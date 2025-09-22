@@ -1,0 +1,138 @@
+# CeraUI Image Building Pipeline - GitHub Actions
+# Automated builds for all supported devices
+
+name: Build CeraUI Images
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly builds every Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device to build (orangepi5plus, rock5bplus, all)'
+        required: false
+        default: 'all'
+      variant:
+        description: 'Build variant (minimal, standard, development)'
+        required: false
+        default: 'standard'
+      force_rebuild:
+        description: 'Force clean rebuild'
+        type: boolean
+        required: false
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ceralive/ceraui-images
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        device: [orangepi5plus, rock5bplus]
+        variant: [minimal, standard]
+        # Only build development variant on schedule or manual trigger
+        include:
+          - device: orangepi5plus
+            variant: development
+            build_condition: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          - device: rock5bplus  
+            variant: development
+            build_condition: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    
+    # Skip development builds on normal pushes
+    if: ${{ !contains(matrix.variant, 'development') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Free up disk space
+      run: |
+        # Free up space on GitHub runners (they're quite limited)
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
+        df -h
+        
+    - name: Build CeraUI image
+      run: |
+        # Set build parameters
+        DEVICE="${{ matrix.device }}"
+        VARIANT="${{ matrix.variant }}"
+        CLEAN_FLAG=""
+        
+        # Force clean build if requested
+        if [[ "${{ github.event.inputs.force_rebuild }}" == "true" ]]; then
+          CLEAN_FLAG="--clean"
+        fi
+        
+        # Build the image
+        ./build.sh --device "$DEVICE" --variant "$VARIANT" --environment docker $CLEAN_FLAG --verbose
+        
+    - name: Test built image
+      run: |
+        # Run basic tests on the built image
+        if [[ -f "tests/test-image.sh" ]]; then
+          ./tests/test-image.sh "${{ matrix.device }}" "${{ matrix.variant }}"
+        fi
+        
+    - name: Calculate checksums
+      run: |
+        cd "images/${{ matrix.device }}/${{ matrix.variant }}/"
+        sha256sum *.img.xz > checksums.sha256
+        sha512sum *.img.xz > checksums.sha512
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ceraui-${{ matrix.device }}-${{ matrix.variant }}
+        path: |
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.img.xz
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.sha256
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.sha512
+        retention-days: 30
+        
+    - name: Create release (on tags)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.img.xz
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.sha256
+          images/${{ matrix.device }}/${{ matrix.variant }}/*.sha512
+        generate_release_notes: true
+        
+  notify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Notify build status
+      run: |
+        if [[ "${{ needs.build.result }}" == "success" ]]; then
+          echo "✅ CeraUI images built successfully"
+        else
+          echo "❌ CeraUI image builds failed"
+          exit 1
+        fi

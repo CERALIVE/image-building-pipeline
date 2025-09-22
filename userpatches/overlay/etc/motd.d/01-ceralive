@@ -1,0 +1,28 @@
+#!/bin/bash
+
+cat << 'EOF'
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║                         🎬 CeraLive 🎬                        ║  
+    ║                Professional Streaming Appliance               ║
+    ║                      Powered by Armbian                       ║
+    ╚═══════════════════════════════════════════════════════════════╝
+
+    🚀 Streaming Features:
+       • HDMI Input Capture        • SRTLA Bonding
+       • WiFi Management           • Hardware Acceleration  
+       • USB Device Auto-Detection • M.2 & USB Modem Support
+       
+    📋 System Information:
+       Device: $(cat /etc/opt/ceraui/device_type 2>/dev/null || echo "Unknown")
+       CeraLive: $(cat /etc/opt/ceraui/version 2>/dev/null || echo "Development")
+       
+    🔧 Quick Commands:
+       ceraui-status    - Show streaming status
+       ceraui-config    - Configuration tool  
+       ceraui-logs      - View system logs
+       
+    📚 Documentation: https://github.com/CERALIVE/CeraUI
+    🆘 Support: https://ceralive.com/support
+
+EOF
