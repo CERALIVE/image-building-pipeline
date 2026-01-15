@@ -15,6 +15,7 @@ secrets/
 .vscode/
 .idea/
 *.deb
+debs/
 *.iso
 *.swp
 *~
