@@ -87,27 +87,79 @@ EOF
     echo "Minimal APT sources configured"
 }
 
-# Add CeraUI custom repository
+# Setup CeraLive APT repository with mTLS and GPG signing
 setup_ceraui_repository() {
-    echo "Setting up CeraLive custom repository..."
+    echo "Setting up CeraLive APT repository..."
     
-    # Create repository directory
+    # Create directories
     mkdir -p /etc/opt/ceraui
+    mkdir -p /etc/apt/certs
+    mkdir -p /usr/share/keyrings
     
-    # Add CeraUI repository (placeholder - replace with actual repo)
-    cat > /etc/apt/sources.list.d/ceraui.list << 'EOF'
-# CeraUI Custom Repository
-# deb [signed-by=/etc/opt/ceraui/ceralive.gpg] https://repo.ceralive.com/debian bookworm main
-# Note: Uncomment above line when repository is available
+    # === mTLS Certs (CI mode only - secrets injected via environment) ===
+    if [[ -n "${APT_CLIENT_CRT_B64:-}" && -n "${APT_CLIENT_KEY_B64:-}" ]]; then
+        echo "CI mode: Installing mTLS certificates..."
+        echo "$APT_CLIENT_CRT_B64" | base64 -d > /etc/apt/certs/client.crt
+        echo "$APT_CLIENT_KEY_B64" | base64 -d > /etc/apt/certs/client.key
+        chmod 600 /etc/apt/certs/client.key
+        chmod 644 /etc/apt/certs/client.crt
+        
+        # APT SSL config for mTLS
+        cat > /etc/apt/apt.conf.d/99ceralive-ssl << 'SSLEOF'
+Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
+Acquire::https::apt.ceralive.tv::SslKey  "/etc/apt/certs/client.key";
+SSLEOF
+        echo "mTLS certificates installed"
+    else
+        echo "Local mode: Skipping mTLS cert injection (secrets not available)"
+    fi
+    
+    # === GPG Public Key (required for package verification) ===
+    if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
+        echo "Installing GPG public key from environment..."
+        echo "$APT_GPG_PUBLIC_B64" | base64 -d > /usr/share/keyrings/ceralive-archive-keyring.gpg
+    elif [[ -f "/tmp/ceralive-archive-keyring.gpg" ]]; then
+        echo "Installing GPG public key from overlay..."
+        cp /tmp/ceralive-archive-keyring.gpg /usr/share/keyrings/
+    else
+        echo "Warning: No GPG public key found. APT verification may fail."
+        # Create empty file to prevent errors
+        touch /usr/share/keyrings/ceralive-archive-keyring.gpg
+    fi
+    chmod 644 /usr/share/keyrings/ceralive-archive-keyring.gpg
+    
+    # === APT Source Configuration ===
+    CHANNEL="${CHANNEL:-stable}"
+    echo "Configuring APT source for channel: ${CHANNEL}"
+    
+    cat > /etc/apt/sources.list.d/ceralive.list << EOF
+# CeraLive APT Repository
+deb [signed-by=/usr/share/keyrings/ceralive-archive-keyring.gpg] https://apt.ceralive.tv/dists/${CHANNEL}/ ./
 EOF
     
-    # Create placeholder GPG key file
-    cat > /etc/opt/ceraui/ceralive.gpg << 'EOF'
-# TODO: Add actual CERALIVE repository GPG key here
-# This will be needed when the custom repository is set up
-EOF
+    echo "CeraLive APT repository configured"
+}
+
+# Install pre-fetched .deb packages
+install_ceralive_packages() {
+    echo "Installing CeraLive packages..."
     
-    echo "CeraUI repository configuration created"
+    # Check for pre-fetched .deb files
+    if ls /tmp/debs/*.deb 1>/dev/null 2>&1; then
+        echo "Found pre-fetched .deb packages:"
+        ls -la /tmp/debs/*.deb
+        
+        # Install all .deb files
+        dpkg -i /tmp/debs/*.deb || {
+            echo "Some packages failed to install, attempting to fix dependencies..."
+            apt-get -f install -y --no-install-recommends
+        }
+        
+        echo "CeraLive packages installed"
+    else
+        echo "No pre-fetched .deb packages found in /tmp/debs/"
+        echo "Skipping CeraLive package installation"
+    fi
 }
 
 # Install streaming and hardware packages
@@ -228,6 +280,154 @@ EOF
     usermod -aG gpio,i2c,spi ceraui
     
     echo "Hardware access rules configured"
+}
+
+# Configure SRTLA source policy routing for bonding
+configure_srtla_routing() {
+    echo "Configuring SRTLA source policy routing..."
+    
+    # Create srtla IPs file with correct permissions
+    touch /tmp/srtla_ips
+    chmod 666 /tmp/srtla_ips
+    
+    # Create routing tables for bonded interfaces (reserve tables 100-199 for modems)
+    if ! grep -q "^100" /etc/iproute2/rt_tables 2>/dev/null; then
+        cat >> /etc/iproute2/rt_tables << 'EOF'
+
+# SRTLA bonding routing tables
+100     modem0
+101     modem1
+102     modem2
+103     modem3
+104     modem4
+105     modem5
+106     modem6
+107     modem7
+110     wlan_bond
+EOF
+    fi
+    
+    # Create dhclient exit hook for source policy routing (modems via DHCP)
+    mkdir -p /etc/dhcp/dhclient-exit-hooks.d
+    cat > /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing << 'HOOKEOF'
+#!/bin/bash
+# SRTLA Source Policy Routing for DHCP interfaces
+# This ensures packets are routed out the correct interface based on source IP
+
+# Only process USB network interfaces (modems)
+case "$interface" in
+    usb*|eth*|enx*)
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+# Extract table number from interface name
+case "$interface" in
+    usb0|enx*0) TABLE=100 ;;
+    usb1|enx*1) TABLE=101 ;;
+    usb2|enx*2) TABLE=102 ;;
+    usb3|enx*3) TABLE=103 ;;
+    usb4|enx*4) TABLE=104 ;;
+    usb5|enx*5) TABLE=105 ;;
+    usb6|enx*6) TABLE=106 ;;
+    usb7|enx*7) TABLE=107 ;;
+    *) TABLE="" ;;
+esac
+
+[ -z "$TABLE" ] && exit 0
+
+case "$reason" in
+    BOUND|RENEW|REBIND|REBOOT)
+        if [ -n "$new_ip_address" ] && [ -n "$new_routers" ]; then
+            GATEWAY=$(echo "$new_routers" | awk '{print $1}')
+            
+            # Flush old rules and routes for this table
+            ip rule del from "$new_ip_address" table "$TABLE" 2>/dev/null || true
+            ip route flush table "$TABLE" 2>/dev/null || true
+            
+            # Add source-based routing rule
+            ip rule add from "$new_ip_address" table "$TABLE" priority 100
+            
+            # Add default route via this interface's gateway
+            ip route add default via "$GATEWAY" dev "$interface" table "$TABLE"
+            
+            # Also add the local network route
+            if [ -n "$new_subnet_mask" ]; then
+                NETWORK=$(ipcalc -n "$new_ip_address" "$new_subnet_mask" 2>/dev/null | grep -oP 'NETWORK=\K.*' || echo "")
+                PREFIX=$(ipcalc -p "$new_ip_address" "$new_subnet_mask" 2>/dev/null | grep -oP 'PREFIX=\K.*' || echo "24")
+                if [ -n "$NETWORK" ]; then
+                    ip route add "$NETWORK/$PREFIX" dev "$interface" table "$TABLE" 2>/dev/null || true
+                fi
+            fi
+            
+            logger -t srtla-routing "Added source routing for $interface ($new_ip_address) via $GATEWAY table $TABLE"
+        fi
+        ;;
+    EXPIRE|FAIL|RELEASE|STOP)
+        # Clean up routing when interface goes down
+        ip rule del from "$old_ip_address" table "$TABLE" 2>/dev/null || true
+        ip route flush table "$TABLE" 2>/dev/null || true
+        logger -t srtla-routing "Removed source routing for $interface table $TABLE"
+        ;;
+esac
+HOOKEOF
+    chmod +x /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing
+    
+    # Create NetworkManager dispatcher for WiFi source routing
+    mkdir -p /etc/NetworkManager/dispatcher.d
+    cat > /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing << 'DISPEOF'
+#!/bin/bash
+# SRTLA Source Routing for WiFi interfaces managed by NetworkManager
+
+INTERFACE="$1"
+ACTION="$2"
+
+# Only process wlan interfaces
+case "$INTERFACE" in
+    wlan*) ;;
+    *) exit 0 ;;
+esac
+
+TABLE=110  # wlan_bond table
+
+case "$ACTION" in
+    up|dhcp4-change)
+        IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        GATEWAY=$(ip route show dev "$INTERFACE" | grep default | awk '{print $3}' | head -1)
+        
+        if [ -n "$IP" ] && [ -n "$GATEWAY" ]; then
+            # Remove old rules for this IP
+            ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
+            
+            # Flush and recreate table routes
+            ip route flush table "$TABLE" 2>/dev/null || true
+            
+            # Add source-based routing
+            ip rule add from "$IP" table "$TABLE" priority 100
+            ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
+            
+            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY"
+        fi
+        ;;
+    down)
+        # Clean up when interface goes down
+        ip rule show | grep "table $TABLE" | while read -r line; do
+            IP=$(echo "$line" | grep -oP 'from \K\d+(\.\d+){3}')
+            [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
+        done
+        ip route flush table "$TABLE" 2>/dev/null || true
+        logger -t srtla-routing "WiFi source routing removed for $INTERFACE"
+        ;;
+esac
+DISPEOF
+    chmod +x /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing
+    
+    # Install ipcalc if available (for subnet calculations)
+    apt-get install -y ipcalc 2>/dev/null || true
+    
+    echo "SRTLA source routing configured"
 }
 
 # Apply system optimizations for streaming
@@ -455,27 +655,112 @@ EOF
     chown -R ceraui:ceraui /home/ceraui
     chown -R ceraui:ceraui /var/opt/ceraui
     
-    # Placeholder configuration (legacy path retained for tool compatibility)
-    cat > /etc/opt/ceraui/ceraui.conf << 'EOF'
-# CeraLive Configuration File (legacy path for tool compatibility)
-[streaming]
-# Streaming configuration will be added here
-default_encoder=h264_rockchip
+    # Create modular config directory
+    mkdir -p /etc/ceralive/conf.d
+    
+    # SRTLA bonding configuration
+    cat > /etc/ceralive/conf.d/srtla.conf << 'EOF'
+# SRTLA Bonding Configuration
+# Used by srtla_send for link aggregation
+
+# Path to the IPs file that srtla_send reads
+# CeraUI updates this file automatically when interfaces change
+ips_file=/tmp/srtla_ips
+
+# Default SRT latency in milliseconds
+# Higher values = more buffering, better reliability
+# Lower values = less delay, more sensitive to packet loss
+srt_latency=2000
+
+# Connection timeout in milliseconds
+connection_timeout=3000
+EOF
+
+    # Streaming/encoder configuration
+    cat > /etc/ceralive/conf.d/streaming.conf << 'EOF'
+# Streaming Configuration
+# Encoder and output settings
+
+# Default video encoder (auto-detected based on hardware)
+# Options: h264_rockchip, h264_nvenc, h264_vaapi, h264_software
+default_encoder=auto
+
+# Audio encoder
+# Options: aac, opus
 audio_encoder=aac
+
+# Default video bitrate in bps
 bitrate=5000000
+
+# Default framerate
 framerate=30
 
-[network]
-# Network configuration
-enable_bonding=true
-srtla_port=5000
-
-[hardware]
-# Hardware configuration
-enable_hdmi_input=true
-enable_usb_devices=true
-auto_detect_input=true
+# Keyframe interval (GOP size in frames)
+keyframe_interval=60
 EOF
+
+    # Network configuration
+    cat > /etc/ceralive/conf.d/network.conf << 'EOF'
+# Network Configuration
+# Bonding and connectivity settings
+
+# Enable multi-interface bonding via SRTLA
+enable_bonding=true
+
+# Prefer wired connections when available
+prefer_wired=true
+
+# Automatically reconnect on connection loss
+auto_reconnect=true
+
+# Reconnect delay in seconds
+reconnect_delay=2
+EOF
+
+    # Hardware configuration
+    cat > /etc/ceralive/conf.d/hardware.conf << 'EOF'
+# Hardware Configuration
+# Input devices and hardware acceleration
+
+# Enable HDMI input capture (RK3588 HDMI-RX)
+enable_hdmi_input=true
+
+# Enable USB capture devices (webcams, capture cards)
+enable_usb_devices=true
+
+# Automatically detect and switch input sources
+auto_detect_input=true
+
+# Preferred capture resolution (WxH or 'auto')
+capture_resolution=auto
+
+# Hardware acceleration backend (auto-detected)
+# Options: rockchip, nvidia, vaapi, none
+hw_accel=auto
+EOF
+
+    # Modem configuration
+    cat > /etc/ceralive/conf.d/modems.conf << 'EOF'
+# Modem Configuration
+# USB modem management settings
+
+# Enable ModemManager for cellular modems
+enable_modem_manager=true
+
+# Auto-connect modems on boot
+auto_connect=true
+
+# Modem priority (lower = higher priority)
+# USB modems typically get usb0, usb1, etc.
+# Priority affects routing table order
+default_priority=100
+
+# Enable SMS notifications (if supported)
+enable_sms=false
+EOF
+
+    # Legacy compatibility symlink
+    ln -sf /etc/ceralive/conf.d /etc/opt/ceraui/conf.d 2>/dev/null || true
 
     # Login banners
     echo 'CeraLive Streaming Appliance' > /etc/issue
@@ -494,14 +779,20 @@ main_customization() {
     # Create CeraUI user
     create_ceraui_user
     
-    # Setup CeraUI repository
+    # Setup CeraUI repository (mTLS + GPG)
     setup_ceraui_repository
     
-    # Install streaming packages
+    # Install CeraLive packages from pre-fetched .deb files
+    install_ceralive_packages
+    
+    # Install streaming packages from system repos
     install_streaming_packages
     
     # Setup hardware access
     setup_hardware_access
+    
+    # Configure SRTLA source routing for bonding
+    configure_srtla_routing
     
     # Apply optimizations
     apply_streaming_optimizations

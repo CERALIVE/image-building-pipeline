@@ -373,7 +373,15 @@ select_device_interactive_fancy() {
 
 setup_armbian_source() {
     log_info "Setting up Armbian build framework..."
-    
+
+    local _versions_yaml="${PROJECT_ROOT}/../versions.yaml"
+    local _armbian_pin=""
+    if [[ -f "$_versions_yaml" ]]; then
+      _armbian_pin="$(awk '$0=="armbian:"{f=1;next} f&&/^[a-zA-Z]/{f=0}
+        f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$_versions_yaml")"
+    fi
+    log_info "PIN: armbian=${_armbian_pin:-main}"
+
     if [[ ! -d "$ARMBIAN_DIR" ]]; then
         log_info "Cloning Armbian build framework (this may take a few minutes)..."
         log_info "Repository: https://github.com/armbian/build.git"
