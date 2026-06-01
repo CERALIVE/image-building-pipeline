@@ -18,6 +18,16 @@ CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-arm64}"
 DEST="${DEST:-./debs}"
 
+# Read a pin value from versions.yaml (graceful fallback: returns "" if absent)
+# Usage: get_pin <key> [registry_file]
+VERSIONS_YAML="${VERSIONS_YAML:-$(dirname "$0")/../../versions.yaml}"
+get_pin() {
+  local key="$1" file="${2:-$VERSIONS_YAML}"
+  [[ -f "$file" ]] || { echo ""; return; }
+  awk -v key="$key" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
+    f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
+}
+
 echo "=== Fetch Debian Packages ==="
 echo "Channel: ${CHANNEL}"
 echo "Arch: ${ARCH}"
@@ -26,8 +36,13 @@ echo ""
 
 mkdir -p "$DEST"
 
-# List of repos to fetch from
 REPOS=("srtla" "srt" "ceracoder" "CeraUI")
+
+for _r in "${REPOS[@]}"; do
+  _pin="$(get_pin "$_r")"
+  echo "PIN: ${_r}=${_pin:-latest}"
+done
+echo ""
 
 if [[ -n "$R2_ACCESS_KEY_ID" ]]; then
     echo "CI mode: Fetching from R2..."

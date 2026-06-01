@@ -78,3 +78,7 @@ Be respectful and constructive. We’re aiming to make streaming setups easier f
 Contributions are under the project’s license. By submitting a PR, you agree your work may be redistributed under the same terms.
 
 Welcome aboard — let’s build a great streaming experience together! 🚀
+
+## AI Documentation
+
+This repository has an [`AGENTS.md`](AGENTS.md) (init-deep hierarchical AI documentation). For group-level context, see the root [`AGENTS.md`](../AGENTS.md) and [`ARCHITECTURE.md`](../ARCHITECTURE.md).
