@@ -44,10 +44,13 @@ RAUC_SRC_DIR="$(CDPATH='' cd -- "${RAUC_SETUP_DIR}/../runtime/rauc" 2>/dev/null 
 
 readonly RAUC_KEYRING_DEST="/etc/rauc/ceralive-keyring.pem"
 readonly RAUC_SYSTEM_CONF="/etc/rauc/system.conf"
-# Compatible string: orchestrator sets it from the manifest family+board; the
-# documented ultimate default matches the task spec. Must equal the compatible
+# Compatible string: the orchestrator ALWAYS sets it from the resolved manifest
+# (lib/orchestrate.sh: COMPATIBLE_STRING=ceralive-${FAMILY}). Must equal the compatible
 # baked into the signed bundle, or `rauc install` rejects it (foreign-bundle guard).
-readonly RAUC_COMPATIBLE="${COMPATIBLE_STRING:-ceralive-rk3588-1.0}"
+# ARCH-NEUTRAL fallback: the runtime layer carries ZERO SoC/family assumptions, so the
+# default must not name an arch. 'ceralive-unknown' is a fail-closed sentinel that
+# matches NO bundle (rauc refuses all) until a real COMPATIBLE_STRING is supplied.
+readonly RAUC_COMPATIBLE="${COMPATIBLE_STRING:-ceralive-unknown}"
 
 # Install the root CA into the device keyring. PUBLIC cert only — never a key.
 install_keyring() {
