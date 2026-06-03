@@ -1,0 +1,98 @@
+# CeraLive private fleet-update engine — Eclipse hawkBit + PostgreSQL (Stage 7, task 40).
+#
+# PRIVATE BY DESIGN:
+#   * Both the Management API (operator/ceralive-platform) and the device-facing DDI API
+#     are served on hawkBit's single 8080 port, bound to 127.0.0.1 ONLY (see `ports`).
+#     Public exposure is the job of a fronting reverse proxy / VPN / Cloudflare Tunnel
+#     operated by whoever hosts this — NEVER bind 0.0.0.0 here.
+#   * No default admin:admin. The built-in user store is driven entirely by env
+#     (HAWKBIT_SERVER_IM_USERS_0_*). Startup FAILS CLOSED if the password var is unset
+#     (compose `${VAR:?...}` guards below), so the image can never boot with a blank/default.
+#
+# ARTIFACTS LIVE IN R2, NOT IN HAWKBIT:
+#   hawkBit only stores artifact METADATA (filename, sha1/sha256, size). The download
+#   link it hands to devices over DDI is rewritten by the artifact URL handler
+#   (HAWKBIT_ARTIFACT_URL_PROTOCOLS_*) to point at the R2 base URL served by apt-worker
+#   (task 39: https://apt.ceralive.tv/bundles/...). The `download` (hawkBit-local) and
+#   `md5sum` protocols are disabled so a device can NEVER be handed a hawkBit-local URL.
+#
+# Keep this file in lockstep with hawkbit.env.example and README.md.
+
+services:
+  hawkbit:
+    image: hawkbit/hawkbit-update-server:0.4.1
+    # Pinned (server is 0.x; DDI API is the frozen v1 device contract — decisions.md task 5).
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # PRIVATE: loopback-only. A reverse proxy / tunnel terminates TLS + auth in front.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # --- JVM memory cap (hosting requirement: 512 MB–1 GB heap) ---
+      - JAVA_OPTS=-Xms256m -Xmx512m
+
+      # --- Datasource: dedicated PostgreSQL (NOT the bundled H2) ---
+      - SPRING_JPA_DATABASE=POSTGRESQL
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${HAWKBIT_DB_NAME:-hawkbit}
+      - SPRING_DATASOURCE_USERNAME=${HAWKBIT_DB_USER:?HAWKBIT_DB_USER is required}
+      - SPRING_DATASOURCE_PASSWORD=${HAWKBIT_DB_PASSWORD:?HAWKBIT_DB_PASSWORD is required}
+      - SPRING_DATASOURCE_DRIVER_CLASS_NAME=org.postgresql.Driver
+
+      # --- Auth: built-in user store, NO admin:admin default ---
+      # Password MUST be a Spring-encoded secret: {bcrypt}$2a$... (preferred) or {noop}plain.
+      # Generate a bcrypt hash with:  htpasswd -bnBC 10 "" 'your-pass' | tr -d ':\n' | sed 's/^/{bcrypt}/'
+      - HAWKBIT_SERVER_IM_USERS_0_USERNAME=${HAWKBIT_ADMIN_USER:?HAWKBIT_ADMIN_USER is required}
+      - HAWKBIT_SERVER_IM_USERS_0_PASSWORD=${HAWKBIT_ADMIN_PASSWORD:?HAWKBIT_ADMIN_PASSWORD is required (Spring-encoded, e.g. {bcrypt}...)}
+      - HAWKBIT_SERVER_IM_USERS_0_ROLES=ADMIN
+
+      # --- Hardening ---
+      - HAWKBIT_SERVER_UI_DEMO_MODE=false
+      - HAWKBIT_SERVER_SECURITY_DOS_FILTER_ENABLED=true
+      # Device DDI auth: target/gateway-token model used by rauc-hawkbit-updater 1.4 (task 41).
+      - HAWKBIT_SERVER_DDI_SECURITY_AUTHENTICATION_TARGETTOKEN_ENABLED=true
+      - HAWKBIT_SERVER_DDI_SECURITY_AUTHENTICATION_GATEWAYTOKEN_ENABLED=true
+      # Anonymous device download MUST stay off — devices authenticate every DDI call.
+      - HAWKBIT_SERVER_DDI_SECURITY_AUTHENTICATION_ANONYMOUS_ENABLED=false
+
+      # --- EXTERNAL ARTIFACTS → R2 (apt-worker /bundles, task 39). hawkBit stores metadata only. ---
+      # The DDI deployment-base download link handed to each device is built from this ref.
+      # {artifactFileName} is the only placeholder we rely on; the channel/board path lives in
+      # R2_BUNDLE_BASE_URL (e.g. https://apt.ceralive.tv/bundles/stable/rock-5b-plus). One engine
+      # per channel/board, or encode the path into the artifact filename — see README.
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_DOWNLOAD_HTTP_ENABLED=true
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_DOWNLOAD_HTTP_REF=${R2_BUNDLE_BASE_URL:?R2_BUNDLE_BASE_URL is required}/{artifactFileName}
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_DOWNLOAD_HTTP_PROTOCOL=https
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_DOWNLOAD_HTTP_RES_HASHES=sha1,sha256
+      # Disable the hawkBit-local download + md5 protocols so no local-store URL ever leaks to a device.
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_DOWNLOAD_ENABLED=false
+      - HAWKBIT_ARTIFACT_URL_PROTOCOLS_MD5SUM_ENABLED=false
+    # hawkBit's actuator health endpoint; gives the proxy/orchestrator a real readiness signal.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${HAWKBIT_DB_NAME:-hawkbit}
+      POSTGRES_USER: ${HAWKBIT_DB_USER:?HAWKBIT_DB_USER is required}
+      POSTGRES_PASSWORD: ${HAWKBIT_DB_PASSWORD:?HAWKBIT_DB_PASSWORD is required}
+    # NOT published — only the hawkbit service reaches Postgres over the internal network.
+    expose:
+      - "5432"
+    volumes:
+      - hawkbit-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${HAWKBIT_DB_USER} -d ${HAWKBIT_DB_NAME:-hawkbit}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  hawkbit-pg-data:
