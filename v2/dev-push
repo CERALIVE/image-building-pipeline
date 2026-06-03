@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+#
+# dev-push — the `<2 min` rsync dev loop for the CeraLive app layer.
+#
+#   dev-push [options] <board-ip> [app ...]
+#
+# Code → running device in under 120 s, WITHOUT a reflash. This is the top
+# operational metric of the platform redesign (plan §Stage 3). It does exactly
+# four things, in order, and times each:
+#
+#   1. BUILD   the app sysext(s) locally via build_app_layer (app-layer/interface.sh)
+#   2. RSYNC   each <app>.raw to root@<board-ip>:/var/lib/extensions/
+#   3. REFRESH systemd-sysext refresh   (re-merge the /usr+/opt overlay on-device)
+#   4. RESTART systemctl restart ceralive.service
+#
+# WHY restart ceralive.service (NON-NEGOTIABLE): CeraUI's backend is a single Bun
+# binary holding IN-PROCESS native FFI bindings to ceracoder and srtla. A sysext
+# refresh swaps the binaries on disk, but the running CeraUI process keeps the OLD
+# FFI bindings until the WHOLE process reloads. Restarting only a hypothetical
+# ceracoder.service/srtla.service would NOT reload those bindings. The remote verb
+# is therefore byte-identical to sysext.sh:refresh_app_layer():
+#       systemd-sysext refresh && systemctl restart ceralive.service
+# The `&&` is load-bearing: if `refresh` fails (a bad/corrupt .raw — bad
+# extension-release, wrong squashfs, arch mismatch), the restart NEVER runs, the
+# previously-merged extension stays active, and the service keeps streaming on the
+# OLD version. A bad push degrades to a no-op + a loud error — never an outage.
+#
+# NO DEV/PROD DIVERGENCE: dev-push and the prod builder call the SAME
+# build_app_layer verb and emit the SAME `<app>.raw` squashfs artifact. Dev is
+# "rsync + reload"; prod adds "sign + publish to the CDN". There is no dev-only
+# artifact format and no NFS-root (rejected — it would diverge from prod).
+#
+# DATA PERSISTENCE: a sysext only overlays /usr and /opt. CeraUI's mutable state
+# (`/var/lib/ceralive/` → config.json, auth tokens, WiFi creds, …) lives on the
+# separate shared data partition (frozen partition contract D4; wired by task 30)
+# and is NEVER touched by a refresh. Restarting ceralive.service re-reads it.
+#
+# Staging source (what feeds build_app_layer's <deb_staging_dir>):
+#   --from-deb <dir>   extract <app>*.deb from <dir> (prod-identical artifact path)
+#   (default)          compile the app from its sibling source checkout, stage the
+#                      resulting binaries into usr/bin/. NOTE: pure-binary apps —
+#                      the build host arch MUST match the device arch (arm64 for
+#                      RK3588). On an arch mismatch the loop still packages, but the
+#                      binary won't run on the board; use --from-deb with an
+#                      arm64 .deb, or build on an arm64 host. (warned, not blocked).
+#
+# Env knobs (all optional):
+#   DRY_RUN=1                 log the rsync/ssh commands instead of running them
+#                             (offline timing-budget + bad-ext logic evidence)
+#   SSH_USER=root             remote user
+#   REMOTE_EXT_DIR=/var/lib/extensions
+#   SSH_OPTS / RSYNC_OPTS     extra flags (e.g. SSH_OPTS="-p 2222")
+#   DEV_PUSH_BUDGET=120       end-to-end budget in seconds (0 = don't enforce)
+#   CERACODER_SRC / SRTLA_SRC override sibling source paths
+#   CERACODER_BUILD_CMD / SRTLA_BUILD_CMD   override the compile command
+#
+# shellcheck shell=bash
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib/common.sh
+source "${HERE}/lib/common.sh"
+# build_app_layer + select_backend (sources the sysext backend, the default).
+# shellcheck source=lib/app-layer/interface.sh
+source "${HERE}/lib/app-layer/interface.sh"
+
+# Workspace root: v2 → image-building-pipeline → <ceralive parent> (siblings live here).
+WORKSPACE_ROOT="$(cd "${HERE}/../.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Defaults (env-overridable; never bake product constants into logic).
+# ---------------------------------------------------------------------------
+SSH_USER="${SSH_USER:-root}"
+REMOTE_EXT_DIR="${REMOTE_EXT_DIR:-/var/lib/extensions}"
+DEV_PUSH_BUDGET="${DEV_PUSH_BUDGET:-120}"
+DRY_RUN="${DRY_RUN:-0}"
+
+# Default apps = both streaming components (the two sysext-ready, pure-binary
+# first-party components — ceracoder + srtla). CeraUI uses the appfs backend.
+DEFAULT_APPS=(ceracoder srtla)
+
+# Per-app source checkouts (siblings of image-building-pipeline) and the binaries
+# each app contributes to /usr/bin. Pure-binary apps → clean sysext candidates.
+CERACODER_SRC="${CERACODER_SRC:-${WORKSPACE_ROOT}/ceracoder}"
+SRTLA_SRC="${SRTLA_SRC:-${WORKSPACE_ROOT}/srtla}"
+
+usage() {
+  cat >&2 <<EOF
+Usage: dev-push [options] <board-ip> [app ...]
+
+  <board-ip>   IP/hostname of the target device (ssh as \${SSH_USER:-root})
+  [app ...]    apps to push (default: ${DEFAULT_APPS[*]})
+
+Options:
+  --from-deb <dir>   stage from <app>*.deb in <dir> (prod-identical artifact)
+  --dry-run          print the rsync/ssh commands instead of running them
+  --time             (default behaviour) always reports per-phase + total timing
+  -h, --help         this help
+
+Pushes build_app_layer(<app>) → /var/lib/extensions, then on the device runs
+'systemd-sysext refresh && systemctl restart ceralive.service'. Target < ${DEV_PUSH_BUDGET}s.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Timing — monotonic-ish millisecond clock. date +%s%N is nanoseconds; fold to ms.
+# ---------------------------------------------------------------------------
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fmt_s()  { awk -v ms="$1" 'BEGIN{ printf "%.2fs", ms/1000 }'; }
+
+# ---------------------------------------------------------------------------
+# Remote command runner. In DRY_RUN it logs the exact ssh invocation (offline
+# evidence path, mirrors fetch-debs.sh:run_or_plan); otherwise it execs and a
+# non-zero remote status propagates (common.sh ERR trap stays armed elsewhere,
+# but here callers inspect the status explicitly so refresh-failure is graceful).
+# ---------------------------------------------------------------------------
+ssh_cmd=(ssh)
+rsync_base=(rsync -az)
+
+remote_run() {
+  local desc="$1" remote_cmd="$2"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log_info "DRY-RUN ssh: ${ssh_cmd[*]} ${SSH_USER}@${BOARD_IP} '${remote_cmd}'  # ${desc}"
+    return 0
+  fi
+  "${ssh_cmd[@]}" "${SSH_USER}@${BOARD_IP}" "${remote_cmd}"
+}
+
+push_file() {
+  local src="$1" dest="$2"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log_info "DRY-RUN rsync: ${rsync_base[*]} ${src} ${SSH_USER}@${BOARD_IP}:${dest}"
+    return 0
+  fi
+  "${rsync_base[@]}" "${src}" "${SSH_USER}@${BOARD_IP}:${dest}"
+}
+
+# ---------------------------------------------------------------------------
+# extract_deb <deb> <dest> — explode a .deb's data tarball into <dest> (a deb
+# staging tree). Prefers dpkg-deb; falls back to ar + tar (host may be Arch with
+# no dpkg, same approach as orchestrate.sh:deb_pkg_name).
+# ---------------------------------------------------------------------------
+extract_deb() {
+  local deb="$1" dest="$2"
+  mkdir -p "${dest}"
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    dpkg-deb -x "${deb}" "${dest}"
+    return
+  fi
+  require_cmd ar
+  require_cmd tar
+  local member
+  member="$(ar t "${deb}" | grep -E '^data\.tar' | head -n1)"
+  [[ -n "${member}" ]] || die "extract_deb: no data.tar member in ${deb}"
+  case "${member}" in
+    *.gz)  ar p "${deb}" "${member}" | tar -xz  -C "${dest}" ;;
+    *.xz)  ar p "${deb}" "${member}" | tar -xJ  -C "${dest}" ;;
+    *.zst) ar p "${deb}" "${member}" | tar --zstd -x -C "${dest}" ;;
+    *)     ar p "${deb}" "${member}" | tar -x   -C "${dest}" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# stage_from_deb <app> <staging> — find <app>*.deb under $FROM_DEB and explode it.
+# ---------------------------------------------------------------------------
+stage_from_deb() {
+  local app="$1" staging="$2" deb
+  shopt -s nullglob
+  local matches=("${FROM_DEB}/${app}"*.deb)
+  shopt -u nullglob
+  (( ${#matches[@]} > 0 )) \
+    || die "stage_from_deb: no ${app}*.deb found in ${FROM_DEB}"
+  deb="${matches[0]}"
+  log_info "stage(${app}): extracting prod .deb ${deb}"
+  extract_deb "${deb}" "${staging}"
+}
+
+# ---------------------------------------------------------------------------
+# stage_from_source <app> <staging> — compile the app from its sibling checkout
+# and lay the binaries into <staging>/usr/bin. Pure-binary apps only.
+# ---------------------------------------------------------------------------
+stage_from_source() {
+  local app="$1" staging="$2"
+  local bindir="${staging}/usr/bin"
+  mkdir -p "${bindir}"
+
+  case "${app}" in
+    ceracoder)
+      [[ -d "${CERACODER_SRC}" ]] || die "stage(ceracoder): source not found: ${CERACODER_SRC}"
+      log_info "stage(ceracoder): building (${CERACODER_BUILD_CMD:-make -C ${CERACODER_SRC} ceracoder})"
+      if [[ -n "${CERACODER_BUILD_CMD:-}" ]]; then
+        bash -c "${CERACODER_BUILD_CMD}"
+      else
+        make -C "${CERACODER_SRC}" ceracoder
+      fi
+      install -m 0755 "${CERACODER_SRC}/ceracoder" "${bindir}/ceracoder"
+      ;;
+    srtla)
+      [[ -d "${SRTLA_SRC}" ]] || die "stage(srtla): source not found: ${SRTLA_SRC}"
+      log_info "stage(srtla): building (${SRTLA_BUILD_CMD:-cmake --build ${SRTLA_SRC}/build --target srtla_send srtla_rec})"
+      if [[ -n "${SRTLA_BUILD_CMD:-}" ]]; then
+        bash -c "${SRTLA_BUILD_CMD}"
+      else
+        [[ -d "${SRTLA_SRC}/build" ]] || cmake -S "${SRTLA_SRC}" -B "${SRTLA_SRC}/build" >/dev/null
+        cmake --build "${SRTLA_SRC}/build" --target srtla_send srtla_rec
+      fi
+      install -m 0755 "${SRTLA_SRC}/build/srtla_send" "${bindir}/srtla_send"
+      install -m 0755 "${SRTLA_SRC}/build/srtla_rec"  "${bindir}/srtla_rec"
+      ;;
+    *)
+      die "stage(${app}): unknown app — no source build recipe (use --from-deb)"
+      ;;
+  esac
+
+  # Pure-binary sysext: warn (don't block) if the host arch can't run on the board.
+  local host_arch; host_arch="$(uname -m)"
+  if [[ "${host_arch}" != "aarch64" && "${host_arch}" != "arm64" ]]; then
+    log_warn "stage(${app}): host arch '${host_arch}' != device arm64 — binaries packaged but will NOT run on an RK3588 board. Use --from-deb <arm64 .deb> or build on an arm64 host for a real push."
+  fi
+}
+
+main() {
+  BOARD_IP=""
+  FROM_DEB=""
+  local apps=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from-deb) FROM_DEB="${2:-}"; shift 2 ;;
+      --dry-run)  DRY_RUN=1; shift ;;
+      --time)     shift ;;                       # timing is always on; accepted for clarity
+      -h|--help)  usage; exit 0 ;;
+      --*)        usage; die "unknown option: $1" ;;
+      *)
+        if [[ -z "${BOARD_IP}" ]]; then BOARD_IP="$1"; else apps+=("$1"); fi
+        shift ;;
+    esac
+  done
+
+  [[ -n "${BOARD_IP}" ]] || { usage; die "<board-ip> is required"; }
+  (( ${#apps[@]} > 0 )) || apps=("${DEFAULT_APPS[@]}")
+  [[ -z "${FROM_DEB}" || -d "${FROM_DEB}" ]] || die "--from-deb dir not found: ${FROM_DEB}"
+
+  require_cmd rsync
+  require_cmd ssh
+
+  # Select the app-layer backend (default sysext) → defines build_app_layer.
+  # Dev-push only uses build_app_layer (the local BUILD verb); install/refresh are
+  # replayed REMOTELY over ssh below, exactly as sysext.sh:refresh_app_layer would
+  # run them on the device. EXTENSIONS_DIR override keeps build artifacts local.
+  export APP_BACKEND="${APP_BACKEND:-sysext}"
+  select_backend
+
+  log_info "=== dev-push → ${SSH_USER}@${BOARD_IP} | apps: ${apps[*]} | budget: ${DEV_PUSH_BUDGET}s${DRY_RUN:+ | DRY_RUN=${DRY_RUN}} ==="
+
+  local out_dir; out_dir="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${out_dir}'" EXIT
+
+  local t0 t1 build_ms=0 rsync_ms=0 remote_ms=0
+  local raws=() app staging artifact
+
+  # -------------------------------------------------------------------------
+  # 1. BUILD — one .raw per app via the SAME build_app_layer verb prod uses.
+  #
+  # GOTCHA: build_app_layer's contract is "stdout = artifact path only", but
+  # mksquashfs >=4.7 prints a progress bar to STDOUT even under -quiet (verified:
+  # 4.7.5 on this host), which would corrupt a `$(build_app_layer …)` capture. We
+  # therefore drive the side effect (it builds <out_dir>/<app>.raw, the documented
+  # sysext artifact name) and reference that deterministic path — never parse the
+  # polluted stdout. (sysext.sh should redirect mksquashfs stdout; noted for a
+  # follow-up. dev-push is sysext-only by design — it rsyncs .raw files.)
+  # -------------------------------------------------------------------------
+  t0="$(now_ms)"
+  for app in "${apps[@]}"; do
+    staging="${out_dir}/staging/${app}"
+    mkdir -p "${staging}"
+    if [[ -n "${FROM_DEB}" ]]; then
+      stage_from_deb "${app}" "${staging}"
+    else
+      stage_from_source "${app}" "${staging}"
+    fi
+    build_app_layer "${app}" "${staging}" "${out_dir}" >/dev/null
+    artifact="${out_dir}/${app}.raw"
+    [[ -f "${artifact}" ]] || die "build_app_layer did not produce ${artifact}"
+    raws+=("${artifact}")
+    log_success "built ${app} sysext: ${artifact} ($(du -h "${artifact}" | cut -f1))"
+  done
+  t1="$(now_ms)"; build_ms=$(( t1 - t0 ))
+
+  # -------------------------------------------------------------------------
+  # 2. RSYNC — drop each .raw into the device's extensions dir.
+  # -------------------------------------------------------------------------
+  t0="$(now_ms)"
+  for artifact in "${raws[@]}"; do
+    log_info "rsync $(basename "${artifact}") → ${SSH_USER}@${BOARD_IP}:${REMOTE_EXT_DIR}/"
+    push_file "${artifact}" "${REMOTE_EXT_DIR}/"
+  done
+  t1="$(now_ms)"; rsync_ms=$(( t1 - t0 ))
+
+  # -------------------------------------------------------------------------
+  # 3+4. REFRESH + RESTART — the exact sysext.sh:refresh_app_layer verb, run on
+  # the device. The `&&` makes a bad-extension refresh leave the prior extension
+  # active and SKIP the restart (no outage). We report a non-zero remote status
+  # loudly without tearing the dev loop down on the developer's behalf.
+  # -------------------------------------------------------------------------
+  local remote_verb="systemd-sysext refresh && systemctl restart ceralive.service"
+  log_info "remote: ${remote_verb}"
+  t0="$(now_ms)"
+  local remote_status=0
+  remote_run "refresh + restart ceralive.service" "${remote_verb}" || remote_status=$?
+  t1="$(now_ms)"; remote_ms=$(( t1 - t0 ))
+
+  if (( remote_status != 0 )); then
+    log_error "remote refresh/restart FAILED (status ${remote_status}) — a bad/corrupt .raw was rejected by 'systemd-sysext refresh'. The PREVIOUS extension stays merged and ceralive.service keeps running on the OLD version (graceful, no outage). Fix the artifact and re-push."
+  fi
+
+  # -------------------------------------------------------------------------
+  # Timing report + budget gate.
+  # -------------------------------------------------------------------------
+  local total_ms=$(( build_ms + rsync_ms + remote_ms ))
+  log_info "---------------------------------------------"
+  log_info "TIMING  build=$(fmt_s "${build_ms}")  rsync=$(fmt_s "${rsync_ms}")  remote=$(fmt_s "${remote_ms}")"
+  log_info "TIMING  total=$(fmt_s "${total_ms}")  (budget ${DEV_PUSH_BUDGET}s)"
+  log_info "---------------------------------------------"
+
+  if (( remote_status != 0 )); then
+    die "dev-push: push not applied (bad extension). Service unaffected."
+  fi
+
+  if (( DEV_PUSH_BUDGET > 0 )) && (( total_ms > DEV_PUSH_BUDGET * 1000 )); then
+    die "dev-push: OVER BUDGET — $(fmt_s "${total_ms}") > ${DEV_PUSH_BUDGET}s. Optimize build/rsync/remote."
+  fi
+
+  log_success "dev-push complete in $(fmt_s "${total_ms}") — ${apps[*]} live on ${BOARD_IP} (ceralive.service restarted, FFI reloaded)"
+}
+
+main "$@"
