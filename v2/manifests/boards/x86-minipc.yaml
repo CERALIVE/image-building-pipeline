@@ -1,0 +1,35 @@
+# CeraLive Image Board Manifest — Generic x86_64 mini-PC (N100/N200)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch (x86-64), branch (none), kernel/firmware packages, EFI bootloader
+# adapter, partition_template and serial_console from families/x86_64.yaml.
+#
+# This is the generic catch-all board for off-the-shelf x86 mini-PCs (Intel
+# N100/N200 and similar). Unlike the rk3588 boards it carries NO device-tree
+# overlays and NO hardware quirks — a stock UEFI x86 platform needs no
+# board-specific workarounds (HDMI capture is via USB/UVC or a PCIe/USB card,
+# not an SoC hdmirx + DT overlay).
+
+family: x86_64
+
+# mkosi/identity board id. No Armbian BOARD= equivalent on x86 (no compile.sh).
+board_id: x86-minipc
+
+# No device tree on x86 — hardware is enumerated via ACPI. The literal 'none'
+# sentinel (schema dtb_name accepts 'none' for ACPI boards).
+dtb_name: none
+
+# Assume a real NVMe/SSD (>= 32 GB) on any mini-PC → A/B layout fits comfortably;
+# never the single-slot fallback (that is for sub-16 GB microSD media).
+single_slot_fallback: false
+
+# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+app_backend: sysext
+
+description: >-
+  Generic x86_64 mini-PC (N100/N200 or similar). UEFI/GRUB boot with RAUC A/B on
+  an EFI System Partition; Debian generic amd64 kernel (no Armbian BSP, no U-Boot,
+  no device tree — ACPI enumeration). Full bonded streaming via Intel VAAPI/QSV
+  hardware encode (Gen12 graphics) with x264 software fallback (decision D1).
+  Assumes an internal NVMe/SATA SSD (>= 32 GB). No board-specific quirks or
+  device-tree overlays — a stock x86 platform needs none.

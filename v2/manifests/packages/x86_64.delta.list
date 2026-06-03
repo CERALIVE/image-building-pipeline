@@ -1,0 +1,42 @@
+# CeraLive — x86-64 (Intel N100/N200, AMD) per-family package DELTA
+#
+# Packages that are x86-SPECIFIC and NOT already carried by either:
+#   - shared.list                          (arch-independent runtime), or
+#   - v2/manifests/families/x86_64.yaml     (typed BSP + HW-accel arrays)
+#
+# Consumed by lib/orchestrate.sh only when the resolved board's family == x86_64
+# (read_pkg_list shared.list + <family>.delta.list). A missing/empty delta is
+# fine — orchestrate.sh skips an absent file and this one carries no active lines.
+#
+# ============================================================================
+# RESULT: this delta is EMPTY.
+# ============================================================================
+#
+# Every x86-specific package is ALREADY captured by the family manifest's typed
+# arrays, so duplicating any of them here would violate the "no duplication"
+# rule. For traceability, the x86-specific packages and their canonical home are
+# listed below as comments (NOT active install lines):
+#
+#   linux-image-amd64                 -> families/x86_64.yaml: kernel_packages
+#   firmware-linux-free               -> families/x86_64.yaml: firmware_packages
+#   firmware-linux-nonfree            -> families/x86_64.yaml: firmware_packages
+#   intel-microcode                   -> families/x86_64.yaml: firmware_packages
+#   gstreamer1.0-vaapi                -> families/x86_64.yaml: hw_accel_gstreamer_plugins
+#   intel-media-va-driver-non-free    -> families/x86_64.yaml: hw_accel_gstreamer_plugins
+#
+# QSV / VA-API element provider (the n100 qsv*/va* elements, D1 caveat 2):
+#   gstreamer1.0-plugins-bad is the package that ships the qsvh265enc / qsvh264dec
+#   / va* elements the Intel N100 pipelines invoke. It is ALREADY in the SHARED
+#   runtime list (shared.list:55, generic "GStreamer core" section — it is not
+#   x86-specific; rk3588 installs it too). So it is deliberately NOT repeated in
+#   the family manifest's gstreamer_runtime_packages NOR here. The x86 hardware
+#   path is enabled by: shared gstreamer1.0-plugins-bad (QSV/VA elements) +
+#   gstreamer1.0-vaapi + intel-media-va-driver-non-free (family hw_accel) +
+#   gstreamer1.0-libav / gstreamer1.0-plugins-{base,good,ugly} (shared, fallback).
+#
+# x86 has NO U-Boot blob, NO device-tree package, and NO Armbian BSP — those
+# arrays are intentionally empty in the family manifest, so there is nothing to
+# delta for them either.
+#
+# Format: one package per line; `#` comments justify entries.
+# (no active package lines — see RESULT above)

@@ -1,0 +1,85 @@
+# CeraLive Image Family Manifest — x86-64 (Intel N100/N200, AMD mini-PC)
+#
+# Validates against ../schema/family.schema.json (draft 2020-12).
+# Second platform family. Proves "new family = one YAML" — but x86 is a
+# *fundamentally* different platform from rk3588 (no Armbian BSP, no U-Boot,
+# no device tree, EFI/GRUB boot), so it also required a one-time, additive
+# generalisation of the (previously rk3588/ARM-centric) schema. See
+# .omo/evidence/task-32-x86-manifest.txt for the schema-delta + rationale.
+#
+# Decision D1 (task 3, locked): ceracoder is encoder-AGNOSTIC — the encode
+# element is runtime-selected from a text pipeline file, not compiled in.
+# x86 supports FULL bonded streaming via VAAPI/QSV hardware encode with a
+# pure-software (x264) fallback; it is NOT relay-only and has NO MPP dependency.
+# The Intel N100 pipelines (ceracoder/pipeline/n100/*) invoke qsvh265enc /
+# qsvh264dec / vajpegdec.
+#
+# Sources: D1 evidence (.omo/evidence/task-3-ceracoder-x86.md per decisions.md
+# §D1), ceracoder/docs/dependencies.md:59-94, ceracoder/pipeline/{n100,generic}/*.
+
+# mkosi architecture identifier (consumed by mkosi --architecture; orchestrate.sh).
+# mkosi has NO 'amd64' — the x86 identifier is 'x86-64' (learnings task 13). The
+# Debian *package* arch is still amd64 (see kernel_packages) — that is a separate
+# namespace and lives there, not here.
+arch: x86-64
+
+# x86 does not use the Armbian BSP at all (no compile.sh BRANCH): Debian generic
+# kernel + GRUB/EFI. 'none' is the explicit "no Armbian branch" value.
+armbian_branch: none
+
+# Debian generic amd64 kernel (NOT an Armbian linux-image-*). Package arch is
+# 'amd64' here by Debian convention — this is the dpkg package name, distinct
+# from the mkosi `arch: x86-64` above.
+kernel_packages:
+  - linux-image-amd64
+
+# No U-Boot on x86 — firmware (UEFI) lives in the platform's own flash; the OS
+# ships a GRUB/EFI bootloader, not a U-Boot blob. Empty by design.
+uboot_packages: []
+
+# No device tree on x86 — hardware is enumerated via ACPI. Empty by design
+# (schema dtb_packages minItems=0 for exactly this case).
+dtb_packages: []
+
+# Generic Debian firmware bundle + Intel CPU microcode. firmware-linux-free /
+# firmware-linux-nonfree replace the Armbian armbian-firmware bundle; the rk3588
+# Mali-G610 GPU firmware has no x86 analogue. intel-microcode is the early CPU
+# microcode update package (N100/N200 are Intel).
+firmware_packages:
+  - firmware-linux-free
+  - firmware-linux-nonfree
+  - intel-microcode
+
+# x86 RAUC A/B selection rides UEFI/GRUB (EFI System Partition + bootloader env),
+# NOT raw-GPT bootcount (rk3588's 'custom') and NOT fw_setenv ('uboot'). 'efi' is
+# the bootloader adapter for the x86 EFI/GRUB target.
+rauc_bootloader_adapter: efi
+
+# Hardware-accelerated GStreamer encode/decode for x86 (D1 VAAPI/QSV path):
+#   - gstreamer1.0-vaapi          : VA-API GStreamer elements (vaapi*).
+#   - intel-media-va-driver-non-free : Intel iHD VA driver backing QSV/VA-API on
+#                                      N100/N200 (Gen12 graphics).
+# NOTE (D1 caveat 2): the n100 pipelines actually invoke the qsv*/va* elements
+# that ship in gstreamer1.0-plugins-bad — and gstreamer1.0-plugins-bad is ALREADY
+# in the SHARED runtime list (manifests/packages/shared.list:55). It is therefore
+# intentionally NOT duplicated here. The QSV elements come from that shared
+# package; this array adds only the x86-specific VA-API plugin + Intel driver.
+hw_accel_gstreamer_plugins:
+  - gstreamer1.0-vaapi
+  - intel-media-va-driver-non-free
+
+# gstreamer_runtime_packages is OMITTED on purpose. rk3588's equivalent
+# (rockchip-multimedia-config) is RK-specific and NOT in shared.list; x86's QSV
+# element provider (gstreamer1.0-plugins-bad) IS in shared.list, so listing it
+# here would violate the no-duplication rule (see x86_64.delta.list accounting).
+
+# Frozen A/B layout NAME for x86 (EFI System Partition + GRUB env + rootfs_a/b +
+# data), analogous to rk3588-ab. NAME reference only — sizes/roles live in the
+# FROZEN docs/partition-contract.md. NOTE: the v1 contract only specifies the
+# rk3588-ab layout; an x86-ab section (ESP/GRUB instead of the RK raw idbloader
+# gap) is a documented FUTURE contract addendum — see the evidence file.
+partition_template: x86-ab
+
+# Generic PC serial console (ttyS0 @ 115200 8N1) — the standard x86 16550 UART,
+# vs rk3588's ttyS2:1500000.
+serial_console: ttyS0:115200
