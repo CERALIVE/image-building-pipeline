@@ -1,0 +1,92 @@
+# CeraLive — Canonical SHARED runtime package list
+#
+# Arch-independent Debian packages every CeraLive device installs, regardless of
+# SoC/board. This is the SINGLE source of truth, reconciled from three diverging
+# legacy sources (Task 18):
+#   1. configs/base/ceraui-base.conf        (BASE_PACKAGES + STREAMING_PACKAGES)
+#   2. userpatches/customize-image.sh        (the set actually installed in v1)
+#   3. configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES — BSP only)
+#
+# NOT here (by design, see removed.md for the full accounting):
+#   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
+#     rockchip-multimedia-config) → v2/manifests/families/rk3588.yaml
+#   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
+#   - First-party .debs (ceraui, ceracoder, srtla, srt) → fetched + dpkg-installed
+#     by the orchestrator, never apt packages
+#   - Development tooling (build-essential, git, vim, …) → development variant only
+#   - openssh-server, systemd, udev, dbus → already in the mkosi base layer
+#
+# Format: one package per line; `#` comments justify non-obvious entries.
+# The mkosi runtime layer (v2/mkosi/mkosi.images/runtime/mkosi.conf) installs
+# exactly this set; lib/parity-check.sh diffs the built rootfs against it.
+
+# --- TLS / apt plumbing -------------------------------------------------------
+ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
+apt-transport-https      # https:// apt transport for the first-party repo
+
+# --- Network management -------------------------------------------------------
+network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
+dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
+iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
+ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
+
+# --- Audio --------------------------------------------------------------------
+alsa-utils               # low-level ALSA control for capture/monitor
+pulseaudio               # sound server; enabled service in ceraui-base.conf. NOTE: dropped by
+                         # v1 customize-image.sh (oversight) — ceraui-base.conf is canonical and
+                         # ENABLED_SERVICES lists pulseaudio, so it is restored here.
+
+# --- USB / hardware introspection ---------------------------------------------
+usbutils                 # lsusb — USB device enumeration (capture cards, modems)
+pciutils                 # lspci
+lsof                     # open-fd inspection for diagnostics
+i2c-tools                # i2c bus access (board sensors/EEPROM)
+can-utils                # CAN bus tooling (present in v1 shipped set)
+usb-modeswitch           # flips USB modems out of storage mode into modem mode
+
+# --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
+gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+gstreamer1.0-plugins-ugly
+gstreamer1.0-libav       # libav-backed encode/decode fallback
+v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device control
+ffmpeg                   # transcode/probe utility for the pipeline
+
+# --- Modems (LTE/5G on every board) -------------------------------------------
+modemmanager             # cellular modem management daemon
+libqmi-utils             # QMI modem control (Qualcomm)
+libmbim-utils            # MBIM modem control
+
+# --- WiFi ---------------------------------------------------------------------
+wireless-tools           # legacy iw* tooling
+wpasupplicant            # WPA client
+hostapd                  # AP mode (device hotspot for config)
+
+# --- mDNS / discovery ---------------------------------------------------------
+avahi-daemon             # .local hostname advertisement (find the box on the LAN)
+libnss-mdns              # NSS plugin so the box can resolve other .local hosts
+
+# --- Time ---------------------------------------------------------------------
+chrony                   # NTP client; enabled service in customize-image.sh:521.
+                         # NOTE: v1 enabled the unit but never apt-installed it — fixed here.
+
+# --- CPU / power --------------------------------------------------------------
+cpufrequtils             # CPU governor control for sustained encode performance
+
+# --- Net glue / diagnostics ---------------------------------------------------
+socat                    # socket relay used by streaming/control glue
+netcat-openbsd           # nc — connectivity probing
+iperf3                   # throughput testing of bonded links (field diagnostics)
+curl                     # http client (CeraUI/update flows)
+wget                     # http downloader
+
+# --- Operational monitoring (field-deployed, often metered links) -------------
+htop                     # interactive process monitor (canonical ceraui-base.conf base pkg)
+iotop                    # IO monitor for storage-bound encode/record diagnostics
+nethogs                  # per-process bandwidth monitor (debug link saturation)
+vnstat                   # cumulative traffic accounting — data-cap awareness on LTE modems
+
+# --- Editor (operator convenience) --------------------------------------------
+nano                     # minimal editor for on-box config (canonical base pkg)

@@ -1,0 +1,39 @@
+# CeraLive — RK3588 / RK3588S per-family package DELTA
+#
+# Packages that are RK3588-SPECIFIC and NOT already carried by either:
+#   - shared.list                          (arch-independent runtime), or
+#   - v2/manifests/families/rk3588.yaml     (typed BSP + HW-accel arrays)
+#
+# ============================================================================
+# RESULT (Task 18): this delta is EMPTY.
+# ============================================================================
+#
+# Every RK3588-specific package surfaced across the three legacy sources is
+# ALREADY captured by the family manifest's typed arrays, so duplicating any of
+# them here would violate the "no duplication" rule. For traceability, the
+# RK3588-specific packages and their canonical home are listed below as comments
+# (NOT active install lines):
+#
+#   gstreamer1.0-rockchip1      → families/rk3588.yaml: hw_accel_gstreamer_plugins
+#   rockchip-multimedia-config  → families/rk3588.yaml: gstreamer_runtime_packages
+#   linux-image-vendor-rockchip64 → families/rk3588.yaml: kernel_packages
+#   linux-dtb-vendor-rockchip64   → families/rk3588.yaml: dtb_packages
+#   rkbin-rk3588                  → families/rk3588.yaml: uboot_packages
+#   armbian-firmware              → families/rk3588.yaml: firmware_packages
+#   mali-g610-firmware            → families/rk3588.yaml: firmware_packages
+#
+# Board-level BSP (armbian-bsp-cli-<board>) is derived from board_id by the
+# orchestrator (lib/fetch-debs.sh), not a static family delta entry.
+# Board WiFi/BT firmware blobs (rtl8852be-firmware, firmware-realtek) are
+# subsumed by the family's broad `armbian-firmware` bundle (Task 11 decision).
+#
+# The streaming userspace (GStreamer core, v4l-utils, ffmpeg) is generic and
+# lives in shared.list — it is NOT RK3588-specific even though it drives the
+# rk_hdmirx capture path (the hardware specificity is in the kernel driver +
+# DT overlay, both already family/board manifest concerns).
+#
+# A future board family (e.g. Intel N100) gets its OWN <family>.delta.list;
+# this file is consumed only when the resolved board's family == rk3588.
+#
+# Format: one package per line; `#` comments justify entries.
+# (no active package lines — see RESULT above)
