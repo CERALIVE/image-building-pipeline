@@ -12,7 +12,7 @@
 #   4. partition split staged .debs into BSP vs first-party by package name
 #   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
-#   6. assemble  mkosi build (base → platform → runtime layers) in a trixie builder
+#   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
 #   8. verify    lib/parity-check.sh <rootfs>   → parity vs configs/base/ceraui-base.conf
 #
@@ -98,6 +98,23 @@ deb_pkg_name() {
 }
 
 # ---------------------------------------------------------------------------
+# read_pkg_list <file...> — emit a space-joined package set from CeraLive *.list
+# files (one package per line; `#` comments and blank lines ignored; inline
+# comments stripped). Missing files are skipped (a family may carry no delta).
+# This is how the runtime layer "references shared.list": the canonical Task-18
+# manifests/packages/shared.list (+ resolved <family>.delta.list) is read here and
+# forwarded to runtime/mkosi.postinst.chroot as $SHARED_PACKAGES — no duplicated
+# inline package list in mkosi.conf.
+# ---------------------------------------------------------------------------
+read_pkg_list() {
+  local f
+  for f in "$@"; do
+    [[ -f "${f}" ]] || continue
+    sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
+  done | sort -u | tr '\n' ' ' | sed -e 's/[[:space:]]\+$//'
+}
+
+# ---------------------------------------------------------------------------
 # require_field — die loudly if a resolved param is empty (no silent defaults).
 # ---------------------------------------------------------------------------
 require_field() {
@@ -147,6 +164,17 @@ main() {
 
   local family_manifest="${MKOSI_DIR}/../manifests/families/${FAMILY}.yaml"
   [[ -f "${family_manifest}" ]] || die "family manifest not found: ${family_manifest}"
+
+  # shared.list (+ resolved family delta) → $SHARED_PACKAGES for the runtime layer.
+  local pkg_dir="${V2_DIR}/manifests/packages"
+  local shared_list="${pkg_dir}/shared.list" delta_list="${pkg_dir}/${FAMILY}.delta.list"
+  [[ -f "${shared_list}" ]] || die "canonical package list not found: ${shared_list}"
+  SHARED_PACKAGES="$(read_pkg_list "${shared_list}" "${delta_list}")"
+  [[ -n "${SHARED_PACKAGES}" ]] || die "shared.list resolved to an empty package set — refusing to build"
+  export SHARED_PACKAGES
+  local _delta_note=""
+  [[ -f "${delta_list}" ]] && _delta_note=" + $(basename "${delta_list}")"
+  log_info "runtime packages: $(wc -w <<<"${SHARED_PACKAGES}") pkg(s) from shared.list${_delta_note}"
 
   # mkosi has no 'amd64'; its identifier is 'x86-64' (task 13). arm64 stays arm64.
   local mkosi_arch
@@ -213,14 +241,14 @@ main() {
   fi
 
   # -------------------------------------------------------------------------
-  # 6. Assemble: mkosi builds base → platform → runtime in the trixie builder.
+  # 6. Assemble: mkosi builds base → platform → runtime → app in the trixie builder.
   # -------------------------------------------------------------------------
   local ts rootfs_tree
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  rootfs_tree="${MKOSI_DIR}/build/runtime"
-  log_info "[5/8] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime"
+  rootfs_tree="${MKOSI_DIR}/build/app"
+  log_info "[5/8] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
   run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
-  [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce a runtime rootfs at ${rootfs_tree}"
+  [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
 
   # -------------------------------------------------------------------------
   # 7. Emit normalized output + checksum (NOT Armbian-unofficial_*).
@@ -233,7 +261,10 @@ main() {
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
   # -------------------------------------------------------------------------
-  # 8. Parity verification vs configs/base/ceraui-base.conf.
+  # 8. Parity verification vs configs/base/ceraui-base.conf. NOTE (Stage 2): the
+  #    app layer is a placeholder, so first-party apps are not installed yet —
+  #    this gate will report ceracoder/srtla/CeraUI gaps until Stage 3 (tasks
+  #    22-23) wires the app install. Intended, documented in LAYER-MAP.md.
   # -------------------------------------------------------------------------
   log_info "[7/8] verifying parity vs configs/base/ceraui-base.conf"
   "${PARITY_CHECK_SH}" "${rootfs_tree}" \
@@ -263,6 +294,7 @@ run_mkosi_build() {
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
+    SHARED_PACKAGES
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -272,6 +304,7 @@ run_mkosi_build() {
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
+  export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
@@ -347,7 +380,7 @@ emit_artifact() {
     "${runtime}" run --rm \
       -v "${MKOSI_DIR}:/work" -v "$(dirname "${artifact}")":/out \
       "${MKOSI_BUILDER_IMAGE}" \
-      tar -C "/work/build/runtime" -cf "/out/$(basename "${artifact}")" .
+      tar -C "/work/build/app" -cf "/out/$(basename "${artifact}")" .
   fi
   ( cd "$(dirname "${artifact}")" && sha256sum "$(basename "${artifact}")" >"$(basename "${artifact}").sha256" )
 }

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# app/mkosi.postinst.chroot — APPLICATION layer (Stage 2: PLACEHOLDER).
+#
+# Runs INSIDE the app tree (via mkosi-chroot) after the finished OS runtime tree
+# is in place. This is where the first-party CeraLive applications WILL install in
+# Stage 3 (tasks 22-23):
+#   * ceracoder / srtla  → /usr/bin (sysext-friendly; the system libsrt they link
+#                          against is already in the Runtime OS slot — App stays small)
+#   * CeraUI             → /opt/ceralive + /var (appfs/.deb; heavy /etc + /var/www
+#                          footprint, so NOT a sysext — redesign Task 0d boundary map)
+#   * CERALIVE/srt .deb  → the first-party libsrt FORK (distinct from the Runtime
+#                          system libsrt1.5-openssl) — see LAYER-MAP.md §libsrt
+#
+# STATUS (Stage 2): PLACEHOLDER — installs NOTHING. It only performs staging
+# hygiene so the four-layer chain composes cleanly today. The orchestrator stages
+# the first-party .debs at FIRST_PARTY_DIR via an mkosi ExtraTree; Stage 3 replaces
+# the placeholder body below with the real dpkg/apt-get install + sysext packaging.
+#
+# STRICT: set -euo pipefail, NO `|| true` swallowing (common.sh DESIGN RULE).
+
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[app] %s\n' "$*" >&2; }
+
+# Where the orchestrator drops the first-party .debs (mkosi ExtraTree). Consumed
+# by Stage 3; for now we only ensure it never ships in the placeholder image.
+FIRST_PARTY_DIR="/opt/ceralive-staging"
+
+main() {
+  log "APPLICATION layer placeholder (Stage 2) — first-party apps install in Stage 3 (tasks 22-23)"
+
+  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
+    log "first-party .debs are staged at ${FIRST_PARTY_DIR}:"
+    ls -la "${FIRST_PARTY_DIR}"/*.deb >&2
+    log "NOT installing them yet — deferred to Stage 3. Dropping the staging tree so the placeholder image stays clean."
+  else
+    log "no first-party .debs staged (offline/dev build) — nothing to defer."
+  fi
+
+  # Staging hygiene: the staging tree must never ship in the image. Stage 3 will
+  # consume it (dpkg -i) BEFORE removing it; the placeholder simply removes it.
+  rm -rf "${FIRST_PARTY_DIR}"
+
+  log "APPLICATION layer placeholder complete (no applications installed)"
+}
+
+main "$@"
