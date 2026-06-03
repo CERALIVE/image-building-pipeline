@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# base/mkosi.finalize — create the CeraLive runtime USER in the BASE OS layer.
+#
+# WHY HERE (not in runtime): the sysext app layer (task 22) merges
+# /usr/bin/ceracoder + /usr/bin/srtla over a SEALED base+platform rootfs and
+# starts services AS the `ceralive` user. A sysext extension cannot add a user
+# (it only overlays /usr + /opt). Therefore the account MUST already exist in
+# the base tree before sealing — so user creation lives in the base layer's
+# FinalizeScript, decomposed out of v1's monolithic customize-image.sh.
+#
+# HOW: mkosi runs this on the HOST after the base tree is built ($BUILDROOT =
+# the rootfs). We stage the customize module set + lib/common.sh into the tree,
+# run `customize/run-all.sh base` (→ users.sh) via mkosi-chroot so useradd /
+# groupadd write into the image, then remove the staging tree so nothing leaks
+# into the shipped rootfs.
+#
+# Strict, no `|| true`: a failure to create the appliance user is fatal.
+
+set -euo pipefail
+
+: "${BUILDROOT:?BUILDROOT must be set by mkosi (path to the base rootfs)}"
+
+# Repo paths, resolved relative to this script: base/ -> mkosi/ -> v2/.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
+V2_DIR="$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)"          # …/v2
+
+# shellcheck source=../../../lib/common.sh
+source "${V2_DIR}/lib/common.sh"
+
+CUSTOMIZE_SRC="${MKOSI_DIR}/customize"
+COMMON_SRC="${V2_DIR}/lib/common.sh"
+
+[[ -d "${CUSTOMIZE_SRC}" ]] || die "customize module dir not found: ${CUSTOMIZE_SRC}"
+[[ -f "${COMMON_SRC}" ]]   || die "lib/common.sh not found: ${COMMON_SRC}"
+
+# Stage preserving the repo's two-level layout (mkosi/customize + lib) so the
+# modules' own `../../lib/common.sh` fallback resolves inside the chroot too.
+STAGE_REL="var/tmp/ceralive-customize"
+STAGE_ABS="${BUILDROOT%/}/${STAGE_REL}"
+
+log_info "staging customize modules into base rootfs (${STAGE_REL})"
+rm -rf "${STAGE_ABS}"
+mkdir -p "${STAGE_ABS}/mkosi" "${STAGE_ABS}/lib"
+cp -a "${CUSTOMIZE_SRC}" "${STAGE_ABS}/mkosi/customize"
+cp -a "${COMMON_SRC}" "${STAGE_ABS}/lib/common.sh"
+
+log_info "creating 'ceralive' user in the BASE OS layer (run-all.sh base)"
+mkosi-chroot bash "/${STAGE_REL}/mkosi/customize/run-all.sh" base
+
+log_info "removing customize staging tree from base rootfs"
+rm -rf "${STAGE_ABS}"
+
+log_success "base layer: ceralive user provisioned"
