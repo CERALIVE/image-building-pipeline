@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# run-tests — single CI entrypoint for the CeraLive v2 manifest unit suite.
+#
+# Runs the bats-core unit tests for the manifest system (schema validation,
+# resolver merge precedence, versions.yaml pin resolution, common.sh strict-fail).
+# Exits with the bats exit code so CI can gate on it directly.
+#
+# Dependencies (test-time only; NOT shipped in the device image):
+#   * bats-core   https://github.com/bats-core/bats-core   (>= 1.5)
+#       install:  git clone --depth=1 https://github.com/bats-core/bats-core.git \
+#                   && sudo bats-core/install.sh /usr/local
+#   * python3 with PyYAML + python-jsonschema (same validator resolve.py uses)
+#
+# Usage:  ./run-tests          (from v2/)
+#         v2/run-tests         (from repo root)
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUITE="${HERE}/tests/manifest.bats"
+
+if ! command -v bats >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+ERROR: bats-core not found on PATH (test-time dependency).
+Install it, then re-run:
+  git clone --depth=1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+  sudo /tmp/bats-core/install.sh /usr/local
+EOF
+  exit 127
+fi
+
+if [[ ! -f "${SUITE}" ]]; then
+  echo "ERROR: test suite not found: ${SUITE}" >&2
+  exit 1
+fi
+
+echo "== CeraLive v2 manifest unit suite (bats $(bats --version | awk '{print $2}')) =="
+exec bats "${SUITE}"

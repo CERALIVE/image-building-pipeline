@@ -1,0 +1,8 @@
+# Fixture: INVALID board manifest — `app_backend` outside its enum.
+# Schema allows only {sysext, appfs}; "rootfs-blob" is illegal. manifest.bats
+# asserts this fails board-schema validation with "app_backend" in the message.
+family: rk3588
+board_id: test-board
+dtb_name: rk3588-test-board.dtb
+description: Board fixture with an out-of-enum app_backend value.
+app_backend: rootfs-blob
