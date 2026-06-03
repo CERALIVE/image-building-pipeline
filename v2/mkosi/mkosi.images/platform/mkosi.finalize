@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# platform/mkosi.finalize — install the A/B bootloader integration into the
+# platform tree (RAUC bootloader=custom backend + state helper + system.conf).
+#
+# WHY HERE (the platform layer): the boot integration is board-specific — it needs
+# SERIAL_CONSOLE / DTB_NAME / BOARD_ID from the manifest, and the platform layer is
+# the ONLY arch-specific layer (LAYER-MAP.md). The arch-neutral runtime layer must
+# NOT carry board tokens, so the board-keyed RAUC system.conf + boot backend belong
+# here, alongside the kernel/DTB/U-Boot BSP installed by mkosi.postinst.chroot.
+#
+# WHY a finalize (host) not the chroot postinst: like base/mkosi.finalize, we stage
+# the v2/mkosi/platform/boot/ source dir into the tree and run install-boot.sh via
+# mkosi-chroot, then remove the staging tree so nothing leaks into the shipped
+# rootfs. The chroot has no access to the repo, so staging from the host is required.
+#
+# SCOPE — the ROOTFS userspace bits only (no mkimage needed here):
+#   /usr/bin/ceralive-boot-state, /usr/lib/rauc/ceralive-rauc-boot-adapter,
+#   /etc/rauc/system.conf.
+# The FAT-boot-partition artifacts (boot.scr, cera_board.env, boot_state.txt,
+# extlinux.conf) are produced by the disk-assembly step (install-boot.sh
+# boot-partition), where mkimage/u-boot-tools is available — see README.md.
+#
+# GATED on arm64 + INSTALL_BOOT_BSP=1: matches the platform postinst's boot-BSP
+# scoping. On an x86 parity/dev build, or a no-boot-BSP parity build, this is a
+# clean no-op (no RK3588 bootloader to integrate).
+#
+# Strict, no `|| true`: a failed bootloader-integration install is fatal.
+
+set -euo pipefail
+
+: "${BUILDROOT:?BUILDROOT must be set by mkosi (path to the platform rootfs)}"
+
+ARCH="${ARCH:-arm64}"
+INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
+
+# Repo paths, resolved relative to this script: platform/ -> mkosi.images/ ->
+# mkosi/ ; the boot source dir is mkosi/platform/boot.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
+V2_DIR="$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)"          # …/v2
+
+# shellcheck source=../../../lib/common.sh
+source "${V2_DIR}/lib/common.sh"
+
+if [[ "${ARCH}" != "arm64" ]]; then
+  log_info "platform finalize: ARCH=${ARCH} is not arm64 — no RK3588 bootloader integration (pass-through)."
+  exit 0
+fi
+if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then
+  log_info "platform finalize: INSTALL_BOOT_BSP!=1 — bootloader integration deferred to the bootable build (parity build skips it)."
+  exit 0
+fi
+
+BOOT_SRC="${MKOSI_DIR}/platform/boot"
+[[ -d "${BOOT_SRC}" ]] || die "platform boot source dir not found: ${BOOT_SRC}"
+
+STAGE_REL="var/tmp/ceralive-boot"
+STAGE_ABS="${BUILDROOT%/}/${STAGE_REL}"
+
+log_info "staging platform/boot into the platform rootfs (${STAGE_REL})"
+rm -rf "${STAGE_ABS}"
+mkdir -p "${STAGE_ABS}"
+cp -a "${BOOT_SRC}/." "${STAGE_ABS}/"
+
+log_info "installing RAUC custom bootloader backend + state helper + system.conf (install-boot.sh rootfs)"
+# install-boot.sh reads the board specifics (SERIAL_CONSOLE/DTB_NAME/BOARD_ID/
+# FAMILY/SINGLE_SLOT_FALLBACK) from the environment that mkosi forwards.
+mkosi-chroot bash "/${STAGE_REL}/install-boot.sh" rootfs
+
+log_info "removing boot staging tree from platform rootfs"
+rm -rf "${STAGE_ABS}"
+
+log_success "platform layer: A/B bootloader integration installed (RAUC bootloader=custom)"
