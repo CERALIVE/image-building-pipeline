@@ -190,6 +190,39 @@ curl -u "$HAWKBIT_ADMIN_USER:<pass>" -H 'Content-Type: application/json' \
   }'
 ```
 
+> A freshly created rollout is **paused** — it must be **started**
+> (`POST /rest/v1/rollouts/{id}/start`) before any device is offered the bundle.
+
+---
+
+## The `ceralive-platform` integration seam (task 43)
+
+The operator dashboard is **deferred to `ceralive-platform`** — *not built here*. What lives in
+this repo is the **server-to-server contract** that lets the platform drive this engine later
+with **zero device-side changes**:
+
+- **[`../integration-contract.md`](../integration-contract.md)** — the full integration contract:
+  the two API planes (devices→DDI v1 direct, platform→Management API server-to-server), auth,
+  every Management endpoint the platform uses (targets / distribution sets / rollouts / action
+  history), the **RAUC slot ↔ distribution-set mapping** (and why hawkBit has no per-slot A/B
+  object), the **fleet-status read model** (action `RUNNING/FINISHED/ERROR` → human states), the
+  rollout-trigger sequence, device custom-data attributes, and where the future UI plugs in.
+- **[`platform-bridge.sh`](platform-bridge.sh)** — a thin, stable bash wrapper over the contract's
+  read+trigger endpoints (`list_targets`, `get_target_status`, `list_distribution_sets`,
+  `trigger_rollout`). `ceralive-platform` can call it directly or replicate its `curl`/`jq` calls.
+
+```bash
+set -a; source .env; set +a
+export HAWKBIT_API_PASSWORD='<plaintext>'      # bridge needs plaintext (auth: contract §2)
+./platform-bridge.sh list_targets | jq '.content[] | {controllerId, updateStatus}'
+./platform-bridge.sh get_target_status rock5b-aabbccddeeff | jq .
+./platform-bridge.sh list_distribution_sets | jq '.content[] | {id, name, version}'
+./platform-bridge.sh trigger_rollout "$DS_ID" "$RAUC_COMPATIBLE" 3   # create + start, grouped
+```
+
+The seam is **Management-API only, loopback/private, never public**, and adds **no**
+`ceralive-platform` feature/UI code — see the contract's scope statement (§10).
+
 ---
 
 ## Files
@@ -199,6 +232,8 @@ curl -u "$HAWKBIT_ADMIN_USER:<pass>" -H 'Content-Type: application/json' \
 | `docker-compose.yml` | hawkBit + Postgres; loopback bind; env-driven auth; R2 artifact URL handler. |
 | `hawkbit.env.example` | Documented env template (placeholders, **no real secrets**). Copy to `.env`. |
 | `provision.sh` | One-time REST setup: RAUC SM type, distribution set, `compatible` target filter. |
+| `platform-bridge.sh` | Thin `ceralive-platform` ↔ Management-API bridge (task 43 seam): `list_targets`, `get_target_status`, `list_distribution_sets`, `trigger_rollout`. |
+| `../integration-contract.md` | The full server-to-server integration contract (task 43): endpoints, auth, RAUC-slot↔DS mapping, fleet read model, rollout trigger, future-UI seam. |
 | `README.md` | This file. |
 
 ## Related tasks
@@ -206,4 +241,6 @@ curl -u "$HAWKBIT_ADMIN_USER:<pass>" -H 'Content-Type: application/json' \
 - **Task 28** — emits signed `.raucb` bundles (`compatible`, version) into the R2 layout.
 - **Task 39** — `apt-worker` serves `/bundles/...` from R2 (content-type, HTTP range).
 - **Task 41** — device-side `rauc-hawkbit-updater` polls this engine's DDI API.
-- **Task 43** — `ceralive-platform` operator UI calls the Management API (the deferred seam).
+- **Task 43** — `ceralive-platform` operator UI calls the Management API (the deferred seam):
+  contract = [`../integration-contract.md`](../integration-contract.md); bridge =
+  [`platform-bridge.sh`](platform-bridge.sh). Contract only; no platform feature/UI code.
