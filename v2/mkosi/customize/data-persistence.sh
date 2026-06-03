@@ -208,6 +208,15 @@ if [ ! -e "$DATA/ceralive/update.conf" ]; then
 # CHANNEL    : release channel hint (informational; the URL is authoritative).
 BUNDLE_URL=
 CHANNEL=stable
+# Boot healthcheck (task 29) — gates `rauc mark-good` on real streaming health.
+# IRL_SERVER_HOST            : irl-srt-server host for the SRT reach check (empty = skip).
+# IRL_SERVER_SRT_PORT        : SRT/SRTLA port (TCP-reach probed).
+# HEALTHCHECK_TIMEOUT        : seconds to reach health before giving up (→ rollback).
+# HEALTHCHECK_RETRY_INTERVAL : seconds between health attempts.
+IRL_SERVER_HOST=
+IRL_SERVER_SRT_PORT=9000
+HEALTHCHECK_TIMEOUT=60
+HEALTHCHECK_RETRY_INTERVAL=5
 CONF
     chmod 0644 "$DATA/ceralive/update.conf"
 fi
@@ -304,6 +313,11 @@ done
 echo "ceralive-update: installing RAUC bundle from $CONF"
 echo "ceralive-update: BUNDLE_URL=$BUNDLE_URL CHANNEL=${CHANNEL:-?}"
 rauc install "$BUNDLE_URL"
+
+# Force the freshly-activated slot to re-prove streaming health before it is
+# confirmed: /data is shared across A/B, so the new slot must NOT inherit this
+# slot's mark-good marker (task 29). The boot healthcheck re-creates it on success.
+rm -f "$DATA/ceralive/.slot-marked-good"
 
 echo "ceralive-update: bundle installed to the inactive slot."
 echo "ceralive-update: reboot to boot it; the task-29 healthcheck confirms (mark-good) or rolls back."

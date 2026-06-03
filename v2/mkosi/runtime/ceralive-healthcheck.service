@@ -1,0 +1,28 @@
+[Unit]
+Description=CeraLive boot healthcheck — confirm streaming health then RAUC mark-good
+Documentation=file:///usr/share/doc/ceralive/partition-contract.md
+# Real streaming-stack health gate for A/B rollback (task 29): only a slot that
+# PROVES it can stream gets `rauc mark-good`. A boots-but-can't-encode slot is left
+# unconfirmed and the bootcount adapter rolls it back on the next reboot.
+#
+# Run only after the app is up AND the network is online (the SRT reach check
+# needs routing). Requires=ceralive.service: if CeraUI never comes up there is
+# nothing to confirm, so the gate must not run (the slot will roll back).
+Requires=ceralive.service
+After=ceralive.service network-online.target
+Wants=network-online.target
+# Idempotency guard: once a slot is confirmed the marker exists and this unit is a
+# no-op. /data is SHARED across A/B, so ceralive-update CLEARS this marker on every
+# new bundle install — the freshly-activated slot must re-prove health before being
+# confirmed (otherwise a healthy slot would inherit the other slot's marker).
+ConditionPathExists=!/data/ceralive/.slot-marked-good
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ceralive-healthcheck.sh
+RemainAfterExit=yes
+# A failed healthcheck deliberately does NOT mark good and is NOT restarted: the
+# rollback mechanism is the next reboot's bootcount, not a systemd retry loop.
+
+[Install]
+WantedBy=multi-user.target
