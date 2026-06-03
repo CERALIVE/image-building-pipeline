@@ -1,0 +1,31 @@
+# CeraLive extlinux.conf — MANUAL A/B recovery selector (NOT the rollback path).
+#
+# TEMPLATE — rendered by install-boot.sh from the manifest (@CONSOLE@/@DTB_NAME@).
+#
+# IMPORTANT: automatic failed-boot rollback is done by boot.scr (the U-Boot script
+# that decrements the per-slot counter — see boot.scr.cmd). extlinux.conf is STATIC
+# and cannot count boots down, so it CANNOT roll back on its own. It exists only as
+# a human-driven recovery menu (pick a slot at the console) for the case where
+# boot.scr is unavailable. The two slot APPEND lines differ ONLY in the rootfs
+# PARTLABEL, exactly as boot.scr selects (root=PARTLABEL=rootfs_a | rootfs_b).
+#
+# Kernel/DTB/initrd ride INSIDE the rootfs slot's /boot (frozen contract); U-Boot
+# resolves those relative to the active rootfs once root= is set.
+
+TIMEOUT 30
+DEFAULT slot-a
+MENU TITLE CeraLive A/B recovery (boot.scr handles automatic rollback)
+
+LABEL slot-a
+    MENU LABEL Slot A (rootfs_a)
+    LINUX /boot/Image
+    FDT /boot/dtb/@DTB_NAME@
+    INITRD /boot/initrd.img
+    APPEND root=PARTLABEL=rootfs_a rootwait rw console=@CONSOLE@ earlycon cera_slot=A
+
+LABEL slot-b
+    MENU LABEL Slot B (rootfs_b)
+    LINUX /boot/Image
+    FDT /boot/dtb/@DTB_NAME@
+    INITRD /boot/initrd.img
+    APPEND root=PARTLABEL=rootfs_b rootwait rw console=@CONSOLE@ earlycon cera_slot=B

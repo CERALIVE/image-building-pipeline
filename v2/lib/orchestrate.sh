@@ -290,7 +290,7 @@ run_mkosi_build() {
   # the invoking environment) so the same set works on host mkosi 26 and the
   # trixie-builder mkosi 25.3 (which disagree on the [Content]/[Build] section).
   local env_names=(
-    ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE
+    ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
@@ -298,8 +298,11 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
-  # inheritance and docker `-e NAME` passthrough resolve.
-  export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE
+  # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
+  # platform bootloader integration (mkosi.finalize → install-boot.sh): the U-Boot
+  # boot.scr / extlinux fdtfile and the board env come from the manifest, never
+  # hardcoded.
+  export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
