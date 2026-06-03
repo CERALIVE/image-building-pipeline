@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 #
-# runtime/mkosi.postinst.chroot — CeraLive system configuration, run INSIDE the
-# image (via mkosi-chroot) after the runtime package set is installed.
+# runtime/mkosi.postinst.chroot — CeraLive OS/system configuration, run INSIDE
+# the image (via mkosi-chroot) after the platform tree is in place.
 #
 # This is the parity-critical port of v1's userpatches/customize-image.sh. It is
-# faithful to the original chroot logic with three deliberate changes:
+# faithful to the original chroot logic with these deliberate changes:
 #   1. user/paths unify on `ceralive` (v1 used `ceraui`) — see redesign wisdom.
 #   2. STRICT: set -euo pipefail, NO `|| true` swallowing (v1's silent apt/dpkg
 #      failures were the root cause of v1 unreliability — common.sh DESIGN RULE).
-#   3. package INSTALL is declarative (mkosi Packages= / platform BSP), so the
-#      v1 in-chroot `apt-get install` of the streaming set is gone; only the
-#      first-party .debs are dpkg-installed here.
+#   3. RUNTIME packages are installed here from the canonical Task-18 list
+#      manifests/packages/shared.list — forwarded by lib/orchestrate.sh as
+#      $SHARED_PACKAGES. There is NO inline hardcoded package list (Task 19).
+#   4. First-party apps (ceracoder/srtla/CeraUI + the CERALIVE/srt fork .deb) are
+#      NOT installed here — they belong to the APPLICATION layer (Stage 3). This
+#      runtime layer carries only the OS + system config + system libsrt.
 #
-# Everything board-specific arrives via the environment (Environment= in
-# mkosi.conf), resolved from the manifest by lib/resolve.sh. NO board name,
-# package list or device path is hardcoded.
+# ARCH-NEUTRAL: this layer is identical on every architecture. NO SoC/board/
+# architecture token appears here — those specifics live in the Platform layer,
+# and board capture/quirk device rules are applied by the platform-specific chroot
+# customization module (task 20), driven by the manifest `quirks:` block. Everything
+# else arrives via the environment (resolved from the manifest by lib/resolve.sh);
+# NO board name, package list or device path is hardcoded.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -26,9 +32,10 @@ CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 BOARD_ID="${BOARD_ID:-unknown}"
 
-# Where the orchestrator drops the first-party .debs (ExtraTrees). May be absent
-# on an offline/dev build (CI provides them) — handled as an explicit branch.
-FIRST_PARTY_DIR="/opt/ceralive-staging"
+# The canonical runtime package set (manifests/packages/shared.list + the
+# resolved <family>.delta.list), forwarded by lib/orchestrate.sh. Space-separated
+# package names; empty is a hard error (refuse to build a package-less runtime).
+SHARED_PACKAGES="${SHARED_PACKAGES:-}"
 
 # ---------------------------------------------------------------------------
 # Small idempotent helpers (replace v1's `|| true` with real guards).
@@ -109,6 +116,27 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 2b. Runtime package install from the canonical Task-18 list.
+#     SOURCE OF TRUTH = manifests/packages/shared.list (+ resolved family delta),
+#     read by lib/orchestrate.sh and forwarded here as $SHARED_PACKAGES. There is
+#     NO inline hardcoded package list (Task 19). Runs AFTER configure_minimal_apt
+#     so the Debian deb822 sources exist before apt-get update (mkosi keeps build
+#     sources in its sandbox, not the rootfs — same reason platform/postinst writes
+#     its own source first). This mirrors the platform layer's in-chroot apt usage.
+# ---------------------------------------------------------------------------
+install_runtime_packages() {
+  if [[ -z "${SHARED_PACKAGES// /}" ]]; then
+    log "FATAL: SHARED_PACKAGES is empty — runtime package set (shared.list) was not forwarded; refusing to build a package-less runtime"
+    exit 1
+  fi
+  local pkgs
+  read -r -a pkgs <<<"${SHARED_PACKAGES}"
+  log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
+  apt-get update
+  apt-get install -y --no-install-recommends "${pkgs[@]}"
+}
+
+# ---------------------------------------------------------------------------
 # 3. CeraLive apt repository (mTLS + GPG). Secrets come from env (CI); never
 #    hardcoded. Local/dev build without secrets installs the source + an empty
 #    keyring placeholder, exactly as v1 did.
@@ -149,22 +177,19 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 4. First-party .debs (ceraui/belacoder/srtla/srt). dpkg the staged files; let
-#    apt resolve any remaining deps. Absent dir = CI-only (R2/gh) — explicit,
-#    loud branch, not a silent skip.
+# 4. (REMOVED in Task 19) First-party .deb install moved to the APPLICATION layer
+#    (mkosi.images/app, Stage 3, tasks 22-23). ceracoder/srtla/CeraUI + the
+#    CERALIVE/srt fork .deb are NOT installed by the runtime layer — only the
+#    system libsrt (libsrt1.5-openssl, via shared.list) lives here so app images
+#    stay small and a libsrt bump rides the RAUC OS slot atomically.
 # ---------------------------------------------------------------------------
-install_first_party() {
-  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null; then
-    log "installing first-party .debs from ${FIRST_PARTY_DIR}"
-    ls -la "${FIRST_PARTY_DIR}"/*.deb >&2
-    dpkg -i "${FIRST_PARTY_DIR}"/*.deb || apt-get -f install -y --no-install-recommends
-  else
-    log "WARNING: no first-party .debs staged in ${FIRST_PARTY_DIR} — ceraui/belacoder/srtla/srt require R2/gh creds (CI mode). Continuing; parity-check will flag this."
-  fi
-}
 
 # ---------------------------------------------------------------------------
-# 5. udev hardware-access rules (verbatim policy from v1 242-272).
+# 5. udev hardware-access rules (arch-neutral policy, ported from v1 242-272).
+#    Board/SoC-specific capture-device quirks (e.g. an HDMI-rx driver-name match)
+#    are NOT here — they are applied by the platform-specific chroot customization
+#    module (task 20), driven by the manifest `quirks:` block. This keeps the
+#    runtime layer identical on every architecture.
 # ---------------------------------------------------------------------------
 setup_hardware_access() {
   log "installing udev hardware-access rules"
@@ -188,16 +213,19 @@ SUBSYSTEM=="usb", ATTR{bDeviceClass}=="08", GROUP="plugdev", MODE="0664"
 # Modem management interfaces
 SUBSYSTEM=="usb", ATTRS{bInterfaceClass}=="02", ATTRS{bInterfaceSubClass}=="02", GROUP="dialout", MODE="0664"
 
-# RK3588 HDMI capture (if available)
-KERNEL=="video0", SUBSYSTEM=="video4linux", ATTRS{name}=="rk_hdmirx", GROUP="video", MODE="0664"
-
-# GPIO access for RK3588
+# GPIO access (generic; arch-neutral SUBSYSTEM/KERNEL match — no SoC name)
 SUBSYSTEM=="gpio", GROUP="gpio", MODE="0664"
 KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"
 
 # I2C and SPI access
 KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0664"
 KERNEL=="spidev[0-9]*", GROUP="spi", MODE="0664"
+
+# NOTE: the generic `video4linux`/`video[0-9]*` rules above already grant the
+# `video` group to ALL V4L2 capture nodes (including an SoC HDMI-rx capture node),
+# so no board-specific capture rule is needed here. A driver-name-matched quirk
+# (if a board ever requires one) is applied by the platform-specific chroot
+# customization module (task 20), NOT this arch-neutral runtime layer.
 EOF
 }
 
@@ -509,10 +537,10 @@ EOF
 # ---------------------------------------------------------------------------
 main() {
   log "starting CeraLive runtime customization (board=${BOARD_ID}, release=${RELEASE}, variant=${VARIANT})"
-  configure_minimal_apt
+  configure_minimal_apt        # write deb822 sources first (apt-get needs them)
+  install_runtime_packages     # shared.list set (forwarded as $SHARED_PACKAGES)
   create_ceralive_user
   setup_ceralive_repository
-  install_first_party
   setup_hardware_access
   configure_srtla_routing
   apply_streaming_optimizations
@@ -520,8 +548,8 @@ main() {
   configure_services
   setup_hostname_service
   create_ceralive_structure
-  # Drop the first-party .deb staging tree so it does not ship in the image.
-  rm -rf "${FIRST_PARTY_DIR}"
+  # First-party apps + their staging tree are handled by the APPLICATION layer
+  # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
 }
 

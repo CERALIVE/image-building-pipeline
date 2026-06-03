@@ -11,8 +11,12 @@
 #   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
 #     rockchip-multimedia-config) → v2/manifests/families/rk3588.yaml
 #   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
-#   - First-party .debs (ceraui, ceracoder, srtla, srt) → fetched + dpkg-installed
-#     by the orchestrator, never apt packages
+#   - First-party .debs (ceracoder, srtla, CeraUI, and the CERALIVE/srt fork) →
+#     installed in the APPLICATION layer (Stage 3), never apt packages. NOTE the
+#     SYSTEM libsrt transport library (Debian `libsrt1.5-openssl`) IS here, in the
+#     OS-update infra section below — it rides the RAUC OS slot so app sysexts stay
+#     small and a libsrt bump is atomic. The CERALIVE/srt .deb (first-party fork)
+#     is separate and lands in the App layer (see LAYER-MAP.md §libsrt).
 #   - Development tooling (build-essential, git, vim, …) → development variant only
 #   - openssh-server, systemd, udev, dbus → already in the mkosi base layer
 #
@@ -90,3 +94,23 @@ vnstat                   # cumulative traffic accounting — data-cap awareness 
 
 # --- Editor (operator convenience) --------------------------------------------
 nano                     # minimal editor for on-box config (canonical base pkg)
+
+# --- OS-update + SRT transport infra (Stage 2; RUNTIME layer, arch-independent) -
+# Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App
+# sysext layer — so they update atomically via RAUC and are identical on every
+# architecture (rk3588, x86). See LAYER-MAP.md and decisions.md (Task 5 RAUC pins).
+libsrt1.5-openssl        # SYSTEM SRT transport library that ceracoder + srtla link
+                         # at runtime. In the OS slot (not app sysext) → app images
+                         # stay small + a libsrt bump is atomic via the RAUC slot.
+                         # bookworm provides 1.5.x; the OpenSSL backend matches the
+                         # CERALIVE build. (The first-party CERALIVE/srt FORK .deb is
+                         # a SEPARATE App-layer artifact — see LAYER-MAP.md §libsrt.)
+rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
+u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
+                         # selector. Generic Debian pkg (present on amd64 too); the
+                         # board-specific U-Boot BLOB is a Platform-layer BSP concern.
+# rauc-hawkbit-updater   # PLACEHOLDER (Stage 4 OTA). NOT in bookworm main → must be
+                         # backported from sid (1.4-1~bpo12+1) and served via
+                         # apt.ceralive.tv before it can be an active install line.
+                         # Left commented so `apt-get install` of this list never
+                         # fails on a missing package. decisions.md Task 5.
