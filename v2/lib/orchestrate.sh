@@ -158,9 +158,14 @@ main() {
   require_field BOARD_ID "${BOARD_ID:-}"
   require_field FAMILY "${FAMILY:-}"
   require_field KERNEL_PACKAGES "${KERNEL_PACKAGES:-}"
-  require_field DTB_PACKAGES "${DTB_PACKAGES:-}"
-  require_field UBOOT_PACKAGES "${UBOOT_PACKAGES:-}"
   require_field FIRMWARE_PACKAGES "${FIRMWARE_PACKAGES:-}"
+  # DTB/U-Boot are required only when installing the boot BSP (rk3588 carries
+  # both; x86 legitimately has neither — ACPI + UEFI). Gating on INSTALL_BOOT_BSP
+  # fixes task-32 gap G2 without changing the arm64 boot build (still =1 there).
+  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+    require_field DTB_PACKAGES "${DTB_PACKAGES:-}"
+    require_field UBOOT_PACKAGES "${UBOOT_PACKAGES:-}"
+  fi
 
   local family_manifest="${MKOSI_DIR}/../manifests/families/${FAMILY}.yaml"
   [[ -f "${family_manifest}" ]] || die "family manifest not found: ${family_manifest}"
@@ -180,8 +185,8 @@ main() {
   local mkosi_arch
   case "${ARCH}" in
     arm64) mkosi_arch="arm64" ;;
-    amd64) mkosi_arch="x86-64" ;;
-    *) die "unsupported arch '${ARCH}' (manifest); expected arm64|amd64" ;;
+    amd64|x86-64) mkosi_arch="x86-64" ;;
+    *) die "unsupported arch '${ARCH}' (manifest); expected arm64|amd64|x86-64" ;;
   esac
   log_info "resolved: family=${FAMILY} arch=${ARCH} (mkosi=${mkosi_arch}) board_id=${BOARD_ID}"
 
@@ -238,6 +243,15 @@ main() {
     log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
   else
     log_warn "[4/8] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
+  fi
+
+  # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
+  # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before
+  # mkosi/docker so CI needs no network, privileged container or board.
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    log_info "[5/8] DRY_RUN=1 — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
+    log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → builder plan emitted; no network/hardware touched ==="
+    exit 0
   fi
 
   # -------------------------------------------------------------------------
