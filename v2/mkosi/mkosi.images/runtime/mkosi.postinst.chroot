@@ -574,8 +574,12 @@ log() { logger -t ceralive-migrate -- "$*" 2>/dev/null || true; echo "ceralive-m
 [ -d "$DATA" ] || { log "ERROR: $DATA missing (data partition not mounted?)"; exit 1; }
 
 mkdir -p "$DATA/ceralive" "$DATA/log" "$DATA/nm/system-connections" "$DATA/srtla"
-chmod 0755 "$DATA/ceralive" "$DATA/log" "$DATA/srtla"
-chmod 0700 "$DATA/nm" "$DATA/nm/system-connections"
+# OTA (task 41): RAUC bundle download dir + the rendered per-device hawkBit
+# updater config dir, BOTH on /data (never the rootfs slot). The updater config
+# carries the DDI token → 0700.
+mkdir -p "$DATA/ceralive/rauc-downloads" "$DATA/ceralive/hawkbit-updater"
+chmod 0755 "$DATA/ceralive" "$DATA/log" "$DATA/srtla" "$DATA/ceralive/rauc-downloads"
+chmod 0700 "$DATA/nm" "$DATA/nm/system-connections" "$DATA/ceralive/hawkbit-updater"
 
 # ONE-TIME legacy config migration: /etc/ceralive/config.json -> /data, then drop
 # the legacy copy so /data is the single source of truth.
@@ -998,6 +1002,255 @@ UNITEOF
 }
 
 # ---------------------------------------------------------------------------
+# 15. Device OTA: rauc-hawkbit-updater (task 41) — poll the private hawkBit DDI
+#     API, install signed .raucb bundles to the inactive RAUC A/B slot. Slot
+#     CONFIRMATION stays with ceralive-healthcheck.service (task 29): the updater
+#     only installs (RAUC D-Bus InstallBundle); it has NO mark-good, so it cannot
+#     bypass the gate. post_update_reboot=false keeps reboot CeraLive-controlled.
+#
+# SECURE ENROLLMENT (NO shared static token baked in): the image bakes only the
+# template (@PLACEHOLDERS@). The per-device token is provisioned on first boot
+# onto /data (ceralive-hawkbit-provision.service → provision script), which renders
+# the effective config (with the token) to /data/ceralive/hawkbit-updater/config.conf.
+#
+# Inline twin of v2/mkosi/runtime/hawkbit-updater/{config.conf,
+# rauc-hawkbit-updater.service,provision-token.sh,README.md} — keep in sync.
+#
+# The 1.4 .deb is NOT in bookworm (backport, decisions.md task 5). It is pre-staged
+# like the first-party .debs and installed here from $HAWKBIT_DEB_STAGING; if absent
+# (parity/dry/offline build) the binary install is skipped GRACEFULLY — the config,
+# provision script and CeraLive units still ship and stay inert (no binary + the
+# updater is gated on the un-rendered /data config), so a package-less image is safe.
+# ---------------------------------------------------------------------------
+setup_hawkbit_updater() {
+  log "installing device OTA (rauc-hawkbit-updater + secure first-boot enrollment)"
+
+  # --- baked-in config TEMPLATE (no token; placeholders rendered on first boot) ---
+  mkdir -p /etc/rauc-hawkbit-updater
+  cat >/etc/rauc-hawkbit-updater/config.conf <<'HBCONF'
+# CeraLive rauc-hawkbit-updater config TEMPLATE (task 41). NO token here — every
+# per-device secret is a @PLACEHOLDER@ rendered on first boot by
+# /usr/local/sbin/ceralive-hawkbit-provision from /data/ceralive/hawkbit.conf into
+# /data/ceralive/hawkbit-updater/config.conf (mode 0600, on /data). The updater is
+# run with `-c` that /data config (drop-in 10-ceralive.conf). See README.md.
+[client]
+hawkbit_server            = @HAWKBIT_SERVER@
+ssl                       = @HAWKBIT_SSL@
+ssl_verify                = @HAWKBIT_SSL_VERIFY@
+@HAWKBIT_AUTH_LINE@
+tenant_id                 = @HAWKBIT_TENANT@
+target_name               = @HAWKBIT_TARGET_NAME@
+# Downloads land on the DATA partition, NOT the rootfs slot (task 41 MUST-NOT).
+bundle_download_location  = /data/ceralive/rauc-downloads/bundle.raucb
+# CeraLive owns reboot; healthcheck-gated mark-good (task 29) confirms the slot.
+post_update_reboot        = false
+retry_wait                = 300
+connect_timeout           = 20
+timeout                   = 60
+log_level                 = message
+
+[device]
+# Reported as target attributes; `compatible` (from /etc/rauc/system.conf) drives
+# the rollout target filter attribute.compatible==ceralive-<family> (task 40).
+compatible                = @COMPATIBLE@
+HBCONF
+  chmod 0644 /etc/rauc-hawkbit-updater/config.conf
+
+  # --- first-boot enrollment + config render script ---
+  mkdir -p /usr/local/sbin
+  cat >/usr/local/sbin/ceralive-hawkbit-provision <<'HBPROV'
+#!/bin/bash
+# ceralive-hawkbit-provision — per-device hawkBit DDI enrollment (task 41).
+# Inline twin of v2/mkosi/runtime/hawkbit-updater/provision-token.sh — keep in sync.
+# Renders the per-device effective config (with the token) onto /data; the image
+# bakes NO token. See README.md for the enrollment-file contract.
+set -euo pipefail
+
+PROG="ceralive-hawkbit-provision"
+ENROLL_CONF="${CERALIVE_HAWKBIT_ENROLL_CONF:-/data/ceralive/hawkbit.conf}"
+TOKEN_FILE="${CERALIVE_HAWKBIT_TOKEN_FILE:-/data/ceralive/hawkbit-token}"
+TEMPLATE="${CERALIVE_HAWKBIT_TEMPLATE:-/etc/rauc-hawkbit-updater/config.conf}"
+EFFECTIVE="${CERALIVE_HAWKBIT_EFFECTIVE:-/data/ceralive/hawkbit-updater/config.conf}"
+RAUC_SYSTEM_CONF="${CERALIVE_RAUC_SYSTEM_CONF:-/etc/rauc/system.conf}"
+APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-/etc/apt/certs/client.crt}"
+APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-/etc/apt/certs/client.key}"
+
+log()  { printf '%s: %s\n' "${PROG}" "$*"; }
+die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
+
+read_compatible() {
+  [ -r "${RAUC_SYSTEM_CONF}" ] || { printf ''; return 0; }
+  awk -F= '/^[[:space:]]*compatible[[:space:]]*=/{
+             gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' \
+      "${RAUC_SYSTEM_CONF}"
+}
+
+fetch_token_from_url() {
+  local url="$1"
+  command -v curl >/dev/null 2>&1 || die "curl missing — cannot fetch token from ${url}"
+  local -a auth=()
+  if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
+    auth=(--cert "${APT_CLIENT_CRT}" --key "${APT_CLIENT_KEY}")
+  fi
+  local token
+  token="$(curl -fsS "${auth[@]}" "${url}")" \
+    || die "provisioning endpoint fetch failed: ${url}"
+  token="$(printf '%s' "${token}" | tr -d '\r\n[:space:]')"
+  [ -n "${token}" ] || die "provisioning endpoint returned an empty token: ${url}"
+  printf '%s' "${token}"
+}
+
+main() {
+  [ -r "${ENROLL_CONF}" ] || {
+    log "no enrollment file at ${ENROLL_CONF} — device not yet enrolled; nothing to do"
+    exit 0
+  }
+  local HAWKBIT_SERVER="" HAWKBIT_TARGET_TOKEN="" HAWKBIT_GATEWAY_TOKEN=""
+  local HAWKBIT_PROVISION_URL="" HAWKBIT_TARGET_NAME="" HAWKBIT_TENANT="DEFAULT"
+  local HAWKBIT_SSL="true" HAWKBIT_SSL_VERIFY="true"
+  # shellcheck disable=SC1090
+  . "${ENROLL_CONF}"
+  [ -n "${HAWKBIT_SERVER}" ] || die "${ENROLL_CONF}: HAWKBIT_SERVER is required"
+
+  local auth_kind="" token=""
+  if [ -n "${HAWKBIT_TARGET_TOKEN}" ]; then
+    auth_kind="auth_token"; token="${HAWKBIT_TARGET_TOKEN}"
+  elif [ -n "${HAWKBIT_GATEWAY_TOKEN}" ]; then
+    auth_kind="gateway_token"; token="${HAWKBIT_GATEWAY_TOKEN}"
+  elif [ -n "${HAWKBIT_PROVISION_URL}" ]; then
+    log "fetching per-device token from provisioning endpoint"
+    auth_kind="auth_token"; token="$(fetch_token_from_url "${HAWKBIT_PROVISION_URL}")"
+  elif [ -s "${TOKEN_FILE}" ]; then
+    log "reusing previously provisioned token at ${TOKEN_FILE}"
+    auth_kind="auth_token"; token="$(tr -d '\r\n[:space:]' <"${TOKEN_FILE}")"
+  else
+    die "${ENROLL_CONF}: provide HAWKBIT_TARGET_TOKEN, HAWKBIT_GATEWAY_TOKEN or HAWKBIT_PROVISION_URL"
+  fi
+  [ -n "${token}" ] || die "resolved an empty token — refusing to write config"
+
+  install -d -m 0700 "$(dirname "${TOKEN_FILE}")"
+  ( umask 077; printf '%s\n' "${token}" >"${TOKEN_FILE}" )
+  chmod 0600 "${TOKEN_FILE}"
+  log "token persisted to ${TOKEN_FILE} (mode 0600, on /data)"
+
+  [ -r "${TEMPLATE}" ] || die "template missing: ${TEMPLATE}"
+  local target_name="${HAWKBIT_TARGET_NAME}"
+  [ -n "${target_name}" ] || target_name="$(hostname)"
+  local compatible; compatible="$(read_compatible)"
+  [ -n "${compatible}" ] || log "WARN: no compatible in ${RAUC_SYSTEM_CONF} — rendering empty"
+
+  local content auth_line
+  content="$(cat "${TEMPLATE}")"
+  auth_line="${auth_kind}                = ${token}"
+  content="${content//@HAWKBIT_SERVER@/${HAWKBIT_SERVER}}"
+  content="${content//@HAWKBIT_SSL@/${HAWKBIT_SSL}}"
+  content="${content//@HAWKBIT_SSL_VERIFY@/${HAWKBIT_SSL_VERIFY}}"
+  content="${content//@HAWKBIT_AUTH_LINE@/${auth_line}}"
+  content="${content//@HAWKBIT_TENANT@/${HAWKBIT_TENANT}}"
+  content="${content//@HAWKBIT_TARGET_NAME@/${target_name}}"
+  content="${content//@COMPATIBLE@/${compatible}}"
+
+  install -d -m 0700 "$(dirname "${EFFECTIVE}")"
+  ( umask 077; printf '%s\n' "${content}" >"${EFFECTIVE}" )
+  chmod 0600 "${EFFECTIVE}"
+  log "rendered effective config → ${EFFECTIVE} (auth=${auth_kind}, target=${target_name}, compatible=${compatible:-<none>})"
+}
+
+main "$@"
+HBPROV
+  chmod 0755 /usr/local/sbin/ceralive-hawkbit-provision
+
+  # --- drop-in over the .deb unit: -c the /data config + gate on it ---
+  mkdir -p /etc/systemd/system/rauc-hawkbit-updater.service.d
+  cat >/etc/systemd/system/rauc-hawkbit-updater.service.d/10-ceralive.conf <<'HBDROPIN'
+[Unit]
+# Fail-closed: don't start until the per-device config (with the token) is rendered.
+ConditionPathExists=/data/ceralive/hawkbit-updater/config.conf
+RequiresMountsFor=/data
+After=ceralive-hawkbit-provision.service network-online.target
+Wants=network-online.target ceralive-hawkbit-provision.service
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/rauc-hawkbit-updater -c /data/ceralive/hawkbit-updater/config.conf
+Restart=on-failure
+RestartSec=30
+HBDROPIN
+
+  # --- first-boot enrollment unit (gated on the operator's /data enrollment file) ---
+  cat >/etc/systemd/system/ceralive-hawkbit-provision.service <<'HBPROVUNIT'
+[Unit]
+Description=CeraLive hawkBit DDI enrollment (render per-device updater config on /data)
+RequiresMountsFor=/data
+After=ceralive-migrate-data.service network-online.target
+Wants=network-online.target
+Before=rauc-hawkbit-updater.service
+ConditionPathExists=/data/ceralive/hawkbit.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-hawkbit-provision
+
+[Install]
+WantedBy=multi-user.target
+HBPROVUNIT
+
+  # --- A/B marker clear (task-29 brick #2 for the hawkBit install path) ---
+  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.service <<'HBMCSVC'
+[Unit]
+Description=Clear the RAUC slot-marked-good marker after a hawkBit-driven bundle download
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+# /data is shared A/B; clear the old slot's marker so the freshly-installed slot
+# re-proves health via ceralive-healthcheck.service (task 29). Safe to re-fire.
+ExecStart=-/bin/rm -f /data/ceralive/.slot-marked-good
+HBMCSVC
+
+  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.path <<'HBMCPATH'
+[Unit]
+Description=Watch for a downloaded RAUC bundle to clear the slot-marked-good marker
+
+[Path]
+PathExistsGlob=/data/ceralive/rauc-downloads/*.raucb
+Unit=ceralive-hawkbit-marker-clear.service
+
+[Install]
+WantedBy=multi-user.target
+HBMCPATH
+
+  # --- install the backport .deb if staged; else GRACEFUL skip (config still ships) ---
+  local staging dir deb="" installed=0
+  for dir in "${HAWKBIT_DEB_STAGING:-}" /opt/ceralive-staging /run/ceralive-debs; do
+    [[ -n "${dir}" && -d "${dir}" ]] || continue
+    for staging in "${dir}"/rauc-hawkbit-updater_*.deb; do
+      [[ -e "${staging}" ]] || continue
+      deb="${staging}"; break
+    done
+    [[ -n "${deb}" ]] && break
+  done
+  if [[ -n "${deb}" ]]; then
+    log "installing staged backport: $(basename "${deb}") (apt resolves deps from bookworm main)"
+    apt-get install -y --no-install-recommends "${deb}"
+    installed=1
+  else
+    log "no rauc-hawkbit-updater .deb staged — skipping binary install (config/units shipped; inert until staged+enrolled)"
+  fi
+
+  # CeraLive-owned units are always installable (present regardless of the .deb).
+  enable_service ceralive-hawkbit-provision.service
+  enable_service ceralive-hawkbit-marker-clear.path
+  # The updater unit only exists when the .deb installed it.
+  if [[ "${installed}" -eq 1 ]]; then
+    enable_service rauc-hawkbit-updater.service
+  else
+    log "rauc-hawkbit-updater.service not enabled (package absent) — drop-in/config staged for when it is"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -1016,6 +1269,7 @@ main() {
   setup_data_persistence       # task 30: relocate mutable state onto /data
   setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
+  setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
