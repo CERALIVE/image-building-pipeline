@@ -28,6 +28,10 @@ set -euo pipefail
 # shellcheck source=../../lib/common.sh
 source "${CERALIVE_COMMON_SH:-"$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../lib" && pwd)/common.sh"}"
 
+SERVICES_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Committed source artifacts (boot healthcheck): v2/mkosi/runtime/ceralive-healthcheck.{sh,service}
+RUNTIME_SRC_DIR="$(CDPATH='' cd -- "${SERVICES_DIR}/../runtime" 2>/dev/null && pwd || true)"
+
 readonly CERALIVE_HOSTNAME="${CERALIVE_HOSTNAME:-ceralive}"
 
 # Services that MUST exist + be enabled (v1 L516-528, configuration reconciled).
@@ -151,6 +155,20 @@ EOF
   enable_service ceralive-hostname.service
 }
 
+# Boot healthcheck (task 29): gate `rauc mark-good` on REAL streaming health so a
+# boots-but-can't-encode slot rolls back instead of confirming itself. Installs the
+# committed runtime artifacts and enables the oneshot unit. DUAL-TRACK: the wired
+# runtime executor mkosi.images/runtime/mkosi.postinst.chroot carries an inline twin.
+install_healthcheck_service() {
+  log_info "installing boot healthcheck (ceralive-healthcheck.service — gates rauc mark-good)"
+  [[ -n "${RUNTIME_SRC_DIR}" && -f "${RUNTIME_SRC_DIR}/ceralive-healthcheck.sh" ]] \
+    || die "boot healthcheck source not found under ${SERVICES_DIR}/../runtime"
+  mkdir -p /usr/local/bin
+  install -m 0755 "${RUNTIME_SRC_DIR}/ceralive-healthcheck.sh" /usr/local/bin/ceralive-healthcheck.sh
+  install -m 0644 "${RUNTIME_SRC_DIR}/ceralive-healthcheck.service" /etc/systemd/system/ceralive-healthcheck.service
+  enable_service ceralive-healthcheck.service
+}
+
 configure_services() {
   configure_network_services
 
@@ -166,6 +184,7 @@ configure_services() {
   done
 
   install_hostname_service
+  install_healthcheck_service
 
   log_success "services configured"
 }

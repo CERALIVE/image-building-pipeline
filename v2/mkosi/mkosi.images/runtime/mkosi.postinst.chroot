@@ -628,6 +628,15 @@ if [ ! -e "$DATA/ceralive/update.conf" ]; then
 # CHANNEL    : release channel hint (informational; URL is authoritative).
 BUNDLE_URL=
 CHANNEL=stable
+# Boot healthcheck (task 29) — gates `rauc mark-good` on real streaming health.
+# IRL_SERVER_HOST            : irl-srt-server host for the SRT reach check (empty = skip).
+# IRL_SERVER_SRT_PORT        : SRT/SRTLA port (TCP-reach probed).
+# HEALTHCHECK_TIMEOUT        : seconds to reach health before giving up (→ rollback).
+# HEALTHCHECK_RETRY_INTERVAL : seconds between health attempts.
+IRL_SERVER_HOST=
+IRL_SERVER_SRT_PORT=9000
+HEALTHCHECK_TIMEOUT=60
+HEALTHCHECK_RETRY_INTERVAL=5
 CONF
     chmod 0644 "$DATA/ceralive/update.conf"
 fi
@@ -719,6 +728,12 @@ done
 
 echo "ceralive-update: installing RAUC bundle from $CONF (BUNDLE_URL=$BUNDLE_URL)"
 rauc install "$BUNDLE_URL"
+
+# Force the freshly-activated slot to re-prove streaming health before it is
+# confirmed: /data is shared across A/B, so the new slot must NOT inherit this
+# slot's mark-good marker (task 29). The boot healthcheck re-creates it on success.
+rm -f "$DATA/ceralive/.slot-marked-good"
+
 echo "ceralive-update: installed to inactive slot; reboot to activate (task-29 mark-good confirms or rolls back)."
 exit 0
 EOF
@@ -805,6 +820,184 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 14. Boot healthcheck (task 29): gate `rauc mark-good` on REAL streaming health.
+#
+# Inline twin of v2/mkosi/runtime/ceralive-healthcheck.{sh,service} (installed by
+# customize/services.sh on the canonical track) — keep in sync. A boots-but-can't-
+# encode slot must NOT confirm itself: it is left unconfirmed and rolls back on the
+# next reboot. See the canonical script header for the full check order + rationale.
+# ---------------------------------------------------------------------------
+setup_boot_healthcheck() {
+  log "installing boot healthcheck (ceralive-healthcheck.service — gates rauc mark-good)"
+  mkdir -p /usr/local/bin
+  cat >/usr/local/bin/ceralive-healthcheck.sh <<'HCEOF'
+#!/bin/bash
+# ceralive-healthcheck.sh — gate RAUC `mark-good` on REAL streaming health.
+# Inline twin of v2/mkosi/runtime/ceralive-healthcheck.sh — keep in sync.
+set -uo pipefail
+
+PROG="ceralive-healthcheck"
+
+CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
+MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
+
+CERALIVE_SERVICE="${CERALIVE_SERVICE:-ceralive.service}"
+IRL_SERVER_HOST=""
+IRL_SERVER_SRT_PORT="9000"
+HEALTHCHECK_TIMEOUT="60"
+HEALTHCHECK_RETRY_INTERVAL="5"
+
+BIN_PROBE_TIMEOUT="${BIN_PROBE_TIMEOUT:-5}"
+SRT_CONNECT_TIMEOUT="${SRT_CONNECT_TIMEOUT:-5}"
+
+RAUC_BIN="${RAUC_BIN:-rauc}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+CERACODER_BIN="${CERACODER_BIN:-ceracoder}"
+SRTLA_SEND_BIN="${SRTLA_SEND_BIN:-srtla_send}"
+
+ts()   { date -u +%H:%M:%SZ; }
+log()  { printf '%s %s: %s\n' "$(ts)" "${PROG}" "$*"; }
+fail() { printf '%s %s: FAIL: %s\n' "$(ts)" "${PROG}" "$*" >&2; }
+
+load_conf() {
+  if [ -r "${CONF}" ]; then
+    log "reading config from ${CONF}"
+    # shellcheck disable=SC1090
+    . "${CONF}"
+  else
+    log "no readable ${CONF} — using built-in defaults (reach check skipped if IRL_SERVER_HOST unset)"
+  fi
+}
+
+check_service_active() {
+  if "${SYSTEMCTL_BIN}" is-active --quiet "${CERALIVE_SERVICE}"; then
+    log "OK: ${CERALIVE_SERVICE} is active"
+    return 0
+  fi
+  fail "${CERALIVE_SERVICE} is NOT active"
+  return 1
+}
+
+check_binary() {
+  local bin="$1"
+  local path out rc
+  path="$(command -v "${bin}" 2>/dev/null || true)"
+  if [ -z "${path}" ] || [ ! -x "${path}" ]; then
+    fail "streaming binary '${bin}' is missing or not executable"
+    return 1
+  fi
+  out="$(timeout "${BIN_PROBE_TIMEOUT}" "${path}" --version </dev/null 2>&1)"
+  rc=$?
+  if [ "${rc}" -eq 124 ]; then
+    fail "streaming binary '${path}' hung on probe (timed out after ${BIN_PROBE_TIMEOUT}s)"
+    return 1
+  fi
+  if printf '%s' "${out}" | grep -qiE 'error while loading shared libraries|cannot open shared object'; then
+    fail "streaming binary '${path}' cannot load its shared libraries (broken encode stack): ${out}"
+    return 1
+  fi
+  log "OK: streaming binary '${path}' present and loads"
+  return 0
+}
+
+check_srt_reach() {
+  if [ -z "${IRL_SERVER_HOST:-}" ]; then
+    log "SKIP: IRL_SERVER_HOST unset in ${CONF} — cannot test SRT reach; relying on local stack checks"
+    return 0
+  fi
+  local host="${IRL_SERVER_HOST}"
+  local port="${IRL_SERVER_SRT_PORT:-9000}"
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z -w"${SRT_CONNECT_TIMEOUT}" "${host}" "${port}" >/dev/null 2>&1; then
+      log "OK: SRT port reachable (tcp ${host}:${port})"
+      return 0
+    fi
+  elif timeout "${SRT_CONNECT_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+    log "OK: SRT port reachable (tcp ${host}:${port} via /dev/tcp)"
+    return 0
+  fi
+  fail "SRT port NOT reachable (tcp ${host}:${port}) — cloud edge unreachable"
+  return 1
+}
+
+run_checks() {
+  check_service_active   || return 1
+  check_binary "${CERACODER_BIN}"  || return 1
+  check_binary "${SRTLA_SEND_BIN}" || return 1
+  check_srt_reach        || return 1
+  return 0
+}
+
+mark_good() {
+  if ! command -v "${RAUC_BIN}" >/dev/null 2>&1; then
+    fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
+    return 1
+  fi
+  log "all health checks passed — calling '${RAUC_BIN} mark-good'"
+  if "${RAUC_BIN}" mark-good; then
+    mkdir -p "$(dirname "${MARKER}")"
+    printf 'marked-good %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${MARKER}"
+    log "slot marked good; wrote idempotency marker ${MARKER}"
+    return 0
+  fi
+  fail "'${RAUC_BIN} mark-good' failed — slot left unconfirmed (will roll back)"
+  return 1
+}
+
+main() {
+  load_conf
+
+  if [ -e "${MARKER}" ]; then
+    log "marker ${MARKER} present — this slot is already confirmed good; no-op"
+    exit 0
+  fi
+
+  local now deadline attempt
+  now="$(date +%s)"
+  deadline=$(( now + HEALTHCHECK_TIMEOUT ))
+  attempt=0
+
+  while :; do
+    attempt=$(( attempt + 1 ))
+    log "streaming healthcheck attempt #${attempt} (deadline in $(( deadline - $(date +%s) ))s)"
+    if run_checks; then
+      mark_good
+      exit $?
+    fi
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      fail "streaming health NOT reached within ${HEALTHCHECK_TIMEOUT}s — NOT calling mark-good; this slot rolls back on the next reboot"
+      exit 1
+    fi
+    log "retrying in ${HEALTHCHECK_RETRY_INTERVAL}s..."
+    sleep "${HEALTHCHECK_RETRY_INTERVAL}"
+  done
+}
+
+main "$@"
+HCEOF
+  chmod 0755 /usr/local/bin/ceralive-healthcheck.sh
+
+  cat >/etc/systemd/system/ceralive-healthcheck.service <<'UNITEOF'
+[Unit]
+Description=CeraLive boot healthcheck — confirm streaming health then RAUC mark-good
+Documentation=file:///usr/share/doc/ceralive/partition-contract.md
+Requires=ceralive.service
+After=ceralive.service network-online.target
+Wants=network-online.target
+ConditionPathExists=!/data/ceralive/.slot-marked-good
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ceralive-healthcheck.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+  enable_service ceralive-healthcheck.service
+}
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -822,6 +1015,7 @@ main() {
   create_ceralive_structure
   setup_data_persistence       # task 30: relocate mutable state onto /data
   setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
+  setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
