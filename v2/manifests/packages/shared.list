@@ -109,8 +109,12 @@ rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.
-# rauc-hawkbit-updater   # PLACEHOLDER (Stage 4 OTA). NOT in bookworm main → must be
-                         # backported from sid (1.4-1~bpo12+1) and served via
-                         # apt.ceralive.tv before it can be an active install line.
-                         # Left commented so `apt-get install` of this list never
-                         # fails on a missing package. decisions.md Task 5.
+# rauc-hawkbit-updater   # Stage 7 OTA (task 41). DELIBERATELY a comment, NOT an
+                         # active apt line: 1.4 is NOT in bookworm main (only sid/forky
+                         # 1.4-1) → it is a bookworm BACKPORT .deb (1.4-1~bpo12+1),
+                         # pre-staged like the first-party .debs and installed by the
+                         # RUNTIME postinst (setup_hawkbit_updater → apt-get install
+                         # ./<file>.deb, which pulls libcurl4/libglib2.0-0/libjson-glib
+                         # from bookworm main). An active line here would break the
+                         # whole-list `apt-get install` on any host without the backport.
+                         # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.

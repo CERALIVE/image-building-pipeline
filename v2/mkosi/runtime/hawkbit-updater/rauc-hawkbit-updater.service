@@ -1,0 +1,34 @@
+# CeraLive — rauc-hawkbit-updater systemd DROP-IN override (Stage 7, task 41).
+#
+# The rauc-hawkbit-updater .deb ships its own /lib/systemd/system/
+# rauc-hawkbit-updater.service. We do NOT replace it; we layer this drop-in,
+# installed by the runtime postinst at:
+#       /etc/systemd/system/rauc-hawkbit-updater.service.d/10-ceralive.conf
+#
+# It does three CeraLive-specific things:
+#   1. Point the updater at the per-device EFFECTIVE config rendered on /data by
+#      the provisioning unit (NOT the baked-in /etc template, which has no token).
+#   2. GATE start on that effective config existing — so an un-enrolled device
+#      (no /data/ceralive/hawkbit.conf yet → nothing rendered) never starts the
+#      updater and never polls hawkBit with an empty token.
+#   3. Order it after the data mount, the network, and the enrollment oneshot.
+#
+# The updater only INSTALLS bundles (RAUC D-Bus InstallBundle); it never calls
+# `rauc mark-good`. Slot confirmation/rollback stays with ceralive-healthcheck.service
+# (task 29). See config.conf + README.md.
+
+[Unit]
+# Don't run until the per-device config (with the real token) has been rendered
+# onto /data by ceralive-hawkbit-provision.service. Fail-closed: no config → inert.
+ConditionPathExists=/data/ceralive/hawkbit-updater/config.conf
+RequiresMountsFor=/data
+After=ceralive-hawkbit-provision.service network-online.target
+Wants=network-online.target ceralive-hawkbit-provision.service
+
+[Service]
+# Reset the .deb unit's ExecStart, then run against the /data effective config.
+ExecStart=
+ExecStart=/usr/bin/rauc-hawkbit-updater -c /data/ceralive/hawkbit-updater/config.conf
+# Resilient polling daemon on field links.
+Restart=on-failure
+RestartSec=30
