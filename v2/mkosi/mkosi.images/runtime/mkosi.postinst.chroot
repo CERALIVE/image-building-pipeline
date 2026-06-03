@@ -740,7 +740,13 @@ EOF
 setup_rauc_client() {
   local keyring=/etc/rauc/ceralive-keyring.pem
   local sysconf=/etc/rauc/system.conf
-  local compatible="${COMPATIBLE_STRING:-ceralive-rk3588-1.0}"
+  # ARCH-NEUTRAL fallback. The orchestrator ALWAYS sets COMPATIBLE_STRING from the
+  # resolved manifest (lib/orchestrate.sh: COMPATIBLE_STRING=ceralive-${FAMILY}), so
+  # this default is only reached when the postinst is run with no env at all. It must
+  # NOT name a SoC/family (the runtime layer is arch-identical) — 'ceralive-unknown'
+  # is a fail-closed sentinel: it matches NO signed bundle, so `rauc install` refuses
+  # everything until a real COMPATIBLE_STRING is supplied (better than a wrong family).
+  local compatible="${COMPATIBLE_STRING:-ceralive-unknown}"
   log "wiring RAUC update client (keyring + system.conf + service)"
   mkdir -p /etc/rauc
 
