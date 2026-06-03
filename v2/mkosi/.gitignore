@@ -1,0 +1,4 @@
+# mkosi build artifacts / caches — never committed.
+/build/
+/cache/
+*.cache
