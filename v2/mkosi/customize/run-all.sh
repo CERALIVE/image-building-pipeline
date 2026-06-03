@@ -39,10 +39,12 @@ source "${CERALIVE_COMMON_SH}"
 #   apt-ceralive-repo first (sources/keyring), then hardware/udev, then the
 #   network routing + tuning, then services (which enable what the above set up),
 #   then the directory structure (chowns to the ceralive user from the base),
-#   then data-persistence LAST — it binds /opt/ceralive + /etc/NetworkManager +
-#   /var/log onto /data, so it must run after structure has created those dirs.
+#   then data-persistence (binds /opt/ceralive + /etc/NetworkManager + /var/log
+#   onto /data, so it must run after structure has created those dirs), then
+#   rauc-setup LAST — it installs the RAUC root-CA keyring + the OS-update client
+#   and pairs with the /data update.conf that data-persistence seeds.
 readonly BASE_MODULES="users"
-readonly RUNTIME_MODULES="apt-ceralive-repo udev networking-srtla sysctl-tuning services structure data-persistence"
+readonly RUNTIME_MODULES="apt-ceralive-repo udev networking-srtla sysctl-tuning services structure data-persistence rauc-setup"
 
 resolve_modules() {
   case "${1:-runtime}" in

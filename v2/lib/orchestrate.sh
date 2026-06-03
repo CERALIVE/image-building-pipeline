@@ -296,6 +296,7 @@ run_mkosi_build() {
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
+    RAUC_ROOT_CA_B64 COMPATIBLE_STRING
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
@@ -314,6 +315,18 @@ run_mkosi_build() {
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
+
+  # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
+  # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
+  # (like the apt GPG key) so the self-contained runtime postinst can write it
+  # without repo access. The RAUC `compatible` is derived from the manifest family
+  # (same scheme install-boot.sh uses) so the device + signed bundles agree.
+  local rauc_keyring="${MKOSI_DIR}/runtime/rauc/ceralive-keyring.pem"
+  if [[ -z "${RAUC_ROOT_CA_B64:-}" && -s "${rauc_keyring}" ]]; then
+    RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
+  fi
+  export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
+  export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${FAMILY}}"
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done

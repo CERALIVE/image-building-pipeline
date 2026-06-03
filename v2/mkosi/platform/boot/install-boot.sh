@@ -51,8 +51,11 @@ FAMILY="${FAMILY:-}"
 SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"
 BOOT_ATTEMPTS="${CERALIVE_BOOT_ATTEMPTS:-3}"
 
-# RAUC system compatible string — derived from the family, NOT hardcoded per board.
-COMPATIBLE="${RAUC_COMPATIBLE:-ceralive-${FAMILY:-unknown}}"
+# RAUC system compatible string — board-aware, NOT hardcoded per board. Honors
+# COMPATIBLE_STRING (the orchestrator-forwarded knob shared with the runtime
+# fallback, task 26), then the legacy RAUC_COMPATIBLE, then the family default.
+# Whatever wins MUST equal the compatible baked into the signed bundle.
+COMPATIBLE="${COMPATIBLE_STRING:-${RAUC_COMPATIBLE:-ceralive-${FAMILY:-unknown}}}"
 
 # console= value for kernel/U-Boot: the manifest uses `ttyS2:1500000`; the kernel
 # console form is `ttyS2,1500000`. Rewrite the ':' separator to ','.
@@ -115,7 +118,7 @@ boot-attempts=${BOOT_ATTEMPTS}
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 
 [keyring]
-path=/etc/rauc/keyring.pem
+path=/etc/rauc/ceralive-keyring.pem
 
 [slot.rootfs.0]
 device=/dev/disk/by-partlabel/rootfs_a
