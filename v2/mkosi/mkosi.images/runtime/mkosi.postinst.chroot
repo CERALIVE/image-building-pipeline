@@ -726,6 +726,79 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 13. RAUC A/B update client (task 26): root-CA keyring + service + fallback conf.
+#
+# Inline twin of customize/rauc-setup.sh (dual-track — keep in sync). Installs the
+# IMMUTABLE root CA (PUBLIC; cert-work/rauc/root-ca.pem) into the device keyring so
+# every signed .raucb verifies against it, and makes rauc.service live. The root CA
+# arrives as base64 in $RAUC_ROOT_CA_B64 (orchestrator-forwarded), exactly like the
+# apt GPG public key. NEVER a private key — the device keyring holds the root cert
+# only. On arm64 the board-aware /etc/rauc/system.conf is already written by
+# platform/boot/install-boot.sh; we leave it authoritative and only drop a fallback
+# when it is absent (x86 / no-boot-BSP builds).
+# ---------------------------------------------------------------------------
+setup_rauc_client() {
+  local keyring=/etc/rauc/ceralive-keyring.pem
+  local sysconf=/etc/rauc/system.conf
+  local compatible="${COMPATIBLE_STRING:-ceralive-rk3588-1.0}"
+  log "wiring RAUC update client (keyring + system.conf + service)"
+  mkdir -p /etc/rauc
+
+  if [[ -n "${RAUC_ROOT_CA_B64:-}" ]]; then
+    log "installing RAUC device keyring (root CA) from env"
+    printf '%s' "${RAUC_ROOT_CA_B64}" | base64 -d >"${keyring}"
+  else
+    log "no RAUC root CA in env — writing EMPTY keyring placeholder (rejects all bundles until the real root CA is baked in)"
+    : >"${keyring}"
+  fi
+  chmod 0644 "${keyring}"
+  if grep -q 'PRIVATE KEY' "${keyring}"; then
+    log "FATAL: ${keyring} contains a PRIVATE KEY — the device keyring must hold ONLY the public root CA"
+    exit 1
+  fi
+
+  if [[ -e "${sysconf}" ]]; then
+    log "system.conf already present (board-aware generator ran) — leaving it authoritative"
+  else
+    log "writing fallback ${sysconf} (compatible=${compatible})"
+    cat >"${sysconf}" <<EOF
+[system]
+compatible=${compatible}
+bootloader=custom
+boot-attempts=3
+
+[handlers]
+bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+
+[keyring]
+path=${keyring}
+
+[slot.rootfs.0]
+device=/dev/disk/by-partlabel/rootfs_a
+type=ext4
+bootname=A
+
+[slot.rootfs.1]
+device=/dev/disk/by-partlabel/rootfs_b
+type=ext4
+bootname=B
+EOF
+    chmod 0644 "${sysconf}"
+  fi
+
+  if ! systemctl list-unit-files rauc.service >/dev/null 2>&1 \
+     || ! systemctl list-unit-files rauc.service | grep -q '^rauc\.service'; then
+    log "FATAL: rauc.service not present — the 'rauc' package (shared.list) is not installed"
+    exit 1
+  fi
+  if systemctl enable rauc.service 2>/dev/null; then
+    log "rauc.service enabled"
+  else
+    log "rauc.service is D-Bus-activated (no [Install]) — live on demand via the rauc CLI"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -742,6 +815,7 @@ main() {
   setup_hostname_service
   create_ceralive_structure
   setup_data_persistence       # task 30: relocate mutable state onto /data
+  setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
