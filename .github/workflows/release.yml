@@ -1,0 +1,28 @@
+# CeraLive — release-branch real-HW gate.
+#
+# On every push to a release branch (or a vX.Y.Z tag) the consolidated RK3588
+# smoke suite MUST pass on real silicon before the release proceeds. This is the
+# release-branch trigger for the reusable real-HW job (the nightly schedule lives
+# in realhw-job.yml itself). Physical HW stays OFF the per-PR path — it runs here
+# only at release time and nightly.
+
+name: Release real-HW gate
+
+on:
+  push:
+    branches:
+      - 'release/**'
+      - 'release-*'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  realhw:
+    # Delegate to the single reusable real-HW workflow — no duplicated board
+    # preflight / flash / suite / diagnostics logic.
+    uses: ./.github/workflows/realhw-job.yml
+    with:
+      board: rock-5b-plus
