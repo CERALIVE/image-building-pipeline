@@ -15,11 +15,21 @@
 # the kernel refuses to merge the extension ("No suitable extensions found").
 # The device OS is Debian bookworm (VERSION_ID=12) across the whole stack.
 #
+# SYSEXT_LEVEL is the SECOND, version-decoupled matching axis. systemd's
+# extension_release_validate() keys on ID plus EITHER SYSEXT_LEVEL (when the
+# HOST os-release also carries SYSEXT_LEVEL) OR VERSION_ID otherwise. Writing
+# BOTH means: a stock bookworm host (no SYSEXT_LEVEL) matches on VERSION_ID=12,
+# while a host that opts into a stable sysext ABI (SYSEXT_LEVEL=1) keeps merging
+# our extensions across minor VERSION_ID drift without a rebuild. Belt and
+# suspenders — task-22 requirement.
+#
 # shellcheck shell=bash
 
 # Host os-release identity the device matches against. Debian bookworm.
 SYSEXT_OS_ID="${SYSEXT_OS_ID:-debian}"
 SYSEXT_OS_VERSION_ID="${SYSEXT_OS_VERSION_ID:-12}"
+# Stable sysext ABI level — decouples merge eligibility from exact VERSION_ID.
+SYSEXT_LEVEL="${SYSEXT_LEVEL:-1}"
 
 # Where installed extensions live on the image/device. Overridable so the
 # builder can target an image rootfs without touching the build host.
@@ -65,11 +75,14 @@ build_app_layer() {
   {
     printf 'ID=%s\n' "$SYSEXT_OS_ID"
     printf 'VERSION_ID=%s\n' "$SYSEXT_OS_VERSION_ID"
+    printf 'SYSEXT_LEVEL=%s\n' "$SYSEXT_LEVEL"
   } > "${rel_dir}/extension-release.${app_name}"
 
   local artifact="${output_dir}/${app_name}.raw"
   log_info "sysext: building squashfs ${artifact} for '${app_name}'"
-  mksquashfs "$tree" "$artifact" -noappend -all-root -quiet
+  # -no-progress: the progress bar goes to STDOUT and would corrupt the
+  # artifact-path-on-stdout contract that callers capture via $(...).
+  mksquashfs "$tree" "$artifact" -noappend -all-root -quiet -no-progress
 
   rm -rf "$tree"
   printf '%s\n' "$artifact"
