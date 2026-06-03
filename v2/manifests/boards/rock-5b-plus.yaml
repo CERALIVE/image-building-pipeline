@@ -1,0 +1,43 @@
+# CeraLive Image Board Manifest — Radxa Rock 5B+ (RK3588)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch, branch, kernel/uboot/dtb/firmware packages, rauc adapter,
+# partition_template and serial_console from families/rk3588.yaml.
+#
+# Sources: configs/devices/rock5bplus.conf (DTB_FILE, DT_OVERLAYS,
+# HARDWARE_WORKAROUNDS, M2_MODEM_SIM_WORKAROUND, INSTALLATION_NOTES),
+# userpatches/config-rock5bplus.conf (BOARD=).
+
+family: rk3588
+
+# Armbian BOARD= from userpatches/config-rock5bplus.conf.
+board_id: rock-5b-plus
+
+# DTB_FILE from configs/devices/rock5bplus.conf.
+dtb_name: rk3588-rock-5b-plus.dtb
+
+# DT_OVERLAYS from configs/devices/rock5bplus.conf.
+armbian_overlays:
+  - rk3588-hdmi-input
+  - rk3588-wifi-rtl8852be
+  - rk3588-m2-modem-42mm
+  - rk3588-usb-power-delivery
+
+# HARDWARE_WORKAROUNDS / M2_MODEM_SIM_WORKAROUND from configs/devices/rock5bplus.conf.
+quirks:
+  m2_modem_sim_workaround: required   # sim_card_detection_fix — M.2 B-key SIM detection
+  hdmi_input_emi_shield: true         # best-in-class EMI resistance for HDMI capture
+  usb_power_optimization: true        # 5.45 A USB budget — power-hungry modems
+
+# 16 GB+ eMMC/NVMe → A/B layout fits (partition-contract §3/§5). Not the
+# single-slot fallback.
+single_slot_fallback: false
+
+# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+app_backend: sysext
+
+description: >-
+  Radxa Rock 5B+ (RK3588). Best HDMI-input EMI resistance (BELABOX-recommended);
+  full-featured streaming appliance. M.2 B-key 42 mm slot for 4G/5G cellular
+  modems (no 52 mm support) with a required SIM-detection workaround. Onboard
+  RTL8852BE Wi-Fi, 5.45 A USB power budget. eMMC/NVMe/microSD targets (16 GB+).

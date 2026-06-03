@@ -1,0 +1,58 @@
+# CeraLive Image Family Manifest — Rockchip RK3588 / RK3588S
+#
+# Validates against ../schema/family.schema.json (draft 2020-12).
+# Captures SoC/arch-level build attributes shared by every rk3588 board
+# (Orange Pi 5+, Radxa Rock 5B+). Per-board variance lives in ../boards/*.yaml.
+#
+# Decision D3 (locked): kernel/U-Boot branch = `vendor` (HDMI hdmirx + mature
+# MPP HW-encode require the vendor kernel) and RAUC bootloader adapter = `custom`
+# (vendor U-Boot 2017.09 lacks fw_setenv → raw GPT bootcount approach).
+#
+# Sources: configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES),
+# userpatches/config-{rock5bplus,orangepi5plus}.conf (BRANCH=, EXTRA_BSP_PACKAGES),
+# configs/base/ceraui-base.conf (STREAMING_PACKAGES HW path).
+
+arch: arm64
+
+# BRANCH= from userpatches/config-*.conf (both boards) — NOT the dead
+# ARMBIAN_BRANCH=current in configs/devices/*.conf. Decision D3.
+armbian_branch: vendor
+
+# linux-image-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3).
+kernel_packages:
+  - linux-image-vendor-rockchip64
+
+# rkbin RK3588 bootloader blob (EXTRA_BSP_PACKAGES in both userpatches).
+uboot_packages:
+  - rkbin-rk3588
+
+# linux-dtb-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3).
+dtb_packages:
+  - linux-dtb-vendor-rockchip64
+
+# Shared SoC/GPU/Wi-Fi firmware. armbian-firmware is the broad Armbian firmware
+# bundle (ships realtek WiFi blobs); mali-g610-firmware is the RK3588 Mali-G610
+# GPU firmware (EXTRA_BSP_PACKAGES, both boards).
+firmware_packages:
+  - armbian-firmware
+  - mali-g610-firmware
+
+# Decision D3: vendor U-Boot has no fw_setenv → raw GPT bootcount approach.
+rauc_bootloader_adapter: custom
+
+# Hardware-accelerated GStreamer encode/decode (Rockchip MPP). From
+# ceraui-base.conf STREAMING_PACKAGES — "Armbian provides this" HW path that
+# feeds VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp.
+hw_accel_gstreamer_plugins:
+  - gstreamer1.0-rockchip1
+
+# Runtime multimedia support (BOARD_PACKAGES / EXTRA_BSP_PACKAGES, both boards).
+gstreamer_runtime_packages:
+  - rockchip-multimedia-config
+
+# Frozen A/B layout, docs/partition-contract.md §3 (v1). NAME reference only —
+# sizes/slot roles/threshold live in the frozen contract, never duplicated here.
+partition_template: rk3588-ab
+
+# SERIALCON from userpatches/config-*.conf (identical on both boards).
+serial_console: ttyS2:1500000

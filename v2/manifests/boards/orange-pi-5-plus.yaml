@@ -1,0 +1,36 @@
+# CeraLive Image Board Manifest — Orange Pi 5+ (RK3588S)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch, branch, kernel/uboot/dtb/firmware packages, rauc adapter,
+# partition_template and serial_console from families/rk3588.yaml.
+#
+# Sources: configs/devices/orangepi5plus.conf (DTB_FILE, DT_OVERLAYS,
+# INSTALLATION_NOTES), userpatches/config-orangepi5plus.conf (BOARD=).
+
+family: rk3588
+
+# Armbian BOARD= from userpatches/config-orangepi5plus.conf.
+board_id: orangepi5-plus
+
+# DTB_FILE from configs/devices/orangepi5plus.conf. SoC is the RK3588S variant —
+# note the rk3588s- DTB prefix (vs rk3588- on the Rock 5B+).
+dtb_name: rk3588s-orangepi-5-plus.dtb
+
+# DT_OVERLAYS from configs/devices/orangepi5plus.conf.
+armbian_overlays:
+  - rk3588-hdmi-input
+  - rk3588-wifi-rtl8821cs
+  - rk3588-m2-nvme
+
+# 16 GB+ eMMC/NVMe → A/B layout fits (partition-contract §3/§5). Not the
+# single-slot fallback.
+single_slot_fallback: false
+
+# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+app_backend: sysext
+
+description: >-
+  Orange Pi 5+ (RK3588S). Best choice for HDMI-input setups (BELABOX-recommended);
+  HDMI capture less affected by EMI. Full 4K@60fps capture/encode. M.2 2280 M-key
+  slot for NVMe. Onboard RTL8821CS Wi-Fi, 3.7 A USB power budget — powers most USB
+  modems without a hub. eMMC/NVMe/microSD targets (16 GB+).
