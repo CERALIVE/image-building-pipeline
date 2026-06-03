@@ -169,6 +169,25 @@ install_healthcheck_service() {
   enable_service ceralive-healthcheck.service
 }
 
+# Cert rotation (task 42): baked-in field rotation of the intermediate/leaf signing
+# certs (root CA stays IMMUTABLE — reflash-only). cert-rotation.service re-verifies a
+# delivered chain to the keyring root before activating it on /data; a weekly timer
+# warns near expiry. DUAL-TRACK: the runtime postinst carries an inline twin.
+install_cert_rotation() {
+  log_info "installing cert rotation (intermediate/leaf through-channel; root immutable)"
+  local src="${RUNTIME_SRC_DIR}/cert-rotation"
+  [[ -n "${RUNTIME_SRC_DIR}" && -f "${src}/cert-rotation.sh" ]] \
+    || die "cert-rotation source not found under ${SERVICES_DIR}/../runtime/cert-rotation"
+  mkdir -p /usr/local/bin /etc/ceralive
+  install -m 0755 "${src}/cert-rotation.sh" /usr/local/bin/cert-rotation.sh
+  install -m 0644 "${src}/cert-rotation.conf" /etc/ceralive/cert-rotation.conf
+  install -m 0644 "${src}/cert-rotation.service" /etc/systemd/system/cert-rotation.service
+  install -m 0644 "${src}/cert-rotation-expiry.service" /etc/systemd/system/cert-rotation-expiry.service
+  install -m 0644 "${src}/cert-rotation-expiry.timer" /etc/systemd/system/cert-rotation-expiry.timer
+  enable_service cert-rotation.service
+  enable_service cert-rotation-expiry.timer
+}
+
 configure_services() {
   configure_network_services
 
@@ -185,6 +204,7 @@ configure_services() {
 
   install_hostname_service
   install_healthcheck_service
+  install_cert_rotation
 
   log_success "services configured"
 }

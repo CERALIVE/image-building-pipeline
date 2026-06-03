@@ -1,0 +1,25 @@
+[Unit]
+Description=CeraLive cert rotation — verify + activate channel-delivered intermediate/leaf certs
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+# Triggered POST-RAUC-INSTALL: a cert-rotation .raucb's install hook stages the new
+# certs in /data/ceralive/certs/incoming and then `systemctl start` this unit. It is
+# also a safe boot-time catch-up — if a rotation was staged but not yet activated
+# (e.g. power loss mid-install), the next boot completes it.
+After=ceralive-migrate-data.service local-fs.target
+Requires=ceralive-migrate-data.service
+RequiresMountsFor=/data
+# No candidate staged => nothing to do. The install hook creates this dir before
+# starting the unit, so a manual `systemctl start` with an empty store is a clean
+# no-op via the script's own guard too.
+ConditionPathExists=/data/ceralive/certs/incoming
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cert-rotation.sh install
+RemainAfterExit=no
+# A failed verification deliberately leaves the CURRENT certs in service (the script
+# refuses to activate a chain that does not verify to the immutable root). It is not
+# retried automatically — the operator inspects the journal and re-pushes a bundle.
+
+[Install]
+WantedBy=multi-user.target

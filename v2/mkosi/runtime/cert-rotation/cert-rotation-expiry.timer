@@ -1,0 +1,16 @@
+[Unit]
+Description=CeraLive weekly cert pre-expiry check
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+
+[Timer]
+# Weekly, with a randomized delay so a whole fleet does not log at the same instant.
+# Persistent: if the device was off when due, run on next boot. This is the device
+# half of pre-expiry monitoring — it surfaces an expiring intermediate/leaf long
+# before it can break updating (threshold default 90 days; policy rotates well
+# inside that window).
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
