@@ -1,0 +1,134 @@
+# CeraLive v2 image pipeline — CI gate.
+#
+# Parallel to (NOT a replacement for) build-images.yml, which still drives the
+# legacy Armbian build until v2 reaches parity (tasks 16/17). This workflow gates
+# the v2/ manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
+# build-plan. No secrets are referenced; the build matrix runs DRY_RUN=1 so it
+# performs no real download/build (no R2 creds, no GPG, no privileged container,
+# no board required).
+
+name: v2 Pipeline CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck (v2 bash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck --version
+
+      - name: shellcheck -x all v2 bash
+        run: |
+          mapfile -t files < <(git ls-files 'v2/**/*.sh' 'v2/build' 'v2/dev-push' 'v2/run-tests')
+          printf 'checking %d file(s)\n' "${#files[@]}"
+          # v2/.shellcheckrc (external-sources=true, source-path=SCRIPTDIR) is
+          # auto-discovered from each script's parent dirs, so `source lib/*.sh`
+          # resolves without per-call -x flags. --severity=warning: SC2015/SC1091
+          # are info-level project baseline (see learnings, tasks 9/26/29).
+          shellcheck --severity=warning -x "${files[@]}"
+
+  schema-validate:
+    name: JSON-Schema validate manifests
+    runs-on: ubuntu-latest
+    needs: shellcheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install validators
+        run: pip install --quiet jsonschema PyYAML
+
+      - name: Validate every manifest against its schema
+        run: python3 v2/ci/validate-manifests.py
+
+  bats:
+    name: bats manifest unit suite
+    runs-on: ubuntu-latest
+    needs: schema-validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install resolver deps (resolve.py uses jsonschema + PyYAML)
+        run: pip install --quiet jsonschema PyYAML
+
+      - name: Install bats-core
+        run: |
+          git clone --depth=1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          sudo /tmp/bats-core/install.sh /usr/local
+          bats --version
+
+      - name: Run v2 manifest unit suite (16 tests)
+        run: ./v2/run-tests
+
+  build-matrix:
+    name: build dry-run (${{ matrix.board }})
+    runs-on: ubuntu-latest
+    needs: bats
+    strategy:
+      fail-fast: false
+      matrix:
+        # rk3588 (arm64) and x86 (amd64) — proves the manifest -> builder
+        # pipeline resolves for both arches without hardware.
+        board: [rock-5b-plus, x86-minipc]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install resolver deps
+        run: pip install --quiet jsonschema PyYAML
+
+      - name: Stub sibling-checkout workspace
+        run: |
+          # fetch-debs asserts ceracoder/ srtla/ CeraUI/ are siblings of the
+          # workspace root (ARCHITECTURE.md §5). Only image-building-pipeline is
+          # checked out here, so point CERALIVE_WORKSPACE at a stub tree. Under
+          # DRY_RUN no .debs are built from source, so empty dirs satisfy the
+          # tripwire without needing the real sibling repos.
+          ws="${RUNNER_TEMP}/ceralive-ws"
+          mkdir -p "${ws}/ceracoder" "${ws}/srtla" "${ws}/CeraUI"
+          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
+
+      - name: Dry-run build (manifest -> builder plan; no network/hardware)
+        env:
+          DRY_RUN: '1'
+          INSTALL_BOOT_BSP: '0'
+        run: |
+          ./v2/build "${{ matrix.board }}" 2>&1 | tee build-dryrun.log
+
+      - name: Assert no real download/build happened (no secret leakage)
+        run: |
+          # run_or_plan logs "exec: <cmd>" for REAL commands and "DRY-RUN would
+          # run: <cmd>" for planned ones; a real mkosi/docker build prints
+          # "Fetched"/progress. Fail loudly if the dry-run leaked any of those.
+          if grep -qiE '^\[INFO \].*exec: (apt-get|aws|gh|docker|mkosi)|^Fetched |docker run ' build-dryrun.log; then
+            echo "::error::DRY_RUN performed a real network/build command"
+            exit 1
+          fi
+          grep -q 'DRY-RUN complete' build-dryrun.log
