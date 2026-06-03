@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ceralive.tv/schema/v2/family.schema.json",
+  "title": "CeraLive Image Family Manifest",
+  "description": "Family-tier manifest. Captures the SoC/architecture-level build attributes shared by every board in a family (e.g. rk3588). A single family file is referenced by many board files via the board manifest's `family` field. Only fields actually consumed by the v2 builder are modelled; descriptive hardware metadata from the legacy configs/devices/*.conf lives in the board `description`/`quirks`, not here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "arch",
+    "armbian_branch",
+    "kernel_packages",
+    "uboot_packages",
+    "dtb_packages",
+    "firmware_packages",
+    "rauc_bootloader_adapter",
+    "partition_template",
+    "serial_console"
+  ],
+  "properties": {
+    "arch": {
+      "description": "Target CPU architecture. Maps to ARCHITECTURE in configs/devices/*.conf and the dpkg/Armbian arch. rk3588 boards are arm64; future Intel N100/N200 + AMD are amd64.",
+      "type": "string",
+      "enum": ["arm64", "amd64"]
+    },
+    "armbian_branch": {
+      "description": "Armbian kernel/U-Boot branch passed as BRANCH= to compile.sh (userpatches/config-*.conf BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in legacy configs/devices/*.conf is dead metadata; the effective branch is this field.",
+      "type": "string",
+      "enum": ["vendor", "current", "edge"]
+    },
+    "kernel_packages": {
+      "description": "Armbian kernel image package(s) for the family (e.g. linux-image-vendor-rockchip64). Maps to the linux-image-* entries of BOARD_PACKAGES.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "uboot_packages": {
+      "description": "Bootloader / U-Boot blob package(s) (e.g. rkbin-rk3588). Maps to BOOTLOADER/rkbin entries. May be empty for families whose U-Boot is supplied raw outside apt.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "dtb_packages": {
+      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "firmware_packages": {
+      "description": "SoC/GPU/Wi-Fi firmware package(s) (e.g. armbian-firmware, mali-g610-firmware, firmware-realtek). Maps to firmware entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES and FIRMWARE_FILES blobs.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "rauc_bootloader_adapter": {
+      "description": "RAUC bootloader backend for A/B slot selection. rk3588 defaults to 'custom' because vendor U-Boot 2017.09 lacks fw_setenv (decision D3). 'uboot' = standard fw_setenv adapter; 'custom' = raw GPT bootcount approach; 'efi'/'grub' = x86 targets.",
+      "type": "string",
+      "enum": ["uboot", "custom", "efi", "grub"],
+      "default": "custom"
+    },
+    "hw_accel_gstreamer_plugins": {
+      "description": "Hardware-accelerated GStreamer encode/decode plugin packages for the family (e.g. rk3588 MPP plugins). Optional: software-only families (generic x264) omit this. Maps to VIDEO_ENCODER/VIDEO_DECODER hardware path.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "partition_template": {
+      "description": "Name of the frozen partition layout template defined in docs/partition-contract.md (e.g. 'rk3588-ab'). Reference by NAME only — partition sizes, slot roles and the single-slot threshold live in the FROZEN contract document, never in this schema.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "serial_console": {
+      "description": "Armbian SERIALCON value as '<tty>:<baud>' (e.g. 'ttyS2:1500000'). Maps to userpatches/config-*.conf SERIALCON and the CONSOLE= line.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]+:[0-9]+$"
+    },
+    "gstreamer_runtime_packages": {
+      "description": "Runtime GStreamer multimedia support packages for the family (e.g. rockchip-multimedia-config). Optional. Maps to the multimedia-config entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ceralive.tv/schema/v2/board.schema.json",
+  "title": "CeraLive Image Board Manifest",
+  "description": "Board-tier manifest. Captures the per-board attributes that vary within a family (board id, DTB, overlays, quirks). A board inherits every family-tier attribute from the family it references. Adding a new board = author one of these files + (if needed) a family file; no script edits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "family",
+    "board_id",
+    "dtb_name",
+    "description"
+  ],
+  "properties": {
+    "family": {
+      "description": "Filename stem of the family manifest this board inherits (e.g. 'rk3588' -> families/rk3588.yaml). REQUIRED — the board pulls arch, branch, kernel/uboot/dtb/firmware packages, bootloader adapter and partition template from the referenced family.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "board_id": {
+      "description": "Armbian BOARD= value passed to compile.sh (userpatches/config-*.conf BOARD=). e.g. 'rock-5b-plus', 'orangepi5-plus'. Also covers ARMBIAN_BOARD/DEVICE_CODE.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "dtb_name": {
+      "description": "Device-tree blob filename for this board (e.g. 'rk3588-rock-5b-plus.dtb'). Maps to DTB_FILE in configs/devices/*.conf.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+\\.dtb$"
+    },
+    "armbian_overlays": {
+      "description": "Board-specific device-tree overlays applied at build time (e.g. rk3588-hdmi-input, rk3588-m2-modem-42mm). Optional. Maps to DT_OVERLAYS in configs/devices/*.conf.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "quirks": {
+      "description": "Free-form board-specific flags for known hardware workarounds (e.g. M2_MODEM_SIM_WORKAROUND, hdmi_input_emi_shield). Optional. Values restricted to scalars so the builder can shell-export them. Absorbs the HARDWARE_WORKAROUNDS / M2_MODEM_* / EMI_RESISTANCE descriptive flags from configs/devices/*.conf.",
+      "type": "object",
+      "additionalProperties": { "type": ["string", "boolean", "number"] }
+    },
+    "layout_overrides": {
+      "description": "Per-board overrides of the family partition_template. Optional and free-form. Sizes/roles remain bounded by the FROZEN partition contract; this exists only for narrow board-specific deviations (rare).",
+      "type": "object"
+    },
+    "single_slot_fallback": {
+      "description": "When true, this board provisions the single-slot fallback layout (no A/B redundancy) for storage below the 16 GB threshold (partition-contract §4/§5). Optional; provisioning normally auto-detects by medium size, so this is an explicit force.",
+      "type": "boolean",
+      "default": false
+    },
+    "app_backend": {
+      "description": "How the first-party app components ship on this board. 'sysext' = ceracoder/srtla binaries via systemd-sysext into /usr/bin; 'appfs' = CeraUI-style heavier payload via the base/app image. Default 'sysext' (decision: sysext boundary).",
+      "type": "string",
+      "enum": ["sysext", "appfs"],
+      "default": "sysext"
+    },
+    "description": {
+      "description": "Human-readable board name/notes (e.g. DEVICE_NAME 'Radxa Rock 5B+'). REQUIRED — single home for the descriptive INSTALLATION_NOTES/hardware-spec metadata that is not consumed by the builder.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
