@@ -1,0 +1,7 @@
+# Fixture: minimal VALID board manifest.
+# Carries exactly the board.schema.json `required` set with legal values.
+# Used by manifest.bats to assert a well-formed board validates (exit 0).
+family: rk3588
+board_id: test-board
+dtb_name: rk3588-test-board.dtb
+description: Minimal valid board fixture for the manifest unit suite.

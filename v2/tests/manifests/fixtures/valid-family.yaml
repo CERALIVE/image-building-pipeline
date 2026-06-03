@@ -1,0 +1,16 @@
+# Fixture: minimal VALID family manifest.
+# Carries exactly the family.schema.json `required` set with legal values.
+# Used by manifest.bats to assert a well-formed family validates (exit 0).
+arch: arm64
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test-rockchip64
+uboot_packages:
+  - rkbin-test
+dtb_packages:
+  - linux-dtb-test-rockchip64
+firmware_packages:
+  - armbian-firmware
+rauc_bootloader_adapter: custom
+partition_template: test-ab
+serial_console: ttyS2:1500000

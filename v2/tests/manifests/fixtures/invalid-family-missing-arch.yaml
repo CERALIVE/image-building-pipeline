@@ -1,0 +1,15 @@
+# Fixture: INVALID family manifest — required `arch` field omitted.
+# Identical to valid-family.yaml minus `arch:`. manifest.bats asserts this
+# fails family-schema validation with the field name "arch" in the message.
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test-rockchip64
+uboot_packages:
+  - rkbin-test
+dtb_packages:
+  - linux-dtb-test-rockchip64
+firmware_packages:
+  - armbian-firmware
+rauc_bootloader_adapter: custom
+partition_template: test-ab
+serial_console: ttyS2:1500000
