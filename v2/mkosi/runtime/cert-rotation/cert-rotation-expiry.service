@@ -1,0 +1,13 @@
+[Unit]
+Description=CeraLive cert pre-expiry monitor — WARN to journald when intermediate/leaf nears expiry
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+# Driven by cert-rotation-expiry.timer (weekly). Monitoring only — it never gates
+# anything and always exits 0; the WARNING in the journal is the signal a fleet
+# operator collects (e.g. journald -> hawkBit attribute / Management API, see
+# docs/cert-rotation-policy.md "Fleet expiry monitoring").
+After=ceralive-migrate-data.service
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cert-rotation.sh check-expiry

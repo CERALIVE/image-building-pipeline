@@ -581,6 +581,14 @@ mkdir -p "$DATA/ceralive/rauc-downloads" "$DATA/ceralive/hawkbit-updater"
 chmod 0755 "$DATA/ceralive" "$DATA/log" "$DATA/srtla" "$DATA/ceralive/rauc-downloads"
 chmod 0700 "$DATA/nm" "$DATA/nm/system-connections" "$DATA/ceralive/hawkbit-updater"
 
+# Cert-rotation store (task 42): persistent intermediate/leaf certs + the staging
+# dir a rotation bundle's install hook drops candidates into. The .rauc-certs-slot
+# placeholder is the [slot.certs.0] device referenced by /etc/rauc/system.conf so a
+# cert-rotation .raucb can target it without a reflash. On /data → survives A/B.
+mkdir -p "$DATA/ceralive/certs/incoming"
+chmod 0755 "$DATA/ceralive/certs" "$DATA/ceralive/certs/incoming"
+[ -e "$DATA/ceralive/certs/.rauc-certs-slot" ] || : >"$DATA/ceralive/certs/.rauc-certs-slot"
+
 # ONE-TIME legacy config migration: /etc/ceralive/config.json -> /data, then drop
 # the legacy copy so /data is the single source of truth.
 if [ -f /etc/ceralive/config.json ] && [ ! -e "$DATA/ceralive/config.json" ]; then
@@ -807,6 +815,10 @@ bootname=A
 device=/dev/disk/by-partlabel/rootfs_b
 type=ext4
 bootname=B
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
 EOF
     chmod 0644 "${sysconf}"
   fi
@@ -1251,6 +1263,256 @@ HBMCPATH
 }
 
 # ---------------------------------------------------------------------------
+# 16. Cert rotation (task 42): baked-in, non-retrofittable field rotation of the
+# intermediate/leaf signing certs. The ROOT CA stays IMMUTABLE (reflash-only). A
+# signed cert-rotation .raucb (built by lib/build-cert-rotation-bundle.sh, signed
+# with the CURRENT leaf) delivers a new intermediate+leaf; its install hook stages
+# them and cert-rotation.service re-verifies leaf -> intermediate -> the immutable
+# keyring root before activating them on /data (survives A/B). A weekly timer warns
+# to journald when an activated cert nears expiry. Must ship in the FIRST image so
+# every device can accept a rotation from first flash.
+#
+# Inline twin of v2/mkosi/runtime/cert-rotation/{cert-rotation.sh,cert-rotation.conf,
+# cert-rotation.service,cert-rotation-expiry.service,cert-rotation-expiry.timer}
+# (installed by customize/services.sh on the canonical track) — keep in sync.
+# ---------------------------------------------------------------------------
+setup_cert_rotation() {
+  log "installing cert rotation (intermediate/leaf through-channel; root immutable)"
+  mkdir -p /usr/local/bin /etc/ceralive
+
+  cat >/etc/ceralive/cert-rotation.conf <<'CRCONF'
+# CeraLive cert-rotation configuration (task 42). Inline twin of
+# v2/mkosi/runtime/cert-rotation/cert-rotation.conf — keep in sync.
+# ROOT_CA is the IMMUTABLE device keyring root (reflash-only); cert-rotation only
+# VERIFIES against it and never writes it. Everything else is on /data (survives
+# A/B OS updates). Intermediate/leaf are the rotatable certs.
+CERT_DIR=/data/ceralive/certs
+CERT_INCOMING_DIR=/data/ceralive/certs/incoming
+ROOT_CA=/etc/rauc/ceralive-keyring.pem
+INTERMEDIATE_CERT=/data/ceralive/certs/intermediate.pem
+LEAF_CERT=/data/ceralive/certs/leaf.pem
+EXPIRY_WARN_DAYS=90
+CRCONF
+  chmod 0644 /etc/ceralive/cert-rotation.conf
+
+  cat >/usr/local/bin/cert-rotation.sh <<'CREOF'
+#!/bin/bash
+# cert-rotation.sh — verify + activate channel-delivered intermediate/leaf certs
+# against the IMMUTABLE root CA (task 42). Inline twin of
+# v2/mkosi/runtime/cert-rotation/cert-rotation.sh — keep in sync.
+set -euo pipefail
+
+PROG="cert-rotation"
+
+CONF="${CERALIVE_CERT_ROTATION_CONF:-/etc/ceralive/cert-rotation.conf}"
+
+CERT_DIR="/data/ceralive/certs"
+CERT_INCOMING_DIR="/data/ceralive/certs/incoming"
+ROOT_CA="/etc/rauc/ceralive-keyring.pem"
+INTERMEDIATE_CERT="/data/ceralive/certs/intermediate.pem"
+LEAF_CERT="/data/ceralive/certs/leaf.pem"
+EXPIRY_WARN_DAYS="90"
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+
+ts()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log()  { printf '%s %s: %s\n' "$(ts)" "${PROG}" "$*"; }
+warn() { printf '%s %s: WARNING: %s\n' "$(ts)" "${PROG}" "$*" >&2; }
+fail() { printf '%s %s: FAIL: %s\n' "$(ts)" "${PROG}" "$*" >&2; }
+
+load_conf() {
+  if [ -r "${CONF}" ]; then
+    log "reading config from ${CONF}"
+    # shellcheck disable=SC1090
+    . "${CONF}"
+  else
+    log "no readable ${CONF} — using built-in defaults"
+  fi
+}
+
+verify_chain() {
+  local intermediate="$1" leaf="$2"
+  if [ ! -s "${ROOT_CA}" ]; then
+    fail "immutable root CA ${ROOT_CA} missing or empty — cannot verify a rotation"
+    return 1
+  fi
+  local out rc=0
+  out="$("${OPENSSL_BIN}" verify -purpose any -CAfile "${ROOT_CA}" \
+    -untrusted "${intermediate}" "${leaf}" 2>&1)" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    fail "candidate chain does NOT verify to the immutable root ${ROOT_CA}: ${out}"
+    return 1
+  fi
+  log "OK: candidate chain verifies leaf -> intermediate -> ${ROOT_CA}"
+  return 0
+}
+
+assert_not_expired() {
+  local cert="$1" label="$2"
+  if ! "${OPENSSL_BIN}" x509 -checkend 0 -noout -in "${cert}" >/dev/null 2>&1; then
+    fail "candidate ${label} (${cert}) is ALREADY EXPIRED — refusing to activate"
+    return 1
+  fi
+  return 0
+}
+
+atomic_install() {
+  local src="$1" dst="$2"
+  local tmp="${dst}.tmp.$$"
+  install -m 0644 "${src}" "${tmp}"
+  if [ -e "${dst}" ]; then
+    cp -a "${dst}" "${dst}.prev"
+  fi
+  mv -f "${tmp}" "${dst}"
+}
+
+do_install() {
+  mkdir -p "${CERT_DIR}"
+  local in_int="${CERT_INCOMING_DIR}/intermediate.pem"
+  local in_leaf="${CERT_INCOMING_DIR}/leaf.pem"
+
+  if [ ! -e "${in_int}" ] && [ ! -e "${in_leaf}" ]; then
+    log "no candidate certs in ${CERT_INCOMING_DIR} — nothing to rotate (no-op)"
+    return 0
+  fi
+  if [ ! -s "${in_int}" ] || [ ! -s "${in_leaf}" ]; then
+    fail "incomplete rotation in ${CERT_INCOMING_DIR} — need BOTH intermediate.pem and leaf.pem; leaving current certs untouched"
+    return 1
+  fi
+
+  log "candidate rotation present — verifying against the immutable root before activating"
+  verify_chain "${in_int}" "${in_leaf}" || return 1
+  assert_not_expired "${in_int}" "intermediate" || return 1
+  assert_not_expired "${in_leaf}" "leaf" || return 1
+
+  atomic_install "${in_int}" "${INTERMEDIATE_CERT}"
+  atomic_install "${in_leaf}" "${LEAF_CERT}"
+  log "activated rotated certs: ${INTERMEDIATE_CERT}, ${LEAF_CERT} (previous kept as *.prev)"
+
+  rm -f "${in_int}" "${in_leaf}"
+  rmdir "${CERT_INCOMING_DIR}" 2>/dev/null || true
+
+  log "cert rotation complete — new intermediate/leaf in service, root CA unchanged"
+  return 0
+}
+
+days_until_expiry() {
+  local cert="$1" end end_epoch now_epoch
+  end="$("${OPENSSL_BIN}" x509 -enddate -noout -in "${cert}" 2>/dev/null | cut -d= -f2)"
+  [ -n "${end}" ] || return 1
+  end_epoch="$(date -u -d "${end}" +%s 2>/dev/null)" || return 1
+  now_epoch="$(date -u +%s)"
+  printf '%s\n' "$(( (end_epoch - now_epoch) / 86400 ))"
+}
+
+report_one() {
+  local cert="$1" label="$2" days
+  if [ ! -s "${cert}" ]; then
+    log "${label}: ${cert} not present — device still on the baked-in chain.pem (no rotation yet)"
+    return 0
+  fi
+  if ! days="$(days_until_expiry "${cert}")"; then
+    warn "${label}: could not read notAfter from ${cert}"
+    return 0
+  fi
+  if [ "${days}" -lt 0 ]; then
+    warn "${label}: ${cert} has EXPIRED ($(( -days )) days ago) — push a rotation bundle NOW"
+  elif [ "${days}" -lt "${EXPIRY_WARN_DAYS}" ]; then
+    warn "${label}: ${cert} expires in ${days} days (< ${EXPIRY_WARN_DAYS}) — rotate before expiry"
+  else
+    log "OK: ${label} (${cert}) expires in ${days} days"
+  fi
+  return 0
+}
+
+do_check_expiry() {
+  log "pre-expiry check (warn threshold ${EXPIRY_WARN_DAYS} days)"
+  report_one "${INTERMEDIATE_CERT}" "intermediate"
+  report_one "${LEAF_CERT}" "leaf"
+  return 0
+}
+
+do_status() {
+  log "cert store: ${CERT_DIR}"
+  log "immutable root CA (keyring): ${ROOT_CA}"
+  report_one "${INTERMEDIATE_CERT}" "intermediate"
+  report_one "${LEAF_CERT}" "leaf"
+  return 0
+}
+
+usage() {
+  cat >&2 <<USAGE
+Usage: cert-rotation.sh <install|check-expiry|status>
+USAGE
+}
+
+main() {
+  load_conf
+  case "${1:-install}" in
+    install)      do_install ;;
+    check-expiry) do_check_expiry ;;
+    status)       do_status ;;
+    -h | --help)  usage; exit 0 ;;
+    *)            usage; exit 2 ;;
+  esac
+}
+
+main "$@"
+CREOF
+  chmod 0755 /usr/local/bin/cert-rotation.sh
+
+  cat >/etc/systemd/system/cert-rotation.service <<'CRSVC'
+[Unit]
+Description=CeraLive cert rotation — verify + activate channel-delivered intermediate/leaf certs
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+After=ceralive-migrate-data.service local-fs.target
+Requires=ceralive-migrate-data.service
+RequiresMountsFor=/data
+ConditionPathExists=/data/ceralive/certs/incoming
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cert-rotation.sh install
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+CRSVC
+
+  cat >/etc/systemd/system/cert-rotation-expiry.service <<'CRESVC'
+[Unit]
+Description=CeraLive cert pre-expiry monitor — WARN to journald when intermediate/leaf nears expiry
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+After=ceralive-migrate-data.service
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cert-rotation.sh check-expiry
+CRESVC
+
+  cat >/etc/systemd/system/cert-rotation-expiry.timer <<'CRETIMER'
+[Unit]
+Description=CeraLive weekly cert pre-expiry check
+Documentation=file:///usr/share/doc/ceralive/cert-rotation-policy.md
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+CRETIMER
+
+  # cert-rotation.service is triggered post-install by the bundle's hook (it is also
+  # WantedBy multi-user.target as a boot-time catch-up). The expiry timer is enabled
+  # so pre-expiry monitoring runs weekly from first flash.
+  enable_service cert-rotation.service
+  enable_service cert-rotation-expiry.timer
+}
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -1270,6 +1532,7 @@ main() {
   setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
+  setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
