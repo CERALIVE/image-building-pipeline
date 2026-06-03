@@ -533,6 +533,199 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 12. Persist user-mutable state on the shared /data partition (task 30).
+#
+# A RAUC A/B slot swap overwrites the active rootfs, so nothing written into a
+# slot survives an OS update. The frozen partition contract (docs/partition-
+# contract.md §6) makes /data (PARTLABEL=data) the single source of truth for
+# all mutable state. This binds the live state dirs onto /data, migrates the
+# legacy /etc/ceralive/config.json once, and ships the RAUC update entrypoint.
+#
+# Canonical implementation lives in customize/data-persistence.sh; this inline
+# copy is the v1-parity executor (same dual-track pattern as configure_services
+# / create_ceralive_structure above). Keep the two in sync.
+# ---------------------------------------------------------------------------
+setup_data_persistence() {
+  local data_root="/data" data_partlabel="data"
+  local workdir="/opt/ceralive" nm_conn="/etc/NetworkManager/system-connections"
+
+  log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"
+
+  if ! grep -qE "^[^#]*[[:space:]]${data_root}[[:space:]]" /etc/fstab 2>/dev/null; then
+    mkdir -p "${data_root}"
+    printf 'PARTLABEL=%s\t%s\text4\tdefaults,noatime,nofail,x-systemd.growfs\t0\t2\n' \
+      "${data_partlabel}" "${data_root}" >>/etc/fstab
+  fi
+
+  mkdir -p /usr/local/sbin
+  cat >/usr/local/sbin/ceralive-migrate-data <<EOF
+#!/bin/bash
+# CeraLive first-boot data migration + /data skeleton. Idempotent; re-runs and
+# A/B slot swaps are no-ops once /data is populated.
+set -euo pipefail
+DATA="${data_root}"
+WORKDIR="${workdir}"
+NM_CONN="${nm_conn}"
+EOF
+  cat >>/usr/local/sbin/ceralive-migrate-data <<'EOF'
+
+log() { logger -t ceralive-migrate -- "$*" 2>/dev/null || true; echo "ceralive-migrate: $*"; }
+
+[ -d "$DATA" ] || { log "ERROR: $DATA missing (data partition not mounted?)"; exit 1; }
+
+mkdir -p "$DATA/ceralive" "$DATA/log" "$DATA/nm/system-connections" "$DATA/srtla"
+chmod 0755 "$DATA/ceralive" "$DATA/log" "$DATA/srtla"
+chmod 0700 "$DATA/nm" "$DATA/nm/system-connections"
+
+# ONE-TIME legacy config migration: /etc/ceralive/config.json -> /data, then drop
+# the legacy copy so /data is the single source of truth.
+if [ -f /etc/ceralive/config.json ] && [ ! -e "$DATA/ceralive/config.json" ]; then
+    log "migrating legacy /etc/ceralive/config.json -> $DATA/ceralive/config.json"
+    cp -a /etc/ceralive/config.json "$DATA/ceralive/config.json"
+    rm -f /etc/ceralive/config.json
+fi
+
+# Seed the CeraUI working dir + /var/log + NM connections before the binds shadow
+# them (first boot only — guarded by mountpoint checks).
+if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
+    for f in "$WORKDIR"/*.json "$WORKDIR/revision"; do
+        [ -e "$f" ] || continue
+        base="$(basename "$f")"
+        [ -e "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
+    done
+fi
+if ! mountpoint -q /var/log; then
+    cp -a /var/log/. "$DATA/log/" 2>/dev/null || true
+fi
+if [ -d "$NM_CONN" ] && ! mountpoint -q "$NM_CONN"; then
+    cp -a "$NM_CONN"/. "$DATA/nm/system-connections/" 2>/dev/null || true
+fi
+
+# Persist machine-id across A/B slots so host identity (and hostname) is stable.
+if [ -s /etc/machine-id ] && [ ! -s "$DATA/ceralive/machine-id" ]; then
+    cp -a /etc/machine-id "$DATA/ceralive/machine-id"
+fi
+if [ -s "$DATA/ceralive/machine-id" ] && ! mountpoint -q /etc/machine-id; then
+    mount --bind "$DATA/ceralive/machine-id" /etc/machine-id 2>/dev/null || true
+fi
+
+# Relocate first-boot hostname index/lock onto /data (contract §6).
+for n in host_index hostname.lock; do
+    if [ -e "/etc/ceralive/$n" ] && [ ! -L "/etc/ceralive/$n" ]; then
+        [ -e "$DATA/ceralive/$n" ] || cp -a "/etc/ceralive/$n" "$DATA/ceralive/$n"
+        rm -f "/etc/ceralive/$n"
+    fi
+    [ -L "/etc/ceralive/$n" ] || ln -s "$DATA/ceralive/$n" "/etc/ceralive/$n" 2>/dev/null || true
+done
+
+# RAUC bundle URL lives on /data (never hardcoded). Seed a disabled default.
+if [ ! -e "$DATA/ceralive/update.conf" ]; then
+    log "seeding $DATA/ceralive/update.conf (OTA disabled until BUNDLE_URL is set)"
+    cat >"$DATA/ceralive/update.conf" <<'CONF'
+# CeraLive OS update (RAUC) configuration — persistent /data, editable on device.
+# Consumed by /usr/local/bin/ceralive-update.
+# BUNDLE_URL : full URL / apt.ceralive.tv path of the .raucb. Empty = OTA disabled.
+# CHANNEL    : release channel hint (informational; URL is authoritative).
+BUNDLE_URL=
+CHANNEL=stable
+CONF
+    chmod 0644 "$DATA/ceralive/update.conf"
+fi
+
+log "data persistence ready (config/logs/wifi/srtla on $DATA)"
+exit 0
+EOF
+  chmod +x /usr/local/sbin/ceralive-migrate-data
+
+  cat >/etc/systemd/system/ceralive-migrate-data.service <<EOF
+[Unit]
+Description=CeraLive one-time data migration + /data skeleton
+RequiresMountsFor=${data_root}
+After=local-fs.target
+Before=ceralive-hostname.service ceralive.service
+ConditionPathIsMountPoint=${data_root}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-migrate-data
+
+[Install]
+WantedBy=local-fs.target
+EOF
+  enable_service ceralive-migrate-data.service
+
+  local spec src dst unit
+  for spec in "${data_root}/ceralive:${workdir}" \
+              "${data_root}/log:/var/log" \
+              "${data_root}/nm/system-connections:${nm_conn}"; do
+    src="${spec%%:*}"
+    dst="${spec#*:}"
+    unit="$(systemd-escape -p --suffix=mount "${dst}")"
+    cat >"/etc/systemd/system/${unit}" <<EOF
+[Unit]
+Description=CeraLive persistent state bind: ${dst} backed by ${src}
+Requires=ceralive-migrate-data.service
+After=ceralive-migrate-data.service
+RequiresMountsFor=${data_root}
+Before=ceralive.service
+
+[Mount]
+What=${src}
+Where=${dst}
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target
+EOF
+    enable_service "${unit}"
+  done
+
+  mkdir -p /etc/systemd/system/ceralive.service.d
+  cat >/etc/systemd/system/ceralive.service.d/10-data-persistence.conf <<EOF
+[Unit]
+RequiresMountsFor=${workdir} /var/log
+After=ceralive-migrate-data.service
+EOF
+
+  mkdir -p /usr/local/bin
+  cat >/usr/local/bin/ceralive-update <<EOF
+#!/bin/bash
+# CeraLive OS update entrypoint — invoked by CeraUI system.startUpdate() (target
+# wiring; see .omo/evidence/task-30-persist.md). Installs a RAUC bundle whose URL
+# is read from persistent /data; the post-reboot mark-good is the task-29 gate.
+set -euo pipefail
+CONF="${data_root}/ceralive/update.conf"
+DATA="${data_root}"
+EOF
+  cat >>/usr/local/bin/ceralive-update <<'EOF'
+
+die() { echo "ceralive-update: $*" >&2; exit 1; }
+
+command -v rauc >/dev/null 2>&1 || die "rauc is not installed"
+mountpoint -q "$DATA" || die "$DATA is not mounted; refusing to update"
+[ -f "$CONF" ] || die "no $CONF; OTA is not provisioned on this device"
+
+# shellcheck disable=SC1090
+. "$CONF"
+[ -n "${BUNDLE_URL:-}" ] || die "BUNDLE_URL is empty in $CONF; OTA disabled"
+
+for svc in ceracoder.service srtla.service; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        die "stream active ($svc); refusing to update"
+    fi
+done
+
+echo "ceralive-update: installing RAUC bundle from $CONF (BUNDLE_URL=$BUNDLE_URL)"
+rauc install "$BUNDLE_URL"
+echo "ceralive-update: installed to inactive slot; reboot to activate (task-29 mark-good confirms or rolls back)."
+exit 0
+EOF
+  chmod +x /usr/local/bin/ceralive-update
+}
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -548,6 +741,7 @@ main() {
   configure_services
   setup_hostname_service
   create_ceralive_structure
+  setup_data_persistence       # task 30: relocate mutable state onto /data
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"

@@ -38,9 +38,11 @@ source "${CERALIVE_COMMON_SH}"
 # Layer -> ordered module list. Order is load-bearing:
 #   apt-ceralive-repo first (sources/keyring), then hardware/udev, then the
 #   network routing + tuning, then services (which enable what the above set up),
-#   then the directory structure (chowns to the ceralive user from the base).
+#   then the directory structure (chowns to the ceralive user from the base),
+#   then data-persistence LAST — it binds /opt/ceralive + /etc/NetworkManager +
+#   /var/log onto /data, so it must run after structure has created those dirs.
 readonly BASE_MODULES="users"
-readonly RUNTIME_MODULES="apt-ceralive-repo udev networking-srtla sysctl-tuning services structure"
+readonly RUNTIME_MODULES="apt-ceralive-repo udev networking-srtla sysctl-tuning services structure data-persistence"
 
 resolve_modules() {
   case "${1:-runtime}" in
