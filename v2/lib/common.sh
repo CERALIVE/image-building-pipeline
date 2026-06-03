@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#
+# common.sh — strict shared bash library for the CeraLive image-building v2 pipeline.
+#
+# This is the single foundation every v2 script sources. It establishes:
+#   - strict mode (set -euo pipefail)
+#   - a loud ERR trap that reports the failing file:line and command
+#   - one canonical set of structured loggers (log_info/log_warn/log_error/log_success)
+#   - die() for fatal exits and require_cmd() for dependency preconditions
+#
+# DESIGN RULE: there is intentionally NO `|| true` / best-effort error swallowing
+# anywhere in this file. Silent apt/dpkg failures were the root cause of v1
+# unreliability (see customize-image.sh:170-174,231-232). v2 fails loudly, always.
+#
+# Usage:
+#   source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+#
+# shellcheck shell=bash
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Error trap — fail loudly with file:line context.
+# ---------------------------------------------------------------------------
+err_trap() {
+  # Capture the exit status of the command that tripped the trap first.
+  local exit_code=$?
+  log_error "ERROR at ${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}: ${BASH_COMMAND} (exit ${exit_code})"
+  exit 1
+}
+trap err_trap ERR
+
+# ---------------------------------------------------------------------------
+# Structured logging — all to stderr, timestamp-prefixed, single canonical impl.
+# ---------------------------------------------------------------------------
+_log() {
+  local level="$1"
+  shift
+  printf '[%s] %s %s\n' "${level}" "$(date '+%H:%M:%S')" "$*" >&2
+}
+
+log_info()    { _log 'INFO ' "$@"; }
+log_warn()    { _log 'WARN ' "$@"; }
+log_error()   { _log 'ERROR' "$@"; }
+log_success() { _log 'OK   ' "$@"; }
+
+# ---------------------------------------------------------------------------
+# die — log a fatal message and exit non-zero.
+# ---------------------------------------------------------------------------
+die() {
+  log_error "$*"
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# require_cmd — assert an external command exists, or die with guidance.
+#   require_cmd mkosi || die "..."   # explicit form
+#   require_cmd mkosi                # also dies on its own with a default msg
+# ---------------------------------------------------------------------------
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "${cmd}" >/dev/null 2>&1; then
+    die "command '${cmd}' not found, install it first"
+  fi
+}
