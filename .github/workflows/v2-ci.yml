@@ -132,3 +132,54 @@ jobs:
             exit 1
           fi
           grep -q 'DRY-RUN complete' build-dryrun.log
+
+  qemu:
+    # AMD64 matrix leg only: boot the x86 (x86-minipc) disk image headlessly in
+    # qemu and assert it reaches multi-user.target + ceralive.service health +
+    # critical packages (v2/tests/qemu-x86.sh, task 36). qemu in CI is fragile and
+    # the DRY_RUN build-matrix above ships no bootable image, so this leg is
+    # continue-on-error and the harness GRACEFULLY SKIPS when qemu/OVMF/the image
+    # is absent. The SELFTEST step always runs the harness's own negative test
+    # (a variant missing a critical package MUST fail the gate) so this job proves
+    # the gate logic on every push even before real image artifacts are wired up.
+    #
+    # NOT a substitute for the RK3588 real-hardware smoke (realhw-smoke.sh / task
+    # 38) — this only validates the x86 amd64 OS+service layer boots.
+    name: qemu x86 boot/service/package (amd64)
+    runs-on: ubuntu-latest
+    needs: build-matrix
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install qemu-system-x86 + OVMF (EFI/GRUB x86 image boots via UEFI)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          qemu-system-x86_64 --version | head -1
+
+      - name: SELFTEST — assertion engine + negative gate (no qemu/image needed)
+        env:
+          CERALIVE_QEMU_SELFTEST: '1'
+        run: ./v2/tests/qemu-x86.sh
+
+      - name: Boot the x86 image in qemu (graceful skip if no artifact under DRY_RUN)
+        env:
+          BOARD: x86-minipc
+          # The Stage-4 disk artifact lands here once the x86 build is wired up
+          # (orchestrate.sh x86 path). Under the DRY_RUN matrix none exists yet, so
+          # the harness auto-discovers nothing and SKIPS (exit 0). Point IMAGE_PATH
+          # explicitly when a real .img artifact is downloaded into this dir.
+          BOOT_TIMEOUT: '120'
+        run: |
+          # Use the build artifact if a downstream step downloaded one; otherwise
+          # the harness skips gracefully (continue-on-error backstops either way).
+          img="$(find v2/images/x86-minipc -maxdepth 1 \
+                   \( -name '*.img' -o -name '*.img.xz' \) 2>/dev/null | sort | tail -1 || true)"
+          if [ -n "${img}" ]; then
+            echo "booting discovered x86 image: ${img}"
+            IMAGE_PATH="${img}" ./v2/tests/qemu-x86.sh
+          else
+            echo "no x86 disk artifact present (DRY_RUN) — running harness in skip mode"
+            ./v2/tests/qemu-x86.sh
+          fi
