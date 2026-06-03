@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# platform/mkosi.postinst.chroot — install the board BSP INSIDE the image.
+#
+# Runs (via mkosi-chroot) inside the platform tree after the base packages are
+# present. Every package NAME comes from the environment (manifest-resolved by
+# lib/resolve.sh, forwarded by Environment= in mkosi.conf) — there is NO board
+# name, package name or device path hardcoded here.
+#
+# Two classes of BSP:
+#   * HW-accel GStreamer (always installed; part of the ceraui-base.conf parity
+#     set: gstreamer1.0-rockchip1, rockchip-multimedia-config).
+#   * Boot BSP (kernel / DTB / U-Boot / firmware) — installed only when
+#     INSTALL_BOOT_BSP=1. It is heavy (emulated) and only matters for a bootable
+#     device image, not for the ceraui-base.conf package-parity gate, so the
+#     orchestrator can scope it independently (INSTALL_BOOT_BSP is a build-scope
+#     flag, NOT error swallowing).
+#
+# The Armbian apt source is written from env, used, then REMOVED so the finished
+# tree's apt config carries only Debian + (later) apt.ceralive.tv — matching v1.
+
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[platform] %s\n' "$*" >&2; }
+
+ARCH="${ARCH:-arm64}"
+
+# The Rockchip RK3588 BSP exists only for arm64. On an amd64 (x86) parity/dev
+# build the platform layer is a clean pass-through — nothing to add.
+if [[ "${ARCH}" != "arm64" ]]; then
+  log "ARCH=${ARCH} is not arm64 — no RK3588 BSP to install; platform layer is a pass-through."
+  exit 0
+fi
+
+ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
+ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
+
+# Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
+read -r -a hw_gst <<<"${HW_ACCEL_GSTREAMER_PLUGINS:-}"
+read -r -a gst_runtime <<<"${GSTREAMER_RUNTIME_PACKAGES:-}"
+
+# Boot BSP (kernel/DTB/U-Boot/firmware) — only when explicitly requested.
+boot_bsp=()
+if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+  read -r -a _k <<<"${KERNEL_PACKAGES:-}"
+  read -r -a _d <<<"${DTB_PACKAGES:-}"
+  read -r -a _u <<<"${UBOOT_PACKAGES:-}"
+  read -r -a _f <<<"${FIRMWARE_PACKAGES:-}"
+  boot_bsp+=("${_k[@]}" "${_d[@]}" "${_u[@]}" "${_f[@]}")
+fi
+
+bsp_pkgs=("${hw_gst[@]}" "${gst_runtime[@]}" "${boot_bsp[@]}")
+if [[ ${#bsp_pkgs[@]} -eq 0 ]]; then
+  log "no BSP packages resolved from manifest — nothing to install."
+  exit 0
+fi
+
+# Write the Armbian apt source from env (deb822). trusted=yes mirrors v1's
+# fetch-debs.sh BSP source — Armbian's pool key is not on the Debian keyring and
+# this source is build-time only (removed below). The minimal base tree has no
+# /etc/apt/sources.list.d yet, so create it first.
+armbian_src="/etc/apt/sources.list.d/armbian.sources"
+mkdir -p /etc/apt/sources.list.d
+log "configuring Armbian pool: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
+cat >"${armbian_src}" <<EOF
+Types: deb
+URIs: ${ARMBIAN_APT_URL}
+Suites: ${ARMBIAN_SUITE}
+Components: main
+Architectures: ${ARCH}
+Trusted: yes
+EOF
+
+apt-get update
+
+log "installing HW-accel GStreamer BSP: ${hw_gst[*]} ${gst_runtime[*]}"
+if [[ ${#hw_gst[@]} -gt 0 || ${#gst_runtime[@]} -gt 0 ]]; then
+  apt-get install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"
+fi
+
+if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
+  log "installing boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
+  apt-get install -y --no-install-recommends "${boot_bsp[@]}"
+else
+  log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
+fi
+
+# Remove the build-time Armbian source so the final tree's apt config is purely
+# Debian + (runtime layer) apt.ceralive.tv — v1 parity.
+rm -f "${armbian_src}"
+rm -rf /var/lib/apt/lists/*armbian*
+log "Armbian pool source removed; BSP layer complete."

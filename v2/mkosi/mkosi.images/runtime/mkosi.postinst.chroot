@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+#
+# runtime/mkosi.postinst.chroot — CeraLive system configuration, run INSIDE the
+# image (via mkosi-chroot) after the runtime package set is installed.
+#
+# This is the parity-critical port of v1's userpatches/customize-image.sh. It is
+# faithful to the original chroot logic with three deliberate changes:
+#   1. user/paths unify on `ceralive` (v1 used `ceraui`) — see redesign wisdom.
+#   2. STRICT: set -euo pipefail, NO `|| true` swallowing (v1's silent apt/dpkg
+#      failures were the root cause of v1 unreliability — common.sh DESIGN RULE).
+#   3. package INSTALL is declarative (mkosi Packages= / platform BSP), so the
+#      v1 in-chroot `apt-get install` of the streaming set is gone; only the
+#      first-party .debs are dpkg-installed here.
+#
+# Everything board-specific arrives via the environment (Environment= in
+# mkosi.conf), resolved from the manifest by lib/resolve.sh. NO board name,
+# package list or device path is hardcoded.
+
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[runtime] %s\n' "$*" >&2; }
+
+RELEASE="${RELEASE:-bookworm}"
+CHANNEL="${CHANNEL:-stable}"
+VARIANT="${VARIANT:-standard}"
+BOARD_ID="${BOARD_ID:-unknown}"
+
+# Where the orchestrator drops the first-party .debs (ExtraTrees). May be absent
+# on an offline/dev build (CI provides them) — handled as an explicit branch.
+FIRST_PARTY_DIR="/opt/ceralive-staging"
+
+# ---------------------------------------------------------------------------
+# Small idempotent helpers (replace v1's `|| true` with real guards).
+# ---------------------------------------------------------------------------
+ensure_group() {
+  local grp="$1"
+  getent group "${grp}" >/dev/null || groupadd --system "${grp}"
+}
+
+enable_service() {
+  # A service we EXPECT must be enableable; a missing unit is a parity failure.
+  local svc="$1"
+  systemctl enable "${svc}"
+}
+
+disable_service() {
+  # Disabling a not-installed unit is a legitimate no-op (the package was never
+  # added to this minimal image) — skip cleanly when the unit file is absent.
+  local svc="$1"
+  if systemctl list-unit-files "${svc}" >/dev/null 2>&1 \
+     && systemctl list-unit-files "${svc}" | grep -q "${svc}"; then
+    systemctl disable "${svc}"
+  else
+    log "service ${svc} not present — nothing to disable"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 1. ceralive user + hardware groups.
+# ---------------------------------------------------------------------------
+create_ceralive_user() {
+  log "creating ceralive user and hardware groups"
+  local grp
+  for grp in sudo audio video dialout plugdev netdev gpio i2c spi; do
+    ensure_group "${grp}"
+  done
+
+  if ! id -u ceralive >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash ceralive
+  fi
+  # No static password in images; account stays locked (first-boot/over-the-air).
+  passwd -l ceralive
+  usermod -aG sudo,audio,video,dialout,plugdev,netdev,gpio,i2c,spi ceralive
+  passwd -l root
+}
+
+# ---------------------------------------------------------------------------
+# 2. Minimal deb822 apt sources (3 Debian sources — matches v1 63-81).
+# ---------------------------------------------------------------------------
+configure_minimal_apt() {
+  log "writing minimal deb822 apt sources"
+  mkdir -p /etc/apt/sources.list.d
+  # Drop any build-time third-party pool that leaked into the tree (none expected).
+  rm -f /etc/apt/sources.list.d/armbian.sources
+
+  cat >/etc/apt/sources.list.d/debian.sources <<EOF
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${RELEASE}
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian-security
+Suites: ${RELEASE}-security
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${RELEASE}-updates
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+  printf 'APT::Install-Recommends "false";\n' >/etc/apt/apt.conf.d/99ceralive
+  printf 'DPkg::Options { "--force-confdef"; "--force-confold"; };\n' >>/etc/apt/apt.conf.d/99ceralive
+}
+
+# ---------------------------------------------------------------------------
+# 3. CeraLive apt repository (mTLS + GPG). Secrets come from env (CI); never
+#    hardcoded. Local/dev build without secrets installs the source + an empty
+#    keyring placeholder, exactly as v1 did.
+# ---------------------------------------------------------------------------
+setup_ceralive_repository() {
+  log "configuring apt.ceralive.tv repository (channel=${CHANNEL})"
+  mkdir -p /etc/opt/ceralive /etc/apt/certs /usr/share/keyrings
+
+  if [[ -n "${APT_CLIENT_CRT_B64:-}" && -n "${APT_CLIENT_KEY_B64:-}" ]]; then
+    log "CI mode: installing mTLS client certificate"
+    printf '%s' "${APT_CLIENT_CRT_B64}" | base64 -d >/etc/apt/certs/client.crt
+    printf '%s' "${APT_CLIENT_KEY_B64}" | base64 -d >/etc/apt/certs/client.key
+    chmod 600 /etc/apt/certs/client.key
+    chmod 644 /etc/apt/certs/client.crt
+    cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
+Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
+Acquire::https::apt.ceralive.tv::SslKey  "/etc/apt/certs/client.key";
+SSLEOF
+  else
+    log "no mTLS secrets in env — skipping client-cert injection (CI provides them)"
+  fi
+
+  if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
+    log "installing CeraLive apt GPG public key from env"
+    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >/usr/share/keyrings/ceralive-archive-keyring.gpg
+  else
+    log "no GPG public key in env — installing placeholder (CI provides the real key)"
+    : >/usr/share/keyrings/ceralive-archive-keyring.gpg
+  fi
+  chmod 644 /usr/share/keyrings/ceralive-archive-keyring.gpg
+
+  cat >/etc/apt/sources.list.d/ceralive.sources <<EOF
+Types: deb
+URIs: https://apt.ceralive.tv/dists/${CHANNEL}/
+Suites: ./
+Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# 4. First-party .debs (ceraui/belacoder/srtla/srt). dpkg the staged files; let
+#    apt resolve any remaining deps. Absent dir = CI-only (R2/gh) — explicit,
+#    loud branch, not a silent skip.
+# ---------------------------------------------------------------------------
+install_first_party() {
+  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null; then
+    log "installing first-party .debs from ${FIRST_PARTY_DIR}"
+    ls -la "${FIRST_PARTY_DIR}"/*.deb >&2
+    dpkg -i "${FIRST_PARTY_DIR}"/*.deb || apt-get -f install -y --no-install-recommends
+  else
+    log "WARNING: no first-party .debs staged in ${FIRST_PARTY_DIR} — ceraui/belacoder/srtla/srt require R2/gh creds (CI mode). Continuing; parity-check will flag this."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 5. udev hardware-access rules (verbatim policy from v1 242-272).
+# ---------------------------------------------------------------------------
+setup_hardware_access() {
+  log "installing udev hardware-access rules"
+  cat >/etc/udev/rules.d/99-ceralive-hardware.rules <<'EOF'
+# CeraLive Hardware Access Rules
+# USB Audio devices
+SUBSYSTEM=="sound", GROUP="audio", MODE="0664"
+KERNEL=="controlC[0-9]*", GROUP="audio", MODE="0664"
+
+# USB Video devices (webcams, capture cards)
+SUBSYSTEM=="video4linux", GROUP="video", MODE="0664"
+KERNEL=="video[0-9]*", GROUP="video", MODE="0664"
+
+# USB Serial devices (modems)
+KERNEL=="ttyUSB[0-9]*", GROUP="dialout", MODE="0664"
+KERNEL=="ttyACM[0-9]*", GROUP="dialout", MODE="0664"
+
+# USB Mass storage (modems in storage mode)
+SUBSYSTEM=="usb", ATTR{bDeviceClass}=="08", GROUP="plugdev", MODE="0664"
+
+# Modem management interfaces
+SUBSYSTEM=="usb", ATTRS{bInterfaceClass}=="02", ATTRS{bInterfaceSubClass}=="02", GROUP="dialout", MODE="0664"
+
+# RK3588 HDMI capture (if available)
+KERNEL=="video0", SUBSYSTEM=="video4linux", ATTRS{name}=="rk_hdmirx", GROUP="video", MODE="0664"
+
+# GPIO access for RK3588
+SUBSYSTEM=="gpio", GROUP="gpio", MODE="0664"
+KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"
+
+# I2C and SPI access
+KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0664"
+KERNEL=="spidev[0-9]*", GROUP="spi", MODE="0664"
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# 6. SRTLA source-policy routing (rt_tables + dhclient hook + NM dispatcher).
+#    Verbatim from v1 286-431 — load-bearing for bonded multi-link streaming.
+# ---------------------------------------------------------------------------
+configure_srtla_routing() {
+  log "configuring SRTLA source-policy routing"
+
+  if ! grep -q "^100[[:space:]]\+modem0" /etc/iproute2/rt_tables 2>/dev/null; then
+    cat >>/etc/iproute2/rt_tables <<'EOF'
+
+# SRTLA bonding routing tables
+100     modem0
+101     modem1
+102     modem2
+103     modem3
+104     modem4
+105     modem5
+106     modem6
+107     modem7
+110     wlan_bond
+EOF
+  fi
+
+  mkdir -p /etc/dhcp/dhclient-exit-hooks.d
+  cat >/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing <<'HOOKEOF'
+#!/bin/bash
+# SRTLA Source Policy Routing for DHCP interfaces
+# Routes packets out the correct interface based on source IP.
+
+case "$interface" in
+    usb*|eth*|enx*) ;;
+    *) exit 0 ;;
+esac
+
+case "$interface" in
+    usb0|enx*0) TABLE=100 ;;
+    usb1|enx*1) TABLE=101 ;;
+    usb2|enx*2) TABLE=102 ;;
+    usb3|enx*3) TABLE=103 ;;
+    usb4|enx*4) TABLE=104 ;;
+    usb5|enx*5) TABLE=105 ;;
+    usb6|enx*6) TABLE=106 ;;
+    usb7|enx*7) TABLE=107 ;;
+    *) TABLE="" ;;
+esac
+
+[ -z "$TABLE" ] && exit 0
+
+case "$reason" in
+    BOUND|RENEW|REBIND|REBOOT)
+        if [ -n "$new_ip_address" ] && [ -n "$new_routers" ]; then
+            GATEWAY=$(echo "$new_routers" | awk '{print $1}')
+            ip rule del from "$new_ip_address" table "$TABLE" 2>/dev/null || true
+            ip route flush table "$TABLE" 2>/dev/null || true
+            ip rule add from "$new_ip_address" table "$TABLE" priority 100
+            ip route add default via "$GATEWAY" dev "$interface" table "$TABLE"
+            if [ -n "$new_subnet_mask" ]; then
+                NETWORK=$(ipcalc -n "$new_ip_address" "$new_subnet_mask" 2>/dev/null | grep -oP 'NETWORK=\K.*' || echo "")
+                PREFIX=$(ipcalc -p "$new_ip_address" "$new_subnet_mask" 2>/dev/null | grep -oP 'PREFIX=\K.*' || echo "24")
+                if [ -n "$NETWORK" ]; then
+                    ip route add "$NETWORK/$PREFIX" dev "$interface" table "$TABLE" 2>/dev/null || true
+                fi
+            fi
+            logger -t srtla-routing "Added source routing for $interface ($new_ip_address) via $GATEWAY table $TABLE"
+        fi
+        ;;
+    EXPIRE|FAIL|RELEASE|STOP)
+        ip rule del from "$old_ip_address" table "$TABLE" 2>/dev/null || true
+        ip route flush table "$TABLE" 2>/dev/null || true
+        logger -t srtla-routing "Removed source routing for $interface table $TABLE"
+        ;;
+esac
+HOOKEOF
+  chmod +x /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing
+
+  mkdir -p /etc/NetworkManager/dispatcher.d
+  cat >/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing <<'DISPEOF'
+#!/bin/bash
+# SRTLA Source Routing for WiFi interfaces managed by NetworkManager
+INTERFACE="$1"
+ACTION="$2"
+
+case "$INTERFACE" in
+    wlan*) ;;
+    *) exit 0 ;;
+esac
+
+TABLE=110  # wlan_bond table
+
+case "$ACTION" in
+    up|dhcp4-change)
+        IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        GATEWAY=$(ip route show dev "$INTERFACE" | grep default | awk '{print $3}' | head -1)
+        if [ -n "$IP" ] && [ -n "$GATEWAY" ]; then
+            ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
+            ip route flush table "$TABLE" 2>/dev/null || true
+            ip rule add from "$IP" table "$TABLE" priority 100
+            ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
+            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY"
+        fi
+        ;;
+    down)
+        ip rule show | grep "table $TABLE" | while read -r line; do
+            IP=$(echo "$line" | grep -oP 'from \K\d+(\.\d+){3}')
+            [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
+        done
+        ip route flush table "$TABLE" 2>/dev/null || true
+        logger -t srtla-routing "WiFi source routing removed for $INTERFACE"
+        ;;
+esac
+DISPEOF
+  chmod +x /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing
+}
+
+# ---------------------------------------------------------------------------
+# 7. Streaming sysctl + governor + tmpfs (v1 434-468).
+# ---------------------------------------------------------------------------
+apply_streaming_optimizations() {
+  log "applying streaming sysctl/governor optimizations"
+  cat >/etc/sysctl.d/99-ceralive-streaming.conf <<'EOF'
+# CeraLive Streaming Optimizations
+net.core.rmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_default = 262144
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_congestion_control = bbr
+vm.swappiness = 10
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+EOF
+
+  echo 'GOVERNOR="performance"' >/etc/default/cpufrequtils
+  echo 'tmpfs /tmp tmpfs defaults,noatime,size=1G 0 0' >>/etc/fstab
+}
+
+# ---------------------------------------------------------------------------
+# 8. Networking (hostname, mDNS, NetworkManager) (v1 471-509).
+# ---------------------------------------------------------------------------
+configure_networking() {
+  log "configuring networking (NetworkManager + mDNS)"
+  echo "ceralive" >/etc/hostname
+  if grep -q '^127.0.1.1' /etc/hosts; then
+    sed -i 's/^127.0.1.1.*/127.0.1.1\tceralive/g' /etc/hosts
+  else
+    printf '127.0.1.1\tceralive\n' >>/etc/hosts
+  fi
+
+  if ! grep -q '^hosts:.*mdns' /etc/nsswitch.conf 2>/dev/null; then
+    sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns mdns4/g' /etc/nsswitch.conf
+  fi
+
+  mkdir -p /etc/NetworkManager/conf.d
+  cat >/etc/NetworkManager/conf.d/ceralive.conf <<'EOF'
+[main]
+dns=systemd-resolved
+systemd-resolved=true
+
+[device]
+wifi.scan-rand-mac-address=yes
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# 9. Services — enable required, disable unneeded (v1 511-542).
+# ---------------------------------------------------------------------------
+configure_services() {
+  log "enabling/disabling services"
+  local svc
+  for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon; do
+    enable_service "${svc}"
+  done
+  for svc in bluetooth.service cups.service; do
+    disable_service "${svc}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 10. First-boot unique-hostname service (v1 544-622).
+# ---------------------------------------------------------------------------
+setup_hostname_service() {
+  log "installing first-boot unique-hostname service"
+  mkdir -p /etc/ceralive
+
+  cat >/usr/local/sbin/ceralive-set-hostname <<'EOF'
+#!/bin/bash
+set -euo pipefail
+BASE_NAME="ceralive"
+INDEX_FILE="/etc/ceralive/host_index"
+LOCK_FILE="/etc/ceralive/hostname.lock"
+[ -f "$LOCK_FILE" ] && exit 0
+
+index=""
+if [ -s "$INDEX_FILE" ]; then
+    index="$(sed -E 's/[^0-9]//g' "$INDEX_FILE")"
+fi
+if [ -z "$index" ]; then
+    mid="$(tr -cd 'a-f0-9' </etc/machine-id | tail -c 4)"
+    [ -n "$mid" ] || mid="0001"
+    num=$(( 16#$mid ))
+    index=$(( (num % 9999) + 1 ))
+fi
+if [ "$index" = "1" ]; then
+    NEW_HOSTNAME="${BASE_NAME}"
+else
+    NEW_HOSTNAME="${BASE_NAME}-${index}"
+fi
+hostnamectl set-hostname "$NEW_HOSTNAME" || echo "$NEW_HOSTNAME" >/etc/hostname
+if grep -qE '^127\.0\.1\.1\b' /etc/hosts; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${NEW_HOSTNAME}/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' "${NEW_HOSTNAME}" >>/etc/hosts
+fi
+: >"$LOCK_FILE"
+EOF
+  chmod +x /usr/local/sbin/ceralive-set-hostname
+
+  cat >/etc/systemd/system/ceralive-hostname.service <<'EOF'
+[Unit]
+Description=CeraLive unique hostname setup
+After=systemd-machine-id-commit.service
+Before=network-pre.target avahi-daemon.service
+Wants=network-pre.target
+ConditionPathExists=/etc/machine-id
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-set-hostname
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl enable ceralive-hostname.service
+}
+
+# ---------------------------------------------------------------------------
+# 11. CeraLive directory structure + seed configs (v1 634-770), ceralive paths.
+# ---------------------------------------------------------------------------
+create_ceralive_structure() {
+  log "creating /etc/opt/ceralive + /opt/ceralive structure and seed configs"
+  mkdir -p /etc/opt/ceralive
+  mkdir -p /opt/ceralive/{bin,lib,share}
+  mkdir -p /var/opt/ceralive/{cache,logs}
+  mkdir -p /home/ceralive/.config/ceralive /home/ceralive/.local/share/ceralive
+  mkdir -p /etc/ceralive/conf.d
+
+  cat >/etc/ceralive/release <<'EOF'
+NAME="CeraLive"
+PRETTY_NAME="CeraLive Streaming Appliance"
+ID=ceralive
+VERSION_ID="1"
+BUILD_BRANCH="stable"
+EOF
+
+  cat >/etc/ceralive/conf.d/srtla.conf <<'EOF'
+# SRTLA Bonding Configuration
+ips_file=/tmp/srtla_ips
+srt_latency=2000
+connection_timeout=3000
+EOF
+
+  cat >/etc/ceralive/conf.d/streaming.conf <<'EOF'
+# Streaming Configuration
+default_encoder=auto
+audio_encoder=aac
+bitrate=5000000
+framerate=30
+keyframe_interval=60
+EOF
+
+  cat >/etc/ceralive/conf.d/network.conf <<'EOF'
+# Network Configuration
+enable_bonding=true
+prefer_wired=true
+auto_reconnect=true
+reconnect_delay=2
+EOF
+
+  cat >/etc/ceralive/conf.d/hardware.conf <<'EOF'
+# Hardware Configuration
+enable_hdmi_input=true
+enable_usb_devices=true
+auto_detect_input=true
+capture_resolution=auto
+hw_accel=auto
+EOF
+
+  cat >/etc/ceralive/conf.d/modems.conf <<'EOF'
+# Modem Configuration
+enable_modem_manager=true
+auto_connect=true
+default_priority=100
+enable_sms=false
+EOF
+
+  chown -R ceralive:ceralive /home/ceralive /var/opt/ceralive
+
+  echo 'CeraLive Streaming Appliance' >/etc/issue
+  echo 'CeraLive Streaming Appliance' >/etc/issue.net
+}
+
+# ---------------------------------------------------------------------------
+# Orchestration (mirrors v1 main_customization order).
+# ---------------------------------------------------------------------------
+main() {
+  log "starting CeraLive runtime customization (board=${BOARD_ID}, release=${RELEASE}, variant=${VARIANT})"
+  configure_minimal_apt
+  create_ceralive_user
+  setup_ceralive_repository
+  install_first_party
+  setup_hardware_access
+  configure_srtla_routing
+  apply_streaming_optimizations
+  configure_networking
+  configure_services
+  setup_hostname_service
+  create_ceralive_structure
+  # Drop the first-party .deb staging tree so it does not ship in the image.
+  rm -rf "${FIRST_PARTY_DIR}"
+  log "CeraLive runtime customization complete"
+}
+
+main "$@"
