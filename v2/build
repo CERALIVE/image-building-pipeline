@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# build — manifest-dispatch entry point for the CeraLive v2 image pipeline.
+#
+# Contract:
+#   build <board>
+#
+#   <board> must correspond to a manifest in manifests/boards/<board>.<ext>.
+#   Board data (kernel branch, partition sizing, package sets, …) lives ENTIRELY
+#   in those manifests — never hardcoded here (see task 11). This entry only:
+#     1. validates the requested board against the manifest directory, and
+#     2. delegates to the orchestrator (implemented in task 16).
+#
+# Fails loudly: missing arg -> usage; unknown board -> lists available manifests.
+#
+# shellcheck shell=bash
+
+# Resolve this script's own directory so it works from any CWD.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=lib/common.sh
+source "${HERE}/lib/common.sh"
+
+BOARDS_DIR="${HERE}/manifests/boards"
+ORCHESTRATOR="${HERE}/lib/orchestrate.sh" # provided by task 16
+
+usage() {
+  cat >&2 <<EOF
+Usage: build <board>
+
+Builds the CeraLive device image for <board>.
+Board definitions are read from manifests under:
+  ${BOARDS_DIR}/
+EOF
+}
+
+# Collect available board names from manifest files (any of the common manifest
+# extensions). Populates the global array AVAILABLE_BOARDS.
+collect_boards() {
+  AVAILABLE_BOARDS=()
+  local f name
+  for f in "${BOARDS_DIR}"/*.yaml "${BOARDS_DIR}"/*.yml \
+           "${BOARDS_DIR}"/*.toml "${BOARDS_DIR}"/*.conf; do
+    [[ -e "${f}" ]] || continue
+    name="$(basename "${f}")"
+    AVAILABLE_BOARDS+=("${name%.*}")
+  done
+}
+
+list_available() {
+  collect_boards
+  if [[ ${#AVAILABLE_BOARDS[@]} -eq 0 ]]; then
+    log_error "no board manifests present yet in ${BOARDS_DIR}/ (added in task 11)"
+    return
+  fi
+  log_error "available boards: ${AVAILABLE_BOARDS[*]}"
+}
+
+main() {
+  if [[ $# -lt 1 || -z "${1:-}" ]]; then
+    usage
+    die "missing required argument: <board>"
+  fi
+
+  local board="$1"
+  shift
+
+  local manifest=""
+  local ext
+  for ext in yaml yml toml conf; do
+    if [[ -f "${BOARDS_DIR}/${board}.${ext}" ]]; then
+      manifest="${BOARDS_DIR}/${board}.${ext}"
+      break
+    fi
+  done
+
+  if [[ -z "${manifest}" ]]; then
+    log_error "unknown board: '${board}'"
+    list_available
+    exit 1
+  fi
+
+  log_info "selected board '${board}' -> ${manifest}"
+
+  # Delegate to the orchestrator (task 16). Until it lands, fail loudly rather
+  # than pretend success — no best-effort stubs that silently no-op.
+  if [[ ! -x "${ORCHESTRATOR}" ]]; then
+    die "orchestrator not yet available at ${ORCHESTRATOR} (implemented in task 16)"
+  fi
+
+  log_info "delegating to orchestrator for board '${board}'"
+  exec "${ORCHESTRATOR}" --board "${board}" --manifest "${manifest}" "$@"
+}
+
+main "$@"

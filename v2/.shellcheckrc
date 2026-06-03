@@ -1,0 +1,5 @@
+# ShellCheck configuration for the CeraLive v2 image pipeline.
+# Allows shellcheck to follow `source` directives to sibling library files
+# (e.g. lib/common.sh) without requiring the -x flag on every invocation.
+external-sources=true
+source-path=SCRIPTDIR
