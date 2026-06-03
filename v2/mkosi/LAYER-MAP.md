@@ -1,23 +1,26 @@
 # CeraLive v2 mkosi — LAYER MAP
 
-The device image is built as an explicit, composable **four-layer** mkosi stack.
-Each layer is a sub-image under `mkosi.images/<layer>/`; the top-level
-`mkosi.conf` is a pure orchestrator (`Format=none`) whose global settings
-(Distribution / Release / Architecture / Repositories) propagate to all layers.
+The device image is built as an explicit, composable mkosi stack: four
+`Format=directory` rootfs layers plus a Stage-4 `Format=disk` assembly. Each layer
+is a sub-image under `mkosi.images/<layer>/`; the top-level `mkosi.conf` is a pure
+orchestrator (`Format=none`) whose global settings (Distribution / Release /
+Architecture / Repositories) propagate to all layers.
 
 ```
-base  ──▶ platform ──▶ runtime ──▶ app          (Dependencies= chain)
- │          │            │           │
+base  ──▶ platform ──▶ runtime ──▶ app  ──▶ disk     (Dependencies= chain)
+ │          │            │           │        │
+ │          │            │           │        └─ Format=disk: D4 partition layout (Stage 4)
  │          │            │           └─ first-party apps (Stage 3 — PLACEHOLDER today)
  │          │            └────────────── OS runtime + system libsrt + RAUC infra (arch-IDENTICAL)
  │          └─────────────────────────── board/SoC BSP + HW-accel (the ONLY arch-specific layer)
  └────────────────────────────────────── minimal Debian bookworm (systemd/udev/ssh/dbus)
 ```
 
-`mkosi build` builds the whole chain in order (top-level `Dependencies=app`); the
-orchestrator (`lib/orchestrate.sh`) ships `build/app` as the final rootfs tree.
-Only the later **assembly** step (Stage 4) turns the merged tree into a
-`Format=disk` image (D4 partition layout + dm-verity + A/B / RAUC).
+`mkosi build` builds the rootfs chain in order (top-level `Dependencies=app`); the
+orchestrator (`lib/orchestrate.sh`) ships `build/app` as the final rootfs tree. The
+**assembly** step (Stage 4, `mkosi.images/disk/` + `lib/assemble-disk.sh`) turns
+that tree into a `Format=disk` image (D4 partition layout). dm-verity + A/B / RAUC
+slot activation are layered on later (task 26).
 
 ---
 
@@ -126,6 +129,57 @@ app images small and the OS slot stable.
 
 ---
 
+## Layer 5 — DISK ASSEMBLY (`mkosi.images/disk/`)  ← Stage 4 · `Format=disk`
+
+**What:** the ONLY `Format=disk` image — turns the finished `app` rootfs tree into
+the actual flashable, partitioned disk per the FROZEN
+[`docs/partition-contract.md`](../../docs/partition-contract.md) §3 (v1).
+
+```
+(16 MB raw gap, no GPT entry) | boot vfat 256M | rootfs_a ext4 4096M
+                              | rootfs_b ext4 4096M | data ext4 remainder >=2048M
+```
+
+| Contents | Source |
+|---|---|
+| Partition geometry (sizes/labels/FS) | `../../repart/*.conf` via `RepartDirectories=` — one systemd-repart def per partition; single source of truth, never duplicated |
+| Root tree populating the slots | `BaseTrees=%O/app` |
+| `Bootable=no` | bootloader (idbloader+U-Boot+ATF) is a Platform-layer artifact, dd'd into the 16 MB gap — not mkosi's job |
+
+**References are by `PARTLABEL`, never FS-UUID** (a slot update changes FS-UUIDs;
+the two rootfs labels are not unique across A/B). `Label=` in the repart def ==
+`PARTLABEL=` on device.
+
+### Two contract realities systemd-repart cannot express alone
+
+`lib/assemble-disk.sh` is the board-faithful Stage-4 producer/verifier (offline:
+no root, no loopback). It handles what plain `RepartDirectories=` cannot:
+
+1. **The 16 MB raw bootloader gap (no GPT entry).** systemd-repart has no
+   `Offset=` (verified on systemd 260) and starts p1 at the 1 MB grain. The
+   assembler PRE-SEEDS the GPT with `sgdisk` so `boot` begins at sector 32768
+   (16 MB); repart then ADOPTS that partition (gap preserved) and appends the
+   rest. The growable trailing `data` partition packs p1–p4 contiguous.
+2. **Single-slot fallback.** `RepartDirectories=` cannot conditionally drop a
+   file, so when `$SINGLE_SLOT_FALLBACK=true` (from the board manifest
+   `single_slot_fallback:`, surfaced by `lib/resolve.sh`, exported by
+   `lib/orchestrate.sh`) the assembler stages the repart set WITHOUT
+   `30-rootfs_b.conf` → a 3-partition disk (`boot`, `rootfs_a`, `data`), no B
+   slot. Both current boards are ≥ 16 GB ⇒ flag `false` ⇒ `rootfs_b` present.
+
+### Built explicitly (not in the default `Dependencies=app` chain)
+
+The default `mkosi build` stops at the `app` rootfs tree (the parity gate runs on
+`build/app`). The disk image is produced in a distinct Stage-4 step
+(`lib/assemble-disk.sh build` offline, or `mkosi --image disk`).
+
+**NOT here (deferred to task 26):** A/B slot **flipping** / RAUC `system.conf` +
+bootcount + `bootname`, dm-verity, the `*.raucb` bundle. This layer lays down the
+GEOMETRY + empty filesystems only. FS is **ext4** per the frozen contract;
+squashfs+verity is the RAUC bundle format (task 26), not the on-disk slot.
+
+---
+
 ## Arch-parametricity contract
 
 | Layer | Arch-specific? | Enforcement |
@@ -147,11 +201,18 @@ family manifest differs.
 | Chroot **customization modules** (board capture/quirk udev rules, per-board hooks driven by manifest `quirks:`) | **task 20** |
 | First-party app install (ceracoder/srtla/CeraUI + CERALIVE/srt fork `.deb`) | **Stage 3 (tasks 22-23)** |
 | `rauc-hawkbit-updater` active install (backport `.deb` + apt.ceralive.tv serving) | **Stage 4 OTA** |
-| `Format=disk` assembly (partitions, dm-verity, A/B, RAUC bundle) | **Stage 4** |
+| A/B slot **flipping** / RAUC `system.conf` + bootcount + `bootname`, dm-verity, `*.raucb` bundle | **task 26** |
+
+`Format=disk` partition **layout** is DONE (task 25 — Layer 5 above): the frozen
+D4 geometry (16 MB gap + boot + rootfs_a/b + data), single-slot fallback, and
+PARTLABEL refs. Only slot *activation* (the A/B flip) + verity/RAUC remain.
 
 ## Cross-references
 
 - `manifests/packages/shared.list` — canonical runtime package set (Task 18)
 - `manifests/families/rk3588.yaml` — platform BSP + HW-accel package names (Task 11)
+- `mkosi/repart/` + `mkosi/repart/README.md` — Stage-4 partition defs (Task 25)
+- `lib/assemble-disk.sh` — Stage-4 disk assembler/verifier (Task 25)
+- `../../docs/partition-contract.md` — FROZEN D4 layout (Task 8, v1)
 - `lib/orchestrate.sh` — reads shared.list → `$SHARED_PACKAGES`; builds the chain
 - `.omo/notepads/image-platform-redesign/decisions.md` — D1 (x86 encode), D3 (vendor kernel), D4 (partitions), Task 5 (RAUC/hawkbit pins)

@@ -294,7 +294,7 @@ run_mkosi_build() {
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
-    SHARED_PACKAGES
+    SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -305,6 +305,9 @@ run_mkosi_build() {
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
+  # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
+  # lib/assemble-disk.sh; default false (A/B). See v2/mkosi/repart/README.md.
+  export SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
