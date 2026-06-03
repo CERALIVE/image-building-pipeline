@@ -18,14 +18,14 @@
   ],
   "properties": {
     "arch": {
-      "description": "Target CPU architecture. Maps to ARCHITECTURE in configs/devices/*.conf and the dpkg/Armbian arch. rk3588 boards are arm64; future Intel N100/N200 + AMD are amd64.",
+      "description": "Target CPU architecture in mkosi's identifier space (consumed by mkosi --architecture; see lib/orchestrate.sh). 'arm64' covers rk3588; 'x86-64' covers Intel N100/N200 + AMD mini-PCs. mkosi has NO 'amd64' — its x86 identifier is 'x86-64' (learnings task 13). 'amd64' is retained only as a legacy alias that orchestrate.sh maps to mkosi x86-64; NEW x86 families use 'x86-64' directly. NOTE: the Debian *package* arch is still 'amd64' (e.g. linux-image-amd64) — that lives in kernel_packages, never here.",
       "type": "string",
-      "enum": ["arm64", "amd64"]
+      "enum": ["arm64", "amd64", "x86-64"]
     },
     "armbian_branch": {
-      "description": "Armbian kernel/U-Boot branch passed as BRANCH= to compile.sh (userpatches/config-*.conf BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in legacy configs/devices/*.conf is dead metadata; the effective branch is this field.",
+      "description": "Armbian kernel/U-Boot branch passed as BRANCH= to compile.sh (userpatches/config-*.conf BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in legacy configs/devices/*.conf is dead metadata; the effective branch is this field. x86 families set 'none': they do not use the Armbian BSP at all (Debian generic kernel + GRUB/EFI; there is no Armbian compile.sh BRANCH for x86).",
       "type": "string",
-      "enum": ["vendor", "current", "edge"]
+      "enum": ["vendor", "current", "edge", "none"]
     },
     "kernel_packages": {
       "description": "Armbian kernel image package(s) for the family (e.g. linux-image-vendor-rockchip64). Maps to the linux-image-* entries of BOARD_PACKAGES.",
@@ -41,10 +41,10 @@
       "uniqueItems": true
     },
     "dtb_packages": {
-      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES.",
+      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES. EMPTY ([]) on x86 families: x86-64 platforms enumerate hardware via ACPI and ship no device tree, so they declare no DTB package. Still REQUIRED to be present (as []) so the absence is explicit, not accidental.",
       "type": "array",
       "items": { "type": "string", "minLength": 1 },
-      "minItems": 1,
+      "minItems": 0,
       "uniqueItems": true
     },
     "firmware_packages": {
