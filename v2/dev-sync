@@ -49,7 +49,14 @@
 #   DEV_SYNC_NATIVE_ARGS       extra args forwarded to sync-native.sh (e.g.
 #                              "--from-deb /path" or "--staging /dir"; sync-native
 #                              needs a build input for a real — non-DRY_RUN — run).
+#   DEV_SYNC_FORCE=1           --force: sync backend/native while streaming, no prompt.
+#   DEV_SYNC_DEFER=1           --defer: queue a backend/native sync until streaming stops.
+#   DEV_SYNC_STREAM_STATUS_*   PORT/PATH of the device GET /status probe (def 80,/status).
 #   …plus every config.sh knob (SSH_USER, DEV_SYNC_TARGET_HOST/_IP, ignore globs…).
+#
+# STREAM-ACTIVE GUARD: frontend is disk-served (no restart) → always stream-safe.
+# backend/native restart ceralive.service (kills the in-process feed) → gated on
+# the device's read-only GET /status: if streaming, prompt [y/N] / --force / --defer.
 #
 # shellcheck shell=bash
 
@@ -62,6 +69,11 @@ SYNC_DIR="${HERE}/lib/dev-sync"
 # DRY_RUN knob + DEV_SYNC_WORKSPACE_ROOT and the DEV_SYNC_IGNORE_GLOBS[] array.
 # shellcheck source=lib/dev-sync/config.sh
 source "${SYNC_DIR}/config.sh"
+# transport.sh adds resolve_target + transport_ssh, reused by the stream-active
+# guard to probe the device's read-only GET /status endpoint over SSH. It
+# re-sources config.sh idempotently (sentinel) — no double yaml parse.
+# shellcheck source=lib/dev-sync/transport.sh
+source "${SYNC_DIR}/transport.sh"
 
 # ---------------------------------------------------------------------------
 # Loop configuration (env-overridable; sane defaults from the sibling layout).
@@ -71,6 +83,19 @@ DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-${DEV_SYNC_WORKSPACE_ROOT}/CeraUI}"
 CERACODER_SRC="${CERACODER_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/ceracoder}"
 SRTLA_SRC="${SRTLA_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/srtla}"
 DEV_SYNC_NATIVE_ARGS="${DEV_SYNC_NATIVE_ARGS:-}"
+
+# Stream-active guard knobs. The guard gates only the restart-bearing components
+# (backend/native); frontend is disk-served and stream-safe (no gate). State is
+# read from the device's read-only GET /status (added to the backend HTTP server)
+# probed over SSH; is_streaming==true means a restart would interrupt a live feed.
+DEV_SYNC_FORCE="${DEV_SYNC_FORCE:-0}"                       # skip the prompt, sync anyway
+DEV_SYNC_DEFER="${DEV_SYNC_DEFER:-0}"                       # queue until the stream stops
+DEV_SYNC_STREAM_STATUS_PORT="${DEV_SYNC_STREAM_STATUS_PORT:-80}"
+DEV_SYNC_STREAM_STATUS_PATH="${DEV_SYNC_STREAM_STATUS_PATH:-/status}"
+DEV_SYNC_STREAM_POLL_INTERVAL="${DEV_SYNC_STREAM_POLL_INTERVAL:-5}"  # --defer poll seconds
+DEV_SYNC_DEFER_TIMEOUT="${DEV_SYNC_DEFER_TIMEOUT:-0}"               # --defer max wait (0=forever)
+# QA/offline override: force the probed state without SSH (active|inactive|unknown).
+DEV_SYNC_STREAM_STATE="${DEV_SYNC_STREAM_STATE:-}"
 
 # Per-component watch roots. We watch ONLY source dirs (never build outputs) so a
 # sync's own artifacts can't re-trigger the watcher into a rebuild loop.
@@ -115,12 +140,20 @@ Components (pick one or more; --all selects all three):
 
 Options:
   --debounce <ms>   coalesce window in ms (default: ${DEV_SYNC_DEBOUNCE_MS})
+  --force           sync backend/native even while a stream is active (no prompt)
+  --defer           queue a backend/native sync until the active stream stops
   --dry-run         print the watch plan + routing and start NO watchers
   -h, --help        this help
 
+Stream-active guard: backend/native restart ceralive.service (interrupts a live
+stream), so when the device is streaming they prompt [y/N] (or honour --force /
+--defer). frontend is disk-served and always syncs restart-free. State is read
+from the device's GET /status over SSH.
+
 Watcher (auto, first available): watchexec → entr → inotifywait.
 Env: DRY_RUN, DEV_SYNC_DEBOUNCE_MS, DEV_SYNC_CERAUI_DIR, CERACODER_SRC, SRTLA_SRC,
-     DEV_SYNC_NATIVE_ARGS, plus all config.sh knobs. Ctrl-C stops all watchers.
+     DEV_SYNC_NATIVE_ARGS, DEV_SYNC_FORCE, DEV_SYNC_DEFER, DEV_SYNC_STREAM_STATUS_PORT,
+     DEV_SYNC_STREAM_STATUS_PATH, plus all config.sh knobs. Ctrl-C stops all watchers.
 EOF
 }
 
@@ -181,14 +214,145 @@ _route_component() {
 }
 
 # ---------------------------------------------------------------------------
+# Stream-active guard. sync-frontend.sh is disk-served (zero systemctl tokens) so
+# it is stream-safe and ALWAYS proceeds. sync-backend.sh / sync-native.sh both
+# restart ceralive.service, which tears down the in-process ceracoder/srtla feed
+# — so they are gated here. _GUARD_SKIP is the sentinel exit for "the operator
+# declined / defer timed out", which the run loop treats as a tolerated no-op.
+# ---------------------------------------------------------------------------
+_GUARD_SKIP=10
+
+# _component_stream_safe <component> — true for components that never restart.
+_component_stream_safe() {
+  [[ "$1" == "frontend" ]]
+}
+
+# _stream_probe_remote — echo the device's GET /status body (or nothing) over
+# SSH, self-contained: the ERR trap + errexit are neutralised so an unreachable
+# device or failed probe never aborts the caller (it just yields no output).
+_stream_probe_remote() {
+  trap - ERR
+  set +eo pipefail
+  resolve_target >/dev/null 2>&1 || return 1
+  local url="http://127.0.0.1:${DEV_SYNC_STREAM_STATUS_PORT}${DEV_SYNC_STREAM_STATUS_PATH}"
+  transport_ssh "command -v curl >/dev/null 2>&1 && curl -fsS --max-time 5 '${url}' || wget -qO- -T 5 '${url}'"
+}
+
+# _probe_stream_state — echo active|inactive|unknown. DEV_SYNC_STREAM_STATE
+# overrides the live probe (QA/offline). is_streaming true→active, false→inactive,
+# anything unparseable or unreachable→unknown (treated conservatively as active).
+_probe_stream_state() {
+  if [[ -n "${DEV_SYNC_STREAM_STATE}" ]]; then
+    printf '%s' "${DEV_SYNC_STREAM_STATE}"; return 0
+  fi
+  local body
+  if body="$(_stream_probe_remote)"; then
+    case "${body}" in
+      *'"is_streaming":true'*|*'"is_streaming": true'*)   printf 'active' ;;
+      *'"is_streaming":false'*|*'"is_streaming": false'*) printf 'inactive' ;;
+      *)                                                  printf 'unknown' ;;
+    esac
+  else
+    printf 'unknown'
+  fi
+}
+
+# _stream_confirm <component> — interactive y/N read from the controlling
+# terminal (/dev/tty, NOT stdin: the watcher backends own stdin). No tty → deny.
+_stream_confirm() {
+  local component="$1" reply=""
+  # `-r /dev/tty` is true even with no controlling terminal (the node is
+  # readable); only an actual open reveals ENXIO. Probe by opening it.
+  if ! { true < /dev/tty; } 2>/dev/null; then
+    log_warn "dev-sync: [${component}] no controlling terminal to confirm on — refusing (use --force or --defer)."
+    return 1
+  fi
+  printf 'dev-sync: Stream is active. Restarting [%s] will interrupt it. Continue? [y/N] ' "${component}" > /dev/tty
+  read -r reply < /dev/tty || return 1
+  case "${reply}" in
+    y|Y|yes|Yes|YES) return 0 ;;
+    *)               return 1 ;;
+  esac
+}
+
+# _stream_defer <component> — block, polling the stream state, until it goes
+# inactive (then proceed) or DEV_SYNC_DEFER_TIMEOUT is hit (then skip).
+_stream_defer() {
+  local component="$1" waited=0 state
+  log_warn "dev-sync: [${component}] --defer — queuing until the stream stops (poll ${DEV_SYNC_STREAM_POLL_INTERVAL}s, timeout ${DEV_SYNC_DEFER_TIMEOUT}s; 0=forever)."
+  while :; do
+    state="$(_probe_stream_state)"
+    if [[ "${state}" == "inactive" ]]; then
+      log_success "dev-sync: [${component}] stream stopped — running deferred sync."
+      return 0
+    fi
+    if (( DEV_SYNC_DEFER_TIMEOUT > 0 && waited >= DEV_SYNC_DEFER_TIMEOUT )); then
+      log_error "dev-sync: [${component}] defer timed out after ${waited}s (stream still ${state}); skipping."
+      return "${_GUARD_SKIP}"
+    fi
+    sleep "${DEV_SYNC_STREAM_POLL_INTERVAL}"
+    waited=$(( waited + DEV_SYNC_STREAM_POLL_INTERVAL ))
+  done
+}
+
+# _stream_guard <component> — the gate. 0=proceed, _GUARD_SKIP=skip (tolerated),
+# other non-zero=hard error. Frontend always proceeds; backend/native consult the
+# stream state and, when active/unknown, honour --force / --defer / interactive.
+_stream_guard() {
+  local component="$1"
+  if _component_stream_safe "${component}"; then
+    log_info "dev-sync: [${component}] is stream-safe (no restart) — proceeding regardless of stream state."
+    return 0
+  fi
+
+  local state
+  state="$(_probe_stream_state)"
+  case "${state}" in
+    inactive)
+      log_info "dev-sync: [${component}] stream is INACTIVE — restart is safe; proceeding."
+      return 0 ;;
+    active)
+      log_warn "dev-sync: [${component}] STREAM IS ACTIVE — restarting ceralive.service WILL interrupt the live stream." ;;
+    *)
+      log_warn "dev-sync: [${component}] stream state UNKNOWN (device unreachable / no /status) — treating as ACTIVE to be safe." ;;
+  esac
+
+  if [[ "${DEV_SYNC_FORCE}" == "1" ]]; then
+    log_warn "dev-sync: [${component}] --force/DEV_SYNC_FORCE=1 — proceeding despite the active stream."
+    return 0
+  fi
+  if [[ "${DEV_SYNC_DEFER}" == "1" ]]; then
+    _stream_defer "${component}"; return $?
+  fi
+  if _stream_confirm "${component}"; then
+    log_warn "dev-sync: [${component}] operator confirmed — proceeding despite the active stream."
+    return 0
+  fi
+  log_warn "dev-sync: [${component}] SKIPPED by stream-active guard (not confirmed). Stop the stream, or use --force / --defer."
+  return "${_GUARD_SKIP}"
+}
+
+# ---------------------------------------------------------------------------
 # _dev_sync_run_one <component> — the timed routing unit. Wrapped with a ms
 # clock; prints a [TIMING] line; returns the sync's exit status (the watch loops
 # tolerate a non-zero so a failed sync never stops watching). This is the target
 # of the internal `__sync` dispatch every watcher backend invokes.
 # ---------------------------------------------------------------------------
 _dev_sync_run_one() {
-  local component="$1" t0 t1 ms st=0
+  local component="$1" t0 t1 ms st=0 g=0
   _validate_component "${component}"
+
+  # Gate restart-bearing syncs on the live stream state BEFORE routing.
+  _stream_guard "${component}" || g=$?
+  if (( g != 0 )); then
+    if (( g == _GUARD_SKIP )); then
+      log_warn "dev-sync: [${component}] no changes deployed (stream-active guard skip)."
+      return 0
+    fi
+    log_error "dev-sync: [${component}] stream guard error (exit ${g}); not routing."
+    return "${g}"
+  fi
+
   log_info "dev-sync: change detected → [${component}] routing to $(_script_for "${component}")"
   t0="$(now_ms)"
   _route_component "${component}" || st=$?
@@ -474,6 +638,8 @@ main() {
       --backend)   SELECTED+=("backend"); shift ;;
       --native)    SELECTED+=("native"); shift ;;
       --debounce)  DEV_SYNC_DEBOUNCE_MS="${2:?--debounce needs <ms>}"; shift 2 ;;
+      --force)     DEV_SYNC_FORCE=1; export DEV_SYNC_FORCE; shift ;;
+      --defer)     DEV_SYNC_DEFER=1; export DEV_SYNC_DEFER; shift ;;
       --dry-run)   DRY_RUN=1; shift ;;
       -h|--help)   usage; exit 0 ;;
       --*)         usage; die "dev-sync: unknown option '$1'" ;;
