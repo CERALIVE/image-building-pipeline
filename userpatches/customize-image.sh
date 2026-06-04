@@ -248,6 +248,7 @@ KERNEL=="controlC[0-9]*", GROUP="audio", MODE="0664"
 # USB Video devices (webcams, capture cards)
 SUBSYSTEM=="video4linux", GROUP="video", MODE="0664"
 KERNEL=="video[0-9]*", GROUP="video", MODE="0664"
+SUBSYSTEMS=="usb", ATTRS{bInterfaceClass}=="0e", ATTRS{bInterfaceSubClass}=="01", GROUP="video", MODE="0664"
 
 # USB Serial devices (modems)
 KERNEL=="ttyUSB[0-9]*", GROUP="dialout", MODE="0664"
