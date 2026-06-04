@@ -1,0 +1,539 @@
+#!/usr/bin/env bash
+#
+# dev-sync — unified, OPT-IN watch orchestrator for the CeraLive dev loop.
+#
+#   dev-sync (--all | --frontend | --backend | --native) [--debounce <ms>] [--dry-run]
+#
+# This is the "sync layer": a watch loop over the three first-party source trees
+# that ROUTES each change to the right component sync script. It does NOT itself
+# build or push — it only WATCHES + ROUTES + TIMES. The actual work lives in the
+# Task 11/12/13 scripts under lib/dev-sync/, which it invokes as SUBPROCESSES:
+#
+#   frontend  CeraUI/apps/frontend/src  →  lib/dev-sync/sync-frontend.sh
+#             (build + atomic static publish; NEVER restarts ceralive.service)
+#   backend   CeraUI/apps/backend/src   →  lib/dev-sync/sync-backend.sh
+#             (build + atomic binary deploy + health gate + rollback; restarts)
+#   native    ceracoder/src, srtla/src  →  lib/dev-sync/sync-native.sh
+#             (sysext build + refresh&&restart + A/B rollback; calls main "$@")
+#
+# WHY opt-in (not a daemon): this installs NO systemd unit and spawns NO
+# persistent background service. It is a foreground convenience loop a developer
+# runs in a terminal and stops with Ctrl-C. dev-push / the existing scripts are
+# untouched (this file only ORCHESTRATES them).
+#
+# WATCHER FALLBACK (no hard dependency on a single binary): prefer `watchexec`
+# (best: native debounce + .gitignore awareness + clean child-process handling),
+# then `entr`, then `inotifywait` (inotify-tools). If none is installed we die
+# with per-distro install instructions. The watcher only DETECTS changes; the
+# routed sync script does the rebuild.
+#
+# DEBOUNCE / COALESCE: rapid bursts of save events (editors write+rename+chmod)
+# are coalesced into ONE sync per quiet window (DEV_SYNC_DEBOUNCE_MS, default
+# 500ms). watchexec/entr coalesce natively; for inotifywait we drain the event
+# stream with a timed `read` until it goes quiet, then fire once.
+#
+# PER-COMPONENT TIMING: every routed sync is wrapped with a millisecond clock and
+# a `[TIMING] <component> = N.NNs` line (ok/FAILED), mirroring dev-push's report.
+#
+# SIGNALS: SIGINT/SIGTERM cleanly tear down every spawned watcher (and its child
+# process tree) before exiting 0 — no orphaned inotifywait/entr/watchexec left.
+#
+# DRY_RUN=1: print the full watch plan (dirs watched + script routed to + the
+# exact watcher command per component) and EXIT WITHOUT starting any watcher.
+#
+# Env knobs (all optional; mirror dev-push / the rest of dev-sync via config.sh):
+#   DRY_RUN=1                  print the plan, start no watchers.
+#   DEV_SYNC_DEBOUNCE_MS=500   coalesce window in milliseconds.
+#   DEV_SYNC_CERAUI_DIR        CeraUI workspace root (default <workspace>/CeraUI).
+#   CERACODER_SRC / SRTLA_SRC  native source checkouts (siblings; mirror dev-push).
+#   DEV_SYNC_NATIVE_ARGS       extra args forwarded to sync-native.sh (e.g.
+#                              "--from-deb /path" or "--staging /dir"; sync-native
+#                              needs a build input for a real — non-DRY_RUN — run).
+#   …plus every config.sh knob (SSH_USER, DEV_SYNC_TARGET_HOST/_IP, ignore globs…).
+#
+# shellcheck shell=bash
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
+SYNC_DIR="${HERE}/lib/dev-sync"
+
+# config.sh sources lib/common.sh (strict mode `set -euo pipefail`, the loud ERR
+# trap, loggers, die, require_cmd) and settles every DEV_SYNC_* / SSH_USER /
+# DRY_RUN knob + DEV_SYNC_WORKSPACE_ROOT and the DEV_SYNC_IGNORE_GLOBS[] array.
+# shellcheck source=lib/dev-sync/config.sh
+source "${SYNC_DIR}/config.sh"
+
+# ---------------------------------------------------------------------------
+# Loop configuration (env-overridable; sane defaults from the sibling layout).
+# ---------------------------------------------------------------------------
+DEV_SYNC_DEBOUNCE_MS="${DEV_SYNC_DEBOUNCE_MS:-500}"
+DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-${DEV_SYNC_WORKSPACE_ROOT}/CeraUI}"
+CERACODER_SRC="${CERACODER_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/ceracoder}"
+SRTLA_SRC="${SRTLA_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/srtla}"
+DEV_SYNC_NATIVE_ARGS="${DEV_SYNC_NATIVE_ARGS:-}"
+
+# Per-component watch roots. We watch ONLY source dirs (never build outputs) so a
+# sync's own artifacts can't re-trigger the watcher into a rebuild loop.
+FRONTEND_WATCH_DIRS=("${DEV_SYNC_CERAUI_DIR}/apps/frontend/src")
+BACKEND_WATCH_DIRS=("${DEV_SYNC_CERAUI_DIR}/apps/backend/src")
+NATIVE_WATCH_DIRS=("${CERACODER_SRC}/src" "${SRTLA_SRC}/src")
+
+# Watch-time ignore globs: the config.sh rsync ignores PLUS build-artifact noise
+# that lives inside watched src trees (e.g. ceracoder/src/*.o) and would otherwise
+# bounce the watcher. (watchexec also honours .gitignore, where these already are.)
+DEV_SYNC_WATCH_IGNORE=(
+  "${DEV_SYNC_IGNORE_GLOBS[@]}"
+  "*.o" "*.lo" "*.a" "*.obj" "*~"
+  "build/" "dist/" "target/" ".svelte-kit/"
+)
+
+# Populated by _dirs_for (bash can't return arrays); read immediately after.
+REPLY_DIRS=()
+# PIDs of the per-component watcher subshells (for signal cleanup).
+WATCHER_PIDS=()
+# Resolved watcher binary name ("watchexec"|"entr"|"inotifywait"|"").
+WATCHER=""
+
+# ---------------------------------------------------------------------------
+# Timing helpers — millisecond clock + human seconds (verbatim from dev-push).
+# ---------------------------------------------------------------------------
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fmt_s()  { awk -v ms="$1" 'BEGIN{ printf "%.2fs", ms/1000 }'; }
+_debounce_secs() { awk -v ms="${DEV_SYNC_DEBOUNCE_MS}" 'BEGIN{ printf "%.3f", ms/1000 }'; }
+
+usage() {
+  cat >&2 <<EOF
+Usage: dev-sync (--all | --frontend | --backend | --native) [--debounce <ms>] [--dry-run]
+
+Watch the first-party source trees and route each change to its sync script.
+
+Components (pick one or more; --all selects all three):
+  --frontend   watch CeraUI/apps/frontend/src → sync-frontend.sh (no restart)
+  --backend    watch CeraUI/apps/backend/src  → sync-backend.sh  (restart+health)
+  --native     watch ceracoder/src, srtla/src → sync-native.sh   (sysext refresh)
+  --all        watch all three
+
+Options:
+  --debounce <ms>   coalesce window in ms (default: ${DEV_SYNC_DEBOUNCE_MS})
+  --dry-run         print the watch plan + routing and start NO watchers
+  -h, --help        this help
+
+Watcher (auto, first available): watchexec → entr → inotifywait.
+Env: DRY_RUN, DEV_SYNC_DEBOUNCE_MS, DEV_SYNC_CERAUI_DIR, CERACODER_SRC, SRTLA_SRC,
+     DEV_SYNC_NATIVE_ARGS, plus all config.sh knobs. Ctrl-C stops all watchers.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# _validate_component <name> — die on anything but frontend/backend/native.
+# ---------------------------------------------------------------------------
+_validate_component() {
+  case "$1" in
+    frontend|backend|native) return 0 ;;
+    *) die "dev-sync: unknown component '$1' (frontend|backend|native)" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _dirs_for <component> — set REPLY_DIRS to that component's watch roots.
+# ---------------------------------------------------------------------------
+_dirs_for() {
+  case "$1" in
+    frontend) REPLY_DIRS=("${FRONTEND_WATCH_DIRS[@]}") ;;
+    backend)  REPLY_DIRS=("${BACKEND_WATCH_DIRS[@]}") ;;
+    native)   REPLY_DIRS=("${NATIVE_WATCH_DIRS[@]}") ;;
+    *) die "dev-sync: _dirs_for: unknown component '$1'" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _script_for <component> — printable "script + args" for the plan/logs.
+# ---------------------------------------------------------------------------
+_script_for() {
+  case "$1" in
+    frontend) printf '%s' "${SYNC_DIR}/sync-frontend.sh" ;;
+    backend)  printf '%s' "${SYNC_DIR}/sync-backend.sh" ;;
+    native)   printf '%s%s' "${SYNC_DIR}/sync-native.sh" "${DEV_SYNC_NATIVE_ARGS:+ ${DEV_SYNC_NATIVE_ARGS}}" ;;
+    *) die "dev-sync: _script_for: unknown component '$1'" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _route_component <component> — invoke the component's sync script as a
+# SUBPROCESS (never sourced — sync-native.sh runs main "$@" at its bottom).
+# We exec each via `bash <script>` rather than `<script>` directly: that is
+# still a clean subprocess (a fresh bash, NOT a source), but it is independent
+# of the file's executable bit (sync-backend.sh ships git mode 100644) and never
+# touches/chmods an existing script. sync-native gets DEV_SYNC_NATIVE_ARGS
+# word-split into argv (no eval).
+# ---------------------------------------------------------------------------
+_route_component() {
+  local component="$1"
+  case "${component}" in
+    frontend) bash "${SYNC_DIR}/sync-frontend.sh" ;;
+    backend)  bash "${SYNC_DIR}/sync-backend.sh" ;;
+    native)
+      local -a nargs=()
+      [[ -n "${DEV_SYNC_NATIVE_ARGS}" ]] && read -r -a nargs <<< "${DEV_SYNC_NATIVE_ARGS}"
+      bash "${SYNC_DIR}/sync-native.sh" "${nargs[@]}" ;;
+    *) die "dev-sync: _route_component: unknown component '${component}'" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _dev_sync_run_one <component> — the timed routing unit. Wrapped with a ms
+# clock; prints a [TIMING] line; returns the sync's exit status (the watch loops
+# tolerate a non-zero so a failed sync never stops watching). This is the target
+# of the internal `__sync` dispatch every watcher backend invokes.
+# ---------------------------------------------------------------------------
+_dev_sync_run_one() {
+  local component="$1" t0 t1 ms st=0
+  _validate_component "${component}"
+  log_info "dev-sync: change detected → [${component}] routing to $(_script_for "${component}")"
+  t0="$(now_ms)"
+  _route_component "${component}" || st=$?
+  t1="$(now_ms)"; ms=$(( t1 - t0 ))
+  if (( st == 0 )); then
+    log_success "dev-sync: [TIMING] ${component} = $(fmt_s "${ms}") (ok)"
+  else
+    log_error "dev-sync: [TIMING] ${component} = $(fmt_s "${ms}") (FAILED, exit ${st})"
+  fi
+  return "${st}"
+}
+
+# ---------------------------------------------------------------------------
+# _detect_watcher — echo the first available watcher (preference order) or "".
+# Never dies: the caller decides (DRY_RUN tolerates none; a real run requires one).
+# ---------------------------------------------------------------------------
+_detect_watcher() {
+  if command -v watchexec >/dev/null 2>&1; then
+    printf '%s' watchexec
+  elif command -v entr >/dev/null 2>&1; then
+    printf '%s' entr
+  elif command -v inotifywait >/dev/null 2>&1; then
+    printf '%s' inotifywait
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# _die_no_watcher — fatal: no watcher binary, with per-distro install guidance.
+# ---------------------------------------------------------------------------
+_die_no_watcher() {
+  die "dev-sync: no file watcher found. Install ONE of (preference order):
+  watchexec (preferred):  cargo install watchexec-cli | brew install watchexec | pacman -S watchexec | apt install watchexec
+  entr:                   apt install entr | brew install entr | pacman -S entr
+  inotify-tools:          apt install inotify-tools | pacman -S inotify-tools | brew install inotify-tools"
+}
+
+# ---------------------------------------------------------------------------
+# _glob_to_ere <glob> — convert a simple ignore glob to a POSIX ERE fragment
+# (substring-matched against the full path by inotifywait --exclude). A trailing
+# slash (dir glob) is dropped; `*`→`[^/]*`, `?`→`[^/]`, `.`→`\.`.
+# ---------------------------------------------------------------------------
+_glob_to_ere() {
+  local g="$1" out="" i ch
+  g="${g%/}"
+  for (( i = 0; i < ${#g}; i++ )); do
+    ch="${g:i:1}"
+    case "${ch}" in
+      '*') out+='[^/]*' ;;
+      '?') out+='[^/]' ;;
+      '.') out+='\.' ;;
+      *)   out+="${ch}" ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
+# ---------------------------------------------------------------------------
+# _build_ignore_ere — OR-join every DEV_SYNC_WATCH_IGNORE glob into one ERE for
+# inotifywait --exclude (a single regex; the flag does not stack).
+# ---------------------------------------------------------------------------
+_build_ignore_ere() {
+  local g parts=()
+  for g in "${DEV_SYNC_WATCH_IGNORE[@]}"; do
+    parts+=("$(_glob_to_ere "${g}")")
+  done
+  local IFS='|'
+  printf '(%s)' "${parts[*]}"
+}
+
+# ---------------------------------------------------------------------------
+# _existing_dirs <dir...> — echo (newline-sep) only the dirs that exist, so a
+# watcher never errors on a not-yet-cloned sibling (e.g. ceracoder/src absent).
+# ---------------------------------------------------------------------------
+_existing_dirs() {
+  local d
+  for d in "$@"; do
+    [[ -d "${d}" ]] && printf '%s\n' "${d}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# _list_watch_files <dir...> — files under <dir...> for the entr backend, with
+# common VCS/build/editor noise pruned (entr needs a concrete file list on stdin).
+# ---------------------------------------------------------------------------
+_list_watch_files() {
+  local -a roots=()
+  local d
+  for d in "$@"; do [[ -d "${d}" ]] && roots+=("${d}"); done
+  (( ${#roots[@]} > 0 )) || return 0
+  find "${roots[@]}" \
+    -type d \( -name .git -o -name node_modules -o -name build -o -name dist \
+               -o -name target -o -name .svelte-kit \) -prune -o \
+    -type f ! -name '*.o' ! -name '*.lo' ! -name '*.a' ! -name '*.obj' \
+                ! -name '*.swp' ! -name '*.tmp' ! -name '*~' ! -name '.DS_Store' \
+    -print
+}
+
+# ---------------------------------------------------------------------------
+# _plan_cmd <component> — the exact watcher command line this run WOULD execute
+# for <component>, for the DRY_RUN plan (purely descriptive; never run).
+# ---------------------------------------------------------------------------
+_plan_cmd() {
+  local component="$1" d s
+  _dirs_for "${component}"
+  case "${WATCHER}" in
+    watchexec)
+      s="watchexec --postpone --debounce ${DEV_SYNC_DEBOUNCE_MS}ms"
+      for d in "${REPLY_DIRS[@]}"; do s+=" --watch ${d}"; done
+      s+=" -- ${SELF} __sync ${component}"
+      printf '%s' "${s}" ;;
+    entr)
+      printf 'find %s -type f | entr -d -p %s __sync %s' \
+        "${REPLY_DIRS[*]}" "${SELF}" "${component}" ;;
+    inotifywait)
+      printf 'inotifywait -m -r -e modify,create,delete,move %s | debounce(%sms) → %s __sync %s' \
+        "${REPLY_DIRS[*]}" "${DEV_SYNC_DEBOUNCE_MS}" "${SELF}" "${component}" ;;
+    *)
+      printf '<no watcher installed — see install instructions>' ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# _print_watch_plan — dump dirs watched + script routed to + watcher command per
+# selected component. Shown both in DRY_RUN and (informationally) on a real start.
+# ---------------------------------------------------------------------------
+_print_watch_plan() {
+  log_info "================= dev-sync watch plan ================="
+  log_info "watcher    : ${WATCHER:-<none installed>}"
+  log_info "debounce   : ${DEV_SYNC_DEBOUNCE_MS}ms"
+  log_info "components : ${SELECTED[*]}"
+  log_info "DRY_RUN    : ${DRY_RUN}"
+  local component d
+  for component in "${SELECTED[@]}"; do
+    _dirs_for "${component}"
+    log_info "-------------------------------------------------------"
+    log_info "[${component}] watch:"
+    for d in "${REPLY_DIRS[@]}"; do
+      if [[ -d "${d}" ]]; then
+        log_info "    ${d}"
+      else
+        log_warn "    ${d}  (MISSING — will be skipped)"
+      fi
+    done
+    log_info "[${component}] route: $(_script_for "${component}")"
+    log_info "[${component}] cmd  : $(_plan_cmd "${component}")"
+  done
+  log_info "======================================================="
+}
+
+# ---------------------------------------------------------------------------
+# Watcher backends. Each runs in its own background subshell (one per component);
+# all invoke the SAME internal `${SELF} __sync <component>` unit so timing +
+# routing are identical regardless of which watcher won. Build/push happens in
+# that subprocess, not here.
+# ---------------------------------------------------------------------------
+
+# watchexec: native debounce + .gitignore awareness + clean child handling.
+# --postpone => run only on change (no sync at startup).
+_launch_watchexec() {
+  local component="$1"; shift
+  local -a dirs=("$@") wopts=() existing=()
+  mapfile -t existing < <(_existing_dirs "${dirs[@]}")
+  if (( ${#existing[@]} == 0 )); then
+    log_warn "dev-sync[${component}]: no existing watch dirs (${dirs[*]}); not watching"
+    return 0
+  fi
+  wopts=(--postpone --debounce "${DEV_SYNC_DEBOUNCE_MS}ms")
+  local d g
+  for d in "${existing[@]}"; do wopts+=(--watch "${d}"); done
+  for g in "${DEV_SYNC_WATCH_IGNORE[@]}"; do wopts+=(--ignore "${g}"); done
+  log_info "dev-sync[${component}]: watchexec ${existing[*]}"
+  watchexec "${wopts[@]}" -- "${SELF}" __sync "${component}"
+}
+
+# entr: -d exits (status 2) when a file is added/removed in a watched dir, so we
+# re-arm in a loop; -p postpones the first run (only fire on change).
+_launch_entr() {
+  local component="$1"; shift
+  local -a dirs=("$@")
+  local files
+  while :; do
+    files="$(_list_watch_files "${dirs[@]}")"
+    if [[ -z "${files}" ]]; then
+      log_warn "dev-sync[${component}]: no files under ${dirs[*]}; retry in 2s"
+      sleep 2; continue
+    fi
+    printf '%s\n' "${files}" | entr -d -p "${SELF}" __sync "${component}" || true
+    sleep 0.5   # brief pause before re-listing/re-arming
+  done
+}
+
+# inotifywait: monitor recursively; coalesce a burst by draining the event stream
+# with a timed read until it goes quiet for the debounce window, then fire once.
+_launch_inotifywait() {
+  local component="$1"; shift
+  local -a dirs=("$@") existing=()
+  mapfile -t existing < <(_existing_dirs "${dirs[@]}")
+  if (( ${#existing[@]} == 0 )); then
+    log_warn "dev-sync[${component}]: no existing watch dirs (${dirs[*]}); not watching"
+    return 0
+  fi
+  local ere secs
+  ere="$(_build_ignore_ere)"
+  secs="$(_debounce_secs)"
+  log_info "dev-sync[${component}]: inotifywait -r ${existing[*]} (debounce ${DEV_SYNC_DEBOUNCE_MS}ms)"
+  inotifywait -m -r -q \
+    -e modify -e create -e delete -e move -e close_write \
+    --exclude "${ere}" "${existing[@]}" \
+  | while read -r _; do
+      # Coalesce: every fresh event resets the timer; once quiet for <secs>, fire.
+      while read -r -t "${secs}" _; do :; done
+      "${SELF}" __sync "${component}" || true
+    done
+}
+
+# ---------------------------------------------------------------------------
+# _launch_watcher <component> — dispatch to the resolved watcher backend.
+# ---------------------------------------------------------------------------
+_launch_watcher() {
+  local component="$1"
+  _dirs_for "${component}"
+  case "${WATCHER}" in
+    watchexec)   _launch_watchexec   "${component}" "${REPLY_DIRS[@]}" ;;
+    entr)        _launch_entr        "${component}" "${REPLY_DIRS[@]}" ;;
+    inotifywait) _launch_inotifywait "${component}" "${REPLY_DIRS[@]}" ;;
+    *) die "dev-sync: _launch_watcher: no watcher resolved" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Signal handling — tear down every watcher (and its child process tree) on
+# SIGINT/SIGTERM, then exit 0. Wraps the `kill $(jobs -p)` pattern with a
+# recursive tree kill so no orphaned inotifywait/entr/watchexec survives.
+# ---------------------------------------------------------------------------
+_kill_tree() {
+  local pid="$1" child
+  if command -v pgrep >/dev/null 2>&1; then
+    while read -r child; do
+      [[ -n "${child}" ]] && _kill_tree "${child}"
+    done < <(pgrep -P "${pid}" 2>/dev/null)
+  fi
+  kill "${pid}" 2>/dev/null || true
+}
+
+_kill_watchers() {
+  local pids p
+  pids="$(jobs -p)"
+  if [[ -n "${pids}" ]]; then
+    for p in ${pids}; do _kill_tree "${p}"; done
+  fi
+  for p in "${WATCHER_PIDS[@]}"; do _kill_tree "${p}"; done
+  wait 2>/dev/null || true
+}
+
+_dev_sync_shutdown() {
+  trap - SIGINT SIGTERM
+  log_warn "dev-sync: stop signal received — stopping watchers…"
+  _kill_watchers
+  log_success "dev-sync: all watchers stopped. Bye."
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# main — parse flags, resolve the watcher, then either print the plan (DRY_RUN)
+# or start one background watcher per selected component and wait.
+# ---------------------------------------------------------------------------
+main() {
+  # Internal dispatch: a watcher backend re-invokes us as `dev-sync __sync <c>`.
+  # This keeps timing + routing identical across watchexec/entr/inotifywait.
+  if [[ "${1:-}" == "__sync" ]]; then
+    [[ -n "${2:-}" ]] || die "dev-sync __sync: missing <component>"
+    _dev_sync_run_one "$2"
+    exit $?
+  fi
+
+  SELECTED=()
+  local want_all=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)       want_all=1; shift ;;
+      --frontend)  SELECTED+=("frontend"); shift ;;
+      --backend)   SELECTED+=("backend"); shift ;;
+      --native)    SELECTED+=("native"); shift ;;
+      --debounce)  DEV_SYNC_DEBOUNCE_MS="${2:?--debounce needs <ms>}"; shift 2 ;;
+      --dry-run)   DRY_RUN=1; shift ;;
+      -h|--help)   usage; exit 0 ;;
+      --*)         usage; die "dev-sync: unknown option '$1'" ;;
+      *)           usage; die "dev-sync: unexpected argument '$1'" ;;
+    esac
+  done
+
+  [[ "${DEV_SYNC_DEBOUNCE_MS}" =~ ^[0-9]+$ ]] \
+    || die "dev-sync: --debounce must be an integer (ms), got '${DEV_SYNC_DEBOUNCE_MS}'"
+
+  # --all expands to every component (kept in canonical order).
+  if (( want_all )); then
+    SELECTED=(frontend backend native)
+  fi
+
+  if (( ${#SELECTED[@]} == 0 )); then
+    usage
+    die "dev-sync: pick at least one of --all / --frontend / --backend / --native"
+  fi
+
+  # De-duplicate while preserving canonical order (frontend, backend, native).
+  local component ordered=()
+  for component in frontend backend native; do
+    for sel in "${SELECTED[@]}"; do
+      if [[ "${sel}" == "${component}" ]]; then
+        ordered+=("${component}"); break
+      fi
+    done
+  done
+  SELECTED=("${ordered[@]}")
+
+  WATCHER="$(_detect_watcher)"
+
+  # DRY_RUN: print the plan (incl. the watcher command per component) and stop.
+  # No watcher is required to merely SHOW the plan.
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print_watch_plan
+    log_success "dev-sync: [DRY_RUN] plan printed; no watchers started."
+    exit 0
+  fi
+
+  # Real run: a watcher is mandatory.
+  [[ -n "${WATCHER}" ]] || _die_no_watcher
+
+  trap '_dev_sync_shutdown' SIGINT SIGTERM
+
+  _print_watch_plan
+
+  WATCHER_PIDS=()
+  for component in "${SELECTED[@]}"; do
+    _launch_watcher "${component}" &
+    WATCHER_PIDS+=("$!")
+    log_info "dev-sync: [${component}] watcher started (pid $!)"
+  done
+
+  log_success "dev-sync: watching [${SELECTED[*]}] via ${WATCHER} — press Ctrl-C to stop."
+  # Block until signalled (the trap exits 0). `|| true` guards the unlikely case
+  # of every watcher exiting on its own (e.g. all watch dirs vanished).
+  wait || true
+  log_warn "dev-sync: all watchers exited; nothing left to watch."
+}
+
+main "$@"
