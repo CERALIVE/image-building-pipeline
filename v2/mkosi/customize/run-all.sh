@@ -12,7 +12,7 @@
 # USAGE
 #   run-all.sh [SELECTOR | MODULE...]
 #     base      -> the BASE OS layer set: users
-#     runtime   -> the runtime/customize set: apt-ceralive-repo udev
+#     runtime   -> the runtime/customize set: apt-ceralive-repo udev quirks
 #                  networking-srtla sysctl-tuning services structure
 #     (no args) -> defaults to `runtime`
 #     MODULE... -> an explicit, space-separated list of module names (no .sh)
@@ -36,15 +36,17 @@ export CERALIVE_COMMON_SH
 source "${CERALIVE_COMMON_SH}"
 
 # Layer -> ordered module list. Order is load-bearing:
-#   apt-ceralive-repo first (sources/keyring), then hardware/udev, then the
-#   network routing + tuning, then services (which enable what the above set up),
+#   apt-ceralive-repo first (sources/keyring), then hardware/udev, then quirks
+#   (board hardware-quirk handlers that append to udev's rules file, so they run
+#   right after it), then the network routing + tuning, then services (which
+#   enable what the above set up),
 #   then the directory structure (chowns to the ceralive user from the base),
 #   then data-persistence (binds /opt/ceralive + /etc/NetworkManager + /var/log
 #   onto /data, so it must run after structure has created those dirs), then
 #   rauc-setup LAST — it installs the RAUC root-CA keyring + the OS-update client
 #   and pairs with the /data update.conf that data-persistence seeds.
 readonly BASE_MODULES="users"
-readonly RUNTIME_MODULES="apt-ceralive-repo udev networking-srtla sysctl-tuning services structure data-persistence rauc-setup"
+readonly RUNTIME_MODULES="apt-ceralive-repo udev quirks networking-srtla sysctl-tuning services structure data-persistence rauc-setup"
 
 resolve_modules() {
   case "${1:-runtime}" in
