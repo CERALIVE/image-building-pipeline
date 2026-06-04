@@ -1,0 +1,69 @@
+# .dev-sync.yaml — developer-workstation config for the dev-sync loop.
+#
+# Copy to `.dev-sync.yaml` (cwd, alongside the scripts, or at the workspace
+# root) and edit. This file lives ONLY on the developer's machine — dev-sync is
+# a convenience layer, so NOTHING here is ever written to the device's
+# RuntimeConfig or config.json.
+#
+# Precedence (highest wins): environment variable > this file > built-in default.
+# The matching env knob is noted on each field; the env names mirror dev-push
+# (DRY_RUN, SSH_USER, REMOTE_EXT_DIR) so muscle memory carries over.
+#
+# This is a DELIBERATELY minimal flat schema: scalar `key: value` pairs plus one
+# `ignore:` block list. No nesting, no anchors — config.sh's reader is not a full
+# YAML parser.
+
+# --- Target device -----------------------------------------------------------
+
+# mDNS .local name, tried FIRST. transport.sh resolves it via
+# avahi-resolve/getent/ping; on resolution OR ssh failure it falls back to
+# target_ip below.            env: DEV_SYNC_TARGET_HOST
+target_host: ceralive.local
+
+# Fallback IP used when the .local name can't be resolved/reached. Leave empty
+# if you only ever use mDNS.  env: DEV_SYNC_TARGET_IP
+target_ip: 192.168.1.50
+
+# --- SSH ----------------------------------------------------------------------
+
+# Remote user.                env: SSH_USER
+ssh_user: root
+
+# Private key for ssh -i. A leading ~/ is expanded. Empty = ssh-agent / default
+# identity.                   env: DEV_SYNC_SSH_KEY
+ssh_key: ~/.ssh/id_ed25519
+
+# SSH port (22 = omitted from the command line). env: DEV_SYNC_SSH_PORT
+ssh_port: 22
+
+# --- Remote paths -------------------------------------------------------------
+
+# Where sysext .raw extensions land (matches dev-push). env: REMOTE_EXT_DIR
+remote_ext_dir: /var/lib/extensions
+
+# Remote scratch dir for rsync --temp-dir (partial transfers never land in
+# place).                     env: DEV_SYNC_REMOTE_TMP
+remote_tmp: /tmp
+
+# Per-component remote destinations (override as your layout dictates).
+#                             env: DEV_SYNC_CERACODER_REMOTE
+ceracoder_remote: /var/lib/extensions
+#                             env: DEV_SYNC_SRTLA_REMOTE
+srtla_remote: /var/lib/extensions
+#                             env: DEV_SYNC_CERAUI_REMOTE
+ceraui_remote: /opt/ceralive
+
+# --- Loop behaviour -----------------------------------------------------------
+
+# End-to-end budget hint in seconds (consumed by higher-level loops).
+#                             env: DEV_SYNC_BUDGET
+budget: 120
+
+# rsync ignore globs (passed as --exclude=<glob>). Override via the
+# DEV_SYNC_IGNORE env knob (space/comma separated).
+ignore:
+  - ".git/"
+  - "node_modules/"
+  - "*.tmp"
+  - "*.swp"
+  - ".DS_Store"
