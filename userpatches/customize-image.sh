@@ -1,4 +1,9 @@
 #!/bin/bash
+# LEGACY: This is the ACTIVE image builder (v1 Armbian native).
+# Migration to v2/mkosi/ is in progress (see .github/workflows/v2-ci.yml).
+# Until v2 reaches parity, this file produces the shipping device images.
+# Do NOT delete until v2 CI produces real (non-DRY_RUN) images.
+#
 # CeraLive Image Customization Script for Armbian
 # This script runs in chroot environment during image creation
 
