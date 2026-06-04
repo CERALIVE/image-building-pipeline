@@ -36,6 +36,7 @@ image-building-pipeline/
 | Board/kernel customisation | `userpatches/` |
 | Armbian framework entry | `build.sh` lines ~379-492 |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| **Dev-sync live-reload loop** | [`v2/lib/dev-sync/README.md`](v2/lib/dev-sync/README.md) |
 
 ## KEY FACTS
 
