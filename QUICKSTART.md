@@ -313,6 +313,13 @@ jobs:
 4. **Configure automatic updates** for your deployed devices
 5. **Set up CI/CD** for automated image builds
 
+## Live Development
+
+After building your image, see the [Live Development Guide](../LIVE_DEVELOPMENT.md) for:
+- Local development with mock scenarios
+- Deploying to a device over SSH
+- Image build workflow and debugging common issues
+
 ## Getting Help
 
 - Check device-specific notes in `configs/devices/[device].conf`
