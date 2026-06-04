@@ -1,4 +1,9 @@
 #!/bin/bash
+# LEGACY: This script is NEVER INVOKED by any build path.
+# It was superseded by userpatches/customize-image.sh setup_hardware_access()
+# and then by v2/mkosi/customize/udev.sh (which is a superset of both).
+# Retained for historical reference only. Safe to delete when v2 is active.
+#
 set -euo pipefail
 
 # CeraUI USB Device Access Configuration
