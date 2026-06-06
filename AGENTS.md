@@ -11,7 +11,7 @@ and produces a flashable image for RK3588 targets (Orange Pi 5+, Radxa Rock 5B+)
 Relates to:
 - `cert-work/` — GPG signing key injected into image; mTLS certs baked in
 - `apt-worker/` — runtime apt source on device points to `apt.ceralive.tv` (Cloudflare R2)
-- `versions.yaml` — pin registry; `fetch-debs.sh` will read it after Task 24 wiring
+- `versions.yaml` — pin registry; `fetch-debs.sh` reads pin versions from `../versions.yaml` [EXISTS]
 
 ## STRUCTURE
 
@@ -55,9 +55,14 @@ REPOS=("srtla" "srt" "ceracoder" "CeraUI")
 - `R2_ACCESS_KEY_ID` set → fetch from R2 (`dists/{CHANNEL}/binary-{ARCH}/`)
 - unset → `gh release download` from GitHub releases
 
-**versions.yaml**
-After Task 24 wiring, `fetch-debs.sh` reads pin versions from `../versions.yaml`
-instead of resolving latest. Don't hardcode versions in the script.
+**versions.yaml** [EXISTS]
+`fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
+Don't hardcode versions in the script.
+
+**Build system: mkosi (`v2/`)** [EXISTS]
+The current build path is `v2/` using mkosi, producing reproducible `.raw` sysext bundles
+and `.raucb` A/B RAUC OTA packages. The Armbian `build.sh` flow is legacy/superseded.
+See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the canonical dev loop.
 
 ## ANTI-PATTERNS
 
