@@ -29,8 +29,21 @@ setup() {
   FAMILY_SCHEMA="$SCHEMA_DIR/family.schema.json"
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
   FIXTURES="$TESTS_DIR/manifests/fixtures"
-  # repo-root versions.yaml: v2 -> image-building-pipeline -> repo root.
-  VERSIONS_YAML="$(cd "$V2/../.." && pwd)/versions.yaml"
+  REPO_ROOT="$(cd "$V2/.." && pwd)"
+  # Locate the pin registry. Standalone CI checks out only this repo, so the
+  # canonical versions.yaml ships at the repo root (sibling of v2/). In the
+  # monorepo dev layout it also exists one level up (workspace root). Honour an
+  # explicit VERSIONS_YAML override first, then prefer the repo-root copy, then
+  # fall back to the workspace-root copy.
+  if [[ -z "${VERSIONS_YAML:-}" || ! -f "${VERSIONS_YAML:-}" ]]; then
+    if [[ -f "$REPO_ROOT/versions.yaml" ]]; then
+      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
+    elif [[ -f "$REPO_ROOT/../versions.yaml" ]]; then
+      VERSIONS_YAML="$(cd "$REPO_ROOT/.." && pwd)/versions.yaml"
+    else
+      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------------------
