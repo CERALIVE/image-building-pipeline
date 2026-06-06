@@ -135,17 +135,21 @@ The interactive mode automatically detects non-interactive environments (like CI
 
 ## Step 3: Flash the Image
 
-The build process creates branded image files in `images/[device]/[variant]/`: 
+The build process creates image artifacts in `images/[device]/[variant]/`. Current output formats:
+
+- **`.raw`** — raw disk image (standard variant, flash directly to SD/eMMC)
+- **`.raucb`** — RAUC OTA bundle (used for over-the-air updates)
 
 ```bash
-# Example output file
-images/orangepi5plus/standard/CERALIVE_orangepi5plus_bookworm_stable_20250922-120000.img
+# Example output files
+images/orangepi5plus/standard/CERALIVE_orangepi5plus_bookworm_stable_20250922-120000.raw
+images/orangepi5plus/standard/CERALIVE_orangepi5plus_bookworm_stable_20250922-120000.raucb
 ```
 
 ### Flash to SD Card:
 ```bash
-# Extract and flash (replace /dev/sdX with your SD card)
-sudo dd if="$(ls -1t images/orangepi5plus/standard/CERALIVE_*.img | head -n1)" of=/dev/sdX bs=4M status=progress conv=fsync
+# Flash the .raw image (replace /dev/sdX with your SD card)
+sudo dd if="$(ls -1t images/orangepi5plus/standard/CERALIVE_*.raw | head -n1)" of=/dev/sdX bs=4M status=progress conv=fsync
 sync
 ```
 
@@ -204,14 +208,14 @@ lsusb | grep -i modem
 
 ## Step 6: Install Your Custom Software
 
-Since your CeraUI components (ceraui, belacoder, srtla, srt) are distributed as .deb files:
+Since your CeraUI components (ceraui, ceracoder, srtla, srt) are distributed as .deb files:
 
 ```bash
 # Update package lists (includes your custom repo)
 sudo apt update
 
 # Install CeraUI components
-sudo apt install ceraui belacoder srtla srt
+sudo apt install ceraui ceracoder srtla srt
 
 # Enable CeraUI service
 sudo systemctl enable ceraui
@@ -315,7 +319,7 @@ jobs:
 
 ## Live Development
 
-After building your image, see the [Live Development Guide](../LIVE_DEVELOPMENT.md) for:
+After building your image, see the [Live Development Guide](v2/docs/dev-loop.md) for:
 - Local development with mock scenarios
 - Deploying to a device over SSH
 - Image build workflow and debugging common issues
@@ -323,7 +327,6 @@ After building your image, see the [Live Development Guide](../LIVE_DEVELOPMENT.
 ## Getting Help
 
 - Check device-specific notes in `configs/devices/[device].conf`
-- Review [BELABOX documentation](https://belabox.net/rk3588/) for hardware insights
 - Monitor build logs in `images/[device]/[variant]/build.log`
 - Test images in QEMU before flashing to hardware
 
