@@ -21,3 +21,6 @@ debs/
 *~
 Thumbs.db
 .cursor/
+
+# OpenCode agent state (local only)
+.omo/
