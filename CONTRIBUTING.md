@@ -11,18 +11,15 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 - Report bugs and edge cases (with logs and steps to reproduce)
 - Improve documentation (Quickstart, device notes, troubleshooting)
 - Add board support (configs, patches, testing notes)
-- Packaging (belacoder, srtla, srt, ceraui) and repo integration
+- Packaging (`ceracoder`, `srtla`, `srt`, `CeraUI`) and repo integration
 - Performance/latency tuning and power management
 - UI/UX feedback for first‑boot and management workflows
 
 ## Getting Started
 
 1. Fork the repo and create a feature branch
-2. Build locally with Docker (recommended):
-```bash
-./build.sh --device rock5bplus --environment docker --verbose
-```
-3. Test the image on hardware; collect logs under `armbian-build/output/logs/`
+2. Build locally — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the current mkosi-based dev loop
+3. Test the image on hardware; collect build logs from the mkosi output directory
 4. Submit a PR with a clear description and a checklist of what you tested
 
 ## Development Conventions
@@ -49,7 +46,7 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 ## PR Checklist
 
 - [ ] Builds locally with `--environment docker`
-- [ ] Tested on device(s); attach relevant logs (`output/logs/*.log`)
+- [ ] Tested on device(s); attach relevant build logs from mkosi output
 - [ ] Doesn’t add unnecessary packages/services
 - [ ] Updates docs if CLI or behavior changed
 - [ ] Passes shellcheck where practical
@@ -59,7 +56,7 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 Please include:
 - Device (e.g., Rock 5B+, Orange Pi 5+), media used (SD/eMMC)
 - Build command and commit hash
-- Logs from `armbian-build/output/logs/` (attach or paste relevant parts)
+- Build logs from the mkosi output directory (attach or paste relevant parts)
 - What you expected vs what happened
 
 ## Community and Conduct
