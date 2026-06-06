@@ -18,7 +18,7 @@ A comprehensive build pipeline for creating ready-to-use images for ARM-based st
 
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
-- **Custom software stack**: CeraUI, belacoder, srtla, srt via .deb packages
+- **Custom software stack**: `CeraUI`, `ceracoder`, `srtla`, `srt` via .deb packages
 - **Minimal system**: Debian-based with minimal apt sources
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Device support**: Automatic USB audio/video device detection and access
@@ -30,7 +30,7 @@ A comprehensive build pipeline for creating ready-to-use images for ARM-based st
 ┌─────────────────────────────────────────────────────────────┐
 │                    CeraUI Application                       │
 ├─────────────────────────────────────────────────────────────┤
-│  belacoder  │    srtla    │     srt     │   WiFi Manager   │
+│  ceracoder  │    srtla    │     srt     │   WiFi Manager   │
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
@@ -57,6 +57,14 @@ A comprehensive build pipeline for creating ready-to-use images for ARM-based st
 - **Local**: Native Linux build with cross-compilation support
 - **Docker**: Containerized build for consistent environments
 - **CI/CD**: Automated builds with testing and distribution
+
+## Armbian Build (Superseded)
+
+The original Armbian native build produced `.img` files via a root-level `build.sh` flow.
+This approach has been superseded by the `v2/` mkosi build system, which produces
+reproducible `.raw` sysext bundles and `.raucb` A/B RAUC OTA packages from a layered source.
+Note: `build-armbian.sh` does not exist; `build.sh` is the legacy entry point (now inert).
+For the current build path, see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
 
 ## Directory Structure
 
@@ -104,7 +112,7 @@ The build script provides a **clean interactive menu** with:
 All custom components are distributed via .deb packages from our repository:
 
 - **CeraUI**: Main streaming application UI
-- **belacoder**: Hardware-accelerated encoding with GStreamer integration  
+- **ceracoder**: Hardware-accelerated encoding with GStreamer integration
 - **srtla**: SRT Link Aggregation implementation
 - **srt**: Custom SRT implementation
 
