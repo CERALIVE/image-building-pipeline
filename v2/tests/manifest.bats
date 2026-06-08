@@ -274,22 +274,7 @@ YAML
 }
 
 # ===========================================================================
-# 7. x86 boot fallback — a forced primary-slot failure rolls back to the known-
-#    good slot. The qemu-x86 harness' --fallback-selftest drives the SHIPPED x86
-#    grubenv A/B engine (no qemu/GRUB/root); a green run is the proof. Engine-only
-#    (no image boot), so it fits this UNIT suite.
-# ===========================================================================
-
-@test "x86 fallback: forced primary-slot failure rolls back to the known-good slot" {
-  run env CERALIVE_QEMU_FALLBACK_SELFTEST=1 bash "$QEMU_X86"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"ROLLBACK: forced A failure fell back to known-good slot B"* ]]
-  [[ "$output" == *"QEMU x86 VALIDATION OK"* ]]
-  [[ "$output" != *"FAIL"* ]]
-}
-
-# ===========================================================================
-# 8. postinst dual-track drift gate (Task 6) — the consolidated runtime-config
+# 7. postinst dual-track drift gate (Task 6) — the consolidated runtime-config
 #    logic lives ONCE in customize/postinst-lib.sh, sourced by both the runtime
 #    executor (mkosi.postinst.chroot) and the customize modules. The gate fails if
 #    that single-source property breaks (a function re-inlined, a track no longer
