@@ -1,49 +1,143 @@
 #!/usr/bin/env bash
 #
-# app/mkosi.postinst.chroot — APPLICATION layer (Stage 2: PLACEHOLDER).
+# app/mkosi.postinst.chroot — APPLICATION layer (Stage 3): install first-party apps.
 #
-# Runs INSIDE the app tree (via mkosi-chroot) after the finished OS runtime tree
-# is in place. This is where the first-party CeraLive applications WILL install in
-# Stage 3 (tasks 22-23):
-#   * ceracoder / srtla  → /usr/bin (sysext-friendly; the system libsrt they link
-#                          against is already in the Runtime OS slot — App stays small)
-#   * CeraUI             → /opt/ceralive + /var (appfs/.deb; heavy /etc + /var/www
-#                          footprint, so NOT a sysext — redesign Task 0d boundary map)
-#   * CERALIVE/srt .deb  → the first-party libsrt FORK (distinct from the Runtime
-#                          system libsrt1.5-openssl) — see LAYER-MAP.md §libsrt
+# Runs INSIDE the app tree (via mkosi-chroot) after the finished OS runtime tree is
+# in place (app/mkosi.conf: BaseTrees=%O/runtime). The orchestrator stages the
+# first-party .debs at FIRST_PARTY_DIR via an mkosi ExtraTree (lib/orchestrate.sh:
+# --extra-tree <firstparty>:/opt/ceralive-staging). This script installs them into
+# the rootfs, then drops the staging tree so it never ships.
 #
-# STATUS (Stage 2): PLACEHOLDER — installs NOTHING. It only performs staging
-# hygiene so the four-layer chain composes cleanly today. The orchestrator stages
-# the first-party .debs at FIRST_PARTY_DIR via an mkosi ExtraTree; Stage 3 replaces
-# the placeholder body below with the real dpkg/apt-get install + sysext packaging.
+# WHAT INSTALLS HERE (LAYER-MAP.md §Layer 4):
+#   * ceracoder / srtla / CERALIVE-srt fork  — SYSEXT-class: pure /usr binaries (+
+#       the libsrt FORK .so) that link the SYSTEM libsrt already in the Runtime OS
+#       slot (libsrt1.5-openssl), so the app footprint stays small. Their OTA UPDATE
+#       delivery is a systemd-sysext .raw that overlays /usr at runtime
+#       (v2/mkosi/app/build-{ceracoder,srtla}-sysext.sh).
+#   * CeraUI (ceralive-device .deb)           — APPFS-class: a full-filesystem payload
+#       (/usr/local/bin + /etc + /var/www) that CANNOT be a sysext — a sysext merges
+#       only /usr+/opt, never /etc or /var. Its OTA delivery is the appfs backend
+#       (v2/mkosi/app/build-ceraui-appfs.sh). Moving CeraUI to sysext is a
+#       CeraUI-REPO change, explicitly OUT OF SCOPE — v2/docs/deferred-ceraui-sysext.md.
 #
-# STRICT: set -euo pipefail, NO `|| true` swallowing (common.sh DESIGN RULE).
+# IN-IMAGE install is `apt-get install` for BOTH classes: the BASE IMAGE bakes every
+# first-party .deb into the rootfs (docs/partition-contract.md §4 "No appfs": app
+# .debs live in the rootfs, atomic with the RAUC slot; a later sysext refresh merely
+# shadows the baked-in binary). The sysext/appfs split is the OTA-delivery contract,
+# NOT an in-image install difference — so it is reflected here only in classification
+# + logging, while one apt-get transaction installs all .debs (apt resolves the
+# inter-deps, e.g. ceracoder Depends: srtla, and pulls the rest — gstlibuvch264src,
+# libgstreamer* — from the Runtime-written sources: bookworm main + apt.ceralive.tv).
+#
+# OFFLINE/DEV builds stage NO first-party .debs (fetch-debs dry-run) — this script
+# then installs nothing and the image stays headless-clean (same graceful pattern as
+# the runtime layer's setup_hawkbit_updater). The parity gate WARNs about the absent
+# first-party packages in that mode, by design (non-vacuity / deferral pattern).
+#
+# STRICT: set -euo pipefail, NO `|| true` swallowing (common.sh DESIGN RULE). A
+# staged-but-unsatisfiable .deb fails the build LOUDLY — never a half-image.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[app] %s\n' "$*" >&2; }
+die() { printf '[app] FATAL: %s\n' "$*" >&2; exit 1; }
 
-# Where the orchestrator drops the first-party .debs (mkosi ExtraTree). Consumed
-# by Stage 3; for now we only ensure it never ships in the placeholder image.
+# Where the orchestrator drops the first-party .debs (mkosi ExtraTree).
 FIRST_PARTY_DIR="/opt/ceralive-staging"
 
-main() {
-  log "APPLICATION layer placeholder (Stage 2) — first-party apps install in Stage 3 (tasks 22-23)"
+# First-party package classes, keyed by Debian Package: name. The DELIVERY backend
+# differs per class (sysext .raw vs appfs payload) but the in-image install is
+# apt-get for both — see header. rauc-hawkbit-updater is NOT a first-party app: it
+# is the runtime layer's OTA backport (setup_hawkbit_updater), so it is skipped here
+# if it happens to share the staging dir.
+SYSEXT_APP_PKGS="ceracoder srtla srt"
+APPFS_APP_PKGS="ceralive-device"
 
-  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
-    log "first-party .debs are staged at ${FIRST_PARTY_DIR}:"
-    ls -la "${FIRST_PARTY_DIR}"/*.deb >&2
-    log "NOT installing them yet — deferred to Stage 3. Dropping the staging tree so the placeholder image stays clean."
-  else
-    log "no first-party .debs staged (offline/dev build) — nothing to defer."
+# Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
+# wrongly-pruned .deb fails loudly instead of shipping an app that cannot encode/bond
+# (non-vacuity, mirroring v2/mkosi/app/sysext-build.lib.sh's required-binary guard).
+# `srt` carries the libsrt FORK shared object (a library, no /usr/bin binary), so it
+# has no entry here — it is still installed, just not binary-asserted.
+declare -A REQUIRED_BINARIES=(
+  [ceracoder]="/usr/bin/ceracoder"
+  [srtla]="/usr/bin/srtla_send /usr/bin/srtla_rec"
+)
+
+# ---------------------------------------------------------------------------
+# install_first_party_apps — classify + install every staged first-party .deb in
+# ONE apt-get transaction, then assert the sysext-class binaries actually landed.
+# ---------------------------------------------------------------------------
+install_first_party_apps() {
+  local deb pkg
+  local -a debs=() installed_pkgs=()
+  shopt -s nullglob
+  for deb in "${FIRST_PARTY_DIR}"/*.deb; do
+    pkg="$(dpkg-deb -f "${deb}" Package)"
+    [[ -n "${pkg}" ]] || die "cannot read Package: field from ${deb}"
+    if [[ " ${pkg} " == *" rauc-hawkbit-updater "* ]]; then
+      log "skip ${pkg} — OTA backport owned by the runtime layer (setup_hawkbit_updater)"
+      continue
+    fi
+    if [[ " ${SYSEXT_APP_PKGS} " == *" ${pkg} "* ]]; then
+      log "sysext-class : ${pkg}  ($(basename "${deb}"))"
+    elif [[ " ${APPFS_APP_PKGS} " == *" ${pkg} "* ]]; then
+      log "appfs-class  : ${pkg}  ($(basename "${deb}"))"
+    else
+      log "first-party  : ${pkg}  ($(basename "${deb}")) [unclassified — installed as-is]"
+    fi
+    debs+=("${deb}")
+    installed_pkgs+=("${pkg}")
+  done
+  shopt -u nullglob
+
+  if (( ${#debs[@]} == 0 )); then
+    log "first-party staging held only non-app .debs — nothing to install in the app layer"
+    return 0
   fi
 
-  # Staging hygiene: the staging tree must never ship in the image. Stage 3 will
-  # consume it (dpkg -i) BEFORE removing it; the placeholder simply removes it.
+  log "installing ${#debs[@]} first-party .deb(s) via apt-get (deps resolved from bookworm + apt.ceralive.tv)"
+  apt-get update
+  apt-get install -y --no-install-recommends "${debs[@]}"
+
+  assert_sysext_binaries "${installed_pkgs[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# assert_sysext_binaries <installed_pkg...> — for each sysext-class package we
+# installed, verify its REQUIRED_BINARIES are present + executable. Loud die on a
+# gap so a broken .deb never ships as a silently-unstartable app.
+# ---------------------------------------------------------------------------
+assert_sysext_binaries() {
+  local pkg bin bins missing=()
+  for pkg in "$@"; do
+    bins="${REQUIRED_BINARIES[$pkg]:-}"
+    [[ -n "${bins}" ]] || continue
+    # shellcheck disable=SC2086  # split the space-separated binary list on purpose
+    for bin in ${bins}; do
+      [[ -x "${bin}" ]] || missing+=("${pkg}:${bin}")
+    done
+  done
+  if (( ${#missing[@]} > 0 )); then
+    die "first-party install incomplete — missing/non-executable binaries: ${missing[*]}"
+  fi
+  log "sysext-class binaries verified present (ceracoder / srtla_send / srtla_rec where staged)"
+}
+
+main() {
+  log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
+
+  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
+    install_first_party_apps
+  else
+    log "no first-party .debs staged at ${FIRST_PARTY_DIR} (offline/dev build) — installing nothing"
+  fi
+
+  # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
+  # consumes it (apt-get install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
 
-  log "APPLICATION layer placeholder complete (no applications installed)"
+  log "APPLICATION layer complete"
 }
 
 main "$@"

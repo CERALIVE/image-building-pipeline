@@ -152,9 +152,10 @@ emit_dpkg_status() {                         # emit_dpkg_status <out>
       done < <(extract_conf_array "${CERAUI_BASE_CONF}" "${arr}")
     done
   fi
-  # Aliases parity-check maps + Armbian-BSP + first-party → list as installed so
-  # the synthetic rootfs is an all-PASS reference (no spurious WARNs offline).
-  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceraui belacoder srtla srt; do
+  # Alias TARGETS parity-check maps to (media-ctl→v4l-utils, belacoder→ceracoder,
+  # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
+  # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
+  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device ceracoder srtla srt; do
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done
 }
