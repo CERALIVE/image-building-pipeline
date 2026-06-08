@@ -272,3 +272,45 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" == *"not found"* ]]
 }
+
+# ===========================================================================
+# 7. postinst dual-track drift gate (Task 6) — the consolidated runtime-config
+#    logic lives ONCE in customize/postinst-lib.sh, sourced by both the runtime
+#    executor (mkosi.postinst.chroot) and the customize modules. The gate fails if
+#    that single-source property breaks (a function re-inlined, a track no longer
+#    sourcing the lib, the §6 SRTLA payloads diverging, or postinst regrowing past
+#    its ceiling). Pure static analysis — no chroot/build — so it fits this suite.
+# ===========================================================================
+
+@test "postinst drift: clean tree has no dual-track drift (single source of truth)" {
+  run bash "$V2/ci/postinst-drift-check.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT: no drift"* ]]
+  [[ "$output" != *"FAIL"* ]]
+}
+
+@test "postinst drift: gate CATCHES a re-inlined consolidated function (non-vacuity)" {
+  local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  local backup="$BATS_TEST_TMPDIR/postinst.bak"
+  cp "$postinst" "$backup"
+  # Re-introduce the exact dual-track hazard the consolidation removed: an inline
+  # twin of a consolidated function in the runtime executor.
+  printf '\nsetup_data_persistence() { log "re-inlined twin (drift)"; }\n' >> "$postinst"
+  run bash "$V2/ci/postinst-drift-check.sh"
+  cp "$backup" "$postinst"          # ALWAYS restore, pass or fail
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"RE-INLINED"* ]]
+  [[ "$output" == *"setup_data_persistence"* ]]
+}
+
+@test "postinst drift: gate CATCHES a divergent §6 SRTLA payload (non-vacuity)" {
+  local netsrtla="$V2/mkosi/customize/networking-srtla.sh"
+  local backup="$BATS_TEST_TMPDIR/networking-srtla.bak"
+  cp "$netsrtla" "$backup"
+  # Diverge one inline copy of the dual-track SRTLA routing payload.
+  sed -i 's/^110[[:space:]]\+wlan_bond$/111     wlan_bond/' "$netsrtla"
+  run bash "$V2/ci/postinst-drift-check.sh"
+  cp "$backup" "$netsrtla"          # ALWAYS restore
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DIVERGED"* ]]
+}
