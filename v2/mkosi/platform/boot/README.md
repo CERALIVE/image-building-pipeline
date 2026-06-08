@@ -35,11 +35,30 @@ shell — the whole point of the format:
 BOOT_ORDER=A B      # slot bootnames, priority order; head = primary
 BOOT_A_LEFT=3       # remaining boot attempts for slot A (3->2->1->0)
 BOOT_B_LEFT=3       # remaining boot attempts for slot B
+BOOT_CRC=697809624  # POSIX cksum of the three lines above (corruption guard)
 ```
 
 A slot is **good** while it is in `BOOT_ORDER` and its `*_LEFT > 0`; **bad** once the
 counter hits 0 (or it is dropped from `BOOT_ORDER`). This is exactly RAUC's u-boot
 adapter semantics — only the backend storage differs.
+
+### Atomic write + corruption safety
+
+A power-loss mid-rewrite of this FAT file is the one failure that could brick the
+device, so `ceralive-boot-state` writes it defensively:
+
+- **Atomic write** — the full file is staged on tmpfs (`/run`, env-overridable via
+  `CERALIVE_BOOT_STATE_STAGEDIR`) and landed on the fragile vfat in a **single
+  `mv -f`**, so the slow partition is touched exactly once per update.
+- **CRC guard** — `BOOT_CRC` is the POSIX `cksum` of the three data lines. On read,
+  a truncated / empty / missing / byte-flipped (bad-CRC) file is detected and the
+  helper falls back to the **safe defaults** (`BOOT_ORDER=A B`, both budgets full)
+  **and rewrites a clean file**. It never aborts the boot path.
+- **U-Boot interop** — the in-U-Boot selector rewrites `boot_state.txt` via
+  `env export`, which cannot emit a checksum. A well-formed file **without** a
+  `BOOT_CRC` line is therefore trusted (not reset) so the bootcount the bootloader
+  just decremented survives the next userspace read. `env import -t` ignores the
+  extra `BOOT_CRC` var, so the file stays readable by both halves.
 
 ## How rollback happens
 
@@ -100,14 +119,16 @@ last-resort boots A.
 ## Test
 
 ```
-v2/mkosi/platform/boot/test-fallback.sh   # 53 assertions, no hardware/root
+v2/mkosi/platform/boot/test-fallback.sh   # 71 assertions, no hardware/root
 ```
 
 Proves: fresh A/B state; 3 failed boots of A → counter 3→2→1→0 → **fallback to B**;
 RAUC backend roundtrip; `mark-good` reset; single-slot has no phantom B; board
-specifics differ per board (not hardcoded); `system.conf` shape; and that
+specifics differ per board (not hardcoded); `system.conf` shape; that
 `boot.scr.cmd` statically matches the tested engine (decrement + fatwrite +
-manifest console/fdtfile + PARTLABEL slot select).
+manifest console/fdtfile + PARTLABEL slot select); and corruption resilience —
+truncated / empty / missing / bad-CRC files yield the safe defaults + a clean
+rewrite (never a crash), while a well-formed no-CRC file is trusted.
 
 ## Deferred / related
 
