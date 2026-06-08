@@ -7,7 +7,7 @@
 >
 > Tasks 25, 26, and 30 depend on this contract being frozen before Stage 1 builds begin.
 >
-> Contract version: **v1** · Date frozen: 2025-06-02 · Evidence: [`.omo/evidence/task-8-partitions.md`](../../.omo/evidence/task-8-partitions.md)
+> Contract version: **v1** · Date frozen: 2025-06-02
 
 ---
 
@@ -164,6 +164,5 @@ Notes:
 Any change to a size, label, slot role, the threshold N, or the `/data` contract is a
 **breaking, fleet-wide re-flash** event. Such a change MUST:
 
-1. bump the contract version (v1 → v2) at the top of this file,
-2. update `.omo/evidence/task-8-partitions.md` arithmetic, and
-3. be coordinated with a mass re-flash — there is no in-place migration path for the GPT.
+1. bump the contract version (v1 → v2) at the top of this file, and
+2. be coordinated with a mass re-flash — there is no in-place migration path for the GPT.

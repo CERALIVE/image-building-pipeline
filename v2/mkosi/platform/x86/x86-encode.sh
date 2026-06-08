@@ -2,7 +2,7 @@
 #
 # x86-encode.sh — set up the CeraLive x86 video-encode path (task 33, decision D1).
 #
-# DECISION D1 (locked, .omo/.../decisions.md §D1; evidence task-3-ceracoder-x86):
+# DECISION D1 (locked):
 # ceracoder is ENCODER-AGNOSTIC — the encode element is runtime-selected from a TEXT
 # pipeline file (gst_parse_launch), not compiled in. There is NO ceracoder source
 # change for x86 and NO MPP dependency. x86 supports FULL bonded streaming:

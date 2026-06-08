@@ -3,7 +3,7 @@
 # customize/postinst-lib.sh — SINGLE SOURCE OF TRUTH for the runtime customization
 # logic that used to be duplicated ("dual-track") between the wired runtime
 # executor mkosi.images/runtime/mkosi.postinst.chroot and the decomposed
-# customize/*.sh modules (see Task 6 / .omo/evidence/task-6-*).
+# customize/*.sh modules (see Task 6).
 #
 # It is SOURCED (never executed) by:
 #   * mkosi.images/runtime/mkosi.postinst.chroot — via "${SRCDIR}/customize/
@@ -321,7 +321,7 @@ EOF
   cat >/usr/local/bin/ceralive-update <<EOF
 #!/bin/bash
 # CeraLive OS update entrypoint — invoked by CeraUI system.startUpdate() (target
-# wiring; see .omo/evidence/task-30-persist.md). Installs a RAUC bundle whose URL
+# wiring). Installs a RAUC bundle whose URL
 # is read from persistent /data; the post-reboot mark-good is the task-29 gate.
 set -euo pipefail
 CONF="${data_root}/ceralive/update.conf"

@@ -4,8 +4,8 @@
 # Second platform family. Proves "new family = one YAML" — but x86 is a
 # *fundamentally* different platform from rk3588 (no Armbian BSP, no U-Boot,
 # no device tree, EFI/GRUB boot), so it also required a one-time, additive
-# generalisation of the (previously rk3588/ARM-centric) schema. See
-# .omo/evidence/task-32-x86-manifest.txt for the schema-delta + rationale.
+# generalisation of the (previously rk3588/ARM-centric) schema; the
+# schema-delta + rationale were captured during the x86 manifest bring-up.
 #
 # Decision D1 (task 3, locked): ceracoder is encoder-AGNOSTIC — the encode
 # element is runtime-selected from a text pipeline file, not compiled in.
@@ -14,8 +14,8 @@
 # The Intel N100 pipelines (ceracoder/pipeline/n100/*) invoke qsvh265enc /
 # qsvh264dec / vajpegdec.
 #
-# Sources: D1 evidence (.omo/evidence/task-3-ceracoder-x86.md per decisions.md
-# §D1), ceracoder/docs/dependencies.md:59-94, ceracoder/pipeline/{n100,generic}/*.
+# Sources: D1 (x86 ceracoder encode decision),
+# ceracoder/docs/dependencies.md:59-94, ceracoder/pipeline/{n100,generic}/*.
 
 # mkosi architecture identifier (consumed by mkosi --architecture; orchestrate.sh).
 # mkosi has NO 'amd64' — the x86 identifier is 'x86-64' (learnings task 13). The

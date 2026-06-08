@@ -6,7 +6,7 @@
 # + the hardware-group additions of setup_hardware_access() (L274-280).
 #
 # UNIFIED NAMING: v1 created the user `ceraui`; v2 unifies on `ceralive`
-# (see .omo/notepads/image-platform-redesign — "ceraui → ceralive rename").
+# (the "ceraui → ceralive" rename).
 #
 # LAYER: this module MUST run in the BASE OS layer (base/mkosi.finalize) so the
 # `ceralive` account exists in the base rootfs BEFORE the sysext app layer

@@ -11,7 +11,7 @@
 # that "dual-tracked" the inline twins in the wired runtime executor
 # mkosi.images/runtime/mkosi.postinst.chroot and silently drifted from them. Both
 # tracks now share postinst-lib.sh, and v2/ci/postinst-drift-check.sh fails CI if
-# an inline twin is ever reintroduced. See .omo/evidence/task-6-*.
+# an inline twin is ever reintroduced.
 #
 # The decomposition is functionally unchanged from v1
 # (userpatches/customize-image.sh): configure_services() L511-542, the service/

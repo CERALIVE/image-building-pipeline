@@ -11,7 +11,7 @@
 # mkosi.images/runtime/mkosi.postinst.chroot (e.g. the migrate script's /data
 # skeleton diverged: cert-incoming / rauc-downloads / hawkbit-updater dirs). Both
 # tracks now share postinst-lib.sh; v2/ci/postinst-drift-check.sh fails CI if an
-# inline twin is reintroduced. See .omo/evidence/task-6-*.
+# inline twin is reintroduced.
 #
 # WHY (Stage 4, task 30): the two rootfs slots (rootfs_a / rootfs_b) are
 # overwritten atomically by a RAUC update — anything written into a slot is lost

@@ -139,5 +139,3 @@ the runtime OS slot's `/usr/lib`.
 - `v2/mkosi/LAYER-MAP.md` §Layer 4 (app) and §libsrt — layer boundaries
 - `CeraUI/scripts/build/build-debian-package.sh` — the `.deb` layout to change
 - `ARCHITECTURE.md` §5 — `link:../../../` sibling-checkout requirement
-- `.omo/notepads/image-platform-redesign/learnings.md` — task-4 sysext boundary,
-  task-21 backend contract, bookworm-systemd-252 / confext-253 constraint
