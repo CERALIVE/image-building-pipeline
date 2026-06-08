@@ -275,10 +275,12 @@ main() {
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
   # -------------------------------------------------------------------------
-  # 8. Parity verification vs configs/base/ceraui-base.conf. NOTE (Stage 2): the
-  #    app layer is a placeholder, so first-party apps are not installed yet —
-  #    this gate will report ceracoder/srtla/CeraUI gaps until Stage 3 (tasks
-  #    22-23) wires the app install. Intended, documented in LAYER-MAP.md.
+  # 8. Parity verification vs configs/base/ceraui-base.conf. The app layer now
+  #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
+  #    CI mode (debs fetched) the gate clears the first-party check via the
+  #    ceraui→ceralive-device / belacoder→ceracoder aliases in parity-check.sh. An
+  #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
+  #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
   # -------------------------------------------------------------------------
   log_info "[7/8] verifying parity vs configs/base/ceraui-base.conf"
   "${PARITY_CHECK_SH}" "${rootfs_tree}" \

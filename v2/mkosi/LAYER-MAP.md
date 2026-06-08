@@ -106,26 +106,35 @@ the **app** layer (Stage 3) — do not conflate the two.
 
 ---
 
-## Layer 4 — APP (`mkosi.images/app/`)  ← arch-IDENTICAL · **PLACEHOLDER in Stage 2**
+## Layer 4 — APP (`mkosi.images/app/`)  ← arch-IDENTICAL · **Stage 3: REAL INSTALL**
 
 **What:** the first-party CeraLive applications, on top of `runtime`.
 
-| Will install (Stage 3, tasks 22-23) | Delivery |
-|---|---|
-| `ceracoder`, `srtla` | `/usr/bin` (sysext-friendly; link the runtime system libsrt) |
-| `CeraUI` | `/opt/ceralive` + `/var` (appfs/`.deb`; heavy `/etc`+`/var/www` → not sysext, per redesign Task 0d) |
-| CERALIVE/srt fork `.deb` | the first-party libsrt fork (distinct from the runtime system libsrt) |
+| Installs (the `.deb`) | In-image path | OTA-delivery backend |
+|---|---|---|
+| `ceracoder`, `srtla` | `/usr/bin` (link the runtime system libsrt) | sysext `.raw` (`mkosi/app/build-{ceracoder,srtla}-sysext.sh`) |
+| `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
+| CERALIVE/srt fork `.deb` | the first-party libsrt fork `/usr/lib` (distinct from the runtime system libsrt) | rides the sysext class |
 
-**STATUS (Stage 2): PLACEHOLDER — installs nothing.** `mkosi.images/app/mkosi.conf`
-+ `mkosi.postinst.chroot` establish the layer boundary so the four-layer model is
-explicit and buildable now; the placeholder postinst only performs staging hygiene
-(drops `/opt/ceralive-staging` so it never ships). The real install lands in
-Stage 3. Consequently the parity gate reports `ceracoder/srtla/CeraUI` gaps until
-Stage 3 — **intended**, matching the project's non-vacuity/deferral pattern.
+**STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
+every staged first-party `.deb` (`apt-get install` from `/opt/ceralive-staging`, deps
+resolved from bookworm + `apt.ceralive.tv`), asserts the `ceracoder`/`srtla_send`/
+`srtla_rec` binaries landed, then drops the staging tree so it never ships. **The base
+image bakes each `.deb` into the rootfs** (`docs/partition-contract.md` §4 "No appfs":
+atomic with the RAUC slot); the **sysext/appfs split is the OTA-delivery contract**, not
+an in-image install difference (a later sysext refresh merely shadows the baked-in
+binary). In CI (`.debs` fetched) the parity gate clears the first-party check via the
+`ceraui→ceralive-device` / `belacoder→ceracoder` aliases in `lib/parity-check.sh`; an
+**offline/dev build stages no `.debs`** → installs nothing → the gate WARNs on the
+absent first-party packages, by design (non-vacuity/deferral pattern).
 
 **WHY a separate layer:** apps update independently of the OS (sysext / appfs),
 while libsrt + the OS update atomically via RAUC. Keeping apps out of runtime keeps
 app images small and the OS slot stable.
+
+**OUT OF SCOPE here:** moving CeraUI from appfs to sysext — a CeraUI-REPO change
+fully specified in `v2/docs/deferred-ceraui-sysext.md` (units/udev/config/www must
+first relocate off `/etc`+`/var`). Do not implement it in this pipeline.
 
 ---
 
