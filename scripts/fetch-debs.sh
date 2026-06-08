@@ -12,7 +12,7 @@
 # Local mode (no R2 credentials):
 #   Fetches from GitHub releases using gh CLI
 
-set -e
+set -euo pipefail
 
 CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-arm64}"
@@ -44,13 +44,18 @@ for _r in "${REPOS[@]}"; do
 done
 echo ""
 
-if [[ -n "$R2_ACCESS_KEY_ID" ]]; then
+if [[ -n "${R2_ACCESS_KEY_ID:-}" ]]; then
     echo "CI mode: Fetching from R2..."
-    
-    # Configure AWS CLI for R2
-    aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
-    aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
-    
+
+    [[ -n "${R2_SECRET_ACCESS_KEY:-}" ]] || { echo "Error: R2_SECRET_ACCESS_KEY unset in CI mode." >&2; exit 1; }
+    [[ -n "${R2_BUCKET:-}" ]]            || { echo "Error: R2_BUCKET unset in CI mode." >&2; exit 1; }
+    [[ -n "${R2_ENDPOINT:-}" ]]          || { echo "Error: R2_ENDPOINT unset in CI mode." >&2; exit 1; }
+
+    # Env-only creds: never persist to ~/.aws/credentials on disk (CI security risk).
+    export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+    export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+    export AWS_DEFAULT_REGION="${R2_REGION:-auto}"
+
     # Sync all .deb files from the channel/arch path
     aws s3 sync \
         "s3://${R2_BUCKET}/dists/${CHANNEL}/binary-${ARCH}/" \
@@ -104,10 +109,11 @@ fi
 
 # Verify we got some packages
 if ! ls "$DEST"/*.deb 1>/dev/null 2>&1; then
-    echo ""
-    echo "Warning: No .deb packages were fetched!"
-    echo "This may cause the image build to fail."
-    exit 0  # Don't fail the script, let the build decide
+    echo "" >&2
+    echo "Error: No .deb packages were fetched into ${DEST}." >&2
+    echo "Expected packages for: ${REPOS[*]} (channel=${CHANNEL}, arch=${ARCH})." >&2
+    echo "Check R2 credentials / GitHub release availability before building the image." >&2
+    exit 1
 fi
 
 echo ""
