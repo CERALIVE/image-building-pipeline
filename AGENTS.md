@@ -37,6 +37,8 @@ image-building-pipeline/
 | Armbian framework entry | `build.sh` lines ~379-492 |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Dev-sync live-reload loop** | [`v2/lib/dev-sync/README.md`](v2/lib/dev-sync/README.md) |
+| Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
+| v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 
 ## KEY FACTS
 

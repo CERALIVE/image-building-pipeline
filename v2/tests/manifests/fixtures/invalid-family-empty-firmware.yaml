@@ -1,0 +1,18 @@
+# Fixture: INVALID family manifest — firmware_packages is an EMPTY array.
+# Identical to valid-family.yaml but firmware_packages: []. orchestrate.sh
+# require_field's FIRMWARE_PACKAGES unconditionally, so an empty set would pass
+# the OLD schema and only blow up at build time. The expanded schema's
+# firmware_packages.minItems=1 now rejects it at validation. manifest.bats asserts
+# this fails family-schema validation with "firmware_packages" in the message.
+arch: arm64
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test-rockchip64
+uboot_packages:
+  - rkbin-test
+dtb_packages:
+  - linux-dtb-test-rockchip64
+firmware_packages: []
+rauc_bootloader_adapter: custom
+partition_template: test-ab
+serial_console: ttyS2:1500000

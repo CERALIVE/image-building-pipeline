@@ -1,0 +1,19 @@
+# Fixture: INVALID family manifest — a malformed Debian package name.
+# Identical to valid-family.yaml but kernel_packages carries an UPPERCASE entry,
+# which is not a legal Debian package name. The expanded schema validates each
+# package-array item against the Debian package-name pattern, so this is rejected
+# at validation (it would otherwise reach apt/dpkg as an unresolvable package).
+# manifest.bats asserts this fails with "kernel_packages" in the message.
+arch: arm64
+armbian_branch: vendor
+kernel_packages:
+  - Linux-Image-Test-Rockchip64
+uboot_packages:
+  - rkbin-test
+dtb_packages:
+  - linux-dtb-test-rockchip64
+firmware_packages:
+  - armbian-firmware
+rauc_bootloader_adapter: custom
+partition_template: test-ab
+serial_console: ttyS2:1500000

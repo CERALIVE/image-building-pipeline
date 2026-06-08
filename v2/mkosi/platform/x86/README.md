@@ -138,14 +138,22 @@ DTB / no U-Boot** (ACPI + UEFI) — those fields are intentionally unused here.
 
 ```
 v2/mkosi/platform/x86/test-x86-fallback.sh   # 72 assertions, no GRUB/qemu/root
+v2/tests/qemu-x86.sh --fallback-selftest     # forced-primary-failure rollback proof
 ```
 
-Proves: fresh A/B; 3 failed boots of A → 3→2→1→0 → **fallback to B**; RAUC backend
-roundtrip; `mark-good` reset; single-slot has no phantom B; grubenv is a valid
-1024-byte block; `install-x86-boot.sh esp` renders board-specific `grub.cfg`
-(console/ladder/PARTLABEL/`/vmlinuz`) + seeds grubenv; `rootfs` renders
-`bootloader=custom` `system.conf`; `x86-encode.sh` writes the D1 encode config
-(qsv primary, x264 fallback, NOT relay-only).
+`test-x86-fallback.sh` is the **engine** unit test. It proves: fresh A/B; 3 failed
+boots of A → 3→2→1→0 → **fallback to B**; RAUC backend roundtrip; `mark-good` reset;
+single-slot has no phantom B; grubenv is a valid 1024-byte block; `install-x86-boot.sh
+esp` renders board-specific `grub.cfg` (console/ladder/PARTLABEL/`/vmlinuz`) + seeds
+grubenv; `rootfs` renders `bootloader=custom` `system.conf`; `x86-encode.sh` writes the
+D1 encode config (qsv primary, x264 fallback, NOT relay-only).
+
+`qemu-x86.sh --fallback-selftest` is the **boot-harness** proof of the one scenario it
+owns: a **forced primary-slot failure rolls back to the known-good slot**. It drives
+this same shipped `x86-boot-state.sh` engine (no re-implementation, no qemu/GRUB/root),
+asserts the rollback contract end-to-end, and is wired into the canonical unit suite
+(`v2/tests/manifest.bats` → `v2/run-tests`) so CI gates on it. Evidence:
+`.omo/evidence/task-9-x86-fallback.txt`.
 
 ## Deferred / related (out of scope for task 33)
 

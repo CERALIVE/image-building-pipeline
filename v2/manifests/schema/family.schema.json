@@ -30,27 +30,29 @@
     "kernel_packages": {
       "description": "Armbian kernel image package(s) for the family (e.g. linux-image-vendor-rockchip64). Maps to the linux-image-* entries of BOARD_PACKAGES.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "minItems": 1,
       "uniqueItems": true
     },
     "uboot_packages": {
-      "description": "Bootloader / U-Boot blob package(s) (e.g. rkbin-rk3588). Maps to BOOTLOADER/rkbin entries. May be empty for families whose U-Boot is supplied raw outside apt.",
+      "description": "Bootloader / U-Boot blob package(s) (e.g. rkbin-rk3588). Maps to BOOTLOADER/rkbin entries. May be empty for families whose U-Boot is supplied raw outside apt (x86 declares [] — UEFI firmware lives in platform flash). Items, when present, must be valid Debian package names.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
       "uniqueItems": true
     },
     "dtb_packages": {
-      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES. EMPTY ([]) on x86 families: x86-64 platforms enumerate hardware via ACPI and ship no device tree, so they declare no DTB package. Still REQUIRED to be present (as []) so the absence is explicit, not accidental.",
+      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES. EMPTY ([]) on x86 families: x86-64 platforms enumerate hardware via ACPI and ship no device tree, so they declare no DTB package. Still REQUIRED to be present (as []) so the absence is explicit, not accidental. Items, when present, must be valid Debian package names.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "minItems": 0,
       "uniqueItems": true
     },
     "firmware_packages": {
-      "description": "SoC/GPU/Wi-Fi firmware package(s) (e.g. armbian-firmware, mali-g610-firmware, firmware-realtek). Maps to firmware entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES and FIRMWARE_FILES blobs.",
+      "description": "SoC/GPU/Wi-Fi firmware package(s) (e.g. armbian-firmware, mali-g610-firmware, firmware-realtek). Maps to firmware entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES and FIRMWARE_FILES blobs. orchestrate.sh require_field's FIRMWARE_PACKAGES unconditionally, so this MUST be a non-empty set of valid Debian package names — an empty array would otherwise pass the schema and only fail at build time.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 1,
       "uniqueItems": true
     },
     "rauc_bootloader_adapter": {
@@ -60,9 +62,9 @@
       "default": "custom"
     },
     "hw_accel_gstreamer_plugins": {
-      "description": "Hardware-accelerated GStreamer encode/decode plugin packages for the family (e.g. rk3588 MPP plugins). Optional: software-only families (generic x264) omit this. Maps to VIDEO_ENCODER/VIDEO_DECODER hardware path.",
+      "description": "Hardware-accelerated GStreamer encode/decode plugin packages for the family (e.g. rk3588 MPP plugins). Optional: software-only families (generic x264) omit this. Maps to VIDEO_ENCODER/VIDEO_DECODER hardware path. Items must be valid Debian package names.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "uniqueItems": true
     },
     "partition_template": {
@@ -76,9 +78,9 @@
       "pattern": "^[A-Za-z0-9]+:[0-9]+$"
     },
     "gstreamer_runtime_packages": {
-      "description": "Runtime GStreamer multimedia support packages for the family (e.g. rockchip-multimedia-config). Optional. Maps to the multimedia-config entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES.",
+      "description": "Runtime GStreamer multimedia support packages for the family (e.g. rockchip-multimedia-config). Optional. Maps to the multimedia-config entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES. Items must be valid Debian package names.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "uniqueItems": true
     }
   }
