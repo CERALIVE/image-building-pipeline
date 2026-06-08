@@ -36,9 +36,13 @@ trap - ERR
 
 CERAUI_BASE_CONF="${CERAUI_BASE_CONF:-${HERE}/../../configs/base/ceraui-base.conf}"
 
-# Packages that ceraui-base.conf names but Debian ships inside another package.
+# Packages that ceraui-base.conf names but the real .deb ships under another name.
+# Without the first-party aliases the gate could never clear the app-layer check
+# even after a real install — the installed names never match the reference names.
 declare -A PKG_ALIAS=(
   [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm
+  [belacoder]=ceracoder         # ceraui-base.conf legacy BELABOX name; encoder .deb = ceracoder
+  [ceraui]=ceralive-device      # CeraUI .deb package name = ceralive-device
 )
 # The Rockchip HW GStreamer set — installed from the Armbian pool (platform layer).
 ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
