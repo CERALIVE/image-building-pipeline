@@ -3,7 +3,7 @@
 # ceralive-boot-state.sh — A/B boot-state read/write helper (RAUC custom backend
 # data layer + bootloader-algorithm reference).
 #
-# WHY THIS EXISTS (decision D3, .omo/.../decisions.md): the RK3588 vendor U-Boot
+# WHY THIS EXISTS (decision D3): the RK3588 vendor U-Boot
 # (Armbian 2017.09) is built ENV_IS_NOWHERE — `fw_setenv` does not persist, so
 # RAUC's stock `bootloader=uboot` adapter (which drives BOOT_ORDER / bootcount via
 # fw_setenv) CANNOT work. The chosen approach is RAUC `bootloader=custom` with the

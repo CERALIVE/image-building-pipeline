@@ -162,8 +162,6 @@ slot re-proves health after reboot.
 - `shellcheck` clean on `provision-token.sh` (and the postinst twin).
 - `config.conf` parses as a GLib key-file; the rendered effective config has no
   leftover `@PLACEHOLDER@` and carries the token only on `/data` (`0600`).
-- Evidence: `.omo/evidence/task-41-ota.md` (enrollment + install path) and
-  `.omo/evidence/task-41-ota-rollback.md` (gate / rollback reasoning).
 
 ## Related tasks
 

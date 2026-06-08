@@ -12,7 +12,6 @@ and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`
 > via `fw_setenv`, so it **cannot work** on this branch. We keep RAUC's exact A/B +
 > bootcount *model* but change the *storage*: the state is a plain text file on the
 > FAT `boot` partition, read+written by both a U-Boot script and userspace.
-> Evidence: `.omo/.../decisions.md` D3; `.omo/evidence/task-27-*`.
 
 ## The two halves
 

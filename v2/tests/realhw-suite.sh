@@ -52,7 +52,7 @@
 #   BUNDLE_DIR    dir with bad.raucb/good.raucb (LIVE rollback; optional in MOCK)
 #   IMAGE_PATH    rootfs/image for the STATIC smoke (MOCK auto-synthesizes if unset)
 #   DEV_DEB_DIR   LIVE dev-loop: dir with an arm64 ceracoder .deb (else section SKIPs)
-#   EVIDENCE_DIR  evidence bundle dir (default <workspace>/.omo/evidence/task-38-smoke)
+#   EVIDENCE_DIR  evidence bundle dir (default <workspace>/test-results/realhw-task-38-smoke)
 #   MOCK=1        force MOCK mode even if BOARD_IP is set
 #
 # Exit 0 iff zero sections FAILed (SKIP never fails the gate); 1 otherwise.
@@ -86,7 +86,7 @@ SSH_PORT="${SSH_PORT:-22}"
 BUNDLE_DIR="${BUNDLE_DIR:-}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 DEV_DEB_DIR="${DEV_DEB_DIR:-}"
-EVIDENCE_DIR="${EVIDENCE_DIR:-${WORKSPACE_ROOT}/.omo/evidence/task-38-smoke}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-${WORKSPACE_ROOT}/test-results/realhw-task-38-smoke}"
 
 # Mode: explicit MOCK=1 forces mock; else BOARD_IP→live; else mock (offline).
 MODE="${CERALIVE_SUITE_MODE:-}"

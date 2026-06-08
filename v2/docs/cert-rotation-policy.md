@@ -4,7 +4,6 @@ How the RAUC signing PKI is rotated across the fleet **without a reflash** — a
 one case (root) where a reflash is the only option, by design.
 
 - PKI design & chain: [`cert-work/rauc/README.txt`](../../cert-work/rauc/README.txt)
-- Locked decision: `.omo/notepads/image-platform-redesign/decisions.md` (Stage 0g)
 - Device implementation: [`v2/mkosi/runtime/cert-rotation/README.md`](../v2/mkosi/runtime/cert-rotation/README.md)
 - Builder: [`v2/lib/build-cert-rotation-bundle.sh`](../v2/lib/build-cert-rotation-bundle.sh)
 

@@ -224,4 +224,3 @@ PARTLABEL refs. Only slot *activation* (the A/B flip) + verity/RAUC remain.
 - `lib/assemble-disk.sh` — Stage-4 disk assembler/verifier (Task 25)
 - `../../docs/partition-contract.md` — FROZEN D4 layout (Task 8, v1)
 - `lib/orchestrate.sh` — reads shared.list → `$SHARED_PACKAGES`; builds the chain
-- `.omo/notepads/image-platform-redesign/decisions.md` — D1 (x86 encode), D3 (vendor kernel), D4 (partitions), Task 5 (RAUC/hawkbit pins)
