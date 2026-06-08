@@ -16,6 +16,10 @@
 #      ENV (console/fdtfile differ per board) — nothing hardcoded.
 #   7. boot.scr.cmd statically contains the decrement + manifest-sourced console/
 #      fdtfile + PARTLABEL slot selection (U-Boot path matches the tested twin).
+#   8. Corruption resilience: a truncated / empty / missing / bad-CRC state file
+#      yields the safe defaults (A B, full budget) + a clean rewrite and NEVER
+#      crashes, while a well-formed no-CRC file (the U-Boot env-export write) is
+#      trusted so the bootcount is not wiped.
 #
 # Run:  v2/mkosi/platform/boot/test-fallback.sh
 #
@@ -164,6 +168,59 @@ assert_contains "console from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "c
 assert_contains "fdtfile from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "/boot/dtb/\${fdtfile}"
 assert_contains "selects rootfs_a slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_a"
 assert_contains "selects rootfs_b slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_b"
+
+echo
+echo "### 8. Corruption resilience — atomic write + CRC validation + safe defaults"
+# A power-loss during the FAT rewrite can leave boot_state.txt truncated, empty or
+# byte-flipped. The engine MUST never crash on a corrupt file: it validates an
+# embedded CRC line and, on ANY failure, returns the safe defaults (A B, full budget)
+# AND rewrites a clean, CRC-armoured file. A file written by the U-Boot selector has
+# NO CRC line (its `env export` cannot emit one) — that is NOT corruption, so a
+# well-formed no-CRC file is trusted (else every real boot's bootcount would be wiped).
+
+# 8a. A healthy write embeds a CRC line (the atomic write stages it then mv-s it in).
+bs init >/dev/null
+assert_contains "init writes a BOOT_CRC checksum line" "${STATE}" "BOOT_CRC="
+
+# 8b. A valid CRC is trusted: a decremented (non-default) state is NOT reset.
+bs boot-select >/dev/null            # A_LEFT 3 -> 2, rewritten with a fresh CRC
+assert_eq "valid CRC preserved (no false reset)" "2" "$(bs get-left A)"
+
+# 8c. BAD CRC -> safe defaults + clean rewrite (the byte-flip / partial-write case).
+printf 'BOOT_ORDER=B A\nBOOT_A_LEFT=1\nBOOT_B_LEFT=1\nBOOT_CRC=0\n' >"${STATE}"
+crc_rc=0; order="$(bs get-order)" || crc_rc=$?
+assert_eq "bad-CRC never crashes (exit 0)"         "0"   "${crc_rc}"
+assert_eq "bad-CRC -> BOOT_ORDER safe default A B" "A B" "${order}"
+assert_eq "bad-CRC -> attempts reset to budget"    "3"   "$(bs get-left A)"
+assert_contains "bad-CRC rewrote a clean order"    "${STATE}" "BOOT_ORDER=A B"
+
+# 8d. TRUNCATED file (cut off mid-write) -> safe defaults + clean rewrite.
+printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=2\nBOOT_B_' >"${STATE}"
+tr_rc=0; order="$(bs get-order)" || tr_rc=$?
+assert_eq "truncated never crashes (exit 0)"       "0"   "${tr_rc}"
+assert_eq "truncated -> BOOT_ORDER safe default"   "A B" "${order}"
+assert_eq "truncated -> attempts reset to budget"  "3"   "$(bs get-left A)"
+assert_contains "truncated rewrote a clean CRC file" "${STATE}" "BOOT_CRC="
+
+# 8e. EMPTY file (0 bytes) -> safe defaults + clean rewrite.
+: >"${STATE}"
+empty_rc=0; order="$(bs get-order)" || empty_rc=$?
+assert_eq "empty never crashes (exit 0)"           "0"   "${empty_rc}"
+assert_eq "empty -> BOOT_ORDER safe default"       "A B" "${order}"
+assert_contains "empty rewrote a clean CRC file"   "${STATE}" "BOOT_CRC="
+
+# 8f. MISSING file -> safe defaults + a fresh clean file is created.
+rm -f "${STATE}"
+miss_rc=0; order="$(bs get-order)" || miss_rc=$?
+assert_eq "missing never crashes (exit 0)"         "0"   "${miss_rc}"
+assert_eq "missing -> BOOT_ORDER safe default"     "A B" "${order}"
+if [[ -f "${STATE}" ]]; then ok "missing -> a clean state file was created"; else bad "missing -> no state file created"; fi
+assert_contains "created file carries a CRC line"  "${STATE}" "BOOT_CRC="
+
+# 8g. LEGACY no-CRC file (the U-Boot selector's env-export write) is TRUSTED, not
+#     reset — otherwise the bootcount the bootloader just decremented would be lost.
+printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=2\nBOOT_B_LEFT=3\n' >"${STATE}"
+assert_eq "legacy no-CRC well-formed file is trusted" "2" "$(bs get-left A)"
 
 echo
 echo "=============================================================="

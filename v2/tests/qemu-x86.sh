@@ -95,6 +95,13 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 IMAGES_DIR="${V2_DIR}/images"
 
+# x86 A/B boot-state engine (shipped). The forced-primary-failure ROLLBACK proof
+# drives THIS real engine (the userspace twin of the on-device grub.cfg selector),
+# never a re-implementation — mirroring how rauc-rollback.sh drives the RK3588
+# shipped scripts. See mkosi/platform/x86/README.md ("How rollback happens").
+X86_BOOT_STATE="${X86_BOOT_STATE:-${V2_DIR}/mkosi/platform/x86/x86-boot-state.sh}"
+X86_BOOT_ATTEMPTS="${X86_BOOT_ATTEMPTS:-3}"
+
 BOARD="${BOARD:-x86-minipc}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
@@ -478,14 +485,96 @@ run_selftest() {
 }
 
 # ===========================================================================
+# FALLBACK SELFTEST — forced primary-slot failure MUST roll back to the known-good
+# slot. Drives the SHIPPED x86 grubenv A/B engine (mkosi/platform/x86/x86-boot-
+# state.sh) — the userspace twin of the on-device grub.cfg selector — with NO qemu,
+# GRUB, root or image. The x86 analogue of rauc-rollback.sh's MOCK mode: it proves
+# the rollback CONTRACT (a primary slot that never confirms itself bleeds its
+# bootcount, then the selector skips it and boots the last-good slot) against the
+# REAL engine, not a stand-in. The exhaustive engine coverage lives in the engine's
+# own unit test (mkosi/platform/x86/test-x86-fallback.sh); this harness asserts the
+# one scenario the boot harness owns: forced primary failure -> rollback.
+# ===========================================================================
+run_fallback_selftest() {
+  log_info "=== FALLBACK SELFTEST: forced primary-slot failure → rollback to good slot ==="
+  if [[ ! -r "${X86_BOOT_STATE}" ]]; then
+    fail "x86 boot-state engine not found/readable: ${X86_BOOT_STATE}"
+    return
+  fi
+
+  local d grubenv
+  d="$(mktemp -d)"; CLEANUP_DIRS+=("${d}")
+  grubenv="${d}/grubenv"
+
+  # Drive the shipped engine against a throwaway grubenv, forcing its bash grubenv
+  # fallback (GRUB_EDITENV → a nonexistent binary) so this runs on hosts with no GRUB
+  # tooling. CERALIVE_BOOT_ATTEMPTS is the per-slot bootcount budget (3→2→1→0).
+  bs() {
+    CERALIVE_GRUBENV="${grubenv}" CERALIVE_BOOT_ATTEMPTS="${X86_BOOT_ATTEMPTS}" \
+      GRUB_EDITENV=/nonexistent-grub-editenv bash "${X86_BOOT_STATE}" "$@"
+  }
+
+  bs init
+  if [[ "$(bs get-primary)" == "A" ]]; then pass "fresh A/B: primary slot is A"
+  else fail "fresh A/B: primary is not A (got '$(bs get-primary)')"; fi
+  if [[ "$(bs get-state A)" == "good" && "$(bs get-state B)" == "good" ]]; then pass "fresh A/B: both slots good (B is the known-good fallback)"
+  else fail "fresh A/B: a slot is not good (A=$(bs get-state A) B=$(bs get-state B))"; fi
+
+  # Non-vacuity control: ONE failed boot of A must NOT roll back yet (A still has
+  # budget). Proves the gate trips only on EXHAUSTION, not on any single failure.
+  local sel; sel="$(bs boot-select)"
+  if [[ "${sel%% *}" == "A" && "$(bs get-primary)" == "A" ]]; then
+    pass "control: 1 failed boot does NOT roll back (A still primary with budget)"
+  else
+    fail "control: rolled back too early (sel='${sel}' primary='$(bs get-primary)')"
+  fi
+
+  # Forced primary failure: slot A never confirms itself (no mark-good). Keep booting
+  # until A's bootcount exhausts; the selector MUST then fall back to slot B.
+  local reboots=1 booted="${sel%% *}" cap=$(( X86_BOOT_ATTEMPTS + 2 ))
+  while (( reboots < cap )); do
+    reboots=$(( reboots + 1 ))
+    sel="$(bs boot-select)"; booted="${sel%% *}"
+    [[ "${booted}" == "B" ]] && break
+  done
+
+  if [[ "${booted}" == "B" ]]; then
+    pass "ROLLBACK: forced A failure fell back to known-good slot B after ${reboots} boot(s)"
+  else
+    fail "NO ROLLBACK: still on slot '${booted}' after ${reboots} boot(s) — bad primary did not roll back"
+  fi
+  if [[ "${sel}" == "B rootfs_b" ]]; then pass "fallback selects B by its rootfs PARTLABEL (rootfs_b)"
+  else fail "fallback target wrong: '${sel}' (want 'B rootfs_b')"; fi
+  if [[ "$(bs get-state A)" == "bad" ]]; then pass "exhausted primary A is now 'bad' (bootcount drained to 0)"
+  else fail "slot A not marked bad after exhaustion (got '$(bs get-state A)')"; fi
+  if [[ "$(bs get-state B)" == "good" ]]; then pass "rollback target B remained 'good' (known-good preserved)"
+  else fail "known-good slot B no longer good (got '$(bs get-state B)')"; fi
+
+  # Recovery: a healthy slot that mark-good's itself stops counting down — a
+  # confirmed slot is sticky and never silently reverts on the next boot.
+  bs mark-good B
+  bs boot-select >/dev/null
+  if [[ "$(bs get-state B)" == "good" && "$(bs get-primary)" == "B" ]]; then
+    pass "recovery: mark-good keeps B sticky (confirmed slot does not roll back)"
+  else
+    fail "recovery: confirmed slot B not sticky (primary=$(bs get-primary) state=$(bs get-state B))"
+  fi
+}
+
+# ===========================================================================
 # MAIN
 # ===========================================================================
 main() {
-  # --selftest flag mirrors the CERALIVE_QEMU_SELFTEST env switch.
+  # --selftest runs the boot-engine AND fallback proofs; --fallback-selftest runs
+  # only the forced-primary-failure rollback proof (mirrors the env switches below).
   if [[ "${1:-}" == "--selftest" ]]; then CERALIVE_QEMU_SELFTEST=1; fi
+  if [[ "${1:-}" == "--fallback-selftest" ]]; then CERALIVE_QEMU_FALLBACK_SELFTEST=1; fi
 
-  if [[ "${CERALIVE_QEMU_SELFTEST:-0}" == "1" ]]; then
+  if [[ "${CERALIVE_QEMU_FALLBACK_SELFTEST:-0}" == "1" ]]; then
+    run_fallback_selftest
+  elif [[ "${CERALIVE_QEMU_SELFTEST:-0}" == "1" ]]; then
     run_selftest
+    run_fallback_selftest
   elif [[ -n "${QEMU_TRANSCRIPT}" ]]; then
     # Engine-only replay against an existing transcript (offline / debugging).
     [[ -f "${QEMU_TRANSCRIPT}" ]] || die "QEMU_TRANSCRIPT not found: ${QEMU_TRANSCRIPT}"

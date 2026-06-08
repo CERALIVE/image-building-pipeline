@@ -28,9 +28,9 @@
       "pattern": "^([A-Za-z0-9._-]+\\.dtb|none)$"
     },
     "armbian_overlays": {
-      "description": "Board-specific device-tree overlays applied at build time (e.g. rk3588-hdmi-input, rk3588-m2-modem-42mm). Optional. Maps to DT_OVERLAYS in configs/devices/*.conf.",
+      "description": "Board-specific device-tree overlays applied at build time (e.g. rk3588-hdmi-input, rk3588-m2-modem-42mm). Optional. Maps to DT_OVERLAYS in configs/devices/*.conf. Overlay names are lowercase alphanumeric with hyphens (the Armbian overlay-file stem convention).",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
       "uniqueItems": true
     },
     "quirks": {

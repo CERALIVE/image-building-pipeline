@@ -15,10 +15,22 @@
 #   BOOT_ORDER=A B        # slot bootnames in priority order (head = primary)
 #   BOOT_A_LEFT=3         # remaining boot attempts for slot A (3->2->1->0)
 #   BOOT_B_LEFT=3         # remaining boot attempts for slot B
+#   BOOT_CRC=<cksum>      # POSIX cksum of the three lines above (corruption guard)
 # A slot is "good" while it is in BOOT_ORDER and its *_LEFT > 0; it is "bad" once
 # *_LEFT reaches 0 (or it is removed from BOOT_ORDER). This mirrors RAUC's own
 # u-boot adapter semantics (BOOT_ORDER + BOOT_<name>_LEFT) so the rollback model is
 # identical — only the storage backend differs (text file vs. fw_setenv).
+#
+# CORRUPTION SAFETY (decision: a bricked boot from a half-written FAT file is the
+# worst outcome). Writes are made durable by staging the FULL file on tmpfs and
+# landing it on the fragile vfat in a SINGLE `mv -f`; the BOOT_CRC line lets the
+# reader detect a truncated / empty / byte-flipped file even when that single write
+# is interrupted by power loss. On ANY validation failure the reader falls back to
+# the safe defaults (BOOT_ORDER="A B", both budgets full) AND rewrites a clean file
+# — it NEVER aborts the boot path. A file WITHOUT a BOOT_CRC line is NOT treated as
+# corrupt: the in-U-Boot selector rewrites boot_state.txt via `env export`, which
+# cannot emit a checksum, so a well-formed no-CRC file is trusted (otherwise the
+# bootcount the bootloader just decremented would be wiped on the next userspace read).
 #
 # BOOTLOADER ALGORITHM (the `boot-select` subcommand) is a faithful userspace twin
 # of the on-device `boot.scr` selector: pick the first slot in BOOT_ORDER whose
@@ -40,6 +52,10 @@ set -euo pipefail
 # a tmp file); NEVER hardcode a board specific here.
 STATE_FILE="${CERALIVE_BOOT_STATE_FILE:-/boot/boot_state.txt}"
 BOOT_ATTEMPTS="${CERALIVE_BOOT_ATTEMPTS:-3}"
+
+# Where the fully-formed file is staged before the single mv onto the FAT partition.
+# A tmpfs keeps the slow/fragile vfat touched exactly once; env-overridable for tests.
+STATE_STAGEDIR="${CERALIVE_BOOT_STATE_STAGEDIR:-}"
 
 # Valid slot bootnames. Symmetric A/B per the frozen partition contract
 # (rootfs_a = slot A, rootfs_b = slot B). Single-slot images carry only A.
@@ -64,44 +80,93 @@ is_valid_slot() {
 
 # ---------------------------------------------------------------------------
 # State load/store. The file is the single source of truth; we read it into
-# BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT, mutate in memory, then rewrite atomically.
+# BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT, mutate in memory, then rewrite atomically
+# (tmpfs stage -> one mv) with a CRC line so a corrupt file is detected and healed.
 # ---------------------------------------------------------------------------
 BOOT_ORDER=""
 BOOT_A_LEFT=""
 BOOT_B_LEFT=""
 
+# The canonical KEY=VALUE body the BOOT_CRC line covers and store_state writes.
+state_payload() {
+  printf 'BOOT_ORDER=%s\n'  "${BOOT_ORDER}"
+  printf 'BOOT_A_LEFT=%s\n' "${BOOT_A_LEFT}"
+  printf 'BOOT_B_LEFT=%s\n' "${BOOT_B_LEFT}"
+}
+
+# POSIX cksum of the in-memory payload; its first field is the checksum we store.
+crc_of_payload() { state_payload | cksum | cut -d' ' -f1; }
+
+# Are the parsed fields well-formed? BOOT_ORDER a sequence of valid slots, counters
+# non-negative integers. Catches a truncated write that mangled a data line.
+state_fields_valid() {
+  [[ -n "${BOOT_ORDER}" ]] || return 1
+  local s
+  for s in ${BOOT_ORDER}; do is_valid_slot "${s}" || return 1; done
+  [[ "${BOOT_A_LEFT}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${BOOT_B_LEFT}" =~ ^[0-9]+$ ]] || return 1
+  return 0
+}
+
+# First writable tmpfs-ish dir for the pre-mv staging file; falls back to the state
+# file's own directory (store_state mkdir -p's it) when nothing else is writable.
+staging_dir() {
+  local d
+  for d in "${STATE_STAGEDIR}" /run /tmp "${TMPDIR:-}"; do
+    if [[ -n "${d}" && -d "${d}" && -w "${d}" ]]; then printf '%s' "${d}"; return 0; fi
+  done
+  dirname "${STATE_FILE}"
+}
+
 load_state() {
   BOOT_ORDER=""; BOOT_A_LEFT=""; BOOT_B_LEFT=""
-  if [[ -f "${STATE_FILE}" ]]; then
+  local stored_crc="" corrupt=0
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    corrupt=1
+  elif [[ ! -s "${STATE_FILE}" ]]; then
+    corrupt=1
+  else
     local key val
     while IFS='=' read -r key val; do
-      # Strip a trailing CR (FAT/U-Boot tooling may write CRLF) and surrounding ws.
-      val="${val%$'\r'}"
+      val="${val%$'\r'}"              # FAT/U-Boot tooling may write CRLF
       case "${key}" in
         BOOT_ORDER)  BOOT_ORDER="${val}" ;;
         BOOT_A_LEFT) BOOT_A_LEFT="${val}" ;;
         BOOT_B_LEFT) BOOT_B_LEFT="${val}" ;;
+        BOOT_CRC)    stored_crc="${val}" ;;
       esac
     done <"${STATE_FILE}"
+    # Malformed fields are always corruption. A present CRC must match; a MISSING CRC
+    # is trusted (the U-Boot selector's env-export write carries none) — see the
+    # CORRUPTION SAFETY note in the header for why this must not reset the bootcount.
+    if ! state_fields_valid; then
+      corrupt=1
+    elif [[ -n "${stored_crc}" && "${stored_crc}" != "$(crc_of_payload)" ]]; then
+      corrupt=1
+    fi
   fi
-  # Defaults make a missing/partial file safe: both slots get the full budget and
-  # A leads (matches the freshly-flashed seed in boot_state.txt).
-  [[ -n "${BOOT_ORDER}"  ]] || BOOT_ORDER="A B"
-  [[ -n "${BOOT_A_LEFT}" ]] || BOOT_A_LEFT="${BOOT_ATTEMPTS}"
-  [[ -n "${BOOT_B_LEFT}" ]] || BOOT_B_LEFT="${BOOT_ATTEMPTS}"
+
+  if (( corrupt == 1 )); then
+    BOOT_ORDER="A B"
+    BOOT_A_LEFT="${BOOT_ATTEMPTS}"
+    BOOT_B_LEFT="${BOOT_ATTEMPTS}"
+    ( store_state ) >/dev/null 2>&1 || true   # best-effort heal; never abort the boot
+  fi
 }
 
 store_state() {
   local dir; dir="$(dirname "${STATE_FILE}")"
   mkdir -p "${dir}"
-  local tmp="${STATE_FILE}.tmp.$$"
+  local stage; stage="$(staging_dir)"
+  local tmp; tmp="$(mktemp "${stage}/.boot_state.XXXXXX")" \
+    || die "cannot create staging file under ${stage}"
   {
-    printf 'BOOT_ORDER=%s\n' "${BOOT_ORDER}"
-    printf 'BOOT_A_LEFT=%s\n' "${BOOT_A_LEFT}"
-    printf 'BOOT_B_LEFT=%s\n' "${BOOT_B_LEFT}"
+    state_payload
+    printf 'BOOT_CRC=%s\n' "$(crc_of_payload)"
   } >"${tmp}"
-  # Best-effort durable replace. vfat has no atomic rename guarantees, but mv is
-  # still the least-bad option and matches how the device rewrites the file.
+  # The fully-formed file lands on the fragile vfat in ONE mv; if power is lost
+  # mid-write the next read sees a short/CRC-less payload, detects it, and heals to
+  # safe defaults. Staging on tmpfs keeps the FAT write down to that single mv.
   mv -f "${tmp}" "${STATE_FILE}"
 }
 

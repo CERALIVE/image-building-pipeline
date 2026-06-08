@@ -1,0 +1,8 @@
+# Fixture: INVALID board manifest — required `dtb_name` field omitted.
+# Identical to valid-board.yaml minus `dtb_name:`. dtb_name maps to the build's
+# DTB_NAME and is REQUIRED by board.schema.json. manifest.bats asserts this fails
+# board-schema validation with "dtb_name" in the message (the board-side analogue
+# of the family missing-arch fixture: a removed required key fails at validation).
+family: rk3588
+board_id: test-board
+description: Board fixture missing the required dtb_name key.

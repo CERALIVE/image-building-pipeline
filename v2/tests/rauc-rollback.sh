@@ -3,7 +3,7 @@
 # rauc-rollback.sh — Stage 4 validation: REAL-HARDWARE RAUC A/B rollback + commit.
 #
 # THE LIVE COUNTERPART of platform/boot/test-fallback.sh. Where test-fallback.sh
-# proves the boot-state ENGINE offline (53 assertions, no HW), this harness proves
+# proves the boot-state ENGINE offline (71 assertions, no HW), this harness proves
 # the SAME contract end-to-end against a RUNNING RK3588 board over SSH — the actual
 # `rauc install` → reboot → bootcount → fallback / healthcheck → mark-good path.
 #

@@ -25,6 +25,7 @@ setup() {
   COMMON_SH="$LIB_DIR/common.sh"
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
+  QEMU_X86="$TESTS_DIR/qemu-x86.sh"
   SCHEMA_DIR="$V2/manifests/schema"
   FAMILY_SCHEMA="$SCHEMA_DIR/family.schema.json"
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
@@ -135,6 +136,37 @@ get_pin() {
   [[ "$output" == *"VALID"* ]]
 }
 
+@test "valid: shipped orange-pi-5-plus board validates against board schema" {
+  run validate_manifest "$V2/manifests/boards/orange-pi-5-plus.yaml" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "valid: shipped x86_64 family validates against family schema" {
+  run validate_manifest "$V2/manifests/families/x86_64.yaml" "$FAMILY_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "valid: shipped x86-minipc board validates against board schema" {
+  run validate_manifest "$V2/manifests/boards/x86-minipc.yaml" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "valid: EVERY shipped manifest validates (no un-checked manifest ships)" {
+  local f rc=0
+  for f in "$V2"/manifests/families/*.yaml; do
+    run validate_manifest "$f" "$FAMILY_SCHEMA"
+    [ "$status" -eq 0 ] || { echo "family failed: $f"; echo "$output"; rc=1; }
+  done
+  for f in "$V2"/manifests/boards/*.yaml; do
+    run validate_manifest "$f" "$BOARD_SCHEMA"
+    [ "$status" -eq 0 ] || { echo "board failed: $f"; echo "$output"; rc=1; }
+  done
+  [ "$rc" -eq 0 ]
+}
+
 # ===========================================================================
 # 3. Invalid manifests — schema rejection names the offending field.
 # ===========================================================================
@@ -149,6 +181,26 @@ get_pin() {
   run validate_manifest "$FIXTURES/invalid-board-bad-backend.yaml" "$BOARD_SCHEMA"
   [ "$status" -ne 0 ]
   [[ "$output" == *"app_backend"* ]]
+}
+
+@test "invalid: family with EMPTY firmware_packages fails and names firmware_packages" {
+  # orchestrate.sh require_field's FIRMWARE_PACKAGES — the expanded schema's
+  # minItems:1 catches an empty set at VALIDATION, not at build (the whole point).
+  run validate_manifest "$FIXTURES/invalid-family-empty-firmware.yaml" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"firmware_packages"* ]]
+}
+
+@test "invalid: family with malformed Debian package name fails and names kernel_packages" {
+  run validate_manifest "$FIXTURES/invalid-family-bad-pkg-name.yaml" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"kernel_packages"* ]]
+}
+
+@test "invalid: board missing required dtb_name fails and names dtb_name" {
+  run validate_manifest "$FIXTURES/invalid-board-missing-dtb_name.yaml" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"dtb_name"* ]]
 }
 
 # ===========================================================================
@@ -274,7 +326,22 @@ YAML
 }
 
 # ===========================================================================
-# 7. postinst dual-track drift gate (Task 6) — the consolidated runtime-config
+# 7. x86 boot fallback — a forced primary-slot failure rolls back to the known-
+#    good slot. The qemu-x86 harness' --fallback-selftest drives the SHIPPED x86
+#    grubenv A/B engine (no qemu/GRUB/root); a green run is the proof. Engine-only
+#    (no image boot), so it fits this UNIT suite.
+# ===========================================================================
+
+@test "x86 fallback: forced primary-slot failure rolls back to the known-good slot" {
+  run env CERALIVE_QEMU_FALLBACK_SELFTEST=1 bash "$QEMU_X86"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ROLLBACK: forced A failure fell back to known-good slot B"* ]]
+  [[ "$output" == *"QEMU x86 VALIDATION OK"* ]]
+  [[ "$output" != *"FAIL"* ]]
+}
+
+# ===========================================================================
+# 8. postinst dual-track drift gate (Task 6) — the consolidated runtime-config
 #    logic lives ONCE in customize/postinst-lib.sh, sourced by both the runtime
 #    executor (mkosi.postinst.chroot) and the customize modules. The gate fails if
 #    that single-source property breaks (a function re-inlined, a track no longer
