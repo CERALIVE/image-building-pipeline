@@ -36,13 +36,8 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 
 # Repo paths, resolved relative to this script: platform/ -> mkosi.images/ ->
 # mkosi/ ; the boot source dir is mkosi/platform/boot.
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
-V2_DIR="${CERALIVE_V2_DIR:-$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)}"
-[[ -f "${V2_DIR}/lib/common.sh" ]] || V2_DIR="/work"
-
 # shellcheck source=../../../lib/common.sh
-source "${V2_DIR}/lib/common.sh"
+source "/work/lib/common.sh"
 
 if [[ "${ARCH}" != "arm64" ]]; then
   log_info "platform finalize: ARCH=${ARCH} is not arm64 — no RK3588 bootloader integration (pass-through)."
@@ -53,7 +48,7 @@ if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then
   exit 0
 fi
 
-BOOT_SRC="${MKOSI_DIR}/platform/boot"
+BOOT_SRC="/work/platform/boot"
 [[ -d "${BOOT_SRC}" ]] || die "platform boot source dir not found: ${BOOT_SRC}"
 
 STAGE_REL="var/tmp/ceralive-boot"

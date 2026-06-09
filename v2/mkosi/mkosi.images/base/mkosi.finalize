@@ -21,23 +21,14 @@ set -euo pipefail
 
 : "${BUILDROOT:?BUILDROOT must be set by mkosi (path to the base rootfs)}"
 
-# Repo paths, resolved relative to this script: base/ -> mkosi/ -> v2/.
-SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
-# mkosi calls finalize scripts from a temp symlink, so BASH_SOURCE[0] may not
-# be the real path; CERALIVE_V2_DIR is injected by the Docker runner as a
-# reliable override (set to the host V2_DIR mounted at /work in the container).
-V2_DIR="${CERALIVE_V2_DIR:-$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)}"
-# Hard fallback: if BASH_SOURCE[0] was a symlink (mkosi's temp /work/finalize),
-# the path traversal above gives / — detect and recover using the known Docker
-# volume mount point before the source below hard-fails.
-[[ -f "${V2_DIR}/lib/common.sh" ]] || V2_DIR="/work"
-
+# mkosi runs finalize scripts in its own mount namespace where /work = the mkosi
+# workspace root. orchestrate.sh stages lib/common.sh into MKOSI_DIR/lib/ before
+# Docker runs, making it available as /work/lib/common.sh here.
 # shellcheck source=../../../lib/common.sh
-source "${V2_DIR}/lib/common.sh"
+source "/work/lib/common.sh"
 
-CUSTOMIZE_SRC="${MKOSI_DIR}/customize"
-COMMON_SRC="${V2_DIR}/lib/common.sh"
+CUSTOMIZE_SRC="/work/customize"
+COMMON_SRC="/work/lib/common.sh"
 
 [[ -d "${CUSTOMIZE_SRC}" ]] || die "customize module dir not found: ${CUSTOMIZE_SRC}"
 [[ -f "${COMMON_SRC}" ]]   || die "lib/common.sh not found: ${COMMON_SRC}"

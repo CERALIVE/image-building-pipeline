@@ -447,6 +447,10 @@ run_mkosi_build() {
   else die "no native mkosi keyring and neither docker nor podman present — cannot run the trixie builder"; fi
 
   log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (Arch host → trixie container)"
+  # Stage lib/common.sh into MKOSI_DIR/lib/ so finalize scripts can source it at
+  # /work/lib/common.sh in mkosi's mount namespace (/work = mkosi workspace root).
+  mkdir -p "${MKOSI_DIR}/lib"
+  cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
   local env_flags=() env_cli_str=""
   for n in "${env_names[@]}"; do
     env_flags+=(-e "${n}")
