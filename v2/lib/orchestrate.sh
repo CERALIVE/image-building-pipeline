@@ -45,6 +45,7 @@ RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
+BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
 # Staged .debs live under the mkosi dir (so the builder container, which mounts
@@ -60,6 +61,11 @@ STAGING_ROOT="${MKOSI_DIR}/.staging"
 # kernel install (the boot BSP is hardware-validated in task 17). This is a
 # build-scope flag, NOT error swallowing.
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
+# RAUC bundle signing PKI (Stage-4 .raucb, build-bundle.sh). Local/dev builds
+# sign with the throwaway NON-PRODUCTION dev keypair in v2/.dev-keys; CI/prod
+# inject the real cert-work/rauc keys by setting this env before invocation.
+CERALIVE_RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR:-${V2_DIR}/.dev-keys}"
+export CERALIVE_RAUC_PKI_DIR
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 RELEASE="${RELEASE:-bookworm}"
@@ -317,6 +323,16 @@ main() {
         --bsp-dir "${bsp_dir}" \
         || die "Stage-4 disk assembly failed for board '${board}'"
       log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
+
+      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
+      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
+      # the .raw, emitted ALONGSIDE it. format=plain (no dm-verity, G4 deferred).
+      local bundle_artifact="${out_dir}/${ts}.raucb"
+      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      BUNDLE_VERSION="${ts}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
+        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
+        || die "Stage-4 RAUC bundle build failed for board '${board}'"
+      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
     fi

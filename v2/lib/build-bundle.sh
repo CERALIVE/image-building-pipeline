@@ -74,6 +74,12 @@ RAUC_LEAF_KEY="${RAUC_PKI_DIR}/leaf-signing.key"
 # Reference only — used by the no-root-sign guard to assert it is NEVER consumed.
 RAUC_ROOT_KEY="${RAUC_PKI_DIR}/root-ca.key"
 
+# Our signing leaf carries EKU=codeSigning (both the dev key and cert-work/rauc).
+# RAUC's default verify purpose is smimesign, which rejects a codeSigning-only
+# leaf with "unsuitable certificate purpose"; tell rauc to check the codesign
+# purpose so `rauc info` verifies the chain instead of dying at signing time.
+RAUC_VERIFY_OPTS=(-C keyring:check-purpose=codesign)
+
 usage() {
   cat >&2 <<EOF
 Usage: build-bundle.sh <board> <rootfs-dir-or-tar>
@@ -93,10 +99,16 @@ Env:
   BUNDLE_VERSION          bundle version string. Default: git short SHA, else
                           the build timestamp.
   CERALIVE_RAUC_PKI_DIR   override the cert-work/rauc PKI directory.
+  BUNDLE_OUT_DIR          override the output directory. Default:
+                          images/<board>/bundles. The orchestrator sets this to
+                          images/<board> so the .raucb lands ALONGSIDE the .raw.
+  BUNDLE_TS               override the output filename stem (<stem>.raucb).
+                          Default: a fresh UTC timestamp. The orchestrator sets
+                          this to the build timestamp shared with the .raw/.rootfs.tar.
 
 Output:
-  images/<board>/bundles/<timestamp>.raucb        the signed bundle
-  images/<board>/bundles/<timestamp>.raucb.sha256 checksum (for R2 upload)
+  <BUNDLE_OUT_DIR>/<BUNDLE_TS>.raucb        the signed bundle
+  <BUNDLE_OUT_DIR>/<BUNDLE_TS>.raucb.sha256 checksum (for R2 upload)
 
 Bundles are served from R2; they are NOT written to the hawkBit local store.
 EOF
@@ -192,7 +204,7 @@ bundle_with_rauc() {
   log_info "signing: ${sign_cmd[*]}"
   "${sign_cmd[@]}"
   log_info "verifying against device root-CA keyring: ${RAUC_ROOT_CA}"
-  rauc info --keyring="${RAUC_ROOT_CA}" "${out}"
+  rauc info "${RAUC_VERIFY_OPTS[@]}" --keyring="${RAUC_ROOT_CA}" "${out}"
 }
 
 # ---------------------------------------------------------------------------
@@ -290,7 +302,7 @@ verify_openssl_bundle() {
 bundle_info() {
   local bundle="$1"
   if command -v rauc >/dev/null 2>&1; then
-    rauc info --keyring="${RAUC_ROOT_CA}" "${bundle}"
+    rauc info "${RAUC_VERIFY_OPTS[@]}" --keyring="${RAUC_ROOT_CA}" "${bundle}"
     return
   fi
   require_cmd unsquashfs
@@ -329,7 +341,9 @@ build-bundle() {
       version=""
     fi
   fi
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  # BUNDLE_TS lets the orchestrator share ONE build timestamp across the
+  # .rootfs.tar / .raw / .raucb triple so they collate under images/<board>/.
+  ts="${BUNDLE_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
   [[ -n "${version}" ]] || version="${ts}"
 
   log_info "board=${board} compatible=${compatible} version=${version}"
@@ -344,7 +358,7 @@ build-bundle() {
 
   # Output layout for R2 serving (NOT the hawkBit local store).
   local out_dir out
-  out_dir="${IMAGES_DIR}/${board}/bundles"
+  out_dir="${BUNDLE_OUT_DIR:-${IMAGES_DIR}/${board}/bundles}"
   mkdir -p "${out_dir}"
   out="${out_dir}/${ts}.raucb"
 
