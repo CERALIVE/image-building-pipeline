@@ -28,6 +28,10 @@ MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
 # be the real path; CERALIVE_V2_DIR is injected by the Docker runner as a
 # reliable override (set to the host V2_DIR mounted at /work in the container).
 V2_DIR="${CERALIVE_V2_DIR:-$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)}"
+# Hard fallback: if BASH_SOURCE[0] was a symlink (mkosi's temp /work/finalize),
+# the path traversal above gives / — detect and recover using the known Docker
+# volume mount point before the source below hard-fails.
+[[ -f "${V2_DIR}/lib/common.sh" ]] || V2_DIR="/work"
 
 # shellcheck source=../../../lib/common.sh
 source "${V2_DIR}/lib/common.sh"
