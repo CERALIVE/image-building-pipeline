@@ -121,7 +121,10 @@ stage_repart_dir() {
 # seed, and extlinux/extlinux.conf. Only the custom-uboot adapter (RK3588) boots via
 # boot.scr; x86 (efi) populates its EFI System Partition elsewhere and is skipped.
 # install-boot.sh renders every board specific from the manifest-resolved env —
-# DTB_NAME/SERIAL_CONSOLE/COMPATIBLE_STRING are inherited from the orchestrator;
+# DTB_NAME/SERIAL_CONSOLE/COMPATIBLE_STRING are EXPLICITLY forwarded from this
+# assembler's environment (orchestrate.sh resolves+exports them from the manifest);
+# we never rely on transitive process inheritance, so a standalone assemble-disk.sh
+# call fails loudly instead of silently rendering a half-board boot partition.
 # BOARD_ID + SINGLE_SLOT_FALLBACK are forced to the values THIS assembly used so the
 # boot_state seed can never drift from the GPT actually laid. Offline + rootless: the
 # tree is mcopy'd straight into the FAT image (never loop-mounted), so a re-run only
@@ -134,6 +137,9 @@ populate_boot_partition() {
     return 0
   fi
   [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to render the boot partition"
+  [[ -n "${DTB_NAME:-}" ]]        || die "bootloader_adapter=custom requires DTB_NAME (manifest dtb_name) to render the boot partition"
+  [[ -n "${SERIAL_CONSOLE:-}" ]]  || die "bootloader_adapter=custom requires SERIAL_CONSOLE (family serial_console) to render the boot console"
+  [[ -n "${COMPATIBLE_STRING:-}" ]] || die "bootloader_adapter=custom requires COMPATIBLE_STRING (orchestrator ceralive-<board-slug>) for the boot partition"
   [[ -x "${INSTALL_BOOT_SH}" ]] || die "boot-partition installer not executable: ${INSTALL_BOOT_SH}"
   require_cmd mcopy    # mtools — fill the FAT offline, no loop mount / no root
   require_cmd mkimage  # u-boot-tools — install-boot.sh compiles boot.scr; the device needs it
@@ -141,6 +147,8 @@ populate_boot_partition() {
   log_info "populating boot partition (boot.scr + cera_board.env + boot_state.txt + extlinux, board=${board_id}, single_slot=${single_slot})"
   local staging; staging="$(mktemp -d)"
   SINGLE_SLOT_FALLBACK="${single_slot}" BOARD_ID="${board_id}" \
+    DTB_NAME="${DTB_NAME}" SERIAL_CONSOLE="${SERIAL_CONSOLE}" \
+    COMPATIBLE_STRING="${COMPATIBLE_STRING}" \
     bash "${INSTALL_BOOT_SH}" boot-partition "${staging}"
   # -s recurse (extlinux/), -o overwrite without prompt (idempotent), -Q quit on
   # error, -m keep mtimes. Lands the staged tree at the FAT image root.
