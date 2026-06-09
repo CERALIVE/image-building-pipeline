@@ -196,53 +196,50 @@ _fetch_bsp_native() {
 }
 
 # ---------------------------------------------------------------------------
-# _fetch_bsp_docker — Docker/Podman fallback for non-Debian hosts (e.g. Arch).
-# Runs apt-get update + download inside the pinned trixie builder container.
-# The /debs volume mount ensures downloaded .deb files land on the host.
+# _fetch_bsp_curl — curl-based fallback for non-Debian hosts (e.g. Arch Linux).
+# Downloads the Armbian Packages.gz index, resolves each BSP package name to
+# its pool URL, then curl-fetches the .deb. No apt-get, no Docker, no GPG key
+# import required. Works on any host with curl + gzip.
 # ---------------------------------------------------------------------------
-_fetch_bsp_docker() {
+_fetch_bsp_curl() {
   local debs="$1"; shift
   local bsp_pkgs=("$@")
-  local runtime=""
+  require_cmd curl
+  require_cmd gzip
 
-  if command -v docker >/dev/null 2>&1; then
-    runtime="docker"
-  elif command -v podman >/dev/null 2>&1; then
-    runtime="podman"
+  log_info "apt-get not found (non-Debian host) — fetching BSP via curl from ${ARMBIAN_APT_URL}"
+
+  local packages_url="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}/main/binary-${ARCH}/Packages.gz"
+  local packages_file; packages_file="$(mktemp)"
+  run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
+    || die "failed to download Armbian Packages index: ${packages_url}"
+
+  if [[ -z "${DRY_RUN}" ]]; then
+    gzip -df "${packages_file}.gz" || die "failed to decompress Armbian Packages.gz"
   else
-    die "apt-get not found and neither docker nor podman available — cannot fetch BSP packages on this host"
+    log_info "DRY-RUN: would decompress ${packages_file}.gz"
   fi
 
-  local builder="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
-  log_info "apt-get not found (non-Debian host) — fetching BSP inside ${builder} (${runtime})"
+  local pkg
+  for pkg in "${bsp_pkgs[@]}"; do
+    local filename=""
+    if [[ -z "${DRY_RUN}" ]]; then
+      # Parse the Packages index: find the block for this package, extract Filename:
+      filename="$(awk -v want="${pkg}" '
+        /^Package: /{ p=($2==want) }
+        p && /^Filename: /{ print $2; exit }
+      ' "${packages_file}")"
+      [[ -n "${filename}" ]] \
+        || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+    fi
+    log_info "BSP fetch (curl): ${pkg}"
+    run_or_plan curl -fsSL --retry 3 \
+      -o "${debs}/$(basename "${filename:-${pkg}.deb}")" \
+      "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
+  done
 
-  local pkg_list="${bsp_pkgs[*]}"
-  run_or_plan "${runtime}" run --rm \
-    -v "${debs}:/debs" \
-    -e "ARCH=${ARCH}" \
-    -e "ARMBIAN_APT_URL=${ARMBIAN_APT_URL}" \
-    -e "ARMBIAN_SUITE=${ARMBIAN_SUITE}" \
-    -e "PKGS=${pkg_list}" \
-    "${builder}" \
-    bash -euo pipefail -c '
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq
-      apt-get install -y --no-install-recommends apt-utils ca-certificates >/dev/null 2>&1
-      src_list="$(mktemp)"
-      printf "deb [trusted=yes arch=%s] %s %s main\n" \
-        "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
-      apt_opts=(
-        -o "Dir::Etc::SourceList=${src_list}"
-        -o "Dir::Etc::SourceParts=-"
-        -o "APT::Architecture=${ARCH}"
-        -qq
-      )
-      apt-get "${apt_opts[@]}" --allow-insecure-repositories update
-      cd /debs
-      for pkg in ${PKGS}; do
-        apt-get "${apt_opts[@]}" --allow-unauthenticated download "${pkg}"
-      done
-    '
+  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -287,7 +284,7 @@ fetch_bsp() {
   if command -v apt-get >/dev/null 2>&1; then
     _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
   else
-    _fetch_bsp_docker "${debs}" "${bsp_pkgs[@]}"
+    _fetch_bsp_curl "${debs}" "${bsp_pkgs[@]}"
   fi
 }
 
