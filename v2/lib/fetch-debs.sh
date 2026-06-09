@@ -237,10 +237,10 @@ _fetch_bsp_docker() {
         -o "APT::Architecture=${ARCH}"
         -qq
       )
-      apt-get "${apt_opts[@]}" update
+      apt-get "${apt_opts[@]}" --allow-insecure-repositories update
       cd /debs
       for pkg in ${PKGS}; do
-        apt-get "${apt_opts[@]}" download "${pkg}"
+        apt-get "${apt_opts[@]}" --allow-unauthenticated download "${pkg}"
       done
     '
 }
