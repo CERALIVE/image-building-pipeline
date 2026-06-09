@@ -7,7 +7,10 @@
 #
 #   1. BSP packages  — kernel / DTB / U-Boot blob / firmware / GStreamer, read
 #                      BY NAME from the resolved FAMILY manifest (typed package
-#                      arrays), fetched from the Armbian apt repo.
+#                      arrays), fetched from the Armbian apt repo. On Debian/Ubuntu
+#                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
+#                      Arch Linux), the fetch runs inside the pinned trixie builder
+#                      container via Docker/Podman.
 #   2. First-party   — srtla / srt / ceracoder / CeraUI .debs, fetched from R2
 #                      (CI mode) or `gh release download` (local mode).
 #
@@ -154,11 +157,103 @@ assert_sibling_layout() {
 }
 
 # ---------------------------------------------------------------------------
+# _fetch_bsp_native — native apt-get path (Debian/Ubuntu hosts).
+# Isolated apt state so the host apt config is never touched. The Armbian repo
+# is declared in a throwaway sources list; `apt-get download` fetches the .deb
+# for the current suite into $debs.
+# ---------------------------------------------------------------------------
+_fetch_bsp_native() {
+  local debs="$1"; shift
+  local bsp_pkgs=("$@")
+
+  local apt_state="${debs}/.apt-state"
+  run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
+  local src_list="${apt_state}/armbian.list"
+  if [[ -z "${DRY_RUN}" ]]; then
+    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
+      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+  else
+    log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
+  fi
+
+  local apt_opts=(
+    -o "Dir::Etc::SourceList=${src_list}"
+    -o "Dir::Etc::SourceParts=-"
+    -o "Dir::State::Lists=${apt_state}/lists"
+    -o "Dir::Cache=${apt_state}/cache"
+    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
+    -o "APT::Architecture=${ARCH}"
+  )
+
+  run_or_plan apt-get "${apt_opts[@]}" update
+
+  local pkg
+  for pkg in "${bsp_pkgs[@]}"; do
+    log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
+    run_or_plan bash -c \
+      "cd $(printf '%q' "${debs}") && apt-get $(printf '%q ' "${apt_opts[@]}")download $(printf '%q' "${pkg}")"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# _fetch_bsp_docker — Docker/Podman fallback for non-Debian hosts (e.g. Arch).
+# Runs apt-get update + download inside the pinned trixie builder container.
+# The /debs volume mount ensures downloaded .deb files land on the host.
+# ---------------------------------------------------------------------------
+_fetch_bsp_docker() {
+  local debs="$1"; shift
+  local bsp_pkgs=("$@")
+  local runtime=""
+
+  if command -v docker >/dev/null 2>&1; then
+    runtime="docker"
+  elif command -v podman >/dev/null 2>&1; then
+    runtime="podman"
+  else
+    die "apt-get not found and neither docker nor podman available — cannot fetch BSP packages on this host"
+  fi
+
+  local builder="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
+  log_info "apt-get not found (non-Debian host) — fetching BSP inside ${builder} (${runtime})"
+
+  local pkg_list="${bsp_pkgs[*]}"
+  run_or_plan "${runtime}" run --rm \
+    -v "${debs}:/debs" \
+    -e "ARCH=${ARCH}" \
+    -e "ARMBIAN_APT_URL=${ARMBIAN_APT_URL}" \
+    -e "ARMBIAN_SUITE=${ARMBIAN_SUITE}" \
+    -e "PKGS=${pkg_list}" \
+    "${builder}" \
+    bash -euo pipefail -c '
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y --no-install-recommends apt-utils ca-certificates >/dev/null 2>&1
+      src_list="$(mktemp)"
+      printf "deb [trusted=yes arch=%s] %s %s main\n" \
+        "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+      apt_opts=(
+        -o "Dir::Etc::SourceList=${src_list}"
+        -o "Dir::Etc::SourceParts=-"
+        -o "APT::Architecture=${ARCH}"
+        -qq
+      )
+      apt-get "${apt_opts[@]}" update
+      cd /debs
+      for pkg in ${PKGS}; do
+        apt-get "${apt_opts[@]}" download "${pkg}"
+      done
+    '
+}
+
+# ---------------------------------------------------------------------------
 # fetch_bsp — read BSP package NAMES from the resolved family manifest and pull
 # each from the Armbian apt pool into $DEST/debs/. Names (not versions) are the
 # manifest contract; the Armbian suite supplies the concrete build. Pinning a
 # specific BSP version would append "=<ver>" — kept name-based to match the
 # manifest + Decision D3 (branch=vendor encoded in the package name itself).
+#
+# On Debian/Ubuntu hosts with apt-get, uses native path. On other hosts (e.g.
+# Arch Linux), delegates to Docker/Podman fallback.
 # ---------------------------------------------------------------------------
 fetch_bsp() {
   local family="$1" debs="$2"
@@ -189,38 +284,11 @@ fetch_bsp() {
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
   log_info "Armbian source: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
 
-  # Isolated apt state so the host apt config is never touched. The Armbian repo
-  # is declared in a throwaway sources list; `apt-get download` fetches the .deb
-  # for the current suite into $debs.
-  local apt_state="${debs}/.apt-state"
-  run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
-  local src_list="${apt_state}/armbian.list"
-  if [[ -z "${DRY_RUN}" ]]; then
-    require_cmd apt-get
-    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
-      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+  if command -v apt-get >/dev/null 2>&1; then
+    _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
   else
-    log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
+    _fetch_bsp_docker "${debs}" "${bsp_pkgs[@]}"
   fi
-
-  local apt_opts=(
-    -o "Dir::Etc::SourceList=${src_list}"
-    -o "Dir::Etc::SourceParts=-"
-    -o "Dir::State::Lists=${apt_state}/lists"
-    -o "Dir::Cache=${apt_state}/cache"
-    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
-    -o "APT::Architecture=${ARCH}"
-  )
-
-  run_or_plan apt-get "${apt_opts[@]}" update
-
-  local pkg
-  for pkg in "${bsp_pkgs[@]}"; do
-    log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
-    # apt-get download writes to CWD; run it inside $debs so the .deb lands there.
-    run_or_plan bash -c \
-      "cd $(printf '%q' "${debs}") && apt-get $(printf '%q ' "${apt_opts[@]}")download $(printf '%q' "${pkg}")"
-  done
 }
 
 # ---------------------------------------------------------------------------
