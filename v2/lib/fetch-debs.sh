@@ -321,11 +321,16 @@ fetch_first_party() {
 
     for r in "${REPOS[@]}"; do
       log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
-      run_or_plan gh release download \
-        --repo "CERALIVE/${r}" \
-        --pattern "*${ARCH}*.deb" \
-        --dir "${debs}" \
-        --clobber
+      if [[ -n "${DRY_RUN}" ]]; then
+        log_info "DRY-RUN would run: gh release download --repo CERALIVE/${r} --pattern *${ARCH}*.deb --dir ${debs} --clobber"
+      else
+        gh release download \
+          --repo "CERALIVE/${r}" \
+          --pattern "*${ARCH}*.deb" \
+          --dir "${debs}" \
+          --clobber 2>&1 \
+          || log_warn "first-party: no ${ARCH} .deb release for CERALIVE/${r} (repo has no release or no matching asset) — mkosi app layer will install nothing for this component"
+      fi
     done
   fi
 }
