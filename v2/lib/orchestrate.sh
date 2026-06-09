@@ -455,6 +455,7 @@ run_mkosi_build() {
 
   "${runtime}" run --rm --privileged \
     "${env_flags[@]}" \
+    -e "CERALIVE_V2_DIR=/work" \
     -v "${V2_DIR}:/work" \
     "${MKOSI_BUILDER_IMAGE}" \
     bash -euo pipefail -c '

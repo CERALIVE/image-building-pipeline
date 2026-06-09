@@ -24,7 +24,10 @@ set -euo pipefail
 # Repo paths, resolved relative to this script: base/ -> mkosi/ -> v2/.
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
-V2_DIR="$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)"          # …/v2
+# mkosi calls finalize scripts from a temp symlink, so BASH_SOURCE[0] may not
+# be the real path; CERALIVE_V2_DIR is injected by the Docker runner as a
+# reliable override (set to the host V2_DIR mounted at /work in the container).
+V2_DIR="${CERALIVE_V2_DIR:-$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)}"
 
 # shellcheck source=../../../lib/common.sh
 source "${V2_DIR}/lib/common.sh"

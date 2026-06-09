@@ -38,7 +38,7 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 # mkosi/ ; the boot source dir is mkosi/platform/boot.
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MKOSI_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/../.." && pwd)"   # …/v2/mkosi
-V2_DIR="$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)"          # …/v2
+V2_DIR="${CERALIVE_V2_DIR:-$(CDPATH='' cd -- "${MKOSI_DIR}/.." && pwd)}"
 
 # shellcheck source=../../../lib/common.sh
 source "${V2_DIR}/lib/common.sh"
