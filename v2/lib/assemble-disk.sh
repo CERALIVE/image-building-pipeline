@@ -25,8 +25,14 @@
 #
 # Fully OFFLINE (`systemd-repart --offline=yes`): no root, no loopback. ext4 slots
 # + data are formatted by repart; the vfat `boot` region is formatted with
-# mkfs.vfat and dd'd into its raw offset (repart does not re-format an adopted
-# partition).
+# mkfs.vfat, POPULATED with the boot artifacts via mtools (mcopy — still no mount),
+# and dd'd into its raw offset (repart does not re-format an adopted partition).
+#
+# The boot-partition populate is FAMILY-GATED (custom-uboot/RK3588 only): it stages
+# boot.scr (mkimage-compiled from boot.scr.cmd), cera_board.env, the boot_state.txt
+# A/B seed and extlinux/extlinux.conf via `install-boot.sh boot-partition`, then
+# mcopies them into the FAT image. mkimage (u-boot-tools) is a HOST prerequisite at
+# assembly time; x86 (efi) skips this — it boots from the EFI System Partition.
 #
 # After the filesystems are laid, the FAMILY-GATED bootloader write fills the
 # 16 MB raw gap: for rauc_bootloader_adapter=custom (RK3588) it dd's the board's
@@ -43,7 +49,8 @@
 #   build   Produce a real-geometry disk image. --total-mb sets the medium size
 #           (default 16384 = 16 GiB); data fills the remainder. --single-slot (or
 #           SINGLE_SLOT_FALLBACK=true) drops rootfs_b. --no-format lays only the
-#           GPT geometry (skips mkfs + bootloader) — used by the static verify path.
+#           GPT geometry (skips mkfs + boot-partition populate + bootloader) — used
+#           by the static verify path.
 #           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
 #           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
 #           RK3588 blob, efi skips it.
@@ -65,6 +72,10 @@ V2_DIR="$(cd "${HERE}/.." && pwd)"
 REPART_DIR="${REPART_DIR:-${V2_DIR}/mkosi/repart}"
 # RK3588 raw-gap bootloader writer (family-gated; only the custom-uboot path).
 WRITE_BOOTLOADER_SH="${WRITE_BOOTLOADER_SH:-${HERE}/write-bootloader.sh}"
+# Boot-partition artifact installer (boot.scr/cera_board.env/boot_state.txt/extlinux),
+# same family gate. Lives in the platform/boot layer because it renders board
+# specifics from the manifest env and needs mkimage (u-boot-tools) at assembly time.
+INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${V2_DIR}/mkosi/platform/boot/install-boot.sh}"
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
@@ -101,6 +112,41 @@ stage_repart_dir() {
   done
   shopt -u nullglob
   (( copied > 0 )) || die "no repart *.conf staged from ${REPART_DIR}"
+}
+
+# ---------------------------------------------------------------------------
+# populate_boot_partition <bootp_img> <adapter> <board_id> <single_slot>
+# FAMILY GATE for filling the vfat boot partition with the U-Boot A/B selector
+# artifacts: boot.scr (compiled by mkimage), cera_board.env, the boot_state.txt A/B
+# seed, and extlinux/extlinux.conf. Only the custom-uboot adapter (RK3588) boots via
+# boot.scr; x86 (efi) populates its EFI System Partition elsewhere and is skipped.
+# install-boot.sh renders every board specific from the manifest-resolved env —
+# DTB_NAME/SERIAL_CONSOLE/COMPATIBLE_STRING are inherited from the orchestrator;
+# BOARD_ID + SINGLE_SLOT_FALLBACK are forced to the values THIS assembly used so the
+# boot_state seed can never drift from the GPT actually laid. Offline + rootless: the
+# tree is mcopy'd straight into the FAT image (never loop-mounted), so a re-run only
+# overwrites (idempotent) and there is no mount to leak on error.
+# ---------------------------------------------------------------------------
+populate_boot_partition() {
+  local bootp="$1" adapter="$2" board_id="$3" single_slot="$4"
+  if [[ "${adapter}" != "custom" ]]; then
+    log_info "bootloader_adapter=${adapter:-<unset>} → SKIP boot-partition populate (only custom-uboot/RK3588 ships boot.scr/cera_board.env/boot_state.txt/extlinux)"
+    return 0
+  fi
+  [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to render the boot partition"
+  [[ -x "${INSTALL_BOOT_SH}" ]] || die "boot-partition installer not executable: ${INSTALL_BOOT_SH}"
+  require_cmd mcopy    # mtools — fill the FAT offline, no loop mount / no root
+  require_cmd mkimage  # u-boot-tools — install-boot.sh compiles boot.scr; the device needs it
+
+  log_info "populating boot partition (boot.scr + cera_board.env + boot_state.txt + extlinux, board=${board_id}, single_slot=${single_slot})"
+  local staging; staging="$(mktemp -d)"
+  SINGLE_SLOT_FALLBACK="${single_slot}" BOARD_ID="${board_id}" \
+    bash "${INSTALL_BOOT_SH}" boot-partition "${staging}"
+  # -s recurse (extlinux/), -o overwrite without prompt (idempotent), -Q quit on
+  # error, -m keep mtimes. Lands the staged tree at the FAT image root.
+  mcopy -i "${bootp}" -s -o -Q -m "${staging}"/* ::
+  rm -rf "${staging}"
+  log_success "boot partition populated"
 }
 
 # ---------------------------------------------------------------------------
@@ -167,13 +213,16 @@ build_disk() {
     --definitions="${defs}" "${img}" >/dev/null
 
   # 3. Format the adopted vfat boot region (repart never re-formats an adopted
-  #    partition). Build a 256 MB vfat image and dd it into the 16 MB offset.
+  #    partition), POPULATE it with the boot artifacts, then dd it into the 16 MB
+  #    offset. Building + filling the 256 MB vfat image standalone keeps the whole
+  #    step offline (mkfs.vfat + mcopy, no loop mount) before the single raw write.
   if [[ "${do_format}" == "true" ]]; then
     require_cmd mkfs.vfat
     log_info "formatting boot region (vfat, label BOOT) at ${GAP_MB} MiB offset"
     local bootp; bootp="$(mktemp)"
     truncate -s "${BOOT_MB}M" "${bootp}"
     mkfs.vfat -n BOOT "${bootp}" >/dev/null
+    populate_boot_partition "${bootp}" "${adapter}" "${board_id}" "${single_slot}"
     dd if="${bootp}" of="${img}" bs=1M seek="${GAP_MB}" conv=notrunc status=none
     rm -f "${bootp}"
   fi
