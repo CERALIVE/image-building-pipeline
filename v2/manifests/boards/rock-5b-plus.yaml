@@ -29,9 +29,11 @@ quirks:
   hdmi_input_emi_shield: true         # best-in-class EMI resistance for HDMI capture
   usb_power_optimization: true        # 5.45 A USB budget — power-hungry modems
 
-# 16 GB+ eMMC/NVMe → A/B layout fits (partition-contract §3/§5). Not the
-# single-slot fallback.
-single_slot_fallback: false
+# First Rock 5B+ image ships SINGLE-SLOT (no rootfs_b) as the brick-loop
+# mitigation for the bring-up image (partition-contract §4/§5): a failed update
+# cannot roll back into an empty B slot. A/B is enabled once the OTA path is
+# hardware-validated. 16 GB+ eMMC/NVMe still fits the eventual A/B layout.
+single_slot_fallback: true
 
 # ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext

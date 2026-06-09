@@ -15,14 +15,20 @@
 #   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
 #   8. verify    lib/parity-check.sh <rootfs>   → parity vs configs/base/ceraui-base.conf
+#   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
+#                (Stage-4 flashable GPT image). FAMILY-GATED: only the custom-uboot
+#                bootloader adapter (RK3588) has a raw bootloader gap to fill; x86
+#                (efi) is skipped here — its disk path is task 14.
 #
 # DESIGN (inherited from common.sh + learnings):
 #   * strict mode + loud ERR trap; NO `|| true` swallowing. Any mkosi/apt/dpkg
 #     failure aborts the whole build (MUST-NOT: don't swallow build errors).
 #   * ZERO hardcoded board names / package lists / device paths. Everything
 #     board-specific flows manifest → resolve.sh → environment → mkosi configs.
-#   * No A/B partitions yet (Stage 4). Stage 1 emits a single rootfs to reach
-#     PARITY with today's Armbian image first.
+#   * The rootfs.tar emit (step 7) is the parity artifact and is ALWAYS produced;
+#     step 9 lays it onto the frozen A/B GPT geometry only for the RK3588
+#     custom-uboot adapter, single-slot or A/B per the manifest's
+#     single_slot_fallback flag.
 #
 # shellcheck shell=bash
 
@@ -38,6 +44,7 @@ V2_DIR="$(cd "${HERE}/.." && pwd)"
 RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
+ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
 # Staged .debs live under the mkosi dir (so the builder container, which mounts
@@ -147,7 +154,7 @@ main() {
   #    resolve.sh dies loudly on unknown board/family, schema violations and
   #    unresolved versions.yaml defer tokens; its failure propagates here.
   # -------------------------------------------------------------------------
-  log_info "[1/8] resolving manifest → build params"
+  log_info "[1/9] resolving manifest → build params"
   local params
   params="$("${RESOLVE_SH}" "${board}")" || die "manifest resolution failed for board '${board}'"
   eval "${params}"
@@ -199,11 +206,11 @@ main() {
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   mkdir -p "${bsp_dir}" "${firstparty_dir}"
 
-  log_info "[2/8] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
+  log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
   DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
     || die "fetch-debs failed for board '${board}'"
 
-  log_info "[3/8] partitioning staged .debs into BSP vs first-party by package name"
+  log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
   # The set of BSP package names (manifest-declared) is the partition key.
   local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
   local deb pkg
@@ -225,7 +232,7 @@ main() {
   #    failure, no half-image (MUST-DO: fail cleanly on missing BSP pin).
   # -------------------------------------------------------------------------
   if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[4/8] verifying boot BSP packages are obtainable"
+    log_info "[4/9] verifying boot BSP packages are obtainable"
     local boot_bsp_names name missing=()
     read -ra boot_bsp_names <<<"${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES}"
     for name in "${boot_bsp_names[@]}"; do
@@ -242,14 +249,14 @@ main() {
     fi
     log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
   else
-    log_warn "[4/8] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
+    log_warn "[4/9] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
   fi
 
   # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
   # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before
   # mkosi/docker so CI needs no network, privileged container or board.
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    log_info "[5/8] DRY_RUN=1 — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
+    log_info "[5/9] DRY_RUN=1 — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -260,14 +267,14 @@ main() {
   local ts rootfs_tree
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   rootfs_tree="${MKOSI_DIR}/build/app"
-  log_info "[5/8] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
+  log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
   run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
   [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
 
   # -------------------------------------------------------------------------
   # 7. Emit normalized output + checksum (NOT Armbian-unofficial_*).
   # -------------------------------------------------------------------------
-  log_info "[6/8] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
+  log_info "[6/9] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
   local out_dir="${IMAGES_DIR}/${board}" artifact
   mkdir -p "${out_dir}"
   artifact="${out_dir}/${ts}.rootfs.tar"
@@ -282,11 +289,42 @@ main() {
   #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
   #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
   # -------------------------------------------------------------------------
-  log_info "[7/8] verifying parity vs configs/base/ceraui-base.conf"
+  log_info "[7/9] verifying parity vs configs/base/ceraui-base.conf"
   "${PARITY_CHECK_SH}" "${rootfs_tree}" \
     || die "parity check FAILED for board '${board}' — image does not match the canonical package/service/user/routing set"
 
-  log_info "[8/8] done"
+  # -------------------------------------------------------------------------
+  # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
+  #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
+  #    .raw ALONGSIDE the rootfs.tar above. FAMILY-GATED on the resolved
+  #    rauc_bootloader_adapter: only `custom` (RK3588 vendor U-Boot, decision D3 —
+  #    the "custom-uboot" adapter) has a raw bootloader gap to fill. x86 resolves
+  #    `efi` and boots from the EFI System Partition; its disk path is task 14, so
+  #    it is skipped here. The gap write needs the staged U-Boot .deb, so a
+  #    config+package parity build (INSTALL_BOOT_BSP=0, no BSP staged) defers disk
+  #    assembly to the full device build — exactly like the boot-BSP gate above.
+  # -------------------------------------------------------------------------
+  if [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "custom" ]]; then
+    if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
+      [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
+      log_info "[8/9] Stage-4 disk assembly → ${raw_artifact} (bootloader_adapter=custom single_slot=${SINGLE_SLOT_FALLBACK:-false})"
+      "${ASSEMBLE_DISK_SH}" build \
+        --output "${raw_artifact}" \
+        "${single_slot_flag[@]}" \
+        --board "${BOARD_ID}" \
+        --bootloader-adapter "${RAUC_BOOTLOADER_ADAPTER}" \
+        --bsp-dir "${bsp_dir}" \
+        || die "Stage-4 disk assembly failed for board '${board}'"
+      log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
+    else
+      log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
+    fi
+  else
+    log_info "[8/9] bootloader_adapter='${RAUC_BOOTLOADER_ADAPTER:-unset}' (not custom) — skipping RK3588 disk assembly (x86/efi disk image is task 14)"
+  fi
+
+  log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
 }
 
