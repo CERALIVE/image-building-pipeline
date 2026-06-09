@@ -39,6 +39,16 @@ quirks:
 # hardware-validated. 16 GB+ eMMC/NVMe still fits the eventual A/B layout.
 single_slot_fallback: true
 
+# Interface identity map — pins each role to its physical port via systemd .link
+# Path= matching (ID_PATH from `udevadm info /sys/class/net/<iface>`). Single
+# onboard 2.5G NIC (RTL8125B, r8169 driver, fe190000.pcie PCIe bus) → eth0.
+# WiFi (RTL8852BE, rtw89_8852be, fe170000.pcie) → wlan0 via generic Type=wlan
+# fallback (only one wifi adapter, no disambiguation needed; listed here for
+# documentation completeness).
+interfaces:
+  eth0: platform-fe190000.pcie-pci-0004:41:00.0
+  wlan0: platform-fe170000.pcie-pci-0002:21:00.0
+
 # ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext
 

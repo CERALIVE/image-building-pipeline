@@ -203,6 +203,18 @@ get_pin() {
   [[ "$output" == *"dtb_name"* ]]
 }
 
+@test "valid: board with an interfaces identity map passes board schema" {
+  run validate_manifest "$FIXTURES/valid-board-interfaces.yaml" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "invalid: board with an unknown interfaces key fails and names interfaces" {
+  run validate_manifest "$FIXTURES/invalid-board-bad-interface-key.yaml" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"interfaces"* ]]
+}
+
 # ===========================================================================
 # 4. Resolver merge-precedence — family defaults survive, board fields apply.
 # ===========================================================================

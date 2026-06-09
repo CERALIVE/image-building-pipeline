@@ -383,6 +383,7 @@ run_mkosi_build() {
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 COMPATIBLE_STRING
+    CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
@@ -417,6 +418,14 @@ run_mkosi_build() {
   # install on a Rock 5B+; deriving from board_id and having install-boot.sh +
   # build-bundle.sh read THIS env (no own default) keeps device + bundle in lockstep.
   export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${BOARD_ID}}"
+
+  # Deterministic interface naming (postinst-lib.sh::install_interface_naming).
+  # The manifest interfaces: block flattens to INTERFACES_ETH0/ETH1/WLAN0; forward
+  # each as CERALIVE_INTERFACES_<role> so the runtime postinst emits per-role
+  # systemd .link Path= rules. Empty/FIXME values are skipped on-device.
+  export CERALIVE_INTERFACES_eth0="${INTERFACES_ETH0:-}"
+  export CERALIVE_INTERFACES_eth1="${INTERFACES_ETH1:-}"
+  export CERALIVE_INTERFACES_wlan0="${INTERFACES_WLAN0:-}"
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done

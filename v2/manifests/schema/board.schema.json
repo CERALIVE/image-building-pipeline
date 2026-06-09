@@ -60,6 +60,16 @@
       "enum": ["sysext", "appfs"],
       "default": "sysext"
     },
+    "interfaces": {
+      "description": "Per-board network interface identity map. Optional. When present, the platform module emits /etc/systemd/network/10-ceralive-<role>.link files that pin each role to a deterministic name via systemd-udevd Path= matching (keyed on ID_PATH, stable per board model). Required on boards with multiple same-class NICs (e.g. dual r8169 on Orange Pi 5+) where a generic Type= match would race. Each key is the canonical interface role name (eth0, eth1, wlan0); value is the udev ID_PATH string for that physical port (read from `udevadm info /sys/class/net/<iface> | grep ID_PATH`). Roles not listed here fall back to the generic Type= rules in configure_networking().",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eth0": { "type": "string", "description": "ID_PATH of the primary wired control port." },
+        "eth1": { "type": "string", "description": "ID_PATH of the secondary wired port (bonded uplink on dual-NIC boards)." },
+        "wlan0": { "type": "string", "description": "ID_PATH of the onboard WiFi adapter (optional; generic Type=wlan fallback is used when absent)." }
+      }
+    },
     "description": {
       "description": "Human-readable board name/notes (e.g. DEVICE_NAME 'Radxa Rock 5B+'). REQUIRED — single home for the descriptive INSTALLATION_NOTES/hardware-spec metadata that is not consumed by the builder.",
       "type": "string",

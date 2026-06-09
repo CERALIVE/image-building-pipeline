@@ -79,6 +79,61 @@ systemd-resolved=true
 
 [device]
 wifi.scan-rand-mac-address=yes
+
+# IPv4 link-local fallback on the wired control port. Without this, a network
+# that offers no DHCP/RA (dead or hostile DHCP server, dumb switch, a laptop
+# plugged in directly) leaves the appliance with NO IPv4 address at all and
+# unreachable over v4. link-local=enabled (=3) always assigns a 169.254/16
+# address (RFC 3927) alongside any lease, so combined with avahi mDNS the device
+# is reachable at ceralive.local on ANY network out of the box. Scoped to eth0
+# ONLY: bonded SRTLA modems / wlan_bond must never get a competing 169.254 route.
+[connection-eth0-llv4]
+match-device=interface-name:eth0
+ipv4.link-local=3
+EOF
+
+  install_interface_naming
+}
+
+# --- 8b. Deterministic interface naming (eth0/eth1/wlan0 .link units) ------
+# RK3588 predictable names (wlP2p33s0, enP4p65s0) never matched SRTLA's wlan*/
+# eth* routing globs, so wifi/wired uplinks were silently dropped from bonding.
+# These .link units rename onboard NICs to stable roles. Per-role Path= rules
+# (keyed on the manifest ID_PATH, stable per board model) are required on OPi 5+
+# where the dual r8169 NICs would otherwise race a generic Type=ether match.
+install_interface_naming() {
+  log "installing deterministic interface naming (.link units + loose rp_filter)"
+  mkdir -p /etc/systemd/network
+
+  cat >/etc/systemd/network/10-ceralive-wlan0.link <<'EOF'
+[Match]
+Type=wlan
+
+[Link]
+Name=wlan0
+EOF
+
+  local role var val
+  for role in eth0 eth1 wlan0; do
+    var="CERALIVE_INTERFACES_${role}"
+    val="${!var:-}"
+    [[ -n "${val}" && "${val}" != FIXME* ]] || continue
+    cat >"/etc/systemd/network/10-ceralive-${role}.link" <<EOF
+[Match]
+Path=${val}
+
+[Link]
+Name=${role}
+EOF
+  done
+
+  # rp_filter=2 (loose) validates the return path on ANY interface, not just the
+  # arrival one — strict RPF silently drops modem return traffic under multi-WAN
+  # source-policy routing.
+  mkdir -p /etc/sysctl.d
+  cat >/etc/sysctl.d/60-ceralive-rp-filter.conf <<'EOF'
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 EOF
 }
 

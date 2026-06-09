@@ -81,3 +81,32 @@ The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but 
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
+
+## KNOWN ISSUES / DEFERRED
+
+**OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
+ships the `interfaces:` block with `FIXME-…` values because the board is not in
+hand. The OPi 5+ has two onboard r8169 NICs on the same driver/bus, so a generic
+`Type=ether` match races. Before building an OPi 5+ image, read the real ID_PATHs
+on the device (`udevadm info /sys/class/net/<iface> | grep ID_PATH`) and replace
+each FIXME. Until then `install_interface_naming()` skips the FIXME values and
+emits only the generic `Type=wlan → wlan0` rule; the dual NICs stay
+non-deterministic.
+
+**Modem source-routing may not fire (NM `dhcp=internal`).** The SRTLA dhclient
+exit hook (`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) installs
+per-modem source-policy routes on DHCP `BOUND` events. NetworkManager in Debian
+bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT execute
+`dhclient-exit-hooks.d/`. Modem routing may therefore never trigger for
+NM-managed interfaces. The wifi path is unaffected (it uses the NM dispatcher,
+`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`). Verify with a modem
+attached: check `journalctl -t srtla-routing` and `ip rule show` after the modem
+connects. If the hook doesn't fire, extend `90-srtla-wifi-routing` to also match
+`usb*|wwan*` and assign tables 100–107 by index — but that touches the
+drift-gated SRTLA payloads (`v2/ci/postinst-drift-check.sh` CHECK 2) and requires
+a deliberate twin-update of both `networking-srtla.sh` and the `§6` block in
+`mkosi.postinst.chroot`.
+
+**Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
+physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`
+are pinned today.

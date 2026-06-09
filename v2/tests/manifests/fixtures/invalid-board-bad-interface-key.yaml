@@ -1,0 +1,11 @@
+# Fixture: INVALID board manifest — unknown key under interfaces:.
+# board.schema.json sets additionalProperties:false on the interfaces object, so
+# only eth0/eth1/wlan0 are permitted; eth99 is illegal. manifest.bats asserts
+# this fails board-schema validation with "interfaces" in the message.
+family: rk3588
+board_id: test-board
+dtb_name: rk3588-test-board.dtb
+description: Board fixture with an unknown key under interfaces.
+interfaces:
+  eth0: platform-fe190000.pcie-pci-0004:41:00.0
+  eth99: platform-bogus-not-a-real-role

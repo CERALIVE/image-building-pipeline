@@ -225,6 +225,14 @@ main() {
     pass "no build-time Armbian pool in final image (clean apt config)"
   fi
 
+  # ---- F. INTERFACE NAMING ----
+  log_info "--- F. deterministic interface naming (.link units) ---"
+  if [[ -f "${root}/etc/systemd/network/10-ceralive-wlan0.link" ]]; then
+    pass "wlan0 .link file present (interface naming standardization)"
+  else
+    fail "wlan0 .link file missing — wlan0 rename won't apply, SRTLA wifi routing broken"
+  fi
+
   # ---- summary ----
   log_info "=== parity summary: ${PASS} pass / ${WARN} warn / ${FAIL} fail ==="
   if (( FAIL > 0 )); then
