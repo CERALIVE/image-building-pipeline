@@ -455,20 +455,20 @@ run_mkosi_build() {
 
   "${runtime}" run --rm --privileged \
     "${env_flags[@]}" \
-    -v "${MKOSI_DIR}:/work" \
+    -v "${V2_DIR}:/work" \
     "${MKOSI_BUILDER_IMAGE}" \
     bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y --no-install-recommends \
         mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates reprepro >/dev/null
-      cd /work
+      cd /work/mkosi
       mkosi \
         --architecture='"${mkosi_arch}"' \
         --with-network=yes \
         '"${env_cli_str}"' \
-        --package-directory /work/.staging/'"${BOARD_ID}"'/bsp \
-        --extra-tree /work/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
+        --package-directory /work/mkosi/.staging/'"${BOARD_ID}"'/bsp \
+        --extra-tree /work/mkosi/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
         --force \
         build
     ' || die "mkosi build failed (container)"
