@@ -6,12 +6,19 @@
 # (L286-431). This is LOAD-BEARING for SRTLA multi-link bonding — do not break
 # the table numbers or the hook/dispatcher logic.
 #
-#   * rt_tables  : 100-107 = modem0..modem7 (USB modems), 110 = wlan_bond (WiFi).
+#   * rt_tables  : 100-107 = modem0..modem7 (USB modems), 120-124 = wlan0..wlan4 (WiFi).
 #   * dhclient   : /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing installs a
 #                  per-source default route in the matching table when a modem /
 #                  wired iface gets a DHCP lease, and tears it down on release.
+#                  RISK: NM defaults to dhcp=internal in bookworm and does NOT exec
+#                  dhclient-exit-hooks.d/ — modem routing may never fire for
+#                  NM-managed interfaces. See AGENTS.md §KNOWN ISSUES.
 #   * NM dispatch: /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing does the
-#                  same for NetworkManager-managed wlan* interfaces (table 110).
+#                  same for NetworkManager-managed wlan0..wlan4 interfaces, each in
+#                  its own table 120+N (per srtla/docs/NETWORK_SETUP.md).
+#                  NOTE: wlan* matches because postinst-lib.sh install_interface_naming()
+#                  emits a systemd .link file renaming the onboard wifi to wlan0
+#                  before NM brings it up. Same applies to eth* (→ eth0).
 #
 # The runtime payload scripts keep their internal `2>/dev/null || true` guards:
 # those run on the LIVE device against transient kernel routing state (a rule
@@ -35,7 +42,7 @@ install_rt_tables() {
     log_info "SRTLA routing tables already present in /etc/iproute2/rt_tables"
     return 0
   fi
-  log_info "reserving SRTLA routing tables 100-107 (modems) + 110 (wlan_bond)"
+  log_info "reserving SRTLA routing tables 100-107 (modems) + 120-124 (wlan0..wlan4)"
   cat >>/etc/iproute2/rt_tables <<'EOF'
 
 # SRTLA bonding routing tables
@@ -47,7 +54,11 @@ install_rt_tables() {
 105     modem5
 106     modem6
 107     modem7
-110     wlan_bond
+120     wlan0
+121     wlan1
+122     wlan2
+123     wlan3
+124     wlan4
 EOF
 }
 
@@ -108,7 +119,7 @@ HOOKEOF
   chmod +x /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing
 }
 
-# NetworkManager dispatcher: source-policy routing for wlan* (table 110).
+# NetworkManager dispatcher: source-policy routing for wlan0..wlan4 (tables 120-124).
 # v1 L378-425. Payload runs on the live device, hence its own transient guards.
 install_nm_dispatcher() {
   log_info "installing NetworkManager SRTLA WiFi-routing dispatcher"
@@ -120,11 +131,11 @@ INTERFACE="$1"
 ACTION="$2"
 
 case "$INTERFACE" in
-    wlan*) ;;
+    wlan[0-4]) ;;
     *) exit 0 ;;
 esac
 
-TABLE=110  # wlan_bond table
+TABLE=$((120 + ${INTERFACE#wlan}))
 
 case "$ACTION" in
     up|dhcp4-change)
@@ -135,16 +146,14 @@ case "$ACTION" in
             ip route flush table "$TABLE" 2>/dev/null || true
             ip rule add from "$IP" table "$TABLE" priority 100
             ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
-            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY"
+            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
         fi
         ;;
     down)
-        ip rule show | grep "table $TABLE" | while read -r line; do
-            IP=$(echo "$line" | grep -oP 'from \K\d+(\.\d+){3}')
-            [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
-        done
+        IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
         ip route flush table "$TABLE" 2>/dev/null || true
-        logger -t srtla-routing "WiFi source routing removed for $INTERFACE"
+        logger -t srtla-routing "WiFi source routing removed for $INTERFACE table $TABLE"
         ;;
 esac
 DISPEOF
@@ -155,7 +164,7 @@ configure_srtla_routing() {
   install_rt_tables
   install_dhclient_hook
   install_nm_dispatcher
-  log_success "SRTLA source-policy routing configured (tables 100-107 + 110)"
+  log_success "SRTLA source-policy routing configured (tables 100-107 + 120-124)"
 }
 
 configure_srtla_routing "$@"

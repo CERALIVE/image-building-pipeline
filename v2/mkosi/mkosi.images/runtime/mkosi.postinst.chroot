@@ -240,7 +240,11 @@ configure_srtla_routing() {
 105     modem5
 106     modem6
 107     modem7
-110     wlan_bond
+120     wlan0
+121     wlan1
+122     wlan2
+123     wlan3
+124     wlan4
 EOF
   fi
 
@@ -304,11 +308,11 @@ INTERFACE="$1"
 ACTION="$2"
 
 case "$INTERFACE" in
-    wlan*) ;;
+    wlan[0-4]) ;;
     *) exit 0 ;;
 esac
 
-TABLE=110  # wlan_bond table
+TABLE=$((120 + ${INTERFACE#wlan}))
 
 case "$ACTION" in
     up|dhcp4-change)
@@ -319,16 +323,14 @@ case "$ACTION" in
             ip route flush table "$TABLE" 2>/dev/null || true
             ip rule add from "$IP" table "$TABLE" priority 100
             ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
-            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY"
+            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
         fi
         ;;
     down)
-        ip rule show | grep "table $TABLE" | while read -r line; do
-            IP=$(echo "$line" | grep -oP 'from \K\d+(\.\d+){3}')
-            [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
-        done
+        IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
         ip route flush table "$TABLE" 2>/dev/null || true
-        logger -t srtla-routing "WiFi source routing removed for $INTERFACE"
+        logger -t srtla-routing "WiFi source routing removed for $INTERFACE table $TABLE"
         ;;
 esac
 DISPEOF

@@ -184,8 +184,8 @@ main() {
   log_info "--- D. SRTLA source-policy routing ---"
   local routing_ok=1
   if grep -qE '^100[[:space:]]+modem0' "${root}/etc/iproute2/rt_tables" 2>/dev/null \
-     && grep -qE '^110[[:space:]]+wlan_bond' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
-    pass "rt_tables has SRTLA bonding tables (modem0..modem7 + wlan_bond)"
+     && grep -qE '^120[[:space:]]+wlan0' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
+    pass "rt_tables has SRTLA bonding tables (modem0..modem7 + wlan0..wlan4)"
   else
     fail "rt_tables missing SRTLA bonding tables"; routing_ok=0
   fi

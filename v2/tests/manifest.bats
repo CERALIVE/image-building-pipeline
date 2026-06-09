@@ -387,7 +387,7 @@ YAML
   local backup="$BATS_TEST_TMPDIR/networking-srtla.bak"
   cp "$netsrtla" "$backup"
   # Diverge one inline copy of the dual-track SRTLA routing payload.
-  sed -i 's/^110[[:space:]]\+wlan_bond$/111     wlan_bond/' "$netsrtla"
+  sed -i 's/^120[[:space:]]\+wlan0$/121     wlan0/' "$netsrtla"
   run bash "$V2/ci/postinst-drift-check.sh"
   cp "$backup" "$netsrtla"          # ALWAYS restore
   [ "$status" -ne 0 ]

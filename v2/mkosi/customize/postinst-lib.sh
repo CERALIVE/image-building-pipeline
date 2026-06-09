@@ -105,14 +105,6 @@ install_interface_naming() {
   log "installing deterministic interface naming (.link units + loose rp_filter)"
   mkdir -p /etc/systemd/network
 
-  cat >/etc/systemd/network/10-ceralive-wlan0.link <<'EOF'
-[Match]
-Type=wlan
-
-[Link]
-Name=wlan0
-EOF
-
   local role var val
   for role in eth0 eth1 wlan0; do
     var="CERALIVE_INTERFACES_${role}"
@@ -126,6 +118,21 @@ Path=${val}
 Name=${role}
 EOF
   done
+
+  # Fallback ONLY when the board manifest has no onboard-wifi Path: match by
+  # Type=wlan. A Path= rule (emitted above) is onboard-scoped and lets USB wifi
+  # dongles keep their kernel names (wlan1+/wlx<mac>); a Type=wlan rule would
+  # instead try to rename EVERY wireless NIC to wlan0 and collide (EEXIST).
+  local wlan0_path="${CERALIVE_INTERFACES_wlan0:-}"
+  if [[ -z "${wlan0_path}" || "${wlan0_path}" == FIXME* ]]; then
+    cat >/etc/systemd/network/10-ceralive-wlan0.link <<'EOF'
+[Match]
+Type=wlan
+
+[Link]
+Name=wlan0
+EOF
+  fi
 
   # rp_filter=2 (loose) validates the return path on ANY interface, not just the
   # arrival one — strict RPF silently drops modem return traffic under multi-WAN
