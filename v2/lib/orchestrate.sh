@@ -468,6 +468,7 @@ run_mkosi_build() {
         --architecture='"${mkosi_arch}"' \
         --with-network=yes \
         '"${env_cli_str}"' \
+        --environment CERALIVE_V2_DIR \
         --package-directory /work/mkosi/.staging/'"${BOARD_ID}"'/bsp \
         --extra-tree /work/mkosi/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
         --force \
