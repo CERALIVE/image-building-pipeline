@@ -28,6 +28,12 @@
 # mkfs.vfat, POPULATED with the boot artifacts via mtools (mcopy — still no mount),
 # and dd'd into its raw offset (repart does not re-format an adopted partition).
 #
+# Step 2b — rootfs_a population. repart only FORMATS the ext4 slots; it never writes
+# the OS into them. With --rootfs-tree <dir> (the mkosi build/app tree) we build a
+# pre-populated ext4 image with `mkfs.ext4 -d <dir>` (no loop mount, no root), sized
+# to the rootfs_a slot, and dd it into partition 2's raw offset. Skipped when no tree
+# is given (the static verify path) — leaving rootfs_a empty panics the board on boot.
+#
 # The boot-partition populate is FAMILY-GATED (custom-uboot/RK3588 only): it stages
 # boot.scr (mkimage-compiled from boot.scr.cmd), cera_board.env, the boot_state.txt
 # A/B seed and extlinux/extlinux.conf via `install-boot.sh boot-partition`, then
@@ -44,6 +50,7 @@
 # Usage:
 #   assemble-disk.sh build  --output <img> [--total-mb N] [--single-slot] [--no-format]
 #                           [--bootloader-adapter custom|efi] [--board <id>] [--bsp-dir <dir>]
+#                           [--rootfs-tree <dir>]
 #   assemble-disk.sh verify [--out-dir DIR]
 #
 #   build   Produce a real-geometry disk image. --total-mb sets the medium size
@@ -53,7 +60,8 @@
 #           by the static verify path.
 #           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
 #           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
-#           RK3588 blob, efi skips it.
+#           RK3588 blob, efi skips it. --rootfs-tree <dir> (default ROOTFS_TREE env)
+#           populates rootfs_a from that tree (step 2b); empty leaves the slot blank.
 #   verify  Build an A/B and a single-slot test image and print + ASSERT their GPT
 #           tables against the frozen contract (static check; prints to stdout).
 #
@@ -189,13 +197,54 @@ write_gap_bootloader() {
 }
 
 # ---------------------------------------------------------------------------
-# build_disk <img> <total_mb> <single_slot> <do_format> <adapter> <board_id> <bsp_dir>
-# Pre-seed the 16 MB gap, run systemd-repart, format the vfat boot region, then
-# (real image only) write the family-gated bootloader into the raw gap.
+# populate_rootfs_a <img> <rootfs_tree> <single_slot>
+# Write the mkosi rootfs tree into the rootfs_a slot (partition 2). systemd-repart
+# --offline FORMATS the ext4 slot but never populates it; without this the flashed
+# board loads U-Boot + kernel then PANICS (empty root, no init). rootfs_a is always
+# partition 2 in BOTH the A/B and single-slot layouts, so the slot is selected by
+# fixed partition number, not by single_slot (kept for call-site symmetry + logging).
+#
+# Offline + rootless, matching the rest of this assembler: mkfs.ext4 -d builds a
+# pre-populated ext4 image FROM the directory (no loop mount, no root), sized to the
+# exact slot, then a single dd lands it at the slot's raw offset (conv=notrunc so the
+# surrounding partitions are untouched). An empty rootfs_tree is a no-op: the static
+# --no-format verify path passes "" and only lays GPT geometry.
+# ---------------------------------------------------------------------------
+populate_rootfs_a() {
+  local img="$1" rootfs_tree="$2" single_slot="${3:-false}"
+  [[ -n "${rootfs_tree}" ]] || return 0   # no tree provided → skip (verify path / backward compat)
+  [[ -d "${rootfs_tree}" ]] || die "rootfs tree not found: ${rootfs_tree}"
+  require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
+
+  # rootfs_a is partition 2 in single-slot AND A/B; read its geometry off the GPT.
+  local start_sector size_sectors
+  start_sector="$(part_field "${img}" 2 'First sector')"
+  size_sectors="$(part_field "${img}" 2 'Partition size')"
+  [[ -n "${start_sector}" && -n "${size_sectors}" ]] \
+    || die "could not read rootfs_a (p2) geometry from ${img}"
+  local size_bytes=$(( size_sectors * SECTOR ))
+
+  log_info "populating rootfs_a (p2, single_slot=${single_slot}) from ${rootfs_tree} via mkfs.ext4 -d (offline, no root)"
+  local rootfs_img; rootfs_img="$(mktemp)"
+  truncate -s "${size_bytes}" "${rootfs_img}"
+  # -d populates the filesystem from a directory (no loop mount, no root needed).
+  mkfs.ext4 -q -L rootfs_a -d "${rootfs_tree}" "${rootfs_img}" \
+    || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
+  dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
+    conv=notrunc status=none
+  rm -f "${rootfs_img}"
+  log_success "rootfs_a populated ($(du -sh "${rootfs_tree}" | cut -f1) tree → partition 2)"
+}
+
+# ---------------------------------------------------------------------------
+# build_disk <img> <total_mb> <single_slot> <do_format> <adapter> <board_id> <bsp_dir> <rootfs_tree>
+# Pre-seed the 16 MB gap, run systemd-repart, populate rootfs_a from the mkosi
+# tree, format the vfat boot region, then (real image only) write the family-gated
+# bootloader into the raw gap.
 # ---------------------------------------------------------------------------
 build_disk() {
   local img="$1" total_mb="$2" single_slot="$3" do_format="$4"
-  local adapter="${5:-}" board_id="${6:-}" bsp_dir="${7:-}"
+  local adapter="${5:-}" board_id="${6:-}" bsp_dir="${7:-}" rootfs_tree_arg="${8:-}"
   require_cmd sgdisk
   require_cmd systemd-repart
   local defs; defs="$(mktemp -d)"
@@ -219,6 +268,11 @@ build_disk() {
   log_info "running systemd-repart (offline) → ${slot_desc}"
   systemd-repart --offline=yes --architecture=arm64 --dry-run=no \
     --definitions="${defs}" "${img}" >/dev/null
+
+  # 2b. Populate rootfs_a from the mkosi rootfs tree (repart formats it EMPTY;
+  #     without this the board panics on first boot). No-op when no tree is given
+  #     (the static --no-format verify path).
+  populate_rootfs_a "${img}" "${rootfs_tree_arg}" "${single_slot}"
 
   # 3. Format the adopted vfat boot region (repart never re-formats an adopted
   #    partition), POPULATE it with the boot artifacts, then dd it into the 16 MB
@@ -391,6 +445,7 @@ main() {
       # (resolve.sh → manifest): adapter family-gates the write, board selects the
       # blob set, bsp-dir is where fetch-debs staged the Armbian U-Boot .deb.
       local adapter="${RAUC_BOOTLOADER_ADAPTER:-}" board_id="${BOARD_ID:-}" bsp_dir="${BSP_DIR:-}"
+      local rootfs_tree="${ROOTFS_TREE:-}"
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --output)              output="${2:-}"; shift 2 ;;
@@ -400,6 +455,7 @@ main() {
           --bootloader-adapter)  adapter="${2:-}"; shift 2 ;;
           --board)               board_id="${2:-}"; shift 2 ;;
           --bsp-dir)             bsp_dir="${2:-}"; shift 2 ;;
+          --rootfs-tree)         rootfs_tree="${2:-}"; shift 2 ;;
           *) die "unknown build argument: $1" ;;
         esac
       done
@@ -407,7 +463,7 @@ main() {
       [[ "${single_slot}" == "true" || "${single_slot}" == "false" ]] \
         || die "SINGLE_SLOT_FALLBACK must be true|false (got '${single_slot}')"
       build_disk "${output}" "${total_mb}" "${single_slot}" "${do_format}" \
-        "${adapter}" "${board_id}" "${bsp_dir}"
+        "${adapter}" "${board_id}" "${bsp_dir}" "${rootfs_tree}"
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)

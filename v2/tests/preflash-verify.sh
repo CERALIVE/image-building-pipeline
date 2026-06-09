@@ -6,7 +6,7 @@
 # and signed `.raucb` RAUC bundle and prints PASS or FAIL for each sub-check,
 # exiting non-zero if ANY sub-check fails. A red gate means DO NOT flash.
 #
-# Five sub-checks (all must PASS):
+# Six sub-checks (all must PASS):
 #   1. GPT geometry   — single-slot: boot + rootfs_a + data, NO rootfs_b.
 #   2. Gap magic      — Rockchip idblock "RKNS" (52 4b 4e 53) at sector 64, i.e.
 #                       the U-Boot bootloader is present in the 16 MB raw gap.
@@ -19,6 +19,9 @@
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
+#   6. rootfs_a       — partition 2 is POPULATED (systemd/init present), not the
+#                       blank ext4 systemd-repart leaves behind. An empty rootfs_a
+#                       boots U-Boot + kernel then PANICS (no init).
 #
 # Everything is image inspection: no loop mount, no root, no hardware. The
 # boot partition is read with mtools (mdir/mtype) at its raw byte offset; the
@@ -184,6 +187,45 @@ check_rauc_bundle() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Check 6 — rootfs_a is POPULATED (a real OS, not a blank ext4 from repart).
+# debugfs has no byte-offset flag and cannot seek a pipe, so the rootfs_a slot
+# (partition 2 in single-slot AND A/B) is sliced into a sparse temp file at its
+# raw offset and inspected offline — no loop mount, no root. The slot is GREEN
+# when the systemd init binary OR /sbin/init exists inside it.
+# ---------------------------------------------------------------------------
+check_rootfs_populated() {
+  local img="$1" start_sector size_sectors tmp
+  require_tool sgdisk  || { fail "rootfs_a populated: systemd/init present (not an empty ext4)"; return; }
+  require_tool debugfs || { fail "rootfs_a populated: systemd/init present (not an empty ext4)"; return; }
+  start_sector="$(sgdisk -i 2 "${img}" 2>/dev/null | sed -n 's/.*First sector: \([0-9]\+\).*/\1/p')"
+  size_sectors="$(sgdisk -i 2 "${img}" 2>/dev/null | sed -n 's/.*Partition size: \([0-9]\+\).*/\1/p')"
+  if [[ -z "${start_sector}" || -z "${size_sectors}" ]]; then
+    fail "rootfs_a populated: systemd/init present (not an empty ext4)"
+    info "could not read rootfs_a (partition 2) geometry from ${img}"
+    return
+  fi
+  tmp="$(mktemp)"
+  # conv=sparse keeps the slice ~rootfs-sized on disk despite the 4 GiB logical size.
+  dd if="${img}" of="${tmp}" bs="${SECTOR}" skip="${start_sector}" count="${size_sectors}" \
+    conv=sparse status=none 2>/dev/null
+  local found=""
+  local p
+  for p in /usr/lib/systemd/systemd /sbin/init; do
+    if debugfs -R "stat ${p}" "${tmp}" 2>/dev/null | grep -q 'Inode:'; then
+      found="${p}"; break
+    fi
+  done
+  rm -f "${tmp}"
+  if [[ -n "${found}" ]]; then
+    pass "rootfs_a populated: systemd/init present (not an empty ext4)"
+    info "rootfs_a (p2 @ sector ${start_sector}): found ${found}"
+  else
+    fail "rootfs_a populated: systemd/init present (not an empty ext4)"
+    info "rootfs_a (p2 @ sector ${start_sector}) has no init — mkfs.ext4 -d populate step missing or failed"
+  fi
+}
+
 # require_tool <name> — return non-zero (and report) if a needed tool is absent.
 require_tool() {
   command -v "$1" >/dev/null 2>&1 && return 0
@@ -214,6 +256,7 @@ run_gate() {
     check_gap_magic    "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
     check_boot_state     "${raw}" "${boot_off}"
+    check_rootfs_populated "${raw}"
   fi
   [[ -f "${bundle}" ]] && check_rauc_bundle "${bundle}" "${board}" "${keyring}"
 

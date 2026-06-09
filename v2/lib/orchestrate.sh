@@ -321,6 +321,7 @@ main() {
         --board "${BOARD_ID}" \
         --bootloader-adapter "${RAUC_BOOTLOADER_ADAPTER}" \
         --bsp-dir "${bsp_dir}" \
+        --rootfs-tree "${rootfs_tree}" \
         || die "Stage-4 disk assembly failed for board '${board}'"
       log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
 
