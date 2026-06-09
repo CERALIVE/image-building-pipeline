@@ -2,12 +2,11 @@
 #
 # base/mkosi.finalize — create the CeraLive runtime USER in the BASE OS layer.
 #
-# WHY HERE (not in runtime): the sysext app layer (task 22) merges
-# /usr/bin/ceracoder + /usr/bin/srtla over a SEALED base+platform rootfs and
-# starts services AS the `ceralive` user. A sysext extension cannot add a user
-# (it only overlays /usr + /opt). Therefore the account MUST already exist in
-# the base tree before sealing — so user creation lives in the base layer's
-# FinalizeScript, decomposed out of v1's monolithic customize-image.sh.
+# WHY HERE (not in runtime): the sysext app layer merges /usr/bin/ceracoder +
+# /usr/bin/srtla over a SEALED base+platform rootfs and starts services AS the
+# `ceralive` user. A sysext extension cannot add a user (it only overlays /usr
+# + /opt). Therefore the account MUST already exist in the base tree before
+# sealing — so user creation lives in the base layer's FinalizeScript.
 #
 # HOW: mkosi runs this on the HOST after the base tree is built ($BUILDROOT =
 # the rootfs). We stage the customize module set + lib/common.sh into the tree,
@@ -15,26 +14,36 @@
 # groupadd write into the image, then remove the staging tree so nothing leaks
 # into the shipped rootfs.
 #
-# Strict, no `|| true`: a failure to create the appliance user is fatal.
+# Self-contained: logging functions are inlined and common.sh is embedded as a
+# heredoc so this script has no external file dependencies (mkosi runs finalize
+# scripts in an isolated mount context).
 
 set -euo pipefail
 
 : "${BUILDROOT:?BUILDROOT must be set by mkosi (path to the base rootfs)}"
 
-# mkosi runs finalize scripts in its own mount namespace where /work = the mkosi
-# workspace root. orchestrate.sh stages lib/common.sh into MKOSI_DIR/lib/ before
-# Docker runs, making it available as /work/lib/common.sh here.
-# shellcheck source=../../../lib/common.sh
-source "/work/lib/common.sh"
+_log() { printf '[%s] %s %s\n' "$1" "$(date '+%H:%M:%S')" "${*:2}" >&2; }
+log_info()    { _log 'INFO ' "$@"; }
+log_success() { _log 'OK   ' "$@"; }
+die()         { _log 'ERROR' "$@"; exit 1; }
 
-CUSTOMIZE_SRC="/work/customize"
-COMMON_SRC="/work/lib/common.sh"
+# Find the mkosi workspace: mkosi copies this script to a temp path but the
+# original lives in the workspace. Probe several known locations.
+_find_workspace() {
+  for candidate in \
+    "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/../.." \
+    "/work/mkosi" \
+    "/work"; do
+    local d; d="$(cd -- "${candidate}" 2>/dev/null && pwd)" || continue
+    [[ -d "${d}/customize" ]] && { printf '%s' "${d}"; return 0; }
+  done
+  return 1
+}
 
+WORKSPACE="$(_find_workspace)" || die "cannot locate mkosi workspace (customize/ dir not found)"
+CUSTOMIZE_SRC="${WORKSPACE}/customize"
 [[ -d "${CUSTOMIZE_SRC}" ]] || die "customize module dir not found: ${CUSTOMIZE_SRC}"
-[[ -f "${COMMON_SRC}" ]]   || die "lib/common.sh not found: ${COMMON_SRC}"
 
-# Stage preserving the repo's two-level layout (mkosi/customize + lib) so the
-# modules' own `../../lib/common.sh` fallback resolves inside the chroot too.
 STAGE_REL="var/tmp/ceralive-customize"
 STAGE_ABS="${BUILDROOT%/}/${STAGE_REL}"
 
@@ -42,7 +51,28 @@ log_info "staging customize modules into base rootfs (${STAGE_REL})"
 rm -rf "${STAGE_ABS}"
 mkdir -p "${STAGE_ABS}/mkosi" "${STAGE_ABS}/lib"
 cp -a "${CUSTOMIZE_SRC}" "${STAGE_ABS}/mkosi/customize"
-cp -a "${COMMON_SRC}" "${STAGE_ABS}/lib/common.sh"
+
+# Embed common.sh as a heredoc — no host path dependency.
+cat >"${STAGE_ABS}/lib/common.sh" <<'_COMMON_SH_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+err_trap() {
+  local exit_code=$?
+  log_error "ERROR at ${BASH_SOURCE[1]:-?}:${BASH_LINENO[0]:-?}: ${BASH_COMMAND} (exit ${exit_code})"
+  exit 1
+}
+trap err_trap ERR
+_log() { printf '[%s] %s %s\n' "${1}" "$(date '+%H:%M:%S')" "${*:2}" >&2; }
+log_info()    { _log 'INFO ' "$@"; }
+log_warn()    { _log 'WARN ' "$@"; }
+log_error()   { _log 'ERROR' "$@"; }
+log_success() { _log 'OK   ' "$@"; }
+die()         { log_error "$*"; exit 1; }
+require_cmd() {
+  local cmd="$1"
+  command -v "${cmd}" >/dev/null 2>&1 || die "command '${cmd}' not found, install it first"
+}
+_COMMON_SH_EOF
 
 log_info "creating 'ceralive' user in the BASE OS layer (run-all.sh base)"
 mkosi-chroot bash "/${STAGE_REL}/mkosi/customize/run-all.sh" base
