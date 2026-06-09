@@ -335,14 +335,18 @@ run_mkosi_build() {
   # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
   # (like the apt GPG key) so the self-contained runtime postinst can write it
-  # without repo access. The RAUC `compatible` is derived from the manifest family
-  # (same scheme install-boot.sh uses) so the device + signed bundles agree.
+  # without repo access.
   local rauc_keyring="${MKOSI_DIR}/runtime/rauc/ceralive-keyring.pem"
   if [[ -z "${RAUC_ROOT_CA_B64:-}" && -s "${rauc_keyring}" ]]; then
     RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
   fi
   export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
-  export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${FAMILY}}"
+
+  # RAUC `compatible` — the single source of truth (T12), BOARD-specific not
+  # family-wide. A family default (ceralive-rk3588) lets an Orange Pi 5+ bundle
+  # install on a Rock 5B+; deriving from board_id and having install-boot.sh +
+  # build-bundle.sh read THIS env (no own default) keeps device + bundle in lockstep.
+  export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${BOARD_ID}}"
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done

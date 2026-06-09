@@ -141,15 +141,20 @@ echo
 echo "### 6b. RAUC system.conf rendered for the rootfs (bootloader=custom)"
 abroot="${WORK}/abroot"; ssroot="${WORK}/ssroot"
 ROOT="${abroot}" SERIAL_CONSOLE="ttyS2:1500000" DTB_NAME="rk3588-rock-5b-plus.dtb" \
-  BOARD_ID="rock-5b-plus" FAMILY="rk3588" SINGLE_SLOT_FALLBACK="false" \
+  BOARD_ID="rock-5b-plus" COMPATIBLE_STRING="ceralive-rock-5b-plus" SINGLE_SLOT_FALLBACK="false" \
   bash "${INSTALL}" rootfs >/dev/null
 ROOT="${ssroot}" SERIAL_CONSOLE="ttyS2:1500000" DTB_NAME="rk3588-rock-5b-plus.dtb" \
-  BOARD_ID="rock-5b-plus" FAMILY="rk3588" SINGLE_SLOT_FALLBACK="true" \
+  BOARD_ID="rock-5b-plus" COMPATIBLE_STRING="ceralive-rock-5b-plus" SINGLE_SLOT_FALLBACK="true" \
   bash "${INSTALL}" rootfs >/dev/null
 sysconf="${abroot}/etc/rauc/system.conf"
 assert_contains "system.conf bootloader=custom"        "${sysconf}" "bootloader=custom"
 assert_contains "system.conf backend = adapter"        "${sysconf}" "bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter"
-assert_contains "system.conf compatible from family"   "${sysconf}" "compatible=ceralive-rk3588"
+# T12: compatible is BOARD-specific (ceralive-rock-5b-plus), read verbatim from
+# COMPATIBLE_STRING — NOT the family-wide ceralive-rk3588 that diverged from the bundle.
+assert_contains "system.conf compatible board-specific" "${sysconf}" "compatible=ceralive-rock-5b-plus"
+if grep -qF "compatible=ceralive-rk3588" "${sysconf}"; then \
+  bad "system.conf must NOT carry the family-wide compatible (T12 regression)"; \
+  else ok "no family-wide ceralive-rk3588 compatible leaked into system.conf"; fi
 assert_contains "slot A by PARTLABEL rootfs_a"         "${sysconf}" "device=/dev/disk/by-partlabel/rootfs_a"
 assert_contains "slot A bootname=A"                    "${sysconf}" "bootname=A"
 assert_contains "slot B by PARTLABEL rootfs_b"         "${sysconf}" "device=/dev/disk/by-partlabel/rootfs_b"
@@ -158,6 +163,19 @@ assert_contains "state helper installed to /usr/bin"   "${abroot}/usr/bin/cerali
 if grep -qF "rootfs_b" "${ssroot}/etc/rauc/system.conf"; then \
   bad "single-slot system.conf must NOT reference rootfs_b"; \
   else ok "single-slot system.conf omits the B slot"; fi
+
+echo
+echo "### 6c. COMPATIBLE_STRING guard — empty compatible MUST fail loud (T12)"
+# A missing compatible would silently brick OTA (device rejects every bundle); the
+# installer must refuse rather than write an unusable/guessed system.conf.
+guardroot="${WORK}/guardroot"; guard_rc=0
+ROOT="${guardroot}" SERIAL_CONSOLE="ttyS2:1500000" DTB_NAME="rk3588-rock-5b-plus.dtb" \
+  BOARD_ID="rock-5b-plus" COMPATIBLE_STRING="" SINGLE_SLOT_FALLBACK="false" \
+  bash "${INSTALL}" rootfs >/dev/null 2>&1 || guard_rc=$?
+if [[ "${guard_rc}" -ne 0 ]]; then ok "empty COMPATIBLE_STRING aborts install (rc=${guard_rc})"; \
+  else bad "empty COMPATIBLE_STRING did NOT abort install"; fi
+if [[ ! -f "${guardroot}/etc/rauc/system.conf" ]]; then ok "no system.conf written on guard abort"; \
+  else bad "system.conf was written despite empty COMPATIBLE_STRING"; fi
 
 echo
 echo "### 7. boot.scr.cmd (U-Boot path) matches the tested engine — static check"

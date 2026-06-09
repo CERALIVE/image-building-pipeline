@@ -82,15 +82,14 @@ Packages a rootfs slot image into a signed RAUC .raucb bundle and verifies it
 against the device root-CA keyring.
 
 Args:
-  <board>              board id (e.g. orangepi5plus); selects the output subtree
-                       and the default compatible string.
+  <board>              board id (e.g. orangepi5plus); selects the output subtree.
   <rootfs-dir-or-tar>  a rootfs directory OR a rootfs tarball to ship as the
                        rootfs slot image.
 
 Env:
-  COMPATIBLE_STRING       RAUC \`compatible\` (set by the orchestrator from the
-                          manifest family+board). Default: ceralive-<board>.
-                          MUST match system.conf on the device or install fails.
+  COMPATIBLE_STRING       RAUC \`compatible\` — REQUIRED. The orchestrator exports
+                          it board-specific (ceralive-<board-slug>). No default:
+                          it MUST match system.conf on the device or install fails.
   BUNDLE_VERSION          bundle version string. Default: git short SHA, else
                           the build timestamp.
   CERALIVE_RAUC_PKI_DIR   override the cert-work/rauc PKI directory.
@@ -316,11 +315,11 @@ build-bundle() {
   assert_pki
 
   local compatible version ts
+  # T12: read the compatible verbatim from the orchestrator — no local default. A
+  # bundle stamped with a guessed compatible that disagrees with the device
+  # system.conf is rejected by `rauc install`, so fail loud rather than ship one.
   compatible="${COMPATIBLE_STRING:-}"
-  if [[ -z "${compatible}" ]]; then
-    compatible="ceralive-${board}"
-    log_warn "COMPATIBLE_STRING unset — defaulting to '${compatible}' (orchestrator normally sets this from the manifest)"
-  fi
+  [[ -n "${compatible}" ]] || die "COMPATIBLE_STRING is unset/empty — the orchestrator must export ceralive-<board-slug> (board-specific); refusing to stamp a bundle the device would reject"
 
   version="${BUNDLE_VERSION:-}"
   if [[ -z "${version}" ]]; then
