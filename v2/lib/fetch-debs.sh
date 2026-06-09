@@ -274,8 +274,24 @@ fetch_bsp() {
     done < <(read_yaml_list "${field}" "${family}")
   done
 
+  # Board manifests override family-level package arrays via env vars resolved
+  # by resolve.py (orchestrate.sh exports them before calling fetch-debs.sh).
+  # e.g. UBOOT_PACKAGES=linux-u-boot-rock-5b-plus-vendor from rock-5b-plus.yaml.
+  for pkg in ${UBOOT_PACKAGES:-} ${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} \
+             ${FIRMWARE_PACKAGES:-} ${HW_ACCEL_GSTREAMER_PLUGINS:-} \
+             ${GSTREAMER_RUNTIME_PACKAGES:-}; do
+    [[ -n "${pkg}" ]] && bsp_pkgs+=("${pkg}")
+  done
+  # Deduplicate while preserving order
+  local -a deduped=()
+  local seen="" p
+  for p in "${bsp_pkgs[@]}"; do
+    [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
+  done
+  bsp_pkgs=("${deduped[@]}")
+
   if (( ${#bsp_pkgs[@]} == 0 )); then
-    die "fetch_bsp: no BSP packages found in ${family} (expected kernel/dtb/uboot/firmware names)"
+    die "fetch_bsp: no BSP packages found in ${family} or env (expected kernel/dtb/uboot/firmware names)"
   fi
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
