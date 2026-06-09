@@ -212,3 +212,11 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 | [`CeraUI/docs/KIOSK_TOKEN_CONTRACT.md`](../../../CeraUI/docs/KIOSK_TOKEN_CONTRACT.md) | DC-3: loopback token spec |
 | [`v2/docs/dev-loop.md`](dev-loop.md) | Dev-push loop for ceracoder/srtla |
 | [`v2/docs/deferred-ceraui-sysext.md`](deferred-ceraui-sysext.md) | CeraUI sysext migration (separate deferral) |
+
+---
+
+## 9. Known Technical Debt
+
+| ID | Item | Detail | Resolution |
+|---|---|---|---|
+| **TD-1** | Workspace-external doc links | This file and `AGENTS.md` reference sibling-repo docs via `../../../CeraUI/...` (and `../CeraUI/...`) paths that climb above this repo's checkout root. Affected here: §Header (`CeraUI/docs/ON_DEVICE_DISPLAY.md`), §7 deferral note, and §8 Related Documents rows for `ON_DEVICE_DISPLAY.md` / `KIOSK_STATE_MACHINE.md` / `KIOSK_TOKEN_CONTRACT.md`. | Violates root `AGENTS.md` **Rule D** (repos self-contained, no workspace-external references). Links resolve only inside the `ceralive/` workspace, not in a standalone CI checkout. Convert to plain textual references (repo + doc name, no relative link) when next touching this file. Low severity: Markdown cross-references only — no code/test/config reads an external path. |
