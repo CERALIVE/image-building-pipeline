@@ -461,7 +461,7 @@ run_mkosi_build() {
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y --no-install-recommends \
-        mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates >/dev/null
+        mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates reprepro >/dev/null
       cd /work
       mkosi \
         --architecture='"${mkosi_arch}"' \
