@@ -85,6 +85,10 @@ cd image-building-pipeline
 DRY_RUN=1 ./v2/build rock-5b-plus
 ```
 
+For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
+smoke test, and signing), see
+[`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
+
 ## Custom Components
 
 All custom components are distributed via .deb packages from our repository:
