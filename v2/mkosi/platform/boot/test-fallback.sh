@@ -183,7 +183,7 @@ assert_contains "decrements A counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "s
 assert_contains "decrements B counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setexpr BOOT_B_LEFT \${BOOT_B_LEFT} - 1"
 assert_contains "persists state via fatwrite"      "${BOOT_DIR}/boot.scr.cmd" "fatwrite \${devtype} \${devnum}:1 \${loadaddr} boot_state.txt"
 assert_contains "console from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "console=\${console}"
-assert_contains "fdtfile from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "/boot/dtb/\${fdtfile}"
+assert_contains "fdtfile from manifest env (under rockchip/ vendor subdir)" "${BOOT_DIR}/boot.scr.cmd" "/boot/dtb/rockchip/\${fdtfile}"
 assert_contains "selects rootfs_a slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_a"
 assert_contains "selects rootfs_b slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_b"
 
