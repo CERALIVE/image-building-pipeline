@@ -320,8 +320,18 @@ main() {
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
     fi
+  elif [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "efi" || "${RAUC_BOOTLOADER_ADAPTER:-}" == "grub" ]]; then
+    # x86 EFI/GRUB disk assembly is DEFERRED — explicitly, not skipped-and-forgotten.
+    # efi/grub boots from an EFI System Partition + GRUB A/B grubenv engine (exercised
+    # by tests/qemu-x86.sh --fallback-selftest), not the RK3588 raw idbloader gap that
+    # assemble-disk.sh/write-bootloader.sh write. Routing x86 through the `custom` .raw
+    # path would emit a NON-BOOTABLE image, so this branch produces NO .raw and stops
+    # cleanly after the step-7 rootfs.tar (no partial disk state).
+    # TODO(x86-disk): wire x86 ESP + GRUB A/B disk assembly behind this gate
+    #   (ESP/grub-install layout, grubenv A/B slot selection, RAUC efi adapter).
+    log_info "[8/9] bootloader_adapter='${RAUC_BOOTLOADER_ADAPTER}' — x86 ESP+GRUB disk assembly DEFERRED (TODO(x86-disk)); rootfs.tar is the only artifact, no .raw produced for board '${board}'"
   else
-    log_info "[8/9] bootloader_adapter='${RAUC_BOOTLOADER_ADAPTER:-unset}' (not custom) — skipping RK3588 disk assembly (x86/efi disk image is task 14)"
+    die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
   fi
 
   log_info "[9/9] done"

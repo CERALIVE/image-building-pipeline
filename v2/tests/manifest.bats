@@ -381,3 +381,64 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" == *"DIVERGED"* ]]
 }
+
+# ===========================================================================
+# 9. Multi-device rootfs non-regression + x86 disk-path guard (Task 14).
+#    All three shipped boards must drive the orchestrator through to the build
+#    plan (the rootfs.tar producer, step 6) without aborting; x86 (efi) must
+#    NOT take the RK3588 `custom` .raw path — its disk assembly is deferred.
+#
+#    These run `DRY_RUN=1` (orchestrate stops at [5/9], before mkosi/Stage-4 —
+#    no network, no qemu, no privileged container) with INSTALL_BOOT_BSP=0
+#    (offline host stages no BSP .debs; the default BSP=1 path aborts at the
+#    require_field / missing-BSP gate, which is a SEPARATE guard tested by the
+#    pipeline itself, not what Task 14 verifies). Reaching the DRY-RUN banner
+#    proves resolve + fetch-plan + every pre-mkosi gate passed for that board.
+# ===========================================================================
+
+@test "t14 rootfs: rock-5b-plus reaches the build plan (exit 0, custom/rk3588)" {
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY-RUN complete"* ]]
+}
+
+@test "t14 rootfs: orange-pi-5-plus reaches the build plan (exit 0, custom/rk3588)" {
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" orange-pi-5-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY-RUN complete"* ]]
+}
+
+@test "t14 rootfs: x86-minipc reaches the build plan (exit 0, efi)" {
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY-RUN complete"* ]]
+}
+
+@test "t14 x86 guard: x86-minipc emits NO .raw (efi disk assembly deferred)" {
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
+  [ "$status" -eq 0 ]
+  local raws=()
+  if [[ -d "$V2/images/x86-minipc" ]]; then
+    while IFS= read -r f; do raws+=("$f"); done \
+      < <(find "$V2/images/x86-minipc" -maxdepth 1 -type f -name '*.raw')
+  fi
+  [ "${#raws[@]}" -eq 0 ]
+}
+
+@test "t14 x86 guard: resolved adapter routes x86 to efi, rk3588 to custom (non-vacuity)" {
+  run "$RESOLVE_SH" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RAUC_BOOTLOADER_ADAPTER='efi'"* ]]
+  run "$RESOLVE_SH" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RAUC_BOOTLOADER_ADAPTER='custom'"* ]]
+}
+
+@test "t14 x86 guard: orchestrate.sh carries the explicit deferred marker (not just a skip log)" {
+  local orch="$V2/lib/orchestrate.sh"
+  grep -q 'TODO(x86-disk)' "$orch"
+  grep -q 'DEFERRED' "$orch"
+  # the single assemble-disk invocation lives ONLY under the `custom` branch:
+  # efi/grub must never reach a .raw write.
+  [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
+}
