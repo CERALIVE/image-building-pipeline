@@ -18,37 +18,40 @@ arch: arm64
 # ARMBIAN_BRANCH=current in configs/devices/*.conf. Decision D3.
 armbian_branch: vendor
 
-# linux-image-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3).
+# linux-image-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3). The
+# Armbian bookworm arm64 vendor kernel for RK35xx SoCs ships as -rk35xx (the
+# -rockchip64 name was a migration placeholder that doesn't exist in the feed).
 kernel_packages:
-  - linux-image-vendor-rockchip64
+  - linux-image-vendor-rk35xx
 
-# rkbin RK3588 bootloader blob (EXTRA_BSP_PACKAGES in both userpatches).
-uboot_packages:
-  - rkbin-rk3588
+# RK3588 U-Boot is BOARD-SPECIFIC in the Armbian feed (linux-u-boot-<board>-vendor),
+# so the family declares none — each board names its own via the board manifest's
+# uboot_packages override (board arrays REPLACE family arrays on deep-merge). The
+# old rkbin-rk3588 entry was an internal placeholder; no such package exists in apt.
+uboot_packages: []
 
-# linux-dtb-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3).
+# linux-dtb-* of BOARD_PACKAGES, resolved to the `vendor` branch (D3). Matches the
+# -rk35xx vendor kernel naming above (the -rockchip64 name was a placeholder).
 dtb_packages:
-  - linux-dtb-vendor-rockchip64
+  - linux-dtb-vendor-rk35xx
 
 # Shared SoC/GPU/Wi-Fi firmware. armbian-firmware is the broad Armbian firmware
-# bundle (ships realtek WiFi blobs); mali-g610-firmware is the RK3588 Mali-G610
-# GPU firmware (EXTRA_BSP_PACKAGES, both boards).
+# bundle (ships realtek WiFi blobs).
+# TD: mali-g610-firmware not in Armbian bookworm arm64 — source separately when available
 firmware_packages:
   - armbian-firmware
-  - mali-g610-firmware
 
 # Decision D3: vendor U-Boot has no fw_setenv → raw GPT bootcount approach.
 rauc_bootloader_adapter: custom
 
-# Hardware-accelerated GStreamer encode/decode (Rockchip MPP). From
-# ceraui-base.conf STREAMING_PACKAGES — "Armbian provides this" HW path that
-# feeds VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp.
-hw_accel_gstreamer_plugins:
-  - gstreamer1.0-rockchip1
+# Hardware-accelerated GStreamer encode/decode (Rockchip MPP) feeding
+# VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp.
+# TD: gstreamer1.0-rockchip1 not in Armbian bookworm arm64 — source from Radxa/Armbian when available
+hw_accel_gstreamer_plugins: []
 
-# Runtime multimedia support (BOARD_PACKAGES / EXTRA_BSP_PACKAGES, both boards).
-gstreamer_runtime_packages:
-  - rockchip-multimedia-config
+# Runtime multimedia support.
+# TD: rockchip-multimedia-config not in Armbian bookworm arm64 — source when available
+gstreamer_runtime_packages: []
 
 # Frozen A/B layout, docs/partition-contract.md §3 (v1). NAME reference only —
 # sizes/slot roles/threshold live in the frozen contract, never duplicated here.

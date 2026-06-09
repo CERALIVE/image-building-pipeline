@@ -16,6 +16,10 @@ board_id: orangepi5-plus
 # note the rk3588s- DTB prefix (vs rk3588- on the Rock 5B+).
 dtb_name: rk3588s-orangepi-5-plus.dtb
 
+# Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+uboot_packages:
+  - linux-u-boot-orangepi5plus-vendor
+
 # DT_OVERLAYS from configs/devices/orangepi5plus.conf.
 armbian_overlays:
   - rk3588-hdmi-input

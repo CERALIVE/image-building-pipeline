@@ -16,6 +16,10 @@ board_id: rock-5b-plus
 # DTB_FILE from configs/devices/rock5bplus.conf.
 dtb_name: rk3588-rock-5b-plus.dtb
 
+# Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+uboot_packages:
+  - linux-u-boot-rock-5b-plus-vendor
+
 # DT_OVERLAYS from configs/devices/rock5bplus.conf.
 armbian_overlays:
   - rk3588-hdmi-input

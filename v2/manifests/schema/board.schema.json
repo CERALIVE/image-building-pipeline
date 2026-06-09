@@ -33,6 +33,13 @@
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
       "uniqueItems": true
     },
+    "uboot_packages": {
+      "description": "Per-board U-Boot package override. Optional. When present it REPLACES the family-tier uboot_packages (deep-merge: board arrays win wholesale). rk3588 U-Boot is board-specific (linux-u-boot-rock-5b-plus-vendor vs linux-u-boot-orangepi5plus-vendor), so the family declares uboot_packages:[] and each board names its own here. Items must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
+      "uniqueItems": true
+    },
     "quirks": {
       "description": "Free-form board-specific flags for known hardware workarounds (e.g. M2_MODEM_SIM_WORKAROUND, hdmi_input_emi_shield). Optional. Values restricted to scalars so the builder can shell-export them. Absorbs the HARDWARE_WORKAROUNDS / M2_MODEM_* / EMI_RESISTANCE descriptive flags from configs/devices/*.conf.",
       "type": "object",
