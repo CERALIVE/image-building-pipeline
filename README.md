@@ -52,60 +52,38 @@ A comprehensive build pipeline for creating ready-to-use images for ARM-based st
 - **Proven platform**: Used successfully by BELABOX and other streaming projects
 - **Regular updates**: Security and hardware support maintained
 
-## Build Environments
+## Build System
 
-- **Local**: Native Linux build with cross-compilation support
-- **Docker**: Containerized build for consistent environments
-- **CI/CD**: Automated builds with testing and distribution
-
-## Armbian Build (Superseded)
-
-The original Armbian native build produced `.img` files via a root-level `build.sh` flow.
-This approach has been superseded by the `v2/` mkosi build system, which produces
-reproducible `.raw` sysext bundles and `.raucb` A/B RAUC OTA packages from a layered source.
-Note: `build-armbian.sh` does not exist; `build.sh` is the legacy entry point (now inert).
-For the current build path, see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
+The current build path is `v2/` using mkosi. It produces reproducible `.raw` sysext
+bundles and `.raucb` A/B RAUC OTA packages from a layered source. See
+[`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 
 ## Directory Structure
 
 ```
-├── build/                 # Build scripts and tools
-├── configs/              # Device-specific configurations
-│   ├── devices/         # Per-device settings
-│   ├── base/           # Common base configurations
-│   └── repos/          # Custom repository configurations
-├── docker/              # Docker build environment
-├── images/              # Generated image outputs
-├── scripts/             # Utility and helper scripts
-├── tests/               # Testing framework
-└── ci/                  # CI/CD pipeline definitions
+├── v2/                    # Current build system (mkosi)
+│   ├── build              # Entry point: ./v2/build <board>
+│   ├── manifests/         # Board and family manifests
+│   ├── lib/               # Orchestrator, assembler, bundle scripts
+│   ├── docs/              # Dev loop, kiosk display, deferred items
+│   └── tests/             # Manifest validation + preflash verify
+├── scripts/
+│   └── fetch-debs.sh      # Downloads .deb packages for REPOS array
+└── CONTRIBUTING.md        # Contribution rules
 ```
 
 ## Quick Start
 
 ```bash
-# Interactive mode with beautiful arrow key navigation
-./build.sh
+cd image-building-pipeline
 
-# Build specific device (auto-detects Docker/local environment)
-./build.sh --device orangepi5plus
-./build.sh --device rock5bplus
+# Build for a specific board
+./v2/build rock-5b-plus
+./v2/build orange-pi-5-plus
 
-# Build all supported devices
-./build.sh --all
-
-# Force specific environment if needed
-./build.sh --device orangepi5plus --environment docker
-./build.sh --device rock5bplus --environment local
+# Dry run (resolve + fetch plan only, no image written)
+DRY_RUN=1 ./v2/build rock-5b-plus
 ```
-
-### ✨ **Interactive Experience**
-
-The build script provides a **clean interactive menu** with:
-- 🎯 **Arrow key navigation** (↑/↓ to browse devices)
-- 🎨 **Real-time highlighting** of selected device
-- 🧠 **Smart terminal detection** (falls back to simple mode if needed)
-- ⚡ **Multiple input methods** (arrows, numbers, or direct typing)
 
 ## Custom Components
 

@@ -10,7 +10,7 @@ A clear and concise description of what the bug is.
 ## Device and build info
 - Device: [e.g., Rock 5B+, Orange Pi 5+]
 - Storage: [SD/eMMC]
-- Build command used: `./build.sh --device ...`
+- Build command used: `./v2/build <board>`
 - Commit/Tag: [git rev or date]
 
 ## Steps to reproduce
@@ -21,7 +21,7 @@ A clear and concise description of what the bug is.
 What you expected to happen.
 
 ## Logs
-Attach or paste relevant parts from `armbian-build/output/logs/log-build-*.log`.
+Attach or paste relevant parts from `v2/images/<board>/` build output or `journalctl` on the device.
 
 ## Additional context
 Add any other context, screenshots, or hardware notes.
