@@ -1,8 +1,8 @@
 # CeraLive v2 image pipeline — CI gate.
 #
-# Parallel to (NOT a replacement for) build-images.yml, which still drives the
-# legacy Armbian build until v2 reaches parity (tasks 16/17). This workflow gates
-# the v2/ manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
+# The SOLE image-build CI gate: the legacy Armbian build.sh path (and its
+# build-images.yml workflow) has been removed. This workflow gates the v2/
+# manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
 # build-plan. No secrets are referenced; the build matrix runs DRY_RUN=1 so it
 # performs no real download/build (no R2 creds, no GPG, no privileged container,
 # no board required).

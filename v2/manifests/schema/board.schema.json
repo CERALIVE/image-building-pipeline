@@ -18,7 +18,7 @@
       "pattern": "^[a-z0-9][a-z0-9_-]*$"
     },
     "board_id": {
-      "description": "Armbian BOARD= value passed to compile.sh (userpatches/config-*.conf BOARD=). e.g. 'rock-5b-plus', 'orangepi5-plus'. Also covers ARMBIAN_BOARD/DEVICE_CODE.",
+      "description": "Armbian BOARD= value for the Armbian BSP build framework (legacy userpatches BOARD=). e.g. 'rock-5b-plus', 'orangepi5-plus'. Also covers ARMBIAN_BOARD/DEVICE_CODE.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },

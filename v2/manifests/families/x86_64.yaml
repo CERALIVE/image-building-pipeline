@@ -23,7 +23,7 @@
 # namespace and lives there, not here.
 arch: x86-64
 
-# x86 does not use the Armbian BSP at all (no compile.sh BRANCH): Debian generic
+# x86 does not use the Armbian BSP at all (no Armbian BSP BRANCH): Debian generic
 # kernel + GRUB/EFI. 'none' is the explicit "no Armbian branch" value.
 armbian_branch: none
 

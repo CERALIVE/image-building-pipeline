@@ -14,7 +14,7 @@
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
 #   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
-#   8. verify    lib/parity-check.sh <rootfs>   → parity vs configs/base/ceraui-base.conf
+#   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
 #   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
 #                (Stage-4 flashable GPT image). FAMILY-GATED: only the custom-uboot
 #                bootloader adapter (RK3588) has a raw bootloader gap to fill; x86
@@ -288,14 +288,14 @@ main() {
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
   # -------------------------------------------------------------------------
-  # 8. Parity verification vs configs/base/ceraui-base.conf. The app layer now
+  # 8. Parity verification vs the v2 package manifests. The app layer now
   #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
   #    CI mode (debs fetched) the gate clears the first-party check via the
   #    ceraui→ceralive-device / belacoder→ceracoder aliases in parity-check.sh. An
   #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
   #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
   # -------------------------------------------------------------------------
-  log_info "[7/9] verifying parity vs configs/base/ceraui-base.conf"
+  log_info "[7/9] verifying parity vs v2 package manifests"
   "${PARITY_CHECK_SH}" "${rootfs_tree}" \
     || die "parity check FAILED for board '${board}' — image does not match the canonical package/service/user/routing set"
 

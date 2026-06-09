@@ -12,7 +12,7 @@
 
 family: x86_64
 
-# mkosi/identity board id. No Armbian BOARD= equivalent on x86 (no compile.sh).
+# mkosi/identity board id. No Armbian BOARD= equivalent on x86 (no Armbian BSP build).
 board_id: x86-minipc
 
 # No device tree on x86 — hardware is enumerated via ACPI. The literal 'none'

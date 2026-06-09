@@ -1,9 +1,0 @@
-armbian-build/cache/
-armbian-build/output/
-armbian-build/.tmp/
-armbian-build/userpatches/
-cache/
-images/
-.git/
-node_modules/
-.DS_Store

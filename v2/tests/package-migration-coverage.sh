@@ -42,8 +42,18 @@ FETCH_DEBS="${V2}/lib/fetch-debs.sh"
 
 EVIDENCE="${1:-${REPO}/test-results/migrate-package-diff.txt}"
 
-for f in "${BASECONF}" "${CIMG}" "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
-  [[ -f "${f}" ]] || { echo "ERROR: missing source: ${f}" >&2; exit 2; }
+for f in "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
+  [[ -f "${f}" ]] || { echo "ERROR: missing v2 source: ${f}" >&2; exit 2; }
+done
+
+# Legacy sources were retired with the legacy Armbian build; absent => MIGRATE
+# phase is over (proof in git history; parity-check.sh now guards package loss).
+if [[ ! -f "${BASECONF}" && ! -f "${CIMG}" ]]; then
+  echo "SKIP: legacy package sources retired (T24) — MIGRATE complete; ongoing guard is v2/lib/parity-check.sh."
+  exit 0
+fi
+for f in "${BASECONF}" "${CIMG}"; do
+  [[ -f "${f}" ]] || { echo "ERROR: partial legacy source set — missing: ${f}" >&2; exit 2; }
 done
 
 WORK="$(mktemp -d)"
