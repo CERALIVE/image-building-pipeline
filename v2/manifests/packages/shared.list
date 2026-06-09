@@ -95,6 +95,8 @@ vnstat                   # cumulative traffic accounting — data-cap awareness 
 
 # --- Editor (operator convenience) --------------------------------------------
 nano                     # minimal editor for on-box config (canonical base pkg)
+kbd                      # setfont — set console font at boot for HDMI readability at any resolution
+fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon
 
 # --- OS-update + SRT transport infra (Stage 2; RUNTIME layer, arch-independent) -
 # Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App

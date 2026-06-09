@@ -1,0 +1,12 @@
+[Unit]
+Description=CeraLive console font — large font for HDMI readability at any resolution
+After=systemd-vconsole-setup.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'setfont /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz 2>/dev/null || setfont /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

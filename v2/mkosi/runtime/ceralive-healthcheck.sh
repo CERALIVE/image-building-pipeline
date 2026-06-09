@@ -178,14 +178,14 @@ mark_good() {
     fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
     return 1
   fi
-  log "all health checks passed — calling '${RAUC_BIN} mark-good'"
-  if "${RAUC_BIN}" mark-good; then
+  log "all health checks passed — calling '${RAUC_BIN} status mark-good'"
+  if "${RAUC_BIN}" status mark-good; then
     mkdir -p "$(dirname "${MARKER}")"
     printf 'marked-good %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${MARKER}"
     log "slot marked good; wrote idempotency marker ${MARKER}"
     return 0
   fi
-  fail "'${RAUC_BIN} mark-good' failed — slot left unconfirmed (will roll back)"
+  fail "'${RAUC_BIN} status mark-good' failed — slot left unconfirmed (will roll back)"
   return 1
 }
 

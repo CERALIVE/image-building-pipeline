@@ -148,7 +148,7 @@ EOF
 configure_services() {
   log "enabling/disabling services"
   local svc
-  for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon; do
+  for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"
   done
   for svc in bluetooth.service cups.service; do
