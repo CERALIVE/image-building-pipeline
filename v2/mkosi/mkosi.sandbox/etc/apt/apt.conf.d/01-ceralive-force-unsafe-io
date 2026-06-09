@@ -1,0 +1,4 @@
+// Speed: forward --force-unsafe-io to dpkg for every apt install in the build
+// sandbox (arm64-via-qemu). mkosi auto-detects mkosi.sandbox/ and reads apt
+// config from it. Safe for ephemeral image builds, not production. ~2-3x faster.
+Dpkg::Options { "--force-unsafe-io"; };

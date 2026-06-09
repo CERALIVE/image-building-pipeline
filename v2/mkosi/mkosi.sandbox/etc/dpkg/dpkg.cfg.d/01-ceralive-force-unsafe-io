@@ -1,0 +1,6 @@
+# Speed: skip fsync on dpkg writes during image builds. mkosi auto-detects
+# mkosi.sandbox/ and reads package-manager config from it, so this applies to
+# every dpkg invocation (arm64-via-qemu) inside the build sandbox. Safe for
+# ephemeral image builds; NOT for production systems where power-loss durability
+# matters. Cuts cross-arch install time by ~2-3x.
+force-unsafe-io

@@ -466,6 +466,7 @@ run_mkosi_build() {
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::=--force-unsafe-io \
         mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates reprepro >/dev/null
       cd /work/mkosi
       mkosi \
