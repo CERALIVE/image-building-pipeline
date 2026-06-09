@@ -214,7 +214,6 @@ populate_rootfs_a() {
   local img="$1" rootfs_tree="$2" single_slot="${3:-false}"
   [[ -n "${rootfs_tree}" ]] || return 0   # no tree provided → skip (verify path / backward compat)
   [[ -d "${rootfs_tree}" ]] || die "rootfs tree not found: ${rootfs_tree}"
-  require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
 
   # rootfs_a is partition 2 in single-slot AND A/B; read its geometry off the GPT.
   local start_sector size_sectors
@@ -224,16 +223,56 @@ populate_rootfs_a() {
     || die "could not read rootfs_a (p2) geometry from ${img}"
   local size_bytes=$(( size_sectors * SECTOR ))
 
-  log_info "populating rootfs_a (p2, single_slot=${single_slot}) from ${rootfs_tree} via mkfs.ext4 -d (offline, no root)"
+  log_info "populating rootfs_a (p2, single_slot=${single_slot}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
   local rootfs_img; rootfs_img="$(mktemp)"
   truncate -s "${size_bytes}" "${rootfs_img}"
-  # -d populates the filesystem from a directory (no loop mount, no root needed).
-  mkfs.ext4 -q -L rootfs_a -d "${rootfs_tree}" "${rootfs_img}" \
-    || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
+  # The mkosi rootfs tree is root-owned with 0700 system dirs (boot/loader,
+  # var/lib/private, …) a rootless host user cannot traverse. Probe readability
+  # (the tar test emit_artifact uses); if blocked, populate inside the builder
+  # container as root, which also preserves the source uid/gid/mode in the image.
+  if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
+    require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
+    mkfs.ext4 -q -L rootfs_a -d "${rootfs_tree}" "${rootfs_img}" \
+      || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
+  else
+    log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
+    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}"
+  fi
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
   rm -f "${rootfs_img}"
-  log_success "rootfs_a populated ($(du -sh "${rootfs_tree}" | cut -f1) tree → partition 2)"
+  log_success "rootfs_a populated (${size_bytes} byte slot ← partition 2)"
+}
+
+# ---------------------------------------------------------------------------
+# _populate_rootfs_a_in_container <rootfs_tree> <out_img>
+# Run `mkfs.ext4 -d` as root in the builder container so the root-owned mkosi tree
+# (0700 system dirs) is fully readable. <out_img> is a host-created, pre-sized file;
+# the container writes the populated ext4 into it in place. Mirrors emit_artifact's
+# container fallback. e2fsprogs is installed on demand (the slim builder lacks it).
+# ---------------------------------------------------------------------------
+_populate_rootfs_a_in_container() {
+  local tree="$1" out_img="$2"
+  local runtime=""
+  if command -v docker >/dev/null 2>&1; then runtime="docker"
+  elif command -v podman >/dev/null 2>&1; then runtime="podman"
+  else die "rootfs tree is root-owned and neither docker nor podman is available to populate it rootlessly — run the build as root or install a container runtime"; fi
+
+  local image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
+  local img_dir img_base; img_dir="$(dirname "${out_img}")"; img_base="$(basename "${out_img}")"
+  "${runtime}" run --rm \
+    -v "${tree}:/rootfs-tree:ro" \
+    -v "${img_dir}:/out" \
+    "${image}" \
+    bash -euo pipefail -c '
+      export DEBIAN_FRONTEND=noninteractive
+      if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+        apt-get update -qq
+        apt-get install -y --no-install-recommends \
+          -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
+      fi
+      mkfs.ext4 -q -L rootfs_a -d /rootfs-tree "/out/'"${img_base}"'"
+    ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
 }
 
 # ---------------------------------------------------------------------------
