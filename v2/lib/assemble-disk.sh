@@ -28,17 +28,25 @@
 # mkfs.vfat and dd'd into its raw offset (repart does not re-format an adopted
 # partition).
 #
-# NO A/B FLIPPING / RAUC slot activation / dm-verity here — that is task 26. This
-# step only lays down the geometry and empty filesystems.
+# After the filesystems are laid, the FAMILY-GATED bootloader write fills the
+# 16 MB raw gap: for rauc_bootloader_adapter=custom (RK3588) it dd's the board's
+# U-Boot blob(s) from the staged BSP .deb into the gap and asserts RKNS at sector
+# 64 (delegated to write-bootloader.sh); for efi (x86) it is skipped — x86 boots
+# from the EFI System Partition. NO A/B FLIPPING / RAUC slot activation / dm-verity
+# here — that is task 26.
 #
 # Usage:
 #   assemble-disk.sh build  --output <img> [--total-mb N] [--single-slot] [--no-format]
+#                           [--bootloader-adapter custom|efi] [--board <id>] [--bsp-dir <dir>]
 #   assemble-disk.sh verify [--out-dir DIR]
 #
 #   build   Produce a real-geometry disk image. --total-mb sets the medium size
 #           (default 16384 = 16 GiB); data fills the remainder. --single-slot (or
 #           SINGLE_SLOT_FALLBACK=true) drops rootfs_b. --no-format lays only the
-#           GPT geometry (skips mkfs) — used by the static verify path.
+#           GPT geometry (skips mkfs + bootloader) — used by the static verify path.
+#           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
+#           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
+#           RK3588 blob, efi skips it.
 #   verify  Build an A/B and a single-slot test image and print + ASSERT their GPT
 #           tables against the frozen contract (static check; prints to stdout).
 #
@@ -55,6 +63,8 @@ source "${HERE}/common.sh"
 # ---------------------------------------------------------------------------
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 REPART_DIR="${REPART_DIR:-${V2_DIR}/mkosi/repart}"
+# RK3588 raw-gap bootloader writer (family-gated; only the custom-uboot path).
+WRITE_BOOTLOADER_SH="${WRITE_BOOTLOADER_SH:-${HERE}/write-bootloader.sh}"
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
@@ -94,11 +104,44 @@ stage_repart_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# build_disk <img> <total_mb> <single_slot> <do_format:true|false>
-# Pre-seed the 16 MB gap, run systemd-repart, then format the vfat boot region.
+# write_gap_bootloader <img> <adapter> <board_id> <bsp_dir>
+# FAMILY GATE for the RK3588 raw-gap bootloader write. Only the custom-uboot
+# adapter (rk3588, decision D3) has an idbloader+U-Boot+ATF gap to fill; x86
+# (efi) boots from the EFI System Partition and MUST be skipped. The actual
+# board-specific blob layout + offsets live in write-bootloader.sh, never here.
+# ---------------------------------------------------------------------------
+write_gap_bootloader() {
+  local img="$1" adapter="$2" board_id="$3" bsp_dir="$4"
+  case "${adapter}" in
+    custom)
+      [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to select the RK3588 blob set"
+      [[ -n "${bsp_dir}" ]]  || die "bootloader_adapter=custom requires --bsp-dir (or BSP_DIR) — the staged Armbian U-Boot .deb lives there"
+      require_cmd "${WRITE_BOOTLOADER_SH}" 2>/dev/null || [[ -x "${WRITE_BOOTLOADER_SH}" ]] \
+        || die "bootloader writer not executable: ${WRITE_BOOTLOADER_SH}"
+      log_info "bootloader_adapter=custom → writing RK3588 bootloader into the ${GAP_MB} MiB gap (board=${board_id})"
+      "${WRITE_BOOTLOADER_SH}" write --image "${img}" --board "${board_id}" \
+        --bsp-dir "${bsp_dir}" --gap-mb "${GAP_MB}"
+      ;;
+    efi)
+      log_info "bootloader_adapter=efi → SKIP RK3588 raw-gap write (x86 boots from the EFI System Partition; no idbloader gap)"
+      ;;
+    ""|none)
+      log_warn "bootloader_adapter unset → SKIP raw-gap bootloader write (set RAUC_BOOTLOADER_ADAPTER/--bootloader-adapter for a bootable image)"
+      ;;
+    *)
+      die "unknown bootloader_adapter '${adapter}' (expected: custom | efi)"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# build_disk <img> <total_mb> <single_slot> <do_format> <adapter> <board_id> <bsp_dir>
+# Pre-seed the 16 MB gap, run systemd-repart, format the vfat boot region, then
+# (real image only) write the family-gated bootloader into the raw gap.
 # ---------------------------------------------------------------------------
 build_disk() {
   local img="$1" total_mb="$2" single_slot="$3" do_format="$4"
+  local adapter="${5:-}" board_id="${6:-}" bsp_dir="${7:-}"
   require_cmd sgdisk
   require_cmd systemd-repart
   local defs; defs="$(mktemp -d)"
@@ -133,6 +176,12 @@ build_disk() {
     mkfs.vfat -n BOOT "${bootp}" >/dev/null
     dd if="${bootp}" of="${img}" bs=1M seek="${GAP_MB}" conv=notrunc status=none
     rm -f "${bootp}"
+  fi
+
+  # 4. Write the family-gated bootloader into the 16 MB raw gap (real image only;
+  #    the static --no-format verify path lays geometry alone and needs no blob).
+  if [[ "${do_format}" == "true" ]]; then
+    write_gap_bootloader "${img}" "${adapter}" "${board_id}" "${bsp_dir}"
   fi
 
   rm -rf "${defs}"
@@ -281,19 +330,27 @@ main() {
     build)
       local output="" total_mb="${DEFAULT_TOTAL_MB}" do_format="true"
       local single_slot="${SINGLE_SLOT_FALLBACK:-false}"
+      # Bootloader gap-write inputs default to the orchestrator-forwarded env
+      # (resolve.sh → manifest): adapter family-gates the write, board selects the
+      # blob set, bsp-dir is where fetch-debs staged the Armbian U-Boot .deb.
+      local adapter="${RAUC_BOOTLOADER_ADAPTER:-}" board_id="${BOARD_ID:-}" bsp_dir="${BSP_DIR:-}"
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --output)      output="${2:-}"; shift 2 ;;
-          --total-mb)    total_mb="${2:-}"; shift 2 ;;
-          --single-slot) single_slot="true"; shift ;;
-          --no-format)   do_format="false"; shift ;;
+          --output)              output="${2:-}"; shift 2 ;;
+          --total-mb)            total_mb="${2:-}"; shift 2 ;;
+          --single-slot)         single_slot="true"; shift ;;
+          --no-format)           do_format="false"; shift ;;
+          --bootloader-adapter)  adapter="${2:-}"; shift 2 ;;
+          --board)               board_id="${2:-}"; shift 2 ;;
+          --bsp-dir)             bsp_dir="${2:-}"; shift 2 ;;
           *) die "unknown build argument: $1" ;;
         esac
       done
       [[ -n "${output}" ]] || die "build: --output <img> is required"
       [[ "${single_slot}" == "true" || "${single_slot}" == "false" ]] \
         || die "SINGLE_SLOT_FALLBACK must be true|false (got '${single_slot}')"
-      build_disk "${output}" "${total_mb}" "${single_slot}" "${do_format}"
+      build_disk "${output}" "${total_mb}" "${single_slot}" "${do_format}" \
+        "${adapter}" "${board_id}" "${bsp_dir}"
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)
