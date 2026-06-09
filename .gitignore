@@ -24,3 +24,6 @@ Thumbs.db
 
 # OpenCode agent state (local only)
 .omo/
+
+# Repo-local test/QA evidence (coverage, diffs, traces) — never committed
+test-results/
