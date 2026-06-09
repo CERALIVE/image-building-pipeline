@@ -674,9 +674,14 @@ main() {
   WATCHER="$(_detect_watcher)"
 
   # DRY_RUN: print the plan (incl. the watcher command per component) and stop.
-  # No watcher is required to merely SHOW the plan.
+  # No watcher is required to merely SHOW the plan — but if none is installed we
+  # say so loudly here, since a REAL run would die on _die_no_watcher. This keeps
+  # the dry-run host-only (no SSH, no watcher spawn) while still surfacing the gap.
   if [[ "${DRY_RUN}" == "1" ]]; then
     _print_watch_plan
+    if [[ -z "${WATCHER}" ]]; then
+      log_warn "dev-sync: [DRY_RUN] no file watcher installed (watchexec|entr|inotifywait) — a real run would abort. Install one before \`dev-sync\` without DRY_RUN."
+    fi
     log_success "dev-sync: [DRY_RUN] plan printed; no watchers started."
     exit 0
   fi
