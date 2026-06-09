@@ -319,16 +319,13 @@ fetch_first_party() {
     log_info "local mode: GitHub releases -> gh release download"
     [[ -n "${DRY_RUN}" ]] || require_cmd gh
 
-    local pre_flag=()
-    [[ "${CHANNEL}" == "beta" ]] || pre_flag=(--exclude-pre-releases)
-
     for r in "${REPOS[@]}"; do
       log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
       run_or_plan gh release download \
         --repo "CERALIVE/${r}" \
         --pattern "*${ARCH}*.deb" \
         --dir "${debs}" \
-        "${pre_flag[@]}"
+        --clobber
     done
   fi
 }
