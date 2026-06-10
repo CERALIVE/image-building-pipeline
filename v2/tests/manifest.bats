@@ -552,3 +552,80 @@ PY
   [ "$status" -eq 0 ]
   [[ "$output" =~ measured=[0-9]+\ budget=1073741824\ \(enforced\) ]]
 }
+
+# ===========================================================================
+# 11. Reproducible builds (Task 14) — a double-build of the SAME inputs yields a
+#     BIT-IDENTICAL signed .raucb. build-bundle.sh clamps every embedded mtime to
+#     SOURCE_DATE_EPOCH (rootfs.tar + squashfs) and signs the CMS without the
+#     wall-clock signingTime attribute — the only non-determinism real `rauc`
+#     cannot suppress — so two runs collide on sha256. A mock rootfs (no
+#     mkosi/network/board) keeps it in this UNIT suite while exercising the REAL
+#     bundle assembly + RSA signing chain against the committed dev PKI.
+# ===========================================================================
+
+# repro_prereqs — the deterministic signer needs mksquashfs + openssl + the dev
+# PKI. Anything missing → the test SKIPs (still green) rather than false-fails.
+repro_prereqs() {
+  command -v mksquashfs >/dev/null 2>&1 || return 1
+  command -v openssl    >/dev/null 2>&1 || return 1
+  [ -s "$V2/.dev-keys/leaf-signing.key" ] || return 1
+  return 0
+}
+
+# build_repro_bundle <out-dir> <source-date-epoch> — build the SAME mock rootfs
+# into <out-dir> with a fixed compatible/version/ts. Echoes nothing; the bundle
+# lands at <out-dir>/fixed.raucb.
+build_repro_bundle() {
+  local out="$1" sde="$2"
+  local tree="$BATS_TEST_TMPDIR/repro-tree"
+  if [ ! -d "$tree" ]; then
+    mkdir -p "$tree/etc" "$tree/usr/bin"
+    printf 'ceralive\n' > "$tree/etc/hostname"
+    printf 'bin\n'      > "$tree/usr/bin/app"
+  fi
+  rm -rf "$out"; mkdir -p "$out"
+  env CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys" \
+      COMPATIBLE_STRING="ceralive-rock-5b-plus" \
+      BUNDLE_VERSION="reprotest" BUNDLE_TS="fixed" BUNDLE_OUT_DIR="$out" \
+      SOURCE_DATE_EPOCH="$sde" \
+      bash "$V2/lib/build-bundle.sh" rock-5b-plus "$tree" >/dev/null 2>&1
+}
+
+@test "repro: double-build of rock-5b-plus yields a bit-identical .raucb (same sha256)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  build_repro_bundle "$BATS_TEST_TMPDIR/r1" 1700000000
+  build_repro_bundle "$BATS_TEST_TMPDIR/r2" 1700000000
+  [ -f "$BATS_TEST_TMPDIR/r1/fixed.raucb" ]
+  [ -f "$BATS_TEST_TMPDIR/r2/fixed.raucb" ]
+  local h1 h2
+  h1="$(sha256sum "$BATS_TEST_TMPDIR/r1/fixed.raucb" | cut -d' ' -f1)"
+  h2="$(sha256sum "$BATS_TEST_TMPDIR/r2/fixed.raucb" | cut -d' ' -f1)"
+  [ -n "$h1" ]
+  [ "$h1" = "$h2" ]
+}
+
+@test "repro: the reproducible bundle still verifies leaf->intermediate->root (signing not faked)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  local tree="$BATS_TEST_TMPDIR/repro-vtree"; mkdir -p "$tree/etc"
+  printf 'x\n' > "$tree/etc/hostname"
+  local out="$BATS_TEST_TMPDIR/rv"; mkdir -p "$out"
+  run env CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys" \
+      COMPATIBLE_STRING="ceralive-rock-5b-plus" \
+      BUNDLE_VERSION="reprotest" BUNDLE_TS="fixed" BUNDLE_OUT_DIR="$out" \
+      SOURCE_DATE_EPOCH=1700000000 \
+      bash "$V2/lib/build-bundle.sh" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"signature verified: leaf -> intermediate -> root"* ]]
+  [ -f "$out/fixed.raucb" ]
+}
+
+@test "repro: changing SOURCE_DATE_EPOCH changes the artifact (test has teeth / not vacuous)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  build_repro_bundle "$BATS_TEST_TMPDIR/t1" 1700000000
+  build_repro_bundle "$BATS_TEST_TMPDIR/t2" 1800000000
+  local h1 h2
+  h1="$(sha256sum "$BATS_TEST_TMPDIR/t1/fixed.raucb" | cut -d' ' -f1)"
+  h2="$(sha256sum "$BATS_TEST_TMPDIR/t2/fixed.raucb" | cut -d' ' -f1)"
+  [ -n "$h1" ]
+  [ "$h1" != "$h2" ]
+}

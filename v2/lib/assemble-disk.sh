@@ -83,6 +83,13 @@ source "${HERE}/verify-disk.sh"
 # ---------------------------------------------------------------------------
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 REPART_DIR="${REPART_DIR:-${V2_DIR}/mkosi/repart}"
+
+# Reproducible builds (task 14): clamp ext4 superblock/inode times to one epoch
+# (mke2fs honours SOURCE_DATE_EPOCH) and feed mkfs.ext4 a STABLE filesystem UUID +
+# dir-hash seed so the rootfs_a image is bit-identical across rebuilds. Inherited
+# from the orchestrator; resolved here too for a standalone assemble-disk.sh call.
+SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
+export SOURCE_DATE_EPOCH
 # RK3588 raw-gap bootloader writer (family-gated; only the custom-uboot path).
 WRITE_BOOTLOADER_SH="${WRITE_BOOTLOADER_SH:-${HERE}/write-bootloader.sh}"
 # Boot-partition artifact installer (boot.scr/cera_board.env/boot_state.txt/extlinux),
@@ -200,6 +207,16 @@ write_gap_bootloader() {
 }
 
 # ---------------------------------------------------------------------------
+# det_uuid <seed> — a STABLE RFC-4122-shaped UUID derived from <seed>. mkfs.ext4
+# would otherwise stamp a random filesystem UUID (and dir-hash seed), defeating a
+# bit-for-bit rebuild; seeding both from the board makes the slot reproducible.
+# ---------------------------------------------------------------------------
+det_uuid() {
+  local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
+  printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
+}
+
+# ---------------------------------------------------------------------------
 # populate_rootfs_a <img> <rootfs_tree> <single_slot>
 # Write the mkosi rootfs tree into the rootfs_a slot (partition 2). systemd-repart
 # --offline FORMATS the ext4 slot but never populates it; without this the flashed
@@ -233,13 +250,15 @@ populate_rootfs_a() {
   # var/lib/private, …) a rootless host user cannot traverse. Probe readability
   # (the tar test emit_artifact uses); if blocked, populate inside the builder
   # container as root, which also preserves the source uid/gid/mode in the image.
+  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-rootfs_a")"
   if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
-    mkfs.ext4 -q -L rootfs_a -d "${rootfs_tree}" "${rootfs_img}" \
+    mkfs.ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
+      -d "${rootfs_tree}" "${rootfs_img}" \
       || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
   else
     log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
-    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}"
+    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}"
   fi
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
@@ -255,7 +274,7 @@ populate_rootfs_a() {
 # container fallback. e2fsprogs is installed on demand (the slim builder lacks it).
 # ---------------------------------------------------------------------------
 _populate_rootfs_a_in_container() {
-  local tree="$1" out_img="$2"
+  local tree="$1" out_img="$2" fs_uuid="${3:-}"
   local runtime=""
   if command -v docker >/dev/null 2>&1; then runtime="docker"
   elif command -v podman >/dev/null 2>&1; then runtime="podman"
@@ -264,6 +283,8 @@ _populate_rootfs_a_in_container() {
   local image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
   local img_dir img_base; img_dir="$(dirname "${out_img}")"; img_base="$(basename "${out_img}")"
   "${runtime}" run --rm \
+    -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
+    -e "FS_UUID=${fs_uuid}" \
     -v "${tree}:/rootfs-tree:ro" \
     -v "${img_dir}:/out" \
     "${image}" \
@@ -274,7 +295,8 @@ _populate_rootfs_a_in_container() {
         apt-get install -y --no-install-recommends \
           -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
       fi
-      mkfs.ext4 -q -L rootfs_a -d /rootfs-tree "/out/'"${img_base}"'"
+      mkfs.ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
+        -d /rootfs-tree "/out/'"${img_base}"'"
     ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
 }
 

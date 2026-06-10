@@ -200,6 +200,13 @@ main() {
   export UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
          HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
 
+  # Reproducible builds (task 14): pin ONE epoch for the whole run so every
+  # embedded mtime (mkosi rootfs, rootfs.tar, squashfs, ext4, CMS) clamps to it.
+  # Exported here so fetch/mkosi/assemble-disk/build-bundle all inherit the value.
+  SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
+  export SOURCE_DATE_EPOCH
+  log_info "reproducible build: SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} ($(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo n/a))"
+
   # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
   # BSP declaration must fail BEFORE any fetch/build, never as a half-image.
   require_field ARCH "${ARCH:-}"
@@ -308,8 +315,12 @@ main() {
   # -------------------------------------------------------------------------
   # 6. Assemble: mkosi builds base → platform → runtime → app in the trixie builder.
   # -------------------------------------------------------------------------
-  local ts rootfs_tree
+  local ts rootfs_tree build_version
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  # Bundle VERSION is embedded in manifest.raucm, so it must be deterministic
+  # (the filename ts may stay wall-clock — it is not part of the .raucb bytes).
+  build_version="$(git -C "${V2_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  [[ -n "${build_version}" ]] || build_version="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ 2>/dev/null || printf '%s' "${SOURCE_DATE_EPOCH}")"
   rootfs_tree="${MKOSI_DIR}/build/app"
   log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
   run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
@@ -368,7 +379,7 @@ main() {
       # the .raw, emitted ALONGSIDE it. format=plain (no dm-verity, G4 deferred).
       local bundle_artifact="${out_dir}/${ts}.raucb"
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
-      BUNDLE_VERSION="${ts}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
+      BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
       log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
@@ -464,6 +475,7 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
+    SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
@@ -587,15 +599,23 @@ run_mkosi_build() {
 # ---------------------------------------------------------------------------
 emit_artifact() {
   local tree="$1" artifact="$2"
-  if tar -C "${tree}" -cf "${artifact}" . 2>/dev/null; then
+  # Deterministic ordering + owner + clamped mtime so the same tree always tars
+  # to the same bytes (task 14). --sort=name pins entry order; gnu format avoids
+  # the per-file pax atime/ctime headers that would re-introduce wall-clock drift.
+  local -a tar_repro=(
+    --sort=name --numeric-owner --owner=0 --group=0
+    --mtime="@${SOURCE_DATE_EPOCH:-0}" --format=gnu
+  )
+  if tar -C "${tree}" "${tar_repro[@]}" -cf "${artifact}" . 2>/dev/null; then
     :
   else
     log_info "rootfs is root-owned — tarring inside the builder container"
     local runtime="docker"; command -v docker >/dev/null 2>&1 || runtime="podman"
     "${runtime}" run --rm \
+      -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
       -v "${MKOSI_DIR}:/work" -v "$(dirname "${artifact}")":/out \
       "${MKOSI_BUILDER_IMAGE}" \
-      tar -C "/work/build/app" -cf "/out/$(basename "${artifact}")" .
+      tar -C "/work/build/app" "${tar_repro[@]}" -cf "/out/$(basename "${artifact}")" .
   fi
   ( cd "$(dirname "${artifact}")" && sha256sum "$(basename "${artifact}")" >"$(basename "${artifact}").sha256" )
 }

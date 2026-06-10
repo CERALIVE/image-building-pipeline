@@ -75,6 +75,17 @@ REPOS=("srtla" "srt" "ceracoder" "CeraUI")
 `fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
 Don't hardcode versions in the script.
 
+**Reproducible builds** [EXISTS]
+Same source state → bit-identical `.raucb`. The orchestrator pins one
+`SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
+`common.sh::resolve_source_date_epoch`) and exports it so every embedded mtime
+(rootfs.tar, squashfs, ext4, mkosi) clamps to it. `build-bundle.sh` signs the RAUC
+bundle through a deterministic OpenSSL CMS path (`-noattr` → no wall-clock
+`signingTime`; real leaf key + chain, still `rauc`-verifiable) because `rauc`
+itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into the
+native `rauc bundle` signer (NOT bit-reproducible). Proof: `v2/run-tests` section
+11; double-build the same board and compare `.raucb` sha256.
+
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.

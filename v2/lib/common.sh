@@ -63,3 +63,23 @@ require_cmd() {
     die "command '${cmd}' not found, install it first"
   fi
 }
+
+# ---------------------------------------------------------------------------
+# resolve_source_date_epoch [repo-dir] — echo a STABLE epoch for reproducible
+# builds: env override > HEAD commit time (pins epoch to source state) > frozen
+# fallback. Callers EXPORT it as SOURCE_DATE_EPOCH so every embedded mtime
+# (tar/squashfs/ext4/CMS) clamps to one value. The git probe sits in the `if`
+# condition so a non-repo dir cannot trip the ERR trap.
+# ---------------------------------------------------------------------------
+resolve_source_date_epoch() {
+  local repo_dir="${1:-.}" epoch=""
+  if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+    printf '%s' "${SOURCE_DATE_EPOCH}"
+    return 0
+  fi
+  if epoch="$(git -C "${repo_dir}" log -1 --pretty=%ct 2>/dev/null)" && [[ -n "${epoch}" ]]; then
+    printf '%s' "${epoch}"
+    return 0
+  fi
+  printf '%s' "${CERALIVE_EPOCH_FALLBACK:-1577836800}"   # 2020-01-01T00:00:00Z
+}
