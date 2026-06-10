@@ -10,16 +10,27 @@
   "compatibleOsVersions": ["12"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw",
-    "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
-    "gpgSigRef": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw.asc",
-    "sizeDownload": 4194304,
-    "sizeInstalled": 12582912
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw.sig",
+    "sizeDownload": 12582912,
+    "sizeInstalled": 37748736
   },
   "provides": [
+    "/usr/bin/alsamixer",
+    "/usr/bin/pulseaudio",
+    "/usr/bin/lsusb",
+    "/usr/bin/lspci",
+    "/usr/bin/lsof",
+    "/usr/sbin/i2cdetect",
+    "/usr/bin/candump",
     "/usr/bin/htop",
-    "/usr/bin/strace",
-    "/usr/bin/tcpdump",
-    "/usr/bin/iperf3"
+    "/usr/sbin/iotop",
+    "/usr/sbin/nethogs",
+    "/usr/bin/vnstat",
+    "/usr/bin/nano",
+    "/usr/bin/iperf3",
+    "/usr/bin/socat",
+    "/usr/bin/nc.openbsd"
   ],
   "deps": [],
   "conflicts": [],
@@ -29,7 +40,7 @@
     "start": []
   },
   "validate": {
-    "cmd": "/usr/bin/strace -V",
+    "cmd": "/usr/bin/htop --version",
     "timeout": 10
   }
 }
