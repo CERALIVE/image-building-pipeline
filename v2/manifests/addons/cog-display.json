@@ -1,0 +1,35 @@
+{
+  "id": "cog-display",
+  "name": "Cog Display Engine",
+  "version": "0.16.1",
+  "category": "display",
+  "icon": "monitor",
+  "payload": { "type": "sysext" },
+  "sysextLevel": "1",
+  "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-{board}-{os_version}.raw",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-{board}-{os_version}.raw.sig",
+    "sizeDownload": 57671680,
+    "sizeInstalled": 125829120
+  },
+  "provides": [
+    "/usr/bin/cog",
+    "/usr/bin/cage",
+    "/usr/lib/systemd/system/cog.service",
+    "/usr/lib/systemd/system/cage.service"
+  ],
+  "deps": [],
+  "conflicts": [],
+  "units": {
+    "unmask": ["cage.service", "cog.service"],
+    "enable": ["cage.service", "cog.service"],
+    "start": ["cage.service", "cog.service"]
+  },
+  "validate": {
+    "cmd": "/usr/bin/cog --version",
+    "timeout": 10
+  }
+}
