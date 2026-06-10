@@ -46,6 +46,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${HERE}/lib/common.sh" 2>/dev/null || source "${HERE}/common.sh"
 
+# Shared libs (lib/shared/): no private copies of these readers/guards live here.
+# shellcheck source=lib/shared/yaml-lib.sh
+source "${HERE}/shared/yaml-lib.sh"
+# shellcheck source=lib/shared/deb-lib.sh
+source "${HERE}/shared/deb-lib.sh"
+# shellcheck source=lib/shared/sibling-layout-lib.sh
+source "${HERE}/shared/sibling-layout-lib.sh"
+
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode versions — pins come from
 # versions.yaml for first-party, and from the family manifest for BSP names).
@@ -92,69 +100,9 @@ get_pin() {
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
 }
 
-# ---------------------------------------------------------------------------
-# read_yaml_list — emit every "- item" under a top-level YAML <key> in <file>.
-# Pure-awk so the fetcher needs no yq. Tolerates blank lines and trailing
-# comments between the key and its items; stops at the next top-level key or
-# a column-0 comment. Returns nothing (success) for an absent/empty key.
-# ---------------------------------------------------------------------------
-read_yaml_list() {
-  local key="$1" file="$2"
-  [[ -f "$file" ]] || die "manifest not found: ${file}"
-  awk -v key="${key}" '
-    $0 ~ "^"key":[[:space:]]*$" { inlist=1; next }
-    inlist && /^[[:space:]]*-[[:space:]]+/ {
-      sub(/^[[:space:]]*-[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; next
-    }
-    inlist && /^[A-Za-z#]/ { inlist=0 }
-  ' "${file}"
-}
-
-# ---------------------------------------------------------------------------
-# assert_sibling_layout <workspace_root>
-#
-# HARD CONSTRAINT (ARCHITECTURE.md §5): CeraUI/apps/backend/package.json resolves
-# @ceralive/ceracoder and @ceralive/srtla via `link:../../../{ceracoder,srtla}/
-# bindings/typescript`. The `../../../` climbs from CeraUI/apps/backend to the
-# parent of CeraUI, so ceracoder/, srtla/, CeraUI/ MUST be siblings there.
-#
-# WHY HERE: once we consume PRE-BUILT .debs, mkosi never touches the link: graph,
-# so the layout is technically irrelevant to image assembly. BUT the .debs are
-# built FROM this checkout upstream; a broken sibling layout means CeraUI's .deb
-# could never have been produced. This guard is the CI-side tripwire that catches
-# the misconfiguration loudly at fetch time instead of letting a silently-missing
-# CeraUI .deb surface as a mysterious runtime gap. It takes the root as an ARG so
-# it is unit-testable against synthetic good/bad trees (see assert-sibling cmd).
-# ---------------------------------------------------------------------------
-assert_sibling_layout() {
-  local root="$1"
-  [[ -n "${root}" ]] || die "assert_sibling_layout: workspace root not given"
-  [[ -d "${root}" ]] || die "sibling-layout: workspace root does not exist: ${root}"
-
-  local sib missing=()
-  for sib in ceracoder srtla CeraUI; do
-    [[ -d "${root}/${sib}" ]] || missing+=("${sib}/")
-  done
-  if (( ${#missing[@]} > 0 )); then
-    die "sibling-layout BROKEN under ${root}: missing ${missing[*]} — CeraUI backend resolves @ceralive/{ceracoder,srtla} via link:../../../ (ARCHITECTURE.md §5). ceracoder/, srtla/, CeraUI/ must be siblings."
-  fi
-
-  # Verify the exact link: targets the backend depends on actually resolve from
-  # CeraUI/apps/backend, not just that the sibling dirs exist.
-  local backend="${root}/CeraUI/apps/backend"
-  if [[ -d "${backend}" ]]; then
-    local dep
-    for dep in ceracoder srtla; do
-      # link:../../../<dep>/bindings/typescript resolved from CeraUI/apps/backend
-      local resolved="${backend}/../../../${dep}/bindings/typescript"
-      if [[ ! -d "${resolved}" ]]; then
-        log_warn "sibling-layout: ${dep} bindings/typescript not present at $(cd "${backend}" >/dev/null 2>&1 && cd "../../../${dep}" 2>/dev/null && pwd || echo "${root}/${dep}")/bindings/typescript — link:../../../${dep}/bindings/typescript will fail on a source build (ok if consuming a pre-built CeraUI .deb)"
-      fi
-    done
-  fi
-
-  log_success "sibling-layout OK under ${root} (ceracoder/ srtla/ CeraUI/ are siblings; link:../../../ resolves)"
-}
+# assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
+# tripwire that ceracoder/, srtla/, CeraUI/ are siblings — see that lib and
+# ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
 
 # ---------------------------------------------------------------------------
 # _fetch_bsp_native — native apt-get path (Debian/Ubuntu hosts).
