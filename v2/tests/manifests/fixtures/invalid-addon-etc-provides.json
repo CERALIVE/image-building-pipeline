@@ -1,0 +1,21 @@
+{
+  "id": "bad-etc-addon",
+  "name": "Bad /etc Add-on",
+  "version": "1.0.0",
+  "category": "other",
+  "payload": { "type": "sysext" },
+  "sysextLevel": "1",
+  "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/bad-etc/{os_version}/bad-etc.raw",
+    "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/bad-etc/{os_version}/bad-etc.raw.asc",
+    "sizeDownload": 1024,
+    "sizeInstalled": 2048
+  },
+  "provides": [
+    "/usr/bin/legit-tool",
+    "/etc/foo"
+  ]
+}

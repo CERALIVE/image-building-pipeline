@@ -1,0 +1,35 @@
+{
+  "id": "debug-toolset",
+  "name": "Debug Toolset",
+  "version": "1.0.0",
+  "category": "debug",
+  "icon": "wrench",
+  "payload": { "type": "sysext" },
+  "sysextLevel": "1",
+  "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw",
+    "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw.asc",
+    "sizeDownload": 4194304,
+    "sizeInstalled": 12582912
+  },
+  "provides": [
+    "/usr/bin/htop",
+    "/usr/bin/strace",
+    "/usr/bin/tcpdump",
+    "/usr/bin/iperf3"
+  ],
+  "deps": [],
+  "conflicts": [],
+  "units": {
+    "unmask": [],
+    "enable": [],
+    "start": []
+  },
+  "validate": {
+    "cmd": "/usr/bin/strace -V",
+    "timeout": 10
+  }
+}

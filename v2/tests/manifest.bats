@@ -31,6 +31,8 @@ setup() {
   SCHEMA_DIR="$V2/manifests/schema"
   FAMILY_SCHEMA="$SCHEMA_DIR/family.schema.json"
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
+  ADDON_SCHEMA="$SCHEMA_DIR/addon.schema.json"
+  VALIDATE_PY="$V2/ci/validate-manifests.py"
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="$(cd "$V2/.." && pwd)"
   # Locate the pin registry. Standalone CI checks out only this repo, so the
@@ -92,6 +94,29 @@ PY
 get_pin() {
   awk -v key="$1" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$VERSIONS_YAML"
+}
+
+# write_addon <dir> <id> <conflicts-json-array> <provides-path>
+# Emit a minimal, schema-valid add-on descriptor into <dir>/<id>.json so the E6
+# collision tests can compose conflict scenarios without shipping fixtures that
+# would themselves trip the shipped-tree validator.
+write_addon() {
+  local dir="$1" id="$2" conflicts="$3" provides="$4"
+  cat > "$dir/$id.json" <<JSON
+{
+  "id": "$id", "name": "$id", "version": "1.0.0", "category": "other",
+  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw",
+    "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw.asc",
+    "sizeDownload": 1024, "sizeInstalled": 2048
+  },
+  "provides": ["$provides"],
+  "conflicts": $conflicts
+}
+JSON
 }
 
 # ===========================================================================
@@ -706,4 +731,68 @@ SH
   # the failing board's stderr was captured into ITS log, not the passing one
   grep -q "simulating failure for failboard" "$faillog"
   ! grep -q "failboard" "$passlog"
+}
+
+# ===========================================================================
+# 13. Add-on descriptor format + conflict model (Task 21).
+#     addon.schema.json is the per-descriptor gate: G1 sysext merge identity
+#     (sysextLevel const "1", versionId const "12") and G2 the /usr+/opt-only
+#     provides[] boundary. validate-manifests.py layers the cross-descriptor E6
+#     model on top: no two add-ons may claim the same provides[] path unless they
+#     mutually declare each other in conflicts[] (the provides/conflicts model).
+#     Pure static validation (no image, no sysext merge) so it fits this UNIT
+#     suite.
+# ===========================================================================
+
+@test "schema: addon.schema.json is a valid draft-2020-12 schema" {
+  run check_schema_metaschema "$ADDON_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCHEMA-OK"* ]]
+}
+
+@test "valid: shipped debug-toolset descriptor validates against addon schema" {
+  run validate_manifest "$V2/manifests/addons/debug-toolset.json" "$ADDON_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "addon: validate-manifests.py passes clean on the shipped descriptors (exit 0)" {
+  run bash -c "python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"debug-toolset.json"* ]]
+  [[ "$output" == *"0 errors"* ]]
+}
+
+@test "invalid: addon with an /etc path in provides[] is REJECTED (G2), names provides" {
+  run validate_manifest "$FIXTURES/invalid-addon-etc-provides.json" "$ADDON_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"provides"* ]]
+}
+
+@test "invalid: addon missing sysextLevel is REJECTED (G1), names sysextLevel" {
+  run validate_manifest "$FIXTURES/invalid-addon-missing-sysextlevel.json" "$ADDON_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sysextLevel"* ]]
+}
+
+@test "addon conflict: two descriptors claiming the same provides[] path are flagged (E6)" {
+  local adir="$BATS_TEST_TMPDIR/addons-collide"
+  mkdir -p "$adir"
+  write_addon "$adir" addon-a '[]' "/usr/bin/shared-tool"
+  write_addon "$adir" addon-b '[]' "/usr/bin/shared-tool"
+  run bash -c "ADDONS_DIR='$adir' python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"collision"* ]]
+  [[ "$output" == *"/usr/bin/shared-tool"* ]]
+}
+
+@test "addon conflict: a shared provides[] path is ALLOWED when both declare mutual conflicts[] (provides/conflicts model)" {
+  local adir="$BATS_TEST_TMPDIR/addons-resolved"
+  mkdir -p "$adir"
+  write_addon "$adir" addon-a '["addon-b"]' "/usr/bin/shared-tool"
+  write_addon "$adir" addon-b '["addon-a"]' "/usr/bin/shared-tool"
+  run bash -c "ADDONS_DIR='$adir' python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 errors"* ]]
+  [[ "$output" != *"collision"* ]]
 }
