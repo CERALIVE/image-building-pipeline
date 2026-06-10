@@ -820,3 +820,138 @@ SH
   [[ "$output" == *"0 errors"* ]]
   [[ "$output" != *"collision"* ]]
 }
+
+# ===========================================================================
+# 14. Signed per-board/per-OS feature sysext build (Task 24).
+#     lib/build-feature-sysext.sh turns a .deb staging tree into a SIGNED add-on
+#     sysext: <feature>-<board>-<os>.raw + .raw.sha256 + .raw.sig, verifiable with
+#     gpgv against the image-baked add-on PUBLIC keyring. Guards proven here:
+#       * artifact set + sha256 integrity + GPG authenticity (gpgv OK)
+#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12
+#       * G2 — a staging tree with /etc (escapes the /usr+/opt boundary) is REFUSED
+#       * tamper — a flipped byte in the .raw makes gpgv FAIL (signing has teeth)
+#       * the baked keyring is PUBLIC-only and a DISTINCT trust domain from RAUC
+#     Hermetic: a throwaway gpg home under BATS_FILE_TMPDIR signs the fixture, so
+#     the suite never touches the repo dev keys. Skips (still green) if the signing
+#     toolchain (mksquashfs/gpg/gpgv/unsquashfs) is unavailable on the host.
+# ===========================================================================
+
+# feature_prereqs — the signer needs mksquashfs + gpg + gpgv + unsquashfs.
+feature_prereqs() {
+  command -v mksquashfs >/dev/null 2>&1 || return 1
+  command -v gpg        >/dev/null 2>&1 || return 1
+  command -v gpgv       >/dev/null 2>&1 || return 1
+  command -v unsquashfs >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# build_feature_fixture — build a sample signed feature sysext ONCE per file into
+# BATS_FILE_TMPDIR, signed by a throwaway gpg home (NOT the repo dev keys). Echoes
+# nothing; idempotent — later tests reuse the produced artifacts.
+build_feature_fixture() {
+  local out="$BATS_FILE_TMPDIR/out"
+  local raw="$out/demo-feature-rock-5b-plus-12.raw"
+  [ -f "$raw" ] && return 0
+  local stg="$BATS_FILE_TMPDIR/staging"
+  mkdir -p "$stg/usr/bin" "$stg/opt/demo"
+  printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
+  printf 'payload\n'            > "$stg/opt/demo/data.txt"
+  bash "$LIB_DIR/build-feature-sysext.sh" \
+    --feature demo-feature --board rock-5b-plus --os-version 12 \
+    --deb-staging "$stg" --out "$out" \
+    --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
+}
+
+@test "t24 sysext: build emits .raw + .raw.sha256 + .raw.sig + addon-keyring.gpg" {
+  feature_prereqs || skip "mksquashfs/gpg/gpgv/unsquashfs not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sha256" ]
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sig" ]
+  [ -f "$out/addon-keyring.gpg" ]
+}
+
+@test "t24 sysext: sha256 sidecar matches the produced .raw" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-12.raw.sha256"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *": OK"* ]]
+}
+
+@test "t24 sysext: detached signature verifies against the baked add-on keyring (gpgv OK)" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run gpgv --keyring "$out/addon-keyring.gpg" \
+        "$out/demo-feature-rock-5b-plus-12.raw.sig" \
+        "$out/demo-feature-rock-5b-plus-12.raw"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Good signature"* ]]
+}
+
+@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run unsquashfs -no-progress -cat \
+        "$out/demo-feature-rock-5b-plus-12.raw" \
+        usr/lib/extension-release.d/extension-release.demo-feature
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SYSEXT_LEVEL=1"* ]]
+  [[ "$output" == *"VERSION_ID=12"* ]]
+}
+
+@test "t24 sysext G2: a staging tree with /etc is REFUSED (escapes /usr+/opt boundary)" {
+  feature_prereqs || skip "signing toolchain not available"
+  local stg="$BATS_TEST_TMPDIR/g2-staging" out="$BATS_TEST_TMPDIR/g2-out"
+  mkdir -p "$stg/usr/bin" "$stg/etc"
+  printf 'x\n'   > "$stg/usr/bin/t"
+  printf 'cfg\n' > "$stg/etc/foo.conf"
+  run bash "$LIB_DIR/build-feature-sysext.sh" \
+        --feature bad --board rock-5b-plus --os-version 12 \
+        --deb-staging "$stg" --out "$out" --keyring "$BATS_FILE_TMPDIR/gnupg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"G2 boundary"* ]]
+  [ ! -f "$out/bad-rock-5b-plus-12.raw" ]
+}
+
+@test "t24 sysext tamper: a flipped byte in the .raw makes gpgv FAIL (signing has teeth)" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  local tampered="$BATS_TEST_TMPDIR/tampered.raw"
+  cp "$out/demo-feature-rock-5b-plus-12.raw" "$tampered"
+  printf '\xff' | dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
+  run gpgv --keyring "$out/addon-keyring.gpg" \
+        "$out/demo-feature-rock-5b-plus-12.raw.sig" "$tampered"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"Good signature"* ]]
+}
+
+@test "t24 keyring: committed baked add-on keyring exists and is PUBLIC-only (no secret packets)" {
+  command -v gpg >/dev/null 2>&1 || skip "gpg not available"
+  local baked="$V2/mkosi/runtime/addon-keyring/addon-keyring.gpg"
+  [ -s "$baked" ]
+  # It must be a usable OpenPGP public keyring...
+  run gpg --show-keys --with-colons "$baked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\npub:'* || "$output" == pub:* ]]
+  # ...and must NOT carry any secret-key material (a device only verifies).
+  run gpg --list-packets "$baked"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"secret key"* ]]
+  ! grep -aq 'PRIVATE KEY' "$baked"
+}
+
+@test "t24 keyring: add-on keyring is a DISTINCT trust domain from the RAUC keyring" {
+  local baked="$V2/mkosi/runtime/addon-keyring/addon-keyring.gpg"
+  local rauc="$V2/mkosi/runtime/rauc/ceralive-keyring.pem"
+  [ -s "$baked" ]
+  [ -s "$rauc" ]
+  # Different files, different bytes — add-on signing never reuses the RAUC anchor.
+  run cmp -s "$baked" "$rauc"
+  [ "$status" -ne 0 ]
+}

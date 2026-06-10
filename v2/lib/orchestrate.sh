@@ -473,7 +473,7 @@ run_mkosi_build() {
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
-    RAUC_ROOT_CA_B64 COMPATIBLE_STRING
+    RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
     SOURCE_DATE_EPOCH
   )
@@ -504,6 +504,18 @@ run_mkosi_build() {
     RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
   fi
   export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
+
+  # Add-on signing keyring (task 24): the PUBLIC add-on keyring baked at
+  # /usr/share/ceralive/addon-keyring.gpg so the device can verify optional add-on
+  # sysext payloads (.raw + detached .sig). SEPARATE trust domain from the RAUC
+  # root CA above — committed (PUBLIC) dev copy at mkosi/runtime/addon-keyring/
+  # addon-keyring.gpg. Forwarded base64 (like RAUC_ROOT_CA_B64) so the runtime
+  # postinst can write it without repo access. CI injects the real public key.
+  local addon_keyring="${MKOSI_DIR}/runtime/addon-keyring/addon-keyring.gpg"
+  if [[ -z "${ADDON_KEYRING_B64:-}" && -s "${addon_keyring}" ]]; then
+    ADDON_KEYRING_B64="$(base64 -w0 <"${addon_keyring}")"
+  fi
+  export ADDON_KEYRING_B64="${ADDON_KEYRING_B64:-}"
 
   # RAUC `compatible` — the single source of truth (T12), BOARD-specific not
   # family-wide. A family default (ceralive-rk3588) lets an Orange Pi 5+ bundle

@@ -541,6 +541,37 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 13b. Add-on signing keyring (task 24): bake the PUBLIC add-on keyring so the
+# device can verify optional add-on sysext payloads (.raw + detached .sig +
+# .sha256). This is a SEPARATE TRUST DOMAIN from the RAUC root CA above: RAUC
+# signs the OS A/B slots, this key signs optional add-on .raw artifacts. The
+# public keyring arrives as base64 in $ADDON_KEYRING_B64 (orchestrator-forwarded,
+# defaulting to the committed dev key at runtime/addon-keyring/addon-keyring.gpg),
+# exactly like the RAUC root CA and the apt GPG key. NEVER a private/secret key —
+# the device only VERIFIES add-on signatures (gpgv), it never signs.
+# ---------------------------------------------------------------------------
+setup_addon_keyring() {
+  local keyring=/usr/share/ceralive/addon-keyring.gpg
+  log "baking add-on signing keyring (separate trust domain from RAUC)"
+  mkdir -p /usr/share/ceralive
+
+  if [[ -n "${ADDON_KEYRING_B64:-}" ]]; then
+    log "installing add-on signing keyring (public) from env"
+    printf '%s' "${ADDON_KEYRING_B64}" | base64 -d >"${keyring}"
+  else
+    log "no add-on keyring in env — writing EMPTY placeholder (rejects all add-on signatures until the real public key is baked in)"
+    : >"${keyring}"
+  fi
+  chmod 0644 "${keyring}"
+  # The device must hold ONLY public key material — a secret key here would let a
+  # compromised device forge add-on signatures. Fail the build if one slipped in.
+  if grep -aq 'PRIVATE KEY' "${keyring}"; then
+    log "FATAL: ${keyring} contains a PRIVATE KEY — the add-on keyring must hold ONLY the public signing key"
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # 14. Boot healthcheck (task 29): gate `rauc mark-good` on REAL streaming health.
 #
 # setup_boot_healthcheck (postinst-lib.sh, sourced above) INSTALLS the committed
@@ -835,6 +866,7 @@ main() {
   create_ceralive_structure
   setup_data_persistence       # task 30: relocate mutable state onto /data
   setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
+  setup_addon_keyring          # task 24: bake the add-on signing keyring (separate trust domain)
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)
