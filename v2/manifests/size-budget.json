@@ -1,0 +1,5 @@
+{
+  "orange-pi-5-plus": { "rootfs_bytes_max": null, "measured": null },
+  "rock-5b-plus": { "rootfs_bytes_max": null, "measured": null },
+  "x86-minipc": { "rootfs_bytes_max": null, "measured": null }
+}

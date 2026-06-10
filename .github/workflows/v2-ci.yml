@@ -92,8 +92,37 @@ jobs:
           mkdir -p "${ws}/ceracoder" "${ws}/srtla" "${ws}/CeraUI"
           echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
 
-      - name: Run v2 manifest unit suite (16 tests)
+      - name: Run v2 manifest unit suite
         run: ./v2/run-tests
+
+  size-gate:
+    # REPORT-ONLY size measurement (Task 8). Sizes rootfs CONTENT via
+    # measure-size.sh (du --apparent-size -sb on the artifact/tree — NOT the
+    # frozen 4096 MB partition, G4/E5) and prints `measured=<N> budget=null
+    # (report-only)`. The DRY_RUN matrix ships no real rootfs, so this exercises
+    # the mechanism against a synthetic content tree. While every budget is null
+    # this MUST exit 0 — Task 20 flips it to blocking by setting a threshold in
+    # manifests/size-budget.json (no workflow change needed then).
+    name: rootfs size measurement (report-only)
+    runs-on: ubuntu-latest
+    needs: bats
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Measure rootfs content vs budget (report-only — threshold null)
+        run: |
+          # No real rootfs under DRY_RUN — measure a synthetic content tree to
+          # prove the mechanism. apparent-size is deterministic; the run must
+          # report and exit 0 while budgets remain null.
+          art="${RUNNER_TEMP}/rootfs-sample"
+          mkdir -p "${art}"
+          head -c 4096 /dev/zero > "${art}/placeholder.bin"
+          ./v2/lib/measure-size.sh rock-5b-plus "${art}" | tee size-report.log
+          grep -Eq 'measured=[0-9]+ budget=null \(report-only\)' size-report.log
 
   build-matrix:
     name: build dry-run (${{ matrix.board }})

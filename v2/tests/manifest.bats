@@ -25,6 +25,8 @@ setup() {
   COMMON_SH="$LIB_DIR/common.sh"
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
+  MEASURE_SH="$LIB_DIR/measure-size.sh"
+  SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
   QEMU_X86="$TESTS_DIR/qemu-x86.sh"
   SCHEMA_DIR="$V2/manifests/schema"
   FAMILY_SCHEMA="$SCHEMA_DIR/family.schema.json"
@@ -453,4 +455,100 @@ YAML
   # the single assemble-disk invocation lives ONLY under the `custom` branch:
   # efi/grub must never reach a .raw write.
   [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
+}
+
+# ===========================================================================
+# 10. Size-gate measurement scaffolding (Task 8) — REPORT-ONLY.
+#     measure-size.sh sizes rootfs CONTENT (du --apparent-size -sb on the
+#     artifact/tree, NOT the frozen 4096 MB partition — G4/E5) and compares it to
+#     manifests/size-budget.json. While every rootfs_bytes_max is null the gate
+#     only REPORTS (prints measured vs budget, exits 0). Pure static measurement —
+#     no chroot/build/mount — so it fits this UNIT suite. Task 20 flips it to
+#     blocking by setting a non-null threshold; the enforcement branch is proven
+#     here so that flip stays a one-line manifest edit.
+# ===========================================================================
+
+@test "size-budget: every shipped board has a null-threshold entry (report-only default)" {
+  # size-budget.json must be legal JSON, an object, and carry one entry per board
+  # manifest with BOTH keys null (the report-only contract Task 20 later flips).
+  run python3 - "$SIZE_BUDGET_JSON" "$V2/manifests/boards" <<'PY'
+import json, sys
+from pathlib import Path
+
+budget = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert isinstance(budget, dict), "root must be an object"
+boards = {p.stem for p in Path(sys.argv[2]).glob("*.yaml")}
+missing = boards - set(budget)
+assert not missing, "boards missing a size-budget entry: %s" % sorted(missing)
+for name, entry in budget.items():
+    assert entry.get("rootfs_bytes_max") is None, "%s: rootfs_bytes_max must be null" % name
+    assert entry.get("measured") is None, "%s: measured must be null" % name
+print("BUDGET-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BUDGET-OK"* ]]
+}
+
+@test "size-gate: report-only run prints measured vs null budget and exits 0" {
+  local tree="$BATS_TEST_TMPDIR/rootfs"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ measured=[0-9]+\ budget=null\ \(report-only\) ]]
+}
+
+@test "size-gate: apparent-size measurement is deterministic (identical bytes across runs)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-det"
+  mkdir -p "$tree/sub"
+  head -c 8192 /dev/zero > "$tree/a.bin"
+  head -c 333  /dev/zero > "$tree/sub/b.bin"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  local first="${output%% *}"          # "measured=<N>"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "${output%% *}" == "$first" ]]
+}
+
+@test "size-gate: malformed size-budget.json fails loudly (non-vacuity negative)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-bad"
+  mkdir -p "$tree"
+  head -c 16 /dev/zero > "$tree/a.bin"
+  local bad="$BATS_TEST_TMPDIR/bad-budget.json"
+  printf '{ this is not json\n' > "$bad"
+  run env SIZE_BUDGET_JSON="$bad" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"malformed size-budget.json"* ]]
+}
+
+@test "size-gate: unknown board fails loudly (no silent pass on a missing budget)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-unknown"
+  mkdir -p "$tree"
+  head -c 16 /dev/zero > "$tree/a.bin"
+  run "$MEASURE_SH" definitely-not-a-board "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no size budget entry"* ]]
+}
+
+@test "size-gate: a non-null budget enforces (over-budget fails) — proves Task-20 flip works" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-enf"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"   # ~64 KiB of content
+  local tight="$BATS_TEST_TMPDIR/tight-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024, "measured": null } }\n' > "$tight"
+  run env SIZE_BUDGET_JSON="$tight" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds budget"* ]]
+}
+
+@test "size-gate: a generous non-null budget passes and reports 'enforced'" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-ok"
+  mkdir -p "$tree"
+  head -c 256 /dev/zero > "$tree/small.bin"
+  local roomy="$BATS_TEST_TMPDIR/roomy-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1073741824, "measured": null } }\n' > "$roomy"
+  run env SIZE_BUDGET_JSON="$roomy" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ measured=[0-9]+\ budget=1073741824\ \(enforced\) ]]
 }
