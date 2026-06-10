@@ -115,7 +115,7 @@ fmt_s()  { awk -v ms="$1" 'BEGIN{ printf "%.2fs", ms/1000 }'; }
 # but here callers inspect the status explicitly so refresh-failure is graceful).
 # ---------------------------------------------------------------------------
 ssh_cmd=(ssh)
-rsync_base=(rsync -az)
+rsync_base=(scp -r)
 
 remote_run() {
   local desc="$1" remote_cmd="$2"
@@ -129,10 +129,10 @@ remote_run() {
 push_file() {
   local src="$1" dest="$2"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    log_info "DRY-RUN rsync: ${rsync_base[*]} ${src} ${SSH_USER}@${BOARD_IP}:${dest}"
+    log_info "DRY-RUN scp: ${rsync_base[*]} ${src} ${SSH_USER}@${BOARD_IP}:${dest}"
     return 0
   fi
-  "${rsync_base[@]}" "${src}" "${SSH_USER}@${BOARD_IP}:${dest}"
+  scp -r "${src}" "${SSH_USER}@${BOARD_IP}:${dest}"
 }
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ main() {
   (( ${#apps[@]} > 0 )) || apps=("${DEFAULT_APPS[@]}")
   [[ -z "${FROM_DEB}" || -d "${FROM_DEB}" ]] || die "--from-deb dir not found: ${FROM_DEB}"
 
-  require_cmd rsync
+  require_cmd scp
   require_cmd ssh
 
   # Select the app-layer backend (default sysext) → defines build_app_layer.

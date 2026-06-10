@@ -83,6 +83,7 @@ cpufrequtils             # CPU governor control for sustained encode performance
 # --- Net glue / diagnostics ---------------------------------------------------
 socat                    # socket relay used by streaming/control glue
 netcat-openbsd           # nc — connectivity probing
+rsync                    # file sync for dev-push/dev-sync live-reload loop (v2/docs/dev-loop.md)
 iperf3                   # throughput testing of bonded links (field diagnostics)
 curl                     # http client (CeraUI/update flows)
 wget                     # http downloader
