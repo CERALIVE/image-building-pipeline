@@ -76,10 +76,28 @@ source "${SYNC_NATIVE_HERE}/../common.sh"
 # interface.sh: select_backend -> build_app_layer/install_app_layer/refresh_app_layer.
 # shellcheck source=../app-layer/interface.sh
 source "${SYNC_NATIVE_HERE}/../app-layer/interface.sh"
-# arch.sh transitively sources config.sh (DEV_SYNC_*/SSH_USER/REMOTE_EXT_DIR/DRY_RUN)
-# and transport.sh (resolve_target/transport_ssh/transport_rsync). Gives arch_guard.
-# shellcheck source=arch.sh
-source "${SYNC_NATIVE_HERE}/arch.sh"
+# config.sh + transport.sh: previously pulled in transitively by arch.sh. Sourced
+# explicitly now because arch-lib.sh (below) does NOT re-source them.
+# shellcheck source=config.sh
+source "${SYNC_NATIVE_HERE}/config.sh"
+# shellcheck source=transport.sh
+source "${SYNC_NATIVE_HERE}/transport.sh"
+
+# Wave-0 shared libs. arch_guard/device_arch/host_arch (arch-lib) and the native
+# phase_rollback (rollback-lib) are called below; health-gate-lib's health_gate is
+# the backend HTTP gate — the native post-restart gate is phase_health (phase-lib).
+# shellcheck source=../shared/arch-lib.sh
+source "${SYNC_NATIVE_HERE}/../shared/arch-lib.sh"
+# shellcheck source=../shared/health-gate-lib.sh
+source "${SYNC_NATIVE_HERE}/../shared/health-gate-lib.sh"
+# shellcheck source=../shared/rollback-lib.sh
+source "${SYNC_NATIVE_HERE}/../shared/rollback-lib.sh"
+
+# Native phases + build-input resolution, split out of this orchestrator.
+# shellcheck source=build-input-lib.sh
+source "${SYNC_NATIVE_HERE}/build-input-lib.sh"
+# shellcheck source=phase-lib.sh
+source "${SYNC_NATIVE_HERE}/phase-lib.sh"
 
 # Default apps = the two pure-binary, sysext-ready first-party components, matching
 # dev-push:DEFAULT_APPS exactly. CeraUI uses the appfs backend, not this path.
@@ -114,290 +132,6 @@ Reuses build_app_layer (sysext.sh) + the byte-identical
 verb, wrapped with: arch guard, optional systemd-dissect --verify, a post-restart
 health gate, and A/B (-rollback.raw) rollback. Does NOT modify dev-push/sysext.sh.
 EOF
-}
-
-# ---------------------------------------------------------------------------
-# _verify_supported_flag — echo the systemd-dissect verification flag this host
-# supports (`--verify` on older systemd, `--validate` on >=257), or nothing.
-# ---------------------------------------------------------------------------
-_verify_supported_flag() {
-  command -v systemd-dissect >/dev/null 2>&1 || return 0
-  local help
-  help="$(systemd-dissect --help 2>&1)" || true
-  if [[ "${help}" == *"--verify"* ]]; then
-    printf '%s' "--verify"
-  elif [[ "${help}" == *"--validate"* ]]; then
-    printf '%s' "--validate"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# _explode_deb <deb> <dest> — standard .deb data-tarball extraction into <dest>
-# (dpkg-deb when present, else ar + tar). Used only by --from-deb; the sysext
-# BUILD itself is the reused build_app_layer verb, never reimplemented here.
-# ---------------------------------------------------------------------------
-_explode_deb() {
-  local deb="$1" dest="$2"
-  mkdir -p "${dest}"
-  if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb -x "${deb}" "${dest}"
-    return 0
-  fi
-  require_cmd ar
-  require_cmd tar
-  local member
-  member="$(ar t "${deb}" | grep -E '^data\.tar' | head -n1)"
-  [[ -n "${member}" ]] || die "_explode_deb: no data.tar member in ${deb}"
-  case "${member}" in
-    *.gz)  ar p "${deb}" "${member}" | tar -xz   -C "${dest}" ;;
-    *.xz)  ar p "${deb}" "${member}" | tar -xJ   -C "${dest}" ;;
-    *.zst) ar p "${deb}" "${member}" | tar --zstd -x -C "${dest}" ;;
-    *)     ar p "${deb}" "${member}" | tar -x    -C "${dest}" ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
-# _stage_for <app> <staging_root> <out_root> — resolve the staging tree for <app>
-# under <staging_root> (prefer <staging_root>/<app>, else <staging_root>); when
-# --from-deb is active, explode the matching .deb into a fresh tree first. Echoes
-# the resolved staging dir on stdout.
-# ---------------------------------------------------------------------------
-_stage_for() {
-  local app="$1" staging_root="$2" out_root="$3"
-  if [[ -n "${FROM_DEB}" ]]; then
-    local tree="${out_root}/staging/${app}"
-    shopt -s nullglob
-    local matches=("${FROM_DEB}/${app}"*.deb)
-    shopt -u nullglob
-    (( ${#matches[@]} > 0 )) || die "_stage_for: no ${app}*.deb in ${FROM_DEB}"
-    log_info "build(${app}): exploding prod .deb ${matches[0]}"
-    _explode_deb "${matches[0]}" "${tree}"
-    printf '%s' "${tree}"
-    return 0
-  fi
-  if [[ -d "${staging_root}/${app}" ]]; then
-    printf '%s' "${staging_root}/${app}"
-  else
-    printf '%s' "${staging_root}"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# _find_staged_binary <staging> — echo the first executable regular file under
-# the staging tree's usr/bin or usr/sbin (the artifact arch_guard reads), or
-# nothing if none is found.
-# ---------------------------------------------------------------------------
-_find_staged_binary() {
-  local staging="$1" d f
-  for d in usr/bin usr/sbin; do
-    [[ -d "${staging}/${d}" ]] || continue
-    for f in "${staging}/${d}"/*; do
-      [[ -f "${f}" && -x "${f}" ]] && { printf '%s' "${f}"; return 0; }
-    done
-  done
-}
-
-# ---------------------------------------------------------------------------
-# phase_arch_check <app> <staging|""> — REFUSE on an artifact↔device arch
-# mismatch. Prefers arch_guard on a real staged binary (content truth). For a
-# prebuilt-raw-only run (no binary to read) it compares host_arch vs device_arch
-# and WARNS on mismatch (the operator explicitly supplied the .raw). DRY_RUN's
-# device probe is logged by arch.sh; the local artifact read still runs.
-# ---------------------------------------------------------------------------
-phase_arch_check() {
-  local app="$1" staging="$2"
-  log_info "[arch-check] ${app}: artifact arch must match device arch"
-  local bin=""
-  [[ -n "${staging}" ]] && bin="$(_find_staged_binary "${staging}")"
-  if [[ -n "${bin}" ]]; then
-    arch_guard "${bin}"          # dies (non-zero) on mismatch — the hard gate
-    return 0
-  fi
-  # No ELF to read (prebuilt .raw): best-effort host-vs-device comparison.
-  local want host
-  want="$(device_arch)"
-  host="$(host_arch)"
-  if [[ "${want}" != "${host}" ]]; then
-    log_warn "[arch-check] ${app}: prebuilt .raw, cannot read inner ELF; build host is ${host} but device is ${want} — ensure the .raw was built for ${want}."
-  else
-    log_success "[arch-check] ${app}: build host ${host} matches device ${want} (prebuilt .raw heuristic)"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# phase_build <app> <staging|""> <out_dir> — produce <app>.raw. With a prebuilt
-# --raw it is used as-is (build skipped). Otherwise the SAME build_app_layer verb
-# prod/dev-push use is invoked (stdout suppressed per the documented mksquashfs
-# stdout caveat; the deterministic <out_dir>/<app>.raw path is referenced). In
-# DRY_RUN with no real staging the build is logged, not executed. Echoes the .raw.
-# ---------------------------------------------------------------------------
-phase_build() {
-  local app="$1" staging="$2" out_dir="$3"
-  local raw_var raw
-  raw_var="${app^^}_RAW"; raw_var="${raw_var//-/_}"
-  raw="${!raw_var:-${RAW_OVERRIDE:-}}"
-
-  if [[ -n "${raw}" ]]; then
-    [[ -f "${raw}" ]] || die "[build] ${app}: --raw '${raw}' not found"
-    log_info "[build] ${app}: using prebuilt raw ${raw} (skipping build_app_layer)"
-    printf '%s' "${raw}"
-    return 0
-  fi
-
-  local artifact="${out_dir}/${app}.raw"
-  if [[ -n "${staging}" && -d "${staging}" ]]; then
-    log_info "[build] ${app}: build_app_layer (sysext) from ${staging} → ${artifact}"
-    # Same caveat as dev-push: mksquashfs can pollute stdout; drive the side
-    # effect and reference the deterministic artifact path, never the capture.
-    build_app_layer "${app}" "${staging}" "${out_dir}" >/dev/null
-    [[ -f "${artifact}" ]] || die "[build] ${app}: build_app_layer did not produce ${artifact}"
-    log_success "[build] ${app}: built ${artifact} ($(du -h "${artifact}" | cut -f1))"
-  elif [[ "${DRY_RUN}" == "1" ]]; then
-    log_info "[build] ${app}: [DRY_RUN] would build_app_layer ${app} <staging> ${out_dir} → ${artifact}"
-  else
-    die "[build] ${app}: no build input — pass --raw <file>, --staging <dir>, or --from-deb <dir>"
-  fi
-  printf '%s' "${artifact}"
-}
-
-# ---------------------------------------------------------------------------
-# phase_verify <app> <raw> — gate the .raw BEFORE any device mutation. Optional
-# systemd-dissect (--verify/--validate) when available; then a squashfs-superblock
-# check (unsquashfs -s, then `file`) as the always-available net. A corrupt/invalid
-# .raw returns non-zero → caller ABORTS before push (device untouched). When the
-# .raw doesn't exist yet (DRY_RUN planned path), the verify is logged, not run.
-# ---------------------------------------------------------------------------
-phase_verify() {
-  local app="$1" raw="$2"
-  if [[ ! -f "${raw}" ]]; then
-    log_info "[verify] ${app}: [DRY_RUN] would systemd-dissect --verify / unsquashfs -s ${raw}"
-    return 0
-  fi
-
-  local flag; flag="$(_verify_supported_flag)"
-  if [[ -n "${flag}" ]]; then
-    log_info "[verify] ${app}: systemd-dissect ${flag} ${raw}"
-    if systemd-dissect "${flag}" "${raw}" >/dev/null 2>&1; then
-      log_success "[verify] ${app}: systemd-dissect ${flag} OK"
-      return 0
-    fi
-    log_error "[verify] ${app}: systemd-dissect ${flag} REJECTED ${raw} — aborting BEFORE push (device untouched)"
-    return 1
-  fi
-
-  # Graceful degrade: systemd-dissect lacks a verify flag (or is absent).
-  log_warn "[verify] ${app}: systemd-dissect verify flag unavailable — using squashfs superblock check"
-  if command -v unsquashfs >/dev/null 2>&1; then
-    log_info "[verify] ${app}: unsquashfs -s ${raw}"
-    if unsquashfs -s "${raw}" >/dev/null 2>&1; then
-      log_success "[verify] ${app}: valid squashfs superblock"
-      return 0
-    fi
-    log_error "[verify] ${app}: NOT a valid squashfs — aborting BEFORE push (device untouched)"
-    return 1
-  fi
-  log_info "[verify] ${app}: file ${raw}"
-  if file -bL "${raw}" | grep -qi 'squashfs'; then
-    log_success "[verify] ${app}: file reports a squashfs filesystem"
-    return 0
-  fi
-  log_error "[verify] ${app}: not a squashfs filesystem — aborting BEFORE push (device untouched)"
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# phase_push <app> <raw> — A/B snapshot then push. First snapshots the live
-# <ext>/<app>.raw → <ext>/<app>-rollback.raw (if present) so a failed deploy can
-# be reverted, then transport_rsync's the new .raw into place atomically
-# (--temp-dir + atomic rename, --checksum for the binary). DRY_RUN logs both.
-# ---------------------------------------------------------------------------
-phase_push() {
-  local app="$1" raw="$2"
-  local dest="${REMOTE_EXT_DIR%/}/${app}.raw"
-  local rollback="${REMOTE_EXT_DIR%/}/${app}-rollback.raw"
-
-  log_info "[push] ${app}: snapshot live ${dest} → ${rollback} (A/B rollback point)"
-  transport_ssh "[ -f '${dest}' ] && cp -f '${dest}' '${rollback}' || echo 'sync-native: no live ${app}.raw to snapshot (first deploy)'"
-
-  log_info "[push] ${app}: ${raw} → ${RESOLVED_TARGET}:${dest} (atomic, --binary)"
-  transport_rsync "${raw}" "${dest}" --binary
-}
-
-# ---------------------------------------------------------------------------
-# phase_refresh_restart — run the reused, byte-identical refresh+restart verb on
-# the device. Returns the remote status WITHOUT tearing down (so the `&&` graceful
-# path is observable and a non-zero status routes into rollback).
-# ---------------------------------------------------------------------------
-phase_refresh_restart() {
-  log_info "[refresh] + [restart] remote: ${REFRESH_RESTART_VERB}"
-  local status=0
-  transport_ssh "${REFRESH_RESTART_VERB}" || status=$?
-  if (( status != 0 )); then
-    log_error "[refresh/restart] FAILED (status ${status}) — 'systemd-sysext refresh' rejected the .raw; the '&&' skipped the restart, so the PREVIOUS extension stays merged and ceralive.service keeps running the OLD version (graceful)."
-  fi
-  return "${status}"
-}
-
-# ---------------------------------------------------------------------------
-# phase_health — post-restart gate. Lets the service settle, then requires
-# `systemctl is-active ceralive.service` == active, plus an optional operator
-# probe (DEV_SYNC_HEALTH_PROBE). Returns non-zero on an unhealthy service. DRY_RUN
-# logs the planned checks and passes.
-# ---------------------------------------------------------------------------
-phase_health() {
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    local probe_note=""
-    [[ -n "${DEV_SYNC_HEALTH_PROBE}" ]] && probe_note="; ssh ${DEV_SYNC_HEALTH_PROBE}"
-    log_info "[health] [DRY_RUN] would sleep ${DEV_SYNC_HEALTH_WAIT}s; ssh systemctl is-active ceralive.service${probe_note}"
-    return 0
-  fi
-
-  log_info "[health] settling ${DEV_SYNC_HEALTH_WAIT}s before probe"
-  sleep "${DEV_SYNC_HEALTH_WAIT}"
-
-  local active=""
-  active="$(transport_ssh "systemctl is-active ceralive.service" 2>/dev/null || true)"
-  active="${active//[$'\r\n']/}"
-  if [[ "${active}" != "active" ]]; then
-    log_error "[health] ceralive.service is '${active:-unknown}' (expected 'active')"
-    return 1
-  fi
-  log_success "[health] ceralive.service is active"
-
-  if [[ -n "${DEV_SYNC_HEALTH_PROBE}" ]]; then
-    log_info "[health] probe: ${DEV_SYNC_HEALTH_PROBE}"
-    if ! transport_ssh "${DEV_SYNC_HEALTH_PROBE}"; then
-      log_error "[health] probe FAILED: ${DEV_SYNC_HEALTH_PROBE}"
-      return 1
-    fi
-    log_success "[health] probe OK"
-  fi
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# phase_rollback <app...> — restore each app's <app>-rollback.raw over <app>.raw
-# and re-run the reused refresh+restart verb so the device returns to the last
-# known-good binary. Runs only when refresh/restart OR the health gate failed.
-# ---------------------------------------------------------------------------
-phase_rollback() {
-  local app dest rollback
-  log_warn "[rollback] restoring last-known-good extension(s) and re-applying"
-  for app in "$@"; do
-    dest="${REMOTE_EXT_DIR%/}/${app}.raw"
-    rollback="${REMOTE_EXT_DIR%/}/${app}-rollback.raw"
-    log_warn "[rollback] ${app}: ${rollback} → ${dest} (if snapshot exists)"
-    transport_ssh "if [ -f '${rollback}' ]; then mv -f '${rollback}' '${dest}'; else echo 'sync-native: no ${app}-rollback.raw — cannot roll back (was this the first deploy?)' >&2; fi"
-  done
-  log_warn "[rollback] re-applying: ${REFRESH_RESTART_VERB}"
-  local status=0
-  transport_ssh "${REFRESH_RESTART_VERB}" || status=$?
-  if (( status != 0 )); then
-    log_error "[rollback] re-apply FAILED (status ${status}) — manual intervention may be required on the device."
-  else
-    log_success "[rollback] device restored to last-known-good and ceralive.service restarted"
-  fi
-  return "${status}"
 }
 
 main() {
