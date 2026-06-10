@@ -72,6 +72,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
 
+# Sourced (not exec'd) so the build path reuses part_field and `verify` reuses
+# do_verify; verify-disk.sh also runs standalone (verify-disk.sh do_verify ...).
+# shellcheck source=lib/verify-disk.sh
+source "${HERE}/verify-disk.sh"
+
 # ---------------------------------------------------------------------------
 # Locations + FROZEN contract constants (docs/partition-contract.md §3).
 # Sizes in MB == MiB (contract line 52). NEVER change without a fleet re-flash.
@@ -87,8 +92,6 @@ INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${V2_DIR}/mkosi/platform/boot/install-boot.s
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
-ROOTFS_MB=4096       # p2/p3 rootfs slots (ext4)
-DATA_FLOOR_MB=2048   # p4 data minimum (ext4, else remainder)
 DEFAULT_TOTAL_MB=16384   # 16 GiB reference medium for `build` / A/B verify
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
@@ -339,72 +342,11 @@ build_disk() {
 }
 
 # ---------------------------------------------------------------------------
-# part_field <img> <num> <First sector|Partition size|Partition name>
-# Pull one field from `sgdisk -i`. Sizes/sectors returned as raw integers (sectors)
-# for "First sector"/"Partition size"; the quoted label for "Partition name".
+# verify_contract — build an A/B + a single-slot test image and ASSERT both
+# against the frozen contract. Image build (build_disk) stays here; the
+# partition/gap/label assertions live in verify-disk.sh do_verify (task 6).
 # ---------------------------------------------------------------------------
-part_field() {
-  local img="$1" num="$2" key="$3" line
-  line="$(sgdisk -i "${num}" "${img}" 2>/dev/null | grep -F "${key}:")" || return 1
-  case "${key}" in
-    "Partition name")
-      sed -E "s/.*: '([^']*)'.*/\1/" <<<"${line}" ;;
-    *)  # "First sector: 32768 (at ...)" / "Partition size: 524288 sectors (...)"
-      sed -E 's/[^0-9]*([0-9]+).*/\1/' <<<"${line}" ;;
-  esac
-}
-
-# part_count <img> — number of partitions in the GPT.
-part_count() { sgdisk --print "$1" 2>/dev/null | awk '/^[[:space:]]+[0-9]+[[:space:]]/{n++} END{print n+0}'; }
-
-# sectors_to_mib <sectors>
-sectors_to_mib() { echo $(( $1 * SECTOR / 1024 / 1024 )); }
-
-# assert_part <img> <num> <expect_label> <expect_mib|min:N>
-assert_part() {
-  local img="$1" num="$2" exp_label="$3" exp_size="$4" label size_sectors size_mib
-  label="$(part_field "${img}" "${num}" 'Partition name')" \
-    || die "partition ${num} missing in ${img}"
-  size_sectors="$(part_field "${img}" "${num}" 'Partition size')"
-  size_mib="$(sectors_to_mib "${size_sectors}")"
-  [[ "${label}" == "${exp_label}" ]] \
-    || die "partition ${num} label '${label}' != expected '${exp_label}' (contract)"
-  if [[ "${exp_size}" == min:* ]]; then
-    local floor="${exp_size#min:}"
-    (( size_mib >= floor )) \
-      || die "partition ${num} (${label}) size ${size_mib} MiB < contract floor ${floor} MiB"
-    printf '  p%s %-9s %6s MiB  (>= %s MiB floor) OK\n' "${num}" "${label}" "${size_mib}" "${floor}"
-  else
-    (( size_mib == exp_size )) \
-      || die "partition ${num} (${label}) size ${size_mib} MiB != contract ${exp_size} MiB"
-    printf '  p%s %-9s %6s MiB  (== contract) OK\n' "${num}" "${label}" "${size_mib}"
-  fi
-}
-
-# assert_no_label <img> <label> — die if any partition carries <label>.
-assert_no_label() {
-  local img="$1" want="$2" n count
-  count="$(part_count "${img}")"
-  for (( n=1; n<=count; n++ )); do
-    [[ "$(part_field "${img}" "${n}" 'Partition name')" != "${want}" ]] \
-      || die "single-slot image MUST NOT contain a '${want}' partition"
-  done
-}
-
-# assert_gap <img> — boot (p1) must start at the 16 MB sector (no GPT entry before).
-assert_gap() {
-  local img="$1" start
-  start="$(part_field "${img}" 1 'First sector')"
-  (( start == BOOT_START_SECTOR )) \
-    || die "boot starts at sector ${start}, expected ${BOOT_START_SECTOR} (16 MB raw gap)"
-  printf '  16 MB raw gap: boot starts at sector %s (== %s MiB, no GPT entry before) OK\n' \
-    "${start}" "${GAP_MB}"
-}
-
-# ---------------------------------------------------------------------------
-# verify — build A/B + single-slot test images and assert against the contract.
-# ---------------------------------------------------------------------------
-do_verify() {
+verify_contract() {
   local tmp; tmp="$(mktemp -d)"
   local ab="${tmp}/ab.img" ss="${tmp}/singleslot.img"
 
@@ -423,14 +365,7 @@ do_verify() {
   echo "--- sgdisk --print ---"
   sgdisk --print "${ab}" 2>/dev/null | sed -n '/Disk /,$p'
   echo
-  echo "--- contract assertions ---"
-  [[ "$(part_count "${ab}")" -eq 4 ]] || die "A/B layout must have exactly 4 partitions"
-  echo "  partition count = 4 (boot + rootfs_a + rootfs_b + data) OK"
-  assert_gap "${ab}"
-  assert_part "${ab}" 1 boot     "${BOOT_MB}"
-  assert_part "${ab}" 2 rootfs_a "${ROOTFS_MB}"
-  assert_part "${ab}" 3 rootfs_b "${ROOTFS_MB}"
-  assert_part "${ab}" 4 data     "min:${DATA_FLOOR_MB}"
+  do_verify "${ab}"
   echo
 
   # --- Slot-swap static check (data survives A/B) ---------------------------
@@ -454,15 +389,7 @@ do_verify() {
   echo "--- sgdisk --print ---"
   sgdisk --print "${ss}" 2>/dev/null | sed -n '/Disk /,$p'
   echo
-  echo "--- contract assertions ---"
-  [[ "$(part_count "${ss}")" -eq 3 ]] || die "single-slot layout must have exactly 3 partitions"
-  echo "  partition count = 3 (boot + rootfs_a + data) OK"
-  assert_gap "${ss}"
-  assert_part "${ss}" 1 boot     "${BOOT_MB}"
-  assert_part "${ss}" 2 rootfs_a "${ROOTFS_MB}"
-  assert_part "${ss}" 3 data     "min:${DATA_FLOOR_MB}"
-  assert_no_label "${ss}" rootfs_b
-  echo "  rootfs_b ABSENT (single-slot fallback honored) OK"
+  do_verify "${ss}"
   echo
 
   rm -rf "${tmp}"
@@ -506,7 +433,7 @@ main() {
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)
-      do_verify
+      verify_contract
       ;;
     -h|--help|"")
       sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
