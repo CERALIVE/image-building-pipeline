@@ -1,2 +1,4 @@
 # Build artifacts emitted by lib/orchestrate.sh — never committed.
 images/
+# Per-board build logs emitted by lib/build-all.sh — runtime only, never committed.
+logs/

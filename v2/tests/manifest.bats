@@ -629,3 +629,81 @@ build_repro_bundle() {
   [ -n "$h1" ]
   [ "$h1" != "$h2" ]
 }
+
+# ===========================================================================
+# 12. Bounded-parallel multi-board runner (Task 12) — lib/build-all.sh.
+#     Two guards:
+#       * REGRESSION: `build --all` under DRY_RUN=1 still resolves the full board
+#         list and exits 0 BEFORE the runner is reached (the preview contract the
+#         runner must not break).
+#       * AGGREGATE + ISOLATION: build-all.sh run directly against a STUB
+#         orchestrator (no real mkosi/network/board) — one board passes, one
+#         fails. The overall run must exit non-zero (failure never masked), yet
+#         the passing board must still complete with its OWN log file (no early
+#         abort, logs not interleaved). A stub keeps this in the UNIT suite.
+# ===========================================================================
+
+@test "t12 parallel: build --all under DRY_RUN=1 exits 0 and prints the resolved board list" {
+  run env DRY_RUN=1 bash "$V2/build" --all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY_RUN"* ]]
+  # every shipped board manifest must appear in the previewed selection
+  local f board
+  for f in "$V2"/manifests/boards/*.yaml; do
+    board="$(basename "$f" .yaml)"
+    [[ "$output" == *"$board"* ]] || { echo "missing board in preview: $board"; false; }
+  done
+}
+
+@test "t12 parallel: build-all.sh fails overall if any board fails, but the passing board still completes (isolated logs)" {
+  local bdir="$BATS_TEST_TMPDIR/boards" ldir="$BATS_TEST_TMPDIR/logs"
+  mkdir -p "$bdir" "$ldir"
+  # Fixture manifests: content is irrelevant — the STUB orchestrator ignores it,
+  # find_manifest only needs the files to exist.
+  : > "$bdir/passboard.yaml"
+  : > "$bdir/failboard.yaml"
+
+  # STUB orchestrator: echoes a marker (so we can prove the log is its OWN output)
+  # and exits non-zero for any board whose name contains 'fail'.
+  local stub="$BATS_TEST_TMPDIR/stub-orchestrate.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+board=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --board)    board="$2"; shift 2 ;;
+    --manifest) shift 2 ;;
+    *)          shift ;;
+  esac
+done
+echo "stub orchestrator ran for board=${board}"
+case "$board" in
+  *fail*) echo "stub: simulating failure for ${board}" >&2; exit 7 ;;
+  *)      exit 0 ;;
+esac
+SH
+  chmod +x "$stub"
+
+  run env ORCHESTRATOR="$stub" BOARDS_DIR="$bdir" LOGS_DIR="$ldir" JOBS=2 \
+    bash "$V2/lib/build-all.sh" passboard failboard
+
+  # A failed board makes the whole run non-zero (aggregate, never swallowed).
+  [ "$status" -ne 0 ]
+  # Summary table reports BOTH outcomes with the real per-board exit code.
+  [[ "$output" == *"passboard"* ]]
+  [[ "$output" == *"failboard"* ]]
+  [[ "$output" == *"FAIL(7)"* ]]
+  [[ "$output" == *"board(s) FAILED"* ]]
+
+  # The passing board completed despite the other's failure: its OWN log exists
+  # and carries the stub's stdout (per-board isolation, not interleaved).
+  local passlog faillog
+  passlog="$(echo "$ldir"/passboard-*.log)"
+  faillog="$(echo "$ldir"/failboard-*.log)"
+  [ -f "$passlog" ]
+  [ -f "$faillog" ]
+  grep -q "stub orchestrator ran for board=passboard" "$passlog"
+  # the failing board's stderr was captured into ITS log, not the passing one
+  grep -q "simulating failure for failboard" "$faillog"
+  ! grep -q "failboard" "$passlog"
+}

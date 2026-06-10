@@ -12,9 +12,10 @@
 #   in those manifests — never hardcoded here (see task 11). This entry only:
 #     1. resolves the requested selection against the manifest directory, and
 #     2. dispatches: a single resolved board execs the orchestrator (task 16);
-#        a multi-board selection is handed to the parallel runner (task 12).
-#        Until task 12 lands, a multi-board selection is only previewed under
-#        DRY_RUN=1 (board list printed, exit 0) and otherwise fails loudly.
+#        a multi-board selection is handed to the bounded-parallel runner
+#        (lib/build-all.sh, task 12), which builds the boards concurrently and
+#        exits non-zero if ANY board fails. DRY_RUN=1 previews a multi-board
+#        selection (board list printed, exit 0) before the runner is reached.
 #
 # Fails loudly: missing arg -> usage; unknown board -> lists available manifests;
 #               unknown board inside --only -> names it and lists available.
@@ -29,6 +30,7 @@ source "${HERE}/lib/common.sh"
 
 BOARDS_DIR="${HERE}/manifests/boards"
 ORCHESTRATOR="${HERE}/lib/orchestrate.sh" # provided by task 16
+BUILD_ALL="${HERE}/lib/build-all.sh"      # bounded-parallel multi-board runner (task 12)
 
 usage() {
   cat >&2 <<EOF
@@ -41,8 +43,10 @@ Board definitions are read from manifests under:
   ${BOARDS_DIR}/
 
 A single resolved board execs the orchestrator. A multi-board selection is
-handed to the parallel runner (task 12); until then it is preview-only under
-DRY_RUN=1 (the resolved board list is printed and the run exits 0).
+handed to the bounded-parallel runner (lib/build-all.sh): boards build
+concurrently (bounded by JOBS), each to its own log under v2/logs/, and the run
+exits non-zero if ANY board fails. DRY_RUN=1 previews the resolved board list
+(printed, exit 0) before the runner is reached.
 EOF
 }
 
@@ -99,9 +103,11 @@ dispatch_single() {
   exec "${ORCHESTRATOR}" --board "${board}" --manifest "${manifest}" "$@"
 }
 
-# Multi-board dispatch. The parallel runner lands in task 12; until then a
-# multi-board selection is preview-only under DRY_RUN=1 (print the resolved list,
-# exit 0) and otherwise fails loudly rather than silently building only one.
+# Multi-board dispatch. Resolve every board's manifest (fail loud on any miss),
+# then hand the selection to the bounded-parallel runner (build-all.sh, task 12),
+# which builds the boards concurrently — one orchestrate.sh per board, each to its
+# own log — and exits non-zero if ANY board fails. DRY_RUN=1 still short-circuits
+# to a preview here (print the resolved list, exit 0) BEFORE reaching the runner.
 dispatch_multi() {
   local -a boards=("$@")
 
@@ -109,11 +115,29 @@ dispatch_multi() {
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     log_info "[DRY_RUN] multi-board selection (${#boards[@]}): ${boards[*]}"
-    log_info "[DRY_RUN] parallel orchestration deferred to task 12; board list resolved, exiting 0"
+    log_info "[DRY_RUN] parallel orchestration preview only; board list resolved, exiting 0"
     exit 0
   fi
 
-  die "multi-board build needs the parallel runner (task 12), not yet available; re-run with DRY_RUN=1 to preview the resolved board list: ${boards[*]}"
+  # Validate each board resolves to a manifest before launching — the runner
+  # re-resolves them, but failing here keeps the loud, named error in one place.
+  local b
+  for b in "${boards[@]}"; do
+    if ! find_manifest "${b}" >/dev/null; then
+      log_error "unknown board: '${b}'"
+      list_available
+      exit 1
+    fi
+  done
+
+  if [[ ! -x "${BUILD_ALL}" ]]; then
+    die "parallel runner not executable at ${BUILD_ALL}"
+  fi
+
+  log_info "delegating ${#boards[@]} boards to the parallel runner: ${BUILD_ALL}"
+  # exec so the runner's aggregate exit status (non-zero if ANY board fails)
+  # propagates as this command's exit status.
+  exec "${BUILD_ALL}" "${boards[@]}"
 }
 
 main() {
