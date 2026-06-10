@@ -328,6 +328,11 @@ These are the **same gate** as kiosk Tasks 26/27/28. The recipe and contracts he
 are the authoritative spec; the inert scaffold (§4.2) is wired into the build only
 **after** the gate clears.
 
+The ready-to-run runbook for clearing this gate on a real board is
+`v2/docs/cog-display-hw-checklist.md` (build+sign the real closure → stage →
+render correctness → touch → disable → sign-off). Everything provable WITHOUT
+hardware is already green and recorded in `test-results/task-39-cog-qa.txt`.
+
 ---
 
 ## 8. Relationship to the cage + Chromium kiosk stack
@@ -366,6 +371,7 @@ not a replacement decision made here:
 
 | Document | Scope |
 |---|---|
+| `v2/docs/cog-display-hw-checklist.md` | ready-to-run on-hardware render-QA runbook (clears the §7 gate) |
 | `v2/docs/kiosk-display.md` | default cage + Chromium kiosk chassis (units, packages, OOM, DRM notes) |
 | `v2/docs/addon-sysext-refresh.md` | sysext refresh → service restart protocol for add-ons |
 | `v2/mkosi/LAYER-MAP.md` | layer boundaries — why GPU userspace is Platform, apps are Layer 4 |

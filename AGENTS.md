@@ -32,6 +32,7 @@ image-building-pipeline/
 │   │       └── sysext.sh     # sysext build lib (extract → prune → squashfs)
 │   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
 │   │   │                     #   size-notes.md, cog-display-addon.md,
+│   │   │                     #   cog-display-hw-checklist.md,
 │   │   │                     #   addon-sysext-refresh.md, deferred items
 │   │   └── fast-reload.md    # dev-sync live-reload loop
 │   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
@@ -56,6 +57,7 @@ image-building-pipeline/
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`v2/docs/size-notes.md`](v2/docs/size-notes.md) — locale strip, firmware audit, size-gate |
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
+| **Cog on-hardware render QA checklist** | [`v2/docs/cog-display-hw-checklist.md`](v2/docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
