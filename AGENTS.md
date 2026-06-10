@@ -46,11 +46,21 @@ image-building-pipeline/
 
 **Build entry point** [EXISTS]
 ```bash
-./v2/build <board>          # e.g. ./v2/build rock-5b-plus
-DRY_RUN=1 ./v2/build <board>   # resolve + fetch plan only
+./v2/build <board>                       # single board, e.g. ./v2/build rock-5b-plus
+./v2/build --all                         # every manifest in manifests/boards/
+./v2/build --only rock-5b-plus,x86-minipc  # validated subset
+DRY_RUN=1 ./v2/build <board>             # resolve + fetch plan only
 ```
 Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
 `.raucb` A/B RAUC OTA packages. See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
+
+Dispatch is by the **count of resolved boards**, not the flag: a single resolved
+board (`<board>`, or `--only`/`--all` that resolves to exactly one) execs the
+orchestrator as today; a multi-board selection is handed to the parallel runner
+(task 12). Until that lands, a multi-board selection is preview-only under
+`DRY_RUN=1` (prints the resolved board list, exits 0) and otherwise fails loudly.
+An unknown board in `--only` exits non-zero, names the offender, and lists the
+available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash

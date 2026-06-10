@@ -3,15 +3,21 @@
 # build — manifest-dispatch entry point for the CeraLive v2 image pipeline.
 #
 # Contract:
-#   build <board>
+#   build <board>            build a single board (default; unchanged behaviour)
+#   build --all              build every manifest in manifests/boards/
+#   build --only b1,b2       build the named subset (each must have a manifest)
 #
 #   <board> must correspond to a manifest in manifests/boards/<board>.<ext>.
 #   Board data (kernel branch, partition sizing, package sets, …) lives ENTIRELY
 #   in those manifests — never hardcoded here (see task 11). This entry only:
-#     1. validates the requested board against the manifest directory, and
-#     2. delegates to the orchestrator (implemented in task 16).
+#     1. resolves the requested selection against the manifest directory, and
+#     2. dispatches: a single resolved board execs the orchestrator (task 16);
+#        a multi-board selection is handed to the parallel runner (task 12).
+#        Until task 12 lands, a multi-board selection is only previewed under
+#        DRY_RUN=1 (board list printed, exit 0) and otherwise fails loudly.
 #
-# Fails loudly: missing arg -> usage; unknown board -> lists available manifests.
+# Fails loudly: missing arg -> usage; unknown board -> lists available manifests;
+#               unknown board inside --only -> names it and lists available.
 #
 # shellcheck shell=bash
 
@@ -26,11 +32,17 @@ ORCHESTRATOR="${HERE}/lib/orchestrate.sh" # provided by task 16
 
 usage() {
   cat >&2 <<EOF
-Usage: build <board>
+Usage:
+  build <board>          build a single board
+  build --all            build every board manifest
+  build --only b1,b2     build the named subset (comma-separated)
 
-Builds the CeraLive device image for <board>.
 Board definitions are read from manifests under:
   ${BOARDS_DIR}/
+
+A single resolved board execs the orchestrator. A multi-board selection is
+handed to the parallel runner (task 12); until then it is preview-only under
+DRY_RUN=1 (the resolved board list is printed and the run exits 0).
 EOF
 }
 
@@ -56,29 +68,24 @@ list_available() {
   log_error "available boards: ${AVAILABLE_BOARDS[*]}"
 }
 
-main() {
-  if [[ $# -lt 1 || -z "${1:-}" ]]; then
-    usage
-    die "missing required argument: <board>"
-  fi
-
-  local board="$1"
-  shift
-
-  local manifest=""
-  local ext
+# Resolve a board name to its manifest path on stdout (first matching extension
+# wins). Returns non-zero with no output when no manifest exists for the board.
+find_manifest() {
+  local board="$1" ext
   for ext in yaml yml toml conf; do
     if [[ -f "${BOARDS_DIR}/${board}.${ext}" ]]; then
-      manifest="${BOARDS_DIR}/${board}.${ext}"
-      break
+      printf '%s\n' "${BOARDS_DIR}/${board}.${ext}"
+      return 0
     fi
   done
+  return 1
+}
 
-  if [[ -z "${manifest}" ]]; then
-    log_error "unknown board: '${board}'"
-    list_available
-    exit 1
-  fi
+# Single-board dispatch: exec the orchestrator (task 16) exactly as before. Any
+# trailing args (after the positional board) are forwarded verbatim.
+dispatch_single() {
+  local board="$1" manifest="$2"
+  shift 2
 
   log_info "selected board '${board}' -> ${manifest}"
 
@@ -90,6 +97,137 @@ main() {
 
   log_info "delegating to orchestrator for board '${board}'"
   exec "${ORCHESTRATOR}" --board "${board}" --manifest "${manifest}" "$@"
+}
+
+# Multi-board dispatch. The parallel runner lands in task 12; until then a
+# multi-board selection is preview-only under DRY_RUN=1 (print the resolved list,
+# exit 0) and otherwise fails loudly rather than silently building only one.
+dispatch_multi() {
+  local -a boards=("$@")
+
+  log_info "resolved ${#boards[@]} boards: ${boards[*]}"
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    log_info "[DRY_RUN] multi-board selection (${#boards[@]}): ${boards[*]}"
+    log_info "[DRY_RUN] parallel orchestration deferred to task 12; board list resolved, exiting 0"
+    exit 0
+  fi
+
+  die "multi-board build needs the parallel runner (task 12), not yet available; re-run with DRY_RUN=1 to preview the resolved board list: ${boards[*]}"
+}
+
+main() {
+  local mode="single"
+  local only_csv=""
+  local board=""
+  local -a passthrough=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)
+        mode="all"
+        shift
+        ;;
+      --only)
+        mode="only"
+        only_csv="${2:-}"
+        if [[ -z "${only_csv}" ]]; then
+          usage
+          die "--only requires a comma-separated board list (e.g. --only rock-5b-plus,x86-minipc)"
+        fi
+        shift 2
+        ;;
+      --only=*)
+        mode="only"
+        only_csv="${1#--only=}"
+        if [[ -z "${only_csv}" ]]; then
+          usage
+          die "--only requires a comma-separated board list (e.g. --only rock-5b-plus,x86-minipc)"
+        fi
+        shift
+        ;;
+      --)
+        shift
+        passthrough+=("$@")
+        break
+        ;;
+      -*)
+        usage
+        die "unknown option: '$1'"
+        ;;
+      *)
+        if [[ "${mode}" != "single" ]]; then
+          usage
+          die "positional board '$1' cannot be combined with --${mode}"
+        fi
+        if [[ -n "${board}" ]]; then
+          usage
+          die "only one positional <board> is allowed (got '${board}' and '$1'); use --all or --only for multiple"
+        fi
+        board="$1"
+        shift
+        ;;
+    esac
+  done
+
+  # Resolve the requested selection into SELECTED_BOARDS.
+  local -a SELECTED_BOARDS=()
+  case "${mode}" in
+    single)
+      if [[ -z "${board}" ]]; then
+        usage
+        die "missing required argument: <board> (or use --all / --only b1,b2)"
+      fi
+      SELECTED_BOARDS=("${board}")
+      ;;
+    all)
+      collect_boards
+      if [[ ${#AVAILABLE_BOARDS[@]} -eq 0 ]]; then
+        die "--all requested but no board manifests present in ${BOARDS_DIR}/"
+      fi
+      SELECTED_BOARDS=("${AVAILABLE_BOARDS[@]}")
+      log_info "--all resolved to ${#SELECTED_BOARDS[@]} boards: ${SELECTED_BOARDS[*]}"
+      ;;
+    only)
+      local -a requested=() invalid=()
+      local b
+      IFS=',' read -r -a requested <<< "${only_csv}"
+      for b in "${requested[@]}"; do
+        b="${b#"${b%%[![:space:]]*}"}"   # ltrim
+        b="${b%"${b##*[![:space:]]}"}"   # rtrim
+        [[ -n "${b}" ]] || continue
+        if find_manifest "${b}" >/dev/null; then
+          SELECTED_BOARDS+=("${b}")
+        else
+          invalid+=("${b}")
+        fi
+      done
+      if [[ ${#invalid[@]} -gt 0 ]]; then
+        log_error "--only: unknown board(s): ${invalid[*]}"
+        list_available
+        exit 1
+      fi
+      if [[ ${#SELECTED_BOARDS[@]} -eq 0 ]]; then
+        usage
+        die "--only resolved to no boards (empty selection)"
+      fi
+      ;;
+  esac
+
+  # Dispatch on the COUNT of resolved boards: one board still execs the
+  # orchestrator exactly as before; more than one goes to the parallel runner.
+  if [[ ${#SELECTED_BOARDS[@]} -eq 1 ]]; then
+    local one="${SELECTED_BOARDS[0]}"
+    local manifest
+    if ! manifest="$(find_manifest "${one}")"; then
+      log_error "unknown board: '${one}'"
+      list_available
+      exit 1
+    fi
+    dispatch_single "${one}" "${manifest}" "${passthrough[@]}"
+  else
+    dispatch_multi "${SELECTED_BOARDS[@]}"
+  fi
 }
 
 main "$@"

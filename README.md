@@ -81,9 +81,20 @@ cd image-building-pipeline
 ./v2/build rock-5b-plus
 ./v2/build orange-pi-5-plus
 
+# Build every board manifest, or a named subset
+./v2/build --all
+./v2/build --only rock-5b-plus,x86-minipc
+
 # Dry run (resolve + fetch plan only, no image written)
 DRY_RUN=1 ./v2/build rock-5b-plus
+DRY_RUN=1 ./v2/build --all                 # preview the resolved board list
 ```
+
+A single resolved board execs the orchestrator as usual. A multi-board
+selection (`--all`, or `--only` with 2+ boards) is handed to the parallel
+runner; until that lands it is preview-only under `DRY_RUN=1` (the resolved
+board list is printed and the run exits 0). An unknown board in `--only`
+fails loudly: it names the offender and lists the available boards.
 
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
