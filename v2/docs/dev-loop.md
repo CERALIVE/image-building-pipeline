@@ -56,6 +56,122 @@ docker build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 
 ---
 
+## Cross-host build
+
+The **container path is the canonical build** and is meant to run the same on
+any host with a working container runtime + arm64 binfmt. The deep portability
+analysis (loop-device reality, SELinux, binfmt survival) lives in
+[`host-support.md`](host-support.md); this section is the **command crib** plus
+the **sha256 parity check** you run to prove your host resolves the *same build*
+CI does.
+
+### What "parity" means here
+
+CI (`v2-ci.yml` → `build-matrix`) can't run the real privileged `mkosi` build —
+it runs `DRY_RUN=1`, which resolves the manifest and emits the **mkosi build
+plan** without touching the network or a board. So the cross-host gate hashes the
+**normalized build plan** (absolute checkout path stripped to `<REPO>`), not a
+real image:
+
+> Same normalized-plan sha256 on two hosts ⇒ identical `mkosi` invocation ⇒,
+> combined with **T14's deterministic builds** (`SOURCE_DATE_EPOCH`-clamped,
+> bit-identical `.raucb`), a **bit-identical image**.
+
+CI proves the *plan* half on its one runner (Linux/x86_64) and asserts the digest
+is reproducible across a rebuild; T14 proves the *determinism* half with a real
+double-build. Neither half is claimed beyond what is actually reproduced.
+
+Reproduce the CI sidecar on your host (run from `image-building-pipeline/`):
+
+```bash
+repo="$PWD"
+DRY_RUN=1 ./v2/build rock-5b-plus 2>&1 \
+  | grep -F 'would build with:' \
+  | sed -E 's/^.*would build with: //' \
+  | sed "s#${repo}#<REPO>#g" \
+  | sha256sum
+# Compare this digest to the host-<uname>.sha256 artifact CI uploaded
+# (job: build dry-run + host sha256). Equal ⇒ your host resolves CI's plan.
+```
+
+### Per-host commands
+
+| Host | Build mode | CI-verified? | One-liner (after runtime + binfmt set up) |
+|---|---|---|---|
+| **Ubuntu/Debian** | container *(or `--native`)* | ✅ **yes** (CI runner) | `./v2/build rock-5b-plus` |
+| **Fedora/RHEL** | container (Podman/Docker) | ⚠️ documented, **not CI-verified** | `./v2/build rock-5b-plus` |
+| **Arch Linux** | container (Docker/Podman) | ⚠️ documented, **not CI-verified**¹ | `./v2/build rock-5b-plus` |
+| **macOS Apple Silicon** | container only | ⚠️ documented, **not CI-verified** | `./v2/build rock-5b-plus` |
+| **WSL2** | container *(native possible)* | ⚠️ documented, **not CI-verified** | `./v2/build rock-5b-plus` |
+
+¹ Arch was the **live spike host** for the loop-free assembly proof in T16
+(`host-support.md`), so its assembly primitives are exercised — but no CI runner
+re-runs them on every push, so it is marked *not CI-verified* for the build-plan
+gate, like the other non-Ubuntu hosts.
+
+**Ubuntu/Debian — full container build (CI-proven).**
+```bash
+sudo apt-get install -y qemu-user-static binfmt-support   # arm64 emulation, F-flag
+grep -A2 '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64  # confirm 'F' (fix-binary)
+./v2/build rock-5b-plus
+```
+
+**Fedora/RHEL — Podman path.** SELinux relabels the repo bind-mount; if you hit
+`Permission denied` on `/work`, see the SELinux workaround in the Fedora/RHEL
+section of [`host-support.md`](host-support.md).
+```bash
+sudo dnf install -y qemu-user-static podman   # qemu-user-static pulls binfmt
+sudo systemctl restart systemd-binfmt
+./v2/build rock-5b-plus
+```
+> *Documented, not CI-verified* — same kernel-feature surface as Ubuntu/Arch, but
+> no Fedora runner exists. The SELinux caveat is the one thing to watch.
+
+**Arch Linux — Docker/Podman path.**
+```bash
+sudo pacman -S docker                               # or: podman
+sudo pacman -S qemu-user-static qemu-user-static-binfmt
+sudo systemctl restart systemd-binfmt
+grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64    # must contain 'F'
+./v2/build rock-5b-plus
+```
+> *Documented, not CI-verified* — assembly primitives were live-tested here in T16
+> (loop-free, privileged **and** unprivileged), but no Arch runner gates pushes.
+> Ensure the binfmt handler carries the **F** flag or it won't fire in-container.
+
+**macOS Apple Silicon — Docker Desktop required, container-only.** Per T16, the
+Stage-4 disk-assembly is **loop-free and rootless** (`systemd-repart --offline`,
+`mkfs.ext4 -d`, `mcopy`, `dd`), so the well-known *"Docker Desktop doesn't expose
+`/dev/loopNpX`"* limitation **does not block CeraLive assembly**. arm64 is the
+*native* VM arch, so the default board builds run with **no qemu emulation**.
+```bash
+# Docker Desktop ≥ 4.x, VirtioFS on, repo's parent in shared paths, ≥4 GB/≥20 GB VM.
+./v2/build rock-5b-plus
+```
+> *Documented, not CI-verified* — **no macOS host in the dev/CI environment.**
+> Expected to work (native arm64 + loop-free assembly) but **not reproduced on
+> hardware**; treat as container-only and verify the sidecar digest by hand.
+> There is **no `--native` path** (macOS is not Linux). See the macOS section of
+> [`host-support.md`](host-support.md).
+
+**WSL2 — container path works; kernel requirement.** Per T16, the WSL2 kernel
+ships `/dev/loop0..7` + overlay/mount built-in since **≥ 5.15** (e.g.
+`5.15.90.1-microsoft-standard-WSL2`), so it is much closer to native Linux than
+macOS. Use **WSL 2** (`wsl --set-default-version 2`), **kernel ≥ 5.15**.
+```bash
+# Container build (x86 Windows host emulating arm64 via the qemu F-flag handler):
+sudo apt-get install -y qemu-user-static binfmt-support
+grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64   # confirm 'F'
+./v2/build rock-5b-plus
+```
+> *Documented, not CI-verified* — **no Windows/WSL2 host in the environment.** The
+> one real gotcha is the arm64 binfmt handler being wiped by
+> `systemd-binfmt`/WSLInterop; keep it alive (`protectBinfmt=false` in
+> `/etc/wsl.conf`, or a `zz-qemu-aarch64.conf` pinned last). Full caveat: the
+> WSL2 section of [`host-support.md`](host-support.md).
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
