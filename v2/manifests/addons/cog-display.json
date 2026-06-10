@@ -15,6 +15,28 @@
     "sizeDownload": 57671680,
     "sizeInstalled": 125829120
   },
+  "boardVariants": {
+    "rock-5b-plus": {
+      "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-rock-5b-plus-{os_version}.raw",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-rock-5b-plus-{os_version}.raw.sig",
+      "sizeDownload": 57671680,
+      "sizeInstalled": 125829120
+    },
+    "orange-pi-5-plus": {
+      "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-orange-pi-5-plus-{os_version}.raw",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-orange-pi-5-plus-{os_version}.raw.sig",
+      "sizeDownload": 57671680,
+      "sizeInstalled": 125829120
+    }
+  },
+  "conditions": {
+    "requires_display": true,
+    "requires_gpu_userspace": true,
+    "min_os_version": "12",
+    "boardAllowlist": ["rock-5b-plus", "orange-pi-5-plus"]
+  },
   "provides": [
     "/usr/bin/cog",
     "/usr/bin/cage",

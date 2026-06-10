@@ -73,41 +73,42 @@
       "uniqueItems": true
     },
     "artifact": {
-      "description": "Where the sysext .raw is fetched from and how its integrity is checked. The URL is templated by OS version so one descriptor can serve multiple os-release lines; the payload is verified by sha256 AND a detached GPG signature reference before install.",
+      "description": "Default/template artifact for the sysext .raw — how it is fetched and integrity-checked. The URL is templated by OS version (and may carry a '{board}' placeholder) so one descriptor can serve multiple os-release lines and boards; the payload is verified by sha256 AND a detached GPG signature reference before install. Per-board overrides live in boardVariants[] when boards ship genuinely different .raw artifacts.",
+      "$ref": "#/$defs/artifact"
+    },
+    "boardVariants": {
+      "description": "Per-board artifact overrides. Optional. Keys are board_id values (the manifests/boards/<id>.yaml stem). Each value is a full artifact object that REPLACES the top-level artifact when installing on that board — used when boards ship genuinely different .raw payloads (distinct urlTemplate, sha256, sizes). The top-level artifact stays the default/template for any board without an explicit variant. A board named in conditions.boardAllowlist SHOULD have a matching variant here so the manager fetches the right per-board .raw.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "urlTemplate",
-        "sha256",
-        "gpgSigRef",
-        "sizeDownload",
-        "sizeInstalled"
-      ],
+      "minProperties": 1,
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9-]*$": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "conditions": {
+      "description": "Optional capability gate the CeraUI add-on manager evaluates BEFORE any download/merge. Conditions are AND-combined; an absent block means the add-on is always offerable. When ANY condition is unmet the manager MUST NOT crash and MUST NOT install/enable: it leaves the add-on inactive, sets the runtime phase to 'unsupported' (capability can never appear on this hardware/board) or 'pending' (capability may appear later, e.g. an OS upgrade), and records a machine-readable lastError. Canonical lastError reasons: requires_display unmet -> 'addon_requires_display'; requires_gpu_userspace unmet -> 'addon_requires_gpu_userspace'; running board not in boardAllowlist -> 'addon_board_not_allowed'; host VERSION_ID < min_os_version -> 'addon_os_too_old'. These reasons are device-local runtime state (CeraUI AddonStateSchema), not baked into the image.",
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "urlTemplate": {
-          "description": "HTTPS URL template for the .raw, parameterised by OS version. MUST contain the literal '{os_version}' placeholder (expanded from compatibleOsVersions at fetch time).",
+        "requires_display": {
+          "description": "When true the add-on only activates on boards with an HDMI/display output (a usable DRM/framebuffer). Boards without display output -> phase 'unsupported', lastError 'addon_requires_display'.",
+          "type": "boolean"
+        },
+        "requires_gpu_userspace": {
+          "description": "When true the add-on needs the Mali GPU userspace (libmali, Platform-layer) for EGL/GBM rendering. Boards/images lacking it -> phase 'unsupported', lastError 'addon_requires_gpu_userspace'.",
+          "type": "boolean"
+        },
+        "min_os_version": {
+          "description": "Minimum host OS VERSION_ID required (numeric VERSION_ID compare). A host below this -> phase 'pending', lastError 'addon_os_too_old' (an OS upgrade can later satisfy it). Bare VERSION_ID token (e.g. '12' for bookworm).",
           "type": "string",
-          "pattern": "^https://[^\\s]*\\{os_version\\}[^\\s]*$"
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$"
         },
-        "sha256": {
-          "description": "Lowercase hex SHA-256 of the resolved .raw artifact (64 hex chars). Verified post-download before install.",
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "gpgSigRef": {
-          "description": "Reference (URL or relative path) to the detached GPG signature of the artifact, verified against the image-baked CeraLive signing key. Non-empty.",
-          "type": "string",
-          "minLength": 1
-        },
-        "sizeDownload": {
-          "description": "Compressed download size of the .raw in bytes (drives the CeraUI progress/size estimate). Positive integer.",
-          "type": "integer",
-          "minimum": 1
-        },
-        "sizeInstalled": {
-          "description": "Installed (merged) size in bytes the extension occupies once active. Positive integer; used for the size/space pre-check.",
-          "type": "integer",
-          "minimum": 1
+        "boardAllowlist": {
+          "description": "Explicit list of board_id values this add-on may activate on. When present the running board MUST be a member; any other board -> phase 'unsupported', lastError 'addon_board_not_allowed'. Board ids are lowercase alphanumeric with hyphens (manifests/boards/<id>.yaml stem).",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "minItems": 1,
+          "uniqueItems": true
         }
       }
     },
@@ -173,6 +174,47 @@
         },
         "timeout": {
           "description": "Probe timeout in seconds. Positive integer; defaults to a manager-side value when omitted.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "description": "A fetchable, integrity-checked sysext .raw: an HTTPS URL templated by OS version, plus the sha256 + detached GPG signature reference verified before install, and the download/installed sizes used for the space pre-check. Shared by the top-level artifact (default/template) and each boardVariants[] entry (per-board override).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "urlTemplate",
+        "sha256",
+        "gpgSigRef",
+        "sizeDownload",
+        "sizeInstalled"
+      ],
+      "properties": {
+        "urlTemplate": {
+          "description": "HTTPS URL template for the .raw, parameterised by OS version. MUST contain the literal '{os_version}' placeholder (expanded from compatibleOsVersions at fetch time); may also carry a '{board}' placeholder for the default/template artifact.",
+          "type": "string",
+          "pattern": "^https://[^\\s]*\\{os_version\\}[^\\s]*$"
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the resolved .raw artifact (64 hex chars). Verified post-download before install.",
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "gpgSigRef": {
+          "description": "Reference (URL or relative path) to the detached GPG signature of the artifact, verified against the image-baked CeraLive signing key. Non-empty.",
+          "type": "string",
+          "minLength": 1
+        },
+        "sizeDownload": {
+          "description": "Compressed download size of the .raw in bytes (drives the CeraUI progress/size estimate). Positive integer.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sizeInstalled": {
+          "description": "Installed (merged) size in bytes the extension occupies once active. Positive integer; used for the size/space pre-check.",
           "type": "integer",
           "minimum": 1
         }
