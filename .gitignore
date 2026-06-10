@@ -23,3 +23,4 @@ Thumbs.db
 
 # Repo-local test/QA evidence (coverage, diffs, traces) — never committed
 test-results/
+test-results-*.txt
