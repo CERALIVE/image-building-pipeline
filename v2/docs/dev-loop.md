@@ -4,6 +4,58 @@ Push a code change to a running device in **under 2 minutes**, without reflashin
 
 ---
 
+## Full image build (canonical containerized path)
+
+A full device image is built with:
+
+```bash
+./v2/build <board>            # e.g. ./v2/build rock-5b-plus
+DRY_RUN=1 ./v2/build <board>  # resolve + fetch + builder plan only (no build)
+```
+
+**The build runs `mkosi` inside a pinned container by default — this is the
+canonical path.** You do **not** need `mkosi`, a Debian host, or the
+`debian-archive-keyring` installed: only a container runtime.
+
+| Aspect | Behaviour |
+|---|---|
+| Default builder | Containerized — runs in a pinned **Debian trixie** image |
+| Container runtime | Auto-detected: **Docker**, else **Podman** (either works, same plan) |
+| Builder image | Baked from [`v2/ci/Dockerfile`](../ci/Dockerfile): **mkosi 26** (the `v2/.mkosi-version` pin) on trixie's **Python 3.13** (satisfies mkosi 26's ≥ 3.12 floor). Auto-built (`ceralive-mkosi-builder:26`) on first use when absent. |
+| Cross-arch | arm64 builds ride the host kernel's `qemu-user-static` binfmt (F-flag); the image bakes `qemu-user-static` + `binfmt-support`. |
+| No runtime present | Build stops with a clear, actionable error (install docker/podman, or use `--native`) — never a stack trace. |
+
+### Native build (opt-in)
+
+To build with the **host's** `mkosi` instead of the container (e.g. a Debian host
+that already has mkosi ≥ 26 and the keyring):
+
+```bash
+./v2/build <board> --native        # flag form
+MKOSI_NATIVE=1 ./v2/build <board>  # env form (equivalent)
+```
+
+Native requires `mkosi` (≥ the `.mkosi-version` pin, needs Python ≥ 3.12) and
+`/usr/share/keyrings/debian-archive-keyring.gpg` on the host.
+
+### Overriding the builder image
+
+Pin your own builder image (registry or locally-built) — it is used verbatim and
+never auto-built; it **must** bake `mkosi 26`:
+
+```bash
+MKOSI_BUILDER_IMAGE=myregistry/ceralive-mkosi:26 ./v2/build <board>
+```
+
+Rebuild the canonical image by hand if needed:
+
+```bash
+docker build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
+# or: podman build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
+```
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
