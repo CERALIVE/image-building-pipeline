@@ -35,19 +35,12 @@ dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
 iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
 ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
 
-# --- Audio --------------------------------------------------------------------
-alsa-utils               # low-level ALSA control for capture/monitor
-pulseaudio               # sound server; enabled service in ceraui-base.conf. NOTE: dropped by
-                         # v1 customize-image.sh (oversight) — ceraui-base.conf is canonical and
-                         # ENABLED_SERVICES lists pulseaudio, so it is restored here.
-
-# --- USB / hardware introspection ---------------------------------------------
-usbutils                 # lsusb — USB device enumeration (capture cards, modems)
-pciutils                 # lspci
-lsof                     # open-fd inspection for diagnostics
-i2c-tools                # i2c bus access (board sensors/EEPROM)
-can-utils                # CAN bus tooling (present in v1 shipped set)
-usb-modeswitch           # flips USB modems out of storage mode into modem mode
+# --- USB modem bring-up -------------------------------------------------------
+usb-modeswitch           # flips USB modems out of storage mode into modem mode —
+                         # required for USB LTE/5G modem enumeration (core datapath).
+                         # NOTE: audio (alsa-utils/pulseaudio) and the rest of the USB/HW
+                         # introspection set (usbutils/pciutils/lsof/i2c-tools/can-utils)
+                         # moved to the debug add-on (T17) — see removed.md.
 
 # --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
 gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing
@@ -80,24 +73,20 @@ chrony                   # NTP client; enabled service in customize-image.sh:521
 # --- CPU / power --------------------------------------------------------------
 cpufrequtils             # CPU governor control for sustained encode performance
 
-# --- Net glue / diagnostics ---------------------------------------------------
-socat                    # socket relay used by streaming/control glue
-netcat-openbsd           # nc — connectivity probing
+# --- Net glue (runtime-critical) ----------------------------------------------
 rsync                    # file sync for dev-push/dev-sync live-reload loop (v2/docs/dev-loop.md)
-iperf3                   # throughput testing of bonded links (field diagnostics)
-curl                     # http client (CeraUI/update flows)
-wget                     # http downloader
+curl                     # http client — CeraUI/update flows + on-device `curl localhost`
+                         # health probe (backend observability.ts). Runtime-critical: KEPT.
+wget                     # http downloader (update/fetch infra)
+                         # NOTE: net DIAGNOSTICS (socat/netcat-openbsd/iperf3) moved to the
+                         # debug add-on (T17) — verified unused by CeraUI/streaming runtime;
+                         # the chaos harness (tools/chaos) ships its own. See removed.md.
 
-# --- Operational monitoring (field-deployed, often metered links) -------------
-htop                     # interactive process monitor (canonical ceraui-base.conf base pkg)
-iotop                    # IO monitor for storage-bound encode/record diagnostics
-nethogs                  # per-process bandwidth monitor (debug link saturation)
-vnstat                   # cumulative traffic accounting — data-cap awareness on LTE modems
-
-# --- Editor (operator convenience) --------------------------------------------
-nano                     # minimal editor for on-box config (canonical base pkg)
+# --- Console (HDMI readability at boot) ---------------------------------------
 kbd                      # setfont — set console font at boot for HDMI readability at any resolution
 fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon
+                         # NOTE: operational monitoring (htop/iotop/nethogs/vnstat) and the
+                         # nano editor moved to the debug add-on (T17) — see removed.md.
 
 # --- OS-update + SRT transport infra (Stage 2; RUNTIME layer, arch-independent) -
 # Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App
