@@ -72,12 +72,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
 
+# Sourced (not exec'd) so the build path reuses part_field and `verify` reuses
+# do_verify; verify-disk.sh also runs standalone (verify-disk.sh do_verify ...).
+# shellcheck source=lib/verify-disk.sh
+source "${HERE}/verify-disk.sh"
+
 # ---------------------------------------------------------------------------
 # Locations + FROZEN contract constants (docs/partition-contract.md §3).
 # Sizes in MB == MiB (contract line 52). NEVER change without a fleet re-flash.
 # ---------------------------------------------------------------------------
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 REPART_DIR="${REPART_DIR:-${V2_DIR}/mkosi/repart}"
+
+# Reproducible builds (task 14): clamp ext4 superblock/inode times to one epoch
+# (mke2fs honours SOURCE_DATE_EPOCH) and feed mkfs.ext4 a STABLE filesystem UUID +
+# dir-hash seed so the rootfs_a image is bit-identical across rebuilds. Inherited
+# from the orchestrator; resolved here too for a standalone assemble-disk.sh call.
+SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
+export SOURCE_DATE_EPOCH
 # RK3588 raw-gap bootloader writer (family-gated; only the custom-uboot path).
 WRITE_BOOTLOADER_SH="${WRITE_BOOTLOADER_SH:-${HERE}/write-bootloader.sh}"
 # Boot-partition artifact installer (boot.scr/cera_board.env/boot_state.txt/extlinux),
@@ -87,8 +99,6 @@ INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${V2_DIR}/mkosi/platform/boot/install-boot.s
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
-ROOTFS_MB=4096       # p2/p3 rootfs slots (ext4)
-DATA_FLOOR_MB=2048   # p4 data minimum (ext4, else remainder)
 DEFAULT_TOTAL_MB=16384   # 16 GiB reference medium for `build` / A/B verify
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
@@ -197,6 +207,16 @@ write_gap_bootloader() {
 }
 
 # ---------------------------------------------------------------------------
+# det_uuid <seed> — a STABLE RFC-4122-shaped UUID derived from <seed>. mkfs.ext4
+# would otherwise stamp a random filesystem UUID (and dir-hash seed), defeating a
+# bit-for-bit rebuild; seeding both from the board makes the slot reproducible.
+# ---------------------------------------------------------------------------
+det_uuid() {
+  local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
+  printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
+}
+
+# ---------------------------------------------------------------------------
 # populate_rootfs_a <img> <rootfs_tree> <single_slot>
 # Write the mkosi rootfs tree into the rootfs_a slot (partition 2). systemd-repart
 # --offline FORMATS the ext4 slot but never populates it; without this the flashed
@@ -230,13 +250,15 @@ populate_rootfs_a() {
   # var/lib/private, …) a rootless host user cannot traverse. Probe readability
   # (the tar test emit_artifact uses); if blocked, populate inside the builder
   # container as root, which also preserves the source uid/gid/mode in the image.
+  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-rootfs_a")"
   if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
-    mkfs.ext4 -q -L rootfs_a -d "${rootfs_tree}" "${rootfs_img}" \
+    mkfs.ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
+      -d "${rootfs_tree}" "${rootfs_img}" \
       || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
   else
     log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
-    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}"
+    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}"
   fi
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
@@ -252,7 +274,7 @@ populate_rootfs_a() {
 # container fallback. e2fsprogs is installed on demand (the slim builder lacks it).
 # ---------------------------------------------------------------------------
 _populate_rootfs_a_in_container() {
-  local tree="$1" out_img="$2"
+  local tree="$1" out_img="$2" fs_uuid="${3:-}"
   local runtime=""
   if command -v docker >/dev/null 2>&1; then runtime="docker"
   elif command -v podman >/dev/null 2>&1; then runtime="podman"
@@ -261,6 +283,8 @@ _populate_rootfs_a_in_container() {
   local image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
   local img_dir img_base; img_dir="$(dirname "${out_img}")"; img_base="$(basename "${out_img}")"
   "${runtime}" run --rm \
+    -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
+    -e "FS_UUID=${fs_uuid}" \
     -v "${tree}:/rootfs-tree:ro" \
     -v "${img_dir}:/out" \
     "${image}" \
@@ -271,7 +295,8 @@ _populate_rootfs_a_in_container() {
         apt-get install -y --no-install-recommends \
           -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
       fi
-      mkfs.ext4 -q -L rootfs_a -d /rootfs-tree "/out/'"${img_base}"'"
+      mkfs.ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
+        -d /rootfs-tree "/out/'"${img_base}"'"
     ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
 }
 
@@ -339,72 +364,11 @@ build_disk() {
 }
 
 # ---------------------------------------------------------------------------
-# part_field <img> <num> <First sector|Partition size|Partition name>
-# Pull one field from `sgdisk -i`. Sizes/sectors returned as raw integers (sectors)
-# for "First sector"/"Partition size"; the quoted label for "Partition name".
+# verify_contract — build an A/B + a single-slot test image and ASSERT both
+# against the frozen contract. Image build (build_disk) stays here; the
+# partition/gap/label assertions live in verify-disk.sh do_verify (task 6).
 # ---------------------------------------------------------------------------
-part_field() {
-  local img="$1" num="$2" key="$3" line
-  line="$(sgdisk -i "${num}" "${img}" 2>/dev/null | grep -F "${key}:")" || return 1
-  case "${key}" in
-    "Partition name")
-      sed -E "s/.*: '([^']*)'.*/\1/" <<<"${line}" ;;
-    *)  # "First sector: 32768 (at ...)" / "Partition size: 524288 sectors (...)"
-      sed -E 's/[^0-9]*([0-9]+).*/\1/' <<<"${line}" ;;
-  esac
-}
-
-# part_count <img> — number of partitions in the GPT.
-part_count() { sgdisk --print "$1" 2>/dev/null | awk '/^[[:space:]]+[0-9]+[[:space:]]/{n++} END{print n+0}'; }
-
-# sectors_to_mib <sectors>
-sectors_to_mib() { echo $(( $1 * SECTOR / 1024 / 1024 )); }
-
-# assert_part <img> <num> <expect_label> <expect_mib|min:N>
-assert_part() {
-  local img="$1" num="$2" exp_label="$3" exp_size="$4" label size_sectors size_mib
-  label="$(part_field "${img}" "${num}" 'Partition name')" \
-    || die "partition ${num} missing in ${img}"
-  size_sectors="$(part_field "${img}" "${num}" 'Partition size')"
-  size_mib="$(sectors_to_mib "${size_sectors}")"
-  [[ "${label}" == "${exp_label}" ]] \
-    || die "partition ${num} label '${label}' != expected '${exp_label}' (contract)"
-  if [[ "${exp_size}" == min:* ]]; then
-    local floor="${exp_size#min:}"
-    (( size_mib >= floor )) \
-      || die "partition ${num} (${label}) size ${size_mib} MiB < contract floor ${floor} MiB"
-    printf '  p%s %-9s %6s MiB  (>= %s MiB floor) OK\n' "${num}" "${label}" "${size_mib}" "${floor}"
-  else
-    (( size_mib == exp_size )) \
-      || die "partition ${num} (${label}) size ${size_mib} MiB != contract ${exp_size} MiB"
-    printf '  p%s %-9s %6s MiB  (== contract) OK\n' "${num}" "${label}" "${size_mib}"
-  fi
-}
-
-# assert_no_label <img> <label> — die if any partition carries <label>.
-assert_no_label() {
-  local img="$1" want="$2" n count
-  count="$(part_count "${img}")"
-  for (( n=1; n<=count; n++ )); do
-    [[ "$(part_field "${img}" "${n}" 'Partition name')" != "${want}" ]] \
-      || die "single-slot image MUST NOT contain a '${want}' partition"
-  done
-}
-
-# assert_gap <img> — boot (p1) must start at the 16 MB sector (no GPT entry before).
-assert_gap() {
-  local img="$1" start
-  start="$(part_field "${img}" 1 'First sector')"
-  (( start == BOOT_START_SECTOR )) \
-    || die "boot starts at sector ${start}, expected ${BOOT_START_SECTOR} (16 MB raw gap)"
-  printf '  16 MB raw gap: boot starts at sector %s (== %s MiB, no GPT entry before) OK\n' \
-    "${start}" "${GAP_MB}"
-}
-
-# ---------------------------------------------------------------------------
-# verify — build A/B + single-slot test images and assert against the contract.
-# ---------------------------------------------------------------------------
-do_verify() {
+verify_contract() {
   local tmp; tmp="$(mktemp -d)"
   local ab="${tmp}/ab.img" ss="${tmp}/singleslot.img"
 
@@ -423,14 +387,7 @@ do_verify() {
   echo "--- sgdisk --print ---"
   sgdisk --print "${ab}" 2>/dev/null | sed -n '/Disk /,$p'
   echo
-  echo "--- contract assertions ---"
-  [[ "$(part_count "${ab}")" -eq 4 ]] || die "A/B layout must have exactly 4 partitions"
-  echo "  partition count = 4 (boot + rootfs_a + rootfs_b + data) OK"
-  assert_gap "${ab}"
-  assert_part "${ab}" 1 boot     "${BOOT_MB}"
-  assert_part "${ab}" 2 rootfs_a "${ROOTFS_MB}"
-  assert_part "${ab}" 3 rootfs_b "${ROOTFS_MB}"
-  assert_part "${ab}" 4 data     "min:${DATA_FLOOR_MB}"
+  do_verify "${ab}"
   echo
 
   # --- Slot-swap static check (data survives A/B) ---------------------------
@@ -454,15 +411,7 @@ do_verify() {
   echo "--- sgdisk --print ---"
   sgdisk --print "${ss}" 2>/dev/null | sed -n '/Disk /,$p'
   echo
-  echo "--- contract assertions ---"
-  [[ "$(part_count "${ss}")" -eq 3 ]] || die "single-slot layout must have exactly 3 partitions"
-  echo "  partition count = 3 (boot + rootfs_a + data) OK"
-  assert_gap "${ss}"
-  assert_part "${ss}" 1 boot     "${BOOT_MB}"
-  assert_part "${ss}" 2 rootfs_a "${ROOTFS_MB}"
-  assert_part "${ss}" 3 data     "min:${DATA_FLOOR_MB}"
-  assert_no_label "${ss}" rootfs_b
-  echo "  rootfs_b ABSENT (single-slot fallback honored) OK"
+  do_verify "${ss}"
   echo
 
   rm -rf "${tmp}"
@@ -506,7 +455,7 @@ main() {
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)
-      do_verify
+      verify_contract
       ;;
     -h|--help|"")
       sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

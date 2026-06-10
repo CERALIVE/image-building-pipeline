@@ -32,7 +32,7 @@ slot activation are layered on later (task 26).
 |---|---|
 | Packages | `systemd`, `udev`, `openssh-server`, `dbus` — and ONLY these (+ transitive deps) |
 | Output | `Format=directory`, `Bootable=no`, `WithDocs=no` |
-| apt sources | none baked (mkosi keeps build sources in its sandbox, not the rootfs) |
+| apt sources | none baked (mkosi keeps build sources in its sandbox, not the rootfs). Build-time components are `main` only (Task 18) — the minimum to assemble; `non-free-firmware` is added back **only** on the device by the runtime postinst's `debian.sources` |
 
 **WHY:** a tiny, stable, arch-parametric foundation that every platform family
 shares. Distribution/Release/Architecture are inherited from the top-level config,

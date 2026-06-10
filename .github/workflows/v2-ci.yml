@@ -6,6 +6,17 @@
 # build-plan. No secrets are referenced; the build matrix runs DRY_RUN=1 so it
 # performs no real download/build (no R2 creds, no GPG, no privileged container,
 # no board required).
+#
+# Cross-host parity (task 15): the build matrix also emits a per-host sha256
+# sidecar (test-results/host-$(uname -s)-$(uname -m).sha256) over the NORMALIZED
+# mkosi build plan — a host-independent digest that, with T14's deterministic
+# builds, fixes the output bytes. Same digest on two hosts ⇒ same plan ⇒ (by
+# T14) bit-identical image. The only CI runner is Linux/x86_64; Fedora/Arch/
+# macOS/WSL2 are documented-not-CI-verified in v2/docs/dev-loop.md.
+#
+# addon-publish (task 35) stays inside the no-secrets invariant: it runs
+# DRY_RUN=1 (plan only, uploads nothing) so the real aws-s3 upload in
+# v2/lib/upload-addons.sh never fires without R2_* creds + a signed artifact.
 
 name: v2 Pipeline CI
 
@@ -92,11 +103,116 @@ jobs:
           mkdir -p "${ws}/ceracoder" "${ws}/srtla" "${ws}/CeraUI"
           echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
 
-      - name: Run v2 manifest unit suite (16 tests)
+      - name: Run v2 manifest unit suite
         run: ./v2/run-tests
 
+  size-gate:
+    # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
+    # (du --apparent-size -sb — NOT the frozen 4096 MB partition, G4/E5). DRY_RUN
+    # ships no real rootfs, so the positive leg uses a synthetic under-budget tree
+    # and the negative leg a sparse 2 GiB tree that MUST trip the gate — without
+    # the negative leg an always-passing gate would look identical.
+    name: rootfs size gate (blocking)
+    runs-on: ubuntu-latest
+    needs: bats
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Gate passes — synthetic tree under the committed ceiling (enforced, exit 0)
+        run: |
+          set -o pipefail
+          art="${RUNNER_TEMP}/rootfs-sample"
+          mkdir -p "${art}"
+          head -c 4096 /dev/zero > "${art}/placeholder.bin"
+          ./v2/lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
+          grep -Eq 'measured=[0-9]+ budget=[0-9]+ \(enforced\)' size-report.log
+
+      - name: Gate bites — sparse over-budget tree MUST fail the gate (non-vacuous)
+        run: |
+          # die() writes "exceeds budget" to stderr — fold it into the log (2>&1)
+          # so the grep below sees it; the if guards the gate's non-zero exit.
+          over="${RUNNER_TEMP}/rootfs-over"
+          mkdir -p "${over}"
+          truncate -s 2G "${over}/oversize.img"
+          if ./v2/lib/measure-size.sh rock-5b-plus "${over}" > size-over.log 2>&1; then
+            cat size-over.log
+            echo "::error::size gate did NOT fail on an over-budget rootfs"
+            exit 1
+          fi
+          cat size-over.log
+          grep -q 'exceeds budget' size-over.log
+
+  addon-publish:
+    # Feature-sysext R2 publish contract. The real path (v2/lib/upload-addons.sh,
+    # aws s3 cp + R2 endpoint — same pattern as fetch-debs.sh) only fires with
+    # R2_* creds AND a signed .raw, neither present here. So this job proves the
+    # contract under DRY_RUN: a synthetic SIGNED artifact set asserts the plan
+    # targets the canonical addons/{os_version}/{board}/{feature} keys with the
+    # right per-file content-type, and a non-vacuous negative leg asserts the
+    # trust gate REFUSES an unsigned .raw (no upload without a .sig).
+    name: addon publish contract (dry-run plan + unsigned-refusal gate)
+    runs-on: ubuntu-latest
+    needs: bats
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plan targets the per-board/per-OS R2 keys (DRY_RUN, signed inputs)
+        env:
+          DRY_RUN: '1'
+          R2_BUCKET: apt-storage
+          R2_ENDPOINT: https://r2.example
+        run: |
+          set -euo pipefail
+          dist="${RUNNER_TEMP}/addon-dist"
+          mkdir -p "${dist}"
+          stem="debug-toolset-rock-5b-plus-12"
+          head -c 4096 /dev/zero > "${dist}/${stem}.raw"
+          ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
+          printf 'stub-detached-signature\n' > "${dist}/${stem}.raw.sig"
+          ./v2/lib/upload-addons.sh \
+            --feature debug-toolset --board rock-5b-plus --os-version 12 \
+            --dist "${dist}" 2>&1 | tee addon-plan.log
+          # All three artifacts must target addons/{os_version}/{board}/{feature}.
+          grep -qE 's3://apt-storage/addons/12/rock-5b-plus/debug-toolset\.raw ' addon-plan.log
+          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sha256' addon-plan.log
+          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sig' addon-plan.log
+          # Content-type pinned per file so R2 stores what the worker serves.
+          grep -q 'debug-toolset.raw --endpoint-url https://r2.example --content-type application/octet-stream' addon-plan.log
+          grep -q 'debug-toolset.raw.sig --endpoint-url https://r2.example --content-type text/plain' addon-plan.log
+
+      - name: Trust gate bites — an UNSIGNED add-on MUST be refused (non-vacuous)
+        env:
+          DRY_RUN: '1'
+          R2_BUCKET: apt-storage
+          R2_ENDPOINT: https://r2.example
+        run: |
+          dist="${RUNNER_TEMP}/addon-unsigned"
+          mkdir -p "${dist}"
+          stem="debug-toolset-rock-5b-plus-12"
+          head -c 4096 /dev/zero > "${dist}/${stem}.raw"
+          ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
+          # No .raw.sig on purpose — the publisher MUST refuse to upload.
+          if ./v2/lib/upload-addons.sh \
+               --feature debug-toolset --board rock-5b-plus --os-version 12 \
+               --dist "${dist}" > addon-unsigned.log 2>&1; then
+            cat addon-unsigned.log
+            echo "::error::upload-addons.sh published an UNSIGNED add-on"
+            exit 1
+          fi
+          cat addon-unsigned.log
+          grep -q 'refusing to publish UNSIGNED add-on' addon-unsigned.log
+
   build-matrix:
-    name: build dry-run (${{ matrix.board }})
+    # Dry-run resolves the containerized build plan for both arches, then emits a
+    # cross-host sha256 sidecar over the NORMALIZED plan (task 15): same digest
+    # across hosts ⇒ identical builder invocation ⇒ (by T14's deterministic
+    # builds) a bit-identical image. A second resolve asserts the digest is
+    # reproducible (parity has teeth). Sidecar uploaded as host-sha256-<board>.
+    name: build dry-run + host sha256 (${{ matrix.board }})
     runs-on: ubuntu-latest
     needs: bats
     strategy:
@@ -143,6 +259,71 @@ jobs:
             exit 1
           fi
           grep -q 'DRY-RUN complete' build-dryrun.log
+
+      - name: Emit host sha256 sidecar (cross-host build-plan parity, task 15)
+        run: |
+          # Cross-host parity proxy. CI cannot run the real privileged mkosi
+          # build (no network/privileged container/board under DRY_RUN), so it
+          # cannot emit the real .raucb sha256 (that is T14's full-build proof).
+          # What it CAN prove is that this host resolves the *exact same builder
+          # invocation* every other host would — the normalized mkosi plan that,
+          # combined with T14's SOURCE_DATE_EPOCH determinism, fully fixes the
+          # output bytes. Two hosts whose sidecars match resolve an identical
+          # plan; given T14 they would produce a bit-identical image.
+          #
+          # The raw plan line embeds this checkout's ABSOLUTE path (differs per
+          # host/runner), so strip it to a stable <REPO> token before hashing —
+          # otherwise the sha would encode the runner's workdir, not the build.
+          set -euo pipefail
+          mkdir -p test-results
+          repo="${GITHUB_WORKSPACE:-$PWD}"
+          # Container-path assertion: the dry-run MUST resolve the containerized
+          # builder (docker/podman) on the runner, never the --native opt-in.
+          if ! grep -Eq 'DRY_RUN=1 \((docker|podman)\)' build-dryrun.log; then
+            echo "::error::build-matrix did not resolve the container path (expected docker/podman)"
+            exit 1
+          fi
+          plan="$(grep -F 'would build with:' build-dryrun.log \
+                  | sed -E 's/^.*would build with: //' \
+                  | sed "s#${repo}#<REPO>#g")"
+          [ -n "${plan}" ] || { echo "::error::no resolved mkosi plan in build-dryrun.log"; exit 1; }
+          sha="$(printf '%s\n' "${plan}" | sha256sum | cut -d' ' -f1)"
+          host="$(uname -s)-$(uname -m)"
+          sidecar="test-results/host-${host}.sha256"
+          # sha256sum-style line (machine-checkable); board-tagged so a multi-leg
+          # matrix never produces an ambiguous "which board?" digest.
+          printf '%s  %s.buildplan\n' "${sha}" "${{ matrix.board }}" > "${sidecar}"
+          echo "wrote ${sidecar}:"; cat "${sidecar}"
+          echo "PLAN_SHA=${sha}" >> "$GITHUB_ENV"
+
+      - name: Assert sha256 parity (rebuild → identical normalized plan, has teeth)
+        env:
+          DRY_RUN: '1'
+          INSTALL_BOOT_BSP: '0'
+        run: |
+          # Reproducibility teeth: re-resolve the same board and assert the
+          # normalized plan sha is BYTE-IDENTICAL to the sidecar. A non-vacuous
+          # parity gate — if board resolution ever became host/time-dependent
+          # this fails. (CERALIVE_WORKSPACE is already exported by the stub step.)
+          set -euo pipefail
+          repo="${GITHUB_WORKSPACE:-$PWD}"
+          ./v2/build "${{ matrix.board }}" 2>&1 | tee build-dryrun-2.log >/dev/null
+          plan2="$(grep -F 'would build with:' build-dryrun-2.log \
+                   | sed -E 's/^.*would build with: //' \
+                   | sed "s#${repo}#<REPO>#g")"
+          sha2="$(printf '%s\n' "${plan2}" | sha256sum | cut -d' ' -f1)"
+          if [ "${sha2}" != "${PLAN_SHA}" ]; then
+            echo "::error::build-plan sha256 not reproducible: ${PLAN_SHA} != ${sha2}"
+            exit 1
+          fi
+          echo "sha256 parity OK: ${PLAN_SHA} (identical across rebuilds on $(uname -s)-$(uname -m))"
+
+      - name: Upload host sha256 sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-sha256-${{ matrix.board }}
+          path: test-results/host-*.sha256
+          if-no-files-found: error
 
   qemu:
     # AMD64 matrix leg only: boot the x86 (x86-minipc) disk image headlessly in

@@ -57,6 +57,15 @@ source "${HERE}/common.sh"
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 IMAGES_DIR="${V2_DIR}/images"
 
+# Reproducible builds (task 14). One fixed epoch clamps every embedded mtime
+# (the staged rootfs.tar entries + the squashfs superblock/inodes), and the
+# reproducible signer omits the wall-clock CMS signingTime — the one source of
+# bundle non-determinism real `rauc` cannot suppress (rauc 1.x exposes no flag
+# for it). REPRODUCIBLE=0 opts back into the native `rauc bundle` signer.
+SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
+export SOURCE_DATE_EPOCH
+REPRODUCIBLE="${REPRODUCIBLE:-1}"
+
 # cert-work lives at the workspace root, a sibling of image-building-pipeline
 # (AGENTS.md: cert-work has no .git — reference by direct path only). The
 # image-building-pipeline checkout is itself under the workspace root, so the
@@ -165,6 +174,24 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# append_image_checksum <manifest> <image-path>
+# RAUC needs sha256+size in [image.<slot>]; `rauc bundle` fills these itself, but
+# the OpenSSL signer must add them or `rauc info`/install rejects the bundle with
+# "Unsupported checksum algorithm". Appended under the [image.rootfs] section
+# write_manifest emits last.
+# ---------------------------------------------------------------------------
+append_image_checksum() {
+  local manifest="$1" image_path="$2" sha size
+  sha="$(sha256sum "${image_path}" | cut -d' ' -f1)"
+  size="$(stat -c '%s' "${image_path}")"
+  cat >>"${manifest}" <<EOF
+sha256=${sha}
+size=${size}
+EOF
+  log_info "manifest: image sha256=${sha:0:12}… size=${size} bytes"
+}
+
+# ---------------------------------------------------------------------------
 # stage_rootfs <rootfs-src> <content-dir> -> prints the image filename
 #
 # A directory becomes rootfs.tar (RAUC unpacks tar* into the ext4 slot). A
@@ -175,7 +202,9 @@ stage_rootfs() {
   local src="$1" content="$2" image
   if [[ -d "${src}" ]]; then
     image="rootfs.tar"
-    tar --numeric-owner --owner=0 --group=0 -cf "${content}/${image}" -C "${src}" .
+    tar --sort=name --numeric-owner --owner=0 --group=0 \
+        --mtime="@${SOURCE_DATE_EPOCH}" --format=gnu \
+        -cf "${content}/${image}" -C "${src}" .
   elif [[ -f "${src}" ]]; then
     case "${src}" in
       *.tar | *.tar.* | *.tgz) image="rootfs.tar" ;;
@@ -208,15 +237,19 @@ bundle_with_rauc() {
 }
 
 # ---------------------------------------------------------------------------
-# bundle_with_openssl <content-dir> <out>  — host fallback (no rauc).
+# bundle_with_openssl <content-dir> <out>  — the deterministic signer.
 #
-# Reproduces RAUC's plain-format trust structure:
+# Reproduces RAUC's plain-format trust structure, and is what `rauc info`/install
+# verify against the device keyring:
 #   payload   = squashfs(content/)                       (manifest + rootfs image)
 #   signature = detached CMS(payload) by the LEAF, chain.pem certs embedded
 #   bundle    = payload || signature || uint64-BE(len(signature))
 #
-# Then verifies the CMS to the ROOT keyring only (the embedded intermediate+leaf
-# build leaf -> intermediate -> root), exactly as the device does.
+# Determinism (task 14): mksquashfs clamps the superblock + inode times to the
+# exported SOURCE_DATE_EPOCH, and the CMS is signed with -noattr so NO wall-clock
+# signingTime enters the signature. With the RSA leaf key the signature bytes are
+# then a pure function of the payload → bit-identical across rebuilds, while still
+# verifying leaf -> intermediate -> root (signing is NOT weakened).
 # ---------------------------------------------------------------------------
 bundle_with_openssl() {
   local content="$1" out="$2"
@@ -228,14 +261,15 @@ bundle_with_openssl() {
   payload="${work}/.$(basename "${out}").squashfs"
   sig="${work}/.$(basename "${out}").cms"
 
-  log_info "fallback: no rauc — building plain-format bundle via squashfs + OpenSSL CMS"
+  log_info "building plain-format bundle via squashfs + OpenSSL CMS (SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH})"
   mksquashfs "${content}" "${payload}" -all-root -noappend -no-progress -quiet -comp gzip
 
-  # Detached CMS over the squashfs payload, signed by the leaf, with the
-  # intermediate+leaf chain embedded for path building. NOTE the signer is the
-  # leaf cert + leaf key; root-ca.key is nowhere in this argv (guard below).
+  # Detached CMS over the squashfs payload, signed by the leaf, chain embedded for
+  # path building. -noattr drops the signed-attribute set (incl. the wall-clock
+  # signingTime) so the RSA signature is reproducible. The signer is the leaf cert
+  # + leaf key; root-ca.key is nowhere in this argv (guard below).
   local -a sign_cmd=(
-    openssl cms -sign -binary -nosmimecap
+    openssl cms -sign -binary -nosmimecap -noattr
     -in "${payload}"
     -signer "${RAUC_LEAF_CERT}"
     -inkey "${RAUC_LEAF_KEY}"
@@ -362,10 +396,15 @@ build-bundle() {
   mkdir -p "${out_dir}"
   out="${out_dir}/${ts}.raucb"
 
-  if command -v rauc >/dev/null 2>&1; then
-    log_info "rauc present — using native rauc bundle"
+  if [[ "${REPRODUCIBLE}" != "0" ]]; then
+    log_info "reproducible mode (REPRODUCIBLE=1) — deterministic OpenSSL CMS signer"
+    append_image_checksum "${content}/manifest.raucm" "${content}/${image}"
+    bundle_with_openssl "${content}" "${out}"
+  elif command -v rauc >/dev/null 2>&1; then
+    log_info "REPRODUCIBLE=0 — native rauc bundle (NOT bit-reproducible: rauc bakes a CMS signingTime)"
     bundle_with_rauc "${content}" "${out}"
   else
+    append_image_checksum "${content}/manifest.raucm" "${content}/${image}"
     bundle_with_openssl "${content}" "${out}"
   fi
 

@@ -12,7 +12,8 @@ Sources reconciled:
 
 Removal categories: **(a)** already in the family manifest, **(b)** desktop/bloat,
 **(c)** genuinely unnecessary / non-existent, **(d)** duplicate, **(e)** development
-variant only, **(f)** first-party .deb, **(g)** already in the mkosi base layer.
+variant only, **(f)** first-party .deb, **(g)** already in the mkosi base layer,
+**(h)** slimmed out of the mandatory set into the debug add-on (T17).
 
 ---
 
@@ -103,6 +104,43 @@ in-tree and delivered as signed `.deb`s via `lib/fetch-debs.sh` (`REPOS`) then
 | `belacoder` | **stale name** → now `ceracoder` in `REPOS` |
 | `srtla` | first-party → `REPOS` (`srtla`) |
 | `srt` | first-party → `REPOS` (`srt`) |
+
+## (h) Slimmed to the debug add-on (T17) — optional, not runtime-critical
+
+Image-slimming pass (T17). These 15 packages were in the mandatory `shared.list`
+but are **operator/field diagnostics or optional capabilities**, not part of the
+streaming/bonding/modem/update datapath. They are removed from the always-installed
+base and become the **seed set for the debug add-on** (T26) — installed on demand,
+never baked into every image. Each was verified to have **no runtime consumer** in
+CeraUI, ceracoder, srtla, or the mkosi runtime postinst before removal.
+
+| Package | Reason for removal | Destination |
+|---|---|---|
+| `alsa-utils` | Low-level ALSA control; the streaming appliance encodes from the capture device, not a local mixer — audio tooling is monitor/diagnostic only. | debug add-on (T26) |
+| `pulseaudio` | Sound server; no runtime consumer (no local-playback path). The old `ENABLED_SERVICES` entry was an Armbian-era carry-over. | debug add-on (T26) |
+| `usbutils` | `lsusb` — manual USB enumeration for field debugging; ModemManager/udev drive device bring-up without it. | debug add-on (T26) |
+| `pciutils` | `lspci` — manual PCI introspection, diagnostics only. | debug add-on (T26) |
+| `lsof` | Open-fd inspection — operator debugging only. | debug add-on (T26) |
+| `i2c-tools` | Manual I²C bus pokes (sensors/EEPROM) — board-bring-up diagnostics, not runtime. | debug add-on (T26) |
+| `can-utils` | CAN-bus tooling — v1 carry-over; no CeraLive datapath uses CAN. | debug add-on (T26) |
+| `htop` | Interactive process monitor — field diagnostics. | debug add-on (T26) |
+| `iotop` | IO monitor — storage-bound encode/record diagnostics only. | debug add-on (T26) |
+| `nethogs` | Per-process bandwidth monitor — link-saturation debugging only. | debug add-on (T26) |
+| `vnstat` | Cumulative traffic accounting — data-cap awareness is a nice-to-have, not runtime-critical. | debug add-on (T26) |
+| `nano` | On-box editor — operator convenience only; no automated config path edits files interactively. | debug add-on (T26) |
+| `iperf3` | Bonded-link throughput testing — field diagnostics. | debug add-on (T26) |
+| `socat` | Socket relay — the old "streaming/control glue" comment was aspirational; **no consumer** in CeraUI/ceracoder/srtla/mkosi. The chaos harness (`tools/chaos`) ships its own. | debug add-on (T26) |
+| `netcat-openbsd` | `nc` connectivity probing — field diagnostics, no runtime consumer. | debug add-on (T26) |
+
+**KEPT (verified runtime-critical, NOT moved):**
+
+| Package | Why it stays mandatory |
+|---|---|
+| `curl` | CeraUI update flows **and** the on-device `curl localhost` health probe (`apps/backend/.../observability.ts`). Runtime-critical. |
+| `rsync` | dev-push / dev-sync live-reload loop (`v2/docs/dev-loop.md`). |
+| `wget` | http downloader for update/fetch infra. |
+| `usb-modeswitch` | Flips USB LTE/5G modems out of storage mode — without it USB modems never enumerate. Core to the bonded-modem datapath. |
+| `kbd` / `fonts-terminus` | `setfont` + large bitmap fonts for HDMI console readability at boot (4K fbcon). Boot-console essentials, not diagnostics. |
 
 ## ESCALATION — Bluetooth stack (decision needed)
 

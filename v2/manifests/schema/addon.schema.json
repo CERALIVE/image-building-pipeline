@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ceralive.tv/schema/v2/addon.schema.json",
+  "title": "CeraLive Add-on Descriptor",
+  "description": "Descriptor for an optional, image-immutable CeraLive add-on. Each add-on ships as a systemd-sysext extension (.raw) that overlays ONLY /usr and /opt onto the running OS (lib/app-layer/sysext.sh). Descriptors are baked read-only into the image at /usr/share/ceralive/addons/<id>.json; CeraUI reads them at runtime to offer install/enable. The descriptor encodes the sysext merge identity the kernel keys on (sysextLevel/versionId, G1), the filesystem paths the extension provides (for cross-add-on collision detection, E6), and a provides/conflicts dependency model. appfs payloads are reserved and NOT implemented in this tier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "version",
+    "category",
+    "payload",
+    "artifact",
+    "provides",
+    "sysextLevel",
+    "versionId"
+  ],
+  "properties": {
+    "id": {
+      "description": "Unique add-on identifier and the descriptor's filename stem (e.g. 'debug-toolset' -> addons/debug-toolset.json, installed at /usr/share/ceralive/addons/debug-toolset.json). Referenced by other add-ons' deps[]/conflicts[]. Lowercase alphanumeric with hyphens.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": {
+      "description": "Human-readable display name shown in the CeraUI add-on catalogue (e.g. 'Debug Toolset').",
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "description": "Add-on version as semver (MAJOR.MINOR.PATCH with optional -prerelease / +build). Drives upgrade comparison in the add-on manager.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "category": {
+      "description": "Catalogue grouping used by the CeraUI add-on browser. Fixed vocabulary so the UI can render stable sections.",
+      "type": "string",
+      "enum": ["debug", "display", "media", "network", "other"]
+    },
+    "icon": {
+      "description": "Optional icon name or path for the CeraUI catalogue tile (icon-set name or relative asset path). Purely presentational.",
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "description": "How the add-on materialises on the device. Only 'sysext' is implemented: a systemd-sysext extension that overlays /usr+/opt. 'appfs' is reserved for a future heavier-payload tier and is intentionally NOT accepted here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "description": "Payload backend. Constrained to 'sysext' (appfs reserved/not implemented).",
+          "type": "string",
+          "enum": ["sysext"]
+        }
+      }
+    },
+    "sysextLevel": {
+      "description": "G1 — the SYSEXT_LEVEL the extension-release file must carry so systemd's extension_release_validate() merges the .raw across minor VERSION_ID drift (lib/app-layer/sysext.sh: SYSEXT_LEVEL=1). MUST be the literal string '1'; any other value is un-mergeable on the device.",
+      "type": "string",
+      "const": "1"
+    },
+    "versionId": {
+      "description": "G1 — the VERSION_ID the extension-release file must carry to match the host os-release (Debian bookworm across the stack). MUST be the literal string '12'; the kernel refuses to merge an extension whose VERSION_ID does not match (lib/app-layer/sysext.sh: SYSEXT_OS_VERSION_ID=12).",
+      "type": "string",
+      "const": "12"
+    },
+    "compatibleOsVersions": {
+      "description": "OS VERSION_ID strings this add-on's artifact is published for (substituted into artifact.urlTemplate's {os_version}). Optional; defaults to the single supported bookworm line. Each entry is a bare VERSION_ID token.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "artifact": {
+      "description": "Default/template artifact for the sysext .raw — how it is fetched and integrity-checked. The URL is templated by OS version (and may carry a '{board}' placeholder) so one descriptor can serve multiple os-release lines and boards; the payload is verified by sha256 AND a detached GPG signature reference before install. Per-board overrides live in boardVariants[] when boards ship genuinely different .raw artifacts.",
+      "$ref": "#/$defs/artifact"
+    },
+    "boardVariants": {
+      "description": "Per-board artifact overrides. Optional. Keys are board_id values (the manifests/boards/<id>.yaml stem). Each value is a full artifact object that REPLACES the top-level artifact when installing on that board — used when boards ship genuinely different .raw payloads (distinct urlTemplate, sha256, sizes). The top-level artifact stays the default/template for any board without an explicit variant. A board named in conditions.boardAllowlist SHOULD have a matching variant here so the manager fetches the right per-board .raw.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9-]*$": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "conditions": {
+      "description": "Optional capability gate the CeraUI add-on manager evaluates BEFORE any download/merge. Conditions are AND-combined; an absent block means the add-on is always offerable. When ANY condition is unmet the manager MUST NOT crash and MUST NOT install/enable: it leaves the add-on inactive, sets the runtime phase to 'unsupported' (capability can never appear on this hardware/board) or 'pending' (capability may appear later, e.g. an OS upgrade), and records a machine-readable lastError. Canonical lastError reasons: requires_display unmet -> 'addon_requires_display'; requires_gpu_userspace unmet -> 'addon_requires_gpu_userspace'; running board not in boardAllowlist -> 'addon_board_not_allowed'; host VERSION_ID < min_os_version -> 'addon_os_too_old'. These reasons are device-local runtime state (CeraUI AddonStateSchema), not baked into the image.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requires_display": {
+          "description": "When true the add-on only activates on boards with an HDMI/display output (a usable DRM/framebuffer). Boards without display output -> phase 'unsupported', lastError 'addon_requires_display'.",
+          "type": "boolean"
+        },
+        "requires_gpu_userspace": {
+          "description": "When true the add-on needs the Mali GPU userspace (libmali, Platform-layer) for EGL/GBM rendering. Boards/images lacking it -> phase 'unsupported', lastError 'addon_requires_gpu_userspace'.",
+          "type": "boolean"
+        },
+        "min_os_version": {
+          "description": "Minimum host OS VERSION_ID required (numeric VERSION_ID compare). A host below this -> phase 'pending', lastError 'addon_os_too_old' (an OS upgrade can later satisfy it). Bare VERSION_ID token (e.g. '12' for bookworm).",
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$"
+        },
+        "boardAllowlist": {
+          "description": "Explicit list of board_id values this add-on may activate on. When present the running board MUST be a member; any other board -> phase 'unsupported', lastError 'addon_board_not_allowed'. Board ids are lowercase alphanumeric with hyphens (manifests/boards/<id>.yaml stem).",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "provides": {
+      "description": "E6/G2 — absolute filesystem paths this sysext contributes. Two axes: (1) collision detection — no two installable add-ons may claim the same path unless they mutually declare each other in conflicts[] (validate-manifests.py E6 check); (2) boundary enforcement — every path MUST live under /usr or /opt, because a systemd-sysext overlays ONLY those subtrees (G2). Paths under /etc or /var are silently lost at merge time and are rejected here.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/(usr|opt)/.+$"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "deps": {
+      "description": "Add-on ids this add-on requires to be installed first. Optional. Resolved by the CeraUI add-on manager before enable.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "uniqueItems": true
+    },
+    "conflicts": {
+      "description": "Add-on ids that are mutually exclusive with this one. Optional. A pair that mutually lists each other here may legally claim the same provides[] path (they can never be merged together) — that is the provides/conflicts model E6 keys on.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "uniqueItems": true
+    },
+    "units": {
+      "description": "systemd units the add-on touches at enable/disable time. All three lists are optional. Units are masked-inert by default in the image; the add-on manager unmasks, enables, then starts in that order.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unmask": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9@._:-]+\\.(service|socket|target|timer|path|mount)$" },
+          "uniqueItems": true
+        },
+        "enable": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9@._:-]+\\.(service|socket|target|timer|path|mount)$" },
+          "uniqueItems": true
+        },
+        "start": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9@._:-]+\\.(service|socket|target|timer|path|mount)$" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "configSchemaRef": {
+      "description": "Optional reference (relative path or URL) to a JSON Schema describing user-supplied configuration for this add-on. When present, CeraUI renders a config form and validates input against it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "validate": {
+      "description": "Optional post-install health probe. The add-on manager runs cmd (argv-only) after merge; a non-zero exit or timeout overrun marks the add-on unhealthy. Add-on health NEVER gates the OTA healthcheck/rollback.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cmd"],
+      "properties": {
+        "cmd": {
+          "description": "Absolute command (with args) to run as the health probe.",
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout": {
+          "description": "Probe timeout in seconds. Positive integer; defaults to a manager-side value when omitted.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "description": "A fetchable, integrity-checked sysext .raw: an HTTPS URL templated by OS version, plus the sha256 + detached GPG signature reference verified before install, and the download/installed sizes used for the space pre-check. Shared by the top-level artifact (default/template) and each boardVariants[] entry (per-board override).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "urlTemplate",
+        "sha256",
+        "gpgSigRef",
+        "sizeDownload",
+        "sizeInstalled"
+      ],
+      "properties": {
+        "urlTemplate": {
+          "description": "HTTPS URL template for the .raw, parameterised by OS version. MUST contain the literal '{os_version}' placeholder (expanded from compatibleOsVersions at fetch time); may also carry a '{board}' placeholder for the default/template artifact.",
+          "type": "string",
+          "pattern": "^https://[^\\s]*\\{os_version\\}[^\\s]*$"
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the resolved .raw artifact (64 hex chars). Verified post-download before install.",
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "gpgSigRef": {
+          "description": "Reference (URL or relative path) to the detached GPG signature of the artifact, verified against the image-baked CeraLive signing key. Non-empty.",
+          "type": "string",
+          "minLength": 1
+        },
+        "sizeDownload": {
+          "description": "Compressed download size of the .raw in bytes (drives the CeraUI progress/size estimate). Positive integer.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sizeInstalled": {
+          "description": "Installed (merged) size in bytes the extension occupies once active. Positive integer; used for the size/space pre-check.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

@@ -36,7 +36,19 @@ dtb_packages:
   - linux-dtb-vendor-rk35xx
 
 # Shared SoC/GPU/Wi-Fi firmware. armbian-firmware is the broad Armbian firmware
-# bundle (ships realtek WiFi blobs).
+# bundle (ships realtek + broadcom WiFi blobs).
+#
+# Task 19 firmware-split audit — KEEP armbian-firmware, do NOT swap to the Debian
+# split (firmware-realtek + firmware-brcm80211). Both rk3588 boards run the Armbian
+# VENDOR kernel (Decision D3) whose out-of-tree WiFi/BT drivers expect Armbian's
+# board-matched blobs AND per-board NVRAM config files:
+#   * Rock 5B+   → RTL8852BE  (was rtl8852be-firmware + firmware-realtek)
+#   * Orange Pi 5+ → AP6275P / brcmfmac (Broadcom)
+# Debian's split packages target the MAINLINE in-tree drivers and omit the Armbian
+# NVRAM (.txt) files, so a swap risks WiFi never associating on the vendor kernel.
+# `armbian-firmware` is already the TRIMMED Armbian variant (NOT armbian-firmware-full),
+# i.e. the narrowest safe lever available — there is no finer split that keeps the
+# vendor-kernel WiFi/BT path intact. Size/feasibility detail: v2/docs/size-notes.md.
 # TD: mali-g610-firmware not in Armbian bookworm arm64 — source separately when available
 firmware_packages:
   - armbian-firmware

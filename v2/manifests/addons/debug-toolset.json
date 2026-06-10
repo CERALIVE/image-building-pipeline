@@ -1,0 +1,46 @@
+{
+  "id": "debug-toolset",
+  "name": "Debug Toolset",
+  "version": "1.0.0",
+  "category": "debug",
+  "icon": "wrench",
+  "payload": { "type": "sysext" },
+  "sysextLevel": "1",
+  "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw.sig",
+    "sizeDownload": 12582912,
+    "sizeInstalled": 37748736
+  },
+  "provides": [
+    "/usr/bin/alsamixer",
+    "/usr/bin/pulseaudio",
+    "/usr/bin/lsusb",
+    "/usr/bin/lspci",
+    "/usr/bin/lsof",
+    "/usr/sbin/i2cdetect",
+    "/usr/bin/candump",
+    "/usr/bin/htop",
+    "/usr/sbin/iotop",
+    "/usr/sbin/nethogs",
+    "/usr/bin/vnstat",
+    "/usr/bin/nano",
+    "/usr/bin/iperf3",
+    "/usr/bin/socat",
+    "/usr/bin/nc.openbsd"
+  ],
+  "deps": [],
+  "conflicts": [],
+  "units": {
+    "unmask": [],
+    "enable": [],
+    "start": []
+  },
+  "validate": {
+    "cmd": "/usr/bin/htop --version",
+    "timeout": 10
+  }
+}

@@ -25,10 +25,14 @@ setup() {
   COMMON_SH="$LIB_DIR/common.sh"
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
+  MEASURE_SH="$LIB_DIR/measure-size.sh"
+  SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
   QEMU_X86="$TESTS_DIR/qemu-x86.sh"
   SCHEMA_DIR="$V2/manifests/schema"
   FAMILY_SCHEMA="$SCHEMA_DIR/family.schema.json"
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
+  ADDON_SCHEMA="$SCHEMA_DIR/addon.schema.json"
+  VALIDATE_PY="$V2/ci/validate-manifests.py"
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="$(cd "$V2/.." && pwd)"
   # Locate the pin registry. Standalone CI checks out only this repo, so the
@@ -90,6 +94,29 @@ PY
 get_pin() {
   awk -v key="$1" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$VERSIONS_YAML"
+}
+
+# write_addon <dir> <id> <conflicts-json-array> <provides-path>
+# Emit a minimal, schema-valid add-on descriptor into <dir>/<id>.json so the E6
+# collision tests can compose conflict scenarios without shipping fixtures that
+# would themselves trip the shipped-tree validator.
+write_addon() {
+  local dir="$1" id="$2" conflicts="$3" provides="$4"
+  cat > "$dir/$id.json" <<JSON
+{
+  "id": "$id", "name": "$id", "version": "1.0.0", "category": "other",
+  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "12",
+  "compatibleOsVersions": ["12"],
+  "artifact": {
+    "urlTemplate": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw",
+    "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
+    "gpgSigRef": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw.asc",
+    "sizeDownload": 1024, "sizeInstalled": 2048
+  },
+  "provides": ["$provides"],
+  "conflicts": $conflicts
+}
+JSON
 }
 
 # ===========================================================================
@@ -453,4 +480,478 @@ YAML
   # the single assemble-disk invocation lives ONLY under the `custom` branch:
   # efi/grub must never reach a .raw write.
   [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
+}
+
+# ===========================================================================
+# 10. Size-gate measurement scaffolding (Task 8) — REPORT-ONLY.
+#     measure-size.sh sizes rootfs CONTENT (du --apparent-size -sb on the
+#     artifact/tree, NOT the frozen 4096 MB partition — G4/E5) and compares it to
+#     manifests/size-budget.json. While every rootfs_bytes_max is null the gate
+#     only REPORTS (prints measured vs budget, exits 0). Pure static measurement —
+#     no chroot/build/mount — so it fits this UNIT suite. Task 20 flips it to
+#     blocking by setting a non-null threshold; the enforcement branch is proven
+#     here so that flip stays a one-line manifest edit.
+# ===========================================================================
+
+@test "size-budget: every shipped board carries a positive-integer blocking ceiling (Task-20 flip landed)" {
+  run python3 - "$SIZE_BUDGET_JSON" "$V2/manifests/boards" <<'PY'
+import json, sys
+from pathlib import Path
+
+budget = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert isinstance(budget, dict), "root must be an object"
+boards = {p.stem for p in Path(sys.argv[2]).glob("*.yaml")}
+entries = {k: v for k, v in budget.items() if not k.startswith("_")}
+missing = boards - set(entries)
+assert not missing, "boards missing a size-budget entry: %s" % sorted(missing)
+for name, entry in entries.items():
+    limit = entry.get("rootfs_bytes_max")
+    assert isinstance(limit, int) and not isinstance(limit, bool) and limit > 0, (
+        "%s: rootfs_bytes_max must be a positive int (blocking), got %r" % (name, limit)
+    )
+print("BUDGET-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BUDGET-OK"* ]]
+}
+
+@test "size-gate: a null budget is report-only (retained path for newly-added boards) and exits 0" {
+  local tree="$BATS_TEST_TMPDIR/rootfs"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  local nullbudget="$BATS_TEST_TMPDIR/null-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": null, "measured": null } }\n' > "$nullbudget"
+  run env SIZE_BUDGET_JSON="$nullbudget" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ measured=[0-9]+\ budget=null\ \(report-only\) ]]
+}
+
+@test "size-gate: apparent-size measurement is deterministic (identical bytes across runs)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-det"
+  mkdir -p "$tree/sub"
+  head -c 8192 /dev/zero > "$tree/a.bin"
+  head -c 333  /dev/zero > "$tree/sub/b.bin"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  local first="${output%% *}"          # "measured=<N>"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "${output%% *}" == "$first" ]]
+}
+
+@test "size-gate: malformed size-budget.json fails loudly (non-vacuity negative)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-bad"
+  mkdir -p "$tree"
+  head -c 16 /dev/zero > "$tree/a.bin"
+  local bad="$BATS_TEST_TMPDIR/bad-budget.json"
+  printf '{ this is not json\n' > "$bad"
+  run env SIZE_BUDGET_JSON="$bad" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"malformed size-budget.json"* ]]
+}
+
+@test "size-gate: unknown board fails loudly (no silent pass on a missing budget)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-unknown"
+  mkdir -p "$tree"
+  head -c 16 /dev/zero > "$tree/a.bin"
+  run "$MEASURE_SH" definitely-not-a-board "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no size budget entry"* ]]
+}
+
+@test "size-gate: a non-null budget enforces (over-budget fails) — proves Task-20 flip works" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-enf"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"   # ~64 KiB of content
+  local tight="$BATS_TEST_TMPDIR/tight-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024, "measured": null } }\n' > "$tight"
+  run env SIZE_BUDGET_JSON="$tight" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds budget"* ]]
+}
+
+@test "size-gate: a generous non-null budget passes and reports 'enforced'" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-ok"
+  mkdir -p "$tree"
+  head -c 256 /dev/zero > "$tree/small.bin"
+  local roomy="$BATS_TEST_TMPDIR/roomy-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1073741824, "measured": null } }\n' > "$roomy"
+  run env SIZE_BUDGET_JSON="$roomy" "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ measured=[0-9]+\ budget=1073741824\ \(enforced\) ]]
+}
+
+@test "size-gate: the COMMITTED size-budget.json enforces (non-null) for every shipped board" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-committed"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  for board in orange-pi-5-plus rock-5b-plus x86-minipc; do
+    run "$MEASURE_SH" "$board" "$tree"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ measured=[0-9]+\ budget=[0-9]+\ \(enforced\) ]]
+    [[ "$output" != *"report-only"* ]]
+  done
+}
+
+@test "size-gate: a tree over the COMMITTED ceiling fails the gate (sparse 2 GiB > 1.5 GB budget)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-over"
+  mkdir -p "$tree"
+  truncate -s 2G "$tree/oversize.img"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds budget"* ]]
+}
+
+# ===========================================================================
+# 11. Reproducible builds (Task 14) — a double-build of the SAME inputs yields a
+#     BIT-IDENTICAL signed .raucb. build-bundle.sh clamps every embedded mtime to
+#     SOURCE_DATE_EPOCH (rootfs.tar + squashfs) and signs the CMS without the
+#     wall-clock signingTime attribute — the only non-determinism real `rauc`
+#     cannot suppress — so two runs collide on sha256. A mock rootfs (no
+#     mkosi/network/board) keeps it in this UNIT suite while exercising the REAL
+#     bundle assembly + RSA signing chain against the committed dev PKI.
+# ===========================================================================
+
+# repro_prereqs — the deterministic signer needs mksquashfs + openssl + the dev
+# PKI. Anything missing → the test SKIPs (still green) rather than false-fails.
+repro_prereqs() {
+  command -v mksquashfs >/dev/null 2>&1 || return 1
+  command -v openssl    >/dev/null 2>&1 || return 1
+  [ -s "$V2/.dev-keys/leaf-signing.key" ] || return 1
+  return 0
+}
+
+# build_repro_bundle <out-dir> <source-date-epoch> — build the SAME mock rootfs
+# into <out-dir> with a fixed compatible/version/ts. Echoes nothing; the bundle
+# lands at <out-dir>/fixed.raucb.
+build_repro_bundle() {
+  local out="$1" sde="$2"
+  local tree="$BATS_TEST_TMPDIR/repro-tree"
+  if [ ! -d "$tree" ]; then
+    mkdir -p "$tree/etc" "$tree/usr/bin"
+    printf 'ceralive\n' > "$tree/etc/hostname"
+    printf 'bin\n'      > "$tree/usr/bin/app"
+  fi
+  rm -rf "$out"; mkdir -p "$out"
+  env CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys" \
+      COMPATIBLE_STRING="ceralive-rock-5b-plus" \
+      BUNDLE_VERSION="reprotest" BUNDLE_TS="fixed" BUNDLE_OUT_DIR="$out" \
+      SOURCE_DATE_EPOCH="$sde" \
+      bash "$V2/lib/build-bundle.sh" rock-5b-plus "$tree" >/dev/null 2>&1
+}
+
+@test "repro: double-build of rock-5b-plus yields a bit-identical .raucb (same sha256)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  build_repro_bundle "$BATS_TEST_TMPDIR/r1" 1700000000
+  build_repro_bundle "$BATS_TEST_TMPDIR/r2" 1700000000
+  [ -f "$BATS_TEST_TMPDIR/r1/fixed.raucb" ]
+  [ -f "$BATS_TEST_TMPDIR/r2/fixed.raucb" ]
+  local h1 h2
+  h1="$(sha256sum "$BATS_TEST_TMPDIR/r1/fixed.raucb" | cut -d' ' -f1)"
+  h2="$(sha256sum "$BATS_TEST_TMPDIR/r2/fixed.raucb" | cut -d' ' -f1)"
+  [ -n "$h1" ]
+  [ "$h1" = "$h2" ]
+}
+
+@test "repro: the reproducible bundle still verifies leaf->intermediate->root (signing not faked)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  local tree="$BATS_TEST_TMPDIR/repro-vtree"; mkdir -p "$tree/etc"
+  printf 'x\n' > "$tree/etc/hostname"
+  local out="$BATS_TEST_TMPDIR/rv"; mkdir -p "$out"
+  run env CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys" \
+      COMPATIBLE_STRING="ceralive-rock-5b-plus" \
+      BUNDLE_VERSION="reprotest" BUNDLE_TS="fixed" BUNDLE_OUT_DIR="$out" \
+      SOURCE_DATE_EPOCH=1700000000 \
+      bash "$V2/lib/build-bundle.sh" rock-5b-plus "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"signature verified: leaf -> intermediate -> root"* ]]
+  [ -f "$out/fixed.raucb" ]
+}
+
+@test "repro: changing SOURCE_DATE_EPOCH changes the artifact (test has teeth / not vacuous)" {
+  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+  build_repro_bundle "$BATS_TEST_TMPDIR/t1" 1700000000
+  build_repro_bundle "$BATS_TEST_TMPDIR/t2" 1800000000
+  local h1 h2
+  h1="$(sha256sum "$BATS_TEST_TMPDIR/t1/fixed.raucb" | cut -d' ' -f1)"
+  h2="$(sha256sum "$BATS_TEST_TMPDIR/t2/fixed.raucb" | cut -d' ' -f1)"
+  [ -n "$h1" ]
+  [ "$h1" != "$h2" ]
+}
+
+# ===========================================================================
+# 12. Bounded-parallel multi-board runner (Task 12) — lib/build-all.sh.
+#     Two guards:
+#       * REGRESSION: `build --all` under DRY_RUN=1 still resolves the full board
+#         list and exits 0 BEFORE the runner is reached (the preview contract the
+#         runner must not break).
+#       * AGGREGATE + ISOLATION: build-all.sh run directly against a STUB
+#         orchestrator (no real mkosi/network/board) — one board passes, one
+#         fails. The overall run must exit non-zero (failure never masked), yet
+#         the passing board must still complete with its OWN log file (no early
+#         abort, logs not interleaved). A stub keeps this in the UNIT suite.
+# ===========================================================================
+
+@test "t12 parallel: build --all under DRY_RUN=1 exits 0 and prints the resolved board list" {
+  run env DRY_RUN=1 bash "$V2/build" --all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY_RUN"* ]]
+  # every shipped board manifest must appear in the previewed selection
+  local f board
+  for f in "$V2"/manifests/boards/*.yaml; do
+    board="$(basename "$f" .yaml)"
+    [[ "$output" == *"$board"* ]] || { echo "missing board in preview: $board"; false; }
+  done
+}
+
+@test "t12 parallel: build-all.sh fails overall if any board fails, but the passing board still completes (isolated logs)" {
+  local bdir="$BATS_TEST_TMPDIR/boards" ldir="$BATS_TEST_TMPDIR/logs"
+  mkdir -p "$bdir" "$ldir"
+  # Fixture manifests: content is irrelevant — the STUB orchestrator ignores it,
+  # find_manifest only needs the files to exist.
+  : > "$bdir/passboard.yaml"
+  : > "$bdir/failboard.yaml"
+
+  # STUB orchestrator: echoes a marker (so we can prove the log is its OWN output)
+  # and exits non-zero for any board whose name contains 'fail'.
+  local stub="$BATS_TEST_TMPDIR/stub-orchestrate.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+board=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --board)    board="$2"; shift 2 ;;
+    --manifest) shift 2 ;;
+    *)          shift ;;
+  esac
+done
+echo "stub orchestrator ran for board=${board}"
+case "$board" in
+  *fail*) echo "stub: simulating failure for ${board}" >&2; exit 7 ;;
+  *)      exit 0 ;;
+esac
+SH
+  chmod +x "$stub"
+
+  run env ORCHESTRATOR="$stub" BOARDS_DIR="$bdir" LOGS_DIR="$ldir" JOBS=2 \
+    bash "$V2/lib/build-all.sh" passboard failboard
+
+  # A failed board makes the whole run non-zero (aggregate, never swallowed).
+  [ "$status" -ne 0 ]
+  # Summary table reports BOTH outcomes with the real per-board exit code.
+  [[ "$output" == *"passboard"* ]]
+  [[ "$output" == *"failboard"* ]]
+  [[ "$output" == *"FAIL(7)"* ]]
+  [[ "$output" == *"board(s) FAILED"* ]]
+
+  # The passing board completed despite the other's failure: its OWN log exists
+  # and carries the stub's stdout (per-board isolation, not interleaved).
+  local passlog faillog
+  passlog="$(echo "$ldir"/passboard-*.log)"
+  faillog="$(echo "$ldir"/failboard-*.log)"
+  [ -f "$passlog" ]
+  [ -f "$faillog" ]
+  grep -q "stub orchestrator ran for board=passboard" "$passlog"
+  # the failing board's stderr was captured into ITS log, not the passing one
+  grep -q "simulating failure for failboard" "$faillog"
+  ! grep -q "failboard" "$passlog"
+}
+
+# ===========================================================================
+# 13. Add-on descriptor format + conflict model (Task 21).
+#     addon.schema.json is the per-descriptor gate: G1 sysext merge identity
+#     (sysextLevel const "1", versionId const "12") and G2 the /usr+/opt-only
+#     provides[] boundary. validate-manifests.py layers the cross-descriptor E6
+#     model on top: no two add-ons may claim the same provides[] path unless they
+#     mutually declare each other in conflicts[] (the provides/conflicts model).
+#     Pure static validation (no image, no sysext merge) so it fits this UNIT
+#     suite.
+# ===========================================================================
+
+@test "schema: addon.schema.json is a valid draft-2020-12 schema" {
+  run check_schema_metaschema "$ADDON_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCHEMA-OK"* ]]
+}
+
+@test "valid: shipped debug-toolset descriptor validates against addon schema" {
+  run validate_manifest "$V2/manifests/addons/debug-toolset.json" "$ADDON_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "addon: validate-manifests.py passes clean on the shipped descriptors (exit 0)" {
+  run bash -c "python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"debug-toolset.json"* ]]
+  [[ "$output" == *"0 errors"* ]]
+}
+
+@test "invalid: addon with an /etc path in provides[] is REJECTED (G2), names provides" {
+  run validate_manifest "$FIXTURES/invalid-addon-etc-provides.json" "$ADDON_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"provides"* ]]
+}
+
+@test "invalid: addon missing sysextLevel is REJECTED (G1), names sysextLevel" {
+  run validate_manifest "$FIXTURES/invalid-addon-missing-sysextlevel.json" "$ADDON_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sysextLevel"* ]]
+}
+
+@test "addon conflict: two descriptors claiming the same provides[] path are flagged (E6)" {
+  local adir="$BATS_TEST_TMPDIR/addons-collide"
+  mkdir -p "$adir"
+  write_addon "$adir" addon-a '[]' "/usr/bin/shared-tool"
+  write_addon "$adir" addon-b '[]' "/usr/bin/shared-tool"
+  run bash -c "ADDONS_DIR='$adir' python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"collision"* ]]
+  [[ "$output" == *"/usr/bin/shared-tool"* ]]
+}
+
+@test "addon conflict: a shared provides[] path is ALLOWED when both declare mutual conflicts[] (provides/conflicts model)" {
+  local adir="$BATS_TEST_TMPDIR/addons-resolved"
+  mkdir -p "$adir"
+  write_addon "$adir" addon-a '["addon-b"]' "/usr/bin/shared-tool"
+  write_addon "$adir" addon-b '["addon-a"]' "/usr/bin/shared-tool"
+  run bash -c "ADDONS_DIR='$adir' python3 '$VALIDATE_PY' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 errors"* ]]
+  [[ "$output" != *"collision"* ]]
+}
+
+# ===========================================================================
+# 14. Signed per-board/per-OS feature sysext build (Task 24).
+#     lib/build-feature-sysext.sh turns a .deb staging tree into a SIGNED add-on
+#     sysext: <feature>-<board>-<os>.raw + .raw.sha256 + .raw.sig, verifiable with
+#     gpgv against the image-baked add-on PUBLIC keyring. Guards proven here:
+#       * artifact set + sha256 integrity + GPG authenticity (gpgv OK)
+#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12
+#       * G2 — a staging tree with /etc (escapes the /usr+/opt boundary) is REFUSED
+#       * tamper — a flipped byte in the .raw makes gpgv FAIL (signing has teeth)
+#       * the baked keyring is PUBLIC-only and a DISTINCT trust domain from RAUC
+#     Hermetic: a throwaway gpg home under BATS_FILE_TMPDIR signs the fixture, so
+#     the suite never touches the repo dev keys. Skips (still green) if the signing
+#     toolchain (mksquashfs/gpg/gpgv/unsquashfs) is unavailable on the host.
+# ===========================================================================
+
+# feature_prereqs — the signer needs mksquashfs + gpg + gpgv + unsquashfs.
+feature_prereqs() {
+  command -v mksquashfs >/dev/null 2>&1 || return 1
+  command -v gpg        >/dev/null 2>&1 || return 1
+  command -v gpgv       >/dev/null 2>&1 || return 1
+  command -v unsquashfs >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# build_feature_fixture — build a sample signed feature sysext ONCE per file into
+# BATS_FILE_TMPDIR, signed by a throwaway gpg home (NOT the repo dev keys). Echoes
+# nothing; idempotent — later tests reuse the produced artifacts.
+build_feature_fixture() {
+  local out="$BATS_FILE_TMPDIR/out"
+  local raw="$out/demo-feature-rock-5b-plus-12.raw"
+  [ -f "$raw" ] && return 0
+  local stg="$BATS_FILE_TMPDIR/staging"
+  mkdir -p "$stg/usr/bin" "$stg/opt/demo"
+  printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
+  printf 'payload\n'            > "$stg/opt/demo/data.txt"
+  bash "$LIB_DIR/build-feature-sysext.sh" \
+    --feature demo-feature --board rock-5b-plus --os-version 12 \
+    --deb-staging "$stg" --out "$out" \
+    --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
+}
+
+@test "t24 sysext: build emits .raw + .raw.sha256 + .raw.sig + addon-keyring.gpg" {
+  feature_prereqs || skip "mksquashfs/gpg/gpgv/unsquashfs not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sha256" ]
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sig" ]
+  [ -f "$out/addon-keyring.gpg" ]
+}
+
+@test "t24 sysext: sha256 sidecar matches the produced .raw" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-12.raw.sha256"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *": OK"* ]]
+}
+
+@test "t24 sysext: detached signature verifies against the baked add-on keyring (gpgv OK)" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run gpgv --keyring "$out/addon-keyring.gpg" \
+        "$out/demo-feature-rock-5b-plus-12.raw.sig" \
+        "$out/demo-feature-rock-5b-plus-12.raw"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Good signature"* ]]
+}
+
+@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  run unsquashfs -no-progress -cat \
+        "$out/demo-feature-rock-5b-plus-12.raw" \
+        usr/lib/extension-release.d/extension-release.demo-feature
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SYSEXT_LEVEL=1"* ]]
+  [[ "$output" == *"VERSION_ID=12"* ]]
+}
+
+@test "t24 sysext G2: a staging tree with /etc is REFUSED (escapes /usr+/opt boundary)" {
+  feature_prereqs || skip "signing toolchain not available"
+  local stg="$BATS_TEST_TMPDIR/g2-staging" out="$BATS_TEST_TMPDIR/g2-out"
+  mkdir -p "$stg/usr/bin" "$stg/etc"
+  printf 'x\n'   > "$stg/usr/bin/t"
+  printf 'cfg\n' > "$stg/etc/foo.conf"
+  run bash "$LIB_DIR/build-feature-sysext.sh" \
+        --feature bad --board rock-5b-plus --os-version 12 \
+        --deb-staging "$stg" --out "$out" --keyring "$BATS_FILE_TMPDIR/gnupg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"G2 boundary"* ]]
+  [ ! -f "$out/bad-rock-5b-plus-12.raw" ]
+}
+
+@test "t24 sysext tamper: a flipped byte in the .raw makes gpgv FAIL (signing has teeth)" {
+  feature_prereqs || skip "signing toolchain not available"
+  build_feature_fixture
+  local out="$BATS_FILE_TMPDIR/out"
+  local tampered="$BATS_TEST_TMPDIR/tampered.raw"
+  cp "$out/demo-feature-rock-5b-plus-12.raw" "$tampered"
+  printf '\xff' | dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
+  run gpgv --keyring "$out/addon-keyring.gpg" \
+        "$out/demo-feature-rock-5b-plus-12.raw.sig" "$tampered"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"Good signature"* ]]
+}
+
+@test "t24 keyring: committed baked add-on keyring exists and is PUBLIC-only (no secret packets)" {
+  command -v gpg >/dev/null 2>&1 || skip "gpg not available"
+  local baked="$V2/mkosi/runtime/addon-keyring/addon-keyring.gpg"
+  [ -s "$baked" ]
+  # It must be a usable OpenPGP public keyring...
+  run gpg --show-keys --with-colons "$baked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\npub:'* || "$output" == pub:* ]]
+  # ...and must NOT carry any secret-key material (a device only verifies).
+  run gpg --list-packets "$baked"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"secret key"* ]]
+  ! grep -aq 'PRIVATE KEY' "$baked"
+}
+
+@test "t24 keyring: add-on keyring is a DISTINCT trust domain from the RAUC keyring" {
+  local baked="$V2/mkosi/runtime/addon-keyring/addon-keyring.gpg"
+  local rauc="$V2/mkosi/runtime/rauc/ceralive-keyring.pem"
+  [ -s "$baked" ]
+  [ -s "$rauc" ]
+  # Different files, different bytes — add-on signing never reuses the RAUC anchor.
+  run cmp -s "$baked" "$rauc"
+  [ "$status" -ne 0 ]
 }

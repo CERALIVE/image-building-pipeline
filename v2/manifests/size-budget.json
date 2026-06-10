@@ -1,0 +1,6 @@
+{
+  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling (Task 20). measure-size.sh sizes rootfs CONTENT via `du --apparent-size -sb` (real file bytes, NOT the frozen 4096 MB A/B partition — G4/E5) and exits non-zero when measured > rootfs_bytes_max. 1500000000 (1.5 GB) is a conservative post-slim ceiling: a minimal Debian bookworm arm64 rootfs with the slimmed shared.list (~35 pkgs, T17) + GStreamer + modem stack measures ~0.8-1.2 GB apparent, leaving headroom. This is a placeholder ceiling that the first real arm64 build refines downward (record the measured value, set the ceiling just above it). Keys beginning with '_' are metadata, not board entries.",
+  "orange-pi-5-plus": { "rootfs_bytes_max": 1500000000, "measured": null },
+  "rock-5b-plus": { "rootfs_bytes_max": 1500000000, "measured": null },
+  "x86-minipc": { "rootfs_bytes_max": 1500000000, "measured": null }
+}

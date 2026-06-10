@@ -46,6 +46,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${HERE}/lib/common.sh" 2>/dev/null || source "${HERE}/common.sh"
 
+# Shared libs (lib/shared/): no private copies of these readers/guards live here.
+# shellcheck source=lib/shared/yaml-lib.sh
+source "${HERE}/shared/yaml-lib.sh"
+# shellcheck source=lib/shared/deb-lib.sh
+source "${HERE}/shared/deb-lib.sh"
+# shellcheck source=lib/shared/sibling-layout-lib.sh
+source "${HERE}/shared/sibling-layout-lib.sh"
+
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode versions — pins come from
 # versions.yaml for first-party, and from the family manifest for BSP names).
@@ -55,6 +63,11 @@ ARCH="${ARCH:-arm64}"
 DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+
+# FETCH_JOBS — bounded fetch concurrency. FETCH_JOBS=1 is the strict serial
+# baseline; sanitised to a positive integer, default 4.
+FETCH_JOBS="${FETCH_JOBS:-4}"
+[[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS=4
 
 # versions.yaml lives at the workspace root: v2/lib -> v2 -> image-building-pipeline
 # -> <workspace>. Same registry scripts/fetch-debs.sh reads.
@@ -82,6 +95,42 @@ run_or_plan() {
 }
 
 # ---------------------------------------------------------------------------
+# Bounded fetch pool. _run_bounded runs <worker> for each arg with at most
+# <max> in flight (sliding window — never an unbounded `&` fan-out). Args are
+# launched in order, so REPOS/BSP ordering (G3) is the launch order. Each child
+# is waited on exactly once; any non-zero child makes the whole run non-zero so
+# one failed download fails the entire fetch (aggregate exit).
+#
+# State the workers need is passed via these script globals (background subshells
+# inherit them); each worker downloads into a private .tmp/.fetch-* path under
+# the staging dir and atomically renames the finished .deb into place, so an
+# interrupted download never leaves a half-written final .deb.
+# ---------------------------------------------------------------------------
+_BSP_DEBS=""
+_FP_DEBS=""
+_PKG_INDEX=""
+_APT_OPTS=()
+
+_run_bounded() {
+  local max="$1" worker="$2"; shift 2
+  (( max >= 1 )) || max=1
+  local rc=0 arg pid
+  local -a window=()
+  for arg in "$@"; do
+    "${worker}" "${arg}" &
+    window+=("$!")
+    if (( ${#window[@]} >= max )); then
+      wait "${window[0]}" || rc=1
+      window=("${window[@]:1}")
+    fi
+  done
+  for pid in "${window[@]}"; do
+    wait "${pid}" || rc=1
+  done
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
 # get_pin — read a component pin from versions.yaml (graceful: "" when absent).
 # Mirrors scripts/fetch-debs.sh get_pin so behaviour stays identical post-rework.
 # ---------------------------------------------------------------------------
@@ -92,75 +141,38 @@ get_pin() {
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
 }
 
-# ---------------------------------------------------------------------------
-# read_yaml_list — emit every "- item" under a top-level YAML <key> in <file>.
-# Pure-awk so the fetcher needs no yq. Tolerates blank lines and trailing
-# comments between the key and its items; stops at the next top-level key or
-# a column-0 comment. Returns nothing (success) for an absent/empty key.
-# ---------------------------------------------------------------------------
-read_yaml_list() {
-  local key="$1" file="$2"
-  [[ -f "$file" ]] || die "manifest not found: ${file}"
-  awk -v key="${key}" '
-    $0 ~ "^"key":[[:space:]]*$" { inlist=1; next }
-    inlist && /^[[:space:]]*-[[:space:]]+/ {
-      sub(/^[[:space:]]*-[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; next
-    }
-    inlist && /^[A-Za-z#]/ { inlist=0 }
-  ' "${file}"
-}
+# assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
+# tripwire that ceracoder/, srtla/, CeraUI/ are siblings — see that lib and
+# ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
 
-# ---------------------------------------------------------------------------
-# assert_sibling_layout <workspace_root>
-#
-# HARD CONSTRAINT (ARCHITECTURE.md §5): CeraUI/apps/backend/package.json resolves
-# @ceralive/ceracoder and @ceralive/srtla via `link:../../../{ceracoder,srtla}/
-# bindings/typescript`. The `../../../` climbs from CeraUI/apps/backend to the
-# parent of CeraUI, so ceracoder/, srtla/, CeraUI/ MUST be siblings there.
-#
-# WHY HERE: once we consume PRE-BUILT .debs, mkosi never touches the link: graph,
-# so the layout is technically irrelevant to image assembly. BUT the .debs are
-# built FROM this checkout upstream; a broken sibling layout means CeraUI's .deb
-# could never have been produced. This guard is the CI-side tripwire that catches
-# the misconfiguration loudly at fetch time instead of letting a silently-missing
-# CeraUI .deb surface as a mysterious runtime gap. It takes the root as an ARG so
-# it is unit-testable against synthetic good/bad trees (see assert-sibling cmd).
-# ---------------------------------------------------------------------------
-assert_sibling_layout() {
-  local root="$1"
-  [[ -n "${root}" ]] || die "assert_sibling_layout: workspace root not given"
-  [[ -d "${root}" ]] || die "sibling-layout: workspace root does not exist: ${root}"
-
-  local sib missing=()
-  for sib in ceracoder srtla CeraUI; do
-    [[ -d "${root}/${sib}" ]] || missing+=("${sib}/")
+# _fetch_bsp_native_one — bounded-pool worker: download ONE BSP .deb into a
+# private temp dir, then atomically rename the result into ${_BSP_DEBS}. A killed
+# apt-get leaves files only in the throwaway .fetch-* dir, never a partial final.
+_fetch_bsp_native_one() {
+  local pkg="$1"
+  log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
+  if [[ -n "${DRY_RUN}" ]]; then
+    run_or_plan bash -c \
+      "cd $(printf '%q' "${_BSP_DEBS}") && apt-get $(printf '%q ' "${_APT_OPTS[@]}")download $(printf '%q' "${pkg}")"
+    return 0
+  fi
+  local tmpd; tmpd="$(mktemp -d "${_BSP_DEBS}/.fetch-XXXXXX")"
+  ( cd "${tmpd}" && apt-get "${_APT_OPTS[@]}" download "${pkg}" )
+  local f
+  shopt -s nullglob
+  for f in "${tmpd}"/*.deb; do
+    mv -f "${f}" "${_BSP_DEBS}/$(basename "${f}")"
   done
-  if (( ${#missing[@]} > 0 )); then
-    die "sibling-layout BROKEN under ${root}: missing ${missing[*]} — CeraUI backend resolves @ceralive/{ceracoder,srtla} via link:../../../ (ARCHITECTURE.md §5). ceracoder/, srtla/, CeraUI/ must be siblings."
-  fi
-
-  # Verify the exact link: targets the backend depends on actually resolve from
-  # CeraUI/apps/backend, not just that the sibling dirs exist.
-  local backend="${root}/CeraUI/apps/backend"
-  if [[ -d "${backend}" ]]; then
-    local dep
-    for dep in ceracoder srtla; do
-      # link:../../../<dep>/bindings/typescript resolved from CeraUI/apps/backend
-      local resolved="${backend}/../../../${dep}/bindings/typescript"
-      if [[ ! -d "${resolved}" ]]; then
-        log_warn "sibling-layout: ${dep} bindings/typescript not present at $(cd "${backend}" >/dev/null 2>&1 && cd "../../../${dep}" 2>/dev/null && pwd || echo "${root}/${dep}")/bindings/typescript — link:../../../${dep}/bindings/typescript will fail on a source build (ok if consuming a pre-built CeraUI .deb)"
-      fi
-    done
-  fi
-
-  log_success "sibling-layout OK under ${root} (ceracoder/ srtla/ CeraUI/ are siblings; link:../../../ resolves)"
+  shopt -u nullglob
+  rm -rf "${tmpd}"
 }
 
 # ---------------------------------------------------------------------------
 # _fetch_bsp_native — native apt-get path (Debian/Ubuntu hosts).
 # Isolated apt state so the host apt config is never touched. The Armbian repo
 # is declared in a throwaway sources list; `apt-get download` fetches the .deb
-# for the current suite into $debs.
+# for the current suite into $debs. The per-package downloads run through the
+# bounded fetch pool; the shared apt state is prepared once, serially, first.
 # ---------------------------------------------------------------------------
 _fetch_bsp_native() {
   local debs="$1"; shift
@@ -187,19 +199,47 @@ _fetch_bsp_native() {
 
   run_or_plan apt-get "${apt_opts[@]}" update
 
-  local pkg
-  for pkg in "${bsp_pkgs[@]}"; do
-    log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
-    run_or_plan bash -c \
-      "cd $(printf '%q' "${debs}") && apt-get $(printf '%q ' "${apt_opts[@]}")download $(printf '%q' "${pkg}")"
-  done
+  _BSP_DEBS="${debs}"
+  _APT_OPTS=("${apt_opts[@]}")
+  local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+  _run_bounded "${jobs}" _fetch_bsp_native_one "${bsp_pkgs[@]}" \
+    || die "BSP fetch failed (native apt path): one or more packages did not download"
+}
+
+# _fetch_bsp_curl_one — bounded-pool worker: resolve ONE BSP package name to its
+# pool path via the cached Packages index (${_PKG_INDEX}), curl it to a private
+# .tmp-* file, then atomically rename into ${_BSP_DEBS}. A killed curl leaves
+# only the .tmp-* partial, never a half-written final .deb.
+_fetch_bsp_curl_one() {
+  local pkg="$1" filename=""
+  if [[ -z "${DRY_RUN}" ]]; then
+    filename="$(awk -v want="${pkg}" '
+      /^Package: /{ p=($2==want) }
+      p && /^Filename: /{ print $2; exit }
+    ' "${_PKG_INDEX}")"
+    [[ -n "${filename}" ]] \
+      || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+  fi
+  log_info "BSP fetch (curl): ${pkg}"
+  if [[ -n "${DRY_RUN}" ]]; then
+    run_or_plan curl -fsSL --retry 3 \
+      -o "${_BSP_DEBS}/$(basename "${filename:-${pkg}.deb}")" \
+      "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
+    return 0
+  fi
+  local final tmp
+  final="${_BSP_DEBS}/$(basename "${filename}")"
+  tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
+  curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"
+  mv -f "${tmp}" "${final}"
 }
 
 # ---------------------------------------------------------------------------
 # _fetch_bsp_curl — curl-based fallback for non-Debian hosts (e.g. Arch Linux).
 # Downloads the Armbian Packages.gz index, resolves each BSP package name to
 # its pool URL, then curl-fetches the .deb. No apt-get, no Docker, no GPG key
-# import required. Works on any host with curl + gzip.
+# import required. Works on any host with curl + gzip. The index is fetched once;
+# per-package downloads run through the bounded fetch pool.
 # ---------------------------------------------------------------------------
 _fetch_bsp_curl() {
   local debs="$1"; shift
@@ -220,23 +260,11 @@ _fetch_bsp_curl() {
     log_info "DRY-RUN: would decompress ${packages_file}.gz"
   fi
 
-  local pkg
-  for pkg in "${bsp_pkgs[@]}"; do
-    local filename=""
-    if [[ -z "${DRY_RUN}" ]]; then
-      # Parse the Packages index: find the block for this package, extract Filename:
-      filename="$(awk -v want="${pkg}" '
-        /^Package: /{ p=($2==want) }
-        p && /^Filename: /{ print $2; exit }
-      ' "${packages_file}")"
-      [[ -n "${filename}" ]] \
-        || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
-    fi
-    log_info "BSP fetch (curl): ${pkg}"
-    run_or_plan curl -fsSL --retry 3 \
-      -o "${debs}/$(basename "${filename:-${pkg}.deb}")" \
-      "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
-  done
+  _BSP_DEBS="${debs}"
+  _PKG_INDEX="${packages_file}"
+  local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+  _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
+    || die "BSP fetch failed (curl path): one or more packages did not download"
 
   [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}"
   return 0
@@ -304,9 +332,39 @@ fetch_bsp() {
   fi
 }
 
+# _fetch_first_party_one — bounded-pool worker: download ONE repo's .deb(s) into
+# a private temp dir, then atomically rename into ${_FP_DEBS}. A repo with no
+# matching release is a warning, not a failure (unchanged semantics). A killed
+# gh leaves files only in the throwaway .fetch-* dir, never a partial final.
+_fetch_first_party_one() {
+  local r="$1"
+  log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
+  if [[ -n "${DRY_RUN}" ]]; then
+    log_info "DRY-RUN would run: gh release download --repo CERALIVE/${r} --pattern *${ARCH}*.deb --dir ${_FP_DEBS} --clobber"
+    return 0
+  fi
+  local tmpd; tmpd="$(mktemp -d "${_FP_DEBS}/.fetch-XXXXXX")"
+  if gh release download \
+       --repo "CERALIVE/${r}" \
+       --pattern "*${ARCH}*.deb" \
+       --dir "${tmpd}" \
+       --clobber 2>&1; then
+    local f
+    shopt -s nullglob
+    for f in "${tmpd}"/*.deb; do
+      mv -f "${f}" "${_FP_DEBS}/$(basename "${f}")"
+    done
+    shopt -u nullglob
+  else
+    log_warn "first-party: no ${ARCH} .deb release for CERALIVE/${r} (repo has no release or no matching asset) — mkosi app layer will install nothing for this component"
+  fi
+  rm -rf "${tmpd}"
+}
+
 # ---------------------------------------------------------------------------
 # fetch_first_party — srtla/srt/ceracoder/CeraUI .debs. CI: aws s3 sync from R2;
-# local: gh release download per repo. Pins logged from versions.yaml.
+# local: gh release download per repo (through the bounded fetch pool, launched
+# in REPOS order). Pins logged from versions.yaml.
 # ---------------------------------------------------------------------------
 fetch_first_party() {
   local debs="$1"
@@ -335,19 +393,10 @@ fetch_first_party() {
     log_info "local mode: GitHub releases -> gh release download"
     [[ -n "${DRY_RUN}" ]] || require_cmd gh
 
-    for r in "${REPOS[@]}"; do
-      log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
-      if [[ -n "${DRY_RUN}" ]]; then
-        log_info "DRY-RUN would run: gh release download --repo CERALIVE/${r} --pattern *${ARCH}*.deb --dir ${debs} --clobber"
-      else
-        gh release download \
-          --repo "CERALIVE/${r}" \
-          --pattern "*${ARCH}*.deb" \
-          --dir "${debs}" \
-          --clobber 2>&1 \
-          || log_warn "first-party: no ${ARCH} .deb release for CERALIVE/${r} (repo has no release or no matching asset) — mkosi app layer will install nothing for this component"
-      fi
-    done
+    _FP_DEBS="${debs}"
+    local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+    _run_bounded "${jobs}" _fetch_first_party_one "${REPOS[@]}" \
+      || die "first-party fetch failed (gh path)"
   fi
 }
 

@@ -207,6 +207,7 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 
 | Document | Scope |
 |---|---|
+| [`cog-display-addon.md`](cog-display-addon.md) | W4: Cog + WPEWebKit feature-sysext packaging path + libmali (Platform-layer) exclusion strategy — a lighter alternative display engine to cage + Chromium |
 | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../../../CeraUI/docs/ON_DEVICE_DISPLAY.md) | Cross-repo architecture, DC-1..DC-4, Phase-3 deferral register |
 | [`CeraUI/docs/KIOSK_STATE_MACHINE.md`](../../../CeraUI/docs/KIOSK_STATE_MACHINE.md) | DC-2: 5-state machine spec |
 | [`CeraUI/docs/KIOSK_TOKEN_CONTRACT.md`](../../../CeraUI/docs/KIOSK_TOKEN_CONTRACT.md) | DC-3: loopback token spec |

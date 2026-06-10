@@ -57,6 +57,14 @@ source "${SYNC_BACKEND_HERE}/transport.sh"
 # shellcheck source=arch.sh
 source "${SYNC_BACKEND_HERE}/arch.sh"
 
+# Wave-0 shared libs: arch guard, health gate, rollback verbs.
+# shellcheck source=../shared/arch-lib.sh
+source "${SYNC_BACKEND_HERE}/../shared/arch-lib.sh"
+# shellcheck source=../shared/health-gate-lib.sh
+source "${SYNC_BACKEND_HERE}/../shared/health-gate-lib.sh"
+# shellcheck source=../shared/rollback-lib.sh
+source "${SYNC_BACKEND_HERE}/../shared/rollback-lib.sh"
+
 # ---------------------------------------------------------------------------
 # Settled config for this component.
 # ---------------------------------------------------------------------------
@@ -110,7 +118,6 @@ preflight_guard() {
     log_success "sync-backend: arch pre-check OK — host ${host} == device ${want}."
   fi
 
-  # Export the resolved device arch for the build step (BUILD_ARCH speaks amd64/arm64).
   BUILD_TARGET_ARCH="${want}"
 }
 
@@ -167,90 +174,6 @@ restart_service() {
   local reason="${1:-deploy}"
   log_info "sync-backend: systemctl restart ${DEV_SYNC_SERVICE} (${reason})"
   transport_ssh "systemctl restart '${DEV_SYNC_SERVICE}'"
-}
-
-# ---------------------------------------------------------------------------
-# health_gate — the deploy verdict. Passes only when the service is `active`
-# AND an HTTP probe of the SPA root returns success, retried up to
-# DEV_SYNC_HEALTH_RETRIES times. There is no dedicated /health route on the
-# backend (Bun.serve in server.ts serves static + WS only); `/` returning the
-# index.html with a 200 is the liveness signal. Returns 0 healthy, 1 unhealthy.
-# ---------------------------------------------------------------------------
-health_gate() {
-  local url="http://127.0.0.1:${DEV_SYNC_HEALTH_PORT}${DEV_SYNC_HEALTH_PATH}"
-
-  if [[ "${DEV_SYNC_FORCE_HEALTH_FAIL}" == "1" ]]; then
-    log_warn "sync-backend: DEV_SYNC_FORCE_HEALTH_FAIL=1 — forcing health gate FAILURE (QA fault-injection)."
-    return 1
-  fi
-
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    log_info "[DRY_RUN] health gate: poll up to ${DEV_SYNC_HEALTH_RETRIES}× every ${DEV_SYNC_HEALTH_INTERVAL}s:"
-    log_info "[DRY_RUN]   ssh ${SSH_USER}@${RESOLVED_TARGET} systemctl is-active ${DEV_SYNC_SERVICE}  # expect: active"
-    log_info "[DRY_RUN]   ssh ${SSH_USER}@${RESOLVED_TARGET} curl -fsS -o /dev/null --max-time 5 ${url}  # expect: 2xx"
-    log_success "[DRY_RUN] health gate assumed PASS"
-    return 0
-  fi
-
-  # Remote one-liner: service active AND HTTP probe ok. curl preferred; wget
-  # fallback for minimal images. Exits non-zero if either check fails.
-  local probe
-  probe="systemctl is-active --quiet '${DEV_SYNC_SERVICE}' && { command -v curl >/dev/null 2>&1 && curl -fsS -o /dev/null --max-time 5 '${url}' || wget -q -O /dev/null -T 5 '${url}'; }"
-
-  local attempt
-  for (( attempt = 1; attempt <= DEV_SYNC_HEALTH_RETRIES; attempt++ )); do
-    if transport_ssh "${probe}"; then
-      log_success "sync-backend: health gate PASS (attempt ${attempt}/${DEV_SYNC_HEALTH_RETRIES}) — ${DEV_SYNC_SERVICE} active + ${url} ok."
-      return 0
-    fi
-    log_warn "sync-backend: health probe not ready (attempt ${attempt}/${DEV_SYNC_HEALTH_RETRIES}); retrying in ${DEV_SYNC_HEALTH_INTERVAL}s…"
-    sleep "${DEV_SYNC_HEALTH_INTERVAL}"
-  done
-
-  log_error "sync-backend: health gate FAILED after ${DEV_SYNC_HEALTH_RETRIES} attempts."
-  return 1
-}
-
-# ---------------------------------------------------------------------------
-# rollback — restore the previous binary and bring the service back to `active`.
-# Invoked only when the post-deploy health gate fails. Always exits the script
-# non-zero afterwards: a failed deploy is a failure even if rollback succeeds.
-# ---------------------------------------------------------------------------
-rollback() {
-  log_error "sync-backend: initiating ROLLBACK to ${REMOTE_BINARY_OLD}."
-
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    log_info "[DRY_RUN] ssh ${SSH_USER}@${RESOLVED_TARGET} 'if [ -f ${REMOTE_BINARY_OLD} ]; then mv -f ${REMOTE_BINARY_OLD} ${REMOTE_BINARY}; fi'"
-    log_info "[DRY_RUN] ssh ${SSH_USER}@${RESOLVED_TARGET} systemctl restart ${DEV_SYNC_SERVICE}"
-    log_info "[DRY_RUN] ssh ${SSH_USER}@${RESOLVED_TARGET} systemctl is-active ${DEV_SYNC_SERVICE}  # expect: active"
-    log_warn "[DRY_RUN] rollback plan logged; exiting non-zero to signal the failed deploy."
-    return 0
-  fi
-
-  # No backup means a first-ever deploy went bad: nothing to restore. The
-  # service has Restart=always, so leave it; surface a loud error.
-  if ! transport_ssh "[ -f '${REMOTE_BINARY_OLD}' ]"; then
-    die "sync-backend: ROLLBACK IMPOSSIBLE — no ${REMOTE_BINARY_OLD} to restore (first deploy?). ${DEV_SYNC_SERVICE} may be crash-looping; investigate the device."
-  fi
-
-  transport_ssh "mv -f '${REMOTE_BINARY_OLD}' '${REMOTE_BINARY}' && chmod +x '${REMOTE_BINARY}'"
-
-  if ! restart_service "rollback"; then
-    die "sync-backend: ROLLBACK restart of ${DEV_SYNC_SERVICE} FAILED — device needs manual recovery."
-  fi
-
-  # Verify the restored binary brings the service back to active.
-  local attempt
-  for (( attempt = 1; attempt <= DEV_SYNC_HEALTH_RETRIES; attempt++ )); do
-    if transport_ssh "systemctl is-active --quiet '${DEV_SYNC_SERVICE}'"; then
-      log_success "sync-backend: ROLLBACK OK — ${DEV_SYNC_SERVICE} is active on the previous binary."
-      return 0
-    fi
-    log_warn "sync-backend: post-rollback service not active yet (attempt ${attempt}/${DEV_SYNC_HEALTH_RETRIES})…"
-    sleep "${DEV_SYNC_HEALTH_INTERVAL}"
-  done
-
-  die "sync-backend: ROLLBACK restored the old binary but ${DEV_SYNC_SERVICE} did not return to active — manual recovery required."
 }
 
 # ---------------------------------------------------------------------------
