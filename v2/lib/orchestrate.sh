@@ -300,7 +300,7 @@ main() {
   # (containerized default vs --native) and surfaces a missing-runtime error.
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     select_build_mode
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
+    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -510,10 +510,18 @@ run_mkosi_build() {
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done
 
+  # Per-board cache isolation (T11): scope the incremental apt cache to this
+  # board so concurrent multi-board builds never share one cache dir (the race
+  # T12 parallelises on). This CLI flag is the authoritative plumb; it overrides
+  # the env-expanded default in mkosi/mkosi.conf and they resolve to the same
+  # path. Relative to the mkosi config dir (MKOSI_DIR / /work/mkosi in-container).
+  local cache_dir="cache/${BOARD_ID}"
+
   local mkosi_args=(
     --architecture="${mkosi_arch}"
     --with-network=yes
     "${env_cli[@]}"
+    --cache-directory="${cache_dir}"
     --package-directory "${bsp_dir}"
     --extra-tree "${firstparty_dir}:/opt/ceralive-staging"
     --force
@@ -564,6 +572,7 @@ run_mkosi_build() {
         --with-network=yes \
         '"${env_cli_str}"' \
         --environment CERALIVE_V2_DIR \
+        --cache-directory='"${cache_dir}"' \
         --package-directory /work/mkosi/.staging/'"${BOARD_ID}"'/bsp \
         --extra-tree /work/mkosi/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
         --force \
