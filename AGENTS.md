@@ -59,6 +59,7 @@ image-building-pipeline/
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
+| Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
 
 ## KEY FACTS
 
@@ -174,12 +175,24 @@ artifacts.
 
 ```
 addons/{os_version}/{board}/{feature}.raw
+addons/{os_version}/{board}/{feature}.raw.sha256
 addons/{os_version}/{board}/{feature}.raw.sig
 ```
 
 `os_version` is the Debian `VERSION_ID` (e.g. `12` for bookworm). The
 `{os_version}` placeholder in `artifact.urlTemplate` is substituted at download
-time by the CeraUI add-on manager.
+time by the CeraUI add-on manager. `apt-worker` serves these keys (404 on a
+missing object, never a 200-empty); see `apt-worker/AGENTS.md`.
+
+**Publishing** [EXISTS]
+
+`v2/lib/upload-addons.sh` publishes a signed add-on to R2, mapping
+`build-feature-sysext.sh`'s `<feature>-<board>-<os_version>.raw{,.sha256,.sig}`
+onto the delivery path above. It REFUSES to upload an unsigned (or
+unchecksummed) artifact, and pins per-file content-type so R2 stores what the
+worker serves. CI mode reuses the `fetch-debs.sh` R2 pattern (`aws s3 cp`
++ `R2_ENDPOINT`); the `v2-ci.yml` `addon-publish` job proves the plan +
+unsigned-refusal gate under `DRY_RUN` without secrets.
 
 **sysext refresh protocol** — see [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md)
 

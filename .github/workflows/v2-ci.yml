@@ -13,6 +13,10 @@
 # builds, fixes the output bytes. Same digest on two hosts ⇒ same plan ⇒ (by
 # T14) bit-identical image. The only CI runner is Linux/x86_64; Fedora/Arch/
 # macOS/WSL2 are documented-not-CI-verified in v2/docs/dev-loop.md.
+#
+# addon-publish (task 35) stays inside the no-secrets invariant: it runs
+# DRY_RUN=1 (plan only, uploads nothing) so the real aws-s3 upload in
+# v2/lib/upload-addons.sh never fires without R2_* creds + a signed artifact.
 
 name: v2 Pipeline CI
 
@@ -141,6 +145,66 @@ jobs:
           fi
           cat size-over.log
           grep -q 'exceeds budget' size-over.log
+
+  addon-publish:
+    # Feature-sysext R2 publish contract. The real path (v2/lib/upload-addons.sh,
+    # aws s3 cp + R2 endpoint — same pattern as fetch-debs.sh) only fires with
+    # R2_* creds AND a signed .raw, neither present here. So this job proves the
+    # contract under DRY_RUN: a synthetic SIGNED artifact set asserts the plan
+    # targets the canonical addons/{os_version}/{board}/{feature} keys with the
+    # right per-file content-type, and a non-vacuous negative leg asserts the
+    # trust gate REFUSES an unsigned .raw (no upload without a .sig).
+    name: addon publish contract (dry-run plan + unsigned-refusal gate)
+    runs-on: ubuntu-latest
+    needs: bats
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plan targets the per-board/per-OS R2 keys (DRY_RUN, signed inputs)
+        env:
+          DRY_RUN: '1'
+          R2_BUCKET: apt-storage
+          R2_ENDPOINT: https://r2.example
+        run: |
+          set -euo pipefail
+          dist="${RUNNER_TEMP}/addon-dist"
+          mkdir -p "${dist}"
+          stem="debug-toolset-rock-5b-plus-12"
+          head -c 4096 /dev/zero > "${dist}/${stem}.raw"
+          ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
+          printf 'stub-detached-signature\n' > "${dist}/${stem}.raw.sig"
+          ./v2/lib/upload-addons.sh \
+            --feature debug-toolset --board rock-5b-plus --os-version 12 \
+            --dist "${dist}" 2>&1 | tee addon-plan.log
+          # All three artifacts must target addons/{os_version}/{board}/{feature}.
+          grep -qE 's3://apt-storage/addons/12/rock-5b-plus/debug-toolset\.raw ' addon-plan.log
+          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sha256' addon-plan.log
+          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sig' addon-plan.log
+          # Content-type pinned per file so R2 stores what the worker serves.
+          grep -q 'debug-toolset.raw --endpoint-url https://r2.example --content-type application/octet-stream' addon-plan.log
+          grep -q 'debug-toolset.raw.sig --endpoint-url https://r2.example --content-type text/plain' addon-plan.log
+
+      - name: Trust gate bites — an UNSIGNED add-on MUST be refused (non-vacuous)
+        env:
+          DRY_RUN: '1'
+          R2_BUCKET: apt-storage
+          R2_ENDPOINT: https://r2.example
+        run: |
+          dist="${RUNNER_TEMP}/addon-unsigned"
+          mkdir -p "${dist}"
+          stem="debug-toolset-rock-5b-plus-12"
+          head -c 4096 /dev/zero > "${dist}/${stem}.raw"
+          ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
+          # No .raw.sig on purpose — the publisher MUST refuse to upload.
+          if ./v2/lib/upload-addons.sh \
+               --feature debug-toolset --board rock-5b-plus --os-version 12 \
+               --dist "${dist}" > addon-unsigned.log 2>&1; then
+            cat addon-unsigned.log
+            echo "::error::upload-addons.sh published an UNSIGNED add-on"
+            exit 1
+          fi
+          cat addon-unsigned.log
+          grep -q 'refusing to publish UNSIGNED add-on' addon-unsigned.log
 
   build-matrix:
     # Dry-run resolves the containerized build plan for both arches, then emits a
