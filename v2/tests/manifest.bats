@@ -493,9 +493,7 @@ YAML
 #     here so that flip stays a one-line manifest edit.
 # ===========================================================================
 
-@test "size-budget: every shipped board has a null-threshold entry (report-only default)" {
-  # size-budget.json must be legal JSON, an object, and carry one entry per board
-  # manifest with BOTH keys null (the report-only contract Task 20 later flips).
+@test "size-budget: every shipped board carries a positive-integer blocking ceiling (Task-20 flip landed)" {
   run python3 - "$SIZE_BUDGET_JSON" "$V2/manifests/boards" <<'PY'
 import json, sys
 from pathlib import Path
@@ -503,22 +501,27 @@ from pathlib import Path
 budget = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert isinstance(budget, dict), "root must be an object"
 boards = {p.stem for p in Path(sys.argv[2]).glob("*.yaml")}
-missing = boards - set(budget)
+entries = {k: v for k, v in budget.items() if not k.startswith("_")}
+missing = boards - set(entries)
 assert not missing, "boards missing a size-budget entry: %s" % sorted(missing)
-for name, entry in budget.items():
-    assert entry.get("rootfs_bytes_max") is None, "%s: rootfs_bytes_max must be null" % name
-    assert entry.get("measured") is None, "%s: measured must be null" % name
+for name, entry in entries.items():
+    limit = entry.get("rootfs_bytes_max")
+    assert isinstance(limit, int) and not isinstance(limit, bool) and limit > 0, (
+        "%s: rootfs_bytes_max must be a positive int (blocking), got %r" % (name, limit)
+    )
 print("BUDGET-OK")
 PY
   [ "$status" -eq 0 ]
   [[ "$output" == *"BUDGET-OK"* ]]
 }
 
-@test "size-gate: report-only run prints measured vs null budget and exits 0" {
+@test "size-gate: a null budget is report-only (retained path for newly-added boards) and exits 0" {
   local tree="$BATS_TEST_TMPDIR/rootfs"
   mkdir -p "$tree"
   head -c 4096 /dev/zero > "$tree/a.bin"
-  run "$MEASURE_SH" rock-5b-plus "$tree"
+  local nullbudget="$BATS_TEST_TMPDIR/null-budget.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": null, "measured": null } }\n' > "$nullbudget"
+  run env SIZE_BUDGET_JSON="$nullbudget" "$MEASURE_SH" rock-5b-plus "$tree"
   [ "$status" -eq 0 ]
   [[ "$output" =~ measured=[0-9]+\ budget=null\ \(report-only\) ]]
 }
@@ -576,6 +579,27 @@ PY
   run env SIZE_BUDGET_JSON="$roomy" "$MEASURE_SH" rock-5b-plus "$tree"
   [ "$status" -eq 0 ]
   [[ "$output" =~ measured=[0-9]+\ budget=1073741824\ \(enforced\) ]]
+}
+
+@test "size-gate: the COMMITTED size-budget.json enforces (non-null) for every shipped board" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-committed"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  for board in orange-pi-5-plus rock-5b-plus x86-minipc; do
+    run "$MEASURE_SH" "$board" "$tree"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ measured=[0-9]+\ budget=[0-9]+\ \(enforced\) ]]
+    [[ "$output" != *"report-only"* ]]
+  done
+}
+
+@test "size-gate: a tree over the COMMITTED ceiling fails the gate (sparse 2 GiB > 1.5 GB budget)" {
+  local tree="$BATS_TEST_TMPDIR/rootfs-over"
+  mkdir -p "$tree"
+  truncate -s 2G "$tree/oversize.img"
+  run "$MEASURE_SH" rock-5b-plus "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds budget"* ]]
 }
 
 # ===========================================================================

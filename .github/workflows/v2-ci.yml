@@ -103,14 +103,12 @@ jobs:
         run: ./v2/run-tests
 
   size-gate:
-    # REPORT-ONLY size measurement (Task 8). Sizes rootfs CONTENT via
-    # measure-size.sh (du --apparent-size -sb on the artifact/tree — NOT the
-    # frozen 4096 MB partition, G4/E5) and prints `measured=<N> budget=null
-    # (report-only)`. The DRY_RUN matrix ships no real rootfs, so this exercises
-    # the mechanism against a synthetic content tree. While every budget is null
-    # this MUST exit 0 — Task 20 flips it to blocking by setting a threshold in
-    # manifests/size-budget.json (no workflow change needed then).
-    name: rootfs size measurement (report-only)
+    # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
+    # (du --apparent-size -sb — NOT the frozen 4096 MB partition, G4/E5). DRY_RUN
+    # ships no real rootfs, so the positive leg uses a synthetic under-budget tree
+    # and the negative leg a sparse 2 GiB tree that MUST trip the gate — without
+    # the negative leg an always-passing gate would look identical.
+    name: rootfs size gate (blocking)
     runs-on: ubuntu-latest
     needs: bats
     steps:
@@ -120,16 +118,29 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Measure rootfs content vs budget (report-only — threshold null)
+      - name: Gate passes — synthetic tree under the committed ceiling (enforced, exit 0)
         run: |
-          # No real rootfs under DRY_RUN — measure a synthetic content tree to
-          # prove the mechanism. apparent-size is deterministic; the run must
-          # report and exit 0 while budgets remain null.
+          set -o pipefail
           art="${RUNNER_TEMP}/rootfs-sample"
           mkdir -p "${art}"
           head -c 4096 /dev/zero > "${art}/placeholder.bin"
-          ./v2/lib/measure-size.sh rock-5b-plus "${art}" | tee size-report.log
-          grep -Eq 'measured=[0-9]+ budget=null \(report-only\)' size-report.log
+          ./v2/lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
+          grep -Eq 'measured=[0-9]+ budget=[0-9]+ \(enforced\)' size-report.log
+
+      - name: Gate bites — sparse over-budget tree MUST fail the gate (non-vacuous)
+        run: |
+          # die() writes "exceeds budget" to stderr — fold it into the log (2>&1)
+          # so the grep below sees it; the if guards the gate's non-zero exit.
+          over="${RUNNER_TEMP}/rootfs-over"
+          mkdir -p "${over}"
+          truncate -s 2G "${over}/oversize.img"
+          if ./v2/lib/measure-size.sh rock-5b-plus "${over}" > size-over.log 2>&1; then
+            cat size-over.log
+            echo "::error::size gate did NOT fail on an over-budget rootfs"
+            exit 1
+          fi
+          cat size-over.log
+          grep -q 'exceeds budget' size-over.log
 
   build-matrix:
     # Dry-run resolves the containerized build plan for both arches, then emits a

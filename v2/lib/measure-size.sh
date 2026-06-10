@@ -3,11 +3,11 @@
 # measure-size.sh — measure rootfs CONTENT size and compare it to the per-board
 # budget in manifests/size-budget.json.
 #
-# REPORT-ONLY SCAFFOLDING (Task 8). While a board's rootfs_bytes_max is null this
-# NEVER fails on size — it prints `measured=<N> budget=null (report-only)` and
-# exits 0. Task 20 flips the gate to blocking by setting a non-null threshold; the
-# enforcement branch below is already wired so that flip is a one-line manifest
-# edit, not a code change.
+# BLOCKING SIZE GATE (Task 20). Every shipped board now carries a non-null
+# rootfs_bytes_max in manifests/size-budget.json, so this ENFORCES: it prints
+# `measured=<N> budget=<M> (enforced)` and exits non-zero when measured > budget.
+# The report-only branch (budget==null) is retained so a newly-added board with an
+# unset budget reports rather than hard-fails until its ceiling is measured.
 #
 # G4/E5 GUARDRAIL: this measures rootfs CONTENT — the apparent byte size of the
 # artifact/tree via `du --apparent-size -sb` — NOT the frozen 4096 MB A/B
