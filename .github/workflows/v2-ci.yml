@@ -81,6 +81,17 @@ jobs:
           sudo /tmp/bats-core/install.sh /usr/local
           bats --version
 
+      - name: Stub sibling-checkout workspace
+        run: |
+          # fetch-debs asserts ceracoder/ srtla/ CeraUI/ are siblings of the
+          # workspace root (ARCHITECTURE.md §5). Only image-building-pipeline is
+          # checked out here, so point CERALIVE_WORKSPACE at a stub tree. Under
+          # DRY_RUN no .debs are built from source, so empty dirs satisfy the
+          # tripwire without needing the real sibling repos.
+          ws="${RUNNER_TEMP}/ceralive-ws"
+          mkdir -p "${ws}/ceracoder" "${ws}/srtla" "${ws}/CeraUI"
+          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
+
       - name: Run v2 manifest unit suite (16 tests)
         run: ./v2/run-tests
 
