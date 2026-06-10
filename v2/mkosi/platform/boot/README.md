@@ -88,12 +88,18 @@ backend, and the offline test share **one** implementation.
 
 ## Board specifics come from the manifest — never hardcoded
 
-`install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`, `FAMILY`,
-`SINGLE_SLOT_FALLBACK` from the environment (resolved from the board+family manifest by
-`lib/resolve.sh`, forwarded by `lib/orchestrate.sh` via mkosi `--environment`). It
-renders `cera_board.env` / `extlinux.conf` from the `*.tmpl` files (the manifest's
-`ttyS2:1500000` becomes the kernel `console=ttyS2,1500000`) and derives the RAUC
-`compatible=ceralive-<family>`. Adding a board never edits any file here.
+`install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`,
+`SINGLE_SLOT_FALLBACK` and `COMPATIBLE_STRING` from the environment (resolved from the
+board+family manifest by `lib/resolve.sh`, forwarded by `lib/orchestrate.sh` via mkosi
+`--environment`). It renders `cera_board.env` / `extlinux.conf` from the `*.tmpl` files
+(the manifest's `ttyS2:1500000` becomes the kernel `console=ttyS2,1500000`) and writes
+the RAUC `compatible` **verbatim from `COMPATIBLE_STRING`** — `ceralive-<board-slug>`
+(e.g. `ceralive-rock-5b-plus`), the **board-specific** string the orchestrator derives
+once from `board_id` (T12). It is NOT family-wide (`ceralive-rk3588`): a family default
+would let one board's signed bundle install on another. `install-boot.sh` keeps **no**
+local default — an empty `COMPATIBLE_STRING` is a hard error, so the on-device
+`system.conf` and the signed `.raucb` can never disagree. Adding a board never edits any
+file here.
 
 ## Single-slot fallback (storage < 16 GB — contract §4)
 

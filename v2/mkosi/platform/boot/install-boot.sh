@@ -9,7 +9,7 @@
 #   SERIAL_CONSOLE   family manifest  serial_console  (e.g. ttyS2:1500000)
 #   DTB_NAME         board  manifest  dtb_name        (e.g. rk3588-rock-5b-plus.dtb)
 #   BOARD_ID         board  manifest  board_id        (e.g. rock-5b-plus)
-#   FAMILY           board  manifest  family          (e.g. rk3588) -> RAUC compatible
+#   COMPATIBLE_STRING  orchestrator   ceralive-<board-slug> (e.g. ceralive-rock-5b-plus)
 #   SINGLE_SLOT_FALLBACK  board manifest single_slot_fallback (true|false)
 #
 # TWO install targets, because the bits live in two places and need different
@@ -47,15 +47,14 @@ die()  { printf '[install-boot] ERROR: %s\n' "$*" >&2; exit 1; }
 BOARD_ID="${BOARD_ID:-}"
 DTB_NAME="${DTB_NAME:-}"
 SERIAL_CONSOLE="${SERIAL_CONSOLE:-}"
-FAMILY="${FAMILY:-}"
 SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"
 BOOT_ATTEMPTS="${CERALIVE_BOOT_ATTEMPTS:-3}"
 
-# RAUC system compatible string — board-aware, NOT hardcoded per board. Honors
-# COMPATIBLE_STRING (the orchestrator-forwarded knob shared with the runtime
-# fallback, task 26), then the legacy RAUC_COMPATIBLE, then the family default.
-# Whatever wins MUST equal the compatible baked into the signed bundle.
-COMPATIBLE="${COMPATIBLE_STRING:-${RAUC_COMPATIBLE:-ceralive-${FAMILY:-unknown}}}"
+# RAUC system compatible — read verbatim from the orchestrator (T12 single source
+# of truth: ceralive-<board-slug>). NO family/board default here: a value computed
+# locally could disagree with the signed bundle and reject every OTA. Empty is a
+# hard error at install time (install_rootfs guard).
+COMPATIBLE="${COMPATIBLE_STRING:-}"
 
 # console= value for kernel/U-Boot: the manifest uses `ttyS2:1500000`; the kernel
 # console form is `ttyS2,1500000`. Rewrite the ':' separator to ','.
@@ -91,6 +90,7 @@ render_env() {
 # ---------------------------------------------------------------------------
 install_rootfs() {
   local root="${ROOT:-}"
+  [[ -n "${COMPATIBLE}" ]] || die "COMPATIBLE_STRING is unset/empty — the orchestrator must export ceralive-<board-slug> (board-specific); refusing to write a system.conf the signed bundle would reject"
   log "installing RAUC custom bootloader backend + state helper into the rootfs${root:+ (ROOT=${root})}"
 
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-boot-state.sh"          "${root}/usr/bin/ceralive-boot-state"
@@ -201,8 +201,8 @@ Usage: install-boot.sh <target> [args]
                                  render boot.scr + cera_board.env + boot_state.txt
                                  + extlinux.conf into <dir> (the FAT boot partition)
 
-Board specifics come from the environment (manifest-resolved):
-  SERIAL_CONSOLE DTB_NAME BOARD_ID FAMILY SINGLE_SLOT_FALLBACK
+Board specifics come from the environment (manifest-resolved + orchestrator):
+  SERIAL_CONSOLE DTB_NAME BOARD_ID SINGLE_SLOT_FALLBACK COMPATIBLE_STRING
 EOF
 }
 

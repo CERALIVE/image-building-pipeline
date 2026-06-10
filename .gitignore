@@ -1,13 +1,9 @@
-armbian-build/output/
-armbian-build/cache/
-armbian-build/.tmp/
 images/
 *.img
 *.img.xz
 *.sha*
 .DS_Store
 build-logs/
-armbian-build/
 cache/
 secrets/
 .env
@@ -24,3 +20,6 @@ Thumbs.db
 
 # OpenCode agent state (local only)
 .omo/
+
+# Repo-local test/QA evidence (coverage, diffs, traces) — never committed
+test-results/

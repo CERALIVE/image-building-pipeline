@@ -14,15 +14,21 @@
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
 #   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
-#   8. verify    lib/parity-check.sh <rootfs>   → parity vs configs/base/ceraui-base.conf
+#   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
+#   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
+#                (Stage-4 flashable GPT image). FAMILY-GATED: only the custom-uboot
+#                bootloader adapter (RK3588) has a raw bootloader gap to fill; x86
+#                (efi) is skipped here — its disk path is task 14.
 #
 # DESIGN (inherited from common.sh + learnings):
 #   * strict mode + loud ERR trap; NO `|| true` swallowing. Any mkosi/apt/dpkg
 #     failure aborts the whole build (MUST-NOT: don't swallow build errors).
 #   * ZERO hardcoded board names / package lists / device paths. Everything
 #     board-specific flows manifest → resolve.sh → environment → mkosi configs.
-#   * No A/B partitions yet (Stage 4). Stage 1 emits a single rootfs to reach
-#     PARITY with today's Armbian image first.
+#   * The rootfs.tar emit (step 7) is the parity artifact and is ALWAYS produced;
+#     step 9 lays it onto the frozen A/B GPT geometry only for the RK3588
+#     custom-uboot adapter, single-slot or A/B per the manifest's
+#     single_slot_fallback flag.
 #
 # shellcheck shell=bash
 
@@ -38,6 +44,8 @@ V2_DIR="$(cd "${HERE}/.." && pwd)"
 RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
+ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
+BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
 # Staged .debs live under the mkosi dir (so the builder container, which mounts
@@ -53,6 +61,11 @@ STAGING_ROOT="${MKOSI_DIR}/.staging"
 # kernel install (the boot BSP is hardware-validated in task 17). This is a
 # build-scope flag, NOT error swallowing.
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
+# RAUC bundle signing PKI (Stage-4 .raucb, build-bundle.sh). Local/dev builds
+# sign with the throwaway NON-PRODUCTION dev keypair in v2/.dev-keys; CI/prod
+# inject the real cert-work/rauc keys by setting this env before invocation.
+CERALIVE_RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR:-${V2_DIR}/.dev-keys}"
+export CERALIVE_RAUC_PKI_DIR
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 RELEASE="${RELEASE:-bookworm}"
@@ -147,10 +160,15 @@ main() {
   #    resolve.sh dies loudly on unknown board/family, schema violations and
   #    unresolved versions.yaml defer tokens; its failure propagates here.
   # -------------------------------------------------------------------------
-  log_info "[1/8] resolving manifest → build params"
+  log_info "[1/9] resolving manifest → build params"
   local params
   params="$("${RESOLVE_SH}" "${board}")" || die "manifest resolution failed for board '${board}'"
   eval "${params}"
+  # Export BSP package vars immediately so fetch-debs.sh (step 2) can read them.
+  # run_mkosi_build() re-exports the full set at step 6; this early export covers
+  # the fetch step which runs before mkosi.
+  export UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
+         HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
 
   # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
   # BSP declaration must fail BEFORE any fetch/build, never as a half-image.
@@ -199,11 +217,11 @@ main() {
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   mkdir -p "${bsp_dir}" "${firstparty_dir}"
 
-  log_info "[2/8] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
+  log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
   DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
     || die "fetch-debs failed for board '${board}'"
 
-  log_info "[3/8] partitioning staged .debs into BSP vs first-party by package name"
+  log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
   # The set of BSP package names (manifest-declared) is the partition key.
   local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
   local deb pkg
@@ -225,7 +243,7 @@ main() {
   #    failure, no half-image (MUST-DO: fail cleanly on missing BSP pin).
   # -------------------------------------------------------------------------
   if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[4/8] verifying boot BSP packages are obtainable"
+    log_info "[4/9] verifying boot BSP packages are obtainable"
     local boot_bsp_names name missing=()
     read -ra boot_bsp_names <<<"${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES}"
     for name in "${boot_bsp_names[@]}"; do
@@ -242,14 +260,14 @@ main() {
     fi
     log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
   else
-    log_warn "[4/8] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
+    log_warn "[4/9] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
   fi
 
   # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
   # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before
   # mkosi/docker so CI needs no network, privileged container or board.
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    log_info "[5/8] DRY_RUN=1 — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
+    log_info "[5/9] DRY_RUN=1 — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -260,14 +278,14 @@ main() {
   local ts rootfs_tree
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   rootfs_tree="${MKOSI_DIR}/build/app"
-  log_info "[5/8] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
+  log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
   run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
   [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
 
   # -------------------------------------------------------------------------
   # 7. Emit normalized output + checksum (NOT Armbian-unofficial_*).
   # -------------------------------------------------------------------------
-  log_info "[6/8] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
+  log_info "[6/9] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
   local out_dir="${IMAGES_DIR}/${board}" artifact
   mkdir -p "${out_dir}"
   artifact="${out_dir}/${ts}.rootfs.tar"
@@ -275,18 +293,70 @@ main() {
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
   # -------------------------------------------------------------------------
-  # 8. Parity verification vs configs/base/ceraui-base.conf. The app layer now
+  # 8. Parity verification vs the v2 package manifests. The app layer now
   #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
   #    CI mode (debs fetched) the gate clears the first-party check via the
   #    ceraui→ceralive-device / belacoder→ceracoder aliases in parity-check.sh. An
   #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
   #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
   # -------------------------------------------------------------------------
-  log_info "[7/8] verifying parity vs configs/base/ceraui-base.conf"
+  log_info "[7/9] verifying parity vs v2 package manifests"
   "${PARITY_CHECK_SH}" "${rootfs_tree}" \
     || die "parity check FAILED for board '${board}' — image does not match the canonical package/service/user/routing set"
 
-  log_info "[8/8] done"
+  # -------------------------------------------------------------------------
+  # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
+  #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
+  #    .raw ALONGSIDE the rootfs.tar above. FAMILY-GATED on the resolved
+  #    rauc_bootloader_adapter: only `custom` (RK3588 vendor U-Boot, decision D3 —
+  #    the "custom-uboot" adapter) has a raw bootloader gap to fill. x86 resolves
+  #    `efi` and boots from the EFI System Partition; its disk path is task 14, so
+  #    it is skipped here. The gap write needs the staged U-Boot .deb, so a
+  #    config+package parity build (INSTALL_BOOT_BSP=0, no BSP staged) defers disk
+  #    assembly to the full device build — exactly like the boot-BSP gate above.
+  # -------------------------------------------------------------------------
+  if [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "custom" ]]; then
+    if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
+      [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
+      log_info "[8/9] Stage-4 disk assembly → ${raw_artifact} (bootloader_adapter=custom single_slot=${SINGLE_SLOT_FALLBACK:-false})"
+      "${ASSEMBLE_DISK_SH}" build \
+        --output "${raw_artifact}" \
+        "${single_slot_flag[@]}" \
+        --board "${BOARD_ID}" \
+        --bootloader-adapter "${RAUC_BOOTLOADER_ADAPTER}" \
+        --bsp-dir "${bsp_dir}" \
+        --rootfs-tree "${rootfs_tree}" \
+        || die "Stage-4 disk assembly failed for board '${board}'"
+      log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
+
+      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
+      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
+      # the .raw, emitted ALONGSIDE it. format=plain (no dm-verity, G4 deferred).
+      local bundle_artifact="${out_dir}/${ts}.raucb"
+      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      BUNDLE_VERSION="${ts}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
+        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
+        || die "Stage-4 RAUC bundle build failed for board '${board}'"
+      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+    else
+      log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
+    fi
+  elif [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "efi" || "${RAUC_BOOTLOADER_ADAPTER:-}" == "grub" ]]; then
+    # x86 EFI/GRUB disk assembly is DEFERRED — explicitly, not skipped-and-forgotten.
+    # efi/grub boots from an EFI System Partition + GRUB A/B grubenv engine (exercised
+    # by tests/qemu-x86.sh --fallback-selftest), not the RK3588 raw idbloader gap that
+    # assemble-disk.sh/write-bootloader.sh write. Routing x86 through the `custom` .raw
+    # path would emit a NON-BOOTABLE image, so this branch produces NO .raw and stops
+    # cleanly after the step-7 rootfs.tar (no partial disk state).
+    # TODO(x86-disk): wire x86 ESP + GRUB A/B disk assembly behind this gate
+    #   (ESP/grub-install layout, grubenv A/B slot selection, RAUC efi adapter).
+    log_info "[8/9] bootloader_adapter='${RAUC_BOOTLOADER_ADAPTER}' — x86 ESP+GRUB disk assembly DEFERRED (TODO(x86-disk)); rootfs.tar is the only artifact, no .raw produced for board '${board}'"
+  else
+    die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
+  fi
+
+  log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
 }
 
@@ -313,6 +383,7 @@ run_mkosi_build() {
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 COMPATIBLE_STRING
+    CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
@@ -335,14 +406,26 @@ run_mkosi_build() {
   # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
   # (like the apt GPG key) so the self-contained runtime postinst can write it
-  # without repo access. The RAUC `compatible` is derived from the manifest family
-  # (same scheme install-boot.sh uses) so the device + signed bundles agree.
+  # without repo access.
   local rauc_keyring="${MKOSI_DIR}/runtime/rauc/ceralive-keyring.pem"
   if [[ -z "${RAUC_ROOT_CA_B64:-}" && -s "${rauc_keyring}" ]]; then
     RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
   fi
   export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
-  export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${FAMILY}}"
+
+  # RAUC `compatible` — the single source of truth (T12), BOARD-specific not
+  # family-wide. A family default (ceralive-rk3588) lets an Orange Pi 5+ bundle
+  # install on a Rock 5B+; deriving from board_id and having install-boot.sh +
+  # build-bundle.sh read THIS env (no own default) keeps device + bundle in lockstep.
+  export COMPATIBLE_STRING="${COMPATIBLE_STRING:-ceralive-${BOARD_ID}}"
+
+  # Deterministic interface naming (postinst-lib.sh::install_interface_naming).
+  # The manifest interfaces: block flattens to INTERFACES_ETH0/ETH1/WLAN0; forward
+  # each as CERALIVE_INTERFACES_<role> so the runtime postinst emits per-role
+  # systemd .link Path= rules. Empty/FIXME values are skipped on-device.
+  export CERALIVE_INTERFACES_eth0="${INTERFACES_ETH0:-}"
+  export CERALIVE_INTERFACES_eth1="${INTERFACES_ETH1:-}"
+  export CERALIVE_INTERFACES_wlan0="${INTERFACES_WLAN0:-}"
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done
@@ -373,6 +456,10 @@ run_mkosi_build() {
   else die "no native mkosi keyring and neither docker nor podman present — cannot run the trixie builder"; fi
 
   log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (Arch host → trixie container)"
+  # Stage lib/common.sh into MKOSI_DIR/lib/ so finalize scripts can source it at
+  # /work/lib/common.sh in mkosi's mount namespace (/work = mkosi workspace root).
+  mkdir -p "${MKOSI_DIR}/lib"
+  cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
   local env_flags=() env_cli_str=""
   for n in "${env_names[@]}"; do
     env_flags+=(-e "${n}")
@@ -381,20 +468,23 @@ run_mkosi_build() {
 
   "${runtime}" run --rm --privileged \
     "${env_flags[@]}" \
-    -v "${MKOSI_DIR}:/work" \
+    -e "CERALIVE_V2_DIR=/work" \
+    -v "${V2_DIR}:/work" \
     "${MKOSI_BUILDER_IMAGE}" \
     bash -euo pipefail -c '
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y --no-install-recommends \
-        mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates >/dev/null
-      cd /work
+        -o Dpkg::Options::=--force-unsafe-io \
+        mkosi debian-archive-keyring apt-utils dpkg-dev ca-certificates reprepro >/dev/null
+      cd /work/mkosi
       mkosi \
         --architecture='"${mkosi_arch}"' \
         --with-network=yes \
         '"${env_cli_str}"' \
-        --package-directory /work/.staging/'"${BOARD_ID}"'/bsp \
-        --extra-tree /work/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
+        --environment CERALIVE_V2_DIR \
+        --package-directory /work/mkosi/.staging/'"${BOARD_ID}"'/bsp \
+        --extra-tree /work/mkosi/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
         --force \
         build
     ' || die "mkosi build failed (container)"

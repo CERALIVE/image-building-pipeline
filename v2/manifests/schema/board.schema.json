@@ -18,7 +18,7 @@
       "pattern": "^[a-z0-9][a-z0-9_-]*$"
     },
     "board_id": {
-      "description": "Armbian BOARD= value passed to compile.sh (userpatches/config-*.conf BOARD=). e.g. 'rock-5b-plus', 'orangepi5-plus'. Also covers ARMBIAN_BOARD/DEVICE_CODE.",
+      "description": "Armbian BOARD= value for the Armbian BSP build framework (legacy userpatches BOARD=). e.g. 'rock-5b-plus', 'orangepi5-plus'. Also covers ARMBIAN_BOARD/DEVICE_CODE.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
@@ -31,6 +31,13 @@
       "description": "Board-specific device-tree overlays applied at build time (e.g. rk3588-hdmi-input, rk3588-m2-modem-42mm). Optional. Maps to DT_OVERLAYS in configs/devices/*.conf. Overlay names are lowercase alphanumeric with hyphens (the Armbian overlay-file stem convention).",
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "uniqueItems": true
+    },
+    "uboot_packages": {
+      "description": "Per-board U-Boot package override. Optional. When present it REPLACES the family-tier uboot_packages (deep-merge: board arrays win wholesale). rk3588 U-Boot is board-specific (linux-u-boot-rock-5b-plus-vendor vs linux-u-boot-orangepi5plus-vendor), so the family declares uboot_packages:[] and each board names its own here. Items must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
       "uniqueItems": true
     },
     "quirks": {
@@ -52,6 +59,16 @@
       "type": "string",
       "enum": ["sysext", "appfs"],
       "default": "sysext"
+    },
+    "interfaces": {
+      "description": "Per-board network interface identity map. Optional. When present, the platform module emits /etc/systemd/network/10-ceralive-<role>.link files that pin each role to a deterministic name via systemd-udevd Path= matching (keyed on ID_PATH, stable per board model). Required on boards with multiple same-class NICs (e.g. dual r8169 on Orange Pi 5+) where a generic Type= match would race. Each key is the canonical interface role name (eth0, eth1, wlan0); value is the udev ID_PATH string for that physical port (read from `udevadm info /sys/class/net/<iface> | grep ID_PATH`). Roles not listed here fall back to the generic Type= rules in configure_networking().",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eth0": { "type": "string", "description": "ID_PATH of the primary wired control port." },
+        "eth1": { "type": "string", "description": "ID_PATH of the secondary wired port (bonded uplink on dual-NIC boards)." },
+        "wlan0": { "type": "string", "description": "ID_PATH of the onboard WiFi adapter (optional; generic Type=wlan fallback is used when absent)." }
+      }
     },
     "description": {
       "description": "Human-readable board name/notes (e.g. DEVICE_NAME 'Radxa Rock 5B+'). REQUIRED — single home for the descriptive INSTALLATION_NOTES/hardware-spec metadata that is not consumed by the builder.",

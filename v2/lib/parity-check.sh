@@ -4,13 +4,16 @@
 #
 #   parity-check.sh <rootfs-tree>
 #
-# The canonical parity reference is configs/base/ceraui-base.conf (richer than
-# customize-image.sh — it also names gstreamer1.0-rockchip1, rockchip-multimedia-
-# config and pulseaudio). The checklist verifies, against the built tree:
+# The canonical parity reference is the v2 package manifests:
+# v2/manifests/packages/shared.list plus every <family>.delta.list — the same
+# runtime set mkosi installs and v2/tests/package-migration-coverage.sh guards.
+# The checklist verifies, against the built tree:
 #
-#   A. PACKAGES   every ceraui-base.conf package is installed (empty diff). Class:
+#   A. PACKAGES   every shared.list (+ family delta) package is installed (empty
+#                 diff). Class:
 #                   debian       — must be installed now (hard FAIL if missing)
 #                   armbian-bsp  — gstreamer1.0-rockchip1 / rockchip-multimedia-config
+#                                  (families/rk3588.yaml HW-accel + runtime)
 #                   first-party  — ceraui/belacoder/srtla/srt (CI: R2/gh; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
@@ -34,20 +37,22 @@ source "${HERE}/common.sh"
 # failures and reports a summary, so drop the trap and own the exit code.
 trap - ERR
 
-CERAUI_BASE_CONF="${CERAUI_BASE_CONF:-${HERE}/../../configs/base/ceraui-base.conf}"
+SHARED_LIST="${SHARED_LIST:-${HERE}/../manifests/packages/shared.list}"
+PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${HERE}/../manifests/packages}"
 
-# Packages that ceraui-base.conf names but the real .deb ships under another name.
-# Without the first-party aliases the gate could never clear the app-layer check
-# even after a real install — the installed names never match the reference names.
+# Reference names that the real .deb ships under another name. Without these
+# aliases the gate could never clear the app-layer check even after a real
+# install — the installed names never match the reference names.
 declare -A PKG_ALIAS=(
   [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm
-  [belacoder]=ceracoder         # ceraui-base.conf legacy BELABOX name; encoder .deb = ceracoder
+  [belacoder]=ceracoder         # legacy BELABOX name; encoder .deb = ceracoder
   [ceraui]=ceralive-device      # CeraUI .deb package name = ceralive-device
 )
-# The Rockchip HW GStreamer set — installed from the Armbian pool (platform layer).
+# Rockchip HW GStreamer pair — families/rk3588.yaml hw_accel_gstreamer_plugins +
+# gstreamer_runtime_packages, installed from the Armbian pool (platform layer).
 ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
-# First-party .debs (ceraui-base.conf CERAUI_PACKAGES) — built upstream, fetched
-# in CI from R2/gh. Offline these are absent → reported as WARN, never silent.
+# First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
+# Offline these are absent → reported as WARN, never silent.
 FIRST_PARTY_PKGS=" ceraui belacoder srtla srt "
 
 PASS=0; WARN=0; FAIL=0
@@ -56,32 +61,28 @@ warn() { log_warn    "WARN  $*"; WARN=$((WARN+1)); }
 fail() { log_error   "FAIL  $*"; FAIL=$((FAIL+1)); }
 
 # ---------------------------------------------------------------------------
-# extract_array <conf> <ARRAY_NAME> — echo the quoted items of a bash array
-# literal spanning NAME=( ... ), ignoring comments. No sourcing (untrusted-ish).
+# read_manifest_packages — echo every active package in the canonical v2 runtime
+# package lists: manifests/packages/shared.list plus every <family>.delta.list.
+# Comments and blank lines are stripped. This is the SAME parse as
+# v2/tests/package-migration-coverage.sh (build_v2_set), so the MIGRATE coverage
+# gate and this REWIRE read the manifests identically.
 # ---------------------------------------------------------------------------
-extract_array() {
-  local conf="$1" name="$2"
-  awk -v name="${name}" '
-    $0 ~ "^"name"=\\(" { inarr=1; sub("^"name"=\\(", ""); }
-    inarr {
-      line=$0
-      sub(/#.*/, "", line)
-      n=split(line, toks, /"/)
-      for (i=2; i<=n; i+=2) if (toks[i] != "") print toks[i]
-      if (line ~ /\)/) inarr=0
-    }
-  ' "${conf}"
+read_manifest_packages() {
+  local f
+  for f in "${SHARED_LIST}" "${PKG_MANIFEST_DIR}"/*.delta.list; do
+    [[ -f "${f}" ]] && sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
+  done
 }
 
 main() {
   local root="${1:-}"
   [[ -n "${root}" ]] || die "usage: parity-check.sh <rootfs-tree>"
   [[ -d "${root}" ]] || die "rootfs tree not found: ${root}"
-  [[ -f "${CERAUI_BASE_CONF}" ]] || die "canonical parity reference not found: ${CERAUI_BASE_CONF}"
+  [[ -f "${SHARED_LIST}" ]] || die "canonical parity reference not found: ${SHARED_LIST}"
 
   log_info "=== CeraLive parity check ==="
   log_info "rootfs=${root}"
-  log_info "reference=${CERAUI_BASE_CONF}"
+  log_info "reference=${SHARED_LIST}"
 
   local status_file="${root}/var/lib/dpkg/status"
   [[ -f "${status_file}" ]] || die "no dpkg status in rootfs (${status_file}) — not a Debian rootfs?"
@@ -98,14 +99,20 @@ main() {
   n_installed="$(echo "${installed}" | wc -w)"
   log_info "rootfs has ${n_installed} installed packages"
 
-  # ---- A. PACKAGE PARITY vs ceraui-base.conf ----
-  log_info "--- A. package parity (vs ceraui-base.conf) ---"
-  local expected=() arr p
-  for arr in BASE_PACKAGES STREAMING_PACKAGES CERAUI_PACKAGES; do
-    while IFS= read -r p; do [[ -n "${p}" ]] && expected+=("${p}"); done \
-      < <(extract_array "${CERAUI_BASE_CONF}" "${arr}")
-  done
-  log_info "ceraui-base.conf declares ${#expected[@]} packages across BASE/STREAMING/CERAUI"
+  # ---- A. PACKAGE PARITY vs v2 manifests ----
+  log_info "--- A. package parity (vs v2 manifests: shared.list + family deltas) ---"
+  local expected=() p
+  while IFS= read -r p; do [[ -n "${p}" ]] && expected+=("${p}"); done \
+    < <(read_manifest_packages)
+  local n_manifest="${#expected[@]}"
+  # The Armbian-BSP GStreamer pair (family manifest) and the first-party .debs
+  # (App layer) live OUTSIDE the runtime package lists, so the gate must add them
+  # to the checked set to keep their WARN classification below.
+  local bsp_arr=() firstparty_arr=()
+  read -ra bsp_arr        <<< "${ARMBIAN_BSP_PKGS}"
+  read -ra firstparty_arr <<< "${FIRST_PARTY_PKGS}"
+  expected+=("${bsp_arr[@]}" "${firstparty_arr[@]}")
+  log_info "v2 manifests declare ${n_manifest} runtime packages (shared.list + family deltas)"
 
   local debian_missing=() armbian_missing=() firstparty_missing=() check
   for p in "${expected[@]}"; do
@@ -123,7 +130,7 @@ main() {
   done
 
   if (( ${#debian_missing[@]} == 0 )); then
-    pass "all Debian-sourced ceraui-base.conf packages installed (diff empty)"
+    pass "all Debian-sourced shared.list packages installed (diff empty)"
   else
     fail "Debian packages MISSING from rootfs: ${debian_missing[*]}"
   fi
@@ -177,8 +184,8 @@ main() {
   log_info "--- D. SRTLA source-policy routing ---"
   local routing_ok=1
   if grep -qE '^100[[:space:]]+modem0' "${root}/etc/iproute2/rt_tables" 2>/dev/null \
-     && grep -qE '^110[[:space:]]+wlan_bond' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
-    pass "rt_tables has SRTLA bonding tables (modem0..modem7 + wlan_bond)"
+     && grep -qE '^120[[:space:]]+wlan0' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
+    pass "rt_tables has SRTLA bonding tables (modem0..modem7 + wlan0..wlan4)"
   else
     fail "rt_tables missing SRTLA bonding tables"; routing_ok=0
   fi
@@ -216,6 +223,14 @@ main() {
     fail "build-time Armbian pool leaked into the final image apt config"
   else
     pass "no build-time Armbian pool in final image (clean apt config)"
+  fi
+
+  # ---- F. INTERFACE NAMING ----
+  log_info "--- F. deterministic interface naming (.link units) ---"
+  if [[ -f "${root}/etc/systemd/network/10-ceralive-wlan0.link" ]]; then
+    pass "wlan0 .link file present (interface naming standardization)"
+  else
+    fail "wlan0 .link file missing — wlan0 rename won't apply, SRTLA wifi routing broken"
   fi
 
   # ---- summary ----

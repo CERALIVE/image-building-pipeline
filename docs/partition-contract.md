@@ -159,7 +159,32 @@ Notes:
 
 ---
 
-## 7. CHANGE CONTROL
+## 7. STAGE-4 BUILD OUTPUT
+
+The v2 build pipeline (Stage-4, `v2/lib/assemble-disk.sh` + `v2/lib/build-bundle.sh`) now
+emits three artifacts per board under `v2/images/<board>/`:
+
+| Artifact | Description |
+|----------|-------------|
+| `<ts>.raw` | Flashable disk image (GPT + gap write + boot partition + rootfs_a) |
+| `<ts>.raucb` | Signed RAUC OTA bundle (dev key by default; prod key via `CERALIVE_RAUC_PKI_DIR`) |
+| `<ts>.raucb.sha256` | SHA-256 checksum of the bundle |
+
+**Single-slot-first policy (current):** The first shipped image uses the §4 single-slot
+layout (`single_slot_fallback: true` in the board manifest). `rootfs_b` is absent; the
+`data` partition follows immediately after `rootfs_a`. This is the brick-loop mitigation
+for the initial fleet bring-up — a failed health gate on a single-slot image does not
+trigger a rollback to an empty B slot.
+
+**A/B follow-up wave (T28):** Enabling full A/B (`single_slot_fallback: false`) is a
+separate task that requires hardware validation of the rollback path. It is deferred until
+the first single-slot image has been verified on real hardware. Switching from single-slot
+to A/B requires a full re-flash (the GPT layout changes — `rootfs_b` is added and `data`
+shifts). This is a contract-version bump event (v1 → v2).
+
+---
+
+## 8. CHANGE CONTROL
 
 Any change to a size, label, slot role, the threshold N, or the `/data` contract is a
 **breaking, fleet-wide re-flash** event. Such a change MUST:

@@ -1,8 +1,8 @@
 # CeraLive v2 image pipeline — CI gate.
 #
-# Parallel to (NOT a replacement for) build-images.yml, which still drives the
-# legacy Armbian build until v2 reaches parity (tasks 16/17). This workflow gates
-# the v2/ manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
+# The SOLE image-build CI gate: the legacy Armbian build.sh path (and its
+# build-images.yml workflow) has been removed. This workflow gates the v2/
+# manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
 # build-plan. No secrets are referenced; the build matrix runs DRY_RUN=1 so it
 # performs no real download/build (no R2 creds, no GPG, no privileged container,
 # no board required).
@@ -80,6 +80,17 @@ jobs:
           git clone --depth=1 https://github.com/bats-core/bats-core.git /tmp/bats-core
           sudo /tmp/bats-core/install.sh /usr/local
           bats --version
+
+      - name: Stub sibling-checkout workspace
+        run: |
+          # fetch-debs asserts ceracoder/ srtla/ CeraUI/ are siblings of the
+          # workspace root (ARCHITECTURE.md §5). Only image-building-pipeline is
+          # checked out here, so point CERALIVE_WORKSPACE at a stub tree. Under
+          # DRY_RUN no .debs are built from source, so empty dirs satisfy the
+          # tripwire without needing the real sibling repos.
+          ws="${RUNNER_TEMP}/ceralive-ws"
+          mkdir -p "${ws}/ceracoder" "${ws}/srtla" "${ws}/CeraUI"
+          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
 
       - name: Run v2 manifest unit suite (16 tests)
         run: ./v2/run-tests

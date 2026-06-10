@@ -90,8 +90,12 @@ if test "${fdtfile}" = ""; then
   exit
 fi
 
+# DTBs live under the rockchip/ SoC-vendor subdir — the Armbian vendor kernel
+# (linux-dtb-vendor-rk35xx) installs to /boot/dtb/rockchip/, NOT /boot/dtb/ directly.
+# Dropping the rockchip/ component makes ext4load miss the DTB; booti then runs with
+# no FDT and the kernel never comes up (U-Boot falls through to the PXE loop).
 ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image
-ext4load ${devtype} ${devnum}:${cera_part} ${fdt_addr_r} /boot/dtb/${fdtfile}
+ext4load ${devtype} ${devnum}:${cera_part} ${fdt_addr_r} /boot/dtb/rockchip/${fdtfile}
 if ext4load ${devtype} ${devnum}:${cera_part} ${ramdisk_addr_r} /boot/initrd.img; then
   booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 else

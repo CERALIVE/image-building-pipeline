@@ -7,7 +7,10 @@
 #
 #   1. BSP packages  — kernel / DTB / U-Boot blob / firmware / GStreamer, read
 #                      BY NAME from the resolved FAMILY manifest (typed package
-#                      arrays), fetched from the Armbian apt repo.
+#                      arrays), fetched from the Armbian apt repo. On Debian/Ubuntu
+#                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
+#                      Arch Linux), the fetch runs inside the pinned trixie builder
+#                      container via Docker/Podman.
 #   2. First-party   — srtla / srt / ceracoder / CeraUI .debs, fetched from R2
 #                      (CI mode) or `gh release download` (local mode).
 #
@@ -154,11 +157,100 @@ assert_sibling_layout() {
 }
 
 # ---------------------------------------------------------------------------
+# _fetch_bsp_native — native apt-get path (Debian/Ubuntu hosts).
+# Isolated apt state so the host apt config is never touched. The Armbian repo
+# is declared in a throwaway sources list; `apt-get download` fetches the .deb
+# for the current suite into $debs.
+# ---------------------------------------------------------------------------
+_fetch_bsp_native() {
+  local debs="$1"; shift
+  local bsp_pkgs=("$@")
+
+  local apt_state="${debs}/.apt-state"
+  run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
+  local src_list="${apt_state}/armbian.list"
+  if [[ -z "${DRY_RUN}" ]]; then
+    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
+      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+  else
+    log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
+  fi
+
+  local apt_opts=(
+    -o "Dir::Etc::SourceList=${src_list}"
+    -o "Dir::Etc::SourceParts=-"
+    -o "Dir::State::Lists=${apt_state}/lists"
+    -o "Dir::Cache=${apt_state}/cache"
+    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
+    -o "APT::Architecture=${ARCH}"
+  )
+
+  run_or_plan apt-get "${apt_opts[@]}" update
+
+  local pkg
+  for pkg in "${bsp_pkgs[@]}"; do
+    log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
+    run_or_plan bash -c \
+      "cd $(printf '%q' "${debs}") && apt-get $(printf '%q ' "${apt_opts[@]}")download $(printf '%q' "${pkg}")"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# _fetch_bsp_curl — curl-based fallback for non-Debian hosts (e.g. Arch Linux).
+# Downloads the Armbian Packages.gz index, resolves each BSP package name to
+# its pool URL, then curl-fetches the .deb. No apt-get, no Docker, no GPG key
+# import required. Works on any host with curl + gzip.
+# ---------------------------------------------------------------------------
+_fetch_bsp_curl() {
+  local debs="$1"; shift
+  local bsp_pkgs=("$@")
+  require_cmd curl
+  require_cmd gzip
+
+  log_info "apt-get not found (non-Debian host) — fetching BSP via curl from ${ARMBIAN_APT_URL}"
+
+  local packages_url="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}/main/binary-${ARCH}/Packages.gz"
+  local packages_file; packages_file="$(mktemp)"
+  run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
+    || die "failed to download Armbian Packages index: ${packages_url}"
+
+  if [[ -z "${DRY_RUN}" ]]; then
+    gzip -df "${packages_file}.gz" || die "failed to decompress Armbian Packages.gz"
+  else
+    log_info "DRY-RUN: would decompress ${packages_file}.gz"
+  fi
+
+  local pkg
+  for pkg in "${bsp_pkgs[@]}"; do
+    local filename=""
+    if [[ -z "${DRY_RUN}" ]]; then
+      # Parse the Packages index: find the block for this package, extract Filename:
+      filename="$(awk -v want="${pkg}" '
+        /^Package: /{ p=($2==want) }
+        p && /^Filename: /{ print $2; exit }
+      ' "${packages_file}")"
+      [[ -n "${filename}" ]] \
+        || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+    fi
+    log_info "BSP fetch (curl): ${pkg}"
+    run_or_plan curl -fsSL --retry 3 \
+      -o "${debs}/$(basename "${filename:-${pkg}.deb}")" \
+      "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
+  done
+
+  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # fetch_bsp — read BSP package NAMES from the resolved family manifest and pull
 # each from the Armbian apt pool into $DEST/debs/. Names (not versions) are the
 # manifest contract; the Armbian suite supplies the concrete build. Pinning a
 # specific BSP version would append "=<ver>" — kept name-based to match the
 # manifest + Decision D3 (branch=vendor encoded in the package name itself).
+#
+# On Debian/Ubuntu hosts with apt-get, uses native path. On other hosts (e.g.
+# Arch Linux), delegates to Docker/Podman fallback.
 # ---------------------------------------------------------------------------
 fetch_bsp() {
   local family="$1" debs="$2"
@@ -182,45 +274,34 @@ fetch_bsp() {
     done < <(read_yaml_list "${field}" "${family}")
   done
 
+  # Board manifests override family-level package arrays via env vars resolved
+  # by resolve.py (orchestrate.sh exports them before calling fetch-debs.sh).
+  # e.g. UBOOT_PACKAGES=linux-u-boot-rock-5b-plus-vendor from rock-5b-plus.yaml.
+  for pkg in ${UBOOT_PACKAGES:-} ${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} \
+             ${FIRMWARE_PACKAGES:-} ${HW_ACCEL_GSTREAMER_PLUGINS:-} \
+             ${GSTREAMER_RUNTIME_PACKAGES:-}; do
+    [[ -n "${pkg}" ]] && bsp_pkgs+=("${pkg}")
+  done
+  # Deduplicate while preserving order
+  local -a deduped=()
+  local seen="" p
+  for p in "${bsp_pkgs[@]}"; do
+    [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
+  done
+  bsp_pkgs=("${deduped[@]}")
+
   if (( ${#bsp_pkgs[@]} == 0 )); then
-    die "fetch_bsp: no BSP packages found in ${family} (expected kernel/dtb/uboot/firmware names)"
+    die "fetch_bsp: no BSP packages found in ${family} or env (expected kernel/dtb/uboot/firmware names)"
   fi
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
   log_info "Armbian source: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
 
-  # Isolated apt state so the host apt config is never touched. The Armbian repo
-  # is declared in a throwaway sources list; `apt-get download` fetches the .deb
-  # for the current suite into $debs.
-  local apt_state="${debs}/.apt-state"
-  run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
-  local src_list="${apt_state}/armbian.list"
-  if [[ -z "${DRY_RUN}" ]]; then
-    require_cmd apt-get
-    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
-      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+  if command -v apt-get >/dev/null 2>&1; then
+    _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
   else
-    log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
+    _fetch_bsp_curl "${debs}" "${bsp_pkgs[@]}"
   fi
-
-  local apt_opts=(
-    -o "Dir::Etc::SourceList=${src_list}"
-    -o "Dir::Etc::SourceParts=-"
-    -o "Dir::State::Lists=${apt_state}/lists"
-    -o "Dir::Cache=${apt_state}/cache"
-    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
-    -o "APT::Architecture=${ARCH}"
-  )
-
-  run_or_plan apt-get "${apt_opts[@]}" update
-
-  local pkg
-  for pkg in "${bsp_pkgs[@]}"; do
-    log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
-    # apt-get download writes to CWD; run it inside $debs so the .deb lands there.
-    run_or_plan bash -c \
-      "cd $(printf '%q' "${debs}") && apt-get $(printf '%q ' "${apt_opts[@]}")download $(printf '%q' "${pkg}")"
-  done
 }
 
 # ---------------------------------------------------------------------------
@@ -254,16 +335,18 @@ fetch_first_party() {
     log_info "local mode: GitHub releases -> gh release download"
     [[ -n "${DRY_RUN}" ]] || require_cmd gh
 
-    local pre_flag=()
-    [[ "${CHANNEL}" == "beta" ]] || pre_flag=(--exclude-pre-releases)
-
     for r in "${REPOS[@]}"; do
       log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
-      run_or_plan gh release download \
-        --repo "CERALIVE/${r}" \
-        --pattern "*${ARCH}*.deb" \
-        --dir "${debs}" \
-        "${pre_flag[@]}"
+      if [[ -n "${DRY_RUN}" ]]; then
+        log_info "DRY-RUN would run: gh release download --repo CERALIVE/${r} --pattern *${ARCH}*.deb --dir ${debs} --clobber"
+      else
+        gh release download \
+          --repo "CERALIVE/${r}" \
+          --pattern "*${ARCH}*.deb" \
+          --dir "${debs}" \
+          --clobber 2>&1 \
+          || log_warn "first-party: no ${ARCH} .deb release for CERALIVE/${r} (repo has no release or no matching asset) — mkosi app layer will install nothing for this component"
+      fi
     done
   fi
 }

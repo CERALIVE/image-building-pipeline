@@ -5,7 +5,7 @@ Parent: [`../AGENTS.md`](../AGENTS.md)
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
-(.deb packages from `srtla`, `srt`, `ceracoder`, `CeraUI`), drives an Armbian build,
+(.deb packages from `srtla`, `srt`, `ceracoder`, `CeraUI`), drives a mkosi v2 build,
 and produces a flashable image for RK3588 targets (Orange Pi 5+, Radxa Rock 5B+).
 
 Relates to:
@@ -17,12 +17,14 @@ Relates to:
 
 ```
 image-building-pipeline/
-├── build.sh                  # main entry: clones Armbian, calls compile.sh
+├── v2/                       # current build system (mkosi)
+│   ├── build                 # entry point: ./v2/build <board>
+│   ├── manifests/            # board and family manifests + package lists
+│   ├── lib/                  # orchestrate.sh, assemble-disk.sh, build-bundle.sh, …
+│   ├── docs/                 # dev-loop.md, kiosk-display.md, deferred items
+│   └── tests/                # manifest.bats, preflash-verify.sh
 ├── scripts/
 │   └── fetch-debs.sh         # downloads .deb packages for REPOS array
-├── userpatches/              # Armbian overlay: kernel config, board hooks, rootfs
-├── QUICKSTART.md             # fastest path to a working build
-├── ARMBIAN_NATIVE.md         # native-build setup (no Docker)
 └── CONTRIBUTING.md           # contribution rules
 ```
 
@@ -30,13 +32,11 @@ image-building-pipeline/
 
 | Task | Location |
 |------|----------|
-| Start a build | [`QUICKSTART.md`](QUICKSTART.md) |
-| Native (no Docker) build | [`ARMBIAN_NATIVE.md`](ARMBIAN_NATIVE.md) |
+| Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
-| Board/kernel customisation | `userpatches/` |
-| Armbian framework entry | `build.sh` lines ~379-492 |
+| Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| **Dev-sync live-reload loop** | [`v2/lib/dev-sync/README.md`](v2/lib/dev-sync/README.md) |
+| **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
 | v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
@@ -44,11 +44,13 @@ image-building-pipeline/
 
 ## KEY FACTS
 
-**Armbian external entry**
+**Build entry point** [EXISTS]
 ```bash
-git clone --depth=1 https://github.com/armbian/build.git
-# then: ./compile.sh  (checked for existence before use)
+./v2/build <board>          # e.g. ./v2/build rock-5b-plus
+DRY_RUN=1 ./v2/build <board>   # resolve + fetch plan only
 ```
+Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
+`.raucb` A/B RAUC OTA packages. See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
 
 **REPOS array — case and order are sacred**
 ```bash
@@ -63,11 +65,6 @@ REPOS=("srtla" "srt" "ceracoder" "CeraUI")
 `fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
 Don't hardcode versions in the script.
 
-**Build system: mkosi (`v2/`)** [EXISTS]
-The current build path is `v2/` using mkosi, producing reproducible `.raw` sysext bundles
-and `.raucb` A/B RAUC OTA packages. The Armbian `build.sh` flow is legacy/superseded.
-See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the canonical dev loop.
-
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.
@@ -81,7 +78,35 @@ The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but 
 ## ANTI-PATTERNS
 
 - Don't change REPOS order or casing — downstream scripts key on exact names
-- Don't duplicate `ARMBIAN_NATIVE.md` content here or in PRs — link to it
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
+
+## KNOWN ISSUES / DEFERRED
+
+**OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
+ships the `interfaces:` block with `FIXME-…` values because the board is not in
+hand. The OPi 5+ has two onboard r8169 NICs on the same driver/bus, so a generic
+`Type=ether` match races. Before building an OPi 5+ image, read the real ID_PATHs
+on the device (`udevadm info /sys/class/net/<iface> | grep ID_PATH`) and replace
+each FIXME. Until then `install_interface_naming()` skips the FIXME values and
+emits only the generic `Type=wlan → wlan0` rule; the dual NICs stay
+non-deterministic.
+
+**Modem source-routing may not fire (NM `dhcp=internal`).** The SRTLA dhclient
+exit hook (`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) installs
+per-modem source-policy routes on DHCP `BOUND` events. NetworkManager in Debian
+bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT execute
+`dhclient-exit-hooks.d/`. Modem routing may therefore never trigger for
+NM-managed interfaces. The wifi path is unaffected (it uses the NM dispatcher,
+`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`). Verify with a modem
+attached: check `journalctl -t srtla-routing` and `ip rule show` after the modem
+connects. If the hook doesn't fire, extend `90-srtla-wifi-routing` to also match
+`usb*|wwan*` and assign tables 100–107 by index — but that touches the
+drift-gated SRTLA payloads (`v2/ci/postinst-drift-check.sh` CHECK 2) and requires
+a deliberate twin-update of both `networking-srtla.sh` and the `§6` block in
+`mkosi.postinst.chroot`.
+
+**Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
+physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`
+are pinned today.

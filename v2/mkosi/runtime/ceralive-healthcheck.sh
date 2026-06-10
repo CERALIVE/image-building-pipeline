@@ -17,18 +17,24 @@
 #   3. srtla_send binary present + LOADS      loader failure (missing libsrt / wrong
 #                                            arch) is the canonical can't-encode
 #                                            signature → hard fail.
-#   4. SRT/SRTLA port reachable            — TCP connect to IRL_SERVER_HOST:PORT.
+#   4. SRT/SRTLA port reachable            — TCP connect to IRL_SERVER_HOST:PORT;
+#                                            NON-FATAL on a fresh offline device.
 #
 # "REACHABLE" = a TCP connection to the SRT port succeeds. SRT/SRTLA itself is
 # UDP; this is deliberately NOT a full SRT handshake (inherited wisdom + brief):
 # a successful TCP connect proves the network path + that the cloud edge is
-# listening, which is sufficient to confirm reach. If IRL_SERVER_HOST is unset
-# (device not yet provisioned) the reach check is SKIPPED — the local stack checks
-# (service active + binaries load) still gate mark-good, so a can't-encode image
-# is still caught and still rolls back.
+# listening, which is sufficient to confirm reach. The reach check is SKIPPED
+# (non-fatal) on a fresh OFFLINE device — when IRL_SERVER_HOST is unset (not yet
+# provisioned) OR no non-loopback network interface is up (no link, so no path to
+# any receiver). In BOTH cases the local stack checks (service active + binaries
+# load) still gate mark-good, so a can't-encode image is still caught and still
+# rolls back; a healthy device with no SRT receiver can confirm itself and avoid a
+# first-boot rollback loop (the highest brick risk on a single-slot image). Reach
+# only HARD-FAILS when the device is BOTH provisioned AND online but the configured
+# cloud edge does not answer.
 #
 # CONFIG (all overridable from /data/ceralive/update.conf; never hardcoded):
-#   IRL_SERVER_HOST            irl-srt-server host (empty → skip reach check)
+#   IRL_SERVER_HOST            irl-srt-server host (empty/offline → skip reach)
 #   IRL_SERVER_SRT_PORT        SRT/SRTLA port                       (default 9000)
 #   HEALTHCHECK_TIMEOUT        overall seconds to reach health      (default 60)
 #   HEALTHCHECK_RETRY_INTERVAL seconds between attempts             (default 5)
@@ -71,6 +77,8 @@ SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 # Streaming binaries to probe (resolved via PATH; /usr/bin on device).
 CERACODER_BIN="${CERACODER_BIN:-ceracoder}"
 SRTLA_SEND_BIN="${SRTLA_SEND_BIN:-srtla_send}"
+# Link-state probe (iproute2); stubbed in the offline proof harness.
+IP_BIN="${IP_BIN:-ip}"
 
 ts()   { date -u +%H:%M:%SZ; }
 log()  { printf '%s %s: %s\n' "$(ts)" "${PROG}" "$*"; }
@@ -122,10 +130,24 @@ check_binary() {
   return 0
 }
 
+# True when at least one non-loopback link is administratively up — i.e. there is
+# some interface on which an SRT receiver could be reached. A fresh OFFLINE device
+# has only `lo`, so this is false and the reach probe is skipped (see below). If
+# `ip` is unavailable we conservatively report "no network" and skip rather than
+# fail, because the local stack checks still gate mark-good.
+network_is_up() {
+  command -v "${IP_BIN}" >/dev/null 2>&1 || return 1
+  "${IP_BIN}" -o link show up 2>/dev/null | grep -v ' lo:' | grep -q 'state UP'
+}
+
 # Step 4 — TCP reach to the SRT/SRTLA port (NOT a full SRT handshake; see header).
 check_srt_reach() {
   if [ -z "${IRL_SERVER_HOST:-}" ]; then
     log "SKIP: IRL_SERVER_HOST unset in ${CONF} — cannot test SRT reach; relying on local stack checks"
+    return 0
+  fi
+  if ! network_is_up; then
+    log "SKIP: no non-loopback interface up (offline device) — SRT reach not testable; relying on local stack checks"
     return 0
   fi
   local host="${IRL_SERVER_HOST}"
@@ -156,14 +178,14 @@ mark_good() {
     fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
     return 1
   fi
-  log "all health checks passed — calling '${RAUC_BIN} mark-good'"
-  if "${RAUC_BIN}" mark-good; then
+  log "all health checks passed — calling '${RAUC_BIN} status mark-good'"
+  if "${RAUC_BIN}" status mark-good; then
     mkdir -p "$(dirname "${MARKER}")"
     printf 'marked-good %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${MARKER}"
     log "slot marked good; wrote idempotency marker ${MARKER}"
     return 0
   fi
-  fail "'${RAUC_BIN} mark-good' failed — slot left unconfirmed (will roll back)"
+  fail "'${RAUC_BIN} status mark-good' failed — slot left unconfirmed (will roll back)"
   return 1
 }
 

@@ -16,6 +16,10 @@ board_id: orangepi5-plus
 # note the rk3588s- DTB prefix (vs rk3588- on the Rock 5B+).
 dtb_name: rk3588s-orangepi-5-plus.dtb
 
+# Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+uboot_packages:
+  - linux-u-boot-orangepi5plus-vendor
+
 # DT_OVERLAYS from configs/devices/orangepi5plus.conf.
 armbian_overlays:
   - rk3588-hdmi-input
@@ -25,6 +29,22 @@ armbian_overlays:
 # 16 GB+ eMMC/NVMe → A/B layout fits (partition-contract §3/§5). Not the
 # single-slot fallback.
 single_slot_fallback: false
+
+# Interface identity map — pins each role to its physical port via systemd .link
+# Path= matching (ID_PATH from `udevadm info /sys/class/net/<iface>`). The OPi 5+
+# has TWO onboard r8169 NICs on the SAME driver/PCI bus, so a generic Type=ether
+# match would race and assign eth0/eth1 non-deterministically across boots. The
+# Path= values below MUST be filled in from the PHYSICAL board before building an
+# OPi 5+ image: on the device run
+#   udevadm info /sys/class/net/<iface> | grep ID_PATH
+# for each onboard NIC + the wifi adapter, then replace each FIXME below with the
+# reported ID_PATH (e.g. platform-fdf80000.pcie-pci-0001:01:00.0). Until then the
+# build emits NO per-role Path= .link (FIXME values are skipped) and only the
+# generic Type=wlan → wlan0 rule applies; the dual NICs stay non-deterministic.
+interfaces:
+  eth0: FIXME-read-from-udevadm-info-on-opi5plus-primary-port
+  eth1: FIXME-read-from-udevadm-info-on-opi5plus-secondary-port
+  wlan0: FIXME-read-from-udevadm-info-on-opi5plus-wifi
 
 # ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext

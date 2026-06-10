@@ -23,7 +23,7 @@
       "enum": ["arm64", "amd64", "x86-64"]
     },
     "armbian_branch": {
-      "description": "Armbian kernel/U-Boot branch passed as BRANCH= to compile.sh (userpatches/config-*.conf BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in legacy configs/devices/*.conf is dead metadata; the effective branch is this field. x86 families set 'none': they do not use the Armbian BSP at all (Debian generic kernel + GRUB/EFI; there is no Armbian compile.sh BRANCH for x86).",
+      "description": "Armbian kernel/U-Boot branch (BRANCH= for the Armbian BSP build framework; legacy userpatches BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in the legacy device configs was dead metadata; the effective branch is this field. x86 families set 'none': they do not use the Armbian BSP at all (Debian generic kernel + GRUB/EFI; there is no Armbian BSP BRANCH for x86).",
       "type": "string",
       "enum": ["vendor", "current", "edge", "none"]
     },

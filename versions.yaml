@@ -34,15 +34,6 @@ CeraUI:
   pin: latest
   channel: stable
 
-# ── External build framework ──────────────────────────────────────────────────
-
-armbian:
-  path: image-building-pipeline/armbian
-  repo: https://github.com/armbian/build
-  kind: external
-  # cloned with --depth=1 (no pinned tag); tracks default branch
-  pin: main
-
 # ── Remaining first-party repos ───────────────────────────────────────────────
 
 apt-worker:

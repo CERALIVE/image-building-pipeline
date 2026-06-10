@@ -30,6 +30,7 @@ apt-transport-https      # https:// apt transport for the first-party repo
 
 # --- Network management -------------------------------------------------------
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
+systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
 dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
 iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
 ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
@@ -82,6 +83,7 @@ cpufrequtils             # CPU governor control for sustained encode performance
 # --- Net glue / diagnostics ---------------------------------------------------
 socat                    # socket relay used by streaming/control glue
 netcat-openbsd           # nc — connectivity probing
+rsync                    # file sync for dev-push/dev-sync live-reload loop (v2/docs/dev-loop.md)
 iperf3                   # throughput testing of bonded links (field diagnostics)
 curl                     # http client (CeraUI/update flows)
 wget                     # http downloader
@@ -94,6 +96,8 @@ vnstat                   # cumulative traffic accounting — data-cap awareness 
 
 # --- Editor (operator convenience) --------------------------------------------
 nano                     # minimal editor for on-box config (canonical base pkg)
+kbd                      # setfont — set console font at boot for HDMI readability at any resolution
+fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon
 
 # --- OS-update + SRT transport infra (Stage 2; RUNTIME layer, arch-independent) -
 # Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App
@@ -106,6 +110,9 @@ libsrt1.5-openssl        # SYSTEM SRT transport library that ceracoder + srtla l
                          # CERALIVE build. (The first-party CERALIVE/srt FORK .deb is
                          # a SEPARATE App-layer artifact — see LAYER-MAP.md §libsrt.)
 rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
+rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
+                         # SPLIT the daemon out of `rauc` (binary-only); the runtime
+                         # postinst enables rauc.service, so the service pkg is required.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.

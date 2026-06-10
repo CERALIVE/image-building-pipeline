@@ -19,13 +19,11 @@ MENU TITLE CeraLive A/B recovery (boot.scr handles automatic rollback)
 LABEL slot-a
     MENU LABEL Slot A (rootfs_a)
     LINUX /boot/Image
-    FDT /boot/dtb/@DTB_NAME@
-    INITRD /boot/initrd.img
+    FDT /boot/dtb/rockchip/@DTB_NAME@
     APPEND root=PARTLABEL=rootfs_a rootwait rw console=@CONSOLE@ earlycon cera_slot=A
 
 LABEL slot-b
     MENU LABEL Slot B (rootfs_b)
     LINUX /boot/Image
-    FDT /boot/dtb/@DTB_NAME@
-    INITRD /boot/initrd.img
+    FDT /boot/dtb/rockchip/@DTB_NAME@
     APPEND root=PARTLABEL=rootfs_b rootwait rw console=@CONSOLE@ earlycon cera_slot=B

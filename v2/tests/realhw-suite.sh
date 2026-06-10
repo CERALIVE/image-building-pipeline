@@ -76,7 +76,10 @@ set -uo pipefail
 SMOKE_SH="${SMOKE_SH:-${HERE}/realhw-smoke.sh}"
 ROLLBACK_SH="${ROLLBACK_SH:-${HERE}/rauc-rollback.sh}"
 DEV_PUSH="${DEV_PUSH:-${V2_DIR}/dev-push}"
-CERAUI_BASE_CONF="${CERAUI_BASE_CONF:-${V2_DIR}/../configs/base/ceraui-base.conf}"
+# Canonical parity package source (T22 rewire): v2 runtime manifests, not legacy
+# configs/base/ceraui-base.conf — the MOCK fixture must match what parity-check diffs.
+SHARED_LIST="${SHARED_LIST:-${V2_DIR}/manifests/packages/shared.list}"
+PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${V2_DIR}/manifests/packages}"
 
 # --- config -----------------------------------------------------------------
 BOARD="${BOARD:-rock-5b-plus}"
@@ -128,30 +131,23 @@ trap cleanup EXIT
 # STATIC smoke + dev-loop genuinely exercise the real tools end-to-end.
 # ===========================================================================
 
-# extract_conf_array <conf> <NAME> — the SAME bash-array extraction parity-check.sh
-# uses, so the synthesized dpkg status lists exactly the packages it asserts.
-extract_conf_array() {
-  awk -v name="$2" '
-    $0 ~ "^"name"=\\(" { inarr=1; sub("^"name"=\\(", "") }
-    inarr {
-      line=$0; sub(/#.*/, "", line); n=split(line, t, /"/)
-      for (i=2; i<=n; i+=2) if (t[i] != "") print t[i]
-      if (line ~ /\)/) inarr=0
-    }
-  ' "$1"
+# read_manifest_packages — the SAME parser parity-check.sh read_manifest_packages
+# (and package-migration-coverage.sh build_v2_set) use, so the synthesized dpkg
+# status lists exactly the shared.list + family-delta packages parity-check asserts.
+read_manifest_packages() {
+  local f
+  for f in "${SHARED_LIST}" "${PKG_MANIFEST_DIR}"/*.delta.list; do
+    [[ -f "${f}" ]] && sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
+  done
 }
 
 emit_dpkg_status() {                         # emit_dpkg_status <out>
-  local out="$1" arr p
+  local out="$1" p
   : > "${out}"
-  if [[ -f "${CERAUI_BASE_CONF}" ]]; then
-    for arr in BASE_PACKAGES STREAMING_PACKAGES CERAUI_PACKAGES; do
-      while IFS= read -r p; do
-        [[ -n "${p}" ]] || continue
-        printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
-      done < <(extract_conf_array "${CERAUI_BASE_CONF}" "${arr}")
-    done
-  fi
+  while IFS= read -r p; do
+    [[ -n "${p}" ]] || continue
+    printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
+  done < <(read_manifest_packages)
   # Alias TARGETS parity-check maps to (media-ctl→v4l-utils, belacoder→ceracoder,
   # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
   # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
