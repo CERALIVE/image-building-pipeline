@@ -11,9 +11,9 @@
 # reboot (see platform/boot/ceralive-rauc-boot-adapter.sh + ceralive-boot-state).
 #
 # HEALTH CHECKS, IN ORDER (ALL must pass within HEALTHCHECK_TIMEOUT):
-#   1. ceralive.service is `active`        — the Bun/CeraUI binary that FFI-loads
-#                                            ceracoder/srtla is up (primary signal).
-#   2. ceracoder binary present + LOADS    — runs under a hard timeout; a dynamic
+#   1. ceralive.service is `active`        — the Bun/CeraUI binary that drives
+#                                            cerastream/srtla is up (primary signal).
+#   2. cerastream binary present + LOADS   — runs under a hard timeout; a dynamic
 #   3. srtla_send binary present + LOADS      loader failure (missing libsrt / wrong
 #                                            arch) is the canonical can't-encode
 #                                            signature → hard fail.
@@ -75,7 +75,8 @@ SRT_CONNECT_TIMEOUT="${SRT_CONNECT_TIMEOUT:-5}"
 RAUC_BIN="${RAUC_BIN:-rauc}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 # Streaming binaries to probe (resolved via PATH; /usr/bin on device).
-CERACODER_BIN="${CERACODER_BIN:-ceracoder}"
+# cerastream replaced ceracoder as the sole streaming engine (retired 2026-06-11).
+CERASTREAM_BIN="${CERASTREAM_BIN:-cerastream}"
 SRTLA_SEND_BIN="${SRTLA_SEND_BIN:-srtla_send}"
 # Link-state probe (iproute2); stubbed in the offline proof harness.
 IP_BIN="${IP_BIN:-ip}"
@@ -106,7 +107,7 @@ check_service_active() {
 
 # Steps 2 & 3 — a streaming binary exists, is executable, and its shared libs
 # resolve. We do NOT require a specific exit code (srtla_send has no --version and
-# prints usage to stderr; ceracoder uses -v); we DO fail on a loader error, which
+# prints usage to stderr); we DO fail on a loader error, which
 # is the real "boots but can't encode" signature.
 check_binary() {
   local bin="$1"
@@ -167,7 +168,7 @@ check_srt_reach() {
 
 run_checks() {
   check_service_active   || return 1
-  check_binary "${CERACODER_BIN}"  || return 1
+  check_binary "${CERASTREAM_BIN}" || return 1
   check_binary "${SRTLA_SEND_BIN}" || return 1
   check_srt_reach        || return 1
   return 0

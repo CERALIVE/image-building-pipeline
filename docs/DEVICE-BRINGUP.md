@@ -355,24 +355,20 @@ The dev loop pushes a code change to a running device in under two minutes,
 without reflashing. It builds a squashfs sysext, rsyncs it to the board, and
 restarts `ceralive.service`.
 
-### Push ceracoder or srtla
+### Push srtla
 
 ```bash
 # From the image-building-pipeline/v2/ directory:
 
-# Push ceracoder
-./dev-push <board-ip> ceracoder
-
-# Push srtla
+# Push srtla (default)
 ./dev-push <board-ip> srtla
-
-# Push both (default)
-./dev-push <board-ip>
 ```
+
+> cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape).
 
 The script runs four steps: build, rsync, `systemd-sysext refresh`, and
 `systemctl restart ceralive.service`. The restart is required because CeraUI's
-backend holds in-process FFI handles to ceracoder and srtla; a sysext refresh
+backend holds in-process FFI handles to srtla; a sysext refresh
 alone does not reload them.
 
 ### Sync the frontend

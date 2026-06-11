@@ -11,7 +11,7 @@
 #   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
 #     rockchip-multimedia-config) → v2/manifests/families/rk3588.yaml
 #   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
-#   - First-party .debs (ceracoder, srtla, CeraUI, and the CERALIVE/srt fork) →
+#   - First-party .debs (cerastream, srtla, CeraUI, and the CERALIVE/srt fork) →
 #     installed in the APPLICATION layer (Stage 3), never apt packages. NOTE the
 #     SYSTEM libsrt transport library (Debian `libsrt1.5-openssl`) IS here, in the
 #     OS-update infra section below — it rides the RAUC OS slot so app sysexts stay
@@ -92,7 +92,7 @@ fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on 
 # Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App
 # sysext layer — so they update atomically via RAUC and are identical on every
 # architecture (rk3588, x86). See LAYER-MAP.md and decisions.md (Task 5 RAUC pins).
-libsrt1.5-openssl        # SYSTEM SRT transport library that ceracoder + srtla link
+libsrt1.5-openssl        # SYSTEM SRT transport library that the streaming stack (srtla) links
                          # at runtime. In the OS slot (not app sysext) → app images
                          # stay small + a libsrt bump is atomic via the RAUC slot.
                          # bookworm provides 1.5.x; the OpenSSL backend matches the

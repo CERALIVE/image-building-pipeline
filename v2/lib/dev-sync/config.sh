@@ -49,7 +49,6 @@ _DS_DEFAULT_ssh_port="22"
 _DS_DEFAULT_remote_ext_dir="/var/lib/extensions"
 _DS_DEFAULT_remote_tmp="/tmp"
 _DS_DEFAULT_budget="120"
-_DS_DEFAULT_ceracoder_remote="/var/lib/extensions"
 _DS_DEFAULT_srtla_remote="/var/lib/extensions"
 _DS_DEFAULT_ceraui_remote="/opt/ceralive"
 # Default rsync ignore globs (sane dev noise).
@@ -189,7 +188,6 @@ dev_sync_load_config() {
   _ds_resolve DEV_SYNC_BUDGET      budget       "${_DS_DEFAULT_budget}"
 
   # Per-component remote destinations.
-  _ds_resolve DEV_SYNC_CERACODER_REMOTE ceracoder_remote "${_DS_DEFAULT_ceracoder_remote}"
   _ds_resolve DEV_SYNC_SRTLA_REMOTE     srtla_remote     "${_DS_DEFAULT_srtla_remote}"
   _ds_resolve DEV_SYNC_CERAUI_REMOTE    ceraui_remote    "${_DS_DEFAULT_ceraui_remote}"
 
@@ -226,7 +224,6 @@ dev-sync config (file: ${DEV_SYNC_CONFIG_FILE:-<none>})
   REMOTE_EXT_DIR         = ${REMOTE_EXT_DIR}
   DEV_SYNC_REMOTE_TMP    = ${DEV_SYNC_REMOTE_TMP}
   DEV_SYNC_BUDGET        = ${DEV_SYNC_BUDGET}
-  ceracoder_remote       = ${DEV_SYNC_CERACODER_REMOTE}
   srtla_remote           = ${DEV_SYNC_SRTLA_REMOTE}
   ceraui_remote          = ${DEV_SYNC_CERAUI_REMOTE}
   ignore globs           = ${DEV_SYNC_IGNORE_GLOBS[*]}

@@ -14,10 +14,10 @@
 #   4. RESTART systemctl restart ceralive.service
 #
 # WHY restart ceralive.service (NON-NEGOTIABLE): CeraUI's backend is a single Bun
-# binary holding IN-PROCESS native FFI bindings to ceracoder and srtla. A sysext
+# binary holding IN-PROCESS native FFI bindings to srtla. A sysext
 # refresh swaps the binaries on disk, but the running CeraUI process keeps the OLD
 # FFI bindings until the WHOLE process reloads. Restarting only a hypothetical
-# ceracoder.service/srtla.service would NOT reload those bindings. The remote verb
+# srtla.service would NOT reload those bindings. The remote verb
 # is therefore byte-identical to sysext.sh:refresh_app_layer():
 #       systemd-sysext refresh && systemctl restart ceralive.service
 # The `&&` is load-bearing: if `refresh` fails (a bad/corrupt .raw — bad
@@ -51,8 +51,8 @@
 #   REMOTE_EXT_DIR=/var/lib/extensions
 #   SSH_OPTS / RSYNC_OPTS     extra flags (e.g. SSH_OPTS="-p 2222")
 #   DEV_PUSH_BUDGET=120       end-to-end budget in seconds (0 = don't enforce)
-#   CERACODER_SRC / SRTLA_SRC override sibling source paths
-#   CERACODER_BUILD_CMD / SRTLA_BUILD_CMD   override the compile command
+#   SRTLA_SRC                 override sibling source path
+#   SRTLA_BUILD_CMD           override the compile command
 #
 # shellcheck shell=bash
 
@@ -75,13 +75,13 @@ REMOTE_EXT_DIR="${REMOTE_EXT_DIR:-/var/lib/extensions}"
 DEV_PUSH_BUDGET="${DEV_PUSH_BUDGET:-120}"
 DRY_RUN="${DRY_RUN:-0}"
 
-# Default apps = both streaming components (the two sysext-ready, pure-binary
-# first-party components — ceracoder + srtla). CeraUI uses the appfs backend.
-DEFAULT_APPS=(ceracoder srtla)
+# Default apps = the sysext-ready, pure-binary first-party component (srtla).
+# CeraUI uses the appfs backend.
+# cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape)
+DEFAULT_APPS=(srtla)
 
 # Per-app source checkouts (siblings of image-building-pipeline) and the binaries
 # each app contributes to /usr/bin. Pure-binary apps → clean sysext candidates.
-CERACODER_SRC="${CERACODER_SRC:-${WORKSPACE_ROOT}/ceracoder}"
 SRTLA_SRC="${SRTLA_SRC:-${WORKSPACE_ROOT}/srtla}"
 
 usage() {
@@ -185,16 +185,6 @@ stage_from_source() {
   mkdir -p "${bindir}"
 
   case "${app}" in
-    ceracoder)
-      [[ -d "${CERACODER_SRC}" ]] || die "stage(ceracoder): source not found: ${CERACODER_SRC}"
-      log_info "stage(ceracoder): building (${CERACODER_BUILD_CMD:-make -C ${CERACODER_SRC} ceracoder})"
-      if [[ -n "${CERACODER_BUILD_CMD:-}" ]]; then
-        bash -c "${CERACODER_BUILD_CMD}"
-      else
-        make -C "${CERACODER_SRC}" ceracoder
-      fi
-      install -m 0755 "${CERACODER_SRC}/ceracoder" "${bindir}/ceracoder"
-      ;;
     srtla)
       [[ -d "${SRTLA_SRC}" ]] || die "stage(srtla): source not found: ${SRTLA_SRC}"
       log_info "stage(srtla): building (${SRTLA_BUILD_CMD:-cmake --build ${SRTLA_SRC}/build --target srtla_send srtla_rec})"

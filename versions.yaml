@@ -1,6 +1,10 @@
 # CeraLive component version registry — manually maintained; pipeline reads with graceful fallback
-# Keys under image-repos match REPOS=("srtla" "srt" "ceracoder" "CeraUI") in fetch-debs.sh exactly.
-# pin: update when cutting a release; ceracoder pin is always HEAD (git short-SHA resolved at build time).
+# Keys under image-repos match REPOS=("srtla" "srt" "cerastream" "CeraUI") in fetch-debs.sh exactly.
+# pin: update when cutting a release.
+# cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
+# generic-profile PASS — cerastream/docs/notes/boot-parity-results.md; the repo remains on GitHub
+# for history). Hardware-gated profiles (Jetson/RK3588) now track as cerastream hardware
+# validation (cerastream/docs/notes/hardware-validation.md), not as a retention condition.
 
 # ── Image-build REPOS (order matches fetch-debs.sh REPOS array) ──────────────
 
@@ -19,12 +23,13 @@ srt:
   pin: latest
   channel: stable
 
-ceracoder:
-  path: ceracoder
-  repo: https://github.com/CERALIVE/ceracoder
+cerastream:
+  path: cerastream
+  repo: https://github.com/CERALIVE/cerastream
   kind: first-party
-  # pin is a git short-SHA resolved at build time via `git rev-parse --short HEAD` (see Makefile:1)
-  pin: HEAD
+  # CalVer (YYYY.MINOR.PATCH) release tags, matching [workspace.package].version in
+  # Cargo.toml; `latest` resolves the newest matching channel release (same as CeraUI).
+  pin: latest
   channel: stable
 
 CeraUI:
@@ -63,12 +68,6 @@ image-building-pipeline:
 irl-srt-server:
   path: irl-srt-server
   repo: https://github.com/CERALIVE/irl-srt-server
-  kind: first-party
-  pin: latest
-
-obs-srtla-sender-plugin:
-  path: obs-srtla-sender-plugin
-  repo: https://github.com/CERALIVE/obs-srtla-sender-plugin
   kind: first-party
   pin: latest
 

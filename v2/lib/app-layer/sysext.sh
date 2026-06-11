@@ -4,7 +4,7 @@
 #
 # Sourced by interface.sh; relies on common.sh (already sourced there) for the
 # loud loggers, die() and require_cmd(). Implements the three-verb contract for
-# the pure-binary first-party components (ceracoder, srtla) that fit the sysext
+# the pure-binary first-party components (srtla) that fit the sysext
 # boundary: a sysext extension overlays ONLY /usr and /opt and CANNOT touch /etc
 # or /var (task-4 boundary). Components that write heavily to /etc or /var/www
 # (CeraUI) use the appfs backend instead.
@@ -110,7 +110,7 @@ install_app_layer() {
 # refresh_app_layer <app_name>
 #   Hot-update a running device: re-merge the overlay, then restart
 #   ceralive.service. The restart is NON-NEGOTIABLE — CeraUI's backend holds
-#   IN-PROCESS native FFI bindings to ceracoder/srtla, so a sysext refresh of
+#   IN-PROCESS native FFI bindings to srtla, so a sysext refresh of
 #   those binaries does not take effect until the process reloads its bindings.
 # ---------------------------------------------------------------------------
 refresh_app_layer() {

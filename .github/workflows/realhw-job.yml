@@ -8,7 +8,7 @@
 # self-hosted runner labeled `ceralive-rk3588`, via the ONE consolidated suite:
 #   * v2/tests/realhw-suite.sh   (LIVE) — orchestrates, in sequence:
 #       1. boot+service     (realhw-smoke.sh)   — boot/service/binary/quirk + parity
-#       2. encode-path init (ceracoder/srtla_send --version)
+#       2. encode-path init (cerastream/srtla_send --version)
 #       3. dev-loop sanity  (dev-push < 120s; optional, needs DEV_DEB_DIR)
 #       4. RAUC A/B rollback (rauc-rollback.sh) — bad → fallback, good → commit
 #     One aggregated exit code + an evidence bundle under artifacts/task-38-smoke/.

@@ -17,7 +17,7 @@
 #              fixture is synthesized when none is supplied) — runs the SAME
 #              parity-check.sh path offline.
 #
-#   2. ENCODE-PATH INIT    → ceracoder --version + srtla_send --version
+#   2. ENCODE-PATH INIT    → cerastream --version + srtla_send --version
 #        Confirms the encode-path binaries INITIALIZE (load + answer --version).
 #        This is the streaming/encode-path init check — NOT a full encode (no
 #        capture HW needed). LIVE: over SSH. MOCK: the shipped binaries locally.
@@ -51,7 +51,7 @@
 #   SSH_PORT      LIVE SSH port (default 22)
 #   BUNDLE_DIR    dir with bad.raucb/good.raucb (LIVE rollback; optional in MOCK)
 #   IMAGE_PATH    rootfs/image for the STATIC smoke (MOCK auto-synthesizes if unset)
-#   DEV_DEB_DIR   LIVE dev-loop: dir with an arm64 ceracoder .deb (else section SKIPs)
+#   DEV_DEB_DIR   LIVE dev-loop: dir with an arm64 srtla .deb (else section SKIPs)
 #   EVIDENCE_DIR  evidence bundle dir (default <workspace>/test-results/realhw-task-38-smoke)
 #   MOCK=1        force MOCK mode even if BOARD_IP is set
 #
@@ -148,10 +148,10 @@ emit_dpkg_status() {                         # emit_dpkg_status <out>
     [[ -n "${p}" ]] || continue
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done < <(read_manifest_packages)
-  # Alias TARGETS parity-check maps to (media-ctl→v4l-utils, belacoder→ceracoder,
+  # Alias TARGETS parity-check maps to (media-ctl→v4l-utils,
   # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
   # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
-  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device ceracoder srtla srt; do
+  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla srt; do
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done
 }
@@ -160,17 +160,17 @@ build_mock_deb() {                           # build_mock_deb <tmp> → sets MOC
   local tmp="$1"
   local work="${tmp}/debwork" debs="${tmp}/debs"
   mkdir -p "${work}/data/usr/bin" "${work}/control" "${debs}"
-  cat > "${work}/data/usr/bin/ceracoder" <<'EOF'
+  cat > "${work}/data/usr/bin/srtla_send" <<'EOF'
 #!/usr/bin/env bash
-echo "ceracoder 2026.06.0 (mock deb)"
+echo "srtla_send 2026.06.0 (mock deb)"
 EOF
-  chmod +x "${work}/data/usr/bin/ceracoder"
-  printf 'Package: ceracoder\nVersion: 0-mock\nArchitecture: arm64\nMaintainer: ceralive <ci@ceralive.tv>\nDescription: mock ceracoder for dev-loop sanity\n' \
+  chmod +x "${work}/data/usr/bin/srtla_send"
+  printf 'Package: srtla\nVersion: 0-mock\nArchitecture: arm64\nMaintainer: ceralive <ci@ceralive.tv>\nDescription: mock srtla for dev-loop sanity\n' \
     > "${work}/control/control"
   ( cd "${work}/data"    && tar -czf "${work}/data.tar.gz"    . )
   ( cd "${work}/control" && tar -czf "${work}/control.tar.gz" . )
   printf '2.0\n' > "${work}/debian-binary"
-  ( cd "${work}" && ar rc "${debs}/ceracoder_0-mock_arm64.deb" debian-binary control.tar.gz data.tar.gz )
+  ( cd "${work}" && ar rc "${debs}/srtla_0-mock_arm64.deb" debian-binary control.tar.gz data.tar.gz )
   MOCK_DEB_DIR="${debs}"
 }
 
@@ -211,7 +211,7 @@ build_mock_fixtures() {
   printf 'Types: deb\nURIs: https://apt.ceralive.tv\nSuites: stable\nComponents: main\n' \
     > "${root}/etc/apt/sources.list.d/ceralive.sources"
   # first-party binaries: stubs that load + answer --version
-  for b in ceracoder srtla_send srtla_rec; do
+  for b in cerastream srtla_send srtla_rec; do
     cat > "${root}/usr/bin/${b}" <<EOF
 #!/usr/bin/env bash
 echo "${b} 2026.06.0 (mock)"
@@ -247,10 +247,10 @@ sec_boot_service() {
 }
 
 sec_encode_init() {
-  header "2/4  ENCODE-PATH INIT   (ceracoder + srtla_send --version)"
+  header "2/4  ENCODE-PATH INIT   (cerastream + srtla_send --version)"
   local log="${EVIDENCE_DIR}/02-encode-init.log" rc=0 b out
   : > "${log}"
-  for b in ceracoder srtla_send; do
+  for b in cerastream srtla_send; do
     if [[ "${MODE}" == "live" ]]; then
       out="$(ssh_run "${b} --version </dev/null 2>&1 | head -1" 2>/dev/null)"
     elif [[ -x "${MOCK_BIN}/${b}" ]]; then
@@ -278,7 +278,7 @@ sec_dev_loop() {
       return 2
     fi
     DEV_PUSH_BUDGET=120 SSH_USER="${SSH_USER}" \
-      "${DEV_PUSH}" --from-deb "${DEV_DEB_DIR}" "${BOARD_IP}" ceracoder 2>&1 | tee "${log}"
+      "${DEV_PUSH}" --from-deb "${DEV_DEB_DIR}" "${BOARD_IP}" srtla 2>&1 | tee "${log}"
     return "${PIPESTATUS[0]}"
   fi
   # MOCK: DRY_RUN dev-push exercises the real build→rsync→refresh→restart loop
@@ -289,7 +289,7 @@ sec_dev_loop() {
     return 2
   fi
   DRY_RUN=1 DEV_PUSH_BUDGET=120 \
-    "${DEV_PUSH}" --from-deb "${MOCK_DEB_DIR}" --dry-run 192.0.2.1 ceracoder 2>&1 | tee "${log}"
+    "${DEV_PUSH}" --from-deb "${MOCK_DEB_DIR}" --dry-run 192.0.2.1 srtla 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
   return "${rc}"
 }
@@ -364,7 +364,7 @@ main() {
 
   local rc
   sec_boot_service;  rc=$?; record "boot + service (realhw-smoke.sh)"                      "${rc}"
-  sec_encode_init;   rc=$?; record "encode-path init (ceracoder/srtla_send --version)"     "${rc}"
+  sec_encode_init;   rc=$?; record "encode-path init (cerastream/srtla_send --version)"     "${rc}"
   sec_dev_loop;      rc=$?; record "dev-loop sanity (dev-push < 120s)"                      "${rc}"
   sec_rauc_rollback; rc=$?; record "rauc A/B rollback (rauc-rollback.sh)"                   "${rc}"
 

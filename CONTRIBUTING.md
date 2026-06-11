@@ -11,7 +11,7 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 - Report bugs and edge cases (with logs and steps to reproduce)
 - Improve documentation (Quickstart, device notes, troubleshooting)
 - Add board support (configs, patches, testing notes)
-- Packaging (`ceracoder`, `srtla`, `srt`, `CeraUI`) and repo integration
+- Packaging (`cerastream`, `srtla`, `srt`, `CeraUI`) and repo integration
 - Performance/latency tuning and power management
 - UI/UX feedback for first‑boot and management workflows
 

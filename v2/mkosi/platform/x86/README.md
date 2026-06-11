@@ -15,15 +15,17 @@ on UEFI/GRUB. The x86 counterpart to `../boot/` (RK3588/U-Boot).
 
 ## 1. Encode strategy (decision D1)
 
-`ceracoder` is **encoder-agnostic** — the encode element is runtime-selected from a
-text pipeline file (`gst_parse_launch`), not compiled in. **No ceracoder source
+D1 was decided for `ceracoder` (retired 2026-06-11; `cerastream` is the sole engine
+and selects encode elements at runtime via its HAL profiles). The encoder is
+**encoder-agnostic** — the encode element is runtime-selected,
+not compiled in. **No engine source
 change** for x86, **no MPP dependency**. x86 does **FULL bonded streaming** — it is
 **NOT relay-only**.
 
 | Path | Element | Pipelines | Provider |
 |---|---|---|---|
-| **Primary** (HW) | `qsvh265enc` / `qsvh264dec` / `vajpegdec` | `ceracoder/pipeline/n100/*` | `gstreamer1.0-plugins-bad` (shared.list) + `intel-media-va-driver-non-free` (iHD) |
-| **Fallback** (SW) | `x264enc` | `ceracoder/pipeline/generic/*` | `gstreamer1.0-plugins-ugly` / core (any CPU) |
+| **Primary** (HW) | `qsvh265enc` / `qsvh264dec` / `vajpegdec` | n100 profile | `gstreamer1.0-plugins-bad` (shared.list) + `intel-media-va-driver-non-free` (iHD) |
+| **Fallback** (SW) | `x264enc` | generic profile | `gstreamer1.0-plugins-ugly` / core (any CPU) |
 
 `x86-encode.sh` (1) ensures the Intel iHD VA driver + `gstreamer1.0-vaapi` are
 present (and **fails loudly** if the driver is missing — never pretends VA-API works
@@ -31,7 +33,7 @@ without it), (2) writes `/etc/ceralive/conf.d/10-encode-x86.conf` (qsv primary, 
 fallback, families `n100` → `generic`, `CERALIVE_RELAY_ONLY=false`), and (3) points
 `/etc/ceralive/pipeline` at the active `n100` family.
 
-> **D1 caveat (runtime, documented in the config):** `ceracoder` always does
+> **D1 caveat (runtime, documented in the config; ceracoder-era):** the legacy encoder always did
 > `g_object_set("bps", …)`. Stock distro `qsvh265enc`/`x264enc` expose `bitrate`
 > (kbps), **not** `bps` — only a **BELABOX/CERALIVE-patched GStreamer** adds `bps`.
 > On unpatched distro GStreamer, encode works but **dynamic bitrate control silently

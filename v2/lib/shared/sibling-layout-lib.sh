@@ -3,9 +3,13 @@
 # sibling-layout-lib.sh — the CeraLive sibling-checkout guard, shared across v2.
 #
 # Single entrypoint:
-#   * assert_sibling_layout <workspace_root> — die loudly if ceracoder/, srtla/,
+#   * assert_sibling_layout <workspace_root> — die loudly if srtla/ and
 #     CeraUI/ are not siblings under <workspace_root> (the layout CeraUI's
 #     backend link: deps depend on; ARCHITECTURE.md §5).
+#
+# ceracoder was retired 2026-06-11 (cerastream is the sole engine); CeraUI now
+# consumes @ceralive/cerastream as an npm tarball, so cerastream needs NO sibling
+# checkout — only @ceralive/srtla remains a link: sibling dependency.
 #
 # Body extracted VERBATIM from fetch-debs.sh. No behaviour change — this file is
 # a relocation of existing logic into one shared home so the fetcher (and any
@@ -23,9 +27,10 @@ source "${SIBLING_LAYOUT_LIB_HERE}/../common.sh"
 # assert_sibling_layout <workspace_root>
 #
 # HARD CONSTRAINT (ARCHITECTURE.md §5): CeraUI/apps/backend/package.json resolves
-# @ceralive/ceracoder and @ceralive/srtla via `link:../../../{ceracoder,srtla}/
-# bindings/typescript`. The `../../../` climbs from CeraUI/apps/backend to the
-# parent of CeraUI, so ceracoder/, srtla/, CeraUI/ MUST be siblings there.
+# @ceralive/srtla via `link:../../../srtla/bindings/typescript` (cerastream is
+# consumed as an npm tarball — no sibling checkout needed). The `../../../`
+# climbs from CeraUI/apps/backend to the parent of CeraUI, so srtla/ and
+# CeraUI/ MUST be siblings there.
 #
 # WHY HERE: once we consume PRE-BUILT .debs, mkosi never touches the link: graph,
 # so the layout is technically irrelevant to image assembly. BUT the .debs are
@@ -41,26 +46,25 @@ assert_sibling_layout() {
   [[ -d "${root}" ]] || die "sibling-layout: workspace root does not exist: ${root}"
 
   local sib missing=()
-  for sib in ceracoder srtla CeraUI; do
+  for sib in srtla CeraUI; do
     [[ -d "${root}/${sib}" ]] || missing+=("${sib}/")
   done
   if (( ${#missing[@]} > 0 )); then
-    die "sibling-layout BROKEN under ${root}: missing ${missing[*]} — CeraUI backend resolves @ceralive/{ceracoder,srtla} via link:../../../ (ARCHITECTURE.md §5). ceracoder/, srtla/, CeraUI/ must be siblings."
+    die "sibling-layout BROKEN under ${root}: missing ${missing[*]} — CeraUI backend resolves @ceralive/srtla via link:../../../ (ARCHITECTURE.md §5). srtla/ and CeraUI/ must be siblings."
   fi
 
-  # Verify the exact link: targets the backend depends on actually resolve from
-  # CeraUI/apps/backend, not just that the sibling dirs exist.
+  # Verify the exact link: target the backend depends on actually resolves from
+  # CeraUI/apps/backend, not just that the sibling dirs exist. srtla is the sole
+  # remaining link: sibling dependency (cerastream is an npm tarball).
   local backend="${root}/CeraUI/apps/backend"
   if [[ -d "${backend}" ]]; then
-    local dep
-    for dep in ceracoder srtla; do
-      # link:../../../<dep>/bindings/typescript resolved from CeraUI/apps/backend
-      local resolved="${backend}/../../../${dep}/bindings/typescript"
-      if [[ ! -d "${resolved}" ]]; then
-        log_warn "sibling-layout: ${dep} bindings/typescript not present at $(cd "${backend}" >/dev/null 2>&1 && cd "../../../${dep}" 2>/dev/null && pwd || echo "${root}/${dep}")/bindings/typescript — link:../../../${dep}/bindings/typescript will fail on a source build (ok if consuming a pre-built CeraUI .deb)"
-      fi
-    done
+    local dep="srtla"
+    # link:../../../<dep>/bindings/typescript resolved from CeraUI/apps/backend
+    local resolved="${backend}/../../../${dep}/bindings/typescript"
+    if [[ ! -d "${resolved}" ]]; then
+      log_warn "sibling-layout: ${dep} bindings/typescript not present at $(cd "${backend}" >/dev/null 2>&1 && cd "../../../${dep}" 2>/dev/null && pwd || echo "${root}/${dep}")/bindings/typescript — link:../../../${dep}/bindings/typescript will fail on a source build (ok if consuming a pre-built CeraUI .deb)"
+    fi
   fi
 
-  log_success "sibling-layout OK under ${root} (ceracoder/ srtla/ CeraUI/ are siblings; link:../../../ resolves)"
+  log_success "sibling-layout OK under ${root} (srtla/ CeraUI/ are siblings; link:../../../ resolves)"
 }

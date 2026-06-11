@@ -2,7 +2,7 @@
 #
 # arch.sh — architecture guard for the dev-sync loop.
 #
-# The CeraLive first-party components (ceracoder, srtla) are PURE BINARIES. An
+# The CeraLive first-party components (srtla, the CeraUI backend) are PURE BINARIES. An
 # RK3588 board is arm64; a developer laptop is usually amd64. Pushing an amd64
 # binary to an arm64 device produces an artifact that installs but can NEVER run
 # ("Exec format error"), and the failure surfaces far from its cause. This guard

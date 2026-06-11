@@ -23,7 +23,7 @@ dtb_name: none
 # never the single-slot fallback (that is for sub-16 GB microSD media).
 single_slot_fallback: false
 
-# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+# cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext
 
 description: >-

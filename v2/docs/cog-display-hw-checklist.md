@@ -138,7 +138,7 @@ This is the core of the gate. None of it is provable off-hardware.
 ## 5. Resource + stability (RECOMMENDED)
 
 - [ ] Memory: Cog + (optional) cage RSS under load is within the OOM budget in
-      `kiosk-display.md §4` — the encoder (`ceracoder`, oom_score_adj −500) must
+      `kiosk-display.md §4` — the engine (`cerastream`, oom_score_adj −500) must
       never be the first OOM victim; Cog is the expendable process.
 - [ ] **No stream regression:** start a live SRTLA stream with Cog running and
       confirm bitrate/stability is unchanged vs Cog-off (the display engine must

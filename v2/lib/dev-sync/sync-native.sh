@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# sync-native.sh — hardened native-binary (ceracoder/srtla) dev-sync wrapper.
+# sync-native.sh — hardened native-binary (srtla) dev-sync wrapper.
 #
-#   sync-native.sh [options] [board-ip] [app ...]      (default apps: ceracoder srtla)
+#   sync-native.sh [options] [board-ip] [app ...]      (default apps: srtla)
 #
 # This is an ADDITIVE wrapper around the EXISTING dev-push sysext build+push. It
 # does NOT replace, copy, or edit dev-push / sysext.sh / interface.sh — it REUSES
@@ -50,7 +50,7 @@
 #
 # Build input (feeds build_app_layer; first match wins, per app):
 #   --raw <file>        use a prebuilt <app>.raw (skip build_app_layer)
-#                       env: <APP>_RAW   e.g. CERACODER_RAW=/path/ceracoder.raw
+#                       env: <APP>_RAW   e.g. SRTLA_RAW=/path/srtla.raw
 #   --staging <dir>     build_app_layer from an extracted .deb staging tree
 #                       (looks for <dir>/<app> first, else <dir>); env: SYNC_STAGING
 #   --from-deb <dir>    explode <app>*.deb from <dir> into a staging tree, then build
@@ -99,9 +99,10 @@ source "${SYNC_NATIVE_HERE}/build-input-lib.sh"
 # shellcheck source=phase-lib.sh
 source "${SYNC_NATIVE_HERE}/phase-lib.sh"
 
-# Default apps = the two pure-binary, sysext-ready first-party components, matching
+# Default apps = the pure-binary, sysext-ready first-party components, matching
 # dev-push:DEFAULT_APPS exactly. CeraUI uses the appfs backend, not this path.
-SYNC_NATIVE_DEFAULT_APPS=(ceracoder srtla)
+# cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape)
+SYNC_NATIVE_DEFAULT_APPS=(srtla)
 
 # The reused, byte-identical on-device verb. The `&&` MUST NOT be split: a bad
 # refresh leaves the prior extension merged and SKIPS the restart (no outage).

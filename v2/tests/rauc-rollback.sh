@@ -9,7 +9,7 @@
 #
 # It runs TWO scripted, repeatable test cases:
 #
-#   BAD BUNDLE  → a bundle that boots but FAILS the healthcheck (ceracoder stripped).
+#   BAD BUNDLE  → a bundle that boots but FAILS the healthcheck (cerastream stripped).
 #                 The slot is never confirmed; its bootcount bleeds 3→2→1→0 and the
 #                 vendor U-Boot selector (boot.scr) falls back to the last-good slot
 #                 A. PROVES: a can't-encode update can NEVER brick the device.
@@ -37,7 +37,7 @@
 #                  * ceralive-boot-state.sh        (the bootloader/state engine)
 #                  * ceralive-rauc-boot-adapter.sh (the RAUC custom backend)
 #                  * ceralive-healthcheck.sh       (the mark-good gate)
-#                Only the LEAF system tools (systemctl/ceracoder/srtla_send/nc) are
+#                Only the LEAF system tools (systemctl/cerastream/srtla_send/nc) are
 #                stubbed — exactly the env seams those scripts already expose. A
 #                "reboot" runs the real `boot-select` (decrement+persist); the
 #                freshly-booted slot runs the real healthcheck, which calls the real
@@ -156,7 +156,7 @@ exit 0
 EOF
 
   # systemctl: ceralive.service is active even on a BAD bundle — the app boots, it
-  # just can't ENCODE (ceracoder stripped). is-active → 0. This is the realistic
+  # just can't ENCODE (cerastream stripped). is-active → 0. This is the realistic
   # "boots but can't encode" trap the healthcheck must still catch via the binary
   # loader probe (so the differentiator is the encoder binary, not the service).
   cat >"${bin}/systemctl" <<'EOF'
@@ -165,12 +165,12 @@ EOF
 exit 0
 EOF
 
-  # A healthy ceracoder (loads + prints a version). The BAD slot points CERACODER_BIN
+  # A healthy cerastream (loads + prints a version). The BAD slot points CERASTREAM_BIN
   # at a non-existent path (the "stripped binary"), which the healthcheck reports as
   # missing/not-executable → no mark-good.
-  cat >"${bin}/ceracoder.good" <<'EOF'
+  cat >"${bin}/cerastream.good" <<'EOF'
 #!/usr/bin/env bash
-echo "ceracoder 2026.06.0 (mock healthy slot)"
+echo "cerastream 2026.06.0 (mock healthy slot)"
 exit 0
 EOF
   cat >"${bin}/srtla_send" <<'EOF'
@@ -193,13 +193,13 @@ EOF
 
 # mock_run_healthcheck — run the REAL ceralive-healthcheck.sh for the booted slot.
 mock_run_healthcheck() {
-  local slot bundle ceracoder
+  local slot bundle cerastream
   slot="$(cat "${SIM}/booted")"
   bundle="$(cat "${SIM}/slot_${slot}.bundle")"
   if [[ "${bundle}" == "good" ]]; then
-    ceracoder="${SIM}/bin/ceracoder.good"
+    cerastream="${SIM}/bin/cerastream.good"
   else
-    ceracoder="${SIM}/bin/ceracoder.stripped"   # deliberately absent (stripped)
+    cerastream="${SIM}/bin/cerastream.stripped"   # deliberately absent (stripped)
   fi
   MOCK_BOOT_STATE_FILE="${SIM}/boot_state.txt" \
   MOCK_BOOT_ATTEMPTS="${BOOT_ATTEMPTS}" \
@@ -210,7 +210,7 @@ mock_run_healthcheck() {
   CERALIVE_HEALTHCHECK_MARKER="${SIM}/data/ceralive/.slot-marked-good" \
   RAUC_BIN="${SIM}/bin/rauc" \
   SYSTEMCTL_BIN="${SIM}/bin/systemctl" \
-  CERACODER_BIN="${ceracoder}" \
+  CERASTREAM_BIN="${cerastream}" \
   SRTLA_SEND_BIN="${SIM}/bin/srtla_send" \
   BIN_PROBE_TIMEOUT=2 SRT_CONNECT_TIMEOUT=2 \
   bash "${HEALTHCHECK_SH}" >/dev/null 2>&1
@@ -395,7 +395,7 @@ run_good_bundle_test() {
   assert_eq "booted into the NEW slot B" "B" "$(board_booted_slot)"
 
   # 6-7. The ceralive-healthcheck logic confirms real streaming health and
-  # mark-goods the slot (service active + ceracoder/srtla load + SRT reach).
+  # mark-goods the slot (service active + cerastream/srtla load + SRT reach).
   phase "healthcheck self-confirmation (wait ≤${HEALTHCHECK_TIMEOUT}s)"
   local hc_rc=0
   board_run_healthcheck; hc_rc=$?

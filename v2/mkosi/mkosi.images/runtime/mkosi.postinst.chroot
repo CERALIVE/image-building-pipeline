@@ -11,7 +11,7 @@
 #   3. RUNTIME packages are installed here from the canonical Task-18 list
 #      manifests/packages/shared.list — forwarded by lib/orchestrate.sh as
 #      $SHARED_PACKAGES. There is NO inline hardcoded package list (Task 19).
-#   4. First-party apps (ceracoder/srtla/CeraUI + the CERALIVE/srt fork .deb) are
+#   4. First-party apps (cerastream/srtla/CeraUI + the CERALIVE/srt fork .deb) are
 #      NOT installed here — they belong to the APPLICATION layer (Stage 3). This
 #      runtime layer carries only the OS + system config + system libsrt.
 #
@@ -170,7 +170,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 # 4. (REMOVED in Task 19) First-party .deb install moved to the APPLICATION layer
-#    (mkosi.images/app, Stage 3, tasks 22-23). ceracoder/srtla/CeraUI + the
+#    (mkosi.images/app, Stage 3, tasks 22-23). cerastream/srtla/CeraUI + the
 #    CERALIVE/srt fork .deb are NOT installed by the runtime layer — only the
 #    system libsrt (libsrt1.5-openssl, via shared.list) lives here so app images
 #    stay small and a libsrt bump rides the RAUC OS slot atomically.

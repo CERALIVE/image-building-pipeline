@@ -49,7 +49,7 @@ interfaces:
   eth0: platform-fe190000.pcie-pci-0004:41:00.0
   wlan0: platform-fe170000.pcie-pci-0002:21:00.0
 
-# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+# cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext
 
 description: >-

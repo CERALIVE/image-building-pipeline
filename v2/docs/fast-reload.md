@@ -89,8 +89,7 @@ Build, rsync, refresh, and restart a component in **~35 s** (120 s budget):
 
 ```bash
 # From image-building-pipeline/v2/ :
-./dev-push 192.168.1.42                  # ceracoder + srtla (default)
-./dev-push 192.168.1.42 ceracoder        # just ceracoder
+./dev-push 192.168.1.42                  # srtla (default)
 ./dev-push --from-deb /path/to/debs 192.168.1.42   # cross-arch / CI artifacts
 ```
 
@@ -105,7 +104,7 @@ Watch the first-party source trees and route each save to its sync script:
 image-building-pipeline/v2/dev-sync --all          # frontend + backend + native
 image-building-pipeline/v2/dev-sync --frontend     # UI only (no restart)
 image-building-pipeline/v2/dev-sync --backend      # backend binary only
-image-building-pipeline/v2/dev-sync --native       # ceracoder/srtla sysext
+image-building-pipeline/v2/dev-sync --native       # srtla sysext
 ```
 
 Preview the plan without starting anything (host-only, no SSH):
@@ -195,8 +194,8 @@ in [`../lib/dev-sync/README.md`](../lib/dev-sync/README.md)):
 |------|--------------|----------|--------------|---------------|
 | **frontend** | `CeraUI/apps/frontend/src` | no (disk-served) | no | **< 600 ms** |
 | **backend** | `CeraUI/apps/backend/src` | yes | yes (`GET /`) | **< 2.3 s** |
-| **native** | `ceracoder/src`, `srtla/src` | yes | yes (`is-active`) | **< 4.1 s** |
-| **`dev-push`** (full ceracoder + srtla) | n/a (one-shot) | yes | yes | **~35 s** total (120 s budget: build ≈ 30 s, rsync ≈ 2 s, remote ≈ 3.5 s) |
+| **native** | `srtla/src` | yes | yes (`is-active`) | **< 4.1 s** |
+| **`dev-push`** (srtla) | n/a (one-shot) | yes | yes | **~35 s** total (120 s budget: build ≈ 30 s, rsync ≈ 2 s, remote ≈ 3.5 s) |
 
 Debounce defaults to 500 ms (`DEV_SYNC_DEBOUNCE_MS`) so an editor's
 write+rename+chmod burst coalesces into a single sync.

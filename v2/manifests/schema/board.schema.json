@@ -55,7 +55,7 @@
       "default": false
     },
     "app_backend": {
-      "description": "How the first-party app components ship on this board. 'sysext' = ceracoder/srtla binaries via systemd-sysext into /usr/bin; 'appfs' = CeraUI-style heavier payload via the base/app image. Default 'sysext' (decision: sysext boundary).",
+      "description": "How the first-party app components ship on this board. 'sysext' = cerastream/srtla binaries via systemd-sysext into /usr/bin; 'appfs' = CeraUI-style heavier payload via the base/app image. Default 'sysext' (decision: sysext boundary).",
       "type": "string",
       "enum": ["sysext", "appfs"],
       "default": "sysext"

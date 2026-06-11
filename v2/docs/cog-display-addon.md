@@ -8,7 +8,7 @@ gated** on a physical RK3588 (Task 1 spike verdict: NO-GO).
 
 This is the concrete **W4 build recipe** for shipping **Cog** (the single-window
 WPE WebKit kiosk browser) as a **feature sysext add-on** — i.e. an optional
-display engine delivered through the same sysext class as `ceracoder`/`srtla`
+display engine delivered through the same sysext class as `srtla`
 and managed by the W3 add-on manager. It is a lighter alternative to the
 cage + Chromium kiosk stack specified in [`kiosk-display.md`](kiosk-display.md);
 choosing Cog-vs-Chromium as the *default* engine is a separate decision — this
@@ -39,7 +39,7 @@ The Mali-G610 **GPU userspace** (`libmali-valhall-g610-*`) is the opposite story
 it is **not** in bookworm and **not** in Armbian's main feed — it comes from the
 Rockchip/Radxa BSP and is a **Platform-layer** artifact. The Cog feature sysext
 therefore **excludes** it and relies on the Platform-layer merge, exactly the way
-`ceracoder`/`srtla` exclude `librockchip_mpp.so*` (§5).
+the first-party app sysexts exclude `librockchip_mpp.so*` (§5).
 
 ---
 
@@ -150,7 +150,7 @@ The recipe mirrors the existing first-party sysext builder
 (`v2/mkosi/app/sysext-build.lib.sh`): **resolve+download the closure → extract
 `/usr` → prune Platform/Runtime-owned libs → assert the launcher survived →
 squashfs via the one app-layer contract**. The only difference from
-`ceracoder`/`srtla` is the *source* of the `.deb`s: a Debian apt closure instead
+`srtla` is the *source* of the `.deb`s: a Debian apt closure instead
 of a first-party staging `.deb`.
 
 ### 4.1 Acquire the closure (inside the arm64 build chroot)
@@ -196,7 +196,7 @@ SYSEXT_REQUIRED_BINARIES="usr/bin/cog"
 #                          libmali provides on-device; a bundled mesa/GLVND copy
 #                          would shadow the Mali stack
 #   librockchip_mpp.so* / libgstrockchip*  -> Platform HW-accel (defensive, same
-#                          contract as ceracoder/srtla)
+#                          contract as the srtla sysext)
 SYSEXT_EXCLUDE_NAMES="libmali.so* libmali-*.so* libEGL.so* libGLESv2.so* libgbm.so* libwayland-egl.so* librockchip_mpp.so* librockchip_vpu.so* libgstrockchip*.so* gstreamer1.0-rockchip*"
 SYSEXT_OS_ID=debian
 SYSEXT_OS_VERSION_ID=12
@@ -255,7 +255,7 @@ doc only fixes the **boundary contract** the Cog add-on must honour.
 
 Per `LAYER-MAP.md`, the GPU/BSP/HW-accel userspace is **Platform-layer (Layer 2)**
 — kernel-coupled and SoC-specific. The add-on sysext (Layer 4, arch-neutral) must
-not carry it, for the identical reasons `ceracoder`/`srtla` exclude
+not carry it, for the identical reasons the first-party app sysexts exclude
 `librockchip_mpp.so*`:
 
 1. **No shadowing.** A bundled `libmali`/mesa-`libEGL` copy in the sysext would
@@ -303,7 +303,7 @@ Runtime layer already provides and thus gets excluded, and on the squashfs
 compressor settings. Measure on a real arm64 build before pinning a size budget.
 
 > For comparison, the existing first-party sysexts are tiny (`srtla.raw` ~420 KB,
-> `ceracoder.raw` ~1.2 MB). Cog is two orders of magnitude larger because it
+> `srtla.raw` ~1.2 MB historically). Cog is two orders of magnitude larger because it
 > carries a full browser engine — a real consideration against the partition/size
 > budget (`manifests/size-budget.json`) when this add-on is enabled.
 

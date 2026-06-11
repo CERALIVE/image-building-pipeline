@@ -60,7 +60,7 @@ Any one of the three is enough. `watchexec` gives the best experience (native de
 
 **For backend syncs:** `bun` must be installed on the build host (the machine running dev-sync, not the device). The backend is compiled with `bun build --compile`.
 
-**For native syncs:** a build input is required. Pass `--staging <dir>`, `--from-deb <dir>`, or `--raw <file>` via `DEV_SYNC_NATIVE_ARGS`. See [native path](#native-ceracoder--srtla-sysext) below.
+**For native syncs:** a build input is required. Pass `--staging <dir>`, `--from-deb <dir>`, or `--raw <file>` via `DEV_SYNC_NATIVE_ARGS`. See [native path](#native-srtla-sysext) below.
 
 **Device preflight (one-time).** Run `setup.sh` once on the device to create the static-path symlink the frontend sync depends on:
 
@@ -123,7 +123,6 @@ remote_ext_dir: /var/lib/extensions
 remote_tmp: /tmp
 
 # Per-component remote destinations.
-ceracoder_remote: /var/lib/extensions   # env: DEV_SYNC_CERACODER_REMOTE
 srtla_remote: /var/lib/extensions       # env: DEV_SYNC_SRTLA_REMOTE
 ceraui_remote: /opt/ceralive            # env: DEV_SYNC_CERAUI_REMOTE
 
@@ -163,7 +162,7 @@ bash image-building-pipeline/v2/lib/dev-sync/config.sh
 2. Rsyncs the bundle into a staging dir on the device (`/var/www/ceralive.dev-sync.tmp`).
 3. Swaps it in atomically with two back-to-back renames in a single SSH round-trip.
 
-**No `ceralive.service` restart, ever.** The Bun backend serves static files straight off disk per request. New files go live the instant they land. A restart would tear down the in-process ceracoder/srtla FFI bindings and interrupt any active stream — so this path deliberately contains zero `systemctl` calls.
+**No `ceralive.service` restart, ever.** The Bun backend serves static files straight off disk per request. New files go live the instant they land. A restart would tear down the in-process srtla FFI bindings and interrupt any active stream — so this path deliberately contains zero `systemctl` calls.
 
 Relevant env knobs:
 
@@ -194,7 +193,7 @@ Relevant env knobs:
 7. Health-gates: polls `systemctl is-active` + `GET /` (returns the SPA index with 200) up to 15 times, 2 s apart.
 8. On health failure: rolls back to `ceralive-old`, restarts, verifies active, exits non-zero.
 
-**Why it needs a restart.** The backend is a compiled Bun binary. Replacing it on disk has no effect until the process is restarted. More importantly, the running process has ceracoder and srtla loaded as in-process FFI bindings (`@ceralive/ceracoder`, `@ceralive/srtla` via `link:` paths). Those bindings are loaded once at startup and live in the Bun process's memory. A new binary means new binding code, so a restart is unavoidable.
+**Why it needs a restart.** The backend is a compiled Bun binary. Replacing it on disk has no effect until the process is restarted. More importantly, the running process has srtla loaded as an in-process FFI binding (`@ceralive/srtla` via a `link:` path; cerastream is consumed as the `@ceralive/cerastream` npm tarball, IPC-driven). Those bindings are loaded once at startup and live in the Bun process's memory. A new binary means new binding code, so a restart is unavoidable.
 
 Relevant env knobs:
 
@@ -210,9 +209,11 @@ Relevant env knobs:
 
 ---
 
-### Native (ceracoder / srtla sysext)
+### Native (srtla sysext)
 
-**Watch dirs:** `ceracoder/src`, `srtla/src`
+> cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape).
+
+**Watch dirs:** `srtla/src`
 **Script:** `lib/dev-sync/sync-native.sh`
 **Timing budget:** < 4.1 s
 
@@ -226,7 +227,7 @@ Relevant env knobs:
 6. **health** — waits `DEV_SYNC_HEALTH_WAIT` seconds, then checks `systemctl is-active ceralive.service`.
 7. **rollback** (conditional) — on refresh/restart failure or health failure, restores `<app>-rollback.raw` and re-runs refresh+restart.
 
-**Why it needs a restart.** Same reason as the backend: ceracoder and srtla are loaded as in-process FFI bindings inside the running Bun process. A sysext refresh merges the new `.raw` into the filesystem overlay, but the running process still has the old native code mapped into memory. Only a `ceralive.service` restart picks up the new bindings.
+**Why it needs a restart.** Same reason as the backend: srtla is loaded as an in-process FFI binding inside the running Bun process. A sysext refresh merges the new `.raw` into the filesystem overlay, but the running process still has the old native code mapped into memory. Only a `ceralive.service` restart picks up the new bindings.
 
 **Build input** (required for a real run; pass via `DEV_SYNC_NATIVE_ARGS`):
 
@@ -238,7 +239,7 @@ DEV_SYNC_NATIVE_ARGS="--from-deb /path/to/debs" image-building-pipeline/v2/dev-s
 DEV_SYNC_NATIVE_ARGS="--staging /path/to/staging" image-building-pipeline/v2/dev-sync --native
 
 # From a prebuilt .raw:
-DEV_SYNC_NATIVE_ARGS="--raw /path/to/ceracoder.raw" image-building-pipeline/v2/dev-sync --native
+DEV_SYNC_NATIVE_ARGS="--raw /path/to/srtla.raw" image-building-pipeline/v2/dev-sync --native
 ```
 
 Relevant env knobs:
@@ -446,7 +447,6 @@ All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in
 | `DRY_RUN` | `0` | Print the plan, start no watchers |
 | `DEV_SYNC_DEBOUNCE_MS` | `500` | Coalesce window in milliseconds |
 | `DEV_SYNC_CERAUI_DIR` | `<workspace>/CeraUI` | CeraUI workspace root |
-| `CERACODER_SRC` | `<workspace>/ceracoder` | ceracoder source checkout |
 | `SRTLA_SRC` | `<workspace>/srtla` | srtla source checkout |
 | `DEV_SYNC_NATIVE_ARGS` | `` | Extra args forwarded to `sync-native.sh` |
 | `DEV_SYNC_FORCE` | `0` | Skip stream-active prompt for backend/native |
@@ -469,7 +469,6 @@ All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in
 | `REMOTE_EXT_DIR` | `remote_ext_dir` | `/var/lib/extensions` | sysext `.raw` destination |
 | `DEV_SYNC_REMOTE_TMP` | `remote_tmp` | `/tmp` | Remote scratch dir for rsync |
 | `DEV_SYNC_BUDGET` | `budget` | `120` | End-to-end budget hint (seconds) |
-| `DEV_SYNC_CERACODER_REMOTE` | `ceracoder_remote` | `/var/lib/extensions` | ceracoder remote dest |
 | `DEV_SYNC_SRTLA_REMOTE` | `srtla_remote` | `/var/lib/extensions` | srtla remote dest |
 | `DEV_SYNC_CERAUI_REMOTE` | `ceraui_remote` | `/opt/ceralive` | CeraUI component root |
 | `DEV_SYNC_IGNORE` | `ignore:` list | `.git/ node_modules/ *.tmp *.swp .DS_Store` | rsync exclude globs |
@@ -503,7 +502,7 @@ All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in
 | `DEV_SYNC_HEALTH_PROBE` | `` | Optional extra remote health command |
 | `DEV_SYNC_DEVICE_ARCH` | `` | Offline arch override (skips SSH `uname -m`) |
 | `SYNC_STAGING` | `` | Staging tree root (equivalent to `--staging`) |
-| `<APP>_RAW` | `` | Prebuilt `.raw` path per app (e.g. `CERACODER_RAW`) |
+| `<APP>_RAW` | `` | Prebuilt `.raw` path per app (e.g. `SRTLA_RAW`) |
 
 ### Vite proxy (`apps/frontend/.env.local`)
 

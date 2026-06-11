@@ -96,22 +96,22 @@ host-local). Low priority — purely cosmetic for sysext-readiness.
 ## Post-migration: extension-release + FFI restart
 
 Once relocated, the CeraUI sysext build follows the same `sysext.sh` contract as
-ceracoder/srtla:
+srtla (and historically ceracoder, retired 2026-06-11):
 
 - The build writes `/usr/lib/extension-release.d/extension-release.ceraui` with
   `ID=<os-id>` + `VERSION_ID=<os-version>` matching the (upgraded) host os-release,
   or the kernel refuses to merge it.
 - `refresh_app_layer` already restarts `ceralive.service` after a sysext refresh —
   unchanged and still required, because CeraUI holds **in-process native FFI** to
-  ceracoder/srtla and must reload after their binaries swap.
+  srtla and must reload after its binaries swap.
 
 ## FFI / sibling-checkout note (unchanged by this migration)
 
-CeraUI's `link:../../../ceracoder/bindings/typescript` and
+CeraUI's
 `link:../../../srtla/bindings/typescript` sibling-checkout (ARCHITECTURE.md §5) is a
 **CeraUI build-time** concern — the bindings are compiled into the Bun binary before
 packaging. The sysext migration does **not** touch that layout, and neither backend
-(appfs today, sysext later) changes how the FFI resolves on-device: ceracoder/srtla
+(appfs today, sysext later) changes how the FFI resolves on-device: srtla
 binaries come from their sysext into the merged `/usr/bin`, and `libsrt` comes from
 the runtime OS slot's `/usr/lib`.
 
@@ -129,7 +129,7 @@ the runtime OS slot's `/usr/lib`.
       or `/var` (except operator-override dirs left intentionally empty)
 - [ ] pipeline flip: set the CeraUI manifest/app backend to `sysext` and replace
       `build-ceraui-appfs.sh` with a `build-ceraui-sysext.sh` (a one-line wrapper
-      over the shared `sysext.sh` backend, mirroring ceracoder/srtla) — **this flip
+      over the shared `sysext.sh` backend, mirroring srtla) — **this flip
       is the only pipeline-side change, and only AFTER all the above land**
 
 ## References

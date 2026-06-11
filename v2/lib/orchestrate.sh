@@ -340,7 +340,7 @@ main() {
   # 8. Parity verification vs the v2 package manifests. The app layer now
   #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
   #    CI mode (debs fetched) the gate clears the first-party check via the
-  #    ceraui→ceralive-device / belacoder→ceracoder aliases in parity-check.sh. An
+  #    ceraui→ceralive-device alias in parity-check.sh. An
   #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
   #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
   # -------------------------------------------------------------------------

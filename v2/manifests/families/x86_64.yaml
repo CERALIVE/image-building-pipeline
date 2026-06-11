@@ -7,15 +7,16 @@
 # generalisation of the (previously rk3588/ARM-centric) schema; the
 # schema-delta + rationale were captured during the x86 manifest bring-up.
 #
-# Decision D1 (task 3, locked): ceracoder is encoder-AGNOSTIC — the encode
-# element is runtime-selected from a text pipeline file, not compiled in.
+# Decision D1 (task 3, locked; decided for ceracoder, RETIRED 2026-06-11 —
+# cerastream is the sole engine and selects its encode element at runtime via
+# its HAL profiles; the package rationale below is unchanged): the encode
+# element is runtime-selected, not compiled in.
 # x86 supports FULL bonded streaming via VAAPI/QSV hardware encode with a
 # pure-software (x264) fallback; it is NOT relay-only and has NO MPP dependency.
-# The Intel N100 pipelines (ceracoder/pipeline/n100/*) invoke qsvh265enc /
-# qsvh264dec / vajpegdec.
+# The Intel N100 profile invokes qsvh265enc / qsvh264dec / vajpegdec.
 #
-# Sources: D1 (x86 ceracoder encode decision),
-# ceracoder/docs/dependencies.md:59-94, ceracoder/pipeline/{n100,generic}/*.
+# Sources: D1 (x86 encode decision, ceracoder-era), cerastream HAL profiles
+# (cerastream/crates/cerastream-hal).
 
 # mkosi architecture identifier (consumed by mkosi --architecture; orchestrate.sh).
 # mkosi has NO 'amd64' — the x86 identifier is 'x86-64' (learnings task 13). The

@@ -19,7 +19,7 @@
 #       * materializes the rootfs (extract .tar / loop-mount .img / use dir),
 #         then runs lib/parity-check.sh against it (packages / ceralive user +
 #         groups / services / SRTLA routing / udev / apt — the task-16 checklist)
-#       * first-party binaries staged in the rootfs (/usr/bin/ceracoder,
+#       * first-party binaries staged in the rootfs (/usr/bin/cerastream,
 #         srtla_send, srtla_rec) when the first-party layer is present
 #       * board-quirk artifacts present in the rootfs (HDMI-capture udev rule,
 #         modem source-routing) as resolved from the board manifest
@@ -30,7 +30,7 @@
 #       * the main app unit is active — handles BOTH ceralive.service AND
 #         ceraui.service (whichever the first-party package ships)
 #       * `id ceralive` resolves (the unified service account)
-#       * binaries present + answer --version: ceracoder, srtla_send, srtla_rec
+#       * binaries present + answer --version: cerastream, srtla_send, srtla_rec
 #       * board-quirk hardware, driven by manifests/boards/<BOARD>.yaml quirks:
 #           hdmi_input_emi_shield     → a /dev/video* capture node exists
 #           m2_modem_sim_workaround   → ModemManager sees a modem OR a modem
@@ -88,8 +88,8 @@ SSH_PORT="${SSH_PORT:-22}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 
 # First-party binaries the device image must ship (package contract — srtla
-# CMake installs srtla_send/srtla_rec; ceracoder bindings resolve /usr/bin/ceracoder).
-EXPECTED_BINARIES=(/usr/bin/ceracoder /usr/bin/srtla_send /usr/bin/srtla_rec)
+# CMake installs srtla_send/srtla_rec; the cerastream .deb ships /usr/bin/cerastream).
+EXPECTED_BINARIES=(/usr/bin/cerastream /usr/bin/srtla_send /usr/bin/srtla_rec)
 # The main application systemd unit — accept either name (task: "handle both").
 APP_SERVICE_CANDIDATES=(ceralive.service ceraui.service)
 

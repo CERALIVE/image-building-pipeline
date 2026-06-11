@@ -10,7 +10,7 @@
 #
 # LAYER: this module MUST run in the BASE OS layer (base/mkosi.finalize) so the
 # `ceralive` account exists in the base rootfs BEFORE the sysext app layer
-# (task 22) merges /usr/bin/ceracoder + /usr/bin/srtla and runs services as it.
+# (task 22) merges the first-party streaming binaries (cerastream, srtla) into /usr and runs services as it.
 #
 # CONTRACT: sourced by run-all.sh (chroot context). Idempotent. Strict; no
 # `|| true`; loud on any failure via common.sh's ERR trap.

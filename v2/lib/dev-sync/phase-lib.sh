@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# phase-lib.sh — the ordered phase verbs of the native (ceracoder/srtla) dev-sync.
+# phase-lib.sh — the ordered phase verbs of the native (srtla) dev-sync.
+# cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape)
 #
 # Each phase is a single seam in the documented order:
 #   arch-check → build → verify → push → refresh+restart → health → (rollback)

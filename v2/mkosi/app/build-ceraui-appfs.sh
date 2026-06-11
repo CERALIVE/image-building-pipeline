@@ -17,8 +17,8 @@
 # A sysext overlays ONLY /usr and /opt and CANNOT merge /etc or /var, so a sysext
 # would silently DROP the unit, the udev rules, the config and the whole web root —
 # leaving an unstartable, unreachable UI. Therefore CeraUI uses the appfs backend
-# (full-filesystem payload, no /usr-only restriction). ceracoder/srtla — pure
-# /usr/bin binaries — stay on the sysext backend (build-*-sysext.sh, task 22).
+# (full-filesystem payload, no /usr-only restriction). srtla — a pure
+# /usr/bin binary — stays on the sysext backend (build-*-sysext.sh, task 22).
 #
 # Becoming sysext-ready is a CeraUI-REPO change (relocate units/udev/config/www to
 # /usr + confext), NOT pipeline work — fully specified in
@@ -26,18 +26,19 @@
 #
 # ── FFI RESOLUTION (in-process, NOT IPC) ─────────────────────────────────────
 # The CeraUI backend is a single Bun binary that holds IN-PROCESS native FFI
-# handles to ceracoder/srtla — it does not spawn them over a socket. Those handles
+# handles to srtla — it does not spawn it over a socket (cerastream, by contrast,
+# is an IPC-driven engine consumed via @ceralive/cerastream). srtla handles
 # resolve at process start against the MERGED /usr view of three independent layers:
 #
 #   Runtime OS slot (RAUC)  → libsrt1.5-openssl  → /usr/lib/<triplet>/libsrt.so.*
-#   App sysext (ceracoder)  → ceracoder binary   → /usr/bin/ceracoder
+#   App .deb   (cerastream) → cerastream binary  → /usr/bin/cerastream
 #   App sysext (srtla)      → srtla binaries     → /usr/bin/srtla_{send,rec}
 #   App appfs  (CeraUI)     → ceralive binary    → /usr/local/bin/ceralive
 #
-# Because the sysext merges ceracoder/srtla into the live /usr and the runtime slot
+# Because the sysext merges srtla into the live /usr and the runtime slot
 # provides libsrt in /usr/lib, the appfs CeraUI binary sees them all through the
 # normal loader path — no bundling, no IPC. CRITICAL CONSEQUENCE: after a sysext
-# refresh swaps the ceracoder/srtla binaries, the FFI handles are stale until the
+# refresh swaps the srtla binaries, the FFI handles are stale until the
 # process reloads them; refresh_app_layer (sysext.sh) therefore restarts
 # ceralive.service. The link:../../../ sibling-checkout (ARCHITECTURE.md §5) is a
 # BUILD-time concern of the CeraUI .deb — by the time we package here it is already
@@ -119,7 +120,7 @@ main() {
 
   # CeraUI is pinned to the appfs backend regardless of the board manifest's
   # default app_backend (sysext). Forcing it here keeps the per-component backend
-  # decision explicit and local — ceracoder/srtla read the manifest default;
+  # decision explicit and local — srtla reads the manifest default;
   # CeraUI does NOT, because its /etc+/var footprint makes sysext non-viable.
   export APP_BACKEND="appfs"
   select_backend

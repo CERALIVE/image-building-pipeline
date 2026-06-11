@@ -11,7 +11,7 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — srtla / srt / ceracoder / CeraUI .debs, fetched from R2
+#   2. First-party   — srtla / srt / cerastream / CeraUI .debs, fetched from R2
 #                      (CI mode) or `gh release download` (local mode).
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
@@ -77,11 +77,11 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # mkosi install ordering and the versions.yaml keys all match these exact names.
 # ceralive-platform is CLOUD-ONLY and MUST NEVER appear here.
 #
-# cerastream is the active engine (default post boot-parity generic profile, Task 37).
-# ceracoder is RETAINED alongside it: its removal is blocked until the hardware-gated
-# boot-parity profiles also pass on real boards (cerastream/docs/notes/boot-parity-results.md).
-# Both encoders ship in the image during this transition — do NOT drop ceracoder yet.
-REPOS=("srtla" "srt" "ceracoder" "cerastream" "CeraUI")
+# cerastream is the SOLE streaming engine (ceracoder retired 2026-06-11 after the
+# boot-parity gate passed on the generic profile — cerastream/docs/notes/
+# boot-parity-results.md). The hardware-gated profiles (Jetson/RK3588) now track
+# as cerastream hardware-validation work, not as a retention condition.
+REPOS=("srtla" "srt" "cerastream" "CeraUI")
 
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
@@ -147,7 +147,7 @@ get_pin() {
 }
 
 # assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
-# tripwire that ceracoder/, srtla/, CeraUI/ are siblings — see that lib and
+# tripwire that srtla/ and CeraUI/ are siblings — see that lib and
 # ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
 
 # _fetch_bsp_native_one — bounded-pool worker: download ONE BSP .deb into a
@@ -367,7 +367,7 @@ _fetch_first_party_one() {
 }
 
 # ---------------------------------------------------------------------------
-# fetch_first_party — srtla/srt/ceracoder/CeraUI .debs. CI: aws s3 sync from R2;
+# fetch_first_party — srtla/srt/cerastream/CeraUI .debs. CI: aws s3 sync from R2;
 # local: gh release download per repo (through the bounded fetch pool, launched
 # in REPOS order). Pins logged from versions.yaml.
 # ---------------------------------------------------------------------------

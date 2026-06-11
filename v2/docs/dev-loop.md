@@ -180,9 +180,9 @@ grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64   # confirm 'F'
 | `rsync` on the build host | `pacman -S rsync` / `apt install rsync` |
 | `mksquashfs` on the build host | `squashfs-tools` package |
 | Board running a v2 image | Must have `systemd-sysext` + `ceralive.service` |
-| Sibling checkout layout | `ceralive/ceracoder/`, `ceralive/srtla/`, `ceralive/image-building-pipeline/` all siblings |
+| Sibling checkout layout | `ceralive/srtla/`, `ceralive/image-building-pipeline/` all siblings |
 
-For **ceracoder** and **srtla** source builds, the build host arch must be **arm64** (aarch64). On an x86 host, use `--from-deb` with a pre-built arm64 `.deb` instead (see below).
+For **srtla** source builds, the build host arch must be **arm64** (aarch64). On an x86 host, use `--from-deb` with a pre-built arm64 `.deb` instead (see below).
 
 ---
 
@@ -192,14 +192,14 @@ For **ceracoder** and **srtla** source builds, the build host arch must be **arm
 # From the image-building-pipeline/v2/ directory:
 ./dev-push 192.168.1.42
 
-# Push only ceracoder:
-./dev-push 192.168.1.42 ceracoder
+# Push srtla explicitly:
+./dev-push 192.168.1.42 srtla
 
 # Push only srtla:
 ./dev-push 192.168.1.42 srtla
 
 # Push both (default):
-./dev-push 192.168.1.42 ceracoder srtla
+./dev-push 192.168.1.42 srtla
 ```
 
 That's it. The script builds, rsyncs, refreshes, and restarts — then prints a timing breakdown.
@@ -209,13 +209,13 @@ That's it. The script builds, rsyncs, refreshes, and restarts — then prints a 
 ## What it does (4 steps)
 
 ```
-1. BUILD   compile ceracoder/srtla from source → package into <app>.raw (squashfs sysext)
+1. BUILD   compile srtla from source → package into <app>.raw (squashfs sysext)
 2. RSYNC   copy <app>.raw to root@<board>:/var/lib/extensions/
 3. REFRESH systemd-sysext refresh          (re-merge /usr+/opt overlay on-device)
 4. RESTART systemctl restart ceralive.service
 ```
 
-**Why restart `ceralive.service`?** CeraUI's backend is a single Bun binary with **in-process native FFI bindings** to ceracoder and srtla. A sysext refresh swaps the binaries on disk, but the running process keeps the old FFI handles until it restarts. Restarting only a hypothetical `ceracoder.service` would not reload those bindings. The full service restart is non-negotiable.
+**Why restart `ceralive.service`?** CeraUI's backend is a single Bun binary with **in-process native FFI bindings** to srtla. A sysext refresh swaps the binaries on disk, but the running process keeps the old FFI handles until it restarts. Restarting only a hypothetical `srtla.service` would not reload those bindings. The full service restart is non-negotiable.
 
 **What if the push fails?** The `&&` between `refresh` and `restart` is load-bearing. If `systemd-sysext refresh` rejects a corrupt or mismatched `.raw` (wrong `extension-release`, bad squashfs, arch mismatch), the restart **never runs**. The previously-merged extension stays active and `ceralive.service` keeps streaming on the old version. A bad push is a no-op + a loud error — never an outage.
 
@@ -226,7 +226,7 @@ That's it. The script builds, rsyncs, refreshes, and restarts — then prints a 
 If you're on an x86 host or have CI-produced arm64 `.deb`s:
 
 ```bash
-# Point at a directory containing ceracoder_*.deb and/or srtla_*.deb
+# Point at a directory containing srtla_*.deb
 ./dev-push --from-deb /path/to/debs 192.168.1.42
 
 # Example: use the debs staged by the orchestrator
@@ -249,9 +249,7 @@ All optional. Set in your shell or prefix the command.
 | `RSYNC_OPTS` | _(none)_ | Extra rsync flags |
 | `DEV_PUSH_BUDGET` | `120` | Budget in seconds; `0` = don't enforce |
 | `REMOTE_EXT_DIR` | `/var/lib/extensions` | Where extensions live on the device |
-| `CERACODER_SRC` | `../../ceracoder` | Override ceracoder source path |
 | `SRTLA_SRC` | `../../srtla` | Override srtla source path |
-| `CERACODER_BUILD_CMD` | `make -C <src> ceracoder` | Override ceracoder build command |
 | `SRTLA_BUILD_CMD` | `cmake --build <src>/build ...` | Override srtla build command |
 | `APP_BACKEND` | `sysext` | App-layer backend (`sysext` or `appfs`) |
 
@@ -274,7 +272,7 @@ DEV_PUSH_BUDGET=180 ./dev-push 192.168.1.42
 
 | Updated by `dev-push` | NOT updated (requires RAUC OS update) |
 |---|---|
-| `ceracoder` binary (`/usr/bin/ceracoder`) | `libsrt` (lives in the OS runtime layer) |
+| `srtla` binaries (`/usr/bin/srtla_{send,rec}`) | `libsrt` (lives in the OS runtime layer) |
 | `srtla_send` / `srtla_rec` binaries | GStreamer plugins / Rockchip MPP |
 | Any file under `/usr` or `/opt` in the sysext | Kernel / U-Boot / firmware |
 | | System config (`/etc`), udev rules |
@@ -303,21 +301,17 @@ A faster CeraUI dev loop (rsync of the Bun binary + assets) is possible once Cer
 
 ```
 $ ./dev-push 192.168.1.42
-[12:34:01] INFO  === dev-push → root@192.168.1.42 | apps: ceracoder srtla | budget: 120s ===
-[12:34:01] INFO  stage(ceracoder): building (make -C /home/user/ceralive/ceracoder ceracoder)
+[12:34:01] INFO  === dev-push → root@192.168.1.42 | apps: srtla | budget: 120s ===
 [12:34:18] INFO  stage(srtla): building (cmake --build /home/user/ceralive/srtla/build ...)
-[12:34:31] INFO  sysext: building squashfs /tmp/tmp.XYZ/ceracoder.raw for 'ceracoder'
 [12:34:32] INFO  sysext: building squashfs /tmp/tmp.XYZ/srtla.raw for 'srtla'
-[12:34:32] SUCCESS  built ceracoder sysext: /tmp/tmp.XYZ/ceracoder.raw (1.2M)
 [12:34:32] SUCCESS  built srtla sysext: /tmp/tmp.XYZ/srtla.raw (420K)
-[12:34:32] INFO  rsync ceracoder.raw → root@192.168.1.42:/var/lib/extensions/
 [12:34:34] INFO  rsync srtla.raw → root@192.168.1.42:/var/lib/extensions/
 [12:34:34] INFO  remote: systemd-sysext refresh && systemctl restart ceralive.service
 [12:34:37] INFO  ---------------------------------------------
 [12:34:37] INFO  TIMING  build=30.12s  rsync=2.01s  remote=3.44s
 [12:34:37] INFO  TIMING  total=35.57s  (budget 120s)
 [12:34:37] INFO  ---------------------------------------------
-[12:34:37] SUCCESS  dev-push complete in 35.57s — ceracoder srtla live on 192.168.1.42 (ceralive.service restarted, FFI reloaded)
+[12:34:37] SUCCESS  dev-push complete in 35.57s — srtla live on 192.168.1.42 (ceralive.service restarted, FFI reloaded)
 ```
 
 ---

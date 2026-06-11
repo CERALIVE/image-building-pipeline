@@ -33,8 +33,8 @@
 # Usage (from the builder/orchestrator):
 #   source "v2/lib/app-layer/interface.sh"
 #   select_backend                         # sources $APP_BACKEND.sh, validates it
-#   artifact="$(build_app_layer ceracoder "$staging" "$out")"
-#   install_app_layer ceracoder "$artifact"
+#   artifact="$(build_app_layer srtla "$staging" "$out")"
+#   install_app_layer srtla "$artifact"
 #
 # shellcheck shell=bash
 

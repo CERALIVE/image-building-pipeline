@@ -7,7 +7,7 @@
 # the frontend bundle straight off disk, per request (rpc/server.ts:serveStatic
 # reads public/<file> at request time — see CeraUI/apps/backend AGENTS.md). New
 # files therefore go live the instant they appear on disk; a service restart
-# would needlessly tear down the in-process ceracoder/srtla FFI bindings and
+# would needlessly tear down the in-process srtla FFI bindings and
 # interrupt an active stream. dev-push restarts because it swaps the BINARY;
 # a frontend-only sync must NOT. This is the stream-safety contract.
 #

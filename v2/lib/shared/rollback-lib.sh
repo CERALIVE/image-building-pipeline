@@ -9,7 +9,7 @@
 #   * phase_rollback  — restore each app's `<app>-rollback.raw` snapshot over
 #                       `<app>.raw` and re-run the reused refresh+restart verb so
 #                       the device returns to the last-known-good extension. Used
-#                       by the native (ceracoder/srtla sysext) path.
+#                       by the native (srtla sysext) path.
 #
 # Bodies extracted VERBATIM from dev-sync/sync-backend.sh (rollback) and
 # dev-sync/sync-native.sh (phase_rollback). No behaviour change — this file is a

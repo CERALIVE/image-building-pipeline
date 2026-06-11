@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
 # sysext-build.lib.sh — shared builder for the first-party app sysext images
-# (ceracoder, srtla) — Stage 3, task 22.
+# (srtla) — Stage 3, task 22. (ceracoder retired 2026-06-11; a cerastream
+# sysext descriptor is a follow-on — cerastream installs via the app layer .deb.)
 #
-# build-ceracoder-sysext.sh and build-srtla-sysext.sh are thin wrappers that
-# pick a *.sysext.conf descriptor and call build_sysext_main here. The actual
+# build-srtla-sysext.sh is a thin wrapper that
+# picks a *.sysext.conf descriptor and calls build_sysext_main here. The actual
 # squashfs creation + extension-release stamping is NOT reimplemented: it is
 # delegated to the ONE app-layer contract (v2/lib/app-layer/interface.sh →
 # build_app_layer), so a sysext built here is byte-identical to one the device

@@ -401,7 +401,7 @@ mountpoint -q "$DATA" || die "$DATA is not mounted; refusing to update"
 . "$CONF"
 [ -n "${BUNDLE_URL:-}" ] || die "BUNDLE_URL is empty in $CONF; OTA disabled"
 
-for svc in ceracoder.service srtla.service; do
+for svc in cerastream.service srtla.service; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         die "stream active ($svc); refusing to update"
     fi

@@ -13,7 +13,7 @@
 #             (build + atomic static publish; NEVER restarts ceralive.service)
 #   backend   CeraUI/apps/backend/src   →  lib/dev-sync/sync-backend.sh
 #             (build + atomic binary deploy + health gate + rollback; restarts)
-#   native    ceracoder/src, srtla/src  →  lib/dev-sync/sync-native.sh
+#   native    srtla/src                 →  lib/dev-sync/sync-native.sh
 #             (sysext build + refresh&&restart + A/B rollback; calls main "$@")
 #
 # WHY opt-in (not a daemon): this installs NO systemd unit and spawns NO
@@ -45,7 +45,7 @@
 #   DRY_RUN=1                  print the plan, start no watchers.
 #   DEV_SYNC_DEBOUNCE_MS=500   coalesce window in milliseconds.
 #   DEV_SYNC_CERAUI_DIR        CeraUI workspace root (default <workspace>/CeraUI).
-#   CERACODER_SRC / SRTLA_SRC  native source checkouts (siblings; mirror dev-push).
+#   SRTLA_SRC                  native source checkout (sibling; mirrors dev-push).
 #   DEV_SYNC_NATIVE_ARGS       extra args forwarded to sync-native.sh (e.g.
 #                              "--from-deb /path" or "--staging /dir"; sync-native
 #                              needs a build input for a real — non-DRY_RUN — run).
@@ -80,7 +80,7 @@ source "${SYNC_DIR}/transport.sh"
 # ---------------------------------------------------------------------------
 DEV_SYNC_DEBOUNCE_MS="${DEV_SYNC_DEBOUNCE_MS:-500}"
 DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-${DEV_SYNC_WORKSPACE_ROOT}/CeraUI}"
-CERACODER_SRC="${CERACODER_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/ceracoder}"
+# cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape)
 SRTLA_SRC="${SRTLA_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/srtla}"
 DEV_SYNC_NATIVE_ARGS="${DEV_SYNC_NATIVE_ARGS:-}"
 
@@ -101,10 +101,10 @@ DEV_SYNC_STREAM_STATE="${DEV_SYNC_STREAM_STATE:-}"
 # sync's own artifacts can't re-trigger the watcher into a rebuild loop.
 FRONTEND_WATCH_DIRS=("${DEV_SYNC_CERAUI_DIR}/apps/frontend/src")
 BACKEND_WATCH_DIRS=("${DEV_SYNC_CERAUI_DIR}/apps/backend/src")
-NATIVE_WATCH_DIRS=("${CERACODER_SRC}/src" "${SRTLA_SRC}/src")
+NATIVE_WATCH_DIRS=("${SRTLA_SRC}/src")
 
 # Watch-time ignore globs: the config.sh rsync ignores PLUS build-artifact noise
-# that lives inside watched src trees (e.g. ceracoder/src/*.o) and would otherwise
+# that lives inside watched src trees (e.g. srtla/src/*.o) and would otherwise
 # bounce the watcher. (watchexec also honours .gitignore, where these already are.)
 DEV_SYNC_WATCH_IGNORE=(
   "${DEV_SYNC_IGNORE_GLOBS[@]}"
@@ -135,7 +135,7 @@ Watch the first-party source trees and route each change to its sync script.
 Components (pick one or more; --all selects all three):
   --frontend   watch CeraUI/apps/frontend/src → sync-frontend.sh (no restart)
   --backend    watch CeraUI/apps/backend/src  → sync-backend.sh  (restart+health)
-  --native     watch ceracoder/src, srtla/src → sync-native.sh   (sysext refresh)
+  --native     watch srtla/src → sync-native.sh   (sysext refresh)
   --all        watch all three
 
 Options:
@@ -151,7 +151,7 @@ stream), so when the device is streaming they prompt [y/N] (or honour --force /
 from the device's GET /status over SSH.
 
 Watcher (auto, first available): watchexec → entr → inotifywait.
-Env: DRY_RUN, DEV_SYNC_DEBOUNCE_MS, DEV_SYNC_CERAUI_DIR, CERACODER_SRC, SRTLA_SRC,
+Env: DRY_RUN, DEV_SYNC_DEBOUNCE_MS, DEV_SYNC_CERAUI_DIR, SRTLA_SRC,
      DEV_SYNC_NATIVE_ARGS, DEV_SYNC_FORCE, DEV_SYNC_DEFER, DEV_SYNC_STREAM_STATUS_PORT,
      DEV_SYNC_STREAM_STATUS_PATH, plus all config.sh knobs. Ctrl-C stops all watchers.
 EOF
@@ -216,7 +216,7 @@ _route_component() {
 # ---------------------------------------------------------------------------
 # Stream-active guard. sync-frontend.sh is disk-served (zero systemctl tokens) so
 # it is stream-safe and ALWAYS proceeds. sync-backend.sh / sync-native.sh both
-# restart ceralive.service, which tears down the in-process ceracoder/srtla feed
+# restart ceralive.service, which tears down the in-process srtla feed
 # — so they are gated here. _GUARD_SKIP is the sentinel exit for "the operator
 # declined / defer timed out", which the run loop treats as a tolerated no-op.
 # ---------------------------------------------------------------------------
@@ -424,7 +424,7 @@ _build_ignore_ere() {
 
 # ---------------------------------------------------------------------------
 # _existing_dirs <dir...> — echo (newline-sep) only the dirs that exist, so a
-# watcher never errors on a not-yet-cloned sibling (e.g. ceracoder/src absent).
+# watcher never errors on a not-yet-cloned sibling (e.g. srtla/src absent).
 # ---------------------------------------------------------------------------
 _existing_dirs() {
   local d

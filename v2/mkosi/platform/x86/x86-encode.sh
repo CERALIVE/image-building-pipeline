@@ -2,7 +2,10 @@
 #
 # x86-encode.sh — set up the CeraLive x86 video-encode path (task 33, decision D1).
 #
-# DECISION D1 (locked):
+# DECISION D1 (locked; decided for ceracoder — RETIRED 2026-06-11, cerastream is
+# the sole engine and selects its encode element at runtime via its HAL profiles.
+# The VA-driver/x264 package guarantees below still stand; the legacy pipeline-dir
+# symlink resolves only if a legacy pipeline tree is present):
 # ceracoder is ENCODER-AGNOSTIC — the encode element is runtime-selected from a TEXT
 # pipeline file (gst_parse_launch), not compiled in. There is NO ceracoder source
 # change for x86 and NO MPP dependency. x86 supports FULL bonded streaming:
@@ -54,8 +57,10 @@ ENCODE_PACKAGES=(intel-media-va-driver-non-free gstreamer1.0-vaapi vainfo)
 PIPELINE_FAMILY="${CERALIVE_PIPELINE_FAMILY:-n100}"
 PIPELINE_FALLBACK_FAMILY="${CERALIVE_PIPELINE_FALLBACK_FAMILY:-generic}"
 
-# Where the ceracoder .deb installs its pipeline tree (app layer, Stage 3). The
-# symlink target; resolved lazily if the dir is not present yet at platform time.
+# LEGACY-COMPAT: where the retired ceracoder .deb installed its pipeline tree.
+# Kept so the symlink behaviour (and its offline test) is unchanged; on a
+# cerastream image the tree never appears and the link stays dangling (harmless).
+# The symlink target; resolved lazily if the dir is not present yet at platform time.
 CERACODER_PIPELINE_DIR="${CERACODER_PIPELINE_DIR:-/usr/share/ceracoder/pipeline}"
 
 ensure_packages() {
@@ -85,7 +90,7 @@ write_encode_config() {
   log "writing x86 encode selection -> ${conf}"
   cat >"${conf}" <<EOF
 # CeraLive x86 encode selection — task 33, decision D1.
-# ceracoder is encoder-agnostic; the encode element comes from the pipeline FILE.
+# The encoder was agnostic; the encode element came from the pipeline FILE (legacy).
 # x86 = FULL bonded streaming. This is NOT relay-only.
 
 # Primary path: Intel Quick Sync / VA-API hardware encode (N100/N200 Gen12 iGPU).
@@ -96,14 +101,14 @@ CERALIVE_ENCODE_PRIMARY=qsv
 # ${PIPELINE_FALLBACK_FAMILY} pipelines invoke x264enc.
 CERALIVE_ENCODE_FALLBACK=x264
 
-# Pipeline families ceracoder/CeraUI select from, in order.
+# Pipeline families selected from, in order (legacy ceracoder-era contract).
 CERALIVE_PIPELINE_FAMILY=${PIPELINE_FAMILY}
 CERALIVE_PIPELINE_FALLBACK_FAMILY=${PIPELINE_FALLBACK_FAMILY}
 
 # x86 is NOT relay-only — full streaming is supported (D1).
 CERALIVE_RELAY_ONLY=false
 
-# D1 caveat (RUNTIME): ceracoder/src/gst/encoder_control.c:53 always does
+# D1 caveat (RUNTIME, ceracoder-era): the legacy encoder always did
 # g_object_set("bps", ...). Stock distro qsvh265enc / x264enc expose "bitrate"
 # (kbps), NOT "bps" — a BELABOX/CERALIVE-PATCHED GStreamer adds the "bps" property.
 # On UNPATCHED distro GStreamer encode still works but DYNAMIC BITRATE CONTROL
@@ -120,17 +125,17 @@ link_pipelines() {
   local target="${CERACODER_PIPELINE_DIR}/${PIPELINE_FAMILY}"
   mkdir -p "${link_dir}"
 
-  # If ceracoder's pipelines are already present (app layer installed first, or a
+  # If a legacy pipeline tree is already present (app layer installed first, or a
   # combined build), point the stable /etc/ceralive/pipeline at the n100 family.
   if [[ -d "${ROOT}${target}" ]]; then
     ln -sfn "${target}" "${link}"
     log "active pipeline dir: ${link} -> ${target} (n100/QSV)"
   else
-    # Platform layer runs BEFORE the app layer installs the ceracoder .deb, so the
+    # Platform layer runs BEFORE the app layer installs the first-party .debs, so the
     # pipeline tree may not exist yet. Create the stable symlink to the conventional
-    # install path (resolves once ceracoder lands) and record the choice in config.
+    # install path (resolves only if a legacy pipeline tree lands) and record the choice in config.
     ln -sfn "${target}" "${link}"
-    warn "ceracoder pipelines not present yet (${ROOT}${target}); symlinked ${link} -> ${target} (resolves when the app layer installs ceracoder). Family also recorded in 10-encode-x86.conf."
+    warn "legacy pipeline tree not present (${ROOT}${target}); symlinked ${link} -> ${target} (legacy-compat; cerastream selects encoders via its HAL at runtime). Family also recorded in 10-encode-x86.conf."
   fi
 }
 

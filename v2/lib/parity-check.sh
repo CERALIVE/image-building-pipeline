@@ -14,7 +14,7 @@
 #                   debian       — must be installed now (hard FAIL if missing)
 #                   armbian-bsp  — gstreamer1.0-rockchip1 / rockchip-multimedia-config
 #                                  (families/rk3588.yaml HW-accel + runtime)
-#                   first-party  — ceraui/belacoder/srtla/srt (CI: R2/gh; offline → WARN)
+#                   first-party  — ceraui/cerastream/srtla/srt (CI: R2/gh; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
@@ -43,17 +43,19 @@ PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${HERE}/../manifests/packages}"
 # Reference names that the real .deb ships under another name. Without these
 # aliases the gate could never clear the app-layer check even after a real
 # install — the installed names never match the reference names.
+# (The legacy belacoder→ceracoder alias is gone: ceracoder was retired 2026-06-11;
+# cerastream — the sole engine — ships under its own package name, no alias needed.)
 declare -A PKG_ALIAS=(
   [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm
-  [belacoder]=ceracoder         # legacy BELABOX name; encoder .deb = ceracoder
   [ceraui]=ceralive-device      # CeraUI .deb package name = ceralive-device
 )
 # Rockchip HW GStreamer pair — families/rk3588.yaml hw_accel_gstreamer_plugins +
 # gstreamer_runtime_packages, installed from the Armbian pool (platform layer).
 ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
-# Offline these are absent → reported as WARN, never silent.
-FIRST_PARTY_PKGS=" ceraui belacoder srtla srt "
+# Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
+# absent → reported as WARN, never silent.
+FIRST_PARTY_PKGS=" ceraui cerastream srtla srt "
 
 PASS=0; WARN=0; FAIL=0
 pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
@@ -140,7 +142,7 @@ main() {
     warn "Armbian-BSP packages not installed (need Armbian pool at build time): ${armbian_missing[*]}"
   fi
   if (( ${#firstparty_missing[@]} == 0 )); then
-    pass "first-party packages installed (ceraui/belacoder/srtla/srt)"
+    pass "first-party packages installed (ceraui/cerastream/srtla/srt)"
   else
     warn "first-party packages not installed: ${firstparty_missing[*]} — require R2/gh creds (CI mode); offline dev build cannot fetch them"
   fi

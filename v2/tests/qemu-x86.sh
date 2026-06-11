@@ -13,12 +13,12 @@
 #   3. ceralive.service is `active` OR at least `loaded`
 #         (it legitimately may not auto-start without on-box config / capture HW —
 #          loaded-but-inactive is a PASS-with-note, not a hard fail; see task brief)
-#   4. key packages/binaries present: systemd, udev (real .debs) + ceracoder,
+#   4. key packages/binaries present: systemd, udev (real .debs) + cerastream,
 #      srtla_send/srtla_rec (first-party /usr/bin binaries — sysext or .deb)
 #
 # It is explicitly NOT a substitute for the RK3588 real-hardware gate (realhw-
 # smoke.sh LIVE + task 38) and does NOT attempt a streaming encode (no VAAPI/QSV
-# or capture HW exists in qemu — decision D1: ceracoder is encoder-agnostic, so we
+# or capture HW exists in qemu — the engine selects its encode element at runtime, so we
 # validate that the service LOADS, never that it encodes).
 #
 # ---------------------------------------------------------------------------
@@ -120,11 +120,11 @@ QEMU_TRANSCRIPT="${QEMU_TRANSCRIPT:-}"
 APP_SERVICE_CANDIDATES=(ceralive.service ceraui.service)
 
 # Critical packages/binaries the booted x86 OS must show. systemd + udev are real
-# Debian packages (queryable via dpkg-query); ceracoder + srtla ship as first-party
+# Debian packages (queryable via dpkg-query); cerastream + srtla ship as first-party
 # /usr/bin binaries (sysext on x86 per the board manifest's app_backend: sysext, or
 # .deb) so they are probed by `command -v`, not dpkg.
 EXPECTED_DPKG=(systemd udev)
-EXPECTED_BINS=(ceracoder srtla_send srtla_rec)
+EXPECTED_BINS=(cerastream srtla_send srtla_rec)
 
 # Unique markers bracketing the in-guest probe block so the engine can locate the
 # command output deterministically inside the noisy serial boot log.
@@ -434,7 +434,7 @@ EOF
     cat <<EOF
 DPKG:systemd=install ok installed
 DPKG:udev=absent
-BIN:ceracoder=present
+BIN:cerastream=present
 BIN:srtla_send=present
 BIN:srtla_rec=absent
 ${MARK_END}
@@ -443,7 +443,7 @@ EOF
     cat <<EOF
 DPKG:systemd=install ok installed
 DPKG:udev=install ok installed
-BIN:ceracoder=present
+BIN:cerastream=present
 BIN:srtla_send=present
 BIN:srtla_rec=present
 ${MARK_END}

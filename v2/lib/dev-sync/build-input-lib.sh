@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build-input-lib.sh — build-input resolution for the native (ceracoder/srtla)
+# build-input-lib.sh — build-input resolution for the native (srtla)
 # dev-sync path. Resolves WHAT feeds build_app_layer for each app:
 #
 #   * _explode_deb        — standard .deb data-tarball extraction (dpkg-deb, else

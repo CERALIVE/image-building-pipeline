@@ -101,7 +101,7 @@ in-tree and delivered as signed `.deb`s via `lib/fetch-debs.sh` (`REPOS`) then
 | Legacy name | Reality |
 |---|---|
 | `ceraui` | first-party → `REPOS` (`CeraUI`) |
-| `belacoder` | **stale name** → now `ceracoder` in `REPOS` |
+| `belacoder` | **retired lineage** → `belacoder` was renamed `ceracoder`, which was itself retired 2026-06-11 (boot-parity generic PASS); `cerastream` in `REPOS` is the sole streaming engine |
 | `srtla` | first-party → `REPOS` (`srtla`) |
 | `srt` | first-party → `REPOS` (`srt`) |
 
@@ -112,7 +112,7 @@ but are **operator/field diagnostics or optional capabilities**, not part of the
 streaming/bonding/modem/update datapath. They are removed from the always-installed
 base and become the **seed set for the debug add-on** (T26) — installed on demand,
 never baked into every image. Each was verified to have **no runtime consumer** in
-CeraUI, ceracoder, srtla, or the mkosi runtime postinst before removal.
+CeraUI, the streaming engine (then ceracoder, now cerastream), srtla, or the mkosi runtime postinst before removal.
 
 | Package | Reason for removal | Destination |
 |---|---|---|
@@ -129,7 +129,7 @@ CeraUI, ceracoder, srtla, or the mkosi runtime postinst before removal.
 | `vnstat` | Cumulative traffic accounting — data-cap awareness is a nice-to-have, not runtime-critical. | debug add-on (T26) |
 | `nano` | On-box editor — operator convenience only; no automated config path edits files interactively. | debug add-on (T26) |
 | `iperf3` | Bonded-link throughput testing — field diagnostics. | debug add-on (T26) |
-| `socat` | Socket relay — the old "streaming/control glue" comment was aspirational; **no consumer** in CeraUI/ceracoder/srtla/mkosi. The chaos harness (`tools/chaos`) ships its own. | debug add-on (T26) |
+| `socat` | Socket relay — the old "streaming/control glue" comment was aspirational; **no consumer** in CeraUI/encoder/srtla/mkosi. The chaos harness (`tools/chaos`) ships its own. | debug add-on (T26) |
 | `netcat-openbsd` | `nc` connectivity probing — field diagnostics, no runtime consumer. | debug add-on (T26) |
 
 **KEPT (verified runtime-critical, NOT moved):**

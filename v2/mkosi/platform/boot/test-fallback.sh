@@ -244,7 +244,7 @@ echo
 echo "### 9-10. Streaming health gate — offline satisfiable, dead encoder fatal (T15)"
 # A fresh OFFLINE first boot (no SRT receiver, no link) MUST be able to mark-good,
 # else the boot counter bleeds and the slot rolls back into a brick loop (RISK-2).
-# But the binary-load check stays STRICT: a slot whose ceracoder cannot load its
+# But the binary-load check stays STRICT: a slot whose cerastream cannot load its
 # shared libs (boots-but-can't-encode) MUST be refused. Drive the REAL healthcheck
 # with a throwaway stub toolchain — no systemd, no rauc, no network, no encoder.
 HEALTHCHECK="${BOOT_DIR}/../../runtime/ceralive-healthcheck.sh"
@@ -258,17 +258,17 @@ mk_stub() { # <name> <line...> ; writes an executable stub of those body lines
 }
 mk_stub systemctl  'exit 0'
 mk_stub rauc       'exit 0'
-mk_stub ceracoder  'echo "ceracoder (stub) 0.0.0"; exit 0'
+mk_stub cerastream  'echo "cerastream (stub) 0.0.0"; exit 0'
 mk_stub srtla_send 'echo "srtla_send (stub)"; exit 0'
-mk_stub ceracoder_dead \
-  'echo "ceracoder: error while loading shared libraries: libsrt.so.1.5: cannot open shared object file" >&2' \
+mk_stub cerastream_dead \
+  'echo "cerastream: error while loading shared libraries: libsrt.so.1.5: cannot open shared object file" >&2' \
   'exit 127'
 mk_stub ip 'echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000"'
 
-run_healthcheck() { # <conf> <marker> [ceracoder-bin] -> healthcheck exit code
+run_healthcheck() { # <conf> <marker> [cerastream-bin] -> healthcheck exit code
   CERALIVE_HEALTHCHECK_CONF="$1" CERALIVE_HEALTHCHECK_MARKER="$2" \
   SYSTEMCTL_BIN="${HC_STUBS}/systemctl" RAUC_BIN="${HC_STUBS}/rauc" \
-  CERACODER_BIN="${3:-${HC_STUBS}/ceracoder}" SRTLA_SEND_BIN="${HC_STUBS}/srtla_send" \
+  CERASTREAM_BIN="${3:-${HC_STUBS}/cerastream}" SRTLA_SEND_BIN="${HC_STUBS}/srtla_send" \
   IP_BIN="${HC_STUBS}/ip" \
     bash "${HEALTHCHECK}" >/dev/null 2>&1
 }
@@ -285,10 +285,10 @@ printf 'IRL_SERVER_HOST=192.0.2.1\nIRL_SERVER_SRT_PORT=9000\nHEALTHCHECK_TIMEOUT
 hc_rc=0; run_healthcheck "${WORK}/hc-nolink.conf" "${WORK}/marker-nolink" || hc_rc=$?
 assert_eq "host set but no link up -> reach skipped -> exit 0" "0" "${hc_rc}"
 
-# 10. STRICT: a non-loadable ceracoder is the boots-but-can't-encode signature and
+# 10. STRICT: a non-loadable cerastream is the boots-but-can't-encode signature and
 #     MUST fail the gate (no mark-good) even offline. TIMEOUT=0 -> fail first pass.
 printf 'HEALTHCHECK_TIMEOUT=0\nHEALTHCHECK_RETRY_INTERVAL=1\n' >"${WORK}/hc-dead.conf"
-hc_rc=0; run_healthcheck "${WORK}/hc-dead.conf" "${WORK}/marker-dead" "${HC_STUBS}/ceracoder_dead" || hc_rc=$?
+hc_rc=0; run_healthcheck "${WORK}/hc-dead.conf" "${WORK}/marker-dead" "${HC_STUBS}/cerastream_dead" || hc_rc=$?
 if [[ "${hc_rc}" -ne 0 ]]; then ok "dead-encoder gate FAILS (exit ${hc_rc}, no mark-good)"; else bad "dead-encoder gate exited 0 — would brick"; fi
 if [[ ! -f "${WORK}/marker-dead" ]]; then ok "dead-encoder gate wrote NO mark-good marker"; else bad "dead-encoder gate wrote a marker despite failure"; fi
 

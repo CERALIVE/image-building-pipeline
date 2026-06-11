@@ -46,7 +46,7 @@ interfaces:
   eth1: FIXME-read-from-udevadm-info-on-opi5plus-secondary-port
   wlan0: FIXME-read-from-udevadm-info-on-opi5plus-wifi
 
-# ceracoder/srtla ship as systemd-sysext into /usr/bin (default boundary).
+# cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext
 
 description: >-

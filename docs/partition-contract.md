@@ -27,7 +27,7 @@ Design rules locked by this contract:
 3. **Kernel rides with the rootfs.** Kernel/DTB/initrd are inside each slot's `/boot`, so an
    OS update swaps kernel + userland atomically. The `boot` partition holds only the
    bootloader environment + slot selector.
-4. **No appfs.** App components (`CeraUI`, `ceracoder`, `srtla`, `srt`) are `.deb`s inside
+4. **No appfs.** App components (`CeraUI`, `cerastream`, `srtla`, `srt`) are `.deb`s inside
    the rootfs → already atomic with the rootfs slot. A separate RAUC appfs is omitted.
 
 ---

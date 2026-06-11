@@ -2,7 +2,7 @@
 #
 # base/mkosi.finalize — create the CeraLive runtime USER in the BASE OS layer.
 #
-# WHY HERE (not in runtime): the sysext app layer merges /usr/bin/ceracoder +
+# WHY HERE (not in runtime): the sysext app layer merges /usr/bin/cerastream +
 # /usr/bin/srtla over a SEALED base+platform rootfs and starts services AS the
 # `ceralive` user. A sysext extension cannot add a user (it only overlays /usr
 # + /opt). Therefore the account MUST already exist in the base tree before

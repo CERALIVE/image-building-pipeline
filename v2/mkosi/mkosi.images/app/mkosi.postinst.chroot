@@ -9,11 +9,12 @@
 # the rootfs, then drops the staging tree so it never ships.
 #
 # WHAT INSTALLS HERE (LAYER-MAP.md §Layer 4):
-#   * ceracoder / srtla / CERALIVE-srt fork  — SYSEXT-class: pure /usr binaries (+
+#   * cerastream / srtla / CERALIVE-srt fork — SYSEXT-class: pure /usr binaries (+
 #       the libsrt FORK .so) that link the SYSTEM libsrt already in the Runtime OS
 #       slot (libsrt1.5-openssl), so the app footprint stays small. Their OTA UPDATE
 #       delivery is a systemd-sysext .raw that overlays /usr at runtime
-#       (v2/mkosi/app/build-{ceracoder,srtla}-sysext.sh).
+#       (v2/mkosi/app/build-srtla-sysext.sh; a cerastream sysext descriptor is a
+#       follow-on — ceracoder's was removed with its retirement, 2026-06-11).
 #   * CeraUI (ceralive-device .deb)           — APPFS-class: a full-filesystem payload
 #       (/usr/local/bin + /etc + /var/www) that CANNOT be a sysext — a sysext merges
 #       only /usr+/opt, never /etc or /var. Its OTA delivery is the appfs backend
@@ -26,7 +27,7 @@
 # shadows the baked-in binary). The sysext/appfs split is the OTA-delivery contract,
 # NOT an in-image install difference — so it is reflected here only in classification
 # + logging, while one apt-get transaction installs all .debs (apt resolves the
-# inter-deps, e.g. ceracoder Depends: srtla, and pulls the rest — gstlibuvch264src,
+# inter-deps and pulls the rest — gstlibuvch264src,
 # libgstreamer* — from the Runtime-written sources: bookworm main + apt.ceralive.tv).
 #
 # OFFLINE/DEV builds stage NO first-party .debs (fetch-debs dry-run) — this script
@@ -51,7 +52,7 @@ FIRST_PARTY_DIR="/opt/ceralive-staging"
 # apt-get for both — see header. rauc-hawkbit-updater is NOT a first-party app: it
 # is the runtime layer's OTA backport (setup_hawkbit_updater), so it is skipped here
 # if it happens to share the staging dir.
-SYSEXT_APP_PKGS="ceracoder srtla srt"
+SYSEXT_APP_PKGS="cerastream srtla srt"
 APPFS_APP_PKGS="ceralive-device"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
@@ -60,7 +61,7 @@ APPFS_APP_PKGS="ceralive-device"
 # `srt` carries the libsrt FORK shared object (a library, no /usr/bin binary), so it
 # has no entry here — it is still installed, just not binary-asserted.
 declare -A REQUIRED_BINARIES=(
-  [ceracoder]="/usr/bin/ceracoder"
+  [cerastream]="/usr/bin/cerastream"
   [srtla]="/usr/bin/srtla_send /usr/bin/srtla_rec"
 )
 
@@ -121,7 +122,7 @@ assert_sysext_binaries() {
   if (( ${#missing[@]} > 0 )); then
     die "first-party install incomplete — missing/non-executable binaries: ${missing[*]}"
   fi
-  log "sysext-class binaries verified present (ceracoder / srtla_send / srtla_rec where staged)"
+  log "sysext-class binaries verified present (cerastream / srtla_send / srtla_rec where staged)"
 }
 
 main() {

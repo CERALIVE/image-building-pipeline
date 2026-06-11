@@ -147,11 +147,11 @@ The OSK is toggled by sending `SIGUSR1` (show) / `SIGUSR2` (hide) to the wvkbd p
 
 ## 4. OOM Configuration
 
-The kiosk stack adds two memory-hungry processes (cage + Chromium) to a device that is already running ceracoder (hardware encoder) and the CeraUI backend. OOM score adjustments ensure the encoder is never killed before the UI.
+The kiosk stack adds two memory-hungry processes (cage + Chromium) to a device that is already running cerastream (the streaming engine) and the CeraUI backend. OOM score adjustments ensure the encoder is never killed before the UI.
 
 | Process | OOM score adjustment | Rationale |
 |---|---|---|
-| `ceracoder` | `-500` (protected) | Killing the encoder drops the stream |
+| `cerastream` | `-500` (protected) | Killing the engine drops the stream |
 | `ceralive` (CeraUI backend) | `-300` (protected) | Killing the backend kills the kiosk session |
 | `chromium` | `+200` (expendable) | UI can restart; stream must not drop |
 | `cage` | `+100` (expendable) | Compositor can restart; stream must not drop |
@@ -168,7 +168,7 @@ These notes apply to the Orange Pi 5+ and Radxa Rock 5B+ targets.
 
 **Touch input:** the RK3588 DSI touchscreen controller appears as a `/dev/input/eventN` device. cage passes input events to Chromium automatically via the Wayland seat. Touch calibration (mapping the touch coordinates to the display geometry) is a Task 28 item and requires physical hardware.
 
-**HDMI input vs display output:** the RK3588 HDMI input (hdmirx, used for capture) and HDMI output (used for the kiosk display) are separate hardware blocks. They do not conflict. The kiosk display uses the HDMI output; ceracoder uses the HDMI input via the `gstlibuvch264src` GStreamer element.
+**HDMI input vs display output:** the RK3588 HDMI input (hdmirx, used for capture) and HDMI output (used for the kiosk display) are separate hardware blocks. They do not conflict. The kiosk display uses the HDMI output; the streaming engine uses the HDMI input via the `gstlibuvch264src` GStreamer element.
 
 ---
 
@@ -211,7 +211,7 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../../../CeraUI/docs/ON_DEVICE_DISPLAY.md) | Cross-repo architecture, DC-1..DC-4, Phase-3 deferral register |
 | [`CeraUI/docs/KIOSK_STATE_MACHINE.md`](../../../CeraUI/docs/KIOSK_STATE_MACHINE.md) | DC-2: 5-state machine spec |
 | [`CeraUI/docs/KIOSK_TOKEN_CONTRACT.md`](../../../CeraUI/docs/KIOSK_TOKEN_CONTRACT.md) | DC-3: loopback token spec |
-| [`v2/docs/dev-loop.md`](dev-loop.md) | Dev-push loop for ceracoder/srtla |
+| [`v2/docs/dev-loop.md`](dev-loop.md) | Dev-push loop for srtla |
 | [`v2/docs/deferred-ceraui-sysext.md`](deferred-ceraui-sysext.md) | CeraUI sysext migration (separate deferral) |
 
 ---

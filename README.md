@@ -20,7 +20,7 @@ support for Intel N100/N200 and AMD platforms.
 
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
-- **Custom software stack**: `CeraUI`, `ceracoder`, `srtla`, `srt` via .deb packages
+- **Custom software stack**: `CeraUI`, `cerastream`, `srtla`, `srt` via .deb packages
 - **Minimal system**: Debian bookworm-based with minimal apt sources
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Device support**: Automatic USB audio/video device detection and access
@@ -33,7 +33,7 @@ support for Intel N100/N200 and AMD platforms.
 ┌─────────────────────────────────────────────────────────────┐
 │                    CeraUI Application                       │
 ├─────────────────────────────────────────────────────────────┤
-│  ceracoder  │    srtla    │     srt     │   WiFi Manager   │
+│ cerastream  │    srtla    │     srt     │   WiFi Manager   │
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
@@ -113,8 +113,9 @@ smoke test, and signing), see
 All custom components are distributed via .deb packages from our repository:
 
 - **CeraUI**: Main streaming application UI
-- **cerastream**: Active Rust encoder engine (default since Task 37, post generic boot-parity)
-- **ceracoder**: Legacy GStreamer encoder — retained until the hardware boot-parity profiles pass
+- **cerastream**: The streaming engine (Rust) — sole engine since 2026-06-11, when the legacy
+  ceracoder encoder was retired after the generic boot-parity profile passed; the hardware-gated
+  profiles (Jetson/RK3588) now track as cerastream hardware-validation work
 - **srtla**: SRT Link Aggregation implementation
 - **srt**: Custom SRT implementation
 

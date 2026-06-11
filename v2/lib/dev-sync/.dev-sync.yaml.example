@@ -46,8 +46,6 @@ remote_ext_dir: /var/lib/extensions
 remote_tmp: /tmp
 
 # Per-component remote destinations (override as your layout dictates).
-#                             env: DEV_SYNC_CERACODER_REMOTE
-ceracoder_remote: /var/lib/extensions
 #                             env: DEV_SYNC_SRTLA_REMOTE
 srtla_remote: /var/lib/extensions
 #                             env: DEV_SYNC_CERAUI_REMOTE

@@ -20,7 +20,7 @@ The two LIVE gates need to **boot a real board and talk to it**:
 
 | Harness | What LIVE mode needs from the runner |
 |---|---|
-| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`ceralive@…`, key auth); asserts login, `ceralive`/`ceraui.service` active, `ceracoder`/`srtla_send`/`srtla_rec` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
+| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`ceralive@…`, key auth); asserts login, `ceralive`/`ceraui.service` active, `cerastream`/`srtla_send`/`srtla_rec` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
 | `rauc-rollback.sh` (LIVE) | `BOARD_IP` + signed bundles in `BUNDLE_DIR` (`bad.raucb`, `good.raucb`); does `scp`+`rauc install`, `systemctl reboot`, **re-poll SSH after each reboot**, reads booted slot from `/proc/cmdline` (`root=PARTLABEL=rootfs_a\|b`). Proves a bad slot bleeds bootcount 3→2→1→0 and falls back to A; a good slot mark-goods and persists. |
 
 GitHub-hosted runners are ephemeral VMs with no USB/serial/board. Only a

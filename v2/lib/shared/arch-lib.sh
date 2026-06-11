@@ -2,7 +2,7 @@
 #
 # arch-lib.sh — shared architecture-guard helpers for the CeraLive v2 pipeline.
 #
-# The CeraLive first-party components (ceracoder, srtla, the CeraUI backend) are
+# The CeraLive first-party components (srtla, the CeraUI backend) are
 # PURE BINARIES. An RK3588 board is arm64; a developer laptop is usually amd64.
 # Pushing an amd64 binary to an arm64 device produces an artifact that installs
 # but can NEVER run ("Exec format error"). These helpers REFUSE that push up front.
