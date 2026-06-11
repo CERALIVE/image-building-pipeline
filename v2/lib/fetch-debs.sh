@@ -76,7 +76,12 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # REPOS — first-party device .debs. CASE AND ORDER ARE SACRED: downstream apt,
 # mkosi install ordering and the versions.yaml keys all match these exact names.
 # ceralive-platform is CLOUD-ONLY and MUST NEVER appear here.
-REPOS=("srtla" "srt" "ceracoder" "CeraUI")
+#
+# cerastream is the active engine (default post boot-parity generic profile, Task 37).
+# ceracoder is RETAINED alongside it: its removal is blocked until the hardware-gated
+# boot-parity profiles also pass on real boards (cerastream/docs/notes/boot-parity-results.md).
+# Both encoders ship in the image during this transition — do NOT drop ceracoder yet.
+REPOS=("srtla" "srt" "ceracoder" "cerastream" "CeraUI")
 
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.

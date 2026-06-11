@@ -5,9 +5,9 @@ Parent: [`../AGENTS.md`](../AGENTS.md)
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
-(.deb packages from `srtla`, `srt`, `ceracoder`, `CeraUI`), drives a containerized
-mkosi v26 build, and produces a flashable image for RK3588 targets (Orange Pi 5+,
-Radxa Rock 5B+).
+(.deb packages from `srtla`, `srt`, `ceracoder`, `cerastream`, `CeraUI`), drives a
+containerized mkosi v26 build, and produces a flashable image for RK3588 targets
+(Orange Pi 5+, Radxa Rock 5B+).
 
 Relates to:
 - `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here
@@ -95,8 +95,12 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srtla" "srt" "ceracoder" "CeraUI")
+REPOS=("srtla" "srt" "ceracoder" "cerastream" "CeraUI")
 ```
+`cerastream` was added after the generic boot-parity profile passed (Task 37);
+`ceracoder` is retained alongside it until the hardware-gated profiles pass
+(`cerastream/docs/notes/boot-parity-results.md`). REPOS lives in
+`v2/lib/fetch-debs.sh`.
 
 **CI vs local .deb fetch**
 - `R2_ACCESS_KEY_ID` set → fetch from R2 (`dists/{CHANNEL}/binary-{ARCH}/`)

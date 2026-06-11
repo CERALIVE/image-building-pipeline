@@ -113,7 +113,8 @@ smoke test, and signing), see
 All custom components are distributed via .deb packages from our repository:
 
 - **CeraUI**: Main streaming application UI
-- **ceracoder**: Hardware-accelerated encoding with GStreamer integration
+- **cerastream**: Active Rust encoder engine (default since Task 37, post generic boot-parity)
+- **ceracoder**: Legacy GStreamer encoder — retained until the hardware boot-parity profiles pass
 - **srtla**: SRT Link Aggregation implementation
 - **srt**: Custom SRT implementation
 
