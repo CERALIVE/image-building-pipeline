@@ -10,12 +10,15 @@
 #   * dhclient   : /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing installs a
 #                  per-source default route in the matching table when a modem /
 #                  wired iface gets a DHCP lease, and tears it down on release.
-#                  RISK: NM defaults to dhcp=internal in bookworm and does NOT exec
-#                  dhclient-exit-hooks.d/ — modem routing may never fire for
-#                  NM-managed interfaces. See AGENTS.md §KNOWN ISSUES.
-#   * NM dispatch: /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing does the
-#                  same for NetworkManager-managed wlan0..wlan4 interfaces, each in
-#                  its own table 120+N (per srtla/docs/NETWORK_SETUP.md).
+#                  Covers the classic dhclient path only — NM defaults to
+#                  dhcp=internal in bookworm and does NOT exec dhclient-exit-hooks.d/.
+#                  The dispatcher below now also handles modems for that case.
+#   * NM dispatch: /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing installs
+#                  source-policy routes for NetworkManager-managed interfaces:
+#                  wlan0..wlan4 in tables 120+N, AND modems usb0..7 / enx*0..7 in
+#                  tables 100-107 (mirroring the dhclient-hook rule/route semantics
+#                  so modem routing fires under dhcp=internal). per
+#                  srtla/docs/NETWORK_SETUP.md.
 #                  NOTE: wlan* matches because postinst-lib.sh install_interface_naming()
 #                  emits a systemd .link file renaming the onboard wifi to wlan0
 #                  before NM brings it up. Same applies to eth* (→ eth0).
@@ -126,16 +129,27 @@ install_nm_dispatcher() {
   mkdir -p /etc/NetworkManager/dispatcher.d
   cat >/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing <<'DISPEOF'
 #!/bin/bash
-# SRTLA Source Routing for WiFi interfaces managed by NetworkManager
+# SRTLA Source Routing for NetworkManager-managed interfaces.
+#   WiFi:   wlan0..wlan4               -> tables 120..124
+#   Modems: usb0..usb7 / enx*0..enx*7  -> tables 100..107
+# Modem handling mirrors the dhclient-exit-hooks.d/srtla-source-routing rule/route
+# semantics: NM defaults to dhcp=internal on bookworm and never runs dhclient hooks,
+# so the source-policy routes for NM-managed modems must be installed here instead.
 INTERFACE="$1"
 ACTION="$2"
 
 case "$INTERFACE" in
-    wlan[0-4]) ;;
+    wlan[0-4]) TABLE=$((120 + ${INTERFACE#wlan})) ;;
+    usb0|enx*0) TABLE=100 ;;
+    usb1|enx*1) TABLE=101 ;;
+    usb2|enx*2) TABLE=102 ;;
+    usb3|enx*3) TABLE=103 ;;
+    usb4|enx*4) TABLE=104 ;;
+    usb5|enx*5) TABLE=105 ;;
+    usb6|enx*6) TABLE=106 ;;
+    usb7|enx*7) TABLE=107 ;;
     *) exit 0 ;;
 esac
-
-TABLE=$((120 + ${INTERFACE#wlan}))
 
 case "$ACTION" in
     up|dhcp4-change)
@@ -146,14 +160,14 @@ case "$ACTION" in
             ip route flush table "$TABLE" 2>/dev/null || true
             ip rule add from "$IP" table "$TABLE" priority 100
             ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
-            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
+            logger -t srtla-routing "Source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
         fi
         ;;
     down)
         IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
         [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
         ip route flush table "$TABLE" 2>/dev/null || true
-        logger -t srtla-routing "WiFi source routing removed for $INTERFACE table $TABLE"
+        logger -t srtla-routing "Source routing removed for $INTERFACE table $TABLE"
         ;;
 esac
 DISPEOF

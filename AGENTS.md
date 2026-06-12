@@ -254,19 +254,20 @@ each FIXME. Until then `install_interface_naming()` skips the FIXME values and
 emits only the generic `Type=wlan → wlan0` rule; the dual NICs stay
 non-deterministic.
 
-**Modem source-routing may not fire (NM `dhcp=internal`).** The SRTLA dhclient
-exit hook (`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) installs
-per-modem source-policy routes on DHCP `BOUND` events. NetworkManager in Debian
-bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT execute
-`dhclient-exit-hooks.d/`. Modem routing may therefore never trigger for
-NM-managed interfaces. The wifi path is unaffected (it uses the NM dispatcher,
-`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`). Verify with a modem
-attached: check `journalctl -t srtla-routing` and `ip rule show` after the modem
-connects. If the hook doesn't fire, extend `90-srtla-wifi-routing` to also match
-`usb*|wwan*` and assign tables 100–107 by index — but that touches the
-drift-gated SRTLA payloads (`v2/ci/postinst-drift-check.sh` CHECK 2) and requires
-a deliberate twin-update of both `networking-srtla.sh` and the `§6` block in
-`mkosi.postinst.chroot`.
+**Modem source-routing under NM `dhcp=internal` — FIXED.** NetworkManager in
+Debian bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT
+execute `dhclient-exit-hooks.d/`, so the SRTLA dhclient hook
+(`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) never fired for
+NM-managed modems. The NM dispatcher
+(`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`) now also matches modem
+interfaces (`usb0..7` and `enx*0..7`) and installs the same source rule + default
+route in tables 100–107, mirroring the dhclient-hook semantics. The dhclient hook
+is retained (harmless; still covers non-NM dhclient paths). Both drift-gated SRTLA
+payloads were twin-updated in one commit (`networking-srtla.sh` and the `§6` block
+in `mkosi.postinst.chroot`); `v2/ci/postinst-drift-check.sh` CHECK 2 confirms
+byte-parity. WiFi table assignments (120–124) are unchanged. Verify on hardware
+with a modem attached: `journalctl -t srtla-routing` and `ip rule show` after the
+modem connects.
 
 **Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`
