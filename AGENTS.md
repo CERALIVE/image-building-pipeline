@@ -36,6 +36,10 @@ image-building-pipeline/
 │   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
 │   │   └── fast-reload.md    # dev-sync live-reload loop
 │   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
+├── docs/
+│   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
+│   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
+│   └── partition-contract.md # frozen GPT layout contract
 ├── scripts/
 │   └── fetch-debs.sh         # downloads .deb packages for REPOS array
 └── CONTRIBUTING.md           # contribution rules
@@ -49,6 +53,7 @@ image-building-pipeline/
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
 | v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
