@@ -513,3 +513,42 @@ setup_ssh_firstboot() {
   install -m 0644 "${src}/ceralive-ssh-firstboot.service" /etc/systemd/system/ceralive-ssh-firstboot.service
   enable_service ceralive-ssh-firstboot.service
 }
+
+# ---------------------------------------------------------------------------
+# CeraUI TLS front (task 15, SC3): nginx terminates HTTPS on 443 and proxies to
+# the CeraUI backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80 is
+# LEFT to the backend — nginx must NOT bind it and there is NO 80->443 redirect.
+# Installs the COMMITTED canonical artifacts under v2/mkosi/runtime/ (single source
+# of truth, no inline twin — Task 6 pattern), mirroring setup_ssh_firstboot. The
+# cert is per-device self-signed, generated on first boot into /data by
+# ceralive-tls-firstboot.service; nginx is ordered AFTER it via a drop-in.
+# CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_tls_proxy() {
+  log "installing CeraUI TLS front (nginx 443 -> 127.0.0.1:80 + first-boot self-signed cert)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-tls-firstboot.sh" ]] \
+    || die "tls-proxy source not found: ${src}/ceralive-tls-firstboot.sh (is \$SRCDIR/runtime mounted?)"
+
+  # (1) First-boot cert generator + its oneshot unit.
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-tls-firstboot.sh" /usr/local/sbin/ceralive-tls-firstboot
+  install -m 0644 "${src}/ceralive-tls-firstboot.service" /etc/systemd/system/ceralive-tls-firstboot.service
+
+  # (2) nginx 443 TLS site. Symlink (not copy) sites-available -> sites-enabled so
+  # the layout matches Debian's nginx convention exactly.
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+  install -m 0644 "${src}/ceralive-tls.nginx.conf" /etc/nginx/sites-available/ceralive-tls.conf
+  ln -sf ../sites-available/ceralive-tls.conf /etc/nginx/sites-enabled/ceralive-tls.conf
+
+  # (3) SC3: nginx binds 443 ONLY. The stock nginx-light ships a default site that
+  # listens on :80 — remove it so nginx never competes with the backend for port 80.
+  rm -f /etc/nginx/sites-enabled/default
+
+  # (4) Order nginx AFTER first-boot cert generation (hard dependency drop-in).
+  mkdir -p /etc/systemd/system/nginx.service.d
+  install -m 0644 "${src}/ceralive-tls-nginx.dropin.conf" /etc/systemd/system/nginx.service.d/10-ceralive-tls.conf
+
+  enable_service ceralive-tls-firstboot.service
+  enable_service nginx.service
+}

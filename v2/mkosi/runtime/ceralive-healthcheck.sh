@@ -80,6 +80,11 @@ CERASTREAM_BIN="${CERASTREAM_BIN:-cerastream}"
 SRTLA_SEND_BIN="${SRTLA_SEND_BIN:-srtla_send}"
 # Link-state probe (iproute2); stubbed in the offline proof harness.
 IP_BIN="${IP_BIN:-ip}"
+# HTTP(S) control-plane probe (task 15): curl hits the CeraUI backend on :80 and
+# the nginx TLS front on :443; stubbed in the offline proof harness.
+CURL_BIN="${CURL_BIN:-curl}"
+HTTP_PROBE_TIMEOUT="${HTTP_PROBE_TIMEOUT:-5}"
+HTTP_STATUS_PATH="${HTTP_STATUS_PATH:-/status}"
 
 ts()   { date -u +%H:%M:%SZ; }
 log()  { printf '%s %s: %s\n' "$(ts)" "${PROG}" "$*"; }
@@ -195,12 +200,41 @@ check_mdns_resolution() {
    return 0
 }
 
+# Step 6 — control-plane reachability over BOTH serving paths (task 15, SC3):
+#   :80  — the CeraUI backend, which binds port 80 directly.
+#   :443 — the nginx TLS front that terminates HTTPS and proxies to :80.
+# NON-FATAL by design, exactly like the mDNS probe: check_service_active already
+# gates mark-good on the app being up, and the file header is emphatic that a
+# can't-encode slot — not a UI/TLS hiccup — is what must roll a slot back. An nginx
+# or cert transient must NOT brick a device whose port-80 backend is otherwise
+# healthy (port 80 keeps serving regardless), so a failure here WARNs with guidance
+# and returns 0. -k on the 443 probe accepts the per-device self-signed cert (SC3).
+check_tls_endpoints() {
+   if ! command -v "${CURL_BIN}" >/dev/null 2>&1; then
+     printf '%s %s: WARN: %s not found — HTTP(S) control-plane probe skipped\n' "$(ts)" "${PROG}" "${CURL_BIN}" >&2
+     return 0
+   fi
+   local code80 code443
+   code80="$("${CURL_BIN}" -s -o /dev/null -w '%{http_code}' --max-time "${HTTP_PROBE_TIMEOUT}" \
+              "http://127.0.0.1${HTTP_STATUS_PATH}" 2>/dev/null || echo 000)"
+   code443="$("${CURL_BIN}" -ks -o /dev/null -w '%{http_code}' --max-time "${HTTP_PROBE_TIMEOUT}" \
+               "https://127.0.0.1${HTTP_STATUS_PATH}" 2>/dev/null || echo 000)"
+   if [ "${code80}" = "200" ] && [ "${code443}" = "200" ]; then
+     log "OK: control plane reachable on :80 (backend) and :443 (nginx TLS) — both 200"
+     return 0
+   fi
+   printf '%s %s: WARN: control-plane probe non-200 (http :80=%s, https :443=%s) — UI may be degraded; port 80 still serves the backend directly, so this does NOT block mark-good. Check ceralive.service, nginx.service and ceralive-tls-firstboot.service\n' \
+     "$(ts)" "${PROG}" "${code80}" "${code443}" >&2
+   return 0
+}
+
 run_checks() {
    check_service_active   || return 1
    check_binary "${CERASTREAM_BIN}" || return 1
    check_binary "${SRTLA_SEND_BIN}" || return 1
    check_srt_reach        || return 1
    check_mdns_resolution  || return 1
+   check_tls_endpoints    || return 1
    return 0
 }
 

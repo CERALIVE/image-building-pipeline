@@ -279,6 +279,43 @@ by `postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chro
   factory reset). The captive-portal page itself is **Task 14** (this is the trigger
   + AP-mode half only).
 
+**CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]
+
+The device serves the CeraUI control plane over HTTPS on **443** via `nginx-light`,
+which terminates TLS and reverse-proxies to the CeraUI backend on `127.0.0.1:80`.
+Standalone artifacts under `v2/mkosi/runtime/`
+(`ceralive-tls.nginx.conf`, `ceralive-tls-firstboot.{sh,service}`,
+`ceralive-tls-nginx.dropin.conf`), installed by
+`postinst-lib.sh::setup_tls_proxy` — NOT inlined in `mkosi.postinst.chroot`
+(drift-gate 950-line ceiling; `setup_tls_proxy` is wired into BOTH the postinst
+executor and `services.sh`, like `setup_provisioning`).
+
+- **SC3 — port 80 is KEPT.** nginx binds **443 only**; the backend keeps serving
+  port 80 directly. `setup_tls_proxy` removes the stock nginx `sites-enabled/default`
+  (which would otherwise grab :80). There is deliberately **no** 80→443 redirect —
+  both ports are a real, supported entry point.
+- **EC6 — WebSocket upgrade.** The proxy site sets
+  `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header
+  Connection "upgrade";` so CeraUI's same-origin telemetry/RPC WebSocket survives the
+  proxy (Task 1 already maps `https:`→`wss:` in the frontend; no UI change needed).
+- **Self-signed cert (no ACME/mTLS).** `ceralive-tls-firstboot.service` mints a
+  per-device self-signed key+cert ONCE on first boot into `/data/ceralive/tls/`
+  (survives reboots + A/B OTA slot swaps), flag-guarded (idempotent). CN/SAN =
+  `<hostname>.local` + the device IPv4. **Browser caveat (honest):** the first visit
+  to `https://<device>.local` shows a "self-signed / not secure" warning — expected
+  for a headless LAN appliance with no public DNS and no ACME path (SC3 forbids
+  ACME/Let's Encrypt and mTLS). `openssl` is pinned in `shared.list` for the cert.
+- **Ordering.** `ceralive-tls-firstboot.service` runs `Before=nginx.service` (and
+  after the unique-hostname service); a `nginx.service.d/10-ceralive-tls.conf`
+  drop-in adds `Requires=`/`After=` so nginx never starts without a cert.
+- **Healthcheck.** `ceralive-healthcheck.sh` probes BOTH `http://127.0.0.1/status`
+  (:80) and `https://127.0.0.1/status` (:443, `-k`); this is **non-fatal** (WARN
+  only, like the mDNS probe) — a UI/TLS hiccup must not roll back a slot whose
+  streaming stack is healthy and whose port 80 still serves.
+- **Coexistence with provisioning (Task 11):** the AP-mode portal uses port 80;
+  nginx only binds 443, so there is no conflict.
+- **Size:** ~+3–4 MB; see [`v2/docs/size-notes.md §5`](v2/docs/size-notes.md).
+
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.

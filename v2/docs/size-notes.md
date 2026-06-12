@@ -186,3 +186,45 @@ Both gates must pass:
 2. **Relative gate:** growth ≤ 50 MB (enforced by `check-size-regression.sh`)
 
 If either fails, the build is rejected and no `.raucb` is produced.
+
+---
+
+## 5. CeraUI TLS front — `nginx-light` + `openssl` (Task 15)
+
+### What changed
+
+`v2/manifests/packages/shared.list` gains two packages so the device can serve the
+CeraUI control plane over HTTPS on 443 (SC3):
+
+- `nginx-light` — terminates TLS on 443 and reverse-proxies to the CeraUI backend
+  on `127.0.0.1:80` (WebSocket-upgrade aware). Port 80 is left to the backend; no
+  redirect. `nginx-light` is the **smallest** nginx flavour that still carries the
+  `http_proxy` + `http_ssl` modules — `nginx-full`/`nginx-extras` add mail, stream,
+  and a large extra-module set we do not use.
+- `openssl` — the CLI used by `ceralive-tls-firstboot` to mint the per-device
+  self-signed cert. On Debian it is `Priority: important` (almost always already
+  present); pinned explicitly so cert generation never relies on a transitive pull.
+
+### Size impact *(estimate)*
+
+Figures from bookworm `arm64` `Installed-Size` metadata (not a wet build on this
+host — upper-bound guidance, consistent with §1–§4).
+
+| Package | Approx installed size | Notes |
+|---|---|---|
+| `nginx-light` | ~1.3 MB | binary + light module set |
+| `nginx-common` (dep) | ~0.7 MB | shared config/init; pulled by nginx-light |
+| `libnginx-mod-*` (deps) | ~0.5 MB | http modules nginx-light links |
+| `openssl` | ~1.5 MB | usually already present (Priority: important) → often **0** net |
+
+**Net expected delta: ~+3–4 MB** (≈ +2.5 MB if `openssl` is already in the base).
+This is comfortably inside both the **1.5 GB absolute gate** and the **+50 MB
+relative regression gate** (§4). The self-signed cert + key live on `/data`
+(runtime artifact, not in the rootfs slot), so they add **nothing** to the image.
+
+### Re-evaluation / baseline note
+
+When the first full build measures the realised rootfs size, bump
+`v2/ci/size-baseline.json` by the observed delta in the same PR (per §4 procedure)
+and note "Added nginx TLS front: +~N MB" in the description. Until a wet build runs
+this is a paper estimate; the absolute gate remains the hard backstop.

@@ -1,0 +1,24 @@
+[Unit]
+Description=CeraLive first-boot TLS cert generation — per-device self-signed cert for the nginx 443 front
+Documentation=file:///usr/share/doc/ceralive/size-notes.md
+# Task 15 / SC3. Mints ONE per-device self-signed key+cert into /data (survives
+# reboots and A/B OTA slot swaps) so the nginx TLS front (listen 443 ssl) always
+# has a key+cert to load. Idempotent: a present cert makes the script a no-op.
+#
+# MUST run before nginx so `listen 443 ssl` never starts without a cert, and AFTER
+# the unique-hostname service so the cert's CN/SAN carry the device's real
+# <hostname>.local rather than the generic baked name.
+After=local-fs.target data.mount ceralive-migrate-data.service ceralive-hostname.service
+Wants=ceralive-hostname.service
+Before=nginx.service
+# Identity persists on /data; data.mount is a SOFT ordering only — the script
+# falls back to /etc/ceralive/tls (mountpoint-guarded) on an image with no /data
+# partition, so do NOT make the mount a hard requirement here.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-tls-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

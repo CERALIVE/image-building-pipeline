@@ -881,6 +881,17 @@ HBMCPATH
 # (definition: customize/postinst-lib.sh::setup_ssh_firstboot — sourced above)
 
 # ---------------------------------------------------------------------------
+# 18. CeraUI TLS front (task 15, SC3): nginx terminates HTTPS on 443 and proxies
+#     to the CeraUI backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80
+#     is LEFT to the backend (no redirect). setup_tls_proxy (postinst-lib.sh,
+#     sourced above) INSTALLS the committed artifacts v2/mkosi/runtime/
+#     ceralive-tls.nginx.conf + ceralive-tls-firstboot.{sh,service} + the nginx
+#     ordering drop-in — NO inline twin, so the postinst stays under the drift
+#     ceiling. The cert is per-device self-signed, generated on first boot into /data.
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::setup_tls_proxy — sourced above)
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -904,6 +915,7 @@ main() {
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)
   setup_ssh_firstboot          # task 10: first-boot SSH hardening (host keys + root pw-login + forced change)
   setup_provisioning           # task 11: first-boot WiFi provisioning AP (trigger + AP mode)
+  setup_tls_proxy              # task 15: nginx TLS front on 443 -> 127.0.0.1:80 (port 80 kept; SC3)
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"
