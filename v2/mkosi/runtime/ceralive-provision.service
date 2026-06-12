@@ -1,0 +1,30 @@
+[Unit]
+Description=CeraLive first-boot WiFi provisioning portal (AP-mode trigger + bring-up)
+# Stored NM WiFi profiles, the factory-reset re-trigger flag, and the portal-active
+# marker all live on /data (survive reboots and A/B OTA slot swaps), and the NM
+# system-connections store is bind-mounted from /data by ceralive-migrate-data.service.
+# The stored-profile check is therefore only meaningful AFTER that bind is in place,
+# and NetworkManager must be up before nmcli can query/drive it.
+RequiresMountsFor=/data
+After=ceralive-migrate-data.service NetworkManager.service
+Wants=NetworkManager.service
+# DELIBERATELY NOT ordered After=network-online.target: the trigger's whole job is to
+# OBSERVE the absence of connectivity. The script runs a 60-90s in-process grace loop
+# instead, so a wired/modem/known-WiFi uplink still wins and suppresses the AP.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-provision start
+# Clean stop on shutdown = link-down only (RETAINS the AP profile + the /data flags so
+# the next boot re-evaluates the trigger and a pending factory reset is not disarmed).
+# The Task 14 FULL teardown (delete profile, release wlan0, clear flags) is the
+# explicit `ceralive-provision teardown` verb, NOT this stop.
+ExecStop=/usr/local/sbin/ceralive-provision stop
+# Grace window (<=90s) + NM AP bring-up must fit; never wedge boot on a slow NM.
+TimeoutStartSec=180
+# A failed bring-up must not loop holding wlan0; the next boot re-evaluates cleanly.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

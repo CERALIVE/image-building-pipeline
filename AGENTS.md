@@ -224,6 +224,45 @@ A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`
 The `ceralive` user ships password-locked (no default password); root retains
 key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
 
+**First-boot WiFi provisioning portal** [PARTIAL]
+
+`ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot so a
+headless, never-configured device can be handed WiFi credentials. Standalone
+artifacts under `v2/mkosi/runtime/` (`ceralive-provision.{sh,service}`), installed
+by `postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chroot`
+(drift-gate 950-line ceiling; `setup_provisioning` is in the gate's
+`CONSOLIDATED_FUNCS`).
+
+- **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
+  there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
+  connectivity appears within a **60-90s boot grace window** (default 75s). Either
+  a stored profile or any connectivity (NM `full`/`limited`/`portal`, or a default
+  route) suppresses it. A `/data/ceralive/provision/force-portal` flag
+  (factory-reset hook) re-triggers it even when profiles exist.
+- **EC4 — OTA-safe:** a RAUC update that preserves `/data` keeps the WiFi profiles,
+  so the portal correctly does **not** start after an update.
+- **Conflict safety:** the AP only runs when there is zero connectivity (so srtla
+  bonding is impossible anyway), and it leaves `wlan0` with no default route, so the
+  srtla NM dispatcher (`90-srtla-wifi-routing`) sees an empty gateway and writes no
+  rule/route in table 120 — a no-op while the portal is up. WiFi tables 120-124 are
+  untouched.
+- **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
+  shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
+  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
+  image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
+  (machine-id-derived, like the hostname service), passphrase `ceralive-setup`
+  (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
+  requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
+  validated on hardware, hence `[PARTIAL]`.
+- **Teardown contract (Task 14):** the captive portal exits provisioning mode by
+  running `/usr/local/sbin/ceralive-provision teardown` (or dropping
+  `/data/ceralive/provision/teardown-requested` then restarting the service) — this
+  brings the AP down, deletes the `ceralive-ap` profile, releases `wlan0`, and
+  clears the portal-active + force flags. Plain `systemctl stop` is a link-down-only
+  clean stop that retains the profile/flags (shutdown must not disarm a pending
+  factory reset). The captive-portal page itself is **Task 14** (this is the trigger
+  + AP-mode half only).
+
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.
