@@ -1,0 +1,18 @@
+[Unit]
+Description=CeraLive first-boot captive-portal listener (192.168.42.1:80)
+Documentation=file:///usr/local/sbin/ceralive-portal
+# Lifecycle is driven IMPERATIVELY by ceralive-provision (start on AP bring-up, stop on
+# teardown) — there is deliberately NO [Install] section, so the socket is never enabled
+# and never binds port 80 outside provisioning mode (where CeraUI owns 80).
+
+[Socket]
+# Must match CERALIVE_AP_GATEWAY in ceralive-provision.sh. Binding the specific AP IP
+# (not 0.0.0.0) scopes the portal to the hotspot; FreeBind tolerates the address still
+# settling right after the AP activates; BindToDevice pins it to the AP radio.
+ListenStream=192.168.42.1:80
+FreeBind=true
+BindToDevice=wlan0
+# Accept=yes → inetd model: systemd accepts each connection and hands the socket to a
+# fresh ceralive-portal@<peer>.service instance as stdin/stdout.
+Accept=yes
+MaxConnections=16

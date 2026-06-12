@@ -474,23 +474,35 @@ setup_cert_rotation() {
   enable_service cert-rotation-expiry.timer
 }
 
-# --- 17. First-boot WiFi provisioning portal (task 11): AP-mode trigger -------
-# Installs the committed canonical artifacts v2/mkosi/runtime/ceralive-provision.{sh,
-# service} (single source of truth — no inline twin, Task 6 pattern), mirroring
-# setup_boot_healthcheck / setup_cert_rotation. The script brings up an NM-native
-# AP-mode hotspot ONLY when there are no stored (non-AP) WiFi profiles on /data AND
-# no link-up connectivity appears within a boot grace window; a /data force flag
-# (factory-reset hook) re-triggers it even when profiles exist. The captive-portal
-# page + credential logic is Task 14, which exits provisioning mode via the script's
-# `teardown` verb. CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# --- 17. First-boot WiFi provisioning portal (tasks 11 + 14) ------------------
+# Installs the committed canonical artifacts under v2/mkosi/runtime/ (single source of
+# truth — no inline twin, Task 6 pattern), mirroring setup_boot_healthcheck /
+# setup_cert_rotation. The provision script brings up an NM-native AP-mode hotspot ONLY
+# when there are no stored (non-AP) WiFi profiles on /data AND no link-up connectivity
+# appears within a boot grace window; a /data force flag (factory-reset hook) re-triggers
+# it even when profiles exist.
+#
+# Task 14 adds the captive portal: ceralive-portal.sh (the inetd-style bash HTTP handler)
+# plus its socket-activation units ceralive-portal.{socket,@.service}. The socket + the
+# per-connection template are installed but NOT enabled — ceralive-provision starts the
+# socket imperatively when the AP comes up and stops it on teardown, so port 80 is taken
+# from CeraUI only for the duration of provisioning. CERALIVE_RUNTIME_SRC must point at
+# the runtime/ source dir.
 setup_provisioning() {
-  log "installing first-boot WiFi provisioning portal (ceralive-provision.service)"
+  log "installing first-boot WiFi provisioning portal (ceralive-provision.service + captive portal)"
   local src="${CERALIVE_RUNTIME_SRC:-}"
   [[ -n "${src}" && -f "${src}/ceralive-provision.sh" ]] \
     || die "provisioning source not found: ${src}/ceralive-provision.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-portal.sh" ]] \
+    || die "captive-portal source not found: ${src}/ceralive-portal.sh (is \$SRCDIR/runtime mounted?)"
   mkdir -p /usr/local/sbin
   install -m 0755 "${src}/ceralive-provision.sh" /usr/local/sbin/ceralive-provision
-  install -m 0644 "${src}/ceralive-provision.service" /etc/systemd/system/ceralive-provision.service
+  install -m 0755 "${src}/ceralive-portal.sh"    /usr/local/sbin/ceralive-portal
+  install -m 0644 "${src}/ceralive-provision.service"  /etc/systemd/system/ceralive-provision.service
+  install -m 0644 "${src}/ceralive-portal.socket"      /etc/systemd/system/ceralive-portal.socket
+  install -m 0644 "${src}/ceralive-portal@.service"    /etc/systemd/system/ceralive-portal@.service
+  # Only the trigger service is enabled at boot; the portal socket + template are driven
+  # imperatively by ceralive-provision (start on AP up, stop on teardown).
   enable_service ceralive-provision.service
 }
 

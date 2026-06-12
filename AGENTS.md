@@ -242,12 +242,15 @@ key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/
 
 **First-boot WiFi provisioning portal** [PARTIAL]
 
-`ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot so a
-headless, never-configured device can be handed WiFi credentials. Standalone
-artifacts under `v2/mkosi/runtime/` (`ceralive-provision.{sh,service}`), installed
-by `postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chroot`
+`ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot AND a
+captive portal so a headless, never-configured device can be handed WiFi
+credentials with no screen or keyboard. Standalone artifacts under
+`v2/mkosi/runtime/` (`ceralive-provision.{sh,service}` plus the captive portal
+`ceralive-portal.{sh,socket,@.service}`), installed by
+`postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chroot`
 (drift-gate 950-line ceiling; `setup_provisioning` is in the gate's
-`CONSOLIDATED_FUNCS`).
+`CONSOLIDATED_FUNCS`). Full end-to-end flow:
+[`v2/docs/wifi-provisioning.md`](v2/docs/wifi-provisioning.md).
 
 - **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
   there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
@@ -270,14 +273,38 @@ by `postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chro
   (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
   requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
   validated on hardware, hence `[PARTIAL]`.
-- **Teardown contract (Task 14):** the captive portal exits provisioning mode by
-  running `/usr/local/sbin/ceralive-provision teardown` (or dropping
-  `/data/ceralive/provision/teardown-requested` then restarting the service) — this
-  brings the AP down, deletes the `ceralive-ap` profile, releases `wlan0`, and
-  clears the portal-active + force flags. Plain `systemctl stop` is a link-down-only
-  clean stop that retains the profile/flags (shutdown must not disarm a pending
-  factory reset). The captive-portal page itself is **Task 14** (this is the trigger
-  + AP-mode half only).
+- **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
+  CeraUI backend (`ceralive.service`) to free port 80 and starts
+  `ceralive-portal.socket` — a systemd socket-activated (`Accept=yes`) **bash** HTTP
+  handler on `192.168.42.1:80`. It is the lightest server already in the image (no
+  busybox/python3/socat/nc ship — socat/netcat were moved to the debug add-on), and is
+  a standalone plain-HTML page, NOT a CeraUI integration (SC2). A
+  `address=/#/192.168.42.1` drop-in in `dnsmasq-shared.d` wildcard-captures DNS so any
+  hostname pops the operator's captive-portal sign-in. The form's SSID list is the
+  pre-AP scan cache (a single radio can't scan in AP mode) plus free-text entry.
+- **Credential handoff:** the form POST writes the user's network via
+  `nmcli connection add` (credentials land ONLY in NM's `/data`-backed store — never a
+  file), answers the browser, then runs a DETACHED `ceralive-provision connect <con>`
+  worker (via `systemd-run`, so it outlives the per-connection service that the AP
+  teardown kills). The worker drops the AP, joins as a client under a bounded
+  `nmcli --wait` + `timeout`, and on a wrong passphrase or hard timeout deletes the bad
+  profile, writes a `last-error` marker the portal shows, and re-arms the AP for a
+  retry — the device is never left headless-dead.
+- **Port-80 coexistence:** the portal owns `192.168.42.1:80` only during provisioning;
+  CeraUI's backend (binds `[80, 8080, 81]`, tries 80 first) is stopped for the window
+  and restarted on teardown so it re-binds 80 on the new uplink IP. The Task-15 nginx
+  TLS front on **443** is unaffected (its `127.0.0.1:80` upstream is just briefly down
+  while there is no uplink — and thus no 443 client).
+- **Teardown — MAC6 end-state (all four, sandbox-verified):** (a) AP profile deleted;
+  (b) device joined the target network; (c) portal unreachable (`ceralive-portal.socket`
+  stopped, port 80 freed); (d) CeraUI reachable on the new IP (`ceralive.service`
+  restarted). A successful `connect` runs the teardown **keeping** the freshly-joined
+  client link; the out-of-band `ceralive-provision teardown` verb (or a
+  `/data/ceralive/provision/teardown-requested` flag) also releases `wlan0` and clears
+  the portal-active + force flags. Plain `systemctl stop` (ExecStop) is link-down +
+  portal-down only and RETAINS the AP profile + flags (shutdown must not disarm a
+  pending factory reset). Offline proof harness:
+  `v2/tests/provision-portal.test.sh` (gated in `manifest.bats`).
 
 **CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]
 

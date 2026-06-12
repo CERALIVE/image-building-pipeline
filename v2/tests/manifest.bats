@@ -422,6 +422,24 @@ YAML
 }
 
 # ===========================================================================
+# 8b. First-boot WiFi provisioning captive portal (Task 14).
+#     The offline proof harness stubs nmcli/ip/systemctl/systemd-run and drives the
+#     real ceralive-provision.sh + ceralive-portal.sh through bring-up, the GET/POST
+#     captive page, the credential handoff, and the four-condition MAC6 teardown
+#     (incl. wrong-passphrase retry + hard-timeout return-to-AP). No radio/systemd
+#     needed, so it fits this static suite.
+# ===========================================================================
+
+@test "provision portal: offline harness proves the 4-condition teardown + handoff" {
+  run bash "$TESTS_DIR/provision-portal.test.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ALL PASS"* ]]
+  # The fail() marker is "  FAIL  " (two-space framed); match that, not the word
+  # "FAILURE" that legitimately appears in a scenario header.
+  [[ "$output" != *"  FAIL  "* ]]
+}
+
+# ===========================================================================
 # 9. Multi-device rootfs non-regression + x86 disk-path guard (Task 14).
 #    All three shipped boards must drive the orchestrator through to the build
 #    plan (the rootfs.tar producer, step 6) without aborting; x86 (efi) must
