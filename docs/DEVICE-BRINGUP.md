@@ -3,8 +3,11 @@
 Public developer guide for building, flashing, and iterating on CeraLive devices
 (Radxa Rock 5B+, Orange Pi 5+). No private repository access required.
 
-> **Status:** Alpha. The build system is functional; hardware-specific sections
-> marked `[TODO]` await evidence from physical bring-up runs.
+> **Status:** Alpha. The build system is functional. Software-side first-boot
+> services (SSH hardening, WiFi provisioning portal, TLS cert generation) are
+> implemented and offline-verified. Sections marked **pending hardware run**
+> require evidence from a physical board and will be filled when hardware is
+> available.
 
 ---
 
@@ -290,7 +293,9 @@ sudo make install
 
 **Enter maskrom mode on Rock 5B+:**
 
-[TODO: insert from T17 evidence placeholder — see test-results/boot-log-\<date\>.txt]
+**Pending hardware run** — the exact button location and USB detection output
+for the Rock 5B+ will be filled from `test-results/boot-log-<date>.txt` once a
+physical board is available.
 
 The general procedure for RK3588 boards:
 
@@ -320,31 +325,59 @@ For full rkdeveloptool documentation, see the
 
 ## 5. First boot
 
-[TODO: insert from T17 evidence placeholder — see test-results/boot-log-\<date\>.txt]
+**Pending hardware run** — boot log timestamps and exact console output will be
+filled from `test-results/boot-log-<date>.txt` once a physical board is
+available. The software-side first-boot sequence is described below based on
+the merged service implementations.
 
-Expected first-boot sequence (hardware evidence pending):
+Expected first-boot sequence:
 
 1. U-Boot loads from the `boot` partition, reads `extlinux/extlinux.conf`,
    selects slot A.
-2. Kernel boots from `rootfs_a`. The health gate (`ceralive-healthcheck.service`)
-   runs after `ceralive.service` starts.
-3. On a fresh offline device the health gate passes (the SRT reachability check
-   is skipped when no network link is up).
-4. CeraUI is accessible on port 80 (HTTP) once `ceralive.service` is active.
+2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
+   - `ceralive-hostname.service` — generates a unique hostname
+     (`ceralive-<short-id>`) from the machine-id.
+   - `ceralive-ssh-firstboot.service` — regenerates per-device SSH host keys,
+     writes `PermitRootLogin prohibit-password`, and arms a forced password
+     change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
+     so sshd never accepts a connection before hardening is in place.
+     Source: `v2/mkosi/runtime/ceralive-ssh-firstboot.sh`.
+   - `ceralive-tls-firstboot.service` — mints a per-device self-signed TLS
+     cert into `/data/ceralive/tls/` (RSA 2048, 3650 days, CN/SAN =
+     `<hostname>.local` + device IPv4). Runs `Before=nginx.service`.
+     Source: `v2/mkosi/runtime/ceralive-tls-firstboot.sh`.
+   - `ceralive-provision.service` — evaluates whether to start the WiFi
+     provisioning portal. On a device with no stored WiFi profiles and no
+     wired uplink, waits 75 s then brings up the `CeraLive-Setup-<short-id>`
+     WPA2 hotspot. Source: `v2/mkosi/runtime/ceralive-provision.sh`.
+3. `ceralive.service` starts and binds port 80 (HTTP). If the provisioning
+   portal is active, `ceralive.service` is stopped first so the portal can
+   use port 80; it restarts automatically after provisioning completes.
+4. `nginx.service` starts and binds port 443 (HTTPS), reverse-proxying to
+   the CeraUI backend on `127.0.0.1:80`.
+5. The health gate (`ceralive-healthcheck.service`) runs after
+   `ceralive.service` starts. On a fresh offline device the SRT reachability
+   check is skipped; the mDNS probe logs a warning if mDNS is not yet
+   resolvable (non-fatal).
 
-**Verify the service is running:**
+For the operator-facing walkthrough of the WiFi portal and first login, see
+[`docs/FIRST-BOOT.md`](FIRST-BOOT.md).
+
+**Verify the services are running** (once the device is on the network):
 
 ```bash
-ssh root@<board-ip> 'systemctl status ceralive.service'
-ssh root@<board-ip> 'journalctl -u ceralive.service -n 50'
+ssh ceralive@ceralive-<short-id>.local 'systemctl status ceralive.service'
+ssh ceralive@ceralive-<short-id>.local 'journalctl -u ceralive.service -n 50'
 ```
 
-Replace `<board-ip>` with the board's actual IP address on your network.
+The default user is `ceralive` (password-locked; see `docs/FIRST-BOOT.md` §5
+for first-login instructions). Replace `ceralive-<short-id>` with the actual
+hostname shown on the HDMI/serial console or the setup hotspot SSID.
 
 **Check the boot slot:**
 
 ```bash
-ssh root@<board-ip> 'rauc status'
+ssh ceralive@ceralive-<short-id>.local 'rauc status'
 ```
 
 ---
@@ -377,8 +410,10 @@ alone does not reload them.
 ./dev-sync --frontend
 ```
 
-[TODO: insert from T17-T21 evidence placeholder — confirm dev-sync --frontend
-invocation and behavior once hardware bring-up evidence is available]
+**Pending hardware run** — the `dev-sync --frontend` invocation and timing will
+be confirmed from `test-results/boot-log-<date>.txt` once a physical board is
+available. The script exists under `v2/dev-sync`; consult
+[`v2/docs/dev-loop.md`](../v2/docs/dev-loop.md) for the current reference.
 
 ### Environment knobs
 
@@ -631,10 +666,16 @@ SYSEXT_OS_VERSION_ID=13 ./v2/dev-push <board-ip>
 
 ### First boot: board does not appear on the network
 
-[TODO: insert from T17-T18 evidence placeholder — see test-results/boot-log-\<date\>.txt]
+**Pending hardware run** — specific console output and timing for this failure
+mode will be filled from `test-results/boot-log-<date>.txt` once a physical
+board is available.
 
 Check that the board's HDMI output shows U-Boot and kernel messages. If the
 board is stuck in maskrom mode, power-cycle without holding the maskrom button.
+
+If the board boots but does not appear on the network, the WiFi provisioning
+portal may be active. Look for a `CeraLive-Setup-<short-id>` hotspot and
+follow the provisioning steps in [`docs/FIRST-BOOT.md`](FIRST-BOOT.md) §3.
 
 ---
 

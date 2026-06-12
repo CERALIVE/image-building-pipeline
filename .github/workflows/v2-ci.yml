@@ -131,6 +131,31 @@ jobs:
           ./v2/lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
           grep -Eq 'measured=[0-9]+ budget=[0-9]+ \(enforced\)' size-report.log
 
+      - name: Regression check — compare against baseline (non-blocking warning)
+        run: |
+          set -o pipefail
+          # Extract measured bytes from the size-report.log produced above.
+          # measure-size.sh outputs: "measured=<bytes> budget=<bytes> (enforced)"
+          measured_bytes=$(grep -oP 'measured=\K[0-9]+' size-report.log | head -1)
+          if [ -z "${measured_bytes}" ]; then
+            echo "::warning::could not extract measured bytes from size-report.log"
+            exit 0
+          fi
+          echo "Extracted measured bytes: ${measured_bytes}"
+          # Invoke the regression comparator. It exits 0 if within threshold,
+          # exits 1 if growth exceeds 50 MB, exits 2 on bad args/missing baseline.
+          # We treat exit 1 (threshold exceeded) as a warning, not a hard failure,
+          # since the absolute 1.5 GB gate already passed.
+          if ! ./v2/ci/check-size-regression.sh "${measured_bytes}" v2/ci/size-baseline.json 2>&1 | tee size-regression.log; then
+            exit_code=$?
+            if [ ${exit_code} -eq 1 ]; then
+              echo "::warning::image size growth exceeds 50 MB threshold (see size-regression.log)"
+            else
+              echo "::error::regression check failed with exit code ${exit_code}"
+              exit ${exit_code}
+            fi
+          fi
+
       - name: Gate bites — sparse over-budget tree MUST fail the gate (non-vacuous)
         run: |
           # die() writes "exceeds budget" to stderr — fold it into the log (2>&1)
@@ -328,19 +353,23 @@ jobs:
   qemu:
     # AMD64 matrix leg only: boot the x86 (x86-minipc) disk image headlessly in
     # qemu and assert it reaches multi-user.target + ceralive.service health +
-    # critical packages (v2/tests/qemu-x86.sh, task 36). qemu in CI is fragile and
-    # the DRY_RUN build-matrix above ships no bootable image, so this leg is
-    # continue-on-error and the harness GRACEFULLY SKIPS when qemu/OVMF/the image
-    # is absent. The SELFTEST step always runs the harness's own negative test
-    # (a variant missing a critical package MUST fail the gate) so this job proves
-    # the gate logic on every push even before real image artifacts are wired up.
+    # critical packages (v2/tests/qemu-x86.sh, task 36). qemu is REQUIRED in CI
+    # (MAC4: fail loudly if missing, not skip). The DRY_RUN build-matrix above
+    # ships no bootable image, so the BOOT step gracefully skips when the image
+    # is absent (but qemu itself MUST be present). The SELFTEST step always runs
+    # the harness's own negative test (a variant missing a critical package MUST
+    # fail the gate) so this job proves the gate logic on every push even before
+    # real image artifacts are wired up.
     #
     # NOT a substitute for the RK3588 real-hardware smoke (realhw-smoke.sh / task
     # 38) — this only validates the x86 amd64 OS+service layer boots.
+    #
+    # Timeout: 600s (10 min) accounts for TCG (no KVM in CI); measured TCG run
+    # ~4–5 min, so 600s = 2× measured + headroom (EC9).
     name: qemu x86 boot/service/package (amd64)
     runs-on: ubuntu-latest
     needs: build-matrix
-    continue-on-error: true
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -350,12 +379,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
           qemu-system-x86_64 --version | head -1
 
+      - name: Verify qemu-system-x86_64 is available (MAC4 — fail loudly if missing)
+        run: |
+          if ! command -v qemu-system-x86_64 &>/dev/null; then
+            echo "::error::qemu-system-x86_64 not found in PATH after install step"
+            exit 1
+          fi
+          echo "qemu-system-x86_64 available: $(qemu-system-x86_64 --version | head -1)"
+
       - name: SELFTEST — assertion engine + negative gate (no qemu/image needed)
         env:
           CERALIVE_QEMU_SELFTEST: '1'
         run: ./v2/tests/qemu-x86.sh
 
-      - name: Boot the x86 image in qemu (graceful skip if no artifact under DRY_RUN)
+      - name: Boot the x86 image in qemu (skip if no artifact under DRY_RUN)
         env:
           BOARD: x86-minipc
           # The Stage-4 disk artifact lands here once the x86 build is wired up
@@ -365,7 +402,7 @@ jobs:
           BOOT_TIMEOUT: '120'
         run: |
           # Use the build artifact if a downstream step downloaded one; otherwise
-          # the harness skips gracefully (continue-on-error backstops either way).
+          # the harness skips gracefully (image is optional under DRY_RUN).
           img="$(find v2/images/x86-minipc -maxdepth 1 \
                    \( -name '*.img' -o -name '*.img.xz' \) 2>/dev/null | sort | tail -1 || true)"
           if [ -n "${img}" ]; then

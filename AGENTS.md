@@ -33,9 +33,13 @@ image-building-pipeline/
 │   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
 │   │   │                     #   size-notes.md, cog-display-addon.md,
 │   │   │                     #   cog-display-hw-checklist.md,
-│   │   │                     #   addon-sysext-refresh.md, deferred items
+│   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
 │   │   └── fast-reload.md    # dev-sync live-reload loop
 │   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
+├── docs/
+│   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
+│   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
+│   └── partition-contract.md # frozen GPT layout contract
 ├── scripts/
 │   └── fetch-debs.sh         # downloads .deb packages for REPOS array
 └── CONTRIBUTING.md           # contribution rules
@@ -49,9 +53,11 @@ image-building-pipeline/
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
 | v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
+| **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
 | Cross-repo kiosk architecture | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../CeraUI/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
@@ -59,6 +65,7 @@ image-building-pipeline/
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
 | **Cog on-hardware render QA checklist** | [`v2/docs/cog-display-hw-checklist.md`](v2/docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
+| **Deferred / hardware-gated items** | [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
@@ -84,6 +91,21 @@ MKOSI_NATIVE=1 ./v2/build <board>        # same, env-var form
 
 Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
 `.raucb` A/B RAUC OTA packages. See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
+
+**x86 disk assembly — full A/B GRUB (Task 12)** [EXISTS]
+
+`v2/build x86-minipc` now produces a flashable `.raw` with RAUC **A/B** boot (was:
+deferred `TODO(x86-disk)`, rootfs.tar only). x86 boots UEFI → GRUB from an EFI System
+Partition with RAUC's **native `bootloader=grub`** backend: `lib/assemble-disk-x86.sh`
+(the offline x86 producer, parallel to the RK3588 `assemble-disk.sh`) lays the ESP
+(`grub-mkstandalone` removable-path `/EFI/BOOT/BOOTX64.EFI` + `grub.cfg` + `grubenv`)
+plus the **FROZEN** `rootfs_a`/`rootfs_b`/`data` slots — `repart/` and the RK3588
+assembly stay zero-diff (G3/SC6). The earlier `bootloader=custom` countdown scaffold
+is RETAINED, unchanged, only as the offline rollback-contract harness
+(`qemu-x86.sh --fallback-selftest`, `test-x86-fallback.sh`). Full rationale +
+VERIFY-FIRST finding: [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2.
+The signed `.raucb` OTA bundle for x86 is a documented follow-up (`build-bundle.sh`
+covers the RK3588 path today).
 
 **Multi-board dispatch** [EXISTS]
 
@@ -211,6 +233,121 @@ add-on manager must:
 Never report an add-on "updated" or "disabled" on the strength of the sysext call
 alone.
 
+**First-boot SSH hardening** [EXISTS]
+
+`ceralive-ssh-firstboot.service` runs once `Before=ssh.service ssh.socket` on
+first boot. Standalone artifacts under `v2/mkosi/runtime/`
+(`ceralive-ssh-firstboot.{sh,service}`), installed by
+`postinst-lib.sh::setup_ssh_firstboot` — NOT inlined in `mkosi.postinst.chroot`
+(the drift gate's 950-line ceiling). Scope is locked (SC4): regenerate the baked
+shared host keys into a per-device identity (persisted on `/data`, stable across
+A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`.
+The `ceralive` user ships password-locked (no default password); root retains
+key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
+
+**First-boot WiFi provisioning portal** [PARTIAL]
+
+`ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot AND a
+captive portal so a headless, never-configured device can be handed WiFi
+credentials with no screen or keyboard. Standalone artifacts under
+`v2/mkosi/runtime/` (`ceralive-provision.{sh,service}` plus the captive portal
+`ceralive-portal.{sh,socket,@.service}`), installed by
+`postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chroot`
+(drift-gate 950-line ceiling; `setup_provisioning` is in the gate's
+`CONSOLIDATED_FUNCS`). Full end-to-end flow:
+[`v2/docs/wifi-provisioning.md`](v2/docs/wifi-provisioning.md).
+
+- **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
+  there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
+  connectivity appears within a **60-90s boot grace window** (default 75s). Either
+  a stored profile or any connectivity (NM `full`/`limited`/`portal`, or a default
+  route) suppresses it. A `/data/ceralive/provision/force-portal` flag
+  (factory-reset hook) re-triggers it even when profiles exist.
+- **EC4 — OTA-safe:** a RAUC update that preserves `/data` keeps the WiFi profiles,
+  so the portal correctly does **not** start after an update.
+- **Conflict safety:** the AP only runs when there is zero connectivity (so srtla
+  bonding is impossible anyway), and it leaves `wlan0` with no default route, so the
+  srtla NM dispatcher (`90-srtla-wifi-routing`) sees an empty gateway and writes no
+  rule/route in table 120 — a no-op while the portal is up. WiFi tables 120-124 are
+  untouched.
+- **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
+  shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
+  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
+  image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
+  (machine-id-derived, like the hostname service), passphrase `ceralive-setup`
+  (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
+  requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
+  validated on hardware, hence `[PARTIAL]`.
+- **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
+  CeraUI backend (`ceralive.service`) to free port 80 and starts
+  `ceralive-portal.socket` — a systemd socket-activated (`Accept=yes`) **bash** HTTP
+  handler on `192.168.42.1:80`. It is the lightest server already in the image (no
+  busybox/python3/socat/nc ship — socat/netcat were moved to the debug add-on), and is
+  a standalone plain-HTML page, NOT a CeraUI integration (SC2). A
+  `address=/#/192.168.42.1` drop-in in `dnsmasq-shared.d` wildcard-captures DNS so any
+  hostname pops the operator's captive-portal sign-in. The form's SSID list is the
+  pre-AP scan cache (a single radio can't scan in AP mode) plus free-text entry.
+- **Credential handoff:** the form POST writes the user's network via
+  `nmcli connection add` (credentials land ONLY in NM's `/data`-backed store — never a
+  file), answers the browser, then runs a DETACHED `ceralive-provision connect <con>`
+  worker (via `systemd-run`, so it outlives the per-connection service that the AP
+  teardown kills). The worker drops the AP, joins as a client under a bounded
+  `nmcli --wait` + `timeout`, and on a wrong passphrase or hard timeout deletes the bad
+  profile, writes a `last-error` marker the portal shows, and re-arms the AP for a
+  retry — the device is never left headless-dead.
+- **Port-80 coexistence:** the portal owns `192.168.42.1:80` only during provisioning;
+  CeraUI's backend (binds `[80, 8080, 81]`, tries 80 first) is stopped for the window
+  and restarted on teardown so it re-binds 80 on the new uplink IP. The Task-15 nginx
+  TLS front on **443** is unaffected (its `127.0.0.1:80` upstream is just briefly down
+  while there is no uplink — and thus no 443 client).
+- **Teardown — MAC6 end-state (all four, sandbox-verified):** (a) AP profile deleted;
+  (b) device joined the target network; (c) portal unreachable (`ceralive-portal.socket`
+  stopped, port 80 freed); (d) CeraUI reachable on the new IP (`ceralive.service`
+  restarted). A successful `connect` runs the teardown **keeping** the freshly-joined
+  client link; the out-of-band `ceralive-provision teardown` verb (or a
+  `/data/ceralive/provision/teardown-requested` flag) also releases `wlan0` and clears
+  the portal-active + force flags. Plain `systemctl stop` (ExecStop) is link-down +
+  portal-down only and RETAINS the AP profile + flags (shutdown must not disarm a
+  pending factory reset). Offline proof harness:
+  `v2/tests/provision-portal.test.sh` (gated in `manifest.bats`).
+
+**CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]
+
+The device serves the CeraUI control plane over HTTPS on **443** via `nginx-light`,
+which terminates TLS and reverse-proxies to the CeraUI backend on `127.0.0.1:80`.
+Standalone artifacts under `v2/mkosi/runtime/`
+(`ceralive-tls.nginx.conf`, `ceralive-tls-firstboot.{sh,service}`,
+`ceralive-tls-nginx.dropin.conf`), installed by
+`postinst-lib.sh::setup_tls_proxy` — NOT inlined in `mkosi.postinst.chroot`
+(drift-gate 950-line ceiling; `setup_tls_proxy` is wired into BOTH the postinst
+executor and `services.sh`, like `setup_provisioning`).
+
+- **SC3 — port 80 is KEPT.** nginx binds **443 only**; the backend keeps serving
+  port 80 directly. `setup_tls_proxy` removes the stock nginx `sites-enabled/default`
+  (which would otherwise grab :80). There is deliberately **no** 80→443 redirect —
+  both ports are a real, supported entry point.
+- **EC6 — WebSocket upgrade.** The proxy site sets
+  `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header
+  Connection "upgrade";` so CeraUI's same-origin telemetry/RPC WebSocket survives the
+  proxy (Task 1 already maps `https:`→`wss:` in the frontend; no UI change needed).
+- **Self-signed cert (no ACME/mTLS).** `ceralive-tls-firstboot.service` mints a
+  per-device self-signed key+cert ONCE on first boot into `/data/ceralive/tls/`
+  (survives reboots + A/B OTA slot swaps), flag-guarded (idempotent). CN/SAN =
+  `<hostname>.local` + the device IPv4. **Browser caveat (honest):** the first visit
+  to `https://<device>.local` shows a "self-signed / not secure" warning — expected
+  for a headless LAN appliance with no public DNS and no ACME path (SC3 forbids
+  ACME/Let's Encrypt and mTLS). `openssl` is pinned in `shared.list` for the cert.
+- **Ordering.** `ceralive-tls-firstboot.service` runs `Before=nginx.service` (and
+  after the unique-hostname service); a `nginx.service.d/10-ceralive-tls.conf`
+  drop-in adds `Requires=`/`After=` so nginx never starts without a cert.
+- **Healthcheck.** `ceralive-healthcheck.sh` probes BOTH `http://127.0.0.1/status`
+  (:80) and `https://127.0.0.1/status` (:443, `-k`); this is **non-fatal** (WARN
+  only, like the mDNS probe) — a UI/TLS hiccup must not roll back a slot whose
+  streaming stack is healthy and whose port 80 still serves.
+- **Coexistence with provisioning (Task 11):** the AP-mode portal uses port 80;
+  nginx only binds 443, so there is no conflict.
+- **Size:** ~+3–4 MB; see [`v2/docs/size-notes.md §5`](v2/docs/size-notes.md).
+
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.
@@ -242,6 +379,8 @@ QA passes (same gate as Tasks 26/27/28).
 
 ## KNOWN ISSUES / DEFERRED
 
+Full index with file:line anchors and unblock conditions: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md).
+
 **OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
 ships the `interfaces:` block with `FIXME-…` values because the board is not in
 hand. The OPi 5+ has two onboard r8169 NICs on the same driver/bus, so a generic
@@ -251,19 +390,20 @@ each FIXME. Until then `install_interface_naming()` skips the FIXME values and
 emits only the generic `Type=wlan → wlan0` rule; the dual NICs stay
 non-deterministic.
 
-**Modem source-routing may not fire (NM `dhcp=internal`).** The SRTLA dhclient
-exit hook (`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) installs
-per-modem source-policy routes on DHCP `BOUND` events. NetworkManager in Debian
-bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT execute
-`dhclient-exit-hooks.d/`. Modem routing may therefore never trigger for
-NM-managed interfaces. The wifi path is unaffected (it uses the NM dispatcher,
-`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`). Verify with a modem
-attached: check `journalctl -t srtla-routing` and `ip rule show` after the modem
-connects. If the hook doesn't fire, extend `90-srtla-wifi-routing` to also match
-`usb*|wwan*` and assign tables 100–107 by index — but that touches the
-drift-gated SRTLA payloads (`v2/ci/postinst-drift-check.sh` CHECK 2) and requires
-a deliberate twin-update of both `networking-srtla.sh` and the `§6` block in
-`mkosi.postinst.chroot`.
+**Modem source-routing under NM `dhcp=internal` — FIXED.** NetworkManager in
+Debian bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT
+execute `dhclient-exit-hooks.d/`, so the SRTLA dhclient hook
+(`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) never fired for
+NM-managed modems. The NM dispatcher
+(`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`) now also matches modem
+interfaces (`usb0..7` and `enx*0..7`) and installs the same source rule + default
+route in tables 100–107, mirroring the dhclient-hook semantics. The dhclient hook
+is retained (harmless; still covers non-NM dhclient paths). Both drift-gated SRTLA
+payloads were twin-updated in one commit (`networking-srtla.sh` and the `§6` block
+in `mkosi.postinst.chroot`); `v2/ci/postinst-drift-check.sh` CHECK 2 confirms
+byte-parity. WiFi table assignments (120–124) are unchanged. Verify on hardware
+with a modem attached: `journalctl -t srtla-routing` and `ip rule show` after the
+modem connects.
 
 **Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`

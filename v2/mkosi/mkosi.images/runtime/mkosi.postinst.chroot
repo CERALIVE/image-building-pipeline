@@ -303,16 +303,27 @@ HOOKEOF
   mkdir -p /etc/NetworkManager/dispatcher.d
   cat >/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing <<'DISPEOF'
 #!/bin/bash
-# SRTLA Source Routing for WiFi interfaces managed by NetworkManager
+# SRTLA Source Routing for NetworkManager-managed interfaces.
+#   WiFi:   wlan0..wlan4               -> tables 120..124
+#   Modems: usb0..usb7 / enx*0..enx*7  -> tables 100..107
+# Modem handling mirrors the dhclient-exit-hooks.d/srtla-source-routing rule/route
+# semantics: NM defaults to dhcp=internal on bookworm and never runs dhclient hooks,
+# so the source-policy routes for NM-managed modems must be installed here instead.
 INTERFACE="$1"
 ACTION="$2"
 
 case "$INTERFACE" in
-    wlan[0-4]) ;;
+    wlan[0-4]) TABLE=$((120 + ${INTERFACE#wlan})) ;;
+    usb0|enx*0) TABLE=100 ;;
+    usb1|enx*1) TABLE=101 ;;
+    usb2|enx*2) TABLE=102 ;;
+    usb3|enx*3) TABLE=103 ;;
+    usb4|enx*4) TABLE=104 ;;
+    usb5|enx*5) TABLE=105 ;;
+    usb6|enx*6) TABLE=106 ;;
+    usb7|enx*7) TABLE=107 ;;
     *) exit 0 ;;
 esac
-
-TABLE=$((120 + ${INTERFACE#wlan}))
 
 case "$ACTION" in
     up|dhcp4-change)
@@ -323,14 +334,14 @@ case "$ACTION" in
             ip route flush table "$TABLE" 2>/dev/null || true
             ip rule add from "$IP" table "$TABLE" priority 100
             ip route add default via "$GATEWAY" dev "$INTERFACE" table "$TABLE"
-            logger -t srtla-routing "WiFi source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
+            logger -t srtla-routing "Source routing: $INTERFACE ($IP) via $GATEWAY table $TABLE"
         fi
         ;;
     down)
         IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
         [ -n "$IP" ] && ip rule del from "$IP" table "$TABLE" 2>/dev/null || true
         ip route flush table "$TABLE" 2>/dev/null || true
-        logger -t srtla-routing "WiFi source routing removed for $INTERFACE table $TABLE"
+        logger -t srtla-routing "Source routing removed for $INTERFACE table $TABLE"
         ;;
 esac
 DISPEOF
@@ -849,6 +860,38 @@ HBMCPATH
 # (definition: customize/postinst-lib.sh::setup_cert_rotation — sourced above)
 
 # ---------------------------------------------------------------------------
+# 17. First-boot WiFi provisioning portal (task 11): AP-mode trigger + bring-up.
+#
+# setup_provisioning (postinst-lib.sh, sourced above) INSTALLS the committed
+# canonical artifacts v2/mkosi/runtime/ceralive-provision.{sh,service} — no inline
+# twin (Task 6). The service brings up an NM-native AP-mode hotspot ONLY when there
+# are no stored WiFi profiles on /data AND no connectivity after a boot grace window;
+# a /data force flag (factory-reset hook) re-triggers it. The captive-portal page is
+# Task 14, which exits provisioning mode via `ceralive-provision teardown`.
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::setup_provisioning — sourced above)
+
+# ---------------------------------------------------------------------------
+# 17. First-boot SSH hardening (task 10, SC4): per-device host keys, root password
+#     login disabled, forced ceralive password change. setup_ssh_firstboot
+#     (postinst-lib.sh, sourced above) INSTALLS the committed standalone artifacts
+#     v2/mkosi/runtime/ceralive-ssh-firstboot.{sh,service} — NO inline twin, so the
+#     postinst stays under the drift ceiling. See the script header for scope.
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::setup_ssh_firstboot — sourced above)
+
+# ---------------------------------------------------------------------------
+# 18. CeraUI TLS front (task 15, SC3): nginx terminates HTTPS on 443 and proxies
+#     to the CeraUI backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80
+#     is LEFT to the backend (no redirect). setup_tls_proxy (postinst-lib.sh,
+#     sourced above) INSTALLS the committed artifacts v2/mkosi/runtime/
+#     ceralive-tls.nginx.conf + ceralive-tls-firstboot.{sh,service} + the nginx
+#     ordering drop-in — NO inline twin, so the postinst stays under the drift
+#     ceiling. The cert is per-device self-signed, generated on first boot into /data.
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::setup_tls_proxy — sourced above)
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -870,6 +913,9 @@ main() {
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)
+  setup_ssh_firstboot          # task 10: first-boot SSH hardening (host keys + root pw-login + forced change)
+  setup_provisioning           # task 11: first-boot WiFi provisioning AP (trigger + AP mode)
+  setup_tls_proxy              # task 15: nginx TLS front on 443 -> 127.0.0.1:80 (port 80 kept; SC3)
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"

@@ -16,9 +16,9 @@
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
 #   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
 #   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
-#                (Stage-4 flashable GPT image). FAMILY-GATED: only the custom-uboot
-#                bootloader adapter (RK3588) has a raw bootloader gap to fill; x86
-#                (efi) is skipped here — its disk path is task 14.
+#                (Stage-4 flashable GPT image). FAMILY-GATED on the bootloader adapter:
+#                custom-uboot (RK3588) fills the raw idbloader gap via assemble-disk.sh;
+#                efi/grub (x86) lays an ESP + RAUC-native GRUB A/B via assemble-disk-x86.sh.
 #
 # DESIGN (inherited from common.sh + learnings):
 #   * strict mode + loud ERR trap; NO `|| true` swallowing. Any mkosi/apt/dpkg
@@ -45,6 +45,7 @@ RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
+ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
@@ -387,15 +388,30 @@ main() {
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
     fi
   elif [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "efi" || "${RAUC_BOOTLOADER_ADAPTER:-}" == "grub" ]]; then
-    # x86 EFI/GRUB disk assembly is DEFERRED — explicitly, not skipped-and-forgotten.
-    # efi/grub boots from an EFI System Partition + GRUB A/B grubenv engine (exercised
-    # by tests/qemu-x86.sh --fallback-selftest), not the RK3588 raw idbloader gap that
-    # assemble-disk.sh/write-bootloader.sh write. Routing x86 through the `custom` .raw
-    # path would emit a NON-BOOTABLE image, so this branch produces NO .raw and stops
-    # cleanly after the step-7 rootfs.tar (no partial disk state).
-    # TODO(x86-disk): wire x86 ESP + GRUB A/B disk assembly behind this gate
-    #   (ESP/grub-install layout, grubenv A/B slot selection, RAUC efi adapter).
-    log_info "[8/9] bootloader_adapter='${RAUC_BOOTLOADER_ADAPTER}' — x86 ESP+GRUB disk assembly DEFERRED (TODO(x86-disk)); rootfs.tar is the only artifact, no .raw produced for board '${board}'"
+    # x86 (UEFI/GRUB) Stage-4 disk assembly (Task 12 — x86-disk wiring landed).
+    # x86 boots from an EFI System Partition with RAUC's NATIVE bootloader=grub backend
+    # (GRUB at the removable path /EFI/BOOT/BOOTX64.EFI + grubenv on the ESP), NOT the
+    # RK3588 raw idbloader gap, so it has its OWN offline producer lib/assemble-disk-x86.sh
+    # (ESP + the FROZEN rootfs_a/rootfs_b/data slots; repart/ untouched). Same
+    # INSTALL_BOOT_BSP gate as the custom path — the x86 .raw needs the Debian kernel
+    # inside rootfs_a, so a config+package parity build (BSP=0) defers disk assembly.
+    if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
+      [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
+      log_info "[8/9] Stage-4 x86 ESP+GRUB disk assembly → ${raw_artifact} (bootloader_adapter=${RAUC_BOOTLOADER_ADAPTER} single_slot=${SINGLE_SLOT_FALLBACK:-false})"
+      # BOARD_ID/COMPATIBLE_STRING/SERIAL_CONSOLE/SINGLE_SLOT_FALLBACK are already
+      # exported by run_mkosi_build (step 6) and read from the env by the assembler
+      # and install-x86-grub.sh esp; the flags below pin the per-run artifact + tree.
+      "${ASSEMBLE_DISK_X86_SH}" build \
+        --output "${raw_artifact}" \
+        "${single_slot_flag[@]}" \
+        --board "${BOARD_ID}" \
+        --rootfs-tree "${rootfs_tree}" \
+        || die "Stage-4 x86 disk assembly failed for board '${board}'"
+      log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
+    else
+      log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 x86 disk assembly (flashable .raw) deferred to the full device build"
+    fi
   else
     die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
   fi

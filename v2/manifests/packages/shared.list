@@ -27,6 +27,17 @@
 # --- TLS / apt plumbing -------------------------------------------------------
 ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
 apt-transport-https      # https:// apt transport for the first-party repo
+openssl                  # CLI for the first-boot self-signed TLS cert (ceralive-tls-firstboot).
+                         # Priority: important on Debian (usually already present), pinned
+                         # explicitly so cert generation never depends on a transitive pull.
+
+# --- CeraUI TLS front (Task 15, SC3) ------------------------------------------
+nginx-light              # terminates HTTPS on 443 and reverse-proxies to the CeraUI
+                         # backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80
+                         # is LEFT to the backend (no redirect). nginx-light is the smallest
+                         # viable nginx flavour — it carries the proxy + ssl modules without
+                         # the mail/stream/extras bulk of nginx-full. Cert is per-device
+                         # self-signed on /data; see v2/docs/size-notes.md for the size delta.
 
 # --- Network management -------------------------------------------------------
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it

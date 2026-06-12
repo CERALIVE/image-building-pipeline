@@ -144,9 +144,29 @@ net.ipv4.conf.default.rp_filter = 2
 EOF
 }
 
+# --- 8c. NTP configuration (chrony pools) --------------------------------
+configure_ntp() {
+  log "configuring NTP (chrony pools)"
+  mkdir -p /etc/chrony/conf.d
+  # Install the ceralive-ntp.conf drop-in with explicit public NTP pools.
+  # This file is staged into the image at build time by the customize layer.
+  if [[ -f "${CERALIVE_CUSTOMIZE_SRC:-}/ceralive-ntp.conf" ]]; then
+    cp "${CERALIVE_CUSTOMIZE_SRC}/ceralive-ntp.conf" /etc/chrony/conf.d/ceralive-ntp.conf
+  else
+    # Fallback: inline the config if the file is not available (e.g., in the
+    # standalone postinst context where the customize dir is not mounted).
+    cat >/etc/chrony/conf.d/ceralive-ntp.conf <<'EOF'
+pool pool.ntp.org iburst
+pool ntp.ubuntu.com iburst
+makestep 1 3
+EOF
+  fi
+}
+
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
+  configure_ntp  # install NTP pools before enabling chrony
   local svc
   for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"
@@ -452,4 +472,95 @@ setup_cert_rotation() {
   install -m 0644 "${src}/cert-rotation-expiry.timer" /etc/systemd/system/cert-rotation-expiry.timer
   enable_service cert-rotation.service
   enable_service cert-rotation-expiry.timer
+}
+
+# --- 17. First-boot WiFi provisioning portal (tasks 11 + 14) ------------------
+# Installs the committed canonical artifacts under v2/mkosi/runtime/ (single source of
+# truth — no inline twin, Task 6 pattern), mirroring setup_boot_healthcheck /
+# setup_cert_rotation. The provision script brings up an NM-native AP-mode hotspot ONLY
+# when there are no stored (non-AP) WiFi profiles on /data AND no link-up connectivity
+# appears within a boot grace window; a /data force flag (factory-reset hook) re-triggers
+# it even when profiles exist.
+#
+# Task 14 adds the captive portal: ceralive-portal.sh (the inetd-style bash HTTP handler)
+# plus its socket-activation units ceralive-portal.{socket,@.service}. The socket + the
+# per-connection template are installed but NOT enabled — ceralive-provision starts the
+# socket imperatively when the AP comes up and stops it on teardown, so port 80 is taken
+# from CeraUI only for the duration of provisioning. CERALIVE_RUNTIME_SRC must point at
+# the runtime/ source dir.
+setup_provisioning() {
+  log "installing first-boot WiFi provisioning portal (ceralive-provision.service + captive portal)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-provision.sh" ]] \
+    || die "provisioning source not found: ${src}/ceralive-provision.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-portal.sh" ]] \
+    || die "captive-portal source not found: ${src}/ceralive-portal.sh (is \$SRCDIR/runtime mounted?)"
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-provision.sh" /usr/local/sbin/ceralive-provision
+  install -m 0755 "${src}/ceralive-portal.sh"    /usr/local/sbin/ceralive-portal
+  install -m 0644 "${src}/ceralive-provision.service"  /etc/systemd/system/ceralive-provision.service
+  install -m 0644 "${src}/ceralive-portal.socket"      /etc/systemd/system/ceralive-portal.socket
+  install -m 0644 "${src}/ceralive-portal@.service"    /etc/systemd/system/ceralive-portal@.service
+  # Only the trigger service is enabled at boot; the portal socket + template are driven
+  # imperatively by ceralive-provision (start on AP up, stop on teardown).
+  enable_service ceralive-provision.service
+}
+
+# ---------------------------------------------------------------------------
+# First-boot SSH hardening (task 10, SC4): install the COMMITTED standalone
+# artifacts ceralive-ssh-firstboot.{sh,service} (single source of truth under
+# v2/mkosi/runtime/) instead of inlining them in the runtime postinst — keeps
+# postinst.chroot under the 950-line drift ceiling. Mirrors setup_boot_healthcheck.
+# Scope is LOCKED to host-key regen + PermitRootLogin prohibit-password + a once-
+# only `chage -d 0 ceralive`; see the script header. CERALIVE_RUNTIME_SRC must
+# point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_ssh_firstboot() {
+  log "installing first-boot SSH hardening (ceralive-ssh-firstboot.service — host keys + root pw-login + forced change)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-ssh-firstboot.sh" ]] \
+    || die "ssh-firstboot source not found: ${src}/ceralive-ssh-firstboot.sh (is \$SRCDIR/runtime mounted?)"
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-ssh-firstboot.sh" /usr/local/sbin/ceralive-ssh-firstboot
+  install -m 0644 "${src}/ceralive-ssh-firstboot.service" /etc/systemd/system/ceralive-ssh-firstboot.service
+  enable_service ceralive-ssh-firstboot.service
+}
+
+# ---------------------------------------------------------------------------
+# CeraUI TLS front (task 15, SC3): nginx terminates HTTPS on 443 and proxies to
+# the CeraUI backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80 is
+# LEFT to the backend — nginx must NOT bind it and there is NO 80->443 redirect.
+# Installs the COMMITTED canonical artifacts under v2/mkosi/runtime/ (single source
+# of truth, no inline twin — Task 6 pattern), mirroring setup_ssh_firstboot. The
+# cert is per-device self-signed, generated on first boot into /data by
+# ceralive-tls-firstboot.service; nginx is ordered AFTER it via a drop-in.
+# CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_tls_proxy() {
+  log "installing CeraUI TLS front (nginx 443 -> 127.0.0.1:80 + first-boot self-signed cert)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-tls-firstboot.sh" ]] \
+    || die "tls-proxy source not found: ${src}/ceralive-tls-firstboot.sh (is \$SRCDIR/runtime mounted?)"
+
+  # (1) First-boot cert generator + its oneshot unit.
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-tls-firstboot.sh" /usr/local/sbin/ceralive-tls-firstboot
+  install -m 0644 "${src}/ceralive-tls-firstboot.service" /etc/systemd/system/ceralive-tls-firstboot.service
+
+  # (2) nginx 443 TLS site. Symlink (not copy) sites-available -> sites-enabled so
+  # the layout matches Debian's nginx convention exactly.
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+  install -m 0644 "${src}/ceralive-tls.nginx.conf" /etc/nginx/sites-available/ceralive-tls.conf
+  ln -sf ../sites-available/ceralive-tls.conf /etc/nginx/sites-enabled/ceralive-tls.conf
+
+  # (3) SC3: nginx binds 443 ONLY. The stock nginx-light ships a default site that
+  # listens on :80 — remove it so nginx never competes with the backend for port 80.
+  rm -f /etc/nginx/sites-enabled/default
+
+  # (4) Order nginx AFTER first-boot cert generation (hard dependency drop-in).
+  mkdir -p /etc/systemd/system/nginx.service.d
+  install -m 0644 "${src}/ceralive-tls-nginx.dropin.conf" /etc/systemd/system/nginx.service.d/10-ceralive-tls.conf
+
+  enable_service ceralive-tls-firstboot.service
+  enable_service nginx.service
 }

@@ -1,0 +1,16 @@
+[Unit]
+Description=CeraLive captive-portal connection handler (%i)
+Documentation=file:///usr/local/sbin/ceralive-portal
+# Per-connection instance spawned by ceralive-portal.socket (Accept=yes). It is never
+# enabled or started directly — systemd instantiates it once per accepted TCP connection.
+
+[Service]
+ExecStart=/usr/local/sbin/ceralive-portal serve
+# inetd model: the accepted socket IS this process's stdin AND stdout, so the bash
+# handler reads the HTTP request from stdin and writes the response to stdout.
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# One short request per instance; the handler bounds its own reads. RuntimeMaxSec is a
+# hard ceiling so a stuck client can never pin the port or wedge an instance.
+RuntimeMaxSec=30
