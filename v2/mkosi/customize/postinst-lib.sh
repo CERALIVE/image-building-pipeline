@@ -144,9 +144,29 @@ net.ipv4.conf.default.rp_filter = 2
 EOF
 }
 
+# --- 8c. NTP configuration (chrony pools) --------------------------------
+configure_ntp() {
+  log "configuring NTP (chrony pools)"
+  mkdir -p /etc/chrony/conf.d
+  # Install the ceralive-ntp.conf drop-in with explicit public NTP pools.
+  # This file is staged into the image at build time by the customize layer.
+  if [[ -f "${CERALIVE_CUSTOMIZE_SRC:-}/ceralive-ntp.conf" ]]; then
+    cp "${CERALIVE_CUSTOMIZE_SRC}/ceralive-ntp.conf" /etc/chrony/conf.d/ceralive-ntp.conf
+  else
+    # Fallback: inline the config if the file is not available (e.g., in the
+    # standalone postinst context where the customize dir is not mounted).
+    cat >/etc/chrony/conf.d/ceralive-ntp.conf <<'EOF'
+pool pool.ntp.org iburst
+pool ntp.ubuntu.com iburst
+makestep 1 3
+EOF
+  fi
+}
+
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
+  configure_ntp  # install NTP pools before enabling chrony
   local svc
   for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"
