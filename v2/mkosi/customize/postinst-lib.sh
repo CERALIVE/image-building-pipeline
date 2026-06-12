@@ -473,3 +473,43 @@ setup_cert_rotation() {
   enable_service cert-rotation.service
   enable_service cert-rotation-expiry.timer
 }
+
+# --- 17. First-boot WiFi provisioning portal (task 11): AP-mode trigger -------
+# Installs the committed canonical artifacts v2/mkosi/runtime/ceralive-provision.{sh,
+# service} (single source of truth — no inline twin, Task 6 pattern), mirroring
+# setup_boot_healthcheck / setup_cert_rotation. The script brings up an NM-native
+# AP-mode hotspot ONLY when there are no stored (non-AP) WiFi profiles on /data AND
+# no link-up connectivity appears within a boot grace window; a /data force flag
+# (factory-reset hook) re-triggers it even when profiles exist. The captive-portal
+# page + credential logic is Task 14, which exits provisioning mode via the script's
+# `teardown` verb. CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+setup_provisioning() {
+  log "installing first-boot WiFi provisioning portal (ceralive-provision.service)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-provision.sh" ]] \
+    || die "provisioning source not found: ${src}/ceralive-provision.sh (is \$SRCDIR/runtime mounted?)"
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-provision.sh" /usr/local/sbin/ceralive-provision
+  install -m 0644 "${src}/ceralive-provision.service" /etc/systemd/system/ceralive-provision.service
+  enable_service ceralive-provision.service
+}
+
+# ---------------------------------------------------------------------------
+# First-boot SSH hardening (task 10, SC4): install the COMMITTED standalone
+# artifacts ceralive-ssh-firstboot.{sh,service} (single source of truth under
+# v2/mkosi/runtime/) instead of inlining them in the runtime postinst — keeps
+# postinst.chroot under the 950-line drift ceiling. Mirrors setup_boot_healthcheck.
+# Scope is LOCKED to host-key regen + PermitRootLogin prohibit-password + a once-
+# only `chage -d 0 ceralive`; see the script header. CERALIVE_RUNTIME_SRC must
+# point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_ssh_firstboot() {
+  log "installing first-boot SSH hardening (ceralive-ssh-firstboot.service — host keys + root pw-login + forced change)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-ssh-firstboot.sh" ]] \
+    || die "ssh-firstboot source not found: ${src}/ceralive-ssh-firstboot.sh (is \$SRCDIR/runtime mounted?)"
+  mkdir -p /usr/local/sbin
+  install -m 0755 "${src}/ceralive-ssh-firstboot.sh" /usr/local/sbin/ceralive-ssh-firstboot
+  install -m 0644 "${src}/ceralive-ssh-firstboot.service" /etc/systemd/system/ceralive-ssh-firstboot.service
+  enable_service ceralive-ssh-firstboot.service
+}

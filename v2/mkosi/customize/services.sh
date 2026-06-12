@@ -53,6 +53,7 @@ configure_network_services() {
   setup_hostname_service        # first-boot unique-hostname service
   setup_boot_healthcheck        # task 29: gate rauc mark-good on streaming health
   setup_cert_rotation           # task 42: baked-in intermediate/leaf rotation
+  setup_provisioning            # task 11: first-boot WiFi provisioning AP (trigger + AP mode)
   log_success "services configured"
 }
 

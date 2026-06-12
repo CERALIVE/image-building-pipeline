@@ -212,6 +212,18 @@ add-on manager must:
 Never report an add-on "updated" or "disabled" on the strength of the sysext call
 alone.
 
+**First-boot SSH hardening** [EXISTS]
+
+`ceralive-ssh-firstboot.service` runs once `Before=ssh.service ssh.socket` on
+first boot. Standalone artifacts under `v2/mkosi/runtime/`
+(`ceralive-ssh-firstboot.{sh,service}`), installed by
+`postinst-lib.sh::setup_ssh_firstboot` — NOT inlined in `mkosi.postinst.chroot`
+(the drift gate's 950-line ceiling). Scope is locked (SC4): regenerate the baked
+shared host keys into a per-device identity (persisted on `/data`, stable across
+A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`.
+The `ceralive` user ships password-locked (no default password); root retains
+key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
+
 ## KIOSK STACK
 
 The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but inert by default**. All kiosk units are masked at first boot. CeraUI enables kiosk mode at runtime via systemctl — no reflash needed.
