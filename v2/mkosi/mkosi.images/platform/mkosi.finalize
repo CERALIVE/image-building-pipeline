@@ -39,8 +39,29 @@ log_info()    { _log 'INFO ' "$@"; }
 log_success() { _log 'OK   ' "$@"; }
 die()         { _log 'ERROR' "$@"; exit 1; }
 
+# x86 (UEFI/GRUB, Task 12): install RAUC's NATIVE bootloader=grub system.conf +
+# the ESP /boot/efi fstab mount. The ESP grub.cfg / grubenv / BOOTX64.EFI are
+# written LATER by lib/assemble-disk-x86.sh at disk-assembly time (grub-mkstandalone
+# lives on the host/builder, not the chroot) — the rootfs-side bits install here so
+# the runtime layer's setup_rauc_client finds an authoritative system.conf and does
+# not overwrite it with the arm64-only bootloader=custom fallback. Gated on
+# INSTALL_BOOT_BSP=1, mirroring the arm64 scoping below: a parity / no-boot-BSP build
+# is non-bootable, so it keeps the runtime fallback unchanged.
+if [[ "${ARCH}" == "x86-64" || "${ARCH}" == "amd64" ]]; then
+  if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then
+    log_info "platform finalize: x86 INSTALL_BOOT_BSP!=1 — RAUC bootloader=grub system.conf deferred to the bootable build (parity build keeps the runtime fallback)."
+    exit 0
+  fi
+  : "${CHROOT_SRCDIR:?CHROOT_SRCDIR must be set by mkosi (in-chroot path of \$SRCDIR)}"
+  INSTALL_X86_GRUB="${CHROOT_SRCDIR%/}/platform/x86/install-x86-grub.sh"
+  log_info "installing RAUC bootloader=grub system.conf + ESP fstab mount (install-x86-grub.sh rootfs)"
+  mkosi-chroot bash "${INSTALL_X86_GRUB}" rootfs
+  log_success "platform layer: x86 A/B bootloader integration installed (RAUC bootloader=grub)"
+  exit 0
+fi
+
 if [[ "${ARCH}" != "arm64" ]]; then
-  log_info "platform finalize: ARCH=${ARCH} is not arm64 — no RK3588 bootloader integration (pass-through)."
+  log_info "platform finalize: ARCH=${ARCH} is neither arm64 nor x86 — no bootloader integration (pass-through)."
   exit 0
 fi
 if [[ "${INSTALL_BOOT_BSP}" != "1" ]]; then

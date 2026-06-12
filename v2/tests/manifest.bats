@@ -453,9 +453,12 @@ YAML
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
-@test "t14 x86 guard: x86-minipc emits NO .raw (efi disk assembly deferred)" {
+@test "t14 x86 guard: x86-minipc DRY_RUN emits no .raw (resolve+plan only, before Stage-4)" {
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
+  # DRY_RUN stops at [5/9], before ANY board reaches Stage-4 disk assembly, so no
+  # artifact is written (the preview contract). x86 disk assembly itself is now WIRED
+  # (lib/assemble-disk-x86.sh) and exercised by the x86-grub test below.
   local raws=()
   if [[ -d "$V2/images/x86-minipc" ]]; then
     while IFS= read -r f; do raws+=("$f"); done \
@@ -473,13 +476,31 @@ YAML
   [[ "$output" == *"RAUC_BOOTLOADER_ADAPTER='custom'"* ]]
 }
 
-@test "t14 x86 guard: orchestrate.sh carries the explicit deferred marker (not just a skip log)" {
+@test "t14 x86 guard: orchestrate.sh wires the x86 ESP/GRUB disk path (TODO(x86-disk) closed)" {
   local orch="$V2/lib/orchestrate.sh"
-  grep -q 'TODO(x86-disk)' "$orch"
-  grep -q 'DEFERRED' "$orch"
-  # the single assemble-disk invocation lives ONLY under the `custom` branch:
-  # efi/grub must never reach a .raw write.
+  # Task 12 closed the deferral: the former active TODO(x86-disk) marker is GONE.
+  ! grep -q 'TODO(x86-disk)' "$orch"
+  # Each adapter has exactly ONE .raw producer under its own branch: RK3588 custom
+  # -> assemble-disk.sh, x86 efi/grub -> assemble-disk-x86.sh.
   [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
+  [ "$(grep -c 'ASSEMBLE_DISK_X86_SH}" build' "$orch")" -eq 1 ]
+}
+
+# ===========================================================================
+# 9b. x86 RAUC-native bootloader=grub disk-path artifacts (Task 12). The shipped
+#     installer (install-x86-grub.sh) renders the bootloader=grub system.conf, the
+#     grub.cfg ORDER/OK/TRY selector, and the seeded grubenv; test-x86-grub.sh
+#     drives it offline (no qemu/GRUB/root/image) and proves the slot-switch
+#     contract (flip grubenv ORDER -> the OTHER slot is selected). Engine/artifact
+#     only, so it fits this UNIT suite.
+# ===========================================================================
+
+@test "x86 grub: bootloader=grub system.conf + grub.cfg selector + grubenv slot-switch (selects B)" {
+  run bash "$V2/mkosi/platform/x86/test-x86-grub.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"switched selection is 'B rootfs_b'"* ]]
+  [[ "$output" == *"X86-GRUB TEST OK"* ]]
+  [[ "$output" != *"FAIL"* ]]
 }
 
 # ===========================================================================

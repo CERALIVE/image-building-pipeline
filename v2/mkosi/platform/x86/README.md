@@ -44,19 +44,57 @@ fallback, families `n100` → `generic`, `CERALIVE_RELAY_ONLY=false`), and (3) p
 
 ## 2. A/B bootloader integration (GRUB on EFI)
 
-### Why `bootloader=custom`, not RAUC's built-in `bootloader=grub`
+### 2.0 SHIPPED PATH — RAUC-native `bootloader=grub` (Task 12)
+
+> **The x86 image ships RAUC's BUILT-IN `bootloader=grub` backend.** Task 12 wired
+> x86 disk assembly and, per its VERIFY-FIRST gate, chose RAUC-native grub over the
+> custom countdown backend documented in §2.1 below. The custom files
+> (`x86-boot-state.sh`, `x86-rauc-boot-adapter.sh`, `grub.cfg.tmpl`,
+> `install-x86-boot.sh`) are **RETAINED unchanged** as the offline rollback-contract
+> harness exercised by `test-x86-fallback.sh` and `qemu-x86.sh --fallback-selftest`
+> — they are **NOT installed on the shipped RAUC-native x86 image**.
+
+**VERIFY-FIRST finding (mkosi-native vs script-installed GRUB).** mkosi's native
+`Bootloader=grub` directive is **INCOMPATIBLE** with this pipeline's `Format=none` +
+offline-assemble model: the production disk is laid by `lib/assemble-disk-x86.sh`
+(`systemd-repart --offline` + `sgdisk` + mtools), **not** by mkosi — the mkosi `disk`
+image is `Bootable=no`, "the geometry reference; assemble-disk.sh is the producer".
+mkosi `Bootloader=grub` would need `Format=disk` + `Bootable=yes` + a mkosi-owned
+ESP/repart pass, which fights that model and **touches partition geometry (G3)**. So
+GRUB is **script-installed offline** (`grub-mkstandalone` → ESP removable path
+`/EFI/BOOT/BOOTX64.EFI`), mirroring how `assemble-disk.sh` writes the RK3588
+bootloader — least custom glue, zero `repart/` diff, RK3588 path untouched.
+
+**Shipped x86 boot files (RAUC-native grub):**
+
+| Where | Files | Tooling | Installed by |
+|---|---|---|---|
+| **rootfs slot** | `/etc/rauc/system.conf` (`bootloader=grub`, `grubenv=` on ESP), `/etc/fstab` (ESP → `/boot/efi`) | none | `install-x86-grub.sh rootfs` (platform/mkosi.finalize, chroot) |
+| **EFI System Partition** | `EFI/BOOT/BOOTX64.EFI` (removable-path GRUB), `EFI/BOOT/grub.cfg` (RAUC `ORDER`/`<slot>_OK`/`<slot>_TRY` selector), `EFI/BOOT/grubenv` (seed) | `grub-mkstandalone` / `grub-editenv` | `assemble-disk-x86.sh` → `install-x86-grub.sh esp` (disk assembly) |
+
+The grubenv lives on the **ESP** (never a rootfs slot): a RAUC update rewrites the
+inactive rootfs slot and would destroy the boot-selection state (EC5). RAUC's grub
+backend rewrites `ORDER`/`<slot>_OK`/`<slot>_TRY` via `grub-editenv` on install +
+`mark-good`; `grub-ab.cfg` is the boot-time selector twin. Build prereq on the host:
+`grub-efi-amd64-bin` + `grub-common` (absent → a placeholder `BOOTX64.EFI` is staged
+and the ESP layout is otherwise complete; a grub-equipped builder fills the binary).
+
+### 2.1 RETAINED reference — `bootloader=custom` countdown engine (offline harness)
+
+> The model below is **no longer the shipped x86 path** (§2.0). It is kept as the
+> cross-platform offline rollback-contract harness only.
 
 RAUC ships a stock grub backend, but it uses a **single boolean retry** per slot
-(`<slot>_OK` / `<slot>_TRY`). We keep the **RK3588 multi-attempt countdown** model
-(`BOOT_<slot>_LEFT`: 3→2→1→0) so **both platforms share one model, one RAUC
-custom-backend interface, and one offline-test shape**. The cost is a small amount of
-grubenv glue; the gain is cross-platform symmetry and a richer N-attempt budget.
+(`<slot>_OK` / `<slot>_TRY`). The custom backend keeps the **RK3588 multi-attempt
+countdown** model (`BOOT_<slot>_LEFT`: 3→2→1→0) so **both platforms share one model,
+one RAUC custom-backend interface, and one offline-test shape**. The cost is a small
+amount of grubenv glue; the gain is cross-platform symmetry and a richer N-attempt
+budget.
 
 The manifest field `rauc_bootloader_adapter: efi` (`families/x86_64.yaml`) names the
-**EFI/GRUB boot family**; the concrete RAUC wiring is `bootloader=custom` with the
-backend below. (The device-side paths are **identical** to RK3588 —
-`/usr/lib/rauc/ceralive-rauc-boot-adapter`, `/usr/bin/ceralive-boot-state` — so RAUC
-`system.conf` is platform-uniform; only the *source implementation* differs.)
+**EFI/GRUB boot family**. The retained custom wiring is `bootloader=custom` with the
+backend below. (Its device-side paths are **identical** to RK3588 —
+`/usr/lib/rauc/ceralive-rauc-boot-adapter`, `/usr/bin/ceralive-boot-state`.)
 
 ### GRUB has no arithmetic — the decrement is a ladder
 
@@ -126,15 +164,26 @@ DTB / no U-Boot** (ACPI + UEFI) — those fields are intentionally unused here.
 
 ## Files
 
+**Shipped path — RAUC-native `bootloader=grub` (Task 12):**
+
 | File | Role |
 |---|---|
-| `x86-boot-state.sh` | grubenv A/B state engine + CLI; userspace twin of `grub.cfg` (→ `/usr/bin/ceralive-boot-state`) |
-| `x86-rauc-boot-adapter.sh` | RAUC custom backend (→ `/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
-| `grub.cfg.tmpl` | GRUB A/B selector template (→ rendered `EFI/ceralive/grub.cfg`) |
-| `install-x86-boot.sh` | build-time installer (`rootfs` + `esp` targets; generates the decrement ladder) |
+| `grub-ab.cfg` | RAUC `ORDER`/`<slot>_OK`/`<slot>_TRY` GRUB selector template (→ rendered `EFI/BOOT/grub.cfg`) |
+| `install-x86-grub.sh` | build-time installer (`rootfs` = `bootloader=grub` system.conf + ESP fstab; `esp` = grub.cfg + grubenv + `grub-mkstandalone` BOOTX64.EFI; `grubenv-set`) |
+| `10-esp.conf` | x86 ESP repart def (`Type=esp`, 256 MB) — staged by `lib/assemble-disk-x86.sh` alongside the FROZEN slot defs; `repart/` stays zero-diff |
+| `test-x86-grub.sh` | offline proof of `bootloader=grub` system.conf + grub.cfg selector + grubenv slot-switch (no GRUB/qemu/root) |
 | `x86-encode.sh` | x86 encode setup (VA driver + QSV/x264 selection + pipeline link) |
-| `test-x86-fallback.sh` | offline proof of decrement→rollback + backend + render + encode (no GRUB/qemu/root) |
 | `README.md` | this file |
+
+**Retained reference — `bootloader=custom` countdown engine (offline harness, §2.1):**
+
+| File | Role |
+|---|---|
+| `x86-boot-state.sh` | grubenv A/B countdown engine + CLI; userspace twin of `grub.cfg.tmpl` (→ `/usr/bin/ceralive-boot-state`) |
+| `x86-rauc-boot-adapter.sh` | RAUC custom backend (→ `/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
+| `grub.cfg.tmpl` | custom-countdown GRUB selector template (decrement ladder) |
+| `install-x86-boot.sh` | custom-path installer (`rootfs` + `esp`; generates the decrement ladder) |
+| `test-x86-fallback.sh` | offline proof of decrement→rollback + backend + render + encode (no GRUB/qemu/root) |
 
 ## Test
 
@@ -156,16 +205,25 @@ this same shipped `x86-boot-state.sh` engine (no re-implementation, no qemu/GRUB
 asserts the rollback contract end-to-end, and is wired into the canonical unit suite
 (`v2/tests/manifest.bats` → `v2/run-tests`) so CI gates on it.
 
-## Deferred / related (out of scope for task 33)
+## Done (Task 12) / still deferred
 
-- **Build wiring (`lib/orchestrate.sh` x86 path, `platform/mkosi.finalize` x86 branch,
-  `fetch-debs.sh` Debian-repo + `x86-64`→`amd64` map).** The shared orchestrator still
-  gates on arm64 and dies on empty DTB/U-Boot (gaps **G1–G3**, `task-32-x86-manifest.txt`).
-  `install-x86-boot.sh` + `x86-encode.sh` are the **ready hooks** a future `mkosi.finalize`
-  x86 branch invokes (analogous to how `boot/install-boot.sh` is invoked for arm64).
-- **`grub-install` of `grubx64.efi` into the ESP** → disk-assembly step (`esp --install-grub`).
-- **`docs/partition-contract.md` `x86-ab` addendum** (ESP + grubenv vs the RK raw idbloader gap)
-  → coordinated additive change to the FROZEN v1 contract.
-- **RAUC keyring** (`/etc/rauc/keyring.pem`) → PKI tasks (`cert-work/rauc/`).
-- **On-silicon validation** (real N100): qemu/HW A/B rollback boot, `vainfo` enc entrypoints,
-  and the `bps`/patched-GStreamer dynamic-bitrate check.
+**Landed in Task 12 (x86 GRUB A/B disk assembly):**
+
+- **Build wiring** — `lib/orchestrate.sh` routes the `efi`/`grub` adapter to
+  `lib/assemble-disk-x86.sh`; `platform/mkosi.finalize` has an x86 branch invoking
+  `install-x86-grub.sh rootfs`. (The earlier arm64-only orchestrator gates that died
+  on empty DTB/U-Boot were already relaxed for x86 via `INSTALL_BOOT_BSP`.)
+- **GRUB into the ESP** — `grub-mkstandalone` writes the removable-path
+  `/EFI/BOOT/BOOTX64.EFI` at disk-assembly time (offline, no `grub-install` mount).
+- **RAUC keyring** — the device root CA is installed by the runtime layer at
+  `/etc/rauc/ceralive-keyring.pem`; the x86 `system.conf` `[keyring]` points at it.
+
+**Still deferred:**
+
+- **`docs/partition-contract.md` `x86-ab` addendum** (ESP + grubenv vs the RK raw
+  idbloader gap) → coordinated additive change to the FROZEN v1 contract. The x86
+  layout reuses the FROZEN slot defs (`20`/`30`/`40`) and adds an ESP p1 (no gap).
+- **Signed RAUC OTA `.raucb` for x86** — `build-bundle.sh` is wired for the RK3588
+  `custom` path today; the x86 branch emits the flashable `.raw`.
+- **On-silicon validation** (real N100): qemu/HW A/B rollback boot with OVMF, `vainfo`
+  enc entrypoints, and the `bps`/patched-GStreamer dynamic-bitrate check.

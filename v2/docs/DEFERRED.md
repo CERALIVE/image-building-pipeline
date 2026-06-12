@@ -64,30 +64,38 @@ block in `mkosi.postinst.chroot`.
 
 ---
 
-## 3. x86 ESP + GRUB A/B Disk Assembly (TODO(x86-disk))
+## 3. x86 ESP + GRUB A/B Disk Assembly — RESOLVED (Task 12)
 
-**Status:** Deferred — being addressed this round by Task 12
-**Location:** `v2/lib/orchestrate.sh:396`
+**Status:** RESOLVED (Task 12, this round). The former `TODO(x86-disk)` is closed.
+**Location:** `v2/lib/orchestrate.sh` (efi/grub branch); `v2/lib/assemble-disk-x86.sh`
 
-**What it is:** When `RAUC_BOOTLOADER_ADAPTER` is `efi` or `grub`, the
-orchestrator's Stage-4 disk assembly step is explicitly skipped. The x86 build
-produces a `rootfs.tar` only; no flashable `.raw` is emitted. The TODO comment
-at line 396 marks the gap: wiring an EFI System Partition, `grub-install`
-layout, `grubenv` A/B slot selection, and the RAUC `efi` adapter behind this
-branch.
+**What it was:** When `RAUC_BOOTLOADER_ADAPTER` was `efi` or `grub`, the
+orchestrator's Stage-4 disk assembly step was explicitly skipped — the x86 build
+produced a `rootfs.tar` only, no flashable `.raw`.
 
-**Why deferred:** The RK3588 `custom` bootloader path (idbloader gap +
-`assemble-disk.sh`) is not reusable for x86 EFI. Routing x86 through the
-`custom` path would produce a non-bootable image. The x86 QEMU fallback
-self-test (`v2/tests/qemu-x86.sh --fallback-selftest`) exercises the GRUB A/B
-grubenv engine and proves the boot logic, but the full disk assembly path was
-not wired in the initial implementation.
+**How it was resolved:** Task 12 wired x86 disk assembly. Its VERIFY-FIRST gate
+found mkosi's native `Bootloader=grub` INCOMPATIBLE with the `Format=none` +
+offline-assemble model (mkosi `disk` is `Bootable=no`; the producer is the offline
+`assemble-disk.sh`), so GRUB is **script-installed** with RAUC's **native
+`bootloader=grub`** backend:
 
-**Unblock condition:** Task 12 (x86 GRUB A/B disk assembly) in this round
-implements the ESP layout, `grub-install` invocation, and `grubenv` A/B slot
-wiring behind the `efi`/`grub` branch in `v2/lib/orchestrate.sh:389-398`.
-Once Task 12 lands, this TODO is resolved and the x86 build produces a
-flashable `.raw`.
+- `v2/lib/assemble-disk-x86.sh` — offline x86 producer (parallel to the RK3588
+  `assemble-disk.sh`): lays an ESP (`grub-mkstandalone` removable-path
+  `/EFI/BOOT/BOOTX64.EFI` + `grub.cfg` + `grubenv`) plus the FROZEN
+  `rootfs_a`/`rootfs_b`/`data` slots (reused verbatim; `repart/` zero-diff, G3).
+- `v2/mkosi/platform/x86/install-x86-grub.sh` — `rootfs` (system.conf
+  `bootloader=grub` + ESP fstab), `esp` (grub.cfg + grubenv + BOOTX64.EFI),
+  `grubenv-set`; `grub-ab.cfg` is the `ORDER`/`<slot>_OK`/`<slot>_TRY` selector.
+- `v2/mkosi/mkosi.images/platform/mkosi.finalize` — x86 branch installs the
+  `bootloader=grub` system.conf into the rootfs.
+- Offline proof: `v2/mkosi/platform/x86/test-x86-grub.sh` (34 assertions incl. the
+  grubenv slot-switch → slot B); the retained `qemu-x86.sh --fallback-selftest`
+  still proves the custom-engine rollback contract (G4 untouched). Full rationale:
+  [`../mkosi/platform/x86/README.md`](../mkosi/platform/x86/README.md) §2.
+
+**Residual follow-ups (NOT this task):** the signed RAUC OTA `.raucb` for x86
+(`build-bundle.sh` covers the RK3588 path today) and the
+`docs/partition-contract.md` `x86-ab` addendum (ESP p1 vs the RK raw idbloader gap).
 
 ---
 
@@ -212,5 +220,5 @@ references `test-results/boot-log-<date>.txt` as the evidence target.
 | `v2/docs/kiosk-display.md` | Kiosk chassis, Phase-3 deferral register (e-ink, dual-display, live-video preview, battery telemetry) |
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence TODOs (item 6) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
-| `v2/lib/orchestrate.sh` | x86 disk assembly TODO(x86-disk) at line 396 (item 3) |
+| `v2/lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |

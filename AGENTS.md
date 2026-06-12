@@ -52,6 +52,7 @@ image-building-pipeline/
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
 | v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
+| **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
 | Cross-repo kiosk architecture | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../CeraUI/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
@@ -85,6 +86,21 @@ MKOSI_NATIVE=1 ./v2/build <board>        # same, env-var form
 
 Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
 `.raucb` A/B RAUC OTA packages. See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
+
+**x86 disk assembly — full A/B GRUB (Task 12)** [EXISTS]
+
+`v2/build x86-minipc` now produces a flashable `.raw` with RAUC **A/B** boot (was:
+deferred `TODO(x86-disk)`, rootfs.tar only). x86 boots UEFI → GRUB from an EFI System
+Partition with RAUC's **native `bootloader=grub`** backend: `lib/assemble-disk-x86.sh`
+(the offline x86 producer, parallel to the RK3588 `assemble-disk.sh`) lays the ESP
+(`grub-mkstandalone` removable-path `/EFI/BOOT/BOOTX64.EFI` + `grub.cfg` + `grubenv`)
+plus the **FROZEN** `rootfs_a`/`rootfs_b`/`data` slots — `repart/` and the RK3588
+assembly stay zero-diff (G3/SC6). The earlier `bootloader=custom` countdown scaffold
+is RETAINED, unchanged, only as the offline rollback-contract harness
+(`qemu-x86.sh --fallback-selftest`, `test-x86-fallback.sh`). Full rationale +
+VERIFY-FIRST finding: [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2.
+The signed `.raucb` OTA bundle for x86 is a documented follow-up (`build-bundle.sh`
+covers the RK3588 path today).
 
 **Multi-board dispatch** [EXISTS]
 
