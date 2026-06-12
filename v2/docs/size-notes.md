@@ -115,3 +115,74 @@ monolith stays until a board is in hand to validate a split empirically.
 Revisit when an RK3588 board is reachable: build a split-firmware image, confirm
 `brcmfmac`/`rtw89` associate and that BT enumerates, then measure the real delta.
 Until then `armbian-firmware` is the correct, safe choice.
+
+---
+
+## 4. Relative size regression tracking (Task 6)
+
+### Baseline artifact and comparator
+
+On top of the existing **1.5 GB absolute gate** (`measure-size.sh`), a relative
+regression detector (`check-size-regression.sh`) warns on any growth and fails
+(exit 1) if growth exceeds **50 MB** per build.
+
+**Baseline file format** (`v2/ci/size-baseline.json`):
+
+```json
+{
+  "board": "x86-minipc",
+  "bytes": 1234567890,
+  "recorded_at": "2026-06-12"
+}
+```
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `board` | string | Board identifier (e.g., `x86-minipc`, `rock-5b-plus`) |
+| `bytes` | integer | Measured rootfs size in bytes (from `du --apparent-size -sb`) |
+| `recorded_at` | ISO-8601 date | When the baseline was recorded (YYYY-MM-DD) |
+
+**Comparator script** (`v2/ci/check-size-regression.sh`):
+
+```bash
+./v2/ci/check-size-regression.sh <current-bytes> <baseline-file>
+```
+
+- **Input:** current measured size (bytes) and baseline JSON file
+- **Output:** human-readable delta line (e.g., `size-regression: baseline=1234567890 bytes, current=1245053650 bytes, delta=+10 MB`)
+- **Behavior:**
+  - Warns (stderr) on any growth (delta > 0)
+  - Exits 0 if delta ≤ 50 MB
+  - Exits 1 if delta > 50 MB (fails the CI gate)
+  - Exits 2 on bad args / missing file / malformed JSON
+
+### Updating the baseline
+
+When intentional changes cause growth (e.g., adding a new package, enabling a feature):
+
+1. **Measure the new size** via `measure-size.sh` or a full build
+2. **Update `v2/ci/size-baseline.json`** in the SAME PR:
+   - Set `bytes` to the new measured value
+   - Update `recorded_at` to the current date
+   - Document the reason in the PR description (e.g., "Added cog display add-on: +15 MB")
+3. **Justify the growth** in the PR description with:
+   - What changed (package, feature, config)
+   - Why it was necessary
+   - The measured delta (e.g., "+15 MB for cog + WPEWebKit")
+4. **CI will pass** once the baseline is updated to match the new size
+
+### Integration with CI
+
+The comparator is wired into CI jobs after `measure-size.sh` runs:
+
+```bash
+# After building the image and measuring its size:
+./v2/lib/measure-size.sh <board> <rootfs-artifact>  # emits measured=<N> bytes
+./v2/ci/check-size-regression.sh <measured-bytes> v2/ci/size-baseline.json
+```
+
+Both gates must pass:
+1. **Absolute gate:** measured size ≤ 1.5 GB (enforced by `measure-size.sh`)
+2. **Relative gate:** growth ≤ 50 MB (enforced by `check-size-regression.sh`)
+
+If either fails, the build is rejected and no `.raucb` is produced.
