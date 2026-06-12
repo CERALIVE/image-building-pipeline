@@ -33,7 +33,7 @@ image-building-pipeline/
 │   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
 │   │   │                     #   size-notes.md, cog-display-addon.md,
 │   │   │                     #   cog-display-hw-checklist.md,
-│   │   │                     #   addon-sysext-refresh.md, deferred items
+│   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
 │   │   └── fast-reload.md    # dev-sync live-reload loop
 │   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
 ├── scripts/
@@ -59,6 +59,7 @@ image-building-pipeline/
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
 | **Cog on-hardware render QA checklist** | [`v2/docs/cog-display-hw-checklist.md`](v2/docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
+| **Deferred / hardware-gated items** | [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
@@ -241,6 +242,8 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
 
 ## KNOWN ISSUES / DEFERRED
+
+Full index with file:line anchors and unblock conditions: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md).
 
 **OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
 ships the `interfaces:` block with `FIXME-…` values because the board is not in
