@@ -143,35 +143,65 @@ network_is_up() {
 
 # Step 4 — TCP reach to the SRT/SRTLA port (NOT a full SRT handshake; see header).
 check_srt_reach() {
-  if [ -z "${IRL_SERVER_HOST:-}" ]; then
-    log "SKIP: IRL_SERVER_HOST unset in ${CONF} — cannot test SRT reach; relying on local stack checks"
-    return 0
-  fi
-  if ! network_is_up; then
-    log "SKIP: no non-loopback interface up (offline device) — SRT reach not testable; relying on local stack checks"
-    return 0
-  fi
-  local host="${IRL_SERVER_HOST}"
-  local port="${IRL_SERVER_SRT_PORT:-9000}"
-  if command -v nc >/dev/null 2>&1; then
-    if nc -z -w"${SRT_CONNECT_TIMEOUT}" "${host}" "${port}" >/dev/null 2>&1; then
-      log "OK: SRT port reachable (tcp ${host}:${port})"
-      return 0
-    fi
-  elif timeout "${SRT_CONNECT_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
-    log "OK: SRT port reachable (tcp ${host}:${port} via /dev/tcp)"
-    return 0
-  fi
-  fail "SRT port NOT reachable (tcp ${host}:${port}) — cloud edge unreachable"
-  return 1
+   if [ -z "${IRL_SERVER_HOST:-}" ]; then
+     log "SKIP: IRL_SERVER_HOST unset in ${CONF} — cannot test SRT reach; relying on local stack checks"
+     return 0
+   fi
+   if ! network_is_up; then
+     log "SKIP: no non-loopback interface up (offline device) — SRT reach not testable; relying on local stack checks"
+     return 0
+   fi
+   local host="${IRL_SERVER_HOST}"
+   local port="${IRL_SERVER_SRT_PORT:-9000}"
+   if command -v nc >/dev/null 2>&1; then
+     if nc -z -w"${SRT_CONNECT_TIMEOUT}" "${host}" "${port}" >/dev/null 2>&1; then
+       log "OK: SRT port reachable (tcp ${host}:${port})"
+       return 0
+     fi
+   elif timeout "${SRT_CONNECT_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
+     log "OK: SRT port reachable (tcp ${host}:${port} via /dev/tcp)"
+     return 0
+   fi
+   fail "SRT port NOT reachable (tcp ${host}:${port}) — cloud edge unreachable"
+   return 1
+}
+
+# Step 5 — mDNS self-resolution (non-fatal; warns on failure but does not block mark-good).
+# The ceralive-hostname.service runs Before=avahi-daemon.service, so by the time this
+# healthcheck runs (after boot), the hostname is set and avahi-daemon is active. This probe
+# verifies that the device can resolve its own .local hostname via mDNS, which is the
+# primary discovery mechanism on the LAN. Failure is logged as a WARNING with IP-fallback
+# guidance; it does NOT trigger a rollback (mDNS absence on a multicast-blocking network
+# must not brick the device).
+check_mdns_resolution() {
+   local hostname fqdn out rc
+   hostname="$(hostname 2>/dev/null || true)"
+   if [ -z "${hostname}" ]; then
+     printf '%s %s: WARN: cannot read hostname — skipping mDNS check\n' "$(ts)" "${PROG}" >&2
+     return 0
+   fi
+   fqdn="${hostname}.local"
+   if ! command -v avahi-resolve-host-name >/dev/null 2>&1; then
+     printf '%s %s: WARN: avahi-resolve-host-name not found — mDNS resolution not testable\n' "$(ts)" "${PROG}" >&2
+     return 0
+   fi
+   out="$(timeout 5 avahi-resolve-host-name "${fqdn}" 2>&1)"
+   rc=$?
+   if [ "${rc}" -eq 0 ]; then
+     log "OK: mDNS self-resolution works (${fqdn})"
+     return 0
+   fi
+   printf '%s %s: WARN: mDNS self-resolution failed for %s (rc=%d) — device may not be discoverable by .local hostname on the LAN; if the network blocks multicast, find the device by IP address instead\n' "$(ts)" "${PROG}" "${fqdn}" "${rc}" >&2
+   return 0
 }
 
 run_checks() {
-  check_service_active   || return 1
-  check_binary "${CERASTREAM_BIN}" || return 1
-  check_binary "${SRTLA_SEND_BIN}" || return 1
-  check_srt_reach        || return 1
-  return 0
+   check_service_active   || return 1
+   check_binary "${CERASTREAM_BIN}" || return 1
+   check_binary "${SRTLA_SEND_BIN}" || return 1
+   check_srt_reach        || return 1
+   check_mdns_resolution  || return 1
+   return 0
 }
 
 mark_good() {
