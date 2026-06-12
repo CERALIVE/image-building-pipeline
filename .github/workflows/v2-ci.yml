@@ -131,6 +131,31 @@ jobs:
           ./v2/lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
           grep -Eq 'measured=[0-9]+ budget=[0-9]+ \(enforced\)' size-report.log
 
+      - name: Regression check — compare against baseline (non-blocking warning)
+        run: |
+          set -o pipefail
+          # Extract measured bytes from the size-report.log produced above.
+          # measure-size.sh outputs: "measured=<bytes> budget=<bytes> (enforced)"
+          measured_bytes=$(grep -oP 'measured=\K[0-9]+' size-report.log | head -1)
+          if [ -z "${measured_bytes}" ]; then
+            echo "::warning::could not extract measured bytes from size-report.log"
+            exit 0
+          fi
+          echo "Extracted measured bytes: ${measured_bytes}"
+          # Invoke the regression comparator. It exits 0 if within threshold,
+          # exits 1 if growth exceeds 50 MB, exits 2 on bad args/missing baseline.
+          # We treat exit 1 (threshold exceeded) as a warning, not a hard failure,
+          # since the absolute 1.5 GB gate already passed.
+          if ! ./v2/ci/check-size-regression.sh "${measured_bytes}" v2/ci/size-baseline.json 2>&1 | tee size-regression.log; then
+            exit_code=$?
+            if [ ${exit_code} -eq 1 ]; then
+              echo "::warning::image size growth exceeds 50 MB threshold (see size-regression.log)"
+            else
+              echo "::error::regression check failed with exit code ${exit_code}"
+              exit ${exit_code}
+            fi
+          fi
+
       - name: Gate bites — sparse over-budget tree MUST fail the gate (non-vacuous)
         run: |
           # die() writes "exceeds budget" to stderr — fold it into the log (2>&1)
