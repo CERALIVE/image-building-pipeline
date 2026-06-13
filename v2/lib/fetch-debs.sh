@@ -11,19 +11,28 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — srtla / srt / cerastream / CeraUI .debs, fetched from R2
-#                      (CI mode) or `gh release download` (local mode).
+#   2. First-party   — cerastream / ceralive-device (CeraUI) / srtla /
+#                      srtla-send-rs .debs, PULLED FROM apt.ceralive.tv via a
+#                      GPG-verified, mTLS-authenticated apt source (`apt-get
+#                      download`). The libsrt fork (`srt`), gstlibuvch264src and
+#                      the libgstreamer* plugins are NOT staged here — they are
+#                      resolved by the app layer's own `apt-get install` from
+#                      apt.ceralive.tv + bookworm main at install time
+#                      (mkosi.images/app/mkosi.postinst.chroot).
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
 # the staged .debs into the rootfs tree directly; there is no Armbian build here.
 #
 # ── Modes ────────────────────────────────────────────────────────────────────
-#   CI mode    : R2_ACCESS_KEY_ID set   -> `aws s3 sync s3://$R2_BUCKET/dists/...`
-#   Local mode : no R2 creds            -> `gh release download --repo CERALIVE/<r>`
-#   Dry-run    : DRY_RUN=1 (or missing tools/creds with FETCH_ALLOW_DRYRUN=1)
-#                -> log the EXACT command that WOULD run; download nothing. Used
-#                   for offline evidence and CI plan inspection. NOT `|| true`:
-#                   it is an explicit, logged branch, never silent failure.
+#   Real fetch : BSP from the Armbian apt pool (apt-get on Debian hosts, curl
+#                fallback elsewhere); first-party from apt.ceralive.tv via an
+#                isolated-state `apt-get update` + `apt-get download` (GPG keyring
+#                + mTLS client cert injected from the environment).
+#   Dry-run    : DRY_RUN=1 (auto when APT_GPG_PUBLIC_B64 is unset — no credential
+#                to do a GPG-verified first-party fetch with)
+#                -> log the EXACT command(s) + source that WOULD run; download
+#                   nothing. Used for offline evidence and CI plan inspection. NOT
+#                   `|| true`: an explicit, logged branch, never silent failure.
 #
 # ── Usage ────────────────────────────────────────────────────────────────────
 #   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
@@ -37,7 +46,9 @@
 #   CERALIVE_WORKSPACE override sibling-root  (default: resolved repo parent)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
 #   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)
-#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET / R2_ENDPOINT  (CI mode)
+#   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
+#   APT_GPG_PUBLIC_B64 first-party GPG keyring (base64; required for a real fetch)
+#   APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64   first-party mTLS client cert/key (base64)
 #
 # shellcheck shell=bash
 
@@ -64,6 +75,11 @@ DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
 
+# First-party apt source (apt.ceralive.tv). The deb822 source appends
+# /dists/${CHANNEL}/ (apt-worker two-axis layout: channel x arch; arch is selected
+# by APT::Architecture, never a board axis). Env-overridable; no trailing slash.
+APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
+
 # FETCH_JOBS — bounded fetch concurrency. FETCH_JOBS=1 is the strict serial
 # baseline; sanitised to a positive integer, default 4.
 FETCH_JOBS="${FETCH_JOBS:-4}"
@@ -87,6 +103,16 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # Conflict declaration: srtla-send-rs Conflicts: srtla (<< 2026.7.0); srtla v2026.6.2
 # << 2026.7.0 is TRUE, so coinstall is blocked correctly until srtla cutover release.
 REPOS=("srtla" "srt" "cerastream" "CeraUI" "srtla-send-rs")
+
+# FIRST_PARTY_APT_PKGS — the Debian Package: NAMES pulled from apt.ceralive.tv,
+# a deliberate mapping off REPOS (the directory/pin names above), NOT a copy:
+#   srtla->srtla  cerastream->cerastream  CeraUI->ceralive-device
+#   srtla-send-rs->srtla-send-rs
+# `srt` is absent on purpose: the libsrt fork (like gstlibuvch264src and the
+# libgstreamer* plugins) is a runtime dependency the app layer's `apt-get install`
+# resolves from apt.ceralive.tv + bookworm main at install time
+# (mkosi.images/app/mkosi.postinst.chroot), so it is never a download target here.
+FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla" "srtla-send-rs")
 
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
@@ -117,7 +143,6 @@ run_or_plan() {
 # interrupted download never leaves a half-written final .deb.
 # ---------------------------------------------------------------------------
 _BSP_DEBS=""
-_FP_DEBS=""
 _PKG_INDEX=""
 _APT_OPTS=()
 
@@ -342,39 +367,26 @@ fetch_bsp() {
   fi
 }
 
-# _fetch_first_party_one — bounded-pool worker: download ONE repo's .deb(s) into
-# a private temp dir, then atomically rename into ${_FP_DEBS}. A repo with no
-# matching release is a warning, not a failure (unchanged semantics). A killed
-# gh leaves files only in the throwaway .fetch-* dir, never a partial final.
-_fetch_first_party_one() {
-  local r="$1"
-  log_info "first-party fetch: CERALIVE/${r} (*${ARCH}*.deb, channel=${CHANNEL})"
-  if [[ -n "${DRY_RUN}" ]]; then
-    log_info "DRY-RUN would run: gh release download --repo CERALIVE/${r} --pattern *${ARCH}*.deb --dir ${_FP_DEBS} --clobber"
-    return 0
-  fi
-  local tmpd; tmpd="$(mktemp -d "${_FP_DEBS}/.fetch-XXXXXX")"
-  if gh release download \
-       --repo "CERALIVE/${r}" \
-       --pattern "*${ARCH}*.deb" \
-       --dir "${tmpd}" \
-       --clobber 2>&1; then
-    local f
-    shopt -s nullglob
-    for f in "${tmpd}"/*.deb; do
-      mv -f "${f}" "${_FP_DEBS}/$(basename "${f}")"
-    done
-    shopt -u nullglob
-  else
-    log_warn "first-party: no ${ARCH} .deb release for CERALIVE/${r} (repo has no release or no matching asset) — mkosi app layer will install nothing for this component"
-  fi
-  rm -rf "${tmpd}"
-}
-
 # ---------------------------------------------------------------------------
-# fetch_first_party — srtla/srt/cerastream/CeraUI .debs. CI: aws s3 sync from R2;
-# local: gh release download per repo (through the bounded fetch pool, launched
-# in REPOS order). Pins logged from versions.yaml.
+# fetch_first_party — pull the first-party device .debs from apt.ceralive.tv via a
+# GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
+# `aws s3 sync` (CI) and `gh release download` (local) paths.
+#
+# Exactly the four TOP-LEVEL packages in FIRST_PARTY_APT_PKGS are `apt-get
+# download`ed into $DEST/debs/; their first-party dependency `srt` (the libsrt
+# fork) is dependency-resolved by the app layer at install time, not staged here.
+# REPOS still drives the versions.yaml pin log below — it is unchanged.
+#
+# Secrets arrive ONLY through the environment, base64-encoded, exactly as
+# v2/mkosi/customize/apt-ceralive-repo.sh consumes them (APT_GPG_PUBLIC_B64 +
+# APT_CLIENT_CRT_B64/APT_CLIENT_KEY_B64). They are NEVER hardcoded, NEVER logged,
+# NEVER committed. A half-supplied mTLS pair is fatal (same loud contract).
+#
+# Isolated apt state (mirrors _fetch_bsp_native): the host apt config is never
+# touched. The .debs land in a throwaway temp dir and are atomically renamed into
+# place, so an interrupted apt-get never leaves a half-written final .deb. One
+# apt-get transaction fetches all four, so the per-package bounded pool used by the
+# BSP path does not apply here.
 # ---------------------------------------------------------------------------
 fetch_first_party() {
   local debs="$1"
@@ -385,29 +397,95 @@ fetch_first_party() {
     log_info "  ${r} = $(get_pin "${r}" || true)"
   done
 
-  if [[ -n "${R2_ACCESS_KEY_ID:-}" ]]; then
-    log_info "CI mode: R2 -> aws s3 sync"
-    [[ -n "${R2_BUCKET:-}" ]]   || die "CI mode: R2_BUCKET unset"
-    [[ -n "${R2_ENDPOINT:-}" ]] || die "CI mode: R2_ENDPOINT unset"
-    [[ -n "${DRY_RUN}" ]] || require_cmd aws
+  log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/ (arch=${ARCH}, GPG Signed-By + mTLS)"
+  log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
 
-    run_or_plan aws configure set aws_access_key_id "${R2_ACCESS_KEY_ID}"
-    run_or_plan aws configure set aws_secret_access_key "${R2_SECRET_ACCESS_KEY:-}"
-    run_or_plan aws s3 sync \
-      "s3://${R2_BUCKET}/dists/${CHANNEL}/binary-${ARCH}/" \
-      "${debs}/" \
-      --endpoint-url "${R2_ENDPOINT}" \
-      --exclude "*" \
-      --include "*.deb"
-  else
-    log_info "local mode: GitHub releases -> gh release download"
-    [[ -n "${DRY_RUN}" ]] || require_cmd gh
-
-    _FP_DEBS="${debs}"
-    local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
-    _run_bounded "${jobs}" _fetch_first_party_one "${REPOS[@]}" \
-      || die "first-party fetch failed (gh path)"
+  # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.
+  local crt="${APT_CLIENT_CRT_B64:-}" key="${APT_CLIENT_KEY_B64:-}"
+  if [[ -n "${crt}" && -z "${key}" ]] || [[ -z "${crt}" && -n "${key}" ]]; then
+    die "incomplete mTLS pair: set BOTH APT_CLIENT_CRT_B64 and APT_CLIENT_KEY_B64, or neither"
   fi
+
+  local apt_state="${debs}/.apt-state-firstparty"
+  local certs_dir="${apt_state}/certs"
+  local keyring="${apt_state}/ceralive-archive-keyring.gpg"
+  local src_list="${apt_state}/ceralive.sources"
+
+  run_or_plan mkdir -p "${apt_state}/lists/partial" \
+    "${apt_state}/cache/archives/partial" "${certs_dir}"
+
+  # deb822 source — the apt-ceralive-repo.sh pattern (flat repo dists/{channel}/ +
+  # Suites ./, GPG Signed-By); arch is chosen by APT::Architecture below.
+  if [[ -z "${DRY_RUN}" ]]; then
+    cat >"${src_list}" <<EOF
+Types: deb
+URIs: ${APT_CERALIVE_URL}/dists/${CHANNEL}/
+Suites: ./
+Signed-By: ${keyring}
+EOF
+  else
+    log_info "DRY-RUN would write deb822 source -> ${src_list}: Types=deb URIs=${APT_CERALIVE_URL}/dists/${CHANNEL}/ Suites=./ Signed-By=${keyring}"
+  fi
+
+  # GPG keyring + mTLS certs from the environment. A real fetch with no GPG key is
+  # refused — never pull unverified packages. Secret VALUES are never logged.
+  if [[ -z "${DRY_RUN}" ]]; then
+    [[ -n "${APT_GPG_PUBLIC_B64:-}" ]] \
+      || die "APT_GPG_PUBLIC_B64 not set — refusing an unverified first-party fetch from ${APT_CERALIVE_URL} (CI injects the GPG public key)"
+    require_cmd apt-get
+    require_cmd base64
+    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${keyring}"
+    chmod 644 "${keyring}"
+    if [[ -n "${crt}" ]]; then
+      printf '%s' "${crt}" | base64 -d >"${certs_dir}/client.crt"
+      printf '%s' "${key}" | base64 -d >"${certs_dir}/client.key"
+      chmod 644 "${certs_dir}/client.crt"
+      chmod 600 "${certs_dir}/client.key"
+    fi
+  else
+    log_info "DRY-RUN: would install GPG keyring from APT_GPG_PUBLIC_B64 -> ${keyring}"
+    if [[ -n "${crt}" ]]; then
+      log_info "DRY-RUN: would install mTLS client cert/key from APT_CLIENT_CRT_B64/APT_CLIENT_KEY_B64 -> ${certs_dir}/"
+    fi
+  fi
+
+  local apt_opts=(
+    -o "Dir::Etc::SourceList=${src_list}"
+    -o "Dir::Etc::SourceParts=-"
+    -o "Dir::State::Lists=${apt_state}/lists"
+    -o "Dir::Cache=${apt_state}/cache"
+    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
+    -o "APT::Architecture=${ARCH}"
+  )
+  if [[ -n "${crt}" ]]; then
+    apt_opts+=(
+      -o "Acquire::https::apt.ceralive.tv::SslCert=${certs_dir}/client.crt"
+      -o "Acquire::https::apt.ceralive.tv::SslKey=${certs_dir}/client.key"
+    )
+  fi
+
+  if [[ -n "${DRY_RUN}" ]]; then
+    log_info "DRY-RUN would run: apt-get $(printf '%q ' "${apt_opts[@]}")update"
+    log_info "DRY-RUN would run: (cd ${debs} && apt-get $(printf '%q ' "${apt_opts[@]}")download ${FIRST_PARTY_APT_PKGS[*]})  # from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
+    return 0
+  fi
+
+  run_or_plan apt-get "${apt_opts[@]}" update
+
+  local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
+  ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${FIRST_PARTY_APT_PKGS[@]}" ) \
+    || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+  local f staged=0
+  shopt -s nullglob
+  for f in "${tmpd}"/*.deb; do
+    mv -f "${f}" "${debs}/$(basename "${f}")"
+    staged=$((staged + 1))
+  done
+  shopt -u nullglob
+  rm -rf "${tmpd}"
+  (( staged > 0 )) \
+    || die "first-party fetch staged 0 .debs from ${APT_CERALIVE_URL} (expected ${#FIRST_PARTY_APT_PKGS[@]})"
+  log_success "first-party: staged ${staged} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
 }
 
 usage() {
@@ -417,7 +495,7 @@ Usage:
   fetch-debs.sh assert-sibling <workspace_root>
 
 Env: CHANNEL ARCH DEST DRY_RUN CERALIVE_WORKSPACE ARMBIAN_APT_URL ARMBIAN_SUITE
-     R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_ENDPOINT
+     APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
 EOF
 }
 
@@ -442,10 +520,11 @@ main() {
   # parent of the image-building-pipeline repo (v2/lib -> v2 -> repo -> parent).
   local workspace="${CERALIVE_WORKSPACE:-$(cd "${HERE}/../../.." && pwd)}"
 
-  # Auto-enable dry-run offline: no R2 creds AND no gh => nothing to fetch with.
-  if [[ -z "${DRY_RUN}" && -z "${R2_ACCESS_KEY_ID:-}" ]] && ! command -v gh >/dev/null 2>&1; then
+  # Auto-enable dry-run offline: without the apt.ceralive.tv GPG keyring there is
+  # no credential to do a GPG-verified first-party fetch, so plan only.
+  if [[ -z "${DRY_RUN}" && -z "${APT_GPG_PUBLIC_B64:-}" ]]; then
     DRY_RUN=1
-    log_warn "no R2 creds and no gh CLI — auto dry-run (plan only, downloads nothing)"
+    log_warn "no apt.ceralive.tv GPG key (APT_GPG_PUBLIC_B64) in env — auto dry-run (plan only, downloads nothing)"
   fi
 
   [[ -n "${family}" ]] || { usage; die "--family <manifest.yaml> is required"; }
@@ -454,6 +533,12 @@ main() {
   log_info "channel=${CHANNEL} arch=${ARCH} dest=${DEST} dry_run=${DRY_RUN:-0}"
 
   # GUARD FIRST: fail before any download if the sibling layout is broken.
+  # NOTE (Task 14): first-party .debs now come PRE-BUILT from apt.ceralive.tv, so
+  # the IMAGE build no longer needs srtla/ + CeraUI/ sibling checkouts. The guard is
+  # kept CONSERVATIVELY as an upstream-build sanity tripwire — those .debs are
+  # produced FROM these checkouts upstream, and a broken layout means a CeraUI/srtla
+  # .deb could never have been published. TODO: demote to a soft warning once the
+  # first-party CI publish is fully decoupled from this workspace.
   assert_sibling_layout "${workspace}"
 
   local debs="${DEST}/debs"

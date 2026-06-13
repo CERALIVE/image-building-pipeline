@@ -129,9 +129,36 @@ receiver-only after cutover. **Conflict declaration:** `srtla-send-rs` declares
 coinstall is blocked correctly until the srtla cutover release. REPOS lives in
 `v2/lib/fetch-debs.sh`.
 
-**CI vs local .deb fetch**
-- `R2_ACCESS_KEY_ID` set → fetch from R2 (`dists/{CHANNEL}/binary-{ARCH}/`)
-- unset → `gh release download` from GitHub releases
+**First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
+
+`fetch_first_party` (in `v2/lib/fetch-debs.sh`) pulls the device first-party
+`.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
+this REPLACES the retired R2 `aws s3 sync` (CI) and `gh release download` (local)
+paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
+(`URIs: …/dists/{CHANNEL}/`, `Suites: ./`, GPG `Signed-By`), the GPG keyring and
+the mTLS client cert/key injected from the environment, all in an **isolated apt
+state** under the staging dir (the host apt config is never touched).
+
+- **Packages staged** (`FIRST_PARTY_APT_PKGS`): exactly the four top-level
+  packages `cerastream ceralive-device srtla srtla-send-rs` are `apt-get
+  download`ed into `$DEST/debs/`. These are Debian **Package** names — a deliberate
+  mapping off `REPOS` (the directory/pin names), notably `CeraUI → ceralive-device`.
+- **`srt` is dependency-resolved, not staged.** The libsrt fork (`srt`), like
+  `gstlibuvch264src` and the `libgstreamer*` plugins, is resolved by the app
+  layer's own `apt-get install` from `apt.ceralive.tv` + bookworm `main` at install
+  time (`mkosi.images/app/mkosi.postinst.chroot`), so it is intentionally not a
+  download target here.
+- **Secrets are env-only, base64-encoded** (same names as the device customize
+  script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
+  are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
+  fatal. `APT_CERALIVE_URL` (default `https://apt.ceralive.tv`) is overridable.
+- **Arch axis only** — the source carries no board axis; `arch` is selected by
+  `APT::Architecture` (apt-worker two-axis model: `channel × arch`).
+- **DRY_RUN** logs the exact `apt-get … download cerastream ceralive-device srtla
+  srtla-send-rs` plan + source and downloads nothing. With no `APT_GPG_PUBLIC_B64`
+  in the env the fetcher auto-enables DRY_RUN (no credential for a verified fetch).
+- **BSP fetch is unchanged** — kernel/DTB/U-Boot/firmware/gstreamer still come from
+  the Armbian apt pool (`fetch_bsp`).
 
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
@@ -375,6 +402,8 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't change REPOS order or casing — downstream scripts key on exact names
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
+- Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT
+- Don't add `srt` to `FIRST_PARTY_APT_PKGS` — the libsrt fork is dependency-resolved by the app layer's `apt-get install`, not a download target
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
