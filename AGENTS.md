@@ -117,12 +117,16 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srtla" "srt" "cerastream" "CeraUI")
+REPOS=("srtla" "srt" "cerastream" "CeraUI" "srtla-send-rs")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
 (`cerastream/docs/notes/boot-parity-results.md`); the hardware-gated profiles
-(Jetson/RK3588) now track as cerastream hardware validation. REPOS lives in
+(Jetson/RK3588) now track as cerastream hardware validation. `srtla-send-rs` is
+the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` .deb provides
+receiver-only after cutover. **Conflict declaration:** `srtla-send-rs` declares
+`Conflicts: srtla (<< 2026.7.0)`; `srtla` v2026.6.2 << 2026.7.0 is TRUE, so
+coinstall is blocked correctly until the srtla cutover release. REPOS lives in
 `v2/lib/fetch-debs.sh`.
 
 **CI vs local .deb fetch**
