@@ -81,7 +81,12 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # boot-parity gate passed on the generic profile — cerastream/docs/notes/
 # boot-parity-results.md). The hardware-gated profiles (Jetson/RK3588) now track
 # as cerastream hardware-validation work, not as a retention condition.
-REPOS=("srtla" "srt" "cerastream" "CeraUI")
+#
+# srtla-send-rs is the Rust sender fork (v1.0.0+) added at cutover (Task 20).
+# srtla .deb provides receiver-only after cutover; srtla-send-rs provides the sender.
+# Conflict declaration: srtla-send-rs Conflicts: srtla (<< 2026.7.0); srtla v2026.6.2
+# << 2026.7.0 is TRUE, so coinstall is blocked correctly until srtla cutover release.
+REPOS=("srtla" "srt" "cerastream" "CeraUI" "srtla-send-rs")
 
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
