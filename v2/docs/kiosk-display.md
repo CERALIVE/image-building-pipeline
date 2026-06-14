@@ -143,6 +143,18 @@ The OSK is toggled by sending `SIGUSR1` (show) / `SIGUSR2` (hide) to the wvkbd p
 
 **GPU contingency:** if `libmali-valhall-g610` fails to provide EGL/GBM for Chromium ozone-wayland (i.e. Chromium falls back to software rendering or refuses to start), the contingency is mainline kernel + Mesa panthor/panfrost. This collides with D3 (`armbian_branch: vendor` for HDMI hdmirx + Rockchip MPP). That collision requires a re-plan and escalation — do not attempt silently.
 
+**RK3588 mainline-patch contingency bookmark:** D3 is NOT changing — the Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265 encoding, so there is no reason to pivot to mainline today. However, if a mainline pivot is ever forced (e.g. vendor BSP drops support or a critical security fix lands mainline-only), the reference path to restore hdmirx + H.265 HW-encode is:
+
+> https://github.com/rcawston/rockchip-rk3588-mainline-patches
+
+That repo tracks three patches relevant to CeraLive's capture and encode path, each with caveats:
+
+1. **VEPU580 H.265 encoder** — out-of-tree WIP targeting near-mainline (v6.19 era). Requires a pinned MPP fork to match the kernel ABI. Not yet upstream; treat as experimental until it lands in a stable kernel release.
+2. **HDMIRX EDID set fix** — corrects EDID negotiation on the RK3588 HDMI input block. Without this, some sources may fail to lock or negotiate incorrect resolutions.
+3. **HDMIRX plugout overflow fix** — prevents a buffer overflow triggered by hot-unplugging the HDMI source. Required for reliable hdmirx operation in a live-streaming context where cables are swapped frequently.
+
+These patches are bookmarked insurance only. Do not apply them unless D3 is explicitly re-opened and a mainline pivot is approved.
+
 ---
 
 ## 4. OOM Configuration
