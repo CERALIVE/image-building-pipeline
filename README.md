@@ -171,6 +171,23 @@ committed), then runs an **advisory** drift-guard against the committed baseline
 - The provenance artifact is deliberately **excluded** from the build-plan `sha256`
   determinism comparison (the float would otherwise break reproducibility).
 
+## OTA-During-Stream Guard
+
+`/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)
+refuses to install a bundle while the device is actively streaming. It checks
+all three live-media units with `systemctl is-active` and aborts if any is
+running:
+
+- `cerastream.service` — the encoder
+- `srtla.service` — the bonding **receiver** role
+- `srtla-send.service` — the bonding **sender** role
+
+A stopped or not-installed unit reads `inactive`, so the guard is a no-op on a
+device that isn't streaming. The sender unit (`srtla-send.service`) is the one
+that actually carries the uplink on a bonding sender device, so it is now part
+of the guard alongside the encoder and receiver. Proof: `v2/run-tests`
+section 16.
+
 ## License
 
 This project is dual-licensed under either:
