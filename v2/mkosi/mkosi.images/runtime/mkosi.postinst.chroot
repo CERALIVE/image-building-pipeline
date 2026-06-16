@@ -583,6 +583,17 @@ setup_addon_keyring() {
 }
 
 # ---------------------------------------------------------------------------
+# 13c. PASETO device-token verification key (ADR-0006 D2): bake the PUBLIC
+# Ed25519 key into the CeraUI backend runtime env (PASETO_PUBLIC_KEY drop-in on
+# ceralive.service) so the device can VERIFY device-control / relay-config tokens.
+# setup_paseto_public_key (postinst-lib.sh, sourced above) decodes the base64-
+# forwarded $PASETO_PUBLIC_KEY_B64 and writes the additive drop-in — NO inline
+# twin, so the postinst stays under the drift ceiling. PUBLIC ONLY (build FAILS on
+# any k4.secret / PEM private material).
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::setup_paseto_public_key — sourced above)
+
+# ---------------------------------------------------------------------------
 # 14. Boot healthcheck (task 29): gate `rauc mark-good` on REAL streaming health.
 #
 # setup_boot_healthcheck (postinst-lib.sh, sourced above) INSTALLS the committed
@@ -910,6 +921,7 @@ main() {
   setup_data_persistence       # task 30: relocate mutable state onto /data
   setup_rauc_client            # task 26: RAUC root-CA keyring + service (update-capable)
   setup_addon_keyring          # task 24: bake the add-on signing keyring (separate trust domain)
+  setup_paseto_public_key      # ADR-0006 D2: bake device-token PUBLIC key into CeraUI runtime env
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)

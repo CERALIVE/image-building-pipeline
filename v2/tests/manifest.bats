@@ -1308,3 +1308,81 @@ CTL
   [[ "$output" == *"ar"* ]]
   [[ "$output" == *"tar"* ]]
 }
+
+# ===========================================================================
+# 18. PASETO device-token PUBLIC key provisioning (ADR-0006 D2 / Phase-A Task 3).
+#     postinst-lib.sh::setup_paseto_public_key decodes the base64-forwarded
+#     $PASETO_PUBLIC_KEY_B64 and bakes it into the CeraUI backend runtime env as an
+#     ADDITIVE ceralive.service drop-in (Environment=PASETO_PUBLIC_KEY=...). CeraUI
+#     reads PASETO_PUBLIC_KEY at startup (apps/backend device-token.ts
+#     DEVICE_TOKEN_PUBLIC_KEY_ENV) — its PRESENCE gates real Ed25519 verification.
+#     Provisioning is PUBLIC ONLY: a k4.secret / PEM private key FAILS the build and
+#     no private material may appear in the baked artifact. These tests drive the
+#     SHIPPED function (sourced from postinst-lib.sh) against a temp drop-in dir
+#     (PASETO_DROPIN_DIR) — no image boot, UNIT scope; the offline DRY_RUN proof.
+# ===========================================================================
+
+# A sample raw-32-byte Ed25519 PUBLIC key in standard base64 (the paseto.public.raw.b64
+# form). The function checks public-only + non-empty, not key math, so a fixed
+# all-zero-bytes sample suffices.
+PASETO_RAW_PUB="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+# run_paseto_provision <value> — run the shipped setup_paseto_public_key against a
+# temp drop-in dir. An empty <value> exercises the no-key (skip) path; otherwise
+# <value> is base64-wrapped into $PASETO_PUBLIC_KEY_B64 as the orchestrator does.
+run_paseto_provision() {
+  local payload="$1"
+  local dir="$BATS_TEST_TMPDIR/ceralive.service.d"
+  rm -rf "$dir"
+  if [[ -z "$payload" ]]; then
+    run env -u PASETO_PUBLIC_KEY_B64 PASETO_DROPIN_DIR="$dir" \
+      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+  else
+    local b64; b64="$(printf '%s' "$payload" | base64 -w0)"
+    run env PASETO_PUBLIC_KEY_B64="$b64" PASETO_DROPIN_DIR="$dir" \
+      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+  fi
+  PASETO_DROPIN="$dir/20-paseto-public-key.conf"
+}
+
+@test "paseto provision: a PUBLIC key is baked into the ceralive.service env drop-in" {
+  run_paseto_provision "$PASETO_RAW_PUB"
+  [ "$status" -eq 0 ]
+  [ -f "$PASETO_DROPIN" ]
+  grep -q '^\[Service\]' "$PASETO_DROPIN"
+  grep -q "^Environment=PASETO_PUBLIC_KEY=$PASETO_RAW_PUB\$" "$PASETO_DROPIN"
+}
+
+@test "paseto provision: NO private material in the baked drop-in (no k4.secret / PRIVATE KEY)" {
+  run_paseto_provision "$PASETO_RAW_PUB"
+  [ "$status" -eq 0 ]
+  ! grep -aq 'k4.secret' "$PASETO_DROPIN"
+  ! grep -aq 'PRIVATE KEY' "$PASETO_DROPIN"
+}
+
+@test "paseto provision: a k4.secret PRIVATE key is REFUSED (build fails, no drop-in)" {
+  run_paseto_provision "k4.secret.ZZZZ"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"k4.secret"* ]]
+  [ ! -f "$PASETO_DROPIN" ]
+}
+
+@test "paseto provision: PEM PRIVATE KEY material is REFUSED (build fails, no drop-in)" {
+  run_paseto_provision "-----BEGIN PRIVATE KEY-----"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PRIVATE KEY"* ]]
+  [ ! -f "$PASETO_DROPIN" ]
+}
+
+@test "paseto provision: no key in env SKIPS provisioning (CeraUI MVP opaque-token path)" {
+  run_paseto_provision ""
+  [ "$status" -eq 0 ]
+  [ ! -f "$PASETO_DROPIN" ]
+  [[ "$output" == *"MVP opaque-token path"* ]]
+}
+
+@test "paseto provision: baked env var name matches CeraUI's device-token gate (cross-repo lockstep)" {
+  local devtok="$REPO_ROOT/../CeraUI/apps/backend/src/modules/pairing/device-token.ts"
+  [ -f "$devtok" ] || skip "CeraUI checkout not present (standalone CI)"
+  grep -q 'DEVICE_TOKEN_PUBLIC_KEY_ENV = "PASETO_PUBLIC_KEY"' "$devtok"
+}

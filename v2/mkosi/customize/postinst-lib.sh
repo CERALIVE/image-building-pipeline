@@ -564,3 +564,48 @@ setup_tls_proxy() {
   enable_service ceralive-tls-firstboot.service
   enable_service nginx.service
 }
+
+# ---------------------------------------------------------------------------
+# PASETO device-token verification key (ADR-0006 D2): bake the PUBLIC Ed25519
+# key into the CeraUI backend runtime env so the device can VERIFY device-control
+# / relay-config tokens. CeraUI reads it from the PASETO_PUBLIC_KEY env var
+# (apps/backend device-token.ts DEVICE_TOKEN_PUBLIC_KEY_ENV); its PRESENCE gates
+# real verification — absent → CeraUI runs the MVP opaque-token path, so a
+# key-less dev/local build still boots. The value arrives base64-wrapped in
+# $PASETO_PUBLIC_KEY_B64 (orchestrator-forwarded), exactly like $ADDON_KEYRING_B64;
+# the decoded payload is the raw-32-byte Ed25519 PUBLIC key in standard base64
+# (cert-work/paseto/gen-keys.sh -> paseto.public.raw.b64), the form CeraUI's
+# importEd25519PublicKey() consumes. It is written as an ADDITIVE drop-in on the
+# ceralive.service unit shipped by the CeraUI .deb (like 10-data-persistence).
+# PUBLIC ONLY — a k4.secret / PEM private key here would let a compromised device
+# FORGE tokens, so the build FAILS if any private material slipped in.
+# PASETO_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_paseto_public_key() {
+  local dropin_dir="${PASETO_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
+  local dropin="${dropin_dir}/20-paseto-public-key.conf"
+
+  if [[ -z "${PASETO_PUBLIC_KEY_B64:-}" ]]; then
+    log "no PASETO public key in env — skipping device-token key provisioning (CeraUI runs the MVP opaque-token path until a key is baked in)"
+    return 0
+  fi
+
+  local key
+  key="$(printf '%s' "${PASETO_PUBLIC_KEY_B64}" | base64 -d | tr -d '\r\n')"
+  [[ -n "${key}" ]] || die "PASETO_PUBLIC_KEY_B64 decoded to empty — refusing to bake an unusable key"
+
+  case "${key}" in
+    *k4.secret*) die "PASETO_PUBLIC_KEY_B64 carries a k4.secret PRIVATE key — provision the PUBLIC key (k4.public / raw-base64) only" ;;
+  esac
+  if printf '%s' "${key}" | grep -aq 'PRIVATE KEY'; then
+    die "PASETO_PUBLIC_KEY_B64 carries PEM PRIVATE KEY material — provision the PUBLIC key only"
+  fi
+
+  log "provisioning PASETO_PUBLIC_KEY into the CeraUI backend runtime env (device-token verification, public key)"
+  mkdir -p "${dropin_dir}"
+  cat >"${dropin}" <<EOF
+[Service]
+Environment=PASETO_PUBLIC_KEY=${key}
+EOF
+  chmod 0644 "${dropin}"
+}

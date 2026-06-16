@@ -10,7 +10,7 @@ containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 (Orange Pi 5+, Radxa Rock 5B+).
 
 Relates to:
-- `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here
+- `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here; PASETO device-token PUBLIC key (`paseto/`) provisioned into the CeraUI runtime env
 - `apt-worker/` — runtime apt source on device points to `apt.ceralive.tv` (Cloudflare R2); add-on `.raw` artifacts served from R2 path `addons/{os_version}/{board}/{feature}.raw`
 - `versions.yaml` — pin registry; `fetch-debs.sh` reads pin versions from `../versions.yaml` [EXISTS]
 
@@ -227,6 +227,33 @@ stopped OR not-installed unit reads `inactive` and never blocks). The list
 mid-broadcast through the bonding sender could be updated out from under the
 stream; the guard now checks `srtla-send.service` too. Don't drop the receiver
 check: a single image runs either role. Proof: `v2/run-tests` section 16.
+
+**PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
+
+`setup_paseto_public_key` (in `customize/postinst-lib.sh`, called by the runtime
+`mkosi.postinst.chroot`) bakes the device-token verification key into the CeraUI
+backend runtime env so the device can VERIFY device-control / relay-config tokens.
+
+- **What it writes** — an ADDITIVE systemd drop-in
+  `/etc/systemd/system/ceralive.service.d/20-paseto-public-key.conf` with
+  `Environment=PASETO_PUBLIC_KEY=<raw-base64 Ed25519 public key>`. The drop-in is
+  additive to the `ceralive.service` unit shipped by the CeraUI `.deb`, exactly
+  like `10-data-persistence.conf`. CeraUI reads `PASETO_PUBLIC_KEY` at startup
+  (`apps/backend` `device-token.ts` `DEVICE_TOKEN_PUBLIC_KEY_ENV`); its **presence**
+  gates real Ed25519 verification (absent → CeraUI runs the MVP opaque-token path,
+  so a key-less dev/local build still boots).
+- **Secret is env-only, base64-encoded** — `PASETO_PUBLIC_KEY_B64`, mirroring the
+  `APT_*_B64` / `ADDON_KEYRING_B64` pattern: orchestrator-forwarded
+  (`lib/orchestrate.sh` `env_names` + `PassEnvironment` in `mkosi.conf`), decoded
+  once at chroot time. The decoded payload is the raw-32-byte Ed25519 PUBLIC key in
+  standard base64 — the `paseto.public.raw.b64` form `cert-work/paseto/gen-keys.sh`
+  emits and CeraUI's `importEd25519PublicKey()` consumes. There is **NO committed
+  default**; CI injects it. With no env var the step is a graceful no-op.
+- **PUBLIC ONLY** — a `k4.secret` (PASERK private) or any PEM `PRIVATE KEY` slipped
+  into `PASETO_PUBLIC_KEY_B64` **FAILS the build**. The device only ever verifies;
+  baking a private key would let a compromised device FORGE tokens. Proof:
+  `v2/run-tests` section 18 (bakes the key, refuses k4.secret/PEM, no-env skip,
+  and the cross-repo env-name lockstep against CeraUI's gate).
 
 **Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
 

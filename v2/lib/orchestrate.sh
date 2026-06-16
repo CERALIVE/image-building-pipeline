@@ -116,6 +116,7 @@ Env:
                        v2/ci/Dockerfile, tag ceralive-mkosi-builder:${MKOSI_VERSION_PIN})
   CHANNEL VARIANT RELEASE ARMBIAN_APT_URL ARMBIAN_SUITE
   APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64   (CI secrets, mTLS+GPG)
+  PASETO_PUBLIC_KEY_B64                                      (CI: device-token Ed25519 PUBLIC key)
 EOF
 }
 
@@ -489,7 +490,7 @@ run_mkosi_build() {
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
-    RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 COMPATIBLE_STRING
+    RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
     SOURCE_DATE_EPOCH
   )
@@ -532,6 +533,16 @@ run_mkosi_build() {
     ADDON_KEYRING_B64="$(base64 -w0 <"${addon_keyring}")"
   fi
   export ADDON_KEYRING_B64="${ADDON_KEYRING_B64:-}"
+
+  # PASETO device-token verification key (ADR-0006 D2): the PUBLIC Ed25519 key the
+  # CeraUI backend uses to verify device-control / relay-config tokens. Baked into
+  # the ceralive.service runtime env as PASETO_PUBLIC_KEY (its PRESENCE gates real
+  # verification; absent → CeraUI runs the MVP opaque-token path). Forwarded base64
+  # (like the apt GPG key / add-on keyring) so the self-contained runtime postinst
+  # can write it without repo access. The decoded payload is the raw-32-byte Ed25519
+  # PUBLIC key in standard base64 (cert-work/paseto/gen-keys.sh → paseto.public.raw.b64).
+  # PUBLIC ONLY — there is no committed default and NEVER any k4.secret; CI injects it.
+  export PASETO_PUBLIC_KEY_B64="${PASETO_PUBLIC_KEY_B64:-}"
 
   # RAUC `compatible` — the single source of truth (T12), BOARD-specific not
   # family-wide. A family default (ceralive-rk3588) lets an Orange Pi 5+ bundle
