@@ -26,6 +26,8 @@ setup() {
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
   MEASURE_SH="$LIB_DIR/measure-size.sh"
+  FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
+  BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
   SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
   QEMU_X86="$TESTS_DIR/qemu-x86.sh"
   SCHEMA_DIR="$V2/manifests/schema"
@@ -993,4 +995,102 @@ build_feature_fixture() {
   # Different files, different bytes — add-on signing never reuses the RAUC anchor.
   run cmp -s "$baked" "$rauc"
   [ "$status" -ne 0 ]
+}
+
+# ===========================================================================
+# 15. BSP provenance + advisory kernel drift-guard (Task 3).
+#     fetch-debs.sh records the floating kernel BSP's resolved version + content
+#     sha256 into a gitignored bsp-provenance.json, and runs an ADVISORY drift
+#     guard against the committed v2/manifests/bsp-baseline.json. The guard is
+#     never fatal (always exit 0); it compares the CONTENT hash (not just the
+#     version) so a same-version re-spin is still caught, and seeds the baseline
+#     on first run. These tests source the fetch helpers directly (main is
+#     BASH_SOURCE-guarded) and drive the guard with synthetic version/hash inputs
+#     — no apt, no real .deb — so they fit this UNIT suite.
+# ===========================================================================
+
+# Two distinct 64-hex content digests for the drift fixtures.
+BSP_SHA_A="1111111111111111111111111111111111111111111111111111111111111111"
+BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
+
+@test "bsp drift: matching version+hash is no-drift (exit 0, no 'BSP drift' banner)" {
+  local base="$BATS_TEST_TMPDIR/baseline-match.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"BSP drift"* ]]
+  [[ "$output" == *"matches known-good baseline"* ]]
+}
+
+@test "bsp drift: a version mismatch fires an advisory 'BSP drift' warning (exit 0)" {
+  local base="$BATS_TEST_TMPDIR/baseline-ver.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ [Dd]rift ]]
+  [[ "$output" == *"BSP drift"* ]]
+}
+
+@test "bsp drift: SAME version but DIFFERENT content hash still drifts (content-hash compare, exit 0)" {
+  local base="$BATS_TEST_TMPDIR/baseline-hash.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_B"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ [Dd]rift ]]
+  # the re-spin note proves the guard compared the hash, not just the version
+  [[ "$output" == *"re-spin"* ]]
+}
+
+@test "bsp drift: first run with NO baseline seeds it, notes it, exits 0" {
+  local base="$BATS_TEST_TMPDIR/seed-me.json"
+  [ ! -f "$base" ]
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first run"* ]]
+  [ -f "$base" ]
+  run cat "$base"
+  [[ "$output" == *'"version": "6.1.0-vendor"'* ]]
+  [[ "$output" == *"$BSP_SHA_A"* ]]
+}
+
+@test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
+  # Copy the COMMITTED scaffold so the test never mutates the tracked file.
+  local base="$BATS_TEST_TMPDIR/scaffold.json"
+  cp "$BSP_BASELINE_JSON" "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first run"* ]]
+  # now seeded with real values (no longer null)
+  run cat "$base"
+  [[ "$output" == *"$BSP_SHA_A"* ]]
+}
+
+@test "bsp provenance: bsp_write_json emits valid JSON with schema_version + 64-hex sha256" {
+  local out="$BATS_TEST_TMPDIR/prov/bsp-provenance.json"
+  run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [ -f "$out" ]
+  # parses as JSON and carries the expected shape
+  run python3 -c "import json,sys; d=json.load(open('$out')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert len(d['sha256'])==64; print('JSON-OK')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"JSON-OK"* ]]
+}
+
+@test "bsp provenance: the committed baseline scaffold is valid JSON and ships UNSEEDED (null)" {
+  run python3 -c "import json; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert d['version'] is None and d['sha256'] is None; print('SCAFFOLD-OK')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCAFFOLD-OK"* ]]
+}
+
+@test "bsp provenance: artifact is gitignored and absent from the determinism hash set" {
+  # The provenance artifact lands in the image output dir ($DEST, default ./out);
+  # the bare-filename .gitignore pattern matches it at any depth.
+  run git -C "$REPO_ROOT" check-ignore -q out/bsp-provenance.json
+  [ "$status" -eq 0 ]
+  # The determinism job hashes the NORMALIZED build-plan string ('would build
+  # with:'), never a file tree — so the floating provenance artifact can never
+  # enter the sha256 comparison. Assert the plan-line anchor exists and the
+  # artifact name is nowhere in that workflow.
+  grep -q "would build with:" "$REPO_ROOT/.github/workflows/v2-ci.yml"
+  ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
 }

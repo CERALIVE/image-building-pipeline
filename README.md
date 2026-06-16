@@ -154,6 +154,23 @@ Every build runs `v2/lib/measure-size.sh`. If the compressed rootfs exceeds
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
 strip, `WithDocs=no`, firmware audit).
 
+## BSP Provenance + Advisory Drift-Guard
+
+The kernel BSP floats (name-based `linux-image-vendor-rk35xx`, **no version pin**),
+so every build records what it actually fetched. After the BSP fetch,
+`v2/lib/fetch-debs.sh` writes the kernel package's resolved version + content
+`sha256` to `bsp-provenance.json` in the image output dir (gitignored, never
+committed), then runs an **advisory** drift-guard against the committed baseline
+`v2/manifests/bsp-baseline.json`.
+
+- A differing version **or** a same-version content-hash re-spin prints a
+  `BSP drift` warning — but the guard is **never fatal** (`exit 0` always). The BSP
+  stays floating; this is observability, not a pin.
+- The baseline ships UNSEEDED; the first authenticated build seeds it with the real
+  version+hash. Commit that to set the known-good reference.
+- The provenance artifact is deliberately **excluded** from the build-plan `sha256`
+  determinism comparison (the float would otherwise break reproducibility).
+
 ## License
 
 This project is dual-licensed under either:
