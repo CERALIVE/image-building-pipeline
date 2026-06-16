@@ -213,6 +213,14 @@ edits `shared.list` or the kernel config. It is hyphen/underscore aware (the
 by an exact `option.ko` / `modules.builtin` / alias entry, never a bare `option`
 substring. Proof: `v2/run-tests` section 17.
 
+## Kernel Currency Watch
+
+The image is locked to the **vendor 6.1 BSP + Rockchip MPP** for H.265 encoding.
+This decision is recorded with a 7-way evidence summary and two precise revisit
+triggers (a 6.12+ vendor BSP with MPP support, or mainline landing a frozen V4L2
+stateless H.265 encode uAPI + VEPU580 driver) in
+[`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
+
 ## License
 
 This project is dual-licensed under either:
