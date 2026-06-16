@@ -180,6 +180,105 @@ get_pin() {
 # tripwire that srtla/ and CeraUI/ are siblings — see that lib and
 # ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
 
+# BSP provenance + advisory kernel drift-guard.
+#
+# The kernel BSP is fetched NAME-based and FLOATING (Decision D3 — no version pin;
+# the Armbian vendor suite supplies whatever concrete build it currently holds).
+# That float is intentional but invisible: a silent kernel re-spin can change the
+# image with no signal. These helpers make the float OBSERVABLE without pinning it.
+#
+# HARD CONTRACTS:
+#   * ADVISORY ONLY — every path returns 0; a drift NEVER fails the build.
+#   * Content hash, not just version — a same-version re-spin is still caught.
+#   * The provenance artifact is gitignored build output, deliberately EXCLUDED
+#     from the sha256 determinism comparison (a floating BSP would break it).
+
+BSP_BASELINE="${BSP_BASELINE:-${HERE}/../manifests/bsp-baseline.json}"
+
+# _bsp_json_field <file> <field> — read a flat JSON string field (no jq dep; the
+# baseline is a small flat object). A null/absent/empty value yields empty output,
+# which the drift-guard reads as "unseeded" (first run).
+_bsp_json_field() {
+  local file="$1" field="$2"
+  [[ -f "${file}" ]] || { printf ''; return 0; }
+  sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${file}" | head -n1
+}
+
+# bsp_write_json <path> <pkg> <version> <sha256> — emit the flat provenance/baseline
+# document (schema_version 1). Used for BOTH the gitignored provenance artifact and
+# the committed baseline seed, so the two files share one shape.
+bsp_write_json() {
+  local out="$1" pkg="$2" version="$3" sha="$4"
+  mkdir -p "$(dirname "${out}")"
+  cat >"${out}" <<EOF
+{
+  "schema_version": 1,
+  "package": "${pkg}",
+  "version": "${version}",
+  "sha256": "${sha}"
+}
+EOF
+}
+
+# bsp_drift_check <baseline> <pkg> <version> <sha256> — advisory drift-guard.
+# First run (no/unseeded baseline) seeds it and notes that. A match is silent-ok.
+# A mismatch prints a "BSP drift" banner to stdout (the user-facing advisory signal)
+# plus structured detail on stderr. ALWAYS returns 0 — drift is never fatal.
+bsp_drift_check() {
+  local baseline="$1" pkg="$2" version="$3" sha="$4"
+  local base_ver base_sha
+  base_ver="$(_bsp_json_field "${baseline}" version)"
+  base_sha="$(_bsp_json_field "${baseline}" sha256)"
+
+  if [[ ! -f "${baseline}" || -z "${base_ver}" || -z "${base_sha}" ]]; then
+    printf 'BSP baseline: no known-good baseline for %s — seeding it (first run, advisory)\n' "${pkg}"
+    bsp_write_json "${baseline}" "${pkg}" "${version}" "${sha}"
+    log_info "BSP baseline seeded -> ${baseline} (version=${version} sha256=${sha})"
+    return 0
+  fi
+
+  if [[ "${base_ver}" == "${version}" && "${base_sha}" == "${sha}" ]]; then
+    log_info "BSP provenance: ${pkg} matches known-good baseline (version=${version})"
+    return 0
+  fi
+
+  printf 'BSP drift: %s differs from the known-good baseline (advisory — build continues)\n' "${pkg}"
+  log_warn "BSP drift detail — baseline: version=${base_ver} sha256=${base_sha}"
+  log_warn "BSP drift detail — current : version=${version} sha256=${sha}"
+  if [[ "${base_ver}" == "${version}" ]]; then
+    log_warn "BSP drift: SAME version, DIFFERENT content hash — kernel BSP re-spin detected"
+  fi
+  return 0
+}
+
+# bsp_capture_provenance <out_dir> <debs_dir> <kernel_pkg> — locate the fetched
+# kernel .deb, record its resolved version + content sha256 to <out_dir>/
+# bsp-provenance.json, then run the advisory drift-guard. Scope is the kernel BSP
+# package ONLY (provenance is intentionally not widened to the rest of the BSP set).
+bsp_capture_provenance() {
+  local out_dir="$1" debs_dir="$2" kpkg="$3"
+  local deb="" f name
+  shopt -s nullglob
+  for f in "${debs_dir}"/*.deb; do
+    name="$(deb_pkg_name "${f}")"
+    if [[ "${name}" == "${kpkg}" ]]; then deb="${f}"; break; fi
+  done
+  shopt -u nullglob
+
+  if [[ -z "${deb}" ]]; then
+    log_warn "BSP provenance: kernel package '${kpkg}' .deb not staged in ${debs_dir} — skipping capture"
+    return 0
+  fi
+
+  local version sha
+  version="$(deb_pkg_version "${deb}")"
+  sha="$(sha256sum "${deb}" | awk '{print $1}')"
+  bsp_write_json "${out_dir}/bsp-provenance.json" "${kpkg}" "${version}" "${sha}"
+  log_info "BSP provenance: ${kpkg} version=${version} sha256=${sha} -> ${out_dir}/bsp-provenance.json"
+
+  bsp_drift_check "${BSP_BASELINE}" "${kpkg}" "${version}" "${sha}"
+}
+
 # _fetch_bsp_native_one — bounded-pool worker: download ONE BSP .deb into a
 # private temp dir, then atomically rename the result into ${_BSP_DEBS}. A killed
 # apt-get leaves files only in the throwaway .fetch-* dir, never a partial final.
@@ -364,6 +463,23 @@ fetch_bsp() {
     _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
   else
     _fetch_bsp_curl "${debs}" "${bsp_pkgs[@]}"
+  fi
+
+  # Provenance + advisory drift-guard for the floating kernel BSP. The board
+  # KERNEL_PACKAGES override (resolve.py) wins over the family field, mirroring
+  # the array-REPLACE merge above. Real-fetch only — DRY_RUN stages no .deb.
+  local -a kernel_pkgs=()
+  if [[ -n "${KERNEL_PACKAGES:-}" ]]; then
+    for pkg in ${KERNEL_PACKAGES}; do
+      [[ -n "${pkg}" ]] && kernel_pkgs+=("${pkg}")
+    done
+  else
+    while IFS= read -r item; do
+      [[ -n "${item}" ]] && kernel_pkgs+=("${item}")
+    done < <(read_yaml_list kernel_packages "${family}")
+  fi
+  if [[ -z "${DRY_RUN}" && ${#kernel_pkgs[@]} -gt 0 ]]; then
+    bsp_capture_provenance "$(dirname "${debs}")" "${debs}" "${kernel_pkgs[0]}"
   fi
 }
 

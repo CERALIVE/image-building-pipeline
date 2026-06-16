@@ -41,6 +41,29 @@ deb_pkg_name() {
 }
 
 # ---------------------------------------------------------------------------
+# deb_pkg_version — read the Version: field of a .deb without dpkg (host is Arch).
+# Mirrors deb_pkg_name: ar + tar over control.tar.* . Echoes the version or empty.
+# Used by the BSP provenance/drift-guard to record the EXACT resolved kernel
+# version string (the floating Armbian vendor build) alongside its content hash.
+# ---------------------------------------------------------------------------
+deb_pkg_version() {
+  local deb="$1" tmp version=""
+  tmp="$(mktemp -d)"
+  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO -C "${tmp}" ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  fi
+  if [[ -s "${tmp}/control" ]]; then
+    version="$(awk -F': ' '/^Version:/{print $2; exit}' "${tmp}/control")"
+  fi
+  rm -rf "${tmp}"
+  printf '%s' "${version}"
+}
+
+# ---------------------------------------------------------------------------
 # explode_deb <deb> <dest> — standard .deb data-tarball extraction into <dest>
 # (dpkg-deb when present, else ar + tar). Used only by --from-deb; the sysext
 # BUILD itself is the reused build_app_layer verb, never reimplemented here.

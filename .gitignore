@@ -24,3 +24,8 @@ Thumbs.db
 # Repo-local test/QA evidence (coverage, diffs, traces) — never committed
 test-results/
 test-results-*.txt
+
+# BSP provenance — floating kernel BSP version+hash recorded per build into the
+# image output dir. Build output, never committed, and deliberately excluded from
+# the build-matrix sha256 determinism comparison (the float would break it).
+bsp-provenance.json

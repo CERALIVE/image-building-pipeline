@@ -160,6 +160,35 @@ state** under the staging dir (the host apt config is never touched).
 - **BSP fetch is unchanged** — kernel/DTB/U-Boot/firmware/gstreamer still come from
   the Armbian apt pool (`fetch_bsp`).
 
+**BSP provenance + advisory kernel drift-guard** [EXISTS]
+
+The kernel BSP floats (Decision D3 — name-based `linux-image-vendor-rk35xx`, **no
+version pin**), so a silent Armbian re-spin can change the image with no signal.
+`fetch_bsp` (in `v2/lib/fetch-debs.sh`) makes that float **observable without
+pinning it**:
+
+- **Provenance capture** — after the real BSP fetch, `bsp_capture_provenance`
+  records the kernel package's exact resolved **version string** + **content
+  `sha256`** into `bsp-provenance.json` in the image output dir (`$DEST`). Scope is
+  the **kernel BSP package only** — provenance is deliberately not widened to the
+  rest of the BSP set. The artifact is **gitignored, never committed**, and
+  deliberately **excluded from the build-matrix `sha256` determinism comparison**
+  (that job hashes the normalized build-plan string, never a file tree — the
+  floating BSP would otherwise break determinism).
+- **Advisory drift-guard** — `bsp_drift_check` compares the captured version+hash
+  against the committed baseline `v2/manifests/bsp-baseline.json`. On a mismatch it
+  prints a `BSP drift` banner to stdout and **always exits 0 — drift is NEVER
+  fatal** (build continues). It compares the **content hash, not just the version**,
+  so a same-version re-spin is still caught.
+- **First-run / unseeded** — the committed baseline ships UNSEEDED (`version` and
+  `sha256` are `null`) because the concrete vendor build cannot be resolved offline.
+  The first authenticated real build seeds the baseline with the actual values,
+  emits an informational note, and exits 0. Commit that seeded value to set the
+  known-good reference. This is **advisory only — never a hard pin** (no `=<ver>` in
+  the fetch, manifests, or `versions.yaml`). Proof: `v2/run-tests` section 15.
+- **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
+  CI build-matrix (DRY_RUN=1) never writes the artifact.
+
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
 Don't hardcode versions in the script.
@@ -411,6 +440,8 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
+- Don't hard-pin the kernel BSP — the drift-guard is **advisory only** (`exit 0` always). No `=<ver>` in the fetch, `rk3588.yaml`, or `versions.yaml`; the BSP still floats (Decision D3)
+- Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — the floating BSP would break it (it is gitignored build output by design)
 
 ## KNOWN ISSUES / DEFERRED
 
