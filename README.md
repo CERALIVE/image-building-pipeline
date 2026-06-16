@@ -188,6 +188,31 @@ that actually carries the uplink on a bonding sender device, so it is now part
 of the guard alongside the encoder and receiver. Proof: `v2/run-tests`
 section 16.
 
+## Supported-Modem Matrix + WWAN Module Check
+
+The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA
+modem source-routing, the M.2 SIM-detection quirk, and the known-good modem
+table) is documented as-is in
+[`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md).
+
+Because the kernel BSP floats (name-only pin, no version pin), a silent Armbian
+re-spin could drop one of the six WWAN kernel modules the modem stack binds to
+(`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`) with no
+signal. `v2/lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted
+module tree) and reports each module as loadable (`=m`), built-in (`=y`, in
+`modules.builtin`), or present via `modules.alias`:
+
+```bash
+v2/lib/check-wwan-modules.sh <kernel.deb | module-tree-dir>
+```
+
+It is **advisory only**, like the BSP drift-guard: a missing module prints a
+WARNING but the check **always exits 0** — it never fails the build and never
+edits `shared.list` or the kernel config. It is hyphen/underscore aware (the
+`cdc_wdm` module ships on disk as `cdc-wdm.ko`) and matches the `option` module
+by an exact `option.ko` / `modules.builtin` / alias entry, never a bare `option`
+substring. Proof: `v2/run-tests` section 17.
+
 ## License
 
 This project is dual-licensed under either:

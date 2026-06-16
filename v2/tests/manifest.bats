@@ -27,6 +27,7 @@ setup() {
   RESOLVE_PY="$LIB_DIR/resolve.py"
   MEASURE_SH="$LIB_DIR/measure-size.sh"
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
+  CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
   POSTINST_LIB="$V2/mkosi/customize/postinst-lib.sh"
   BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
   SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
@@ -1190,4 +1191,120 @@ run_ota_guard() {
   run_ota_guard ""
   [ "$status" -eq 0 ]
   [[ "$output" == *"installed to inactive slot"* ]]
+}
+
+# ===========================================================================
+# 17. Advisory WWAN module-presence check (Task 5).
+#     v2/lib/check-wwan-modules.sh inspects a kernel .deb (or an extracted
+#     module tree) and reports whether the six WWAN modules ship — loadable
+#     (=m, a <mod>.ko file), built-in (=y, modules.builtin), or via a
+#     modules.alias entry. It is ADVISORY: a missing module WARNS but the check
+#     ALWAYS exits 0 (like the BSP drift-guard). The option module is matched by
+#     option.ko / modules.builtin / alias, NEVER a bare "option" substring. These
+#     tests build fixture .debs (ar+tar) and module trees in $BATS_TEST_TMPDIR —
+#     no real BSP, UNIT scope.
+# ===========================================================================
+
+# wwan_stage_six <root> [kver] — stage a module tree carrying all six WWAN
+# modules with a deliberate MIX of forms: qmi_wwan/cdc_mbim loadable (.ko),
+# cdc_ether loadable (.ko.xz, compressed), cdc_wdm as cdc-wdm.ko (hyphen on disk
+# — exercises the -/_ normalisation), option + cdc_ncm built-in (modules.builtin).
+wwan_stage_six() {
+  local root="$1" kv="${2:-6.1.0-vendor}"
+  local netusb="$root/lib/modules/$kv/kernel/drivers/net/usb"
+  local usbclass="$root/lib/modules/$kv/kernel/drivers/usb/class"
+  mkdir -p "$netusb" "$usbclass"
+  printf 'ELF' > "$netusb/qmi_wwan.ko"
+  printf 'ELF' > "$netusb/cdc_mbim.ko"
+  printf 'ELF' > "$netusb/cdc_ether.ko.xz"
+  printf 'ELF' > "$usbclass/cdc-wdm.ko"
+  printf 'kernel/drivers/usb/serial/option.ko\nkernel/drivers/net/usb/cdc_ncm.ko\n' \
+    > "$root/lib/modules/$kv/modules.builtin"
+}
+
+# make_kernel_deb <stage> <out.deb> — pack a staged rootfs dir into a minimal but
+# real .deb (debian-binary + control.tar.gz + data.tar.gz via ar), so the check's
+# extraction path (explode_deb: ar+tar fallback) is exercised end-to-end.
+make_kernel_deb() {
+  local stage="$1" out="$2" tmp
+  tmp="$(mktemp -d)"
+  tar -C "$stage" -czf "$tmp/data.tar.gz" .
+  mkdir -p "$tmp/ctl"
+  cat > "$tmp/ctl/control" <<'CTL'
+Package: linux-image-vendor-rk35xx
+Version: 6.1.0-vendor
+Architecture: arm64
+Maintainer: ceralive-test <test@ceralive.tv>
+Description: fixture kernel for WWAN module-presence tests
+CTL
+  tar -C "$tmp/ctl" -czf "$tmp/control.tar.gz" ./control
+  printf '2.0\n' > "$tmp/debian-binary"
+  ( cd "$tmp" && ar rc "$out" debian-binary control.tar.gz data.tar.gz )
+  rm -rf "$tmp"
+}
+
+@test "wwan: all six modules present in a kernel .deb (happy path, mix of =m and =y)" {
+  local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-vendor-rk35xx.deb"
+  mkdir -p "$stage"
+  wwan_stage_six "$stage"
+  make_kernel_deb "$stage" "$deb"
+  run "$CHECK_WWAN" "$deb"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"all 6 required modules present"* ]]
+  [[ "$output" != *"MISSING"* ]]
+  # cdc-wdm.ko (hyphen) satisfies cdc_wdm — the -/_ normalisation has teeth
+  [[ "$output" == *"cdc_wdm — loadable"* ]]
+  # compressed cdc_ether.ko.xz is recognised as loadable
+  [[ "$output" == *"cdc_ether — loadable"* ]]
+  # built-in modules recognised via modules.builtin
+  [[ "$output" == *"cdc_ncm — built-in"* ]]
+}
+
+@test "wwan: a missing module WARNS and still exits 0 (advisory, missing cdc_ncm)" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_six "$root"
+  # drop cdc_ncm from modules.builtin (option stays) so exactly one is absent
+  printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-vendor/modules.builtin"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WWAN module MISSING: cdc_ncm"* ]]
+  [[ "$output" == *"5/6 present, 1 missing"* ]]
+  [[ "$output" == *"ADVISORY"* ]]
+}
+
+@test "wwan: a =y built-in module is recognised via modules.builtin (no .ko false-negative)" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_six "$root"   # option ships ONLY in modules.builtin, no option.ko
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"option — built-in (=y, modules.builtin)"* ]]
+  [[ "$output" != *"WWAN module MISSING: option"* ]]
+}
+
+@test "wwan: bare 'option' decoys do NOT satisfy the option module (false-positive guard)" {
+  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-vendor"
+  wwan_stage_six "$root"
+  local md="$root/lib/modules/$kv"
+  # remove the only legitimate option signal (built-in), keep cdc_ncm built-in
+  printf 'kernel/drivers/net/usb/cdc_ncm.ko\n' > "$md/modules.builtin"
+  # decoys that all contain the word "option" but are NOT the option module:
+  printf 'the option driver is mentioned here\n' > "$md/optionnotes.txt"
+  printf 'ELF' > "$md/kernel/drivers/net/usb/snd_usb_option_helper.ko"
+  printf 'alias usb:v1234p5678option cdc_ncm\n' > "$md/modules.alias"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WWAN module MISSING: option"* ]]
+  # the other five remain present → exactly one missing
+  [[ "$output" == *"5/6 present, 1 missing"* ]]
+}
+
+@test "wwan: the check asserts a .deb extractor (dpkg-deb or ar+tar) is available" {
+  # with a normal PATH the assertion passes (ar + tar are on the host)
+  run bash -c "source '$CHECK_WWAN'; wwan_assert_deb_tools"
+  [ "$status" -eq 0 ]
+  # with an empty PATH (no dpkg-deb, no ar/tar) it fails loudly and names the tools
+  run bash -c "source '$CHECK_WWAN'; PATH='' wwan_assert_deb_tools"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ar"* ]]
+  [[ "$output" == *"tar"* ]]
 }

@@ -52,6 +52,7 @@ image-building-pipeline/
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
+| **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack as-is + the advisory check `v2/lib/check-wwan-modules.sh` |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
@@ -225,6 +226,30 @@ stopped OR not-installed unit reads `inactive` and never blocks). The list
 mid-broadcast through the bonding sender could be updated out from under the
 stream; the guard now checks `srtla-send.service` too. Don't drop the receiver
 check: a single image runs either role. Proof: `v2/run-tests` section 16.
+
+**Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
+
+The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem
+source-routing, the M.2 SIM quirk, and the known-good modem table) is documented
+as-is in [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md). That runtime stack
+is **not** touched here — the doc only describes it.
+
+Because the kernel BSP floats (Decision D3 — name-only pin, no version pin), a
+silent Armbian re-spin could drop one of the six WWAN modules the modem stack
+binds to (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`)
+with no signal. `v2/lib/check-wwan-modules.sh` makes that observable: it inspects
+a kernel `.deb` (or an extracted module tree) and reports each module as loadable
+(`=m`, a `<mod>.ko` file), built-in (`=y`, in `modules.builtin`), or present via
+`modules.alias`.
+
+- Hyphen/underscore aware (the `cdc_wdm` module ships on disk as `cdc-wdm.ko`).
+- The `option` module is matched by an exact `option.ko` basename, a
+  `…/option.ko` `modules.builtin` entry, or a `modules.alias` module token —
+  **never** a bare `option` substring (a known false-positive trap).
+- Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) before opening a `.deb`.
+- **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
+  the check **always exits 0**. It never fails the build and never edits
+  `shared.list` or the kernel config. Proof: `v2/run-tests` section 17.
 
 ## ADD-ON SUBSYSTEM [EXISTS]
 
