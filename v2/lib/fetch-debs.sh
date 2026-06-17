@@ -519,7 +519,7 @@ fetch_first_party() {
     log_info "  ${r} = $(get_pin "${r}" || true)"
   done
 
-  log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/ (arch=${ARCH}, GPG Signed-By + mTLS)"
+  log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
   log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
 
   # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.
@@ -536,17 +536,17 @@ fetch_first_party() {
   run_or_plan mkdir -p "${apt_state}/lists/partial" \
     "${apt_state}/cache/archives/partial" "${certs_dir}"
 
-  # deb822 source — the apt-ceralive-repo.sh pattern (flat repo dists/{channel}/ +
+  # deb822 source — the apt-ceralive-repo.sh pattern (arch-specific repo dists/{channel}/binary-{arch}/ +
   # Suites ./, GPG Signed-By); arch is chosen by APT::Architecture below.
   if [[ -z "${DRY_RUN}" ]]; then
     cat >"${src_list}" <<EOF
 Types: deb
-URIs: ${APT_CERALIVE_URL}/dists/${CHANNEL}/
+URIs: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/
 Suites: ./
 Signed-By: ${keyring}
 EOF
   else
-    log_info "DRY-RUN would write deb822 source -> ${src_list}: Types=deb URIs=${APT_CERALIVE_URL}/dists/${CHANNEL}/ Suites=./ Signed-By=${keyring}"
+    log_info "DRY-RUN would write deb822 source -> ${src_list}: Types=deb URIs=${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ Suites=./ Signed-By=${keyring}"
   fi
 
   # GPG keyring + mTLS certs from the environment. A real fetch with no GPG key is
@@ -607,7 +607,7 @@ EOF
   rm -rf "${tmpd}"
   (( staged > 0 )) \
     || die "first-party fetch staged 0 .debs from ${APT_CERALIVE_URL} (expected ${#FIRST_PARTY_APT_PKGS[@]})"
-  log_success "first-party: staged ${staged} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
+  log_success "first-party: staged ${staged} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
 usage() {

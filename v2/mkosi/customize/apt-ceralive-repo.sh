@@ -103,7 +103,7 @@ configure_ceralive_source() {
   log_info "configuring apt.ceralive.tv source (channel=${APT_CHANNEL})"
   cat >/etc/apt/sources.list.d/ceralive.sources <<EOF
 Types: deb
-URIs: https://apt.ceralive.tv/dists/${APT_CHANNEL}/
+URIs: https://apt.ceralive.tv/dists/${APT_CHANNEL}/binary-$(dpkg --print-architecture)/
 Suites: ./
 Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
 EOF
