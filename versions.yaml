@@ -1,5 +1,6 @@
 # CeraLive component version registry — manually maintained; pipeline reads with graceful fallback
-# Keys under image-repos match REPOS=("srtla" "srt" "cerastream" "CeraUI") in fetch-debs.sh exactly.
+# Keys under image-repos match REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs") in fetch-debs.sh
+# exactly. `srt` is NOT in REPOS: it is a build-time vendored libsrt source (no .deb) — see below.
 # pin: update when cutting a release.
 # cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
 # generic-profile PASS — cerastream/docs/notes/boot-parity-results.md; the repo remains on GitHub
@@ -14,13 +15,6 @@ srtla:
   kind: first-party
   # main no-ff merge commit of feat/merge-irlserver-main-2026-04 (irlserver catch-up)
   pin: aa66a88617010ab69fe01948d8e8163ee53ff703
-  channel: stable
-
-srt:
-  path: srt
-  repo: https://github.com/CERALIVE/srt
-  kind: first-party
-  pin: latest
   channel: stable
 
 cerastream:
@@ -70,6 +64,20 @@ irl-srt-server:
   repo: https://github.com/CERALIVE/irl-srt-server
   kind: first-party
   pin: latest
+
+# ── Vendored transport source (NOT a REPOS entry; not its own .deb) ───────────
+
+# srt (CERALIVE fork of Haivision libsrt) is a BUILD-TIME vendored source ONLY —
+# cerastream + srtla compile/link against its headers for ABI parity (SONAME
+# libsrt.so.1.5). It has no packaging recipe and produces no .deb. Runtime libsrt is
+# the SYSTEM `libsrt1.5-openssl` (bookworm main), installed by the runtime OS layer
+# (manifests/packages/shared.list) — there is no CERALIVE libsrt fork .deb.
+srt:
+  path: srt
+  repo: https://github.com/CERALIVE/srt
+  kind: vendored-transport-src
+  pin: latest
+  channel: stable
 
 # ── Local PKI (no remote, no pin) ─────────────────────────────────────────────
 

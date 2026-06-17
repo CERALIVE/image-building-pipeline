@@ -14,10 +14,12 @@
 #   2. First-party   — cerastream / ceralive-device (CeraUI) / srtla /
 #                      srtla-send-rs .debs, PULLED FROM apt.ceralive.tv via a
 #                      GPG-verified, mTLS-authenticated apt source (`apt-get
-#                      download`). The libsrt fork (`srt`), gstlibuvch264src and
-#                      the libgstreamer* plugins are NOT staged here — they are
-#                      resolved by the app layer's own `apt-get install` from
-#                      apt.ceralive.tv + bookworm main at install time
+#                      download`). System libsrt (`libsrt1.5-openssl`) is installed
+#                      by the runtime OS layer (shared.list); gstlibuvch264src
+#                      (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins
+#                      are NOT staged here — they are resolved as transitive
+#                      cerastream Depends by the app layer's own `apt-get install`
+#                      from apt.ceralive.tv + bookworm main at install time
 #                      (mkosi.images/app/mkosi.postinst.chroot).
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
@@ -100,18 +102,22 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 #
 # srtla-send-rs is the Rust sender fork (v1.0.0+) added at cutover (Task 20).
 # srtla .deb provides receiver-only after cutover; srtla-send-rs provides the sender.
-# Conflict declaration: srtla-send-rs Conflicts: srtla (<< 2026.7.0); srtla v2026.6.2
-# << 2026.7.0 is TRUE, so coinstall is blocked correctly until srtla cutover release.
-REPOS=("srtla" "srt" "cerastream" "CeraUI" "srtla-send-rs")
+# Conflict declaration: srtla-send-rs Conflicts/Replaces srtla (<< 2026.6.2)
+# (SRTLA_CUTOVER_VERSION). Any pre-cutover srtla (<< 2026.6.2, which still bundled the
+# C sender) is correctly blocked from coinstall; srtla v2026.6.2 — the first
+# receiver-only release — is NOT << 2026.6.2, so it coinstalls with the Rust sender.
+REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
 
 # FIRST_PARTY_APT_PKGS — the Debian Package: NAMES pulled from apt.ceralive.tv,
 # a deliberate mapping off REPOS (the directory/pin names above), NOT a copy:
 #   srtla->srtla  cerastream->cerastream  CeraUI->ceralive-device
 #   srtla-send-rs->srtla-send-rs
-# `srt` is absent on purpose: the libsrt fork (like gstlibuvch264src and the
-# libgstreamer* plugins) is a runtime dependency the app layer's `apt-get install`
-# resolves from apt.ceralive.tv + bookworm main at install time
-# (mkosi.images/app/mkosi.postinst.chroot), so it is never a download target here.
+# `srt` is gone from this set AND from REPOS: it is a build-time vendored libsrt
+# source that produces no .deb. Runtime libsrt is the SYSTEM `libsrt1.5-openssl`,
+# installed by the runtime OS layer (manifests/packages/shared.list), not here.
+# gstlibuvch264src (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins are
+# resolved as transitive cerastream Depends by the app layer's own `apt-get install`
+# from apt.ceralive.tv + bookworm main, so they are not download targets here either.
 FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla" "srtla-send-rs")
 
 # ---------------------------------------------------------------------------

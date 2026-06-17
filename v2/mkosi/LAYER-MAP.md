@@ -97,9 +97,12 @@ the app layer, because:
 2. A libsrt update flows through the **RAUC OS slot** (atomic), not through a sysext.
 3. Both architectures (rk3588, x86) use the **same** package name.
 
-The runtime layer installs the **system** `libsrt1.5-openssl` (Debian bookworm).
-The first-party **CERALIVE/srt fork `.deb`** is a *separate* artifact and lands in
-the **app** layer (Stage 3) — do not conflate the two.
+The runtime layer installs the **system** `libsrt1.5-openssl` (Debian bookworm) —
+this IS the device's runtime libsrt. The CERALIVE `srt` repo is a **build-time
+vendored source** (cerastream + srtla compile/link against its headers for ABI
+parity, SONAME `libsrt.so.1.5`); it produces **no `.deb`** and ships nothing at
+runtime. There is **no first-party libsrt fork `.deb`** — `cerastream` `Depends`
+on the system `libsrt1.5-openssl` directly.
 
 **NOT here:** HW-accel GStreamer / kernel / BSP (→ platform); first-party apps
 (→ app). Board capture/quirk udev rules (→ platform-specific module, task 20).
@@ -112,9 +115,8 @@ the **app** layer (Stage 3) — do not conflate the two.
 
 | Installs (the `.deb`) | In-image path | OTA-delivery backend |
 |---|---|---|
-| `cerastream`, `srtla` | `/usr/bin` (link the runtime system libsrt) | sysext `.raw` (`mkosi/app/build-srtla-sysext.sh`; a cerastream sysext descriptor is a follow-on) |
+| `cerastream`, `srtla` | `/usr/bin` (link the runtime system libsrt `libsrt1.5-openssl`) | sysext `.raw` (`mkosi/app/build-srtla-sysext.sh`; a cerastream sysext descriptor is a follow-on) |
 | `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
-| CERALIVE/srt fork `.deb` | the first-party libsrt fork `/usr/lib` (distinct from the runtime system libsrt) | rides the sysext class |
 
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
 every staged first-party `.deb` (`apt-get install` from `/opt/ceralive-staging`, deps
@@ -208,7 +210,7 @@ family manifest differs.
 | Item | Deferred to |
 |---|---|
 | Chroot **customization modules** (board capture/quirk udev rules, per-board hooks driven by manifest `quirks:`) | **task 20** |
-| First-party app install (cerastream/srtla/CeraUI + CERALIVE/srt fork `.deb`) | **Stage 3 (tasks 22-23)** |
+| First-party app install (cerastream / srtla / CeraUI `.deb`s) | **Stage 3 (tasks 22-23)** |
 | `rauc-hawkbit-updater` active install (backport `.deb` + apt.ceralive.tv serving) | **Stage 4 OTA** |
 | A/B slot **flipping** / RAUC `system.conf` + bootcount + `bootname`, dm-verity, `*.raucb` bundle | **task 26** |
 
