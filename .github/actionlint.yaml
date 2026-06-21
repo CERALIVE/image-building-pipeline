@@ -1,0 +1,21 @@
+# actionlint config for image-building-pipeline.
+#
+# self-hosted-runner.labels — declare the custom label for the physical RK3588
+# runner so actionlint stops flagging `runs-on: [self-hosted, ceralive-rk3588]`
+# as unknown. This only TEACHES actionlint the label; it does not change the
+# workflow's runner targeting (realhw-job.yml is the activated reusable copy and
+# its runner labels are frozen).
+self-hosted-runner:
+  labels:
+    - ceralive-rk3588
+
+# realhw-job.yml is an ACTIVATED COPY of v2/ci/realhw-job.yml — kept to action
+# versions only here (per the CI-standardization scope). Its pre-existing
+# SC2015 info in the always-on diagnostics cleanup
+# (`[[ -f serial.pid ]] && kill ... || true`, where `|| true` is the intended
+# best-effort behavior) is suppressed rather than rewritten so this activated
+# copy stays byte-for-byte with its canonical source apart from the pins.
+paths:
+  "**/realhw-job.yml":
+    ignore:
+      - 'SC2015'

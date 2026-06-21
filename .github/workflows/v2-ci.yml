@@ -37,7 +37,7 @@ jobs:
     name: shellcheck (v2 bash)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install ShellCheck
         run: |
@@ -60,9 +60,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: shellcheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -77,9 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: schema-validate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -116,9 +116,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: bats
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -183,7 +183,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: bats
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Plan targets the per-board/per-OS R2 keys (DRY_RUN, signed inputs)
         env:
@@ -247,9 +247,9 @@ jobs:
         # pipeline resolves for both arches without hardware.
         board: [rock-5b-plus, x86-minipc]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
@@ -344,7 +344,7 @@ jobs:
           echo "sha256 parity OK: ${PLAN_SHA} (identical across rebuilds on $(uname -s)-$(uname -m))"
 
       - name: Upload host sha256 sidecar
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: host-sha256-${{ matrix.board }}
           path: test-results/host-*.sha256
@@ -371,7 +371,7 @@ jobs:
     needs: build-matrix
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install qemu-system-x86 + OVMF (EFI/GRUB x86 image boots via UEFI)
         run: |

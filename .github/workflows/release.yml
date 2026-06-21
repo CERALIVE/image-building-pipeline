@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # release/real-HW gate — never cancel mid-run
+
 jobs:
   realhw:
     # Delegate to the single reusable real-HW workflow — no duplicated board
