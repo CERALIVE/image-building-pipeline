@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Shell/Armbian image-build repo — only GitHub Actions are dependency-managed
+  # here (no npm/cargo manifests). Weekly, grouped into one PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
