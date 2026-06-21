@@ -9,8 +9,16 @@
 #   - die() for fatal exits and require_cmd() for dependency preconditions
 #
 # DESIGN RULE: there is intentionally NO `|| true` / best-effort error swallowing
-# anywhere in this file. Silent apt/dpkg failures were the root cause of v1
-# unreliability (see customize-image.sh:170-174,231-232). v2 fails loudly, always.
+# anywhere in this file — and, by extension, none on the sacred fetch path that
+# sources it. Silent apt/dpkg failures were the root cause of v1 unreliability
+# (see customize-image.sh:170-174,231-232). v2 fails loudly, always: the `trap
+# err_trap ERR` installed below converts ANY unguarded non-zero command into an
+# immediate, file:line-reported exit. A stray `|| true` would defeat that trap by
+# resetting the failing command's exit status to 0 BEFORE the trap can see it — so
+# the two rules are one and the same: keep commands unguarded and let err_trap
+# report them. The ONLY sanctioned way to say "this command does not run now" is
+# the explicit DRY_RUN plan path (fetch-debs.sh `run_or_plan`), which LOGS the
+# command and returns 0 deliberately — never the silent `|| true` shortcut.
 #
 # Usage:
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"

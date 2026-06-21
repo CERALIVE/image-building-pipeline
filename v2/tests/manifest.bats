@@ -1386,3 +1386,50 @@ run_paseto_provision() {
   [ -f "$devtok" ] || skip "CeraUI checkout not present (standalone CI)"
   grep -q 'DEVICE_TOKEN_PUBLIC_KEY_ENV = "PASETO_PUBLIC_KEY"' "$devtok"
 }
+
+# ===========================================================================
+# 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
+#     fetch-debs.sh asserts the sacred 4-entry REPOS constant (a `die` that can
+#     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
+#     when APT_CERALIVE_URL is not https:// (legitimate local/dev http:// overrides
+#     must keep working; the fetch path gains no new failure mode). These tests
+#     source the helpers directly (main is BASH_SOURCE-guarded) — no apt, no .deb.
+# ===========================================================================
+
+@test "fetch-debs REPOS guard: a REPOS without the 4 sacred entries trips the assert (die, non-zero)" {
+  run bash -c "source '$FETCH_DEBS'; REPOS=(srtla cerastream CeraUI); assert_repos_integrity 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"REPOS integrity"* ]]
+}
+
+@test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {
+  run bash -c "{ export APT_CERALIVE_URL=http://localhost:8080; source '$FETCH_DEBS' && echo SOURCED_OK; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not https"* ]]
+  [[ "$output" == *"SOURCED_OK"* ]]
+}
+
+# ===========================================================================
+# 20. fetch-debs DRY_RUN reliability (Task 24) — fetch_first_party under DRY_RUN
+#     logs the EXACT planned `apt-get download` and stages NOTHING. This locks the
+#     "plan-only, no side effects" contract that the run_or_plan / NO-`|| true`
+#     design rule (common.sh) and the CI build-matrix (DRY_RUN=1) depend on. The
+#     test sources the helper directly (main is BASH_SOURCE-guarded) — no apt.
+# ===========================================================================
+
+@test "fetch-debs DRY_RUN: fetch_first_party logs the planned apt-get download and stages no .deb" {
+  local debs="$BATS_TEST_TMPDIR/debs"
+  mkdir -p "$debs"
+  run bash -c "{ export DRY_RUN=1 VERSIONS_YAML='$VERSIONS_YAML'; source '$FETCH_DEBS'; fetch_first_party '$debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  # the planned command is LOGGED, names apt-get download + all four packages
+  [[ "$output" == *"DRY-RUN would run:"* ]]
+  [[ "$output" == *"download"* ]]
+  [[ "$output" == *"cerastream"* ]]
+  [[ "$output" == *"ceralive-device"* ]]
+  [[ "$output" == *"srtla"* ]]
+  [[ "$output" == *"srtla-send-rs"* ]]
+  # and NOT ONE .deb was staged (plan-only, zero side effects)
+  run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
+  [ "$output" -eq 0 ]
+}

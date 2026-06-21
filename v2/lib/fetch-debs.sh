@@ -82,6 +82,15 @@ ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
 # by APT::Architecture, never a board axis). Env-overridable; no trailing slash.
 APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
 
+# WARN-ONLY (never die): a non-https first-party apt base is almost always a
+# mistake in production, but legitimate local/dev overrides DO use http:// (a LAN
+# mirror, a localhost apt proxy). A hard die would break those AND add a new
+# failure mode to the sacred fetch path — so we surface the signal loudly and let
+# the fetch proceed. The transport-verification contract is still carried by GPG
+# (Signed-By) + mTLS below, independent of the URL scheme.
+[[ "${APT_CERALIVE_URL}" == https://* ]] \
+  || log_warn "APT_CERALIVE_URL is not https:// (${APT_CERALIVE_URL}) — proceeding; transport is unverified (intended only for local/dev overrides)"
+
 # FETCH_JOBS — bounded fetch concurrency. FETCH_JOBS=1 is the strict serial
 # baseline; sanitised to a positive integer, default 4.
 FETCH_JOBS="${FETCH_JOBS:-4}"
@@ -107,6 +116,23 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # C sender) is correctly blocked from coinstall; srtla v2026.6.2 — the first
 # receiver-only release — is NOT << 2026.6.2, so it coinstalls with the Rust sender.
 REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+
+# REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
+# `die` is SAFE here: this asserts a compile-time constant, so it can ONLY fire on
+# a wrong EDIT to the REPOS line (an added/removed/reordered/recased entry), NEVER
+# on a valid run. Downstream apt install ordering, the FIRST_PARTY_APT_PKGS mapping
+# and the versions.yaml keys all key off these exact four names in this exact order.
+assert_repos_integrity() {
+  local -a _sacred=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+  (( ${#REPOS[@]} == ${#_sacred[@]} )) \
+    || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
+  local i
+  for i in "${!_sacred[@]}"; do
+    [[ "${REPOS[$i]:-}" == "${_sacred[$i]}" ]] \
+      || die "REPOS integrity: entry ${i} is '${REPOS[$i]:-}', expected '${_sacred[$i]}' — REPOS order/case is sacred"
+  done
+}
+assert_repos_integrity
 
 # FIRST_PARTY_APT_PKGS — the Debian Package: NAMES pulled from apt.ceralive.tv,
 # a deliberate mapping off REPOS (the directory/pin names above), NOT a copy:
@@ -659,8 +685,14 @@ main() {
   # the IMAGE build no longer needs srtla/ + CeraUI/ sibling checkouts. The guard is
   # kept CONSERVATIVELY as an upstream-build sanity tripwire — those .debs are
   # produced FROM these checkouts upstream, and a broken layout means a CeraUI/srtla
-  # .deb could never have been published. TODO: demote to a soft warning once the
-  # first-party CI publish is fully decoupled from this workspace.
+  # .deb could never have been published.
+  #
+  # This stays a HARD assert (die), NOT a warning: it is the first tripwire on the
+  # sacred fetch path, and a broken sibling layout is the signal that a silently
+  # wrong or stale rootfs could ship. Demoting it to a soft warning is explicitly
+  # OUT OF SCOPE here — it would require first fully decoupling the first-party CI
+  # publish from this workspace AND proving the fetch path can no longer consume a
+  # sibling-derived artifact. Until that holds, the tripwire fires loudly by design.
   assert_sibling_layout "${workspace}"
 
   local debs="${DEST}/debs"
