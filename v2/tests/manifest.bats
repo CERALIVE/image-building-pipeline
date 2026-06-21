@@ -1386,3 +1386,25 @@ run_paseto_provision() {
   [ -f "$devtok" ] || skip "CeraUI checkout not present (standalone CI)"
   grep -q 'DEVICE_TOKEN_PUBLIC_KEY_ENV = "PASETO_PUBLIC_KEY"' "$devtok"
 }
+
+# ===========================================================================
+# 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
+#     fetch-debs.sh asserts the sacred 4-entry REPOS constant (a `die` that can
+#     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
+#     when APT_CERALIVE_URL is not https:// (legitimate local/dev http:// overrides
+#     must keep working; the fetch path gains no new failure mode). These tests
+#     source the helpers directly (main is BASH_SOURCE-guarded) — no apt, no .deb.
+# ===========================================================================
+
+@test "fetch-debs REPOS guard: a REPOS without the 4 sacred entries trips the assert (die, non-zero)" {
+  run bash -c "source '$FETCH_DEBS'; REPOS=(srtla cerastream CeraUI); assert_repos_integrity 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"REPOS integrity"* ]]
+}
+
+@test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {
+  run bash -c "{ export APT_CERALIVE_URL=http://localhost:8080; source '$FETCH_DEBS' && echo SOURCED_OK; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not https"* ]]
+  [[ "$output" == *"SOURCED_OK"* ]]
+}
