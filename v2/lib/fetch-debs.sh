@@ -685,8 +685,14 @@ main() {
   # the IMAGE build no longer needs srtla/ + CeraUI/ sibling checkouts. The guard is
   # kept CONSERVATIVELY as an upstream-build sanity tripwire — those .debs are
   # produced FROM these checkouts upstream, and a broken layout means a CeraUI/srtla
-  # .deb could never have been published. TODO: demote to a soft warning once the
-  # first-party CI publish is fully decoupled from this workspace.
+  # .deb could never have been published.
+  #
+  # This stays a HARD assert (die), NOT a warning: it is the first tripwire on the
+  # sacred fetch path, and a broken sibling layout is the signal that a silently
+  # wrong or stale rootfs could ship. Demoting it to a soft warning is explicitly
+  # OUT OF SCOPE here — it would require first fully decoupling the first-party CI
+  # publish from this workspace AND proving the fetch path can no longer consume a
+  # sibling-derived artifact. Until that holds, the tripwire fires loudly by design.
   assert_sibling_layout "${workspace}"
 
   local debs="${DEST}/debs"

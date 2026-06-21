@@ -1408,3 +1408,28 @@ run_paseto_provision() {
   [[ "$output" == *"not https"* ]]
   [[ "$output" == *"SOURCED_OK"* ]]
 }
+
+# ===========================================================================
+# 20. fetch-debs DRY_RUN reliability (Task 24) — fetch_first_party under DRY_RUN
+#     logs the EXACT planned `apt-get download` and stages NOTHING. This locks the
+#     "plan-only, no side effects" contract that the run_or_plan / NO-`|| true`
+#     design rule (common.sh) and the CI build-matrix (DRY_RUN=1) depend on. The
+#     test sources the helper directly (main is BASH_SOURCE-guarded) — no apt.
+# ===========================================================================
+
+@test "fetch-debs DRY_RUN: fetch_first_party logs the planned apt-get download and stages no .deb" {
+  local debs="$BATS_TEST_TMPDIR/debs"
+  mkdir -p "$debs"
+  run bash -c "{ export DRY_RUN=1 VERSIONS_YAML='$VERSIONS_YAML'; source '$FETCH_DEBS'; fetch_first_party '$debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  # the planned command is LOGGED, names apt-get download + all four packages
+  [[ "$output" == *"DRY-RUN would run:"* ]]
+  [[ "$output" == *"download"* ]]
+  [[ "$output" == *"cerastream"* ]]
+  [[ "$output" == *"ceralive-device"* ]]
+  [[ "$output" == *"srtla"* ]]
+  [[ "$output" == *"srtla-send-rs"* ]]
+  # and NOT ONE .deb was staged (plan-only, zero side effects)
+  run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
+  [ "$output" -eq 0 ]
+}
