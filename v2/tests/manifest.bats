@@ -29,6 +29,7 @@ setup() {
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
   POSTINST_LIB="$V2/mkosi/customize/postinst-lib.sh"
+  VERIFY_PASETO="$LIB_DIR/verify-paseto-key-encodings.sh"
   BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
   SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
   QEMU_X86="$TESTS_DIR/qemu-x86.sh"
@@ -1432,4 +1433,42 @@ run_paseto_provision() {
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]
+}
+
+# ===========================================================================
+# 21. PASETO key-encoding cross-check (Task 19 / ADR-0006 D2) — the provisioning
+#     verifier verify-paseto-key-encodings.sh proves the platform PASERK
+#     k4.public and the device raw-base64 are the SAME 32-byte Ed25519 public
+#     key, AND that the shipped setup_paseto_public_key bakes the build input
+#     (PASETO_PUBLIC_KEY_B64) into Environment=PASETO_PUBLIC_KEY with zero drift,
+#     AND that a k4.secret is refused. --self-test mints an EPHEMERAL keypair, so
+#     the check is self-contained (no cert-work, no secrets) and CI-safe. Runbook:
+#     docs/paseto-key-provisioning.md.
+# ===========================================================================
+
+@test "paseto verify: --self-test proves k4.public == raw-base64 and a clean build-bake (ephemeral keypair)" {
+  run "$VERIFY_PASETO" --self-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"byte-equal 32-byte public keys"* ]]
+  [[ "$output" == *"round-trips to the same 32-byte public key"* ]]
+  [[ "$output" == *"k4.secret fed as the build input is REFUSED"* ]]
+  [[ "$output" == *"self-test OK"* ]]
+}
+
+@test "paseto verify: a mismatched k4.public / raw-base64 pair is caught (fail loud)" {
+  # Two DIFFERENT Ed25519 keys' encodings must not validate as a pair. Minted
+  # inline with openssl so the fixture is self-contained (no cert-work, Rule D).
+  local d="$BATS_TEST_TMPDIR/paseto-mismatch"
+  mkdir -p "$d/mix"
+  openssl genpkey -algorithm ed25519 -out "$d/a.pem" 2>/dev/null
+  openssl genpkey -algorithm ed25519 -out "$d/b.pem" 2>/dev/null
+  # k4.public from keypair A (base64url-nopad), raw-base64 from keypair B (standard).
+  local a_url b_std
+  a_url="$(openssl pkey -in "$d/a.pem" -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  b_std="$(openssl pkey -in "$d/b.pem" -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 -A)"
+  printf 'k4.public.%s\n' "$a_url" > "$d/mix/paseto.k4.public"
+  printf '%s\n' "$b_std" > "$d/mix/paseto.public.raw.b64"
+  run "$VERIFY_PASETO" --key-dir "$d/mix"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISMATCH"* ]]
 }

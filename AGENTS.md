@@ -71,6 +71,7 @@ image-building-pipeline/
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
+| **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `v2/lib/verify-paseto-key-encodings.sh` |
 
 ## KEY FACTS
 
@@ -259,6 +260,15 @@ backend runtime env so the device can VERIFY device-control / relay-config token
   baking a private key would let a compromised device FORGE tokens. Proof:
   `v2/run-tests` section 18 (bakes the key, refuses k4.secret/PEM, no-env skip,
   and the cross-repo env-name lockstep against CeraUI's gate).
+- **Operator runbook + encoding verifier** — the end-to-end provisioning procedure
+  (generate one Ed25519 keypair per environment; route the THREE values — `(a)`
+  PASERK `k4.secret` → platform `PASETO_SIGNING_KEY`, `(b)` PASERK `k4.public` →
+  platform `PASETO_PUBLIC_KEY`, `(c)` raw-base64 → image-build `PASETO_PUBLIC_KEY_B64`)
+  lives in [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md).
+  `v2/lib/verify-paseto-key-encodings.sh` proves `(b)` and `(c)` decode to the **same**
+  32-byte public key AND that `setup_paseto_public_key` bakes the build input into the
+  drop-in with zero drift (reading PUBLIC files only; never the `k4.secret`).
+  `--self-test` (ephemeral keypair, no secrets) is the `v2/run-tests` section-21 gate.
 
 **Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
 
