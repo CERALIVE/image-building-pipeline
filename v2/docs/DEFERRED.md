@@ -15,7 +15,8 @@ Items are documentation-only. None are resolved here.
 
 **Status:** Deferred (hardware-gated)
 **Location:** `v2/manifests/boards/orange-pi-5-plus.yaml:45-47`
-**Also referenced:** `AGENTS.md:245-252`
+**Also referenced:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs are FIXME placeholders"
+**Cross-repo:** tracked in the workspace-root `docs/DEFERRED-WORK.md` as item 3 (*Orange Pi 5+ interface ID_PATHs*); owned here.
 
 **What it is:** The `interfaces:` block in the Orange Pi 5+ board manifest
 carries `FIXME-…` placeholder values for all three network interfaces
@@ -40,7 +41,7 @@ Re-run `v2/run-tests` to confirm the manifest validates.
 ## 2. Modem Interface Naming (usb0..7)
 
 **Status:** Deferred (hardware-gated)
-**Location:** `AGENTS.md:268-270`
+**Location:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Modem `usb0..7` naming is hardware-gated"
 
 **What it is:** Deterministic udev rename rules for USB modem interfaces
 (`usb0`..`usb7`) are not implemented. Only `eth0`, `eth1`, and `wlan0` are
@@ -49,9 +50,10 @@ shift across reboots or when multiple modems are present.
 
 **Why deferred:** Deterministic modem renames require reading the `ID_PATH` of
 a physical modem from a live device. The naming uncertainty is distinct from
-the source-routing issue (the NM `dhcp=internal` hook problem described in
-`AGENTS.md:254-266`): routing can be addressed in software, but the rename
-rules need hardware evidence.
+the source-routing issue (the NM `dhcp=internal` hook problem — now FIXED in
+software; see `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Modem source-routing
+under NM `dhcp=internal` — FIXED"): routing was addressed in software, but the
+rename rules need hardware evidence.
 
 **Unblock condition:** Attach a supported USB or M.2 modem to a running
 CeraLive device. Read `udevadm info /sys/class/net/<iface> | grep ID_PATH` for
@@ -102,7 +104,7 @@ offline-assemble model (mkosi `disk` is `Bootable=no`; the producer is the offli
 ## 4. Cog + WPEWebKit Render QA (Hardware-Gated)
 
 **Status:** Hardware-gated
-**Location:** `v2/docs/cog-display-addon.md:312-334` (§7), `v2/docs/cog-display-hw-checklist.md` (full runbook), `AGENTS.md:225-228`, `AGENTS.md:272-274`
+**Location:** `v2/docs/cog-display-addon.md` §7 (*Hardware-gated caveats (render QA)*), `v2/docs/cog-display-hw-checklist.md` (full runbook), `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Cog render QA hardware-gated", `AGENTS.md` → *KIOSK STACK* → "Cog display add-on (W4)"
 
 **What it is:** The Cog + WPEWebKit display add-on packaging is fully
 validated in software (apt index, layer contract, build+sign pipeline). The
@@ -142,7 +144,7 @@ the build and CI `addon-publish` path; pin `cog`/`wpewebkit` versions in
 ## 5. versions.yaml Null Pins for cog and wpewebkit
 
 **Status:** Deferred (hardware-gated, same gate as item 4)
-**Location:** `versions.yaml:81-93` (workspace root, consumed by `scripts/fetch-debs.sh`)
+**Location:** `versions.yaml:153-165` (workspace root, consumed by `scripts/fetch-debs.sh`)
 
 **What it is:** The `cog` and `wpewebkit` entries in `versions.yaml` carry
 `pin: null`. The apt-index-validated versions (cog `0.16.1-1`,
@@ -152,52 +154,57 @@ change (e.g. if WebKit 2.38.6 proves insufficient for OKLCH/Tailwind v4 and a
 trixie/backport snapshot is needed instead).
 
 ```yaml
-# versions.yaml:81-93
+# versions.yaml:153-165
 cog:
   kind: debian-apt
   source: bookworm/main
   package: cog
   pin: null  # 0.16.1-1 validated from apt index; pin after hardware render QA
+  channel: stable
 
 wpewebkit:
   kind: debian-apt
   source: bookworm/main
   package: libwpewebkit-1.1-0
   pin: null  # 2.38.6-1 validated from apt index; pin after hardware render QA
+  channel: stable
 ```
 
 **Why deferred:** Pinning is intentionally deferred until render QA confirms
 the bookworm versions are sufficient. The technical debt is tracked as TD-C1 in
-`v2/docs/cog-display-addon.md:361`.
+`v2/docs/cog-display-addon.md` §9 (*Known technical debt* → TD-C1).
 
 **Unblock condition:** Same gate as item 4. After the Cog render QA checklist
 passes on hardware, fill the real `artifact.sha256` in `cog-display.json`, then
 set `pin: 0.16.1-1` and `pin: 2.38.6-1` (or the trixie/backport equivalents if
-the bookworm versions proved insufficient) in `versions.yaml:85` and
-`versions.yaml:92`. Re-run `python3 v2/ci/validate-manifests.py` to confirm.
+the bookworm versions proved insufficient) in `versions.yaml:157` and
+`versions.yaml:164`. Re-run `python3 v2/ci/validate-manifests.py` to confirm.
 
 ---
 
-## 6. DEVICE-BRINGUP.md Hardware-Evidence TODOs
+## 6. DEVICE-BRINGUP.md Hardware-Evidence Placeholders
 
 **Status:** Deferred (hardware-gated)
-**Location:** `docs/DEVICE-BRINGUP.md:293`, `docs/DEVICE-BRINGUP.md:323`, `docs/DEVICE-BRINGUP.md:380`, `docs/DEVICE-BRINGUP.md:634`
+**Location:** `docs/DEVICE-BRINGUP.md:296`, `docs/DEVICE-BRINGUP.md:328`, `docs/DEVICE-BRINGUP.md:413`, `docs/DEVICE-BRINGUP.md:669`
 
-**What it is:** Four `[TODO]` placeholders in the public device bring-up guide
-await evidence from physical board runs:
+**What it is:** Four **Pending hardware run** placeholders in the public device
+bring-up guide await evidence from physical board runs. Each is a literal
+"**Pending hardware run**" note in the guide (not a `[TODO]` marker), and each
+points at `test-results/boot-log-<date>.txt` as its evidence target:
 
-- **Line 293** — maskrom mode entry procedure for Rock 5B+: the general
+- **Line 296** — maskrom mode entry procedure for Rock 5B+: the general
   RK3588 steps are documented but the board-specific button location and
-  confirmed `rkdeveloptool ld` output are placeholders pending a real bring-up
-  run.
-- **Line 323** — first-boot sequence: the expected U-Boot → kernel → health
-  gate → CeraUI sequence is described but marked as "hardware evidence pending"
-  because no board has been booted with a CeraLive image yet.
-- **Line 380** — `dev-sync --frontend` invocation and behavior: the dev-sync
-  frontend path is specced but the confirmed invocation and output are
-  placeholders pending T17-T21 hardware evidence.
-- **Line 634** — first-boot network troubleshooting: the "board does not appear
-  on the network" section is a placeholder pending T17-T18 hardware evidence.
+  confirmed `rkdeveloptool ld` / USB detection output are placeholders pending a
+  real bring-up run.
+- **Line 328** — first-boot sequence: the expected U-Boot → kernel → health
+  gate → CeraUI sequence is described, but the boot-log timestamps and exact
+  console output are pending because no board has been booted with a CeraLive
+  image yet.
+- **Line 413** — `dev-sync --frontend` invocation and behavior: the dev-sync
+  frontend path is specced (`v2/dev-sync`; see `v2/docs/dev-loop.md`) but the
+  confirmed invocation and timing are placeholders pending hardware evidence.
+- **Line 669** — first-boot network troubleshooting: the "board does not appear
+  on the network" section is a placeholder pending hardware evidence.
 
 **Why deferred:** All four items require a physical RK3588 board running a
 CeraLive image. The build system is functional; the hardware-specific evidence
@@ -205,9 +212,8 @@ CeraLive image. The build system is functional; the hardware-specific evidence
 
 **Unblock condition:** Complete a physical bring-up run on a Radxa Rock 5B+ or
 Orange Pi 5+. Capture boot logs to `test-results/boot-log-<date>.txt` (the
-placeholder reference already used in the guide). Fill each `[TODO]` section
-with the observed procedure and output. The guide's own placeholder text
-references `test-results/boot-log-<date>.txt` as the evidence target.
+reference each placeholder already names). Replace each "**Pending hardware
+run**" note with the observed procedure and output.
 
 ---
 
