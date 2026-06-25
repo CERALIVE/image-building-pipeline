@@ -12,8 +12,22 @@
 #                   && sudo bats-core/install.sh /usr/local
 #   * python3 with PyYAML + python-jsonschema (same validator resolve.py uses)
 #
-# Usage:  ./run-tests          (from v2/)
-#         v2/run-tests         (from repo root)
+# Parallelism (opt-in, automatic):
+#   bats parallelizes test CASES with `-j N`, which needs GNU parallel (or
+#   shenwei356/rush) on PATH. This entrypoint enables `-j` automatically when
+#   BOTH a parallel backend AND flock are present, and falls back to the
+#   previous serial run otherwise — the suite stays green either way. The few
+#   tests that share mutable state (the working tree in §8, the per-file
+#   feature-sysext fixture in §14) serialize themselves with flock (see the
+#   `serialize` helper in tests/manifest.bats), so parallel runs are correct.
+#   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
+#   auto-derives from nproc, capped at 8 (this unit suite is ~95 short tests —
+#   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
+#
+# Usage:  ./run-tests              (from v2/)         — auto-parallel
+#         v2/run-tests             (from repo root)
+#         BATS_JOBS=1 v2/run-tests (force serial)
+#         BATS_JOBS=8 v2/run-tests (force 8 workers)
 
 set -euo pipefail
 
@@ -35,5 +49,33 @@ if [[ ! -f "${SUITE}" ]]; then
   exit 1
 fi
 
-echo "== CeraLive v2 manifest unit suite (bats $(bats --version | awk '{print $2}')) =="
-exec bats "${SUITE}"
+# --- Decide on parallelism -------------------------------------------------
+jobs="${BATS_JOBS:-${PARALLEL_JOBS:-0}}"
+[[ "$jobs" =~ ^[0-9]+$ ]] || jobs=0           # non-numeric override -> auto
+if [[ "$jobs" -eq 0 ]]; then
+  ncpu="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+  [[ "$ncpu" =~ ^[0-9]+$ && "$ncpu" -ge 1 ]] || ncpu=1
+  jobs=$(( ncpu < 8 ? ncpu : 8 ))
+fi
+
+parallel_backend=""
+if command -v parallel >/dev/null 2>&1; then
+  parallel_backend="GNU parallel"
+elif command -v rush >/dev/null 2>&1; then
+  parallel_backend="rush"
+fi
+
+bats_args=()
+if [[ "$jobs" -gt 1 && -n "$parallel_backend" ]] && command -v flock >/dev/null 2>&1; then
+  bats_args+=( --jobs "$jobs" )
+  mode="parallel — ${jobs} jobs via ${parallel_backend}"
+else
+  mode="serial"
+  if [[ "$jobs" -gt 1 && -z "$parallel_backend" ]]; then
+    echo "note: GNU parallel (or rush) not on PATH; running serially." \
+         "Install GNU parallel to parallelize this suite (~2-3x faster on CI)." >&2
+  fi
+fi
+
+echo "== CeraLive v2 manifest unit suite (bats $(bats --version | awk '{print $2}')) — ${mode} =="
+exec bats ${bats_args[@]+"${bats_args[@]}"} "${SUITE}"
