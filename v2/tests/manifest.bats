@@ -124,6 +124,27 @@ write_addon() {
 JSON
 }
 
+# serialize <name> — hold an exclusive, file-scoped lock for the REST of the
+# current @test, so the handful of tests that share mutable state run correctly
+# under `bats --jobs N` (which v2/run-tests enables when GNU parallel is on
+# PATH). bats parallelizes test CASES, not the comment "sections", so any two
+# tests that touch the same mutable resource must serialize themselves:
+#   * §8 postinst-drift — two tests cp/sed-restore tracked working-tree files
+#     (mkosi.postinst.chroot, networking-srtla.sh) while a third asserts the
+#     CLEAN tree; without a lock a parallel scheduler could read the tree
+#     mid-mutation -> false failure.
+#   * §14 feature sysext — build_feature_fixture populates a per-FILE fixture
+#     dir ($BATS_FILE_TMPDIR/out) shared by five tests; only one may build it.
+# The lock auto-releases when the @test subshell exits (each bats test runs in
+# its own subshell). flock-less hosts get a no-op — v2/run-tests only requests
+# --jobs when flock is present, so a serial run never needs it.
+serialize() {
+  command -v flock >/dev/null 2>&1 || return 0
+  local lockfd
+  exec {lockfd}>"$BATS_FILE_TMPDIR/.serialize.$1.lock"
+  flock "$lockfd"
+}
+
 # ===========================================================================
 # 1. Schema self-validation — the schemas are legal draft-2020-12 documents.
 # ===========================================================================
@@ -394,6 +415,7 @@ YAML
 # ===========================================================================
 
 @test "postinst drift: clean tree has no dual-track drift (single source of truth)" {
+  serialize working-tree   # never read the tree while a sibling test mutates it
   run bash "$V2/ci/postinst-drift-check.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"RESULT: no drift"* ]]
@@ -401,6 +423,7 @@ YAML
 }
 
 @test "postinst drift: gate CATCHES a re-inlined consolidated function (non-vacuity)" {
+  serialize working-tree   # mutates a tracked file then restores; exclusive
   local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   local backup="$BATS_TEST_TMPDIR/postinst.bak"
   cp "$postinst" "$backup"
@@ -415,6 +438,7 @@ YAML
 }
 
 @test "postinst drift: gate CATCHES a divergent §6 SRTLA payload (non-vacuity)" {
+  serialize working-tree   # mutates a tracked file then restores; exclusive
   local netsrtla="$V2/mkosi/customize/networking-srtla.sh"
   local backup="$BATS_TEST_TMPDIR/networking-srtla.bak"
   cp "$netsrtla" "$backup"
@@ -891,19 +915,27 @@ feature_prereqs() {
 
 # build_feature_fixture — build a sample signed feature sysext ONCE per file into
 # BATS_FILE_TMPDIR, signed by a throwaway gpg home (NOT the repo dev keys). Echoes
-# nothing; idempotent — later tests reuse the produced artifacts.
+# nothing; idempotent — later tests reuse the produced artifacts. Under
+# `bats --jobs N` the five §14 tests call this concurrently, so the build (and
+# the idempotency check that guards it) run inside a flock'd subshell: exactly
+# one test populates the shared per-FILE fixture dir, the rest see it already
+# built. The lock releases as soon as the subshell exits, so the assertion
+# bodies still run in parallel.
 build_feature_fixture() {
   local out="$BATS_FILE_TMPDIR/out"
   local raw="$out/demo-feature-rock-5b-plus-12.raw"
-  [ -f "$raw" ] && return 0
-  local stg="$BATS_FILE_TMPDIR/staging"
-  mkdir -p "$stg/usr/bin" "$stg/opt/demo"
-  printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
-  printf 'payload\n'            > "$stg/opt/demo/data.txt"
-  bash "$LIB_DIR/build-feature-sysext.sh" \
-    --feature demo-feature --board rock-5b-plus --os-version 12 \
-    --deb-staging "$stg" --out "$out" \
-    --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
+  (
+    command -v flock >/dev/null 2>&1 && flock 9
+    [ -f "$raw" ] && exit 0          # idempotency check INSIDE the lock (no TOCTOU)
+    local stg="$BATS_FILE_TMPDIR/staging"
+    mkdir -p "$stg/usr/bin" "$stg/opt/demo"
+    printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
+    printf 'payload\n'            > "$stg/opt/demo/data.txt"
+    bash "$LIB_DIR/build-feature-sysext.sh" \
+      --feature demo-feature --board rock-5b-plus --os-version 12 \
+      --deb-staging "$stg" --out "$out" \
+      --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
+  ) 9>"$BATS_FILE_TMPDIR/.serialize.feature-fixture.lock"
 }
 
 @test "t24 sysext: build emits .raw + .raw.sha256 + .raw.sig + addon-keyring.gpg" {
