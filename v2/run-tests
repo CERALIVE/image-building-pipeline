@@ -32,7 +32,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUITE="${HERE}/tests/manifest.bats"
+# Suites, in run order. manifest.bats is the manifest/orchestrator unit suite;
+# x86-raucb-bundle.bats is the offline REAL x86 .raucb sign/verify/tamper gate (T10).
+SUITES=(
+  "${HERE}/tests/manifest.bats"
+  "${HERE}/tests/x86-raucb-bundle.bats"
+)
 
 if ! command -v bats >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -44,10 +49,12 @@ EOF
   exit 127
 fi
 
-if [[ ! -f "${SUITE}" ]]; then
-  echo "ERROR: test suite not found: ${SUITE}" >&2
-  exit 1
-fi
+for suite in "${SUITES[@]}"; do
+  if [[ ! -f "${suite}" ]]; then
+    echo "ERROR: test suite not found: ${suite}" >&2
+    exit 1
+  fi
+done
 
 # --- Decide on parallelism -------------------------------------------------
 jobs="${BATS_JOBS:-${PARALLEL_JOBS:-0}}"
@@ -77,5 +84,5 @@ else
   fi
 fi
 
-echo "== CeraLive v2 manifest unit suite (bats $(bats --version | awk '{print $2}')) — ${mode} =="
-exec bats ${bats_args[@]+"${bats_args[@]}"} "${SUITE}"
+echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
+exec bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
