@@ -217,13 +217,17 @@ asserts the rollback contract end-to-end, and is wired into the canonical unit s
   `/EFI/BOOT/BOOTX64.EFI` at disk-assembly time (offline, no `grub-install` mount).
 - **RAUC keyring** — the device root CA is installed by the runtime layer at
   `/etc/rauc/ceralive-keyring.pem`; the x86 `system.conf` `[keyring]` points at it.
+- **Signed RAUC OTA `.raucb` for x86** — `lib/orchestrate.sh`'s `efi`/`grub`
+  Stage-4 branch now calls `build-bundle.sh` after `assemble-disk-x86.sh`,
+  emitting a signed `.raucb` (+ `.sha256`) ALONGSIDE the `.raw`, stamped with the
+  board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and the shared build
+  timestamp. `build-bundle.sh` is board-agnostic, so this mirrors the RK3588
+  `custom` path verbatim — same rootfs.tar artifact, same `BUNDLE_*` env.
 
 **Still deferred:**
 
 - **`docs/partition-contract.md` `x86-ab` addendum** (ESP + grubenv vs the RK raw
   idbloader gap) → coordinated additive change to the FROZEN v1 contract. The x86
   layout reuses the FROZEN slot defs (`20`/`30`/`40`) and adds an ESP p1 (no gap).
-- **Signed RAUC OTA `.raucb` for x86** — `build-bundle.sh` is wired for the RK3588
-  `custom` path today; the x86 branch emits the flashable `.raw`.
 - **On-silicon validation** (real N100): qemu/HW A/B rollback boot with OVMF, `vainfo`
   enc entrypoints, and the `bps`/patched-GStreamer dynamic-bitrate check.

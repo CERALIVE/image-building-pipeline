@@ -410,6 +410,18 @@ main() {
         --rootfs-tree "${rootfs_tree}" \
         || die "Stage-4 x86 disk assembly failed for board '${board}'"
       log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
+
+      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
+      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
+      # the .raw, emitted ALONGSIDE it. build-bundle.sh is board-agnostic (it reads
+      # COMPATIBLE_STRING from the env), so the x86 path mirrors the custom path
+      # verbatim — same rootfs.tar artifact, same BUNDLE_* env. format=plain.
+      local bundle_artifact="${out_dir}/${ts}.raucb"
+      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
+        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
+        || die "Stage-4 RAUC bundle build failed for board '${board}'"
+      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 x86 disk assembly (flashable .raw) deferred to the full device build"
     fi

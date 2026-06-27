@@ -107,8 +107,11 @@ assembly stay zero-diff (G3/SC6). The earlier `bootloader=custom` countdown scaf
 is RETAINED, unchanged, only as the offline rollback-contract harness
 (`qemu-x86.sh --fallback-selftest`, `test-x86-fallback.sh`). Full rationale +
 VERIFY-FIRST finding: [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2.
-The signed `.raucb` OTA bundle for x86 is a documented follow-up (`build-bundle.sh`
-covers the RK3588 path today).
+The signed `.raucb` OTA bundle is now emitted on the x86 path too: the `efi`/`grub`
+Stage-4 branch calls `build-bundle.sh` after `assemble-disk-x86.sh`, alongside the
+`.raw`, stamped with the board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`).
+`build-bundle.sh` is board-agnostic, so the x86 path mirrors the RK3588 `custom`
+path verbatim.
 
 **Multi-board dispatch** [EXISTS]
 
