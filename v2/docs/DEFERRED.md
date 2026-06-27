@@ -95,9 +95,10 @@ offline-assemble model (mkosi `disk` is `Bootable=no`; the producer is the offli
   still proves the custom-engine rollback contract (G4 untouched). Full rationale:
   [`../mkosi/platform/x86/README.md`](../mkosi/platform/x86/README.md) §2.
 
-**Residual follow-ups (NOT this task):** the signed RAUC OTA `.raucb` for x86
-(`build-bundle.sh` covers the RK3588 path today) and the
-`docs/partition-contract.md` `x86-ab` addendum (ESP p1 vs the RK raw idbloader gap).
+**Residual follow-up (NOT this task):** the `docs/partition-contract.md` `x86-ab`
+addendum (ESP p1 vs the RK raw idbloader gap). The x86 OTA bundle (`.raucb`) is
+now wired: `orchestrate.sh`'s `efi`/`grub` Stage-4 branch calls `build-bundle.sh`
+after `assemble-disk-x86.sh` (T10 wired, T11 offline-proven).
 
 ---
 
