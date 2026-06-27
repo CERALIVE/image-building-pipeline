@@ -191,3 +191,103 @@ Any change to a size, label, slot role, the threshold N, or the `/data` contract
 
 1. bump the contract version (v1 → v2) at the top of this file, and
 2. be coordinated with a mass re-flash — there is no in-place migration path for the GPT.
+
+---
+
+## 9. x86-ab ADDENDUM — ESP + grubenv layout (Intel N100/N200, AMD mini-PC)
+
+> **Additive only — the RK3588 contract above (§§1–8) is unchanged.** This section
+> documents the already-shipped x86 A/B layout produced by
+> `v2/lib/assemble-disk-x86.sh` (Task 12). The slot sizes (`rootfs_a`, `rootfs_b`,
+> `data`) are **identical** to the RK3588 layout; only p1 and the bootloader model
+> differ.
+
+### 9.1 What changes on x86
+
+RK3588 needs a **16 MB raw gap** before p1 for the idbloader + U-Boot + ATF blobs
+(written directly to sectors, no GPT entry). x86 boots via **UEFI**, so the platform
+firmware lives in the board's own SPI flash — there is **no raw gap**. p1 is instead
+an **EFI System Partition** (GPT type `EF00`, FAT32, PARTLABEL `boot`) that holds
+GRUB and the `grubenv` boot-selection state.
+
+The bootloader state model also differs. RK3588 uses a vendor U-Boot 2017.09 with no
+working `fw_setenv`, so its A/B state lives in a hand-rolled text file on the FAT
+`boot` partition. x86 GRUB has full persistent env via `grub-editenv`, so the state
+lives in a **grubenv** block on the ESP — read by GRUB at boot time and rewritten by
+RAUC's native `bootloader=grub` backend on install and `mark-good`.
+
+### 9.2 x86-ab A/B layout
+
+GPT, 1 MiB alignment. Sizes in **MB (= MiB, 2^20 bytes)**.
+
+| # | Partition label | Role | Size (MB) | FS | Mount |
+|---|-----------------|------|-----------|----|----|
+| — | *(no gap)* | x86 has no raw idbloader/U-Boot/ATF gap — UEFI lives in platform SPI flash | **0** | — | — |
+| p1 | `boot` | EFI System Partition: `EFI/BOOT/BOOTX64.EFI` (GRUB removable path), `EFI/BOOT/grub.cfg` (RAUC slot selector), `EFI/BOOT/grubenv` (boot-selection state) | **256** | vfat (FAT32) | `/boot/efi` |
+| p2 | `rootfs_a` | RAUC rootfs **slot A** (incl. `/boot` kernel/initrd) | **4096** | ext4 | `/` (when A active) |
+| p3 | `rootfs_b` | RAUC rootfs **slot B** | **4096** | ext4 | `/` (when B active) |
+| p4 | `data` | Persistent mutable state (survives A/B) | **remainder** (≥ 2048 floor) | ext4 | `/data` |
+
+**Fixed OS subtotal (p1 + p2 + p3) = 8448 MB** (8464 MB on RK3588 minus the 16 MB
+raw gap that x86 does not have).
+
+The ESP starts at sector 2048 (the 1 MiB grain) — no leading gap. `systemd-repart
+--offline` adopts the pre-seeded ESP and appends the rootfs/data slots.
+
+Single-slot fallback (storage < 16 GB) omits `rootfs_b`; the threshold and data-margin
+rules from §§4–5 apply unchanged.
+
+### 9.3 grubenv boot-selection state
+
+RAUC's `bootloader=grub` backend manages two variables per slot in the grubenv block:
+
+```
+ORDER=A B          # slot bootnames, priority order; head = primary
+A_OK=1             # slot A marked good (1) or not (0)
+A_TRY=0            # slot A retry flag (set by RAUC on install; cleared on mark-good)
+B_OK=1
+B_TRY=0
+```
+
+The grubenv lives on the **ESP** (p1), never inside a rootfs slot. A RAUC update
+rewrites the inactive rootfs slot — if the grubenv were there, the boot-selection
+state would be destroyed on every update (EC5). RAUC rewrites `ORDER`/`<slot>_OK`/
+`<slot>_TRY` via `grub-editenv` at install time and on `mark-good`; `grub-ab.cfg`
+is the boot-time selector that reads these variables.
+
+### 9.4 RAUC slot model (x86)
+
+`system.conf` for x86 uses `bootloader=grub` with the grubenv path on the ESP:
+
+```ini
+[system]
+compatible=ceralive-x86_64
+bootloader=grub
+grubenv=/boot/efi/EFI/BOOT/grubenv
+
+[slot.rootfs.0]
+bootname=A
+device=/dev/disk/by-partlabel/rootfs_a
+type=ext4
+
+[slot.rootfs.1]
+bootname=B
+device=/dev/disk/by-partlabel/rootfs_b
+type=ext4
+```
+
+Reference partitions by **PARTLABEL** (same rule as RK3588 — never by FS-UUID).
+
+### 9.5 Build artifacts
+
+`v2/lib/assemble-disk-x86.sh` is the offline producer (the x86 twin of
+`lib/assemble-disk.sh`). It uses `sgdisk` to pre-seed the ESP at sector 2048, then
+`systemd-repart --offline` to append the rootfs/data slots, then
+`grub-mkstandalone` to write `EFI/BOOT/BOOTX64.EFI` into the ESP via `mtools`
+(no loop mount, no root). The FROZEN repart slot defs (`20`/`30`/`40-*.conf`) are
+reused verbatim; only `platform/x86/10-esp.conf` replaces the RK3588
+`10-boot.conf` for p1.
+
+Full rationale and VERIFY-FIRST finding (why mkosi-native `Bootloader=grub` is
+incompatible with the offline-assemble model):
+[`v2/mkosi/platform/x86/README.md §2`](../v2/mkosi/platform/x86/README.md).
