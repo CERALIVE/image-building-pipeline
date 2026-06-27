@@ -221,6 +221,7 @@ run**" note with the observed procedure and output.
 
 | Document | Scope |
 |----------|-------|
+| `v2/docs/hardware-gated-completion.md` | **Consolidated execution runbook** — exact commands, file:line targets, and acceptance criteria for all 6 gated items |
 | `v2/docs/cog-display-addon.md` | Cog packaging recipe, libmali strategy, §7 hardware caveats |
 | `v2/docs/cog-display-hw-checklist.md` | Ready-to-run RK3588 render QA runbook (clears item 4) |
 | `v2/docs/kiosk-display.md` | Kiosk chassis, Phase-3 deferral register (e-ink, dual-display, live-video preview, battery telemetry) |
