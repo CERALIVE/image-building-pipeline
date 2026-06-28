@@ -22,8 +22,9 @@ name: v2 Pipeline CI
 
 on:
   push:
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
