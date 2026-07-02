@@ -1,0 +1,64 @@
+###############################################
+# CeraLive RTMP ingest gateway — MediaMTX config
+#
+# SINGLE-PURPOSE LAN RTMP RELAY. This is NOT a general media server.
+# It exists solely to accept a LAN RTMP publish at path `publish/live`
+# and serve that SAME path back on loopback so cerastream can pull it via
+#   rtmpsrc rtmp://127.0.0.1/publish/live
+# app=`publish`, stream=`live` are HARDCODED in cerastream
+# crates/cerastream-core/src/sources/spec.rs::InputKind::RtmpLocalhost
+# (read-only contract — do NOT change the path).
+#
+# EVERY protocol except RTMP is disabled ON PURPOSE (RTSP/HLS/WebRTC/MoQ/
+# API/metrics/pprof/playback). SRT is deliberately OFF here: the device's SRT
+# leg is served by a SEPARATE tool (srt-live-transmit, ceralive-srt-gateway),
+# never MediaMTX — MediaMTX cannot emit the UDP-TS that the SRT leg requires.
+#
+# Installed to /etc/mediamtx.yml by postinst-lib.sh::setup_rtmp_gateway.
+# Validated against the pinned mediamtx v1.19.2 binary at build authoring time
+# (only the :1935 RTMP listener starts; no other port is opened).
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+
+###############################################
+# Global settings -> protocols
+
+# RTMP: the ONLY enabled protocol. LAN publish + loopback pull on :1935.
+rtmp: true
+rtmpEncryption: "no"
+rtmpAddress: :1935
+
+# Everything else OFF — minimal single-purpose relay.
+rtsp: false
+hls: false
+webrtc: false
+srt: false
+moq: false
+api: false
+metrics: false
+pprof: false
+playback: false
+
+###############################################
+# Authentication — anonymous LAN publish + loopback read, scoped to publish/live.
+# 'any' user = anonymous; no password. Permissions are restricted to the single
+# contract path so nothing else is publishable/readable even if reached.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path: publish/live
+      - action: read
+        path: publish/live
+
+###############################################
+# Paths — exactly one: publish/live (the cerastream contract path).
+# A publisher pushes rtmp://<device>/publish/live; cerastream pulls the same
+# path on loopback. Empty path settings = MediaMTX defaults (on-demand relay).
+paths:
+  publish/live:
