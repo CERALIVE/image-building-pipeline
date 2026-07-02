@@ -249,6 +249,63 @@ RTMP gateway (item — Todo 14, `ceralive-rtmp-gateway.service`) shares the same
 LAN-scoped-in-v1 posture; if Todo 22 formalizes an ingest-auth model it should cover
 both gateways together. Until then both stay LAN-scoped.
 
+**Cross-reference:** the SEPARATE on-device functional QA for these same two
+gateways (does a real publisher actually reach cerastream end-to-end) is item 8
+below — this item is the auth/security posture only, not the relay-verification
+checklist.
+
+---
+
+## 8. Network-ingest gateway on-device relay verification (RTMP + SRT)
+
+**Status:** Deferred (hardware-gated — formalized by CeraUI Todo 22, extends the
+Todo 15 placeholder in item 7 without duplicating it)
+**Location:** `v2/mkosi/runtime/rtmp-gateway/` (Todo 14) + the srt-gateway unit
+(Todo 15, `v2/mkosi/customize/postinst-lib.sh::setup_srt_gateway`); consumed on the
+CeraUI side by `apps/backend/src/modules/network/network-ingest.ts`,
+`apps/backend/src/modules/streaming/gateway-availability.ts`, and
+`apps/frontend/src/lib/components/custom/NetworkIngestSection.svelte`
+(`ceralive/CeraUI` repo — see `CeraUI/AGENTS.md` → NETWORK-INGEST GATEWAY).
+
+**What it is:** Both LAN ingest gateways (`ceralive-rtmp-gateway.service` /
+MediaMTX and `ceralive-srt-gateway.service` / srt-live-transmit) are fully
+validated in software — unit files pass `systemd-analyze verify`, the CeraUI
+backend probes `systemctl is-active` and surfaces LAN publish URLs, and the
+`requires_gateway` stream-start gate is unit-tested against a mocked
+`GatewayProbe`. What is NOT yet proven is that a REAL publisher on the REAL LAN
+can push media through either gateway into a REAL cerastream process and have it
+appear as a live stream. The checklist to close this gap:
+
+1. **RTMP path:** on a physical device, point a phone's RTMP-capable broadcaster
+   app at `rtmp://<device-lan-ip>:1935/publish/live` (the exact hardcoded path
+   from item — Todo 14). Confirm in CeraUI's LiveView that the stream starts with
+   `pipeline=rtmp` selected (via the Network Ingest card,
+   `data-testid="network-ingest-select-rtmp"`) and that live video/audio is
+   flowing through to the configured server destination.
+2. **SRT path:** on the same physical device, point OBS Studio's SRT output at
+   `srt://<device-lan-ip>:4001` (caller mode, matching the gateway's
+   `mode=listener`). Confirm in CeraUI's LiveView that the stream starts with
+   `pipeline=srt` selected (`data-testid="network-ingest-select-srt"`) and that
+   live video/audio flows through identically to the RTMP path.
+3. **Both** confirmations must be captured with evidence (screen recording or
+   `test-results/` capture showing the LiveView active-encode state, plus the
+   `journalctl` output for the corresponding gateway unit during the session).
+
+**Why deferred:** No physical RK3588/x86 board with a real LAN and a real
+mobile/OBS publisher is reachable from this dev environment — the same
+constraint documented in items 1, 2, 4, and 6. MediaMTX's RTMP listener and
+srt-live-transmit's SRT listener are both third-party binaries; their runtime
+relay behavior (not just "the unit starts and the port opens") can only be
+proven by actually publishing media into them and observing it exit correctly
+through cerastream's loopback inputs (`InputKind::RtmpLocalhost` /
+`InputKind::SrtIngest`).
+
+**Unblock condition:** Flash a physical device with an image containing both
+gateways. Run the two-step checklist above (phone→RTMP, OBS→SRT) on the same
+LAN as the device. Capture evidence to `test-results/network-ingest-qa-<date>.txt`
+(mirroring the `boot-log-<date>.txt` convention in item 6). On sign-off, update
+this entry's status to RESOLVED and note the evidence file here.
+
 ---
 
 ## Related Documents
@@ -263,3 +320,13 @@ both gateways together. Until then both stay LAN-scoped.
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `v2/lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
+| `../CeraUI/AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
+
+## Cross-Repo Note
+
+Item 8 (network-ingest on-device relay verification) spans two repositories: the
+gateway units are baked here (`v2/mkosi/runtime/`, Todos 14–15); the runtime
+verification surface (LAN status probe, stream-start gate, LiveView card) lives
+in `ceralive/CeraUI` (Todos 16–19, see `CeraUI/AGENTS.md` → NETWORK-INGEST
+GATEWAY). The on-device checklist in item 8 exercises BOTH halves end-to-end —
+it is not resolvable by changes in either repo alone.
