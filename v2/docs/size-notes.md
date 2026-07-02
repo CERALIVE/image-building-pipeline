@@ -228,3 +228,101 @@ When the first full build measures the realised rootfs size, bump
 `v2/ci/size-baseline.json` by the observed delta in the same PR (per §4 procedure)
 and note "Added nginx TLS front: +~N MB" in the description. Until a wet build runs
 this is a paper estimate; the absolute gate remains the hard backstop.
+
+---
+
+## 6. SRT ingest gateway — `srt-tools` (Todo 15)
+
+### What changed
+
+`v2/manifests/packages/shared.list` gains one package so the device can run the LAN
+SRT ingest gateway (`ceralive-srt-gateway.service`): srt-live-transmit accepts an SRT
+listener on `:4001` and rewraps it as UDP-TS to `127.0.0.1:4000`, the ingest
+cerastream's SRT source listens on. This is the SRT sibling of the Todo 14 RTMP
+gateway; unlike MediaMTX it is a Debian apt package, not a fetched pinned binary.
+
+- `srt-tools` — ships `/usr/bin/srt-live-transmit` (+ `srt-file-transmit`,
+  `srt-tunnel`, `srt-ffplay`). It is the ONLY tool for this leg (MediaMTX cannot emit
+  UDP-TS, which cerastream's SRT ingest requires).
+
+### Co-installability with `libsrt1.5-openssl` (verified, not assumed)
+
+`srt-tools` `Depends: libsrt1.5-gnutls (= 1.5.1-1+deb12u1)` — the **GnuTLS** libsrt
+flavour, whereas the streaming stack (cerastream/srtla) links the **OpenSSL** flavour
+`libsrt1.5-openssl` (§ "OS-update + SRT transport infra" in `shared.list`). These two
+flavours **co-install cleanly** — verified against the actual bookworm arm64 `.deb`
+file lists:
+
+| Package | Shared-object path |
+|---|---|
+| `libsrt1.5-openssl` | `/usr/lib/aarch64-linux-gnu/libsrt.so.1.5{,.1}` |
+| `libsrt1.5-gnutls` | `/usr/lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5{,.1}` |
+
+The GnuTLS flavour ships a **distinct** `libsrt-gnutls.so.1.5` path, so there is NO
+file overlap with the OpenSSL `libsrt.so.1.5` cerastream needs, and neither package
+declares `Conflicts:`/`Replaces:` on the other (the split was deliberate — Debian
+`srt` changelog "Split build against OpenSSL and GnuTLS", Closes #933180). Only the
+`-dev` packages conflict; the runtime pair does not. `srt-live-transmit` links the
+GnuTLS libsrt; cerastream keeps its OpenSSL libsrt. Both are in the RUNTIME OS slot.
+
+### Size impact *(estimate)*
+
+Figures from bookworm `arm64` `Installed-Size` metadata (not a wet build on this host
+— upper-bound guidance, consistent with §1–§5).
+
+| Package | Approx installed size | Notes |
+|---|---|---|
+| `srt-tools` | ~3.05 MB (3122 KiB) | the 4 SRT CLI tools |
+| `libsrt1.5-gnutls` (dep) | ~0.85 MB (875 KiB) | GnuTLS libsrt flavour srt-tools links |
+| `libgnutls30` / `libnettle8` (deps) | **0 net** | already present in the base layer (confirmed in the built platform `dpkg` status) |
+
+**Net expected delta: ~+3.9 MB** (srt-tools + libsrt1.5-gnutls; the TLS libs are
+already pulled by NetworkManager/avahi/curl). Comfortably inside both the **1.5 GB
+absolute gate** and the **+50 MB relative regression gate** (§4). The gateway holds no
+state and writes nothing to the rootfs beyond the unit + apt payload.
+
+### Re-evaluation / baseline note
+
+When the first full build measures the realised rootfs size, fold this delta together
+with §5 (nginx) and Todo 14 (MediaMTX, fetched to `/usr/local/bin`) when bumping
+`v2/ci/size-baseline.json`, and note "Added srt-tools SRT ingest gateway: +~4 MB" in
+the description. Until a wet build runs this is a paper estimate; the absolute gate
+remains the hard backstop.
+
+## 7. LAN-ingest ingress firewall — `nftables` (Todo 14/15 INGRESS BOUNDARY)
+
+### What changed
+
+`v2/manifests/packages/shared.list` gains one package so the device can load the LAN
+ingest ingress firewall (`ceralive-ingest-firewall.service`): the ruleset
+`/etc/ceralive/ingest-firewall.nft` DROPs inbound `:1935` (RTMP, Todo 14) + `:4001`
+(SRT, Todo 15) on the WAN/modem/WWAN/ppp uplink classes so the two UNAUTHENTICATED v1
+gateways are reachable from LAN/hotspot ONLY (see `v2/docs/DEFERRED.md` items 7 & 8).
+
+- `nftables` — ships `/usr/sbin/nft` (the ruleset loader). The oneshot unit runs
+  `nft -f /etc/ceralive/ingest-firewall.nft` at boot into a dedicated
+  `inet ceralive_ingest_fw` table (policy-accept chain; only the two ingest ports on
+  the WAN classes are dropped — no default-deny, so no other service is affected).
+
+### Size impact *(estimate)*
+
+Figures from bookworm `arm64` `Installed-Size` metadata (not a wet build on this host
+— upper-bound guidance, consistent with §1–§6).
+
+| Package | Approx installed size | Notes |
+|---|---|---|
+| `nftables` | ~0.9 MB (the `nft` binary) | the ruleset loader |
+| `libnftnl11` / `libmnl0` (deps) | ~0.4 MB | netlink helpers |
+| `libnftables1` (dep) | **0 net** | already present in the base layer (pulled by NetworkManager — confirmed in the built app tree `libnftables.so.1`) |
+
+**Net expected delta: ~+1.3 MB** (`nft` + libnftnl/libmnl; `libnftables1` already
+present). Comfortably inside both the **1.5 GB absolute gate** and the **+50 MB
+relative regression gate** (§4). The firewall holds no state and writes nothing to the
+rootfs beyond the ruleset + unit + apt payload.
+
+### Re-evaluation / baseline note
+
+Fold this delta together with §5 (nginx), §6 (srt-tools) and Todo 14 (MediaMTX) when
+bumping `v2/ci/size-baseline.json`, and note "Added nftables LAN-ingest firewall:
++~1.3 MB" in the description. Until a wet build runs this is a paper estimate; the
+absolute gate remains the hard backstop.

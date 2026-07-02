@@ -1,0 +1,37 @@
+[Unit]
+Description=CeraLive RTMP ingest gateway (MediaMTX — LAN publish/live relay)
+Documentation=https://github.com/bluenviron/mediamtx
+# Single-purpose LAN RTMP relay: accepts a LAN publish at rtmp://<device>/publish/live
+# and serves the SAME path on loopback so cerastream can pull
+# rtmpsrc rtmp://127.0.0.1/publish/live (app=publish, stream=live — hardcoded in
+# cerastream spec.rs). Every non-RTMP MediaMTX protocol is disabled in the config.
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx.yml
+# Keep the ingest path alive: a crashed relay drops the operator's feed, so bring
+# it straight back (bounded restart, not a tight spin loop).
+Restart=on-failure
+RestartSec=2s
+
+# Least-privilege hardening — the relay needs only its RTMP socket, no on-disk state.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -928,6 +928,9 @@ main() {
   setup_ssh_firstboot          # task 10: first-boot SSH hardening (host keys + root pw-login + forced change)
   setup_provisioning           # task 11: first-boot WiFi provisioning AP (trigger + AP mode)
   setup_tls_proxy              # task 15: nginx TLS front on 443 -> 127.0.0.1:80 (port 80 kept; SC3)
+  setup_rtmp_gateway           # todo 14: pinned MediaMTX RTMP ingest relay (LAN publish/live -> loopback for cerastream)
+  setup_srt_gateway            # todo 15: srt-live-transmit SRT ingest gateway (LAN :4001 -> loopback udp://127.0.0.1:4000 for cerastream)
+  setup_ingest_firewall        # todo 14/15: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"

@@ -218,6 +218,138 @@ run**" note with the observed procedure and output.
 
 ---
 
+## 7. SRT ingest gateway — no v1 passphrase (LAN-scoped)
+
+**Status:** Deferred (placeholder — extend/formalize in Todo 22). The LAN-only
+INGRESS BOUNDARY is now SHIPPED (nftables firewall, below); only the auth model
+(passphrase/streamid) remains deferred.
+**Location:** `v2/mkosi/runtime/ceralive-srt-gateway.service` (ExecStart);
+`v2/mkosi/customize/postinst-lib.sh::setup_srt_gateway` (install + enable);
+`v2/mkosi/runtime/ingest-firewall/` (the ingress firewall that enforces the LAN
+boundary — ruleset + oneshot unit) + `postinst-lib.sh::setup_ingest_firewall`
+
+**What it is:** The LAN SRT ingest gateway (`ceralive-srt-gateway.service`, Todo 15)
+runs `srt-live-transmit "srt://:4001?mode=listener" "udp://127.0.0.1:4000"` — an SRT
+listener on `:4001` that rewraps the stream as UDP-TS onto cerastream's loopback
+ingest (`udp://127.0.0.1:4000`, cerastream `sources/spec.rs` `InputKind::SrtIngest`).
+In v1 the listener carries **NO SRT passphrase** (no `passphrase=`/`pbkeylen=` on the
+URI) and **no streamid ACL**, so anything on the LAN that can reach `:4001` can
+publish to the device's ingest.
+
+**Why deferred:** v1 is LAN-scoped — the gateway is expected to be reached only from
+the same trusted local network the operator controls (same trust boundary as the
+Todo 14 RTMP gateway's `publish/live` path and the CeraUI control plane on the LAN).
+Adding a passphrase needs a place to provision + surface the secret (device config +
+CeraUI UI + the publisher side), which is a coordinated cross-repo change, not a
+one-line unit edit. Shipping the LAN-only listener first unblocks the ingest datapath
+without prematurely committing a key-management design.
+
+**INGRESS BOUNDARY — SHIPPED (was the security gap in this LAN-scoped posture).**
+The "expected to be reached only from a trusted LAN" assumption above is no longer
+just an expectation: it is enforced in the image by the **LAN-ingest ingress
+firewall** (`v2/mkosi/runtime/ingest-firewall/ingest-firewall.nft` +
+`ceralive-ingest-firewall.service`, staged by
+`postinst-lib.sh::setup_ingest_firewall`, `nftables` added to `shared.list`). The
+`inet ceralive_ingest_fw` table DROPs inbound `:1935` (RTMP, Todo 14) and `:4001`
+(SRT, Todo 15) on the **WAN/modem/WWAN/ppp** uplink interface classes
+(`usb*`/`enx*`/`ww*`/`ppp*` — the SAME classes the SRTLA source-routing dispatcher
+in `networking-srtla.sh`/postinst §6 uses; loopback and LAN/hotspot ifaces are
+untouched). So a publisher out on the public internet (a modem's public/CGNAT
+address) can NEVER reach the anonymous ingest, while a phone/OBS on the LAN or the
+device hotspot still can. Verified on nftables v1.1.6 by a veth/netns packet test:
+`:1935`/`:4001` ingress on a modem-class iface (`usb9`) is DROPPED (drop counters
+fire); the same ports on a LAN-class iface (`eth9`) connect/deliver bytes.
+
+**RESIDUAL THREAT (still deferred):** the accepted surface is **unauthenticated LAN
+ingest** — anything reachable on the LAN, the device hotspot, or a bonded
+wifi-STATION link (also a `wlan*` iface, deliberately NOT dropped so the hotspot
+keeps working) can still publish. That is the intended v1 boundary; closing it needs
+the passphrase/streamid auth model below, NOT a firewall change. Do NOT add a
+passphrase to the unit as a workaround — the firewall is the v1 mitigation; the auth
+model is the v1.next hardening.
+
+**Unblock condition (Todo 22 to formalize):** Decide the SRT ingest auth model
+(per-device passphrase provisioned onto `/data` like the TLS cert, or a streamid ACL),
+then extend `ceralive-srt-gateway.service` ExecStart with `passphrase=…&pbkeylen=…`
+(or a streamid filter) sourced from a `/data`-persisted secret, wire the secret into
+CeraUI (generate/rotate/display), and document the publisher-side URI. Note: the
+RTMP gateway (item — Todo 14, `ceralive-rtmp-gateway.service`) shares the same
+LAN-scoped-in-v1 posture; if Todo 22 formalizes an ingest-auth model it should cover
+both gateways together. Until then both stay LAN-scoped.
+
+**Cross-reference:** the SEPARATE on-device functional QA for these same two
+gateways (does a real publisher actually reach cerastream end-to-end) is item 8
+below — this item is the auth/security posture only, not the relay-verification
+checklist.
+
+---
+
+## 8. Network-ingest gateway on-device relay verification (RTMP + SRT)
+
+**Status:** Deferred (hardware-gated — formalized by CeraUI Todo 22, extends the
+Todo 15 placeholder in item 7 without duplicating it)
+**Location:** `v2/mkosi/runtime/rtmp-gateway/` (Todo 14) + the srt-gateway unit
+(Todo 15, `v2/mkosi/customize/postinst-lib.sh::setup_srt_gateway`); consumed on the
+CeraUI side by `apps/backend/src/modules/network/network-ingest.ts`,
+`apps/backend/src/modules/streaming/gateway-availability.ts`, and
+`apps/frontend/src/lib/components/custom/NetworkIngestSection.svelte`
+(`ceralive/CeraUI` repo — see `CeraUI/AGENTS.md` → NETWORK-INGEST GATEWAY).
+
+**What it is:** Both LAN ingest gateways (`ceralive-rtmp-gateway.service` /
+MediaMTX and `ceralive-srt-gateway.service` / srt-live-transmit), plus the
+LAN-only ingress firewall that fronts them (`ceralive-ingest-firewall.service` /
+nftables — see item 7), are fully validated in software — unit files pass
+`systemd-analyze verify`, the RTMP publish→ffprobe-pull and SRT
+push→udp/4000-capture round-trips pass on the build host against the exact shipped
+config/ExecStart, the firewall's drop/allow logic is proven by a veth/netns packet
+test, the CeraUI backend probes `systemctl is-active` and surfaces LAN publish
+URLs, and the `requires_gateway` stream-start gate is unit-tested against a mocked
+`GatewayProbe`. What is NOT yet proven is that a REAL publisher on the REAL LAN
+can push media through either gateway into a REAL cerastream process and have it
+appear as a live stream — and that the firewall REFUSES the same publisher on a
+REAL modem/WAN NIC. The checklist to close this gap:
+
+1. **RTMP path:** on a physical device, point a phone's RTMP-capable broadcaster
+   app at `rtmp://<device-lan-ip>:1935/publish/live` (the exact hardcoded path
+   from item — Todo 14). Confirm in CeraUI's LiveView that the stream starts with
+   `pipeline=rtmp` selected (via the Network Ingest card,
+   `data-testid="network-ingest-select-rtmp"`) and that live video/audio is
+   flowing through to the configured server destination.
+2. **SRT path:** on the same physical device, point OBS Studio's SRT output at
+   `srt://<device-lan-ip>:4001` (caller mode, matching the gateway's
+   `mode=listener`). Confirm in CeraUI's LiveView that the stream starts with
+   `pipeline=srt` selected (`data-testid="network-ingest-select-srt"`) and that
+   live video/audio flows through identically to the RTMP path.
+3. **INGRESS BOUNDARY path (firewall):** with a modem/WWAN uplink attached (a
+   `usb*`/`enx*`/`ww*`/`ppp*` interface holding a routable address), confirm the
+   ingress firewall (`ceralive-ingest-firewall.service`) is active
+   (`systemctl is-active` = `active`; `nft list table inet ceralive_ingest_fw`
+   shows the two drop rules) and that a publisher reaching the device's **modem/WAN
+   address** on `:1935` / `:4001` is REFUSED while the **LAN/hotspot address**
+   still accepts (the host-side veth/netns packet proof only exercises the rule
+   logic, not a real modem NIC). Capture the `nft` drop-counter deltas.
+4. **All three** confirmations must be captured with evidence (screen recording or
+   `test-results/` capture showing the LiveView active-encode state, plus the
+   `journalctl` output for the corresponding gateway unit and the `nft list
+   ruleset` counter output during the session).
+
+**Why deferred:** No physical RK3588/x86 board with a real LAN and a real
+mobile/OBS publisher is reachable from this dev environment — the same
+constraint documented in items 1, 2, 4, and 6. MediaMTX's RTMP listener and
+srt-live-transmit's SRT listener are both third-party binaries; their runtime
+relay behavior (not just "the unit starts and the port opens") can only be
+proven by actually publishing media into them and observing it exit correctly
+through cerastream's loopback inputs (`InputKind::RtmpLocalhost` /
+`InputKind::SrtIngest`).
+
+**Unblock condition:** Flash a physical device with an image containing both
+gateways. Run the two-step checklist above (phone→RTMP, OBS→SRT) on the same
+LAN as the device. Capture evidence to `test-results/network-ingest-qa-<date>.txt`
+(mirroring the `boot-log-<date>.txt` convention in item 6). On sign-off, update
+this entry's status to RESOLVED and note the evidence file here.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
@@ -230,3 +362,13 @@ run**" note with the observed procedure and output.
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `v2/lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
+| `../CeraUI/AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
+
+## Cross-Repo Note
+
+Item 8 (network-ingest on-device relay verification) spans two repositories: the
+gateway units are baked here (`v2/mkosi/runtime/`, Todos 14–15); the runtime
+verification surface (LAN status probe, stream-start gate, LiveView card) lives
+in `ceralive/CeraUI` (Todos 16–19, see `CeraUI/AGENTS.md` → NETWORK-INGEST
+GATEWAY). The on-device checklist in item 8 exercises BOTH halves end-to-end —
+it is not resolvable by changes in either repo alone.

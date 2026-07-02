@@ -1,0 +1,24 @@
+[Unit]
+Description=CeraLive SRT ingest gateway — LAN srt-live-transmit listener → cerastream loopback UDP-TS ingest
+Documentation=https://github.com/Haivision/srt/blob/master/docs/apps/srt-live-transmit.md
+# LAN SRT contribution gateway. Accepts an SRT stream on :4001 (listener mode) and
+# rewraps it as an MPEG-TS elementary flow over loopback UDP to 127.0.0.1:4000 — the
+# UDP-TS ingest cerastream's SRT source listens on (cerastream cerastream-core
+# sources/spec.rs InputKind::SrtIngest → `udpsrc uri=udp://127.0.0.1:{port}`, default
+# port 4000). srt-live-transmit is the ONLY tool for this leg: MediaMTX cannot emit
+# UDP-TS, which cerastream's SRT ingest requires. The binary is provided by the
+# Debian `srt-tools` package and links the system libsrt that rides the RAUC OS slot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# v1 is LAN-scoped: NO SRT passphrase on the listener URI (no `passphrase=`/`pbkeylen=`).
+# Adding an SRT passphrase + streamid ACL is deferred — see v2/docs/DEFERRED.md
+# item 7 "SRT ingest gateway — no v1 passphrase (LAN-scoped)".
+ExecStart=/usr/bin/srt-live-transmit "srt://:4001?mode=listener" "udp://127.0.0.1:4000"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

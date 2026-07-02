@@ -609,3 +609,168 @@ Environment=PASETO_PUBLIC_KEY=${key}
 EOF
   chmod 0644 "${dropin}"
 }
+
+# ---------------------------------------------------------------------------
+# RTMP ingest gateway (Todo 14): bake the PINNED MediaMTX relay.
+#
+# Build-time FETCH of a pinned MediaMTX release (declarative pin: rtmp-gateway/
+# mediamtx.recipe.conf) for the TARGET architecture, verified against a per-arch
+# sha256 pin — the build FAILS CLOSED on any checksum mismatch. Stages the single
+# static binary to /usr/local/bin/mediamtx, the committed RTMP-only config to
+# /etc/mediamtx.yml, and the unit to
+# /etc/systemd/system/ceralive-rtmp-gateway.service, then enables it.
+#
+# The relay is a SINGLE-PURPOSE LAN RTMP ingest: it accepts a publish at path
+# `publish/live` and serves that SAME path on loopback so cerastream can pull
+# `rtmpsrc rtmp://127.0.0.1/publish/live` (app=publish, stream=live — HARDCODED in
+# cerastream crates/cerastream-core/src/sources/spec.rs). Every non-RTMP MediaMTX
+# protocol (RTSP/HLS/WebRTC/MoQ/API/metrics/pprof/playback) is disabled in
+# mediamtx.yml; SRT is deliberately OFF (the device's SRT leg is a SEPARATE
+# srt-live-transmit gateway, never MediaMTX — MediaMTX cannot emit UDP-TS).
+#
+# Runs INSIDE the target-arch chroot, so `dpkg --print-architecture` yields the
+# image arch and curl/tar/sha256sum are present (shared.list: curl + ca-certificates
+# + coreutils tar/sha256sum). Network is available — same as the apt install step.
+#
+# CERALIVE_RUNTIME_SRC must point at the runtime/ source dir. Test seams:
+#   MEDIAMTX_RECIPE        — override recipe path (default rtmp-gateway/mediamtx.recipe.conf)
+#   MEDIAMTX_ARCH          — override detected target arch (default dpkg --print-architecture)
+#   MEDIAMTX_LOCAL_TARBALL — use a local tarball instead of fetching (offline verify)
+#   MEDIAMTX_DESTROOT      — install-path prefix (default empty = real /usr,/etc; tests use a tmpdir)
+# ---------------------------------------------------------------------------
+setup_rtmp_gateway() {
+  log "installing RTMP ingest gateway (ceralive-rtmp-gateway.service — pinned MediaMTX LAN publish/live relay)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/rtmp-gateway"
+  local recipe="${MEDIAMTX_RECIPE:-${src}/mediamtx.recipe.conf}"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${recipe}" ]] \
+    || die "rtmp-gateway recipe not found: ${recipe} (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/mediamtx.yml" ]] \
+    || die "rtmp-gateway config not found: ${src}/mediamtx.yml"
+  [[ -f "${src}/ceralive-rtmp-gateway.service" ]] \
+    || die "rtmp-gateway unit not found: ${src}/ceralive-rtmp-gateway.service"
+
+  # Load the declarative PIN (KEY=value only).
+  local MEDIAMTX_VERSION="" MEDIAMTX_URL_TEMPLATE=""
+  # shellcheck source=/dev/null
+  source "${recipe}"
+  [[ -n "${MEDIAMTX_VERSION}" ]]      || die "${recipe}: MEDIAMTX_VERSION is required"
+  [[ -n "${MEDIAMTX_URL_TEMPLATE}" ]] || die "${recipe}: MEDIAMTX_URL_TEMPLATE is required"
+
+  # Target architecture — the chroot IS the image arch.
+  local arch="${MEDIAMTX_ARCH:-}"
+  if [[ -z "${arch}" ]]; then
+    command -v dpkg >/dev/null 2>&1 || die "dpkg not found — cannot resolve target architecture for MediaMTX fetch"
+    arch="$(dpkg --print-architecture)"
+  fi
+  case "${arch}" in
+    amd64 | arm64) ;;
+    *) die "unsupported architecture for MediaMTX: '${arch}' (recipe pins amd64 + arm64 only)" ;;
+  esac
+
+  # Resolve the per-arch sha256 pin (indirect expansion of MEDIAMTX_SHA256_<arch>).
+  local sha_var="MEDIAMTX_SHA256_${arch}"
+  local expected="${!sha_var:-}"
+  [[ -n "${expected}" ]] || die "${recipe}: missing ${sha_var} pin for arch '${arch}'"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  local tarball="${tmpdir}/mediamtx.tar.gz"
+
+  # Fetch the pinned tarball (or use a local one for offline verification).
+  if [[ -n "${MEDIAMTX_LOCAL_TARBALL:-}" ]]; then
+    [[ -f "${MEDIAMTX_LOCAL_TARBALL}" ]] \
+      || { rm -rf "${tmpdir}"; die "MEDIAMTX_LOCAL_TARBALL not a file: ${MEDIAMTX_LOCAL_TARBALL}"; }
+    cp "${MEDIAMTX_LOCAL_TARBALL}" "${tarball}"
+  else
+    command -v curl >/dev/null 2>&1 || { rm -rf "${tmpdir}"; die "curl not found — cannot fetch MediaMTX"; }
+    local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
+    url="${url//\{arch\}/${arch}}"
+    log "fetching MediaMTX ${MEDIAMTX_VERSION} (${arch}) from ${url}"
+    curl -fsSL --retry 3 -o "${tarball}" "${url}" \
+      || { rm -rf "${tmpdir}"; die "MediaMTX fetch failed: ${url}"; }
+  fi
+
+  # FAIL CLOSED on checksum mismatch — this is the pin gate.
+  local actual
+  actual="$(sha256sum "${tarball}" | awk '{print $1}')"
+  if [[ "${actual}" != "${expected}" ]]; then
+    rm -rf "${tmpdir}"
+    die "MediaMTX ${MEDIAMTX_VERSION} (${arch}) sha256 MISMATCH — build fails closed. expected=${expected} actual=${actual}"
+  fi
+  log "MediaMTX ${MEDIAMTX_VERSION} (${arch}) sha256 verified: ${actual}"
+
+  # Extract only the static binary from the verified tarball.
+  tar -xzf "${tarball}" -C "${tmpdir}" mediamtx \
+    || { rm -rf "${tmpdir}"; die "MediaMTX tarball missing 'mediamtx' binary member"; }
+
+  # Stage binary + config + unit. install -D creates parents; DESTROOT is empty in
+  # production (absolute /usr,/etc) and a tmpdir in the offline self-test.
+  local destroot="${MEDIAMTX_DESTROOT:-}"
+  install -D -m 0755 "${tmpdir}/mediamtx" "${destroot}/usr/local/bin/mediamtx"
+  install -D -m 0644 "${src}/mediamtx.yml" "${destroot}/etc/mediamtx.yml"
+  install -D -m 0644 "${src}/ceralive-rtmp-gateway.service" "${destroot}/etc/systemd/system/ceralive-rtmp-gateway.service"
+  rm -rf "${tmpdir}"
+
+  enable_service ceralive-rtmp-gateway.service
+}
+
+# ---------------------------------------------------------------------------
+# SRT ingest gateway (Todo 15): LAN srt-live-transmit listener → cerastream
+# loopback UDP-TS ingest.
+#
+# Installs the COMMITTED canonical unit under v2/mkosi/runtime/ (single source of
+# truth, no inline twin — Task 6 pattern) and enables it. Unlike setup_rtmp_gateway,
+# the srt-live-transmit binary is NOT fetched: it is the Debian `srt-tools` apt
+# package (shared.list), so this function only stages + enables the unit.
+#
+# The gateway accepts an SRT stream on :4001 (listener mode) and rewraps it as an
+# MPEG-TS elementary flow over loopback UDP to 127.0.0.1:4000 — the UDP-TS ingest
+# cerastream's SRT source listens on (cerastream crates/cerastream-core/src/sources/
+# spec.rs InputKind::SrtIngest → udpsrc uri=udp://127.0.0.1:{port}, default port
+# 4000). srt-live-transmit is the ONLY tool for this leg: MediaMTX cannot emit
+# UDP-TS, which cerastream's SRT ingest requires.
+#
+# srt-tools links the GnuTLS libsrt flavour (libsrt-gnutls.so.1.5, a DISTINCT path
+# from the OpenSSL libsrt.so.1.5 cerastream needs), so the two co-install cleanly.
+#
+# v1 is LAN-scoped: NO SRT passphrase on the listener (see v2/docs/DEFERRED.md
+# item 7). CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_srt_gateway() {
+  log "installing SRT ingest gateway (ceralive-srt-gateway.service — srt-live-transmit LAN listener :4001 → loopback udp://127.0.0.1:4000 for cerastream)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-srt-gateway.service" ]] \
+    || die "srt-gateway unit not found: ${src}/ceralive-srt-gateway.service (is \$SRCDIR/runtime mounted?)"
+
+  install -m 0644 "${src}/ceralive-srt-gateway.service" /etc/systemd/system/ceralive-srt-gateway.service
+
+  enable_service ceralive-srt-gateway.service
+}
+
+# ---------------------------------------------------------------------------
+# LAN-ingest ingress firewall (Todo 14/15 INGRESS BOUNDARY): the security half
+# of the two ingest gateways above. Stages the committed nftables ruleset +
+# oneshot unit under v2/mkosi/runtime/ingest-firewall/ (single source of truth,
+# Task-6 pattern) and enables the unit.
+#
+# The RTMP (:1935) and SRT (:4001) gateways accept an UNAUTHENTICATED publish in
+# v1 (no RTMP password, no SRT passphrase — DEFERRED.md items 7 & 8), which is
+# only safe on the LAN. The ruleset DROPS both ports on the WAN/modem/WWAN/ppp
+# uplink classes (usb*/enx*/ww*/ppp* — the SAME classes the SRTLA dispatcher in
+# §6 uses), so the anonymous ingest is reachable from LAN/hotspot ONLY. `nft` is
+# provided by the `nftables` package (shared.list); this function only stages +
+# enables. CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_ingest_firewall() {
+  log "installing LAN-ingest ingress firewall (ceralive-ingest-firewall.service — drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/ingest-firewall"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/ingest-firewall.nft" ]] \
+    || die "ingest-firewall ruleset not found: ${src}/ingest-firewall.nft (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-ingest-firewall.service" ]] \
+    || die "ingest-firewall unit not found: ${src}/ceralive-ingest-firewall.service"
+
+  install -D -m 0644 "${src}/ingest-firewall.nft" /etc/ceralive/ingest-firewall.nft
+  install -m 0644 "${src}/ceralive-ingest-firewall.service" /etc/systemd/system/ceralive-ingest-firewall.service
+
+  enable_service ceralive-ingest-firewall.service
+}
