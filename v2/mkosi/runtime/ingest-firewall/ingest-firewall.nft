@@ -1,0 +1,65 @@
+#!/usr/sbin/nft -f
+###############################################################################
+# CeraLive LAN-ingest ingress firewall — nftables ruleset.
+#
+# INGRESS BOUNDARY (security, v1). The two LAN ingest gateways —
+#   * ceralive-rtmp-gateway.service  (MediaMTX, TCP :1935, publish/live)
+#   * ceralive-srt-gateway.service   (srt-live-transmit, UDP :4001 listener)
+# accept an UNAUTHENTICATED publish (no RTMP auth password, no SRT passphrase in
+# v1 — see v2/docs/DEFERRED.md items 7 & 8). That is only safe on the trusted
+# LOCAL network. This ruleset enforces the LAN boundary those gateways assume:
+# it DROPS inbound :1935 / :4001 arriving on the WAN/modem/WWAN/ppp uplink
+# interface classes, so a publisher out on the public internet (a modem's public
+# or CGNAT address) can NEVER reach the anonymous ingest, while a phone/OBS on
+# the operator's LAN or the device hotspot still can.
+#
+# THREAT STANCE: the residual accepted surface is UNAUTHENTICATED LAN ingest —
+# anything that can reach :1935/:4001 over the LAN (or the device hotspot, or a
+# bonded wifi-STATION link, which is also a wlan* interface and is NOT dropped
+# here) can publish to the device. That is the deliberate v1 trust boundary; the
+# passphrase/streamid follow-up that would let this be safely WAN-exposed is
+# tracked in v2/docs/DEFERRED.md items 7 & 8 (do not add a passphrase here — add
+# the firewall, ship LAN-scoped, formalize auth in Todo 22).
+#
+# INTERFACE CLASSES are the SAME ones the SRTLA source-routing dispatcher uses
+# (v2/mkosi/customize/networking-srtla.sh / postinst §6): USB modems are usb*/
+# enx*, WWAN modems are ww* (wwan0 / wwp* / wwx*), cellular dial-up is ppp*. This
+# does NOT invent a new classification scheme — it reuses the image's existing one.
+#
+# ISOLATION: a dedicated `inet ceralive_ingest_fw` table with a policy-accept
+# chain that ONLY drops the two ingest ports on the WAN classes. It never flushes
+# the ruleset and never adds a default-deny, so it cannot break SSH/HTTPS/CeraUI
+# or any other service, and coexists with any future firewall table.
+#
+# Loaded by ceralive-ingest-firewall.service (oneshot) via `nft -f` at boot.
+# Idempotent: the create → delete → create dance atomically REPLACES our own
+# table on every (re)load without touching any other table.
+#
+# Verified on nftables v1.1.6 by a veth/netns packet test: :1935/:4001 ingress
+# on a modem-class iface (usb9) is DROPPED (nft drop counters fire); the same
+# ports on a LAN-class iface (eth9) CONNECT / deliver bytes.
+###############################################################################
+
+# Idempotent self-replace: ensure the table exists so `delete` never errors on a
+# cold first load, drop our previous copy, then install the current definition.
+table inet ceralive_ingest_fw
+delete table inet ceralive_ingest_fw
+
+table inet ceralive_ingest_fw {
+	chain input {
+		# policy accept: this chain is SURGICAL — it only DROPs the two ingest
+		# ports on WAN/modem classes and lets everything else fall through
+		# untouched (no default-deny, so no risk to other services).
+		type filter hook input priority -10; policy accept;
+
+		# Loopback is cerastream's own pull path (rtmp://127.0.0.1/publish/live
+		# and udp://127.0.0.1:4000) — never touch it.
+		iifname "lo" accept
+
+		# DROP the anonymous ingest ports when they arrive on a WAN/modem/WWAN/
+		# ppp uplink. `counter` makes the drops visible in `nft list ruleset`
+		# and journald for on-device diagnosis.
+		tcp dport 1935 iifname { "usb*", "enx*", "ww*", "ppp*" } counter drop
+		udp dport 4001 iifname { "usb*", "enx*", "ww*", "ppp*" } counter drop
+	}
+}

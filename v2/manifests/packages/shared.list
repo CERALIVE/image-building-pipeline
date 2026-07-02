@@ -119,6 +119,13 @@ srt-tools                # ships /usr/bin/srt-live-transmit — the LAN SRT inge
                          # cerastream needs). libgnutls30/libnettle8 are already pulled by the
                          # base, so the net add is srt-tools + libsrt1.5-gnutls (~4 MB — see
                          # v2/docs/size-notes.md §6). srt-live-transmit links the GnuTLS libsrt.
+nftables                 # ships /usr/sbin/nft — loads the LAN-ingest ingress firewall
+                         # (ceralive-ingest-firewall.service): DROP inbound :1935 (RTMP) +
+                         # :4001 (SRT) on modem/WWAN/ppp uplink classes so the two
+                         # UNAUTHENTICATED v1 ingest gateways are reachable from LAN/hotspot
+                         # ONLY, never from a WAN uplink (DEFERRED.md items 7 & 8). libnftables1
+                         # is already pulled by the base (NetworkManager dep), so the net add is
+                         # just the nft binary + libmnl/libnftnl (~1.5 MB — see size-notes.md §7).
 rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
 rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
                          # SPLIT the daemon out of `rauc` (binary-only); the runtime

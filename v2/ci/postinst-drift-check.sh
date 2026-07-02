@@ -58,6 +58,7 @@ readonly CONSOLIDATED_FUNCS=(
   configure_networking configure_services setup_hostname_service
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
   setup_provisioning setup_rtmp_gateway setup_srt_gateway
+  setup_ingest_firewall
 )
 
 FAIL=0

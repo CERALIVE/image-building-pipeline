@@ -1,0 +1,29 @@
+[Unit]
+Description=CeraLive LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks)
+Documentation=https://www.netfilter.org/projects/nftables/
+# INGRESS BOUNDARY (security, v1). Installs the nftables ruleset that keeps the two
+# UNAUTHENTICATED LAN ingest gateways — ceralive-rtmp-gateway.service (TCP :1935) and
+# ceralive-srt-gateway.service (UDP :4001) — reachable ONLY from LAN/hotspot, never
+# from a modem/WWAN/ppp WAN uplink. In v1 neither gateway carries a publish password
+# or SRT passphrase (LAN-scoped trust posture — see v2/docs/DEFERRED.md items 7 & 8);
+# this firewall is what enforces that boundary. Order this BEFORE the gateways so the
+# boundary is in place before either listener opens its socket.
+DefaultDependencies=no
+After=nftables.service systemd-sysctl.service
+Before=ceralive-rtmp-gateway.service ceralive-srt-gateway.service network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# iifname wildcard matching binds by NAME at packet time, so the rules are correct
+# even for modem/wifi interfaces that appear after boot — no network-online wait.
+ExecStart=/usr/sbin/nft -f /etc/ceralive/ingest-firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/ceralive/ingest-firewall.nft
+# Tear down only OUR table on stop (leading '-' = ignore if already absent); never
+# flush the whole ruleset, so any other firewall table is left intact.
+ExecStop=-/usr/sbin/nft delete table inet ceralive_ingest_fw
+
+[Install]
+WantedBy=multi-user.target

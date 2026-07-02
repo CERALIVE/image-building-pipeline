@@ -288,3 +288,41 @@ with §5 (nginx) and Todo 14 (MediaMTX, fetched to `/usr/local/bin`) when bumpin
 `v2/ci/size-baseline.json`, and note "Added srt-tools SRT ingest gateway: +~4 MB" in
 the description. Until a wet build runs this is a paper estimate; the absolute gate
 remains the hard backstop.
+
+## 7. LAN-ingest ingress firewall — `nftables` (Todo 14/15 INGRESS BOUNDARY)
+
+### What changed
+
+`v2/manifests/packages/shared.list` gains one package so the device can load the LAN
+ingest ingress firewall (`ceralive-ingest-firewall.service`): the ruleset
+`/etc/ceralive/ingest-firewall.nft` DROPs inbound `:1935` (RTMP, Todo 14) + `:4001`
+(SRT, Todo 15) on the WAN/modem/WWAN/ppp uplink classes so the two UNAUTHENTICATED v1
+gateways are reachable from LAN/hotspot ONLY (see `v2/docs/DEFERRED.md` items 7 & 8).
+
+- `nftables` — ships `/usr/sbin/nft` (the ruleset loader). The oneshot unit runs
+  `nft -f /etc/ceralive/ingest-firewall.nft` at boot into a dedicated
+  `inet ceralive_ingest_fw` table (policy-accept chain; only the two ingest ports on
+  the WAN classes are dropped — no default-deny, so no other service is affected).
+
+### Size impact *(estimate)*
+
+Figures from bookworm `arm64` `Installed-Size` metadata (not a wet build on this host
+— upper-bound guidance, consistent with §1–§6).
+
+| Package | Approx installed size | Notes |
+|---|---|---|
+| `nftables` | ~0.9 MB (the `nft` binary) | the ruleset loader |
+| `libnftnl11` / `libmnl0` (deps) | ~0.4 MB | netlink helpers |
+| `libnftables1` (dep) | **0 net** | already present in the base layer (pulled by NetworkManager — confirmed in the built app tree `libnftables.so.1`) |
+
+**Net expected delta: ~+1.3 MB** (`nft` + libnftnl/libmnl; `libnftables1` already
+present). Comfortably inside both the **1.5 GB absolute gate** and the **+50 MB
+relative regression gate** (§4). The firewall holds no state and writes nothing to the
+rootfs beyond the ruleset + unit + apt payload.
+
+### Re-evaluation / baseline note
+
+Fold this delta together with §5 (nginx), §6 (srt-tools) and Todo 14 (MediaMTX) when
+bumping `v2/ci/size-baseline.json`, and note "Added nftables LAN-ingest firewall:
++~1.3 MB" in the description. Until a wet build runs this is a paper estimate; the
+absolute gate remains the hard backstop.

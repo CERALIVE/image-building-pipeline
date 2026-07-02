@@ -60,5 +60,10 @@ authInternalUsers:
 # Paths — exactly one: publish/live (the cerastream contract path).
 # A publisher pushes rtmp://<device>/publish/live; cerastream pulls the same
 # path on loopback. Empty path settings = MediaMTX defaults (on-demand relay).
+#
+# FOOTGUN: the key MUST be the QUOTED slash-path 'publish/live', never the bare
+# parent `publish` — they are DIFFERENT MediaMTX paths, and the parent form leaves
+# the loopback pull of rtmp://127.0.0.1/publish/live resolving to a dead path (yaml
+# still lints clean). Verified live on pinned v1.19.2 by a host publish->ffprobe-pull.
 paths:
-  publish/live:
+  'publish/live':

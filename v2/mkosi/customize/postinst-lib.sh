@@ -746,3 +746,31 @@ setup_srt_gateway() {
 
   enable_service ceralive-srt-gateway.service
 }
+
+# ---------------------------------------------------------------------------
+# LAN-ingest ingress firewall (Todo 14/15 INGRESS BOUNDARY): the security half
+# of the two ingest gateways above. Stages the committed nftables ruleset +
+# oneshot unit under v2/mkosi/runtime/ingest-firewall/ (single source of truth,
+# Task-6 pattern) and enables the unit.
+#
+# The RTMP (:1935) and SRT (:4001) gateways accept an UNAUTHENTICATED publish in
+# v1 (no RTMP password, no SRT passphrase — DEFERRED.md items 7 & 8), which is
+# only safe on the LAN. The ruleset DROPS both ports on the WAN/modem/WWAN/ppp
+# uplink classes (usb*/enx*/ww*/ppp* — the SAME classes the SRTLA dispatcher in
+# §6 uses), so the anonymous ingest is reachable from LAN/hotspot ONLY. `nft` is
+# provided by the `nftables` package (shared.list); this function only stages +
+# enables. CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# ---------------------------------------------------------------------------
+setup_ingest_firewall() {
+  log "installing LAN-ingest ingress firewall (ceralive-ingest-firewall.service — drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/ingest-firewall"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/ingest-firewall.nft" ]] \
+    || die "ingest-firewall ruleset not found: ${src}/ingest-firewall.nft (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-ingest-firewall.service" ]] \
+    || die "ingest-firewall unit not found: ${src}/ceralive-ingest-firewall.service"
+
+  install -D -m 0644 "${src}/ingest-firewall.nft" /etc/ceralive/ingest-firewall.nft
+  install -m 0644 "${src}/ceralive-ingest-firewall.service" /etc/systemd/system/ceralive-ingest-firewall.service
+
+  enable_service ceralive-ingest-firewall.service
+}
