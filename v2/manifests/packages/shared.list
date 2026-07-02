@@ -109,6 +109,16 @@ libsrt1.5-openssl        # SYSTEM SRT transport library that the streaming stack
                          # bookworm provides 1.5.x; the OpenSSL backend matches the
                          # CERALIVE build. (The first-party CERALIVE/srt FORK .deb is
                          # a SEPARATE App-layer artifact — see LAYER-MAP.md §libsrt.)
+srt-tools                # ships /usr/bin/srt-live-transmit — the LAN SRT ingest gateway
+                         # (ceralive-srt-gateway.service, Todo 15): SRT listener :4001 →
+                         # loopback udp://127.0.0.1:4000 UDP-TS for cerastream. This is the
+                         # ONLY tool for that leg (MediaMTX cannot emit UDP-TS). CO-INSTALLS
+                         # cleanly with libsrt1.5-openssl above: srt-tools Depends on the
+                         # GnuTLS flavour (libsrt1.5-gnutls, ships libsrt-gnutls.so.1.5 — a
+                         # DISTINCT path, so NO file conflict with the OpenSSL libsrt.so.1.5
+                         # cerastream needs). libgnutls30/libnettle8 are already pulled by the
+                         # base, so the net add is srt-tools + libsrt1.5-gnutls (~4 MB — see
+                         # v2/docs/size-notes.md §6). srt-live-transmit links the GnuTLS libsrt.
 rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
 rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
                          # SPLIT the daemon out of `rauc` (binary-only); the runtime

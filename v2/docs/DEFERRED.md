@@ -218,6 +218,39 @@ run**" note with the observed procedure and output.
 
 ---
 
+## 7. SRT ingest gateway — no v1 passphrase (LAN-scoped)
+
+**Status:** Deferred (placeholder — extend/formalize in Todo 22)
+**Location:** `v2/mkosi/runtime/ceralive-srt-gateway.service` (ExecStart);
+`v2/mkosi/customize/postinst-lib.sh::setup_srt_gateway` (install + enable)
+
+**What it is:** The LAN SRT ingest gateway (`ceralive-srt-gateway.service`, Todo 15)
+runs `srt-live-transmit "srt://:4001?mode=listener" "udp://127.0.0.1:4000"` — an SRT
+listener on `:4001` that rewraps the stream as UDP-TS onto cerastream's loopback
+ingest (`udp://127.0.0.1:4000`, cerastream `sources/spec.rs` `InputKind::SrtIngest`).
+In v1 the listener carries **NO SRT passphrase** (no `passphrase=`/`pbkeylen=` on the
+URI) and **no streamid ACL**, so anything on the LAN that can reach `:4001` can
+publish to the device's ingest.
+
+**Why deferred:** v1 is LAN-scoped — the gateway is expected to be reached only from
+the same trusted local network the operator controls (same trust boundary as the
+Todo 14 RTMP gateway's `publish/live` path and the CeraUI control plane on the LAN).
+Adding a passphrase needs a place to provision + surface the secret (device config +
+CeraUI UI + the publisher side), which is a coordinated cross-repo change, not a
+one-line unit edit. Shipping the LAN-only listener first unblocks the ingest datapath
+without prematurely committing a key-management design.
+
+**Unblock condition (Todo 22 to formalize):** Decide the SRT ingest auth model
+(per-device passphrase provisioned onto `/data` like the TLS cert, or a streamid ACL),
+then extend `ceralive-srt-gateway.service` ExecStart with `passphrase=…&pbkeylen=…`
+(or a streamid filter) sourced from a `/data`-persisted secret, wire the secret into
+CeraUI (generate/rotate/display), and document the publisher-side URI. Note: the
+RTMP gateway (item — Todo 14, `ceralive-rtmp-gateway.service`) shares the same
+LAN-scoped-in-v1 posture; if Todo 22 formalizes an ingest-auth model it should cover
+both gateways together. Until then both stay LAN-scoped.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
