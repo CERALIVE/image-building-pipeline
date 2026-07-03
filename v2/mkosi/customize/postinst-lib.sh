@@ -620,13 +620,15 @@ EOF
 # /etc/mediamtx.yml, and the unit to
 # /etc/systemd/system/ceralive-rtmp-gateway.service, then enables it.
 #
-# The relay is a SINGLE-PURPOSE LAN RTMP ingest: it accepts a publish at path
-# `publish/live` and serves that SAME path on loopback so cerastream can pull
-# `rtmpsrc rtmp://127.0.0.1/publish/live` (app=publish, stream=live — HARDCODED in
-# cerastream crates/cerastream-core/src/sources/spec.rs). Every non-RTMP MediaMTX
-# protocol (RTSP/HLS/WebRTC/MoQ/API/metrics/pprof/playback) is disabled in
-# mediamtx.yml; SRT is deliberately OFF (the device's SRT leg is a SEPARATE
-# srt-live-transmit gateway, never MediaMTX — MediaMTX cannot emit UDP-TS).
+# The relay is a SINGLE-PURPOSE LAN ingest: it accepts a publish at path
+# `publish/live` over RTMP (:1935) OR SRT (:4001) and serves that SAME path on
+# loopback so cerastream can pull it — `rtmpsrc rtmp://127.0.0.1/publish/live` or
+# `srt://127.0.0.1:4001?streamid=read:publish/live` (app=publish, stream=live —
+# HARDCODED in cerastream crates/cerastream-core/src/sources/spec.rs). Every other
+# MediaMTX protocol (RTSP/HLS/WebRTC/MoQ/API/metrics/pprof/playback) is disabled in
+# mediamtx.yml. MediaMTX's built-in SRT server terminates the SRT leg directly
+# (Todo 14 B2): cerastream pulls the SRT read stream on loopback, exactly as it
+# pulls RTMP — one MediaMTX process owns both ingest protocols.
 #
 # Runs INSIDE the target-arch chroot, so `dpkg --print-architecture` yields the
 # image arch and curl/tar/sha256sum are present (shared.list: curl + ca-certificates
@@ -715,51 +717,19 @@ setup_rtmp_gateway() {
 }
 
 # ---------------------------------------------------------------------------
-# SRT ingest gateway (Todo 15): LAN srt-live-transmit listener → cerastream
-# loopback UDP-TS ingest.
-#
-# Installs the COMMITTED canonical unit under v2/mkosi/runtime/ (single source of
-# truth, no inline twin — Task 6 pattern) and enables it. Unlike setup_rtmp_gateway,
-# the srt-live-transmit binary is NOT fetched: it is the Debian `srt-tools` apt
-# package (shared.list), so this function only stages + enables the unit.
-#
-# The gateway accepts an SRT stream on :4001 (listener mode) and rewraps it as an
-# MPEG-TS elementary flow over loopback UDP to 127.0.0.1:4000 — the UDP-TS ingest
-# cerastream's SRT source listens on (cerastream crates/cerastream-core/src/sources/
-# spec.rs InputKind::SrtIngest → udpsrc uri=udp://127.0.0.1:{port}, default port
-# 4000). srt-live-transmit is the ONLY tool for this leg: MediaMTX cannot emit
-# UDP-TS, which cerastream's SRT ingest requires.
-#
-# srt-tools links the GnuTLS libsrt flavour (libsrt-gnutls.so.1.5, a DISTINCT path
-# from the OpenSSL libsrt.so.1.5 cerastream needs), so the two co-install cleanly.
-#
-# v1 is LAN-scoped: NO SRT passphrase on the listener (see v2/docs/DEFERRED.md
-# item 7). CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
-# ---------------------------------------------------------------------------
-setup_srt_gateway() {
-  log "installing SRT ingest gateway (ceralive-srt-gateway.service — srt-live-transmit LAN listener :4001 → loopback udp://127.0.0.1:4000 for cerastream)"
-  local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "${src}" && -f "${src}/ceralive-srt-gateway.service" ]] \
-    || die "srt-gateway unit not found: ${src}/ceralive-srt-gateway.service (is \$SRCDIR/runtime mounted?)"
-
-  install -m 0644 "${src}/ceralive-srt-gateway.service" /etc/systemd/system/ceralive-srt-gateway.service
-
-  enable_service ceralive-srt-gateway.service
-}
-
-# ---------------------------------------------------------------------------
 # LAN-ingest ingress firewall (Todo 14/15 INGRESS BOUNDARY): the security half
-# of the two ingest gateways above. Stages the committed nftables ruleset +
+# of the ingest gateway above. Stages the committed nftables ruleset +
 # oneshot unit under v2/mkosi/runtime/ingest-firewall/ (single source of truth,
 # Task-6 pattern) and enables the unit.
 #
-# The RTMP (:1935) and SRT (:4001) gateways accept an UNAUTHENTICATED publish in
-# v1 (no RTMP password, no SRT passphrase — DEFERRED.md items 7 & 8), which is
-# only safe on the LAN. The ruleset DROPS both ports on the WAN/modem/WWAN/ppp
-# uplink classes (usb*/enx*/ww*/ppp* — the SAME classes the SRTLA dispatcher in
-# §6 uses), so the anonymous ingest is reachable from LAN/hotspot ONLY. `nft` is
-# provided by the `nftables` package (shared.list); this function only stages +
-# enables. CERALIVE_RUNTIME_SRC must point at the runtime/ source dir.
+# The single MediaMTX gateway accepts an UNAUTHENTICATED publish on BOTH its RTMP
+# (:1935) and SRT (:4001) listeners in v1 (no RTMP password, no SRT passphrase —
+# DEFERRED.md items 7 & 8), which is only safe on the LAN. The ruleset DROPS both
+# ports on the WAN/modem/WWAN/ppp uplink classes (usb*/enx*/ww*/ppp* — the SAME
+# classes the SRTLA dispatcher in §6 uses), so the anonymous ingest is reachable
+# from LAN/hotspot ONLY. `nft` is provided by the `nftables` package (shared.list);
+# this function only stages + enables. CERALIVE_RUNTIME_SRC must point at the
+# runtime/ source dir.
 # ---------------------------------------------------------------------------
 setup_ingest_firewall() {
   log "installing LAN-ingest ingress firewall (ceralive-ingest-firewall.service — drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)"

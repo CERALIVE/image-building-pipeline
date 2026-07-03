@@ -2,12 +2,12 @@
 ###############################################################################
 # CeraLive LAN-ingest ingress firewall — nftables ruleset.
 #
-# INGRESS BOUNDARY (security, v1). The two LAN ingest gateways —
-#   * ceralive-rtmp-gateway.service  (MediaMTX, TCP :1935, publish/live)
-#   * ceralive-srt-gateway.service   (srt-live-transmit, UDP :4001 listener)
-# accept an UNAUTHENTICATED publish (no RTMP auth password, no SRT passphrase in
+# INGRESS BOUNDARY (security, v1). One LAN ingest gateway —
+#   * ceralive-rtmp-gateway.service  (MediaMTX): RTMP on TCP :1935 + SRT on UDP :4001,
+#     both scoped to the publish/live path (Todo 14 B2 — MediaMTX terminates both).
+# accepts an UNAUTHENTICATED publish (no RTMP auth password, no SRT passphrase in
 # v1 — see v2/docs/DEFERRED.md items 7 & 8). That is only safe on the trusted
-# LOCAL network. This ruleset enforces the LAN boundary those gateways assume:
+# LOCAL network. This ruleset enforces the LAN boundary that gateway assumes:
 # it DROPS inbound :1935 / :4001 arriving on the WAN/modem/WWAN/ppp uplink
 # interface classes, so a publisher out on the public internet (a modem's public
 # or CGNAT address) can NEVER reach the anonymous ingest, while a phone/OBS on
