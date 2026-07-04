@@ -53,7 +53,7 @@ table inet ceralive_ingest_fw {
 		type filter hook input priority -10; policy accept;
 
 		# Loopback is cerastream's own pull path (rtmp://127.0.0.1/publish/live
-		# and udp://127.0.0.1:4000) — never touch it.
+		# and srt://127.0.0.1:4001?streamid=read:publish/live) — never touch it.
 		iifname "lo" accept
 
 		# DROP the anonymous ingest ports when they arrive on a WAN/modem/WWAN/
