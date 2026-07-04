@@ -231,63 +231,45 @@ this is a paper estimate; the absolute gate remains the hard backstop.
 
 ---
 
-## 6. SRT ingest gateway — `srt-tools` (Todo 15)
+## 6. SRT ingest gateway — served by MediaMTX (Todo 14 B2, no extra package)
 
 ### What changed
 
-`v2/manifests/packages/shared.list` gains one package so the device can run the LAN
-SRT ingest gateway (`ceralive-srt-gateway.service`): srt-live-transmit accepts an SRT
-listener on `:4001` and rewraps it as UDP-TS to `127.0.0.1:4000`, the ingest
-cerastream's SRT source listens on. This is the SRT sibling of the Todo 14 RTMP
-gateway; unlike MediaMTX it is a Debian apt package, not a fetched pinned binary.
+The LAN SRT ingest leg is served by MediaMTX's built-in SRT server, on the same
+single MediaMTX process as the RTMP leg (`ceralive-rtmp-gateway.service`, Todo 14):
+`srt: yes` + `srtAddress: :4001` in `mediamtx.yml` open the SRT listener on `:4001`,
+and cerastream pulls the SRT read stream on loopback
+(`srt://127.0.0.1:4001?streamid=read:publish/live`). No separate SRT gateway process
+and no separate apt package are involved.
 
-- `srt-tools` — ships `/usr/bin/srt-live-transmit` (+ `srt-file-transmit`,
-  `srt-tunnel`, `srt-ffplay`). It is the ONLY tool for this leg (MediaMTX cannot emit
-  UDP-TS, which cerastream's SRT ingest requires).
-
-### Co-installability with `libsrt1.5-openssl` (verified, not assumed)
-
-`srt-tools` `Depends: libsrt1.5-gnutls (= 1.5.1-1+deb12u1)` — the **GnuTLS** libsrt
-flavour, whereas the streaming stack (cerastream/srtla) links the **OpenSSL** flavour
-`libsrt1.5-openssl` (§ "OS-update + SRT transport infra" in `shared.list`). These two
-flavours **co-install cleanly** — verified against the actual bookworm arm64 `.deb`
-file lists:
-
-| Package | Shared-object path |
-|---|---|
-| `libsrt1.5-openssl` | `/usr/lib/aarch64-linux-gnu/libsrt.so.1.5{,.1}` |
-| `libsrt1.5-gnutls` | `/usr/lib/aarch64-linux-gnu/libsrt-gnutls.so.1.5{,.1}` |
-
-The GnuTLS flavour ships a **distinct** `libsrt-gnutls.so.1.5` path, so there is NO
-file overlap with the OpenSSL `libsrt.so.1.5` cerastream needs, and neither package
-declares `Conflicts:`/`Replaces:` on the other (the split was deliberate — Debian
-`srt` changelog "Split build against OpenSSL and GnuTLS", Closes #933180). Only the
-`-dev` packages conflict; the runtime pair does not. `srt-live-transmit` links the
-GnuTLS libsrt; cerastream keeps its OpenSSL libsrt. Both are in the RUNTIME OS slot.
+- The former `srt-tools` package (which shipped `/usr/bin/srt-live-transmit` for the
+  now-retired standalone SRT gateway) is **removed from
+  `v2/manifests/packages/shared.list`** — nothing else in the image references it.
 
 ### Size impact *(estimate)*
 
-Figures from bookworm `arm64` `Installed-Size` metadata (not a wet build on this host
-— upper-bound guidance, consistent with §1–§5).
+The SRT leg now adds **0 bytes** beyond what Todo 14 already counts: it rides the same
+pinned MediaMTX binary (recorded in `v2/manifests/size-budget.json` /
+`/usr/local/bin/mediamtx`). Removing `srt-tools` reclaims the space it previously
+occupied.
 
-| Package | Approx installed size | Notes |
+| Package | Approx installed size | Direction |
 |---|---|---|
-| `srt-tools` | ~3.05 MB (3122 KiB) | the 4 SRT CLI tools |
-| `libsrt1.5-gnutls` (dep) | ~0.85 MB (875 KiB) | GnuTLS libsrt flavour srt-tools links |
-| `libgnutls30` / `libnettle8` (deps) | **0 net** | already present in the base layer (confirmed in the built platform `dpkg` status) |
+| `srt-tools` | ~3.05 MB (3122 KiB) | **REMOVED** (reclaimed) |
+| `libsrt1.5-gnutls` (was a `srt-tools` dep) | ~0.85 MB (875 KiB) | **REMOVED** (no longer pulled) |
 
-**Net expected delta: ~+3.9 MB** (srt-tools + libsrt1.5-gnutls; the TLS libs are
-already pulled by NetworkManager/avahi/curl). Comfortably inside both the **1.5 GB
-absolute gate** and the **+50 MB relative regression gate** (§4). The gateway holds no
-state and writes nothing to the rootfs beyond the unit + apt payload.
+**Net expected delta: ~−3.9 MB** vs the previous topology. `libsrt1.5-openssl` (the
+OpenSSL libsrt the streaming stack/srtla links) is **KEPT** — it is unrelated to the
+removed GnuTLS `srt-tools` flavour and remains a runtime dependency of cerastream/srtla
+(§ "OS-update + SRT transport infra" in `shared.list`).
 
 ### Re-evaluation / baseline note
 
-When the first full build measures the realised rootfs size, fold this delta together
-with §5 (nginx) and Todo 14 (MediaMTX, fetched to `/usr/local/bin`) when bumping
-`v2/ci/size-baseline.json`, and note "Added srt-tools SRT ingest gateway: +~4 MB" in
-the description. Until a wet build runs this is a paper estimate; the absolute gate
-remains the hard backstop.
+When the first full build measures the realised rootfs size, fold this reclaim
+together with §5 (nginx) and Todo 14 (MediaMTX, fetched to `/usr/local/bin`) when
+bumping `v2/ci/size-baseline.json`, and note "Removed srt-tools; MediaMTX now serves
+SRT: −~4 MB" in the description. Until a wet build runs this is a paper estimate; the
+absolute gate remains the hard backstop.
 
 ## 7. LAN-ingest ingress firewall — `nftables` (Todo 14/15 INGRESS BOUNDARY)
 
@@ -295,9 +277,10 @@ remains the hard backstop.
 
 `v2/manifests/packages/shared.list` gains one package so the device can load the LAN
 ingest ingress firewall (`ceralive-ingest-firewall.service`): the ruleset
-`/etc/ceralive/ingest-firewall.nft` DROPs inbound `:1935` (RTMP, Todo 14) + `:4001`
-(SRT, Todo 15) on the WAN/modem/WWAN/ppp uplink classes so the two UNAUTHENTICATED v1
-gateways are reachable from LAN/hotspot ONLY (see `v2/docs/DEFERRED.md` items 7 & 8).
+`/etc/ceralive/ingest-firewall.nft` DROPs inbound `:1935` (RTMP) + `:4001` (SRT) —
+both served by the single MediaMTX gateway (Todo 14 B2) — on the WAN/modem/WWAN/ppp
+uplink classes so the UNAUTHENTICATED v1 ingest gateway is reachable from LAN/hotspot
+ONLY (see `v2/docs/DEFERRED.md` items 7 & 8).
 
 - `nftables` — ships `/usr/sbin/nft` (the ruleset loader). The oneshot unit runs
   `nft -f /etc/ceralive/ingest-firewall.nft` at boot into a dedicated
@@ -322,7 +305,7 @@ rootfs beyond the ruleset + unit + apt payload.
 
 ### Re-evaluation / baseline note
 
-Fold this delta together with §5 (nginx), §6 (srt-tools) and Todo 14 (MediaMTX) when
-bumping `v2/ci/size-baseline.json`, and note "Added nftables LAN-ingest firewall:
+Fold this delta together with §5 (nginx), §6 (srt-tools reclaim) and Todo 14 (MediaMTX)
+when bumping `v2/ci/size-baseline.json`, and note "Added nftables LAN-ingest firewall:
 +~1.3 MB" in the description. Until a wet build runs this is a paper estimate; the
 absolute gate remains the hard backstop.

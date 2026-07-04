@@ -1,10 +1,17 @@
 [Unit]
-Description=CeraLive RTMP ingest gateway (MediaMTX — LAN publish/live relay)
+Description=CeraLive LAN ingest gateway (MediaMTX — RTMP :1935 + SRT :4001 publish/live relay)
 Documentation=https://github.com/bluenviron/mediamtx
-# Single-purpose LAN RTMP relay: accepts a LAN publish at rtmp://<device>/publish/live
-# and serves the SAME path on loopback so cerastream can pull
-# rtmpsrc rtmp://127.0.0.1/publish/live (app=publish, stream=live — hardcoded in
-# cerastream spec.rs). Every non-RTMP MediaMTX protocol is disabled in the config.
+# Single-purpose LAN ingest relay: accepts a LAN publish at path publish/live over
+# RTMP (rtmp://<device>/publish/live) or SRT (srt://<device>:4001?streamid=publish:publish/live)
+# and serves the SAME path on loopback so cerastream can pull it — rtmpsrc
+# rtmp://127.0.0.1/publish/live or srt://127.0.0.1:4001?streamid=read:publish/live
+# (app=publish, stream=live — hardcoded in cerastream spec.rs). MediaMTX's built-in
+# SRT server owns the SRT leg (Todo 14 B2); every other MediaMTX protocol is disabled.
+#
+# X-CeraLive-Protocols=rtmp srt
+#   ^ fleet-probe protocol marker. CeraUI probes this gateway BY NAME
+#   (ceralive-rtmp-gateway.service) and the ingest protocols it terminates; the
+#   machine-readable source of truth is /etc/mediamtx.yml (srt: yes + srtAddress: :4001).
 After=network.target
 Wants=network.target
 

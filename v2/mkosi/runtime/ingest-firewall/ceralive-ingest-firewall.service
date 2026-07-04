@@ -1,16 +1,16 @@
 [Unit]
 Description=CeraLive LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks)
 Documentation=https://www.netfilter.org/projects/nftables/
-# INGRESS BOUNDARY (security, v1). Installs the nftables ruleset that keeps the two
-# UNAUTHENTICATED LAN ingest gateways — ceralive-rtmp-gateway.service (TCP :1935) and
-# ceralive-srt-gateway.service (UDP :4001) — reachable ONLY from LAN/hotspot, never
-# from a modem/WWAN/ppp WAN uplink. In v1 neither gateway carries a publish password
-# or SRT passphrase (LAN-scoped trust posture — see v2/docs/DEFERRED.md items 7 & 8);
-# this firewall is what enforces that boundary. Order this BEFORE the gateways so the
+# INGRESS BOUNDARY (security, v1). Installs the nftables ruleset that keeps the
+# UNAUTHENTICATED LAN ingest gateway — ceralive-rtmp-gateway.service (MediaMTX,
+# RTMP :1935 + SRT :4001) — reachable ONLY from LAN/hotspot, never from a
+# modem/WWAN/ppp WAN uplink. In v1 the gateway carries no publish password or SRT
+# passphrase (LAN-scoped trust posture — see v2/docs/DEFERRED.md items 7 & 8); this
+# firewall is what enforces that boundary. Order this BEFORE the gateway so the
 # boundary is in place before either listener opens its socket.
 DefaultDependencies=no
 After=nftables.service systemd-sysctl.service
-Before=ceralive-rtmp-gateway.service ceralive-srt-gateway.service network-pre.target shutdown.target
+Before=ceralive-rtmp-gateway.service network-pre.target shutdown.target
 Wants=network-pre.target
 Conflicts=shutdown.target
 

@@ -1,22 +1,36 @@
 ###############################################
-# CeraLive RTMP ingest gateway — MediaMTX config
+# CeraLive LAN ingest gateway — MediaMTX config
 #
-# SINGLE-PURPOSE LAN RTMP RELAY. This is NOT a general media server.
-# It exists solely to accept a LAN RTMP publish at path `publish/live`
-# and serve that SAME path back on loopback so cerastream can pull it via
-#   rtmpsrc rtmp://127.0.0.1/publish/live
+# SINGLE-PURPOSE LAN INGEST RELAY. This is NOT a general media server.
+# It accepts a LAN publish at path `publish/live` over EITHER protocol —
+#   * RTMP on :1935
+#   * SRT  on :4001
+# and serves that SAME path back on loopback so cerastream can pull it:
+#   RTMP: rtmpsrc rtmp://127.0.0.1/publish/live
+#   SRT : srt://127.0.0.1:4001?streamid=read:publish/live
 # app=`publish`, stream=`live` are HARDCODED in cerastream
-# crates/cerastream-core/src/sources/spec.rs::InputKind::RtmpLocalhost
-# (read-only contract — do NOT change the path).
+# crates/cerastream-core/src/sources/spec.rs (InputKind::RtmpLocalhost /
+# InputKind::SrtIngest — read-only contract, do NOT change the path).
 #
-# EVERY protocol except RTMP is disabled ON PURPOSE (RTSP/HLS/WebRTC/MoQ/
-# API/metrics/pprof/playback). SRT is deliberately OFF here: the device's SRT
-# leg is served by a SEPARATE tool (srt-live-transmit, ceralive-srt-gateway),
-# never MediaMTX — MediaMTX cannot emit the UDP-TS that the SRT leg requires.
+# TOPOLOGY (Todo 14 — gateway consolidation B2): a single MediaMTX process
+# terminates BOTH ingest protocols. Its built-in SRT server serves the SRT leg
+# directly and cerastream PULLS the SRT read stream on loopback (the read URI
+# above), exactly as it pulls RTMP — there is no separate srt-live-transmit
+# gateway and no UDP-TS push leg. The loopback pull contract is why MediaMTX
+# alone suffices for SRT here (an SRT push→UDP-TS rewrap tool is not needed).
+#
+# EVERY other protocol stays disabled ON PURPOSE (RTSP/HLS/WebRTC/MoQ/API/
+# metrics/pprof/playback).
+#
+# MACHINE-READABLE TOPOLOGY CONTRACT: the two TOP-LEVEL keys `srt: yes` and
+# `srtAddress: :4001` below ARE the proof CeraUI's dual-topology probe parses
+# (CeraUI Todo 16) to decide the SRT leg is served by MediaMTX. Keep BOTH keys
+# EXACT and TOP-LEVEL. An older image that predates this todo ships `srt: false`
+# (SRT off), so it can NEVER false-positive as SRT-capable.
 #
 # Installed to /etc/mediamtx.yml by postinst-lib.sh::setup_rtmp_gateway.
 # Validated against the pinned mediamtx v1.19.2 binary at build authoring time
-# (only the :1935 RTMP listener starts; no other port is opened).
+# (only the :1935 RTMP + :4001 SRT listeners start; no other port is opened).
 ###############################################
 
 logLevel: info
@@ -25,16 +39,25 @@ logDestinations: [stdout]
 ###############################################
 # Global settings -> protocols
 
-# RTMP: the ONLY enabled protocol. LAN publish + loopback pull on :1935.
+# RTMP: LAN publish + loopback pull on :1935 (unchanged).
 rtmp: true
 rtmpEncryption: "no"
 rtmpAddress: :1935
+
+# SRT: LAN publish + loopback read on :4001. MediaMTX terminates SRT directly
+# (Todo 14 B2) — there is NO external srt-live-transmit gateway. cerastream pulls
+# the SRT read stream on loopback via the PINNED read contract:
+#   srt://127.0.0.1:4001?streamid=read:publish/live
+# (a LAN publisher pushes srt://<device>:4001?streamid=publish:publish/live).
+# `srt: yes` + `srtAddress: :4001` are the machine-readable topology contract
+# (see header) — keep BOTH EXACT and TOP-LEVEL.
+srt: yes
+srtAddress: :4001
 
 # Everything else OFF — minimal single-purpose relay.
 rtsp: false
 hls: false
 webrtc: false
-srt: false
 moq: false
 api: false
 metrics: false
@@ -44,7 +67,11 @@ playback: false
 ###############################################
 # Authentication — anonymous LAN publish + loopback read, scoped to publish/live.
 # 'any' user = anonymous; no password. Permissions are restricted to the single
-# contract path so nothing else is publishable/readable even if reached.
+# contract path so nothing else is publishable/readable even if reached. The SAME
+# rule authorizes BOTH the RTMP and SRT legs (MediaMTX permissions are path+action,
+# protocol-agnostic). The LAN trust boundary is enforced OUT OF BAND by the
+# ingress firewall (ceralive-ingest-firewall.service drops :1935/:4001 on WAN/
+# modem uplinks) — no SRT passphrase in v1 (deferred, see v2/docs/DEFERRED.md #7).
 authMethod: internal
 authInternalUsers:
   - user: any
@@ -58,8 +85,11 @@ authInternalUsers:
 
 ###############################################
 # Paths — exactly one: publish/live (the cerastream contract path).
-# A publisher pushes rtmp://<device>/publish/live; cerastream pulls the same
-# path on loopback. Empty path settings = MediaMTX defaults (on-demand relay).
+# A publisher pushes rtmp://<device>/publish/live or
+# srt://<device>:4001?streamid=publish:publish/live; cerastream pulls the same
+# path on loopback — RTMP via rtmp://127.0.0.1/publish/live, SRT via
+# srt://127.0.0.1:4001?streamid=read:publish/live. Empty path settings =
+# MediaMTX defaults (on-demand relay).
 #
 # FOOTGUN: the key MUST be the QUOTED slash-path 'publish/live', never the bare
 # parent `publish` — they are DIFFERENT MediaMTX paths, and the parent form leaves
