@@ -111,6 +111,43 @@ def check_addon_semantics(addons: list[dict]) -> list[str]:
     return errors
 
 
+def validate_single_file(path_str: str) -> int:
+    """Schema-only validation of ONE add-on descriptor (build-time fail-fast).
+
+    Consumed by lib/build-feature-sysext.sh to gate a build on its target
+    descriptor being schema-valid BEFORE any build side-effect. This is the
+    build-time counterpart to the CI glob mode in main(): it validates a SINGLE
+    descriptor against addon.schema.json ONLY. The cross-descriptor G1/G2/E6
+    semantics (check_addon_semantics) stay CI-only — they need the whole
+    descriptor set and cannot be judged from one file — so this mode never runs
+    them. Prints the failing path + the FIRST jsonschema error and returns
+    non-zero on any violation; prints an OK line and returns 0 on success.
+    """
+    path = Path(path_str)
+    addon_schema = load_schema(ADDON_SCHEMA)
+    Draft202012Validator.check_schema(addon_schema)
+    validator = Draft202012Validator(addon_schema)
+
+    try:
+        instance = json.loads(path.read_text())
+    except FileNotFoundError:
+        print(f"FAIL {path}: descriptor not found", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"FAIL {path}: not valid JSON: {exc}", file=sys.stderr)
+        return 1
+
+    errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.absolute_path))
+    if errors:
+        err = errors[0]
+        field = "/".join(map(str, err.absolute_path)) or "(root)"
+        print(f"FAIL {path}: field '{field}': {err.message}", file=sys.stderr)
+        return 1
+
+    print(f"OK   addon  {path}")
+    return 0
+
+
 def main() -> int:
     rc = 0
 
@@ -186,4 +223,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--file":
+        # Build-time single-descriptor fail-fast (schema only). Default glob mode
+        # (CI, with the G1/G2/E6 semantics) is left completely untouched.
+        if len(argv) != 2:
+            print(
+                "usage: validate-manifests.py --file <descriptor.json>",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        sys.exit(validate_single_file(argv[1]))
     sys.exit(main())

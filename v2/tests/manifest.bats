@@ -1033,6 +1033,60 @@ build_feature_fixture() {
 }
 
 # ===========================================================================
+# 14b. Build-time descriptor schema fail-fast (C6b).
+#     build-feature-sysext.sh validates its target add-on descriptor against
+#     addon.schema.json (reusing ci/validate-manifests.py --file) BEFORE any
+#     build side-effect. A corrupt descriptor aborts non-zero with the path in
+#     stderr and produces no artifact; a schema-valid descriptor proceeds. The
+#     cross-descriptor G1/G2/E6 semantics stay CI-only (glob mode) — build time
+#     is schema-only. Needs python3 + jsonschema (a suite-wide assumption, §13).
+# ===========================================================================
+
+@test "c6b: --file mode of validate-manifests.py rejects a corrupt descriptor, names its path" {
+  local desc="$FIXTURES/invalid-addon-build-fixture.json"
+  run bash -c "python3 '$VALIDATE_PY' --file '$desc' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$desc"* ]]
+  [[ "$output" == *"name"* ]]
+}
+
+@test "c6b: --file mode of validate-manifests.py passes a shipped descriptor (exit 0)" {
+  run bash -c "python3 '$VALIDATE_PY' --file '$V2/manifests/addons/debug-toolset.json' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"debug-toolset.json"* ]]
+}
+
+@test "c6b build: a corrupt descriptor is REJECTED before any build side-effect, names the path" {
+  local stg="$BATS_TEST_TMPDIR/c6b-staging" out="$BATS_TEST_TMPDIR/c6b-out"
+  local desc="$FIXTURES/invalid-addon-build-fixture.json"
+  mkdir -p "$stg/usr/bin"
+  printf 'x\n' > "$stg/usr/bin/t"
+  run bash "$LIB_DIR/build-feature-sysext.sh" \
+        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --deb-staging "$stg" --out "$out" --descriptor "$desc" \
+        --keyring "$BATS_TEST_TMPDIR/c6b-gnupg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$desc"* ]]
+  # No build side-effect: the output dir is never created past the fail-fast gate.
+  [ ! -e "$out" ]
+}
+
+@test "c6b build: a schema-valid descriptor passes validation and the build proceeds" {
+  feature_prereqs || skip "signing toolchain not available"
+  local stg="$BATS_TEST_TMPDIR/c6b-ok-staging" out="$BATS_TEST_TMPDIR/c6b-ok-out"
+  mkdir -p "$stg/usr/bin"
+  printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
+  run bash "$LIB_DIR/build-feature-sysext.sh" \
+        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --deb-staging "$stg" --out "$out" \
+        --descriptor "$V2/manifests/addons/debug-toolset.json" \
+        --keyring "$BATS_TEST_TMPDIR/c6b-ok-gnupg"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"descriptor schema-valid"* ]]
+  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
+}
+
+# ===========================================================================
 # 15. BSP provenance + advisory kernel drift-guard (Task 3).
 #     fetch-debs.sh records the floating kernel BSP's resolved version + content
 #     sha256 into a gitignored bsp-provenance.json, and runs an ADVISORY drift
