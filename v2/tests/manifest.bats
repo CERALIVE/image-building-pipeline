@@ -1100,6 +1100,44 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
 
+@test "bsp drift (C6b): default (STRICT unset) with drift warns and exits 0" {
+  local base="$BATS_TEST_TMPDIR/baseline-default.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BSP drift"* ]]
+  [[ "$output" == *"advisory — build continues"* ]]
+}
+
+@test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with drift fails (non-zero)" {
+  local base="$BATS_TEST_TMPDIR/baseline-strict.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BSP drift"* ]]
+  [[ "$output" == *"BSP_DRIFT_STRICT=1"* ]]
+}
+
+@test "bsp drift (C6b): no drift is exit 0 in BOTH default and strict modes" {
+  local base="$BATS_TEST_TMPDIR/baseline-match-modes.json"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"matches known-good baseline"* ]]
+}
+
+@test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
+  local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
+  cp "$BSP_BASELINE_JSON" "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first run"* ]]
+  run cat "$base"
+  [[ "$output" == *"$BSP_SHA_A"* ]]
+}
+
 @test "bsp provenance: bsp_write_json emits valid JSON with schema_version + 64-hex sha256" {
   local out="$BATS_TEST_TMPDIR/prov/bsp-provenance.json"
   run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"

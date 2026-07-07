@@ -189,11 +189,19 @@ pinning it**:
   deliberately **excluded from the build-matrix `sha256` determinism comparison**
   (that job hashes the normalized build-plan string, never a file tree — the
   floating BSP would otherwise break determinism).
-- **Advisory drift-guard** — `bsp_drift_check` compares the captured version+hash
-  against the committed baseline `v2/manifests/bsp-baseline.json`. On a mismatch it
-  prints a `BSP drift` banner to stdout and **always exits 0 — drift is NEVER
-  fatal** (build continues). It compares the **content hash, not just the version**,
-  so a same-version re-spin is still caught.
+- **Drift-guard (warn-default, strict opt-in, C6b)** — `bsp_drift_check` compares
+  the captured version+hash against the committed baseline
+  `v2/manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
+  stdout. Exit policy is **opt-in**: by DEFAULT (`BSP_DRIFT_STRICT` unset/≠1) it
+  **exits 0 — drift is warn-only, never fatal** (build continues, the historical
+  byte-for-byte path). With **`BSP_DRIFT_STRICT=1`** a real mismatch against a
+  SEEDED baseline **exits non-zero, failing the build** (the seeding run + a clean
+  match stay exit 0 regardless — a fresh baseline can never fail a strict build). It
+  compares the **content hash, not just the version**, so a same-version re-spin is
+  still caught. **Promotion criterion:** flipping the default to strict is a FUTURE
+  change gated on (1) the baseline seeded with a real known-good version+sha256 AND
+  (2) a fleet manifest run clean of drift — see
+  [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
 - **First-run / unseeded** — the committed baseline ships UNSEEDED (`version` and
   `sha256` are `null`) because the concrete vendor build cannot be resolved offline.
   The first authenticated real build seeds the baseline with the actual values,

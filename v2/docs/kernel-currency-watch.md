@@ -49,6 +49,32 @@ adopt it in a stable track.
 `linux-image-vendor-rk35xx` package. A jump from 6.1.x to 6.12.x in the
 provenance log is the concrete indicator.
 
+## Drift-Guard Exit Policy + Strict-Gate Promotion Criterion
+
+`bsp_drift_check` is **warn-only by default** and **strict on opt-in** (C6b):
+
+- **Default** (`BSP_DRIFT_STRICT` unset or ≠ `1`) — drift prints the `BSP drift`
+  banner and returns **exit 0**. The build continues; the BSP stays floating. This
+  is the historical, byte-for-byte behavior.
+- **`BSP_DRIFT_STRICT=1`** — a real version/hash mismatch against a **seeded**
+  baseline returns **non-zero**, failing the build. The seeding run (unseeded /
+  first run) and a clean match are **always exit 0** regardless of the flag, so a
+  fresh baseline can never fail a strict build. CI or an operator that wants the
+  gate today opts in with this env var.
+
+**Promotion criterion — when to flip the default to strict.** Flipping strict from
+opt-in to the DEFAULT is a **future change, not this one**. Both conditions must
+hold first:
+
+1. **Baseline seeded** — `v2/manifests/bsp-baseline.json` carries a real known-good
+   `version` + `sha256` (it currently ships UNSEEDED / `null`).
+2. **Fleet manifest clean** — a fleet manifest run confirms every board resolves to
+   that same known-good BSP with no outstanding drift.
+
+Until both are true, strict-by-default would fail green builds on the very first
+authenticated fetch. When both hold, a future change flips the default (and this
+section records the flip).
+
 ### Trigger 2 — Mainline lands a frozen V4L2 stateless H.265 ENCODE uAPI + VEPU580 driver
 
 **Condition:** The Linux kernel merges BOTH:
