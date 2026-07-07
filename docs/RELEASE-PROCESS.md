@@ -174,6 +174,38 @@ leaf or intermediate rotates through the channel without a reflash) is a
 [`v2/docs/cert-rotation-policy.md`](../v2/docs/cert-rotation-policy.md) for the
 full contract; it isn't duplicated here.
 
+### CI determinism coverage — cross-runner build-plan gate (C6b)
+
+CI cannot run the privileged mkosi build (no network / privileged container /
+board under `DRY_RUN`), so it does **not** produce — let alone dual-host-compare —
+a real signed `.raucb`. What it CAN prove is the reachable precondition for the
+bit-identical bundle above: that the **build plan / input closure** resolves
+host-independently.
+
+- The [`v2-ci.yml`](../.github/workflows/v2-ci.yml) `build-plan-xrunner` +
+  `build-plan-xrunner-gate` jobs resolve the `DRY_RUN=1` mkosi plan on **two
+  independent GitHub-hosted runners** (`ubuntu-24.04` + `ubuntu-22.04`), hash the
+  **normalized** per-board plan ([`v2/ci/emit-build-plan-sha.sh`](../v2/ci/emit-build-plan-sha.sh)
+  — the same task-15 normalization: strip the abs repo path → `<REPO>`, sha256 the
+  single line), and fail if the two runners disagree on any board's plan sha256
+  ([`v2/ci/assert-xrunner-parity.sh`](../v2/ci/assert-xrunner-parity.sh)). It
+  extends the `build-matrix` job's **same-host** rebuild-parity into a **cross-host**
+  check — catching host-dependence (hostname / arch / toolchain / an un-normalized
+  path) a single host can never surface.
+- **Runner diversity:** two independent GH runners of different OS images were
+  chosen (not cross-OS/arch or two containers) because the DRY_RUN resolution needs
+  a Linux container runtime + GNU coreutils — macOS/Windows runners can't run it —
+  while `ubuntu-24.04`/`ubuntu-22.04` are guaranteed-available, fast, and ship
+  different toolchains (glibc/coreutils/python/docker). It starts **advisory**
+  (`continue-on-error` gated on the repo variable `XRUNNER_PARITY_BLOCKING`);
+  promote it to a required check after one green in-budget run.
+- **SCOPE LIMIT:** this compares the deterministic PLAN / input closure ONLY, **not
+  a full `.raucb` image build**. **Full-artifact (`.raucb`) determinism remains
+  future work** — it would require running the real privileged mkosi build on two
+  independent hosts and comparing the signed bundle bytes. The plan gate plus the
+  `SOURCE_DATE_EPOCH` clamp above is the necessary precondition for a bit-identical
+  image, not a substitute for proving it.
+
 ---
 
 ## 5. R2 upload — the ACTUAL mechanism (MANUAL today)

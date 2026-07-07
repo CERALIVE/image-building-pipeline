@@ -17,6 +17,13 @@
 # addon-publish (task 35) stays inside the no-secrets invariant: it runs
 # DRY_RUN=1 (plan only, uploads nothing) so the real aws-s3 upload in
 # v2/lib/upload-addons.sh never fires without R2_* creds + a signed artifact.
+#
+# Cross-runner build-plan determinism (C6b): build-plan-xrunner resolves the same
+# DRY_RUN plan on TWO INDEPENDENT runners (ubuntu-24.04 + ubuntu-22.04) and
+# build-plan-xrunner-gate asserts the NORMALIZED per-board plan sha256 is identical
+# across them — extending task 15's SAME-host rebuild-parity to a CROSS-host gate.
+# PLAN-ONLY (not a full .raucb build); starts ADVISORY (see that job's header for
+# the runner-diversity rationale + promotion note).
 
 name: v2 Pipeline CI
 
@@ -413,3 +420,134 @@ jobs:
             echo "no x86 disk artifact present (DRY_RUN) — running harness in skip mode"
             ./v2/tests/qemu-x86.sh
           fi
+
+  # ---------------------------------------------------------------------------
+  # Cross-runner build-plan determinism gate (C6b) — PLAN-ONLY, ADVISORY.
+  #
+  # WHAT: resolves the DRY_RUN mkosi build plan on TWO INDEPENDENT GitHub-hosted
+  # runners (ubuntu-24.04 + ubuntu-22.04) for each board, hashes the NORMALIZED
+  # plan per board (the SAME task-15 normalization the build-matrix job uses,
+  # factored into v2/ci/emit-build-plan-sha.sh), then the gate job asserts the
+  # per-board sha256 is IDENTICAL across the two runners (v2/ci/assert-xrunner-
+  # parity.sh). A divergent plan sha ⇒ the plan leaked host state ⇒ RED.
+  #
+  # This EXTENDS the build-matrix job's SAME-host rebuild-parity into a CROSS-host
+  # check: rebuild-parity catches time-dependence on one host; this catches
+  # HOST-dependence (hostname / arch / toolchain version / an un-normalized
+  # absolute path) that a single host can never surface.
+  #
+  # RUNNER-DIVERSITY CHOICE (documented per task C6b): TWO INDEPENDENT GH-HOSTED
+  # RUNNERS of different OS images — ubuntu-24.04 + ubuntu-22.04 (both x86_64).
+  # WHY these, and not cross-OS/arch or two containers:
+  #   * The v2 build's DRY_RUN plan resolution needs a Linux CONTAINER runtime
+  #     (docker/podman — select_build_mode dies without one) + GNU coreutils. macOS
+  #     GH runners ship no docker daemon and BSD tools; Windows has no Linux
+  #     container path — so neither can run this resolution. True cross-OS runner
+  #     diversity is NOT available for this build (this file's header already notes
+  #     "The only CI runner is Linux/x86_64").
+  #   * ubuntu-24.04 vs ubuntu-22.04 are two genuinely INDEPENDENT runner VMs with
+  #     DIFFERENT toolchains (glibc 2.39 vs 2.35, coreutils, python, docker) — real
+  #     host diversity that catches toolchain-dependent plan drift — while being
+  #     guaranteed-available and fast on ANY repo tier (no arm64/macOS capacity
+  #     flakiness — honours the "don't ship a flaky blocking gate" rule).
+  #   * The matrix is one line from an arm64 leg (ubuntu-24.04-arm) once that
+  #     runner's capacity/cost is confirmed for this repo — the strongest proof, but
+  #     not a reliable default today. Two isolated containers were the documented
+  #     fallback; not needed — genuine independent runners ARE available here.
+  #
+  # SCOPE GUARD: this compares the deterministic PLAN / input closure, NOT a dual-
+  # host full .raucb image build (CI runs no privileged mkosi build). Full-artifact
+  # determinism remains future work — see docs/RELEASE-PROCESS.md §4
+  # "CI determinism coverage — cross-runner build-plan gate (C6b)".
+  #
+  # NON-BLOCKING / PROMOTION NOTE: starts ADVISORY. `continue-on-error` on BOTH jobs
+  # is gated on the repo variable XRUNNER_PARITY_BLOCKING — UNSET (default) ⇒
+  # continue-on-error true ⇒ the gate annotates red but does NOT fail the workflow
+  # run (non-blocking). PROMOTE by setting repo variable XRUNNER_PARITY_BLOCKING=true
+  # (and adding `build-plan-xrunner-gate` to the branch-protection required checks)
+  # ONCE one green CI run confirms both DRY_RUN legs + the gate complete within the
+  # existing CI time budget (the resolve is ~seconds, so this is expected to pass
+  # immediately). Do NOT make it a REQUIRED check while it is advisory.
+  # ---------------------------------------------------------------------------
+  build-plan-xrunner:
+    name: build-plan cross-runner sha (${{ matrix.os }} / ${{ matrix.board }}) [plan-only]
+    runs-on: ${{ matrix.os }}
+    needs: bats
+    # Advisory by default; promote to blocking via repo var XRUNNER_PARITY_BLOCKING.
+    continue-on-error: ${{ vars.XRUNNER_PARITY_BLOCKING != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # TWO INDEPENDENT runners × the SAME board matrix as build-matrix above.
+        os: [ubuntu-24.04, ubuntu-22.04]
+        board: [rock-5b-plus, x86-minipc]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Install resolver deps
+        run: pip install --quiet jsonschema PyYAML
+
+      - name: Stub sibling-checkout workspace
+        run: |
+          # fetch-debs asserts srtla/ CeraUI/ are siblings of the workspace root
+          # (ARCHITECTURE.md §5). Only image-building-pipeline is checked out here,
+          # so point CERALIVE_WORKSPACE at a stub tree — under DRY_RUN no .debs are
+          # built from source, so empty dirs satisfy the tripwire.
+          ws="${RUNNER_TEMP}/ceralive-ws"
+          mkdir -p "${ws}/srtla" "${ws}/CeraUI"
+          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
+
+      - name: Resolve DRY_RUN plan → normalized sha sidecar (this runner)
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          # emit-build-plan-sha.sh runs DRY_RUN=1 INSTALL_BOOT_BSP=0 itself, asserts
+          # the container path, strips the abs repo path, and hashes the normalized
+          # plan line — the SAME normalization as the build-matrix task-15 step.
+          ./v2/ci/emit-build-plan-sha.sh \
+            --board "${{ matrix.board }}" \
+            --out "test-results/xrunner__${{ matrix.os }}__${{ matrix.board }}.sha256"
+          echo "sidecar (runner=${{ matrix.os }}, board=${{ matrix.board }}):"
+          cat "test-results/xrunner__${{ matrix.os }}__${{ matrix.board }}.sha256"
+
+      - name: Upload per-runner sidecar
+        uses: actions/upload-artifact@v7
+        with:
+          name: xrunner-plan-${{ matrix.os }}-${{ matrix.board }}
+          path: test-results/xrunner__*.sha256
+          if-no-files-found: error
+
+  build-plan-xrunner-gate:
+    name: build-plan cross-runner determinism gate [plan-only, advisory]
+    runs-on: ubuntu-latest
+    needs: build-plan-xrunner
+    # Advisory by default (see PROMOTION NOTE above); flip to blocking by setting
+    # the repo variable XRUNNER_PARITY_BLOCKING=true after a green in-budget run.
+    continue-on-error: ${{ vars.XRUNNER_PARITY_BLOCKING != 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download every per-runner sidecar
+        uses: actions/download-artifact@v7
+        with:
+          pattern: xrunner-plan-*
+          path: xrunner-sidecars
+          merge-multiple: true
+
+      - name: List the collected per-runner sidecars
+        run: |
+          echo "collected per-runner build-plan sidecars:"
+          find xrunner-sidecars -type f -name '*.sha256' | sort | while read -r f; do
+            printf '%s: ' "$(basename "$f")"; cat "$f"
+          done
+
+      - name: Assert cross-runner plan-hash equality (has teeth — RED on mismatch)
+        run: |
+          # Explicit hash-equality assertion: for EVERY board, all runners must
+          # agree on the normalized plan sha256. --expect-runners 2 makes a missing
+          # leg a failure (never a vacuous pass). Exit 1 ⇒ determinism regression.
+          ./v2/ci/assert-xrunner-parity.sh xrunner-sidecars --expect-runners 2
