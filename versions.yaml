@@ -4,8 +4,9 @@
 # pin: update when cutting a release.
 # cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
 # generic-profile PASS — cerastream/docs/notes/boot-parity-results.md; the repo remains on GitHub
-# for history). Hardware-gated profiles (Jetson/RK3588) now track as cerastream hardware
-# validation (cerastream/docs/notes/hardware-validation.md), not as a retention condition.
+# for history). RK3588 hardware-gated profiles now track as cerastream hardware
+# validation; Jetson profiles are DEFERRED — not currently planned
+# (cerastream/docs/notes/hardware-validation.md), not as a retention condition.
 
 # ── Image-build REPOS (order matches fetch-debs.sh REPOS array) ──────────────
 

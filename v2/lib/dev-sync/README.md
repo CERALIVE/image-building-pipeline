@@ -373,7 +373,7 @@ ssh root@ceralive.local journalctl -u systemd-sysext -n 50
 
 **Options:**
 
-1. Build on a host that matches the device (arm64 for Jetson/Orange Pi/Radxa).
+1. Build on a host that matches the device (arm64 for Orange Pi/Radxa).
 2. Cross-compile (backend only): `DEV_SYNC_ALLOW_CROSS_BUILD=1 image-building-pipeline/v2/dev-sync --backend`. This uses `bun --target=bun-linux-arm64`.
 3. For native (sysext): build the `.deb` on the right arch and pass it via `DEV_SYNC_NATIVE_ARGS="--from-deb /path"`.
 

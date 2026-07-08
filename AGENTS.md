@@ -130,8 +130,9 @@ REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
-(`cerastream/docs/notes/boot-parity-results.md`); the hardware-gated profiles
-(Jetson/RK3588) now track as cerastream hardware validation. `srtla-send-rs` is
+(`cerastream/docs/notes/boot-parity-results.md`); RK3588 hardware-gated profiles
+now track as cerastream hardware validation, while Jetson profiles are DEFERRED —
+not currently planned. `srtla-send-rs` is
 the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` .deb provides
 receiver-only after cutover. **Conflict declaration:** `srtla-send-rs` declares
 `Conflicts: srtla (<< 2026.6.2)` (SRTLA_CUTOVER_VERSION); any pre-cutover

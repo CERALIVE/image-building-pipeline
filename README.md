@@ -114,8 +114,9 @@ All custom components are distributed via .deb packages from our repository:
 
 - **CeraUI**: Main streaming application UI
 - **cerastream**: The streaming engine (Rust) — sole engine since 2026-06-11, when the legacy
-  ceracoder encoder was retired after the generic boot-parity profile passed; the hardware-gated
-  profiles (Jetson/RK3588) now track as cerastream hardware-validation work
+  ceracoder encoder was retired after the generic boot-parity profile passed; RK3588
+  hardware-gated profiles now track as cerastream hardware-validation work, while
+  Jetson profiles are DEFERRED — not currently planned
 - **srtla**: SRT Link Aggregation implementation
 - **srt**: Custom SRT implementation
 

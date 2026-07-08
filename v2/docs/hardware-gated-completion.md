@@ -618,8 +618,8 @@ artifacts.
 | `v2/tests/realhw-suite.sh` | Consolidated real-HW acceptance suite |
 | `cerastream/docs/notes/hardware-validation.md` | cerastream per-platform encoder validation matrix |
 
-The cerastream hardware-gated encoder validation (Jetson, RK3588, N100 HAL
-property mapping + real encode) is tracked separately in
+The cerastream hardware-gated encoder validation (RK3588 now; x86/N100 when in hand;
+Jetson DEFERRED — not currently planned) is tracked separately in
 `cerastream/docs/notes/hardware-validation.md`. That runbook is the authoritative
 checklist for encoder validation; this document does not duplicate it. The
 `ceralive-rk3588` runner (Item 6) is the shared infrastructure that enables both
