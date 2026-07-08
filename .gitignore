@@ -4,6 +4,7 @@ images/
 *.sha*
 .DS_Store
 build-logs/
+*.log
 cache/
 secrets/
 .env
