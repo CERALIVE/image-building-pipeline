@@ -38,6 +38,9 @@ SUITES=(
   "${HERE}/tests/manifest.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
 )
+SHELL_SUITES=(
+  "${HERE}/tests/fetch-debs-apt-chain.test.sh"
+)
 
 if ! command -v bats >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -54,6 +57,16 @@ for suite in "${SUITES[@]}"; do
     echo "ERROR: test suite not found: ${suite}" >&2
     exit 1
   fi
+done
+for suite in "${SHELL_SUITES[@]}"; do
+  if [[ ! -x "${suite}" ]]; then
+    echo "ERROR: shell test suite not found or not executable: ${suite}" >&2
+    exit 1
+  fi
+done
+
+for suite in "${SHELL_SUITES[@]}"; do
+  "${suite}"
 done
 
 # --- Decide on parallelism -------------------------------------------------
