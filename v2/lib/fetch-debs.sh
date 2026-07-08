@@ -252,10 +252,28 @@ bsp_write_json() {
 EOF
 }
 
-# bsp_drift_check <baseline> <pkg> <version> <sha256> — advisory drift-guard.
+# bsp_drift_check <baseline> <pkg> <version> <sha256> — drift-guard.
 # First run (no/unseeded baseline) seeds it and notes that. A match is silent-ok.
 # A mismatch prints a "BSP drift" banner to stdout (the user-facing advisory signal)
-# plus structured detail on stderr. ALWAYS returns 0 — drift is never fatal.
+# plus structured detail on stderr.
+#
+# Exit policy is opt-in (C6b):
+#   * DEFAULT (BSP_DRIFT_STRICT unset/≠1) — WARN-ONLY: drift prints the banner and
+#     still returns 0. Drift is NOT fatal by default; the BSP stays floating and
+#     this is observability, not a pin. This is the byte-for-byte historical path.
+#   * BSP_DRIFT_STRICT=1 — STRICT: a real version/hash mismatch against a SEEDED
+#     baseline returns non-zero, failing the build. The seeding run (unseeded/first
+#     run) and a clean match are ALWAYS exit 0 regardless of this flag — a fresh
+#     baseline can never fail a strict build.
+#
+# Promotion criterion (why default is still warn): flipping the default to strict
+# (blocking) is deferred to a FUTURE change, NOT this one. Two conditions must both
+# hold before that flip: (1) the committed baseline v2/manifests/bsp-baseline.json
+# is SEEDED with a real known-good version+sha256 (it currently ships UNSEEDED /
+# null), and (2) a fleet manifest run confirms every board resolves to that same
+# known-good BSP with no outstanding drift. Until both are true, strict-by-default
+# would fail green builds on the very first authenticated fetch. Operators/CI that
+# want the gate today opt in with BSP_DRIFT_STRICT=1.
 bsp_drift_check() {
   local baseline="$1" pkg="$2" version="$3" sha="$4"
   local base_ver base_sha
@@ -274,11 +292,23 @@ bsp_drift_check() {
     return 0
   fi
 
-  printf 'BSP drift: %s differs from the known-good baseline (advisory — build continues)\n' "${pkg}"
+  local strict=0
+  [[ "${BSP_DRIFT_STRICT:-}" == "1" ]] && strict=1
+
+  if [[ "${strict}" -eq 1 ]]; then
+    printf 'BSP drift: %s differs from the known-good baseline (BSP_DRIFT_STRICT=1 — failing the build)\n' "${pkg}"
+  else
+    printf 'BSP drift: %s differs from the known-good baseline (advisory — build continues)\n' "${pkg}"
+  fi
   log_warn "BSP drift detail — baseline: version=${base_ver} sha256=${base_sha}"
   log_warn "BSP drift detail — current : version=${version} sha256=${sha}"
   if [[ "${base_ver}" == "${version}" ]]; then
     log_warn "BSP drift: SAME version, DIFFERENT content hash — kernel BSP re-spin detected"
+  fi
+
+  if [[ "${strict}" -eq 1 ]]; then
+    log_warn "BSP drift: strict mode (BSP_DRIFT_STRICT=1) — returning non-zero to fail the build"
+    return 1
   fi
   return 0
 }

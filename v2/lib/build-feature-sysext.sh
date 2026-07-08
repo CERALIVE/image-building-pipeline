@@ -69,7 +69,8 @@ DEV_ADDON_GNUPGHOME="${DEV_ADDON_KEYS_DIR}/gnupg"
 usage() {
   cat >&2 <<EOF
 Usage: build-feature-sysext.sh --feature <name> --board <board> \\
-         --os-version <ver> --deb-staging <dir> --out <dir> [--keyring <gpg-home>]
+         --os-version <ver> --deb-staging <dir> --out <dir> \\
+         [--descriptor <path>] [--keyring <gpg-home>]
 
 Builds a SIGNED per-board/per-OS feature sysext (.raw) from a .deb staging tree
 and emits, into <out>:
@@ -87,6 +88,11 @@ Args:
                         /usr and /opt subtrees cross the sysext boundary (G2); a
                         top-level /etc or /var is REJECTED.
   --out <dir>           output directory for the artifacts above.
+  --descriptor <path>   add-on descriptor JSON to schema-validate before building.
+                        Default: manifests/addons/<feature>.json. A PRESENT
+                        descriptor that fails addon.schema.json ABORTS the build
+                        (C6b fail-fast); an absent one is skipped (synthetic
+                        features have no catalogue descriptor).
   --keyring <gpg-home>  GnuPG home dir holding the add-on signing SECRET key.
                         Default: ${DEV_ADDON_GNUPGHOME}
                         (throwaway dev keypair, generated on first use).
@@ -111,6 +117,23 @@ assert_payload_boundary() {
       die "G2 boundary: staging tree carries /${sub} — a sysext overlays ONLY /usr and /opt; move config/state out of the payload (refusing to build)"
     fi
   done
+}
+
+# ---------------------------------------------------------------------------
+# assert_descriptor_valid <descriptor> — C6b: fail-fast schema gate. The target
+# add-on descriptor MUST validate against manifests/schema/addon.schema.json
+# BEFORE any build side-effect, reusing ci/validate-manifests.py's single-file
+# (--file) mode. Schema validation ONLY; the cross-descriptor G1/G2/E6 semantics
+# stay CI-only (they need the whole descriptor set). Errors name the failing path
+# and the first jsonschema error, then refuse to build.
+# ---------------------------------------------------------------------------
+assert_descriptor_valid() {
+  local descriptor="$1"
+  require_cmd python3
+  log_info "validating add-on descriptor against addon.schema.json: ${descriptor}"
+  python3 "${V2_DIR}/ci/validate-manifests.py" --file "${descriptor}" \
+    || die "add-on descriptor failed schema validation: ${descriptor} (refusing to build)"
+  log_success "descriptor schema-valid: ${descriptor}"
 }
 
 # ---------------------------------------------------------------------------
@@ -191,6 +214,7 @@ assert_g1() {
 # ---------------------------------------------------------------------------
 build-feature-sysext() {
   local feature="" board="" os_version="12" deb_staging="" out_dir="" gnupg_home=""
+  local descriptor=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -199,6 +223,7 @@ build-feature-sysext() {
       --os-version)  os_version="${2:-}";  shift 2 ;;
       --deb-staging) deb_staging="${2:-}"; shift 2 ;;
       --out)         out_dir="${2:-}";     shift 2 ;;
+      --descriptor)  descriptor="${2:-}";  shift 2 ;;
       --keyring)     gnupg_home="${2:-}";  shift 2 ;;
       -h | --help)   usage; return 0 ;;
       *) usage; die "unknown argument: $1" ;;
@@ -211,6 +236,16 @@ build-feature-sysext() {
   [[ -n "${deb_staging}" ]] || { usage; die "--deb-staging is required"; }
   [[ -n "${out_dir}" ]]     || { usage; die "--out is required"; }
   [[ -d "${deb_staging}" ]] || die "--deb-staging dir not found: ${deb_staging}"
+
+  # C6b: fail-fast schema gate — validate the target descriptor BEFORE any build
+  # side-effect. Only a PRESENT descriptor is gated; synthetic features (no
+  # catalogue descriptor) skip validation and proceed.
+  descriptor="${descriptor:-${V2_DIR}/manifests/addons/${feature}.json}"
+  if [[ -f "${descriptor}" ]]; then
+    assert_descriptor_valid "${descriptor}"
+  else
+    log_warn "no catalogue descriptor at ${descriptor} — skipping schema validation"
+  fi
 
   gnupg_home="${gnupg_home:-${DEV_ADDON_GNUPGHOME}}"
 
