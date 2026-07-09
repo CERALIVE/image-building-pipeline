@@ -634,6 +634,7 @@ EOF
   )
   if [[ -n "${crt}" ]]; then
     apt_opts+=(
+      -o "APT::Sandbox::User=root"
       -o "Acquire::https::apt.ceralive.tv::SslCert=${certs_dir}/client.crt"
       -o "Acquire::https::apt.ceralive.tv::SslKey=${certs_dir}/client.key"
     )

@@ -163,10 +163,19 @@ EOF
   fi
 }
 
+install_console_font_service() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-console-font.service" ]] \
+    || die "console font service source not found: ${src}/ceralive-console-font.service (is \$SRCDIR/runtime mounted?)"
+
+  install -m 0644 "${src}/ceralive-console-font.service" /etc/systemd/system/ceralive-console-font.service
+}
+
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
   configure_ntp  # install NTP pools before enabling chrony
+  install_console_font_service
   local svc
   for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"

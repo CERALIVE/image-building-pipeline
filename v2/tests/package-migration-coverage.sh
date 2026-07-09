@@ -39,12 +39,17 @@ CIMG="${REPO}/userpatches/customize-image.sh"
 PKGDIR="${V2}/manifests/packages"
 FAMDIR="${V2}/manifests/families"
 FETCH_DEBS="${V2}/lib/fetch-debs.sh"
+POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+RUNTIME_DIR="${V2}/mkosi/runtime"
 
 EVIDENCE="${1:-${REPO}/test-results/migrate-package-diff.txt}"
 
 for f in "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
   [[ -f "${f}" ]] || { echo "ERROR: missing v2 source: ${f}" >&2; exit 2; }
 done
+[[ -f "${RUNTIME_DIR}/ceralive-console-font.service" ]] || { echo "ERROR: missing console font unit source" >&2; exit 2; }
+[[ "$(grep -c 'install_console_font_service' "${POSTINST_LIB}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
+grep -q 'ceralive-console-font' "${POSTINST_LIB}" || { echo "ERROR: console font service is not enabled by postinst-lib" >&2; exit 2; }
 
 # Legacy sources were retired with the legacy Armbian build; absent => MIGRATE
 # phase is over (proof in git history; parity-check.sh now guards package loss).

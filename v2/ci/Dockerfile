@@ -44,6 +44,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   qemu-user-static        transparent arm64 emulation (binfmt F-flag interpreter)
 #   binfmt-support          registers the qemu interpreters
 #   pipx git python3        pinned mkosi 26 install from the upstream tag
+#   python3-pefile          PE/COFF parsing used by mkosi image assembly
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       -o Dpkg::Options::=--force-unsafe-io \
@@ -58,6 +59,7 @@ RUN apt-get update \
       pipx \
       git \
       python3 \
+      python3-pefile \
  && rm -rf /var/lib/apt/lists/*
 
 # Pin mkosi to the exact upstream tag (trixie apt mkosi is 25.3 — too old for the
@@ -68,4 +70,5 @@ RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
 # mkosi ${MKOSI_VERSION} on a Python that meets the >= 3.12 floor.
 RUN mkosi --version \
  && mkosi --version | grep -qx "mkosi ${MKOSI_VERSION}" \
- && python3 --version
+ && python3 --version \
+ && python3 -c "import pefile"
