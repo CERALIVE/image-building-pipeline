@@ -352,6 +352,27 @@ trigger_rollout` wraps):
 The device-facing half is untouched: the device still just polls DDI and installs whatever DS it
 is offered. The rollout machinery is entirely Management-side.
 
+### 6.1 Launch rollout rings and holds
+
+Production rollout policy is ring-staged even though the hawkBit primitive is a grouped rollout:
+
+| Ring | Target | Gate |
+|------|--------|------|
+| Internal device | 1 lab-owned device | update success + boot success + stream-capable smoke |
+| 1 device | 1 customer-like device | no update error + reconnect + stream start |
+| 5% | 5% of eligible devices | success >= 80%, error < 10% |
+| 25% | 25% of eligible devices | success >= 80%, error < 10% |
+| 100% | all remaining eligible devices | rollout finishes without `paused` or `error` |
+
+`ceralive-platform` defaults its wizard to `amountGroups=5` to match these launch rings. The
+Management-API body still carries the same safety actions: `successAction=NEXTGROUP` and
+`errorAction=PAUSEROLLOUT`. A `paused` rollout is an emergency stop: investigate before any
+new rollout for that distribution set.
+
+Do-not-update holds are operator-owned hawkBit target classifications. A held target must be
+excluded from the target set before the platform starts a rollout. The device DDI contract is not
+changed by this hold; the platform/hawkBit Management plane owns it.
+
 ---
 
 ## 7. Custom data fields — device metadata the platform can read
