@@ -5,7 +5,7 @@ Parent: [`../AGENTS.md`](../AGENTS.md)
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
-(.deb packages from `srtla`, `srtla-send-rs`, `cerastream`, `CeraUI`), drives a
+(.deb packages from `srtla-send-rs`, `cerastream`, `CeraUI`), drives a
 containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 (Orange Pi 5+, Radxa Rock 5B+).
 
@@ -126,15 +126,15 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("cerastream" "CeraUI" "srtla-send-rs")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
 (`cerastream/docs/notes/boot-parity-results.md`); RK3588 hardware-gated profiles
 now track as cerastream hardware validation, while Jetson profiles are DEFERRED —
 not currently planned. `srtla-send-rs` is
-the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` .deb provides
-receiver-only after cutover. **Conflict declaration:** `srtla-send-rs` declares
+the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` is
+receiver-side only after cutover. **Conflict declaration:** `srtla-send-rs` declares
 `Conflicts: srtla (<< 2026.6.2)` (SRTLA_CUTOVER_VERSION); any pre-cutover
 `srtla (<< 2026.6.2)` — which still bundled the C sender — is correctly blocked from
 coinstall, while `srtla` v2026.6.2 (the first receiver-only release) is NOT
@@ -151,10 +151,11 @@ paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
 the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
-- **Packages staged** (`FIRST_PARTY_APT_PKGS`): exactly the four top-level
-  packages `cerastream ceralive-device srtla srtla-send-rs` are `apt-get
-  download`ed into `$DEST/debs/`. These are Debian **Package** names — a deliberate
-  mapping off `REPOS` (the directory/pin names), notably `CeraUI → ceralive-device`.
+- **Packages staged** (`FIRST_PARTY_APT_PKGS`): exactly the three top-level
+  packages `cerastream ceralive-device srtla-send-rs` are `apt-get
+  download`ed into `$DEST/debs/` using the pins from root `versions.yaml`. These
+  are Debian **Package** names — a deliberate mapping off `REPOS` (the
+  directory/pin names), notably `CeraUI → ceralive-device`.
 - **`srt` is NOT a `.deb` and NOT in `REPOS`.** The `srt` repo is a build-time
   vendored libsrt source (cerastream + srtla compile against its headers for ABI
   parity); it produces no `.deb`. Runtime libsrt is the **system** `libsrt1.5-openssl`
@@ -169,9 +170,9 @@ state** under the staging dir (the host apt config is never touched).
   fatal. `APT_CERALIVE_URL` (default `https://apt.ceralive.tv`) is overridable.
 - **Arch axis only** — the source carries no board axis; `arch` is selected by
   `APT::Architecture` (apt-worker two-axis model: `channel × arch`).
-- **DRY_RUN** logs the exact `apt-get … download cerastream ceralive-device srtla
-  srtla-send-rs` plan + source and downloads nothing. With no `APT_GPG_PUBLIC_B64`
-  in the env the fetcher auto-enables DRY_RUN (no credential for a verified fetch).
+- **DRY_RUN** logs the exact version-qualified `apt-get … download` plan + source
+  and downloads nothing. With no `APT_GPG_PUBLIC_B64` in the env the fetcher
+  auto-enables DRY_RUN (no credential for a verified fetch).
 - **BSP fetch is unchanged** — kernel/DTB/U-Boot/firmware/gstreamer still come from
   the Armbian apt pool (`fetch_bsp`).
 
@@ -203,12 +204,12 @@ pinning it**:
   change gated on (1) the baseline seeded with a real known-good version+sha256 AND
   (2) a fleet manifest run clean of drift — see
   [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
-- **First-run / unseeded** — the committed baseline ships UNSEEDED (`version` and
-  `sha256` are `null`) because the concrete vendor build cannot be resolved offline.
-  The first authenticated real build seeds the baseline with the actual values,
-  emits an informational note, and exits 0. Commit that seeded value to set the
-  known-good reference. This is **advisory only — never a hard pin** (no `=<ver>` in
-  the fetch, manifests, or `versions.yaml`). Proof: `v2/run-tests` section 15.
+- **First-run / seeded baseline** — a new scaffold may start with `version` and
+  `sha256` as `null`; the first authenticated real build seeds the baseline with
+  the actual values, emits an informational note, and exits 0. Commit that seeded
+  value to set the known-good reference. This is **advisory only — never a hard
+  pin** (no `=<ver>` in the fetch, manifests, or `versions.yaml`). Proof:
+  `v2/run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 

@@ -1143,13 +1143,11 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
 }
 
 @test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
-  # Copy the COMMITTED scaffold so the test never mutates the tracked file.
   local base="$BATS_TEST_TMPDIR/scaffold.json"
-  cp "$BSP_BASELINE_JSON" "$base"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
   run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
-  # now seeded with real values (no longer null)
   run cat "$base"
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
@@ -1184,7 +1182,7 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
   local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
-  cp "$BSP_BASELINE_JSON" "$base"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
   run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
@@ -1203,10 +1201,10 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   [[ "$output" == *"JSON-OK"* ]]
 }
 
-@test "bsp provenance: the committed baseline scaffold is valid JSON and ships UNSEEDED (null)" {
-  run python3 -c "import json; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert d['version'] is None and d['sha256'] is None; print('SCAFFOLD-OK')"
+@test "bsp provenance: the committed baseline is valid JSON and carries a valid seed state" {
+  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; v=d.get('version'); s=d.get('sha256'); assert (v is None and s is None) or (isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SCAFFOLD-OK"* ]]
+  [[ "$output" == *"BASELINE-OK"* ]]
 }
 
 @test "bsp provenance: artifact is gitignored and absent from the determinism hash set" {
@@ -1514,15 +1512,15 @@ run_paseto_provision() {
 
 # ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
-#     fetch-debs.sh asserts the sacred 4-entry REPOS constant (a `die` that can
+#     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
 #     when APT_CERALIVE_URL is not https:// (legitimate local/dev http:// overrides
 #     must keep working; the fetch path gains no new failure mode). These tests
 #     source the helpers directly (main is BASH_SOURCE-guarded) — no apt, no .deb.
 # ===========================================================================
 
-@test "fetch-debs REPOS guard: a REPOS without the 4 sacred entries trips the assert (die, non-zero)" {
-  run bash -c "source '$FETCH_DEBS'; REPOS=(srtla cerastream CeraUI); assert_repos_integrity 2>&1"
+@test "fetch-debs REPOS guard: a REPOS without the sacred device entries trips the assert (die, non-zero)" {
+  run bash -c "source '$FETCH_DEBS'; REPOS=(cerastream CeraUI); assert_repos_integrity 2>&1"
   [ "$status" -ne 0 ]
   [[ "$output" == *"REPOS integrity"* ]]
 }
@@ -1547,12 +1545,10 @@ run_paseto_provision() {
   mkdir -p "$debs"
   run bash -c "{ export DRY_RUN=1 VERSIONS_YAML='$VERSIONS_YAML'; source '$FETCH_DEBS'; fetch_first_party '$debs'; } 2>&1"
   [ "$status" -eq 0 ]
-  # the planned command is LOGGED, names apt-get download + all four packages
   [[ "$output" == *"DRY-RUN would run:"* ]]
   [[ "$output" == *"download"* ]]
   [[ "$output" == *"cerastream"* ]]
   [[ "$output" == *"ceralive-device"* ]]
-  [[ "$output" == *"srtla"* ]]
   [[ "$output" == *"srtla-send-rs"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"

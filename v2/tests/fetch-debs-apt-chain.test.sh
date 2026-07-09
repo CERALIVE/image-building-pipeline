@@ -52,7 +52,8 @@ if [[ "${command_name}" == "download" ]]; then
 			[[ "${arg}" == "download" ]] && seen_download=1
 			continue
 		fi
-		touch "${arg}_1.0_${ARCH:-arm64}.deb"
+		pkg="${arg%%=*}"
+		touch "${pkg}_1.0_${ARCH:-arm64}.deb"
 	done
 fi
 SH
@@ -117,11 +118,11 @@ expect_success \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
 staged_count="$(find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' | wc -l)"
-if [[ "${staged_count}" -ne 4 ]]; then
-	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 4\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
+if [[ "${staged_count}" -ne 3 ]]; then
+	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 3\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
-printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 4 debs\n' | tee -a "${RESULTS_LOG}"
+printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 3 debs\n' | tee -a "${RESULTS_LOG}"
 
 expect_failure \
 	"half-mtls-pair-is-fatal" \
@@ -142,7 +143,7 @@ expect_failure \
 	APT_CLIENT_CRT_B64="${CRT_B64}" \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
-if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -q ' download cerastream ceralive-device srtla srtla-send-rs$' "${FAKE_APT_LOG}"; then
+if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -q ' download cerastream=2026.6.1\\\* ceralive-device=2026.6.2\\\* srtla-send-rs=3.1.0\\\*$' "${FAKE_APT_LOG}"; then
 	printf 'FAIL apt-get fake did not observe expected update/download contract\n' | tee -a "${RESULTS_LOG}"
 	cat "${FAKE_APT_LOG}" >&2
 	exit 1

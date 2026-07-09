@@ -115,13 +115,13 @@ on the system `libsrt1.5-openssl` directly.
 
 | Installs (the `.deb`) | In-image path | OTA-delivery backend |
 |---|---|---|
-| `cerastream`, `srtla` | `/usr/bin` (link the runtime system libsrt `libsrt1.5-openssl`) | sysext `.raw` (`mkosi/app/build-srtla-sysext.sh`; a cerastream sysext descriptor is a follow-on) |
+| `cerastream`, `srtla-send-rs` | `/usr/bin` | sysext/app binary payload |
 | `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
 
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
 every staged first-party `.deb` (`apt-get install` from `/opt/ceralive-staging`, deps
-resolved from bookworm + `apt.ceralive.tv`), asserts the `cerastream`/`srtla_send`/
-`srtla_rec` binaries landed, then drops the staging tree so it never ships. **The base
+resolved from bookworm + `apt.ceralive.tv`), asserts the `cerastream`/`srtla_send`
+binaries landed, then drops the staging tree so it never ships. **The base
 image bakes each `.deb` into the rootfs** (`docs/partition-contract.md` §4 "No appfs":
 atomic with the RAUC slot); the **sysext/appfs split is the OTA-delivery contract**, not
 an in-image install difference (a later sysext refresh merely shadows the baked-in

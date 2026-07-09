@@ -14,7 +14,7 @@
 #                   debian       — must be installed now (hard FAIL if missing)
 #                   armbian-bsp  — gstreamer1.0-rockchip1 / rockchip-multimedia-config
 #                                  (families/rk3588.yaml HW-accel + runtime)
-#                   first-party  — ceraui/cerastream/srtla/srt (CI: R2/gh; offline → WARN)
+#                   first-party  — ceraui/cerastream/srtla-send-rs (CI: R2/gh; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
@@ -55,7 +55,7 @@ ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
 # Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
 # absent → reported as WARN, never silent.
-FIRST_PARTY_PKGS=" ceraui cerastream srtla srt "
+FIRST_PARTY_PKGS=" ceraui cerastream srtla-send-rs "
 
 PASS=0; WARN=0; FAIL=0
 pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
@@ -142,7 +142,7 @@ main() {
     warn "Armbian-BSP packages not installed (need Armbian pool at build time): ${armbian_missing[*]}"
   fi
   if (( ${#firstparty_missing[@]} == 0 )); then
-    pass "first-party packages installed (ceraui/cerastream/srtla/srt)"
+    pass "first-party packages installed (ceraui/cerastream/srtla-send-rs)"
   else
     warn "first-party packages not installed: ${firstparty_missing[*]} — require R2/gh creds (CI mode); offline dev build cannot fetch them"
   fi

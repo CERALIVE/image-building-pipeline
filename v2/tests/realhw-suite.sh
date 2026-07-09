@@ -210,8 +210,7 @@ build_mock_fixtures() {
     > "${root}/etc/apt/sources.list.d/debian.sources"
   printf 'Types: deb\nURIs: https://apt.ceralive.tv\nSuites: stable\nComponents: main\n' \
     > "${root}/etc/apt/sources.list.d/ceralive.sources"
-  # first-party binaries: stubs that load + answer --version
-  for b in cerastream srtla_send srtla_rec; do
+  for b in cerastream srtla_send; do
     cat > "${root}/usr/bin/${b}" <<EOF
 #!/usr/bin/env bash
 echo "${b} 2026.06.0 (mock)"

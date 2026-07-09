@@ -14,7 +14,7 @@
 #         (it legitimately may not auto-start without on-box config / capture HW —
 #          loaded-but-inactive is a PASS-with-note, not a hard fail; see task brief)
 #   4. key packages/binaries present: systemd, udev (real .debs) + cerastream,
-#      srtla_send/srtla_rec (first-party /usr/bin binaries — sysext or .deb)
+#      srtla_send (first-party /usr/bin binary from srtla-send-rs)
 #
 # It is explicitly NOT a substitute for the RK3588 real-hardware gate (realhw-
 # smoke.sh LIVE + task 38) and does NOT attempt a streaming encode (no VAAPI/QSV
@@ -120,11 +120,8 @@ QEMU_TRANSCRIPT="${QEMU_TRANSCRIPT:-}"
 APP_SERVICE_CANDIDATES=(ceralive.service ceraui.service)
 
 # Critical packages/binaries the booted x86 OS must show. systemd + udev are real
-# Debian packages (queryable via dpkg-query); cerastream + srtla ship as first-party
-# /usr/bin binaries (sysext on x86 per the board manifest's app_backend: sysext, or
-# .deb) so they are probed by `command -v`, not dpkg.
 EXPECTED_DPKG=(systemd udev)
-EXPECTED_BINS=(cerastream srtla_send srtla_rec)
+EXPECTED_BINS=(cerastream srtla_send)
 
 # Unique markers bracketing the in-guest probe block so the engine can locate the
 # command output deterministically inside the noisy serial boot log.
@@ -430,13 +427,11 @@ ACTIVE:ceraui.service=inactive
 LOAD:ceraui.service=not-found
 EOF
   if [[ "${kind}" == "broken" ]]; then
-    # Critical package udev reported absent → the gate must FAIL.
     cat <<EOF
 DPKG:systemd=install ok installed
 DPKG:udev=absent
 BIN:cerastream=present
 BIN:srtla_send=present
-BIN:srtla_rec=absent
 ${MARK_END}
 EOF
   else
@@ -445,7 +440,6 @@ DPKG:systemd=install ok installed
 DPKG:udev=install ok installed
 BIN:cerastream=present
 BIN:srtla_send=present
-BIN:srtla_rec=present
 ${MARK_END}
 EOF
   fi

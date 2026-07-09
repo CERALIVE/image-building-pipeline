@@ -11,7 +11,7 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — cerastream / ceralive-device (CeraUI) / srtla /
+#   2. First-party   — cerastream / ceralive-device (CeraUI) /
 #                      srtla-send-rs .debs, PULLED FROM apt.ceralive.tv via a
 #                      GPG-verified, mTLS-authenticated apt source (`apt-get
 #                      download`). System libsrt (`libsrt1.5-openssl`) is installed
@@ -109,21 +109,11 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # boot-parity-results.md). RK3588 hardware-gated profiles now track as
 # cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
-# srtla-send-rs is the Rust sender fork (v1.0.0+) added at cutover (Task 20).
-# srtla .deb provides receiver-only after cutover; srtla-send-rs provides the sender.
-# Conflict declaration: srtla-send-rs Conflicts/Replaces srtla (<< 2026.6.2)
-# (SRTLA_CUTOVER_VERSION). Any pre-cutover srtla (<< 2026.6.2, which still bundled the
-# C sender) is correctly blocked from coinstall; srtla v2026.6.2 — the first
-# receiver-only release — is NOT << 2026.6.2, so it coinstalls with the Rust sender.
-REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("cerastream" "CeraUI" "srtla-send-rs")
 
 # REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
-# `die` is SAFE here: this asserts a compile-time constant, so it can ONLY fire on
-# a wrong EDIT to the REPOS line (an added/removed/reordered/recased entry), NEVER
-# on a valid run. Downstream apt install ordering, the FIRST_PARTY_APT_PKGS mapping
-# and the versions.yaml keys all key off these exact four names in this exact order.
 assert_repos_integrity() {
-  local -a _sacred=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+  local -a _sacred=("cerastream" "CeraUI" "srtla-send-rs")
   (( ${#REPOS[@]} == ${#_sacred[@]} )) \
     || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
   local i
@@ -134,17 +124,12 @@ assert_repos_integrity() {
 }
 assert_repos_integrity
 
-# FIRST_PARTY_APT_PKGS — the Debian Package: NAMES pulled from apt.ceralive.tv,
-# a deliberate mapping off REPOS (the directory/pin names above), NOT a copy:
-#   srtla->srtla  cerastream->cerastream  CeraUI->ceralive-device
-#   srtla-send-rs->srtla-send-rs
-# `srt` is gone from this set AND from REPOS: it is a build-time vendored libsrt
-# source that produces no .deb. Runtime libsrt is the SYSTEM `libsrt1.5-openssl`,
-# installed by the runtime OS layer (manifests/packages/shared.list), not here.
-# gstlibuvch264src (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins are
-# resolved as transitive cerastream Depends by the app layer's own `apt-get install`
-# from apt.ceralive.tv + bookworm main, so they are not download targets here either.
-FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla" "srtla-send-rs")
+FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla-send-rs")
+declare -A FIRST_PARTY_PIN_KEYS=(
+  [cerastream]="cerastream"
+  [ceralive-device]="CeraUI"
+  [srtla-send-rs]="srtla-send-rs"
+)
 
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
@@ -206,6 +191,22 @@ get_pin() {
   [[ -f "$file" ]] || { printf ''; return; }
   awk -v key="$key" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
+}
+
+first_party_download_specs() {
+  local pkg key pin version
+  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
+    key="${FIRST_PARTY_PIN_KEYS[${pkg}]:-${pkg}}"
+    pin="$(get_pin "${key}" || true)"
+    [[ -n "${pin}" ]] \
+      || die "versions.yaml pin missing for ${key} (apt package ${pkg})"
+    if [[ "${pin}" == "latest" ]]; then
+      printf '%s\n' "${pkg}"
+      continue
+    fi
+    version="${pin#v}"
+    printf '%s\n' "${pkg}=${version}*"
+  done
 }
 
 # assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
@@ -550,11 +551,6 @@ fetch_bsp() {
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
 # `aws s3 sync` (CI) and `gh release download` (local) paths.
 #
-# Exactly the four TOP-LEVEL packages in FIRST_PARTY_APT_PKGS are `apt-get
-# download`ed into $DEST/debs/; their first-party dependency `srt` (the libsrt
-# fork) is dependency-resolved by the app layer at install time, not staged here.
-# REPOS still drives the versions.yaml pin log below — it is unchanged.
-#
 # Secrets arrive ONLY through the environment, base64-encoded, exactly as
 # v2/mkosi/customize/apt-ceralive-repo.sh consumes them (APT_GPG_PUBLIC_B64 +
 # APT_CLIENT_CRT_B64/APT_CLIENT_KEY_B64). They are NEVER hardcoded, NEVER logged,
@@ -563,8 +559,6 @@ fetch_bsp() {
 # Isolated apt state (mirrors _fetch_bsp_native): the host apt config is never
 # touched. The .debs land in a throwaway temp dir and are atomically renamed into
 # place, so an interrupted apt-get never leaves a half-written final .deb. One
-# apt-get transaction fetches all four, so the per-package bounded pool used by the
-# BSP path does not apply here.
 # ---------------------------------------------------------------------------
 fetch_first_party() {
   local debs="$1"
@@ -577,6 +571,9 @@ fetch_first_party() {
 
   log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
   log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
+  local -a download_specs=()
+  mapfile -t download_specs < <(first_party_download_specs)
+  log_info "first-party apt specs: ${download_specs[*]}"
 
   # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.
   local crt="${APT_CLIENT_CRT_B64:-}" key="${APT_CLIENT_KEY_B64:-}"
@@ -644,14 +641,14 @@ EOF
 
   if [[ -n "${DRY_RUN}" ]]; then
     log_info "DRY-RUN would run: apt-get $(printf '%q ' "${apt_opts[@]}")update"
-    log_info "DRY-RUN would run: (cd ${debs} && apt-get $(printf '%q ' "${apt_opts[@]}")download ${FIRST_PARTY_APT_PKGS[*]})  # from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
+    log_info "DRY-RUN would run: (cd ${debs} && apt-get $(printf '%q ' "${apt_opts[@]}")download ${download_specs[*]})  # from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
     return 0
   fi
 
   run_or_plan apt-get "${apt_opts[@]}" update
 
   local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
-  ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${FIRST_PARTY_APT_PKGS[@]}" ) \
+  ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
     || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
   local f staged=0
   shopt -s nullglob
