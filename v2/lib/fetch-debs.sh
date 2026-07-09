@@ -106,8 +106,8 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 #
 # cerastream is the SOLE streaming engine (ceracoder retired 2026-06-11 after the
 # boot-parity gate passed on the generic profile — cerastream/docs/notes/
-# boot-parity-results.md). The hardware-gated profiles (Jetson/RK3588) now track
-# as cerastream hardware-validation work, not as a retention condition.
+# boot-parity-results.md). RK3588 hardware-gated profiles now track as
+# cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
 # srtla-send-rs is the Rust sender fork (v1.0.0+) added at cutover (Task 20).
 # srtla .deb provides receiver-only after cutover; srtla-send-rs provides the sender.
