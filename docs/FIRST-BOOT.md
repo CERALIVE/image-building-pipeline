@@ -51,7 +51,7 @@ is reachable:
 
 | Service | What it does | Source |
 |---------|-------------|--------|
-| `ceralive-hostname.service` | Generates a unique hostname from the machine-id (`ceralive-<short-id>`) | `v2/mkosi/runtime/ceralive-set-hostname.sh` |
+| `ceralive-hostname.service` | Claims `ceralive.local`, falling back to `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already occupied | `v2/mkosi/customize/postinst-lib.sh` |
 | `ceralive-ssh-firstboot.service` | Regenerates per-device SSH host keys, disables root password login, arms forced password change | `v2/mkosi/runtime/ceralive-ssh-firstboot.sh` |
 | `ceralive-tls-firstboot.service` | Mints a per-device self-signed TLS cert into `/data/ceralive/tls/` | `v2/mkosi/runtime/ceralive-tls-firstboot.sh` |
 | `ceralive-provision.service` | Evaluates whether to start the WiFi provisioning portal | `v2/mkosi/runtime/ceralive-provision.sh` |
@@ -137,15 +137,18 @@ EC4 comment).
 
 ## 4. Finding the device on your network
 
-The device registers itself as `ceralive-<short-id>.local` via mDNS (Avahi).
-The short-id is the same four hex digits used in the setup hotspot SSID.
+The device first tries to register itself as `ceralive.local` via mDNS
+(Avahi). If another CeraLive device already owns that name on the LAN, it tries
+the next predictable name: `ceralive2.local`, then `ceralive3.local`, and so on.
+The selected index is persisted on `/data`, so the device keeps the same name
+across reboots and A/B updates.
 
 ```bash
 # Resolve the mDNS name (from any machine on the same LAN)
-avahi-resolve-host-name ceralive-<short-id>.local
+avahi-resolve-host-name ceralive.local
 
 # Or ping it
-ping ceralive-<short-id>.local
+ping ceralive.local
 ```
 
 If mDNS is not working on your network (some enterprise or cellular networks
@@ -175,7 +178,7 @@ Source: `v2/mkosi/customize/users.sh` (password-lock); `v2/docs/ssh-hardening.md
 ### 5.2 Connecting
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local
+ssh ceralive@ceralive.local
 ```
 
 Because the account is password-locked, password SSH login is not possible
@@ -221,8 +224,8 @@ CeraUI is the on-device control plane. It is reachable on two ports:
 
 | Port | URL | Notes |
 |------|-----|-------|
-| 80 | `http://ceralive-<short-id>.local/` | Direct from the CeraUI backend |
-| 443 | `https://ceralive-<short-id>.local/` | nginx TLS front, reverse-proxies to port 80 |
+| 80 | `http://ceralive.local/` | Direct from the CeraUI backend |
+| 443 | `https://ceralive.local/` | nginx TLS front, reverse-proxies to port 80 |
 
 Both ports are real, supported entry points. There is no redirect from 80 to
 443.
@@ -232,7 +235,8 @@ Source: `ceralive-tls.nginx.conf` lines 21-22 (`listen 443 ssl`; no `listen
 
 ### 6.1 The self-signed certificate warning
 
-The first time you open `https://ceralive-<short-id>.local/`, your browser
+The first time you open `https://ceralive.local/` (or the selected fallback
+hostname, such as `https://ceralive2.local/`), your browser
 shows a "self-signed / not secure" warning. This is expected.
 
 The device mints a per-device self-signed certificate on first boot. It cannot
@@ -261,7 +265,7 @@ Source: `ceralive-tls.nginx.conf` lines 37-39 (`proxy_http_version 1.1`,
 ### 6.3 Verify the services are running
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local
+ssh ceralive@ceralive.local
 
 # CeraUI backend
 systemctl status ceralive.service
@@ -307,7 +311,9 @@ Source: `ceralive-provision.sh` `should_start_portal()`.
 ### Device does not appear on the network after provisioning
 
 After the hotspot disappears, wait 10-15 seconds for the device to join your
-network and for CeraUI to restart. Then try `ping ceralive-<short-id>.local`.
+network and for CeraUI to restart. Then try `ping ceralive.local`. If another
+device already had that name, try `ceralive2.local`, `ceralive3.local`, and so
+on.
 
 If it still does not appear, check the journal on the device console:
 

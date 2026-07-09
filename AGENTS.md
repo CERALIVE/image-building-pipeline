@@ -438,7 +438,7 @@ credentials with no screen or keyboard. Standalone artifacts under
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
   `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
   image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
-  (machine-id-derived, like the hostname service), passphrase `ceralive-setup`
+  (machine-id-derived setup identifier), passphrase `ceralive-setup`
   (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
   requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
   validated on hardware, hence `[PARTIAL]`.

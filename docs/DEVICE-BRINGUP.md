@@ -335,8 +335,9 @@ Expected first-boot sequence:
 1. U-Boot loads from the `boot` partition, reads `extlinux/extlinux.conf`,
    selects slot A.
 2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
-   - `ceralive-hostname.service` — generates a unique hostname
-     (`ceralive-<short-id>`) from the machine-id.
+   - `ceralive-hostname.service` — claims `ceralive.local`, falling back to
+     `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already
+     occupied.
    - `ceralive-ssh-firstboot.service` — regenerates per-device SSH host keys,
      writes `PermitRootLogin prohibit-password`, and arms a forced password
      change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
@@ -366,18 +367,19 @@ For the operator-facing walkthrough of the WiFi portal and first login, see
 **Verify the services are running** (once the device is on the network):
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local 'systemctl status ceralive.service'
-ssh ceralive@ceralive-<short-id>.local 'journalctl -u ceralive.service -n 50'
+ssh ceralive@ceralive.local 'systemctl status ceralive.service'
+ssh ceralive@ceralive.local 'journalctl -u ceralive.service -n 50'
 ```
 
 The default user is `ceralive` (password-locked; see `docs/FIRST-BOOT.md` §5
-for first-login instructions). Replace `ceralive-<short-id>` with the actual
-hostname shown on the HDMI/serial console or the setup hotspot SSID.
+for first-login instructions). If another device already owns `ceralive.local`,
+replace it with the selected fallback hostname shown on the HDMI/serial console,
+for example `ceralive2.local`.
 
 **Check the boot slot:**
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local 'rauc status'
+ssh ceralive@ceralive.local 'rauc status'
 ```
 
 ---

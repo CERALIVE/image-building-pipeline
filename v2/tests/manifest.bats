@@ -82,6 +82,82 @@ print("VALID")
 PY
 }
 
+extract_hostname_script() {
+  awk '
+    /cat >\/usr\/local\/sbin\/ceralive-set-hostname <<'\''EOF'\''/ { in_script = 1; next }
+    in_script && /^EOF$/ { exit }
+    in_script { print }
+  ' "$POSTINST_LIB"
+}
+
+run_hostname_script_with_collision() {
+  local collision_ip="${1:-}"
+  local state="$BATS_TEST_TMPDIR/hostname-state"
+  local bin="$BATS_TEST_TMPDIR/hostname-bin"
+  local script="$BATS_TEST_TMPDIR/ceralive-set-hostname"
+  local hosts="$BATS_TEST_TMPDIR/hosts"
+  local hostname_file="$BATS_TEST_TMPDIR/hostname"
+  local calls="$BATS_TEST_TMPDIR/hostname-calls"
+  rm -rf "$state" "$bin"
+  mkdir -p "$state" "$bin"
+  printf '127.0.0.1\tlocalhost\n' >"$hosts"
+  extract_hostname_script >"$script"
+  chmod +x "$script"
+  cat >"$bin/hostnamectl" <<'SH'
+#!/usr/bin/env bash
+printf 'hostnamectl %s\n' "$*" >>"$HOSTNAME_CALLS"
+exit 0
+SH
+  cat >"$bin/ip" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"-4 addr show scope global"*) printf '2: eth0    inet 192.168.78.50/24 brd 192.168.78.255 scope global eth0\n' ;;
+esac
+SH
+  cat >"$bin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  cat >"$bin/avahi-resolve-host-name" <<'SH'
+#!/usr/bin/env bash
+name="${*: -1}"
+if [ "$name" = "ceralive.local" ] && [ -n "${HOSTNAME_COLLISION_IP:-}" ]; then
+  printf 'ceralive.local\t%s\n' "$HOSTNAME_COLLISION_IP"
+fi
+SH
+  chmod +x "$bin/hostnamectl" "$bin/ip" "$bin/timeout" "$bin/avahi-resolve-host-name"
+  env HOSTNAME_CALLS="$calls" HOSTNAME_COLLISION_IP="$collision_ip" \
+      CERALIVE_HOSTNAME_STATE_DIR="$state" \
+      CERALIVE_HOSTS_FILE="$hosts" \
+      CERALIVE_HOSTNAME_FILE="$hostname_file" \
+      HOSTNAMECTL_BIN="$bin/hostnamectl" \
+      IP_BIN="$bin/ip" \
+      TIMEOUT_BIN="$bin/timeout" \
+      AVAHI_RESOLVE_BIN="$bin/avahi-resolve-host-name" \
+      CERALIVE_HOSTNAME_PROBE_GRACE=0 \
+      bash "$script"
+  cat "$calls"
+  printf 'index=%s\n' "$(cat "$state/host_index")"
+  printf 'hosts=%s\n' "$(grep '^127\.0\.1\.1' "$hosts")"
+}
+
+@test "hostname: first device claims predictable ceralive.local" {
+  run run_hostname_script_with_collision ""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *$'hosts=127.0.1.1\tceralive'* ]]
+}
+
+@test "hostname: mDNS collision falls back to ceralive2.local" {
+  run run_hostname_script_with_collision "192.168.78.10"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive2"* ]]
+  [[ "$output" == *"index=2"* ]]
+  [[ "$output" == *$'hosts=127.0.1.1\tceralive2'* ]]
+}
+
 # check_schema_metaschema <schema.json>
 # Exit 0 + "SCHEMA-OK" iff the schema is itself a legal draft-2020-12 schema.
 check_schema_metaschema() {
