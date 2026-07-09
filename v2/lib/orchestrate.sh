@@ -9,6 +9,7 @@
 #   1. resolve   lib/resolve.sh <board>        → flat KEY=value build params (eval'd)
 #   2. gate      required BSP package sets present                (fail loud, pre-build)
 #   3. fetch     lib/fetch-debs.sh --family …   → stage BSP + first-party .debs
+#               (or CERALIVE_REUSE_STAGING=1 for lab rebuilds from existing staging)
 #   4. partition split staged .debs into BSP vs first-party by package name
 #   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
@@ -251,29 +252,36 @@ main() {
   # 2-4. Fetch + stage .debs, then partition them into BSP vs first-party.
   # -------------------------------------------------------------------------
   local staging="${STAGING_ROOT}/${board}"
-  rm -rf "${staging}"
-  mkdir -p "${staging}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
-  mkdir -p "${bsp_dir}" "${firstparty_dir}"
+  if [[ "${CERALIVE_REUSE_STAGING:-0}" == "1" ]]; then
+    log_warn "[2/9] CERALIVE_REUSE_STAGING=1 — reusing existing .deb staging at ${staging}"
+    [[ -d "${staging}/debs" ]] || die "CERALIVE_REUSE_STAGING=1 but ${staging}/debs is missing"
+    [[ -d "${bsp_dir}" ]] || die "CERALIVE_REUSE_STAGING=1 but ${bsp_dir} is missing"
+    [[ -d "${firstparty_dir}" ]] || die "CERALIVE_REUSE_STAGING=1 but ${firstparty_dir} is missing"
+    log_info "[3/9] reusing pre-partitioned BSP vs first-party staging"
+  else
+    rm -rf "${staging}"
+    mkdir -p "${staging}" "${bsp_dir}" "${firstparty_dir}"
 
-  log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
-  DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
-    || die "fetch-debs failed for board '${board}'"
+    log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
+    DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
+      || die "fetch-debs failed for board '${board}'"
 
-  log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
-  # The set of BSP package names (manifest-declared) is the partition key.
-  local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
-  local deb pkg
-  shopt -s nullglob
-  for deb in "${staging}/debs"/*.deb; do
-    pkg="$(deb_pkg_name "${deb}")"
-    if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
-      cp "${deb}" "${bsp_dir}/"
-    else
-      cp "${deb}" "${firstparty_dir}/"
-    fi
-  done
-  shopt -u nullglob
+    log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
+    # The set of BSP package names (manifest-declared) is the partition key.
+    local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
+    local deb pkg
+    shopt -s nullglob
+    for deb in "${staging}/debs"/*.deb; do
+      pkg="$(deb_pkg_name "${deb}")"
+      if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
+        cp "${deb}" "${bsp_dir}/"
+      else
+        cp "${deb}" "${firstparty_dir}/"
+      fi
+    done
+    shopt -u nullglob
+  fi
   log_info "staged: $(find "${bsp_dir}" -name '*.deb' | wc -l) BSP, $(find "${firstparty_dir}" -name '*.deb' | wc -l) first-party .deb(s)"
 
   # -------------------------------------------------------------------------

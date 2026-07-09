@@ -163,6 +163,11 @@ main() {
   else
     fail "user 'ceralive' not present in /etc/passwd"
   fi
+  if [[ -x "${root}/usr/bin/sudo" ]]; then
+    pass "sudo binary present for CeraUI privileged helper"
+  else
+    fail "sudo binary missing — CeraUI add-on sudoers drop-in cannot execute"
+  fi
 
   # ---- C. SERVICES ENABLED ----
   log_info "--- C. services enabled ---"
@@ -180,6 +185,18 @@ main() {
     pass "all required services enabled (NetworkManager/ModemManager/ssh/chrony/avahi-daemon/systemd-resolved/ceralive-hostname)"
   else
     fail "service(s) not enabled: ${svc_missing[*]}"
+  fi
+  local cera_service="${root}/etc/systemd/system/ceralive.service"
+  if [[ -f "${cera_service}" ]]; then
+    local cera_exec
+    cera_exec="$(sed -n 's/^ExecStart=//p' "${cera_service}" | awk 'NR == 1 { print $1 }')"
+    if [[ -n "${cera_exec}" && -x "${root}${cera_exec}" ]]; then
+      pass "ceralive.service ExecStart target exists and is executable (${cera_exec})"
+    else
+      fail "ceralive.service ExecStart target missing/not executable: ${cera_exec:-<empty>}"
+    fi
+  else
+    warn "ceralive.service absent — first-party CeraUI package not installed"
   fi
 
   # ---- D. SRTLA SOURCE-POLICY ROUTING ----

@@ -92,6 +92,8 @@ wget                     # http downloader (update/fetch infra)
                          # NOTE: net DIAGNOSTICS (socat/netcat-openbsd/iperf3) moved to the
                          # debug add-on (T17) — verified unused by CeraUI/streaming runtime;
                          # the chaos harness (tools/chaos) ships its own. See removed.md.
+sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-addon-helper
+                         # drop-in; without the sudo binary add-on enable/disable is dead code.
 
 # --- Console (HDMI readability at boot) ---------------------------------------
 kbd                      # setfont — set console font at boot for HDMI readability at any resolution

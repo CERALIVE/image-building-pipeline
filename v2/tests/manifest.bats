@@ -200,6 +200,59 @@ write_addon() {
 JSON
 }
 
+write_installed_package_status() {
+  local status_file="$1"
+  shift
+  : >"$status_file"
+  local package
+  for package in "$@"; do
+    cat >>"$status_file" <<STATUS
+Package: $package
+Status: install ok installed
+
+STATUS
+  done
+}
+
+make_parity_rootfs() {
+  local root="$1"
+  mkdir -p \
+    "$root/var/lib/dpkg" \
+    "$root/etc/systemd/system" \
+    "$root/usr/bin" \
+    "$root/etc/iproute2" \
+    "$root/etc/dhcp/dhclient-exit-hooks.d" \
+    "$root/etc/NetworkManager/dispatcher.d" \
+    "$root/etc/udev/rules.d" \
+    "$root/etc/apt/sources.list.d" \
+    "$root/etc/systemd/network"
+
+  local packages=() package
+  while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
+    < <(sed -e 's/#.*//' "$V2/manifests/packages/shared.list" "$V2/manifests/packages"/*.delta.list | awk 'NF{print $1}')
+  packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
+
+  printf 'ceralive:x:1000:1000:CeraLive:/home/ceralive:/bin/bash\n' >"$root/etc/passwd"
+  for group in sudo audio video dialout plugdev netdev gpio i2c spi; do
+    printf '%s:x:1000:ceralive\n' "$group" >>"$root/etc/group"
+  done
+  : >"$root/usr/bin/sudo"
+  chmod +x "$root/usr/bin/sudo"
+  for svc in NetworkManager ModemManager ssh chrony avahi-daemon systemd-resolved ceralive-hostname; do
+    : >"$root/etc/systemd/system/$svc.service"
+  done
+  printf '100 modem0\n120 wlan0\n' >"$root/etc/iproute2/rt_tables"
+  : >"$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
+  : >"$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
+  chmod +x "$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
+  chmod +x "$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
+  : >"$root/etc/udev/rules.d/99-ceralive-hardware.rules"
+  : >"$root/etc/apt/sources.list.d/debian.sources"
+  : >"$root/etc/apt/sources.list.d/ceralive.sources"
+  : >"$root/etc/systemd/network/10-ceralive-wlan0.link"
+}
+
 # serialize <name> — hold an exclusive, file-scoped lock for the REST of the
 # current @test, so the handful of tests that share mutable state run correctly
 # under `bats --jobs N` (which v2/run-tests enables when GNU parallel is on
@@ -792,6 +845,24 @@ PY
 
   run grep -F 'apt-get update' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -ne 0 ]
+}
+
+@test "runtime packages: sudo is installed for the CeraUI add-on helper" {
+  run grep -Ex 'sudo[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "parity: ceralive.service fails when ExecStart target is missing" {
+  local root="$BATS_TEST_TMPDIR/parity-rootfs"
+  make_parity_rootfs "$root"
+  cat >"$root/etc/systemd/system/ceralive.service" <<'UNIT'
+[Service]
+ExecStart=/opt/ceralive/ceralive
+UNIT
+
+  run "$LIB_DIR/parity-check.sh" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ceralive.service ExecStart target missing/not executable: /opt/ceralive/ceralive"* ]]
 }
 
 @test "rauc: service guard checks installed unit files without relying on systemctl list output" {
