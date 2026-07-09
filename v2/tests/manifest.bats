@@ -670,6 +670,65 @@ PY
   [[ "$output" == *"exceeds budget"* ]]
 }
 
+@test "size-gate: final app layer strips apt caches while preserving dpkg status" {
+  run grep -qx 'CleanPackageMetadata=no' "$V2/mkosi/mkosi.images/app/mkosi.conf"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'clean_package_download_metadata' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean_package_download_metadata"* ]]
+
+  run grep -F 'rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "size-gate: final app layer prunes headless RK3588-irrelevant payload" {
+  run grep -F 'prune_final_image_payload' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '/usr/share/icons/Adwaita' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "app-layer: first-party packages can be copied from mkosi source staging" {
+  run grep -F 'stage_first_party_from_source_mount' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'src="${src%/}/.staging/${BOARD_ID}/firstparty"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'cp -a "${src}"/*.deb "${FIRST_PARTY_DIR}/"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "app-layer: first-party install is closed over staged packages and runtime deps" {
+  run grep -F 'gstreamer1.0-libuvch264src' "$FETCH_DEBS"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'dpkg -i "${debs[@]}"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F -- 'apt-get install -y --no-install-recommends --no-download -f' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'apt-get update' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -ne 0 ]
+}
+
+@test "rauc: service guard checks installed unit files without relying on systemctl list output" {
+  run grep -F '[[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '[[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]' "$V2/mkosi/customize/rauc-setup.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'systemctl list-unit-files rauc.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" "$V2/mkosi/customize/rauc-setup.sh"
+  [ "$status" -ne 0 ]
+}
+
 # ===========================================================================
 # 11. Reproducible builds (Task 14) — a double-build of the SAME inputs yields a
 #     BIT-IDENTICAL signed .raucb. build-bundle.sh clamps every embedded mtime to
@@ -1548,6 +1607,7 @@ run_paseto_provision() {
   [[ "$output" == *"DRY-RUN would run:"* ]]
   [[ "$output" == *"download"* ]]
   [[ "$output" == *"cerastream"* ]]
+  [[ "$output" == *"gstreamer1.0-libuvch264src"* ]]
   [[ "$output" == *"ceralive-device"* ]]
   [[ "$output" == *"srtla-send-rs"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)

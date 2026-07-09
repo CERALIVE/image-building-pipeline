@@ -4,9 +4,9 @@
 #
 # Runs INSIDE the app tree (via mkosi-chroot) after the finished OS runtime tree is
 # in place (app/mkosi.conf: BaseTrees=%O/runtime). The orchestrator stages the
-# first-party .debs at FIRST_PARTY_DIR via an mkosi ExtraTree (lib/orchestrate.sh:
-# --extra-tree <firstparty>:/opt/ceralive-staging). This script installs them into
-# the rootfs, then drops the staging tree so it never ships.
+# first-party .debs at FIRST_PARTY_DIR via an mkosi ExtraTree, with a source-tree
+# staging fallback for app subimage builds. This script installs them into the
+# rootfs, then drops the staging tree so it never ships.
 #
 # WHAT INSTALLS HERE (LAYER-MAP.md §Layer 4):
 #   * cerastream / srtla-send-rs — SYSEXT-class: pure /usr binaries.
@@ -16,14 +16,14 @@
 #       (v2/mkosi/app/build-ceraui-appfs.sh). Moving CeraUI to sysext is a
 #       CeraUI-REPO change, explicitly OUT OF SCOPE — v2/docs/deferred-ceraui-sysext.md.
 #
-# IN-IMAGE install is `apt-get install` for BOTH classes: the BASE IMAGE bakes every
+# IN-IMAGE install handles BOTH classes together: the BASE IMAGE bakes every
 # first-party .deb into the rootfs (docs/partition-contract.md §4 "No appfs": app
 # .debs live in the rootfs, atomic with the RAUC slot; a later sysext refresh merely
 # shadows the baked-in binary). The sysext/appfs split is the OTA-delivery contract,
 # NOT an in-image install difference — so it is reflected here only in classification
-# + logging, while one apt-get transaction installs all .debs (apt resolves the
-# inter-deps and pulls the rest — gstreamer1.0-libuvch264src, libsrt1.5-openssl,
-# libgstreamer* — from the Runtime-written sources: bookworm main + apt.ceralive.tv).
+# + logging, while one local dpkg transaction installs all staged .debs.
+# Runtime already provides system libsrt and libgstreamer*, and fetch-debs stages
+# gstreamer1.0-libuvch264src beside cerastream so this layer does not need network.
 #
 # OFFLINE/DEV builds stage NO first-party .debs (fetch-debs dry-run) — this script
 # then installs nothing and the image stays headless-clean (same graceful pattern as
@@ -47,7 +47,7 @@ FIRST_PARTY_DIR="/opt/ceralive-staging"
 # apt-get for both — see header. rauc-hawkbit-updater is NOT a first-party app: it
 # is the runtime layer's OTA backport (setup_hawkbit_updater), so it is skipped here
 # if it happens to share the staging dir.
-SYSEXT_APP_PKGS="cerastream srtla-send-rs"
+SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvch264src srtla-send-rs"
 APPFS_APP_PKGS="ceralive-device"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
@@ -58,9 +58,26 @@ declare -A REQUIRED_BINARIES=(
   [srtla-send-rs]="/usr/bin/srtla_send"
 )
 
+stage_first_party_from_source_mount() {
+  local src="${SRCDIR:-}"
+  [[ -n "${src}" && -n "${BOARD_ID:-}" ]] || return 0
+  src="${src%/}/.staging/${BOARD_ID}/firstparty"
+
+  if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! compgen -G "${src}/*.deb" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "copying first-party .debs from mkosi source staging (${src})"
+  mkdir -p "${FIRST_PARTY_DIR}"
+  cp -a "${src}"/*.deb "${FIRST_PARTY_DIR}/"
+}
+
 # ---------------------------------------------------------------------------
 # install_first_party_apps — classify + install every staged first-party .deb in
-# ONE apt-get transaction, then assert the sysext-class binaries actually landed.
+# ONE local transaction, then assert the sysext-class binaries actually landed.
 # ---------------------------------------------------------------------------
 install_first_party_apps() {
   local deb pkg
@@ -90,9 +107,12 @@ install_first_party_apps() {
     return 0
   fi
 
-  log "installing ${#debs[@]} first-party .deb(s) via apt-get (deps resolved from bookworm + apt.ceralive.tv)"
-  apt-get update
-  apt-get install -y --no-install-recommends "${debs[@]}"
+  log "installing ${#debs[@]} first-party .deb(s) from local staging (no downloads; deps must be staged or in runtime)"
+  if ! dpkg -i "${debs[@]}"; then
+    log "dpkg left unresolved dependencies; resolving from already-available packages only"
+    apt-get install -y --no-install-recommends --no-download -f
+  fi
+  apt-get check
 
   assert_sysext_binaries "${installed_pkgs[@]}"
 }
@@ -118,8 +138,38 @@ assert_sysext_binaries() {
   log "sysext-class binaries verified present (cerastream / srtla_send where staged)"
 }
 
+clean_package_download_metadata() {
+  log "removing build-time apt package indexes and downloaded archives"
+  apt-get clean
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
+  mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial
+}
+
+prune_final_image_payload() {
+  local -a paths=(
+    /usr/lib/firmware/qcom
+    /usr/lib/firmware/intel
+    /usr/lib/firmware/ath10k
+    /usr/lib/firmware/ath11k
+    /usr/lib/firmware/ath12k
+    /usr/lib/firmware/updates
+    /usr/share/X11
+    /usr/share/bash-completion
+    /usr/share/gtk-3.0
+    /usr/share/icons/Adwaita
+    /usr/share/icons/hicolor
+    /usr/share/man
+    /usr/share/mime
+    /usr/share/sounds
+    /usr/share/zoneinfo/right
+  )
+  log "pruning non-RK3588 firmware and desktop/documentation payload from final appliance image"
+  rm -rf "${paths[@]}"
+}
+
 main() {
   log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
+  stage_first_party_from_source_mount
 
   if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
     install_first_party_apps
@@ -128,8 +178,10 @@ main() {
   fi
 
   # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
-  # consumes it (apt-get install above) BEFORE removing it.
+  # consumes it (local .deb install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
+  clean_package_download_metadata
+  prune_final_image_payload
 
   log "APPLICATION layer complete"
 }

@@ -11,25 +11,22 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — cerastream / ceralive-device (CeraUI) /
-#                      srtla-send-rs .debs, PULLED FROM apt.ceralive.tv via a
-#                      GPG-verified, mTLS-authenticated apt source (`apt-get
-#                      download`). System libsrt (`libsrt1.5-openssl`) is installed
-#                      by the runtime OS layer (shared.list); gstlibuvch264src
-#                      (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins
-#                      are NOT staged here — they are resolved as transitive
-#                      cerastream Depends by the app layer's own `apt-get install`
-#                      from apt.ceralive.tv + bookworm main at install time
-#                      (mkosi.images/app/mkosi.postinst.chroot).
+#   2. First-party   — cerastream / gstreamer1.0-libuvch264src /
+#                      ceralive-device (CeraUI) / srtla-send-rs .debs, PULLED FROM
+#                      apt.ceralive.tv via a GPG-verified, mTLS-authenticated apt
+#                      source. System libsrt
+#                      (`libsrt1.5-openssl`) and the libgstreamer* plugins are
+#                      installed by the runtime OS layer (shared.list). The app
+#                      layer installs the staged local .debs with no downloads.
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
 # the staged .debs into the rootfs tree directly; there is no Armbian build here.
 #
 # ── Modes ────────────────────────────────────────────────────────────────────
 #   Real fetch : BSP from the Armbian apt pool (apt-get on Debian hosts, curl
-#                fallback elsewhere); first-party from apt.ceralive.tv via an
-#                isolated-state `apt-get update` + `apt-get download` (GPG keyring
-#                + mTLS client cert injected from the environment).
+#                fallback elsewhere); first-party from apt.ceralive.tv with apt-get
+#                when present, otherwise a curl fallback that verifies InRelease and
+#                Packages.gz before downloading .debs.
 #   Dry-run    : DRY_RUN=1 (auto when APT_GPG_PUBLIC_B64 is unset — no credential
 #                to do a GPG-verified first-party fetch with)
 #                -> log the EXACT command(s) + source that WOULD run; download
@@ -124,9 +121,10 @@ assert_repos_integrity() {
 }
 assert_repos_integrity
 
-FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla-send-rs")
+FIRST_PARTY_APT_PKGS=("cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
 declare -A FIRST_PARTY_PIN_KEYS=(
   [cerastream]="cerastream"
+  [gstreamer1.0-libuvch264src]="gstlibuvch264src"
   [ceralive-device]="CeraUI"
   [srtla-send-rs]="srtla-send-rs"
 )
@@ -162,6 +160,10 @@ run_or_plan() {
 _BSP_DEBS=""
 _PKG_INDEX=""
 _APT_OPTS=()
+_FIRST_PARTY_DEBS=""
+_FIRST_PARTY_INDEX=""
+_FIRST_PARTY_BASE_URL=""
+_FIRST_PARTY_CURL_AUTH=()
 
 _run_bounded() {
   local max="$1" worker="$2"; shift 2
@@ -467,6 +469,110 @@ _fetch_bsp_curl() {
   return 0
 }
 
+first_party_curl_url() {
+  local filename="$1"
+  case "${filename}" in
+    http://*|https://*) printf '%s\n' "${filename}" ;;
+    ./*) printf '%s/%s\n' "${_FIRST_PARTY_BASE_URL}" "${filename#./}" ;;
+    /*) die "first-party package index contains absolute Filename: ${filename}" ;;
+    *) printf '%s/%s\n' "${_FIRST_PARTY_BASE_URL}" "${filename}" ;;
+  esac
+}
+
+first_party_lookup() {
+  local spec="$1" pkg version_glob version_prefix
+  pkg="${spec%%=*}"
+  if [[ "${spec}" == *=* ]]; then
+    version_glob="${spec#*=}"
+    version_prefix="${version_glob%\*}"
+  else
+    version_prefix=""
+  fi
+
+  awk -v want_pkg="${pkg}" -v want_prefix="${version_prefix}" '
+    BEGIN { RS=""; FS="\n" }
+    {
+      pkg=""; version=""; filename=""; sha256="";
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^Package: /) { pkg=substr($i, 10) }
+        else if ($i ~ /^Version: /) { version=substr($i, 10) }
+        else if ($i ~ /^Filename: /) { filename=substr($i, 11) }
+        else if ($i ~ /^SHA256: /) { sha256=substr($i, 9) }
+      }
+      if (pkg == want_pkg && filename != "" && sha256 != "" &&
+          (want_prefix == "" || index(version, want_prefix) == 1)) {
+        printf "%s\t%s\t%s\n", filename, sha256, version;
+        exit;
+      }
+    }
+  ' "${_FIRST_PARTY_INDEX}"
+}
+
+_fetch_first_party_curl_one() {
+  local spec="$1" resolved filename sha256 version url final tmp actual
+  resolved="$(first_party_lookup "${spec}")"
+  [[ -n "${resolved}" ]] \
+    || die "first-party package '${spec}' not found in ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/Packages"
+  IFS=$'\t' read -r filename sha256 version <<<"${resolved}"
+
+  url="$(first_party_curl_url "${filename}")"
+  final="${_FIRST_PARTY_DEBS}/$(basename "${filename}")"
+  tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
+  log_info "first-party fetch (curl): ${spec} resolved=${version}"
+  curl -fsSL --retry 3 "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+  actual="$(sha256sum "${tmp}" | awk '{print $1}')"
+  [[ "${actual}" == "${sha256}" ]] \
+    || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
+  mv -f "${tmp}" "${final}"
+}
+
+_fetch_first_party_curl() {
+  local debs="$1" keyring="$2" certs_dir="$3"; shift 3
+  local download_specs=("$@")
+  require_cmd curl
+  require_cmd gzip
+  require_cmd gpgv
+  require_cmd sha256sum
+
+  local repo_base="${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}"
+  local inrelease="${debs}/.apt-state-firstparty/InRelease"
+  local packages_gz="${debs}/.apt-state-firstparty/Packages.gz"
+  local packages="${debs}/.apt-state-firstparty/Packages"
+  local expected_sha actual_sha
+
+  local -a curl_auth=()
+  if [[ -n "${APT_CLIENT_CRT_B64:-}" ]]; then
+    curl_auth+=(--cert "${certs_dir}/client.crt" --key "${certs_dir}/client.key")
+  fi
+
+  log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
+  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
+  gpgv --keyring "${keyring}" "${inrelease}" >/dev/null \
+    || die "first-party InRelease signature verification failed for ${repo_base}"
+
+  expected_sha="$(awk '
+    /^SHA256:/{ in_sha=1; next }
+    /^[A-Za-z0-9-]+:/{ in_sha=0 }
+    in_sha && $3 == "Packages.gz" { print $1; exit }
+  ' "${inrelease}")"
+  [[ -n "${expected_sha}" ]] \
+    || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
+
+  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
+  actual_sha="$(sha256sum "${packages_gz}" | awk '{print $1}')"
+  [[ "${actual_sha}" == "${expected_sha}" ]] \
+    || die "first-party Packages.gz checksum mismatch: expected ${expected_sha}, got ${actual_sha}"
+  gzip -dc "${packages_gz}" >"${packages}"
+
+  _FIRST_PARTY_DEBS="${debs}"
+  _FIRST_PARTY_INDEX="${packages}"
+  _FIRST_PARTY_BASE_URL="${repo_base}"
+  _FIRST_PARTY_CURL_AUTH=("${curl_auth[@]}")
+  local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+  _run_bounded "${jobs}" _fetch_first_party_curl_one "${download_specs[@]}" \
+    || die "first-party fetch failed (curl path): one or more packages did not download"
+}
+
 # ---------------------------------------------------------------------------
 # fetch_bsp — read BSP package NAMES from the resolved family manifest and pull
 # each from the Armbian apt pool into $DEST/debs/. Names (not versions) are the
@@ -607,9 +713,14 @@ EOF
   if [[ -z "${DRY_RUN}" ]]; then
     [[ -n "${APT_GPG_PUBLIC_B64:-}" ]] \
       || die "APT_GPG_PUBLIC_B64 not set — refusing an unverified first-party fetch from ${APT_CERALIVE_URL} (CI injects the GPG public key)"
-    require_cmd apt-get
     require_cmd base64
-    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${keyring}"
+    local raw_keyring="${apt_state}/ceralive-archive-keyring.raw"
+    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${raw_keyring}"
+    if command -v gpg >/dev/null 2>&1 && gpg --dearmor <"${raw_keyring}" >"${keyring}" 2>/dev/null; then
+      :
+    else
+      cp "${raw_keyring}" "${keyring}"
+    fi
     chmod 644 "${keyring}"
     if [[ -n "${crt}" ]]; then
       printf '%s' "${crt}" | base64 -d >"${certs_dir}/client.crt"
@@ -646,22 +757,33 @@ EOF
     return 0
   fi
 
-  run_or_plan apt-get "${apt_opts[@]}" update
+  if [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
+    _fetch_first_party_curl "${debs}" "${keyring}" "${certs_dir}" "${download_specs[@]}"
+  else
+    run_or_plan apt-get "${apt_opts[@]}" update
 
-  local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
-  ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
-    || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
-  local f staged=0
+    local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
+    ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
+      || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+    local f
+    shopt -s nullglob
+    for f in "${tmpd}"/*.deb; do
+      mv -f "${f}" "${debs}/$(basename "${f}")"
+    done
+    shopt -u nullglob
+    rm -rf "${tmpd}"
+  fi
+
+  local pkg
+  local -a staged=()
   shopt -s nullglob
-  for f in "${tmpd}"/*.deb; do
-    mv -f "${f}" "${debs}/$(basename "${f}")"
-    staged=$((staged + 1))
+  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
+    staged+=("${debs}/${pkg}"_*.deb)
   done
   shopt -u nullglob
-  rm -rf "${tmpd}"
-  (( staged > 0 )) \
+  (( ${#staged[@]} > 0 )) \
     || die "first-party fetch staged 0 .debs from ${APT_CERALIVE_URL} (expected ${#FIRST_PARTY_APT_PKGS[@]})"
-  log_success "first-party: staged ${staged} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
+  log_success "first-party: staged ${#staged[@]} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
 usage() {

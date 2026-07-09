@@ -119,9 +119,10 @@ on the system `libsrt1.5-openssl` directly.
 | `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
 
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
-every staged first-party `.deb` (`apt-get install` from `/opt/ceralive-staging`, deps
-resolved from bookworm + `apt.ceralive.tv`), asserts the `cerastream`/`srtla_send`
-binaries landed, then drops the staging tree so it never ships. **The base
+every staged first-party `.deb` from `/opt/ceralive-staging` with no downloads
+(system deps must already be in the runtime layer), asserts the
+`cerastream`/`srtla_send` binaries landed, prunes non-RK3588/headless payload, then
+drops the staging tree so it never ships. **The base
 image bakes each `.deb` into the rootfs** (`docs/partition-contract.md` §4 "No appfs":
 atomic with the RAUC slot); the **sysext/appfs split is the OTA-delivery contract**, not
 an in-image install difference (a later sysext refresh merely shadows the baked-in

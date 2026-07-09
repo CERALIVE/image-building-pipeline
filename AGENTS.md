@@ -151,19 +151,23 @@ paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
 the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
-- **Packages staged** (`FIRST_PARTY_APT_PKGS`): exactly the three top-level
-  packages `cerastream ceralive-device srtla-send-rs` are `apt-get
-  download`ed into `$DEST/debs/` using the pins from root `versions.yaml`. These
-  are Debian **Package** names — a deliberate mapping off `REPOS` (the
-  directory/pin names), notably `CeraUI → ceralive-device`.
+- **Packages staged** (`FIRST_PARTY_APT_PKGS`): the three top-level packages
+  `cerastream ceralive-device srtla-send-rs` plus the required capture plugin
+  `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
+  from root `versions.yaml`. Debian hosts use isolated `apt-get download`;
+  non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
+  checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
+  exact package files. These are Debian **Package** names — a
+  deliberate mapping off `REPOS` (the directory/pin names), notably
+  `CeraUI → ceralive-device` and `gstlibuvch264src → gstreamer1.0-libuvch264src`.
 - **`srt` is NOT a `.deb` and NOT in `REPOS`.** The `srt` repo is a build-time
   vendored libsrt source (cerastream + srtla compile against its headers for ABI
   parity); it produces no `.deb`. Runtime libsrt is the **system** `libsrt1.5-openssl`
   installed by the runtime OS layer (`manifests/packages/shared.list`). The
-  `gstlibuvch264src` (`gstreamer1.0-libuvch264src`) and `libgstreamer*` plugins are
-  resolved as transitive `cerastream` Depends by the app layer's own `apt-get install`
-  from `apt.ceralive.tv` + bookworm `main` at install time
-  (`mkosi.images/app/mkosi.postinst.chroot`), so they are not download targets here.
+  `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
+  `gstreamer1.0-libuvch264src` is staged so the app layer can install all
+  first-party packages from local `.deb`s with no downloads; `libgstreamer*`
+  plugins still come from the runtime OS layer (`shared.list`).
 - **Secrets are env-only, base64-encoded** (same names as the device customize
   script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
@@ -230,9 +234,10 @@ native `rauc bundle` signer (NOT bit-reproducible). Proof: `v2/run-tests` sectio
 
 **Image size gate — BLOCKING at 1.5 GB** [EXISTS]
 
-`v2/lib/measure-size.sh` runs after every build. If the compressed rootfs exceeds
+`v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds
 **1.5 GB** the build fails loudly and the `.raucb` is not produced. The threshold
-is post-slim (locale strip + `WithDocs=no` already applied). See
+is post-slim (locale strip, final apt-cache cleanup, and appliance payload pruning
+already applied). See
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers used to reach it.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]

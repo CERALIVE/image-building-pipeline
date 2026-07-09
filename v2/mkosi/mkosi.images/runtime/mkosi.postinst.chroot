@@ -473,7 +473,7 @@ EOF
 #
 # Inline twin of customize/rauc-setup.sh (dual-track — keep in sync). Installs the
 # IMMUTABLE root CA (PUBLIC; cert-work/rauc/root-ca.pem) into the device keyring so
-# every signed .raucb verifies against it, and makes rauc.service live. The root CA
+# every signed .raucb verifies against it, and makes rauc.service available. The root CA
 # arrives as base64 in $RAUC_ROOT_CA_B64 (orchestrator-forwarded), exactly like the
 # apt GPG public key. NEVER a private key — the device keyring holds the root cert
 # only. On arm64 the board-aware /etc/rauc/system.conf is already written by
@@ -539,9 +539,8 @@ EOF
     chmod 0644 "${sysconf}"
   fi
 
-  if ! systemctl list-unit-files rauc.service >/dev/null 2>&1 \
-     || ! systemctl list-unit-files rauc.service | grep -q '^rauc\.service'; then
-    log "FATAL: rauc.service not present — the 'rauc' package (shared.list) is not installed"
+  if [[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]; then
+    log "FATAL: rauc.service not present — the 'rauc-service' package (shared.list) is not installed"
     exit 1
   fi
   if systemctl enable rauc.service 2>/dev/null; then

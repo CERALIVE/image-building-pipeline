@@ -118,7 +118,7 @@ build_v2_set() {
     if [[ -f "${FETCH_DEBS}" ]]; then
       sed -n 's/^REPOS=(\(.*\))/\1/p' "${FETCH_DEBS}" | tr -d '"' | tr ' ' '\n'
     fi
-    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device
+    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src
   } | sed '/^$/d' | sort -u
 }
 
