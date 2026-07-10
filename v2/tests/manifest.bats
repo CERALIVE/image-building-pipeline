@@ -1505,6 +1505,35 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
 }
 
+@test "v2 CI: resolver dependency cache is content-addressed and covers every resolver job" {
+  run python3 - "$REPO_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+repo_root = Path(sys.argv[1])
+workflow = yaml.safe_load((repo_root / ".github/workflows/v2-ci.yml").read_text())
+requirements = repo_root / "v2/ci/requirements-ci.txt"
+assert requirements.read_text().splitlines()[-2:] == ["jsonschema", "PyYAML"]
+
+expected_key = "pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}"
+for job_id in ("schema-validate", "bats", "build-matrix", "build-plan-xrunner"):
+    steps = workflow["jobs"][job_id]["steps"]
+    cache = next(step for step in steps if step.get("uses") == "actions/cache@v6")
+    assert cache["with"] == {
+        "path": "~/.cache/pip",
+        "key": expected_key,
+    }, f"{job_id}: unexpected pip cache declaration: {cache!r}"
+    install = next(step["run"] for step in steps if step.get("name", "").startswith("Install "))
+    assert "pip install --quiet --requirement v2/ci/requirements-ci.txt" in install, job_id
+
+print("V2-CI-PIP-CACHE-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"V2-CI-PIP-CACHE-OK"* ]]
+}
+
 @test "v2 CI: outer qemu budget preserves provisioning and TCG timeouts with headroom" {
   run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; outer = job['timeout-minutes']; provision = int(job['env']['PROVISION_BUDGET_MINUTES']); qemu = int(job['env']['QEMU_TIMEOUT_MINUTES']); overhead = int(job['env']['RUNNER_OVERHEAD_BUDGET_MINUTES']); runs = '\n'.join(step.get('run', '') for step in job['steps']); assert provision == 10; assert qemu == 10; assert overhead == 10; assert outer >= provision + qemu + overhead; assert runs.count('\"\${QEMU_TIMEOUT_MINUTES}m\"') == 2; print('QEMU-TIMEOUT-BUDGET-OK')"
   [ "$status" -eq 0 ]

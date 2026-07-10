@@ -74,8 +74,14 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache resolver dependency downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+
       - name: Install validators
-        run: pip install --quiet jsonschema PyYAML
+        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
       - name: Validate every manifest against its schema
         run: python3 v2/ci/validate-manifests.py
@@ -91,8 +97,14 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache resolver dependency downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+
       - name: Install resolver deps (resolve.py uses jsonschema + PyYAML)
-        run: pip install --quiet jsonschema PyYAML
+        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
       - name: Install bats-core
         run: |
@@ -261,8 +273,14 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache resolver dependency downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+
       - name: Install resolver deps
-        run: pip install --quiet jsonschema PyYAML
+        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
       - name: Stub sibling-checkout workspace
         run: |
@@ -494,8 +512,14 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache resolver dependency downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+
       - name: Install resolver deps
-        run: pip install --quiet jsonschema PyYAML
+        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
       - name: Stub sibling-checkout workspace
         run: |

@@ -1,0 +1,3 @@
+# Python dependencies used by the GitHub Actions manifest-validation and plan jobs.
+jsonschema
+PyYAML

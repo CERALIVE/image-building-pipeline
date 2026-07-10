@@ -224,6 +224,12 @@ pinning it**:
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
 
+**CI resolver dependency cache** [EXISTS]
+`v2-ci.yml` caches only pip's download/wheel store (`~/.cache/pip`) for the
+manifest-validation and build-plan jobs. The key includes the runner OS,
+architecture, and the hash of `v2/ci/requirements-ci.txt`; image outputs, mkosi
+caches, QEMU state, and release artifacts remain uncached.
+
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
