@@ -122,8 +122,15 @@ prepare_fake_curl_repo() {
 	mkdir -p "${repo}/debs"
 	: >"${packages}"
 
-	local pkg version deb sha
-	while IFS='|' read -r pkg version; do
+	local spec pkg version deb sha
+	while IFS= read -r spec; do
+		pkg="${spec%%=*}"
+		if [[ "${spec}" == *=* ]]; then
+			version="${spec#*=}"
+			version="${version%\*}"
+		else
+			version="1.0"
+		fi
 		deb="${pkg}_${version}_${ARCH:-arm64}.deb"
 		printf '%s %s\n' "${pkg}" "${version}" >"${repo}/debs/${deb}"
 		sha="$(sha256sum "${repo}/debs/${deb}" | awk '{print $1}')"
@@ -135,13 +142,7 @@ Filename: ./${deb}
 SHA256: ${sha}
 
 EOF
-	done <<'EOF'
-libsrt1.5-ceralive|1.5.5+ceralive.1
-cerastream|2026.6.1
-gstreamer1.0-libuvch264src|2026.6.0
-ceralive-device|2026.6.2-20260618T010244.eb107e7
-srtla-send-rs|3.1.0
-EOF
+	done < <(bash -c 'source "$1"; first_party_download_specs' bash "${FETCH_DEBS}")
 
 	gzip -c "${packages}" >"${repo}/Packages.gz"
 	sha="$(sha256sum "${repo}/Packages.gz" | awk '{print $1}')"
@@ -250,7 +251,13 @@ expect_failure \
 	APT_CLIENT_CRT_B64="${CRT_B64}" \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
-if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -q ' download libsrt1.5-ceralive=1.5.5+ceralive.1\\\* cerastream=2026.6.1\\\* gstreamer1.0-libuvch264src=2026.6.0\\\* ceralive-device=2026.6.2\\\* srtla-send-rs=3.1.0\\\*$' "${FAKE_APT_LOG}"; then
+expected_download=" download"
+while IFS= read -r spec; do
+	printf -v quoted_spec '%q' "${spec}"
+	expected_download+=" ${quoted_spec}"
+done < <(bash -c 'source "$1"; first_party_download_specs' bash "${FETCH_DEBS}")
+
+if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -Fq "${expected_download}" "${FAKE_APT_LOG}"; then
 	printf 'FAIL apt-get fake did not observe expected update/download contract\n' | tee -a "${RESULTS_LOG}"
 	cat "${FAKE_APT_LOG}" >&2
 	exit 1

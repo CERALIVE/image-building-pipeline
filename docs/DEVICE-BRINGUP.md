@@ -78,15 +78,15 @@ ships an older version:
 pip install --user git+https://github.com/systemd/mkosi.git@v26
 ```
 
-### BELABOX libsrt (required for the E2E smoke test)
+### CeraLive libsrt (required for the E2E smoke test)
 
 The system `libsrt` package lacks the `SRTO_SRTLAPATCHES` socket option that
-CeraLive's bonding layer requires. Build the BELABOX fork instead:
+CeraLive's bonding layer requires. Build the pinned CERALIVE fork instead:
 
 ```bash
-# Clone the BELABOX fork
-git clone --branch belabox https://github.com/irlserver/srt.git belabox-srt
-cd belabox-srt
+# Clone the CeraLive fork at the device runtime release
+git clone --branch srt-v1.5.5+ceralive.1 https://github.com/CERALIVE/srt.git ceralive-srt
+cd ceralive-srt
 
 # Build with cmake directly (the ./configure script requires tclsh; cmake does not)
 cmake -B build \
