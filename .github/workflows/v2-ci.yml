@@ -379,18 +379,16 @@ jobs:
     needs: build-matrix
     timeout-minutes: 30
     env:
-      PROVISION_TIMEOUT_MINUTES: '10'
+      PROVISION_BUDGET_MINUTES: '10'
       QEMU_TIMEOUT_MINUTES: '10'
+      RUNNER_OVERHEAD_BUDGET_MINUTES: '10'
     steps:
       - uses: actions/checkout@v7
 
       - name: Install qemu-system-x86 + OVMF (EFI/GRUB x86 image boots via UEFI)
         run: |
-          timeout --signal=TERM --kill-after=30s "${PROVISION_TIMEOUT_MINUTES}m" \
-            sudo bash -euo pipefail <<'EOF'
-          apt-get update -qq
-          apt-get install -y --no-install-recommends qemu-system-x86 ovmf
-          EOF
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
           qemu-system-x86_64 --version | head -1
 
       - name: Verify qemu-system-x86_64 is available (MAC4 — fail loudly if missing)

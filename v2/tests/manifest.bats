@@ -1506,7 +1506,7 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
 }
 
 @test "v2 CI: outer qemu budget preserves provisioning and TCG timeouts with headroom" {
-  run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; outer = job['timeout-minutes']; provision = int(job['env']['PROVISION_TIMEOUT_MINUTES']); qemu = int(job['env']['QEMU_TIMEOUT_MINUTES']); runs = '\n'.join(step.get('run', '') for step in job['steps']); assert provision == 10; assert qemu == 10; assert outer >= provision + qemu + 10; assert '\"\${PROVISION_TIMEOUT_MINUTES}m\"' in runs; assert runs.count('\"\${QEMU_TIMEOUT_MINUTES}m\"') == 2; print('QEMU-TIMEOUT-BUDGET-OK')"
+  run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; outer = job['timeout-minutes']; provision = int(job['env']['PROVISION_BUDGET_MINUTES']); qemu = int(job['env']['QEMU_TIMEOUT_MINUTES']); overhead = int(job['env']['RUNNER_OVERHEAD_BUDGET_MINUTES']); runs = '\n'.join(step.get('run', '') for step in job['steps']); assert provision == 10; assert qemu == 10; assert overhead == 10; assert outer >= provision + qemu + overhead; assert runs.count('\"\${QEMU_TIMEOUT_MINUTES}m\"') == 2; print('QEMU-TIMEOUT-BUDGET-OK')"
   [ "$status" -eq 0 ]
   [[ "$output" == *"QEMU-TIMEOUT-BUDGET-OK"* ]]
 }
