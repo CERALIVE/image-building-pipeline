@@ -415,6 +415,15 @@ For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
 
+**Build concurrency** [EXISTS]
+
+The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
+before touching staging, cache, or mkosi output. Different boards remain safe to
+build in parallel. A second build of the same board waits for up to one hour by
+default; set `CERALIVE_BUILD_LOCK_TIMEOUT=0` for fail-fast behavior or another
+non-negative number of seconds for a bounded wait. This also prevents a CI
+dry-run from deleting the staging tree of an active hardware image build.
+
 **First-boot WiFi provisioning portal** [PARTIAL]
 
 `ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot AND a

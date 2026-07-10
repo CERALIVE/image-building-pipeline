@@ -1816,6 +1816,25 @@ run_paseto_provision() {
   [ "$output" = "$REPO_ROOT/versions.yaml" ]
 }
 
+@test "fetch-debs BSP set deduplicates the first family package against board overrides" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  cat >"$family" <<'YAML'
+kernel_packages:
+  - linux-image-test
+dtb_packages:
+  - linux-dtb-test
+uboot_packages: []
+firmware_packages:
+  - firmware-test
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+
+  run bash -c "{ export DRY_RUN=1 KERNEL_PACKAGES=linux-image-test DTB_PACKAGES=linux-dtb-test UBOOT_PACKAGES=u-boot-test FIRMWARE_PACKAGES=firmware-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(4 pkgs): linux-image-test linux-dtb-test firmware-test u-boot-test"* ]]
+}
+
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {
   run bash -c "{ export APT_CERALIVE_URL=http://localhost:8080; source '$FETCH_DEBS' && echo SOURCED_OK; } 2>&1"
   [ "$status" -eq 0 ]

@@ -54,6 +54,9 @@ IMAGES_DIR="${V2_DIR}/images"
 # MKOSI_DIR, can see them) but OUTSIDE build/ — `mkosi --force` wipes build/ image
 # outputs, and we must not lose the staging mid-build. Gitignored via mkosi/.gitignore.
 STAGING_ROOT="${MKOSI_DIR}/.staging"
+BUILD_LOCK_DIR="${CERALIVE_BUILD_LOCK_DIR:-${STAGING_ROOT}/.locks}"
+BUILD_LOCK_TIMEOUT="${CERALIVE_BUILD_LOCK_TIMEOUT:-3600}"
+BUILD_LOCK_FD=""
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode product constants in logic).
@@ -118,7 +121,21 @@ Env:
   CHANNEL VARIANT RELEASE ARMBIAN_APT_URL ARMBIAN_SUITE
   APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64   (CI secrets, mTLS+GPG)
   PASETO_PUBLIC_KEY_B64                                      (CI: device-token Ed25519 PUBLIC key)
+  CERALIVE_BUILD_LOCK_TIMEOUT seconds to wait for another build of the same board
 EOF
+}
+
+acquire_board_lock() {
+  local board="$1" lock_file
+  [[ "${BUILD_LOCK_TIMEOUT}" =~ ^[0-9]+$ ]] \
+    || die "CERALIVE_BUILD_LOCK_TIMEOUT must be a non-negative integer"
+  mkdir -p "${BUILD_LOCK_DIR}"
+  lock_file="${BUILD_LOCK_DIR}/${board}.lock"
+  exec {BUILD_LOCK_FD}>"${lock_file}"
+  if ! flock -w "${BUILD_LOCK_TIMEOUT}" "${BUILD_LOCK_FD}"; then
+    die "build already active for board '${board}' (lock: ${lock_file})"
+  fi
+  log_info "build lock acquired for board '${board}'"
 }
 
 # ---------------------------------------------------------------------------
@@ -184,6 +201,8 @@ main() {
   require_cmd python3
   require_cmd ar
   require_cmd tar
+  require_cmd flock
+  acquire_board_lock "${board}"
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT}"

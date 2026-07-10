@@ -40,6 +40,7 @@ SUITES=(
 )
 SHELL_SUITES=(
   "${HERE}/tests/fetch-debs-apt-chain.test.sh"
+  "${HERE}/tests/orchestrate-build-lock.test.sh"
 )
 
 if ! command -v bats >/dev/null 2>&1; then

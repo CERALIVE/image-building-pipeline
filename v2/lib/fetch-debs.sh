@@ -607,7 +607,7 @@ fetch_bsp() {
   done
   # Deduplicate while preserving order
   local -a deduped=()
-  local seen="" p
+  local seen="|" p
   for p in "${bsp_pkgs[@]}"; do
     [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
   done
