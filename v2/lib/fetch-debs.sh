@@ -34,14 +34,12 @@
 #
 # ── Usage ────────────────────────────────────────────────────────────────────
 #   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
-#   fetch-debs.sh assert-sibling <workspace_root>     # guard self-test hook
 #
 # ── Env ──────────────────────────────────────────────────────────────────────
 #   CHANNEL            stable|beta            (default: stable)
 #   ARCH               arm64|amd64            (default: arm64)
 #   DEST               staging root           (default: ./out)  -> debs in $DEST/debs/
 #   DRY_RUN            1 to plan-only         (default: auto)
-#   CERALIVE_WORKSPACE override sibling-root  (default: resolved repo parent)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
 #   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)
 #   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
@@ -60,8 +58,6 @@ source "${HERE}/lib/common.sh" 2>/dev/null || source "${HERE}/common.sh"
 source "${HERE}/shared/yaml-lib.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
-# shellcheck source=lib/shared/sibling-layout-lib.sh
-source "${HERE}/shared/sibling-layout-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode versions — pins come from
@@ -92,9 +88,9 @@ APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
 FETCH_JOBS="${FETCH_JOBS:-4}"
 [[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS=4
 
-# versions.yaml lives at the workspace root: v2/lib -> v2 -> image-building-pipeline
-# -> <workspace>. Same registry scripts/fetch-debs.sh reads.
-VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
+# The release registry is repo-local so standalone image builds do not depend on
+# the surrounding development workspace.
+VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../versions.yaml}"
 
 # REPOS — first-party device .debs. CASE AND ORDER ARE SACRED: downstream apt,
 # mkosi install ordering and the versions.yaml keys all match these exact names.
@@ -210,10 +206,6 @@ first_party_download_specs() {
     printf '%s\n' "${pkg}=${version}*"
   done
 }
-
-# assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
-# tripwire that srtla/ and CeraUI/ are siblings — see that lib and
-# ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
 
 # BSP provenance + advisory kernel drift-guard.
 #
@@ -790,20 +782,13 @@ usage() {
   cat >&2 <<EOF
 Usage:
   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
-  fetch-debs.sh assert-sibling <workspace_root>
 
-Env: CHANNEL ARCH DEST DRY_RUN CERALIVE_WORKSPACE ARMBIAN_APT_URL ARMBIAN_SUITE
+Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE
      APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
 EOF
 }
 
 main() {
-  # Hidden subcommand: guard self-test hook (used by task-14-sibling evidence).
-  if [[ "${1:-}" == "assert-sibling" ]]; then
-    assert_sibling_layout "${2:-}"
-    exit 0
-  fi
-
   local family=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -813,10 +798,6 @@ main() {
       *) usage; die "unknown argument: $1" ;;
     esac
   done
-
-  # Resolve the workspace root that must hold the sibling checkouts. Default:
-  # parent of the image-building-pipeline repo (v2/lib -> v2 -> repo -> parent).
-  local workspace="${CERALIVE_WORKSPACE:-$(cd "${HERE}/../../.." && pwd)}"
 
   # Auto-enable dry-run offline: without the apt.ceralive.tv GPG keyring there is
   # no credential to do a GPG-verified first-party fetch, so plan only.
@@ -829,21 +810,6 @@ main() {
 
   log_info "=== fetch-debs (mkosi staging) ==="
   log_info "channel=${CHANNEL} arch=${ARCH} dest=${DEST} dry_run=${DRY_RUN:-0}"
-
-  # GUARD FIRST: fail before any download if the sibling layout is broken.
-  # NOTE (Task 14): first-party .debs now come PRE-BUILT from apt.ceralive.tv, so
-  # the IMAGE build no longer needs srtla/ + CeraUI/ sibling checkouts. The guard is
-  # kept CONSERVATIVELY as an upstream-build sanity tripwire — those .debs are
-  # produced FROM these checkouts upstream, and a broken layout means a CeraUI/srtla
-  # .deb could never have been published.
-  #
-  # This stays a HARD assert (die), NOT a warning: it is the first tripwire on the
-  # sacred fetch path, and a broken sibling layout is the signal that a silently
-  # wrong or stale rootfs could ship. Demoting it to a soft warning is explicitly
-  # OUT OF SCOPE here — it would require first fully decoupling the first-party CI
-  # publish from this workspace AND proving the fetch path can no longer consume a
-  # sibling-derived artifact. Until that holds, the tripwire fires loudly by design.
-  assert_sibling_layout "${workspace}"
 
   local debs="${DEST}/debs"
   run_or_plan mkdir -p "${debs}"

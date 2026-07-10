@@ -40,19 +40,9 @@ setup() {
   VALIDATE_PY="$V2/ci/validate-manifests.py"
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="$(cd "$V2/.." && pwd)"
-  # Locate the pin registry. Standalone CI checks out only this repo, so the
-  # canonical versions.yaml ships at the repo root (sibling of v2/). In the
-  # monorepo dev layout it also exists one level up (workspace root). Honour an
-  # explicit VERSIONS_YAML override first, then prefer the repo-root copy, then
-  # fall back to the workspace-root copy.
+  # Locate the repo-local pin registry unless the caller provides an override.
   if [[ -z "${VERSIONS_YAML:-}" || ! -f "${VERSIONS_YAML:-}" ]]; then
-    if [[ -f "$REPO_ROOT/versions.yaml" ]]; then
-      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
-    elif [[ -f "$REPO_ROOT/../versions.yaml" ]]; then
-      VERSIONS_YAML="$(cd "$REPO_ROOT/.." && pwd)/versions.yaml"
-    else
-      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
-    fi
+    VERSIONS_YAML="$REPO_ROOT/versions.yaml"
   fi
 }
 
@@ -1818,6 +1808,12 @@ run_paseto_provision() {
   run bash -c "source '$FETCH_DEBS'; REPOS=(cerastream CeraUI); assert_repos_integrity 2>&1"
   [ "$status" -ne 0 ]
   [[ "$output" == *"REPOS integrity"* ]]
+}
+
+@test "fetch-debs registry defaults to this checkout instead of the parent workspace" {
+  run env -u VERSIONS_YAML bash -c "source '$FETCH_DEBS'; realpath \"\$VERSIONS_YAML\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$REPO_ROOT/versions.yaml" ]
 }
 
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {

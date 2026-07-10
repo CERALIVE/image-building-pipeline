@@ -12,7 +12,7 @@ containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 Relates to:
 - `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here; PASETO device-token PUBLIC key (`paseto/`) provisioned into the CeraUI runtime env
 - `apt-worker/` — runtime apt source on device points to `apt.ceralive.tv` (Cloudflare R2); add-on `.raw` artifacts served from R2 path `addons/{os_version}/{board}/{feature}.raw`
-- `versions.yaml` — pin registry; `fetch-debs.sh` reads pin versions from `../versions.yaml` [EXISTS]
+- `versions.yaml` — standalone pin registry consumed by `fetch-debs.sh` [EXISTS]
 
 ## STRUCTURE
 
@@ -154,7 +154,7 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, plus the required capture plugin
   `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
-  from root `versions.yaml`. Debian hosts use isolated `apt-get download`;
+  from this repo's `versions.yaml`. Debian hosts use isolated `apt-get download`;
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
   exact package files. These are Debian **Package** names — a
@@ -221,7 +221,7 @@ pinning it**:
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
 **versions.yaml** [EXISTS]
-`fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
+`fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
 
 **Reproducible builds** [EXISTS]

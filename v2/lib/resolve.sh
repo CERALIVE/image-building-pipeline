@@ -46,9 +46,9 @@ BOARD_SCHEMA="${SCHEMA_DIR}/board.schema.json"
 FAMILY_SCHEMA="${SCHEMA_DIR}/family.schema.json"
 RESOLVE_PY="${HERE}/resolve.py"
 
-# Repo-root pin registry. v2/lib -> v2 -> image-building-pipeline -> repo root.
+# Repo-root pin registry. v2/lib -> v2 -> repo root.
 # Mirrors the fetch-debs.sh relative-path convention; override with VERSIONS_YAML.
-VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
+VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../versions.yaml}"
 
 # Manifest file extensions we accept, in precedence order.
 MANIFEST_EXTS=(yaml yml)

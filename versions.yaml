@@ -1,6 +1,6 @@
 # CeraLive component version registry — manually maintained; pipeline reads with graceful fallback
-# Keys under image-repos match REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs") in fetch-debs.sh
-# exactly. `srt` is NOT in REPOS: it is a build-time vendored libsrt source (no .deb) — see below.
+# Keys under image-repos match REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs") in fetch-debs.sh
+# exactly. Each key resolves a published device package from apt.ceralive.tv.
 # pin: update when cutting a release.
 # cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
 # generic-profile PASS — cerastream/docs/notes/boot-parity-results.md; the repo remains on GitHub
@@ -10,12 +10,11 @@
 
 # ── Image-build REPOS (order matches fetch-debs.sh REPOS array) ──────────────
 
-srtla:
-  path: srtla
-  repo: https://github.com/CERALIVE/srtla
+srt:
+  path: srt
+  repo: https://github.com/CERALIVE/srt
   kind: first-party
-  # main no-ff merge commit of feat/merge-irlserver-main-2026-04 (irlserver catch-up)
-  pin: aa66a88617010ab69fe01948d8e8163ee53ff703
+  pin: v1.5.5+ceralive.1
   channel: stable
 
 cerastream:
@@ -24,17 +23,31 @@ cerastream:
   kind: first-party
   # CalVer (YYYY.MINOR.PATCH) release tags, matching [workspace.package].version in
   # Cargo.toml; `latest` resolves the newest matching channel release (same as CeraUI).
-  pin: latest
+  pin: v2026.6.1
   channel: stable
 
 CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: latest
+  pin: v2026.6.2
+  channel: stable
+
+srtla-send-rs:
+  path: srtla-send-rs
+  repo: https://github.com/CERALIVE/srtla-send-rs
+  kind: first-party
+  pin: v3.1.0
   channel: stable
 
 # ── Remaining first-party repos ───────────────────────────────────────────────
+
+srtla:
+  path: srtla
+  repo: https://github.com/CERALIVE/srtla
+  kind: first-party-receiver
+  pin: v2026.6.2
+  channel: stable
 
 apt-worker:
   path: apt-worker
@@ -52,7 +65,7 @@ gstlibuvch264src:
   path: gstlibuvch264src
   repo: https://github.com/CERALIVE/gstlibuvch264src
   kind: first-party
-  pin: latest
+  pin: v2026.6.0
 
 image-building-pipeline:
   path: image-building-pipeline
@@ -65,20 +78,6 @@ irl-srt-server:
   repo: https://github.com/CERALIVE/irl-srt-server
   kind: first-party
   pin: latest
-
-# ── Vendored transport source (NOT a REPOS entry; not its own .deb) ───────────
-
-# srt (CERALIVE fork of Haivision libsrt) is a BUILD-TIME vendored source ONLY —
-# cerastream + srtla compile/link against its headers for ABI parity (SONAME
-# libsrt.so.1.5). It has no packaging recipe and produces no .deb. Runtime libsrt is
-# the SYSTEM `libsrt1.5-openssl` (bookworm main), installed by the runtime OS layer
-# (manifests/packages/shared.list) — there is no CERALIVE libsrt fork .deb.
-srt:
-  path: srt
-  repo: https://github.com/CERALIVE/srt
-  kind: vendored-transport-src
-  pin: latest
-  channel: stable
 
 # ── Local PKI (no remote, no pin) ─────────────────────────────────────────────
 
