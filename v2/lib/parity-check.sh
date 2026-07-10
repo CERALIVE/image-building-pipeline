@@ -195,6 +195,11 @@ main() {
     else
       fail "ceralive.service ExecStart target missing/not executable: ${cera_exec:-<empty>}"
     fi
+    if [[ -L "${root}/etc/systemd/system/multi-user.target.wants/ceralive.service" ]]; then
+      pass "ceralive.service enabled for multi-user boot"
+    else
+      fail "ceralive.service is not enabled for multi-user boot"
+    fi
   else
     warn "ceralive.service absent — first-party CeraUI package not installed"
   fi

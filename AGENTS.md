@@ -167,7 +167,10 @@ state** under the staging dir (the host apt config is never touched).
   `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
   `gstreamer1.0-libuvch264src` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
-  plugins still come from the runtime OS layer (`shared.list`).
+  plugins still come from the runtime OS layer (`shared.list`). When that app
+  layer installs `ceralive-device`, it explicitly enables `ceralive.service`;
+  the runtime layer runs earlier and cannot enable a unit supplied later by the
+  CeraUI package.
 - **Secrets are env-only, base64-encoded** (same names as the device customize
   script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is

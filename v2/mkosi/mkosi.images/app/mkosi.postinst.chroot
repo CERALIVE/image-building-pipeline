@@ -115,6 +115,13 @@ install_first_party_apps() {
   apt-get check
 
   assert_sysext_binaries "${installed_pkgs[@]}"
+
+  if [[ " ${installed_pkgs[*]} " == *" ceralive-device "* ]]; then
+    [[ -f /etc/systemd/system/ceralive.service ]] \
+      || die "ceralive-device did not install ceralive.service"
+    systemctl enable ceralive.service
+    log "enabled ceralive.service for multi-user boot"
+  fi
 }
 
 # ---------------------------------------------------------------------------

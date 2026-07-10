@@ -865,6 +865,22 @@ UNIT
   [[ "$output" == *"ceralive.service ExecStart target missing/not executable: /opt/ceralive/ceralive"* ]]
 }
 
+@test "parity: ceralive.service must be enabled for multi-user boot" {
+  local root="$BATS_TEST_TMPDIR/parity-rootfs"
+  make_parity_rootfs "$root"
+  mkdir -p "$root/usr/local/bin"
+  : >"$root/usr/local/bin/ceralive"
+  chmod +x "$root/usr/local/bin/ceralive"
+  cat >"$root/etc/systemd/system/ceralive.service" <<'UNIT'
+[Service]
+ExecStart=/usr/local/bin/ceralive
+UNIT
+
+  run "$LIB_DIR/parity-check.sh" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ceralive.service is not enabled for multi-user boot"* ]]
+}
+
 @test "rauc: service guard checks installed unit files without relying on systemctl list output" {
   run grep -F '[[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
