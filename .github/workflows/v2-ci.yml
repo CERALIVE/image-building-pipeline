@@ -372,19 +372,25 @@ jobs:
     # NOT a substitute for the RK3588 real-hardware smoke (realhw-smoke.sh / task
     # 38) — this only validates the x86 amd64 OS+service layer boots.
     #
-    # Timeout: 600s (10 min) accounts for TCG (no KVM in CI); measured TCG run
-    # ~4–5 min, so 600s = 2× measured + headroom (EC9).
+    # Timeout model: 10 min provisioning + 10 min TCG + 10 min runner overhead.
+    # The inner bounds preserve the QEMU budget even when apt is slow.
     name: qemu x86 boot/service/package (amd64)
     runs-on: ubuntu-latest
     needs: build-matrix
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      PROVISION_TIMEOUT_MINUTES: '10'
+      QEMU_TIMEOUT_MINUTES: '10'
     steps:
       - uses: actions/checkout@v7
 
       - name: Install qemu-system-x86 + OVMF (EFI/GRUB x86 image boots via UEFI)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          timeout --signal=TERM --kill-after=30s "${PROVISION_TIMEOUT_MINUTES}m" \
+            sudo bash -euo pipefail <<'EOF'
+          apt-get update -qq
+          apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          EOF
           qemu-system-x86_64 --version | head -1
 
       - name: Verify qemu-system-x86_64 is available (MAC4 — fail loudly if missing)
@@ -415,10 +421,12 @@ jobs:
                    \( -name '*.img' -o -name '*.img.xz' \) 2>/dev/null | sort | tail -1 || true)"
           if [ -n "${img}" ]; then
             echo "booting discovered x86 image: ${img}"
-            IMAGE_PATH="${img}" ./v2/tests/qemu-x86.sh
+            IMAGE_PATH="${img}" timeout --signal=TERM --kill-after=30s \
+              "${QEMU_TIMEOUT_MINUTES}m" ./v2/tests/qemu-x86.sh
           else
             echo "no x86 disk artifact present (DRY_RUN) — running harness in skip mode"
-            ./v2/tests/qemu-x86.sh
+            timeout --signal=TERM --kill-after=30s \
+              "${QEMU_TIMEOUT_MINUTES}m" ./v2/tests/qemu-x86.sh
           fi
 
   # ---------------------------------------------------------------------------
