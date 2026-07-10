@@ -22,8 +22,8 @@ cerastream:
   repo: https://github.com/CERALIVE/cerastream
   kind: first-party
   # CalVer (YYYY.MINOR.PATCH) release tags, matching [workspace.package].version in
-  # Cargo.toml; `latest` resolves the newest matching channel release (same as CeraUI).
-  pin: v2026.6.1
+  # Cargo.toml.
+  pin: v2026.7.1
   channel: stable
 
 CeraUI:
@@ -65,7 +65,7 @@ gstlibuvch264src:
   path: gstlibuvch264src
   repo: https://github.com/CERALIVE/gstlibuvch264src
   kind: first-party
-  pin: v2026.6.0
+  pin: v2026.7.0
 
 image-building-pipeline:
   path: image-building-pipeline
