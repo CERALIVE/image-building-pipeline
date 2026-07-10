@@ -69,7 +69,7 @@ configure_debug_access() {
   if [[ -n "${hash}" && "${mode}" != "1" ]]; then
     die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
   fi
-  [[ "${mode}" == "1" ]] || return
+  [[ "${mode}" == "1" ]] || return 0
   [[ -n "${hash}" ]] || die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
   [[ "${hash}" == '$'* ]] || die "CERALIVE_DEBUG_PASSWORD_HASH must be an encrypted password hash"
   id -u "${user}" >/dev/null || die "lab debug user '${user}' is absent"

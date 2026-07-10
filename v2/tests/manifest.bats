@@ -852,6 +852,15 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "production image leaves debug access disabled without failing finalization" {
+  run env \
+    CERALIVE_DEBUG_IMAGE=0 \
+    CERALIVE_DEBUG_PASSWORD_HASH='' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+}
+
 @test "lab debug password requires an explicitly marked debug image" {
   local bin="$BATS_TEST_TMPDIR/debug-password-bin"
   local calls="$BATS_TEST_TMPDIR/debug-password-calls"
