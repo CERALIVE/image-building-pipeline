@@ -861,6 +861,12 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "mkosi passes lab debug settings to every subimage" {
+  run grep -Fx 'PassEnvironment=CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH' "$V2/mkosi/mkosi.conf"
+
+  [ "$status" -eq 0 ]
+}
+
 @test "lab debug password requires an explicitly marked debug image" {
   local bin="$BATS_TEST_TMPDIR/debug-password-bin"
   local calls="$BATS_TEST_TMPDIR/debug-password-calls"
