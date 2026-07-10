@@ -512,6 +512,7 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
+    CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -577,6 +578,18 @@ run_mkosi_build() {
   export CERALIVE_INTERFACES_eth0="${INTERFACES_ETH0:-}"
   export CERALIVE_INTERFACES_eth1="${INTERFACES_ETH1:-}"
   export CERALIVE_INTERFACES_wlan0="${INTERFACES_WLAN0:-}"
+  export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
+  export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
+  case "${CERALIVE_DEBUG_IMAGE}" in
+    0|1) ;;
+    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
+  esac
+  if [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH}" && "${CERALIVE_DEBUG_IMAGE}" != "1" ]]; then
+    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
+  fi
+  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" && -z "${CERALIVE_DEBUG_PASSWORD_HASH}" ]]; then
+    die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
+  fi
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done

@@ -45,6 +45,7 @@ else
 fi
 FLAG="${STATE_DIR}/ssh-firstboot.done"
 KEYSTORE="${STATE_DIR}/host-keys"
+DEBUG_IMAGE_MARKER="/etc/ceralive/debug-image"
 
 # --- (2) Disable root password login -----------------------------------------
 # Written every boot (deterministic content) so a freshly-activated OTA slot is
@@ -98,7 +99,9 @@ ensure_host_keys
 
 # --- (3) Force default-user password change at first login -------------------
 # Applied EXACTLY once (flag-guarded); a clean no-op on every subsequent boot.
-if [ ! -e "${FLAG}" ]; then
+if [ -e "${DEBUG_IMAGE_MARKER}" ]; then
+    log "lab debug image detected; retaining the injected '${DEFAULT_USER}' password"
+elif [ ! -e "${FLAG}" ]; then
     if id -u "${DEFAULT_USER}" >/dev/null 2>&1; then
         log "expiring '${DEFAULT_USER}' password → forced change at first login"
         chage -d 0 "${DEFAULT_USER}"

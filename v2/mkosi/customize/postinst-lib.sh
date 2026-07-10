@@ -57,6 +57,29 @@ disable_service() {
   fi
 }
 
+configure_debug_access() {
+  local user="${CERALIVE_USER:-ceralive}"
+  local mode="${CERALIVE_DEBUG_IMAGE:-0}"
+  local hash="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
+
+  case "${mode}" in
+    0|1) ;;
+    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
+  esac
+  if [[ -n "${hash}" && "${mode}" != "1" ]]; then
+    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
+  fi
+  [[ "${mode}" == "1" ]] || return
+  [[ -n "${hash}" ]] || die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
+  [[ "${hash}" == '$'* ]] || die "CERALIVE_DEBUG_PASSWORD_HASH must be an encrypted password hash"
+  id -u "${user}" >/dev/null || die "lab debug user '${user}' is absent"
+
+  usermod --password "${hash}" "${user}"
+  chage -d -1 "${user}"
+  install -Dm 0600 /dev/null /etc/ceralive/debug-image
+  log "lab debug image: password access enabled for '${user}'"
+}
+
 # --- 8. Networking (verbatim from postinst section 8) ---------------------
 configure_networking() {
   log "configuring networking (NetworkManager + mDNS)"
@@ -174,6 +197,7 @@ install_console_font_service() {
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
+  configure_debug_access
   configure_ntp  # install NTP pools before enabling chrony
   install_console_font_service
   local svc

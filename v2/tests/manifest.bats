@@ -852,6 +852,64 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "lab debug password requires an explicitly marked debug image" {
+  local bin="$BATS_TEST_TMPDIR/debug-password-bin"
+  local calls="$BATS_TEST_TMPDIR/debug-password-calls"
+  mkdir -p "$bin"
+
+  for command in id usermod chage install; do
+    cat >"$bin/$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DEBUG_PASSWORD_CALLS"
+case "$(basename "$0")" in
+  id) exit 0 ;;
+esac
+SH
+    chmod +x "$bin/$command"
+  done
+
+  run env \
+    PATH="$bin:$PATH" \
+    DEBUG_PASSWORD_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=0 \
+    CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"* ]]
+}
+
+@test "lab debug image unlocks ceralive with an injected password hash" {
+  local bin="$BATS_TEST_TMPDIR/debug-password-bin"
+  local calls="$BATS_TEST_TMPDIR/debug-password-calls"
+  mkdir -p "$bin"
+
+  for command in id usermod chage install; do
+    cat >"$bin/$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DEBUG_PASSWORD_CALLS"
+case "$(basename "$0")" in
+  id) exit 0 ;;
+esac
+SH
+    chmod +x "$bin/$command"
+  done
+
+  run env \
+    PATH="$bin:$PATH" \
+    DEBUG_PASSWORD_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=1 \
+    CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'usermod --password $6$test$hash ceralive'* ]]
+  [[ "$output" == *'chage -d -1 ceralive'* ]]
+  [[ "$output" == *'install -Dm 0600 /dev/null /etc/ceralive/debug-image'* ]]
+}
+
 @test "parity: ceralive.service fails when ExecStart target is missing" {
   local root="$BATS_TEST_TMPDIR/parity-rootfs"
   make_parity_rootfs "$root"

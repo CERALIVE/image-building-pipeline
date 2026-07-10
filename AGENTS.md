@@ -411,6 +411,9 @@ shared host keys into a per-device identity (persisted on `/data`, stable across
 A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`.
 The `ceralive` user ships password-locked (no default password); root retains
 key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
+For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
+encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
+must never be used for fleet artifacts.
 
 **First-boot WiFi provisioning portal** [PARTIAL]
 
