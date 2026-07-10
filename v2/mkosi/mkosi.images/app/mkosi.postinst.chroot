@@ -9,6 +9,7 @@
 # rootfs, then drops the staging tree so it never ships.
 #
 # WHAT INSTALLS HERE (LAYER-MAP.md §Layer 4):
+#   * libsrt1.5-ceralive — runtime ABI package, replacing Debian TLS flavors.
 #   * cerastream / srtla-send-rs — SYSEXT-class: pure /usr binaries.
 #   * CeraUI (ceralive-device .deb)           — APPFS-class: a full-filesystem payload
 #       (/usr/local/bin + /etc + /var/www) that CANNOT be a sysext — a sysext merges
@@ -22,8 +23,9 @@
 # shadows the baked-in binary). The sysext/appfs split is the OTA-delivery contract,
 # NOT an in-image install difference — so it is reflected here only in classification
 # + logging, while one local dpkg transaction installs all staged .debs.
-# Runtime already provides system libsrt and libgstreamer*, and fetch-debs stages
-# gstreamer1.0-libuvch264src beside cerastream so this layer does not need network.
+# Runtime provides libgstreamer*. fetch-debs stages the CeraLive SRT runtime beside
+# cerastream, so this transaction replaces Debian's TLS-flavor libsrt package without
+# a network dependency.
 #
 # OFFLINE/DEV builds stage NO first-party .debs (fetch-debs dry-run) — this script
 # then installs nothing and the image stays headless-clean (same graceful pattern as
@@ -49,6 +51,7 @@ FIRST_PARTY_DIR="/opt/ceralive-staging"
 # if it happens to share the staging dir.
 SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvch264src srtla-send-rs"
 APPFS_APP_PKGS="ceralive-device"
+RUNTIME_APP_PKGS="libsrt1.5-ceralive"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
 # wrongly-pruned .deb fails loudly instead of shipping an app that cannot encode/bond
@@ -94,6 +97,8 @@ install_first_party_apps() {
       log "sysext-class : ${pkg}  ($(basename "${deb}"))"
     elif [[ " ${APPFS_APP_PKGS} " == *" ${pkg} "* ]]; then
       log "appfs-class  : ${pkg}  ($(basename "${deb}"))"
+    elif [[ " ${RUNTIME_APP_PKGS} " == *" ${pkg} "* ]]; then
+      log "runtime-abi  : ${pkg}  ($(basename "${deb}"))"
     else
       log "first-party  : ${pkg}  ($(basename "${deb}")) [unclassified — installed as-is]"
     fi
@@ -113,6 +118,12 @@ install_first_party_apps() {
     apt-get install -y --no-install-recommends --no-download -f
   fi
   apt-get check
+
+  if [[ " ${installed_pkgs[*]} " == *" libsrt1.5-ceralive "* ]]; then
+    dpkg-query -W libsrt1.5-ceralive >/dev/null
+    ! dpkg-query -W libsrt1.5-gnutls >/dev/null 2>&1
+    ! dpkg-query -W libsrt1.5-openssl >/dev/null 2>&1
+  fi
 
   assert_sysext_binaries "${installed_pkgs[@]}"
 

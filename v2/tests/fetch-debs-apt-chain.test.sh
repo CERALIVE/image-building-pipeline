@@ -136,6 +136,7 @@ SHA256: ${sha}
 
 EOF
 	done <<'EOF'
+libsrt1.5-ceralive|1.5.5+ceralive.1
 cerastream|2026.6.1
 gstreamer1.0-libuvch264src|2026.6.0
 ceralive-device|2026.6.2-20260618T010244.eb107e7
@@ -206,11 +207,11 @@ expect_success \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
 staged_count="$(find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' | wc -l)"
-if [[ "${staged_count}" -ne 4 ]]; then
-	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 4\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
+if [[ "${staged_count}" -ne 5 ]]; then
+	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 5\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
-printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 4 debs\n' | tee -a "${RESULTS_LOG}"
+printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 5 debs\n' | tee -a "${RESULTS_LOG}"
 
 curl_repo="${RUN_DIR}/curl-repo"
 prepare_fake_curl_repo "${curl_repo}"
@@ -224,8 +225,8 @@ if ! run_fetch_first_party_curl "${curl_dest}" "${curl_repo}" \
 	exit 1
 fi
 curl_staged_count="$(find "${curl_dest}" -maxdepth 1 -name '*.deb' | wc -l)"
-if [[ "${curl_staged_count}" -ne 4 ]]; then
-	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 4\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
+if [[ "${curl_staged_count}" -ne 5 ]]; then
+	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 5\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
@@ -249,7 +250,7 @@ expect_failure \
 	APT_CLIENT_CRT_B64="${CRT_B64}" \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
-if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -q ' download cerastream=2026.6.1\\\* gstreamer1.0-libuvch264src=2026.6.0\\\* ceralive-device=2026.6.2\\\* srtla-send-rs=3.1.0\\\*$' "${FAKE_APT_LOG}"; then
+if ! grep -q ' update$' "${FAKE_APT_LOG}" || ! grep -q ' download libsrt1.5-ceralive=1.5.5+ceralive.1\\\* cerastream=2026.6.1\\\* gstreamer1.0-libuvch264src=2026.6.0\\\* ceralive-device=2026.6.2\\\* srtla-send-rs=3.1.0\\\*$' "${FAKE_APT_LOG}"; then
 	printf 'FAIL apt-get fake did not observe expected update/download contract\n' | tee -a "${RESULTS_LOG}"
 	cat "${FAKE_APT_LOG}" >&2
 	exit 1

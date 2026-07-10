@@ -118,7 +118,7 @@ build_v2_set() {
     if [[ -f "${FETCH_DEBS}" ]]; then
       sed -n 's/^REPOS=(\(.*\))/\1/p' "${FETCH_DEBS}" | tr -d '"' | tr ' ' '\n'
     fi
-    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src
+    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src libsrt1.5-ceralive
   } | sed '/^$/d' | sort -u
 }
 
@@ -142,7 +142,7 @@ SHARED="$(sed -e 's/#.*//' "${PKGDIR}/shared.list" | awk 'NF{print $1}' | sort -
 FAMILY="$(for y in "${FAMDIR}"/*.yaml; do grep -E '^[[:space:]]*-[[:space:]]+[a-z0-9._+-]+' "${y}" | sed -E 's/^[[:space:]]*-[[:space:]]+//' | awk '{print $1}'; done | sort -u)"
 # shellcheck disable=SC2016  # literal backticks in the regex are intentional
 REMOVED="$(grep -oE '`[^`]+`' "${PKGDIR}/removed.md" | tr -d '`' | grep -E '^[a-z0-9][a-z0-9.+*-]*$' | grep -vE '\.(conf|sh|list|yaml|yml|md|py)$' | sort -u)"
-FIRSTPARTY=$'srtla-send-rs\ncerastream\nCeraUI\nceraui\nceralive-device'
+FIRSTPARTY=$'srtla-send-rs\ncerastream\nCeraUI\nceraui\nceralive-device\nlibsrt1.5-ceralive'
 
 mkdir -p "$(dirname "${EVIDENCE}")"
 {

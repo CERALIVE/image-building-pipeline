@@ -11,13 +11,12 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — cerastream / gstreamer1.0-libuvch264src /
+#   2. First-party   — CeraLive SRT / cerastream / gstreamer1.0-libuvch264src /
 #                      ceralive-device (CeraUI) / srtla-send-rs .debs, PULLED FROM
 #                      apt.ceralive.tv via a GPG-verified, mTLS-authenticated apt
-#                      source. System libsrt
-#                      (`libsrt1.5-openssl`) and the libgstreamer* plugins are
-#                      installed by the runtime OS layer (shared.list). The app
-#                      layer installs the staged local .debs with no downloads.
+#                      source. The app layer installs the staged local .debs with
+#                      no downloads. Debian's TLS-flavor libsrt packages are replaced
+#                      by the single CeraLive runtime package during that transaction.
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
 # the staged .debs into the rootfs tree directly; there is no Armbian build here.
@@ -106,11 +105,11 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 # boot-parity-results.md). RK3588 hardware-gated profiles now track as
 # cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
-REPOS=("cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
 
 # REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
 assert_repos_integrity() {
-  local -a _sacred=("cerastream" "CeraUI" "srtla-send-rs")
+  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla-send-rs")
   (( ${#REPOS[@]} == ${#_sacred[@]} )) \
     || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
   local i
@@ -121,8 +120,9 @@ assert_repos_integrity() {
 }
 assert_repos_integrity
 
-FIRST_PARTY_APT_PKGS=("cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
+FIRST_PARTY_APT_PKGS=("libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
 declare -A FIRST_PARTY_PIN_KEYS=(
+  [libsrt1.5-ceralive]="srt"
   [cerastream]="cerastream"
   [gstreamer1.0-libuvch264src]="gstlibuvch264src"
   [ceralive-device]="CeraUI"

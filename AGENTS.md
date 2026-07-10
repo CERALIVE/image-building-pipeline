@@ -126,7 +126,7 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
@@ -151,19 +151,19 @@ paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
 the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
-- **Packages staged** (`FIRST_PARTY_APT_PKGS`): the three top-level packages
-  `cerastream ceralive-device srtla-send-rs` plus the required capture plugin
+- **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
+  `cerastream ceralive-device srtla-send-rs`, plus the required capture plugin
   `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
   from root `versions.yaml`. Debian hosts use isolated `apt-get download`;
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
   exact package files. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
-  `CeraUI → ceralive-device` and `gstlibuvch264src → gstreamer1.0-libuvch264src`.
-- **`srt` is NOT a `.deb` and NOT in `REPOS`.** The `srt` repo is a build-time
-  vendored libsrt source (cerastream + srtla compile against its headers for ABI
-  parity); it produces no `.deb`. Runtime libsrt is the **system** `libsrt1.5-openssl`
-  installed by the runtime OS layer (`manifests/packages/shared.list`). The
+  `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
+  `gstlibuvch264src → gstreamer1.0-libuvch264src`.
+- **`srt` provides the device SRT runtime.** Its `libsrt1.5-ceralive` package
+  replaces Debian's GnuTLS/OpenSSL variants, so GStreamer and cerastream resolve
+  one forked `libsrt.so.1.5` implementation. The
   `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
   `gstreamer1.0-libuvch264src` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
@@ -544,7 +544,7 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT
-- Don't add `srt` to `REPOS` or `FIRST_PARTY_APT_PKGS` — `srt` is a build-time vendored libsrt source that produces no `.deb`; runtime libsrt is the system `libsrt1.5-openssl` from the runtime OS layer (`shared.list`)
+- Keep `srt` in `REPOS` and map `libsrt1.5-ceralive` through `FIRST_PARTY_APT_PKGS`; do not add a Debian `libsrt1.5-*` runtime package to `shared.list`
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only

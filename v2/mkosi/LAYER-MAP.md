@@ -11,7 +11,7 @@ base  ──▶ platform ──▶ runtime ──▶ app  ──▶ disk     (De
  │          │            │           │        │
  │          │            │           │        └─ Format=disk: D4 partition layout (Stage 4)
  │          │            │           └─ first-party apps (Stage 3 — PLACEHOLDER today)
- │          │            └────────────── OS runtime + system libsrt + RAUC infra (arch-IDENTICAL)
+ │          │            └────────────── OS runtime + RAUC infra (arch-IDENTICAL)
  │          └─────────────────────────── board/SoC BSP + HW-accel (the ONLY arch-specific layer)
  └────────────────────────────────────── minimal Debian bookworm (systemd/udev/ssh/dbus)
 ```
@@ -62,8 +62,8 @@ board logic in the layer config. Adding a new board never edits this layer.
 are allowed.** On an x86 build the platform postinst is a clean pass-through
 (no RK3588 BSP to add).
 
-**NOT here:** the SRT transport library (`libsrt`) — it is a stable, arch-neutral
-OS package and lives in **runtime**, so a libsrt bump never forces a BSP rebuild.
+**NOT here:** the SRT transport library (`libsrt`) — the first-party CeraLive
+runtime package is installed in the App layer, never in the BSP.
 
 ---
 
@@ -75,7 +75,7 @@ OS package and lives in **runtime**, so a libsrt bump never forces a BSP rebuild
 | Contents | Source |
 |---|---|
 | Canonical runtime package set (45 pkgs) | `manifests/packages/shared.list` (+ resolved `<family>.delta.list`, currently empty) |
-| **System SRT transport library** `libsrt1.5-openssl` | shared.list (OS-update infra section) |
+| **CeraLive SRT transport library** `libsrt1.5-ceralive` | first-party staging, installed in App |
 | RAUC A/B client `rauc` + `u-boot-tools` | shared.list (decisions.md Task 5) |
 | `rauc-hawkbit-updater` | **commented PLACEHOLDER** in shared.list (Stage 4 OTA; backport `.deb`, not in bookworm) |
 | System config (`mkosi.postinst.chroot`) | ceralive user+groups, deb822 apt sources, mTLS+GPG `apt.ceralive.tv` repo, udev hardware-access rules, streaming sysctl, NetworkManager, **SRTLA source-policy routing**, services, first-boot hostname |
@@ -89,20 +89,11 @@ the built rootfs against `configs/base/ceraui-base.conf`.
 
 ### libsrt — the key placement decision
 
-`libsrt` (the SRT transport library) is a stable shared library that **both**
-`cerastream` and `srtla` link at runtime. It lives in the **runtime OS slot**, NOT
-the app layer, because:
-
-1. The app sysext images (srtla; cerastream follow-on) stay small (no bundled libsrt).
-2. A libsrt update flows through the **RAUC OS slot** (atomic), not through a sysext.
-3. Both architectures (rk3588, x86) use the **same** package name.
-
-The runtime layer installs the **system** `libsrt1.5-openssl` (Debian bookworm) —
-this IS the device's runtime libsrt. The CERALIVE `srt` repo is a **build-time
-vendored source** (cerastream + srtla compile/link against its headers for ABI
-parity, SONAME `libsrt.so.1.5`); it produces **no `.deb`** and ships nothing at
-runtime. There is **no first-party libsrt fork `.deb`** — `cerastream` `Depends`
-on the system `libsrt1.5-openssl` directly.
+`libsrt` is installed as the first-party `libsrt1.5-ceralive` package in the App
+layer. It provides both Debian TLS-flavor virtual package names and ships a
+`libsrt-gnutls.so.1.5` alias to the same forked `libsrt.so.1.5`. GStreamer and
+cerastream's direct FFI therefore load one CeraLive implementation, not two TLS
+flavor builds in one process.
 
 **NOT here:** HW-accel GStreamer / kernel / BSP (→ platform); first-party apps
 (→ app). Board capture/quirk udev rules (→ platform-specific module, task 20).
@@ -115,12 +106,13 @@ on the system `libsrt1.5-openssl` directly.
 
 | Installs (the `.deb`) | In-image path | OTA-delivery backend |
 |---|---|---|
+| `libsrt1.5-ceralive` | `/usr/lib/<triplet>` | first-party runtime ABI payload |
 | `cerastream`, `srtla-send-rs` | `/usr/bin` | sysext/app binary payload |
 | `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
 
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
-every staged first-party `.deb` from `/opt/ceralive-staging` with no downloads
-(system deps must already be in the runtime layer), asserts the
+every staged first-party `.deb` from `/opt/ceralive-staging` with no downloads,
+replaces any Debian SRT TLS flavor with `libsrt1.5-ceralive`, asserts the
 `cerastream`/`srtla_send` binaries landed, prunes non-RK3588/headless payload, then
 drops the staging tree so it never ships. **The base
 image bakes each `.deb` into the rootfs** (`docs/partition-contract.md` §4 "No appfs":
@@ -132,8 +124,9 @@ binary). In CI (`.debs` fetched) the parity gate clears the first-party check vi
 absent first-party packages, by design (non-vacuity/deferral pattern).
 
 **WHY a separate layer:** apps update independently of the OS (sysext / appfs),
-while libsrt + the OS update atomically via RAUC. Keeping apps out of runtime keeps
-app images small and the OS slot stable.
+while the CeraLive SRT runtime and applications are installed together from the
+first-party staging set. Keeping Debian libsrt out of runtime prevents a second
+implementation from entering the process.
 
 **OUT OF SCOPE here:** moving CeraUI from appfs to sysext — a CeraUI-REPO change
 fully specified in `v2/docs/deferred-ceraui-sysext.md` (units/udev/config/www must

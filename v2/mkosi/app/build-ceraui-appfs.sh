@@ -30,7 +30,7 @@
 # is an IPC-driven engine consumed via @ceralive/cerastream). srtla handles
 # resolve at process start against the MERGED /usr view of three independent layers:
 #
-#   Runtime OS slot (RAUC)  → libsrt1.5-openssl  → /usr/lib/<triplet>/libsrt.so.*
+#   First-party SRT package → libsrt1.5-ceralive → /usr/lib/<triplet>/libsrt.so.*
 #   App .deb   (cerastream) → cerastream binary  → /usr/bin/cerastream
 #   App sysext (srtla)      → srtla binaries     → /usr/bin/srtla_{send,rec}
 #   App appfs  (CeraUI)     → ceralive binary    → /usr/local/bin/ceralive

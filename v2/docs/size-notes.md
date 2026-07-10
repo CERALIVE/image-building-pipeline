@@ -260,10 +260,10 @@ occupied.
 | `srt-tools` | ~3.05 MB (3122 KiB) | **REMOVED** (reclaimed) |
 | `libsrt1.5-gnutls` (was a `srt-tools` dep) | ~0.85 MB (875 KiB) | **REMOVED** (no longer pulled) |
 
-**Net expected delta: ~−3.9 MB** vs the previous topology. `libsrt1.5-openssl` (the
-OpenSSL libsrt the streaming stack/srtla links) is **KEPT** — it is unrelated to the
-removed GnuTLS `srt-tools` flavour and remains a runtime dependency of cerastream/srtla
-(§ "OS-update + SRT transport infra" in `shared.list`).
+**Net expected delta: ~−3.9 MB** vs the previous topology before the first-party SRT
+runtime is added. The release image instead installs `libsrt1.5-ceralive` from the
+CeraLive apt repository; it replaces both Debian TLS flavors and is accounted with
+the App-layer first-party artifacts, not the shared runtime manifest.
 
 ### Re-evaluation / baseline note
 
