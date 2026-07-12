@@ -120,6 +120,8 @@ smoke test, and signing), see
 The hardware-free CI/test entrypoint is `CERALIVE_RUN_REAL_RAUC_CONTRACT=required
 ./v2/run-tests`. It creates the ignored, NON-PRODUCTION RAUC signing fixture on
 demand; production builds must still provide `CERALIVE_RAUC_PKI_DIR` explicitly.
+When GNU parallel is available, tests that share the build staging tree serialize
+with file locks so CI concurrency cannot alter their assertions.
 
 ## Custom Components
 

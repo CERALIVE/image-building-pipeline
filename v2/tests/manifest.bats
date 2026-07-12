@@ -254,6 +254,9 @@ make_parity_rootfs() {
 #     mid-mutation -> false failure.
 #   * §14 feature sysext — build_feature_fixture populates a per-FILE fixture
 #     dir ($BATS_FILE_TMPDIR/out) shared by five tests; only one may build it.
+#   * §9 build-plan probes — each `v2/build` invocation removes and recreates
+#     the shared `v2/mkosi/.staging/<board>` directory; these tests take one
+#     lock so GNU-parallel CI cannot interleave board fetch plans.
 # The lock auto-releases when the @test subshell exits (each bats test runs in
 # its own subshell). flock-less hosts get a no-op — v2/run-tests only requests
 # --jobs when flock is present, so a serial run never needs it.
@@ -602,24 +605,28 @@ YAML
 # ===========================================================================
 
 @test "t14 rootfs: rock-5b-plus reaches the build plan (exit 0, custom/rk3588)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
 @test "t14 rootfs: orange-pi-5-plus reaches the build plan (exit 0, custom/rk3588)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" orange-pi-5-plus
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
 @test "t14 rootfs: x86-minipc reaches the build plan (exit 0, efi)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
 @test "fetch staging: x86-minipc maps resolved x86-64 to Debian amd64" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
   [[ "$output" == *"resolved: family=x86_64 arch=x86-64 (mkosi=x86-64)"* ]]
@@ -631,6 +638,7 @@ YAML
 }
 
 @test "fetch staging: RK3588 boards keep Debian arm64" {
+  serialize build-plan
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
     run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" "$board"
@@ -645,6 +653,7 @@ YAML
 }
 
 @test "t14 x86 guard: x86-minipc DRY_RUN emits no .raw (resolve+plan only, before Stage-4)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
   # DRY_RUN stops at [5/9], before ANY board reaches Stage-4 disk assembly, so no
