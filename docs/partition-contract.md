@@ -227,7 +227,7 @@ firmware lives in the board's own SPI flash — there is **no raw gap**. p1 is i
 an **EFI System Partition** (GPT type `EF00`, FAT32, PARTLABEL `boot`) that holds
 GRUB and the `grubenv` boot-selection state.
 
-The bootloader state model also differs. RK3588 uses a vendor U-Boot 2017.09 with no
+The bootloader state model also differs. RK3588 uses the staged vendor U-Boot with no
 working `fw_setenv`, so its A/B state lives in a hand-rolled text file on the FAT
 `boot` partition. x86 GRUB has full persistent env via `grub-editenv`, so the state
 lives in a **grubenv** block on the ESP — read by GRUB at boot time and rewritten by

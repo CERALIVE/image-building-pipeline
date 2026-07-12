@@ -6,23 +6,23 @@
 # and signed `.raucb` RAUC bundle and prints PASS or FAIL for each sub-check,
 # exiting non-zero if ANY sub-check fails. A red gate means DO NOT flash.
 #
-# Eight sub-checks (all must PASS):
-#   1. GPT geometry   — A/B: boot + rootfs_a + rootfs_b + data, unique labels.
-#   2. Gap magic      — Rockchip idblock "RKNS" (52 4b 4e 53) at sector 64, i.e.
-#                       the U-Boot bootloader is present in the 16 MB raw gap.
-#   3. Boot partition — boot.scr, cera_board.env, boot_state.txt and
+# Nine sub-checks (all must PASS):
+#   1. GPT geometry   — exact A/B starts/sizes, unique labels, clean sgdisk -v.
+#   2. Gap idblock    — Rockchip "RKNS" at sector 64.
+#   3. Gap FIT        — parseable U-Boot FIT at sector 16384 with a valid extent.
+#   4. Boot partition — compiled boot.scr, Rock board metadata, boot_state.txt and
 #                       extlinux/extlinux.conf are all present on the FAT boot
 #                       partition (offset GAP_MB * 1 MiB).
-#   4. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
+#   5. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
 #                       attempt budget for both populated factory slots.
-#   5. RAUC bundle    — `rauc info` parses the bundle and its Compatible string
+#   6. RAUC bundle    — `rauc info` parses the bundle and its Compatible string
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
-#   6. Factory A      — rootfs_a contains systemd/init and the shared p1 /boot mount.
-#   7. Factory B      — rootfs_b contains systemd/init and the shared p1 /boot mount.
+#   7. Factory A      — init, kernel, Rock DTB, initrd, shared p1 /boot mount.
+#   8. Factory B      — the same complete boot artifact set in rootfs_b.
 #                       An empty or state-isolated B blocks production flash.
-#   8. Target media   — the operator-supplied capacity is at least the exact raw
+#   9. Target media   — the operator-supplied capacity is at least the exact raw
 #                       image size; an undersized eMMC/SD/NVMe is rejected.
 #
 # Everything is image inspection: no loop mount, no root, no hardware. The
@@ -57,6 +57,14 @@ SECTOR=512
 GAP_MB_DEFAULT=16            # raw idbloader+U-Boot+ATF gap before p1 (16 MiB)
 RKNS_SECTOR=64               # Rockchip idblock lands at sector 64 (byte 32768)
 RKNS_MAGIC="52 4b 4e 53"     # "RKNS" on media (NOT literal "RK35"; spike Div #3)
+FIT_SECTOR=16384
+FIT_MAGIC="d0 0d fe ed"
+BOOT_START=32768
+BOOT_SIZE=524288
+ROOTFS_SIZE=8388608
+ROOTFS_A_START=557056
+ROOTFS_B_START=8945664
+DATA_START=17334272
 # RAUC leaf cert carries EKU=codeSigning only; default smimesign purpose rejects
 # it ("unsuitable certificate purpose"). Tell rauc to check the codesign purpose.
 RAUC_VERIFY_OPTS=(-C keyring:check-purpose=codesign)
@@ -83,21 +91,44 @@ newest_artifact() {
 check_gpt_geometry() {
   local img="$1"
   require_tool sgdisk || { fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"; return; }
-  local labels count
+  local labels count verify_out
+  if ! verify_out="$(sgdisk -v "${img}" 2>&1)" \
+      || ! grep -q 'No problems found' <<<"${verify_out}"; then
+    fail "GPT integrity: sgdisk -v reports no structural errors"
+    info "$(printf '%s' "${verify_out}" | tail -1)"
+    return
+  fi
   # Partition rows in `sgdisk -p` start with whitespace + the partition number;
   # the PARTLABEL is the last column. Collect them in table order.
   labels="$(sgdisk -p "${img}" 2>/dev/null \
     | awk '/^[[:space:]]+[0-9]+[[:space:]]/{print $NF}')"
   count="$(printf '%s\n' "${labels}" | grep -c .)"
   local norm; norm="$(printf '%s\n' "${labels}" | tr '\n' ' ' | sed 's/ *$//')"
+  local p1_start p1_size p2_start p2_size p3_start p3_size p4_start p4_size p4_last expected_last
+  p1_start="$(part_value "${img}" 1 'First sector')"; p1_size="$(part_value "${img}" 1 'Partition size')"
+  p2_start="$(part_value "${img}" 2 'First sector')"; p2_size="$(part_value "${img}" 2 'Partition size')"
+  p3_start="$(part_value "${img}" 3 'First sector')"; p3_size="$(part_value "${img}" 3 'Partition size')"
+  p4_start="$(part_value "${img}" 4 'First sector')"; p4_size="$(part_value "${img}" 4 'Partition size')"
+  p4_last="$(part_value "${img}" 4 'Last sector')"
+  expected_last=$(( (($(stat -c %s "${img}") / SECTOR - 33) / 8) * 8 - 1 ))
   if [[ "${norm}" == "boot rootfs_a rootfs_b data" ]] \
-      && [[ "$(printf '%s\n' "${labels}" | sort -u | wc -l)" -eq 4 ]]; then
-    pass "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"
+      && [[ "$(printf '%s\n' "${labels}" | sort -u | wc -l)" -eq 4 ]] \
+      && [[ "${p1_start}" == "${BOOT_START}" && "${p1_size}" == "${BOOT_SIZE}" ]] \
+      && [[ "${p2_start}" == "${ROOTFS_A_START}" && "${p2_size}" == "${ROOTFS_SIZE}" ]] \
+      && [[ "${p3_start}" == "${ROOTFS_B_START}" && "${p3_size}" == "${ROOTFS_SIZE}" ]] \
+      && [[ "${p4_start}" == "${DATA_START}" && "${p4_size}" -ge 4194304 ]] \
+      && [[ "${p4_last}" -eq "${expected_last}" && "${p4_size}" -eq $((expected_last - DATA_START + 1)) ]]; then
+    pass "GPT geometry: exact A/B starts/sizes and unique labels"
     info "partitions (${count}): ${norm}"
   else
-    fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"
-    info "expected four unique labels 'boot rootfs_a rootfs_b data', got '${norm}' (${count} partitions)"
+    fail "GPT geometry: exact A/B starts/sizes and unique labels"
+    info "got labels='${norm}' starts=${p1_start},${p2_start},${p3_start},${p4_start} sizes=${p1_size},${p2_size},${p3_size},${p4_size}"
   fi
+}
+
+part_value() {
+  local img="$1" part="$2" field="$3"
+  sgdisk -i "${part}" "${img}" 2>/dev/null | sed -n "s/.*${field}: \([0-9][0-9]*\).*/\1/p"
 }
 
 # ---------------------------------------------------------------------------
@@ -126,22 +157,56 @@ check_gap_magic() {
   fi
 }
 
+check_second_stage_fit() {
+  local img="$1" got size_hex size fit
+  require_tool dumpimage || { fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"; return; }
+  got="$(dd if="${img}" bs=1 skip=$((FIT_SECTOR * SECTOR)) count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')"
+  size_hex="$(dd if="${img}" bs=1 skip=$((FIT_SECTOR * SECTOR + 4)) count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  size=0
+  [[ "${size_hex}" =~ ^[0-9a-fA-F]{8}$ ]] && size=$((16#${size_hex}))
+  fit="$(mktemp)"
+  if (( size > 0 && size <= 8388608 )); then
+    dd if="${img}" of="${fit}" bs=1 skip=$((FIT_SECTOR * SECTOR)) count="${size}" status=none 2>/dev/null
+  fi
+  if [[ "${got}" == "${FIT_MAGIC}" ]] && (( size >= 4096 && size <= 8388608 )) \
+      && dumpimage -l "${fit}" >/dev/null 2>&1; then
+    pass "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    info "FIT total size: ${size} bytes"
+  else
+    fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    info "magic='${got}' total-size=${size} (expected ${FIT_MAGIC}, 4096..8388608 bytes)"
+  fi
+  rm -f "${fit}"
+}
+
 # ---------------------------------------------------------------------------
 # Check 3 — Boot partition holds the four U-Boot A/B selector artifacts.
 # ---------------------------------------------------------------------------
 check_boot_partition() {
   local img="$1" boot_off="$2"
   require_tool mdir || { fail "Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf"; return; }
-  local f missing=""
+  require_tool mtype || { fail "Boot partition: staged selector and board metadata"; return; }
+  require_tool mcopy || { fail "Boot partition: staged selector and board metadata"; return; }
+  require_tool mkimage || { fail "Boot partition: staged selector and board metadata"; return; }
+  local f missing="" tmp script board_env valid=1
   for f in boot.scr cera_board.env boot_state.txt extlinux/extlinux.conf; do
     mdir -i "${img}@@${boot_off}" "::/${f}" >/dev/null 2>&1 || missing="${missing} ${f}"
   done
-  if [[ -z "${missing}" ]]; then
-    pass "Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf"
-    info "boot partition @ offset ${boot_off} — all 4 artifacts present"
+  tmp="$(mktemp -d)"
+  script="${tmp}/boot.scr"
+  mcopy -i "${img}@@${boot_off}" ::/boot.scr "${script}" >/dev/null 2>&1 || valid=0
+  mkimage -l "${script}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
+  board_env="$(mtype -i "${img}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
+  grep -qx 'board_id=rock-5b-plus' <<<"${board_env}" || valid=0
+  grep -qx 'fdtfile=rk3588-rock-5b-plus.dtb' <<<"${board_env}" || valid=0
+  rm -rf "${tmp}"
+  if [[ -z "${missing}" ]] && (( valid == 1 )); then
+    pass "Boot partition: compiled AArch64 selector + Rock board metadata + recovery files"
+    info "boot partition @ offset ${boot_off} — selector parses and board DTB metadata matches"
   else
-    fail "Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf"
-    info "missing from boot partition @ offset ${boot_off}:${missing}"
+    fail "Boot partition: compiled AArch64 selector + Rock board metadata + recovery files"
+    [[ -z "${missing}" ]] || info "missing from boot partition @ offset ${boot_off}:${missing}"
+    (( valid == 1 )) || info "boot.scr or Rock board metadata is malformed"
   fi
 }
 
@@ -150,8 +215,8 @@ check_boot_state() {
   require_tool mtype || { fail "Boot state: BOOT_ORDER=A B with positive A/B attempts"; return; }
   state="$(mtype -i "${img}@@${boot_off}" ::/boot_state.txt 2>/dev/null)"
   if grep -qx 'BOOT_ORDER=A B' <<<"${state}" \
-      && grep -qE '^BOOT_A_LEFT=[1-9][0-9]*$' <<<"${state}" \
-      && grep -qE '^BOOT_B_LEFT=[1-9][0-9]*$' <<<"${state}"; then
+      && grep -qE '^BOOT_A_LEFT=[1-3]$' <<<"${state}" \
+      && grep -qE '^BOOT_B_LEFT=[1-3]$' <<<"${state}"; then
     pass "Boot state: BOOT_ORDER=A B with positive A/B attempts"
     info "$(grep -E '^BOOT_ORDER=|^BOOT_[AB]_LEFT=' <<<"${state}" | tr '\n' ' ')"
   else
@@ -193,6 +258,7 @@ check_rootfs_populated() {
   local fstab boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
   require_tool sgdisk  || { fail "${label} populated + shared /boot mount present"; return; }
   require_tool debugfs || { fail "${label} populated + shared /boot mount present"; return; }
+  require_tool fdtdump || { fail "${label} populated + kernel + board DTB + initrd + shared /boot mount"; return; }
   start_sector="$(sgdisk -i "${part}" "${img}" 2>/dev/null | sed -n 's/.*First sector: \([0-9]\+\).*/\1/p')"
   size_sectors="$(sgdisk -i "${part}" "${img}" 2>/dev/null | sed -n 's/.*Partition size: \([0-9]\+\).*/\1/p')"
   if [[ -z "${start_sector}" || -z "${size_sectors}" ]]; then
@@ -212,15 +278,30 @@ check_rootfs_populated() {
     fi
   done
   fstab="$(debugfs -R 'cat /etc/fstab' "${tmp}" 2>/dev/null || true)"
-  rm -f "${tmp}"
-  if [[ -n "${found}" ]] && grep -Fxq "${boot_mount}" <<<"${fstab}"; then
-    pass "${label} populated + shared /boot mount present"
-    info "${label} (p${part} @ sector ${start_sector}): found ${found} and explicit shared p1 mount"
+  local artifacts_ok=1 artifact_dir kernel dtb initrd kernel_magic dtb_magic initrd_magic
+  artifact_dir="$(mktemp -d)"
+  kernel="${artifact_dir}/Image"; dtb="${artifact_dir}/board.dtb"; initrd="${artifact_dir}/initrd.img"
+  debugfs -R "dump -p /boot/Image ${kernel}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
+  debugfs -R "dump -p /boot/dtb/rockchip/rk3588-rock-5b-plus.dtb ${dtb}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
+  debugfs -R "dump -p /boot/initrd.img ${initrd}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
+  kernel_magic="$(dd if="${kernel}" bs=1 skip=56 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  dtb_magic="$(dd if="${dtb}" bs=1 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  initrd_magic="$(dd if="${initrd}" bs=1 count=6 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  [[ -f "${kernel}" && "$(stat -c %s "${kernel}" 2>/dev/null || echo 0)" -ge 8388608 && "${kernel_magic}" == 41524d64 ]] || artifacts_ok=0
+  [[ -f "${dtb}" && "$(stat -c %s "${dtb}" 2>/dev/null || echo 0)" -ge 4096 && "${dtb_magic}" == d00dfeed ]] \
+    && fdtdump "${dtb}" >/dev/null 2>&1 || artifacts_ok=0
+  [[ -f "${initrd}" && "$(stat -c %s "${initrd}" 2>/dev/null || echo 0)" -ge 1048576 ]] || artifacts_ok=0
+  initrd_is_coherent "${initrd}" "${initrd_magic}" || artifacts_ok=0
+  rm -rf "${artifact_dir}" "${tmp}"
+  if [[ -n "${found}" ]] && grep -Fxq "${boot_mount}" <<<"${fstab}" && (( artifacts_ok == 1 )); then
+    pass "${label} populated + kernel + board DTB + initrd + shared /boot mount"
+    info "${label} (p${part} @ sector ${start_sector}): complete arm64 boot artifact set"
   else
-    fail "${label} populated + shared /boot mount present"
+    fail "${label} populated + kernel + board DTB + initrd + shared /boot mount"
     [[ -n "${found}" ]] || info "${label} (p${part} @ sector ${start_sector}) has no init"
     grep -Fxq "${boot_mount}" <<<"${fstab}" \
       || info "${label} lacks the explicit writable PARTLABEL=boot /boot mount"
+    (( artifacts_ok == 1 )) || info "${label} lacks a coherent kernel + board DTB + initrd artifact set"
   fi
 }
 
@@ -241,6 +322,20 @@ require_tool() {
   return 1
 }
 
+initrd_is_coherent() {
+  local initrd="$1" magic="$2" listing=""
+  require_tool cpio || return 1
+  case "${magic}" in
+    1f8b*) require_tool gzip || return 1; listing="$(gzip -dc "${initrd}" 2>/dev/null | cpio -it 2>/dev/null)" ;;
+    28b52ffd*) require_tool zstd || return 1; listing="$(zstd -q -dc "${initrd}" 2>/dev/null | cpio -it 2>/dev/null)" ;;
+    fd377a585a00) require_tool xz || return 1; listing="$(xz -dc "${initrd}" 2>/dev/null | cpio -it 2>/dev/null)" ;;
+    04224d18*) require_tool lz4 || return 1; listing="$(lz4 -q -dc "${initrd}" 2>/dev/null | cpio -it 2>/dev/null)" ;;
+    303730373031|303730373032) listing="$(cpio -it <"${initrd}" 2>/dev/null)" ;;
+    *) return 1 ;;
+  esac
+  grep -Eq '^\.?/?init$' <<<"${listing}"
+}
+
 run_gate() {
   local raw="$1" bundle="$2" board="$3" keyring="$4" gap_mb="$5" target_bytes="$6"
   local boot_off=$(( gap_mb * 1024 * 1024 ))
@@ -258,6 +353,7 @@ run_gate() {
   if [[ -f "${raw}" ]]; then
     check_gpt_geometry "${raw}"
     check_gap_magic    "${raw}"
+    check_second_stage_fit "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
     check_boot_state     "${raw}" "${boot_off}"
     check_rootfs_populated "${raw}" 2 rootfs_a

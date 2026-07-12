@@ -127,9 +127,14 @@ successful write; a three-attempt bootcount rolls an unconfirmed slot back.
 Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
 automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
 
-`v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects missing B,
-duplicate/wrong GPT labels, stale boot state, incompatible/invalid bundles, and a
-destination smaller than the raw image. A v1 single-slot disk cannot migrate by
+`v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects wrong GPT
+starts/sizes or labels, a missing idblock or second-stage FIT, malformed compiled
+boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
+state, incompatible/invalid signed bundles, and a destination smaller than the raw
+image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
+mock rollback, preflash adversarial fixtures, and—when CI sets
+`CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
+and cleanup harness. A v1 single-slot disk cannot migrate by
 OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.

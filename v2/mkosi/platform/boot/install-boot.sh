@@ -114,8 +114,8 @@ boot-attempts=${BOOT_ATTEMPTS}
 [handlers]
 # Bookworm RAUC 1.8 reads rauc.slot= itself and delegates the four state/primary
 # operations to this script. RAUC 1.11+ may also call get-current. BOOT_ORDER and
-# per-slot attempt counters live on the FAT boot partition because vendor U-Boot
-# 2017.09 has no working fw_setenv (decision D3).
+# per-slot attempt counters live on the FAT boot partition because the staged
+# vendor U-Boot has no persistent fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 
 [keyring]

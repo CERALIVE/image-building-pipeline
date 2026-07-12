@@ -42,6 +42,8 @@ SUITES=(
 SHELL_SUITES=(
   "${HERE}/tests/fetch-debs-apt-chain.test.sh"
   "${HERE}/tests/orchestrate-build-lock.test.sh"
+  "${HERE}/tests/boot-script-sanitize.test.sh"
+  "${HERE}/mkosi/platform/boot/test-fallback.sh"
 )
 
 if ! command -v bats >/dev/null 2>&1; then
@@ -100,4 +102,24 @@ else
 fi
 
 echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
-exec bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+
+echo "== CeraLive v2 mock RAUC rollback suite =="
+CERALIVE_ROLLBACK_MODE=mock bash "${HERE}/tests/rauc-rollback.sh"
+
+# The RK3588 Bats suite invokes preflash-verify.sh --self-test against its real
+# signed-bundle fixture. The privileged RAUC service harness is opt-in locally
+# and required by CI so a developer machine is never mounted on unexpectedly.
+case "${CERALIVE_RUN_REAL_RAUC_CONTRACT:-skip}" in
+  required)
+    echo "== CeraLive v2 real RAUC interruption/cleanup contract =="
+    bash "${HERE}/tests/real-rauc-contract.sh"
+    ;;
+  skip)
+    echo "== SKIP real RAUC contract (set CERALIVE_RUN_REAL_RAUC_CONTRACT=required) =="
+    ;;
+  *)
+    echo "ERROR: CERALIVE_RUN_REAL_RAUC_CONTRACT must be 'required' or 'skip'" >&2
+    exit 2
+    ;;
+esac

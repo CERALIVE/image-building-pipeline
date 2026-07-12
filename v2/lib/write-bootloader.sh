@@ -17,14 +17,15 @@
 # Per-board blob layout — ground truth is the T1 spike (test-results/g3a-spike.txt),
 # which extracted the real Armbian `linux-u-boot-<board>-vendor` packages:
 #
-#   rock-5b-plus    (U-Boot 2025.10): ONE unified blob `u-boot-rockchip.bin`.
+#   rock-5b-plus    (current staged vendor package): ONE unified blob
+#                   `u-boot-rockchip.bin`.
 #                   A single dd at sector 64 lays BOTH the idbloader (RKNS @ blob
 #                   offset 0 -> disk sector 64) AND the U-Boot FIT (d00dfeed @
 #                   blob offset 0x7f8000 -> disk sector 16384). The FIT carries
 #                   ATF/BL31 + OP-TEE internally — there is NO separate trust.bin.
 #                   DO NOT split this blob.
 #
-#   orangepi5-plus  (U-Boot 2017.09): TWO blobs — `idbloader.img` at sector 64
+#   orangepi5-plus  (staged vendor package): TWO blobs — `idbloader.img` at sector 64
 #                   and `u-boot.itb` (FIT, ATF/BL31 embedded) at sector 16384.
 #
 # Both boards yield the SAME on-disk byte layout (idbloader@64, FIT@16384); only

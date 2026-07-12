@@ -8,7 +8,7 @@
 #   [handlers]
 #   bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 #
-# WHY custom (decision D3): the RK3588 vendor U-Boot (2017.09, ENV_IS_NOWHERE) has
+# WHY custom (decision D3): the staged RK3588 vendor U-Boot (ENV_IS_NOWHERE) has
 # no working `fw_setenv`, so RAUC's stock `bootloader=uboot` backend cannot persist
 # BOOT_ORDER / bootcount. We keep that exact A/B+bootcount model, but in a text file
 # on the FAT `boot` partition instead of U-Boot env — see ceralive-boot-state.sh.

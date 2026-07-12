@@ -205,9 +205,10 @@ Replace `<your-apt-mirror>` with your mirror hostname.
 ## 3. Pre-flash verification
 
 Before flashing, identify the destination block device and run the offline gate.
-Reading its size is non-destructive. The gate checks A/B geometry, bootloader gap
-magic, boot artifacts and state, both populated factory rootfs slots, exact media
-capacity, and the RAUC bundle signature/compatible contract.
+Reading its size is non-destructive. The gate checks exact A/B geometry and GPT
+integrity, idblock plus parsed second-stage FIT, the compiled selector and board
+metadata, boot state, kernel/DTB/initrd in both factory slots, exact media capacity,
+and the RAUC bundle signature/compatible contract.
 
 ```bash
 TARGET=/dev/sdX
@@ -215,7 +216,7 @@ TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
 bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
-Expected output (all eight checks green):
+Expected output (all nine checks green):
 
 ```text
 ==============================================================
@@ -224,12 +225,13 @@ Expected output (all eight checks green):
  bundle:  v2/images/rock-5b-plus/<ts>.raucb
  keyring: v2/.dev-keys/dev-root-ca.pem
 ==============================================================
-[PASS] GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)
+[PASS] GPT geometry: exact A/B starts/sizes and unique labels
 [PASS] Gap magic: RKNS (52 4b 4e 53) at sector 64
-[PASS] Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf
+[PASS] Bootloader second-stage FIT: valid FDT header and extent at sector 16384
+[PASS] Boot partition: compiled AArch64 selector + Rock board metadata + recovery files
 [PASS] Boot state: BOOT_ORDER=A B with positive A/B attempts
-[PASS] rootfs_a populated + shared /boot mount present
-[PASS] rootfs_b populated + shared /boot mount present
+[PASS] rootfs_a populated + kernel + board DTB + initrd + shared /boot mount
+[PASS] rootfs_b populated + kernel + board DTB + initrd + shared /boot mount
 [PASS] Target media capacity: <target-bytes> bytes >= image <image-bytes> bytes
 [PASS] RAUC bundle: parses + Compatible 'ceralive-rock-5b-plus'
 --------------------------------------------------------------

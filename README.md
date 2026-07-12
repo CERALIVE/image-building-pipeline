@@ -60,7 +60,9 @@ See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
 rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
 RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
-Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`.
+Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; it
+requires exact GPT geometry, both RK3588 bootloader stages, a compiled selector,
+complete kernel/DTB/initrd sets in both slots, and a real compatible signed bundle.
 Legacy single-slot images require a full re-flash because their data partition
 overlaps the new B-slot extent; they cannot be converted by OTA.
 

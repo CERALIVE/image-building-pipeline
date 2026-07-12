@@ -6,8 +6,9 @@ layer because it is board-specific (console / DTB / board_id come from the manif
 and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`).
 
 > **Why custom and not the stock RAUC `bootloader=uboot` adapter — decision D3.**
-> The vendor U-Boot CeraLive actually builds is **Radxa/Xunlong U-Boot 2017.09**,
-> compiled `ENV_IS_NOWHERE`: `fw_setenv` does **not** persist across reboot. RAUC's
+> The Rock 5B+ package currently staged by the pipeline reports **U-Boot 2026.04**.
+> The contract is capability-based: this vendor build uses `ENV_IS_NOWHERE`, so
+> `fw_setenv` does **not** persist across reboot. RAUC's
 > standard uboot adapter drives `BOOT_ORDER` + per-slot `BOOT_<name>_LEFT` bootcount
 > via `fw_setenv`, so it **cannot work** on this branch. We keep RAUC's exact A/B +
 > bootcount *model* but change the *storage*: the state is a plain text file on the
@@ -70,15 +71,17 @@ device, so `ceralive-boot-state` writes it defensively:
 
 1. U-Boot runs `boot.scr` (compiled from `boot.scr.cmd`).
 2. It imports `cera_board.env` (console, fdtfile) and `boot_state.txt`.
-3. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),
+3. It rejects missing, unknown, duplicate, non-numeric, or out-of-budget state and
+   persists factory-safe `A B` / `3,3` defaults before slot resolution.
+4. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),
    **decrements** that slot's counter, and persists the file (`fatwrite`).
-4. It boots the kernel/DTB/initrd from that slot's `/boot` with
+5. It boots the kernel/DTB/initrd from that slot's `/boot` with
    `root=PARTLABEL=rootfs_a|b rauc.slot=A|B`, so RAUC identifies the booted slot
    explicitly rather than inferring it from the root device.
-5. A healthy OS calls **`ceralive-boot-state mark-good <slot>`** (RAUC `set-state good`),
+6. A healthy OS calls **`ceralive-boot-state mark-good <slot>`** (RAUC `set-state good`),
    which resets the counter to the full budget — so a good slot never counts down.
-6. A slot that keeps failing never marks itself good: its counter bleeds 3→2→1→0 and
-   the **next** boot's step 3 skips it and selects the other slot — **automatic rollback**.
+7. A slot that keeps failing never marks itself good: its counter bleeds 3→2→1→0 and
+   the **next** boot's selection skips it and chooses the other slot — **automatic rollback**.
 
 ## RAUC custom backend interface (`ceralive-rauc-boot-adapter`)
 
@@ -132,19 +135,22 @@ last-resort boots A.
 | `boot_state.txt` | fresh-flash A/B state seed |
 | `install-boot.sh` | build-time installer (`rootfs` + `boot-partition` targets) |
 | `test-fallback.sh` | offline proof of decrement→rollback + backend + render (no HW/root) |
+| `tests/boot-script-sanitize.test.sh` | faithful execution of the actual selector source with malformed imported state |
 
 ## Test
 
 ```
-v2/mkosi/platform/boot/test-fallback.sh   # 87 assertions, no hardware/root
+v2/mkosi/platform/boot/test-fallback.sh
+v2/tests/boot-script-sanitize.test.sh
 ```
 
 Proves: fresh A/B state; 3 failed boots of A → counter 3→2→1→0 → **fallback to B**;
 RAUC backend roundtrip including fail-closed `get-current`; `mark-good` reset;
 single-slot has no phantom B; board
 specifics differ per board (not hardcoded); `system.conf` shape; that
-`boot.scr.cmd` statically matches the tested engine (decrement + fatwrite +
-manifest console/fdtfile + PARTLABEL slot select); and corruption resilience —
+`boot.scr.cmd` matches the tested engine (decrement + fatwrite + manifest
+console/fdtfile + PARTLABEL slot select); the actual script is also executed through
+U-Boot command stubs against missing and malformed imported state. Corruption resilience —
 truncated / empty / missing / bad-CRC files yield the safe defaults + a clean
 rewrite (never a crash), while a well-formed no-CRC file is trusted. It also rejects
 duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,

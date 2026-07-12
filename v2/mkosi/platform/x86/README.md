@@ -6,7 +6,7 @@ on UEFI/GRUB. The x86 counterpart to `../boot/` (RK3588/U-Boot).
 
 > **Why x86 is a separate adapter from RK3588.** Same A/B + bootcount *model*
 > (`BOOT_ORDER` + per-slot `BOOT_<n>_LEFT` countdown), different *bootloader*:
-> RK3588 uses a vendor U-Boot 2017.09 with **no working `fw_setenv`** (decision D3),
+> RK3588 uses its staged vendor U-Boot with **no persistent `fw_setenv`** (decision D3),
 > so its state lives in a hand-rolled text file on a FAT partition. x86 boots via
 > **UEFI → GRUB**, which has full persistent env (`grub-editenv` + `grubenv`), so the
 > state lives in the **grubenv** on the EFI System Partition.

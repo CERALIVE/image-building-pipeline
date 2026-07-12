@@ -6,7 +6,7 @@
 #
 # Decision D3 (locked): kernel/U-Boot branch = `vendor` (HDMI hdmirx + mature
 # MPP HW-encode require the vendor kernel) and RAUC bootloader adapter = `custom`
-# (vendor U-Boot 2017.09 lacks fw_setenv → raw GPT bootcount approach).
+# (the staged vendor U-Boot lacks persistent fw_setenv → FAT-file bootcount approach).
 #
 # Sources: configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES),
 # userpatches/config-{rock5bplus,orangepi5plus}.conf (BRANCH=, EXTRA_BSP_PACKAGES),
