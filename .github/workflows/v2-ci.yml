@@ -112,6 +112,12 @@ jobs:
           sudo /tmp/bats-core/install.sh /usr/local
           bats --version
 
+      - name: Install RK3588 disk-contract tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            dosfstools e2fsprogs gdisk mtools systemd u-boot-tools
+
       - name: Stub sibling-checkout workspace
         run: |
           # fetch-debs asserts srtla/ CeraUI/ are siblings of the

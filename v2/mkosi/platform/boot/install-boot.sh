@@ -19,6 +19,7 @@
 #                          - /usr/bin/ceralive-boot-state               (state helper)
 #                          - /usr/lib/rauc/ceralive-rauc-boot-adapter   (RAUC backend)
 #                          - /etc/rauc/system.conf                      (bootloader=custom)
+#                          - /etc/fstab                                 (shared p1 at /boot)
 #                          Invoked from platform/mkosi.finalize via mkosi-chroot.
 #
 #   boot-partition <dir>   FAT BOOT PARTITION bits into <dir> (the mounted p1 boot).
@@ -111,10 +112,10 @@ bootloader=custom
 boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
-# RAUC bootloader=custom delegates every boot-state op to this script
-# (get-primary / set-primary / get-state / set-state). It keeps BOOT_ORDER +
-# per-slot attempt counters in a text file on the FAT boot partition, because the
-# vendor U-Boot 2017.09 has no working fw_setenv (decision D3).
+# Bookworm RAUC 1.8 reads rauc.slot= itself and delegates the four state/primary
+# operations to this script. RAUC 1.11+ may also call get-current. BOOT_ORDER and
+# per-slot attempt counters live on the FAT boot partition because vendor U-Boot
+# 2017.09 has no working fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 
 [keyring]
@@ -136,6 +137,17 @@ EOF
     fi
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
+
+  local fstab="${root}/etc/fstab"
+  local boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
+  mkdir -p "${root}/etc" "${root}/boot"
+  touch "${fstab}"
+  if grep -qE '^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]]+' "${fstab}"; then
+    grep -Fxq "${boot_mount}" "${fstab}" \
+      || die "${fstab} already has a conflicting /boot mount; shared boot_state.txt requires ${boot_mount}"
+  else
+    printf '%s\n' "${boot_mount}" >>"${fstab}"
+  fi
 
   log "rootfs bootloader integration installed"
 }

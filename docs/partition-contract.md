@@ -7,7 +7,7 @@
 >
 > Tasks 25, 26, and 30 depend on this contract being frozen before Stage 1 builds begin.
 >
-> Contract version: **v1** · Date frozen: 2025-06-02
+> Contract version: **v2** · A/B production activation: 2026-07-11
 
 ---
 
@@ -54,30 +54,43 @@ GPT, 1 MiB alignment. Sizes in **MB (= MiB, 2^20 bytes)**.
 | # | Partition label | Role | Size (MB) | FS | Mount |
 |---|-----------------|------|-----------|----|----|
 | — | *(reserved gap)* | RK3588 idbloader + U-Boot + ATF (raw, no GPT entry) | **16** | raw | — |
-| p1 | `boot` | U-Boot env + `extlinux/extlinux.conf` slot selector | **256** | vfat (FAT32) | `/boot` (ro) |
+| p1 | `boot` | U-Boot env + `extlinux/extlinux.conf` slot selector | **256** | vfat (FAT32) | `/boot` (rw, explicit fstab) |
 | p2 | `rootfs_a` | RAUC rootfs **slot A** (incl. `/boot` kernel/DTB/initrd) | **4096** | ext4 | `/` (when A active) |
 | p3 | `rootfs_b` | RAUC rootfs **slot B** | **4096** | ext4 | `/` (when B active) |
 | p4 | `data` | Persistent mutable state (survives A/B) | **remainder** (≥ 2048 floor) | ext4 | `/data` |
 
-**Fixed OS subtotal (p–reserved + p1 + p2 + p3) = 8464 MB.**
-`data size = (usable capacity) − 8464 MB`.
+**Fixed OS subtotal (p–reserved + p1 + p2 + p3) = 8464 MB.** The raw image also
+needs a 1 MiB aligned backup-GPT tail, so `data size = raw capacity − 8465 MiB`.
 
 RAUC slot model (for `system.conf`, defined downstream): symmetric A/B —
 `[slot.rootfs.0] bootname=A` → `rootfs_a`, `[slot.rootfs.1] bootname=B` → `rootfs_b`.
 `boot` and `data` are shared (not RAUC-managed slots). Reference partitions by
-**PARTLABEL** in fstab/`system.conf` (never by FS-UUID — UUIDs change after a slot update,
-and labels are not unique across A/B for the rootfs).
+**PARTLABEL** in fstab/`system.conf` (never by FS-UUID — a UUID is filesystem-instance
+state rather than the frozen GPT slot identity and can change when a slot is recreated).
+
+The factory image populates **both** rootfs slots from the same known-good rootfs tree.
+Slot A is primary on first boot; slot B is an immediately bootable rollback baseline.
+An empty B filesystem is not a valid A/B factory image.
+
+Every rootfs carries
+`PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2`
+in `/etc/fstab`. This explicit
+mount is mandatory: each slot's `/boot` directory already contains its kernel, so
+systemd's XBOOTLDR auto-generator intentionally will not mount p1 over that non-empty
+directory. U-Boot loads the kernel before Linux starts; once userspace is running,
+the shared writable p1 must cover `/boot` so RAUC and U-Boot read and write the same
+`/boot/boot_state.txt`.
 
 ### 3.1 Capacity fit table (data margin ≥ 10 % required)
 
 | Nominal | Usable (MiB) | Fixed (MB) | data (MB) | data % | Result |
 |---------|--------------|-----------|-----------|--------|--------|
-| 16 GB | 14,800 | 8,464 | 6,336 | 42.8 % | ✅ A/B |
-| 32 GB | 29,600 | 8,464 | 21,136 | 71.4 % | ✅ A/B |
-| 64 GB | 59,500 | 8,464 | 51,036 | 85.8 % | ✅ A/B |
-| 128 GB | 120,000 | 8,464 | 111,536 | 92.9 % | ✅ A/B |
-| 256 GB | 244,000 | 8,464 | 235,536 | 96.5 % | ✅ A/B |
-| NVMe ≥ 240 GB | ≥ 228,000 | 8,464 | ≥ 219,536 | ≥ 96 % | ✅ A/B |
+| 16 GB | 14,800 | 8,465 | 6,335 | 42.8 % | ✅ A/B |
+| 32 GB | 29,600 | 8,465 | 21,135 | 71.4 % | ✅ A/B |
+| 64 GB | 59,500 | 8,465 | 51,035 | 85.8 % | ✅ A/B |
+| 128 GB | 120,000 | 8,465 | 111,535 | 92.9 % | ✅ A/B |
+| 256 GB | 244,000 | 8,465 | 235,535 | 96.5 % | ✅ A/B |
+| NVMe ≥ 240 GB | ≥ 228,000 | 8,465 | ≥ 219,535 | ≥ 96 % | ✅ A/B |
 
 Worst case (16 GB) still leaves **42.8 %** for data — comfortably above the 10 % floor.
 Usable-capacity model (conservative, rounds real silicon DOWN) is in evidence §3.
@@ -96,11 +109,12 @@ For small microSD boots (and any hypothetical < 16 GB eMMC — none are sold). S
 | p2 | `rootfs_a` | single rootfs (no B slot) | **4096** | ext4 | `/` |
 | p3 | `data` | Persistent mutable state | **remainder** (≥ 2048 floor) | ext4 | `/data` |
 
-Fixed = 16 + 256 + 4096 = **4368 MB**.
+Fixed partitions = 16 + 256 + 4096 = **4368 MB**; including the backup-GPT tail,
+the minimum raw overhead is **4369 MiB**.
 
 | Nominal | Usable (MiB) | Fixed (MB) | data (MB) | data % | Result |
 |---------|--------------|-----------|-----------|--------|--------|
-| 8 GB SD/eMMC | 7,400 | 4,368 | 3,032 | 41.0 % | ✅ single-slot |
+| 8 GB SD/eMMC | 7,400 | 4,369 | 3,031 | 41.0 % | ✅ single-slot |
 
 Single-slot has **no field A/B rollback**: updates apply in place (or via an external
 re-flash / recovery image). Use only when the medium is below the threshold.
@@ -115,13 +129,17 @@ Nominal storage <  16 GB   →  single-slot fallback (§4)
 ```
 
 Derivation (evidence §7): A/B needs the fixed 8464 MB **plus** a ≥ 2048 MB data floor
-**and** ≥ 10 % data margin → **≥ 10,512 MB usable**. An 8 GB medium (7,400 usable) cannot
-satisfy this; the smallest eMMC sold (16 GB → 14,800 usable) clears it by +4,288 MB. No
+**and** ≥ 10 % data margin → **≥ 10,512 MB usable**. The offline assembler requires
+**10,513 MiB** because the raw image also needs the aligned backup-GPT tail. An 8 GB
+medium (7,400 usable) cannot
+satisfy this; the smallest eMMC sold (16 GB → 14,800 usable) clears the exact raw
+floor by +4,287 MiB. No
 storage size exists between 8 GB and 16 GB, so **N = 16 GB** is the clean cut.
 
-Detection at provisioning time: read the block device size; if total bytes ≥ 16e9 (allow a
-small tolerance, e.g. ≥ 15.0 GiB to absorb vendor under-provisioning) use the A/B GPT,
-otherwise use the single-slot GPT.
+The canonical RK3588 factory image is **14,800 MiB**, not 16 GiB: a 16 GiB raw file is
+larger than a nominal 16 GB device. Provisioning must read the exact destination capacity
+and require `target_size_bytes >= raw_image_size_bytes`; `preflash-verify.sh` enforces that
+comparison. Media below the A/B floor must use the single-slot layout or be rejected.
 
 ---
 
@@ -166,21 +184,20 @@ emits three artifacts per board under `v2/images/<board>/`:
 
 | Artifact | Description |
 |----------|-------------|
-| `<ts>.raw` | Flashable disk image (GPT + gap write + boot partition + rootfs_a) |
+| `<ts>.raw` | Flashable disk image (GPT + gap write + boot partition + populated rootfs A and B) |
 | `<ts>.raucb` | Signed RAUC OTA bundle (dev key by default; prod key via `CERALIVE_RAUC_PKI_DIR`) |
 | `<ts>.raucb.sha256` | SHA-256 checksum of the bundle |
 
-**Single-slot-first policy (current):** The first shipped image uses the §4 single-slot
-layout (`single_slot_fallback: true` in the board manifest). `rootfs_b` is absent; the
-`data` partition follows immediately after `rootfs_a`. This is the brick-loop mitigation
-for the initial fleet bring-up — a failed health gate on a single-slot image does not
-trigger a rollback to an empty B slot.
+**Production A/B policy (v2):** Rock 5B+ resolves `single_slot_fallback: false`. The
+factory assembler writes the same bootable baseline to `rootfs_a` and `rootfs_b`, seeds
+`BOOT_ORDER=A B`, and leaves slot A primary. OTA may then write only the inactive slot and
+activate it after a successful install.
 
-**A/B follow-up wave (T28):** Enabling full A/B (`single_slot_fallback: false`) is a
-separate task that requires hardware validation of the rollback path. It is deferred until
-the first single-slot image has been verified on real hardware. Switching from single-slot
-to A/B requires a full re-flash (the GPT layout changes — `rootfs_b` is added and `data`
-shifts). This is a contract-version bump event (v1 → v2).
+**Migration from the v1 single-slot image is reflash-only.** In v1, `data` is partition 3
+and begins at the exact sector that v2 assigns to `rootfs_b`. Creating B in place would
+overwrite live persistent data, while moving `data` is destructive and interruption-prone.
+No `.raucb`, boot-state edit, or in-place repartition is an approved migration. Back up
+required state, perform a full re-flash with the v2 A/B image, and restore/provision state.
 
 ---
 
@@ -189,7 +206,7 @@ shifts). This is a contract-version bump event (v1 → v2).
 Any change to a size, label, slot role, the threshold N, or the `/data` contract is a
 **breaking, fleet-wide re-flash** event. Such a change MUST:
 
-1. bump the contract version (v1 → v2) at the top of this file, and
+1. bump the contract version (v2 → v3) at the top of this file, and
 2. be coordinated with a mass re-flash — there is no in-place migration path for the GPT.
 
 ---

@@ -315,58 +315,65 @@ bookworm versions proved insufficient) in `versions.yaml:163` and
 
 ---
 
-## Item 4 — Rock 5B+ Single-Slot to A/B Enablement
+## Item 4 — Rock 5B+ A/B Hardware Validation
 
 **DEFERRED.md ref:** not a separate DEFERRED.md item — this is a build-system
 gate tracked in `AGENTS.md` (KIOSK STACK / hardware-blocked) and in the OTA
 validation path.  
-**File to edit after OTA HW validation:** `v2/manifests/boards/rock-5b-plus.yaml`
-(A/B slot configuration)  
+**Software prerequisite:** `[EXISTS]` — the Rock manifest enables A/B, the factory
+image populates both slots, and the custom backend/bootcount contract is covered
+offline.
 **Blocked on:** physical Rock 5B+ completing a full OTA A/B rollback cycle on hardware
 
 ### Background
 
-The Rock 5B+ image uses RAUC A/B slots. The A/B enablement and the RAUC rollback
-path are specced and the offline proof exists (`v2/tests/qemu-x86.sh
---fallback-selftest` proves the rollback contract on x86). The hardware-gated step
-is running the real A/B rollback cycle on a physical Rock 5B+ to confirm the
-U-Boot extlinux slot-switch and the RAUC `bootloader=uboot` backend work as
-expected on the actual board.
+The Rock 5B+ production image uses symmetric RAUC A/B slots. The manifest resolves
+`single_slot_fallback: false`; `assemble-disk.sh` populates A and B from the same
+factory tree; and kernel arguments carry `rauc.slot=A|B`. RK3588 uses RAUC
+`bootloader=custom` because the vendor U-Boot has no persistent environment. Its
+`boot.scr` selector and FAT-backed boot state implement the three-attempt rollback.
+The remaining gate is a real arm64 bundle install, reboot, and rollback on silicon.
 
-> **SAFETY GATE — DO NOT ENABLE A/B BEFORE OTA HW VALIDATION.**
+> **SAFETY GATE — DO NOT CLAIM PRODUCTION HARDWARE VALIDATION YET.**
 >
-> Enabling A/B on a board that has not completed a real rollback cycle risks a
-> brick-loop: if the slot-switch or rollback fails on hardware, the device may
-> boot into an unrecoverable state with no fallback. The deliberate gate here is
-> not a documentation gap — it is a safety constraint. Do not remove or bypass
-> this warning.
+> A/B must be enabled and both slots populated to run this validation, but no
+> offline/mock result substitutes for the physical cycle. Do not ship the board
+> as hardware-validated until every acceptance item below passes.
 
 ### Commands (run on the physical Rock 5B+)
 
 ```bash
-# 1. Flash a known-good CeraLive image to the board (eMMC):
-#    (Use rkdeveloptool in maskrom mode — see docs/DEVICE-BRINGUP.md §4)
+# 1. Before flashing, verify the exact target capacity and all image contracts:
+TARGET=/dev/<confirmed-rock5b-media>
+TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
+bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 
-# 2. Confirm RAUC sees both slots:
+# 2. Flash the known-good A/B factory image using DEVICE-BRINGUP.md §4.
+#    A legacy single-slot image requires this full re-flash; it cannot migrate OTA.
+
+# 3. Confirm RAUC sees both slots and identifies A as booted:
 rauc status
 # -> should show slot.rootfs.0 (A) and slot.rootfs.1 (B), one marked booted
+findmnt -no SOURCE,FSTYPE,OPTIONS /boot
+# -> PARTLABEL=boot-backed device, vfat, rw (shared boot_state.txt)
 
-# 3. Install a test bundle into the inactive slot:
+# 4. Install a signed arm64 test bundle into the inactive slot:
 rauc install /path/to/ceralive-rock-5b-plus-<version>.raucb
 # -> should complete without error
 
-# 4. Reboot and confirm the board switched to the new slot:
+# 5. Reboot and confirm the board switched to the new slot:
+reboot
 rauc status
 # -> booted slot should now be the previously inactive one
 
-# 5. Simulate a bad boot (mark slot as failed) and confirm rollback:
-rauc mark bad booted
+# 6. Mark the booted test slot bad and confirm rollback:
+rauc status mark-bad booted
 reboot
 # -> after reboot, board should have rolled back to the previous good slot
 rauc status
 # -> booted slot should be the original good slot
 
-# 6. Run the consolidated real-HW suite to confirm the full gate:
+# 7. Run the consolidated real-HW suite to confirm the full gate:
 BOARD=rock-5b-plus BOARD_IP=<ip> \
 EVIDENCE_DIR=test-results/task-38-smoke \
 ./v2/tests/realhw-suite.sh
@@ -375,10 +382,13 @@ EVIDENCE_DIR=test-results/task-38-smoke \
 ### Checklist
 
 - [ ] Board flashed with a CeraLive image and boots to login.
+- [ ] Preflash gate passed with the exact destination capacity.
 - [ ] `rauc status` shows both A and B slots.
+- [ ] `/boot` is the shared `PARTLABEL=boot` vfat mounted read-write.
+- [ ] Both slots contain the factory baseline before the first OTA.
 - [ ] RAUC bundle installed into inactive slot without error.
 - [ ] Board rebooted into the new slot (slot-switch confirmed).
-- [ ] Bad-boot simulation: `rauc mark bad booted` + reboot → rolled back to good slot.
+- [ ] Bad-slot simulation: `rauc status mark-bad booted` + reboot → rolled back.
 - [ ] `v2/tests/realhw-suite.sh` (LIVE mode) exits 0.
 - [ ] Evidence saved to `test-results/task-38-smoke/` and
       `test-results/rock5b-ab-rollback-<date>.txt`.
@@ -394,7 +404,9 @@ No brick-loop observed across at least two full A/B cycles.
 Complete a physical A/B OTA cycle on a Radxa Rock 5B+ — install a bundle, reboot
 into the new slot, simulate a bad boot, confirm rollback to the good slot. Capture
 `rauc status` output and the realhw-suite evidence to `test-results/`. Only after
-this gate passes is it safe to treat A/B as confirmed working on this board.
+this gate passes is it safe to treat A/B as hardware-confirmed on this board. Do
+not change the manifest back to single-slot; that would make the required test
+impossible and would not provide a migration path for existing disks.
 
 ---
 

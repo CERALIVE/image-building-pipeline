@@ -2,7 +2,7 @@
 #
 # assemble-disk.sh — Stage 4 disk assembly for the CeraLive v2 image pipeline.
 #
-# Lays the FROZEN A/B partition layout (docs/partition-contract.md §3, contract v1)
+# Lays the FROZEN A/B partition layout (docs/partition-contract.md §3, contract v2)
 # onto a GPT disk image, driven by the systemd-repart definitions committed in
 # v2/mkosi/repart/*.conf (the single source of truth for sizes / labels / FS).
 #
@@ -28,11 +28,10 @@
 # mkfs.vfat, POPULATED with the boot artifacts via mtools (mcopy — still no mount),
 # and dd'd into its raw offset (repart does not re-format an adopted partition).
 #
-# Step 2b — rootfs_a population. repart only FORMATS the ext4 slots; it never writes
-# the OS into them. With --rootfs-tree <dir> (the mkosi build/app tree) we build a
-# pre-populated ext4 image with `mkfs.ext4 -d <dir>` (no loop mount, no root), sized
-# to the rootfs_a slot, and dd it into partition 2's raw offset. Skipped when no tree
-# is given (the static verify path) — leaving rootfs_a empty panics the board on boot.
+# Step 2b — factory rootfs population. repart only FORMATS the ext4 slots; it never
+# writes the OS into them. With --rootfs-tree <dir> (the mkosi build/app tree), the
+# same bootable baseline is built independently into rootfs_a and rootfs_b. A
+# factory A/B image must never mark an empty fallback slot good.
 #
 # The boot-partition populate is FAMILY-GATED (custom-uboot/RK3588 only): it stages
 # boot.scr (mkimage-compiled from boot.scr.cmd), cera_board.env, the boot_state.txt
@@ -44,8 +43,7 @@
 # 16 MB raw gap: for rauc_bootloader_adapter=custom (RK3588) it dd's the board's
 # U-Boot blob(s) from the staged BSP .deb into the gap and asserts RKNS at sector
 # 64 (delegated to write-bootloader.sh); for efi (x86) it is skipped — x86 boots
-# from the EFI System Partition. NO A/B FLIPPING / RAUC slot activation / dm-verity
-# here — that is task 26.
+# from the EFI System Partition.
 #
 # Usage:
 #   assemble-disk.sh build  --output <img> [--total-mb N] [--single-slot] [--no-format]
@@ -54,14 +52,16 @@
 #   assemble-disk.sh verify [--out-dir DIR]
 #
 #   build   Produce a real-geometry disk image. --total-mb sets the medium size
-#           (default 16384 = 16 GiB); data fills the remainder. --single-slot (or
+#           (default 14800 MiB, fitting a nominal 16 GB target); data fills the
+#           remainder. --single-slot (or
 #           SINGLE_SLOT_FALLBACK=true) drops rootfs_b. --no-format lays only the
 #           GPT geometry (skips mkfs + boot-partition populate + bootloader) — used
 #           by the static verify path.
 #           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
 #           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
 #           RK3588 blob, efi skips it. --rootfs-tree <dir> (default ROOTFS_TREE env)
-#           populates rootfs_a from that tree (step 2b); empty leaves the slot blank.
+#           populates every factory rootfs slot from that tree; empty leaves the
+#           slots blank for the static geometry-only verification path.
 #   verify  Build an A/B and a single-slot test image and print + ASSERT their GPT
 #           tables against the frozen contract (static check; prints to stdout).
 #
@@ -99,7 +99,12 @@ INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${V2_DIR}/mkosi/platform/boot/install-boot.s
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
-DEFAULT_TOTAL_MB=16384   # 16 GiB reference medium for `build` / A/B verify
+ROOTFS_MB=4096
+DATA_FLOOR_MB=2048
+GPT_TAIL_MB=1
+AB_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB * 2 + DATA_FLOOR_MB + GPT_TAIL_MB ))
+SINGLE_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB + DATA_FLOOR_MB + GPT_TAIL_MB ))
+DEFAULT_TOTAL_MB=14800   # conservative usable capacity of the smallest 16 GB target
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
 SECTOR=512
@@ -217,64 +222,55 @@ det_uuid() {
 }
 
 # ---------------------------------------------------------------------------
-# populate_rootfs_a <img> <rootfs_tree> <single_slot>
-# Write the mkosi rootfs tree into the rootfs_a slot (partition 2). systemd-repart
-# --offline FORMATS the ext4 slot but never populates it; without this the flashed
-# board loads U-Boot + kernel then PANICS (empty root, no init). rootfs_a is always
-# partition 2 in BOTH the A/B and single-slot layouts, so the slot is selected by
-# fixed partition number, not by single_slot (kept for call-site symmetry + logging).
-#
 # Offline + rootless, matching the rest of this assembler: mkfs.ext4 -d builds a
 # pre-populated ext4 image FROM the directory (no loop mount, no root), sized to the
 # exact slot, then a single dd lands it at the slot's raw offset (conv=notrunc so the
 # surrounding partitions are untouched). An empty rootfs_tree is a no-op: the static
 # --no-format verify path passes "" and only lays GPT geometry.
 # ---------------------------------------------------------------------------
-populate_rootfs_a() {
-  local img="$1" rootfs_tree="$2" single_slot="${3:-false}"
+populate_rootfs_slot() {
+  local img="$1" rootfs_tree="$2" part_num="$3" slot_label="$4"
   [[ -n "${rootfs_tree}" ]] || return 0   # no tree provided → skip (verify path / backward compat)
   [[ -d "${rootfs_tree}" ]] || die "rootfs tree not found: ${rootfs_tree}"
 
-  # rootfs_a is partition 2 in single-slot AND A/B; read its geometry off the GPT.
   local start_sector size_sectors
-  start_sector="$(part_field "${img}" 2 'First sector')"
-  size_sectors="$(part_field "${img}" 2 'Partition size')"
+  start_sector="$(part_field "${img}" "${part_num}" 'First sector')"
+  size_sectors="$(part_field "${img}" "${part_num}" 'Partition size')"
   [[ -n "${start_sector}" && -n "${size_sectors}" ]] \
-    || die "could not read rootfs_a (p2) geometry from ${img}"
+    || die "could not read ${slot_label} (p${part_num}) geometry from ${img}"
   local size_bytes=$(( size_sectors * SECTOR ))
 
-  log_info "populating rootfs_a (p2, single_slot=${single_slot}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
+  log_info "populating ${slot_label} (p${part_num}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
   local rootfs_img; rootfs_img="$(mktemp)"
   truncate -s "${size_bytes}" "${rootfs_img}"
   # The mkosi rootfs tree is root-owned with 0700 system dirs (boot/loader,
   # var/lib/private, …) a rootless host user cannot traverse. Probe readability
   # (the tar test emit_artifact uses); if blocked, populate inside the builder
   # container as root, which also preserves the source uid/gid/mode in the image.
-  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-rootfs_a")"
+  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-${slot_label}")"
   if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
-    mkfs.ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
+    mkfs.ext4 -q -L "${slot_label}" -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
       -d "${rootfs_tree}" "${rootfs_img}" \
-      || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
+      || die "mkfs.ext4 -d failed populating ${slot_label} from ${rootfs_tree}"
   else
     log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
-    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}"
+    _populate_rootfs_slot_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}" "${slot_label}"
   fi
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
   rm -f "${rootfs_img}"
-  log_success "rootfs_a populated (${size_bytes} byte slot ← partition 2)"
+  log_success "${slot_label} populated (${size_bytes} byte slot ← partition ${part_num})"
 }
 
 # ---------------------------------------------------------------------------
-# _populate_rootfs_a_in_container <rootfs_tree> <out_img>
 # Run `mkfs.ext4 -d` as root in the builder container so the root-owned mkosi tree
 # (0700 system dirs) is fully readable. <out_img> is a host-created, pre-sized file;
 # the container writes the populated ext4 into it in place. Mirrors emit_artifact's
 # container fallback. e2fsprogs is installed on demand (the slim builder lacks it).
 # ---------------------------------------------------------------------------
-_populate_rootfs_a_in_container() {
-  local tree="$1" out_img="$2" fs_uuid="${3:-}"
+_populate_rootfs_slot_in_container() {
+  local tree="$1" out_img="$2" fs_uuid="$3" slot_label="$4"
   local runtime=""
   if command -v docker >/dev/null 2>&1; then runtime="docker"
   elif command -v podman >/dev/null 2>&1; then runtime="podman"
@@ -285,6 +281,7 @@ _populate_rootfs_a_in_container() {
   "${runtime}" run --rm \
     -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
     -e "FS_UUID=${fs_uuid}" \
+    -e "FS_LABEL=${slot_label}" \
     -v "${tree}:/rootfs-tree:ro" \
     -v "${img_dir}:/out" \
     "${image}" \
@@ -295,16 +292,15 @@ _populate_rootfs_a_in_container() {
         apt-get install -y --no-install-recommends \
           -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
       fi
-      mkfs.ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
+      mkfs.ext4 -q -L "${FS_LABEL}" -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
         -d /rootfs-tree "/out/'"${img_base}"'"
-    ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
+    ' || die "containerized mkfs.ext4 -d failed populating ${slot_label} from ${tree}"
 }
 
 # ---------------------------------------------------------------------------
 # build_disk <img> <total_mb> <single_slot> <do_format> <adapter> <board_id> <bsp_dir> <rootfs_tree>
-# Pre-seed the 16 MB gap, run systemd-repart, populate rootfs_a from the mkosi
-# tree, format the vfat boot region, then (real image only) write the family-gated
-# bootloader into the raw gap.
+# Pre-seed the 16 MB gap, run systemd-repart, populate the factory rootfs slots,
+# format the vfat boot region, then write the family-gated bootloader into the gap.
 # ---------------------------------------------------------------------------
 build_disk() {
   local img="$1" total_mb="$2" single_slot="$3" do_format="$4"
@@ -333,10 +329,12 @@ build_disk() {
   systemd-repart --offline=yes --architecture=arm64 --dry-run=no \
     --definitions="${defs}" "${img}" >/dev/null
 
-  # 2b. Populate rootfs_a from the mkosi rootfs tree (repart formats it EMPTY;
-  #     without this the board panics on first boot). No-op when no tree is given
-  #     (the static --no-format verify path).
-  populate_rootfs_a "${img}" "${rootfs_tree_arg}" "${single_slot}"
+  # 2b. Populate every factory slot. RAUC's factory-image contract requires B to
+  #     be bootable before the first OTA; single-slot media only has partition 2.
+  populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 2 rootfs_a
+  if [[ "${single_slot}" != "true" ]]; then
+    populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 3 rootfs_b
+  fi
 
   # 3. Format the adopted vfat boot region (repart never re-formats an adopted
   #    partition), POPULATE it with the boot artifacts, then dd it into the 16 MB
@@ -374,7 +372,7 @@ verify_contract() {
 
   echo "=============================================================="
   echo " CeraLive Stage 4 — A/B partition layout verification"
-  echo " Contract: docs/partition-contract.md §3 (v1, FROZEN)"
+  echo " Contract: docs/partition-contract.md §3 (v2, FROZEN)"
   echo " Repart defs: v2/mkosi/repart/*.conf"
   echo " Tooling: $(systemd-repart --version | head -1), $(sgdisk --version 2>&1 | head -1)"
   echo "=============================================================="
@@ -450,6 +448,13 @@ main() {
       [[ -n "${output}" ]] || die "build: --output <img> is required"
       [[ "${single_slot}" == "true" || "${single_slot}" == "false" ]] \
         || die "SINGLE_SLOT_FALLBACK must be true|false (got '${single_slot}')"
+      [[ "${total_mb}" =~ ^[0-9]+$ ]] || die "build: --total-mb must be a positive integer (got '${total_mb}')"
+      local min_total_mb="${AB_MIN_TOTAL_MB}" layout_name="A/B"
+      if [[ "${single_slot}" == "true" ]]; then
+        min_total_mb="${SINGLE_MIN_TOTAL_MB}"; layout_name="single-slot"
+      fi
+      (( total_mb >= min_total_mb )) \
+        || die "${layout_name} layout requires at least ${min_total_mb} MiB including the data floor and GPT tail (got ${total_mb} MiB)"
       build_disk "${output}" "${total_mb}" "${single_slot}" "${do_format}" \
         "${adapter}" "${board_id}" "${bsp_dir}" "${rootfs_tree}"
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'

@@ -2,7 +2,7 @@
 
 systemd-repart partition definitions that implement the **FROZEN** A/B layout from
 [`../../../docs/partition-contract.md`](../../../docs/partition-contract.md) §3 (contract
-**v1**). One `*.conf` per GPT partition; files are applied in sort order.
+**v2**). One `*.conf` per GPT partition; files are applied in sort order.
 
 > These numbers are FROZEN. Changing a size, label, FS, or the partition count is a
 > breaking, fleet-wide **re-flash** event — see the contract's Change Control §7.
@@ -17,15 +17,18 @@ systemd-repart partition definitions that implement the **FROZEN** A/B layout fr
 | 30 | `30-rootfs_b.conf` | `rootfs_b` | RAUC slot B | ext4 | **4096 MB** |
 | 40 | `40-data.conf` | `data` | persistent mutable state | ext4 | **remainder ≥ 2048 MB** |
 
-Fixed OS subtotal (16 + 256 + 4096 + 4096) = **8464 MB**; `data` = usable − 8464 MB.
+Fixed OS subtotal (16 + 256 + 4096 + 4096) = **8464 MB**. The raw image also
+reserves a 1 MiB backup-GPT tail, so `data` = raw capacity − 8465 MiB.
 
 ## Reference by PARTLABEL, never FS-UUID
 
 Every downstream consumer (fstab, RAUC `system.conf`, extlinux) references these
 partitions by **`PARTLABEL=`** (the GPT partition *name*, set via repart `Label=`).
-FS-UUIDs are forbidden: a RAUC slot update reformats a rootfs slot and changes its
-FS-UUID, and the two rootfs slots are not uniquely identifiable by FS label. The GPT
-PARTLABEL is stable across updates. `Label=` here == `PARTLABEL=` on the device.
+FS-UUIDs are forbidden as slot identifiers: they are filesystem-instance state and
+can change whenever a slot is recreated. The GPT PARTLABEL is the frozen identity
+across update formats. `Label=` here == `PARTLABEL=` on the device.
+The RK3588 rootfs explicitly mounts `PARTLABEL=boot` at `/boot`; XBOOTLDR automatic
+mounting is insufficient because the slot-local kernel makes `/boot` non-empty.
 
 ## The 16 MB raw bootloader gap (no GPT entry)
 
@@ -53,15 +56,16 @@ slot, no field rollback). `data` still has a ≥ 2048 MB floor. Both current boa
 
 ## Why ext4, not squashfs, for the rootfs slots
 
-The frozen contract pins **ext4** for `rootfs_a` / `rootfs_b` (and `data`). squashfs +
-dm-verity is the **RAUC bundle** (`*.raucb`, `format=verity`) artifact produced in
-task 26 (`Verity=` + `SplitArtifacts=partitions,roothash`), **not** the on-disk slot
-filesystem. Do not "compress" the on-disk slots — that would deviate from the contract.
+The frozen contract pins **ext4** for `rootfs_a` / `rootfs_b` (and `data`). The
+current signed RAUC bundle uses `format=plain` and installs `rootfs.tar` into the
+inactive ext4 slot. Do not "compress" the on-disk slots — that would deviate from
+the contract. dm-verity remains future hardening, not a current install dependency.
 
-## NOT implemented here (deferred)
+## Assembly and update integration
 
-- **A/B flipping / slot activation** (RAUC `system.conf`, bootcount, `bootname`) → task 26.
-- **dm-verity / `*.raucb`** bundle → task 26.
+- `lib/assemble-disk.sh` populates both A and B in a factory A/B image; repart itself
+  only creates and formats the filesystems.
+- RK3588 slot activation is the shipped RAUC `bootloader=custom` adapter plus the
+  FAT-backed bootcount selector in `platform/boot/`.
+- Signed plain-format `*.raucb` bundles are emitted by `lib/build-bundle.sh`.
 - **`/var` + WiFi bind-mounts onto `data`** → task 30.
-
-This task lays down the GEOMETRY only.

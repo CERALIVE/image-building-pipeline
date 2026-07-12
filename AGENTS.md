@@ -35,7 +35,7 @@ image-building-pipeline/
 │   │   │                     #   cog-display-hw-checklist.md,
 │   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
 │   │   └── fast-reload.md    # dev-sync live-reload loop
-│   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
+│   └── tests/                # manifests, RK3588 A/B/preflash, x86 rollback
 ├── docs/
 │   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
 │   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
@@ -57,7 +57,7 @@ image-building-pipeline/
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
-| v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
+| v2 unit tests / boot fallback | `v2/tests/manifest.bats` and `v2/tests/rk3588-ab-contract.bats` via `v2/run-tests`; RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
 | Cross-repo kiosk architecture | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../CeraUI/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
@@ -115,6 +115,24 @@ Stage-4 branch calls `build-bundle.sh` after `assemble-disk-x86.sh`, alongside t
 `.raw`, stamped with the board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`).
 `build-bundle.sh` is board-agnostic, so the x86 path mirrors the RK3588 `custom`
 path verbatim.
+
+**Rock 5B+ production A/B contract** [EXISTS]
+
+`rock-5b-plus.yaml` resolves `single_slot_fallback: false` with RAUC
+`bootloader=custom`. The RK3588 assembler emits a 14,800 MiB factory image, writes
+the same bootable baseline into `rootfs_a` and `rootfs_b`, seeds A as primary, and
+passes `rauc.slot=A|B` on every automatic/manual boot path. The custom backend marks
+the inactive target bad before installation and RAUC activates it only after a
+successful write; a three-attempt bootcount rolls an unconfirmed slot back.
+Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
+automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
+
+`v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects missing B,
+duplicate/wrong GPT labels, stale boot state, incompatible/invalid bundles, and a
+destination smaller than the raw image. A v1 single-slot disk cannot migrate by
+OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
+state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
+the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
 
 **Multi-board dispatch** [EXISTS]
 

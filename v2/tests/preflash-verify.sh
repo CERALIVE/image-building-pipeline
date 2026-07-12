@@ -6,22 +6,24 @@
 # and signed `.raucb` RAUC bundle and prints PASS or FAIL for each sub-check,
 # exiting non-zero if ANY sub-check fails. A red gate means DO NOT flash.
 #
-# Six sub-checks (all must PASS):
-#   1. GPT geometry   — single-slot: boot + rootfs_a + data, NO rootfs_b.
+# Eight sub-checks (all must PASS):
+#   1. GPT geometry   — A/B: boot + rootfs_a + rootfs_b + data, unique labels.
 #   2. Gap magic      — Rockchip idblock "RKNS" (52 4b 4e 53) at sector 64, i.e.
 #                       the U-Boot bootloader is present in the 16 MB raw gap.
 #   3. Boot partition — boot.scr, cera_board.env, boot_state.txt and
 #                       extlinux/extlinux.conf are all present on the FAT boot
 #                       partition (offset GAP_MB * 1 MiB).
-#   4. Boot state     — boot_state.txt reflects single-slot: BOOT_ORDER=A (not
-#                       "A B") and BOOT_B_LEFT=0 (no B slot to roll back to).
+#   4. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
+#                       attempt budget for both populated factory slots.
 #   5. RAUC bundle    — `rauc info` parses the bundle and its Compatible string
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
-#   6. rootfs_a       — partition 2 is POPULATED (systemd/init present), not the
-#                       blank ext4 systemd-repart leaves behind. An empty rootfs_a
-#                       boots U-Boot + kernel then PANICS (no init).
+#   6. Factory A      — rootfs_a contains systemd/init and the shared p1 /boot mount.
+#   7. Factory B      — rootfs_b contains systemd/init and the shared p1 /boot mount.
+#                       An empty or state-isolated B blocks production flash.
+#   8. Target media   — the operator-supplied capacity is at least the exact raw
+#                       image size; an undersized eMMC/SD/NVMe is rejected.
 #
 # Everything is image inspection: no loop mount, no root, no hardware. The
 # boot partition is read with mtools (mdir/mtype) at its raw byte offset; the
@@ -29,10 +31,10 @@
 #
 # Usage:
 #   preflash-verify.sh [--image <raw>] [--bundle <raucb>] [--board <id>]
-#                      [--keyring <pem>] [--gap-mb N]
+#                      [--keyring <pem>] [--gap-mb N] --target-size-bytes N
 #   preflash-verify.sh --self-test [--board <id>] ...   # built-in negative test
 #
-#   (no mode)   Run the five sub-checks against the artifacts and exit non-zero
+#   (no mode)   Run all sub-checks against the artifacts and exit non-zero
 #               on any FAIL. --image/--bundle default to the newest files under
 #               v2/images/<board>/ ; --board defaults to rock-5b-plus.
 #   --self-test Prove the gate is NOT vacuous: copy the image, zero the gap
@@ -78,12 +80,9 @@ newest_artifact() {
   ls -1t "${IMAGES_DIR}/${board}/"${glob} 2>/dev/null | head -1
 }
 
-# ---------------------------------------------------------------------------
-# Check 1 — GPT geometry: exactly boot + rootfs_a + data, NO rootfs_b.
-# ---------------------------------------------------------------------------
 check_gpt_geometry() {
   local img="$1"
-  require_tool sgdisk || { fail "GPT geometry: single-slot (boot + rootfs_a + data, no rootfs_b)"; return; }
+  require_tool sgdisk || { fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"; return; }
   local labels count
   # Partition rows in `sgdisk -p` start with whitespace + the partition number;
   # the PARTLABEL is the last column. Collect them in table order.
@@ -91,14 +90,13 @@ check_gpt_geometry() {
     | awk '/^[[:space:]]+[0-9]+[[:space:]]/{print $NF}')"
   count="$(printf '%s\n' "${labels}" | grep -c .)"
   local norm; norm="$(printf '%s\n' "${labels}" | tr '\n' ' ' | sed 's/ *$//')"
-  if [[ "${norm}" == "boot rootfs_a data" ]]; then
-    pass "GPT geometry: single-slot (boot + rootfs_a + data, no rootfs_b)"
+  if [[ "${norm}" == "boot rootfs_a rootfs_b data" ]] \
+      && [[ "$(printf '%s\n' "${labels}" | sort -u | wc -l)" -eq 4 ]]; then
+    pass "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"
     info "partitions (${count}): ${norm}"
   else
-    fail "GPT geometry: single-slot (boot + rootfs_a + data, no rootfs_b)"
-    info "expected 'boot rootfs_a data', got '${norm}' (${count} partitions)"
-    printf '%s\n' "${labels}" | grep -qx 'rootfs_b' \
-      && info "rootfs_b present — image is A/B, not single-slot-first"
+    fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"
+    info "expected four unique labels 'boot rootfs_a rootfs_b data', got '${norm}' (${count} partitions)"
   fi
 }
 
@@ -147,20 +145,18 @@ check_boot_partition() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Check 4 — boot_state.txt reflects single-slot (BOOT_ORDER=A, BOOT_B_LEFT=0).
-# ---------------------------------------------------------------------------
 check_boot_state() {
   local img="$1" boot_off="$2" state
-  require_tool mtype || { fail "Boot state: BOOT_ORDER=A (single-slot) and BOOT_B_LEFT=0"; return; }
+  require_tool mtype || { fail "Boot state: BOOT_ORDER=A B with positive A/B attempts"; return; }
   state="$(mtype -i "${img}@@${boot_off}" ::/boot_state.txt 2>/dev/null)"
-  if grep -qx 'BOOT_ORDER=A' <<<"${state}" && grep -qx 'BOOT_B_LEFT=0' <<<"${state}"; then
-    pass "Boot state: BOOT_ORDER=A (single-slot) and BOOT_B_LEFT=0"
-    info "$(grep -E '^BOOT_ORDER=|^BOOT_B_LEFT=' <<<"${state}" | tr '\n' ' ')"
+  if grep -qx 'BOOT_ORDER=A B' <<<"${state}" \
+      && grep -qE '^BOOT_A_LEFT=[1-9][0-9]*$' <<<"${state}" \
+      && grep -qE '^BOOT_B_LEFT=[1-9][0-9]*$' <<<"${state}"; then
+    pass "Boot state: BOOT_ORDER=A B with positive A/B attempts"
+    info "$(grep -E '^BOOT_ORDER=|^BOOT_[AB]_LEFT=' <<<"${state}" | tr '\n' ' ')"
   else
-    fail "Boot state: BOOT_ORDER=A (single-slot) and BOOT_B_LEFT=0"
-    info "boot_state.txt: $(grep -E '^BOOT_ORDER=|^BOOT_B_LEFT=' <<<"${state}" | tr '\n' ' ' || true)"
-    grep -qx 'BOOT_ORDER=A' <<<"${state}" || info "BOOT_ORDER is not exactly 'A' (A/B order leaks a non-existent B slot)"
+    fail "Boot state: BOOT_ORDER=A B with positive A/B attempts"
+    info "boot_state.txt: $(grep -E '^BOOT_ORDER=|^BOOT_[AB]_LEFT=' <<<"${state}" | tr '\n' ' ' || true)"
   fi
 }
 
@@ -187,22 +183,21 @@ check_rauc_bundle() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Check 6 — rootfs_a is POPULATED (a real OS, not a blank ext4 from repart).
-# debugfs has no byte-offset flag and cannot seek a pipe, so the rootfs_a slot
-# (partition 2 in single-slot AND A/B) is sliced into a sparse temp file at its
-# raw offset and inspected offline — no loop mount, no root. The slot is GREEN
+# debugfs has no byte-offset flag and cannot seek a pipe, so each rootfs slot
+# is sliced into a sparse temp file at its raw offset and inspected offline — no
+# loop mount, no root. The slot is GREEN
 # when the systemd init binary OR /sbin/init exists inside it.
 # ---------------------------------------------------------------------------
 check_rootfs_populated() {
-  local img="$1" start_sector size_sectors tmp
-  require_tool sgdisk  || { fail "rootfs_a populated: systemd/init present (not an empty ext4)"; return; }
-  require_tool debugfs || { fail "rootfs_a populated: systemd/init present (not an empty ext4)"; return; }
-  start_sector="$(sgdisk -i 2 "${img}" 2>/dev/null | sed -n 's/.*First sector: \([0-9]\+\).*/\1/p')"
-  size_sectors="$(sgdisk -i 2 "${img}" 2>/dev/null | sed -n 's/.*Partition size: \([0-9]\+\).*/\1/p')"
+  local img="$1" part="$2" label="$3" start_sector size_sectors tmp
+  local fstab boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
+  require_tool sgdisk  || { fail "${label} populated + shared /boot mount present"; return; }
+  require_tool debugfs || { fail "${label} populated + shared /boot mount present"; return; }
+  start_sector="$(sgdisk -i "${part}" "${img}" 2>/dev/null | sed -n 's/.*First sector: \([0-9]\+\).*/\1/p')"
+  size_sectors="$(sgdisk -i "${part}" "${img}" 2>/dev/null | sed -n 's/.*Partition size: \([0-9]\+\).*/\1/p')"
   if [[ -z "${start_sector}" || -z "${size_sectors}" ]]; then
-    fail "rootfs_a populated: systemd/init present (not an empty ext4)"
-    info "could not read rootfs_a (partition 2) geometry from ${img}"
+    fail "${label} populated + shared /boot mount present"
+    info "could not read ${label} (partition ${part}) geometry from ${img}"
     return
   fi
   tmp="$(mktemp)"
@@ -216,13 +211,26 @@ check_rootfs_populated() {
       found="${p}"; break
     fi
   done
+  fstab="$(debugfs -R 'cat /etc/fstab' "${tmp}" 2>/dev/null || true)"
   rm -f "${tmp}"
-  if [[ -n "${found}" ]]; then
-    pass "rootfs_a populated: systemd/init present (not an empty ext4)"
-    info "rootfs_a (p2 @ sector ${start_sector}): found ${found}"
+  if [[ -n "${found}" ]] && grep -Fxq "${boot_mount}" <<<"${fstab}"; then
+    pass "${label} populated + shared /boot mount present"
+    info "${label} (p${part} @ sector ${start_sector}): found ${found} and explicit shared p1 mount"
   else
-    fail "rootfs_a populated: systemd/init present (not an empty ext4)"
-    info "rootfs_a (p2 @ sector ${start_sector}) has no init — mkfs.ext4 -d populate step missing or failed"
+    fail "${label} populated + shared /boot mount present"
+    [[ -n "${found}" ]] || info "${label} (p${part} @ sector ${start_sector}) has no init"
+    grep -Fxq "${boot_mount}" <<<"${fstab}" \
+      || info "${label} lacks the explicit writable PARTLABEL=boot /boot mount"
+  fi
+}
+
+check_target_capacity() {
+  local img="$1" target_bytes="$2" image_bytes
+  image_bytes="$(stat -c '%s' "${img}")"
+  if (( target_bytes >= image_bytes )); then
+    pass "Target media capacity: ${target_bytes} bytes >= image ${image_bytes} bytes"
+  else
+    fail "Target media capacity: ${target_bytes} bytes < image ${image_bytes} bytes"
   fi
 }
 
@@ -233,12 +241,8 @@ require_tool() {
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# run_gate <raw> <bundle> <board> <keyring> <gap_mb> — the five sub-checks.
-# Returns the number of FAILed sub-checks (0 == GREEN). Prints the report.
-# ---------------------------------------------------------------------------
 run_gate() {
-  local raw="$1" bundle="$2" board="$3" keyring="$4" gap_mb="$5"
+  local raw="$1" bundle="$2" board="$3" keyring="$4" gap_mb="$5" target_bytes="$6"
   local boot_off=$(( gap_mb * 1024 * 1024 ))
   FAILS=0
 
@@ -256,7 +260,9 @@ run_gate() {
     check_gap_magic    "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
     check_boot_state     "${raw}" "${boot_off}"
-    check_rootfs_populated "${raw}"
+    check_rootfs_populated "${raw}" 2 rootfs_a
+    check_rootfs_populated "${raw}" 3 rootfs_b
+    check_target_capacity "${raw}" "${target_bytes}"
   fi
   [[ -f "${bundle}" ]] && check_rauc_bundle "${bundle}" "${board}" "${keyring}"
 
@@ -276,7 +282,7 @@ run_gate() {
 # sub-check FAILS. Exits 0 only when the corruption is correctly detected.
 # ---------------------------------------------------------------------------
 self_test() {
-  local raw="$1" bundle="$2" board="$3" keyring="$4" gap_mb="$5"
+  local raw="$1" bundle="$2" board="$3" keyring="$4" gap_mb="$5" target_bytes="$6"
   [[ -f "${raw}" ]] || { echo "self-test: image not found: ${raw}" >&2; return 2; }
   local tmp corrupt
   tmp="$(mktemp -d)"
@@ -292,7 +298,7 @@ self_test() {
   echo
   echo "--- gate output against the zeroed-gap image (expecting a gap-magic FAIL) ---"
   local out rc
-  out="$(run_gate "${corrupt}" "${bundle}" "${board}" "${keyring}" "${gap_mb}")"; rc=$?
+  out="$(run_gate "${corrupt}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" "${target_bytes}")"; rc=$?
   printf '%s\n' "${out}"
   rm -rf "${tmp}"
   echo
@@ -304,13 +310,13 @@ self_test() {
   return 1
 }
 
-usage() { sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
-  local image="" bundle="" board="rock-5b-plus" keyring="" gap_mb="${GAP_MB_DEFAULT}"
+  local image="" bundle="" board="rock-5b-plus" keyring="" gap_mb="${GAP_MB_DEFAULT}" target_size_bytes=""
   local mode="gate"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -319,6 +325,7 @@ main() {
       --board)     board="${2:-}"; shift 2 ;;
       --keyring)   keyring="${2:-}"; shift 2 ;;
       --gap-mb)    gap_mb="${2:-}"; shift 2 ;;
+      --target-size-bytes) target_size_bytes="${2:-}"; shift 2 ;;
       --self-test) mode="self-test"; shift ;;
       -h|--help)   usage; exit 0 ;;
       *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
@@ -328,12 +335,14 @@ main() {
   [[ -n "${keyring}" ]] || keyring="${DEFAULT_KEYRING}"
   [[ -n "${image}" ]]   || image="$(newest_artifact "${board}" '*.raw')"
   [[ -n "${bundle}" ]]  || bundle="$(newest_artifact "${board}" '*.raucb')"
+  [[ "${target_size_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "--target-size-bytes is required and must be a positive integer" >&2; exit 2; }
   [[ -n "${image}" ]]   || { echo "no .raw found under ${IMAGES_DIR}/${board}/ — pass --image" >&2; exit 2; }
   [[ -n "${bundle}" ]]  || { echo "no .raucb found under ${IMAGES_DIR}/${board}/ — pass --bundle" >&2; exit 2; }
 
   case "${mode}" in
-    gate)      run_gate  "${image}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" ;;
-    self-test) self_test "${image}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" ;;
+    gate)      run_gate  "${image}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" "${target_size_bytes}" ;;
+    self-test) self_test "${image}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" "${target_size_bytes}" ;;
   esac
 }
 

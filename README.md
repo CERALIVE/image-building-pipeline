@@ -57,6 +57,13 @@ full host matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon, WSL2).
 
 See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 
+Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
+rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
+RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
+Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`.
+Legacy single-slot images require a full re-flash because their data partition
+overlaps the new B-slot extent; they cannot be converted by OTA.
+
 ## Directory Structure
 
 ```
@@ -72,7 +79,7 @@ See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 │   ├── docs/              # Dev loop, kiosk display, host support, size notes,
 │   │   │                  #   Cog add-on recipe, sysext refresh protocol
 │   │   └── fast-reload.md # Dev-sync live-reload loop
-│   └── tests/             # Manifest validation + preflash verify + QEMU x86
+│   └── tests/             # Manifest + RK3588 A/B/preflash + x86 rollback
 ├── scripts/
 │   └── fetch-debs.sh      # Downloads .deb packages for REPOS array
 └── CONTRIBUTING.md        # Contribution rules

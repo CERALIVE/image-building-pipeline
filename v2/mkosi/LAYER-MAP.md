@@ -19,8 +19,8 @@ base  ──▶ platform ──▶ runtime ──▶ app  ──▶ disk     (De
 `mkosi build` builds the rootfs chain in order (top-level `Dependencies=app`); the
 orchestrator (`lib/orchestrate.sh`) ships `build/app` as the final rootfs tree. The
 **assembly** step (Stage 4, `mkosi.images/disk/` + `lib/assemble-disk.sh`) turns
-that tree into a `Format=disk` image (D4 partition layout). dm-verity + A/B / RAUC
-slot activation are layered on later (task 26).
+that tree into a `Format=disk` image, populates both factory slots, installs the
+RK3588 A/B selector, and emits the signed RAUC bundle.
 
 ---
 
@@ -138,7 +138,7 @@ first relocate off `/etc`+`/var`). Do not implement it in this pipeline.
 
 **What:** the ONLY `Format=disk` image — turns the finished `app` rootfs tree into
 the actual flashable, partitioned disk per the FROZEN
-[`docs/partition-contract.md`](../../docs/partition-contract.md) §3 (v1).
+[`docs/partition-contract.md`](../../docs/partition-contract.md) §3 (v2).
 
 ```
 (16 MB raw gap, no GPT entry) | boot vfat 256M | rootfs_a ext4 4096M
@@ -151,9 +151,9 @@ the actual flashable, partitioned disk per the FROZEN
 | Root tree populating the slots | `BaseTrees=%O/app` |
 | `Bootable=no` | bootloader (idbloader+U-Boot+ATF) is a Platform-layer artifact, dd'd into the 16 MB gap — not mkosi's job |
 
-**References are by `PARTLABEL`, never FS-UUID** (a slot update changes FS-UUIDs;
-the two rootfs labels are not unique across A/B). `Label=` in the repart def ==
-`PARTLABEL=` on device.
+**References are by `PARTLABEL`, never FS-UUID**. GPT slot identity is frozen even
+when a filesystem is recreated; its FS-UUID is instance state, not a stable update
+identifier. `Label=` in the repart def == `PARTLABEL=` on device.
 
 ### Two contract realities systemd-repart cannot express alone
 
@@ -178,10 +178,9 @@ The default `mkosi build` stops at the `app` rootfs tree (the parity gate runs o
 `build/app`). The disk image is produced in a distinct Stage-4 step
 (`lib/assemble-disk.sh build` offline, or `mkosi --image disk`).
 
-**NOT here (deferred to task 26):** A/B slot **flipping** / RAUC `system.conf` +
-bootcount + `bootname`, dm-verity, the `*.raucb` bundle. This layer lays down the
-GEOMETRY + empty filesystems only. FS is **ext4** per the frozen contract;
-squashfs+verity is the RAUC bundle format (task 26), not the on-disk slot.
+`systemd-repart` lays down geometry and empty filesystems. The surrounding assembler
+populates A and B from the app tree, writes the boot artifacts, and pairs the image
+with a signed plain-format `*.raucb`. FS is **ext4** per the frozen contract.
 
 ---
 
@@ -206,11 +205,11 @@ family manifest differs.
 | Chroot **customization modules** (board capture/quirk udev rules, per-board hooks driven by manifest `quirks:`) | **task 20** |
 | First-party app install (cerastream / srtla / CeraUI `.deb`s) | **Stage 3 (tasks 22-23)** |
 | `rauc-hawkbit-updater` active install (backport `.deb` + apt.ceralive.tv serving) | **Stage 4 OTA** |
-| A/B slot **flipping** / RAUC `system.conf` + bootcount + `bootname`, dm-verity, `*.raucb` bundle | **task 26** |
+| dm-verity bundle format | future hardening; current signed bundles use `format=plain` |
 
 `Format=disk` partition **layout** is DONE (task 25 — Layer 5 above): the frozen
-D4 geometry (16 MB gap + boot + rootfs_a/b + data), single-slot fallback, and
-PARTLABEL refs. Only slot *activation* (the A/B flip) + verity/RAUC remain.
+D4 geometry (16 MB gap + boot + rootfs_a/b + data), factory population, slot
+activation, signed RAUC bundles, single-slot fallback, and PARTLABEL refs are done.
 
 ## Cross-references
 
@@ -218,5 +217,5 @@ PARTLABEL refs. Only slot *activation* (the A/B flip) + verity/RAUC remain.
 - `manifests/families/rk3588.yaml` — platform BSP + HW-accel package names (Task 11)
 - `mkosi/repart/` + `mkosi/repart/README.md` — Stage-4 partition defs (Task 25)
 - `lib/assemble-disk.sh` — Stage-4 disk assembler/verifier (Task 25)
-- `../../docs/partition-contract.md` — FROZEN D4 layout (Task 8, v1)
+- `../../docs/partition-contract.md` — FROZEN D4 layout (Task 8, v2)
 - `lib/orchestrate.sh` — reads shared.list → `$SHARED_PACKAGES`; builds the chain

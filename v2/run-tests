@@ -2,15 +2,15 @@
 #
 # run-tests — single CI entrypoint for the CeraLive v2 manifest unit suite.
 #
-# Runs the bats-core unit tests for the manifest system (schema validation,
-# resolver merge precedence, versions.yaml pin resolution, common.sh strict-fail).
-# Exits with the bats exit code so CI can gate on it directly.
+# Runs the manifest/orchestrator units plus the hardware-free RK3588 disk contract
+# and signed x86 bundle contract. Exits with the bats status so CI can gate on it.
 #
 # Dependencies (test-time only; NOT shipped in the device image):
 #   * bats-core   https://github.com/bats-core/bats-core   (>= 1.5)
 #       install:  git clone --depth=1 https://github.com/bats-core/bats-core.git \
 #                   && sudo bats-core/install.sh /usr/local
 #   * python3 with PyYAML + python-jsonschema (same validator resolve.py uses)
+#   * sgdisk, systemd-repart, e2fsprogs, dosfstools, mtools, u-boot-tools
 #
 # Parallelism (opt-in, automatic):
 #   bats parallelizes test CASES with `-j N`, which needs GNU parallel (or
@@ -32,10 +32,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Suites, in run order. manifest.bats is the manifest/orchestrator unit suite;
-# x86-raucb-bundle.bats is the offline REAL x86 .raucb sign/verify/tamper gate (T10).
+# Suites, in run order. The RK3588 contract suite proves the production Rock 5B+
+# factory A/B geometry before the signed-bundle suites run.
 SUITES=(
   "${HERE}/tests/manifest.bats"
+  "${HERE}/tests/rk3588-ab-contract.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
 )
 SHELL_SUITES=(

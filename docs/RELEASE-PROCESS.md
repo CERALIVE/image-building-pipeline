@@ -300,10 +300,11 @@ Two verification passes bracket the whole path, one before ship and one after:
 **Pre-flash (build-time, offline, this repo):**
 [`v2/tests/preflash-verify.sh`](../v2/tests/preflash-verify.sh) checks GPT
 geometry, the bootloader-gap magic, boot-partition artifacts, the seeded boot
-state, and — the one relevant to this doc — that the `.raucb` parses and
-carries the expected `Compatible=` string. Run it before flashing anything;
-see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §3 for the expected
-five-green-check output.
+state, populated A and B factory slots, destination capacity, and — the one
+relevant to this doc — that the `.raucb` parses and carries the expected
+`Compatible=` string. Pass the exact block-device size with
+`--target-size-bytes`; see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §3 for
+the expected eight-green-check output.
 
 **Post-install (on the fielded device):**
 
@@ -453,14 +454,16 @@ further or to pull it from circulation.
 
 ### The A/B fallback contract (automatic, on-device, no operator action needed)
 
-RAUC's A/B slot model means a bad update **can never brick a device** by
-design, proven end-to-end by
+RAUC's A/B slot model provides bounded automatic rollback for a bad update when
+the factory image passed the A/B preflash gate and the board-specific hardware
+cycle has passed. The software contract is exercised by
 [`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh) (run live on real
 hardware as part of the §3 realhw gate, and in a MOCK mode that drives the same
 shipped scripts without hardware):
 
-1. `rauc install` writes the new bundle to the **inactive** slot and makes it
-   primary (next to boot). The currently-running slot is untouched.
+1. `rauc install` marks the inactive target bad, writes the new bundle there,
+   and makes it primary only after the write succeeds. If installation is
+   interrupted first, the currently-running slot remains primary.
 2. On reboot, the device boots the new (now-primary) slot with a **bounded
    bootcount budget** (`BOOT_ATTEMPTS`, default 3).
 3. `ceralive-healthcheck.service` runs after boot and decides the slot's fate:
@@ -483,10 +486,10 @@ shipped scripts without hardware):
    `srtla-send.service` is active — a bad bundle pushed during a live
    broadcast doesn't get a chance to interrupt it in the first place.
 
-This is the automatic safety net. Nothing an operator does is required for a
-single bad bundle on a single device to self-heal — the fleet-response actions
-below are about **stopping the bad bundle from reaching more devices**, not
-about un-bricking any individual one (nothing is bricked).
+This is the automatic safety net for an already A/B-provisioned device. It does
+not convert a legacy single-slot disk: that transition requires backup and a
+full re-flash because the old `data` partition overlaps the new B slot. The
+fleet-response actions below stop a bad bundle from reaching more devices.
 
 ### qemu-x86 fallback-selftest — the proof reference
 

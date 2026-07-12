@@ -204,15 +204,18 @@ Replace `<your-apt-mirror>` with your mirror hostname.
 
 ## 3. Pre-flash verification
 
-Before touching any hardware, run the offline gate. It checks five things:
-GPT geometry, bootloader gap magic, boot partition artifacts, boot state seed,
-and RAUC bundle signature.
+Before flashing, identify the destination block device and run the offline gate.
+Reading its size is non-destructive. The gate checks A/B geometry, bootloader gap
+magic, boot artifacts and state, both populated factory rootfs slots, exact media
+capacity, and the RAUC bundle signature/compatible contract.
 
 ```bash
-bash v2/tests/preflash-verify.sh
+TARGET=/dev/sdX
+TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
+bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
-Expected output (all five checks green):
+Expected output (all eight checks green):
 
 ```text
 ==============================================================
@@ -221,10 +224,13 @@ Expected output (all five checks green):
  bundle:  v2/images/rock-5b-plus/<ts>.raucb
  keyring: v2/.dev-keys/dev-root-ca.pem
 ==============================================================
-[PASS] GPT geometry: single-slot (boot + rootfs_a + data, no rootfs_b)
+[PASS] GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)
 [PASS] Gap magic: RKNS (52 4b 4e 53) at sector 64
-[PASS] Boot partition: all 4 artifacts present
-[PASS] Boot state: BOOT_ORDER=A (single-slot) and BOOT_B_LEFT=0
+[PASS] Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf
+[PASS] Boot state: BOOT_ORDER=A B with positive A/B attempts
+[PASS] rootfs_a populated + shared /boot mount present
+[PASS] rootfs_b populated + shared /boot mount present
+[PASS] Target media capacity: <target-bytes> bytes >= image <image-bytes> bytes
 [PASS] RAUC bundle: parses + Compatible 'ceralive-rock-5b-plus'
 --------------------------------------------------------------
 RESULT: PASS — pre-flash gate GREEN. Hardware bring-up AUTHORIZED.
@@ -237,7 +243,8 @@ You can also run the built-in negative self-test to confirm the gate is
 non-vacuous:
 
 ```bash
-bash v2/tests/preflash-verify.sh --self-test
+bash v2/tests/preflash-verify.sh --self-test \
+  --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
 ---
@@ -254,8 +261,13 @@ build system; you do not need to write it separately.
 [16 MB raw gap]  idbloader + U-Boot + ATF (no GPT entry)
 p1  boot         256 MB  vfat   U-Boot env + extlinux slot selector
 p2  rootfs_a     4096 MB ext4   rootfs slot A (active)
-p3  data         remainder ext4  persistent mutable state
+p3  rootfs_b     4096 MB ext4   rootfs slot B (factory rollback baseline)
+p4  data         remainder ext4  persistent mutable state
 ```
+
+An older single-slot image cannot be upgraded to this layout with a `.raucb`:
+its `data` partition occupies the future `rootfs_b` extent. Back up required state
+and perform a full re-flash; do not attempt in-place repartitioning.
 
 ### Option A: dd to microSD card
 

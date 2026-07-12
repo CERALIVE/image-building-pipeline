@@ -83,7 +83,7 @@ fi
 # --- boot the chosen slot. Kernel/DTB/initrd ride INSIDE the rootfs slot's /boot
 #     (frozen contract), so load them from the ext4 rootfs partition, not this FAT.
 echo "CeraLive: booting slot ${cera_slot} (root=PARTLABEL=${cera_root}, part ${cera_part})"
-setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot}"
+setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot} rauc.slot=${cera_slot}"
 
 if test "${fdtfile}" = ""; then
   echo "CeraLive: FATAL fdtfile unset (cera_board.env missing?) — cannot boot"
