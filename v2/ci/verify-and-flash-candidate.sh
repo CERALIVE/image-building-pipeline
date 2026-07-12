@@ -31,6 +31,19 @@ identity_dir="$(dirname -- "${identity_out}")"
 }
 rm -f -- "${identity_out}"
 
+validate_identity_filename() {
+  local field="$1" value="$2"
+  [[ "${value}" =~ ^[A-Za-z0-9._+-]+$ ]] || {
+    printf '%s identity filename contains unsupported characters\n' "${field}" >&2
+    exit 1
+  }
+}
+
+raw_file="$(basename -- "${image}")"
+bundle_file="$(basename -- "${bundle}")"
+validate_identity_filename raw_file "${raw_file}"
+validate_identity_filename bundle_file "${bundle_file}"
+
 scratch_root="${RUNNER_TEMP:-/tmp}"
 [[ -d "${scratch_root}" && -w "${scratch_root}" && ! -L "${scratch_root}" ]] || {
   printf 'RUNNER_TEMP must be a writable non-symlink directory: %s\n' "${scratch_root}" >&2
@@ -40,14 +53,20 @@ verify_tmp="$(mktemp -d "${scratch_root}/ceralive-verify.XXXXXX")"
 chmod 700 "${verify_tmp}"
 flash_image="${verify_tmp}/candidate.raw"
 readback_image="${verify_tmp}/readback.raw"
+ld_output_file="${verify_tmp}/rkdeveloptool-ld.log"
 ssh_known_hosts="${verify_tmp}/known_hosts"
 identity_tmp=""
-readback_pid=""
-cleanup() {
-  if [[ -n "${readback_pid}" ]]; then
-    kill "${readback_pid}" >/dev/null 2>&1 || true
-    wait "${readback_pid}" >/dev/null 2>&1 || true
+rkdeveloptool_pid=""
+stop_rkdeveloptool() {
+  local pid="${rkdeveloptool_pid}"
+  rkdeveloptool_pid=""
+  if [[ -n "${pid}" ]]; then
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
   fi
+}
+cleanup() {
+  stop_rkdeveloptool
   [[ -z "${identity_tmp}" ]] || rm -f -- "${identity_tmp}"
   rm -rf -- "${verify_tmp}"
 }
@@ -55,9 +74,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+run_rkdeveloptool() {
+  local status
+  "${rkdeveloptool}" "$@" &
+  rkdeveloptool_pid=$!
+  if wait "${rkdeveloptool_pid}"; then
+    status=0
+  else
+    status=$?
+  fi
+  rkdeveloptool_pid=""
+  return "${status}"
+}
+
 cp --reflink=auto --sparse=always -- "${image}" "${flash_image}"
 chmod 400 "${flash_image}"
-raw_file="$(basename -- "${image}")"
 actual_sha="$(sha256sum "${flash_image}" | cut -d' ' -f1)"
 [[ "${actual_sha}" == "${expected_sha}" ]] || {
   printf 'candidate raw digest mismatch: expected %s, got %s\n' "${expected_sha}" "${actual_sha}" >&2
@@ -120,10 +151,11 @@ done
   exit 1
 }
 
-ld_output="$("${rkdeveloptool}" ld 2>&1)" || {
-  printf 'rkdeveloptool could not enumerate the maskrom target\n%s\n' "${ld_output}" >&2
+if ! run_rkdeveloptool ld >"${ld_output_file}" 2>&1; then
+  printf 'rkdeveloptool could not enumerate the maskrom target\n%s\n' "$(<"${ld_output_file}")" >&2
   exit 1
-}
+fi
+ld_output="$(<"${ld_output_file}")"
 printf '%s\n' "${ld_output}"
 mapfile -t usb_devices < <(grep 'DevNo=' <<<"${ld_output}" || true)
 (( ${#usb_devices[@]} == 1 )) || {
@@ -131,8 +163,8 @@ mapfile -t usb_devices < <(grep 'DevNo=' <<<"${ld_output}" || true)
   exit 1
 }
 usb_device_sha256="$(printf '%s\n' "${usb_devices[0]}" | sha256sum | cut -d' ' -f1)"
-"${rkdeveloptool}" db "${loader}"
-"${rkdeveloptool}" wl 0 "${flash_image}"
+run_rkdeveloptool db "${loader}"
+run_rkdeveloptool wl 0 "${flash_image}"
 [[ "$(stat -c %s "${flash_image}")" == "${image_bytes}" ]] || {
   printf 'private candidate snapshot changed size while flashing\n' >&2
   exit 1
@@ -140,14 +172,10 @@ usb_device_sha256="$(printf '%s\n' "${usb_devices[0]}" | sha256sum | cut -d' ' -
 chmod 600 "${flash_image}"
 rm -f -- "${flash_image}"
 
-"${rkdeveloptool}" rl 0 "${image_sectors}" "${readback_image}" &
-readback_pid=$!
-if ! wait "${readback_pid}"; then
-  readback_pid=""
+if ! run_rkdeveloptool rl 0 "${image_sectors}" "${readback_image}"; then
   printf 'failed to read back flashed candidate before reset\n' >&2
   exit 1
 fi
-readback_pid=""
 [[ "$(stat -c %s "${readback_image}")" == "${image_bytes}" ]] || {
   printf 'flashed candidate readback size mismatch\n' >&2
   exit 1
@@ -160,7 +188,7 @@ readback_sha="$(sha256sum "${readback_image}" | cut -d' ' -f1)"
 }
 rm -f -- "${readback_image}"
 : >"${ssh_known_hosts}"
-"${rkdeveloptool}" rd
+run_rkdeveloptool rd
 
 attempts="${CERALIVE_RECONNECT_ATTEMPTS:-18}"
 delay="${CERALIVE_RECONNECT_DELAY:-5}"
@@ -194,7 +222,7 @@ candidate_commit=${candidate_commit}
 raw_file=${raw_file}
 raw_size=${image_bytes}
 raw_sha256=${expected_sha}
-bundle_file=$(basename "${bundle}")
+bundle_file=${bundle_file}
 keyring_sha256=$(sha256sum "${keyring}" | cut -d' ' -f1)
 identity_contract=pre-boot-whole-media-sha256
 pre_boot_media_sha256=${readback_sha}

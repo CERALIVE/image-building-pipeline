@@ -146,7 +146,9 @@ the board is still in maskrom, the gate reads the exact whole-media sector range
 back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
 on mismatch. Only after that immutable proof does it boot, rotate a run-local SSH
 host-key record, and require reconnect to the same media CID. It never compares
-mutable post-boot media bytes.
+mutable post-boot media bytes. Every `rkdeveloptool` operation is owned by a
+cancellable child and reaped on interruption; the identity record accepts only
+safe artifact filename characters so its line-oriented fields cannot be split.
 Authenticated BSP fetches require the pinned Armbian archive key fingerprint and
 verify InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery
 uses `recovery.scr`, which loads boot artifacts directly from p2 or p3.

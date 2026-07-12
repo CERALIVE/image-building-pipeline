@@ -95,7 +95,9 @@ Steps, in order:
    The board must disconnect from SSH, enumerate as the only Rockchip USB target,
    then reconnect before the bounded retry budget expires with the same media CID
    and a fresh run-local SSH host-key record. The gate deliberately does not hash
-   post-boot media because U-Boot state and the mounted rootfs are mutable.
+   post-boot media because U-Boot state and the mounted rootfs are mutable. Its
+   `rkdeveloptool` children are cancellable/reaped, and artifact filenames in the
+   identity record are restricted to a safe line-oriented character set.
 3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,

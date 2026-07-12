@@ -570,7 +570,10 @@ The workflow runs these steps in order:
    sector range before reset. The gate requires the SSH-to-USB disconnect, one
    Rockchip target, and post-boot reconnect to the same media CID within its retry
    budget. Its run-local SSH host-key record is rotated only after the immutable
-   readback succeeds. Post-boot mutable bytes are not compared to the factory raw.
+   readback succeeds. All `rkdeveloptool` operations are owned and reaped so an
+   interruption cannot leave a flash/readback child or scratch candidate behind.
+   Post-boot mutable bytes are not compared to the factory raw, and identity
+   artifact filenames are validated before entering the line-oriented record.
 3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
    init, dev-loop sanity (optional), RAUC A/B rollback.
 4. **Upload artifacts** — uploads candidate identity and suite evidence with
