@@ -122,7 +122,9 @@ The hardware-free CI/test entrypoint is `CERALIVE_RUN_REAL_RAUC_CONTRACT=require
 demand; production builds must still provide `CERALIVE_RAUC_PKI_DIR` explicitly.
 When GNU parallel is available, Bats files run in parallel but cases within each
 file stay serial; tests that share the build staging tree also use file locks so
-CI concurrency cannot alter their assertions.
+CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's
+supported boot-slot override for its synthetic file-backed slots, so CI does not
+depend on the runner's boot device.
 
 ## Custom Components
 

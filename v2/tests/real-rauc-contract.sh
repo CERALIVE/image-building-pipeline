@@ -84,7 +84,7 @@ trap 'exit 143' TERM
 
 start_service() {
   local log="$1" _
-  run_service() { exec sudo -n rauc -d -c "${CONF}" service; }
+  run_service() { exec sudo -n rauc -d -c "${CONF}" service --override-boot-slot=A; }
   run_service >"${log}" 2>&1 &
   service_pid=$!
   for _ in $(seq 1 100); do

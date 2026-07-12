@@ -132,7 +132,10 @@ state, incompatible/invalid signed bundles, and a destination smaller than the r
 image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and—when CI sets
 `CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
-and cleanup harness. A v1 single-slot disk cannot migrate by
+and cleanup harness. The harness uses RAUC's supported boot-slot override for
+its synthetic file-backed slots, so the same service contract runs across CI
+RAUC versions without depending on the runner's boot device. A v1 single-slot
+disk cannot migrate by
 OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
