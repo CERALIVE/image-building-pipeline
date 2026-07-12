@@ -40,7 +40,9 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
 - **x86_64** strongly preferred (mkosi/docker tooling, `rkdeveloptool` apt
   package, GH runner are all first-class on amd64).
 - ≥ 4 GB RAM, ≥ 40 GB free disk (build artifacts + image staging + runner work
-  dir).
+  dir). Candidate verification uses one private image-sized scratch object at a
+  time: first the immutable flash snapshot, then the exact media readback. It
+  never retains both scratch images simultaneously.
 - Outbound HTTPS to `github.com` / `api.github.com` / `*.actions.githubusercontent.com`
   (the runner long-polls GitHub; **no inbound** port needs opening).
 
@@ -254,15 +256,26 @@ rkdeveloptool db rk3588_loader.bin     # download-boot the loader into SRAM
 # 3. Write the full image to the eMMC (offset 0 = whole-disk GPT image):
 rkdeveloptool wl 0 ceralive-rock-5b-plus.img
 
-# 4. Reset the board into the freshly-flashed system:
+# 4. Before reset, read back and verify the exact image-sized sector range:
+bytes=$(stat -c %s ceralive-rock-5b-plus.img)
+sectors=$((bytes / 512))
+readback=$(mktemp)
+rkdeveloptool rl 0 "${sectors}" "${readback}"
+test "$(stat -c %s "${readback}")" -eq "${bytes}"
+test "$(sha256sum "${readback}" | cut -d' ' -f1)" = \
+  "$(sha256sum ceralive-rock-5b-plus.img | cut -d' ' -f1)"
+rm -f "${readback}"
+
+# 5. Only after the readback matches, reset into the freshly-flashed system:
 rkdeveloptool rd
 ```
 
 - `ld` = list devices, `db` = download-boot loader, `wl <start_sector> <file>` =
-  write at LBA, `rd` = reset. Sector 0 is correct for a **whole-disk** image with
-  its own GPT (what `v2/lib/assemble-disk.sh` produces). For a **rootfs-only**
-  partition image, write at that partition's start LBA instead — prefer
-  whole-disk images for CI to keep this a single, dumb `wl 0`.
+  write at LBA, `rl <start_sector> <sector_count> <file>` = read back, and `rd` =
+  reset. Sector 0 is correct for a **whole-disk** image with its own GPT (what
+  `v2/lib/assemble-disk.sh` produces). For a **rootfs-only** partition image,
+  write at that partition's start LBA instead — prefer whole-disk images for CI
+  to keep this a single, dumb `wl 0`.
 - `udev` rule so non-root can flash (file
   `/etc/udev/rules.d/99-rockchip-rk3588.rules`):
   ```
@@ -394,6 +407,11 @@ recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
    ```bash
    rkdeveloptool db rk3588_loader.bin
    rkdeveloptool wl 0 last-known-good.img
+   sectors=$(( $(stat -c %s last-known-good.img) / 512 ))
+   rkdeveloptool rl 0 "${sectors}" last-known-good.readback.img
+   test "$(sha256sum last-known-good.readback.img | cut -d' ' -f1)" = \
+     "$(sha256sum last-known-good.img | cut -d' ' -f1)"
+   rm -f last-known-good.readback.img
    rkdeveloptool rd          # reset into the reflashed system
    ```
 5. **Watch serial** (section 5.2) to confirm U-Boot → kernel → login, then

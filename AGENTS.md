@@ -141,7 +141,12 @@ Production builds require one explicit RAUC PKI contract: signer root, chain,
 leaf certificate/key, and baked device keyring must match. The release workflow
 builds the candidate before hardware validation, uploads the raw image, bundle,
 keyring, and digest as one immutable artifact, then the hardware gate preflights
-and flashes that exact raw image and verifies its media digest after reconnect.
+and flashes a private, digest-verified snapshot of that exact raw image. While
+the board is still in maskrom, the gate reads the exact whole-media sector range
+back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
+on mismatch. Only after that immutable proof does it boot, rotate a run-local SSH
+host-key record, and require reconnect to the same media CID. It never compares
+mutable post-boot media bytes.
 Authenticated BSP fetches require the pinned Armbian archive key fingerprint and
 verify InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery
 uses `recovery.scr`, which loads boot artifacts directly from p2 or p3.
@@ -206,7 +211,8 @@ state** under the staging dir (the host apt config is never touched).
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
   fatal. `APT_CERALIVE_URL` (default `https://apt.ceralive.tv`) is overridable.
 - **Arch axis only** — the source carries no board axis; `arch` is selected by
-  `APT::Architecture` (apt-worker two-axis model: `channel × arch`).
+  `APT::Architecture` (apt-worker two-axis model: `channel × arch`). Resolved
+  mkosi `x86-64` is normalized to Debian `amd64`; RK3588 remains `arm64`.
 - **DRY_RUN** logs the exact version-qualified `apt-get … download` plan + source
   and downloads nothing. With no `APT_GPG_PUBLIC_B64` in the env the fetcher
   auto-enables DRY_RUN (no credential for a verified fetch).

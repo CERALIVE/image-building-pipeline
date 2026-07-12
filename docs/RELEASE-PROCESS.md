@@ -88,10 +88,14 @@ Steps, in order:
 
 1. **Candidate verification** — verify the exact raw SHA-256, production bundle,
    embedded slot keyrings, boot artifacts, GPT geometry, and target capacity.
-2. **Required flash and identity proof** — write that raw file through RK3588
-   maskrom with `rkdeveloptool`, reboot,
-   fail on reconnect exhaustion, and compare the flashed media bytes to the
-   expected digest.
+2. **Required flash and identity proof** — copy the raw into a private snapshot,
+   verify its SHA-256, and use that same snapshot for preflight and the RK3588
+   maskrom write. Before reset, read the exact candidate sector range into a
+   private file, verify its size and SHA-256, and refuse to boot on any mismatch.
+   The board must disconnect from SSH, enumerate as the only Rockchip USB target,
+   then reconnect before the bounded retry budget expires with the same media CID
+   and a fresh run-local SSH host-key record. The gate deliberately does not hash
+   post-boot media because U-Boot state and the mounted rootfs are mutable.
 3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,

@@ -217,10 +217,10 @@ main() {
   local params
   params="$("${RESOLVE_SH}" "${board}")" || die "manifest resolution failed for board '${board}'"
   eval "${params}"
-  # Export BSP package vars immediately so fetch-debs.sh (step 2) can read them.
-  # run_mkosi_build() re-exports the full set at step 6; this early export covers
-  # the fetch step which runs before mkosi.
-  export UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
+  # Export the resolved architecture and BSP package vars immediately so
+  # fetch-debs.sh (step 2) can read them. run_mkosi_build() re-exports the full
+  # set at step 6; this early export covers the fetch step which runs before mkosi.
+  export ARCH UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
          HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
 
   # Reproducible builds (task 14): pin ONE epoch for the whole run so every

@@ -37,7 +37,7 @@
 #
 # ── Env ──────────────────────────────────────────────────────────────────────
 #   CHANNEL            stable|beta            (default: stable)
-#   ARCH               arm64|amd64            (default: arm64)
+#   ARCH               arm64|amd64|x86-64     (default: arm64; Debian-normalized)
 #   DEST               staging root           (default: ./out)  -> debs in $DEST/debs/
 #   DRY_RUN            1 to plan-only         (default: auto)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
@@ -67,6 +67,11 @@ source "${HERE}/fetch-debs-auth.sh"
 # ---------------------------------------------------------------------------
 CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-arm64}"
+case "${ARCH}" in
+  arm64|amd64) ;;
+  x86-64) ARCH="amd64" ;;
+  *) die "unsupported Debian package architecture '${ARCH}'; expected arm64|amd64|x86-64" ;;
+esac
 DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"

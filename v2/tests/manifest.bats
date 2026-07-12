@@ -619,6 +619,31 @@ YAML
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
+@test "fetch staging: x86-minipc maps resolved x86-64 to Debian amd64" {
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"resolved: family=x86_64 arch=x86-64 (mkosi=x86-64)"* ]]
+  [[ "$output" == *"channel=stable arch=amd64"* ]]
+  [[ "$output" == *"binary-amd64/Packages.gz"* ]]
+  [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-amd64/"* ]]
+  [[ "$output" == *"APT::Architecture=amd64"* ]]
+  [[ "$output" != *"binary-arm64"* ]]
+}
+
+@test "fetch staging: RK3588 boards keep Debian arm64" {
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" "$board"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"resolved: family=rk3588 arch=arm64 (mkosi=arm64)"* ]]
+    [[ "$output" == *"channel=stable arch=arm64"* ]]
+    [[ "$output" == *"binary-arm64/Packages.gz"* ]]
+    [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-arm64/"* ]]
+    [[ "$output" == *"APT::Architecture=arm64"* ]]
+    [[ "$output" != *"binary-amd64"* ]]
+  done
+}
+
 @test "t14 x86 guard: x86-minipc DRY_RUN emits no .raw (resolve+plan only, before Stage-4)" {
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]

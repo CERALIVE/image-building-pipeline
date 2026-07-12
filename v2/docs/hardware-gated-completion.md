@@ -565,8 +565,12 @@ The workflow runs these steps in order:
 
 1. **Candidate preflash** — verify the exact raw digest, A/B media, production
    bundle/keyring contract, and destination capacity.
-2. **Required flash** — write that exact raw image through maskrom, reboot, fail on reconnect
-   exhaustion, and verify the flashed media digest.
+2. **Required flash** — digest a private candidate snapshot, use that same file
+   for preflight and the maskrom write, then read and SHA-256 the exact candidate
+   sector range before reset. The gate requires the SSH-to-USB disconnect, one
+   Rockchip target, and post-boot reconnect to the same media CID within its retry
+   budget. Its run-local SSH host-key record is rotated only after the immutable
+   readback succeeds. Post-boot mutable bytes are not compared to the factory raw.
 3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
    init, dev-loop sanity (optional), RAUC A/B rollback.
 4. **Upload artifacts** — uploads candidate identity and suite evidence with
