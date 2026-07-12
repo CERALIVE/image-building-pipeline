@@ -21,15 +21,15 @@
 #                      compatible=ceralive-x86-minipc (what `rauc install` matches
 #                      against the device system.conf).
 #
-# PKI: the THROWAWAY dev keypair under v2/.dev-keys (root-ca.pem, chain.pem,
+# PKI: the THROWAWAY dev keypair generated under v2/.dev-keys (root-ca.pem, chain.pem,
 # leaf-signing.pem, leaf-signing.key — symlinks onto the dev-* files). This NEVER
 # touches the production signing PKI, and uses only a repo-local path
 # (CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys") — no path escapes this checkout (Rule D).
 #
 # Dependency: bats-core + mksquashfs + unsquashfs + openssl. Missing toolchain ->
 # the real-bundle sections SKIP (still green), exactly like §11/§14 — a host
-# without squashfs-tools never false-fails. The dev PKI is committed, so the
-# signing chain is always exercised for real when the toolchain is present.
+# without squashfs-tools never false-fails. The dev PKI is generated on demand,
+# so the signing chain is exercised for real when the toolchain is present.
 #
 # Run:  v2/run-tests              (CI entrypoint — registered alongside manifest.bats)
 #   or: bats v2/tests/x86-raucb-bundle.bats

@@ -155,7 +155,8 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 `BUNDLE_VERSION` (git short SHA by default). The signing contract:
 
 - **Leaf key only, never root.** The bundle is signed with the injected release
-  `leaf-signing.key` + `chain.pem` (intermediate + leaf).
+  `leaf-signing.key` + `chain.pem` (the intermediate chain; the leaf certificate is
+  passed separately as the signer).
   The root CA key (`root-ca.key`) never touches the signing invocation — it
   stays offline, by design.
 - **`assert_no_root_signing()`** is the enforced guard: it greps the *rendered*

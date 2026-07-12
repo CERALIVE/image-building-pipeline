@@ -575,7 +575,7 @@ containing the following files:
 ```text
 <your-signing-key>/
   root-ca.pem        # root CA cert (baked into device keyring)
-  chain.pem          # intermediate + leaf chain (embedded in bundle)
+  chain.pem          # intermediate chain; leaf certificate is passed separately
   leaf-signing.pem   # leaf code-signing cert
   leaf-signing.key   # leaf private key
 ```
@@ -621,8 +621,8 @@ openssl x509 -req -in dev-leaf-signing.csr \
     'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning')
 rm dev-leaf-signing.csr
 
-# Chain
-cat dev-intermediate-ca.pem dev-leaf-signing.pem > dev-chain.pem
+# Chain (the leaf is passed separately as the signer)
+cp dev-intermediate-ca.pem dev-chain.pem
 
 # Symlinks expected by build-bundle.sh
 ln -sf dev-root-ca.pem root-ca.pem

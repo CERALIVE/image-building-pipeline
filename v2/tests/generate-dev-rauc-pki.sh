@@ -68,10 +68,12 @@ matches_key() {
 }
 
 validate_fixture() {
-  local cert subject
+  local cert subject chain_certs
   for cert in dev-root-ca.pem dev-intermediate-ca.pem dev-leaf-signing.pem dev-chain.pem; do
     [[ -s "$DEV_KEYS/$cert" ]] || die "fixture file is missing or empty: ${DEV_KEYS}/${cert}"
   done
+  chain_certs="$(awk '/^-----BEGIN CERTIFICATE-----$/{n++} END{print n+0}' "$DEV_KEYS/dev-chain.pem")"
+  [[ "$chain_certs" -eq 1 ]] || die "dev-chain.pem must contain only the intermediate certificate"
   for cert in dev-root-ca.pem dev-intermediate-ca.pem dev-leaf-signing.pem; do
     subject="$(openssl x509 -in "$DEV_KEYS/$cert" -noout -subject)"
     [[ "$subject" == *"NON-PRODUCTION"* ]] \
@@ -129,7 +131,7 @@ if (( ! present )); then
     -out "$tmp/dev-leaf-signing.pem" -extfile "$tmp/leaf.ext" \
     >/dev/null 2>&1
 
-  cat "$tmp/dev-intermediate-ca.pem" "$tmp/dev-leaf-signing.pem" >"$tmp/dev-chain.pem"
+  cp "$tmp/dev-intermediate-ca.pem" "$tmp/dev-chain.pem"
   rm -f "$tmp"/*.csr "$tmp"/*.ext
   ln -s dev-root-ca.pem "$tmp/root-ca.pem"
   ln -s dev-chain.pem "$tmp/chain.pem"
@@ -142,6 +144,7 @@ if (( ! present )); then
   trap - EXIT
 fi
 
+cp "$DEV_KEYS/dev-intermediate-ca.pem" "$DEV_KEYS/dev-chain.pem"
 link_fixture root-ca.pem dev-root-ca.pem
 link_fixture chain.pem dev-chain.pem
 link_fixture leaf-signing.pem dev-leaf-signing.pem

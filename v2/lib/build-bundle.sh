@@ -9,7 +9,7 @@
 # WHAT IT DOES
 #   1. Builds a RAUC `manifest.raucm` (rootfs slot, compatible, version).
 #   2. Assembles the bundle content (manifest + rootfs image).
-#   3. SIGNS it with the leaf signing key + the intermediate/leaf chain —
+#   3. SIGNS it with the leaf signing key + the intermediate chain —
 #      NEVER the root CA key (the root stays offline/immutable, README.txt).
 #   4. VERIFIES the signature chain against the device trust anchor
 #      (the explicit release root, identical to the on-device keyring).
@@ -20,16 +20,16 @@
 # PKI (explicit CERALIVE_RAUC_PKI_DIR):
 #   root-ca.pem        device keyring (immutable trust anchor)        — VERIFY only
 #   root-ca.key        root private key                               — NEVER touched here
-#   chain.pem          intermediate-ca.pem + leaf-signing.pem         — embedded in bundle
+#   chain.pem          intermediate-ca.pem                           — embedded in bundle
 #   leaf-signing.pem   leaf code-signing cert                         — the signer cert
 #   leaf-signing.key   leaf private key                               — SIGNS the bundle (CMS)
 #
 # Device verify path: leaf -> intermediate (from the bundle's chain.pem) -> root
 # (from /etc/rauc/ceralive-keyring.pem). RAUC has no through-channel root swap.
 #
-# RAUC INVOCATION (real `rauc`, when present). chain.pem is ordered
-# intermediate-then-leaf, so the signer cert is passed explicitly as the leaf and
-# the chain is supplied via --intermediate (the README-canonical form). This still
+# RAUC INVOCATION (real `rauc`, when present). chain.pem contains the intermediate
+# certificate, while the signer cert is passed explicitly as the leaf and the
+# chain is supplied via --intermediate (the README-canonical form). This still
 # uses ONLY leaf-signing.key + chain.pem; root-ca.key never appears:
 #
 #     rauc bundle --cert=leaf-signing.pem --key=leaf-signing.key \
@@ -136,7 +136,7 @@ assert_pki() {
 # ---------------------------------------------------------------------------
 # assert_no_root_signing <argv...> — the no-root-sign guard.
 #
-# RAUC bundle signing must use the leaf key + intermediate/leaf chain ONLY. The
+# RAUC bundle signing must use the leaf key + intermediate chain ONLY. The
 # root CA key is offline and immutable; it signs the intermediate and nothing
 # else (README.txt). This greps the *rendered signing invocation* and aborts if
 # root-ca.key appears, and positively asserts the leaf key is the signer.
@@ -240,7 +240,7 @@ bundle_with_rauc() {
 # Reproduces RAUC's plain-format trust structure, and is what `rauc info`/install
 # verify against the device keyring:
 #   payload   = squashfs(content/)                       (manifest + rootfs image)
-#   signature = detached CMS(payload) by the LEAF, chain.pem certs embedded
+#   signature = detached CMS(payload) by the LEAF, with chain.pem intermediates embedded
 #   bundle    = payload || signature || uint64-BE(len(signature))
 #
 # Determinism (task 14): mksquashfs clamps the superblock + inode times to the
