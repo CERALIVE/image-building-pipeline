@@ -536,6 +536,17 @@ The build system defaults to a throwaway dev signing key stored in
 `v2/.dev-keys/` (gitignored). This key is for local and CI builds only and
 must never be used in production.
 
+The canonical test entrypoint creates this ignored fixture automatically on a
+clean checkout:
+
+```bash
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+```
+
+The generator validates the NON-PRODUCTION certificate chain and leaf key before
+the RAUC assertions run. Production builds still require an explicit
+`CERALIVE_RAUC_PKI_DIR`; the test fixture is never a production fallback.
+
 The orchestrator sets this automatically:
 
 ```bash

@@ -117,6 +117,10 @@ For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
 
+The hardware-free CI/test entrypoint is `CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+./v2/run-tests`. It creates the ignored, NON-PRODUCTION RAUC signing fixture on
+demand; production builds must still provide `CERALIVE_RAUC_PKI_DIR` explicitly.
+
 ## Custom Components
 
 All custom components are distributed via .deb packages from our repository:

@@ -50,6 +50,7 @@ SHELL_SUITES=(
   "${HERE}/tests/boot-script-sanitize.test.sh"
   "${HERE}/mkosi/platform/boot/test-fallback.sh"
 )
+DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"
 
 if ! command -v bats >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -73,6 +74,12 @@ for suite in "${SHELL_SUITES[@]}"; do
     exit 1
   fi
 done
+if [[ ! -x "${DEV_PKI_GENERATOR}" ]]; then
+  echo "ERROR: dev RAUC PKI generator not found or not executable: ${DEV_PKI_GENERATOR}" >&2
+  exit 1
+fi
+
+"${DEV_PKI_GENERATOR}"
 
 for suite in "${SHELL_SUITES[@]}"; do
   "${suite}"

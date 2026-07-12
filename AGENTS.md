@@ -284,6 +284,15 @@ itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into th
 native `rauc bundle` signer (NOT bit-reproducible). Proof: `v2/run-tests` section
 11; double-build the same board and compare `.raucb` sha256.
 
+**RAUC test trust fixture** [EXISTS]
+
+The canonical `v2/run-tests` entrypoint invokes
+`v2/tests/generate-dev-rauc-pki.sh` before any RAUC contract suite. The generator
+creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
+(including the leaf → intermediate → root chain and leaf key pairing); it never
+provides a production default. Production image builds still require an explicit
+`CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
+
 **Image size gate — BLOCKING at 1.5 GB** [EXISTS]
 
 `v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds
