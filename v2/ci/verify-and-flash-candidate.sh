@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+reset_ignored_cancellation_signals() {
+  local ignored
+  [[ -r "/proc/$$/status" ]] || return 0
+  ignored="$(awk '$1 == "SigIgn:" { print $2 }' "/proc/$$/status")"
+  [[ "${ignored}" =~ ^[0-9a-fA-F]{16}$ ]] || return 0
+  if (( (16#${ignored} & 0x4002) != 0 )); then
+    exec env --default-signal=INT --default-signal=TERM \
+      "${BASH}" "${BASH_SOURCE[0]}" "$@"
+  fi
+}
+reset_ignored_cancellation_signals "$@"
+
 image="" bundle="" keyring="" board="" board_ip="" candidate_commit=""
 expected_sha="" identity_out=""
 while [[ $# -gt 0 ]]; do

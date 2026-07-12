@@ -282,9 +282,9 @@ if grep -q '^rkdeveloptool rd' "${TMP}/flash-term.log"; then
 fi
 
 assert_interrupt_cleanup() {
-  local mode="$1" label="$2" case_dir
-  local verify_pid watchdog_pid rk_pid rc
-  case_dir="${TMP}/interrupt-${label}"
+  local mode="$1" label="$2" signal="$3" expected_rc="$4" case_dir
+  local verify_pid watchdog_pid rk_pid rc started elapsed child_survived=0
+  case_dir="${TMP}/interrupt-${signal,,}-${label}"
   mkdir -p "${case_dir}"
   rm -f "${TMP}/identity.txt"
   env "${base_env[@]}" MOCK_FLASH_MODE="${mode}" \
@@ -299,40 +299,59 @@ assert_interrupt_cleanup() {
   done
   [[ -s "${case_dir}/rk.pid" ]]
   rk_pid="$(cat "${case_dir}/rk.pid")"
+  started="${SECONDS}"
   (
     sleep 3
     kill -KILL "${verify_pid}" 2>/dev/null || true
   ) &
   watchdog_pid=$!
-  kill -TERM "${verify_pid}"
+  kill "-${signal}" "${verify_pid}"
   set +e
   wait "${verify_pid}"
   rc=$?
   set -e
+  elapsed=$((SECONDS - started))
   kill "${watchdog_pid}" 2>/dev/null || true
   wait "${watchdog_pid}" 2>/dev/null || true
   if kill -0 "${rk_pid}" 2>/dev/null; then
+    child_survived=1
     kill -KILL "${rk_pid}" 2>/dev/null || true
     wait "${rk_pid}" 2>/dev/null || true
   fi
-  [[ "${rc}" -eq 143 ]]
-  if kill -0 "${rk_pid}" 2>/dev/null; then
-    printf '%s rkdeveloptool child survived cancellation\n' "${label}" >&2
+  if [[ "${rc}" -ne "${expected_rc}" ]]; then
+    printf '%s %s cancellation returned %s, expected %s (elapsed=%ss)\n' \
+      "${signal}" "${label}" "${rc}" "${expected_rc}" "${elapsed}" >&2
     exit 1
   fi
+  if (( child_survived == 1 )); then
+    printf '%s %s rkdeveloptool child survived cancellation\n' "${signal}" "${label}" >&2
+    exit 1
+  fi
+  (( elapsed < 3 )) || {
+    printf '%s %s cancellation reached the 3s watchdog\n' "${signal}" "${label}" >&2
+    exit 1
+  }
   grep -q "^rkdeveloptool ${label}" "${case_dir}/flash.log"
   [[ ! -e "${TMP}/identity.txt" ]]
   if find "${TMP}" -maxdepth 1 -type d -name 'ceralive-verify.*' -print -quit | grep -q .; then
-    printf '%s cancellation leaked verifier scratch\n' "${label}" >&2
+    printf '%s %s cancellation leaked verifier scratch\n' "${signal}" "${label}" >&2
     exit 1
   fi
-  printf '%s cancellation cleaned child and scratch (rc=%s)\n' "${label}" "${rc}"
+  printf '%s %s cancellation cleaned verifier, child, and scratch (rc=%s elapsed=%ss)\n' \
+    "${signal}" "${label}" "${rc}" "${elapsed}"
 }
 
-assert_interrupt_cleanup db-wait db
-assert_interrupt_cleanup wl-wait wl
-assert_interrupt_cleanup rl-wait rl
-assert_interrupt_cleanup rd-wait rd
+for signal_case in TERM INT; do
+  if [[ "${signal_case}" == TERM ]]; then
+    expected_signal_rc=143
+  else
+    expected_signal_rc=130
+  fi
+  assert_interrupt_cleanup db-wait db "${signal_case}" "${expected_signal_rc}"
+  assert_interrupt_cleanup wl-wait wl "${signal_case}" "${expected_signal_rc}"
+  assert_interrupt_cleanup rl-wait rl "${signal_case}" "${expected_signal_rc}"
+  assert_interrupt_cleanup rd-wait rd "${signal_case}" "${expected_signal_rc}"
+done
 
 if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
     MOCK_POST_MEDIA_CID="ffffffffffffffffffffffffffffffff" \
