@@ -243,7 +243,7 @@ make_parity_rootfs() {
   : >"$root/etc/systemd/network/10-ceralive-wlan0.link"
 }
 
-# serialize <name> — hold an exclusive, file-scoped lock for the REST of the
+# serialize <name> — hold an exclusive, suite-scoped lock for the REST of the
 # current @test, so the handful of tests that share mutable state run correctly
 # under `bats --jobs N` (which v2/run-tests enables when GNU parallel is on
 # PATH). bats parallelizes test CASES, not the comment "sections", so any two
@@ -258,12 +258,16 @@ make_parity_rootfs() {
 #     the shared `v2/mkosi/.staging/<board>` directory; these tests take one
 #     lock so GNU-parallel CI cannot interleave board fetch plans.
 # The lock auto-releases when the @test subshell exits (each bats test runs in
-# its own subshell). flock-less hosts get a no-op — v2/run-tests only requests
-# --jobs when flock is present, so a serial run never needs it.
+# its own subshell). Use BATS_RUN_TMPDIR so workers spawned by GNU parallel share
+# the rendezvous even when BATS_FILE_TMPDIR is worker-local. flock-less hosts get
+# a no-op — v2/run-tests only requests --jobs when flock is present, so a serial
+# run never needs it.
 serialize() {
   command -v flock >/dev/null 2>&1 || return 0
-  local lockfd
-  exec {lockfd}>"$BATS_FILE_TMPDIR/.serialize.$1.lock"
+  local lockfd lock_root="${BATS_RUN_TMPDIR:-${BATS_FILE_TMPDIR:-}}"
+  [[ -n "$lock_root" ]] || return 0
+  mkdir -p "$lock_root/locks"
+  exec {lockfd}>"$lock_root/locks/.serialize.${BATS_TEST_FILENAME##*/}.$1.lock"
   flock "$lockfd"
 }
 
