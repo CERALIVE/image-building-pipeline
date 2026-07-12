@@ -13,13 +13,14 @@
 #   * sgdisk, systemd-repart, e2fsprogs, dosfstools, mtools, u-boot-tools
 #
 # Parallelism (opt-in, automatic):
-#   bats parallelizes test CASES with `-j N`, which needs GNU parallel (or
+#   bats parallelizes test files with `-j N`, which needs GNU parallel (or
 #   shenwei356/rush) on PATH. This entrypoint enables `-j` automatically when
 #   BOTH a parallel backend AND flock are present, and falls back to the
-#   previous serial run otherwise — the suite stays green either way. The few
-#   tests that share mutable state (the working tree in §8, the per-file
-#   feature-sysext fixture in §14) serialize themselves with flock (see the
-#   `serialize` helper in tests/manifest.bats), so parallel runs are correct.
+#   previous serial run otherwise — the suite stays green either way. Cases
+#   within each Bats file stay serial because they share repo-local fixtures;
+#   the three suite files still run in parallel. The few shared fixtures that
+#   need finer locking serialize themselves with flock (see `serialize` in
+#   tests/manifest.bats).
 #   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
 #   auto-derives from nproc, capped at 8 (this unit suite is ~95 short tests —
 #   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
@@ -103,8 +104,8 @@ fi
 
 bats_args=()
 if [[ "$jobs" -gt 1 && -n "$parallel_backend" ]] && command -v flock >/dev/null 2>&1; then
-  bats_args+=( --jobs "$jobs" )
-  mode="parallel — ${jobs} jobs via ${parallel_backend}"
+  bats_args+=( --jobs "$jobs" --no-parallelize-within-files )
+  mode="parallel — ${jobs} jobs via ${parallel_backend} (file-serial)"
 else
   mode="serial"
   if [[ "$jobs" -gt 1 && -z "$parallel_backend" ]]; then
