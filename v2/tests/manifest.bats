@@ -645,7 +645,8 @@ YAML
 @test "t14 x86 guard: orchestrate.sh wires the x86 ESP/GRUB disk path (TODO(x86-disk) closed)" {
   local orch="$V2/lib/orchestrate.sh"
   # Task 12 closed the deferral: the former active TODO(x86-disk) marker is GONE.
-  ! grep -q 'TODO(x86-disk)' "$orch"
+  run grep -q 'TODO(x86-disk)' "$orch"
+  [ "$status" -ne 0 ]
   # Each adapter has exactly ONE .raw producer under its own branch: RK3588 custom
   # -> assemble-disk.sh, x86 efi/grub -> assemble-disk-x86.sh.
   [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
@@ -1191,10 +1192,20 @@ SH
 
 # feature_prereqs — the signer needs mksquashfs + gpg + gpgv + unsquashfs.
 feature_prereqs() {
+  local probe
   command -v mksquashfs >/dev/null 2>&1 || return 1
   command -v gpg        >/dev/null 2>&1 || return 1
+  command -v gpg-agent  >/dev/null 2>&1 || return 1
   command -v gpgv       >/dev/null 2>&1 || return 1
   command -v unsquashfs >/dev/null 2>&1 || return 1
+  probe="$(mktemp -d)"
+  chmod 700 "$probe"
+  if ! gpg-agent --homedir "$probe" --daemon >/dev/null 2>&1; then
+    rm -rf "$probe"
+    return 1
+  fi
+  gpgconf --homedir "$probe" --kill gpg-agent >/dev/null 2>&1 || true
+  rm -rf "$probe"
   return 0
 }
 
@@ -1515,7 +1526,7 @@ import yaml
 repo_root = Path(sys.argv[1])
 workflow = yaml.safe_load((repo_root / ".github/workflows/v2-ci.yml").read_text())
 requirements = repo_root / "v2/ci/requirements-ci.txt"
-assert requirements.read_text().splitlines()[-2:] == ["jsonschema", "PyYAML"]
+assert requirements.read_text().splitlines()[-2:] == ["jsonschema==4.26.0", "PyYAML==6.0.3"]
 
 expected_key = "pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}"
 for job_id in ("schema-validate", "bats", "build-matrix", "build-plan-xrunner"):
@@ -1534,10 +1545,10 @@ PY
   [[ "$output" == *"V2-CI-PIP-CACHE-OK"* ]]
 }
 
-@test "v2 CI: outer qemu budget preserves provisioning and TCG timeouts with headroom" {
-  run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; outer = job['timeout-minutes']; provision = int(job['env']['PROVISION_BUDGET_MINUTES']); qemu = int(job['env']['QEMU_TIMEOUT_MINUTES']); overhead = int(job['env']['RUNNER_OVERHEAD_BUDGET_MINUTES']); runs = '\n'.join(step.get('run', '') for step in job['steps']); assert provision == 10; assert qemu == 10; assert overhead == 10; assert outer >= provision + qemu + overhead; assert runs.count('\"\${QEMU_TIMEOUT_MINUTES}m\"') == 2; print('QEMU-TIMEOUT-BUDGET-OK')"
+@test "v2 CI: qemu job honestly runs only the assertion-engine selftest" {
+  run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; runs = '\n'.join(step.get('run', '') for step in job['steps']); assert 'CERALIVE_QEMU_SELFTEST' in str(job['steps']); assert 'IMAGE_PATH=' not in runs; assert 'skip mode' not in runs; print('QEMU-SELFTEST-SCOPE-OK')"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"QEMU-TIMEOUT-BUDGET-OK"* ]]
+  [[ "$output" == *"QEMU-SELFTEST-SCOPE-OK"* ]]
 }
 
 # ===========================================================================
@@ -1799,8 +1810,10 @@ run_paseto_provision() {
 @test "paseto provision: NO private material in the baked drop-in (no k4.secret / PRIVATE KEY)" {
   run_paseto_provision "$PASETO_RAW_PUB"
   [ "$status" -eq 0 ]
-  ! grep -aq 'k4.secret' "$PASETO_DROPIN"
-  ! grep -aq 'PRIVATE KEY' "$PASETO_DROPIN"
+  run grep -aq 'k4.secret' "$PASETO_DROPIN"
+  [ "$status" -ne 0 ]
+  run grep -aq 'PRIVATE KEY' "$PASETO_DROPIN"
+  [ "$status" -ne 0 ]
 }
 
 @test "paseto provision: a k4.secret PRIVATE key is REFUSED (build fails, no drop-in)" {
@@ -1824,10 +1837,8 @@ run_paseto_provision() {
   [[ "$output" == *"MVP opaque-token path"* ]]
 }
 
-@test "paseto provision: baked env var name matches CeraUI's device-token gate (cross-repo lockstep)" {
-  local devtok="$REPO_ROOT/../CeraUI/apps/backend/src/modules/pairing/device-token.ts"
-  [ -f "$devtok" ] || skip "CeraUI checkout not present (standalone CI)"
-  grep -q 'DEVICE_TOKEN_PUBLIC_KEY_ENV = "PASETO_PUBLIC_KEY"' "$devtok"
+@test "paseto provision: image contract uses the canonical public-key environment name" {
+  grep -q 'PASETO_PUBLIC_KEY' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 # ===========================================================================

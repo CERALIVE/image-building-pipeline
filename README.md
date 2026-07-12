@@ -20,7 +20,7 @@ support for Intel N100/N200 and AMD platforms.
 
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
-- **Custom software stack**: `CeraUI`, `cerastream`, `srtla`, `srt` via .deb packages
+- **Custom software stack**: `CeraUI`, `cerastream`, `srtla-send-rs`, `srt` via .deb packages
 - **Minimal system**: Debian bookworm-based with minimal apt sources
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Device support**: Automatic USB audio/video device detection and access
@@ -33,7 +33,7 @@ support for Intel N100/N200 and AMD platforms.
 ┌─────────────────────────────────────────────────────────────┐
 │                    CeraUI Application                       │
 ├─────────────────────────────────────────────────────────────┤
-│ cerastream  │    srtla    │     srt     │   WiFi Manager   │
+│ cerastream  │ srtla-send-rs│     srt     │   WiFi Manager   │
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
@@ -159,7 +159,7 @@ v2/lib/build-feature-sysext.sh \
 
 ## Image Size Gate
 
-Every build runs `v2/lib/measure-size.sh`. If the compressed rootfs exceeds
+Every build runs `v2/lib/measure-size.sh`. If the rootfs content's apparent size exceeds
 **1.5 GB** the build fails and no `.raucb` is produced. See
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
 strip, `WithDocs=no`, firmware audit).
@@ -176,8 +176,8 @@ committed), then runs an **advisory** drift-guard against the committed baseline
 - A differing version **or** a same-version content-hash re-spin prints a
   `BSP drift` warning — but the guard is **never fatal** (`exit 0` always). The BSP
   stays floating; this is observability, not a pin.
-- The baseline ships UNSEEDED; the first authenticated build seeds it with the real
-  version+hash. Commit that to set the known-good reference.
+- The baseline is seeded with the reviewed Armbian 26.5.1 kernel package version
+  and SHA-256; promotion requires an explicit baseline update.
 - The provenance artifact is deliberately **excluded** from the build-plan `sha256`
   determinism comparison (the float would otherwise break reproducibility).
 

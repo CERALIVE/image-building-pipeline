@@ -35,7 +35,7 @@
 #
 # The boot-partition populate is FAMILY-GATED (custom-uboot/RK3588 only): it stages
 # boot.scr (mkimage-compiled from boot.scr.cmd), cera_board.env, the boot_state.txt
-# A/B seed and extlinux/extlinux.conf via `install-boot.sh boot-partition`, then
+# A/B seed and recovery.scr via `install-boot.sh boot-partition`, then
 # mcopies them into the FAT image. mkimage (u-boot-tools) is a HOST prerequisite at
 # assembly time; x86 (efi) skips this — it boots from the EFI System Partition.
 #
@@ -92,7 +92,7 @@ SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
 export SOURCE_DATE_EPOCH
 # RK3588 raw-gap bootloader writer (family-gated; only the custom-uboot path).
 WRITE_BOOTLOADER_SH="${WRITE_BOOTLOADER_SH:-${HERE}/write-bootloader.sh}"
-# Boot-partition artifact installer (boot.scr/cera_board.env/boot_state.txt/extlinux),
+# Boot-partition artifact installer (boot.scr/recovery.scr/cera_board.env/boot_state.txt),
 # same family gate. Lives in the platform/boot layer because it renders board
 # specifics from the manifest env and needs mkimage (u-boot-tools) at assembly time.
 INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${V2_DIR}/mkosi/platform/boot/install-boot.sh}"
@@ -141,7 +141,7 @@ stage_repart_dir() {
 # populate_boot_partition <bootp_img> <adapter> <board_id> <single_slot>
 # FAMILY GATE for filling the vfat boot partition with the U-Boot A/B selector
 # artifacts: boot.scr (compiled by mkimage), cera_board.env, the boot_state.txt A/B
-# seed, and extlinux/extlinux.conf. Only the custom-uboot adapter (RK3588) boots via
+# seed, and recovery.scr. Only the custom-uboot adapter (RK3588) boots via
 # boot.scr; x86 (efi) populates its EFI System Partition elsewhere and is skipped.
 # install-boot.sh renders every board specific from the manifest-resolved env —
 # DTB_NAME/SERIAL_CONSOLE/COMPATIBLE_STRING are EXPLICITLY forwarded from this
@@ -156,7 +156,7 @@ stage_repart_dir() {
 populate_boot_partition() {
   local bootp="$1" adapter="$2" board_id="$3" single_slot="$4"
   if [[ "${adapter}" != "custom" ]]; then
-    log_info "bootloader_adapter=${adapter:-<unset>} → SKIP boot-partition populate (only custom-uboot/RK3588 ships boot.scr/cera_board.env/boot_state.txt/extlinux)"
+    log_info "bootloader_adapter=${adapter:-<unset>} → SKIP boot-partition populate (only custom-uboot/RK3588 ships boot.scr/recovery.scr/cera_board.env/boot_state.txt)"
     return 0
   fi
   [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to render the boot partition"
@@ -167,13 +167,13 @@ populate_boot_partition() {
   require_cmd mcopy    # mtools — fill the FAT offline, no loop mount / no root
   require_cmd mkimage  # u-boot-tools — install-boot.sh compiles boot.scr; the device needs it
 
-  log_info "populating boot partition (boot.scr + cera_board.env + boot_state.txt + extlinux, board=${board_id}, single_slot=${single_slot})"
+  log_info "populating boot partition (boot.scr + recovery.scr + cera_board.env + boot_state.txt, board=${board_id}, single_slot=${single_slot})"
   local staging; staging="$(mktemp -d)"
   SINGLE_SLOT_FALLBACK="${single_slot}" BOARD_ID="${board_id}" \
     DTB_NAME="${DTB_NAME}" SERIAL_CONSOLE="${SERIAL_CONSOLE}" \
     COMPATIBLE_STRING="${COMPATIBLE_STRING}" \
     bash "${INSTALL_BOOT_SH}" boot-partition "${staging}"
-  # -s recurse (extlinux/), -o overwrite without prompt (idempotent), -Q quit on
+  # -s recurse, -o overwrite without prompt (idempotent), -Q quit on
   # error, -m keep mtimes. Lands the staged tree at the FAT image root.
   mcopy -i "${bootp}" -s -o -Q -m "${staging}"/* ::
   rm -rf "${staging}"

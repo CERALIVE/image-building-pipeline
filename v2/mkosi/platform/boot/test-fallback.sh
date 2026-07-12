@@ -140,11 +140,13 @@ assert_contains "rock-5b cera_board.env: console rewritten : -> ," "${r5b}/cera_
 assert_contains "rock-5b cera_board.env: fdtfile from manifest" "${r5b}/cera_board.env" "fdtfile=rk3588-rock-5b-plus.dtb"
 assert_contains "rock-5b cera_board.env: board_id from manifest" "${r5b}/cera_board.env" "board_id=rock-5b-plus"
 assert_contains "opi5 cera_board.env: DIFFERENT fdtfile" "${opi}/cera_board.env" "fdtfile=rk3588s-orangepi-5-plus.dtb"
-assert_contains "extlinux selects rootfs_a by PARTLABEL" "${r5b}/extlinux/extlinux.conf" "root=PARTLABEL=rootfs_a"
-assert_contains "extlinux selects rootfs_b by PARTLABEL" "${r5b}/extlinux/extlinux.conf" "root=PARTLABEL=rootfs_b"
-assert_contains "extlinux console from manifest" "${r5b}/extlinux/extlinux.conf" "console=ttyS2,1500000"
+assert_contains "recovery script loads slot A from p2" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 2'
+assert_contains "recovery script loads slot B from p3" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 3'
+assert_contains "recovery script loads kernel from selected rootfs" "${BOOT_DIR}/recovery.scr.cmd" 'ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image'
 if [[ -f "${r5b}/boot.scr" ]]; then ok "boot.scr compiled (mkimage present)"; \
   else assert_contains "boot.scr.cmd staged (mkimage absent)" "${r5b}/boot.scr.cmd" "CeraLive A/B boot selector"; fi
+if [[ -f "${r5b}/recovery.scr" ]]; then ok "recovery.scr compiled (mkimage present)"; \
+  else assert_contains "recovery.scr.cmd staged (mkimage absent)" "${r5b}/recovery.scr.cmd" "CeraLive manual A/B recovery selector"; fi
 # differing DTB across boards proves nothing is hardcoded
 if ! diff -q "${r5b}/cera_board.env" "${opi}/cera_board.env" >/dev/null; then \
   ok "two boards render DIFFERENT cera_board.env (not hardcoded)"; \

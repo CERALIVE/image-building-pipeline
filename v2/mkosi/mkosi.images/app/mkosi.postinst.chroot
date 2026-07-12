@@ -100,7 +100,7 @@ install_first_party_apps() {
     elif [[ " ${RUNTIME_APP_PKGS} " == *" ${pkg} "* ]]; then
       log "runtime-abi  : ${pkg}  ($(basename "${deb}"))"
     else
-      log "first-party  : ${pkg}  ($(basename "${deb}")) [unclassified — installed as-is]"
+      die "unclassified first-party package in staging: ${pkg} ($(basename "${deb}"))"
     fi
     debs+=("${deb}")
     installed_pkgs+=("${pkg}")

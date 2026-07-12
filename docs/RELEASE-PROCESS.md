@@ -64,9 +64,10 @@ OS bundles. Section 5 spells out exactly why and exactly what to type.
 - a push to `release/**` or `release-*`
 - a `v*` tag (e.g. `v2026.7.0`)
 
-It does one thing: call the reusable [`realhw-job.yml`](../.github/workflows/realhw-job.yml)
-with `board: rock-5b-plus`. `concurrency.cancel-in-progress: false` — a release
-run is never cancelled mid-flight by a newer push to the same ref.
+It builds and seals one production candidate, then calls
+[`realhw-job.yml`](../.github/workflows/realhw-job.yml) with the immutable
+artifact identity. `concurrency.cancel-in-progress: false` prevents a newer
+release push from cancelling a build or flash in progress.
 
 There is no version-bump automation in this repo. The tag itself is the release
 marker; CeraLive's CalVer convention (`YYYY.MINOR.PATCH`, documented as the
@@ -77,23 +78,21 @@ string goes in the tag and in `BUNDLE_VERSION` (§4).
 
 ## 3. Real-HW gate
 
-`realhw-job.yml` runs on a **self-hosted runner physically wired to an RK3588
-board** (`[self-hosted, ceralive-rk3588]`), serialized (`concurrency.group:
-realhw-rk3588-<board>`) because there is exactly one physical board. It also
-runs nightly (`schedule: '0 2 * * *'`) and on manual dispatch — never on a
-per-PR push, since the hardware is scarce.
+`release.yml` first builds and uploads one immutable production candidate, then
+calls `realhw-job.yml` on the **self-hosted runner physically wired to an RK3588
+board** (`[self-hosted, ceralive-rk3588]`). The artifact name, artifact digest,
+raw filename, raw SHA-256, bundle, keyring, and candidate commit are all required
+workflow inputs.
 
 Steps, in order:
 
-1. **Preflight** — SSH-ping the board. If it's dead, attempt a maskrom
-   recovery flash of `LAST_GOOD_IMAGE` via `rkdeveloptool`; if that tooling or
-   image isn't available either, the job fails loudly and asks for a human
-   ("board down and no recovery image/tooling on the runner").
-2. **Start serial capture** — best-effort; not fatal if no UART device.
-3. **Optional flash** — if the runner var `CERALIVE_RK3588_FLASH_IMAGE` is set,
-   `dd`s that image to the board over SSH and reboots. Otherwise the suite
-   smoke-tests whatever image is currently on the board's eMMC.
-4. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
+1. **Candidate verification** — verify the exact raw SHA-256, production bundle,
+   embedded slot keyrings, boot artifacts, GPT geometry, and target capacity.
+2. **Required flash and identity proof** — write that raw file through RK3588
+   maskrom with `rkdeveloptool`, reboot,
+   fail on reconnect exhaustion, and compare the flashed media bytes to the
+   expected digest.
+3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,
      quirk checks, and parity against the manifest.
@@ -104,9 +103,8 @@ Steps, in order:
    - **RAUC A/B rollback** ([`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh))
      — the same rollback proof described in §8, run live against real
      silicon rather than the mock harness.
-5. **Diagnostics + artifact upload** — always run (`if: always()`), captures
-   `rauc status` and the last 200 journal lines, uploads everything under
-   `artifacts/` with a 14-day retention.
+4. **Evidence upload** — always uploads the candidate identity, artifact digest,
+   and suite logs with a 14-day retention.
 
 A release only proceeds past this job if all four sub-harnesses pass on the
 physical board. There is no bypass.
@@ -115,11 +113,10 @@ physical board. There is no bypass.
 
 ## 4. Build and sign
 
-Once the gate is green, a human runs the actual image build — **this repo has
-no CI job that performs a real (non-`DRY_RUN`) build.** `v2-ci.yml`'s
-`build-matrix` job is explicit about this: it always runs `DRY_RUN=1` and
-asserts no real `apt-get`/`aws`/`docker` command fired, precisely so that no
-secret is ever exposed to a PR-triggered runner.
+The release workflow performs the real production build before the hardware
+gate on a dedicated `ceralive-image-builder` runner. PR CI remains DRY_RUN-only.
+The release job fails closed unless production RAUC PKI, the pinned Armbian
+archive keyring, and first-party apt GPG/mTLS credentials are supplied as secrets.
 
 The real build is:
 
@@ -133,8 +130,8 @@ disk → write the bootloader gap → emit the signed `.raucb`). See
 [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2 for the full stage list and
 artifact layout.
 
-Fetching the four first-party `.deb`s (`cerastream`, `ceralive-device`,
-`srtla`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
+Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
+`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
 mTLS-authenticated apt source — the exact credential contract is
 `APT_GPG_PUBLIC_B64` / `APT_CLIENT_CRT_B64` / `APT_CLIENT_KEY_B64` in
 [`v2/lib/fetch-debs.sh`](../v2/lib/fetch-debs.sh) `fetch_first_party()`
@@ -148,8 +145,8 @@ to produce `images/<board>/<ts>.raucb` (+ `.sha256`), stamped with the
 board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 `BUNDLE_VERSION` (git short SHA by default). The signing contract:
 
-- **Leaf key only, never root.** The bundle is signed with
-  `cert-work/rauc/leaf-signing.key` + the `chain.pem` (intermediate + leaf).
+- **Leaf key only, never root.** The bundle is signed with the injected release
+  `leaf-signing.key` + `chain.pem` (intermediate + leaf).
   The root CA key (`root-ca.key`) never touches the signing invocation — it
   stays offline, by design.
 - **`assert_no_root_signing()`** is the enforced guard: it greps the *rendered*
@@ -157,7 +154,7 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
   asserts `leaf-signing.key` IS the signer. This runs on every bundle build,
   real `rauc` path or the deterministic OpenSSL-CMS fallback path.
 - **Verification is part of the same step.** After signing, `build-bundle.sh`
-  immediately verifies the bundle against `cert-work/rauc/root-ca.pem` (the
+  immediately verifies the bundle against the injected `root-ca.pem` (the
   same keyring baked into the device) — `rauc info` on a host with `rauc`
   installed, or an equivalent OpenSSL CMS chain-verify
   (`verify_openssl_bundle()`) when it isn't. A bundle that fails to verify
@@ -330,9 +327,10 @@ specific rollout, not re-deriving it from scratch.
 ## 7. Runbook: rotating the apt.ceralive.tv build credentials
 
 Scope: `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64` — the
-three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the four
-first-party `.deb`s (`cerastream`, `ceralive-device`, `srtla`,
-`srtla-send-rs`) from `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
+three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the five
+first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
+`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from
+`apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
 The device-side twin of this same contract is
 [`v2/mkosi/customize/apt-ceralive-repo.sh`](../v2/mkosi/customize/apt-ceralive-repo.sh),
 which bakes the same three values (as build-time inputs) into the image's own

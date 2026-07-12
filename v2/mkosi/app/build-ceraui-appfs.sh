@@ -40,8 +40,8 @@
 # normal loader path — no bundling, no IPC. CRITICAL CONSEQUENCE: after a sysext
 # refresh swaps the srtla binaries, the FFI handles are stale until the
 # process reloads them; refresh_app_layer (sysext.sh) therefore restarts
-# ceralive.service. The link:../../../ sibling-checkout (ARCHITECTURE.md §5) is a
-# BUILD-time concern of the CeraUI .deb — by the time we package here it is already
+# ceralive.service. Registry dependency resolution is a BUILD-time concern of
+# the CeraUI .deb — by the time we package here it is already
 # baked into the compiled binary; this script never touches that layout.
 #
 # Usage:

@@ -517,11 +517,9 @@ as a GitHub Actions self-hosted runner with label `ceralive-rk3588`
 
 ### Background
 
-`realhw-job.yml` is the consolidated real-hardware acceptance gate. It runs
-`v2/tests/realhw-suite.sh` (LIVE mode) on a physical RK3588 board via a
-self-hosted runner labeled `ceralive-rk3588`. The workflow is fully authored and
-activated (copied to `.github/workflows/` from `v2/ci/realhw-job.yml`). It
-cannot run until the runner is provisioned and the board is attached.
+`realhw-job.yml` is the candidate-bound real-hardware acceptance gate. The
+release workflow builds and uploads the exact raw image, signed good and rollback
+probe bundles, keyring, and digests before invoking it on a physical RK3588 board.
 
 The workflow requires these GitHub Actions runner variables on the
 `ceralive-rk3588` runner (set via the repo's Settings → Actions → Variables):
@@ -531,12 +529,8 @@ The workflow requires these GitHub Actions runner variables on the
 | `CERALIVE_RK3588_BOARD_IP` | IP address of the attached RK3588 board |
 | `CERALIVE_RK3588_SSH_USER` | SSH user on the board (default: `ceralive`) |
 | `CERALIVE_RK3588_SSH_PORT` | SSH port (default: `22`) |
-| `CERALIVE_RK3588_BUNDLE_DIR` | Path to RAUC bundle directory on the runner |
-| `CERALIVE_RK3588_LAST_GOOD_IMAGE` | Path to last-known-good `.raw` for maskrom recovery |
-| `CERALIVE_RK3588_SERIAL_DEV` | Serial device for boot log capture (default: `/dev/ttyUSB0`) |
-| `CERALIVE_RK3588_FLASH_IMAGE` | (Optional) Path to image to flash before each run |
-| `CERALIVE_RK3588_DEV_DEB_DIR` | (Optional) Path to dev `.deb` dir for dev-loop step |
-| `CERALIVE_RK3588_POWER_HELPER` | (Optional) Script to power-cycle board into maskrom |
+| `CERALIVE_RK3588_POWER_HELPER` | Executable that powers the board into maskrom mode |
+| `CERALIVE_RK3588_LOADER` | Exact RK3588 loader binary used by `rkdeveloptool db` |
 
 ### Provisioning steps
 
@@ -558,10 +552,7 @@ sudo apt-get install -y rkdeveloptool openssh-client
 #    GitHub repo → Settings → Actions → Runners
 #    -> ceralive-rk3588 should show as "Idle"
 
-# 6. Trigger a manual run to verify the workflow executes:
-gh workflow run realhw-job.yml \
-  --field board=rock-5b-plus \
-  --field board_ip=<ip>
+# 6. Push a release branch or tag after the release secrets are configured.
 
 # 7. Check the run result:
 gh run list --workflow=realhw-job.yml --limit 5
@@ -572,18 +563,14 @@ gh run view <run-id> --log
 
 The workflow runs these steps in order:
 
-1. **Preflight** — SSH to the board; if unreachable, attempt maskrom recovery
-   using `CERALIVE_RK3588_LAST_GOOD_IMAGE`.
-2. **Serial capture** — starts `cat /dev/ttyUSB0` in the background if the
-   device is present.
-3. **Flash** (optional) — `ssh dd` the image-under-test to eMMC if
-   `CERALIVE_RK3588_FLASH_IMAGE` is set.
-4. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
+1. **Candidate preflash** — verify the exact raw digest, A/B media, production
+   bundle/keyring contract, and destination capacity.
+2. **Required flash** — write that exact raw image through maskrom, reboot, fail on reconnect
+   exhaustion, and verify the flashed media digest.
+3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
    init, dev-loop sanity (optional), RAUC A/B rollback.
-5. **Diagnostics** — always runs; collects `rauc status` + `journalctl` from the
-   board.
-6. **Upload artifacts** — uploads `artifacts/` (serial log, suite log, evidence
-   bundle) with 14-day retention.
+4. **Upload artifacts** — uploads candidate identity and suite evidence with
+   14-day retention.
 
 ### Checklist
 
@@ -592,25 +579,24 @@ The workflow runs these steps in order:
 - [ ] GitHub Actions runner agent installed and labeled `ceralive-rk3588`.
 - [ ] Runner shows as "Idle" in GitHub repo Settings → Actions → Runners.
 - [ ] All required runner variables set (see table above).
-- [ ] `gh workflow run realhw-job.yml` triggered manually.
+- [ ] A release branch or tag produced the candidate-bound realhw job.
 - [ ] Workflow completes without error; `realhw-suite.sh` exits 0.
-- [ ] Artifacts uploaded: `artifacts/realhw-suite.log`,
-      `artifacts/task-38-smoke/`, `artifacts/board-diagnostics.log`.
-- [ ] Nightly schedule (`0 2 * * *`) confirmed active in GitHub Actions.
+- [ ] Artifacts uploaded: `artifacts/candidate-identity.txt`,
+      `artifacts/realhw-suite.log`, and `artifacts/realhw/`.
 - [ ] Evidence saved to `test-results/ceralive-rk3588-runner-<date>.txt`.
 
 ### Acceptance
 
-`gh run list --workflow=realhw-job.yml` shows at least one successful run
+`gh run list --workflow=release.yml` shows at least one successful run
 (conclusion: `success`). The uploaded artifacts include `realhw-suite.log` with
-a passing exit code and an evidence bundle under `artifacts/task-38-smoke/`.
-The nightly schedule is active and the runner is labeled `ceralive-rk3588`.
+a passing exit code and an evidence bundle under `artifacts/realhw/`.
+The evidence names the candidate artifact digest/raw SHA-256 and the runner is labeled `ceralive-rk3588`.
 
 ### Unblock condition
 
 Provision a Linux host with a physical RK3588 board attached. Register it as a
 GitHub Actions self-hosted runner with label `ceralive-rk3588`. Set the required
-runner variables. Trigger `realhw-job.yml` manually and confirm it runs
+runner variables and release secrets. Trigger a release candidate and confirm it runs
 `v2/tests/realhw-suite.sh` end-to-end with a passing exit code and uploaded
 artifacts.
 
@@ -626,7 +612,6 @@ artifacts.
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence placeholders (Item 5) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (Item 1) |
 | `.github/workflows/realhw-job.yml` | Real-HW CI workflow (Item 6) |
-| `v2/ci/realhw-job.yml` | Canonical source for the real-HW workflow (keep in sync) |
 | `v2/tests/realhw-suite.sh` | Consolidated real-HW acceptance suite |
 | `cerastream/docs/notes/hardware-validation.md` | cerastream per-platform encoder validation matrix |
 

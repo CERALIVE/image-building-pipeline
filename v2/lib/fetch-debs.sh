@@ -58,6 +58,8 @@ source "${HERE}/lib/common.sh" 2>/dev/null || source "${HERE}/common.sh"
 source "${HERE}/shared/yaml-lib.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
+# shellcheck source=lib/fetch-debs-auth.sh
+source "${HERE}/fetch-debs-auth.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode versions — pins come from
@@ -68,6 +70,9 @@ ARCH="${ARCH:-arm64}"
 DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+ARMBIAN_APT_KEYRING="${ARMBIAN_APT_KEYRING:-}"
+ARMBIAN_APT_KEY_FINGERPRINT="${ARMBIAN_APT_KEY_FINGERPRINT:-DF00FAF1C577104B50BF1D0093D6889F9F0E78D5}"
+FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
 
 # First-party apt source (apt.ceralive.tv). The deb822 source appends
 # /dists/${CHANNEL}/ (apt-worker two-axis layout: channel x arch; arch is selected
@@ -117,14 +122,6 @@ assert_repos_integrity() {
 assert_repos_integrity
 
 FIRST_PARTY_APT_PKGS=("libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
-declare -A FIRST_PARTY_PIN_KEYS=(
-  [libsrt1.5-ceralive]="srt"
-  [cerastream]="cerastream"
-  [gstreamer1.0-libuvch264src]="gstlibuvch264src"
-  [ceralive-device]="CeraUI"
-  [srtla-send-rs]="srtla-send-rs"
-)
-
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
 # This is the SOLE bridge between "real fetch" and "offline evidence" — there is
@@ -192,18 +189,13 @@ get_pin() {
 }
 
 first_party_download_specs() {
-  local pkg key pin version
+  local pkg version
+  [[ -f "${FIRST_PARTY_DEB_VERSIONS_FILE}" ]] \
+    || die "exact first-party Debian version file missing: ${FIRST_PARTY_DEB_VERSIONS_FILE}"
   for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
-    key="${FIRST_PARTY_PIN_KEYS[${pkg}]:-${pkg}}"
-    pin="$(get_pin "${key}" || true)"
-    [[ -n "${pin}" ]] \
-      || die "versions.yaml pin missing for ${key} (apt package ${pkg})"
-    if [[ "${pin}" == "latest" ]]; then
-      printf '%s\n' "${pkg}"
-      continue
-    fi
-    version="${pin#v}"
-    printf '%s\n' "${pkg}=${version}*"
+    version="$(awk -F= -v pkg="${pkg}" '$1==pkg{print substr($0,length($1)+2); exit}' "${FIRST_PARTY_DEB_VERSIONS_FILE}")"
+    [[ -n "${version}" ]] || die "exact Debian version missing for first-party package ${pkg}"
+    printf '%s=%s\n' "${pkg}" "${version}"
   done
 }
 
@@ -373,8 +365,8 @@ _fetch_bsp_native() {
   run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
   local src_list="${apt_state}/armbian.list"
   if [[ -z "${DRY_RUN}" ]]; then
-    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
-      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+    printf 'deb [arch=%s signed-by=%s] %s %s main\n' \
+      "${ARCH}" "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
   else
     log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
   fi
@@ -402,14 +394,12 @@ _fetch_bsp_native() {
 # .tmp-* file, then atomically rename into ${_BSP_DEBS}. A killed curl leaves
 # only the .tmp-* partial, never a half-written final .deb.
 _fetch_bsp_curl_one() {
-  local pkg="$1" filename=""
+  local pkg="$1" resolved="" filename="" sha256="" version=""
   if [[ -z "${DRY_RUN}" ]]; then
-    filename="$(awk -v want="${pkg}" '
-      /^Package: /{ p=($2==want) }
-      p && /^Filename: /{ print $2; exit }
-    ' "${_PKG_INDEX}")"
-    [[ -n "${filename}" ]] \
+    resolved="$(auth_lookup_package "${_PKG_INDEX}" "${pkg}" "" "${ARCH}")"
+    [[ -n "${resolved}" ]] \
       || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+    IFS=$'\t' read -r filename sha256 version <<<"${resolved}"
   fi
   log_info "BSP fetch (curl): ${pkg}"
   if [[ -n "${DRY_RUN}" ]]; then
@@ -422,6 +412,8 @@ _fetch_bsp_curl_one() {
   final="${_BSP_DEBS}/$(basename "${filename}")"
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
   curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"
+  auth_verify_file "${tmp}" "${sha256}" \
+    || die "BSP package checksum mismatch for ${pkg}=${version}"
   mv -f "${tmp}" "${final}"
 }
 
@@ -440,12 +432,29 @@ _fetch_bsp_curl() {
 
   log_info "apt-get not found (non-Debian host) — fetching BSP via curl from ${ARMBIAN_APT_URL}"
 
-  local packages_url="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}/main/binary-${ARCH}/Packages.gz"
+  local release_base="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}"
+  local packages_rel="main/binary-${ARCH}/Packages.gz"
+  local packages_url="${release_base}/${packages_rel}"
   local packages_file; packages_file="$(mktemp)"
+  local inrelease="${packages_file}.InRelease" expected_sha actual_sha
+  run_or_plan curl -fsSL --retry 3 -o "${inrelease}" "${release_base}/InRelease" \
+    || die "failed to download Armbian InRelease"
+  if [[ -z "${DRY_RUN}" ]]; then
+    auth_verify_release_signature "${ARMBIAN_APT_KEYRING}" "${inrelease}" \
+      || die "Armbian InRelease signature verification failed"
+    expected_sha="$(awk -v path="${packages_rel}" '
+      /^SHA256:/{inside=1;next} /^[A-Za-z0-9-]+:/{inside=0}
+      inside && $3==path{print $1;exit}
+    ' "${inrelease}")"
+    [[ -n "${expected_sha}" ]] || die "Armbian InRelease lacks ${packages_rel} SHA256"
+  fi
   run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
     || die "failed to download Armbian Packages index: ${packages_url}"
 
   if [[ -z "${DRY_RUN}" ]]; then
+    actual_sha="$(sha256sum "${packages_file}.gz" | cut -d' ' -f1)"
+    [[ "${actual_sha}" == "${expected_sha}" ]] \
+      || die "Armbian Packages.gz checksum mismatch"
     gzip -df "${packages_file}.gz" || die "failed to decompress Armbian Packages.gz"
   else
     log_info "DRY-RUN: would decompress ${packages_file}.gz"
@@ -457,7 +466,7 @@ _fetch_bsp_curl() {
   _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
     || die "BSP fetch failed (curl path): one or more packages did not download"
 
-  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}"
+  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}" "${inrelease}"
   return 0
 }
 
@@ -472,32 +481,11 @@ first_party_curl_url() {
 }
 
 first_party_lookup() {
-  local spec="$1" pkg version_glob version_prefix
+  local spec="$1" pkg version
   pkg="${spec%%=*}"
-  if [[ "${spec}" == *=* ]]; then
-    version_glob="${spec#*=}"
-    version_prefix="${version_glob%\*}"
-  else
-    version_prefix=""
-  fi
-
-  awk -v want_pkg="${pkg}" -v want_prefix="${version_prefix}" '
-    BEGIN { RS=""; FS="\n" }
-    {
-      pkg=""; version=""; filename=""; sha256="";
-      for (i=1; i<=NF; i++) {
-        if ($i ~ /^Package: /) { pkg=substr($i, 10) }
-        else if ($i ~ /^Version: /) { version=substr($i, 10) }
-        else if ($i ~ /^Filename: /) { filename=substr($i, 11) }
-        else if ($i ~ /^SHA256: /) { sha256=substr($i, 9) }
-      }
-      if (pkg == want_pkg && filename != "" && sha256 != "" &&
-          (want_prefix == "" || index(version, want_prefix) == 1)) {
-        printf "%s\t%s\t%s\n", filename, sha256, version;
-        exit;
-      }
-    }
-  ' "${_FIRST_PARTY_INDEX}"
+  [[ "${spec}" == *=* ]] || die "first-party package lacks exact version: ${spec}"
+  version="${spec#*=}"
+  auth_lookup_package "${_FIRST_PARTY_INDEX}" "${pkg}" "${version}" "${ARCH}"
 }
 
 _fetch_first_party_curl_one() {
@@ -539,7 +527,7 @@ _fetch_first_party_curl() {
 
   log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
   curl -fsSL --retry 3 "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
-  gpgv --keyring "${keyring}" "${inrelease}" >/dev/null \
+  auth_verify_release_signature "${keyring}" "${inrelease}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
   expected_sha="$(awk '
@@ -619,6 +607,13 @@ fetch_bsp() {
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
   log_info "Armbian source: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
+
+  if [[ -z "${DRY_RUN}" ]]; then
+    [[ -s "${ARMBIAN_APT_KEYRING}" ]] \
+      || die "ARMBIAN_APT_KEYRING is required for authenticated BSP fetches"
+    auth_keyring_has_fingerprint "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_KEY_FINGERPRINT}" \
+      || die "Armbian keyring does not contain pinned fingerprint ${ARMBIAN_APT_KEY_FINGERPRINT}"
+  fi
 
   if command -v apt-get >/dev/null 2>&1; then
     _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
@@ -773,9 +768,20 @@ EOF
     staged+=("${debs}/${pkg}"_*.deb)
   done
   shopt -u nullglob
-  (( ${#staged[@]} > 0 )) \
-    || die "first-party fetch staged 0 .debs from ${APT_CERALIVE_URL} (expected ${#FIRST_PARTY_APT_PKGS[@]})"
-  log_success "first-party: staged ${#staged[@]} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
+  (( ${#staged[@]} == ${#FIRST_PARTY_APT_PKGS[@]} )) \
+    || die "first-party fetch staged ${#staged[@]} .debs (expected exactly ${#FIRST_PARTY_APT_PKGS[@]})"
+  local expected spec expected_version actual_pkg actual_version actual_arch staged_total
+  staged_total="${#staged[@]}"
+  for spec in "${download_specs[@]}"; do
+    expected="${spec%%=*}"; expected_version="${spec#*=}"
+    mapfile -t staged < <(find "${debs}" -maxdepth 1 -type f -name "${expected}_*.deb" -print)
+    (( ${#staged[@]} == 1 )) || die "expected exactly one staged ${expected} .deb"
+    actual_pkg="$(deb_pkg_name "${staged[0]}")"; actual_version="$(deb_pkg_version "${staged[0]}")"
+    actual_arch="$(deb_pkg_arch "${staged[0]}")"
+    [[ "${actual_pkg}" == "${expected}" && "${actual_version}" == "${expected_version}" && "${actual_arch}" == "${ARCH}" ]] \
+      || die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"
+  done
+  log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
 usage() {
@@ -783,7 +789,7 @@ usage() {
 Usage:
   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
 
-Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE
+Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE ARMBIAN_APT_KEYRING
      APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
 EOF
 }

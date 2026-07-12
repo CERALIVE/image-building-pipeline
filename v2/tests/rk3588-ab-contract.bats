@@ -64,10 +64,11 @@ EOF
 
 make_rootfs_tree() {
   local tree="$1"
-  mkdir -p "$tree/sbin" "$tree/etc" "$tree/boot/dtb/rockchip"
+  mkdir -p "$tree/sbin" "$tree/etc/rauc" "$tree/boot/dtb/rockchip"
   printf '#!/bin/sh\nexit 0\n' >"$tree/sbin/init"
   chmod +x "$tree/sbin/init"
   printf 'factory-baseline\n' >"$tree/etc/ceralive-ab-baseline"
+  cp "$V2/.dev-keys/dev-root-ca.pem" "$tree/etc/rauc/ceralive-keyring.pem"
   truncate -s 8M "$tree/boot/Image"
   printf '\x41\x52\x4d\x64' | dd of="$tree/boot/Image" bs=1 seek=56 conv=notrunc status=none
   printf '/dts-v1/; / { model = "Rock 5B+ contract fixture"; compatible = "radxa,rock-5b-plus"; };\n' \
@@ -160,6 +161,9 @@ build_missing_artifact_image() {
   build_preflash_fixture
   cp -a --sparse=always "$base/rootfs" "$tree"
   rm -f "$tree/$artifact"
+  if [[ "$artifact" == etc/rauc/ceralive-keyring.pem ]]; then
+    cp "$V2/mkosi/runtime/rauc/ceralive-keyring.pem" "$tree/$artifact"
+  fi
   write_small_repart_defs "$defs"
   env REPART_DIR="$defs" WRITE_BOOTLOADER_SH="$base/write-bootloader" \
     SOURCE_DATE_EPOCH=1700000000 DTB_NAME=rk3588-rock-5b-plus.dtb \
@@ -229,9 +233,7 @@ build_missing_artifact_image() {
   local uboot_slot_arg="rauc.slot=\${cera_slot}"
   run grep -F "$uboot_slot_arg" "$BOOT_DIR/boot.scr.cmd"
   [ "$status" -eq 0 ]
-  run grep -F 'rauc.slot=A' "$BOOT_DIR/extlinux.conf.tmpl"
-  [ "$status" -eq 0 ]
-  run grep -F 'rauc.slot=B' "$BOOT_DIR/extlinux.conf.tmpl"
+  run bash "$V2/tests/recovery-script-contract.test.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -324,8 +326,21 @@ build_missing_artifact_image() {
       --board rock-5b-plus --keyring "$base/keyring.pem" \
       --target-size-bytes "$bytes"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"kernel + board DTB + initrd"* ]]
   done
+}
+
+@test "Rock preflash rejects rootfs keyrings outside the bundle trust root" {
+  require_disk_tools
+  build_preflash_fixture
+  local base="$BATS_FILE_TMPDIR/preflash" bytes corrupt
+  bytes="$(stat -c '%s' "$base/image.raw")"
+  corrupt="$BATS_TEST_TMPDIR/mismatched-root.raw"
+  build_missing_artifact_image etc/rauc/ceralive-keyring.pem "$corrupt"
+  run bash "$PREFLASH" \
+    --image "$corrupt" --bundle "$base/update.raucb" \
+    --board rock-5b-plus --keyring "$base/keyring.pem" \
+    --target-size-bytes "$bytes"
+  [ "$status" -ne 0 ]
 }
 
 @test "Rock preflash built-in negative self-test rejects bootloader corruption" {
@@ -362,15 +377,7 @@ build_missing_artifact_image() {
 }
 
 @test "blocking v2 gate includes boot fallback rollback real RAUC and preflash negatives" {
-  run grep -F 'mkosi/platform/boot/test-fallback.sh' "$V2/run-tests"
-  [ "$status" -eq 0 ]
-  run grep -F 'tests/rauc-rollback.sh' "$V2/run-tests"
-  [ "$status" -eq 0 ]
-  run grep -F 'tests/real-rauc-contract.sh' "$V2/run-tests"
-  [ "$status" -eq 0 ]
-  run grep -F -- '--self-test' "$V2/run-tests"
-  [ "$status" -eq 0 ]
-  run grep -F 'CERALIVE_RUN_REAL_RAUC_CONTRACT=required' "$REPO_ROOT/.github/workflows/v2-ci.yml"
+  run bash "$V2/tests/production-ci-scope-contract.test.sh"
   [ "$status" -eq 0 ]
 }
 

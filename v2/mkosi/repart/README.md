@@ -12,7 +12,7 @@ systemd-repart partition definitions that implement the **FROZEN** A/B layout fr
 | sort key | file | PARTLABEL | role | FS | size |
 |---|---|---|---|---|---|
 | — | *(no file — see "16 MB gap")* | *(none)* | idbloader + U-Boot + ATF (raw) | raw | **16 MB** |
-| 10 | `10-boot.conf` | `boot` | U-Boot env + extlinux selector | vfat | **256 MB** |
+| 10 | `10-boot.conf` | `boot` | U-Boot scripts + durable selector state | vfat | **256 MB** |
 | 20 | `20-rootfs_a.conf` | `rootfs_a` | RAUC slot A | ext4 | **4096 MB** |
 | 30 | `30-rootfs_b.conf` | `rootfs_b` | RAUC slot B | ext4 | **4096 MB** |
 | 40 | `40-data.conf` | `data` | persistent mutable state | ext4 | **remainder ≥ 2048 MB** |
@@ -22,7 +22,7 @@ reserves a 1 MiB backup-GPT tail, so `data` = raw capacity − 8465 MiB.
 
 ## Reference by PARTLABEL, never FS-UUID
 
-Every downstream consumer (fstab, RAUC `system.conf`, extlinux) references these
+Every downstream consumer (fstab, RAUC `system.conf`, U-Boot scripts) references these
 partitions by **`PARTLABEL=`** (the GPT partition *name*, set via repart `Label=`).
 FS-UUIDs are forbidden as slot identifiers: they are filesystem-instance state and
 can change whenever a slot is recreated. The GPT PARTLABEL is the frozen identity

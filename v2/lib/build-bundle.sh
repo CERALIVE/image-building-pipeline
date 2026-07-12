@@ -12,12 +12,12 @@
 #   3. SIGNS it with the leaf signing key + the intermediate/leaf chain —
 #      NEVER the root CA key (the root stays offline/immutable, README.txt).
 #   4. VERIFIES the signature chain against the device trust anchor
-#      (cert-work/rauc/root-ca.pem, identical to the on-device keyring).
+#      (the explicit release root, identical to the on-device keyring).
 #   5. Emits to images/<board>/bundles/<timestamp>.raucb (+ .sha256) — the
 #      layout consumed by the R2 upload step. Bundles are served from R2;
 #      they are NOT placed in the hawkBit local artifact store.
 #
-# PKI (cert-work/rauc/, see README.txt + task 7):
+# PKI (explicit CERALIVE_RAUC_PKI_DIR):
 #   root-ca.pem        device keyring (immutable trust anchor)        — VERIFY only
 #   root-ca.key        root private key                               — NEVER touched here
 #   chain.pem          intermediate-ca.pem + leaf-signing.pem         — embedded in bundle
@@ -66,16 +66,14 @@ SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
 export SOURCE_DATE_EPOCH
 REPRODUCIBLE="${REPRODUCIBLE:-1}"
 
-# cert-work lives at the workspace root, a sibling of image-building-pipeline
-# (AGENTS.md: cert-work has no .git — reference by direct path only). The
-# image-building-pipeline checkout is itself under the workspace root, so the
-# PKI is two levels up from v2/. Overridable for CI (keys injected elsewhere).
-WORKSPACE_ROOT="$(cd "${V2_DIR}/../.." && pwd)"
-RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR:-${WORKSPACE_ROOT}/cert-work/rauc}"
+# The orchestrator resolves development/production PKI once and passes the exact
+# directory. Direct callers must do the same; no sibling-workspace fallback exists.
+[[ -n "${CERALIVE_RAUC_PKI_DIR:-}" ]] \
+  || die "CERALIVE_RAUC_PKI_DIR is required (resolve it with rauc-pki-contract.sh)"
+RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR}"
 
-# The device keyring committed into the image is byte-identical to root-ca.pem;
-# verify against the cert-work root by default (task: "validates against
-# cert-work/rauc/root-ca.pem keyring").
+# The orchestrator has already proven root-ca.pem matches the keyring baked into
+# both slots; direct callers must supply the same resolved directory.
 RAUC_ROOT_CA="${RAUC_PKI_DIR}/root-ca.pem"
 RAUC_CHAIN="${RAUC_PKI_DIR}/chain.pem"
 RAUC_LEAF_CERT="${RAUC_PKI_DIR}/leaf-signing.pem"
@@ -83,7 +81,7 @@ RAUC_LEAF_KEY="${RAUC_PKI_DIR}/leaf-signing.key"
 # Reference only — used by the no-root-sign guard to assert it is NEVER consumed.
 RAUC_ROOT_KEY="${RAUC_PKI_DIR}/root-ca.key"
 
-# Our signing leaf carries EKU=codeSigning (both the dev key and cert-work/rauc).
+# The signing leaf carries EKU=codeSigning.
 # RAUC's default verify purpose is smimesign, which rejects a codeSigning-only
 # leaf with "unsuitable certificate purpose"; tell rauc to check the codesign
 # purpose so `rauc info` verifies the chain instead of dying at signing time.
@@ -107,7 +105,7 @@ Env:
                           it MUST match system.conf on the device or install fails.
   BUNDLE_VERSION          bundle version string. Default: git short SHA, else
                           the build timestamp.
-  CERALIVE_RAUC_PKI_DIR   override the cert-work/rauc PKI directory.
+  CERALIVE_RAUC_PKI_DIR   explicit signer PKI directory (required).
   BUNDLE_OUT_DIR          override the output directory. Default:
                           images/<board>/bundles. The orchestrator sets this to
                           images/<board> so the .raucb lands ALONGSIDE the .raw.

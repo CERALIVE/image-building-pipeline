@@ -119,17 +119,6 @@ jobs:
             cpio device-tree-compiler dosfstools e2fsprogs gdisk mtools \
             rauc squashfs-tools systemd u-boot-tools
 
-      - name: Stub sibling-checkout workspace
-        run: |
-          # fetch-debs asserts srtla/ CeraUI/ are siblings of the
-          # workspace root (ARCHITECTURE.md §5). Only image-building-pipeline is
-          # checked out here, so point CERALIVE_WORKSPACE at a stub tree. Under
-          # DRY_RUN no .debs are built from source, so empty dirs satisfy the
-          # tripwire without needing the real sibling repos.
-          ws="${RUNNER_TEMP}/ceralive-ws"
-          mkdir -p "${ws}/srtla" "${ws}/CeraUI"
-          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
-
       - name: Run v2 manifest unit suite
         run: CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
 
@@ -173,13 +162,16 @@ jobs:
           # exits 1 if growth exceeds 50 MB, exits 2 on bad args/missing baseline.
           # We treat exit 1 (threshold exceeded) as a warning, not a hard failure,
           # since the absolute 1.5 GB gate already passed.
-          if ! ./v2/ci/check-size-regression.sh "${measured_bytes}" v2/ci/size-baseline.json 2>&1 | tee size-regression.log; then
-            exit_code=$?
-            if [ ${exit_code} -eq 1 ]; then
+          set +e
+          ./v2/ci/check-size-regression.sh "${measured_bytes}" v2/ci/size-baseline.json 2>&1 | tee size-regression.log
+          exit_code=${PIPESTATUS[0]}
+          set -e
+          if [ "${exit_code}" -ne 0 ]; then
+            if [ "${exit_code}" -eq 1 ]; then
               echo "::warning::image size growth exceeds 50 MB threshold (see size-regression.log)"
             else
               echo "::error::regression check failed with exit code ${exit_code}"
-              exit ${exit_code}
+              exit "${exit_code}"
             fi
           fi
 
@@ -289,17 +281,6 @@ jobs:
       - name: Install resolver deps
         run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
-      - name: Stub sibling-checkout workspace
-        run: |
-          # fetch-debs asserts srtla/ CeraUI/ are siblings of the
-          # workspace root (ARCHITECTURE.md §5). Only image-building-pipeline is
-          # checked out here, so point CERALIVE_WORKSPACE at a stub tree. Under
-          # DRY_RUN no .debs are built from source, so empty dirs satisfy the
-          # tripwire without needing the real sibling repos.
-          ws="${RUNNER_TEMP}/ceralive-ws"
-          mkdir -p "${ws}/srtla" "${ws}/CeraUI"
-          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
-
       - name: Dry-run build (manifest -> builder plan; no network/hardware)
         env:
           DRY_RUN: '1'
@@ -362,7 +343,6 @@ jobs:
           # Reproducibility teeth: re-resolve the same board and assert the
           # normalized plan sha is BYTE-IDENTICAL to the sidecar. A non-vacuous
           # parity gate — if board resolution ever became host/time-dependent
-          # this fails. (CERALIVE_WORKSPACE is already exported by the stub step.)
           set -euo pipefail
           repo="${GITHUB_WORKSPACE:-$PWD}"
           ./v2/build "${{ matrix.board }}" 2>&1 | tee build-dryrun-2.log >/dev/null
@@ -399,7 +379,7 @@ jobs:
     #
     # Timeout model: 10 min provisioning + 10 min TCG + 10 min runner overhead.
     # The inner bounds preserve the QEMU budget even when apt is slow.
-    name: qemu x86 boot/service/package (amd64)
+    name: qemu x86 assertion-engine selftest (amd64)
     runs-on: ubuntu-latest
     needs: build-matrix
     timeout-minutes: 30
@@ -428,29 +408,6 @@ jobs:
         env:
           CERALIVE_QEMU_SELFTEST: '1'
         run: ./v2/tests/qemu-x86.sh
-
-      - name: Boot the x86 image in qemu (skip if no artifact under DRY_RUN)
-        env:
-          BOARD: x86-minipc
-          # The Stage-4 disk artifact lands here once the x86 build is wired up
-          # (orchestrate.sh x86 path). Under the DRY_RUN matrix none exists yet, so
-          # the harness auto-discovers nothing and SKIPS (exit 0). Point IMAGE_PATH
-          # explicitly when a real .img artifact is downloaded into this dir.
-          BOOT_TIMEOUT: '120'
-        run: |
-          # Use the build artifact if a downstream step downloaded one; otherwise
-          # the harness skips gracefully (image is optional under DRY_RUN).
-          img="$(find v2/images/x86-minipc -maxdepth 1 \
-                   \( -name '*.img' -o -name '*.img.xz' \) 2>/dev/null | sort | tail -1 || true)"
-          if [ -n "${img}" ]; then
-            echo "booting discovered x86 image: ${img}"
-            IMAGE_PATH="${img}" timeout --signal=TERM --kill-after=30s \
-              "${QEMU_TIMEOUT_MINUTES}m" ./v2/tests/qemu-x86.sh
-          else
-            echo "no x86 disk artifact present (DRY_RUN) — running harness in skip mode"
-            timeout --signal=TERM --kill-after=30s \
-              "${QEMU_TIMEOUT_MINUTES}m" ./v2/tests/qemu-x86.sh
-          fi
 
   # ---------------------------------------------------------------------------
   # Cross-runner build-plan determinism gate (C6b) — PLAN-ONLY, ADVISORY.
@@ -527,16 +484,6 @@ jobs:
 
       - name: Install resolver deps
         run: pip install --quiet --requirement v2/ci/requirements-ci.txt
-
-      - name: Stub sibling-checkout workspace
-        run: |
-          # fetch-debs asserts srtla/ CeraUI/ are siblings of the workspace root
-          # (ARCHITECTURE.md §5). Only image-building-pipeline is checked out here,
-          # so point CERALIVE_WORKSPACE at a stub tree — under DRY_RUN no .debs are
-          # built from source, so empty dirs satisfy the tripwire.
-          ws="${RUNNER_TEMP}/ceralive-ws"
-          mkdir -p "${ws}/srtla" "${ws}/CeraUI"
-          echo "CERALIVE_WORKSPACE=${ws}" >> "$GITHUB_ENV"
 
       - name: Resolve DRY_RUN plan → normalized sha sidecar (this runner)
         run: |

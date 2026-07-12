@@ -249,7 +249,7 @@ All optional. Set in your shell or prefix the command.
 | `RSYNC_OPTS` | _(none)_ | Extra rsync flags |
 | `DEV_PUSH_BUDGET` | `120` | Budget in seconds; `0` = don't enforce |
 | `REMOTE_EXT_DIR` | `/var/lib/extensions` | Where extensions live on the device |
-| `SRTLA_SRC` | `../../srtla` | Override srtla source path |
+| `SRTLA_SRC` | required for srtla dev-push | Explicit source checkout path |
 | `SRTLA_BUILD_CMD` | `cmake --build <src>/build ...` | Override srtla build command |
 | `APP_BACKEND` | `sysext` | App-layer backend (`sysext` or `appfs`) |
 

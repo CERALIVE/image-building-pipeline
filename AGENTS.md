@@ -1,7 +1,5 @@
 # image-building-pipeline
 
-Parent: [`../AGENTS.md`](../AGENTS.md)
-
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
@@ -60,7 +58,7 @@ image-building-pipeline/
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats` and `v2/tests/rk3588-ab-contract.bats` via `v2/run-tests`; RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
-| Cross-repo kiosk architecture | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../CeraUI/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
+| Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`v2/docs/size-notes.md`](v2/docs/size-notes.md) — locale strip, firmware audit, size-gate |
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
@@ -139,6 +137,15 @@ OTA because its `data` partition starts where v2 places `rootfs_b`; back up requ
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
 
+Production builds require one explicit RAUC PKI contract: signer root, chain,
+leaf certificate/key, and baked device keyring must match. The release workflow
+builds the candidate before hardware validation, uploads the raw image, bundle,
+keyring, and digest as one immutable artifact, then the hardware gate preflights
+and flashes that exact raw image and verifies its media digest after reconnect.
+Authenticated BSP fetches require the pinned Armbian archive key fingerprint and
+verify InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery
+uses `recovery.scr`, which loads boot artifacts directly from p2 or p3.
+
 **Multi-board dispatch** [EXISTS]
 
 Dispatch is by the **count of resolved boards**, not the flag: a single resolved
@@ -177,7 +184,7 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, plus the required capture plugin
   `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
-  from this repo's `versions.yaml`. Debian hosts use isolated `apt-get download`;
+  from `v2/manifests/first-party-deb-versions.txt`. Debian hosts use isolated `apt-get download`;
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
   exact package files. These are Debian **Package** names — a
@@ -203,15 +210,17 @@ state** under the staging dir (the host apt config is never touched).
 - **DRY_RUN** logs the exact version-qualified `apt-get … download` plan + source
   and downloads nothing. With no `APT_GPG_PUBLIC_B64` in the env the fetcher
   auto-enables DRY_RUN (no credential for a verified fetch).
-- **BSP fetch is unchanged** — kernel/DTB/U-Boot/firmware/gstreamer still come from
-  the Armbian apt pool (`fetch_bsp`).
+- **BSP fetch is authenticated** — kernel/DTB/U-Boot/firmware/GStreamer come
+  from signed Armbian metadata, with the archive-key fingerprint and all content
+  hashes checked before staging.
 
 **BSP provenance + advisory kernel drift-guard** [EXISTS]
 
 The kernel BSP floats (Decision D3 — name-based `linux-image-vendor-rk35xx`, **no
 version pin**), so a silent Armbian re-spin can change the image with no signal.
-`fetch_bsp` (in `v2/lib/fetch-debs.sh`) makes that float **observable without
-pinning it**:
+`fetch_bsp` authenticates the pinned Armbian archive-key fingerprint, verifies
+`InRelease`, verifies the `Packages.gz` digest from signed metadata, and verifies
+every staged package SHA-256. It also makes the kernel float observable:
 
 - **Provenance capture** — after the real BSP fetch, `bsp_capture_provenance`
   records the kernel package's exact resolved **version string** + **content

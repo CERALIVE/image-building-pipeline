@@ -24,7 +24,7 @@
 # Build (orchestrate.sh does this automatically when the tag is absent):
 #   docker build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 #   podman build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
-FROM debian:trixie-slim
+FROM debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 # mkosi version pin — MUST match v2/.mkosi-version (26).
 ARG MKOSI_VERSION=26

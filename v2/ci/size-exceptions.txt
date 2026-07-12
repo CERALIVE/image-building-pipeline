@@ -1,0 +1,14 @@
+# SIZE_OK: legacy manifest integration suite; split requires a dedicated test-layout change.
+v2/tests/manifest.bats
+# SIZE_OK: package transport module keeps native/curl transaction state in one process.
+v2/lib/fetch-debs.sh
+# SIZE_OK: build orchestrator is a linear transaction with shared cleanup state.
+v2/lib/orchestrate.sh
+# SIZE_OK: preflash verification is one fail-closed ordered media gate.
+v2/tests/preflash-verify.sh
+# SIZE_OK: RK3588 contract shares expensive disk fixtures across assertions.
+v2/tests/rk3588-ab-contract.bats
+# SIZE_OK: disk assembly is one geometry transaction with shared cleanup state.
+v2/lib/assemble-disk.sh
+# SIZE_OK: image post-install library predates this change and is shared by mkosi stages.
+v2/mkosi/customize/postinst-lib.sh

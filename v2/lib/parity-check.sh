@@ -144,7 +144,7 @@ main() {
   if (( ${#firstparty_missing[@]} == 0 )); then
     pass "first-party packages installed (libsrt1.5-ceralive/ceraui/cerastream/srtla-send-rs)"
   else
-    warn "first-party packages not installed: ${firstparty_missing[*]} — require R2/gh creds (CI mode); offline dev build cannot fetch them"
+    fail "first-party packages MISSING from rootfs: ${firstparty_missing[*]}"
   fi
 
   # ---- B. ceralive USER + GROUPS ----

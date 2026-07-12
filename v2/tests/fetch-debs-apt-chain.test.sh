@@ -54,7 +54,22 @@ if [[ "${command_name}" == "download" ]]; then
 			continue
 		fi
 		pkg="${arg%%=*}"
-		touch "${pkg}_1.0_${ARCH:-arm64}.deb"
+		version="${arg#*=}"
+		if [[ "${FAKE_APT_MODE:-ok}" == missing-one && "${pkg}" == srtla-send-rs ]]; then
+			continue
+		fi
+		tmp="$(mktemp -d)"
+		mkdir -p "${tmp}/DEBIAN"
+		printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: Test <test@example.invalid>\nDescription: fixture\n' \
+			"${pkg}" "${version}" "${ARCH:-arm64}" >"${tmp}/DEBIAN/control"
+		printf '2.0\n' >"${tmp}/debian-binary"
+		tar -czf "${tmp}/control.tar.gz" -C "${tmp}/DEBIAN" ./control
+		tar -czf "${tmp}/data.tar.gz" --files-from /dev/null
+		ar r "${pkg}_${version}_${ARCH:-arm64}.deb" "${tmp}/debian-binary" "${tmp}/control.tar.gz" "${tmp}/data.tar.gz" >/dev/null
+		if [[ "${FAKE_APT_MODE:-ok}" == duplicate-one && "${pkg}" == cerastream ]]; then
+			cp "${pkg}_${version}_${ARCH:-arm64}.deb" "${pkg}_${version}_duplicate_${ARCH:-arm64}.deb"
+		fi
+		rm -rf "${tmp}"
 	done
 fi
 SH
@@ -97,6 +112,7 @@ chmod 755 "${FAKE_CURL_BIN}/curl"
 
 cat >"${FAKE_CURL_BIN}/gpgv" <<'SH'
 #!/usr/bin/env bash
+[[ "${FAKE_GPGV_MODE:-ok}" == ok ]] || exit 1
 exit 0
 SH
 chmod 755 "${FAKE_CURL_BIN}/gpgv"
@@ -132,7 +148,15 @@ prepare_fake_curl_repo() {
 			version="1.0"
 		fi
 		deb="${pkg}_${version}_${ARCH:-arm64}.deb"
-		printf '%s %s\n' "${pkg}" "${version}" >"${repo}/debs/${deb}"
+		tmp="$(mktemp -d)"
+		mkdir -p "${tmp}/DEBIAN"
+		printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: Test <test@example.invalid>\nDescription: fixture\n' \
+			"${pkg}" "${version}" "${ARCH:-arm64}" >"${tmp}/DEBIAN/control"
+		printf '2.0\n' >"${tmp}/debian-binary"
+		tar -czf "${tmp}/control.tar.gz" -C "${tmp}/DEBIAN" ./control
+		tar -czf "${tmp}/data.tar.gz" --files-from /dev/null
+		ar r "${repo}/debs/${deb}" "${tmp}/debian-binary" "${tmp}/control.tar.gz" "${tmp}/data.tar.gz" >/dev/null
+		rm -rf "${tmp}"
 		sha="$(sha256sum "${repo}/debs/${deb}" | awk '{print $1}')"
 		cat >>"${packages}" <<EOF
 Package: ${pkg}
@@ -232,6 +256,25 @@ if [[ "${curl_staged_count}" -ne 5 ]]; then
 fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
 
+if run_fetch_first_party_curl "${RUN_DIR}/bad-signature/debs" "${curl_repo}" \
+	FAKE_GPGV_MODE=bad APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/bad-signature.out" 2>&1; then
+	printf 'FAIL bad-curl-signature-is-fatal\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
+grep -q 'signature verification failed' "${RUN_DIR}/bad-signature.out"
+printf 'PASS bad-curl-signature-is-fatal\n' | tee -a "${RESULTS_LOG}"
+
+corrupt_repo="${RUN_DIR}/corrupt-repo"
+cp -a "${curl_repo}" "${corrupt_repo}"
+printf 'tampered\n' >>"$(find "${corrupt_repo}/debs" -type f -name '*.deb' | head -1)"
+if run_fetch_first_party_curl "${RUN_DIR}/bad-package-hash/debs" "${corrupt_repo}" \
+	APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/bad-package-hash.out" 2>&1; then
+	printf 'FAIL bad-curl-package-hash-is-fatal\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
+grep -q 'checksum mismatch' "${RUN_DIR}/bad-package-hash.out"
+printf 'PASS bad-curl-package-hash-is-fatal\n' | tee -a "${RESULTS_LOG}"
+
 expect_failure \
 	"half-mtls-pair-is-fatal" \
 	"incomplete mTLS pair" \
@@ -250,6 +293,18 @@ expect_failure \
 	APT_GPG_PUBLIC_B64="${KEY_B64}" \
 	APT_CLIENT_CRT_B64="${CRT_B64}" \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
+
+expect_failure \
+	"missing-first-party-package-is-fatal" \
+	"expected exactly" \
+	FAKE_APT_MODE="missing-one" \
+	APT_GPG_PUBLIC_B64="${KEY_B64}"
+
+expect_failure \
+	"duplicate-first-party-package-is-fatal" \
+	"expected exactly" \
+	FAKE_APT_MODE="duplicate-one" \
+	APT_GPG_PUBLIC_B64="${KEY_B64}"
 
 expected_download=" download"
 while IFS= read -r spec; do

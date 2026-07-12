@@ -181,13 +181,13 @@ After a successful build, artifacts land in `v2/images/<board>/`:
 
 ```text
 v2/images/rock-5b-plus/
-  20260609T075534Z.raw      # flashable disk image (sparse, ~12 GiB nominal)
+  20260609T075534Z.raw      # flashable disk image (sparse, 14,800 MiB nominal)
   20260609T075534Z.raucb    # signed RAUC OTA bundle
   20260609T075534Z.raucb.sha256
 ```
 
 The `.raw` is a sparse file. Actual on-disk size is much smaller than the
-nominal 12 GiB. Use `du -sh` to see the real size.
+nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size.
 
 ### Custom APT mirror
 
@@ -261,7 +261,7 @@ build system; you do not need to write it separately.
 
 ```text
 [16 MB raw gap]  idbloader + U-Boot + ATF (no GPT entry)
-p1  boot         256 MB  vfat   U-Boot env + extlinux slot selector
+p1  boot         256 MB  vfat   automatic selector + manual recovery script + state
 p2  rootfs_a     4096 MB ext4   rootfs slot A (active)
 p3  rootfs_b     4096 MB ext4   rootfs slot B (factory rollback baseline)
 p4  data         remainder ext4  persistent mutable state
@@ -346,8 +346,9 @@ the merged service implementations.
 
 Expected first-boot sequence:
 
-1. U-Boot loads from the `boot` partition, reads `extlinux/extlinux.conf`,
-   selects slot A.
+1. U-Boot loads `boot.scr` from the shared boot partition and selects slot A.
+   At the console, `recovery.scr` can explicitly load slot A from p2 or slot B
+   from p3 without relying on extlinux path resolution.
 2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
    - `ceralive-hostname.service` — claims `ceralive.local`, falling back to
      `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already

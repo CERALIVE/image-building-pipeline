@@ -19,7 +19,7 @@ and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`
 | Where | Files | Tooling | Installed by |
 |---|---|---|---|
 | **rootfs slot** (userspace) | `ceralive-boot-state` → `/usr/bin`, `ceralive-rauc-boot-adapter` → `/usr/lib/rauc`, `/etc/rauc/system.conf`, explicit p1 `/boot` fstab mount | none | `mkosi.finalize` → `install-boot.sh rootfs` (chroot) |
-| **FAT boot partition** (p1) | `boot.scr` (compiled), `cera_board.env`, `boot_state.txt`, `extlinux/extlinux.conf` | `mkimage` (u-boot-tools) | disk assembly → `install-boot.sh boot-partition <dir>` |
+| **FAT boot partition** (p1) | `boot.scr`, `recovery.scr`, `cera_board.env`, `boot_state.txt` | `mkimage` (u-boot-tools) | disk assembly → `install-boot.sh boot-partition <dir>` |
 
 The split exists because `mkimage` (to compile `boot.scr`) is a **host/runtime** tool,
 not present in the platform chroot — so the boot-partition artifacts are produced at
@@ -106,7 +106,7 @@ the old slot is still running. State mutations delegate to `ceralive-boot-state`
 `install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`,
 `SINGLE_SLOT_FALLBACK` and `COMPATIBLE_STRING` from the environment (resolved from the
 board+family manifest by `lib/resolve.sh`, forwarded by `lib/orchestrate.sh` via mkosi
-`--environment`). It renders `cera_board.env` / `extlinux.conf` from the `*.tmpl` files
+`--environment`). It renders `cera_board.env` and compiles the automatic and recovery scripts
 (the manifest's `ttyS2:1500000` becomes the kernel `console=ttyS2,1500000`) and writes
 the RAUC `compatible` **verbatim from `COMPATIBLE_STRING`** — `ceralive-<board-slug>`
 (e.g. `ceralive-rock-5b-plus`), the **board-specific** string the orchestrator derives
@@ -131,7 +131,7 @@ last-resort boots A.
 | `ceralive-rauc-boot-adapter.sh` | RAUC custom backend (`/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
 | `boot.scr.cmd` | U-Boot selector source (compiled to `boot.scr`) |
 | `cera_board.env.tmpl` | board specifics template (`@CONSOLE@`/`@DTB_NAME@`/`@BOARD_ID@`) |
-| `extlinux.conf.tmpl` | manual A/B recovery menu (static; not the rollback path) |
+| `recovery.scr.cmd` | manual A/B recovery source; explicitly loads Image, DTB, and initrd from p2 or p3 |
 | `boot_state.txt` | fresh-flash A/B state seed |
 | `install-boot.sh` | build-time installer (`rootfs` + `boot-partition` targets) |
 | `test-fallback.sh` | offline proof of decrement→rollback + backend + render (no HW/root) |

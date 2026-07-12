@@ -63,6 +63,40 @@ deb_pkg_version() {
   printf '%s' "${version}"
 }
 
+deb_pkg_arch() {
+  local deb="$1" tmp arch=""
+  tmp="$(mktemp -d)"
+  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  fi
+  if [[ -s "${tmp}/control" ]]; then
+    arch="$(awk -F': ' '/^Architecture:/{print $2; exit}' "${tmp}/control")"
+  fi
+  rm -rf "${tmp}"
+  printf '%s' "${arch}"
+}
+
+deb_pkg_arch() {
+  local deb="$1" tmp arch=""
+  tmp="$(mktemp -d)"
+  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
+    :
+  fi
+  if [[ -s "${tmp}/control" ]]; then
+    arch="$(awk -F': ' '/^Architecture:/{print $2; exit}' "${tmp}/control")"
+  fi
+  rm -rf "${tmp}"
+  printf '%s' "${arch}"
+}
+
 # ---------------------------------------------------------------------------
 # explode_deb <deb> <dest> — standard .deb data-tarball extraction into <dest>
 # (dpkg-deb when present, else ar + tar). Used only by --from-deb; the sysext

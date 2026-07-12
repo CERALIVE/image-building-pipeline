@@ -11,11 +11,11 @@
 #   2. Gap idblock    — Rockchip "RKNS" at sector 64.
 #   3. Gap FIT        — parseable U-Boot FIT at sector 16384 with a valid extent.
 #   4. Boot partition — compiled boot.scr, Rock board metadata, boot_state.txt and
-#                       extlinux/extlinux.conf are all present on the FAT boot
+#                       recovery.scr are all present on the FAT boot
 #                       partition (offset GAP_MB * 1 MiB).
 #   5. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
 #                       attempt budget for both populated factory slots.
-#   6. RAUC bundle    — `rauc info` parses the bundle and its Compatible string
+#   6. RAUC bundle    — CMS verifies to the release root and manifest Compatible matches
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
@@ -48,6 +48,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2_DIR="$(cd "${HERE}/.." && pwd)"
+# shellcheck source=lib/rauc-bundle-inspect.sh
+source "${V2_DIR}/lib/rauc-bundle-inspect.sh"
 IMAGES_DIR="${IMAGES_DIR:-${V2_DIR}/images}"
 
 # ---------------------------------------------------------------------------
@@ -65,11 +67,6 @@ ROOTFS_SIZE=8388608
 ROOTFS_A_START=557056
 ROOTFS_B_START=8945664
 DATA_START=17334272
-# RAUC leaf cert carries EKU=codeSigning only; default smimesign purpose rejects
-# it ("unsuitable certificate purpose"). Tell rauc to check the codesign purpose.
-RAUC_VERIFY_OPTS=(-C keyring:check-purpose=codesign)
-DEFAULT_KEYRING="${V2_DIR}/.dev-keys/dev-root-ca.pem"
-
 # ---------------------------------------------------------------------------
 # Reporting — every sub-check prints exactly one PASS/FAIL line and feeds FAILS.
 # ---------------------------------------------------------------------------
@@ -180,22 +177,25 @@ check_second_stage_fit() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 3 — Boot partition holds the four U-Boot A/B selector artifacts.
+# Check 3 — Boot partition holds automatic and manual A/B scripts plus state.
 # ---------------------------------------------------------------------------
 check_boot_partition() {
   local img="$1" boot_off="$2"
-  require_tool mdir || { fail "Boot partition: boot.scr + cera_board.env + boot_state.txt + extlinux/extlinux.conf"; return; }
+  require_tool mdir || { fail "Boot partition: boot.scr + cera_board.env + boot_state.txt + recovery.scr"; return; }
   require_tool mtype || { fail "Boot partition: staged selector and board metadata"; return; }
   require_tool mcopy || { fail "Boot partition: staged selector and board metadata"; return; }
   require_tool mkimage || { fail "Boot partition: staged selector and board metadata"; return; }
-  local f missing="" tmp script board_env valid=1
-  for f in boot.scr cera_board.env boot_state.txt extlinux/extlinux.conf; do
+  local f missing="" tmp script recovery board_env valid=1
+  for f in boot.scr cera_board.env boot_state.txt recovery.scr; do
     mdir -i "${img}@@${boot_off}" "::/${f}" >/dev/null 2>&1 || missing="${missing} ${f}"
   done
   tmp="$(mktemp -d)"
   script="${tmp}/boot.scr"
+  recovery="${tmp}/recovery.scr"
   mcopy -i "${img}@@${boot_off}" ::/boot.scr "${script}" >/dev/null 2>&1 || valid=0
+  mcopy -i "${img}@@${boot_off}" ::/recovery.scr "${recovery}" >/dev/null 2>&1 || valid=0
   mkimage -l "${script}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
+  mkimage -l "${recovery}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
   board_env="$(mtype -i "${img}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
   grep -qx 'board_id=rock-5b-plus' <<<"${board_env}" || valid=0
   grep -qx 'fdtfile=rk3588-rock-5b-plus.dtb' <<<"${board_env}" || valid=0
@@ -206,7 +206,7 @@ check_boot_partition() {
   else
     fail "Boot partition: compiled AArch64 selector + Rock board metadata + recovery files"
     [[ -z "${missing}" ]] || info "missing from boot partition @ offset ${boot_off}:${missing}"
-    (( valid == 1 )) || info "boot.scr or Rock board metadata is malformed"
+    (( valid == 1 )) || info "boot.scr, recovery.scr, or Rock board metadata is malformed"
   fi
 }
 
@@ -231,14 +231,15 @@ check_boot_state() {
 check_rauc_bundle() {
   local bundle="$1" board="$2" keyring="$3" out compatible expect
   expect="ceralive-${board}"
-  require_tool rauc || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool openssl || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool unsquashfs || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
   [[ -s "${keyring}" ]] || { fail "RAUC bundle: parses + Compatible '${expect}'"; info "keyring not found: ${keyring}"; return; }
-  if ! out="$(rauc info "${RAUC_VERIFY_OPTS[@]}" --keyring="${keyring}" "${bundle}" 2>&1)"; then
+  if ! out="$(rauc_bundle_verify_and_compatible "${bundle}" "${keyring}" 2>&1)"; then
     fail "RAUC bundle: parses + Compatible '${expect}'"
-    info "rauc info failed: $(printf '%s' "${out}" | grep -iE 'error|failed' | head -1)"
+    info "bundle signature/manifest verification failed: $(printf '%s' "${out}" | tail -1)"
     return
   fi
-  compatible="$(printf '%s\n' "${out}" | sed -n "s/^Compatible:[[:space:]]*'\\(.*\\)'.*/\\1/p" | head -1)"
+  compatible="$(printf '%s\n' "${out}" | tail -1)"
   if [[ "${compatible}" == "${expect}" ]]; then
     pass "RAUC bundle: parses + Compatible '${expect}'"
     info "Compatible: '${compatible}'; signature verified (check-purpose=codesign)"
@@ -254,7 +255,7 @@ check_rauc_bundle() {
 # when the systemd init binary OR /sbin/init exists inside it.
 # ---------------------------------------------------------------------------
 check_rootfs_populated() {
-  local img="$1" part="$2" label="$3" start_sector size_sectors tmp
+  local img="$1" part="$2" label="$3" expected_keyring="$4" start_sector size_sectors tmp
   local fstab boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
   require_tool sgdisk  || { fail "${label} populated + shared /boot mount present"; return; }
   require_tool debugfs || { fail "${label} populated + shared /boot mount present"; return; }
@@ -278,12 +279,14 @@ check_rootfs_populated() {
     fi
   done
   fstab="$(debugfs -R 'cat /etc/fstab' "${tmp}" 2>/dev/null || true)"
-  local artifacts_ok=1 artifact_dir kernel dtb initrd kernel_magic dtb_magic initrd_magic
+  local artifacts_ok=1 artifact_dir kernel dtb initrd embedded_keyring kernel_magic dtb_magic initrd_magic
   artifact_dir="$(mktemp -d)"
   kernel="${artifact_dir}/Image"; dtb="${artifact_dir}/board.dtb"; initrd="${artifact_dir}/initrd.img"
+  embedded_keyring="${artifact_dir}/ceralive-keyring.pem"
   debugfs -R "dump -p /boot/Image ${kernel}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
   debugfs -R "dump -p /boot/dtb/rockchip/rk3588-rock-5b-plus.dtb ${dtb}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
   debugfs -R "dump -p /boot/initrd.img ${initrd}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
+  debugfs -R "dump -p /etc/rauc/ceralive-keyring.pem ${embedded_keyring}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
   kernel_magic="$(dd if="${kernel}" bs=1 skip=56 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
   dtb_magic="$(dd if="${dtb}" bs=1 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
   initrd_magic="$(dd if="${initrd}" bs=1 count=6 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
@@ -292,6 +295,10 @@ check_rootfs_populated() {
     && fdtdump "${dtb}" >/dev/null 2>&1 || artifacts_ok=0
   [[ -f "${initrd}" && "$(stat -c %s "${initrd}" 2>/dev/null || echo 0)" -ge 1048576 ]] || artifacts_ok=0
   initrd_is_coherent "${initrd}" "${initrd_magic}" || artifacts_ok=0
+  [[ -s "${embedded_keyring}" ]] \
+    && [[ "$(openssl x509 -in "${embedded_keyring}" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" \
+       == "$(openssl x509 -in "${expected_keyring}" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" ]] \
+    || artifacts_ok=0
   rm -rf "${artifact_dir}" "${tmp}"
   if [[ -n "${found}" ]] && grep -Fxq "${boot_mount}" <<<"${fstab}" && (( artifacts_ok == 1 )); then
     pass "${label} populated + kernel + board DTB + initrd + shared /boot mount"
@@ -356,8 +363,8 @@ run_gate() {
     check_second_stage_fit "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
     check_boot_state     "${raw}" "${boot_off}"
-    check_rootfs_populated "${raw}" 2 rootfs_a
-    check_rootfs_populated "${raw}" 3 rootfs_b
+    check_rootfs_populated "${raw}" 2 rootfs_a "${keyring}"
+    check_rootfs_populated "${raw}" 3 rootfs_b "${keyring}"
     check_target_capacity "${raw}" "${target_bytes}"
   fi
   [[ -f "${bundle}" ]] && check_rauc_bundle "${bundle}" "${board}" "${keyring}"
@@ -394,7 +401,10 @@ self_test() {
   echo
   echo "--- gate output against the zeroed-gap image (expecting a gap-magic FAIL) ---"
   local out rc
-  out="$(run_gate "${corrupt}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" "${target_bytes}")"; rc=$?
+  set +e
+  out="$(run_gate "${corrupt}" "${bundle}" "${board}" "${keyring}" "${gap_mb}" "${target_bytes}")"
+  rc=$?
+  set -e
   printf '%s\n' "${out}"
   rm -rf "${tmp}"
   echo
@@ -428,7 +438,7 @@ main() {
     esac
   done
 
-  [[ -n "${keyring}" ]] || keyring="${DEFAULT_KEYRING}"
+  [[ -n "${keyring}" ]] || { echo "--keyring is required; production verification has no dev-key default" >&2; exit 2; }
   [[ -n "${image}" ]]   || image="$(newest_artifact "${board}" '*.raw')"
   [[ -n "${bundle}" ]]  || bundle="$(newest_artifact "${board}" '*.raucb')"
   [[ "${target_size_bytes}" =~ ^[1-9][0-9]*$ ]] \

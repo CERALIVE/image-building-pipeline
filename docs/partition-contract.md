@@ -54,7 +54,7 @@ GPT, 1 MiB alignment. Sizes in **MB (= MiB, 2^20 bytes)**.
 | # | Partition label | Role | Size (MB) | FS | Mount |
 |---|-----------------|------|-----------|----|----|
 | — | *(reserved gap)* | RK3588 idbloader + U-Boot + ATF (raw, no GPT entry) | **16** | raw | — |
-| p1 | `boot` | U-Boot env + `extlinux/extlinux.conf` slot selector | **256** | vfat (FAT32) | `/boot` (rw, explicit fstab) |
+| p1 | `boot` | compiled automatic selector, manual recovery script, durable state | **256** | vfat (FAT32) | `/boot` (rw, explicit fstab) |
 | p2 | `rootfs_a` | RAUC rootfs **slot A** (incl. `/boot` kernel/DTB/initrd) | **4096** | ext4 | `/` (when A active) |
 | p3 | `rootfs_b` | RAUC rootfs **slot B** | **4096** | ext4 | `/` (when B active) |
 | p4 | `data` | Persistent mutable state (survives A/B) | **remainder** (≥ 2048 floor) | ext4 | `/data` |
@@ -105,7 +105,7 @@ For small microSD boots (and any hypothetical < 16 GB eMMC — none are sold). S
 | # | Partition label | Role | Size (MB) | FS | Mount |
 |---|-----------------|------|-----------|----|----|
 | — | *(reserved gap)* | idbloader + U-Boot + ATF (raw) | **16** | raw | — |
-| p1 | `boot` | U-Boot env + extlinux | **256** | vfat | `/boot` |
+| p1 | `boot` | U-Boot scripts + durable state | **256** | vfat | `/boot` |
 | p2 | `rootfs_a` | single rootfs (no B slot) | **4096** | ext4 | `/` |
 | p3 | `data` | Persistent mutable state | **remainder** (≥ 2048 floor) | ext4 | `/data` |
 

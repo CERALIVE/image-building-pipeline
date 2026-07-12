@@ -9,7 +9,7 @@
 #   1. resolve   lib/resolve.sh <board>        → flat KEY=value build params (eval'd)
 #   2. gate      required BSP package sets present                (fail loud, pre-build)
 #   3. fetch     lib/fetch-debs.sh --family …   → stage BSP + first-party .debs
-#               (or CERALIVE_REUSE_STAGING=1 for lab rebuilds from existing staging)
+#               (staging is always recreated and authenticated for each build)
 #   4. partition split staged .debs into BSP vs first-party by package name
 #   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
@@ -48,6 +48,7 @@ PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
+RAUC_PKI_CONTRACT_SH="${HERE}/rauc-pki-contract.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
 # Staged .debs live under the mkosi dir (so the builder container, which mounts
@@ -66,11 +67,11 @@ BUILD_LOCK_FD=""
 # kernel install (the boot BSP is hardware-validated in task 17). This is a
 # build-scope flag, NOT error swallowing.
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
-# RAUC bundle signing PKI (Stage-4 .raucb, build-bundle.sh). Local/dev builds
-# sign with the throwaway NON-PRODUCTION dev keypair in v2/.dev-keys; CI/prod
-# inject the real cert-work/rauc keys by setting this env before invocation.
-CERALIVE_RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR:-${V2_DIR}/.dev-keys}"
-export CERALIVE_RAUC_PKI_DIR
+# shellcheck source=lib/rauc-pki-contract.sh
+source "${RAUC_PKI_CONTRACT_SH}"
+CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
+rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+export CERALIVE_BUILD_MODE CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 RELEASE="${RELEASE:-bookworm}"
@@ -272,13 +273,9 @@ main() {
   # -------------------------------------------------------------------------
   local staging="${STAGING_ROOT}/${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
-  if [[ "${CERALIVE_REUSE_STAGING:-0}" == "1" ]]; then
-    log_warn "[2/9] CERALIVE_REUSE_STAGING=1 — reusing existing .deb staging at ${staging}"
-    [[ -d "${staging}/debs" ]] || die "CERALIVE_REUSE_STAGING=1 but ${staging}/debs is missing"
-    [[ -d "${bsp_dir}" ]] || die "CERALIVE_REUSE_STAGING=1 but ${bsp_dir} is missing"
-    [[ -d "${firstparty_dir}" ]] || die "CERALIVE_REUSE_STAGING=1 but ${firstparty_dir} is missing"
-    log_info "[3/9] reusing pre-partitioned BSP vs first-party staging"
-  else
+  [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
+    || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
+  {
     rm -rf "${staging}"
     mkdir -p "${staging}" "${bsp_dir}" "${firstparty_dir}"
 
@@ -289,18 +286,21 @@ main() {
     log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
     # The set of BSP package names (manifest-declared) is the partition key.
     local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
+    local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs "
     local deb pkg
     shopt -s nullglob
     for deb in "${staging}/debs"/*.deb; do
       pkg="$(deb_pkg_name "${deb}")"
       if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
         cp "${deb}" "${bsp_dir}/"
-      else
+      elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
         cp "${deb}" "${firstparty_dir}/"
+      else
+        die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
       fi
     done
     shopt -u nullglob
-  fi
+  }
   log_info "staged: $(find "${bsp_dir}" -name '*.deb' | wc -l) BSP, $(find "${firstparty_dir}" -name '*.deb' | wc -l) first-party .deb(s)"
 
   # -------------------------------------------------------------------------
@@ -537,7 +537,7 @@ run_mkosi_build() {
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
   # platform bootloader integration (mkosi.finalize → install-boot.sh): the U-Boot
-  # boot.scr / extlinux fdtfile and the board env come from the manifest, never
+  # boot.scr / recovery.scr fdtfile and the board env come from the manifest, never
   # hardcoded.
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
@@ -556,11 +556,8 @@ run_mkosi_build() {
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
   # (like the apt GPG key) so the self-contained runtime postinst can write it
   # without repo access.
-  local rauc_keyring="${MKOSI_DIR}/runtime/rauc/ceralive-keyring.pem"
-  if [[ -z "${RAUC_ROOT_CA_B64:-}" && -s "${rauc_keyring}" ]]; then
-    RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
-  fi
-  export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
+  RAUC_ROOT_CA_B64="$(base64 -w0 <"${RAUC_KEYRING_FILE}")"
+  export RAUC_ROOT_CA_B64
 
   # Add-on signing keyring (task 24): the PUBLIC add-on keyring baked at
   # /usr/share/ceralive/addon-keyring.gpg so the device can verify optional add-on

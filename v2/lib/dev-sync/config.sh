@@ -24,7 +24,7 @@
 #   $DEV_SYNC_CONFIG (explicit)               → this file path
 #   ./.dev-sync.yaml                          → cwd
 #   <this dir>/.dev-sync.yaml                  → alongside the scripts
-#   $WORKSPACE_ROOT/.dev-sync.yaml            → repo workspace root
+#   <repo>/.dev-sync.yaml                     → image-pipeline checkout root
 #
 # shellcheck shell=bash
 
@@ -34,9 +34,7 @@ DEV_SYNC_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../common.sh
 source "${DEV_SYNC_HERE}/../common.sh"
 
-# Workspace root: v2/lib/dev-sync → v2/lib → v2 → image-building-pipeline →
-# <ceralive parent> (siblings live here), matching dev-push's WORKSPACE_ROOT.
-DEV_SYNC_WORKSPACE_ROOT="$(cd "${DEV_SYNC_HERE}/../../../.." && pwd)"
+DEV_SYNC_REPO_ROOT="$(cd "${DEV_SYNC_HERE}/../../.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Built-in defaults (layer 3). Every one is overridable by yaml then env.
@@ -92,7 +90,7 @@ _ds_find_config() {
   for cand in \
     "./.dev-sync.yaml" \
     "${DEV_SYNC_HERE}/.dev-sync.yaml" \
-    "${DEV_SYNC_WORKSPACE_ROOT}/.dev-sync.yaml"; do
+    "${DEV_SYNC_REPO_ROOT}/.dev-sync.yaml"; do
     if [[ -f "$cand" ]]; then
       printf '%s' "$cand"
       return 0

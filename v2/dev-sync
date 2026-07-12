@@ -44,8 +44,8 @@
 # Env knobs (all optional; mirror dev-push / the rest of dev-sync via config.sh):
 #   DRY_RUN=1                  print the plan, start no watchers.
 #   DEV_SYNC_DEBOUNCE_MS=500   coalesce window in milliseconds.
-#   DEV_SYNC_CERAUI_DIR        CeraUI workspace root (default <workspace>/CeraUI).
-#   SRTLA_SRC                  native source checkout (sibling; mirrors dev-push).
+#   DEV_SYNC_CERAUI_DIR        explicit CeraUI checkout path (required).
+#   SRTLA_SRC                  explicit native source checkout path (required).
 #   DEV_SYNC_NATIVE_ARGS       extra args forwarded to sync-native.sh (e.g.
 #                              "--from-deb /path" or "--staging /dir"; sync-native
 #                              needs a build input for a real — non-DRY_RUN — run).
@@ -66,7 +66,7 @@ SYNC_DIR="${HERE}/lib/dev-sync"
 
 # config.sh sources lib/common.sh (strict mode `set -euo pipefail`, the loud ERR
 # trap, loggers, die, require_cmd) and settles every DEV_SYNC_* / SSH_USER /
-# DRY_RUN knob + DEV_SYNC_WORKSPACE_ROOT and the DEV_SYNC_IGNORE_GLOBS[] array.
+# DRY_RUN knob and the DEV_SYNC_IGNORE_GLOBS[] array.
 # shellcheck source=lib/dev-sync/config.sh
 source "${SYNC_DIR}/config.sh"
 # transport.sh adds resolve_target + transport_ssh, reused by the stream-active
@@ -79,9 +79,11 @@ source "${SYNC_DIR}/transport.sh"
 # Loop configuration (env-overridable; sane defaults from the sibling layout).
 # ---------------------------------------------------------------------------
 DEV_SYNC_DEBOUNCE_MS="${DEV_SYNC_DEBOUNCE_MS:-500}"
-DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-${DEV_SYNC_WORKSPACE_ROOT}/CeraUI}"
+DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-}"
+[[ -n "${DEV_SYNC_CERAUI_DIR}" ]] || die "DEV_SYNC_CERAUI_DIR must name the CeraUI checkout"
 # cerastream dev-sync is a follow-on (IPC-driven engine, different sync shape)
-SRTLA_SRC="${SRTLA_SRC:-${DEV_SYNC_WORKSPACE_ROOT}/srtla}"
+SRTLA_SRC="${SRTLA_SRC:-}"
+[[ -n "${SRTLA_SRC}" ]] || die "SRTLA_SRC must name the native source checkout"
 DEV_SYNC_NATIVE_ARGS="${DEV_SYNC_NATIVE_ARGS:-}"
 
 # Stream-active guard knobs. The guard gates only the restart-bearing components
