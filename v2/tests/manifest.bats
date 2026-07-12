@@ -271,6 +271,21 @@ serialize() {
   flock "$lockfd"
 }
 
+# assert_bsp_architecture_plan <debian-arch> — both supported offline BSP
+# transports must expose the resolved Debian architecture. Native apt-get logs
+# its explicit APT::Architecture option; the curl fallback logs the Packages.gz
+# index path. Keep both checks because CI and Arch-like developer hosts choose
+# different transports without changing the build contract.
+assert_bsp_architecture_plan() {
+  local arch="$1"
+  if [[ "$output" == *"DRY-RUN would write Armbian source:"* ]]; then
+    [[ "$output" == *"DRY-RUN would write Armbian source: deb [arch=${arch}]"* ]]
+    [[ "$output" == *"APT::Architecture=${arch}"* ]]
+  else
+    [[ "$output" == *"binary-${arch}/Packages.gz"* ]]
+  fi
+}
+
 # ===========================================================================
 # 1. Schema self-validation — the schemas are legal draft-2020-12 documents.
 # ===========================================================================
@@ -635,7 +650,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"resolved: family=x86_64 arch=x86-64 (mkosi=x86-64)"* ]]
   [[ "$output" == *"channel=stable arch=amd64"* ]]
-  [[ "$output" == *"binary-amd64/Packages.gz"* ]]
+  assert_bsp_architecture_plan amd64
   [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-amd64/"* ]]
   [[ "$output" == *"APT::Architecture=amd64"* ]]
   [[ "$output" != *"binary-arm64"* ]]
@@ -649,7 +664,7 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"resolved: family=rk3588 arch=arm64 (mkosi=arm64)"* ]]
     [[ "$output" == *"channel=stable arch=arm64"* ]]
-    [[ "$output" == *"binary-arm64/Packages.gz"* ]]
+    assert_bsp_architecture_plan arm64
     [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-arm64/"* ]]
     [[ "$output" == *"APT::Architecture=arm64"* ]]
     [[ "$output" != *"binary-amd64"* ]]
