@@ -127,7 +127,9 @@ supported boot-slot override for its synthetic file-backed slots, so CI does not
 depend on the runner's boot device. The CI Bats job also installs Ubuntu's split
 `rauc` + `rauc-service` packages and starts a system D-Bus before the required
 real-RAUC contract, reloading the installed bus policy; it does not substitute
-a session bus or skip the service check.
+a session bus or skip the service check. Standalone DRY_RUN build-plan jobs also
+materialize the same ignored NON-PRODUCTION fixture before resolving, so they
+do not depend on the Bats job's checkout.
 
 ## Custom Components
 

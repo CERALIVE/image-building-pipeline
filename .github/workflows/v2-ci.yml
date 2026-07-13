@@ -291,6 +291,9 @@ jobs:
       - name: Install resolver deps
         run: pip install --quiet --requirement v2/ci/requirements-ci.txt
 
+      - name: Materialize non-production RAUC test fixture
+        run: ./v2/tests/generate-dev-rauc-pki.sh
+
       - name: Dry-run build (manifest -> builder plan; no network/hardware)
         env:
           DRY_RUN: '1'
@@ -494,6 +497,9 @@ jobs:
 
       - name: Install resolver deps
         run: pip install --quiet --requirement v2/ci/requirements-ci.txt
+
+      - name: Materialize non-production RAUC test fixture
+        run: ./v2/tests/generate-dev-rauc-pki.sh
 
       - name: Resolve DRY_RUN plan → normalized sha sidecar (this runner)
         run: |
