@@ -1915,6 +1915,18 @@ run_paseto_provision() {
   [ "$output" = "$REPO_ROOT/versions.yaml" ]
 }
 
+@test "fetch-debs CeraUI registry pin matches the concrete device package release" {
+  local expected_ceraui_pin="v2026.7.0"
+  local expected_device_version="${expected_ceraui_pin#v}-20260713T190647.93ca1f8"
+  local device_version
+
+  [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
+  device_version="$(awk -F= '$1 == "ceralive-device" { print $2; exit }' \
+    "$REPO_ROOT/v2/manifests/first-party-deb-versions.txt")"
+  [ "$device_version" = "$expected_device_version" ]
+  [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
+}
+
 @test "fetch-debs BSP set deduplicates the first family package against board overrides" {
   local family="$BATS_TEST_TMPDIR/family.yaml"
   cat >"$family" <<'YAML'
