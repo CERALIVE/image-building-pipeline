@@ -15,6 +15,9 @@ concurrency:
 jobs:
   candidate:
     runs-on: [self-hosted, ceralive-image-builder]
+    env:
+      CERALIVE_MKOSI_CACHE_DIR: v2/mkosi/cache/rock-5b-plus
+      CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
@@ -25,6 +28,54 @@ jobs:
       commit: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve release cache keys
+        id: cache-meta
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+          MKOSI_TOOL_KEY: ${{ hashFiles('v2/.mkosi-version') }}
+          MKOSI_SOURCE_KEY: >-
+            ${{ hashFiles('v2/build', 'v2/lib/**/*.sh', 'v2/mkosi/**/*', 'v2/manifests/**/*', 'v2/ci/Dockerfile') }}
+          BUILDER_SOURCE_KEY: >-
+            ${{ hashFiles('v2/ci/Dockerfile', 'v2/ci/requirements-ci.txt', 'v2/.mkosi-version') }}
+        run: |
+          set -euo pipefail
+          board=rock-5b-plus
+          repository="${REPOSITORY//\//-}"
+          builder_scope="ceralive-builder-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}"
+          builder_image="ceralive-mkosi-builder:${BUILDER_SOURCE_KEY}"
+          mkosi_prefix="mkosi-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}-source-"
+          {
+            echo "builder_scope=${builder_scope}"
+            echo "builder_image=${builder_image}"
+            echo "builder_source_key=${BUILDER_SOURCE_KEY}"
+            echo "mkosi_key=${mkosi_prefix}${MKOSI_SOURCE_KEY}"
+            echo "mkosi_restore_prefix=${mkosi_prefix}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Set up BuildKit
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/setup-buildx-action@v4
+      - name: Build canonical mkosi builder with reusable layers
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/build-push-action@v7
+        with:
+          context: v2/ci
+          file: v2/ci/Dockerfile
+          tags: ${{ steps.cache-meta.outputs.builder_image }}
+          labels: |
+            org.ceralive.builder.source-key=${{ steps.cache-meta.outputs.builder_source_key }}
+          load: true
+          cache-from: type=gha,scope=${{ steps.cache-meta.outputs.builder_scope }}
+          cache-to: type=gha,mode=min,scope=${{ steps.cache-meta.outputs.builder_scope }}
+      - name: Restore board-scoped mkosi build cache
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
+          restore-keys: ${{ steps.cache-meta.outputs.mkosi_restore_prefix }}
       - name: Materialize release trust inputs
         env:
           RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
@@ -43,6 +94,7 @@ jobs:
           APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
           APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
           APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
+          MKOSI_BUILDER_IMAGE: ${{ steps.cache-meta.outputs.builder_image }}
         run: ./v2/build rock-5b-plus
       - name: Build candidate-bound signed rollback probe
         env:
@@ -85,6 +137,46 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 7
+      - name: Bound board-scoped mkosi cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        run: |
+          set -euo pipefail
+          cache_dir="${CERALIVE_MKOSI_CACHE_DIR}"
+          max_bytes="${CERALIVE_MKOSI_CACHE_MAX_BYTES}"
+          builder_image="${{ steps.cache-meta.outputs.builder_image }}"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          [[ "${cache_dir}" == v2/mkosi/cache/rock-5b-plus ]]
+          [[ "${max_bytes}" =~ ^[0-9]+$ ]]
+          docker run --rm \
+            --env CACHE_DIR="${cache_dir}" \
+            --env CACHE_UID="${runner_uid}" \
+            --env CACHE_GID="${runner_gid}" \
+            --env CACHE_MAX_BYTES="${max_bytes}" \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${builder_image}" \
+            bash -euo pipefail -c '
+              [[ "${CACHE_DIR}" == v2/mkosi/cache/rock-5b-plus ]]
+              [[ "${CACHE_UID}" =~ ^[0-9]+$ && "${CACHE_GID}" =~ ^[0-9]+$ ]]
+              [[ "${CACHE_MAX_BYTES}" =~ ^[0-9]+$ ]]
+              cache_path="/work/${CACHE_DIR}"
+              mkdir -p "${cache_path}"
+              cache_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              if (( cache_bytes > CACHE_MAX_BYTES )); then
+                echo "::warning::mkosi cache is ${cache_bytes} bytes; clearing it before save (limit ${CACHE_MAX_BYTES})"
+                find "${cache_path}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+              fi
+              final_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              (( final_bytes <= CACHE_MAX_BYTES ))
+              chown -R "${CACHE_UID}:${CACHE_GID}" "/work/${CACHE_DIR}"
+              echo "mkosi cache bytes=${final_bytes} limit=${CACHE_MAX_BYTES} path=${CACHE_DIR}"
+            '
+      - name: Save board-scoped mkosi build cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
       - name: Remove release secrets and temporary roots
         if: ${{ always() }}
         run: |

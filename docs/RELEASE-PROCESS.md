@@ -139,6 +139,28 @@ disk → write the bootloader gap → emit the signed `.raucb`). See
 [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2 for the full stage list and
 artifact layout.
 
+### Production build caches
+
+The candidate job persists only reusable build state; it never caches a
+candidate image or a trust input. BuildKit loads the canonical
+`v2/ci/Dockerfile` builder image and exports its layers through the GitHub
+Actions cache with a stable repository/OS/architecture/board/mkosi-tool scope.
+The source hash is carried in the builder tag and label, while BuildKit's
+content-addressed Dockerfile/context digests select the reusable layers. The
+export uses `mode=min` so the cache contains only layers needed by the loaded
+builder image.
+
+The same job restores and saves only the board-specific mkosi package cache at
+`v2/mkosi/cache/rock-5b-plus`. Its exact key includes the repository, runner
+OS/architecture, board, mkosi pin, and build-source hash; its fallback prefix
+keeps those axes fixed. Before saving, the workflow enforces a 2 GiB ceiling,
+measures/prunes the tree as root inside the builder container, and normalizes
+ownership to the runner so mode-700 mkosi entries remain cacheable. Image outputs,
+`.staging`, QEMU state, apt credentials, and release artifacts are not cache
+inputs. These steps are guarded to release pushes/tags, and the trust-input
+step remains after cache restore and builder preparation; the production build,
+candidate sealing, and required real-HW workflow call are unchanged.
+
 Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
 mTLS-authenticated apt source — the exact credential contract is
@@ -354,23 +376,20 @@ to the `apt.ceralive.tv` package feed. Don't conflate the two.
 
 ### Where they live today
 
-**Honestly: no committed GitHub Actions workflow in this repo currently
-injects these three secrets.** `v2-ci.yml`'s build-matrix job runs
-`DRY_RUN=1` specifically so it never needs them (its own header comment says
-so: "No secrets are referenced"). `release.yml` / `realhw-job.yml` gate
-hardware validation on an already-built image and use repo **variables**
-(`vars.CERALIVE_RK3588_*`) for board connectivity, not these secrets.
+`v2-ci.yml`'s build-matrix job runs `DRY_RUN=1` specifically so it never needs
+these values (its own header comment says so: "No secrets are referenced"). The
+protected `release.yml` candidate job injects them from GitHub Actions secrets
+for release pushes/tags, while `realhw-job.yml` uses repo **variables**
+(`vars.CERALIVE_RK3588_*`) for board connectivity. The release workflow keeps
+the values env-only and materializes them after cache restore; they are never
+part of a cache key or Docker build context.
 
-The real (authenticated) build is run today by whoever executes
-`./v2/build <board>` with these three values exported in their own shell —
-locally, or from a private/未-committed CI job outside this repo's tracked
-workflows. **Recommendation, not current fact:** when a real build/sign/upload
-CI job is added (see §5's "future work"), these three values should be stored
-as **GitHub Actions encrypted repository secrets** (`Settings → Secrets and
+For any additional authenticated build path, store these three values as
+**GitHub Actions encrypted repository secrets** (`Settings → Secrets and
 variables → Actions → Repository secrets`), scoped to an environment
 (`production`) with required reviewers, exactly the way `fetch-debs.sh`
-already expects to consume them (env-only, base64-encoded, never written to
-disk outside the isolated per-run apt state dir).
+expects to consume them (env-only, base64-encoded, never written to disk
+outside the isolated per-run apt state dir).
 
 ### Half-supplied-pair-is-fatal behavior
 

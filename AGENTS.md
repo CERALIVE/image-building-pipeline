@@ -277,11 +277,34 @@ every staged package SHA-256. It also makes the kernel float observable:
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
 
-**CI resolver dependency cache** [EXISTS]
-`v2-ci.yml` caches only pip's download/wheel store (`~/.cache/pip`) for the
-manifest-validation and build-plan jobs. The key includes the runner OS,
+**CI and release build caches** [EXISTS]
+PR CI (`v2-ci.yml`) caches only pip's download/wheel store (`~/.cache/pip`) for
+the manifest-validation and build-plan jobs. Its key includes the runner OS,
 architecture, and the hash of `v2/ci/requirements-ci.txt`; image outputs, mkosi
-caches, QEMU state, and release artifacts remain uncached.
+caches, QEMU state, and release artifacts remain uncached there.
+
+The protected release candidate (`.github/workflows/release.yml`) persists the
+two build-state stores that materially shorten a production rebuild:
+
+- BuildKit's GitHub Actions cache reuses layers from the canonical
+  `v2/ci/Dockerfile`. The scope is stable per repository, runner OS/architecture,
+  board, and mkosi tool pin, so old commits do not create an unbounded cache
+  family. The source hash is carried in the builder image tag and label; the
+  Dockerfile/context digests remain BuildKit's layer keys. `mode=min` exports
+  only layers needed by the loaded builder image.
+- `v2/mkosi/cache/rock-5b-plus` is restored and saved with a key containing the
+  repository, runner OS/architecture, board, mkosi pin, and build-source hash.
+  Its restore prefix retains those collision boundaries. The cache is capped at
+  2 GiB; size measurement, over-limit clearing, and runner-UID/GID
+  normalization all happen as root inside the builder container before the save
+  step, because mkosi may create mode-700 root-owned entries.
+
+Both cache paths are build state only: image outputs, `.staging`, QEMU state,
+apt credentials, and release artifacts are excluded. Cache steps are guarded to
+release pushes/tags (the workflow has no pull-request trigger), and all
+production trust inputs are materialized after cache restore/build, so an
+untrusted PR cannot populate or consume this release cache path and secrets
+never enter a cache key or build context.
 
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one
