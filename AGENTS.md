@@ -140,7 +140,8 @@ OTA because its `data` partition starts where v2 places `rootfs_b`; back up requ
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
 
-The v2 CI Bats job installs and starts a system D-Bus before invoking the real
+The v2 CI Bats job installs the split Ubuntu `rauc` + `rauc-service` packages
+starts a system D-Bus, reloads its installed policy, and then invokes the real
 RAUC contract; the harness requires RAUC to own its normal system-bus service
 name and does not replace that check with a session bus or a skipped test.
 

@@ -117,13 +117,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             cpio device-tree-compiler dosfstools e2fsprogs gdisk mtools \
-            dbus rauc squashfs-tools systemd u-boot-tools
+            dbus rauc rauc-service squashfs-tools systemd u-boot-tools
 
       - name: Start system D-Bus for real RAUC contract
         run: |
           if ! sudo busctl --system status >/dev/null 2>&1; then
             sudo dbus-daemon --system --fork
           fi
+          sudo busctl call --system \
+            org.freedesktop.DBus /org/freedesktop/DBus \
+            org.freedesktop.DBus ReloadConfig
           sudo busctl --system status
 
       - name: Run v2 manifest unit suite
