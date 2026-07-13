@@ -19,7 +19,8 @@
 #   8. Corruption resilience: a truncated / empty / missing / bad-CRC state file
 #      yields the safe defaults (A B, full budget) + a clean rewrite and NEVER
 #      crashes, while a well-formed no-CRC file (the U-Boot env-export write) is
-#      trusted so the bootcount is not wiped.
+#      trusted so the bootcount is not wiped. Userspace replacement is a
+#      same-filesystem rename, so `mv` never degrades into copy-then-unlink.
 #
 # Run:  v2/mkosi/platform/boot/test-fallback.sh
 #
@@ -82,6 +83,18 @@ assert_eq "  B_LEFT 3->2"        "2" "$(bs get-left B)"
 echo
 echo "### 3. RAUC custom backend roundtrip (get/set primary + state)"
 bs init >/dev/null
+cmdline="${WORK}/cmdline"
+printf 'console=ttyS2 root=PARTLABEL=rootfs_a rauc.slot=A rw\n' >"${cmdline}"
+assert_eq "backend get-current = kernel rauc.slot" "A" \
+  "$(CERALIVE_BOOT_STATE_FILE="${STATE}" CERALIVE_BOOT_STATE_BIN="${STATE_HELPER}" \
+    CERALIVE_KERNEL_CMDLINE_FILE="${cmdline}" bash "${ADAPTER}" get-current)"
+printf 'console=ttyS2 root=PARTLABEL=rootfs_a rw\n' >"${cmdline}"
+current_rc=0
+CERALIVE_BOOT_STATE_FILE="${STATE}" CERALIVE_BOOT_STATE_BIN="${STATE_HELPER}" \
+  CERALIVE_KERNEL_CMDLINE_FILE="${cmdline}" bash "${ADAPTER}" get-current \
+  >/dev/null 2>&1 || current_rc=$?
+if [[ "${current_rc}" -ne 0 ]]; then ok "backend get-current fails closed without rauc.slot"; \
+  else bad "backend get-current guessed a booted slot without rauc.slot"; fi
 assert_eq "backend get-primary = A" "A" "$(adapter get-primary)"
 adapter set-primary B
 assert_eq "after set-primary B"     "B" "$(adapter get-primary)"
@@ -127,11 +140,13 @@ assert_contains "rock-5b cera_board.env: console rewritten : -> ," "${r5b}/cera_
 assert_contains "rock-5b cera_board.env: fdtfile from manifest" "${r5b}/cera_board.env" "fdtfile=rk3588-rock-5b-plus.dtb"
 assert_contains "rock-5b cera_board.env: board_id from manifest" "${r5b}/cera_board.env" "board_id=rock-5b-plus"
 assert_contains "opi5 cera_board.env: DIFFERENT fdtfile" "${opi}/cera_board.env" "fdtfile=rk3588s-orangepi-5-plus.dtb"
-assert_contains "extlinux selects rootfs_a by PARTLABEL" "${r5b}/extlinux/extlinux.conf" "root=PARTLABEL=rootfs_a"
-assert_contains "extlinux selects rootfs_b by PARTLABEL" "${r5b}/extlinux/extlinux.conf" "root=PARTLABEL=rootfs_b"
-assert_contains "extlinux console from manifest" "${r5b}/extlinux/extlinux.conf" "console=ttyS2,1500000"
+assert_contains "recovery script loads slot A from p2" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 2'
+assert_contains "recovery script loads slot B from p3" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 3'
+assert_contains "recovery script loads kernel from selected rootfs" "${BOOT_DIR}/recovery.scr.cmd" 'ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image'
 if [[ -f "${r5b}/boot.scr" ]]; then ok "boot.scr compiled (mkimage present)"; \
   else assert_contains "boot.scr.cmd staged (mkimage absent)" "${r5b}/boot.scr.cmd" "CeraLive A/B boot selector"; fi
+if [[ -f "${r5b}/recovery.scr" ]]; then ok "recovery.scr compiled (mkimage present)"; \
+  else assert_contains "recovery.scr.cmd staged (mkimage absent)" "${r5b}/recovery.scr.cmd" "CeraLive manual A/B recovery selector"; fi
 # differing DTB across boards proves nothing is hardcoded
 if ! diff -q "${r5b}/cera_board.env" "${opi}/cera_board.env" >/dev/null; then \
   ok "two boards render DIFFERENT cera_board.env (not hardcoded)"; \
@@ -239,6 +254,38 @@ assert_contains "created file carries a CRC line"  "${STATE}" "BOOT_CRC="
 #     reset — otherwise the bootcount the bootloader just decremented would be lost.
 printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=2\nBOOT_B_LEFT=3\n' >"${STATE}"
 assert_eq "legacy no-CRC well-formed file is trusted" "2" "$(bs get-left A)"
+
+printf 'BOOT_ORDER=A A\nBOOT_A_LEFT=2\nBOOT_B_LEFT=3\n' >"${STATE}"
+assert_eq "duplicate BOOT_ORDER heals to unique A B" "A B" "$(bs get-order)"
+
+printf 'BOOT_ORDER=B A\nBOOT_A_LEFT=3\nBOOT_B_LEFT=999\n' >"${STATE}"
+assert_eq "counter above budget heals to configured attempts" "3" "$(bs get-left B)"
+
+printf 'BOOT_ORDER=A\nBOOT_A_LEFT=1\nBOOT_B_LEFT=0\n' >"${STATE}"
+bs set-state A bad
+assert_eq "last bad slot remains the last-resort order" "A" "$(bs get-order)"
+assert_eq "last bad slot has zero attempts" "0" "$(bs get-left A)"
+assert_eq "all-bad state last-resorts deterministically" "A rootfs_a" "$(bs boot-select)"
+
+# 8h. Atomic replacement requires source and destination on the same filesystem.
+# Reject any cross-directory mv, then point the legacy staging override elsewhere;
+# init must still succeed because the temporary file belongs beside boot_state.txt.
+real_mv="$(command -v mv)"
+mv_guard_dir="${WORK}/mv-guard"; mkdir -p "${mv_guard_dir}" "${WORK}/elsewhere"
+cat >"${mv_guard_dir}/mv" <<'EOF'
+#!/usr/bin/env bash
+args=("$@")
+src="${args[${#args[@]}-2]}"
+dst="${args[${#args[@]}-1]}"
+[[ "$(dirname -- "${src}")" == "$(dirname -- "${dst}")" ]] || exit 97
+exec "${CERALIVE_TEST_REAL_MV}" "${args[@]}"
+EOF
+chmod +x "${mv_guard_dir}/mv"
+samefs_rc=0
+CERALIVE_BOOT_STATE_FILE="${STATE}" CERALIVE_BOOT_STATE_STAGEDIR="${WORK}/elsewhere" \
+  CERALIVE_TEST_REAL_MV="${real_mv}" PATH="${mv_guard_dir}:${PATH}" \
+  bash "${STATE_HELPER}" init >/dev/null || samefs_rc=$?
+assert_eq "state replacement stays on the boot filesystem" "0" "${samefs_rc}"
 
 echo
 echo "### 9-10. Streaming health gate — offline satisfiable, dead encoder fatal (T15)"

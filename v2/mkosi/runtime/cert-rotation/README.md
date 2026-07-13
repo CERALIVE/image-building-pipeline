@@ -6,7 +6,7 @@ first flash. The **root CA is immutable** — it can only change by reflashing.
 
 Full operator policy (fleet monitoring, recovery, root rollover):
 [`../../../docs/cert-rotation-policy.md`](../../../docs/cert-rotation-policy.md).
-PKI design: [`cert-work/rauc/README.txt`](../../../../../cert-work/rauc/README.txt).
+PKI design is owned by the externally managed release-PKI runbook (`rauc/README.txt`).
 
 ---
 

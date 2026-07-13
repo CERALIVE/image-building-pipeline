@@ -14,7 +14,7 @@
 #                   debian       — must be installed now (hard FAIL if missing)
 #                   armbian-bsp  — gstreamer1.0-rockchip1 / rockchip-multimedia-config
 #                                  (families/rk3588.yaml HW-accel + runtime)
-#                   first-party  — ceraui/cerastream/srtla/srt (CI: R2/gh; offline → WARN)
+#                   first-party  — CeraLive SRT/ceraui/cerastream/srtla-send-rs (CI: apt; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
@@ -55,7 +55,7 @@ ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
 # Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
 # absent → reported as WARN, never silent.
-FIRST_PARTY_PKGS=" ceraui cerastream srtla srt "
+FIRST_PARTY_PKGS=" libsrt1.5-ceralive ceraui cerastream srtla-send-rs "
 
 PASS=0; WARN=0; FAIL=0
 pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
@@ -142,9 +142,9 @@ main() {
     warn "Armbian-BSP packages not installed (need Armbian pool at build time): ${armbian_missing[*]}"
   fi
   if (( ${#firstparty_missing[@]} == 0 )); then
-    pass "first-party packages installed (ceraui/cerastream/srtla/srt)"
+    pass "first-party packages installed (libsrt1.5-ceralive/ceraui/cerastream/srtla-send-rs)"
   else
-    warn "first-party packages not installed: ${firstparty_missing[*]} — require R2/gh creds (CI mode); offline dev build cannot fetch them"
+    fail "first-party packages MISSING from rootfs: ${firstparty_missing[*]}"
   fi
 
   # ---- B. ceralive USER + GROUPS ----
@@ -163,6 +163,11 @@ main() {
   else
     fail "user 'ceralive' not present in /etc/passwd"
   fi
+  if [[ -x "${root}/usr/bin/sudo" ]]; then
+    pass "sudo binary present for CeraUI privileged helper"
+  else
+    fail "sudo binary missing — CeraUI add-on sudoers drop-in cannot execute"
+  fi
 
   # ---- C. SERVICES ENABLED ----
   log_info "--- C. services enabled ---"
@@ -180,6 +185,23 @@ main() {
     pass "all required services enabled (NetworkManager/ModemManager/ssh/chrony/avahi-daemon/systemd-resolved/ceralive-hostname)"
   else
     fail "service(s) not enabled: ${svc_missing[*]}"
+  fi
+  local cera_service="${root}/etc/systemd/system/ceralive.service"
+  if [[ -f "${cera_service}" ]]; then
+    local cera_exec
+    cera_exec="$(sed -n 's/^ExecStart=//p' "${cera_service}" | awk 'NR == 1 { print $1 }')"
+    if [[ -n "${cera_exec}" && -x "${root}${cera_exec}" ]]; then
+      pass "ceralive.service ExecStart target exists and is executable (${cera_exec})"
+    else
+      fail "ceralive.service ExecStart target missing/not executable: ${cera_exec:-<empty>}"
+    fi
+    if [[ -L "${root}/etc/systemd/system/multi-user.target.wants/ceralive.service" ]]; then
+      pass "ceralive.service enabled for multi-user boot"
+    else
+      fail "ceralive.service is not enabled for multi-user boot"
+    fi
+  else
+    warn "ceralive.service absent — first-party CeraUI package not installed"
   fi
 
   # ---- D. SRTLA SOURCE-POLICY ROUTING ----

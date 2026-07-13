@@ -36,7 +36,7 @@
 #
 # Env knobs (all optional; mirror dev-push / the rest of dev-sync):
 #   DRY_RUN=1                         log every build/ssh/rsync/rename, run nothing
-#   DEV_SYNC_CERAUI_DIR               CeraUI workspace root (default: <workspace>/CeraUI)
+#   DEV_SYNC_CERAUI_DIR               explicit CeraUI checkout path (required)
 #   DEV_SYNC_FRONTEND_DIST            local build output (default: <CeraUI>/dist/public)
 #   DEV_SYNC_FRONTEND_BUILD_CMD       build command (default: pnpm --filter frontend build)
 #   DEV_SYNC_FRONTEND_SKIP_BUILD=1    sync the existing dist without rebuilding
@@ -65,7 +65,8 @@ source "${SYNC_FE_HERE}/transport.sh"
 # Frontend-sync configuration (env-overridable; sane defaults from the layout).
 # ---------------------------------------------------------------------------
 # CeraUI lives as a sibling of image-building-pipeline under the workspace root.
-DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-${DEV_SYNC_WORKSPACE_ROOT}/CeraUI}"
+DEV_SYNC_CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-}"
+[[ -n "${DEV_SYNC_CERAUI_DIR}" ]] || die "DEV_SYNC_CERAUI_DIR must name the CeraUI checkout"
 # vite.config.ts builds the frontend to <CeraUI>/dist/public (outDir ../../dist/public).
 DEV_SYNC_FRONTEND_DIST="${DEV_SYNC_FRONTEND_DIST:-${DEV_SYNC_CERAUI_DIR}/dist/public}"
 # Build verb run from the CeraUI workspace root (package.json filters the frontend).

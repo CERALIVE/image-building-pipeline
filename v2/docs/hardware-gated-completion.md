@@ -315,58 +315,65 @@ bookworm versions proved insufficient) in `versions.yaml:163` and
 
 ---
 
-## Item 4 — Rock 5B+ Single-Slot to A/B Enablement
+## Item 4 — Rock 5B+ A/B Hardware Validation
 
 **DEFERRED.md ref:** not a separate DEFERRED.md item — this is a build-system
 gate tracked in `AGENTS.md` (KIOSK STACK / hardware-blocked) and in the OTA
 validation path.  
-**File to edit after OTA HW validation:** `v2/manifests/boards/rock-5b-plus.yaml`
-(A/B slot configuration)  
+**Software prerequisite:** `[EXISTS]` — the Rock manifest enables A/B, the factory
+image populates both slots, and the custom backend/bootcount contract is covered
+offline.
 **Blocked on:** physical Rock 5B+ completing a full OTA A/B rollback cycle on hardware
 
 ### Background
 
-The Rock 5B+ image uses RAUC A/B slots. The A/B enablement and the RAUC rollback
-path are specced and the offline proof exists (`v2/tests/qemu-x86.sh
---fallback-selftest` proves the rollback contract on x86). The hardware-gated step
-is running the real A/B rollback cycle on a physical Rock 5B+ to confirm the
-U-Boot extlinux slot-switch and the RAUC `bootloader=uboot` backend work as
-expected on the actual board.
+The Rock 5B+ production image uses symmetric RAUC A/B slots. The manifest resolves
+`single_slot_fallback: false`; `assemble-disk.sh` populates A and B from the same
+factory tree; and kernel arguments carry `rauc.slot=A|B`. RK3588 uses RAUC
+`bootloader=custom` because the vendor U-Boot has no persistent environment. Its
+`boot.scr` selector and FAT-backed boot state implement the three-attempt rollback.
+The remaining gate is a real arm64 bundle install, reboot, and rollback on silicon.
 
-> **SAFETY GATE — DO NOT ENABLE A/B BEFORE OTA HW VALIDATION.**
+> **SAFETY GATE — DO NOT CLAIM PRODUCTION HARDWARE VALIDATION YET.**
 >
-> Enabling A/B on a board that has not completed a real rollback cycle risks a
-> brick-loop: if the slot-switch or rollback fails on hardware, the device may
-> boot into an unrecoverable state with no fallback. The deliberate gate here is
-> not a documentation gap — it is a safety constraint. Do not remove or bypass
-> this warning.
+> A/B must be enabled and both slots populated to run this validation, but no
+> offline/mock result substitutes for the physical cycle. Do not ship the board
+> as hardware-validated until every acceptance item below passes.
 
 ### Commands (run on the physical Rock 5B+)
 
 ```bash
-# 1. Flash a known-good CeraLive image to the board (eMMC):
-#    (Use rkdeveloptool in maskrom mode — see docs/DEVICE-BRINGUP.md §4)
+# 1. Before flashing, verify the exact target capacity and all image contracts:
+TARGET=/dev/<confirmed-rock5b-media>
+TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
+bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 
-# 2. Confirm RAUC sees both slots:
+# 2. Flash the known-good A/B factory image using DEVICE-BRINGUP.md §4.
+#    A legacy single-slot image requires this full re-flash; it cannot migrate OTA.
+
+# 3. Confirm RAUC sees both slots and identifies A as booted:
 rauc status
 # -> should show slot.rootfs.0 (A) and slot.rootfs.1 (B), one marked booted
+findmnt -no SOURCE,FSTYPE,OPTIONS /boot
+# -> PARTLABEL=boot-backed device, vfat, rw (shared boot_state.txt)
 
-# 3. Install a test bundle into the inactive slot:
+# 4. Install a signed arm64 test bundle into the inactive slot:
 rauc install /path/to/ceralive-rock-5b-plus-<version>.raucb
 # -> should complete without error
 
-# 4. Reboot and confirm the board switched to the new slot:
+# 5. Reboot and confirm the board switched to the new slot:
+reboot
 rauc status
 # -> booted slot should now be the previously inactive one
 
-# 5. Simulate a bad boot (mark slot as failed) and confirm rollback:
-rauc mark bad booted
+# 6. Mark the booted test slot bad and confirm rollback:
+rauc status mark-bad booted
 reboot
 # -> after reboot, board should have rolled back to the previous good slot
 rauc status
 # -> booted slot should be the original good slot
 
-# 6. Run the consolidated real-HW suite to confirm the full gate:
+# 7. Run the consolidated real-HW suite to confirm the full gate:
 BOARD=rock-5b-plus BOARD_IP=<ip> \
 EVIDENCE_DIR=test-results/task-38-smoke \
 ./v2/tests/realhw-suite.sh
@@ -375,10 +382,13 @@ EVIDENCE_DIR=test-results/task-38-smoke \
 ### Checklist
 
 - [ ] Board flashed with a CeraLive image and boots to login.
+- [ ] Preflash gate passed with the exact destination capacity.
 - [ ] `rauc status` shows both A and B slots.
+- [ ] `/boot` is the shared `PARTLABEL=boot` vfat mounted read-write.
+- [ ] Both slots contain the factory baseline before the first OTA.
 - [ ] RAUC bundle installed into inactive slot without error.
 - [ ] Board rebooted into the new slot (slot-switch confirmed).
-- [ ] Bad-boot simulation: `rauc mark bad booted` + reboot → rolled back to good slot.
+- [ ] Bad-slot simulation: `rauc status mark-bad booted` + reboot → rolled back.
 - [ ] `v2/tests/realhw-suite.sh` (LIVE mode) exits 0.
 - [ ] Evidence saved to `test-results/task-38-smoke/` and
       `test-results/rock5b-ab-rollback-<date>.txt`.
@@ -394,7 +404,9 @@ No brick-loop observed across at least two full A/B cycles.
 Complete a physical A/B OTA cycle on a Radxa Rock 5B+ — install a bundle, reboot
 into the new slot, simulate a bad boot, confirm rollback to the good slot. Capture
 `rauc status` output and the realhw-suite evidence to `test-results/`. Only after
-this gate passes is it safe to treat A/B as confirmed working on this board.
+this gate passes is it safe to treat A/B as hardware-confirmed on this board. Do
+not change the manifest back to single-slot; that would make the required test
+impossible and would not provide a migration path for existing disks.
 
 ---
 
@@ -505,11 +517,9 @@ as a GitHub Actions self-hosted runner with label `ceralive-rk3588`
 
 ### Background
 
-`realhw-job.yml` is the consolidated real-hardware acceptance gate. It runs
-`v2/tests/realhw-suite.sh` (LIVE mode) on a physical RK3588 board via a
-self-hosted runner labeled `ceralive-rk3588`. The workflow is fully authored and
-activated (copied to `.github/workflows/` from `v2/ci/realhw-job.yml`). It
-cannot run until the runner is provisioned and the board is attached.
+`realhw-job.yml` is the candidate-bound real-hardware acceptance gate. The
+release workflow builds and uploads the exact raw image, signed good and rollback
+probe bundles, keyring, and digests before invoking it on a physical RK3588 board.
 
 The workflow requires these GitHub Actions runner variables on the
 `ceralive-rk3588` runner (set via the repo's Settings → Actions → Variables):
@@ -519,12 +529,8 @@ The workflow requires these GitHub Actions runner variables on the
 | `CERALIVE_RK3588_BOARD_IP` | IP address of the attached RK3588 board |
 | `CERALIVE_RK3588_SSH_USER` | SSH user on the board (default: `ceralive`) |
 | `CERALIVE_RK3588_SSH_PORT` | SSH port (default: `22`) |
-| `CERALIVE_RK3588_BUNDLE_DIR` | Path to RAUC bundle directory on the runner |
-| `CERALIVE_RK3588_LAST_GOOD_IMAGE` | Path to last-known-good `.raw` for maskrom recovery |
-| `CERALIVE_RK3588_SERIAL_DEV` | Serial device for boot log capture (default: `/dev/ttyUSB0`) |
-| `CERALIVE_RK3588_FLASH_IMAGE` | (Optional) Path to image to flash before each run |
-| `CERALIVE_RK3588_DEV_DEB_DIR` | (Optional) Path to dev `.deb` dir for dev-loop step |
-| `CERALIVE_RK3588_POWER_HELPER` | (Optional) Script to power-cycle board into maskrom |
+| `CERALIVE_RK3588_POWER_HELPER` | Executable that powers the board into maskrom mode |
+| `CERALIVE_RK3588_LOADER` | Exact RK3588 loader binary used by `rkdeveloptool db` |
 
 ### Provisioning steps
 
@@ -546,10 +552,7 @@ sudo apt-get install -y rkdeveloptool openssh-client
 #    GitHub repo → Settings → Actions → Runners
 #    -> ceralive-rk3588 should show as "Idle"
 
-# 6. Trigger a manual run to verify the workflow executes:
-gh workflow run realhw-job.yml \
-  --field board=rock-5b-plus \
-  --field board_ip=<ip>
+# 6. Push a release branch or tag after the release secrets are configured.
 
 # 7. Check the run result:
 gh run list --workflow=realhw-job.yml --limit 5
@@ -560,18 +563,21 @@ gh run view <run-id> --log
 
 The workflow runs these steps in order:
 
-1. **Preflight** — SSH to the board; if unreachable, attempt maskrom recovery
-   using `CERALIVE_RK3588_LAST_GOOD_IMAGE`.
-2. **Serial capture** — starts `cat /dev/ttyUSB0` in the background if the
-   device is present.
-3. **Flash** (optional) — `ssh dd` the image-under-test to eMMC if
-   `CERALIVE_RK3588_FLASH_IMAGE` is set.
-4. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
+1. **Candidate preflash** — verify the exact raw digest, A/B media, production
+   bundle/keyring contract, and destination capacity.
+2. **Required flash** — digest a private candidate snapshot, use that same file
+   for preflight and the maskrom write, then read and SHA-256 the exact candidate
+   sector range before reset. The gate requires the SSH-to-USB disconnect, one
+   Rockchip target, and post-boot reconnect to the same media CID within its retry
+   budget. Its run-local SSH host-key record is rotated only after the immutable
+   readback succeeds. All `rkdeveloptool` operations are owned and reaped so an
+   interruption cannot leave a flash/readback child or scratch candidate behind.
+   Post-boot mutable bytes are not compared to the factory raw, and identity
+   artifact filenames are validated before entering the line-oriented record.
+3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
    init, dev-loop sanity (optional), RAUC A/B rollback.
-5. **Diagnostics** — always runs; collects `rauc status` + `journalctl` from the
-   board.
-6. **Upload artifacts** — uploads `artifacts/` (serial log, suite log, evidence
-   bundle) with 14-day retention.
+4. **Upload artifacts** — uploads candidate identity and suite evidence with
+   14-day retention.
 
 ### Checklist
 
@@ -580,25 +586,24 @@ The workflow runs these steps in order:
 - [ ] GitHub Actions runner agent installed and labeled `ceralive-rk3588`.
 - [ ] Runner shows as "Idle" in GitHub repo Settings → Actions → Runners.
 - [ ] All required runner variables set (see table above).
-- [ ] `gh workflow run realhw-job.yml` triggered manually.
+- [ ] A release branch or tag produced the candidate-bound realhw job.
 - [ ] Workflow completes without error; `realhw-suite.sh` exits 0.
-- [ ] Artifacts uploaded: `artifacts/realhw-suite.log`,
-      `artifacts/task-38-smoke/`, `artifacts/board-diagnostics.log`.
-- [ ] Nightly schedule (`0 2 * * *`) confirmed active in GitHub Actions.
+- [ ] Artifacts uploaded: `artifacts/candidate-identity.txt`,
+      `artifacts/realhw-suite.log`, and `artifacts/realhw/`.
 - [ ] Evidence saved to `test-results/ceralive-rk3588-runner-<date>.txt`.
 
 ### Acceptance
 
-`gh run list --workflow=realhw-job.yml` shows at least one successful run
+`gh run list --workflow=release.yml` shows at least one successful run
 (conclusion: `success`). The uploaded artifacts include `realhw-suite.log` with
-a passing exit code and an evidence bundle under `artifacts/task-38-smoke/`.
-The nightly schedule is active and the runner is labeled `ceralive-rk3588`.
+a passing exit code and an evidence bundle under `artifacts/realhw/`.
+The evidence names the candidate artifact digest/raw SHA-256 and the runner is labeled `ceralive-rk3588`.
 
 ### Unblock condition
 
 Provision a Linux host with a physical RK3588 board attached. Register it as a
 GitHub Actions self-hosted runner with label `ceralive-rk3588`. Set the required
-runner variables. Trigger `realhw-job.yml` manually and confirm it runs
+runner variables and release secrets. Trigger a release candidate and confirm it runs
 `v2/tests/realhw-suite.sh` end-to-end with a passing exit code and uploaded
 artifacts.
 
@@ -614,12 +619,11 @@ artifacts.
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence placeholders (Item 5) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (Item 1) |
 | `.github/workflows/realhw-job.yml` | Real-HW CI workflow (Item 6) |
-| `v2/ci/realhw-job.yml` | Canonical source for the real-HW workflow (keep in sync) |
 | `v2/tests/realhw-suite.sh` | Consolidated real-HW acceptance suite |
 | `cerastream/docs/notes/hardware-validation.md` | cerastream per-platform encoder validation matrix |
 
-The cerastream hardware-gated encoder validation (Jetson, RK3588, N100 HAL
-property mapping + real encode) is tracked separately in
+The cerastream hardware-gated encoder validation (RK3588 now; x86/N100 when in hand;
+Jetson DEFERRED — not currently planned) is tracked separately in
 `cerastream/docs/notes/hardware-validation.md`. That runbook is the authoritative
 checklist for encoder validation; this document does not duplicate it. The
 `ceralive-rk3588` runner (Item 6) is the shared infrastructure that enables both

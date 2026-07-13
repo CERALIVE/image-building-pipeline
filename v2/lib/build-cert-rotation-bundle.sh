@@ -23,7 +23,7 @@
 #
 # SIGNING (identical trust structure to lib/build-bundle.sh, task 28)
 #   The bundle is signed with the CURRENT release leaf (cert-work/rauc/
-#   leaf-signing.key) + the CURRENT chain.pem — NEVER the root key. A device with
+#   leaf-signing.key) + the CURRENT intermediate chain.pem — NEVER the root key. A device with
 #   the unchanged root in its keyring accepts it (leaf -> intermediate -> root).
 #   This is "pre-expiry rotation": you sign with the still-valid current leaf to
 #   deliver the next one. (The no-root-sign guard from build-bundle.sh is enforced.)
@@ -201,7 +201,7 @@ build-cert-rotation-bundle() {
   local board="$1" new_int="$2" new_leaf="$3" new_key="$4"
   [[ -n "${board}" ]] || die "empty board"
 
-  # CURRENT signing material (cert-work/rauc): leaf-signing.key + chain.pem + root.
+  # CURRENT signing material (cert-work/rauc): leaf-signing.key + intermediate chain.pem + root.
   assert_pki
   # NEW certs gate: must chain to the immutable root, be in-date, key matches cert.
   assert_new_certs "${new_int}" "${new_leaf}" "${new_key}"

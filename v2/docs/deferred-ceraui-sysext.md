@@ -105,11 +105,10 @@ srtla (and historically ceracoder, retired 2026-06-11):
   unchanged and still required, because CeraUI holds **in-process native FFI** to
   srtla and must reload after its binaries swap.
 
-## FFI / sibling-checkout note (unchanged by this migration)
+## Native binding note (unchanged by this migration)
 
-CeraUI's
-`link:../../../srtla/bindings/typescript` sibling-checkout (ARCHITECTURE.md §5) is a
-**CeraUI build-time** concern — the bindings are compiled into the Bun binary before
+CeraUI's registry-provided native binding is a **CeraUI build-time** concern —
+the bindings are compiled into the Bun binary before
 packaging. The sysext migration does **not** touch that layout, and neither backend
 (appfs today, sysext later) changes how the FFI resolves on-device: srtla
 binaries come from their sysext into the merged `/usr/bin`, and `libsrt` comes from

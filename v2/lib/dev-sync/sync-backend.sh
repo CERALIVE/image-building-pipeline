@@ -68,9 +68,8 @@ source "${SYNC_BACKEND_HERE}/../shared/rollback-lib.sh"
 # ---------------------------------------------------------------------------
 # Settled config for this component.
 # ---------------------------------------------------------------------------
-# CeraUI lives as a sibling of image-building-pipeline under the workspace root
-# (config.sh resolves DEV_SYNC_WORKSPACE_ROOT to that parent).
-CERAUI_DIR="${DEV_SYNC_WORKSPACE_ROOT}/CeraUI"
+CERAUI_DIR="${DEV_SYNC_CERAUI_DIR:-}"
+[[ -n "${CERAUI_DIR}" ]] || die "DEV_SYNC_CERAUI_DIR must name the CeraUI checkout"
 BACKEND_DIR="${CERAUI_DIR}/apps/backend"
 # `bun run build:backend-only` (run from apps/backend) emits ../../dist/ceralive.
 BUILT_BINARY="${CERAUI_DIR}/dist/ceralive"

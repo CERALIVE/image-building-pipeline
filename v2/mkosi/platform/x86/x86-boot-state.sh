@@ -6,7 +6,7 @@
 # SAME CLI, SAME RAUC semantics — only the STORAGE backend differs.
 #
 # WHY THIS EXISTS (task 33, decision D1 platform = x86; analogous to D3 on RK3588):
-# x86 boots via UEFI -> GRUB. Unlike the RK3588 vendor U-Boot (2017.09,
+# x86 boots via UEFI -> GRUB. Unlike the staged RK3588 vendor U-Boot
 # ENV_IS_NOWHERE — no working fw_setenv, hence the RK text-file backend), GRUB has
 # FULL persistent-env support through the `grubenv` block + `grub-editenv`. So the
 # A/B state lives in the grubenv file on the EFI System Partition, written by BOTH

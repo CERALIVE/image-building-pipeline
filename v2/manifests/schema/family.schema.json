@@ -56,7 +56,7 @@
       "uniqueItems": true
     },
     "rauc_bootloader_adapter": {
-      "description": "RAUC bootloader backend for A/B slot selection. rk3588 defaults to 'custom' because vendor U-Boot 2017.09 lacks fw_setenv (decision D3). 'uboot' = standard fw_setenv adapter; 'custom' = raw GPT bootcount approach; 'efi'/'grub' = x86 targets.",
+      "description": "RAUC bootloader backend for A/B slot selection. rk3588 defaults to 'custom' because the staged vendor U-Boot lacks persistent fw_setenv (decision D3). 'uboot' = standard fw_setenv adapter; 'custom' = FAT-file bootcount approach; 'efi'/'grub' = x86 targets.",
       "type": "string",
       "enum": ["uboot", "custom", "efi", "grub"],
       "default": "custom"

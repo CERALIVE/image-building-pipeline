@@ -7,7 +7,7 @@
 # PKI tasks:
 #   1. the device KEYRING  — the immutable root CA (cert-work/rauc/root-ca.pem)
 #      that every signed .raucb is verified against → /etc/rauc/ceralive-keyring.pem
-#   2. rauc.service         — enabled so the OS-update client is live at boot.
+#   2. rauc.service         — installed so the D-Bus-activated OS-update client is available.
 # It also drops a FALLBACK /etc/rauc/system.conf for builds where the board-aware
 # generator did NOT run (x86 / parity / no-boot-BSP); on a real arm64 device,
 # install-boot.sh has already written the authoritative board-keyed system.conf
@@ -118,14 +118,13 @@ EOF
   chmod 0644 "${RAUC_SYSTEM_CONF}"
 }
 
-# Enable the RAUC client. rauc.service is D-Bus-activated (Type=dbus, no [Install]
+# Verify the RAUC client. rauc.service is D-Bus-activated (Type=dbus, no [Install]
 # section), so `systemctl enable` on it legitimately fails — that is NOT an error,
 # the unit is reachable on demand. A MISSING unit, however, means the `rauc`
 # package (shared.list) was not installed → a parity failure (fail loud).
 enable_rauc_service() {
-  if ! systemctl list-unit-files rauc.service >/dev/null 2>&1 \
-     || ! systemctl list-unit-files rauc.service | grep -q '^rauc\.service'; then
-    die "rauc.service not present — the 'rauc' package (shared.list) is not installed; cannot make the image update-capable"
+  if [[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]; then
+    die "rauc.service not present — the 'rauc-service' package (shared.list) is not installed; cannot make the image update-capable"
   fi
   if systemctl enable rauc.service 2>/dev/null; then
     log_info "rauc.service enabled"

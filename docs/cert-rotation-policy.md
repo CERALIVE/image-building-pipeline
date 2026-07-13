@@ -3,7 +3,7 @@
 How the RAUC signing PKI is rotated across the fleet **without a reflash** — and the
 one case (root) where a reflash is the only option, by design.
 
-- PKI design & chain: [`cert-work/rauc/README.txt`](../../cert-work/rauc/README.txt)
+- PKI design & chain: externally managed release-PKI runbook (`rauc/README.txt`)
 - Device implementation: [`v2/mkosi/runtime/cert-rotation/README.md`](../v2/mkosi/runtime/cert-rotation/README.md)
 - Builder: [`v2/lib/build-cert-rotation-bundle.sh`](../v2/lib/build-cert-rotation-bundle.sh)
 
@@ -34,13 +34,16 @@ that unchanged root is accepted; nothing else is. This is the entire security mo
 ## 2. Why leaf/intermediate rotation needs no device change
 
 RAUC verifies every bundle's CMS signature as `leaf → intermediate → root(keyring)`.
-The leaf+intermediate travel **inside** each bundle (`chain.pem`); only the root is
-on the device. So:
+The leaf signer and intermediate chain travel **inside** each bundle (`chain.pem`
+supplies the intermediate; the builder passes the leaf separately); only the root
+is on the device. So:
 
 - **New leaf** under the current intermediate → bundles signed with it verify on any
   device that still has the root. Nothing to push for verification to keep working.
-- **New intermediate** under the **same** root → ship a bundle whose embedded
-  `chain.pem` is the new intermediate+leaf; it still terminates at the device's root.
+- **New intermediate** under the **same** root → ship a bundle whose embedded CMS
+  carries the new intermediate and signer leaf; the builder receives the
+  intermediate through `chain.pem` and the leaf separately. It still terminates at
+  the device's root.
 
 A dedicated **cert-rotation bundle** additionally writes the new
 `intermediate.pem`/`leaf.pem` to `/data/ceralive/certs/` so the device has the current
@@ -58,7 +61,7 @@ v2/lib/build-cert-rotation-bundle.sh <board> new-intermediate.pem new-leaf.pem n
 ```
 
 The builder **refuses** to produce a bundle whose new intermediate/leaf does not
-verify to the immutable `cert-work/rauc/root-ca.pem`, or that is expired, or whose
+verify to the immutable injected release `root-ca.pem`, or that is expired, or whose
 new leaf.key does not match new leaf.pem. It signs with the **current** leaf
 (`cert-work/rauc/leaf-signing.key`) + `chain.pem` — **never** the root key (the
 no-root-sign guard from `build-bundle.sh` is enforced). No private key is shipped to

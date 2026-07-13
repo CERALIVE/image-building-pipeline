@@ -1,168 +1,67 @@
-# CeraLive v2 — REAL-HARDWARE job (RK3588 on a self-hosted runner).
-#
-# ACTIVATED COPY. Authored/reviewed in v2/ci/realhw-job.yml; copied here because
-# GitHub only runs reusable workflows + schedules from .github/workflows/. Keep
-# the two in sync (v2/ci/ is the canonical source). See v2/ci/runner-setup.md §8.
-#
-# Runs the LIVE acceptance gate on a PHYSICAL RK3588 board attached to a
-# self-hosted runner labeled `ceralive-rk3588`, via the ONE consolidated suite:
-#   * v2/tests/realhw-suite.sh   (LIVE) — orchestrates, in sequence:
-#       1. boot+service     (realhw-smoke.sh)   — boot/service/binary/quirk + parity
-#       2. encode-path init (cerastream/srtla_send --version)
-#       3. dev-loop sanity  (dev-push < 120s; optional, needs DEV_DEB_DIR)
-#       4. RAUC A/B rollback (rauc-rollback.sh) — bad → fallback, good → commit
-#     One aggregated exit code + an evidence bundle under artifacts/task-38-smoke/.
-#
-# Triggers: workflow_call (callers like release.yml), a nightly schedule, and
-# manual dispatch — NEVER on every PR (scarce physical HW stays off the PR path).
-
-name: v2 Real-HW (RK3588)
+name: v2 Real-HW candidate gate (RK3588)
 
 on:
   workflow_call:
     inputs:
-      board:
-        description: 'RK3588 board manifest name (manifests/boards/<board>.yaml)'
-        type: string
-        required: false
-        default: rock-5b-plus
-      board_ip:
-        description: 'LIVE board IP for SSH (defaults to the BOARD_IP runner var)'
-        type: string
-        required: false
-        default: ''
-  # Nightly drift catcher — 02:00 UTC.
-  schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-    inputs:
-      board:
-        description: 'RK3588 board manifest name'
-        type: string
-        required: false
-        default: rock-5b-plus
+      board: {type: string, required: true}
+      board_ip: {type: string, required: false, default: ''}
+      candidate_artifact_name: {type: string, required: true}
+      candidate_artifact_digest: {type: string, required: true}
+      candidate_raw_filename: {type: string, required: true}
+      candidate_raw_sha256: {type: string, required: true}
+      candidate_bundle_filename: {type: string, required: true}
+      candidate_keyring_filename: {type: string, required: true}
+      candidate_commit: {type: string, required: true}
 
 permissions:
   contents: read
 
-# Serialize: there is ONE physical board. Never run two HW jobs against it at
-# once; let an in-flight HW run finish rather than cancel mid-flash.
 concurrency:
-  group: realhw-rk3588-${{ inputs.board || 'rock-5b-plus' }}
+  group: realhw-rk3588-${{ inputs.board }}
   cancel-in-progress: false
 
 jobs:
-  realhw-smoke:
-    name: real-HW suite (${{ inputs.board || 'rock-5b-plus' }})
+  realhw:
     runs-on: [self-hosted, ceralive-rk3588]
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      BOARD: ${{ inputs.board || 'rock-5b-plus' }}
+      BOARD: ${{ inputs.board }}
       BOARD_IP: ${{ inputs.board_ip || vars.CERALIVE_RK3588_BOARD_IP }}
       SSH_USER: ${{ vars.CERALIVE_RK3588_SSH_USER || 'ceralive' }}
       SSH_PORT: ${{ vars.CERALIVE_RK3588_SSH_PORT || '22' }}
-      BUNDLE_DIR: ${{ vars.CERALIVE_RK3588_BUNDLE_DIR }}
-      LAST_GOOD_IMAGE: ${{ vars.CERALIVE_RK3588_LAST_GOOD_IMAGE }}
-      SERIAL_DEV: ${{ vars.CERALIVE_RK3588_SERIAL_DEV || '/dev/ttyUSB0' }}
-      SERIAL_BAUD: '1500000'
+      CERALIVE_RK3588_POWER_HELPER: ${{ vars.CERALIVE_RK3588_POWER_HELPER }}
+      RK3588_LOADER: ${{ vars.CERALIVE_RK3588_LOADER }}
     steps:
       - uses: actions/checkout@v7
-
-      # Preflight: ensure the board is ALIVE before touching it; maskrom-recover
-      # the last-known-good image only if it is dead (runner-setup.md §7).
-      - name: Preflight — board reachable (else maskrom-recover last-known-good)
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.candidate_artifact_name }}
+          path: candidate
+      - name: Verify, flash, reconnect, and prove media identity
         run: |
           set -euo pipefail
-          if [[ -z "${BOARD_IP}" ]]; then
-            echo "::error::BOARD_IP unset — set the CERALIVE_RK3588_BOARD_IP runner var or pass board_ip input"
-            exit 1
-          fi
-          if ssh -o BatchMode=yes -o ConnectTimeout=10 \
-                 -o StrictHostKeyChecking=accept-new \
-                 -p "${SSH_PORT}" "${SSH_USER}@${BOARD_IP}" true 2>/dev/null; then
-            echo "board alive at ${BOARD_IP}"
-          else
-            echo "::warning::board unreachable — attempting maskrom recovery of last-known-good"
-            if [[ -n "${LAST_GOOD_IMAGE}" && -f "${LAST_GOOD_IMAGE}" ]] && command -v rkdeveloptool >/dev/null; then
-              "${CERALIVE_RK3588_POWER_HELPER:-true}" maskrom || true
-              rkdeveloptool ld
-              rkdeveloptool db "${RK3588_LOADER:-/opt/ceralive/rk3588_loader.bin}"
-              rkdeveloptool wl 0 "${LAST_GOOD_IMAGE}"
-              rkdeveloptool rd
-            else
-              echo "::error::board down and no recovery image/tooling on the runner — human escalation required"
-              exit 1
-            fi
-          fi
-
-      # Capture serial for the whole run so a failed boot is debuggable
-      # (runner-setup.md §5.2). Non-fatal if the UART isn't present.
-      - name: Start serial capture
-        run: |
-          set -uo pipefail
+          [[ "${{ inputs.candidate_artifact_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           mkdir -p artifacts
-          if [[ -c "${SERIAL_DEV}" ]]; then
-            stty -F "${SERIAL_DEV}" "${SERIAL_BAUD}" raw -echo || true
-            ( cat "${SERIAL_DEV}" > artifacts/serial-boot.log 2>&1 & echo $! > artifacts/serial.pid )
-            echo "capturing serial from ${SERIAL_DEV} @ ${SERIAL_BAUD}"
-          else
-            echo "::warning::${SERIAL_DEV} not present — skipping serial capture"
-          fi
-
-      # Flash the image-under-test (opt-in via FLASH_IMAGE runner var). Default
-      # path is SSH `dd`; otherwise smoke-test the CURRENT on-board image.
-      - name: Flash image-under-test (optional, SSH dd fast-path)
-        if: ${{ vars.CERALIVE_RK3588_FLASH_IMAGE != '' }}
+          ./v2/ci/verify-and-flash-candidate.sh \
+            --image "candidate/${{ inputs.candidate_raw_filename }}" \
+            --bundle "candidate/${{ inputs.candidate_bundle_filename }}" \
+            --keyring "candidate/${{ inputs.candidate_keyring_filename }}" \
+            --board "${BOARD}" --board-ip "${BOARD_IP}" \
+            --candidate-commit "${{ inputs.candidate_commit }}" \
+            --image-sha256 "${{ inputs.candidate_raw_sha256 }}" \
+            --identity-out artifacts/candidate-identity.txt
+          printf 'artifact_digest=%s\n' '${{ inputs.candidate_artifact_digest }}' >> artifacts/candidate-identity.txt
+      - name: Run physical A/B acceptance suite
         run: |
           set -euo pipefail
-          img="${{ vars.CERALIVE_RK3588_FLASH_IMAGE }}"
-          echo "flashing ${img} → board eMMC via ssh dd"
-          if [[ "${img}" == *.xz ]]; then
-            xz -dc "${img}" | ssh -o BatchMode=yes -p "${SSH_PORT}" \
-              "${SSH_USER}@${BOARD_IP}" 'sudo dd of=/dev/mmcblk0 bs=4M conv=fsync status=progress'
-          else
-            ssh -o BatchMode=yes -p "${SSH_PORT}" "${SSH_USER}@${BOARD_IP}" \
-              'sudo dd of=/dev/mmcblk0 bs=4M conv=fsync status=progress' < "${img}"
-          fi
-          ssh -o BatchMode=yes -p "${SSH_PORT}" "${SSH_USER}@${BOARD_IP}" 'sudo reboot' || true
-          for _ in $(seq 1 18); do
-            sleep 5
-            ssh -o BatchMode=yes -o ConnectTimeout=10 -p "${SSH_PORT}" \
-              "${SSH_USER}@${BOARD_IP}" true 2>/dev/null && break
-          done
-
-      # THE GATE — the consolidated suite. ONE invocation runs all four
-      # sub-harnesses, aggregates, and emits a single exit code + evidence bundle.
-      - name: realhw-suite.sh (LIVE — consolidated boot/encode/dev-loop/rollback)
-        run: |
-          set -euo pipefail
-          chmod +x v2/tests/realhw-suite.sh \
-                   v2/tests/realhw-smoke.sh v2/tests/rauc-rollback.sh v2/dev-push
-          BOARD="${BOARD}" BOARD_IP="${BOARD_IP}" \
-          SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
-          BUNDLE_DIR="${BUNDLE_DIR}" \
-          DEV_DEB_DIR="${CERALIVE_RK3588_DEV_DEB_DIR:-}" \
-          EVIDENCE_DIR="${PWD}/artifacts/task-38-smoke" \
-          ./v2/tests/realhw-suite.sh 2>&1 | tee artifacts/realhw-suite.log
-
-      - name: Collect diagnostics (always)
-        if: ${{ always() }}
-        run: |
-          set -uo pipefail
-          [[ -f artifacts/serial.pid ]] && kill "$(cat artifacts/serial.pid)" 2>/dev/null || true
-          if [[ -n "${BOARD_IP}" ]]; then
-            ssh -o BatchMode=yes -o ConnectTimeout=10 -p "${SSH_PORT}" \
-              "${SSH_USER}@${BOARD_IP}" 'rauc status 2>/dev/null; echo "---"; \
-              journalctl -b --no-pager -n 200 2>/dev/null' \
-              > artifacts/board-diagnostics.log 2>&1 || \
-              echo "board unreachable at diagnostics collection" > artifacts/board-diagnostics.log
-          fi
-
-      - name: Upload artifacts
+          BOARD="${BOARD}" BOARD_IP="${BOARD_IP}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
+            BUNDLE_DIR="${PWD}/candidate" EVIDENCE_DIR="${PWD}/artifacts/realhw" \
+            ./v2/tests/realhw-suite.sh 2>&1 | tee artifacts/realhw-suite.log
+      - name: Upload candidate-bound evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: realhw-${{ env.BOARD }}-${{ github.run_id }}
+          name: realhw-${{ inputs.board }}-${{ github.run_id }}
           path: artifacts/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14

@@ -1,32 +1,196 @@
-# CeraLive — release-branch real-HW gate.
-#
-# On every push to a release branch (or a vX.Y.Z tag) the consolidated RK3588
-# smoke suite MUST pass on real silicon before the release proceeds. This is the
-# release-branch trigger for the reusable real-HW job (the nightly schedule lives
-# in realhw-job.yml itself). Physical HW stays OFF the per-PR path — it runs here
-# only at release time and nightly.
-
-name: Release real-HW gate
+name: Release candidate real-HW gate
 
 on:
   push:
-    branches:
-      - 'release/**'
-      - 'release-*'
-    tags:
-      - 'v*'
+    branches: ['release/**', 'release-*']
+    tags: ['v*']
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false  # release/real-HW gate — never cancel mid-run
+  cancel-in-progress: false
 
 jobs:
+  candidate:
+    runs-on: [self-hosted, ceralive-image-builder]
+    env:
+      CERALIVE_MKOSI_CACHE_DIR: v2/mkosi/cache/rock-5b-plus
+      CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      raw_filename: ${{ steps.meta.outputs.raw_filename }}
+      raw_sha256: ${{ steps.meta.outputs.raw_sha256 }}
+      bundle_filename: ${{ steps.meta.outputs.bundle_filename }}
+      keyring_filename: ${{ steps.meta.outputs.keyring_filename }}
+      commit: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve release cache keys
+        id: cache-meta
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+          MKOSI_TOOL_KEY: ${{ hashFiles('v2/.mkosi-version') }}
+          MKOSI_SOURCE_KEY: >-
+            ${{ hashFiles('v2/build', 'v2/lib/**/*.sh', 'v2/mkosi/**/*', 'v2/manifests/**/*', 'v2/ci/Dockerfile') }}
+          BUILDER_SOURCE_KEY: >-
+            ${{ hashFiles('v2/ci/Dockerfile', 'v2/ci/requirements-ci.txt', 'v2/.mkosi-version') }}
+        run: |
+          set -euo pipefail
+          board=rock-5b-plus
+          repository="${REPOSITORY//\//-}"
+          builder_scope="ceralive-builder-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}"
+          builder_image="ceralive-mkosi-builder:${BUILDER_SOURCE_KEY}"
+          mkosi_prefix="mkosi-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}-source-"
+          {
+            echo "builder_scope=${builder_scope}"
+            echo "builder_image=${builder_image}"
+            echo "builder_source_key=${BUILDER_SOURCE_KEY}"
+            echo "mkosi_key=${mkosi_prefix}${MKOSI_SOURCE_KEY}"
+            echo "mkosi_restore_prefix=${mkosi_prefix}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Set up BuildKit
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/setup-buildx-action@v4
+      - name: Build canonical mkosi builder with reusable layers
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/build-push-action@v7
+        with:
+          context: v2/ci
+          file: v2/ci/Dockerfile
+          tags: ${{ steps.cache-meta.outputs.builder_image }}
+          labels: |
+            org.ceralive.builder.source-key=${{ steps.cache-meta.outputs.builder_source_key }}
+          load: true
+          cache-from: type=gha,scope=${{ steps.cache-meta.outputs.builder_scope }}
+          cache-to: type=gha,mode=min,scope=${{ steps.cache-meta.outputs.builder_scope }}
+      - name: Restore board-scoped mkosi build cache
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
+          restore-keys: ${{ steps.cache-meta.outputs.mkosi_restore_prefix }}
+      - name: Materialize release trust inputs
+        env:
+          RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
+          ARMBIAN_APT_KEYRING_B64: ${{ secrets.ARMBIAN_APT_KEYRING_B64 }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${RAUC_RELEASE_PKI_TAR_B64}" | base64 -d | tar -xz -C "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
+      - name: Build exact production candidate
+        env:
+          CERALIVE_BUILD_MODE: production
+          CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
+          APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
+          MKOSI_BUILDER_IMAGE: ${{ steps.cache-meta.outputs.builder_image }}
+        run: ./v2/build rock-5b-plus
+      - name: Build candidate-bound signed rollback probe
+        env:
+          CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+          COMPATIBLE_STRING: ceralive-rock-5b-plus
+        run: |
+          set -euo pipefail
+          mapfile -t roots < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.rootfs.tar')
+          (( ${#roots[@]} == 1 ))
+          mkdir -p "${RUNNER_TEMP}/rollback-root/etc/systemd/system" "${RUNNER_TEMP}/rollback-bundle"
+          tar -xf "${roots[0]}" -C "${RUNNER_TEMP}/rollback-root"
+          ln -sf /dev/null "${RUNNER_TEMP}/rollback-root/etc/systemd/system/ceralive.service"
+          BUNDLE_VERSION="${GITHUB_SHA}-rollback-probe" \
+            BUNDLE_OUT_DIR="${RUNNER_TEMP}/rollback-bundle" BUNDLE_TS=bad \
+            ./v2/lib/build-bundle.sh rock-5b-plus "${RUNNER_TEMP}/rollback-root"
+      - id: meta
+        name: Seal candidate metadata
+        run: |
+          set -euo pipefail
+          mapfile -t raws < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
+          mkdir candidate
+          cp "${raws[0]}" "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
+          cp "${bundles[0]}" candidate/good.raucb
+          cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
+          raw_name="$(basename "${raws[0]}")"; bundle_name=good.raucb
+          sha256sum "candidate/${raw_name}" > candidate/raw.sha256
+          {
+            echo "artifact_name=rock-5b-plus-${GITHUB_SHA}"
+            echo "raw_filename=${raw_name}"
+            echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
+            echo "bundle_filename=${bundle_name}"
+            echo "keyring_filename=root-ca.pem"
+          } >> "${GITHUB_OUTPUT}"
+      - id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Bound board-scoped mkosi cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        run: |
+          set -euo pipefail
+          cache_dir="${CERALIVE_MKOSI_CACHE_DIR}"
+          max_bytes="${CERALIVE_MKOSI_CACHE_MAX_BYTES}"
+          builder_image="${{ steps.cache-meta.outputs.builder_image }}"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          [[ "${cache_dir}" == v2/mkosi/cache/rock-5b-plus ]]
+          [[ "${max_bytes}" =~ ^[0-9]+$ ]]
+          docker run --rm \
+            --env CACHE_DIR="${cache_dir}" \
+            --env CACHE_UID="${runner_uid}" \
+            --env CACHE_GID="${runner_gid}" \
+            --env CACHE_MAX_BYTES="${max_bytes}" \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${builder_image}" \
+            bash -euo pipefail -c '
+              [[ "${CACHE_DIR}" == v2/mkosi/cache/rock-5b-plus ]]
+              [[ "${CACHE_UID}" =~ ^[0-9]+$ && "${CACHE_GID}" =~ ^[0-9]+$ ]]
+              [[ "${CACHE_MAX_BYTES}" =~ ^[0-9]+$ ]]
+              cache_path="/work/${CACHE_DIR}"
+              mkdir -p "${cache_path}"
+              cache_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              if (( cache_bytes > CACHE_MAX_BYTES )); then
+                echo "::warning::mkosi cache is ${cache_bytes} bytes; clearing it before save (limit ${CACHE_MAX_BYTES})"
+                find "${cache_path}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+              fi
+              final_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              (( final_bytes <= CACHE_MAX_BYTES ))
+              chown -R "${CACHE_UID}:${CACHE_GID}" "/work/${CACHE_DIR}"
+              echo "mkosi cache bytes=${final_bytes} limit=${CACHE_MAX_BYTES} path=${CACHE_DIR}"
+            '
+      - name: Save board-scoped mkosi build cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
+      - name: Remove release secrets and temporary roots
+        if: ${{ always() }}
+        run: |
+          rm -rf "${RUNNER_TEMP}/release-pki" "${RUNNER_TEMP}/armbian-keyring.gpg" \
+            "${RUNNER_TEMP}/rollback-root" "${RUNNER_TEMP}/rollback-bundle"
   realhw:
-    # Delegate to the single reusable real-HW workflow — no duplicated board
-    # preflight / flash / suite / diagnostics logic.
+    needs: candidate
     uses: ./.github/workflows/realhw-job.yml
     with:
       board: rock-5b-plus
+      candidate_artifact_name: ${{ needs.candidate.outputs.artifact_name }}
+      candidate_artifact_digest: ${{ needs.candidate.outputs.artifact_digest }}
+      candidate_raw_filename: ${{ needs.candidate.outputs.raw_filename }}
+      candidate_raw_sha256: ${{ needs.candidate.outputs.raw_sha256 }}
+      candidate_bundle_filename: ${{ needs.candidate.outputs.bundle_filename }}
+      candidate_keyring_filename: ${{ needs.candidate.outputs.keyring_filename }}
+      candidate_commit: ${{ needs.candidate.outputs.commit }}

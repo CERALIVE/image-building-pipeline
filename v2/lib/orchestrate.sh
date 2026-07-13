@@ -9,6 +9,7 @@
 #   1. resolve   lib/resolve.sh <board>        → flat KEY=value build params (eval'd)
 #   2. gate      required BSP package sets present                (fail loud, pre-build)
 #   3. fetch     lib/fetch-debs.sh --family …   → stage BSP + first-party .debs
+#               (staging is always recreated and authenticated for each build)
 #   4. partition split staged .debs into BSP vs first-party by package name
 #   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
@@ -47,12 +48,16 @@ PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
+RAUC_PKI_CONTRACT_SH="${HERE}/rauc-pki-contract.sh"
 MKOSI_DIR="${V2_DIR}/mkosi"
 IMAGES_DIR="${V2_DIR}/images"
 # Staged .debs live under the mkosi dir (so the builder container, which mounts
 # MKOSI_DIR, can see them) but OUTSIDE build/ — `mkosi --force` wipes build/ image
 # outputs, and we must not lose the staging mid-build. Gitignored via mkosi/.gitignore.
 STAGING_ROOT="${MKOSI_DIR}/.staging"
+BUILD_LOCK_DIR="${CERALIVE_BUILD_LOCK_DIR:-${STAGING_ROOT}/.locks}"
+BUILD_LOCK_TIMEOUT="${CERALIVE_BUILD_LOCK_TIMEOUT:-3600}"
+BUILD_LOCK_FD=""
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode product constants in logic).
@@ -62,11 +67,11 @@ STAGING_ROOT="${MKOSI_DIR}/.staging"
 # kernel install (the boot BSP is hardware-validated in task 17). This is a
 # build-scope flag, NOT error swallowing.
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
-# RAUC bundle signing PKI (Stage-4 .raucb, build-bundle.sh). Local/dev builds
-# sign with the throwaway NON-PRODUCTION dev keypair in v2/.dev-keys; CI/prod
-# inject the real cert-work/rauc keys by setting this env before invocation.
-CERALIVE_RAUC_PKI_DIR="${CERALIVE_RAUC_PKI_DIR:-${V2_DIR}/.dev-keys}"
-export CERALIVE_RAUC_PKI_DIR
+# shellcheck source=lib/rauc-pki-contract.sh
+source "${RAUC_PKI_CONTRACT_SH}"
+CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
+rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+export CERALIVE_BUILD_MODE CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 RELEASE="${RELEASE:-bookworm}"
@@ -117,7 +122,21 @@ Env:
   CHANNEL VARIANT RELEASE ARMBIAN_APT_URL ARMBIAN_SUITE
   APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64   (CI secrets, mTLS+GPG)
   PASETO_PUBLIC_KEY_B64                                      (CI: device-token Ed25519 PUBLIC key)
+  CERALIVE_BUILD_LOCK_TIMEOUT seconds to wait for another build of the same board
 EOF
+}
+
+acquire_board_lock() {
+  local board="$1" lock_file
+  [[ "${BUILD_LOCK_TIMEOUT}" =~ ^[0-9]+$ ]] \
+    || die "CERALIVE_BUILD_LOCK_TIMEOUT must be a non-negative integer"
+  mkdir -p "${BUILD_LOCK_DIR}"
+  lock_file="${BUILD_LOCK_DIR}/${board}.lock"
+  exec {BUILD_LOCK_FD}>"${lock_file}"
+  if ! flock -w "${BUILD_LOCK_TIMEOUT}" "${BUILD_LOCK_FD}"; then
+    die "build already active for board '${board}' (lock: ${lock_file})"
+  fi
+  log_info "build lock acquired for board '${board}'"
 }
 
 # ---------------------------------------------------------------------------
@@ -183,6 +202,8 @@ main() {
   require_cmd python3
   require_cmd ar
   require_cmd tar
+  require_cmd flock
+  acquire_board_lock "${board}"
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT}"
@@ -196,10 +217,10 @@ main() {
   local params
   params="$("${RESOLVE_SH}" "${board}")" || die "manifest resolution failed for board '${board}'"
   eval "${params}"
-  # Export BSP package vars immediately so fetch-debs.sh (step 2) can read them.
-  # run_mkosi_build() re-exports the full set at step 6; this early export covers
-  # the fetch step which runs before mkosi.
-  export UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
+  # Export the resolved architecture and BSP package vars immediately so
+  # fetch-debs.sh (step 2) can read them. run_mkosi_build() re-exports the full
+  # set at step 6; this early export covers the fetch step which runs before mkosi.
+  export ARCH UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
          HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
 
   # Reproducible builds (task 14): pin ONE epoch for the whole run so every
@@ -251,29 +272,35 @@ main() {
   # 2-4. Fetch + stage .debs, then partition them into BSP vs first-party.
   # -------------------------------------------------------------------------
   local staging="${STAGING_ROOT}/${board}"
-  rm -rf "${staging}"
-  mkdir -p "${staging}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
-  mkdir -p "${bsp_dir}" "${firstparty_dir}"
+  [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
+    || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
+  {
+    rm -rf "${staging}"
+    mkdir -p "${staging}" "${bsp_dir}" "${firstparty_dir}"
 
-  log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
-  DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
-    || die "fetch-debs failed for board '${board}'"
+    log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
+    DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
+      || die "fetch-debs failed for board '${board}'"
 
-  log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
-  # The set of BSP package names (manifest-declared) is the partition key.
-  local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
-  local deb pkg
-  shopt -s nullglob
-  for deb in "${staging}/debs"/*.deb; do
-    pkg="$(deb_pkg_name "${deb}")"
-    if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
-      cp "${deb}" "${bsp_dir}/"
-    else
-      cp "${deb}" "${firstparty_dir}/"
-    fi
-  done
-  shopt -u nullglob
+    log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
+    # The set of BSP package names (manifest-declared) is the partition key.
+    local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
+    local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs "
+    local deb pkg
+    shopt -s nullglob
+    for deb in "${staging}/debs"/*.deb; do
+      pkg="$(deb_pkg_name "${deb}")"
+      if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
+        cp "${deb}" "${bsp_dir}/"
+      elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
+        cp "${deb}" "${firstparty_dir}/"
+      else
+        die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
+      fi
+    done
+    shopt -u nullglob
+  }
   log_info "staged: $(find "${bsp_dir}" -name '*.deb' | wc -l) BSP, $(find "${firstparty_dir}" -name '*.deb' | wc -l) first-party .deb(s)"
 
   # -------------------------------------------------------------------------
@@ -504,12 +531,13 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
+    CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
   # inheritance and docker `-e NAME` passthrough resolve. DTB_NAME feeds the
   # platform bootloader integration (mkosi.finalize → install-boot.sh): the U-Boot
-  # boot.scr / extlinux fdtfile and the board env come from the manifest, never
+  # boot.scr / recovery.scr fdtfile and the board env come from the manifest, never
   # hardcoded.
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
@@ -528,11 +556,8 @@ run_mkosi_build() {
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
   # (like the apt GPG key) so the self-contained runtime postinst can write it
   # without repo access.
-  local rauc_keyring="${MKOSI_DIR}/runtime/rauc/ceralive-keyring.pem"
-  if [[ -z "${RAUC_ROOT_CA_B64:-}" && -s "${rauc_keyring}" ]]; then
-    RAUC_ROOT_CA_B64="$(base64 -w0 <"${rauc_keyring}")"
-  fi
-  export RAUC_ROOT_CA_B64="${RAUC_ROOT_CA_B64:-}"
+  RAUC_ROOT_CA_B64="$(base64 -w0 <"${RAUC_KEYRING_FILE}")"
+  export RAUC_ROOT_CA_B64
 
   # Add-on signing keyring (task 24): the PUBLIC add-on keyring baked at
   # /usr/share/ceralive/addon-keyring.gpg so the device can verify optional add-on
@@ -569,6 +594,18 @@ run_mkosi_build() {
   export CERALIVE_INTERFACES_eth0="${INTERFACES_ETH0:-}"
   export CERALIVE_INTERFACES_eth1="${INTERFACES_ETH1:-}"
   export CERALIVE_INTERFACES_wlan0="${INTERFACES_WLAN0:-}"
+  export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
+  export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
+  case "${CERALIVE_DEBUG_IMAGE}" in
+    0|1) ;;
+    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
+  esac
+  if [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH}" && "${CERALIVE_DEBUG_IMAGE}" != "1" ]]; then
+    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
+  fi
+  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" && -z "${CERALIVE_DEBUG_PASSWORD_HASH}" ]]; then
+    die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
+  fi
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done

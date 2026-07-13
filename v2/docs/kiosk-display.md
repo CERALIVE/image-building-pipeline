@@ -2,7 +2,7 @@
 
 **Status:** `[PARTIAL]` (Phase 2 docs complete; Task 26/27/28 implementation hardware-blocked)
 **Scope:** image-building-pipeline only (chassis ownership per DC-1)
-**Cross-repo reference:** [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../../../CeraUI/docs/ON_DEVICE_DISPLAY.md)
+**Cross-repo reference:** [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md)
 
 This document covers everything the image is responsible for in the kiosk display stack: the systemd units, the package set, the OOM configuration, the wvkbd build, and the inert-by-default model. CeraUI owns the content, control, and lifecycle state — see the cross-repo doc above for the full picture.
 
@@ -202,7 +202,7 @@ The postinst must be idempotent (re-running it on an already-configured system m
 
 The following items are explicitly deferred to Phase 3. They are NOT present in the current image.
 
-All Phase-3 items are hardware-blocked: no RK3588 board is reachable from the development environment (Task 1 spike verdict: NO-GO). See [`CeraUI/docs/ON_DEVICE_DISPLAY.md §6`](../../../CeraUI/docs/ON_DEVICE_DISPLAY.md) for the full deferral register with rationale.
+All Phase-3 items are hardware-blocked: no RK3588 board is reachable from the development environment (Task 1 spike verdict: NO-GO). See CeraUI `docs/ON_DEVICE_DISPLAY.md` §6 for the full deferral register with rationale.
 
 | Item | Blocked on |
 |---|---|
@@ -220,9 +220,9 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 | Document | Scope |
 |---|---|
 | [`cog-display-addon.md`](cog-display-addon.md) | W4: Cog + WPEWebKit feature-sysext packaging path + libmali (Platform-layer) exclusion strategy — a lighter alternative display engine to cage + Chromium |
-| [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../../../CeraUI/docs/ON_DEVICE_DISPLAY.md) | Cross-repo architecture, DC-1..DC-4, Phase-3 deferral register |
-| [`CeraUI/docs/KIOSK_STATE_MACHINE.md`](../../../CeraUI/docs/KIOSK_STATE_MACHINE.md) | DC-2: 5-state machine spec |
-| [`CeraUI/docs/KIOSK_TOKEN_CONTRACT.md`](../../../CeraUI/docs/KIOSK_TOKEN_CONTRACT.md) | DC-3: loopback token spec |
+| CeraUI `docs/ON_DEVICE_DISPLAY.md` | Cross-repo architecture, DC-1..DC-4, Phase-3 deferral register |
+| CeraUI `docs/KIOSK_STATE_MACHINE.md` | DC-2: 5-state machine spec |
+| CeraUI `docs/KIOSK_TOKEN_CONTRACT.md` | DC-3: loopback token spec |
 | [`v2/docs/dev-loop.md`](dev-loop.md) | Dev-push loop for srtla |
 | [`v2/docs/deferred-ceraui-sysext.md`](deferred-ceraui-sysext.md) | CeraUI sysext migration (separate deferral) |
 
@@ -232,4 +232,3 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 
 | ID | Item | Detail | Resolution |
 |---|---|---|---|
-| **TD-1** | Workspace-external doc links | This file and `AGENTS.md` reference sibling-repo docs via `../../../CeraUI/...` (and `../CeraUI/...`) paths that climb above this repo's checkout root. Affected here: §Header (`CeraUI/docs/ON_DEVICE_DISPLAY.md`), §7 deferral note, and §8 Related Documents rows for `ON_DEVICE_DISPLAY.md` / `KIOSK_STATE_MACHINE.md` / `KIOSK_TOKEN_CONTRACT.md`. | Violates root `AGENTS.md` **Rule D** (repos self-contained, no workspace-external references). Links resolve only inside the `ceralive/` workspace, not in a standalone CI checkout. Convert to plain textual references (repo + doc name, no relative link) when next touching this file. Low severity: Markdown cross-references only — no code/test/config reads an external path. |

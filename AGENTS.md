@@ -1,18 +1,16 @@
 # image-building-pipeline
 
-Parent: [`../AGENTS.md`](../AGENTS.md)
-
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
-(.deb packages from `srtla`, `srtla-send-rs`, `cerastream`, `CeraUI`), drives a
+(.deb packages from `srtla-send-rs`, `cerastream`, `CeraUI`), drives a
 containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 (Orange Pi 5+, Radxa Rock 5B+).
 
 Relates to:
 - `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here; PASETO device-token PUBLIC key (`paseto/`) provisioned into the CeraUI runtime env
 - `apt-worker/` — runtime apt source on device points to `apt.ceralive.tv` (Cloudflare R2); add-on `.raw` artifacts served from R2 path `addons/{os_version}/{board}/{feature}.raw`
-- `versions.yaml` — pin registry; `fetch-debs.sh` reads pin versions from `../versions.yaml` [EXISTS]
+- `versions.yaml` — standalone pin registry consumed by `fetch-debs.sh` [EXISTS]
 
 ## STRUCTURE
 
@@ -35,7 +33,7 @@ image-building-pipeline/
 │   │   │                     #   cog-display-hw-checklist.md,
 │   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
 │   │   └── fast-reload.md    # dev-sync live-reload loop
-│   └── tests/                # manifest.bats, preflash-verify.sh, qemu-x86.sh
+│   └── tests/                # manifests, RK3588 A/B/preflash, x86 rollback
 ├── docs/
 │   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
 │   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
@@ -57,10 +55,10 @@ image-building-pipeline/
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
-| v2 unit tests / x86 boot fallback | `v2/tests/manifest.bats` via `v2/run-tests`; forced-primary-failure rollback proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
+| v2 unit tests / boot fallback | `v2/tests/manifest.bats` and `v2/tests/rk3588-ab-contract.bats` via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
-| Cross-repo kiosk architecture | [`CeraUI/docs/ON_DEVICE_DISPLAY.md`](../CeraUI/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
+| Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`v2/docs/size-notes.md`](v2/docs/size-notes.md) — locale strip, firmware audit, size-gate |
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
@@ -116,6 +114,58 @@ Stage-4 branch calls `build-bundle.sh` after `assemble-disk-x86.sh`, alongside t
 `build-bundle.sh` is board-agnostic, so the x86 path mirrors the RK3588 `custom`
 path verbatim.
 
+**Rock 5B+ production A/B contract** [EXISTS]
+
+`rock-5b-plus.yaml` resolves `single_slot_fallback: false` with RAUC
+`bootloader=custom`. The RK3588 assembler emits a 14,800 MiB factory image, writes
+the same bootable baseline into `rootfs_a` and `rootfs_b`, seeds A as primary, and
+passes `rauc.slot=A|B` on every automatic/manual boot path. The custom backend marks
+the inactive target bad before installation and RAUC activates it only after a
+successful write; a three-attempt bootcount rolls an unconfirmed slot back.
+Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
+automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
+
+`v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects wrong GPT
+starts/sizes or labels, a missing idblock or second-stage FIT, malformed compiled
+boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
+state, incompatible/invalid signed bundles, and a destination smaller than the raw
+image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
+mock rollback, preflash adversarial fixtures, and—when CI sets
+`CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
+and cleanup harness. The harness uses RAUC's supported boot-slot override for
+its synthetic file-backed slots, so the same service contract runs across CI
+RAUC versions without depending on the runner's boot device. A v1 single-slot
+disk cannot migrate by
+OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
+state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
+the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
+
+The v2 CI Bats job installs the split Ubuntu `rauc` + `rauc-service` packages,
+starts a system D-Bus, reloads its installed policy, and then invokes the real
+RAUC contract; the harness requires RAUC to own its normal system-bus service
+name and does not replace that check with a session bus or a skipped test. The
+standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
+fixture before resolving, so build-plan checks are self-contained too.
+
+Production builds require one explicit RAUC PKI contract: signer root, chain,
+leaf certificate/key, and baked device keyring must match. The release workflow
+builds the candidate before hardware validation, uploads the raw image, bundle,
+keyring, and digest as one immutable artifact, then the hardware gate preflights
+and flashes a private, digest-verified snapshot of that exact raw image. While
+the board is still in maskrom, the gate reads the exact whole-media sector range
+back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
+on mismatch. Only after that immutable proof does it boot, rotate a run-local SSH
+host-key record, and require reconnect to the same media CID. It never compares
+mutable post-boot media bytes. Every `rkdeveloptool` operation is owned by a
+cancellable child and reaped on interruption. The verifier resets inherited
+ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
+that launch it asynchronously cannot make SIGINT cancellation ineffective. The
+identity record accepts only safe artifact filename characters so its
+line-oriented fields cannot be split.
+Authenticated BSP fetches require the pinned Armbian archive key fingerprint and
+verify InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery
+uses `recovery.scr`, which loads boot artifacts directly from p2 or p3.
+
 **Multi-board dispatch** [EXISTS]
 
 Dispatch is by the **count of resolved boards**, not the flag: a single resolved
@@ -126,14 +176,15 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
-(`cerastream/docs/notes/boot-parity-results.md`); the hardware-gated profiles
-(Jetson/RK3588) now track as cerastream hardware validation. `srtla-send-rs` is
-the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` .deb provides
-receiver-only after cutover. **Conflict declaration:** `srtla-send-rs` declares
+(`cerastream/docs/notes/boot-parity-results.md`); RK3588 hardware-gated profiles
+now track as cerastream hardware validation, while Jetson profiles are DEFERRED —
+not currently planned. `srtla-send-rs` is
+the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` is
+receiver-side only after cutover. **Conflict declaration:** `srtla-send-rs` declares
 `Conflicts: srtla (<< 2026.6.2)` (SRTLA_CUTOVER_VERSION); any pre-cutover
 `srtla (<< 2026.6.2)` — which still bundled the C sender — is correctly blocked from
 coinstall, while `srtla` v2026.6.2 (the first receiver-only release) is NOT
@@ -150,36 +201,47 @@ paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
 the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
-- **Packages staged** (`FIRST_PARTY_APT_PKGS`): exactly the four top-level
-  packages `cerastream ceralive-device srtla srtla-send-rs` are `apt-get
-  download`ed into `$DEST/debs/`. These are Debian **Package** names — a deliberate
-  mapping off `REPOS` (the directory/pin names), notably `CeraUI → ceralive-device`.
-- **`srt` is NOT a `.deb` and NOT in `REPOS`.** The `srt` repo is a build-time
-  vendored libsrt source (cerastream + srtla compile against its headers for ABI
-  parity); it produces no `.deb`. Runtime libsrt is the **system** `libsrt1.5-openssl`
-  installed by the runtime OS layer (`manifests/packages/shared.list`). The
-  `gstlibuvch264src` (`gstreamer1.0-libuvch264src`) and `libgstreamer*` plugins are
-  resolved as transitive `cerastream` Depends by the app layer's own `apt-get install`
-  from `apt.ceralive.tv` + bookworm `main` at install time
-  (`mkosi.images/app/mkosi.postinst.chroot`), so they are not download targets here.
+- **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
+  `cerastream ceralive-device srtla-send-rs`, plus the required capture plugin
+  `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
+  from `v2/manifests/first-party-deb-versions.txt`. Debian hosts use isolated `apt-get download`;
+  non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
+  checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
+  exact package files. These are Debian **Package** names — a
+  deliberate mapping off `REPOS` (the directory/pin names), notably
+  `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
+  `gstlibuvch264src → gstreamer1.0-libuvch264src`.
+- **`srt` provides the device SRT runtime.** Its `libsrt1.5-ceralive` package
+  replaces Debian's GnuTLS/OpenSSL variants, so GStreamer and cerastream resolve
+  one forked `libsrt.so.1.5` implementation. The
+  `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
+  `gstreamer1.0-libuvch264src` is staged so the app layer can install all
+  first-party packages from local `.deb`s with no downloads; `libgstreamer*`
+  plugins still come from the runtime OS layer (`shared.list`). When that app
+  layer installs `ceralive-device`, it explicitly enables `ceralive.service`;
+  the runtime layer runs earlier and cannot enable a unit supplied later by the
+  CeraUI package.
 - **Secrets are env-only, base64-encoded** (same names as the device customize
   script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
   fatal. `APT_CERALIVE_URL` (default `https://apt.ceralive.tv`) is overridable.
 - **Arch axis only** — the source carries no board axis; `arch` is selected by
-  `APT::Architecture` (apt-worker two-axis model: `channel × arch`).
-- **DRY_RUN** logs the exact `apt-get … download cerastream ceralive-device srtla
-  srtla-send-rs` plan + source and downloads nothing. With no `APT_GPG_PUBLIC_B64`
-  in the env the fetcher auto-enables DRY_RUN (no credential for a verified fetch).
-- **BSP fetch is unchanged** — kernel/DTB/U-Boot/firmware/gstreamer still come from
-  the Armbian apt pool (`fetch_bsp`).
+  `APT::Architecture` (apt-worker two-axis model: `channel × arch`). Resolved
+  mkosi `x86-64` is normalized to Debian `amd64`; RK3588 remains `arm64`.
+- **DRY_RUN** logs the exact version-qualified `apt-get … download` plan + source
+  and downloads nothing. With no `APT_GPG_PUBLIC_B64` in the env the fetcher
+  auto-enables DRY_RUN (no credential for a verified fetch).
+- **BSP fetch is authenticated** — kernel/DTB/U-Boot/firmware/GStreamer come
+  from signed Armbian metadata, with the archive-key fingerprint and all content
+  hashes checked before staging.
 
 **BSP provenance + advisory kernel drift-guard** [EXISTS]
 
 The kernel BSP floats (Decision D3 — name-based `linux-image-vendor-rk35xx`, **no
 version pin**), so a silent Armbian re-spin can change the image with no signal.
-`fetch_bsp` (in `v2/lib/fetch-debs.sh`) makes that float **observable without
-pinning it**:
+`fetch_bsp` authenticates the pinned Armbian archive-key fingerprint, verifies
+`InRelease`, verifies the `Packages.gz` digest from signed metadata, and verifies
+every staged package SHA-256. It also makes the kernel float observable:
 
 - **Provenance capture** — after the real BSP fetch, `bsp_capture_provenance`
   records the kernel package's exact resolved **version string** + **content
@@ -202,18 +264,47 @@ pinning it**:
   change gated on (1) the baseline seeded with a real known-good version+sha256 AND
   (2) a fleet manifest run clean of drift — see
   [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
-- **First-run / unseeded** — the committed baseline ships UNSEEDED (`version` and
-  `sha256` are `null`) because the concrete vendor build cannot be resolved offline.
-  The first authenticated real build seeds the baseline with the actual values,
-  emits an informational note, and exits 0. Commit that seeded value to set the
-  known-good reference. This is **advisory only — never a hard pin** (no `=<ver>` in
-  the fetch, manifests, or `versions.yaml`). Proof: `v2/run-tests` section 15.
+- **First-run / seeded baseline** — a new scaffold may start with `version` and
+  `sha256` as `null`; the first authenticated real build seeds the baseline with
+  the actual values, emits an informational note, and exits 0. Commit that seeded
+  value to set the known-good reference. This is **advisory only — never a hard
+  pin** (no `=<ver>` in the fetch, manifests, or `versions.yaml`). Proof:
+  `v2/run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
 **versions.yaml** [EXISTS]
-`fetch-debs.sh` reads pin versions from `../versions.yaml` instead of resolving latest.
+`fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
+
+**CI and release build caches** [EXISTS]
+PR CI (`v2-ci.yml`) caches only pip's download/wheel store (`~/.cache/pip`) for
+the manifest-validation and build-plan jobs. Its key includes the runner OS,
+architecture, and the hash of `v2/ci/requirements-ci.txt`; image outputs, mkosi
+caches, QEMU state, and release artifacts remain uncached there.
+
+The protected release candidate (`.github/workflows/release.yml`) persists the
+two build-state stores that materially shorten a production rebuild:
+
+- BuildKit's GitHub Actions cache reuses layers from the canonical
+  `v2/ci/Dockerfile`. The scope is stable per repository, runner OS/architecture,
+  board, and mkosi tool pin, so old commits do not create an unbounded cache
+  family. The source hash is carried in the builder image tag and label; the
+  Dockerfile/context digests remain BuildKit's layer keys. `mode=min` exports
+  only layers needed by the loaded builder image.
+- `v2/mkosi/cache/rock-5b-plus` is restored and saved with a key containing the
+  repository, runner OS/architecture, board, mkosi pin, and build-source hash.
+  Its restore prefix retains those collision boundaries. The cache is capped at
+  2 GiB; size measurement, over-limit clearing, and runner-UID/GID
+  normalization all happen as root inside the builder container before the save
+  step, because mkosi may create mode-700 root-owned entries.
+
+Both cache paths are build state only: image outputs, `.staging`, QEMU state,
+apt credentials, and release artifacts are excluded. Cache steps are guarded to
+release pushes/tags (the workflow has no pull-request trigger), and all
+production trust inputs are materialized after cache restore/build, so an
+untrusted PR cannot populate or consume this release cache path and secrets
+never enter a cache key or build context.
 
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one
@@ -221,16 +312,26 @@ Same source state → bit-identical `.raucb`. The orchestrator pins one
 `common.sh::resolve_source_date_epoch`) and exports it so every embedded mtime
 (rootfs.tar, squashfs, ext4, mkosi) clamps to it. `build-bundle.sh` signs the RAUC
 bundle through a deterministic OpenSSL CMS path (`-noattr` → no wall-clock
-`signingTime`; real leaf key + chain, still `rauc`-verifiable) because `rauc`
+`signingTime`; real leaf key + intermediate chain, still `rauc`-verifiable) because `rauc`
 itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into the
 native `rauc bundle` signer (NOT bit-reproducible). Proof: `v2/run-tests` section
 11; double-build the same board and compare `.raucb` sha256.
 
+**RAUC test trust fixture** [EXISTS]
+
+The canonical `v2/run-tests` entrypoint invokes
+`v2/tests/generate-dev-rauc-pki.sh` before any RAUC contract suite. The generator
+creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
+(including the leaf → intermediate → root chain and leaf key pairing); it never
+provides a production default. Production image builds still require an explicit
+`CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
+
 **Image size gate — BLOCKING at 1.5 GB** [EXISTS]
 
-`v2/lib/measure-size.sh` runs after every build. If the compressed rootfs exceeds
+`v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds
 **1.5 GB** the build fails loudly and the `.raucb` is not produced. The threshold
-is post-slim (locale strip + `WithDocs=no` already applied). See
+is post-slim (locale strip, final apt-cache cleanup, and appliance payload pruning
+already applied). See
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers used to reach it.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]
@@ -401,6 +502,18 @@ shared host keys into a per-device identity (persisted on `/data`, stable across
 A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`.
 The `ceralive` user ships password-locked (no default password); root retains
 key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
+For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
+encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
+must never be used for fleet artifacts.
+
+**Build concurrency** [EXISTS]
+
+The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
+before touching staging, cache, or mkosi output. Different boards remain safe to
+build in parallel. A second build of the same board waits for up to one hour by
+default; set `CERALIVE_BUILD_LOCK_TIMEOUT=0` for fail-fast behavior or another
+non-negative number of seconds for a bounded wait. This also prevents a CI
+dry-run from deleting the staging tree of an active hardware image build.
 
 **First-boot WiFi provisioning portal** [PARTIAL]
 
@@ -431,7 +544,7 @@ credentials with no screen or keyboard. Standalone artifacts under
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
   `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
   image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
-  (machine-id-derived, like the hostname service), passphrase `ceralive-setup`
+  (machine-id-derived setup identifier), passphrase `ceralive-setup`
   (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
   requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
   validated on hardware, hence `[PARTIAL]`.
@@ -531,7 +644,7 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT
-- Don't add `srt` to `REPOS` or `FIRST_PARTY_APT_PKGS` — `srt` is a build-time vendored libsrt source that produces no `.deb`; runtime libsrt is the system `libsrt1.5-openssl` from the runtime OS layer (`shared.list`)
+- Keep `srt` in `REPOS` and map `libsrt1.5-ceralive` through `FIRST_PARTY_APT_PKGS`; do not add a Debian `libsrt1.5-*` runtime package to `shared.list`
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only

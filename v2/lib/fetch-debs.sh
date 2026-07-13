@@ -11,25 +11,21 @@
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
-#   2. First-party   — cerastream / ceralive-device (CeraUI) / srtla /
-#                      srtla-send-rs .debs, PULLED FROM apt.ceralive.tv via a
-#                      GPG-verified, mTLS-authenticated apt source (`apt-get
-#                      download`). System libsrt (`libsrt1.5-openssl`) is installed
-#                      by the runtime OS layer (shared.list); gstlibuvch264src
-#                      (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins
-#                      are NOT staged here — they are resolved as transitive
-#                      cerastream Depends by the app layer's own `apt-get install`
-#                      from apt.ceralive.tv + bookworm main at install time
-#                      (mkosi.images/app/mkosi.postinst.chroot).
+#   2. First-party   — CeraLive SRT / cerastream / gstreamer1.0-libuvch264src /
+#                      ceralive-device (CeraUI) / srtla-send-rs .debs, PULLED FROM
+#                      apt.ceralive.tv via a GPG-verified, mTLS-authenticated apt
+#                      source. The app layer installs the staged local .debs with
+#                      no downloads. Debian's TLS-flavor libsrt packages are replaced
+#                      by the single CeraLive runtime package during that transaction.
 #
 # This REPLACES the Armbian-chroot fetch of scripts/fetch-debs.sh. mkosi installs
 # the staged .debs into the rootfs tree directly; there is no Armbian build here.
 #
 # ── Modes ────────────────────────────────────────────────────────────────────
 #   Real fetch : BSP from the Armbian apt pool (apt-get on Debian hosts, curl
-#                fallback elsewhere); first-party from apt.ceralive.tv via an
-#                isolated-state `apt-get update` + `apt-get download` (GPG keyring
-#                + mTLS client cert injected from the environment).
+#                fallback elsewhere); first-party from apt.ceralive.tv with apt-get
+#                when present, otherwise a curl fallback that verifies InRelease and
+#                Packages.gz before downloading .debs.
 #   Dry-run    : DRY_RUN=1 (auto when APT_GPG_PUBLIC_B64 is unset — no credential
 #                to do a GPG-verified first-party fetch with)
 #                -> log the EXACT command(s) + source that WOULD run; download
@@ -38,14 +34,12 @@
 #
 # ── Usage ────────────────────────────────────────────────────────────────────
 #   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
-#   fetch-debs.sh assert-sibling <workspace_root>     # guard self-test hook
 #
 # ── Env ──────────────────────────────────────────────────────────────────────
 #   CHANNEL            stable|beta            (default: stable)
-#   ARCH               arm64|amd64            (default: arm64)
+#   ARCH               arm64|amd64|x86-64     (default: arm64; Debian-normalized)
 #   DEST               staging root           (default: ./out)  -> debs in $DEST/debs/
 #   DRY_RUN            1 to plan-only         (default: auto)
-#   CERALIVE_WORKSPACE override sibling-root  (default: resolved repo parent)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
 #   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)
 #   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
@@ -64,8 +58,8 @@ source "${HERE}/lib/common.sh" 2>/dev/null || source "${HERE}/common.sh"
 source "${HERE}/shared/yaml-lib.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
-# shellcheck source=lib/shared/sibling-layout-lib.sh
-source "${HERE}/shared/sibling-layout-lib.sh"
+# shellcheck source=lib/fetch-debs-auth.sh
+source "${HERE}/fetch-debs-auth.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; never hardcode versions — pins come from
@@ -73,9 +67,17 @@ source "${HERE}/shared/sibling-layout-lib.sh"
 # ---------------------------------------------------------------------------
 CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-arm64}"
+case "${ARCH}" in
+  arm64|amd64) ;;
+  x86-64) ARCH="amd64" ;;
+  *) die "unsupported Debian package architecture '${ARCH}'; expected arm64|amd64|x86-64" ;;
+esac
 DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+ARMBIAN_APT_KEYRING="${ARMBIAN_APT_KEYRING:-}"
+ARMBIAN_APT_KEY_FINGERPRINT="${ARMBIAN_APT_KEY_FINGERPRINT:-DF00FAF1C577104B50BF1D0093D6889F9F0E78D5}"
+FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
 
 # First-party apt source (apt.ceralive.tv). The deb822 source appends
 # /dists/${CHANNEL}/ (apt-worker two-axis layout: channel x arch; arch is selected
@@ -96,9 +98,9 @@ APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
 FETCH_JOBS="${FETCH_JOBS:-4}"
 [[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS=4
 
-# versions.yaml lives at the workspace root: v2/lib -> v2 -> image-building-pipeline
-# -> <workspace>. Same registry scripts/fetch-debs.sh reads.
-VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
+# The release registry is repo-local so standalone image builds do not depend on
+# the surrounding development workspace.
+VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../versions.yaml}"
 
 # REPOS — first-party device .debs. CASE AND ORDER ARE SACRED: downstream apt,
 # mkosi install ordering and the versions.yaml keys all match these exact names.
@@ -106,24 +108,14 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../../versions.yaml}"
 #
 # cerastream is the SOLE streaming engine (ceracoder retired 2026-06-11 after the
 # boot-parity gate passed on the generic profile — cerastream/docs/notes/
-# boot-parity-results.md). The hardware-gated profiles (Jetson/RK3588) now track
-# as cerastream hardware-validation work, not as a retention condition.
+# boot-parity-results.md). RK3588 hardware-gated profiles now track as
+# cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
-# srtla-send-rs is the Rust sender fork (v1.0.0+) added at cutover (Task 20).
-# srtla .deb provides receiver-only after cutover; srtla-send-rs provides the sender.
-# Conflict declaration: srtla-send-rs Conflicts/Replaces srtla (<< 2026.6.2)
-# (SRTLA_CUTOVER_VERSION). Any pre-cutover srtla (<< 2026.6.2, which still bundled the
-# C sender) is correctly blocked from coinstall; srtla v2026.6.2 — the first
-# receiver-only release — is NOT << 2026.6.2, so it coinstalls with the Rust sender.
-REPOS=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
 
 # REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
-# `die` is SAFE here: this asserts a compile-time constant, so it can ONLY fire on
-# a wrong EDIT to the REPOS line (an added/removed/reordered/recased entry), NEVER
-# on a valid run. Downstream apt install ordering, the FIRST_PARTY_APT_PKGS mapping
-# and the versions.yaml keys all key off these exact four names in this exact order.
 assert_repos_integrity() {
-  local -a _sacred=("srtla" "cerastream" "CeraUI" "srtla-send-rs")
+  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla-send-rs")
   (( ${#REPOS[@]} == ${#_sacred[@]} )) \
     || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
   local i
@@ -134,18 +126,7 @@ assert_repos_integrity() {
 }
 assert_repos_integrity
 
-# FIRST_PARTY_APT_PKGS — the Debian Package: NAMES pulled from apt.ceralive.tv,
-# a deliberate mapping off REPOS (the directory/pin names above), NOT a copy:
-#   srtla->srtla  cerastream->cerastream  CeraUI->ceralive-device
-#   srtla-send-rs->srtla-send-rs
-# `srt` is gone from this set AND from REPOS: it is a build-time vendored libsrt
-# source that produces no .deb. Runtime libsrt is the SYSTEM `libsrt1.5-openssl`,
-# installed by the runtime OS layer (manifests/packages/shared.list), not here.
-# gstlibuvch264src (`gstreamer1.0-libuvch264src`) and the libgstreamer* plugins are
-# resolved as transitive cerastream Depends by the app layer's own `apt-get install`
-# from apt.ceralive.tv + bookworm main, so they are not download targets here either.
-FIRST_PARTY_APT_PKGS=("cerastream" "ceralive-device" "srtla" "srtla-send-rs")
-
+FIRST_PARTY_APT_PKGS=("libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
 # This is the SOLE bridge between "real fetch" and "offline evidence" — there is
@@ -177,6 +158,10 @@ run_or_plan() {
 _BSP_DEBS=""
 _PKG_INDEX=""
 _APT_OPTS=()
+_FIRST_PARTY_DEBS=""
+_FIRST_PARTY_INDEX=""
+_FIRST_PARTY_BASE_URL=""
+_FIRST_PARTY_CURL_AUTH=()
 
 _run_bounded() {
   local max="$1" worker="$2"; shift 2
@@ -208,9 +193,16 @@ get_pin() {
     f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
 }
 
-# assert_sibling_layout (lib/shared/sibling-layout-lib.sh) is the fetch-time
-# tripwire that srtla/ and CeraUI/ are siblings — see that lib and
-# ARCHITECTURE.md §5 for why a broken layout means CeraUI's .deb is unbuildable.
+first_party_download_specs() {
+  local pkg version
+  [[ -f "${FIRST_PARTY_DEB_VERSIONS_FILE}" ]] \
+    || die "exact first-party Debian version file missing: ${FIRST_PARTY_DEB_VERSIONS_FILE}"
+  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
+    version="$(awk -F= -v pkg="${pkg}" '$1==pkg{print substr($0,length($1)+2); exit}' "${FIRST_PARTY_DEB_VERSIONS_FILE}")"
+    [[ -n "${version}" ]] || die "exact Debian version missing for first-party package ${pkg}"
+    printf '%s=%s\n' "${pkg}" "${version}"
+  done
+}
 
 # BSP provenance + advisory kernel drift-guard.
 #
@@ -378,8 +370,8 @@ _fetch_bsp_native() {
   run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
   local src_list="${apt_state}/armbian.list"
   if [[ -z "${DRY_RUN}" ]]; then
-    printf 'deb [trusted=yes arch=%s] %s %s main\n' \
-      "${ARCH}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
+    printf 'deb [arch=%s signed-by=%s] %s %s main\n' \
+      "${ARCH}" "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" >"${src_list}"
   else
     log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
   fi
@@ -407,14 +399,12 @@ _fetch_bsp_native() {
 # .tmp-* file, then atomically rename into ${_BSP_DEBS}. A killed curl leaves
 # only the .tmp-* partial, never a half-written final .deb.
 _fetch_bsp_curl_one() {
-  local pkg="$1" filename=""
+  local pkg="$1" resolved="" filename="" sha256="" version=""
   if [[ -z "${DRY_RUN}" ]]; then
-    filename="$(awk -v want="${pkg}" '
-      /^Package: /{ p=($2==want) }
-      p && /^Filename: /{ print $2; exit }
-    ' "${_PKG_INDEX}")"
-    [[ -n "${filename}" ]] \
+    resolved="$(auth_lookup_package "${_PKG_INDEX}" "${pkg}" "" "${ARCH}")"
+    [[ -n "${resolved}" ]] \
       || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+    IFS=$'\t' read -r filename sha256 version <<<"${resolved}"
   fi
   log_info "BSP fetch (curl): ${pkg}"
   if [[ -n "${DRY_RUN}" ]]; then
@@ -427,6 +417,8 @@ _fetch_bsp_curl_one() {
   final="${_BSP_DEBS}/$(basename "${filename}")"
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
   curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"
+  auth_verify_file "${tmp}" "${sha256}" \
+    || die "BSP package checksum mismatch for ${pkg}=${version}"
   mv -f "${tmp}" "${final}"
 }
 
@@ -445,12 +437,29 @@ _fetch_bsp_curl() {
 
   log_info "apt-get not found (non-Debian host) — fetching BSP via curl from ${ARMBIAN_APT_URL}"
 
-  local packages_url="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}/main/binary-${ARCH}/Packages.gz"
+  local release_base="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}"
+  local packages_rel="main/binary-${ARCH}/Packages.gz"
+  local packages_url="${release_base}/${packages_rel}"
   local packages_file; packages_file="$(mktemp)"
+  local inrelease="${packages_file}.InRelease" expected_sha actual_sha
+  run_or_plan curl -fsSL --retry 3 -o "${inrelease}" "${release_base}/InRelease" \
+    || die "failed to download Armbian InRelease"
+  if [[ -z "${DRY_RUN}" ]]; then
+    auth_verify_release_signature "${ARMBIAN_APT_KEYRING}" "${inrelease}" \
+      || die "Armbian InRelease signature verification failed"
+    expected_sha="$(awk -v path="${packages_rel}" '
+      /^SHA256:/{inside=1;next} /^[A-Za-z0-9-]+:/{inside=0}
+      inside && $3==path{print $1;exit}
+    ' "${inrelease}")"
+    [[ -n "${expected_sha}" ]] || die "Armbian InRelease lacks ${packages_rel} SHA256"
+  fi
   run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
     || die "failed to download Armbian Packages index: ${packages_url}"
 
   if [[ -z "${DRY_RUN}" ]]; then
+    actual_sha="$(sha256sum "${packages_file}.gz" | cut -d' ' -f1)"
+    [[ "${actual_sha}" == "${expected_sha}" ]] \
+      || die "Armbian Packages.gz checksum mismatch"
     gzip -df "${packages_file}.gz" || die "failed to decompress Armbian Packages.gz"
   else
     log_info "DRY-RUN: would decompress ${packages_file}.gz"
@@ -462,8 +471,91 @@ _fetch_bsp_curl() {
   _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
     || die "BSP fetch failed (curl path): one or more packages did not download"
 
-  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}"
+  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}" "${inrelease}"
   return 0
+}
+
+first_party_curl_url() {
+  local filename="$1"
+  case "${filename}" in
+    http://*|https://*) printf '%s\n' "${filename}" ;;
+    ./*) printf '%s/%s\n' "${_FIRST_PARTY_BASE_URL}" "${filename#./}" ;;
+    /*) die "first-party package index contains absolute Filename: ${filename}" ;;
+    *) printf '%s/%s\n' "${_FIRST_PARTY_BASE_URL}" "${filename}" ;;
+  esac
+}
+
+first_party_lookup() {
+  local spec="$1" pkg version
+  pkg="${spec%%=*}"
+  [[ "${spec}" == *=* ]] || die "first-party package lacks exact version: ${spec}"
+  version="${spec#*=}"
+  auth_lookup_package "${_FIRST_PARTY_INDEX}" "${pkg}" "${version}" "${ARCH}"
+}
+
+_fetch_first_party_curl_one() {
+  local spec="$1" resolved filename sha256 version url final tmp actual
+  resolved="$(first_party_lookup "${spec}")"
+  [[ -n "${resolved}" ]] \
+    || die "first-party package '${spec}' not found in ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/Packages"
+  IFS=$'\t' read -r filename sha256 version <<<"${resolved}"
+
+  url="$(first_party_curl_url "${filename}")"
+  final="${_FIRST_PARTY_DEBS}/$(basename "${filename}")"
+  tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
+  log_info "first-party fetch (curl): ${spec} resolved=${version}"
+  curl -fsSL --retry 3 "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+  actual="$(sha256sum "${tmp}" | awk '{print $1}')"
+  [[ "${actual}" == "${sha256}" ]] \
+    || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
+  mv -f "${tmp}" "${final}"
+}
+
+_fetch_first_party_curl() {
+  local debs="$1" keyring="$2" certs_dir="$3"; shift 3
+  local download_specs=("$@")
+  require_cmd curl
+  require_cmd gzip
+  require_cmd gpgv
+  require_cmd sha256sum
+
+  local repo_base="${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}"
+  local inrelease="${debs}/.apt-state-firstparty/InRelease"
+  local packages_gz="${debs}/.apt-state-firstparty/Packages.gz"
+  local packages="${debs}/.apt-state-firstparty/Packages"
+  local expected_sha actual_sha
+
+  local -a curl_auth=()
+  if [[ -n "${APT_CLIENT_CRT_B64:-}" ]]; then
+    curl_auth+=(--cert "${certs_dir}/client.crt" --key "${certs_dir}/client.key")
+  fi
+
+  log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
+  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
+  auth_verify_release_signature "${keyring}" "${inrelease}" \
+    || die "first-party InRelease signature verification failed for ${repo_base}"
+
+  expected_sha="$(awk '
+    /^SHA256:/{ in_sha=1; next }
+    /^[A-Za-z0-9-]+:/{ in_sha=0 }
+    in_sha && $3 == "Packages.gz" { print $1; exit }
+  ' "${inrelease}")"
+  [[ -n "${expected_sha}" ]] \
+    || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
+
+  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
+  actual_sha="$(sha256sum "${packages_gz}" | awk '{print $1}')"
+  [[ "${actual_sha}" == "${expected_sha}" ]] \
+    || die "first-party Packages.gz checksum mismatch: expected ${expected_sha}, got ${actual_sha}"
+  gzip -dc "${packages_gz}" >"${packages}"
+
+  _FIRST_PARTY_DEBS="${debs}"
+  _FIRST_PARTY_INDEX="${packages}"
+  _FIRST_PARTY_BASE_URL="${repo_base}"
+  _FIRST_PARTY_CURL_AUTH=("${curl_auth[@]}")
+  local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+  _run_bounded "${jobs}" _fetch_first_party_curl_one "${download_specs[@]}" \
+    || die "first-party fetch failed (curl path): one or more packages did not download"
 }
 
 # ---------------------------------------------------------------------------
@@ -508,7 +600,7 @@ fetch_bsp() {
   done
   # Deduplicate while preserving order
   local -a deduped=()
-  local seen="" p
+  local seen="|" p
   for p in "${bsp_pkgs[@]}"; do
     [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
   done
@@ -520,6 +612,13 @@ fetch_bsp() {
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
   log_info "Armbian source: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
+
+  if [[ -z "${DRY_RUN}" ]]; then
+    [[ -s "${ARMBIAN_APT_KEYRING}" ]] \
+      || die "ARMBIAN_APT_KEYRING is required for authenticated BSP fetches"
+    auth_keyring_has_fingerprint "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_KEY_FINGERPRINT}" \
+      || die "Armbian keyring does not contain pinned fingerprint ${ARMBIAN_APT_KEY_FINGERPRINT}"
+  fi
 
   if command -v apt-get >/dev/null 2>&1; then
     _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
@@ -550,11 +649,6 @@ fetch_bsp() {
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
 # `aws s3 sync` (CI) and `gh release download` (local) paths.
 #
-# Exactly the four TOP-LEVEL packages in FIRST_PARTY_APT_PKGS are `apt-get
-# download`ed into $DEST/debs/; their first-party dependency `srt` (the libsrt
-# fork) is dependency-resolved by the app layer at install time, not staged here.
-# REPOS still drives the versions.yaml pin log below — it is unchanged.
-#
 # Secrets arrive ONLY through the environment, base64-encoded, exactly as
 # v2/mkosi/customize/apt-ceralive-repo.sh consumes them (APT_GPG_PUBLIC_B64 +
 # APT_CLIENT_CRT_B64/APT_CLIENT_KEY_B64). They are NEVER hardcoded, NEVER logged,
@@ -563,8 +657,6 @@ fetch_bsp() {
 # Isolated apt state (mirrors _fetch_bsp_native): the host apt config is never
 # touched. The .debs land in a throwaway temp dir and are atomically renamed into
 # place, so an interrupted apt-get never leaves a half-written final .deb. One
-# apt-get transaction fetches all four, so the per-package bounded pool used by the
-# BSP path does not apply here.
 # ---------------------------------------------------------------------------
 fetch_first_party() {
   local debs="$1"
@@ -577,6 +669,9 @@ fetch_first_party() {
 
   log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
   log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
+  local -a download_specs=()
+  mapfile -t download_specs < <(first_party_download_specs)
+  log_info "first-party apt specs: ${download_specs[*]}"
 
   # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.
   local crt="${APT_CLIENT_CRT_B64:-}" key="${APT_CLIENT_KEY_B64:-}"
@@ -610,9 +705,14 @@ EOF
   if [[ -z "${DRY_RUN}" ]]; then
     [[ -n "${APT_GPG_PUBLIC_B64:-}" ]] \
       || die "APT_GPG_PUBLIC_B64 not set — refusing an unverified first-party fetch from ${APT_CERALIVE_URL} (CI injects the GPG public key)"
-    require_cmd apt-get
     require_cmd base64
-    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${keyring}"
+    local raw_keyring="${apt_state}/ceralive-archive-keyring.raw"
+    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${raw_keyring}"
+    if command -v gpg >/dev/null 2>&1 && gpg --dearmor <"${raw_keyring}" >"${keyring}" 2>/dev/null; then
+      :
+    else
+      cp "${raw_keyring}" "${keyring}"
+    fi
     chmod 644 "${keyring}"
     if [[ -n "${crt}" ]]; then
       printf '%s' "${crt}" | base64 -d >"${certs_dir}/client.crt"
@@ -637,6 +737,7 @@ EOF
   )
   if [[ -n "${crt}" ]]; then
     apt_opts+=(
+      -o "APT::Sandbox::User=root"
       -o "Acquire::https::apt.ceralive.tv::SslCert=${certs_dir}/client.crt"
       -o "Acquire::https::apt.ceralive.tv::SslKey=${certs_dir}/client.key"
     )
@@ -644,46 +745,61 @@ EOF
 
   if [[ -n "${DRY_RUN}" ]]; then
     log_info "DRY-RUN would run: apt-get $(printf '%q ' "${apt_opts[@]}")update"
-    log_info "DRY-RUN would run: (cd ${debs} && apt-get $(printf '%q ' "${apt_opts[@]}")download ${FIRST_PARTY_APT_PKGS[*]})  # from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
+    log_info "DRY-RUN would run: (cd ${debs} && apt-get $(printf '%q ' "${apt_opts[@]}")download ${download_specs[*]})  # from ${APT_CERALIVE_URL}/dists/${CHANNEL}/"
     return 0
   fi
 
-  run_or_plan apt-get "${apt_opts[@]}" update
+  if [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
+    _fetch_first_party_curl "${debs}" "${keyring}" "${certs_dir}" "${download_specs[@]}"
+  else
+    run_or_plan apt-get "${apt_opts[@]}" update
 
-  local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
-  ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${FIRST_PARTY_APT_PKGS[@]}" ) \
-    || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
-  local f staged=0
+    local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
+    ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
+      || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+    local f
+    shopt -s nullglob
+    for f in "${tmpd}"/*.deb; do
+      mv -f "${f}" "${debs}/$(basename "${f}")"
+    done
+    shopt -u nullglob
+    rm -rf "${tmpd}"
+  fi
+
+  local pkg
+  local -a staged=()
   shopt -s nullglob
-  for f in "${tmpd}"/*.deb; do
-    mv -f "${f}" "${debs}/$(basename "${f}")"
-    staged=$((staged + 1))
+  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
+    staged+=("${debs}/${pkg}"_*.deb)
   done
   shopt -u nullglob
-  rm -rf "${tmpd}"
-  (( staged > 0 )) \
-    || die "first-party fetch staged 0 .debs from ${APT_CERALIVE_URL} (expected ${#FIRST_PARTY_APT_PKGS[@]})"
-  log_success "first-party: staged ${staged} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
+  (( ${#staged[@]} == ${#FIRST_PARTY_APT_PKGS[@]} )) \
+    || die "first-party fetch staged ${#staged[@]} .debs (expected exactly ${#FIRST_PARTY_APT_PKGS[@]})"
+  local expected spec expected_version actual_pkg actual_version actual_arch staged_total
+  staged_total="${#staged[@]}"
+  for spec in "${download_specs[@]}"; do
+    expected="${spec%%=*}"; expected_version="${spec#*=}"
+    mapfile -t staged < <(find "${debs}" -maxdepth 1 -type f -name "${expected}_*.deb" -print)
+    (( ${#staged[@]} == 1 )) || die "expected exactly one staged ${expected} .deb"
+    actual_pkg="$(deb_pkg_name "${staged[0]}")"; actual_version="$(deb_pkg_version "${staged[0]}")"
+    actual_arch="$(deb_pkg_arch "${staged[0]}")"
+    [[ "${actual_pkg}" == "${expected}" && "${actual_version}" == "${expected_version}" && "${actual_arch}" == "${ARCH}" ]] \
+      || die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"
+  done
+  log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
 usage() {
   cat >&2 <<EOF
 Usage:
   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
-  fetch-debs.sh assert-sibling <workspace_root>
 
-Env: CHANNEL ARCH DEST DRY_RUN CERALIVE_WORKSPACE ARMBIAN_APT_URL ARMBIAN_SUITE
+Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE ARMBIAN_APT_KEYRING
      APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
 EOF
 }
 
 main() {
-  # Hidden subcommand: guard self-test hook (used by task-14-sibling evidence).
-  if [[ "${1:-}" == "assert-sibling" ]]; then
-    assert_sibling_layout "${2:-}"
-    exit 0
-  fi
-
   local family=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -693,10 +809,6 @@ main() {
       *) usage; die "unknown argument: $1" ;;
     esac
   done
-
-  # Resolve the workspace root that must hold the sibling checkouts. Default:
-  # parent of the image-building-pipeline repo (v2/lib -> v2 -> repo -> parent).
-  local workspace="${CERALIVE_WORKSPACE:-$(cd "${HERE}/../../.." && pwd)}"
 
   # Auto-enable dry-run offline: without the apt.ceralive.tv GPG keyring there is
   # no credential to do a GPG-verified first-party fetch, so plan only.
@@ -709,21 +821,6 @@ main() {
 
   log_info "=== fetch-debs (mkosi staging) ==="
   log_info "channel=${CHANNEL} arch=${ARCH} dest=${DEST} dry_run=${DRY_RUN:-0}"
-
-  # GUARD FIRST: fail before any download if the sibling layout is broken.
-  # NOTE (Task 14): first-party .debs now come PRE-BUILT from apt.ceralive.tv, so
-  # the IMAGE build no longer needs srtla/ + CeraUI/ sibling checkouts. The guard is
-  # kept CONSERVATIVELY as an upstream-build sanity tripwire — those .debs are
-  # produced FROM these checkouts upstream, and a broken layout means a CeraUI/srtla
-  # .deb could never have been published.
-  #
-  # This stays a HARD assert (die), NOT a warning: it is the first tripwire on the
-  # sacred fetch path, and a broken sibling layout is the signal that a silently
-  # wrong or stale rootfs could ship. Demoting it to a soft warning is explicitly
-  # OUT OF SCOPE here — it would require first fully decoupling the first-party CI
-  # publish from this workspace AND proving the fetch path can no longer consume a
-  # sibling-derived artifact. Until that holds, the tripwire fires loudly by design.
-  assert_sibling_layout "${workspace}"
 
   local debs="${DEST}/debs"
   run_or_plan mkdir -p "${debs}"

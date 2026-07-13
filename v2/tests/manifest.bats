@@ -40,19 +40,9 @@ setup() {
   VALIDATE_PY="$V2/ci/validate-manifests.py"
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="$(cd "$V2/.." && pwd)"
-  # Locate the pin registry. Standalone CI checks out only this repo, so the
-  # canonical versions.yaml ships at the repo root (sibling of v2/). In the
-  # monorepo dev layout it also exists one level up (workspace root). Honour an
-  # explicit VERSIONS_YAML override first, then prefer the repo-root copy, then
-  # fall back to the workspace-root copy.
+  # Locate the repo-local pin registry unless the caller provides an override.
   if [[ -z "${VERSIONS_YAML:-}" || ! -f "${VERSIONS_YAML:-}" ]]; then
-    if [[ -f "$REPO_ROOT/versions.yaml" ]]; then
-      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
-    elif [[ -f "$REPO_ROOT/../versions.yaml" ]]; then
-      VERSIONS_YAML="$(cd "$REPO_ROOT/.." && pwd)/versions.yaml"
-    else
-      VERSIONS_YAML="$REPO_ROOT/versions.yaml"
-    fi
+    VERSIONS_YAML="$REPO_ROOT/versions.yaml"
   fi
 }
 
@@ -80,6 +70,82 @@ if errors:
     sys.exit(1)
 print("VALID")
 PY
+}
+
+extract_hostname_script() {
+  awk '
+    /cat >\/usr\/local\/sbin\/ceralive-set-hostname <<'\''EOF'\''/ { in_script = 1; next }
+    in_script && /^EOF$/ { exit }
+    in_script { print }
+  ' "$POSTINST_LIB"
+}
+
+run_hostname_script_with_collision() {
+  local collision_ip="${1:-}"
+  local state="$BATS_TEST_TMPDIR/hostname-state"
+  local bin="$BATS_TEST_TMPDIR/hostname-bin"
+  local script="$BATS_TEST_TMPDIR/ceralive-set-hostname"
+  local hosts="$BATS_TEST_TMPDIR/hosts"
+  local hostname_file="$BATS_TEST_TMPDIR/hostname"
+  local calls="$BATS_TEST_TMPDIR/hostname-calls"
+  rm -rf "$state" "$bin"
+  mkdir -p "$state" "$bin"
+  printf '127.0.0.1\tlocalhost\n' >"$hosts"
+  extract_hostname_script >"$script"
+  chmod +x "$script"
+  cat >"$bin/hostnamectl" <<'SH'
+#!/usr/bin/env bash
+printf 'hostnamectl %s\n' "$*" >>"$HOSTNAME_CALLS"
+exit 0
+SH
+  cat >"$bin/ip" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"-4 addr show scope global"*) printf '2: eth0    inet 192.168.78.50/24 brd 192.168.78.255 scope global eth0\n' ;;
+esac
+SH
+  cat >"$bin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  cat >"$bin/avahi-resolve-host-name" <<'SH'
+#!/usr/bin/env bash
+name="${*: -1}"
+if [ "$name" = "ceralive.local" ] && [ -n "${HOSTNAME_COLLISION_IP:-}" ]; then
+  printf 'ceralive.local\t%s\n' "$HOSTNAME_COLLISION_IP"
+fi
+SH
+  chmod +x "$bin/hostnamectl" "$bin/ip" "$bin/timeout" "$bin/avahi-resolve-host-name"
+  env HOSTNAME_CALLS="$calls" HOSTNAME_COLLISION_IP="$collision_ip" \
+      CERALIVE_HOSTNAME_STATE_DIR="$state" \
+      CERALIVE_HOSTS_FILE="$hosts" \
+      CERALIVE_HOSTNAME_FILE="$hostname_file" \
+      HOSTNAMECTL_BIN="$bin/hostnamectl" \
+      IP_BIN="$bin/ip" \
+      TIMEOUT_BIN="$bin/timeout" \
+      AVAHI_RESOLVE_BIN="$bin/avahi-resolve-host-name" \
+      CERALIVE_HOSTNAME_PROBE_GRACE=0 \
+      bash "$script"
+  cat "$calls"
+  printf 'index=%s\n' "$(cat "$state/host_index")"
+  printf 'hosts=%s\n' "$(grep '^127\.0\.1\.1' "$hosts")"
+}
+
+@test "hostname: first device claims predictable ceralive.local" {
+  run run_hostname_script_with_collision ""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *$'hosts=127.0.1.1\tceralive'* ]]
+}
+
+@test "hostname: mDNS collision falls back to ceralive2.local" {
+  run run_hostname_script_with_collision "192.168.78.10"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive2"* ]]
+  [[ "$output" == *"index=2"* ]]
+  [[ "$output" == *$'hosts=127.0.1.1\tceralive2'* ]]
 }
 
 # check_schema_metaschema <schema.json>
@@ -124,7 +190,60 @@ write_addon() {
 JSON
 }
 
-# serialize <name> — hold an exclusive, file-scoped lock for the REST of the
+write_installed_package_status() {
+  local status_file="$1"
+  shift
+  : >"$status_file"
+  local package
+  for package in "$@"; do
+    cat >>"$status_file" <<STATUS
+Package: $package
+Status: install ok installed
+
+STATUS
+  done
+}
+
+make_parity_rootfs() {
+  local root="$1"
+  mkdir -p \
+    "$root/var/lib/dpkg" \
+    "$root/etc/systemd/system" \
+    "$root/usr/bin" \
+    "$root/etc/iproute2" \
+    "$root/etc/dhcp/dhclient-exit-hooks.d" \
+    "$root/etc/NetworkManager/dispatcher.d" \
+    "$root/etc/udev/rules.d" \
+    "$root/etc/apt/sources.list.d" \
+    "$root/etc/systemd/network"
+
+  local packages=() package
+  while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
+    < <(sed -e 's/#.*//' "$V2/manifests/packages/shared.list" "$V2/manifests/packages"/*.delta.list | awk 'NF{print $1}')
+  packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
+
+  printf 'ceralive:x:1000:1000:CeraLive:/home/ceralive:/bin/bash\n' >"$root/etc/passwd"
+  for group in sudo audio video dialout plugdev netdev gpio i2c spi; do
+    printf '%s:x:1000:ceralive\n' "$group" >>"$root/etc/group"
+  done
+  : >"$root/usr/bin/sudo"
+  chmod +x "$root/usr/bin/sudo"
+  for svc in NetworkManager ModemManager ssh chrony avahi-daemon systemd-resolved ceralive-hostname; do
+    : >"$root/etc/systemd/system/$svc.service"
+  done
+  printf '100 modem0\n120 wlan0\n' >"$root/etc/iproute2/rt_tables"
+  : >"$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
+  : >"$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
+  chmod +x "$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
+  chmod +x "$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
+  : >"$root/etc/udev/rules.d/99-ceralive-hardware.rules"
+  : >"$root/etc/apt/sources.list.d/debian.sources"
+  : >"$root/etc/apt/sources.list.d/ceralive.sources"
+  : >"$root/etc/systemd/network/10-ceralive-wlan0.link"
+}
+
+# serialize <name> — hold an exclusive, suite-scoped lock for the REST of the
 # current @test, so the handful of tests that share mutable state run correctly
 # under `bats --jobs N` (which v2/run-tests enables when GNU parallel is on
 # PATH). bats parallelizes test CASES, not the comment "sections", so any two
@@ -135,14 +254,36 @@ JSON
 #     mid-mutation -> false failure.
 #   * §14 feature sysext — build_feature_fixture populates a per-FILE fixture
 #     dir ($BATS_FILE_TMPDIR/out) shared by five tests; only one may build it.
+#   * §9 build-plan probes — each `v2/build` invocation removes and recreates
+#     the shared `v2/mkosi/.staging/<board>` directory; these tests take one
+#     lock so GNU-parallel CI cannot interleave board fetch plans.
 # The lock auto-releases when the @test subshell exits (each bats test runs in
-# its own subshell). flock-less hosts get a no-op — v2/run-tests only requests
-# --jobs when flock is present, so a serial run never needs it.
+# its own subshell). Use BATS_RUN_TMPDIR so workers spawned by GNU parallel share
+# the rendezvous even when BATS_FILE_TMPDIR is worker-local. flock-less hosts get
+# a no-op — v2/run-tests only requests --jobs when flock is present, so a serial
+# run never needs it.
 serialize() {
   command -v flock >/dev/null 2>&1 || return 0
-  local lockfd
-  exec {lockfd}>"$BATS_FILE_TMPDIR/.serialize.$1.lock"
+  local lockfd lock_root="${BATS_RUN_TMPDIR:-${BATS_FILE_TMPDIR:-}}"
+  [[ -n "$lock_root" ]] || return 0
+  mkdir -p "$lock_root/locks"
+  exec {lockfd}>"$lock_root/locks/.serialize.${BATS_TEST_FILENAME##*/}.$1.lock"
   flock "$lockfd"
+}
+
+# assert_bsp_architecture_plan <debian-arch> — both supported offline BSP
+# transports must expose the resolved Debian architecture. Native apt-get logs
+# its explicit APT::Architecture option; the curl fallback logs the Packages.gz
+# index path. Keep both checks because CI and Arch-like developer hosts choose
+# different transports without changing the build contract.
+assert_bsp_architecture_plan() {
+  local arch="$1"
+  if [[ "$output" == *"DRY-RUN would write Armbian source:"* ]]; then
+    [[ "$output" == *"DRY-RUN would write Armbian source: deb [arch=${arch}]"* ]]
+    [[ "$output" == *"APT::Architecture=${arch}"* ]]
+  else
+    [[ "$output" == *"binary-${arch}/Packages.gz"* ]]
+  fi
 }
 
 # ===========================================================================
@@ -483,24 +624,55 @@ YAML
 # ===========================================================================
 
 @test "t14 rootfs: rock-5b-plus reaches the build plan (exit 0, custom/rk3588)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
 @test "t14 rootfs: orange-pi-5-plus reaches the build plan (exit 0, custom/rk3588)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" orange-pi-5-plus
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
 @test "t14 rootfs: x86-minipc reaches the build plan (exit 0, efi)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
   [[ "$output" == *"DRY-RUN complete"* ]]
 }
 
+@test "fetch staging: x86-minipc maps resolved x86-64 to Debian amd64" {
+  serialize build-plan
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"resolved: family=x86_64 arch=x86-64 (mkosi=x86-64)"* ]]
+  [[ "$output" == *"channel=stable arch=amd64"* ]]
+  assert_bsp_architecture_plan amd64
+  [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-amd64/"* ]]
+  [[ "$output" == *"APT::Architecture=amd64"* ]]
+  [[ "$output" != *"binary-arm64"* ]]
+}
+
+@test "fetch staging: RK3588 boards keep Debian arm64" {
+  serialize build-plan
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" "$board"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"resolved: family=rk3588 arch=arm64 (mkosi=arm64)"* ]]
+    [[ "$output" == *"channel=stable arch=arm64"* ]]
+    assert_bsp_architecture_plan arm64
+    [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-arm64/"* ]]
+    [[ "$output" == *"APT::Architecture=arm64"* ]]
+    [[ "$output" != *"binary-amd64"* ]]
+  done
+}
+
 @test "t14 x86 guard: x86-minipc DRY_RUN emits no .raw (resolve+plan only, before Stage-4)" {
+  serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
   [ "$status" -eq 0 ]
   # DRY_RUN stops at [5/9], before ANY board reaches Stage-4 disk assembly, so no
@@ -526,7 +698,8 @@ YAML
 @test "t14 x86 guard: orchestrate.sh wires the x86 ESP/GRUB disk path (TODO(x86-disk) closed)" {
   local orch="$V2/lib/orchestrate.sh"
   # Task 12 closed the deferral: the former active TODO(x86-disk) marker is GONE.
-  ! grep -q 'TODO(x86-disk)' "$orch"
+  run grep -q 'TODO(x86-disk)' "$orch"
+  [ "$status" -ne 0 ]
   # Each adapter has exactly ONE .raw producer under its own branch: RK3588 custom
   # -> assemble-disk.sh, x86 efi/grub -> assemble-disk-x86.sh.
   [ "$(grep -c 'ASSEMBLE_DISK_SH}" build' "$orch")" -eq 1 ]
@@ -668,6 +841,172 @@ PY
   run "$MEASURE_SH" rock-5b-plus "$tree"
   [ "$status" -ne 0 ]
   [[ "$output" == *"exceeds budget"* ]]
+}
+
+@test "size-gate: final app layer strips apt caches while preserving dpkg status" {
+  run grep -qx 'CleanPackageMetadata=no' "$V2/mkosi/mkosi.images/app/mkosi.conf"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'clean_package_download_metadata' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clean_package_download_metadata"* ]]
+
+  run grep -F 'rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "size-gate: final app layer prunes headless RK3588-irrelevant payload" {
+  run grep -F 'prune_final_image_payload' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '/usr/share/icons/Adwaita' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "app-layer: first-party packages can be copied from mkosi source staging" {
+  run grep -F 'stage_first_party_from_source_mount' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'src="${src%/}/.staging/${BOARD_ID}/firstparty"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'cp -a "${src}"/*.deb "${FIRST_PARTY_DIR}/"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+}
+
+@test "app-layer: first-party install is closed over staged packages and runtime deps" {
+  run grep -F 'gstreamer1.0-libuvch264src' "$FETCH_DEBS"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'dpkg -i "${debs[@]}"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F -- 'apt-get install -y --no-install-recommends --no-download -f' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'apt-get update' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -ne 0 ]
+}
+
+@test "runtime packages: sudo is installed for the CeraUI add-on helper" {
+  run grep -Ex 'sudo[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "production image leaves debug access disabled without failing finalization" {
+  run env \
+    CERALIVE_DEBUG_IMAGE=0 \
+    CERALIVE_DEBUG_PASSWORD_HASH='' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "mkosi passes lab debug settings to every subimage" {
+  run grep -Fx 'PassEnvironment=CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH' "$V2/mkosi/mkosi.conf"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "lab debug password requires an explicitly marked debug image" {
+  local bin="$BATS_TEST_TMPDIR/debug-password-bin"
+  local calls="$BATS_TEST_TMPDIR/debug-password-calls"
+  mkdir -p "$bin"
+
+  for command in id usermod chage install; do
+    cat >"$bin/$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DEBUG_PASSWORD_CALLS"
+case "$(basename "$0")" in
+  id) exit 0 ;;
+esac
+SH
+    chmod +x "$bin/$command"
+  done
+
+  run env \
+    PATH="$bin:$PATH" \
+    DEBUG_PASSWORD_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=0 \
+    CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"* ]]
+}
+
+@test "lab debug image unlocks ceralive with an injected password hash" {
+  local bin="$BATS_TEST_TMPDIR/debug-password-bin"
+  local calls="$BATS_TEST_TMPDIR/debug-password-calls"
+  mkdir -p "$bin"
+
+  for command in id usermod chage install; do
+    cat >"$bin/$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DEBUG_PASSWORD_CALLS"
+case "$(basename "$0")" in
+  id) exit 0 ;;
+esac
+SH
+    chmod +x "$bin/$command"
+  done
+
+  run env \
+    PATH="$bin:$PATH" \
+    DEBUG_PASSWORD_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=1 \
+    CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'usermod --password $6$test$hash ceralive'* ]]
+  [[ "$output" == *'chage -d -1 ceralive'* ]]
+  [[ "$output" == *'install -Dm 0600 /dev/null /etc/ceralive/debug-image'* ]]
+}
+
+@test "parity: ceralive.service fails when ExecStart target is missing" {
+  local root="$BATS_TEST_TMPDIR/parity-rootfs"
+  make_parity_rootfs "$root"
+  cat >"$root/etc/systemd/system/ceralive.service" <<'UNIT'
+[Service]
+ExecStart=/opt/ceralive/ceralive
+UNIT
+
+  run "$LIB_DIR/parity-check.sh" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ceralive.service ExecStart target missing/not executable: /opt/ceralive/ceralive"* ]]
+}
+
+@test "parity: ceralive.service must be enabled for multi-user boot" {
+  local root="$BATS_TEST_TMPDIR/parity-rootfs"
+  make_parity_rootfs "$root"
+  mkdir -p "$root/usr/local/bin"
+  : >"$root/usr/local/bin/ceralive"
+  chmod +x "$root/usr/local/bin/ceralive"
+  cat >"$root/etc/systemd/system/ceralive.service" <<'UNIT'
+[Service]
+ExecStart=/usr/local/bin/ceralive
+UNIT
+
+  run "$LIB_DIR/parity-check.sh" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ceralive.service is not enabled for multi-user boot"* ]]
+}
+
+@test "rauc: service guard checks installed unit files without relying on systemctl list output" {
+  run grep -F '[[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+
+  run grep -F '[[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]' "$V2/mkosi/customize/rauc-setup.sh"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'systemctl list-unit-files rauc.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" "$V2/mkosi/customize/rauc-setup.sh"
+  [ "$status" -ne 0 ]
 }
 
 # ===========================================================================
@@ -906,10 +1245,20 @@ SH
 
 # feature_prereqs — the signer needs mksquashfs + gpg + gpgv + unsquashfs.
 feature_prereqs() {
+  local probe
   command -v mksquashfs >/dev/null 2>&1 || return 1
   command -v gpg        >/dev/null 2>&1 || return 1
+  command -v gpg-agent  >/dev/null 2>&1 || return 1
   command -v gpgv       >/dev/null 2>&1 || return 1
   command -v unsquashfs >/dev/null 2>&1 || return 1
+  probe="$(mktemp -d)"
+  chmod 700 "$probe"
+  if ! gpg-agent --homedir "$probe" --daemon >/dev/null 2>&1; then
+    rm -rf "$probe"
+    return 1
+  fi
+  gpgconf --homedir "$probe" --kill gpg-agent >/dev/null 2>&1 || true
+  rm -rf "$probe"
   return 0
 }
 
@@ -1143,13 +1492,11 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
 }
 
 @test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
-  # Copy the COMMITTED scaffold so the test never mutates the tracked file.
   local base="$BATS_TEST_TMPDIR/scaffold.json"
-  cp "$BSP_BASELINE_JSON" "$base"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
   run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
-  # now seeded with real values (no longer null)
   run cat "$base"
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
@@ -1184,7 +1531,7 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
   local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
-  cp "$BSP_BASELINE_JSON" "$base"
+  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
   run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
@@ -1203,10 +1550,10 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   [[ "$output" == *"JSON-OK"* ]]
 }
 
-@test "bsp provenance: the committed baseline scaffold is valid JSON and ships UNSEEDED (null)" {
-  run python3 -c "import json; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert d['version'] is None and d['sha256'] is None; print('SCAFFOLD-OK')"
+@test "bsp provenance: the committed baseline is valid JSON and carries a valid seed state" {
+  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; v=d.get('version'); s=d.get('sha256'); assert (v is None and s is None) or (isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SCAFFOLD-OK"* ]]
+  [[ "$output" == *"BASELINE-OK"* ]]
 }
 
 @test "bsp provenance: artifact is gitignored and absent from the determinism hash set" {
@@ -1220,6 +1567,41 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   # artifact name is nowhere in that workflow.
   grep -q "would build with:" "$REPO_ROOT/.github/workflows/v2-ci.yml"
   ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
+}
+
+@test "v2 CI: resolver dependency cache is content-addressed and covers every resolver job" {
+  run python3 - "$REPO_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+repo_root = Path(sys.argv[1])
+workflow = yaml.safe_load((repo_root / ".github/workflows/v2-ci.yml").read_text())
+requirements = repo_root / "v2/ci/requirements-ci.txt"
+assert requirements.read_text().splitlines()[-2:] == ["jsonschema==4.26.0", "PyYAML==6.0.3"]
+
+expected_key = "pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}"
+for job_id in ("schema-validate", "bats", "build-matrix", "build-plan-xrunner"):
+    steps = workflow["jobs"][job_id]["steps"]
+    cache = next(step for step in steps if step.get("uses") == "actions/cache@v6")
+    assert cache["with"] == {
+        "path": "~/.cache/pip",
+        "key": expected_key,
+    }, f"{job_id}: unexpected pip cache declaration: {cache!r}"
+    install = next(step["run"] for step in steps if step.get("name", "").startswith("Install "))
+    assert "pip install --quiet --requirement v2/ci/requirements-ci.txt" in install, job_id
+
+print("V2-CI-PIP-CACHE-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"V2-CI-PIP-CACHE-OK"* ]]
+}
+
+@test "v2 CI: qemu job honestly runs only the assertion-engine selftest" {
+  run python3 -c "import yaml; workflow = yaml.safe_load(open('$REPO_ROOT/.github/workflows/v2-ci.yml')); job = workflow['jobs']['qemu']; runs = '\n'.join(step.get('run', '') for step in job['steps']); assert 'CERALIVE_QEMU_SELFTEST' in str(job['steps']); assert 'IMAGE_PATH=' not in runs; assert 'skip mode' not in runs; print('QEMU-SELFTEST-SCOPE-OK')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"QEMU-SELFTEST-SCOPE-OK"* ]]
 }
 
 # ===========================================================================
@@ -1481,8 +1863,10 @@ run_paseto_provision() {
 @test "paseto provision: NO private material in the baked drop-in (no k4.secret / PRIVATE KEY)" {
   run_paseto_provision "$PASETO_RAW_PUB"
   [ "$status" -eq 0 ]
-  ! grep -aq 'k4.secret' "$PASETO_DROPIN"
-  ! grep -aq 'PRIVATE KEY' "$PASETO_DROPIN"
+  run grep -aq 'k4.secret' "$PASETO_DROPIN"
+  [ "$status" -ne 0 ]
+  run grep -aq 'PRIVATE KEY' "$PASETO_DROPIN"
+  [ "$status" -ne 0 ]
 }
 
 @test "paseto provision: a k4.secret PRIVATE key is REFUSED (build fails, no drop-in)" {
@@ -1506,25 +1890,48 @@ run_paseto_provision() {
   [[ "$output" == *"MVP opaque-token path"* ]]
 }
 
-@test "paseto provision: baked env var name matches CeraUI's device-token gate (cross-repo lockstep)" {
-  local devtok="$REPO_ROOT/../CeraUI/apps/backend/src/modules/pairing/device-token.ts"
-  [ -f "$devtok" ] || skip "CeraUI checkout not present (standalone CI)"
-  grep -q 'DEVICE_TOKEN_PUBLIC_KEY_ENV = "PASETO_PUBLIC_KEY"' "$devtok"
+@test "paseto provision: image contract uses the canonical public-key environment name" {
+  grep -q 'PASETO_PUBLIC_KEY' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 # ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
-#     fetch-debs.sh asserts the sacred 4-entry REPOS constant (a `die` that can
+#     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
 #     when APT_CERALIVE_URL is not https:// (legitimate local/dev http:// overrides
 #     must keep working; the fetch path gains no new failure mode). These tests
 #     source the helpers directly (main is BASH_SOURCE-guarded) — no apt, no .deb.
 # ===========================================================================
 
-@test "fetch-debs REPOS guard: a REPOS without the 4 sacred entries trips the assert (die, non-zero)" {
-  run bash -c "source '$FETCH_DEBS'; REPOS=(srtla cerastream CeraUI); assert_repos_integrity 2>&1"
+@test "fetch-debs REPOS guard: a REPOS without the sacred device entries trips the assert (die, non-zero)" {
+  run bash -c "source '$FETCH_DEBS'; REPOS=(cerastream CeraUI); assert_repos_integrity 2>&1"
   [ "$status" -ne 0 ]
   [[ "$output" == *"REPOS integrity"* ]]
+}
+
+@test "fetch-debs registry defaults to this checkout instead of the parent workspace" {
+  run env -u VERSIONS_YAML bash -c "source '$FETCH_DEBS'; realpath \"\$VERSIONS_YAML\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "$REPO_ROOT/versions.yaml" ]
+}
+
+@test "fetch-debs BSP set deduplicates the first family package against board overrides" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  cat >"$family" <<'YAML'
+kernel_packages:
+  - linux-image-test
+dtb_packages:
+  - linux-dtb-test
+uboot_packages: []
+firmware_packages:
+  - firmware-test
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+
+  run bash -c "{ export DRY_RUN=1 KERNEL_PACKAGES=linux-image-test DTB_PACKAGES=linux-dtb-test UBOOT_PACKAGES=u-boot-test FIRMWARE_PACKAGES=firmware-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(4 pkgs): linux-image-test linux-dtb-test firmware-test u-boot-test"* ]]
 }
 
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {
@@ -1547,12 +1954,11 @@ run_paseto_provision() {
   mkdir -p "$debs"
   run bash -c "{ export DRY_RUN=1 VERSIONS_YAML='$VERSIONS_YAML'; source '$FETCH_DEBS'; fetch_first_party '$debs'; } 2>&1"
   [ "$status" -eq 0 ]
-  # the planned command is LOGGED, names apt-get download + all four packages
   [[ "$output" == *"DRY-RUN would run:"* ]]
   [[ "$output" == *"download"* ]]
   [[ "$output" == *"cerastream"* ]]
+  [[ "$output" == *"gstreamer1.0-libuvch264src"* ]]
   [[ "$output" == *"ceralive-device"* ]]
-  [[ "$output" == *"srtla"* ]]
   [[ "$output" == *"srtla-send-rs"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"

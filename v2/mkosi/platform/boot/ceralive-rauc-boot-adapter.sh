@@ -8,15 +8,20 @@
 #   [handlers]
 #   bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 #
-# WHY custom (decision D3): the RK3588 vendor U-Boot (2017.09, ENV_IS_NOWHERE) has
+# WHY custom (decision D3): the staged RK3588 vendor U-Boot (ENV_IS_NOWHERE) has
 # no working `fw_setenv`, so RAUC's stock `bootloader=uboot` backend cannot persist
 # BOOT_ORDER / bootcount. We keep that exact A/B+bootcount model, but in a text file
 # on the FAT `boot` partition instead of U-Boot env — see ceralive-boot-state.sh.
 #
 # RAUC CUSTOM BACKEND INTERFACE (https://rauc.readthedocs.io/ integration.html):
 # RAUC invokes this script with the operation as $1 and the slot's `bootname` as the
-# trailing argument. The four operations and their CeraLive mapping:
+# trailing argument. Debian bookworm's RAUC 1.8 reads `rauc.slot=` itself and calls
+# the four state/primary operations. RAUC 1.11+ may also call `get-current`, which
+# this backend implements for forward compatibility. Their CeraLive mapping:
 #
+#   get-current                 -> read rauc.slot=A|B from the kernel command line
+#       Print the bootname of the slot running now. Never infer this from primary:
+#       an install changes primary while the old slot is still running.
 #   get-primary                 -> ceralive-boot-state get-primary
 #       Print the bootname of the slot marked primary (the one that boots next).
 #   set-primary  <bootname>     -> ceralive-boot-state set-primary <bootname>
@@ -57,11 +62,37 @@ find_boot_state() {
   die "cannot find ceralive-boot-state (set CERALIVE_BOOT_STATE_BIN, or install it on PATH)"
 }
 
+get_current_slot() {
+  local cmdline_file="${CERALIVE_KERNEL_CMDLINE_FILE:-/proc/cmdline}" cmdline token
+  local current=""
+  local -a tokens=()
+  [[ -r "${cmdline_file}" ]] || die "cannot read kernel command line: ${cmdline_file}"
+  cmdline="$(<"${cmdline_file}")"
+  read -r -a tokens <<<"${cmdline}"
+  for token in "${tokens[@]}"; do
+    case "${token}" in
+      rauc.slot=*)
+        [[ -z "${current}" ]] || die "kernel command line has duplicate rauc.slot arguments"
+        current="${token#rauc.slot=}"
+        ;;
+    esac
+  done
+  case "${current}" in
+    A|B) printf '%s\n' "${current}" ;;
+    "") die "kernel command line is missing rauc.slot=A|B" ;;
+    *) die "invalid kernel rauc.slot '${current}' (expected A or B)" ;;
+  esac
+}
+
 main() {
   local op="${1:-}"; shift || true
   local boot_state; boot_state="$(find_boot_state)"
 
   case "${op}" in
+    get-current)
+      [[ $# -eq 0 ]] || die "get-current takes no arguments"
+      get_current_slot
+      ;;
     get-primary)
       [[ $# -eq 0 ]] || die "get-primary takes no arguments"
       "${boot_state}" get-primary
@@ -82,6 +113,7 @@ main() {
     -h|--help|"")
       cat >&2 <<'EOF'
 RAUC custom bootloader backend. Invoked by RAUC, not by hand:
+  get-current
   get-primary
   set-primary <bootname>
   get-state   <bootname>

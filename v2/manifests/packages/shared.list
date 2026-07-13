@@ -11,12 +11,10 @@
 #   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
 #     rockchip-multimedia-config) → v2/manifests/families/rk3588.yaml
 #   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
-#   - First-party .debs (cerastream, srtla, CeraUI, and the CERALIVE/srt fork) →
-#     installed in the APPLICATION layer (Stage 3), never apt packages. NOTE the
-#     SYSTEM libsrt transport library (Debian `libsrt1.5-openssl`) IS here, in the
-#     OS-update infra section below — it rides the RAUC OS slot so app sysexts stay
-#     small and a libsrt bump is atomic. The CERALIVE/srt .deb (first-party fork)
-#     is separate and lands in the App layer (see LAYER-MAP.md §libsrt).
+#   - First-party .debs (the CERALIVE/srt runtime, cerastream, srtla-send-rs, and
+#     CeraUI) → installed in the APPLICATION layer (Stage 3), never fetched from
+#     Debian by this manifest. The SRT package replaces Debian's TLS-flavor
+#     variants in the same offline local transaction; see LAYER-MAP.md §libsrt.
 #   - Development tooling (build-essential, git, vim, …) → development variant only
 #   - openssh-server, systemd, udev, dbus → already in the mkosi base layer
 #
@@ -92,6 +90,8 @@ wget                     # http downloader (update/fetch infra)
                          # NOTE: net DIAGNOSTICS (socat/netcat-openbsd/iperf3) moved to the
                          # debug add-on (T17) — verified unused by CeraUI/streaming runtime;
                          # the chaos harness (tools/chaos) ships its own. See removed.md.
+sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-addon-helper
+                         # drop-in; without the sudo binary add-on enable/disable is dead code.
 
 # --- Console (HDMI readability at boot) ---------------------------------------
 kbd                      # setfont — set console font at boot for HDMI readability at any resolution
@@ -99,19 +99,11 @@ fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on 
                          # NOTE: operational monitoring (htop/iotop/nethogs/vnstat) and the
                          # nano editor moved to the debug add-on (T17) — see removed.md.
 
-# --- OS-update + SRT transport infra (Stage 2; RUNTIME layer, arch-independent) -
-# Added in Task 19 (layering). These belong in the RUNTIME OS slot — NOT the App
-# sysext layer — so they update atomically via RAUC and are identical on every
-# architecture (rk3588, x86). See LAYER-MAP.md and decisions.md (Task 5 RAUC pins).
-libsrt1.5-openssl        # SYSTEM SRT transport library that the streaming stack (srtla) links
-                         # at runtime. In the OS slot (not app sysext) → app images
-                         # stay small + a libsrt bump is atomic via the RAUC slot.
-                         # bookworm provides 1.5.x; the OpenSSL backend matches the
-                         # CERALIVE build. (The first-party CERALIVE/srt FORK .deb is
-                         # a SEPARATE App-layer artifact — see LAYER-MAP.md §libsrt.)
-                         # NOTE: the LAN SRT ingest listener is served by MediaMTX's
-                         # built-in SRT server (ceralive-rtmp-gateway.service, Todo 14 B2),
-                         # so no srt-tools / srt-live-transmit package is needed for it.
+# --- OS-update infrastructure (Stage 2; RUNTIME layer, arch-independent) -----
+# The device SRT runtime is CeraLive's `libsrt1.5-ceralive` first-party package,
+# staged and installed by the App layer. Do not add a Debian `libsrt1.5-*` flavor
+# here: GStreamer and cerastream must resolve one forked shared object. The LAN SRT
+# ingest listener is served by MediaMTX, so no srt-tools package is needed.
 nftables                 # ships /usr/sbin/nft — loads the LAN-ingest ingress firewall
                          # (ceralive-ingest-firewall.service): DROP inbound :1935 (RTMP) +
                          # :4001 (SRT) on modem/WWAN/ppp uplink classes so the

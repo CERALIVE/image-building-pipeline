@@ -91,24 +91,26 @@ WiFi/BT radio never associating on the vendor kernel — a board-breaking
 regression that violates the "do not drop firmware the board needs" constraint.
 
 `armbian-firmware` is also already the **trimmed** Armbian variant — it is *not*
-`armbian-firmware-full`. That is the narrowest safe lever the Armbian feed
-offers; there is no finer split that keeps the vendor-kernel WiFi/BT path intact.
+`armbian-firmware-full`. The package still carries firmware for unrelated SoC
+families. The final app layer keeps the Armbian package installed for provenance and
+board WiFi/BT coverage, but prunes firmware directories that are irrelevant to this
+headless RK3588 image (`qcom`, `intel`, `ath10k`, `ath11k`, `ath12k`, `updates`).
 
 ### Size impact *(estimate)*
 
 | Option | Approx installed size | WiFi works on vendor kernel? |
 |---|---|---|
-| `armbian-firmware` (current, trimmed) | ~100–150 MB | ✅ yes — board NVRAM included |
+| `armbian-firmware` (current, trimmed + final RK3588 prune) | ~120–130 MB after prune | ✅ yes — board NVRAM retained |
 | `armbian-firmware-full` | ~400–500 MB | ✅ yes (but much larger — rejected) |
 | Debian split: `firmware-realtek` (6.7 MB) + `firmware-brcm80211` (17.7 MB) | ~24 MB | ⚠️ **at risk** — no Armbian NVRAM `.txt` |
 | Debian split + `firmware-misc-nonfree` (50.5 MB) | ~75 MB | ⚠️ still missing board NVRAM |
 
 (Debian sizes from bookworm `non-free-firmware/binary-arm64` `Installed-Size`.)
 
-A Debian-split swap *could* save **~75–125 MB** on paper, but only by trading a
-guaranteed-working radio for an unverified one on hardware we cannot currently
-test. The size win is not worth a potential WiFi-down field regression, so the
-monolith stays until a board is in hand to validate a split empirically.
+A Debian-split swap *could* save more on paper, but only by trading a
+guaranteed-working vendor-kernel radio set for an unverified one. The current
+compromise keeps the Armbian monolith at package level, then removes unrelated
+firmware payload from the sealed appliance image.
 
 ### Re-evaluation trigger
 
@@ -258,10 +260,10 @@ occupied.
 | `srt-tools` | ~3.05 MB (3122 KiB) | **REMOVED** (reclaimed) |
 | `libsrt1.5-gnutls` (was a `srt-tools` dep) | ~0.85 MB (875 KiB) | **REMOVED** (no longer pulled) |
 
-**Net expected delta: ~−3.9 MB** vs the previous topology. `libsrt1.5-openssl` (the
-OpenSSL libsrt the streaming stack/srtla links) is **KEPT** — it is unrelated to the
-removed GnuTLS `srt-tools` flavour and remains a runtime dependency of cerastream/srtla
-(§ "OS-update + SRT transport infra" in `shared.list`).
+**Net expected delta: ~−3.9 MB** vs the previous topology before the first-party SRT
+runtime is added. The release image instead installs `libsrt1.5-ceralive` from the
+CeraLive apt repository; it replaces both Debian TLS flavors and is accounted with
+the App-layer first-party artifacts, not the shared runtime manifest.
 
 ### Re-evaluation / baseline note
 

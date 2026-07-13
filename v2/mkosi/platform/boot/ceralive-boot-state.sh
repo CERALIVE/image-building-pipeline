@@ -3,8 +3,8 @@
 # ceralive-boot-state.sh — A/B boot-state read/write helper (RAUC custom backend
 # data layer + bootloader-algorithm reference).
 #
-# WHY THIS EXISTS (decision D3): the RK3588 vendor U-Boot
-# (Armbian 2017.09) is built ENV_IS_NOWHERE — `fw_setenv` does not persist, so
+# WHY THIS EXISTS (decision D3): the staged RK3588 vendor U-Boot is built
+# ENV_IS_NOWHERE — `fw_setenv` does not persist, so
 # RAUC's stock `bootloader=uboot` adapter (which drives BOOT_ORDER / bootcount via
 # fw_setenv) CANNOT work. The chosen approach is RAUC `bootloader=custom` with the
 # boot state kept in a plain text file on the FAT `boot` partition (PARTLABEL=boot,
@@ -22,10 +22,11 @@
 # identical — only the storage backend differs (text file vs. fw_setenv).
 #
 # CORRUPTION SAFETY (decision: a bricked boot from a half-written FAT file is the
-# worst outcome). Writes are made durable by staging the FULL file on tmpfs and
-# landing it on the fragile vfat in a SINGLE `mv -f`; the BOOT_CRC line lets the
-# reader detect a truncated / empty / byte-flipped file even when that single write
-# is interrupted by power loss. On ANY validation failure the reader falls back to
+# worst outcome). Writes are made durable beside the destination and replaced with
+# a same-filesystem `mv -f`; cross-filesystem `mv` is copy-then-unlink, not atomic.
+# The BOOT_CRC line lets the reader detect a truncated / empty / byte-flipped file
+# even when that write is interrupted by power loss. On ANY validation failure the
+# reader falls back to
 # the safe defaults (BOOT_ORDER="A B", both budgets full) AND rewrites a clean file
 # — it NEVER aborts the boot path. A file WITHOUT a BOOT_CRC line is NOT treated as
 # corrupt: the in-U-Boot selector rewrites boot_state.txt via `env export`, which
@@ -53,10 +54,6 @@ set -euo pipefail
 STATE_FILE="${CERALIVE_BOOT_STATE_FILE:-/boot/boot_state.txt}"
 BOOT_ATTEMPTS="${CERALIVE_BOOT_ATTEMPTS:-3}"
 
-# Where the fully-formed file is staged before the single mv onto the FAT partition.
-# A tmpfs keeps the slow/fragile vfat touched exactly once; env-overridable for tests.
-STATE_STAGEDIR="${CERALIVE_BOOT_STATE_STAGEDIR:-}"
-
 # Valid slot bootnames. Symmetric A/B per the frozen partition contract
 # (rootfs_a = slot A, rootfs_b = slot B). Single-slot images carry only A.
 readonly VALID_SLOTS=("A" "B")
@@ -81,7 +78,7 @@ is_valid_slot() {
 # ---------------------------------------------------------------------------
 # State load/store. The file is the single source of truth; we read it into
 # BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT, mutate in memory, then rewrite atomically
-# (tmpfs stage -> one mv) with a CRC line so a corrupt file is detected and healed.
+# with a CRC line so a corrupt file is detected and healed.
 # ---------------------------------------------------------------------------
 BOOT_ORDER=""
 BOOT_A_LEFT=""
@@ -101,21 +98,18 @@ crc_of_payload() { state_payload | cksum | cut -d' ' -f1; }
 # non-negative integers. Catches a truncated write that mangled a data line.
 state_fields_valid() {
   [[ -n "${BOOT_ORDER}" ]] || return 1
-  local s
-  for s in ${BOOT_ORDER}; do is_valid_slot "${s}" || return 1; done
   [[ "${BOOT_A_LEFT}" =~ ^[0-9]+$ ]] || return 1
   [[ "${BOOT_B_LEFT}" =~ ^[0-9]+$ ]] || return 1
-  return 0
-}
-
-# First writable tmpfs-ish dir for the pre-mv staging file; falls back to the state
-# file's own directory (store_state mkdir -p's it) when nothing else is writable.
-staging_dir() {
-  local d
-  for d in "${STATE_STAGEDIR}" /run /tmp "${TMPDIR:-}"; do
-    if [[ -n "${d}" && -d "${d}" && -w "${d}" ]]; then printf '%s' "${d}"; return 0; fi
+  (( BOOT_A_LEFT <= BOOT_ATTEMPTS && BOOT_B_LEFT <= BOOT_ATTEMPTS )) || return 1
+  local s seen_a=0 seen_b=0
+  for s in ${BOOT_ORDER}; do
+    is_valid_slot "${s}" || return 1
+    case "${s}" in
+      A) (( seen_a == 0 )) || return 1; seen_a=1 ;;
+      B) (( seen_b == 0 )) || return 1; seen_b=1 ;;
+    esac
   done
-  dirname "${STATE_FILE}"
+  return 0
 }
 
 load_state() {
@@ -157,17 +151,15 @@ load_state() {
 store_state() {
   local dir; dir="$(dirname "${STATE_FILE}")"
   mkdir -p "${dir}"
-  local stage; stage="$(staging_dir)"
-  local tmp; tmp="$(mktemp "${stage}/.boot_state.XXXXXX")" \
-    || die "cannot create staging file under ${stage}"
+  local tmp; tmp="$(mktemp "${dir}/.boot_state.XXXXXX")" \
+    || die "cannot create staging file beside ${STATE_FILE}"
   {
     state_payload
     printf 'BOOT_CRC=%s\n' "$(crc_of_payload)"
   } >"${tmp}"
-  # The fully-formed file lands on the fragile vfat in ONE mv; if power is lost
-  # mid-write the next read sees a short/CRC-less payload, detects it, and heals to
-  # safe defaults. Staging on tmpfs keeps the FAT write down to that single mv.
+  sync -f "${tmp}"
   mv -f "${tmp}" "${STATE_FILE}"
+  sync -f "${STATE_FILE}"
 }
 
 # left_of <slot> / set_left <slot> <n> — per-slot counter accessors.
@@ -264,6 +256,7 @@ cmd_set_state() {
       local rest="" s
       for s in ${BOOT_ORDER}; do [[ "${s}" == "${slot}" ]] || rest+="${s} "; done
       BOOT_ORDER="$(printf '%s' "${rest}" | tr -s ' ')"; BOOT_ORDER="${BOOT_ORDER% }"
+      [[ -n "${BOOT_ORDER}" ]] || BOOT_ORDER="${slot}"
       ;;
     *) die "set-state: state must be 'good' or 'bad' (got '${state}')" ;;
   esac

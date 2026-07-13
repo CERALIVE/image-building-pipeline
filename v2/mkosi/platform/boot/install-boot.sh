@@ -19,6 +19,7 @@
 #                          - /usr/bin/ceralive-boot-state               (state helper)
 #                          - /usr/lib/rauc/ceralive-rauc-boot-adapter   (RAUC backend)
 #                          - /etc/rauc/system.conf                      (bootloader=custom)
+#                          - /etc/fstab                                 (shared p1 at /boot)
 #                          Invoked from platform/mkosi.finalize via mkosi-chroot.
 #
 #   boot-partition <dir>   FAT BOOT PARTITION bits into <dir> (the mounted p1 boot).
@@ -26,7 +27,7 @@
 #                          - boot.scr        (compiled from boot.scr.cmd)
 #                          - cera_board.env  (rendered console/fdtfile/board_id)
 #                          - boot_state.txt  (initial A/B state seed)
-#                          - extlinux/extlinux.conf (manual recovery menu)
+#                          - recovery.scr    (cross-partition manual recovery)
 #                          Invoked by the disk assembler / the offline test.
 #
 # Self-contained: the rootfs path runs INSIDE the image (mkosi-chroot) where the
@@ -111,10 +112,10 @@ bootloader=custom
 boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
-# RAUC bootloader=custom delegates every boot-state op to this script
-# (get-primary / set-primary / get-state / set-state). It keeps BOOT_ORDER +
-# per-slot attempt counters in a text file on the FAT boot partition, because the
-# vendor U-Boot 2017.09 has no working fw_setenv (decision D3).
+# Bookworm RAUC 1.8 reads rauc.slot= itself and delegates the four state/primary
+# operations to this script. RAUC 1.11+ may also call get-current. BOOT_ORDER and
+# per-slot attempt counters live on the FAT boot partition because the staged
+# vendor U-Boot has no persistent fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 
 [keyring]
@@ -136,6 +137,17 @@ EOF
     fi
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
+
+  local fstab="${root}/etc/fstab"
+  local boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
+  mkdir -p "${root}/etc" "${root}/boot"
+  touch "${fstab}"
+  if grep -qE '^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]]+' "${fstab}"; then
+    grep -Fxq "${boot_mount}" "${fstab}" \
+      || die "${fstab} already has a conflicting /boot mount; shared boot_state.txt requires ${boot_mount}"
+  else
+    printf '%s\n' "${boot_mount}" >>"${fstab}"
+  fi
 
   log "rootfs bootloader integration installed"
 }
@@ -172,16 +184,15 @@ install_boot_partition() {
       bash "${SCRIPT_DIR}/ceralive-boot-state.sh" init --attempts "${BOOT_ATTEMPTS}"
   fi
 
-  log "rendering extlinux/extlinux.conf (manual recovery menu)"
-  mkdir -p "${dest}/extlinux"
-  render "${SCRIPT_DIR}/extlinux.conf.tmpl" "${dest}/extlinux/extlinux.conf"
-
   if command -v mkimage >/dev/null 2>&1; then
-    log "compiling boot.scr from boot.scr.cmd (mkimage)"
+    log "compiling automatic and manual recovery scripts (mkimage)"
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B selector" \
       -d "${SCRIPT_DIR}/boot.scr.cmd" "${dest}/boot.scr" >&2
+    mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B recovery" \
+      -d "${SCRIPT_DIR}/recovery.scr.cmd" "${dest}/recovery.scr" >&2
   else
     cp -a "${SCRIPT_DIR}/boot.scr.cmd" "${dest}/boot.scr.cmd"
+    cp -a "${SCRIPT_DIR}/recovery.scr.cmd" "${dest}/recovery.scr.cmd"
     if [[ "${allow_uncompiled}" == "true" ]]; then
       log "WARN mkimage not found — staged boot.scr.cmd source (compile later); --allow-uncompiled set"
     else
@@ -198,8 +209,8 @@ Usage: install-boot.sh <target> [args]
   rootfs                         install RAUC backend + state helper + system.conf
                                  (run inside the image via mkosi-chroot)
   boot-partition <dir> [--allow-uncompiled]
-                                 render boot.scr + cera_board.env + boot_state.txt
-                                 + extlinux.conf into <dir> (the FAT boot partition)
+                                 render boot.scr + recovery.scr + cera_board.env
+                                 + boot_state.txt into <dir> (the FAT partition)
 
 Board specifics come from the environment (manifest-resolved + orchestrator):
   SERIAL_CONSOLE DTB_NAME BOARD_ID SINGLE_SLOT_FALLBACK COMPATIBLE_STRING

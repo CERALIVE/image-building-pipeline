@@ -64,9 +64,6 @@ source "${HERE}/lib/common.sh"
 # shellcheck source=lib/app-layer/interface.sh
 source "${HERE}/lib/app-layer/interface.sh"
 
-# Workspace root: v2 → image-building-pipeline → <ceralive parent> (siblings live here).
-WORKSPACE_ROOT="$(cd "${HERE}/../.." && pwd)"
-
 # ---------------------------------------------------------------------------
 # Defaults (env-overridable; never bake product constants into logic).
 # ---------------------------------------------------------------------------
@@ -82,7 +79,7 @@ DEFAULT_APPS=(srtla)
 
 # Per-app source checkouts (siblings of image-building-pipeline) and the binaries
 # each app contributes to /usr/bin. Pure-binary apps → clean sysext candidates.
-SRTLA_SRC="${SRTLA_SRC:-${WORKSPACE_ROOT}/srtla}"
+SRTLA_SRC="${SRTLA_SRC:-}"
 
 usage() {
   cat >&2 <<EOF

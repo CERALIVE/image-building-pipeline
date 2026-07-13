@@ -168,7 +168,7 @@ Relevant env knobs:
 
 | Knob | Default | Purpose |
 |------|---------|---------|
-| `DEV_SYNC_CERAUI_DIR` | `<workspace>/CeraUI` | CeraUI workspace root |
+| `DEV_SYNC_CERAUI_DIR` | required | Explicit CeraUI checkout path |
 | `DEV_SYNC_FRONTEND_DIST` | `<CeraUI>/dist/public` | Local build output dir |
 | `DEV_SYNC_FRONTEND_BUILD_CMD` | `pnpm --filter frontend build` | Build command |
 | `DEV_SYNC_FRONTEND_SKIP_BUILD` | `0` | Set to `1` to sync existing dist without rebuilding |
@@ -373,7 +373,7 @@ ssh root@ceralive.local journalctl -u systemd-sysext -n 50
 
 **Options:**
 
-1. Build on a host that matches the device (arm64 for Jetson/Orange Pi/Radxa).
+1. Build on a host that matches the device (arm64 for Orange Pi/Radxa).
 2. Cross-compile (backend only): `DEV_SYNC_ALLOW_CROSS_BUILD=1 image-building-pipeline/v2/dev-sync --backend`. This uses `bun --target=bun-linux-arm64`.
 3. For native (sysext): build the `.deb` on the right arch and pass it via `DEV_SYNC_NATIVE_ARGS="--from-deb /path"`.
 
@@ -446,8 +446,8 @@ All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in
 |------|---------|---------|
 | `DRY_RUN` | `0` | Print the plan, start no watchers |
 | `DEV_SYNC_DEBOUNCE_MS` | `500` | Coalesce window in milliseconds |
-| `DEV_SYNC_CERAUI_DIR` | `<workspace>/CeraUI` | CeraUI workspace root |
-| `SRTLA_SRC` | `<workspace>/srtla` | srtla source checkout |
+| `DEV_SYNC_CERAUI_DIR` | required | Explicit CeraUI checkout path |
+| `SRTLA_SRC` | required for srtla dev-push | Explicit srtla source checkout path |
 | `DEV_SYNC_NATIVE_ARGS` | `` | Extra args forwarded to `sync-native.sh` |
 | `DEV_SYNC_FORCE` | `0` | Skip stream-active prompt for backend/native |
 | `DEV_SYNC_DEFER` | `0` | Queue backend/native until stream stops |

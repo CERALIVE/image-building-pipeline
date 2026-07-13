@@ -3,7 +3,7 @@
 # verify-disk.sh — Stage 4 disk-image CONTRACT VERIFIER for the CeraLive v2 pipeline.
 #
 # The partition/gap/label assertions that prove a produced disk image matches the
-# FROZEN A/B layout (docs/partition-contract.md §3, contract v1). Extracted from
+# FROZEN A/B layout (docs/partition-contract.md §3, contract v2). Extracted from
 # assemble-disk.sh (task 6) so the checks live in one place, run STANDALONE, and so
 # the assembler's build path can reuse part_field without duplicating it.
 #

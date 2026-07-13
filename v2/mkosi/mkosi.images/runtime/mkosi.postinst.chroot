@@ -13,7 +13,7 @@
 #      $SHARED_PACKAGES. There is NO inline hardcoded package list (Task 19).
 #   4. First-party apps (cerastream/srtla/CeraUI + the CERALIVE/srt fork .deb) are
 #      NOT installed here — they belong to the APPLICATION layer (Stage 3). This
-#      runtime layer carries only the OS + system config + system libsrt.
+#      runtime layer carries only the OS and system configuration.
 #
 # ARCH-NEUTRAL: this layer is identical on every architecture. NO SoC/board/
 # architecture token appears here — those specifics live in the Platform layer,
@@ -171,9 +171,8 @@ EOF
 # ---------------------------------------------------------------------------
 # 4. (REMOVED in Task 19) First-party .deb install moved to the APPLICATION layer
 #    (mkosi.images/app, Stage 3, tasks 22-23). cerastream/srtla/CeraUI + the
-#    CERALIVE/srt fork .deb are NOT installed by the runtime layer — only the
-#    system libsrt (libsrt1.5-openssl, via shared.list) lives here so app images
-#    stay small and a libsrt bump rides the RAUC OS slot atomically.
+#    CERALIVE/srt fork .deb are NOT installed by the runtime layer; the App layer
+#    installs the fork with cerastream so all SRT consumers use one shared object.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -473,7 +472,7 @@ EOF
 #
 # Inline twin of customize/rauc-setup.sh (dual-track — keep in sync). Installs the
 # IMMUTABLE root CA (PUBLIC; cert-work/rauc/root-ca.pem) into the device keyring so
-# every signed .raucb verifies against it, and makes rauc.service live. The root CA
+# every signed .raucb verifies against it, and makes rauc.service available. The root CA
 # arrives as base64 in $RAUC_ROOT_CA_B64 (orchestrator-forwarded), exactly like the
 # apt GPG public key. NEVER a private key — the device keyring holds the root cert
 # only. On arm64 the board-aware /etc/rauc/system.conf is already written by
@@ -539,9 +538,8 @@ EOF
     chmod 0644 "${sysconf}"
   fi
 
-  if ! systemctl list-unit-files rauc.service >/dev/null 2>&1 \
-     || ! systemctl list-unit-files rauc.service | grep -q '^rauc\.service'; then
-    log "FATAL: rauc.service not present — the 'rauc' package (shared.list) is not installed"
+  if [[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]; then
+    log "FATAL: rauc.service not present — the 'rauc-service' package (shared.list) is not installed"
     exit 1
   fi
   if systemctl enable rauc.service 2>/dev/null; then

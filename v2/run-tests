@@ -2,24 +2,25 @@
 #
 # run-tests — single CI entrypoint for the CeraLive v2 manifest unit suite.
 #
-# Runs the bats-core unit tests for the manifest system (schema validation,
-# resolver merge precedence, versions.yaml pin resolution, common.sh strict-fail).
-# Exits with the bats exit code so CI can gate on it directly.
+# Runs the manifest/orchestrator units plus the hardware-free RK3588 disk contract
+# and signed x86 bundle contract. Exits with the bats status so CI can gate on it.
 #
 # Dependencies (test-time only; NOT shipped in the device image):
 #   * bats-core   https://github.com/bats-core/bats-core   (>= 1.5)
 #       install:  git clone --depth=1 https://github.com/bats-core/bats-core.git \
 #                   && sudo bats-core/install.sh /usr/local
 #   * python3 with PyYAML + python-jsonschema (same validator resolve.py uses)
+#   * sgdisk, systemd-repart, e2fsprogs, dosfstools, mtools, u-boot-tools
 #
 # Parallelism (opt-in, automatic):
-#   bats parallelizes test CASES with `-j N`, which needs GNU parallel (or
+#   bats parallelizes test files with `-j N`, which needs GNU parallel (or
 #   shenwei356/rush) on PATH. This entrypoint enables `-j` automatically when
 #   BOTH a parallel backend AND flock are present, and falls back to the
-#   previous serial run otherwise — the suite stays green either way. The few
-#   tests that share mutable state (the working tree in §8, the per-file
-#   feature-sysext fixture in §14) serialize themselves with flock (see the
-#   `serialize` helper in tests/manifest.bats), so parallel runs are correct.
+#   previous serial run otherwise — the suite stays green either way. Cases
+#   within each Bats file stay serial because they share repo-local fixtures;
+#   the three suite files still run in parallel. The few shared fixtures that
+#   need finer locking serialize themselves with flock (see `serialize` in
+#   tests/manifest.bats).
 #   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
 #   auto-derives from nproc, capped at 8 (this unit suite is ~95 short tests —
 #   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
@@ -32,12 +33,26 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Suites, in run order. manifest.bats is the manifest/orchestrator unit suite;
-# x86-raucb-bundle.bats is the offline REAL x86 .raucb sign/verify/tamper gate (T10).
+# Suites, in run order. The RK3588 contract suite proves the production Rock 5B+
+# factory A/B geometry before the signed-bundle suites run.
 SUITES=(
   "${HERE}/tests/manifest.bats"
+  "${HERE}/tests/rk3588-ab-contract.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
 )
+SHELL_SUITES=(
+  "${HERE}/tests/fetch-debs-apt-chain.test.sh"
+  "${HERE}/tests/bsp-auth-contract.test.sh"
+  "${HERE}/tests/rauc-pki-contract.test.sh"
+  "${HERE}/tests/release-candidate-contract.test.sh"
+  "${HERE}/tests/release-cache-contract.test.sh"
+  "${HERE}/tests/recovery-script-contract.test.sh"
+  "${HERE}/tests/production-ci-scope-contract.test.sh"
+  "${HERE}/tests/orchestrate-build-lock.test.sh"
+  "${HERE}/tests/boot-script-sanitize.test.sh"
+  "${HERE}/mkosi/platform/boot/test-fallback.sh"
+)
+DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"
 
 if ! command -v bats >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -54,6 +69,22 @@ for suite in "${SUITES[@]}"; do
     echo "ERROR: test suite not found: ${suite}" >&2
     exit 1
   fi
+done
+for suite in "${SHELL_SUITES[@]}"; do
+  if [[ ! -x "${suite}" ]]; then
+    echo "ERROR: shell test suite not found or not executable: ${suite}" >&2
+    exit 1
+  fi
+done
+if [[ ! -x "${DEV_PKI_GENERATOR}" ]]; then
+  echo "ERROR: dev RAUC PKI generator not found or not executable: ${DEV_PKI_GENERATOR}" >&2
+  exit 1
+fi
+
+"${DEV_PKI_GENERATOR}"
+
+for suite in "${SHELL_SUITES[@]}"; do
+  "${suite}"
 done
 
 # --- Decide on parallelism -------------------------------------------------
@@ -74,8 +105,8 @@ fi
 
 bats_args=()
 if [[ "$jobs" -gt 1 && -n "$parallel_backend" ]] && command -v flock >/dev/null 2>&1; then
-  bats_args+=( --jobs "$jobs" )
-  mode="parallel — ${jobs} jobs via ${parallel_backend}"
+  bats_args+=( --jobs "$jobs" --no-parallelize-within-files )
+  mode="parallel — ${jobs} jobs via ${parallel_backend} (file-serial)"
 else
   mode="serial"
   if [[ "$jobs" -gt 1 && -z "$parallel_backend" ]]; then
@@ -85,4 +116,25 @@ else
 fi
 
 echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
-exec bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+
+echo "== CeraLive v2 mock RAUC rollback suite =="
+CERALIVE_ROLLBACK_MODE=mock bash "${HERE}/tests/rauc-rollback.sh"
+
+# The RK3588 Bats suite invokes preflash-verify.sh --self-test against its real
+# signed-bundle fixture. The privileged RAUC service harness is opt-in locally
+# and required by CI so a developer machine is never mounted on unexpectedly.
+case "${CERALIVE_RUN_REAL_RAUC_CONTRACT:-skip}" in
+  required)
+    echo "== CeraLive v2 real RAUC interruption/cleanup contract =="
+    bash "${HERE}/tests/real-rauc-contract.sh"
+    bash "${HERE}/tests/real-rauc-cleanup-contract.test.sh"
+    ;;
+  skip)
+    echo "== SKIP real RAUC contract (set CERALIVE_RUN_REAL_RAUC_CONTRACT=required) =="
+    ;;
+  *)
+    echo "ERROR: CERALIVE_RUN_REAL_RAUC_CONTRACT must be 'required' or 'skip'" >&2
+    exit 2
+    ;;
+esac

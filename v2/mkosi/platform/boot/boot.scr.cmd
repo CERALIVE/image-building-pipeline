@@ -1,5 +1,5 @@
 # CeraLive A/B boot selector — U-Boot script SOURCE (compiled to boot.scr with
-# mkimage; see install-boot.sh). Runs on the RK3588 vendor U-Boot (2017.09).
+# mkimage; see install-boot.sh). Runs on the board's staged RK3588 U-Boot.
 #
 # WHY a boot.scr and not fw_setenv/extlinux alone (decision D3): the vendor U-Boot
 # is ENV_IS_NOWHERE — `fw_setenv` does not persist, so RAUC's stock BOOT_ORDER/
@@ -8,8 +8,7 @@
 # mutates, and writes back with `fatwrite`. extlinux.conf is static and cannot
 # decrement a counter; this script is what makes failed-boot rollback work.
 #
-# ALGORITHM (the userspace twin lives in ceralive-boot-state.sh `boot-select`, kept
-# byte-for-byte equivalent so test-fallback.sh proves this exact behaviour offline):
+# ALGORITHM (the userspace twin lives in ceralive-boot-state.sh `boot-select`):
 #   1. import board specifics (console, fdtfile) from cera_board.env  [from manifest]
 #   2. import A/B state (BOOT_ORDER, BOOT_A_LEFT, BOOT_B_LEFT) from boot_state.txt
 #   3. pick the first slot in BOOT_ORDER whose *_LEFT > 0   (the "primary")
@@ -39,6 +38,34 @@ setenv BOOT_A_LEFT 3
 setenv BOOT_B_LEFT 3
 if load ${devtype} ${devnum}:1 ${loadaddr} boot_state.txt; then
   env import -t ${loadaddr} ${filesize}
+fi
+
+# U-Boot must reject malformed state before choosing a slot. Userspace cannot
+# repair an interrupted FAT write unless a known-good factory slot boots first.
+setenv cera_state_valid 0
+if test "${BOOT_ORDER}" = "A B"; then setenv cera_state_valid 1; fi
+if test "${BOOT_ORDER}" = "B A"; then setenv cera_state_valid 1; fi
+if test "${BOOT_ORDER}" = "A"; then setenv cera_state_valid 1; fi
+if test "${BOOT_ORDER}" = "B"; then setenv cera_state_valid 1; fi
+setenv cera_a_valid 0
+setenv cera_b_valid 0
+for n in 0 1 2 3; do
+  if test "${BOOT_A_LEFT}" = "${n}"; then setenv cera_a_valid 1; fi
+  if test "${BOOT_B_LEFT}" = "${n}"; then setenv cera_b_valid 1; fi
+done
+if test "${cera_a_valid}" = "0"; then setenv cera_state_valid 0; fi
+if test "${cera_b_valid}" = "0"; then setenv cera_state_valid 0; fi
+if test "${cera_state_valid}" = "0"; then
+  echo "CeraLive: invalid boot state — restoring factory-safe A/B defaults"
+  setenv BOOT_ORDER "A B"
+  setenv BOOT_A_LEFT 3
+  setenv BOOT_B_LEFT 3
+  env export -t ${loadaddr} BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
+  if fatwrite ${devtype} ${devnum}:1 ${loadaddr} boot_state.txt ${filesize}; then
+    echo "CeraLive: repaired boot_state.txt"
+  else
+    echo "CeraLive: WARNING could not persist repaired boot_state.txt"
+  fi
 fi
 echo "BOOT_ORDER=${BOOT_ORDER} A_LEFT=${BOOT_A_LEFT} B_LEFT=${BOOT_B_LEFT}"
 
@@ -83,7 +110,7 @@ fi
 # --- boot the chosen slot. Kernel/DTB/initrd ride INSIDE the rootfs slot's /boot
 #     (frozen contract), so load them from the ext4 rootfs partition, not this FAT.
 echo "CeraLive: booting slot ${cera_slot} (root=PARTLABEL=${cera_root}, part ${cera_part})"
-setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot}"
+setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot} rauc.slot=${cera_slot}"
 
 if test "${fdtfile}" = ""; then
   echo "CeraLive: FATAL fdtfile unset (cera_board.env missing?) — cannot boot"

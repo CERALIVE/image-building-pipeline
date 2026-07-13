@@ -30,7 +30,7 @@
 # is an IPC-driven engine consumed via @ceralive/cerastream). srtla handles
 # resolve at process start against the MERGED /usr view of three independent layers:
 #
-#   Runtime OS slot (RAUC)  → libsrt1.5-openssl  → /usr/lib/<triplet>/libsrt.so.*
+#   First-party SRT package → libsrt1.5-ceralive → /usr/lib/<triplet>/libsrt.so.*
 #   App .deb   (cerastream) → cerastream binary  → /usr/bin/cerastream
 #   App sysext (srtla)      → srtla binaries     → /usr/bin/srtla_{send,rec}
 #   App appfs  (CeraUI)     → ceralive binary    → /usr/local/bin/ceralive
@@ -40,8 +40,8 @@
 # normal loader path — no bundling, no IPC. CRITICAL CONSEQUENCE: after a sysext
 # refresh swaps the srtla binaries, the FFI handles are stale until the
 # process reloads them; refresh_app_layer (sysext.sh) therefore restarts
-# ceralive.service. The link:../../../ sibling-checkout (ARCHITECTURE.md §5) is a
-# BUILD-time concern of the CeraUI .deb — by the time we package here it is already
+# ceralive.service. Registry dependency resolution is a BUILD-time concern of
+# the CeraUI .deb — by the time we package here it is already
 # baked into the compiled binary; this script never touches that layout.
 #
 # Usage:

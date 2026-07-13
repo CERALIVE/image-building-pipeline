@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "package": "linux-image-vendor-rk35xx",
-  "version": null,
-  "sha256": null,
-  "_comment": "Last-known-good kernel BSP provenance for the advisory drift-guard (v2/lib/fetch-debs.sh::bsp_drift_check). The kernel BSP floats (Decision D3 — name-based, no version pin), so this baseline ships UNSEEDED: version/sha256 are null because the concrete Armbian vendor build cannot be resolved offline (no apt creds in CI/dev). The first authenticated real build seeds these fields with the actual resolved version + content sha256, emits an informational note, and exits 0. Commit that seeded value to make it the known-good reference; thereafter a differing version OR a same-version content-hash re-spin trips an advisory 'BSP drift' warning (never fatal). This file is NEVER a hard pin."
+  "version": "26.5.1",
+  "sha256": "7b70fb2d1148021275a648fb0a4c0177236c3f54bef69a02a771d6ae7d9055ed"
 }

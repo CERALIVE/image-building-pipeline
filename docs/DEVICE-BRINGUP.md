@@ -78,15 +78,15 @@ ships an older version:
 pip install --user git+https://github.com/systemd/mkosi.git@v26
 ```
 
-### BELABOX libsrt (required for the E2E smoke test)
+### CeraLive libsrt (required for the E2E smoke test)
 
 The system `libsrt` package lacks the `SRTO_SRTLAPATCHES` socket option that
-CeraLive's bonding layer requires. Build the BELABOX fork instead:
+CeraLive's bonding layer requires. Build the pinned CERALIVE fork instead:
 
 ```bash
-# Clone the BELABOX fork
-git clone --branch belabox https://github.com/irlserver/srt.git belabox-srt
-cd belabox-srt
+# Clone the CeraLive fork at the device runtime release
+git clone --branch srt-v1.5.5+ceralive.1 https://github.com/CERALIVE/srt.git ceralive-srt
+cd ceralive-srt
 
 # Build with cmake directly (the ./configure script requires tclsh; cmake does not)
 cmake -B build \
@@ -181,13 +181,13 @@ After a successful build, artifacts land in `v2/images/<board>/`:
 
 ```text
 v2/images/rock-5b-plus/
-  20260609T075534Z.raw      # flashable disk image (sparse, ~12 GiB nominal)
+  20260609T075534Z.raw      # flashable disk image (sparse, 14,800 MiB nominal)
   20260609T075534Z.raucb    # signed RAUC OTA bundle
   20260609T075534Z.raucb.sha256
 ```
 
 The `.raw` is a sparse file. Actual on-disk size is much smaller than the
-nominal 12 GiB. Use `du -sh` to see the real size.
+nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size.
 
 ### Custom APT mirror
 
@@ -204,15 +204,19 @@ Replace `<your-apt-mirror>` with your mirror hostname.
 
 ## 3. Pre-flash verification
 
-Before touching any hardware, run the offline gate. It checks five things:
-GPT geometry, bootloader gap magic, boot partition artifacts, boot state seed,
-and RAUC bundle signature.
+Before flashing, identify the destination block device and run the offline gate.
+Reading its size is non-destructive. The gate checks exact A/B geometry and GPT
+integrity, idblock plus parsed second-stage FIT, the compiled selector and board
+metadata, boot state, kernel/DTB/initrd in both factory slots, exact media capacity,
+and the RAUC bundle signature/compatible contract.
 
 ```bash
-bash v2/tests/preflash-verify.sh
+TARGET=/dev/sdX
+TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
+bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
-Expected output (all five checks green):
+Expected output (all nine checks green):
 
 ```text
 ==============================================================
@@ -221,10 +225,14 @@ Expected output (all five checks green):
  bundle:  v2/images/rock-5b-plus/<ts>.raucb
  keyring: v2/.dev-keys/dev-root-ca.pem
 ==============================================================
-[PASS] GPT geometry: single-slot (boot + rootfs_a + data, no rootfs_b)
+[PASS] GPT geometry: exact A/B starts/sizes and unique labels
 [PASS] Gap magic: RKNS (52 4b 4e 53) at sector 64
-[PASS] Boot partition: all 4 artifacts present
-[PASS] Boot state: BOOT_ORDER=A (single-slot) and BOOT_B_LEFT=0
+[PASS] Bootloader second-stage FIT: valid FDT header and extent at sector 16384
+[PASS] Boot partition: compiled AArch64 selector + Rock board metadata + recovery files
+[PASS] Boot state: BOOT_ORDER=A B with positive A/B attempts
+[PASS] rootfs_a populated + kernel + board DTB + initrd + shared /boot mount
+[PASS] rootfs_b populated + kernel + board DTB + initrd + shared /boot mount
+[PASS] Target media capacity: <target-bytes> bytes >= image <image-bytes> bytes
 [PASS] RAUC bundle: parses + Compatible 'ceralive-rock-5b-plus'
 --------------------------------------------------------------
 RESULT: PASS — pre-flash gate GREEN. Hardware bring-up AUTHORIZED.
@@ -237,7 +245,8 @@ You can also run the built-in negative self-test to confirm the gate is
 non-vacuous:
 
 ```bash
-bash v2/tests/preflash-verify.sh --self-test
+bash v2/tests/preflash-verify.sh --self-test \
+  --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
 ---
@@ -252,10 +261,15 @@ build system; you do not need to write it separately.
 
 ```text
 [16 MB raw gap]  idbloader + U-Boot + ATF (no GPT entry)
-p1  boot         256 MB  vfat   U-Boot env + extlinux slot selector
+p1  boot         256 MB  vfat   automatic selector + manual recovery script + state
 p2  rootfs_a     4096 MB ext4   rootfs slot A (active)
-p3  data         remainder ext4  persistent mutable state
+p3  rootfs_b     4096 MB ext4   rootfs slot B (factory rollback baseline)
+p4  data         remainder ext4  persistent mutable state
 ```
+
+An older single-slot image cannot be upgraded to this layout with a `.raucb`:
+its `data` partition occupies the future `rootfs_b` extent. Back up required state
+and perform a full re-flash; do not attempt in-place repartitioning.
 
 ### Option A: dd to microSD card
 
@@ -332,11 +346,13 @@ the merged service implementations.
 
 Expected first-boot sequence:
 
-1. U-Boot loads from the `boot` partition, reads `extlinux/extlinux.conf`,
-   selects slot A.
+1. U-Boot loads `boot.scr` from the shared boot partition and selects slot A.
+   At the console, `recovery.scr` can explicitly load slot A from p2 or slot B
+   from p3 without relying on extlinux path resolution.
 2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
-   - `ceralive-hostname.service` — generates a unique hostname
-     (`ceralive-<short-id>`) from the machine-id.
+   - `ceralive-hostname.service` — claims `ceralive.local`, falling back to
+     `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already
+     occupied.
    - `ceralive-ssh-firstboot.service` — regenerates per-device SSH host keys,
      writes `PermitRootLogin prohibit-password`, and arms a forced password
      change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
@@ -366,18 +382,19 @@ For the operator-facing walkthrough of the WiFi portal and first login, see
 **Verify the services are running** (once the device is on the network):
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local 'systemctl status ceralive.service'
-ssh ceralive@ceralive-<short-id>.local 'journalctl -u ceralive.service -n 50'
+ssh ceralive@ceralive.local 'systemctl status ceralive.service'
+ssh ceralive@ceralive.local 'journalctl -u ceralive.service -n 50'
 ```
 
 The default user is `ceralive` (password-locked; see `docs/FIRST-BOOT.md` §5
-for first-login instructions). Replace `ceralive-<short-id>` with the actual
-hostname shown on the HDMI/serial console or the setup hotspot SSID.
+for first-login instructions). If another device already owns `ceralive.local`,
+replace it with the selected fallback hostname shown on the HDMI/serial console,
+for example `ceralive2.local`.
 
 **Check the boot slot:**
 
 ```bash
-ssh ceralive@ceralive-<short-id>.local 'rauc status'
+ssh ceralive@ceralive.local 'rauc status'
 ```
 
 ---
@@ -519,6 +536,17 @@ The build system defaults to a throwaway dev signing key stored in
 `v2/.dev-keys/` (gitignored). This key is for local and CI builds only and
 must never be used in production.
 
+The canonical test entrypoint creates this ignored fixture automatically on a
+clean checkout:
+
+```bash
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+```
+
+The generator validates the NON-PRODUCTION certificate chain and leaf key before
+the RAUC assertions run. Production builds still require an explicit
+`CERALIVE_RAUC_PKI_DIR`; the test fixture is never a production fallback.
+
 The orchestrator sets this automatically:
 
 ```bash
@@ -547,7 +575,7 @@ containing the following files:
 ```text
 <your-signing-key>/
   root-ca.pem        # root CA cert (baked into device keyring)
-  chain.pem          # intermediate + leaf chain (embedded in bundle)
+  chain.pem          # intermediate chain; leaf certificate is passed separately
   leaf-signing.pem   # leaf code-signing cert
   leaf-signing.key   # leaf private key
 ```
@@ -593,8 +621,8 @@ openssl x509 -req -in dev-leaf-signing.csr \
     'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning')
 rm dev-leaf-signing.csr
 
-# Chain
-cat dev-intermediate-ca.pem dev-leaf-signing.pem > dev-chain.pem
+# Chain (the leaf is passed separately as the signer)
+cp dev-intermediate-ca.pem dev-chain.pem
 
 # Symlinks expected by build-bundle.sh
 ln -sf dev-root-ca.pem root-ca.pem

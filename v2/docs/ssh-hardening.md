@@ -53,6 +53,11 @@ config, so a malformed drop-in can never wedge sshd's startup.
   out-of-band/OTA provisioning). The `chage -d 0` above guarantees that the
   moment a password is established it is treated as expired and the operator is
   forced to choose a new one on first interactive use.
+- **Lab-only debug images:** `CERALIVE_DEBUG_IMAGE=1` plus an encrypted
+  `CERALIVE_DEBUG_PASSWORD_HASH` creates `/etc/ceralive/debug-image`, unlocks
+  `ceralive`, and retains that injected password across the first-boot service.
+  The build rejects a hash without the lab flag, and production builds never
+  receive either input. Do not use this mode for fleet artifacts.
 - **The device is never locked out of the network on first boot.** SSH remains
   reachable; root retains key-based access for recovery. The appliance is
   reachable at `ceralive.local` (mDNS) on any network out of the box.

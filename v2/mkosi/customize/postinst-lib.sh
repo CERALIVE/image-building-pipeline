@@ -57,6 +57,29 @@ disable_service() {
   fi
 }
 
+configure_debug_access() {
+  local user="${CERALIVE_USER:-ceralive}"
+  local mode="${CERALIVE_DEBUG_IMAGE:-0}"
+  local hash="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
+
+  case "${mode}" in
+    0|1) ;;
+    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
+  esac
+  if [[ -n "${hash}" && "${mode}" != "1" ]]; then
+    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
+  fi
+  [[ "${mode}" == "1" ]] || return 0
+  [[ -n "${hash}" ]] || die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
+  [[ "${hash}" == '$'* ]] || die "CERALIVE_DEBUG_PASSWORD_HASH must be an encrypted password hash"
+  id -u "${user}" >/dev/null || die "lab debug user '${user}' is absent"
+
+  usermod --password "${hash}" "${user}"
+  chage -d -1 "${user}"
+  install -Dm 0600 /dev/null /etc/ceralive/debug-image
+  log "lab debug image: password access enabled for '${user}'"
+}
+
 # --- 8. Networking (verbatim from postinst section 8) ---------------------
 configure_networking() {
   log "configuring networking (NetworkManager + mDNS)"
@@ -163,10 +186,20 @@ EOF
   fi
 }
 
+install_console_font_service() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-console-font.service" ]] \
+    || die "console font service source not found: ${src}/ceralive-console-font.service (is \$SRCDIR/runtime mounted?)"
+
+  install -m 0644 "${src}/ceralive-console-font.service" /etc/systemd/system/ceralive-console-font.service
+}
+
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
+  configure_debug_access
   configure_ntp  # install NTP pools before enabling chrony
+  install_console_font_service
   local svc
   for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"
@@ -184,31 +217,103 @@ setup_hostname_service() {
   cat >/usr/local/sbin/ceralive-set-hostname <<'EOF'
 #!/bin/bash
 set -euo pipefail
-BASE_NAME="ceralive"
-INDEX_FILE="/etc/ceralive/host_index"
-LOCK_FILE="/etc/ceralive/hostname.lock"
+BASE_NAME="${CERALIVE_BASE_HOSTNAME:-ceralive}"
+STATE_DIR="${CERALIVE_HOSTNAME_STATE_DIR:-/etc/ceralive}"
+INDEX_FILE="${STATE_DIR}/host_index"
+LOCK_FILE="${STATE_DIR}/hostname.lock"
+HOSTS_FILE="${CERALIVE_HOSTS_FILE:-/etc/hosts}"
+HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
+HOSTNAMECTL_BIN="${HOSTNAMECTL_BIN:-hostnamectl}"
+IP_BIN="${IP_BIN:-ip}"
+TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
+AVAHI_RESOLVE_BIN="${AVAHI_RESOLVE_BIN:-avahi-resolve-host-name}"
+MAX_INDEX="${CERALIVE_HOSTNAME_MAX_INDEX:-9999}"
+PROBE_GRACE="${CERALIVE_HOSTNAME_PROBE_GRACE:-3}"
 [ -f "$LOCK_FILE" ] && exit 0
 
-index=""
+candidate_for_index() {
+    local i="$1"
+    if [ "$i" = "1" ]; then
+        printf '%s\n' "$BASE_NAME"
+    else
+        printf '%s%s\n' "$BASE_NAME" "$i"
+    fi
+}
+
+local_addresses() {
+    if [ -n "${CERALIVE_LOCAL_ADDRS:-}" ]; then
+        printf '%s\n' ${CERALIVE_LOCAL_ADDRS}
+        return
+    fi
+    command -v "$IP_BIN" >/dev/null 2>&1 || return 0
+    "$IP_BIN" -o -4 addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
+    "$IP_BIN" -o -6 addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
+}
+
+resolved_addresses() {
+    local name="$1"
+    command -v "$AVAHI_RESOLVE_BIN" >/dev/null 2>&1 || return 0
+    "$TIMEOUT_BIN" 2 "$AVAHI_RESOLVE_BIN" -4 "${name}.local" 2>/dev/null | awk 'NF >= 2 { print $2 }' || true
+}
+
+hostname_available() {
+    local name="$1"
+    local resolved locals ip
+    resolved="$(resolved_addresses "$name")"
+    [ -n "$resolved" ] || return 0
+    locals="$(local_addresses)"
+    [ -n "$locals" ] || return 1
+    while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        if ! printf '%s\n' "$locals" | grep -Fxq "$ip"; then
+            return 1
+        fi
+    done <<ADDRS
+$resolved
+ADDRS
+    return 0
+}
+
+select_index() {
+    local index="" name i
+    if [ -s "$INDEX_FILE" ]; then
+        index="$(sed -E 's/[^0-9]//g' "$INDEX_FILE")"
+        if [ -n "$index" ] && [ "$index" -ge 1 ] 2>/dev/null; then
+            printf '%s\n' "$index"
+            return
+        fi
+    fi
+    if command -v "$AVAHI_RESOLVE_BIN" >/dev/null 2>&1 && [ "$PROBE_GRACE" -gt 0 ] 2>/dev/null; then
+        sleep "$PROBE_GRACE"
+    fi
+    i=1
+    while [ "$i" -le "$MAX_INDEX" ]; do
+        name="$(candidate_for_index "$i")"
+        if hostname_available "$name"; then
+            printf '%s\n' "$i"
+            return
+        fi
+        i=$((i + 1))
+    done
+    printf '%s\n' "$MAX_INDEX"
+}
+
+mkdir -p "$STATE_DIR"
+index="$(select_index)"
+NEW_HOSTNAME="$(candidate_for_index "$index")"
+printf '%s\n' "$index" >"$INDEX_FILE"
+if command -v "$HOSTNAMECTL_BIN" >/dev/null 2>&1; then
+    "$HOSTNAMECTL_BIN" set-hostname "$NEW_HOSTNAME" || printf '%s\n' "$NEW_HOSTNAME" >"$HOSTNAME_FILE"
+else
+    printf '%s\n' "$NEW_HOSTNAME" >"$HOSTNAME_FILE"
+fi
 if [ -s "$INDEX_FILE" ]; then
-    index="$(sed -E 's/[^0-9]//g' "$INDEX_FILE")"
+    chmod 0644 "$INDEX_FILE"
 fi
-if [ -z "$index" ]; then
-    mid="$(tr -cd 'a-f0-9' </etc/machine-id | tail -c 4)"
-    [ -n "$mid" ] || mid="0001"
-    num=$(( 16#$mid ))
-    index=$(( (num % 9999) + 1 ))
-fi
-if [ "$index" = "1" ]; then
-    NEW_HOSTNAME="${BASE_NAME}"
+if grep -qE '^127\.0\.1\.1\b' "$HOSTS_FILE"; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${NEW_HOSTNAME}/" "$HOSTS_FILE"
 else
-    NEW_HOSTNAME="${BASE_NAME}-${index}"
-fi
-hostnamectl set-hostname "$NEW_HOSTNAME" || echo "$NEW_HOSTNAME" >/etc/hostname
-if grep -qE '^127\.0\.1\.1\b' /etc/hosts; then
-    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${NEW_HOSTNAME}/" /etc/hosts
-else
-    printf '127.0.1.1\t%s\n' "${NEW_HOSTNAME}" >>/etc/hosts
+    printf '127.0.1.1\t%s\n' "${NEW_HOSTNAME}" >>"$HOSTS_FILE"
 fi
 : >"$LOCK_FILE"
 EOF
@@ -217,9 +322,9 @@ EOF
   cat >/etc/systemd/system/ceralive-hostname.service <<'EOF'
 [Unit]
 Description=CeraLive unique hostname setup
-After=systemd-machine-id-commit.service
-Before=network-pre.target avahi-daemon.service
-Wants=network-pre.target
+After=systemd-machine-id-commit.service NetworkManager.service avahi-daemon.service
+Before=ceralive-tls-firstboot.service ceralive.service
+Wants=NetworkManager.service avahi-daemon.service
 ConditionPathExists=/etc/machine-id
 
 [Service]
@@ -302,7 +407,7 @@ if [ -d "$NM_CONN" ] && ! mountpoint -q "$NM_CONN"; then
     cp -a "$NM_CONN"/. "$DATA/nm/system-connections/" 2>/dev/null || true
 fi
 
-# Persist machine-id across A/B slots so host identity (and hostname) is stable.
+# Persist machine-id across A/B slots so host identity and setup identifiers are stable.
 if [ -s /etc/machine-id ] && [ ! -s "$DATA/ceralive/machine-id" ]; then
     cp -a /etc/machine-id "$DATA/ceralive/machine-id"
 fi

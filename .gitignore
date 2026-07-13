@@ -4,6 +4,7 @@ images/
 *.sha*
 .DS_Store
 build-logs/
+*.log
 cache/
 secrets/
 .env
@@ -17,6 +18,9 @@ debs/
 *~
 Thumbs.db
 .cursor/
+
+# Non-production RAUC test keys are generated on demand and never committed.
+v2/.dev-keys/
 
 # OpenCode agent state (local only)
 .omo/

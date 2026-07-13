@@ -66,8 +66,8 @@ provenance log is the concrete indicator.
 opt-in to the DEFAULT is a **future change, not this one**. Both conditions must
 hold first:
 
-1. **Baseline seeded** — `v2/manifests/bsp-baseline.json` carries a real known-good
-   `version` + `sha256` (it currently ships UNSEEDED / `null`).
+1. **Baseline seeded** — `v2/manifests/bsp-baseline.json` carries the reviewed
+   known-good `version` + `sha256` (this condition is now satisfied).
 2. **Fleet manifest clean** — a fleet manifest run confirms every board resolves to
    that same known-good BSP with no outstanding drift.
 

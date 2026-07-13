@@ -39,12 +39,17 @@ CIMG="${REPO}/userpatches/customize-image.sh"
 PKGDIR="${V2}/manifests/packages"
 FAMDIR="${V2}/manifests/families"
 FETCH_DEBS="${V2}/lib/fetch-debs.sh"
+POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+RUNTIME_DIR="${V2}/mkosi/runtime"
 
 EVIDENCE="${1:-${REPO}/test-results/migrate-package-diff.txt}"
 
 for f in "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
   [[ -f "${f}" ]] || { echo "ERROR: missing v2 source: ${f}" >&2; exit 2; }
 done
+[[ -f "${RUNTIME_DIR}/ceralive-console-font.service" ]] || { echo "ERROR: missing console font unit source" >&2; exit 2; }
+[[ "$(grep -c 'install_console_font_service' "${POSTINST_LIB}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
+grep -q 'ceralive-console-font' "${POSTINST_LIB}" || { echo "ERROR: console font service is not enabled by postinst-lib" >&2; exit 2; }
 
 # Legacy sources were retired with the legacy Armbian build; absent => MIGRATE
 # phase is over (proof in git history; parity-check.sh now guards package loss).
@@ -113,7 +118,7 @@ build_v2_set() {
     if [[ -f "${FETCH_DEBS}" ]]; then
       sed -n 's/^REPOS=(\(.*\))/\1/p' "${FETCH_DEBS}" | tr -d '"' | tr ' ' '\n'
     fi
-    printf '%s\n' srtla srt cerastream CeraUI ceraui ceralive-device
+    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src libsrt1.5-ceralive
   } | sed '/^$/d' | sort -u
 }
 
@@ -137,7 +142,7 @@ SHARED="$(sed -e 's/#.*//' "${PKGDIR}/shared.list" | awk 'NF{print $1}' | sort -
 FAMILY="$(for y in "${FAMDIR}"/*.yaml; do grep -E '^[[:space:]]*-[[:space:]]+[a-z0-9._+-]+' "${y}" | sed -E 's/^[[:space:]]*-[[:space:]]+//' | awk '{print $1}'; done | sort -u)"
 # shellcheck disable=SC2016  # literal backticks in the regex are intentional
 REMOVED="$(grep -oE '`[^`]+`' "${PKGDIR}/removed.md" | tr -d '`' | grep -E '^[a-z0-9][a-z0-9.+*-]*$' | grep -vE '\.(conf|sh|list|yaml|yml|md|py)$' | sort -u)"
-FIRSTPARTY=$'srtla\nsrt\ncerastream\nCeraUI\nceraui\nceralive-device'
+FIRSTPARTY=$'srtla-send-rs\ncerastream\nCeraUI\nceraui\nceralive-device\nlibsrt1.5-ceralive'
 
 mkdir -p "$(dirname "${EVIDENCE}")"
 {

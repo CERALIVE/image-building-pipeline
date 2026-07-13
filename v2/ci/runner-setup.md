@@ -4,10 +4,10 @@
 > RK3588 board attached** (USB flash + serial + power control) so the real-HW
 > acceptance gates — [`v2/tests/realhw-smoke.sh`](../tests/realhw-smoke.sh) (LIVE
 > mode) and [`v2/tests/rauc-rollback.sh`](../tests/rauc-rollback.sh) (LIVE mode)
-> — can run **on demand** (labeled / nightly), never on every PR.
+> — runs only for a candidate-bound release, never on every PR.
 >
 > The reusable job that consumes this runner is
-> [`v2/ci/realhw-job.yml`](realhw-job.yml). Regular offline CI stays on
+> [`.github/workflows/realhw-job.yml`](../../.github/workflows/realhw-job.yml). Regular offline CI stays on
 > `ubuntu-latest` ([`.github/workflows/v2-ci.yml`](../../.github/workflows/v2-ci.yml));
 > **only** the hardware jobs target this runner via
 > `runs-on: [self-hosted, ceralive-rk3588]`.
@@ -36,11 +36,13 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
 
 - **Linux host**, Ubuntu **22.04 LTS or newer** (24.04 fine). A small always-on
   box (NUC/mini-PC/spare x86 desktop) is ideal — it must stay powered to service
-  nightly + labeled jobs.
+  candidate-bound release jobs.
 - **x86_64** strongly preferred (mkosi/docker tooling, `rkdeveloptool` apt
   package, GH runner are all first-class on amd64).
 - ≥ 4 GB RAM, ≥ 40 GB free disk (build artifacts + image staging + runner work
-  dir).
+  dir). Candidate verification uses one private image-sized scratch object at a
+  time: first the immutable flash snapshot, then the exact media readback. It
+  never retains both scratch images simultaneously.
 - Outbound HTTPS to `github.com` / `api.github.com` / `*.actions.githubusercontent.com`
   (the runner long-polls GitHub; **no inbound** port needs opening).
 
@@ -204,10 +206,8 @@ curl -s "http://<plug-ip>/cm?cmnd=Power%20On"
 
 ### 3.3 Manual power switch (NOT for unattended CI)
 
-A human flips power. **Acceptable only for an attended bring-up session**, never
-for nightly/scheduled jobs — a bad flash at 02:00 with no remote power control
-leaves the lab stuck until someone walks over. The `realhw-job.yml` nightly
-schedule **requires** option 3.1 or 3.2.
+A human flips power. **Acceptable only for an attended bring-up session**, not
+for the release gate. Candidate flashing requires remotely controllable power.
 
 > **Safety rule:** the runner must be able to (a) cut power, (b) put the board in
 > maskrom (section 4.1 — manual button OR a second relay on the recovery pin),
@@ -256,15 +256,26 @@ rkdeveloptool db rk3588_loader.bin     # download-boot the loader into SRAM
 # 3. Write the full image to the eMMC (offset 0 = whole-disk GPT image):
 rkdeveloptool wl 0 ceralive-rock-5b-plus.img
 
-# 4. Reset the board into the freshly-flashed system:
+# 4. Before reset, read back and verify the exact image-sized sector range:
+bytes=$(stat -c %s ceralive-rock-5b-plus.img)
+sectors=$((bytes / 512))
+readback=$(mktemp)
+rkdeveloptool rl 0 "${sectors}" "${readback}"
+test "$(stat -c %s "${readback}")" -eq "${bytes}"
+test "$(sha256sum "${readback}" | cut -d' ' -f1)" = \
+  "$(sha256sum ceralive-rock-5b-plus.img | cut -d' ' -f1)"
+rm -f "${readback}"
+
+# 5. Only after the readback matches, reset into the freshly-flashed system:
 rkdeveloptool rd
 ```
 
 - `ld` = list devices, `db` = download-boot loader, `wl <start_sector> <file>` =
-  write at LBA, `rd` = reset. Sector 0 is correct for a **whole-disk** image with
-  its own GPT (what `v2/lib/assemble-disk.sh` produces). For a **rootfs-only**
-  partition image, write at that partition's start LBA instead — prefer
-  whole-disk images for CI to keep this a single, dumb `wl 0`.
+  write at LBA, `rl <start_sector> <sector_count> <file>` = read back, and `rd` =
+  reset. Sector 0 is correct for a **whole-disk** image with its own GPT (what
+  `v2/lib/assemble-disk.sh` produces). For a **rootfs-only** partition image,
+  write at that partition's start LBA instead — prefer whole-disk images for CI
+  to keep this a single, dumb `wl 0`.
 - `udev` rule so non-root can flash (file
   `/etc/udev/rules.d/99-rockchip-rk3588.rules`):
   ```
@@ -302,8 +313,9 @@ ssh ceralive@"$BOARD_IP" 'sudo reboot'
 ```
 
 - **Cheapest** (no flash hardware at all), but it **cannot recover a board that
-  won't boot** — for that you always fall back to maskrom (4.1). CI should treat
-  `dd`-over-SSH as the fast path and maskrom as the recovery path.
+  won't boot** — for that you always fall back to maskrom (4.1). Release CI uses
+  maskrom for every whole-media candidate flash; `dd`-over-SSH is a manual lab
+  shortcut only and is not part of the production gate.
 
 ---
 
@@ -395,14 +407,19 @@ recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
    ```bash
    rkdeveloptool db rk3588_loader.bin
    rkdeveloptool wl 0 last-known-good.img
+   sectors=$(( $(stat -c %s last-known-good.img) / 512 ))
+   rkdeveloptool rl 0 "${sectors}" last-known-good.readback.img
+   test "$(sha256sum last-known-good.readback.img | cut -d' ' -f1)" = \
+     "$(sha256sum last-known-good.img | cut -d' ' -f1)"
+   rm -f last-known-good.readback.img
    rkdeveloptool rd          # reset into the reflashed system
    ```
 5. **Watch serial** (section 5.2) to confirm U-Boot → kernel → login, then
    re-verify SSH (`ssh ceralive-board true`).
 
 > **Keep a "last-known-good" image on the host** (a pinned release `.img` +
-> `.sha256`) so recovery never depends on a fresh build. The nightly job (section
-> 8) should refresh this only **after** a green smoke run.
+> `.sha256`) so recovery never depends on a fresh build. Refresh it only after a
+> candidate-bound hardware run is green.
 
 ### Failure-budget / retries (don't thrash a board)
 
@@ -421,43 +438,20 @@ recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
 
 ## 8. Wiring it to CI
 
-The runner is consumed by [`v2/ci/realhw-job.yml`](realhw-job.yml), a **reusable**
-(`workflow_call`) workflow that also self-triggers on a **nightly schedule**
-(`cron: '0 2 * * *'`) and `workflow_dispatch`. It is **never** triggered by
-`pull_request`. A caller wires it behind a **label gate** so a maintainer can run
-it on a specific PR on demand without burdening every PR:
+The runner is consumed by [`.github/workflows/realhw-job.yml`](../../.github/workflows/realhw-job.yml),
+a `workflow_call`-only workflow. The release caller must pass the immutable
+artifact digest, raw SHA-256, bundle, keyring, and candidate commit. There is no
+nightly, manual-current-image, or pull-request trigger.
 
-```yaml
-# in a caller workflow, e.g. .github/workflows/realhw.yml
-on:
-  pull_request:
-    types: [labeled]          # only when someone adds the label
-jobs:
-  realhw:
-    if: github.event.label.name == 'ci:real-hw'
-    uses: ./.github/workflows/realhw-job.yml   # after copying realhw-job.yml there
-    with:
-      board: rock-5b-plus
-```
-
-> GitHub requires reusable workflows to live under `.github/workflows/`. This
-> file is authored/version-controlled in `v2/ci/` (the pipeline's CI home, next
-> to `validate-manifests.py`); copy/symlink it into `.github/workflows/` to
-> activate it, or have the caller `uses:` a path there. Keeping the source in
-> `v2/ci/` keeps the pipeline's CI definitions together and reviewable.
-
-### Label / scheduling contract (MUST-NOT: never gate every PR)
+### Trigger contract
 
 | Trigger | Who | Runs on HW? |
 |---|---|---|
 | `pull_request` (normal) | everyone | **No** — offline `v2-ci.yml` on `ubuntu-latest` only |
-| `pull_request` **labeled** `ci:real-hw` | maintainer adds label | Yes — on demand |
-| `schedule` nightly 02:00 UTC | cron | Yes — catches drift |
-| `workflow_dispatch` | maintainer | Yes — manual |
+| release branch or tag | `release.yml` builds and seals candidate | Yes |
 
 Scarce, slow, physical hardware **must not** sit in the critical path of every
-PR. Labeled + nightly keeps fast feedback on `ubuntu-latest` while still proving
-real silicon regularly.
+PR. Release validation proves real silicon against the exact candidate that can ship.
 
 ---
 

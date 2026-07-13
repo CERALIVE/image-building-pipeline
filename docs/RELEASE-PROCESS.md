@@ -64,9 +64,10 @@ OS bundles. Section 5 spells out exactly why and exactly what to type.
 - a push to `release/**` or `release-*`
 - a `v*` tag (e.g. `v2026.7.0`)
 
-It does one thing: call the reusable [`realhw-job.yml`](../.github/workflows/realhw-job.yml)
-with `board: rock-5b-plus`. `concurrency.cancel-in-progress: false` — a release
-run is never cancelled mid-flight by a newer push to the same ref.
+It builds and seals one production candidate, then calls
+[`realhw-job.yml`](../.github/workflows/realhw-job.yml) with the immutable
+artifact identity. `concurrency.cancel-in-progress: false` prevents a newer
+release push from cancelling a build or flash in progress.
 
 There is no version-bump automation in this repo. The tag itself is the release
 marker; CeraLive's CalVer convention (`YYYY.MINOR.PATCH`, documented as the
@@ -77,23 +78,30 @@ string goes in the tag and in `BUNDLE_VERSION` (§4).
 
 ## 3. Real-HW gate
 
-`realhw-job.yml` runs on a **self-hosted runner physically wired to an RK3588
-board** (`[self-hosted, ceralive-rk3588]`), serialized (`concurrency.group:
-realhw-rk3588-<board>`) because there is exactly one physical board. It also
-runs nightly (`schedule: '0 2 * * *'`) and on manual dispatch — never on a
-per-PR push, since the hardware is scarce.
+`release.yml` first builds and uploads one immutable production candidate, then
+calls `realhw-job.yml` on the **self-hosted runner physically wired to an RK3588
+board** (`[self-hosted, ceralive-rk3588]`). The artifact name, artifact digest,
+raw filename, raw SHA-256, bundle, keyring, and candidate commit are all required
+workflow inputs.
 
 Steps, in order:
 
-1. **Preflight** — SSH-ping the board. If it's dead, attempt a maskrom
-   recovery flash of `LAST_GOOD_IMAGE` via `rkdeveloptool`; if that tooling or
-   image isn't available either, the job fails loudly and asks for a human
-   ("board down and no recovery image/tooling on the runner").
-2. **Start serial capture** — best-effort; not fatal if no UART device.
-3. **Optional flash** — if the runner var `CERALIVE_RK3588_FLASH_IMAGE` is set,
-   `dd`s that image to the board over SSH and reboots. Otherwise the suite
-   smoke-tests whatever image is currently on the board's eMMC.
-4. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
+1. **Candidate verification** — verify the exact raw SHA-256, production bundle,
+   embedded slot keyrings, boot artifacts, GPT geometry, and target capacity.
+2. **Required flash and identity proof** — copy the raw into a private snapshot,
+   verify its SHA-256, and use that same snapshot for preflight and the RK3588
+   maskrom write. Before reset, read the exact candidate sector range into a
+   private file, verify its size and SHA-256, and refuse to boot on any mismatch.
+   The board must disconnect from SSH, enumerate as the only Rockchip USB target,
+   then reconnect before the bounded retry budget expires with the same media CID
+   and a fresh run-local SSH host-key record. The gate deliberately does not hash
+   post-boot media because U-Boot state and the mounted rootfs are mutable. Its
+   `rkdeveloptool` children are cancellable/reaped. The verifier resets inherited
+   ignored INT/TERM dispositions before Bash starts its traps, covering
+   asynchronous CI-shell launches where SIGINT would otherwise remain ignored.
+   Artifact filenames in the identity record are restricted to a safe
+   line-oriented character set.
+3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,
      quirk checks, and parity against the manifest.
@@ -104,9 +112,8 @@ Steps, in order:
    - **RAUC A/B rollback** ([`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh))
      — the same rollback proof described in §8, run live against real
      silicon rather than the mock harness.
-5. **Diagnostics + artifact upload** — always run (`if: always()`), captures
-   `rauc status` and the last 200 journal lines, uploads everything under
-   `artifacts/` with a 14-day retention.
+4. **Evidence upload** — always uploads the candidate identity, artifact digest,
+   and suite logs with a 14-day retention.
 
 A release only proceeds past this job if all four sub-harnesses pass on the
 physical board. There is no bypass.
@@ -115,11 +122,10 @@ physical board. There is no bypass.
 
 ## 4. Build and sign
 
-Once the gate is green, a human runs the actual image build — **this repo has
-no CI job that performs a real (non-`DRY_RUN`) build.** `v2-ci.yml`'s
-`build-matrix` job is explicit about this: it always runs `DRY_RUN=1` and
-asserts no real `apt-get`/`aws`/`docker` command fired, precisely so that no
-secret is ever exposed to a PR-triggered runner.
+The release workflow performs the real production build before the hardware
+gate on a dedicated `ceralive-image-builder` runner. PR CI remains DRY_RUN-only.
+The release job fails closed unless production RAUC PKI, the pinned Armbian
+archive keyring, and first-party apt GPG/mTLS credentials are supplied as secrets.
 
 The real build is:
 
@@ -133,8 +139,30 @@ disk → write the bootloader gap → emit the signed `.raucb`). See
 [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2 for the full stage list and
 artifact layout.
 
-Fetching the four first-party `.deb`s (`cerastream`, `ceralive-device`,
-`srtla`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
+### Production build caches
+
+The candidate job persists only reusable build state; it never caches a
+candidate image or a trust input. BuildKit loads the canonical
+`v2/ci/Dockerfile` builder image and exports its layers through the GitHub
+Actions cache with a stable repository/OS/architecture/board/mkosi-tool scope.
+The source hash is carried in the builder tag and label, while BuildKit's
+content-addressed Dockerfile/context digests select the reusable layers. The
+export uses `mode=min` so the cache contains only layers needed by the loaded
+builder image.
+
+The same job restores and saves only the board-specific mkosi package cache at
+`v2/mkosi/cache/rock-5b-plus`. Its exact key includes the repository, runner
+OS/architecture, board, mkosi pin, and build-source hash; its fallback prefix
+keeps those axes fixed. Before saving, the workflow enforces a 2 GiB ceiling,
+measures/prunes the tree as root inside the builder container, and normalizes
+ownership to the runner so mode-700 mkosi entries remain cacheable. Image outputs,
+`.staging`, QEMU state, apt credentials, and release artifacts are not cache
+inputs. These steps are guarded to release pushes/tags, and the trust-input
+step remains after cache restore and builder preparation; the production build,
+candidate sealing, and required real-HW workflow call are unchanged.
+
+Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
+`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
 mTLS-authenticated apt source — the exact credential contract is
 `APT_GPG_PUBLIC_B64` / `APT_CLIENT_CRT_B64` / `APT_CLIENT_KEY_B64` in
 [`v2/lib/fetch-debs.sh`](../v2/lib/fetch-debs.sh) `fetch_first_party()`
@@ -148,8 +176,9 @@ to produce `images/<board>/<ts>.raucb` (+ `.sha256`), stamped with the
 board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 `BUNDLE_VERSION` (git short SHA by default). The signing contract:
 
-- **Leaf key only, never root.** The bundle is signed with
-  `cert-work/rauc/leaf-signing.key` + the `chain.pem` (intermediate + leaf).
+- **Leaf key only, never root.** The bundle is signed with the injected release
+  `leaf-signing.key` + `chain.pem` (the intermediate chain; the leaf certificate is
+  passed separately as the signer).
   The root CA key (`root-ca.key`) never touches the signing invocation — it
   stays offline, by design.
 - **`assert_no_root_signing()`** is the enforced guard: it greps the *rendered*
@@ -157,7 +186,7 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
   asserts `leaf-signing.key` IS the signer. This runs on every bundle build,
   real `rauc` path or the deterministic OpenSSL-CMS fallback path.
 - **Verification is part of the same step.** After signing, `build-bundle.sh`
-  immediately verifies the bundle against `cert-work/rauc/root-ca.pem` (the
+  immediately verifies the bundle against the injected `root-ca.pem` (the
   same keyring baked into the device) — `rauc info` on a host with `rauc`
   installed, or an equivalent OpenSSL CMS chain-verify
   (`verify_openssl_bundle()`) when it isn't. A bundle that fails to verify
@@ -299,11 +328,13 @@ Two verification passes bracket the whole path, one before ship and one after:
 
 **Pre-flash (build-time, offline, this repo):**
 [`v2/tests/preflash-verify.sh`](../v2/tests/preflash-verify.sh) checks GPT
-geometry, the bootloader-gap magic, boot-partition artifacts, the seeded boot
-state, and — the one relevant to this doc — that the `.raucb` parses and
-carries the expected `Compatible=` string. Run it before flashing anything;
-see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §3 for the expected
-five-green-check output.
+geometry plus `sgdisk -v`, both idblock and parsed second-stage FIT, the compiled
+boot selector and board metadata, the seeded boot state, complete arm64
+kernel/DTB/initrd sets in A and B, destination capacity, and — the one
+relevant to this doc — that the `.raucb` parses and carries the expected
+`Compatible=` string. Pass the exact block-device size with
+`--target-size-bytes`; see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §3 for
+the expected nine-green-check output.
 
 **Post-install (on the fielded device):**
 
@@ -328,9 +359,10 @@ specific rollout, not re-deriving it from scratch.
 ## 7. Runbook: rotating the apt.ceralive.tv build credentials
 
 Scope: `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64` — the
-three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the four
-first-party `.deb`s (`cerastream`, `ceralive-device`, `srtla`,
-`srtla-send-rs`) from `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
+three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the five
+first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
+`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from
+`apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
 The device-side twin of this same contract is
 [`v2/mkosi/customize/apt-ceralive-repo.sh`](../v2/mkosi/customize/apt-ceralive-repo.sh),
 which bakes the same three values (as build-time inputs) into the image's own
@@ -344,23 +376,20 @@ to the `apt.ceralive.tv` package feed. Don't conflate the two.
 
 ### Where they live today
 
-**Honestly: no committed GitHub Actions workflow in this repo currently
-injects these three secrets.** `v2-ci.yml`'s build-matrix job runs
-`DRY_RUN=1` specifically so it never needs them (its own header comment says
-so: "No secrets are referenced"). `release.yml` / `realhw-job.yml` gate
-hardware validation on an already-built image and use repo **variables**
-(`vars.CERALIVE_RK3588_*`) for board connectivity, not these secrets.
+`v2-ci.yml`'s build-matrix job runs `DRY_RUN=1` specifically so it never needs
+these values (its own header comment says so: "No secrets are referenced"). The
+protected `release.yml` candidate job injects them from GitHub Actions secrets
+for release pushes/tags, while `realhw-job.yml` uses repo **variables**
+(`vars.CERALIVE_RK3588_*`) for board connectivity. The release workflow keeps
+the values env-only and materializes them after cache restore; they are never
+part of a cache key or Docker build context.
 
-The real (authenticated) build is run today by whoever executes
-`./v2/build <board>` with these three values exported in their own shell —
-locally, or from a private/未-committed CI job outside this repo's tracked
-workflows. **Recommendation, not current fact:** when a real build/sign/upload
-CI job is added (see §5's "future work"), these three values should be stored
-as **GitHub Actions encrypted repository secrets** (`Settings → Secrets and
+For any additional authenticated build path, store these three values as
+**GitHub Actions encrypted repository secrets** (`Settings → Secrets and
 variables → Actions → Repository secrets`), scoped to an environment
 (`production`) with required reviewers, exactly the way `fetch-debs.sh`
-already expects to consume them (env-only, base64-encoded, never written to
-disk outside the isolated per-run apt state dir).
+expects to consume them (env-only, base64-encoded, never written to disk
+outside the isolated per-run apt state dir).
 
 ### Half-supplied-pair-is-fatal behavior
 
@@ -453,14 +482,16 @@ further or to pull it from circulation.
 
 ### The A/B fallback contract (automatic, on-device, no operator action needed)
 
-RAUC's A/B slot model means a bad update **can never brick a device** by
-design, proven end-to-end by
+RAUC's A/B slot model provides bounded automatic rollback for a bad update when
+the factory image passed the A/B preflash gate and the board-specific hardware
+cycle has passed. The software contract is exercised by
 [`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh) (run live on real
 hardware as part of the §3 realhw gate, and in a MOCK mode that drives the same
 shipped scripts without hardware):
 
-1. `rauc install` writes the new bundle to the **inactive** slot and makes it
-   primary (next to boot). The currently-running slot is untouched.
+1. `rauc install` marks the inactive target bad, writes the new bundle there,
+   and makes it primary only after the write succeeds. If installation is
+   interrupted first, the currently-running slot remains primary.
 2. On reboot, the device boots the new (now-primary) slot with a **bounded
    bootcount budget** (`BOOT_ATTEMPTS`, default 3).
 3. `ceralive-healthcheck.service` runs after boot and decides the slot's fate:
@@ -483,10 +514,10 @@ shipped scripts without hardware):
    `srtla-send.service` is active — a bad bundle pushed during a live
    broadcast doesn't get a chance to interrupt it in the first place.
 
-This is the automatic safety net. Nothing an operator does is required for a
-single bad bundle on a single device to self-heal — the fleet-response actions
-below are about **stopping the bad bundle from reaching more devices**, not
-about un-bricking any individual one (nothing is bricked).
+This is the automatic safety net for an already A/B-provisioned device. It does
+not convert a legacy single-slot disk: that transition requires backup and a
+full re-flash because the old `data` partition overlaps the new B slot. The
+fleet-response actions below stop a bad bundle from reaching more devices.
 
 ### qemu-x86 fallback-selftest — the proof reference
 

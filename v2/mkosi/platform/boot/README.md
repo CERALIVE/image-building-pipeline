@@ -6,8 +6,9 @@ layer because it is board-specific (console / DTB / board_id come from the manif
 and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`).
 
 > **Why custom and not the stock RAUC `bootloader=uboot` adapter — decision D3.**
-> The vendor U-Boot CeraLive actually builds is **Radxa/Xunlong U-Boot 2017.09**,
-> compiled `ENV_IS_NOWHERE`: `fw_setenv` does **not** persist across reboot. RAUC's
+> The Rock 5B+ package currently staged by the pipeline reports **U-Boot 2026.04**.
+> The contract is capability-based: this vendor build uses `ENV_IS_NOWHERE`, so
+> `fw_setenv` does **not** persist across reboot. RAUC's
 > standard uboot adapter drives `BOOT_ORDER` + per-slot `BOOT_<name>_LEFT` bootcount
 > via `fw_setenv`, so it **cannot work** on this branch. We keep RAUC's exact A/B +
 > bootcount *model* but change the *storage*: the state is a plain text file on the
@@ -17,13 +18,20 @@ and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`
 
 | Where | Files | Tooling | Installed by |
 |---|---|---|---|
-| **rootfs slot** (userspace) | `ceralive-boot-state` → `/usr/bin`, `ceralive-rauc-boot-adapter` → `/usr/lib/rauc`, `/etc/rauc/system.conf` | none | `mkosi.finalize` → `install-boot.sh rootfs` (chroot) |
-| **FAT boot partition** (p1) | `boot.scr` (compiled), `cera_board.env`, `boot_state.txt`, `extlinux/extlinux.conf` | `mkimage` (u-boot-tools) | disk assembly → `install-boot.sh boot-partition <dir>` |
+| **rootfs slot** (userspace) | `ceralive-boot-state` → `/usr/bin`, `ceralive-rauc-boot-adapter` → `/usr/lib/rauc`, `/etc/rauc/system.conf`, explicit p1 `/boot` fstab mount | none | `mkosi.finalize` → `install-boot.sh rootfs` (chroot) |
+| **FAT boot partition** (p1) | `boot.scr`, `recovery.scr`, `cera_board.env`, `boot_state.txt` | `mkimage` (u-boot-tools) | disk assembly → `install-boot.sh boot-partition <dir>` |
 
 The split exists because `mkimage` (to compile `boot.scr`) is a **host/runtime** tool,
 not present in the platform chroot — so the boot-partition artifacts are produced at
 disk-assembly time (where u-boot-tools is available), while the RAUC backend + state
 helper + `system.conf` are pure userspace and install straight into the rootfs.
+
+The p1 partition is GPT type XBOOTLDR, but every rootfs has a non-empty `/boot`
+containing its kernel. The discoverable-partitions contract therefore suppresses the
+automatic XBOOTLDR mount. `install-boot.sh rootfs` writes an explicit writable
+`PARTLABEL=boot /boot` fstab entry so userspace and U-Boot share the same state file;
+`nodev,nosuid,noexec` limit the shared FAT surface. Linux mounts it only after U-Boot
+has already loaded the selected slot's kernel.
 
 ## State file format (`boot_state.txt`)
 
@@ -46,9 +54,9 @@ adapter semantics — only the backend storage differs.
 A power-loss mid-rewrite of this FAT file is the one failure that could brick the
 device, so `ceralive-boot-state` writes it defensively:
 
-- **Atomic write** — the full file is staged on tmpfs (`/run`, env-overridable via
-  `CERALIVE_BOOT_STATE_STAGEDIR`) and landed on the fragile vfat in a **single
-  `mv -f`**, so the slow partition is touched exactly once per update.
+- **Atomic replacement** — the full file is created beside `boot_state.txt`, flushed,
+  and moved over the destination on the same filesystem. A tmpfs staging file is not
+  used because cross-filesystem `mv` degrades into copy-then-unlink and is not atomic.
 - **CRC guard** — `BOOT_CRC` is the POSIX `cksum` of the three data lines. On read,
   a truncated / empty / missing / byte-flipped (bad-CRC) file is detected and the
   helper falls back to the **safe defaults** (`BOOT_ORDER=A B`, both budgets full)
@@ -63,13 +71,17 @@ device, so `ceralive-boot-state` writes it defensively:
 
 1. U-Boot runs `boot.scr` (compiled from `boot.scr.cmd`).
 2. It imports `cera_board.env` (console, fdtfile) and `boot_state.txt`.
-3. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),
+3. It rejects missing, unknown, duplicate, non-numeric, or out-of-budget state and
+   persists factory-safe `A B` / `3,3` defaults before slot resolution.
+4. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),
    **decrements** that slot's counter, and persists the file (`fatwrite`).
-4. It boots the kernel/DTB/initrd from that slot's `/boot` (`root=PARTLABEL=rootfs_a|b`).
-5. A healthy OS calls **`ceralive-boot-state mark-good <slot>`** (RAUC `set-state good`),
+5. It boots the kernel/DTB/initrd from that slot's `/boot` with
+   `root=PARTLABEL=rootfs_a|b rauc.slot=A|B`, so RAUC identifies the booted slot
+   explicitly rather than inferring it from the root device.
+6. A healthy OS calls **`ceralive-boot-state mark-good <slot>`** (RAUC `set-state good`),
    which resets the counter to the full budget — so a good slot never counts down.
-6. A slot that keeps failing never marks itself good: its counter bleeds 3→2→1→0 and
-   the **next** boot's step 3 skips it and selects the other slot — **automatic rollback**.
+7. A slot that keeps failing never marks itself good: its counter bleeds 3→2→1→0 and
+   the **next** boot's selection skips it and chooses the other slot — **automatic rollback**.
 
 ## RAUC custom backend interface (`ceralive-rauc-boot-adapter`)
 
@@ -78,20 +90,23 @@ with the operation as `$1` and the slot `bootname` (A/B) as the trailing argumen
 
 | RAUC op | CeraLive action |
 |---|---|
+| `get-current` | read the running slot from the required kernel argument `rauc.slot=A|B`; fail closed if absent |
 | `get-primary` | first slot in `BOOT_ORDER` with attempts left (the one that boots next) |
 | `set-primary <name>` | move `<name>` to the head of `BOOT_ORDER` + reset its attempts (activate a freshly-installed slot) |
 | `get-state <name>` | `good` / `bad` |
 | `set-state <name> good\|bad` | `good`: reset attempts; `bad`: zero attempts + drop from `BOOT_ORDER` |
 
-All four delegate to `ceralive-boot-state`, so the bootloader (`boot.scr`), the RAUC
-backend, and the offline test share **one** implementation.
+Debian bookworm's RAUC 1.8 reads `rauc.slot=` natively and invokes the four
+state/primary operations. RAUC 1.11+ prefers the optional `get-current` operation,
+which deliberately reads the same kernel argument because primary can change while
+the old slot is still running. State mutations delegate to `ceralive-boot-state`.
 
 ## Board specifics come from the manifest — never hardcoded
 
 `install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`,
 `SINGLE_SLOT_FALLBACK` and `COMPATIBLE_STRING` from the environment (resolved from the
 board+family manifest by `lib/resolve.sh`, forwarded by `lib/orchestrate.sh` via mkosi
-`--environment`). It renders `cera_board.env` / `extlinux.conf` from the `*.tmpl` files
+`--environment`). It renders `cera_board.env` and compiles the automatic and recovery scripts
 (the manifest's `ttyS2:1500000` becomes the kernel `console=ttyS2,1500000`) and writes
 the RAUC `compatible` **verbatim from `COMPATIBLE_STRING`** — `ceralive-<board-slug>`
 (e.g. `ceralive-rock-5b-plus`), the **board-specific** string the orchestrator derives
@@ -116,30 +131,35 @@ last-resort boots A.
 | `ceralive-rauc-boot-adapter.sh` | RAUC custom backend (`/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
 | `boot.scr.cmd` | U-Boot selector source (compiled to `boot.scr`) |
 | `cera_board.env.tmpl` | board specifics template (`@CONSOLE@`/`@DTB_NAME@`/`@BOARD_ID@`) |
-| `extlinux.conf.tmpl` | manual A/B recovery menu (static; not the rollback path) |
+| `recovery.scr.cmd` | manual A/B recovery source; explicitly loads Image, DTB, and initrd from p2 or p3 |
 | `boot_state.txt` | fresh-flash A/B state seed |
 | `install-boot.sh` | build-time installer (`rootfs` + `boot-partition` targets) |
 | `test-fallback.sh` | offline proof of decrement→rollback + backend + render (no HW/root) |
+| `tests/boot-script-sanitize.test.sh` | faithful execution of the actual selector source with malformed imported state |
 
 ## Test
 
 ```
-v2/mkosi/platform/boot/test-fallback.sh   # 71 assertions, no hardware/root
+v2/mkosi/platform/boot/test-fallback.sh
+v2/tests/boot-script-sanitize.test.sh
 ```
 
 Proves: fresh A/B state; 3 failed boots of A → counter 3→2→1→0 → **fallback to B**;
-RAUC backend roundtrip; `mark-good` reset; single-slot has no phantom B; board
+RAUC backend roundtrip including fail-closed `get-current`; `mark-good` reset;
+single-slot has no phantom B; board
 specifics differ per board (not hardcoded); `system.conf` shape; that
-`boot.scr.cmd` statically matches the tested engine (decrement + fatwrite +
-manifest console/fdtfile + PARTLABEL slot select); and corruption resilience —
+`boot.scr.cmd` matches the tested engine (decrement + fatwrite + manifest
+console/fdtfile + PARTLABEL slot select); the actual script is also executed through
+U-Boot command stubs against missing and malformed imported state. Corruption resilience —
 truncated / empty / missing / bad-CRC files yield the safe defaults + a clean
-rewrite (never a crash), while a well-formed no-CRC file is trusted.
+rewrite (never a crash), while a well-formed no-CRC file is trusted. It also rejects
+duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,
+and proves userspace state replacement stays on one filesystem.
 
-## Deferred / related
+## Related
 
-- **dm-verity + the `*.raucb` bundle** (`format=verity`) → the RAUC bundle build (task 26).
-- **Wiring the boot-partition artifacts into `lib/assemble-disk.sh`** (it currently lays
-  an empty vfat `boot`) → disk-assembly follow-up; `install-boot.sh boot-partition` is the
-  ready hook.
-- **RAUC keyring** (`/etc/rauc/keyring.pem`, the immutable root CA) → PKI tasks
-  (`cert-work/rauc/`, decisions.md Stage 0g).
+- `lib/assemble-disk.sh` writes these artifacts into the factory image and populates
+  both A/B rootfs filesystems.
+- `lib/build-bundle.sh` emits the signed plain-format `.raucb`; the immutable root CA
+  is installed as `/etc/rauc/keyring.pem`.
+- dm-verity is future bundle hardening and is not part of the current slot contract.

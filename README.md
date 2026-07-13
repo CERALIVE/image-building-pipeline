@@ -20,7 +20,7 @@ support for Intel N100/N200 and AMD platforms.
 
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
-- **Custom software stack**: `CeraUI`, `cerastream`, `srtla`, `srt` via .deb packages
+- **Custom software stack**: `CeraUI`, `cerastream`, `srtla-send-rs`, `srt` via .deb packages
 - **Minimal system**: Debian bookworm-based with minimal apt sources
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Device support**: Automatic USB audio/video device detection and access
@@ -33,7 +33,7 @@ support for Intel N100/N200 and AMD platforms.
 ┌─────────────────────────────────────────────────────────────┐
 │                    CeraUI Application                       │
 ├─────────────────────────────────────────────────────────────┤
-│ cerastream  │    srtla    │     srt     │   WiFi Manager   │
+│ cerastream  │ srtla-send-rs│     srt     │   WiFi Manager   │
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
@@ -57,6 +57,15 @@ full host matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon, WSL2).
 
 See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 
+Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
+rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
+RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
+Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; it
+requires exact GPT geometry, both RK3588 bootloader stages, a compiled selector,
+complete kernel/DTB/initrd sets in both slots, and a real compatible signed bundle.
+Legacy single-slot images require a full re-flash because their data partition
+overlaps the new B-slot extent; they cannot be converted by OTA.
+
 ## Directory Structure
 
 ```
@@ -72,7 +81,7 @@ See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 │   ├── docs/              # Dev loop, kiosk display, host support, size notes,
 │   │   │                  #   Cog add-on recipe, sysext refresh protocol
 │   │   └── fast-reload.md # Dev-sync live-reload loop
-│   └── tests/             # Manifest validation + preflash verify + QEMU x86
+│   └── tests/             # Manifest + RK3588 A/B/preflash + x86 rollback
 ├── scripts/
 │   └── fetch-debs.sh      # Downloads .deb packages for REPOS array
 └── CONTRIBUTING.md        # Contribution rules
@@ -108,14 +117,29 @@ For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
 
+The hardware-free CI/test entrypoint is `CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+./v2/run-tests`. It creates the ignored, NON-PRODUCTION RAUC signing fixture on
+demand; production builds must still provide `CERALIVE_RAUC_PKI_DIR` explicitly.
+When GNU parallel is available, Bats files run in parallel but cases within each
+file stay serial; tests that share the build staging tree also use file locks so
+CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's
+supported boot-slot override for its synthetic file-backed slots, so CI does not
+depend on the runner's boot device. The CI Bats job also installs Ubuntu's split
+`rauc` + `rauc-service` packages and starts a system D-Bus before the required
+real-RAUC contract, reloading the installed bus policy; it does not substitute
+a session bus or skip the service check. Standalone DRY_RUN build-plan jobs also
+materialize the same ignored NON-PRODUCTION fixture before resolving, so they
+do not depend on the Bats job's checkout.
+
 ## Custom Components
 
 All custom components are distributed via .deb packages from our repository:
 
 - **CeraUI**: Main streaming application UI
 - **cerastream**: The streaming engine (Rust) — sole engine since 2026-06-11, when the legacy
-  ceracoder encoder was retired after the generic boot-parity profile passed; the hardware-gated
-  profiles (Jetson/RK3588) now track as cerastream hardware-validation work
+  ceracoder encoder was retired after the generic boot-parity profile passed; RK3588
+  hardware-gated profiles now track as cerastream hardware-validation work, while
+  Jetson profiles are DEFERRED — not currently planned
 - **srtla**: SRT Link Aggregation implementation
 - **srt**: Custom SRT implementation
 
@@ -149,7 +173,7 @@ v2/lib/build-feature-sysext.sh \
 
 ## Image Size Gate
 
-Every build runs `v2/lib/measure-size.sh`. If the compressed rootfs exceeds
+Every build runs `v2/lib/measure-size.sh`. If the rootfs content's apparent size exceeds
 **1.5 GB** the build fails and no `.raucb` is produced. See
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
 strip, `WithDocs=no`, firmware audit).
@@ -166,8 +190,8 @@ committed), then runs an **advisory** drift-guard against the committed baseline
 - A differing version **or** a same-version content-hash re-spin prints a
   `BSP drift` warning — but the guard is **never fatal** (`exit 0` always). The BSP
   stays floating; this is observability, not a pin.
-- The baseline ships UNSEEDED; the first authenticated build seeds it with the real
-  version+hash. Commit that to set the known-good reference.
+- The baseline is seeded with the reviewed Armbian 26.5.1 kernel package version
+  and SHA-256; promotion requires an explicit baseline update.
 - The provenance artifact is deliberately **excluded** from the build-plan `sha256`
   determinism comparison (the float would otherwise break reproducibility).
 

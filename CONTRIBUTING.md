@@ -78,4 +78,5 @@ Welcome aboard — let’s build a great streaming experience together! 🚀
 
 ## AI Documentation
 
-This repository has an [`AGENTS.md`](AGENTS.md) (init-deep hierarchical AI documentation). For group-level context, see the root [`AGENTS.md`](../AGENTS.md) and [`ARCHITECTURE.md`](../ARCHITECTURE.md).
+This repository has an [`AGENTS.md`](AGENTS.md). Group-level context lives in the
+separate CeraLive workspace repository and is not read by this standalone checkout.
