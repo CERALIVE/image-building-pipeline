@@ -1,10 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-auth_keyring_has_fingerprint() {
-  local keyring="$1" expected="$2"
-  gpg --show-keys --with-colons "${keyring}" 2>/dev/null \
-    | awk -F: '$1=="fpr"{print $10}' | grep -Fqx "${expected}"
+auth_keyring_primary_fingerprints() {
+  local keyring="$1"
+  gpg --batch --show-keys --with-colons --fingerprint -- "${keyring}" 2>/dev/null \
+    | awk -F: '
+      $1=="pub" {
+        primary_count++
+        pending_primary=1
+        if ($2 ~ /[deir]/ || $12 !~ /[sS]/ || $12 ~ /D/) invalid=1
+        next
+      }
+      pending_primary && $1=="fpr" {
+        print $10
+        fingerprint_count++
+        pending_primary=0
+        next
+      }
+      $1=="sub" && ($2 ~ /[deir]/ || $12 ~ /D/) { invalid=1 }
+      END {
+        if (invalid || pending_primary || primary_count != fingerprint_count) exit 1
+      }
+    '
+}
+
+auth_keyring_has_exact_fingerprints() {
+  local keyring="$1"
+  shift
+  (( $# > 0 )) || return 1
+
+  local fingerprint actual expected
+  for fingerprint in "$@"; do
+    [[ "${fingerprint}" =~ ^[A-F0-9]{40}$ ]] || return 1
+  done
+  actual="$(auth_keyring_primary_fingerprints "${keyring}")" || return 1
+  [[ -n "${actual}" ]] || return 1
+  actual="$(LC_ALL=C sort -u <<<"${actual}")" || return 1
+  expected="$(printf '%s\n' "$@" | LC_ALL=C sort -u)" || return 1
+  [[ "${actual}" == "${expected}" ]]
 }
 
 auth_lookup_package() {

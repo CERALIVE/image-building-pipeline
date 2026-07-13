@@ -180,6 +180,15 @@ strip, `WithDocs=no`, firmware audit).
 
 ## BSP Provenance + Advisory Drift-Guard
 
+Armbian BSP metadata is accepted only with a public keyring whose primary-key
+fingerprints are exactly the current dual-signing transition set:
+`DF00FAF1C577104B50BF1D0093D6889F9F0E78D5` and
+`8CFA83D13EB2181EEF5843E41EB30FAF236099FE`. A missing key, unusable primary or
+subkey, malformed keyring, normalization failure, or unrelated extra primary key
+fails before apt runs. The SHA-pinned official key sources, identities, live
+`InRelease` check, and stdin-only GitHub secret update are documented in
+[`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §4.
+
 The kernel BSP floats (name-based `linux-image-vendor-rk35xx`, **no version pin**),
 so every build records what it actually fetched. After the BSP fetch,
 `v2/lib/fetch-debs.sh` writes the kernel package's resolved version + content
