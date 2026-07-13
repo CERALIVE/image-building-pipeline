@@ -124,7 +124,9 @@ When GNU parallel is available, Bats files run in parallel but cases within each
 file stay serial; tests that share the build staging tree also use file locks so
 CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's
 supported boot-slot override for its synthetic file-backed slots, so CI does not
-depend on the runner's boot device.
+depend on the runner's boot device. The CI Bats job also installs and starts a
+system D-Bus before the required real-RAUC contract; it does not substitute a
+session bus or skip the service check.
 
 ## Custom Components
 

@@ -140,6 +140,10 @@ OTA because its `data` partition starts where v2 places `rootfs_b`; back up requ
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
 
+The v2 CI Bats job installs and starts a system D-Bus before invoking the real
+RAUC contract; the harness requires RAUC to own its normal system-bus service
+name and does not replace that check with a session bus or a skipped test.
+
 Production builds require one explicit RAUC PKI contract: signer root, chain,
 leaf certificate/key, and baked device keyring must match. The release workflow
 builds the candidate before hardware validation, uploads the raw image, bundle,
