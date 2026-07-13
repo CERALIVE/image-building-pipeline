@@ -74,6 +74,11 @@ marker; CeraLive's CalVer convention (`YYYY.MINOR.PATCH`, documented as the
 cross-repo source of truth in `CeraUI/docs/APT_VERSION_CONTROL.md`) governs what
 string goes in the tag and in `BUNDLE_VERSION` (§4).
 
+A workflow rerun for an existing tag always checks out that tag's original SHA.
+If a release fix lands after the tag, rotate any affected secret first and create
+a new CalVer tag at the fix's merge SHA; rerunning the old tag does not include
+the merged code.
+
 ---
 
 ## 3. Real-HW gate
@@ -168,6 +173,85 @@ mTLS-authenticated apt source — the exact credential contract is
 [`v2/lib/fetch-debs.sh`](../v2/lib/fetch-debs.sh) `fetch_first_party()`
 (lines ~518-637). **Section 7 below is the full rotation runbook for these
 three values** — read it before running an authenticated release build.
+
+### Armbian archive keyring rotation
+
+`ARMBIAN_APT_KEYRING_B64` is a public-key trust input stored as a GitHub Actions
+repository secret. During Armbian's current repository-key transition, the
+canonical keyring is exactly these two primary keys, with no third primary key:
+
+| Fingerprint | Identity |
+|---|---|
+| `DF00FAF1C577104B50BF1D0093D6889F9F0E78D5` | `Igor Pecovnik (Ljubljana, Slovenia) <igor.pecovnik@gmail.com>` |
+| `8CFA83D13EB2181EEF5843E41EB30FAF236099FE` | `Armbian Repository Signing Key (Repository Key) <info@armbian.com>` |
+
+The authority is Armbian-owned and immutable: current
+[`armbian/build` signing code](https://github.com/armbian/build/blob/d14878c7e9f68106b2cde368f1cf576ab9f61e60/tools/repository/repo.sh)
+signs with both fingerprints, while the
+[`armbian/documentation` key instructions](https://github.com/armbian/documentation/blob/b683e8c2cc30a2a2a05b3b6b347e7437687fc614/docs/User-Guide_Getting-Started.md)
+name both. Build the combined keyring only from the SHA-pinned official key files:
+
+- historical key: [`armbian/build@fa9302f…/config/armbian.key`](https://github.com/armbian/build/blob/fa9302f1629409d035d55ff5b41543cf94aa6cf2/config/armbian.key), SHA-256 `45eea660732932370088652b214b85acb426c022529284211d76c12dcb5c9ec3`;
+- repository key: [`armbian/build@d14878c…/config/armbian.key`](https://github.com/armbian/build/blob/d14878c7e9f68106b2cde368f1cf576ab9f61e60/config/armbian.key), SHA-256 `c86db754ae38d13aa254e59672d8bb6c0ed9a0eeee9b5440cde69afef995da7a`.
+
+Provision it from a clean checkout with `curl`, `gpg`, `gpgv`, and authenticated
+`gh`. The commands compare source bytes, full primary fingerprints, and exact UIDs;
+the secret value never appears in argv or terminal output. Run the block as one
+compound command: its strict subshell stops before the secret update if any source,
+identity, keyring-policy, or live-signature check fails.
+
+```bash
+(
+set -euo pipefail
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+install -d -m 0700 "${tmp}/gnupg"
+export GNUPGHOME="${tmp}/gnupg"
+
+old_fpr=DF00FAF1C577104B50BF1D0093D6889F9F0E78D5
+new_fpr=8CFA83D13EB2181EEF5843E41EB30FAF236099FE
+curl --proto '=https' --tlsv1.2 -fsSL \
+  -o "${tmp}/old.asc" \
+  https://raw.githubusercontent.com/armbian/build/fa9302f1629409d035d55ff5b41543cf94aa6cf2/config/armbian.key
+curl --proto '=https' --tlsv1.2 -fsSL \
+  -o "${tmp}/new.asc" \
+  https://raw.githubusercontent.com/armbian/build/d14878c7e9f68106b2cde368f1cf576ab9f61e60/config/armbian.key
+
+test "$(sha256sum "${tmp}/old.asc" | cut -d' ' -f1)" = \
+  45eea660732932370088652b214b85acb426c022529284211d76c12dcb5c9ec3
+test "$(sha256sum "${tmp}/new.asc" | cut -d' ' -f1)" = \
+  c86db754ae38d13aa254e59672d8bb6c0ed9a0eeee9b5440cde69afef995da7a
+
+old_meta="$(gpg --batch --with-colons --show-keys --fingerprint "${tmp}/old.asc")"
+new_meta="$(gpg --batch --with-colons --show-keys --fingerprint "${tmp}/new.asc")"
+test "$(awk -F: '$1=="fpr"{print $10; exit}' <<<"${old_meta}")" = "${old_fpr}"
+test "$(awk -F: '$1=="uid"{print $10; exit}' <<<"${old_meta}")" = \
+  'Igor Pecovnik (Ljubljana, Slovenia) <igor.pecovnik@gmail.com>'
+test "$(awk -F: '$1=="fpr"{print $10; exit}' <<<"${new_meta}")" = "${new_fpr}"
+test "$(awk -F: '$1=="uid"{print $10; exit}' <<<"${new_meta}")" = \
+  'Armbian Repository Signing Key (Repository Key) <info@armbian.com>'
+
+gpg --batch --quiet --import "${tmp}/old.asc" "${tmp}/new.asc"
+gpg --batch --yes --output "${tmp}/armbian-combined.gpg" \
+  --export "${old_fpr}" "${new_fpr}"
+bash -c 'source v2/lib/fetch-debs-auth.sh; \
+  auth_keyring_has_exact_fingerprints "$1" "$2" "$3"' \
+  bash "${tmp}/armbian-combined.gpg" "${old_fpr}" "${new_fpr}"
+
+curl --proto '=https' --tlsv1.2 -fsSL \
+  -o "${tmp}/InRelease" https://apt.armbian.com/dists/bookworm/InRelease
+gpgv --keyring "${tmp}/armbian-combined.gpg" "${tmp}/InRelease"
+base64 -w0 <"${tmp}/armbian-combined.gpg" \
+  | gh secret set ARMBIAN_APT_KEYRING_B64 \
+      --repo CERALIVE/image-building-pipeline
+)
+```
+
+`v2/lib/fetch-debs.sh` independently enforces exact primary-fingerprint set
+equality before either apt or the curl fallback runs. That check deliberately
+rejects old-only, new-only, malformed, revoked, expired, invalid, disabled,
+normalization-failed, and expected-plus-unrelated keyrings; the dual-signed
+`InRelease` must then pass normal `gpgv` verification with both signatures valid.
 
 ### Signing (`build-bundle.sh`)
 

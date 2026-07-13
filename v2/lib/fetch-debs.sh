@@ -76,7 +76,10 @@ DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
 ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
 ARMBIAN_APT_KEYRING="${ARMBIAN_APT_KEYRING:-}"
-ARMBIAN_APT_KEY_FINGERPRINT="${ARMBIAN_APT_KEY_FINGERPRINT:-DF00FAF1C577104B50BF1D0093D6889F9F0E78D5}"
+ARMBIAN_APT_KEY_FINGERPRINTS=(
+  "DF00FAF1C577104B50BF1D0093D6889F9F0E78D5"
+  "8CFA83D13EB2181EEF5843E41EB30FAF236099FE"
+)
 FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
 
 # First-party apt source (apt.ceralive.tv). The deb822 source appends
@@ -616,8 +619,9 @@ fetch_bsp() {
   if [[ -z "${DRY_RUN}" ]]; then
     [[ -s "${ARMBIAN_APT_KEYRING}" ]] \
       || die "ARMBIAN_APT_KEYRING is required for authenticated BSP fetches"
-    auth_keyring_has_fingerprint "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_KEY_FINGERPRINT}" \
-      || die "Armbian keyring does not contain pinned fingerprint ${ARMBIAN_APT_KEY_FINGERPRINT}"
+    auth_keyring_has_exact_fingerprints \
+      "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_APT_KEY_FINGERPRINTS[@]}" \
+      || die "Armbian keyring primary fingerprints do not exactly match pinned set: ${ARMBIAN_APT_KEY_FINGERPRINTS[*]}"
   fi
 
   if command -v apt-get >/dev/null 2>&1; then

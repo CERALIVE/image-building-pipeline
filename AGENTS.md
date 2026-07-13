@@ -162,9 +162,10 @@ ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
 that launch it asynchronously cannot make SIGINT cancellation ineffective. The
 identity record accepts only safe artifact filename characters so its
 line-oriented fields cannot be split.
-Authenticated BSP fetches require the pinned Armbian archive key fingerprint and
-verify InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery
-uses `recovery.scr`, which loads boot artifacts directly from p2 or p3.
+Authenticated BSP fetches require the exact two-key Armbian archive rotation set
+(`DF00FAF1…E78D5` + `8CFA83D1…6099FE`, with no extra primary keys) and verify
+InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery uses
+`recovery.scr`, which loads boot artifacts directly from p2 or p3.
 
 **Multi-board dispatch** [EXISTS]
 
@@ -232,14 +233,19 @@ state** under the staging dir (the host apt config is never touched).
   and downloads nothing. With no `APT_GPG_PUBLIC_B64` in the env the fetcher
   auto-enables DRY_RUN (no credential for a verified fetch).
 - **BSP fetch is authenticated** — kernel/DTB/U-Boot/firmware/GStreamer come
-  from signed Armbian metadata, with the archive-key fingerprint and all content
-  hashes checked before staging.
+  from signed Armbian metadata, with the exact archive-key fingerprint set and
+  all content hashes checked before staging. The current transition set is the
+  historical `DF00FAF1C577104B50BF1D0093D6889F9F0E78D5` key plus repository key
+  `8CFA83D13EB2181EEF5843E41EB30FAF236099FE`; missing or additional primary keys,
+  unusable primary/subkey states, and keyring parsing or normalization failures
+  fail before apt runs. Source pins and the stdin-only secret rotation procedure
+  are in [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §4.
 
 **BSP provenance + advisory kernel drift-guard** [EXISTS]
 
 The kernel BSP floats (Decision D3 — name-based `linux-image-vendor-rk35xx`, **no
 version pin**), so a silent Armbian re-spin can change the image with no signal.
-`fetch_bsp` authenticates the pinned Armbian archive-key fingerprint, verifies
+`fetch_bsp` authenticates the exact Armbian archive-key fingerprint set, verifies
 `InRelease`, verifies the `Packages.gz` digest from signed metadata, and verifies
 every staged package SHA-256. It also makes the kernel float observable:
 
