@@ -60,6 +60,9 @@ development: it pins Docker's native Linux `default` context and fails before
 BuildKit unless the daemon exposes at least 16 GiB RAM, live memory plus swap
 headroom is at least 16 GiB, and both the workspace and Docker root have at
 least 24 GiB free. Docker Desktop is not a supported production runner daemon.
+On the persistent self-hosted runner, digest-pinned pre-checkout and `always()`
+post-run cleanup removes only the ignored mkosi `build` and `cache` paths so an
+interrupted rootful build cannot block the next clean checkout.
 See the production-runner section of the host matrix for the exact checks.
 
 See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
@@ -210,10 +213,12 @@ require both pinned Armbian signatures, and verify that plaintext identifies the
 configured suite, `main` component, and architecture. The curl path then requires
 one compatible (`arm64` or `all`) record for every exact `package=version` spec.
 Every staged package SHA-256 and Debian control package/version/architecture are
-verified. Verified `.deb` archives are staged atomically as mode `0644`, which is
-required by mkosi's sandboxed local-repository helper. Mode or rename failures
-fail closed and remove private package-temporary artifacts. There is no fallback
-to another version, suite, architecture, or mirror.
+verified. Verified `.deb` archives are staged atomically as mode `0644`, then
+partitioned into mode-`0755` mkosi consumer directories with archive mode `0644`.
+Those modes are explicit even under a restrictive runner umask because mkosi's
+sandboxed local-repository helper is unprivileged. Mode or rename failures fail
+closed and remove private package-temporary artifacts. There is no fallback to
+another version, suite, architecture, or mirror.
 Families with `armbian_branch: none` omit Armbian from DRY_RUN and fail closed on
 a real BSP fetch until an authenticated, exact-versioned non-Armbian package
 source is implemented.

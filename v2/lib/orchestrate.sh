@@ -44,6 +44,7 @@ source "${HERE}/common.sh"
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
+MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
@@ -277,7 +278,8 @@ main() {
     || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
   {
     rm -rf "${staging}"
-    mkdir -p "${staging}" "${bsp_dir}" "${firstparty_dir}"
+    mkdir -p "${staging}"
+    install -d -m 0755 "${bsp_dir}" "${firstparty_dir}"
 
     log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
     DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
@@ -292,9 +294,9 @@ main() {
     for deb in "${staging}/debs"/*.deb; do
       pkg="$(deb_pkg_name "${deb}")"
       if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
-        cp "${deb}" "${bsp_dir}/"
+        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${bsp_dir}"
       elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
-        cp "${deb}" "${firstparty_dir}/"
+        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${firstparty_dir}"
       else
         die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
       fi

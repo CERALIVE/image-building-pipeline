@@ -212,9 +212,11 @@ state** under the staging dir (the host apt config is never touched).
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
   exact package files. Every verified `.deb` is normalized to mode `0644` before
-  its atomic staging rename so mkosi's sandboxed local-repository helper can read
-  it; mode or rename failures fail closed and clean private package-temporary
-  artifacts, while package payload modes are unaffected. These are Debian **Package** names — a
+  its atomic staging rename, then copied into explicit mode-`0755` mkosi consumer
+  directories as mode `0644` so a restrictive runner umask cannot hide packages
+  from mkosi's unprivileged local-repository helper. Mode or rename failures fail
+  closed and clean private package-temporary artifacts, while package payload
+  modes are unaffected. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
   `gstlibuvch264src → gstreamer1.0-libuvch264src`.
@@ -327,6 +329,14 @@ two build-state stores that materially shorten a production rebuild:
   2 GiB; size measurement, over-limit clearing, and runner-UID/GID
   normalization all happen as root inside the builder container before the save
   step, because mkosi may create mode-700 root-owned entries.
+
+The persistent self-hosted runner also clears exactly the ignored generated
+paths `v2/mkosi/build` and `v2/mkosi/cache` in a digest-pinned, network-disabled
+cleanup container before checkout and in an `always()` step after the job. The
+post-run cleanup happens after a successful cache save. This bounded allowlist
+lets `actions/checkout` keep its normal clean checkout while recovering from a
+host interruption that skipped post-run cleanup; it never deletes the checkout,
+staging inputs, image outputs, QEMU state, release artifacts, or trust material.
 
 Both cache paths are build state only: image outputs, `.staging`, QEMU state,
 apt credentials, and release artifacts are excluded. Cache steps are guarded to

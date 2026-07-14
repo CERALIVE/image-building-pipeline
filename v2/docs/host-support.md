@@ -84,6 +84,15 @@ Run that command from the checkout before a manual production-path proof. A
 failure is actionable resource/topology evidence; do not compensate by extending
 workflow timeouts or skipping verification.
 
+The runner workspace is persistent, but rootful mkosi output is not allowed to
+survive as an obstacle to the next clean checkout. Before `actions/checkout` and
+again in an `always()` step after cache save, the release workflow uses the
+digest-pinned Debian cleanup image with networking disabled to remove only
+`v2/mkosi/build` and `v2/mkosi/cache`. The pre-checkout pass recovers when a host
+or runner interruption prevented the prior post-run pass. Do not broaden this
+allowlist: `.staging`, `v2/images`, `candidate`, source, and trust inputs are not
+runner-cleanup targets.
+
 ---
 
 ## Per-host detail
