@@ -435,9 +435,14 @@ test "$(gh run view "${run_id}" --repo "${repo}" --json conclusion --jq .conclus
 run_event="$(gh run view "${run_id}" --repo "${repo}" --json event --jq .event)"
 run_branch="$(gh run view "${run_id}" --repo "${repo}" --json headBranch --jq .headBranch)"
 run_workflow="$(gh run view "${run_id}" --repo "${repo}" --json workflowName --jq .workflowName)"
+workflow_id="$(
+  gh run view "${run_id}" --repo "${repo}" --json workflowDatabaseId --jq .workflowDatabaseId
+)"
+workflow_path="$(gh api "repos/${repo}/actions/workflows/${workflow_id}" --jq .path)"
 test "${run_event}" = push
 [[ "${run_branch}" == release/* || "${run_branch}" == release-* ]]
 test "${run_workflow}" = 'Release candidate real-HW gate'
+test "${workflow_path}" = '.github/workflows/release.yml'
 master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .status)"
 [[ "${master_status}" == identical || "${master_status}" == ahead ]]
 

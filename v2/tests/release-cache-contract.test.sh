@@ -58,6 +58,14 @@ grep -Fq "test \"\${run_workflow}\" = 'Release candidate real-HW gate'" "${RELEA
   echo 'BUG: manual publication does not require the production release workflow' >&2
   exit 1
 }
+grep -Fq "actions/workflows/\${workflow_id}" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not resolve the workflow identity by database ID' >&2
+  exit 1
+}
+grep -Fq "test \"\${workflow_path}\" = '.github/workflows/release.yml'" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not pin the release workflow file path' >&2
+  exit 1
+}
 grep -Fq "compare/\${merge_sha}...master" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not prove the candidate commit is merged to master' >&2
   exit 1
