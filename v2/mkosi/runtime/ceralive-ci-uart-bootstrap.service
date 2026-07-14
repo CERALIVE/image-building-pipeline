@@ -1,0 +1,20 @@
+[Unit]
+Description=CeraLive one-shot CI UART SSH bootstrap
+Documentation=file:///usr/share/doc/ceralive/ssh-hardening.md
+ConditionKernelCommandLine=ceralive.ci_uart=1
+After=data.mount ceralive-ssh-firstboot.service
+Before=ssh.service ssh.socket
+
+[Service]
+Type=oneshot
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS2
+TTYReset=yes
+TTYVHangup=yes
+ExecStart=/usr/bin/timeout --signal=KILL 180s /usr/local/sbin/ceralive-ci-uart-bootstrap
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

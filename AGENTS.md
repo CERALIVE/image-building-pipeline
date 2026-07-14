@@ -157,8 +157,26 @@ keyring, and digest as one immutable artifact, then the hardware gate preflights
 and flashes a private, digest-verified snapshot of that exact raw image. While
 the board is still in maskrom, the gate reads the exact whole-media sector range
 back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
-on mismatch. Only after that immutable proof does it boot, rotate a run-local SSH
-host-key record, and require reconnect to the same media CID. It never compares
+on mismatch. The candidate artifact also carries the official Radxa Maskrom
+loader under an exact SHA-256. The gate starts from Maskrom, derives capacity in
+loader mode, and uses UART to enable a bounded, one-shot data-only bootstrap that
+installs a restricted, expiring run-local root public key into the empty `/data`
+key store. The bootstrap accepts no shell commands, does not restart, and binds
+an authenticated, one-hour-bounded request containing a device-generated nonce,
+the baked candidate commit, USB-captured 16-byte chip identity, and fresh UART challenge to
+the post-boot SSH marker. Consumed nonces and a non-decreasing signed epoch floor
+persist on `/data`; the runner private key must derive the public verifier baked
+into the candidate before any USB operation. The
+image contains only the UART verification public key, never an SSH credential or
+password. Only after
+the immutable proof does it boot, rotate a run-local SSH host-key record, require
+a valid media CID, the same chip identity read by `rkdeveloptool rci` before reset
+and from the first 16 bytes of Rockchip OTP NVMEM through the installed
+`ceralive-rockchip-chip-info` helper, and `/`
+on the flashed eMMC, then run
+the physical suite, and remove the exact temporary key
+with a cleanup receipt. Each planned RAUC reboot consumes a one-use retention
+marker; any unarmed later boot revokes leftover CI access before sshd. It never compares
 mutable post-boot media bytes. Every `rkdeveloptool` operation is owned by a
 cancellable child and reaped on interruption. The verifier resets inherited
 ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
@@ -562,13 +580,17 @@ alone.
 
 **First-boot SSH hardening** [EXISTS]
 
-`ceralive-ssh-firstboot.service` runs once `Before=ssh.service ssh.socket` on
-first boot. Standalone artifacts under `v2/mkosi/runtime/`
+`ceralive-ssh-firstboot.service` runs before `ssh.service` and `ssh.socket` on
+every boot, and both SSH activation paths require it to succeed. Standalone
+artifacts under `v2/mkosi/runtime/`
 (`ceralive-ssh-firstboot.{sh,service}`), installed by
 `postinst-lib.sh::setup_ssh_firstboot` — NOT inlined in `mkosi.postinst.chroot`
 (the drift gate's 950-line ceiling). Scope is locked (SC4): regenerate the baked
 shared host keys into a per-device identity (persisted on `/data`, stable across
-A/B), `PermitRootLogin prohibit-password`, and a once-only `chage -d 0 ceralive`.
+A/B) and apply the once-only password hardening on initial boot; the per-boot guard
+then enforces `PermitRootLogin prohibit-password` and CI-key retention policy.
+Persistent authorized-key stores are linked from `/data`; run-local CI keys survive
+only an explicitly armed, one-use reboot and are otherwise purged before sshd.
 The `ceralive` user ships password-locked (no default password); root retains
 key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
 For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied

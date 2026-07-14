@@ -613,22 +613,38 @@ setup_provisioning() {
 
 # ---------------------------------------------------------------------------
 # First-boot SSH hardening (task 10, SC4): install the COMMITTED standalone
-# artifacts ceralive-ssh-firstboot.{sh,service} (single source of truth under
+# artifacts ceralive-ssh-firstboot.{sh,service} and the opt-in, one-shot UART
+# bootstrap (single source of truth under
 # v2/mkosi/runtime/) instead of inlining them in the runtime postinst — keeps
 # postinst.chroot under the 950-line drift ceiling. Mirrors setup_boot_healthcheck.
-# Scope is LOCKED to host-key regen + PermitRootLogin prohibit-password + a once-
-# only `chage -d 0 ceralive`; see the script header. CERALIVE_RUNTIME_SRC must
+# Scope is LOCKED to host-key regeneration, PermitRootLogin prohibit-password,
+# once-only `chage -d 0 ceralive`, persistent authorized-key stores, and the
+# boot-scoped UART CI key guard; see the script header. CERALIVE_RUNTIME_SRC must
 # point at the runtime/ source dir.
 # ---------------------------------------------------------------------------
 setup_ssh_firstboot() {
-  log "installing first-boot SSH hardening (ceralive-ssh-firstboot.service — host keys + root pw-login + forced change)"
+  log "installing first-boot SSH hardening and one-shot UART CI bootstrap"
   local src="${CERALIVE_RUNTIME_SRC:-}"
   [[ -n "${src}" && -f "${src}/ceralive-ssh-firstboot.sh" ]] \
     || die "ssh-firstboot source not found: ${src}/ceralive-ssh-firstboot.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-ci-uart-bootstrap.sh" && -f "${src}/ceralive-ci-uart-bootstrap.service" && \
+     -f "${src}/ceralive-ci-uart-bootstrap-public.pem" && \
+     -f "${src}/ceralive-rockchip-chip-info.sh" ]] \
+    || die "UART bootstrap source not found under ${src}"
   mkdir -p /usr/local/sbin
   install -m 0755 "${src}/ceralive-ssh-firstboot.sh" /usr/local/sbin/ceralive-ssh-firstboot
   install -m 0644 "${src}/ceralive-ssh-firstboot.service" /etc/systemd/system/ceralive-ssh-firstboot.service
+  install -m 0755 "${src}/ceralive-ci-uart-bootstrap.sh" /usr/local/sbin/ceralive-ci-uart-bootstrap
+  install -m 0755 "${src}/ceralive-rockchip-chip-info.sh" /usr/local/sbin/ceralive-rockchip-chip-info
+  install -m 0644 "${src}/ceralive-ci-uart-bootstrap.service" /etc/systemd/system/ceralive-ci-uart-bootstrap.service
+  [[ "${CERALIVE_IMAGE_BUILD_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "CERALIVE_IMAGE_BUILD_COMMIT is not an exact commit SHA"
+  install -d -m 0755 /etc/ceralive
+  install -m 0444 "${src}/ceralive-ci-uart-bootstrap-public.pem" /etc/ceralive/uart-bootstrap-public.pem
+  printf '%s\n' "${CERALIVE_IMAGE_BUILD_COMMIT}" >/etc/ceralive/image-build-commit
+  chmod 0444 /etc/ceralive/image-build-commit
   enable_service ceralive-ssh-firstboot.service
+  enable_service ceralive-ci-uart-bootstrap.service
 }
 
 # ---------------------------------------------------------------------------

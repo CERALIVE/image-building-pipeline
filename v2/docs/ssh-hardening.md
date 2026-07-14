@@ -12,6 +12,10 @@ operators.
 |----------|--------------|------|
 | `ceralive-ssh-firstboot.sh` | `/usr/local/sbin/ceralive-ssh-firstboot` | the hardening script |
 | `ceralive-ssh-firstboot.service` | `/etc/systemd/system/` | one-shot unit, `Before=ssh.service ssh.socket` |
+| `ceralive-ci-uart-bootstrap.sh` | `/usr/local/sbin/ceralive-ci-uart-bootstrap` | data-only release-gate key bootstrap |
+| `ceralive-ci-uart-bootstrap.service` | `/etc/systemd/system/` | opt-in 180-second UART oneshot |
+| `ceralive-ci-uart-bootstrap-public.pem` | `/etc/ceralive/uart-bootstrap-public.pem` | public verifier for host-signed bootstrap requests |
+| `ceralive-rockchip-chip-info.sh` | `/usr/local/sbin/ceralive-rockchip-chip-info` | exact 16-byte OTP identity reader |
 
 Canonical sources live under `v2/mkosi/runtime/`; they are installed (not
 inlined) by `postinst-lib.sh::setup_ssh_firstboot`, enabled through the
@@ -19,7 +23,7 @@ services-enablement path. The unit is ordered **before** sshd so the first
 inbound connection already sees a per-device host key and root-password login
 already disabled.
 
-## The three scoped actions (SC4 — nothing more)
+## The four scoped actions (SC4 — nothing more)
 
 1. **Per-device SSH host keys.** The image bakes shared host keys, so every
    flashed unit would otherwise present an identical fingerprint (a MITM hazard).
@@ -38,6 +42,30 @@ already disabled.
    (guarded by a flag at `<state>/ssh-firstboot.done`), the script runs
    `chage -d 0 ceralive`, so the next time a password is set/used it must be
    changed immediately.
+4. **Persistent authorized-key paths.** The script creates empty ceralive and
+   root stores at `/data/ceralive/ssh/{authorized_keys,root_authorized_keys}` with
+   mode `0600`, then links each account's slot-local `authorized_keys` path to its
+   store. Operator keys therefore survive an A/B slot change. The factory image
+   contains no authorized key.
+
+The release gate adds `ceralive.ci_uart=1` for one boot. That condition starts a
+non-restarting UART service with a device-enforced 180-second timeout. It accepts
+one strict signed data record and verifies it with the baked public key, then
+requires its fresh device-generated nonce, the candidate commit from
+`/etc/ceralive/image-build-commit`, the local 16-byte identity read from the
+first 16 bytes of raw Rockchip OTP NVMEM, and an expiry no more
+than one hour after the signed host epoch. Consumed nonces and a non-decreasing
+epoch floor persist under `/data/ceralive/ssh`, preventing replay and clock
+rollback from restoring an expired key. Only then does it write a restricted root
+key plus a fresh challenge marker. It accepts no shell command. The signing
+private key stays mode `0600` on the dedicated runner, is preflight-matched to the
+baked public key, and is not an SSH credential. The workflow
+selects that key explicitly for SSH, verifies the same challenge and commit over
+the network, then removes the exact key and marker after the gate. Before every
+planned RAUC reboot, the authenticated harness arms a one-use retention marker;
+first-boot hardening consumes it before sshd starts. Any later boot without that
+marker removes the CI key and access marker before sshd, so interrupted cleanup
+and wall-clock rollback cannot revive expired access.
 
 After applying the drop-in the script runs `sshd -t` to validate the resulting
 config, so a malformed drop-in can never wedge sshd's startup.
@@ -68,8 +96,9 @@ config, so a malformed drop-in can never wedge sshd's startup.
   hardened).
 - Actions (1) and (3) are once-only: the persisted host-key store and the
   `ssh-firstboot.done` flag make every subsequent boot a clean no-op.
+- Action (4) is idempotent and keeps the same `/data` file across both slots.
 
 ## Out of scope (deliberately)
 
 No `fail2ban`, no UFW, no auditd, no key-only enforcement for the `ceralive`
-user. SC4 locks the scope to exactly the three actions above.
+user. SC4 locks the scope to exactly the four actions above.

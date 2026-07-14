@@ -187,7 +187,8 @@ until you set a password. The intended first-access paths are:
 - **Console** (HDMI or serial getty): log in as `ceralive` and set a password
   with `passwd`.
 - **Key-based SSH**: add your public key to `/home/ceralive/.ssh/authorized_keys`
-  via the console, then SSH in normally.
+  via the console, then SSH in normally. This path is a symlink to
+  `/data/ceralive/ssh/authorized_keys`, so operator keys survive A/B updates.
 - **Root key-based SSH**: root retains key-based access for recovery
   (`PermitRootLogin prohibit-password`).
 
@@ -201,7 +202,7 @@ This marks the account's password as expired. The moment you set any password
 via console or out-of-band provisioning, the system immediately prompts you to
 choose a new one.
 
-Source: `ceralive-ssh-firstboot.sh` lines 101-110.
+Source: `ceralive-ssh-firstboot.sh` lines 171-184.
 
 ### 5.4 SSH host key fingerprint
 

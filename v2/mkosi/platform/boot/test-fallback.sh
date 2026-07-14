@@ -201,6 +201,8 @@ assert_contains "console from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "c
 assert_contains "fdtfile from manifest env (under rockchip/ vendor subdir)" "${BOOT_DIR}/boot.scr.cmd" "/boot/dtb/rockchip/\${fdtfile}"
 assert_contains "selects rootfs_a slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_a"
 assert_contains "selects rootfs_b slot"            "${BOOT_DIR}/boot.scr.cmd" "cera_root rootfs_b"
+assert_contains "accepts volatile one-boot arguments" "${BOOT_DIR}/boot.scr.cmd" 'cera_transient_bootargs'
+assert_contains "clears volatile arguments before boot" "${BOOT_DIR}/boot.scr.cmd" 'setenv cera_transient_bootargs'
 
 echo
 echo "### 8. Corruption resilience — atomic write + CRC validation + safe defaults"

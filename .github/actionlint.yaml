@@ -5,4 +5,5 @@
 self-hosted-runner:
   labels:
     - ceralive-rk3588
+    - rock-5b-plus
     - ceralive-image-builder

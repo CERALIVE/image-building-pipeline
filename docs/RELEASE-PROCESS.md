@@ -61,7 +61,7 @@ it for OS bundles. Section 5 spells out exactly why and exactly what to type.
 
 [`release.yml`](../.github/workflows/release.yml) fires on:
 
-- a push to `release/**` or `release-*`
+- a push to `release/**`
 - a `v*` tag (e.g. `v2026.7.0`)
 
 It builds and seals one production candidate, then calls
@@ -92,23 +92,50 @@ For the resource failure after `v2026.7.2`, the only eligible next patch is
 
 `release.yml` first builds and uploads one immutable production candidate, then
 calls `realhw-job.yml` on the **self-hosted runner physically wired to an RK3588
-board** (`[self-hosted, ceralive-rk3588]`). The artifact name, artifact digest,
-raw filename, raw SHA-256, bundle, keyring, and candidate commit are all required
-workflow inputs. The candidate job labels the upload action's bare hexadecimal
+board** (`[self-hosted, ceralive-rk3588, rock-5b-plus]`). The artifact name, artifact digest,
+raw filename, raw SHA-256, bundle, keyring, hash-pinned Maskrom loader, and
+candidate commit are all required workflow inputs. The candidate job labels the
+upload action's bare hexadecimal
 digest as `sha256:<64 lowercase hex>` before passing it to the real-HW workflow,
 whose input contract rejects any other form.
+
+The reusable job is admitted only from this repository's `release.yml`, on a
+first-attempt `push` to `release/**` or `v*`, and enters the protected
+`image-hardware` environment before a self-hosted runner is selected. Configure
+that environment for trusted required reviewers and restrict its deployment
+branches and tags to those same release refs before adding the hardware labels.
 
 Steps, in order:
 
 1. **Candidate verification** — verify the exact raw SHA-256, production bundle,
-   embedded slot keyrings, boot artifacts, GPT geometry, and target capacity.
+   embedded slot keyrings, boot artifacts, GPT geometry, loader SHA-256, and
+   loader-mode eMMC capacity before any media write.
 2. **Required flash and identity proof** — copy the raw into a private snapshot,
    verify its SHA-256, and use that same snapshot for preflight and the RK3588
-   maskrom write. Before reset, read the exact candidate sector range into a
+   Maskrom write. The board is expected to be in Maskrom when the job starts;
+   no pre-flash SSH session, password, or power helper is required. Before reset,
+   read the exact candidate sector range into a
    private file, verify its size and SHA-256, and refuse to boot on any mismatch.
-   The board must disconnect from SSH, enumerate as the only Rockchip USB target,
-   then reconnect before the bounded retry budget expires with the same media CID
-   and a fresh run-local SSH host-key record. The gate deliberately does not hash
+   The board must enumerate as the only RK3588 USB target and its canonical
+   VID/PID/`LocationID` hash must match the approved Rock 5B+ fixture before
+   loader transfer. After the pinned loader starts, `rkdeveloptool rci` captures
+   its 16-byte chip identity before `wl`. A UART
+   helper acquires the serial port before the write, then
+   interrupts U-Boot and supplies a volatile, one-boot data-only UART bootstrap
+   argument. A dedicated host-local Ed25519 key signs the request; the image
+   contains only its public verification key. Before USB access, the verifier
+   proves that the configured private key derives that exact public key. The
+   bootstrap emits a fresh device nonce and verifies the signature, nonce, baked
+   candidate commit, USB-captured SoC identity, one-hour maximum expiry, and a
+   persistent non-decreasing epoch floor before it installs a newly
+   generated, restricted root public key with an
+   absolute expiry into the empty `/data` authorized-key store; neither the key
+   nor a password is embedded in the immutable image. The board must reconnect
+   before the bounded retry budget expires with a valid media CID, the same
+   Rockchip 16-byte chip identity read by Linux from the first 16 bytes of the
+   raw OTP NVMEM device, a root filesystem
+   whose parent is the flashed eMMC, and a fresh run-local SSH host-key record.
+   The gate deliberately does not hash
    post-boot media because U-Boot state and the mounted rootfs are mutable. Its
    `rkdeveloptool` children are cancellable/reaped. The verifier resets inherited
    ignored INT/TERM dispositions before Bash starts its traps, covering
@@ -118,16 +145,22 @@ Steps, in order:
 3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,
-     quirk checks, and parity against the manifest.
+     quirk checks, and required live parity against the manifest. Missing or
+     incomplete parity collection is a hard failure.
    - **encode-path init** — `cerastream --version` / `srtla_send --version`
      actually run on the board.
-   - **dev-loop sanity** — `v2/dev-push` completes in under 120s (optional,
-     needs `DEV_DEB_DIR`).
+   - **dev-loop sanity** — `v2/dev-push` completes in under 120s using the
+     candidate-bound package in `DEV_DEB_DIR`; this lane is required.
    - **RAUC A/B rollback** ([`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh))
      — the same rollback proof described in §8, run live against real
      silicon rather than the mock harness.
-4. **Evidence upload** — always uploads the candidate identity, artifact digest,
-   and suite logs with a 14-day retention.
+4. **Access cleanup and evidence upload** — an `always()` step removes the exact
+   run-local authorized-key line and marker, proves both absent, deletes the
+   private key, and records a cleanup receipt. If cleanup cannot run, the
+   server-enforced key expiry bounds access, and any later boot without a one-use
+   marker armed by the authenticated RAUC harness revokes the key before sshd.
+   Evidence includes candidate identity,
+   artifact digest, UART log, suite logs, and the receipt for 14 days.
 
 A release only proceeds past this job if all four sub-harnesses pass on the
 physical board. There is no bypass.
@@ -440,7 +473,7 @@ workflow_id="$(
 )"
 workflow_path="$(gh api "repos/${repo}/actions/workflows/${workflow_id}" --jq .path)"
 test "${run_event}" = push
-[[ "${run_branch}" == release/* || "${run_branch}" == release-* ]]
+[[ "${run_branch}" == release/* ]]
 test "${run_workflow}" = 'Release candidate real-HW gate'
 test "${workflow_path}" = '.github/workflows/release.yml'
 master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .status)"
@@ -501,6 +534,8 @@ grep -Fx 'pre_boot_media_identity=verified' "${identity}"
 grep -Fx 'post_boot_reconnect=verified' "${identity}"
 grep -Fx 'flash_transport=maskrom-rkdeveloptool' "${identity}"
 grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP' "${tmp}/realhw/realhw-suite.log"
+grep -Fx '{"mode":"live","board":"rock-5b-plus","pass":4,"fail":0,"skip":0,"exit":0}' \
+  "${tmp}/realhw/realhw/result.json"
 
 release_name="$(<"${candidate}/release-bundle-name.txt")"
 [[ "${release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
@@ -629,9 +664,14 @@ to the `apt.ceralive.tv` package feed. Don't conflate the two.
 `v2-ci.yml`'s build-matrix job runs `DRY_RUN=1` specifically so it never needs
 these values (its own header comment says so: "No secrets are referenced"). The
 protected `release.yml` candidate job injects them from GitHub Actions secrets
-for release pushes/tags, while `realhw-job.yml` uses repo **variables**
-(`vars.CERALIVE_RK3588_*`) for board connectivity. The release workflow keeps
-the values env-only and materializes them after cache restore; they are never
+for release pushes/tags, while `realhw-job.yml` uses repo **variables** for the
+board address/port, stable UART path, approved Maskrom USB identity hash, and absolute
+path to the mode-`0600` host-local UART signing key. The hardware verifier rejects
+that key before USB access unless its derived public key equals the verifier baked
+into the candidate. SSH is fixed to root. Loader
+bytes travel inside the candidate artifact, and the board-login key is generated
+and revoked per run; it is neither a runner variable nor a stored secret.
+The release workflow keeps the values env-only and materializes them after cache restore; they are never
 part of a cache key or Docker build context.
 
 For any additional authenticated build path, store these three values as
@@ -800,42 +840,26 @@ are proof of the **engine**, not a substitute for the real-hardware run in §3
 qemu/mock result is accepted as the RK3588 rollback proof" per the harness's
 own MOCK-mode warning banner).
 
-### Pulling or superseding a published bundle on R2
+### Pausing or superseding a published bundle on R2
 
-Because R2 delivery for `bundles/{channel}/{board}/` has no publisher
-automation yet (§5), removing a bad bundle is also a manual step. Two options,
-in order of preference:
+Immutable bundle objects and their digest sidecars are never deleted or
+overwritten. If a published bundle is found to be bad:
 
-1. **Supersede, don't delete (preferred).** Build a fixed bundle, sign it
+1. **Pause the hawkBit rollout** so no further devices are offered the bad
+   distribution set:
+   ```bash
+   curl -u "$HAWKBIT_ADMIN_USER:<pass>" \
+     -X POST "http://127.0.0.1:8080/rest/v1/rollouts/<rollout-id>/pauseGroup"
+   ```
+   (or the equivalent `platform-bridge.sh` call once that verb is exposed; see
+   `v2/fleet/integration-contract.md` for the rollout-control surface).
+2. **Supersede, never delete.** Build a fixed bundle, sign it
    (§4), upload it under a **new** timestamped filename (§5's manual steps),
    and register it with hawkBit as a new artifact/distribution set
    (`provision.sh`). Devices that already pulled the bad bundle self-heal via
    the fallback contract above regardless; devices that haven't updated yet
    get offered the fixed one instead. This avoids ever deleting an artifact a
    device might still be mid-download of.
-2. **Remove the bad object from R2 (only if it must not be fetched again).**
-   ```bash
-   aws s3 rm "s3://${R2_BUCKET}/bundles/${channel}/${board}/<bad-ts>.raucb" \
-     --endpoint-url "${R2_ENDPOINT}"
-   aws s3 rm "s3://${R2_BUCKET}/bundles/${channel}/${board}/<bad-ts>.raucb.sha256" \
-     --endpoint-url "${R2_ENDPOINT}"
-   ```
-   `apt-worker` returns a true 404 for a missing object (never a 200-empty),
-   so any device that hasn't already downloaded the bundle simply can't fetch
-   it anymore. A device mid-download when the object disappears fails its
-   transfer and retries against whatever hawkBit currently offers — it does
-   **not** brick, per the same A/B contract above.
-3. **Stop/pause the hawkBit rollout** so no further devices are even offered
-   the bad distribution set, independent of whether the R2 object itself is
-   pulled:
-   ```bash
-   curl -u "$HAWKBIT_ADMIN_USER:<pass>" \
-     -X POST "http://127.0.0.1:8080/rest/v1/rollouts/<rollout-id>/pauseGroup"
-   ```
-   (or the equivalent `platform-bridge.sh` call, once that verb is exposed —
-   see `v2/fleet/integration-contract.md` for the full rollout-control
-   surface). Pausing is instantaneous and reversible; it's the fastest lever
-   to pull while deciding between options 1 and 2.
 
 ### Healthcheck interplay
 

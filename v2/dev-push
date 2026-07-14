@@ -48,8 +48,11 @@
 #   DRY_RUN=1                 log the rsync/ssh commands instead of running them
 #                             (offline timing-budget + bad-ext logic evidence)
 #   SSH_USER=root             remote user
+#   SSH_IDENTITY_FILE         explicit private key (sets IdentitiesOnly=yes)
+#   SSH_PORT=22               remote SSH port
+#   SSH_KNOWN_HOSTS_FILE      run-local host-key file
 #   REMOTE_EXT_DIR=/var/lib/extensions
-#   SSH_OPTS / RSYNC_OPTS     extra flags (e.g. SSH_OPTS="-p 2222")
+#   SSH_OPTS / RSYNC_OPTS     extra ssh / scp flags
 #   DEV_PUSH_BUDGET=120       end-to-end budget in seconds (0 = don't enforce)
 #   SRTLA_SRC                 override sibling source path
 #   SRTLA_BUILD_CMD           override the compile command
@@ -71,6 +74,10 @@ SSH_USER="${SSH_USER:-root}"
 REMOTE_EXT_DIR="${REMOTE_EXT_DIR:-/var/lib/extensions}"
 DEV_PUSH_BUDGET="${DEV_PUSH_BUDGET:-120}"
 DRY_RUN="${DRY_RUN:-0}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+SSH_PORT="${SSH_PORT:-22}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
+[[ "${SSH_PORT}" =~ ^[0-9]+$ ]] || die "SSH_PORT must be numeric"
 
 # Default apps = the sysext-ready, pure-binary first-party component (srtla).
 # CeraUI uses the appfs backend.
@@ -111,8 +118,28 @@ fmt_s()  { awk -v ms="$1" 'BEGIN{ printf "%.2fs", ms/1000 }'; }
 # non-zero remote status propagates (common.sh ERR trap stays armed elsewhere,
 # but here callers inspect the status explicitly so refresh-failure is graceful).
 # ---------------------------------------------------------------------------
-ssh_cmd=(ssh)
-rsync_base=(scp -r)
+ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+scp_cmd=(scp -r -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
+  ssh_cmd+=(-o IdentitiesOnly=yes -i "${SSH_IDENTITY_FILE}")
+  scp_cmd+=(-o IdentitiesOnly=yes -i "${SSH_IDENTITY_FILE}")
+fi
+if [[ -n "${SSH_KNOWN_HOSTS_FILE}" ]]; then
+  ssh_cmd+=(-o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null)
+  scp_cmd+=(-o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null)
+fi
+if [[ "${SSH_PORT}" != 22 ]]; then
+  ssh_cmd+=(-p "${SSH_PORT}")
+  scp_cmd+=(-P "${SSH_PORT}")
+fi
+if [[ -n "${SSH_OPTS:-}" ]]; then
+  read -r -a ssh_extra <<<"${SSH_OPTS}"
+  ssh_cmd+=("${ssh_extra[@]}")
+fi
+if [[ -n "${RSYNC_OPTS:-}" ]]; then
+  read -r -a scp_extra <<<"${RSYNC_OPTS}"
+  scp_cmd+=("${scp_extra[@]}")
+fi
 
 remote_run() {
   local desc="$1" remote_cmd="$2"
@@ -126,10 +153,10 @@ remote_run() {
 push_file() {
   local src="$1" dest="$2"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    log_info "DRY-RUN scp: ${rsync_base[*]} ${src} ${SSH_USER}@${BOARD_IP}:${dest}"
+    log_info "DRY-RUN scp: ${scp_cmd[*]} ${src} ${SSH_USER}@${BOARD_IP}:${dest}"
     return 0
   fi
-  scp -r "${src}" "${SSH_USER}@${BOARD_IP}:${dest}"
+  "${scp_cmd[@]}" "${src}" "${SSH_USER}@${BOARD_IP}:${dest}"
 }
 
 # ---------------------------------------------------------------------------

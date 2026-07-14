@@ -111,6 +111,11 @@ fi
 #     (frozen contract), so load them from the ext4 rootfs partition, not this FAT.
 echo "CeraLive: booting slot ${cera_slot} (root=PARTLABEL=${cera_root}, part ${cera_part})"
 setenv bootargs "root=PARTLABEL=${cera_root} rootwait rw console=${console} earlycon cera_slot=${cera_slot} rauc.slot=${cera_slot}"
+if test -n "${cera_transient_bootargs}"; then
+  echo "CeraLive: applying volatile one-boot arguments"
+  setenv bootargs "${bootargs} ${cera_transient_bootargs}"
+  setenv cera_transient_bootargs
+fi
 
 if test "${fdtfile}" = ""; then
   echo "CeraLive: FATAL fdtfile unset (cera_board.env missing?) — cannot boot"
