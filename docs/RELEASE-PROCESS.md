@@ -119,7 +119,11 @@ Steps, in order:
    The board must enumerate as the only RK3588 USB target and its canonical
    VID/PID/`LocationID` hash must match the approved Rock 5B+ fixture before
    loader transfer. After the pinned loader starts, `rkdeveloptool rci` captures
-   its 16-byte chip identity before `wl`. A UART
+   its 16-byte chip identity before `wl`. The structured parser accepts LF and
+   CRLF framing, strips only the terminal transport CR, and requires exactly one
+   `Chip Info:` record of exactly 16 one- or two-digit hex octets. Truncated,
+   extra, split, nonhex, or duplicate records fail closed before media write; the
+   accepted downstream identity is lowercase 32-hex. A UART
    helper acquires the serial port before the write, then
    interrupts U-Boot and supplies a volatile, one-boot data-only UART bootstrap
    argument. A dedicated host-local Ed25519 key signs the request; the image

@@ -78,8 +78,11 @@ The release hardware gate starts with one Rock 5B+ in Maskrom, carries a
 SHA-256-pinned loader in the candidate artifact, checks loader-mode eMMC capacity,
 and verifies a full readback before reset. A canonical hash approves the
 Maskrom USB port before loader transfer; the 16-byte Rockchip SoC identity is
-then captured with `rkdeveloptool rci` before the write. Linux reads the same
-first 16 bytes from the raw Rockchip OTP NVMEM device through the committed
+then captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
+CRLF transport framing but requires exactly one labeled record with exactly 16
+hex octets; truncated, extra, split, nonhex, and duplicate records fail before
+media write. The normalized identity remains lowercase 32-hex. Linux reads the
+same first 16 bytes from the raw Rockchip OTP NVMEM device through the committed
 `ceralive-rockchip-chip-info` helper; exact equality is required by UART and
 SSH after boot. `/` must
 resolve to that flashed eMMC. UART observes first boot through a

@@ -116,7 +116,23 @@ case "${1:-}" in
     printf 'Flash ID: mock-emmc\n'
     ;;
   rci)
-    printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
+    case "${MOCK_RCI_MODE:-lf}" in
+      lf) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n' ;;
+      crlf) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\r\n' ;;
+      truncated) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F\n' ;;
+      extra) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10 11\n' ;;
+      split)
+        printf 'Chip Info: 1 2 3 4 5 6 7 8\n'
+        printf 'Chip Info: 9 A B C D E F 10\n'
+        ;;
+      nonhex) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F GG\n' ;;
+      duplicate)
+        printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
+        printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
+        ;;
+      malformed) printf 'Chip Info: not-a-chip-identity\n' ;;
+      *) printf 'unknown MOCK_RCI_MODE: %s\n' "${MOCK_RCI_MODE}" >&2; exit 2 ;;
+    esac
     ;;
   wl)
     if [[ "${MOCK_FLASH_MODE:-exact}" == wl-wait ]]; then wait_for_interrupt; fi
@@ -208,6 +224,60 @@ base_env=(
   "CERALIVE_RECONNECT_DELAY=0"
   "CERALIVE_UART_PUBLIC_KEY_FILE=${TMP}/uart-public.pem"
 )
+
+assert_rci_contract() {
+  local mode="$1" expected="$2" label="$3" output rc=0
+  local case_dir="${TMP}/rci-${mode}"
+  mkdir -p "${case_dir}"
+  rm -f "${TMP}/identity.txt"
+  if output="$(env "${base_env[@]}" MOCK_RCI_MODE="${mode}" MOCK_RECONNECT_MODE=success \
+      MOCK_MEDIA="${case_dir}/media.raw" MOCK_SSH_COUNT_FILE="${case_dir}/count" \
+      MOCK_FLASH_LOG="${case_dir}/flash.log" MOCK_DEVICE_STATE_FILE="${case_dir}/state" \
+      "${VERIFY}" "${common[@]}" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ "${expected}" == accept ]]; then
+    if (( rc != 0 )); then
+      printf 'valid %s rci identity was rejected (rc=%s)\n%s\n' \
+        "${label}" "${rc}" "${output}" >&2
+      return 1
+    fi
+    grep -Eq '^soc_id_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+    grep -q '^rkdeveloptool wl ' "${case_dir}/flash.log"
+    printf 'rci %s accepted through real verifier path (exit=0)\n' "${label}"
+    return 0
+  fi
+
+  if (( rc == 0 )); then
+    printf 'malformed %s rci identity was accepted\n' "${label}" >&2
+    return 1
+  fi
+  if [[ "${output}" != *'rkdeveloptool did not report one 16-byte chip identity'* ]]; then
+    printf 'malformed %s rci identity failed for the wrong reason (rc=%s)\n%s\n' \
+      "${label}" "${rc}" "${output}" >&2
+    return 1
+  fi
+  [[ ! -e "${TMP}/identity.txt" ]]
+  if grep -q '^rkdeveloptool wl ' "${case_dir}/flash.log"; then
+    printf 'malformed %s rci identity reached media write\n' "${label}" >&2
+    return 1
+  fi
+  printf 'rci %s rejected before write (exit=%s)\n' "${label}" "${rc}"
+}
+
+rci_contract_failures=0
+assert_rci_contract lf accept LF || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract crlf accept CRLF || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract truncated reject truncated || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract extra reject extra-octet || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract split reject split-record || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract nonhex reject nonhex || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract duplicate reject duplicate-valid-records || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract malformed reject malformed || rci_contract_failures=$((rci_contract_failures + 1))
+(( rci_contract_failures == 0 )) || exit 1
 
 assert_identity_name_rejected() {
   local label="$1" flag="$2" path="$3" output

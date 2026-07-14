@@ -254,10 +254,14 @@ target_bytes=$((target_sectors * 512))
 run_rkdeveloptool rid >"${rid_output_file}"
 flash_id_sha256="$(sha256sum "${rid_output_file}" | cut -d' ' -f1)"
 run_rkdeveloptool rci >"${rci_output_file}"
-chip_info_line="$(grep -E '^Chip Info:([[:space:]]+[0-9A-Fa-f]{1,2}){16}[[:space:]]*$' "${rci_output_file}")" || {
+mapfile -t chip_info_lines < <(sed -nE 's/\r$//; /^Chip Info:/p' "${rci_output_file}")
+if (( ${#chip_info_lines[@]} != 1 )) ||
+   ! grep -Eq '^Chip Info:([[:blank:]]+[0-9A-Fa-f]{1,2}){16}[[:blank:]]*$' \
+     <<<"${chip_info_lines[0]}"; then
   printf 'rkdeveloptool did not report one 16-byte chip identity\n' >&2
   exit 1
-}
+fi
+chip_info_line="${chip_info_lines[0]}"
 read -r -a chip_info_tokens <<<"${chip_info_line#Chip Info:}"
 (( ${#chip_info_tokens[@]} == 16 ))
 usb_soc_id=""
