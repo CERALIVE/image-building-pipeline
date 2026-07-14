@@ -155,6 +155,10 @@ assert job_env.get("DOCKER_CONTEXT") == "default", (
 assert job_env.get("CERALIVE_RESOURCE_MEMINFO_FILE") == "/proc/meminfo", (
     "BUG: production candidate can inherit a synthetic host-memory probe"
 )
+assert job_env.get("CERALIVE_RUNNER_CLEANUP_IMAGE") == (
+    "debian:trixie-20260623-slim@sha256:"
+    "28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2"
+), "BUG: runner cleanup image is not pinned to the reviewed manifest digest"
 
 def step_index(predicate):
     return next(index for index, step in enumerate(steps) if predicate(step))
@@ -165,6 +169,10 @@ def require_guard(step):
     assert "github.ref" in condition, step
 
 meta_index = step_index(lambda step: step.get("id") == "cache-meta")
+checkout_index = step_index(lambda step: step.get("uses") == "actions/checkout@v7")
+pre_cleanup_index = step_index(
+    lambda step: step.get("name") == "Remove stale generated runner paths before checkout"
+)
 resource_index = step_index(lambda step: step.get("name") == "Verify production builder resource budget")
 setup_index = step_index(lambda step: step.get("uses") == "docker/setup-buildx-action@v4")
 builder_index = step_index(lambda step: step.get("uses") == "docker/build-push-action@v7")
@@ -173,9 +181,35 @@ build_index = step_index(lambda step: step.get("name") == "Build exact productio
 restore_index = step_index(lambda step: step.get("uses") == "actions/cache/restore@v6")
 save_index = step_index(lambda step: step.get("uses") == "actions/cache/save@v6")
 bound_index = step_index(lambda step: step.get("name") == "Bound board-scoped mkosi cache")
+post_cleanup_index = step_index(
+    lambda step: step.get("name") == "Remove generated runner paths after job"
+)
 
+assert pre_cleanup_index < checkout_index < meta_index
 assert meta_index < resource_index < setup_index < builder_index < trust_index < build_index
-assert restore_index < trust_index < build_index < bound_index < save_index
+assert restore_index < trust_index < build_index < bound_index < save_index < post_cleanup_index
+
+for cleanup_index in (pre_cleanup_index, post_cleanup_index):
+    cleanup = steps[cleanup_index]
+    cleanup_run = cleanup["run"]
+    assert cleanup["env"]["CLEANUP_IMAGE"] == "${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}"
+    for required in (
+        "docker run --rm --read-only --network none",
+        "--cap-drop ALL --cap-add DAC_OVERRIDE",
+        "--security-opt no-new-privileges",
+        '--volume "${GITHUB_WORKSPACE}:/work"',
+        '"${CLEANUP_IMAGE}"',
+    ):
+        assert required in cleanup_run, required
+    assert cleanup_run.count("/work/v2/mkosi/build") == 1
+    assert cleanup_run.count("/work/v2/mkosi/cache") == 1
+    assert "rm -rf -- /work/v2/mkosi/build /work/v2/mkosi/cache" in cleanup_run
+    assert "chown" not in cleanup_run and "find " not in cleanup_run
+    assert "rm -rf -- /work" not in cleanup_run.replace(
+        "rm -rf -- /work/v2/mkosi/build /work/v2/mkosi/cache", ""
+    )
+assert "if" not in steps[pre_cleanup_index]
+assert steps[post_cleanup_index]["if"] == "${{ always() }}"
 
 resource_step = steps[resource_index]
 assert resource_step.get("run") == "./v2/ci/check-builder-resources.sh", (

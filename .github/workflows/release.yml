@@ -20,6 +20,7 @@ jobs:
       CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
       CERALIVE_MKOSI_CACHE_DIR: v2/mkosi/cache/rock-5b-plus
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
+      CERALIVE_RUNNER_CLEANUP_IMAGE: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
       artifact_digest: sha256:${{ steps.upload.outputs.artifact-digest }}
@@ -29,6 +30,17 @@ jobs:
       keyring_filename: ${{ steps.meta.outputs.keyring_filename }}
       commit: ${{ github.sha }}
     steps:
+      - name: Remove stale generated runner paths before checkout
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+        run: |
+          set -euo pipefail
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- /work/v2/mkosi/build /work/v2/mkosi/cache
       - uses: actions/checkout@v7
       - name: Resolve release cache keys
         id: cache-meta
@@ -187,6 +199,18 @@ jobs:
         with:
           path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
           key: ${{ steps.cache-meta.outputs.mkosi_key }}
+      - name: Remove generated runner paths after job
+        if: ${{ always() }}
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+        run: |
+          set -euo pipefail
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- /work/v2/mkosi/build /work/v2/mkosi/cache
       - name: Remove release secrets and temporary roots
         if: ${{ always() }}
         run: |
