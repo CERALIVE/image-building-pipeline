@@ -16,7 +16,8 @@ setup() {
 
 require_disk_tools() {
   local tool
-  for tool in sgdisk systemd-repart mkfs.ext4 debugfs mkfs.vfat mcopy mkimage flock rauc dtc fdtdump cpio; do
+  for tool in sgdisk systemd-repart mkfs.ext4 debugfs mkfs.vfat mcopy mkimage dumpimage \
+    fdtget fdtput sha256sum flock rauc dtc fdtdump cpio; do
     command -v "$tool" >/dev/null 2>&1 || {
       printf 'missing required contract-test tool: %s\n' "$tool" >&2
       return 1

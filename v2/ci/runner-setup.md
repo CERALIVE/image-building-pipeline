@@ -68,8 +68,13 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
 sudo apt-get update
 sudo apt-get install -y \
   rkdeveloptool android-tools-adb minicom screen \
-  openssh-client openssl rsync xz-utils gdisk util-linux
+  openssh-client openssl rsync xz-utils gdisk util-linux \
+  device-tree-compiler u-boot-tools
 ```
+
+`device-tree-compiler` supplies `fdtget`/`fdtput`, and `u-boot-tools` supplies
+`dumpimage`; the offline preflash gate and its blocking adversarial contract require
+them to bound and hash-check U-Boot FIT payloads before any USB operation.
 
 > `rkdeveloptool` ships in Ubuntu 22.04+ `universe`. If your distro lacks it,
 > build that exact tool from source (`github.com/rockchip-linux/rkdeveloptool`).
