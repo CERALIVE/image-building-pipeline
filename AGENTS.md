@@ -129,8 +129,9 @@ Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
 automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
 
 `v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects wrong GPT
-starts/sizes or labels, a missing idblock or second-stage FIT, malformed compiled
-boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
+starts/sizes or labels, a missing idblock or second-stage FIT, external FIT payloads
+whose declared extents exceed the image/8 MiB budget or whose SHA-256 nodes mismatch,
+malformed compiled boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
 state, incompatible/invalid signed bundles, and a destination smaller than the raw
 image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and—when CI sets

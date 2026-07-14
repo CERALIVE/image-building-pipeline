@@ -71,8 +71,9 @@ Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
 rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
 RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
 Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; it
-requires exact GPT geometry, both RK3588 bootloader stages, a compiled selector,
-complete kernel/DTB/initrd sets in both slots, and a real compatible signed bundle.
+requires exact GPT geometry, both RK3588 bootloader stages, bounded and SHA-256-valid
+embedded/external FIT payloads, a compiled selector, complete kernel/DTB/initrd sets
+in both slots, and a real compatible signed bundle.
 The release hardware gate starts with one Rock 5B+ in Maskrom, carries a
 SHA-256-pinned loader in the candidate artifact, checks loader-mode eMMC capacity,
 and verifies a full readback before reset. A canonical hash approves the

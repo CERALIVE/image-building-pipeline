@@ -9,7 +9,8 @@
 # Nine sub-checks (all must PASS):
 #   1. GPT geometry   — exact A/B starts/sizes, unique labels, clean sgdisk -v.
 #   2. Gap idblock    — Rockchip "RKNS" at sector 64.
-#   3. Gap FIT        — parseable U-Boot FIT at sector 16384 with a valid extent.
+#   3. Gap FIT        — parseable U-Boot FIT at sector 16384 whose embedded or
+#                       external payload extents are bounded and SHA-256-valid.
 #   4. Boot partition — compiled boot.scr, Rock board metadata, boot_state.txt and
 #                       recovery.scr are all present on the FAT boot
 #                       partition (offset GAP_MB * 1 MiB).
@@ -61,6 +62,9 @@ RKNS_SECTOR=64               # Rockchip idblock lands at sector 64 (byte 32768)
 RKNS_MAGIC="52 4b 4e 53"     # "RKNS" on media (NOT literal "RK35"; spike Div #3)
 FIT_SECTOR=16384
 FIT_MAGIC="d0 0d fe ed"
+FIT_MAX_BYTES=8388608
+FIT_MAX_IMAGES=32
+FIT_MAX_HASH_NODES=8
 BOOT_START=32768
 BOOT_SIZE=524288
 ROOTFS_SIZE=8388608
@@ -154,26 +158,241 @@ check_gap_magic() {
   fi
 }
 
+fit_has_property() {
+  local fit="$1" node="$2" property="$3"
+  fdtget -p "${fit}" "${node}" 2>/dev/null | grep -Fxq "${property}"
+}
+
+fit_u32_property() {
+  local fit="$1" node="$2" property="$3" raw
+  local -a values
+  raw="$(fdtget -t u "${fit}" "${node}" "${property}" 2>/dev/null)" || return 1
+  read -r -a values <<<"${raw}"
+  (( ${#values[@]} == 1 )) && [[ "${values[0]}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$((10#${values[0]}))"
+}
+
+fit_sha256_property() {
+  local fit="$1" node="$2" property="$3" raw byte padded digest=""
+  local -a bytes
+  raw="$(fdtget -t bx "${fit}" "${node}" "${property}" 2>/dev/null)" || return 1
+  read -r -a bytes <<<"${raw}"
+  (( ${#bytes[@]} == 32 )) || return 1
+  for byte in "${bytes[@]}"; do
+    [[ "${byte}" =~ ^[0-9a-fA-F]{1,2}$ ]] || return 1
+    printf -v padded '%02x' "$((16#${byte}))"
+    digest+="${padded}"
+  done
+  printf '%s\n' "${digest}"
+}
+
 check_second_stage_fit() {
-  local img="$1" got size_hex size fit
-  require_tool dumpimage || { fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"; return; }
-  got="$(dd if="${img}" bs=1 skip=$((FIT_SECTOR * SECTOR)) count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')"
-  size_hex="$(dd if="${img}" bs=1 skip=$((FIT_SECTOR * SECTOR + 4)) count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
-  size=0
-  [[ "${size_hex}" =~ ^[0-9a-fA-F]{8}$ ]] && size=$((16#${size_hex}))
-  fit="$(mktemp)"
-  if (( size > 0 && size <= 8388608 )); then
-    dd if="${img}" of="${fit}" bs=1 skip=$((FIT_SECTOR * SECTOR)) count="${size}" status=none 2>/dev/null
+  local img="$1" got size_hex metadata_size=0 image_bytes available_bytes
+  local fit_start=$((FIT_SECTOR * SECTOR)) external_base=0 full_extent=0 valid=1 reason=""
+  local tmp metadata_fit full_fit metadata_bytes full_bytes nodes_out node path properties
+  local has_data has_offset has_position data_size data_offset data_position payload_start payload_end
+  local children_out child hash_path algo expected actual payload payload_bytes verified_hashes=0 image_index hash_nodes
+  local -a image_nodes expected_hashes
+
+  require_tool dumpimage || {
+    fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    return
+  }
+  require_tool fdtget || {
+    fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    return
+  }
+  require_tool sha256sum || {
+    fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    return
+  }
+
+  got="$(dd if="${img}" bs=1 skip="${fit_start}" count=4 status=none 2>/dev/null \
+    | od -An -v -tx1 | tr -s ' ' | sed 's/^ //;s/ $//')"
+  size_hex="$(dd if="${img}" bs=1 skip=$((fit_start + 4)) count=4 status=none 2>/dev/null \
+    | od -An -v -tx1 | tr -d ' \n')"
+  [[ "${size_hex}" =~ ^[0-9a-fA-F]{8}$ ]] && metadata_size=$((16#${size_hex}))
+  image_bytes="$(stat -c %s "${img}" 2>/dev/null || printf 0)"
+  available_bytes=$(( image_bytes > fit_start ? image_bytes - fit_start : 0 ))
+  if ! tmp="$(mktemp -d)"; then
+    fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
+    info "could not create private FIT inspection directory"
+    return
   fi
-  if [[ "${got}" == "${FIT_MAGIC}" ]] && (( size >= 4096 && size <= 8388608 )) \
-      && dumpimage -l "${fit}" >/dev/null 2>&1; then
+  metadata_fit="${tmp}/metadata.itb"
+  full_fit="${tmp}/full.itb"
+
+  if [[ "${got}" != "${FIT_MAGIC}" ]]; then
+    valid=0; reason="invalid FIT magic '${got}'"
+  elif (( metadata_size < 40 || metadata_size > FIT_MAX_BYTES )); then
+    valid=0; reason="invalid FDT metadata size ${metadata_size}"
+  elif (( metadata_size > available_bytes )); then
+    valid=0; reason="FDT metadata exceeds available FIT bytes"
+  elif ! dd if="${img}" of="${metadata_fit}" bs=1 skip="${fit_start}" \
+      count="${metadata_size}" status=none 2>/dev/null; then
+    valid=0; reason="could not read FDT metadata"
+  elif ! metadata_bytes="$(stat -c %s "${metadata_fit}" 2>/dev/null)" \
+      || [[ "${metadata_bytes}" != "${metadata_size}" ]]; then
+    valid=0; reason="could not read complete FDT metadata"
+  elif ! dumpimage -l "${metadata_fit}" >/dev/null 2>&1; then
+    valid=0; reason="dumpimage rejected FDT metadata"
+  fi
+
+  image_nodes=()
+  if (( valid == 1 )); then
+    if ! nodes_out="$(fdtget -l "${metadata_fit}" /images 2>/dev/null)"; then
+      valid=0; reason="FIT has no parseable /images node"
+    else
+      while IFS= read -r node; do
+        [[ -n "${node}" ]] && image_nodes+=("${node}")
+      done <<<"${nodes_out}"
+      if (( ${#image_nodes[@]} == 0 )); then
+        valid=0; reason="FIT contains no image payloads"
+      elif (( ${#image_nodes[@]} > FIT_MAX_IMAGES )); then
+        valid=0; reason="FIT contains more than ${FIT_MAX_IMAGES} image payloads"
+      fi
+    fi
+  fi
+
+  external_base=$(( (metadata_size + 3) / 4 * 4 ))
+  full_extent="${metadata_size}"
+  if (( valid == 1 )); then
+    for image_index in "${!image_nodes[@]}"; do
+      node="${image_nodes[$image_index]}"
+      path="/images/${node}"
+      properties="$(fdtget -p "${metadata_fit}" "${path}" 2>/dev/null || true)"
+      has_data=0; has_offset=0; has_position=0
+      grep -Fxq data <<<"${properties}" && has_data=1
+      grep -Fxq data-offset <<<"${properties}" && has_offset=1
+      grep -Fxq data-position <<<"${properties}" && has_position=1
+
+      if (( has_data == 1 )); then
+        if (( has_offset == 1 || has_position == 1 )); then
+          valid=0; reason="image '${node}' mixes embedded and external payload locations"; break
+        fi
+        continue
+      fi
+      if ! fit_has_property "${metadata_fit}" "${path}" data-size \
+          || ! data_size="$(fit_u32_property "${metadata_fit}" "${path}" data-size)" \
+          || (( data_size <= 0 )); then
+        valid=0; reason="image '${node}' has no bounded payload size"; break
+      fi
+      if (( has_offset + has_position != 1 )); then
+        valid=0; reason="image '${node}' has an ambiguous external payload location"; break
+      fi
+      if (( has_offset == 1 )); then
+        if ! data_offset="$(fit_u32_property "${metadata_fit}" "${path}" data-offset)" \
+            || (( data_offset > FIT_MAX_BYTES - external_base )); then
+          valid=0; reason="image '${node}' has an invalid data-offset"; break
+        fi
+        payload_start=$((external_base + data_offset))
+      else
+        if ! data_position="$(fit_u32_property "${metadata_fit}" "${path}" data-position)" \
+            || (( data_position < metadata_size || data_position > FIT_MAX_BYTES )); then
+          valid=0; reason="image '${node}' has an invalid data-position"; break
+        fi
+        payload_start="${data_position}"
+      fi
+      if (( payload_start > FIT_MAX_BYTES || data_size > FIT_MAX_BYTES - payload_start )); then
+        valid=0; reason="image '${node}' payload extent exceeds ${FIT_MAX_BYTES}-byte FIT budget"; break
+      fi
+      payload_end=$((payload_start + data_size))
+      if (( payload_end > available_bytes )); then
+        valid=0; reason="image '${node}' payload extent exceeds available FIT bytes"; break
+      fi
+      (( payload_end > full_extent )) && full_extent="${payload_end}"
+    done
+  fi
+
+  if (( valid == 1 )); then
+    if ! dd if="${img}" of="${full_fit}" bs=1 skip="${fit_start}" \
+        count="${full_extent}" status=none 2>/dev/null; then
+      valid=0; reason="could not read complete FIT extent"
+    elif ! full_bytes="$(stat -c %s "${full_fit}" 2>/dev/null)" \
+        || [[ "${full_bytes}" != "${full_extent}" ]]; then
+      valid=0; reason="could not read complete FIT extent"
+    elif ! dumpimage -l "${full_fit}" >/dev/null 2>&1; then
+      valid=0; reason="dumpimage rejected the full FIT extent"
+    fi
+  fi
+
+  if (( valid == 1 )); then
+    for image_index in "${!image_nodes[@]}"; do
+      node="${image_nodes[$image_index]}"
+      path="/images/${node}"
+      expected_hashes=()
+      hash_nodes=0
+      children_out="$(fdtget -l "${metadata_fit}" "${path}" 2>/dev/null || true)"
+      while IFS= read -r child; do
+        [[ -n "${child}" ]] || continue
+        [[ "${child}" == hash* ]] || continue
+        hash_nodes=$((hash_nodes + 1))
+        if (( hash_nodes > FIT_MAX_HASH_NODES )); then
+          valid=0; reason="image '${node}' has more than ${FIT_MAX_HASH_NODES} hash nodes"; break
+        fi
+        hash_path="${path}/${child}"
+        algo="$(fdtget -t s "${metadata_fit}" "${hash_path}" algo 2>/dev/null || true)"
+        if [[ "${algo}" != sha256 ]]; then
+          valid=0; reason="image '${node}' has unsupported hash algorithm '${algo:-missing}'"; break
+        fi
+        if ! expected="$(fit_sha256_property "${metadata_fit}" "${hash_path}" value)"; then
+          valid=0; reason="image '${node}' has a malformed SHA-256 value"; break
+        fi
+        expected_hashes+=("${expected}")
+      done <<<"${children_out}"
+      (( valid == 1 )) || break
+      if (( ${#expected_hashes[@]} == 0 )); then
+        valid=0; reason="image '${node}' has no SHA-256 payload hash"; break
+      fi
+
+      if fit_has_property "${metadata_fit}" "${path}" data; then
+        payload="${tmp}/payload-${image_index}.bin"
+        if ! dumpimage -T flat_dt -p "${image_index}" -o "${payload}" \
+            "${full_fit}" >/dev/null 2>&1; then
+          valid=0; reason="could not extract embedded payload for image '${node}'"; break
+        fi
+        if ! actual="$(sha256sum "${payload}" | cut -d' ' -f1)"; then
+          valid=0; reason="could not hash payload for image '${node}'"; break
+        fi
+      else
+        data_size="$(fit_u32_property "${metadata_fit}" "${path}" data-size)"
+        if fit_has_property "${metadata_fit}" "${path}" data-offset; then
+          data_offset="$(fit_u32_property "${metadata_fit}" "${path}" data-offset)"
+          payload_start=$((external_base + data_offset))
+        else
+          payload_start="$(fit_u32_property "${metadata_fit}" "${path}" data-position)"
+        fi
+        payload="${tmp}/payload-${image_index}.bin"
+        if ! dd if="${full_fit}" of="${payload}" bs=1 skip="${payload_start}" \
+            count="${data_size}" status=none 2>/dev/null; then
+          valid=0; reason="could not read external payload for image '${node}'"; break
+        fi
+        if ! payload_bytes="$(stat -c %s "${payload}" 2>/dev/null)" \
+            || [[ "${payload_bytes}" != "${data_size}" ]]; then
+          valid=0; reason="short external payload read for image '${node}'"; break
+        fi
+        if ! actual="$(sha256sum "${payload}" | cut -d' ' -f1)"; then
+          valid=0; reason="could not hash payload for image '${node}'"; break
+        fi
+      fi
+      for expected in "${expected_hashes[@]}"; do
+        if [[ "${actual}" != "${expected}" ]]; then
+          valid=0; reason="image '${node}' payload hash mismatch"; break
+        fi
+      done
+      (( valid == 1 )) || break
+      verified_hashes=$((verified_hashes + ${#expected_hashes[@]}))
+    done
+  fi
+
+  if (( valid == 1 )); then
     pass "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
-    info "FIT total size: ${size} bytes"
+    info "FIT metadata=${metadata_size} bytes, full extent=${full_extent} bytes; ${verified_hashes} payload hash(es) verified"
   else
     fail "Bootloader second-stage FIT: valid FDT header and extent at sector ${FIT_SECTOR}"
-    info "magic='${got}' total-size=${size} (expected ${FIT_MAGIC}, 4096..8388608 bytes)"
+    info "${reason}; magic='${got}' metadata=${metadata_size} available=${available_bytes}"
   fi
-  rm -f "${fit}"
+  rm -rf "${tmp}"
 }
 
 # ---------------------------------------------------------------------------
@@ -452,4 +671,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

@@ -619,7 +619,10 @@ kernel/DTB/initrd sets in A and B, destination capacity, and — the one
 relevant to this doc — that the `.raucb` parses and carries the expected
 `Compatible=` string. Pass the exact block-device size with
 `--target-size-bytes`; see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §3 for
-the expected nine-green-check output.
+the expected nine-green-check output. For FIT images with external data, the gate
+separates the FDT metadata `totalsize` from the full payload extent, bounds every
+declared payload within the image and 8 MiB bootloader budget, and verifies each
+payload against its SHA-256 hash node before authorizing a flash.
 
 **Post-install (on the fielded device):**
 
