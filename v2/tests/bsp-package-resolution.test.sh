@@ -152,6 +152,7 @@ mkdir -p "${TMP}/native-ok" "${TMP}/native-fail" "${TMP}/native-empty" \
   "${TMP}/native-wrong-arch"
 build_test_deb "${TMP}/native-fixture.deb" demo 1.0 all
 build_test_deb "${TMP}/native-wrong-arch.deb" demo 1.0 amd64
+chmod 600 "${TMP}/native-fixture.deb"
 _APT_OPTS=()
 DRY_RUN=""
 (
@@ -160,6 +161,7 @@ DRY_RUN=""
   _fetch_bsp_native_one demo=1.0
 )
 [[ "$(find "${TMP}/native-ok" -maxdepth 1 -name '*.deb' | wc -l)" -eq 1 ]]
+[[ "$(stat -c '%a' "${TMP}/native-ok/demo_1.0_all.deb")" == 644 ]]
 if (
   _BSP_DEBS="${TMP}/native-fail"
   apt-get() { return 100; }

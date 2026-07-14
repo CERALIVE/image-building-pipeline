@@ -66,6 +66,7 @@ if [[ "${command_name}" == "download" ]]; then
 		tar -czf "${tmp}/control.tar.gz" -C "${tmp}/DEBIAN" ./control
 		tar -czf "${tmp}/data.tar.gz" --files-from /dev/null
 		ar r "${pkg}_${version}_${ARCH:-arm64}.deb" "${tmp}/debian-binary" "${tmp}/control.tar.gz" "${tmp}/data.tar.gz" >/dev/null
+		chmod 0600 "${pkg}_${version}_${ARCH:-arm64}.deb"
 		if [[ "${FAKE_APT_MODE:-ok}" == duplicate-one && "${pkg}" == cerastream ]]; then
 			cp "${pkg}_${version}_${ARCH:-arm64}.deb" "${pkg}_${version}_duplicate_${ARCH:-arm64}.deb"
 		fi
@@ -257,6 +258,10 @@ if [[ "${staged_count}" -ne 5 ]]; then
 	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 5\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
+if find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then
+	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: package mode is not 0644\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
 printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 5 debs\n' | tee -a "${RESULTS_LOG}"
 
 curl_repo="${RUN_DIR}/curl-repo"
@@ -275,8 +280,8 @@ if [[ "${curl_staged_count}" -ne 5 ]]; then
 	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 5\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
-if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm -004 -print -quit | grep -q .; then
-	printf 'FAIL valid-curl-fallback-stages-first-party-debs: package is not sandbox-readable\n' | tee -a "${RESULTS_LOG}"
+if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then
+	printf 'FAIL valid-curl-fallback-stages-first-party-debs: package mode is not 0644\n' | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
