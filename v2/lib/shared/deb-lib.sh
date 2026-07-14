@@ -44,7 +44,7 @@ deb_pkg_name() {
 # deb_pkg_version — read the Version: field of a .deb without dpkg (host is Arch).
 # Mirrors deb_pkg_name: ar + tar over control.tar.* . Echoes the version or empty.
 # Used by the BSP provenance/drift-guard to record the EXACT resolved kernel
-# version string (the floating Armbian vendor build) alongside its content hash.
+# version string for the exact Armbian vendor package alongside its content hash.
 # ---------------------------------------------------------------------------
 deb_pkg_version() {
   local deb="$1" tmp version=""

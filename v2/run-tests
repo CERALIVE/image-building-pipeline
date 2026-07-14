@@ -43,6 +43,7 @@ SUITES=(
 SHELL_SUITES=(
   "${HERE}/tests/fetch-debs-apt-chain.test.sh"
   "${HERE}/tests/bsp-auth-contract.test.sh"
+  "${HERE}/tests/bsp-package-resolution.test.sh"
   "${HERE}/tests/rauc-pki-contract.test.sh"
   "${HERE}/tests/release-candidate-contract.test.sh"
   "${HERE}/tests/release-cache-contract.test.sh"

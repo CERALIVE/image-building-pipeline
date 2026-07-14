@@ -121,8 +121,9 @@ On the current Armbian vendor BSP kernel (`linux-image-vendor-rk35xx`,
 
 ## 6. Build-time module-presence check
 
-The kernel BSP floats — Decision D3 pins it by **name only**
-(`linux-image-vendor-rk35xx`), with no version pin, so a silent Armbian re-spin
+The kernel package is exact-versioned in
+`v2/manifests/armbian-bsp-deb-versions.txt`. An upstream repository can still
+replace bytes under the same Debian version, so a same-version Armbian re-spin
 could drop one of the six modules with no signal. `v2/lib/check-wwan-modules.sh`
 makes that observable.
 

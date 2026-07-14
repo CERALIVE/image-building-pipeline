@@ -36,6 +36,19 @@ fi
 
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 
+prune_irrelevant_rk3588_firmware() {
+  local -a paths=(
+    /usr/lib/firmware/qcom
+    /usr/lib/firmware/intel
+    /usr/lib/firmware/ath10k
+    /usr/lib/firmware/ath11k
+    /usr/lib/firmware/ath12k
+    /usr/lib/firmware/updates
+  )
+  log "pruning firmware irrelevant to the RK3588 platform"
+  rm -rf "${paths[@]}"
+}
+
 # Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
 read -r -a hw_gst <<<"${HW_ACCEL_GSTREAMER_PLUGINS:-}"
 read -r -a gst_runtime <<<"${GSTREAMER_RUNTIME_PACKAGES:-}"
@@ -64,6 +77,7 @@ fi
 if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   log "installing authenticated staged boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
   apt-get install -y --no-install-recommends "${boot_bsp[@]}"
+  prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
 fi

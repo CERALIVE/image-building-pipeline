@@ -250,8 +250,39 @@ base64 -w0 <"${tmp}/armbian-combined.gpg" \
 `v2/lib/fetch-debs.sh` independently enforces exact primary-fingerprint set
 equality before either apt or the curl fallback runs. That check deliberately
 rejects old-only, new-only, malformed, revoked, expired, invalid, disabled,
-normalization-failed, and expected-plus-unrelated keyrings; the dual-signed
-`InRelease` must then pass normal `gpgv` verification with both signatures valid.
+normalization-failed, and expected-plus-unrelated keyrings. Both native apt and
+curl paths re-verify the downloaded `InRelease` with `gpgv`; both signatures must
+be valid before package download begins.
+
+### Armbian BSP package pin promotion
+
+Family manifests choose the required BSP package names. Production resolves those
+names only through the exact Debian versions in
+`v2/manifests/armbian-bsp-deb-versions.txt`; it never asks apt for an unqualified
+latest package. Both fetch paths verify the dual-signed `InRelease` and require
+the configured suite, `main` component, and architecture. The curl path also
+verifies the signed `Packages.gz` digest and preflights the complete exact set
+before downloading. Each downloaded package is then checked against its
+signed-index SHA-256 and its Debian control package/version/architecture.
+
+To promote a BSP version:
+
+1. Fetch the live official `InRelease` and `Packages.gz` from
+   `https://apt.armbian.com` using the exact two-key procedure above.
+2. Verify suite/component/architecture identity and confirm one compatible
+   (`arm64` or `all`) record, including SHA-256, for every required exact package.
+   Do not promote a partial set or use an unsigned mirror or HTTP status alone.
+3. Review the package contents and hardware implications. Update
+   `armbian-bsp-deb-versions.txt`; when the kernel changes, update
+   `v2/manifests/bsp-baseline.json` to the reviewed version and content hash in the
+   same change.
+4. Run `v2/tests/bsp-package-resolution.test.sh`, `v2/run-tests`, an authenticated
+   live BSP fetch, and the release hardware gate before shipping a new immutable
+   tag.
+
+If a tagged candidate fails, merge the fix and create the next unused CalVer
+patch tag at the merge SHA. Never move or rerun an older tag expecting it to pick
+up new code.
 
 ### Signing (`build-bundle.sh`)
 

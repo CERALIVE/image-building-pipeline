@@ -18,7 +18,7 @@ dtb_name: rk3588s-orangepi-5-plus.dtb
 
 # Board-specific Armbian vendor U-Boot; overrides the family's empty default.
 uboot_packages:
-  - linux-u-boot-orangepi5plus-vendor
+  - linux-u-boot-orangepi5-plus-vendor
 
 # DT_OVERLAYS from configs/devices/orangepi5plus.conf.
 armbian_overlays:

@@ -60,7 +60,11 @@ board logic in the layer config. Adding a new board never edits this layer.
 
 **This is the only place arch/SoC tokens (`rk3588`, `rockchip`, `vendor`, `arm64`)
 are allowed.** On an x86 build the platform postinst is a clean pass-through
-(no RK3588 BSP to add).
+(no RK3588 BSP to add); authenticated Debian kernel/firmware staging for that
+non-Armbian family remains [GREENFIELD] and real fetches fail closed. After a
+full RK3588 BSP install, this layer also removes
+firmware directories that are irrelevant to RK3588; the shared app layer never
+deletes architecture-specific firmware.
 
 **NOT here:** the SRT transport library (`libsrt`) — the first-party CeraLive
 runtime package is installed in the App layer, never in the BSP.
@@ -113,7 +117,7 @@ flavor builds in one process.
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
 every staged first-party `.deb` from `/opt/ceralive-staging` with no downloads,
 replaces any Debian SRT TLS flavor with `libsrt1.5-ceralive`, asserts the
-`cerastream`/`srtla_send` binaries landed, prunes non-RK3588/headless payload, then
+`cerastream`/`srtla_send` binaries landed, prunes headless desktop/documentation payload, then
 drops the staging tree so it never ships. **The base
 image bakes each `.deb` into the rootfs** (`docs/partition-contract.md` §4 "No appfs":
 atomic with the RAUC slot); the **sysext/appfs split is the OTA-delivery contract**, not
