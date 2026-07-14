@@ -14,6 +14,37 @@ source "${AUTH}"
 # shellcheck source=../lib/fetch-debs.sh
 source "${FETCH}"
 
+# Publishing must fail closed if archive readability cannot be normalized. Bash
+# suppresses errexit inside functions reached through `if !`, so this regression
+# exercises the helper through that exact caller shape.
+mkdir -p "${TMP}/chmod-failure/bin" "${TMP}/chmod-failure/dest"
+printf 'fixture\n' >"${TMP}/chmod-failure/source.deb"
+cat >"${TMP}/chmod-failure/bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+/usr/bin/chmod 0755 "${TMP}/chmod-failure/bin/chmod"
+if PATH="${TMP}/chmod-failure/bin:${PATH}" publish_staged_deb \
+    "${TMP}/chmod-failure/source.deb" "${TMP}/chmod-failure/dest/package.deb"; then
+  printf 'staged package publication swallowed chmod failure\n' >&2
+  exit 1
+fi
+[[ -f "${TMP}/chmod-failure/source.deb" ]]
+[[ ! -e "${TMP}/chmod-failure/dest/package.deb" ]]
+
+mkdir -p "${TMP}/rename-failure/dest"
+printf 'fixture\n' >"${TMP}/rename-failure/source.deb"
+if (
+  mv() { return 1; }
+  publish_staged_deb \
+    "${TMP}/rename-failure/source.deb" "${TMP}/rename-failure/dest/package.deb"
+); then
+  printf 'staged package publication swallowed rename failure\n' >&2
+  exit 1
+fi
+[[ -f "${TMP}/rename-failure/source.deb" ]]
+[[ ! -e "${TMP}/rename-failure/dest/package.deb" ]]
+
 cat >"${TMP}/Packages.current-like" <<'EOF'
 Package: linux-image-vendor-rk35xx
 Version: 26.2.1
@@ -149,9 +180,10 @@ build_test_deb() {
 # Native apt workers must propagate apt failures, reject empty-success responses,
 # and inspect the one downloaded package before it can enter final staging.
 mkdir -p "${TMP}/native-ok" "${TMP}/native-fail" "${TMP}/native-empty" \
-  "${TMP}/native-wrong-arch"
+  "${TMP}/native-wrong-arch" "${TMP}/native-chmod-failure"
 build_test_deb "${TMP}/native-fixture.deb" demo 1.0 all
 build_test_deb "${TMP}/native-wrong-arch.deb" demo 1.0 amd64
+chmod 600 "${TMP}/native-fixture.deb"
 _APT_OPTS=()
 DRY_RUN=""
 (
@@ -160,6 +192,17 @@ DRY_RUN=""
   _fetch_bsp_native_one demo=1.0
 )
 [[ "$(find "${TMP}/native-ok" -maxdepth 1 -name '*.deb' | wc -l)" -eq 1 ]]
+[[ "$(stat -c '%a' "${TMP}/native-ok/demo_1.0_all.deb")" == 644 ]]
+if (
+  _BSP_DEBS="${TMP}/native-chmod-failure"
+  apt-get() { cp "${TMP}/native-fixture.deb" ./demo_1.0_all.deb; }
+  chmod() { return 1; }
+  _fetch_bsp_native_one demo=1.0
+); then
+  printf 'native BSP worker swallowed staged package chmod failure\n' >&2
+  exit 1
+fi
+[[ -z "$(find "${TMP}/native-chmod-failure" -mindepth 1 -print -quit)" ]]
 if (
   _BSP_DEBS="${TMP}/native-fail"
   apt-get() { return 100; }
@@ -239,6 +282,42 @@ if (
   exit 1
 fi
 [[ -z "$(find "${TMP}/curl-checksum-mismatch" -maxdepth 1 -type f -print -quit)" ]]
+
+# Given curl's mktemp destination is 0600, when the verified package is published
+# to staging, then mkosi's sandboxed repository helper can read it as mode 0644.
+mkdir -p "${TMP}/curl-readable"
+build_test_deb "${TMP}/curl-readable.deb" demo 1.0 arm64
+chmod 600 "${TMP}/curl-readable.deb"
+curl_readable_sha="$(sha256sum "${TMP}/curl-readable.deb" | awk '{print $1}')"
+cat >"${TMP}/Packages.curl-readable" <<EOF
+Package: demo
+Version: 1.0
+Architecture: arm64
+Filename: pool/demo_1.0_arm64.deb
+SHA256: ${curl_readable_sha}
+EOF
+(
+  _BSP_DEBS="${TMP}/curl-readable"
+  _PKG_INDEX="${TMP}/Packages.curl-readable"
+  CURL_FIXTURE="${TMP}/curl-readable.deb"
+  curl() { mock_curl_copy_fixture "$@"; }
+  _fetch_bsp_curl_one demo=1.0
+)
+[[ "$(stat -c '%a' "${TMP}/curl-readable/demo_1.0_arm64.deb")" == 644 ]]
+
+mkdir -p "${TMP}/curl-chmod-failure"
+if (
+  _BSP_DEBS="${TMP}/curl-chmod-failure"
+  _PKG_INDEX="${TMP}/Packages.curl-readable"
+  CURL_FIXTURE="${TMP}/curl-readable.deb"
+  curl() { mock_curl_copy_fixture "$@"; }
+  chmod() { return 1; }
+  _fetch_bsp_curl_one demo=1.0
+); then
+  printf 'curl BSP worker swallowed staged package chmod failure\n' >&2
+  exit 1
+fi
+[[ -z "$(find "${TMP}/curl-chmod-failure" -mindepth 1 -print -quit)" ]]
 
 # Given retained historical versions and Architecture: all firmware, when exact
 # reviewed pins are resolved for arm64, then every required record is unique.

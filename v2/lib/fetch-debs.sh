@@ -168,6 +168,12 @@ _FIRST_PARTY_INDEX=""
 _FIRST_PARTY_BASE_URL=""
 _FIRST_PARTY_CURL_AUTH=()
 
+publish_staged_deb() {
+  local source="$1" destination="$2"
+  chmod 0644 "${source}" || return 1
+  mv -f "${source}" "${destination}" || return 1
+}
+
 _run_bounded() {
   local max="$1" worker="$2"; shift 2
   (( max >= 1 )) || max=1
@@ -389,7 +395,7 @@ _fetch_bsp_native_one() {
     rm -rf "${tmpd}"
     return 1
   fi
-  if ! mv -f "${staged[0]}" "${_BSP_DEBS}/$(basename "${staged[0]}")"; then
+  if ! publish_staged_deb "${staged[0]}" "${_BSP_DEBS}/$(basename "${staged[0]}")"; then
     rm -rf "${tmpd}"
     return 1
   fi
@@ -511,7 +517,7 @@ _fetch_bsp_curl_one() {
     rm -f "${tmp}"
     return 1
   fi
-  if ! mv -f "${tmp}" "${final}"; then
+  if ! publish_staged_deb "${tmp}" "${final}"; then
     rm -f "${tmp}"
     return 1
   fi
@@ -630,7 +636,10 @@ _fetch_first_party_curl_one() {
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
-  mv -f "${tmp}" "${final}"
+  if ! publish_staged_deb "${tmp}" "${final}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
 }
 
 _fetch_first_party_curl() {
@@ -897,13 +906,17 @@ EOF
     local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
     ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
       || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
-    local f
+    local f publish_failed=0
     shopt -s nullglob
     for f in "${tmpd}"/*.deb; do
-      mv -f "${f}" "${debs}/$(basename "${f}")"
+      if ! publish_staged_deb "${f}" "${debs}/$(basename "${f}")"; then
+        publish_failed=1
+        break
+      fi
     done
     shopt -u nullglob
     rm -rf "${tmpd}"
+    (( publish_failed == 0 )) || return 1
   fi
 
   local pkg

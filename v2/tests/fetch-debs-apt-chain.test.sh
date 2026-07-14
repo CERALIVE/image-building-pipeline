@@ -66,6 +66,7 @@ if [[ "${command_name}" == "download" ]]; then
 		tar -czf "${tmp}/control.tar.gz" -C "${tmp}/DEBIAN" ./control
 		tar -czf "${tmp}/data.tar.gz" --files-from /dev/null
 		ar r "${pkg}_${version}_${ARCH:-arm64}.deb" "${tmp}/debian-binary" "${tmp}/control.tar.gz" "${tmp}/data.tar.gz" >/dev/null
+		/usr/bin/chmod 0600 "${pkg}_${version}_${ARCH:-arm64}.deb"
 		if [[ "${FAKE_APT_MODE:-ok}" == duplicate-one && "${pkg}" == cerastream ]]; then
 			cp "${pkg}_${version}_${ARCH:-arm64}.deb" "${pkg}_${version}_duplicate_${ARCH:-arm64}.deb"
 		fi
@@ -137,6 +138,22 @@ done
 cp "${inrelease}" "${out}"
 SH
 chmod 755 "${FAKE_CURL_BIN}/gpgv"
+
+cat >"${RUN_DIR}/chmod" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${!#}"
+if [[ "${FAKE_CHMOD_MODE:-}" == "fail-first-party-package" ]]; then
+	case "${target}" in
+		*/.fetch-firstparty-*/*.deb|*/.tmp-firstparty-*) exit 1 ;;
+	esac
+fi
+exec /usr/bin/chmod "$@"
+SH
+/usr/bin/chmod 755 "${RUN_DIR}/chmod"
+cp "${RUN_DIR}/chmod" "${FAKE_BIN}/chmod"
+cp "${RUN_DIR}/chmod" "${FAKE_CURL_BIN}/chmod"
 
 valid_b64() {
 	printf '%s' "$1" | base64 -w0
@@ -257,6 +274,10 @@ if [[ "${staged_count}" -ne 5 ]]; then
 	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 5\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
+if find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then
+	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: package mode is not 0644\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
 printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 5 debs\n' | tee -a "${RESULTS_LOG}"
 
 curl_repo="${RUN_DIR}/curl-repo"
@@ -275,7 +296,51 @@ if [[ "${curl_staged_count}" -ne 5 ]]; then
 	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 5\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
+if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then
+	printf 'FAIL valid-curl-fallback-stages-first-party-debs: package mode is not 0644\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
+
+native_mode_failure_dest="${RUN_DIR}/native-package-mode-failure/debs"
+mkdir -p "${native_mode_failure_dest}"
+cp "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs/"*.deb \
+	"${native_mode_failure_dest}/"
+package_mode_failure_rc=0
+if run_fetch_first_party "${native_mode_failure_dest}" \
+	FAKE_CHMOD_MODE=fail-first-party-package \
+	APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/native-package-mode-failure.out" 2>&1; then
+	printf 'FAIL native-package-mode-failure-is-fatal: expected non-zero exit\n' | tee -a "${RESULTS_LOG}"
+	package_mode_failure_rc=1
+fi
+native_mode_leaks="$(find "${native_mode_failure_dest}" -maxdepth 1 \
+	-name '.fetch-firstparty-*' -print)"
+if [[ -n "${native_mode_leaks}" ]]; then
+	printf 'FAIL native-package-mode-failure-cleans-temporary-packages: %s\n' \
+		"${native_mode_leaks}" | tee -a "${RESULTS_LOG}"
+	package_mode_failure_rc=1
+else
+	printf 'PASS native-package-mode-failure-cleans-temporary-packages\n' | tee -a "${RESULTS_LOG}"
+fi
+
+curl_mode_failure_dest="${RUN_DIR}/curl-package-mode-failure/debs"
+if run_fetch_first_party_curl "${curl_mode_failure_dest}" "${curl_repo}" \
+	FAKE_CHMOD_MODE=fail-first-party-package \
+	APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/curl-package-mode-failure.out" 2>&1; then
+	printf 'FAIL curl-package-mode-failure-is-fatal: expected non-zero exit\n' | tee -a "${RESULTS_LOG}"
+	package_mode_failure_rc=1
+fi
+curl_mode_leaks="$(find "${curl_mode_failure_dest}" -maxdepth 1 \
+	\( -name '.tmp-firstparty-*' -o -name '*.deb' \) -print)"
+if [[ -n "${curl_mode_leaks}" ]]; then
+	printf 'FAIL curl-package-mode-failure-cleans-temporary-packages: %s\n' \
+		"${curl_mode_leaks}" | tee -a "${RESULTS_LOG}"
+	package_mode_failure_rc=1
+else
+	printf 'PASS curl-package-mode-failure-cleans-temporary-packages\n' | tee -a "${RESULTS_LOG}"
+fi
+(( package_mode_failure_rc == 0 )) || exit "${package_mode_failure_rc}"
+printf 'PASS native-and-curl-package-mode-failures-are-fatal-and-clean\n' | tee -a "${RESULTS_LOG}"
 
 if run_fetch_first_party_curl "${RUN_DIR}/bad-signature/debs" "${curl_repo}" \
 	FAKE_GPGV_MODE=bad APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/bad-signature.out" 2>&1; then
