@@ -14,6 +14,24 @@ source "${AUTH}"
 # shellcheck source=../lib/fetch-debs.sh
 source "${FETCH}"
 
+# Publishing must fail closed if archive readability cannot be normalized. Bash
+# suppresses errexit inside functions reached through `if !`, so this regression
+# exercises the helper through that exact caller shape.
+mkdir -p "${TMP}/chmod-failure/bin" "${TMP}/chmod-failure/dest"
+printf 'fixture\n' >"${TMP}/chmod-failure/source.deb"
+cat >"${TMP}/chmod-failure/bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+/usr/bin/chmod 0755 "${TMP}/chmod-failure/bin/chmod"
+if PATH="${TMP}/chmod-failure/bin:${PATH}" publish_staged_deb \
+    "${TMP}/chmod-failure/source.deb" "${TMP}/chmod-failure/dest/package.deb"; then
+  printf 'staged package publication swallowed chmod failure\n' >&2
+  exit 1
+fi
+[[ -f "${TMP}/chmod-failure/source.deb" ]]
+[[ ! -e "${TMP}/chmod-failure/dest/package.deb" ]]
+
 cat >"${TMP}/Packages.current-like" <<'EOF'
 Package: linux-image-vendor-rk35xx
 Version: 26.2.1

@@ -170,7 +170,7 @@ _FIRST_PARTY_CURL_AUTH=()
 
 publish_staged_deb() {
   local source="$1" destination="$2"
-  chmod 0644 "${source}"
+  chmod 0644 "${source}" || return 1
   mv -f "${source}" "${destination}"
 }
 
