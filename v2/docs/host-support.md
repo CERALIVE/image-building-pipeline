@@ -63,6 +63,29 @@ limitation + workaround; do **not** assume the **native** build works.
 
 ---
 
+## Protected production-candidate runner
+
+The developer matrix above describes functional portability. The protected
+GitHub release candidate has a narrower, fail-closed resource contract: a native
+Linux Docker daemon on the `default` context and socket, at least 16 GiB visible
+to Docker, at least 16 GiB current `MemAvailable` + `SwapFree`, and at least
+24 GiB free on both the checkout and Docker-root filesystems. Docker Desktop is
+not accepted for this dedicated production job, even when it remains suitable
+for caveated local development.
+
+The workflow exports `DOCKER_CONTEXT=default`, so an interactive `docker context
+use desktop-linux` cannot redirect the runner service. It then runs:
+
+```bash
+DOCKER_CONTEXT=default GITHUB_WORKSPACE="$PWD" ./v2/ci/check-builder-resources.sh
+```
+
+Run that command from the checkout before a manual production-path proof. A
+failure is actionable resource/topology evidence; do not compensate by extending
+workflow timeouts or skipping verification.
+
+---
+
 ## Per-host detail
 
 ### Ubuntu/Debian (CI baseline) — ✅ fully supported

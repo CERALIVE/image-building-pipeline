@@ -47,6 +47,7 @@ SHELL_SUITES=(
   "${HERE}/tests/rauc-pki-contract.test.sh"
   "${HERE}/tests/release-candidate-contract.test.sh"
   "${HERE}/tests/release-cache-contract.test.sh"
+  "${HERE}/tests/builder-resource-budget.test.sh"
   "${HERE}/tests/recovery-script-contract.test.sh"
   "${HERE}/tests/production-ci-scope-contract.test.sh"
   "${HERE}/tests/orchestrate-build-lock.test.sh"
