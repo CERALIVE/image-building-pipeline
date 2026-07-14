@@ -79,7 +79,8 @@ overlaps the new B-slot extent; they cannot be converted by OTA.
 ├── v2/                    # Current build system (mkosi v26)
 │   ├── build              # Entry point: ./v2/build <board>
 │   ├── ci/
-│   │   └── Dockerfile     # Pinned trixie-slim builder (mkosi 26)
+│   │   ├── Dockerfile     # Pinned trixie-slim builder (mkosi 26)
+│   │   └── publish-immutable-r2-pair.sh # Approved RAUC bundle publisher
 │   ├── manifests/         # Board/family manifests, package pins, add-on descriptors
 │   ├── lib/               # Orchestrator, assembler, bundle scripts,
 │   │   │                  #   build-all.sh (parallel runner),
@@ -137,6 +138,12 @@ real-RAUC contract, reloading the installed bus policy; it does not substitute
 a session bus or skip the service check. Standalone DRY_RUN build-plan jobs also
 materialize the same ignored NON-PRODUCTION fixture before resolving, so they
 do not depend on the Bats job's checkout.
+
+Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
+§5. Its low-level `v2/ci/publish-immutable-r2-pair.sh` helper requires the
+independently approved candidate SHA-256, snapshots both inputs privately, and
+uses create-only writes with exact-byte retry recovery; it never deletes an
+immutable release key.
 
 ## Custom Components
 

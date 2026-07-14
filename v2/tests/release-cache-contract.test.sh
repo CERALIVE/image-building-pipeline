@@ -6,6 +6,7 @@ V2="$(cd "${HERE}/.." && pwd)"
 REPO="$(cd "${V2}/.." && pwd)"
 WORKFLOW="${WORKFLOW:-${REPO}/.github/workflows/release.yml}"
 RELEASE_DOC="${REPO}/docs/RELEASE-PROCESS.md"
+R2_PUBLISHER="${REPO}/v2/ci/publish-immutable-r2-pair.sh"
 
 python3 - "${WORKFLOW}" <<'PY'
 from pathlib import Path
@@ -57,12 +58,28 @@ grep -Fq "test \"\${run_workflow}\" = 'Release candidate real-HW gate'" "${RELEA
   echo 'BUG: manual publication does not require the production release workflow' >&2
   exit 1
 }
+grep -Fq "actions/workflows/\${workflow_id}" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not resolve the workflow identity by database ID' >&2
+  exit 1
+}
+grep -Fq "test \"\${workflow_path}\" = '.github/workflows/release.yml'" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not pin the release workflow file path' >&2
+  exit 1
+}
+grep -Fq "compare/\${merge_sha}...master" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not prove the candidate commit is merged to master' >&2
+  exit 1
+}
 grep -Fq "realhw_artifact_name=\"realhw-\${board}-\${run_id}\"" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not select the candidate-bound real-HW evidence' >&2
   exit 1
 }
 grep -Fq "grep -Fx \"artifact_digest=\${artifact_digest}\" \"\${identity}\"" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not bind hardware identity to the candidate digest' >&2
+  exit 1
+}
+grep -Fq "grep -Fx \"media_cid=\${expected_media_cid}\" \"\${identity}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not bind proof to the approved physical test medium' >&2
   exit 1
 }
 grep -Fq "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'" "${RELEASE_DOC}" || {
@@ -78,29 +95,44 @@ grep -Fq "rauc info --keyring \"\${approved_root}\"" "${RELEASE_DOC}" || {
   exit 1
 }
 
+[[ -x "${R2_PUBLISHER}" ]] || {
+  echo 'BUG: immutable R2 pair publisher is missing or not executable' >&2
+  exit 1
+}
+
 python3 - "${RELEASE_DOC}" <<'PY'
 from pathlib import Path
 import sys
 
 runbook = Path(sys.argv[1]).read_text()
-sidecar_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}"')
-bundle_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-readback = runbook.index('aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-verified = runbook.index('r2_pair_verified=1', readback)
-assert sidecar_put < bundle_put < readback < verified, (
-    "BUG: manual publication is not sidecar-first and read-back verified"
+operator = runbook.index("### Operator steps (today, until this is automated)")
+block_start = runbook.index("```bash", operator)
+block_end = runbook.index("```", block_start + len("```bash"))
+publication = runbook[block_start:block_end]
+helper = publication.index('"${publisher}" \\')
+for required in (
+    'compare/${merge_sha}...master',
+    'grep -Fx "artifact_digest=${artifact_digest}" "${identity}"',
+    'grep -Fx "media_cid=${expected_media_cid}" "${identity}"',
+    "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'",
+    'rauc info --keyring "${approved_root}"',
+    'sha256sum -c good.raucb.sha256',
+    'git show "${merge_sha}:v2/ci/publish-immutable-r2-pair.sh"',
+):
+    assert publication.index(required) < helper, f"proof must precede R2 helper: {required}"
+assert '--bundle "${bundle}" --sidecar "${sha}"' in publication[helper:]
+assert 'GIT_NO_REPLACE_OBJECTS=1 git show' in publication[:helper]
+assert '--expected-sha256 "${approved_bundle_sha}"' in publication[helper:]
+assert '--bucket "${R2_BUCKET}" --endpoint "${R2_ENDPOINT}"' in publication[helper:]
+assert '--bundle-key "bundles/${channel}/${board}/${release_name}"' in publication[helper:]
+assert "aws s3api put-object" not in publication, (
+    "BUG: untested inline R2 writes bypass the immutable pair helper"
 )
-publication = runbook[sidecar_put:verified]
-assert publication.count("--if-none-match '*'") == 2, (
-    "BUG: manual publication can overwrite an immutable R2 key"
-)
-assert '--content-md5 "${sha_md5}"' in publication
-assert '--content-md5 "${bundle_md5}"' in publication
-assert 'cmp "${bundle}" "${tmp}/${release_name}"' in publication
-assert 'sha256sum -c "${release_name}.published.sha256"' in publication
-assert 'delete-object --bucket "${R2_BUCKET}"' in runbook, (
-    "BUG: a failed two-object publication leaves an unverified partial pair"
-)
+assert 'actions: ["GetObject", "PutObject"]' in runbook
+assert "paths.objectPaths" in runbook
+assert "Do not use a long-lived or prefix-scoped publication token" in runbook
+assert "session token" in runbook
+assert "no `DeleteObject`" in runbook
 print("manual immutable R2 publication contract: PASS")
 PY
 
