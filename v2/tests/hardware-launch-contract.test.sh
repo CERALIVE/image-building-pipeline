@@ -46,6 +46,24 @@ grep -Fq "refs/heads/release/" <<<"${realhw_job}"
 grep -Fq "refs/tags/v" <<<"${realhw_job}"
 grep -Fq 'CERALIVE/image-building-pipeline/.github/workflows/release.yml@' <<<"${realhw_job}"
 grep -Fq 'runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]' <<<"${realhw_job}"
+if grep -Eq 'ACCESS_DIR:.*runner\.temp' <<<"${realhw_job}"; then
+  printf 'real-HW workflow uses runner context before a runner exists\n' >&2
+  exit 1
+fi
+initialize_access_script="$(awk '
+  $0 == "      - name: Initialize run-local access path" { found=1; next }
+  found && $0 ~ /^[[:space:]]+run: \|/ { in_run=1; next }
+  in_run && $0 ~ /^      - / { exit }
+  in_run { sub(/^          /, ""); print }
+' "${REALHW}")"
+[[ -n "${initialize_access_script}" ]]
+mkdir -p "${TMP}/runner temp"
+RUNNER_TEMP="${TMP}/runner temp" GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 \
+  GITHUB_ENV="${TMP}/github-env" bash -euo pipefail -c "${initialize_access_script}"
+grep -Fxq "ACCESS_DIR=${TMP}/runner temp/ceralive-realhw-access-123-1" "${TMP}/github-env"
+initialize_line="$(grep -n -m1 -F -- '- name: Initialize run-local access path' "${REALHW}" | cut -d: -f1)"
+first_consumer_line="$(grep -n -m1 -F 'rm -rf -- "${ACCESS_DIR}"' "${REALHW}" | cut -d: -f1)"
+(( initialize_line < first_consumer_line ))
 if grep -Fq "release-*" "${REPO}/.github/workflows/release.yml"; then
   printf 'legacy broad release branch trigger is still enabled\n' >&2
   exit 1
