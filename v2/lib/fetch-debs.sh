@@ -171,7 +171,7 @@ _FIRST_PARTY_CURL_AUTH=()
 publish_staged_deb() {
   local source="$1" destination="$2"
   chmod 0644 "${source}" || return 1
-  mv -f "${source}" "${destination}"
+  mv -f "${source}" "${destination}" || return 1
 }
 
 _run_bounded() {
@@ -636,7 +636,10 @@ _fetch_first_party_curl_one() {
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
-  publish_staged_deb "${tmp}" "${final}"
+  if ! publish_staged_deb "${tmp}" "${final}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
 }
 
 _fetch_first_party_curl() {
@@ -903,13 +906,17 @@ EOF
     local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
     ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
       || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
-    local f
+    local f publish_failed=0
     shopt -s nullglob
     for f in "${tmpd}"/*.deb; do
-      publish_staged_deb "${f}" "${debs}/$(basename "${f}")"
+      if ! publish_staged_deb "${f}" "${debs}/$(basename "${f}")"; then
+        publish_failed=1
+        break
+      fi
     done
     shopt -u nullglob
     rm -rf "${tmpd}"
+    (( publish_failed == 0 )) || return 1
   fi
 
   local pkg
