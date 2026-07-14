@@ -50,7 +50,7 @@ grep -Fq "test \"\${run_event}\" = push" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not reject non-push workflow events' >&2
   exit 1
 }
-grep -Fq "[[ \"\${run_branch}\" == release/* || \"\${run_branch}\" == release-* ]]" "${RELEASE_DOC}" || {
+grep -Fq "[[ \"\${run_branch}\" == release/* ]]" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not reject tag and non-release branch runs' >&2
   exit 1
 }
@@ -279,6 +279,8 @@ assert '( cd candidate && sha256sum good.raucb > good.raucb.sha256 )' in meta_ru
 assert 'candidate/release-bundle-name.txt' in meta_run, (
     "BUG: manual publication cannot recover the hardware-tested bundle's release name"
 )
+assert 'rk3588_spl_loader_v1.15.113.bin' in meta_run
+assert 'loader_sha256=' in meta_run
 upload = steps[step_index(lambda step: step.get("id") == "upload")]
 assert upload["with"].get("compression-level") == "6", (
     "BUG: sparse candidate transport compression is not explicit"

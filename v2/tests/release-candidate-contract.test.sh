@@ -6,6 +6,11 @@ V2="$(cd "${HERE}/.." && pwd)"
 VERIFY="${V2}/ci/verify-and-flash-candidate.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
+openssl genpkey -algorithm ED25519 -out "${TMP}/uart-signing.pem" >/dev/null 2>&1
+chmod 0600 "${TMP}/uart-signing.pem"
+openssl pkey -in "${TMP}/uart-signing.pem" -pubout -out "${TMP}/uart-public.pem" >/dev/null 2>&1
+openssl genpkey -algorithm ED25519 -out "${TMP}/wrong-uart-signing.pem" >/dev/null 2>&1
+openssl pkey -in "${TMP}/wrong-uart-signing.pem" -pubout -out "${TMP}/wrong-uart-public.pem" >/dev/null 2>&1
 
 [[ -x "${VERIFY}" ]]
 printf 'candidate-bytes\n' >"${TMP}/candidate.raw"
@@ -13,11 +18,15 @@ truncate -s 4096 "${TMP}/candidate.raw"
 printf 'bundle\n' >"${TMP}/candidate.raucb"
 printf 'keyring\n' >"${TMP}/keyring.pem"
 printf 'loader\n' >"${TMP}/loader.bin"
+printf 'serial\n' >"${TMP}/serial"
+printf 'private\n' >"${TMP}/id"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockCandidateKey contract\n' >"${TMP}/id.pub"
 sha="$(sha256sum "${TMP}/candidate.raw" | cut -d' ' -f1)"
+loader_sha="$(sha256sum "${TMP}/loader.bin" | cut -d' ' -f1)"
 
 cat >"${TMP}/preflash" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+printf 'preflash %s\n' "$*" >>"${MOCK_FLASH_LOG}"
 EOF
 cat >"${TMP}/ssh" <<'EOF'
 #!/usr/bin/env bash
@@ -30,29 +39,30 @@ for arg in "$@"; do
   esac
 done
 [[ -n "${known_hosts}" && "${global_known_hosts}" == /dev/null ]]
+[[ " $* " == *" -i ${MOCK_SSH_IDENTITY} "* && " $* " == *" IdentitiesOnly=yes "* ]]
 cmd="${*: -1}"
 printf 'ssh %s\n' "${cmd}" >>"${MOCK_FLASH_LOG}"
 state="$(cat "${MOCK_DEVICE_STATE_FILE}" 2>/dev/null || printf online)"
 case "${cmd}" in
-  *blockdev*)
-    printf 'old-host-key\n' >"${known_hosts}"
-    printf '100000000\n'
-    ;;
   *'/device/cid'*)
-    if [[ "${state}" == booting && -n "${MOCK_POST_MEDIA_CID:-}" ]]; then
+    if [[ -n "${MOCK_POST_MEDIA_CID:-}" ]]; then
       printf '%s\n' "${MOCK_POST_MEDIA_CID}"
     else
       printf '%s\n' "${MOCK_MEDIA_CID}"
     fi
     ;;
+  *'/usr/local/sbin/ceralive-rockchip-chip-info'*)
+    printf '%s\n' "${MOCK_POST_SOC_ID:-${MOCK_SOC_ID}}"
+    ;;
+  *'findmnt -n -o SOURCE /'*)
+    printf '%s\n' "${MOCK_BOOT_ROOT_PARENT:-mmcblk0}"
+    ;;
+  *'/ci-access/'*)
+    printf 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    printf 'candidate_commit=1111111111111111111111111111111111111111\n'
+    printf 'soc_id=%s\n' "${MOCK_SOC_ID}"
+    ;;
   true)
-    if [[ "${state}" == maskrom ]]; then
-      [[ "${MOCK_DISCONNECT_MODE:-disconnect}" == remain-online ]] && exit 0
-      exit 1
-    fi
-    if grep -q '^old-host-key$' "${known_hosts}"; then
-      exit 92
-    fi
     grep -q '^new-host-key$' "${known_hosts}" || printf 'new-host-key\n' >"${known_hosts}"
     count_file="${MOCK_SSH_COUNT_FILE}"
     count="$(cat "${count_file}" 2>/dev/null || echo 0)"
@@ -66,11 +76,6 @@ case "${cmd}" in
   *) exit 0 ;;
 esac
 EOF
-cat >"${TMP}/power" <<'EOF'
-#!/usr/bin/env bash
-printf 'power %s\n' "$*" >>"${MOCK_FLASH_LOG}"
-printf 'maskrom\n' >"${MOCK_DEVICE_STATE_FILE}"
-EOF
 cat >"${TMP}/rkdeveloptool" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -82,13 +87,36 @@ wait_for_interrupt() {
 }
 case "${1:-}" in
   ld)
-    printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Mode=Maskrom SerialNo=mock\n'
+    usb_mode=Maskrom
+    [[ "${MOCK_USB_MODE:-single}" == loader ]] && usb_mode=Loader
+    if [[ "${MOCK_USB_MODE:-single}" == wrong-soc ]]; then
+      printf 'DevNo=1 Vid=0x2207,Pid=0x330c,LocationID=101 Maskrom\n'
+    else
+      printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 %s\n' "${usb_mode}"
+    fi
     if [[ "${MOCK_USB_MODE:-single}" == multiple ]]; then
-      printf 'DevNo=2 Vid=0x2207,Pid=0x350b,LocationID=102 Mode=Maskrom SerialNo=other\n'
+      printf 'DevNo=2 Vid=0x2207,Pid=0x350b,LocationID=102 Maskrom\n'
+    fi
+    if [[ -n "${MOCK_REPLACE_LOADER_AFTER_VALIDATION:-}" ]]; then
+      printf 'replacement-loader\n' >"${MOCK_LOADER_SOURCE}"
     fi
     ;;
   db)
+    if [[ -n "${MOCK_REPLACE_LOADER_AFTER_VALIDATION:-}" ]]; then
+      [[ "$2" != "${MOCK_LOADER_SOURCE}" ]]
+      grep -qx 'loader' "$2"
+    fi
     if [[ "${MOCK_FLASH_MODE:-exact}" == db-wait ]]; then wait_for_interrupt; fi
+    [[ "${MOCK_FLASH_MODE:-exact}" != db-fail ]] || exit 70
+    ;;
+  rfi)
+    printf 'Flash Size: %s Sectors\n' "${MOCK_TARGET_SECTORS:-195312}"
+    ;;
+  rid)
+    printf 'Flash ID: mock-emmc\n'
+    ;;
+  rci)
+    printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
     ;;
   wl)
     if [[ "${MOCK_FLASH_MODE:-exact}" == wl-wait ]]; then wait_for_interrupt; fi
@@ -118,31 +146,67 @@ case "${1:-}" in
     ;;
 esac
 EOF
-chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/power" "${TMP}/rkdeveloptool"
+cat >"${TMP}/uart" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+uart_log="" authorized_line_out="" ready_out="" start_signal=""
+challenge="" candidate_commit=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uart-log) uart_log="$2"; shift 2 ;;
+    --authorized-line-out) authorized_line_out="$2"; shift 2 ;;
+    --ready-out) ready_out="$2"; shift 2 ;;
+    --start-signal) start_signal="$2"; shift 2 ;;
+    --challenge) challenge="$2"; shift 2 ;;
+    --candidate-commit) candidate_commit="$2"; shift 2 ;;
+    *) shift 2 ;;
+  esac
+done
+printf 'restrict,expiry-time="20990101000000Z" ssh-ed25519 AAAA mock\n' >"${authorized_line_out}"
+: >"${ready_out}"
+while [[ ! -e "${start_signal}" ]]; do sleep 0.02; done
+printf 'CERALIVE_UART_PROVISIONED %s %s\n' "${challenge}" "${candidate_commit}" >"${uart_log}"
+EOF
+chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/rkdeveloptool" "${TMP}/uart"
 
 common=(
   --image "${TMP}/candidate.raw"
   --bundle "${TMP}/candidate.raucb"
   --keyring "${TMP}/keyring.pem"
+  --loader "${TMP}/loader.bin"
+  --loader-sha256 "${loader_sha}"
   --board rock-5b-plus
   --board-ip 192.0.2.10
-  --candidate-commit deadbeef
+  --candidate-commit 1111111111111111111111111111111111111111
   --image-sha256 "${sha}"
+  --serial-dev "${TMP}/serial"
+  --uart-log "${TMP}/uart.log"
+  --authorized-key "${TMP}/id.pub"
+  --access-id gh-123-1
+  --access-expires 20990101000000Z
+  --host-epoch 4070908800
+  --ssh-identity "${TMP}/id"
+  --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  --expected-maskrom-id-sha256 "$(printf '%s' 'Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom' | sha256sum | cut -d' ' -f1)"
+  --uart-signing-key "${TMP}/uart-signing.pem"
+  --known-hosts "${TMP}/known-hosts"
+  --authorized-line-out "${TMP}/authorized-line"
   --identity-out "${TMP}/identity.txt"
 )
 media_cid="0123456789abcdef0123456789abcdef"
+soc_id="0102030405060708090a0b0c0d0e0f10"
 base_env=(
   "RUNNER_TEMP=${TMP}"
   "MOCK_MEDIA_CID=${media_cid}"
-  "CERALIVE_RK3588_POWER_HELPER=${TMP}/power"
-  "RK3588_LOADER=${TMP}/loader.bin"
+  "MOCK_SOC_ID=${soc_id}"
+  "MOCK_SSH_IDENTITY=${TMP}/id"
   "CERALIVE_RKDEVELOPTOOL_BIN=${TMP}/rkdeveloptool"
+  "CERALIVE_UART_HELPER_BIN=${TMP}/uart"
   "CERALIVE_PREFLASH_BIN=${TMP}/preflash"
   "CERALIVE_SSH_BIN=${TMP}/ssh"
-  "CERALIVE_DISCONNECT_ATTEMPTS=2"
-  "CERALIVE_DISCONNECT_DELAY=0"
   "CERALIVE_RECONNECT_ATTEMPTS=3"
   "CERALIVE_RECONNECT_DELAY=0"
+  "CERALIVE_UART_PUBLIC_KEY_FILE=${TMP}/uart-public.pem"
 )
 
 assert_identity_name_rejected() {
@@ -174,23 +238,109 @@ if env "${base_env[@]}" "${VERIFY}" "${common[@]}" \
   exit 1
 fi
 
-if env "${base_env[@]}" MOCK_DISCONNECT_MODE=remain-online \
-    MOCK_MEDIA="${TMP}/media-online.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-online" \
-    MOCK_FLASH_LOG="${TMP}/flash-online.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-online" \
+if env "${base_env[@]}" MOCK_FLASH_LOG="${TMP}/flash-loader-digest.log" \
+    "${VERIFY}" "${common[@]}" \
+    --loader-sha256 "$(printf bad | sha256sum | cut -d' ' -f1)"; then
+  printf 'loader digest mismatch was accepted\n' >&2
+  exit 1
+fi
+[[ ! -e "${TMP}/flash-loader-digest.log" ]]
+
+if ! env "${base_env[@]}" MOCK_REPLACE_LOADER_AFTER_VALIDATION=1 \
+    MOCK_LOADER_SOURCE="${TMP}/loader.bin" MOCK_RECONNECT_MODE=success \
+    MOCK_MEDIA="${TMP}/media-loader-snapshot.raw" \
+    MOCK_SSH_COUNT_FILE="${TMP}/count-loader-snapshot" \
+    MOCK_FLASH_LOG="${TMP}/flash-loader-snapshot.log" \
+    MOCK_DEVICE_STATE_FILE="${TMP}/state-loader-snapshot" \
     "${VERIFY}" "${common[@]}"; then
-  printf 'board that remained reachable after maskrom was accepted\n' >&2
+  printf 'verified private loader snapshot was not used after source replacement\n' >&2
   exit 1
 fi
-if grep -q '^rkdeveloptool ld' "${TMP}/flash-online.log"; then
-  printf 'reachable board advanced to USB target enumeration\n' >&2
-  exit 1
-fi
+grep -Eq "^rkdeveloptool db ${TMP}/ceralive-verify\\.[^/]+/loader.bin$" \
+  "${TMP}/flash-loader-snapshot.log"
+printf 'loader\n' >"${TMP}/loader.bin"
 
 if env "${base_env[@]}" MOCK_USB_MODE=multiple \
     MOCK_MEDIA="${TMP}/media-multi.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-multi" \
     MOCK_FLASH_LOG="${TMP}/flash-multi.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-multi" \
     "${VERIFY}" "${common[@]}"; then
   printf 'ambiguous Rockchip USB target selection was accepted\n' >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" MOCK_USB_MODE=loader \
+    MOCK_MEDIA="${TMP}/media-loader.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-loader" \
+    MOCK_FLASH_LOG="${TMP}/flash-loader.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-loader" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'loader-mode target was accepted as a Maskrom starting state\n' >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" MOCK_USB_MODE=wrong-soc \
+    MOCK_MEDIA="${TMP}/media-wrong-soc.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-wrong-soc" \
+    MOCK_FLASH_LOG="${TMP}/flash-wrong-soc.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-wrong-soc" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'wrong single Maskrom SoC was accepted\n' >&2
+  exit 1
+fi
+if grep -q '^rkdeveloptool db' "${TMP}/flash-wrong-soc.log"; then
+  printf 'wrong single Maskrom SoC advanced to loader download\n' >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" MOCK_FLASH_MODE=db-fail \
+    MOCK_MEDIA="${TMP}/media-db-fail.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-db-fail" \
+    MOCK_FLASH_LOG="${TMP}/flash-db-fail.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-db-fail" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'loader transfer failure was accepted\n' >&2
+  exit 1
+fi
+if grep -Eq '^rkdeveloptool (rfi|wl|rl|rd)' "${TMP}/flash-db-fail.log"; then
+  printf 'loader transfer failure advanced to capacity, write, readback, or reset\n' >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" \
+    MOCK_MEDIA="${TMP}/media-unapproved.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-unapproved" \
+    MOCK_FLASH_LOG="${TMP}/flash-unapproved.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-unapproved" \
+    "${VERIFY}" "${common[@]}" \
+    --expected-maskrom-id-sha256 "$(printf unapproved | sha256sum | cut -d' ' -f1)"; then
+  printf 'unapproved Rock 5B+ fixture was accepted\n' >&2
+  exit 1
+fi
+if grep -q '^rkdeveloptool wl' "${TMP}/flash-unapproved.log"; then
+  printf 'unapproved Rock 5B+ fixture reached media write\n' >&2
+  exit 1
+fi
+if grep -q '^rkdeveloptool db' "${TMP}/flash-loader.log"; then
+  printf 'loader-mode target advanced to loader download\n' >&2
+  exit 1
+fi
+
+if key_mismatch_output="$(env "${base_env[@]}" \
+    CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/wrong-uart-public.pem" \
+    MOCK_MEDIA="${TMP}/media-key-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-key-mismatch" \
+    MOCK_FLASH_LOG="${TMP}/flash-key-mismatch.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-key-mismatch" \
+    "${VERIFY}" "${common[@]}" 2>&1)"; then
+  printf 'mismatched UART signing key and baked public key were accepted\n' >&2
+  exit 1
+fi
+[[ "${key_mismatch_output}" == *'does not match the public key baked into the candidate'* ]]
+if [[ -e "${TMP}/flash-key-mismatch.log" ]] && \
+   grep -q '^rkdeveloptool ' "${TMP}/flash-key-mismatch.log"; then
+  printf 'mismatched UART signing key touched the Rockchip USB fixture\n' >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" MOCK_TARGET_SECTORS=7 \
+    MOCK_MEDIA="${TMP}/media-small.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-small" \
+    MOCK_FLASH_LOG="${TMP}/flash-small.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-small" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'undersized eMMC capacity was accepted\n' >&2
+  exit 1
+fi
+if grep -q '^rkdeveloptool wl' "${TMP}/flash-small.log"; then
+  printf 'undersized eMMC capacity reached media write\n' >&2
   exit 1
 fi
 if grep -q '^rkdeveloptool db' "${TMP}/flash-multi.log"; then
@@ -354,11 +504,30 @@ for signal_case in TERM INT; do
 done
 
 if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
-    MOCK_POST_MEDIA_CID="ffffffffffffffffffffffffffffffff" \
+    MOCK_POST_MEDIA_CID="invalid-cid" \
     MOCK_MEDIA="${TMP}/media-cid.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-cid" \
     MOCK_FLASH_LOG="${TMP}/flash-cid.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-cid" \
     "${VERIFY}" "${common[@]}"; then
-  printf 'reconnect to a different media CID was accepted\n' >&2
+  printf 'reconnect with an invalid media CID was accepted\n' >&2
+  exit 1
+fi
+[[ ! -e "${TMP}/identity.txt" ]]
+
+if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
+    MOCK_POST_SOC_ID="ffffffffffffffffffffffffffffffff" \
+    MOCK_MEDIA="${TMP}/media-soc-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-soc-mismatch" \
+    MOCK_FLASH_LOG="${TMP}/flash-soc-mismatch.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-soc-mismatch" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'reconnect from a different SoC was accepted\n' >&2
+  exit 1
+fi
+[[ ! -e "${TMP}/identity.txt" ]]
+
+if env "${base_env[@]}" MOCK_RECONNECT_MODE=success MOCK_BOOT_ROOT_PARENT=mmcblk1 \
+    MOCK_MEDIA="${TMP}/media-root-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-root-mismatch" \
+    MOCK_FLASH_LOG="${TMP}/flash-root-mismatch.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-root-mismatch" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'boot from a different media device was accepted\n' >&2
   exit 1
 fi
 [[ ! -e "${TMP}/identity.txt" ]]
@@ -369,27 +538,38 @@ if ! env "${base_env[@]}" MOCK_RECONNECT_MODE=success MOCK_MEDIA="${TMP}/media-o
   printf 'healthy candidate was rejected after expected first-boot media mutation\n' >&2
   exit 1
 fi
-grep -qx "candidate_commit=deadbeef" "${TMP}/identity.txt"
+grep -qx "candidate_commit=1111111111111111111111111111111111111111" "${TMP}/identity.txt"
 grep -qx 'raw_file=candidate.raw' "${TMP}/identity.txt"
 grep -qx 'raw_size=4096' "${TMP}/identity.txt"
 grep -qx "raw_sha256=${sha}" "${TMP}/identity.txt"
 grep -qx 'bundle_file=candidate.raucb' "${TMP}/identity.txt"
 grep -qx "keyring_sha256=$(sha256sum "${TMP}/keyring.pem" | cut -d' ' -f1)" \
   "${TMP}/identity.txt"
+grep -qx 'loader_file=loader.bin' "${TMP}/identity.txt"
+grep -qx "loader_sha256=${loader_sha}" "${TMP}/identity.txt"
 grep -qx 'identity_contract=pre-boot-whole-media-sha256' "${TMP}/identity.txt"
 grep -qx "pre_boot_media_sha256=${sha}" "${TMP}/identity.txt"
 grep -qx 'pre_boot_media_identity=verified' "${TMP}/identity.txt"
-grep -qx "media_cid=${media_cid}" "${TMP}/identity.txt"
-usb_identity='DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Mode=Maskrom SerialNo=mock'
-grep -qx "usb_device_sha256=$(printf '%s\n' "${usb_identity}" | sha256sum | cut -d' ' -f1)" \
+grep -qx 'target_capacity_sectors=195312' "${TMP}/identity.txt"
+grep -Eq '^flash_id_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+grep -qx "soc_id_sha256=$(printf '%s' "${soc_id}" | sha256sum | cut -d' ' -f1)" \
   "${TMP}/identity.txt"
-grep -Eq '^pre_flash_known_hosts_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+grep -qx "media_cid=${media_cid}" "${TMP}/identity.txt"
+grep -qx 'boot_root_parent=mmcblk0' "${TMP}/identity.txt"
+usb_identity='Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom'
+grep -qx "usb_device_sha256=$(printf '%s' "${usb_identity}" | sha256sum | cut -d' ' -f1)" \
+  "${TMP}/identity.txt"
+grep -Eq '^bootstrap_challenge_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
 grep -Eq '^post_boot_known_hosts_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
-[[ "$(grep '^pre_flash_known_hosts_sha256=' "${TMP}/identity.txt")" != \
-   "$(grep '^post_boot_known_hosts_sha256=' "${TMP}/identity.txt")" ]]
 grep -qx 'post_boot_reconnect=verified' "${TMP}/identity.txt"
+grep -Eq '^uart_log_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+grep -qx 'ephemeral_ssh_access=gh-123-1' "${TMP}/identity.txt"
 grep -qx 'flash_transport=maskrom-rkdeveloptool' "${TMP}/identity.txt"
-grep -qx 'power maskrom' "${TMP}/flash-ok.log"
+grep -qx 'rkdeveloptool db .*loader.bin' "${TMP}/flash-ok.log"
+grep -qx 'rkdeveloptool rfi' "${TMP}/flash-ok.log"
+grep -qx 'rkdeveloptool rid' "${TMP}/flash-ok.log"
+grep -qx 'rkdeveloptool rci' "${TMP}/flash-ok.log"
+grep -q 'preflash .*--target-size-bytes 99999744' "${TMP}/flash-ok.log"
 grep -Eq "^rkdeveloptool wl 0 ${TMP}/ceralive-verify\.[^/]+/candidate.raw$" "${TMP}/flash-ok.log"
 grep -Eq "^rkdeveloptool rl 0 8 ${TMP}/ceralive-verify\.[^/]+/readback.raw$" "${TMP}/flash-ok.log"
 grep -qx 'rkdeveloptool rd' "${TMP}/flash-ok.log"

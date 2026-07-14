@@ -243,10 +243,13 @@ All optional. Set in your shell or prefix the command.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DRY_RUN=1` | `0` | Print rsync/ssh commands instead of running them |
+| `DRY_RUN=1` | `0` | Print scp/ssh commands instead of running them |
 | `SSH_USER` | `root` | Remote user |
-| `SSH_OPTS` | _(none)_ | Extra SSH flags, e.g. `SSH_OPTS="-p 2222"` |
-| `RSYNC_OPTS` | _(none)_ | Extra rsync flags |
+| `SSH_IDENTITY_FILE` | _(none)_ | Explicit private key; also enables `IdentitiesOnly` |
+| `SSH_PORT` | `22` | SSH port, mapped to `ssh -p` and `scp -P` |
+| `SSH_KNOWN_HOSTS_FILE` | _(default OpenSSH path)_ | Explicit host-key file |
+| `SSH_OPTS` | _(none)_ | Additional `ssh` flags |
+| `RSYNC_OPTS` | _(none)_ | Additional `scp` flags (legacy variable name) |
 | `DEV_PUSH_BUDGET` | `120` | Budget in seconds; `0` = don't enforce |
 | `REMOTE_EXT_DIR` | `/var/lib/extensions` | Where extensions live on the device |
 | `SRTLA_SRC` | required for srtla dev-push | Explicit source checkout path |
@@ -257,7 +260,7 @@ Examples:
 
 ```bash
 # Non-standard SSH port
-SSH_OPTS="-p 2222" ./dev-push 192.168.1.42
+SSH_PORT=2222 ./dev-push 192.168.1.42
 
 # Dry run — see what would happen without touching the board
 DRY_RUN=1 ./dev-push 192.168.1.42
@@ -355,7 +358,7 @@ The previous sysext is still merged (the restart failed, not the refresh). Fix t
 **Push is over budget**
 
 The 120s budget is enforced at the end. Common causes:
-- Slow WiFi link → use Ethernet or `RSYNC_OPTS="--compress"` for large binaries
+- Slow WiFi link → use Ethernet or `RSYNC_OPTS="-C"` for large binaries
 - Cold build (no incremental make cache) → warm up with one build first
 - Large binary → check for debug symbols (`strip` the binary before packaging)
 

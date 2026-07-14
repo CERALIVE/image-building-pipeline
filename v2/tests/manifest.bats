@@ -911,7 +911,7 @@ PY
 }
 
 @test "mkosi passes lab debug settings to every subimage" {
-  run grep -Fx 'PassEnvironment=CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH' "$V2/mkosi/mkosi.conf"
+  run grep -Fx 'PassEnvironment=CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT' "$V2/mkosi/mkosi.conf"
 
   [ "$status" -eq 0 ]
 }

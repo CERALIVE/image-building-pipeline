@@ -228,7 +228,10 @@ main() {
   # embedded mtime (mkosi rootfs, rootfs.tar, squashfs, ext4, CMS) clamps to it.
   # Exported here so fetch/mkosi/assemble-disk/build-bundle all inherit the value.
   SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
-  export SOURCE_DATE_EPOCH
+  CERALIVE_IMAGE_BUILD_COMMIT="${CERALIVE_IMAGE_BUILD_COMMIT:-$(git -C "${V2_DIR}/.." rev-parse HEAD)}"
+  [[ "${CERALIVE_IMAGE_BUILD_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "CERALIVE_IMAGE_BUILD_COMMIT must be an exact 40-character commit SHA"
+  export SOURCE_DATE_EPOCH CERALIVE_IMAGE_BUILD_COMMIT
   log_info "reproducible build: SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} ($(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo n/a))"
 
   # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
@@ -539,7 +542,7 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
-    CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH
+    CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -553,6 +556,7 @@ run_mkosi_build() {
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
+  export CERALIVE_IMAGE_BUILD_COMMIT
   # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
   # lib/assemble-disk.sh; default false (A/B). See v2/mkosi/repart/README.md.
   export SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"

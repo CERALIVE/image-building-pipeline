@@ -1,7 +1,7 @@
 # Self-Hosted RK3588 Hardware Runner — Setup & Safety Guide
 
 > **Task 37 (Stage 6).** A self-hosted GitHub Actions runner with a **physical
-> RK3588 board attached** (USB flash + serial + power control) so the real-HW
+> RK3588 board attached** (USB flash + serial, starting in Maskrom) so the real-HW
 > acceptance gates — [`v2/tests/realhw-smoke.sh`](../tests/realhw-smoke.sh) (LIVE
 > mode) and [`v2/tests/rauc-rollback.sh`](../tests/rauc-rollback.sh) (LIVE mode)
 > — runs only for a candidate-bound release, never on every PR.
@@ -10,7 +10,7 @@
 > [`.github/workflows/realhw-job.yml`](../../.github/workflows/realhw-job.yml). Regular offline CI stays on
 > `ubuntu-latest` ([`.github/workflows/v2-ci.yml`](../../.github/workflows/v2-ci.yml));
 > **only** the hardware jobs target this runner via
-> `runs-on: [self-hosted, ceralive-rk3588]`.
+> `runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]`.
 
 ---
 
@@ -20,7 +20,7 @@ The two LIVE gates need to **boot a real board and talk to it**:
 
 | Harness | What LIVE mode needs from the runner |
 |---|---|
-| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`ceralive@…`, key auth); asserts login, `ceralive`/`ceraui.service` active, `cerastream`/`srtla_send`/`srtla_rec` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
+| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`root@…`, restricted run-local key auth); asserts login, `ceralive`/`ceraui.service` active, `cerastream`/`srtla_send`/`srtla_rec` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
 | `rauc-rollback.sh` (LIVE) | `BOARD_IP` + signed bundles in `BUNDLE_DIR` (`bad.raucb`, `good.raucb`); does `scp`+`rauc install`, `systemctl reboot`, **re-poll SSH after each reboot**, reads booted slot from `/proc/cmdline` (`root=PARTLABEL=rootfs_a\|b`). Proves a bad slot bleeds bootcount 3→2→1→0 and falls back to A; a good slot mark-goods and persists. |
 
 GitHub-hosted runners are ephemeral VMs with no USB/serial/board. Only a
@@ -46,10 +46,10 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
 - Outbound HTTPS to `github.com` / `api.github.com` / `*.actions.githubusercontent.com`
   (the runner long-polls GitHub; **no inbound** port needs opening).
 
-### 1.2 Attached RK3588 board
+### 1.2 Attached Rock 5B+ fixture
 
-- **Orange Pi 5+** or **Radxa Rock 5B+** (the two RK3588 targets — see
-  `manifests/boards/{orange-pi-5-plus,rock-5b-plus}.yaml`).
+- **Radxa Rock 5B+ only.** This release workflow builds a Rock 5B+ image and
+  carries its pinned Radxa loader; other RK3588 boards use separate validation.
 - **USB-OTG / Type-C** cable from the board's OTG port to a host USB port
   (used for maskrom-mode flashing — section 4).
 - **USB-UART (serial)** adapter on the board's debug UART → host
@@ -57,25 +57,23 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
   1500000 baud** on-device (`family rk3588.yaml: serial_console: ttyS2:1500000`).
 - **Network**: board on the same LAN as the host, with a **stable IP** (DHCP
   reservation by MAC, or static). This is the `BOARD_IP` the LIVE harnesses use.
-- **Power control** (section 3) — required for unattended recovery.
-- **eMMC** (or SD) the board boots from; this is the flash target.
+- **Starting state**: the release job accepts the board only when it already
+  enumerates as exactly one Rockchip target whose line ends in `Maskrom`. A relay is optional
+  recovery equipment, not a workflow input.
+- **eMMC** is the whole-media flash target. SD boot is not accepted by this gate.
 
 ### 1.3 Host packages
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  rkdeveloptool \      # RK3588 maskrom/loader flashing over USB-OTG
-  android-tools-adb \  # optional: usb device probing
-  minicom screen \     # serial console
-  openssh-client \     # SSH/scp to the board (LIVE mode)
-  rsync \              # realhw-smoke LIVE full-parity rsync
-  xz-utils sgdisk gdisk util-linux  # image handling the harness expects
+  rkdeveloptool android-tools-adb minicom screen \
+  openssh-client openssl rsync xz-utils gdisk util-linux
 ```
 
 > `rkdeveloptool` ships in Ubuntu 22.04+ `universe`. If your distro lacks it,
-> build from source (`github.com/rockchip-linux/rkdeveloptool`) or use
-> Rockchip's `upgrade_tool` (section 4.3).
+> build that exact tool from source (`github.com/rockchip-linux/rkdeveloptool`).
+> No alternate flasher is accepted by the production gate (section 4.3).
 
 ---
 
@@ -115,18 +113,15 @@ tar xzf runner.tar.gz
   --url <REPO_URL> \
   --token <TOKEN> \
   --name ceralive-rk3588-rock5bplus-01 \
-  --labels ceralive-rk3588 \
+  --labels ceralive-rk3588,rock-5b-plus \
   --work _work \
   --unattended \
   --replace
 ```
 
-- **`--labels ceralive-rk3588`** is the contract. Jobs select this runner with
-  `runs-on: [self-hosted, ceralive-rk3588]`. Anything else stays on
+- **Both labels are the contract.** Jobs select this runner with
+  `runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]`. Anything else stays on
   `ubuntu-latest`.
-- Add a **board-specific** label too if you run more than one board, e.g.
-  `--labels ceralive-rk3588,rock-5b-plus` — then a job can pin
-  `runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]`.
 - `--name` should be unique + identify the physical board.
 
 ### 2.3 Install as a service (auto-start, survives reboot)
@@ -146,81 +141,45 @@ service restarts on host reboot — important for an always-on HW lab.
 - **Run jobs from trusted refs only.** Self-hosted runners on a **public** repo
   are a supply-chain risk (a malicious PR can run arbitrary code on your lab
   box). Mitigations, in order of preference:
-  - Keep the HW jobs **`workflow_dispatch` + `schedule` + label-gated** (see
-    `realhw-job.yml`) so they never trigger from `pull_request`.
+  - Create the `image-hardware` environment with trusted required reviewers and
+    deployment refs restricted to `release/**` and `v*`. The reusable job also
+    rejects any caller other than this repository's first-attempt `release.yml`
+    push before selecting the hardware runner.
   - In *Settings → Actions → General*, set **"Require approval for all outside
     collaborators"** (or "for all PRs") so fork PRs can't auto-run.
   - Prefer an **org-level** runner scoped to this one repo with
     `pull_request`-from-fork disabled.
-- **No long-lived secrets on the box.** The board's SSH key (section 6) is the
-  only credential at rest; keep it `chmod 600`, owned by `ghrunner`, outside the
-  runner's `_work` checkout dir so it's never inside a job's workspace.
+- **No long-lived board credential on the box.** The workflow generates an
+  Ed25519 identity under `RUNNER_TEMP`, provisions only its restricted and
+  expiring public key over UART, revokes it after the suite, then removes the
+  private key. The distinct host-local UART signing key authenticates that data
+  envelope; only its public verification key is present in the image.
 - **Ephemeral option:** add `--ephemeral` to `config.sh` so the runner
   de-registers after one job (re-register via a wrapper/systemd). Safer for
   public repos; costs a re-register per job.
 
 ---
 
-## 3. Power control (the safety backbone)
+## 3. Starting-state and reset contract
 
-Unattended CI **must** be able to power-cycle the board — a wedged kernel, a
-hung U-Boot, or a board that won't take a new flash all need a hard reset that no
-SSH/serial command can deliver. Three options, cheapest-safe first:
+The workflow owns the transition from Maskrom to the candidate. Before assigning
+the hardware label, place the Rock 5B+ in Maskrom and verify that
+`rkdeveloptool ld` reports exactly one device with the trailing `Maskrom` mode token. The verifier fails
+closed on zero, multiple, or loader-mode targets; it does not try to power-cycle
+or recover an unexpected board state.
 
-### 3.1 USB relay (recommended, cheap, unattended-safe)
-
-A USB-controlled relay (e.g. a 1–2 channel **HID/USB relay** ~ $5–15) inline on
-the board's DC barrel/USB-C power. The runner drives it from userspace:
-
-```bash
-# example with `usbrelay` (apt: usbrelay) — one channel "BITFT_1"
-usbrelay BITFT_1=0   # cut power
-sleep 3
-usbrelay BITFT_1=1   # restore power
-```
-
-- **Pros:** no extra network device, scriptable, ~$10, the host owns it
-  directly. Add `ghrunner` to `plugdev` + a udev rule for the relay's VID:PID.
-- **Cons:** the relay's current rating must exceed the board's peak draw
-  (RK3588 + modem + capture can hit 3–4 A @ 5 V; size the relay/PSU accordingly,
-  or switch the **mains side of the PSU** via a relay rated for AC).
-- **Safest unattended pick** when the relay is sized correctly and the host is
-  the single controller.
-
-### 3.2 Smart PDU / smart plug (good for racks / multiple boards)
-
-A networked PDU (APC/Eaton) or a flashed smart plug (Tasmota/`espnow`,
-Shelly with local HTTP) exposes a power toggle over the LAN:
-
-```bash
-# Tasmota example (local HTTP, no cloud)
-curl -s "http://<plug-ip>/cm?cmnd=Power%20Off" ; sleep 3
-curl -s "http://<plug-ip>/cm?cmnd=Power%20On"
-```
-
-- **Pros:** handles full board power incl. high-draw peripherals; scales to a
-  shelf of boards; physically isolates power.
-- **Cons:** another networked device to secure (keep it on a **management
-  VLAN**, local-only firmware, **no cloud account**); slower cycle (PSU
-  inrush/boot).
-
-### 3.3 Manual power switch (NOT for unattended CI)
-
-A human flips power. **Acceptable only for an attended bring-up session**, not
-for the release gate. Candidate flashing requires remotely controllable power.
-
-> **Safety rule:** the runner must be able to (a) cut power, (b) put the board in
-> maskrom (section 4.1 — manual button OR a second relay on the recovery pin),
-> and (c) restore power — **without a human present**. If you can only do (a)+(c)
-> automatically, gate flashing jobs to attended hours.
+After exact write/readback verification, `rkdeveloptool rd` is the required
+reset mechanism. Later A/B checks reboot through the authenticated OS. A relay or
+smart PDU remains useful for lab recovery, but it is deliberately outside the
+release workflow and no power-helper repository variable is defined.
 
 ---
 
 ## 4. Flash tooling
 
-Two paths. The **maskrom/USB-OTG** path (4.1–4.2) is the authoritative,
-always-available one — it works even when the eMMC is empty or bricked. The
-**SSH/`dd`** path (4.4) is faster but only works when the board already boots.
+The **Maskrom/USB-OTG** path in sections 4.1–4.2 is the only production flash
+path. It works even when the eMMC is empty or bricked and preserves the fixture
+identity, cancellation, full-readback, and evidence contracts.
 
 ### 4.1 Enter maskrom mode (the key safety claim)
 
@@ -238,44 +197,18 @@ entering maskrom. To enter:
 4. Release the button. The host should now enumerate a **Rockchip USB device**
    in maskrom.
 
-For **unattended** recovery, wire a **second USB-relay channel (or an optocoupler)
-across the recovery button** so the runner can "press" it in software, then
-power-cycle via the section-3 relay. Sequence: assert recovery → power on →
-release recovery.
-
-### 4.2 Flash with `rkdeveloptool` (open-source)
+### 4.2 Verify the launch state
 
 ```bash
 # 1. Confirm the SoC is in maskrom and the host sees it:
 rkdeveloptool ld           # lists loader/maskrom devices; "Maskrom" = ready
 
-# 2. Load the DDR init + U-Boot loader blob (the rkbin "loader"):
-rkdeveloptool db rk3588_loader.bin     # download-boot the loader into SRAM
-#    (rk3588_loader.bin = the rkbin RK3588 loader; matches uboot_packages: rkbin-rk3588)
-
-# 3. Write the full image to the eMMC (offset 0 = whole-disk GPT image):
-rkdeveloptool wl 0 ceralive-rock-5b-plus.img
-
-# 4. Before reset, read back and verify the exact image-sized sector range:
-bytes=$(stat -c %s ceralive-rock-5b-plus.img)
-sectors=$((bytes / 512))
-readback=$(mktemp)
-rkdeveloptool rl 0 "${sectors}" "${readback}"
-test "$(stat -c %s "${readback}")" -eq "${bytes}"
-test "$(sha256sum "${readback}" | cut -d' ' -f1)" = \
-  "$(sha256sum ceralive-rock-5b-plus.img | cut -d' ' -f1)"
-rm -f "${readback}"
-
-# 5. Only after the readback matches, reset into the freshly-flashed system:
-rkdeveloptool rd
+# Do not issue db, wl, rl, or rd manually. Leave the fixture in Maskrom.
 ```
 
-- `ld` = list devices, `db` = download-boot loader, `wl <start_sector> <file>` =
-  write at LBA, `rl <start_sector> <sector_count> <file>` = read back, and `rd` =
-  reset. Sector 0 is correct for a **whole-disk** image with its own GPT (what
-  `v2/lib/assemble-disk.sh` produces). For a **rootfs-only** partition image,
-  write at that partition's start LBA instead — prefer whole-disk images for CI
-  to keep this a single, dumb `wl 0`.
+- `ld` is the only attended launch-state command. The protected `release.yml`
+  workflow owns `db`, `rfi`, `rid`, `rci`, `wl`, `rl`, and `rd`, and records their
+  candidate-bound evidence.
 - `udev` rule so non-root can flash (file
   `/etc/udev/rules.d/99-rockchip-rk3588.rules`):
   ```
@@ -285,37 +218,10 @@ rkdeveloptool rd
   Then `sudo udevadm control --reload && sudo udevadm trigger`. `ghrunner` is in
   `plugdev`, so flashing needs no `sudo`.
 
-### 4.3 Alternative: Rockchip `upgrade_tool`
+### 4.3 No alternate production flasher
 
-Rockchip's closed `upgrade_tool` (a.k.a. `Linux_Upgrade_Tool`) does the same job
-and some `.img`/firmware layouts only it handles cleanly:
-
-```bash
-upgrade_tool ul rk3588_loader.bin     # upgrade loader (= rkdeveloptool db)
-upgrade_tool wl 0 ceralive-rock-5b-plus.img
-upgrade_tool rd                       # reset
-```
-
-Use whichever the CI host has; `rkdeveloptool` is preferred because it is
-open-source and apt-installable.
-
-### 4.4 Alternative: flash over SSH (`dd`) — only if the board boots
-
-When the board already runs a healthy system and you only need to *replace* the
-whole image (faster than maskrom for the common case):
-
-```bash
-# stream the image to the eMMC; adjust mmcblk for your board (eMMC is usually mmcblk0)
-xz -dc ceralive-rock-5b-plus.img.xz | \
-  ssh -o BatchMode=yes ceralive@"$BOARD_IP" \
-  'sudo dd of=/dev/mmcblk0 bs=4M conv=fsync status=progress'
-ssh ceralive@"$BOARD_IP" 'sudo reboot'
-```
-
-- **Cheapest** (no flash hardware at all), but it **cannot recover a board that
-  won't boot** — for that you always fall back to maskrom (4.1). Release CI uses
-  maskrom for every whole-media candidate flash; `dd`-over-SSH is a manual lab
-  shortcut only and is not part of the production gate.
+Do not use `upgrade_tool` or SSH-to-`dd` for a release candidate. Both bypass the
+verifier's fixture identity, cancellation, full-readback, and evidence contracts.
 
 ---
 
@@ -335,104 +241,99 @@ screen /dev/ttyUSB0 1500000        # Ctrl-a k to quit
 minicom -D /dev/ttyUSB0 -b 1500000
 ```
 
-### 5.2 Capture serial from the runner (non-interactive)
+### 5.2 Workflow-owned serial capture (non-interactive)
 
-Serial is the **only** window into early boot / U-Boot / a kernel that never
-reaches SSH — capture it for every HW job so a failed boot is debuggable:
+During a release hardware gate, `uart-provision-ssh.sh` is the **exclusive owner
+of the serial device**. It locks the configured `CERALIVE_RK3588_SERIAL_DEV`,
+interrupts U-Boot, performs the signed one-shot bootstrap, and records the full
+session in `artifacts/first-boot-uart.log`. The workflow uploads that log even
+when the board never reaches SSH.
 
-```bash
-# log the full boot to a file the job uploads as an artifact
-mkdir -p artifacts
-stty -F /dev/ttyUSB0 1500000 raw -echo
-timeout 300 cat /dev/ttyUSB0 | tee artifacts/serial-boot.log &
-SERIAL_PID=$!
-# ... trigger power-on / flash / reboot here ...
-# at end of job:
-kill "$SERIAL_PID" 2>/dev/null || true
-```
+Do not start `screen`, `minicom`, or a second background reader while the gate
+is running. A competing reader can consume the boot nonce or prompt bytes and
+make the signed bootstrap fail nondeterministically. Interactive access from
+section 5.1 is permitted only when no hardware-gate process owns the port.
 
-`ghrunner` reads the port via its `dialout` group membership (section 2.1) — no
-`sudo`. Capturing serial is what lets `rauc-rollback.sh`'s per-reboot loop be
-diagnosed when SSH never returns.
+The runner service user reads the port through its `dialout` membership
+(section 2.1), without `sudo`. Later RAUC reboot diagnostics use SSH and the
+workflow artifacts; they do not open a second UART reader.
 
 ---
 
-## 6. SSH access for the LIVE harnesses
+## 6. Ephemeral SSH access for the LIVE harnesses
 
-Both LIVE harnesses connect as **`ceralive`** (`SSH_USER` default) on
-**port 22** (`SSH_PORT`) with `BatchMode=yes` (**key auth only — no password
-prompts**, the harness will fail otherwise).
+No SSH private key or password is embedded in the image, stored as a GitHub
+secret, or retained on the runner. `realhw-job.yml` generates one Ed25519 key in
+`RUNNER_TEMP`. Before `rkdeveloptool rd`, `uart-provision-ssh.sh` interrupts
+U-Boot and supplies the volatile kernel arguments
+`ceralive.ci_uart=1 systemd.mask=serial-getty@ttyS2.service`. A non-restarting,
+180-second UART oneshot emits a fresh 256-bit boot nonce, accepts one signed data
+record bound to that nonce, verifies the candidate commit, and appends a root
+public-key line constrained with `restrict` and an absolute `expiry-time`. It
+records consumed nonces and a non-decreasing signed epoch floor on `/data`, so a
+captured request cannot restore an expired key. It never exposes a shell.
 
-```bash
-# as ghrunner: generate a dedicated CI key OUTSIDE the runner _work dir
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/ceralive_rk3588_ci -C 'ceralive-rk3588-ci'
+Before loader transfer, the workflow normalizes the single Maskrom device's
+VID/PID and stable `LocationID`, then requires its SHA-256 to match the approved
+fixture repository variable. This identity is readable while the board remains
+in Maskrom; `rci` is not. After the pinned loader starts, the workflow reads the
+unique 16-byte SoC identity. The host signs the UART request with a mode-0600,
+host-local Ed25519 key; before any USB operation, the verifier derives its public
+key and requires it to equal the public key in the candidate source. The image
+contains only that public verification key. The signed request includes the
+device nonce, SoC identity, and a maximum one-hour expiry window, so the UART
+service rejects a crossed cable or forged long-lived key before changing the
+authorized-key store.
+After SSH starts it requires those bytes to equal the output of
+`/usr/local/sbin/ceralive-rockchip-chip-info`, which reads the first 16 bytes of
+`/sys/bus/nvmem/devices/rockchip-otp0/nvmem`. The UART challenge therefore binds
+the SSH endpoint, while the SoC identity binds that endpoint to the exact USB
+device whose media was written and read back.
 
-# install the public key on the board's ceralive account (one-time, attended):
-ssh-copy-id -i ~/.ssh/ceralive_rk3588_ci.pub ceralive@"$BOARD_IP"
-
-# pin host + key so the harness's StrictHostKeyChecking=accept-new is happy:
-cat >> ~/.ssh/config <<EOF
-Host ceralive-board
-  HostName ${BOARD_IP}
-  User ceralive
-  IdentityFile ~/.ssh/ceralive_rk3588_ci
-  IdentitiesOnly yes
-EOF
-chmod 600 ~/.ssh/ceralive_rk3588_ci ~/.ssh/config
-```
-
-- The key is the **only credential at rest**. Keep it `chmod 600`, owned by
-  `ghrunner`, **outside** `_work/` so no job checkout can read it. Do **not** put
-  it in repo secrets.
-- `rauc-rollback.sh` LIVE also needs `ceralive` to `rauc install` and `reboot` —
-  ensure passwordless `sudo` for exactly those (or run the unit as a privileged
-  helper) on the board image, scoped tight.
+The key lives in `/data/ceralive/ssh/root_authorized_keys`, so it remains available
+through each explicitly armed RAUC slot reboot in the same gate. Each arm is
+one-use and consumed before sshd; an unarmed later boot revokes the CI key before
+network access, independently of wall-clock expiry. After the suite,
+`revoke-ephemeral-ssh.sh` removes the exact line and marker and emits a cleanup
+receipt. An `always()` step deletes the local private key. If cleanup is
+interrupted, OpenSSH enforces the expiry as a backstop.
 
 ---
 
-## 7. Recovery from a bricked flash (the operational runbook)
+## 7. Recovery from a bricked flash
 
 A "brick" here means **the eMMC content won't boot** (bad image, interrupted
 write, broken bootloader). Because **maskrom is ROM**, this is *always*
 recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
 
-1. **Power off** the board (section 3 relay/PDU — `usbrelay …=0` / plug off).
-2. **Assert recovery + power on into maskrom** (section 4.1): hold MASKROM
-   button (or assert the recovery relay channel), power on, release.
-3. **Confirm the loader is detected:**
+1. Use the board's physical Maskrom button and normal power input to return it
+   to Maskrom; a relay is optional and is not part of the workflow contract.
+2. Confirm exactly one approved fixture is detected:
    ```bash
    rkdeveloptool ld          # expect a "Maskrom" device line
    ```
-4. **Re-download the loader + reflash a known-good image:**
-   ```bash
-   rkdeveloptool db rk3588_loader.bin
-   rkdeveloptool wl 0 last-known-good.img
-   sectors=$(( $(stat -c %s last-known-good.img) / 512 ))
-   rkdeveloptool rl 0 "${sectors}" last-known-good.readback.img
-   test "$(sha256sum last-known-good.readback.img | cut -d' ' -f1)" = \
-     "$(sha256sum last-known-good.img | cut -d' ' -f1)"
-   rm -f last-known-good.readback.img
-   rkdeveloptool rd          # reset into the reflashed system
-   ```
-5. **Watch serial** (section 5.2) to confirm U-Boot → kernel → login, then
-   re-verify SSH (`ssh ceralive-board true`).
+3. Leave the board in Maskrom and push a newly named `release/**` branch at the
+   exact approved commit. The workflow owns loader transfer, capacity preflight,
+   fixture identity, write, full readback, UART-observed boot, and ephemeral SSH.
+   Do not use a raw attended `wl`/`rd` sequence, because it bypasses candidate
+   binding and leaves no cleanup receipt.
 
-> **Keep a "last-known-good" image on the host** (a pinned release `.img` +
-> `.sha256`) so recovery never depends on a fresh build. Refresh it only after a
-> candidate-bound hardware run is green.
+Recovery uses the same immutable path as release proof: approve an exact commit,
+push a newly named `release/**` branch, and let the workflow build and verify a
+fresh candidate before it touches the fixture. A retained raw image must not
+bypass candidate binding, readback, UART identity, or cleanup evidence.
 
-### Failure-budget / retries (don't thrash a board)
+### Failure budget (don't thrash a board)
 
-- **`timeout-minutes: 30`** per HW job (set in `realhw-job.yml`) — a hung board
+- **`timeout-minutes: 45`** per HW job (set in `realhw-job.yml`) — a hung board
   can't hold the runner forever.
-- **Max 1 retry** of a HW job on failure. A second failure means a **real**
-  regression or a **physical** fault — escalate to a human, do **not** auto-loop
-  (repeated failed flash/power cycles stress the eMMC + PSU).
+- **Never rerun a hardware workflow run.** Both candidate jobs reject
+  `github.run_attempt > 1` before touching the board. Diagnose the first run,
+  land any repair, and use a newly named immutable proof branch.
 - Always **capture serial + `rauc status` + `journalctl`** on failure as
-  artifacts before any retry, so the first failure is diagnosable.
-- If a job leaves the board unbootable, the **next** job's first step must run the
-  section-7 maskrom recovery to reflash last-known-good before doing anything
-  else (idempotent "ensure the board is alive" preflight).
+  artifacts so the first failure is diagnosable.
+- If a job leaves the board unbootable, return it to Maskrom deliberately before
+  enabling the exact board label for the new proof run.
 
 ---
 
@@ -440,8 +341,46 @@ recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
 
 The runner is consumed by [`.github/workflows/realhw-job.yml`](../../.github/workflows/realhw-job.yml),
 a `workflow_call`-only workflow. The release caller must pass the immutable
-artifact digest, raw SHA-256, bundle, keyring, and candidate commit. There is no
+artifact digest, raw SHA-256, bundle, keyring, loader filename/SHA-256, and
+candidate commit. There is no
 nightly, manual-current-image, or pull-request trigger.
+
+Before adding the hardware labels, create the protected GitHub environment
+`image-hardware`, require approval from trusted maintainers, and restrict its
+deployment branches and tags to `release/**` and `v*`. The reusable job's
+repository, event, caller-workflow, ref, and first-attempt condition is evaluated
+before the self-hosted runner is selected; the environment protection is the
+external authorization boundary.
+
+Set these repository Actions variables only after the host checks below pass:
+
+| Variable | Value |
+|---|---|
+| `CERALIVE_RK3588_BOARD_IP` | stable board address used after first boot |
+| `CERALIVE_RK3588_SSH_PORT` | `22` |
+| `CERALIVE_RK3588_SERIAL_DEV` | stable `/dev/serial/by-id/...` path, never a transient `ttyUSBN` |
+| `CERALIVE_RK3588_MASKROM_ID_SHA256` | SHA-256 of `Vid=0x2207,Pid=0x350b,LocationID=<id> Maskrom` from the approved USB port |
+| `CERALIVE_RK3588_UART_SIGNING_KEY` | absolute path to the mode-`0600` host-local Ed25519 private key |
+
+SSH is fixed to `root`. The loader is candidate-bound, and there are no board
+SSH-key, password, `RK3588_LOADER`, or power-helper variables.
+
+Provision the already-approved signing private key through the host's secure
+configuration channel as the runner service user; it is never stored in GitHub.
+Its derived public key must be byte-equivalent to the verifier committed at
+`v2/mkosi/runtime/ceralive-ci-uart-bootstrap-public.pem`:
+
+```bash
+chmod 0600 /absolute/host-local/key-directory/uart-bootstrap-ed25519.pem
+cmp \
+  <(openssl pkey -in /absolute/host-local/key-directory/uart-bootstrap-ed25519.pem -pubout -outform DER) \
+  <(openssl pkey -pubin -in v2/mkosi/runtime/ceralive-ci-uart-bootstrap-public.pem -pubout -outform DER)
+```
+
+For rotation, remove the hardware labels, generate a new host-local private key,
+commit only its derived public key in the path above, merge that change, then set
+the runner variable to the new key and restore the labels after the comparison
+passes. Never retain the old private key as a fallback.
 
 ### Trigger contract
 
@@ -463,21 +402,15 @@ Run these on the host as `ghrunner` before declaring the runner ready:
 # runner is registered + Idle
 sudo ~/actions-runner/svc.sh status
 
-# board reachable for LIVE smoke
-ssh ceralive-board true && echo "SSH OK"
-
-# maskrom path works (power off, enter maskrom, then:)
+# maskrom path works and is the expected launch state
 rkdeveloptool ld            # must print a Maskrom device
 
-# serial captures
-timeout 3 cat /dev/ttyUSB0 | head   # should show board chatter if powered
-
-# power control
-usbrelay <CH>=0 && sleep 2 && usbrelay <CH>=1   # board should reboot
-
-# the harnesses themselves (LIVE):
-BOARD=rock-5b-plus BOARD_IP=<ip> ./v2/tests/realhw-smoke.sh
-BOARD_IP=<ip> BUNDLE_DIR=/path/to/bundles ./v2/tests/rauc-rollback.sh
+# stable UART is readable and writable; signing key is private to the runner user
+test -r /dev/serial/by-id/<adapter-id> && test -w /dev/serial/by-id/<adapter-id>
+test "$(stat -c %a /absolute/path/to/uart-bootstrap-ed25519.pem)" = 600
+cmp \
+  <(openssl pkey -in /absolute/path/to/uart-bootstrap-ed25519.pem -pubout -outform DER) \
+  <(openssl pkey -pubin -in v2/mkosi/runtime/ceralive-ci-uart-bootstrap-public.pem -pubout -outform DER)
 ```
 
 All green ⇒ the `ceralive-rk3588` runner is ready for `realhw-job.yml`.
@@ -488,15 +421,15 @@ All green ⇒ the `ceralive-rk3588` runner is ready for `realhw-job.yml`.
 
 | Item | Why | Cost | Required? |
 |---|---|---|---|
-| RK3588 board (Rock 5B+ / OPi 5+) | the DUT | $$ | **yes** |
+| Rock 5B+ | the DUT | $$ | **yes** |
 | USB-C/OTG cable | maskrom flashing | $ | **yes** |
 | USB-UART adapter (CP210x/FTDI) | serial console | $ | **yes** |
 | Linux host (NUC/mini-PC) | runs the GH runner | $$ | **yes** |
-| **USB relay (1–2 ch)** | unattended power + recovery-button | ~$10 | **yes for unattended** |
+| **USB relay (1–2 ch)** | optional recovery power + recovery-button | ~$10 | optional |
 | Smart PDU / local smart plug | rack-scale / high-draw power | $$ | optional (alt to relay) |
-| eMMC module / SD card | flash target | $ | **yes** |
+| eMMC module | flash target | $ | **yes** |
 
-The **cheap** path is fully sufficient: USB-OTG flash + USB-UART serial + a ~$10
-USB relay. The PDU is an **optional** upgrade for multi-board labs. (MUST-NOT:
+The **cheap** release path is USB-OTG flash + USB-UART serial; a relay and PDU
+are optional recovery upgrades. (MUST-NOT:
 don't require expensive flash hardware — maskrom over a plain USB cable is the
 baseline.)

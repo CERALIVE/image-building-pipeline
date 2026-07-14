@@ -2,7 +2,7 @@ name: Release candidate real-HW gate
 
 on:
   push:
-    branches: ['release/**', 'release-*']
+    branches: ['release/**']
     tags: ['v*']
 
 permissions:
@@ -28,8 +28,18 @@ jobs:
       raw_sha256: ${{ steps.meta.outputs.raw_sha256 }}
       bundle_filename: ${{ steps.meta.outputs.bundle_filename }}
       keyring_filename: ${{ steps.meta.outputs.keyring_filename }}
+      loader_filename: ${{ steps.meta.outputs.loader_filename }}
+      loader_sha256: ${{ steps.meta.outputs.loader_sha256 }}
       commit: ${{ github.sha }}
     steps:
+      - name: Reject reruns of immutable release candidates
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${RUN_ATTEMPT}" == 1 ]] || {
+            echo "::error::Immutable release candidates must run once; create a newly named proof branch."
+            exit 1
+          }
       - name: Remove stale generated runner paths before checkout
         env:
           CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
@@ -111,6 +121,7 @@ jobs:
           APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
           APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
           MKOSI_BUILDER_IMAGE: ${{ steps.cache-meta.outputs.builder_image }}
+          CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
         run: ./v2/build rock-5b-plus
       - name: Build candidate-bound signed rollback probe
         env:
@@ -126,19 +137,25 @@ jobs:
           BUNDLE_VERSION="${GITHUB_SHA}-rollback-probe" \
             BUNDLE_OUT_DIR="${RUNNER_TEMP}/rollback-bundle" BUNDLE_TS=bad \
             ./v2/lib/build-bundle.sh rock-5b-plus "${RUNNER_TEMP}/rollback-root"
+      - name: Fetch hash-pinned RK3588 Maskrom loader
+        run: ./v2/ci/fetch-rk3588-loader.sh "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"
       - id: meta
         name: Seal candidate metadata
         run: |
           set -euo pipefail
           mapfile -t raws < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
           mapfile -t bundles < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
-          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
-          mkdir candidate
+          mapfile -t dev_debs < <(find v2/mkosi/.staging/rock-5b-plus/debs -maxdepth 1 -type f -name 'srtla-send-rs_*.deb')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 ))
+          mkdir -p candidate/dev-debs
           ln "${raws[0]}" candidate/
           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
           cp "${bundles[0]}" candidate/good.raucb
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
+          cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
+          cp "${dev_debs[0]}" candidate/dev-debs/
           raw_name="$(basename "${raws[0]}")"; bundle_name=good.raucb
+          loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"
           [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
           sha256sum "candidate/${raw_name}" > candidate/raw.sha256
@@ -150,6 +167,8 @@ jobs:
             echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
             echo "bundle_filename=${bundle_name}"
             echo "keyring_filename=root-ca.pem"
+            echo "loader_filename=${loader_name}"
+            echo "loader_sha256=$(sha256sum "candidate/${loader_name}" | cut -d' ' -f1)"
           } >> "${GITHUB_OUTPUT}"
       - id: upload
         uses: actions/upload-artifact@v7
@@ -216,6 +235,7 @@ jobs:
         run: |
           rm -rf "${RUNNER_TEMP}/release-pki" "${RUNNER_TEMP}/armbian-keyring.gpg" \
             "${RUNNER_TEMP}/rollback-root" "${RUNNER_TEMP}/rollback-bundle"
+          rm -f "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"
   realhw:
     needs: candidate
     uses: ./.github/workflows/realhw-job.yml
@@ -227,4 +247,6 @@ jobs:
       candidate_raw_sha256: ${{ needs.candidate.outputs.raw_sha256 }}
       candidate_bundle_filename: ${{ needs.candidate.outputs.bundle_filename }}
       candidate_keyring_filename: ${{ needs.candidate.outputs.keyring_filename }}
+      candidate_loader_filename: ${{ needs.candidate.outputs.loader_filename }}
+      candidate_loader_sha256: ${{ needs.candidate.outputs.loader_sha256 }}
       candidate_commit: ${{ needs.candidate.outputs.commit }}

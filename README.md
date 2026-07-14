@@ -73,6 +73,25 @@ RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
 Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; it
 requires exact GPT geometry, both RK3588 bootloader stages, a compiled selector,
 complete kernel/DTB/initrd sets in both slots, and a real compatible signed bundle.
+The release hardware gate starts with one Rock 5B+ in Maskrom, carries a
+SHA-256-pinned loader in the candidate artifact, checks loader-mode eMMC capacity,
+and verifies a full readback before reset. A canonical hash approves the
+Maskrom USB port before loader transfer; the 16-byte Rockchip SoC identity is
+then captured with `rkdeveloptool rci` before the write. Linux reads the same
+first 16 bytes from the raw Rockchip OTP NVMEM device through the committed
+`ceralive-rockchip-chip-info` helper; exact equality is required by UART and
+SSH after boot. `/` must
+resolve to that flashed eMMC. UART observes first boot through a
+bounded one-shot bootstrap that emits a fresh device nonce. Its request is signed
+by a host-local key, bound to that nonce, protected by consumed-nonce and
+non-decreasing epoch records on `/data`, and
+provisions only a restricted, expiring per-run
+root SSH public key into `/data`; the immutable image contains no CI SSH
+credential or password (only the UART verification public key). The runner key is
+matched to that public key before USB access, and an `always()` cleanup step
+proves the exact key and marker were
+removed after the physical suite. Planned RAUC reboots consume a one-use retention
+marker; any unarmed later boot revokes leftover CI access before sshd starts.
 Legacy single-slot images require a full re-flash because their data partition
 overlaps the new B-slot extent; they cannot be converted by OTA.
 

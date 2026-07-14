@@ -321,16 +321,14 @@ The general procedure for RK3588 boards:
 5. Confirm the board is detected: `sudo rkdeveloptool ld` should list a
    `Maskrom` device.
 
-**Write the image:**
-
-```bash
-BOARD_DIR="v2/images/rock-5b-plus"
-IMAGE="${BOARD_DIR}/$(ls -t "${BOARD_DIR}"/*.raw | head -1 | xargs basename)"
-
-# Write the full disk image to eMMC
-sudo rkdeveloptool wl 0 "${IMAGE}"
-sudo rkdeveloptool rd   # reset device
-```
+**Write the image:** use the candidate-bound `release.yml` workflow described in
+[`v2/ci/runner-setup.md`](../v2/ci/runner-setup.md). It downloads the pinned
+loader, checks the approved Maskrom USB fixture and eMMC capacity, captures the
+16-byte chip identity with `rkdeveloptool rci`, verifies the image,
+writes it, reads the entire candidate range back, and only then resets. A direct
+`rkdeveloptool wl` command is not an acceptable production or recovery path.
+After boot, the gate reads the same first 16 bytes from Rockchip OTP NVMEM via
+the image's committed helper and requires exact equality before SSH checks.
 
 For full rkdeveloptool documentation, see the
 [Rockchip Linux wiki](https://opensource.rock-chips.com/wiki_Rkdeveloptool).

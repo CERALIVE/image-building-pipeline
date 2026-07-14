@@ -55,7 +55,7 @@
 #   BOARD          board name (default rock-5b-plus) — selects the manifest whose
 #                  quirks drive the hardware assertions
 #   BOARD_IP       set → LIVE mode (SSH target)
-#   SSH_USER       SSH user for LIVE mode (default ceralive)
+#   SSH_USER       SSH user for LIVE mode (default root)
 #   SSH_PORT       SSH port for LIVE mode (default 22)
 #   IMAGE_PATH     set → STATIC mode (dir | .tar | .img | .img.xz)
 #   PARITY_CHECK_SH override path to lib/parity-check.sh
@@ -83,8 +83,10 @@ MKOSI_BUILD_DIR="${V2_DIR}/mkosi/build"
 
 BOARD="${BOARD:-rock-5b-plus}"
 BOARD_IP="${BOARD_IP:-}"
-SSH_USER="${SSH_USER:-ceralive}"
+SSH_USER="${SSH_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 
 EXPECTED_BINARIES=(/usr/bin/cerastream /usr/bin/srtla_send)
@@ -92,6 +94,10 @@ EXPECTED_BINARIES=(/usr/bin/cerastream /usr/bin/srtla_send)
 APP_SERVICE_CANDIDATES=(ceralive.service ceraui.service)
 
 SSH_BASE_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+[[ -z "${SSH_IDENTITY_FILE}" ]] || SSH_BASE_OPTS+=(-o IdentitiesOnly=yes -i "${SSH_IDENTITY_FILE}")
+[[ -z "${SSH_KNOWN_HOSTS_FILE}" ]] || SSH_BASE_OPTS+=(
+  -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null
+)
 
 PASS=0; WARN=0; FAIL=0
 pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
@@ -443,7 +449,7 @@ live_quirk_checks() {
 # gate runs as part of LIVE mode (the harness's authoritative parity proof).
 live_full_parity() {
   if ! command -v rsync >/dev/null 2>&1; then
-    warn "rsync not on the host — skipping live full parity-check.sh (install rsync to enable)"
+    fail "rsync not on the host — LIVE full parity-check.sh is required"
     return
   fi
   local root; root="$(mktemp -d)"; CLEANUP_DIRS+=("${root}")
@@ -468,10 +474,10 @@ live_full_parity() {
         fail "LIVE parity-check.sh FAILED against the running board's filesystem"
       fi
     else
-      warn "LIVE parity: dpkg status not pulled — cannot run parity-check.sh remotely"
+      fail "LIVE parity: dpkg status not pulled — cannot run required parity-check.sh"
     fi
   else
-    warn "LIVE parity: rsync of the parity subtree failed (perms?) — skipped full parity-check.sh"
+    fail "LIVE parity: rsync of the parity subtree failed — required parity-check.sh did not run"
   fi
 }
 

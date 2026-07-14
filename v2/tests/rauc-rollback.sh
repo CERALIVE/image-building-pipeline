@@ -59,6 +59,7 @@
 #   REBOOT_TIMEOUT      seconds to wait for SSH to return after a reboot      (def 90)
 #   HEALTHCHECK_TIMEOUT seconds to wait for the slot to self-confirm good    (def 120)
 #   SSH_POLL_INTERVAL   seconds between SSH reachability polls                 (def 5)
+#   CERALIVE_CI_ACCESS_ID  run-local access id whose key may survive one reboot
 #   CERALIVE_ROLLBACK_MODE  force "live" or "mock" (default: auto from BOARD_IP)
 #
 # Exit 0 iff every assertion passed (both cases). Mirrors test-fallback.sh output.
@@ -89,11 +90,14 @@ HEALTHCHECK_SH="${RUNTIME_DIR}/ceralive-healthcheck.sh"
 BOARD_IP="${BOARD_IP:-}"
 SSH_USER="${SSH_USER:-ceralive}"
 SSH_PORT="${SSH_PORT:-22}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
 BUNDLE_DIR="${BUNDLE_DIR:-}"
 BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-3}"
 REBOOT_TIMEOUT="${REBOOT_TIMEOUT:-90}"
 HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-120}"
 SSH_POLL_INTERVAL="${SSH_POLL_INTERVAL:-5}"
+CERALIVE_CI_ACCESS_ID="${CERALIVE_CI_ACCESS_ID:-}"
 
 BAD_BUNDLE="${BAD_BUNDLE:-${BUNDLE_DIR:+${BUNDLE_DIR}/bad.raucb}}"
 GOOD_BUNDLE="${GOOD_BUNDLE:-${BUNDLE_DIR:+${BUNDLE_DIR}/good.raucb}}"
@@ -104,6 +108,10 @@ if [[ -z "${MODE}" ]]; then
 fi
 
 SSH_BASE_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+[[ -z "${SSH_IDENTITY_FILE}" ]] || SSH_BASE_OPTS+=(-o IdentitiesOnly=yes -i "${SSH_IDENTITY_FILE}")
+[[ -z "${SSH_KNOWN_HOSTS_FILE}" ]] || SSH_BASE_OPTS+=(
+  -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null
+)
 
 # --- result bookkeeping (mirrors test-fallback.sh) -------------------------
 PASS=0; FAIL=0
@@ -294,6 +302,12 @@ board_reboot_and_wait() {
     printf '%s\n' "${slot}" >"${SIM}/booted"
     return 0
   fi
+  ssh_run "test -f '/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}' && \
+    test ! -L '/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}' && \
+    rm -f '/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}.retain-once' && \
+    printf 'access_id=${CERALIVE_CI_ACCESS_ID}\\n' >'/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}.retain-once' && \
+    chmod 0600 '/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}.retain-once'" \
+    >/dev/null || return 1
   ssh_run "systemctl reboot" >/dev/null 2>&1 || true   # connection drop is expected
   sleep "${SSH_POLL_INTERVAL}"
   local deadline=$(( SECONDS + REBOOT_TIMEOUT ))
@@ -421,6 +435,8 @@ run_good_bundle_test() {
 # ===========================================================================
 preflight_live() {
   require_cmd ssh; require_cmd scp
+  [[ "${CERALIVE_CI_ACCESS_ID}" =~ ^[A-Za-z0-9._-]{1,80}$ ]] \
+    || die "LIVE mode requires a valid CERALIVE_CI_ACCESS_ID for one-boot SSH retention"
   [[ -n "${BAD_BUNDLE}"  && -s "${BAD_BUNDLE}"  ]] || die "LIVE mode needs a bad bundle (set BUNDLE_DIR with bad.raucb, or BAD_BUNDLE)"
   [[ -n "${GOOD_BUNDLE}" && -s "${GOOD_BUNDLE}" ]] || die "LIVE mode needs a good bundle (set BUNDLE_DIR with good.raucb, or GOOD_BUNDLE)"
   if ! ssh_run true >/dev/null 2>&1; then

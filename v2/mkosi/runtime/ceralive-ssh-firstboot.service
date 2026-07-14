@@ -1,16 +1,16 @@
 [Unit]
-Description=CeraLive first-boot SSH hardening — per-device host keys, root password login disabled, forced password change
+Description=CeraLive SSH hardening, persistent identity, and CI-key guard
 Documentation=file:///usr/share/doc/ceralive/ssh-hardening.md
-# Task 10 / SC4. Three scoped actions (see the script header): regenerate the
+# Task 10 / SC4. Four scoped actions (see the script header): regenerate the
 # baked shared SSH host keys into a per-device identity, drop in
 # PermitRootLogin prohibit-password, and expire the ceralive password once so the
-# first interactive login forces a change. Nothing more (no fail2ban/UFW/auditd).
+# first interactive login forces a change, and link the empty /data-backed
+# authorized-key store. Nothing more (no fail2ban/UFW/auditd).
 #
-# MUST run before sshd accepts ANY connection on first boot, otherwise the very
-# first client would pin the shared baked host-key fingerprint (a MITM hazard)
-# and root could still authenticate by password. Ordered Before both the classic
-# service and the socket so it wins regardless of which sshd activation the image
-# uses.
+# MUST complete before sshd accepts any connection on every boot. Initial boot
+# replaces the shared baked host-key fingerprint; later boots purge unauthorized
+# CI keys before either the classic service or socket activation can accept a
+# connection.
 After=local-fs.target data.mount
 Before=ssh.service ssh.socket
 # Persisted per-device host identity lives on /data (survives reboots + A/B OTA
@@ -26,3 +26,4 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=ssh.service ssh.socket

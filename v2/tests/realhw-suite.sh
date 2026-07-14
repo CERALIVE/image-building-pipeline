@@ -6,7 +6,7 @@
 # ORCHESTRATES the harnesses Stages 1–4 already built, runs them in sequence with
 # clear section headers, aggregates PASS/FAIL/SKIP, and emits ONE pass/fail signal
 # plus an evidence bundle. This is what the self-hosted `ceralive-rk3588` runner
-# (task 37) invokes nightly and on release branches.
+# (task 37) invokes only through the candidate-bound release workflow.
 #
 # FOUR SECTIONS (each a thin wrapper over an existing tool — no logic duplicated):
 #
@@ -22,10 +22,10 @@
 #        This is the streaming/encode-path init check — NOT a full encode (no
 #        capture HW needed). LIVE: over SSH. MOCK: the shipped binaries locally.
 #
-#   3. DEV-LOOP SANITY     → v2/dev-push (OPTIONAL)
+#   3. DEV-LOOP SANITY     → v2/dev-push (REQUIRED in the release gate)
 #        Confirms the <120 s code→device dev loop still delivers. LIVE: runs
-#        dev-push against the board when DEV_DEB_DIR (an arm64 .deb dir) is given,
-#        else SKIP (optional). MOCK: DRY_RUN dev-push proves the
+#        dev-push against the board using DEV_DEB_DIR (an arm64 .deb dir).
+#        A missing directory fails LIVE. MOCK: DRY_RUN dev-push proves the
 #        build→rsync→refresh→restart loop + the budget gate offline.
 #
 #   4. RAUC A/B ROLLBACK   → tests/rauc-rollback.sh
@@ -47,11 +47,12 @@
 # ---------------------------------------------------------------------------
 #   BOARD         board manifest name (default rock-5b-plus) — drives smoke quirks
 #   BOARD_IP      LIVE SSH target (unset → MOCK)
-#   SSH_USER      LIVE SSH user (default ceralive)
+#   SSH_USER      LIVE SSH user (default root)
 #   SSH_PORT      LIVE SSH port (default 22)
+#   SSH_IDENTITY_FILE / SSH_KNOWN_HOSTS_FILE  bounded release-gate SSH identity
 #   BUNDLE_DIR    dir with bad.raucb/good.raucb (LIVE rollback; optional in MOCK)
 #   IMAGE_PATH    rootfs/image for the STATIC smoke (MOCK auto-synthesizes if unset)
-#   DEV_DEB_DIR   LIVE dev-loop: dir with an arm64 srtla .deb (else section SKIPs)
+#   DEV_DEB_DIR   LIVE dev-loop: required dir with an arm64 srtla .deb
 #   EVIDENCE_DIR  evidence bundle dir (default <repo>/test-results/realhw-task-38-smoke)
 #   MOCK=1        force MOCK mode even if BOARD_IP is set
 #
@@ -84,8 +85,10 @@ PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${V2_DIR}/manifests/packages}"
 # --- config -----------------------------------------------------------------
 BOARD="${BOARD:-rock-5b-plus}"
 BOARD_IP="${BOARD_IP:-}"
-SSH_USER="${SSH_USER:-ceralive}"
+SSH_USER="${SSH_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
 BUNDLE_DIR="${BUNDLE_DIR:-}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 DEV_DEB_DIR="${DEV_DEB_DIR:-}"
@@ -99,8 +102,13 @@ if [[ -z "${MODE}" ]]; then
   else                                 MODE="mock"
   fi
 fi
+[[ "${MODE}" == live || "${MODE}" == mock ]] || die "CERALIVE_SUITE_MODE must be live or mock"
 
 SSH_BASE_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+[[ -z "${SSH_IDENTITY_FILE}" ]] || SSH_BASE_OPTS+=(-o IdentitiesOnly=yes -i "${SSH_IDENTITY_FILE}")
+[[ -z "${SSH_KNOWN_HOSTS_FILE}" ]] || SSH_BASE_OPTS+=(
+  -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null
+)
 ssh_run() { ssh "${SSH_BASE_OPTS[@]}" -p "${SSH_PORT}" "${SSH_USER}@${BOARD_IP}" "$@"; }
 
 # Synthesized-fixture handles (MOCK mode only).
@@ -151,7 +159,8 @@ emit_dpkg_status() {                         # emit_dpkg_status <out>
   # Alias TARGETS parity-check maps to (media-ctl→v4l-utils,
   # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
   # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
-  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla srt; do
+  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device \
+    cerastream libsrt1.5-ceralive srtla-send-rs; do
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done
 }
@@ -179,6 +188,7 @@ build_mock_fixtures() {
   local root="${tmp}/rootfs" b svc g
   mkdir -p \
     "${root}/usr/bin" "${root}/var/lib/dpkg" "${root}/etc/systemd/system" \
+    "${root}/etc/systemd/system/multi-user.target.wants" "${root}/etc/systemd/network" \
     "${root}/etc/iproute2" "${root}/etc/udev/rules.d" "${root}/etc/apt/sources.list.d" \
     "${root}/etc/dhcp/dhclient-exit-hooks.d" "${root}/etc/NetworkManager/dispatcher.d"
 
@@ -195,8 +205,13 @@ build_mock_fixtures() {
   for svc in NetworkManager ModemManager ssh chrony avahi-daemon systemd-resolved ceralive-hostname; do
     printf '[Unit]\nDescription=mock %s\n' "${svc}" > "${root}/etc/systemd/system/${svc}.service"
   done
+  printf '[Unit]\nDescription=mock ceralive\n[Service]\nExecStart=/usr/bin/cerastream\n' \
+    >"${root}/etc/systemd/system/ceralive.service"
+  ln -s ../ceralive.service "${root}/etc/systemd/system/multi-user.target.wants/ceralive.service"
   # D. SRTLA source-policy routing
-  printf '100\tmodem0\n101\tmodem1\n110\twlan_bond\n' > "${root}/etc/iproute2/rt_tables"
+  printf '100\tmodem0\n101\tmodem1\n120\twlan0\n121\twlan1\n' > "${root}/etc/iproute2/rt_tables"
+  printf '[Match]\nType=wlan\n[Link]\nName=wlan0\n' \
+    >"${root}/etc/systemd/network/10-ceralive-wlan0.link"
   printf '#!/bin/sh\n# mock SRTLA dhclient source-routing hook\n' \
     > "${root}/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
   printf '#!/bin/sh\n# mock SRTLA NetworkManager wifi-routing dispatcher\n' \
@@ -210,7 +225,7 @@ build_mock_fixtures() {
     > "${root}/etc/apt/sources.list.d/debian.sources"
   printf 'Types: deb\nURIs: https://apt.ceralive.tv\nSuites: stable\nComponents: main\n' \
     > "${root}/etc/apt/sources.list.d/ceralive.sources"
-  for b in cerastream srtla_send; do
+  for b in cerastream srtla_send sudo; do
     cat > "${root}/usr/bin/${b}" <<EOF
 #!/usr/bin/env bash
 echo "${b} 2026.06.0 (mock)"
@@ -237,6 +252,7 @@ sec_boot_service() {
   local log="${EVIDENCE_DIR}/01-boot-service.log" rc
   if [[ "${MODE}" == "live" ]]; then
     BOARD="${BOARD}" BOARD_IP="${BOARD_IP}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" IMAGE_PATH="" \
+      SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE}" SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE}" \
       "${SMOKE_SH}" 2>&1 | tee "${log}"; rc="${PIPESTATUS[0]}"
   else
     BOARD="${BOARD}" BOARD_IP="" IMAGE_PATH="${IMAGE_PATH:-${MOCK_TAR}}" \
@@ -272,11 +288,12 @@ sec_dev_loop() {
   local log="${EVIDENCE_DIR}/03-dev-loop.log" rc
   if [[ "${MODE}" == "live" ]]; then
     if [[ -z "${DEV_DEB_DIR}" ]]; then
-      echo "SKIP — dev-loop sanity is OPTIONAL; set DEV_DEB_DIR=<arm64 .deb dir> to exercise dev-push live." \
+      echo "FAIL — LIVE candidate gate requires DEV_DEB_DIR with the staged arm64 srtla-send-rs package." \
         | tee "${log}"
-      return 2
+      return 1
     fi
-    DEV_PUSH_BUDGET=120 SSH_USER="${SSH_USER}" \
+    DEV_PUSH_BUDGET=120 SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
+      SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE}" SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE}" \
       "${DEV_PUSH}" --from-deb "${DEV_DEB_DIR}" "${BOARD_IP}" srtla 2>&1 | tee "${log}"
     return "${PIPESTATUS[0]}"
   fi
@@ -302,6 +319,7 @@ sec_rauc_rollback() {
       return 1
     fi
     BOARD_IP="${BOARD_IP}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" BUNDLE_DIR="${BUNDLE_DIR}" \
+      SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE}" SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE}" \
       "${ROLLBACK_SH}" 2>&1 | tee "${log}"; rc="${PIPESTATUS[0]}"
   else
     BOARD_IP="" CERALIVE_ROLLBACK_MODE=mock BUNDLE_DIR="${BUNDLE_DIR}" \
