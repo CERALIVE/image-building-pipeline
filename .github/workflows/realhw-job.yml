@@ -41,9 +41,13 @@ jobs:
       SERIAL_DEV: ${{ vars.CERALIVE_RK3588_SERIAL_DEV }}
       EXPECTED_MASKROM_ID_SHA256: ${{ vars.CERALIVE_RK3588_MASKROM_ID_SHA256 }}
       UART_SIGNING_KEY: ${{ vars.CERALIVE_RK3588_UART_SIGNING_KEY }}
-      ACCESS_DIR: ${{ runner.temp }}/ceralive-realhw-access-${{ github.run_id }}-${{ github.run_attempt }}
       ACCESS_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Initialize run-local access path
+        run: |
+          printf 'ACCESS_DIR=%s\n' \
+            "${RUNNER_TEMP}/ceralive-realhw-access-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >>"${GITHUB_ENV}"
       - name: Reject reruns of immutable hardware candidates
         env:
           RUN_ATTEMPT: ${{ github.run_attempt }}
