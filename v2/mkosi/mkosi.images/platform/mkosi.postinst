@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# platform/mkosi.postinst.chroot — install the board BSP INSIDE the image.
+# platform/mkosi.postinst — install the board BSP into the image.
 #
-# Runs (via mkosi-chroot) inside the platform tree after the base packages are
-# present. Every package NAME comes from the environment (manifest-resolved by
+# Runs in mkosi's package-manager-aware postinstall sandbox after the base
+# packages are present. Every package NAME comes from the environment (manifest-resolved by
 # lib/resolve.sh, forwarded by Environment= in mkosi.conf) — there is NO board
 # name, package name or device path hardcoded here.
 #
@@ -37,13 +37,14 @@ fi
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 
 prune_irrelevant_rk3588_firmware() {
+	local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
   local -a paths=(
-    /usr/lib/firmware/qcom
-    /usr/lib/firmware/intel
-    /usr/lib/firmware/ath10k
-    /usr/lib/firmware/ath11k
-    /usr/lib/firmware/ath12k
-    /usr/lib/firmware/updates
+		"${root}/usr/lib/firmware/qcom"
+		"${root}/usr/lib/firmware/intel"
+		"${root}/usr/lib/firmware/ath10k"
+		"${root}/usr/lib/firmware/ath11k"
+		"${root}/usr/lib/firmware/ath12k"
+		"${root}/usr/lib/firmware/updates"
   )
   log "pruning firmware irrelevant to the RK3588 platform"
   rm -rf "${paths[@]}"
@@ -71,12 +72,12 @@ fi
 
 log "installing authenticated staged HW-accel GStreamer BSP: ${hw_gst[*]} ${gst_runtime[*]}"
 if [[ ${#hw_gst[@]} -gt 0 || ${#gst_runtime[@]} -gt 0 ]]; then
-  apt-get install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"
+  mkosi-install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"
 fi
 
 if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   log "installing authenticated staged boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
-  apt-get install -y --no-install-recommends "${boot_bsp[@]}"
+  mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
   prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."

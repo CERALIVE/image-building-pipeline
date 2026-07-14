@@ -98,7 +98,9 @@ mode `0700`. The containerized build therefore mounts the verified BSP and
 first-party consumer directories directly at dedicated read-only paths. Do not
 route mkosi package inputs back through `/work/mkosi/.staging`: its unprivileged
 repository indexer cannot traverse those private ancestors and will produce an
-empty local package index.
+empty local package index. The platform postinstall must remain non-chrooted so
+mkosi exposes `mkosi-install`; raw `apt-get` uses the image's persistent APT state
+and cannot resolve packages from mkosi's ephemeral `file:/repository`.
 
 ---
 

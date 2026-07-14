@@ -48,7 +48,7 @@ if bash "${AUTH}" verify-file --file "${TMP}/demo.deb" --sha256 aaaaaaaaaaaaaaaa
   exit 1
 fi
 if grep -qiE 'trusted[=:][[:space:]]*(yes|true)' "${FETCH}" \
-    "${V2}/mkosi/mkosi.images/platform/mkosi.postinst.chroot"; then
+    "${V2}/mkosi/mkosi.images/platform/mkosi.postinst"; then
   printf 'trusted=yes bypass was found in the BSP fetch path\n' >&2
   exit 1
 fi

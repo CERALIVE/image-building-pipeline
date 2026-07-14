@@ -6,6 +6,7 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${TESTS_DIR}/.." && pwd)"
 HELPER="${STAGING_HELPER:-${V2}/lib/stage-mkosi-package.sh}"
 ORCHESTRATOR="${V2}/lib/orchestrate.sh"
+PLATFORM_POSTINST="${V2}/mkosi/mkosi.images/platform/mkosi.postinst"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mkosi-package-staging.XXXXXX")"
 
 cleanup() {
@@ -104,5 +105,55 @@ mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
 	printf 'FAIL read-only package bind mount changed a source path containing comma/space\n' >&2
 	exit 1
 }
+
+# Raw apt-get uses the image's persistent APT state and cannot see mkosi's
+# ephemeral file:/repository. A non-chroot postinstall receives mkosi's wrapper,
+# which carries the local repository and package-list state into both BSP installs.
+[[ "${PLATFORM_POSTINST}" != *.chroot ]] || {
+	printf 'FAIL platform BSP installer is chrooted outside mkosi wrapper PATH\n' >&2
+	exit 1
+}
+[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 2 ]] || {
+	printf 'FAIL platform BSP installs do not both use mkosi-install\n' >&2
+	exit 1
+}
+if grep -Eq '^[[:space:]]*apt-get install ' "${PLATFORM_POSTINST}"; then
+	printf 'FAIL platform BSP install bypasses mkosi local repository via raw apt-get\n' >&2
+	exit 1
+fi
+
+install -d -m 0755 "${RUN_DIR}/bin"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${MKOSI_INSTALL_CALLS}"' \
+	>"${RUN_DIR}/bin/mkosi-install"
+printf '%s\n' '#!/bin/sh' 'printf "raw apt-get invoked\\n" >&2' 'exit 90' \
+	>"${RUN_DIR}/bin/apt-get"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${RM_CALLS}"' \
+	>"${RUN_DIR}/bin/rm"
+chmod 755 "${RUN_DIR}/bin/"*
+
+MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
+	RM_CALLS="${RUN_DIR}/rm.calls" \
+	PATH="${RUN_DIR}/bin:${PATH}" \
+	BUILDROOT="${RUN_DIR}/buildroot" \
+	ARCH=arm64 \
+	INSTALL_BOOT_BSP=1 \
+	HW_ACCEL_GSTREAMER_PLUGINS='gstreamer-bsp' \
+	GSTREAMER_RUNTIME_PACKAGES='gstreamer-runtime' \
+	KERNEL_PACKAGES='linux-image-demo' \
+	DTB_PACKAGES='linux-dtb-demo' \
+	UBOOT_PACKAGES='linux-u-boot-demo' \
+	FIRMWARE_PACKAGES='firmware-demo' \
+	bash "${PLATFORM_POSTINST}" >"${RUN_DIR}/platform-postinst.log" 2>&1 || {
+		cat "${RUN_DIR}/platform-postinst.log" >&2
+		printf 'FAIL platform BSP installer did not use the mkosi wrapper\n' >&2
+		exit 1
+	}
+
+mapfile -t install_calls <"${RUN_DIR}/mkosi-install.calls"
+[[ "${#install_calls[@]}" -eq 2 ]]
+[[ "${install_calls[0]}" == '-y --no-install-recommends gstreamer-bsp gstreamer-runtime' ]]
+[[ "${install_calls[1]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo' ]]
+[[ "$(<"${RUN_DIR}/rm.calls")" == \
+	"-rf ${RUN_DIR}/buildroot/usr/lib/firmware/qcom ${RUN_DIR}/buildroot/usr/lib/firmware/intel ${RUN_DIR}/buildroot/usr/lib/firmware/ath10k ${RUN_DIR}/buildroot/usr/lib/firmware/ath11k ${RUN_DIR}/buildroot/usr/lib/firmware/ath12k ${RUN_DIR}/buildroot/usr/lib/firmware/updates" ]]
 
 printf 'PASS mkosi package consumers are readable while download temporaries stay private\n'

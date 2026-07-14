@@ -217,9 +217,12 @@ state** under the staging dir (the host apt config is never touched).
   from mkosi's unprivileged local-repository helper. Containerized builds expose
   only those two consumer leaves through read-only bind mounts; mkosi never has
   to traverse the intentionally mode-`0700` persistent-runner checkout or staging
-  ancestors. Mode, mount, or rename failures fail closed and clean private
-  package-temporary artifacts, while package payload modes are unaffected. These
-  are Debian **Package** names — a
+  ancestors. The platform postinstall is deliberately non-chrooted so mkosi
+  exposes its `mkosi-install` wrapper; raw `apt-get` bypasses mkosi's ephemeral
+  `file:/repository` package-list state and is forbidden for this path. Mode,
+  mount, rename, or local-repository consumption failures fail closed and clean
+  private package-temporary artifacts, while package payload modes are
+  unaffected. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
   `gstlibuvch264src → gstreamer1.0-libuvch264src`.
