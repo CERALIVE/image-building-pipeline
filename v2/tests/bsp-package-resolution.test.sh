@@ -240,6 +240,28 @@ if (
 fi
 [[ -z "$(find "${TMP}/curl-checksum-mismatch" -maxdepth 1 -type f -print -quit)" ]]
 
+# Given curl's mktemp destination is 0600, when the verified package is published
+# to staging, then mkosi's sandboxed repository helper can read it as mode 0644.
+mkdir -p "${TMP}/curl-readable"
+build_test_deb "${TMP}/curl-readable.deb" demo 1.0 arm64
+chmod 600 "${TMP}/curl-readable.deb"
+curl_readable_sha="$(sha256sum "${TMP}/curl-readable.deb" | awk '{print $1}')"
+cat >"${TMP}/Packages.curl-readable" <<EOF
+Package: demo
+Version: 1.0
+Architecture: arm64
+Filename: pool/demo_1.0_arm64.deb
+SHA256: ${curl_readable_sha}
+EOF
+(
+  _BSP_DEBS="${TMP}/curl-readable"
+  _PKG_INDEX="${TMP}/Packages.curl-readable"
+  CURL_FIXTURE="${TMP}/curl-readable.deb"
+  curl() { mock_curl_copy_fixture "$@"; }
+  _fetch_bsp_curl_one demo=1.0
+)
+[[ "$(stat -c '%a' "${TMP}/curl-readable/demo_1.0_arm64.deb")" == 644 ]]
+
 # Given retained historical versions and Architecture: all firmware, when exact
 # reviewed pins are resolved for arm64, then every required record is unique.
 bsp_assert_index_specs "${TMP}/Packages.current-like" arm64 "${rock_specs[@]}"

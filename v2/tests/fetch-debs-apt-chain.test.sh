@@ -275,6 +275,10 @@ if [[ "${curl_staged_count}" -ne 5 ]]; then
 	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 5\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
+if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm -004 -print -quit | grep -q .; then
+	printf 'FAIL valid-curl-fallback-stages-first-party-debs: package is not sandbox-readable\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
 
 if run_fetch_first_party_curl "${RUN_DIR}/bad-signature/debs" "${curl_repo}" \

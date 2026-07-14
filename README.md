@@ -210,7 +210,9 @@ require both pinned Armbian signatures, and verify that plaintext identifies the
 configured suite, `main` component, and architecture. The curl path then requires
 one compatible (`arm64` or `all`) record for every exact `package=version` spec.
 Every staged package SHA-256 and Debian control package/version/architecture are
-verified. There is no fallback to another version, suite, architecture, or mirror.
+verified. Verified `.deb` archives are staged atomically as mode `0644`, which is
+required by mkosi's sandboxed local-repository helper. There is no fallback to
+another version, suite, architecture, or mirror.
 Families with `armbian_branch: none` omit Armbian from DRY_RUN and fail closed on
 a real BSP fetch until an authenticated, exact-versioned non-Armbian package
 source is implemented.

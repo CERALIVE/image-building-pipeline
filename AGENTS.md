@@ -211,7 +211,9 @@ state** under the staging dir (the host apt config is never touched).
   from `v2/manifests/first-party-deb-versions.txt`. Debian hosts use isolated `apt-get download`;
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
-  exact package files. These are Debian **Package** names — a
+  exact package files. Every verified `.deb` is normalized to mode `0644` before
+  its atomic staging rename so mkosi's sandboxed local-repository helper can read
+  it; package payload modes are unaffected. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
   `gstlibuvch264src → gstreamer1.0-libuvch264src`.
