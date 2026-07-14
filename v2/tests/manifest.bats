@@ -861,7 +861,7 @@ PY
   run grep -F 'prune_final_image_payload' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
 
-  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/platform/mkosi.postinst.chroot"
+  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
 
   run grep -F '/usr/lib/firmware/intel' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"

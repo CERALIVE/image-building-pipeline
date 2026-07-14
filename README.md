@@ -218,8 +218,11 @@ partitioned into mode-`0755` mkosi consumer directories with archive mode `0644`
 Those modes are explicit even under a restrictive runner umask because mkosi's
 sandboxed local-repository helper is unprivileged. Container builds mount only
 the BSP and first-party consumer leaves read-only, so private mode-`0700` runner
-checkout ancestors remain private without hiding packages from mkosi. Mode,
-mount, or rename failures fail closed and remove private package-temporary
+checkout ancestors remain private without hiding packages from mkosi. The
+platform postinstall is non-chrooted so mkosi exposes its `mkosi-install`
+wrapper; raw `apt-get` would miss the generated `file:/repository` and its
+ephemeral package-list state while installing the authenticated BSP. Mode, mount, rename, or local
+repository consumption failures fail closed and remove private package-temporary
 artifacts. There is no fallback to another version, suite, architecture, or
 mirror.
 Families with `armbian_branch: none` omit Armbian from DRY_RUN and fail closed on

@@ -7,7 +7,7 @@
 # SERIAL_CONSOLE / DTB_NAME / BOARD_ID from the manifest, and the platform layer is
 # the ONLY arch-specific layer (LAYER-MAP.md). The arch-neutral runtime layer must
 # NOT carry board tokens, so the board-keyed RAUC system.conf + boot backend belong
-# here, alongside the kernel/DTB/U-Boot BSP installed by mkosi.postinst.chroot.
+# here, alongside the kernel/DTB/U-Boot BSP installed by mkosi.postinst.
 #
 # WHY a finalize (host) not the chroot postinst: the boot integration source dir
 # (v2/mkosi/platform/boot/) lives in the repo, not the image. mkosi-chroot mounts
