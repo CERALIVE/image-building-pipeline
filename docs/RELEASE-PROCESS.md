@@ -18,14 +18,9 @@ rotation for the build-time apt secrets, and fleet OTA rollback.
 push to release/** or vX.Y.Z tag
         │
         ▼
-release.yml  ──workflow_call──▶  realhw-job.yml
-        │                              │
-        │                              ▼
-        │                    realhw-suite.sh on a REAL RK3588
-        │                    (boot/service, encode-path init,
-        │                     dev-loop sanity, RAUC A/B rollback)
+release.yml: admission + production build
         │
-        ▼  (once the gate is green)
+        ▼
 ./v2/build <board>  →  orchestrate.sh  →  build-bundle.sh
         │                                       │
         │                                       ▼
@@ -33,13 +28,17 @@ release.yml  ──workflow_call──▶  realhw-job.yml
         │                            verifies leaf→intermediate→root
         │
         ▼
-images/<board>/<ts>.raucb (+ .sha256)      ◀── MANUAL step from here down
+seal + upload one immutable candidate artifact
         │
         ▼
-operator uploads to R2  bundles/{channel}/{board}/<ts>.raucb
+realhw-job.yml: realhw-suite.sh on a REAL RK3588
+(boot/service, encode-path init, dev-loop sanity, RAUC A/B rollback)
+        │
+        ▼  (once the gate is green; MANUAL from here down)
+operator uploads images/<board>/<ts>.raucb (+ .sha256) to R2
         │
         ▼
-operator registers the artifact + rolls out via hawkBit
+operator registers bundles/{channel}/{board}/<ts>.raucb + rolls out via hawkBit
 (v2/fleet/hawkbit/provision.sh, platform-bridge.sh)
         │
         ▼
@@ -50,10 +49,11 @@ verification: preflash-verify.sh (pre-flash) + on-device
 rauc status / ceralive-healthcheck (post-install)
 ```
 
-The realhw gate runs **before** a human trusts the build enough to sign and
-ship it. Everything from "operator uploads to R2" onward is a manual,
-operator-driven step today — there is no committed workflow that does it for
-OS bundles. Section 5 spells out exactly why and exactly what to type.
+The production job signs and seals the exact candidate first so the physical
+real-HW gate tests the bytes that could ship. A human may publish those bytes
+only after that gate passes. Everything from "operator uploads" onward is a
+manual, operator-driven step today — there is no committed workflow that does
+it for OS bundles. Section 5 spells out exactly why and exactly what to type.
 
 ---
 
@@ -75,9 +75,16 @@ cross-repo source of truth in `CeraUI/docs/APT_VERSION_CONTROL.md`) governs what
 string goes in the tag and in `BUNDLE_VERSION` (§4).
 
 A workflow rerun for an existing tag always checks out that tag's original SHA.
-If a release fix lands after the tag, rotate any affected secret first and create
-a new CalVer tag at the fix's merge SHA; rerunning the old tag does not include
-the merged code.
+If a release fix lands after the tag, rotate any affected secret first; rerunning
+the old tag does not include the merged code. Merge the fix, push an untagged
+`release/**` branch at that exact merge SHA, and require both the production
+candidate and physical real-HW jobs to pass. Verify the successful run SHA equals
+the merge SHA, then create the next unused CalVer patch tag at that same proven
+commit. A new tag must not be the first production execution of a release-path
+repair, and an older tag is never moved or rerun to pick up the fix.
+
+For the resource failure after `v2026.7.2`, the only eligible next patch is
+`v2026.7.3`; never rerun or move `v2026.7.0`, `v2026.7.1`, or `v2026.7.2`.
 
 ---
 
@@ -87,7 +94,9 @@ the merged code.
 calls `realhw-job.yml` on the **self-hosted runner physically wired to an RK3588
 board** (`[self-hosted, ceralive-rk3588]`). The artifact name, artifact digest,
 raw filename, raw SHA-256, bundle, keyring, and candidate commit are all required
-workflow inputs.
+workflow inputs. The candidate job labels the upload action's bare hexadecimal
+digest as `sha256:<64 lowercase hex>` before passing it to the real-HW workflow,
+whose input contract rejects any other form.
 
 Steps, in order:
 
@@ -144,6 +153,32 @@ disk → write the bootloader gap → emit the signed `.raucb`). See
 [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2 for the full stage list and
 artifact layout.
 
+### Production builder admission
+
+The dedicated `ceralive-image-builder` runner must use the host's native Linux
+Docker daemon. The candidate job sets `DOCKER_CONTEXT=default`, and
+[`check-builder-resources.sh`](../v2/ci/check-builder-resources.sh) runs before
+BuildKit. It fails closed unless all of these are true:
+
+- `default` resolves to `unix:///var/run/docker.sock` and the daemon is not
+  Docker Desktop;
+- Docker reports at least 16 GiB daemon-visible memory;
+- the workflow-pinned `/proc/meminfo` reports at least 16 GiB combined
+  `MemAvailable` + `SwapFree`;
+- the checkout and Docker root each have at least 24 GiB free.
+
+These are admission floors for the production path, not a substitute for the
+full build or hardware gate. If admission fails, restore native-daemon access or
+free the reported resource and start a new candidate from the fixed commit. Do
+not increase a timeout, bypass the check, or rerun/move an existing immutable
+tag.
+
+The raw disk's large logical size is flash geometry, not transport size. The
+assembler creates it sparse; candidate sealing uses a same-filesystem hard link
+instead of a byte copy, and `actions/upload-artifact` compresses the candidate at
+explicit level 6. This keeps the raw bytes and SHA-256 unchanged while avoiding
+a second allocated raw during the upload window.
+
 ### Production build caches
 
 The candidate job persists only reusable build state; it never caches a
@@ -164,7 +199,8 @@ ownership to the runner so mode-700 mkosi entries remain cacheable. Image output
 `.staging`, QEMU state, apt credentials, and release artifacts are not cache
 inputs. These steps are guarded to release pushes/tags, and the trust-input
 step remains after cache restore and builder preparation; the production build,
-candidate sealing, and required real-HW workflow call are unchanged.
+candidate contents, and required real-HW workflow call are unchanged. Candidate
+sealing uses the same-filesystem hard link described above.
 
 Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
@@ -204,7 +240,30 @@ identity, keyring-policy, or live-signature check fails.
 (
 set -euo pipefail
 tmp="$(mktemp -d)"
-trap 'rm -rf "${tmp}"' EXIT
+r2_sidecar_created=0
+r2_bundle_created=0
+r2_pair_verified=0
+bundle_key=
+sha_key=
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if (( r2_pair_verified == 0 )); then
+    if (( r2_bundle_created == 1 )); then
+      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
+        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
+        printf 'WARNING: remove unverified R2 object manually: %s\n' "${bundle_key}" >&2
+    fi
+    if (( r2_sidecar_created == 1 )); then
+      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
+        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
+        printf 'WARNING: remove unverified R2 object manually: %s\n' "${sha_key}" >&2
+    fi
+  fi
+  rm -rf "${tmp}"
+  exit "${rc}"
+}
+trap cleanup EXIT
 install -d -m 0700 "${tmp}/gnupg"
 export GNUPGHOME="${tmp}/gnupg"
 
@@ -280,9 +339,10 @@ To promote a BSP version:
    live BSP fetch, and the release hardware gate before shipping a new immutable
    tag.
 
-If a tagged candidate fails, merge the fix and create the next unused CalVer
-patch tag at the merge SHA. Never move or rerun an older tag expecting it to pick
-up new code.
+If a tagged candidate fails, merge the fix and follow the §2 repair procedure:
+prove the exact merge SHA with an untagged `release/**` production candidate and
+physical real-HW pass, then create the next unused CalVer patch tag at that same
+commit. Never move or rerun an older tag expecting it to pick up new code.
 
 ### Signing (`build-bundle.sh`)
 
@@ -373,36 +433,130 @@ does yet.
 ### Operator steps (today, until this is automated)
 
 Until an `upload-bundle.sh` (or equivalent CI job) exists, publish a release
-bundle by hand, following the exact pattern `upload-addons.sh` already
-proves out for add-ons — same tool (`aws s3 cp` against the R2 S3-compatible
-endpoint), same trust-gate-first discipline, same per-file content-type
-pinning:
+bundle by hand from the exact candidate artifact that passed physical hardware.
+Do not select a local build by timestamp or "newest" ordering. The candidate
+contains the production bundle's original release filename and checksum; the
+GitHub artifact API binds that candidate to the successful run and merge SHA.
+After installing `gh`, `jq`, `unzip`, `rauc`, and the AWS CLI:
 
 ```bash
-# from the build host, after build-bundle.sh has produced + verified the bundle
+set -euo pipefail
+repo=CERALIVE/image-building-pipeline
+run_id=<successful-untagged-release-run-id>
+merge_sha=<full-merge-sha>
 board=rock-5b-plus
 channel=stable
-bundle_dir="v2/images/${board}"
-bundle="$(ls -t "${bundle_dir}"/*.raucb | head -1)"
-sha="${bundle}.sha256"
+approved_root=<path-to-operator-approved-production-root-ca.pem>
+artifact_name="rock-5b-plus-${merge_sha}"
+realhw_artifact_name="realhw-${board}-${run_id}"
 
-# sanity: never upload a bundle whose sha256 didn't verify in §4
-sha256sum -c "${sha}"
+# Bind publication to the successful workflow at the exact proven merge SHA.
+test "$(gh run view "${run_id}" --repo "${repo}" --json headSha --jq .headSha)" = "${merge_sha}"
+test "$(gh run view "${run_id}" --repo "${repo}" --json conclusion --jq .conclusion)" = success
+run_event="$(gh run view "${run_id}" --repo "${repo}" --json event --jq .event)"
+run_branch="$(gh run view "${run_id}" --repo "${repo}" --json headBranch --jq .headBranch)"
+run_workflow="$(gh run view "${run_id}" --repo "${repo}" --json workflowName --jq .workflowName)"
+test "${run_event}" = push
+[[ "${run_branch}" == release/* || "${run_branch}" == release-* ]]
+test "${run_workflow}" = 'Release candidate real-HW gate'
 
-aws s3 cp "${bundle}" \
-  "s3://${R2_BUCKET}/bundles/${channel}/${board}/$(basename "${bundle}")" \
-  --endpoint-url "${R2_ENDPOINT}" \
-  --content-type application/vnd.rauc.bundle
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+gh api "repos/${repo}/actions/runs/${run_id}/artifacts" > "${tmp}/artifacts.json"
+artifact_id="$(jq -er --arg name "${artifact_name}" '
+  [.artifacts[] | select(.name == $name and (.expired | not))]
+  | if length == 1 then .[0].id else error("expected exactly one live candidate artifact") end
+' "${tmp}/artifacts.json")"
+artifact_digest="$(gh api "repos/${repo}/actions/artifacts/${artifact_id}" --jq .digest)"
+artifact_sha="$(gh api "repos/${repo}/actions/artifacts/${artifact_id}" --jq .workflow_run.head_sha)"
+[[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+test "${artifact_sha}" = "${merge_sha}"
 
-aws s3 cp "${sha}" \
-  "s3://${R2_BUCKET}/bundles/${channel}/${board}/$(basename "${sha}")" \
-  --endpoint-url "${R2_ENDPOINT}" \
-  --content-type 'text/plain; charset=utf-8'
+# Select the physical acceptance evidence emitted by this same workflow run.
+realhw_artifact_id="$(jq -er --arg name "${realhw_artifact_name}" '
+  [.artifacts[] | select(.name == $name and (.expired | not))]
+  | if length == 1 then .[0].id else error("expected exactly one live real-HW evidence artifact") end
+' "${tmp}/artifacts.json")"
+realhw_artifact_digest="$(
+  gh api "repos/${repo}/actions/artifacts/${realhw_artifact_id}" --jq .digest
+)"
+realhw_artifact_sha="$(
+  gh api "repos/${repo}/actions/artifacts/${realhw_artifact_id}" --jq .workflow_run.head_sha
+)"
+[[ "${realhw_artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+test "${realhw_artifact_sha}" = "${merge_sha}"
+
+# Verify both exact GitHub artifact archives before inspecting the tested bytes.
+gh api -H 'Accept: application/vnd.github+json' \
+  "repos/${repo}/actions/artifacts/${artifact_id}/zip" > "${tmp}/candidate.zip"
+printf '%s  %s\n' "${artifact_digest#sha256:}" "${tmp}/candidate.zip" | sha256sum -c -
+mkdir "${tmp}/candidate"
+unzip -q "${tmp}/candidate.zip" -d "${tmp}/candidate"
+gh api -H 'Accept: application/vnd.github+json' \
+  "repos/${repo}/actions/artifacts/${realhw_artifact_id}/zip" > "${tmp}/realhw.zip"
+printf '%s  %s\n' "${realhw_artifact_digest#sha256:}" "${tmp}/realhw.zip" | sha256sum -c -
+mkdir "${tmp}/realhw"
+unzip -q "${tmp}/realhw.zip" -d "${tmp}/realhw"
+
+candidate="${tmp}/candidate"
+identity="${tmp}/realhw/candidate-identity.txt"
+expected_raw_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/raw.sha256")"
+[[ "${expected_raw_sha}" =~ ^[0-9a-f]{64}$ ]]
+grep -Fx "candidate_commit=${merge_sha}" "${identity}"
+grep -Fx "raw_sha256=${expected_raw_sha}" "${identity}"
+grep -Fx 'bundle_file=good.raucb' "${identity}"
+grep -Fx "artifact_digest=${artifact_digest}" "${identity}"
+grep -Fx 'pre_boot_media_identity=verified' "${identity}"
+grep -Fx 'post_boot_reconnect=verified' "${identity}"
+grep -Fx 'flash_transport=maskrom-rkdeveloptool' "${identity}"
+grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP' "${tmp}/realhw/realhw-suite.log"
+
+release_name="$(<"${candidate}/release-bundle-name.txt")"
+[[ "${release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
+( cd "${candidate}" && sha256sum -c good.raucb.sha256 )
+test -f "${approved_root}"
+test "$(openssl x509 -in "${approved_root}" -outform DER | sha256sum | cut -d' ' -f1)" = \
+  "$(openssl x509 -in "${candidate}/root-ca.pem" -outform DER | sha256sum | cut -d' ' -f1)"
+rauc info --keyring "${approved_root}" "${candidate}/good.raucb" >/dev/null
+
+bundle="${candidate}/good.raucb"
+sha="${tmp}/${release_name}.sha256"
+printf '%s  %s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)" "${release_name}" > "${sha}"
+bundle_key="bundles/${channel}/${board}/${release_name}"
+sha_key="${bundle_key}.sha256"
+bundle_md5="$(openssl dgst -md5 -binary "${bundle}" | base64 -w0)"
+sha_md5="$(openssl dgst -md5 -binary "${sha}" | base64 -w0)"
+
+# Create-only writes make an immutable-key collision fail with HTTP 412. Publish
+# the sidecar first so a second-write failure cannot expose a bundle without its
+# checksum; the trap removes only objects created by this invocation on failure.
+aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}" --body "${sha}" \
+  --endpoint-url "${R2_ENDPOINT}" --if-none-match '*' --content-md5 "${sha_md5}" \
+  --content-type 'text/plain; charset=utf-8' >/dev/null
+r2_sidecar_created=1
+aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}" --body "${bundle}" \
+  --endpoint-url "${R2_ENDPOINT}" --if-none-match '*' --content-md5 "${bundle_md5}" \
+  --content-type application/vnd.rauc.bundle >/dev/null
+r2_bundle_created=1
+
+# Do not register the release until the exact immutable pair reads back and the
+# published sidecar validates the published bundle.
+aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
+  --endpoint-url "${R2_ENDPOINT}" "${tmp}/${release_name}" >/dev/null
+aws s3api get-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
+  --endpoint-url "${R2_ENDPOINT}" "${tmp}/${release_name}.published.sha256" >/dev/null
+cmp "${bundle}" "${tmp}/${release_name}"
+cmp "${sha}" "${tmp}/${release_name}.published.sha256"
+( cd "${tmp}" && sha256sum -c "${release_name}.published.sha256" )
+r2_pair_verified=1
 ```
 
-`R2_BUCKET` / `R2_ENDPOINT` are the same two variables `upload-addons.sh` and
-`fetch-debs.sh`'s BSP path already use for R2 access — no new credential shape
-to provision.
+`R2_BUCKET` / `R2_ENDPOINT` use the same S3-compatible R2 endpoint shape as
+`upload-addons.sh`; provision them for the operator session together with the
+corresponding AWS credentials.
+The commands require an AWS CLI version whose `s3api put-object` supports
+`--if-none-match`. A collision or failed read-back aborts before hawkBit
+registration; never replace an existing release key.
 
 **Future work.** The natural next step is a `v2/lib/upload-bundle.sh` that
 mirrors `upload-addons.sh` line for line (require a `.sha256` sidecar present,
@@ -421,7 +575,7 @@ device is offered the update:
 ```bash
 cd v2/fleet/hawkbit
 set -a; source .env; set +a
-EXAMPLE_BUNDLE_FILE="$(basename "${bundle}")" ./provision.sh
+EXAMPLE_BUNDLE_FILE="${release_name}" ./provision.sh
 ```
 
 `provision.sh` creates the RAUC software-module type, registers the artifact

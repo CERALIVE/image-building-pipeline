@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 REPO="$(cd "${V2}/.." && pwd)"
 WORKFLOW="${WORKFLOW:-${REPO}/.github/workflows/release.yml}"
+RELEASE_DOC="${REPO}/docs/RELEASE-PROCESS.md"
 
 python3 - "${WORKFLOW}" <<'PY'
 from pathlib import Path
@@ -30,6 +31,9 @@ assert any(
 )
 assert any(step.get("id") == "upload" and step.get("uses") == "actions/upload-artifact@v7" for step in steps)
 assert candidate["outputs"]["artifact_name"].startswith("${{ steps.meta.outputs.")
+assert candidate["outputs"]["artifact_digest"] == "sha256:${{ steps.upload.outputs.artifact-digest }}", (
+    "BUG: upload-artifact emits bare hex but the real-HW consumer requires sha256:<hex>"
+)
 
 realhw = workflow["jobs"]["realhw"]
 assert realhw["needs"] == "candidate"
@@ -39,6 +43,65 @@ print("release workflow baseline characterization: PASS")
 print("candidate=production rock-5b-plus self-hosted builder")
 print("realhw=required workflow_call after candidate")
 print("artifact_upload=immutable candidate artifact")
+PY
+
+grep -Fq "test \"\${run_event}\" = push" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not reject non-push workflow events' >&2
+  exit 1
+}
+grep -Fq "[[ \"\${run_branch}\" == release/* || \"\${run_branch}\" == release-* ]]" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not reject tag and non-release branch runs' >&2
+  exit 1
+}
+grep -Fq "test \"\${run_workflow}\" = 'Release candidate real-HW gate'" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not require the production release workflow' >&2
+  exit 1
+}
+grep -Fq "realhw_artifact_name=\"realhw-\${board}-\${run_id}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not select the candidate-bound real-HW evidence' >&2
+  exit 1
+}
+grep -Fq "grep -Fx \"artifact_digest=\${artifact_digest}\" \"\${identity}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not bind hardware identity to the candidate digest' >&2
+  exit 1
+}
+grep -Fq "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not inspect the successful physical acceptance record' >&2
+  exit 1
+}
+grep -Fq "openssl x509 -in \"\${approved_root}\" -outform DER" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not pin the candidate to an approved production root' >&2
+  exit 1
+}
+grep -Fq "rauc info --keyring \"\${approved_root}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication verifies RAUC with an artifact-supplied root' >&2
+  exit 1
+}
+
+python3 - "${RELEASE_DOC}" <<'PY'
+from pathlib import Path
+import sys
+
+runbook = Path(sys.argv[1]).read_text()
+sidecar_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}"')
+bundle_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
+readback = runbook.index('aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
+verified = runbook.index('r2_pair_verified=1', readback)
+assert sidecar_put < bundle_put < readback < verified, (
+    "BUG: manual publication is not sidecar-first and read-back verified"
+)
+publication = runbook[sidecar_put:verified]
+assert publication.count("--if-none-match '*'") == 2, (
+    "BUG: manual publication can overwrite an immutable R2 key"
+)
+assert '--content-md5 "${sha_md5}"' in publication
+assert '--content-md5 "${bundle_md5}"' in publication
+assert 'cmp "${bundle}" "${tmp}/${release_name}"' in publication
+assert 'sha256sum -c "${release_name}.published.sha256"' in publication
+assert 'delete-object --bucket "${R2_BUCKET}"' in runbook, (
+    "BUG: a failed two-object publication leaves an unverified partial pair"
+)
+print("manual immutable R2 publication contract: PASS")
 PY
 
 python3 - "${WORKFLOW}" <<'PY'
@@ -54,6 +117,12 @@ candidate = workflow["jobs"]["candidate"]
 steps = candidate["steps"]
 job_env = candidate.get("env", {})
 assert job_env, "candidate job is missing release cache metadata"
+assert job_env.get("DOCKER_CONTEXT") == "default", (
+    "BUG: production candidate can inherit the interactive Docker Desktop context"
+)
+assert job_env.get("CERALIVE_RESOURCE_MEMINFO_FILE") == "/proc/meminfo", (
+    "BUG: production candidate can inherit a synthetic host-memory probe"
+)
 
 def step_index(predicate):
     return next(index for index, step in enumerate(steps) if predicate(step))
@@ -64,6 +133,7 @@ def require_guard(step):
     assert "github.ref" in condition, step
 
 meta_index = step_index(lambda step: step.get("id") == "cache-meta")
+resource_index = step_index(lambda step: step.get("name") == "Verify production builder resource budget")
 setup_index = step_index(lambda step: step.get("uses") == "docker/setup-buildx-action@v4")
 builder_index = step_index(lambda step: step.get("uses") == "docker/build-push-action@v7")
 trust_index = step_index(lambda step: step.get("name") == "Materialize release trust inputs")
@@ -72,8 +142,13 @@ restore_index = step_index(lambda step: step.get("uses") == "actions/cache/resto
 save_index = step_index(lambda step: step.get("uses") == "actions/cache/save@v6")
 bound_index = step_index(lambda step: step.get("name") == "Bound board-scoped mkosi cache")
 
-assert meta_index < setup_index < builder_index < trust_index < build_index
+assert meta_index < resource_index < setup_index < builder_index < trust_index < build_index
 assert restore_index < trust_index < build_index < bound_index < save_index
+
+resource_step = steps[resource_index]
+assert resource_step.get("run") == "./v2/ci/check-builder-resources.sh", (
+    "BUG: production candidate does not fail early on an unsafe daemon/resource budget"
+)
 
 setup = steps[setup_index]
 builder = steps[builder_index]
@@ -123,6 +198,25 @@ assert build_env["MKOSI_BUILDER_IMAGE"] == "${{ steps.cache-meta.outputs.builder
 assert "${{ secrets." not in str(job_env)
 assert "${{ secrets." not in str(restore.get("with", {}))
 assert "${{ secrets." not in str(save.get("with", {}))
+
+meta_run = steps[step_index(lambda step: step.get("id") == "meta")]["run"]
+assert 'ln "${raws[0]}" candidate/' in meta_run, (
+    "BUG: candidate staging allocates a second multi-GiB raw image instead of a hard link"
+)
+assert 'cp "${raws[0]}"' not in meta_run
+assert 'bundle_release_name="$(basename "${bundles[0]}")"' in meta_run, (
+    "BUG: the sealed candidate loses the production bundle's publish filename"
+)
+assert '( cd candidate && sha256sum good.raucb > good.raucb.sha256 )' in meta_run, (
+    "BUG: the hardware-tested bundle has no candidate-bound checksum sidecar"
+)
+assert 'candidate/release-bundle-name.txt' in meta_run, (
+    "BUG: manual publication cannot recover the hardware-tested bundle's release name"
+)
+upload = steps[step_index(lambda step: step.get("id") == "upload")]
+assert upload["with"].get("compression-level") == "6", (
+    "BUG: sparse candidate transport compression is not explicit"
+)
 
 bound_run = steps[bound_index]["run"]
 assert "du -sb" in bound_run

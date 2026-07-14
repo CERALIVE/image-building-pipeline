@@ -16,11 +16,13 @@ jobs:
   candidate:
     runs-on: [self-hosted, ceralive-image-builder]
     env:
+      DOCKER_CONTEXT: default
+      CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
       CERALIVE_MKOSI_CACHE_DIR: v2/mkosi/cache/rock-5b-plus
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
-      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact_digest: sha256:${{ steps.upload.outputs.artifact-digest }}
       raw_filename: ${{ steps.meta.outputs.raw_filename }}
       raw_sha256: ${{ steps.meta.outputs.raw_sha256 }}
       bundle_filename: ${{ steps.meta.outputs.bundle_filename }}
@@ -54,6 +56,8 @@ jobs:
             echo "mkosi_key=${mkosi_prefix}${MKOSI_SOURCE_KEY}"
             echo "mkosi_restore_prefix=${mkosi_prefix}"
           } >>"${GITHUB_OUTPUT}"
+      - name: Verify production builder resource budget
+        run: ./v2/ci/check-builder-resources.sh
       - name: Set up BuildKit
         if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
         uses: docker/setup-buildx-action@v4
@@ -118,11 +122,16 @@ jobs:
           mapfile -t bundles < <(find v2/images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
           mkdir candidate
-          cp "${raws[0]}" "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
+          ln "${raws[0]}" candidate/
+          cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
           cp "${bundles[0]}" candidate/good.raucb
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
           raw_name="$(basename "${raws[0]}")"; bundle_name=good.raucb
+          bundle_release_name="$(basename "${bundles[0]}")"
+          [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
           sha256sum "candidate/${raw_name}" > candidate/raw.sha256
+          ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
           {
             echo "artifact_name=rock-5b-plus-${GITHUB_SHA}"
             echo "raw_filename=${raw_name}"
@@ -137,6 +146,7 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 6
       - name: Bound board-scoped mkosi cache
         if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
         run: |

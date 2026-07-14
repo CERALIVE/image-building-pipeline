@@ -55,6 +55,13 @@ container (`v2/ci/Dockerfile`). It produces reproducible `.raw` sysext bundles a
 trixie+ host. See [`v2/docs/host-support.md`](v2/docs/host-support.md) for the
 full host matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon, WSL2).
 
+The protected production-candidate job has a stricter host contract than local
+development: it pins Docker's native Linux `default` context and fails before
+BuildKit unless the daemon exposes at least 16 GiB RAM, live memory plus swap
+headroom is at least 16 GiB, and both the workspace and Docker root have at
+least 24 GiB free. Docker Desktop is not a supported production runner daemon.
+See the production-runner section of the host matrix for the exact checks.
+
 See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
 
 Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB

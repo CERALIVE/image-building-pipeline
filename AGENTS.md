@@ -71,7 +71,7 @@ image-building-pipeline/
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
 | **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `v2/lib/verify-paseto-key-encodings.sh` |
-| **End-to-end release process** (trigger → realhw gate → sign → R2 upload → verify) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
+| **End-to-end release process** (build/sign → immutable candidate → real-HW gate → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
 | **apt.ceralive.tv build-credential rotation** (`APT_GPG_PUBLIC_B64`/`APT_CLIENT_CRT_B64`/`APT_CLIENT_KEY_B64`) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §7 |
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
@@ -329,6 +329,30 @@ release pushes/tags (the workflow has no pull-request trigger), and all
 production trust inputs are materialized after cache restore/build, so an
 untrusted PR cannot populate or consume this release cache path and secrets
 never enter a cache key or build context.
+
+**Production builder resource contract** [EXISTS]
+The protected candidate job pins `DOCKER_CONTEXT=default`; the context must
+resolve to the native Linux socket `unix:///var/run/docker.sock`, and the daemon
+must not identify as Docker Desktop. Before BuildKit or trust materialization,
+`v2/ci/check-builder-resources.sh` requires at least 16 GiB daemon-visible RAM,
+16 GiB combined `MemAvailable` + `SwapFree` from the workflow-pinned
+`/proc/meminfo`, and 24 GiB free on both the workspace and Docker-root
+filesystems. A pressure or topology failure aborts before package fetch/build
+instead of risking a kernel OOM and runner restart.
+
+After a failed immutable candidate exposes a release-path defect, merge its fix
+before proving it: push an untagged `release/**` branch at the exact merge SHA,
+require the production candidate and physical real-HW jobs to pass, then create
+the next unused patch tag at that same proven commit. Never use a new tag as the
+first production execution of the repair, and never move or rerun the failed tag.
+
+The Rock 5B+ raw's 14,800 MiB logical geometry is intentional and starts sparse.
+Candidate sealing hard-links that immutable raw into the repo-local `candidate/`
+directory, so staging does not allocate a second multi-GiB copy; artifact upload
+uses explicit zlib compression level 6. Keep the candidate directory on the same
+filesystem, and do not replace the hard link with `cp`. Regression coverage is
+in `v2/tests/builder-resource-budget.test.sh` and
+`v2/tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one

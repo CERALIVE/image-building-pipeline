@@ -62,12 +62,13 @@ mapfile -t armbian_fingerprints < <(
   'DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 8CFA83D13EB2181EEF5843E41EB30FAF236099FE' ]]
 awk '
   /^### Armbian archive keyring rotation$/ { section=1; next }
-  section && /^```bash$/ { block=1; next }
+  section && !done && /^```bash$/ { block=1; next }
+  block && /^```$/ { block=0; done=1; next }
   block && /^\($/ { open=NR }
   block && /^set -euo pipefail$/ { strict=NR }
   block && /gh secret set ARMBIAN_APT_KEYRING_B64/ { update=NR }
   block && /^\)$/ { closed=NR }
-  END { exit !(open && strict == open + 1 && update > strict && closed > update) }
+  END { exit !(done && open && strict == open + 1 && update > strict && closed > update) }
 ' "${RELEASE_DOC}"
 
 mkdir "${TMP}/bin"
