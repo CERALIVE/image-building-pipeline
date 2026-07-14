@@ -165,12 +165,6 @@ clean_package_download_metadata() {
 
 prune_final_image_payload() {
   local -a paths=(
-    /usr/lib/firmware/qcom
-    /usr/lib/firmware/intel
-    /usr/lib/firmware/ath10k
-    /usr/lib/firmware/ath11k
-    /usr/lib/firmware/ath12k
-    /usr/lib/firmware/updates
     /usr/share/X11
     /usr/share/bash-completion
     /usr/share/gtk-3.0
@@ -181,7 +175,7 @@ prune_final_image_payload() {
     /usr/share/sounds
     /usr/share/zoneinfo/right
   )
-  log "pruning non-RK3588 firmware and desktop/documentation payload from final appliance image"
+  log "pruning desktop and documentation payload from final appliance image"
   rm -rf "${paths[@]}"
 }
 

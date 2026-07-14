@@ -99,10 +99,24 @@ old_fpr="$(generate_signing_key 'Armbian historical fixture <old@example.invalid
 new_fpr="$(generate_signing_key 'Armbian rotation fixture <new@example.invalid>')"
 unknown_fpr="$(generate_signing_key 'Unrelated fixture <unknown@example.invalid>')"
 
-printf 'Origin: Armbian\nSuite: bookworm\n' >"${TMP}/Release"
+cat >"${TMP}/Release" <<'EOF'
+Origin: Armbian
+Suite: bookworm
+Codename: bookworm
+Architectures: all amd64 arm64
+Components: main
+SHA256:
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 123 main/binary-arm64/Packages.gz
+EOF
 gpg --batch --quiet --yes --homedir "${GPG_HOME}" --pinentry-mode loopback \
   --passphrase '' --local-user "${old_fpr}" --local-user "${new_fpr}" \
   --digest-algo SHA512 --clearsign --output "${TMP}/InRelease.dual" "${TMP}/Release"
+gpg --batch --quiet --yes --homedir "${GPG_HOME}" --pinentry-mode loopback \
+  --passphrase '' --local-user "${old_fpr}" --digest-algo SHA512 \
+  --clearsign --output "${TMP}/InRelease.old" "${TMP}/Release"
+gpg --batch --quiet --yes --homedir "${GPG_HOME}" --pinentry-mode loopback \
+  --passphrase '' --local-user "${new_fpr}" --digest-algo SHA512 \
+  --clearsign --output "${TMP}/InRelease.new" "${TMP}/Release"
 gpg --batch --quiet --yes --homedir "${GPG_HOME}" --pinentry-mode loopback \
   --passphrase '' --local-user "${unknown_fpr}" --digest-algo SHA512 \
   --clearsign --output "${TMP}/InRelease.unknown" "${TMP}/Release"
@@ -175,17 +189,68 @@ for key_state in r e i d; do
   fi
 done
 
-if ! auth_verify_release_signature "${TMP}/combined.gpg" "${TMP}/InRelease.dual"; then
+if ! auth_verify_release_to_file \
+    "${TMP}/combined.gpg" "${TMP}/InRelease.dual" "${TMP}/Release.verified" \
+    "${old_fpr}" "${new_fpr}"; then
   printf 'dual-signed InRelease was rejected by the exact two-key keyring\n' >&2
   exit 1
 fi
+cmp "${TMP}/Release" "${TMP}/Release.verified"
+auth_release_has_identity "${TMP}/Release.verified" bookworm main arm64
+verified_hash="$(awk '$3=="main/binary-arm64/Packages.gz" { print $1 }' \
+  "${TMP}/Release.verified")"
+[[ "${verified_hash}" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]
+
+cat >"${TMP}/unsigned-prefix" <<'EOF'
+Suite: trixie
+Architectures: riscv64
+Components: hostile
+SHA256:
+ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 123 main/binary-arm64/Packages.gz
+EOF
+cat "${TMP}/unsigned-prefix" "${TMP}/InRelease.dual" >"${TMP}/InRelease.prefixed"
+auth_verify_release_to_file \
+  "${TMP}/combined.gpg" "${TMP}/InRelease.prefixed" "${TMP}/Release.prefixed.verified" \
+  "${old_fpr}" "${new_fpr}"
+cmp "${TMP}/Release" "${TMP}/Release.prefixed.verified"
+
+native_state="${TMP}/native-apt-state"
+mkdir -p "${native_state}/lists"
+cp "${TMP}/InRelease.dual" \
+  "${native_state}/lists/apt.armbian.com_dists_bookworm_InRelease"
+if ! (
+  # shellcheck source=../lib/fetch-debs.sh
+  source "${FETCH}"
+  bsp_verify_native_release \
+    "${native_state}" "${TMP}/combined.gpg" bookworm main arm64 \
+    "${old_fpr}" "${new_fpr}"
+); then
+  printf 'native apt cached dual-signed InRelease was rejected\n' >&2
+  exit 1
+fi
+cp "${TMP}/InRelease.old" \
+  "${native_state}/lists/apt.armbian.com_dists_bookworm_InRelease"
+if (
+  # shellcheck source=../lib/fetch-debs.sh
+  source "${FETCH}"
+  bsp_verify_native_release \
+    "${native_state}" "${TMP}/combined.gpg" bookworm main arm64 \
+    "${old_fpr}" "${new_fpr}"
+); then
+  printf 'native apt accepted an InRelease missing one required signature\n' >&2
+  exit 1
+fi
+
 for failure in \
   'old-only.gpg InRelease.dual' \
   'new-only.gpg InRelease.dual' \
+  'combined.gpg InRelease.old' \
+  'combined.gpg InRelease.new' \
   'combined.gpg InRelease.unknown' \
   'combined.gpg InRelease.malformed'; do
   read -r keyring inrelease <<<"${failure}"
-  if auth_verify_release_signature "${TMP}/${keyring}" "${TMP}/${inrelease}"; then
+  if auth_verify_release_signature \
+      "${TMP}/${keyring}" "${TMP}/${inrelease}" "${old_fpr}" "${new_fpr}"; then
     printf 'invalid Armbian signature case was accepted: %s\n' "${failure}" >&2
     exit 1
   fi

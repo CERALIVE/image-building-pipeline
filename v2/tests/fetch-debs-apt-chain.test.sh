@@ -113,7 +113,28 @@ chmod 755 "${FAKE_CURL_BIN}/curl"
 cat >"${FAKE_CURL_BIN}/gpgv" <<'SH'
 #!/usr/bin/env bash
 [[ "${FAKE_GPGV_MODE:-ok}" == ok ]] || exit 1
-exit 0
+out=""
+inrelease=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--status-fd|--keyring)
+			shift 2
+			;;
+		--output)
+			out="$2"
+			shift 2
+			;;
+		-*)
+			shift
+			;;
+		*)
+			inrelease="$1"
+			shift
+			;;
+	esac
+done
+[[ -n "${out}" && -n "${inrelease}" ]] || exit 2
+cp "${inrelease}" "${out}"
 SH
 chmod 755 "${FAKE_CURL_BIN}/gpgv"
 

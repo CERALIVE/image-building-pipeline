@@ -650,7 +650,9 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"resolved: family=x86_64 arch=x86-64 (mkosi=x86-64)"* ]]
   [[ "$output" == *"channel=stable arch=amd64"* ]]
-  assert_bsp_architecture_plan amd64
+  [[ "$output" == *"non-Armbian family: BSP fetch omitted from DRY_RUN plan"* ]]
+  [[ "$output" != *"DRY-RUN would write Armbian source:"* ]]
+  [[ "$output" != *"https://apt.armbian.com"* ]]
   [[ "$output" == *"first-party source: https://apt.ceralive.tv/dists/stable/binary-amd64/"* ]]
   [[ "$output" == *"APT::Architecture=amd64"* ]]
   [[ "$output" != *"binary-arm64"* ]]
@@ -855,12 +857,15 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "size-gate: final app layer prunes headless RK3588-irrelevant payload" {
+@test "size-gate: platform prunes RK3588 firmware and final app prunes headless payload" {
   run grep -F 'prune_final_image_payload' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
 
-  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  run grep -F '/usr/lib/firmware/qcom' "$V2/mkosi/mkosi.images/platform/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
+
+  run grep -F '/usr/lib/firmware/intel' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  [ "$status" -ne 0 ]
 
   run grep -F '/usr/share/icons/Adwaita' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
@@ -1437,13 +1442,13 @@ build_feature_fixture() {
 
 # ===========================================================================
 # 15. BSP provenance + advisory kernel drift-guard (Task 3).
-#     fetch-debs.sh records the floating kernel BSP's resolved version + content
-#     sha256 into a gitignored bsp-provenance.json, and runs an ADVISORY drift
-#     guard against the committed v2/manifests/bsp-baseline.json. The guard is
-#     never fatal (always exit 0); it compares the CONTENT hash (not just the
-#     version) so a same-version re-spin is still caught, and seeds the baseline
-#     on first run. These tests source the fetch helpers directly (main is
-#     BASH_SOURCE-guarded) and drive the guard with synthetic version/hash inputs
+#     fetch-debs.sh records the exact-versioned kernel BSP's resolved version +
+#     content sha256 into a gitignored bsp-provenance.json, then runs a drift
+#     guard against the committed v2/manifests/bsp-baseline.json. It warns by
+#     default and is fatal only with BSP_DRIFT_STRICT=1; it compares the CONTENT
+#     hash (not just the version), so a same-version re-spin is still caught, and
+#     seeds the baseline on first run. These tests source the fetch helpers
+#     directly and drive the guard with synthetic version/hash inputs
 #     — no apt, no real .deb — so they fit this UNIT suite.
 # ===========================================================================
 
@@ -1929,7 +1934,9 @@ run_paseto_provision() {
 
 @test "fetch-debs BSP set deduplicates the first family package against board overrides" {
   local family="$BATS_TEST_TMPDIR/family.yaml"
+  local pins="$BATS_TEST_TMPDIR/bsp-versions.txt"
   cat >"$family" <<'YAML'
+armbian_branch: vendor
 kernel_packages:
   - linux-image-test
 dtb_packages:
@@ -1940,10 +1947,17 @@ firmware_packages:
 hw_accel_gstreamer_plugins: []
 gstreamer_runtime_packages: []
 YAML
+  cat >"$pins" <<'PINS'
+linux-image-test=1.0
+linux-dtb-test=1.0
+firmware-test=1.0
+u-boot-test=1.0
+PINS
 
-  run bash -c "{ export DRY_RUN=1 KERNEL_PACKAGES=linux-image-test DTB_PACKAGES=linux-dtb-test UBOOT_PACKAGES=u-boot-test FIRMWARE_PACKAGES=firmware-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  run bash -c "{ export DRY_RUN=1 BSP_DEB_VERSIONS_FILE='$pins' KERNEL_PACKAGES=linux-image-test DTB_PACKAGES=linux-dtb-test UBOOT_PACKAGES=u-boot-test FIRMWARE_PACKAGES=firmware-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"(4 pkgs): linux-image-test linux-dtb-test firmware-test u-boot-test"* ]]
+  [[ "$output" == *"BSP apt specs: linux-image-test=1.0 linux-dtb-test=1.0 firmware-test=1.0 u-boot-test=1.0"* ]]
 }
 
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {

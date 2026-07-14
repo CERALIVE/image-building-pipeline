@@ -73,7 +73,7 @@ overlaps the new B-slot extent; they cannot be converted by OTA.
 │   ├── build              # Entry point: ./v2/build <board>
 │   ├── ci/
 │   │   └── Dockerfile     # Pinned trixie-slim builder (mkosi 26)
-│   ├── manifests/         # Board and family manifests + add-on descriptors
+│   ├── manifests/         # Board/family manifests, package pins, add-on descriptors
 │   ├── lib/               # Orchestrator, assembler, bundle scripts,
 │   │   │                  #   build-all.sh (parallel runner),
 │   │   │                  #   build-feature-sysext.sh (add-on builder)
@@ -178,7 +178,7 @@ Every build runs `v2/lib/measure-size.sh`. If the rootfs content's apparent size
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
 strip, `WithDocs=no`, firmware audit).
 
-## BSP Provenance + Advisory Drift-Guard
+## BSP Package Pins, Provenance + Advisory Drift-Guard
 
 Armbian BSP metadata is accepted only with a public keyring whose primary-key
 fingerprints are exactly the current dual-signing transition set:
@@ -189,20 +189,32 @@ fails before apt runs. The SHA-pinned official key sources, identities, live
 `InRelease` check, and stdin-only GitHub secret update are documented in
 [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §4.
 
-The kernel BSP floats (name-based `linux-image-vendor-rk35xx`, **no version pin**),
-so every build records what it actually fetched. After the BSP fetch,
-`v2/lib/fetch-debs.sh` writes the kernel package's resolved version + content
-`sha256` to `bsp-provenance.json` in the image output dir (gitignored, never
-committed), then runs an **advisory** drift-guard against the committed baseline
-`v2/manifests/bsp-baseline.json`.
+Family manifests select BSP package names; the reviewed exact Debian versions
+live in `v2/manifests/armbian-bsp-deb-versions.txt`. Before downloading anything,
+both native apt and curl paths extract `gpgv`'s verified Release plaintext,
+require both pinned Armbian signatures, and verify that plaintext identifies the
+configured suite, `main` component, and architecture. The curl path then requires
+one compatible (`arm64` or `all`) record for every exact `package=version` spec.
+Every staged package SHA-256 and Debian control package/version/architecture are
+verified. There is no fallback to another version, suite, architecture, or mirror.
+Families with `armbian_branch: none` omit Armbian from DRY_RUN and fail closed on
+a real BSP fetch until an authenticated, exact-versioned non-Armbian package
+source is implemented.
+
+After the BSP fetch, `v2/lib/fetch-debs.sh` writes the kernel package's resolved
+version + content `sha256` to `bsp-provenance.json` in the image output dir
+(gitignored, never committed), then runs the content drift-guard against the
+committed baseline `v2/manifests/bsp-baseline.json`.
 
 - A differing version **or** a same-version content-hash re-spin prints a
-  `BSP drift` warning — but the guard is **never fatal** (`exit 0` always). The BSP
-  stays floating; this is observability, not a pin.
+  `BSP drift` warning. It is warn-only by default; `BSP_DRIFT_STRICT=1` makes a
+  mismatch against a seeded baseline fatal.
 - The baseline is seeded with the reviewed Armbian 26.5.1 kernel package version
-  and SHA-256; promotion requires an explicit baseline update.
+  and SHA-256. A package promotion requires an authenticated signed-index review
+  and explicit updates to the version registry and kernel baseline.
 - The provenance artifact is deliberately **excluded** from the build-plan `sha256`
-  determinism comparison (the float would otherwise break reproducibility).
+  determinism comparison; that comparison hashes the normalized plan, not build
+  output files.
 
 ## OTA-During-Stream Guard
 
@@ -228,8 +240,8 @@ modem source-routing, the M.2 SIM-detection quirk, and the known-good modem
 table) is documented as-is in
 [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md).
 
-Because the kernel BSP floats (name-only pin, no version pin), a silent Armbian
-re-spin could drop one of the six WWAN kernel modules the modem stack binds to
+Because an upstream repository can replace package bytes under the same Debian
+version, a same-version Armbian re-spin could drop one of the six WWAN kernel modules the modem stack binds to
 (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`) with no
 signal. `v2/lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted
 module tree) and reports each module as loadable (`=m`), built-in (`=y`, in

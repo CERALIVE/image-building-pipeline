@@ -92,9 +92,12 @@ regression that violates the "do not drop firmware the board needs" constraint.
 
 `armbian-firmware` is also already the **trimmed** Armbian variant — it is *not*
 `armbian-firmware-full`. The package still carries firmware for unrelated SoC
-families. The final app layer keeps the Armbian package installed for provenance and
-board WiFi/BT coverage, but prunes firmware directories that are irrelevant to this
-headless RK3588 image (`qcom`, `intel`, `ath10k`, `ath11k`, `ath12k`, `updates`).
+families. The RK3588 platform layer keeps the Armbian package installed for
+provenance and board WiFi/BT coverage, but prunes firmware directories that are
+irrelevant to this platform (`qcom`, `intel`, `ath10k`, `ath11k`, `ath12k`,
+`updates`). The architecture-identical app layer prunes only desktop and
+documentation payload, so it cannot delete architecture-specific firmware when
+a non-Armbian platform path stages it.
 
 ### Size impact *(estimate)*
 

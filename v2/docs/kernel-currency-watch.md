@@ -1,6 +1,7 @@
 # Kernel Currency Watch: Vendor 6.1 Lock + Revisit Triggers
 
 **Decision recorded:** vendor BSP 6.1 + Rockchip MPP — no migration.
+**Selection mechanism:** exact BSP Debian versions ([`v2/manifests/armbian-bsp-deb-versions.txt`](../manifests/armbian-bsp-deb-versions.txt)).
 **Visibility mechanism:** BSP provenance/drift-guard ([`v2/manifests/bsp-baseline.json`](../manifests/bsp-baseline.json), Task 3).
 
 ---
@@ -44,18 +45,20 @@ Neither is close to firing today.
 that retains full MPP support, AND integrators (Armbian, JetKVM, or equivalent)
 adopt it in a stable track.
 
-**Signal to watch:** the BSP drift-guard (`bsp_drift_check` in
-`v2/lib/fetch-debs.sh`) will surface a version bump when Armbian re-spins the
-`linux-image-vendor-rk35xx` package. A jump from 6.1.x to 6.12.x in the
-provenance log is the concrete indicator.
+**Signal to watch:** current, dual-signed Armbian metadata contains a reviewed
+`linux-image-vendor-rk35xx` version whose kernel jumps from 6.1.x to 6.12.x.
+Promoting it requires an explicit change to
+`armbian-bsp-deb-versions.txt` and `bsp-baseline.json`; an ordinary build never
+silently adopts it. The provenance log confirms the concrete version and bytes.
 
 ## Drift-Guard Exit Policy + Strict-Gate Promotion Criterion
 
 `bsp_drift_check` is **warn-only by default** and **strict on opt-in** (C6b):
 
 - **Default** (`BSP_DRIFT_STRICT` unset or ≠ `1`) — drift prints the `BSP drift`
-  banner and returns **exit 0**. The build continues; the BSP stays floating. This
-  is the historical, byte-for-byte behavior.
+  banner and returns **exit 0**. The build continues with the exact selected
+  version; this warns about a content replacement or a deliberate pin/baseline
+  mismatch.
 - **`BSP_DRIFT_STRICT=1`** — a real version/hash mismatch against a **seeded**
   baseline returns **non-zero**, failing the build. The seeding run (unseeded /
   first run) and a clean match are **always exit 0** regardless of the flag, so a
@@ -71,9 +74,8 @@ hold first:
 2. **Fleet manifest clean** — a fleet manifest run confirms every board resolves to
    that same known-good BSP with no outstanding drift.
 
-Until both are true, strict-by-default would fail green builds on the very first
-authenticated fetch. When both hold, a future change flips the default (and this
-section records the flip).
+When both hold, a future change flips the default (and this section records the
+flip).
 
 ### Trigger 2 — Mainline lands a frozen V4L2 stateless H.265 ENCODE uAPI + VEPU580 driver
 

@@ -53,12 +53,31 @@ auth_lookup_package() {
         else if ($i ~ /^Filename: /) filename=substr($i,11)
         else if ($i ~ /^SHA256: /) sha=substr($i,9)
       }
-      if (pkg==want_pkg && a==want_arch && (want_version=="" || ver==want_version) && filename!="" && sha!="")
+      if (pkg==want_pkg && (a==want_arch || a=="all") && (want_version=="" || ver==want_version) && filename!="" && sha!="")
         printf "%s\t%s\t%s\n", filename, sha, ver
     }
   ' "${index}")"
   [[ "$(grep -c . <<<"${rows}")" -eq 1 ]] || return 1
   printf '%s\n' "${rows}"
+}
+
+auth_release_has_identity() {
+  local release="$1" suite="$2" component="$3" arch="$4"
+  awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" '
+    $1=="Suite:" { suite_count++; suite=$2 }
+    $1=="Architectures:" {
+      architectures_count++
+      for (i=2; i<=NF; i++) if ($i==want_arch) has_arch=1
+    }
+    $1=="Components:" {
+      components_count++
+      for (i=2; i<=NF; i++) if ($i==want_component) has_component=1
+    }
+    END {
+      exit !(suite_count==1 && architectures_count==1 && components_count==1 &&
+             suite==want_suite && has_arch && has_component)
+    }
+  ' "${release}"
 }
 
 auth_verify_file() {
@@ -67,9 +86,68 @@ auth_verify_file() {
   [[ "${actual}" == "${expected}" ]]
 }
 
+auth_verify_release_to_file() {
+  local keyring="$1" inrelease="$2" verified_release="$3"
+  shift 3
+  local work status plaintext actual expected fingerprint
+  work="$(mktemp -d "$(dirname "${verified_release}")/.release-verify.XXXXXX")"
+  status="${work}/status"
+  plaintext="${work}/Release"
+
+  if ! gpgv --status-fd 3 --keyring "${keyring}" --output "${plaintext}" \
+      "${inrelease}" 3>"${status}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  if [[ ! -s "${plaintext}" ]]; then
+    rm -rf "${work}"
+    return 1
+  fi
+
+  if (( $# > 0 )); then
+    for fingerprint in "$@"; do
+      [[ "${fingerprint}" =~ ^[A-F0-9]{40}$ ]] || {
+        rm -rf "${work}"
+        return 1
+      }
+    done
+    actual="$(awk '
+      $2=="VALIDSIG" {
+        fingerprint=$NF
+        if (fingerprint !~ /^[A-Fa-f0-9]{40}$/) fingerprint=$3
+        if (fingerprint ~ /^[A-Fa-f0-9]{40}$/) print toupper(fingerprint)
+      }
+    ' "${status}" | LC_ALL=C sort -u)" || {
+      rm -rf "${work}"
+      return 1
+    }
+    expected="$(printf '%s\n' "$@" | LC_ALL=C sort -u)" || {
+      rm -rf "${work}"
+      return 1
+    }
+    if [[ -z "${actual}" || "${actual}" != "${expected}" ]]; then
+      rm -rf "${work}"
+      return 1
+    fi
+  fi
+
+  if ! mv -f "${plaintext}" "${verified_release}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  rm -rf "${work}"
+}
+
 auth_verify_release_signature() {
-  local keyring="$1" inrelease="$2"
-  gpgv --keyring "${keyring}" "${inrelease}" >/dev/null
+  local keyring="$1" inrelease="$2" verified_release
+  shift 2
+  verified_release="$(mktemp)"
+  if ! auth_verify_release_to_file \
+      "${keyring}" "${inrelease}" "${verified_release}" "$@"; then
+    rm -f "${verified_release}"
+    return 1
+  fi
+  rm -f "${verified_release}"
 }
 
 main() {

@@ -3,8 +3,8 @@
 # check-wwan-modules.sh — ADVISORY build-time WWAN kernel-module presence check.
 #
 # The cellular datapath needs six WWAN kernel modules to enumerate USB/M.2 LTE/5G
-# modems (see v2/docs/modem-matrix.md). The kernel BSP floats (Decision D3 — no
-# version pin), so a silent Armbian re-spin could drop a module with no signal.
+# modems (see v2/docs/modem-matrix.md). The kernel BSP is exact-versioned, but a
+# same-version Armbian re-spin could still drop a module without this signal.
 # This check inspects the kernel .deb (or an already-extracted module tree) and
 # reports which of the six ship, distinguishing:
 #   * loadable (=m)  — a <mod>.ko[.xz|.gz|.zst] file under lib/modules/.../kernel/

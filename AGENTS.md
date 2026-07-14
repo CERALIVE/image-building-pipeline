@@ -20,7 +20,7 @@ image-building-pipeline/
 │   ├── build                 # entry point: ./v2/build <board>
 │   ├── ci/
 │   │   └── Dockerfile        # pinned debian:trixie-slim builder (mkosi 26)
-│   ├── manifests/            # board and family manifests + package lists
+│   ├── manifests/            # board/family manifests + exact package registries
 │   │   └── schema/
 │   │       └── addon.schema.json   # add-on descriptor JSON Schema (T21)
 │   ├── lib/                  # orchestrate.sh, assemble-disk.sh, build-bundle.sh,
@@ -55,6 +55,7 @@ image-building-pipeline/
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
+| Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats` and `v2/tests/rk3588-ab-contract.bats` via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
@@ -234,20 +235,38 @@ state** under the staging dir (the host apt config is never touched).
   auto-enables DRY_RUN (no credential for a verified fetch).
 - **BSP fetch is authenticated** — kernel/DTB/U-Boot/firmware/GStreamer come
   from signed Armbian metadata, with the exact archive-key fingerprint set and
-  all content hashes checked before staging. The current transition set is the
+  all content hashes checked before staging. Family manifests select package
+  names; `v2/manifests/armbian-bsp-deb-versions.txt` supplies the exact Debian
+  versions. Both native apt and curl fetches re-verify the downloaded InRelease
+  with `gpgv`, require signatures from both pinned archive keys, and validate the
+  signed suite/component/architecture identity before any package download. The
+  curl path parses only that verified Release plaintext and preflights every
+  exact spec. The
+  current transition set is the
   historical `DF00FAF1C577104B50BF1D0093D6889F9F0E78D5` key plus repository key
   `8CFA83D13EB2181EEF5843E41EB30FAF236099FE`; missing or additional primary keys,
   unusable primary/subkey states, and keyring parsing or normalization failures
   fail before apt runs. Source pins and the stdin-only secret rotation procedure
   are in [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §4.
+- **Non-Armbian package staging is fail-closed** — a family with
+  `armbian_branch: none` emits no Armbian fetch in DRY_RUN and a real `fetch_bsp`
+  invocation fails until an authenticated, exact-versioned Debian BSP source is
+  implemented. The x86 disk/boot assembly exists, but its production Debian
+  kernel/firmware staging path remains [GREENFIELD]; Armbian must not be used as
+  an accidental substitute.
 
-**BSP provenance + advisory kernel drift-guard** [EXISTS]
+**Exact BSP package pins + advisory kernel content drift-guard** [EXISTS]
 
-The kernel BSP floats (Decision D3 — name-based `linux-image-vendor-rk35xx`, **no
-version pin**), so a silent Armbian re-spin can change the image with no signal.
-`fetch_bsp` authenticates the exact Armbian archive-key fingerprint set, verifies
-`InRelease`, verifies the `Packages.gz` digest from signed metadata, and verifies
-every staged package SHA-256. It also makes the kernel float observable:
+Decision D3 still selects the vendor branch through package names such as
+`linux-image-vendor-rk35xx`; exact Debian versions for every required BSP package
+are committed in `v2/manifests/armbian-bsp-deb-versions.txt`. `fetch_bsp`
+authenticates the exact Armbian archive-key fingerprint set, verifies `InRelease`
+and its configured suite/`main`/architecture identity, verifies the `Packages.gz`
+digest from signed metadata, preflights the complete exact package set, and
+verifies every staged package SHA-256. `Architecture: all` is compatible with a
+target architecture; a stale version, wrong suite/architecture, ambiguous record,
+or partial package set fails closed without fallback. It also makes an upstream
+same-version content replacement observable:
 
 - **Provenance capture** — after the real BSP fetch, `bsp_capture_provenance`
   records the kernel package's exact resolved **version string** + **content
@@ -255,8 +274,7 @@ every staged package SHA-256. It also makes the kernel float observable:
   the **kernel BSP package only** — provenance is deliberately not widened to the
   rest of the BSP set. The artifact is **gitignored, never committed**, and
   deliberately **excluded from the build-matrix `sha256` determinism comparison**
-  (that job hashes the normalized build-plan string, never a file tree — the
-  floating BSP would otherwise break determinism).
+  (that job hashes the normalized build-plan string, never a file tree).
 - **Drift-guard (warn-default, strict opt-in, C6b)** — `bsp_drift_check` compares
   the captured version+hash against the committed baseline
   `v2/manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
@@ -273,8 +291,8 @@ every staged package SHA-256. It also makes the kernel float observable:
 - **First-run / seeded baseline** — a new scaffold may start with `version` and
   `sha256` as `null`; the first authenticated real build seeds the baseline with
   the actual values, emits an informational note, and exits 0. Commit that seeded
-  value to set the known-good reference. This is **advisory only — never a hard
-  pin** (no `=<ver>` in the fetch, manifests, or `versions.yaml`). Proof:
+  value to set the known-good content reference. Exact package selection remains
+  governed by `armbian-bsp-deb-versions.txt`. Proof:
   `v2/run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
@@ -398,8 +416,8 @@ source-routing, the M.2 SIM quirk, and the known-good modem table) is documented
 as-is in [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md). That runtime stack
 is **not** touched here — the doc only describes it.
 
-Because the kernel BSP floats (Decision D3 — name-only pin, no version pin), a
-silent Armbian re-spin could drop one of the six WWAN modules the modem stack
+Because an upstream repository can replace bytes under the same Debian package
+version, a same-version Armbian re-spin could drop one of the six WWAN modules the modem stack
 binds to (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`)
 with no signal. `v2/lib/check-wwan-modules.sh` makes that observable: it inspects
 a kernel `.deb` (or an extracted module tree) and reports each module as loadable
@@ -656,8 +674,8 @@ QA passes (same gate as Tasks 26/27/28).
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
-- Don't hard-pin the kernel BSP — the drift-guard is **advisory only** (`exit 0` always). No `=<ver>` in the fetch, `rk3588.yaml`, or `versions.yaml`; the BSP still floats (Decision D3)
-- Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — the floating BSP would break it (it is gitignored build output by design)
+- Don't fetch BSP packages by bare name or accept apt's latest version. Update `armbian-bsp-deb-versions.txt` only after signed-index review; update `bsp-baseline.json` with the kernel pin when its reviewed bytes change
+- Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 
 ## KNOWN ISSUES / DEFERRED
 

@@ -34,7 +34,7 @@
       "uniqueItems": true
     },
     "uboot_packages": {
-      "description": "Per-board U-Boot package override. Optional. When present it REPLACES the family-tier uboot_packages (deep-merge: board arrays win wholesale). rk3588 U-Boot is board-specific (linux-u-boot-rock-5b-plus-vendor vs linux-u-boot-orangepi5plus-vendor), so the family declares uboot_packages:[] and each board names its own here. Items must be valid Debian package names.",
+      "description": "Per-board U-Boot package override. Optional. When present it REPLACES the family-tier uboot_packages (deep-merge: board arrays win wholesale). rk3588 U-Boot is board-specific (linux-u-boot-rock-5b-plus-vendor vs linux-u-boot-orangepi5-plus-vendor), so the family declares uboot_packages:[] and each board names its own here. Items must be valid Debian package names.",
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "minItems": 0,

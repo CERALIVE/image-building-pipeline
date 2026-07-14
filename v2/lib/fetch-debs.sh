@@ -5,9 +5,9 @@
 # Two package classes land in ONE staging dir ($DEST/debs/) for the mkosi
 # runtime/assembly layer to consume:
 #
-#   1. BSP packages  — kernel / DTB / U-Boot blob / firmware / GStreamer, read
-#                      BY NAME from the resolved FAMILY manifest (typed package
-#                      arrays), fetched from the Armbian apt repo. On Debian/Ubuntu
+#   1. BSP packages  — kernel / DTB / U-Boot blob / firmware / GStreamer, named
+#                      by the resolved FAMILY manifest and exact-versioned by the
+#                      BSP package registry, fetched from the Armbian apt repo. On Debian/Ubuntu
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
@@ -42,6 +42,7 @@
 #   DRY_RUN            1 to plan-only         (default: auto)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
 #   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)
+#   BSP_DEB_VERSIONS_FILE exact BSP package pins (default: manifests registry)
 #   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
 #   APT_GPG_PUBLIC_B64 first-party GPG keyring (base64; required for a real fetch)
 #   APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64   first-party mTLS client cert/key (base64)
@@ -62,8 +63,8 @@ source "${HERE}/shared/deb-lib.sh"
 source "${HERE}/fetch-debs-auth.sh"
 
 # ---------------------------------------------------------------------------
-# Configuration (env-overridable; never hardcode versions — pins come from
-# versions.yaml for first-party, and from the family manifest for BSP names).
+# Configuration (env-overridable; package names come from manifests and exact
+# Debian versions come from the repo-local package registries).
 # ---------------------------------------------------------------------------
 CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-arm64}"
@@ -80,6 +81,7 @@ ARMBIAN_APT_KEY_FINGERPRINTS=(
   "DF00FAF1C577104B50BF1D0093D6889F9F0E78D5"
   "8CFA83D13EB2181EEF5843E41EB30FAF236099FE"
 )
+BSP_DEB_VERSIONS_FILE="${BSP_DEB_VERSIONS_FILE:-${HERE}/../manifests/armbian-bsp-deb-versions.txt}"
 FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
 
 # First-party apt source (apt.ceralive.tv). The deb822 source appends
@@ -207,18 +209,36 @@ first_party_download_specs() {
   done
 }
 
+bsp_download_specs() {
+  [[ -f "${BSP_DEB_VERSIONS_FILE}" ]] \
+    || die "exact BSP Debian version file missing: ${BSP_DEB_VERSIONS_FILE}"
+  local pkg version
+  local -a versions=()
+  for pkg in "$@"; do
+    mapfile -t versions < <(
+      awk -F= -v pkg="${pkg}" '$1==pkg { print substr($0, length($1) + 2) }' \
+        "${BSP_DEB_VERSIONS_FILE}"
+    )
+    (( ${#versions[@]} == 1 )) \
+      || die "expected exactly one BSP Debian version for ${pkg}, found ${#versions[@]}"
+    version="${versions[0]}"
+    [[ "${version}" =~ ^[^[:space:]=]+$ ]] \
+      || die "invalid exact BSP Debian version for ${pkg}: ${version}"
+    printf '%s=%s\n' "${pkg}" "${version}"
+  done
+}
+
 # BSP provenance + advisory kernel drift-guard.
 #
-# The kernel BSP is fetched NAME-based and FLOATING (Decision D3 — no version pin;
-# the Armbian vendor suite supplies whatever concrete build it currently holds).
-# That float is intentional but invisible: a silent kernel re-spin can change the
-# image with no signal. These helpers make the float OBSERVABLE without pinning it.
+# The kernel BSP is exact-versioned. Armbian can still replace package bytes under
+# the same version, so provenance records the downloaded hash and makes a silent
+# same-version re-spin observable against the reviewed baseline.
 #
 # HARD CONTRACTS:
-#   * ADVISORY ONLY — every path returns 0; a drift NEVER fails the build.
+#   * WARN by default; BSP_DRIFT_STRICT=1 makes a seeded mismatch fatal.
 #   * Content hash, not just version — a same-version re-spin is still caught.
 #   * The provenance artifact is gitignored build output, deliberately EXCLUDED
-#     from the sha256 determinism comparison (a floating BSP would break it).
+#     from the normalized build-plan comparison.
 
 BSP_BASELINE="${BSP_BASELINE:-${HERE}/../manifests/bsp-baseline.json}"
 
@@ -254,21 +274,17 @@ EOF
 #
 # Exit policy is opt-in (C6b):
 #   * DEFAULT (BSP_DRIFT_STRICT unset/≠1) — WARN-ONLY: drift prints the banner and
-#     still returns 0. Drift is NOT fatal by default; the BSP stays floating and
-#     this is observability, not a pin. This is the byte-for-byte historical path.
+#     still returns 0. The package version remains exact; this reports a content
+#     replacement or an intentional version/baseline mismatch.
 #   * BSP_DRIFT_STRICT=1 — STRICT: a real version/hash mismatch against a SEEDED
 #     baseline returns non-zero, failing the build. The seeding run (unseeded/first
 #     run) and a clean match are ALWAYS exit 0 regardless of this flag — a fresh
 #     baseline can never fail a strict build.
 #
 # Promotion criterion (why default is still warn): flipping the default to strict
-# (blocking) is deferred to a FUTURE change, NOT this one. Two conditions must both
-# hold before that flip: (1) the committed baseline v2/manifests/bsp-baseline.json
-# is SEEDED with a real known-good version+sha256 (it currently ships UNSEEDED /
-# null), and (2) a fleet manifest run confirms every board resolves to that same
-# known-good BSP with no outstanding drift. Until both are true, strict-by-default
-# would fail green builds on the very first authenticated fetch. Operators/CI that
-# want the gate today opt in with BSP_DRIFT_STRICT=1.
+# (blocking) remains gated on a fleet manifest run confirming that every board
+# resolves to the seeded known-good BSP with no outstanding drift. Operators/CI
+# that want the gate today opt in with BSP_DRIFT_STRICT=1.
 bsp_drift_check() {
   local baseline="$1" pkg="$2" version="$3" sha="$4"
   local base_ver base_sha
@@ -340,22 +356,68 @@ bsp_capture_provenance() {
 # private temp dir, then atomically rename the result into ${_BSP_DEBS}. A killed
 # apt-get leaves files only in the throwaway .fetch-* dir, never a partial final.
 _fetch_bsp_native_one() {
-  local pkg="$1"
-  log_info "BSP fetch: ${pkg} (${ARMBIAN_SUITE}/${ARCH})"
+  local spec="$1" pkg="${1%%=*}"
+  [[ "${spec}" == *=* && -n "${pkg}" && -n "${spec#*=}" ]] \
+    || die "invalid BSP package spec: ${spec}"
+  log_info "BSP fetch: ${spec} (${ARMBIAN_SUITE}/${ARCH})"
   if [[ -n "${DRY_RUN}" ]]; then
     run_or_plan bash -c \
-      "cd $(printf '%q' "${_BSP_DEBS}") && apt-get $(printf '%q ' "${_APT_OPTS[@]}")download $(printf '%q' "${pkg}")"
+      "cd $(printf '%q' "${_BSP_DEBS}") && apt-get $(printf '%q ' "${_APT_OPTS[@]}")download $(printf '%q' "${spec}")"
     return 0
   fi
   local tmpd; tmpd="$(mktemp -d "${_BSP_DEBS}/.fetch-XXXXXX")"
-  ( cd "${tmpd}" && apt-get "${_APT_OPTS[@]}" download "${pkg}" )
-  local f
+  if ! ( cd "${tmpd}" && apt-get "${_APT_OPTS[@]}" download "${spec}" ); then
+    rm -rf "${tmpd}"
+    return 1
+  fi
+  local actual_pkg actual_version actual_arch
+  local -a staged=()
   shopt -s nullglob
-  for f in "${tmpd}"/*.deb; do
-    mv -f "${f}" "${_BSP_DEBS}/$(basename "${f}")"
-  done
+  staged=("${tmpd}"/*.deb)
   shopt -u nullglob
+  if (( ${#staged[@]} != 1 )); then
+    log_error "BSP fetch produced ${#staged[@]} .deb files for ${spec}; expected exactly one"
+    rm -rf "${tmpd}"
+    return 1
+  fi
+  actual_pkg="$(deb_pkg_name "${staged[0]}")"
+  actual_version="$(deb_pkg_version "${staged[0]}")"
+  actual_arch="$(deb_pkg_arch "${staged[0]}")"
+  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${spec#*=}" \
+      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+    log_error "BSP fetch control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
+    rm -rf "${tmpd}"
+    return 1
+  fi
+  if ! mv -f "${staged[0]}" "${_BSP_DEBS}/$(basename "${staged[0]}")"; then
+    rm -rf "${tmpd}"
+    return 1
+  fi
   rm -rf "${tmpd}"
+}
+
+bsp_verify_native_release() {
+  local apt_state="$1" keyring="$2" suite="$3" component="$4" arch="$5"
+  shift 5
+  local verified_release="${apt_state}/verified-Release"
+  local -a inreleases=()
+  shopt -s nullglob
+  inreleases=("${apt_state}/lists/"*_dists_"${suite}"_InRelease)
+  shopt -u nullglob
+  if (( ${#inreleases[@]} != 1 )); then
+    log_error "native BSP apt state contains ${#inreleases[@]} InRelease files for suite ${suite}; expected exactly one"
+    return 1
+  fi
+  if ! auth_verify_release_to_file \
+      "${keyring}" "${inreleases[0]}" "${verified_release}" "$@"; then
+    log_error "native BSP InRelease does not carry every required signature"
+    return 1
+  fi
+  if ! auth_release_has_identity \
+      "${verified_release}" "${suite}" "${component}" "${arch}"; then
+    log_error "native BSP InRelease identity mismatch: expected suite=${suite} component=${component} arch=${arch}"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -389,6 +451,12 @@ _fetch_bsp_native() {
   )
 
   run_or_plan apt-get "${apt_opts[@]}" update
+  if [[ -z "${DRY_RUN}" ]]; then
+    bsp_verify_native_release \
+      "${apt_state}" "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_SUITE}" main "${ARCH}" \
+      "${ARMBIAN_APT_KEY_FINGERPRINTS[@]}" \
+      || die "BSP fetch failed native dual-signature/identity verification"
+  fi
 
   _BSP_DEBS="${debs}"
   _APT_OPTS=("${apt_opts[@]}")
@@ -397,37 +465,78 @@ _fetch_bsp_native() {
     || die "BSP fetch failed (native apt path): one or more packages did not download"
 }
 
-# _fetch_bsp_curl_one — bounded-pool worker: resolve ONE BSP package name to its
+# _fetch_bsp_curl_one — bounded-pool worker: resolve ONE exact BSP package spec to its
 # pool path via the cached Packages index (${_PKG_INDEX}), curl it to a private
 # .tmp-* file, then atomically rename into ${_BSP_DEBS}. A killed curl leaves
 # only the .tmp-* partial, never a half-written final .deb.
 _fetch_bsp_curl_one() {
-  local pkg="$1" resolved="" filename="" sha256="" version=""
+  local spec="$1" pkg="${1%%=*}" wanted_version=""
+  local resolved="" filename="" sha256="" version=""
+  if [[ "${spec}" == *=* ]]; then
+    wanted_version="${spec#*=}"
+  fi
+  [[ "${spec}" == *=* && -n "${pkg}" && -n "${wanted_version}" ]] \
+    || die "invalid BSP package spec: ${spec}"
   if [[ -z "${DRY_RUN}" ]]; then
-    resolved="$(auth_lookup_package "${_PKG_INDEX}" "${pkg}" "" "${ARCH}")"
+    resolved="$(auth_lookup_package "${_PKG_INDEX}" "${pkg}" "${wanted_version}" "${ARCH}")"
     [[ -n "${resolved}" ]] \
-      || die "BSP package '${pkg}' not found in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
+      || die "exact BSP package '${spec}' unavailable in ${ARMBIAN_SUITE}/main/binary-${ARCH} Packages index"
     IFS=$'\t' read -r filename sha256 version <<<"${resolved}"
   fi
-  log_info "BSP fetch (curl): ${pkg}"
+  log_info "BSP fetch (curl): ${spec}"
   if [[ -n "${DRY_RUN}" ]]; then
     run_or_plan curl -fsSL --retry 3 \
       -o "${_BSP_DEBS}/$(basename "${filename:-${pkg}.deb}")" \
       "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
     return 0
   fi
-  local final tmp
+  local final tmp actual_pkg actual_version actual_arch
   final="${_BSP_DEBS}/$(basename "${filename}")"
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
-  curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"
-  auth_verify_file "${tmp}" "${sha256}" \
-    || die "BSP package checksum mismatch for ${pkg}=${version}"
-  mv -f "${tmp}" "${final}"
+  if ! curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  if ! auth_verify_file "${tmp}" "${sha256}"; then
+    log_error "BSP package checksum mismatch for ${pkg}=${version}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  actual_pkg="$(deb_pkg_name "${tmp}")"
+  actual_version="$(deb_pkg_version "${tmp}")"
+  actual_arch="$(deb_pkg_arch "${tmp}")"
+  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${wanted_version}" \
+      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+    log_error "BSP package control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  if ! mv -f "${tmp}" "${final}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+}
+
+bsp_assert_index_specs() {
+  local index="$1" arch="$2" spec pkg version
+  shift 2
+  for spec in "$@"; do
+    [[ "${spec}" == *=* ]] || {
+      log_error "BSP package lacks exact version: ${spec}"
+      return 1
+    }
+    pkg="${spec%%=*}"
+    version="${spec#*=}"
+    if ! auth_lookup_package "${index}" "${pkg}" "${version}" "${arch}" >/dev/null; then
+      log_error "exact BSP package '${spec}' unavailable for architecture ${arch}"
+      return 1
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
 # _fetch_bsp_curl — curl-based fallback for non-Debian hosts (e.g. Arch Linux).
-# Downloads the Armbian Packages.gz index, resolves each BSP package name to
+# Downloads the Armbian Packages.gz index, preflights every exact BSP package spec,
 # its pool URL, then curl-fetches the .deb. No apt-get, no Docker, no GPG key
 # import required. Works on any host with curl + gzip. The index is fetched once;
 # per-package downloads run through the bounded fetch pool.
@@ -444,16 +553,21 @@ _fetch_bsp_curl() {
   local packages_rel="main/binary-${ARCH}/Packages.gz"
   local packages_url="${release_base}/${packages_rel}"
   local packages_file; packages_file="$(mktemp)"
-  local inrelease="${packages_file}.InRelease" expected_sha actual_sha
+  local inrelease="${packages_file}.InRelease"
+  local verified_release="${packages_file}.Release" expected_sha actual_sha
   run_or_plan curl -fsSL --retry 3 -o "${inrelease}" "${release_base}/InRelease" \
     || die "failed to download Armbian InRelease"
   if [[ -z "${DRY_RUN}" ]]; then
-    auth_verify_release_signature "${ARMBIAN_APT_KEYRING}" "${inrelease}" \
+    auth_verify_release_to_file \
+      "${ARMBIAN_APT_KEYRING}" "${inrelease}" "${verified_release}" \
+      "${ARMBIAN_APT_KEY_FINGERPRINTS[@]}" \
       || die "Armbian InRelease signature verification failed"
+    auth_release_has_identity "${verified_release}" "${ARMBIAN_SUITE}" main "${ARCH}" \
+      || die "Armbian InRelease identity mismatch: expected suite=${ARMBIAN_SUITE} component=main arch=${ARCH}"
     expected_sha="$(awk -v path="${packages_rel}" '
       /^SHA256:/{inside=1;next} /^[A-Za-z0-9-]+:/{inside=0}
       inside && $3==path{print $1;exit}
-    ' "${inrelease}")"
+    ' "${verified_release}")"
     [[ -n "${expected_sha}" ]] || die "Armbian InRelease lacks ${packages_rel} SHA256"
   fi
   run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
@@ -470,11 +584,16 @@ _fetch_bsp_curl() {
 
   _BSP_DEBS="${debs}"
   _PKG_INDEX="${packages_file}"
+  if [[ -z "${DRY_RUN}" ]]; then
+    bsp_assert_index_specs "${_PKG_INDEX}" "${ARCH}" "${bsp_pkgs[@]}" \
+      || die "BSP signed index preflight failed before package downloads"
+  fi
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
     || die "BSP fetch failed (curl path): one or more packages did not download"
 
-  [[ -z "${DRY_RUN}" ]] && rm -f "${packages_file}" "${inrelease}"
+  [[ -z "${DRY_RUN}" ]] \
+    && rm -f "${packages_file}" "${inrelease}" "${verified_release}"
   return 0
 }
 
@@ -526,6 +645,7 @@ _fetch_first_party_curl() {
   local inrelease="${debs}/.apt-state-firstparty/InRelease"
   local packages_gz="${debs}/.apt-state-firstparty/Packages.gz"
   local packages="${debs}/.apt-state-firstparty/Packages"
+  local verified_release="${debs}/.apt-state-firstparty/Release"
   local expected_sha actual_sha
 
   local -a curl_auth=()
@@ -535,14 +655,14 @@ _fetch_first_party_curl() {
 
   log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
   curl -fsSL --retry 3 "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
-  auth_verify_release_signature "${keyring}" "${inrelease}" \
+  auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
   expected_sha="$(awk '
     /^SHA256:/{ in_sha=1; next }
     /^[A-Za-z0-9-]+:/{ in_sha=0 }
     in_sha && $3 == "Packages.gz" { print $1; exit }
-  ' "${inrelease}")"
+  ' "${verified_release}")"
   [[ -n "${expected_sha}" ]] \
     || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
 
@@ -562,11 +682,9 @@ _fetch_first_party_curl() {
 }
 
 # ---------------------------------------------------------------------------
-# fetch_bsp — read BSP package NAMES from the resolved family manifest and pull
-# each from the Armbian apt pool into $DEST/debs/. Names (not versions) are the
-# manifest contract; the Armbian suite supplies the concrete build. Pinning a
-# specific BSP version would append "=<ver>" — kept name-based to match the
-# manifest + Decision D3 (branch=vendor encoded in the package name itself).
+# fetch_bsp — read BSP package names from the resolved family manifest, bind each
+# to its reviewed exact version, and pull it from the Armbian apt pool into
+# $DEST/debs/. Decision D3's vendor branch remains encoded in the package name.
 #
 # On Debian/Ubuntu hosts with apt-get, uses native path. On other hosts (e.g.
 # Arch Linux), delegates to Docker/Podman fallback.
@@ -614,6 +732,24 @@ fetch_bsp() {
   fi
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
+  local armbian_branch
+  armbian_branch="$(read_yaml_value armbian_branch "${family}")"
+  if [[ "${armbian_branch}" == "none" ]]; then
+    if [[ -n "${DRY_RUN}" ]]; then
+      log_info "non-Armbian family: BSP fetch omitted from DRY_RUN plan"
+      return 0
+    fi
+    die "authenticated non-Armbian BSP fetch is not implemented for $(basename "${family}"); refusing an unpinned download"
+  fi
+
+  local -a bsp_specs=()
+  local specs_text
+  specs_text="$(bsp_download_specs "${bsp_pkgs[@]}")" \
+    || die "failed to resolve exact BSP Debian package versions"
+  mapfile -t bsp_specs <<<"${specs_text}"
+  (( ${#bsp_specs[@]} == ${#bsp_pkgs[@]} )) \
+    || die "BSP version registry resolved ${#bsp_specs[@]} specs for ${#bsp_pkgs[@]} packages"
+  log_info "BSP apt specs: ${bsp_specs[*]}"
   log_info "Armbian source: ${ARMBIAN_APT_URL} suite=${ARMBIAN_SUITE} arch=${ARCH}"
 
   if [[ -z "${DRY_RUN}" ]]; then
@@ -625,12 +761,12 @@ fetch_bsp() {
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
-    _fetch_bsp_native "${debs}" "${bsp_pkgs[@]}"
+    _fetch_bsp_native "${debs}" "${bsp_specs[@]}"
   else
-    _fetch_bsp_curl "${debs}" "${bsp_pkgs[@]}"
+    _fetch_bsp_curl "${debs}" "${bsp_specs[@]}"
   fi
 
-  # Provenance + advisory drift-guard for the floating kernel BSP. The board
+  # Provenance + content drift-guard for the exact-versioned kernel BSP. The board
   # KERNEL_PACKAGES override (resolve.py) wins over the family field, mirroring
   # the array-REPLACE merge above. Real-fetch only — DRY_RUN stages no .deb.
   local -a kernel_pkgs=()
@@ -798,7 +934,7 @@ usage() {
 Usage:
   fetch-debs.sh --family <manifest.yaml> [--dest <dir>]
 
-Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE ARMBIAN_APT_KEYRING
+Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE ARMBIAN_APT_KEYRING BSP_DEB_VERSIONS_FILE
      APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
 EOF
 }
