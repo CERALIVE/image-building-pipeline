@@ -338,7 +338,13 @@ main() {
   # (containerized default vs --native) and surfaces a missing-runtime error.
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     select_build_mode
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${STAGING_ROOT}/${board}/bsp --extra-tree ${STAGING_ROOT}/${board}/firstparty:/opt/ceralive-staging --force build"
+    local package_dir_plan="${STAGING_ROOT}/${board}/bsp"
+    local firstparty_dir_plan="${STAGING_ROOT}/${board}/firstparty"
+    if [[ "${BUILD_MODE}" != "native" ]]; then
+      package_dir_plan="/run/ceralive-bsp"
+      firstparty_dir_plan="/run/ceralive-firstparty"
+    fi
+    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -662,6 +668,8 @@ run_mkosi_build() {
     "${env_flags[@]}" \
     -e "CERALIVE_V2_DIR=/work" \
     -v "${V2_DIR}:/work" \
+    -v "${bsp_dir}:/run/ceralive-bsp:ro" \
+    -v "${firstparty_dir}:/run/ceralive-firstparty:ro" \
     "${MKOSI_BUILDER_IMAGE}" \
     bash -euo pipefail -c '
       command -v mkosi >/dev/null 2>&1 || {
@@ -675,8 +683,8 @@ run_mkosi_build() {
         '"${env_cli_str}"' \
         --environment CERALIVE_V2_DIR \
         --cache-directory='"${cache_dir}"' \
-        --package-directory /work/mkosi/.staging/'"${BOARD_ID}"'/bsp \
-        --extra-tree /work/mkosi/.staging/'"${BOARD_ID}"'/firstparty:/opt/ceralive-staging \
+        --package-directory /run/ceralive-bsp \
+        --extra-tree /run/ceralive-firstparty:/opt/ceralive-staging \
         --force \
         build
     ' || die "mkosi build failed (container)"

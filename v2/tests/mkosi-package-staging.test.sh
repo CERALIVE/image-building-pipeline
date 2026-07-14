@@ -81,4 +81,28 @@ grep -Fq "MKOSI_PACKAGE_STAGING_SH=\"\${HERE}/stage-mkosi-package.sh\"" "${ORCHE
 grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\"" "${ORCHESTRATOR}"
 grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"" "${ORCHESTRATOR}"
 
+# The runner service uses UMask=0077, so the checkout and .staging ancestors are
+# intentionally private. The container must mount each consumer leaf directly;
+# passing its /work path makes mkosi's unprivileged repository indexer see zero
+# packages even when the leaf and archives themselves are readable.
+grep -Fq -- '-v "${bsp_dir}:/run/ceralive-bsp:ro"' "${ORCHESTRATOR}"
+grep -Fq -- '-v "${firstparty_dir}:/run/ceralive-firstparty:ro"' "${ORCHESTRATOR}"
+grep -Fq -- '--package-directory /run/ceralive-bsp' "${ORCHESTRATOR}"
+grep -Fq -- '--extra-tree /run/ceralive-firstparty:/opt/ceralive-staging' "${ORCHESTRATOR}"
+if grep -Fq -- '--package-directory /work/mkosi/.staging/' "${ORCHESTRATOR}"; then
+	printf 'FAIL containerized mkosi still traverses private /work staging ancestors\n' >&2
+	exit 1
+fi
+
+mount_source="${RUN_DIR}/consumer,with space"
+mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
+[[ "${#mount_args[@]}" -eq 2 ]] || {
+	printf 'FAIL read-only package bind mount split into multiple arguments\n' >&2
+	exit 1
+}
+[[ "${mount_args[1]}" == "${mount_source}:/run/ceralive-bsp:ro" ]] || {
+	printf 'FAIL read-only package bind mount changed a source path containing comma/space\n' >&2
+	exit 1
+}
+
 printf 'PASS mkosi package consumers are readable while download temporaries stay private\n'

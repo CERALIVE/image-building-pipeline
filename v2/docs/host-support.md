@@ -93,6 +93,13 @@ or runner interruption prevented the prior post-run pass. Do not broaden this
 allowlist: `.staging`, `v2/images`, `candidate`, source, and trust inputs are not
 runner-cleanup targets.
 
+The same restrictive runner umask also makes checkout and `.staging` ancestors
+mode `0700`. The containerized build therefore mounts the verified BSP and
+first-party consumer directories directly at dedicated read-only paths. Do not
+route mkosi package inputs back through `/work/mkosi/.staging`: its unprivileged
+repository indexer cannot traverse those private ancestors and will produce an
+empty local package index.
+
 ---
 
 ## Per-host detail

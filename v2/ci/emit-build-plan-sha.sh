@@ -16,9 +16,9 @@
 #   2. Assert the CONTAINER path was resolved ("DRY_RUN=1 (docker|podman)"), never
 #      the --native opt-in whose plan differs — this guards against a runner with no
 #      container runtime silently changing the hash.
-#   3. Strip THIS checkout's ABSOLUTE repo path to a stable "<REPO>" token (the raw
-#      plan embeds .../v2/mkosi/.staging/<board>/… — a per-runner absolute path that
-#      must NOT leak into the digest, else the sha would encode the runner's workdir).
+#   3. Strip THIS checkout's ABSOLUTE repo path to a stable "<REPO>" token if it
+#      appears. Container plans use fixed /run package paths, while other plan
+#      fields may still contain a per-runner checkout path.
 #   4. sha256sum the single normalized line.
 #
 # SCOPE: hashes the deterministic build PLAN / input closure ONLY — NOT a full

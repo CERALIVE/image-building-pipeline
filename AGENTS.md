@@ -214,9 +214,12 @@ state** under the staging dir (the host apt config is never touched).
   exact package files. Every verified `.deb` is normalized to mode `0644` before
   its atomic staging rename, then copied into explicit mode-`0755` mkosi consumer
   directories as mode `0644` so a restrictive runner umask cannot hide packages
-  from mkosi's unprivileged local-repository helper. Mode or rename failures fail
-  closed and clean private package-temporary artifacts, while package payload
-  modes are unaffected. These are Debian **Package** names — a
+  from mkosi's unprivileged local-repository helper. Containerized builds expose
+  only those two consumer leaves through read-only bind mounts; mkosi never has
+  to traverse the intentionally mode-`0700` persistent-runner checkout or staging
+  ancestors. Mode, mount, or rename failures fail closed and clean private
+  package-temporary artifacts, while package payload modes are unaffected. These
+  are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
   `gstlibuvch264src → gstreamer1.0-libuvch264src`.
