@@ -183,7 +183,11 @@ cancellable child and reaped on interruption. The verifier resets inherited
 ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
 that launch it asynchronously cannot make SIGINT cancellation ineffective. The
 identity record accepts only safe artifact filename characters so its
-line-oriented fields cannot be split.
+line-oriented fields cannot be split. The `rci` structured-input boundary accepts
+exactly one `Chip Info:` record containing exactly 16 one- or two-digit hex octets,
+under LF or CRLF framing; it strips only the terminal transport CR and rejects
+truncated, extra, split, nonhex, or duplicate records before media write. The
+accepted identity remains lowercase 32-hex downstream.
 Authenticated BSP fetches require the exact two-key Armbian archive rotation set
 (`DF00FAF1…E78D5` + `8CFA83D1…6099FE`, with no extra primary keys) and verify
 InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery uses
