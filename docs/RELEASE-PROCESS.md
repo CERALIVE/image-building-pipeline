@@ -448,6 +448,9 @@ master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .stat
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
+publisher="${tmp}/publish-immutable-r2-pair.sh"
+GIT_NO_REPLACE_OBJECTS=1 git show "${merge_sha}:v2/ci/publish-immutable-r2-pair.sh" > "${publisher}"
+chmod 0700 "${publisher}"
 gh api "repos/${repo}/actions/runs/${run_id}/artifacts" > "${tmp}/artifacts.json"
 artifact_id="$(jq -er --arg name "${artifact_name}" '
   [.artifacts[] | select(.name == $name and (.expired | not))]
@@ -501,6 +504,8 @@ grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP' "${tmp}/realhw/realhw-suite.log"
 
 release_name="$(<"${candidate}/release-bundle-name.txt")"
 [[ "${release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
+approved_bundle_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/good.raucb.sha256")"
+[[ "${approved_bundle_sha}" =~ ^[0-9a-f]{64}$ ]]
 ( cd "${candidate}" && sha256sum -c good.raucb.sha256 )
 test -f "${approved_root}"
 test "$(openssl x509 -in "${approved_root}" -outform DER | sha256sum | cut -d' ' -f1)" = \
@@ -509,21 +514,32 @@ rauc info --keyring "${approved_root}" "${candidate}/good.raucb" >/dev/null
 
 bundle="${candidate}/good.raucb"
 sha="${tmp}/${release_name}.sha256"
-printf '%s  %s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)" "${release_name}" > "${sha}"
-./v2/ci/publish-immutable-r2-pair.sh \
-  --bundle "${bundle}" --sidecar "${sha}" \
+printf '%s  %s\n' "${approved_bundle_sha}" "${release_name}" > "${sha}"
+"${publisher}" \
+  --bundle "${bundle}" --sidecar "${sha}" --expected-sha256 "${approved_bundle_sha}" \
   --bucket "${R2_BUCKET}" --endpoint "${R2_ENDPOINT}" \
   --bundle-key "bundles/${channel}/${board}/${release_name}"
 ```
 
 `R2_BUCKET` / `R2_ENDPOINT` use the same S3-compatible R2 endpoint shape as
-`upload-addons.sh`; provision them for the operator session together with the
-corresponding AWS credentials.
+`upload-addons.sh`. Do not use a long-lived or prefix-scoped publication token.
+Immediately before invoking the helper, a trusted issuer must locally sign an
+R2 temporary credential with `actions: ["GetObject", "PutObject"]`, the shortest
+practical TTL, and `paths.objectPaths` containing exactly these two keys:
+`bundles/${channel}/${board}/${release_name}` and
+`bundles/${channel}/${board}/${release_name}.sha256`. Export its access key,
+secret, and session token through the standard AWS environment variables. It
+must have no `DeleteObject`, list, bucket-administration, or unrelated-key
+access and must expire after this one publication attempt; the helper's
+conditional PUT enforces create-only writes while that authority exists.
 The helper requires an AWS CLI version whose `s3api put-object` supports
-`--if-none-match`. It uses create-only writes, per-invocation ownership metadata,
-failure cleanup, and exact read-back verification. A collision or uncertain
-cleanup aborts before hawkBit registration; never replace an existing release
-key.
+`--if-none-match`. It snapshots both inputs privately and requires the snapshot
+to match the already-approved candidate SHA-256 before using sidecar-first
+create-only writes and exact-byte, idempotent collision recovery. An interrupted
+accepted write is resumed only when the existing bytes exactly match. It never
+deletes a release key. Any
+mismatched collision or unverifiable read aborts before hawkBit registration;
+never replace an existing release key.
 
 **Future work.** The remaining gap is a high-level publisher that performs the
 candidate/workflow/hardware checks above automatically and a protected

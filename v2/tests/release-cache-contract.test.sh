@@ -109,7 +109,7 @@ operator = runbook.index("### Operator steps (today, until this is automated)")
 block_start = runbook.index("```bash", operator)
 block_end = runbook.index("```", block_start + len("```bash"))
 publication = runbook[block_start:block_end]
-helper = publication.index("./v2/ci/publish-immutable-r2-pair.sh")
+helper = publication.index('"${publisher}" \\')
 for required in (
     'compare/${merge_sha}...master',
     'grep -Fx "artifact_digest=${artifact_digest}" "${identity}"',
@@ -117,14 +117,22 @@ for required in (
     "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'",
     'rauc info --keyring "${approved_root}"',
     'sha256sum -c good.raucb.sha256',
+    'git show "${merge_sha}:v2/ci/publish-immutable-r2-pair.sh"',
 ):
     assert publication.index(required) < helper, f"proof must precede R2 helper: {required}"
 assert '--bundle "${bundle}" --sidecar "${sha}"' in publication[helper:]
+assert 'GIT_NO_REPLACE_OBJECTS=1 git show' in publication[:helper]
+assert '--expected-sha256 "${approved_bundle_sha}"' in publication[helper:]
 assert '--bucket "${R2_BUCKET}" --endpoint "${R2_ENDPOINT}"' in publication[helper:]
 assert '--bundle-key "bundles/${channel}/${board}/${release_name}"' in publication[helper:]
 assert "aws s3api put-object" not in publication, (
     "BUG: untested inline R2 writes bypass the immutable pair helper"
 )
+assert 'actions: ["GetObject", "PutObject"]' in runbook
+assert "paths.objectPaths" in runbook
+assert "Do not use a long-lived or prefix-scoped publication token" in runbook
+assert "session token" in runbook
+assert "no `DeleteObject`" in runbook
 print("manual immutable R2 publication contract: PASS")
 PY
 

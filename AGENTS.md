@@ -19,7 +19,8 @@ image-building-pipeline/
 ├── v2/                       # current build system (mkosi v26)
 │   ├── build                 # entry point: ./v2/build <board>
 │   ├── ci/
-│   │   └── Dockerfile        # pinned debian:trixie-slim builder (mkosi 26)
+│   │   ├── Dockerfile        # pinned debian:trixie-slim builder (mkosi 26)
+│   │   └── publish-immutable-r2-pair.sh # approved-digest-bound RAUC publisher
 │   ├── manifests/            # board/family manifests + exact package registries
 │   │   └── schema/
 │   │       └── addon.schema.json   # add-on descriptor JSON Schema (T21)
@@ -70,6 +71,7 @@ image-building-pipeline/
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
+| Publish a hardware-approved RAUC bundle pair to R2 | `v2/ci/publish-immutable-r2-pair.sh` via [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §5; requires the independently approved candidate SHA-256 and performs private, read-only input snapshots plus create-only exact-byte recovery |
 | **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `v2/lib/verify-paseto-key-encodings.sh` |
 | **End-to-end release process** (build/sign → immutable candidate → real-HW gate → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
 | **apt.ceralive.tv build-credential rotation** (`APT_GPG_PUBLIC_B64`/`APT_CLIENT_CRT_B64`/`APT_CLIENT_KEY_B64`) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §7 |
