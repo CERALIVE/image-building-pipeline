@@ -391,26 +391,27 @@ host-independently.
 
 ## 5. R2 upload — the ACTUAL mechanism (MANUAL today)
 
-**There is no script or CI job in this repo that uploads a signed OS `.raucb`
-to R2.** This is a real gap, not an oversight in this doc. Compare the three
-artifact families this pipeline produces:
+**There is no CI job or high-level candidate publisher for signed OS `.raucb`
+bundles.** The tested low-level helper performs only the final immutable R2 pair
+write after an operator completes every proof below. Compare the three artifact
+families this pipeline produces:
 
 | Artifact | R2 path | Publisher |
 |----------|---------|-----------|
 | Feature-sysext add-ons | `addons/{os_version}/{board}/{feature}.raw` | [`v2/lib/upload-addons.sh`](../v2/lib/upload-addons.sh) — **exists, automatable, CI-proven under `DRY_RUN`** (`v2-ci.yml` `addon-publish` job) |
 | CeraUI federation UI bundles | `ui-bundle/{ceraui-version}/*.js` | CeraUI's own `publish-release.yml` → `publish-federation` job — **exists in the CeraUI repo** |
-| **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | **none — no script, no workflow** |
+| **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | manual candidate proof, then [`publish-immutable-r2-pair.sh`](../v2/ci/publish-immutable-r2-pair.sh); **no publishing workflow** |
 
 `apt-worker/AGENTS.md` and `apt-worker/README.md` both describe the `bundles/`
 path as a pure read side (the worker range-serves whatever is already in R2)
 and explicitly credit the add-on and federation paths to their respective
-publisher scripts — they say nothing publishes `bundles/`, because nothing
-does yet.
+publisher scripts. The helper here is operator-invoked and is not a release
+workflow or candidate-selection authority.
 
 ### Operator steps (today, until this is automated)
 
-Until an `upload-bundle.sh` (or equivalent CI job) exists, publish a release
-bundle by hand from the exact candidate artifact that passed physical hardware.
+Until a high-level publisher or equivalent CI job exists, publish a release
+bundle manually from the exact candidate artifact that passed physical hardware.
 Do not select a local build by timestamp or "newest" ordering. The candidate
 contains the production bundle's original release filename and checksum; the
 GitHub artifact API binds that candidate to the successful run and merge SHA.
@@ -424,6 +425,7 @@ merge_sha=<full-merge-sha>
 board=rock-5b-plus
 channel=stable
 approved_root=<path-to-operator-approved-production-root-ca.pem>
+expected_media_cid=<approved-32-lowercase-hex-media-cid>
 artifact_name="rock-5b-plus-${merge_sha}"
 realhw_artifact_name="realhw-${board}-${run_id}"
 
@@ -440,30 +442,7 @@ master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .stat
 [[ "${master_status}" == identical || "${master_status}" == ahead ]]
 
 tmp="$(mktemp -d)"
-r2_sidecar_created=0
-r2_bundle_created=0
-r2_pair_verified=0
-bundle_key=
-sha_key=
-cleanup() {
-  rc=$?
-  trap - EXIT
-  if (( r2_pair_verified == 0 )); then
-    if (( r2_bundle_created == 1 )); then
-      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
-        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
-        printf 'WARNING: remove unverified R2 object manually: %s\n' "${bundle_key}" >&2
-    fi
-    if (( r2_sidecar_created == 1 )); then
-      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
-        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
-        printf 'WARNING: remove unverified R2 object manually: %s\n' "${sha_key}" >&2
-    fi
-  fi
-  rm -rf "${tmp}"
-  exit "${rc}"
-}
-trap cleanup EXIT
+trap 'rm -rf "${tmp}"' EXIT
 gh api "repos/${repo}/actions/runs/${run_id}/artifacts" > "${tmp}/artifacts.json"
 artifact_id="$(jq -er --arg name "${artifact_name}" '
   [.artifacts[] | select(.name == $name and (.expired | not))]
@@ -504,10 +483,12 @@ candidate="${tmp}/candidate"
 identity="${tmp}/realhw/candidate-identity.txt"
 expected_raw_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/raw.sha256")"
 [[ "${expected_raw_sha}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${expected_media_cid}" =~ ^[0-9a-f]{32}$ ]]
 grep -Fx "candidate_commit=${merge_sha}" "${identity}"
 grep -Fx "raw_sha256=${expected_raw_sha}" "${identity}"
 grep -Fx 'bundle_file=good.raucb' "${identity}"
 grep -Fx "artifact_digest=${artifact_digest}" "${identity}"
+grep -Fx "media_cid=${expected_media_cid}" "${identity}"
 grep -Fx 'pre_boot_media_identity=verified' "${identity}"
 grep -Fx 'post_boot_reconnect=verified' "${identity}"
 grep -Fx 'flash_transport=maskrom-rkdeveloptool' "${identity}"
@@ -524,49 +505,26 @@ rauc info --keyring "${approved_root}" "${candidate}/good.raucb" >/dev/null
 bundle="${candidate}/good.raucb"
 sha="${tmp}/${release_name}.sha256"
 printf '%s  %s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)" "${release_name}" > "${sha}"
-bundle_key="bundles/${channel}/${board}/${release_name}"
-sha_key="${bundle_key}.sha256"
-bundle_md5="$(openssl dgst -md5 -binary "${bundle}" | base64 -w0)"
-sha_md5="$(openssl dgst -md5 -binary "${sha}" | base64 -w0)"
-
-# Create-only writes make an immutable-key collision fail with HTTP 412. Publish
-# the sidecar first so a second-write failure cannot expose a bundle without its
-# checksum; the trap removes only objects created by this invocation on failure.
-aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}" --body "${sha}" \
-  --endpoint-url "${R2_ENDPOINT}" --if-none-match '*' --content-md5 "${sha_md5}" \
-  --content-type 'text/plain; charset=utf-8' >/dev/null
-r2_sidecar_created=1
-aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}" --body "${bundle}" \
-  --endpoint-url "${R2_ENDPOINT}" --if-none-match '*' --content-md5 "${bundle_md5}" \
-  --content-type application/vnd.rauc.bundle >/dev/null
-r2_bundle_created=1
-
-# Do not register the release until the exact immutable pair reads back and the
-# published sidecar validates the published bundle.
-aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
-  --endpoint-url "${R2_ENDPOINT}" "${tmp}/${release_name}" >/dev/null
-aws s3api get-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
-  --endpoint-url "${R2_ENDPOINT}" "${tmp}/${release_name}.published.sha256" >/dev/null
-cmp "${bundle}" "${tmp}/${release_name}"
-cmp "${sha}" "${tmp}/${release_name}.published.sha256"
-( cd "${tmp}" && sha256sum -c "${release_name}.published.sha256" )
-r2_pair_verified=1
+./v2/ci/publish-immutable-r2-pair.sh \
+  --bundle "${bundle}" --sidecar "${sha}" \
+  --bucket "${R2_BUCKET}" --endpoint "${R2_ENDPOINT}" \
+  --bundle-key "bundles/${channel}/${board}/${release_name}"
 ```
 
 `R2_BUCKET` / `R2_ENDPOINT` use the same S3-compatible R2 endpoint shape as
 `upload-addons.sh`; provision them for the operator session together with the
 corresponding AWS credentials.
-The commands require an AWS CLI version whose `s3api put-object` supports
-`--if-none-match`. A collision or failed read-back aborts before hawkBit
-registration; never replace an existing release key.
+The helper requires an AWS CLI version whose `s3api put-object` supports
+`--if-none-match`. It uses create-only writes, per-invocation ownership metadata,
+failure cleanup, and exact read-back verification. A collision or uncertain
+cleanup aborts before hawkBit registration; never replace an existing release
+key.
 
-**Future work.** The natural next step is a `v2/lib/upload-bundle.sh` that
-mirrors `upload-addons.sh` line for line (require a `.sha256` sidecar present,
-refuse to upload without it, `DRY_RUN` plan mode, pinned content-type), plus a
-release-triggered CI job analogous to `v2-ci.yml`'s `addon-publish` — gated the
-same way (real credentials only on a protected branch/tag, `DRY_RUN=1`
-everywhere else). Track this as an open item; it is **not** implemented by this
-doc, only described.
+**Future work.** The remaining gap is a high-level publisher that performs the
+candidate/workflow/hardware checks above automatically and a protected
+release-triggered job analogous to `v2-ci.yml`'s `addon-publish`. The low-level
+immutable R2 pair helper deliberately does not select or trust a candidate by
+itself.
 
 ### Registering the artifact with hawkBit (also manual/operator-driven)
 

@@ -6,6 +6,7 @@ V2="$(cd "${HERE}/.." && pwd)"
 REPO="$(cd "${V2}/.." && pwd)"
 WORKFLOW="${WORKFLOW:-${REPO}/.github/workflows/release.yml}"
 RELEASE_DOC="${REPO}/docs/RELEASE-PROCESS.md"
+R2_PUBLISHER="${REPO}/v2/ci/publish-immutable-r2-pair.sh"
 
 python3 - "${WORKFLOW}" <<'PY'
 from pathlib import Path
@@ -69,6 +70,10 @@ grep -Fq "grep -Fx \"artifact_digest=\${artifact_digest}\" \"\${identity}\"" "${
   echo 'BUG: manual publication does not bind hardware identity to the candidate digest' >&2
   exit 1
 }
+grep -Fq "grep -Fx \"media_cid=\${expected_media_cid}\" \"\${identity}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not bind proof to the approved physical test medium' >&2
+  exit 1
+}
 grep -Fq "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not inspect the successful physical acceptance record' >&2
   exit 1
@@ -82,6 +87,11 @@ grep -Fq "rauc info --keyring \"\${approved_root}\"" "${RELEASE_DOC}" || {
   exit 1
 }
 
+[[ -x "${R2_PUBLISHER}" ]] || {
+  echo 'BUG: immutable R2 pair publisher is missing or not executable' >&2
+  exit 1
+}
+
 python3 - "${RELEASE_DOC}" <<'PY'
 from pathlib import Path
 import sys
@@ -91,31 +101,21 @@ operator = runbook.index("### Operator steps (today, until this is automated)")
 block_start = runbook.index("```bash", operator)
 block_end = runbook.index("```", block_start + len("```bash"))
 publication = runbook[block_start:block_end]
-assert "r2_sidecar_created" not in runbook[:operator], (
-    "BUG: R2 cleanup state escaped into an unrelated runbook block"
-)
-cleanup = publication.index("cleanup() {")
-trap = publication.index("trap cleanup EXIT")
-sidecar_put = publication.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}"')
-bundle_put = publication.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-readback = publication.index('aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-verified = publication.index('r2_pair_verified=1', readback)
-assert cleanup < trap < sidecar_put, (
-    "BUG: partial-publication cleanup is not installed before the first R2 write"
-)
-assert sidecar_put < bundle_put < readback < verified, (
-    "BUG: manual publication is not sidecar-first and read-back verified"
-)
-write_and_verify = publication[sidecar_put:verified]
-assert write_and_verify.count("--if-none-match '*'") == 2, (
-    "BUG: manual publication can overwrite an immutable R2 key"
-)
-assert '--content-md5 "${sha_md5}"' in write_and_verify
-assert '--content-md5 "${bundle_md5}"' in write_and_verify
-assert 'cmp "${bundle}" "${tmp}/${release_name}"' in write_and_verify
-assert 'sha256sum -c "${release_name}.published.sha256"' in write_and_verify
-assert publication.count('delete-object --bucket "${R2_BUCKET}"') == 2, (
-    "BUG: a failed two-object publication leaves an unverified partial pair"
+helper = publication.index("./v2/ci/publish-immutable-r2-pair.sh")
+for required in (
+    'compare/${merge_sha}...master',
+    'grep -Fx "artifact_digest=${artifact_digest}" "${identity}"',
+    'grep -Fx "media_cid=${expected_media_cid}" "${identity}"',
+    "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'",
+    'rauc info --keyring "${approved_root}"',
+    'sha256sum -c good.raucb.sha256',
+):
+    assert publication.index(required) < helper, f"proof must precede R2 helper: {required}"
+assert '--bundle "${bundle}" --sidecar "${sha}"' in publication[helper:]
+assert '--bucket "${R2_BUCKET}" --endpoint "${R2_ENDPOINT}"' in publication[helper:]
+assert '--bundle-key "bundles/${channel}/${board}/${release_name}"' in publication[helper:]
+assert "aws s3api put-object" not in publication, (
+    "BUG: untested inline R2 writes bypass the immutable pair helper"
 )
 print("manual immutable R2 publication contract: PASS")
 PY
