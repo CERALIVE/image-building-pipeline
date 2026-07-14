@@ -57,6 +57,10 @@ grep -Fq "test \"\${run_workflow}\" = 'Release candidate real-HW gate'" "${RELEA
   echo 'BUG: manual publication does not require the production release workflow' >&2
   exit 1
 }
+grep -Fq "compare/\${merge_sha}...master" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not prove the candidate commit is merged to master' >&2
+  exit 1
+}
 grep -Fq "realhw_artifact_name=\"realhw-\${board}-\${run_id}\"" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not select the candidate-bound real-HW evidence' >&2
   exit 1
@@ -83,22 +87,34 @@ from pathlib import Path
 import sys
 
 runbook = Path(sys.argv[1]).read_text()
-sidecar_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}"')
-bundle_put = runbook.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-readback = runbook.index('aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
-verified = runbook.index('r2_pair_verified=1', readback)
+operator = runbook.index("### Operator steps (today, until this is automated)")
+block_start = runbook.index("```bash", operator)
+block_end = runbook.index("```", block_start + len("```bash"))
+publication = runbook[block_start:block_end]
+assert "r2_sidecar_created" not in runbook[:operator], (
+    "BUG: R2 cleanup state escaped into an unrelated runbook block"
+)
+cleanup = publication.index("cleanup() {")
+trap = publication.index("trap cleanup EXIT")
+sidecar_put = publication.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${sha_key}"')
+bundle_put = publication.index('aws s3api put-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
+readback = publication.index('aws s3api get-object --bucket "${R2_BUCKET}" --key "${bundle_key}"')
+verified = publication.index('r2_pair_verified=1', readback)
+assert cleanup < trap < sidecar_put, (
+    "BUG: partial-publication cleanup is not installed before the first R2 write"
+)
 assert sidecar_put < bundle_put < readback < verified, (
     "BUG: manual publication is not sidecar-first and read-back verified"
 )
-publication = runbook[sidecar_put:verified]
-assert publication.count("--if-none-match '*'") == 2, (
+write_and_verify = publication[sidecar_put:verified]
+assert write_and_verify.count("--if-none-match '*'") == 2, (
     "BUG: manual publication can overwrite an immutable R2 key"
 )
-assert '--content-md5 "${sha_md5}"' in publication
-assert '--content-md5 "${bundle_md5}"' in publication
-assert 'cmp "${bundle}" "${tmp}/${release_name}"' in publication
-assert 'sha256sum -c "${release_name}.published.sha256"' in publication
-assert 'delete-object --bucket "${R2_BUCKET}"' in runbook, (
+assert '--content-md5 "${sha_md5}"' in write_and_verify
+assert '--content-md5 "${bundle_md5}"' in write_and_verify
+assert 'cmp "${bundle}" "${tmp}/${release_name}"' in write_and_verify
+assert 'sha256sum -c "${release_name}.published.sha256"' in write_and_verify
+assert publication.count('delete-object --bucket "${R2_BUCKET}"') == 2, (
     "BUG: a failed two-object publication leaves an unverified partial pair"
 )
 print("manual immutable R2 publication contract: PASS")

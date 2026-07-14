@@ -240,30 +240,7 @@ identity, keyring-policy, or live-signature check fails.
 (
 set -euo pipefail
 tmp="$(mktemp -d)"
-r2_sidecar_created=0
-r2_bundle_created=0
-r2_pair_verified=0
-bundle_key=
-sha_key=
-cleanup() {
-  rc=$?
-  trap - EXIT
-  if (( r2_pair_verified == 0 )); then
-    if (( r2_bundle_created == 1 )); then
-      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
-        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
-        printf 'WARNING: remove unverified R2 object manually: %s\n' "${bundle_key}" >&2
-    fi
-    if (( r2_sidecar_created == 1 )); then
-      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
-        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
-        printf 'WARNING: remove unverified R2 object manually: %s\n' "${sha_key}" >&2
-    fi
-  fi
-  rm -rf "${tmp}"
-  exit "${rc}"
-}
-trap cleanup EXIT
+trap 'rm -rf "${tmp}"' EXIT
 install -d -m 0700 "${tmp}/gnupg"
 export GNUPGHOME="${tmp}/gnupg"
 
@@ -459,9 +436,34 @@ run_workflow="$(gh run view "${run_id}" --repo "${repo}" --json workflowName --j
 test "${run_event}" = push
 [[ "${run_branch}" == release/* || "${run_branch}" == release-* ]]
 test "${run_workflow}" = 'Release candidate real-HW gate'
+master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .status)"
+[[ "${master_status}" == identical || "${master_status}" == ahead ]]
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "${tmp}"' EXIT
+r2_sidecar_created=0
+r2_bundle_created=0
+r2_pair_verified=0
+bundle_key=
+sha_key=
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if (( r2_pair_verified == 0 )); then
+    if (( r2_bundle_created == 1 )); then
+      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${bundle_key}" \
+        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
+        printf 'WARNING: remove unverified R2 object manually: %s\n' "${bundle_key}" >&2
+    fi
+    if (( r2_sidecar_created == 1 )); then
+      aws s3api delete-object --bucket "${R2_BUCKET}" --key "${sha_key}" \
+        --endpoint-url "${R2_ENDPOINT}" >/dev/null 2>&1 || \
+        printf 'WARNING: remove unverified R2 object manually: %s\n' "${sha_key}" >&2
+    fi
+  fi
+  rm -rf "${tmp}"
+  exit "${rc}"
+}
+trap cleanup EXIT
 gh api "repos/${repo}/actions/runs/${run_id}/artifacts" > "${tmp}/artifacts.json"
 artifact_id="$(jq -er --arg name "${artifact_name}" '
   [.artifacts[] | select(.name == $name and (.expired | not))]
