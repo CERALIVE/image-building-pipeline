@@ -455,9 +455,17 @@ EOF
   cat >/etc/systemd/system/ceralive-migrate-data.service <<EOF
 [Unit]
 Description=CeraLive one-time data migration + /data skeleton
+# Seeds the /data skeleton (log, ceralive, nm) that the bind mounts below shadow,
+# so it MUST run in the local-fs setup phase: after ${data_root} is mounted (via
+# RequiresMountsFor) and BEFORE local-fs.target. A normal service inherits
+# After=basic.target (basic is After sysinit After local-fs); combined with the
+# bind mounts being Before=local-fs.target and After=this unit, that forms a
+# local-fs.target ordering cycle. DefaultDependencies=no keeps it out of that
+# late chain — RequiresMountsFor still orders it after the data mount.
+DefaultDependencies=no
+Conflicts=shutdown.target
 RequiresMountsFor=${data_root}
-After=local-fs.target
-Before=ceralive-hostname.service ceralive.service
+Before=local-fs.target shutdown.target ceralive-hostname.service ceralive.service
 ConditionPathIsMountPoint=${data_root}
 
 [Service]

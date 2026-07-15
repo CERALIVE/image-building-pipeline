@@ -23,6 +23,14 @@ services-enablement path. The unit is ordered **before** sshd so the first
 inbound connection already sees a per-device host key and root-password login
 already disabled.
 
+Both SSH-gate units carry **`DefaultDependencies=no`**. `ssh.socket` is ordered
+`Before=sockets.target` (early boot, before `basic.target`), so a unit that is
+`Before=ssh.socket` must not inherit the implicit `After=basic.target` — that
+closes an `ssh.socket → guard → basic.target → sockets.target → ssh.socket`
+ordering cycle and systemd deletes `ssh.socket`'s start job, so SSH never comes
+up on any boot. Opting out of default dependencies keeps the guards in the early
+phase; the offline regression guard is `v2/tests/systemd-ordering-cycle.test.sh`.
+
 ## The four scoped actions (SC4 — nothing more)
 
 1. **Per-device SSH host keys.** The image bakes shared host keys, so every

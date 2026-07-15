@@ -620,6 +620,22 @@ For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
 
+**`Before=ssh.socket` guards MUST be `DefaultDependencies=no`.** Both
+`ceralive-ssh-firstboot.service` and `ceralive-ci-uart-bootstrap.service` are
+`Before=ssh.socket`. `ssh.socket` is ordered `Before=sockets.target` (early
+boot, before `basic.target`), so a guard that inherits the implicit
+`After=basic.target` closes an `ssh.socket → guard → basic.target →
+sockets.target → ssh.socket` ordering cycle — systemd deletes `ssh.socket`'s
+start job and SSH never starts, on every boot (proof-10 UART boot log,
+2026-07-15). The same trap hit `ceralive-migrate-data.service`, which seeds the
+`/data` skeleton the `/var/log`+`/opt/ceralive` bind mounts shadow: it must be
+`Before=local-fs.target` (never `After=`) with `DefaultDependencies=no`, or
+`local-fs.target ↔ var-log.mount` cycles and the frontend `public` symlink never
+lands. `ConditionKernelCommandLine`/`ConditionPathExists` do NOT remove a unit's
+ordering edges — systemd wires them at transaction-build time regardless of the
+condition. Offline guard: `v2/tests/systemd-ordering-cycle.test.sh` (static
+contract + `systemd-analyze verify`), wired into `v2/run-tests`.
+
 **Build concurrency** [EXISTS]
 
 The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`

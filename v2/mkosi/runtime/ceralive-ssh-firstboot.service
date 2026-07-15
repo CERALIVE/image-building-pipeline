@@ -11,6 +11,15 @@ Documentation=file:///usr/share/doc/ceralive/ssh-hardening.md
 # replaces the shared baked host-key fingerprint; later boots purge unauthorized
 # CI keys before either the classic service or socket activation can accept a
 # connection.
+#
+# ssh.socket is ordered Before=sockets.target (early boot, before basic.target),
+# so a guard ordered Before=ssh.socket must NOT inherit the default
+# After=basic.target — that forms an unbreakable ssh.socket<->sockets.target
+# ordering cycle (systemd deletes ssh.socket's start job and SSH never comes up).
+# Opt out of default deps and pin only the early orderings we actually need.
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
 After=local-fs.target data.mount
 Before=ssh.service ssh.socket
 # Persisted per-device host identity lives on /data (survives reboots + A/B OTA
