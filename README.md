@@ -77,8 +77,16 @@ in both slots, and a real compatible signed bundle.
 The release hardware gate starts with one Rock 5B+ in Maskrom, carries a
 SHA-256-pinned loader in the candidate artifact, checks loader-mode eMMC capacity,
 and verifies a full readback before reset. A canonical hash approves the
-Maskrom USB port before loader transfer; the 16-byte Rockchip SoC identity is
-then captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
+Maskrom USB port before loader transfer. The initial `rkdeveloptool db` runs
+under a pinned leader in an owned process group with a monotonic 15-second
+budget and bounded one-second TERM-to-KILL cleanup. Returning from `db` is not
+treated as success: for up to 10 seconds the gate requires the same
+VID/PID/`LocationID` to reappear in exact
+`Loader` mode before it can query capacity or identity. A timeout, malformed or
+multiple listing, changed fixture, or unexpected mode fails with no retry and
+before `rfi`, write, readback, or reset. Command timeout and USB re-enumeration
+timeout have separate diagnostics. The 16-byte Rockchip SoC identity is then
+captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
 CRLF transport framing but requires exactly one labeled record with exactly 16
 hex octets; truncated, extra, split, nonhex, and duplicate records fail before
 media write. The normalized identity remains lowercase 32-hex. Linux reads the

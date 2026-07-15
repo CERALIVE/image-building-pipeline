@@ -22,7 +22,7 @@
 #   need finer locking serialize themselves with flock (see `serialize` in
 #   tests/manifest.bats).
 #   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
-#   auto-derives from nproc, capped at 8 (this unit suite is ~95 short tests —
+#   auto-derives from nproc, capped at 8 (this unit suite is 143 short tests —
 #   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
 #
 # Usage:  ./run-tests              (from v2/)         — auto-parallel

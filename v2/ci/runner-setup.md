@@ -173,6 +173,19 @@ the hardware label, place the Rock 5B+ in Maskrom and verify that
 closed on zero, multiple, or loader-mode targets; it does not try to power-cycle
 or recover an unexpected board state.
 
+The workflow transfers the pinned loader with one owned `rkdeveloptool db`
+process group whose leader remains pinned. The command has a monotonic 15-second
+budget; timeout or cancellation sends whole-group TERM, waits one second,
+escalates survivors to KILL, reaps the leader, and fails unless cleanup is
+complete. Command exit begins a separate
+10-second USB phase. Capacity probing is forbidden until exactly one device with
+the original VID/PID/`LocationID` appears in `Loader` mode. Zero devices or that
+same fixture still in Maskrom may be transient. Malformed, multiple, changed, or
+unexpected-mode listings fail immediately. The workflow never retries `db`, and
+neither handoff failure may reach `rfi`, identity reads, media write/readback, or
+reset. Logs distinguish the `db` command timeout from Loader re-enumeration
+timeout.
+
 After exact write/readback verification, `rkdeveloptool rd` is the required
 reset mechanism. Later A/B checks reboot through the authenticated OS. A relay or
 smart PDU remains useful for lab recovery, but it is deliberately outside the
@@ -281,7 +294,9 @@ captured request cannot restore an expired key. It never exposes a shell.
 Before loader transfer, the workflow normalizes the single Maskrom device's
 VID/PID and stable `LocationID`, then requires its SHA-256 to match the approved
 fixture repository variable. This identity is readable while the board remains
-in Maskrom; `rci` is not. After the pinned loader starts, the workflow reads the
+in Maskrom; `rci` is not. A return from `db` alone is insufficient: the bounded
+handoff described in section 3 must positively observe the same fixture in
+`Loader` mode. After that proof, the workflow reads the
 unique 16-byte SoC identity. The host signs the UART request with a mode-0600,
 host-local Ed25519 key; before any USB operation, the verifier derives its public
 key and requires it to equal the public key in the candidate source. The image
@@ -318,8 +333,9 @@ recoverable — there is no eMMC state that blocks maskrom entry. Runbook:
    rkdeveloptool ld          # expect a "Maskrom" device line
    ```
 3. Leave the board in Maskrom and push a newly named `release/**` branch at the
-   exact approved commit. The workflow owns loader transfer, capacity preflight,
-   fixture identity, write, full readback, UART-observed boot, and ephemeral SSH.
+   exact approved commit. The workflow owns the bounded, no-retry loader
+   transfer and same-fixture Loader proof, capacity preflight, fixture identity,
+   write, full readback, UART-observed boot, and ephemeral SSH.
    Do not use a raw attended `wl`/`rd` sequence, because it bypasses candidate
    binding and leaves no cleanup receipt.
 

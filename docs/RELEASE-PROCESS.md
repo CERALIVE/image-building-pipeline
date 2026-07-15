@@ -118,7 +118,20 @@ Steps, in order:
    private file, verify its size and SHA-256, and refuse to boot on any mismatch.
    The board must enumerate as the only RK3588 USB target and its canonical
    VID/PID/`LocationID` hash must match the approved Rock 5B+ fixture before
-   loader transfer. After the pinned loader starts, `rkdeveloptool rci` captures
+   loader transfer. The initial `rkdeveloptool db` is isolated under a pinned
+   leader in an owned process group and limited by a monotonic 15-second budget.
+   Timeout or interruption sends TERM to the group, waits one second, sends KILL
+   to survivors, reaps the leader, and fails unless no group member or zombie
+   remains. A clean command exit starts a
+   distinct 10-second USB re-enumeration phase: only exactly one target with the
+   same VID/PID/`LocationID` in `Loader` mode may advance to `rfi`. Zero targets
+   or the same target still in Maskrom may be transient; malformed, multiple,
+   changed, or unexpected-mode output fails immediately. There is no `db` retry,
+   and no capacity query, identity read, write, readback, or reset follows either
+   failure. Logs distinguish “rkdeveloptool db command timed out” from “loader
+   re-enumeration timed out.”
+
+   After the pinned loader is positively observed, `rkdeveloptool rci` captures
    its 16-byte chip identity before `wl`. The structured parser accepts LF and
    CRLF framing, strips only the terminal transport CR, and requires exactly one
    `Chip Info:` record of exactly 16 one- or two-digit hex octets. Truncated,
@@ -141,7 +154,8 @@ Steps, in order:
    whose parent is the flashed eMMC, and a fresh run-local SSH host-key record.
    The gate deliberately does not hash
    post-boot media because U-Boot state and the mounted rootfs are mutable. Its
-   `rkdeveloptool` children are cancellable/reaped. The verifier resets inherited
+   later `rkdeveloptool` children retain their cancellable/reaped behavior. The
+   verifier resets inherited
    ignored INT/TERM dispositions before Bash starts its traps, covering
    asynchronous CI-shell launches where SIGINT would otherwise remain ignored.
    Artifact filenames in the identity record are restricted to a safe
