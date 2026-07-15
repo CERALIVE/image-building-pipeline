@@ -54,13 +54,30 @@ line_of() {
   printf '%s\n' "${line}"
 }
 
-db_line="$(line_of 'run_rkdeveloptool db' "${VERIFY}")"
+db_function_line="$(line_of '^run_owned_db() {' "${VERIFY}")"
+db_startup_int_trap_line="$(line_of 'db_startup_signal=130' "${VERIFY}")"
+db_startup_term_trap_line="$(line_of 'db_startup_signal=143' "${VERIFY}")"
+db_setsid_line="$(line_of 'setsid bash -c' "${VERIFY}")"
+db_pid_capture_line="$(line_of 'db_leader_pid=\$!' "${VERIFY}")"
+db_session_owned_line="$(line_of 'db_session_owned=1' "${VERIFY}")"
+db_pending_signal_line="$(line_of 'db_startup_signal == 0' "${VERIFY}")"
+db_line="$(line_of '^run_owned_db$' "${VERIFY}")"
 rfi_line="$(line_of 'run_rkdeveloptool rfi' "${VERIFY}")"
 preflight_line="$(line_of --target-size-bytes "${VERIFY}")"
 uart_arm_line="$(line_of "\"\${uart_helper}\" --serial-dev" "${VERIFY}")"
 write_line="$(line_of 'run_rkdeveloptool wl' "${VERIFY}")"
-if ! (( db_line < rfi_line && rfi_line < preflight_line && preflight_line < uart_arm_line && uart_arm_line < write_line )); then
+if ! (( db_function_line < db_line && db_line < rfi_line && rfi_line < preflight_line && preflight_line < uart_arm_line && uart_arm_line < write_line )); then
   printf 'Maskrom-first regression: loader capacity/preflight/write ordering is unsafe\n' >&2
+  exit 1
+fi
+if ! (( db_function_line < db_startup_int_trap_line &&
+        db_function_line < db_startup_term_trap_line &&
+        db_startup_int_trap_line < db_setsid_line &&
+        db_startup_term_trap_line < db_setsid_line &&
+        db_setsid_line < db_pid_capture_line &&
+        db_pid_capture_line < db_session_owned_line &&
+        db_session_owned_line < db_pending_signal_line )); then
+  printf 'Maskrom-first regression: loader startup cancellation is not ownership-safe\n' >&2
   exit 1
 fi
 if grep -Fq 'blockdev --getsize64' "${VERIFY}"; then
@@ -494,6 +511,8 @@ import os
 import sys
 
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
+with open(sys.argv[2], "w", encoding="ascii"):
+    pass
 line = bytearray()
 prompted = False
 while True:
@@ -513,8 +532,13 @@ while True:
             line.clear()
         else:
             line.append(byte)
-' "${pty}/sim" &
+' "${pty}/sim" "${pty}/sim-ready" &
 sim_pid=$!
+for _ in $(seq 1 100); do
+  [[ -e "${pty}/sim-ready" ]] && break
+  sleep 0.02
+done
+[[ -e "${pty}/sim-ready" ]]
 timeout 20s env CERALIVE_UBOOT_TIMEOUT_SECONDS=5 \
   CERALIVE_BOOTSTRAP_TIMEOUT_SECONDS=5 CERALIVE_PROVISION_TIMEOUT_SECONDS=5 \
   "${UART}" --serial-dev "${pty}/runner" --authorized-key "${pty}/id_ed25519.pub" \

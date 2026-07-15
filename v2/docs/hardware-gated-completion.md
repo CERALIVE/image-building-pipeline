@@ -357,7 +357,15 @@ rkdeveloptool ld
 #    Do not rerun an old workflow run or manually flash a retained artifact.
 ```
 
-The workflow verifies fixture identity, loads the pinned bootloader, checks target
+The workflow verifies fixture identity and runs the pinned loader under a pinned
+leader in an owned process group with a monotonic 15-second command budget and
+bounded one-second TERM→KILL cleanup. It then allows up to 10 seconds for exactly
+the same
+VID/PID/`LocationID` to appear in `Loader` mode before querying capacity. A
+command timeout, stale or missing transition, malformed or multiple listing,
+changed fixture, or wrong mode fails without retry and before every downstream
+capacity, identity, write, readback, or reset command. The two phases emit
+distinct timeout diagnostics. After Loader proof, the workflow checks target
 capacity, writes and reads back the freshly built immutable candidate, observes the
 signed UART bootstrap, provisions temporary SSH access, and runs
 `v2/tests/realhw-suite.sh`. It removes the temporary key and records cleanup even
@@ -369,6 +377,8 @@ when the gate fails.
 - [ ] Required runner variables and dedicated board labels are verified.
 - [ ] Newly named `release/**` branch points at the exact approved commit.
 - [ ] Candidate build succeeds on its first attempt and remains immutable.
+- [ ] Loader `db` and same-fixture Loader re-enumeration complete inside their
+      separate budgets with no retry.
 - [ ] Workflow-owned capacity preflight, flash, and full readback pass.
 - [ ] Signed UART identity matches the candidate commit and approved SoC.
 - [ ] Ephemeral SSH access is provisioned and removed by the workflow.
@@ -572,7 +582,12 @@ The workflow runs these steps in order:
 2. **Required flash** — digest a private candidate snapshot, use that same file
    for preflight and the maskrom write, then read and SHA-256 the exact candidate
    sector range before reset. The gate requires one Maskrom Rockchip target,
-   applies a volatile one-boot, data-only UART bootstrap, and provisions a restricted,
+   bounds the initial `db` command to 15 seconds in an owned process group, and
+   requires the same VID/PID/`LocationID` in `Loader` mode within a separate
+   10-second phase before `rfi`. Timeout cleanup is whole-group TERM then KILL
+   and reap; malformed, multiple, stale, changed, or wrong-mode transitions fail
+   without retry or downstream operations. The gate then applies a volatile
+   one-boot, data-only UART bootstrap and provisions a restricted,
    expiring run-local root public key without modifying the artifact. The
    bootstrap verifies an authenticated, one-hour-bounded envelope containing the
    baked candidate commit, a fresh challenge, and the USB-captured SoC identity. The
@@ -581,9 +596,10 @@ The workflow runs these steps in order:
    180-second timeout, no shell, and no restart. Post-boot SSH must report a valid
    media CID within the retry budget. Its run-local SSH
    host-key record is rotated only after the immutable
-   readback succeeds. All `rkdeveloptool` operations are owned and reaped so an
-   interruption cannot leave a flash/readback child or scratch candidate behind.
-   Post-boot mutable bytes are not compared to the factory raw, and identity
+   readback succeeds. Later `rkdeveloptool` operations retain their existing
+   cancellable-child cleanup so an interruption cannot leave a flash/readback
+   child or scratch candidate behind. Post-boot mutable bytes are not compared
+   to the factory raw, and identity
    artifact filenames are validated before entering the line-oriented record.
 3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
    init, required candidate-bound dev-loop sanity, RAUC A/B rollback. Acceptance

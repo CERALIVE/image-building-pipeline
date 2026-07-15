@@ -5,7 +5,121 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 VERIFY="${V2}/ci/verify-and-flash-candidate.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf "${TMP}"' EXIT
+proof4_owned_pgids=()
+proof4_run_id="${CERALIVE_PROOF4_RUN_ID:-proof4-${BASHPID}-${RANDOM}}"
+proof4_group_members() {
+  local pgid="$1"
+  ps -eo pid=,pgid= | awk -v pgid="${pgid}" '$2 == pgid { print $1 }'
+}
+proof4_assert_owned_group() {
+  local pgid="$1" pid marker pid_pgid pid_sid self_pgid members=()
+  mapfile -t members < <(proof4_group_members "${pgid}")
+  (( ${#members[@]} > 0 )) || return 3
+  self_pgid="$(ps -o pgid= -p "${BASHPID}")"
+  self_pgid="${self_pgid//[[:space:]]/}"
+  [[ "${pgid}" != "${self_pgid}" ]] || {
+    printf 'refusing to signal worker/test pgid=%s\n' "${pgid}" >&2
+    return 1
+  }
+  for pid in "${members[@]}"; do
+    if ! read -r pid_pgid pid_sid < <(ps -o pgid=,sid= -p "${pid}"); then
+      [[ ! -e "/proc/${pid}" ]] && continue
+      return 1
+    fi
+    pid_pgid="${pid_pgid//[[:space:]]/}"
+    pid_sid="${pid_sid//[[:space:]]/}"
+    [[ "${pid_pgid}" == "${pgid}" && "${pid_sid}" == "${pgid}" ]] || {
+      printf 'refusing to signal pid=%s with pgid=%s sid=%s expected=%s\n' \
+        "${pid}" "${pid_pgid}" "${pid_sid}" "${pgid}" >&2
+      return 1
+    }
+    if [[ ! -r "/proc/${pid}/environ" ]]; then
+      [[ ! -e "/proc/${pid}" ]] && continue
+      return 1
+    fi
+    marker="$(tr '\0' '\n' <"/proc/${pid}/environ" | \
+      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')"
+    [[ "${marker}" == "${proof4_run_id}" ]] || {
+      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
+        "${pid}" "${pgid}" "${marker:-missing}" >&2
+      return 1
+    }
+  done
+}
+proof4_cleanup_group() {
+  local pgid="$1" pid members=() marker
+  mapfile -t members < <(proof4_group_members "${pgid}")
+  for pid in "${members[@]}"; do
+    if [[ ! -r "/proc/${pid}/environ" ]]; then
+      [[ ! -e "/proc/${pid}" ]] && continue
+      return 1
+    fi
+    marker="$(tr '\0' '\n' <"/proc/${pid}/environ" | \
+      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')"
+    [[ "${marker}" == "${proof4_run_id}" ]] || {
+      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
+        "${pid}" "${pgid}" "${marker:-missing}" >&2
+      return 1
+    }
+  done
+  if (( ${#members[@]} > 0 )); then
+    proof4_assert_owned_group "${pgid}"
+    kill -TERM -- "-${pgid}" 2>/dev/null || true
+    for _ in $(seq 1 25); do
+      mapfile -t members < <(proof4_group_members "${pgid}")
+      (( ${#members[@]} == 0 )) && break
+      sleep 0.02
+    done
+    mapfile -t members < <(proof4_group_members "${pgid}")
+    if (( ${#members[@]} > 0 )); then
+      proof4_assert_owned_group "${pgid}"
+      kill -KILL -- "-${pgid}" 2>/dev/null || true
+    fi
+  fi
+  for _ in $(seq 1 100); do
+    mapfile -t members < <(proof4_group_members "${pgid}")
+    (( ${#members[@]} == 0 )) && break
+    sleep 0.02
+  done
+  mapfile -t members < <(proof4_group_members "${pgid}")
+  (( ${#members[@]} == 0 ))
+}
+proof4_forget_owned_group() {
+  local target="$1" pgid retained=()
+  for pgid in "${proof4_owned_pgids[@]}"; do
+    [[ "${pgid}" == "${target}" ]] || retained+=("${pgid}")
+  done
+  proof4_owned_pgids=("${retained[@]}")
+}
+proof4_run_id_pgids() {
+  local pid pgid marker self_pgid
+  self_pgid="$(ps -o pgid= -p "${BASHPID}")"
+  self_pgid="${self_pgid//[[:space:]]/}"
+  ps -eo pid=,pgid= | while read -r pid pgid; do
+    [[ "${pgid}" != "${self_pgid}" ]] || continue
+    [[ -r "/proc/${pid}/environ" ]] || continue
+    marker="$({ tr '\0' '\n' <"/proc/${pid}/environ"; } 2>/dev/null | \
+      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')" || continue
+    [[ "${marker}" == "${proof4_run_id}" ]] || continue
+    printf '%s\n' "${pgid}"
+  done | sort -u
+}
+proof4_cleanup_run_groups() {
+  local pgid
+  while read -r pgid; do
+    [[ -n "${pgid}" ]] || continue
+    proof4_cleanup_group "${pgid}" || true
+  done < <(proof4_run_id_pgids)
+}
+cleanup() {
+  local pgid
+  for pgid in "${proof4_owned_pgids[@]}"; do
+    proof4_cleanup_group "${pgid}" || true
+  done
+  proof4_cleanup_run_groups
+  rm -rf "${TMP}"
+}
+trap cleanup EXIT
 openssl genpkey -algorithm ED25519 -out "${TMP}/uart-signing.pem" >/dev/null 2>&1
 chmod 0600 "${TMP}/uart-signing.pem"
 openssl pkey -in "${TMP}/uart-signing.pem" -pubout -out "${TMP}/uart-public.pem" >/dev/null 2>&1
@@ -82,12 +196,114 @@ set -euo pipefail
 printf 'rkdeveloptool %s\n' "$*" >>"${MOCK_FLASH_LOG}"
 wait_for_interrupt() {
   [[ -z "${MOCK_RK_PID_FILE:-}" ]] || printf '%s\n' "$$" >"${MOCK_RK_PID_FILE}"
-  trap 'exit 143' TERM INT
+  if [[ "${MOCK_RK_IGNORE_TERM:-0}" == 1 ]]; then
+    trap ':' TERM INT
+  else
+    trap 'exit 143' TERM INT
+  fi
   while :; do sleep 1; done
+}
+proof4_process_record() {
+  local role="$1" output="$2" pid="${BASHPID}" ppid pgid stat starttime fd1 fd2
+  read -r ppid pgid stat < <(ps -o ppid=,pgid=,stat= -p "${pid}")
+  ppid="${ppid//[[:space:]]/}"
+  pgid="${pgid//[[:space:]]/}"
+  stat="${stat//[[:space:]]/}"
+  starttime="$(awk '{print $22}' "/proc/${pid}/stat")"
+  fd1="$(readlink "/proc/${pid}/fd/1")"
+  fd2="$(readlink "/proc/${pid}/fd/2")"
+  printf 'role=%s pid=%s ppid=%s pgid=%s stat=%s starttime=%s fd1=%s fd2=%s\n' \
+    "${role}" "${pid}" "${ppid}" "${pgid}" "${stat}" "${starttime}" "${fd1}" "${fd2}" \
+    >"${output}"
+}
+proof4_term_ignoring_descendant() {
+  proof4_process_record child "${MOCK_PROOF4_PROCESS_DIR}/child.info"
+  trap 'printf "child TERM observed and ignored at %s\n" "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" >>"${MOCK_PROOF4_PROCESS_DIR}/signals.log"' TERM
+  : >"${MOCK_PROOF4_PROCESS_DIR}/child.ready"
+  while :; do sleep 0.05 || true; done
+}
+proof4_db_process_tree() {
+  local mode="$1" child_pid
+  proof4_process_record leader "${MOCK_PROOF4_PROCESS_DIR}/leader.info"
+  trap 'printf "leader TERM observed and ignored at %s\n" "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" >>"${MOCK_PROOF4_PROCESS_DIR}/signals.log"' TERM
+  proof4_term_ignoring_descendant &
+  child_pid=$!
+  printf '%s\n' "${child_pid}" >"${MOCK_PROOF4_PROCESS_DIR}/child.pid"
+  for _ in $(seq 1 100); do
+    [[ -e "${MOCK_PROOF4_PROCESS_DIR}/child.ready" ]] && break
+    sleep 0.01
+  done
+  [[ -e "${MOCK_PROOF4_PROCESS_DIR}/child.ready" ]]
+  if [[ "${mode}" == leader-exits ]]; then
+    printf 'leader-exited-with-live-descendant\n' >"${MOCK_PROOF4_PROCESS_DIR}/leader-exited"
+    exit 0
+  fi
+  while :; do sleep 0.05 || true; done
 }
 case "${1:-}" in
   ld)
+    if [[ -n "${MOCK_PROOF4_REENUM_SCENARIO:-}" ]]; then
+      call_count="$(cat "${MOCK_PROOF4_LD_COUNT_FILE}" 2>/dev/null || printf 0)"
+      call_count=$((call_count + 1))
+      printf '%s\n' "${call_count}" >"${MOCK_PROOF4_LD_COUNT_FILE}"
+      if (( call_count == 1 )); then
+        printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom\n'
+        printf 'ld:initial:Vid=0x2207,Pid=0x350b,LocationID=101:Maskrom\n' \
+          >>"${MOCK_PROOF4_EVENT_LOG}"
+        exit 0
+      fi
+      case "${MOCK_PROOF4_REENUM_SCENARIO}" in
+        timeout)
+          printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom\n'
+          printf 'ld:transient-same-maskrom\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+        transient)
+          case "${call_count}" in
+            2) printf 'ld:transient-zero-device\n' >>"${MOCK_PROOF4_EVENT_LOG}" ;;
+            3)
+              printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom\n'
+              printf 'ld:transient-same-maskrom\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+              ;;
+            *)
+              printf 'Loader\n' >"${MOCK_HANDOFF_STATE_FILE}"
+              printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Loader\n'
+              printf 'ld:loader:same-identity\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+              ;;
+          esac
+          ;;
+        malformed)
+          printf 'this is not an rkdeveloptool device listing\n'
+          printf 'ld:malformed\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+        wrong-identity)
+          printf 'DevNo=1 Vid=0x2207,Pid=0x330c,LocationID=101 Loader\n'
+          printf 'ld:wrong-identity\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+        changed-location)
+          printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=102 Loader\n'
+          printf 'ld:changed-location\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+        multiple)
+          printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Loader\n'
+          printf 'DevNo=2 Vid=0x2207,Pid=0x350b,LocationID=101 Loader\n'
+          printf 'ld:multiple\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+        wrong-mode)
+          printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 Rockusb\n'
+          printf 'ld:wrong-mode\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+          ;;
+      esac
+      exit 0
+    fi
+    if [[ -n "${MOCK_HANDOFF_STATE_FILE:-}" && -z "${MOCK_PROOF4_REENUM_SCENARIO:-}" ]]; then
+      handoff_state="$(cat "${MOCK_HANDOFF_STATE_FILE}")"
+      printf 'DevNo=1 Vid=0x2207,Pid=0x350b,LocationID=101 %s\n' "${handoff_state}"
+      printf 'ld:%s:Vid=0x2207,Pid=0x350b,LocationID=101\n' "${handoff_state}" \
+        >>"${MOCK_HANDOFF_EVENT_LOG}"
+      exit 0
+    fi
     usb_mode=Maskrom
+    [[ ! -e "${MOCK_FLASH_LOG}.db-complete" ]] || usb_mode=Loader
     [[ "${MOCK_USB_MODE:-single}" == loader ]] && usb_mode=Loader
     if [[ "${MOCK_USB_MODE:-single}" == wrong-soc ]]; then
       printf 'DevNo=1 Vid=0x2207,Pid=0x330c,LocationID=101 Maskrom\n'
@@ -102,14 +318,37 @@ case "${1:-}" in
     fi
     ;;
   db)
+    if [[ -n "${MOCK_PROOF4_DB_MODE:-}" ]]; then
+      proof4_db_process_tree "${MOCK_PROOF4_DB_MODE}"
+    fi
+    if [[ -n "${MOCK_HANDOFF_STATE_FILE:-}" && -z "${MOCK_PROOF4_REENUM_SCENARIO:-}" ]]; then
+      [[ "$(cat "${MOCK_HANDOFF_STATE_FILE}")" == Maskrom ]]
+      printf 'db:start\n' >>"${MOCK_HANDOFF_EVENT_LOG}"
+      printf 'Loader\n' >"${MOCK_HANDOFF_STATE_FILE}"
+      printf 'db:complete\n' >>"${MOCK_HANDOFF_EVENT_LOG}"
+    fi
     if [[ -n "${MOCK_REPLACE_LOADER_AFTER_VALIDATION:-}" ]]; then
       [[ "$2" != "${MOCK_LOADER_SOURCE}" ]]
       grep -qx 'loader' "$2"
     fi
     if [[ "${MOCK_FLASH_MODE:-exact}" == db-wait ]]; then wait_for_interrupt; fi
     [[ "${MOCK_FLASH_MODE:-exact}" != db-fail ]] || exit 70
+    : >"${MOCK_FLASH_LOG}.db-complete"
     ;;
   rfi)
+    if [[ -n "${MOCK_PROOF4_REENUM_SCENARIO:-}" ]]; then
+      printf 'rfi\n' >>"${MOCK_PROOF4_EVENT_LOG}"
+      if [[ "$(cat "${MOCK_HANDOFF_STATE_FILE}")" != Loader ]]; then
+        printf 'fixture rejected rfi before same-fixture Loader re-enumeration\n' >&2
+        exit 91
+      fi
+    fi
+    if [[ -n "${MOCK_HANDOFF_STATE_FILE:-}" ]]; then
+      [[ "$(cat "${MOCK_HANDOFF_STATE_FILE}")" == Loader ]]
+      printf 'reenumeration:Loader:Vid=0x2207,Pid=0x350b,LocationID=101\n' \
+        >>"${MOCK_HANDOFF_EVENT_LOG}"
+      printf 'rfi\n' >>"${MOCK_HANDOFF_EVENT_LOG}"
+    fi
     printf 'Flash Size: %s Sectors\n' "${MOCK_TARGET_SECTORS:-195312}"
     ;;
   rid)
@@ -224,6 +463,470 @@ base_env=(
   "CERALIVE_RECONNECT_DELAY=0"
   "CERALIVE_UART_PUBLIC_KEY_FILE=${TMP}/uart-public.pem"
 )
+
+assert_healthy_loader_handoff() {
+  local case_dir="${TMP}/healthy-loader-handoff"
+  local expected_events
+  mkdir -p "${case_dir}"
+  printf 'Maskrom\n' >"${case_dir}/usb-state"
+  expected_events=$'ld:Maskrom:Vid=0x2207,Pid=0x350b,LocationID=101\n'\
+$'db:start\n'\
+$'db:complete\n'\
+$'ld:Loader:Vid=0x2207,Pid=0x350b,LocationID=101\n'\
+$'reenumeration:Loader:Vid=0x2207,Pid=0x350b,LocationID=101\n'\
+$'rfi'
+  rm -f "${TMP}/identity.txt"
+  env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
+    MOCK_HANDOFF_STATE_FILE="${case_dir}/usb-state" \
+    MOCK_HANDOFF_EVENT_LOG="${case_dir}/events.log" \
+    MOCK_MEDIA="${case_dir}/media.raw" MOCK_SSH_COUNT_FILE="${case_dir}/count" \
+    MOCK_FLASH_LOG="${case_dir}/flash.log" MOCK_DEVICE_STATE_FILE="${case_dir}/state" \
+    "${VERIFY}" "${common[@]}" >"${case_dir}/verify.log" 2>&1
+  [[ "$(<"${case_dir}/usb-state")" == Loader ]]
+  [[ "$(<"${case_dir}/events.log")" == "${expected_events}" ]]
+  [[ "$(grep -c '^db:start$' "${case_dir}/events.log")" -eq 1 ]]
+  printf 'healthy loader handoff: db completed before same-fixture Loader re-enumeration before rfi (exit=0)\n'
+}
+
+assert_healthy_loader_handoff
+if [[ "${CERALIVE_PROOF4_CASE:-}" == healthy ]]; then
+  exit 0
+fi
+
+proof4_live_and_zombie_counts() {
+  local pgid="$1" live=0 zombie=0 stat
+  while read -r stat; do
+    [[ -n "${stat}" ]] || continue
+    if [[ "${stat}" == Z* ]]; then
+      zombie=$((zombie + 1))
+    else
+      live=$((live + 1))
+    fi
+  done < <(ps -eo pgid=,stat= | awk -v pgid="${pgid}" '$1 == pgid { print $2 }')
+  printf '%s %s\n' "${live}" "${zombie}"
+}
+
+proof4_run_verifier() {
+  local case_dir="$1" db_mode="$2" reenum_scenario="$3"
+  local watchdog_pid watchdog_fd started_ms ended_ms verifier_stat session_observed=0
+  mkdir -p "${case_dir}/process"
+  mkfifo -- "${case_dir}/watchdog.cancel"
+  exec {watchdog_fd}<>"${case_dir}/watchdog.cancel"
+  proof4_db_pgid=""
+  printf 'Maskrom\n' >"${case_dir}/usb-state"
+  : >"${case_dir}/events.log"
+  : >"${case_dir}/flash.log"
+  started_ms="$(date +%s%3N)"
+  setsid env "${base_env[@]}" \
+    CERALIVE_PROOF4_RUN_ID="${proof4_run_id}" \
+    CERALIVE_RKDEVELOPTOOL_DB_TIMEOUT_SECONDS=1 \
+    CERALIVE_LOADER_REENUMERATION_TIMEOUT_SECONDS=1 \
+    CERALIVE_LOADER_REENUMERATION_POLL_SECONDS=0.05 \
+    MOCK_PROOF4_DB_MODE="${db_mode}" \
+    MOCK_PROOF4_PROCESS_DIR="${case_dir}/process" \
+    MOCK_PROOF4_REENUM_SCENARIO="${reenum_scenario}" \
+    MOCK_PROOF4_LD_COUNT_FILE="${case_dir}/ld-count" \
+    MOCK_PROOF4_EVENT_LOG="${case_dir}/events.log" \
+    MOCK_HANDOFF_STATE_FILE="${case_dir}/usb-state" \
+    MOCK_HANDOFF_EVENT_LOG="${case_dir}/events.log" \
+    MOCK_RECONNECT_MODE=success MOCK_MEDIA="${case_dir}/media.raw" \
+    MOCK_SSH_COUNT_FILE="${case_dir}/count" MOCK_FLASH_LOG="${case_dir}/flash.log" \
+    MOCK_DEVICE_STATE_FILE="${case_dir}/state" \
+    "${VERIFY}" "${common[@]}" >"${case_dir}/verify.log" 2>&1 &
+  proof4_verify_pid=$!
+  proof4_verify_pgid="${proof4_verify_pid}"
+  proof4_owned_pgids+=("${proof4_verify_pgid}")
+  for _ in $(seq 1 100); do
+    if proof4_assert_owned_group "${proof4_verify_pgid}" 2>/dev/null; then
+      session_observed=1
+      break
+    fi
+    verifier_stat="$(ps -o stat= -p "${proof4_verify_pid}" 2>/dev/null || true)"
+    [[ -z "${verifier_stat}" || "${verifier_stat}" == *Z* ]] && break
+    sleep 0.01
+  done
+  if (( session_observed == 0 )) && \
+     verifier_stat="$(ps -o stat= -p "${proof4_verify_pid}" 2>/dev/null || true)" && \
+     [[ -n "${verifier_stat}" && "${verifier_stat}" != *Z* ]]; then
+    printf 'FIXTURE_ERROR: verifier did not establish a separately owned session pgid=%s\n' \
+      "${proof4_verify_pgid}" >&2
+    exec {watchdog_fd}>&-
+    return 2
+  fi
+  (
+    if IFS= read -r -t 4 _ <&"${watchdog_fd}"; then
+      exit 0
+    fi
+    if ! proof4_assert_owned_group "${proof4_verify_pgid}"; then
+      printf 'outer-watchdog-refused utc=%s pgid=%s reason=ownership-check\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "${proof4_verify_pgid}" \
+        >"${case_dir}/watchdog.log"
+      exit 1
+    fi
+    printf 'outer-watchdog-fired utc=%s pgid=%s action=TERM\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "${proof4_verify_pgid}" \
+      >"${case_dir}/watchdog.log"
+    kill -TERM -- "-${proof4_verify_pgid}" 2>/dev/null || true
+    sleep 0.4
+    if proof4_assert_owned_group "${proof4_verify_pgid}"; then
+      printf 'outer-watchdog utc=%s pgid=%s action=KILL\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "${proof4_verify_pgid}" \
+        >>"${case_dir}/watchdog.log"
+      kill -KILL -- "-${proof4_verify_pgid}" 2>/dev/null || true
+    fi
+  ) &
+  watchdog_pid=$!
+
+  if [[ -n "${db_mode}" ]]; then
+    for _ in $(seq 1 200); do
+      [[ -s "${case_dir}/process/leader.info" && -s "${case_dir}/process/child.info" ]] && break
+      sleep 0.01
+    done
+    if [[ -s "${case_dir}/process/leader.info" ]]; then
+      proof4_db_pgid="$(sed -nE \
+        's/^role=leader pid=[0-9]+ ppid=[0-9]+ pgid=([0-9]+) .*/\1/p' \
+        "${case_dir}/process/leader.info")"
+      [[ "${proof4_db_pgid}" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'FIXTURE_ERROR: process tree published an invalid db pgid\n' >&2
+        proof4_cleanup_group "${proof4_verify_pgid}" || true
+        printf 'cancel\n' >&"${watchdog_fd}" || true
+        wait "${watchdog_pid}" 2>/dev/null || true
+        exec {watchdog_fd}>&-
+        return 2
+      }
+      proof4_owned_pgids+=("${proof4_db_pgid}")
+    fi
+    if [[ ! -s "${case_dir}/process/leader.info" || ! -s "${case_dir}/process/child.info" ]]; then
+      printf 'FIXTURE_ERROR: process tree did not publish leader and child identity\n' >&2
+      [[ -z "${proof4_db_pgid}" ]] || proof4_cleanup_group "${proof4_db_pgid}" || true
+      proof4_cleanup_run_groups
+      proof4_cleanup_group "${proof4_verify_pgid}" || true
+      printf 'cancel\n' >&"${watchdog_fd}" || true
+      wait "${watchdog_pid}" 2>/dev/null || true
+      exec {watchdog_fd}>&-
+      return 2
+    fi
+    proof4_assert_owned_group "${proof4_db_pgid}" || {
+      printf 'FIXTURE_ERROR: nested db process group ownership was not established\n' >&2
+      proof4_cleanup_group "${proof4_db_pgid}" || true
+      proof4_cleanup_group "${proof4_verify_pgid}" || true
+      printf 'cancel\n' >&"${watchdog_fd}" || true
+      wait "${watchdog_pid}" 2>/dev/null || true
+      exec {watchdog_fd}>&-
+      return 2
+    }
+    printf 'PROCESS_SNAPSHOT case=%s\n' "$(basename "${case_dir}")"
+    cat "${case_dir}/process/leader.info" "${case_dir}/process/child.info"
+    ps -o pid=,ppid=,pgid=,stat=,args= -g "${proof4_verify_pgid}" || true
+  fi
+
+  set +e
+  wait "${proof4_verify_pid}"
+  proof4_rc=$?
+  set -e
+  ended_ms="$(date +%s%3N)"
+  proof4_elapsed_ms=$((ended_ms - started_ms))
+  if (( proof4_rc != 0 )); then
+    printf 'VERIFIER_DIAGNOSTIC case=%s rc=%s\n' "$(basename "${case_dir}")" "${proof4_rc}"
+    cat "${case_dir}/verify.log"
+  fi
+  if [[ -e "${case_dir}/watchdog.log" ]]; then
+    proof4_watchdog_fired=1
+  else
+    proof4_watchdog_fired=0
+    printf 'cancel\n' >&"${watchdog_fd}"
+  fi
+  wait "${watchdog_pid}" 2>/dev/null || true
+  exec {watchdog_fd}>&-
+}
+
+proof4_finish_case_cleanup() {
+  local case_dir="$1" live zombie db_live=0 db_zombie=0 total_live total_zombie
+  local info pid recorded_start current_start exact_matches=0
+  read -r live zombie < <(proof4_live_and_zombie_counts "${proof4_verify_pgid}")
+  if [[ -n "${proof4_db_pgid:-}" ]]; then
+    read -r db_live db_zombie < <(proof4_live_and_zombie_counts "${proof4_db_pgid}")
+  fi
+  total_live=$((live + db_live))
+  total_zombie=$((zombie + db_zombie))
+  for info in "${case_dir}"/process/{leader,child}.info; do
+    [[ -s "${info}" ]] || continue
+    pid="$(sed -nE 's/^role=[^ ]+ pid=([0-9]+).*/\1/p' "${info}")"
+    recorded_start="$(sed -nE 's/.* starttime=([0-9]+) .*/\1/p' "${info}")"
+    if [[ -r "/proc/${pid}/stat" ]]; then
+      current_start="$(awk '{print $22}' "/proc/${pid}/stat")"
+      [[ "${current_start}" != "${recorded_start}" ]] || exact_matches=$((exact_matches + 1))
+    fi
+  done
+  if [[ -n "${proof4_db_pgid:-}" ]]; then
+    proof4_cleanup_group "${proof4_db_pgid}" || true
+  fi
+  proof4_cleanup_group "${proof4_verify_pgid}" || true
+  proof4_cleanup_run_groups
+  proof4_forget_owned_group "${proof4_verify_pgid}"
+  [[ -z "${proof4_db_pgid:-}" ]] || proof4_forget_owned_group "${proof4_db_pgid}"
+  printf 'CLEANUP_RECEIPT case=%s verifier_pgid=%s db_pgid=%s remaining_live=%s remaining_zombie=%s exact_pid_start_matches=%s\n' \
+    "$(basename "${case_dir}")" "${proof4_verify_pgid}" "${proof4_db_pgid:-none}" \
+    "${total_live}" "${total_zombie}" "${exact_matches}"
+  proof4_remaining_live="${total_live}"
+  proof4_remaining_zombie="${total_zombie}"
+  proof4_exact_pid_start_matches="${exact_matches}"
+}
+
+proof4_contract_result() {
+  local outcome="$1" contract="$2" observable="$3"
+  printf 'CONTRACT_%s: %s | %s\n' "${outcome}" "${contract}" "${observable}"
+}
+
+assert_invalid_loader_handoff_overrides() {
+  local name value label output rc case_dir="${TMP}/proof4-invalid-overrides"
+  local cases=(
+    CERALIVE_RKDEVELOPTOOL_DB_TIMEOUT_SECONDS 0
+    CERALIVE_RKDEVELOPTOOL_DB_TIMEOUT_SECONDS invalid
+    CERALIVE_RKDEVELOPTOOL_DB_TIMEOUT_SECONDS 61
+    CERALIVE_LOADER_REENUMERATION_TIMEOUT_SECONDS 0
+    CERALIVE_LOADER_REENUMERATION_TIMEOUT_SECONDS invalid
+    CERALIVE_LOADER_REENUMERATION_TIMEOUT_SECONDS 61
+    CERALIVE_LOADER_REENUMERATION_POLL_SECONDS 0
+    CERALIVE_LOADER_REENUMERATION_POLL_SECONDS invalid
+    CERALIVE_LOADER_REENUMERATION_POLL_SECONDS 5.1
+    CERALIVE_RKDEVELOPTOOL_TERM_GRACE_SECONDS 0
+    CERALIVE_RKDEVELOPTOOL_TERM_GRACE_SECONDS invalid
+    CERALIVE_RKDEVELOPTOOL_TERM_GRACE_SECONDS 11
+    CERALIVE_RKDEVELOPTOOL_KILL_REAP_GRACE_SECONDS 0
+    CERALIVE_RKDEVELOPTOOL_KILL_REAP_GRACE_SECONDS invalid
+    CERALIVE_RKDEVELOPTOOL_KILL_REAP_GRACE_SECONDS 11
+  )
+  mkdir -p "${case_dir}"
+  while (( ${#cases[@]} > 0 )); do
+    name="${cases[0]}"
+    value="${cases[1]}"
+    cases=("${cases[@]:2}")
+    label="${name,,}-${value}"
+    rm -f "${case_dir}/${label}.flash.log"
+    set +e
+    output="$(env "${base_env[@]}" "${name}=${value}" \
+      MOCK_FLASH_LOG="${case_dir}/${label}.flash.log" \
+      "${VERIFY}" "${common[@]}" 2>&1)"
+    rc=$?
+    set -e
+    if (( rc == 2 )) && [[ ! -e "${case_dir}/${label}.flash.log" ]] &&
+       [[ "${output}" == *"${name} must be a positive"* ]]; then
+      proof4_contract_result PASS "${name}=${value} is rejected before rkdeveloptool" \
+        'rc=2 rkdeveloptool_calls=0'
+    else
+      proof4_contract_result FAIL "${name}=${value} is rejected before rkdeveloptool" \
+        "rc=${rc} flash_log=$([[ -e "${case_dir}/${label}.flash.log" ]] && echo present || echo absent)"
+      return 1
+    fi
+  done
+}
+
+run_proof4_red_contract() {
+  local failures=0 case_dir child_pid child_start current_start
+  local leader_pid fd1 fd2 scenario expected_pattern
+
+  assert_invalid_loader_handoff_overrides || return 2
+
+  case_dir="${TMP}/proof4-db-command-timeout"
+  proof4_run_verifier "${case_dir}" hang timeout || return 2
+  cat "${case_dir}/watchdog.log" 2>/dev/null || true
+  cat "${case_dir}/process/signals.log" 2>/dev/null || true
+  if (( proof4_rc != 0 )); then
+    proof4_contract_result PASS 'db command timeout returns nonzero' "rc=${proof4_rc}"
+  else
+    proof4_contract_result FAIL 'db command timeout returns nonzero' 'rc=0'
+    failures=$((failures + 1))
+  fi
+  if (( proof4_watchdog_fired == 0 )) && \
+     grep -Fq 'rkdeveloptool db command timed out' "${case_dir}/verify.log"; then
+    proof4_contract_result PASS 'db command timeout is internally bounded and diagnostic is preserved' \
+      "elapsed_ms=${proof4_elapsed_ms}"
+  else
+    proof4_contract_result FAIL 'db command timeout is internally bounded and diagnostic is preserved' \
+      "outer_watchdog=${proof4_watchdog_fired} elapsed_ms=${proof4_elapsed_ms} diagnostic=missing"
+    failures=$((failures + 1))
+  fi
+  if ! grep -Fq 'loader re-enumeration timed out' "${case_dir}/verify.log"; then
+    proof4_contract_result PASS 'db command timeout remains distinct from re-enumeration timeout' \
+      'no re-enumeration-timeout diagnostic on hung db command'
+  else
+    proof4_contract_result FAIL 'db command timeout remains distinct from re-enumeration timeout' \
+      'wrong timeout diagnostic'
+    failures=$((failures + 1))
+  fi
+  if grep -Eq '^rkdeveloptool (rfi|wl|rl|rd)' "${case_dir}/flash.log"; then
+    proof4_contract_result FAIL 'hung db makes zero downstream rfi|wl|rl|rd calls' 'downstream call observed'
+    failures=$((failures + 1))
+  else
+    proof4_contract_result PASS 'hung db makes zero downstream rfi|wl|rl|rd calls' 'count=0'
+  fi
+  if (( proof4_watchdog_fired == 0 )) && [[ -s "${case_dir}/process/signals.log" ]]; then
+    proof4_contract_result PASS 'production sends process-group TERM before KILL/reap' \
+      "$(tr '\n' ';' <"${case_dir}/process/signals.log")"
+  else
+    proof4_contract_result FAIL 'production sends process-group TERM before KILL/reap' \
+      'only the outer watchdog forced escalation'
+    failures=$((failures + 1))
+  fi
+  proof4_finish_case_cleanup "${case_dir}"
+  if (( proof4_remaining_live == 0 && proof4_remaining_zombie == 0 &&
+        proof4_exact_pid_start_matches == 0 )); then
+    proof4_contract_result PASS 'db timeout leaves no live child and no zombie after completion' \
+      'remaining_live=0 remaining_zombie=0 exact_pid_start_matches=0'
+  else
+    proof4_contract_result FAIL 'db timeout leaves no live child and no zombie after completion' \
+      "remaining_live=${proof4_remaining_live} remaining_zombie=${proof4_remaining_zombie} exact_pid_start_matches=${proof4_exact_pid_start_matches}"
+    failures=$((failures + 1))
+  fi
+
+  case_dir="${TMP}/proof4-leader-exits"
+  proof4_run_verifier "${case_dir}" leader-exits timeout || return 2
+  read -r _ child_pid _ _ _ child_start fd1 fd2 < <(
+    sed -E 's/^[^ ]+ pid=([^ ]+) ppid=([^ ]+) pgid=([^ ]+) stat=([^ ]+) starttime=([^ ]+) fd1=([^ ]+) fd2=(.*)$/child \1 \2 \3 \4 \5 \6 \7/' \
+      "${case_dir}/process/child.info"
+  )
+  leader_pid="$(sed -nE 's/^role=leader pid=([0-9]+).*/\1/p' "${case_dir}/process/leader.info")"
+  if [[ -s "${case_dir}/process/leader-exited" && ! -e "/proc/${leader_pid}" &&
+        ! -e "/proc/${child_pid}" && "${fd1}" == *'/verify.log' &&
+        "${fd2}" == *'/verify.log' ]]; then
+    proof4_contract_result PASS 'leader exit occurred with an exact live descendant retaining descriptors before production cleanup' \
+      "leader_pid=${leader_pid} child_pid=${child_pid} child_start=${child_start} fd1=${fd1} fd2=${fd2} post_cleanup=absent"
+  else
+    printf 'FIXTURE_ERROR: durable leader-exit descendant evidence or production cleanup was not observed\n' >&2
+    proof4_finish_case_cleanup "${case_dir}"
+    return 2
+  fi
+  if (( proof4_rc != 0 )) &&
+     grep -Fq 'rkdeveloptool db leader exited while process-group descendants survived' \
+       "${case_dir}/verify.log" &&
+     ! grep -Fq 'loader re-enumeration timed out' "${case_dir}/verify.log"; then
+    proof4_contract_result PASS 'leader-exit descendant survival fails before loader re-enumeration' \
+      "rc=${proof4_rc} elapsed_ms=${proof4_elapsed_ms}"
+  else
+    proof4_contract_result FAIL 'leader-exit descendant survival fails before loader re-enumeration' \
+      "rc=${proof4_rc}; descendant diagnostic missing or re-enumeration started"
+    failures=$((failures + 1))
+  fi
+  if grep -Eq '^rkdeveloptool (rfi|wl|rl|rd)' "${case_dir}/flash.log"; then
+    proof4_contract_result FAIL 'failed re-enumeration makes zero downstream rfi|wl|rl|rd calls' \
+      "$(grep -E '^rkdeveloptool (rfi|wl|rl|rd)' "${case_dir}/flash.log" | tr '\n' ';')"
+    failures=$((failures + 1))
+  else
+    proof4_contract_result PASS 'failed re-enumeration makes zero downstream rfi|wl|rl|rd calls' 'count=0'
+  fi
+  if kill -0 "${child_pid}" 2>/dev/null; then
+    proof4_contract_result FAIL 'production owns descendant after leader exit' \
+      "child_pid=${child_pid} still live before test cleanup"
+    failures=$((failures + 1))
+  else
+    proof4_contract_result PASS 'production owns descendant after leader exit' 'child reaped by production'
+  fi
+  proof4_finish_case_cleanup "${case_dir}"
+  if (( proof4_remaining_live != 0 || proof4_remaining_zombie != 0 ||
+        proof4_exact_pid_start_matches != 0 )); then return 2; fi
+
+  case_dir="${TMP}/proof4-loader-reenumeration-timeout"
+  proof4_run_verifier "${case_dir}" '' timeout || return 2
+  if (( proof4_rc != 0 && proof4_watchdog_fired == 0 )) &&
+     grep -Fq 'loader re-enumeration timed out' "${case_dir}/verify.log"; then
+    proof4_contract_result PASS 'post-db same-Maskrom state reaches bounded re-enumeration timeout' \
+      "rc=${proof4_rc} elapsed_ms=${proof4_elapsed_ms}"
+  else
+    proof4_contract_result FAIL 'post-db same-Maskrom state reaches bounded re-enumeration timeout' \
+      "rc=${proof4_rc} outer_watchdog=${proof4_watchdog_fired}; diagnostic missing"
+    failures=$((failures + 1))
+  fi
+  if grep -Eq '^rkdeveloptool (rfi|wl|rl|rd)' "${case_dir}/flash.log"; then
+    proof4_contract_result FAIL 're-enumeration timeout makes zero downstream rfi|wl|rl|rd calls' \
+      'downstream call observed'
+    failures=$((failures + 1))
+  else
+    proof4_contract_result PASS 're-enumeration timeout makes zero downstream rfi|wl|rl|rd calls' 'count=0'
+  fi
+  proof4_finish_case_cleanup "${case_dir}"
+  if (( proof4_remaining_live != 0 || proof4_remaining_zombie != 0 ||
+        proof4_exact_pid_start_matches != 0 )); then return 2; fi
+
+  for scenario in malformed multiple wrong-identity changed-location wrong-mode transient; do
+    case_dir="${TMP}/proof4-reenumeration-${scenario}"
+    proof4_run_verifier "${case_dir}" '' "${scenario}" || return 2
+    case "${scenario}" in
+      malformed) expected_pattern='malformed rkdeveloptool loader re-enumeration listing' ;;
+      multiple) expected_pattern='expected exactly one rkdeveloptool loader target, found 2' ;;
+      wrong-identity) expected_pattern='loader re-enumerated with the wrong RK3588 identity' ;;
+      changed-location) expected_pattern='loader re-enumerated at a changed LocationID' ;;
+      wrong-mode) expected_pattern='loader re-enumerated in an unknown mode' ;;
+      transient) expected_pattern='' ;;
+    esac
+    if [[ "${scenario}" == transient ]]; then
+      if (( proof4_rc == 0 )) && \
+         grep -Fq 'ld:transient-zero-device' "${case_dir}/events.log" && \
+         grep -Fq 'ld:transient-same-maskrom' "${case_dir}/events.log" && \
+         grep -Fq 'ld:loader:same-identity' "${case_dir}/events.log"; then
+        proof4_contract_result PASS 'zero-device and same-Maskrom are tolerated only until same-fixture Loader appears within budget' \
+          "rc=0 elapsed_ms=${proof4_elapsed_ms}"
+      else
+        proof4_contract_result FAIL 'zero-device and same-Maskrom are tolerated only until same-fixture Loader appears within budget' \
+          "rc=${proof4_rc}; transition events missing"
+        failures=$((failures + 1))
+      fi
+      for downstream in rfi wl rl rd; do
+        if [[ "$(grep -c "^rkdeveloptool ${downstream}\( \|$\)" "${case_dir}/flash.log")" -eq 1 ]]; then
+          proof4_contract_result PASS "successful handoff does not retry ${downstream}" 'count=1'
+        else
+          proof4_contract_result FAIL "successful handoff does not retry ${downstream}" \
+            "count=$(grep -c "^rkdeveloptool ${downstream}\( \|$\)" "${case_dir}/flash.log")"
+          failures=$((failures + 1))
+        fi
+      done
+    elif grep -Fq "${expected_pattern}" "${case_dir}/verify.log" && \
+         ! grep -Eq '^rkdeveloptool (rfi|wl|rl|rd)' "${case_dir}/flash.log"; then
+      proof4_contract_result PASS "${scenario} re-enumeration is rejected before downstream commands" \
+        "rc=${proof4_rc} diagnostic=${expected_pattern}"
+    else
+      proof4_contract_result FAIL "${scenario} re-enumeration is rejected before downstream commands" \
+        "rc=${proof4_rc}; expected diagnostic missing or rfi observed"
+      failures=$((failures + 1))
+    fi
+    if [[ "$(grep -c '^rkdeveloptool db ' "${case_dir}/flash.log")" -eq 1 ]]; then
+      proof4_contract_result PASS "${scenario} performs no db retry" 'db_count=1'
+    else
+      proof4_contract_result FAIL "${scenario} performs no db retry" \
+        "db_count=$(grep -c '^rkdeveloptool db ' "${case_dir}/flash.log")"
+      failures=$((failures + 1))
+    fi
+    proof4_finish_case_cleanup "${case_dir}"
+    if (( proof4_remaining_live != 0 || proof4_remaining_zombie != 0 ||
+          proof4_exact_pid_start_matches != 0 )); then return 2; fi
+  done
+
+  if (( failures == 0 )); then
+    printf 'proof-4 bounded loader handoff desired contract: PASS\n'
+    return 0
+  fi
+  printf 'EXPECTED_RED: unchanged production lacks bounded process-group loader handoff (contract_failures=%s)\n' \
+    "${failures}" >&2
+  return 1
+}
+
+case "${CERALIVE_PROOF4_CASE:-all}" in
+  healthy)
+    exit 0
+    ;;
+  red)
+    run_proof4_red_contract
+    exit $?
+    ;;
+  all)
+    run_proof4_red_contract
+    ;;
+  *)
+    printf 'unknown CERALIVE_PROOF4_CASE: %s (expected all, healthy, or red)\n' \
+      "${CERALIVE_PROOF4_CASE}" >&2
+    exit 2
+    ;;
+esac
 
 assert_rci_contract() {
   local mode="$1" expected="$2" label="$3" output rc=0
@@ -502,40 +1205,63 @@ if grep -q '^rkdeveloptool rd' "${TMP}/flash-term.log"; then
 fi
 
 assert_interrupt_cleanup() {
-  local mode="$1" label="$2" signal="$3" expected_rc="$4" case_dir
-  local verify_pid watchdog_pid rk_pid rc started elapsed child_survived=0
+  local mode="$1" label="$2" signal="$3" expected_rc="$4" repeated="${5:-0}" case_dir
+  local verify_pid verify_starttime watchdog_pid watchdog_fd rk_pid rk_starttime current_starttime
+  local rc started elapsed child_survived=0
   case_dir="${TMP}/interrupt-${signal,,}-${label}"
   mkdir -p "${case_dir}"
+  mkfifo -- "${case_dir}/watchdog.cancel"
+  exec {watchdog_fd}<>"${case_dir}/watchdog.cancel"
   rm -f "${TMP}/identity.txt"
-  env "${base_env[@]}" MOCK_FLASH_MODE="${mode}" \
+  env "${base_env[@]}" MOCK_FLASH_MODE="${mode}" MOCK_RK_IGNORE_TERM="${repeated}" \
     MOCK_MEDIA="${case_dir}/media.raw" MOCK_SSH_COUNT_FILE="${case_dir}/count" \
     MOCK_FLASH_LOG="${case_dir}/flash.log" MOCK_DEVICE_STATE_FILE="${case_dir}/state" \
     MOCK_RK_PID_FILE="${case_dir}/rk.pid" "${VERIFY}" "${common[@]}" \
     >"${case_dir}/verify.log" 2>&1 &
   verify_pid=$!
+  verify_starttime="$(awk '{print $22}' "/proc/${verify_pid}/stat")"
   for _ in $(seq 1 150); do
     [[ -s "${case_dir}/rk.pid" ]] && break
     sleep 0.02
   done
   [[ -s "${case_dir}/rk.pid" ]]
   rk_pid="$(cat "${case_dir}/rk.pid")"
+  rk_starttime="$(awk '{print $22}' "/proc/${rk_pid}/stat")"
   started="${SECONDS}"
   (
-    sleep 3
-    kill -KILL "${verify_pid}" 2>/dev/null || true
+    if IFS= read -r -t 3 _ <&"${watchdog_fd}"; then
+      exit 0
+    fi
+    if [[ -r "/proc/${verify_pid}/stat" ]] &&
+       [[ "$(awk '{print $22}' "/proc/${verify_pid}/stat")" == "${verify_starttime}" ]]; then
+      kill -KILL "${verify_pid}" 2>/dev/null || true
+    fi
   ) &
   watchdog_pid=$!
   kill "-${signal}" "${verify_pid}"
+  if (( repeated == 1 )); then
+    sleep 0.1
+    kill "-${signal}" "${verify_pid}" || {
+      printf '%s %s verifier exited before repeated cleanup signal\n' "${signal}" "${label}" >&2
+      printf 'cancel\n' >&"${watchdog_fd}" || true
+      wait "${watchdog_pid}" 2>/dev/null || true
+      exec {watchdog_fd}>&-
+      return 1
+    }
+  fi
   set +e
   wait "${verify_pid}"
   rc=$?
   set -e
   elapsed=$((SECONDS - started))
-  kill "${watchdog_pid}" 2>/dev/null || true
+  printf 'cancel\n' >&"${watchdog_fd}" || true
   wait "${watchdog_pid}" 2>/dev/null || true
+  exec {watchdog_fd}>&-
   if kill -0 "${rk_pid}" 2>/dev/null; then
     child_survived=1
-    kill -KILL "${rk_pid}" 2>/dev/null || true
+    current_starttime="$(awk '{print $22}' "/proc/${rk_pid}/stat")"
+    [[ "${current_starttime}" != "${rk_starttime}" ]] || \
+      kill -KILL "${rk_pid}" 2>/dev/null || true
     wait "${rk_pid}" 2>/dev/null || true
   fi
   if [[ "${rc}" -ne "${expected_rc}" ]]; then
@@ -557,8 +1283,8 @@ assert_interrupt_cleanup() {
     printf '%s %s cancellation leaked verifier scratch\n' "${signal}" "${label}" >&2
     exit 1
   fi
-  printf '%s %s cancellation cleaned verifier, child, and scratch (rc=%s elapsed=%ss)\n' \
-    "${signal}" "${label}" "${rc}" "${elapsed}"
+  printf '%s %s cancellation cleaned verifier, child, and scratch (rc=%s elapsed=%ss repeated_signal=%s)\n' \
+    "${signal}" "${label}" "${rc}" "${elapsed}" "${repeated}"
 }
 
 for signal_case in TERM INT; do
@@ -567,7 +1293,11 @@ for signal_case in TERM INT; do
   else
     expected_signal_rc=130
   fi
-  assert_interrupt_cleanup db-wait db "${signal_case}" "${expected_signal_rc}"
+  if [[ "${signal_case}" == TERM ]]; then
+    assert_interrupt_cleanup db-wait db "${signal_case}" "${expected_signal_rc}" 1
+  else
+    assert_interrupt_cleanup db-wait db "${signal_case}" "${expected_signal_rc}"
+  fi
   assert_interrupt_cleanup wl-wait wl "${signal_case}" "${expected_signal_rc}"
   assert_interrupt_cleanup rl-wait rl "${signal_case}" "${expected_signal_rc}"
   assert_interrupt_cleanup rd-wait rd "${signal_case}" "${expected_signal_rc}"

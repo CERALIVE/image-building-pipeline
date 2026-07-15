@@ -162,7 +162,25 @@ on mismatch. The candidate artifact also carries the official Radxa Maskrom
 loader under an exact SHA-256. The gate starts from Maskrom, derives capacity in
 loader mode, and uses UART to enable a bounded, one-shot data-only bootstrap that
 installs a restricted, expiring run-local root public key into the empty `/data`
-key store. The bootstrap accepts no shell commands, does not restart, and binds
+key store. The initial `rkdeveloptool db` runs under a pinned leader in an owned
+session/process group with a monotonic 15-second command budget. The leader
+stays present until command status and descendant cleanup are proved, preventing
+PID/process-group reuse from redirecting cleanup signals. On timeout or
+interruption the verifier sends TERM to the whole group, waits one second, sends
+KILL to survivors, reaps the leader, and fails unless no live or zombie group
+member remains. A clean `db` exit is not readiness: a separate 10-second poll
+must observe exactly the same
+VID/PID/`LocationID` in `Loader` mode before `rfi`. Zero devices or the same
+fixture still in Maskrom are transient; malformed, multiple, changed, or
+unexpected-mode listings fail immediately. Neither phase retries `db` or any
+later destructive operation, and no `rfi`, identity read, write, readback, or
+reset may run after failure. The diagnostics distinguish “rkdeveloptool db
+command timed out” from “loader re-enumeration timed out.” Test overrides are
+hard-capped at 60 seconds for either phase, 10 seconds for each cleanup grace,
+and 5 seconds for the poll interval, so configuration cannot recreate an
+unbounded handoff.
+
+The bootstrap accepts no shell commands, does not restart, and binds
 an authenticated, one-hour-bounded request containing a device-generated nonce,
 the baked candidate commit, USB-captured 16-byte chip identity, and fresh UART challenge to
 the post-boot SSH marker. Consumed nonces and a non-decreasing signed epoch floor
@@ -178,8 +196,8 @@ on the flashed eMMC, then run
 the physical suite, and remove the exact temporary key
 with a cleanup receipt. Each planned RAUC reboot consumes a one-use retention
 marker; any unarmed later boot revokes leftover CI access before sshd. It never compares
-mutable post-boot media bytes. Every `rkdeveloptool` operation is owned by a
-cancellable child and reaped on interruption. The verifier resets inherited
+mutable post-boot media bytes. Later `rkdeveloptool` operations retain their
+existing cancellable-child behavior. The verifier resets inherited
 ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
 that launch it asynchronously cannot make SIGINT cancellation ineffective. The
 identity record accepts only safe artifact filename characters so its
