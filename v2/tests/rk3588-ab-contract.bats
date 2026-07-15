@@ -397,3 +397,112 @@ build_missing_artifact_image() {
   run grep -F 'full re-flash' "$REPO_ROOT/docs/partition-contract.md"
   [ "$status" -eq 0 ]
 }
+
+# Regression coverage for the proof-5 EDQUOT failure (2026-07-15): the per-slot
+# scratch image must live on the persistent output filesystem, never a bare
+# `mktemp` /tmp (a fixed 16 GiB tmpfs on the self-hosted runner that a 4 GiB slot
+# exhausts), and it must be removed on the `die` failure path — not only after a
+# successful dd. See .omo/evidence/rock5b-proof-5-20260715/22d-tmpfs-root-cause.log.
+
+# Emit an mkfs.ext4 shim that intercepts ONLY the rootfs-slot populate call —
+# `mkfs.ext4 … -d <tree> <img>` for the exact <tree> this test drives — and
+# records its target image (the last arg) to <log>. systemd-repart's own ext4
+# formatting also passes -d, but with its private `.#repart*` staging dir, so
+# gating on the driven tree keeps repart's calls flowing to the real mkfs.ext4.
+# <tail> runs after recording: empty on the success shim (falls through to the
+# real mkfs), or `exit 1` on the negative shim (forces the populate `die` path).
+write_mkfs_recording_shim() {
+  local path="$1" log="$2" tree="$3" real_mkfs="$4" tail="$5"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+mine=0 prev=
+for a in "\$@"; do
+  [[ "\$prev" == "-d" && "\$a" == "$tree" ]] && mine=1
+  prev="\$a"
+done
+if (( mine )); then
+  t=
+  for t; do :; done
+  printf '%s\n' "\$t" >>"$log"
+  $tail
+fi
+exec "$real_mkfs" "\$@"
+EOF
+  chmod +x "$path"
+}
+
+@test "rootfs slot scratch image lands next to the output image, not in TMPDIR" {
+  require_disk_tools
+  local defs="$BATS_TEST_TMPDIR/repart" tree="$BATS_TEST_TMPDIR/rootfs"
+  local outdir="$BATS_TEST_TMPDIR/out-loc"; mkdir -p "$outdir"
+  local image="$outdir/scratch-loc.img"
+  local faketmp="$BATS_TEST_TMPDIR/fake-tmpfs"; mkdir -p "$faketmp"
+  local shim="$BATS_TEST_TMPDIR/shim-loc"; mkdir -p "$shim"
+  local log="$BATS_TEST_TMPDIR/mkfs-loc.log"
+  write_small_repart_defs "$defs"
+  make_rootfs_tree "$tree"
+
+  # Record the populate target, then hand off to the real mkfs.ext4 so the slot is
+  # validly populated and the build still succeeds.
+  local real_mkfs; real_mkfs="$(command -v mkfs.ext4)"
+  write_mkfs_recording_shim "$shim/mkfs.ext4" "$log" "$tree" "$real_mkfs" ""
+
+  # TMPDIR points OUTSIDE the output tree. Unfixed code (bare `mktemp`) honours
+  # TMPDIR and lands the scratch there; the fix must ignore TMPDIR and use
+  # $(dirname img) — the persistent filesystem the .raw itself lands on.
+  run env PATH="$shim:$PATH" TMPDIR="$faketmp" REPART_DIR="$defs" \
+    SOURCE_DATE_EPOCH=1700000000 \
+    bash "$ASSEMBLE" build --output "$image" --total-mb 10513 --no-format \
+      --bootloader-adapter efi --rootfs-tree "$tree"
+  [ "$status" -eq 0 ]
+
+  # Both slot populates were seen, and every recorded scratch path sits under the
+  # output image's directory and never under TMPDIR (the tmpfs stand-in).
+  [ "$(wc -l <"$log")" -eq 2 ]
+  local p
+  while IFS= read -r p; do
+    [[ "$p" == "$outdir/"* ]]
+    [[ "$p" != "$faketmp/"* ]]
+  done <"$log"
+
+  # And the success path leaves no scratch behind in the output dir.
+  run bash -c "ls -A '$outdir' | grep -c '^\.rootfs-slot\.' || true"
+  [ "$output" -eq 0 ]
+}
+
+@test "a failed mkfs.ext4 populate leaves no leftover rootfs-slot scratch image" {
+  require_disk_tools
+  local defs="$BATS_TEST_TMPDIR/repart-fail" tree="$BATS_TEST_TMPDIR/rootfs-fail"
+  local outdir="$BATS_TEST_TMPDIR/out-fail"; mkdir -p "$outdir"
+  local image="$outdir/scratch-fail.img"
+  local faketmp="$BATS_TEST_TMPDIR/fake-tmpfs-fail"; mkdir -p "$faketmp"
+  local shim="$BATS_TEST_TMPDIR/shim-fail"; mkdir -p "$shim"
+  local log="$BATS_TEST_TMPDIR/mkfs-fail.log"
+  write_small_repart_defs "$defs"
+  make_rootfs_tree "$tree"
+
+  # Let systemd-repart format normally (real mkfs), but fail the FIRST rootfs-slot
+  # populate — the exact proof-5 mode (EDQUOT mid-populate), driving
+  # populate_rootfs_slot down its `die` path with the scratch already created.
+  local real_mkfs; real_mkfs="$(command -v mkfs.ext4)"
+  write_mkfs_recording_shim "$shim/mkfs.ext4" "$log" "$tree" "$real_mkfs" \
+    'echo "mkfs.ext4: Disk quota exceeded while populating file system" >&2; exit 1'
+
+  run env PATH="$shim:$PATH" TMPDIR="$faketmp" REPART_DIR="$defs" \
+    SOURCE_DATE_EPOCH=1700000000 \
+    bash "$ASSEMBLE" build --output "$image" --total-mb 10513 --no-format \
+      --bootloader-adapter efi --rootfs-tree "$tree"
+  # The build must fail (the populate mkfs died)…
+  [ "$status" -ne 0 ]
+
+  # …and the scratch image the populate created must be gone wherever it was put.
+  # Unfixed code leaked the bare-`mktemp` file into TMPDIR on the `die` path; the
+  # fix removes it via the EXIT-driven scratch cleanup.
+  [ -s "$log" ]
+  local p
+  while IFS= read -r p; do
+    [ ! -e "$p" ]
+  done <"$log"
+  run bash -c "ls -A '$outdir' 2>/dev/null | grep -c '^\.rootfs-slot\.' || true"
+  [ "$output" -eq 0 ]
+}
