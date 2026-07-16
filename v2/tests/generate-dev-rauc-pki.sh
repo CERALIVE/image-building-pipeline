@@ -85,6 +85,12 @@ validate_fixture() {
   openssl verify -CAfile "$DEV_KEYS/dev-root-ca.pem" \
     -untrusted "$DEV_KEYS/dev-intermediate-ca.pem" \
     "$DEV_KEYS/dev-leaf-signing.pem" >/dev/null
+  local leaf_eku
+  leaf_eku="$(openssl x509 -in "$DEV_KEYS/dev-leaf-signing.pem" -noout -ext extendedKeyUsage)"
+  [[ "$leaf_eku" == *"E-mail Protection"* ]] \
+    || die "leaf EKU missing emailProtection — rauc 1.8's smime_sign default would reject the bundle (regenerate: rm -rf ${DEV_KEYS})"
+  [[ "$leaf_eku" == *"Code Signing"* ]] \
+    || die "leaf EKU missing codeSigning — needed for a future rauc >=1.9 check-purpose=codesign (regenerate: rm -rf ${DEV_KEYS})"
 }
 
 if (( ! present )); then
@@ -119,10 +125,18 @@ if (( ! present )); then
   openssl req -new -sha256 -key "$tmp/dev-leaf-signing.key" \
     -out "$tmp/dev-leaf-signing.csr" \
     -subj '/CN=CeraLive CI Test Leaf Signing (NON-PRODUCTION)' >/dev/null 2>&1
+  # DUAL EKU (emailProtection + codeSigning) — do NOT reduce to codeSigning-only.
+  # The device runs Debian bookworm's rauc 1.8, which predates the
+  # check-purpose=codesign / X.509-key-usage feature (added in rauc 1.9). On 1.8
+  # rauc's CMS_verify() falls back to OpenSSL's default smime_sign purpose, which
+  # rejects a codeSigning-ONLY leaf with "unsuitable certificate purpose" (proven
+  # on real Rock 5B+ hardware). emailProtection satisfies that unconfigured 1.8
+  # default so `rauc install` accepts the bundle; codeSigning stays for
+  # forward-compat with a future rauc >=1.9 using check-purpose=codesign.
   printf '%s\n' \
     'basicConstraints=critical,CA:FALSE' \
     'keyUsage=critical,digitalSignature' \
-    'extendedKeyUsage=codeSigning' \
+    'extendedKeyUsage=emailProtection,codeSigning' \
     'subjectKeyIdentifier=hash' \
     'authorityKeyIdentifier=keyid,issuer' >"$tmp/leaf.ext"
   openssl x509 -req -sha256 -days 730 -set_serial 3 \

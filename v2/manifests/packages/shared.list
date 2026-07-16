@@ -123,6 +123,12 @@ rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.
 rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
                          # SPLIT the daemon out of `rauc` (binary-only); the runtime
                          # postinst enables rauc.service, so the service pkg is required.
+squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it to extract the
+                         # manifest (and rootfs image) from a plain-format .raucb at
+                         # `rauc info`/`rauc install` time. Absent it, install fails after
+                         # signature verification with "Failed to start unsquashfs: ... No
+                         # such file or directory" (real Rock 5B+ hardware). build-time
+                         # mksquashfs runs on the HOST/CI, so this runtime gap was invisible.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.

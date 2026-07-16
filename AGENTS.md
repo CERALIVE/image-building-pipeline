@@ -444,6 +444,48 @@ creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
 
+**RAUC 1.8 needs a DUAL-EKU signing leaf, and `unsquashfs` on the device —
+else OTA is 100% broken** [EXISTS]
+
+The device runs Debian bookworm's `rauc 1.8-2`. `rauc install` (the config-driven
+path `ceralive-update` / CeraUI `system.startUpdate()` actually use) failed on real
+Rock 5B+ hardware in two stacked ways, both fixed here:
+
+- **Signing leaf EKU.** RAUC's `check-purpose=codesign` / X.509 key-usage support
+  landed in **rauc 1.9** (March 2023); 1.8 predates it entirely — its
+  `-C`/`--confopt` CLI flag does not exist and a `[keyring] check-purpose=codesign`
+  line in `system.conf` is ignored. So 1.8's `CMS_verify()` falls back to OpenSSL's
+  default `smime_sign` purpose, which rejects a **codeSigning-only** leaf with
+  `Verify error: unsuitable certificate purpose`. The dev/CI leaf
+  (`v2/tests/generate-dev-rauc-pki.sh`) now carries a **dual EKU**
+  `emailProtection,codeSigning`: `emailProtection` satisfies 1.8's unconfigured
+  `smime_sign` default (install succeeds), `codeSigning` keeps forward-compat with a
+  future rauc ≥1.9 `check-purpose=codesign` upgrade (and the modern CI/local `rauc`
+  1.15.2 strict path). CA certs (root/intermediate) intentionally carry NO EKU per
+  RAUC's own docs — do not add one. The build-time self-check in
+  `build-bundle.sh::verify_openssl_bundle()` was `openssl cms -verify -purpose any`
+  (accepts anything) — materially weaker than the device, which is why the bug
+  shipped silently; it is now `-purpose smimesign`, reproducing rauc 1.8's default
+  purpose (same OpenSSL error) so a single-purpose leaf fails at build time.
+  Structural guards: `generate-dev-rauc-pki.sh`'s `validate_fixture()` asserts the
+  leaf carries both EKUs, and `verify_openssl_bundle()` now fails a single-purpose
+  leaf.
+- **`unsquashfs` runtime gap.** Even with a verified signature, `rauc info`/`install`
+  next fails `Failed to start unsquashfs: ... No such file or directory` — `rauc`
+  shells out to `unsquashfs` to extract the plain-format bundle manifest. Build-time
+  `mksquashfs` runs on the HOST/CI, so this runtime-only gap was invisible.
+  `squashfs-tools` is now in `shared.list` (standard bookworm `main` — no new trust
+  source). Guard: `manifest.bats` "squashfs-tools is installed so rauc can unsquashfs
+  bundles".
+
+**PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
+touched here.** `/mnt/development/ceralive/cert-work/rauc/gen-certs.sh` generates the
+production leaf with the same `extendedKeyUsage = codeSigning` only — so it has the
+identical RAUC 1.8 defect. It is live security key material (private keys included)
+and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` — out
+of scope for this fix. Flagged for the orchestrator/user to action separately before
+production OTA can work on a 1.8 device.
+
 **Image size gate — BLOCKING at 1.5 GB** [EXISTS]
 
 `v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds

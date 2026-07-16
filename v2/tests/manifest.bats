@@ -912,6 +912,17 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: squashfs-tools is installed so rauc can unsquashfs bundles" {
+  # rauc info/install shells out to /usr/bin/unsquashfs to extract the manifest
+  # (and rootfs image) from a plain-format .raucb. Without squashfs-tools on the
+  # device, install fails right after signature verification with
+  # "Failed to start unsquashfs: ... No such file or directory" (real Rock 5B+
+  # hardware). build-time mksquashfs runs on the HOST/CI, so this runtime-only gap
+  # was invisible until OTA was exercised on-device.
+  run grep -Ex 'squashfs-tools[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \

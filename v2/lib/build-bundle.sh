@@ -81,10 +81,18 @@ RAUC_LEAF_KEY="${RAUC_PKI_DIR}/leaf-signing.key"
 # Reference only — used by the no-root-sign guard to assert it is NEVER consumed.
 RAUC_ROOT_KEY="${RAUC_PKI_DIR}/root-ca.key"
 
-# The signing leaf carries EKU=codeSigning.
-# RAUC's default verify purpose is smimesign, which rejects a codeSigning-only
-# leaf with "unsuitable certificate purpose"; tell rauc to check the codesign
-# purpose so `rauc info` verifies the chain instead of dying at signing time.
+# The signing leaf carries a DUAL EKU: emailProtection + codeSigning.
+#   * emailProtection satisfies the device's UNCONFIGURED default verify purpose.
+#     Debian bookworm ships rauc 1.8, which predates check-purpose=codesign
+#     (added in rauc 1.9), so its CMS_verify() falls back to OpenSSL's default
+#     smime_sign purpose. A codeSigning-ONLY leaf fails that with "unsuitable
+#     certificate purpose" — confirmed on real Rock 5B+ hardware; emailProtection
+#     is what makes `rauc install` accept the bundle on 1.8.
+#   * codeSigning keeps the leaf forward-compatible with a future rauc >=1.9
+#     upgrade using check-purpose=codesign (below).
+# RAUC_VERIFY_OPTS still requests check-purpose=codesign so a modern host `rauc`
+# (>=1.9, e.g. CI/local rauc 1.15.2) exercises the strict codesign path; on the
+# device's 1.8 this flag doesn't exist, hence the emailProtection belt-and-braces.
 RAUC_VERIFY_OPTS=(-C keyring:check-purpose=codesign)
 
 usage() {
@@ -309,12 +317,21 @@ verify_openssl_bundle() {
   head -c "${payload_len}" "${bundle}" >"${payload}"
   tail -c "$(( sig_len + 8 ))" "${bundle}" | head -c "${sig_len}" >"${sig}"
 
-  # Verify to the ROOT keyring only. -purpose any: the leaf carries EKU
-  # codeSigning, not the default S/MIME purpose. The intermediate is taken from
-  # the certs embedded in the CMS at signing time.
+  # Verify to the ROOT keyring with -purpose smimesign — deliberately NOT
+  # -purpose any. This self-check must reproduce what the DEVICE enforces at
+  # `rauc install` time, not a laxer superset. The device runs rauc 1.8 (Debian
+  # bookworm), which predates check-purpose=codesign (rauc 1.9) and therefore
+  # falls back to OpenSSL's default smime_sign purpose. -purpose any accepted
+  # ANY purpose and so silently passed a codeSigning-ONLY leaf that rauc 1.8
+  # rejects on hardware ("unsuitable certificate purpose") — the exact parity gap
+  # that shipped a non-installable bundle. -purpose smimesign reproduces the 1.8
+  # check (same OpenSSL error), so a single-purpose leaf fails HERE at build time
+  # instead of on the device; the dual-EKU leaf (emailProtection + codeSigning)
+  # satisfies it. The intermediate is taken from the certs embedded in the CMS at
+  # signing time.
   local rc=0
   openssl cms -verify -binary -inform DER -in "${sig}" \
-    -content "${payload}" -CAfile "${RAUC_ROOT_CA}" -purpose any \
+    -content "${payload}" -CAfile "${RAUC_ROOT_CA}" -purpose smimesign \
     -out /dev/null 2>"${work}/.verify.log" || rc=$?
   if [[ "${rc}" -ne 0 ]]; then
     cat "${work}/.verify.log" >&2 || true
