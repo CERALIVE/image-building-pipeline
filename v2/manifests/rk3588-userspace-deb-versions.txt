@@ -1,0 +1,59 @@
+# rk3588-userspace-deb-versions.txt — pinned RK3588 HW-accel userspace .debs
+#
+# WHAT: the Rockchip RK3588 GPU/video userspace (Mali-G610 blob, MPP encode/decode
+# library, RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev
+# config) that the Armbian bookworm arm64 feed does NOT ship. These make the vendor
+# kernel's HW encoders reachable from GStreamer (mpph264enc/mpph265enc/mppjpegenc/
+# mppvp8enc register only when this MPP userspace is present) and give Cog/WPEWebKit
+# a working Mali EGL/GBM stack for the 5.4 Kiosk render path.
+#
+# WHY PINNED URLs (not an apt source): these are NOT in a rotating apt repo we
+# trust, so they are pinned to exact upstream release-asset URLs and verified by
+# SHA-256 before staging — the SAME fail-closed, no-fallback discipline as the
+# Armbian BSP fetch (v2/lib/fetch-debs.sh fetch_bsp), minus the apt/GPG machinery
+# (a pinned URL + SHA-256 needs no rotating index or GPG trust root). Do NOT turn
+# any of these into a `deb [signed-by=...] https://...` apt line — that is a new
+# live trust root and is exactly what this file exists to avoid.
+#
+# PROVENANCE: proven working on real Rock 5B+ hardware (raw H.264/H.265 HW encode
+# via mpph264enc/mpph265enc, ffprobe-verified). See
+# .omo/notepads/production-launch-readiness/rk3588-userspace-packaging.md for the
+# exact hardware-proof context and the source/variant decisions.
+#
+# FORMAT: one record per package, four whitespace-separated fields:
+#   <package>  <filename>  <sha256>  <url>
+#   * <package>  MUST equal the Debian Package: field — it is the family-manifest
+#                wiring key AND the orchestrate.sh partition key.
+#   * <filename> is the exact release-asset filename (== basename of <url>).
+#   * <sha256>   is the real lowercase-hex SHA-256 of the exact asset.
+#   * <url>      is the exact pinned download URL.
+# Consumed by fetch_rk3588_userspace in v2/lib/fetch-debs.sh. The set of <package>
+# names here MUST match the userspace packages declared in the rk3588 family
+# manifest (firmware_packages / hw_accel_gstreamer_plugins / gstreamer_runtime_packages):
+# fetch_bsp EXCLUDES these names from the Armbian fetch, and fetch_rk3588_userspace
+# fetches exactly the ones the resolved family declares.
+#
+# VERSIONS ARE EMPIRICALLY PROVEN — do not bump without re-proving on hardware.
+# tsukumijima MPP 1.5.0-1 + radxa gstreamer1.0-rockchip1 1.14-4 + radxa librga2
+# 2.2.0-1 is the exact combination proven to register the MPP encoders. libmali is
+# the latest g24p0 (Valhall G610) wayland-gbm driver, per v2/docs/cog-display-addon.md.
+
+# --- Mali-G610 (Valhall) GPU userspace — Platform-layer; needed for Cog/WPEWebKit EGL/GBM ---
+# wayland-gbm variant per cog-display-addon.md §5 + TD-C2 (the default kiosk uses cage,
+# a Wayland compositor, so the Wayland EGL platform is required; wayland-gbm is a
+# superset of gbm and also covers direct-DRM cog). g24p0 = RK3588's G610 revision.
+libmali-valhall-g610-g24p0-wayland-gbm  libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb  533fc920220f36e0614e0e4808eabea55976c5af84f9b4996971862d183d2b62  https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb
+
+# --- Rockchip MPP encode/decode library (tsukumijima) — the runtime the GStreamer plugin dlopens ---
+librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp1_1.5.0-1_arm64.deb
+librockchip-mpp-dev  librockchip-mpp-dev_1.5.0-1_arm64.deb  aa38d6476ff4798623b37f09845436ab80d730f42c17e305f43ba7a892ee34fe  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp-dev_1.5.0-1_arm64.deb
+
+# --- Runtime multimedia udev/config (tsukumijima) ---
+rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb
+
+# --- GStreamer MPP plugin + RGA 2D accelerator (radxa rk3588s2-bookworm pool) ---
+# tsukumijima publishes NO gst-rockchip build, so the plugin must come from radxa;
+# it links librga2, so the PROVEN, ABI-matched gst<->rga pair is kept together on
+# radxa rather than splitting rga to tsukumijima's same-version build (see notepad).
+gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
+librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb

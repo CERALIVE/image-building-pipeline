@@ -36,9 +36,10 @@ already uses** — no backport, no third-party repo, no from-source toolchain.
 This is the most reproducible path available and is the chosen one (§2).
 
 The Mali-G610 **GPU userspace** (`libmali-valhall-g610-*`) is the opposite story:
-it is **not** in bookworm and **not** in Armbian's main feed — it comes from the
-Rockchip/Radxa BSP and is a **Platform-layer** artifact. The Cog feature sysext
-therefore **excludes** it and relies on the Platform-layer merge, exactly the way
+it is **not** in bookworm and **not** in Armbian's main feed. It is now baked into
+the base image (**Platform-layer**) from a pinned, SHA-256-verified upstream release
+asset — `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1, see §5. The Cog feature
+sysext still **excludes** it and relies on the Platform-layer merge, exactly the way
 the first-party app sysexts exclude `librockchip_mpp.so*` (§5).
 
 ---
@@ -240,16 +241,24 @@ and `libgbm`) is a **proprietary Rockchip blob**:
 - **Not** in Armbian's `apt.armbian.com` `main` feed for bookworm (Armbian's
   RK3588 bookworm images default to the open Panfrost/Panthor mainline driver
   instead of the blob).
-- **Sourced from the Rockchip/Radxa BSP** — package pattern
-  `libmali-valhall-g610-g24p0-wayland-gbm` (the **Wayland-GBM** variant is the one
-  a Wayland compositor / direct-DRM `cog` needs; the `g24p0` revision targets
-  RK3588's G610, distinct from the `g13p0` RK3576/68/66 revision).
+- **Now baked into the base image (Platform layer).** The exact package
+  `libmali-valhall-g610-g24p0-wayland-gbm` **1.9-1** (tsukumijima `libmali-rockchip`
+  release `v1.9-1-20260312-bd33ee2`) is pinned to its exact release-asset URL and
+  SHA-256-verified in `../manifests/rk3588-userspace-deb-versions.txt`, wired into
+  `manifests/families/rk3588.yaml` `firmware_packages`, and staged by
+  `fetch_rk3588_userspace` in `v2/lib/fetch-debs.sh` (excluded from the Armbian
+  fetch — it is not in that pool). The **Wayland-GBM** variant is chosen because the
+  default kiosk uses `cage`, a Wayland compositor, so the Wayland EGL platform is
+  required; `wayland-gbm` is a superset of `gbm` and also covers a direct-DRM `cog`.
+  The `g24p0` revision targets RK3588's G610, distinct from the `g13p0`
+  RK3576/68/66 revision.
 
-This is the same class as the GPU **firmware** blob `mali-g610-firmware` already
-tracked as technical debt in `manifests/families/rk3588.yaml` (firmware vs
-userspace are two distinct artifacts; both are Platform/BSP-owned). Integrating
-the Radxa BSP `libmali` into the Platform layer (Layer 2) is its own task; this
-doc only fixes the **boundary contract** the Cog add-on must honour.
+The GPU **firmware** blob (`mali_csffw.bin`, formerly the `mali-g610-firmware` TD)
+is a distinct artifact from this userspace driver (both are Platform/BSP-owned);
+it rides the vendor kernel / `armbian-firmware`. The `libmali` userspace is now
+integrated into the Platform layer (Layer 2) as above; this doc still fixes the
+**boundary contract** the Cog add-on must honour — the sysext excludes `libmali*`
+so the Platform copy is the only one on-device.
 
 ### Why it must NOT be in the Cog sysext
 
@@ -359,7 +368,7 @@ not a replacement decision made here:
 | ID | Item | Resolution |
 |---|---|---|
 | **TD-C1** | `cog`/`wpewebkit` not yet pinned in `versions.yaml` | pin after render QA passes (§2) |
-| **TD-C2** | Radxa BSP `libmali-valhall-g610-g24p0-wayland-gbm` not yet integrated into the Platform layer (`rk3588.yaml`) | separate Platform-layer task; the Cog add-on already excludes it by contract (§5) |
+| ~~TD-C2~~ **RESOLVED** | `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 now baked into the Platform layer (`rk3588.yaml` `firmware_packages`, pinned + SHA-256-verified in `rk3588-userspace-deb-versions.txt`) | done — the Cog add-on still excludes it by contract (§5) so only the Platform copy ships |
 | **TD-C3** | OKLCH / Tailwind v4 support on WebKit 2.38.6 unverified | hardware render QA (§7); fall back to a trixie/backport apt snapshot via the *same* recipe if insufficient |
 | **TD-C4** | `cog.sysext.conf` + build wrapper are inert scaffolds | wire into the orchestrator only after the RK3588 gate clears |
 
@@ -376,5 +385,6 @@ not a replacement decision made here:
 | `v2/docs/addon-sysext-refresh.md` | sysext refresh → service restart protocol for add-ons |
 | `v2/mkosi/LAYER-MAP.md` | layer boundaries — why GPU userspace is Platform, apps are Layer 4 |
 | `v2/mkosi/app/sysext-build.lib.sh` | the extract → prune → squashfs builder this recipe reuses |
-| `v2/manifests/families/rk3588.yaml` | RK3588 BSP/firmware sources (`mali-g610-firmware` TD) |
+| `v2/manifests/families/rk3588.yaml` | RK3588 BSP/firmware sources (now bakes `libmali-valhall-g610-g24p0-wayland-gbm`) |
+| `v2/manifests/rk3588-userspace-deb-versions.txt` | pinned + SHA-256-verified RK3588 GPU/MPP/RGA userspace .debs (incl. the libmali variant above) |
 | `CeraUI` repo — `docs/ON_DEVICE_DISPLAY.md` | cross-repo kiosk architecture (DC-1..DC-4) |

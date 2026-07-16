@@ -2076,6 +2076,101 @@ PINS
   [[ "$output" == *"BSP apt specs: linux-image-test=1.0 linux-dtb-test=1.0 firmware-test=1.0 u-boot-test=1.0"* ]]
 }
 
+# ===========================================================================
+# 19b. RK3588 HW-accel userspace fetch (pinned URL + SHA-256) —
+#      fetch_rk3588_userspace stages ONLY the pinned userspace packages the
+#      resolved family declares (Mali blob / MPP / RGA / gst-rockchip / config),
+#      and fetch_bsp EXCLUDES exactly that set from the Armbian fetch because the
+#      Armbian bookworm arm64 feed does NOT carry them. DRY_RUN logs the exact
+#      pinned URL + hash and stages nothing. Self-contained: temp pin files, no
+#      network (DRY_RUN plan-only).
+# ===========================================================================
+
+@test "fetch-debs RK3588 userspace: DRY_RUN logs the pinned URL + sha and stages no .deb" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local pins="$BATS_TEST_TMPDIR/userspace.txt"
+  mkdir -p "$BATS_TEST_TMPDIR/debs"
+  cat >"$family" <<'YAML'
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test
+dtb_packages: []
+uboot_packages: []
+firmware_packages:
+  - libmali-test
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+  cat >"$pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=arm64 RK3588_USERSPACE_DEB_VERSIONS_FILE='$pins' KERNEL_PACKAGES=linux-image-test FIRMWARE_PACKAGES=libmali-test; source '$FETCH_DEBS'; fetch_rk3588_userspace '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RK3588 userspace set from"* ]]
+  [[ "$output" == *"libmali-test"* ]]
+  [[ "$output" == *"https://example.invalid/libmali-test_1.0_arm64.deb"* ]]
+  [[ "$output" == *"DRY-RUN would run:"* ]]
+  # plan-only: not one .deb was staged
+  run bash -c "shopt -s nullglob; f=('$BATS_TEST_TMPDIR/debs'/*.deb); echo \${#f[@]}"
+  [ "$output" -eq 0 ]
+}
+
+@test "fetch-debs RK3588 userspace: fetch_bsp EXCLUDES pinned userspace pkgs from the Armbian set" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local bsp_pins="$BATS_TEST_TMPDIR/bsp.txt"
+  local us_pins="$BATS_TEST_TMPDIR/userspace.txt"
+  cat >"$family" <<'YAML'
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test
+dtb_packages: []
+uboot_packages: []
+firmware_packages:
+  - armbian-firmware
+  - libmali-test
+hw_accel_gstreamer_plugins:
+  - gst-rockchip-test
+gstreamer_runtime_packages: []
+YAML
+  cat >"$bsp_pins" <<'PINS'
+linux-image-test=1.0
+armbian-firmware=1.0
+PINS
+  cat >"$us_pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+gst-rockchip-test  gst-rockchip-test_1.0_arm64.deb  fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210  https://example.invalid/gst-rockchip-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=arm64 BSP_DEB_VERSIONS_FILE='$bsp_pins' RK3588_USERSPACE_DEB_VERSIONS_FILE='$us_pins' KERNEL_PACKAGES=linux-image-test FIRMWARE_PACKAGES='armbian-firmware libmali-test' HW_ACCEL_GSTREAMER_PLUGINS=gst-rockchip-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  # the pinned userspace names never enter the Armbian BSP set / apt specs
+  [[ "$output" != *"libmali-test"* ]]
+  [[ "$output" != *"gst-rockchip-test"* ]]
+  # the real Armbian BSP packages DO
+  [[ "$output" == *"BSP set from"* ]]
+  [[ "$output" == *"linux-image-test"* ]]
+  [[ "$output" == *"armbian-firmware"* ]]
+}
+
+@test "fetch-debs RK3588 userspace: a family declaring no pinned userspace pkg fetches nothing" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local us_pins="$BATS_TEST_TMPDIR/userspace.txt"
+  cat >"$family" <<'YAML'
+armbian_branch: none
+kernel_packages: []
+dtb_packages: []
+uboot_packages: []
+firmware_packages: []
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+  cat >"$us_pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=x86-64 RK3588_USERSPACE_DEB_VERSIONS_FILE='$us_pins'; source '$FETCH_DEBS'; fetch_rk3588_userspace '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declares no pinned userspace package"* ]]
+}
+
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {
   run bash -c "{ export APT_CERALIVE_URL=http://localhost:8080; source '$FETCH_DEBS' && echo SOURCED_OK; } 2>&1"
   [ "$status" -eq 0 ]

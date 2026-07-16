@@ -49,21 +49,43 @@ dtb_packages:
 # `armbian-firmware` is already the TRIMMED Armbian variant (NOT armbian-firmware-full),
 # i.e. the narrowest safe lever available — there is no finer split that keeps the
 # vendor-kernel WiFi/BT path intact. Size/feasibility detail: v2/docs/size-notes.md.
-# TD: mali-g610-firmware not in Armbian bookworm arm64 — source separately when available
+#
+# The Mali-G610 (Valhall) GPU userspace driver (libEGL/libGLESv2/libgbm) is NOT in
+# the Armbian bookworm arm64 feed. It is pinned to an exact upstream release asset
+# and SHA-256-verified in ../rk3588-userspace-deb-versions.txt (staged by
+# fetch_rk3588_userspace, excluded from the Armbian fetch). The g24p0 wayland-gbm
+# variant is the one the default kiosk (cage = a Wayland compositor) needs — see
+# v2/docs/cog-display-addon.md §5. It unblocks the 5.4 Kiosk / Cog+WPEWebKit EGL/GBM
+# path; on-hardware render stays the HW-gated QA item (cog-display-addon.md §7). The
+# GPU's CSF firmware blob rides the vendor kernel / armbian-firmware.
 firmware_packages:
   - armbian-firmware
+  - libmali-valhall-g610-g24p0-wayland-gbm
 
 # Decision D3: vendor U-Boot has no fw_setenv → raw GPT bootcount approach.
 rauc_bootloader_adapter: custom
 
 # Hardware-accelerated GStreamer encode/decode (Rockchip MPP) feeding
-# VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp.
-# TD: gstreamer1.0-rockchip1 not in Armbian bookworm arm64 — source from Radxa/Armbian when available
-hw_accel_gstreamer_plugins: []
+# VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp. gstreamer1.0-rockchip1 registers
+# mpph264enc/mpph265enc/mppjpegenc/mppvp8enc against the MPP runtime below — PROVEN
+# on real Rock 5B+ hardware (ffprobe-verified raw H.264/H.265 HW encode). It is NOT
+# in the Armbian bookworm arm64 feed; pinned + SHA-256-verified in
+# ../rk3588-userspace-deb-versions.txt (radxa rk3588s2-bookworm build — tsukumijima
+# publishes no gst-rockchip mirror). Staged by fetch_rk3588_userspace.
+hw_accel_gstreamer_plugins:
+  - gstreamer1.0-rockchip1
 
-# Runtime multimedia support.
-# TD: rockchip-multimedia-config not in Armbian bookworm arm64 — source when available
-gstreamer_runtime_packages: []
+# Runtime multimedia support for the MPP HW-accel path. librockchip-mpp1 is the MPP
+# encode/decode runtime the gst plugin dlopens; librga2 is the RGA 2D accelerator it
+# links; rockchip-multimedia-config ships the udev/config glue; librockchip-mpp-dev
+# accompanies the MPP runtime to mirror the exact hardware-proven asset set. None are
+# in the Armbian bookworm arm64 feed — all pinned + SHA-256-verified in
+# ../rk3588-userspace-deb-versions.txt and staged by fetch_rk3588_userspace.
+gstreamer_runtime_packages:
+  - rockchip-multimedia-config
+  - librga2
+  - librockchip-mpp1
+  - librockchip-mpp-dev
 
 # Frozen A/B layout, docs/partition-contract.md §3 (v1). NAME reference only —
 # sizes/slot roles/threshold live in the frozen contract, never duplicated here.

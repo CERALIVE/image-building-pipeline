@@ -1,7 +1,7 @@
 # Kernel Currency Watch: Vendor 6.1 Lock + Revisit Triggers
 
 **Decision recorded:** vendor BSP 6.1 + Rockchip MPP — no migration.
-**Selection mechanism:** exact BSP Debian versions ([`v2/manifests/armbian-bsp-deb-versions.txt`](../manifests/armbian-bsp-deb-versions.txt)).
+**Selection mechanism:** exact BSP Debian versions ([`v2/manifests/armbian-bsp-deb-versions.txt`](../manifests/armbian-bsp-deb-versions.txt)); the MPP/GPU **userspace** (not in the Armbian feed) is pinned + SHA-256-verified in [`v2/manifests/rk3588-userspace-deb-versions.txt`](../manifests/rk3588-userspace-deb-versions.txt).
 **Visibility mechanism:** BSP provenance/drift-guard ([`v2/manifests/bsp-baseline.json`](../manifests/bsp-baseline.json), Task 3).
 
 ---
@@ -11,6 +11,15 @@
 The image runs `armbian_branch: vendor` (Linux 6.1 Rockchip vendor BSP). The
 streaming engine (`cerastream`) encodes H.265 via **Rockchip MPP** — the mature,
 hardware-accelerated path that the vendor BSP exposes. This is not changing.
+
+The vendor kernel exposes the MPP hardware, but the MPP **userspace** that makes it
+reachable from GStreamer is NOT in the Armbian feed: `librockchip-mpp1` 1.5.0-1
+(tsukumijima) + `gstreamer1.0-rockchip1` 1.14-4 + `librga2` 2.2.0-1 (radxa) register
+`mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc`, proven on real Rock 5B+ hardware
+(ffprobe-verified). These are baked from exact pinned release assets, SHA-256-verified
+in [`v2/manifests/rk3588-userspace-deb-versions.txt`](../manifests/rk3588-userspace-deb-versions.txt)
+(staged by `fetch_rk3588_userspace`), not from the Armbian pool. The MPP encoder
+**version** is now part of the userspace pin set — bump only after re-proving on hardware.
 
 ## Why (7-Way Evidence Summary)
 

@@ -325,6 +325,13 @@ triggers (a 6.12+ vendor BSP with MPP support, or mainline landing a frozen V4L2
 stateless H.265 encode uAPI + VEPU580 driver) in
 [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
 
+The MPP/GPU **userspace** that makes the vendor kernel's HW encoders reachable from
+GStreamer (`gstreamer1.0-rockchip1` + `librockchip-mpp1` + `librga2`, plus the
+Mali-G610 `libmali` blob) is not in the Armbian feed. It is baked from exact pinned
+upstream release assets, verified by SHA-256, in
+[`v2/manifests/rk3588-userspace-deb-versions.txt`](v2/manifests/rk3588-userspace-deb-versions.txt)
+(fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
+
 ## License
 
 This project is dual-licensed under either:

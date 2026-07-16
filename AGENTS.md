@@ -359,6 +359,36 @@ same-version content replacement observable:
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
+**RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
+
+The RK3588 GPU/video **userspace** (Mali-G610 blob, Rockchip MPP encode/decode lib,
+RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev config) is NOT
+in the Armbian bookworm arm64 feed, so it is baked from **exact upstream release-asset
+URLs verified by SHA-256** — the same fail-closed, no-fallback discipline as the BSP
+fetch, but URL-pinned (a pinned URL + SHA-256 needs no rotating apt index or GPG trust
+root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` register —
+proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
+
+- **Pin file:** `v2/manifests/rk3588-userspace-deb-versions.txt` — one record per
+  package (`package  filename  sha256  url`). Six packages:
+  `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 (firmware_packages),
+  `gstreamer1.0-rockchip1` 1.14-4 (hw_accel_gstreamer_plugins), and
+  `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
+  / `librockchip-mpp-dev` 1.5.0-1 (gstreamer_runtime_packages). Sources: tsukumijima
+  (`mpp-rockchip`, `rockchip-multimedia-config`, `libmali-rockchip`) + radxa
+  `rk3588s2-bookworm` (the gst plugin + its ABI-paired RGA; tsukumijima ships no
+  gst-rockchip mirror).
+- **Fetcher:** `fetch_rk3588_userspace` in `v2/lib/fetch-debs.sh` stages only the
+  pinned packages the resolved family declares (intersection of
+  `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
+  this set from the Armbian fetch. An x86 family declares none. DRY_RUN logs the exact
+  URLs + hashes and downloads nothing.
+- **DO NOT** convert any of these into a `deb [signed-by=...] https://...` apt line —
+  that is a new live trust root, exactly what the pinned-URL + SHA-256 approach avoids.
+  **DO NOT** bump a pinned VERSION without re-proving HW encode (the versions are
+  empirically proven). See `v2/docs/kernel-currency-watch.md` and
+  `v2/docs/cog-display-addon.md`.
+
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
@@ -913,10 +943,13 @@ The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but 
 **Cog display add-on (W4):** Cog + WPEWebKit is validated as a lighter alternative
 display engine, packaged as a feature sysext add-on. Acquisition path: plain `apt`
 from bookworm `main` (`cog` 0.16.1, `libwpewebkit-1.1-0` 2.38.6). The Mali-G610
-GPU userspace (`libmali-valhall-g610-*`) is Platform-layer and excluded from the
-sysext by contract. Full recipe: [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md).
+GPU userspace (`libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1) is now **baked into
+the base image** (Platform layer) via `firmware_packages` + the pinned userspace file
+(see the "RK3588 HW-accel userspace" KEY FACT); it stays **excluded from the sysext**
+by contract. Full recipe: [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md).
 **Hardware-gated:** `cog.sysext.conf` wired into the build only after RK3588 render
-QA passes (same gate as Tasks 26/27/28).
+QA passes (same gate as Tasks 26/27/28) — on-hardware Mali EGL/GBM render is the
+gated item, not the package availability.
 
 **Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-blocked** — no RK3588 board is reachable from the dev environment (Task 1 spike: NO-GO). The architecture is fully specced; implementation waits for hardware access.
 
