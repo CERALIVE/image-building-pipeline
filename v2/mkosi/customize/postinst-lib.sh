@@ -137,6 +137,17 @@ EOF
 # These .link units rename onboard NICs to stable roles. Per-role Path= rules
 # (keyed on the manifest ID_PATH, stable per board model) are required on OPi 5+
 # where the dual r8169 NICs would otherwise race a generic Type=ether match.
+#
+# PROPAGATION CONTRACT: this runs in the RUNTIME SUBIMAGE chroot, so the
+# per-role Path= values reach it ONLY via CERALIVE_INTERFACES_eth0/eth1/wlan0
+# in mkosi.conf's PassEnvironment=. orchestrate.sh exporting them to the
+# top-level image is NOT enough — --environment populates the MAIN image only.
+# If a CERALIVE_INTERFACES_* name is ever dropped from PassEnvironment= (it once
+# was), "${!var}" reads EMPTY here and eth0/eth1 get NO .link file (only wlan0
+# has a generic Type=wlan fallback), so ethernet keeps its kernel name and falls
+# out of SRTLA bonding — silently. mkosi.conf's PassEnvironment= MUST stay in
+# lockstep with orchestrate.sh:run_mkosi_build()'s env_names; the guard is
+# manifest.bats "mkosi PassEnvironment stays in lockstep with … env_names".
 install_interface_naming() {
   log "installing deterministic interface naming (.link units + loose rp_filter)"
   mkdir -p /etc/systemd/network

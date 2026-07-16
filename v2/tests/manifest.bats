@@ -927,6 +927,89 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "mkosi PassEnvironment stays in lockstep with orchestrate.sh env_names" {
+  # STRUCTURAL DRIFT GUARD (the actual bug class, not just two instances).
+  #
+  # orchestrate.sh:run_mkosi_build() exports+CLI-passes `env_names` to the
+  # TOP-LEVEL mkosi image, but only PassEnvironment= in mkosi.conf propagates a
+  # value from there into the base/platform/runtime/app SUBIMAGES, where the
+  # postinst scripts that consume it actually run. A name in env_names that is
+  # missing from PassEnvironment reads EMPTY in every subimage chroot — silently.
+  # That drift shipped two production bugs: eth0/eth1 never renamed (dropped from
+  # SRTLA's eth*/wlan* bonding globs) and an empty add-on keyring (rejects every
+  # add-on signature). This test asserts env_names is a SUBSET of PassEnvironment
+  # so any FUTURE name added to env_names without a matching PassEnvironment=
+  # entry fails here — the lockstep the mkosi.conf comment already demands.
+  local orchestrate="$LIB_DIR/orchestrate.sh"
+  local mkosi_conf="$V2/mkosi/mkosi.conf"
+
+  # Extract the multi-line `local env_names=( … )` bash array literal: every line
+  # between the opener and the first line that is only a closing paren.
+  local env_names
+  env_names="$(awk '
+    /local env_names=\(/ { grab=1; next }
+    grab && /^[[:space:]]*\)/ { grab=0 }
+    grab { print }
+  ' "$orchestrate")"
+
+  # Extract every whitespace-separated name from ALL PassEnvironment= lines.
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$mkosi_conf")"
+
+  # Guard against a parser that silently yields nothing (which would make the
+  # subset assertion vacuously pass).
+  [ -n "$env_names" ]
+  [ -n "$pass_names" ]
+
+  local -A in_pass=()
+  local n
+  for n in $pass_names; do in_pass["$n"]=1; done
+
+  # Names legitimately in env_names but NOT in PassEnvironment. SOURCE_DATE_EPOCH
+  # is a reproducible-builds variable consumed ONLY by host-side orchestrator
+  # scripts (never inside a subimage chroot — verified: zero references under
+  # mkosi.images/); mkosi also handles it natively, so it needs no propagation.
+  local -A env_only_ok=( [SOURCE_DATE_EPOCH]=1 )
+
+  local missing=()
+  for n in $env_names; do
+    [ -n "${in_pass[$n]:-}" ] && continue
+    [ -n "${env_only_ok[$n]:-}" ] && continue
+    missing+=("$n")
+  done
+
+  if [ "${#missing[@]}" -ne 0 ]; then
+    printf 'env_names not propagated via PassEnvironment=: %s\n' "${missing[*]}" >&2
+  fi
+  [ "${#missing[@]}" -eq 0 ]
+}
+
+@test "mkosi PassEnvironment forwards interface-naming + add-on keyring into subimages" {
+  # Explicit regression pin for the two instances the lockstep guard above closed:
+  #   * CERALIVE_INTERFACES_eth0/eth1/wlan0 → runtime install_interface_naming()
+  #     emits per-role .link Path= rules; empty ⇒ ethernet keeps its kernel name
+  #     (enP4p65s0) and SRTLA's eth*/wlan* glob never matches the wired uplink.
+  #   * ADDON_KEYRING_B64 → runtime setup_addon_keyring() bakes the PUBLIC add-on
+  #     keyring; empty ⇒ EMPTY placeholder that rejects ALL add-on signatures.
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$V2/mkosi/mkosi.conf")"
+
+  local -A in_pass=()
+  local n
+  for n in $pass_names; do in_pass["$n"]=1; done
+
+  local want missing=()
+  for want in CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 \
+              CERALIVE_INTERFACES_wlan0 ADDON_KEYRING_B64; do
+    [ -n "${in_pass[$want]:-}" ] || missing+=("$want")
+  done
+
+  if [ "${#missing[@]}" -ne 0 ]; then
+    printf 'PassEnvironment= missing: %s\n' "${missing[*]}" >&2
+  fi
+  [ "${#missing[@]}" -eq 0 ]
+}
+
 @test "lab debug password requires an explicitly marked debug image" {
   local bin="$BATS_TEST_TMPDIR/debug-password-bin"
   local calls="$BATS_TEST_TMPDIR/debug-password-calls"

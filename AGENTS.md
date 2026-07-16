@@ -890,6 +890,26 @@ QA passes (same gate as Tasks 26/27/28).
 
 Full index with file:line anchors and unblock conditions: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md).
 
+**RK3588 predictable names — the subimage env-propagation contract.** The
+deterministic `eth0/eth1/wlan0` renames (`install_interface_naming()` in
+`postinst-lib.sh`, run from the runtime `mkosi.postinst.chroot`) and the add-on
+signing keyring (`setup_addon_keyring()`) run inside a SUBIMAGE chroot. Their
+inputs — `CERALIVE_INTERFACES_eth0/eth1/wlan0`, `ADDON_KEYRING_B64` — reach that
+chroot ONLY through `PassEnvironment=` in `mkosi/mkosi.conf`. `orchestrate.sh`
+exporting a name and listing it in `run_mkosi_build()`'s `env_names` is NOT
+enough: mkosi's `--environment` populates the TOP-LEVEL image's script env only,
+and the base/platform/runtime/app subimages each parse config in isolation. A
+name present in `env_names` but MISSING from `PassEnvironment=` reads EMPTY in
+every subimage — silently. That exact drift shipped two production bugs (eth0/eth1
+never renamed → dropped from SRTLA's `eth*`/`wlan*` bonding globs, confirmed on
+Rock 5B+ hardware; and an empty add-on keyring → all add-on signatures rejected).
+`PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
+`manifest.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
+fails the build if a future `env_names` addition skips `PassEnvironment=`).
+`SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_V2_DIR` (forwarded via
+a separate `-e`/`--environment` mechanism) are the two documented legitimate
+asymmetries.
+
 **OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
 ships the `interfaces:` block with `FIXME-…` values because the board is not in
 hand. The OPi 5+ has two onboard r8169 NICs on the same driver/bus, so a generic
