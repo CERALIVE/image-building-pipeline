@@ -16,9 +16,9 @@
 # live trust root and is exactly what this file exists to avoid.
 #
 # PROVENANCE: proven working on real Rock 5B+ hardware (raw H.264/H.265 HW encode
-# via mpph264enc/mpph265enc, ffprobe-verified). See
-# .omo/notepads/production-launch-readiness/rk3588-userspace-packaging.md for the
-# exact hardware-proof context and the source/variant decisions.
+# via mpph264enc/mpph265enc, ffprobe-verified). The proven combination is
+# tsukumijima MPP 1.5.0-1 plus the ABI-matched radxa GStreamer/RGA pair; the
+# Wayland-GBM Mali variant is required by the cage-based kiosk render path.
 #
 # FORMAT: one record per package, four whitespace-separated fields:
 #   <package>  <filename>  <sha256>  <url>
