@@ -241,6 +241,13 @@ RESULT: PASS — pre-flash gate GREEN. Hardware bring-up AUTHORIZED.
 
 Do not flash if any check shows `[FAIL]`. Fix the build first.
 
+The `rootfs_a`/`rootfs_b` checks resolve the real Armbian kernel-package `/boot`
+layout: `/boot/Image` is a symlink to the versioned `vmlinuz-<ver>` and the
+initrd exists only as `/boot/initrd.img-<ver>` (no bare `/boot/initrd.img`). The
+gate dereferences the kernel symlink and falls back to the versioned initrd name,
+so a genuinely complete Armbian slot passes; plain-file `/boot/Image` and
+`/boot/initrd.img` layouts still pass unchanged.
+
 You can also run the built-in negative self-test to confirm the gate is
 non-vacuous:
 

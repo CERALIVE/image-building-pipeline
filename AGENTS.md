@@ -134,7 +134,13 @@ starts/sizes or labels, a missing idblock or second-stage FIT, external FIT payl
 whose declared extents exceed the image/8 MiB budget or whose SHA-256 nodes mismatch,
 malformed compiled boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
 state, incompatible/invalid signed bundles, and a destination smaller than the raw
-image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
+image. Its `check_rootfs_populated` resolves the real Armbian kernel-package `/boot`
+layout — `/boot/Image` is a symlink to `vmlinuz-<ver>` and only the versioned
+`/boot/initrd.img-<ver>` exists (no bare `/boot/initrd.img`). `debugfs dump -p` does
+NOT dereference a symlink that is the FINAL path component (it writes the link
+target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
+follows a terminal-component symlink to the versioned target, and globs the versioned
+initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and—when CI sets
 `CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
 and cleanup harness. The harness uses RAUC's supported boot-slot override for

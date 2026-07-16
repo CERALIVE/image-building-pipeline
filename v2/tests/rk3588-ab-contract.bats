@@ -84,6 +84,21 @@ make_rootfs_tree() {
   rm -rf "$tree/.initrd-fixture"
 }
 
+# Rework a rootfs tree's /boot into the REAL Armbian kernel-package layout that
+# broke check_rootfs_populated: /boot/Image and /boot/dtb become symlinks, and
+# the initrd exists ONLY under its versioned name (no bare /boot/initrd.img).
+# The plain-file make_rootfs_tree never exercised this, so debugfs's
+# terminal-symlink dump bug stayed invisible to the suite.
+make_armbian_symlink_rootfs_tree() {
+  local tree="$1" ver=6.1.115-vendor-rk35xx
+  make_rootfs_tree "$tree"
+  mv "$tree/boot/Image" "$tree/boot/vmlinuz-$ver"
+  ln -s "vmlinuz-$ver" "$tree/boot/Image"
+  mv "$tree/boot/dtb" "$tree/boot/dtb-$ver"
+  ln -s "dtb-$ver" "$tree/boot/dtb"
+  mv "$tree/boot/initrd.img" "$tree/boot/initrd.img-$ver"
+}
+
 slot_contains_init() {
   local image="$1" part="$2" slot="$3"
   local start size slice
@@ -94,13 +109,21 @@ slot_contains_init() {
   debugfs -R 'stat /sbin/init' "$slice" 2>/dev/null | grep -q 'Inode:'
 }
 
-build_preflash_fixture() {
-  local base="$BATS_FILE_TMPDIR/preflash"
+build_preflash_fixture() { build_preflash_fixture_variant preflash make_rootfs_tree; }
+
+# build_preflash_fixture_variant <slug> <tree_fn> — assemble a full, signed
+# rock-5b-plus factory image + bundle into $BATS_FILE_TMPDIR/<slug>, populating
+# both rootfs slots from <tree_fn>. Default (preflash/make_rootfs_tree) feeds the
+# plain-file positives and negatives; the armbian-symlink variant proves the gate
+# passes on the real symlink /boot layout.
+build_preflash_fixture_variant() {
+  local slug="$1" tree_fn="$2"
+  local base="$BATS_FILE_TMPDIR/$slug"
   (
     flock 9
     [ -s "$base/image.raw" ] && exit 0
     mkdir -p "$base/bsp"
-    make_rootfs_tree "$base/rootfs"
+    "$tree_fn" "$base/rootfs"
     ROOT="$base/rootfs" SERIAL_CONSOLE=ttyS2:1500000 \
       DTB_NAME=rk3588-rock-5b-plus.dtb BOARD_ID=rock-5b-plus \
       COMPATIBLE_STRING=ceralive-rock-5b-plus SINGLE_SLOT_FALLBACK=false \
@@ -153,7 +176,7 @@ EOF
       BUNDLE_OUT_DIR="$base" BUNDLE_TS=update CERALIVE_RAUC_PKI_DIR="$V2/.dev-keys" \
       REPRODUCIBLE=1 bash "$V2/lib/build-bundle.sh" rock-5b-plus "$base/rootfs" >/dev/null
     cp "$V2/.dev-keys/dev-root-ca.pem" "$base/keyring.pem"
-  ) 9>"$BATS_FILE_TMPDIR/.preflash.lock"
+  ) 9>"$BATS_FILE_TMPDIR/.$slug.lock"
 }
 
 build_missing_artifact_image() {
@@ -293,6 +316,27 @@ build_missing_artifact_image() {
     --target-size-bytes "$((bytes - 1))"
   [ "$status" -ne 0 ]
   [[ "$output" == *"[FAIL] Target media capacity"* ]]
+}
+
+# Regression for the real Armbian kernel-package /boot layout (2026-07-16):
+# /boot/Image is a symlink to vmlinuz-<ver> and only the versioned
+# /boot/initrd.img-<ver> exists. `debugfs dump -p` does not dereference a
+# terminal-component symlink, so the pre-fix gate extracted a 0-byte "kernel"
+# and could not find the initrd — failing BOTH factory slots on an image whose
+# artifacts are actually intact. Fails without the preflash-verify.sh fix.
+@test "Rock preflash gate PASSES on the real Armbian symlink /boot layout" {
+  require_disk_tools
+  build_preflash_fixture_variant armbian-symlink make_armbian_symlink_rootfs_tree
+  local base="$BATS_FILE_TMPDIR/armbian-symlink" bytes
+  bytes="$(stat -c '%s' "$base/image.raw")"
+
+  run bash "$PREFLASH" \
+    --image "$base/image.raw" --bundle "$base/update.raucb" \
+    --board rock-5b-plus --keyring "$base/keyring.pem" \
+    --target-size-bytes "$bytes"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[PASS] rootfs_a populated + kernel + board DTB + initrd"* ]]
+  [[ "$output" == *"[PASS] rootfs_b populated + kernel + board DTB + initrd"* ]]
 }
 
 @test "Rock preflash rejects idblock-only images without a second-stage FIT" {
