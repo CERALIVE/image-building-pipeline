@@ -664,6 +664,55 @@ ROOT-CAUSE fix, handled separately in the CeraUI repo. Guard: `manifest.bats`
 "avahi restart: an additive Restart=on-failure drop-in is baked …" (+ fail-closed
 + executor-wiring cases).
 
+**`net-tools` in `shared.list` — else the CeraUI Network destination is TOTALLY
+empty** [EXISTS]
+
+CeraUI's backend (`ceralive.service`) shells out to the legacy `ifconfig` binary
+every ~5s (`apps/backend/src/modules/network/network-interfaces.ts`
+`run("ifconfig", [])`) to build the `netif` broadcast
+(WiFi/Ethernet/cellular/bonded-link status shown on the Network destination). This
+minimal Debian bookworm image ships only modern `iproute2`, NOT `net-tools`, so
+every poll tick failed since boot (`{"level":"error","msg":"Error getting ifconfig:
+Executable not found in $PATH: \"ifconfig\""}`, confirmed live on real Rock 5B+
+hardware). That is the root cause of the Network destination rendering completely
+empty ("No WiFi interfaces found", "No wired interfaces found", "No SIM cards
+detected", "No active links yet") AND the missing Ethernet row in "Bonded Links"
+(`BondedLinksSection.svelte` renders an `ethernet`-typed link fine — its input array
+is just empty upstream) despite a live, connected Ethernet + WiFi. The fix is one
+line — `net-tools` in `v2/manifests/packages/shared.list` (next to `iproute2`,
+arch-independent, every board), NOT a rewrite of `network-interfaces.ts` onto `ip`:
+CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
+(`MONITOR-NOTES.md`, `netif-migration`/`netif-same-subnet` tests, `mocks/providers/
+network.ts`), so swapping binaries is a large unrelated risk — adding the one legacy
+binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
+installed …" + "… reaches the resolved runtime package set …".
+
+**`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
+`Requires=`)** [EXISTS]
+
+`ceralive.service`'s boot step `initPipelines()` connects to cerastream's control
+socket **exactly once**, so if cerastream isn't up yet the connection fails
+permanently for that boot. Confirmed live: `cerastream.service` started ~2 minutes
+AFTER `ceralive.service` in one boot instance, and `systemctl show ceralive -p
+After` had NO mention of `cerastream.service`. `setup_cerastream_ordering` (in
+`customize/postinst-lib.sh`, called from the runtime `mkosi.postinst.chroot`) bakes
+an ADDITIVE drop-in
+`/etc/systemd/system/ceralive.service.d/30-cerastream-ordering.conf` with
+`After=cerastream.service`, installed from the committed standalone artifact
+`v2/mkosi/runtime/ceralive-cerastream-ordering.dropin.conf` (the SAME
+standalone-artifact + `postinst-lib.sh` setup-function idiom as the avahi/TLS
+drop-ins; additive to the `ceralive.service` unit shipped by the CeraUI `.deb`, like
+`10-data-persistence.conf` / `20-paseto-public-key.conf`). **ORDERING-ONLY — never
+`Requires=`**: `ceralive.service` MUST still boot and serve its "engine unavailable"
+degraded state (CeraUI `helpers/boot-guard.ts::guardNonCritical` fail-soft boot
+design) if cerastream is ever genuinely absent/masked, and `After=` on an
+out-of-transaction unit is a harmless no-op. This is the systemd-level ordering half
+only — a CeraUI-side retry/resilience fix for the one-shot connect lands separately
+in that repo. Guards: `manifest.bats` "cerastream ordering: an additive
+After=cerastream.service drop-in is baked …" + "… is ordering-ONLY (no
+Requires=/Requisite=/BindsTo= hard dependency)" (+ fail-closed + executor-wiring
+cases).
+
 **Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
 
 The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem

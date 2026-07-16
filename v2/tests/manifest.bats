@@ -934,6 +934,29 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: net-tools is installed so CeraUI's ifconfig poll works" {
+  # CeraUI's backend polls /sbin/ifconfig every ~5s (apps/backend
+  # network-interfaces.ts run("ifconfig", [])) to build the `netif` broadcast
+  # (WiFi/Ethernet/cellular/bonded-link status). This minimal bookworm image ships
+  # only modern iproute2, so without net-tools every poll tick fails ("Executable
+  # not found in $PATH: \"ifconfig\"") and the Network destination renders empty
+  # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a missing
+  # Ethernet entry in Bonded Links — confirmed on real Rock 5B+ hardware.
+  run grep -Ex 'net-tools[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: net-tools reaches the resolved runtime package set (rk3588 + x86)" {
+  # net-tools is arch-independent (shared.list), so it must appear in the runtime
+  # package set the runtime layer installs for EVERY board family — the same
+  # sed|awk projection make_parity_rootfs uses to model the installed set. A
+  # missing/misplaced entry (e.g. accidentally landing in a delta list only) would
+  # break ifconfig on one family; this asserts the shared list carries it.
+  local pkgs
+  pkgs="$(sed -e 's/#.*//' "$V2/manifests/packages/shared.list" | awk 'NF{print $1}')"
+  [[ "$pkgs" == *net-tools* ]]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \
@@ -2050,6 +2073,63 @@ run_paseto_provision() {
 
 @test "avahi restart: image contract wires setup_avahi_restart into the runtime executor" {
   grep -q 'setup_avahi_restart' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
+# 18c. ceralive.service -> cerastream.service boot ordering — ceralive.service's
+#      initPipelines() connects to cerastream's control socket exactly once, so a
+#      cerastream that starts LATE (confirmed live: ~2 min after ceralive.service)
+#      permanently fails that boot's connect. setup_cerastream_ordering
+#      (postinst-lib.sh) bakes an ADDITIVE After=cerastream.service drop-in from the
+#      committed standalone artifact under CERALIVE_RUNTIME_SRC (like the avahi/TLS
+#      drop-ins). ORDERING-ONLY: it must NEVER carry Requires= — ceralive.service has
+#      to boot into its "engine unavailable" degraded state if cerastream is
+#      absent/masked. These drive the SHIPPED function against a temp drop-in dir
+#      (CERASTREAM_ORDERING_DROPIN_DIR) — no image boot, UNIT scope.
+# ===========================================================================
+
+@test "cerastream ordering: an additive After=cerastream.service drop-in is baked for ceralive.service" {
+  local dir="$BATS_TEST_TMPDIR/ceralive.service.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/30-cerastream-ordering.conf" ]
+  grep -q '^\[Unit\]' "$dir/30-cerastream-ordering.conf"
+  grep -q '^After=cerastream.service$' "$dir/30-cerastream-ordering.conf"
+}
+
+@test "cerastream ordering: the drop-in is ordering-ONLY (no Requires=/Requisite=/BindsTo= hard dependency)" {
+  # ceralive.service MUST still boot and serve its "engine unavailable" degraded
+  # state (CeraUI helpers/boot-guard.ts::guardNonCritical) if cerastream is ever
+  # genuinely absent or masked. A hard dependency (Requires=/Requisite=/BindsTo=)
+  # would break that fail-soft design — this asserts the drop-in never introduces one.
+  local dir="$BATS_TEST_TMPDIR/ceralive-ordering-only.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -eq 0 ]
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' "$dir/30-cerastream-ordering.conf"
+  [ "$status" -ne 0 ]
+  # Same guard against the committed source artifact so a future edit can't smuggle
+  # a hard dependency in past the runtime-src indirection.
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' \
+    "$V2/mkosi/runtime/ceralive-cerastream-ordering.dropin.conf"
+  [ "$status" -ne 0 ]
+}
+
+@test "cerastream ordering: missing runtime source FAILS the build (fail-closed, no drop-in)" {
+  local dir="$BATS_TEST_TMPDIR/ceralive-ordering-fail.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cerastream-ordering source not found"* ]]
+  [ ! -f "$dir/30-cerastream-ordering.conf" ]
+}
+
+@test "cerastream ordering: image contract wires setup_cerastream_ordering into the runtime executor" {
+  grep -q 'setup_cerastream_ordering' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 # ===========================================================================

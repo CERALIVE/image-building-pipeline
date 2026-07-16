@@ -794,6 +794,32 @@ setup_avahi_restart() {
 }
 
 # ---------------------------------------------------------------------------
+# ceralive.service -> cerastream.service boot ordering (soft hint, defense against a
+# real boot race): ceralive.service's initPipelines() boot step connects to
+# cerastream's control socket exactly once, so if cerastream isn't up yet the
+# connection fails permanently for that boot. Confirmed live: cerastream.service
+# started ~2 minutes AFTER ceralive.service in one boot instance, and
+# `systemctl show ceralive -p After` had NO mention of cerastream.service. Bake an
+# ADDITIVE drop-in on the ceralive.service unit (shipped by the CeraUI .deb, like
+# 10-data-persistence / 20-paseto-public-key) that adds After=cerastream.service.
+# ORDERING-ONLY — never Requires=: ceralive.service must still boot into its
+# "engine unavailable" degraded state (CeraUI helpers/boot-guard.ts::guardNonCritical)
+# if cerastream is genuinely absent/masked, and After= on an out-of-transaction unit
+# is a harmless no-op. Installed from the committed standalone artifact under
+# CERALIVE_RUNTIME_SRC (like setup_avahi_restart / setup_tls_proxy), never inlined.
+# CERASTREAM_ORDERING_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_cerastream_ordering() {
+  log "ordering ceralive.service after cerastream.service (additive After= boot-ordering drop-in; no hard dependency)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-cerastream-ordering.dropin.conf" ]] \
+    || die "cerastream-ordering source not found: ${src}/ceralive-cerastream-ordering.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${CERASTREAM_ORDERING_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/ceralive-cerastream-ordering.dropin.conf" "${dropin_dir}/30-cerastream-ordering.conf"
+}
+
+# ---------------------------------------------------------------------------
 # RTMP ingest gateway (Todo 14): bake the PINNED MediaMTX relay.
 #
 # Build-time FETCH of a pinned MediaMTX release (declarative pin: rtmp-gateway/

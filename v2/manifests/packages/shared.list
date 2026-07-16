@@ -42,6 +42,17 @@ network-manager          # primary connection manager (WiFi/Ethernet/modem); Cer
 systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
 dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
 iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
+net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
+                         # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
+                         # the `netif` broadcast (WiFi/Ethernet/cellular/bonded-link status).
+                         # This minimal bookworm image ships only modern iproute2, so WITHOUT
+                         # net-tools every poll tick fails ("Executable not found in $PATH:
+                         # \"ifconfig\"") and the Network destination renders completely empty
+                         # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a
+                         # missing Ethernet entry in Bonded Links, despite live, connected NICs
+                         # (confirmed on real Rock 5B+ hardware). CeraUI's ifconfig text-parsing is
+                         # deeply embedded in its test suite; adding the one legacy binary is the
+                         # minimal-risk fix, NOT rewriting network-interfaces.ts onto `ip`.
 ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
 
 # --- USB modem bring-up -------------------------------------------------------

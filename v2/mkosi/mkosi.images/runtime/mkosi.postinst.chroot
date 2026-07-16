@@ -921,6 +921,7 @@ main() {
   setup_addon_keyring          # task 24: bake the add-on signing keyring (separate trust domain)
   setup_paseto_public_key      # ADR-0006 D2: bake device-token PUBLIC key into CeraUI runtime env
   setup_avahi_restart          # mDNS reliability: additive Restart=on-failure drop-in so avahi-daemon self-heals after any signal/crash
+  setup_cerastream_ordering    # boot race: additive After=cerastream.service drop-in (ordering only, no Requires=) so ceralive.service starts after the engine
   setup_boot_healthcheck       # task 29: gate mark-good on real streaming health
   setup_hawkbit_updater        # task 41: hawkBit DDI OTA + secure first-boot enrollment
   setup_cert_rotation          # task 42: baked-in intermediate/leaf rotation (root immutable)
