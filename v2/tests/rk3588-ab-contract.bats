@@ -402,7 +402,7 @@ build_missing_artifact_image() {
 # scratch image must live on the persistent output filesystem, never a bare
 # `mktemp` /tmp (a fixed 16 GiB tmpfs on the self-hosted runner that a 4 GiB slot
 # exhausts), and it must be removed on the `die` failure path — not only after a
-# successful dd. See .omo/evidence/rock5b-proof-5-20260715/22d-tmpfs-root-cause.log.
+# successful dd.
 
 # Emit an mkfs.ext4 shim that intercepts ONLY the rootfs-slot populate call —
 # `mkfs.ext4 … -d <tree> <img>` for the exact <tree> this test drives — and
