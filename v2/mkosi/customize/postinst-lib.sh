@@ -115,6 +115,19 @@ match-device=interface-name:eth0
 ipv4.link-local=3
 EOF
 
+  # dns=systemd-resolved above makes NetworkManager DELEGATE DNS to resolved (it
+  # forwards DHCP servers over D-Bus, never writing resolv.conf itself). resolved
+  # only manages /etc/resolv.conf when it IS the symlink to its stub; on a plain
+  # file it reports `resolv.conf mode: foreign` and stands down (safety behavior).
+  # This minimal mkosi rootfs never ran resolved's postinst trigger, so it ships
+  # resolv.conf as an empty 0-byte regular file — with delegation on and resolved
+  # refusing a foreign file, NOTHING populates it and every glibc/getent/curl
+  # lookup fails despite a valid lease (confirmed live: `resolvectl status` shows
+  # the server + `mode: foreign`, `getent hosts` exits 2, CeraUI logs constant
+  # "DNS timeout"). `ln -sf` is force+idempotent — fixes the empty file, a stale
+  # link, or an already-correct link, safe on every A/B rebuild.
+  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
   install_interface_naming
 }
 

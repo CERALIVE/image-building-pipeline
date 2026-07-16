@@ -490,6 +490,36 @@ cannot see. Offline guard: `v2/tests/data-persistence-public-symlink.test.sh`
 synthetic tree and proves the symlink is preserved, resolves after the bind mount,
 is idempotent, and never clobbers an existing entry). Wired into `v2/run-tests`.
 
+**`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is
+totally dead** [EXISTS]
+
+`postinst-lib.sh::configure_networking` writes
+`/etc/NetworkManager/conf.d/ceralive.conf` with `dns=systemd-resolved`, so
+NetworkManager DELEGATES DNS to systemd-resolved (forwards the DHCP-received
+servers over D-Bus, never writing `/etc/resolv.conf` itself). systemd-resolved
+only manages `/etc/resolv.conf` when that path IS the symlink to its stub
+`/run/systemd/resolve/stub-resolv.conf`; on a plain regular file it reports
+`resolv.conf mode: foreign` and stands down (its designed safety behavior). This
+minimal mkosi rootfs never ran systemd-resolved's postinst trigger /
+`dpkg-reconfigure`, so it ships `/etc/resolv.conf` as an empty 0-byte REGULAR
+file — with delegation on and resolved refusing a foreign file, NOTHING ever
+populates it and every glibc/`getent`/`curl` lookup fails with zero working DNS
+despite a valid IP, gateway, and DHCP-supplied server (confirmed live on
+hardware: `resolvectl status` shows the server + `mode: foreign`, `getent hosts
+www.google.com` exits 2, and CeraUI logs constant `DNS timeout for
+wellknown.belabox.net` / `Failed to resolve www.gstatic.com` health-check
+failures). `configure_networking` now runs `ln -sf
+/run/systemd/resolve/stub-resolv.conf /etc/resolv.conf` right after the
+`dns=systemd-resolved` drop-in (same delegation contract); `-sf` is
+force+idempotent, so it fixes the empty file, a stale link, or an
+already-correct link, safe on every build and A/B slot swap. This is a content
+bug the `systemd-ordering-cycle` graph check cannot see. Offline guard:
+`v2/tests/resolv-conf-symlink.test.sh` (static contract on the
+`configure_networking()` body + a rootless-namespace runtime reproduction that
+seeds the exact 0-byte-regular-file bug state, runs the real function, and proves
+the result is the stub symlink — resolves through it, is idempotent, and
+force-replaces a stale link). Wired into `v2/run-tests`.
+
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
 `setup_paseto_public_key` (in `customize/postinst-lib.sh`, called by the runtime
