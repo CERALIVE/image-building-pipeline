@@ -23,6 +23,39 @@ services-enablement path. The unit is ordered **before** sshd so the first
 inbound connection already sees a per-device host key and root-password login
 already disabled.
 
+Both SSH-gate units carry **`DefaultDependencies=no`** paired with an explicit
+**`After=sysinit.target`**. `ssh.socket` is ordered `Before=sockets.target`
+(early boot, before `basic.target`), so a unit that is `Before=ssh.socket` must
+not inherit the implicit `After=basic.target` — that closes an `ssh.socket →
+guard → basic.target → sockets.target → ssh.socket` ordering cycle and systemd
+deletes `ssh.socket`'s start job, so SSH never comes up on any boot. But
+`DefaultDependencies=no` also drops the implicit `After=sysinit.target`, and this
+script does sysinit-phase-dependent work (`ssh-keygen -A` needs the seeded RNG;
+the authorized-key store resolves the `ceralive` user/group and chowns to it;
+`sshd -t` needs runtime paths). proof-11 proved that without `After=sysinit.target`
+the unit races ahead of `systemd-sysusers`/`systemd-tmpfiles`/udev and fails under
+`set -euo pipefail` — SSH down with **zero** ordering cycles. So each guard
+re-adds `After=sysinit.target` by hand (the safe half of the default deps;
+`sysinit.target` is ordered before `sockets.target`, so it never re-closes the
+loop) but NEVER `After=basic.target`. The offline regression guard,
+`v2/tests/systemd-ordering-cycle.test.sh`, asserts BOTH zero cycles AND that each
+guard is transitively ordered after `systemd-sysusers`/`systemd-tmpfiles`.
+
+The script also **creates `/run/sshd` (mode `0755`) before its final `sshd -t`**.
+`sshd -t` refuses to run without the privilege-separation directory `/run/sshd`,
+exiting 255 with `Missing privilege separation directory: /run/sshd`. On a fresh
+boot that directory does not exist yet — nothing in the image ships a `tmpfiles.d`
+entry for it, so its only creator is `ssh.service`'s `RuntimeDirectory=sshd`, which
+runs **after** this `Before=ssh.service` guard. Without pre-creating it, `sshd -t`
+exits 255, `set -euo pipefail` fails the unit, and both `ssh.service` (the LAN sshd
+on :22) and `ssh.socket` DEPEND-fail through their `RequiredBy=`, closing port 22 on
+every boot — with **zero** ordering cycles and a healthy rest-of-system (proof-13
+real-HW UART, 2026-07-16). This is a runtime failure inside the guard's script, not
+a dependency-graph defect, so `systemd-ordering-cycle.test.sh` cannot see it; the
+dedicated guard is `v2/tests/ssh-firstboot-privsep.test.sh`, which asserts the
+`/run/sshd` creation precedes `sshd -t` in the script (static) and reproduces the
+empty-`/run` first boot end-to-end in a rootless namespace (runtime).
+
 ## The four scoped actions (SC4 — nothing more)
 
 1. **Per-device SSH host keys.** The image bakes shared host keys, so every

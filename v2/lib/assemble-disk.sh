@@ -115,6 +115,61 @@ BOOT_START_SECTOR=$(( GAP_MB * 1024 * 1024 / SECTOR ))
 XBOOTLDR_GUID="BC13C2FF-59E6-4262-A352-B275FD6F7172"
 
 # ---------------------------------------------------------------------------
+# Transient-scratch cleanup registry.
+#
+# WHY a registry and not a per-function `trap … RETURN`: every fatal path in this
+# assembler runs through `die`/the common.sh ERR trap, and BOTH `exit 1` — which
+# fires an EXIT trap, NEVER a RETURN trap. A RETURN trap would therefore silently
+# skip exactly the failure paths that leak (proof-5, 2026-07-15: a `mkfs.ext4 -d`
+# `die` left a ~4 GiB slot image behind, and five such leaks congested the
+# runner's fixed 16 GiB /tmp tmpfs until the next build hit EDQUOT mid-populate).
+# A single process-level EXIT trap drains this registry, so every path registered
+# here is removed on a successful return AND on any `die`/error — no second
+# `rm -f` sprinkled at each `die` call site (that pattern already proved fragile:
+# it was missed twice). assemble-disk.sh is only ever executed, never sourced, so
+# owning the process EXIT trap here clobbers no caller.
+# ---------------------------------------------------------------------------
+_SCRATCH_PATHS=()
+_cleanup_scratch() {
+  local p
+  for p in ${_SCRATCH_PATHS[@]+"${_SCRATCH_PATHS[@]}"}; do
+    [[ -n "${p}" ]] && rm -rf "${p}"
+  done
+}
+trap _cleanup_scratch EXIT
+
+# register_scratch <path> — track <path> for removal on ANY exit (success or die).
+register_scratch() { _SCRATCH_PATHS+=("$1"); }
+
+# discard_scratch <path> — remove <path> NOW and drop it from the registry, for the
+# success path where the scratch has served its purpose (e.g. after the dd lands it).
+discard_scratch() {
+  local target="$1" keep=() p
+  rm -rf "${target}"
+  for p in ${_SCRATCH_PATHS[@]+"${_SCRATCH_PATHS[@]}"}; do
+    [[ "${p}" == "${target}" ]] || keep+=("${p}")
+  done
+  _SCRATCH_PATHS=(${keep[@]+"${keep[@]}"})
+}
+
+# ---------------------------------------------------------------------------
+# assert_free_space <dir> <need_bytes> <what>
+# Pre-flight guard: fail EARLY and legibly when <dir>'s filesystem cannot hold
+# <need_bytes>, instead of letting `truncate`/`mkfs.ext4 -d` surface a raw
+# EDQUOT/ENOSPC deep inside a container (proof-5). Names the exact directory and
+# the byte deficit so the failure is diagnosable without a mkfs stack trace.
+# ---------------------------------------------------------------------------
+assert_free_space() {
+  local dir="$1" need_bytes="$2" what="$3" avail_bytes
+  # df -PB1: POSIX single-line output, available space reported in 1-byte blocks.
+  avail_bytes="$(df -PB1 "${dir}" | awk 'NR==2 {print $4}')"
+  [[ "${avail_bytes}" =~ ^[0-9]+$ ]] \
+    || die "could not read free space on ${dir} (df returned '${avail_bytes}')"
+  (( avail_bytes >= need_bytes )) \
+    || die "insufficient free space for ${what}: ${dir} has ${avail_bytes} bytes free, needs ${need_bytes} (short by $(( need_bytes - avail_bytes )) bytes) — this scratch area must be persistent, quota-safe storage, not a size-capped tmpfs like /tmp"
+}
+
+# ---------------------------------------------------------------------------
 # stage_repart_dir <dest> <single_slot:true|false>
 # Copy the committed repart defs into <dest>, dropping rootfs_b for single-slot.
 # ---------------------------------------------------------------------------
@@ -169,6 +224,7 @@ populate_boot_partition() {
 
   log_info "populating boot partition (boot.scr + recovery.scr + cera_board.env + boot_state.txt, board=${board_id}, single_slot=${single_slot})"
   local staging; staging="$(mktemp -d)"
+  register_scratch "${staging}"
   SINGLE_SLOT_FALLBACK="${single_slot}" BOARD_ID="${board_id}" \
     DTB_NAME="${DTB_NAME}" SERIAL_CONSOLE="${SERIAL_CONSOLE}" \
     COMPATIBLE_STRING="${COMPATIBLE_STRING}" \
@@ -176,7 +232,7 @@ populate_boot_partition() {
   # -s recurse, -o overwrite without prompt (idempotent), -Q quit on
   # error, -m keep mtimes. Lands the staged tree at the FAT image root.
   mcopy -i "${bootp}" -s -o -Q -m "${staging}"/* ::
-  rm -rf "${staging}"
+  discard_scratch "${staging}"
   log_success "boot partition populated"
 }
 
@@ -241,7 +297,16 @@ populate_rootfs_slot() {
   local size_bytes=$(( size_sectors * SECTOR ))
 
   log_info "populating ${slot_label} (p${part_num}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
-  local rootfs_img; rootfs_img="$(mktemp)"
+  # Build the pre-sized slot image ALONGSIDE the output .raw, never in a bare
+  # `mktemp` /tmp: on the self-hosted runner /tmp is a FIXED 16 GiB tmpfs (not
+  # scaled to host RAM), and a 4096 MiB slot exhausts it → mkfs.ext4 EDQUOT
+  # (proof-5). $(dirname img) is the persistent, quota-safe filesystem the .raw
+  # itself lands on — the same convention fetch-debs.sh uses (temp next to its
+  # destination artifact). register_scratch cleans it on success AND on `die`.
+  local scratch_dir; scratch_dir="$(dirname "${img}")"
+  assert_free_space "${scratch_dir}" "${size_bytes}" "${slot_label} slot image"
+  local rootfs_img; rootfs_img="$(mktemp "${scratch_dir}/.rootfs-slot.XXXXXX")"
+  register_scratch "${rootfs_img}"
   truncate -s "${size_bytes}" "${rootfs_img}"
   # The mkosi rootfs tree is root-owned with 0700 system dirs (boot/loader,
   # var/lib/private, …) a rootless host user cannot traverse. Probe readability
@@ -259,7 +324,7 @@ populate_rootfs_slot() {
   fi
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
-  rm -f "${rootfs_img}"
+  discard_scratch "${rootfs_img}"
   log_success "${slot_label} populated (${size_bytes} byte slot ← partition ${part_num})"
 }
 
@@ -308,6 +373,7 @@ build_disk() {
   require_cmd sgdisk
   require_cmd systemd-repart
   local defs; defs="$(mktemp -d)"
+  register_scratch "${defs}"
   stage_repart_dir "${defs}" "${single_slot}"
 
   log_info "creating ${total_mb} MiB image: ${img} (single_slot=${single_slot})"
@@ -343,12 +409,18 @@ build_disk() {
   if [[ "${do_format}" == "true" ]]; then
     require_cmd mkfs.vfat
     log_info "formatting boot region (vfat, label BOOT) at ${GAP_MB} MiB offset"
-    local bootp; bootp="$(mktemp)"
+    # Same rule as the rootfs slots: the pre-sized boot image goes on the
+    # persistent output filesystem (not a bare `mktemp` tmpfs) and is registered
+    # for cleanup on every exit path (the old `rm -f` ran only after the dd).
+    local bootp_dir; bootp_dir="$(dirname "${img}")"
+    assert_free_space "${bootp_dir}" "$(( BOOT_MB * 1024 * 1024 ))" "boot partition image"
+    local bootp; bootp="$(mktemp "${bootp_dir}/.bootp.XXXXXX")"
+    register_scratch "${bootp}"
     truncate -s "${BOOT_MB}M" "${bootp}"
     mkfs.vfat -n BOOT "${bootp}" >/dev/null
     populate_boot_partition "${bootp}" "${adapter}" "${board_id}" "${single_slot}"
     dd if="${bootp}" of="${img}" bs=1M seek="${GAP_MB}" conv=notrunc status=none
-    rm -f "${bootp}"
+    discard_scratch "${bootp}"
   fi
 
   # 4. Write the family-gated bootloader into the 16 MB raw gap (real image only;
@@ -357,7 +429,7 @@ build_disk() {
     write_gap_bootloader "${img}" "${adapter}" "${board_id}" "${bsp_dir}"
   fi
 
-  rm -rf "${defs}"
+  discard_scratch "${defs}"
   log_success "assembled ${img}"
 }
 
@@ -368,6 +440,7 @@ build_disk() {
 # ---------------------------------------------------------------------------
 verify_contract() {
   local tmp; tmp="$(mktemp -d)"
+  register_scratch "${tmp}"
   local ab="${tmp}/ab.img" ss="${tmp}/singleslot.img"
 
   echo "=============================================================="
@@ -412,7 +485,7 @@ verify_contract() {
   do_verify "${ss}"
   echo
 
-  rm -rf "${tmp}"
+  discard_scratch "${tmp}"
   echo "=============================================================="
   log_success "ALL contract assertions passed (A/B + single-slot)"
   echo "=============================================================="

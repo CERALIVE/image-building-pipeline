@@ -54,11 +54,13 @@ image-building-pipeline/
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack as-is + the advisory check `v2/lib/check-wwan-modules.sh` |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
+| **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
 | Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats` and `v2/tests/rk3588-ab-contract.bats` via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
+| **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`v2/docs/X86-MINIPC-BRINGUP.md`](v2/docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
 | Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
@@ -133,7 +135,13 @@ starts/sizes or labels, a missing idblock or second-stage FIT, external FIT payl
 whose declared extents exceed the image/8 MiB budget or whose SHA-256 nodes mismatch,
 malformed compiled boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
 state, incompatible/invalid signed bundles, and a destination smaller than the raw
-image. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
+image. Its `check_rootfs_populated` resolves the real Armbian kernel-package `/boot`
+layout — `/boot/Image` is a symlink to `vmlinuz-<ver>` and only the versioned
+`/boot/initrd.img-<ver>` exists (no bare `/boot/initrd.img`). `debugfs dump -p` does
+NOT dereference a symlink that is the FINAL path component (it writes the link
+target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
+follows a terminal-component symlink to the versioned target, and globs the versioned
+initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and—when CI sets
 `CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
 and cleanup harness. The harness uses RAUC's supported boot-slot override for
@@ -351,6 +359,36 @@ same-version content replacement observable:
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
+**RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
+
+The RK3588 GPU/video **userspace** (Mali-G610 blob, Rockchip MPP encode/decode lib,
+RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev config) is NOT
+in the Armbian bookworm arm64 feed, so it is baked from **exact upstream release-asset
+URLs verified by SHA-256** — the same fail-closed, no-fallback discipline as the BSP
+fetch, but URL-pinned (a pinned URL + SHA-256 needs no rotating apt index or GPG trust
+root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` register —
+proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
+
+- **Pin file:** `v2/manifests/rk3588-userspace-deb-versions.txt` — one record per
+  package (`package  filename  sha256  url`). Six packages:
+  `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 (firmware_packages),
+  `gstreamer1.0-rockchip1` 1.14-4 (hw_accel_gstreamer_plugins), and
+  `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
+  / `librockchip-mpp-dev` 1.5.0-1 (gstreamer_runtime_packages). Sources: tsukumijima
+  (`mpp-rockchip`, `rockchip-multimedia-config`, `libmali-rockchip`) + radxa
+  `rk3588s2-bookworm` (the gst plugin + its ABI-paired RGA; tsukumijima ships no
+  gst-rockchip mirror).
+- **Fetcher:** `fetch_rk3588_userspace` in `v2/lib/fetch-debs.sh` stages only the
+  pinned packages the resolved family declares (intersection of
+  `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
+  this set from the Armbian fetch. An x86 family declares none. DRY_RUN logs the exact
+  URLs + hashes and downloads nothing.
+- **DO NOT** convert any of these into a `deb [signed-by=...] https://...` apt line —
+  that is a new live trust root, exactly what the pinned-URL + SHA-256 approach avoids.
+  **DO NOT** bump a pinned VERSION without re-proving HW encode (the versions are
+  empirically proven). See `v2/docs/kernel-currency-watch.md` and
+  `v2/docs/cog-display-addon.md`.
+
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
 Don't hardcode versions in the script.
@@ -436,6 +474,59 @@ creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
 
+**RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
+device — else OTA is 100% broken** [EXISTS]
+
+The device runs Debian bookworm's `rauc 1.8-2`. `rauc install` (the config-driven
+path `ceralive-update` / CeraUI `system.startUpdate()` actually use) failed on real
+Rock 5B+ hardware in three stacked ways, all fixed here. A REAL, complete,
+end-to-end OTA install with all three fixes combined has now been PROVEN on
+physical Rock 5B+ hardware: signature verified, manifest checked, slot B was
+written, the bootloader switched to it, and the new slot rebooted healthy.
+
+- **Signing leaf EKU.** RAUC's `check-purpose=codesign` / X.509 key-usage support
+  landed in **rauc 1.9** (March 2023); 1.8 predates it entirely — its
+  `-C`/`--confopt` CLI flag does not exist and a `[keyring] check-purpose=codesign`
+  line in `system.conf` is ignored. So 1.8's `CMS_verify()` falls back to OpenSSL's
+  default `smime_sign` purpose, which rejects a **codeSigning-only** leaf with
+  `Verify error: unsuitable certificate purpose`. The dev/CI leaf
+  (`v2/tests/generate-dev-rauc-pki.sh`) now carries a **dual EKU**
+  `emailProtection,codeSigning`: `emailProtection` satisfies 1.8's unconfigured
+  `smime_sign` default (install succeeds), `codeSigning` keeps forward-compat with a
+  future rauc ≥1.9 `check-purpose=codesign` upgrade (and the modern CI/local `rauc`
+  1.15.2 strict path). CA certs (root/intermediate) intentionally carry NO EKU per
+  RAUC's own docs — do not add one. The build-time self-check in
+  `build-bundle.sh::verify_openssl_bundle()` was `openssl cms -verify -purpose any`
+  (accepts anything) — materially weaker than the device, which is why the bug
+  shipped silently; it is now `-purpose smimesign`, reproducing rauc 1.8's default
+  purpose (same OpenSSL error) so a single-purpose leaf fails at build time.
+  Structural guards: `generate-dev-rauc-pki.sh`'s `validate_fixture()` asserts the
+  leaf carries both EKUs, and `verify_openssl_bundle()` now fails a single-purpose
+  leaf.
+- **`unsquashfs` runtime gap.** Even with a verified signature, `rauc info`/`install`
+  next fails `Failed to start unsquashfs: ... No such file or directory` — `rauc`
+  shells out to `unsquashfs` to extract the plain-format bundle manifest. Build-time
+  `mksquashfs` runs on the HOST/CI, so this runtime-only gap was invisible.
+  `squashfs-tools` is now in `shared.list` (standard bookworm `main` — no new trust
+  source). Guard: `manifest.bats` "squashfs-tools is installed so rauc can unsquashfs
+  bundles".
+- **`mkfs.ext4` runtime gap.** After signature and manifest checks pass, RAUC's
+  slot-write phase shells out to `/sbin/mkfs.ext4` from `e2fsprogs` to format the
+  target ext4 slot before copying in the new rootfs image. Without it, the real
+  Rock 5B+ install reported exactly: `LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)`. Build-time tooling never needed
+  `mkfs.ext4`, so this runtime-only gap was invisible. Adding `e2fsprogs` made the
+  REAL end-to-end install complete successfully, activate slot B, and boot the
+  fresh slot healthy; guard: `manifest.bats` "e2fsprogs is installed so rauc can
+  format ext4 slots".
+
+**PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
+touched here.** `/mnt/development/ceralive/cert-work/rauc/gen-certs.sh` generates the
+production leaf with the same `extendedKeyUsage = codeSigning` only — so it has the
+identical RAUC 1.8 defect. It is live security key material (private keys included)
+and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` — out
+of scope for this fix. Flagged for the orchestrator/user to action separately before
+production OTA can work on a 1.8 device.
+
 **Image size gate — BLOCKING at 1.5 GB** [EXISTS]
 
 `v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds
@@ -458,6 +549,59 @@ stopped OR not-installed unit reads `inactive` and never blocks). The list
 mid-broadcast through the bonding sender could be updated out from under the
 stream; the guard now checks `srtla-send.service` too. Don't drop the receiver
 check: a single image runs either role. Proof: `v2/run-tests` section 16.
+
+**`/data` migration MUST seed the `public` frontend symlink — else `/` 404s** [EXISTS]
+
+`postinst-lib.sh::setup_data_persistence` generates `ceralive-migrate-data`, whose
+first-boot seeding loop copies the CeraUI working dir (`/opt/ceralive`) onto
+`/data/ceralive` BEFORE the `/data/ceralive:/opt/ceralive` bind mount shadows it.
+The CeraUI `.deb` ships the frontend static tree at `/var/www/ceralive` and an
+ABSOLUTE symlink `/opt/ceralive/public -> /var/www/ceralive`
+(`CeraUI` `build-debian-package.sh`). The loop MUST seed `public` alongside
+`*.json`/`revision`: once the bind mount activates, `/opt/ceralive/public` is the
+`/data/ceralive/public` entry, so if `/data` never got one the symlink is gone and
+CeraUI serves the frontend from a missing dir — `curl http://<device>/` returns 404
+while `/status` stays healthy (confirmed on real hardware). `cp -a` copies the
+symlink ITSELF (never the `/var/www` asset tree — those stay on the rootfs so
+image/OTA updates keep tracking); the loop's `[ -L ]` guards keep it symlink-aware
+(a target-absent link isn't skipped as a source, an existing `/data` entry isn't
+clobbered on a re-run / A-B swap). Because the link is absolute and `/opt/ceralive`
+and `/data/ceralive` sit at the same depth, it resolves identically post-bind. This
+is DISTINCT from the systemd ordering-cycle fixes — a content bug the graph check
+cannot see. Offline guard: `v2/tests/data-persistence-public-symlink.test.sh`
+(static contract on the seeding block + a runtime reproduction that seeds a
+synthetic tree and proves the symlink is preserved, resolves after the bind mount,
+is idempotent, and never clobbers an existing entry). Wired into `v2/run-tests`.
+
+**`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is
+totally dead** [EXISTS]
+
+`postinst-lib.sh::configure_networking` writes
+`/etc/NetworkManager/conf.d/ceralive.conf` with `dns=systemd-resolved`, so
+NetworkManager DELEGATES DNS to systemd-resolved (forwards the DHCP-received
+servers over D-Bus, never writing `/etc/resolv.conf` itself). systemd-resolved
+only manages `/etc/resolv.conf` when that path IS the symlink to its stub
+`/run/systemd/resolve/stub-resolv.conf`; on a plain regular file it reports
+`resolv.conf mode: foreign` and stands down (its designed safety behavior). This
+minimal mkosi rootfs never ran systemd-resolved's postinst trigger /
+`dpkg-reconfigure`, so it ships `/etc/resolv.conf` as an empty 0-byte REGULAR
+file — with delegation on and resolved refusing a foreign file, NOTHING ever
+populates it and every glibc/`getent`/`curl` lookup fails with zero working DNS
+despite a valid IP, gateway, and DHCP-supplied server (confirmed live on
+hardware: `resolvectl status` shows the server + `mode: foreign`, `getent hosts
+www.google.com` exits 2, and CeraUI logs constant `DNS timeout for
+wellknown.belabox.net` / `Failed to resolve www.gstatic.com` health-check
+failures). `configure_networking` now runs `ln -sf
+/run/systemd/resolve/stub-resolv.conf /etc/resolv.conf` right after the
+`dns=systemd-resolved` drop-in (same delegation contract); `-sf` is
+force+idempotent, so it fixes the empty file, a stale link, or an
+already-correct link, safe on every build and A/B slot swap. This is a content
+bug the `systemd-ordering-cycle` graph check cannot see. Offline guard:
+`v2/tests/resolv-conf-symlink.test.sh` (static contract on the
+`configure_networking()` body + a rootless-namespace runtime reproduction that
+seeds the exact 0-byte-regular-file bug state, runs the real function, and proves
+the result is the stub symlink — resolves through it, is idempotent, and
+force-replaces a stale link). Wired into `v2/run-tests`.
 
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
@@ -494,6 +638,80 @@ backend runtime env so the device can VERIFY device-control / relay-config token
   32-byte public key AND that `setup_paseto_public_key` bakes the build input into the
   drop-in with zero drift (reading PUBLIC files only; never the `k4.secret`).
   `--self-test` (ephemeral keypair, no secrets) is the `v2/run-tests` section-21 gate.
+
+**avahi-daemon restart hardening — else a single mDNS crash kills `<hostname>.local`
+until reboot** [EXISTS]
+
+Stock Debian's `avahi-daemon.service` ships **NO `Restart=` directive**, so ANY
+signal or crash leaves `avahi-daemon` — and therefore `<hostname>.local` mDNS —
+permanently dead until the next reboot. Confirmed live on real hardware
+(`journalctl -u avahi-daemon`): the daemon was killed by SIGUSR2 (`Main process
+exited, code=killed, status=12/USR2` → `Failed with result 'signal'`), and
+`systemctl show avahi-daemon -p NRestarts` read `NRestarts=0` — no restart policy
+was active. Operators reach the device by `<hostname>.local` (`docs/FIRST-BOOT.md`
++ the deterministic first-boot unique-hostname service), so mDNS staying up is a
+device-reliability requirement. `setup_avahi_restart` (in `customize/postinst-lib.sh`,
+called from the runtime `mkosi.postinst.chroot`) bakes an ADDITIVE drop-in
+`/etc/systemd/system/avahi-daemon.service.d/10-ceralive-restart.conf` with
+`Restart=on-failure` + `RestartSec=2`, installed from the committed standalone
+artifact `v2/mkosi/runtime/avahi-daemon-restart.dropin.conf` (the SAME
+standalone-artifact + `postinst-lib.sh` setup-function idiom as the nginx TLS
+drop-in, never inlined in `mkosi.postinst.chroot` per the drift-gate ceiling).
+`on-failure` (not `always`) so a deliberate `systemctl stop` still stops it. This
+is the systemd-level **defense-in-depth** layer only — the signal SOURCE (a CeraUI
+udev rule's overly-broad `pkill -f ceralive` catching avahi-daemon) is the
+ROOT-CAUSE fix, handled separately in the CeraUI repo. Guard: `manifest.bats`
+"avahi restart: an additive Restart=on-failure drop-in is baked …" (+ fail-closed
++ executor-wiring cases).
+
+**`net-tools` in `shared.list` — else the CeraUI Network destination is TOTALLY
+empty** [EXISTS]
+
+CeraUI's backend (`ceralive.service`) shells out to the legacy `ifconfig` binary
+every ~5s (`apps/backend/src/modules/network/network-interfaces.ts`
+`run("ifconfig", [])`) to build the `netif` broadcast
+(WiFi/Ethernet/cellular/bonded-link status shown on the Network destination). This
+minimal Debian bookworm image ships only modern `iproute2`, NOT `net-tools`, so
+every poll tick failed since boot (`{"level":"error","msg":"Error getting ifconfig:
+Executable not found in $PATH: \"ifconfig\""}`, confirmed live on real Rock 5B+
+hardware). That is the root cause of the Network destination rendering completely
+empty ("No WiFi interfaces found", "No wired interfaces found", "No SIM cards
+detected", "No active links yet") AND the missing Ethernet row in "Bonded Links"
+(`BondedLinksSection.svelte` renders an `ethernet`-typed link fine — its input array
+is just empty upstream) despite a live, connected Ethernet + WiFi. The fix is one
+line — `net-tools` in `v2/manifests/packages/shared.list` (next to `iproute2`,
+arch-independent, every board), NOT a rewrite of `network-interfaces.ts` onto `ip`:
+CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
+(`MONITOR-NOTES.md`, `netif-migration`/`netif-same-subnet` tests, `mocks/providers/
+network.ts`), so swapping binaries is a large unrelated risk — adding the one legacy
+binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
+installed …" + "… reaches the resolved runtime package set …".
+
+**`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
+`Requires=`)** [EXISTS]
+
+`ceralive.service`'s boot step `initPipelines()` connects to cerastream's control
+socket **exactly once**, so if cerastream isn't up yet the connection fails
+permanently for that boot. Confirmed live: `cerastream.service` started ~2 minutes
+AFTER `ceralive.service` in one boot instance, and `systemctl show ceralive -p
+After` had NO mention of `cerastream.service`. `setup_cerastream_ordering` (in
+`customize/postinst-lib.sh`, called from the runtime `mkosi.postinst.chroot`) bakes
+an ADDITIVE drop-in
+`/etc/systemd/system/ceralive.service.d/30-cerastream-ordering.conf` with
+`After=cerastream.service`, installed from the committed standalone artifact
+`v2/mkosi/runtime/ceralive-cerastream-ordering.dropin.conf` (the SAME
+standalone-artifact + `postinst-lib.sh` setup-function idiom as the avahi/TLS
+drop-ins; additive to the `ceralive.service` unit shipped by the CeraUI `.deb`, like
+`10-data-persistence.conf` / `20-paseto-public-key.conf`). **ORDERING-ONLY — never
+`Requires=`**: `ceralive.service` MUST still boot and serve its "engine unavailable"
+degraded state (CeraUI `helpers/boot-guard.ts::guardNonCritical` fail-soft boot
+design) if cerastream is ever genuinely absent/masked, and `After=` on an
+out-of-transaction unit is a harmless no-op. This is the systemd-level ordering half
+only — a CeraUI-side retry/resilience fix for the one-shot connect lands separately
+in that repo. Guards: `manifest.bats` "cerastream ordering: an additive
+After=cerastream.service drop-in is baked …" + "… is ordering-ONLY (no
+Requires=/Requisite=/BindsTo= hard dependency)" (+ fail-closed + executor-wiring
+cases).
 
 **Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
 
@@ -620,6 +838,49 @@ For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
 
+**`Before=ssh.socket` guards MUST be `DefaultDependencies=no` AND
+`After=sysinit.target`.** Both `ceralive-ssh-firstboot.service` and
+`ceralive-ci-uart-bootstrap.service` are `Before=ssh.socket`. `ssh.socket` is
+ordered `Before=sockets.target` (early boot, before `basic.target`), so a guard
+that inherits the implicit `After=basic.target` closes an `ssh.socket → guard →
+basic.target → sockets.target → ssh.socket` ordering cycle — systemd deletes
+`ssh.socket`'s start job and SSH never starts, on every boot (proof-10 UART boot
+log, 2026-07-15). `DefaultDependencies=no` breaks that, but it ALSO drops the
+implicit `After=sysinit.target`; proof-11 (2026-07-15) then showed
+`ceralive-ssh-firstboot` racing ahead of `systemd-sysusers`/`systemd-tmpfiles`/
+udev and FAILING under `set -euo pipefail` (host-key gen, authorized-key chowns,
+`sshd -t`), taking ssh.service/ssh.socket down with "Dependency failed" — with
+**zero** ordering cycles. So each guard must ALSO re-add `After=sysinit.target`
+explicitly (the SAFE half of the default deps; `sysinit.target` is ordered before
+`sockets.target`, so it never re-closes the ssh.socket loop). NEVER re-add
+`After=basic.target`. The same cycle trap (but NOT the sysinit issue) hit
+`ceralive-migrate-data.service`, which seeds the `/data` skeleton the
+`/var/log`+`/opt/ceralive` bind mounts shadow: it must be `Before=local-fs.target`
+(never `After=`) with `DefaultDependencies=no`, and must NOT gain
+`After=sysinit.target` (sysinit.target is After=local-fs.target — that would
+cycle); it runs as root against `/data`+rootfs only, so it needs no sysinit-phase
+ordering. `ConditionKernelCommandLine`/`ConditionPathExists` do NOT remove a
+unit's ordering edges — systemd wires them at transaction-build time regardless of
+the condition. Offline guard: `v2/tests/systemd-ordering-cycle.test.sh` — static
+contract + `systemd-analyze verify` for zero cycles AND an ordering probe that
+proves each guard is transitively after `systemd-sysusers`/`systemd-tmpfiles`
+(a cycle-only check would miss the proof-11 gap). Wired into `v2/run-tests`.
+
+**`ceralive-ssh-firstboot.sh` MUST create `/run/sshd` before its `sshd -t`.** The
+guard's last step validates the sshd config with `sshd -t`, which refuses to run
+without the privilege-separation dir `/run/sshd` (`Missing privilege separation
+directory: /run/sshd`, exit 255). On a fresh boot that dir does not exist yet:
+nothing ships a `tmpfiles.d` entry for it, and its only creator is `ssh.service`'s
+`RuntimeDirectory=sshd` — which runs AFTER this `Before=ssh.service` guard. Without
+pre-creating it, `sshd -t` exits 255, `set -euo pipefail` fails the unit, and both
+`ssh.service` (LAN sshd on :22) and `ssh.socket` DEPEND-fail via `RequiredBy=`,
+closing port 22 on EVERY boot with **zero** ordering cycles and an otherwise-healthy
+system (proof-13 real-HW UART, 2026-07-16). This is a runtime script failure, NOT a
+dependency-graph defect — `systemd-ordering-cycle.test.sh` cannot see it. The
+dedicated offline guard is `v2/tests/ssh-firstboot-privsep.test.sh` (static: the
+`/run/sshd` creation precedes `sshd -t`; runtime: the real script survives an
+empty-`/run` first boot in a rootless namespace). Wired into `v2/run-tests`.
+
 **Build concurrency** [EXISTS]
 
 The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
@@ -662,6 +923,21 @@ credentials with no screen or keyboard. Standalone artifacts under
   (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
   requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
   validated on hardware, hence `[PARTIAL]`.
+- **Regulatory DB (`wireless-regdb`) is an EXPLICIT `shared.list` entry.** WiFi in
+  ANY mode (client or the AP above) needs `/lib/firmware/regulatory.db` (+ `.p7s`),
+  which the kernel `cfg80211` subsystem loads at boot to establish a usable
+  regulatory domain. It ships in Debian's `wireless-regdb` package — the Linux
+  wireless project's regulatory database, NOT chip firmware, so it is **not** part
+  of the RK3588 `armbian-firmware` bundle (unlike `rtl8852be-firmware`; see
+  `rk3588.delta.list`). It is only `wpasupplicant`'s `Recommends:`, so the runtime
+  layer's `apt-get install --no-install-recommends` (runtime/mkosi.postinst.chroot)
+  never pulls it transitively — it MUST be named in `shared.list` explicitly. Absent
+  it, every boot logs `platform regulatory.0: Direct firmware load for regulatory.db
+  failed with error -2` / `cfg80211: failed to load regulatory.db` and NetworkManager
+  reports "No WiFi interfaces found" even with a working driver (real-HW UART,
+  2026-07-16; the RTL8852BE `rtw89_8852be` chip enumerates + trains PCIe fine — the
+  missing DB is a distinct gap). Guard: `manifest.bats` "wireless-regdb is installed
+  so cfg80211 loads regulatory.db".
 - **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
   CeraUI backend (`ceralive.service`) to free port 80 and starts
   `ceralive-portal.socket` — a systemd socket-activated (`Accept=yes`) **bash** HTTP
@@ -741,10 +1017,13 @@ The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but 
 **Cog display add-on (W4):** Cog + WPEWebKit is validated as a lighter alternative
 display engine, packaged as a feature sysext add-on. Acquisition path: plain `apt`
 from bookworm `main` (`cog` 0.16.1, `libwpewebkit-1.1-0` 2.38.6). The Mali-G610
-GPU userspace (`libmali-valhall-g610-*`) is Platform-layer and excluded from the
-sysext by contract. Full recipe: [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md).
+GPU userspace (`libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1) is now **baked into
+the base image** (Platform layer) via `firmware_packages` + the pinned userspace file
+(see the "RK3588 HW-accel userspace" KEY FACT); it stays **excluded from the sysext**
+by contract. Full recipe: [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md).
 **Hardware-gated:** `cog.sysext.conf` wired into the build only after RK3588 render
-QA passes (same gate as Tasks 26/27/28).
+QA passes (same gate as Tasks 26/27/28) — on-hardware Mali EGL/GBM render is the
+gated item, not the package availability.
 
 **Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-blocked** — no RK3588 board is reachable from the dev environment (Task 1 spike: NO-GO). The architecture is fully specced; implementation waits for hardware access.
 
@@ -770,6 +1049,26 @@ QA passes (same gate as Tasks 26/27/28).
 ## KNOWN ISSUES / DEFERRED
 
 Full index with file:line anchors and unblock conditions: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md).
+
+**RK3588 predictable names — the subimage env-propagation contract.** The
+deterministic `eth0/eth1/wlan0` renames (`install_interface_naming()` in
+`postinst-lib.sh`, run from the runtime `mkosi.postinst.chroot`) and the add-on
+signing keyring (`setup_addon_keyring()`) run inside a SUBIMAGE chroot. Their
+inputs — `CERALIVE_INTERFACES_eth0/eth1/wlan0`, `ADDON_KEYRING_B64` — reach that
+chroot ONLY through `PassEnvironment=` in `mkosi/mkosi.conf`. `orchestrate.sh`
+exporting a name and listing it in `run_mkosi_build()`'s `env_names` is NOT
+enough: mkosi's `--environment` populates the TOP-LEVEL image's script env only,
+and the base/platform/runtime/app subimages each parse config in isolation. A
+name present in `env_names` but MISSING from `PassEnvironment=` reads EMPTY in
+every subimage — silently. That exact drift shipped two production bugs (eth0/eth1
+never renamed → dropped from SRTLA's `eth*`/`wlan*` bonding globs, confirmed on
+Rock 5B+ hardware; and an empty add-on keyring → all add-on signatures rejected).
+`PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
+`manifest.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
+fails the build if a future `env_names` addition skips `PassEnvironment=`).
+`SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_V2_DIR` (forwarded via
+a separate `-e`/`--environment` mechanism) are the two documented legitimate
+asymmetries.
 
 **OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
 ships the `interfaces:` block with `FIXME-…` values because the board is not in

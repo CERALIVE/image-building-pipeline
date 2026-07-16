@@ -83,6 +83,10 @@ ARMBIAN_APT_KEY_FINGERPRINTS=(
 )
 BSP_DEB_VERSIONS_FILE="${BSP_DEB_VERSIONS_FILE:-${HERE}/../manifests/armbian-bsp-deb-versions.txt}"
 FIRST_PARTY_DEB_VERSIONS_FILE="${FIRST_PARTY_DEB_VERSIONS_FILE:-${HERE}/../manifests/first-party-deb-versions.txt}"
+# RK3588 HW-accel userspace (Mali blob, MPP, RGA, gst-rockchip, multimedia-config)
+# is NOT in the Armbian pool; it is pinned to exact upstream release-asset URLs and
+# verified by SHA-256. package<TAB-or-space>filename<...>sha256<...>url per line.
+RK3588_USERSPACE_DEB_VERSIONS_FILE="${RK3588_USERSPACE_DEB_VERSIONS_FILE:-${HERE}/../manifests/rk3588-userspace-deb-versions.txt}"
 
 # First-party apt source (apt.ceralive.tv). The deb822 source appends
 # /dists/${CHANNEL}/ (apt-worker two-axis layout: channel x arch; arch is selected
@@ -167,6 +171,7 @@ _FIRST_PARTY_DEBS=""
 _FIRST_PARTY_INDEX=""
 _FIRST_PARTY_BASE_URL=""
 _FIRST_PARTY_CURL_AUTH=()
+_RK3588_USERSPACE_DEBS=""
 
 publish_staged_deb() {
   local source="$1" destination="$2"
@@ -691,6 +696,172 @@ _fetch_first_party_curl() {
 }
 
 # ---------------------------------------------------------------------------
+# collect_declared_bsp_pkgs <family> — echo the deduped, order-preserving set of
+# BSP-class package NAMES this build declares: the family manifest's
+# kernel/dtb/uboot/firmware/hw-accel-gstreamer/gstreamer-runtime lists UNIONED with
+# the same-named board override env vars (resolve.py flattens board-over-family into
+# ${*_PACKAGES}; board arrays REPLACE family arrays on merge, so the env value is
+# authoritative and the union+dedup collapses the family duplicate). One name per
+# line. Single source of truth for "what packages does this build declare",
+# consumed by BOTH fetch_bsp (the Armbian set, minus userspace pins) and
+# fetch_rk3588_userspace (the pinned-URL subset).
+# ---------------------------------------------------------------------------
+collect_declared_bsp_pkgs() {
+  local family="$1"
+  local -a pkgs=()
+  local field item pkg
+  local fields=(
+    kernel_packages
+    dtb_packages
+    uboot_packages
+    firmware_packages
+    hw_accel_gstreamer_plugins
+    gstreamer_runtime_packages
+  )
+  for field in "${fields[@]}"; do
+    while IFS= read -r item; do
+      [[ -n "${item}" ]] && pkgs+=("${item}")
+    done < <(read_yaml_list "${field}" "${family}")
+  done
+  for pkg in ${UBOOT_PACKAGES:-} ${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} \
+             ${FIRMWARE_PACKAGES:-} ${HW_ACCEL_GSTREAMER_PLUGINS:-} \
+             ${GSTREAMER_RUNTIME_PACKAGES:-}; do
+    [[ -n "${pkg}" ]] && pkgs+=("${pkg}")
+  done
+  local -a deduped=()
+  local seen="|" p
+  for p in "${pkgs[@]}"; do
+    [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
+  done
+  (( ${#deduped[@]} > 0 )) && printf '%s\n' "${deduped[@]}"
+  return 0
+}
+
+# rk3588_userspace_pkg_names — echo every pinned userspace package NAME (col 1)
+# from the pin file. Empty (success) when the file is absent — a family that
+# declares no RK3588 userspace package simply matches none of these.
+rk3588_userspace_pkg_names() {
+  [[ -f "${RK3588_USERSPACE_DEB_VERSIONS_FILE}" ]] || return 0
+  awk 'NF && $1 !~ /^#/ { print $1 }' "${RK3588_USERSPACE_DEB_VERSIONS_FILE}"
+}
+
+# rk3588_userspace_record <pkg> — echo the pin record for <pkg> as
+# filename<TAB>sha256<TAB>url, or empty if <pkg> is unpinned.
+rk3588_userspace_record() {
+  local pkg="$1"
+  [[ -f "${RK3588_USERSPACE_DEB_VERSIONS_FILE}" ]] || return 0
+  awk -v pkg="${pkg}" 'NF && $1 !~ /^#/ && $1==pkg { print $2 "\t" $3 "\t" $4; exit }' \
+    "${RK3588_USERSPACE_DEB_VERSIONS_FILE}"
+}
+
+# _fetch_rk3588_userspace_one — bounded-pool worker: download ONE pinned userspace
+# .deb by its exact URL into a private .tmp-* file, verify its SHA-256 and Debian
+# control identity (package name + architecture), then atomically rename into
+# ${_RK3588_USERSPACE_DEBS}. A killed curl leaves only the .tmp-* partial, never a
+# half-written final .deb. Fail-closed, no-fallback — no alternate mirror or version.
+_fetch_rk3588_userspace_one() {
+  local pkg="$1" record filename sha256 url
+  record="$(rk3588_userspace_record "${pkg}")"
+  [[ -n "${record}" ]] \
+    || die "RK3588 userspace package '${pkg}' has no pin in ${RK3588_USERSPACE_DEB_VERSIONS_FILE}"
+  IFS=$'\t' read -r filename sha256 url <<<"${record}"
+  [[ -n "${filename}" && -n "${sha256}" && -n "${url}" ]] \
+    || die "RK3588 userspace pin for '${pkg}' is incomplete (need filename/sha256/url): ${record}"
+  [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "RK3588 userspace pin for '${pkg}' has a malformed SHA-256: ${sha256}"
+
+  log_info "RK3588 userspace fetch: ${pkg} (${filename}) sha256=${sha256} <- ${url}"
+  if [[ -n "${DRY_RUN}" ]]; then
+    run_or_plan curl -fsSL --retry 3 -o "${_RK3588_USERSPACE_DEBS}/${filename}" "${url}"
+    return 0
+  fi
+
+  local final tmp actual_sha actual_pkg actual_arch
+  final="${_RK3588_USERSPACE_DEBS}/${filename}"
+  tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"
+  if ! curl -fsSL --retry 3 -o "${tmp}" "${url}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  actual_sha="$(sha256sum "${tmp}" | awk '{print $1}')"
+  if [[ "${actual_sha}" != "${sha256}" ]]; then
+    log_error "RK3588 userspace checksum mismatch for ${pkg}: expected ${sha256}, got ${actual_sha}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  actual_pkg="$(deb_pkg_name "${tmp}")"
+  actual_arch="$(deb_pkg_arch "${tmp}")"
+  if [[ "${actual_pkg}" != "${pkg}" \
+      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+    log_error "RK3588 userspace control mismatch for ${pkg}: package=${actual_pkg:-<missing>} architecture=${actual_arch:-<missing>} (expected ${pkg}, arch ${ARCH}|all)"
+    rm -f "${tmp}"
+    return 1
+  fi
+  if ! publish_staged_deb "${tmp}" "${final}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# fetch_rk3588_userspace — stage the RK3588 HW-accel userspace .debs (Mali-G610
+# GPU blob, Rockchip MPP encode/decode lib, RGA 2D accelerator, the GStreamer MPP
+# plugin, and the multimedia udev config) that the Armbian bookworm arm64 feed
+# does NOT carry. Each is pinned to an exact upstream release-asset URL and
+# verified by SHA-256 (manifests/rk3588-userspace-deb-versions.txt) — the SAME
+# fail-closed, no-fallback discipline as fetch_bsp, but URL-pinned: a pinned URL +
+# SHA-256 needs no rotating apt index or GPG trust root, so these packages never
+# require a live apt source.
+#
+# Only the pinned packages the RESOLVED family actually declares are fetched — the
+# intersection of collect_declared_bsp_pkgs (manifest fields + board env overrides)
+# and the pin file's package names. An x86 family declares none, so nothing is
+# fetched. fetch_bsp EXCLUDES exactly this set from the Armbian fetch.
+# ---------------------------------------------------------------------------
+fetch_rk3588_userspace() {
+  local family="$1" debs="$2"
+  [[ -n "${family}" ]] || die "fetch_rk3588_userspace: --family manifest required"
+  [[ -f "${family}" ]] || die "fetch_rk3588_userspace: family manifest not found: ${family}"
+
+  local -A pinned=()
+  local name
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] && pinned["${name}"]=1
+  done < <(rk3588_userspace_pkg_names)
+
+  local -a want=()
+  while IFS= read -r name; do
+    [[ -n "${name}" && -n "${pinned[${name}]:-}" ]] && want+=("${name}")
+  done < <(collect_declared_bsp_pkgs "${family}")
+
+  if (( ${#want[@]} == 0 )); then
+    log_info "RK3588 userspace: $(basename "${family}") declares no pinned userspace package — nothing to fetch"
+    return 0
+  fi
+
+  log_info "RK3588 userspace set from $(basename "${family}") (${#want[@]} pkgs): ${want[*]}"
+  log_info "RK3588 userspace pins: ${RK3588_USERSPACE_DEB_VERSIONS_FILE}"
+
+  _RK3588_USERSPACE_DEBS="${debs}"
+  local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
+  _run_bounded "${jobs}" _fetch_rk3588_userspace_one "${want[@]}" \
+    || die "RK3588 userspace fetch failed: one or more pinned packages did not download/verify"
+
+  if [[ -z "${DRY_RUN}" ]]; then
+    local pkg
+    local -a staged=()
+    for pkg in "${want[@]}"; do
+      shopt -s nullglob
+      staged=("${debs}/${pkg}"_*.deb)
+      shopt -u nullglob
+      (( ${#staged[@]} >= 1 )) \
+        || die "RK3588 userspace fetch staged no .deb for '${pkg}'"
+    done
+    log_success "RK3588 userspace: staged ${#want[@]} SHA-256-verified pinned .deb(s) into ${debs}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # fetch_bsp — read BSP package names from the resolved family manifest, bind each
 # to its reviewed exact version, and pull it from the Armbian apt pool into
 # $DEST/debs/. Decision D3's vendor branch remains encoded in the package name.
@@ -703,41 +874,28 @@ fetch_bsp() {
   [[ -n "${family}" ]] || die "fetch_bsp: --family manifest required for BSP packages"
   [[ -f "${family}" ]] || die "fetch_bsp: family manifest not found: ${family}"
 
-  local fields=(
-    kernel_packages
-    dtb_packages
-    uboot_packages
-    firmware_packages
-    hw_accel_gstreamer_plugins
-    gstreamer_runtime_packages
-  )
-
-  local -a bsp_pkgs=()
-  local field item
-  for field in "${fields[@]}"; do
-    while IFS= read -r item; do
-      [[ -n "${item}" ]] && bsp_pkgs+=("${item}")
-    done < <(read_yaml_list "${field}" "${family}")
-  done
-
-  # Board manifests override family-level package arrays via env vars resolved
-  # by resolve.py (orchestrate.sh exports them before calling fetch-debs.sh).
-  # e.g. UBOOT_PACKAGES=linux-u-boot-rock-5b-plus-vendor from rock-5b-plus.yaml.
-  for pkg in ${UBOOT_PACKAGES:-} ${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} \
-             ${FIRMWARE_PACKAGES:-} ${HW_ACCEL_GSTREAMER_PLUGINS:-} \
-             ${GSTREAMER_RUNTIME_PACKAGES:-}; do
-    [[ -n "${pkg}" ]] && bsp_pkgs+=("${pkg}")
-  done
-  # Deduplicate while preserving order
-  local -a deduped=()
-  local seen="|" p
-  for p in "${bsp_pkgs[@]}"; do
-    [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
-  done
-  bsp_pkgs=("${deduped[@]}")
-
-  if (( ${#bsp_pkgs[@]} == 0 )); then
+  local -a declared=()
+  mapfile -t declared < <(collect_declared_bsp_pkgs "${family}")
+  if (( ${#declared[@]} == 0 )); then
     die "fetch_bsp: no BSP packages found in ${family} or env (expected kernel/dtb/uboot/firmware names)"
+  fi
+
+  # RK3588 HW-accel userspace packages (Mali blob, MPP, RGA, gst-rockchip,
+  # multimedia-config) are NOT in the Armbian pool — fetch_rk3588_userspace stages
+  # them from SHA-256-verified pinned URLs. Exclude them here so bsp_download_specs
+  # never tries to resolve an Armbian version for a package Armbian does not carry.
+  local -A _userspace=()
+  local uname
+  while IFS= read -r uname; do
+    [[ -n "${uname}" ]] && _userspace["${uname}"]=1
+  done < <(rk3588_userspace_pkg_names)
+  local -a bsp_pkgs=()
+  local bp
+  for bp in "${declared[@]}"; do
+    [[ -n "${_userspace[${bp}]:-}" ]] || bsp_pkgs+=("${bp}")
+  done
+  if (( ${#bsp_pkgs[@]} == 0 )); then
+    die "fetch_bsp: every declared package in ${family} is an RK3588 userspace pin — expected at least one Armbian BSP package (kernel/dtb/uboot/firmware)"
   fi
 
   log_info "BSP set from $(basename "${family}") (${#bsp_pkgs[@]} pkgs): ${bsp_pkgs[*]}"
@@ -979,6 +1137,7 @@ main() {
   run_or_plan mkdir -p "${debs}"
 
   fetch_bsp "${family}" "${debs}"
+  fetch_rk3588_userspace "${family}" "${debs}"
   fetch_first_party "${debs}"
 
   log_success "staging complete -> ${debs} (mkosi runtime/assembly layer consumes this)"

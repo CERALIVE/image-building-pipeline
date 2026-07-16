@@ -42,6 +42,17 @@ network-manager          # primary connection manager (WiFi/Ethernet/modem); Cer
 systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
 dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
 iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
+net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
+                         # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
+                         # the `netif` broadcast (WiFi/Ethernet/cellular/bonded-link status).
+                         # This minimal bookworm image ships only modern iproute2, so WITHOUT
+                         # net-tools every poll tick fails ("Executable not found in $PATH:
+                         # \"ifconfig\"") and the Network destination renders completely empty
+                         # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a
+                         # missing Ethernet entry in Bonded Links, despite live, connected NICs
+                         # (confirmed on real Rock 5B+ hardware). CeraUI's ifconfig text-parsing is
+                         # deeply embedded in its test suite; adding the one legacy binary is the
+                         # minimal-risk fix, NOT rewriting network-interfaces.ts onto `ip`.
 ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
 
 # --- USB modem bring-up -------------------------------------------------------
@@ -69,6 +80,13 @@ libmbim-utils            # MBIM modem control
 # --- WiFi ---------------------------------------------------------------------
 wireless-tools           # legacy iw* tooling
 wpasupplicant            # WPA client
+wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db + .p7s) — the
+                         # kernel cfg80211 subsystem loads it at boot to establish a usable
+                         # regulatory domain. It is wpasupplicant's `Recommends:`, so it is
+                         # NOT pulled transitively (this list installs with
+                         # --no-install-recommends); named explicitly or cfg80211 boots with
+                         # "Direct firmware load for regulatory.db failed with error -2" and
+                         # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
 hostapd                  # AP mode (device hotspot for config)
 
 # --- mDNS / discovery ---------------------------------------------------------
@@ -116,6 +134,20 @@ rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.
 rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
                          # SPLIT the daemon out of `rauc` (binary-only); the runtime
                          # postinst enables rauc.service, so the service pkg is required.
+squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it to extract the
+                         # manifest (and rootfs image) from a plain-format .raucb at
+                         # `rauc info`/`rauc install` time. Absent it, install fails after
+                         # signature verification with "Failed to start unsquashfs: ... No
+                         # such file or directory" (real Rock 5B+ hardware). build-time
+                         # mksquashfs runs on the HOST/CI, so this runtime gap was invisible.
+e2fsprogs                # ships /sbin/mkfs.ext4 — rauc shells out to it to format the target
+                         # ext4 slot before copying the new rootfs image during the slot-write
+                         # phase of `rauc install`, AFTER signature + manifest checks pass.
+                         # Without it, real Rock 5B+ hardware reported exactly: "LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)".
+                         # build-time tooling never needed mkfs.ext4, so this runtime-only gap was
+                         # invisible; installing e2fsprogs made the REAL end-to-end OTA install
+                         # complete successfully (signature verified, slot B activated and rebooted
+                         # healthy), proving the fix on physical hardware.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.

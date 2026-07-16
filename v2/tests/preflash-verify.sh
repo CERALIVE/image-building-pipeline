@@ -468,6 +468,52 @@ check_rauc_bundle() {
   fi
 }
 
+# debugfs_dump_resolved <fsimg> <path> <outfile> [depth] — dump <path>,
+# dereferencing a symlink that is the FINAL path component. WHY: `debugfs dump
+# -p` does NOT follow a terminal-component symlink; it writes the raw link
+# target, so a fast symlink yields a 0-byte file. Armbian ships /boot/Image as a
+# symlink to vmlinuz-<ver>, so the old direct dump failed every magic check on a
+# real image. (Intermediate symlink components ARE followed during traversal —
+# that is why /boot/dtb -> dtb-<ver>/ always resolved.) A regular file dumps
+# directly, so the synthetic fixtures and non-Debian kernel packagings still work.
+debugfs_dump_resolved() {
+  local fsimg="$1" path="$2" out="$3" depth="${4:-0}" stat_out dest dir resolved
+  (( depth > 8 )) && return 1
+  stat_out="$(debugfs -R "stat ${path}" "${fsimg}" 2>/dev/null)" || return 1
+  grep -q '^Inode:' <<<"${stat_out}" || return 1
+  if grep -q 'Type: symlink' <<<"${stat_out}"; then
+    dest="$(sed -n 's/^Fast link dest: "\(.*\)"$/\1/p' <<<"${stat_out}")"
+    [[ -n "${dest}" ]] || return 1
+    if [[ "${dest}" == /* ]]; then
+      resolved="${dest}"
+    else
+      dir="$(dirname "${path}")"
+      resolved="${dir%/}/${dest}"
+    fi
+    debugfs_dump_resolved "${fsimg}" "${resolved}" "${out}" "$(( depth + 1 ))"
+    return
+  fi
+  debugfs -R "dump -p ${path} ${out}" "${fsimg}" >/dev/null 2>&1
+}
+
+# resolve_initrd_path <fsimg> — echo the /boot path of the initrd to inspect.
+# Prefers a bare /boot/initrd.img (present on the synthetic fixtures / non-Debian
+# packagings). WHY the fallback: Armbian ships ONLY the versioned
+# /boot/initrd.img-<ver> — the bare name is a ROOT-level /initrd.img symlink
+# OUTSIDE /boot — so we pick the highest-sorting /boot/initrd.img-<ver> from
+# `ls -p /boot` (fields /inode/mode/uid/gid/name/size/, so $6 is the name).
+resolve_initrd_path() {
+  local fsimg="$1" versioned
+  if debugfs -R "stat /boot/initrd.img" "${fsimg}" 2>/dev/null | grep -q '^Inode:'; then
+    printf '/boot/initrd.img\n'
+    return 0
+  fi
+  versioned="$(debugfs -R "ls -p /boot" "${fsimg}" 2>/dev/null \
+    | awk -F/ '$6 ~ /^initrd\.img-/ { print $6 }' | sort | tail -1)"
+  [[ -n "${versioned}" ]] || return 1
+  printf '/boot/%s\n' "${versioned}"
+}
+
 # debugfs has no byte-offset flag and cannot seek a pipe, so each rootfs slot
 # is sliced into a sparse temp file at its raw offset and inspected offline — no
 # loop mount, no root. The slot is GREEN
@@ -498,14 +544,18 @@ check_rootfs_populated() {
     fi
   done
   fstab="$(debugfs -R 'cat /etc/fstab' "${tmp}" 2>/dev/null || true)"
-  local artifacts_ok=1 artifact_dir kernel dtb initrd embedded_keyring kernel_magic dtb_magic initrd_magic
+  local artifacts_ok=1 artifact_dir kernel dtb initrd initrd_path embedded_keyring kernel_magic dtb_magic initrd_magic
   artifact_dir="$(mktemp -d)"
   kernel="${artifact_dir}/Image"; dtb="${artifact_dir}/board.dtb"; initrd="${artifact_dir}/initrd.img"
   embedded_keyring="${artifact_dir}/ceralive-keyring.pem"
-  debugfs -R "dump -p /boot/Image ${kernel}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
-  debugfs -R "dump -p /boot/dtb/rockchip/rk3588-rock-5b-plus.dtb ${dtb}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
-  debugfs -R "dump -p /boot/initrd.img ${initrd}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
-  debugfs -R "dump -p /etc/rauc/ceralive-keyring.pem ${embedded_keyring}" "${tmp}" >/dev/null 2>&1 || artifacts_ok=0
+  debugfs_dump_resolved "${tmp}" /boot/Image "${kernel}" || artifacts_ok=0
+  debugfs_dump_resolved "${tmp}" /boot/dtb/rockchip/rk3588-rock-5b-plus.dtb "${dtb}" || artifacts_ok=0
+  if initrd_path="$(resolve_initrd_path "${tmp}")"; then
+    debugfs_dump_resolved "${tmp}" "${initrd_path}" "${initrd}" || artifacts_ok=0
+  else
+    artifacts_ok=0
+  fi
+  debugfs_dump_resolved "${tmp}" /etc/rauc/ceralive-keyring.pem "${embedded_keyring}" || artifacts_ok=0
   kernel_magic="$(dd if="${kernel}" bs=1 skip=56 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
   dtb_magic="$(dd if="${dtb}" bs=1 count=4 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
   initrd_magic="$(dd if="${initrd}" bs=1 count=6 status=none 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"

@@ -241,6 +241,13 @@ RESULT: PASS — pre-flash gate GREEN. Hardware bring-up AUTHORIZED.
 
 Do not flash if any check shows `[FAIL]`. Fix the build first.
 
+The `rootfs_a`/`rootfs_b` checks resolve the real Armbian kernel-package `/boot`
+layout: `/boot/Image` is a symlink to the versioned `vmlinuz-<ver>` and the
+initrd exists only as `/boot/initrd.img-<ver>` (no bare `/boot/initrd.img`). The
+gate dereferences the kernel symlink and falls back to the versioned initrd name,
+so a genuinely complete Armbian slot passes; plain-file `/boot/Image` and
+`/boot/initrd.img` layouts still pass unchanged.
+
 You can also run the built-in negative self-test to confirm the gate is
 non-vacuous:
 
@@ -337,6 +344,71 @@ writes it, reads the entire candidate range back, and only then resets. A direct
 `rkdeveloptool wl` command is not an acceptable production or recovery path.
 After boot, the gate reads the same first 16 bytes from Rockchip OTP NVMEM via
 the image's committed helper and requires exact equality before SSH checks.
+
+#### Manual bench flashing (development/debugging only — NOT for production releases)
+
+The CI release gate above is the only acceptable path for production or
+recovery flashes. The procedure below is for a developer or bench engineer who
+needs to flash a board directly during development or debugging, outside the
+full CI release pipeline. It has been validated on real Rock 5B+ hardware.
+
+**The 3-command procedure:**
+
+```bash
+rkdeveloptool db  <loader.bin>      # download the loader (SPL) into device RAM
+rkdeveloptool wl 0 <image.raw>      # write the full raw image, starting at LBA 0
+rkdeveloptool rd                    # reset the device
+```
+
+No intermediate "wait for Loader mode" gate is required between `db` and `wl`
+for this manual path — go straight from a successful `db` to `wl`. That gate
+exists inside the automated CI script above for its own safety-timeout
+bookkeeping, not because `rkdeveloptool` itself requires it; polling
+`rkdeveloptool ld` for a "Loader" mode string proved unreliable for at least
+one loader/`rkdeveloptool` build combination during hardware validation. After
+`db`, give the loader a brief moment (roughly one second) to re-enumerate as a
+USB-MSC device before issuing `wl` — running the two back-to-back with zero
+delay can race the USB re-enumeration and report "Did not find any rockusb
+device," though the loader itself stays alive; retrying `wl` against the same
+still-live session then succeeds with no fresh `db` needed.
+
+**Timeout discipline — the single most important rule here.** A full `wl 0`
+write of the ~14.8 GB Rock 5B+ image over USB takes roughly **900-930 seconds
+(~15 minutes)**. Do not run it under a timeout or wrapper with less than about
+**1800 seconds (30 minutes)** of headroom above that baseline. Killing `wl`
+mid-write leaves the on-chip loader session wedged — a subsequent
+`rkdeveloptool rfi` fails with `Read Flash Info failed!` — and there is no
+resume. Recovering requires a full fresh Maskrom re-entry: power the board
+off, re-enter Maskrom, and run `db` again from scratch. Prefer running `wl` as
+a detached/background process with periodic progress polling (e.g. checking
+the process is still alive and tailing its log every few minutes) rather than
+a blocking foreground call wrapped in an aggressive timeout.
+
+**UART console baud rate.** The Rock 5B+, and the RK3588 board family
+generally (per the `serial_console:` value in the family manifest and
+`v2/mkosi/platform/boot/install-boot.sh`), uses **1500000 baud** on its debug
+UART — not the 115200 baud that is correct for the x86 family. Capture the
+console with:
+
+```bash
+stty -F /dev/ttyUSBx 1500000 cs8 -cstopb -parenb raw -echo -crtscts clocal
+cat /dev/ttyUSBx
+```
+
+**UART log parsing caveat.** The boot log on this UART is a genuinely
+multi-writer stream: kernel `dmesg` output and systemd's status printer both
+write to the same tty, using `\r` and ANSI cursor-movement/clear codes
+(`ESC[nA`, `ESC[K`) to redraw status lines in place. A naive strip of `\r` and
+ANSI codes can concatenate before/after redraw content into garbled,
+misleading merged text. To check a specific claim (e.g. "did unit X fail?"),
+strip only color codes and search the raw log for the literal substring,
+cross-checking the surrounding byte context, rather than trusting a fully
+reconstructed log. Better still, verify empirically over the network (ping,
+port probe, `curl`) once the board is reachable — that's faster and
+unambiguous compared to log archaeology.
+
+Entering Maskrom mode is board-specific — consult the board's hardware
+documentation for the exact button location and timing.
 
 For full rkdeveloptool documentation, see the
 [Rockchip Linux wiki](https://opensource.rock-chips.com/wiki_Rkdeveloptool).

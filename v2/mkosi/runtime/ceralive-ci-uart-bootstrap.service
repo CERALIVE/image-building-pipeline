@@ -1,6 +1,21 @@
 [Unit]
 Description=CeraLive one-shot CI UART SSH bootstrap
 Documentation=file:///usr/share/doc/ceralive/ssh-hardening.md
+# Same ssh.socket ordering-cycle guard as ceralive-ssh-firstboot: this unit is
+# Before=ssh.socket, so it must opt out of the default After=basic.target.
+# ConditionKernelCommandLine keeps it inert on non-CI boots, but systemd still
+# wires the Before=/After= ordering edges at transaction-build time regardless of
+# the condition — so without this the cycle would delete ssh.socket on EVERY boot.
+# Re-add the SAFE half of the default deps by hand (After=sysinit.target, never
+# After=basic.target): the bootstrap needs the seeded RNG (openssl rand for the
+# device nonce) and /run + device nodes laid down by the sysinit phase, exactly
+# like ceralive-ssh-firstboot. sysinit.target is ordered before sockets.target, so
+# it never closes the ssh.socket loop.
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target
+Conflicts=shutdown.target
+Before=shutdown.target
 ConditionKernelCommandLine=ceralive.ci_uart=1
 After=data.mount ceralive-ssh-firstboot.service
 Before=ssh.service ssh.socket

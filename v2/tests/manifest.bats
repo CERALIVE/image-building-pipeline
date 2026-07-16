@@ -901,6 +901,62 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: wireless-regdb is installed so cfg80211 loads regulatory.db" {
+  # The runtime layer installs shared.list with --no-install-recommends
+  # (runtime/mkosi.postinst.chroot), so wpasupplicant's `Recommends: wireless-regdb`
+  # is NOT pulled transitively. Without an explicit entry the kernel cfg80211
+  # subsystem fails to load /lib/firmware/regulatory.db at boot
+  # ("Direct firmware load for regulatory.db failed with error -2") and
+  # NetworkManager reports no usable WiFi interface (confirmed on real hardware).
+  run grep -Ex 'wireless-regdb[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: squashfs-tools is installed so rauc can unsquashfs bundles" {
+  # rauc info/install shells out to /usr/bin/unsquashfs to extract the manifest
+  # (and rootfs image) from a plain-format .raucb. Without squashfs-tools on the
+  # device, install fails right after signature verification with
+  # "Failed to start unsquashfs: ... No such file or directory" (real Rock 5B+
+  # hardware). build-time mksquashfs runs on the HOST/CI, so this runtime-only gap
+  # was invisible until OTA was exercised on-device.
+  run grep -Ex 'squashfs-tools[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: e2fsprogs is installed so rauc can format ext4 slots" {
+  # rauc install shells out to /sbin/mkfs.ext4 to format the target ext4 slot
+  # before copying the new rootfs image during the slot-write phase, after
+  # signature and manifest checks. Without e2fsprogs, real Rock 5B+ hardware
+  # reported "Failed to execute child process 'mkfs.ext4' (No such file or
+  # directory)"; build-time tooling never needed it, so this runtime-only gap
+  # was invisible until OTA was exercised on-device.
+  run grep -Ex 'e2fsprogs[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: net-tools is installed so CeraUI's ifconfig poll works" {
+  # CeraUI's backend polls /sbin/ifconfig every ~5s (apps/backend
+  # network-interfaces.ts run("ifconfig", [])) to build the `netif` broadcast
+  # (WiFi/Ethernet/cellular/bonded-link status). This minimal bookworm image ships
+  # only modern iproute2, so without net-tools every poll tick fails ("Executable
+  # not found in $PATH: \"ifconfig\"") and the Network destination renders empty
+  # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a missing
+  # Ethernet entry in Bonded Links — confirmed on real Rock 5B+ hardware.
+  run grep -Ex 'net-tools[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: net-tools reaches the resolved runtime package set (rk3588 + x86)" {
+  # net-tools is arch-independent (shared.list), so it must appear in the runtime
+  # package set the runtime layer installs for EVERY board family — the same
+  # sed|awk projection make_parity_rootfs uses to model the installed set. A
+  # missing/misplaced entry (e.g. accidentally landing in a delta list only) would
+  # break ifconfig on one family; this asserts the shared list carries it.
+  local pkgs
+  pkgs="$(sed -e 's/#.*//' "$V2/manifests/packages/shared.list" | awk 'NF{print $1}')"
+  [[ "$pkgs" == *net-tools* ]]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \
@@ -914,6 +970,89 @@ PY
   run grep -Fx 'PassEnvironment=CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT' "$V2/mkosi/mkosi.conf"
 
   [ "$status" -eq 0 ]
+}
+
+@test "mkosi PassEnvironment stays in lockstep with orchestrate.sh env_names" {
+  # STRUCTURAL DRIFT GUARD (the actual bug class, not just two instances).
+  #
+  # orchestrate.sh:run_mkosi_build() exports+CLI-passes `env_names` to the
+  # TOP-LEVEL mkosi image, but only PassEnvironment= in mkosi.conf propagates a
+  # value from there into the base/platform/runtime/app SUBIMAGES, where the
+  # postinst scripts that consume it actually run. A name in env_names that is
+  # missing from PassEnvironment reads EMPTY in every subimage chroot — silently.
+  # That drift shipped two production bugs: eth0/eth1 never renamed (dropped from
+  # SRTLA's eth*/wlan* bonding globs) and an empty add-on keyring (rejects every
+  # add-on signature). This test asserts env_names is a SUBSET of PassEnvironment
+  # so any FUTURE name added to env_names without a matching PassEnvironment=
+  # entry fails here — the lockstep the mkosi.conf comment already demands.
+  local orchestrate="$LIB_DIR/orchestrate.sh"
+  local mkosi_conf="$V2/mkosi/mkosi.conf"
+
+  # Extract the multi-line `local env_names=( … )` bash array literal: every line
+  # between the opener and the first line that is only a closing paren.
+  local env_names
+  env_names="$(awk '
+    /local env_names=\(/ { grab=1; next }
+    grab && /^[[:space:]]*\)/ { grab=0 }
+    grab { print }
+  ' "$orchestrate")"
+
+  # Extract every whitespace-separated name from ALL PassEnvironment= lines.
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$mkosi_conf")"
+
+  # Guard against a parser that silently yields nothing (which would make the
+  # subset assertion vacuously pass).
+  [ -n "$env_names" ]
+  [ -n "$pass_names" ]
+
+  local -A in_pass=()
+  local n
+  for n in $pass_names; do in_pass["$n"]=1; done
+
+  # Names legitimately in env_names but NOT in PassEnvironment. SOURCE_DATE_EPOCH
+  # is a reproducible-builds variable consumed ONLY by host-side orchestrator
+  # scripts (never inside a subimage chroot — verified: zero references under
+  # mkosi.images/); mkosi also handles it natively, so it needs no propagation.
+  local -A env_only_ok=( [SOURCE_DATE_EPOCH]=1 )
+
+  local missing=()
+  for n in $env_names; do
+    [ -n "${in_pass[$n]:-}" ] && continue
+    [ -n "${env_only_ok[$n]:-}" ] && continue
+    missing+=("$n")
+  done
+
+  if [ "${#missing[@]}" -ne 0 ]; then
+    printf 'env_names not propagated via PassEnvironment=: %s\n' "${missing[*]}" >&2
+  fi
+  [ "${#missing[@]}" -eq 0 ]
+}
+
+@test "mkosi PassEnvironment forwards interface-naming + add-on keyring into subimages" {
+  # Explicit regression pin for the two instances the lockstep guard above closed:
+  #   * CERALIVE_INTERFACES_eth0/eth1/wlan0 → runtime install_interface_naming()
+  #     emits per-role .link Path= rules; empty ⇒ ethernet keeps its kernel name
+  #     (enP4p65s0) and SRTLA's eth*/wlan* glob never matches the wired uplink.
+  #   * ADDON_KEYRING_B64 → runtime setup_addon_keyring() bakes the PUBLIC add-on
+  #     keyring; empty ⇒ EMPTY placeholder that rejects ALL add-on signatures.
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$V2/mkosi/mkosi.conf")"
+
+  local -A in_pass=()
+  local n
+  for n in $pass_names; do in_pass["$n"]=1; done
+
+  local want missing=()
+  for want in CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 \
+              CERALIVE_INTERFACES_wlan0 ADDON_KEYRING_B64; do
+    [ -n "${in_pass[$want]:-}" ] || missing+=("$want")
+  done
+
+  if [ "${#missing[@]}" -ne 0 ]; then
+    printf 'PassEnvironment= missing: %s\n' "${missing[*]}" >&2
+  fi
+  [ "${#missing[@]}" -eq 0 ]
 }
 
 @test "lab debug password requires an explicitly marked debug image" {
@@ -1900,6 +2039,100 @@ run_paseto_provision() {
 }
 
 # ===========================================================================
+# 18b. avahi-daemon restart hardening (defense-in-depth mDNS reliability) —
+#      stock Debian's avahi-daemon.service ships NO Restart= directive, so ANY
+#      signal/crash leaves mDNS (<hostname>.local) dead until reboot. Confirmed
+#      live on real hardware: killed by SIGUSR2 (status=12/USR2), NRestarts=0.
+#      setup_avahi_restart (postinst-lib.sh) bakes an ADDITIVE drop-in installed
+#      from the committed standalone artifact under CERALIVE_RUNTIME_SRC (like the
+#      TLS nginx drop-in). These drive the SHIPPED function against a temp drop-in
+#      dir (AVAHI_DROPIN_DIR) — no image boot, UNIT scope.
+# ===========================================================================
+
+@test "avahi restart: an additive Restart=on-failure drop-in is baked for avahi-daemon.service" {
+  local dir="$BATS_TEST_TMPDIR/avahi-daemon.service.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" AVAHI_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/10-ceralive-restart.conf" ]
+  grep -q '^\[Service\]' "$dir/10-ceralive-restart.conf"
+  grep -q '^Restart=on-failure$' "$dir/10-ceralive-restart.conf"
+  grep -q '^RestartSec=2$' "$dir/10-ceralive-restart.conf"
+}
+
+@test "avahi restart: missing runtime source FAILS the build (fail-closed, no drop-in)" {
+  local dir="$BATS_TEST_TMPDIR/avahi-fail.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" AVAHI_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"avahi-restart source not found"* ]]
+  [ ! -f "$dir/10-ceralive-restart.conf" ]
+}
+
+@test "avahi restart: image contract wires setup_avahi_restart into the runtime executor" {
+  grep -q 'setup_avahi_restart' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
+# 18c. ceralive.service -> cerastream.service boot ordering — ceralive.service's
+#      initPipelines() connects to cerastream's control socket exactly once, so a
+#      cerastream that starts LATE (confirmed live: ~2 min after ceralive.service)
+#      permanently fails that boot's connect. setup_cerastream_ordering
+#      (postinst-lib.sh) bakes an ADDITIVE After=cerastream.service drop-in from the
+#      committed standalone artifact under CERALIVE_RUNTIME_SRC (like the avahi/TLS
+#      drop-ins). ORDERING-ONLY: it must NEVER carry Requires= — ceralive.service has
+#      to boot into its "engine unavailable" degraded state if cerastream is
+#      absent/masked. These drive the SHIPPED function against a temp drop-in dir
+#      (CERASTREAM_ORDERING_DROPIN_DIR) — no image boot, UNIT scope.
+# ===========================================================================
+
+@test "cerastream ordering: an additive After=cerastream.service drop-in is baked for ceralive.service" {
+  local dir="$BATS_TEST_TMPDIR/ceralive.service.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/30-cerastream-ordering.conf" ]
+  grep -q '^\[Unit\]' "$dir/30-cerastream-ordering.conf"
+  grep -q '^After=cerastream.service$' "$dir/30-cerastream-ordering.conf"
+}
+
+@test "cerastream ordering: the drop-in is ordering-ONLY (no Requires=/Requisite=/BindsTo= hard dependency)" {
+  # ceralive.service MUST still boot and serve its "engine unavailable" degraded
+  # state (CeraUI helpers/boot-guard.ts::guardNonCritical) if cerastream is ever
+  # genuinely absent or masked. A hard dependency (Requires=/Requisite=/BindsTo=)
+  # would break that fail-soft design — this asserts the drop-in never introduces one.
+  local dir="$BATS_TEST_TMPDIR/ceralive-ordering-only.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -eq 0 ]
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' "$dir/30-cerastream-ordering.conf"
+  [ "$status" -ne 0 ]
+  # Same guard against the committed source artifact so a future edit can't smuggle
+  # a hard dependency in past the runtime-src indirection.
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' \
+    "$V2/mkosi/runtime/ceralive-cerastream-ordering.dropin.conf"
+  [ "$status" -ne 0 ]
+}
+
+@test "cerastream ordering: missing runtime source FAILS the build (fail-closed, no drop-in)" {
+  local dir="$BATS_TEST_TMPDIR/ceralive-ordering-fail.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cerastream-ordering source not found"* ]]
+  [ ! -f "$dir/30-cerastream-ordering.conf" ]
+}
+
+@test "cerastream ordering: image contract wires setup_cerastream_ordering into the runtime executor" {
+  grep -q 'setup_cerastream_ordering' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
@@ -1958,6 +2191,101 @@ PINS
   [ "$status" -eq 0 ]
   [[ "$output" == *"(4 pkgs): linux-image-test linux-dtb-test firmware-test u-boot-test"* ]]
   [[ "$output" == *"BSP apt specs: linux-image-test=1.0 linux-dtb-test=1.0 firmware-test=1.0 u-boot-test=1.0"* ]]
+}
+
+# ===========================================================================
+# 19b. RK3588 HW-accel userspace fetch (pinned URL + SHA-256) —
+#      fetch_rk3588_userspace stages ONLY the pinned userspace packages the
+#      resolved family declares (Mali blob / MPP / RGA / gst-rockchip / config),
+#      and fetch_bsp EXCLUDES exactly that set from the Armbian fetch because the
+#      Armbian bookworm arm64 feed does NOT carry them. DRY_RUN logs the exact
+#      pinned URL + hash and stages nothing. Self-contained: temp pin files, no
+#      network (DRY_RUN plan-only).
+# ===========================================================================
+
+@test "fetch-debs RK3588 userspace: DRY_RUN logs the pinned URL + sha and stages no .deb" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local pins="$BATS_TEST_TMPDIR/userspace.txt"
+  mkdir -p "$BATS_TEST_TMPDIR/debs"
+  cat >"$family" <<'YAML'
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test
+dtb_packages: []
+uboot_packages: []
+firmware_packages:
+  - libmali-test
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+  cat >"$pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=arm64 RK3588_USERSPACE_DEB_VERSIONS_FILE='$pins' KERNEL_PACKAGES=linux-image-test FIRMWARE_PACKAGES=libmali-test; source '$FETCH_DEBS'; fetch_rk3588_userspace '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RK3588 userspace set from"* ]]
+  [[ "$output" == *"libmali-test"* ]]
+  [[ "$output" == *"https://example.invalid/libmali-test_1.0_arm64.deb"* ]]
+  [[ "$output" == *"DRY-RUN would run:"* ]]
+  # plan-only: not one .deb was staged
+  run bash -c "shopt -s nullglob; f=('$BATS_TEST_TMPDIR/debs'/*.deb); echo \${#f[@]}"
+  [ "$output" -eq 0 ]
+}
+
+@test "fetch-debs RK3588 userspace: fetch_bsp EXCLUDES pinned userspace pkgs from the Armbian set" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local bsp_pins="$BATS_TEST_TMPDIR/bsp.txt"
+  local us_pins="$BATS_TEST_TMPDIR/userspace.txt"
+  cat >"$family" <<'YAML'
+armbian_branch: vendor
+kernel_packages:
+  - linux-image-test
+dtb_packages: []
+uboot_packages: []
+firmware_packages:
+  - armbian-firmware
+  - libmali-test
+hw_accel_gstreamer_plugins:
+  - gst-rockchip-test
+gstreamer_runtime_packages: []
+YAML
+  cat >"$bsp_pins" <<'PINS'
+linux-image-test=1.0
+armbian-firmware=1.0
+PINS
+  cat >"$us_pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+gst-rockchip-test  gst-rockchip-test_1.0_arm64.deb  fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210  https://example.invalid/gst-rockchip-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=arm64 BSP_DEB_VERSIONS_FILE='$bsp_pins' RK3588_USERSPACE_DEB_VERSIONS_FILE='$us_pins' KERNEL_PACKAGES=linux-image-test FIRMWARE_PACKAGES='armbian-firmware libmali-test' HW_ACCEL_GSTREAMER_PLUGINS=gst-rockchip-test; source '$FETCH_DEBS'; fetch_bsp '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  # the pinned userspace names never enter the Armbian BSP set / apt specs
+  [[ "$output" != *"libmali-test"* ]]
+  [[ "$output" != *"gst-rockchip-test"* ]]
+  # the real Armbian BSP packages DO
+  [[ "$output" == *"BSP set from"* ]]
+  [[ "$output" == *"linux-image-test"* ]]
+  [[ "$output" == *"armbian-firmware"* ]]
+}
+
+@test "fetch-debs RK3588 userspace: a family declaring no pinned userspace pkg fetches nothing" {
+  local family="$BATS_TEST_TMPDIR/family.yaml"
+  local us_pins="$BATS_TEST_TMPDIR/userspace.txt"
+  cat >"$family" <<'YAML'
+armbian_branch: none
+kernel_packages: []
+dtb_packages: []
+uboot_packages: []
+firmware_packages: []
+hw_accel_gstreamer_plugins: []
+gstreamer_runtime_packages: []
+YAML
+  cat >"$us_pins" <<'PINS'
+libmali-test  libmali-test_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/libmali-test_1.0_arm64.deb
+PINS
+  run bash -c "{ export DRY_RUN=1 ARCH=x86-64 RK3588_USERSPACE_DEB_VERSIONS_FILE='$us_pins'; source '$FETCH_DEBS'; fetch_rk3588_userspace '$family' '$BATS_TEST_TMPDIR/debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declares no pinned userspace package"* ]]
 }
 
 @test "fetch-debs URL guard: a non-HTTPS APT_CERALIVE_URL WARNS but does NOT die (sourcing proceeds)" {

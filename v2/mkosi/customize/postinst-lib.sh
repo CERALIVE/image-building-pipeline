@@ -115,6 +115,19 @@ match-device=interface-name:eth0
 ipv4.link-local=3
 EOF
 
+  # dns=systemd-resolved above makes NetworkManager DELEGATE DNS to resolved (it
+  # forwards DHCP servers over D-Bus, never writing resolv.conf itself). resolved
+  # only manages /etc/resolv.conf when it IS the symlink to its stub; on a plain
+  # file it reports `resolv.conf mode: foreign` and stands down (safety behavior).
+  # This minimal mkosi rootfs never ran resolved's postinst trigger, so it ships
+  # resolv.conf as an empty 0-byte regular file — with delegation on and resolved
+  # refusing a foreign file, NOTHING populates it and every glibc/getent/curl
+  # lookup fails despite a valid lease (confirmed live: `resolvectl status` shows
+  # the server + `mode: foreign`, `getent hosts` exits 2, CeraUI logs constant
+  # "DNS timeout"). `ln -sf` is force+idempotent — fixes the empty file, a stale
+  # link, or an already-correct link, safe on every A/B rebuild.
+  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
   install_interface_naming
 }
 
@@ -124,6 +137,17 @@ EOF
 # These .link units rename onboard NICs to stable roles. Per-role Path= rules
 # (keyed on the manifest ID_PATH, stable per board model) are required on OPi 5+
 # where the dual r8169 NICs would otherwise race a generic Type=ether match.
+#
+# PROPAGATION CONTRACT: this runs in the RUNTIME SUBIMAGE chroot, so the
+# per-role Path= values reach it ONLY via CERALIVE_INTERFACES_eth0/eth1/wlan0
+# in mkosi.conf's PassEnvironment=. orchestrate.sh exporting them to the
+# top-level image is NOT enough — --environment populates the MAIN image only.
+# If a CERALIVE_INTERFACES_* name is ever dropped from PassEnvironment= (it once
+# was), "${!var}" reads EMPTY here and eth0/eth1 get NO .link file (only wlan0
+# has a generic Type=wlan fallback), so ethernet keeps its kernel name and falls
+# out of SRTLA bonding — silently. mkosi.conf's PassEnvironment= MUST stay in
+# lockstep with orchestrate.sh:run_mkosi_build()'s env_names; the guard is
+# manifest.bats "mkosi PassEnvironment stays in lockstep with … env_names".
 install_interface_naming() {
   log "installing deterministic interface naming (.link units + loose rp_filter)"
   mkdir -p /etc/systemd/network
@@ -392,12 +416,17 @@ if [ -f /etc/ceralive/config.json ] && [ ! -e "$DATA/ceralive/config.json" ]; th
 fi
 
 # Seed the CeraUI working dir + /var/log + NM connections before the binds shadow
-# them (first boot only — guarded by mountpoint checks).
+# them (first boot only — guarded by mountpoint checks). "public" is the frontend
+# static-serving symlink ($WORKDIR/public -> /var/www/ceralive) the CeraUI .deb
+# ships; the $DATA/ceralive:$WORKDIR bind below shadows it, so it must be seeded
+# onto /data or the frontend 404s. cp -a copies the symlink itself (never the bulk
+# /var/www asset tree, which stays on the rootfs to track image/OTA updates); the
+# -L guards catch a target-absent symlink and never clobber an existing /data entry.
 if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
-    for f in "$WORKDIR"/*.json "$WORKDIR/revision"; do
-        [ -e "$f" ] || continue
+    for f in "$WORKDIR"/*.json "$WORKDIR/revision" "$WORKDIR/public"; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
         base="$(basename "$f")"
-        [ -e "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
+        [ -e "$DATA/ceralive/$base" ] || [ -L "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
     done
 fi
 if ! mountpoint -q /var/log; then
@@ -455,9 +484,17 @@ EOF
   cat >/etc/systemd/system/ceralive-migrate-data.service <<EOF
 [Unit]
 Description=CeraLive one-time data migration + /data skeleton
+# Seeds the /data skeleton (log, ceralive, nm) that the bind mounts below shadow,
+# so it MUST run in the local-fs setup phase: after ${data_root} is mounted (via
+# RequiresMountsFor) and BEFORE local-fs.target. A normal service inherits
+# After=basic.target (basic is After sysinit After local-fs); combined with the
+# bind mounts being Before=local-fs.target and After=this unit, that forms a
+# local-fs.target ordering cycle. DefaultDependencies=no keeps it out of that
+# late chain — RequiresMountsFor still orders it after the data mount.
+DefaultDependencies=no
+Conflicts=shutdown.target
 RequiresMountsFor=${data_root}
-After=local-fs.target
-Before=ceralive-hostname.service ceralive.service
+Before=local-fs.target shutdown.target ceralive-hostname.service ceralive.service
 ConditionPathIsMountPoint=${data_root}
 
 [Service]
@@ -729,6 +766,57 @@ setup_paseto_public_key() {
 Environment=PASETO_PUBLIC_KEY=${key}
 EOF
   chmod 0644 "${dropin}"
+}
+
+# ---------------------------------------------------------------------------
+# avahi-daemon restart hardening (defense-in-depth mDNS reliability): stock Debian's
+# avahi-daemon.service ships NO Restart= directive, so ANY signal or crash leaves
+# avahi-daemon — and therefore <hostname>.local mDNS — permanently dead until the
+# next reboot. Confirmed live on real hardware: the daemon was killed by SIGUSR2
+# (status=12/USR2 -> result 'signal'), with NRestarts=0 (no restart policy active).
+# Operators reach the device by <hostname>.local (docs/FIRST-BOOT.md + the
+# deterministic first-boot unique-hostname service), so bake an ADDITIVE drop-in
+# that makes systemd auto-restart the daemon after any non-clean exit. The signal
+# SOURCE (a CeraUI udev rule's overly-broad pkill) is fixed separately in the CeraUI
+# repo (root cause); this is the systemd-level defense-in-depth against ANY future
+# cause. Installed from the committed standalone artifact under CERALIVE_RUNTIME_SRC
+# (like setup_tls_proxy's nginx drop-in), never inlined here.
+# AVAHI_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_avahi_restart() {
+  log "hardening avahi-daemon restart policy (additive Restart=on-failure drop-in for mDNS reliability)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/avahi-daemon-restart.dropin.conf" ]] \
+    || die "avahi-restart source not found: ${src}/avahi-daemon-restart.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${AVAHI_DROPIN_DIR:-/etc/systemd/system/avahi-daemon.service.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/avahi-daemon-restart.dropin.conf" "${dropin_dir}/10-ceralive-restart.conf"
+}
+
+# ---------------------------------------------------------------------------
+# ceralive.service -> cerastream.service boot ordering (soft hint, defense against a
+# real boot race): ceralive.service's initPipelines() boot step connects to
+# cerastream's control socket exactly once, so if cerastream isn't up yet the
+# connection fails permanently for that boot. Confirmed live: cerastream.service
+# started ~2 minutes AFTER ceralive.service in one boot instance, and
+# `systemctl show ceralive -p After` had NO mention of cerastream.service. Bake an
+# ADDITIVE drop-in on the ceralive.service unit (shipped by the CeraUI .deb, like
+# 10-data-persistence / 20-paseto-public-key) that adds After=cerastream.service.
+# ORDERING-ONLY — never Requires=: ceralive.service must still boot into its
+# "engine unavailable" degraded state (CeraUI helpers/boot-guard.ts::guardNonCritical)
+# if cerastream is genuinely absent/masked, and After= on an out-of-transaction unit
+# is a harmless no-op. Installed from the committed standalone artifact under
+# CERALIVE_RUNTIME_SRC (like setup_avahi_restart / setup_tls_proxy), never inlined.
+# CERASTREAM_ORDERING_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_cerastream_ordering() {
+  log "ordering ceralive.service after cerastream.service (additive After= boot-ordering drop-in; no hard dependency)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-cerastream-ordering.dropin.conf" ]] \
+    || die "cerastream-ordering source not found: ${src}/ceralive-cerastream-ordering.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${CERASTREAM_ORDERING_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/ceralive-cerastream-ordering.dropin.conf" "${dropin_dir}/30-cerastream-ordering.conf"
 }
 
 # ---------------------------------------------------------------------------
