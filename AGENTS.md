@@ -639,6 +639,31 @@ backend runtime env so the device can VERIFY device-control / relay-config token
   drop-in with zero drift (reading PUBLIC files only; never the `k4.secret`).
   `--self-test` (ephemeral keypair, no secrets) is the `v2/run-tests` section-21 gate.
 
+**avahi-daemon restart hardening — else a single mDNS crash kills `<hostname>.local`
+until reboot** [EXISTS]
+
+Stock Debian's `avahi-daemon.service` ships **NO `Restart=` directive**, so ANY
+signal or crash leaves `avahi-daemon` — and therefore `<hostname>.local` mDNS —
+permanently dead until the next reboot. Confirmed live on real hardware
+(`journalctl -u avahi-daemon`): the daemon was killed by SIGUSR2 (`Main process
+exited, code=killed, status=12/USR2` → `Failed with result 'signal'`), and
+`systemctl show avahi-daemon -p NRestarts` read `NRestarts=0` — no restart policy
+was active. Operators reach the device by `<hostname>.local` (`docs/FIRST-BOOT.md`
++ the deterministic first-boot unique-hostname service), so mDNS staying up is a
+device-reliability requirement. `setup_avahi_restart` (in `customize/postinst-lib.sh`,
+called from the runtime `mkosi.postinst.chroot`) bakes an ADDITIVE drop-in
+`/etc/systemd/system/avahi-daemon.service.d/10-ceralive-restart.conf` with
+`Restart=on-failure` + `RestartSec=2`, installed from the committed standalone
+artifact `v2/mkosi/runtime/avahi-daemon-restart.dropin.conf` (the SAME
+standalone-artifact + `postinst-lib.sh` setup-function idiom as the nginx TLS
+drop-in, never inlined in `mkosi.postinst.chroot` per the drift-gate ceiling).
+`on-failure` (not `always`) so a deliberate `systemctl stop` still stops it. This
+is the systemd-level **defense-in-depth** layer only — the signal SOURCE (a CeraUI
+udev rule's overly-broad `pkill -f ceralive` catching avahi-daemon) is the
+ROOT-CAUSE fix, handled separately in the CeraUI repo. Guard: `manifest.bats`
+"avahi restart: an additive Restart=on-failure drop-in is baked …" (+ fail-closed
++ executor-wiring cases).
+
 **Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
 
 The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem

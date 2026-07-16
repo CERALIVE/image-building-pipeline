@@ -769,6 +769,31 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# avahi-daemon restart hardening (defense-in-depth mDNS reliability): stock Debian's
+# avahi-daemon.service ships NO Restart= directive, so ANY signal or crash leaves
+# avahi-daemon — and therefore <hostname>.local mDNS — permanently dead until the
+# next reboot. Confirmed live on real hardware: the daemon was killed by SIGUSR2
+# (status=12/USR2 -> result 'signal'), with NRestarts=0 (no restart policy active).
+# Operators reach the device by <hostname>.local (docs/FIRST-BOOT.md + the
+# deterministic first-boot unique-hostname service), so bake an ADDITIVE drop-in
+# that makes systemd auto-restart the daemon after any non-clean exit. The signal
+# SOURCE (a CeraUI udev rule's overly-broad pkill) is fixed separately in the CeraUI
+# repo (root cause); this is the systemd-level defense-in-depth against ANY future
+# cause. Installed from the committed standalone artifact under CERALIVE_RUNTIME_SRC
+# (like setup_tls_proxy's nginx drop-in), never inlined here.
+# AVAHI_DROPIN_DIR overrides the drop-in directory for the offline unit test.
+# ---------------------------------------------------------------------------
+setup_avahi_restart() {
+  log "hardening avahi-daemon restart policy (additive Restart=on-failure drop-in for mDNS reliability)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/avahi-daemon-restart.dropin.conf" ]] \
+    || die "avahi-restart source not found: ${src}/avahi-daemon-restart.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${AVAHI_DROPIN_DIR:-/etc/systemd/system/avahi-daemon.service.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/avahi-daemon-restart.dropin.conf" "${dropin_dir}/10-ceralive-restart.conf"
+}
+
+# ---------------------------------------------------------------------------
 # RTMP ingest gateway (Todo 14): bake the PINNED MediaMTX relay.
 #
 # Build-time FETCH of a pinned MediaMTX release (declarative pin: rtmp-gateway/

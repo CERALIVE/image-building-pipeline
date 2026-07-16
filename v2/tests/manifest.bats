@@ -2016,6 +2016,43 @@ run_paseto_provision() {
 }
 
 # ===========================================================================
+# 18b. avahi-daemon restart hardening (defense-in-depth mDNS reliability) —
+#      stock Debian's avahi-daemon.service ships NO Restart= directive, so ANY
+#      signal/crash leaves mDNS (<hostname>.local) dead until reboot. Confirmed
+#      live on real hardware: killed by SIGUSR2 (status=12/USR2), NRestarts=0.
+#      setup_avahi_restart (postinst-lib.sh) bakes an ADDITIVE drop-in installed
+#      from the committed standalone artifact under CERALIVE_RUNTIME_SRC (like the
+#      TLS nginx drop-in). These drive the SHIPPED function against a temp drop-in
+#      dir (AVAHI_DROPIN_DIR) — no image boot, UNIT scope.
+# ===========================================================================
+
+@test "avahi restart: an additive Restart=on-failure drop-in is baked for avahi-daemon.service" {
+  local dir="$BATS_TEST_TMPDIR/avahi-daemon.service.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" AVAHI_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/10-ceralive-restart.conf" ]
+  grep -q '^\[Service\]' "$dir/10-ceralive-restart.conf"
+  grep -q '^Restart=on-failure$' "$dir/10-ceralive-restart.conf"
+  grep -q '^RestartSec=2$' "$dir/10-ceralive-restart.conf"
+}
+
+@test "avahi restart: missing runtime source FAILS the build (fail-closed, no drop-in)" {
+  local dir="$BATS_TEST_TMPDIR/avahi-fail.d"
+  rm -rf "$dir"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" AVAHI_DROPIN_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"avahi-restart source not found"* ]]
+  [ ! -f "$dir/10-ceralive-restart.conf" ]
+}
+
+@test "avahi restart: image contract wires setup_avahi_restart into the runtime executor" {
+  grep -q 'setup_avahi_restart' "$REPO_ROOT/v2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
