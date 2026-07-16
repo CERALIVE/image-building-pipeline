@@ -23,13 +23,23 @@ services-enablement path. The unit is ordered **before** sshd so the first
 inbound connection already sees a per-device host key and root-password login
 already disabled.
 
-Both SSH-gate units carry **`DefaultDependencies=no`**. `ssh.socket` is ordered
-`Before=sockets.target` (early boot, before `basic.target`), so a unit that is
-`Before=ssh.socket` must not inherit the implicit `After=basic.target` — that
-closes an `ssh.socket → guard → basic.target → sockets.target → ssh.socket`
-ordering cycle and systemd deletes `ssh.socket`'s start job, so SSH never comes
-up on any boot. Opting out of default dependencies keeps the guards in the early
-phase; the offline regression guard is `v2/tests/systemd-ordering-cycle.test.sh`.
+Both SSH-gate units carry **`DefaultDependencies=no`** paired with an explicit
+**`After=sysinit.target`**. `ssh.socket` is ordered `Before=sockets.target`
+(early boot, before `basic.target`), so a unit that is `Before=ssh.socket` must
+not inherit the implicit `After=basic.target` — that closes an `ssh.socket →
+guard → basic.target → sockets.target → ssh.socket` ordering cycle and systemd
+deletes `ssh.socket`'s start job, so SSH never comes up on any boot. But
+`DefaultDependencies=no` also drops the implicit `After=sysinit.target`, and this
+script does sysinit-phase-dependent work (`ssh-keygen -A` needs the seeded RNG;
+the authorized-key store resolves the `ceralive` user/group and chowns to it;
+`sshd -t` needs runtime paths). proof-11 proved that without `After=sysinit.target`
+the unit races ahead of `systemd-sysusers`/`systemd-tmpfiles`/udev and fails under
+`set -euo pipefail` — SSH down with **zero** ordering cycles. So each guard
+re-adds `After=sysinit.target` by hand (the safe half of the default deps;
+`sysinit.target` is ordered before `sockets.target`, so it never re-closes the
+loop) but NEVER `After=basic.target`. The offline regression guard,
+`v2/tests/systemd-ordering-cycle.test.sh`, asserts BOTH zero cycles AND that each
+guard is transitively ordered after `systemd-sysusers`/`systemd-tmpfiles`.
 
 ## The four scoped actions (SC4 — nothing more)
 

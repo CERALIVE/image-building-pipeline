@@ -620,21 +620,33 @@ For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
 
-**`Before=ssh.socket` guards MUST be `DefaultDependencies=no`.** Both
-`ceralive-ssh-firstboot.service` and `ceralive-ci-uart-bootstrap.service` are
-`Before=ssh.socket`. `ssh.socket` is ordered `Before=sockets.target` (early
-boot, before `basic.target`), so a guard that inherits the implicit
-`After=basic.target` closes an `ssh.socket → guard → basic.target →
-sockets.target → ssh.socket` ordering cycle — systemd deletes `ssh.socket`'s
-start job and SSH never starts, on every boot (proof-10 UART boot log,
-2026-07-15). The same trap hit `ceralive-migrate-data.service`, which seeds the
-`/data` skeleton the `/var/log`+`/opt/ceralive` bind mounts shadow: it must be
-`Before=local-fs.target` (never `After=`) with `DefaultDependencies=no`, or
-`local-fs.target ↔ var-log.mount` cycles and the frontend `public` symlink never
-lands. `ConditionKernelCommandLine`/`ConditionPathExists` do NOT remove a unit's
-ordering edges — systemd wires them at transaction-build time regardless of the
-condition. Offline guard: `v2/tests/systemd-ordering-cycle.test.sh` (static
-contract + `systemd-analyze verify`), wired into `v2/run-tests`.
+**`Before=ssh.socket` guards MUST be `DefaultDependencies=no` AND
+`After=sysinit.target`.** Both `ceralive-ssh-firstboot.service` and
+`ceralive-ci-uart-bootstrap.service` are `Before=ssh.socket`. `ssh.socket` is
+ordered `Before=sockets.target` (early boot, before `basic.target`), so a guard
+that inherits the implicit `After=basic.target` closes an `ssh.socket → guard →
+basic.target → sockets.target → ssh.socket` ordering cycle — systemd deletes
+`ssh.socket`'s start job and SSH never starts, on every boot (proof-10 UART boot
+log, 2026-07-15). `DefaultDependencies=no` breaks that, but it ALSO drops the
+implicit `After=sysinit.target`; proof-11 (2026-07-15) then showed
+`ceralive-ssh-firstboot` racing ahead of `systemd-sysusers`/`systemd-tmpfiles`/
+udev and FAILING under `set -euo pipefail` (host-key gen, authorized-key chowns,
+`sshd -t`), taking ssh.service/ssh.socket down with "Dependency failed" — with
+**zero** ordering cycles. So each guard must ALSO re-add `After=sysinit.target`
+explicitly (the SAFE half of the default deps; `sysinit.target` is ordered before
+`sockets.target`, so it never re-closes the ssh.socket loop). NEVER re-add
+`After=basic.target`. The same cycle trap (but NOT the sysinit issue) hit
+`ceralive-migrate-data.service`, which seeds the `/data` skeleton the
+`/var/log`+`/opt/ceralive` bind mounts shadow: it must be `Before=local-fs.target`
+(never `After=`) with `DefaultDependencies=no`, and must NOT gain
+`After=sysinit.target` (sysinit.target is After=local-fs.target — that would
+cycle); it runs as root against `/data`+rootfs only, so it needs no sysinit-phase
+ordering. `ConditionKernelCommandLine`/`ConditionPathExists` do NOT remove a
+unit's ordering edges — systemd wires them at transaction-build time regardless of
+the condition. Offline guard: `v2/tests/systemd-ordering-cycle.test.sh` — static
+contract + `systemd-analyze verify` for zero cycles AND an ordering probe that
+proves each guard is transitively after `systemd-sysusers`/`systemd-tmpfiles`
+(a cycle-only check would miss the proof-11 gap). Wired into `v2/run-tests`.
 
 **Build concurrency** [EXISTS]
 

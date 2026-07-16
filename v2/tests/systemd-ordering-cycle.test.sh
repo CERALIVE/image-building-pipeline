@@ -1,34 +1,40 @@
 #!/usr/bin/env bash
 #
-# systemd-ordering-cycle.test.sh — offline guard against the boot-time systemd
-# ordering cycles that deleted ssh.socket and local-fs.target on real hardware
-# (proof-10 UART boot log, 2026-07-15).
+# systemd-ordering-cycle.test.sh — offline guard for the boot-time systemd
+# dependency graph of the SSH-gate + data-migration units.
 #
-# Two independent cycles were shipped:
+# It defends against TWO distinct classes of regression, both seen on real
+# hardware in this effort:
 #
-#   1. ssh.socket cycle. Both ceralive-ssh-firstboot.service and
-#      ceralive-ci-uart-bootstrap.service are Before=ssh.socket. ssh.socket is
-#      itself Before=sockets.target (early boot, before basic.target), so a guard
-#      that inherits the default After=basic.target closes the loop
-#      ssh.socket -> guard -> basic.target -> sockets.target -> ssh.socket.
-#      systemd breaks it by DELETING ssh.socket's start job — SSH never starts.
+#   (A) ORDERING CYCLES (proof-10 UART boot log, 2026-07-15). ssh.socket is
+#       Before=sockets.target (early boot, before basic.target). A guard that is
+#       Before=ssh.socket while carrying the default After=basic.target closes
+#       ssh.socket -> guard -> basic.target -> sockets.target -> ssh.socket, and
+#       systemd DELETES ssh.socket's start job (SSH never starts). The same trap
+#       hit ceralive-migrate-data.service vs local-fs.target/var-log.mount. Fix:
+#       DefaultDependencies=no.
 #
-#   2. local-fs.target cycle. ceralive-migrate-data.service seeds the /data
-#      skeleton that the /var/log|/opt/ceralive bind mounts shadow, so those
-#      mounts are After=ceralive-migrate-data.service AND (by default)
-#      Before=local-fs.target. A migrate-data that inherits the default
-#      After=basic.target/local-fs.target closes
-#      local-fs.target -> var-log.mount -> migrate-data -> (basic/local-fs).
+#   (B) MISSING SYSINIT ORDERING (proof-11 UART boot log, 2026-07-15). Opting out
+#       of default deps to break (A) ALSO dropped the implicit After=sysinit.target.
+#       ceralive-ssh-firstboot.service then raced ahead of systemd-sysusers /
+#       systemd-tmpfiles / udev and FAILED under `set -euo pipefail`, taking
+#       ssh.service/ssh.socket down with "Dependency failed" — with ZERO ordering
+#       cycles in the boot log. Fix: re-add After=sysinit.target explicitly (the
+#       SAFE half of the default deps; sysinit.target is ordered before
+#       sockets.target so it cannot re-close the ssh.socket loop).
 #
-# The fix for all three units is DefaultDependencies=no plus explicit early
-# ordering. This test enforces that invariant two ways:
+# A cycle-only test would NOT have caught (B) (proof-11 had zero cycles yet still
+# failed), so this test asserts BOTH acyclicity AND real ordering:
 #
-#   Part A — static contract (systemd-version independent): the three units must
-#            carry DefaultDependencies=no and must not re-introduce the late
-#            ordering that closes each cycle.
-#   Part B — dynamic proof (needs systemd-analyze + systemctl): assemble the real
-#            unit set into a --root and assert `systemd-analyze verify` finds ZERO
-#            ordering cycles in the multi-user.target transaction.
+#   Part A — static contract (systemd-version independent).
+#   Part B — dynamic proof via `systemd-analyze verify --root`:
+#              B1 the assembled unit set has ZERO ordering cycles, and
+#              B2 each Before=ssh.socket guard is TRANSITIVELY ordered after
+#                 systemd-sysusers.service and systemd-tmpfiles-setup.service.
+#            (B2) is proven with an ordering PROBE: a throwaway unit that is
+#            After=<guard> Before=<sysinit-phase unit> MUST close a cycle iff the
+#            guard is genuinely ordered after that unit. This turns an ordering
+#            question into one `systemd-analyze verify` can answer offline.
 #
 # shellcheck disable=SC2016
 
@@ -51,18 +57,25 @@ done
 # Part A — static contract (version independent)
 # ---------------------------------------------------------------------------
 
-# Any unit ordered Before=ssh.socket must opt out of default dependencies, else
-# it inherits After=basic.target and cycles ssh.socket <-> sockets.target.
+# Any unit ordered Before=ssh.socket must (A) opt out of default dependencies to
+# avoid the ssh.socket cycle, and (B) explicitly re-add After=sysinit.target so it
+# still runs after the sysinit phase (users/tmpfiles/udev/RNG) it depends on.
 for unit in "${FIRSTBOOT}" "${CIUART}"; do
   base="$(basename "${unit}")"
   grep -Fq 'Before=ssh.service ssh.socket' "${unit}" \
     || fail "${base} no longer orders Before=ssh.service ssh.socket (guard contract changed)"
   grep -Eq '^DefaultDependencies=no$' "${unit}" \
     || fail "${base} is Before=ssh.socket but lacks DefaultDependencies=no — reopens the ssh.socket ordering cycle"
+  grep -Eq '^After=.*\bsysinit\.target\b' "${unit}" \
+    || fail "${base} has DefaultDependencies=no but no After=sysinit.target — races ahead of sysusers/tmpfiles (proof-11 failure)"
+  grep -Eq '^After=.*\bbasic\.target\b' "${unit}" \
+    && fail "${base} must NOT be After=basic.target — that re-closes the ssh.socket ordering cycle"
 done
 
 # ceralive-migrate-data.service (generated inline by postinst-lib.sh) must run in
-# the local-fs setup phase, not after it.
+# the local-fs setup phase, not after it. It CANNOT be After=sysinit.target
+# (sysinit.target is After=local-fs.target — that would cycle); it only touches
+# /data + rootfs paths as root, so it needs no sysinit-phase ordering.
 mig="$(awk '
   /cat >\/etc\/systemd\/system\/ceralive-migrate-data\.service <<EOF/ { f=1; next }
   f && /^EOF$/ { exit }
@@ -75,6 +88,8 @@ grep -Eq '^After=local-fs\.target$' <<<"${mig}" \
   && fail "ceralive-migrate-data.service still has After=local-fs.target — closes local-fs.target <-> var-log.mount cycle"
 grep -Eq '^Before=.*\blocal-fs\.target\b' <<<"${mig}" \
   || fail "ceralive-migrate-data.service must be Before=local-fs.target (run before the bind mounts it seeds)"
+grep -Eq '\bsysinit\.target\b' <<<"${mig}" \
+  && fail "ceralive-migrate-data.service must NOT reference sysinit.target — it runs in the local-fs phase (would cycle)"
 
 echo "systemd-ordering-cycle: Part A static contract OK"
 
@@ -173,19 +188,68 @@ mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
 ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
 
-# verify is non-deterministic in which job it deletes to break a cycle, so run a
-# few times and fail if a cycle surfaces in ANY run.
-cycles=0
-for _ in 1 2 3; do
-  out="$(systemd-analyze verify --root "${S}" default.target 2>&1 || true)"
-  n="$(printf '%s\n' "${out}" | grep -c 'Found ordering cycle' || true)"
-  cycles=$((cycles + n))
-  last="${out}"
+# systemd-analyze verify is non-deterministic in WHICH job it deletes to break a
+# cycle, so count matched cycle lines across a few runs.
+count_cycles() {
+  local run out n total=0
+  for run in 1 2 3; do
+    out="$(systemd-analyze verify --root "${S}" default.target 2>&1 || true)"
+    n="$(printf '%s\n' "${out}" | grep -c 'Found ordering cycle' || true)"
+    total=$((total + n))
+  done
+  printf '%s' "${total}"
+}
+
+# --- B1: the assembled unit set must be acyclic ---------------------------------
+base_cycles="$(count_cycles)"
+if (( base_cycles > 0 )); then
+  systemd-analyze verify --root "${S}" default.target 2>&1 \
+    | grep -E 'Found ordering cycle|deleted to break' | sort -u >&2
+  fail "assembled unit set has ${base_cycles} ordering cycle(s) — see above"
+fi
+echo "systemd-ordering-cycle: Part B1 acyclic OK (systemd $(systemd-analyze --version | awk 'NR==1{print $2}'))"
+
+# --- B2: prove each guard is transitively After the sysinit-phase units ---------
+# Inject a probe unit After=<guard> Before=<sysinit unit>. If (and only if) the
+# guard is genuinely ordered after that sysinit unit, the probe closes a cycle.
+probe_orders_after() { # $1=guard unit  $2=target sysinit unit -> 0 if guard is After target
+  local guard="$1" target="$2" probe="${ETC}/zz-order-probe.service"
+  cat >"${probe}" <<EOF
+[Unit]
+Description=ordering probe (${guard} after ${target})
+DefaultDependencies=no
+After=${guard}
+Before=${target}
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+[Install]
+WantedBy=sysinit.target
+EOF
+  mkdir -p "${ETC}/sysinit.target.wants"
+  ln -sf ../zz-order-probe.service "${ETC}/sysinit.target.wants/zz-order-probe.service"
+  local c; c="$(count_cycles)"
+  rm -f "${probe}" "${ETC}/sysinit.target.wants/zz-order-probe.service"
+  (( c > 0 ))
+}
+
+checked=0
+for target in systemd-sysusers.service systemd-tmpfiles-setup.service; do
+  [[ -f "${SYS_LIB}/${target}" ]] || { echo "systemd-ordering-cycle: ${target} absent — skipping its ordering probe"; continue; }
+  for guard in ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service; do
+    probe_orders_after "${guard}" "${target}" \
+      || fail "${guard} is NOT ordered after ${target} (missing After=sysinit.target — proof-11 runtime failure)"
+    checked=$((checked + 1))
+  done
 done
-if (( cycles > 0 )); then
-  printf '%s\n' "${last}" | grep -E 'Found ordering cycle|deleted to break' | sort -u >&2
-  fail "systemd-analyze verify found ${cycles} ordering cycle(s) across the assembled unit set"
+
+# Backstop when neither sysinit unit shipped: prove After=sysinit.target directly.
+if (( checked == 0 )); then
+  for guard in ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service; do
+    probe_orders_after "${guard}" sysinit.target \
+      || fail "${guard} is NOT ordered after sysinit.target (proof-11 runtime failure)"
+  done
 fi
 
-echo "systemd-ordering-cycle: Part B dynamic proof OK (systemd $(systemd-analyze --version | awk 'NR==1{print $2}'), zero cycles)"
+echo "systemd-ordering-cycle: Part B2 sysinit ordering OK (guards run after sysusers/tmpfiles)"
 echo "systemd-ordering-cycle regression: PASS"

@@ -16,8 +16,19 @@ Documentation=file:///usr/share/doc/ceralive/ssh-hardening.md
 # so a guard ordered Before=ssh.socket must NOT inherit the default
 # After=basic.target — that forms an unbreakable ssh.socket<->sockets.target
 # ordering cycle (systemd deletes ssh.socket's start job and SSH never comes up).
-# Opt out of default deps and pin only the early orderings we actually need.
+# So opt out of default deps, but re-add the SAFE half by hand. This script does
+# sysinit-phase-dependent work (ssh-keygen -A needs the seeded RNG; the
+# authorized-key store setup resolves the ceralive user/group via NSS and chowns
+# to it; sshd -t needs tmpfiles/udev-provided runtime paths), so it MUST run after
+# sysinit.target. proof-11 proved that dropping After=sysinit.target (a side effect
+# of DefaultDependencies=no) let this unit race ahead of systemd-tmpfiles/sysusers/
+# udev and fail under `set -euo pipefail`, taking ssh.service/ssh.socket down with
+# "Dependency failed". After=sysinit.target restores every sysinit-phase
+# prerequisite WITHOUT re-adding After=basic.target — sysinit.target is ordered
+# before sockets.target, so it can never close the ssh.socket loop.
 DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target
 Conflicts=shutdown.target
 Before=shutdown.target
 After=local-fs.target data.mount
