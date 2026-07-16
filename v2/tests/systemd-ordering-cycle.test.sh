@@ -191,8 +191,8 @@ ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
 # systemd-analyze verify is non-deterministic in WHICH job it deletes to break a
 # cycle, so count matched cycle lines across a few runs.
 count_cycles() {
-  local run out n total=0
-  for run in 1 2 3; do
+  local out n total=0
+  for _ in 1 2 3; do
     out="$(systemd-analyze verify --root "${S}" default.target 2>&1 || true)"
     n="$(printf '%s\n' "${out}" | grep -c 'Found ordering cycle' || true)"
     total=$((total + n))
