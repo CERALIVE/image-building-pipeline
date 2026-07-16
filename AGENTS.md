@@ -736,6 +736,21 @@ credentials with no screen or keyboard. Standalone artifacts under
   (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
   requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
   validated on hardware, hence `[PARTIAL]`.
+- **Regulatory DB (`wireless-regdb`) is an EXPLICIT `shared.list` entry.** WiFi in
+  ANY mode (client or the AP above) needs `/lib/firmware/regulatory.db` (+ `.p7s`),
+  which the kernel `cfg80211` subsystem loads at boot to establish a usable
+  regulatory domain. It ships in Debian's `wireless-regdb` package — the Linux
+  wireless project's regulatory database, NOT chip firmware, so it is **not** part
+  of the RK3588 `armbian-firmware` bundle (unlike `rtl8852be-firmware`; see
+  `rk3588.delta.list`). It is only `wpasupplicant`'s `Recommends:`, so the runtime
+  layer's `apt-get install --no-install-recommends` (runtime/mkosi.postinst.chroot)
+  never pulls it transitively — it MUST be named in `shared.list` explicitly. Absent
+  it, every boot logs `platform regulatory.0: Direct firmware load for regulatory.db
+  failed with error -2` / `cfg80211: failed to load regulatory.db` and NetworkManager
+  reports "No WiFi interfaces found" even with a working driver (real-HW UART,
+  2026-07-16; the RTL8852BE `rtw89_8852be` chip enumerates + trains PCIe fine — the
+  missing DB is a distinct gap). Guard: `manifest.bats` "wireless-regdb is installed
+  so cfg80211 loads regulatory.db".
 - **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
   CeraUI backend (`ceralive.service`) to free port 80 and starts
   `ceralive-portal.socket` — a systemd socket-activated (`Accept=yes`) **bash** HTTP

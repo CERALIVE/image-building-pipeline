@@ -901,6 +901,17 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: wireless-regdb is installed so cfg80211 loads regulatory.db" {
+  # The runtime layer installs shared.list with --no-install-recommends
+  # (runtime/mkosi.postinst.chroot), so wpasupplicant's `Recommends: wireless-regdb`
+  # is NOT pulled transitively. Without an explicit entry the kernel cfg80211
+  # subsystem fails to load /lib/firmware/regulatory.db at boot
+  # ("Direct firmware load for regulatory.db failed with error -2") and
+  # NetworkManager reports no usable WiFi interface (confirmed on real hardware).
+  run grep -Ex 'wireless-regdb[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \

@@ -69,6 +69,13 @@ libmbim-utils            # MBIM modem control
 # --- WiFi ---------------------------------------------------------------------
 wireless-tools           # legacy iw* tooling
 wpasupplicant            # WPA client
+wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db + .p7s) — the
+                         # kernel cfg80211 subsystem loads it at boot to establish a usable
+                         # regulatory domain. It is wpasupplicant's `Recommends:`, so it is
+                         # NOT pulled transitively (this list installs with
+                         # --no-install-recommends); named explicitly or cfg80211 boots with
+                         # "Direct firmware load for regulatory.db failed with error -2" and
+                         # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
 hostapd                  # AP mode (device hotspot for config)
 
 # --- mDNS / discovery ---------------------------------------------------------
