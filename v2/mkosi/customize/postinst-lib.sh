@@ -392,12 +392,17 @@ if [ -f /etc/ceralive/config.json ] && [ ! -e "$DATA/ceralive/config.json" ]; th
 fi
 
 # Seed the CeraUI working dir + /var/log + NM connections before the binds shadow
-# them (first boot only — guarded by mountpoint checks).
+# them (first boot only — guarded by mountpoint checks). "public" is the frontend
+# static-serving symlink ($WORKDIR/public -> /var/www/ceralive) the CeraUI .deb
+# ships; the $DATA/ceralive:$WORKDIR bind below shadows it, so it must be seeded
+# onto /data or the frontend 404s. cp -a copies the symlink itself (never the bulk
+# /var/www asset tree, which stays on the rootfs to track image/OTA updates); the
+# -L guards catch a target-absent symlink and never clobber an existing /data entry.
 if [ -d "$WORKDIR" ] && ! mountpoint -q "$WORKDIR"; then
-    for f in "$WORKDIR"/*.json "$WORKDIR/revision"; do
-        [ -e "$f" ] || continue
+    for f in "$WORKDIR"/*.json "$WORKDIR/revision" "$WORKDIR/public"; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
         base="$(basename "$f")"
-        [ -e "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
+        [ -e "$DATA/ceralive/$base" ] || [ -L "$DATA/ceralive/$base" ] || cp -a "$f" "$DATA/ceralive/$base"
     done
 fi
 if ! mountpoint -q /var/log; then

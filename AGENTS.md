@@ -467,6 +467,29 @@ mid-broadcast through the bonding sender could be updated out from under the
 stream; the guard now checks `srtla-send.service` too. Don't drop the receiver
 check: a single image runs either role. Proof: `v2/run-tests` section 16.
 
+**`/data` migration MUST seed the `public` frontend symlink — else `/` 404s** [EXISTS]
+
+`postinst-lib.sh::setup_data_persistence` generates `ceralive-migrate-data`, whose
+first-boot seeding loop copies the CeraUI working dir (`/opt/ceralive`) onto
+`/data/ceralive` BEFORE the `/data/ceralive:/opt/ceralive` bind mount shadows it.
+The CeraUI `.deb` ships the frontend static tree at `/var/www/ceralive` and an
+ABSOLUTE symlink `/opt/ceralive/public -> /var/www/ceralive`
+(`CeraUI` `build-debian-package.sh`). The loop MUST seed `public` alongside
+`*.json`/`revision`: once the bind mount activates, `/opt/ceralive/public` is the
+`/data/ceralive/public` entry, so if `/data` never got one the symlink is gone and
+CeraUI serves the frontend from a missing dir — `curl http://<device>/` returns 404
+while `/status` stays healthy (confirmed on real hardware). `cp -a` copies the
+symlink ITSELF (never the `/var/www` asset tree — those stay on the rootfs so
+image/OTA updates keep tracking); the loop's `[ -L ]` guards keep it symlink-aware
+(a target-absent link isn't skipped as a source, an existing `/data` entry isn't
+clobbered on a re-run / A-B swap). Because the link is absolute and `/opt/ceralive`
+and `/data/ceralive` sit at the same depth, it resolves identically post-bind. This
+is DISTINCT from the systemd ordering-cycle fixes — a content bug the graph check
+cannot see. Offline guard: `v2/tests/data-persistence-public-symlink.test.sh`
+(static contract on the seeding block + a runtime reproduction that seeds a
+synthetic tree and proves the symlink is preserved, resolves after the bind mount,
+is idempotent, and never clobbers an existing entry). Wired into `v2/run-tests`.
+
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
 `setup_paseto_public_key` (in `customize/postinst-lib.sh`, called by the runtime
