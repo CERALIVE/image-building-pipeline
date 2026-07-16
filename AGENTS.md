@@ -444,12 +444,15 @@ creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
 
-**RAUC 1.8 needs a DUAL-EKU signing leaf, and `unsquashfs` on the device —
-else OTA is 100% broken** [EXISTS]
+**RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
+device — else OTA is 100% broken** [EXISTS]
 
 The device runs Debian bookworm's `rauc 1.8-2`. `rauc install` (the config-driven
 path `ceralive-update` / CeraUI `system.startUpdate()` actually use) failed on real
-Rock 5B+ hardware in two stacked ways, both fixed here:
+Rock 5B+ hardware in three stacked ways, all fixed here. A REAL, complete,
+end-to-end OTA install with all three fixes combined has now been PROVEN on
+physical Rock 5B+ hardware: signature verified, manifest checked, slot B was
+written, the bootloader switched to it, and the new slot rebooted healthy.
 
 - **Signing leaf EKU.** RAUC's `check-purpose=codesign` / X.509 key-usage support
   landed in **rauc 1.9** (March 2023); 1.8 predates it entirely — its
@@ -477,6 +480,14 @@ Rock 5B+ hardware in two stacked ways, both fixed here:
   `squashfs-tools` is now in `shared.list` (standard bookworm `main` — no new trust
   source). Guard: `manifest.bats` "squashfs-tools is installed so rauc can unsquashfs
   bundles".
+- **`mkfs.ext4` runtime gap.** After signature and manifest checks pass, RAUC's
+  slot-write phase shells out to `/sbin/mkfs.ext4` from `e2fsprogs` to format the
+  target ext4 slot before copying in the new rootfs image. Without it, the real
+  Rock 5B+ install reported exactly: `LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)`. Build-time tooling never needed
+  `mkfs.ext4`, so this runtime-only gap was invisible. Adding `e2fsprogs` made the
+  REAL end-to-end install complete successfully, activate slot B, and boot the
+  fresh slot healthy; guard: `manifest.bats` "e2fsprogs is installed so rauc can
+  format ext4 slots".
 
 **PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
 touched here.** `/mnt/development/ceralive/cert-work/rauc/gen-certs.sh` generates the

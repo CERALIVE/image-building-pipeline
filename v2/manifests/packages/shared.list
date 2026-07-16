@@ -129,6 +129,14 @@ squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it t
                          # signature verification with "Failed to start unsquashfs: ... No
                          # such file or directory" (real Rock 5B+ hardware). build-time
                          # mksquashfs runs on the HOST/CI, so this runtime gap was invisible.
+e2fsprogs                # ships /sbin/mkfs.ext4 — rauc shells out to it to format the target
+                         # ext4 slot before copying the new rootfs image during the slot-write
+                         # phase of `rauc install`, AFTER signature + manifest checks pass.
+                         # Without it, real Rock 5B+ hardware reported exactly: "LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)".
+                         # build-time tooling never needed mkfs.ext4, so this runtime-only gap was
+                         # invisible; installing e2fsprogs made the REAL end-to-end OTA install
+                         # complete successfully (signature verified, slot B activated and rebooted
+                         # healthy), proving the fix on physical hardware.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.

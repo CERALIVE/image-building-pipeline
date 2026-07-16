@@ -923,6 +923,17 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: e2fsprogs is installed so rauc can format ext4 slots" {
+  # rauc install shells out to /sbin/mkfs.ext4 to format the target ext4 slot
+  # before copying the new rootfs image during the slot-write phase, after
+  # signature and manifest checks. Without e2fsprogs, real Rock 5B+ hardware
+  # reported "Failed to execute child process 'mkfs.ext4' (No such file or
+  # directory)"; build-time tooling never needed it, so this runtime-only gap
+  # was invisible until OTA was exercised on-device.
+  run grep -Ex 'e2fsprogs[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \
