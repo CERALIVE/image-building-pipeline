@@ -186,8 +186,15 @@ elif [ ! -e "${FLAG}" ]; then
 fi
 
 # Validate the resulting sshd config so a bad drop-in can never wedge sshd's
-# ExecStartPre (`sshd -t`) on the very first connection.
+# ExecStartPre (`sshd -t`) on the very first connection. `sshd -t` exits 255 with
+# "Missing privilege separation directory: /run/sshd" if that dir is absent. On a
+# fresh boot it is: nothing ships a tmpfiles.d entry for it, so its only creator is
+# ssh.service's RuntimeDirectory=sshd — which runs AFTER this Before=ssh.service
+# guard. Pre-create it (0755 root, as ssh.service would) or `set -e` fails this
+# unit and ssh.service/ssh.socket DEPEND-fail via RequiredBy=, closing port 22
+# (proof-13 real-HW UART, 2026-07-16).
 if command -v sshd >/dev/null 2>&1; then
+    install -d -m 0755 /run/sshd
     sshd -t
 fi
 

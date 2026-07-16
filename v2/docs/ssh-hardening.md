@@ -41,6 +41,21 @@ loop) but NEVER `After=basic.target`. The offline regression guard,
 `v2/tests/systemd-ordering-cycle.test.sh`, asserts BOTH zero cycles AND that each
 guard is transitively ordered after `systemd-sysusers`/`systemd-tmpfiles`.
 
+The script also **creates `/run/sshd` (mode `0755`) before its final `sshd -t`**.
+`sshd -t` refuses to run without the privilege-separation directory `/run/sshd`,
+exiting 255 with `Missing privilege separation directory: /run/sshd`. On a fresh
+boot that directory does not exist yet — nothing in the image ships a `tmpfiles.d`
+entry for it, so its only creator is `ssh.service`'s `RuntimeDirectory=sshd`, which
+runs **after** this `Before=ssh.service` guard. Without pre-creating it, `sshd -t`
+exits 255, `set -euo pipefail` fails the unit, and both `ssh.service` (the LAN sshd
+on :22) and `ssh.socket` DEPEND-fail through their `RequiredBy=`, closing port 22 on
+every boot — with **zero** ordering cycles and a healthy rest-of-system (proof-13
+real-HW UART, 2026-07-16). This is a runtime failure inside the guard's script, not
+a dependency-graph defect, so `systemd-ordering-cycle.test.sh` cannot see it; the
+dedicated guard is `v2/tests/ssh-firstboot-privsep.test.sh`, which asserts the
+`/run/sshd` creation precedes `sshd -t` in the script (static) and reproduces the
+empty-`/run` first boot end-to-end in a rootless namespace (runtime).
+
 ## The four scoped actions (SC4 — nothing more)
 
 1. **Per-device SSH host keys.** The image bakes shared host keys, so every

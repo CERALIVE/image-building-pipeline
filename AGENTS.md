@@ -648,6 +648,21 @@ contract + `systemd-analyze verify` for zero cycles AND an ordering probe that
 proves each guard is transitively after `systemd-sysusers`/`systemd-tmpfiles`
 (a cycle-only check would miss the proof-11 gap). Wired into `v2/run-tests`.
 
+**`ceralive-ssh-firstboot.sh` MUST create `/run/sshd` before its `sshd -t`.** The
+guard's last step validates the sshd config with `sshd -t`, which refuses to run
+without the privilege-separation dir `/run/sshd` (`Missing privilege separation
+directory: /run/sshd`, exit 255). On a fresh boot that dir does not exist yet:
+nothing ships a `tmpfiles.d` entry for it, and its only creator is `ssh.service`'s
+`RuntimeDirectory=sshd` — which runs AFTER this `Before=ssh.service` guard. Without
+pre-creating it, `sshd -t` exits 255, `set -euo pipefail` fails the unit, and both
+`ssh.service` (LAN sshd on :22) and `ssh.socket` DEPEND-fail via `RequiredBy=`,
+closing port 22 on EVERY boot with **zero** ordering cycles and an otherwise-healthy
+system (proof-13 real-HW UART, 2026-07-16). This is a runtime script failure, NOT a
+dependency-graph defect — `systemd-ordering-cycle.test.sh` cannot see it. The
+dedicated offline guard is `v2/tests/ssh-firstboot-privsep.test.sh` (static: the
+`/run/sshd` creation precedes `sshd -t`; runtime: the real script survives an
+empty-`/run` first boot in a rootless namespace). Wired into `v2/run-tests`.
+
 **Build concurrency** [EXISTS]
 
 The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
