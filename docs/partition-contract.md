@@ -158,13 +158,16 @@ provisioning wires these via bind-mounts / symlinks (implementation, not contrac
 | `/data/ceralive/gsm_operator_cache.json` | Modem operator cache | `/opt/ceralive/gsm_operator_cache.json` |
 | `/data/ceralive/relays_cache.json` | Relay cache | `/opt/ceralive/relays_cache.json` |
 | `/data/ceralive/revision` | Installed UI revision marker | `/opt/ceralive/revision` |
-| `/data/ceralive/host_index`, `host.lock` | First-boot hostname index/lock | `/etc/ceralive/host_index`, `hostname.lock` |
+| `/data/ceralive/host_index` | Persistent deterministic-hostname index | `/etc/ceralive/host_index` |
 | `/data/ceralive/machine-id` | Stable machine identity for host keys, TLS, and setup identifiers | `/etc/machine-id` (persist copy) |
 | `/data/nm/system-connections/` | **WiFi credentials / NM profiles** | `/etc/NetworkManager/system-connections/` |
 | `/data/log/` | System + app logs | bind-mounted to `/var/log` |
 | `/data/srtla/` | Persisted SRTLA routing/bonding state (not the static `rt_tables` seed) | runtime SRTLA state |
 
 Notes:
+- The hostname allocator's local process lock is runtime-only at
+  `/run/ceralive-hostname/hostname.lock`; it is never identity state and is not
+  persisted.
 - The `.deb`-shipped `/etc/ceralive/config.json` (build-debian-package.sh:67) and the
   static `/etc/ceralive/conf.d/*.conf` defaults remain **read-only seeds in the rootfs**;
   the **live, writable** copies live under `/data`.

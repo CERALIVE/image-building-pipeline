@@ -65,7 +65,7 @@ Any one of the three is enough. `watchexec` gives the best experience (native de
 **Device preflight (one-time).** Run `setup.sh` once on the device to create the static-path symlink the frontend sync depends on:
 
 ```bash
-ssh root@ceralive.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
+ssh root@<selected-hostname>.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
 ```
 
 This creates `/opt/ceralive/public -> /var/www/ceralive`. It's idempotent — safe to run again.
@@ -79,6 +79,11 @@ Copy the example and edit it:
 ```bash
 cp image-building-pipeline/v2/lib/dev-sync/.dev-sync.yaml.example .dev-sync.yaml
 ```
+
+Set `target_host` to the device's selected deterministic name (for example,
+`ceralive2.local`) or set `target_ip`. There is deliberately no default target:
+silently choosing `ceralive.local` can update the wrong device on a multi-device
+LAN.
 
 The file is discovered (first hit wins) at:
 
@@ -94,9 +99,9 @@ The file is discovered (first hit wins) at:
 ```yaml
 # --- Target device ---
 
-# mDNS .local name, tried first. Falls back to target_ip on failure.
+# Selected mDNS .local name, tried first. Falls back to target_ip on failure.
 # env: DEV_SYNC_TARGET_HOST
-target_host: ceralive.local
+target_host: <selected-hostname>.local
 
 # Fallback IP when mDNS can't resolve. Leave empty for mDNS-only.
 # env: DEV_SYNC_TARGET_IP
@@ -321,7 +326,7 @@ The three env vars in `apps/frontend/.env.local`:
 
 ### mDNS resolution fails
 
-**Symptom:** `dev-sync` can't reach `ceralive.local` even though the device is on the network.
+**Symptom:** `dev-sync` can't reach the selected `.local` hostname even though the device is on the network.
 
 **Cause.** `avahi-resolve` exits 0 even when resolution fails — it prints an error to stderr but returns success. The transport layer checks stdout content, not the exit code, to detect this.
 
@@ -360,7 +365,7 @@ The `&&` is load-bearing. If `systemd-sysext refresh` rejects the `.raw` (corrup
 Check the device logs for the rejection reason:
 
 ```bash
-ssh root@ceralive.local journalctl -u systemd-sysext -n 50
+ssh root@<selected-hostname>.local journalctl -u systemd-sysext -n 50
 ```
 
 ---
@@ -388,13 +393,13 @@ ssh root@ceralive.local journalctl -u systemd-sysext -n 50
 **Fix:** Run setup on the device:
 
 ```bash
-ssh root@ceralive.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
+ssh root@<selected-hostname>.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
 ```
 
 To check the current state without changing anything:
 
 ```bash
-ssh root@ceralive.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh --dry-run
+ssh root@<selected-hostname>.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh --dry-run
 ```
 
 If a real directory exists at `/opt/ceralive/public` (not a symlink), `setup.sh` will refuse to overwrite it. Remove or rename it manually first.
@@ -425,12 +430,12 @@ brew install watchexec
 **Check the service logs on the device:**
 
 ```bash
-ssh root@ceralive.local journalctl -u ceralive.service -n 100
+ssh root@<selected-hostname>.local journalctl -u ceralive.service -n 100
 ```
 
 Common causes:
 
-- **Arch mismatch in the binary** — the binary was cross-compiled but the device can't execute it. Check with `ssh root@ceralive.local file /opt/ceralive/ceralive`.
+- **Arch mismatch in the binary** — the binary was cross-compiled but the device can't execute it. Check with `ssh root@<selected-hostname>.local file /opt/ceralive/ceralive`.
 - **Port conflict** — something else is on port 80. The health probe hits `GET http://127.0.0.1:80/`. Override with `DEV_SYNC_HEALTH_PORT`.
 - **Slow startup** — increase retries or interval: `DEV_SYNC_HEALTH_RETRIES=30 DEV_SYNC_HEALTH_INTERVAL=3`.
 
@@ -438,7 +443,9 @@ Common causes:
 
 ## Full env-knob reference
 
-All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in parentheses.
+All knobs are optional except that one device target (`DEV_SYNC_TARGET_HOST` or
+`DEV_SYNC_TARGET_IP`) must be selected. The matching `.dev-sync.yaml` field (if
+any) is noted in parentheses.
 
 ### Orchestrator (`dev-sync`)
 
@@ -461,7 +468,7 @@ All knobs are optional. The matching `.dev-sync.yaml` field (if any) is noted in
 
 | Knob | yaml field | Default | Purpose |
 |------|-----------|---------|---------|
-| `DEV_SYNC_TARGET_HOST` | `target_host` | `ceralive.local` | mDNS name, tried first |
+| `DEV_SYNC_TARGET_HOST` | `target_host` | `` | Explicit selected mDNS name such as `ceralive.local` or `ceralive2.local` |
 | `DEV_SYNC_TARGET_IP` | `target_ip` | `` | Fallback IP |
 | `SSH_USER` | `ssh_user` | `root` | Remote user |
 | `DEV_SYNC_SSH_KEY` | `ssh_key` | `` | SSH identity file (`~/.ssh/id_ed25519`) |

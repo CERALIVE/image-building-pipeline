@@ -80,72 +80,735 @@ extract_hostname_script() {
   ' "$POSTINST_LIB"
 }
 
-run_hostname_script_with_collision() {
-  local collision_ip="${1:-}"
-  local state="$BATS_TEST_TMPDIR/hostname-state"
-  local bin="$BATS_TEST_TMPDIR/hostname-bin"
-  local script="$BATS_TEST_TMPDIR/ceralive-set-hostname"
-  local hosts="$BATS_TEST_TMPDIR/hosts"
-  local hostname_file="$BATS_TEST_TMPDIR/hostname"
-  local calls="$BATS_TEST_TMPDIR/hostname-calls"
-  rm -rf "$state" "$bin"
-  mkdir -p "$state" "$bin"
-  printf '127.0.0.1\tlocalhost\n' >"$hosts"
-  extract_hostname_script >"$script"
-  chmod +x "$script"
+extract_hostname_unit() {
+  awk '
+    /cat >\/etc\/systemd\/system\/ceralive-hostname\.service <<'\''EOF'\''/ { in_unit = 1; next }
+    in_unit && /^EOF$/ { exit }
+    in_unit { print }
+  ' "$POSTINST_LIB"
+}
+
+make_hostname_fixture() {
+  local root="$1"
+  local bin="$root/bin"
+  rm -rf "$root"
+  mkdir -p "$root/state" "$root/avahi" "$root/shared" "$bin"
+  printf '127.0.0.1\tlocalhost\n' >"$root/hosts"
+  printf '0123456789abcdef0123456789abcdef\n' >"$root/machine-id"
+  extract_hostname_script >"$root/ceralive-set-hostname"
+  chmod +x "$root/ceralive-set-hostname"
+
   cat >"$bin/hostnamectl" <<'SH'
 #!/usr/bin/env bash
 printf 'hostnamectl %s\n' "$*" >>"$HOSTNAME_CALLS"
-exit 0
+[[ "${1:-}" = set-hostname && -n "${2:-}" ]] || exit 2
+if [[ "${HOSTNAMECTL_SCENARIO:-normal}" = interrupt ]]; then
+  kill -TERM "$PPID"
+  exit 143
+fi
+printf '%s\n' "$2" >"$SYSTEM_HOSTNAME_FILE"
+SH
+  cat >"$bin/hostname" <<'SH'
+#!/usr/bin/env bash
+if [[ $# -eq 0 ]]; then
+  cat "$SYSTEM_HOSTNAME_FILE"
+else
+  printf 'hostname %s\n' "$*" >>"$HOSTNAME_CALLS"
+  printf '%s\n' "$1" >"$SYSTEM_HOSTNAME_FILE"
+fi
+SH
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
+[[ "${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" != fail ]]
 SH
   cat >"$bin/ip" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *"-4 addr show scope global"*) printf '2: eth0    inet 192.168.78.50/24 brd 192.168.78.255 scope global eth0\n' ;;
-esac
+if [[ "$*" = *"addr show"* ]]; then
+  iface="${HOSTNAME_LOCAL_IFACE:-eth0}"
+  printf '2: %s    inet %s/24 brd 192.168.78.255 scope global %s\n' \
+    "$iface" "${HOSTNAME_LOCAL_IP:-192.168.78.50}" "$iface"
+fi
 SH
   cat >"$bin/timeout" <<'SH'
 #!/usr/bin/env bash
+while [[ "${1:-}" = -* ]]; do shift; done
 shift
 exec "$@"
 SH
-  cat >"$bin/avahi-resolve-host-name" <<'SH'
+  cat >"$bin/sync" <<'SH'
 #!/usr/bin/env bash
-name="${*: -1}"
-if [ "$name" = "ceralive.local" ] && [ -n "${HOSTNAME_COLLISION_IP:-}" ]; then
-  printf 'ceralive.local\t%s\n' "$HOSTNAME_COLLISION_IP"
+printf 'sync %s\n' "$*" >>"$HOSTNAME_CALLS"
+if [[ -n "${SYNC_FAIL_MATCH:-}" && "$*" = *"$SYNC_FAIL_MATCH"* ]]; then
+  exit 1
 fi
 SH
-  chmod +x "$bin/hostnamectl" "$bin/ip" "$bin/timeout" "$bin/avahi-resolve-host-name"
-  env HOSTNAME_CALLS="$calls" HOSTNAME_COLLISION_IP="$collision_ip" \
-      CERALIVE_HOSTNAME_STATE_DIR="$state" \
-      CERALIVE_HOSTS_FILE="$hosts" \
-      CERALIVE_HOSTNAME_FILE="$hostname_file" \
-      HOSTNAMECTL_BIN="$bin/hostnamectl" \
-      IP_BIN="$bin/ip" \
-      TIMEOUT_BIN="$bin/timeout" \
-      AVAHI_RESOLVE_BIN="$bin/avahi-resolve-host-name" \
-      CERALIVE_HOSTNAME_PROBE_GRACE=0 \
-      bash "$script"
-  cat "$calls"
-  printf 'index=%s\n' "$(cat "$state/host_index")"
-  printf 'hosts=%s\n' "$(grep '^127\.0\.1\.1' "$hosts")"
+  cat >"$bin/avahi-set-host-name" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+name="${1:?missing hostname}"
+mkdir -p "$AVAHI_DEVICE_STATE" "$AVAHI_SHARED_DIR"
+printf 'avahi-set-host-name %s\n' "$name" >>"$HOSTNAME_CALLS"
+
+if [[ "${AVAHI_SCENARIO:-normal}" =~ ^(concurrent|symmetric-gap)$ \
+      && "$name" = ceralive && ! -e "$AVAHI_DEVICE_STATE/gate-passed" ]]; then
+  : >"$AVAHI_SHARED_DIR/ready.${AVAHI_CLIENT_ID}"
+  flock "$AVAHI_SHARED_DIR/gate.lock" -c :
+  : >"$AVAHI_DEVICE_STATE/gate-passed"
+fi
+
+attempt_file="$AVAHI_DEVICE_STATE/set-count.${name}"
+attempt=0
+[[ ! -s "$attempt_file" ]] || attempt="$(cat "$attempt_file")"
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$attempt_file"
+
+published="$name"
+if [[ "${AVAHI_SCENARIO:-normal}" = symmetric-gap && "$name" = ceralive && "$attempt" -eq 1 ]]; then
+  published="ceralive-2"
+else
+  case ",${HOSTNAME_OCCUPIED_NAMES:-}," in
+    *",${name},"*) published="${name}-2" ;;
+  esac
+  if [[ "${AVAHI_SCENARIO:-normal}" = rename && "$name" = ceralive ]]; then
+    published="ceralive-2"
+  fi
+fi
+
+if [[ "${AVAHI_SCENARIO:-normal}" =~ ^(concurrent|symmetric-gap)$ && "$published" = "$name" ]]; then
+  exec 9>"$AVAHI_SHARED_DIR/owners.lock"
+  flock 9
+  owner="$AVAHI_SHARED_DIR/owner.${name}"
+  if [[ ! -e "$owner" ]]; then
+    printf '%s\n' "$AVAHI_CLIENT_ID" >"$owner"
+  elif [[ "$(cat "$owner")" != "$AVAHI_CLIENT_ID" ]]; then
+    published="${name}-2"
+  fi
+fi
+
+printf '%s\n' "$published" >"$AVAHI_DEVICE_STATE/published"
+printf '2\n' >"$AVAHI_DEVICE_STATE/state"
+SH
+  cat >"$bin/avahi-resolve" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  -n)
+    fqdn="${2:?missing host name}"
+    name="${fqdn%.local}"
+    stable=0
+    case ",${HOSTNAME_OCCUPIED_NAMES:-}," in
+      *",${name},"*) stable=1 ;;
+    esac
+    if [[ "${AVAHI_SCENARIO:-normal}" = rename && "$name" = ceralive ]]; then
+      stable=1
+    fi
+    owner="$AVAHI_SHARED_DIR/owner.${name}"
+    if [[ -s "$owner" && "$(cat "$owner")" != "$AVAHI_CLIENT_ID" ]]; then
+      stable=1
+    fi
+    (( stable == 1 )) || exit 1
+    printf '%s\n' "$name" >"$AVAHI_DEVICE_STATE/resolved-name"
+    printf '%s\t192.0.2.10\n' "$fqdn"
+    ;;
+  -a)
+    address="${2:?missing address}"
+    name="$(cat "$AVAHI_DEVICE_STATE/resolved-name")"
+    printf '%s\t%s.local\n' "$address" "$name"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  cat >"$bin/busctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *GetState)
+    case "${AVAHI_SCENARIO:-normal}" in
+      malformed) printf 'malformed-state\n' ;;
+      misleading-state) printf 'i 2 trailing-data\n' ;;
+      multiline-state) printf 'i 2\ntrailing-record\n' ;;
+      *) printf 'i %s\n' "$(cat "$AVAHI_DEVICE_STATE/state")" ;;
+    esac
+    ;;
+  *GetHostName)
+    count_file="$AVAHI_DEVICE_STATE/get-name-count"
+    exec 9>"$AVAHI_DEVICE_STATE/probe.lock"
+    flock 9
+    count=0
+    [[ ! -s "$count_file" ]] || count="$(cat "$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    if [[ "${AVAHI_SCENARIO:-normal}" = multiline-name ]]; then
+      printf 's "%s"\ntrailing-record\n' "$(cat "$AVAHI_DEVICE_STATE/published")"
+    elif [[ "${AVAHI_SCENARIO:-normal}" = misleading-name ]]; then
+      printf 's "%s" trailing-data\n' "$(cat "$AVAHI_DEVICE_STATE/published")"
+    elif [[ "${AVAHI_SCENARIO:-normal}" = stale && "$count" -eq 1 ]]; then
+      printf 's "old-hostname"\n'
+    else
+      printf 's "%s"\n' "$(cat "$AVAHI_DEVICE_STATE/published")"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$bin"/*
 }
 
-@test "hostname: first device claims predictable ceralive.local" {
-  run run_hostname_script_with_collision ""
+emit_hostname_observables() {
+  local root="$1"
+  [[ ! -f "$root/calls" ]] || cat "$root/calls"
+  printf 'index=%s\n' "$(cat "$root/state/host_index" 2>/dev/null || printf '<missing>')"
+  printf 'system-hostname=%s\n' "$(cat "$root/system-hostname" 2>/dev/null || printf '<missing>')"
+  printf 'hostname-file=%s\n' "$(cat "$root/hostname" 2>/dev/null || printf '<missing>')"
+  printf 'hosts=%s\n' "$(awk '$1 == "127.0.1.1" { print $2 }' "$root/hosts")"
+  printf 'published=%s\n' "$(cat "$root/avahi/published" 2>/dev/null || printf '<missing>')"
+  printf 'get-name-count=%s\n' "$(cat "$root/avahi/get-name-count" 2>/dev/null || printf '0')"
+}
+
+run_hostname_script() {
+  local root="$1"
+  local bin="$root/bin"
+  local occupied="${2:-}"
+  local scenario="${3:-normal}"
+  local client="${4:-device}"
+  local shared="${5:-$root/shared}"
+  local hostnamectl_scenario="${6:-normal}"
+  local mode="${7:-}"
+  local -a script_args=()
+  [[ -z "$mode" ]] || script_args+=("$mode")
+  local rc=0
+  env HOSTNAME_CALLS="$root/calls" \
+      SYSTEM_HOSTNAME_FILE="$root/system-hostname" \
+      HOSTNAME_OCCUPIED_NAMES="$occupied" \
+      HOSTNAMECTL_SCENARIO="$hostnamectl_scenario" \
+      HOSTNAME_SYSTEMCTL_SCENARIO="${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" \
+      HOSTNAME_LOCAL_IP="${HOSTNAME_LOCAL_IP:-192.168.78.50}" \
+      HOSTNAME_LOCAL_IFACE="${HOSTNAME_LOCAL_IFACE:-eth0}" \
+      AVAHI_SCENARIO="$scenario" \
+      AVAHI_CLIENT_ID="$client" \
+      AVAHI_DEVICE_STATE="$root/avahi" \
+      AVAHI_SHARED_DIR="$shared" \
+      CERALIVE_HOSTNAME_STATE_DIR="$root/state" \
+      CERALIVE_HOSTNAME_LOCK_FILE="$root/run/hostname.lock" \
+      CERALIVE_HOSTS_FILE="$root/hosts" \
+      CERALIVE_HOSTNAME_FILE="$root/hostname" \
+      CERALIVE_MACHINE_ID_FILE="$root/machine-id" \
+      HOSTNAMECTL_BIN="$bin/hostnamectl" \
+      HOSTNAME_BIN="$bin/hostname" \
+      IP_BIN="$root/bin/ip" \
+      TIMEOUT_BIN="$root/bin/timeout" \
+      SYNC_BIN="$root/bin/sync" \
+      AVAHI_SET_HOSTNAME_BIN="$root/bin/avahi-set-host-name" \
+      BUSCTL_BIN="$root/bin/busctl" \
+      AVAHI_RESOLVE_BIN="$root/bin/avahi-resolve" \
+      SYSTEMCTL_BIN="$root/bin/systemctl" \
+      CERALIVE_HOSTNAME_MAX_INDEX=4 \
+      CERALIVE_HOSTNAME_MAX_WAIT=4 \
+      CERALIVE_HOSTNAME_MAX_PROBES=4 \
+      CERALIVE_HOSTNAME_POLL_INTERVAL=0 \
+      CERALIVE_HOSTNAME_STABLE_CHECKS=2 \
+      CERALIVE_HOSTNAME_CONTENTION_RETRIES=4 \
+      CERALIVE_HOSTNAME_CONTENTION_BACKOFF_MAX=0 \
+      bash "$root/ceralive-set-hostname" "${script_args[@]}" || rc=$?
+  emit_hostname_observables "$root"
+  return "$rc"
+}
+
+run_concurrent_hostname_scripts() {
+  local root_a="$1" root_b="$2" shared="$3" scenario="${4:-concurrent}"
+  make_hostname_fixture "$root_a"
+  make_hostname_fixture "$root_b"
+  mkdir -p "$shared"
+  exec 8>"$shared/gate.lock"
+  flock 8
+
+  run_hostname_script "$root_a" "" "$scenario" device-a "$shared" >"$root_a/output" 2>&1 &
+  local pid_a=$!
+  run_hostname_script "$root_b" "" "$scenario" device-b "$shared" >"$root_b/output" 2>&1 &
+  local pid_b=$!
+  local observed=0
+  for _ in $(seq 1 200); do
+    if [[ -e "$shared/ready.device-a" && -e "$shared/ready.device-b" ]]; then
+      observed=1
+      break
+    fi
+    if ! kill -0 "$pid_a" 2>/dev/null && ! kill -0 "$pid_b" 2>/dev/null; then
+      break
+    fi
+    sleep 0.01
+  done
+  flock -u 8
+
+  local rc=0
+  wait "$pid_a" || rc=1
+  wait "$pid_b" || rc=1
+  printf 'overlap-observed=%s\n' "$observed"
+  sed 's/^/device-a: /' "$root_a/output"
+  sed 's/^/device-b: /' "$root_b/output"
+  return "$rc"
+}
+
+@test "hostname: no collision commits and publishes ceralive" {
+  local root="$BATS_TEST_TMPDIR/no-collision"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostnamectl set-hostname ceralive"* ]]
   [[ "$output" == *"index=1"* ]]
-  [[ "$output" == *$'hosts=127.0.1.1\tceralive'* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"hosts=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
 }
 
-@test "hostname: mDNS collision falls back to ceralive2.local" {
-  run run_hostname_script_with_collision "192.168.78.10"
+@test "hostname: occupied ceralive commits and publishes ceralive2" {
+  local root="$BATS_TEST_TMPDIR/one-collision"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "ceralive"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostnamectl set-hostname ceralive2"* ]]
   [[ "$output" == *"index=2"* ]]
-  [[ "$output" == *$'hosts=127.0.1.1\tceralive2'* ]]
+  [[ "$output" == *"system-hostname=ceralive2"* ]]
+  [[ "$output" == *"hostname-file=ceralive2"* ]]
+  [[ "$output" == *"hosts=ceralive2"* ]]
+  [[ "$output" == *"published=ceralive2"* ]]
+  [[ "$output" != *"system-hostname=ceralive-2"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: occupied ceralive and ceralive2 commit and publish ceralive3" {
+  local root="$BATS_TEST_TMPDIR/two-collisions"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "ceralive,ceralive2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive3"* ]]
+  [[ "$output" == *"index=3"* ]]
+  [[ "$output" == *"system-hostname=ceralive3"* ]]
+  [[ "$output" == *"hostname-file=ceralive3"* ]]
+  [[ "$output" == *"published=ceralive3"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: concurrent first boots establish distinct deterministic names" {
+  local root_a="$BATS_TEST_TMPDIR/concurrent-a"
+  local root_b="$BATS_TEST_TMPDIR/concurrent-b"
+  local shared="$BATS_TEST_TMPDIR/concurrent-shared"
+  run run_concurrent_hostname_scripts "$root_a" "$root_b" "$shared"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"overlap-observed=1"* ]]
+  local concurrent_output="$output"
+  run bash -c "printf '%s\n' \"\$(cat '$root_a/system-hostname')\" \"\$(cat '$root_b/system-hostname')\" | sort | paste -sd,"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ceralive,ceralive2" ]
+  [ "$(cat "$root_a/system-hostname")" = "$(cat "$root_a/hostname")" ]
+  [ "$(cat "$root_a/hostname")" = "$(cat "$root_a/avahi/published")" ]
+  [ "$(cat "$root_b/system-hostname")" = "$(cat "$root_b/hostname")" ]
+  [ "$(cat "$root_b/hostname")" = "$(cat "$root_b/avahi/published")" ]
+  printf '%s\n' "$concurrent_output"
+}
+
+@test "hostname: symmetric Avahi renames retry the unowned lower candidate" {
+  local root_a="$BATS_TEST_TMPDIR/symmetric-gap-a"
+  local root_b="$BATS_TEST_TMPDIR/symmetric-gap-b"
+  local shared="$BATS_TEST_TMPDIR/symmetric-gap-shared"
+  run run_concurrent_hostname_scripts "$root_a" "$root_b" "$shared" symmetric-gap
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"overlap-observed=1"* ]]
+  [[ "$output" == *"has no stable owner; retrying the same deterministic candidate"* ]]
+  local race_output="$output"
+  run bash -c "printf '%s\n' \"\$(cat '$root_a/system-hostname')\" \"\$(cat '$root_b/system-hostname')\" | sort | paste -sd,"
+  [ "$status" -eq 0 ]
+  [ "$output" = "ceralive,ceralive2" ]
+  [ "$(cat "$root_a/system-hostname")" = "$(cat "$root_a/avahi/published")" ]
+  [ "$(cat "$root_b/system-hostname")" = "$(cat "$root_b/avahi/published")" ]
+  printf '%s\n' "$race_output"
+}
+
+@test "hostname: stale Avahi snapshot is retried without skipping ceralive" {
+  local root="$BATS_TEST_TMPDIR/stale-probe"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "" stale
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  [[ "$output" == *"get-name-count=3"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: malformed Avahi snapshots fail closed without persisting identity" {
+  local root="$BATS_TEST_TMPDIR/malformed-probe"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "" malformed
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"index=<missing>"* ]]
+  [[ "$output" == *"system-hostname=<missing>"* ]]
+  [[ "$output" == *"hostname-file=<missing>"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: Avahi automatic hyphen rename advances to deterministic next candidate" {
+  local root="$BATS_TEST_TMPDIR/avahi-rename"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "" rename
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"avahi-set-host-name ceralive"* ]]
+  [[ "$output" == *"avahi-set-host-name ceralive2"* ]]
+  [[ "$output" == *"index=2"* ]]
+  [[ "$output" == *"system-hostname=ceralive2"* ]]
+  [[ "$output" == *"hostname-file=ceralive2"* ]]
+  [[ "$output" == *"published=ceralive2"* ]]
+  [[ "$output" != *"system-hostname=ceralive-2"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: restart reapplies persisted identity to system and Avahi" {
+  local root="$BATS_TEST_TMPDIR/restart"
+  make_hostname_fixture "$root"
+  mkdir -p "$root/data"
+  ln -s "$root/data/host_index" "$root/state/host_index"
+  ln -s "$root/data/hostname.lock" "$root/state/hostname.lock"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [ -L "$root/state/host_index" ]
+  [ -L "$root/state/hostname.lock" ]
+  [ ! -e "$root/data/hostname.lock" ]
+  [ -f "$root/run/hostname.lock" ]
+  [ "$(cat "$root/data/host_index")" = 1 ]
+  local first_boot_output="$output"
+
+  printf 'factory-seed\n' >"$root/hostname"
+  printf 'factory-seed\n' >"$root/system-hostname"
+  rm -f "$root/avahi/published" "$root/avahi/get-name-count" "$root/calls"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostnamectl set-hostname ceralive"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"hosts=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n--- restart ---\n%s\n' "$first_boot_output" "$output"
+}
+
+@test "hostname: stale persisted lock symlink is ignored without clobbering its target" {
+  local root="$BATS_TEST_TMPDIR/stale-lock-symlink"
+  make_hostname_fixture "$root"
+  printf 'do-not-clobber\n' >"$root/victim"
+  ln -s "$root/victim" "$root/state/hostname.lock"
+
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/victim")" = do-not-clobber ]
+  [ -L "$root/state/hostname.lock" ]
+  [ -f "$root/run/hostname.lock" ]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: identity files are synced before the persisted claim completes" {
+  local root="$BATS_TEST_TMPDIR/durable-identity"
+  make_hostname_fixture "$root"
+
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^sync -f ' "$root/calls")" -eq 9 ]
+  grep -Fq "sync -f $root/hostname" "$root/calls"
+  grep -Fq "sync -f $root/hosts" "$root/calls"
+  grep -Fq "sync -f $root/state/host_index" "$root/calls"
+  [ "$(tail -n 1 "$root/calls")" = "sync -f $root/state" ]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: interrupted commit leaves no identity and restart converges" {
+  local root="$BATS_TEST_TMPDIR/interrupted-commit"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "" normal device "$root/shared" interrupt
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"index=<missing>"* ]]
+  [[ "$output" == *"system-hostname=<missing>"* ]]
+  [[ "$output" == *"hostname-file=<missing>"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  [ -f "$root/run/hostname.lock" ]
+  local interrupted_output="$output"
+
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n--- recovered ---\n%s\n' "$interrupted_output" "$output"
+}
+
+@test "hostname: claim tooling and identity consumer ordering ship together" {
+  local hostname_unit
+  run bash -c "sed 's/#.*//' '$V2/manifests/packages/shared.list' | awk 'NF { print \$1 }' | grep -Fx avahi-utils"
+  [ "$status" -eq 0 ]
+  hostname_unit="$(extract_hostname_unit)"
+  grep -Fq 'Requires=ceralive-migrate-data.service' "$POSTINST_LIB"
+  grep -Fq 'RequiresMountsFor=/data' "$POSTINST_LIB"
+  [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service'* ]]
+  [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service'* ]]
+  [[ "$hostname_unit" == *'RemainAfterExit=yes'* ]]
+  [[ "$hostname_unit" != *'OnSuccess='* ]]
+  grep -Fq 'ceralive-hostname-reconcile.service' "$POSTINST_LIB"
+  grep -Fq 'ExecStart=/usr/local/sbin/ceralive-set-hostname reconcile' "$POSTINST_LIB"
+  grep -Fq 'ceralive-hostname-reconcile.timer' "$POSTINST_LIB"
+  grep -Fq 'OnUnitActiveSec=30s' "$POSTINST_LIB"
+  grep -Fq 'Unit=ceralive-hostname-reconcile.service' "$POSTINST_LIB"
+  grep -Fq 'RuntimeDirectory=ceralive-hostname' "$POSTINST_LIB"
+  grep -Fq 'After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service' "$POSTINST_LIB"
+  grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
+  grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
+  grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
+  ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
+  grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service network-online.target' \
+    "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+}
+
+@test "hostname: aligned reconciliation is a no-op" {
+  local root="$BATS_TEST_TMPDIR/reconcile-aligned"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"identity already aligned at ceralive.local"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: late Avahi rename advances identity and restarts every consumer" {
+  local root="$BATS_TEST_TMPDIR/reconcile-conflict"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  printf 'ceralive-2\n' >"$root/avahi/published"
+  printf '2\n' >"$root/avahi/state"
+  : >"$root/calls"
+  run run_hostname_script "$root" "" rename device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"publication diverged"* ]]
+  [[ "$output" == *"index=2"* ]]
+  [[ "$output" == *"system-hostname=ceralive2"* ]]
+  [[ "$output" == *"hostname-file=ceralive2"* ]]
+  [[ "$output" == *"hosts=ceralive2"* ]]
+  [[ "$output" == *"published=ceralive2"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive.service ceralive-hawkbit-provision.service ceralive-healthcheck.service"* ]]
+  [[ "$output" != *"system-hostname=ceralive-2"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: registering publication defers reconciliation without churn" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  printf '1\n' >"$root/avahi/state"
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"publication is still registering; deferring"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
+  [[ "$output" == *"index=1"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: malformed reconciliation probe fails closed without mutation" {
+  local root="$BATS_TEST_TMPDIR/reconcile-malformed"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  : >"$root/calls"
+  run run_hostname_script "$root" "" malformed device "$root/shared" normal reconcile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot read a strict Avahi publication snapshot"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  [[ "$output" != *"systemctl --no-block restart"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: interrupted consumer requeue is retried without reallocating" {
+  local root="$BATS_TEST_TMPDIR/reconcile-requeue-interruption"
+  make_hostname_fixture "$root"
+  mkdir -p "$root/data"
+  ln -s "$root/data/hostname_consumers_pending" "$root/state/hostname_consumers_pending"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  printf 'ceralive-2\n' >"$root/avahi/published"
+  printf '2\n' >"$root/avahi/state"
+  : >"$root/calls"
+  HOSTNAME_SYSTEMCTL_SCENARIO=fail run run_hostname_script \
+    "$root" "" rename device "$root/shared" normal reconcile
+  [ "$status" -ne 0 ]
+  [ -e "$root/state/hostname_consumers_pending" ]
+  [ -L "$root/state/hostname_consumers_pending" ]
+  [ -e "$root/data/hostname_consumers_pending" ]
+  [[ "$output" == *"failed to requeue identity consumers"* ]]
+  [[ "$output" == *"index=2"* ]]
+  [[ "$output" == *"system-hostname=ceralive2"* ]]
+  [[ "$output" == *"published=ceralive2"* ]]
+
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/state/hostname_consumers_pending" ]
+  [ -L "$root/state/hostname_consumers_pending" ]
+  [ ! -e "$root/data/hostname_consumers_pending" ]
+  [[ "$output" == *"completed pending consumer restart for ceralive2.local"* ]]
+  [[ "$output" == *"identity already aligned at ceralive2.local"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  [[ "$output" == *"systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive.service ceralive-hawkbit-provision.service ceralive-healthcheck.service"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: TLS certificate follows the committed identity and stays stable" {
+  local tls_script="$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
+  local root="$BATS_TEST_TMPDIR/tls-hostname"
+  local bin="$root/bin"
+  local cert="$root/state/ceralive.crt"
+  local key="$root/state/ceralive.key"
+  mkdir -p "$bin"
+
+  grep -Fq 'CERALIVE_TLS_STATE_DIR' "$tls_script"
+  cat >"$bin/hostname" <<'SH'
+#!/usr/bin/env bash
+cat "$TLS_TEST_HOSTNAME_FILE"
+SH
+  cat >"$bin/ip" <<'SH'
+#!/usr/bin/env bash
+printf '2: eth0    inet 192.0.2.20/24 brd 192.0.2.255 scope global eth0\n'
+SH
+  chmod +x "$bin/hostname" "$bin/ip"
+
+  printf 'ceralive\n' >"$root/runtime-hostname"
+  TLS_TEST_HOSTNAME_FILE="$root/runtime-hostname" \
+    CERALIVE_TLS_STATE_DIR="$root/state" HOSTNAME_BIN="$bin/hostname" IP_BIN="$bin/ip" \
+    run bash "$tls_script"
+  [ "$status" -eq 0 ]
+  [ -s "$cert" ]
+  [ -s "$key" ]
+  local first_fingerprint
+  first_fingerprint="$(openssl x509 -in "$cert" -noout -fingerprint -sha256)"
+  [[ "$(openssl x509 -in "$cert" -noout -checkhost ceralive.local 2>/dev/null)" == *"does match certificate"* ]]
+
+  TLS_TEST_HOSTNAME_FILE="$root/runtime-hostname" \
+    CERALIVE_TLS_STATE_DIR="$root/state" HOSTNAME_BIN="$bin/hostname" IP_BIN="$bin/ip" \
+    run bash "$tls_script"
+  [ "$status" -eq 0 ]
+  [ "$(openssl x509 -in "$cert" -noout -fingerprint -sha256)" = "$first_fingerprint" ]
+
+  printf 'ceralive2\n' >"$root/runtime-hostname"
+  TLS_TEST_HOSTNAME_FILE="$root/runtime-hostname" \
+    CERALIVE_TLS_STATE_DIR="$root/state" HOSTNAME_BIN="$bin/hostname" IP_BIN="$bin/ip" \
+    run bash "$tls_script"
+  [ "$status" -eq 0 ]
+  [ "$(openssl x509 -in "$cert" -noout -fingerprint -sha256)" != "$first_fingerprint" ]
+  [[ "$(openssl x509 -in "$cert" -noout -checkhost ceralive2.local 2>/dev/null)" == *"does match certificate"* ]]
+  [[ "$(openssl x509 -in "$cert" -noout -checkhost ceralive.local 2>/dev/null)" != *"does match certificate"* ]]
+  [ "$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print $1}')" = \
+    "$(openssl pkey -in "$key" -pubout -outform DER | sha256sum | awk '{print $1}')" ]
+  printf 'first=%s\nsecond=%s\n' "$first_fingerprint" \
+    "$(openssl x509 -in "$cert" -noout -fingerprint -sha256)"
+}
+
+@test "dev-sync: target selection is explicit when deterministic names can collide" {
+  local missing="$BATS_TEST_TMPDIR/no-dev-sync-config.yaml"
+  run env -u DEV_SYNC_TARGET_HOST -u DEV_SYNC_TARGET_IP \
+    DEV_SYNC_CONFIG="$missing" DRY_RUN=1 bash "$V2/lib/dev-sync/transport.sh" resolve
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"neither DEV_SYNC_TARGET_HOST nor DEV_SYNC_TARGET_IP is set"* ]]
+  [[ "$output" != *"ceralive.local"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: valid-looking D-Bus output with trailing data fails closed" {
+  local scenario root
+  for scenario in misleading-state misleading-name; do
+    root="$BATS_TEST_TMPDIR/$scenario"
+    make_hostname_fixture "$root"
+    run run_hostname_script "$root" "" "$scenario"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"index=<missing>"* ]]
+    [[ "$output" == *"system-hostname=<missing>"* ]]
+    [[ "$output" == *"hostname-file=<missing>"* ]]
+    printf 'scenario=%s\n%s\n' "$scenario" "$output"
+  done
+}
+
+@test "hostname: multiline D-Bus output fails closed without persisting identity" {
+  local scenario root
+  for scenario in multiline-state multiline-name; do
+    root="$BATS_TEST_TMPDIR/$scenario"
+    make_hostname_fixture "$root"
+    run run_hostname_script "$root" "" "$scenario"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"index=<missing>"* ]]
+    [[ "$output" == *"hostname-file=<missing>"* ]]
+    printf 'scenario=%s\n%s\n' "$scenario" "$output"
+  done
+}
+
+@test "hostname: setup AP address alone is not accepted as publishable identity" {
+  local root="$BATS_TEST_TMPDIR/setup-ap-only"
+  make_hostname_fixture "$root"
+  HOSTNAME_LOCAL_IP=192.168.42.1 HOSTNAME_LOCAL_IFACE=wlan0 run run_hostname_script "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"index=<missing>"* ]]
+  [[ "$output" == *"hostname-file=<missing>"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: same-subnet non-AP LAN address remains publishable" {
+  local root="$BATS_TEST_TMPDIR/same-subnet-lan"
+  make_hostname_fixture "$root"
+  HOSTNAME_LOCAL_IP=192.168.42.50 HOSTNAME_LOCAL_IFACE=eth0 run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: Ethernet IPv4 link-local remains a publishable collision domain" {
+  local root="$BATS_TEST_TMPDIR/ethernet-link-local"
+  make_hostname_fixture "$root"
+  HOSTNAME_LOCAL_IP=169.254.50.2 HOSTNAME_LOCAL_IFACE=eth0 run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: malformed persisted index fails closed without reinterpretation" {
+  local root="$BATS_TEST_TMPDIR/malformed-index"
+  make_hostname_fixture "$root"
+  printf '2stale\n' >"$root/state/host_index"
+  run run_hostname_script "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"invalid persisted hostname index"* ]]
+  [[ "$output" == *"index=2stale"* ]]
+  [[ "$output" == *"system-hostname=<missing>"* ]]
+  [[ "$output" == *"hostname-file=<missing>"* ]]
+  [[ "$output" == *"published=<missing>"* ]]
+  printf '%s\n' "$output"
 }
 
 # check_schema_metaschema <schema.json>

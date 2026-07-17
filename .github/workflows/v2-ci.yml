@@ -116,8 +116,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cpio device-tree-compiler dosfstools e2fsprogs gdisk mtools \
-            dbus rauc rauc-service socat squashfs-tools systemd u-boot-tools
+            avahi-daemon avahi-utils cpio dbus device-tree-compiler dosfstools \
+            e2fsprogs gdisk iproute2 mtools procps rauc rauc-service socat \
+            squashfs-tools systemd u-boot-tools util-linux
 
       - name: Start system D-Bus for real RAUC contract
         run: |
@@ -130,7 +131,9 @@ jobs:
           sudo busctl --system status
 
       - name: Run v2 manifest unit suite
-        run: CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+        run: |
+          CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
+            CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
 
   size-gate:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT

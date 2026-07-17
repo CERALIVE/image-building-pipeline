@@ -74,7 +74,7 @@ plan (see §5).
 sync depends on:
 
 ```bash
-ssh root@ceralive.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
+ssh root@<selected-hostname>.local bash < image-building-pipeline/v2/lib/dev-sync/setup.sh
 ```
 
 Idempotent; creates `/opt/ceralive/public -> /var/www/ceralive`.

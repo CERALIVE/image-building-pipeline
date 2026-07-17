@@ -15,10 +15,10 @@
 
 # --- Target device -----------------------------------------------------------
 
-# mDNS .local name, tried FIRST. transport.sh resolves it via
+# Selected mDNS .local name, tried FIRST. transport.sh resolves it via
 # avahi-resolve/getent/ping; on resolution OR ssh failure it falls back to
 # target_ip below.            env: DEV_SYNC_TARGET_HOST
-target_host: ceralive.local
+target_host: <selected-hostname>.local
 
 # Fallback IP used when the .local name can't be resolved/reached. Leave empty
 # if you only ever use mDNS.  env: DEV_SYNC_TARGET_IP

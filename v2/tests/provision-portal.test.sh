@@ -36,6 +36,7 @@ trap 'rm -rf "${SANDBOX}"' EXIT
 BIN="${SANDBOX}/bin"; STATE="${SANDBOX}/state"; DNSDIR="${SANDBOX}/dnsmasq-shared.d"
 CALL_LOG="${SANDBOX}/calls.log"; SCAN_SRC="${SANDBOX}/scan-src.txt"
 MACHINE_ID="${SANDBOX}/machine-id"
+HOSTNAME_FILE="${SANDBOX}/hostname"; HOST_INDEX_FILE="${SANDBOX}/host-index"
 mkdir -p "${BIN}" "${STATE}"
 printf 'HomeNet\nCafe Wifi\nNeighbour\n' >"${SCAN_SRC}"
 printf 'deadbeefcafef00d\n' >"${MACHINE_ID}"
@@ -71,17 +72,29 @@ make_stub systemd-run 'echo "systemd-run $*" >>"$CALL_LOG"; exit 0'
 make_stub timeout \
   'echo "timeout $*" >>"$CALL_LOG"' \
   'if [ -n "${STUB_TIMEOUT_RC:-}" ]; then exit "$STUB_TIMEOUT_RC"; fi' \
+  'while [ "${1#-}" != "$1" ]; do shift; done' \
   'shift; exec "$@"'
 
 make_stub logger 'exit 0'
+make_stub hostname 'printf "%s\n" "${STUB_RUNTIME_HOSTNAME:-factory-seed}"'
+make_stub busctl \
+  'case "$*" in' \
+  '  *GetState) printf '"'"'i %s\n'"'"' "${STUB_AVAHI_STATE:-2}" ;;' \
+  '  *GetHostName) printf '"'"'s "%s"\n'"'"' "${STUB_AVAHI_HOSTNAME:-factory-seed}" ;;' \
+  '  *) exit 2 ;;' \
+  'esac'
 
 export PATH="${BIN}:${PATH}"
 export NMCLI="${BIN}/nmcli" IP_BIN="${BIN}/ip" SYSTEMCTL="${BIN}/systemctl"
 export SYSTEMD_RUN="${BIN}/systemd-run" TIMEOUT_BIN="${BIN}/timeout"
+export CERALIVE_BUSCTL="${BIN}/busctl" CERALIVE_TIMEOUT="${BIN}/timeout"
 export CERALIVE_MACHINE_ID_FILE="${MACHINE_ID}"
 export CERALIVE_PROVISION_STATE_DIR="${STATE}"
 export CERALIVE_DNSMASQ_SHARED_DIR="${DNSDIR}"
 export CERALIVE_PROVISION_BIN="${PROVISION}"
+export CERALIVE_HOSTNAME_FILE="${HOSTNAME_FILE}"
+export CERALIVE_HOSTNAME_INDEX_FILE="${HOST_INDEX_FILE}"
+export CERALIVE_HOSTNAME_BIN="${BIN}/hostname"
 export CERALIVE_CONNECT_FLUSH_DELAY=0
 export CALL_LOG STUB_SCAN_FILE="${SCAN_SRC}"
 
@@ -120,12 +133,31 @@ grep -qiF '200 OK'             <<<"${GET_OUT}"   && pass "responds 200 OK"      
 echo "== Scenario C: POST writes the NM profile + triggers the detached handoff =="
 reset_state
 printf 'portal-active' >"$(state_file portal-active)"
+printf '2\n' >"${HOST_INDEX_FILE}"
+printf 'ceralive2\n' >"${HOSTNAME_FILE}"
+export STUB_RUNTIME_HOSTNAME=ceralive2
+export STUB_AVAHI_HOSTNAME=ceralive2
 POST_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
 called "nmcli connection add type wifi con-name ceralive-wifi" && pass "writes NM profile for the user network" || fail "writes NM profile for the user network"
 called "wifi-sec.psk hunter2pass"                && pass "passphrase handed to NM only (not a file)" || fail "passphrase handed to NM only"
 called "systemd-run"                             && pass "detached worker launched"     || fail "detached worker launched"
 called "ceralive-provision.sh connect ceralive-wifi" && pass "handoff = provision connect <con>" || fail "handoff = provision connect <con>"
 grep -qiF 'Connecting' <<<"${POST_OUT}"          && pass "browser gets a connecting page" || fail "browser gets a connecting page"
+grep -qF '<b>ceralive2.local</b>' <<<"${POST_OUT}" && pass "connecting page uses the committed collision name" || fail "connecting page uses the committed collision name"
+! grep -qF 'selected deterministic address' <<<"${POST_OUT}" && pass "committed collision name does not fall back to deterministic guidance" || fail "committed collision name does not fall back to deterministic guidance"
+export STUB_RUNTIME_HOSTNAME=ceralive2
+export STUB_AVAHI_HOSTNAME=ceralive-2
+STALE_AVAHI_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
+grep -qF 'selected deterministic address' <<<"${STALE_AVAHI_OUT}" && pass "stale Avahi publication gets deterministic fallback guidance" || fail "stale Avahi publication gets deterministic fallback guidance"
+export STUB_AVAHI_HOSTNAME=ceralive2
+export STUB_AVAHI_STATE=1
+REGISTERING_AVAHI_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
+grep -qF 'selected deterministic address' <<<"${REGISTERING_AVAHI_OUT}" && pass "registering Avahi publication gets deterministic fallback guidance" || fail "registering Avahi publication gets deterministic fallback guidance"
+export STUB_AVAHI_STATE=2
+export STUB_RUNTIME_HOSTNAME=factory-seed
+export STUB_AVAHI_HOSTNAME=ceralive2
+UNCOMMITTED_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | bash "${PORTAL}" serve 2>/dev/null)"
+grep -qF 'selected deterministic address' <<<"${UNCOMMITTED_OUT}" && pass "in-flight identity gets deterministic fallback guidance" || fail "in-flight identity gets deterministic fallback guidance"
 # credentials must NOT be persisted anywhere but NM (no temp/state file holds the psk)
 ! grep -rqF 'hunter2pass' "${STATE}" 2>/dev/null && pass "no credential written to /data state" || fail "no credential written to /data state"
 

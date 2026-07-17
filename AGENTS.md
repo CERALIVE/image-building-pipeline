@@ -142,9 +142,11 @@ NOT dereference a symlink that is the FINAL path component (it writes the link
 target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
 follows a terminal-component symlink to the versioned target, and globs the versioned
 initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
-mock rollback, preflash adversarial fixtures, and—when CI sets
-`CERALIVE_RUN_REAL_RAUC_CONTRACT=required`—the privileged real-RAUC interruption
-and cleanup harness. The harness uses RAUC's supported boot-slot override for
+mock rollback, preflash adversarial fixtures, and the two privileged hardware-free
+contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=required` exercises
+real-RAUC interruption/cleanup, while
+`CERALIVE_RUN_REAL_AVAHI_CONTRACT=required` exercises real mDNS arbitration in
+private namespaces. The RAUC harness uses the supported boot-slot override for
 its synthetic file-backed slots, so the same service contract runs across CI
 RAUC versions without depending on the runner's boot device. A v1 single-slot
 disk cannot migrate by
@@ -881,6 +883,37 @@ dedicated offline guard is `v2/tests/ssh-firstboot-privsep.test.sh` (static: the
 `/run/sshd` creation precedes `sshd -t`; runtime: the real script survives an
 empty-`/run` first boot in a rootless namespace). Wired into `v2/run-tests`.
 
+**Deterministic first-boot hostname** [EXISTS]
+
+`ceralive-hostname.service` asks the running Avahi daemon to publish candidates
+in the exact sequence `ceralive`, `ceralive2`, `ceralive3`, ... and accepts a
+candidate only after Avahi repeatedly reports `RUNNING` with that exact name.
+Avahi's automatic hyphenated collision name is treated only as a conflict signal;
+it is never persisted. A real local `flock` serializes starts, while Avahi's mDNS
+claim protocol arbitrates simultaneous devices. The selected index lives at
+`/data/ceralive/host_index` through the `/etc/ceralive/host_index` symlink; the
+local service lock is runtime-only state under `/run`.
+
+Each service attempt has a 120-second global claim budget, 3-second command
+timeouts, and a 10-second local-lock wait. systemd caps the attempt at 150 seconds
+and retries a failed attempt after 5 seconds. Missing/malformed Avahi state,
+missing tooling, and failure to establish exact ownership all fail closed; there
+is no random suffix or DNS-only availability fallback. The isolated provisioning
+AP address is not a claimable LAN identity; Ethernet IPv4 link-local remains
+eligible. A successful retry non-blockingly requeues identity consumers while
+the hostname unit remains active, so an early no-network failure does not strand
+CeraUI or TLS. On every restart the service reapplies the persisted identity to
+the runtime hostname, `/etc/hostname`, `/etc/hosts`, and Avahi before CeraUI, TLS
+certificate creation, or hawkBit enrollment may run. A separate 30-second
+reconciliation timer checks strict Avahi and local identity state. Aligned and
+`REGISTERING` snapshots cause no allocation or service churn; explicit conflict
+or divergence reruns the bounded deterministic claim and restarts identity
+consumers only after a successful commit. TLS validates the actual certificate
+SAN and key pair, replacing it if the committed hostname advances. CI exercises
+the production script against two real Avahi daemons in private D-Bus/network
+namespaces for simultaneous boot and late-LAN-merge races. Operator behavior and
+diagnostics are documented in [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §4.
+
 **Build concurrency** [EXISTS]
 
 The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
@@ -990,10 +1023,12 @@ executor and `services.sh`, like `setup_provisioning`).
   `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header
   Connection "upgrade";` so CeraUI's same-origin telemetry/RPC WebSocket survives the
   proxy (Task 1 already maps `https:`→`wss:` in the frontend; no UI change needed).
-- **Self-signed cert (no ACME/mTLS).** `ceralive-tls-firstboot.service` mints a
-  per-device self-signed key+cert ONCE on first boot into `/data/ceralive/tls/`
-  (survives reboots + A/B OTA slot swaps), flag-guarded (idempotent). CN/SAN =
-  `<hostname>.local` + the device IPv4. **Browser caveat (honest):** the first visit
+- **Self-signed cert (no ACME/mTLS).** `ceralive-tls-firstboot.service` keeps a
+  per-device self-signed key+cert in `/data/ceralive/tls/` across reboots and A/B
+  OTA slot swaps. It validates the real SAN and key pair on each run, remaining
+  byte-stable while the hostname is unchanged and replacing the pair after a
+  deterministic hostname advance. CN/SAN = `<hostname>.local` + the device IPv4.
+  **Browser caveat (honest):** the first visit
   to `https://<device>.local` shows a "self-signed / not secure" warning — expected
   for a headless LAN appliance with no public DNS and no ACME path (SC3 forbids
   ACME/Let's Encrypt and mTLS). `openssl` is pinned in `shared.list` for the cert.
