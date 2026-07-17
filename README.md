@@ -23,6 +23,8 @@ support for Intel N100/N200 and AMD platforms.
 - **Custom software stack**: `CeraUI`, `cerastream`, `srtla-send-rs`, `srt` via .deb packages
 - **Minimal system**: Debian bookworm-based with minimal apt sources
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
+- **Predictable LAN identity**: Avahi-arbitrated `ceralive.local`, `ceralive2.local`,
+  `ceralive3.local`, ... allocation with no random or hyphenated fallback
 - **Device support**: Automatic USB audio/video device detection and access
 - **Modem support**: M.2 and USB 4G/5G modems
 - **Feature add-ons**: Optional per-board/per-OS sysext `.raw` artifacts (display engine, debug tools, etc.)
@@ -159,9 +161,13 @@ For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
 
-The hardware-free CI/test entrypoint is `CERALIVE_RUN_REAL_RAUC_CONTRACT=required
-./v2/run-tests`. It creates the ignored, NON-PRODUCTION RAUC signing fixture on
-demand; production builds must still provide `CERALIVE_RAUC_PKI_DIR` explicitly.
+The complete hardware-free CI/test entrypoint is
+`CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests`. It creates the ignored,
+NON-PRODUCTION RAUC signing fixture on demand; production builds must still
+provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
+network namespaces and D-Bus sockets to prove simultaneous first boot and
+late-network-merge reconciliation without touching the host publication.
 When GNU parallel is available, Bats files run in parallel but cases within each
 file stay serial; tests that share the build staging tree also use file locks so
 CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's

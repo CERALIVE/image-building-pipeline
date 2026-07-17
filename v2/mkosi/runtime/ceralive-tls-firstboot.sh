@@ -16,11 +16,10 @@
 # not a bug — the alternative (a shared baked cert) would give every unit the same
 # key, a far worse posture.
 #
-# SCOPE IS LOCKED to exactly one thing: generate ONE per-device key+cert, ONCE,
-# into a /data-backed path so it survives reboots AND A/B OTA slot swaps (/data is
-# shared across slots). Idempotent: a present cert short-circuits the script, so
-# re-runs and every subsequent boot are clean no-ops. Nothing here touches nginx
-# config, port 80, or the rotation channel (cert-rotation/, a separate domain).
+# SCOPE IS LOCKED to keeping one per-device key+cert aligned with the committed
+# mDNS identity in a /data-backed path. The pair survives reboots and A/B OTA
+# slot swaps; it is replaced only when the hostname changes or the pair is
+# invalid. Nothing here touches nginx config, port 80, or cert-rotation/.
 #
 # shellcheck shell=bash
 
@@ -31,11 +30,9 @@ log() {
     echo "ceralive-tls-firstboot: $*"
 }
 
-# Persistence root: prefer /data (survives reboots + A/B OTA slot swaps) so the
-# device keeps ONE stable TLS identity for its whole lifetime. Fall back to
-# /etc/ceralive/tls on an image with no /data partition (mountpoint-guarded, same
-# convention as ceralive-ssh-firstboot.sh).
-if mountpoint -q /data 2>/dev/null; then
+if [ -n "${CERALIVE_TLS_STATE_DIR:-}" ]; then
+    STATE_DIR="${CERALIVE_TLS_STATE_DIR}"
+elif mountpoint -q /data 2>/dev/null; then
     STATE_DIR="/data/ceralive/tls"
 else
     STATE_DIR="/etc/ceralive/tls"
@@ -43,28 +40,50 @@ fi
 CERT="${STATE_DIR}/ceralive.crt"
 KEY="${STATE_DIR}/ceralive.key"
 CERT_DAYS="${CERALIVE_TLS_CERT_DAYS:-3650}"
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+HOSTNAME_BIN="${HOSTNAME_BIN:-hostname}"
+IP_BIN="${IP_BIN:-ip}"
 
-# Idempotency: a present key+cert means this device already has its identity —
-# nothing to do (a re-run, a later boot, or a fresh OTA slot reading shared /data).
-if [ -s "${CERT}" ] && [ -s "${KEY}" ]; then
-    log "TLS cert already present at ${CERT} — nothing to generate"
-    exit 0
-fi
-
-command -v openssl >/dev/null 2>&1 || { log "FATAL: openssl not found — cannot mint TLS cert"; exit 1; }
+command -v "${OPENSSL_BIN}" >/dev/null 2>&1 || { log "FATAL: openssl not found — cannot mint TLS cert"; exit 1; }
+command -v "${HOSTNAME_BIN}" >/dev/null 2>&1 || { log "FATAL: hostname not found — cannot mint TLS cert"; exit 1; }
 
 # Identity for the cert. CN + the primary SAN is the mDNS name the operator types
 # (<hostname>.local); we also pin the bare hostname and, when known, the current
 # IPv4 so reaching the box by raw address does not mismatch the cert name.
-HOSTNAME_SHORT="$(hostname 2>/dev/null || echo ceralive)"
-[ -n "${HOSTNAME_SHORT}" ] || HOSTNAME_SHORT="ceralive"
+HOSTNAME_SHORT="$("${HOSTNAME_BIN}" 2>/dev/null)" \
+    || { log "FATAL: cannot read committed hostname"; exit 1; }
+[[ "${HOSTNAME_SHORT}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || { log "FATAL: invalid committed hostname '${HOSTNAME_SHORT}'"; exit 1; }
 FQDN="${HOSTNAME_SHORT}.local"
+
+certificate_matches_identity() {
+    local cert="$1" key="$2" cert_pub key_pub checkhost
+    [ -s "$cert" ] && [ -s "$key" ] || return 1
+    # `openssl x509 -checkhost` prints its verdict but exits 0 on a mismatch on most
+    # OpenSSL releases, so parse the printed phrase instead of trusting the exit code
+    # (else a stale cert survives a deterministic hostname advance). Fail closed.
+    checkhost="$("${OPENSSL_BIN}" x509 -in "$cert" -noout -checkhost "$FQDN" 2>/dev/null)" || return 1
+    case "$checkhost" in
+        *"does match certificate"*) ;;
+        *) return 1 ;;
+    esac
+    cert_pub="$("${OPENSSL_BIN}" x509 -in "$cert" -pubkey -noout \
+        | "${OPENSSL_BIN}" pkey -pubin -outform DER \
+        | "${OPENSSL_BIN}" dgst -sha256)" || return 1
+    key_pub="$("${OPENSSL_BIN}" pkey -in "$key" -pubout -outform DER \
+        | "${OPENSSL_BIN}" dgst -sha256)" || return 1
+    [ -n "$cert_pub" ] && [ "$cert_pub" = "$key_pub" ]
+}
+
+if certificate_matches_identity "${CERT}" "${KEY}"; then
+    log "TLS cert already present for ${FQDN} at ${CERT} — nothing to generate"
+    exit 0
+fi
 
 # First global-scope IPv4 on a non-loopback link, if the device is on a network
 # yet. Empty on a fresh offline box — the cert is still valid by .local name, and
-# the IP SAN is simply omitted (regenerated identities are not re-minted later, so
-# this is a best-effort convenience SAN, not a correctness requirement).
-DEVICE_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
+# the IP SAN is simply omitted; it is a convenience SAN, not identity state.
+DEVICE_IP="$("${IP_BIN}" -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
 
 SAN="DNS:${FQDN},DNS:${HOSTNAME_SHORT}"
 if [ -n "${DEVICE_IP}" ]; then
@@ -84,7 +103,7 @@ tmp_crt="$(mktemp "${STATE_DIR}/.ceralive.crt.XXXXXX")"
 cleanup() { rm -f "${tmp_key}" "${tmp_crt}"; }
 trap cleanup EXIT
 
-openssl req -x509 -newkey rsa:2048 -nodes \
+"${OPENSSL_BIN}" req -x509 -newkey rsa:2048 -nodes \
     -keyout "${tmp_key}" -out "${tmp_crt}" \
     -days "${CERT_DAYS}" \
     -subj "/CN=${FQDN}" \
@@ -92,6 +111,8 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 
 chmod 0600 "${tmp_key}"
 chmod 0644 "${tmp_crt}"
+certificate_matches_identity "${tmp_crt}" "${tmp_key}" \
+    || { log "FATAL: generated TLS certificate does not match ${FQDN} and its private key"; exit 1; }
 mv -f "${tmp_key}" "${KEY}"
 mv -f "${tmp_crt}" "${CERT}"
 trap - EXIT

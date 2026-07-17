@@ -22,7 +22,7 @@
 #   need finer locking serialize themselves with flock (see `serialize` in
 #   tests/manifest.bats).
 #   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
-#   auto-derives from nproc, capped at 8 (this unit suite is 143 short tests —
+#   auto-derives from nproc, capped at 8 (this unit suite is 187 short tests —
 #   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
 #
 # Usage:  ./run-tests              (from v2/)         — auto-parallel
@@ -64,6 +64,7 @@ SHELL_SUITES=(
   "${HERE}/mkosi/platform/boot/test-fallback.sh"
 )
 DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"
+REAL_AVAHI_CONTRACT="${HERE}/tests/real-avahi-hostname-contract.sh"
 
 if ! command -v bats >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -89,6 +90,10 @@ for suite in "${SHELL_SUITES[@]}"; do
 done
 if [[ ! -x "${DEV_PKI_GENERATOR}" ]]; then
   echo "ERROR: dev RAUC PKI generator not found or not executable: ${DEV_PKI_GENERATOR}" >&2
+  exit 1
+fi
+if [[ ! -x "${REAL_AVAHI_CONTRACT}" ]]; then
+  echo "ERROR: real Avahi hostname contract not found or not executable: ${REAL_AVAHI_CONTRACT}" >&2
   exit 1
 fi
 
@@ -128,6 +133,20 @@ fi
 
 echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
 bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+
+case "${CERALIVE_RUN_REAL_AVAHI_CONTRACT:-skip}" in
+  required)
+    echo "== CeraLive v2 real Avahi hostname collision contract =="
+    bash "${REAL_AVAHI_CONTRACT}"
+    ;;
+  skip)
+    echo "== SKIP real Avahi contract (set CERALIVE_RUN_REAL_AVAHI_CONTRACT=required) =="
+    ;;
+  *)
+    echo "ERROR: CERALIVE_RUN_REAL_AVAHI_CONTRACT must be 'required' or 'skip'" >&2
+    exit 2
+    ;;
+esac
 
 echo "== CeraLive v2 mock RAUC rollback suite =="
 CERALIVE_ROLLBACK_MODE=mock bash "${HERE}/tests/rauc-rollback.sh"

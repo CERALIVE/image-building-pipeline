@@ -51,9 +51,9 @@ is reachable:
 
 | Service | What it does | Source |
 |---------|-------------|--------|
-| `ceralive-hostname.service` | Claims `ceralive.local`, falling back to `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already occupied | `v2/mkosi/customize/postinst-lib.sh` |
+| `ceralive-hostname.service` | Establishes one exact Avahi-owned identity: `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, ... | `v2/mkosi/customize/postinst-lib.sh` |
 | `ceralive-ssh-firstboot.service` | Regenerates per-device SSH host keys, disables root password login, arms forced password change | `v2/mkosi/runtime/ceralive-ssh-firstboot.sh` |
-| `ceralive-tls-firstboot.service` | Mints a per-device self-signed TLS cert into `/data/ceralive/tls/` | `v2/mkosi/runtime/ceralive-tls-firstboot.sh` |
+| `ceralive-tls-firstboot.service` | Keeps a per-device self-signed TLS cert aligned with the committed hostname | `v2/mkosi/runtime/ceralive-tls-firstboot.sh` |
 | `ceralive-provision.service` | Evaluates whether to start the WiFi provisioning portal | `v2/mkosi/runtime/ceralive-provision.sh` |
 | `ceralive.service` | Starts the CeraUI backend (binds port 80) | CeraUI `.deb` |
 | `nginx.service` | Starts the TLS front (binds port 443) | `v2/mkosi/runtime/ceralive-tls.nginx.conf` |
@@ -102,8 +102,8 @@ Fill in the network name and password, then tap **Connect**.
 - SSID: 1-32 characters (required)
 - Password: leave empty for an open network, or 8-63 characters for WPA2
 
-Source: `ceralive-portal.sh` lines 242-249 (validation), lines 217-224
-(profile write via `nmcli`).
+Source: `ceralive-portal.sh` `handle_post()` (validation and profile write via
+`nmcli`).
 
 ### 3.3 What happens next
 
@@ -140,15 +140,54 @@ EC4 comment).
 The device first tries to register itself as `ceralive.local` via mDNS
 (Avahi). If another CeraLive device already owns that name on the LAN, it tries
 the next predictable name: `ceralive2.local`, then `ceralive3.local`, and so on.
-The selected index is persisted on `/data`, so the device keeps the same name
-across reboots and A/B updates.
+There is no `ceralive-2`, random-number, or random-suffix fallback. Avahi is the
+claim authority, so devices powered on together are resolved by the same mDNS
+probing that controls the name actually published on the LAN.
+
+The service accepts a candidate only after Avahi repeatedly reports its exact
+name in the running state. It then writes the same identity to the runtime system
+hostname, `/etc/hostname`, `/etc/hosts`, and the persistent index on `/data`.
+Only the selected index is persistent identity state; the local allocation lock
+stays under `/run` and is recreated on each boot.
+Those values are reconciled on every restart before CeraUI, TLS certificate
+creation, or hawkBit enrollment can start. A separate check starts 30 seconds
+after boot and repeats every 30 seconds, so devices that first boot on isolated
+networks also converge after those networks are joined. An aligned publication
+or Avahi's transient `REGISTERING` state is a no-op. An explicit conflict or
+different published name reruns the same deterministic claim sequence; consumers
+restart only after every identity surface commits the replacement name.
+
+A claim attempt waits for at most 120 seconds, with each Avahi command bounded to
+3 seconds; systemd caps the full attempt at 150 seconds. Unavailable or malformed
+Avahi responses fail closed, and systemd retries after 5 seconds instead of
+guessing a name. The local allocation lock is bounded to 10 seconds. A device
+without a publishable network address therefore waits rather than persisting an
+identity that Avahi has not established. The private setup-hotspot address is
+deliberately excluded because separate devices cannot arbitrate ownership across
+their isolated APs; Ethernet IPv4 link-local is still accepted as a real shared
+collision domain. After a retry succeeds, systemd requeues CeraUI, TLS/nginx,
+hawkBit enrollment, and the boot healthcheck without blocking the hostname
+service's completion.
+
+The periodic check detects a conflict within 30 seconds after Avahi exposes it.
+Any resulting re-claim uses the same 120-second global budget and 3-second call
+timeouts. Malformed or unavailable snapshots cause no identity mutation and are
+retried by the next timer activation.
 
 ```bash
-# Resolve the mDNS name (from any machine on the same LAN)
-avahi-resolve-host-name ceralive.local
+# Resolve the selected mDNS name (from any machine on the same LAN)
+avahi-resolve-host-name <selected-hostname>.local
 
 # Or ping it
-ping ceralive.local
+ping <selected-hostname>.local
+
+# On the device, all four values should agree (index 1 maps to ceralive,
+# index 2 maps to ceralive2, and so on)
+hostname
+cat /etc/hostname
+cat /data/ceralive/host_index
+busctl --system call org.freedesktop.Avahi / \
+  org.freedesktop.Avahi.Server GetHostName
 ```
 
 If mDNS is not working on your network (some enterprise or cellular networks
@@ -178,7 +217,7 @@ Source: `v2/mkosi/customize/users.sh` (password-lock); `v2/docs/ssh-hardening.md
 ### 5.2 Connecting
 
 ```bash
-ssh ceralive@ceralive.local
+ssh ceralive@<selected-hostname>.local
 ```
 
 Because the account is password-locked, password SSH login is not possible
@@ -225,8 +264,8 @@ CeraUI is the on-device control plane. It is reachable on two ports:
 
 | Port | URL | Notes |
 |------|-----|-------|
-| 80 | `http://ceralive.local/` | Direct from the CeraUI backend |
-| 443 | `https://ceralive.local/` | nginx TLS front, reverse-proxies to port 80 |
+| 80 | `http://<selected-hostname>.local/` | Direct from the CeraUI backend |
+| 443 | `https://<selected-hostname>.local/` | nginx TLS front, reverse-proxies to port 80 |
 
 Both ports are real, supported entry points. There is no redirect from 80 to
 443.
@@ -236,8 +275,8 @@ Source: `ceralive-tls.nginx.conf` lines 21-22 (`listen 443 ssl`; no `listen
 
 ### 6.1 The self-signed certificate warning
 
-The first time you open `https://ceralive.local/` (or the selected fallback
-hostname, such as `https://ceralive2.local/`), your browser
+The first time you open `https://<selected-hostname>.local/` (for example
+`https://ceralive.local/` or `https://ceralive2.local/`), your browser
 shows a "self-signed / not secure" warning. This is expected.
 
 The device mints a per-device self-signed certificate on first boot. It cannot
@@ -245,14 +284,16 @@ use a CA-signed certificate because it is a headless appliance on a private LAN
 with no public DNS name and no inbound path for an ACME challenge.
 
 To proceed: click through the browser's "Advanced" or "Proceed anyway" option.
-You only need to do this once per browser per device — the cert is stable across
-reboots and OTA updates.
+The cert is stable across reboots and OTA updates while the selected hostname is
+unchanged. If a later network merge forces the device from (for example)
+`ceralive.local` to `ceralive2.local`, the device replaces the certificate with
+one for the committed name and the browser may ask you to accept it once more.
 
 The certificate's CN and SAN are set to `<hostname>.local` plus the device's
 IPv4 at the time of generation.
 
-Source: `ceralive-tls-firstboot.sh` lines 59-91; `ceralive-tls.nginx.conf`
-lines 14-18 (honest comment about the warning).
+Source: `ceralive-tls-firstboot.sh` (`certificate_matches_identity` and the
+temporary key/cert commit); `ceralive-tls.nginx.conf` lines 14-18.
 
 ### 6.2 WebSocket connections through the TLS proxy
 
@@ -266,7 +307,7 @@ Source: `ceralive-tls.nginx.conf` lines 37-39 (`proxy_http_version 1.1`,
 ### 6.3 Verify the services are running
 
 ```bash
-ssh ceralive@ceralive.local
+ssh ceralive@<selected-hostname>.local
 
 # CeraUI backend
 systemctl status ceralive.service
@@ -312,9 +353,9 @@ Source: `ceralive-provision.sh` `should_start_portal()`.
 ### Device does not appear on the network after provisioning
 
 After the hotspot disappears, wait 10-15 seconds for the device to join your
-network and for CeraUI to restart. Then try `ping ceralive.local`. If another
-device already had that name, try `ceralive2.local`, `ceralive3.local`, and so
-on.
+network and for CeraUI to restart. Then try the selected hostname shown by the
+device, starting with `ping ceralive.local`; if another device already had that
+name, try `ceralive2.local`, `ceralive3.local`, and so on.
 
 If it still does not appear, check the journal on the device console:
 

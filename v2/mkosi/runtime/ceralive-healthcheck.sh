@@ -172,8 +172,8 @@ check_srt_reach() {
 }
 
 # Step 5 — mDNS self-resolution (non-fatal; warns on failure but does not block mark-good).
-# The ceralive-hostname.service runs Before=avahi-daemon.service, so by the time this
-# healthcheck runs (after boot), the hostname is set and avahi-daemon is active. This probe
+# The ceralive-hostname.service establishes Avahi ownership before ceralive.service, so
+# by the time this healthcheck runs the system and published hostnames agree. This probe
 # verifies that the device can resolve its own .local hostname via mDNS, which is the
 # primary discovery mechanism on the LAN. Failure is logged as a WARNING with IP-fallback
 # guidance; it does NOT trigger a rollback (mDNS absence on a multicast-blocking network

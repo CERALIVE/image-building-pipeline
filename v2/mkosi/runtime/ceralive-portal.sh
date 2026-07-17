@@ -44,6 +44,11 @@ STATE_DIR="${CERALIVE_PROVISION_STATE_DIR:-/data/ceralive/provision}"
 ACTIVE_FLAG="${CERALIVE_PROVISION_ACTIVE_FLAG:-${STATE_DIR}/portal-active}"
 SCAN_CACHE="${CERALIVE_PROVISION_SCAN_CACHE:-${STATE_DIR}/scan.txt}"
 ERROR_MARKER="${CERALIVE_PROVISION_ERROR_MARKER:-${STATE_DIR}/last-error}"
+HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
+HOST_INDEX_FILE="${CERALIVE_HOSTNAME_INDEX_FILE:-/etc/ceralive/host_index}"
+HOSTNAME_BIN="${CERALIVE_HOSTNAME_BIN:-hostname}"
+BUSCTL="${CERALIVE_BUSCTL:-busctl}"
+TIMEOUT="${CERALIVE_TIMEOUT:-timeout}"
 
 READ_TIMEOUT="${CERALIVE_PORTAL_READ_TIMEOUT:-5}"     # bound a slow/hung client
 MAX_BODY="${CERALIVE_PORTAL_MAX_BODY:-4096}"          # cap the POST body read
@@ -95,6 +100,47 @@ device_ssid() {
   local s=""
   [ -f "${ACTIVE_FLAG}" ] && s="$(sed -n 's/^ssid=//p' "${ACTIVE_FLAG}" | head -n1)"
   printf '%s' "${s:-CeraLive-Setup}"
+}
+
+avahi_publishes() {
+  local expected="$1" output signature value extra name line_count
+  command -v "${BUSCTL}" >/dev/null 2>&1 || return 1
+  command -v "${TIMEOUT}" >/dev/null 2>&1 || return 1
+  output="$("${TIMEOUT}" --foreground 3 "${BUSCTL}" --system call \
+    org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetState 2>/dev/null)" || return 1
+  line_count="$(printf '%s\n' "${output}" | wc -l)" || return 1
+  [ "${line_count}" = 1 ] || return 1
+  read -r signature value extra <<<"${output}"
+  [ "${signature}" = i ] && [ "${value}" = 2 ] && [ -z "${extra:-}" ] || return 1
+  output="$("${TIMEOUT}" --foreground 3 "${BUSCTL}" --system call \
+    org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostName 2>/dev/null)" || return 1
+  line_count="$(printf '%s\n' "${output}" | wc -l)" || return 1
+  [ "${line_count}" = 1 ] || return 1
+  read -r signature value extra <<<"${output}"
+  [[ "${signature}" = s && "${value}" = \"*\" && -z "${extra:-}" ]] || return 1
+  name="${value#\"}"
+  name="${name%\"}"
+  [ "${name}" = "${expected}" ]
+}
+
+# Return a name only after the persisted claim, hostname file, and runtime
+# hostname agree. During an in-flight first-boot claim the portal must not
+# advertise the factory seed as though it were the final reachable address.
+committed_mdns_name() {
+  local index static_name runtime_name expected
+  [ -r "${HOST_INDEX_FILE}" ] && [ -r "${HOSTNAME_FILE}" ] || return 1
+  index="$(cat -- "${HOST_INDEX_FILE}")" || return 1
+  static_name="$(cat -- "${HOSTNAME_FILE}")" || return 1
+  runtime_name="$("${HOSTNAME_BIN}" 2>/dev/null)" || return 1
+  [[ "${index}" =~ ^[1-9][0-9]*$ ]] && (( index <= 9999 )) || return 1
+  if [ "${index}" = 1 ]; then
+    expected="ceralive"
+  else
+    expected="ceralive${index}"
+  fi
+  [ "${static_name}" = "${expected}" ] && [ "${runtime_name}" = "${expected}" ] || return 1
+  avahi_publishes "${expected}" || return 1
+  printf '%s.local' "${expected}"
 }
 
 # Build <option> rows from the cached scan, HTML-escaped, deduped by the cache writer.
@@ -170,14 +216,23 @@ HTML
 }
 
 render_connecting() {
-  local ssid; ssid="$(html_escape "$1")"
+  local ssid mdns_name destination
+  ssid="$(html_escape "$1")"
+  mdns_name="$(committed_mdns_name 2>/dev/null || true)"
+  if [ -n "${mdns_name}" ]; then
+    destination="at <b>$(html_escape "${mdns_name}")</b>"
+  else
+    destination='using its selected deterministic address: <b>ceralive.local</b>, then <b>ceralive2.local</b>, <b>ceralive3.local</b>, and so on'
+  fi
   { page_head "Connecting…"
     printf '  <h1>Connecting to %s…</h1>\n' "${ssid}"
     cat <<'HTML'
   <p class="muted">The CeraLive device is leaving the setup hotspot and joining your
      network now. This hotspot will disappear. If it comes back, the password was
      wrong — reconnect to it and try again. Otherwise the device is online; reach
-     CeraUI on your network at <b>ceralive.local</b>.</p>
+HTML
+    printf '     CeraUI on your network %s.</p>\n' "${destination}"
+    cat <<'HTML'
 </div></body></html>
 HTML
   }

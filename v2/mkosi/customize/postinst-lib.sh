@@ -108,7 +108,7 @@ wifi.scan-rand-mac-address=yes
 # plugged in directly) leaves the appliance with NO IPv4 address at all and
 # unreachable over v4. link-local=enabled (=3) always assigns a 169.254/16
 # address (RFC 3927) alongside any lease, so combined with avahi mDNS the device
-# is reachable at ceralive.local on ANY network out of the box. Scoped to eth0
+# is reachable at its selected .local name on ANY network out of the box. Scoped to eth0
 # ONLY: bonded SRTLA modems / wlan_bond must never get a competing 169.254 route.
 [connection-eth0-llv4]
 match-device=interface-name:eth0
@@ -241,19 +241,85 @@ setup_hostname_service() {
   cat >/usr/local/sbin/ceralive-set-hostname <<'EOF'
 #!/bin/bash
 set -euo pipefail
+MODE="${1:-allocate}"
 BASE_NAME="${CERALIVE_BASE_HOSTNAME:-ceralive}"
 STATE_DIR="${CERALIVE_HOSTNAME_STATE_DIR:-/etc/ceralive}"
 INDEX_FILE="${STATE_DIR}/host_index"
-LOCK_FILE="${STATE_DIR}/hostname.lock"
+RESTART_PENDING_FILE="${STATE_DIR}/hostname_consumers_pending"
+LOCK_FILE="${CERALIVE_HOSTNAME_LOCK_FILE:-/run/ceralive-hostname/hostname.lock}"
 HOSTS_FILE="${CERALIVE_HOSTS_FILE:-/etc/hosts}"
 HOSTNAME_FILE="${CERALIVE_HOSTNAME_FILE:-/etc/hostname}"
+MACHINE_ID_FILE="${CERALIVE_MACHINE_ID_FILE:-/etc/machine-id}"
 HOSTNAMECTL_BIN="${HOSTNAMECTL_BIN:-hostnamectl}"
+HOSTNAME_BIN="${HOSTNAME_BIN:-hostname}"
 IP_BIN="${IP_BIN:-ip}"
 TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
-AVAHI_RESOLVE_BIN="${AVAHI_RESOLVE_BIN:-avahi-resolve-host-name}"
+SYNC_BIN="${SYNC_BIN:-sync}"
+AVAHI_SET_HOSTNAME_BIN="${AVAHI_SET_HOSTNAME_BIN:-avahi-set-host-name}"
+BUSCTL_BIN="${BUSCTL_BIN:-busctl}"
+AVAHI_RESOLVE_BIN="${AVAHI_RESOLVE_BIN:-avahi-resolve}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+AP_IFACE="${CERALIVE_AP_IFACE:-wlan0}"
+AP_ADDRESS="${CERALIVE_AP_ADDRESS:-192.168.42.1}"
 MAX_INDEX="${CERALIVE_HOSTNAME_MAX_INDEX:-9999}"
-PROBE_GRACE="${CERALIVE_HOSTNAME_PROBE_GRACE:-3}"
-[ -f "$LOCK_FILE" ] && exit 0
+MAX_WAIT="${CERALIVE_HOSTNAME_MAX_WAIT:-120}"
+MAX_PROBES="${CERALIVE_HOSTNAME_MAX_PROBES:-120}"
+POLL_INTERVAL="${CERALIVE_HOSTNAME_POLL_INTERVAL:-1}"
+STABLE_CHECKS="${CERALIVE_HOSTNAME_STABLE_CHECKS:-3}"
+CALL_TIMEOUT="${CERALIVE_HOSTNAME_CALL_TIMEOUT:-3}"
+LOCK_WAIT="${CERALIVE_HOSTNAME_LOCK_WAIT:-10}"
+CONTENTION_RETRIES="${CERALIVE_HOSTNAME_CONTENTION_RETRIES:-4}"
+CONTENTION_BACKOFF_MAX="${CERALIVE_HOSTNAME_CONTENTION_BACKOFF_MAX:-4}"
+CLAIM_CONFLICT=10
+CONSUMER_UNITS=(
+    ceralive-tls-firstboot.service
+    nginx.service
+    ceralive.service
+    ceralive-hawkbit-provision.service
+    ceralive-healthcheck.service
+)
+
+die() {
+    printf 'ceralive-set-hostname: %s\n' "$*" >&2
+    exit 1
+}
+
+(( $# <= 1 )) || die "usage: ceralive-set-hostname [allocate|reconcile]"
+case "$MODE" in
+    allocate | reconcile) ;;
+    *) die "usage: ceralive-set-hostname [allocate|reconcile]" ;;
+esac
+
+[[ "$BASE_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "invalid base hostname: $BASE_NAME"
+(( ${#BASE_NAME} <= 59 )) || die "base hostname leaves no room for deterministic numbering"
+for value in "$MAX_INDEX" "$MAX_WAIT" "$MAX_PROBES" "$POLL_INTERVAL" \
+             "$STABLE_CHECKS" "$CALL_TIMEOUT" "$LOCK_WAIT" \
+             "$CONTENTION_RETRIES" "$CONTENTION_BACKOFF_MAX"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || die "hostname timing/index values must be unsigned integers"
+done
+(( MAX_INDEX >= 1 && MAX_INDEX <= 9999 )) || die "hostname max index must be 1..9999"
+(( MAX_WAIT >= 1 && MAX_WAIT <= 300 )) || die "hostname max wait must be 1..300 seconds"
+(( MAX_PROBES >= 1 && MAX_PROBES <= 600 )) || die "hostname max probes must be 1..600"
+(( POLL_INTERVAL <= 10 )) || die "hostname poll interval must be 0..10 seconds"
+(( STABLE_CHECKS >= 1 && STABLE_CHECKS <= 10 )) || die "hostname stable checks must be 1..10"
+(( CALL_TIMEOUT >= 1 && CALL_TIMEOUT <= 10 )) || die "hostname call timeout must be 1..10 seconds"
+(( LOCK_WAIT <= 30 )) || die "hostname lock wait must be 0..30 seconds"
+(( CONTENTION_RETRIES >= 1 && CONTENTION_RETRIES <= 10 )) \
+    || die "hostname contention retries must be 1..10"
+(( CONTENTION_BACKOFF_MAX <= 10 )) || die "hostname contention backoff must be 0..10 seconds"
+
+for command in "$HOSTNAMECTL_BIN" "$HOSTNAME_BIN" "$IP_BIN" "$TIMEOUT_BIN" \
+               "$SYNC_BIN" "$AVAHI_SET_HOSTNAME_BIN" "$BUSCTL_BIN" \
+               "$AVAHI_RESOLVE_BIN" "$SYSTEMCTL_BIN" cksum flock; do
+    command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
+done
+
+[ -r "$MACHINE_ID_FILE" ] || die "machine-id is not readable"
+MACHINE_ID="$(cat -- "$MACHINE_ID_FILE")" || die "cannot read machine-id"
+machine_id_lines="$(awk 'END { print NR }' "$MACHINE_ID_FILE")" || die "cannot parse machine-id"
+[[ "$machine_id_lines" = 1 && "$MACHINE_ID" =~ ^[0-9a-f]{32}$ ]] \
+    || die "machine-id is not a committed 32-digit lowercase hexadecimal ID"
 
 candidate_for_index() {
     local i="$1"
@@ -264,102 +330,387 @@ candidate_for_index() {
     fi
 }
 
-local_addresses() {
-    if [ -n "${CERALIVE_LOCAL_ADDRS:-}" ]; then
-        printf '%s\n' ${CERALIVE_LOCAL_ADDRS}
-        return
-    fi
-    command -v "$IP_BIN" >/dev/null 2>&1 || return 0
-    "$IP_BIN" -o -4 addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
-    "$IP_BIN" -o -6 addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
+publishable_address_present() {
+    "$IP_BIN" -o addr show up 2>/dev/null \
+        | awk -v ap_iface="$AP_IFACE" -v ap_address="$AP_ADDRESS" '
+            $2 == "lo" { next }
+            $3 == "inet" {
+                split($4, parts, "/")
+                ip = parts[1]
+                if (ip ~ /^127\./ || ($2 == ap_iface && ip == ap_address)) next
+                found = 1
+            }
+            $3 == "inet6" {
+                split($4, parts, "/")
+                ip = tolower(parts[1])
+                if (ip == "::1" || ip ~ /^fe80:/) next
+                found = 1
+            }
+            END { exit !found }
+        '
 }
 
-resolved_addresses() {
-    local name="$1"
-    command -v "$AVAHI_RESOLVE_BIN" >/dev/null 2>&1 || return 0
-    "$TIMEOUT_BIN" 2 "$AVAHI_RESOLVE_BIN" -4 "${name}.local" 2>/dev/null | awk 'NF >= 2 { print $2 }' || true
+avahi_call() {
+    "$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" "$BUSCTL_BIN" --system call \
+        org.freedesktop.Avahi / org.freedesktop.Avahi.Server "$1"
 }
 
-hostname_available() {
-    local name="$1"
-    local resolved locals ip
-    resolved="$(resolved_addresses "$name")"
-    [ -n "$resolved" ] || return 0
-    locals="$(local_addresses)"
-    [ -n "$locals" ] || return 1
-    while IFS= read -r ip; do
-        [ -n "$ip" ] || continue
-        if ! printf '%s\n' "$locals" | grep -Fxq "$ip"; then
-            return 1
-        fi
-    done <<ADDRS
-$resolved
-ADDRS
-    return 0
+read_avahi_state() {
+    local output signature value extra line_count
+    output="$(avahi_call GetState 2>/dev/null)" || return 1
+    line_count="$(printf '%s\n' "$output" | wc -l)" || return 1
+    [ "$line_count" = 1 ] || return 1
+    read -r signature value extra <<<"$output"
+    [[ "$signature" = i && "$value" =~ ^[0-4]$ && -z "${extra:-}" ]] || return 1
+    printf '%s\n' "$value"
 }
 
-select_index() {
-    local index="" name i
-    if [ -s "$INDEX_FILE" ]; then
-        index="$(sed -E 's/[^0-9]//g' "$INDEX_FILE")"
-        if [ -n "$index" ] && [ "$index" -ge 1 ] 2>/dev/null; then
-            printf '%s\n' "$index"
-            return
-        fi
-    fi
-    if command -v "$AVAHI_RESOLVE_BIN" >/dev/null 2>&1 && [ "$PROBE_GRACE" -gt 0 ] 2>/dev/null; then
-        sleep "$PROBE_GRACE"
-    fi
-    i=1
-    while [ "$i" -le "$MAX_INDEX" ]; do
-        name="$(candidate_for_index "$i")"
-        if hostname_available "$name"; then
-            printf '%s\n' "$i"
-            return
-        fi
-        i=$((i + 1))
+read_avahi_hostname() {
+    local output signature value extra name line_count
+    output="$(avahi_call GetHostName 2>/dev/null)" || return 1
+    line_count="$(printf '%s\n' "$output" | wc -l)" || return 1
+    [ "$line_count" = 1 ] || return 1
+    read -r signature value extra <<<"$output"
+    [[ "$signature" = s && "$value" = \"*\" && -z "${extra:-}" ]] || return 1
+    name="${value#\"}"
+    name="${name%\"}"
+    [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+    printf '%s\n' "$name"
+}
+
+is_avahi_alternative() {
+    local candidate="$1" published="$2" suffix
+    [[ "$published" = "$candidate"-* ]] || return 1
+    suffix="${published#"$candidate"-}"
+    [[ "$suffix" =~ ^[0-9]+$ ]]
+}
+
+# Ask Avahi whether <candidate>.local is already owned by a different, live host.
+# A forward lookup that resolves to an address which reverse-resolves back to the
+# same name is proof another device holds the name (we no longer answer for it
+# once Avahi has renamed us away). A miss means the name is unclaimed — the
+# hyphenated rename we just saw was a transient simultaneous-probe race, not a
+# real owner, so the lower deterministic candidate is still ours to keep.
+candidate_has_stable_owner() {
+    local candidate="$1" fqdn="$1.local" forward reverse addr back
+    forward="$("$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
+        "$AVAHI_RESOLVE_BIN" -n "$fqdn" 2>/dev/null)" || return 1
+    addr="$(printf '%s\n' "$forward" | awk 'NF >= 2 { print $2; exit }')"
+    [ -n "$addr" ] || return 1
+    reverse="$("$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
+        "$AVAHI_RESOLVE_BIN" -a "$addr" 2>/dev/null)" || return 1
+    back="$(printf '%s\n' "$reverse" | awk 'NF >= 2 { print $2; exit }')"
+    [ "$back" = "$fqdn" ]
+}
+
+claim_candidate() {
+    local candidate="$1" deadline="$2"
+    local attempt probe state published stable retry
+
+    # Retry the SAME deterministic candidate while Avahi keeps renaming us but no
+    # other host actually owns the name (the symmetric double-rename race). Only a
+    # proven, live owner advances us to the next deterministic index.
+    for ((attempt = 1; attempt <= CONTENTION_RETRIES; attempt++)); do
+        (( SECONDS < deadline )) || return 1
+        "$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
+            "$AVAHI_SET_HOSTNAME_BIN" "$candidate" >/dev/null 2>&1 || return 1
+
+        stable=0
+        retry=0
+        for ((probe = 1; probe <= MAX_PROBES; probe++)); do
+            (( SECONDS < deadline )) || return 1
+            if publishable_address_present \
+                && state="$(read_avahi_state)" \
+                && published="$(read_avahi_hostname)"; then
+                if [[ "$state" = 2 && "$published" = "$candidate" ]]; then
+                    stable=$((stable + 1))
+                    (( stable >= STABLE_CHECKS )) && return 0
+                    (( POLL_INTERVAL == 0 )) || sleep "$POLL_INTERVAL"
+                    continue
+                fi
+                if [[ "$state" = 3 ]] \
+                    || { [[ "$state" = 2 ]] && is_avahi_alternative "$candidate" "$published"; }; then
+                    if candidate_has_stable_owner "$candidate"; then
+                        return "$CLAIM_CONFLICT"
+                    fi
+                    printf 'ceralive-set-hostname: %s.local has no stable owner; retrying the same deterministic candidate\n' \
+                        "$candidate" >&2
+                    retry=1
+                    break
+                fi
+                [[ "$state" != 4 ]] || return 1
+                stable=0
+            else
+                stable=0
+            fi
+            (( POLL_INTERVAL == 0 )) || sleep "$POLL_INTERVAL"
+        done
+        (( retry == 1 )) || return 1
+        (( CONTENTION_BACKOFF_MAX == 0 )) || sleep "$(( (RANDOM % CONTENTION_BACKOFF_MAX) + 1 ))"
     done
-    printf '%s\n' "$MAX_INDEX"
+    return "$CLAIM_CONFLICT"
+}
+
+storage_path() {
+    local path="$1" link
+    if [ -L "$path" ]; then
+        link="$(readlink -- "$path")" || return 1
+        case "$link" in
+            /*) printf '%s\n' "$link" ;;
+            *) printf '%s/%s\n' "$(dirname -- "$path")" "$link" ;;
+        esac
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+atomic_write() {
+    local path="$1" mode="$2" value="$3" target dir tmp
+    target="$(storage_path "$path")" || return 1
+    dir="$(dirname -- "$target")"
+    mkdir -p "$dir"
+    tmp="$(mktemp "$dir/.ceralive-hostname.XXXXXX")" || return 1
+    if ! printf '%s\n' "$value" >"$tmp" \
+        || ! chmod "$mode" "$tmp" \
+        || ! "$SYNC_BIN" -f "$tmp" \
+        || ! mv -f -- "$tmp" "$target" \
+        || ! "$SYNC_BIN" -f "$target" \
+        || ! "$SYNC_BIN" -f "$dir"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
+update_hosts_identity() {
+    local name="$1" content
+    content="$(awk -v name="$name" '
+        BEGIN { replaced = 0 }
+        $1 == "127.0.1.1" && !replaced {
+            printf "127.0.1.1\t%s\n", name
+            replaced = 1
+            next
+        }
+        { print }
+        END {
+            if (!replaced) {
+                printf "127.0.1.1\t%s\n", name
+            }
+        }
+    ' "$HOSTS_FILE")" || return 1
+    atomic_write "$HOSTS_FILE" 0644 "$content"
+}
+
+commit_identity() {
+    local index="$1" name="$2"
+    if ! "$HOSTNAMECTL_BIN" set-hostname "$name"; then
+        command -v "$HOSTNAME_BIN" >/dev/null 2>&1 || return 1
+        "$HOSTNAME_BIN" "$name" || return 1
+    fi
+    atomic_write "$HOSTNAME_FILE" 0644 "$name" || return 1
+    update_hosts_identity "$name" || return 1
+    atomic_write "$INDEX_FILE" 0644 "$index"
+}
+
+read_runtime_hostname() {
+    local output line_count
+    output="$("$HOSTNAME_BIN" 2>/dev/null)" || return 1
+    line_count="$(printf '%s\n' "$output" | wc -l)" || return 1
+    [[ "$line_count" = 1 && "$output" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+    printf '%s\n' "$output"
+}
+
+read_static_hostname() {
+    local output line_count
+    [ -r "$HOSTNAME_FILE" ] || return 1
+    output="$(cat -- "$HOSTNAME_FILE")" || return 1
+    line_count="$(awk 'END { print NR }' "$HOSTNAME_FILE")" || return 1
+    [[ "$line_count" = 1 && "$output" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || return 1
+    printf '%s\n' "$output"
+}
+
+hosts_identity_matches() {
+    local expected="$1"
+    awk -v expected="$expected" '
+        $1 == "127.0.1.1" {
+            count++
+            if (NF != 2 || $2 != expected) bad = 1
+        }
+        END { exit !(count == 1 && !bad) }
+    ' "$HOSTS_FILE"
+}
+
+local_identity_matches() {
+    local expected="$1" runtime static
+    runtime="$(read_runtime_hostname)" || return 1
+    static="$(read_static_hostname)" || return 1
+    [[ "$runtime" = "$expected" && "$static" = "$expected" ]] || return 1
+    hosts_identity_matches "$expected"
+}
+
+restart_identity_consumers() {
+    "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}"
+}
+
+clear_restart_pending() {
+    local target dir
+    target="$(storage_path "$RESTART_PENDING_FILE")" || return 1
+    dir="$(dirname -- "$target")"
+    rm -f -- "$target" || return 1
+    "$SYNC_BIN" -f "$dir"
 }
 
 mkdir -p "$STATE_DIR"
-index="$(select_index)"
-NEW_HOSTNAME="$(candidate_for_index "$index")"
-printf '%s\n' "$index" >"$INDEX_FILE"
-if command -v "$HOSTNAMECTL_BIN" >/dev/null 2>&1; then
-    "$HOSTNAMECTL_BIN" set-hostname "$NEW_HOSTNAME" || printf '%s\n' "$NEW_HOSTNAME" >"$HOSTNAME_FILE"
-else
-    printf '%s\n' "$NEW_HOSTNAME" >"$HOSTNAME_FILE"
+mkdir -p "$(dirname -- "$LOCK_FILE")"
+chmod 0700 "$(dirname -- "$LOCK_FILE")"
+[ ! -L "$LOCK_FILE" ] || die "hostname lock path must not be a symlink"
+exec 9>"$LOCK_FILE"
+flock -w "$LOCK_WAIT" 9 || die "timed out waiting for local hostname allocation lock"
+chmod 0600 "$LOCK_FILE"
+
+index=1
+if [ -e "$INDEX_FILE" ]; then
+    persisted="$(cat "$INDEX_FILE")" || die "cannot read persisted hostname index"
+    if [[ ! "$persisted" =~ ^[1-9][0-9]*$ ]] || (( persisted > MAX_INDEX )); then
+        die "invalid persisted hostname index"
+    fi
+    index="$persisted"
 fi
-if [ -s "$INDEX_FILE" ]; then
-    chmod 0644 "$INDEX_FILE"
+
+if [[ "$MODE" = reconcile ]]; then
+    [ -e "$INDEX_FILE" ] || die "persisted hostname index is missing during reconciliation"
+    candidate="$(candidate_for_index "$index")"
+
+    if ! publishable_address_present; then
+        if local_identity_matches "$candidate"; then
+            if [ -e "$RESTART_PENDING_FILE" ]; then
+                restart_identity_consumers || die "failed to requeue identity consumers"
+                clear_restart_pending || die "failed to clear identity-consumer restart marker"
+                printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+            fi
+            printf 'ceralive-set-hostname: no publishable LAN address; deferring publication reconciliation\n'
+            exit 0
+        fi
+        die "local identity diverged while no publishable LAN address is available"
+    fi
+
+    state="$(read_avahi_state)" \
+        && published="$(read_avahi_hostname)" \
+        || die "cannot read a strict Avahi publication snapshot"
+    if local_identity_matches "$candidate"; then
+        if [[ "$state" = 2 && "$published" = "$candidate" ]]; then
+            if [ -e "$RESTART_PENDING_FILE" ]; then
+                restart_identity_consumers || die "failed to requeue identity consumers"
+                clear_restart_pending || die "failed to clear identity-consumer restart marker"
+                printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+            fi
+            printf 'ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
+            exit 0
+        fi
+        if [[ "$state" = 1 ]]; then
+            printf 'ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+            exit 0
+        fi
+    fi
+    [[ "$state" != 0 && "$state" != 4 ]] \
+        || die "Avahi is not able to establish hostname ownership (state $state)"
+    [[ "$state" != 1 ]] \
+        || die "local identity diverged while Avahi is still registering"
+    printf 'ceralive-set-hostname: publication diverged (expected=%s state=%s published=%s); reclaiming deterministically\n' \
+        "$candidate" "$state" "$published" >&2
 fi
-if grep -qE '^127\.0\.1\.1\b' "$HOSTS_FILE"; then
-    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${NEW_HOSTNAME}/" "$HOSTS_FILE"
-else
-    printf '127.0.1.1\t%s\n' "${NEW_HOSTNAME}" >>"$HOSTS_FILE"
-fi
-: >"$LOCK_FILE"
+
+deadline=$((SECONDS + MAX_WAIT))
+while (( index <= MAX_INDEX )); do
+    candidate="$(candidate_for_index "$index")"
+    if claim_candidate "$candidate" "$deadline"; then
+        if [[ "$MODE" = reconcile ]]; then
+            atomic_write "$RESTART_PENDING_FILE" 0600 "$candidate" \
+                || die "failed to persist identity-consumer restart marker"
+        fi
+        commit_identity "$index" "$candidate" || die "failed to persist hostname identity"
+        if [[ "$MODE" = reconcile ]]; then
+            restart_identity_consumers || die "failed to requeue identity consumers"
+            clear_restart_pending || die "failed to clear identity-consumer restart marker"
+            printf 'ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
+        else
+            printf 'ceralive-set-hostname: established %s.local\n' "$candidate"
+        fi
+        exit 0
+    else
+        rc=$?
+    fi
+    if [[ "$rc" = "$CLAIM_CONFLICT" ]]; then
+        printf 'ceralive-set-hostname: %s.local conflicted; trying next deterministic candidate\n' "$candidate" >&2
+        index=$((index + 1))
+        continue
+    fi
+    die "could not establish Avahi ownership of ${candidate}.local within the bounded wait"
+done
+die "no deterministic hostname available through index $MAX_INDEX"
 EOF
   chmod +x /usr/local/sbin/ceralive-set-hostname
 
   cat >/etc/systemd/system/ceralive-hostname.service <<'EOF'
 [Unit]
 Description=CeraLive unique hostname setup
-After=systemd-machine-id-commit.service NetworkManager.service avahi-daemon.service
+Requires=ceralive-migrate-data.service
+RequiresMountsFor=/data
+After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service
 Before=ceralive-tls-firstboot.service ceralive.service
 Wants=NetworkManager.service avahi-daemon.service
 ConditionPathExists=/etc/machine-id
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/ceralive-set-hostname
 RemainAfterExit=yes
+RuntimeDirectory=ceralive-hostname
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/sbin/ceralive-set-hostname
+ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service
+ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service
+TimeoutStartSec=150
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl enable ceralive-hostname.service
+
+  cat >/etc/systemd/system/ceralive-hostname-reconcile.service <<'EOF'
+[Unit]
+Description=Reconcile CeraLive hostname with the active Avahi publication
+Requires=ceralive-hostname.service
+After=ceralive-hostname.service NetworkManager.service avahi-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-set-hostname reconcile
+TimeoutStartSec=150
+EOF
+
+  cat >/etc/systemd/system/ceralive-hostname-reconcile.timer <<'EOF'
+[Unit]
+Description=Detect CeraLive Avahi hostname publication conflicts
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=ceralive-hostname-reconcile.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl enable ceralive-hostname-reconcile.timer
+
+  mkdir -p /etc/systemd/system/ceralive.service.d
+  cat >/etc/systemd/system/ceralive.service.d/05-hostname-identity.conf <<'EOF'
+[Unit]
+Requires=ceralive-hostname.service
+After=ceralive-hostname.service
+EOF
 }
 
 # --- 12. Persist user-mutable state on /data (verbatim, postinst section 12) -
@@ -444,8 +795,9 @@ if [ -s "$DATA/ceralive/machine-id" ] && ! mountpoint -q /etc/machine-id; then
     mount --bind "$DATA/ceralive/machine-id" /etc/machine-id 2>/dev/null || true
 fi
 
-# Relocate first-boot hostname index/lock onto /data (contract §6).
-for n in host_index hostname.lock; do
+# Relocate first-boot hostname state onto /data (contract §6). The local
+# allocation lock stays under /run because it is process coordination only.
+for n in host_index hostname_consumers_pending; do
     if [ -e "/etc/ceralive/$n" ] && [ ! -L "/etc/ceralive/$n" ]; then
         [ -e "$DATA/ceralive/$n" ] || cp -a "/etc/ceralive/$n" "$DATA/ceralive/$n"
         rm -f "/etc/ceralive/$n"

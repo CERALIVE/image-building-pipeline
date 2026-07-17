@@ -428,17 +428,24 @@ Expected first-boot sequence:
    At the console, `recovery.scr` can explicitly load slot A from p2 or slot B
    from p3 without relying on extlinux path resolution.
 2. Kernel boots from `rootfs_a`. One-shot first-boot services run in order:
-   - `ceralive-hostname.service` — claims `ceralive.local`, falling back to
-     `ceralive2.local`, `ceralive3.local`, ... when mDNS names are already
-     occupied.
+   - `ceralive-hostname.service` — asks Avahi to establish `ceralive.local`, then
+     `ceralive2.local`, `ceralive3.local`, ... under collision. It never accepts
+     Avahi's hyphenated alternative or a random suffix. Runtime hostname,
+     `/etc/hostname`, persistent index, and published name are committed only
+     after exact ownership is stable. Each claim attempt is bounded to 120 s;
+     malformed/unavailable state fails closed and systemd retries after 5 s. A
+     separate 30-second timer repairs explicit publication divergence after
+     isolated networks are joined without rerunning allocation when aligned.
    - `ceralive-ssh-firstboot.service` — regenerates per-device SSH host keys,
      writes `PermitRootLogin prohibit-password`, and arms a forced password
      change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
      so sshd never accepts a connection before hardening is in place.
      Source: `v2/mkosi/runtime/ceralive-ssh-firstboot.sh`.
-   - `ceralive-tls-firstboot.service` — mints a per-device self-signed TLS
-     cert into `/data/ceralive/tls/` (RSA 2048, 3650 days, CN/SAN =
-     `<hostname>.local` + device IPv4). Runs `Before=nginx.service`.
+   - `ceralive-tls-firstboot.service` — keeps a per-device self-signed TLS cert
+     in `/data/ceralive/tls/` (RSA 2048, 3650 days, CN/SAN =
+     `<hostname>.local` + device IPv4). It validates the cert/key pair and
+     replaces it if deterministic collision recovery changes the hostname.
+     Runs `Before=nginx.service`.
      Source: `v2/mkosi/runtime/ceralive-tls-firstboot.sh`.
    - `ceralive-provision.service` — evaluates whether to start the WiFi
      provisioning portal. On a device with no stored WiFi profiles and no
@@ -460,8 +467,10 @@ For the operator-facing walkthrough of the WiFi portal and first login, see
 **Verify the services are running** (once the device is on the network):
 
 ```bash
-ssh ceralive@ceralive.local 'systemctl status ceralive.service'
-ssh ceralive@ceralive.local 'journalctl -u ceralive.service -n 50'
+ssh ceralive@<selected-hostname>.local 'systemctl status ceralive.service'
+ssh ceralive@<selected-hostname>.local 'journalctl -u ceralive.service -n 50'
+ssh ceralive@<selected-hostname>.local \
+  'hostname; cat /etc/hostname; cat /data/ceralive/host_index; busctl --system call org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostName'
 ```
 
 The default user is `ceralive` (password-locked; see `docs/FIRST-BOOT.md` §5
@@ -472,7 +481,7 @@ for example `ceralive2.local`.
 **Check the boot slot:**
 
 ```bash
-ssh ceralive@ceralive.local 'rauc status'
+ssh ceralive@<selected-hostname>.local 'rauc status'
 ```
 
 ---
@@ -618,7 +627,8 @@ The canonical test entrypoint creates this ignored fixture automatically on a
 clean checkout:
 
 ```bash
-CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
+  CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
 ```
 
 The generator validates the NON-PRODUCTION certificate chain and leaf key before

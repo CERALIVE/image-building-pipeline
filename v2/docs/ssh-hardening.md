@@ -121,7 +121,10 @@ config, so a malformed drop-in can never wedge sshd's startup.
   receive either input. Do not use this mode for fleet artifacts.
 - **The device is never locked out of the network on first boot.** SSH remains
   reachable; root retains key-based access for recovery. The appliance is
-  reachable at `ceralive.local` (mDNS) on any network out of the box.
+  reachable at its selected mDNS hostname after it joins a shared LAN:
+  `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, and so on when
+  collisions exist. The isolated setup AP address is not accepted as proof of
+  LAN-visible mDNS ownership.
 
 ## Idempotency
 

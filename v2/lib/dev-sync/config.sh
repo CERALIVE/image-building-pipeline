@@ -39,7 +39,7 @@ DEV_SYNC_REPO_ROOT="$(cd "${DEV_SYNC_HERE}/../../.." && pwd)"
 # ---------------------------------------------------------------------------
 # Built-in defaults (layer 3). Every one is overridable by yaml then env.
 # ---------------------------------------------------------------------------
-_DS_DEFAULT_target_host="ceralive.local"     # mDNS name, tried first
+_DS_DEFAULT_target_host=""
 _DS_DEFAULT_target_ip=""                       # fallback IP (empty = none)
 _DS_DEFAULT_ssh_user="root"
 _DS_DEFAULT_ssh_key=""                          # empty = ssh-agent / default key

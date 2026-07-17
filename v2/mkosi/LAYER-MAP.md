@@ -78,11 +78,11 @@ runtime package is installed in the App layer, never in the BSP.
 
 | Contents | Source |
 |---|---|
-| Canonical runtime package set (45 pkgs) | `manifests/packages/shared.list` (+ resolved `<family>.delta.list`, currently empty) |
+| Canonical runtime package set | `manifests/packages/shared.list` (+ resolved `<family>.delta.list`, currently empty) |
 | **CeraLive SRT transport library** `libsrt1.5-ceralive` | first-party staging, installed in App |
 | RAUC A/B client `rauc` + `u-boot-tools` | shared.list (decisions.md Task 5) |
 | `rauc-hawkbit-updater` | **commented PLACEHOLDER** in shared.list (Stage 4 OTA; backport `.deb`, not in bookworm) |
-| System config (`mkosi.postinst.chroot`) | ceralive user+groups, deb822 apt sources, mTLS+GPG `apt.ceralive.tv` repo, udev hardware-access rules, streaming sysctl, NetworkManager, **SRTLA source-policy routing**, services, first-boot hostname |
+| System config (`mkosi.postinst.chroot`) | ceralive user+groups, deb822 apt sources, mTLS+GPG `apt.ceralive.tv` repo, udev hardware-access rules, streaming sysctl, NetworkManager, **SRTLA source-policy routing**, services, Avahi-arbitrated deterministic hostname |
 
 **Package source of truth = `shared.list`.** There is no inline hardcoded package
 list. `lib/orchestrate.sh` reads `shared.list` (+ family delta), forwards it as

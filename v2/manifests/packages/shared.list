@@ -91,6 +91,7 @@ hostapd                  # AP mode (device hotspot for config)
 
 # --- mDNS / discovery ---------------------------------------------------------
 avahi-daemon             # .local hostname advertisement (find the box on the LAN)
+avahi-utils              # set/query Avahi's published hostname during allocation + health checks
 libnss-mdns              # NSS plugin so the box can resolve other .local hosts
 
 # --- Time ---------------------------------------------------------------------

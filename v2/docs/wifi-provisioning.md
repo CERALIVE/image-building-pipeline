@@ -147,7 +147,8 @@ stops the backend for the AP window and restarts it on teardown — `Restart=alw
 nginx on 443 is unaffected; while there is no uplink there is no 443 client, and its
 `127.0.0.1:80` upstream simply returns 502 until the backend restarts. After teardown the
 backend re-binds 80, nginx's upstream recovers, and the device is reachable at
-`https://ceralive.local` on the new network.
+its selected mDNS hostname on the new network (`https://ceralive.local`,
+`https://ceralive2.local`, and so on).
 
 ## Hardware caveat (`[PARTIAL]`)
 
@@ -167,4 +168,5 @@ out-of-band teardown verb. It is gated in `v2/tests/manifest.bats`
 
 On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotspot
 disappears, `journalctl -t ceralive-provision -t ceralive-portal` shows the join +
-teardown, and CeraUI answers on the device's new IP (`ceralive.local`).
+teardown, and CeraUI answers on the device's new IP or selected `.local`
+hostname (`ceralive.local`, `ceralive2.local`, and so on).

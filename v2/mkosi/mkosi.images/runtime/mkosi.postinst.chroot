@@ -783,7 +783,8 @@ HBDROPIN
 [Unit]
 Description=CeraLive hawkBit DDI enrollment (render per-device updater config on /data)
 RequiresMountsFor=/data
-After=ceralive-migrate-data.service network-online.target
+After=ceralive-migrate-data.service ceralive-hostname.service network-online.target
+Requires=ceralive-hostname.service
 Wants=network-online.target
 Before=rauc-hawkbit-updater.service
 ConditionPathExists=/data/ceralive/hawkbit.conf
