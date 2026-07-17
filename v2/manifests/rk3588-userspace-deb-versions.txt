@@ -54,6 +54,6 @@ rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9
 # --- GStreamer MPP plugin + RGA 2D accelerator (radxa rk3588s2-bookworm pool) ---
 # tsukumijima publishes NO gst-rockchip build, so the plugin must come from radxa;
 # it links librga2, so the PROVEN, ABI-matched gst<->rga pair is kept together on
-# radxa rather than splitting rga to tsukumijima's same-version build (see notepad).
+# radxa rather than splitting rga to tsukumijima's same-version build.
 gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
 librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb
