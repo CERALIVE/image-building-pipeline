@@ -23,7 +23,7 @@ cerastream:
   kind: first-party
   # CalVer (YYYY.MINOR.PATCH) release tags, matching [workspace.package].version in
   # Cargo.toml.
-  pin: v2026.7.1
+  pin: v2026.7.2
   channel: stable
 
 CeraUI:
@@ -39,7 +39,7 @@ srtla-send-rs:
   path: srtla-send-rs
   repo: https://github.com/CERALIVE/srtla-send-rs
   kind: first-party
-  pin: v3.1.0
+  pin: v3.2.0
   channel: stable
 
 # ── Remaining first-party repos ───────────────────────────────────────────────

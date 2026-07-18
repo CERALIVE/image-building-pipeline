@@ -1,5 +1,5 @@
 libsrt1.5-ceralive=1.5.5+ceralive.1
-cerastream=2026.7.1
+cerastream=2026.7.2
 gstreamer1.0-libuvch264src=2026.7.0
 ceralive-device=2026.7.0-20260713T190647.93ca1f8
-srtla-send-rs=3.1.0
+srtla-send-rs=3.2.0
