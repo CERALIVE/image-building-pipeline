@@ -87,7 +87,7 @@ SSLEOF
 # Install the GPG public keyring used to verify apt.ceralive.tv packages.
 # v1 L117-129 (env → file → placeholder).
 install_gpg_keyring() {
-  local keyring=/usr/share/keyrings/ceralive-archive-keyring.gpg
+  local keyring="${APT_KEYRING_FILE:-/usr/share/keyrings/ceralive-archive-keyring.gpg}"
   if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
     log_info "installing CeraLive apt GPG public key from env"
     printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${keyring}"
@@ -100,12 +100,34 @@ install_gpg_keyring() {
 
 # Write the apt.ceralive.tv source (deb822). v1 L131-138.
 configure_ceralive_source() {
+  local dir="${APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
   log_info "configuring apt.ceralive.tv source (channel=${APT_CHANNEL})"
-  cat >/etc/apt/sources.list.d/ceralive.sources <<EOF
+  mkdir -p "${dir}"
+  cat >"${dir}/ceralive.sources" <<EOF
 Types: deb
 URIs: https://apt.ceralive.tv/dists/${APT_CHANNEL}/binary-$(dpkg --print-architecture)/
 Suites: ./
 Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
+EOF
+}
+
+# Pin the apt.ceralive.tv origin so the device installs OUR first-party updates
+# for the packages IT carries. Priority 990 sits just below apt's "always"
+# (1000) and above the archive default (500), so a package the CeraLive origin
+# actually publishes wins over any Debian copy of the same name. Pin-Priority
+# only affects packages the pinned origin ACTUALLY offers, so the rest of the
+# Debian archive keeps its normal 500 default — no shadowing of packages we do
+# not carry. The libsrt coinstall model stays Provides/Conflicts/Replaces
+# (orthogonal to this origin pin; this must not disturb it). E4: baked at build,
+# never edited on-device.
+install_apt_preferences() {
+  local dir="${APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
+  log_info "pinning apt.ceralive.tv origin (Pin-Priority 990)"
+  mkdir -p "${dir}"
+  cat >"${dir}/ceralive" <<'EOF'
+Package: *
+Pin: origin apt.ceralive.tv
+Pin-Priority: 990
 EOF
 }
 
@@ -115,7 +137,14 @@ configure_apt_ceralive_repo() {
   install_mtls_cert
   install_gpg_keyring
   configure_ceralive_source
-  log_success "apt sources configured (Debian + apt.ceralive.tv:${APT_CHANNEL})"
+  install_apt_preferences
+  log_success "apt sources configured (Debian + apt.ceralive.tv:${APT_CHANNEL}, origin pinned 990)"
 }
 
-configure_apt_ceralive_repo "$@"
+# Auto-run when sourced by run-all.sh (the chroot dispatcher). Unit tests set
+# APT_CERALIVE_REPO_NO_AUTORUN=1 to source this module and exercise individual
+# functions against scratch dirs (APT_*_DIR / APT_KEYRING_FILE) without executing
+# the full chroot flow against the host's /etc/apt.
+if [[ -z "${APT_CERALIVE_REPO_NO_AUTORUN:-}" ]]; then
+  configure_apt_ceralive_repo "$@"
+fi

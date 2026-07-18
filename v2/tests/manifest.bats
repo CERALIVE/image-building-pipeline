@@ -29,6 +29,7 @@ setup() {
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
   POSTINST_LIB="$V2/mkosi/customize/postinst-lib.sh"
+  APT_CERALIVE_REPO="$V2/mkosi/customize/apt-ceralive-repo.sh"
   VERIFY_PASETO="$LIB_DIR/verify-paseto-key-encodings.sh"
   BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
   SIZE_BUDGET_JSON="$V2/manifests/size-budget.json"
@@ -3018,4 +3019,65 @@ PINS
   run "$VERIFY_PASETO" --key-dir "$d/mix"
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISMATCH"* ]]
+}
+
+# ===========================================================================
+# 22. apt.ceralive.tv repo correctness (T2.6) — the customize module
+#     apt-ceralive-repo.sh writes the device's own apt source (deb822 with a
+#     Signed-By keyring), installs the GPG keyring from env-injected
+#     APT_GPG_PUBLIC_B64 (the empty-keyring placeholder is a DEV-ONLY branch that
+#     MUST NOT ship in a credentialed build), and pins the apt.ceralive.tv origin
+#     at Pin-Priority 990 so OUR first-party updates win for the packages the
+#     origin carries while the rest of the Debian archive keeps its 500 default.
+#     These drive the SHIPPED functions (sourced with APT_CERALIVE_REPO_NO_AUTORUN=1
+#     so the chroot auto-run is suppressed) against scratch dirs
+#     (APT_SOURCES_DIR / APT_PREFERENCES_DIR / APT_KEYRING_FILE) — no chroot, no
+#     image, UNIT scope. Secret VALUES are never echoed: the keyring fixture is a
+#     synthetic non-secret payload whose bytes are asserted ABSENT from output.
+# ===========================================================================
+
+@test "apt ceralive (T2.6): ceralive.sources is written with a Signed-By keyring reference" {
+  local dir="$BATS_TEST_TMPDIR/apt-src/sources.list.d"
+  run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_SOURCES_DIR="$dir" \
+    bash -c "source '$APT_CERALIVE_REPO'; configure_ceralive_source"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/ceralive.sources" ]
+  grep -q '^Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg$' "$dir/ceralive.sources"
+  grep -q '^URIs: https://apt.ceralive.tv/' "$dir/ceralive.sources"
+  printf '%s\n' "$output"
+}
+
+@test "apt ceralive (T2.6): a credentialed build installs a NON-EMPTY keyring, never the empty placeholder" {
+  local root="$BATS_TEST_TMPDIR/apt-keyring"
+  mkdir -p "$root"
+  local keyring="$root/ceralive-archive-keyring.gpg"
+  local payload="SYNTHETIC-NON-SECRET-KEYRING-BYTES"
+  local b64; b64="$(printf '%s' "$payload" | base64 -w0)"
+  run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_KEYRING_FILE="$keyring" \
+    APT_GPG_PUBLIC_B64="$b64" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_gpg_keyring"
+  [ "$status" -eq 0 ]
+  [ -s "$keyring" ]
+  [[ "$output" != *"$b64"* ]]
+  [[ "$output" != *"$payload"* ]]
+
+  local placeholder="$root/placeholder.gpg"
+  run env -u APT_GPG_PUBLIC_B64 APT_CERALIVE_REPO_NO_AUTORUN=1 APT_KEYRING_FILE="$placeholder" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_gpg_keyring"
+  [ "$status" -eq 0 ]
+  [ ! -s "$placeholder" ]
+  [[ "$output" == *"empty placeholder"* ]]
+}
+
+@test "apt ceralive (T2.6): the apt.ceralive.tv origin is pinned at Pin-Priority 990" {
+  local dir="$BATS_TEST_TMPDIR/apt-prefs/preferences.d"
+  run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/ceralive" ]
+  grep -q '^Package: \*$' "$dir/ceralive"
+  grep -q '^Pin: origin apt.ceralive.tv$' "$dir/ceralive"
+  grep -q '^Pin-Priority: 990$' "$dir/ceralive"
+  grep -q '^  install_apt_preferences$' "$APT_CERALIVE_REPO"
+  printf '%s\n' "$output"
 }
