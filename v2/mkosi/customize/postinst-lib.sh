@@ -132,13 +132,22 @@ EOF
   # a bare `ln -sf` dies EBUSY. Do NOT "fix" that by skipping when busy: mkosi's
   # empty 0-byte placeholder would then bake into the image as the permanent
   # resolv.conf and ship a device with ZERO DNS. Unmount the overlay first (safe:
-  # privileged customize chroot; no later runtime-postinst step needs DNS), then
-  # symlink so it persists into the built image; die loudly rather than degrade.
+  # privileged customize chroot), then symlink so it persists into the built image;
+  # die loudly rather than degrade. Capture the nameservers mkosi provided and seed
+  # resolved's stub so LATER postinst steps that hit the network still resolve
+  # (e.g. setup_rtmp_gateway fetches MediaMTX from github) — /run is tmpfs at device
+  # boot, so this build-only seed never ships and resolved recreates the stub live.
+  local mkosi_nameservers=""
   if mountpoint -q /etc/resolv.conf 2>/dev/null; then
+    mkosi_nameservers="$(cat /etc/resolv.conf 2>/dev/null || true)"
     umount /etc/resolv.conf \
       || die "could not unmount the mkosi /etc/resolv.conf bind overlay — refusing to bake an empty resolv.conf that leaves the device with no DNS"
   fi
   ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  if [[ -n "${mkosi_nameservers}" ]]; then
+    mkdir -p /run/systemd/resolve
+    printf '%s\n' "${mkosi_nameservers}" >/run/systemd/resolve/stub-resolv.conf
+  fi
 
   install_interface_naming
 }
