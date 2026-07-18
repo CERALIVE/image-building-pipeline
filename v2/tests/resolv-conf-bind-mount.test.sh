@@ -72,7 +72,14 @@ ln_line="$(grep -nE "ln[[:space:]]+-sf[[:space:]]+${STUB}[[:space:]]+/etc/resolv
 (( umount_line < ln_line )) \
   || fail "configure_networking() runs 'ln -sf' before unmounting the overlay — the symlink cannot replace a still-mounted /etc/resolv.conf"
 
-echo "resolv-conf-bind-mount: Part A static contract OK (unmount guarded by mountpoint, before the symlink)"
+# After unmounting the overlay, DNS is gone for the rest of the postinst; later steps
+# still hit the network (e.g. setup_rtmp_gateway's MediaMTX fetch). The function must
+# seed resolved's stub with the captured nameservers so those steps keep resolving.
+grep -Eq 'stub-resolv\.conf' <<<"${fn_body}" \
+  && grep -Eq 'mkdir[[:space:]].*-p[[:space:]].*/run/systemd/resolve' <<<"${fn_body}" \
+  || fail "configure_networking() no longer seeds /run/systemd/resolve/stub-resolv.conf after unmounting — later network steps (e.g. MediaMTX fetch) lose DNS and the build fails"
+
+echo "resolv-conf-bind-mount: Part A static contract OK (unmount before symlink; stub seeded for build-time DNS continuity)"
 
 # ---------------------------------------------------------------------------
 # Part B — runtime reproduction in a rootless user+mount namespace (best effort)
@@ -118,8 +125,12 @@ configure_networking
 if mountpoint -q /etc/resolv.conf; then echo "FAIL: /etc/resolv.conf is STILL a mountpoint after configure_networking (overlay not torn down)"; exit 1; fi
 [ -L /etc/resolv.conf ] || { echo "FAIL: /etc/resolv.conf is not a symlink after configure_networking (skip-when-busy would leave the empty placeholder → zero DNS)"; exit 1; }
 [ "\$(readlink /etc/resolv.conf)" = "${STUB}" ] || { echo "FAIL: resolv.conf points at '\$(readlink /etc/resolv.conf)', expected ${STUB}"; exit 1; }
-# It must NOT still be the mounted overlay's content.
-if grep -q '203.0.113.53' /etc/resolv.conf 2>/dev/null; then echo "FAIL: /etc/resolv.conf still resolves to the mounted overlay, not the stub symlink"; exit 1; fi
+
+# --- DNS continuity: the stub is seeded with the captured nameservers ------------
+# The symlink resolves through to the seeded stub, so later postinst steps that hit
+# the network (e.g. MediaMTX fetch) still resolve during the build.
+[ "\$(readlink -f /etc/resolv.conf)" = "${STUB}" ] || { echo "FAIL: resolv.conf does not resolve through to ${STUB}"; exit 1; }
+grep -q '203.0.113.53' "${STUB}" || { echo "FAIL: resolved stub not seeded with the captured nameservers — later build steps lose DNS"; exit 1; }
 
 # --- idempotent: a second run over an already-correct symlink stays correct ------
 configure_networking
