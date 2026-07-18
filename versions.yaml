@@ -14,7 +14,7 @@ srt:
   path: srt
   repo: https://github.com/CERALIVE/srt
   kind: first-party
-  pin: v1.5.5+ceralive.1
+  pin: v1.5.5+ceralive.2
   channel: stable
 
 cerastream:
@@ -30,9 +30,9 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.7.0
-  # Release provenance: tag v2026.7.0 resolves to commit 93ca1f88c2efd48596a0844cc1668ceac3c802a1.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.7.0
+  pin: v2026.7.1
+  # Release provenance: tag v2026.7.1 resolves to commit bceb5886061eafa10c14f32ca205c11006ff7de1.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.7.1
   channel: stable
 
 srtla-send-rs:
