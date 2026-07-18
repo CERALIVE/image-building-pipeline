@@ -126,6 +126,18 @@ EOF
   # the server + `mode: foreign`, `getent hosts` exits 2, CeraUI logs constant
   # "DNS timeout"). `ln -sf` is force+idempotent — fixes the empty file, a stale
   # link, or an already-correct link, safe on every A/B rebuild.
+  #
+  # In a containerized mkosi build, mkosi ro-binds the host resolv.conf over this
+  # path for networked postinst scripts, making it an un-replaceable mountpoint so
+  # a bare `ln -sf` dies EBUSY. Do NOT "fix" that by skipping when busy: mkosi's
+  # empty 0-byte placeholder would then bake into the image as the permanent
+  # resolv.conf and ship a device with ZERO DNS. Unmount the overlay first (safe:
+  # privileged customize chroot; no later runtime-postinst step needs DNS), then
+  # symlink so it persists into the built image; die loudly rather than degrade.
+  if mountpoint -q /etc/resolv.conf 2>/dev/null; then
+    umount /etc/resolv.conf \
+      || die "could not unmount the mkosi /etc/resolv.conf bind overlay — refusing to bake an empty resolv.conf that leaves the device with no DNS"
+  fi
   ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
   install_interface_naming
