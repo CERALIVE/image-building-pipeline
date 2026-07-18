@@ -3081,3 +3081,17 @@ PINS
   grep -q '^  install_apt_preferences$' "$APT_CERALIVE_REPO"
   printf '%s\n' "$output"
 }
+
+# The guard ABOVE proves the customize MODULE (apt-ceralive-repo.sh) pins the origin
+# — but `./v2/build` never runs that module; it runs the runtime executor
+# (mkosi.postinst.chroot::setup_ceralive_repository). Todo 8's pin shipped absent
+# from real images precisely because only the module was tested. This guard drives
+# the REAL build-path function against a scratch chroot filesystem and asserts the
+# pin is baked there.
+@test "apt ceralive (T2.6): the RUNTIME EXECUTOR (the ./v2/build path) bakes the 990 origin pin" {
+  run bash "$TESTS_DIR/apt-preferences-baked.test.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Part A static contract OK"* ]]
+  [[ "$output" == *"regression: PASS"* ]]
+  printf '%s\n' "$output"
+}

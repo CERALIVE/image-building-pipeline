@@ -166,6 +166,16 @@ URIs: https://apt.ceralive.tv/dists/${CHANNEL}/
 Suites: ./
 Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
 EOF
+
+  # apt.ceralive.tv origin pin (990) — dual-track twin of
+  # apt-ceralive-repo.sh::install_apt_preferences. `./v2/build` runs THIS executor,
+  # so the pin MUST live here too or it never ships (guarded in manifest.bats T2.6).
+  mkdir -p /etc/apt/preferences.d
+  cat >/etc/apt/preferences.d/ceralive <<'EOF'
+Package: *
+Pin: origin apt.ceralive.tv
+Pin-Priority: 990
+EOF
 }
 
 # ---------------------------------------------------------------------------
