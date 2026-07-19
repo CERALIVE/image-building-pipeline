@@ -1842,6 +1842,69 @@ SH
   [[ "$output" == *'install -Dm 0600 /dev/null /etc/ceralive/debug-image'* ]]
 }
 
+@test "production image leaves ssh.service NOT enabled (disabled-by-default)" {
+  # Todo 42: on a production image (CERALIVE_DEBUG_IMAGE=0/unset) ssh MUST NOT be
+  # enabled. The base layer's openssh-server preset already enables ssh.service, so
+  # configure_ssh_enablement must actively DISABLE it — never call `enable ssh`.
+  local bin="$BATS_TEST_TMPDIR/ssh-enable-bin"
+  local calls="$BATS_TEST_TMPDIR/ssh-enable-calls"
+  mkdir -p "$bin"
+
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$SSH_ENABLE_CALLS"
+# disable_service greps list-unit-files output for the unit before disabling; echo
+# the unit so it treats it as present (the base-layer-enabled state).
+case "$1" in
+  list-unit-files) printf '%s enabled\n' "$2" ;;
+esac
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env \
+    PATH="$bin:$PATH" \
+    SSH_ENABLE_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=0 \
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"enable ssh"* ]]
+  [[ "$output" == *"disable ssh.service"* ]]
+}
+
+@test "lab debug image enables ssh.service by default" {
+  # Todo 42: the debug branch (CERALIVE_DEBUG_IMAGE=1) keeps the historical
+  # enabled-by-default behavior — `enable ssh`, no disable.
+  local bin="$BATS_TEST_TMPDIR/ssh-enable-bin"
+  local calls="$BATS_TEST_TMPDIR/ssh-enable-calls"
+  mkdir -p "$bin"
+
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$SSH_ENABLE_CALLS"
+case "$1" in
+  list-unit-files) printf '%s enabled\n' "$2" ;;
+esac
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env \
+    PATH="$bin:$PATH" \
+    SSH_ENABLE_CALLS="$calls" \
+    CERALIVE_DEBUG_IMAGE=1 \
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+
+  [ "$status" -eq 0 ]
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ssh"* ]]
+  [[ "$output" != *"disable ssh"* ]]
+}
+
 @test "parity: ceralive.service fails when ExecStart target is missing" {
   local root="$BATS_TEST_TMPDIR/parity-rootfs"
   make_parity_rootfs "$root"
