@@ -48,6 +48,7 @@ SHELL_SUITES=(
   "${HERE}/tests/release-candidate-contract.test.sh"
   "${HERE}/tests/preflash-fit.test.sh"
   "${HERE}/tests/maskrom-first-realhw.test.sh"
+  "${HERE}/tests/uart-console-path.test.sh"
   "${HERE}/tests/systemd-ordering-cycle.test.sh"
   "${HERE}/tests/ssh-firstboot-privsep.test.sh"
   "${HERE}/tests/data-persistence-public-symlink.test.sh"

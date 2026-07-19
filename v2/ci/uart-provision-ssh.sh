@@ -108,7 +108,12 @@ while [[ "${buffer}" != *'=>'* && ${SECONDS} -lt ${deadline} ]]; do
 done
 [[ "${buffer}" == *'=>'* ]] || { printf 'UART did not reach the U-Boot prompt\n' >&2; exit 1; }
 
-printf '%s\r' "setenv cera_transient_bootargs 'ceralive.ci_uart=1 systemd.mask=serial-getty@ttyS2.service'" >&"${serial_fd}"
+# Mask the getty on the LIVE Linux-phase console so it does not contend with the
+# one-shot bootstrap's TTYPath=/dev/ttyFIQ0. On RK3588 the Rockchip FIQ debugger
+# owns UART2 under Linux and systemd spawns serial-getty@ttyFIQ0.service (there is
+# no serial-getty@ttyS2.service at runtime, so masking ttyS2 was a no-op that left
+# the real ttyFIQ0 getty fighting for the port).
+printf '%s\r' "setenv cera_transient_bootargs 'ceralive.ci_uart=1 systemd.mask=serial-getty@ttyFIQ0.service'" >&"${serial_fd}"
 buffer=""
 deadline=$((SECONDS + 5))
 while [[ "${buffer}" != *'=>'* && ${SECONDS} -lt ${deadline} ]]; do read_uart; done

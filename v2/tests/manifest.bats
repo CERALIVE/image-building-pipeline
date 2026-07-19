@@ -563,7 +563,14 @@ run_concurrent_hostname_scripts() {
   grep -Fq 'OnUnitActiveSec=30s' "$POSTINST_LIB"
   grep -Fq 'Unit=ceralive-hostname-reconcile.service' "$POSTINST_LIB"
   grep -Fq 'RuntimeDirectory=ceralive-hostname' "$POSTINST_LIB"
-  grep -Fq 'After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service' "$POSTINST_LIB"
+  # ceralive-hostname.service MUST wait for network-online.target (link up), not
+  # just NetworkManager.service (daemon up) — else the mDNS claim runs before eth0
+  # links and every Requires= consumer cascades to "Dependency failed" on first boot
+  # (real Rock 5B+ regression). After=/Wants= both carry network-online.target.
+  grep -Fq 'After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service network-online.target avahi-daemon.service' "$POSTINST_LIB"
+  grep -Fq 'Wants=NetworkManager.service network-online.target avahi-daemon.service' "$POSTINST_LIB"
+  [[ "$hostname_unit" == *'After='*'network-online.target'*'avahi-daemon.service'* ]]
+  [[ "$hostname_unit" == *'Wants=NetworkManager.service network-online.target avahi-daemon.service'* ]]
   grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
   grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
