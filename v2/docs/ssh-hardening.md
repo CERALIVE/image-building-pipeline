@@ -105,6 +105,19 @@ config, so a malformed drop-in can never wedge sshd's startup.
 
 ## Default credentials operators must know
 
+- **`ssh.service` is DISABLED by default on production images.** The systemd
+  enablement of SSH is gated on `CERALIVE_DEBUG_IMAGE`
+  (`postinst-lib.sh::configure_ssh_enablement`, called from `configure_services`).
+  A production build (`CERALIVE_DEBUG_IMAGE=0`, the default) ships `ssh.service`
+  **not enabled** — sshd does not start at boot. The operator turns SSH on from the
+  CeraUI UI (`systemctl start ssh`), which reveals its boot-generated password. The
+  base OS layer installs `openssh-server`, and Debian's postinst preset would enable
+  `ssh.service`, so the production branch **actively disables** `ssh.service`/
+  `ssh.socket` rather than merely skipping the enable — otherwise the base-layer
+  preset would leave SSH enabled. A **debug** image (`CERALIVE_DEBUG_IMAGE=1`) keeps
+  the historical **enabled-by-default** behavior, alongside its predefined debug
+  password (below). `ceralive-ssh-firstboot.service` still runs its one-shot
+  hardening pass whenever SSH is eventually started, on both image kinds.
 - **Default user:** `ceralive` (member of `sudo` and the streaming hardware
   groups). The image ships it **password-locked** (`passwd -l`, set in
   `customize/users.sh`) — there is **no shipped default password**. `root` is
@@ -116,15 +129,18 @@ config, so a malformed drop-in can never wedge sshd's startup.
   forced to choose a new one on first interactive use.
 - **Lab-only debug images:** `CERALIVE_DEBUG_IMAGE=1` plus an encrypted
   `CERALIVE_DEBUG_PASSWORD_HASH` creates `/etc/ceralive/debug-image`, unlocks
-  `ceralive`, and retains that injected password across the first-boot service.
-  The build rejects a hash without the lab flag, and production builds never
-  receive either input. Do not use this mode for fleet artifacts.
-- **The device is never locked out of the network on first boot.** SSH remains
-  reachable; root retains key-based access for recovery. The appliance is
-  reachable at its selected mDNS hostname after it joins a shared LAN:
+  `ceralive`, retains that injected password across the first-boot service, **and
+  enables `ssh.service` by default** (per the enablement gate above). The build
+  rejects a hash without the lab flag, and production builds never receive either
+  input. Do not use this mode for fleet artifacts.
+- **On production, SSH is off until the operator enables it.** The device is still
+  reachable on the LAN — CeraUI serves the control plane over HTTP/HTTPS and the
+  appliance answers at its selected mDNS hostname after it joins a shared LAN:
   `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, and so on when
-  collisions exist. The isolated setup AP address is not accepted as proof of
-  LAN-visible mDNS ownership.
+  collisions exist. Once the operator enables SSH from the UI, root retains
+  key-based access for recovery. The isolated setup AP address is not accepted as
+  proof of LAN-visible mDNS ownership. **Debug images** leave SSH reachable from
+  first boot.
 
 ## Idempotency
 

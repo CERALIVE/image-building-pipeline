@@ -246,12 +246,31 @@ configure_services() {
   configure_ntp  # install NTP pools before enabling chrony
   install_console_font_service
   local svc
-  for svc in systemd-resolved NetworkManager ModemManager ssh chrony avahi-daemon ceralive-console-font; do
+  for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon ceralive-console-font; do
     enable_service "${svc}"
   done
+  configure_ssh_enablement
   for svc in bluetooth.service cups.service; do
     disable_service "${svc}"
   done
+}
+
+# SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs
+# openssh-server, whose Debian postinst preset ALREADY enables ssh.service — so a
+# production image must actively DISABLE it, not merely skip the enable, to truly
+# ship disabled-by-default. Debug (=1) keeps the historical enabled-by-default plus
+# the predefined debug password (configure_debug_access). CERALIVE_DEBUG_IMAGE is
+# validated 0/1 upstream (orchestrate.sh + configure_debug_access), so no re-check.
+configure_ssh_enablement() {
+  local mode="${CERALIVE_DEBUG_IMAGE:-0}"
+  if [[ "${mode}" == "1" ]]; then
+    enable_service ssh
+    log "lab debug image: ssh.service enabled by default"
+  else
+    disable_service ssh.service
+    disable_service ssh.socket
+    log "production image: ssh.service NOT enabled (operator enables via CeraUI)"
+  fi
 }
 
 # --- 10. First-boot unique-hostname service (verbatim, postinst section 10) -

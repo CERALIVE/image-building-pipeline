@@ -905,6 +905,18 @@ For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
 
+**`ssh.service` systemd enablement is gated on `CERALIVE_DEBUG_IMAGE`
+(`postinst-lib.sh::configure_ssh_enablement`, called from `configure_services`).**
+Production images (`=0`/default) ship `ssh.service` **NOT enabled** (operator turns
+SSH on from the CeraUI UI); debug images (`=1`) keep the historical
+enabled-by-default behavior. The base layer installs `openssh-server`, whose Debian
+postinst preset already enables `ssh.service`, so the production branch **actively
+disables** `ssh.service`/`ssh.socket` — merely skipping the enable would leave the
+base-layer preset enablement in place. `ceralive-ssh-firstboot.service` still hardens
+SSH whenever it is eventually started, on both image kinds. Guards: `manifest.bats`
+"production image leaves ssh.service NOT enabled" + "lab debug image enables
+ssh.service by default".
+
 **`Before=ssh.socket` guards MUST be `DefaultDependencies=no` AND
 `After=sysinit.target`.** Both `ceralive-ssh-firstboot.service` and
 `ceralive-ci-uart-bootstrap.service` are `Before=ssh.socket`. `ssh.socket` is
