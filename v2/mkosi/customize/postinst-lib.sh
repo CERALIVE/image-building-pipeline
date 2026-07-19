@@ -399,6 +399,21 @@ read_avahi_hostname() {
     printf '%s\n' "$name"
 }
 
+# After=avahi-daemon.service only guarantees the daemon process STARTED, not that
+# its D-Bus interface answers yet. Poll GetState until it reports a query-ready
+# state (1 REGISTERING or 2 RUNNING) so the first claim call is not issued into a
+# cold daemon. Best-effort: bounded by the caller's deadline and never fatal.
+wait_for_avahi_ready() {
+    local deadline="$1" state
+    while (( SECONDS < deadline )); do
+        if state="$(read_avahi_state)" && [[ "$state" = 1 || "$state" = 2 ]]; then
+            return 0
+        fi
+        (( POLL_INTERVAL == 0 )) || sleep "$POLL_INTERVAL"
+    done
+    return 0
+}
+
 is_avahi_alternative() {
     local candidate="$1" published="$2" suffix
     [[ "$published" = "$candidate"-* ]] || return 1
@@ -433,8 +448,24 @@ claim_candidate() {
     # proven, live owner advances us to the next deterministic index.
     for ((attempt = 1; attempt <= CONTENTION_RETRIES; attempt++)); do
         (( SECONDS < deadline )) || return 1
-        "$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
-            "$AVAHI_SET_HOSTNAME_BIN" "$candidate" >/dev/null 2>&1 || return 1
+        if ! "$TIMEOUT_BIN" --foreground "$CALL_TIMEOUT" \
+            "$AVAHI_SET_HOSTNAME_BIN" "$candidate" >/dev/null 2>&1; then
+            # avahi returns non-zero (AVAHI_ERR_NO_CHANGE) when it already
+            # publishes this EXACT name — the baked /etc/hostname=ceralive makes
+            # the first candidate a no-op set. That means we already own it:
+            # confirm RUNNING + published==candidate and accept. Any other failure
+            # (daemon not query-ready, transient D-Bus) retries the SAME candidate
+            # within the deadline instead of aborting or advancing the index.
+            if state="$(read_avahi_state)" \
+                && published="$(read_avahi_hostname)" \
+                && [[ "$state" = 2 && "$published" = "$candidate" ]]; then
+                return 0
+            fi
+            (( attempt < CONTENTION_RETRIES )) || return 1
+            (( CONTENTION_BACKOFF_MAX == 0 )) \
+                || sleep "$(( (RANDOM % CONTENTION_BACKOFF_MAX) + 1 ))"
+            continue
+        fi
 
         stable=0
         retry=0
@@ -641,6 +672,7 @@ if [[ "$MODE" = reconcile ]]; then
 fi
 
 deadline=$((SECONDS + MAX_WAIT))
+wait_for_avahi_ready "$deadline"
 while (( index <= MAX_INDEX )); do
     candidate="$(candidate_for_index "$index")"
     if claim_candidate "$candidate" "$deadline"; then
@@ -732,9 +764,14 @@ EOF
   systemctl enable ceralive-hostname-reconcile.timer
 
   mkdir -p /etc/systemd/system/ceralive.service.d
+  # Wants=, not Requires=: a failed unique-hostname claim must NOT take the
+  # product down. ceralive.service still boots on the baked default hostname
+  # (degraded-but-functional), After= keeps the claim ordered first when it can
+  # run, and ceralive-hostname.service's own Restart=on-failure + the reconcile
+  # timer keep retrying — ExecStartPost then restarts consumers once it succeeds.
   cat >/etc/systemd/system/ceralive.service.d/05-hostname-identity.conf <<'EOF'
 [Unit]
-Requires=ceralive-hostname.service
+Wants=ceralive-hostname.service
 After=ceralive-hostname.service
 EOF
 }

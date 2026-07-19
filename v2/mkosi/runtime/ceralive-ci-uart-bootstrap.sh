@@ -19,8 +19,29 @@ fail() {
     exit 1
 }
 
+# RK3588's live console /dev/ttyFIQ0 is the FIQ-debugger's fixed-rate software
+# console over the debug UART: it rejects the TCSETS baud ioctl, so `stty 1500000`
+# fails and, under `set -e`, aborted the whole bootstrap before READY (real
+# Rock 5B+ regression, 2026-07-19). There the channel already works by default,
+# so stty is best-effort. On a real UART (future ttyS board / x86 ttyS0) the baud
+# set is meaningful: keep it fatal — deliberately NOT `|| true` — so a genuine
+# mis-provision is surfaced, not masked.
+configure_bootstrap_tty() {
+    local dev
+    dev="$(tty 2>/dev/null || true)"
+    case "${dev##*/}" in
+    ttyFIQ*)
+        stty -echo <&0 2>/dev/null \
+            || printf 'CERALIVE_UART_BOOTSTRAP_INFO fiq-tty-stty-skipped %s\n' "${dev}"
+        ;;
+    *)
+        stty 1500000 sane -echo <&0 || fail tty-setup
+        ;;
+    esac
+}
+
 if [[ -t 0 ]]; then
-    stty 1500000 sane -echo <&0
+    configure_bootstrap_tty
 fi
 boot_nonce="${CERALIVE_UART_BOOT_NONCE:-$("${OPENSSL_BIN}" rand -hex 32)}"
 [[ "${boot_nonce}" =~ ^[0-9a-f]{64}$ ]] || fail boot-nonce
