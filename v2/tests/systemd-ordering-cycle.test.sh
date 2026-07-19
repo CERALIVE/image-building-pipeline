@@ -91,6 +91,22 @@ grep -Eq '^Before=.*\blocal-fs\.target\b' <<<"${mig}" \
 grep -Eq '\bsysinit\.target\b' <<<"${mig}" \
   && fail "ceralive-migrate-data.service must NOT reference sysinit.target — it runs in the local-fs phase (would cycle)"
 
+# ceralive-hostname.service (generated inline by postinst-lib.sh) does an mDNS
+# hostname claim that CANNOT succeed before a network link is up. Ordering only
+# After=NetworkManager.service (daemon up) let it run before eth0 linked on real
+# Rock 5B+ hardware, so it failed-closed and every Requires= consumer cascaded to
+# "Dependency failed". It MUST order After=/Wants=network-online.target (link up).
+hostname_unit="$(awk '
+  /cat >\/etc\/systemd\/system\/ceralive-hostname\.service <<'\''EOF'\''/ { f=1; next }
+  f && /^EOF$/ { exit }
+  f { print }
+' "${POSTINST_LIB}")"
+[[ -n "${hostname_unit}" ]] || fail "could not extract ceralive-hostname.service heredoc from postinst-lib.sh"
+grep -Eq '^After=.*\bnetwork-online\.target\b' <<<"${hostname_unit}" \
+  || fail "ceralive-hostname.service lacks After=network-online.target — mDNS claim races ahead of the link (first-boot cascade regression)"
+grep -Eq '^Wants=.*\bnetwork-online\.target\b' <<<"${hostname_unit}" \
+  || fail "ceralive-hostname.service lacks Wants=network-online.target — network-online.target is never pulled in, so After= is a no-op"
+
 echo "systemd-ordering-cycle: Part A static contract OK"
 
 # ---------------------------------------------------------------------------
@@ -169,16 +185,21 @@ What=/dev/disk/by-partlabel/data
 Where=/data
 Type=ext4
 EOF
-for stub in ceralive.service ceralive-hostname.service; do
-  cat >"${ETC}/${stub}" <<EOF
+cat >"${ETC}/ceralive.service" <<'EOF'
 [Unit]
-Description=${stub} stub
+Description=ceralive.service stub
 [Service]
 ExecStart=/bin/true
 [Install]
 WantedBy=multi-user.target
 EOF
-done
+
+# Render the REAL ceralive-hostname.service (not a stub) so B1 acyclicity also
+# proves the network-online.target addition introduced no cycle, and Part C can
+# probe its ordering. Its ExecStart target is stubbed above in /usr/local/sbin.
+printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/ceralive-set-hostname"
+chmod 0755 "${S}/usr/local/sbin/ceralive-set-hostname"
+printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
 
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
@@ -252,4 +273,18 @@ if (( checked == 0 )); then
 fi
 
 echo "systemd-ordering-cycle: Part B2 sysinit ordering OK (guards run after sysusers/tmpfiles)"
+
+# --- Part C: prove ceralive-hostname.service is ordered After network-online.target ---
+# Same probe technique as B2: a unit After=ceralive-hostname.service
+# Before=network-online.target closes a cycle iff the hostname unit is genuinely
+# ordered after network-online.target. This is the dynamic proof of Defect 2's fix
+# (the static After=/Wants= assertion is in Part A).
+if [[ -f "${SYS_LIB}/network-online.target" ]]; then
+  probe_orders_after ceralive-hostname.service network-online.target \
+    || fail "ceralive-hostname.service is NOT ordered after network-online.target (first-boot mDNS-before-link cascade regression)"
+  echo "systemd-ordering-cycle: Part C network-online ordering OK (hostname runs after the link is up)"
+else
+  echo "systemd-ordering-cycle: network-online.target absent — skipping Part C dynamic probe (static contract enforced in Part A)"
+fi
+
 echo "systemd-ordering-cycle regression: PASS"

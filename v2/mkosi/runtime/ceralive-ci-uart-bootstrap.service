@@ -25,7 +25,14 @@ Type=oneshot
 StandardInput=tty
 StandardOutput=tty
 StandardError=tty
-TTYPath=/dev/ttyS2
+# RK3588's live Linux-phase console is /dev/ttyFIQ0, NOT /dev/ttyS2. The Rockchip
+# vendor kernel's FIQ debugger claims physical UART2 once Linux boots and exposes
+# it as ttyFIQ0 (systemd runs serial-getty@ttyFIQ0.service; there is no /dev/ttyS2
+# device node at runtime). U-Boot/early-kernel still use raw ttyS2 @ 1500000 (the
+# family serial_console → console= arg), which is why the UART helper's `=>` prompt
+# interaction works BEFORE the FIQ debugger claims the port. This one-shot must own
+# the runtime console, so it targets ttyFIQ0. Confirmed on real Rock 5B+ hardware.
+TTYPath=/dev/ttyFIQ0
 TTYReset=yes
 TTYVHangup=yes
 ExecStart=/usr/bin/timeout --signal=KILL 180s /usr/local/sbin/ceralive-ci-uart-bootstrap

@@ -53,8 +53,11 @@ mode of `rauc-rollback.sh` proves the engine, not the silicon.
 - **USB-OTG / Type-C** cable from the board's OTG port to a host USB port
   (used for maskrom-mode flashing — section 4).
 - **USB-UART (serial)** adapter on the board's debug UART → host
-  `/dev/ttyUSB0` or `/dev/ttyACM0` (section 5). RK3588 debug UART is **ttyS2 @
-  1500000 baud** on-device (`family rk3588.yaml: serial_console: ttyS2:1500000`).
+  `/dev/ttyUSB0` or `/dev/ttyACM0` (section 5). RK3588 debug UART is physical
+  **UART2 @ 1500000 baud** on-device. U-Boot/early-kernel drive it as raw `ttyS2`
+  (`family rk3588.yaml: serial_console: ttyS2:1500000` → `console=ttyS2,1500000`);
+  once Linux boots, the Rockchip FIQ debugger claims UART2 and the live console is
+  **`/dev/ttyFIQ0`** (`serial-getty@ttyFIQ0.service`, no `/dev/ttyS2` node).
 - **Network**: board on the same LAN as the host, with a **stable IP** (DHCP
   reservation by MAC, or static). This is the `BOARD_IP` the LIVE harnesses use.
 - **Starting state**: the release job accepts the board only when it already
@@ -245,9 +248,11 @@ verifier's fixture identity, cancellation, full-readback, and evidence contracts
 
 ## 5. Serial access
 
-The RK3588 debug UART is **`ttyS2` @ 1500000 baud on-device**
-(`family rk3588.yaml: serial_console: ttyS2:1500000`). On the host it appears as
-`/dev/ttyUSB0` (FTDI/CP210x adapter) or `/dev/ttyACM0` (CDC-ACM).
+The RK3588 debug UART is physical **UART2 @ 1500000 baud on-device**. U-Boot and
+the early kernel drive it as raw `ttyS2` (`family rk3588.yaml: serial_console:
+ttyS2:1500000`); under Linux the Rockchip FIQ debugger owns UART2 and the live
+console is **`/dev/ttyFIQ0`** (there is no runtime `/dev/ttyS2` node). On the host
+it appears as `/dev/ttyUSB0` (FTDI/CP210x adapter) or `/dev/ttyACM0` (CDC-ACM).
 
 ### 5.1 Interactive
 
@@ -284,7 +289,10 @@ No SSH private key or password is embedded in the image, stored as a GitHub
 secret, or retained on the runner. `realhw-job.yml` generates one Ed25519 key in
 `RUNNER_TEMP`. Before `rkdeveloptool rd`, `uart-provision-ssh.sh` interrupts
 U-Boot and supplies the volatile kernel arguments
-`ceralive.ci_uart=1 systemd.mask=serial-getty@ttyS2.service`. A non-restarting,
+`ceralive.ci_uart=1 systemd.mask=serial-getty@ttyFIQ0.service` (the mask targets
+the FIQ-debugger live console `ttyFIQ0`, which is where systemd actually spawns
+the serial getty, so it cannot contend with the one-shot bootstrap's
+`TTYPath=/dev/ttyFIQ0`). A non-restarting,
 180-second UART oneshot emits a fresh 256-bit boot nonce, accepts one signed data
 record bound to that nonce, verifies the candidate commit, and appends a root
 public-key line constrained with `restrict` and an absolute `expiry-time`. It

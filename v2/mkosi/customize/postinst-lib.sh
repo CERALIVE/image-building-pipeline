@@ -676,9 +676,14 @@ EOF
 Description=CeraLive unique hostname setup
 Requires=ceralive-migrate-data.service
 RequiresMountsFor=/data
-After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service
+# network-online.target (link actually up), NOT just NetworkManager.service (daemon
+# up): the mDNS claim cannot succeed before an interface links. On real Rock 5B+ HW
+# this unit ran at ~15s and failed by ~15.8s while eth0 linked only at 18.89s, so it
+# failed-closed and every Requires= consumer cascaded to "Dependency failed" — a dead
+# appliance on first boot. Its sibling network units already wait for this target.
+After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service network-online.target avahi-daemon.service
 Before=ceralive-tls-firstboot.service ceralive.service
-Wants=NetworkManager.service avahi-daemon.service
+Wants=NetworkManager.service network-online.target avahi-daemon.service
 ConditionPathExists=/etc/machine-id
 StartLimitIntervalSec=0
 

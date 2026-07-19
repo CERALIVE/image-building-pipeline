@@ -920,6 +920,27 @@ contract + `systemd-analyze verify` for zero cycles AND an ordering probe that
 proves each guard is transitively after `systemd-sysusers`/`systemd-tmpfiles`
 (a cycle-only check would miss the proof-11 gap). Wired into `v2/run-tests`.
 
+**RK3588 CI-UART bootstrap owns the LIVE console `/dev/ttyFIQ0`, NOT `/dev/ttyS2`.**
+On RK3588 the Rockchip vendor kernel's FIQ debugger claims physical UART2 once Linux
+boots and exposes it as `/dev/ttyFIQ0` — systemd spawns `serial-getty@ttyFIQ0.service`
+and there is **no `/dev/ttyS2` device node at runtime**. So
+`ceralive-ci-uart-bootstrap.service` sets `TTYPath=/dev/ttyFIQ0` (was `/dev/ttyS2`,
+which made its `StandardInput=tty` setup fail instantly on real Rock 5B+ hardware — no
+handshake, no run-local SSH key installed), and the CI harness
+`v2/ci/uart-provision-ssh.sh` masks `serial-getty@ttyFIQ0.service` over the transient
+kernel cmdline (`systemd.mask=serial-getty@ttyFIQ0.service`) so the real getty cannot
+contend for the port (masking `serial-getty@ttyS2.service` was a no-op — that unit
+never exists). This is DISTINCT from the family `serial_console: ttyS2:1500000`, which
+stays `ttyS2`: that is the raw UART2 U-Boot/early-kernel `console=ttyS2,1500000` arg,
+correct because the bootloader/early kernel drive UART2 directly BEFORE the FIQ
+debugger claims it (hence the UART helper's `=>` prompt interaction works). Do NOT
+rename `serial_console` to `ttyFIQ0` — that would break the early/bootloader console.
+The entire CI-UART path is RK3588-only by construction (`TTYPath` is a hardcoded
+literal, not templated; x86 uses `ttyS0` and never runs this gate). Offline guard:
+`v2/tests/uart-console-path.test.sh` (bootstrap `TTYPath` + getty mask both target
+`ttyFIQ0`, the two agree, and `serial_console` stays the raw-UART2 `ttyS2` early
+console). Wired into `v2/run-tests`.
+
 **`ceralive-ssh-firstboot.sh` MUST create `/run/sshd` before its `sshd -t`.** The
 guard's last step validates the sshd config with `sshd -t`, which refuses to run
 without the privilege-separation dir `/run/sshd` (`Missing privilege separation
@@ -945,6 +966,24 @@ it is never persisted. A real local `flock` serializes starts, while Avahi's mDN
 claim protocol arbitrates simultaneous devices. The selected index lives at
 `/data/ceralive/host_index` through the `/etc/ceralive/host_index` symlink; the
 local service lock is runtime-only state under `/run`.
+
+The unit is ordered `After=`/`Wants=network-online.target` (link actually up), NOT
+merely `After=NetworkManager.service` (daemon up). The mDNS claim (`avahi-set-host-name`
++ Avahi `RUNNING` + a publishable LAN address) cannot succeed before an interface
+links, and every `Requires=ceralive-hostname.service` consumer (`ceralive.service`,
+`ceralive-tls-firstboot.service`, `ceralive-hawkbit-provision.service`, and
+transitively `nginx.service`/`ceralive-healthcheck.service`) cascades to "Dependency
+failed" if this unit fails on first boot. Confirmed on real Rock 5B+ hardware: the
+unit ran at ~15s and failed by ~15.8s while `eth0`'s link only came up at 18.89s, so
+the claim failed-closed and the entire appliance stack (plus `dnsmasq`, which shares
+the same start batch) never came up (`curl http://<device>/api/health` → connection
+refused). Its sibling network-dependent units (`ceralive-healthcheck`,
+`ceralive-hawkbit-provision`, `rauc-hawkbit-updater`) already wait for
+`network-online.target`; the hostname unit was the lone omission. This is a systemd
+ordering fix, distinct from the mDNS-arbitration logic. Offline guards:
+`v2/tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
+dynamic ordering probe proving the unit runs after `network-online.target`) and
+`manifest.bats` "hostname:" ordering assertions.
 
 Each service attempt has a 120-second global claim budget, 3-second command
 timeouts, and a 10-second local-lock wait. systemd caps the attempt at 150 seconds
