@@ -794,8 +794,8 @@ HBDROPIN
 Description=CeraLive hawkBit DDI enrollment (render per-device updater config on /data)
 RequiresMountsFor=/data
 After=ceralive-migrate-data.service ceralive-hostname.service network-online.target
-Requires=ceralive-hostname.service
-Wants=network-online.target
+# Wants= (not Requires=): a failed hostname claim must not block enrollment — graceful degradation, see postinst-lib.sh.
+Wants=network-online.target ceralive-hostname.service
 Before=rauc-hawkbit-updater.service
 ConditionPathExists=/data/ceralive/hawkbit.conf
 

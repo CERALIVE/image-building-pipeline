@@ -96,6 +96,11 @@ make_hostname_fixture() {
   mkdir -p "$root/state" "$root/avahi" "$root/shared" "$bin"
   printf '127.0.0.1\tlocalhost\n' >"$root/hosts"
   printf '0123456789abcdef0123456789abcdef\n' >"$root/machine-id"
+  # A live avahi-daemon always answers GetState; seed a RUNNING state so
+  # wait_for_avahi_ready probes a ready daemon like hardware. published is left
+  # unset (the mock creates it on the first SetHostName) so tests that die before
+  # any claim still observe published=<missing>.
+  printf '2\n' >"$root/avahi/state"
   extract_hostname_script >"$root/ceralive-set-hostname"
   chmod +x "$root/ceralive-set-hostname"
 
@@ -150,6 +155,10 @@ set -euo pipefail
 name="${1:?missing hostname}"
 mkdir -p "$AVAHI_DEVICE_STATE" "$AVAHI_SHARED_DIR"
 printf 'avahi-set-host-name %s\n' "$name" >>"$HOSTNAME_CALLS"
+
+if [[ "${AVAHI_SCENARIO:-normal}" = preowned && "$name" = ceralive ]]; then
+  exit 1
+fi
 
 if [[ "${AVAHI_SCENARIO:-normal}" =~ ^(concurrent|symmetric-gap)$ \
       && "$name" = ceralive && ! -e "$AVAHI_DEVICE_STATE/gate-passed" ]]; then
@@ -229,6 +238,11 @@ case "$*" in
       malformed) printf 'malformed-state\n' ;;
       misleading-state) printf 'i 2 trailing-data\n' ;;
       multiline-state) printf 'i 2\ntrailing-record\n' ;;
+      slow-ready)
+        sc="$AVAHI_DEVICE_STATE/state-poll-count"
+        c=0; [[ ! -s "$sc" ]] || c="$(cat "$sc")"; c=$((c + 1)); printf '%s\n' "$c" >"$sc"
+        if (( c <= 2 )); then printf 'i 0\n'; else printf 'i %s\n' "$(cat "$AVAHI_DEVICE_STATE/state")"; fi
+        ;;
       *) printf 'i %s\n' "$(cat "$AVAHI_DEVICE_STATE/state")" ;;
     esac
     ;;
@@ -361,6 +375,41 @@ run_concurrent_hostname_scripts() {
   [[ "$output" == *"hostname-file=ceralive"* ]]
   [[ "$output" == *"hosts=ceralive"* ]]
   [[ "$output" == *"published=ceralive"* ]]
+  printf '%s\n' "$output"
+}
+
+# Real Rock 5B+ regression (2026-07-19, empirically reproduced against live
+# avahi): the baked /etc/hostname=ceralive makes avahi already publish ceralive,
+# so avahi-set-host-name ceralive returns AVAHI_ERR_NO_CHANGE (exit 1). The old
+# claim treated that as a lost claim and died, cascading DEPEND failures across
+# the whole appliance. The fix accepts "already own it" as success.
+@test "hostname: avahi already owns the baked name (NO_CHANGE) is accepted as success" {
+  local root="$BATS_TEST_TMPDIR/preowned"
+  make_hostname_fixture "$root"
+  printf 'ceralive\n' >"$root/avahi/published"
+  run run_hostname_script "$root" "" preowned
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"avahi-set-host-name ceralive"* ]]
+  [[ "$output" == *"hostnamectl set-hostname ceralive"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hosts=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  [[ "$output" != *"avahi-set-host-name ceralive2"* ]]
+  printf '%s\n' "$output"
+}
+
+# wait_for_avahi_ready must poll GetState until the daemon is query-ready rather
+# than issue the first claim into a cold daemon. slow-ready reports not-ready
+# (state 0) for the first two GetState calls, then RUNNING.
+@test "hostname: allocation waits for avahi to become query-ready" {
+  local root="$BATS_TEST_TMPDIR/slow-ready"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root" "" slow-ready
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  [ "$(cat "$root/avahi/state-poll-count")" -ge 3 ]
   printf '%s\n' "$output"
 }
 
@@ -571,12 +620,21 @@ run_concurrent_hostname_scripts() {
   grep -Fq 'Wants=NetworkManager.service network-online.target avahi-daemon.service' "$POSTINST_LIB"
   [[ "$hostname_unit" == *'After='*'network-online.target'*'avahi-daemon.service'* ]]
   [[ "$hostname_unit" == *'Wants=NetworkManager.service network-online.target avahi-daemon.service'* ]]
+  # Graceful degradation: appliance consumers Wants= (not Requires=) the hostname
+  # claim, so a failed claim boots on the baked default instead of cascading
+  # DEPEND failures across ceralive.service/nginx/tls/hawkbit. Only the reconcile
+  # retry service keeps a hard Requires= (its failure is harmless, timer refires).
+  grep -Fq 'Wants=ceralive-hostname.service' "$POSTINST_LIB"
+  grep -Fq 'Wants=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
+  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
   grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
-  grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
   grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
   ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
   grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service network-online.target' \
     "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  grep -Fq 'Wants=network-online.target ceralive-hostname.service' \
+    "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 @test "hostname: aligned reconciliation is a no-op" {

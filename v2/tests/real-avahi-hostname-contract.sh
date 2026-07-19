@@ -427,6 +427,25 @@ printf 'CONCURRENT=PASS exact=ceralive,ceralive2\n'
 stop_device "$CONCURRENT_A"
 stop_device "$CONCURRENT_B"
 
+# Baked-hostname (AVAHI_ERR_NO_CHANGE) regression against REAL avahi. A lone
+# first boot whose daemon already publishes the baked name `ceralive` (seed
+# below): avahi-set-host-name ceralive returns NO_CHANGE (exit 1). The fixed
+# allocator must accept "we already own it" and commit, not die and cascade
+# DEPEND failures (real Rock 5B+ regression, 2026-07-19). The prior seeds never
+# equalled the first candidate, so this exact path was a CI blind spot.
+create_pair p 3 no
+PREOWNED_A="$TMP/preowned/device-a"
+start_device "$PREOWNED_A" "${PAIR_A_NS[p]}" ceralive
+run_allocator "$PREOWNED_A" "${PAIR_A_NS[p]}" a >"$TMP/preowned/device-a.out" 2>&1 & pid_a=$!
+set +e; wait "$pid_a"; preowned_rc=$?; set -e
+sed 's/^/PREOWNED_A: /' "$TMP/preowned/device-a.out"
+(( preowned_rc == 0 )) \
+  || fail "PREOWNED allocator failed — baked-hostname NO_CHANGE not accepted as ownership"
+[[ "$(avahi_name "$PREOWNED_A")" = ceralive ]] || fail "preowned device did not retain ceralive"
+assert_device_aligned "$PREOWNED_A"
+printf 'PREOWNED=PASS device-a=ceralive (NO_CHANGE accepted as ownership)\n'
+stop_device "$PREOWNED_A"
+
 create_pair m 2 no
 MERGE_A="$TMP/late-merge/device-a"
 MERGE_B="$TMP/late-merge/device-b"

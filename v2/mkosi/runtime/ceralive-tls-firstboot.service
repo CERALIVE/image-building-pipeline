@@ -8,7 +8,11 @@ Documentation=file:///usr/share/doc/ceralive/size-notes.md
 # the unique-hostname service so the cert's CN/SAN carry the device's real
 # <hostname>.local rather than the generic baked name.
 After=local-fs.target data.mount ceralive-migrate-data.service ceralive-hostname.service
-Requires=ceralive-hostname.service
+# Wants=, not Requires=: a failed unique-hostname claim must not block the TLS
+# front. The cert is generated for whatever hostname is current (the baked
+# default if the claim degraded), and is re-issued when the hostname later
+# advances (ExecStartPost restart + SAN re-validation on each run).
+Wants=ceralive-hostname.service
 Before=nginx.service
 StartLimitIntervalSec=0
 # Identity persists on /data; data.mount is a SOFT ordering only — the script

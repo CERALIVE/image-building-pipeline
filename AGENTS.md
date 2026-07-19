@@ -1039,6 +1039,42 @@ the production script against two real Avahi daemons in private D-Bus/network
 namespaces for simultaneous boot and late-LAN-merge races. Operator behavior and
 diagnostics are documented in [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §4.
 
+**Baked-hostname `AVAHI_ERR_NO_CHANGE` fix + graceful degradation (2026-07-19).**
+After the `network-online.target` ordering fix above, the claim STILL failed on
+real Rock 5B+ hardware — for a different, empirically-confirmed reason. The image
+bakes `/etc/hostname=ceralive` (`configure_networking`), so the running Avahi daemon
+already publishes `ceralive` at boot. `ceralive-set-hostname` (allocate, index 1)
+then calls `avahi-set-host-name ceralive`, which returns non-zero
+(`AVAHI_ERR_NO_CHANGE`: a no-op set to the daemon's current name in a non-collision
+state — reproduced live: same-name set → exit 1, different-name → exit 0). The old
+`claim_candidate` treated that non-zero as a lost claim → `die` → and every hard
+`Requires=` consumer cascaded to "Dependency failed", killing the whole appliance
+(`ceralive.service`, `nginx`, TLS, hawkBit) on first boot. Three fixes, all in
+`postinst-lib.sh::setup_hostname_service` unless noted:
+
+- **Root cause** — `claim_candidate` now treats a failed `avahi-set-host-name`
+  whose daemon is already `RUNNING` + publishing the exact candidate as SUCCESS
+  ("we already own it"); any other set failure retries the SAME candidate within
+  the deadline instead of aborting or wrongly advancing the deterministic index.
+- **Avahi readiness** — a bounded, best-effort `wait_for_avahi_ready` polls
+  `GetState` for a query-ready daemon (REGISTERING/RUNNING) before the first claim,
+  since `After=avahi-daemon.service` only guarantees the process started.
+- **Graceful degradation** — the appliance consumers now `Wants=` (NOT `Requires=`)
+  `ceralive-hostname.service`: `ceralive.service` (drop-in `05-hostname-identity.conf`),
+  `ceralive-tls-firstboot.service`, and `ceralive-hawkbit-provision.service`. A failed
+  claim no longer cascades; the device boots on the baked default hostname
+  (degraded-but-functional), `After=` keeps ordering, the unit's own
+  `Restart=on-failure` + the 30s reconcile timer keep retrying, and `ExecStartPost`
+  restarts consumers once a claim succeeds. Only `ceralive-hostname-reconcile.service`
+  keeps a hard `Requires=` (its failure is harmless — the timer refires). This
+  supersedes the "every `Requires=` consumer cascades" description above.
+
+Guards: `manifest.bats` "hostname:" gains an `AVAHI_ERR_NO_CHANGE`-accepted test, a
+readiness-wait test, and `Wants=` (not `Requires=`) graceful-degradation assertions;
+`real-avahi-hostname-contract.sh` gains a real-avahi PREOWNED scenario (daemon seeded
+`ceralive`) proving the fixed allocator claims it instead of dying — the exact CI
+blind spot (prior seeds never equalled the first candidate).
+
 **Build concurrency** [EXISTS]
 
 The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
