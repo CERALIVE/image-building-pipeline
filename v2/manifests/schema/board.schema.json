@@ -70,6 +70,25 @@
         "wlan0": { "type": "string", "description": "ID_PATH of the onboard WiFi adapter (optional; generic Type=wlan fallback is used when absent)." }
       }
     },
+    "modem_ports": {
+      "description": "Per-board physical modem-slot identity map for deterministic ModemManager slot-UID naming. Optional. `status` gates whether the udev generator (v2/mkosi/customize/udev.sh generate_modem_slot_uid_rules) emits any generated 78-mm-ceralive-slot-uid.rules: while `unverified` (the default until a physical modem on this exact board model is used to read each slot's real ID_PATH) NO generated slot-uid rules are emitted — fail-closed, no permissive fallback; the permanent generic modem group-tag rules in setup_hardware_access are unaffected. When `verified`, `slots` maps each physical slot name (modemN) to the ID_PATH string read from `udevadm info` on hardware, and the generator emits one ENV{ID_MM_PHYSDEV_UID} rule per slot. Discovery runbook: v2/docs/modem-matrix.md §7.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "description": "`unverified` (default posture — emit NO generated slot-uid rules) or `verified` (hardware-confirmed slot ID_PATHs present in `slots`; generator emits rules).",
+          "type": "string",
+          "enum": ["unverified", "verified"]
+        },
+        "slots": {
+          "description": "Map of physical modem-slot name (modem0, modem1, …) to the udev ID_PATH of that slot (read from `udevadm info /sys/class/net/<iface>` or the modem's USB device). Only meaningful when status is `verified`.",
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "propertyNames": { "pattern": "^modem[0-9]+$" }
+        }
+      }
+    },
     "description": {
       "description": "Human-readable board name/notes (e.g. DEVICE_NAME 'Radxa Rock 5B+'). REQUIRED — single home for the descriptive INSTALLATION_NOTES/hardware-spec metadata that is not consumed by the builder.",
       "type": "string",

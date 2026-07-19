@@ -49,6 +49,15 @@ interfaces:
   eth0: platform-fe190000.pcie-pci-0004:41:00.0
   wlan0: platform-fe170000.pcie-pci-0002:21:00.0
 
+# Physical modem-slot identity for deterministic ModemManager slot-UID naming.
+# UNVERIFIED until a physical modem in the M.2 B-key slot is used to read the real
+# ID_PATH on this exact board model. While unverified the udev generator emits NO
+# 78-mm-ceralive-slot-uid.rules (fail-closed — the permanent generic modem rules
+# still apply). Flipping to `verified` + populating `slots` is a separate,
+# hardware-gated step (v2/docs/modem-matrix.md §7).
+modem_ports:
+  status: unverified
+
 # cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext
 

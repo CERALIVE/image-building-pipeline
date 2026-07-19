@@ -125,6 +125,15 @@ software (the NM dispatcher `90-srtla-wifi-routing` now matches `usb0..7` and
 `enx*0..7`). This item is about deterministic **rename rules** only, which require
 reading the real `ID_PATH` from a physical modem.
 
+Note: deterministic modem **slot-UID naming** is a distinct, also-hardware-gated
+mechanism now wired fail-closed via the board `modem_ports` block and the
+`v2/mkosi/customize/udev.sh::generate_modem_slot_uid_rules` generator. While
+`modem_ports.status: unverified` (the shipped default) NO slot-uid rules are
+emitted; the discovery + flip-to-`verified` runbook is in
+[`v2/docs/modem-matrix.md §7`](modem-matrix.md). The interface **rename** below
+and the slot-**UID** mechanism are independent — either can be verified without
+the other.
+
 ### Commands (run on the device with modem attached)
 
 ```bash

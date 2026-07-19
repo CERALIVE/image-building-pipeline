@@ -51,7 +51,8 @@ image-building-pipeline/
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
-| **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack as-is + the advisory check `v2/lib/check-wwan-modules.sh` |
+| **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
+| **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
@@ -257,9 +258,20 @@ the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
-  `cerastream ceralive-device srtla-send-rs`, plus the required capture plugin
-  `gstreamer1.0-libuvch264src` are downloaded into `$DEST/debs/` using the pins
-  from `v2/manifests/first-party-deb-versions.txt`. Debian hosts use isolated `apt-get download`;
+  `cerastream ceralive-device srtla-send-rs`, the required capture plugin
+  `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
+  ceralive-forked (`~ceralive0.2.0`) modem packages `modemmanager libmm-glib0
+  libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
+  libqrtr-glib0` (modem-stack v0.2.0). All are downloaded into `$DEST/debs/` using the pins
+  from `v2/manifests/first-party-deb-versions.txt` (14 packages total). The modem
+  closure is a self-contained dependency set (`modemmanager`→`libmm-glib0`; the
+  glib libs bind the qmi/mbim/qrtr transports); external deps (GLib, `libgudev`,
+  `polkit`, systemd) come from Debian. The app layer classifies all nine as
+  `RUNTIME_APP_PKGS` and their `dpkg -i` **upgrades** the Debian modem packages the
+  runtime layer pulled via `shared.list` (`modemmanager`/`libqmi-utils`/`libmbim-utils`
+  stay in `shared.list` to resolve that dependency tree; the fork wins on-device via
+  the `Package: *` origin-990 pin). `mobile-broadband-provider-info` (ModemManager's
+  APN database, a `Recommends:`) is an explicit `shared.list` entry. Debian hosts use isolated `apt-get download`;
   non-Debian hosts use a curl fallback that verifies `InRelease` with `gpgv`,
   checks the `Packages.gz` SHA256 from that signed metadata, then downloads the
   exact package files. Every verified `.deb` is normalized to mode `0644` before
@@ -738,6 +750,46 @@ a kernel `.deb` (or an extracted module tree) and reports each module as loadabl
 - **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
   the check **always exits 0**. It never fails the build and never edits
   `shared.list` or the kernel config. Proof: `v2/run-tests` section 17.
+
+**ModemManager 1.24 closure — first-party fork, app-layer install** [EXISTS]
+
+The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
+(`~ceralive0.2.0`, modem-stack v0.2.0), not Debian's ModemManager. Nine
+ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
+`-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
+first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
+`v2/manifests/first-party-deb-versions.txt`, and classified `RUNTIME_APP_PKGS` by
+the app postinst (`app/mkosi.postinst.chroot`). Their local `dpkg -i` **upgrades**
+the Debian modem packages the runtime layer pulled transitively via `shared.list`
+(`modemmanager`/`libqmi-utils`/`libmbim-utils` stay there to resolve the full
+dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come from
+Debian). The `Package: *` origin-990 pin keeps the fork winning on-device.
+`mobile-broadband-provider-info` (ModemManager's APN database, a `Recommends:`) is
+an explicit `shared.list` entry. Full source-of-truth: `v2/docs/modem-matrix.md §1`.
+Guards: `manifest.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
+exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
+`v2/tests/app-layer-modem-closure.test.sh` (executable install/classification).
+
+**Fail-closed modem slot-UID naming (`modem_ports`)** [EXISTS]
+
+The board manifest carries an optional `modem_ports` block that gates a udev
+generator, `v2/mkosi/customize/udev.sh::generate_modem_slot_uid_rules`. It is
+**fail-closed**: while `status: unverified` (the shipped default on every board —
+verifying a slot map needs a physical modem on that exact board to read each
+slot's real `ID_PATH`) the generator emits **NO** generated
+`78-mm-ceralive-slot-uid.rules` and removes any stale one — **no permissive
+fallback**. The **permanent generic modem rules** in `setup_hardware_access` (the
+"USB Modem Devices (4G/5G)" `dialout` group-tag block) always ship and are NOT
+touched. Only when a board is `status: verified` with `slots:` (`modemN` → `ID_PATH`)
+does the generator emit one `ENV{ID_MM_PHYSDEV_UID}` rule per slot. The status/slots
+reach the runtime subimage chroot via `CERALIVE_MODEM_PORTS_STATUS`/`_SLOTS`
+(orchestrate.sh `env_names` ↔ `mkosi.conf` `PassEnvironment=`, same lockstep the
+interface-naming vars use). Flipping to `verified` is a separate, hardware-gated
+step (`v2/docs/modem-matrix.md §7` discovery runbook) — **do NOT flip it without
+reading real hardware ID_PATHs**. Guards: `manifest.bats §23` generator matrix
+(unverified ⇒ zero rules; unset ⇒ unverified; verified fixture ⇒ rules emitted;
+verified-with-no-slots ⇒ fail-closed; stale-file cleanup; generic-rules-untouched;
+env lockstep).
 
 ## ADD-ON SUBSYSTEM [EXISTS]
 
