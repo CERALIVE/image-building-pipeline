@@ -342,11 +342,13 @@ timeout and Loader re-enumeration timeout separately. The workflow then captures
 the 16-byte SoC-family marker with `rkdeveloptool rci`, verifies the image,
 writes it, reads the entire candidate range back, and only then resets. A direct
 `rkdeveloptool wl` command is not an acceptable production or recovery path.
-After boot, the gate reads the same first 16 bytes from Rockchip OTP NVMEM via
-the image's committed helper and requires a like-for-like family match before SSH
-checks. `rci` is only the RK3588 family constant (Maskrom exposes no per-device
-read), so the genuine per-device binding is the eMMC CID: the UART bootstrap
-records it and the gate cross-checks it against the live post-boot media CID.
+After boot, the gate reads the RK3588 OTP `cpu_code` cell (nvmem offset `0x02`)
+via the image's committed helper and requires a like-for-like family match before
+SSH checks. `rci` and the OTP encode the family differently, so the helper reads
+that cpu_code cell — not a raw 16-byte dump — and both sides normalize to the same
+cpu_code identity. `rci` is only the RK3588 family constant (Maskrom exposes no
+per-device read), so the genuine per-device binding is the eMMC CID: the UART
+bootstrap records it and the gate cross-checks it against the live post-boot media CID.
 
 #### Manual bench flashing (development/debugging only — NOT for production releases)
 

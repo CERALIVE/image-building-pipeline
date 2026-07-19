@@ -20,10 +20,14 @@ trap 'rm -rf "${TMP}"' EXIT
   printf 'Rockchip chip-info helper is missing\n' >&2
   exit 1
 }
+# Synthetic RK3588-representative OTP: cpu_code cell at offset 0x02-0x03 = 35 88
+# (0x3588); offset 0x04+ is a per-die serial and the trailing "extra" is past the
+# OTP identity region. The helper must decode ONLY the cpu_code family id and
+# ignore the per-die serial + trailing bytes.
 printf '\x52\x4b\x35\x88\x91\xfe\x21\x41\x5a\x43\x39\x36\x00\x00\x00\x00extra' \
   >"${TMP}/nvmem"
 chip_info="$(CERALIVE_ROCKCHIP_NVMEM_FILE="${TMP}/nvmem" "${CHIP_INFO}")"
-[[ "${chip_info}" == 524b358891fe21415a43393600000000 ]]
+[[ "${chip_info}" == 35880000000000000000000000000000 ]]
 printf '\x01\x02\x03' >"${TMP}/short-nvmem"
 if CERALIVE_ROCKCHIP_NVMEM_FILE="${TMP}/short-nvmem" "${CHIP_INFO}" >/dev/null 2>&1; then
   printf 'short Rockchip NVMEM identity was accepted\n' >&2

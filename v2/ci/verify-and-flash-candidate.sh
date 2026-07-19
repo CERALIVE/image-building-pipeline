@@ -781,18 +781,41 @@ for token in "${chip_info_tokens[@]}"; do
   usb_soc_raw+="${octet}"
 done
 [[ "${usb_soc_raw}" =~ ^[0-9a-f]{32}$ ]]
-# SECURITY (do not re-tighten to an equality on the raw bytes): `rci` is a
-# SoC-FAMILY marker, NOT a per-device id. On RK3588 bytes 0-3 are ASCII "8853"
-# and byte 12 is a loader overlay (0x00 cold / 0x10 warm), not an OTP fuse.
-# rkdeveloptool exposes no OTP/eFuse/serial/CID read in Maskrom, so no genuine
-# per-device value exists pre-flash. This is a COARSE per-family guard; the
-# per-device binding is the eMMC CID cross-checked post-boot. See runner-setup.md §6.
-soc_family_marker="38383533"   # ASCII "8853" == RK3588
+# SECURITY (do not re-tighten to a raw-byte equality, and do NOT drop the check):
+# `rci` and the device's post-boot OTP read encode the RK3588 SoC family in TWO
+# DIFFERENT ways, so a naive equality on either raw form is a guaranteed mismatch.
+#   - `rci` reports the model number's ASCII digits byte-reversed: bytes 0-3 are
+#     38 38 35 33 ("8853"), the little-endian image of the BootROM chip_info DWORD
+#     0x33353838 (= ASCII "3588"). Bytes 4-15 are loader/runtime noise (byte 12 is
+#     an 0x00 cold / 0x10 warm overlay), NOT identity.
+#   - The device re-reads the SAME family from the RK3588 OTP `cpu_code` cell
+#     (nvmem offset 0x02, 2 bytes = 0x3588) via ceralive-rockchip-chip-info; the
+#     per-die serial (`id@7`, offset 0x07+) is deliberately excluded there. A raw
+#     first-16-byte OTP dump (real board: 524b358812fe21413337544600000000) would
+#     carry that per-die serial and never equal a fixed host-derived constant.
+# Normalize BOTH sides to the cpu_code family identity so they compare like-for-
+# like (35880000000000000000000000000000 on RK3588). This stays a COARSE
+# per-family guard (identical on every RK3588); the genuine per-device binding is
+# the eMMC CID cross-checked post-boot. See runner-setup.md §6.
+soc_family_marker="38383533"   # rci little-endian bytes for the RK3588 model ("8853")
 [[ "${usb_soc_raw:0:8}" == "${soc_family_marker}" ]] || {
   printf 'Maskrom chip info does not identify the expected RK3588 SoC family\n' >&2
   exit 1
 }
-usb_soc_family="${soc_family_marker}000000000000000000000000"
+# Recover the OTP cpu_code hex the device emits ("3588"): decode the 4 rci model
+# bytes to their ASCII digits (38 38 35 33 -> "8853") and reverse them ("3588").
+# For RK35xx/RK358x the model number IS the cpu_code hex, so this is the exact
+# cross-encoding bridge between the rci read and the OTP cpu_code cell.
+soc_model_ascii="$(printf '%b' "\\x${usb_soc_raw:0:2}\\x${usb_soc_raw:2:2}\\x${usb_soc_raw:4:2}\\x${usb_soc_raw:6:2}")"
+soc_cpu_code=""
+for (( i = ${#soc_model_ascii} - 1; i >= 0; i-- )); do
+  soc_cpu_code+="${soc_model_ascii:i:1}"
+done
+[[ "${soc_cpu_code}" =~ ^[0-9a-f]{4}$ ]] || {
+  printf 'Maskrom chip info did not yield a valid RK3588 cpu_code family id\n' >&2
+  exit 1
+}
+usb_soc_family="${soc_cpu_code}0000000000000000000000000000"
 soc_family_sha256="$(printf '%s' "${usb_soc_family}" | sha256sum | cut -d' ' -f1)"
 "${preflash}" --image "${flash_image}" --bundle "${bundle}" --board "${board}" \
   --keyring "${keyring}" --target-size-bytes "${target_bytes}"
@@ -888,8 +911,11 @@ post_boot_soc_id="${post_boot_soc_id,,}"
   printf 'reconnected board did not report a valid Rockchip SoC identity\n' >&2
   exit 1
 }
-# Coarse per-family guard only (both sides are the RK3588 family constant); the
-# per-device guarantee is the eMMC CID binding below, not this comparison.
+# Coarse per-family guard only: the device's ceralive-rockchip-chip-info emits the
+# OTP cpu_code family identity, which the host derived above from the differently-
+# encoded Maskrom rci read — both now normalize to the SAME cpu_code form, so this
+# is a genuine like-for-like family match. The per-device guarantee is the eMMC CID
+# binding below, not this comparison.
 [[ "${post_boot_soc_id}" == "${usb_soc_family}" ]] || {
   printf 'post-boot SoC family does not match the Maskrom-read RK3588 family\n' >&2
   exit 1

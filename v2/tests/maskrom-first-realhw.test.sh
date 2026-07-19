@@ -251,7 +251,7 @@ payload="$(<"${TMPDIR}/uart-payload")"
 grep -Fxq 'host_epoch=4070908800' <<<"${payload}"
 grep -Fxq 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' <<<"${payload}"
 grep -Fxq 'candidate_commit=1111111111111111111111111111111111111111' <<<"${payload}"
-grep -Fxq 'soc_id=38383533000000000000000000000000' <<<"${payload}"
+grep -Fxq 'soc_id=35880000000000000000000000000000' <<<"${payload}"
 grep -Fxq 'boot_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' <<<"${payload}"
 if grep -Fq 'PRIVATE KEY' <<<"${payload}"; then exit 90; fi
 printf 'CERALIVE_UART_PROVISIONED aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1111111111111111111111111111111111111111\n' >"$3"
@@ -265,7 +265,7 @@ CERALIVE_UART_DRIVER="${TMP}/uart-driver" "${UART}" \
   --access-id gh-123-1 --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 38383533000000000000000000000000 \
+  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${TMP}/uart-start" \
   --uart-log "${TMP}/uart.log" --authorized-line-out "${TMP}/authorized-line" \
   --ready-out "${TMP}/uart-ready"
@@ -313,7 +313,7 @@ printf 'abcdef0123456789abcdef0123456789\n' >"${TMP}/mock-media-cid"
 device_payload="$(printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nsoc_id=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \
   gh-123-1 20990101005000Z 4070908800 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  1111111111111111111111111111111111111111 38383533000000000000000000000000 \
+  1111111111111111111111111111111111111111 35880000000000000000000000000000 \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ssh-ed25519 \
   AAAAC3NzaC1lZDI1NTE5AAAAIMaskromContractKey)"
 printf '%s' "${device_payload}" >"${TMP}/device-payload"
@@ -323,7 +323,7 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/device-payload")" \
   "$(base64 -w0 <"${TMP}/device-signature")" >"${TMP}/device-request"
 CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=38383533000000000000000000000000 \
+  MOCK_CHIP_INFO=35880000000000000000000000000000 \
   CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
@@ -342,7 +342,7 @@ test -f "${TMP}/device-state/ci-nonces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 if replay_output="$(CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=38383533000000000000000000000000 \
+  MOCK_CHIP_INFO=35880000000000000000000000000000 \
   CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
@@ -364,7 +364,7 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/rollback-payload")" \
   "$(base64 -w0 <"${TMP}/rollback-signature")" >"${TMP}/rollback-request"
 if rollback_output="$(CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=38383533000000000000000000000000 \
+  MOCK_CHIP_INFO=35880000000000000000000000000000 \
   CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
@@ -437,7 +437,7 @@ printf 'CERALIVE3 %s %s\n' "$(printf '%s' "${wrong_payload}" | base64 -w0)" \
   "$(base64 -w0 <"${TMP}/wrong-signature")" >"${TMP}/wrong-request"
 if CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=38383533000000000000000000000000 \
+  MOCK_CHIP_INFO=35880000000000000000000000000000 \
   CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
@@ -453,7 +453,7 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/device-payload")" \
   "$(base64 -w0 <"${TMP}/wrong-signature")" >"${TMP}/tampered-request"
 if CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=38383533000000000000000000000000 \
+  MOCK_CHIP_INFO=35880000000000000000000000000000 \
   CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
@@ -500,7 +500,7 @@ if timeout 5s env CERALIVE_UART_ARM_TIMEOUT_SECONDS=1 "${UART}" \
   --access-id locked-contract --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 38383533000000000000000000000000 \
+  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${pty}/uart-start" \
   --uart-log "${pty}/locked.log" --authorized-line-out "${pty}/locked-line" \
   --ready-out "${pty}/locked-ready" >/dev/null 2>&1; then
@@ -549,7 +549,7 @@ timeout 20s env CERALIVE_UBOOT_TIMEOUT_SECONDS=5 \
   --access-id pty-contract --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 38383533000000000000000000000000 \
+  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${pty}/uart-start" \
   --uart-log "${pty}/uart.log" --authorized-line-out "${pty}/authorized-line" \
   --ready-out "${pty}/uart-ready"

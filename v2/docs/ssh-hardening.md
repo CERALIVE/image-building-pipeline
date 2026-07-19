@@ -15,7 +15,7 @@ operators.
 | `ceralive-ci-uart-bootstrap.sh` | `/usr/local/sbin/ceralive-ci-uart-bootstrap` | data-only release-gate key bootstrap |
 | `ceralive-ci-uart-bootstrap.service` | `/etc/systemd/system/` | opt-in 180-second UART oneshot |
 | `ceralive-ci-uart-bootstrap-public.pem` | `/etc/ceralive/uart-bootstrap-public.pem` | public verifier for host-signed bootstrap requests |
-| `ceralive-rockchip-chip-info.sh` | `/usr/local/sbin/ceralive-rockchip-chip-info` | exact 16-byte OTP identity reader |
+| `ceralive-rockchip-chip-info.sh` | `/usr/local/sbin/ceralive-rockchip-chip-info` | RK3588 OTP `cpu_code` SoC-family reader (nvmem offset 0x02) |
 
 Canonical sources live under `v2/mkosi/runtime/`; they are installed (not
 inlined) by `postinst-lib.sh::setup_ssh_firstboot`, enabled through the
@@ -85,9 +85,10 @@ The release gate adds `ceralive.ci_uart=1` for one boot. That condition starts a
 non-restarting UART service with a device-enforced 180-second timeout. It accepts
 one strict signed data record and verifies it with the baked public key, then
 requires its fresh device-generated nonce, the candidate commit from
-`/etc/ceralive/image-build-commit`, the local 16-byte SoC-family marker read from
-the first 16 bytes of raw Rockchip OTP NVMEM (a coarse family guard — the RK3588
-family constant, not a per-device id), and an expiry no more
+`/etc/ceralive/image-build-commit`, the local SoC-family identity read from the
+RK3588 OTP `cpu_code` cell (nvmem offset `0x02`; the helper reads that cell, not a
+raw 16-byte dump, since `rci` and the OTP encode the family differently — a coarse
+family guard, the RK3588 family constant, not a per-device id), and an expiry no more
 than one hour after the signed host epoch. Consumed nonces and a non-decreasing
 epoch floor persist under `/data/ceralive/ssh`, preventing replay and clock
 rollback from restoring an expired key. Only then does it write a restricted root

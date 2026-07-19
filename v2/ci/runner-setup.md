@@ -304,28 +304,35 @@ VID/PID and stable `LocationID`, then requires its SHA-256 to match the approved
 fixture repository variable. This identity is readable while the board remains
 in Maskrom; `rci` is not. A return from `db` alone is insufficient: the bounded
 handoff described in section 3 must positively observe the same fixture in
-`Loader` mode. After that proof, the workflow reads the 16-byte SoC-**family**
-marker with `rkdeveloptool rci`. This is a COARSE guard, **not** a per-device
-identity: `rci` returns the RK3588 family constant (ASCII "8853"), identical on
-every board of this SoC, plus a runtime-state loader-overlay byte. Maskrom exposes
-**no** per-device read at all — rkdeveloptool's full command set has no
-OTP/eFuse/serial/CID command — so no genuine per-device value can be captured
-before the flash. The host signs the UART request with a mode-0600, host-local
-Ed25519 key; before any USB operation, the verifier derives its public key and
-requires it to equal the public key in the candidate source. The image contains
-only that public verification key. The signed request includes the device nonce,
-the SoC-family marker, and a maximum one-hour expiry window, so the UART service
-rejects a crossed cable or forged long-lived key before changing the
-authorized-key store.
+`Loader` mode. After that proof, the workflow reads the SoC-**family** marker with
+`rkdeveloptool rci`. This is a COARSE guard, **not** a per-device identity: `rci`
+returns the RK3588 model number as ASCII digits byte-reversed ("8853" = the
+little-endian image of the BootROM chip_info DWORD `0x33353838` = "3588"),
+identical on every board of this SoC, plus a runtime-state loader-overlay byte.
+Maskrom exposes **no** per-device read at all — rkdeveloptool's full command set
+has no OTP/eFuse/serial/CID command — so no genuine per-device value can be
+captured before the flash. The host normalizes the `rci` read to the RK3588
+`cpu_code` family identity (`35880000…`) before signing the UART request with a
+mode-0600, host-local Ed25519 key; before any USB operation, the verifier derives
+its public key and requires it to equal the public key in the candidate source.
+The image contains only that public verification key. The signed request includes
+the device nonce, the normalized SoC-family identity, and a maximum one-hour
+expiry window, so the UART service rejects a crossed cable or forged long-lived
+key before changing the authorized-key store.
 After SSH starts, the post-boot OTP read from
-`/usr/local/sbin/ceralive-rockchip-chip-info` (first 16 bytes of
-`/sys/bus/nvmem/devices/rockchip-otp0/nvmem`) must equal that same family marker —
-a like-for-like **family** check, not a per-device one. The genuine **per-device**
-binding is the eMMC **CID**: the UART one-shot bootstrap records this board's CID
-(a per-card-unique value) into the signed-request-gated marker, and the workflow
-requires it to equal the live media CID read over SSH. The UART challenge binds
-the SSH endpoint; the CID binds that endpoint to the exact physical eMMC whose
-media was written and read back.
+`/usr/local/sbin/ceralive-rockchip-chip-info` must equal that same normalized
+family identity. `rci` and the OTP encode the family in DIFFERENT ways, so the
+helper does **not** dump raw OTP bytes (an earlier `od -N16` implementation did,
+which is why the guard silently mismatched on real hardware): it reads the RK3588
+`cpu_code` cell (`/sys/bus/nvmem/devices/rockchip-otp0/nvmem` offset `0x02`,
+2 bytes = `0x3588`) and emits the SAME `cpu_code` identity the host derived — a
+genuine like-for-like **family** check. It deliberately excludes the per-die
+serial (`id@7`, offset `0x07`+), a per-device value that would never equal a fixed
+host constant. The genuine **per-device** binding is the eMMC **CID**: the UART
+one-shot bootstrap records this board's CID (a per-card-unique value) into the
+signed-request-gated marker, and the workflow requires it to equal the live media
+CID read over SSH. The UART challenge binds the SSH endpoint; the CID binds that
+endpoint to the exact physical eMMC whose media was written and read back.
 
 The key lives in `/data/ceralive/ssh/root_authorized_keys`, so it remains available
 through each explicitly armed RAUC slot reboot in the same gate. Each arm is

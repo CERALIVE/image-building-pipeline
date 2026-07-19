@@ -152,9 +152,12 @@ Steps, in order:
    nor a password is embedded in the immutable image. The board must reconnect
    before the bounded retry budget expires with a media **CID** that matches the
    one the UART bootstrap recorded (the genuine **per-device** binding), the same
-   RK3588 SoC-**family** marker read by Linux from the first 16 bytes of the
-   raw OTP NVMEM device (a coarse family guard, not per-device), a root filesystem
-   whose parent is the flashed eMMC, and a fresh run-local SSH host-key record.
+   RK3588 SoC-**family** identity read by Linux from the OTP `cpu_code` cell (nvmem
+   offset `0x02`, 2 bytes = `0x3588`; `rci` and the OTP encode the family
+   differently, so the helper reads that cell — not a raw 16-byte dump — and both
+   sides normalize to the same cpu_code identity, a coarse family guard, not
+   per-device), a root filesystem whose parent is the flashed eMMC, and a fresh
+   run-local SSH host-key record.
    The gate deliberately does not hash
    post-boot media because U-Boot state and the mounted rootfs are mutable. Its
    later `rkdeveloptool` children retain their cancellable/reaped behavior. The
