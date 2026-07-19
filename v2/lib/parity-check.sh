@@ -172,7 +172,7 @@ main() {
   # ---- C. SERVICES ENABLED ----
   log_info "--- C. services enabled ---"
   local svc svc_missing=()
-  for svc in NetworkManager ModemManager ssh chrony avahi-daemon systemd-resolved ceralive-hostname; do
+  for svc in NetworkManager ModemManager chrony avahi-daemon systemd-resolved ceralive-hostname; do
     if find "${root}/etc/systemd/system" "${root}/usr/lib/systemd/system" \
          -name "${svc}.service" -type l 2>/dev/null | grep -q . \
        || find "${root}/etc/systemd/system" -name "${svc}.service" 2>/dev/null | grep -q .; then
@@ -182,9 +182,31 @@ main() {
     fi
   done
   if (( ${#svc_missing[@]} == 0 )); then
-    pass "all required services enabled (NetworkManager/ModemManager/ssh/chrony/avahi-daemon/systemd-resolved/ceralive-hostname)"
+    pass "all required services enabled (NetworkManager/ModemManager/chrony/avahi-daemon/systemd-resolved/ceralive-hostname)"
   else
     fail "service(s) not enabled: ${svc_missing[*]}"
+  fi
+
+  # ssh.service enablement is image-kind-gated (PR #60 / Todo-42): a production
+  # image (CERALIVE_DEBUG_IMAGE != 1) ships ssh NOT enabled — the operator turns
+  # SSH on from CeraUI — while a lab debug image (=1) keeps it enabled by default.
+  # configure_ssh_enablement() actively `systemctl disable ssh.service`s on
+  # production, so assert the correct per-kind invariant rather than a blanket
+  # "ssh enabled" (which regressed here once #60 landed disabled-by-default).
+  local ssh_enabled=0
+  if find "${root}/etc/systemd/system" -name "ssh.service" -type l 2>/dev/null | grep -q .; then
+    ssh_enabled=1
+  fi
+  if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" ]]; then
+    if (( ssh_enabled == 1 )); then
+      pass "lab debug image: ssh.service enabled by default"
+    else
+      fail "lab debug image: ssh.service expected enabled but is not"
+    fi
+  elif (( ssh_enabled == 0 )); then
+    pass "production image: ssh.service NOT enabled by default (operator enables via CeraUI) — Todo-42/PR#60"
+  else
+    fail "production image: ssh.service is enabled but MUST be disabled-by-default — Todo-42/PR#60"
   fi
   local cera_service="${root}/etc/systemd/system/ceralive.service"
   if [[ -f "${cera_service}" ]]; then
