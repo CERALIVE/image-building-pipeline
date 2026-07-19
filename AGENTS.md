@@ -770,6 +770,19 @@ Guards: `manifest.bats §23` (closure membership, RUNTIME_APP_PKGS classificatio
 exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
 `v2/tests/app-layer-modem-closure.test.sh` (executable install/classification).
 
+**`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
+`FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 14 first-party `.deb`s
+into `<staging>/debs/`, the `[3/9]` step in `lib/orchestrate.sh` partitions each
+staged `.deb` into BSP vs first-party by an exact package-name allowlist
+(`firstparty_names`). A REAL (non-`DRY_RUN`) build `die`s with `unclassified staged
+package` if a fetched first-party package is missing from that allowlist. The 9
+ModemManager-closure packages were added to `FIRST_PARTY_APT_PKGS` (fetcher) but not
+to `firstparty_names` (partitioner), so the first full build after that landed blew
+up at `[3/9]` — invisible to CI because the PR gate only runs `DRY_RUN=1` plan-only
+builds (the partitioner never runs there). `firstparty_names` now lists all 14. Guard:
+`v2/tests/firstparty-classification.test.sh` (sources `FIRST_PARTY_APT_PKGS` from the
+fetcher and asserts the partitioner allowlist is a superset). Wired into `v2/run-tests`.
+
 **Fail-closed modem slot-UID naming (`modem_ports`)** [EXISTS]
 
 The board manifest carries an optional `modem_ports` block that gates a udev
