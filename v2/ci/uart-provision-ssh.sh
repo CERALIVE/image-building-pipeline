@@ -53,6 +53,8 @@ signature_file="${request_dir}/signature"
 expected_marker="CERALIVE_UART_PROVISIONED ${challenge} ${candidate_commit}"
 
 build_request() {
+  # soc_id here is the coarse SoC-family guard value (RK3588 family constant), not
+  # a per-device id; the per-device binding is the eMMC CID in the post-boot marker.
   local boot_nonce="$1"
   [[ "${boot_nonce}" =~ ^[0-9a-f]{64}$ ]]
   printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nsoc_id=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \

@@ -87,14 +87,17 @@ VID/PID/`LocationID` to reappear in exact
 `Loader` mode before it can query capacity or identity. A timeout, malformed or
 multiple listing, changed fixture, or unexpected mode fails with no retry and
 before `rfi`, write, readback, or reset. Command timeout and USB re-enumeration
-timeout have separate diagnostics. The 16-byte Rockchip SoC identity is then
-captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
+timeout have separate diagnostics. The 16-byte Rockchip SoC-**family** marker is
+then captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
 CRLF transport framing but requires exactly one labeled record with exactly 16
 hex octets; truncated, extra, split, nonhex, and duplicate records fail before
-media write. The normalized identity remains lowercase 32-hex. Linux reads the
-same first 16 bytes from the raw Rockchip OTP NVMEM device through the committed
-`ceralive-rockchip-chip-info` helper; exact equality is required by UART and
-SSH after boot. `/` must
+media write. `rci` returns the RK3588 family constant (identical on every board of
+this SoC), **not** a per-device identity — Maskrom exposes no per-device read — so
+this is a coarse family guard: Linux re-reads the same family marker from Rockchip
+OTP NVMEM through the committed `ceralive-rockchip-chip-info` helper and UART/SSH
+require a like-for-like family match after boot. The genuine per-device binding is
+the eMMC **CID**, which the UART bootstrap records into its signed marker and the
+gate cross-checks against the live post-boot CID. `/` must
 resolve to that flashed eMMC. UART observes first boot through a
 bounded one-shot bootstrap that emits a fresh device nonce. Its request is signed
 by a host-local key, bound to that nonce, protected by consumed-nonce and

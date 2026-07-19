@@ -132,25 +132,28 @@ Steps, in order:
    re-enumeration timed out.”
 
    After the pinned loader is positively observed, `rkdeveloptool rci` captures
-   its 16-byte chip identity before `wl`. The structured parser accepts LF and
-   CRLF framing, strips only the terminal transport CR, and requires exactly one
+   the 16-byte SoC-**family** marker before `wl`. The structured parser accepts LF
+   and CRLF framing, strips only the terminal transport CR, and requires exactly one
    `Chip Info:` record of exactly 16 one- or two-digit hex octets. Truncated,
-   extra, split, nonhex, or duplicate records fail closed before media write; the
-   accepted downstream identity is lowercase 32-hex. A UART
+   extra, split, nonhex, or duplicate records fail closed before media write. `rci`
+   returns the RK3588 family constant (identical on every board of this SoC), not a
+   per-device id — Maskrom exposes no per-device read — so it is only a coarse
+   family guard; the accepted downstream family marker is lowercase 32-hex. A UART
    helper acquires the serial port before the write, then
    interrupts U-Boot and supplies a volatile, one-boot data-only UART bootstrap
    argument. A dedicated host-local Ed25519 key signs the request; the image
    contains only its public verification key. Before USB access, the verifier
    proves that the configured private key derives that exact public key. The
    bootstrap emits a fresh device nonce and verifies the signature, nonce, baked
-   candidate commit, USB-captured SoC identity, one-hour maximum expiry, and a
+   candidate commit, USB-captured SoC-family marker, one-hour maximum expiry, and a
    persistent non-decreasing epoch floor before it installs a newly
    generated, restricted root public key with an
    absolute expiry into the empty `/data` authorized-key store; neither the key
    nor a password is embedded in the immutable image. The board must reconnect
-   before the bounded retry budget expires with a valid media CID, the same
-   Rockchip 16-byte chip identity read by Linux from the first 16 bytes of the
-   raw OTP NVMEM device, a root filesystem
+   before the bounded retry budget expires with a media **CID** that matches the
+   one the UART bootstrap recorded (the genuine **per-device** binding), the same
+   RK3588 SoC-**family** marker read by Linux from the first 16 bytes of the
+   raw OTP NVMEM device (a coarse family guard, not per-device), a root filesystem
    whose parent is the flashed eMMC, and a fresh run-local SSH host-key record.
    The gate deliberately does not hash
    post-boot media because U-Boot state and the mounted rootfs are mutable. Its

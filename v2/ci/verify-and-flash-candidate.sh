@@ -775,19 +775,31 @@ fi
 chip_info_line="${chip_info_lines[0]}"
 read -r -a chip_info_tokens <<<"${chip_info_line#Chip Info:}"
 (( ${#chip_info_tokens[@]} == 16 ))
-usb_soc_id=""
+usb_soc_raw=""
 for token in "${chip_info_tokens[@]}"; do
   printf -v octet '%02x' "0x${token}"
-  usb_soc_id+="${octet}"
+  usb_soc_raw+="${octet}"
 done
-[[ "${usb_soc_id}" =~ ^[0-9a-f]{32}$ ]]
-soc_id_sha256="$(printf '%s' "${usb_soc_id}" | sha256sum | cut -d' ' -f1)"
+[[ "${usb_soc_raw}" =~ ^[0-9a-f]{32}$ ]]
+# SECURITY (do not re-tighten to an equality on the raw bytes): `rci` is a
+# SoC-FAMILY marker, NOT a per-device id. On RK3588 bytes 0-3 are ASCII "8853"
+# and byte 12 is a loader overlay (0x00 cold / 0x10 warm), not an OTP fuse.
+# rkdeveloptool exposes no OTP/eFuse/serial/CID read in Maskrom, so no genuine
+# per-device value exists pre-flash. This is a COARSE per-family guard; the
+# per-device binding is the eMMC CID cross-checked post-boot. See runner-setup.md §6.
+soc_family_marker="38383533"   # ASCII "8853" == RK3588
+[[ "${usb_soc_raw:0:8}" == "${soc_family_marker}" ]] || {
+  printf 'Maskrom chip info does not identify the expected RK3588 SoC family\n' >&2
+  exit 1
+}
+usb_soc_family="${soc_family_marker}000000000000000000000000"
+soc_family_sha256="$(printf '%s' "${usb_soc_family}" | sha256sum | cut -d' ' -f1)"
 "${preflash}" --image "${flash_image}" --bundle "${bundle}" --board "${board}" \
   --keyring "${keyring}" --target-size-bytes "${target_bytes}"
 "${uart_helper}" --serial-dev "${serial_dev}" --authorized-key "${authorized_key}" \
   --access-id "${access_id}" --expires "${access_expires}" --host-epoch "${host_epoch}" \
   --challenge "${challenge}" --candidate-commit "${candidate_commit}" \
-  --soc-id "${usb_soc_id}" --signing-key "${uart_signing_key}" \
+  --soc-id "${usb_soc_family}" --signing-key "${uart_signing_key}" \
   --start-signal "${uart_start_file}" \
   --uart-log "${uart_log}" --authorized-line-out "${authorized_line_out}" \
   --ready-out "${uart_ready_file}" &
@@ -876,13 +888,22 @@ post_boot_soc_id="${post_boot_soc_id,,}"
   printf 'reconnected board did not report a valid Rockchip SoC identity\n' >&2
   exit 1
 }
-[[ "${post_boot_soc_id}" == "${usb_soc_id}" ]] || {
-  printf 'USB-flashed SoC identity does not match the UART/SSH endpoint\n' >&2
+# Coarse per-family guard only (both sides are the RK3588 family constant); the
+# per-device guarantee is the eMMC CID binding below, not this comparison.
+[[ "${post_boot_soc_id}" == "${usb_soc_family}" ]] || {
+  printf 'post-boot SoC family does not match the Maskrom-read RK3588 family\n' >&2
   exit 1
 }
 marker="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
   "cat '/data/ceralive/ssh/ci-access/${access_id}'")"
-[[ "${marker}" == $'challenge='"${challenge}"$'\ncandidate_commit='"${candidate_commit}"$'\nsoc_id='"${usb_soc_id}" ]] || {
+marker_media_cid="$(sed -n 's/^media_cid=//p' <<<"${marker}")"
+# Per-device binding: the CID recorded into the UART bootstrap's signed-request-
+# gated marker must equal the live media CID, tying the receipt to the physical eMMC.
+[[ "${marker_media_cid}" == "${post_boot_media_cid}" ]] || {
+  printf 'UART-recorded media CID does not match the post-boot media CID\n' >&2
+  exit 1
+}
+[[ "${marker}" == $'challenge='"${challenge}"$'\ncandidate_commit='"${candidate_commit}"$'\nsoc_id='"${usb_soc_family}"$'\nmedia_cid='"${post_boot_media_cid}" ]] || {
   printf 'post-boot endpoint did not present the UART-bound candidate challenge\n' >&2
   exit 1
 }
@@ -905,7 +926,7 @@ pre_boot_media_sha256=${readback_sha}
 pre_boot_media_identity=verified
 target_capacity_sectors=${target_sectors}
 flash_id_sha256=${flash_id_sha256}
-soc_id_sha256=${soc_id_sha256}
+soc_family_sha256=${soc_family_sha256}
 media_cid=${post_boot_media_cid}
 boot_root_parent=${boot_root_parent}
 usb_device_sha256=${usb_device_sha256}

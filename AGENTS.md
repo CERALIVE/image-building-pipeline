@@ -193,16 +193,19 @@ unbounded handoff.
 
 The bootstrap accepts no shell commands, does not restart, and binds
 an authenticated, one-hour-bounded request containing a device-generated nonce,
-the baked candidate commit, USB-captured 16-byte chip identity, and fresh UART challenge to
+the baked candidate commit, the USB-captured SoC-family marker, and fresh UART challenge to
 the post-boot SSH marker. Consumed nonces and a non-decreasing signed epoch floor
 persist on `/data`; the runner private key must derive the public verifier baked
 into the candidate before any USB operation. The
 image contains only the UART verification public key, never an SSH credential or
 password. Only after
 the immutable proof does it boot, rotate a run-local SSH host-key record, require
-a valid media CID, the same chip identity read by `rkdeveloptool rci` before reset
-and from the first 16 bytes of Rockchip OTP NVMEM through the installed
-`ceralive-rockchip-chip-info` helper, and `/`
+the eMMC **CID** the UART bootstrap recorded to equal the live post-boot media CID
+(the genuine **per-device** binding), the SoC-**family** marker read by
+`rkdeveloptool rci` before reset to match the first 16 bytes of Rockchip OTP NVMEM
+through the installed `ceralive-rockchip-chip-info` helper (a coarse family guard —
+`rci` returns the RK3588 family constant, not a per-device id, and Maskrom exposes
+no per-device read), and `/`
 on the flashed eMMC, then run
 the physical suite, and remove the exact temporary key
 with a cleanup receipt. Each planned RAUC reboot consumes a one-use retention

@@ -3404,3 +3404,67 @@ run_modem_generator() {
     grep -Eq "^PassEnvironment=.*$var" "$mkosi_conf" || { echo "$var missing from PassEnvironment"; false; }
   done
 }
+
+# ---------------------------------------------------------------------------
+# UART release gate: SoC-family guard + eMMC CID per-device binding (Todo 45)
+# ---------------------------------------------------------------------------
+# `rkdeveloptool rci` is a COARSE SoC-family guard, NOT a per-device identity: it
+# returns the RK3588 family constant "8853" (0x38383533) plus a runtime-state
+# loader-overlay byte, and Maskrom exposes no per-device read at all. The genuine
+# per-device binding is the eMMC CID the UART bootstrap records into its marker and
+# the host cross-checks against the live post-boot CID. Full end-to-end proof is in
+# release-candidate-contract.test.sh + maskrom-first-realhw.test.sh; these unit
+# cases pin the comparison logic and guard against a silent revert.
+
+# Reproduce the shipped rci -> canonical-family normalization.
+_rci_family_id() {
+  local raw="" octet token
+  for token in "$@"; do
+    printf -v octet '%02x' "0x${token}"
+    raw+="${octet}"
+  done
+  [[ "${raw:0:8}" == 38383533 ]] || return 1
+  printf '38383533000000000000000000000000\n'
+}
+
+@test "UART family guard: real RK3588 rci (warm+cold) normalizes to the canonical family id (MATCH)" {
+  # Warm boot carries the byte-12 loader overlay (0x10); cold does not. Both must
+  # collapse to the one canonical family constant the OTP helper also returns.
+  run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+  run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 0 0 0 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+  local nvmem="$BATS_TEST_TMPDIR/nvmem"
+  printf '\x38\x38\x35\x33\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >"$nvmem"
+  run env CERALIVE_ROCKCHIP_NVMEM_FILE="$nvmem" \
+      bash "$V2/mkosi/runtime/ceralive-rockchip-chip-info.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+}
+
+@test "UART family guard: a non-RK3588 rci marker is rejected (MISMATCH)" {
+  run _rci_family_id 1 2 3 4 5 6 7 8 9 A B C D E F 10
+  [ "$status" -ne 0 ]
+}
+
+@test "UART family guard: verify script ships the marker guard + canonical derivation, not a raw per-device equality" {
+  local verify="$V2/ci/verify-and-flash-candidate.sh"
+  grep -Fq 'soc_family_marker="38383533"' "$verify"
+  grep -Fq 'usb_soc_family="${soc_family_marker}000000000000000000000000"' "$verify"
+  grep -Fq 'does not identify the expected RK3588 SoC family' "$verify"
+  # The retired per-device variable must be fully gone (guards against a revert to
+  # the structurally-impossible OTP==rci equality).
+  ! grep -Fq 'usb_soc_id' "$verify"
+}
+
+@test "UART CID binding: bootstrap records media_cid and the host binds it to the live post-boot CID" {
+  local verify="$V2/ci/verify-and-flash-candidate.sh"
+  local boot="$V2/mkosi/runtime/ceralive-ci-uart-bootstrap.sh"
+  grep -Fq 'MEDIA_CID_FILE=' "$boot"
+  grep -Fq 'fail media-cid-invalid' "$boot"
+  grep -Fq 'media_cid=%s' "$boot"
+  grep -Fq 'marker_media_cid=' "$verify"
+  grep -Fq 'UART-recorded media CID does not match the post-boot media CID' "$verify"
+}
