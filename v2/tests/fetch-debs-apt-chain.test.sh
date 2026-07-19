@@ -259,6 +259,11 @@ expect_failure() {
 : >"${RESULTS_LOG}"
 : >"${FAKE_APT_LOG}"
 
+# Expected staged-.deb count == the size of the real FIRST_PARTY_APT_PKGS set
+# (libsrt + cerastream/CeraUI/srtla-send/capture + the ModemManager 1.24 closure),
+# read from the shipped array so this never drifts when the set grows.
+EXPECTED_FIRST_PARTY_COUNT="$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "${FETCH_DEBS}")"
+
 KEY_B64="$(valid_b64 'test public keyring')"
 CRT_B64="$(valid_b64 'test client certificate')"
 CLIENT_KEY_B64="$(valid_b64 'test client private key')"
@@ -270,15 +275,15 @@ expect_success \
 	APT_CLIENT_KEY_B64="${CLIENT_KEY_B64}"
 
 staged_count="$(find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' | wc -l)"
-if [[ "${staged_count}" -ne 5 ]]; then
-	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected 5\n' "${staged_count}" | tee -a "${RESULTS_LOG}"
+if [[ "${staged_count}" -ne "${EXPECTED_FIRST_PARTY_COUNT}" ]]; then
+	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: staged %s debs, expected %s\n' "${staged_count}" "${EXPECTED_FIRST_PARTY_COUNT}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
 if find "${RUN_DIR}/valid-gpg-and-mtls-stages-first-party-debs/debs" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then
 	printf 'FAIL valid-gpg-and-mtls-stages-first-party-debs: package mode is not 0644\n' | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
-printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly 5 debs\n' | tee -a "${RESULTS_LOG}"
+printf 'PASS valid-gpg-and-mtls-stages-first-party-debs staged exactly %s debs\n' "${EXPECTED_FIRST_PARTY_COUNT}" | tee -a "${RESULTS_LOG}"
 
 curl_repo="${RUN_DIR}/curl-repo"
 prepare_fake_curl_repo "${curl_repo}"
@@ -292,8 +297,8 @@ if ! run_fetch_first_party_curl "${curl_dest}" "${curl_repo}" \
 	exit 1
 fi
 curl_staged_count="$(find "${curl_dest}" -maxdepth 1 -name '*.deb' | wc -l)"
-if [[ "${curl_staged_count}" -ne 5 ]]; then
-	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected 5\n' "${curl_staged_count}" | tee -a "${RESULTS_LOG}"
+if [[ "${curl_staged_count}" -ne "${EXPECTED_FIRST_PARTY_COUNT}" ]]; then
+	printf 'FAIL valid-curl-fallback-stages-first-party-debs: staged %s debs, expected %s\n' "${curl_staged_count}" "${EXPECTED_FIRST_PARTY_COUNT}" | tee -a "${RESULTS_LOG}"
 	exit 1
 fi
 if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | grep -q .; then

@@ -135,7 +135,24 @@ assert_repos_integrity() {
 }
 assert_repos_integrity
 
-FIRST_PARTY_APT_PKGS=("libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs")
+# The device first-party set: the CeraLive runtime .debs (libsrt/cerastream/
+# CeraUI/srtla-send) + the capture plugin, PLUS the ModemManager 1.24 closure —
+# the 9-package modem-stack set forked and published by modem-stack v0.2.0 on
+# apt.ceralive.tv. The closure is self-contained: modemmanager depends on
+# libmm-glib0, and the libmbim/libqmi/libqrtr packages provide the QMI/MBIM
+# transport its glib libs bind to — all nine carry the ~ceralive0.2.0 fork suffix.
+# They are staged like every other first-party .deb (exact pins in
+# first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).
+# External deps (glib, libgudev, polkit, …) come from Debian via shared.list; the
+# origin-990 pin (customize/apt-ceralive-repo.sh, Package: *) keeps the fork
+# winning on-device.
+FIRST_PARTY_APT_PKGS=(
+  "libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvch264src" "ceralive-device" "srtla-send-rs"
+  "modemmanager" "libmm-glib0"
+  "libmbim-glib4" "libmbim-proxy" "libmbim-utils"
+  "libqmi-glib5" "libqmi-proxy" "libqmi-utils"
+  "libqrtr-glib0"
+)
 # ---------------------------------------------------------------------------
 # Dry-run plumbing. run_or_plan executes in normal mode, logs-only in dry-run.
 # This is the SOLE bridge between "real fetch" and "offline evidence" — there is

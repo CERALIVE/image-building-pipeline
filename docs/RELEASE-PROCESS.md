@@ -825,6 +825,17 @@ shipped scripts without hardware):
    `srtla-send.service` is active — a bad bundle pushed during a live
    broadcast doesn't get a chance to interrupt it in the first place.
 
+The A/B contract covers the **ModemManager 1.24 closure** the same way it covers
+every other baked package: the nine fork `.deb`s (`modemmanager` +
+`libmm-glib0`/`libqmi-*`/`libmbim-*`/`libqrtr-glib0`, all `~ceralive0.2.0`) are
+installed into the rootfs, atomic with the RAUC slot, so a bad modem-stack bundle
+rolls back with the slot — there is no separately-updatable modem partition to
+strand. After a rollback the recovered slot runs whatever modem-stack version it
+was built with; a bad closure never leaves a device with a half-installed
+cellular stack. The generated `78-mm-ceralive-slot-uid.rules` file is likewise
+per-slot rootfs content (absent while `modem_ports.status: unverified`), so it
+never diverges from the running slot.
+
 This is the automatic safety net for an already A/B-provisioned device. It does
 not convert a legacy single-slot disk: that transition requires backup and a
 full re-flash because the old `data` partition overlaps the new B slot. The

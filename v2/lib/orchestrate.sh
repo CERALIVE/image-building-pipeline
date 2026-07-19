@@ -542,6 +542,7 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
+    CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
     SOURCE_DATE_EPOCH
   )
@@ -606,6 +607,21 @@ run_mkosi_build() {
   export CERALIVE_INTERFACES_eth0="${INTERFACES_ETH0:-}"
   export CERALIVE_INTERFACES_eth1="${INTERFACES_ETH1:-}"
   export CERALIVE_INTERFACES_wlan0="${INTERFACES_WLAN0:-}"
+
+  # Fail-closed modem slot-UID naming (udev.sh::generate_modem_slot_uid_rules).
+  # The manifest modem_ports: block flattens to MODEM_PORTS_STATUS + one
+  # MODEM_PORTS_SLOTS_<NAME> per slot; forward the status and collapse the slot
+  # leaves into a single space-separated `name=ID_PATH` list the generator parses.
+  # status=unverified (the shipped default) carries no slots -> the generator
+  # emits NO slot-uid rules on-device.
+  export CERALIVE_MODEM_PORTS_STATUS="${MODEM_PORTS_STATUS:-unverified}"
+  local _modem_slots="" _slot_var _slot_name
+  for _slot_var in $(compgen -v MODEM_PORTS_SLOTS_ 2>/dev/null || true); do
+    _slot_name="${_slot_var#MODEM_PORTS_SLOTS_}"
+    [[ -n "${!_slot_var:-}" ]] || continue
+    _modem_slots+="${_slot_name,,}=${!_slot_var} "
+  done
+  export CERALIVE_MODEM_PORTS_SLOTS="${_modem_slots% }"
   export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
   export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
   case "${CERALIVE_DEBUG_IMAGE}" in

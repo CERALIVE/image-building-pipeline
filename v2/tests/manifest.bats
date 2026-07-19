@@ -3095,3 +3095,247 @@ PINS
   [[ "$output" == *"regression: PASS"* ]]
   printf '%s\n' "$output"
 }
+
+# ===========================================================================
+# 23. ModemManager 1.24 closure image integration + fail-closed modem_ports udev.
+#     The nine-package modem-stack fork (modemmanager + libmm-glib0 +
+#     libmbim/libqmi/libqrtr) is staged first-party (FIRST_PARTY_APT_PKGS),
+#     exact-pinned in first-party-deb-versions.txt, classified RUNTIME_APP_PKGS by
+#     the app postinst, and covered by the Package:* origin-990 pin. The board
+#     modem_ports block drives a FAIL-CLOSED udev generator: unverified ⇒ zero
+#     generated slot-uid rules, verified fixture ⇒ rules emitted. All static /
+#     sourced-function checks — UNIT scope, no image.
+# ===========================================================================
+
+MODEM_CLOSURE_PKGS="modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0"
+
+@test "modem closure: all nine packages are in FIRST_PARTY_APT_PKGS" {
+  local staged pkg
+  staged="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")"
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    grep -Fxq "$pkg" <<<"$staged" || { echo "missing from FIRST_PARTY_APT_PKGS: $pkg"; false; }
+  done
+  # The set grew by exactly nine (5 original + 9 closure = 14).
+  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 14 ]
+}
+
+@test "modem closure: each package has an exact live-verified Version pin in the txt" {
+  local pins="$V2/manifests/first-party-deb-versions.txt"
+  local pkg version
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    version="$(awk -F= -v p="$pkg" '$1==p{print $2; exit}' "$pins")"
+    [ -n "$version" ] || { echo "no pin for $pkg"; false; }
+    # every closure pin carries the ~ceralive0.2.0 fork suffix (published live)
+    [[ "$version" == *"~ceralive0.2.0" ]] || { echo "$pkg pin lacks ~ceralive0.2.0: $version"; false; }
+  done
+  # spot-check the two anchor versions confirmed live on apt.ceralive.tv
+  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive0.2.0" ]
+  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive0.2.0" ]
+}
+
+@test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {
+  local app="$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  local runtime_line sysext_line appfs_line pkg
+  # RUNTIME_APP_PKGS spans a line continuation; collapse the assignment to one line.
+  runtime_line="$(awk '/^RUNTIME_APP_PKGS=/{f=1} f{printf "%s ", $0} f&&!/\\$/{exit}' "$app")"
+  sysext_line="$(grep -E '^SYSEXT_APP_PKGS=' "$app")"
+  appfs_line="$(grep -E '^APPFS_APP_PKGS=' "$app")"
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    [[ "$runtime_line" == *" $pkg"* || "$runtime_line" == *"\"$pkg"* ]] \
+      || { echo "$pkg not in RUNTIME_APP_PKGS"; false; }
+    [[ "$sysext_line" != *"$pkg"* ]] || { echo "$pkg leaked into SYSEXT_APP_PKGS"; false; }
+    [[ "$appfs_line" != *"$pkg"* ]] || { echo "$pkg leaked into APPFS_APP_PKGS"; false; }
+  done
+}
+
+@test "modem closure: mobile-broadband-provider-info is in shared.list (Recommends not auto-pulled)" {
+  run grep -Ex 'mobile-broadband-provider-info[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "modem closure: the Package:* origin-990 pin covers the closure (wildcard, not per-package)" {
+  # The closure debs are served from the apt.ceralive.tv origin. The pin is
+  # `Package: *` at Pin-Priority 990, so it covers EVERY package that origin
+  # carries — including all nine — with no per-package enumeration needed.
+  local dir="$BATS_TEST_TMPDIR/modem-prefs/preferences.d"
+  run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
+  [ "$status" -eq 0 ]
+  grep -qxF 'Package: *' "$dir/ceralive"
+  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive"
+  grep -qxF 'Pin-Priority: 990' "$dir/ceralive"
+}
+
+@test "modem closure: DRY_RUN fetch_first_party resolves every closure package" {
+  local debs="$BATS_TEST_TMPDIR/modem-debs"
+  mkdir -p "$debs"
+  run bash -c "{ export DRY_RUN=1 VERSIONS_YAML='$VERSIONS_YAML'; source '$FETCH_DEBS'; fetch_first_party '$debs'; } 2>&1"
+  [ "$status" -eq 0 ]
+  local pkg
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    [[ "$output" == *"$pkg"* ]] || { echo "DRY_RUN plan missing $pkg"; false; }
+  done
+  # plan-only: nothing staged
+  run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
+  [ "$output" -eq 0 ]
+}
+
+@test "modem closure: executable app-layer install test passes (classification + install)" {
+  run bash "$TESTS_DIR/app-layer-modem-closure.test.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS positive"* ]]
+  [[ "$output" == *"PASS negative"* ]]
+  [[ "$output" == *"regression: PASS"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "modem_ports schema: rock-5b-plus ships status: unverified and validates" {
+  run validate_manifest "$V2/manifests/boards/rock-5b-plus.yaml" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+  run python3 -c "import yaml; d=yaml.safe_load(open('$V2/manifests/boards/rock-5b-plus.yaml')); print(d['modem_ports']['status'])"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "unverified" ]]
+}
+
+@test "modem_ports schema: a verified board with slot ID_PATHs validates" {
+  local brd="$BATS_TEST_TMPDIR/verified-board.yaml"
+  cat > "$brd" <<'YAML'
+family: rk3588
+board_id: modem-verified
+dtb_name: none
+description: verified modem slots fixture
+modem_ports:
+  status: verified
+  slots:
+    modem0: platform-fc000000.usb-usb-0:1:1.0
+    modem1: platform-fc400000.usb-usb-0:1:1.0
+YAML
+  run validate_manifest "$brd" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+}
+
+@test "modem_ports schema: an out-of-enum status is REJECTED and names modem_ports" {
+  local brd="$BATS_TEST_TMPDIR/bad-status-board.yaml"
+  cat > "$brd" <<'YAML'
+family: rk3588
+board_id: modem-bad
+dtb_name: none
+description: bad modem status fixture
+modem_ports:
+  status: maybe
+YAML
+  run validate_manifest "$brd" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"modem_ports"* ]]
+}
+
+@test "modem_ports schema: a slot key that is not modemN is REJECTED" {
+  local brd="$BATS_TEST_TMPDIR/bad-slot-board.yaml"
+  cat > "$brd" <<'YAML'
+family: rk3588
+board_id: modem-badslot
+dtb_name: none
+description: bad modem slot key fixture
+modem_ports:
+  status: verified
+  slots:
+    wlan0: platform-xyz
+YAML
+  run validate_manifest "$brd" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"modem_ports"* ]]
+}
+
+# --- Generator matrix: the CORE fail-closed contract of this integration -------
+# run_modem_generator <status> <slots> — source udev.sh's generator (setup runs on
+# source but writes only into the scratch rules dir), drive it with the given
+# CERALIVE_MODEM_PORTS_* env, and echo the resulting rules-dir listing.
+run_modem_generator() {
+  local status="$1" slots="$2"
+  local rules_dir="$BATS_TEST_TMPDIR/udev-rules.d"
+  rm -rf "$rules_dir"; mkdir -p "$rules_dir"
+  env CERALIVE_MODEM_PORTS_STATUS="$status" CERALIVE_MODEM_PORTS_SLOTS="$slots" \
+      MODEM_SLOT_RULES_DIR="$rules_dir" \
+      bash -c "source '$V2/mkosi/customize/udev.sh' >/dev/null 2>&1 || true
+               source '$V2/lib/common.sh'
+               source '$V2/mkosi/customize/udev.sh' 2>/dev/null || true
+               generate_modem_slot_uid_rules" >"$BATS_TEST_TMPDIR/gen.out" 2>&1
+  MODEM_GEN_STATUS=$?
+  MODEM_GEN_RULES="$rules_dir/78-mm-ceralive-slot-uid.rules"
+}
+
+@test "modem generator MATRIX: unverified fixture emits ZERO generated slot-uid rules (fail-closed)" {
+  run_modem_generator unverified ""
+  [ "$MODEM_GEN_STATUS" -eq 0 ]
+  [ ! -f "$MODEM_GEN_RULES" ]
+  grep -q "emitting NO generated slot-uid rules" "$BATS_TEST_TMPDIR/gen.out"
+}
+
+@test "modem generator MATRIX: an unset status is treated as unverified (no permissive fallback)" {
+  local rules_dir="$BATS_TEST_TMPDIR/udev-unset"
+  rm -rf "$rules_dir"; mkdir -p "$rules_dir"
+  run env -u CERALIVE_MODEM_PORTS_STATUS -u CERALIVE_MODEM_PORTS_SLOTS \
+      MODEM_SLOT_RULES_DIR="$rules_dir" \
+      bash -c "source '$V2/lib/common.sh'; source '$V2/mkosi/customize/udev.sh' 2>/dev/null || true; generate_modem_slot_uid_rules"
+  [ "$status" -eq 0 ]
+  [ ! -f "$rules_dir/78-mm-ceralive-slot-uid.rules" ]
+}
+
+@test "modem generator MATRIX: a verified fixture EMITS one ID_MM_PHYSDEV_UID rule per slot" {
+  run_modem_generator verified "modem0=platform-fc000000.usb-usb-0:1:1.0 modem1=platform-fc400000.usb-usb-0:1:1.0"
+  [ "$MODEM_GEN_STATUS" -eq 0 ]
+  [ -f "$MODEM_GEN_RULES" ]
+  grep -q 'ENV{ID_PATH}=="platform-fc000000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem0"' "$MODEM_GEN_RULES"
+  grep -q 'ENV{ID_PATH}=="platform-fc400000.usb-usb-0:1:1.0", ENV{ID_MM_PHYSDEV_UID}="modem1"' "$MODEM_GEN_RULES"
+  # exactly two emitted RULE lines (count ACTION== rules, not the header comment
+  # line that also mentions ID_MM_PHYSDEV_UID)
+  [ "$(grep -c '^ACTION==.*ID_MM_PHYSDEV_UID' "$MODEM_GEN_RULES")" -eq 2 ]
+}
+
+@test "modem generator MATRIX: a stale verified rule file is removed when status reverts to unverified" {
+  local rules_dir="$BATS_TEST_TMPDIR/udev-revert"
+  rm -rf "$rules_dir"; mkdir -p "$rules_dir"
+  # seed a prior generated file, then run unverified — it must be cleaned up
+  printf 'stale\n' > "$rules_dir/78-mm-ceralive-slot-uid.rules"
+  run env CERALIVE_MODEM_PORTS_STATUS=unverified CERALIVE_MODEM_PORTS_SLOTS="" \
+      MODEM_SLOT_RULES_DIR="$rules_dir" \
+      bash -c "source '$V2/lib/common.sh'; source '$V2/mkosi/customize/udev.sh' 2>/dev/null || true; generate_modem_slot_uid_rules"
+  [ "$status" -eq 0 ]
+  [ ! -f "$rules_dir/78-mm-ceralive-slot-uid.rules" ]
+}
+
+@test "modem generator MATRIX: verified with NO slots FAILS closed (refuses an empty verified set)" {
+  local rules_dir="$BATS_TEST_TMPDIR/udev-empty-verified"
+  rm -rf "$rules_dir"; mkdir -p "$rules_dir"
+  run env CERALIVE_MODEM_PORTS_STATUS=verified CERALIVE_MODEM_PORTS_SLOTS="" \
+      MODEM_SLOT_RULES_DIR="$rules_dir" \
+      bash -c "source '$V2/lib/common.sh'; source '$V2/mkosi/customize/udev.sh' 2>/dev/null || true; generate_modem_slot_uid_rules"
+  [ "$status" -ne 0 ]
+  [ ! -f "$rules_dir/78-mm-ceralive-slot-uid.rules" ]
+}
+
+@test "modem generator: the permanent generic modem rules (udev.sh 'USB Modem Devices') are untouched" {
+  # The fail-closed generator must NOT remove or alter the always-shipped generic
+  # dialout group-tag rules in setup_hardware_access.
+  local udev="$V2/mkosi/customize/udev.sh"
+  grep -Fq 'USB Modem Devices (4G/5G)' "$udev"
+  grep -Fq 'KERNEL=="cdc-wdm[0-9]*", GROUP="dialout"' "$udev"
+  grep -Fq 'ATTRS{idVendor}=="2c7c", GROUP="dialout"' "$udev"
+  # and the generator is a SEPARATE function, invoked after setup_hardware_access
+  grep -Fq 'generate_modem_slot_uid_rules "$@"' "$udev"
+}
+
+@test "modem_ports wiring: CERALIVE_MODEM_PORTS_* is forwarded env_names -> PassEnvironment lockstep" {
+  # Mirrors the interface-naming lockstep guard: the status/slots vars must be in
+  # BOTH orchestrate.sh env_names AND mkosi.conf PassEnvironment, or they read
+  # EMPTY in the runtime subimage chroot (the generator would then see no status).
+  local orchestrate="$LIB_DIR/orchestrate.sh"
+  local mkosi_conf="$V2/mkosi/mkosi.conf"
+  local var
+  for var in CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS; do
+    grep -Fq "$var" "$orchestrate" || { echo "$var missing from orchestrate.sh"; false; }
+    grep -Eq "^PassEnvironment=.*$var" "$mkosi_conf" || { echo "$var missing from PassEnvironment"; false; }
+  done
+}

@@ -73,9 +73,22 @@ v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device cont
 ffmpeg                   # transcode/probe utility for the pipeline
 
 # --- Modems (LTE/5G on every board) -------------------------------------------
+# These pull the FULL Debian modem dependency tree (libmm-glib0, libqmi-glib5,
+# libmbim-glib4, libqrtr-glib0, plus external deps: glib, libgudev, polkit, …) in
+# the runtime layer. The APP layer then UPGRADES the nine ceralive-forked ELF
+# packages (the ModemManager 1.24 closure staged from apt.ceralive.tv) over these
+# Debian versions in one local dpkg transaction — see mkosi.images/app/
+# mkosi.postinst.chroot RUNTIME_APP_PKGS and v2/docs/modem-matrix.md §1.
 modemmanager             # cellular modem management daemon
 libqmi-utils             # QMI modem control (Qualcomm)
 libmbim-utils            # MBIM modem control
+mobile-broadband-provider-info  # ModemManager's mobile-provider / APN database
+                         # (/usr/share/mobile-broadband-provider-info). Only a
+                         # ModemManager `Recommends:`, so --no-install-recommends
+                         # never pulls it transitively (same trap as wireless-regdb).
+                         # Absent it, ModemManager cannot auto-resolve APN/provider
+                         # settings from the operator's MCCMNC and every SIM needs
+                         # a manual connection profile. Debian package (not forked).
 
 # --- WiFi ---------------------------------------------------------------------
 wireless-tools           # legacy iw* tooling
