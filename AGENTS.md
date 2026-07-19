@@ -954,6 +954,27 @@ literal, not templated; x86 uses `ttyS0` and never runs this gate). Offline guar
 `ttyFIQ0`, the two agree, and `serial_console` stays the raw-UART2 `ttyS2` early
 console). Wired into `v2/run-tests`.
 
+**CI-UART bootstrap `stty` is tty-class-aware — the FIQ tty rejects the baud
+ioctl.** Once the console fix above got the bootstrap to actually run on
+`/dev/ttyFIQ0`, `ceralive-ci-uart-bootstrap.sh` aborted at `stty 1500000 sane -echo
+<&0` under `set -euo pipefail`, BEFORE printing `CERALIVE_UART_BOOTSTRAP_READY`
+(real Rock 5B+ regression, 2026-07-19; empirically reproduced — same-line-rate
+`stty` on the FIQ tty returns `unable to perform all requested operations`). The FIQ
+debugger is a **software** console over the debug UART whose line rate is FIXED by
+the kernel `console=ttyS2,1500000` arg, so its baud is not settable and the channel
+already works by default (every boot message reaches the host over it). The fix
+(`configure_bootstrap_tty()`) is **tty-class-aware**: on a `ttyFIQ*` tty it drops
+echo best-effort and NEVER fails (logs `CERALIVE_UART_BOOTSTRAP_INFO
+fiq-tty-stty-skipped`); on a real UART (a future `ttyS` board, or x86 `ttyS0`) it
+keeps the full `stty 1500000 sane -echo <&0 || fail` — deliberately NOT a blanket
+`|| true`, so a genuine mis-provision on a settable-baud board is surfaced, not
+masked. Host-side `v2/ci/uart-provision-ssh.sh` still `stty`s the CI runner's USB
+adapter at 1500000 (that adapter DOES honor it — unchanged). Offline guard:
+`v2/tests/uart-bootstrap-tty.test.sh` (exercises the shipped function against stubbed
+FIQ + real-UART ttys: FIQ tolerant even when stty fully fails, real UART fatal on a
+baud failure) + a co-located static signature in `uart-console-path.test.sh`. Wired
+into `v2/run-tests`.
+
 **`ceralive-ssh-firstboot.sh` MUST create `/run/sshd` before its `sshd -t`.** The
 guard's last step validates the sshd config with `sshd -t`, which refuses to run
 without the privilege-separation dir `/run/sshd` (`Missing privilege separation

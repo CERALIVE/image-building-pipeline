@@ -19,10 +19,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 UNIT="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.service"
 UART_PROVISION="${V2}/ci/uart-provision-ssh.sh"
+BOOTSTRAP="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.sh"
 
 fail() { printf 'uart-console-path: FAIL: %s\n' "$*" >&2; exit 1; }
 
-for f in "${UNIT}" "${UART_PROVISION}"; do
+for f in "${UNIT}" "${UART_PROVISION}" "${BOOTSTRAP}"; do
   [[ -f "${f}" ]] || fail "missing source file: ${f}"
 done
 
@@ -57,5 +58,14 @@ RK3588_FAMILY="${V2}/manifests/families/rk3588.yaml"
 [[ -f "${RK3588_FAMILY}" ]] || fail "missing ${RK3588_FAMILY}"
 grep -Eq '^serial_console:[[:space:]]*ttyS2:1500000$' "${RK3588_FAMILY}" \
   || fail "rk3588.yaml serial_console must stay ttyS2:1500000 (raw UART2 early/bootloader console — NOT the live ttyFIQ0 console)"
+
+# The live console IS the fixed-rate FIQ tty, so the bootstrap must special-case
+# it: any stty 1500000 must be gated (deep behaviour in uart-bootstrap-tty.test.sh).
+grep -Eq '^[[:space:]]*ttyFIQ\*\)' "${BOOTSTRAP}" \
+  || fail "ceralive-ci-uart-bootstrap.sh must special-case the ttyFIQ* live console for stty setup"
+while IFS= read -r line; do
+  [[ "${line}" == *'|| fail'* ]] \
+    || fail "bootstrap has an unguarded 'stty 1500000' — the FIQ live console rejects the baud and aborts under set -e"
+done < <(grep -E '^[[:space:]]*stty 1500000' "${BOOTSTRAP}")
 
 printf 'uart-console-path: PASS (bootstrap + getty mask target ttyFIQ0; early console stays ttyS2)\n'
