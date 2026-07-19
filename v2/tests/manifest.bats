@@ -2946,8 +2946,8 @@ run_paseto_provision() {
 }
 
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.7.1"
-  local expected_device_version="${expected_ceraui_pin#v}-20260718T151351.bceb588"
+  local expected_ceraui_pin="v2026.7.2"
+  local expected_device_version="2026.7.2-20260719T181141.a881b77"
   local device_version
 
   [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]

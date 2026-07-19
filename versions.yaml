@@ -30,9 +30,10 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.7.1
-  # Release provenance: tag v2026.7.1 resolves to commit bceb5886061eafa10c14f32ca205c11006ff7de1.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.7.1
+  pin: v2026.7.2
+  # Release provenance: tag v2026.7.2 resolves to commit a881b77976e75e8ea51a400ae9382bfa9e87a818.
+  # Device deb: ceralive-device 2026.7.2-20260719T181141.a881b77 (live+GPG-valid, arm64+amd64).
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.7.2
   channel: stable
 
 srtla-send-rs:
