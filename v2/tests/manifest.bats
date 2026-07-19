@@ -2957,6 +2957,21 @@ run_paseto_provision() {
   [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
 }
 
+@test "fetch-debs srt pin ships libsrt1.5-ceralive bundling /usr/bin/srt-live-transmit" {
+  # srt v1.5.5+ceralive.3 (PR #18 @ 9b02dc7, "Path A") bundles srt-live-transmit into
+  # the EXISTING libsrt1.5-ceralive .deb, linked against the same shared GnuTLS
+  # libsrt.so.1.5 (single-libsrt invariant) — so it needs NO new FIRST_PARTY_APT_PKGS
+  # entry, only the version bump. Confirmed live + GPG-signed on apt.ceralive.tv.
+  local expected_srt_pin="v1.5.5+ceralive.3"
+  [ "$(get_pin srt)" = "$expected_srt_pin" ]
+  local libsrt_version
+  libsrt_version="$(awk -F= '$1 == "libsrt1.5-ceralive" { print $2; exit }' \
+    "$REPO_ROOT/v2/manifests/first-party-deb-versions.txt")"
+  [ "$libsrt_version" = "${expected_srt_pin#v}" ]
+  # The rootfs build/install-test asserts the bundled tool actually lands on-device.
+  grep -Fq '/usr/bin/srt-live-transmit' "$V2/tests/realhw-smoke.sh"
+}
+
 @test "fetch-debs BSP set deduplicates the first family package against board overrides" {
   local family="$BATS_TEST_TMPDIR/family.yaml"
   local pins="$BATS_TEST_TMPDIR/bsp-versions.txt"
@@ -3466,4 +3481,68 @@ run_modem_generator() {
     grep -Fq "$var" "$orchestrate" || { echo "$var missing from orchestrate.sh"; false; }
     grep -Eq "^PassEnvironment=.*$var" "$mkosi_conf" || { echo "$var missing from PassEnvironment"; false; }
   done
+}
+
+# ---------------------------------------------------------------------------
+# UART release gate: SoC-family guard + eMMC CID per-device binding (Todo 45)
+# ---------------------------------------------------------------------------
+# `rkdeveloptool rci` is a COARSE SoC-family guard, NOT a per-device identity: it
+# returns the RK3588 family constant "8853" (0x38383533) plus a runtime-state
+# loader-overlay byte, and Maskrom exposes no per-device read at all. The genuine
+# per-device binding is the eMMC CID the UART bootstrap records into its marker and
+# the host cross-checks against the live post-boot CID. Full end-to-end proof is in
+# release-candidate-contract.test.sh + maskrom-first-realhw.test.sh; these unit
+# cases pin the comparison logic and guard against a silent revert.
+
+# Reproduce the shipped rci -> canonical-family normalization.
+_rci_family_id() {
+  local raw="" octet token
+  for token in "$@"; do
+    printf -v octet '%02x' "0x${token}"
+    raw+="${octet}"
+  done
+  [[ "${raw:0:8}" == 38383533 ]] || return 1
+  printf '38383533000000000000000000000000\n'
+}
+
+@test "UART family guard: real RK3588 rci (warm+cold) normalizes to the canonical family id (MATCH)" {
+  # Warm boot carries the byte-12 loader overlay (0x10); cold does not. Both must
+  # collapse to the one canonical family constant the OTP helper also returns.
+  run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+  run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 0 0 0 0
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+  local nvmem="$BATS_TEST_TMPDIR/nvmem"
+  printf '\x38\x38\x35\x33\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >"$nvmem"
+  run env CERALIVE_ROCKCHIP_NVMEM_FILE="$nvmem" \
+      bash "$V2/mkosi/runtime/ceralive-rockchip-chip-info.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "38383533000000000000000000000000" ]
+}
+
+@test "UART family guard: a non-RK3588 rci marker is rejected (MISMATCH)" {
+  run _rci_family_id 1 2 3 4 5 6 7 8 9 A B C D E F 10
+  [ "$status" -ne 0 ]
+}
+
+@test "UART family guard: verify script ships the marker guard + canonical derivation, not a raw per-device equality" {
+  local verify="$V2/ci/verify-and-flash-candidate.sh"
+  grep -Fq 'soc_family_marker="38383533"' "$verify"
+  grep -Fq 'usb_soc_family="${soc_family_marker}000000000000000000000000"' "$verify"
+  grep -Fq 'does not identify the expected RK3588 SoC family' "$verify"
+  # The retired per-device variable must be fully gone (guards against a revert to
+  # the structurally-impossible OTP==rci equality).
+  ! grep -Fq 'usb_soc_id' "$verify"
+}
+
+@test "UART CID binding: bootstrap records media_cid and the host binds it to the live post-boot CID" {
+  local verify="$V2/ci/verify-and-flash-candidate.sh"
+  local boot="$V2/mkosi/runtime/ceralive-ci-uart-bootstrap.sh"
+  grep -Fq 'MEDIA_CID_FILE=' "$boot"
+  grep -Fq 'fail media-cid-invalid' "$boot"
+  grep -Fq 'media_cid=%s' "$boot"
+  grep -Fq 'marker_media_cid=' "$verify"
+  grep -Fq 'UART-recorded media CID does not match the post-boot media CID' "$verify"
 }

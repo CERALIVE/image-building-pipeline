@@ -304,19 +304,28 @@ VID/PID and stable `LocationID`, then requires its SHA-256 to match the approved
 fixture repository variable. This identity is readable while the board remains
 in Maskrom; `rci` is not. A return from `db` alone is insufficient: the bounded
 handoff described in section 3 must positively observe the same fixture in
-`Loader` mode. After that proof, the workflow reads the
-unique 16-byte SoC identity. The host signs the UART request with a mode-0600,
-host-local Ed25519 key; before any USB operation, the verifier derives its public
-key and requires it to equal the public key in the candidate source. The image
-contains only that public verification key. The signed request includes the
-device nonce, SoC identity, and a maximum one-hour expiry window, so the UART
-service rejects a crossed cable or forged long-lived key before changing the
+`Loader` mode. After that proof, the workflow reads the 16-byte SoC-**family**
+marker with `rkdeveloptool rci`. This is a COARSE guard, **not** a per-device
+identity: `rci` returns the RK3588 family constant (ASCII "8853"), identical on
+every board of this SoC, plus a runtime-state loader-overlay byte. Maskrom exposes
+**no** per-device read at all — rkdeveloptool's full command set has no
+OTP/eFuse/serial/CID command — so no genuine per-device value can be captured
+before the flash. The host signs the UART request with a mode-0600, host-local
+Ed25519 key; before any USB operation, the verifier derives its public key and
+requires it to equal the public key in the candidate source. The image contains
+only that public verification key. The signed request includes the device nonce,
+the SoC-family marker, and a maximum one-hour expiry window, so the UART service
+rejects a crossed cable or forged long-lived key before changing the
 authorized-key store.
-After SSH starts it requires those bytes to equal the output of
-`/usr/local/sbin/ceralive-rockchip-chip-info`, which reads the first 16 bytes of
-`/sys/bus/nvmem/devices/rockchip-otp0/nvmem`. The UART challenge therefore binds
-the SSH endpoint, while the SoC identity binds that endpoint to the exact USB
-device whose media was written and read back.
+After SSH starts, the post-boot OTP read from
+`/usr/local/sbin/ceralive-rockchip-chip-info` (first 16 bytes of
+`/sys/bus/nvmem/devices/rockchip-otp0/nvmem`) must equal that same family marker —
+a like-for-like **family** check, not a per-device one. The genuine **per-device**
+binding is the eMMC **CID**: the UART one-shot bootstrap records this board's CID
+(a per-card-unique value) into the signed-request-gated marker, and the workflow
+requires it to equal the live media CID read over SSH. The UART challenge binds
+the SSH endpoint; the CID binds that endpoint to the exact physical eMMC whose
+media was written and read back.
 
 The key lives in `/data/ceralive/ssh/root_authorized_keys`, so it remains available
 through each explicitly armed RAUC slot reboot in the same gate. Each arm is

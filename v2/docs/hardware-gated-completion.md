@@ -599,11 +599,14 @@ The workflow runs these steps in order:
    one-boot, data-only UART bootstrap and provisions a restricted,
    expiring run-local root public key without modifying the artifact. The
    bootstrap verifies an authenticated, one-hour-bounded envelope containing the
-   baked candidate commit, a fresh challenge, and the USB-captured SoC identity. The
-   post-boot SoC identity must match the 16-byte identity read over USB before
-   reset, and `/` must resolve to the flashed eMMC parent. The bootstrap has a
-   180-second timeout, no shell, and no restart. Post-boot SSH must report a valid
-   media CID within the retry budget. Its run-local SSH
+   baked candidate commit, a fresh challenge, and the USB-captured SoC-family marker. The
+   post-boot OTP family marker must match the 16-byte family constant read over USB before
+   reset — a coarse family guard, since `rci` is the RK3588 family constant, not a
+   per-device id, and Maskrom exposes no per-device read — and `/` must resolve to the
+   flashed eMMC parent. The bootstrap has a
+   180-second timeout, no shell, and no restart. The genuine per-device binding is the
+   eMMC CID: the bootstrap records it into its marker and post-boot SSH must report a
+   media CID that matches, within the retry budget. Its run-local SSH
    host-key record is rotated only after the immutable
    readback succeeds. Later `rkdeveloptool` operations retain their existing
    cancellable-child cleanup so an interruption cannot leave a flash/readback

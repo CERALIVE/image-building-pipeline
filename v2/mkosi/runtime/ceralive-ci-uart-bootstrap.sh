@@ -13,6 +13,7 @@ INSTALL_BIN="${CERALIVE_UART_INSTALL_BIN:-install}"
 OPENSSL_BIN="${CERALIVE_UART_OPENSSL_BIN:-openssl}"
 PUBLIC_KEY_FILE="${CERALIVE_UART_PUBLIC_KEY_FILE:-/etc/ceralive/uart-bootstrap-public.pem}"
 CHIP_INFO_BIN="${CERALIVE_CHIP_INFO_BIN:-/usr/local/sbin/ceralive-rockchip-chip-info}"
+MEDIA_CID_FILE="${CERALIVE_MEDIA_CID_FILE:-/sys/class/block/mmcblk0/device/cid}"
 
 fail() {
     printf 'CERALIVE_UART_BOOTSTRAP_ERROR %s\n' "$1"
@@ -138,10 +139,17 @@ grep -Fqx -- "${authorized_line}" "${KEYS}" || printf '%s\n' "${authorized_line}
 "${CHOWN_BIN}" root:root "${KEYS}"
 chmod 0600 "${KEYS}"
 
+# Per-device binding (soc_id above is only a coarse SoC-family guard): the host
+# cross-checks this eMMC CID against the live post-boot CID to tie the receipt to media.
+[[ -r "${MEDIA_CID_FILE}" ]] || fail media-cid-source
+media_cid="$(tr -d '[:space:]' <"${MEDIA_CID_FILE}")"
+media_cid="${media_cid,,}"
+[[ "${media_cid}" =~ ^[0-9a-f]{32}$ ]] || fail media-cid-invalid
+
 marker="${ACCESS_DIR}/${fields[access_id]}"
 tmp="$(mktemp "${ACCESS_DIR}/.${fields[access_id]}.XXXXXX")"
-printf 'challenge=%s\ncandidate_commit=%s\nsoc_id=%s\n' \
-    "${fields[challenge]}" "${fields[candidate_commit]}" "${fields[soc_id]}" >"${tmp}"
+printf 'challenge=%s\ncandidate_commit=%s\nsoc_id=%s\nmedia_cid=%s\n' \
+    "${fields[challenge]}" "${fields[candidate_commit]}" "${fields[soc_id]}" "${media_cid}" >"${tmp}"
 chmod 0600 "${tmp}"
 mv -f -- "${tmp}" "${marker}"
 tmp=""

@@ -1,4 +1,4 @@
-libsrt1.5-ceralive=1.5.5+ceralive.2
+libsrt1.5-ceralive=1.5.5+ceralive.3
 cerastream=2026.7.2
 gstreamer1.0-libuvch264src=2026.7.0
 ceralive-device=2026.7.1-20260718T151351.bceb588

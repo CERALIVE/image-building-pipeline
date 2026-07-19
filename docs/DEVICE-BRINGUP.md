@@ -339,11 +339,14 @@ command receives whole-group TERM then KILL with bounded cleanup; a stale,
 missing, malformed, multiple, changed, or wrong-mode re-enumeration fails before
 `rfi` and every write/readback/reset. Neither phase retries. Logs name command
 timeout and Loader re-enumeration timeout separately. The workflow then captures
-the 16-byte chip identity with `rkdeveloptool rci`, verifies the image,
+the 16-byte SoC-family marker with `rkdeveloptool rci`, verifies the image,
 writes it, reads the entire candidate range back, and only then resets. A direct
 `rkdeveloptool wl` command is not an acceptable production or recovery path.
 After boot, the gate reads the same first 16 bytes from Rockchip OTP NVMEM via
-the image's committed helper and requires exact equality before SSH checks.
+the image's committed helper and requires a like-for-like family match before SSH
+checks. `rci` is only the RK3588 family constant (Maskrom exposes no per-device
+read), so the genuine per-device binding is the eMMC CID: the UART bootstrap
+records it and the gate cross-checks it against the live post-boot media CID.
 
 #### Manual bench flashing (development/debugging only — NOT for production releases)
 

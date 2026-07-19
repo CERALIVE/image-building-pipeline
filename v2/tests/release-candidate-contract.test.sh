@@ -175,6 +175,7 @@ case "${cmd}" in
     printf 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
     printf 'candidate_commit=1111111111111111111111111111111111111111\n'
     printf 'soc_id=%s\n' "${MOCK_SOC_ID}"
+    printf 'media_cid=%s\n' "${MOCK_MARKER_MEDIA_CID:-${MOCK_MEDIA_CID}}"
     ;;
   true)
     grep -q '^new-host-key$' "${known_hosts}" || printf 'new-host-key\n' >"${known_hosts}"
@@ -355,19 +356,23 @@ case "${1:-}" in
     printf 'Flash ID: mock-emmc\n'
     ;;
   rci)
+    # Real RK3588 rci output: bytes 0-3 = ASCII "8853" (family marker); byte 12 is
+    # the warm-boot loader overlay (0x10) the host normalizes away. wrong-family is
+    # a well-formed 16-octet record whose marker is NOT RK3588 (family guard rejects).
     case "${MOCK_RCI_MODE:-lf}" in
-      lf) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n' ;;
-      crlf) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\r\n' ;;
-      truncated) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F\n' ;;
-      extra) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10 11\n' ;;
+      lf) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n' ;;
+      crlf) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\r\n' ;;
+      wrong-family) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n' ;;
+      truncated) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0\n' ;;
+      extra) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0 11\n' ;;
       split)
-        printf 'Chip Info: 1 2 3 4 5 6 7 8\n'
-        printf 'Chip Info: 9 A B C D E F 10\n'
+        printf 'Chip Info: 38 38 35 33 0 0 0 0\n'
+        printf 'Chip Info: 0 0 0 0 10 0 0 0\n'
         ;;
-      nonhex) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F GG\n' ;;
+      nonhex) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 GG\n' ;;
       duplicate)
-        printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
-        printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n'
+        printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n'
+        printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n'
         ;;
       malformed) printf 'Chip Info: not-a-chip-identity\n' ;;
       *) printf 'unknown MOCK_RCI_MODE: %s\n' "${MOCK_RCI_MODE}" >&2; exit 2 ;;
@@ -449,7 +454,7 @@ common=(
   --identity-out "${TMP}/identity.txt"
 )
 media_cid="0123456789abcdef0123456789abcdef"
-soc_id="0102030405060708090a0b0c0d0e0f10"
+soc_id="38383533000000000000000000000000"
 base_env=(
   "RUNNER_TEMP=${TMP}"
   "MOCK_MEDIA_CID=${media_cid}"
@@ -930,6 +935,7 @@ esac
 
 assert_rci_contract() {
   local mode="$1" expected="$2" label="$3" output rc=0
+  local err="${4:-rkdeveloptool did not report one 16-byte chip identity}"
   local case_dir="${TMP}/rci-${mode}"
   mkdir -p "${case_dir}"
   rm -f "${TMP}/identity.txt"
@@ -948,7 +954,7 @@ assert_rci_contract() {
         "${label}" "${rc}" "${output}" >&2
       return 1
     fi
-    grep -Eq '^soc_id_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+    grep -Eq '^soc_family_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
     grep -q '^rkdeveloptool wl ' "${case_dir}/flash.log"
     printf 'rci %s accepted through real verifier path (exit=0)\n' "${label}"
     return 0
@@ -958,7 +964,7 @@ assert_rci_contract() {
     printf 'malformed %s rci identity was accepted\n' "${label}" >&2
     return 1
   fi
-  if [[ "${output}" != *'rkdeveloptool did not report one 16-byte chip identity'* ]]; then
+  if [[ "${output}" != *"${err}"* ]]; then
     printf 'malformed %s rci identity failed for the wrong reason (rc=%s)\n%s\n' \
       "${label}" "${rc}" "${output}" >&2
     return 1
@@ -974,6 +980,9 @@ assert_rci_contract() {
 rci_contract_failures=0
 assert_rci_contract lf accept LF || rci_contract_failures=$((rci_contract_failures + 1))
 assert_rci_contract crlf accept CRLF || rci_contract_failures=$((rci_contract_failures + 1))
+assert_rci_contract wrong-family reject wrong-SoC-family \
+  'does not identify the expected RK3588 SoC family' \
+  || rci_contract_failures=$((rci_contract_failures + 1))
 assert_rci_contract truncated reject truncated || rci_contract_failures=$((rci_contract_failures + 1))
 assert_rci_contract extra reject extra-octet || rci_contract_failures=$((rci_contract_failures + 1))
 assert_rci_contract split reject split-record || rci_contract_failures=$((rci_contract_failures + 1))
@@ -1313,6 +1322,17 @@ if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
 fi
 [[ ! -e "${TMP}/identity.txt" ]]
 
+# MOCK_POST_MEDIA_CID sets only the live /device/cid; the marker keeps MOCK_MEDIA_CID.
+if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
+    MOCK_POST_MEDIA_CID="ffffffffffffffffffffffffffffffff" \
+    MOCK_MEDIA="${TMP}/media-cid-bind.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-cid-bind" \
+    MOCK_FLASH_LOG="${TMP}/flash-cid-bind.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-cid-bind" \
+    "${VERIFY}" "${common[@]}"; then
+  printf 'reconnect whose live media CID differs from the UART-recorded CID was accepted\n' >&2
+  exit 1
+fi
+[[ ! -e "${TMP}/identity.txt" ]]
+
 if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
     MOCK_POST_SOC_ID="ffffffffffffffffffffffffffffffff" \
     MOCK_MEDIA="${TMP}/media-soc-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-soc-mismatch" \
@@ -1352,7 +1372,7 @@ grep -qx "pre_boot_media_sha256=${sha}" "${TMP}/identity.txt"
 grep -qx 'pre_boot_media_identity=verified' "${TMP}/identity.txt"
 grep -qx 'target_capacity_sectors=195312' "${TMP}/identity.txt"
 grep -Eq '^flash_id_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
-grep -qx "soc_id_sha256=$(printf '%s' "${soc_id}" | sha256sum | cut -d' ' -f1)" \
+grep -qx "soc_family_sha256=$(printf '%s' "${soc_id}" | sha256sum | cut -d' ' -f1)" \
   "${TMP}/identity.txt"
 grep -qx "media_cid=${media_cid}" "${TMP}/identity.txt"
 grep -qx 'boot_root_parent=mmcblk0' "${TMP}/identity.txt"

@@ -85,12 +85,14 @@ The release gate adds `ceralive.ci_uart=1` for one boot. That condition starts a
 non-restarting UART service with a device-enforced 180-second timeout. It accepts
 one strict signed data record and verifies it with the baked public key, then
 requires its fresh device-generated nonce, the candidate commit from
-`/etc/ceralive/image-build-commit`, the local 16-byte identity read from the
-first 16 bytes of raw Rockchip OTP NVMEM, and an expiry no more
+`/etc/ceralive/image-build-commit`, the local 16-byte SoC-family marker read from
+the first 16 bytes of raw Rockchip OTP NVMEM (a coarse family guard — the RK3588
+family constant, not a per-device id), and an expiry no more
 than one hour after the signed host epoch. Consumed nonces and a non-decreasing
 epoch floor persist under `/data/ceralive/ssh`, preventing replay and clock
 rollback from restoring an expired key. Only then does it write a restricted root
-key plus a fresh challenge marker. It accepts no shell command. The signing
+key plus a fresh challenge marker that also records this eMMC's **CID** — the
+genuine per-device binding the host cross-checks against the live post-boot CID. It accepts no shell command. The signing
 private key stays mode `0600` on the dedicated runner, is preflight-matched to the
 baked public key, and is not an SSH credential. The workflow
 selects that key explicitly for SSH, verifies the same challenge and commit over
