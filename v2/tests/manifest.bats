@@ -2894,6 +2894,21 @@ run_paseto_provision() {
   [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
 }
 
+@test "fetch-debs srt pin ships libsrt1.5-ceralive bundling /usr/bin/srt-live-transmit" {
+  # srt v1.5.5+ceralive.3 (PR #18 @ 9b02dc7, "Path A") bundles srt-live-transmit into
+  # the EXISTING libsrt1.5-ceralive .deb, linked against the same shared GnuTLS
+  # libsrt.so.1.5 (single-libsrt invariant) — so it needs NO new FIRST_PARTY_APT_PKGS
+  # entry, only the version bump. Confirmed live + GPG-signed on apt.ceralive.tv.
+  local expected_srt_pin="v1.5.5+ceralive.3"
+  [ "$(get_pin srt)" = "$expected_srt_pin" ]
+  local libsrt_version
+  libsrt_version="$(awk -F= '$1 == "libsrt1.5-ceralive" { print $2; exit }' \
+    "$REPO_ROOT/v2/manifests/first-party-deb-versions.txt")"
+  [ "$libsrt_version" = "${expected_srt_pin#v}" ]
+  # The rootfs build/install-test asserts the bundled tool actually lands on-device.
+  grep -Fq '/usr/bin/srt-live-transmit' "$V2/tests/realhw-smoke.sh"
+}
+
 @test "fetch-debs BSP set deduplicates the first family package against board overrides" {
   local family="$BATS_TEST_TMPDIR/family.yaml"
   local pins="$BATS_TEST_TMPDIR/bsp-versions.txt"

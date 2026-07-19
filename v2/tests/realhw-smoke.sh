@@ -89,7 +89,7 @@ SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
 SSH_KNOWN_HOSTS_FILE="${SSH_KNOWN_HOSTS_FILE:-}"
 IMAGE_PATH="${IMAGE_PATH:-}"
 
-EXPECTED_BINARIES=(/usr/bin/cerastream /usr/bin/srtla_send)
+EXPECTED_BINARIES=(/usr/bin/cerastream /usr/bin/srtla_send /usr/bin/srt-live-transmit)
 # The main application systemd unit — accept either name (task: "handle both").
 APP_SERVICE_CANDIDATES=(ceralive.service ceraui.service)
 
