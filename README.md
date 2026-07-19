@@ -93,9 +93,12 @@ CRLF transport framing but requires exactly one labeled record with exactly 16
 hex octets; truncated, extra, split, nonhex, and duplicate records fail before
 media write. `rci` returns the RK3588 family constant (identical on every board of
 this SoC), **not** a per-device identity — Maskrom exposes no per-device read — so
-this is a coarse family guard: Linux re-reads the same family marker from Rockchip
-OTP NVMEM through the committed `ceralive-rockchip-chip-info` helper and UART/SSH
-require a like-for-like family match after boot. The genuine per-device binding is
+this is a coarse family guard. `rci` and the device OTP encode the family
+DIFFERENTLY (rci = the model number byte-reversed "8853"; OTP = the `cpu_code`
+cell `0x3588` at nvmem offset `0x02`), so the committed `ceralive-rockchip-chip-info`
+helper reads that cpu_code cell (NOT a raw 16-byte dump) and both sides normalize
+to the same cpu_code identity (`35880000…`), giving a like-for-like family match
+after boot. The genuine per-device binding is
 the eMMC **CID**, which the UART bootstrap records into its signed marker and the
 gate cross-checks against the live post-boot CID. `/` must
 resolve to that flashed eMMC. UART observes first boot through a

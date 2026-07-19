@@ -454,7 +454,9 @@ common=(
   --identity-out "${TMP}/identity.txt"
 )
 media_cid="0123456789abcdef0123456789abcdef"
-soc_id="38383533000000000000000000000000"
+# Canonical RK3588 cpu_code family id: the host derives this from the rci "8853"
+# read and the device's chip-info helper derives it from the OTP cpu_code cell.
+soc_id="35880000000000000000000000000000"
 base_env=(
   "RUNNER_TEMP=${TMP}"
   "MOCK_MEDIA_CID=${media_cid}"

@@ -600,10 +600,12 @@ The workflow runs these steps in order:
    expiring run-local root public key without modifying the artifact. The
    bootstrap verifies an authenticated, one-hour-bounded envelope containing the
    baked candidate commit, a fresh challenge, and the USB-captured SoC-family marker. The
-   post-boot OTP family marker must match the 16-byte family constant read over USB before
-   reset — a coarse family guard, since `rci` is the RK3588 family constant, not a
-   per-device id, and Maskrom exposes no per-device read — and `/` must resolve to the
-   flashed eMMC parent. The bootstrap has a
+   post-boot OTP `cpu_code` family identity (nvmem offset `0x02`) must match the
+   family identity the host normalized from the USB `rci` read before reset — `rci`
+   and the OTP encode the family differently, so the helper reads that cpu_code cell,
+   not a raw 16-byte dump — a coarse family guard, since `rci` is the RK3588 family
+   constant, not a per-device id, and Maskrom exposes no per-device read — and `/`
+   must resolve to the flashed eMMC parent. The bootstrap has a
    180-second timeout, no shell, and no restart. The genuine per-device binding is the
    eMMC CID: the bootstrap records it into its marker and post-boot SSH must report a
    media CID that matches, within the retry budget. Its run-local SSH

@@ -3486,15 +3486,20 @@ run_modem_generator() {
 # ---------------------------------------------------------------------------
 # UART release gate: SoC-family guard + eMMC CID per-device binding (Todo 45)
 # ---------------------------------------------------------------------------
-# `rkdeveloptool rci` is a COARSE SoC-family guard, NOT a per-device identity: it
-# returns the RK3588 family constant "8853" (0x38383533) plus a runtime-state
-# loader-overlay byte, and Maskrom exposes no per-device read at all. The genuine
-# per-device binding is the eMMC CID the UART bootstrap records into its marker and
-# the host cross-checks against the live post-boot CID. Full end-to-end proof is in
-# release-candidate-contract.test.sh + maskrom-first-realhw.test.sh; these unit
-# cases pin the comparison logic and guard against a silent revert.
+# `rkdeveloptool rci` is a COARSE SoC-family guard, NOT a per-device identity, and
+# it encodes the family DIFFERENTLY from the device's OTP read. rci reports the
+# RK3588 model number byte-reversed ("8853" = 0x38383533, the little-endian image
+# of the BootROM chip_info DWORD 0x33353838 = ASCII "3588"); the device re-reads
+# the SAME family from the OTP `cpu_code` cell (nvmem offset 0x02 = 0x3588). Both
+# sides normalize to the cpu_code family identity (35880000...) so they compare
+# like-for-like. The genuine per-device binding is the eMMC CID the UART bootstrap
+# records into its marker and the host cross-checks against the live post-boot CID.
+# Full end-to-end proof is in release-candidate-contract.test.sh +
+# maskrom-first-realhw.test.sh; these unit cases pin the comparison logic and guard
+# against a silent revert.
 
-# Reproduce the shipped rci -> canonical-family normalization.
+# Reproduce the shipped rci -> cpu_code family normalization: reverse the 4 model
+# ASCII bytes to recover the OTP cpu_code hex, then zero-fill to 32 chars.
 _rci_family_id() {
   local raw="" octet token
   for token in "$@"; do
@@ -3502,24 +3507,32 @@ _rci_family_id() {
     raw+="${octet}"
   done
   [[ "${raw:0:8}" == 38383533 ]] || return 1
-  printf '38383533000000000000000000000000\n'
+  local ascii cpu_code="" i
+  ascii="$(printf '%b' "\\x${raw:0:2}\\x${raw:2:2}\\x${raw:4:2}\\x${raw:6:2}")"
+  for (( i = ${#ascii} - 1; i >= 0; i-- )); do cpu_code+="${ascii:i:1}"; done
+  [[ "${cpu_code}" =~ ^[0-9a-f]{4}$ ]] || return 1
+  printf '%s0000000000000000000000000000\n' "${cpu_code}"
 }
 
-@test "UART family guard: real RK3588 rci (warm+cold) normalizes to the canonical family id (MATCH)" {
+@test "UART family guard: real RK3588 rci (warm+cold) normalizes to the cpu_code family id (MATCH)" {
   # Warm boot carries the byte-12 loader overlay (0x10); cold does not. Both must
-  # collapse to the one canonical family constant the OTP helper also returns.
+  # collapse to the one cpu_code family id the OTP helper also returns.
   run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0
   [ "$status" -eq 0 ]
-  [ "$output" = "38383533000000000000000000000000" ]
+  [ "$output" = "35880000000000000000000000000000" ]
   run _rci_family_id 38 38 35 33 0 0 0 0 0 0 0 0 0 0 0 0
   [ "$status" -eq 0 ]
-  [ "$output" = "38383533000000000000000000000000" ]
+  [ "$output" = "35880000000000000000000000000000" ]
+  # THIS board's REAL captured OTP dump (524b358812fe21413337544600000000,
+  # re-read on-device twice): cpu_code cell at offset 2-3 = 35 88, per-die serial
+  # at offset 7+ (12fe2141...) is discarded. The shipped OTP helper must decode the
+  # SAME cpu_code family id the host derives from the differently-encoded rci read.
   local nvmem="$BATS_TEST_TMPDIR/nvmem"
-  printf '\x38\x38\x35\x33\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >"$nvmem"
+  printf '\x52\x4b\x35\x88\x12\xfe\x21\x41\x33\x37\x54\x46\x00\x00\x00\x00' >"$nvmem"
   run env CERALIVE_ROCKCHIP_NVMEM_FILE="$nvmem" \
       bash "$V2/mkosi/runtime/ceralive-rockchip-chip-info.sh"
   [ "$status" -eq 0 ]
-  [ "$output" = "38383533000000000000000000000000" ]
+  [ "$output" = "35880000000000000000000000000000" ]
 }
 
 @test "UART family guard: a non-RK3588 rci marker is rejected (MISMATCH)" {
@@ -3527,13 +3540,13 @@ _rci_family_id() {
   [ "$status" -ne 0 ]
 }
 
-@test "UART family guard: verify script ships the marker guard + canonical derivation, not a raw per-device equality" {
+@test "UART family guard: verify script ships the marker guard + cpu_code derivation, not a raw per-device equality" {
   local verify="$V2/ci/verify-and-flash-candidate.sh"
   grep -Fq 'soc_family_marker="38383533"' "$verify"
-  grep -Fq 'usb_soc_family="${soc_family_marker}000000000000000000000000"' "$verify"
+  grep -Fq 'usb_soc_family="${soc_cpu_code}0000000000000000000000000000"' "$verify"
   grep -Fq 'does not identify the expected RK3588 SoC family' "$verify"
   # The retired per-device variable must be fully gone (guards against a revert to
-  # the structurally-impossible OTP==rci equality).
+  # the structurally-impossible OTP-raw-dump==rci equality).
   ! grep -Fq 'usb_soc_id' "$verify"
 }
 

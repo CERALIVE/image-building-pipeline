@@ -202,10 +202,14 @@ password. Only after
 the immutable proof does it boot, rotate a run-local SSH host-key record, require
 the eMMC **CID** the UART bootstrap recorded to equal the live post-boot media CID
 (the genuine **per-device** binding), the SoC-**family** marker read by
-`rkdeveloptool rci` before reset to match the first 16 bytes of Rockchip OTP NVMEM
-through the installed `ceralive-rockchip-chip-info` helper (a coarse family guard —
-`rci` returns the RK3588 family constant, not a per-device id, and Maskrom exposes
-no per-device read), and `/`
+`rkdeveloptool rci` before reset to match the RK3588 OTP `cpu_code` cell (nvmem
+offset `0x02`) read post-boot through the installed `ceralive-rockchip-chip-info`
+helper — both normalized to the SAME cpu_code family identity. `rci` and the OTP
+encode the family DIFFERENTLY (rci = the model number byte-reversed "8853"; OTP =
+`cpu_code` `0x3588`), so the helper reads that cpu_code cell, NOT a raw 16-byte
+dump, and excludes the per-die serial — a coarse family guard (`rci` returns the
+RK3588 family constant, not a per-device id, and Maskrom exposes no per-device
+read), and `/`
 on the flashed eMMC, then run
 the physical suite, and remove the exact temporary key
 with a cleanup receipt. Each planned RAUC reboot consumes a one-use retention
