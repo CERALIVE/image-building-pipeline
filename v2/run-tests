@@ -58,7 +58,6 @@ SHELL_SUITES=(
   "${HERE}/tests/apt-preferences-baked.test.sh"
   "${HERE}/tests/app-layer-modem-closure.test.sh"
   "${HERE}/tests/firstparty-classification.test.sh"
-  "${HERE}/tests/hardware-launch-contract.test.sh"
   "${HERE}/tests/release-cache-contract.test.sh"
   "${HERE}/tests/builder-resource-budget.test.sh"
   "${HERE}/tests/mkosi-package-staging.test.sh"

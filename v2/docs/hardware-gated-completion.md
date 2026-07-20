@@ -342,12 +342,10 @@ The Rock 5B+ production image uses symmetric RAUC A/B slots. The manifest resolv
 factory tree; and kernel arguments carry `rauc.slot=A|B`. RK3588 uses RAUC
 `bootloader=custom` because the vendor U-Boot has no persistent environment. Its
 `boot.scr` selector and FAT-backed boot state implement the three-attempt rollback.
-The release workflow owns the remaining gate: candidate build, Maskrom flash and
-readback, UART-observed first boot, ephemeral SSH provisioning, and the real arm64
-bundle switch/rollback cycle on silicon.
-It admits the hardware job only from this repository's first-attempt release
-workflow and enters the protected `image-hardware` environment before selecting
-the labeled self-hosted runner.
+The release workflow builds the candidate; an operator owns the remaining
+hand-test on real hardware: Maskrom flash and readback, UART-observed first boot,
+ephemeral SSH provisioning, and the real arm64 bundle switch/rollback cycle on
+silicon. There is no automated CI job that flashes or tests real hardware.
 
 > **SAFETY GATE — DO NOT CLAIM PRODUCTION HARDWARE VALIDATION YET.**
 >
@@ -517,139 +515,117 @@ procedure and output.
 
 ---
 
-## Item 6 — ceralive-rk3588 Self-Hosted Runner Provisioning
+## Item 6 — RK3588 Bench Workstation for Manual Hand-Testing
 
-**DEFERRED.md ref:** not a separate DEFERRED.md item — this is the CI
-infrastructure gate that enables `realhw-job.yml` to run.  
-**File:** `.github/workflows/realhw-job.yml` (already authored; needs a runner)  
-**Blocked on:** a Linux host with a physical RK3588 board attached, registered
-as a GitHub Actions self-hosted runner with labels `ceralive-rk3588,rock-5b-plus`
+**DEFERRED.md ref:** not a separate DEFERRED.md item — this is the bench
+workstation an operator uses to hand-test a release candidate on real hardware.  
+**Tooling:** `v2/ci/verify-and-flash-candidate.sh` + `v2/tests/realhw-suite.sh`
+(there is no automated hardware-flashing workflow)  
+**Blocked on:** a Linux host with a physical RK3588 board attached (see
+[`v2/ci/runner-setup.md`](../ci/runner-setup.md))
 
 ### Background
 
-`realhw-job.yml` is the candidate-bound real-hardware acceptance gate. The
-release workflow builds and uploads the exact raw image, signed good and rollback
-probe bundles, keyring, and digests before invoking it on a physical RK3588 board.
+Images are hand-tested on real hardware before a manual release is cut — there is
+no automated CI job that flashes or tests real hardware. The release workflow
+builds and uploads the exact raw image, signed good and rollback probe bundles,
+keyring, and digests; an operator downloads that immutable candidate and flashes
+it with the bench flash-and-verify tool.
 
-The workflow requires these GitHub Actions runner variables on the
-`ceralive-rk3588` runner (set via the repo's Settings → Actions → Variables):
+The bench flash-and-verify tool takes these operator inputs:
 
-| Variable | Purpose |
+| Input | Purpose |
 |----------|---------|
-| `CERALIVE_RK3588_BOARD_IP` | IP address of the attached RK3588 board |
-| `CERALIVE_RK3588_SSH_PORT` | SSH port (default: `22`) |
-| `CERALIVE_RK3588_SERIAL_DEV` | Stable `/dev/serial/by-id/...` path for the debug UART |
-| `CERALIVE_RK3588_MASKROM_ID_SHA256` | Approved canonical Maskrom USB identity hash required before loader transfer |
-| `CERALIVE_RK3588_UART_SIGNING_KEY` | Absolute mode-`0600` path to the host-local request-signing key |
+| board IP | IP address of the attached RK3588 board |
+| SSH port | SSH port (default: `22`) |
+| serial device | Stable `/dev/serial/by-id/...` path for the debug UART |
+| approved Maskrom USB id SHA-256 | Approved canonical Maskrom USB identity hash required before loader transfer |
+| UART signing key | Absolute mode-`0600` path to the host-local request-signing key |
 
-The repository must also have an `image-hardware` environment with trusted
-required reviewers and deployment refs restricted to `release/**` and `v*`.
-Create and protect that environment before enabling either hardware label.
+The board must already be in Maskrom before flashing. The loader is hash-pinned
+inside the candidate artifact. SSH is fixed to root; its access key is generated,
+UART-provisioned, and revoked per run. The long-lived host key is preflight-matched
+to the candidate's baked public verifier before USB access. The device contributes
+a fresh signed-request nonce and persists consumed nonces plus a non-decreasing
+epoch floor, so a captured envelope cannot restore expired SSH access. That
+long-lived key is only an envelope signer and cannot log in to the board.
 
-The board must already be in Maskrom before the label is enabled. The loader is
-hash-pinned inside the candidate artifact. SSH is fixed to root; its access key
-is generated, UART-provisioned, and revoked per run. The long-lived host key is
-preflight-matched to the candidate's baked public verifier before USB access. The
-device contributes a fresh signed-request nonce and persists consumed nonces plus
-a non-decreasing epoch floor, so a captured envelope cannot restore expired SSH
-access. That long-lived key is only an envelope signer and cannot log in to the
-board.
-
-### Provisioning steps
+### Bench steps
 
 ```bash
-# 1. On the runner host: install the GitHub Actions runner agent
-#    (follow https://docs.github.com/en/actions/hosting-your-own-runners)
-#    Label the runner: ceralive-rk3588,rock-5b-plus
-
-# 2. Install required tools on the runner host:
+# 1. Install required tools on the bench host:
 sudo apt-get install -y rkdeveloptool openssh-client rsync
 
-# 3. Attach the RK3588 board via USB-C, stable USB-UART, and network. Put it in
+# 2. Attach the RK3588 board via USB-C, stable USB-UART, and network. Put it in
 #    Maskrom and require exactly one line ending in Maskrom from rkdeveloptool ld.
 
-# 4. Set the runner variables in GitHub repo Settings → Actions → Variables
-#    (see table above).
+# 3. Configure the bench inputs (see table above) for verify-and-flash-candidate.sh.
 
-# 5. Verify the runner is online:
-#    GitHub repo → Settings → Actions → Runners
-#    -> ceralive-rk3588 should show as "Idle"
-
-# 6. Push a release branch or tag after the release secrets are configured.
-
-# 7. Check the run result:
+# 4. Push a release branch or tag; the release.yml build produces the immutable
+#    candidate artifact.
 gh run list --workflow=release.yml --limit 5
-gh run view <run-id> --log
+
+# 5. Download the candidate artifact, then hand-flash and verify it:
+#    v2/ci/verify-and-flash-candidate.sh ... (see v2/ci/runner-setup.md section 8)
+#    followed by the acceptance suite v2/tests/realhw-suite.sh.
 ```
 
-### Verifying realhw-job.yml runs end-to-end
+### Verifying the hand-test end-to-end
 
-The workflow runs these steps in order:
+The bench flash-and-verify tool runs these steps in order:
 
 1. **Candidate preflash** — verify the exact raw digest, A/B media, production
    bundle/keyring contract, loader digest, and loader-mode destination capacity.
 2. **Required flash** — digest a private candidate snapshot, use that same file
    for preflight and the maskrom write, then read and SHA-256 the exact candidate
-   sector range before reset. The gate requires one Maskrom Rockchip target,
+   sector range before reset. The tool requires one Maskrom Rockchip target,
    bounds the initial `db` command to 15 seconds in an owned process group, and
    requires the same VID/PID/`LocationID` in `Loader` mode within a separate
    10-second phase before `rfi`. Timeout cleanup is whole-group TERM then KILL
    and reap; malformed, multiple, stale, changed, or wrong-mode transitions fail
-   without retry or downstream operations. The gate then applies a volatile
+   without retry or downstream operations. The tool then applies a volatile
    one-boot, data-only UART bootstrap and provisions a restricted,
    expiring run-local root public key without modifying the artifact. The
    bootstrap verifies an authenticated, one-hour-bounded envelope containing the
-   baked candidate commit, a fresh challenge, and the USB-captured SoC-family marker. The
-   post-boot OTP `cpu_code` family identity (nvmem offset `0x02`) must match the
-   family identity the host normalized from the USB `rci` read before reset — `rci`
-   and the OTP encode the family differently, so the helper reads that cpu_code cell,
-   not a raw 16-byte dump — a coarse family guard, since `rci` is the RK3588 family
-   constant, not a per-device id, and Maskrom exposes no per-device read — and `/`
-   must resolve to the flashed eMMC parent. The bootstrap has a
-   180-second timeout, no shell, and no restart. The genuine per-device binding is the
-   eMMC CID: the bootstrap records it into its marker and post-boot SSH must report a
-   media CID that matches, within the retry budget. Its run-local SSH
+   baked candidate commit and a fresh challenge, and `/` must resolve to the
+   flashed eMMC parent. The bootstrap has a
+   180-second timeout, no shell, and no restart. Its run-local SSH
    host-key record is rotated only after the immutable
    readback succeeds. Later `rkdeveloptool` operations retain their existing
    cancellable-child cleanup so an interruption cannot leave a flash/readback
    child or scratch candidate behind. Post-boot mutable bytes are not compared
    to the factory raw, and identity
    artifact filenames are validated before entering the line-oriented record.
-3. **realhw-suite.sh** — the consolidated gate: boot+service smoke, encode-path
-   init, required candidate-bound dev-loop sanity, RAUC A/B rollback. Acceptance
-   requires `RESULT: 4 PASS / 0 FAIL / 0 SKIP`.
-4. **Revoke and upload** — removes and proves absence of the exact temporary key
-   and marker, deletes the local private key, and uploads identity, UART, cleanup,
-   and suite evidence with 14-day retention.
+3. **realhw-suite.sh** — the consolidated acceptance suite: boot+service smoke,
+   encode-path init, required candidate-bound dev-loop sanity, RAUC A/B rollback.
+   Acceptance requires `RESULT: 4 PASS / 0 FAIL / 0 SKIP`.
+4. **Revoke and clean up** — removes and proves absence of the exact temporary key
+   and marker, deletes the local private key, and records identity, UART, cleanup,
+   and suite evidence.
 
 ### Checklist
 
-- [ ] Runner host provisioned (Linux, `rkdeveloptool` + `openssh-client` installed).
+- [ ] Bench host provisioned (Linux, `rkdeveloptool` + `openssh-client` installed).
 - [ ] RK3588 board attached (USB-C Maskrom, stable USB-UART, network) and left in Maskrom.
-- [ ] GitHub Actions runner agent installed and labeled `ceralive-rk3588,rock-5b-plus`.
-- [ ] Runner shows as "Idle" in GitHub repo Settings → Actions → Runners.
-- [ ] All required runner variables set (see table above).
-- [ ] A release branch or tag produced the candidate-bound realhw job.
-- [ ] Workflow completes without error; `realhw-suite.sh` exits 0.
-- [ ] Artifacts uploaded: `artifacts/candidate-identity.txt`,
-      `artifacts/first-boot-uart.log`, `artifacts/ephemeral-ssh-cleanup.txt`,
-      `artifacts/realhw-suite.log`, and `artifacts/realhw/`.
+- [ ] Bench inputs configured for `verify-and-flash-candidate.sh` (see table above).
+- [ ] A release branch or tag produced the immutable candidate artifact.
+- [ ] Operator flashed the candidate with `verify-and-flash-candidate.sh` (exit 0).
+- [ ] `realhw-suite.sh` exits 0 on the flashed board.
 - [ ] Evidence saved to `test-results/ceralive-rk3588-runner-<date>.txt`.
 
 ### Acceptance
 
-`gh run list --workflow=release.yml` shows at least one successful run
-(conclusion: `success`). The uploaded artifacts include `realhw-suite.log` with
-a passing exit code and an evidence bundle under `artifacts/realhw/`.
-The evidence names the candidate artifact digest/raw SHA-256 and the runner has both required labels.
+`gh run list --workflow=release.yml` shows at least one successful candidate build
+(conclusion: `success`). The operator's hand-test records a passing
+`realhw-suite.sh` run against the exact candidate, named by its raw SHA-256.
 
 ### Unblock condition
 
-Provision a Linux host with a physical RK3588 board attached. Register it as a
-GitHub Actions self-hosted runner with labels `ceralive-rk3588,rock-5b-plus`. Set the required
-runner variables and release secrets. Trigger a release candidate and confirm it runs
-`v2/tests/realhw-suite.sh` end-to-end with a passing exit code and uploaded
-artifacts.
+Provision a Linux host with a physical RK3588 board attached (see
+[`v2/ci/runner-setup.md`](../ci/runner-setup.md)). Build a release candidate,
+download the immutable artifact, hand-flash it with
+`v2/ci/verify-and-flash-candidate.sh`, and confirm `v2/tests/realhw-suite.sh`
+passes end-to-end on the flashed board.
 
 ---
 
@@ -662,16 +638,16 @@ artifacts.
 | `v2/docs/cog-display-addon.md` | Cog packaging recipe, libmali strategy, §7 hardware caveats |
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence placeholders (Item 5) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (Item 1) |
-| `.github/workflows/realhw-job.yml` | Real-HW CI workflow (Item 6) |
+| `v2/ci/verify-and-flash-candidate.sh` | Bench flash-and-verify tool (Item 6) |
 | `v2/tests/realhw-suite.sh` | Consolidated real-HW acceptance suite |
 | `cerastream/docs/notes/hardware-validation.md` | cerastream per-platform encoder validation matrix |
 
 The cerastream hardware-gated encoder validation (RK3588 now; x86/N100 when in hand;
 Jetson DEFERRED — not currently planned) is tracked separately in
 `cerastream/docs/notes/hardware-validation.md`. That runbook is the authoritative
-checklist for encoder validation; this document does not duplicate it. The
-`ceralive-rk3588` runner (Item 6) is the shared infrastructure that enables both
-the image-pipeline real-HW gate and the cerastream encoder validation on the same
+checklist for encoder validation; this document does not duplicate it. The RK3588
+bench workstation (Item 6) is the shared hardware that supports both the
+image-pipeline manual hand-test and the cerastream encoder validation on the same
 physical board.
 
 ---

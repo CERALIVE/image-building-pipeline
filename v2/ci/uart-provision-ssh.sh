@@ -3,7 +3,7 @@ set -euo pipefail
 
 serial_dev="" authorized_key="" access_id="" expires="" host_epoch=""
 challenge="" candidate_commit="" uart_log="" authorized_line_out="" ready_out=""
-soc_id="" signing_key="" start_signal=""
+signing_key="" start_signal=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --serial-dev) serial_dev="${2:-}"; shift 2 ;;
@@ -13,7 +13,6 @@ while [[ $# -gt 0 ]]; do
     --host-epoch) host_epoch="${2:-}"; shift 2 ;;
     --challenge) challenge="${2:-}"; shift 2 ;;
     --candidate-commit) candidate_commit="${2:-}"; shift 2 ;;
-    --soc-id) soc_id="${2:-}"; shift 2 ;;
     --signing-key) signing_key="${2:-}"; shift 2 ;;
     --start-signal) start_signal="${2:-}"; shift 2 ;;
     --uart-log) uart_log="${2:-}"; shift 2 ;;
@@ -23,14 +22,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 for value in serial_dev authorized_key access_id expires host_epoch challenge candidate_commit \
-  soc_id signing_key start_signal uart_log authorized_line_out ready_out; do
+  signing_key start_signal uart_log authorized_line_out ready_out; do
   [[ -n "${!value}" ]] || { printf '%s is required\n' "${value}" >&2; exit 2; }
 done
 [[ -e "${serial_dev}" && -r "${authorized_key}" ]]
 [[ "${access_id}" =~ ^[A-Za-z0-9._-]{1,80}$ ]]
 [[ "${expires}" =~ ^[0-9]{14}Z$ && "${host_epoch}" =~ ^[0-9]{10}$ ]]
 [[ "${challenge}" =~ ^[0-9a-f]{64}$ && "${candidate_commit}" =~ ^[0-9a-f]{40}$ ]]
-[[ "${soc_id}" =~ ^[0-9a-f]{32}$ ]]
 [[ -f "${signing_key}" && ! -L "${signing_key}" && "$(stat -c %a "${signing_key}")" == 600 ]]
 for output in "${uart_log}" "${authorized_line_out}" "${ready_out}"; do
   [[ -d "$(dirname -- "${output}")" && ! -L "${output}" ]] || {
@@ -53,15 +51,11 @@ signature_file="${request_dir}/signature"
 expected_marker="CERALIVE_UART_PROVISIONED ${challenge} ${candidate_commit}"
 
 build_request() {
-  # soc_id here is the coarse SoC-family guard value: the RK3588 OTP cpu_code family
-  # identity (35880000...), which the device re-derives from its OTP and the host
-  # derives from the differently-encoded rci read. It is NOT a per-device id; the
-  # per-device binding is the eMMC CID in the post-boot marker.
   local boot_nonce="$1"
   [[ "${boot_nonce}" =~ ^[0-9a-f]{64}$ ]]
-  printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nsoc_id=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \
+  printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \
     "${access_id}" "${expires}" "${host_epoch}" "${challenge}" "${candidate_commit}" \
-    "${soc_id}" "${boot_nonce}" "${key_type}" "${key_body}" >"${payload_file}"
+    "${boot_nonce}" "${key_type}" "${key_body}" >"${payload_file}"
   openssl pkeyutl -sign -inkey "${signing_key}" -rawin -in "${payload_file}" \
     -out "${signature_file}"
   printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${payload_file}")" \

@@ -1,4 +1,9 @@
-name: Release candidate real-HW gate
+name: Release candidate build
+
+# Builds the exact production candidate image (raw + signed .raucb bundle + loader
+# + rollback probe) and uploads it as one immutable artifact for a human to flash
+# and hand-test on real hardware BEFORE a manual release is cut. There is no
+# automated hardware-flashing gate on this push — images are validated locally.
 
 on:
   push:
@@ -21,16 +26,6 @@ jobs:
       CERALIVE_MKOSI_CACHE_DIR: v2/mkosi/cache/rock-5b-plus
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
       CERALIVE_RUNNER_CLEANUP_IMAGE: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
-    outputs:
-      artifact_name: ${{ steps.meta.outputs.artifact_name }}
-      artifact_digest: sha256:${{ steps.upload.outputs.artifact-digest }}
-      raw_filename: ${{ steps.meta.outputs.raw_filename }}
-      raw_sha256: ${{ steps.meta.outputs.raw_sha256 }}
-      bundle_filename: ${{ steps.meta.outputs.bundle_filename }}
-      keyring_filename: ${{ steps.meta.outputs.keyring_filename }}
-      loader_filename: ${{ steps.meta.outputs.loader_filename }}
-      loader_sha256: ${{ steps.meta.outputs.loader_sha256 }}
-      commit: ${{ github.sha }}
     steps:
       - name: Reject reruns of immutable release candidates
         env:
@@ -236,17 +231,3 @@ jobs:
           rm -rf "${RUNNER_TEMP}/release-pki" "${RUNNER_TEMP}/armbian-keyring.gpg" \
             "${RUNNER_TEMP}/rollback-root" "${RUNNER_TEMP}/rollback-bundle"
           rm -f "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"
-  realhw:
-    needs: candidate
-    uses: ./.github/workflows/realhw-job.yml
-    with:
-      board: rock-5b-plus
-      candidate_artifact_name: ${{ needs.candidate.outputs.artifact_name }}
-      candidate_artifact_digest: ${{ needs.candidate.outputs.artifact_digest }}
-      candidate_raw_filename: ${{ needs.candidate.outputs.raw_filename }}
-      candidate_raw_sha256: ${{ needs.candidate.outputs.raw_sha256 }}
-      candidate_bundle_filename: ${{ needs.candidate.outputs.bundle_filename }}
-      candidate_keyring_filename: ${{ needs.candidate.outputs.keyring_filename }}
-      candidate_loader_filename: ${{ needs.candidate.outputs.loader_filename }}
-      candidate_loader_sha256: ${{ needs.candidate.outputs.loader_sha256 }}
-      candidate_commit: ${{ needs.candidate.outputs.commit }}

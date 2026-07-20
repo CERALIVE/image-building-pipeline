@@ -31,19 +31,13 @@ assert any(
     for step in steps
 )
 assert any(step.get("id") == "upload" and step.get("uses") == "actions/upload-artifact@v7" for step in steps)
-assert candidate["outputs"]["artifact_name"].startswith("${{ steps.meta.outputs.")
-assert candidate["outputs"]["artifact_digest"] == "sha256:${{ steps.upload.outputs.artifact-digest }}", (
-    "BUG: upload-artifact emits bare hex but the real-HW consumer requires sha256:<hex>"
+assert "realhw" not in workflow["jobs"], (
+    "BUG: the automated real-HW flashing gate was removed; images are hand-tested before a manual release"
 )
-
-realhw = workflow["jobs"]["realhw"]
-assert realhw["needs"] == "candidate"
-assert realhw["uses"] == "./.github/workflows/realhw-job.yml"
 
 print("release workflow baseline characterization: PASS")
 print("candidate=production rock-5b-plus self-hosted builder")
-print("realhw=required workflow_call after candidate")
-print("artifact_upload=immutable candidate artifact")
+print("artifact_upload=immutable candidate artifact for manual hardware testing")
 PY
 
 grep -Fq "test \"\${run_event}\" = push" "${RELEASE_DOC}" || {
@@ -54,7 +48,7 @@ grep -Fq "[[ \"\${run_branch}\" == release/* ]]" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not reject tag and non-release branch runs' >&2
   exit 1
 }
-grep -Fq "test \"\${run_workflow}\" = 'Release candidate real-HW gate'" "${RELEASE_DOC}" || {
+grep -Fq "test \"\${run_workflow}\" = 'Release candidate build'" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not require the production release workflow' >&2
   exit 1
 }
@@ -70,20 +64,8 @@ grep -Fq "compare/\${merge_sha}...master" "${RELEASE_DOC}" || {
   echo 'BUG: manual publication does not prove the candidate commit is merged to master' >&2
   exit 1
 }
-grep -Fq "realhw_artifact_name=\"realhw-\${board}-\${run_id}\"" "${RELEASE_DOC}" || {
-  echo 'BUG: manual publication does not select the candidate-bound real-HW evidence' >&2
-  exit 1
-}
-grep -Fq "grep -Fx \"artifact_digest=\${artifact_digest}\" \"\${identity}\"" "${RELEASE_DOC}" || {
-  echo 'BUG: manual publication does not bind hardware identity to the candidate digest' >&2
-  exit 1
-}
-grep -Fq "grep -Fx \"media_cid=\${expected_media_cid}\" \"\${identity}\"" "${RELEASE_DOC}" || {
-  echo 'BUG: manual publication does not bind proof to the approved physical test medium' >&2
-  exit 1
-}
-grep -Fq "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'" "${RELEASE_DOC}" || {
-  echo 'BUG: manual publication does not inspect the successful physical acceptance record' >&2
+grep -Fq "test \"\${hand_tested_raw_sha256}\" = \"\${expected_raw_sha}\"" "${RELEASE_DOC}" || {
+  echo 'BUG: manual publication does not gate on the operator-recorded hand-tested raw image SHA' >&2
   exit 1
 }
 grep -Fq "openssl x509 -in \"\${approved_root}\" -outform DER" "${RELEASE_DOC}" || {
@@ -112,9 +94,7 @@ publication = runbook[block_start:block_end]
 helper = publication.index('"${publisher}" \\')
 for required in (
     'compare/${merge_sha}...master',
-    'grep -Fx "artifact_digest=${artifact_digest}" "${identity}"',
-    'grep -Fx "media_cid=${expected_media_cid}" "${identity}"',
-    "grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP'",
+    'test "${hand_tested_raw_sha256}" = "${expected_raw_sha}"',
     'rauc info --keyring "${approved_root}"',
     'sha256sum -c good.raucb.sha256',
     'git show "${merge_sha}:v2/ci/publish-immutable-r2-pair.sh"',
@@ -306,7 +286,6 @@ assert cache_paths == ["${{ env.CERALIVE_MKOSI_CACHE_DIR }}"] * 2
 assert all(token not in path.lower() for path in cache_paths for token in ("apt", "qemu", "images", "staging", "build/"))
 assert "pull_request:" not in raw_workflow
 assert all("continue-on-error" not in step for step in steps)
-assert "continue-on-error" not in str(workflow["jobs"]["realhw"])
 
 print("release workflow cache contract: PASS")
 PY

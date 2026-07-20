@@ -30,11 +30,12 @@ release.yml: admission + production build
         ▼
 seal + upload one immutable candidate artifact
         │
-        ▼
-realhw-job.yml: realhw-suite.sh on a REAL RK3588
-(boot/service, encode-path init, dev-loop sanity, RAUC A/B rollback)
+        ▼  (MANUAL from here down — no automated hardware gate)
+operator flashes the candidate with verify-and-flash-candidate.sh and
+hand-tests it on a REAL RK3588 (realhw-suite.sh: boot/service,
+encode-path init, dev-loop sanity, RAUC A/B rollback)
         │
-        ▼  (once the gate is green; MANUAL from here down)
+        ▼  (once the operator confirms the hand-test is green)
 operator uploads images/<board>/<ts>.raucb (+ .sha256) to R2
         │
         ▼
@@ -49,11 +50,12 @@ verification: preflash-verify.sh (pre-flash) + on-device
 rauc status / ceralive-healthcheck (post-install)
 ```
 
-The production job signs and seals the exact candidate first so the physical
-real-HW gate tests the bytes that could ship. A human may publish those bytes
-only after that gate passes. Everything from "operator uploads" onward is a
-manual, operator-driven step today — there is no committed workflow that does
-it for OS bundles. Section 5 spells out exactly why and exactly what to type.
+The production job signs and seals the exact candidate first so the operator
+hand-tests the bytes that could ship. A human may publish those bytes only after
+hand-testing that exact candidate on real hardware — there is no automated CI job
+that flashes or tests real hardware. Everything from "operator flashes" onward is
+a manual, operator-driven step — there is no committed workflow that does it for
+OS bundles. Section 5 spells out exactly why and exactly what to type.
 
 ---
 
@@ -64,10 +66,10 @@ it for OS bundles. Section 5 spells out exactly why and exactly what to type.
 - a push to `release/**`
 - a `v*` tag (e.g. `v2026.7.0`)
 
-It builds and seals one production candidate, then calls
-[`realhw-job.yml`](../.github/workflows/realhw-job.yml) with the immutable
-artifact identity. `concurrency.cancel-in-progress: false` prevents a newer
-release push from cancelling a build or flash in progress.
+It builds and seals one production candidate as an immutable artifact for an
+operator to download, flash, and hand-test on real hardware — there is no
+automated hardware-flashing gate. `concurrency.cancel-in-progress: false` prevents
+a newer release push from cancelling a build in progress.
 
 There is no version-bump automation in this repo. The tag itself is the release
 marker; CeraLive's CalVer convention (`YYYY.MINOR.PATCH`, documented as the
@@ -77,33 +79,28 @@ string goes in the tag and in `BUNDLE_VERSION` (§4).
 A workflow rerun for an existing tag always checks out that tag's original SHA.
 If a release fix lands after the tag, rotate any affected secret first; rerunning
 the old tag does not include the merged code. Merge the fix, push an untagged
-`release/**` branch at that exact merge SHA, and require both the production
-candidate and physical real-HW jobs to pass. Verify the successful run SHA equals
-the merge SHA, then create the next unused CalVer patch tag at that same proven
-commit. A new tag must not be the first production execution of a release-path
-repair, and an older tag is never moved or rerun to pick up the fix.
+`release/**` branch at that exact merge SHA, require the production candidate
+build to pass, and hand-test the rebuilt candidate on real hardware. Verify the
+successful run SHA equals the merge SHA, then create the next unused CalVer patch
+tag at that same proven commit. A new tag must not be the first production
+execution of a release-path repair, and an older tag is never moved or rerun to
+pick up the fix.
 
 For the resource failure after `v2026.7.2`, the only eligible next patch is
 `v2026.7.3`; never rerun or move `v2026.7.0`, `v2026.7.1`, or `v2026.7.2`.
 
 ---
 
-## 3. Real-HW gate
+## 3. Manual hand-test on real hardware
 
-`release.yml` first builds and uploads one immutable production candidate, then
-calls `realhw-job.yml` on the **self-hosted runner physically wired to an RK3588
-board** (`[self-hosted, ceralive-rk3588, rock-5b-plus]`). The artifact name, artifact digest,
-raw filename, raw SHA-256, bundle, keyring, hash-pinned Maskrom loader, and
-candidate commit are all required workflow inputs. The candidate job labels the
-upload action's bare hexadecimal
-digest as `sha256:<64 lowercase hex>` before passing it to the real-HW workflow,
-whose input contract rejects any other form.
-
-The reusable job is admitted only from this repository's `release.yml`, on a
-first-attempt `push` to `release/**` or `v*`, and enters the protected
-`image-hardware` environment before a self-hosted runner is selected. Configure
-that environment for trusted required reviewers and restrict its deployment
-branches and tags to those same release refs before adding the hardware labels.
+`release.yml` builds and uploads one immutable production candidate; there is no
+automated CI job that flashes or tests real hardware. An operator downloads the
+candidate artifact and hand-tests it on a Rock 5B+ before a manual release, using
+the bench flash-and-verify tool (`v2/ci/verify-and-flash-candidate.sh`) plus the
+acceptance suite (`v2/tests/realhw-suite.sh`). The candidate artifact carries the
+raw image, its SHA-256, the production bundle, keyring, the hash-pinned Maskrom
+loader, and the candidate commit — everything the operator needs to flash and
+validate the exact bytes that could ship.
 
 Steps, in order:
 
@@ -112,7 +109,7 @@ Steps, in order:
    loader-mode eMMC capacity before any media write.
 2. **Required flash and identity proof** — copy the raw into a private snapshot,
    verify its SHA-256, and use that same snapshot for preflight and the RK3588
-   Maskrom write. The board is expected to be in Maskrom when the job starts;
+   Maskrom write. The board is expected to be in Maskrom when the tool starts;
    no pre-flash SSH session, password, or power helper is required. Before reset,
    read the exact candidate sector range into a
    private file, verify its size and SHA-256, and refuse to boot on any mismatch.
@@ -131,34 +128,20 @@ Steps, in order:
    failure. Logs distinguish “rkdeveloptool db command timed out” from “loader
    re-enumeration timed out.”
 
-   After the pinned loader is positively observed, `rkdeveloptool rci` captures
-   the 16-byte SoC-**family** marker before `wl`. The structured parser accepts LF
-   and CRLF framing, strips only the terminal transport CR, and requires exactly one
-   `Chip Info:` record of exactly 16 one- or two-digit hex octets. Truncated,
-   extra, split, nonhex, or duplicate records fail closed before media write. `rci`
-   returns the RK3588 family constant (identical on every board of this SoC), not a
-   per-device id — Maskrom exposes no per-device read — so it is only a coarse
-   family guard; the accepted downstream family marker is lowercase 32-hex. A UART
-   helper acquires the serial port before the write, then
-   interrupts U-Boot and supplies a volatile, one-boot data-only UART bootstrap
-   argument. A dedicated host-local Ed25519 key signs the request; the image
-   contains only its public verification key. Before USB access, the verifier
-   proves that the configured private key derives that exact public key. The
-   bootstrap emits a fresh device nonce and verifies the signature, nonce, baked
-   candidate commit, USB-captured SoC-family marker, one-hour maximum expiry, and a
-   persistent non-decreasing epoch floor before it installs a newly
-   generated, restricted root public key with an
-   absolute expiry into the empty `/data` authorized-key store; neither the key
-   nor a password is embedded in the immutable image. The board must reconnect
-   before the bounded retry budget expires with a media **CID** that matches the
-   one the UART bootstrap recorded (the genuine **per-device** binding), the same
-   RK3588 SoC-**family** identity read by Linux from the OTP `cpu_code` cell (nvmem
-   offset `0x02`, 2 bytes = `0x3588`; `rci` and the OTP encode the family
-   differently, so the helper reads that cell — not a raw 16-byte dump — and both
-   sides normalize to the same cpu_code identity, a coarse family guard, not
-   per-device), a root filesystem whose parent is the flashed eMMC, and a fresh
+   After the pinned loader is positively observed, a UART helper acquires the
+   serial port before the write, then interrupts U-Boot and supplies a volatile,
+   one-boot data-only UART bootstrap argument. A dedicated host-local Ed25519 key
+   signs the request; the image contains only its public verification key. Before
+   USB access, the verifier proves that the configured private key derives that
+   exact public key. The bootstrap emits a fresh device nonce and verifies the
+   signature, nonce, baked candidate commit, one-hour maximum expiry, and a
+   persistent non-decreasing epoch floor before it installs a newly generated,
+   restricted root public key with an absolute expiry into the empty `/data`
+   authorized-key store; neither the key nor a password is embedded in the
+   immutable image. The board must reconnect before the bounded retry budget
+   expires with a root filesystem whose parent is the flashed eMMC and a fresh
    run-local SSH host-key record.
-   The gate deliberately does not hash
+   The tool deliberately does not hash
    post-boot media because U-Boot state and the mounted rootfs are mutable. Its
    later `rkdeveloptool` children retain their cancellable/reaped behavior. The
    verifier resets inherited
@@ -166,7 +149,7 @@ Steps, in order:
    asynchronous CI-shell launches where SIGINT would otherwise remain ignored.
    Artifact filenames in the identity record are restricted to a safe
    line-oriented character set.
-3. **The gate itself** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
+3. **The acceptance suite** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
    - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,
      quirk checks, and required live parity against the manifest. Missing or
@@ -225,7 +208,7 @@ BuildKit. It fails closed unless all of these are true:
 - the checkout and Docker root each have at least 24 GiB free.
 
 These are admission floors for the production path, not a substitute for the
-full build or hardware gate. If admission fails, restore native-daemon access or
+full build or the operator's hand-test on real hardware. If admission fails, restore native-daemon access or
 free the reported resource and start a new candidate from the fixed commit. Do
 not increase a timeout, bypass the check, or rerun/move an existing immutable
 tag.
@@ -370,8 +353,8 @@ To promote a BSP version:
    `v2/manifests/bsp-baseline.json` to the reviewed version and content hash in the
    same change.
 4. Run `v2/tests/bsp-package-resolution.test.sh`, `v2/run-tests`, an authenticated
-   live BSP fetch, and the release hardware gate before shipping a new immutable
-   tag.
+   live BSP fetch, and a hand-test of the candidate on real hardware before shipping
+   a new immutable tag.
 
 If a tagged candidate fails, merge the fix and follow the §2 repair procedure:
 prove the exact merge SHA with an untagged `release/**` production candidate and
@@ -482,11 +465,12 @@ merge_sha=<full-merge-sha>
 board=rock-5b-plus
 channel=stable
 approved_root=<path-to-operator-approved-production-root-ca.pem>
-expected_media_cid=<approved-32-lowercase-hex-media-cid>
+# The raw-image SHA-256 you recorded while hand-testing these exact bytes on a
+# real RK3588 (it must equal the candidate's own raw.sha256). Publishing is gated on it.
+hand_tested_raw_sha256=<64-lowercase-hex-you-flashed-and-tested>
 artifact_name="rock-5b-plus-${merge_sha}"
-realhw_artifact_name="realhw-${board}-${run_id}"
 
-# Bind publication to the successful workflow at the exact proven merge SHA.
+# Bind publication to the successful candidate-build workflow at the exact proven merge SHA.
 test "$(gh run view "${run_id}" --repo "${repo}" --json headSha --jq .headSha)" = "${merge_sha}"
 test "$(gh run view "${run_id}" --repo "${repo}" --json conclusion --jq .conclusion)" = success
 run_event="$(gh run view "${run_id}" --repo "${repo}" --json event --jq .event)"
@@ -498,7 +482,7 @@ workflow_id="$(
 workflow_path="$(gh api "repos/${repo}/actions/workflows/${workflow_id}" --jq .path)"
 test "${run_event}" = push
 [[ "${run_branch}" == release/* ]]
-test "${run_workflow}" = 'Release candidate real-HW gate'
+test "${run_workflow}" = 'Release candidate build'
 test "${workflow_path}" = '.github/workflows/release.yml'
 master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .status)"
 [[ "${master_status}" == identical || "${master_status}" == ahead ]]
@@ -518,48 +502,20 @@ artifact_sha="$(gh api "repos/${repo}/actions/artifacts/${artifact_id}" --jq .wo
 [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
 test "${artifact_sha}" = "${merge_sha}"
 
-# Select the physical acceptance evidence emitted by this same workflow run.
-realhw_artifact_id="$(jq -er --arg name "${realhw_artifact_name}" '
-  [.artifacts[] | select(.name == $name and (.expired | not))]
-  | if length == 1 then .[0].id else error("expected exactly one live real-HW evidence artifact") end
-' "${tmp}/artifacts.json")"
-realhw_artifact_digest="$(
-  gh api "repos/${repo}/actions/artifacts/${realhw_artifact_id}" --jq .digest
-)"
-realhw_artifact_sha="$(
-  gh api "repos/${repo}/actions/artifacts/${realhw_artifact_id}" --jq .workflow_run.head_sha
-)"
-[[ "${realhw_artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-test "${realhw_artifact_sha}" = "${merge_sha}"
-
-# Verify both exact GitHub artifact archives before inspecting the tested bytes.
+# Verify the exact GitHub candidate archive before inspecting the tested bytes.
 gh api -H 'Accept: application/vnd.github+json' \
   "repos/${repo}/actions/artifacts/${artifact_id}/zip" > "${tmp}/candidate.zip"
 printf '%s  %s\n' "${artifact_digest#sha256:}" "${tmp}/candidate.zip" | sha256sum -c -
 mkdir "${tmp}/candidate"
 unzip -q "${tmp}/candidate.zip" -d "${tmp}/candidate"
-gh api -H 'Accept: application/vnd.github+json' \
-  "repos/${repo}/actions/artifacts/${realhw_artifact_id}/zip" > "${tmp}/realhw.zip"
-printf '%s  %s\n' "${realhw_artifact_digest#sha256:}" "${tmp}/realhw.zip" | sha256sum -c -
-mkdir "${tmp}/realhw"
-unzip -q "${tmp}/realhw.zip" -d "${tmp}/realhw"
 
 candidate="${tmp}/candidate"
-identity="${tmp}/realhw/candidate-identity.txt"
 expected_raw_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/raw.sha256")"
 [[ "${expected_raw_sha}" =~ ^[0-9a-f]{64}$ ]]
-[[ "${expected_media_cid}" =~ ^[0-9a-f]{32}$ ]]
-grep -Fx "candidate_commit=${merge_sha}" "${identity}"
-grep -Fx "raw_sha256=${expected_raw_sha}" "${identity}"
-grep -Fx 'bundle_file=good.raucb' "${identity}"
-grep -Fx "artifact_digest=${artifact_digest}" "${identity}"
-grep -Fx "media_cid=${expected_media_cid}" "${identity}"
-grep -Fx 'pre_boot_media_identity=verified' "${identity}"
-grep -Fx 'post_boot_reconnect=verified' "${identity}"
-grep -Fx 'flash_transport=maskrom-rkdeveloptool' "${identity}"
-grep -F 'RESULT: 4 PASS / 0 FAIL / 0 SKIP' "${tmp}/realhw/realhw-suite.log"
-grep -Fx '{"mode":"live","board":"rock-5b-plus","pass":4,"fail":0,"skip":0,"exit":0}' \
-  "${tmp}/realhw/realhw/result.json"
+[[ "${hand_tested_raw_sha256}" =~ ^[0-9a-f]{64}$ ]]
+# Publish ONLY the exact raw image you hand-tested on real hardware: the SHA-256
+# you recorded while flashing/validating must equal the candidate's own raw.sha256.
+test "${hand_tested_raw_sha256}" = "${expected_raw_sha}"
 
 release_name="$(<"${candidate}/release-bundle-name.txt")"
 [[ "${release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
@@ -661,10 +617,10 @@ feeds into. hawkBit's Management API also reports per-target action status
 (`RUNNING` / `FINISHED` / `ERROR`) for anyone tracking a fleet-wide rollout,
 per the integration contract in `v2/fleet/integration-contract.md`.
 
-The realhw gate (§3) already proves the rollback and healthcheck contract
-against real silicon **before** the bundle ships — post-install verification on
-a fielded device is confirming that the same proven contract held for this
-specific rollout, not re-deriving it from scratch.
+The operator's §3 hand-test on real hardware already proves the rollback and
+healthcheck contract against real silicon **before** the bundle ships —
+post-install verification on a fielded device is confirming that the same proven
+contract held for this specific rollout, not re-deriving it from scratch.
 
 ---
 
@@ -691,9 +647,10 @@ to the `apt.ceralive.tv` package feed. Don't conflate the two.
 `v2-ci.yml`'s build-matrix job runs `DRY_RUN=1` specifically so it never needs
 these values (its own header comment says so: "No secrets are referenced"). The
 protected `release.yml` candidate job injects them from GitHub Actions secrets
-for release pushes/tags, while `realhw-job.yml` uses repo **variables** for the
-board address/port, stable UART path, approved Maskrom USB identity hash, and absolute
-path to the mode-`0600` host-local UART signing key. The hardware verifier rejects
+for release pushes/tags. The operator's bench flash-and-verify tool
+(`verify-and-flash-candidate.sh`) takes the board address/port, stable UART path,
+approved Maskrom USB identity hash, and absolute path to the mode-`0600`
+host-local UART signing key as its own inputs. The verifier rejects
 that key before USB access unless its derived public key equals the verifier baked
 into the candidate. SSH is fixed to root. Loader
 bytes travel inside the candidate artifact, and the board-login key is generated
@@ -803,8 +760,8 @@ RAUC's A/B slot model provides bounded automatic rollback for a bad update when
 the factory image passed the A/B preflash gate and the board-specific hardware
 cycle has passed. The software contract is exercised by
 [`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh) (run live on real
-hardware as part of the §3 realhw gate, and in a MOCK mode that drives the same
-shipped scripts without hardware):
+hardware as part of the §3 operator hand-test, and in a MOCK mode that drives the
+same shipped scripts without hardware):
 
 1. `rauc install` marks the inactive target bad, writes the new bundle there,
    and makes it primary only after the write succeeds. If installation is
@@ -873,10 +830,10 @@ This is the harness cited in this repo's own `AGENTS.md` `WHERE TO LOOK` table
 as the "forced-primary-failure rollback proof" — treat a passing run of it as
 the evidence that the x86 boot-state engine itself has not regressed, the same
 way `rauc-rollback.sh`'s MOCK mode is the evidence for the RK3588 engine. Both
-are proof of the **engine**, not a substitute for the real-hardware run in §3
-(the RK3588 realhw gate is the only accepted proof for that board — "no
-qemu/mock result is accepted as the RK3588 rollback proof" per the harness's
-own MOCK-mode warning banner).
+are proof of the **engine**, not a substitute for the operator's real-hardware
+hand-test in §3 (the operator's RK3588 hand-test is the only accepted proof for
+that board — "no qemu/mock result is accepted as the RK3588 rollback proof" per
+the harness's own MOCK-mode warning banner).
 
 ### Pausing or superseding a published bundle on R2
 

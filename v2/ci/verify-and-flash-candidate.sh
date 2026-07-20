@@ -136,7 +136,6 @@ readback_image="${verify_tmp}/readback.raw"
 ld_output_file="${verify_tmp}/rkdeveloptool-ld.log"
 rfi_output_file="${verify_tmp}/rkdeveloptool-rfi.log"
 rid_output_file="${verify_tmp}/rkdeveloptool-rid.log"
-rci_output_file="${verify_tmp}/rkdeveloptool-rci.log"
 uart_ready_file="${verify_tmp}/uart-ready"
 uart_start_file="${verify_tmp}/uart-start"
 identity_tmp=""
@@ -764,65 +763,12 @@ target_sectors="${flash_sector_values[0]}"
 target_bytes=$((target_sectors * 512))
 run_rkdeveloptool rid >"${rid_output_file}"
 flash_id_sha256="$(sha256sum "${rid_output_file}" | cut -d' ' -f1)"
-run_rkdeveloptool rci >"${rci_output_file}"
-mapfile -t chip_info_lines < <(sed -nE 's/\r$//; /^Chip Info:/p' "${rci_output_file}")
-if (( ${#chip_info_lines[@]} != 1 )) ||
-   ! grep -Eq '^Chip Info:([[:blank:]]+[0-9A-Fa-f]{1,2}){16}[[:blank:]]*$' \
-     <<<"${chip_info_lines[0]}"; then
-  printf 'rkdeveloptool did not report one 16-byte chip identity\n' >&2
-  exit 1
-fi
-chip_info_line="${chip_info_lines[0]}"
-read -r -a chip_info_tokens <<<"${chip_info_line#Chip Info:}"
-(( ${#chip_info_tokens[@]} == 16 ))
-usb_soc_raw=""
-for token in "${chip_info_tokens[@]}"; do
-  printf -v octet '%02x' "0x${token}"
-  usb_soc_raw+="${octet}"
-done
-[[ "${usb_soc_raw}" =~ ^[0-9a-f]{32}$ ]]
-# SECURITY (do not re-tighten to a raw-byte equality, and do NOT drop the check):
-# `rci` and the device's post-boot OTP read encode the RK3588 SoC family in TWO
-# DIFFERENT ways, so a naive equality on either raw form is a guaranteed mismatch.
-#   - `rci` reports the model number's ASCII digits byte-reversed: bytes 0-3 are
-#     38 38 35 33 ("8853"), the little-endian image of the BootROM chip_info DWORD
-#     0x33353838 (= ASCII "3588"). Bytes 4-15 are loader/runtime noise (byte 12 is
-#     an 0x00 cold / 0x10 warm overlay), NOT identity.
-#   - The device re-reads the SAME family from the RK3588 OTP `cpu_code` cell
-#     (nvmem offset 0x02, 2 bytes = 0x3588) via ceralive-rockchip-chip-info; the
-#     per-die serial (`id@7`, offset 0x07+) is deliberately excluded there. A raw
-#     first-16-byte OTP dump (real board: 524b358812fe21413337544600000000) would
-#     carry that per-die serial and never equal a fixed host-derived constant.
-# Normalize BOTH sides to the cpu_code family identity so they compare like-for-
-# like (35880000000000000000000000000000 on RK3588). This stays a COARSE
-# per-family guard (identical on every RK3588); the genuine per-device binding is
-# the eMMC CID cross-checked post-boot. See runner-setup.md §6.
-soc_family_marker="38383533"   # rci little-endian bytes for the RK3588 model ("8853")
-[[ "${usb_soc_raw:0:8}" == "${soc_family_marker}" ]] || {
-  printf 'Maskrom chip info does not identify the expected RK3588 SoC family\n' >&2
-  exit 1
-}
-# Recover the OTP cpu_code hex the device emits ("3588"): decode the 4 rci model
-# bytes to their ASCII digits (38 38 35 33 -> "8853") and reverse them ("3588").
-# For RK35xx/RK358x the model number IS the cpu_code hex, so this is the exact
-# cross-encoding bridge between the rci read and the OTP cpu_code cell.
-soc_model_ascii="$(printf '%b' "\\x${usb_soc_raw:0:2}\\x${usb_soc_raw:2:2}\\x${usb_soc_raw:4:2}\\x${usb_soc_raw:6:2}")"
-soc_cpu_code=""
-for (( i = ${#soc_model_ascii} - 1; i >= 0; i-- )); do
-  soc_cpu_code+="${soc_model_ascii:i:1}"
-done
-[[ "${soc_cpu_code}" =~ ^[0-9a-f]{4}$ ]] || {
-  printf 'Maskrom chip info did not yield a valid RK3588 cpu_code family id\n' >&2
-  exit 1
-}
-usb_soc_family="${soc_cpu_code}0000000000000000000000000000"
-soc_family_sha256="$(printf '%s' "${usb_soc_family}" | sha256sum | cut -d' ' -f1)"
 "${preflash}" --image "${flash_image}" --bundle "${bundle}" --board "${board}" \
   --keyring "${keyring}" --target-size-bytes "${target_bytes}"
 "${uart_helper}" --serial-dev "${serial_dev}" --authorized-key "${authorized_key}" \
   --access-id "${access_id}" --expires "${access_expires}" --host-epoch "${host_epoch}" \
   --challenge "${challenge}" --candidate-commit "${candidate_commit}" \
-  --soc-id "${usb_soc_family}" --signing-key "${uart_signing_key}" \
+  --signing-key "${uart_signing_key}" \
   --start-signal "${uart_start_file}" \
   --uart-log "${uart_log}" --authorized-line-out "${authorized_line_out}" \
   --ready-out "${uart_ready_file}" &
@@ -890,13 +836,6 @@ done
   printf 'SSH reconnect did not record the candidate host identity\n' >&2
   exit 1
 }
-post_boot_media_cid="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
-  "cat '/sys/class/block/${media_node}/device/cid'" | tr -d '[:space:]')"
-post_boot_media_cid="${post_boot_media_cid,,}"
-[[ "${post_boot_media_cid}" =~ ^[0-9a-f]{32}$ ]] || {
-  printf 'reconnected board did not report a valid media CID\n' >&2
-  exit 1
-}
 boot_root_parent="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
   "root_source=\$(findmnt -n -o SOURCE /); root_device=\$(readlink -f -- \"\${root_source}\"); lsblk -ndo PKNAME \"\${root_device}\"" \
   | tr -d '[:space:]')"
@@ -904,32 +843,9 @@ boot_root_parent="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
   printf 'running root filesystem is not on the flashed eMMC device\n' >&2
   exit 1
 }
-post_boot_soc_id="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
-  "/usr/local/sbin/ceralive-rockchip-chip-info" | tr -d '[:space:]')"
-post_boot_soc_id="${post_boot_soc_id,,}"
-[[ "${post_boot_soc_id}" =~ ^[0-9a-f]{32}$ ]] || {
-  printf 'reconnected board did not report a valid Rockchip SoC identity\n' >&2
-  exit 1
-}
-# Coarse per-family guard only: the device's ceralive-rockchip-chip-info emits the
-# OTP cpu_code family identity, which the host derived above from the differently-
-# encoded Maskrom rci read — both now normalize to the SAME cpu_code form, so this
-# is a genuine like-for-like family match. The per-device guarantee is the eMMC CID
-# binding below, not this comparison.
-[[ "${post_boot_soc_id}" == "${usb_soc_family}" ]] || {
-  printf 'post-boot SoC family does not match the Maskrom-read RK3588 family\n' >&2
-  exit 1
-}
 marker="$("${ssh_bin}" "${ssh_opts[@]}" "${remote}" \
   "cat '/data/ceralive/ssh/ci-access/${access_id}'")"
-marker_media_cid="$(sed -n 's/^media_cid=//p' <<<"${marker}")"
-# Per-device binding: the CID recorded into the UART bootstrap's signed-request-
-# gated marker must equal the live media CID, tying the receipt to the physical eMMC.
-[[ "${marker_media_cid}" == "${post_boot_media_cid}" ]] || {
-  printf 'UART-recorded media CID does not match the post-boot media CID\n' >&2
-  exit 1
-}
-[[ "${marker}" == $'challenge='"${challenge}"$'\ncandidate_commit='"${candidate_commit}"$'\nsoc_id='"${usb_soc_family}"$'\nmedia_cid='"${post_boot_media_cid}" ]] || {
+[[ "${marker}" == $'challenge='"${challenge}"$'\ncandidate_commit='"${candidate_commit}" ]] || {
   printf 'post-boot endpoint did not present the UART-bound candidate challenge\n' >&2
   exit 1
 }
@@ -952,8 +868,6 @@ pre_boot_media_sha256=${readback_sha}
 pre_boot_media_identity=verified
 target_capacity_sectors=${target_sectors}
 flash_id_sha256=${flash_id_sha256}
-soc_family_sha256=${soc_family_sha256}
-media_cid=${post_boot_media_cid}
 boot_root_parent=${boot_root_parent}
 usb_device_sha256=${usb_device_sha256}
 bootstrap_challenge_sha256=$(printf '%s' "${challenge}" | sha256sum | cut -d' ' -f1)

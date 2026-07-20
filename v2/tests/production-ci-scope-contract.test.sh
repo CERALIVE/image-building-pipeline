@@ -25,14 +25,5 @@ if rg -n 'REPO_ROOT/\.\./CeraUI|V2_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./\.\./\
   exit 1
 fi
 [[ -s "${V2}/ci/size-exceptions.txt" ]]
-for field in candidate_artifact_name candidate_artifact_digest candidate_raw_filename \
-  candidate_raw_sha256 candidate_bundle_filename candidate_keyring_filename \
-  candidate_loader_filename candidate_loader_sha256 candidate_commit; do
-  grep -q "${field}" "${REPO}/.github/workflows/realhw-job.yml"
-  grep -q "${field}" "${REPO}/.github/workflows/release.yml"
-done
-reject_pattern 'CERALIVE_RK3588_FLASH_IMAGE' "${REPO}/.github/workflows/realhw-job.yml"
-reject_pattern 'CERALIVE_RK3588_POWER_HELPER' "${REPO}/.github/workflows/realhw-job.yml"
-reject_pattern 'CERALIVE_RK3588_LOADER' "${REPO}/.github/workflows/realhw-job.yml"
 
 printf 'production CI/scope contract: PASS\n'

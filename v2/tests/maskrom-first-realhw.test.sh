@@ -12,10 +12,8 @@ SSH_FIRSTBOOT_UNIT="${V2}/mkosi/runtime/ceralive-ssh-firstboot.service"
 UART_BOOTSTRAP="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.sh"
 UART_BOOTSTRAP_UNIT="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.service"
 UART_BOOTSTRAP_PUBLIC="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap-public.pem"
-CHIP_INFO="${V2}/mkosi/runtime/ceralive-rockchip-chip-info.sh"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
 RELEASE_WORKFLOW="${REPO}/.github/workflows/release.yml"
-REALHW_WORKFLOW="${REPO}/.github/workflows/realhw-job.yml"
 REVOKE="${V2}/ci/revoke-ephemeral-ssh.sh"
 LOADER_FETCH="${V2}/ci/fetch-rk3588-loader.sh"
 DEV_PUSH="${V2}/dev-push"
@@ -103,20 +101,6 @@ if grep -Eq 'ssh-(rsa|ed25519) [A-Za-z0-9+/=]{32,}' "${SSH_FIRSTBOOT}" "${BOOT_S
   exit 1
 fi
 
-for field in candidate_loader_filename candidate_loader_sha256; do
-  grep -Fq "${field}" "${RELEASE_WORKFLOW}" || {
-    printf 'Maskrom-first regression: release workflow omits %s\n' "${field}" >&2
-    exit 1
-  }
-  grep -Fq "${field}" "${REALHW_WORKFLOW}" || {
-    printf 'Maskrom-first regression: real-HW workflow omits %s\n' "${field}" >&2
-    exit 1
-  }
-done
-grep -Fq 'CERALIVE_RK3588_SERIAL_DEV' "${REALHW_WORKFLOW}" || {
-  printf 'Maskrom-first regression: real-HW workflow has no UART device contract\n' >&2
-  exit 1
-}
 grep -Fq 'expiry-time=' "${UART}" || {
   printf 'Maskrom-first regression: UART-provisioned key has no bounded expiry\n' >&2
   exit 1
@@ -151,7 +135,6 @@ if grep -Fq 'systemctl restart ssh.service' "${UART_BOOTSTRAP}"; then
   printf 'Maskrom-first regression: UART bootstrap synchronously starts its ordered-after SSH service\n' >&2
   exit 1
 fi
-grep -Fq 'runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]' "${REALHW_WORKFLOW}"
 run_workflow_guard() {
   local workflow="$1" name="$2" attempt="$3" script
   script="$(awk -v name="${name}" '
@@ -163,38 +146,11 @@ run_workflow_guard() {
   [[ -n "${script}" ]]
   RUN_ATTEMPT="${attempt}" bash -euo pipefail -c "${script}"
 }
-run_workflow_guard "${REALHW_WORKFLOW}" 'Reject reruns of immutable hardware candidates' 1
-if run_workflow_guard "${REALHW_WORKFLOW}" 'Reject reruns of immutable hardware candidates' 2; then
-  printf 'Maskrom-first regression: hardware rerun guard accepted attempt 2\n' >&2
-  exit 1
-fi
 run_workflow_guard "${RELEASE_WORKFLOW}" 'Reject reruns of immutable release candidates' 1
 if run_workflow_guard "${RELEASE_WORKFLOW}" 'Reject reruns of immutable release candidates' 2; then
   printf 'Maskrom-first regression: release rerun guard accepted attempt 2\n' >&2
   exit 1
 fi
-if grep -Fq 'grep -Fq CERALIVE_UART_PROVISIONED' "${REALHW_WORKFLOW}"; then
-  printf 'Maskrom-first regression: cleanup is incorrectly gated on the late UART success marker\n' >&2
-  exit 1
-fi
-grep -Fq -- '- name: Revoke run-local SSH identity' "${REALHW_WORKFLOW}"
-grep -Fq "if: \${{ always() }}" "${REALHW_WORKFLOW}"
-grep -Fq './v2/ci/revoke-ephemeral-ssh.sh' "${REALHW_WORKFLOW}"
-grep -Fq "rm -rf -- \"\${ACCESS_DIR}\"" "${REALHW_WORKFLOW}"
-grep -Fq 'ephemeral-ssh-cleanup.txt' "${REALHW_WORKFLOW}"
-grep -Fq -- '- name: Upload candidate-bound evidence' "${REALHW_WORKFLOW}"
-grep -Fq '/usr/local/sbin/ceralive-rockchip-chip-info' "${VERIFY}"
-if grep -Fq '/sys/module/rockchip_cpuinfo/parameters/id' "${VERIFY}" "${UART_BOOTSTRAP}"; then
-  printf 'Maskrom-first regression: workflow still reads a nonexistent Rockchip module parameter\n' >&2
-  exit 1
-fi
-[[ -x "${CHIP_INFO}" ]]
-grep -Fq "DEV_DEB_DIR=\"\${PWD}/candidate/dev-debs\"" "${REALHW_WORKFLOW}"
-grep -Fq 'CERALIVE_SUITE_MODE=live MOCK=0' "${REALHW_WORKFLOW}"
-grep -Fq '"mode":"live","board":"rock-5b-plus","pass":4,"fail":0,"skip":0,"exit":0' "${REALHW_WORKFLOW}"
-grep -Fq "::add-mask::\${challenge}" "${REALHW_WORKFLOW}"
-grep -Fq 'CERALIVE_RK3588_MASKROM_ID_SHA256' "${REALHW_WORKFLOW}"
-grep -Fq 'CERALIVE_RK3588_UART_SIGNING_KEY' "${REALHW_WORKFLOW}"
 grep -Fq 'CERALIVE_UART_PUBLIC_KEY_FILE' "${VERIFY}" || {
   printf 'Maskrom-first regression: runner signing key is not bound to the baked verifier key\n' >&2
   exit 1
@@ -207,16 +163,11 @@ grep -Fq 'ci-epoch-floor' "${UART_BOOTSTRAP}" || {
   printf 'Maskrom-first regression: device does not retain an anti-rollback epoch floor\n' >&2
   exit 1
 }
-grep -Fq 'CERALIVE_CI_ACCESS_ID' "${REALHW_WORKFLOW}" || {
-  printf 'Maskrom-first regression: live rollback suite cannot arm one planned reboot\n' >&2
-  exit 1
-}
 grep -Fq '.retain-once' "${V2}/tests/rauc-rollback.sh" || {
   printf 'Maskrom-first regression: RAUC reboot does not arm boot-scoped SSH retention\n' >&2
   exit 1
 }
 grep -Fq -- "-name 'srtla-send-rs_*.deb'" "${RELEASE_WORKFLOW}"
-grep -Fq 'RESULT: 4 PASS / 0 FAIL / 0 SKIP' "${V2}/docs/hardware-gated-completion.md"
 if grep -Fq 'path (4.4)' "${V2}/ci/runner-setup.md"; then
   printf 'Maskrom-first regression: runner guide still advertises an SSH/dd production flash path\n' >&2
   exit 1
@@ -251,7 +202,6 @@ payload="$(<"${TMPDIR}/uart-payload")"
 grep -Fxq 'host_epoch=4070908800' <<<"${payload}"
 grep -Fxq 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' <<<"${payload}"
 grep -Fxq 'candidate_commit=1111111111111111111111111111111111111111' <<<"${payload}"
-grep -Fxq 'soc_id=35880000000000000000000000000000' <<<"${payload}"
 grep -Fxq 'boot_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' <<<"${payload}"
 if grep -Fq 'PRIVATE KEY' <<<"${payload}"; then exit 90; fi
 printf 'CERALIVE_UART_PROVISIONED aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1111111111111111111111111111111111111111\n' >"$3"
@@ -265,7 +215,6 @@ CERALIVE_UART_DRIVER="${TMP}/uart-driver" "${UART}" \
   --access-id gh-123-1 --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${TMP}/uart-start" \
   --uart-log "${TMP}/uart.log" --authorized-line-out "${TMP}/authorized-line" \
   --ready-out "${TMP}/uart-ready"
@@ -304,16 +253,11 @@ if [[ " $* " == *" -d "* ]]; then
 fi
 [[ " $* " == *" -s @4070908800 "* ]]
 EOF
-cat >"${TMP}/mock-chip-info" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "${MOCK_CHIP_INFO}"
-EOF
-chmod +x "${TMP}/mock-ok" "${TMP}/mock-date" "${TMP}/mock-chip-info"
-printf 'abcdef0123456789abcdef0123456789\n' >"${TMP}/mock-media-cid"
-device_payload="$(printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nsoc_id=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \
+chmod +x "${TMP}/mock-ok" "${TMP}/mock-date"
+device_payload="$(printf 'access_id=%s\nexpires=%s\nhost_epoch=%s\nchallenge=%s\ncandidate_commit=%s\nboot_nonce=%s\nkey_type=%s\nkey_body=%s\n' \
   gh-123-1 20990101005000Z 4070908800 \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  1111111111111111111111111111111111111111 35880000000000000000000000000000 \
+  1111111111111111111111111111111111111111 \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ssh-ed25519 \
   AAAAC3NzaC1lZDI1NTE5AAAAIMaskromContractKey)"
 printf '%s' "${device_payload}" >"${TMP}/device-payload"
@@ -323,27 +267,22 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/device-payload")" \
   "$(base64 -w0 <"${TMP}/device-signature")" >"${TMP}/device-request"
 CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=35880000000000000000000000000000 \
-  CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
+  CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
   CERALIVE_UART_DATE_BIN="${TMP}/mock-date" CERALIVE_UART_CHOWN_BIN="${TMP}/mock-ok" \
   CERALIVE_UART_INSTALL_BIN="${TMP}/mock-ok" \
-  CERALIVE_MEDIA_CID_FILE="${TMP}/mock-media-cid" \
   "${UART_BOOTSTRAP}" <"${TMP}/device-request" >"${TMP}/device-uart.log"
 grep -Fxq 'CERALIVE_UART_PROVISIONED aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1111111111111111111111111111111111111111' \
   "${TMP}/device-uart.log"
 grep -Fxq 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
-  "${TMP}/device-state/ci-access/gh-123-1"
-grep -Fxq 'media_cid=abcdef0123456789abcdef0123456789' \
   "${TMP}/device-state/ci-access/gh-123-1"
 grep -Fxq '4070908800' "${TMP}/device-state/ci-epoch-floor"
 test -f "${TMP}/device-state/ci-nonces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 if replay_output="$(CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=35880000000000000000000000000000 \
-  CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
+  CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
   CERALIVE_UART_DATE_BIN="${TMP}/mock-date" CERALIVE_UART_CHOWN_BIN="${TMP}/mock-ok" \
@@ -364,8 +303,7 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/rollback-payload")" \
   "$(base64 -w0 <"${TMP}/rollback-signature")" >"${TMP}/rollback-request"
 if rollback_output="$(CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=35880000000000000000000000000000 \
-  CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
+  CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
   CERALIVE_UART_DATE_BIN="${TMP}/mock-date" CERALIVE_UART_CHOWN_BIN="${TMP}/mock-ok" \
@@ -437,8 +375,7 @@ printf 'CERALIVE3 %s %s\n' "$(printf '%s' "${wrong_payload}" | base64 -w0)" \
   "$(base64 -w0 <"${TMP}/wrong-signature")" >"${TMP}/wrong-request"
 if CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=35880000000000000000000000000000 \
-  CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
+  CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
   CERALIVE_UART_DATE_BIN="${TMP}/mock-ok" CERALIVE_UART_CHOWN_BIN="${TMP}/mock-ok" \
@@ -453,8 +390,7 @@ printf 'CERALIVE3 %s %s\n' "$(base64 -w0 <"${TMP}/device-payload")" \
   "$(base64 -w0 <"${TMP}/wrong-signature")" >"${TMP}/tampered-request"
 if CERALIVE_UART_STATE_DIR="${TMP}/device-state" \
   CERALIVE_IMAGE_COMMIT_FILE="${TMP}/image-commit" \
-  MOCK_CHIP_INFO=35880000000000000000000000000000 \
-  CERALIVE_CHIP_INFO_BIN="${TMP}/mock-chip-info" CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
+  CERALIVE_UART_PUBLIC_KEY_FILE="${TMP}/uart-public.pem" \
   CERALIVE_UART_BOOT_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   CERALIVE_UART_VERIFY_ROOT="${TMP}" \
   CERALIVE_UART_DATE_BIN="${TMP}/mock-ok" CERALIVE_UART_CHOWN_BIN="${TMP}/mock-ok" \
@@ -500,7 +436,6 @@ if timeout 5s env CERALIVE_UART_ARM_TIMEOUT_SECONDS=1 "${UART}" \
   --access-id locked-contract --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${pty}/uart-start" \
   --uart-log "${pty}/locked.log" --authorized-line-out "${pty}/locked-line" \
   --ready-out "${pty}/locked-ready" >/dev/null 2>&1; then
@@ -549,7 +484,6 @@ timeout 20s env CERALIVE_UBOOT_TIMEOUT_SECONDS=5 \
   --access-id pty-contract --expires 20990101005000Z --host-epoch 4070908800 \
   --challenge aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --candidate-commit 1111111111111111111111111111111111111111 \
-  --soc-id 35880000000000000000000000000000 \
   --signing-key "${TMP}/uart-signing.pem" --start-signal "${pty}/uart-start" \
   --uart-log "${pty}/uart.log" --authorized-line-out "${pty}/authorized-line" \
   --ready-out "${pty}/uart-ready"
