@@ -34,6 +34,15 @@ configure_minimal_apt() {
   log_info "writing minimal deb822 Debian apt sources (suite=${APT_RELEASE})"
   mkdir -p /etc/apt/sources.list.d
 
+  # Remove any build-time Debian sources that leak into the rootfs — mkosi's own
+  # release-named bootstrap source (${APT_RELEASE}.sources) and any Armbian pool —
+  # so the device ships EXACTLY ONE Debian source (debian.sources, written below).
+  # A second file configuring the same targets makes apt-get update warn
+  # "Target Packages … is configured multiple times".
+  rm -f "/etc/apt/sources.list.d/${APT_RELEASE}.sources" \
+        /etc/apt/sources.list.d/armbian.sources \
+        /etc/apt/sources.list
+
   cat >/etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
 URIs: http://deb.debian.org/debian
@@ -76,7 +85,9 @@ install_mtls_cert() {
   log_info "CI mode: installing apt.ceralive.tv mTLS client certificate"
   printf '%s' "${crt}" | base64 -d >/etc/apt/certs/client.crt
   printf '%s' "${key}" | base64 -d >/etc/apt/certs/client.key
-  chmod 600 /etc/apt/certs/client.key
+  # apt's https fetcher runs as sandbox user `_apt`; a root:root 0600 key is unreadable there ("Could not load client certificate"). Hand the key to `_apt`, owner-read only.
+  chown _apt:root /etc/apt/certs/client.key
+  chmod 400 /etc/apt/certs/client.key
   chmod 644 /etc/apt/certs/client.crt
   cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
 Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";

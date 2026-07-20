@@ -696,6 +696,52 @@ network.ts`), so swapping binaries is a large unrelated risk — adding the one 
 binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
 installed …" + "… reaches the resolved runtime package set …".
 
+**Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
+arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
+
+The device apt config (`mkosi.postinst.chroot::setup_ceralive_repository` +
+`configure_minimal_apt`, twinned in `customize/apt-ceralive-repo.sh`) had three
+device-runtime bugs, confirmed live on real Rock 5B+ hardware:
+
+- **mTLS client KEY unreadable by apt's sandbox.** The key was baked
+  `root:root` mode `0600`, but apt runs its https fetcher as the sandbox user
+  `_apt` (`APT::Sandbox::User "_apt"`, uid 42/group nogroup) — which cannot read a
+  root-owned `0600` file. `apt-get update` failed `Err … apt.ceralive.tv … Could
+  not load client certificate (/etc/apt/certs/client.crt, SslCert option) or key
+  (…client.key, SslKey option): Error while reading file` (the cert/key PAIR was
+  valid + matched — a pure permission bug, not missing/corrupt/wrong-path). Fix:
+  `chown _apt:root /etc/apt/certs/client.key` + `chmod 400` (owner-read only); the
+  public `client.crt` stays `644 root:root`. Do NOT weaken `APT::Sandbox::User` to
+  `root` — that disables apt sandboxing fleet-wide.
+- **Duplicate Debian source.** mkosi's own release-named bootstrap source
+  (`/etc/apt/sources.list.d/${RELEASE}.sources` = `bookworm.sources`, with
+  `deb-src` + `bookworm-debug`) leaks into the base rootfs and is inherited down
+  base→platform→runtime→app, duplicating the canonical `debian.sources` and making
+  apt warn `Target Packages … is configured multiple times`. `configure_minimal_apt`
+  now `rm -f`s `${RELEASE}.sources` (+ `armbian.sources` + legacy `sources.list`)
+  before writing `debian.sources`, so the device ships EXACTLY ONE Debian source.
+  Runtime-layer removal suffices: the app layer inherits the runtime tree
+  (`BaseTrees=%O/runtime`) and installs first-party `.deb`s with local `dpkg`
+  WITHOUT re-bootstrapping apt repo metadata (`app/mkosi.conf`), so it never
+  regenerates the stray. The apt.ceralive.tv origin-990 pin is untouched.
+- **Non-arch-qualified apt.ceralive.tv URI (404 on Release).** `setup_ceralive_repository`
+  wrote `ceralive.sources` `URIs: …/dists/${CHANNEL}/` — but apt-worker serves the
+  first-party repo at `…/dists/${CHANNEL}/binary-${arch}/` (flat `Suites: ./`).
+  The bare URI made apt fetch `dists/stable/./Release` → `404 Not Found` → `E: The
+  repository … does not have a Release file`, so no origin-990 index ever loaded
+  (masked until the mTLS fix let the request reach the origin). The URI is now
+  `…/dists/${CHANNEL}/binary-$(dpkg --print-architecture)/`, matching the
+  known-working `fetch-debs.sh::fetch_first_party` and the customize module twin
+  (which already carried the arch axis — a postinst-vs-module drift, same class as
+  the origin-pin drift the `apt-preferences-baked` guard catches).
+
+Guard: `v2/tests/apt-mtls-and-dedupe.test.sh` (Part A static: BOTH tracks
+`chown _apt` the key + `rm` the `${RELEASE}.sources` dupe + arch-qualified
+`binary-<arch>/` URI + no lingering root-owned `0600` key; Part B rootless-namespace
+runtime: the real `configure_minimal_apt` leaves exactly one Debian source), wired
+into `v2/run-tests` and `manifest.bats §22` "the build path makes client.key
+_apt-readable and dedupes Debian sources".
+
 **`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
 `Requires=`)** [EXISTS]
 
