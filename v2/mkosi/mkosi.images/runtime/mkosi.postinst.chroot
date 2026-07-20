@@ -80,8 +80,8 @@ create_ceralive_user() {
 configure_minimal_apt() {
   log "writing minimal deb822 apt sources"
   mkdir -p /etc/apt/sources.list.d
-  # Drop any build-time third-party pool that leaked into the tree (none expected).
-  rm -f /etc/apt/sources.list.d/armbian.sources
+  # Remove build-time Debian sources that leak into the rootfs (mkosi's release-named bootstrap source + any Armbian pool) so the device ships EXACTLY ONE Debian source (debian.sources) — else apt-get update warns "configured multiple times".
+  rm -f /etc/apt/sources.list.d/armbian.sources /etc/apt/sources.list.d/"${RELEASE}".sources /etc/apt/sources.list
 
   cat >/etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
@@ -141,7 +141,7 @@ setup_ceralive_repository() {
     log "CI mode: installing mTLS client certificate"
     printf '%s' "${APT_CLIENT_CRT_B64}" | base64 -d >/etc/apt/certs/client.crt
     printf '%s' "${APT_CLIENT_KEY_B64}" | base64 -d >/etc/apt/certs/client.key
-    chmod 600 /etc/apt/certs/client.key
+    chown _apt:root /etc/apt/certs/client.key && chmod 400 /etc/apt/certs/client.key  # apt fetches as the _apt sandbox user; a root:root 0600 key is unreadable → "Could not load client certificate"
     chmod 644 /etc/apt/certs/client.crt
     cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
 Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
@@ -162,7 +162,7 @@ SSLEOF
 
   cat >/etc/apt/sources.list.d/ceralive.sources <<EOF
 Types: deb
-URIs: https://apt.ceralive.tv/dists/${CHANNEL}/
+URIs: https://apt.ceralive.tv/dists/${CHANNEL}/binary-$(dpkg --print-architecture)/
 Suites: ./
 Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
 EOF

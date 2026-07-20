@@ -3239,6 +3239,18 @@ PINS
   printf '%s\n' "$output"
 }
 
+# The RUNTIME EXECUTOR (./v2/build path) must ALSO hand the mTLS client.key to the
+# _apt sandbox user (else apt-get update dies "Could not load client certificate"),
+# dedupe to exactly ONE Debian source (else "configured multiple times" warnings),
+# and write an arch-qualified apt.ceralive.tv URI (else the Release file 404s).
+@test "apt ceralive (T2.6): the build path makes client.key _apt-readable and dedupes Debian sources" {
+  run bash "$TESTS_DIR/apt-mtls-and-dedupe.test.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Part A static contract OK"* ]]
+  [[ "$output" == *"regression: PASS"* ]]
+  printf '%s\n' "$output"
+}
+
 # ===========================================================================
 # 23. ModemManager 1.24 closure image integration + fail-closed modem_ports udev.
 #     The nine-package modem-stack fork (modemmanager + libmm-glib0 +
