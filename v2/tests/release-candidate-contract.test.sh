@@ -158,24 +158,12 @@ cmd="${*: -1}"
 printf 'ssh %s\n' "${cmd}" >>"${MOCK_FLASH_LOG}"
 state="$(cat "${MOCK_DEVICE_STATE_FILE}" 2>/dev/null || printf online)"
 case "${cmd}" in
-  *'/device/cid'*)
-    if [[ -n "${MOCK_POST_MEDIA_CID:-}" ]]; then
-      printf '%s\n' "${MOCK_POST_MEDIA_CID}"
-    else
-      printf '%s\n' "${MOCK_MEDIA_CID}"
-    fi
-    ;;
-  *'/usr/local/sbin/ceralive-rockchip-chip-info'*)
-    printf '%s\n' "${MOCK_POST_SOC_ID:-${MOCK_SOC_ID}}"
-    ;;
   *'findmnt -n -o SOURCE /'*)
     printf '%s\n' "${MOCK_BOOT_ROOT_PARENT:-mmcblk0}"
     ;;
   *'/ci-access/'*)
     printf 'challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
     printf 'candidate_commit=1111111111111111111111111111111111111111\n'
-    printf 'soc_id=%s\n' "${MOCK_SOC_ID}"
-    printf 'media_cid=%s\n' "${MOCK_MARKER_MEDIA_CID:-${MOCK_MEDIA_CID}}"
     ;;
   true)
     grep -q '^new-host-key$' "${known_hosts}" || printf 'new-host-key\n' >"${known_hosts}"
@@ -355,29 +343,6 @@ case "${1:-}" in
   rid)
     printf 'Flash ID: mock-emmc\n'
     ;;
-  rci)
-    # Real RK3588 rci output: bytes 0-3 = ASCII "8853" (family marker); byte 12 is
-    # the warm-boot loader overlay (0x10) the host normalizes away. wrong-family is
-    # a well-formed 16-octet record whose marker is NOT RK3588 (family guard rejects).
-    case "${MOCK_RCI_MODE:-lf}" in
-      lf) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n' ;;
-      crlf) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\r\n' ;;
-      wrong-family) printf 'Chip Info: 1 2 3 4 5 6 7 8 9 A B C D E F 10\n' ;;
-      truncated) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0\n' ;;
-      extra) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0 11\n' ;;
-      split)
-        printf 'Chip Info: 38 38 35 33 0 0 0 0\n'
-        printf 'Chip Info: 0 0 0 0 10 0 0 0\n'
-        ;;
-      nonhex) printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 GG\n' ;;
-      duplicate)
-        printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n'
-        printf 'Chip Info: 38 38 35 33 0 0 0 0 0 0 0 0 10 0 0 0\n'
-        ;;
-      malformed) printf 'Chip Info: not-a-chip-identity\n' ;;
-      *) printf 'unknown MOCK_RCI_MODE: %s\n' "${MOCK_RCI_MODE}" >&2; exit 2 ;;
-    esac
-    ;;
   wl)
     if [[ "${MOCK_FLASH_MODE:-exact}" == wl-wait ]]; then wait_for_interrupt; fi
     cp "$3" "${MOCK_MEDIA}"
@@ -453,14 +418,8 @@ common=(
   --authorized-line-out "${TMP}/authorized-line"
   --identity-out "${TMP}/identity.txt"
 )
-media_cid="0123456789abcdef0123456789abcdef"
-# Canonical RK3588 cpu_code family id: the host derives this from the rci "8853"
-# read and the device's chip-info helper derives it from the OTP cpu_code cell.
-soc_id="35880000000000000000000000000000"
 base_env=(
   "RUNNER_TEMP=${TMP}"
-  "MOCK_MEDIA_CID=${media_cid}"
-  "MOCK_SOC_ID=${soc_id}"
   "MOCK_SSH_IDENTITY=${TMP}/id"
   "CERALIVE_RKDEVELOPTOOL_BIN=${TMP}/rkdeveloptool"
   "CERALIVE_UART_HELPER_BIN=${TMP}/uart"
@@ -935,64 +894,6 @@ case "${CERALIVE_PROOF4_CASE:-all}" in
     ;;
 esac
 
-assert_rci_contract() {
-  local mode="$1" expected="$2" label="$3" output rc=0
-  local err="${4:-rkdeveloptool did not report one 16-byte chip identity}"
-  local case_dir="${TMP}/rci-${mode}"
-  mkdir -p "${case_dir}"
-  rm -f "${TMP}/identity.txt"
-  if output="$(env "${base_env[@]}" MOCK_RCI_MODE="${mode}" MOCK_RECONNECT_MODE=success \
-      MOCK_MEDIA="${case_dir}/media.raw" MOCK_SSH_COUNT_FILE="${case_dir}/count" \
-      MOCK_FLASH_LOG="${case_dir}/flash.log" MOCK_DEVICE_STATE_FILE="${case_dir}/state" \
-      "${VERIFY}" "${common[@]}" 2>&1)"; then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [[ "${expected}" == accept ]]; then
-    if (( rc != 0 )); then
-      printf 'valid %s rci identity was rejected (rc=%s)\n%s\n' \
-        "${label}" "${rc}" "${output}" >&2
-      return 1
-    fi
-    grep -Eq '^soc_family_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
-    grep -q '^rkdeveloptool wl ' "${case_dir}/flash.log"
-    printf 'rci %s accepted through real verifier path (exit=0)\n' "${label}"
-    return 0
-  fi
-
-  if (( rc == 0 )); then
-    printf 'malformed %s rci identity was accepted\n' "${label}" >&2
-    return 1
-  fi
-  if [[ "${output}" != *"${err}"* ]]; then
-    printf 'malformed %s rci identity failed for the wrong reason (rc=%s)\n%s\n' \
-      "${label}" "${rc}" "${output}" >&2
-    return 1
-  fi
-  [[ ! -e "${TMP}/identity.txt" ]]
-  if grep -q '^rkdeveloptool wl ' "${case_dir}/flash.log"; then
-    printf 'malformed %s rci identity reached media write\n' "${label}" >&2
-    return 1
-  fi
-  printf 'rci %s rejected before write (exit=%s)\n' "${label}" "${rc}"
-}
-
-rci_contract_failures=0
-assert_rci_contract lf accept LF || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract crlf accept CRLF || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract wrong-family reject wrong-SoC-family \
-  'does not identify the expected RK3588 SoC family' \
-  || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract truncated reject truncated || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract extra reject extra-octet || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract split reject split-record || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract nonhex reject nonhex || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract duplicate reject duplicate-valid-records || rci_contract_failures=$((rci_contract_failures + 1))
-assert_rci_contract malformed reject malformed || rci_contract_failures=$((rci_contract_failures + 1))
-(( rci_contract_failures == 0 )) || exit 1
-
 assert_identity_name_rejected() {
   local label="$1" flag="$2" path="$3" output
   rm -f "${TMP}/identity.txt"
@@ -1314,37 +1215,6 @@ for signal_case in TERM INT; do
   assert_interrupt_cleanup rd-wait rd "${signal_case}" "${expected_signal_rc}"
 done
 
-if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
-    MOCK_POST_MEDIA_CID="invalid-cid" \
-    MOCK_MEDIA="${TMP}/media-cid.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-cid" \
-    MOCK_FLASH_LOG="${TMP}/flash-cid.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-cid" \
-    "${VERIFY}" "${common[@]}"; then
-  printf 'reconnect with an invalid media CID was accepted\n' >&2
-  exit 1
-fi
-[[ ! -e "${TMP}/identity.txt" ]]
-
-# MOCK_POST_MEDIA_CID sets only the live /device/cid; the marker keeps MOCK_MEDIA_CID.
-if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
-    MOCK_POST_MEDIA_CID="ffffffffffffffffffffffffffffffff" \
-    MOCK_MEDIA="${TMP}/media-cid-bind.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-cid-bind" \
-    MOCK_FLASH_LOG="${TMP}/flash-cid-bind.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-cid-bind" \
-    "${VERIFY}" "${common[@]}"; then
-  printf 'reconnect whose live media CID differs from the UART-recorded CID was accepted\n' >&2
-  exit 1
-fi
-[[ ! -e "${TMP}/identity.txt" ]]
-
-if env "${base_env[@]}" MOCK_RECONNECT_MODE=success \
-    MOCK_POST_SOC_ID="ffffffffffffffffffffffffffffffff" \
-    MOCK_MEDIA="${TMP}/media-soc-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-soc-mismatch" \
-    MOCK_FLASH_LOG="${TMP}/flash-soc-mismatch.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-soc-mismatch" \
-    "${VERIFY}" "${common[@]}"; then
-  printf 'reconnect from a different SoC was accepted\n' >&2
-  exit 1
-fi
-[[ ! -e "${TMP}/identity.txt" ]]
-
 if env "${base_env[@]}" MOCK_RECONNECT_MODE=success MOCK_BOOT_ROOT_PARENT=mmcblk1 \
     MOCK_MEDIA="${TMP}/media-root-mismatch.raw" MOCK_SSH_COUNT_FILE="${TMP}/count-root-mismatch" \
     MOCK_FLASH_LOG="${TMP}/flash-root-mismatch.log" MOCK_DEVICE_STATE_FILE="${TMP}/state-root-mismatch" \
@@ -1374,9 +1244,6 @@ grep -qx "pre_boot_media_sha256=${sha}" "${TMP}/identity.txt"
 grep -qx 'pre_boot_media_identity=verified' "${TMP}/identity.txt"
 grep -qx 'target_capacity_sectors=195312' "${TMP}/identity.txt"
 grep -Eq '^flash_id_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
-grep -qx "soc_family_sha256=$(printf '%s' "${soc_id}" | sha256sum | cut -d' ' -f1)" \
-  "${TMP}/identity.txt"
-grep -qx "media_cid=${media_cid}" "${TMP}/identity.txt"
 grep -qx 'boot_root_parent=mmcblk0' "${TMP}/identity.txt"
 usb_identity='Vid=0x2207,Pid=0x350b,LocationID=101 Maskrom'
 grep -qx "usb_device_sha256=$(printf '%s' "${usb_identity}" | sha256sum | cut -d' ' -f1)" \
@@ -1390,7 +1257,6 @@ grep -qx 'flash_transport=maskrom-rkdeveloptool' "${TMP}/identity.txt"
 grep -qx 'rkdeveloptool db .*loader.bin' "${TMP}/flash-ok.log"
 grep -qx 'rkdeveloptool rfi' "${TMP}/flash-ok.log"
 grep -qx 'rkdeveloptool rid' "${TMP}/flash-ok.log"
-grep -qx 'rkdeveloptool rci' "${TMP}/flash-ok.log"
 grep -q 'preflash .*--target-size-bytes 99999744' "${TMP}/flash-ok.log"
 grep -Eq "^rkdeveloptool wl 0 ${TMP}/ceralive-verify\.[^/]+/candidate.raw$" "${TMP}/flash-ok.log"
 grep -Eq "^rkdeveloptool rl 0 8 ${TMP}/ceralive-verify\.[^/]+/readback.raw$" "${TMP}/flash-ok.log"

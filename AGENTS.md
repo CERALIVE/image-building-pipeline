@@ -76,7 +76,7 @@ image-building-pipeline/
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
 | Publish a hardware-approved RAUC bundle pair to R2 | `v2/ci/publish-immutable-r2-pair.sh` via [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §5; requires the independently approved candidate SHA-256 and performs private, read-only input snapshots plus create-only exact-byte recovery |
 | **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `v2/lib/verify-paseto-key-encodings.sh` |
-| **End-to-end release process** (build/sign → immutable candidate → real-HW gate → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
+| **End-to-end release process** (build/sign → immutable candidate → manual hand-test on real HW → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
 | **apt.ceralive.tv build-credential rotation** (`APT_GPG_PUBLIC_B64`/`APT_CLIENT_CRT_B64`/`APT_CLIENT_KEY_B64`) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §7 |
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
@@ -164,10 +164,13 @@ fixture before resolving, so build-plan checks are self-contained too.
 
 Production builds require one explicit RAUC PKI contract: signer root, chain,
 leaf certificate/key, and baked device keyring must match. The release workflow
-builds the candidate before hardware validation, uploads the raw image, bundle,
-keyring, and digest as one immutable artifact, then the hardware gate preflights
-and flashes a private, digest-verified snapshot of that exact raw image. While
-the board is still in maskrom, the gate reads the exact whole-media sector range
+builds the candidate and uploads the raw image, bundle, keyring, and digest as one
+immutable artifact for an operator to download; there is no automated
+hardware-flashing gate. An operator hand-tests that exact artifact on real
+hardware before a manual release, using the bench flash-and-verify tool
+(`v2/ci/verify-and-flash-candidate.sh`), which preflights and flashes a private,
+digest-verified snapshot of that exact raw image. While
+the board is still in maskrom, the tool reads the exact whole-media sector range
 back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
 on mismatch. The candidate artifact also carries the official Radxa Maskrom
 loader under an exact SHA-256. The gate starts from Maskrom, derives capacity in
@@ -193,37 +196,22 @@ unbounded handoff.
 
 The bootstrap accepts no shell commands, does not restart, and binds
 an authenticated, one-hour-bounded request containing a device-generated nonce,
-the baked candidate commit, the USB-captured SoC-family marker, and fresh UART challenge to
+the baked candidate commit, and a fresh UART challenge to
 the post-boot SSH marker. Consumed nonces and a non-decreasing signed epoch floor
 persist on `/data`; the runner private key must derive the public verifier baked
 into the candidate before any USB operation. The
 image contains only the UART verification public key, never an SSH credential or
 password. Only after
 the immutable proof does it boot, rotate a run-local SSH host-key record, require
-the eMMC **CID** the UART bootstrap recorded to equal the live post-boot media CID
-(the genuine **per-device** binding), the SoC-**family** marker read by
-`rkdeveloptool rci` before reset to match the RK3588 OTP `cpu_code` cell (nvmem
-offset `0x02`) read post-boot through the installed `ceralive-rockchip-chip-info`
-helper — both normalized to the SAME cpu_code family identity. `rci` and the OTP
-encode the family DIFFERENTLY (rci = the model number byte-reversed "8853"; OTP =
-`cpu_code` `0x3588`), so the helper reads that cpu_code cell, NOT a raw 16-byte
-dump, and excludes the per-die serial — a coarse family guard (`rci` returns the
-RK3588 family constant, not a per-device id, and Maskrom exposes no per-device
-read), and `/`
-on the flashed eMMC, then run
-the physical suite, and remove the exact temporary key
-with a cleanup receipt. Each planned RAUC reboot consumes a one-use retention
-marker; any unarmed later boot revokes leftover CI access before sshd. It never compares
-mutable post-boot media bytes. Later `rkdeveloptool` operations retain their
-existing cancellable-child behavior. The verifier resets inherited
-ignored INT/TERM dispositions before Bash starts its signal traps, so CI shells
-that launch it asynchronously cannot make SIGINT cancellation ineffective. The
-identity record accepts only safe artifact filename characters so its
-line-oriented fields cannot be split. The `rci` structured-input boundary accepts
-exactly one `Chip Info:` record containing exactly 16 one- or two-digit hex octets,
-under LF or CRLF framing; it strips only the terminal transport CR and rejects
-truncated, extra, split, nonhex, or duplicate records before media write. The
-accepted identity remains lowercase 32-hex downstream.
+`/` on the booted board to resolve to the flashed eMMC, then run the physical
+checks and remove the exact temporary key with a cleanup receipt. Each planned
+RAUC reboot consumes a one-use retention marker; any unarmed later boot revokes
+leftover CI access before sshd. It never compares mutable post-boot media bytes.
+Later `rkdeveloptool` operations retain their existing cancellable-child behavior.
+The verifier resets inherited ignored INT/TERM dispositions before Bash starts its
+signal traps, so CI shells that launch it asynchronously cannot make SIGINT
+cancellation ineffective. The identity record accepts only safe artifact filename
+characters so its line-oriented fields cannot be split.
 Authenticated BSP fetches require the exact two-key Armbian archive rotation set
 (`DF00FAF1…E78D5` + `8CFA83D1…6099FE`, with no extra primary keys) and verify
 InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery uses

@@ -76,44 +76,32 @@ Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; 
 requires exact GPT geometry, both RK3588 bootloader stages, bounded and SHA-256-valid
 embedded/external FIT payloads, a compiled selector, complete kernel/DTB/initrd sets
 in both slots, and a real compatible signed bundle.
-The release hardware gate starts with one Rock 5B+ in Maskrom, carries a
-SHA-256-pinned loader in the candidate artifact, checks loader-mode eMMC capacity,
-and verifies a full readback before reset. A canonical hash approves the
-Maskrom USB port before loader transfer. The initial `rkdeveloptool db` runs
-under a pinned leader in an owned process group with a monotonic 15-second
-budget and bounded one-second TERM-to-KILL cleanup. Returning from `db` is not
-treated as success: for up to 10 seconds the gate requires the same
-VID/PID/`LocationID` to reappear in exact
+Images are hand-tested on real hardware before a manual release is cut — there
+is no automated CI job that flashes or tests real hardware. The bench
+flash-and-verify tool (`v2/ci/verify-and-flash-candidate.sh`, run by an operator)
+starts with one Rock 5B+ in Maskrom, carries a SHA-256-pinned loader in the
+candidate artifact, checks loader-mode eMMC capacity, and verifies a full readback
+before reset. A canonical hash approves the Maskrom USB port before loader
+transfer. The initial `rkdeveloptool db` runs under a pinned leader in an owned
+process group with a monotonic 15-second budget and bounded one-second
+TERM-to-KILL cleanup. Returning from `db` is not treated as success: for up to 10
+seconds the tool requires the same VID/PID/`LocationID` to reappear in exact
 `Loader` mode before it can query capacity or identity. A timeout, malformed or
 multiple listing, changed fixture, or unexpected mode fails with no retry and
 before `rfi`, write, readback, or reset. Command timeout and USB re-enumeration
-timeout have separate diagnostics. The 16-byte Rockchip SoC-**family** marker is
-then captured with `rkdeveloptool rci` before the write. Its parser accepts LF or
-CRLF transport framing but requires exactly one labeled record with exactly 16
-hex octets; truncated, extra, split, nonhex, and duplicate records fail before
-media write. `rci` returns the RK3588 family constant (identical on every board of
-this SoC), **not** a per-device identity — Maskrom exposes no per-device read — so
-this is a coarse family guard. `rci` and the device OTP encode the family
-DIFFERENTLY (rci = the model number byte-reversed "8853"; OTP = the `cpu_code`
-cell `0x3588` at nvmem offset `0x02`), so the committed `ceralive-rockchip-chip-info`
-helper reads that cpu_code cell (NOT a raw 16-byte dump) and both sides normalize
-to the same cpu_code identity (`35880000…`), giving a like-for-like family match
-after boot. The genuine per-device binding is
-the eMMC **CID**, which the UART bootstrap records into its signed marker and the
-gate cross-checks against the live post-boot CID. `/` must
-resolve to that flashed eMMC. UART observes first boot through a
-bounded one-shot bootstrap that emits a fresh device nonce. Its request is signed
-by a host-local key, bound to that nonce, protected by consumed-nonce and
-non-decreasing epoch records on `/data`, and
-provisions only a restricted, expiring per-run
-root SSH public key into `/data`; the immutable image contains no CI SSH
-credential or password (only the UART verification public key). The runner key is
-matched to that public key before USB access, and an `always()` cleanup step
-proves the exact key and marker were
-removed after the physical suite. Planned RAUC reboots consume a one-use retention
-marker; any unarmed later boot revokes leftover CI access before sshd starts.
-Legacy single-slot images require a full re-flash because their data partition
-overlaps the new B-slot extent; they cannot be converted by OTA.
+timeout have separate diagnostics. After flashing and readback, `/` on the booted
+board must resolve to the flashed eMMC. UART observes first boot through a bounded
+one-shot bootstrap that emits a fresh device nonce. Its request is signed by a
+host-local key, bound to that nonce and the baked candidate commit, protected by
+consumed-nonce and non-decreasing epoch records on `/data`, and provisions only a
+restricted, expiring per-run root SSH public key into `/data`; the immutable image
+contains no CI SSH credential or password (only the UART verification public key).
+The runner key is matched to that public key before USB access, and cleanup proves
+the exact key and marker were removed after the physical checks. Planned RAUC
+reboots consume a one-use retention marker; any unarmed later boot revokes
+leftover CI access before sshd starts. Legacy single-slot images require a full
+re-flash because their data partition overlaps the new B-slot extent; they cannot
+be converted by OTA.
 
 ## Directory Structure
 

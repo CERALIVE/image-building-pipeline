@@ -328,8 +328,11 @@ The general procedure for RK3588 boards:
 5. Confirm the board is detected: `sudo rkdeveloptool ld` should list a
    `Maskrom` device.
 
-**Write the image:** use the candidate-bound `release.yml` workflow described in
-[`v2/ci/runner-setup.md`](../v2/ci/runner-setup.md). It downloads the pinned
+**Write the image:** the release-candidate build workflow (`release.yml`) produces
+the immutable candidate artifact (raw image + signed `.raucb` + pinned loader); an
+operator downloads it and flashes it with the bench flash-and-verify tool
+(`v2/ci/verify-and-flash-candidate.sh`, described in
+[`v2/ci/runner-setup.md`](../v2/ci/runner-setup.md)). The tool downloads the pinned
 loader, checks the approved Maskrom USB fixture and eMMC capacity, captures the
 initial loader command under a pinned process-group leader, and limits it with a
 monotonic 15-second budget.
@@ -338,24 +341,19 @@ VID/PID/`LocationID` in `Loader` mode before capacity or identity reads. A stuck
 command receives whole-group TERM then KILL with bounded cleanup; a stale,
 missing, malformed, multiple, changed, or wrong-mode re-enumeration fails before
 `rfi` and every write/readback/reset. Neither phase retries. Logs name command
-timeout and Loader re-enumeration timeout separately. The workflow then captures
-the 16-byte SoC-family marker with `rkdeveloptool rci`, verifies the image,
-writes it, reads the entire candidate range back, and only then resets. A direct
-`rkdeveloptool wl` command is not an acceptable production or recovery path.
-After boot, the gate reads the RK3588 OTP `cpu_code` cell (nvmem offset `0x02`)
-via the image's committed helper and requires a like-for-like family match before
-SSH checks. `rci` and the OTP encode the family differently, so the helper reads
-that cpu_code cell — not a raw 16-byte dump — and both sides normalize to the same
-cpu_code identity. `rci` is only the RK3588 family constant (Maskrom exposes no
-per-device read), so the genuine per-device binding is the eMMC CID: the UART
-bootstrap records it and the gate cross-checks it against the live post-boot media CID.
+timeout and Loader re-enumeration timeout separately. The tool then verifies the
+image, writes it, reads the entire candidate range back, and only then resets. A
+direct `rkdeveloptool wl` command is not an acceptable production or recovery path.
+After boot, the tool requires `/` on the booted board to resolve to the flashed
+eMMC before its SSH checks. Images are hand-tested on real hardware before a manual
+release; there is no automated CI job that flashes or tests real hardware.
 
-#### Manual bench flashing (development/debugging only — NOT for production releases)
+#### Manual bench flashing (development/debugging only — NOT the verified release path)
 
-The CI release gate above is the only acceptable path for production or
-recovery flashes. The procedure below is for a developer or bench engineer who
-needs to flash a board directly during development or debugging, outside the
-full CI release pipeline. It has been validated on real Rock 5B+ hardware.
+The bench flash-and-verify tool above is the safe path for a release candidate.
+The procedure below is for a developer or bench engineer who needs to flash a
+board directly during development or debugging, outside that verified pipeline. It
+has been validated on real Rock 5B+ hardware.
 
 **The 3-command procedure:**
 

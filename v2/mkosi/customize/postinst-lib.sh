@@ -1099,14 +1099,12 @@ setup_ssh_firstboot() {
   [[ -n "${src}" && -f "${src}/ceralive-ssh-firstboot.sh" ]] \
     || die "ssh-firstboot source not found: ${src}/ceralive-ssh-firstboot.sh (is \$SRCDIR/runtime mounted?)"
   [[ -f "${src}/ceralive-ci-uart-bootstrap.sh" && -f "${src}/ceralive-ci-uart-bootstrap.service" && \
-     -f "${src}/ceralive-ci-uart-bootstrap-public.pem" && \
-     -f "${src}/ceralive-rockchip-chip-info.sh" ]] \
+     -f "${src}/ceralive-ci-uart-bootstrap-public.pem" ]] \
     || die "UART bootstrap source not found under ${src}"
   mkdir -p /usr/local/sbin
   install -m 0755 "${src}/ceralive-ssh-firstboot.sh" /usr/local/sbin/ceralive-ssh-firstboot
   install -m 0644 "${src}/ceralive-ssh-firstboot.service" /etc/systemd/system/ceralive-ssh-firstboot.service
   install -m 0755 "${src}/ceralive-ci-uart-bootstrap.sh" /usr/local/sbin/ceralive-ci-uart-bootstrap
-  install -m 0755 "${src}/ceralive-rockchip-chip-info.sh" /usr/local/sbin/ceralive-rockchip-chip-info
   install -m 0644 "${src}/ceralive-ci-uart-bootstrap.service" /etc/systemd/system/ceralive-ci-uart-bootstrap.service
   [[ "${CERALIVE_IMAGE_BUILD_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] \
     || die "CERALIVE_IMAGE_BUILD_COMMIT is not an exact commit SHA"

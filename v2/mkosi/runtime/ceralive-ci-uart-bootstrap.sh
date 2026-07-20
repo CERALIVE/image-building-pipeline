@@ -12,8 +12,6 @@ CHOWN_BIN="${CERALIVE_UART_CHOWN_BIN:-chown}"
 INSTALL_BIN="${CERALIVE_UART_INSTALL_BIN:-install}"
 OPENSSL_BIN="${CERALIVE_UART_OPENSSL_BIN:-openssl}"
 PUBLIC_KEY_FILE="${CERALIVE_UART_PUBLIC_KEY_FILE:-/etc/ceralive/uart-bootstrap-public.pem}"
-CHIP_INFO_BIN="${CERALIVE_CHIP_INFO_BIN:-/usr/local/sbin/ceralive-rockchip-chip-info}"
-MEDIA_CID_FILE="${CERALIVE_MEDIA_CID_FILE:-/sys/class/block/mmcblk0/device/cid}"
 
 fail() {
     printf 'CERALIVE_UART_BOOTSTRAP_ERROR %s\n' "$1"
@@ -73,13 +71,13 @@ payload="$(<"${verify_dir}/payload")"
 
 declare -A fields=()
 while IFS='=' read -r name value; do
-    [[ "${name}" =~ ^(access_id|expires|host_epoch|challenge|candidate_commit|soc_id|boot_nonce|key_type|key_body)$ ]] \
+    [[ "${name}" =~ ^(access_id|expires|host_epoch|challenge|candidate_commit|boot_nonce|key_type|key_body)$ ]] \
         || fail request-field
     [[ -z "${fields[${name}]+x}" ]] || fail request-duplicate
     fields["${name}"]="${value}"
 done <<<"${payload}"
 
-for name in access_id expires host_epoch challenge candidate_commit soc_id boot_nonce key_type key_body; do
+for name in access_id expires host_epoch challenge candidate_commit boot_nonce key_type key_body; do
     [[ -n "${fields[${name}]:-}" ]] || fail "request-missing-${name}"
 done
 [[ "${fields[access_id]}" =~ ^[A-Za-z0-9._-]{1,80}$ ]] || fail access-id
@@ -87,7 +85,6 @@ done
 [[ "${fields[host_epoch]}" =~ ^[0-9]{10}$ ]] || fail host-epoch
 [[ "${fields[challenge]}" =~ ^[0-9a-f]{64}$ ]] || fail challenge
 [[ "${fields[candidate_commit]}" =~ ^[0-9a-f]{40}$ ]] || fail candidate-commit
-[[ "${fields[soc_id]}" =~ ^[0-9a-f]{32}$ ]] || fail soc-id
 [[ "${fields[boot_nonce]}" =~ ^[0-9a-f]{64}$ ]] || fail boot-nonce
 [[ "${fields[boot_nonce]}" == "${boot_nonce}" ]] || fail boot-nonce-mismatch
 [[ "${fields[key_type]}" == ssh-ed25519 ]] || fail key-type
@@ -100,11 +97,6 @@ host_epoch=$((10#${fields[host_epoch]}))
 [[ -r "${IMAGE_COMMIT_FILE}" ]] || fail image-commit-missing
 image_commit="$(tr -d '[:space:]' <"${IMAGE_COMMIT_FILE}")"
 [[ "${image_commit}" == "${fields[candidate_commit]}" ]] || fail image-commit-mismatch
-[[ -x "${CHIP_INFO_BIN}" && ! -L "${CHIP_INFO_BIN}" ]] || fail soc-id-source
-device_soc_id="$("${CHIP_INFO_BIN}" 2>/dev/null)" || fail soc-id-missing
-device_soc_id="${device_soc_id,,}"
-[[ "${device_soc_id}" =~ ^[0-9a-f]{32}$ ]] || fail soc-id-invalid
-[[ "${device_soc_id}" == "${fields[soc_id]}" ]] || fail soc-id-mismatch
 
 [[ -d "${STATE_DIR}" && ! -L "${STATE_DIR}" ]] || fail state-dir
 "${INSTALL_BIN}" -d -m 0700 -o root -g root "${NONCE_DIR}"
@@ -139,17 +131,10 @@ grep -Fqx -- "${authorized_line}" "${KEYS}" || printf '%s\n' "${authorized_line}
 "${CHOWN_BIN}" root:root "${KEYS}"
 chmod 0600 "${KEYS}"
 
-# Per-device binding (soc_id above is only a coarse SoC-family guard): the host
-# cross-checks this eMMC CID against the live post-boot CID to tie the receipt to media.
-[[ -r "${MEDIA_CID_FILE}" ]] || fail media-cid-source
-media_cid="$(tr -d '[:space:]' <"${MEDIA_CID_FILE}")"
-media_cid="${media_cid,,}"
-[[ "${media_cid}" =~ ^[0-9a-f]{32}$ ]] || fail media-cid-invalid
-
 marker="${ACCESS_DIR}/${fields[access_id]}"
 tmp="$(mktemp "${ACCESS_DIR}/.${fields[access_id]}.XXXXXX")"
-printf 'challenge=%s\ncandidate_commit=%s\nsoc_id=%s\nmedia_cid=%s\n' \
-    "${fields[challenge]}" "${fields[candidate_commit]}" "${fields[soc_id]}" "${media_cid}" >"${tmp}"
+printf 'challenge=%s\ncandidate_commit=%s\n' \
+    "${fields[challenge]}" "${fields[candidate_commit]}" >"${tmp}"
 chmod 0600 "${tmp}"
 mv -f -- "${tmp}" "${marker}"
 tmp=""
