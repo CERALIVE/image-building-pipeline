@@ -290,7 +290,8 @@ state** under the staging dir (the host apt config is never touched).
   `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
   `gstreamer1.0-libuvch264src` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
-  plugins still come from the runtime OS layer (`shared.list`). When that app
+  plugins, including the explicit `gstreamer1.0-alsa` ALSA source plugin, come
+  from the runtime OS layer (`shared.list`). When that app
   layer installs `ceralive-device`, it explicitly enables `ceralive.service`;
   the runtime layer runs earlier and cannot enable a unit supplied later by the
   CeraUI package.
