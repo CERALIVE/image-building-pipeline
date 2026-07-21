@@ -1630,6 +1630,14 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: gstreamer1.0-alsa is installed so alsasrc is available" {
+  # Audio-capable capture pipelines construct an ALSA leg even when the source
+  # selection has no configured audio. Keep this explicit because the plugin
+  # is not pulled by the GStreamer base packages with --no-install-recommends.
+  run grep -Ex 'gstreamer1\.0-alsa[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "runtime packages: wireless-regdb is installed so cfg80211 loads regulatory.db" {
   # The runtime layer installs shared.list with --no-install-recommends
   # (runtime/mkosi.postinst.chroot), so wpasupplicant's `Recommends: wireless-regdb`
