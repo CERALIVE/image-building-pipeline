@@ -14,7 +14,7 @@ srt:
   path: srt
   repo: https://github.com/CERALIVE/srt
   kind: first-party
-  pin: v1.5.5+ceralive.3
+  pin: v1.5.6+ceralive.1
   channel: stable
 
 cerastream:
