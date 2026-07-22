@@ -1638,6 +1638,13 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: gstreamer1.0-nice is installed so nicesrc is available" {
+  # WebRTC ICE pipelines require the libnice GStreamer source. Keep this explicit
+  # because the plugin is not pulled by the GStreamer base packages with --no-install-recommends.
+  run grep -Ex 'gstreamer1\.0-nice[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "runtime packages: wireless-regdb is installed so cfg80211 loads regulatory.db" {
   # The runtime layer installs shared.list with --no-install-recommends
   # (runtime/mkosi.postinst.chroot), so wpasupplicant's `Recommends: wireless-regdb`
