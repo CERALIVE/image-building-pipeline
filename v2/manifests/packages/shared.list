@@ -65,6 +65,7 @@ usb-modeswitch           # flips USB modems out of storage mode into modem mode 
 # --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
 gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing
 gstreamer1.0-alsa        # alsasrc — USB audio capture for audio-capable streaming pipelines
+gstreamer1.0-nice         # nicesrc — WebRTC ICE transport for peer connectivity
 gstreamer1.0-plugins-base
 gstreamer1.0-plugins-good
 gstreamer1.0-plugins-bad
