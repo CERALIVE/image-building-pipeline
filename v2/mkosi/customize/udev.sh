@@ -9,10 +9,6 @@
 # folds both into ONE canonical, deduplicated rules file so the comprehensive
 # policy actually ships.
 #
-# UNIFIED NAMING: file 99-ceraui-hardware.rules / 99-ceraui-devices.rules →
-# 99-ceralive-hardware.rules; the ceraui-optimize@ unit reference →
-# ceralive-optimize@ (SYSTEMD_WANTS no-ops if the unit is absent).
-#
 # CONTRACT: sourced by run-all.sh (chroot context). Strict; no `|| true`.
 #
 # shellcheck shell=bash
@@ -96,7 +92,6 @@ KERNEL=="spidev[0-9]*", GROUP="spi", MODE="0664"
 # Streaming optimization + CeraLive user device permissions
 # =============================================================================
 KERNEL=="video[0-9]*", ATTR{name}=="*", RUN+="/bin/sh -c 'echo 8 > /sys/class/video4linux/%k/device/video_buffers'"
-KERNEL=="video[0-9]*", TAG+="systemd", ENV{SYSTEMD_WANTS}="ceralive-optimize@%k.service"
 KERNEL=="video[0-9]*", RUN+="/bin/chmod g+rw /dev/%k"
 KERNEL=="audio[0-9]*", RUN+="/bin/chmod g+rw /dev/%k"
 KERNEL=="ttyUSB[0-9]*", RUN+="/bin/chmod g+rw /dev/%k"

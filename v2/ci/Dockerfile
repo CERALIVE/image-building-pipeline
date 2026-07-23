@@ -52,6 +52,8 @@ RUN apt-get update \
       apt-utils \
       dpkg-dev \
       ca-certificates \
+      file \
+      gpg \
       reprepro \
       systemd-repart \
       qemu-user-static \
