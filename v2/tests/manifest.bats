@@ -3404,8 +3404,17 @@ REPRO
 }
 
 @test "image hygiene: hardware udev rules do not queue the retired optimize unit" {
-  run rg 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$V2/mkosi"
+  run grep -RE 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$V2/mkosi"
   [ "$status" -eq 1 ]
+}
+
+@test "image hygiene: portable check detects a planted retired optimize unit" {
+  local fixture="$BATS_TEST_TMPDIR/planted-udev.rules"
+  printf '%s\n' 'ACTION=="add", ENV{SYSTEMD_WANTS}="ceralive-optimize@.service"' >"$fixture"
+
+  run grep -E 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$fixture"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ceralive-optimize@"* ]]
 }
 
 # ===========================================================================
