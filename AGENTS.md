@@ -855,18 +855,32 @@ env lockstep).
 
 `v2/mkosi/customize/udev.sh::setup_hardware_access` gives the RK3588 SoC HDMI-RX
 capture node a persistent, collision-proof name via a `SYMLINK+=` rule keyed on the
-stable `rk_hdmirx` **driver** name (`ATTRS{name}=="rk_hdmirx"`), NOT on the
-`/dev/videoN` index. This matters because a USB capture card can grab `/dev/video0`
-and renumber the SoC HDMI-RX to a higher index — the enumeration-order conflict a
-bare node index cannot avoid. The rule emits BOTH `/dev/hdmi-in` (human-readable)
-and `/dev/hdmirx` (cerastream's canonical default HDMI device string, so the engine
-default resolves to a real node). It is ADDITIVE: the two existing name-matched HDMI
-`GROUP="video"` permission rules are untouched, and the engine still finds the HDMI
-device by driver substring (`cerastream driver_is_hdmi_rx`), so the symlink is a
-stable operator/diagnostic handle, not a new required routing dependency. Guard:
-`manifest.bats` "hdmi-in: a name-keyed SYMLINK rule gives the SoC HDMI-RX a stable
-/dev/hdmi-in node" (asserts driver-keyed, not `video0`-pinned, both symlink tokens,
-and the original permission rules preserved).
+parent platform **driver** (`DRIVERS=="rk_hdmirx"`), NOT on the `/dev/videoN` index.
+This matters because a USB capture card can grab `/dev/video0` and renumber the SoC
+HDMI-RX to a higher index — the enumeration-order conflict a bare node index cannot
+avoid. The rule emits BOTH `/dev/hdmi-in` (human-readable) and `/dev/hdmirx`
+(cerastream's canonical default HDMI device string, so the engine default resolves to
+a real node). It is ADDITIVE: the two existing name-matched HDMI `GROUP="video"`
+permission rules are untouched, and the engine still finds the HDMI device by driver
+substring (`cerastream driver_is_hdmi_rx`), so the symlink is a stable
+operator/diagnostic handle, not a new required routing dependency.
+
+**Why `DRIVERS==`, not `ATTRS{name}==` (#74).** PR #73 first shipped the rule as
+`ATTRS{name}=="rk_hdmirx"`. That never matches on real RK3588 hardware: the V4L2
+node's sysfs `name` attribute is `stream_hdmirx`, while `rk_hdmirx` is the *driver*
+bound to the parent platform device (`fdee0000.hdmirx-controller`). `DRIVERS==`
+matches up the parent chain and is the correct key. Verified on device — both
+symlinks resolve to the live HDMI-RX node:
+
+```
+/dev/hdmi-in -> video0     /dev/hdmirx -> video0
+v4l2-ctl -d /dev/video0 --info  →  Driver name: rk_hdmirx
+```
+
+Guard: `manifest.bats` "hdmi-in: a driver-keyed SYMLINK rule gives the SoC HDMI-RX a
+stable /dev/hdmi-in node" — asserts `DRIVERS==` (and explicitly rejects a re-slip to
+`ATTRS{name}==`), not `video0`-pinned, both symlink tokens, and the original
+permission rules preserved.
 
 ## ADD-ON SUBSYSTEM [EXISTS]
 
