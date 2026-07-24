@@ -3333,6 +3333,9 @@ set -euo pipefail
 postinst="$1"
 key_b64="$2"
 work="$3"
+final=/usr/share/keyrings/ceralive-archive-keyring.gpg
+expected="$work/expected-runtime-keyring.gpg"
+old="$work/old-runtime-keyring.gpg"
 
 extract_fn() {
   awk -v fn="$1" '
@@ -3354,16 +3357,102 @@ DPKG
 chmod +x "$work/bin/dpkg"
 export PATH="$work/bin:$PATH"
 
+printf '%s' "$key_b64" | base64 -d >"$expected"
+printf '\x00old-ceralive-keyring\xff\n' >"$old"
+
+fail() {
+  printf 'runtime-keyring regression: FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_no_temp() {
+  local leaked
+  leaked="$(find /usr/share/keyrings -maxdepth 1 -type f \
+    -name 'ceralive-archive-keyring.gpg.??????' -print -quit)"
+  [[ -z "$leaked" ]] || fail "$1 left temporary keyring $leaked"
+}
+
+seed_old() {
+  cp "$old" "$final"
+  old_sha="$(sha256sum "$final" | awk '{print $1}')"
+}
+
+assert_old_preserved() {
+  local actual_sha
+  [[ -f "$final" ]] || fail "$1 removed the pre-existing final keyring"
+  actual_sha="$(sha256sum "$final" | awk '{print $1}')"
+  [[ "$actual_sha" == "$old_sha" ]] \
+    || fail "$1 changed the pre-existing final keyring: expected $old_sha, got $actual_sha"
+  cmp -s "$old" "$final" || fail "$1 changed the pre-existing final keyring bytes"
+  assert_no_temp "$1"
+  printf 'runtime-keyring: %s preserved old sha256=%s and cleaned temp\n' "$1" "$actual_sha"
+}
+
 log() { printf '[runtime-test] %s\n' "$*" >&2; }
 eval "$(extract_fn setup_ceralive_repository "$postinst")"
 CHANNEL=stable
+
+seed_old
+APT_GPG_PUBLIC_B64='@@@@'
+if setup_ceralive_repository; then
+  fail "malformed base64 unexpectedly succeeded"
+fi
+assert_old_preserved "decode failure"
+
+cat >"$work/bin/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+exit 74
+MKTEMP
+chmod +x "$work/bin/mktemp"
+seed_old
+APT_GPG_PUBLIC_B64="$key_b64"
+if setup_ceralive_repository; then
+  fail "temporary preparation failure unexpectedly succeeded"
+fi
+assert_old_preserved "temporary preparation failure"
+rm -f "$work/bin/mktemp"
+hash -r
+
+cat >"$work/bin/mv" <<'MV'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "-f" && "$2" == "--" && "$#" -eq 4 ]]
+source_path="$3"
+final_path="$4"
+[[ "$final_path" == /usr/share/keyrings/ceralive-archive-keyring.gpg ]]
+cmp -s "$TEST_EXPECTED_KEYRING" "$source_path"
+[[ "$(stat -c '%a' "$source_path")" == 644 ]]
+[[ "$(stat -c '%u:%g' "$source_path")" == 0:0 ]]
+printf 'prepared source bytes, mode, and owner verified\n' >"$TEST_MV_MARKER"
+exit 73
+MV
+chmod +x "$work/bin/mv"
+seed_old
+export TEST_EXPECTED_KEYRING="$expected"
+export TEST_MV_MARKER="$work/mv-preparation-verified"
+APT_GPG_PUBLIC_B64="$key_b64"
+if setup_ceralive_repository; then
+  fail "final replacement failure unexpectedly succeeded"
+fi
+[[ -s "$TEST_MV_MARKER" ]] \
+  || fail "final replacement failure was not injected after full temporary preparation"
+assert_old_preserved "final replacement failure"
+rm -f "$work/bin/mv"
+hash -r
+
 APT_GPG_PUBLIC_B64="$key_b64"
 setup_ceralive_repository
-cp /usr/share/keyrings/ceralive-archive-keyring.gpg "$work/runtime-keyring.gpg"
+cmp -s "$expected" "$final" || fail "successful handoff published unexpected bytes"
+[[ "$(stat -c '%a' "$final")" == 644 ]] || fail "successful handoff mode is not 0644"
+[[ "$(stat -c '%u:%g' "$final")" == 0:0 ]] || fail "successful handoff owner is not root:root"
+assert_no_temp "successful handoff"
+cp "$final" "$work/runtime-keyring.gpg"
+printf 'runtime-keyring: success published expected bytes mode=0644 owner=root:root and cleaned temp\n'
 REPRO
 
   run unshare -rm --map-root-user bash "$repro" "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
     "$binary_b64" "$BATS_TEST_TMPDIR"
+  printf '%s\n' "$output"
   [ "$status" -eq 0 ]
   [[ "$output" != *"$binary_b64"* ]]
   run file -b "$BATS_TEST_TMPDIR/runtime-keyring.gpg"
@@ -3373,6 +3462,8 @@ REPRO
 
   local runtime_fn
   runtime_fn="$(awk '/^setup_ceralive_repository\(\) \{/{f=1} f{print} f && /^}/{exit}' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot")"
+  [[ "$runtime_fn" == *'mv -f -- "${keyring_tmp}" /usr/share/keyrings/ceralive-archive-keyring.gpg'* ]]
+  [[ "$runtime_fn" != *'install -m 0644 "${keyring_tmp}" /usr/share/keyrings/ceralive-archive-keyring.gpg'* ]]
   [[ "$runtime_fn" != *"gpg --"* ]]
   [[ "$runtime_fn" != *"file -b"* ]]
   grep -q 'DEARMOR_APT_KEYRING_SH=' "$V2/lib/orchestrate.sh"
