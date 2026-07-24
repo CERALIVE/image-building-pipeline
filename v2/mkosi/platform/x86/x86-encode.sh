@@ -2,16 +2,16 @@
 #
 # x86-encode.sh — set up the CeraLive x86 video-encode path (task 33, decision D1).
 #
-# DECISION D1 (locked; decided for ceracoder — RETIRED 2026-06-11, cerastream is
-# the sole engine and selects its encode element at runtime via its HAL profiles.
-# The VA-driver/x264 package guarantees below still stand; the legacy pipeline-dir
-# symlink resolves only if a legacy pipeline tree is present):
-# ceracoder is ENCODER-AGNOSTIC — the encode element is runtime-selected from a TEXT
-# pipeline file (gst_parse_launch), not compiled in. There is NO ceracoder source
-# change for x86 and NO MPP dependency. x86 supports FULL bonded streaming:
-#   * PRIMARY  : Intel Quick Sync / VA-API hardware encode — the ceracoder/pipeline/
-#                n100/* files invoke qsvh265enc / qsvh264dec / vajpegdec (Gen12 iGPU).
-#   * FALLBACK : pure-software x264 — the ceracoder/pipeline/generic/* files invoke
+# DECISION D1 (locked): cerastream is the sole streaming engine and selects its
+# encode element at runtime via its HAL profiles. The VA-driver/x264 package
+# guarantees below still stand; the legacy pipeline-dir symlink resolves only if a
+# pipeline tree is present.
+# The engine is ENCODER-AGNOSTIC — the encode element is runtime-selected, not
+# compiled in. There is NO engine source change for x86 and NO MPP dependency. x86
+# supports FULL bonded streaming:
+#   * PRIMARY  : Intel Quick Sync / VA-API hardware encode — the n100 pipeline
+#                family invokes qsvh265enc / qsvh264dec / vajpegdec (Gen12 iGPU).
+#   * FALLBACK : pure-software x264 — the generic pipeline family invokes
 #                x264enc; runs on ANY x86 CPU with no GPU.
 # x86 is NOT relay-only — full streaming is confirmed. This script therefore does
 # NOT configure any relay-only degradation; it wires the real encode path.
@@ -23,9 +23,9 @@
 #      and the place that fails LOUDLY if the iHD driver is missing).
 #   2. write the encode-selection config (/etc/ceralive/conf.d/10-encode-x86.conf):
 #      qsv primary, x264 fallback, pipeline families n100 -> generic.
-#   3. point the active pipeline directory at the n100 family (symlink if the
-#      ceracoder pipelines are already present; otherwise the config records the
-#      family for ceracoder/CeraUI to resolve once the app layer installs them).
+#   3. point the active pipeline directory at the n100 family (symlink if a
+#      pipeline tree is already present; otherwise the config records the
+#      family for the engine/CeraUI to resolve once the app layer installs it).
 #   4. record the D1 `bps` caveat: dynamic bitrate needs a PATCHED GStreamer.
 #
 # MUST NOT pretend VA-API works without the Intel media driver: step 1 verifies the
@@ -57,11 +57,11 @@ ENCODE_PACKAGES=(intel-media-va-driver-non-free gstreamer1.0-vaapi vainfo)
 PIPELINE_FAMILY="${CERALIVE_PIPELINE_FAMILY:-n100}"
 PIPELINE_FALLBACK_FAMILY="${CERALIVE_PIPELINE_FALLBACK_FAMILY:-generic}"
 
-# LEGACY-COMPAT: where the retired ceracoder .deb installed its pipeline tree.
-# Kept so the symlink behaviour (and its offline test) is unchanged; on a
-# cerastream image the tree never appears and the link stays dangling (harmless).
-# The symlink target; resolved lazily if the dir is not present yet at platform time.
-CERACODER_PIPELINE_DIR="${CERACODER_PIPELINE_DIR:-/usr/share/ceracoder/pipeline}"
+# Where a pipeline-file tree would be installed on disk. Kept so the symlink
+# behaviour (and its offline test) is unchanged; cerastream selects encoders via
+# its HAL at runtime and installs no such tree, so the link stays dangling
+# (harmless). The symlink target; resolved lazily if the dir is not present yet.
+CERASTREAM_PIPELINE_DIR="${CERASTREAM_PIPELINE_DIR:-/usr/share/cerastream/pipeline}"
 
 ensure_packages() {
   if [[ -n "${SKIP_PKG}" ]]; then
@@ -101,14 +101,14 @@ CERALIVE_ENCODE_PRIMARY=qsv
 # ${PIPELINE_FALLBACK_FAMILY} pipelines invoke x264enc.
 CERALIVE_ENCODE_FALLBACK=x264
 
-# Pipeline families selected from, in order (legacy ceracoder-era contract).
+# Pipeline families selected from, in order (pipeline-file contract).
 CERALIVE_PIPELINE_FAMILY=${PIPELINE_FAMILY}
 CERALIVE_PIPELINE_FALLBACK_FAMILY=${PIPELINE_FALLBACK_FAMILY}
 
 # x86 is NOT relay-only — full streaming is supported (D1).
 CERALIVE_RELAY_ONLY=false
 
-# D1 caveat (RUNTIME, ceracoder-era): the legacy encoder always did
+# D1 caveat (RUNTIME): a BELABOX-lineage encoder always did
 # g_object_set("bps", ...). Stock distro qsvh265enc / x264enc expose "bitrate"
 # (kbps), NOT "bps" — a BELABOX/CERALIVE-PATCHED GStreamer adds the "bps" property.
 # On UNPATCHED distro GStreamer encode still works but DYNAMIC BITRATE CONTROL
@@ -122,7 +122,7 @@ EOF
 link_pipelines() {
   local link_dir="${ROOT}/etc/ceralive"
   local link="${link_dir}/pipeline"
-  local target="${CERACODER_PIPELINE_DIR}/${PIPELINE_FAMILY}"
+  local target="${CERASTREAM_PIPELINE_DIR}/${PIPELINE_FAMILY}"
   mkdir -p "${link_dir}"
 
   # If a legacy pipeline tree is already present (app layer installed first, or a

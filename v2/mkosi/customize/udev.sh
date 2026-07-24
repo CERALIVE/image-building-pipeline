@@ -9,6 +9,11 @@
 # folds both into ONE canonical, deduplicated rules file so the comprehensive
 # policy actually ships.
 #
+# UNIFIED NAMING: file 99-ceraui-hardware.rules / 99-ceraui-devices.rules →
+# 99-ceralive-hardware.rules. The dangling SYSTEMD_WANTS=ceralive-optimize@%k
+# want was removed: no such unit ships in the image (the rule was a permanent
+# no-op pointing at a never-provided template unit).
+#
 # CONTRACT: sourced by run-all.sh (chroot context). Strict; no `|| true`.
 #
 # shellcheck shell=bash
