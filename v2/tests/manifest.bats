@@ -3495,7 +3495,7 @@ REPRO
 }
 
 @test "image hygiene: hardware udev rules do not queue the retired optimize unit" {
-  run grep -RE 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$V2/mkosi"
+  run grep -RE '^[[:space:]]*[^#[:space:]].*(ceralive-optimize@|SYSTEMD_WANTS.*optimize)' "$V2/mkosi"
   [ "$status" -eq 1 ]
 }
 

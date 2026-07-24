@@ -15,10 +15,9 @@ on UEFI/GRUB. The x86 counterpart to `../boot/` (RK3588/U-Boot).
 
 ## 1. Encode strategy (decision D1)
 
-D1 was decided for `ceracoder` (retired 2026-06-11; `cerastream` is the sole engine
-and selects encode elements at runtime via its HAL profiles). The encoder is
-**encoder-agnostic** — the encode element is runtime-selected,
-not compiled in. **No engine source
+`cerastream` is the sole engine and selects encode elements at runtime via its HAL
+profiles. The engine is **encoder-agnostic** — the encode element is
+runtime-selected, not compiled in. **No engine source
 change** for x86, **no MPP dependency**. x86 does **FULL bonded streaming** — it is
 **NOT relay-only**.
 
@@ -33,7 +32,7 @@ without it), (2) writes `/etc/ceralive/conf.d/10-encode-x86.conf` (qsv primary, 
 fallback, families `n100` → `generic`, `CERALIVE_RELAY_ONLY=false`), and (3) points
 `/etc/ceralive/pipeline` at the active `n100` family.
 
-> **D1 caveat (runtime, documented in the config; ceracoder-era):** the legacy encoder always did
+> **D1 caveat (runtime, documented in the config):** a BELABOX-lineage encoder always did
 > `g_object_set("bps", …)`. Stock distro `qsvh265enc`/`x264enc` expose `bitrate`
 > (kbps), **not** `bps` — only a **BELABOX/CERALIVE-patched GStreamer** adds `bps`.
 > On unpatched distro GStreamer, encode works but **dynamic bitrate control silently

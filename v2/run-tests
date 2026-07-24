@@ -39,6 +39,7 @@ SUITES=(
   "${HERE}/tests/manifest.bats"
   "${HERE}/tests/rk3588-ab-contract.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
+  "${HERE}/tests/packaging-hygiene.bats"
 )
 SHELL_SUITES=(
   "${HERE}/tests/fetch-debs-apt-chain.test.sh"
