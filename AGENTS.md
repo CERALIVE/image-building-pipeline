@@ -290,7 +290,9 @@ state** under the staging dir (the host apt config is never touched).
   `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
   `gstreamer1.0-libuvch264src` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
-  plugins, including the explicit `gstreamer1.0-alsa` ALSA source plugin, come
+  plugins, including the explicit `gstreamer1.0-alsa` ALSA source plugin (RØDE/ALSA
+  capture + always-on audio meter) and `gstreamer1.0-nice` (libnice — the `nicesrc`
+  ICE plugin the cerastream WebRTC remote-preview tier requires), come
   from the runtime OS layer (`shared.list`). When that app
   layer installs `ceralive-device`, it explicitly enables `ceralive.service`;
   the runtime layer runs earlier and cannot enable a unit supplied later by the
