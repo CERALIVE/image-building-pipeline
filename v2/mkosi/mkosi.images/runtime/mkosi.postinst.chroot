@@ -152,14 +152,15 @@ SSLEOF
   fi
 
   if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
-    log "installing CeraLive apt GPG public key from env"
-    printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >/usr/share/keyrings/ceralive-archive-keyring.gpg
+    log "installing build-validated CeraLive apt GPG public key from env"
+    local keyring_tmp=''
+    if ! keyring_tmp="$(mktemp /usr/share/keyrings/ceralive-archive-keyring.gpg.XXXXXX)"; then log "FATAL: could not decode the build-validated CeraLive apt public key"; return 1; fi
+    if ! { printf '%s' "${APT_GPG_PUBLIC_B64}" | base64 -d >"${keyring_tmp}" && chown 0:0 "${keyring_tmp}" && chmod 0644 "${keyring_tmp}" && mv -f -- "${keyring_tmp}" /usr/share/keyrings/ceralive-archive-keyring.gpg; }; then rm -f "${keyring_tmp}"; log "FATAL: could not decode the build-validated CeraLive apt public key"; return 1; fi
   else
     log "no GPG public key in env — installing placeholder (CI provides the real key)"
     : >/usr/share/keyrings/ceralive-archive-keyring.gpg
+    chmod 644 /usr/share/keyrings/ceralive-archive-keyring.gpg
   fi
-  chmod 644 /usr/share/keyrings/ceralive-archive-keyring.gpg
-
   cat >/etc/apt/sources.list.d/ceralive.sources <<EOF
 Types: deb
 URIs: https://apt.ceralive.tv/dists/${CHANNEL}/binary-$(dpkg --print-architecture)/

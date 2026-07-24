@@ -44,6 +44,7 @@ source "${HERE}/common.sh"
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
+DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
@@ -668,6 +669,11 @@ run_mkosi_build() {
       || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
     [[ -f /usr/share/keyrings/debian-archive-keyring.gpg ]] \
       || log_warn "native build: /usr/share/keyrings/debian-archive-keyring.gpg absent — mkosi may fail to verify the Debian repos (install debian-archive-keyring)"
+    if [[ -n "${APT_GPG_PUBLIC_B64}" ]]; then
+      APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")" \
+        || die "could not prepare the binary CeraLive apt keyring for mkosi"
+      export APT_GPG_PUBLIC_B64
+    fi
     ( cd "${MKOSI_DIR}" && mkosi "${mkosi_args[@]}" ) \
       || die "mkosi build failed (native)"
     return
@@ -701,6 +707,13 @@ run_mkosi_build() {
         echo "FATAL: builder image lacks mkosi — an overridden MKOSI_BUILDER_IMAGE must bake mkosi '"${MKOSI_VERSION_PIN}"' (see v2/ci/Dockerfile)" >&2
         exit 1
       }
+      if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
+        APT_GPG_PUBLIC_B64="$(/work/lib/dearmor-apt-keyring.sh)" || {
+          echo "FATAL: could not prepare the binary CeraLive apt keyring for mkosi" >&2
+          exit 1
+        }
+        export APT_GPG_PUBLIC_B64
+      fi
       cd /work/mkosi
       mkosi \
         --architecture='"${mkosi_arch}"' \

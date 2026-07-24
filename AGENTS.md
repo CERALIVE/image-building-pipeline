@@ -298,7 +298,12 @@ state** under the staging dir (the host apt config is never touched).
 - **Secrets are env-only, base64-encoded** (same names as the device customize
   script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
-  fatal. `APT_CERALIVE_URL` (default `https://apt.ceralive.tv`) is overridable.
+  fatal. `APT_GPG_PUBLIC_B64` may encode either the current armored `.asc` public
+  key or a binary `.gpg` keyring: `v2/lib/dearmor-apt-keyring.sh` normalizes it
+  and checks binary OpenPGP `file(1)` magic in the native/container build context
+  before mkosi starts. The runtime postinstall receives only that validated binary
+  payload; do not add `gpg` or `file` to the device package set. `APT_CERALIVE_URL`
+  (default `https://apt.ceralive.tv`) is overridable.
 - **Arch axis only** — the source carries no board axis; `arch` is selected by
   `APT::Architecture` (apt-worker two-axis model: `channel × arch`). Resolved
   mkosi `x86-64` is normalized to Debian `amd64`; RK3588 remains `arm64`.

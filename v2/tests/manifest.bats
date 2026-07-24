@@ -3267,6 +3267,247 @@ PINS
   printf '%s\n' "$output"
 }
 
+# The build path must normalize the armored CI secret before the runtime executor
+# writes it: the device carries apt/gpgv, not gpg or file(1).
+@test "apt ceralive (T2.6): the build dearmors its keyring and the RUNTIME EXECUTOR consumes binary input" {
+  command -v gpg >/dev/null || skip "gpg is required for the synthetic OpenPGP fixture"
+  command -v file >/dev/null || skip "file is required for the keyring-magic guard"
+  unshare -rm --map-root-user true 2>/dev/null || skip "rootless mount namespaces are required"
+
+  local fixture_home="$BATS_TEST_TMPDIR/apt-keyring-gnupg"
+  local armored="$BATS_TEST_TMPDIR/ceralive-archive-keyring.asc"
+  local repro="$BATS_TEST_TMPDIR/runtime-keyring-repro.sh"
+  local dearmor="$V2/lib/dearmor-apt-keyring.sh"
+  mkdir -m 700 "$fixture_home"
+  run gpg --batch --homedir "$fixture_home" --passphrase '' \
+    --quick-generate-key 'CeraLive test archive <test-archive@example.invalid>' ed25519 sign 1d
+  [ "$status" -eq 0 ]
+  run gpg --batch --homedir "$fixture_home" --armor --export test-archive@example.invalid
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" >"$armored"
+
+  local armored_b64 binary_b64
+  armored_b64="$(base64 -w0 "$armored")"
+  run env APT_GPG_PUBLIC_B64="$armored_b64" "$dearmor"
+  [ "$status" -eq 0 ]
+  binary_b64="$output"
+  printf '%s' "$binary_b64" | base64 -d >"$BATS_TEST_TMPDIR/build-keyring.gpg"
+  run file -b "$BATS_TEST_TMPDIR/build-keyring.gpg"
+  [ "$status" -eq 0 ]
+  [[ "$output" == OpenPGP\ Public\ Key\ Version* ]]
+  local binary_magic="$output"
+
+  run env APT_GPG_PUBLIC_B64="$binary_b64" "$dearmor"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | base64 -d >"$BATS_TEST_TMPDIR/reaccepted-binary-keyring.gpg"
+  run file -b "$BATS_TEST_TMPDIR/reaccepted-binary-keyring.gpg"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$binary_magic" ]]
+
+  run env APT_GPG_PUBLIC_B64='@@@@' "$dearmor"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not decode APT_GPG_PUBLIC_B64"* ]]
+
+  local fake_bin="$BATS_TEST_TMPDIR/fake-gpg"
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/gpg" <<'FAKE_GPG'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+input=''
+while (( $# )); do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) input="$1"; shift ;;
+  esac
+done
+cat "$input" >"$output"
+FAKE_GPG
+  chmod +x "$fake_bin/gpg"
+  run env PATH="$fake_bin:$PATH" APT_GPG_PUBLIC_B64="$armored_b64" "$dearmor"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a binary OpenPGP public key (PGP public key block Public-Key (old))"* ]]
+
+  cat >"$repro" <<'REPRO'
+set -euo pipefail
+postinst="$1"
+key_b64="$2"
+work="$3"
+final=/usr/share/keyrings/ceralive-archive-keyring.gpg
+expected="$work/expected-runtime-keyring.gpg"
+old="$work/old-runtime-keyring.gpg"
+
+extract_fn() {
+  awk -v fn="$1" '
+    $0 ~ "^" fn "\\(\\) \\{" { found=1 }
+    found { print }
+    found && /^}/ { exit }
+  ' "$2"
+}
+
+mkdir -p "$work/bin"
+mount -t tmpfs tmpfs /etc
+mount -t tmpfs tmpfs /usr/share
+mkdir -p /etc/opt/ceralive /etc/apt/certs /etc/apt/apt.conf.d /etc/apt/sources.list.d \
+  /etc/apt/preferences.d /usr/share/keyrings
+cat >"$work/bin/dpkg" <<'DPKG'
+#!/usr/bin/env bash
+printf 'amd64\n'
+DPKG
+chmod +x "$work/bin/dpkg"
+export PATH="$work/bin:$PATH"
+
+printf '%s' "$key_b64" | base64 -d >"$expected"
+printf '\x00old-ceralive-keyring\xff\n' >"$old"
+
+fail() {
+  printf 'runtime-keyring regression: FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_no_temp() {
+  local leaked
+  leaked="$(find /usr/share/keyrings -maxdepth 1 -type f \
+    -name 'ceralive-archive-keyring.gpg.??????' -print -quit)"
+  [[ -z "$leaked" ]] || fail "$1 left temporary keyring $leaked"
+}
+
+seed_old() {
+  cp "$old" "$final"
+  old_sha="$(sha256sum "$final" | awk '{print $1}')"
+}
+
+assert_old_preserved() {
+  local actual_sha
+  [[ -f "$final" ]] || fail "$1 removed the pre-existing final keyring"
+  actual_sha="$(sha256sum "$final" | awk '{print $1}')"
+  [[ "$actual_sha" == "$old_sha" ]] \
+    || fail "$1 changed the pre-existing final keyring: expected $old_sha, got $actual_sha"
+  cmp -s "$old" "$final" || fail "$1 changed the pre-existing final keyring bytes"
+  assert_no_temp "$1"
+  printf 'runtime-keyring: %s preserved old sha256=%s and cleaned temp\n' "$1" "$actual_sha"
+}
+
+log() { printf '[runtime-test] %s\n' "$*" >&2; }
+eval "$(extract_fn setup_ceralive_repository "$postinst")"
+CHANNEL=stable
+
+seed_old
+APT_GPG_PUBLIC_B64='@@@@'
+if setup_ceralive_repository; then
+  fail "malformed base64 unexpectedly succeeded"
+fi
+assert_old_preserved "decode failure"
+
+cat >"$work/bin/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+exit 74
+MKTEMP
+chmod +x "$work/bin/mktemp"
+seed_old
+APT_GPG_PUBLIC_B64="$key_b64"
+if setup_ceralive_repository; then
+  fail "temporary preparation failure unexpectedly succeeded"
+fi
+assert_old_preserved "temporary preparation failure"
+rm -f "$work/bin/mktemp"
+hash -r
+
+cat >"$work/bin/mv" <<'MV'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "-f" && "$2" == "--" && "$#" -eq 4 ]]
+source_path="$3"
+final_path="$4"
+[[ "$final_path" == /usr/share/keyrings/ceralive-archive-keyring.gpg ]]
+cmp -s "$TEST_EXPECTED_KEYRING" "$source_path"
+[[ "$(stat -c '%a' "$source_path")" == 644 ]]
+[[ "$(stat -c '%u:%g' "$source_path")" == 0:0 ]]
+printf 'prepared source bytes, mode, and owner verified\n' >"$TEST_MV_MARKER"
+exit 73
+MV
+chmod +x "$work/bin/mv"
+seed_old
+export TEST_EXPECTED_KEYRING="$expected"
+export TEST_MV_MARKER="$work/mv-preparation-verified"
+APT_GPG_PUBLIC_B64="$key_b64"
+if setup_ceralive_repository; then
+  fail "final replacement failure unexpectedly succeeded"
+fi
+[[ -s "$TEST_MV_MARKER" ]] \
+  || fail "final replacement failure was not injected after full temporary preparation"
+assert_old_preserved "final replacement failure"
+rm -f "$work/bin/mv"
+hash -r
+
+APT_GPG_PUBLIC_B64="$key_b64"
+setup_ceralive_repository
+cmp -s "$expected" "$final" || fail "successful handoff published unexpected bytes"
+[[ "$(stat -c '%a' "$final")" == 644 ]] || fail "successful handoff mode is not 0644"
+[[ "$(stat -c '%u:%g' "$final")" == 0:0 ]] || fail "successful handoff owner is not root:root"
+assert_no_temp "successful handoff"
+cp "$final" "$work/runtime-keyring.gpg"
+printf 'runtime-keyring: success published expected bytes mode=0644 owner=root:root and cleaned temp\n'
+REPRO
+
+  run unshare -rm --map-root-user bash "$repro" "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
+    "$binary_b64" "$BATS_TEST_TMPDIR"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$binary_b64"* ]]
+  run file -b "$BATS_TEST_TMPDIR/runtime-keyring.gpg"
+  [ "$status" -eq 0 ]
+  [[ "$output" == OpenPGP\ Public\ Key\ Version* ]]
+  [[ "$output" == "$binary_magic" ]]
+
+  local runtime_fn
+  runtime_fn="$(awk '/^setup_ceralive_repository\(\) \{/{f=1} f{print} f && /^}/{exit}' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot")"
+  [[ "$runtime_fn" == *'mv -f -- "${keyring_tmp}" /usr/share/keyrings/ceralive-archive-keyring.gpg'* ]]
+  [[ "$runtime_fn" != *'install -m 0644 "${keyring_tmp}" /usr/share/keyrings/ceralive-archive-keyring.gpg'* ]]
+  [[ "$runtime_fn" != *"gpg --"* ]]
+  [[ "$runtime_fn" != *"file -b"* ]]
+  grep -q 'DEARMOR_APT_KEYRING_SH=' "$V2/lib/orchestrate.sh"
+  grep -q 'APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")"' "$V2/lib/orchestrate.sh"
+  grep -q '/work/lib/dearmor-apt-keyring.sh' "$V2/lib/orchestrate.sh"
+  local failing_container_helper="$BATS_TEST_TMPDIR/failing-container-dearmor"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 37' >"$failing_container_helper"
+  chmod +x "$failing_container_helper"
+  local container_prepare
+  container_prepare="$(awk '
+    /if \[\[ -n "\$\{APT_GPG_PUBLIC_B64:-\}" \]\]; then/ { found=1 }
+    found { print }
+    found && /^[[:space:]]*fi$/ { exit }
+  ' "$V2/lib/orchestrate.sh")"
+  [[ "$container_prepare" == *'/work/lib/dearmor-apt-keyring.sh'* ]]
+  run env APT_GPG_PUBLIC_B64='must-fail' bash -euo pipefail -c "${container_prepare//\/work\/lib\/dearmor-apt-keyring.sh/$failing_container_helper}"$'\nprintf "mkosi_started=yes\\n"'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'could not prepare the binary CeraLive apt keyring for mkosi'* ]]
+  [[ "$output" != *'mkosi_started=yes'* ]]
+  local passing_container_helper="$BATS_TEST_TMPDIR/passing-container-dearmor"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf binary-keyring-b64' >"$passing_container_helper"
+  chmod +x "$passing_container_helper"
+  run env APT_GPG_PUBLIC_B64='normalizes' bash -euo pipefail -c "${container_prepare//\/work\/lib\/dearmor-apt-keyring.sh/$passing_container_helper}"$'\nprintf "mkosi_started=yes keyring=%s\\n" "$APT_GPG_PUBLIC_B64"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == 'mkosi_started=yes keyring=binary-keyring-b64' ]]
+  grep -Eq '^[[:space:]]+file \\' "$V2/ci/Dockerfile"
+  grep -Eq '^[[:space:]]+gpg \\' "$V2/ci/Dockerfile"
+  printf 'binary magic: %s\narmored fixture rejected by build guard\nruntime consumed build-validated binary keyring\n' "$binary_magic"
+}
+
+@test "image hygiene: hardware udev rules do not queue the retired optimize unit" {
+  run grep -RE 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$V2/mkosi"
+  [ "$status" -eq 1 ]
+}
+
+@test "image hygiene: portable check detects a planted retired optimize unit" {
+  local fixture="$BATS_TEST_TMPDIR/planted-udev.rules"
+  printf '%s\n' 'ACTION=="add", ENV{SYSTEMD_WANTS}="ceralive-optimize@.service"' >"$fixture"
+
+  run grep -E 'ceralive-optimize@|SYSTEMD_WANTS.*optimize' "$fixture"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ceralive-optimize@"* ]]
+}
+
 # ===========================================================================
 # 23. ModemManager 1.24 closure image integration + fail-closed modem_ports udev.
 #     The nine-package modem-stack fork (modemmanager + libmm-glib0 +

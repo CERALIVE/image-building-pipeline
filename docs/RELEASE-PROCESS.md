@@ -699,10 +699,16 @@ attempting an unverified download — see `main()` line ~671-676.
    wrapping, unlike the PASETO key contract in
    [`docs/paseto-key-provisioning.md`](../docs/paseto-key-provisioning.md)):
    ```bash
-   APT_GPG_PUBLIC_B64="$(base64 -w0 < new-ceralive-archive-keyring.gpg)"
+   APT_GPG_PUBLIC_B64="$(base64 -w0 < new-ceralive-archive-keyring.asc)"
    APT_CLIENT_CRT_B64="$(base64 -w0 < new-client.crt)"
    APT_CLIENT_KEY_B64="$(base64 -w0 < new-client.key)"
    ```
+   The current secret is armored `.asc`; a binary `.gpg` public keyring is also
+   accepted for compatibility. Before mkosi runs, the native host or canonical
+   builder executes `v2/lib/dearmor-apt-keyring.sh`, verifies the resulting binary
+   OpenPGP keyring with `file(1)`, and forwards only the binary payload into the
+   runtime postinstall. This is build-only tooling: the device image must not gain
+   `gpg` or `file` for this conversion.
 3. **Update wherever the current values are stored** — today, that means every
    place a human or private CI job keeps them (local `.env`, a secrets
    manager, or GitHub repository secrets once §5's future CI job lands). Set
