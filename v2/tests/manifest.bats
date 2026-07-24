@@ -3739,6 +3739,25 @@ run_modem_generator() {
   grep -Fq 'generate_modem_slot_uid_rules "$@"' "$udev"
 }
 
+@test "hdmi-in: a name-keyed SYMLINK rule gives the SoC HDMI-RX a stable /dev/hdmi-in node" {
+  # The SoC HDMI-IN capture node must get a persistent, collision-proof name that
+  # does not depend on its /dev/videoN enumeration index (a USB capture card can
+  # grab video0 and renumber the HDMI-RX). The symlink rule keys on the stable
+  # rk_hdmirx DRIVER name via ATTRS{name}, never on KERNEL=="video0".
+  local udev="$V2/mkosi/customize/udev.sh"
+  local rule
+  rule="$(grep -F 'SYMLINK+="hdmi-in"' "$udev")"
+  [ -n "$rule" ]
+  # keyed on the driver name, not a fixed node index
+  [[ "$rule" == *'ATTRS{name}=="rk_hdmirx"'* ]]
+  [[ "$rule" != *'KERNEL=="video0"'* ]]
+  # also provides /dev/hdmirx (cerastream's canonical default HDMI device string)
+  [[ "$rule" == *'SYMLINK+="hdmirx"'* ]]
+  # additive: the original name-matched HDMI permission rules are still present
+  grep -Fq 'ATTRS{name}=="rk_hdmirx", GROUP="video", MODE="0664"' "$udev"
+  grep -Fq 'ATTRS{name}=="*hdmi*", GROUP="video", MODE="0664"' "$udev"
+}
+
 @test "modem_ports wiring: CERALIVE_MODEM_PORTS_* is forwarded env_names -> PassEnvironment lockstep" {
   # Mirrors the interface-naming lockstep guard: the status/slots vars must be in
   # BOTH orchestrate.sh env_names AND mkosi.conf PassEnvironment, or they read

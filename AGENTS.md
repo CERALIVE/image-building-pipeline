@@ -851,6 +851,23 @@ reading real hardware ID_PATHs**. Guards: `manifest.bats §23` generator matrix
 verified-with-no-slots ⇒ fail-closed; stale-file cleanup; generic-rules-untouched;
 env lockstep).
 
+**Stable HDMI-IN capture symlink (`/dev/hdmi-in` + `/dev/hdmirx`)** [EXISTS]
+
+`v2/mkosi/customize/udev.sh::setup_hardware_access` gives the RK3588 SoC HDMI-RX
+capture node a persistent, collision-proof name via a `SYMLINK+=` rule keyed on the
+stable `rk_hdmirx` **driver** name (`ATTRS{name}=="rk_hdmirx"`), NOT on the
+`/dev/videoN` index. This matters because a USB capture card can grab `/dev/video0`
+and renumber the SoC HDMI-RX to a higher index — the enumeration-order conflict a
+bare node index cannot avoid. The rule emits BOTH `/dev/hdmi-in` (human-readable)
+and `/dev/hdmirx` (cerastream's canonical default HDMI device string, so the engine
+default resolves to a real node). It is ADDITIVE: the two existing name-matched HDMI
+`GROUP="video"` permission rules are untouched, and the engine still finds the HDMI
+device by driver substring (`cerastream driver_is_hdmi_rx`), so the symlink is a
+stable operator/diagnostic handle, not a new required routing dependency. Guard:
+`manifest.bats` "hdmi-in: a name-keyed SYMLINK rule gives the SoC HDMI-RX a stable
+/dev/hdmi-in node" (asserts driver-keyed, not `video0`-pinned, both symlink tokens,
+and the original permission rules preserved).
+
 ## ADD-ON SUBSYSTEM [EXISTS]
 
 Feature sysexts are optional, per-board/per-OS `.raw` artifacts delivered
