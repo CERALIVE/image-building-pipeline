@@ -397,15 +397,15 @@ EOF
 # (definition: customize/postinst-lib.sh::setup_hostname_service — sourced above)
 
 # ---------------------------------------------------------------------------
-# 11. CeraLive directory structure + seed configs (v1 634-770), ceralive paths.
+# 11. CeraLive directory structure (v1 634-770), ceralive paths.
 # ---------------------------------------------------------------------------
 create_ceralive_structure() {
-  log "creating /etc/opt/ceralive + /opt/ceralive structure and seed configs"
+  log "creating /etc/opt/ceralive + /opt/ceralive structure"
   mkdir -p /etc/opt/ceralive
   mkdir -p /opt/ceralive/{bin,lib,share}
   mkdir -p /var/opt/ceralive/{cache,logs}
   mkdir -p /home/ceralive/.config/ceralive /home/ceralive/.local/share/ceralive
-  mkdir -p /etc/ceralive/conf.d
+  mkdir -p /etc/ceralive
 
   cat >/etc/ceralive/release <<'EOF'
 NAME="CeraLive"
@@ -413,47 +413,6 @@ PRETTY_NAME="CeraLive Streaming Appliance"
 ID=ceralive
 VERSION_ID="1"
 BUILD_BRANCH="stable"
-EOF
-
-  cat >/etc/ceralive/conf.d/srtla.conf <<'EOF'
-# SRTLA Bonding Configuration
-ips_file=/tmp/srtla_ips
-srt_latency=2000
-connection_timeout=3000
-EOF
-
-  cat >/etc/ceralive/conf.d/streaming.conf <<'EOF'
-# Streaming Configuration
-default_encoder=auto
-audio_encoder=aac
-bitrate=5000000
-framerate=30
-keyframe_interval=60
-EOF
-
-  cat >/etc/ceralive/conf.d/network.conf <<'EOF'
-# Network Configuration
-enable_bonding=true
-prefer_wired=true
-auto_reconnect=true
-reconnect_delay=2
-EOF
-
-  cat >/etc/ceralive/conf.d/hardware.conf <<'EOF'
-# Hardware Configuration
-enable_hdmi_input=true
-enable_usb_devices=true
-auto_detect_input=true
-capture_resolution=auto
-hw_accel=auto
-EOF
-
-  cat >/etc/ceralive/conf.d/modems.conf <<'EOF'
-# Modem Configuration
-enable_modem_manager=true
-auto_connect=true
-default_priority=100
-enable_sms=false
 EOF
 
   chown -R ceralive:ceralive /home/ceralive /var/opt/ceralive
