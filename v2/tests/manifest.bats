@@ -3739,17 +3739,18 @@ run_modem_generator() {
   grep -Fq 'generate_modem_slot_uid_rules "$@"' "$udev"
 }
 
-@test "hdmi-in: a name-keyed SYMLINK rule gives the SoC HDMI-RX a stable /dev/hdmi-in node" {
+@test "hdmi-in: a driver-keyed SYMLINK rule gives the SoC HDMI-RX a stable /dev/hdmi-in node" {
   # The SoC HDMI-IN capture node must get a persistent, collision-proof name that
   # does not depend on its /dev/videoN enumeration index (a USB capture card can
   # grab video0 and renumber the HDMI-RX). The symlink rule keys on the stable
-  # rk_hdmirx DRIVER name via ATTRS{name}, never on KERNEL=="video0".
+  # rk_hdmirx DRIVER name, never on KERNEL=="video0" or the node's name attr.
   local udev="$V2/mkosi/customize/udev.sh"
   local rule
   rule="$(grep -F 'SYMLINK+="hdmi-in"' "$udev")"
   [ -n "$rule" ]
   # keyed on the driver name, not a fixed node index
-  [[ "$rule" == *'ATTRS{name}=="rk_hdmirx"'* ]]
+  [[ "$rule" == *'DRIVERS=="rk_hdmirx"'* ]]
+  [[ "$rule" != *'ATTRS{name}=="rk_hdmirx"'* ]]
   [[ "$rule" != *'KERNEL=="video0"'* ]]
   # also provides /dev/hdmirx (cerastream's canonical default HDMI device string)
   [[ "$rule" == *'SYMLINK+="hdmirx"'* ]]

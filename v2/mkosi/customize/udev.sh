@@ -63,7 +63,7 @@ KERNEL=="video*", SUBSYSTEM=="video4linux", ATTRS{name}=="*hdmi*", GROUP="video"
 # capture card grabbing video0 and re-enumerating the HDMI-RX to a higher index —
 # the enumeration-order conflict the bare node index cannot avoid. /dev/hdmirx
 # also matches cerastream's canonical default HDMI device string.
-KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", ATTRS{name}=="rk_hdmirx", SYMLINK+="hdmi-in", SYMLINK+="hdmirx"
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", DRIVERS=="rk_hdmirx", SYMLINK+="hdmi-in", SYMLINK+="hdmirx"
 KERNEL=="card[0-9]*", SUBSYSTEM=="drm", GROUP="video", MODE="0664"
 KERNEL=="renderD[0-9]*", SUBSYSTEM=="drm", GROUP="video", MODE="0664"
 
