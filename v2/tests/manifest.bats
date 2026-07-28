@@ -1656,6 +1656,18 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: iw is installed so the regulatory domain can be applied" {
+  # `wireless-tools` looks like it covers this and does NOT: it ships only the
+  # legacy WEXT binaries (iwconfig/iwlist/iwgetid/iwpriv/iwspy). The nl80211 `iw`
+  # binary is a SEPARATE Debian package, is nothing else's dependency in this
+  # list, and is what CeraUI shells out to for `iw reg set <CC>` (apply the
+  # operator's country) and `iw phy` (read the AP-usable channels back out).
+  # Absent it, wireless-regdb is loaded but no country can ever be selected and
+  # the hotspot is stuck on the conservative world domain.
+  run grep -Ex 'iw[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "runtime packages: squashfs-tools is installed so rauc can unsquashfs bundles" {
   # rauc info/install shells out to /usr/bin/unsquashfs to extract the manifest
   # (and rootfs image) from a plain-format .raucb. Without squashfs-tools on the
