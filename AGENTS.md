@@ -704,6 +704,25 @@ network.ts`), so swapping binaries is a large unrelated risk — adding the one 
 binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
 installed …" + "… reaches the resolved runtime package set …".
 
+**`iw` in `shared.list` — `wireless-tools` is NOT the same package** [EXISTS]
+
+The same class of gap as `net-tools` above, one layer over. `wireless-regdb` was
+already an explicit entry (so the kernel loads `/lib/firmware/regulatory.db`), but
+nothing could ever SELECT a regulatory domain: CeraUI applies the operator's
+country with `iw reg set <CC>` and then reads the AP-usable hotspot channels back
+out of `iw phy` (`apps/backend/src/modules/wifi/regdomain.ts` — the channel list is
+derived from the kernel, never from a country→channel table). `iw` is the nl80211
+tool and is its OWN Debian package.
+
+The trap is the name: `wireless-tools` reads like it covers this and does not — it
+ships only the legacy WEXT binaries (`iwconfig`, `iwlist`, `iwgetid`, `iwpriv`,
+`iwspy`, `iwevent`), which was confirmed against the built rootfs
+(`v2/mkosi/build/app/usr/sbin/`). Nothing else in `shared.list` depends on `iw`
+either, so absent an explicit entry the regulatory country silently cannot be
+applied and the hotspot stays on the conservative world domain (2.4 GHz channels
+1-11 only — no channel 12/13 in ETSI countries). Guard: `manifest.bats` "runtime
+packages: iw is installed so the regulatory domain can be applied".
+
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
 

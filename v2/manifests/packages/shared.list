@@ -93,7 +93,15 @@ mobile-broadband-provider-info  # ModemManager's mobile-provider / APN database
                          # a manual connection profile. Debian package (not forked).
 
 # --- WiFi ---------------------------------------------------------------------
-wireless-tools           # legacy iw* tooling
+wireless-tools           # legacy WEXT tooling (iwconfig/iwlist) — NOT the `iw` below
+iw                       # nl80211 tool: `iw reg get/set` applies the operator's regulatory
+                         # country, and `iw phy` is what CeraUI reads BACK to derive the
+                         # AP-usable hotspot channels (no country->channel table exists
+                         # anywhere). wireless-tools does NOT provide it — that package ships
+                         # only the legacy WEXT iwconfig/iwlist/iwgetid binaries — and nothing
+                         # else in this list pulls it, so without an explicit entry the
+                         # regulatory country cannot be applied and the hotspot stays on the
+                         # conservative world domain.
 wpasupplicant            # WPA client
 wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db + .p7s) — the
                          # kernel cfg80211 subsystem loads it at boot to establish a usable
