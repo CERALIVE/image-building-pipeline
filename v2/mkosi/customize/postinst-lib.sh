@@ -253,6 +253,62 @@ configure_services() {
   for svc in bluetooth.service cups.service; do
     disable_service "${svc}"
   done
+  setup_typec_source_role
+}
+
+# USB-C capture reliability: pin the Type-C connector to the SOURCE role at boot.
+#
+# /sys/class/typec/port0 is an FUSB302 TCPM connector (feac0000.i2c/i2c-4/4-0022)
+# that drives the DWC3 controller fc000000.usb through a usb-role-switch. The
+# device tree leaves it DRP (dual-role), so every fresh boot reads
+# `port_type = [dual] source sink` and the port does not CHOOSE a role — it
+# toggles, and Try.SRC/Try.SNK arbitration on the CC lines decides. The capture
+# camera (DJI Osmo Pocket 3) is dual-role too, so both ends toggle and the
+# arbitration is a real race: the TCPM trace shows the port cycling
+# `SNK_TRY_WAIT -> SRC_TRYWAIT` rather than converging. Whenever it lands on
+# SINK the SoC is running as a USB peripheral, so the camera is not "slow to be
+# detected" — its bus (usb9/9-1) is entirely absent from /sys/bus/usb/devices/.
+# That is the mechanism behind the long-standing "camera sometimes isn't detected
+# over USB-C" complaint. Writing `source` removes the arbitration outright and
+# the camera enumerated on every attempt in live testing (1-19 s to full UVC mode
+# switch), including straight after a cold power-cycle.
+#
+# It has to be a BOOT-TIME mechanism because `port_type` is live sysfs state: it
+# reverts to `dual` on every reboot, and there is no device-tree property we own
+# in this repo (the DT comes from the Armbian BSP kernel package, see the BSP
+# pin/drift contract) that would set it.
+#
+# WHY A SYSTEMD ONESHOT AND NOT A UDEV RULE. udev would sidestep the "does the
+# sysfs path exist yet" race for free, but it loses on three counts that matter
+# more here: (1) it cannot express ordering against cerastream.service — the unit
+# that actually opens the camera — whereas Before= can, and that ordering is the
+# actual requirement; (2) a failed ATTR{} write is a silent udevd log line, not a
+# failed unit, and this image's boot-config discipline is fail-loud with journal
+# evidence; (3) the obvious `ATTR{port_type}=="dual"` guard that would make such a
+# rule idempotent can NEVER match, because the kernel prints the whole menu with
+# the active entry bracketed (`[dual] source sink`) — a trap that yields a rule
+# that looks correct and does nothing. On top of that, a role change makes TCPM
+# emit KOBJ_CHANGE on the same device, so an unguarded rule re-triggers itself.
+# The service pays for this with a bounded poll (never a fixed sleep) for the
+# asynchronously-probed attribute; see the script header.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_boot_healthcheck / setup_provisioning), never inlined.
+# TYPEC_UNIT_DIR / TYPEC_SBIN_DIR override the install dirs for the offline test.
+setup_typec_source_role() {
+  log "pinning the USB-C connector to the Type-C source role at boot (ceralive-typec-source.service — DRP arbitration must not decide whether the camera enumerates)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-typec-source.sh" ]] \
+    || die "typec-source script not found: ${src}/ceralive-typec-source.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-typec-source.service" ]] \
+    || die "typec-source unit not found: ${src}/ceralive-typec-source.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${TYPEC_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${TYPEC_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-typec-source.sh" "${sbin_dir}/ceralive-typec-source"
+  install -D -m 0644 "${src}/ceralive-typec-source.service" "${unit_dir}/ceralive-typec-source.service"
+
+  enable_service ceralive-typec-source.service
 }
 
 # SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs

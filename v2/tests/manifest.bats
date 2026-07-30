@@ -2952,6 +2952,155 @@ run_paseto_provision() {
 }
 
 # ===========================================================================
+# 18d. USB-C Type-C source role — the board's connector is a DRP (dual-role)
+#      FUSB302/TCPM port, so every fresh boot reads `[dual] source sink` and the
+#      Try.SRC/Try.SNK arbitration against the (also dual-role) camera decides
+#      the role. When it lands on sink the SoC runs as a USB peripheral and the
+#      camera's bus is absent entirely — the "camera sometimes isn't detected
+#      over USB-C" complaint. setup_typec_source_role (postinst-lib.sh) installs
+#      a oneshot that pins port_type to `source` before cerastream.service.
+#      These drive the SHIPPED function and the SHIPPED script against temp
+#      install dirs and a fake sysfs tree — no image boot, no hardware.
+# ===========================================================================
+
+# typec_fake_sysfs <dir> <port_type contents> — a minimal /sys/class/typec stand-in.
+typec_fake_sysfs() {
+  mkdir -p "$1/port0"
+  printf '%s\n' "$2" >"$1/port0/port_type"
+}
+
+@test "typec source: the pinning script + boot unit are installed and enabled" {
+  local unit_dir="$BATS_TEST_TMPDIR/typec-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/typec-sbin"
+  local bin="$BATS_TEST_TMPDIR/typec-bin"
+  local calls="$BATS_TEST_TMPDIR/typec-calls"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$TYPEC_CALLS"
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" TYPEC_CALLS="$calls" \
+    CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
+    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+  [ "$status" -eq 0 ]
+  [ -x "$sbin_dir/ceralive-typec-source" ]
+  [ -f "$unit_dir/ceralive-typec-source.service" ]
+
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-typec-source.service"* ]]
+}
+
+@test "typec source: the target is port_type -> source (never sink, never dual)" {
+  # `dual` is the broken default and `sink` is the failure mode it resolves to;
+  # only `source` removes the arbitration. Locked against a well-meaning "fix".
+  local script="$V2/mkosi/runtime/ceralive-typec-source.sh"
+  grep -Fq 'WANTED_ROLE="source"' "$script"
+  grep -Fq '/port_type' "$script"
+
+  run grep -E 'WANTED_ROLE="(sink|dual)"' "$script"
+  [ "$status" -ne 0 ]
+  run grep -E '^[[:space:]]*printf .*(sink|dual).*>"\$\{ATTR\}"' "$script"
+  [ "$status" -ne 0 ]
+}
+
+@test "typec source: the unit is ordered before cerastream.service" {
+  # cerastream is what actually opens the capture device; ceralive.service is
+  # ordered after cerastream, so Before= on both covers the whole camera chain.
+  local unit="$V2/mkosi/runtime/ceralive-typec-source.service"
+  grep -Eq '^Before=.*\bcerastream\.service\b' "$unit"
+  grep -Eq '^Before=.*\bceralive\.service\b' "$unit"
+
+  # Ordering-ONLY: a hard dependency would make a board without cerastream fail.
+  run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=.*cerastream' "$unit"
+  [ "$status" -ne 0 ]
+}
+
+@test "typec source: a DRP port reading [dual] is pinned to source" {
+  local sysfs="$BATS_TEST_TMPDIR/typec-drp"
+  typec_fake_sysfs "$sysfs" '[dual] source sink'
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+    bash "$V2/mkosi/runtime/ceralive-typec-source.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pinning port0 from 'dual' to 'source'"* ]]
+  run cat "$sysfs/port0/port_type"
+  [[ "$output" == "source" ]]
+}
+
+@test "typec source: pinning is idempotent — an already-source port is not rewritten" {
+  # The kernel prints the whole menu with the ACTIVE entry bracketed, so a
+  # pinned port reads `dual [source] sink`, NOT `source`. A naive literal
+  # comparison would miss that and rewrite port_type on every boot.
+  local sysfs="$BATS_TEST_TMPDIR/typec-idem"
+  typec_fake_sysfs "$sysfs" 'dual [source] sink'
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+    bash "$V2/mkosi/runtime/ceralive-typec-source.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already source"* ]]
+  # Untouched: the menu string survives, proving no write happened.
+  run cat "$sysfs/port0/port_type"
+  [[ "$output" == "dual [source] sink" ]]
+}
+
+@test "typec source: a late/absent port_type is a bounded wait, never a hang or a failure" {
+  # /sys/class/typec/port0 is created by an ASYNCHRONOUS fusb302/TCPM probe, so
+  # the script must poll to a deadline — not sleep a fixed amount and hope.
+  local sysfs="$BATS_TEST_TMPDIR/typec-empty"
+  mkdir -p "$sysfs"
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=1 \
+    bash "$V2/mkosi/runtime/ceralive-typec-source.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"did not appear within 1s"* ]]
+
+  # A board with no Type-C class at all is a clean no-op, not a boot failure.
+  run env CERALIVE_TYPEC_CLASS_DIR="$BATS_TEST_TMPDIR/typec-absent" \
+    bash "$V2/mkosi/runtime/ceralive-typec-source.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to pin"* ]]
+
+  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
+  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$V2/mkosi/runtime/ceralive-typec-source.sh"
+}
+
+@test "typec source: a role change that does not take FAILS loudly (read-back verified)" {
+  # /dev/null accepts the write and reads back empty — the same observable shape
+  # as a TCPM that refuses the role change. It must not be reported as success.
+  local sysfs="$BATS_TEST_TMPDIR/typec-nulled"
+  mkdir -p "$sysfs/port0"
+  printf '%s\n' '[dual] source sink' >"$sysfs/port0/real_port_type"
+  ln -sf /dev/null "$sysfs/port0/port_type"
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+    bash "$V2/mkosi/runtime/ceralive-typec-source.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"after writing 'source'"* ]]
+}
+
+@test "typec source: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+  local unit_dir="$BATS_TEST_TMPDIR/typec-failclosed-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/typec-failclosed-sbin"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
+    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"typec-source script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-typec-source.service" ]
+}
+
+@test "typec source: pinning is wired into configure_services" {
+  # An unreferenced setup function is dead code — the camera race would ship.
+  run grep -E '^\s*setup_typec_source_role$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —

@@ -53,6 +53,7 @@ image-building-pipeline/
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
+| **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
@@ -902,6 +903,80 @@ Guard: `manifest.bats` "hdmi-in: a driver-keyed SYMLINK rule gives the SoC HDMI-
 stable /dev/hdmi-in node" — asserts `DRIVERS==` (and explicitly rejects a re-slip to
 `ATTRS{name}==`), not `video0`-pinned, both symlink tokens, and the original
 permission rules preserved.
+
+**The USB-C connector MUST be pinned to the Type-C `source` role at boot — else the
+camera is sometimes not on the USB bus at all** [EXISTS — code merged-ready, NOT in
+any shipped release yet]
+
+`/sys/class/typec/port0` is an FUSB302 TCPM connector (`feac0000.i2c/i2c-4/4-0022`)
+that drives the DWC3 controller `fc000000.usb` through a `usb-role-switch`. The
+device tree describes it as a **DRP** (dual-role) port, so every fresh boot comes up
+reading `port_type = [dual] source sink`. A DRP port does not *choose* a role — it
+toggles, and the role is settled by Try.SRC/Try.SNK arbitration on the CC lines
+against whatever is at the other end of the cable. The capture camera (DJI Osmo
+Pocket 3) is dual-role too, so **both** ends toggle and the arbitration is a genuine
+race with no stable winner: the TCPM trace
+(`/sys/kernel/debug/usb/tcpm-4-0022/log`) shows the port cycling
+`SNK_TRY_WAIT -> SRC_TRYWAIT` instead of converging.
+
+When the race lands on **SNK/device role**, the SoC's own controller is running as a
+USB *peripheral*. The camera is then not "slow to be detected" — it is *undetectable*:
+its bus (`usb9`/`9-1`) is entirely absent from `/sys/bus/usb/devices/`. This is the
+mechanism behind the long-standing operator complaint that the camera *sometimes*
+isn't detected over USB-C. Confirmed live on a Rock 5B+ repeatedly on 2026-07-30,
+including immediately after a genuine cold power-cycle: fresh boot → `port_type`
+`[dual] …` → camera absent → `echo source > …/port_type` → camera enumerates in
+seconds, full UVC mode switch (`idProduct` 0020→0023), `/dev/video1`+`/dev/video2`
+present, `uvcvideo`/`snd-usb-audio` bound. Every single time.
+
+`port_type` is **live sysfs state**: it reverts to `dual` on every reboot, and the
+device tree that would otherwise carry the default comes from the Armbian BSP kernel
+package (pinned/drift-gated here, not authored here). So the fix has to be applied at
+boot. `postinst-lib.sh::setup_typec_source_role` (called from `configure_services`)
+installs two committed standalone artifacts under `v2/mkosi/runtime/` —
+`ceralive-typec-source.sh` → `/usr/local/sbin/ceralive-typec-source` and
+`ceralive-typec-source.service` — and enables the unit.
+
+**Why a systemd oneshot and NOT a udev rule.** A udev rule
+(`SUBSYSTEM=="typec", KERNEL=="port0", ATTR{port_type}="source"`) would sidestep the
+"has the sysfs path been created yet" race for free, which is genuinely attractive.
+It loses on three counts that matter more here:
+
+1. **It cannot express the ordering that is the actual requirement.** The fix must be
+   in place before `cerastream.service` opens the capture device; a unit says
+   `Before=cerastream.service`, a udev rule can only hope the coldplug wins the race.
+2. **It fails silently.** A rejected `ATTR{}` write is a `udevd` log line, not a
+   failed unit — the opposite of this image's fail-loud, journal-evidence discipline.
+3. **The obvious idempotency guard cannot work, and looks like it does.** The kernel
+   prints the *whole menu* with the active entry bracketed — `[dual] source sink` at
+   rest, `dual [source] sink` once pinned — so `ATTR{port_type}=="dual"` never
+   matches and the rule silently does nothing. (Same trap for a naive
+   `[ "$(cat port_type)" = source ]` in a script; the shipped script parses the
+   bracket.) On top of that a role change makes TCPM emit `KOBJ_CHANGE` on the same
+   device, so an unguarded rule re-triggers itself.
+
+The unit pays for that choice by owning the probe race itself: `port0` is created by
+an **asynchronous** fusb302/TCPM probe, so the script **polls to a deadline** (30 s
+default, `CERALIVE_TYPEC_WAIT`) — never a fixed settle constant. A board with no
+Type-C class at all (x86) and a port that never appears are both clean no-ops; only a
+role change that is accepted but does not take (read-back mismatch) fails loudly.
+
+Scope is deliberately ONE attribute on ONE connector: `port0/port_type` ← `source`.
+Do **NOT** set `sink` or leave `dual` (`dual` is the broken default; both were settled
+by live hardware testing), and do **NOT** extend this to any `dwc3` platform-driver
+unbind/rebind — doing that by hand wedges a kernel worker on this board (separate,
+confirmed defect). Guards: `manifest.bats` §18d "typec source: …" — install+enable,
+`port_type`→`source` (rejecting `sink`/`dual`), `Before=cerastream.service`
+ordering-only, the `[dual]`→`source` transition, idempotency against the bracketed
+`dual [source] sink`, the bounded wait, fail-loud read-back, fail-closed missing
+source, and the `configure_services` wiring. `setup_typec_source_role` is registered
+in `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
+
+**Not yet in a shipped release.** This is code-complete and merged-ready only; it has
+not been through this repo's build/flash/release cycle, so no published image carries
+it. The persistent version still needs the normal on-hardware board-proof (confirm a
+reboot leaves `port_type` pinned and the camera enumerates exactly as the live sysfs
+poke did) before it is claimed as shipped.
 
 ## ADD-ON SUBSYSTEM [EXISTS]
 

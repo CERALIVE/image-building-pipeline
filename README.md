@@ -292,6 +292,27 @@ that actually carries the uplink on a bonding sender device, so it is now part
 of the guard alongside the encoder and receiver. Proof: `v2/run-tests`
 section 16.
 
+## USB-C Type-C Source-Role Pinning
+
+The board's USB-C connector is a dual-role (DRP) FUSB302/TCPM port, so on a fresh
+boot it does not pick a role — it toggles, and Try.SRC/Try.SNK arbitration on the
+cable decides. Against a camera that is *also* dual-role that arbitration genuinely
+races, and whenever it settles on the sink side the SoC runs as a USB peripheral and
+the camera never appears on the bus at all. That is the root cause of "the camera
+sometimes isn't detected over USB-C".
+
+`ceralive-typec-source.service` (a oneshot ordered before `cerastream.service`) pins
+`/sys/class/typec/port0/port_type` to `source` on every boot, which removes the
+arbitration entirely. The connector attribute is created by an asynchronous driver
+probe, so the unit polls for it to a deadline rather than sleeping a fixed amount; a
+board with no Type-C connector, or a port that never appears, is a clean no-op.
+
+Verified live on a Rock 5B+ (including straight after a cold power-cycle): with the
+port pinned, the camera enumerates within seconds on every attempt. **This code is
+merged-ready but has not been through a release — no published image carries it yet,
+and the persistent behaviour still needs an on-hardware board-proof.** Guards:
+`v2/tests/manifest.bats` §18d.
+
 ## Supported-Modem Matrix + WWAN Module Check
 
 The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA
