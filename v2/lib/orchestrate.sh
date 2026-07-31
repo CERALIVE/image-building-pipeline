@@ -46,6 +46,7 @@ RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
+BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
@@ -114,6 +115,8 @@ Builds the CeraLive v2 image for <board> from its manifest.
 Options:
   --native           build with HOST mkosi instead of the default container
                      (same as MKOSI_NATIVE=1)
+  --variant <name>   apply an OPT-IN family variant overlay (default: 'default',
+                     the production vendor path). Never inferred.
 
 Env:
   INSTALL_BOOT_BSP   1 (default) full device build incl. kernel/DTB/U-Boot/firmware
@@ -187,17 +190,63 @@ require_field() {
   [[ -n "${val}" ]] || die "manifest did not resolve required field '${name}' — refusing to build a half-image"
 }
 
+# ---------------------------------------------------------------------------
+# assert_staged_packages_unique <debs-dir> <built-dir>
+#
+# The kernel-from-source stage and the remote fetcher both feed the SAME local
+# package directory mkosi later resolves from. If a package name arrives from
+# both, mkosi's local repository silently picks one by version and the image
+# ships a kernel nobody chose — the worst possible failure mode for this feature,
+# because it produces a plausible image rather than an error.
+#
+# Suppression (CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS) is what should make a
+# collision impossible; this check is what proves it did. Fail closed on ANY
+# name present in both directories.
+# ---------------------------------------------------------------------------
+assert_staged_packages_unique() {
+  local fetched_dir="$1" built_dir="$2"
+  local deb pkg
+  local -A fetched=()
+  local -a collisions=()
+
+  shopt -s nullglob
+  for deb in "${fetched_dir}"/*.deb; do
+    pkg="$(deb_pkg_name "${deb}")"
+    [[ -n "${pkg}" ]] || die "unreadable staged package: $(basename "${deb}")"
+    fetched["${pkg}"]="$(basename "${deb}")"
+  done
+  for deb in "${built_dir}"/*.deb; do
+    pkg="$(deb_pkg_name "${deb}")"
+    [[ -n "${pkg}" ]] || die "unreadable built package: $(basename "${deb}")"
+    if [[ -n "${fetched[${pkg}]:-}" ]]; then
+      collisions+=("${pkg} (fetched: ${fetched[${pkg}]}, built: $(basename "${deb}"))")
+    fi
+  done
+  shopt -u nullglob
+
+  if (( ${#collisions[@]} > 0 )); then
+    for pkg in "${collisions[@]}"; do
+      log_error "duplicate candidate for staged package ${pkg}"
+    done
+    die "${#collisions[@]} package name(s) have BOTH a fetched and a locally-built candidate; the local package directory must have exactly one candidate per name. Check that kernel_source.suppressed_packages covers every name the variant replaces."
+  fi
+  log_success "staged package uniqueness verified: no name has both a fetched and a built candidate"
+}
+
 main() {
-  local board="" manifest=""
+  local board="" manifest="" variant="${CERALIVE_KERNEL_VARIANT:-default}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --board)    board="${2:-}"; shift 2 ;;
-      --manifest) manifest="${2:-}"; shift 2 ;;
-      --native)   MKOSI_NATIVE=1; shift ;;
-      -h|--help)  usage; exit 0 ;;
+      --board)     board="${2:-}"; shift 2 ;;
+      --manifest)  manifest="${2:-}"; shift 2 ;;
+      --native)    MKOSI_NATIVE=1; shift ;;
+      --variant)   variant="${2:-}"; shift 2 ;;
+      --variant=*) variant="${1#--variant=}"; shift ;;
+      -h|--help)   usage; exit 0 ;;
       *) usage; die "unknown argument: $1" ;;
     esac
   done
+  [[ -n "${variant}" ]] || die "--variant requires a name (use 'default' for the production vendor path)"
 
   [[ -n "${board}" ]]    || { usage; die "--board is required"; }
   [[ -n "${manifest}" ]] || { usage; die "--manifest is required"; }
@@ -208,7 +257,7 @@ main() {
   acquire_board_lock "${board}"
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
-  log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT}"
+  log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"
 
   # -------------------------------------------------------------------------
   # 1. Resolve manifest → flat build params, into THIS shell's environment.
@@ -217,12 +266,13 @@ main() {
   # -------------------------------------------------------------------------
   log_info "[1/9] resolving manifest → build params"
   local params
-  params="$("${RESOLVE_SH}" "${board}")" || die "manifest resolution failed for board '${board}'"
+  params="$("${RESOLVE_SH}" "${board}" --variant "${variant}")" \
+    || die "manifest resolution failed for board '${board}' (variant '${variant}')"
   eval "${params}"
   # Export the resolved architecture and BSP package vars immediately so
   # fetch-debs.sh (step 2) can read them. run_mkosi_build() re-exports the full
   # set at step 6; this early export covers the fetch step which runs before mkosi.
-  export ARCH UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
+  export ARCH DTB_NAME UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
          HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
 
   # Reproducible builds (task 14): pin ONE epoch for the whole run so every
@@ -242,11 +292,46 @@ main() {
   require_field FAMILY "${FAMILY:-}"
   require_field KERNEL_PACKAGES "${KERNEL_PACKAGES:-}"
   require_field FIRMWARE_PACKAGES "${FIRMWARE_PACKAGES:-}"
+
+  # Kernel-build-from-source is active IFF the resolved manifest carries a
+  # kernel_source: block — i.e. only under an explicitly selected variant. The
+  # production vendor path resolves this empty and every branch below is inert.
+  local kernel_from_source=0
+  if [[ -n "${KERNEL_SOURCE_GIT_URL:-}" ]]; then
+    kernel_from_source=1
+    require_field KERNEL_SOURCE_SUPPRESSED_PACKAGES "${KERNEL_SOURCE_SUPPRESSED_PACKAGES:-}"
+    require_field KERNEL_SOURCE_DTB_DEB_DIR "${KERNEL_SOURCE_DTB_DEB_DIR:-}"
+    require_field KERNEL_SOURCE_DTB_BOOT_DIR "${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
+    # Forwarded to fetch-debs.sh so exactly these names are excluded from every
+    # remote fetch path. U-Boot and firmware are NOT in this set and stay
+    # prebuilt-fetched.
+    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS="${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
+    # build-kernel.sh is a separate process and reads the whole pin set from the
+    # environment; every field it requires must be exported here or it fails
+    # closed on a "half-specified pin".
+    export KERNEL_SOURCE_GIT_URL KERNEL_SOURCE_TAG KERNEL_SOURCE_COMMIT
+    export KERNEL_SOURCE_PATCHES_GIT_URL KERNEL_SOURCE_PATCHES_COMMIT
+    export KERNEL_SOURCE_PATCHES_SERIES
+    export KERNEL_SOURCE_DEFCONFIG_BASE KERNEL_SOURCE_DEFCONFIG_FRAGMENT
+    export KERNEL_SOURCE_BUILDER_IMAGE KERNEL_SOURCE_LOCAL_VERSION
+    export KERNEL_SOURCE_KERNEL_RELEASE KERNEL_SOURCE_PACKAGE_VERSION
+    export KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
+    export KERNEL_SOURCE_MIRROR_URL="${KERNEL_SOURCE_MIRROR_URL:-}"
+    log_info "kernel from source: variant='${KERNEL_VARIANT:-${variant}}' builds ${KERNEL_PACKAGES}; remote fetch suppressed for: ${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
+  fi
+
   # DTB/U-Boot are required only when installing the boot BSP (rk3588 carries
   # both; x86 legitimately has neither — ACPI + UEFI). Gating on INSTALL_BOOT_BSP
   # fixes task-32 gap G2 without changing the arm64 boot build (still =1 there).
   if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    require_field DTB_PACKAGES "${DTB_PACKAGES:-}"
+    # A kernel_source variant legitimately resolves DTB_PACKAGES empty: the
+    # built linux-image deb carries the in-tree DTBs itself, and the
+    # dtb_deb_dir -> dtb_boot_dir mapping (asserted non-empty above, and
+    # machine-verified against the real deb by build-kernel.sh) is what
+    # satisfies the board's dtb_name instead of a linux-dtb-* package.
+    if [[ "${kernel_from_source}" != "1" ]]; then
+      require_field DTB_PACKAGES "${DTB_PACKAGES:-}"
+    fi
     require_field UBOOT_PACKAGES "${UBOOT_PACKAGES:-}"
   fi
 
@@ -278,16 +363,36 @@ main() {
   # -------------------------------------------------------------------------
   local staging="${STAGING_ROOT}/${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
+  local kernel_build_dir="${staging}/kernel-build"
   [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
     || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
   {
     rm -rf "${staging}"
     mkdir -p "${staging}"
-    install -d -m 0755 "${bsp_dir}" "${firstparty_dir}"
+    install -d -m 0755 "${bsp_dir}" "${firstparty_dir}" "${kernel_build_dir}"
 
     log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
     DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
       || die "fetch-debs failed for board '${board}'"
+
+    # Kernel from source. Runs AFTER the fetch so the uniqueness check below sees
+    # the complete fetched set, and BEFORE partitioning so the built .deb flows
+    # through exactly the same classification and staging path as a fetched one.
+    if [[ "${kernel_from_source}" == "1" ]]; then
+      log_info "[2b/9] building kernel from pinned source (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
+      "${BUILD_KERNEL_SH}" --board "${board}" --out "${kernel_build_dir}" \
+        || die "kernel-build-from-source failed for board '${board}'"
+
+      if [[ "${DRY_RUN:-0}" != "1" ]]; then
+        assert_staged_packages_unique "${staging}/debs" "${kernel_build_dir}"
+        shopt -s nullglob
+        local _kdeb
+        for _kdeb in "${kernel_build_dir}"/*.deb; do
+          "${MKOSI_PACKAGE_STAGING_SH}" "${_kdeb}" "${staging}/debs"
+        done
+        shopt -u nullglob
+      fi
+    fi
 
     log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
     # The set of BSP package names (manifest-declared) is the partition key.
@@ -543,6 +648,7 @@ run_mkosi_build() {
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+    KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
@@ -560,6 +666,13 @@ run_mkosi_build() {
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+  # Kernel-from-source DTB install mapping. EMPTY on the production vendor path,
+  # which is what makes the platform layer's copy step a strict no-op there:
+  # a source-built kernel ships its DTBs inside the linux-image deb, an Armbian
+  # linux-dtb-* package already puts them where the boot script looks.
+  export KERNEL_VARIANT="${KERNEL_VARIANT:-}"
+  export KERNEL_SOURCE_DTB_DEB_DIR="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
+  export KERNEL_SOURCE_DTB_BOOT_DIR="${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
