@@ -722,6 +722,16 @@ _fetch_first_party_curl() {
 # line. Single source of truth for "what packages does this build declare",
 # consumed by BOTH fetch_bsp (the Armbian set, minus userspace pins) and
 # fetch_rk3588_userspace (the pinned-URL subset).
+#
+# KERNEL-FROM-SOURCE SUPPRESSION (task 26). When an opt-in family variant builds
+# the kernel from source, CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS names exactly the
+# kernel/DTB packages that must NOT be fetched remotely — both the pre-overlay
+# vendor names (which the family file still lists) and the post-overlay built
+# names (which no remote archive carries). Filtering HERE rather than in each
+# fetcher means a suppressed package is invisible to every remote path at once.
+# U-Boot and firmware are deliberately never in that set: they stay prebuilt-
+# fetched. The list is DERIVED by resolve.py, never authored, so it cannot drift
+# from the replacement set. Empty/unset on the production vendor path.
 # ---------------------------------------------------------------------------
 collect_declared_bsp_pkgs() {
   local family="$1"
@@ -745,9 +755,13 @@ collect_declared_bsp_pkgs() {
              ${GSTREAMER_RUNTIME_PACKAGES:-}; do
     [[ -n "${pkg}" ]] && pkgs+=("${pkg}")
   done
+  local suppressed=" ${CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS:-} "
   local -a deduped=()
   local seen="|" p
   for p in "${pkgs[@]}"; do
+    if [[ "${suppressed}" == *" ${p} "* ]]; then
+      continue
+    fi
     [[ "${seen}" == *"|${p}|"* ]] || { deduped+=("${p}"); seen+="${p}|"; }
   done
   (( ${#deduped[@]} > 0 )) && printf '%s\n' "${deduped[@]}"
@@ -953,14 +967,26 @@ fetch_bsp() {
   # Provenance + content drift-guard for the exact-versioned kernel BSP. The board
   # KERNEL_PACKAGES override (resolve.py) wins over the family field, mirroring
   # the array-REPLACE merge above. Real-fetch only — DRY_RUN stages no .deb.
+  #
+  # A suppressed kernel package was never fetched here, so there is no staged
+  # .deb to hash: the drift-guard's subject is the ARMBIAN archive's bytes, and a
+  # kernel built from a pinned source tree + pinned patch commit is pinned by
+  # construction. Capturing provenance for it would either fail or, worse, seed
+  # the baseline with a locally-built hash and make a real Armbian re-spin look
+  # clean forever.
+  local suppressed=" ${CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS:-} "
   local -a kernel_pkgs=()
   if [[ -n "${KERNEL_PACKAGES:-}" ]]; then
     for pkg in ${KERNEL_PACKAGES}; do
-      [[ -n "${pkg}" ]] && kernel_pkgs+=("${pkg}")
+      if [[ -n "${pkg}" && "${suppressed}" != *" ${pkg} "* ]]; then
+        kernel_pkgs+=("${pkg}")
+      fi
     done
   else
     while IFS= read -r item; do
-      [[ -n "${item}" ]] && kernel_pkgs+=("${item}")
+      if [[ -n "${item}" && "${suppressed}" != *" ${item} "* ]]; then
+        kernel_pkgs+=("${item}")
+      fi
     done < <(read_yaml_list kernel_packages "${family}")
   fi
   if [[ -z "${DRY_RUN}" && ${#kernel_pkgs[@]} -gt 0 ]]; then
