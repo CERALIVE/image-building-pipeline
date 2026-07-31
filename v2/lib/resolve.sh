@@ -7,12 +7,21 @@
 #   2. reads the required `family:` ref
 #   3. locates manifests/families/<family>.yaml       (dies loudly + lists families)
 #   4. validates BOTH against their JSON Schemas       (dies "schema invalid: <field>")
-#   5. deep-merges family (defaults) <- board (overrides); board wins
+#   5. deep-merges family (defaults) <- [variant overlay] <- board (overrides); board wins
 #   6. resolves any `@versions:<key>` defer token via versions.yaml get_pin
 #   7. emits a flat, sorted, source-able KEY=value param set on stdout
 #
 # The emitted param set is what the builder orchestrator (task 16) consumes:
 #   eval "$(resolve.sh rock-5b-plus)"      # or: source <(resolve.sh rock-5b-plus)
+#
+# FAMILY VARIANTS (task 26)
+# -------------------------
+# A family may declare named `variants:` overlays (e.g. `edge`, which retargets
+# the kernel to a build-from-source pin). Selection is EXPLICIT ONLY — via
+# `--variant <name>` or CERALIVE_KERNEL_VARIANT — and is never inferred from the
+# board, the host or the environment beyond that one variable. With no variant
+# the resolver strips `variants:` and emits byte-identical params to a family
+# that never declared one, so the production (vendor) path cannot move.
 #
 # Design rules (inherited from lib/common.sh + learnings):
 #   * strict mode + loud ERR trap (common.sh); NO `|| true` anywhere.
@@ -52,6 +61,9 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../../versions.yaml}"
 
 # Manifest file extensions we accept, in precedence order.
 MANIFEST_EXTS=(yaml yml)
+
+# Reserved variant name meaning "apply no overlay" — the production vendor path.
+DEFAULT_KERNEL_VARIANT="default"
 
 # ---------------------------------------------------------------------------
 # get_pin — read a component's `pin:` from versions.yaml.
@@ -119,12 +131,16 @@ list_manifests() {
 
 usage() {
   cat >&2 <<EOF
-Usage: resolve.sh <board>
+Usage: resolve.sh <board> [--variant <name>]
 
 Resolves a board manifest into a flat KEY=value build-parameter set on stdout:
-  family defaults <- board overrides (board wins), versions.yaml pins resolved.
+  family defaults <- [variant overlay] <- board overrides (board wins),
+  versions.yaml pins resolved.
 
-  <board>  manifest stem under ${BOARDS_DIR}/
+  <board>            manifest stem under ${BOARDS_DIR}/
+  --variant <name>   family variant overlay to apply (default: '${DEFAULT_KERNEL_VARIANT}'
+                     = no overlay, the production vendor path). Also settable
+                     with CERALIVE_KERNEL_VARIANT. NEVER inferred.
 EOF
 }
 
@@ -134,11 +150,24 @@ EOF
 resolve() {
   require_cmd python3
 
-  local board="${1:-}"
+  local board="" variant="${CERALIVE_KERNEL_VARIANT:-${DEFAULT_KERNEL_VARIANT}}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --variant)   variant="${2:-}"; shift 2 ;;
+      --variant=*) variant="${1#--variant=}"; shift ;;
+      -h|--help)   usage; return 0 ;;
+      -*)          usage; die "unknown option: '$1'" ;;
+      *)
+        [[ -z "$board" ]] || { usage; die "only one positional <board> is allowed (got '${board}' and '$1')"; }
+        board="$1"; shift ;;
+    esac
+  done
+
   if [[ -z "$board" ]]; then
     usage
     die "missing required argument: <board>"
   fi
+  [[ -n "$variant" ]] || die "--variant requires a name (use '${DEFAULT_KERNEL_VARIANT}' for the production vendor path)"
 
   # 1. Locate the board manifest.
   local board_file
@@ -163,15 +192,19 @@ resolve() {
     exit 1
   fi
 
-  log_info "resolving board '${board}' (family '${family}')"
+  if [[ "$variant" == "$DEFAULT_KERNEL_VARIANT" ]]; then
+    log_info "resolving board '${board}' (family '${family}')"
+  else
+    log_info "resolving board '${board}' (family '${family}', variant '${variant}')"
+  fi
 
   # 4+5. Validate both against their schemas, then deep-merge (board wins).
   #      python emits sorted, tab-delimited KEY<TAB>RAW-VALUE lines.
   local merged
   merged="$(python3 "$RESOLVE_PY" merge \
-      --family "$family_file" --board "$board_file" \
+      --family "$family_file" --board "$board_file" --variant "$variant" \
       --family-schema "$FAMILY_SCHEMA" --board-schema "$BOARD_SCHEMA")" \
-    || die "manifest validation/merge failed for board '${board}' (see 'schema invalid:' above)"
+    || die "manifest validation/merge failed for board '${board}' (variant '${variant}'; see 'schema invalid:' above)"
 
   # 6+7. Resolve versions.yaml defer tokens, shell-quote, emit flat KEY=value.
   # resolve_pins' die() runs in a command substitution, so its exit cannot abort

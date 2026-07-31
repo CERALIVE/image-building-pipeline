@@ -36,6 +36,50 @@ fi
 
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 
+# install_kernel_source_dtbs — the PLATFORM-LAYER INSTALL MAPPING for a kernel
+# built from source.
+#
+# An Armbian linux-dtb-* package lands the board DTBs exactly where the U-Boot
+# boot script looks them up (/boot/dtb/<vendor>/${fdtfile}). `make bindeb-pkg`
+# does not: it ships the in-tree DTBs inside the linux-image deb under
+# /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/. This copies source -> target so
+# a source-built kernel satisfies the SAME board dtb_name expectation, with no
+# change to the boot script, the board manifest, or the disk assembler.
+#
+# Both paths come from the manifest (kernel_source.dtb_deb_dir / dtb_boot_dir)
+# and are EMPTY on the production vendor path, so this is a strict no-op there.
+# It is fail-loud when enabled: a missing source dir or a missing board DTB means
+# the image would boot to a device-tree-less kernel, which is indistinguishable
+# from a dead board at the far end of a flash cycle.
+install_kernel_source_dtbs() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local src="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
+  local dst="${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
+
+  if [[ -z "${src}" && -z "${dst}" ]]; then
+    return 0
+  fi
+  if [[ -z "${src}" || -z "${dst}" ]]; then
+    log "FATAL: kernel_source DTB mapping is half-specified (deb_dir='${src}' boot_dir='${dst}')"
+    exit 1
+  fi
+
+  if [[ ! -d "${root}${src}" ]]; then
+    log "FATAL: kernel_source.dtb_deb_dir ${src} is absent from the installed kernel package"
+    exit 1
+  fi
+
+  log "installing source-built kernel DTBs: ${src} -> ${dst}"
+  install -d -m 0755 "${root}${dst}"
+  cp -a "${root}${src}/." "${root}${dst}/"
+
+  if [[ -n "${DTB_NAME:-}" && ! -e "${root}${dst}/${DTB_NAME}" ]]; then
+    log "FATAL: board DTB ${DTB_NAME} is not present at ${dst} after the copy"
+    exit 1
+  fi
+  log "board DTB present at ${dst}/${DTB_NAME:-<unset>}"
+}
+
 prune_irrelevant_rk3588_firmware() {
 	local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
   local -a paths=(
@@ -78,6 +122,7 @@ fi
 if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   log "installing authenticated staged boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
   mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
+  install_kernel_source_dtbs
   prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."

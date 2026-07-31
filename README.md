@@ -138,6 +138,9 @@ cd image-building-pipeline
 ./v2/build --all
 ./v2/build --only rock-5b-plus,x86-minipc
 
+# Opt-in family variant (rk3588 'edge' = kernel built from pinned source)
+./v2/build rock-5b-plus --variant edge
+
 # Dry run (resolve + fetch plan only, no image written)
 DRY_RUN=1 ./v2/build rock-5b-plus
 DRY_RUN=1 ./v2/build --all                 # preview the resolved board list
@@ -337,6 +340,35 @@ edits `shared.list` or the kernel config. It is hyphen/underscore aware (the
 `cdc_wdm` module ships on disk as `cdc-wdm.ko`) and matches the `option` module
 by an exact `option.ko` / `modules.builtin` / alias entry, never a bare `option`
 substring. Proof: `v2/run-tests` section 17.
+
+## Kernel Build From Source (opt-in)
+
+The rk3588 family manifest carries an **opt-in** `edge` variant that builds the
+kernel and its in-tree DTBs from **pinned source** (`v7.1.5`) with the CeraLive
+RK3588 patch series applied, instead of fetching the prebuilt Armbian kernel:
+
+```bash
+./v2/build rock-5b-plus --variant edge
+```
+
+Every input is exact-pinned — the kernel commit, the patch-series commit (an
+immutable SHA, never a branch), and the builder container digest — and each pin is
+verified after checkout, so a moved tag fails the build instead of silently
+building different source. The backend is plain kernel `make bindeb-pkg`; the
+Armbian build framework is consulted for the branch→version mapping only and is
+never invoked as the build system.
+
+Selecting the variant suppresses the remote fetch of the kernel/DTB packages
+(U-Boot and firmware stay prebuilt-fetched), replaces their names with the built
+ones, and fails the build if any package name ends up with both a fetched and a
+built candidate.
+
+**With no variant selected the resolved production build is byte-identical to
+before this existed**, pinned by committed golden fixtures. Nothing produced by
+this stage has been compiled or booted yet, and it does not reopen the vendor-BSP
+decision. Full detail:
+[`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md);
+gaps: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) item 9.
 
 ## Kernel Currency Watch
 

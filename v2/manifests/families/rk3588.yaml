@@ -93,3 +93,79 @@ partition_template: rk3588-ab
 
 # SERIALCON from userpatches/config-*.conf (identical on both boards).
 serial_console: ttyS2:1500000
+
+# ---------------------------------------------------------------------------
+# OPT-IN VARIANTS. Everything above this line is the DEFAULT (vendor) variant —
+# the production path, and the only path any shipped image has ever used.
+#
+# A variant applies ONLY when a build explicitly asks for it:
+#   v2/build rock-5b-plus --variant edge      (or CERALIVE_KERNEL_VARIANT=edge)
+# Nothing infers a variant from the board, the host or the branch. With no
+# variant the resolver strips this block entirely, so the resolved production
+# parameter set is byte-identical to the manifest before variants existed
+# (pinned by the vendor-baseline fixtures in v2/tests/manifests/fixtures/).
+#
+# Declaring `edge` here does NOT reopen decision D3. D3 (vendor BSP) remains the
+# shipped kernel; this is the mainline-track option kept buildable and pinned.
+# See v2/docs/kernel-build-from-source.md and v2/docs/kernel-currency-watch.md.
+# ---------------------------------------------------------------------------
+variants:
+  # Mainline-track kernel built FROM SOURCE with the CeraLive RK3588 patch
+  # series (VEPU580 encoder + the three HDMI-RX fixes). Armbian maps rk3588
+  # BRANCH=edge to KERNEL_MAJOR_MINOR=7.1; that mapping is re-derived from
+  # armbian/build by CERALIVE/rk3588-kernel-patches scripts/preflight.sh and
+  # recorded in its kernel-pin.env. Armbian is consulted for that mapping ONLY —
+  # it is never invoked as the build system (see kernel_source below).
+  edge:
+    armbian_branch: edge
+
+    # The BUILT package name replaces the family's vendor kernel package for
+    # resolver/orchestrator purposes. The build stage validates the actual
+    # Debian control Package:/Version:/Architecture: fields against this name,
+    # kernel_source.package_version and the resolved arch.
+    kernel_packages:
+      - linux-image-7.1.5-ceralive-rk3588
+
+    # NO separate DTB package: `make bindeb-pkg` ships the in-tree arm64 DTBs
+    # inside the linux-image deb. kernel_source.dtb_deb_dir/dtb_boot_dir declare
+    # how that in-deb path satisfies the board manifest's dtb_name expectation.
+    dtb_packages: []
+
+    kernel_source:
+      # Armbian's KERNELSOURCE for edge (mainline stable). Armbian follows the
+      # ROLLING branch linux-7.1.y; we pin the exact tag that was its tip at
+      # import, because "verified against linux-7.1.y" is not a reproducible
+      # claim. commit is the real pin — a moved tag fails the build loudly.
+      git_url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+      mirror_url: https://github.com/gregkh/linux.git
+      tag: v7.1.5
+      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+
+      # The patch series is a BUILD INPUT and is exact-pinned like every other
+      # BSP input — an IMMUTABLE commit, never a branch. This SHA is the merge
+      # of CERALIVE/rk3588-kernel-patches#1 (the git-am mailbox conversion
+      # pinned at v7.1.5, CI-green against that exact kernel commit).
+      patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
+      patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
+      patches_series: patches/series
+
+      defconfig_base: defconfig
+      defconfig_fragment: manifests/kernel/rk3588-edge.fragment
+
+      # Same digest-pinned base the canonical mkosi builder uses (v2/ci/Dockerfile).
+      # The kernel builder image is derived FROM this exact digest, so the pin of
+      # record is this manifest line, not a Dockerfile default.
+      builder_image: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+
+      local_version: -ceralive-rk3588
+      kernel_release: 7.1.5-ceralive-rk3588
+      package_version: 7.1.5-ceralive1
+
+      # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
+      # /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/; the U-Boot boot script
+      # resolves ${fdtfile} under /boot/dtb/rockchip/ (mkosi/platform/boot/
+      # boot.scr.cmd). The platform layer copies source -> target so a
+      # source-built kernel satisfies the SAME board dtb_name expectation an
+      # Armbian linux-dtb-* package would.
+      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip

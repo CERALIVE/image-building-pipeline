@@ -1,0 +1,101 @@
+# CeraLive RK3588 `edge` kernel — Kconfig fragment
+#
+# Merged ON TOP of the in-tree arm64 `defconfig` by
+# scripts/kconfig/merge_config.sh, from v2/lib/build-kernel.sh. Referenced by
+# manifests/families/rk3588.yaml -> variants.edge.kernel_source.defconfig_fragment.
+#
+# SCOPE: this fragment declares the symbols the CeraLive device stack needs that
+# arm64 `defconfig` does not already imply, plus the two determinism switches.
+# It is NOT a port of Armbian's linux-rockchip64-edge.config: that config is a
+# full 10k-line file tuned for Armbian's own userspace and build framework, and
+# copying it would silently import decisions nobody here reviewed. Starting from
+# mainline defconfig and adding exactly what we need keeps every line auditable.
+#
+# NOT HARDWARE-PROVEN. Nothing in this todo compiles or boots a kernel; the
+# experimental image build is the next step. Treat every symbol below as a
+# reviewed intent, not a validated result. See
+# v2/docs/kernel-build-from-source.md §"Known gaps".
+
+# --- Build determinism -----------------------------------------------------
+# LOCALVERSION_AUTO would append a git description to KERNELRELEASE, which would
+# make the produced package NAME depend on the checkout state. The manifest
+# declares the exact kernel_release the build must produce, so this must be off.
+CONFIG_LOCALVERSION_AUTO=n
+# bindeb-pkg emits a separate multi-hundred-MB linux-image-*-dbg package when
+# debug info is on. The output contract is ONE linux-image deb; turn it off at
+# the source rather than deleting a package we paid to build.
+CONFIG_DEBUG_INFO_NONE=y
+
+# --- Rockchip RK3588 platform ---------------------------------------------
+CONFIG_ARCH_ROCKCHIP=y
+CONFIG_ROCKCHIP_IOMMU=y
+CONFIG_PCIE_ROCKCHIP_DW=y
+CONFIG_PHY_ROCKCHIP_SNPS_PCIE3=y
+CONFIG_PHY_ROCKCHIP_USBDP=y
+CONFIG_MMC_DW_ROCKCHIP=y
+CONFIG_MMC_SDHCI_OF_DWCMSHC=y
+CONFIG_SPI_ROCKCHIP=y
+CONFIG_PWM_ROCKCHIP=y
+CONFIG_ROCKCHIP_THERMAL=y
+CONFIG_ROCKCHIP_SARADC=y
+
+# --- Capture: SoC HDMI-RX --------------------------------------------------
+# The Synopsys HDMI-RX controller behind /dev/hdmi-in. Patches 0002/0003/0005 of
+# the CeraLive series (EDID visibility, replug overflow, audio capture) all land
+# in this driver; without the symbol the series builds nothing.
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_VIDEO_DEV=y
+CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
+
+# --- Capture: USB UVC (HDMI capture dongles, DJI-class cameras) ------------
+CONFIG_USB_VIDEO_CLASS=m
+CONFIG_SND_USB_AUDIO=m
+
+# --- Encode: VEPU580 / RKVENC v2 -------------------------------------------
+# Provided by patch 0001 of the series. Asserted selectable by the patches
+# repo's own apply gate; asserted BUILT by the kernel-build stage's post-build
+# module check.
+CONFIG_VIDEO_ROCKCHIP_RKVENC=m
+
+# --- Networking: bonded-link uplinks ---------------------------------------
+# Onboard NICs: RTL8125B (Rock 5B+, r8169) and the OPi 5+ dual r8169.
+CONFIG_R8169=m
+# RTL8852BE WiFi (Rock 5B+).
+CONFIG_RTW89_8852BE=m
+# WWAN: the six modules v2/lib/check-wwan-modules.sh binds the modem stack to.
+# Keep this list in lockstep with that checker — a drop here is exactly the
+# regression it exists to catch.
+CONFIG_USB_NET_CDCETHER=m
+CONFIG_USB_NET_CDC_NCM=m
+CONFIG_USB_NET_CDC_MBIM=m
+CONFIG_USB_NET_QMI_WWAN=m
+CONFIG_USB_WDM=m
+CONFIG_USB_SERIAL_OPTION=m
+
+# --- Type-C / USB role switching -------------------------------------------
+# The FUSB302/TCPM connector v2/mkosi/runtime/ceralive-typec-source.sh pins to
+# the source role. Without TYPEC_TCPM + TYPEC_FUSB302 there is no
+# /sys/class/typec/port0 for that unit to act on and the camera-enumeration race
+# returns.
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_FUSB302=y
+CONFIG_USB_ROLE_SWITCH=y
+
+# --- Storage / rootfs ------------------------------------------------------
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=m
+CONFIG_OVERLAY_FS=m
+
+# --- systemd / RAUC prerequisites ------------------------------------------
+CONFIG_CGROUPS=y
+CONFIG_NAMESPACES=y
+CONFIG_EFIVAR_FS=n
+CONFIG_FANOTIFY=y
+CONFIG_AUTOFS_FS=y

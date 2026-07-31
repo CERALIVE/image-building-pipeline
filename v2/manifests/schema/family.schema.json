@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ceralive.tv/schema/v2/family.schema.json",
   "title": "CeraLive Image Family Manifest",
-  "description": "Family-tier manifest. Captures the SoC/architecture-level build attributes shared by every board in a family (e.g. rk3588). A single family file is referenced by many board files via the board manifest's `family` field. Only fields actually consumed by the v2 builder are modelled; descriptive hardware metadata from the legacy configs/devices/*.conf lives in the board `description`/`quirks`, not here.",
+  "description": "Family-tier manifest. Captures the SoC/architecture-level build attributes shared by every board in a family (e.g. rk3588). A single family file is referenced by many board files via the board manifest's `family` field. Only fields actually consumed by the v2 builder are modelled; descriptive hardware metadata from the legacy configs/devices/*.conf lives in the board `description`/`quirks`, not here.\n\nVARIANT MODEL: the family's TOP-LEVEL fields are the DEFAULT (vendor) variant — the production path. An optional `variants:` map declares named overlays (e.g. `edge`) that are applied ONLY when a build explicitly opts in (`v2/build <board> --variant <name>`, `CERALIVE_KERNEL_VARIANT`). Resolver merge order is family -> variant -> board (board still wins). With no variant selected the resolver strips `variants:` and emits byte-identical params to a family that never declared one, so adding a variant can never move the production path.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -82,6 +82,149 @@
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
       "uniqueItems": true
+    },
+    "kernel_source": {
+      "$ref": "#/$defs/kernel_source",
+      "description": "Kernel-build-from-source declaration. Present ONLY inside a `variants:` overlay in practice — a family that declares it at top level would build every production image from source, which is never what we want today. See $defs/kernel_source."
+    },
+    "variants": {
+      "description": "Named, OPT-IN overlays on the family defaults. The key is the variant name as passed to `v2/build <board> --variant <name>`; the value overlays a SUBSET of the family fields. `default` is a RESERVED name meaning 'no overlay' (the vendor/production path) and MUST NOT be declared here — declaring it would make the production path silently overridable. Resolver merge order: family -> variant -> board.",
+      "type": "object",
+      "minProperties": 1,
+      "not": { "required": ["default"] },
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/variant_overlay" }
+    }
+  },
+  "$defs": {
+    "variant_overlay": {
+      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB package names, and declare a kernel_source build — nothing else. Anything wider (firmware, U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "armbian_branch": {
+          "description": "Armbian branch this variant targets (same enum as the family field). An `edge` variant sets this so the Armbian mapping recorded in the kernel-patches repo's kernel-pin.env stays traceable, even though the Armbian framework is NEVER invoked as the build system (see $defs/kernel_source).",
+          "type": "string",
+          "enum": ["vendor", "current", "edge", "none"]
+        },
+        "kernel_packages": {
+          "description": "Kernel image package name(s) this variant resolves to. With a kernel_source block these are the names the BUILT .debs must carry — the build stage validates the actual Debian control `Package:` field against them and fails the build on a mismatch, so a rename cannot silently produce an unused deb.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "dtb_packages": {
+          "description": "DTB package name(s) for this variant. EMPTY ([]) when the built kernel .deb carries the in-tree DTBs itself (the `make bindeb-pkg` output contract) — the DTB path inside that deb is then declared by kernel_source.dtb_deb_dir / dtb_boot_dir.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "kernel_source": { "$ref": "#/$defs/kernel_source" }
+      }
+    },
+    "kernel_source": {
+      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the defconfig fragment, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping (the kernel-patches repo's preflight) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_url",
+        "tag",
+        "commit",
+        "patches_git_url",
+        "patches_commit",
+        "patches_series",
+        "defconfig_base",
+        "defconfig_fragment",
+        "builder_image",
+        "local_version",
+        "kernel_release",
+        "package_version",
+        "dtb_deb_dir",
+        "dtb_boot_dir"
+      ],
+      "properties": {
+        "git_url": {
+          "description": "Canonical kernel source repository (e.g. the linux-stable git). Used verbatim; no mirror substitution happens implicitly.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "mirror_url": {
+          "description": "OPTIONAL faster mirror of the SAME objects. Only ever used when explicitly enabled; the pinned `commit` is verified after checkout either way, so a mirror cannot change what is built.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "tag": {
+          "description": "Exact source tag (e.g. v7.1.5). A tag alone is NOT the pin — `commit` is. The build fails loudly if the tag does not resolve to `commit`, so a moved tag is caught rather than silently built.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "commit": {
+          "description": "Exact 40-character kernel commit SHA the tag must resolve to. THE pin.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "patches_git_url": {
+          "description": "Patch-series repository (CERALIVE/rk3588-kernel-patches). A build input, pinned exactly like the kernel source itself.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "patches_commit": {
+          "description": "Exact 40-character commit of the patches repo. IMMUTABLE — never a branch name, never a tag. A floating reference here would make the built kernel unreproducible while still looking pinned.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "patches_series": {
+          "description": "Path INSIDE the patches repo to the git-am series file (one patch filename per line, `#` comments ignored). Applied in file order with `git am`.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "defconfig_base": {
+          "description": "The in-tree defconfig target the build starts from (e.g. `defconfig` for arm64). The fragment is merged ON TOP of it.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "defconfig_fragment": {
+          "description": "Repo-relative path (from v2/) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "builder_image": {
+          "description": "DIGEST-PINNED base container image for the kernel builder (repo:tag@sha256:<64 hex>). The kernel-build stage derives its toolchain image FROM this exact digest, so the manifest — not a Dockerfile default — is the pin of record.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$"
+        },
+        "local_version": {
+          "description": "LOCALVERSION passed to the kernel build (e.g. -ceralive-rk3588). Together with the source version it fixes KERNELRELEASE, and therefore the produced package name.",
+          "type": "string",
+          "pattern": "^-[a-z0-9][a-z0-9-]*$"
+        },
+        "kernel_release": {
+          "description": "The KERNELRELEASE the build MUST produce (<source version><local_version>). Declared so the build can assert it rather than discover it — a drift here means the source version moved.",
+          "type": "string",
+          "pattern": "^[0-9][A-Za-z0-9._-]*$"
+        },
+        "package_version": {
+          "description": "KDEB_PKGVERSION — the exact Debian version of the produced .deb. Validated against the built control `Version:` field.",
+          "type": "string",
+          "pattern": "^[0-9][A-Za-z0-9.+~:-]*$"
+        },
+        "dtb_deb_dir": {
+          "description": "PLATFORM-LAYER INSTALL MAPPING (source half). Absolute path INSIDE the built kernel .deb holding the board DTBs — `make bindeb-pkg` puts arm64 in-tree DTBs under /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/. The build stage asserts the board manifest's dtb_name actually exists here, so the mapping is machine-verified, not merely declared.",
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "dtb_boot_dir": {
+          "description": "PLATFORM-LAYER INSTALL MAPPING (target half). Absolute on-image path the U-Boot boot script resolves `fdtfile` under (/boot/dtb/<vendor>/ — see mkosi/platform/boot/boot.scr.cmd). The platform layer copies dtb_deb_dir -> dtb_boot_dir so a source-built kernel satisfies the SAME board DTB expectation an Armbian linux-dtb-* package would.",
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        }
+      }
     }
   }
 }

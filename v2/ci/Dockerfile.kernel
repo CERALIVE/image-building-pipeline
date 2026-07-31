@@ -1,0 +1,68 @@
+# CeraLive v2 — kernel-build-from-source container (Task 26).
+#
+# Used ONLY by lib/build-kernel.sh, which runs `make bindeb-pkg` inside this
+# image for an opt-in family variant that declares a `kernel_source:` block
+# (today: rk3588 `edge`). The default vendor path never builds this image and
+# never runs this stage.
+#
+# THE BASE IMAGE IS NOT PINNED HERE. BASE_IMAGE is REQUIRED and is supplied by
+# lib/build-kernel.sh from the manifest's kernel_source.builder_image, which the
+# schema constrains to a repo:tag@sha256:<digest> form. Keeping the pin in the
+# manifest — not in this file — means the builder digest is reviewed alongside
+# the kernel and patch pins it is paired with, in one place, instead of drifting
+# in a Dockerfile default nobody reads. The build FAILS if BASE_IMAGE is unset.
+#
+# WHY a container at all: the host may be any distro (this repo is developed on
+# Arch), and a kernel build is exquisitely sensitive to toolchain version. One
+# digest-pinned Debian trixie image gives the same gcc/binutils/dpkg-dev
+# everywhere, which is the only way `make bindeb-pkg` output is comparable
+# across machines.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/ccache \
+    PATH=/usr/lib/ccache:$PATH
+
+# Kernel build closure, in the order `make bindeb-pkg` needs them:
+#   build-essential bc bison flex   kbuild + Kconfig parser
+#   libssl-dev libelf-dev           module signing + objtool/BTF
+#   gcc-aarch64-linux-gnu           the arm64 cross toolchain (RK3588 target)
+#   dpkg-dev debhelper fakeroot     bindeb-pkg's Debian packaging path
+#   kmod cpio rsync zstd xz-utils   depmod, initramfs plumbing, deb compression
+#   git ca-certificates             pinned source + patch-series checkout
+#   ccache                          the reason a rebuild is minutes not hours
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      -o Dpkg::Options::=--force-unsafe-io \
+      build-essential \
+      bc \
+      bison \
+      flex \
+      libssl-dev \
+      libelf-dev \
+      gcc-aarch64-linux-gnu \
+      dpkg-dev \
+      debhelper \
+      fakeroot \
+      kmod \
+      cpio \
+      rsync \
+      zstd \
+      xz-utils \
+      git \
+      ca-certificates \
+      python3 \
+      ccache \
+ && rm -rf /var/lib/apt/lists/*
+
+# ccache wrappers for the cross compiler. /usr/lib/ccache is first on PATH, so a
+# plain `aarch64-linux-gnu-gcc` invocation from kbuild is cached without the
+# Makefile having to know ccache exists.
+RUN ccache --version \
+ && ln -sf /usr/bin/ccache /usr/lib/ccache/aarch64-linux-gnu-gcc \
+ && ln -sf /usr/bin/ccache /usr/lib/ccache/aarch64-linux-gnu-g++
+
+# Fail the image build LOUDLY if the cross toolchain is not what we asked for.
+RUN aarch64-linux-gnu-gcc --version \
+ && dpkg-architecture -aarm64 -qDEB_HOST_ARCH
