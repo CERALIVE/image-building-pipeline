@@ -22,7 +22,7 @@ Subcommands
         Print one top-level scalar field (used by resolve.sh to read the
         board's ``family:`` ref before the full merge). No schema validation.
 
-  merge --family F.yaml --board B.yaml
+  merge --family F.yaml --board B.yaml [--variant NAME]
         [--family-schema FS.json --board-schema BS.json]
         Validate each manifest against its schema (when schemas are given),
         deep-merge (board wins), flatten, and print sorted ``KEY<TAB>VALUE``
@@ -43,6 +43,25 @@ Merge semantics (LOCKED — see learnings task 12)
   * arrays/lists : board REPLACES the family array entirely (board-specific
                    overlays are authoritative; never appended). Cleaner for
                    per-board overlay sets than an append-and-dedupe.
+
+Family variants (task 26)
+-------------------------
+A family MAY declare a ``variants:`` map of named, OPT-IN overlays. The merge
+order becomes ``family -> variant -> board`` — the board still wins last, so a
+variant can never override a board-specific fact.
+
+The ``variants:`` key itself is ALWAYS stripped before flattening, selected or
+not. That is what makes the production (vendor) path provably unmoved: with no
+``--variant`` the resolver emits byte-identical params to a family that never
+declared a variant at all. ``default`` is the reserved no-overlay name.
+
+When the applied overlay carries a ``kernel_source`` block the resolver also
+injects ONE derived key, ``kernel_source.suppressed_packages`` — the union of
+the pre-overlay family kernel/DTB package names and the post-merge ones. The
+orchestrator forwards it so the fetcher excludes exactly those names from the
+remote (Armbian) fetch. Deriving it here rather than authoring it in YAML is
+deliberate: a hand-written suppression list would silently drift from the
+replacement list the moment either changed.
 """
 
 from __future__ import annotations
@@ -140,6 +159,71 @@ def deep_merge(base: Any, override: Any) -> Any:
     return override
 
 
+DEFAULT_VARIANT = "default"
+
+# Family fields whose package names the remote (Armbian) fetch must skip when a
+# variant builds the kernel from source. U-Boot and firmware are deliberately
+# ABSENT: they stay prebuilt-fetched.
+_SUPPRESSED_FIELDS = ("kernel_packages", "dtb_packages")
+
+
+def _package_names(manifest: Any, fields: "tuple[str, ...]") -> "list[str]":
+    """Collect the package names a manifest declares across ``fields``."""
+    names: "list[str]" = []
+    if not isinstance(manifest, dict):
+        return names
+    for field in fields:
+        value = manifest.get(field)
+        if isinstance(value, list):
+            names.extend(str(item) for item in value)
+    return names
+
+
+def _dedupe(names: "list[str]") -> "list[str]":
+    """Order-preserving de-duplication."""
+    seen: "set[str]" = set()
+    out: "list[str]" = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def apply_variant(
+    family: Any, variant: str, path: str
+) -> "tuple[Any, Any]":
+    """Strip ``variants:`` from ``family`` and apply the selected overlay.
+
+    Returns ``(base, overlay)`` where ``base`` is the family with ``variants:``
+    removed and the overlay merged in (when one was selected), and ``overlay``
+    is the raw overlay mapping (or ``None`` for the default path).
+
+    Stripping happens unconditionally so an unselected ``variants:`` block never
+    reaches ``flatten()`` — the guarantee that declaring a variant cannot move
+    the production param set by a single byte.
+    """
+    if not isinstance(family, dict):
+        return family, None
+    base = {key: value for key, value in family.items() if key != "variants"}
+    variants = family.get("variants")
+
+    if variant in ("", DEFAULT_VARIANT):
+        return base, None
+
+    if not isinstance(variants, dict) or variant not in variants:
+        available = (
+            ", ".join(sorted(variants)) if isinstance(variants, dict) and variants
+            else "<none>"
+        )
+        _die(
+            f"schema invalid: {path}: unknown variant '{variant}' "
+            f"(available: {available})"
+        )
+    overlay = variants[variant]
+    return deep_merge(base, overlay), overlay
+
+
 def _scalar(value: Any, prefix: str) -> str:
     """Render a scalar leaf to its flat string form."""
     if isinstance(value, bool):
@@ -212,7 +296,22 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if args.board_schema:
         validate(board, load_json(args.board_schema), args.board)
 
-    merged = deep_merge(family, board)
+    variant = args.variant or DEFAULT_VARIANT
+    pre_overlay_packages = _package_names(family, _SUPPRESSED_FIELDS)
+    base, overlay = apply_variant(family, variant, args.family)
+
+    merged = deep_merge(base, board)
+
+    if isinstance(overlay, dict) and isinstance(overlay.get("kernel_source"), dict):
+        # Record which variant produced this param set, and derive the exact
+        # set of package names the remote fetch must skip. Both keys appear
+        # ONLY on a kernel-from-source variant, so the default path is
+        # byte-unchanged.
+        merged["kernel_variant"] = variant
+        merged["kernel_source"]["suppressed_packages"] = _dedupe(
+            pre_overlay_packages + _package_names(merged, _SUPPRESSED_FIELDS)
+        )
+
     flat = flatten(merged)
     for key in sorted(flat):
         # Tab-delimited, RAW value. resolve.sh resolves versions.yaml defer
@@ -238,6 +337,14 @@ def main(argv: "list[str]") -> int:
     )
     p_merge.add_argument("--family", required=True)
     p_merge.add_argument("--board", required=True)
+    p_merge.add_argument(
+        "--variant",
+        default=DEFAULT_VARIANT,
+        help=(
+            "family variant overlay to apply (merge order family -> variant -> "
+            f"board). '{DEFAULT_VARIANT}' (the default) applies no overlay."
+        ),
+    )
     p_merge.add_argument("--family-schema", default=None)
     p_merge.add_argument("--board-schema", default=None)
     p_merge.set_defaults(func=cmd_merge)
