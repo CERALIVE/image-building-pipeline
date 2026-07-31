@@ -58,7 +58,7 @@ image-building-pipeline/
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
-| Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build) |
+| Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats`, `v2/tests/rk3588-ab-contract.bats`, and `v2/tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
@@ -72,6 +72,7 @@ image-building-pipeline/
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
 | **Deferred / hardware-gated items** | [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | **Kernel currency watch** | [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
+| **Kernel build from source (opt-in variants)** | [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) — the `variants:` model, `kernel_source:` pins, `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
@@ -98,6 +99,7 @@ for the full host matrix.
 DRY_RUN=1 ./v2/build <board>             # resolve + fetch plan only
 ./v2/build <board> --native              # opt-in native build (trixie+ host only)
 MKOSI_NATIVE=1 ./v2/build <board>        # same, env-var form
+./v2/build <board> --variant edge        # opt-in family variant (kernel from source)
 ```
 
 Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
@@ -376,6 +378,64 @@ same-version content replacement observable:
   `v2/run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
+
+**Kernel build from source — OPT-IN family variants, production path byte-identical** [PARTIAL]
+
+The family manifest gained a `variants:` map: named, **explicitly opt-in** overlays
+on the family defaults, applied only via `v2/build <board> --variant <name>` (or
+`CERALIVE_KERNEL_VARIANT`). Resolver merge order is **family → variant → board**
+(board still wins last, so board facts stay authoritative). `default` is the
+reserved no-overlay name and the schema refuses a variant literally called that.
+
+rk3588 ships one variant, `edge`, which builds the kernel + in-tree DTBs **from
+pinned source** (`v7.1.5` / `155b42bec9cb`) with the CeraLive RK3588 patch series
+(`CERALIVE/rk3588-kernel-patches@4809354656a1` — the merge of that repo's PR #1,
+an **immutable commit**, never a branch) applied by `git am`, then `make
+bindeb-pkg` inside a **digest-pinned** builder container with a persistent ccache.
+Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md).
+
+- **The production vendor path is BYTE-IDENTICAL.** `variants:` is stripped from
+  the family before flattening whether or not one is selected, so a family that
+  declares a variant resolves exactly like one that never did. Pinned by committed
+  golden fixtures (`v2/tests/manifests/fixtures/vendor-baseline/*.params`, captured
+  pre-change) for all three shipped boards, plus an explicit **non-vacuity** leg
+  proving the same comparison fails on the `edge` resolve.
+- **The Armbian framework is NOT the build system.** It is consulted for the
+  `edge` → 7.1 mapping only (upstream, in the patches repo's preflight) and never
+  invoked. Adopting it would import its patch stack, config and packaging and make
+  "what is in this kernel" unanswerable from this repo.
+- **Output contract:** exactly ONE `linux-image-*` deb carrying the kernel AND the
+  in-tree DTBs; `linux-headers-*`/`linux-libc-dev` are discarded before staging.
+  The built deb is validated against the manifest on four axes — control
+  `Package:`/`Version:`/`Architecture:` and the presence of the board's own DTB at
+  `kernel_source.dtb_deb_dir`.
+- **Three integration semantics, active only under a `kernel_source:` variant:**
+  (i) remote fetch of the manifest-named kernel/DTB packages is SUPPRESSED
+  (`CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS` → `collect_declared_bsp_pkgs`;
+  **U-Boot and firmware stay prebuilt-fetched**); (ii) the built package names
+  REPLACE `kernel_packages`/`dtb_packages` via the ordinary variant merge;
+  (iii) a **staged-package uniqueness check** fails the build if any name has BOTH
+  a fetched and a built candidate — suppression should make that impossible, this
+  proves it did. Stage order: `[2/9] fetch` → `[2b/9] kernel build` → uniqueness →
+  `[3/9] partition`.
+- **The suppression list is DERIVED, never authored** (pre-overlay family names ∪
+  post-merge names). The schema rejects a manifest that declares it, because a
+  hand-written list would drift from the replacement list.
+- **DTB install mapping:** `bindeb-pkg` puts arm64 DTBs under
+  `/usr/lib/linux-image-<REL>/rockchip/`, but the U-Boot script resolves
+  `/boot/dtb/rockchip/${fdtfile}`. `platform/mkosi.postinst::install_kernel_source_dtbs`
+  copies source → target. Both paths are EMPTY on the vendor path, so the step is a
+  strict no-op there; fail-loud when enabled.
+- **`[PARTIAL]` — nothing has been compiled or booted.** The PR gate runs
+  `DRY_RUN=1` (plan only). The defconfig fragment is reviewed intent, not a
+  validated result, and mainline/vendor disagree on the OPi 5+ DTB filename
+  (`rk3588-` vs `rk3588s-orangepi-5-plus.dtb`) — the build stage fails loudly there
+  on purpose. `v2/docs/DEFERRED.md` item 9.
+- **D3 is NOT reopened.** The shipped kernel is still the Armbian vendor BSP; this
+  is the mainline-track option kept pinned and buildable. See
+  `v2/docs/kernel-currency-watch.md`.
+
+Guards: `manifest.bats` §26 (36 tests).
 
 **RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
 
@@ -1426,6 +1486,10 @@ gated item, not the package availability.
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
 - Don't fetch BSP packages by bare name or accept apt's latest version. Update `armbian-bsp-deb-versions.txt` only after signed-index review; update `bsp-baseline.json` with the kernel pin when its reviewed bytes change
+- Don't make a family variant implicit. `--variant` is the ONLY selector (plus `CERALIVE_KERNEL_VARIANT`); never infer one from a board, host, branch or CI context
+- Don't pin `kernel_source.patches_commit` (or `commit`, or `builder_image`) to anything but an exact SHA/digest — a branch there is unreproducible while looking pinned, and both the schema and `build-kernel.sh` reject it
+- Don't hand-write `kernel_source.suppressed_packages`; it is derived by `resolve.py` and the schema rejects an authored one
+- Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 
 ## KNOWN ISSUES / DEFERRED

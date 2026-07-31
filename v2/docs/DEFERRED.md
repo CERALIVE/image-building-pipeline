@@ -368,6 +368,44 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
+## 9. Kernel-build-from-source variant — nothing compiled, nothing booted
+
+**Status:** Deferred (never built)
+**Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/lib/build-kernel.sh`
+
+**What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
+kernel + in-tree DTBs from pinned source (`v7.1.5` + the
+`CERALIVE/rk3588-kernel-patches` series) with `make bindeb-pkg`. The pipeline, the
+schema, the pins, the fetch suppression, the package-name replacement, the
+staged-package uniqueness check and the platform DTB install mapping all exist and
+are gated by 36 tests. **No kernel has ever been compiled by it, and no image built
+from it has ever booted.**
+
+**Why deferred:** The PR gate runs `DRY_RUN=1` (plan only — no network, container
+or compiler). A real build is a multi-GB clone plus a long cross-compile, so
+running it in the PR gate is a separate, deliberate CI-budget decision. The
+experimental image build is the next step.
+
+Two consequences worth stating plainly:
+
+* The **defconfig fragment** (`v2/manifests/kernel/rk3588-edge.fragment`) is
+  reviewed intent, not a validated result. No symbol in it has been proven
+  necessary *or* sufficient on hardware.
+* **Mainline and the Armbian vendor BSP disagree on some RK3588 DTB filenames.**
+  `orange-pi-5-plus.yaml` declares `rk3588s-orangepi-5-plus.dtb` (the vendor
+  name); mainline v7.1 names it `rk3588-orangepi-5-plus.dtb`. `build-kernel.sh`
+  therefore fails loudly for that board and lists the DTBs actually present. That
+  is deliberate: the divergence surfaces at build time rather than as a board that
+  does not boot.
+
+**Unblock condition:** Run a real (non-`DRY_RUN`) `v2/build <board> --variant edge`
+on a host with a container runtime, resolve the OPi 5+ DTB-name divergence above,
+then flash and boot the resulting image on a physical RK3588 board. **D3 is not
+reopened by any of this** — the shipped kernel remains the Armbian vendor BSP; see
+`v2/docs/kernel-currency-watch.md` for the two triggers that would revisit it.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
@@ -379,6 +417,7 @@ this entry's status to RESOLVED and note the evidence file here.
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence TODOs (item 6) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `v2/lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
+| `v2/docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and item 9's gaps |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
 

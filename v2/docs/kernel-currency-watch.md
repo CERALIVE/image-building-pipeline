@@ -104,6 +104,27 @@ vendor MPP does not provide. Those are real latency advantages. If a stable
 mainline path to VEPU580 opens, re-evaluating the encoder stack is worth the
 effort.
 
+## The `edge` build-from-source variant does NOT fire either trigger
+
+The rk3588 family manifest now carries an **opt-in** `edge` variant that builds a
+mainline-track kernel from pinned source with the CeraLive RK3588 patch series
+applied (`v2/docs/kernel-build-from-source.md`). Its existence is easy to mistake
+for a pending migration. It is not one:
+
+- The shipped kernel is still the Armbian **vendor** BSP. No shipped image
+  selects the variant, and nothing selects it implicitly — it requires an
+  explicit `--variant edge`.
+- It carries the **out-of-tree** rcawston `rkvenc` driver as a patch. Trigger 2
+  is about a **frozen, in-tree, mainline** stateless H.265 encode uAPI. Applying
+  an out-of-tree driver is the opposite of that condition being met, not evidence
+  of it.
+- Nothing built by it has been compiled or booted (`v2/docs/DEFERRED.md` item 9).
+
+What it is: the mainline-track option kept **pinned, applying and buildable**, so
+that if a trigger above ever does fire the work starts from a known-good,
+exact-pinned base instead of from scratch. Keeping an option alive is not
+exercising it.
+
 ## What This Doc Is Not
 
 This is a decision record, not a roadmap. It records what was true at the time of
