@@ -3932,3 +3932,581 @@ run_modem_generator() {
     grep -Eq "^PassEnvironment=.*$var" "$mkosi_conf" || { echo "$var missing from PassEnvironment"; false; }
   done
 }
+
+# ===========================================================================
+# 26. Family variants + kernel-build-from-source (Task 26).
+#
+#     The load-bearing property of this whole feature is a NEGATIVE one: adding
+#     an opt-in variant must not move the production vendor path by a single
+#     byte. That is pinned first (against committed golden fixtures), and pinned
+#     with an explicit non-vacuity leg, because a golden-file comparison that
+#     silently compares nothing is worse than no comparison at all.
+# ===========================================================================
+
+VENDOR_BASELINE_DIR() { printf '%s' "$TESTS_DIR/manifests/fixtures/vendor-baseline"; }
+
+# make_stub_deb <out.deb> <package> <version> <arch> — a minimal but REAL .deb
+# (debian-binary + control.tar.gz + data.tar.gz via ar) so the uniqueness check
+# exercises its actual ar+tar control-reading path rather than a filename parse.
+make_stub_deb() {
+  local out="$1" pkg="$2" version="$3" arch="$4" tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/ctl" "$tmp/data"
+  printf 'stub\n' > "$tmp/data/stub"
+  tar -C "$tmp/data" -czf "$tmp/data.tar.gz" .
+  cat > "$tmp/ctl/control" <<CTL
+Package: ${pkg}
+Version: ${version}
+Architecture: ${arch}
+Maintainer: ceralive-test <test@ceralive.tv>
+Description: fixture package for staged-uniqueness tests
+CTL
+  tar -C "$tmp/ctl" -czf "$tmp/control.tar.gz" ./control
+  printf '2.0\n' > "$tmp/debian-binary"
+  ( cd "$tmp" && ar rc "$out" debian-binary control.tar.gz data.tar.gz )
+  rm -rf "$tmp"
+}
+
+# Write a schema-valid family carrying one variant overlay, so the negative
+# schema legs below differ from the shipped manifest in exactly one field.
+write_variant_family() {
+  local dest="$1" overlay="$2"
+  cat > "$dest" <<YAML
+arch: arm64
+armbian_branch: vendor
+kernel_packages: [linux-image-vendor-rk35xx]
+uboot_packages: []
+dtb_packages: [linux-dtb-vendor-rk35xx]
+firmware_packages: [armbian-firmware]
+rauc_bootloader_adapter: custom
+partition_template: rk3588-ab
+serial_console: ttyS2:1500000
+variants:
+${overlay}
+YAML
+}
+
+@test "variants: shipped rk3588 family declares edge and still validates" {
+  run validate_manifest "$V2/manifests/families/rk3588.yaml" "$FAMILY_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+  grep -Eq '^variants:' "$V2/manifests/families/rk3588.yaml"
+  grep -Eq '^  edge:' "$V2/manifests/families/rk3588.yaml"
+}
+
+@test "variants: VENDOR PATH IS BYTE-IDENTICAL for every shipped board" {
+  # THE hard requirement of task 26. The fixtures were captured from the
+  # resolver BEFORE variants existed; if declaring one moved any production
+  # parameter, this fails with a readable diff.
+  local board
+  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
+    run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    if ! diff -u "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
+      printf 'vendor path moved for %s\n' "$board" >&2
+      false
+    fi
+  done
+}
+
+@test "variants: explicit --variant default is also byte-identical to the baseline" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant default 2>/dev/null"
+  [ "$status" -eq 0 ]
+  diff -u "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output") >&2
+}
+
+@test "variants: CERALIVE_KERNEL_VARIANT=default is byte-identical too" {
+  run bash -c "CERALIVE_KERNEL_VARIANT=default '$RESOLVE_SH' rock-5b-plus 2>/dev/null"
+  [ "$status" -eq 0 ]
+  diff -u "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output") >&2
+}
+
+@test "variants: the byte-identity proof HAS TEETH (a real change makes it fail)" {
+  # Non-vacuity. Resolve with the edge variant — which genuinely changes the
+  # kernel package and branch — and require the SAME comparison to fail. Without
+  # this leg a broken fixture path would make the guard above pass forever.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  run diff -q "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output")
+  [ "$status" -ne 0 ]
+}
+
+@test "variants: the variants: block never reaches the flattened param set" {
+  # A leaked VARIANTS_* key would (a) move the vendor path and (b) hand the
+  # orchestrator a second, unselected kernel pin in its environment.
+  local board
+  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
+    run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"VARIANTS_"* ]]
+    run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"VARIANTS_"* ]]
+  done
+}
+
+@test "variants: merge order is family -> variant -> board (board still wins last)" {
+  fam="$BATS_TEST_TMPDIR/vfam.yaml"
+  brd="$BATS_TEST_TMPDIR/vbrd.yaml"
+  cat > "$fam" <<'YAML'
+from_family: family
+overridden_by_variant: family
+overridden_by_board: family
+variants:
+  edge:
+    overridden_by_variant: variant
+    overridden_by_board: variant
+YAML
+  cat > "$brd" <<'YAML'
+family: vfam
+overridden_by_board: board
+YAML
+  run python3 "$RESOLVE_PY" merge --family "$fam" --board "$brd" --variant edge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'FROM_FAMILY\tfamily'* ]]
+  [[ "$output" == *$'OVERRIDDEN_BY_VARIANT\tvariant'* ]]
+  [[ "$output" == *$'OVERRIDDEN_BY_BOARD\tboard'* ]]
+}
+
+@test "variants: an unknown variant fails loudly and lists what IS available" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant does-not-exist 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does-not-exist"* ]]
+  [[ "$output" == *"available: edge"* ]]
+}
+
+@test "variants: --variant with no name is refused (never silently defaults)" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant '' 2>&1"
+  [ "$status" -ne 0 ]
+}
+
+@test "variants: x86 has no variants, so an edge build of x86-minipc is refused" {
+  # x86_64 declares no variants at all. Asking for one must fail rather than
+  # silently resolve the vendor path under a name that promises otherwise.
+  run bash -c "'$RESOLVE_SH' x86-minipc --variant edge 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown variant 'edge'"* ]]
+  [[ "$output" == *"available: <none>"* ]]
+}
+
+@test "variants: schema rejects a variant named 'default' (reserved)" {
+  local f="$BATS_TEST_TMPDIR/default-variant.yaml"
+  write_variant_family "$f" "  default:
+    armbian_branch: edge"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"variants"* ]]
+}
+
+@test "variants: schema rejects an unknown field inside a variant overlay" {
+  local f="$BATS_TEST_TMPDIR/wide-variant.yaml"
+  write_variant_family "$f" "  edge:
+    firmware_packages: [something-else]"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"firmware_packages"* ]]
+}
+
+@test "kernel_source: schema rejects a FLOATING patches reference" {
+  # The single most important pin in the block: a branch name here would make
+  # the built kernel unreproducible while still looking pinned.
+  local f="$BATS_TEST_TMPDIR/floating-patches.yaml"
+  write_variant_family "$f" "  edge:
+    kernel_source:
+      git_url: https://example.invalid/linux.git
+      tag: v7.1.5
+      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      patches_git_url: https://example.invalid/patches.git
+      patches_commit: main
+      patches_series: patches/series
+      defconfig_base: defconfig
+      defconfig_fragment: manifests/kernel/f.fragment
+      builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+      local_version: -ceralive-rk3588
+      kernel_release: 7.1.5-ceralive-rk3588
+      package_version: 7.1.5-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"patches_commit"* ]]
+}
+
+@test "kernel_source: schema rejects a builder_image without a digest" {
+  local f="$BATS_TEST_TMPDIR/floating-image.yaml"
+  write_variant_family "$f" "  edge:
+    kernel_source:
+      git_url: https://example.invalid/linux.git
+      tag: v7.1.5
+      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      patches_git_url: https://example.invalid/patches.git
+      patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
+      patches_series: patches/series
+      defconfig_base: defconfig
+      defconfig_fragment: manifests/kernel/f.fragment
+      builder_image: debian:trixie-slim
+      local_version: -ceralive-rk3588
+      kernel_release: 7.1.5-ceralive-rk3588
+      package_version: 7.1.5-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"builder_image"* ]]
+}
+
+@test "kernel_source: schema rejects an incomplete pin (missing commit)" {
+  local f="$BATS_TEST_TMPDIR/incomplete-pin.yaml"
+  write_variant_family "$f" "  edge:
+    kernel_source:
+      git_url: https://example.invalid/linux.git
+      tag: v7.1.5
+      patches_git_url: https://example.invalid/patches.git
+      patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
+      patches_series: patches/series
+      defconfig_base: defconfig
+      defconfig_fragment: manifests/kernel/f.fragment
+      builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+      local_version: -ceralive-rk3588
+      kernel_release: 7.1.5-ceralive-rk3588
+      package_version: 7.1.5-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"commit"* ]]
+}
+
+@test "kernel_source: suppressed_packages is DERIVED, and a manifest cannot author it" {
+  local f="$BATS_TEST_TMPDIR/authored-suppression.yaml"
+  write_variant_family "$f" "  edge:
+    kernel_source:
+      git_url: https://example.invalid/linux.git
+      tag: v7.1.5
+      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      patches_git_url: https://example.invalid/patches.git
+      patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
+      patches_series: patches/series
+      defconfig_base: defconfig
+      defconfig_fragment: manifests/kernel/f.fragment
+      builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+      local_version: -ceralive-rk3588
+      kernel_release: 7.1.5-ceralive-rk3588
+      package_version: 7.1.5-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip
+      suppressed_packages: [linux-image-vendor-rk35xx]"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"suppressed_packages"* ]]
+}
+
+@test "kernel_source: the edge resolve replaces the kernel package and empties DTB_PACKAGES" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"DTB_PACKAGES=''"* ]]
+  [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
+  # U-Boot and firmware are NOT replaced: they stay prebuilt-fetched.
+  [[ "$output" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-vendor'"* ]]
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
+}
+
+@test "kernel_source: the derived suppression set is pre-overlay UNION post-overlay" {
+  # Both halves matter. The pre-overlay vendor names are still in the family
+  # file (fetch-debs reads it directly); the post-overlay built name exists in
+  # no remote archive. Missing either half means a failed or wrong fetch.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  local line
+  line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
+  [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
+  [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
+  [[ "$line" == *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  # U-Boot / firmware must NEVER be suppressed.
+  [[ "$line" != *"linux-u-boot"* ]]
+  [[ "$line" != *"armbian-firmware"* ]]
+}
+
+@test "kernel_source: the pinned patches commit is the merged CERALIVE PR #1 SHA" {
+  # A regression pin on the actual value. Todo 25 merged
+  # CERALIVE/rk3588-kernel-patches#1 at this exact commit; a silent bump here
+  # would change what the kernel contains with no other signal.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='4809354656a16443c0b69f1e72b77f3fea1cbdae'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_COMMIT='155b42bec9cbb6b8cdc47dd9bd09503a81fbe493'"* ]]
+}
+
+@test "kernel_source: the defconfig fragment the manifest names actually exists" {
+  local frag
+  frag="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null" \
+          | sed -n "s/^KERNEL_SOURCE_DEFCONFIG_FRAGMENT='\(.*\)'$/\1/p")"
+  [ -n "$frag" ]
+  [ -f "$V2/$frag" ]
+  # The two symbols the whole variant exists for.
+  grep -q 'CONFIG_VIDEO_ROCKCHIP_RKVENC=' "$V2/$frag"
+  grep -q 'CONFIG_VIDEO_SYNOPSYS_HDMIRX=' "$V2/$frag"
+  # Determinism switch: an auto localversion would change the package NAME.
+  grep -q 'CONFIG_LOCALVERSION_AUTO=n' "$V2/$frag"
+}
+
+@test "fetch suppression: suppressed kernel/DTB names leave the declared BSP set" {
+  run bash -c "
+    set -euo pipefail
+    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.5-ceralive-rk3588'
+    export KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'
+    export DTB_PACKAGES=''
+    source '$FETCH_DEBS'
+    collect_declared_bsp_pkgs '$V2/manifests/families/rk3588.yaml'
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"linux-image-vendor-rk35xx"* ]]
+  [[ "$output" != *"linux-dtb-vendor-rk35xx"* ]]
+  [[ "$output" != *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  # Everything else the family declares is untouched.
+  [[ "$output" == *"armbian-firmware"* ]]
+  [[ "$output" == *"gstreamer1.0-rockchip1"* ]]
+}
+
+@test "fetch suppression: NON-VACUOUS — without it the vendor names are still declared" {
+  run bash -c "
+    set -euo pipefail
+    unset CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS KERNEL_PACKAGES DTB_PACKAGES
+    source '$FETCH_DEBS'
+    collect_declared_bsp_pkgs '$V2/manifests/families/rk3588.yaml'
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
+  [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
+}
+
+@test "orchestrate: an edge DRY_RUN reaches the plan for BOTH rk3588 boards" {
+  serialize build-plan
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" "$board" --variant edge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kernel_variant=edge"* ]]
+    [[ "$output" == *"DRY-RUN complete: board='${board}'"* ]]
+    # The Armbian BSP set no longer contains the kernel or the DTB package …
+    [[ "$output" != *"BSP set from rk3588.yaml (4 pkgs)"* ]]
+    [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs)"* ]]
+    # … but U-Boot and firmware are still fetched.
+    [[ "$output" == *"armbian-firmware"* ]]
+    [[ "$output" == *"linux-u-boot-"* ]]
+    # The kernel-build stage ran and emitted its plan.
+    [[ "$output" == *"[2b/9] building kernel from pinned source"* ]]
+    [[ "$output" == *"kernel-build plan emitted"* ]]
+  done
+}
+
+@test "orchestrate: NON-VACUOUS — the vendor DRY_RUN still fetches kernel + DTB" {
+  serialize build-plan
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BSP set from rk3588.yaml (4 pkgs)"* ]]
+  [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
+  [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
+  # And the kernel-build stage never runs on the production path.
+  [[ "$output" != *"[2b/9]"* ]]
+  [[ "$output" != *"kernel from source"* ]]
+}
+
+@test "orchestrate: x86 DRY_RUN is unaffected by the variant machinery" {
+  serialize build-plan
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRY-RUN complete"* ]]
+  [[ "$output" == *"kernel_variant=default"* ]]
+  [[ "$output" != *"[2b/9]"* ]]
+  [[ "$output" != *"kernel from source"* ]]
+  [[ "$output" == *"non-Armbian family: BSP fetch omitted from DRY_RUN plan"* ]]
+}
+
+@test "orchestrate: a fetched AND built candidate for one name FAILS the build" {
+  # The uniqueness check is the backstop for suppression. Two candidates for one
+  # name would let mkosi's local repository pick a kernel nobody chose — a
+  # plausible-looking image instead of an error, the worst outcome available.
+  local fetched="$BATS_TEST_TMPDIR/uniq/debs" built="$BATS_TEST_TMPDIR/uniq/kernel"
+  mkdir -p "$fetched" "$built"
+  make_stub_deb "$fetched/linux-image-collide_1_arm64.deb" linux-image-collide 1 arm64
+  make_stub_deb "$built/linux-image-collide_2_arm64.deb"   linux-image-collide 2 arm64
+
+  run bash -c "
+    set -euo pipefail
+    ORCH='$LIB_DIR/orchestrate.sh'
+    # Lift the orchestrator's function bodies without running main().
+    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
+    log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
+    log_success() { printf 'OK %s\n' \"\$*\" >&2; }
+    die() { printf 'DIE %s\n' \"\$*\" >&2; exit 1; }
+    assert_staged_packages_unique '$fetched' '$built' 2>&1
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"linux-image-collide"* ]]
+  [[ "$output" == *"DIE"* ]]
+}
+
+@test "orchestrate: distinct fetched and built package names PASS the uniqueness check" {
+  local fetched="$BATS_TEST_TMPDIR/uniq2/debs" built="$BATS_TEST_TMPDIR/uniq2/kernel"
+  mkdir -p "$fetched" "$built"
+  make_stub_deb "$fetched/armbian-firmware_1_all.deb" armbian-firmware 1 all
+  make_stub_deb "$built/linux-image-built_2_arm64.deb" linux-image-built 2 arm64
+
+  run bash -c "
+    set -euo pipefail
+    ORCH='$LIB_DIR/orchestrate.sh'
+    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
+    log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
+    log_success() { printf 'OK %s\n' \"\$*\" >&2; }
+    die() { printf 'DIE %s\n' \"\$*\" >&2; exit 1; }
+    assert_staged_packages_unique '$fetched' '$built' 2>&1
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"uniqueness verified"* ]]
+}
+
+@test "build-kernel: a non-40-hex patches pin is refused before anything runs" {
+  run env DRY_RUN=1 \
+    ARCH=arm64 DTB_NAME=rk3588-rock-5b-plus.dtb \
+    KERNEL_PACKAGES=linux-image-7.1.5-ceralive-rk3588 \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    KERNEL_SOURCE_TAG=v7.1.5 \
+    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
+    KERNEL_SOURCE_PATCHES_COMMIT=main \
+    KERNEL_SOURCE_PATCHES_SERIES=patches/series \
+    KERNEL_SOURCE_DEFCONFIG_BASE=defconfig \
+    KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
+    KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
+    KERNEL_SOURCE_LOCAL_VERSION=-ceralive-rk3588 \
+    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588 \
+    KERNEL_SOURCE_PACKAGE_VERSION=7.1.5-ceralive1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"patches_commit"* ]]
+  [[ "$output" == *"never a branch"* ]]
+}
+
+@test "build-kernel: a half-specified pin is refused (no partial kernel build)" {
+  run env DRY_RUN=1 ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko2"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"half-specified pin"* ]]
+}
+
+@test "build-kernel: the DRY_RUN plan names every pinned coordinate" {
+  serialize build-plan
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus --variant edge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git clone --branch v7.1.5"* ]]
+  [[ "$output" == *"git rev-parse HEAD == 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493"* ]]
+  [[ "$output" == *"4809354656a16443c0b69f1e72b77f3fea1cbdae"* ]]
+  [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
+  [[ "$output" == *"bindeb-pkg"* ]]
+  [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
+  # The plan must not perform anything.
+  [[ "$output" != *"docker run"* ]]
+}
+
+@test "build-kernel: ccache is wired (a rebuild must not be a cold kernel build)" {
+  grep -q 'CCACHE_DIR' "$V2/ci/Dockerfile.kernel"
+  grep -q '/usr/lib/ccache/aarch64-linux-gnu-gcc' "$V2/ci/Dockerfile.kernel"
+  grep -q -- '-v "${ccache_dir}:/ccache"' "$LIB_DIR/build-kernel.sh"
+}
+
+@test "build-kernel: the builder base image is the MANIFEST pin, not a Dockerfile default" {
+  # A FROM with a baked default would let the manifest's builder_image drift
+  # into decoration. ARG BASE_IMAGE with no default makes the manifest load-bearing.
+  grep -Eq '^ARG BASE_IMAGE$' "$V2/ci/Dockerfile.kernel"
+  grep -Eq '^FROM \$\{BASE_IMAGE\}$' "$V2/ci/Dockerfile.kernel"
+  run grep -Eq '^ARG BASE_IMAGE=' "$V2/ci/Dockerfile.kernel"
+  [ "$status" -ne 0 ]
+}
+
+@test "platform DTB mapping: no-op with an empty mapping, fail-loud when half-specified" {
+  local postinst="$V2/mkosi/mkosi.images/platform/mkosi.postinst"
+  local fn
+  fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
+  [ -n "$fn" ]
+
+  # Empty mapping (the production vendor path) -> clean no-op.
+  run bash -c "
+    set -euo pipefail
+    log() { printf '[platform] %s\n' \"\$*\" >&2; }
+    BUILDROOT='$BATS_TEST_TMPDIR/pr'; mkdir -p \"\$BUILDROOT\"
+    KERNEL_SOURCE_DTB_DEB_DIR='' KERNEL_SOURCE_DTB_BOOT_DIR=''
+    $fn
+    install_kernel_source_dtbs
+    echo NOOP-OK
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NOOP-OK"* ]]
+
+  # Half-specified -> fatal (a silent skip here ships a DTB-less image).
+  run bash -c "
+    set -euo pipefail
+    log() { printf '[platform] %s\n' \"\$*\" >&2; }
+    BUILDROOT='$BATS_TEST_TMPDIR/pr2'; mkdir -p \"\$BUILDROOT\"
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-x/rockchip' KERNEL_SOURCE_DTB_BOOT_DIR=''
+    $fn
+    install_kernel_source_dtbs
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"half-specified"* ]]
+}
+
+@test "platform DTB mapping: copies the board DTB where the boot script looks" {
+  local postinst="$V2/mkosi/mkosi.images/platform/mkosi.postinst"
+  local fn
+  fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
+  local root="$BATS_TEST_TMPDIR/dtbroot"
+  mkdir -p "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip"
+  printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
+
+  run bash -c "
+    set -euo pipefail
+    log() { printf '[platform] %s\n' \"\$*\" >&2; }
+    BUILDROOT='$root'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
+    DTB_NAME='rk3588-rock-5b-plus.dtb'
+    $fn
+    install_kernel_source_dtbs
+  "
+  [ "$status" -eq 0 ]
+  # /boot/dtb/rockchip/\${fdtfile} is exactly what boot.scr.cmd resolves.
+  [ -f "$root/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb" ]
+
+  # And it is fail-loud when the board's own DTB is missing from the package —
+  # mainline and the Armbian vendor BSP do not always agree on RK3588 DTB names.
+  run bash -c "
+    set -euo pipefail
+    log() { printf '[platform] %s\n' \"\$*\" >&2; }
+    BUILDROOT='$root'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
+    DTB_NAME='rk3588s-orangepi-5-plus.dtb'
+    $fn
+    install_kernel_source_dtbs
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rk3588s-orangepi-5-plus.dtb"* ]]
+}
+
+@test "build: --variant is refused for a multi-board selection" {
+  run bash "$V2/build" --only rock-5b-plus,x86-minipc --variant edge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"single-board only"* ]]
+}
+
+@test "build: --variant with no value is refused" {
+  run bash "$V2/build" rock-5b-plus --variant
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--variant requires a name"* ]]
+}
