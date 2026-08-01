@@ -54,6 +54,50 @@ docker build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 # or: podman build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 ```
 
+### Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`) — bench media ONLY
+
+```bash
+CERALIVE_BENCH_LABELS=1 ./v2/build rock-5b-plus     # a bench-only microSD image
+```
+
+A bench microSD is booted on a board whose **eMMC is already flashed with a
+production image**, and the frozen contract selects every slot and mount by
+`PARTLABEL` ([`docs/partition-contract.md`](../../docs/partition-contract.md) §3).
+Two media carrying the same `boot` / `rootfs_a` / `rootfs_b` / `data` labels make
+`PARTLABEL=rootfs_a` genuinely ambiguous on the running kernel — which medium you
+mounted becomes a race.
+
+With the flag set the build lays `xboot` / `xrootfs_a` / `xrootfs_b` / `xdata`
+instead, and the *same* names are written everywhere the running system looks
+them up, so a collision is structurally impossible:
+
+| Reference site | File |
+|---|---|
+| GPT partition labels | `lib/assemble-disk.sh` (p1 `sgdisk -c`, staged `repart/*.conf` `Label=`) |
+| Contract verifier | `lib/verify-disk.sh` |
+| `/boot` fstab entry + RAUC `system.conf` slot devices | `mkosi/platform/boot/install-boot.sh` |
+| Compiled U-Boot selectors (`boot.scr`, `recovery.scr`) | same, via `setenv cera_root` |
+| `/data` fstab entry | `mkosi/customize/postinst-lib.sh` |
+| Fallback RAUC `system.conf` (x86 / parity builds) | `mkosi/customize/rauc-setup.sh` + its runtime-postinst twin |
+
+It also seeds distinct ext4 filesystem UUIDs for the rootfs slots (those are
+derived from the slot label), so `/dev/disk/by-uuid` cannot collide either.
+
+Rules:
+
+- **Bench only.** Never set it on a release path — no `release.yml` job, no apt/R2
+  publish, no fleet artifact. The build logs a loud warning while it is active.
+- **Sizes, roles and geometry are untouched.** This is additive tooling behaviour
+  on top of the frozen contract, *not* a contract change. `partition-contract.md`
+  is unchanged and stays frozen.
+- **Unset is the default and is byte-identical to not having the flag at all** —
+  pinned by the committed pre-overlay GPT fixtures in
+  `v2/tests/fixtures/gpt-baseline/` and the guard tests in
+  `v2/tests/bench-partlabels.bats`.
+- A bench image deliberately **fails** `v2/tests/preflash-verify.sh`, which asserts
+  the production label set — so it can never be flashed to a board's eMMC by the
+  release gate.
+
 ---
 
 ## Cross-host build

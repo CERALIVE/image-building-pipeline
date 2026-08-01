@@ -73,6 +73,7 @@ image-building-pipeline/
 | **Deferred / hardware-gated items** | [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | **Kernel currency watch** | [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
 | **Kernel build from source (opt-in variants)** | [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) — the `variants:` model, `kernel_source:` pins, `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
+| **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
 | Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
@@ -436,6 +437,47 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `v2/docs/kernel-currency-watch.md`.
 
 Guards: `manifest.bats` §26 (36 tests).
+
+**Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
+
+`CERALIVE_BENCH_LABELS=1 ./v2/build <board>` renames the frozen label set to
+`xboot`/`xrootfs_a`/`xrootfs_b`/`xdata`. It exists because a bench microSD is
+booted on a board whose **eMMC already carries a production image**, and the
+frozen contract selects every slot and mount by `PARTLABEL`
+(`docs/partition-contract.md` §3, lines 65/75) — duplicate labels across the two
+media make `PARTLABEL=rootfs_a` ambiguous on the running kernel.
+
+- **It is NOT a contract change.** Sizes, roles, partition order and geometry are
+  untouched; `docs/partition-contract.md` stays FROZEN and unedited. This is
+  additive tooling behaviour layered on top of it. The committed
+  `v2/mkosi/repart/*.conf` are never edited either — the `Label=` rewrite happens
+  on the STAGED COPY inside `stage_repart_dir`.
+- **Every reference site is renamed together, or the card does not boot.** GPT
+  labels (`lib/assemble-disk.sh`), the contract verifier (`lib/verify-disk.sh`),
+  the `/boot` fstab entry + RAUC `system.conf` slot devices + the compiled U-Boot
+  `boot.scr`/`recovery.scr` (`platform/boot/install-boot.sh`), the `/data` fstab
+  entry (`customize/postinst-lib.sh`), and the fallback RAUC `system.conf` on both
+  dual-track twins (`customize/rauc-setup.sh` + the runtime `mkosi.postinst.chroot`).
+  A relabelled GPT whose fstab still says `PARTLABEL=boot` fails on first mount —
+  strictly worse than the collision it was meant to prevent.
+- **One resolver, three copies by necessity:** `lib/common.sh::resolve_partlabel`
+  is canonical; `customize/postinst-lib.sh` carries a `declare -F`-guarded fallback
+  (same idiom as its `log`/`die`) and `platform/boot/install-boot.sh` a
+  self-contained twin — both run in chroots where `lib/` is not mounted.
+- **Subimage propagation.** `CERALIVE_BENCH_LABELS` is in `orchestrate.sh`
+  `env_names` AND `mkosi.conf` `PassEnvironment=` — the runtime chroot writes the
+  `/data` fstab entry, so skipping `PassEnvironment=` would silently read it empty
+  (the exact drift that shipped the eth0/eth1 and add-on-keyring bugs).
+- **Also isolates the ext4 filesystem UUIDs.** The slot label seeds `det_uuid`, so
+  the bench slots do not carry byte-identical UUIDs to the eMMC beside them.
+- **Unflagged is byte-identical to before this existed**, pinned by the committed
+  pre-overlay GPT fixtures `v2/tests/fixtures/gpt-baseline/*.gpt` (captured at
+  `1af9116`) plus a non-vacuity leg proving the same comparison fails on a bench
+  build. Guards: `v2/tests/bench-partlabels.bats` (13 tests).
+- **Bench-only, never released.** No `release.yml` job and no apt/R2 publish path
+  sets it; the orchestrator logs a loud warning while it is active, and a bench
+  image deliberately FAILS `v2/tests/preflash-verify.sh` (which asserts the
+  production label set), so the eMMC flash gate refuses it.
 
 **RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
 
@@ -1489,6 +1531,8 @@ gated item, not the package availability.
 - Don't make a family variant implicit. `--variant` is the ONLY selector (plus `CERALIVE_KERNEL_VARIANT`); never infer one from a board, host, branch or CI context
 - Don't pin `kernel_source.patches_commit` (or `commit`, or `builder_image`) to anything but an exact SHA/digest — a branch there is unreproducible while looking pinned, and both the schema and `build-kernel.sh` reject it
 - Don't hand-write `kernel_source.suppressed_packages`; it is derived by `resolve.py` and the schema rejects an authored one
+- Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
+- Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 

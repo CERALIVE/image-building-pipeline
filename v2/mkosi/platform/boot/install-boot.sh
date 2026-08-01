@@ -64,6 +64,28 @@ console_value() {
   printf '%s' "${SERIAL_CONSOLE/:/,}"
 }
 
+# Self-contained twin of lib/common.sh::partlabel_prefix / resolve_partlabel (the
+# rootfs target runs inside the chroot, where lib/ is not mounted — same reason
+# this script carries its own log()/die()). CERALIVE_BENCH_LABELS=1 is the opt-in
+# bench overlay: it must reach EVERY PARTLABEL this installer writes (the RAUC
+# slot devices, the shared /boot fstab entry and the compiled U-Boot selectors),
+# because a relabelled GPT whose selector still asks for `rootfs_a` does not boot.
+partlabel_prefix() {
+  [[ "${CERALIVE_BENCH_LABELS:-0}" == "1" ]] && printf 'x'
+  return 0
+}
+
+resolve_partlabel() {
+  printf '%s%s' "$(partlabel_prefix)" "${1:?resolve_partlabel needs a partition role}"
+}
+
+# relabel_selector <src> <dest> — copy a U-Boot selector source, rewriting the
+# rootfs PARTLABEL it assigns. `setenv cera_root <label>` is the ONLY place a
+# selector names one; the bootargs line reads ${cera_root} back out.
+relabel_selector() {
+  sed "s|setenv cera_root rootfs_|setenv cera_root $(partlabel_prefix)rootfs_|g" "$1" >"$2"
+}
+
 # render <template> <dest> — substitute @CONSOLE@/@DTB_NAME@/@BOARD_ID@ placeholders.
 render() {
   local tmpl="$1" dest="$2" console; console="$(console_value)"
@@ -100,7 +122,10 @@ install_rootfs() {
   # RAUC system.conf — bootloader=custom wired to our backend. Slots referenced by
   # PARTLABEL (frozen contract: never FS-UUID). The B slot is omitted for
   # single-slot media (contract §4) so RAUC never targets a non-existent partition.
-  log "writing ${root}/etc/rauc/system.conf (bootloader=custom, compatible=${COMPATIBLE}, single_slot=${SINGLE_SLOT_FALLBACK})"
+  local slot_a slot_b
+  slot_a="$(resolve_partlabel rootfs_a)"
+  slot_b="$(resolve_partlabel rootfs_b)"
+  log "writing ${root}/etc/rauc/system.conf (bootloader=custom, compatible=${COMPATIBLE}, single_slot=${SINGLE_SLOT_FALLBACK}, slots=${slot_a}/${slot_b})"
   mkdir -p "${root}/etc/rauc"
   {
     cat <<EOF
@@ -122,7 +147,7 @@ bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 path=/etc/rauc/ceralive-keyring.pem
 
 [slot.rootfs.0]
-device=/dev/disk/by-partlabel/rootfs_a
+device=/dev/disk/by-partlabel/${slot_a}
 type=ext4
 bootname=A
 EOF
@@ -130,7 +155,7 @@ EOF
       cat <<EOF
 
 [slot.rootfs.1]
-device=/dev/disk/by-partlabel/rootfs_b
+device=/dev/disk/by-partlabel/${slot_b}
 type=ext4
 bootname=B
 EOF
@@ -139,7 +164,8 @@ EOF
   chmod 0644 "${root}/etc/rauc/system.conf"
 
   local fstab="${root}/etc/fstab"
-  local boot_mount='PARTLABEL=boot /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2'
+  local boot_mount
+  boot_mount="PARTLABEL=$(resolve_partlabel boot) /boot vfat rw,nodev,nosuid,noexec,umask=0077,shortname=mixed,errors=remount-ro 0 2"
   mkdir -p "${root}/etc" "${root}/boot"
   touch "${fstab}"
   if grep -qE '^[[:space:]]*[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]]+' "${fstab}"; then
@@ -184,20 +210,38 @@ install_boot_partition() {
       bash "${SCRIPT_DIR}/ceralive-boot-state.sh" init --attempts "${BOOT_ATTEMPTS}"
   fi
 
+  # <dest> is mcopy'd wholesale into the FAT partition, so the relabelled sources
+  # are staged OUTSIDE it. With the overlay off the committed sources are compiled
+  # in place, byte for byte as before.
+  local boot_src="${SCRIPT_DIR}/boot.scr.cmd" recovery_src="${SCRIPT_DIR}/recovery.scr.cmd"
+  local relabelled=""
+  if [[ -n "$(partlabel_prefix)" ]]; then
+    relabelled="$(mktemp -d)"
+    log "bench PARTLABEL overlay active — selectors will boot $(resolve_partlabel rootfs_a)/$(resolve_partlabel rootfs_b)"
+    relabel_selector "${boot_src}"     "${relabelled}/boot.scr.cmd"
+    relabel_selector "${recovery_src}" "${relabelled}/recovery.scr.cmd"
+    boot_src="${relabelled}/boot.scr.cmd"
+    recovery_src="${relabelled}/recovery.scr.cmd"
+  fi
+
   if command -v mkimage >/dev/null 2>&1; then
     log "compiling automatic and manual recovery scripts (mkimage)"
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B selector" \
-      -d "${SCRIPT_DIR}/boot.scr.cmd" "${dest}/boot.scr" >&2
+      -d "${boot_src}" "${dest}/boot.scr" >&2
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B recovery" \
-      -d "${SCRIPT_DIR}/recovery.scr.cmd" "${dest}/recovery.scr" >&2
+      -d "${recovery_src}" "${dest}/recovery.scr" >&2
   else
-    cp -a "${SCRIPT_DIR}/boot.scr.cmd" "${dest}/boot.scr.cmd"
-    cp -a "${SCRIPT_DIR}/recovery.scr.cmd" "${dest}/recovery.scr.cmd"
+    cp -a "${boot_src}" "${dest}/boot.scr.cmd"
+    cp -a "${recovery_src}" "${dest}/recovery.scr.cmd"
     if [[ "${allow_uncompiled}" == "true" ]]; then
       log "WARN mkimage not found — staged boot.scr.cmd source (compile later); --allow-uncompiled set"
     else
       die "mkimage (u-boot-tools) not found — cannot compile boot.scr. Install u-boot-tools or pass --allow-uncompiled."
     fi
+  fi
+
+  if [[ -n "${relabelled}" ]]; then
+    rm -rf "${relabelled}"
   fi
 
   log "boot-partition artifacts staged in ${dest}"

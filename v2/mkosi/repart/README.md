@@ -20,6 +20,14 @@ systemd-repart partition definitions that implement the **FROZEN** A/B layout fr
 Fixed OS subtotal (16 + 256 + 4096 + 4096) = **8464 MB**. The raw image also
 reserves a 1 MiB backup-GPT tail, so `data` = raw capacity − 8465 MiB.
 
+## Bench media: `CERALIVE_BENCH_LABELS=1`
+
+These files are the frozen production source of truth and are **never edited** by
+the bench overlay. `lib/assemble-disk.sh::stage_repart_dir` rewrites `Label=` on
+the STAGED COPY only, producing `xboot`/`xrootfs_a`/`xrootfs_b`/`xdata` so a bench
+microSD cannot collide with the production labels on the board's eMMC. See
+[`v2/docs/dev-loop.md`](../../docs/dev-loop.md) → "Bench PARTLABEL overlay".
+
 ## Reference by PARTLABEL, never FS-UUID
 
 Every downstream consumer (fstab, RAUC `system.conf`, U-Boot scripts) references these

@@ -91,3 +91,31 @@ resolve_source_date_epoch() {
   fi
   printf '%s' "${CERALIVE_EPOCH_FALLBACK:-1577836800}"   # 2020-01-01T00:00:00Z
 }
+
+# ---------------------------------------------------------------------------
+# partlabel_prefix / resolve_partlabel <name> — the GPT PARTLABEL to use for a
+# contract partition role (boot | rootfs_a | rootfs_b | data).
+#
+# Default: the FROZEN production label, verbatim (docs/partition-contract.md §3).
+#
+# CERALIVE_BENCH_LABELS=1 (bench-only, opt-in) returns the `x`-prefixed twin —
+# xboot / xrootfs_a / xrootfs_b / xdata. A bench microSD gets booted on a board
+# whose eMMC already carries a production image, and every mount/slot lookup in
+# the contract is by PARTLABEL, so duplicate labels across the two media make
+# `PARTLABEL=rootfs_a` ambiguous on the running kernel. Renaming the bench set
+# makes that collision structurally impossible. It is NEVER set on a release
+# path; the frozen contract itself is unchanged.
+#
+# EVERY producer of a PARTLABEL reference must go through this (or its
+# self-contained twin in customize/postinst-lib.sh and platform/boot/install-boot.sh):
+# a GPT relabelled without its fstab/RAUC/boot-selector counterparts does not
+# boot at all, which is worse than the collision it was meant to avoid.
+# ---------------------------------------------------------------------------
+partlabel_prefix() {
+  [[ "${CERALIVE_BENCH_LABELS:-0}" == "1" ]] && printf 'x'
+  return 0
+}
+
+resolve_partlabel() {
+  printf '%s%s' "$(partlabel_prefix)" "${1:?resolve_partlabel needs a partition role}"
+}

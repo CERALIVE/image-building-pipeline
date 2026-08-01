@@ -84,10 +84,18 @@ install_system_conf_fallback() {
     log_info "system.conf already present (board-aware generator ran) — leaving it authoritative, not overwriting"
     return 0
   fi
-  log_info "writing fallback ${RAUC_SYSTEM_CONF} (compatible=${RAUC_COMPATIBLE})"
+  # The committed template carries the frozen production slot labels; the bench
+  # overlay rewrites them here so the fallback can never disagree with the GPT
+  # install-boot.sh / assemble-disk.sh actually laid.
+  local slot_a slot_b
+  slot_a="$(resolve_partlabel rootfs_a)"
+  slot_b="$(resolve_partlabel rootfs_b)"
+  log_info "writing fallback ${RAUC_SYSTEM_CONF} (compatible=${RAUC_COMPATIBLE}, slots=${slot_a}/${slot_b})"
   mkdir -p /etc/rauc
   if [[ -n "${RAUC_SRC_DIR}" && -s "${RAUC_SRC_DIR}/system.conf" ]]; then
     sed -e "s|@COMPATIBLE_STRING@|${RAUC_COMPATIBLE}|g" \
+      -e "s|by-partlabel/rootfs_a$|by-partlabel/${slot_a}|" \
+      -e "s|by-partlabel/rootfs_b$|by-partlabel/${slot_b}|" \
       "${RAUC_SRC_DIR}/system.conf" >"${RAUC_SYSTEM_CONF}"
   else
     # Self-contained heredoc twin (chroot has no source tree). Keep in sync with
@@ -105,12 +113,12 @@ bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 path=${RAUC_KEYRING_DEST}
 
 [slot.rootfs.0]
-device=/dev/disk/by-partlabel/rootfs_a
+device=/dev/disk/by-partlabel/${slot_a}
 type=ext4
 bootname=A
 
 [slot.rootfs.1]
-device=/dev/disk/by-partlabel/rootfs_b
+device=/dev/disk/by-partlabel/${slot_b}
 type=ext4
 bootname=B
 EOF

@@ -38,6 +38,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITES=(
   "${HERE}/tests/manifest.bats"
   "${HERE}/tests/rk3588-ab-contract.bats"
+  "${HERE}/tests/bench-partlabels.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
   "${HERE}/tests/packaging-hygiene.bats"
 )
