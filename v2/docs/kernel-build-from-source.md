@@ -217,15 +217,15 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    `/boot/config-7.1.5-ceralive-rk3588` carries it — but no symbol in it has been
    proven necessary *or* sufficient **on hardware**.
 3. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
-   filenames.** `orange-pi-5-plus.yaml` declares `rk3588s-orangepi-5-plus.dtb`
-   (the vendor name); mainline v7.1 names that board's DTB
-   `rk3588-orangepi-5-plus.dtb`. The build stage therefore **fails loudly** for
-   that board with the available DTB names listed. This is deliberate — it
-   surfaces a real divergence at build time instead of producing a board that
-   does not boot. Resolving it (a per-board DTB name under the variant, or a
-   rename) belongs with the experimental image build, on a board.
+   filenames — RESOLVED, via a board-declared per-variant override.** The Orange
+   Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor BSP and
+   `rk3588-orangepi-5-plus.dtb` (no `s`) in mainline, which is what this variant
+   compiles. Because the board always wins the merge, a family variant cannot
+   restate that name — so the **board** declares it, scoped to the variant. See
+   §9 below for the mechanism; the short version is
+   `variant_overrides.edge.dtb_name` in `orange-pi-5-plus.yaml`.
 
-   `rock-5b-plus` is **not** affected: it declares `rk3588-rock-5b-plus.dtb`,
+   `rock-5b-plus` never needed it: it declares `rk3588-rock-5b-plus.dtb`,
    mainline v7.1.5 builds exactly that name, and the built `.deb` ships it (228
    `rockchip/*.dtb` entries in total). Note that until the `deb_lists_path` fix in
    item 1, this board *also* failed the DTB check — with the divergence wording
@@ -248,14 +248,62 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
 
 ---
 
-## 8. Files
+## 8. Board variant overrides — when a board fact differs per variant
+
+The merge order is `family -> variant -> board`, and **the board wins last**. That
+is intentional and tested: a variant must never be able to restate a
+board-specific fact. It also means a variant cannot fix the one thing that
+genuinely differs per variant *and* per board — the DTB filename, which follows
+whichever kernel tree the DTB came from.
+
+So the **board** (never the family) may declare a `variant_overrides:` map:
+
+```yaml
+# v2/manifests/boards/orange-pi-5-plus.yaml
+dtb_name: rk3588s-orangepi-5-plus.dtb        # vendor BSP, the default path
+
+variant_overrides:
+  edge:
+    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.5, no 's'
+```
+
+The rules, all enforced:
+
+* **It is applied AFTER the board**, so board-wins-last is strengthened, not
+  weakened — the override is a board fact that happens to be scoped to a variant.
+  A plain family-variant overlay still loses to the board exactly as before.
+* **The key is stripped before flattening whether or not a variant is selected**,
+  the same discipline as the family's `variants:`. A board that declares one
+  resolves byte-identically on the default path to a board that never did — pinned
+  by the same `vendor-baseline/*.params` golden fixtures.
+* **It is deliberately narrow**: `dtb_name` is the only permitted field. This is a
+  DTB-naming mechanism, not a general board-overrides-the-variant escape hatch.
+  The schema rejects anything else, and `default` is reserved exactly as it is for
+  `variants:`.
+* **An override naming a variant the family does not declare is FATAL on every
+  resolve**, including the default path. A typo'd name that silently never applied
+  would be the worst possible outcome for a mechanism whose entire job is to
+  change one filename.
+
+Because `DTB_NAME` is a single resolved parameter, one override moves every
+consumer together — the U-Boot `fdtfile`, the disk assembler, the platform DTB
+install mapping, and `build-kernel.sh`'s validation of the built `.deb`. There is
+no second place to keep in sync.
+
+`rock-5b-plus` declares no override and needs none.
+
+---
+
+## 9. Files
 
 | Path | Role |
 |---|---|
 | `v2/manifests/schema/family.schema.json` | `variants:` map + `kernel_source:` `$defs` |
+| `v2/manifests/schema/board.schema.json` | `variant_overrides:` map + its `$defs` |
+| `v2/manifests/boards/orange-pi-5-plus.yaml` | the `edge` DTB-name override |
 | `v2/manifests/families/rk3588.yaml` | the `edge` variant declaration + every pin |
 | `v2/manifests/kernel/rk3588-edge.fragment` | the Kconfig fragment |
-| `v2/lib/resolve.py` | variant merge, `variants:` stripping, derived suppression set |
+| `v2/lib/resolve.py` | variant merge, `variants:`/`variant_overrides:` stripping, derived suppression set |
 | `v2/lib/resolve.sh` | `--variant` / `CERALIVE_KERNEL_VARIANT` |
 | `v2/lib/build-kernel.sh` | the build stage |
 | `v2/ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |

@@ -4117,6 +4117,161 @@ YAML
   [[ "$output" == *"firmware_packages"* ]]
 }
 
+# Write a schema-valid board carrying one variant_overrides block, so the
+# negative legs below differ from the shipped manifest in exactly one field.
+write_override_board() {
+  local dest="$1" overrides="$2"
+  cat > "$dest" <<YAML
+family: rk3588
+board_id: fixture-board
+dtb_name: rk3588-fixture.dtb
+description: fixture board for variant_overrides schema legs
+variant_overrides:
+${overrides}
+YAML
+}
+
+@test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
+  # The defect this mechanism exists for. Mainline's rockchip Makefile at the
+  # pinned v7.1.5 builds rk3588-orangepi-5-plus.dtb (no 's'), so the vendor
+  # spelling made validate_built_kernel_deb reject a correctly-built kernel.
+  run bash -c "'$RESOLVE_SH' orange-pi-5-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DTB_NAME='rk3588-orangepi-5-plus.dtb'"* ]]
+  [[ "$output" != *"rk3588s-orangepi-5-plus.dtb"* ]]
+}
+
+@test "variant_overrides: OPi 5+ WITHOUT the variant keeps the VENDOR DTB name" {
+  # The override is opt-in in exactly the same sense the variant is. The vendor
+  # BSP genuinely ships the rk3588s- spelling; taking it away would break the
+  # production path this change must not move.
+  run bash -c "'$RESOLVE_SH' orange-pi-5-plus 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DTB_NAME='rk3588s-orangepi-5-plus.dtb'"* ]]
+}
+
+@test "variant_overrides: Rock 5B+ is UNAFFECTED with and without the variant" {
+  # It declares no override and needs none — mainline and vendor agree on this
+  # board's spelling. Asserted explicitly on BOTH paths so a future accidental
+  # divergence (either tree renaming it) is caught here rather than at build.
+  local path
+  for path in "" "--variant edge"; do
+    run bash -c "'$RESOLVE_SH' rock-5b-plus $path 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DTB_NAME='rk3588-rock-5b-plus.dtb'"* ]]
+  done
+  ! grep -Fq 'variant_overrides' "$V2/manifests/boards/rock-5b-plus.yaml"
+}
+
+@test "variant_overrides: the mechanism is OPT-IN, not a silent global change" {
+  # Non-vacuity. A board that declares NO override must resolve its ordinary
+  # board dtb_name under a variant, exactly as before this existed. Without
+  # this leg the change could be rewriting DTB names fleet-wide unnoticed.
+  local fam="$BATS_TEST_TMPDIR/no-ovr-fam.yaml"
+  local brd="$BATS_TEST_TMPDIR/no-ovr-brd.yaml"
+  cat > "$fam" <<'YAML'
+dtb_name: family-default.dtb
+variants:
+  edge:
+    armbian_branch: edge
+YAML
+  cat > "$brd" <<'YAML'
+family: no-ovr-fam
+dtb_name: board-own.dtb
+YAML
+  run python3 "$RESOLVE_PY" merge --family "$fam" --board "$brd" --variant edge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'DTB_NAME\tboard-own.dtb'* ]]
+}
+
+@test "variant_overrides: the block never reaches the flattened param set" {
+  # A leaked VARIANT_OVERRIDES_* key would move the vendor path and hand the
+  # orchestrator a second, unselected DTB name in its environment.
+  local path
+  for path in "" "--variant edge"; do
+    run bash -c "'$RESOLVE_SH' orange-pi-5-plus $path 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"VARIANT_OVERRIDES"* ]]
+  done
+}
+
+@test "variant_overrides: an override applies AFTER the board, not before it" {
+  # Board-wins-last is untouched: a plain variant overlay still loses to the
+  # board, and only the board's OWN per-variant entry wins.
+  local fam="$BATS_TEST_TMPDIR/ovr-order-fam.yaml"
+  local brd="$BATS_TEST_TMPDIR/ovr-order-brd.yaml"
+  cat > "$fam" <<'YAML'
+variants:
+  edge:
+    dtb_name: from-variant.dtb
+    other_field: from-variant
+YAML
+  cat > "$brd" <<'YAML'
+family: ovr-order-fam
+dtb_name: from-board.dtb
+other_field: from-board
+variant_overrides:
+  edge:
+    dtb_name: from-board-override.dtb
+YAML
+  run python3 "$RESOLVE_PY" merge --family "$fam" --board "$brd" --variant edge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'DTB_NAME\tfrom-board-override.dtb'* ]]
+  [[ "$output" == *$'OTHER_FIELD\tfrom-board'* ]]
+}
+
+@test "variant_overrides: an override for a variant the family lacks is FATAL" {
+  # The PR #83 defect-3 class: a mechanism that silently never triggers. A
+  # typo'd variant name must fail the resolve, not sit there looking effective.
+  local fam="$BATS_TEST_TMPDIR/typo-fam.yaml"
+  local brd="$BATS_TEST_TMPDIR/typo-brd.yaml"
+  cat > "$fam" <<'YAML'
+variants:
+  edge:
+    armbian_branch: edge
+YAML
+  cat > "$brd" <<'YAML'
+family: typo-fam
+dtb_name: board-own.dtb
+variant_overrides:
+  edg:
+    dtb_name: never-applies.dtb
+YAML
+  # Fatal on the DEFAULT path too — the typo is a manifest defect either way.
+  run python3 "$RESOLVE_PY" merge --family "$fam" --board "$brd"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"variant 'edg'"* ]]
+  [[ "$output" == *"never apply"* ]]
+}
+
+@test "variant_overrides: schema rejects an entry named 'default' (reserved)" {
+  local f="$BATS_TEST_TMPDIR/default-override.yaml"
+  write_override_board "$f" "  default:
+    dtb_name: rk3588-other.dtb"
+  run validate_manifest "$f" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"variant_overrides"* ]]
+}
+
+@test "variant_overrides: schema rejects any field other than dtb_name" {
+  # Deliberately narrow. This is a DTB-naming mechanism, not a general
+  # board-overrides-the-variant escape hatch.
+  local f="$BATS_TEST_TMPDIR/wide-override.yaml"
+  write_override_board "$f" "  edge:
+    kernel_packages: [linux-image-something]"
+  run validate_manifest "$f" "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"kernel_packages"* ]]
+}
+
+@test "variant_overrides: shipped OPi 5+ board manifest declares edge and validates" {
+  run validate_manifest "$V2/manifests/boards/orange-pi-5-plus.yaml" "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VALID"* ]]
+  grep -Eq '^variant_overrides:' "$V2/manifests/boards/orange-pi-5-plus.yaml"
+  grep -Eq '^  edge:' "$V2/manifests/boards/orange-pi-5-plus.yaml"
+}
+
 @test "kernel_source: schema rejects a FLOATING patches reference" {
   # The single most important pin in the block: a branch name here would make
   # the built kernel unreproducible while still looking pinned.

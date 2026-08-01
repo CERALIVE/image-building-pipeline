@@ -433,9 +433,34 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `validate_built_kernel_deb` axes, installs the board DTB to
   `/boot/dtb/rockchip/`, and emits a flashable `.raw` + signed `.raucb`. The
   defconfig fragment is still reviewed intent rather than a hardware-validated
-  result, and mainline/vendor still disagree on the OPi 5+ DTB filename
-  (`rk3588-` vs `rk3588s-orangepi-5-plus.dtb`) — the build stage fails loudly there
-  on purpose, and that board remains blocked. `v2/docs/DEFERRED.md` item 9.
+  result. `v2/docs/DEFERRED.md` item 9.
+- **A board fact that differs per variant is declared BY THE BOARD, in
+  `variant_overrides:`.** The merge order is family → variant → board and the board
+  wins last, so a variant can never restate a board fact — which is also why a
+  variant could not fix the one thing that legitimately differs per variant AND per
+  board: the DTB filename. `orange-pi-5-plus.yaml` therefore carries
+  `variant_overrides.edge.dtb_name: rk3588-orangepi-5-plus.dtb` (mainline spells it
+  without the `s`; the vendor BSP ships `rk3588s-`). The override is applied AFTER
+  the board merge — board-wins-last is strengthened, not weakened — is stripped
+  before flattening whether or not a variant is selected (so the vendor path stays
+  byte-identical, pinned by the same `vendor-baseline/*.params` fixtures), permits
+  ONLY `dtb_name`, and is FATAL when it names a variant the family does not
+  declare. `rock-5b-plus` needs none: mainline and vendor agree on its spelling.
+  With this, a real `v2/build orange-pi-5-plus --variant edge` compiles and passes
+  all four validation axes. Full write-up:
+  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §8.
+- **The app layer stages first-party `.deb`s by `BOARD_ID`, not by the board
+  manifest stem — so `orange-pi-5-plus` installs NONE of them.** mkosi's CLI
+  `--extra-tree …:/opt/ceralive-staging` does not reach the `app` subimage
+  (the same subimage-isolation trap as `PassEnvironment=`), so the packages are
+  actually delivered by the fallback `stage_first_party_from_source_mount` in
+  `app/mkosi.postinst.chroot`, which reads `${SRCDIR}/.staging/${BOARD_ID}/firstparty`
+  while the orchestrator stages into `.staging/<board-manifest-stem>/`. Those agree
+  only on `rock-5b-plus` (`board_id: rock-5b-plus`); on `orange-pi-5-plus`
+  (`board_id: orangepi5-plus`) the path does not exist, the function returns
+  silently, and the build stops at `[7/9]` with `first-party packages MISSING from
+  rootfs`. Board-specific and variant-independent. **Not yet fixed** —
+  `v2/docs/DEFERRED.md` item 9.
 - **The `DRY_RUN` PR gate cannot see this stage — so every fix needs a STATIC
   guard.** The first real build hit four independent, board-independent, fatal
   defects that a plan-only gate had passed for a whole release: `make kernelrelease`
