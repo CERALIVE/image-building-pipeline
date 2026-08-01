@@ -368,9 +368,9 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — nothing compiled, nothing booted
+## 9. Kernel-build-from-source variant — compiled on rock-5b-plus, never booted
 
-**Status:** Deferred (never built)
+**Status:** Partially unblocked — `rock-5b-plus` builds end to end; nothing booted; `orange-pi-5-plus` still blocked on its DTB name
 **Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -378,29 +378,37 @@ kernel + in-tree DTBs from pinned source (`v7.1.5` + the
 `CERALIVE/rk3588-kernel-patches` series) with `make bindeb-pkg`. The pipeline, the
 schema, the pins, the fetch suppression, the package-name replacement, the
 staged-package uniqueness check and the platform DTB install mapping all exist and
-are gated by 36 tests. **No kernel has ever been compiled by it, and no image built
-from it has ever booted.**
+are gated by tests.
 
-**Why deferred:** The PR gate runs `DRY_RUN=1` (plan only — no network, container
-or compiler). A real build is a multi-GB clone plus a long cross-compile, so
-running it in the PR gate is a separate, deliberate CI-budget decision. The
-experimental image build is the next step.
+**What has now been proven:** `CERALIVE_BENCH_LABELS=1 v2/build rock-5b-plus
+--variant edge` was run for real, twice, on a container host. It compiles
+`linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passes all four
+`validate_built_kernel_deb` axes, installs the board DTB to
+`/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produces a flashable `.raw` plus a
+signed `.raucb`. The two builds agreed on every package version, every rootfs path
+and the built `/boot/config-*`. Reaching that required fixing four defects the
+`DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
+
+**Still deferred:** the PR gate still runs `DRY_RUN=1` (plan only — no network,
+container or compiler). A real build is a multi-GB clone plus a long cross-compile,
+so running it in the PR gate remains a separate, deliberate CI-budget decision.
 
 Two consequences worth stating plainly:
 
-* The **defconfig fragment** (`v2/manifests/kernel/rk3588-edge.fragment`) is
-  reviewed intent, not a validated result. No symbol in it has been proven
-  necessary *or* sufficient on hardware.
+* The **defconfig fragment** (`v2/manifests/kernel/rk3588-edge.fragment`) now
+  demonstrably resolves and compiles, but it is still reviewed intent rather than a
+  validated result: no symbol in it has been proven necessary *or* sufficient **on
+  hardware**.
 * **Mainline and the Armbian vendor BSP disagree on some RK3588 DTB filenames.**
   `orange-pi-5-plus.yaml` declares `rk3588s-orangepi-5-plus.dtb` (the vendor
   name); mainline v7.1 names it `rk3588-orangepi-5-plus.dtb`. `build-kernel.sh`
   therefore fails loudly for that board and lists the DTBs actually present. That
   is deliberate: the divergence surfaces at build time rather than as a board that
-  does not boot.
+  does not boot. `rock-5b-plus` is unaffected — it declares
+  `rk3588-rock-5b-plus.dtb`, which mainline builds under exactly that name.
 
-**Unblock condition:** Run a real (non-`DRY_RUN`) `v2/build <board> --variant edge`
-on a host with a container runtime, resolve the OPi 5+ DTB-name divergence above,
-then flash and boot the resulting image on a physical RK3588 board. **D3 is not
+**Unblock condition:** Flash and boot a `--variant edge` image on a physical RK3588
+board, and separately resolve the OPi 5+ DTB-name divergence above. **D3 is not
 reopened by any of this** — the shipped kernel remains the Armbian vendor BSP; see
 `v2/docs/kernel-currency-watch.md` for the two triggers that would revisit it.
 

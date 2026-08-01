@@ -192,17 +192,30 @@ this.
 
 ## 7. Known gaps — read before using this
 
-Honest status: **nothing here has been compiled or booted.** This todo delivered
-the pipeline, the schema, the pins and the gates. The experimental image build is
-the next step.
+Honest status: **`rock-5b-plus --variant edge` has been built end to end** — a real
+cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.raw`.
+**Nothing has been booted.** Everything below the compile line is still unproven.
 
 1. **The kernel is not built in CI.** The PR gate runs `DRY_RUN=1`, which emits
    the plan and touches no network, container or compiler. A real kernel build is
    a multi-GB clone and a long cross-compile; wiring it into the PR gate would be
    a separate, deliberate decision about CI budget.
+
+   That gap is not free, and it has been paid for once already: the first real
+   build of this path hit **four** independent, board-independent defects, each
+   invisible to a plan-only gate and each fatal — a stale `include/config/auto.conf`
+   making the `kernelrelease` assertion unsatisfiable, two missing cross build
+   dependencies in the builder image, a builder-image tag that could never be
+   invalidated, and a `deb_lists_path` that reported every present DTB as absent
+   (`grep -q` closing the pipe, `tar` dying of `SIGPIPE`, `set -o pipefail`
+   turning that into "not found"). All four now carry static/executable guards in
+   `manifest.bats` §26, because a static guard is the only thing a `DRY_RUN` gate
+   can enforce. **Add a guard whenever you touch this path.**
 2. **The defconfig fragment is reviewed intent, not a validated result.** It
-   starts from mainline `defconfig` and adds what the CeraLive stack needs. No
-   symbol in it has been proven necessary *or* sufficient on hardware.
+   starts from mainline `defconfig` and adds what the CeraLive stack needs. The
+   fragment is now known to *resolve and compile* — the built
+   `/boot/config-7.1.5-ceralive-rk3588` carries it — but no symbol in it has been
+   proven necessary *or* sufficient **on hardware**.
 3. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
    filenames.** `orange-pi-5-plus.yaml` declares `rk3588s-orangepi-5-plus.dtb`
    (the vendor name); mainline v7.1 names that board's DTB
@@ -211,12 +224,27 @@ the next step.
    surfaces a real divergence at build time instead of producing a board that
    does not boot. Resolving it (a per-board DTB name under the variant, or a
    rename) belongs with the experimental image build, on a board.
+
+   `rock-5b-plus` is **not** affected: it declares `rk3588-rock-5b-plus.dtb`,
+   mainline v7.1.5 builds exactly that name, and the built `.deb` ships it (228
+   `rockchip/*.dtb` entries in total). Note that until the `deb_lists_path` fix in
+   item 1, this board *also* failed the DTB check — with the divergence wording
+   above and an empty "DTBs actually present" list. **An empty list there means the
+   listing is broken, not that the DTB is missing.**
 4. **No `.deb` produced by this stage may be published.** It is a local build
    input only; nothing here uploads to apt/R2.
 5. **D3 is not reopened.** The shipped kernel is still the Armbian vendor BSP.
    See [`kernel-currency-watch.md`](kernel-currency-watch.md) for the two precise
    triggers that would revisit that decision; this variant existing is not one of
    them.
+6. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
+   date from the wall clock, so the post-`am` commit SHAs differ on every run.
+   `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP` are pinned and the *content* is
+   stable — two consecutive builds produced identical package versions, identical
+   `.deb` file lists and an identical `/boot/config-*` — but the archive bytes
+   differ. This is exactly why `CONFIG_LOCALVERSION_AUTO=n` and the
+   `kernelrelease` assertion matter: without them the package NAME would inherit
+   that nondeterminism.
 
 ---
 
