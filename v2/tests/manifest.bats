@@ -1604,7 +1604,7 @@ PY
   run grep -F 'stage_first_party_from_source_mount' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
 
-  run grep -F 'src="${src%/}/.staging/${BOARD_ID}/firstparty"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  run grep -F 'src="${src%/}/.staging/${board}/firstparty"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
 
   run grep -F 'cp -a "${src}"/*.deb "${FIRST_PARTY_DIR}/"' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
@@ -4796,4 +4796,162 @@ YAML
   run bash "$V2/build" rock-5b-plus --variant
   [ "$status" -ne 0 ]
   [[ "$output" == *"--variant requires a name"* ]]
+}
+
+# ===========================================================================
+# 27. First-party staging key — producer/consumer agreement across the subimage
+#     boundary.
+#
+#     The orchestrator stages the 14 first-party .debs under the board MANIFEST
+#     STEM; the app subimage rebuilds that path from inside its own chroot,
+#     because mkosi's --extra-tree never reaches a subimage and the source-mount
+#     fallback is the ONLY live delivery route. Keying the consumer off BOARD_ID
+#     (the Armbian BOARD= value) made those two agree on rock-5b-plus alone —
+#     the one board built regularly — so orange-pi-5-plus installed ZERO
+#     first-party packages for a whole release. These tests therefore drive the
+#     REAL shipped stager against the REAL shipped manifests, and every leg is
+#     paired with a non-vacuity leg, because an identity mapping is exactly what
+#     hid the defect.
+# ===========================================================================
+
+# run_source_mount_stager <srcdir> <ceralive_board> <board_id> <dest>
+# Source the SHIPPED app postinst (its BASH_SOURCE guard leaves main() unrun, so
+# the destructive prune/clean steps never fire) and call the real function.
+run_source_mount_stager() {
+  local srcdir="$1" ceralive_board="$2" board_id="$3" dest="$4"
+  run bash -c "
+    set -euo pipefail
+    SRCDIR='$srcdir'
+    CERALIVE_BOARD='$ceralive_board'
+    BOARD_ID='$board_id'
+    export SRCDIR CERALIVE_BOARD BOARD_ID
+    source '$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot'
+    FIRST_PARTY_DIR='$dest'
+    stage_first_party_from_source_mount
+  "
+}
+
+@test "firstparty-staging: the REAL stager finds the tree for EVERY shipped board manifest" {
+  # The producer/consumer contract, exercised end to end per board: lay the tree
+  # out exactly as orchestrate.sh does (STAGING_ROOT/<manifest-stem>/firstparty)
+  # and hand the stager that board's REAL board_id at the same time, which is
+  # what the broken code read. orange-pi-5-plus is the leg that fails on the
+  # pre-fix consumer.
+  local manifest board board_id divergent=0
+  for manifest in "$V2"/manifests/boards/*.yaml; do
+    board="$(basename "$manifest" .yaml)"
+    board_id="$(sed -n 's/^board_id:[[:space:]]*//p' "$manifest" | head -1)"
+    [ -n "$board_id" ]
+    [ "$board" = "$board_id" ] || divergent=1
+
+    local srcdir="$BATS_TEST_TMPDIR/src-$board"
+    local dest="$BATS_TEST_TMPDIR/dest-$board"
+    mkdir -p "$srcdir/.staging/$board/firstparty" "$dest"
+    make_stub_deb "$srcdir/.staging/$board/firstparty/cerastream_1_arm64.deb" \
+      cerastream 1 arm64
+
+    run_source_mount_stager "$srcdir" "$board" "$board_id" "$dest"
+    [ "$status" -eq 0 ]
+    [ -f "$dest/cerastream_1_arm64.deb" ] \
+      || { echo "stager did not deliver for board=$board board_id=$board_id"; false; }
+  done
+
+  # NON-VACUITY: at least one shipped board must have stem != board_id, or the
+  # whole matrix above is an identity test that passes on the broken consumer.
+  [ "$divergent" -eq 1 ]
+}
+
+@test "firstparty-staging: a tree staged under BOARD_ID is NOT picked up (the actual defect)" {
+  # The inverse of the test above, and the one that would have caught this the
+  # day it shipped: with the tree at .staging/<board_id>/ and nothing at
+  # .staging/<manifest-stem>/, the stager must deliver NOTHING — proving it
+  # follows the orchestrator's key and not the Armbian device identity.
+  local board=orange-pi-5-plus
+  local board_id
+  board_id="$(sed -n 's/^board_id:[[:space:]]*//p' "$V2/manifests/boards/$board.yaml" | head -1)"
+  [ "$board_id" = orangepi5-plus ]
+  [ "$board_id" != "$board" ]
+
+  local srcdir="$BATS_TEST_TMPDIR/src" dest="$BATS_TEST_TMPDIR/dest"
+  mkdir -p "$srcdir/.staging/$board_id/firstparty" "$dest"
+  make_stub_deb "$srcdir/.staging/$board_id/firstparty/cerastream_1_arm64.deb" \
+    cerastream 1 arm64
+
+  run_source_mount_stager "$srcdir" "$board" "$board_id" "$dest"
+  [ "$status" -eq 0 ]
+  run bash -c "ls '$dest'/*.deb 2>/dev/null"
+  [ "$status" -ne 0 ]
+}
+
+@test "firstparty-staging: a miss NAMES the probed path instead of returning silently" {
+  # The silent `return 0` is why a zero-package image built to completion. An
+  # offline/dev build legitimately stages nothing, so this stays non-fatal — but
+  # the log line must carry the exact path, which is the entire diagnosis.
+  local srcdir="$BATS_TEST_TMPDIR/src" dest="$BATS_TEST_TMPDIR/dest"
+  mkdir -p "$srcdir" "$dest"
+
+  run_source_mount_stager "$srcdir" rock-5b-plus rock-5b-plus "$dest"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *".staging/rock-5b-plus/firstparty"* ]]
+
+  # An unset CERALIVE_BOARD is the PassEnvironment-drift failure mode; it must
+  # say so rather than look like an ordinary offline build.
+  run_source_mount_stager "$srcdir" "" rock-5b-plus "$dest"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CERALIVE_BOARD"* ]]
+}
+
+@test "firstparty-staging: the ExtraTree still wins when it did reach the subimage" {
+  # The fallback must stay a fallback: if /opt/ceralive-staging is already
+  # populated, the source mount is not consulted at all.
+  local srcdir="$BATS_TEST_TMPDIR/src" dest="$BATS_TEST_TMPDIR/dest"
+  mkdir -p "$srcdir/.staging/rock-5b-plus/firstparty" "$dest"
+  make_stub_deb "$srcdir/.staging/rock-5b-plus/firstparty/from-source_1_arm64.deb" \
+    from-source 1 arm64
+  make_stub_deb "$dest/from-extratree_1_arm64.deb" from-extratree 1 arm64
+
+  run_source_mount_stager "$srcdir" rock-5b-plus rock-5b-plus "$dest"
+  [ "$status" -eq 0 ]
+  [ -f "$dest/from-extratree_1_arm64.deb" ]
+  [ ! -f "$dest/from-source_1_arm64.deb" ]
+}
+
+@test "firstparty-staging: orchestrate.sh exports the SAME key it stages under" {
+  # Cross-file agreement, statically. The producer's staging path and the
+  # exported key must be the same shell variable, or the two halves drift again.
+  local orchestrate="$LIB_DIR/orchestrate.sh"
+  grep -Fq 'local staging="${STAGING_ROOT}/${board}"' "$orchestrate"
+  grep -Fq 'export CERALIVE_BOARD="${board}"' "$orchestrate"
+
+  # And the per-board mkosi cache stays keyed by BOARD_ID — a DIFFERENT tree for
+  # a different purpose, deliberately not aliased onto the staging key.
+  grep -Fq 'local cache_dir="cache/${BOARD_ID}"' "$orchestrate"
+}
+
+@test "firstparty-staging: the consumer never re-slips to BOARD_ID" {
+  # Explicit re-slip guard (same discipline as the hdmi-in DRIVERS== rule): the
+  # source-mount path expression must not mention BOARD_ID at all.
+  local postinst="$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  local fn
+  fn="$(sed -n '/^stage_first_party_from_source_mount()/,/^}/p' "$postinst")"
+  [ -n "$fn" ]
+  [[ "$fn" == *'.staging/${board}/firstparty'* ]]
+  [[ "$fn" != *'${BOARD_ID}'* ]]
+}
+
+@test "firstparty-staging: CERALIVE_BOARD reaches the app SUBIMAGE (env_names + PassEnvironment)" {
+  # Explicit regression pin on top of the structural lockstep guard: this value
+  # is consumed inside a subimage chroot, so a name in env_names alone reads
+  # EMPTY there — silently — and the stager degrades to installing nothing.
+  grep -Eq '^[[:space:]]+CERALIVE_BENCH_LABELS CERALIVE_BOARD$' "$LIB_DIR/orchestrate.sh"
+
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$V2/mkosi/mkosi.conf")"
+  [ -n "$pass_names" ]
+
+  local n found=0
+  for n in $pass_names; do
+    [ "$n" = CERALIVE_BOARD ] && found=1
+  done
+  [ "$found" -eq 1 ]
 }

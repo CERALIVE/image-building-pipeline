@@ -427,13 +427,16 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `/boot/dtb/rockchip/${fdtfile}`. `platform/mkosi.postinst::install_kernel_source_dtbs`
   copies source → target. Both paths are EMPTY on the vendor path, so the step is a
   strict no-op there; fail-loud when enabled.
-- **`[PARTIAL]` — `rock-5b-plus` COMPILES end to end; nothing has BOOTED.** A real
-  (non-`DRY_RUN`) `v2/build rock-5b-plus --variant edge` now produces
+- **`[PARTIAL]` — BOTH RK3588 boards COMPILE end to end; nothing has BOOTED.** A
+  real (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
   `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
   `validate_built_kernel_deb` axes, installs the board DTB to
-  `/boot/dtb/rockchip/`, and emits a flashable `.raw` + signed `.raucb`. The
-  defconfig fragment is still reviewed intent rather than a hardware-validated
-  result. `v2/docs/DEFERRED.md` item 9.
+  `/boot/dtb/rockchip/`, installs all 14 first-party `.deb`s, clears the `[7/9]`
+  parity gate and emits a flashable `.raw` + signed `.raucb` — proven on
+  `rock-5b-plus` first, and on `orange-pi-5-plus` once the DTB-name override and
+  the first-party staging key below were both fixed. The defconfig fragment is
+  still reviewed intent rather than a hardware-validated result.
+  `v2/docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
@@ -449,18 +452,32 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   With this, a real `v2/build orange-pi-5-plus --variant edge` compiles and passes
   all four validation axes. Full write-up:
   [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §8.
-- **The app layer stages first-party `.deb`s by `BOARD_ID`, not by the board
-  manifest stem — so `orange-pi-5-plus` installs NONE of them.** mkosi's CLI
-  `--extra-tree …:/opt/ceralive-staging` does not reach the `app` subimage
-  (the same subimage-isolation trap as `PassEnvironment=`), so the packages are
-  actually delivered by the fallback `stage_first_party_from_source_mount` in
-  `app/mkosi.postinst.chroot`, which reads `${SRCDIR}/.staging/${BOARD_ID}/firstparty`
-  while the orchestrator stages into `.staging/<board-manifest-stem>/`. Those agree
-  only on `rock-5b-plus` (`board_id: rock-5b-plus`); on `orange-pi-5-plus`
-  (`board_id: orangepi5-plus`) the path does not exist, the function returns
-  silently, and the build stops at `[7/9]` with `first-party packages MISSING from
-  rootfs`. Board-specific and variant-independent. **Not yet fixed** —
-  `v2/docs/DEFERRED.md` item 9.
+- **The first-party staging key is `CERALIVE_BOARD` (the board manifest stem),
+  NOT `BOARD_ID` — and the source-mount fallback is the ONLY live delivery
+  route.** mkosi's CLI `--extra-tree …:/opt/ceralive-staging` does not reach the
+  `app` subimage (the same subimage-isolation trap as `PassEnvironment=`), so on
+  every board the 14 first-party `.deb`s are actually delivered by the fallback
+  `stage_first_party_from_source_mount` in `app/mkosi.postinst.chroot`. It
+  rebuilds the orchestrator's staging path from inside its chroot, so producer
+  and consumer must agree on the key. They did not: the consumer read
+  `${SRCDIR}/.staging/${BOARD_ID}/firstparty` while `orchestrate.sh` stages into
+  `.staging/<board-manifest-stem>/`, and those coincide only on `rock-5b-plus`
+  (`board_id: rock-5b-plus`). On `orange-pi-5-plus` (`board_id: orangepi5-plus`)
+  the path did not exist, the function returned silently, ZERO first-party
+  packages installed, and the build ran to `[7/9]` before failing with
+  `first-party packages MISSING from rootfs` — board-specific, variant-independent
+  and identical on the vendor path. **FIXED:** `orchestrate.sh` now exports the
+  stem as `CERALIVE_BOARD` right where it computes the staging dir (`env_names`
+  + `mkosi.conf` `PassEnvironment=`, per the subimage env-propagation contract
+  below) and the consumer keys off that. The stem is used rather than `BOARD_ID`
+  because it is unique by construction and is the same key `acquire_board_lock()`
+  serialises on — keying a tree that gets `rm -rf`'d on the Armbian `BOARD=` value
+  would let two manifests sharing a `board_id` clobber each other under different
+  locks. `cache/${BOARD_ID}` is a DIFFERENT tree for a different purpose and is
+  deliberately not aliased onto this. A miss now LOGS the probed path instead of
+  returning silently. Guards: `manifest.bats` §27 (7 tests, incl. the real shipped
+  stager driven against every shipped manifest with its real `board_id`, and the
+  inverse leg proving a `BOARD_ID`-keyed tree is NOT picked up).
 - **The `DRY_RUN` PR gate cannot see this stage — so every fix needs a STATIC
   guard.** The first real build hit four independent, board-independent, fatal
   defects that a plan-only gate had passed for a whole release: `make kernelrelease`
@@ -1601,6 +1618,9 @@ name present in `env_names` but MISSING from `PassEnvironment=` reads EMPTY in
 every subimage — silently. That exact drift shipped two production bugs (eth0/eth1
 never renamed → dropped from SRTLA's `eth*`/`wlan*` bonding globs, confirmed on
 Rock 5B+ hardware; and an empty add-on keyring → all add-on signatures rejected).
+`CERALIVE_BOARD` (the first-party staging key) is a third value on this contract:
+read empty in the app subimage it installs ZERO first-party packages, so it is in
+both lists and additionally pinned by `manifest.bats` §27.
 `PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
 `manifest.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
 fails the build if a future `env_names` addition skips `PassEnvironment=`).
