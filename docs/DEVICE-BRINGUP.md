@@ -292,17 +292,28 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
 sudo sync
 ```
 
-Eject the card and insert it into the board. On the Rock 5B+ (same RK3588 SoC
-and U-Boot SPL lineage as the Rock 5B), the SPL boot order probes microSD
-before eMMC: `rk3588-rock-5b-u-boot.dtsi` sets `u-boot,spl-boot-order =
-"same-as-spl", &sdmmc, &sdhci;`, listing `&sdmmc` ahead of `&sdhci`. A bootable
-card boots automatically, that's the default order, not a fallback that only
-applies when eMMC is absent, and no boot-order override is needed. A
-non-bootable card falls through to eMMC on its own, since the SPL just skips a
-slot with no valid idbloader signature. This is confirmed on the Rock 5B itself
-(Radxa forum guidance plus real-hardware testing showing microSD, then eMMC,
-then M.2 NVMe as the observed priority); it hasn't been independently verified
-on the 5B+, though the shared SoC and bootloader lineage make it a safe bet.
+Eject the card and insert it into the board. **Do not assume this is enough,
+verify it.** A previous version of this doc claimed the Rock 5B+ boots microSD
+before eMMC by default, citing Radxa forum guidance for the Rock 5B and the
+shared `rk3588-rock-5b-u-boot.dtsi` SPL boot order. That claim has not held up
+under direct testing. On a real Rock 5B+ with a byte-verified bootable card
+inserted, a warm `sudo reboot` (no power cycle) came back up still running the
+eMMC OS: `uname -a` showed the old kernel and `/` was mounted from
+`mmcblk0p2`, not the card's `mmcblk1`. This board's own `boot.scr.cmd` (in this
+repo, `v2/mkosi/platform/boot/boot.scr.cmd`) has no cross-device chain-load
+logic of its own. It only acts on `${devtype}`/`${devnum}`, values U-Boot's
+generic `distro_bootcmd` framework resolves before this script ever runs. So
+the SD-vs-eMMC decision happens entirely inside this board's shipped U-Boot
+binary (reports **U-Boot 2026.04** per `v2/mkosi/platform/boot/README.md`),
+which this pipeline does not control and which may simply behave differently
+from whatever build the Rock 5B forum posts were describing. A full cold power
+cycle (power fully removed, not a warm reboot) has not been tested and may
+behave differently. Treat that as open, not settled. **Practical takeaway:**
+don't trust card insertion alone. After rebooting, confirm the board actually
+came up from the card. Watch the U-Boot boot-device probe messages on the
+UART console, or check over SSH/network with `uname -a` and `lsblk` (rootfs on
+`mmcblk1`, not `mmcblk0`), before relying on a microSD-based bench or recovery
+flow.
 
 ### Option B: rkdeveloptool to eMMC (maskrom mode)
 
