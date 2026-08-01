@@ -459,6 +459,12 @@ setup_rauc_client() {
   # is a fail-closed sentinel: it matches NO signed bundle, so `rauc install` refuses
   # everything until a real COMPATIBLE_STRING is supplied (better than a wrong family).
   local compatible="${COMPATIBLE_STRING:-ceralive-unknown}"
+  # Frozen production slot labels unless the opt-in bench overlay renames them
+  # (postinst-lib.sh::resolve_partlabel, sourced above); the fallback must never
+  # disagree with the GPT the assembler laid.
+  local slot_a slot_b
+  slot_a="$(resolve_partlabel rootfs_a)"
+  slot_b="$(resolve_partlabel rootfs_b)"
   log "wiring RAUC update client (keyring + system.conf + service)"
   mkdir -p /etc/rauc
 
@@ -478,7 +484,7 @@ setup_rauc_client() {
   if [[ -e "${sysconf}" ]]; then
     log "system.conf already present (board-aware generator ran) — leaving it authoritative"
   else
-    log "writing fallback ${sysconf} (compatible=${compatible})"
+    log "writing fallback ${sysconf} (compatible=${compatible}, slots=${slot_a}/${slot_b})"
     cat >"${sysconf}" <<EOF
 [system]
 compatible=${compatible}
@@ -492,12 +498,12 @@ bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 path=${keyring}
 
 [slot.rootfs.0]
-device=/dev/disk/by-partlabel/rootfs_a
+device=/dev/disk/by-partlabel/${slot_a}
 type=ext4
 bootname=A
 
 [slot.rootfs.1]
-device=/dev/disk/by-partlabel/rootfs_b
+device=/dev/disk/by-partlabel/${slot_b}
 type=ext4
 bootname=B
 

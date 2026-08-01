@@ -13,6 +13,11 @@
 #   p4 data      ext4     remainder >=2048 MB  PARTLABEL=data (shared, survives A/B)
 #     * rootfs_b is OMITTED when SINGLE_SLOT_FALLBACK=true (contract §4/§5).
 #
+# CERALIVE_BENCH_LABELS=1 (opt-in, bench media only) renames that label set to
+# xboot/xrootfs_a/xrootfs_b/xdata so a bench microSD cannot collide with the
+# production labels on the eMMC of the board it is booted on. Sizes, roles and
+# geometry are untouched — see common.sh::resolve_partlabel.
+#
 # Two contract realities systemd-repart cannot express on its own, handled here:
 #   1. The 16 MB raw bootloader gap with NO GPT entry. systemd-repart has no
 #      `Offset=` (verified on systemd 260) and starts p1 at the 1 MB grain. We
@@ -179,13 +184,22 @@ stage_repart_dir() {
   mkdir -p "${dest}"
   rm -f "${dest}"/*.conf
   shopt -s nullglob
+  # The committed defs always carry the FROZEN production Label=. The bench
+  # overlay rewrites it on the STAGED COPY only, so v2/mkosi/repart/*.conf — the
+  # single source of truth for the frozen contract — is never edited, and the
+  # unflagged path stays a plain cp.
+  local prefix; prefix="$(partlabel_prefix)"
   local copied=0
   for f in "${REPART_DIR}"/*.conf; do
     if [[ "${single_slot}" == "true" && "$(basename "${f}")" == *rootfs_b* ]]; then
       log_info "single-slot fallback: omitting $(basename "${f}") (no B slot)"
       continue
     fi
-    cp "${f}" "${dest}/"
+    if [[ -n "${prefix}" ]]; then
+      sed "s|^Label=|Label=${prefix}|" "${f}" >"${dest}/$(basename "${f}")"
+    else
+      cp "${f}" "${dest}/"
+    fi
     copied=$(( copied + 1 ))
   done
   shopt -u nullglob
@@ -382,24 +396,31 @@ build_disk() {
 
   # 1. Pre-seed the GPT: place p1 boot at sector ${BOOT_START_SECTOR} (16 MB),
   #    leaving the leading 16 MB as raw free space with NO GPT entry for it.
-  log_info "pre-seeding GPT: boot at sector ${BOOT_START_SECTOR} (16 MB gap before it)"
+  local boot_label; boot_label="$(resolve_partlabel boot)"
+  log_info "pre-seeding GPT: ${boot_label} at sector ${BOOT_START_SECTOR} (16 MB gap before it)"
   sgdisk --clear -a 2048 \
-    -n "1:${BOOT_START_SECTOR}:+${BOOT_MB}M" -c 1:boot -t "1:${XBOOTLDR_GUID}" \
+    -n "1:${BOOT_START_SECTOR}:+${BOOT_MB}M" -c "1:${boot_label}" -t "1:${XBOOTLDR_GUID}" \
     "${img}" >/dev/null
 
   # 2. systemd-repart adopts boot and appends rootfs_a[/rootfs_b]/data, formatting
   #    the ext4 partitions. Offline: no root, no loopback.
-  local slot_desc="rootfs_a/rootfs_b/data"
-  [[ "${single_slot}" == "true" ]] && slot_desc="rootfs_a/data (no B slot)"
+  local slot_a slot_b
+  slot_a="$(resolve_partlabel rootfs_a)"; slot_b="$(resolve_partlabel rootfs_b)"
+  local slot_desc
+  slot_desc="${slot_a}/${slot_b}/$(resolve_partlabel data)"
+  [[ "${single_slot}" == "true" ]] && slot_desc="${slot_a}/$(resolve_partlabel data) (no B slot)"
   log_info "running systemd-repart (offline) → ${slot_desc}"
   systemd-repart --offline=yes --architecture=arm64 --dry-run=no \
     --definitions="${defs}" "${img}" >/dev/null
 
   # 2b. Populate every factory slot. RAUC's factory-image contract requires B to
   #     be bootable before the first OTA; single-slot media only has partition 2.
-  populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 2 rootfs_a
+  #     The slot label also seeds det_uuid, so the bench overlay additionally
+  #     keeps the ext4 filesystem UUIDs off the production values — otherwise a
+  #     bench card would carry byte-identical UUIDs to the eMMC it boots beside.
+  populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 2 "${slot_a}"
   if [[ "${single_slot}" != "true" ]]; then
-    populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 3 rootfs_b
+    populate_rootfs_slot "${img}" "${rootfs_tree_arg}" 3 "${slot_b}"
   fi
 
   # 3. Format the adopted vfat boot region (repart never re-formats an adopted
@@ -463,16 +484,19 @@ verify_contract() {
 
   # --- Slot-swap static check (data survives A/B) ---------------------------
   echo "### Slot-swap static check — does /data survive an A/B swap?"
-  echo "RAUC-managed rootfs slots (swapped on update): rootfs_a, rootfs_b"
-  echo "SHARED partitions (never touched by a swap):    boot, data"
+  local l_boot l_a l_b l_data
+  l_boot="$(resolve_partlabel boot)";     l_a="$(resolve_partlabel rootfs_a)"
+  l_b="$(resolve_partlabel rootfs_b)";    l_data="$(resolve_partlabel data)"
+  echo "RAUC-managed rootfs slots (swapped on update): ${l_a}, ${l_b}"
+  echo "SHARED partitions (never touched by a swap):    ${l_boot}, ${l_data}"
   local data_start data_size
   data_start="$(part_field "${ab}" 4 'First sector')"
   data_size="$(part_field "${ab}" 4 'Partition size')"
-  echo "  data geometry (A active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=data"
+  echo "  data geometry (A active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=${l_data}"
   echo "  simulate swap A->B: RAUC flips the active rootfs slot bootname only; it"
   echo "  rewrites NO partition table entry. data start/size are INVARIANT =>"
-  echo "  data geometry (B active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=data"
-  echo "  data partition is NOT in {rootfs_a, rootfs_b} => mutable state SURVIVES the swap OK"
+  echo "  data geometry (B active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=${l_data}"
+  echo "  data partition is NOT in {${l_a}, ${l_b}} => mutable state SURVIVES the swap OK"
   echo
 
   # --- Single-slot fallback (<16 GB) ----------------------------------------

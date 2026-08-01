@@ -32,6 +32,22 @@ fi
 if ! declare -F die >/dev/null 2>&1; then
   die() { log "FATAL: $*"; exit 1; }
 fi
+# Same fallback contract as log()/die() above: callers that already sourced
+# lib/common.sh keep its copy, the standalone chroot postinst gets this one.
+# CERALIVE_BENCH_LABELS=1 is the opt-in bench overlay (xboot/xrootfs_a/xrootfs_b/
+# xdata) that keeps a bench microSD's PARTLABELs off the production set on the
+# eMMC it boots beside; it reaches this chroot via mkosi.conf PassEnvironment=.
+if ! declare -F partlabel_prefix >/dev/null 2>&1; then
+  partlabel_prefix() {
+    [[ "${CERALIVE_BENCH_LABELS:-0}" == "1" ]] && printf 'x'
+    return 0
+  }
+fi
+if ! declare -F resolve_partlabel >/dev/null 2>&1; then
+  resolve_partlabel() {
+    printf '%s%s' "$(partlabel_prefix)" "${1:?resolve_partlabel needs a partition role}"
+  }
+fi
 
 # Idempotent group creation (replaces v1's `|| true`).
 ensure_group() {
@@ -853,7 +869,8 @@ EOF
 
 # --- 12. Persist user-mutable state on /data (verbatim, postinst section 12) -
 setup_data_persistence() {
-  local data_root="/data" data_partlabel="data"
+  local data_root="/data" data_partlabel
+  data_partlabel="$(resolve_partlabel data)"
   local workdir="/opt/ceralive" nm_conn="/etc/NetworkManager/system-connections"
 
   log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"

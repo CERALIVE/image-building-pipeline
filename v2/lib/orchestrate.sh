@@ -285,6 +285,14 @@ main() {
   export SOURCE_DATE_EPOCH CERALIVE_IMAGE_BUILD_COMMIT
   log_info "reproducible build: SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} ($(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo n/a))"
 
+  # Opt-in bench PARTLABEL overlay. Logged ONLY when active so an ordinary build's
+  # plan output is unchanged, and logged LOUDLY when it is, because the resulting
+  # image is bench-only: it is not the frozen contract and must never be released.
+  export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
+  if [[ -n "$(partlabel_prefix)" ]]; then
+    log_warn "CERALIVE_BENCH_LABELS=1 — BENCH IMAGE: partitions will be labelled $(resolve_partlabel boot)/$(resolve_partlabel rootfs_a)/$(resolve_partlabel rootfs_b)/$(resolve_partlabel data), NOT the frozen production set. Never publish this artifact."
+  fi
+
   # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
   # BSP declaration must fail BEFORE any fetch/build, never as a half-image.
   require_field ARCH "${ARCH:-}"
@@ -656,6 +664,7 @@ run_mkosi_build() {
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
     CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
+    CERALIVE_BENCH_LABELS
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -680,6 +689,10 @@ run_mkosi_build() {
   # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
   # lib/assemble-disk.sh; default false (A/B). See v2/mkosi/repart/README.md.
   export SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"
+  # Opt-in bench PARTLABEL overlay (main() normalizes it). The runtime chroot
+  # writes the /data fstab entry and the fallback RAUC slot devices, so it has to
+  # reach the SUBIMAGES too — hence the matching mkosi.conf PassEnvironment= entry.
+  export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"

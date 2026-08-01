@@ -15,6 +15,9 @@
 #     * rootfs_b is OMITTED in the single-slot fallback (3 partitions).
 #
 # Sizes are FROZEN. NEVER change without a fleet re-flash (docs/partition-contract.md).
+# The EXPECTED LABELS follow the assembler: with CERALIVE_BENCH_LABELS=1 the
+# bench set (xboot/xrootfs_a/xrootfs_b/xdata) is asserted instead, so a bench
+# image and a production image can never pass each other's verification.
 #
 # Usage:
 #   verify-disk.sh do_verify <img> <board>
@@ -122,25 +125,28 @@ do_verify() {
   [[ -n "${img}" ]] || die "do_verify: <img> is required"
   [[ -f "${img}" ]] || die "do_verify: image not found: ${img}"
   count="$(part_count "${img}")"
+  local l_boot l_a l_b l_data
+  l_boot="$(resolve_partlabel boot)"     ; l_a="$(resolve_partlabel rootfs_a)"
+  l_b="$(resolve_partlabel rootfs_b)"    ; l_data="$(resolve_partlabel data)"
   log_info "verifying ${img} (board=${board:-unspecified}, ${count} partitions)"
   echo "--- contract assertions ---"
   case "${count}" in
     4)
-      echo "  partition count = 4 (boot + rootfs_a + rootfs_b + data) OK"
+      echo "  partition count = 4 (${l_boot} + ${l_a} + ${l_b} + ${l_data}) OK"
       assert_gap "${img}"
-      assert_part "${img}" 1 boot     "${BOOT_MB}"
-      assert_part "${img}" 2 rootfs_a "${ROOTFS_MB}"
-      assert_part "${img}" 3 rootfs_b "${ROOTFS_MB}"
-      assert_part "${img}" 4 data     "min:${DATA_FLOOR_MB}"
+      assert_part "${img}" 1 "${l_boot}" "${BOOT_MB}"
+      assert_part "${img}" 2 "${l_a}"    "${ROOTFS_MB}"
+      assert_part "${img}" 3 "${l_b}"    "${ROOTFS_MB}"
+      assert_part "${img}" 4 "${l_data}" "min:${DATA_FLOOR_MB}"
       ;;
     3)
-      echo "  partition count = 3 (boot + rootfs_a + data) OK"
+      echo "  partition count = 3 (${l_boot} + ${l_a} + ${l_data}) OK"
       assert_gap "${img}"
-      assert_part "${img}" 1 boot     "${BOOT_MB}"
-      assert_part "${img}" 2 rootfs_a "${ROOTFS_MB}"
-      assert_part "${img}" 3 data     "min:${DATA_FLOOR_MB}"
-      assert_no_label "${img}" rootfs_b
-      echo "  rootfs_b ABSENT (single-slot fallback honored) OK"
+      assert_part "${img}" 1 "${l_boot}" "${BOOT_MB}"
+      assert_part "${img}" 2 "${l_a}"    "${ROOTFS_MB}"
+      assert_part "${img}" 3 "${l_data}" "min:${DATA_FLOOR_MB}"
+      assert_no_label "${img}" "${l_b}"
+      echo "  ${l_b} ABSENT (single-slot fallback honored) OK"
       ;;
     *)
       die "unexpected partition count ${count} in ${img} (expected 4=A/B or 3=single-slot)"

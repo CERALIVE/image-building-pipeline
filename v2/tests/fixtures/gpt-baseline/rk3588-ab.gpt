@@ -1,0 +1,4 @@
+p1 boot start=32768 size=524288
+p2 rootfs_a start=557056 size=8388608
+p3 rootfs_b start=8945664 size=8388608
+p4 data start=17334272 size=4196312
