@@ -3656,7 +3656,17 @@ REPRO
 }
 
 @test "image hygiene: hardware udev rules do not queue the retired optimize unit" {
-  run grep -RE '^[[:space:]]*[^#[:space:]].*(ceralive-optimize@|SYSTEMD_WANTS.*optimize)' "$V2/mkosi"
+  # Scope: mkosi SOURCE only. The generated siblings must be excluded, and both
+  # exclusions are load-bearing on any machine that has run a real build:
+  #   -r not -R — mkosi's cached base rootfs carries absolute symlinks into /dev,
+  #     /proc and /run, and -R dereferences them straight out of the repo onto the
+  #     host, where one blocking open() on a FIFO or tty hangs the suite forever.
+  #   --exclude-dir — that same cache is root-owned and partly mode 0700, so grep
+  #     exits 2 (error) instead of 1 (no match) and the assertion below fails even
+  #     though nothing matched.
+  # CI sees neither because it wipes v2/mkosi/{build,cache} before the job.
+  run grep -rE --exclude-dir=cache --exclude-dir=build --exclude-dir=.staging \
+    '^[[:space:]]*[^#[:space:]].*(ceralive-optimize@|SYSTEMD_WANTS.*optimize)' "$V2/mkosi"
   [ "$status" -eq 1 ]
 }
 
@@ -4418,6 +4428,128 @@ YAML
   grep -q 'CCACHE_DIR' "$V2/ci/Dockerfile.kernel"
   grep -q '/usr/lib/ccache/aarch64-linux-gnu-gcc' "$V2/ci/Dockerfile.kernel"
   grep -q -- '-v "${ccache_dir}:/ccache"' "$LIB_DIR/build-kernel.sh"
+}
+
+@test "build-kernel: syncconfig refreshes auto.conf between olddefconfig and the kernelrelease assertion" {
+  # `make kernelrelease` is in the kernel no-sync-config-targets list, so it skips
+  # syncconfig and reads include/config/auto.conf as written by `make defconfig` —
+  # still CONFIG_LOCALVERSION_AUTO=y. setlocalversion reads auto.conf, NOT .config,
+  # so without an explicit syncconfig the fragment override never takes effect and
+  # the assertion below rejects a git-describe-suffixed release on EVERY build, on
+  # every board. Only a real (non-DRY_RUN) build executes that container script, so
+  # this ordering is asserted statically.
+  local script="$LIB_DIR/build-kernel.sh"
+  local olddefconfig syncconfig release_assert
+
+  olddefconfig="$(grep -n '^ *make olddefconfig$' "$script" | cut -d: -f1)"
+  syncconfig="$(grep -n '^ *make syncconfig$' "$script" | cut -d: -f1)"
+  release_assert="$(grep -n 'make -s kernelrelease' "$script" | cut -d: -f1)"
+
+  [ "$(printf '%s\n' "$olddefconfig" | wc -l)" -eq 1 ]
+  [ "$(printf '%s\n' "$syncconfig" | wc -l)" -eq 1 ]
+  [ "$(printf '%s\n' "$release_assert" | wc -l)" -eq 1 ]
+
+  (( olddefconfig < syncconfig )) \
+    || { echo "make syncconfig must come AFTER make olddefconfig"; false; }
+  (( syncconfig < release_assert )) \
+    || { echo "make syncconfig must come BEFORE the kernelrelease assertion"; false; }
+}
+
+@test "build-kernel: the kernelrelease assertion stays an EXACT match (never relaxed to a prefix)" {
+  # The assertion is the only thing between this pipeline and a non-deterministic
+  # kernel package name: `git am` restamps committer dates, so an AUTO release
+  # string embeds a different SHA on every run. Relaxing it is not a valid fix for
+  # a stale auto.conf.
+  local script="$LIB_DIR/build-kernel.sh"
+  grep -Fq 'if [ "${release}" != "${KERNEL_RELEASE}" ]; then' "$script"
+  run grep -Eq '\$\{release#|\$\{release\*|release. == .\$\{KERNEL_RELEASE\}\*' "$script"
+  [ "$status" -ne 0 ]
+}
+
+@test "build-kernel: deb_lists_path finds a present path in a LARGE deb (no pipefail/SIGPIPE false negative)" {
+  # Regression: `tar -t | grep -Fqx` under `set -o pipefail` reports FAILURE when
+  # the path IS present — grep exits at the first match and tar dies of SIGPIPE.
+  # It only misfires once the listing outgrows the pipe buffer, so a tiny fixture
+  # passes and a real kernel deb (thousands of DTBs and modules) never does.
+  local script="$LIB_DIR/build-kernel.sh"
+  local deb="$BATS_TEST_TMPDIR/big.deb" stage="$BATS_TEST_TMPDIR/stage"
+  local want='/usr/lib/linux-image-x/rockchip/rk3588-rock-5b-plus.dtb'
+
+  mkdir -p "$stage/usr/lib/linux-image-x/rockchip"
+  printf 'dtb\n' >"$stage$want"
+  local i
+  for i in $(seq 1 6000); do printf 'm\n' >"$stage/usr/lib/linux-image-x/rockchip/pad-$i.dtb"; done
+  tar -C "$stage" -czf "$BATS_TEST_TMPDIR/data.tar.gz" .
+  printf '2.0\n' >"$BATS_TEST_TMPDIR/debian-binary"
+  mkdir -p "$BATS_TEST_TMPDIR/ctl"
+  printf 'Package: linux-image-x\nVersion: 1\nArchitecture: arm64\n' >"$BATS_TEST_TMPDIR/ctl/control"
+  tar -C "$BATS_TEST_TMPDIR/ctl" -czf "$BATS_TEST_TMPDIR/control.tar.gz" ./control
+  ( cd "$BATS_TEST_TMPDIR" && ar rc "$deb" debian-binary control.tar.gz data.tar.gz )
+
+  run bash -c "
+    set -euo pipefail
+    $(sed -n '/^deb_data_list()/,/^}/p;/^deb_lists_path()/,/^}/p' "$script")
+    deb_lists_path '$deb' '$want' && echo PRESENT
+    deb_lists_path '$deb' '/usr/lib/linux-image-x/rockchip/absent.dtb' && echo BUG-FALSE-POSITIVE
+    echo DONE
+  "
+  [[ "$output" == *"PRESENT"* ]]
+  [[ "$output" != *"BUG-FALSE-POSITIVE"* ]]
+}
+
+@test "build-kernel: the builder image satisfies the CROSS build-deps dpkg-checkbuilddeps demands" {
+  # bindeb-pkg runs dpkg-buildpackage -a arm64, so the kernel Build-Depends-Arch
+  # resolves `libssl-dev:native` against amd64 and a bare `libssl-dev` against the
+  # arm64 HOST arch. Installing only the amd64 one aborts the package build at
+  # dpkg-checkbuilddeps, before any compilation — invisible to a DRY_RUN gate.
+  local df="$V2/ci/Dockerfile.kernel"
+  grep -Eq '^RUN dpkg --add-architecture arm64' "$df"
+  grep -Eq '^ +libssl-dev \\$' "$df"
+  grep -Eq '^ +libssl-dev:arm64 \\$' "$df"
+  grep -Eq '^ +libdw-dev \\$' "$df"
+  grep -Eq '^ +libelf-dev \\$' "$df"
+  # install-extmod-build rebuilds the headers package host tools with the CROSS
+  # gcc, which resolves libc only via /usr/include/aarch64-linux-gnu.
+  grep -Eq '^ +libc6-dev:arm64 \\$' "$df"
+}
+
+@test "build-kernel: the builder image tag is content-addressed (an edited Dockerfile invalidates it)" {
+  # ensure_kernel_builder_image skips `docker build` when the tag already exists,
+  # so a constant tag would pin every host to whatever layers it first built.
+  local script="$LIB_DIR/build-kernel.sh"
+  local base='debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2'
+  local tag_a tag_b tag_edited edited
+
+  tag_a="$(bash -c "KERNEL_BUILDER_DOCKERFILE='$V2/ci/Dockerfile.kernel'; \
+    $(sed -n '/^resolve_kernel_builder_tag()/,/^}/p' "$script"); \
+    resolve_kernel_builder_tag '$base'")"
+  [[ "$tag_a" == ceralive-kernel-builder:* ]]
+
+  tag_b="$(bash -c "KERNEL_BUILDER_DOCKERFILE='$V2/ci/Dockerfile.kernel'; \
+    $(sed -n '/^resolve_kernel_builder_tag()/,/^}/p' "$script"); \
+    resolve_kernel_builder_tag '$base'")"
+  [ "$tag_a" = "$tag_b" ]
+
+  # A different builder_image pin must yield a different tag.
+  tag_b="$(bash -c "KERNEL_BUILDER_DOCKERFILE='$V2/ci/Dockerfile.kernel'; \
+    $(sed -n '/^resolve_kernel_builder_tag()/,/^}/p' "$script"); \
+    resolve_kernel_builder_tag 'debian:trixie-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000'")"
+  [ "$tag_a" != "$tag_b" ]
+
+  # An edited Dockerfile must yield a different tag.
+  edited="$BATS_TEST_TMPDIR/Dockerfile.kernel"
+  { cat "$V2/ci/Dockerfile.kernel"; echo '# drift'; } >"$edited"
+  tag_edited="$(bash -c "KERNEL_BUILDER_DOCKERFILE='$edited'; \
+    $(sed -n '/^resolve_kernel_builder_tag()/,/^}/p' "$script"); \
+    resolve_kernel_builder_tag '$base'")"
+  [ "$tag_a" != "$tag_edited" ]
+
+  # An operator override is still used verbatim.
+  tag_b="$(bash -c "KERNEL_BUILDER_DOCKERFILE='$V2/ci/Dockerfile.kernel'; \
+    CERALIVE_KERNEL_BUILDER_IMAGE=myregistry/kbuilder:9; \
+    $(sed -n '/^resolve_kernel_builder_tag()/,/^}/p' "$script"); \
+    resolve_kernel_builder_tag '$base'")"
+  [ "$tag_b" = "myregistry/kbuilder:9" ]
 }
 
 @test "build-kernel: the builder base image is the MANIFEST pin, not a Dockerfile default" {

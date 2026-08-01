@@ -427,16 +427,39 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `/boot/dtb/rockchip/${fdtfile}`. `platform/mkosi.postinst::install_kernel_source_dtbs`
   copies source → target. Both paths are EMPTY on the vendor path, so the step is a
   strict no-op there; fail-loud when enabled.
-- **`[PARTIAL]` — nothing has been compiled or booted.** The PR gate runs
-  `DRY_RUN=1` (plan only). The defconfig fragment is reviewed intent, not a
-  validated result, and mainline/vendor disagree on the OPi 5+ DTB filename
+- **`[PARTIAL]` — `rock-5b-plus` COMPILES end to end; nothing has BOOTED.** A real
+  (non-`DRY_RUN`) `v2/build rock-5b-plus --variant edge` now produces
+  `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
+  `validate_built_kernel_deb` axes, installs the board DTB to
+  `/boot/dtb/rockchip/`, and emits a flashable `.raw` + signed `.raucb`. The
+  defconfig fragment is still reviewed intent rather than a hardware-validated
+  result, and mainline/vendor still disagree on the OPi 5+ DTB filename
   (`rk3588-` vs `rk3588s-orangepi-5-plus.dtb`) — the build stage fails loudly there
-  on purpose. `v2/docs/DEFERRED.md` item 9.
+  on purpose, and that board remains blocked. `v2/docs/DEFERRED.md` item 9.
+- **The `DRY_RUN` PR gate cannot see this stage — so every fix needs a STATIC
+  guard.** The first real build hit four independent, board-independent, fatal
+  defects that a plan-only gate had passed for a whole release: `make kernelrelease`
+  reading a stale `include/config/auto.conf` (fixed by an explicit `make syncconfig`
+  after `olddefconfig` — `kernelrelease` is in the kernel's `no-sync-config-targets`,
+  so it never syncs it itself); two missing cross build-deps in `Dockerfile.kernel`
+  (`libdw-dev`, plus arm64-multiarch `libssl-dev:arm64` and `libc6-dev:arm64` —
+  `install-extmod-build` rebuilds the headers package host tools with the CROSS gcc);
+  a constant builder-image tag that made `ensure_kernel_builder_image`'s
+  already-present short-circuit permanent (now content-addressed over the Dockerfile
+  + `builder_image` pin); and a `deb_lists_path` that reported EVERY present path as
+  absent because `grep -q` closed the pipe, `tar` died of `SIGPIPE`, and
+  `set -o pipefail` turned that into failure. **An empty "DTBs actually present"
+  list in that error means the listing is broken, not that the DTB is missing.**
+- **The `edge` `.deb` is NOT byte-reproducible** — `git am` restamps committer dates,
+  so post-`am` SHAs differ per run. Content is stable (two builds agreed on package
+  versions, rootfs file lists and `/boot/config-*`); archive bytes are not. This is
+  precisely why `CONFIG_LOCALVERSION_AUTO=n` plus the exact `kernelrelease` assertion
+  matter — without them the package NAME inherits that nondeterminism.
 - **D3 is NOT reopened.** The shipped kernel is still the Armbian vendor BSP; this
   is the mainline-track option kept pinned and buildable. See
   `v2/docs/kernel-currency-watch.md`.
 
-Guards: `manifest.bats` §26 (36 tests).
+Guards: `manifest.bats` §26 (41 tests).
 
 **Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
 

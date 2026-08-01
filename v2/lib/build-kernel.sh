@@ -55,7 +55,7 @@ source "${HERE}/common.sh"
 
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 KERNEL_BUILDER_DOCKERFILE="${V2_DIR}/ci/Dockerfile.kernel"
-KERNEL_BUILDER_IMAGE_TAG="${CERALIVE_KERNEL_BUILDER_IMAGE:-ceralive-kernel-builder}"
+KERNEL_BUILDER_IMAGE_TAG=""
 # Bounded so a hung clone cannot wedge a build host indefinitely.
 KERNEL_BUILD_JOBS="${CERALIVE_KERNEL_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
@@ -93,6 +93,27 @@ select_container_runtime() {
   else
     die "kernel-build-from-source needs a container runtime (docker or podman). There is deliberately no host-native fallback: a host build would bind the kernel to an unpinned toolchain."
   fi
+}
+
+# ---------------------------------------------------------------------------
+# resolve_kernel_builder_tag <base_image> — the builder tag, content-addressed.
+#
+# The tag embeds a digest of the Dockerfile AND the manifest's builder_image pin,
+# because ensure_kernel_builder_image below skips the build when the tag already
+# exists locally. A constant tag makes that short-circuit permanent: an edited
+# Dockerfile or a bumped builder_image pin is silently ignored on every host that
+# ever built the image once, and the stale layers keep being used. This mirrors
+# the mkosi builder, whose tag carries its version pin.
+# ---------------------------------------------------------------------------
+resolve_kernel_builder_tag() {
+  local base_image="$1" key
+  if [[ -n "${CERALIVE_KERNEL_BUILDER_IMAGE:-}" ]]; then
+    printf '%s' "${CERALIVE_KERNEL_BUILDER_IMAGE}"
+    return 0
+  fi
+  key="$( { printf '%s\n' "${base_image}"; cat "${KERNEL_BUILDER_DOCKERFILE}"; } \
+    | sha256sum | cut -c1-12 )"
+  printf 'ceralive-kernel-builder:%s' "${key}"
 }
 
 ensure_kernel_builder_image() {
@@ -134,21 +155,46 @@ deb_control_field() {
 }
 
 # ---------------------------------------------------------------------------
+# deb_data_list <deb> — emit the data member's tar listing, one path per line.
+#
+# The member is discovered from `ar t` rather than guessed, so a dpkg-deb that
+# switches compressor (trixie ships .xz today, .zst is the way the wind blows)
+# does not silently produce an empty listing.
+# ---------------------------------------------------------------------------
+deb_data_list() {
+  local deb="$1" members member="" m
+  members="$(ar t "${deb}" 2>/dev/null)" || return 1
+  for m in ${members}; do
+    case "${m}" in data.tar.*) member="${m}"; break ;; esac
+  done
+  [[ -n "${member}" ]] || return 1
+  case "${member}" in
+    *.zst)  ar p "${deb}" "${member}" 2>/dev/null | tar --zstd -t 2>/dev/null ;;
+    *.xz)   ar p "${deb}" "${member}" 2>/dev/null | tar -Jt     2>/dev/null ;;
+    *.gz)   ar p "${deb}" "${member}" 2>/dev/null | tar -zt     2>/dev/null ;;
+    *.bz2)  ar p "${deb}" "${member}" 2>/dev/null | tar -jt     2>/dev/null ;;
+    *.lzma) ar p "${deb}" "${member}" 2>/dev/null | tar --lzma -t 2>/dev/null ;;
+    data.tar) ar p "${deb}" "${member}" 2>/dev/null | tar -t    2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # deb_lists_path <deb> <path> — true when the .deb data archive contains <path>.
 # Used to prove the DTB the board manifest names is really inside the built
 # kernel package, so the platform-layer install mapping is machine-verified
 # rather than merely declared.
+#
+# The listing is materialised BEFORE it is searched. Piping `tar -t` straight
+# into `grep -q` looks equivalent and is not: grep exits at the first match,
+# tar dies of SIGPIPE, and under this file's `set -o pipefail` the pipeline
+# reports failure — so a path that IS present reads as absent, every time, for
+# every board.
 # ---------------------------------------------------------------------------
 deb_lists_path() {
-  local deb="$1" want="$2" member
-  for member in data.tar.zst data.tar.xz data.tar.gz; do
-    case "${member}" in
-      *.zst) ar p "${deb}" "${member}" 2>/dev/null | tar --zstd -t 2>/dev/null | grep -Fqx "./${want#/}" && return 0 ;;
-      *.xz)  ar p "${deb}" "${member}" 2>/dev/null | tar -Jt   2>/dev/null | grep -Fqx "./${want#/}" && return 0 ;;
-      *.gz)  ar p "${deb}" "${member}" 2>/dev/null | tar -zt   2>/dev/null | grep -Fqx "./${want#/}" && return 0 ;;
-    esac
-  done
-  return 1
+  local deb="$1" want="$2" listing
+  listing="$(deb_data_list "${deb}")" || return 1
+  grep -Fqx -e "./${want#/}" -e "${want}" <<<"${listing}"
 }
 
 # ---------------------------------------------------------------------------
@@ -178,7 +224,7 @@ validate_built_kernel_deb() {
     log_error "built kernel .deb does not contain the board DTB at ${dtb_path}"
     log_error "the platform-layer install mapping (kernel_source.dtb_deb_dir + the board's dtb_name) is what makes a source-built kernel satisfy the same DTB expectation an Armbian linux-dtb-* package would; it cannot be satisfied by a DTB that is not there."
     log_error "mainline and the Armbian vendor BSP do NOT always agree on RK3588 DTB filenames (e.g. vendor 'rk3588s-orangepi-5-plus.dtb' vs mainline 'rk3588-orangepi-5-plus.dtb'). DTBs actually present in the built package:"
-    ar p "${deb}" data.tar.zst 2>/dev/null | tar --zstd -t 2>/dev/null | grep -F "$(dirname "${dtb_path}")/" >&2 || true
+    deb_data_list "${deb}" | grep -F "$(dirname "${dtb_path}")/" >&2 || true
     die "built kernel .deb is missing ${dtb_path}"
   fi
   log_success "board DTB present inside the built kernel .deb: ${dtb_path}"
@@ -268,7 +314,7 @@ main() {
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     log_info "DRY-RUN would run: git clone --branch ${tag} ${git_url} && git rev-parse HEAD == ${commit}"
     log_info "DRY-RUN would run: git fetch ${patches_url} ${patches_commit} && git am \$(series ${patches_series})"
-    log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image} -t ${KERNEL_BUILDER_IMAGE_TAG} -f ${KERNEL_BUILDER_DOCKERFILE}"
+    log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image} -t $(resolve_kernel_builder_tag "${builder_image}") -f ${KERNEL_BUILDER_DOCKERFILE}"
     log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragment_rel}"
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
@@ -281,6 +327,7 @@ main() {
 
   local runtime
   runtime="$(select_container_runtime)"
+  KERNEL_BUILDER_IMAGE_TAG="$(resolve_kernel_builder_tag "${builder_image}")"
   ensure_kernel_builder_image "${runtime}" "${builder_image}" "${KERNEL_BUILDER_IMAGE_TAG}"
 
   local work
@@ -358,6 +405,10 @@ main() {
       make -j"${BUILD_JOBS}" "${DEFCONFIG_BASE}"
       ./scripts/kconfig/merge_config.sh -m .config /in/fragment.config
       make olddefconfig
+      # `kernelrelease` is in the kernel no-sync-config-targets list, so it reads a
+      # STALE include/config/auto.conf. Without this, setlocalversion still sees the
+      # defconfig CONFIG_LOCALVERSION_AUTO=y and appends the git-describe suffix.
+      make syncconfig
 
       release="$(make -s kernelrelease LOCALVERSION="${LOCAL_VERSION}")"
       if [ "${release}" != "${KERNEL_RELEASE}" ]; then
