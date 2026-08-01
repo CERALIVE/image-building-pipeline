@@ -370,7 +370,7 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ## 9. Kernel-build-from-source variant — compiled on rock-5b-plus, never booted
 
-**Status:** Partially unblocked — `rock-5b-plus` builds end to end; nothing booted; `orange-pi-5-plus` now compiles and validates its kernel, but stops later at parity on an unrelated app-layer staging defect
+**Status:** Partially unblocked — BOTH `rock-5b-plus` and `orange-pi-5-plus` now build end to end (`.raw` + signed `.raucb`, all 14 first-party packages installed); nothing has BOOTED
 **Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `v2/lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -388,6 +388,12 @@ are gated by tests.
 signed `.raucb`. The two builds agreed on every package version, every rootfs path
 and the built `/boot/config-*`. Reaching that required fixing four defects the
 `DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
+
+`orange-pi-5-plus` has since reached the same point: after the DTB-name override
+and the staging-key fix below, `CERALIVE_BENCH_LABELS=1 v2/build orange-pi-5-plus
+--variant edge` completes (exit 0), installs all 14 first-party `.deb`s, clears
+the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`. It, too, has never
+been booted.
 
 **Still deferred:** the PR gate still runs `DRY_RUN=1` (plan only — no network,
 container or compiler). A real build is a multi-GB clone plus a long cross-compile,
@@ -409,26 +415,39 @@ Two consequences worth stating plainly:
   `rockchip/rk3588-orangepi-5-plus.dtb` from the built `.deb`. `rock-5b-plus`
   declares no override and never needed one.
 
-**Newly surfaced by that build, and NOT yet fixed — the app layer stages
-first-party `.deb`s by `BOARD_ID`, not by the board manifest stem.** mkosi's CLI
+**Surfaced by that build and now RESOLVED — the app layer staged first-party
+`.deb`s by `BOARD_ID` instead of by the board manifest stem.** mkosi's CLI
 `--extra-tree …:/opt/ceralive-staging` does not reach the `app` subimage, so what
-actually delivers the 14 first-party packages is the fallback
+actually delivers the 14 first-party packages on **every** board is the fallback
 `stage_first_party_from_source_mount` in
-`v2/mkosi/mkosi.images/app/mkosi.postinst.chroot`, which reads
-`${SRCDIR}/.staging/${BOARD_ID}/firstparty`. The orchestrator stages into
+`v2/mkosi/mkosi.images/app/mkosi.postinst.chroot`. It read
+`${SRCDIR}/.staging/${BOARD_ID}/firstparty` while the orchestrator stages into
 `.staging/<board-manifest-stem>/`. Those two agree **only** on `rock-5b-plus`
 (`board_id: rock-5b-plus`); on `orange-pi-5-plus` (`board_id: orangepi5-plus`) the
-fallback path does not exist, the function returns silently, **zero** first-party
-packages install, and the build stops at `[7/9]` parity with `first-party packages
-MISSING from rootfs`. This is board-specific, variant-independent (nothing on that
-path reads the variant), and identical on the vendor path. It is the same
+fallback path did not exist, the function returned silently, **zero** first-party
+packages installed, and the build stopped at `[7/9]` parity with `first-party
+packages MISSING from rootfs`. Board-specific, variant-independent (nothing on
+that path reads the variant), and identical on the vendor path — the same
 silently-inert-mechanism class as the `PassEnvironment=` drift in `AGENTS.md`,
 masked because the only regularly-built board has an identity mapping.
 
-**Unblock condition:** Fix the `BOARD_ID`-vs-manifest-stem staging mismatch above,
-then flash and boot a `--variant edge` image on a physical RK3588 board. **D3 is
-not reopened by any of this** — the shipped kernel remains the Armbian vendor BSP;
-see `v2/docs/kernel-currency-watch.md` for the two triggers that would revisit it.
+The fix forwards the producer's own key: `orchestrate.sh` exports the manifest
+stem as `CERALIVE_BOARD` at the point it computes the staging dir, adds it to
+`env_names` **and** `mkosi.conf` `PassEnvironment=` (a name in one list only reads
+empty in a subimage — the very contract this bug rhymes with), and the consumer
+keys off that. The stem, not `BOARD_ID`, because it is unique by construction and
+is the key `acquire_board_lock()` already serialises on; `cache/${BOARD_ID}` is a
+separate tree for a separate purpose and is untouched. A miss now logs the probed
+path instead of returning silently. Guards: `manifest.bats` §27 — the real shipped
+stager driven against every shipped board manifest with that manifest's real
+`board_id`, plus the inverse leg proving a `BOARD_ID`-keyed tree is *not* picked
+up, plus a non-vacuity assertion that at least one shipped board really does have
+stem ≠ `board_id`.
+
+**Unblock condition:** flash and boot a `--variant edge` image on a physical
+RK3588 board. **D3 is not reopened by any of this** — the shipped kernel remains
+the Armbian vendor BSP; see `v2/docs/kernel-currency-watch.md` for the two
+triggers that would revisit it.
 
 ---
 

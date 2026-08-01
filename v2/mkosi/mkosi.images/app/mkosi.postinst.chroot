@@ -72,13 +72,26 @@ declare -A REQUIRED_BINARIES=(
 
 stage_first_party_from_source_mount() {
   local src="${SRCDIR:-}"
-  [[ -n "${src}" && -n "${BOARD_ID:-}" ]] || return 0
-  src="${src%/}/.staging/${BOARD_ID}/firstparty"
+  # CERALIVE_BOARD is the board MANIFEST STEM the orchestrator stages under
+  # (lib/orchestrate.sh: STAGING_ROOT/<board>), forwarded via env_names +
+  # mkosi.conf PassEnvironment=. NOT BOARD_ID (the Armbian BOARD= value): those
+  # agree only on rock-5b-plus, so keying this path off BOARD_ID silently
+  # installed zero first-party .debs on every other board.
+  local board="${CERALIVE_BOARD:-}"
+  if [[ -z "${src}" || -z "${board}" ]]; then
+    log "source-mount staging unavailable (SRCDIR='${src}' CERALIVE_BOARD='${board}') — only ${FIRST_PARTY_DIR} can supply first-party .debs"
+    return 0
+  fi
+  src="${src%/}/.staging/${board}/firstparty"
 
   if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
     return 0
   fi
   if ! compgen -G "${src}/*.deb" >/dev/null 2>&1; then
+    # Naming the probed path is the whole diagnosis when it is wrong. An empty
+    # source is legitimate offline/dev, but it looks identical to a staging-key
+    # mismatch, and the silent return is what hid exactly that for a release.
+    log "no first-party .debs at the mkosi source staging path ${src}"
     return 0
   fi
 

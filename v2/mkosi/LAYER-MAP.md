@@ -127,6 +127,17 @@ binary). In CI (`.debs` fetched) the parity gate clears the first-party check vi
 **offline/dev build stages no `.debs`** → installs nothing → the gate WARNs on the
 absent first-party packages, by design (non-vacuity/deferral pattern).
 
+**HOW the `.deb`s actually get to `/opt/ceralive-staging`.** The orchestrator passes
+`--extra-tree <staging>/firstparty:/opt/ceralive-staging`, but that CLI option does
+**not** reach a subimage — so on every board the packages are really delivered by
+`stage_first_party_from_source_mount`, which copies them out of the mkosi source
+mount at `${SRCDIR}/.staging/${CERALIVE_BOARD}/firstparty`. `CERALIVE_BOARD` is the
+board **manifest stem**, the key `lib/orchestrate.sh` stages under, forwarded via
+`env_names` + `mkosi.conf` `PassEnvironment=`. It is deliberately **not** `BOARD_ID`
+(the Armbian `BOARD=` value): those coincide on `rock-5b-plus` alone, and keying
+this path off `BOARD_ID` silently installed zero first-party packages on every
+other board. A miss logs the exact path it probed.
+
 **WHY a separate layer:** apps update independently of the OS (sysext / appfs),
 while the CeraLive SRT runtime and applications are installed together from the
 first-party staging set. Keeping Debian libsrt out of runtime prevents a second

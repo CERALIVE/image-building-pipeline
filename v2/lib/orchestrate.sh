@@ -369,7 +369,15 @@ main() {
   # -------------------------------------------------------------------------
   # 2-4. Fetch + stage .debs, then partition them into BSP vs first-party.
   # -------------------------------------------------------------------------
+  # Staging key = the board MANIFEST STEM: unique by construction, and the same
+  # key acquire_board_lock() serialises on. The app subimage rebuilds this exact
+  # path from inside its chroot (--extra-tree does not reach a subimage), so the
+  # key is forwarded as CERALIVE_BOARD via env_names AND mkosi.conf
+  # PassEnvironment=. NOT ${BOARD_ID} — that Armbian BOARD= value equals the stem
+  # only on rock-5b-plus, and the app layer keying off it installed ZERO
+  # first-party .debs on orange-pi-5-plus. Unrelated to cache/${BOARD_ID} below.
   local staging="${STAGING_ROOT}/${board}"
+  export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
   [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
@@ -664,7 +672,7 @@ run_mkosi_build() {
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
     CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
-    CERALIVE_BENCH_LABELS
+    CERALIVE_BENCH_LABELS CERALIVE_BOARD
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
