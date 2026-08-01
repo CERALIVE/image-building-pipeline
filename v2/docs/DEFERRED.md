@@ -370,8 +370,8 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ## 9. Kernel-build-from-source variant — compiled on rock-5b-plus, never booted
 
-**Status:** Partially unblocked — `rock-5b-plus` builds end to end; nothing booted; `orange-pi-5-plus` still blocked on its DTB name
-**Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/lib/build-kernel.sh`
+**Status:** Partially unblocked — `rock-5b-plus` builds end to end; nothing booted; `orange-pi-5-plus` now compiles and validates its kernel, but stops later at parity on an unrelated app-layer staging defect
+**Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `v2/lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
 kernel + in-tree DTBs from pinned source (`v7.1.5` + the
@@ -399,18 +399,36 @@ Two consequences worth stating plainly:
   demonstrably resolves and compiles, but it is still reviewed intent rather than a
   validated result: no symbol in it has been proven necessary *or* sufficient **on
   hardware**.
-* **Mainline and the Armbian vendor BSP disagree on some RK3588 DTB filenames.**
-  `orange-pi-5-plus.yaml` declares `rk3588s-orangepi-5-plus.dtb` (the vendor
-  name); mainline v7.1 names it `rk3588-orangepi-5-plus.dtb`. `build-kernel.sh`
-  therefore fails loudly for that board and lists the DTBs actually present. That
-  is deliberate: the divergence surfaces at build time rather than as a board that
-  does not boot. `rock-5b-plus` is unaffected — it declares
-  `rk3588-rock-5b-plus.dtb`, which mainline builds under exactly that name.
+* **Mainline and the Armbian vendor BSP disagree on some RK3588 DTB filenames —
+  RESOLVED.** The Orange Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor
+  BSP and `rk3588-orangepi-5-plus.dtb` in mainline. Since the board wins the merge
+  last, the **board** now declares the per-variant name via `variant_overrides:`
+  (`kernel-build-from-source.md` §8). A real
+  `v2/build orange-pi-5-plus --variant edge` then compiles the kernel and passes
+  all four `validate_built_kernel_deb` axes, installing
+  `rockchip/rk3588-orangepi-5-plus.dtb` from the built `.deb`. `rock-5b-plus`
+  declares no override and never needed one.
 
-**Unblock condition:** Flash and boot a `--variant edge` image on a physical RK3588
-board, and separately resolve the OPi 5+ DTB-name divergence above. **D3 is not
-reopened by any of this** — the shipped kernel remains the Armbian vendor BSP; see
-`v2/docs/kernel-currency-watch.md` for the two triggers that would revisit it.
+**Newly surfaced by that build, and NOT yet fixed — the app layer stages
+first-party `.deb`s by `BOARD_ID`, not by the board manifest stem.** mkosi's CLI
+`--extra-tree …:/opt/ceralive-staging` does not reach the `app` subimage, so what
+actually delivers the 14 first-party packages is the fallback
+`stage_first_party_from_source_mount` in
+`v2/mkosi/mkosi.images/app/mkosi.postinst.chroot`, which reads
+`${SRCDIR}/.staging/${BOARD_ID}/firstparty`. The orchestrator stages into
+`.staging/<board-manifest-stem>/`. Those two agree **only** on `rock-5b-plus`
+(`board_id: rock-5b-plus`); on `orange-pi-5-plus` (`board_id: orangepi5-plus`) the
+fallback path does not exist, the function returns silently, **zero** first-party
+packages install, and the build stops at `[7/9]` parity with `first-party packages
+MISSING from rootfs`. This is board-specific, variant-independent (nothing on that
+path reads the variant), and identical on the vendor path. It is the same
+silently-inert-mechanism class as the `PassEnvironment=` drift in `AGENTS.md`,
+masked because the only regularly-built board has an identity mapping.
+
+**Unblock condition:** Fix the `BOARD_ID`-vs-manifest-stem staging mismatch above,
+then flash and boot a `--variant edge` image on a physical RK3588 board. **D3 is
+not reopened by any of this** — the shipped kernel remains the Armbian vendor BSP;
+see `v2/docs/kernel-currency-watch.md` for the two triggers that would revisit it.
 
 ---
 

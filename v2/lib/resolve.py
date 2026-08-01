@@ -62,6 +62,26 @@ orchestrator forwards it so the fetcher excludes exactly those names from the
 remote (Armbian) fetch. Deriving it here rather than authoring it in YAML is
 deliberate: a hand-written suppression list would silently drift from the
 replacement list the moment either changed.
+
+Board variant overrides (task 27)
+---------------------------------
+Because the board always wins last, a family variant can never restate a
+board-specific fact — by design. But a fact can legitimately DIFFER per variant
+while still being the board's own: the Orange Pi 5+ DTB is
+``rk3588s-orangepi-5-plus.dtb`` in the Armbian vendor BSP and
+``rk3588-orangepi-5-plus.dtb`` in mainline, which is what the ``edge`` variant
+builds from source.
+
+So the BOARD (never the family) MAY declare a ``variant_overrides:`` map keyed
+by variant name. It is applied AFTER the board merge, so board-wins-last is
+strengthened rather than weakened: the override is itself a board fact, just one
+scoped to a variant. Like ``variants:``, the key is ALWAYS stripped before
+flattening — selected or not — so a board that declares one resolves byte-
+identically on the default path to a board that never did.
+
+An override naming a variant the family does not declare is FATAL on every
+resolve, including the default path. A silently-inert override is exactly the
+failure mode this mechanism exists to prevent.
 """
 
 from __future__ import annotations
@@ -224,6 +244,48 @@ def apply_variant(
     return deep_merge(base, overlay), overlay
 
 
+BOARD_VARIANT_OVERRIDES = "variant_overrides"
+
+
+def apply_board_variant_overrides(
+    board: Any, variant: str, path: str, family_variants: Any
+) -> "tuple[Any, Any]":
+    """Strip ``variant_overrides:`` from ``board`` and select the named override.
+
+    Returns ``(base, override)`` where ``base`` is the board with the key
+    removed and ``override`` is the raw mapping for ``variant`` (or ``None``).
+    The caller merges ``override`` AFTER the board so it lands last.
+
+    Every declared override name is cross-checked against the family's declared
+    variants on EVERY resolve, default path included. A typo'd name would
+    otherwise sit in the manifest looking effective while never applying.
+    """
+    if not isinstance(board, dict):
+        return board, None
+    base = {
+        key: value
+        for key, value in board.items()
+        if key != BOARD_VARIANT_OVERRIDES
+    }
+    overrides = board.get(BOARD_VARIANT_OVERRIDES)
+    if not isinstance(overrides, dict):
+        return base, None
+
+    declared = family_variants if isinstance(family_variants, dict) else {}
+    for name in sorted(overrides):
+        if name not in declared:
+            available = ", ".join(sorted(declared)) if declared else "<none>"
+            _die(
+                f"schema invalid: {path}: {BOARD_VARIANT_OVERRIDES} names "
+                f"variant '{name}', which the family does not declare "
+                f"(available: {available}) — it would never apply"
+            )
+
+    if variant in ("", DEFAULT_VARIANT):
+        return base, None
+    return base, overrides.get(variant)
+
+
 def _scalar(value: Any, prefix: str) -> str:
     """Render a scalar leaf to its flat string form."""
     if isinstance(value, bool):
@@ -299,8 +361,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
     variant = args.variant or DEFAULT_VARIANT
     pre_overlay_packages = _package_names(family, _SUPPRESSED_FIELDS)
     base, overlay = apply_variant(family, variant, args.family)
+    board_base, board_override = apply_board_variant_overrides(
+        board, variant, args.board, family.get("variants")
+    )
 
-    merged = deep_merge(base, board)
+    merged = deep_merge(base, board_base)
+    if isinstance(board_override, dict):
+        # Applied AFTER the board so a per-variant board fact wins over the
+        # board's own default — the board still has the last word either way.
+        merged = deep_merge(merged, board_override)
 
     if isinstance(overlay, dict) and isinstance(overlay.get("kernel_source"), dict):
         # Record which variant produced this param set, and derive the exact

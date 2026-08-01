@@ -16,6 +16,14 @@ board_id: orangepi5-plus
 # note the rk3588s- DTB prefix (vs rk3588- on the Rock 5B+).
 dtb_name: rk3588s-orangepi-5-plus.dtb
 
+# Mainline spells this board's DTB WITHOUT the 's': the rockchip Makefile at the
+# exact tag the edge variant compiles (v7.1.5) builds rk3588-orangepi-5-plus.dtb,
+# while the vendor BSP above ships rk3588s-. The Rock 5B+ needs no entry — it is
+# rk3588-rock-5b-plus.dtb in both trees.
+variant_overrides:
+  edge:
+    dtb_name: rk3588-orangepi-5-plus.dtb
+
 # Board-specific Armbian vendor U-Boot; overrides the family's empty default.
 uboot_packages:
   - linux-u-boot-orangepi5-plus-vendor
