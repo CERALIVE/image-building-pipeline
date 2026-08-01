@@ -292,8 +292,17 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
 sudo sync
 ```
 
-Eject the card and insert it into the board. The board boots from microSD
-when no eMMC is present (or when the eMMC boot order is overridden).
+Eject the card and insert it into the board. On the Rock 5B+ (same RK3588 SoC
+and U-Boot SPL lineage as the Rock 5B), the SPL boot order probes microSD
+before eMMC: `rk3588-rock-5b-u-boot.dtsi` sets `u-boot,spl-boot-order =
+"same-as-spl", &sdmmc, &sdhci;`, listing `&sdmmc` ahead of `&sdhci`. A bootable
+card boots automatically, that's the default order, not a fallback that only
+applies when eMMC is absent, and no boot-order override is needed. A
+non-bootable card falls through to eMMC on its own, since the SPL just skips a
+slot with no valid idbloader signature. This is confirmed on the Rock 5B itself
+(Radxa forum guidance plus real-hardware testing showing microSD, then eMMC,
+then M.2 NVMe as the observed priority); it hasn't been independently verified
+on the 5B+, though the shared SoC and bootloader lineage make it a safe bet.
 
 ### Option B: rkdeveloptool to eMMC (maskrom mode)
 
