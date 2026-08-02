@@ -112,6 +112,21 @@ wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db +
                          # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
 hostapd                  # AP mode (device hotspot for config)
 
+# --- Bluetooth ----------------------------------------------------------------
+bluez                    # the Bluetooth userspace stack: bluetoothd + bluetoothctl/btmgmt.
+                         # The KERNEL half already works and always did — on a Rock 5B+ the
+                         # RTL8852BE's Bluetooth radio enumerates as USB 13d3:3572, btusb+btrtl
+                         # bind it, and /sys/class/bluetooth/hci0 exists (board-confirmed on
+                         # 7.1.5, 2026-08-02). What was missing is entirely userspace: with no
+                         # bluez there is no bluetoothd, no bluetooth.service ("Unit
+                         # bluetooth.service could not be found"), and no bluetoothctl/hciconfig,
+                         # so the adapter can never be powered up, paired or used. libbluetooth3
+                         # was present only as a transitive dependency of an unrelated package,
+                         # which is why `dpkg -l | grep blue` looked deceptively non-empty.
+                         # This is NOT an edge-kernel regression — the vendor-BSP images have the
+                         # same gap. Same class as the net-tools / iw entries above: one missing
+                         # userspace package silently disables a whole hardware feature.
+
 # --- mDNS / discovery ---------------------------------------------------------
 avahi-daemon             # .local hostname advertisement (find the box on the LAN)
 avahi-utils              # set/query Avahi's published hostname during allocation + health checks
