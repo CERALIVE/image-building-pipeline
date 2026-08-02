@@ -528,6 +528,72 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
 
 Guards: `manifest.bats` §26 (41 tests).
 
+**A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
+will not tell you the difference** [EXISTS]
+
+`scripts/kconfig/merge_config.sh -m` merges TEXT and reports only symbols the
+fragment REDEFINES. It says nothing about a symbol the following
+`make olddefconfig` DROPS for an unmet visibility condition — and `-m` is exactly
+the flag that skips merge_config's own post-merge validation pass. So a fragment
+line can vanish in total silence: the build succeeds, `validate_built_kernel_deb`
+passes all four axes, `/boot` is complete, the image boots, and the driver is
+simply not there.
+
+Confirmed on a live Rock 5B+ running the `edge` 7.1.5 kernel: the RTL8852BE WiFi
+enumerated at PCI level (`0x10ec`/`0xb852`, class `0x028000`) with **no driver
+bound, no `wl*` interface, and zero `rtw89*` modules under
+`/lib/modules/7.1.5-ceralive-rk3588`** — while `/lib/firmware/rtw89/rtw8852b_fw.bin`
+(from `armbian-firmware`) was present and `cfg80211` was loaded. `/proc/config.gz`
+read `# CONFIG_RTW89 is not set`. The fragment DID name the adapter
+(`CONFIG_RTW89_8852BE=m`) but not the `menuconfig RTW89` that gates the family —
+a tristate, `depends on MAC80211`, defaulting off — so the leaf was invisible and
+discarded. Three releases of build logs said nothing.
+
+`v2/lib/verify-kernel-config.sh` closes it, running **inside the builder container
+right after `make syncconfig` and before `bindeb-pkg`** (mounted read-only at
+`/in/verify-kernel-config.sh`), asserting every declared symbol against the
+RESOLVED `.config`: `=y`/`=m`/`="str"` must match verbatim, `=n` and
+`# … is not set` must resolve to not-set (absent counts). Value matching is EXACT
+on purpose, and that is what caught the second instance nobody was looking for —
+`CONFIG_TYPEC_FUSB302=y` had been resolving to `=m` for three releases because
+FUSB302 carries `depends on DRM || DRM=n` and arm64 defconfig builds DRM as a
+module. The board proved `=m` is fine (`/sys/class/typec/port0` exists,
+`port_type` reads `dual [source] sink`, `fusb302` in `lsmod`) because udev
+auto-loads it off the OF modalias and `ceralive-typec-source.service` POLLS for
+the port to a deadline — so the fragment now declares the honest `=m`. **Do NOT
+"fix" that one by setting `CONFIG_DRM=y`.**
+
+When the gate fires, do NOT silence it by deleting the line: read the symbol's
+Kconfig entry, find the `menuconfig` block it sits inside and its `depends on`,
+and declare those too. A `select`ed helper (`RTW89_CORE`/`RTW89_PCI`/`RTW89_8852B`)
+needs no entry; a `menuconfig` parent always does. Guards:
+`v2/tests/kernel-config-fragment.bats` (14 tests, incl. a red/green pair driving
+the REAL fragment against a reproduction of the broken 7.1.5 answer). Full
+write-up: `v2/docs/kernel-build-from-source.md` §6b.
+
+**eMMC HS400 does not negotiate under the `edge` 7.1.5 kernel — upstream
+behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
+
+Same board, same kernel: `sdhci-dwcmshc fe2e0000.mmc: Can't reduce the clock
+below 52MHz in HS200/HS400 mode` (×3) → `mmc0: switch to hs400 failed, err:-110`
+→ `mmc0: Failed to initialize a non-removable card`, and `/dev/mmcblk0` never
+appears. Everything this repo controls is correct: the board DTS
+(`rk3588-rock-5b-5bp-5t.dtsi`, straight out of the pinned tree) already declares
+`mmc-hs400-1_8v` + `mmc-hs400-enhanced-strobe`, the base node carries all five
+clocks/resets + `supports-cqe`, the config has `MMC_SDHCI_OF_DWCMSHC=y` /
+`MMC_CQHCI=y` / `ROCKCHIP_IODOMAIN=y`, and `sdhci_dwcmshc_rk3588_pdata.revision`
+is `1`. Linux **v7.0** added a guard to `dwcmshc_rk3568_set_clock()` that
+`goto enable_clk`s past the DLL bypass/reset whenever the requested clock is
+≤52 MHz while `ios.timing` still reads HS200/HS400; through v6.17 that block ran
+unconditionally, and the guard is still in mainline `master` — current upstream
+behaviour, not a regression already fixed. The pipeline authors NO device tree
+(zero `.dts`/`.dtsi`/`.dtbo` files in the repo), so it cannot express a repair:
+that is a driver patch or a board DT patch in `CERALIVE/rk3588-kernel-patches`,
+bench-validated on a spare board, **never** guessed at against a production eMMC.
+Not currently blocking — production ships the vendor BSP (D3 unchanged), which
+drives this eMMC fine. Full analysis:
+`.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+
 **The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
 load — both were real infinite-crash-loop defects** [EXISTS]
 

@@ -316,6 +316,7 @@ main() {
     log_info "DRY-RUN would run: git fetch ${patches_url} ${patches_commit} && git am \$(series ${patches_series})"
     log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image} -t $(resolve_kernel_builder_tag "${builder_image}") -f ${KERNEL_BUILDER_DOCKERFILE}"
     log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragment_rel}"
+    log_info "DRY-RUN would run: verify-kernel-config.sh ${fragment_rel} .config (fragment-survival gate, after olddefconfig)"
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
@@ -358,6 +359,7 @@ main() {
     -e "BUILD_JOBS=${KERNEL_BUILD_JOBS}" \
     -e "SOURCE_DATE_EPOCH=${epoch}" \
     -v "${fragment}:/in/fragment.config:ro" \
+    -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
     -v "${work}/out:/out" \
     -v "${ccache_dir}:/ccache" \
     "${KERNEL_BUILDER_IMAGE_TAG}" \
@@ -409,6 +411,13 @@ main() {
       # STALE include/config/auto.conf. Without this, setlocalversion still sees the
       # defconfig CONFIG_LOCALVERSION_AUTO=y and appends the git-describe suffix.
       make syncconfig
+
+      # merge_config.sh -m merges TEXT only and never reports a symbol the
+      # following olddefconfig DROPS for an unmet visibility condition — which is
+      # how 7.1.5 shipped with no rtw89 WiFi driver. Runs before bindeb-pkg so
+      # the failure is fast.
+      echo "== verifying the fragment survived olddefconfig"
+      bash /in/verify-kernel-config.sh /in/fragment.config .config
 
       release="$(make -s kernelrelease LOCALVERSION="${LOCAL_VERSION}")"
       if [ "${release}" != "${KERNEL_RELEASE}" ]; then
