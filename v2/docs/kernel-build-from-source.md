@@ -347,12 +347,18 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    gate now makes "the fragment is honoured" a build invariant, but that is a
    weaker claim than "the fragment is right for this board" — which still needs a
    bench run per symbol.
-3. **eMMC HS400 does not negotiate under this kernel, and no fix is staged.** On
-   a real Rock 5B+ the `edge` 7.1.5 kernel logs
+3. **eMMC HS400 negotiation is inconsistent under this kernel, and no fix is
+   staged.** On a real Rock 5B+ one `edge` 7.1.5 run logged
    `sdhci-dwcmshc fe2e0000.mmc: Can't reduce the clock below 52MHz in HS200/HS400
    mode` (×3) → `mmc0: switch to hs400 failed, err:-110` → `mmc0: Failed to
-   initialize a non-removable card`, and `/dev/mmcblk0` never appears. This is
-   **not** a pipeline misconfiguration: the DT node is upstream-complete
+   initialize a non-removable card`, and `/dev/mmcblk0` did not appear. A fresh
+   2026-08-02 bench build from the same kernel/patch pins at commit `7c98213`
+   printed the warning (×4) but then initialized successfully:
+   `mmc0: new HS400 MMC card at address 0001`, `mmcblk0: mmc0:0001 HCG8e 58.3
+   GiB`, and `mmcblk0: p1 p2 p3 p4`. The warning and upstream driver mechanics
+   are real, but the outcome is not deterministic across these builds; the
+   cause of the inconsistency is not established and needs a dedicated
+   investigation. This is **not** a pipeline misconfiguration: the DT node is upstream-complete
    (`mmc-hs400-1_8v`, `mmc-hs400-enhanced-strobe`, all five clocks + resets,
    `supports-cqe`), the config carries `MMC_SDHCI_OF_DWCMSHC=y` / `MMC_CQHCI=y` /
    `ROCKCHIP_IODOMAIN=y`, and the driver's `rk3588_pdata.revision = 1` selection
@@ -365,7 +371,9 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    dropping `mmc-hs400-*` to settle the part at HS200) carried in
    `CERALIVE/rk3588-kernel-patches` and validated on a bench board — never
    guessed at against a production eMMC. Full analysis:
-   `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+   `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`; the
+   later successful enumeration is recorded in
+   `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §8a.
 4. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
    filenames — RESOLVED, via a board-declared per-variant override.** The Orange
    Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor BSP and
