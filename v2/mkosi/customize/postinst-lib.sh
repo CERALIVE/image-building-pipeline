@@ -185,18 +185,58 @@ EOF
 # out of SRTLA bonding — silently. mkosi.conf's PassEnvironment= MUST stay in
 # lockstep with orchestrate.sh:run_mkosi_build()'s env_names; the guard is
 # manifest.bats "mkosi PassEnvironment stays in lockstep with … env_names".
+#
+# KERNEL-PORTABLE Path= MATCHING — why the literal manifest value is not enough.
+# An ID_PATH for a PCIe NIC is `platform-<controller>-pci-<domain:bus:dev.fn>`,
+# and <controller> is the PLATFORM DEVICE name, which Linux derives from the
+# FIRST `reg` entry of the DT node. The vendor BSP and mainline order that node's
+# `reg` cells differently: the vendor DTS puts the APB window first, so the
+# controller is `fe190000.pcie`, while mainline puts the ECAM window first, so
+# the SAME controller is `a41000000.pcie`. The manifest values were captured on a
+# vendor-BSP board, so on the `edge` (mainline) kernel the literal Path= matched
+# NOTHING and systemd fell through to /usr/lib/systemd/network/99-default.link.
+# Confirmed live on a Rock 5B+ running 7.1.5: the .link files were present and
+# correct, yet the NIC stayed `enP4p65s0`, `udevadm test-builtin net_setup_link`
+# reported `ID_NET_LINK_FILE=/usr/lib/systemd/network/99-default.link`, and the
+# real ID_PATH read `platform-a41000000.pcie-pci-0004:41:00.0` against a manifest
+# saying `platform-fe190000.pcie-pci-0004:41:00.0`. eth0 therefore fell out of
+# SRTLA's `eth*` bonding glob on every edge image.
+#
+# systemd.link(5) Path= takes a WHITESPACE-SEPARATED LIST OF GLOBS, so the fix is
+# to emit the literal value AND a controller-agnostic glob keyed on the part that
+# is genuinely stable across kernels — the PCI domain:bus:device.function, which
+# comes from `linux,pci-domain` and the board's physical topology, not from node
+# naming. Two controllers cannot host the same PCI domain, so the glob cannot
+# over-match. Non-PCI ID_PATHs (an onboard MAC like `platform-fe1c0000.ethernet`)
+# have no such suffix and are emitted literally, unchanged.
+
+# link_path_match <id-path> — the Path= value for a role's .link unit: the
+# literal manifest ID_PATH, plus a `platform-*.<devtype>-pci-<bdf>` glob when the
+# ID_PATH is a platform-hosted PCI device (see the block comment above).
+link_path_match() {
+  local id_path="$1" devtype pci_suffix
+  if [[ "${id_path}" =~ ^platform-[0-9a-f]+\.([a-z0-9_]+)-(pci-.+)$ ]]; then
+    devtype="${BASH_REMATCH[1]}"
+    pci_suffix="${BASH_REMATCH[2]}"
+    printf '%s platform-*.%s-%s\n' "${id_path}" "${devtype}" "${pci_suffix}"
+  else
+    printf '%s\n' "${id_path}"
+  fi
+}
+
 install_interface_naming() {
   log "installing deterministic interface naming (.link units + loose rp_filter)"
   mkdir -p /etc/systemd/network
 
-  local role var val
+  local role var val match
   for role in eth0 eth1 wlan0; do
     var="CERALIVE_INTERFACES_${role}"
     val="${!var:-}"
     [[ -n "${val}" && "${val}" != FIXME* ]] || continue
+    match="$(link_path_match "${val}")"
     cat >"/etc/systemd/network/10-ceralive-${role}.link" <<EOF
 [Match]
-Path=${val}
+Path=${match}
 
 [Link]
 Name=${role}

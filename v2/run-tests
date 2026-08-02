@@ -59,6 +59,7 @@ SHELL_SUITES=(
   "${HERE}/tests/data-persistence-public-symlink.test.sh"
   "${HERE}/tests/resolv-conf-symlink.test.sh"
   "${HERE}/tests/resolv-conf-bind-mount.test.sh"
+  "${HERE}/tests/interface-naming-path-match.test.sh"
   "${HERE}/tests/apt-preferences-baked.test.sh"
   "${HERE}/tests/apt-mtls-and-dedupe.test.sh"
   "${HERE}/tests/app-layer-modem-closure.test.sh"
