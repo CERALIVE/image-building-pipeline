@@ -655,14 +655,72 @@ with `/dev/mpp_service` present. The image also already CONTRADICTED itself:
 `chmod a+rw /dev/dma_heap`. The fragment now declares `CONFIG_DMABUF_HEAPS=y` +
 `_SYSTEM=y` + `_CMA=y` (`DMA_CMA` was already `=y`).
 
-**HONEST LIMIT — necessary, not proven sufficient.** The three heap names MPP
-asks for are ROCKCHIP-BSP heaps; mainline registers only `system` and
-`linux,cma`. Enabling these symbols is required (with no `/dev/dma_heap` at all
-MPP cannot reach any fallback), but whether MPP settles on the mainline `system`
-heap is hardware-gated and needs a rebuild + board boot. A second, harder gap sits
-behind it: `librga` wants the vendor `/dev/rga` char device, and mainline exposes
-RGA only as a V4L2 M2M node (`rockchip-rga` → `/dev/video1`). Full analysis:
+**HONEST LIMIT — necessary, and now PROVEN not sufficient.** The three heap names
+MPP asks for are ROCKCHIP-BSP heaps; mainline registers only `system` and the CMA
+heaps. Enabling these symbols is required (with no `/dev/dma_heap` at all MPP
+cannot reach any fallback) and it is where the story stops being a config
+question — see the KNOWN ISSUE immediately below, which resolves the
+"whether MPP settles on the mainline `system` heap" question on real hardware
+(it does not, and cannot). A second, harder gap sits behind it: `librga` wants
+the vendor `/dev/rga` char device, and mainline exposes RGA only as a V4L2 M2M
+node (`rockchip-rga` → `/dev/video1`). Full analysis:
 `.omo/evidence/device-platform-wave4/task-hardware-audit-followup.md` §5.
+
+**MPP hardware video encode does not work on the `edge` 7.1.5 kernel — three
+stacked defects, none of them fixable from this repo** [KNOWN ISSUE]
+
+Root-caused on a Rock 5B+ on 2026-08-02. This is NOT a config gap and NOT a
+pipeline defect; no kernel fragment, DTS property or package pin this repo owns
+can repair it. `CONFIG_DMABUF_HEAPS` (above) was necessary and is confirmed
+insufficient. The three defects are independent and stack:
+
+1. **`mpph264enc` does not register at all.** `librockchip-mpp`'s dma-heap
+   allocator table hard-codes `system-uncached` as the heap for an uncached
+   allocation. Mainline registers `system`, `default_cma_region`, `reserved` —
+   there is no `system-uncached`, so the H.264 HAL's init-time buffer allocation
+   fails, `mpp_init(MPP_CTX_ENC, AVC)` fails, and the plugin's registration probe
+   skips the element. MPP's own log names it:
+   `mpp_dma_heap: os_allocator_dma_heap_open open dma heap type 0 system-uncached
+   failed!` → `hal_h264e_vepu580_init init vepu buffer failed ret: -1`. SoC
+   detection is fine (`mpp_soc: match chip name: rk3588`), so the earlier
+   "MPP answers no AVC encoder" reading was wrong. H.265 allocates later, which
+   is why `mpph265enc` registers and then dies at PLAYING instead.
+2. **The `rkvenc` IOVA guardrail fires because imported buffer lengths are
+   truncated to 64 KiB.** `rkvenc_dma_import_fd()` records
+   `buffer->size = sg_dma_len(sgt->sgl)` — the FIRST DMA segment only — and the
+   patch series never calls `dma_set_max_seg_size()`, so
+   `dma_get_max_seg_size()` returns the `SZ_64K` default and `__finalise_sg()`
+   stops coalescing there. The reported window is always exactly `0x10000`, and
+   the rejected register is the source frame's NV12 chroma-plane offset. The
+   guardrail is correct and must NOT be silenced — it is catching a real
+   out-of-range register produced by a bookkeeping bug one layer below it.
+3. **Mainline has no uncached dma-heap, so even a corrected mapping encodes
+   garbage.** MPP does no CPU cache maintenance on the heap it believes is
+   uncached. Given cached memory it produces different output sizes for identical
+   input (1280×720 ×60: 231047 bytes, then 161997 bytes) and intermittent CABAC
+   decode failures.
+
+Both real fixes are kernel changes in `CERALIVE/rk3588-kernel-patches`, not here:
+`dma_set_max_seg_size(dev, DMA_BIT_MASK(32))` in `rkvenc_hw_probe()` for (2), and
+an ACK/Rockchip-style `system-uncached` dma-heap for (1)+(3). The second was
+deliberately NOT attempted — ARM cache-alias handling done subtly wrong yields
+silent intermittent corruption in the video path, and proving it correct needs a
+real validation campaign, not a 30-frame smoke test. There is no userspace escape
+hatch: MPP's heap-name table has no environment override, and the shipped
+`librockchip-mpp1 1.5.0-1` lacks the newer upstream cached-heap fallback.
+
+**A `/dev/dma_heap/system-uncached` symlink or `mknod` alias is NOT a workaround.**
+It makes the element register and the guardrail stop firing, which is exactly why
+it is tempting — but it hands MPP cached memory it will not synchronise, and
+pointing it at the CMA heap instead caps out below 1080p (32 MiB CMA, fragmented
+to a ~1.9 MiB largest run; a 1080p NV12 frame needs ~3.1 MiB contiguous). It was
+used here as a diagnostic instrument only.
+
+Not currently blocking — production ships the vendor BSP (D3 unchanged), whose
+in-tree MPP stack provides all three missing pieces. This is a gate on the
+mainline-track `edge` variant only. Full evidence, verbatim logs and the
+experiment that isolated each layer:
+`.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a.
 
 **eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
