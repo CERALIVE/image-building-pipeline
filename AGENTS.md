@@ -664,13 +664,23 @@ behind it: `librga` wants the vendor `/dev/rga` char device, and mainline expose
 RGA only as a V4L2 M2M node (`rockchip-rga` → `/dev/video1`). Full analysis:
 `.omo/evidence/device-platform-wave4/task-hardware-audit-followup.md` §5.
 
-**eMMC HS400 does not negotiate under the `edge` 7.1.5 kernel — upstream
+**eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
 
-Same board, same kernel: `sdhci-dwcmshc fe2e0000.mmc: Can't reduce the clock
-below 52MHz in HS200/HS400 mode` (×3) → `mmc0: switch to hs400 failed, err:-110`
-→ `mmc0: Failed to initialize a non-removable card`, and `/dev/mmcblk0` never
-appears. Everything this repo controls is correct: the board DTS
+Two real-hardware observations now exist on the same board and kernel/patch pins.
+The earlier task-28 run observed `sdhci-dwcmshc fe2e0000.mmc: Can't reduce the
+clock below 52MHz in HS200/HS400 mode` (×3) → `mmc0: switch to hs400 failed,
+err:-110` → `mmc0: Failed to initialize a non-removable card`, and `/dev/mmcblk0`
+did not appear. A fresh bench build from commit `7c98213` on 2026-08-02 printed
+the same warning (×4), but then successfully negotiated HS400:
+`mmc0: new HS400 MMC card at address 0001`, `mmcblk0: mmc0:0001 HCG8e 58.3 GiB`,
+and `mmcblk0: p1 p2 p3 p4` (with the boot and RPMB areas also enumerated).
+The warning therefore remains real, but eMMC reachability is not deterministic
+enough to claim that `/dev/mmcblk0` never appears. Whether the difference is
+board-unit-specific controller tuning, boot-order timing, or something else is
+not established; it needs a dedicated investigation and is not being fixed here.
+
+Everything this repo controls is correct: the board DTS
 (`rk3588-rock-5b-5bp-5t.dtsi`, straight out of the pinned tree) already declares
 `mmc-hs400-1_8v` + `mmc-hs400-enhanced-strobe`, the base node carries all five
 clocks/resets + `supports-cqe`, the config has `MMC_SDHCI_OF_DWCMSHC=y` /
@@ -684,8 +694,12 @@ behaviour, not a regression already fixed. The pipeline authors NO device tree
 that is a driver patch or a board DT patch in `CERALIVE/rk3588-kernel-patches`,
 bench-validated on a spare board, **never** guessed at against a production eMMC.
 Not currently blocking — production ships the vendor BSP (D3 unchanged), which
-drives this eMMC fine. Full analysis:
-`.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+drives this eMMC fine. Do **not** use eMMC being unreachable as proof that a
+bench boot did not touch it; prove non-interference from the mount table and
+disjoint `PARTLABEL` namespaces instead. Full historical analysis and the
+failure observation: `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+The succeeding observation is recorded in
+`.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §8a.
 
 **The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
 load — both were real infinite-crash-loop defects** [EXISTS]
