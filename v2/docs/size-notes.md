@@ -314,3 +314,66 @@ Fold this delta together with §5 (nginx), §6 (srt-tools reclaim) and Todo 14 (
 when bumping `v2/ci/size-baseline.json`, and note "Added nftables LAN-ingest firewall:
 +~1.3 MB" in the description. Until a wet build runs this is a paper estimate; the
 absolute gate remains the hard backstop.
+
+---
+
+## 8. First REAL measurement — the wet build (2026-08-02)
+
+Every "*(estimate)*" above was a paper figure. This section records the first
+committed measurement from actual wet vendor-BSP production builds, and it
+supersedes those estimates as the reference for the absolute and relative gates.
+
+### What was measured
+
+Both RK3588 boards, built from `01975f6` on the **production path** — vendor BSP
+kernel, no `--variant`, no `CERALIVE_BENCH_LABELS` — then measured with
+`v2/lib/measure-size.sh` against the emitted normalized `rootfs.tar`:
+
+| board | measured (bytes) | vs the 1.5 GB ceiling |
+|---|---:|---:|
+| `rock-5b-plus` | 1,569,914,880 | **+69,914,880 over** |
+| `orange-pi-5-plus` | 1,576,458,240 | **+76,458,240 over** |
+
+The two boards differ by exactly 6,543,360 B, which is board-specific U-Boot and
+firmware payload — the OS content is otherwise identical.
+
+### The ceiling stays at 1.5 GB
+
+`rootfs_bytes_max` is deliberately **NOT** raised to match. Raising it would
+launder a real overage into a passing gate. The recorded `measured` value in
+`v2/manifests/size-budget.json` is the honest number; closing the ~70 MB gap is
+package/file-level slimming work tracked separately.
+
+Note that nothing in `orchestrate.sh` currently invokes `measure-size.sh`, so a
+real build does not yet fail on this. The only live caller is the `v2-ci.yml`
+size job, which measures a synthetic 4 KB tree. Wiring the gate into the build is
+part of the same slimming work — turning it on today fails every RK3588 build.
+
+### Where the bytes are (rock-5b-plus, summed from `tar -tvf` by path prefix)
+
+| prefix | bytes |
+|---|---:|
+| `/usr` | 1,380,532,159 |
+| `/boot` | 156,107,754 |
+| `/var` | 17,558,206 |
+| `/etc` | 1,652,044 |
+| everything else | 5,490 |
+
+Measure shipped bytes this way — **never** dpkg `Installed-Size`, which is
+unreliable here: `adwaita-icon-theme` reports ~20 MB to dpkg and ships **0 bytes**,
+because the app layer already deletes `/usr/share/icons`.
+
+### Growth since the previous (uncommitted) 2026-07-31 measurement
+
+`rock-5b-plus` went 1,565,081,600 → 1,569,914,880, i.e. **+4,833,280 B**, and
+`orange-pi-5-plus` moved by the same amount. That entire drift is one package:
+`bluez` + `libbluetooth3` ship 4,829,217 B of files, added to `shared.list` in
+PR #90. No other size-relevant change landed in between.
+
+### Full methodology and the live-board delta attribution
+
+The complete write-up — build environment, both artifact SHA-256s, the
+`du`-vs-`du` comparison against a real board, and the category breakdown
+explaining why a dev board's rootfs reads 3.77 GB when the image is 1.57 GB —
+is in `.omo/evidence/device-platform-wave4/task-31-measurement.md` (workspace
+evidence tree, outside this repo).
