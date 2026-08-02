@@ -62,7 +62,14 @@ CONFIG_VIDEO_ROCKCHIP_RKVENC=m
 # --- Networking: bonded-link uplinks ---------------------------------------
 # Onboard NICs: RTL8125B (Rock 5B+, r8169) and the OPi 5+ dual r8169.
 CONFIG_R8169=m
-# RTL8852BE WiFi (Rock 5B+).
+# RTL8852BE WiFi (Rock 5B+), PCI 10ec:b852.
+# CONFIG_RTW89 is the `menuconfig` that gates the whole rtw89 family and it is a
+# tristate defaulting OFF, so declaring only the 8852BE leaf makes olddefconfig
+# discard the leaf and ship a kernel with no rtw89 driver at all — which is
+# exactly what 7.1.5 did until this line was added. The leaf `select`s
+# RTW89_CORE/RTW89_PCI/RTW89_8852B itself, so those need no entry. MAC80211
+# (rtw89's `depends on`) is already =m from defconfig.
+CONFIG_RTW89=m
 CONFIG_RTW89_8852BE=m
 # WWAN: the six modules v2/lib/check-wwan-modules.sh binds the modem stack to.
 # Keep this list in lockstep with that checker — a drop here is exactly the
@@ -81,7 +88,14 @@ CONFIG_USB_SERIAL_OPTION=m
 # returns.
 CONFIG_TYPEC=y
 CONFIG_TYPEC_TCPM=y
-CONFIG_TYPEC_FUSB302=y
+# FUSB302 carries `depends on DRM || DRM=n`, and arm64 defconfig builds DRM as a
+# module, so kconfig caps this at =m however loudly the fragment asks for =y.
+# It asked for =y for three releases and silently got =m. That is tolerable —
+# udev auto-loads typec_fusb302 off the I2C node's OF modalias during ordinary
+# boot, and ceralive-typec-source.service POLLS for /sys/class/typec/port0 to a
+# deadline rather than assuming it is already there — so the honest value is
+# declared here instead. Do NOT "fix" this by setting CONFIG_DRM=y.
+CONFIG_TYPEC_FUSB302=m
 CONFIG_USB_ROLE_SWITCH=y
 
 # --- Storage / rootfs ------------------------------------------------------

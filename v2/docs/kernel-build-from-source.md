@@ -258,6 +258,63 @@ this.
 
 ---
 
+## 6b. The fragment-survival gate — what the fragment ASKS FOR must be what ships
+
+`scripts/kconfig/merge_config.sh -m` merges text and reports only symbols the
+fragment *redefines*. It says nothing about a symbol that the following
+`make olddefconfig` then **drops**, and `-m` is precisely the flag that skips
+merge_config's own post-merge validation pass. So a fragment line can be
+discarded in total silence: the build succeeds, the four-axis `.deb` validation
+passes, `/boot` is complete, the image boots, and the driver is simply absent.
+
+That is not hypothetical. `rk3588-edge.fragment` declared
+
+```
+CONFIG_RTW89_8852BE=m      # RTL8852BE WiFi (Rock 5B+)
+```
+
+without `CONFIG_RTW89`, the `menuconfig` that gates the whole rtw89 family
+(`tristate`, `depends on MAC80211`, defaults off). `olddefconfig` discarded the
+leaf. The shipped `7.1.5-ceralive-rk3588` carried `# CONFIG_RTW89 is not set`,
+and a real Rock 5B+ enumerated the radio at PCI level (`10ec:b852`, class
+`0x028000`) with **no driver bound, no `wl*` interface and no `rtw89*` in
+`lsmod`** — while the firmware it needed (`/lib/firmware/rtw89/rtw8852b_fw.bin`,
+from `armbian-firmware`) was present the whole time and `cfg80211` was loaded.
+Nothing in three releases of build logs suggested anything had been lost.
+
+`v2/lib/verify-kernel-config.sh` closes it. It runs **inside the builder
+container, immediately after `make syncconfig` and before `bindeb-pkg`** (so the
+failure is fast, not one cross-compile later), mounted read-only at
+`/in/verify-kernel-config.sh`, and asserts every symbol the fragment declares
+against the resolved `.config`:
+
+| Fragment line | Requirement |
+|---|---|
+| `CONFIG_X=y` / `=m` / `="str"` | must appear **verbatim** in the resolved config |
+| `CONFIG_X=n` | must resolve to not-set (absent counts) |
+| `# CONFIG_X is not set` | must resolve to not-set (absent counts) |
+
+Exact value matching is deliberate, and it immediately found a second, quieter
+instance of the same class: `CONFIG_TYPEC_FUSB302=y` had been resolving to `=m`
+for three releases, because FUSB302 carries `depends on DRM || DRM=n` and arm64
+`defconfig` builds DRM as a module — so kconfig caps it at `=m` however loudly
+the fragment asks. Built-in versus loadable module is a real difference in what
+ships, so the gate reports it rather than tolerating it; the fragment now
+declares the honest `=m`.
+
+**When the gate fires, do not silence it by deleting the line.** A dropped symbol
+means its Kconfig visibility condition is unmet. Read the symbol's own Kconfig
+entry, find the `menuconfig` block it sits inside and its `depends on` line, and
+declare those too — a `select`ed helper symbol (`RTW89_CORE`, `RTW89_PCI`,
+`RTW89_8852B`) needs no entry, but a `menuconfig` parent always does.
+
+Coverage: `v2/tests/kernel-config-fragment.bats` (14 tests — the verifier's
+drop/downgrade/off/absence table, the real fragment's two repaired symbols, a
+red/green pair driving the real fragment against a reproduction of the broken
+7.1.5 answer and against a fully-honoured one, and the build-stage wiring order).
+
+---
+
 ## 7. Known gaps — read before using this
 
 Honest status: **`rock-5b-plus --variant edge` has been built end to end** — a real
@@ -284,7 +341,32 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    fragment is now known to *resolve and compile* — the built
    `/boot/config-7.1.5-ceralive-rk3588` carries it — but no symbol in it has been
    proven necessary *or* sufficient **on hardware**.
-3. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
+
+   Worse, until §6b's gate existed the built config did not even carry what the
+   fragment ASKED for: two symbols were being silently dropped or downgraded. The
+   gate now makes "the fragment is honoured" a build invariant, but that is a
+   weaker claim than "the fragment is right for this board" — which still needs a
+   bench run per symbol.
+3. **eMMC HS400 does not negotiate under this kernel, and no fix is staged.** On
+   a real Rock 5B+ the `edge` 7.1.5 kernel logs
+   `sdhci-dwcmshc fe2e0000.mmc: Can't reduce the clock below 52MHz in HS200/HS400
+   mode` (×3) → `mmc0: switch to hs400 failed, err:-110` → `mmc0: Failed to
+   initialize a non-removable card`, and `/dev/mmcblk0` never appears. This is
+   **not** a pipeline misconfiguration: the DT node is upstream-complete
+   (`mmc-hs400-1_8v`, `mmc-hs400-enhanced-strobe`, all five clocks + resets,
+   `supports-cqe`), the config carries `MMC_SDHCI_OF_DWCMSHC=y` / `MMC_CQHCI=y` /
+   `ROCKCHIP_IODOMAIN=y`, and the driver's `rk3588_pdata.revision = 1` selection
+   is correct. Linux **v7.0** added a guard to `dwcmshc_rk3568_set_clock()` that
+   `goto enable_clk`s past the DLL bypass/reset block whenever the requested clock
+   is ≤52 MHz while `ios.timing` still reads HS200/HS400; through v6.17 that block
+   ran unconditionally. The guard is still present in mainline `master`, so this
+   is current upstream behaviour, not a regression somebody has already fixed.
+   Any repair is a real kernel change (a driver patch, or a board DT patch
+   dropping `mmc-hs400-*` to settle the part at HS200) carried in
+   `CERALIVE/rk3588-kernel-patches` and validated on a bench board — never
+   guessed at against a production eMMC. Full analysis:
+   `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+4. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
    filenames — RESOLVED, via a board-declared per-variant override.** The Orange
    Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor BSP and
    `rk3588-orangepi-5-plus.dtb` (no `s`) in mainline, which is what this variant
@@ -299,13 +381,13 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    item 1, this board *also* failed the DTB check — with the divergence wording
    above and an empty "DTBs actually present" list. **An empty list there means the
    listing is broken, not that the DTB is missing.**
-4. **No `.deb` produced by this stage may be published.** It is a local build
+5. **No `.deb` produced by this stage may be published.** It is a local build
    input only; nothing here uploads to apt/R2.
-5. **D3 is not reopened.** The shipped kernel is still the Armbian vendor BSP.
+6. **D3 is not reopened.** The shipped kernel is still the Armbian vendor BSP.
    See [`kernel-currency-watch.md`](kernel-currency-watch.md) for the two precise
    triggers that would revisit that decision; this variant existing is not one of
    them.
-6. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
+7. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
    date from the wall clock, so the post-`am` commit SHAs differ on every run.
    `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP` are pinned and the *content* is
    stable — two consecutive builds produced identical package versions, identical
@@ -379,6 +461,8 @@ no second place to keep in sync.
 | `v2/lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
 | `v2/mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping + the `/boot` artifact mapping (§4b) |
 | `v2/lib/verify-boot-artifacts.sh` | the `[6b/9]` build gate on `/boot` completeness |
+| `v2/lib/verify-kernel-config.sh` | the in-container fragment-survival gate (§6b) |
 | `v2/tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
+| `v2/tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |
 | `v2/tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
 | `v2/tests/manifests/fixtures/vendor-baseline/` | the pre-change golden resolver output |
