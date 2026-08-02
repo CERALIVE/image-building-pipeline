@@ -28,7 +28,12 @@ variant_overrides:
 uboot_packages:
   - linux-u-boot-orangepi5-plus-vendor
 
-# DT_OVERLAYS from configs/devices/orangepi5plus.conf.
+# INERT/UNCONSUMED legacy metadata carried from configs/devices/orangepi5plus.conf:
+# no build script reads this field and no overlay-application step exists in the
+# boot path. Real behavior lives elsewhere: USB-C source role in
+# ceralive-typec-source.service; HDMI-RX in the base DTB + udev symlink; Wi-Fi in
+# the base DTB + its kernel driver; and modem support in ModemManager plus the
+# applicable modem quirk. Do not treat these names as applied.
 armbian_overlays:
   - rk3588-hdmi-input
   - rk3588-wifi-rtl8821cs

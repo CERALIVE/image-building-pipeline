@@ -20,7 +20,12 @@ dtb_name: rk3588-rock-5b-plus.dtb
 uboot_packages:
   - linux-u-boot-rock-5b-plus-vendor
 
-# DT_OVERLAYS from configs/devices/rock5bplus.conf.
+# INERT/UNCONSUMED legacy metadata carried from configs/devices/rock5bplus.conf:
+# no build script reads this field and no overlay-application step exists in the
+# boot path. Real behavior lives elsewhere: USB-C source role in
+# ceralive-typec-source.service; HDMI-RX in the base DTB + udev symlink; Wi-Fi in
+# the base DTB + rtw89 (todo 28 / PR #88); and M.2 modem support in ModemManager
+# plus the m2_modem_sim_workaround quirk. Do not treat these names as applied.
 armbian_overlays:
   - rk3588-hdmi-input
   - rk3588-wifi-rtl8852be
