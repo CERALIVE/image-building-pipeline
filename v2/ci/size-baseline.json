@@ -1,5 +1,9 @@
 {
-  "board": "x86-minipc",
-  "bytes": 1234567890,
-  "recorded_at": "2026-06-12"
+  "board": "rock-5b-plus",
+  "bytes": 1569914880,
+  "recorded_at": "2026-08-02",
+  "artifact": "v2/images/rock-5b-plus/20260802T132149Z.rootfs.tar",
+  "artifact_sha256": "0e48a77448f997e8f5ea3b155c14c394c2a9825748a2454b74b20bd28b3cc5fb",
+  "commit": "01975f6",
+  "note": "First REAL baseline. Replaces the x86-minipc / 1234567890 placeholder stub, which was never a measurement. Produced by a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS) and measured with v2/lib/measure-size.sh."
 }

@@ -1,0 +1,9 @@
+{
+  "board": "orange-pi-5-plus",
+  "bytes": 1576458240,
+  "recorded_at": "2026-08-02",
+  "artifact": "v2/images/orange-pi-5-plus/20260802T133827Z.rootfs.tar",
+  "artifact_sha256": "cc0dd1e2aa6c07470e1c6f8c4ff4823d6d42a8e75f1a1086a1cf36204f3eef80",
+  "commit": "01975f6",
+  "note": "Per-board baseline. v2/ci/size-baseline.json (no board suffix) is the rock-5b-plus baseline the v2-ci size job reads today; this file is the OPi 5+ counterpart, ready for a per-board wiring. The producing build FAILED the [6b/9] boot-artifact gate on a dtb_name mismatch (manifest says rk3588s-orangepi-5-plus.dtb, vendor BSP 26.5.1 ships rk3588-orangepi-5-plus.dtb) — a boot-path naming defect, not a content defect, so the byte count is still a valid content measurement."
+}
