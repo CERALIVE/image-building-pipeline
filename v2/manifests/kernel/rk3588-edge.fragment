@@ -43,6 +43,12 @@ CONFIG_ROCKCHIP_SARADC=y
 # The Synopsys HDMI-RX controller behind /dev/hdmi-in. Patches 0002/0003/0005 of
 # the CeraLive series (EDID visibility, replug overflow, audio capture) all land
 # in this driver; without the symbol the series builds nothing.
+#
+# Audio capture needs 0005 AND 0006 together: 0005 registers the ASoC codec,
+# 0006 is the device tree that binds it to i2s7_8ch as an ALSA card. The ASoC
+# symbols that card needs — SND_SIMPLE_CARD, SND_SOC_ROCKCHIP_I2S_TDM,
+# SND_SOC_HDMI_CODEC — are already =m via the in-tree defconfig, verified against
+# the board's own /proc/config.gz, so this fragment does not restate them.
 CONFIG_MEDIA_SUPPORT=y
 CONFIG_MEDIA_PLATFORM_SUPPORT=y
 CONFIG_V4L_PLATFORM_DRIVERS=y

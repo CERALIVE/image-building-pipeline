@@ -392,7 +392,7 @@ reserved no-overlay name and the schema refuses a variant literally called that.
 
 rk3588 ships one variant, `edge`, which builds the kernel + in-tree DTBs **from
 pinned source** (`v7.1.5` / `155b42bec9cb`) with the CeraLive RK3588 patch series
-(`CERALIVE/rk3588-kernel-patches@4809354656a1` — the merge of that repo's PR #1,
+(`CERALIVE/rk3588-kernel-patches@9c1cb385098d` — the merge of that repo's PR #2,
 an **immutable commit**, never a branch) applied by `git am`, then `make
 bindeb-pkg` inside a **digest-pinned** builder container with a persistent ccache.
 Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md).
@@ -652,6 +652,41 @@ leaks into the CeraUI source list as the row's `displayName`, because CeraUI's
 `onboard-display-names.ts` friendly-name map only knows the vendor spellings.
 That half is a CeraUI change, not a pipeline one. Guards: `manifest.bats`
 "hdmi-in: …" × 3 (driver-keyed rule, present in the LIVE writer, both names).
+
+**HDMI-RX audio needs BOTH patch `0005` and patch `0006` — `0005` alone gives a
+bound codec and NO ALSA card** [EXISTS]
+
+Same shape as the `DMABUF_HEAPS` finding below: the driver half was fine and
+proved nothing. Upstream `0005` makes `snps_hdmirx` register an ASoC
+`hdmi-audio-codec` child, and on an edge board that device is **bound** with no
+cable attached — `/sys/devices/platform/fdee0000.hdmi_receiver/hdmi-audio-codec.7.auto`.
+It is also the entire story: `0005` touches no device tree, and ALSA does not
+create a card for a bare codec, so `/proc/asound/cards` showed only `usbaudio`,
+`rk3588es8316`, `hdmi0` and `hdmi1` — and the last two are the HDMI
+**transmitters**, not the receiver. HDMI-IN embedded audio was uncapturable, with
+nothing anywhere reporting an error.
+
+Three DT facts were missing, now supplied by `0006`
+(`CERALIVE/rk3588-kernel-patches@9c1cb385098d`, PR #2): `#sound-dai-cells` on
+`hdmi_receiver`, an `hdmirx-sound` `simple-audio-card`, and `&hdmirx_sound` +
+`&i2s7_8ch` (the capture-only I2S the receiver feeds) enabled per board. The
+pipeline authors **no** device tree, so the fix was correctly a patches-repo
+change plus this pin bump — but the *diagnosis* belongs here, because the symptom
+is a pipeline-shaped one ("the image has no HDMI-IN audio").
+
+Two traps worth naming:
+
+- `hdmi0`/`hdmi1` in `/proc/asound/cards` look like they might be the HDMI input
+  miscounted. They are not. They are `simple-card` nodes for the SoC's two HDMI
+  **outputs**, and a correct fix adds a **fifth** card, it does not repair those.
+- The obvious suspect — `armbian/linux-rockchip` `78c67d98f221`, which zeroes
+  `capture.channels_min/max` for every `hdmi-audio-codec` with no TX/RX
+  discrimination — is **vendor-BSP only**. Mainline `v7.1.5` already carries the
+  upstream `no_i2s_capture` / `no_spdif_capture` pdata flags and only clears a
+  direction when the registering driver asks. A parked branch in this repo
+  (`fix/hdmi-rx-audio-capture-kernel-patch`, tip `5a51e2f`, deleted after todo 8)
+  backported that vendor fix; it is correct for `6.1.115-vendor-rk35xx` and
+  **does not apply to the edge kernel at all**. Do not resurrect it for `edge`.
 
 **MPP hardware encode needs `CONFIG_DMABUF_HEAPS` — without it `/dev/dma_heap`
 does not exist and `mpph264enc` produces ZERO bytes** [EXISTS]

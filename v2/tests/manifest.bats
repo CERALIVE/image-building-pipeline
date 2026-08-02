@@ -4457,13 +4457,14 @@ YAML
   [[ "$line" != *"armbian-firmware"* ]]
 }
 
-@test "kernel_source: the pinned patches commit is the merged CERALIVE PR #1 SHA" {
-  # A regression pin on the actual value. Todo 25 merged
-  # CERALIVE/rk3588-kernel-patches#1 at this exact commit; a silent bump here
-  # would change what the kernel contains with no other signal.
+@test "kernel_source: the pinned patches commit is the merged CERALIVE PR #2 SHA" {
+  # A regression pin on the actual value. CERALIVE/rk3588-kernel-patches#2 added
+  # patch 0006 (the HDMI-RX audio sound-card device tree) on top of PR #1's
+  # series; a silent bump here would change what the kernel contains with no
+  # other signal.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='4809354656a16443c0b69f1e72b77f3fea1cbdae'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='9c1cb385098d842a1d5755e3717b308a25bb8305'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='155b42bec9cbb6b8cdc47dd9bd09503a81fbe493'"* ]]
@@ -4635,7 +4636,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.5"* ]]
   [[ "$output" == *"git rev-parse HEAD == 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493"* ]]
-  [[ "$output" == *"4809354656a16443c0b69f1e72b77f3fea1cbdae"* ]]
+  [[ "$output" == *"9c1cb385098d842a1d5755e3717b308a25bb8305"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
