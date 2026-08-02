@@ -1,25 +1,35 @@
-# CeraLive Image Board Manifest — Orange Pi 5+ (RK3588S)
+# CeraLive Image Board Manifest — Orange Pi 5+ (RK3588)
 #
 # Validates against ../schema/board.schema.json (draft 2020-12).
 # Inherits arch, branch, kernel/uboot/dtb/firmware packages, rauc adapter,
 # partition_template and serial_console from families/rk3588.yaml.
 #
-# Sources: configs/devices/orangepi5plus.conf (DTB_FILE, DT_OVERLAYS,
-# INSTALLATION_NOTES), userpatches/config-orangepi5plus.conf (BOARD=).
+# Sources: configs/devices/orangepi5plus.conf (DT_OVERLAYS, INSTALLATION_NOTES),
+# userpatches/config-orangepi5plus.conf (BOARD=). dtb_name is NOT taken from
+# there — it carries its own provenance below.
 
 family: rk3588
 
 # Armbian BOARD= from userpatches/config-orangepi5plus.conf.
 board_id: orangepi5-plus
 
-# DTB_FILE from configs/devices/orangepi5plus.conf. SoC is the RK3588S variant —
-# note the rk3588s- DTB prefix (vs rk3588- on the Rock 5B+).
-dtb_name: rk3588s-orangepi-5-plus.dtb
+# The board name says "5 Plus (RK3588S)" and the DTB name does NOT follow it: the
+# 5 Plus carries the FULL RK3588, so every tree spells its DTB rk3588- with no 's'.
+# The rk3588s- prefix belongs to the genuinely-RK3588S parts, and the same vendor
+# package ships those separately (rk3588s-orangepi-5.dtb, -5b, -5-pro). Verified
+# against the pinned Armbian vendor package linux-dtb-vendor-rk35xx 26.5.1
+# (sha256 90eb41c1…a8be): it contains rk3588-orangepi-5-plus.dtb and NO
+# rk3588s-orangepi-5-plus.dtb. Armbian's own board config agrees —
+# config/boards/orangepi5-plus.conf sets BOOT_SOC="rk3588" and
+# BOOT_FDT_FILE="rockchip/rk3588-orangepi-5-plus.dtb".
+dtb_name: rk3588-orangepi-5-plus.dtb
 
-# Mainline spells this board's DTB WITHOUT the 's': the rockchip Makefile at the
-# exact tag the edge variant compiles (v7.1.5) builds rk3588-orangepi-5-plus.dtb,
-# while the vendor BSP above ships rk3588s-. The Rock 5B+ needs no entry — it is
-# rk3588-rock-5b-plus.dtb in both trees.
+# Kept as an EXPLICIT per-variant assertion even though it now restates the
+# default: the edge variant compiles its DTBs from mainline v7.1.5, an entirely
+# different tree from the vendor BSP above, and the two agreeing today is a fact
+# to pin rather than an invariant to assume. If either tree ever renames it, only
+# one of these two lines moves. The Rock 5B+ needs no entry for the same reason it
+# never did — rk3588-rock-5b-plus.dtb in both trees.
 variant_overrides:
   edge:
     dtb_name: rk3588-orangepi-5-plus.dtb
@@ -63,7 +73,7 @@ interfaces:
 app_backend: sysext
 
 description: >-
-  Orange Pi 5+ (RK3588S). Best choice for HDMI-input setups (BELABOX-recommended);
+  Orange Pi 5+ (RK3588). Best choice for HDMI-input setups (BELABOX-recommended);
   HDMI capture less affected by EMI. Full 4K@60fps capture/encode. M.2 2280 M-key
   slot for NVMe. Onboard RTL8821CS Wi-Fi, 3.7 A USB power budget — powers most USB
   modems without a hub. eMMC/NVMe/microSD targets (16 GB+).

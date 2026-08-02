@@ -223,7 +223,7 @@ validate_built_kernel_deb() {
   if ! deb_lists_path "${deb}" "${dtb_path}"; then
     log_error "built kernel .deb does not contain the board DTB at ${dtb_path}"
     log_error "the platform-layer install mapping (kernel_source.dtb_deb_dir + the board's dtb_name) is what makes a source-built kernel satisfy the same DTB expectation an Armbian linux-dtb-* package would; it cannot be satisfied by a DTB that is not there."
-    log_error "mainline and the Armbian vendor BSP do NOT always agree on RK3588 DTB filenames (e.g. vendor 'rk3588s-orangepi-5-plus.dtb' vs mainline 'rk3588-orangepi-5-plus.dtb'). DTBs actually present in the built package:"
+    log_error "mainline and the Armbian vendor BSP do NOT always agree on RK3588 DTB filenames; a board whose name differs per tree declares the mainline spelling in variant_overrides.edge.dtb_name. DTBs actually present in the built package:"
     deb_data_list "${deb}" | grep -F "$(dirname "${dtb_path}")/" >&2 || true
     die "built kernel .deb is missing ${dtb_path}"
   fi

@@ -405,11 +405,13 @@ Two consequences worth stating plainly:
   demonstrably resolves and compiles, but it is still reviewed intent rather than a
   validated result: no symbol in it has been proven necessary *or* sufficient **on
   hardware**.
-* **Mainline and the Armbian vendor BSP disagree on some RK3588 DTB filenames —
-  RESOLVED.** The Orange Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor
-  BSP and `rk3588-orangepi-5-plus.dtb` in mainline. Since the board wins the merge
+* **A board's DTB filename comes from whichever kernel tree built it, and the two
+  trees need not agree — RESOLVED.** Since the board wins the merge
   last, the **board** now declares the per-variant name via `variant_overrides:`
-  (`kernel-build-from-source.md` §8). A real
+  (`kernel-build-from-source.md` §8). For the Orange Pi 5+ both trees in fact
+  spell it `rk3588-orangepi-5-plus.dtb`; the manifest's original `rk3588s-`
+  spelling was a bad inference from the board's marketing name, corrected on the
+  production path, and the override is retained as an explicit assertion. A real
   `v2/build orange-pi-5-plus --variant edge` then compiles the kernel and passes
   all four `validate_built_kernel_deb` axes, installing
   `rockchip/rk3588-orangepi-5-plus.dtb` from the built `.deb`. `rock-5b-plus`

@@ -4175,22 +4175,43 @@ YAML
 }
 
 @test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
-  # The defect this mechanism exists for. Mainline's rockchip Makefile at the
-  # pinned v7.1.5 builds rk3588-orangepi-5-plus.dtb (no 's'), so the vendor
-  # spelling made validate_built_kernel_deb reject a correctly-built kernel.
+  # Mainline's rockchip Makefile at the pinned v7.1.5 builds
+  # rk3588-orangepi-5-plus.dtb, and the override states that explicitly rather
+  # than inheriting it, so a future mainline rename moves exactly one line.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DTB_NAME='rk3588-orangepi-5-plus.dtb'"* ]]
   [[ "$output" != *"rk3588s-orangepi-5-plus.dtb"* ]]
 }
 
-@test "variant_overrides: OPi 5+ WITHOUT the variant keeps the VENDOR DTB name" {
-  # The override is opt-in in exactly the same sense the variant is. The vendor
-  # BSP genuinely ships the rk3588s- spelling; taking it away would break the
-  # production path this change must not move.
+@test "variant_overrides: OPi 5+ PRODUCTION path resolves the VENDOR DTB name" {
+  # REGRESSION GUARD. The board shipped dtb_name 'rk3588s-orangepi-5-plus.dtb'
+  # from its first commit, inferred from the "5 Plus (RK3588S)" marketing name.
+  # It is wrong: the 5 Plus carries the full RK3588. The pinned vendor package
+  # linux-dtb-vendor-rk35xx 26.5.1 ships rk3588-orangepi-5-plus.dtb and has NO
+  # rk3588s-orangepi-5-plus.dtb — verified by extraction, and true of every
+  # version in the Armbian archive back to 24.5.1, so this was never drift.
+  # A real production build failed the [6b/9] boot-artifact gate on it; the
+  # DRY_RUN-only PR gate never runs that stage, which is what this test replaces.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"DTB_NAME='rk3588s-orangepi-5-plus.dtb'"* ]]
+  [[ "$output" == *"DTB_NAME='rk3588-orangepi-5-plus.dtb'"* ]]
+  [[ "$output" != *"rk3588s-orangepi-5-plus.dtb"* ]]
+}
+
+@test "variant_overrides: no shipped board claims an rk3588s- DTB (the '5 Plus' trap)" {
+  # The bug class, not just the one instance: an RK3588S-looking board name does
+  # not make the DTB rk3588s-. Both shipped RK3588 boards are full-RK3588 parts,
+  # so the prefix must appear on neither, on either kernel path.
+  local board path
+  for board in rock-5b-plus orange-pi-5-plus; do
+    ! grep -Eq '^\s*dtb_name:\s*rk3588s-' "$V2/manifests/boards/${board}.yaml"
+    for path in "" "--variant edge"; do
+      run bash -c "'$RESOLVE_SH' '$board' $path 2>/dev/null"
+      [ "$status" -eq 0 ]
+      [[ "$output" != *"DTB_NAME='rk3588s-"* ]]
+    done
+  done
 }
 
 @test "variant_overrides: Rock 5B+ is UNAFFECTED with and without the variant" {
@@ -4821,12 +4842,12 @@ YAML
     BUILDROOT='$root'
     KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
     KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
-    DTB_NAME='rk3588s-orangepi-5-plus.dtb'
+    DTB_NAME='rk3588s-orangepi-5b.dtb'
     $fn
     install_kernel_source_dtbs
   "
   [ "$status" -ne 0 ]
-  [[ "$output" == *"rk3588s-orangepi-5-plus.dtb"* ]]
+  [[ "$output" == *"rk3588s-orangepi-5b.dtb"* ]]
 }
 
 @test "build: --variant is refused for a multi-board selection" {
