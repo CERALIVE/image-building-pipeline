@@ -67,10 +67,9 @@ Board variant overrides (task 27)
 ---------------------------------
 Because the board always wins last, a family variant can never restate a
 board-specific fact — by design. But a fact can legitimately DIFFER per variant
-while still being the board's own: the Orange Pi 5+ DTB is
-``rk3588s-orangepi-5-plus.dtb`` in the Armbian vendor BSP and
-``rk3588-orangepi-5-plus.dtb`` in mainline, which is what the ``edge`` variant
-builds from source.
+while still being the board's own: a board's DTB filename comes from whichever
+kernel tree built it, and the Armbian vendor BSP and the mainline source the
+``edge`` variant compiles are two different trees that need not agree on it.
 
 So the BOARD (never the family) MAY declare a ``variant_overrides:`` map keyed
 by variant name. It is applied AFTER the board merge, so board-wins-last is

@@ -466,9 +466,10 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
   variant could not fix the one thing that legitimately differs per variant AND per
-  board: the DTB filename. `orange-pi-5-plus.yaml` therefore carries
-  `variant_overrides.edge.dtb_name: rk3588-orangepi-5-plus.dtb` (mainline spells it
-  without the `s`; the vendor BSP ships `rk3588s-`). The override is applied AFTER
+  board: the DTB filename, which comes from whichever kernel tree built it.
+  `orange-pi-5-plus.yaml` therefore carries
+  `variant_overrides.edge.dtb_name: rk3588-orangepi-5-plus.dtb`. The override is
+  applied AFTER
   the board merge — board-wins-last is strengthened, not weakened — is stripped
   before flattening whether or not a variant is selected (so the vendor path stays
   byte-identical, pinned by the same `vendor-baseline/*.params` fixtures), permits
@@ -477,6 +478,28 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   With this, a real `v2/build orange-pi-5-plus --variant edge` compiles and passes
   all four validation axes. Full write-up:
   [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §8.
+- **CORRECTION (2026-08-02) — the vendor BSP does NOT ship an `rk3588s-` spelling
+  for the Orange Pi 5+, and never did.** The KEY FACT above previously read
+  "mainline spells it without the `s`; the vendor BSP ships `rk3588s-`". That
+  premise was wrong, and it was the board's DEFAULT `dtb_name` — the production,
+  vendor-kernel path — that carried the bad value from the manifest's very first
+  commit. `linux-dtb-vendor-rk35xx` 26.5.1 contains `rk3588-orangepi-5-plus.dtb`
+  and NO `rk3588s-orangepi-5-plus.dtb`, and that holds for every version in the
+  Armbian archive back to 24.5.1, so this is a manifest error rather than archive
+  drift (and the BSP drift-guard, whose subject is the KERNEL package's
+  version+hash, was correctly silent — nothing upstream changed). Armbian's own
+  `config/boards/orangepi5-plus.conf` agrees: `BOOT_SOC="rk3588"`,
+  `BOOT_FDT_FILE="rockchip/rk3588-orangepi-5-plus.dtb"`. The `rk3588s-` prefix
+  belongs to the genuinely-RK3588S parts (OPi 5 / 5B / 5 Pro), which the same
+  package ships separately — the "5 Plus (RK3588S)" board name is the trap. The
+  production `dtb_name` is now `rk3588-orangepi-5-plus.dtb`; a real
+  `./v2/build orange-pi-5-plus` clears `[6b/9]` and emits `.raw` + `.raucb`. PR
+  #84's `variant_overrides.edge.dtb_name` was and is correct — it is retained as
+  an explicit per-tree assertion rather than deleted as redundant. **This class of
+  defect is invisible to the PR gate**, which is `DRY_RUN=1` plan-only and never
+  runs `[6b/9]`, so the static guards in `manifest.bats §26` pin both boards'
+  resolved `DTB_NAME` on both kernel paths and forbid an `rk3588s-` prefix on
+  either shipped RK3588 board.
 - **The first-party staging key is `CERALIVE_BOARD` (the board manifest stem),
   NOT `BOARD_ID` — and the source-mount fallback is the ONLY live delivery
   route.** mkosi's CLI `--extra-tree …:/opt/ceralive-staging` does not reach the

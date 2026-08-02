@@ -374,14 +374,22 @@ cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.ra
    `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`; the
    later successful enumeration is recorded in
    `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §8a.
-4. **Mainline and the Armbian vendor BSP do not always agree on RK3588 DTB
-   filenames — RESOLVED, via a board-declared per-variant override.** The Orange
-   Pi 5+ DTB is `rk3588s-orangepi-5-plus.dtb` in the vendor BSP and
-   `rk3588-orangepi-5-plus.dtb` (no `s`) in mainline, which is what this variant
-   compiles. Because the board always wins the merge, a family variant cannot
-   restate that name — so the **board** declares it, scoped to the variant. See
-   §9 below for the mechanism; the short version is
+4. **A board's DTB filename comes from whichever kernel tree built it — RESOLVED,
+   via a board-declared per-variant override.** The vendor BSP and the mainline
+   source this variant compiles are two different trees and need not agree on a
+   given board's DTB name. Because the board always wins the merge, a family
+   variant cannot restate that name — so the **board** declares it, scoped to the
+   variant. See §9 below for the mechanism; the short version is
    `variant_overrides.edge.dtb_name` in `orange-pi-5-plus.yaml`.
+
+   **Both trees happen to agree on the Orange Pi 5+ today** — it is
+   `rk3588-orangepi-5-plus.dtb` in the vendor BSP and in mainline. The board was
+   originally declared as `rk3588s-orangepi-5-plus.dtb`, inferred from the
+   "5 Plus (RK3588S)" marketing name; the 5 Plus in fact carries the full RK3588,
+   and no version of `linux-dtb-vendor-rk35xx` in the Armbian archive has ever
+   shipped an `rk3588s-` spelling for it. That was corrected on the production
+   path; the override is retained as an explicit assertion so a future divergence
+   in either tree moves exactly one line.
 
    `rock-5b-plus` never needed it: it declares `rk3588-rock-5b-plus.dtb`,
    mainline v7.1.5 builds exactly that name, and the built `.deb` ships it (228
@@ -418,11 +426,11 @@ So the **board** (never the family) may declare a `variant_overrides:` map:
 
 ```yaml
 # v2/manifests/boards/orange-pi-5-plus.yaml
-dtb_name: rk3588s-orangepi-5-plus.dtb        # vendor BSP, the default path
+dtb_name: rk3588-orangepi-5-plus.dtb         # vendor BSP, the default path
 
 variant_overrides:
   edge:
-    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.5, no 's'
+    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.5
 ```
 
 The rules, all enforced:
