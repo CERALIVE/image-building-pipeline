@@ -59,6 +59,36 @@ CONFIG_SND_USB_AUDIO=m
 # module check.
 CONFIG_VIDEO_ROCKCHIP_RKVENC=m
 
+# --- Encode: DMA-BUF userland heaps (the MPP buffer allocator) --------------
+# Rockchip MPP userspace (librockchip_mpp, which backs mpph264enc/mpph265enc)
+# allocates every frame and stream buffer through its `dma_heap` allocator,
+# which opens /dev/dma_heap/<name>. Those chardevs exist ONLY when
+# CONFIG_DMABUF_HEAPS is enabled — and DMABUF_HEAPS is a `menuconfig bool`
+# that defaults OFF, so arm64 defconfig never turns it on. It was missing here,
+# and the whole /dev/dma_heap directory was therefore absent on the 7.1.5 board:
+# a real `gst-launch-1.0 videotestsrc ! mpph264enc ! filesink` produced ZERO
+# bytes and died at buffer negotiation, even though the rkvenc driver itself was
+# built, bound to fdbd0000/fdbe0000.rkvenc-core, and exposing /dev/mpp_service.
+# This is the same `menuconfig`-parent class as the CONFIG_RTW89 drop.
+#
+# The image's own shipped udev policy already assumes these exist — the
+# rockchip-multimedia-config package's 99-rk-device-permissions.rules matches
+# KERNEL=="system-dma32" / "system-uncached" / "system-uncached-dma32" and runs
+# `chmod a+rw /dev/dma_heap` — so the absence was a contradiction in the image,
+# not a design choice.
+#
+# HONEST LIMIT: those three heap names are ROCKCHIP-BSP heaps. Mainline
+# registers only `system` (DMABUF_HEAPS_SYSTEM) and `linux,cma`
+# (DMABUF_HEAPS_CMA). Enabling these symbols is NECESSARY — with no
+# /dev/dma_heap at all, MPP cannot even reach a fallback — but whether MPP's
+# allocator settles on the mainline `system` heap is a hardware-gated question
+# that needs a rebuild and a board boot to answer. See
+# .omo/evidence/device-platform-wave4/task-hardware-audit-followup.md §5.
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+# depends on DMABUF_HEAPS && DMA_CMA; DMA_CMA is already =y from defconfig.
+CONFIG_DMABUF_HEAPS_CMA=y
+
 # --- Networking: bonded-link uplinks ---------------------------------------
 # Onboard NICs: RTL8125B (Rock 5B+, r8169) and the OPi 5+ dual r8169.
 CONFIG_R8169=m
