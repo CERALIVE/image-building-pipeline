@@ -5019,3 +5019,73 @@ run_source_mount_stager() {
   done
   [ "$found" -eq 1 ]
 }
+
+# ===========================================================================
+# 28. Mesa software-GL prune — the RemoveFiles contract.
+#
+#     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches LLVM's
+#     JIT and Z3 for Mesa's software rasterizer: 157.6 MB the device can never
+#     execute, because the Mali vendor stubs win the EGL/GLES/GBM lookup and the
+#     only other Mesa entry point needs an X server this image does not ship.
+#     `apt remove` cascades into the plugin set cerastream needs, so the lever is
+#     file-level, like the locale strip.
+#
+#     These are STATIC guards because the prune only happens on a wet build and
+#     the PR gate is DRY_RUN=1 plan-only — the same blind spot that shipped the
+#     OPi DTB name and the four kernel-from-source defects. The dri glob leg is
+#     the one that matters most: libva resolves VA-API drivers as
+#     `<name>_drv_video.so` out of the SAME directory, so widening the glob to
+#     `dri/*` would silently delete a hardware video driver on a future x86 build.
+# ===========================================================================
+
+removefiles_runtime() {
+  sed -n 's/^RemoveFiles=//p' "$V2/mkosi/mkosi.images/runtime/mkosi.conf"
+}
+
+@test "mesa-prune: the runtime layer strips libLLVM-15, libz3 and the Mesa DRI megadriver" {
+  local entries
+  entries="$(removefiles_runtime)"
+  [ -n "$entries" ]
+
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libLLVM-15.so*'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libz3.so*'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/dri/*_dri.so'* ]]
+}
+
+@test "mesa-prune: the DRI glob never widens to dri/* (it would eat VA-API drivers)" {
+  local entries
+  entries="$(removefiles_runtime)"
+  # libva looks up <name>_drv_video.so in /usr/lib/<triplet>/dri; only the
+  # `*_dri.so` suffix may be removed. Reject a bare directory glob outright.
+  [[ "$entries" != *'/dri/*,'* ]]
+  [[ "$entries" != *'/dri/*' ]]
+  [[ "$entries" != *'/dri,'* ]]
+}
+
+@test "mesa-prune: the locale strip it shares the key with is not clobbered" {
+  # RemoveFiles is ONE comma-separated key; appending to it is exactly how the
+  # Task-19 locale entries could be lost without any test noticing.
+  local entries
+  entries="$(removefiles_runtime)"
+  [[ "$entries" == *'/usr/share/locale/*'* ]]
+  [[ "$entries" == *'/usr/lib/locale/locale-archive'* ]]
+
+  # And every OTHER layer keeps its own locale strip untouched by this change.
+  local layer
+  for layer in base platform app; do
+    grep -Fq 'RemoveFiles=/usr/share/locale/*,/usr/lib/locale/locale-archive' \
+      "$V2/mkosi/mkosi.images/$layer/mkosi.conf"
+  done
+}
+
+@test "mesa-prune: the pruned packages are NOT removed from shared.list or apt" {
+  # The whole point of the file-level lever is that the metapackage STAYS
+  # installed — `apt remove libgl1-mesa-dri` cascades into gstreamer1.0-plugins-bad,
+  # which cerastream needs. Nothing may start uninstalling it.
+  local shared="$V2/manifests/packages/shared.list"
+  grep -Eq '^gstreamer1\.0-plugins-bad$' "$shared"
+
+  local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
+  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+}

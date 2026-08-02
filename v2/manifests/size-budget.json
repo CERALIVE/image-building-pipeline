@@ -11,21 +11,22 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP (production, no --variant, no CERALIVE_BENCH_LABELS) build. Both RK3588 boards are currently OVER the 1.5 GB ceiling; the ceiling is deliberately left at 1500000000 rather than raised to match, because raising it would launder the overage instead of recording it. Closing the gap is the package/file-level slimming work, tracked separately. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP (production, no --variant, no CERALIVE_BENCH_LABELS) build. Both RK3588 boards are now UNDER the 1.5 GB ceiling after the Mesa software-GL file prune (size-notes.md §9): libLLVM-15.so*, libz3.so* and the 43-hardlink Mesa DRI megadriver, 157,637,616 B of files the device can never execute because the Mali vendor stubs win the EGL/GLES/GBM loader path. rootfs_bytes_max was NOT moved in either direction — it was not raised while the image was over, and it is not lowered now that it is under. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
     "rootfs_bytes_max": 1500000000,
-    "measured": 1576458240,
+    "measured": 1418792960,
     "measured_at": "2026-08-02",
-    "measured_commit": "01975f6",
-    "measured_artifact": "v2/images/orange-pi-5-plus/20260802T133827Z.rootfs.tar",
-    "note": "The build that produced this artifact FAILED the [6b/9] boot-artifact gate: at that commit the board manifest declared dtb_name rk3588s-orangepi-5-plus.dtb, but vendor BSP linux-dtb-vendor-rk35xx 26.5.1 ships rk3588-orangepi-5-plus.dtb (no 's' — the 5 Plus is full RK3588, not RK3588S). That was a boot-path naming defect, not a content defect: the DTB IS in the rootfs, so the measured byte count remains a valid measurement of the image content. The manifest has since been corrected and the board builds end to end; the measurement is retained unchanged because the fix moves no bytes."
+    "measured_commit": "67d053a",
+    "measured_artifact": "v2/images/orange-pi-5-plus/20260802T161110Z.rootfs.tar",
+    "note": "Post-prune measurement; the pre-prune value at commit 01975f6 was 1576458240 (artifact 20260802T133827Z.rootfs.tar), i.e. 76,458,240 B OVER the ceiling. Build+measure only — this board has no hardware validation behind it (physical swap still pending)."
   },
   "rock-5b-plus": {
     "rootfs_bytes_max": 1500000000,
-    "measured": 1569914880,
+    "measured": 1412259840,
     "measured_at": "2026-08-02",
-    "measured_commit": "01975f6",
-    "measured_artifact": "v2/images/rock-5b-plus/20260802T132149Z.rootfs.tar"
+    "measured_commit": "67d053a",
+    "measured_artifact": "v2/images/rock-5b-plus/20260802T155321Z.rootfs.tar",
+    "note": "Post-prune measurement; the pre-prune value at commit 01975f6 was 1569914880 (artifact 20260802T132149Z.rootfs.tar), i.e. 69,914,880 B OVER the ceiling."
   },
   "x86-minipc": { "rootfs_bytes_max": 1500000000, "measured": null }
 }

@@ -377,3 +377,105 @@ The complete write-up — build environment, both artifact SHA-256s, the
 explaining why a dev board's rootfs reads 3.77 GB when the image is 1.57 GB —
 is in `.omo/evidence/device-platform-wave4/task-31-measurement.md` (workspace
 evidence tree, outside this repo).
+
+---
+
+## 9. Mesa software-GL prune — the 157.6 MB the device cannot execute (2026-08-02)
+
+The single largest item in §8's composition is not multimedia. It is LLVM.
+
+### The dependency chain, and why `apt remove` is not the lever
+
+`gstreamer1.0-plugins-bad` hard-`Depends:` its way to `libgl1-mesa-dri`, whose
+Gallium software rasterizer links LLVM's JIT — and LLVM in turn links the Z3 SMT
+solver. Three packages, 157.6 MB of shipped bytes:
+
+| file | package | bytes |
+|---|---|---:|
+| `/usr/lib/aarch64-linux-gnu/libLLVM-15.so.1` | `libllvm15` | 111,631,520 |
+| `/usr/lib/aarch64-linux-gnu/libz3.so.4` | `libz3-4` | 22,090,928 |
+| `/usr/lib/aarch64-linux-gnu/dri/*_dri.so` | `libgl1-mesa-dri` | 23,915,168 |
+| **total** | | **157,637,616** |
+
+`apt remove libgl1-mesa-dri` cascades into the plugin set cerastream needs, so
+the lever is file-level `RemoveFiles=` in the runtime layer — the same technique
+as the §2 locale strip. The packages stay installed and their dpkg metadata stays
+intact; only the payload files go.
+
+**The DRI directory holds ONE file, hardlinked 43 ways.** `armada-drm_dri.so`,
+`swrast_dri.so`, `rockchip_dri.so`, `panfrost_dri.so` and 39 more are all the
+same inode — Mesa's megadriver under 43 names. Removing "just the software
+rasterizer" recovers **zero** bytes; the 23.9 MB is only released when every link
+goes. That is why the glob covers the whole `*_dri.so` set rather than one name.
+
+### Why these files are unreachable on this device
+
+Four independent checks, all run against a real built rootfs and a real board:
+
+1. **Mali wins the loader path.** `libmali-valhall-g610-g24p0-wayland-gbm` ships
+   `/etc/ld.so.conf.d/00-aarch64-mali.conf` (`/usr/lib/aarch64-linux-gnu/mali`).
+   The `00-` prefix sorts before `aarch64-linux-gnu.conf`, so `ldconfig` records
+   the Mali entry FIRST and `ld.so` takes it. On the board:
+
+   ```
+   libEGL.so.1    => /usr/lib/aarch64-linux-gnu/mali/libEGL.so.1
+   libEGL.so.1    => /lib/aarch64-linux-gnu/libEGL.so.1
+   libGLESv2.so.2 => /usr/lib/aarch64-linux-gnu/mali/libGLESv2.so.2
+   libgbm.so.1    => /usr/lib/aarch64-linux-gnu/mali/libgbm.so.1
+   ```
+
+   Mesa's `libEGL_mesa` and `libgbm` — the two libraries that `dlopen` a DRI
+   driver — are therefore never reached.
+2. **The one un-overridden entry point needs an X server.** `libGL.so.1` has no
+   Mali counterpart and still resolves to Mesa, but its DRI load happens inside
+   `libGLX_mesa` at GLX context creation. The image ships no X server and no
+   Xwayland, so there is no display for it to open. The kiosk stack
+   (`kiosk-display.md`) is documented-but-unimplemented and, when it lands, is
+   specced on cage/Wayland over **Mali** EGL/GBM — not Mesa.
+3. **The DT_NEEDED graph is closed.** Scanning every ELF in the rootfs:
+   `libLLVM-15.so.1` is needed by the 43 DRI links and by **nothing else**;
+   `libz3.so.4` is needed by `libLLVM-15.so.1` and by **nothing else**. Deleting
+   the DRI drivers orphans both libraries completely.
+4. **Nothing GL-shaped runs.** cerastream's element vocabulary contains no
+   `glimagesink` / `glupload` / `kmssink` / `waylandsink`; its WebRTC preview tier
+   is `webrtcbin` + `nicesrc`, neither of which links `libgstgl`. The only shipped
+   plugin that does is `libgstnvcodec.so` (NVIDIA, inert on RK3588), and
+   `libgstopengl.so` is not installed at all.
+
+### The glob is `dri/*_dri.so`, never `dri/*`
+
+`libva` resolves VA-API drivers as `<name>_drv_video.so` out of that same
+directory. A bare `dri/*` would delete a future hardware video driver — exactly
+the `intel-media-va-driver-non-free` the x86 family notes in
+`x86_64.delta.list`. The `aarch64-linux-gnu` path prefix additionally makes the
+whole entry a no-op on non-arm64 families. Both properties are pinned by
+`manifest.bats` §28.
+
+### Measured result
+
+| board | before | after | delta |
+|---|---:|---:|---:|
+| `rock-5b-plus` | 1,569,914,880 | **1,412,259,840** | −157,655,040 |
+| `orange-pi-5-plus` | 1,576,458,240 | **1,418,792,960** | −157,665,280 |
+
+Both boards now pass the 1.5 GB gate — `rock-5b-plus` with 87,740,160 B of
+headroom, `orange-pi-5-plus` with 81,207,040 B. The two deltas differ by 10,240 B,
+which is one tar block; each is within ~28 KB of the 157,637,616 B file-content
+total, the rest being the 46 tar headers that went with the files. An independent
+third measurement agrees: on a real board, `df` on the rootfs dropped
+157,634,560 B when exactly these paths were deleted.
+
+**The ceiling is still 1,500,000,000.** It was not moved in either direction —
+not raised while the image was over, and not lowered now that it is under.
+
+### Board proof
+
+Behaviour was verified on a Rock 5B+ booted from the bench microSD by removing
+exactly these paths from the live rootfs, rebooting, and re-running the same
+measurements. Every observable is unchanged: the board boots, CeraUI answers on
+both :80 and :443, a stream starts and stops cleanly with the same bonded-link
+count and the same uplink byte volume, the GStreamer registry still reports
+264 plugins / 1548 features, and no process on the board maps `libLLVM`,
+`libz3`, a DRI driver, or any GL/EGL/GBM library — during a **live stream**, not
+just at idle. Full transcript:
+`.omo/evidence/device-platform-wave4/task-31-slim-attempt1.md`.
