@@ -83,6 +83,45 @@ device, so `ceralive-boot-state` writes it defensively:
 7. A slot that keeps failing never marks itself good: its counter bleeds 3→2→1→0 and
    the **next** boot's selection skips it and chooses the other slot — **automatic rollback**.
 
+### The decrement in step 4 uses NO arithmetic command
+
+This board's U-Boot is built `# CONFIG_CMD_SETEXPR is not set` (read it back from
+`u-boot-config-target-1` inside the staged `linux-u-boot-*` package). The selector
+originally decremented with `setexpr`, so on real hardware every boot printed
+`Unknown command 'setexpr' - try 'help'` and **left the counter untouched** — the
+rollback in step 7 could never trigger, and a slot that could not boot retried
+forever. Confirmed over UART: 8 consecutive crash-reboots all logged `A=3 B=3`.
+
+The budget is the closed set `0..3` (step 3 already rejects anything else), so the
+decrement is a lookup, written across two variables — the branches read `cera_cur`
+and assign `cera_next` — because a cascade over a single variable would fall through
+`3→2→1→0` in one pass. `itest` exists on this build and `test` string comparison is
+enough; do not reintroduce an arithmetic dependency.
+
+### A slot that cannot be loaded ABANDONS the device
+
+Steps 5's kernel and DTB loads are checked. An unguarded `ext4load` failure left the
+load address holding whatever was already in DRAM, and `booti` jumped into it:
+`"Synchronous Abort" handler` → reset → the same slot again. Combined with the dead
+counter above, that is an infinite crash loop that never reaches the other slot or
+the other boot medium. On a failed kernel/DTB load the script now `exit`s, which
+returns control to the bootflow scan so U-Boot moves on to the next boot device
+(e.g. eMMC) instead of wedging.
+
+The **initrd load stays optional**: the Armbian vendor package ships only the
+versioned `/boot/initrd.img-<release>`, so the bare-name load legitimately fails on
+the known-good path and the board boots `root=PARTLABEL=` directly.
+
+### What must be in the slot's `/boot`
+
+`/boot/Image` and `/boot/dtb/<soc-vendor>/${fdtfile}` must both resolve — as a
+symlink or as a real file/dir; the selector does not care which, and the two kernel
+paths legitimately differ. `v2/lib/verify-boot-artifacts.sh` asserts exactly this
+against the emitted rootfs tar and the orchestrator runs it on every arm64 build
+(`[6b/9]`), because the two paths populate `/boot` by different mechanisms and one
+being complete says nothing about the other. See
+[`v2/docs/kernel-build-from-source.md`](../../docs/kernel-build-from-source.md).
+
 ## RAUC custom backend interface (`ceralive-rauc-boot-adapter`)
 
 RAUC (`bootloader=custom`, `[handlers] bootloader-custom-backend=`) invokes the script
@@ -136,12 +175,15 @@ last-resort boots A.
 | `install-boot.sh` | build-time installer (`rootfs` + `boot-partition` targets) |
 | `test-fallback.sh` | offline proof of decrement→rollback + backend + render (no HW/root) |
 | `tests/boot-script-sanitize.test.sh` | faithful execution of the actual selector source with malformed imported state |
+| `lib/verify-boot-artifacts.sh` | asserts a built rootfs carries what the selector loads, on either kernel path |
+| `tests/boot-artifacts.bats` | `/boot` contract for BOTH kernel paths + the producing mechanisms |
 
 ## Test
 
 ```
 v2/mkosi/platform/boot/test-fallback.sh
 v2/tests/boot-script-sanitize.test.sh
+bats v2/tests/boot-artifacts.bats
 ```
 
 Proves: fresh A/B state; 3 failed boots of A → counter 3→2→1→0 → **fallback to B**;
@@ -155,6 +197,17 @@ truncated / empty / missing / bad-CRC files yield the safe defaults + a clean
 rewrite (never a crash), while a well-formed no-CRC file is trusted. It also rejects
 duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,
 and proves userspace state replacement stays on one filesystem.
+
+`boot-script-sanitize.test.sh` additionally stubs `setexpr` as **absent** — the way
+this board's U-Boot really answers — so a decrement that depends on it fails the
+suite instead of the fleet. It walks the whole budget (`3→2→1→0`), proves an
+exhausted A rolls over to B and that B's budget then moves too, and proves an
+unloadable kernel or DTB abandons the device rather than reaching `booti`.
+
+`boot-artifacts.bats` proves the `/boot` contract holds for the Armbian vendor
+layout (`Image`/`dtb` symlinks, versioned initrd) AND the source-built layout (real
+`dtb/` dir), rejects the exact pre-fix state that shipped, and drives each artifact
+out of both layouts one at a time so no single case carries the suite.
 
 ## Related
 

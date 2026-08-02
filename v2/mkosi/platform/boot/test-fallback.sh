@@ -194,8 +194,16 @@ if [[ ! -f "${guardroot}/etc/rauc/system.conf" ]]; then ok "no system.conf writt
 
 echo
 echo "### 7. boot.scr.cmd (U-Boot path) matches the tested engine — static check"
-assert_contains "decrements A counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setexpr BOOT_A_LEFT \${BOOT_A_LEFT} - 1"
-assert_contains "decrements B counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setexpr BOOT_B_LEFT \${BOOT_B_LEFT} - 1"
+assert_contains "decrements A counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setenv BOOT_A_LEFT \"\${cera_next}\""
+assert_contains "decrements B counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setenv BOOT_B_LEFT \"\${cera_next}\""
+# The board's U-Boot has no CONFIG_CMD_SETEXPR, so an arithmetic decrement silently
+# no-ops and a dead slot retries forever. Executable proof: tests/boot-script-sanitize.test.sh.
+if grep -vE '^[[:space:]]*#' "${BOOT_DIR}/boot.scr.cmd" | grep -q 'setexpr'; then
+  bad "boot.scr.cmd must not depend on setexpr (absent from this board's U-Boot)"
+else
+  ok "boot.scr.cmd depends on no arithmetic command"
+fi
+assert_contains "aborts rather than booti-ing an unloaded kernel" "${BOOT_DIR}/boot.scr.cmd" "FATAL /boot/Image missing"
 assert_contains "persists state via fatwrite"      "${BOOT_DIR}/boot.scr.cmd" "fatwrite \${devtype} \${devnum}:1 \${loadaddr} boot_state.txt"
 assert_contains "console from manifest env"        "${BOOT_DIR}/boot.scr.cmd" "console=\${console}"
 assert_contains "fdtfile from manifest env (under rockchip/ vendor subdir)" "${BOOT_DIR}/boot.scr.cmd" "/boot/dtb/rockchip/\${fdtfile}"

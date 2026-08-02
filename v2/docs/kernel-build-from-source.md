@@ -132,6 +132,74 @@ there. When enabled it is fail-loud: a missing source directory, a half-specifie
 mapping, or a missing board DTB aborts the build rather than producing an image
 that boots to a device-tree-less kernel.
 
+Note the layouts differ and that is FINE: the vendor package ships
+`/boot/dtb-<release>/<vendor>/` with a `/boot/dtb` symlink onto it, while this copy
+makes `/boot/dtb` a real directory. The selector resolves
+`/boot/dtb/<vendor>/${fdtfile}` either way — U-Boot's ext4 driver follows an
+intermediate symlink — so no versioned directory is synthesised here. Proven on
+hardware: the failing boot that motivated §4b still read the DTB correctly
+(`106449 bytes read`) off exactly this layout.
+
+---
+
+## 4b. The rest of `/boot` — `Image` and the initrd
+
+The DTB mapping above was not enough, and the gap put a board into an infinite
+crash-reboot loop. **Read this before adding any other kernel packaging.**
+
+The selector's first load is `/boot/Image`. On the vendor path that file exists
+because Armbian's `linux-image-vendor-rk35xx` **postinst** creates it:
+
+```sh
+ln -sfv vmlinuz-6.1.115-vendor-rk35xx /boot/Image
+touch /boot/.next
+linux-update-symlinks install "6.1.115-vendor-rk35xx" "boot/vmlinuz-…"
+```
+
+and, because that package `Depends: initramfs-tools`, the `run-parts
+/etc/kernel/postinst.d` at the top of the same postinst also emits
+`/boot/initrd.img-<release>`. Neither is done by the kernel; both are done by
+**Armbian's maintainer script and its dependency closure**.
+
+`make bindeb-pkg` generates a postinst that does only the `run-parts`, creates no
+`Image`, and declares no initramfs dependency. Replacing the vendor kernel package
+with the built one therefore also removes `initramfs-tools` from the closure, so
+`/etc/kernel/postinst.d` is EMPTY and the `run-parts` is a no-op. The resulting
+`/boot` had `vmlinuz-<release>` and nothing else:
+
+```
+Failed to load '/boot/Image'
+106449 bytes read in 21 ms          <- the DTB, correctly resolved
+Failed to load '/boot/initrd.img'
+Starting kernel ...
+"Synchronous Abort" handler, esr 0x02000000
+```
+
+`install_kernel_source_boot_artifacts` in
+`mkosi.images/platform/mkosi.postinst` replicates the vendor behaviour for this
+path, and the platform layer installs `initramfs-tools` in its **own transaction
+before** the kernel package so the hook is configured when the kernel postinst runs.
+Ordering is the mechanism — in one apt invocation it is incidental, and the vendor
+path only gets it for free because of that hard dependency.
+
+Deliberately NOT replicated: the root-level `/vmlinuz` and `/initrd.img` symlinks
+`linux-update-symlinks` (from `linux-base`) maintains. Nothing on the boot path
+reads them, and `linux-base` is not in this closure.
+
+The step is gated on `KERNEL_SOURCE_KERNEL_RELEASE`, which resolves empty unless a
+`kernel_source:` variant was selected, so the vendor path is untouched. That
+variable rides the `env_names` ↔ `PassEnvironment=` lockstep like every other
+subimage input.
+
+**The build now gates on the result.** `v2/lib/verify-boot-artifacts.sh` asserts the
+emitted rootfs tar carries a resolvable `Image`, board DTB and versioned initrd, and
+the orchestrator runs it at `[6b/9]` on every arm64 build. It is layout-agnostic on
+purpose — symlink or real file, versioned dtb dir or not — because it checks what
+U-Boot can load, not which packaging mechanism produced it. This exists because
+`DRY_RUN` CI never executes the layers that populate `/boot`, and
+`tests/preflash-verify.sh` (which does check) asserts the production PARTLABEL set
+first, so a bench image fails there and never reaches its artifact checks.
+
 ---
 
 ## 5. Integration semantics
@@ -309,6 +377,8 @@ no second place to keep in sync.
 | `v2/ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |
 | `v2/lib/orchestrate.sh` | stage wiring, suppression export, uniqueness check |
 | `v2/lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
-| `v2/mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping |
+| `v2/mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping + the `/boot` artifact mapping (§4b) |
+| `v2/lib/verify-boot-artifacts.sh` | the `[6b/9]` build gate on `/boot` completeness |
+| `v2/tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `v2/tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
 | `v2/tests/manifests/fixtures/vendor-baseline/` | the pre-change golden resolver output |

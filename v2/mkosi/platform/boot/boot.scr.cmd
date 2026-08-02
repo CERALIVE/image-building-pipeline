@@ -96,9 +96,24 @@ if test "${cera_slot}" = "B"; then setenv cera_part 3; setenv cera_root rootfs_b
 
 # --- decrement the chosen slot's counter and persist (skip when exhausted: nothing
 #     left to spend). This is the bootcount step that drives automatic rollback.
+#
+# NO ARITHMETIC COMMAND IS AVAILABLE HERE. This board's U-Boot ships
+# `# CONFIG_CMD_SETEXPR is not set`, so the `setexpr` this step used to call
+# answered `Unknown command 'setexpr'` and left the counter untouched — a slot
+# that could not boot burned zero attempts and retried forever instead of rolling
+# back. The budget is the closed set 0..3 (validated above), so the decrement is a
+# table. Each branch reads cera_cur (never reassigned) and writes cera_next, so
+# exactly one can fire — a cascade over one variable would collapse 3 straight to 0.
 if test "${cera_exhausted}" = "0"; then
-  if test "${cera_slot}" = "A"; then setexpr BOOT_A_LEFT ${BOOT_A_LEFT} - 1; fi
-  if test "${cera_slot}" = "B"; then setexpr BOOT_B_LEFT ${BOOT_B_LEFT} - 1; fi
+  setenv cera_cur 0
+  if test "${cera_slot}" = "A"; then setenv cera_cur "${BOOT_A_LEFT}"; fi
+  if test "${cera_slot}" = "B"; then setenv cera_cur "${BOOT_B_LEFT}"; fi
+  setenv cera_next 0
+  if test "${cera_cur}" = "3"; then setenv cera_next 2; fi
+  if test "${cera_cur}" = "2"; then setenv cera_next 1; fi
+  if test "${cera_cur}" = "1"; then setenv cera_next 0; fi
+  if test "${cera_slot}" = "A"; then setenv BOOT_A_LEFT "${cera_next}"; fi
+  if test "${cera_slot}" = "B"; then setenv BOOT_B_LEFT "${cera_next}"; fi
   env export -t ${loadaddr} BOOT_ORDER BOOT_A_LEFT BOOT_B_LEFT
   if fatwrite ${devtype} ${devnum}:1 ${loadaddr} boot_state.txt ${filesize}; then
     echo "CeraLive: ${cera_slot} attempts now A=${BOOT_A_LEFT} B=${BOOT_B_LEFT} (persisted)"
@@ -126,8 +141,30 @@ fi
 # (linux-dtb-vendor-rk35xx) installs to /boot/dtb/rockchip/, NOT /boot/dtb/ directly.
 # Dropping the rockchip/ component makes ext4load miss the DTB; booti then runs with
 # no FDT and the kernel never comes up (U-Boot falls through to the PXE loop).
-ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image
-ext4load ${devtype} ${devnum}:${cera_part} ${fdt_addr_r} /boot/dtb/rockchip/${fdtfile}
+#
+# ABORT, never `booti` on a failed load. An unguarded ext4load failure left
+# ${kernel_addr_r} holding whatever was in DRAM and `booti` jumped into it —
+# "Synchronous Abort" -> reset -> the same slot again, forever. Returning instead
+# hands control back to the bootflow scan, which moves on to the next boot device
+# (eMMC), so a slot missing its kernel degrades to the other media instead of
+# wedging the board.
+if ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image; then
+  echo "CeraLive: loaded /boot/Image from slot ${cera_slot}"
+else
+  echo "CeraLive: FATAL /boot/Image missing in slot ${cera_slot} — abandoning this device"
+  exit
+fi
+if ext4load ${devtype} ${devnum}:${cera_part} ${fdt_addr_r} /boot/dtb/rockchip/${fdtfile}; then
+  echo "CeraLive: loaded ${fdtfile}"
+else
+  echo "CeraLive: FATAL /boot/dtb/rockchip/${fdtfile} missing in slot ${cera_slot} — abandoning this device"
+  exit
+fi
+
+# The initrd is OPTIONAL by design and MUST stay optional: the Armbian vendor
+# package ships only the versioned /boot/initrd.img-<ver>, so this bare-name load
+# legitimately fails on the known-good path and the board boots root=PARTLABEL
+# directly. Only the kernel and the DTB above are fatal.
 if ext4load ${devtype} ${devnum}:${cera_part} ${ramdisk_addr_r} /boot/initrd.img; then
   booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
 else

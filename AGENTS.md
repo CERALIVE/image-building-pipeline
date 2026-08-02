@@ -61,6 +61,8 @@ image-building-pipeline/
 | Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats`, `v2/tests/rk3588-ab-contract.bats`, and `v2/tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
+| **`/boot` completeness (both kernel paths)** | `v2/lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `v2/tests/boot-artifacts.bats` — see the KEY FACT below |
+| **A/B selector arithmetic + load guards** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` KEY FACT below |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`v2/docs/X86-MINIPC-BRINGUP.md`](v2/docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
@@ -427,6 +429,29 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `/boot/dtb/rockchip/${fdtfile}`. `platform/mkosi.postinst::install_kernel_source_dtbs`
   copies source → target. Both paths are EMPTY on the vendor path, so the step is a
   strict no-op there; fail-loud when enabled.
+- **`/boot` artifact mapping — the DTB copy was NOT enough, and the gap crash-looped
+  a board.** The selector's FIRST load is `/boot/Image`, and on the vendor path that
+  file exists only because Armbian's `linux-image-vendor-rk35xx` **postinst** runs
+  `ln -sfv vmlinuz-<REL> /boot/Image`; the same postinst's
+  `run-parts /etc/kernel/postinst.d` emits `initrd.img-<REL>` only because that
+  package `Depends: initramfs-tools`. `make bindeb-pkg` does NEITHER — its generated
+  postinst creates no `Image` and declares no initramfs dependency, so replacing the
+  vendor kernel package also drops `initramfs-tools` from the closure, leaving
+  `/etc/kernel/postinst.d` EMPTY and the `run-parts` a no-op. A real `edge` bench
+  image therefore shipped a `/boot` holding `vmlinuz-7.1.5-ceralive-rk3588` and
+  nothing else; on hardware: `Failed to load '/boot/Image'` → `booti` into unloaded
+  DRAM → `"Synchronous Abort"` → reset, forever.
+  `platform/mkosi.postinst::install_kernel_source_boot_artifacts` replicates the
+  vendor behaviour, and the platform layer installs `initramfs-tools` in its **own
+  transaction before** the kernel package — ordering is the mechanism, because the
+  hook must be configured when the kernel postinst run-parts. Gated on
+  `KERNEL_SOURCE_KERNEL_RELEASE` (empty on the vendor path ⇒ strict no-op), which
+  rides the `env_names` ↔ `PassEnvironment=` lockstep. The **DTB layout is
+  deliberately NOT made vendor-identical**: vendor ships `/boot/dtb-<REL>/` plus a
+  `/boot/dtb` symlink, this path makes `/boot/dtb` a real dir, and U-Boot resolves
+  `/boot/dtb/rockchip/${fdtfile}` either way — proven by the very boot that failed,
+  which still read the DTB (`106449 bytes read`) off exactly this layout.
+  Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4b.
 - **`[PARTIAL]` — BOTH RK3588 boards COMPILE end to end; nothing has BOOTED.** A
   real (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
   `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
@@ -502,6 +527,66 @@ Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from
   `v2/docs/kernel-currency-watch.md`.
 
 Guards: `manifest.bats` §26 (41 tests).
+
+**The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
+load — both were real infinite-crash-loop defects** [EXISTS]
+
+Two independent bugs in `v2/mkosi/platform/boot/boot.scr.cmd`, both found on a live
+Rock 5B+ over UART, both of which made a failing slot retry forever instead of
+rolling back.
+
+- **`setexpr` does not exist on this board.** The staged U-Boot is built
+  `# CONFIG_CMD_SETEXPR is not set` — read it back from `u-boot-config-target-1`
+  inside `linux-u-boot-vendor-rock-5b-plus`. The bootcount decrement called
+  `setexpr`, so every boot printed `Unknown command 'setexpr' - try 'help'` and left
+  the counter UNCHANGED; 8 consecutive crash-reboots all logged `A=3 B=3`, so the
+  documented `3→2→1→0` rollback could never fire. The decrement is now a lookup over
+  the closed `0..3` budget the sanitizer already enforces, written across two
+  variables (branches read `cera_cur`, assign `cera_next`) because a cascade over one
+  variable falls through `3→2→1→0` in a single pass. `itest` and `test` are
+  available; **do not reintroduce an arithmetic dependency.**
+- **A failed `ext4load` used to reach `booti` anyway.** The kernel/DTB loads were
+  unguarded, so on failure the load address still held whatever was in DRAM and
+  `booti` jumped into it — `"Synchronous Abort" handler, esr 0x02000000` → reset →
+  same slot. The script now `exit`s on a failed kernel or DTB load, which returns to
+  the bootflow scan so U-Boot moves to the next boot device (eMMC) instead of
+  wedging. The **initrd load stays optional** — the vendor package ships only
+  `/boot/initrd.img-<REL>`, so the bare-name load legitimately fails on the
+  known-good path.
+
+Guard: `v2/tests/boot-script-sanitize.test.sh` stubs `setexpr` as **absent**, the way
+the board really answers, and executes the real script through U-Boot command stubs —
+so a decrement that depends on it fails the suite, not the fleet. It walks the whole
+budget, proves rollover to B and B's own decrement, and proves an unloadable
+kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the token
+`setexpr` outside comments.
+
+**`/boot` completeness is a BUILD gate (`[6b/9]`), because the two kernel paths fill
+it by different mechanisms** [EXISTS]
+
+`v2/lib/verify-boot-artifacts.sh` asserts the emitted rootfs tar carries a resolvable
+`/boot/Image`, `/boot/dtb/<soc-vendor>/${fdtfile}` and a versioned
+`/boot/initrd.img-<REL>`; `orchestrate.sh` runs it on every arm64 boot-BSP build
+right after the tar is emitted, and fails the build if anything is missing.
+
+- **Layout-agnostic ON PURPOSE.** `Image` may be a symlink or a real file; `dtb` may
+  be a symlink to `dtb-<REL>/` or a real directory. It checks what U-Boot can load,
+  not which packaging mechanism produced it — the vendor and source-built layouts
+  legitimately differ (see the kernel-from-source `/boot` artifact mapping above).
+- **Why it is not left to `tests/preflash-verify.sh`,** whose `check_rootfs_populated`
+  already checks these artifacts: that tool runs on a **production-labelled `.raw` an
+  operator is about to flash**, and it asserts the frozen PARTLABEL set FIRST — so a
+  `CERALIVE_BENCH_LABELS=1` bench image fails there and never reaches its artifact
+  checks. Combined with a `DRY_RUN`-only PR gate that never executes the layers which
+  populate `/boot`, that is precisely how an `edge` image with no `/boot/Image`
+  reached a board. Do not delete this as duplicated coverage.
+- **Root-free and fast:** the subject is the normalized rootfs tar, so symlinks and
+  sizes are readable with no loop device, no `debugfs` and no privileges — ~1 s on a
+  1.5 GB tar, and it runs identically in CI.
+
+Guards: `v2/tests/boot-artifacts.bats` (17 tests — both layouts pass, the exact
+pre-fix layout is rejected, each artifact is driven out of BOTH layouts one at a
+time, plus the producing mechanisms and the orchestrator wiring).
 
 **Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
 

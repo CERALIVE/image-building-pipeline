@@ -48,6 +48,7 @@ DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
+VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
@@ -503,6 +504,19 @@ main() {
   emit_artifact "${rootfs_tree}" "${artifact}"
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
+  # Everything the U-Boot selector loads must actually be in that rootfs, on EVERY
+  # kernel path. This is checked here, against the emitted tar, because it is the
+  # earliest point where the real answer exists: DRY_RUN CI never runs the layers
+  # that populate /boot, and preflash-verify.sh (which does check) only runs on a
+  # production-labelled .raw an operator is about to flash — a bench image fails its
+  # PARTLABEL assertions first and never reaches the artifact checks. That gap is
+  # exactly how an `edge` image with no /boot/Image reached a board.
+  if [[ "${ARCH}" == "arm64" && "${INSTALL_BOOT_BSP}" == "1" ]]; then
+    log_info "[6b/9] verifying boot artifacts in ${artifact}"
+    "${VERIFY_BOOT_ARTIFACTS_SH}" "${artifact}" --dtb-name "${DTB_NAME}" \
+      || die "boot artifacts INCOMPLETE for board '${board}' — this image would not boot"
+  fi
+
   # -------------------------------------------------------------------------
   # 8. Parity verification vs the v2 package manifests. The app layer now
   #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
@@ -665,6 +679,7 @@ run_mkosi_build() {
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
+    KERNEL_SOURCE_KERNEL_RELEASE
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
     SHARED_PACKAGES SINGLE_SLOT_FALLBACK
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
@@ -690,6 +705,10 @@ run_mkosi_build() {
   export KERNEL_VARIANT="${KERNEL_VARIANT:-}"
   export KERNEL_SOURCE_DTB_DEB_DIR="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
   export KERNEL_SOURCE_DTB_BOOT_DIR="${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
+  # Also the platform layer's /boot artifact gate: an Armbian linux-image-*
+  # postinst creates /boot/Image and pulls initramfs-tools in; `make bindeb-pkg`
+  # does neither, so the release is what tells the platform layer to do it itself.
+  export KERNEL_SOURCE_KERNEL_RELEASE="${KERNEL_SOURCE_KERNEL_RELEASE:-}"
   export HW_ACCEL_GSTREAMER_PLUGINS="${HW_ACCEL_GSTREAMER_PLUGINS:-}"
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"

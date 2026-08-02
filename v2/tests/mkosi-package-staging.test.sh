@@ -113,12 +113,19 @@ mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
 	printf 'FAIL platform BSP installer is chrooted outside mkosi wrapper PATH\n' >&2
 	exit 1
 }
-[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 2 ]] || {
-	printf 'FAIL platform BSP installs do not both use mkosi-install\n' >&2
+# Three install sites: the HW-accel GStreamer set, initramfs-tools, and the boot
+# BSP. initramfs-tools is deliberately its OWN transaction and not one more name on
+# the boot-BSP line — a kernel .deb emits its initramfs by run-parts-ing
+# /etc/kernel/postinst.d, so on the source-built path the hook has to be configured
+# before the kernel is unpacked (see docs/kernel-build-from-source.md §4b).
+[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 3 ]] || {
+	printf 'FAIL platform BSP installs do not all use mkosi-install\n' >&2
 	exit 1
 }
-if grep -Eq '^[[:space:]]*apt-get install ' "${PLATFORM_POSTINST}"; then
-	printf 'FAIL platform BSP install bypasses mkosi local repository via raw apt-get\n' >&2
+# The exact count above catches an added/removed site; this catches a site that
+# installs by some other means entirely, which a count alone cannot see.
+if grep -Eq '^[[:space:]]*(apt-get|apt|aptitude) install |^[[:space:]]*dpkg -i ' "${PLATFORM_POSTINST}"; then
+	printf 'FAIL platform BSP install bypasses mkosi local repository\n' >&2
 	exit 1
 fi
 
