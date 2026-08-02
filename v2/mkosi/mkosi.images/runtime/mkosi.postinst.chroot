@@ -223,11 +223,21 @@ KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"
 KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0664"
 KERNEL=="spidev[0-9]*", GROUP="spi", MODE="0664"
 
-# NOTE: the generic `video4linux`/`video[0-9]*` rules above already grant the
-# `video` group to ALL V4L2 capture nodes (including an SoC HDMI-rx capture node),
-# so no board-specific capture rule is needed here. A driver-name-matched quirk
-# (if a board ever requires one) is applied by the platform-specific chroot
-# customization module (task 20), NOT this arch-neutral runtime layer.
+# Stable, collision-proof name for the SoC HDMI-IN capture node. Matched on the
+# parent platform DRIVER, never on the /dev/videoN index, so it survives a USB
+# capture card grabbing video0 and renumbering the HDMI-RX to a higher index.
+# /dev/hdmirx is cerastream's canonical default HDMI device string.
+#
+# BOTH driver spellings are matched because the two kernel tracks name the same
+# IP block differently: the Rockchip vendor BSP ships an out-of-tree driver named
+# `rk_hdmirx`, while mainline (the `edge` variant) ships the upstream Synopsys
+# DesignWare HDMI-RX driver, whose platform driver name is `snps_hdmirx`
+# (module synopsys_hdmirx; DT compatible snps,dw-hdmi-rx +
+# rockchip,rk3588-hdmirx-ctrler). Confirmed live on a Rock 5B+ running 7.1.5:
+# /sys/devices/platform/fdee0000.hdmi_receiver/driver -> snps_hdmirx, so an
+# `rk_hdmirx`-only rule creates no symlink at all. The generic
+# `video4linux`/`video[0-9]*` group rules above already cover PERMISSIONS on both.
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", DRIVERS=="rk_hdmirx|snps_hdmirx", SYMLINK+="hdmi-in", SYMLINK+="hdmirx"
 EOF
 }
 
