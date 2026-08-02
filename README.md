@@ -227,7 +227,15 @@ v2/lib/build-feature-sysext.sh \
 Every build runs `v2/lib/measure-size.sh`. If the rootfs content's apparent size exceeds
 **1.5 GB** the build fails and no `.raucb` is produced. See
 [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
-strip, `WithDocs=no`, firmware audit).
+strip, `WithDocs=no`, firmware audit, Mesa software-GL prune).
+
+Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
+`orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
+software-GL prune — `libgl1-mesa-dri` drags LLVM's JIT and the Z3 solver into the
+image for a software rasterizer that can never run, because the Mali vendor driver
+wins the EGL/GLES/GBM lookup. The metapackage stays installed (removing it would
+cascade into the GStreamer plugins cerastream needs); only its 157.6 MB of
+unreachable payload is stripped.
 
 ## BSP Package Pins, Provenance + Advisory Drift-Guard
 
