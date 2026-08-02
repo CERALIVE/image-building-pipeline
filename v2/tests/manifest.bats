@@ -3914,13 +3914,13 @@ run_modem_generator() {
   # The SoC HDMI-IN capture node must get a persistent, collision-proof name that
   # does not depend on its /dev/videoN enumeration index (a USB capture card can
   # grab video0 and renumber the HDMI-RX). The symlink rule keys on the stable
-  # rk_hdmirx DRIVER name, never on KERNEL=="video0" or the node's name attr.
+  # HDMI-RX DRIVER name, never on KERNEL=="video0" or the node's name attr.
   local udev="$V2/mkosi/customize/udev.sh"
   local rule
   rule="$(grep -F 'SYMLINK+="hdmi-in"' "$udev")"
   [ -n "$rule" ]
   # keyed on the driver name, not a fixed node index
-  [[ "$rule" == *'DRIVERS=="rk_hdmirx"'* ]]
+  [[ "$rule" == *'DRIVERS=="rk_hdmirx|snps_hdmirx"'* ]]
   [[ "$rule" != *'ATTRS{name}=="rk_hdmirx"'* ]]
   [[ "$rule" != *'KERNEL=="video0"'* ]]
   # also provides /dev/hdmirx (cerastream's canonical default HDMI device string)
@@ -3928,6 +3928,49 @@ run_modem_generator() {
   # additive: the original name-matched HDMI permission rules are still present
   grep -Fq 'ATTRS{name}=="rk_hdmirx", GROUP="video", MODE="0664"' "$udev"
   grep -Fq 'ATTRS{name}=="*hdmi*", GROUP="video", MODE="0664"' "$udev"
+}
+
+@test "hdmi-in: the symlink rule is in the LIVE writer (runtime postinst), not only the customize module" {
+  # `./v2/build` runs mkosi.images/runtime/mkosi.postinst.chroot; run-all.sh's
+  # RUNTIME modules (customize/udev.sh) are NOT executed by it — only
+  # `run-all.sh base`. So a rule that exists ONLY in customize/udev.sh never
+  # ships. That is exactly what happened: a live Rock 5B+ had neither
+  # /dev/hdmi-in nor /dev/hdmirx, and its /etc/udev/rules.d/99-ceralive-hardware.rules
+  # was the postinst twin with no symlink rule at all (board-confirmed 2026-08-02).
+  local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  local rule
+  rule="$(grep -F 'SYMLINK+="hdmi-in"' "$postinst")"
+  [ -n "$rule" ]
+  [[ "$rule" == *'DRIVERS=="rk_hdmirx|snps_hdmirx"'* ]]
+  [[ "$rule" == *'SYMLINK+="hdmirx"'* ]]
+  [[ "$rule" != *'KERNEL=="video0"'* ]]
+}
+
+@test "hdmi-in: BOTH kernel tracks' driver names are matched (rk_hdmirx AND snps_hdmirx)" {
+  # The vendor BSP ships an out-of-tree driver named rk_hdmirx; mainline (the
+  # `edge` variant) ships the upstream Synopsys driver, whose platform driver
+  # name is snps_hdmirx. Board-confirmed on 7.1.5:
+  #   readlink /sys/devices/platform/fdee0000.hdmi_receiver/driver
+  #     -> /sys/bus/platform/drivers/snps_hdmirx
+  # An rk_hdmirx-only rule therefore produces NO symlink on an edge image.
+  local f
+  for f in "$V2/mkosi/customize/udev.sh" \
+           "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"; do
+    local rule
+    rule="$(grep -F 'SYMLINK+="hdmi-in"' "$f")"
+    [[ "$rule" == *rk_hdmirx* ]]
+    [[ "$rule" == *snps_hdmirx* ]]
+  done
+}
+
+@test "runtime packages: bluez is installed so the Bluetooth adapter is usable" {
+  # The kernel half already works: on a Rock 5B+ the RTL8852BE's Bluetooth radio
+  # enumerates as USB 13d3:3572, btusb+btrtl bind it, and /sys/class/bluetooth/hci0
+  # exists. Without bluez there is no bluetoothd, no bluetooth.service and no
+  # bluetoothctl, so the adapter can never be powered up or paired. libbluetooth3
+  # ships only as an unrelated transitive dependency and provides no daemon.
+  run grep -Ex 'bluez[[:space:]]*(#.*)?' "$V2/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
 }
 
 @test "modem_ports wiring: CERALIVE_MODEM_PORTS_* is forwarded env_names -> PassEnvironment lockstep" {

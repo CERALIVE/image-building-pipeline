@@ -571,6 +571,99 @@ needs no entry; a `menuconfig` parent always does. Guards:
 the REAL fragment against a reproduction of the broken 7.1.5 answer). Full
 write-up: `v2/docs/kernel-build-from-source.md` §6b.
 
+**A `.link` `Path=` captured on the vendor BSP does NOT match on mainline — the
+platform-device name moves, and the rename silently stops** [EXISTS]
+
+`install_interface_naming()` wrote `Path=` with the board manifest's ID_PATH
+verbatim. An ID_PATH for a PCIe NIC is
+`platform-<controller>-pci-<domain:bus:device.function>`, and `<controller>` is
+the **platform device** name, which Linux derives from the **first `reg` entry**
+of the DT node. The vendor BSP DTS lists the APB window first (`fe190000.pcie`);
+mainline lists the ECAM window first (`a41000000.pcie`). Same silicon, same slot,
+different name — so the manifest values, captured on a vendor board, matched
+NOTHING on the `edge` kernel. Confirmed live on a Rock 5B+ running 7.1.5: the
+`.link` files were present and correct, and yet
+
+```
+ID_PATH=platform-a41000000.pcie-pci-0004:41:00.0   # manifest says fe190000
+udevadm test-builtin net_setup_link /sys/class/net/enP4p65s0
+  -> ID_NET_LINK_FILE=/usr/lib/systemd/network/99-default.link   # ours never matched
+ip -o link show -> lo, enP4p65s0                   # never became eth0
+```
+
+Not cosmetic: SRTLA's link discovery globs `eth*`/`wlan*`, so the wired uplink
+silently dropped out of bonding on every edge image. `systemd.link(5)` `Path=`
+takes a **whitespace-separated list of globs**, so `link_path_match()` now emits
+the literal manifest value AND a controller-agnostic
+`platform-*.<devtype>-pci-<bdf>` glob. The PCI domain:bus:device.function is the
+part that is stable across kernels (it comes from `linux,pci-domain` and physical
+topology, not node naming), and two controllers cannot host the same PCI domain,
+so the glob cannot over-match. A non-PCI ID_PATH (an onboard MAC such as
+`platform-fe1c0000.ethernet`) is emitted verbatim. **Do NOT "fix" a future
+mismatch by rewriting the manifest to the mainline spelling** — that just breaks
+the vendor path instead. Guard:
+`v2/tests/interface-naming-path-match.test.sh` (static contract + the real
+function driven against BOTH kernels' real ID_PATHs, with over-match legs).
+
+**The SoC HDMI-RX driver is named `rk_hdmirx` on the vendor BSP and
+`snps_hdmirx` on mainline — and the symlink rule only ever shipped in DEAD
+CODE** [EXISTS]
+
+Two independent defects stacked on the `/dev/hdmi-in` symlink, both confirmed on
+a live Rock 5B+ running 7.1.5 (neither symlink existed on the board):
+
+1. **Wrong writer.** The rule lived only in `v2/mkosi/customize/udev.sh`, but
+   `./v2/build` runs `mkosi.images/runtime/mkosi.postinst.chroot` — `run-all.sh`'s
+   RUNTIME modules are NOT executed by it (only `run-all.sh base`, a fact this
+   repo already records in `v2/tests/apt-preferences-baked.test.sh`). The shipped
+   `99-ceralive-hardware.rules` was the postinst twin, which had no symlink rule
+   at all. The rule is now in the live writer too.
+2. **Wrong driver name.** Mainline ships the upstream Synopsys DesignWare HDMI-RX
+   driver, whose platform driver name is `snps_hdmirx` (module `synopsys_hdmirx`;
+   DT compatible `snps,dw-hdmi-rx` + `rockchip,rk3588-hdmirx-ctrler`), so an
+   `rk_hdmirx`-only `DRIVERS==` match produces nothing on an edge image. Both
+   spellings are now matched: `DRIVERS=="rk_hdmirx|snps_hdmirx"`.
+
+`snps_hdmirx` is the CORRECT upstream name, not a bug in itself — but it also
+leaks into the CeraUI source list as the row's `displayName`, because CeraUI's
+`onboard-display-names.ts` friendly-name map only knows the vendor spellings.
+That half is a CeraUI change, not a pipeline one. Guards: `manifest.bats`
+"hdmi-in: …" × 3 (driver-keyed rule, present in the LIVE writer, both names).
+
+**MPP hardware encode needs `CONFIG_DMABUF_HEAPS` — without it `/dev/dma_heap`
+does not exist and `mpph264enc` produces ZERO bytes** [EXISTS]
+
+Third instance of the `menuconfig`-parent class that `CONFIG_RTW89` opened.
+`DMABUF_HEAPS` is a `menuconfig bool` defaulting OFF, so arm64 defconfig never
+enables it and the fragment never named it. Rockchip MPP userspace
+(`librockchip_mpp`, which backs `mpph264enc`/`mpph265enc`) allocates every frame
+and stream buffer through its `dma_heap` allocator, which opens
+`/dev/dma_heap/<name>` — a directory that simply did not exist. A real functional
+test on the board (not an element-presence check) confirmed it:
+
+```
+gst-launch-1.0 videotestsrc ! mpph264enc ! filesink   ->  0 bytes, stream error
+zcat /proc/config.gz | grep DMABUF_HEAPS  ->  # CONFIG_DMABUF_HEAPS is not set
+ls /dev/dma_heap                          ->  No such file or directory
+```
+
+The kernel driver half was fine — the CeraLive patch series' `rkvenc` driver was
+built and bound to `fdbd0000/fdbe0000.rkvenc-core` + `rkvenc-ccu` + `mpp-srv`,
+with `/dev/mpp_service` present. The image also already CONTRADICTED itself:
+`rockchip-multimedia-config`'s shipped `99-rk-device-permissions.rules` matches
+`KERNEL=="system-dma32"`/`"system-uncached"`/`"system-uncached-dma32"` and runs
+`chmod a+rw /dev/dma_heap`. The fragment now declares `CONFIG_DMABUF_HEAPS=y` +
+`_SYSTEM=y` + `_CMA=y` (`DMA_CMA` was already `=y`).
+
+**HONEST LIMIT — necessary, not proven sufficient.** The three heap names MPP
+asks for are ROCKCHIP-BSP heaps; mainline registers only `system` and
+`linux,cma`. Enabling these symbols is required (with no `/dev/dma_heap` at all
+MPP cannot reach any fallback), but whether MPP settles on the mainline `system`
+heap is hardware-gated and needs a rebuild + board boot. A second, harder gap sits
+behind it: `librga` wants the vendor `/dev/rga` char device, and mainline exposes
+RGA only as a V4L2 M2M node (`rockchip-rga` → `/dev/video1`). Full analysis:
+`.omo/evidence/device-platform-wave4/task-hardware-audit-followup.md` §5.
+
 **eMMC HS400 does not negotiate under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
 
@@ -1022,6 +1115,35 @@ CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
 network.ts`), so swapping binaries is a large unrelated risk — adding the one legacy
 binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
 installed …" + "… reaches the resolved runtime package set …".
+
+**`bluez` in `shared.list` — the Bluetooth KERNEL half already worked; the whole
+gap was userspace** [EXISTS]
+
+Same class as the `net-tools` and `iw` entries below: one missing userspace
+package silently disabled a whole hardware feature, and the kernel-side
+investigation that "found nothing" was a false negative. On a Rock 5B+ the
+RTL8852BE's Bluetooth radio enumerates as **USB `13d3:3572`**, `btusb`+`btrtl`
+bind it, `/sys/class/bluetooth/hci0` exists and `rfkill` lists it — all correct,
+with `CONFIG_BT_HCIBTUSB=m` + `CONFIG_BT_RTL=m` already in the resolved config.
+What was missing is entirely userspace: with no `bluez` there is no
+`bluetoothd`, `systemctl status bluetooth.service` answers *"Unit
+bluetooth.service could not be found"*, and there is no `bluetoothctl`/`btmgmt`,
+so the adapter can never be powered up or paired. `libbluetooth3` was present
+only as an unrelated package's transitive dependency, which is why
+`dpkg -l | grep blue` looked deceptively non-empty.
+
+**This is NOT an edge-kernel regression** — the vendor-BSP images have the same
+gap, because `shared.list` never carried `bluez` on any board.
+
+**Beware the dmesg false negative that hid this.** `dmesg | grep -i bluetooth`
+returning nothing was NOT evidence of absence: `CONFIG_LOG_BUF_SHIFT=17` (128 KiB)
+and the HDMI-RX driver `dev_err`s `hdmirx_query_dv_timings: port has no link`
+every 5 s whenever no HDMI cable is attached, so after a few hours **1638 of 1638
+lines in the ring buffer were that one message** and every boot-time line had been
+evicted. Use `journalctl -k`, `/sys/class/bluetooth/`, and `lsmod` — never a bare
+`dmesg` grep — to decide whether a driver bound on this board. Guard:
+`manifest.bats` "runtime packages: bluez is installed so the Bluetooth adapter is
+usable".
 
 **`iw` in `shared.list` — `wireless-tools` is NOT the same package** [EXISTS]
 
