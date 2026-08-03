@@ -815,6 +815,59 @@ budget, proves rollover to B and B's own decrement, and proves an unloadable
 kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the token
 `setexpr` outside comments.
 
+**Before ANY bench reboot into a freshly-installed slot, the OTHER slot MUST be
+confirmed-good first — otherwise automatic rollback is already disabled** [KNOWN ISSUE /
+SAFETY RULE]
+
+This is an operational precondition, not optional hygiene. With `BOOT_ORDER=A B`, if the
+running slot has already reached `BOOT_B_LEFT=0` without being marked good, a reboot into
+newly-installed A can exhaust A too and strand the board. The selector's exact
+last-resort branch in `v2/mkosi/platform/boot/boot.scr.cmd` is:
+
+```text
+# --- all counters exhausted -> last-resort boot the head of BOOT_ORDER (no decrement)
+if test "${cera_slot}" = ""; then
+  setenv cera_exhausted 1
+  for s in ${BOOT_ORDER}; do
+    if test "${cera_slot}" = ""; then setenv cera_slot "${s}"; fi
+  done
+  echo "CeraLive: all slots exhausted — last-resort booting ${cera_slot}"
+fi
+```
+
+Thus, when **both** `BOOT_A_LEFT` and `BOOT_B_LEFT` are `0`, the loop chooses only the
+head of `BOOT_ORDER` — A for `BOOT_ORDER=A B` — and `cera_exhausted=1` skips the later
+decrement. Every subsequent reboot therefore boots A again, forever; it never falls
+through to B. The A/B safety net requires **at least one slot to have a nonzero counter
+at all times**.
+
+A slot can reach `_LEFT=0` and never regain its normal budget of 3 when its booted OS
+never completes the mark-good path. This can happen after a manual reset or
+power-cycle outside the normal flow, or during bench RAUC installs when
+`ceralive-healthcheck.service` / the mark-good mechanism never runs. That was the real
+incident: immediately before the 2026-08-03 bench reboot, the running B state was
+`BOOT_ORDER=A B`, `BOOT_A_LEFT=3`, `BOOT_B_LEFT=0`; the board did not return after A
+was selected and did not return to the network; whether A failed to boot or booted
+without network remained undetermined, and automatic rollback to B was unavailable.
+See the full failure timeline and selector analysis in
+[`.omo/evidence/device-platform-wave4/task-hdmirx-audio-fix-boot-proof.md`](../.omo/evidence/device-platform-wave4/task-hdmirx-audio-fix-boot-proof.md)
+§3–§4. Do not infer recovery or hardware state from this incident; the lesson is the
+precondition.
+
+**Mandatory rule:** before initiating **any** reboot into a freshly RAUC-installed slot
+during bench/dev work, inspect the raw boot state and confirm that the OTHER,
+currently-running slot has a nonzero counter and is confirmed-good. If it is not,
+explicitly restore it **before** rebooting. On the current image the documented form is
+`ceralive-boot-state set-state <currently-running-slot> good`, but operators MUST verify
+the exact command name and syntax against the installed board/image (do not guess; use
+the installed helper's documentation/help or equivalent). Skipping this check can
+strand the board and require physical recovery.
+
+Follow-up recommendation: add an automated guard — for example, a Bats assertion that
+locks down the documented all-counters-exhausted/head-of-`BOOT_ORDER` behavior, and/or a
+bench-reboot wrapper that checks the other slot and warns or refuses when its counter is
+zero. Do not implement that tooling as part of this documentation-only fix.
+
 **`/boot` completeness is a BUILD gate (`[6b/9]`), because the two kernel paths fill
 it by different mechanisms** [EXISTS]
 
