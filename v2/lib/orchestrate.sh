@@ -15,6 +15,11 @@
 #                → else: "cannot resolve package <name>"  ABORT, no half-image
 #   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
 #   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
+#  7b. gate      lib/verify-boot-artifacts.sh   [6b/9] → /boot carries a resolvable
+#                Image + board DTB + versioned initrd (arm64 boot-BSP builds only)
+#  7c. gate      lib/measure-size.sh            [6c/9] → rootfs CONTENT is within the
+#                per-board rootfs_bytes_max in manifests/size-budget.json. BLOCKING:
+#                an over-budget image fails HERE, so no .raw and no .raucb are cut.
 #   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
 #   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
 #                (Stage-4 flashable GPT image). FAMILY-GATED on the bootloader adapter:
@@ -49,6 +54,7 @@ MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
+MEASURE_SIZE_SH="${HERE}/measure-size.sh"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
@@ -515,6 +521,24 @@ main() {
     log_info "[6b/9] verifying boot artifacts in ${artifact}"
     "${VERIFY_BOOT_ARTIFACTS_SH}" "${artifact}" --dtb-name "${DTB_NAME}" \
       || die "boot artifacts INCOMPLETE for board '${board}' — this image would not boot"
+  fi
+
+  # The rootfs_bytes_max in manifests/size-budget.json is documented as a BLOCKING
+  # ceiling, and until this stage existed NOTHING enforced it on a real artifact: the
+  # only live caller was the v2-ci "size gate" job, which measures a synthetic 4 KB
+  # tree. That is how both RK3588 boards shipped 65-72 MB over budget while the docs
+  # claimed the gate ran after every build. It runs here, against the same emitted
+  # tar as [6b/9] and for the same reason — the earliest point where the real answer
+  # exists. Deliberately NOT arch-gated: every shipped board carries a non-null
+  # ceiling, and gating on arm64 would exempt the one board whose size has never been
+  # measured. INSTALL_BOOT_BSP=0 IS skipped, because a kernel-less parity rootfs is
+  # not the shipped image and measuring it would be a vacuous pass.
+  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+    log_info "[6c/9] enforcing the rootfs size budget for ${artifact}"
+    "${MEASURE_SIZE_SH}" "${board}" "${artifact}" \
+      || die "rootfs size budget EXCEEDED for board '${board}' (measured/budget bytes above) — slim the image (v2/docs/size-notes.md), do NOT raise rootfs_bytes_max"
+  else
+    log_warn "[6c/9] INSTALL_BOOT_BSP=0 — config+package parity build; rootfs size budget not enforced (a kernel-less rootfs is not the shipped image)"
   fi
 
   # -------------------------------------------------------------------------

@@ -1600,6 +1600,165 @@ PY
   [ "$status" -eq 0 ]
 }
 
+# --- the wiring that makes the budget a BUILD gate, not a CI curiosity --------
+#
+# For three releases the "BLOCKING size gate" never ran against a real image:
+# orchestrate.sh had no measurement stage at all, and the only live caller was
+# v2-ci.yml's size job, which measures a synthetic 4 KB tree. Both RK3588 boards
+# shipped 65-76 MB over the committed ceiling while README/AGENTS claimed the gate
+# ran after every build. These cases pin the [6c/9] stage that closed that gap:
+# where it sits, that it propagates a failure, and that it cannot run on inputs
+# that have no real rootfs behind them. Root-free and hardware-free — the shipped
+# block is extracted and executed against synthetic KB-sized trees.
+
+# Emit the real [6c/9] block out of orchestrate.sh so the cases below execute the
+# shipped code rather than a copy of it.
+extract_size_gate_block() {
+  awk '
+    /^  if \[\[/ { inblk = 1; buf = $0; next }
+    inblk {
+      buf = buf ORS $0
+      if ($0 == "  fi") { if (buf ~ /\[6c\/9\]/) print buf; inblk = 0 }
+    }
+  ' "$V2/lib/orchestrate.sh"
+}
+
+# Drive that block with stubbed logging, a caller-supplied budget file and a
+# caller-supplied MEASURE_SIZE_SH, exactly as main() would.
+run_size_gate_block() {
+  local install_boot_bsp="$1" budget_json="$2" artifact="$3" measure_sh="${4:-$MEASURE_SH}"
+  run bash -c "
+    set -euo pipefail
+    log_info()  { printf '[INFO] %s\n' \"\$*\"; }
+    log_warn()  { printf '[WARN] %s\n' \"\$*\"; }
+    die()       { printf '[ERROR] %s\n' \"\$*\" >&2; exit 1; }
+    export SIZE_BUDGET_JSON='${budget_json}'
+    MEASURE_SIZE_SH='${measure_sh}'
+    INSTALL_BOOT_BSP='${install_boot_bsp}'
+    board=rock-5b-plus
+    artifact='${artifact}'
+    $(extract_size_gate_block)
+  "
+}
+
+@test "size-gate wiring: orchestrate.sh resolves measure-size.sh and invokes it" {
+  run grep -Fx 'MEASURE_SIZE_SH="${HERE}/measure-size.sh"' "$V2/lib/orchestrate.sh"
+  [ "$status" -eq 0 ]
+  [ -x "$MEASURE_SH" ]
+
+  run grep -F '"${MEASURE_SIZE_SH}" "${board}" "${artifact}"' "$V2/lib/orchestrate.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "size-gate wiring: the gate runs after the tar is emitted and before parity/disk assembly" {
+  # Position is the whole point: measuring before the emit has nothing to measure,
+  # and measuring after Stage-4 would already have cut a .raw and a signed .raucb
+  # from an over-budget image.
+  local emit_line gate_line parity_line disk_line
+  emit_line="$(grep -n '\[6/9\] emitting normalized artifact' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  parity_line="$(grep -n '\[7/9\] verifying parity' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  disk_line="$(grep -n '\[8/9\] Stage-4 disk assembly' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  [ -n "$emit_line" ] && [ -n "$gate_line" ] && [ -n "$parity_line" ] && [ -n "$disk_line" ]
+  [ "$emit_line" -lt "$gate_line" ]
+  [ "$gate_line" -lt "$parity_line" ]
+  [ "$parity_line" -lt "$disk_line" ]
+}
+
+@test "size-gate wiring: DRY_RUN exits the orchestrator before the gate can run" {
+  # DRY_RUN ships no rootfs at all, so the gate must be unreachable there — by
+  # placement, not by a condition that a later edit could drop.
+  local dryrun_exit_line gate_line
+  dryrun_exit_line="$(grep -n '=== DRY-RUN complete' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  [ -n "$dryrun_exit_line" ] && [ -n "$gate_line" ]
+  [ "$dryrun_exit_line" -lt "$gate_line" ]
+}
+
+@test "size-gate wiring: the shipped block PASSES an under-budget artifact" {
+  local tree="$BATS_TEST_TMPDIR/wired-ok"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  run_size_gate_block 1 "$SIZE_BUDGET_JSON" "$tree"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[6c/9] enforcing the rootfs size budget"* ]]
+  [[ "$output" =~ measured=[0-9]+\ budget=1500000000\ \(enforced\) ]]
+}
+
+@test "size-gate wiring: the shipped block ABORTS the build on an over-budget artifact" {
+  # The non-vacuity leg. Without it an always-passing gate looks identical to a
+  # working one — which is exactly the state this stage was added to end.
+  local tree="$BATS_TEST_TMPDIR/wired-over"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"
+  local tight="$BATS_TEST_TMPDIR/wired-tight.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024 } }\n' > "$tight"
+  run_size_gate_block 1 "$tight" "$tree"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds budget"* ]]
+  [[ "$output" == *"rootfs size budget EXCEEDED for board 'rock-5b-plus'"* ]]
+  [[ "$output" == *"do NOT raise rootfs_bytes_max"* ]]
+}
+
+@test "size-gate wiring: an INSTALL_BOOT_BSP=0 parity build skips the gate LOUDLY" {
+  # A kernel-less parity rootfs is not the shipped image, so measuring it would be
+  # a vacuous pass. Skipping is correct; skipping silently is not.
+  local tree="$BATS_TEST_TMPDIR/wired-parity"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"
+  local tight="$BATS_TEST_TMPDIR/wired-parity-tight.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024 } }\n' > "$tight"
+
+  local sentinel="$BATS_TEST_TMPDIR/measure-ran"
+  local spy="$BATS_TEST_TMPDIR/measure-spy.sh"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$sentinel" > "$spy"
+  chmod +x "$spy"
+
+  run_size_gate_block 0 "$tight" "$tree" "$spy"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[6c/9] INSTALL_BOOT_BSP=0"* ]]
+  [ ! -e "$sentinel" ]
+}
+
+@test "size-gate wiring: the gate is NOT arch-gated (x86 carries a real ceiling too)" {
+  # Gating on arm64 would exempt the one board whose size has never been measured.
+  # Every shipped board has a non-null ceiling, so the gate applies to all of them.
+  local block
+  block="$(extract_size_gate_block)"
+  [ -n "$block" ]
+  [[ "$block" != *'${ARCH}'* ]]
+  [[ "$block" != *'arm64'* ]]
+
+  run python3 -c "
+import json, sys
+d = json.load(open('$SIZE_BUDGET_JSON', encoding='utf-8'))
+e = {k: v for k, v in d.items() if not k.startswith('_')}
+assert 'x86-minipc' in e, 'x86-minipc has no size-budget entry'
+assert isinstance(e['x86-minipc']['rootfs_bytes_max'], int), 'x86-minipc ceiling must be a real integer'
+print('X86-CEILING-OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"X86-CEILING-OK"* ]]
+}
+
+@test "size-gate: no board's ceiling may be raised above 1.5 GB" {
+  # Raising rootfs_bytes_max to match an overage launders it into a passing gate.
+  # Both RK3588 boards were 65-76 MB over and the ceiling was never moved; that is
+  # the precedent this pins. Lowering stays allowed.
+  run python3 -c "
+import json
+d = json.load(open('$SIZE_BUDGET_JSON', encoding='utf-8'))
+for name, entry in d.items():
+    if name.startswith('_'):
+        continue
+    limit = entry['rootfs_bytes_max']
+    assert limit <= 1500000000, '%s: rootfs_bytes_max %d exceeds the 1.5 GB policy ceiling' % (name, limit)
+print('CEILING-POLICY-OK')
+"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CEILING-POLICY-OK"* ]]
+}
+
 @test "app-layer: first-party packages can be copied from mkosi source staging" {
   run grep -F 'stage_first_party_from_source_mount' "$V2/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]

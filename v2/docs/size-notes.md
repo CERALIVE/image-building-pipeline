@@ -344,10 +344,13 @@ launder a real overage into a passing gate. The recorded `measured` value in
 `v2/manifests/size-budget.json` is the honest number; closing the ~70 MB gap is
 package/file-level slimming work tracked separately.
 
-Note that nothing in `orchestrate.sh` currently invokes `measure-size.sh`, so a
-real build does not yet fail on this. The only live caller is the `v2-ci.yml`
-size job, which measures a synthetic 4 KB tree. Wiring the gate into the build is
-part of the same slimming work — turning it on today fails every RK3588 build.
+At the time of this measurement nothing in `orchestrate.sh` invoked
+`measure-size.sh`, so a real build did not fail on it. The only live caller was
+the `v2-ci.yml` size job, which measures a synthetic 4 KB tree — which is exactly
+how a 65-76 MB overage shipped while the docs claimed the gate ran after every
+build. Wiring it in was held back deliberately: turning it on that day would have
+failed every RK3588 build. §9 (the Mesa prune) removed that blocker and §10
+records the wiring.
 
 ### Where the bytes are (rock-5b-plus, summed from `tar -tvf` by path prefix)
 
@@ -479,3 +482,48 @@ count and the same uplink byte volume, the GStreamer registry still reports
 `libz3`, a DRI driver, or any GL/EGL/GBM library — during a **live stream**, not
 just at idle. Full transcript:
 `.omo/evidence/device-platform-wave4/task-31-slim-attempt1.md`.
+
+---
+
+## 10. The gate is now wired into the build — `[6c/9]` (2026-08-04)
+
+§8 recorded the real defect behind the whole overage: the budget was documented as
+blocking, and **nothing enforced it on a real artifact**. `orchestrate.sh` had no
+measurement stage, and the sole live caller was `v2-ci.yml`'s "rootfs size gate
+(blocking)" job, which measures a synthetic 4 KB tree. A CI job that can only ever
+measure 4 KB cannot fail on a 1.57 GB image.
+
+§9 removed the reason to keep it unwired. With both RK3588 boards under the ceiling
+with real headroom (87.7 MB / 81.2 MB), the orchestrator now runs the gate on every
+real build:
+
+```
+[6/9]  emitting normalized artifact images/<board>/<ts>.rootfs.tar
+[6b/9] verifying boot artifacts in <artifact>          (arm64 boot-BSP builds)
+[6c/9] enforcing the rootfs size budget for <artifact> ← this
+[7/9]  verifying parity vs v2 package manifests
+[8/9]  Stage-4 disk assembly → <ts>.raw   +  Stage-4 RAUC bundle → <ts>.raucb
+```
+
+Position is the contract. Measuring before `[6/9]` has nothing to measure;
+measuring after `[8/9]` would already have cut a flashable `.raw` and a signed
+`.raucb` from an over-budget image. Sitting between emit and parity, an overage
+fails the build with **no disk artifact produced at all**.
+
+| Property | Behaviour | Why |
+|---|---|---|
+| `DRY_RUN=1` | never reached | the orchestrator `exit 0`s at `[5/9]`; a plan-only run ships no rootfs |
+| `INSTALL_BOOT_BSP=0` | skipped, with a `log_warn` naming the reason | a kernel-less parity rootfs is not the shipped image, so measuring it is a vacuous pass — but the skip is loud, never silent |
+| architecture | **not** gated | every shipped board carries a non-null `rootfs_bytes_max`, including `x86-minipc`; gating on arm64 would exempt the one board whose size has never been measured |
+| over budget | `die` → build aborts | the budget check itself is not reimplemented — `measure-size.sh` is invoked and its exit status propagates, so there is exactly one implementation of the rule |
+
+The existing `v2-ci.yml` synthetic-fixture job is **retained unchanged**. It is a
+fast, hardware-free proof that the gate's own pass and fail legs work at all
+(including a sparse 2 GiB negative leg); `[6c/9]` is the second, complementary
+check that the gate meets a real artifact. Neither replaces the other.
+
+Guards: `manifest.bats` §10 — the shipped `[6c/9]` block is extracted from
+`orchestrate.sh` and executed against synthetic KB-sized trees, proving the pass
+leg, the abort leg, the loud `INSTALL_BOOT_BSP=0` skip (with a spy proving
+`measure-size.sh` is not invoked), the stage ordering, DRY_RUN unreachability, and
+that no board's ceiling has been raised above 1,500,000,000.
