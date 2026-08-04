@@ -371,6 +371,18 @@ Selecting the variant suppresses the remote fetch of the kernel/DTB packages
 ones, and fails the build if any package name ends up with both a fetched and a
 built candidate.
 
+The kernel's config is arm64 `defconfig` plus
+[`v2/manifests/kernel/rk3588-edge.fragment`](v2/manifests/kernel/rk3588-edge.fragment),
+and `v2/lib/verify-kernel-config.sh` asserts inside the builder that every symbol
+the fragment declares survived `olddefconfig` — a leaf whose `menuconfig` parent is
+off is otherwise dropped in complete silence. Four real defects have been found
+that way, each disabling a whole capability on a booting, validating image: no
+RTL8852BE WiFi (`CONFIG_RTW89`), no `/dev/dma_heap` for MPP encode
+(`CONFIG_DMABUF_HEAPS`), a `=y` that had been resolving to `=m` for three releases
+(`CONFIG_TYPEC_FUSB302`), and no nftables at all — which failed
+`ceralive-ingest-firewall.service` every boot and left the WAN-side drop of the
+unauthenticated RTMP/SRT ingest ports unapplied (`CONFIG_NF_TABLES`).
+
 **With no variant selected the resolved production build is byte-identical to
 before this existed**, pinned by committed golden fixtures. Nothing produced by
 this stage has been compiled or booted yet, and it does not reopen the vendor-BSP
