@@ -224,10 +224,15 @@ v2/lib/build-feature-sysext.sh \
 
 ## Image Size Gate
 
-Every build runs `v2/lib/measure-size.sh`. If the rootfs content's apparent size exceeds
-**1.5 GB** the build fails and no `.raucb` is produced. See
-[`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers applied (locale
-strip, `WithDocs=no`, firmware audit, Mesa software-GL prune).
+Every real build runs `v2/lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
+between the normalized-tar emit and the parity check. If the rootfs content's
+apparent size exceeds **1.5 GB** the build fails there, so no `.raw` and no `.raucb`
+are produced. A `DRY_RUN=1` plan-only run never reaches it, and an
+`INSTALL_BOOT_BSP=0` parity build skips it with a warning (a kernel-less rootfs is
+not the shipped image). It is not architecture-gated — every shipped board carries a
+real ceiling. See [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the wiring
+(§10) and the levers applied (locale strip, `WithDocs=no`, firmware audit, Mesa
+software-GL prune).
 
 Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa

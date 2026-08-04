@@ -1210,18 +1210,50 @@ and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` �
 of scope for this fix. Flagged for the orchestrator/user to action separately before
 production OTA can work on a 1.8 device.
 
-**Image size gate — BLOCKING at 1.5 GB** [EXISTS]
+**Image size gate — BLOCKING at 1.5 GB, and it is the `[6c/9]` BUILD stage** [EXISTS]
 
-`v2/lib/measure-size.sh` runs after every build. If the normalized rootfs tar exceeds
-**1.5 GB** the build fails loudly and the `.raucb` is not produced. The threshold
-is post-slim (locale strip, final apt-cache cleanup, and appliance payload pruning
-already applied). See
-[`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the levers used to reach it.
+`v2/lib/measure-size.sh` runs as `orchestrate.sh`'s `[6c/9]` stage on every real
+build, between the `[6/9]` tar emit and the `[7/9]` parity check. If the normalized
+rootfs tar exceeds **1.5 GB** the build `die`s there, so no `.raw` and no `.raucb`
+are cut. The threshold is post-slim (locale strip, final apt-cache cleanup,
+appliance payload pruning, and the Mesa software-GL prune below already applied).
+See [`v2/docs/size-notes.md`](v2/docs/size-notes.md) §10 for the wiring and the
+levers used to reach it.
 
 Both RK3588 boards pass it: `rock-5b-plus` 1,412,259,840 B, `orange-pi-5-plus`
 1,418,792,960 B (real wet vendor-BSP production builds, 2026-08-02). They were
 ~70-76 MB OVER until the Mesa software-GL prune below; `rootfs_bytes_max` has never
 been moved to accommodate an overage.
+
+**For three releases this "blocking" gate had never once run against a real
+image** — and that is why the overage shipped. `orchestrate.sh` had no measurement
+stage at all, and the only live caller was `v2-ci.yml`'s *"rootfs size gate
+(blocking)"* job, which measures a **synthetic 4 KB tree**. A job that can only ever
+measure 4 KB cannot fail on a 1.57 GB image, so the README/AGENTS claim that the
+gate "runs after every build" was aspirational until `[6c/9]` landed. Properties
+worth knowing before editing it:
+
+- **Not arch-gated.** Every shipped board carries a non-null `rootfs_bytes_max`,
+  `x86-minipc` included. Gating on `arm64` would exempt the one board whose size has
+  never been measured — the exact shape of the original defect.
+- **`INSTALL_BOOT_BSP=0` is skipped, LOUDLY.** A kernel-less parity rootfs is not
+  the shipped image, so measuring it is a vacuous pass; the skip logs a `log_warn`
+  naming the reason rather than passing quietly.
+- **`DRY_RUN=1` never reaches it** — the orchestrator `exit 0`s at `[5/9]`. This is
+  placement, not a condition, so the PR gate (which is DRY_RUN plan-only) still
+  cannot see this stage. Same blind spot as `[6b/9]`: every fix here needs a static
+  guard.
+- **The budget rule has exactly one implementation.** The stage invokes
+  `measure-size.sh` and propagates its exit status through `die`; it does not
+  re-derive the comparison. The CI synthetic-fixture job is retained unchanged as an
+  independent fast proof of the gate's own pass/fail legs — `[6c/9]` complements it,
+  it does not replace it.
+
+Guards: `manifest.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
+extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
+(pass leg, abort leg, spy-proven silent-skip refusal, stage ordering, DRY_RUN
+unreachability), plus a policy guard that no board's ceiling may be raised above
+1,500,000,000.
 
 **157.6 MB of Mesa software-GL is `RemoveFiles=`d, and the DRI "blob" is 43
 hardlinks to ONE file** [EXISTS]
