@@ -316,16 +316,47 @@ the fragment asks. Built-in versus loadable module is a real difference in what
 ships, so the gate reports it rather than tolerating it; the fragment now
 declares the honest `=m`.
 
+The gate only sees symbols the fragment *names*, so the same class keeps
+resurfacing wherever the fragment was silent. `CONFIG_DMABUF_HEAPS` was the third
+instance (no `/dev/dma_heap`, so `mpph264enc` produced zero bytes), and
+`CONFIG_NF_TABLES` the fourth — and that one is a security regression rather than
+a missing feature. The `edge` kernel had **no nftables at all**, so
+`ceralive-ingest-firewall.service` failed on every boot with
+
+```
+nft[182]: mnl.c:60: Unable to initialize Netlink socket: Protocol not supported
+```
+
+and the WAN-side drop of the unauthenticated RTMP `:1935` / SRT `:4001` ingest
+ports was silently never applied. `CONFIG_NF_TABLES` is a tristate with a prompt
+and no `default`, and the whole family (`NF_TABLES_INET`, every `nft_*`
+expression, the v4/v6 halves) sits inside its `if NF_TABLES` block, so
+`defconfig` never enabled it. The `NETLINK_NETFILTER` protocol `nft` opens comes
+from `CONFIG_NETFILTER_NETLINK`, a promptless tristate nothing selects until
+`NF_TABLES` is on — which is why the board reports a missing netlink *protocol*
+and `modprobe nfnetlink` answers "module not found"; neither is the real subject.
+
 **When the gate fires, do not silence it by deleting the line.** A dropped symbol
 means its Kconfig visibility condition is unmet. Read the symbol's own Kconfig
 entry, find the `menuconfig` block it sits inside and its `depends on` line, and
 declare those too — a `select`ed helper symbol (`RTW89_CORE`, `RTW89_PCI`,
-`RTW89_8852B`) needs no entry, but a `menuconfig` parent always does.
+`RTW89_8852B`; `NF_TABLES_IPV4`, `NF_TABLES_IPV6`) needs no entry, but a
+`menuconfig` parent always does.
 
-Coverage: `v2/tests/kernel-config-fragment.bats` (14 tests — the verifier's
-drop/downgrade/off/absence table, the real fragment's two repaired symbols, a
-red/green pair driving the real fragment against a reproduction of the broken
-7.1.5 answer and against a fully-honoured one, and the build-stage wiring order).
+**And read the Makefile as well as the Kconfig before you add a symbol.** The
+ingest ruleset uses a `counter` statement, so `CONFIG_NFT_COUNTER` looks
+obligatory — but no such symbol exists in `v7.1.5`: `net/netfilter/Makefile`
+compiles `nft_counter.o` unconditionally into `nf_tables-objs`, next to
+`nft_meta.o` (`iifname`) and `nft_chain_filter.o` (`type filter hook input`).
+Declaring it would resolve to nothing and this gate would reject the build. The
+rule is symmetric with the FUSB302 case: declare the value kconfig can actually
+give, whether that is a downgrade or an omission.
+
+Coverage: `v2/tests/kernel-config-fragment.bats` (16 tests — the verifier's
+drop/downgrade/off/absence table, the real fragment's repaired symbols (rtw89,
+FUSB302, nftables) plus the `NFT_COUNTER` absence guard, a red/green pair driving
+the real fragment against a reproduction of the broken 7.1.5 answer and against a
+fully-honoured one, and the build-stage wiring order).
 
 ---
 

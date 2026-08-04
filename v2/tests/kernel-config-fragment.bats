@@ -22,6 +22,12 @@
 # resolved to `=m`, because FUSB302 carries `depends on DRM || DRM=n` and arm64
 # defconfig builds DRM as a module.
 #
+# A later board run found the same class again, this time as a SECURITY gap:
+# `CONFIG_NF_TABLES` was never named either, so the edge kernel had no nftables
+# at all and `ceralive-ingest-firewall.service` failed every boot with
+# `Unable to initialize Netlink socket: Protocol not supported` — leaving the
+# WAN-side drop of the unauthenticated RTMP/SRT ingest ports silently unapplied.
+#
 # Hardware-free and root-free: the verifier is pure text over two files.
 
 setup() {
@@ -138,9 +144,35 @@ EOF
   ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
 }
 
+@test "rk3588-edge.fragment: NF_TABLES declares the parent the whole nftables family sits inside" {
+  grep -qx 'CONFIG_NF_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_NF_TABLES_INET=y' "$FRAGMENT"
+  # NF_TABLES_INET lives inside `if NF_TABLES`, so — as with RTW89 — a reader must
+  # meet the gate before the thing it gates.
+  local parent inet
+  parent="$(grep -n '^CONFIG_NF_TABLES=y$' "$FRAGMENT" | cut -d: -f1)"
+  inet="$(grep -n '^CONFIG_NF_TABLES_INET=y$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$parent" -lt "$inet" ]
+  # =m is NOT equivalent here: ceralive-ingest-firewall.service is a
+  # DefaultDependencies=no oneshot that runs `nft -f` before the ingest gateway
+  # opens its listeners, so the family must be built in.
+  ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.5 has no such symbol" {
+  # The ruleset's `counter` statement is real, but net/netfilter/Makefile compiles
+  # nft_counter.o unconditionally into nf_tables-objs. Declaring CONFIG_NFT_COUNTER
+  # would resolve to nothing and the gate would fail the build over a symbol the
+  # kernel does not have.
+  ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
+}
+
 @test "rk3588-edge.fragment: the gate REJECTS the resolved .config the broken 7.1.5 build produced" {
-  # A synthetic reproduction of the shipped build's answer for the three symbols
-  # this defect turned on: the rtw89 family off, FUSB302 downgraded.
+  # A synthetic reproduction of the shipped build's answer for the symbols this
+  # defect turned on: the rtw89 family off, the nftables family off, FUSB302
+  # downgraded. The NETFILTER/IPV6 lines are the board's real answer too — they
+  # are what proves NF_TABLES was dropped for its own missing declaration and not
+  # for an unmet dependency.
   cat >"$WORK/broken" <<'EOF'
 CONFIG_WLAN=y
 CONFIG_CFG80211=m
@@ -148,6 +180,10 @@ CONFIG_MAC80211=m
 CONFIG_WLAN_VENDOR_REALTEK=y
 # CONFIG_RTW88 is not set
 # CONFIG_RTW89 is not set
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_IPV6=y
+# CONFIG_NF_TABLES is not set
 CONFIG_TYPEC=y
 CONFIG_TYPEC_TCPM=y
 CONFIG_TYPEC_FUSB302=m
@@ -156,6 +192,8 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"CONFIG_RTW89: DROPPED"* ]]
   [[ "$output" == *"CONFIG_RTW89_8852BE: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_NF_TABLES: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_NF_TABLES_INET: DROPPED"* ]]
   # FUSB302 is now declared =m, so the same broken config must NOT flag it.
   [[ "$output" != *"CONFIG_TYPEC_FUSB302"* ]]
 }

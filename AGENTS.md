@@ -817,6 +817,77 @@ failure observation: `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-find
 The succeeding observation is recorded in
 `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §8a.
 
+**The LAN-ingest firewall needs `CONFIG_NF_TABLES` — the `edge` kernel had no
+nftables at all, so the WAN-side ingest boundary silently never applied** [EXISTS]
+
+Fourth instance of the `menuconfig`-parent class `CONFIG_RTW89` opened, and the
+first one that is a SECURITY regression rather than a missing feature.
+`ceralive-ingest-firewall.service` is what keeps the UNAUTHENTICATED MediaMTX
+ingest gateway (RTMP :1935 + SRT :4001, no publish password and no SRT passphrase
+in v1) off the WAN: it `nft -f`s a ruleset that DROPs both ports when they arrive
+on a `usb*`/`enx*`/`ww*`/`ppp*` uplink. On the `edge` 7.1.5 kernel that unit
+failed on EVERY boot and the boundary was simply not there — a publisher on a
+modem's public or CGNAT address could reach the anonymous ingest. Confirmed live
+on a Rock 5B+ running a fresh bench build:
+
+```
+systemctl status ceralive-ingest-firewall.service
+  Active: failed (Result: exit-code)
+  Process: 182 ExecStart=/usr/sbin/nft -f /etc/ceralive/ingest-firewall.nft (code=exited, status=3)
+  nft[182]: mnl.c:60: Unable to initialize Netlink socket: Protocol not supported
+
+modprobe nfnetlink
+  FATAL: Module nfnetlink not found in directory /lib/modules/7.1.5-ceralive-rk3588
+
+zcat /proc/config.gz | grep -iE "NFNETLINK|NF_TABLES|NETFILTER"
+  # CONFIG_NF_TABLES is not set
+  CONFIG_NETFILTER=y
+  CONFIG_NETFILTER_ADVANCED=y
+  CONFIG_IPV6=y
+```
+
+`CONFIG_NF_TABLES` is a tristate with a prompt and **no `default`**, and the
+entire family — `NF_TABLES_INET`, every `nft_*` expression module, the IPv4/IPv6
+halves — lives inside its `if NF_TABLES` block, so arm64 `defconfig` never turns
+it on and `rk3588-edge.fragment` never named it. Everything netfilter-shaped that
+WAS in the config (`NETFILTER=y`, `NETFILTER_ADVANCED=y`) is the legacy
+`{ip,ip6}_tables` scaffolding and buys nftables nothing.
+
+**Do not chase `nfnetlink` as the missing module.** The error `nft` reports is a
+missing netlink PROTOCOL, not a missing table, because the `NETLINK_NETFILTER`
+protocol comes from `CONFIG_NETFILTER_NETLINK` — a promptless tristate that
+NOTHING selects until `NF_TABLES` is on. `modprobe nfnetlink` therefore fails
+with "module not found", which reads like a packaging or firmware gap and is
+neither. Fixing the parent makes the protocol appear built-in and the `modprobe`
+question moot.
+
+The fragment now declares exactly two symbols: `CONFIG_NF_TABLES=y` (`=y`, not
+`=m` — the unit is a `DefaultDependencies=no` oneshot ordered `Before=` the
+gateway opens its listeners, so the boundary must exist before any modular
+autoload could have run) and `CONFIG_NF_TABLES_INET=y` (the ruleset's table is
+`inet`; the symbol is a bool `depends on IPV6`, already `=y` from defconfig, and
+it `select`s `NF_TABLES_IPV4`/`NF_TABLES_IPV6`, which therefore need no entry —
+same `select`ed-helper rule as `RTW89_CORE`/`RTW89_PCI`).
+
+**`CONFIG_NFT_COUNTER` is deliberately NOT declared, and adding it would fail the
+build.** The ruleset's `counter` statement is real and load-bearing, so the
+symbol looks obligatory — but v7.1.5 has no such symbol at all:
+`net/netfilter/Makefile` compiles `nft_counter.o` unconditionally into
+`nf_tables-objs`, alongside `nft_meta.o` (the `iifname` match) and
+`nft_chain_filter.o` (the `type filter hook input` base chain). Declared, it
+would resolve to nothing and `verify-kernel-config.sh` would correctly reject the
+build. This is the same declare-the-honest-resolved-value discipline as
+`CONFIG_TYPEC_FUSB302=m`, arrived at the same way — read the symbol's own Kconfig
+and Makefile at the pinned tag instead of arguing with the gate.
+
+**Invisible to the PR gate**, like every finding in this class: the gate is
+`DRY_RUN=1` and never runs `[2b/9]`, and the unit fails at BOOT, not at build —
+the `.deb` validated on all four axes, `/boot` was complete, and the image booted.
+Guard: `v2/tests/kernel-config-fragment.bats` — both symbols pinned in the real
+fragment with the parent declared ahead of the `inet` child, `=m` rejected,
+`CONFIG_NFT_COUNTER` forbidden, and the real fragment driven against a
+reproduction of the board's own `# CONFIG_NF_TABLES is not set` answer.
+
 **The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
 load — both were real infinite-crash-loop defects** [EXISTS]
 

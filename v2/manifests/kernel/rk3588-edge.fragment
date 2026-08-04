@@ -117,6 +117,56 @@ CONFIG_USB_NET_QMI_WWAN=m
 CONFIG_USB_WDM=m
 CONFIG_USB_SERIAL_OPTION=m
 
+# --- Networking: LAN-ingest ingress firewall (nftables) --------------------
+# ceralive-ingest-firewall.service loads /etc/ceralive/ingest-firewall.nft with
+# `nft -f` at boot. That ruleset IS the LAN boundary around the UNAUTHENTICATED
+# MediaMTX ingest gateway: it DROPs inbound RTMP :1935 and SRT :4001 whenever they
+# arrive on a usb*/enx*/ww*/ppp* WAN uplink. CONFIG_NF_TABLES is a tristate with a
+# prompt and NO `default`, and everything else in the family sits inside its
+# `if NF_TABLES` block, so arm64 defconfig never turns it on and this fragment
+# never named it — the same `menuconfig`-parent class as the CONFIG_RTW89 and
+# CONFIG_DMABUF_HEAPS drops. Like both of those it failed in complete build-side
+# silence: the deb validated on all four axes, /boot was complete, the image
+# booted, and the only thing that ever said so was the unit on the board.
+#
+# Confirmed live on a Rock 5B+ running the edge 7.1.5 kernel:
+#
+#   systemctl status ceralive-ingest-firewall.service
+#     Active: failed (Result: exit-code)
+#     ExecStart=/usr/sbin/nft -f /etc/ceralive/ingest-firewall.nft (status=3)
+#     nft[182]: mnl.c:60: Unable to initialize Netlink socket: Protocol not supported
+#   modprobe nfnetlink
+#     FATAL: Module nfnetlink not found in directory /lib/modules/7.1.5-ceralive-rk3588
+#   zcat /proc/config.gz | grep -iE 'NF_TABLES|NETFILTER'
+#     # CONFIG_NF_TABLES is not set
+#     CONFIG_NETFILTER=y
+#     CONFIG_NETFILTER_ADVANCED=y
+#
+# The socket `nft` cannot open is NETLINK_NETFILTER, which comes from
+# CONFIG_NETFILTER_NETLINK — a promptless tristate that NOTHING selects until
+# NF_TABLES is on. That is why the board reports a missing netlink PROTOCOL rather
+# than a missing table, and why chasing `nfnetlink` as a module is a dead end. It
+# is `select`ed by the symbol below and so needs no entry of its own.
+#
+# =y rather than =m: the ruleset is installed by a DefaultDependencies=no oneshot
+# ordered Before= the gateway opens its listeners, so the boundary has to exist
+# before any modular autoload could plausibly have run.
+CONFIG_NF_TABLES=y
+# The ruleset declares `table inet ceralive_ingest_fw` — one table covering v4 and
+# v6 — which is exactly what this bool provides. It `depends on IPV6`, already =y
+# from defconfig and verified against the board's own /proc/config.gz, and it
+# `select`s NF_TABLES_IPV4/NF_TABLES_IPV6, so neither of those needs an entry.
+CONFIG_NF_TABLES_INET=y
+# NOT DECLARED, deliberately: CONFIG_NFT_COUNTER. The `counter` statement in the
+# ruleset is real and load-bearing — it is what makes a drop visible in
+# `nft list ruleset` for on-device diagnosis — but v7.1.5 has no such symbol:
+# net/netfilter/Makefile builds nft_counter.o unconditionally into nf_tables-objs,
+# next to nft_meta.o (the `iifname` match) and nft_chain_filter.o (the
+# `type filter hook input` base chain). Declaring it would resolve to nothing and
+# verify-kernel-config.sh would correctly fail the build over a symbol the kernel
+# does not have. Declare the value kconfig can actually give, exactly as with
+# CONFIG_TYPEC_FUSB302 below.
+
 # --- Type-C / USB role switching -------------------------------------------
 # The FUSB302/TCPM connector v2/mkosi/runtime/ceralive-typec-source.sh pins to
 # the source role. Without TYPEC_TCPM + TYPEC_FUSB302 there is no
