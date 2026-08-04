@@ -54,6 +54,7 @@ image-building-pipeline/
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
+| **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
@@ -1370,6 +1371,192 @@ seeds the exact 0-byte-regular-file bug state, runs the real function, and prove
 the result is the stub symlink — resolves through it, is idempotent, and
 force-replaces a stale link). Wired into `v2/run-tests`.
 
+**Six stock units must be MASKED (never merely disabled) — they cost every boot
+2 of its 2min 6s and kept the device permanently `degraded`** [EXISTS]
+
+Root-caused on a shipped Rock 5B+ running the PRODUCTION vendor-BSP image on
+2026-08-04. `systemd-analyze time` read **`3.925s (kernel) + 2min 2.744s
+(userspace)`**, and the userspace half was almost entirely one unit that can never
+succeed. Two more units failed on every single boot for structural reasons, and a
+fourth blocked `multi-user.target` on an NTP convergence nothing waits for. All
+four defects are stock-Debian defaults this repo never asked for; none is fixable
+by a package removal, and — the trap that makes this its own KEY FACT — **none is
+fixable by `disable_service` either.**
+
+**The 2-minute stall: `systemd-networkd-wait-online.service`.** NetworkManager is
+this image's only network stack; no `.network` file ships anywhere, so
+`systemd-networkd` manages **zero** links while NM owns everything:
+
+```
+networkctl list       ->  lo / eth0 / wlan0 — all "unmanaged"
+nmcli device status   ->  eth0  ethernet  connected
+
+journalctl -u systemd-networkd-wait-online.service -b
+  16:40:42  Starting systemd-networkd-wait-online.service...
+  16:42:42  Timeout occurred while waiting for network connectivity.
+  16:42:42  Failed to start systemd-networkd-wait-online.service
+```
+
+Exactly 2:00 — the binary's hardcoded default `--timeout=120s` — with the network
+fully up. The cost is not the unit, it is `network-online.target`:
+`systemctl list-dependencies network-online.target` shows BOTH
+`NetworkManager-wait-online.service` and `systemd-networkd-wait-online.service`,
+and a target only becomes active once EVERY ordering dependency has reached a
+terminal state — **failure counts**. So the target waited on the slower of the two:
+
+```
+systemd-analyze critical-chain graphical.target
+graphical.target @2min 2.707s
+└─multi-user.target @2min 2.707s
+  └─nginx.service @2min 2.593s +112ms
+    └─ceralive-tls-firstboot.service @2min 2.357s +225ms
+      └─ceralive-hostname.service @2min 1.366s +983ms
+        └─network-online.target @2min 1.362s
+          └─NetworkManager-wait-online.service @11.026s +8.261s
+            └─NetworkManager.service @10.307s +714ms
+```
+
+The ~100-second gap between `NetworkManager-wait-online` finishing at **19.3s** and
+the target activating at **2min 1.362s** IS the hidden networkd timeout — it does
+not appear in the chain because the chain prints the slowest *reached* edge, not the
+failed one. **This delayed the product itself, not just SSH:**
+`systemctl show ceralive.service -p After -p Wants` carries
+`ceralive-hostname.service`, which cannot START until `network-online.target`, so
+the operator could not reach the CeraUI web UI on port 80 AT ALL for two minutes
+after power-on.
+
+**Why `disable` is the WRONG tool, and this is the load-bearing part.** Nothing in
+this repo enables networkd. `/etc/machine-id` ships holding the literal string
+`uninitialized` (14 bytes, confirmed in the built rootfs), so **every freshly
+flashed board is a systemd FIRST BOOT and PID 1 runs `preset-all`** — which
+re-applies the vendor presets over anything the build merely disabled. Worse,
+Debian's own `90-systemd.preset` contradicts itself and loses:
+
+```
+enable systemd-networkd.service              # line 20
+disable systemd-networkd-wait-online.service # line 38
+```
+
+The `disable` verdict is overridden, because `systemd-networkd.service`'s
+`[Install]` carries `Also=systemd-networkd-wait-online.service` and `Also=` is
+applied **unconditionally** by `enable`. That is why a preset that explicitly
+disables wait-online still ships it enabled. `systemctl enable` REFUSES to act on a
+masked unit, so a mask is the only build-time suppression that survives first boot —
+and masking `systemd-networkd.service` **itself** (not just wait-online) is what
+makes that `Also=` unreachable at the source. This is the same class of trap as
+`configure_ssh_enablement` (where the base-layer preset means a production image must
+actively disable, not merely skip the enable) — one notch worse, because here even an
+active disable is not enough.
+
+**Masking networkd does NOT touch interface naming.** The `.link` files
+`install_interface_naming` writes are consumed by udev's **built-in
+`net_setup_link`**, which lives in `systemd-udevd` and is a completely separate
+mechanism from whether the networkd DAEMON runs. `eth0`/`wlan0` renaming — and
+therefore SRTLA's `eth*`/`wlan*` bonding globs — are unaffected. Do NOT widen this
+to `NetworkManager`, `systemd-resolved` or `systemd-udevd`.
+
+**`systemd-machine-id-commit.service` fails forever because of OUR OWN bind mount.**
+The obvious reading — "this image's `/etc/machine-id` is a plain file on the real
+rootfs, so the unit is inert" — is wrong, and the unit's own condition proves it:
+
+```
+[Unit]
+ConditionPathIsReadWrite=/etc
+ConditionPathIsMountPoint=/etc/machine-id
+```
+
+A plain file would SKIP the unit silently. It ran and failed:
+
+```
+16:40:47  Starting systemd-machine-id-commit.service...
+16:40:49  Main process exited, code=exited, status=1/FAILURE
+16:40:50  systemd-machine-id-setup[426]: /etc/machine-id is not on a temporary file system.
+```
+
+…because `postinst-lib.sh::setup_data_persistence`'s generated
+`ceralive-migrate-data` does `mount --bind "$DATA/ceralive/machine-id"
+/etc/machine-id` to keep host identity stable across A/B slots. That bind mount
+SATISFIES `ConditionPathIsMountPoint`, the unit starts, and
+`systemd-machine-id-setup --commit` then correctly refuses because the bind SOURCE
+is real ext4 on `/data`, not a tmpfs. The unit exists solely to persist a machine-id
+an initrd generated on tmpfs; this image's persistence model is the bind mount, so
+the unit is structurally guaranteed to fail on every boot, forever. Note
+`ceralive-hostname.service` keeps its historical
+`After=systemd-machine-id-commit.service` — that edge was ALREADY vacuous (it was
+ordering after a unit that always failed), and the real machine-id guarantee comes
+from `ceralive-migrate-data.service`, which is in the same `After=` list.
+
+**`dnsmasq.service` is the STANDALONE Debian unit, and it is NOT the hotspot's
+dnsmasq.** It always loses port 53 to `systemd-resolved`, which owns it by design
+(the `/etc/resolv.conf` stub-symlink architecture directly above):
+
+```
+Loaded: loaded (/lib/systemd/system/dnsmasq.service; enabled; preset: enabled)
+Active: failed (Result: exit-code)
+dnsmasq: failed to create listening socket for port 53: Address already in use
+```
+
+The first-boot WiFi provisioning portal is unaffected: NetworkManager spawns its
+**own dnsmasq CHILD PROCESS** for `802-11-wireless.mode ap` + `ipv4.method shared`,
+reading `/etc/NetworkManager/dnsmasq-shared.d` — it never starts this unit. The
+`dnsmasq` package stays in `shared.list` precisely so that child still has its
+binary; masking the unit is deliberately NOT a package removal. **Do not "restore"
+`dnsmasq.service` believing it drives the hotspot.**
+
+**`chrony-wait.service` blocks `multi-user.target` for 21s on a wait nothing needs.**
+`systemd-analyze blame` put it at `21.092s`, the second-largest single unit and the
+tallest remaining pole once the networkd stall is gone:
+
+```
+16:40:52  Starting chrony-wait.service - Wait for chrony to synchronize system clock...
+16:41:13  Finished chrony-wait.service
+```
+
+Its `ExecStart` is `chronyc waitsync 0 0.1 0.0 1` (`TimeoutStartSec=180`) and it is
+`WantedBy=multi-user.target`. **Nothing on this device orders itself after
+`time-sync.target` or `chrony-wait.service`** — verified across the whole tracked
+tree: not `ceralive-tls-firstboot.service` (which generates the per-device
+self-signed cert with a plain `openssl req -x509 -days 3650`, no `-not_before`), not
+`ceralive-healthcheck.service`, not `cert-rotation.service`, not
+`rauc-hawkbit-updater.service`, not `nginx.service`, not `ceralive.service`. Be
+precise about what is being given up: the cert today *happens* to be generated after
+the clock synced ONLY because the 2-minute networkd stall pushed
+`ceralive-tls-firstboot` out to 2min 2.357s — an ACCIDENT of the very defect being
+fixed here, not a contract, since there is no ordering edge between the two units.
+Masking therefore removes no guarantee that ever existed. `chronyd` itself is
+untouched, still enabled by `configure_services`, and still steps the clock
+(`makestep 1 3` in `customize/ceralive-ntp.conf`). **Never mask `chrony.service`** —
+only its boot-blocking `chrony-wait` sibling. RAUC bundle signature verification IS
+time-sensitive, but it is an on-demand OTA operation, not a boot one.
+
+**The fix.** `postinst-lib.sh::suppress_unusable_boot_units` (called from
+`configure_services`, via a new `mask_service` helper beside
+`enable_service`/`disable_service`) masks all six:
+`systemd-networkd.service`, `systemd-networkd.socket`,
+`systemd-networkd-wait-online.service`, `systemd-machine-id-commit.service`,
+`dnsmasq.service`, `chrony-wait.service`. `mask_service` then **verifies** the
+resulting `/etc/systemd/system/<unit> -> /dev/null` symlink and `die`s if it is
+absent — a mask that silently did not land would put the defect straight back into
+the fleet on an image that otherwise builds, boots and passes every other gate. No
+`mkosi.postinst.chroot` line is added (it stays at 925 against the drift gate's 950
+ceiling); `suppress_unusable_boot_units` + `mask_service` are registered in
+`postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
+
+Expected improvement: the ~100s networkd stall and the 21s chrony-wait both leave
+the boot path, so `graphical.target` should land near **~20s instead of 2min 6s**,
+with CeraUI on :80 reachable at roughly the same point rather than two minutes in,
+and `systemctl is-system-running` reading `running` instead of `degraded`.
+**Not yet boot-proven on hardware** — the masks are verified present in the built
+artifact, but the timing claim above is a prediction until a board boots it.
+
+Verified in the real emitted rootfs (not merely "the postinst ran"): all six mask
+symlinks are present under `./etc/systemd/system/` in the `rock-5b-plus` build tar.
+Guards: `manifest.bats` §18e (6 tests — all six masked to `/dev/null`, the `Also=`
+resurrection path closed, mask-not-disable, the fail-closed leg proving a
+non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
+widen to NetworkManager/resolved/udevd/`chrony.service`, and the
+`configure_services` wiring).
+
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
 `setup_paseto_public_key` (in `customize/postinst-lib.sh`, called by the runtime
@@ -2211,6 +2398,9 @@ gated item, not the package availability.
 - Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
+- Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
+- Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
+- Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
 
 ## KNOWN ISSUES / DEFERRED
 
