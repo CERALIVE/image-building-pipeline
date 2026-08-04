@@ -3260,6 +3260,155 @@ SH
 }
 
 # ===========================================================================
+# 18e. Boot dead-weight masks — six stock units that cost a shipped Rock 5B+
+#      ~2 minutes of EVERY boot and left it permanently `degraded`.
+#      systemd-networkd{,.socket,-wait-online} can never be satisfied (NM owns
+#      every link; networkctl reports all `unmanaged`), yet wait-online burned a
+#      flat 120s inside network-online.target and held ceralive.service — the
+#      CeraUI web UI on :80 — unreachable for 2 minutes after power-on.
+#      systemd-machine-id-commit fails forever because OUR OWN migrate-data bind
+#      mount satisfies its ConditionPathIsMountPoint while the bind source is real
+#      ext4. Standalone dnsmasq.service always loses port 53 to systemd-resolved.
+#      chrony-wait blocks multi-user.target ~21s for NTP convergence nothing
+#      orders itself after. These drive the SHIPPED function against a temp mask
+#      dir (CERALIVE_MASK_UNIT_DIR) with a faithful `systemctl mask` stub — no
+#      image boot, no hardware, UNIT scope.
+# ===========================================================================
+
+# mask_stub_bin <dir> — a systemctl stub that RECORDS every call and faithfully
+# reproduces `systemctl mask` (symlink the unit to /dev/null) into
+# $CERALIVE_MASK_UNIT_DIR, so the shipped function's own post-mask verification is
+# exercised rather than bypassed.
+mask_stub_bin() {
+  mkdir -p "$1"
+  cat >"$1/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$MASK_CALLS"
+if [ "${1:-}" = mask ]; then
+  mkdir -p "$CERALIVE_MASK_UNIT_DIR"
+  ln -sfn /dev/null "$CERALIVE_MASK_UNIT_DIR/$2"
+fi
+exit 0
+SH
+  chmod +x "$1/systemctl"
+}
+
+@test "boot unit masks: all six unusable/blocking units are masked to /dev/null" {
+  local bin="$BATS_TEST_TMPDIR/mask-bin"
+  local calls="$BATS_TEST_TMPDIR/mask-calls"
+  local dir="$BATS_TEST_TMPDIR/mask-units"
+  rm -rf "$bin" "$calls" "$dir"
+  mask_stub_bin "$bin"
+
+  run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+  [ "$status" -eq 0 ]
+
+  local unit
+  for unit in systemd-networkd.service systemd-networkd.socket \
+              systemd-networkd-wait-online.service \
+              systemd-machine-id-commit.service dnsmasq.service \
+              chrony-wait.service; do
+    [ -L "$dir/$unit" ]
+    [ "$(readlink "$dir/$unit")" = "/dev/null" ]
+  done
+}
+
+@test "boot unit masks: masking systemd-networkd.service itself closes the Also= resurrection path" {
+  # Debian's 90-systemd.preset says `enable systemd-networkd.service` AND
+  # `disable systemd-networkd-wait-online.service` — and the disable LOSES, because
+  # systemd-networkd.service's [Install] carries
+  # `Also=systemd-networkd-wait-online.service`, applied unconditionally by enable.
+  # Masking the parent is what makes that Also= unreachable, so both must be masked.
+  grep -Fq 'Also=systemd-networkd-wait-online.service' \
+    "$V2/mkosi/build/runtime/usr/lib/systemd/system/systemd-networkd.service" \
+    || skip "built runtime tree not present — Also= premise checked on the real unit only"
+
+  local bin="$BATS_TEST_TMPDIR/mask-also-bin"
+  local calls="$BATS_TEST_TMPDIR/mask-also-calls"
+  local dir="$BATS_TEST_TMPDIR/mask-also-units"
+  rm -rf "$bin" "$calls" "$dir"
+  mask_stub_bin "$bin"
+
+  run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+  [ "$status" -eq 0 ]
+  [ -L "$dir/systemd-networkd.service" ]
+  [ -L "$dir/systemd-networkd-wait-online.service" ]
+}
+
+@test "boot unit masks: mask, NOT disable — first-boot preset-all would undo a disable" {
+  # /etc/machine-id ships as the literal string `uninitialized`, so every freshly
+  # flashed board is a systemd FIRST BOOT and PID 1 runs `preset-all`, re-applying
+  # the vendor presets over anything this build merely disabled. `systemctl enable`
+  # refuses to act on a masked unit, so only a mask survives.
+  run grep -E '^\s*mask_service "\$\{svc\}"' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+
+  local unit
+  for unit in systemd-networkd systemd-networkd-wait-online \
+              systemd-machine-id-commit dnsmasq chrony-wait; do
+    run grep -E "disable_service ${unit}" "$POSTINST_LIB"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "boot unit masks: a mask that does not land FAILS the build (fail-closed, never silent)" {
+  # A silently-ineffective mask ships the exact defect back to the fleet on an image
+  # that otherwise builds, boots and passes every other gate — so the shipped
+  # function VERIFIES the symlink instead of trusting the systemctl exit status.
+  local bin="$BATS_TEST_TMPDIR/mask-noop-bin"
+  local dir="$BATS_TEST_TMPDIR/mask-noop-units"
+  rm -rf "$bin" "$dir"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" CERALIVE_MASK_UNIT_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mask did not land"* ]]
+  [ ! -e "$dir/systemd-networkd.service" ]
+}
+
+@test "boot unit masks: NEVER widen to NetworkManager, resolved, udevd or chronyd" {
+  # NM is the only network stack; systemd-resolved owns :53 and the resolv.conf stub;
+  # systemd-udevd's BUILT-IN net_setup_link (not networkd) consumes the .link files
+  # that produce eth0/wlan0 for SRTLA's bonding globs; chrony.service is the NTP
+  # daemon itself — only its boot-blocking chrony-wait sibling may be masked.
+  local bin="$BATS_TEST_TMPDIR/mask-scope-bin"
+  local calls="$BATS_TEST_TMPDIR/mask-scope-calls"
+  local dir="$BATS_TEST_TMPDIR/mask-scope-units"
+  rm -rf "$bin" "$calls" "$dir"
+  mask_stub_bin "$bin"
+
+  run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
+    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+  [ "$status" -eq 0 ]
+
+  run grep -cE '^systemctl mask ' "$calls"
+  [ "$output" -eq 6 ]
+
+  run grep -E '^systemctl mask (NetworkManager|systemd-resolved|systemd-udevd|systemd-networkd-generator|chrony)\.(service|socket)$' "$calls"
+  [ "$status" -ne 0 ]
+
+  # The positive half: the units above are still ENABLED and the .link writer intact.
+  run grep -E '^\s*for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  run grep -F '/etc/systemd/network/10-ceralive-${role}.link' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+}
+
+@test "boot unit masks: suppression is wired into configure_services" {
+  # An unreferenced setup function is dead code — the 2-minute stall would ship.
+  run grep -E '^\s*suppress_unusable_boot_units$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —

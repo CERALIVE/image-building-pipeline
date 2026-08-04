@@ -73,6 +73,29 @@ disable_service() {
   fi
 }
 
+# mask_service — for units a build-time `disable` CANNOT durably suppress.
+#
+# `systemctl mask` writes /etc/systemd/system/<unit> -> /dev/null, which outranks
+# every [Install] section and every vendor preset, because `systemctl enable`
+# REFUSES to act on a masked unit. That matters here specifically: this image
+# ships /etc/machine-id holding the literal string `uninitialized`, so EVERY
+# freshly flashed board is a systemd FIRST BOOT and PID 1 runs `preset-all` —
+# which re-applies the vendor presets to units this build already disabled. A
+# `disable_service` is therefore silently undone the first time the device boots;
+# only a mask survives. See suppress_unusable_boot_units for the concrete cases.
+#
+# The resulting symlink is VERIFIED rather than assumed: a mask that quietly did
+# not land would put the defect straight back into the fleet on an image that
+# otherwise builds, boots and passes every other gate. Fail the build instead.
+# CERALIVE_MASK_UNIT_DIR overrides the mask directory for the offline unit test.
+mask_service() {
+  local svc="$1"
+  local unit_dir="${CERALIVE_MASK_UNIT_DIR:-/etc/systemd/system}"
+  systemctl mask "${svc}"
+  [[ -L "${unit_dir}/${svc}" && "$(readlink "${unit_dir}/${svc}")" == "/dev/null" ]] \
+    || die "mask did not land: ${unit_dir}/${svc} is not a symlink to /dev/null"
+}
+
 configure_debug_access() {
   local user="${CERALIVE_USER:-ceralive}"
   local mode="${CERALIVE_DEBUG_IMAGE:-0}"
@@ -309,7 +332,83 @@ configure_services() {
   for svc in bluetooth.service cups.service; do
     disable_service "${svc}"
   done
+  suppress_unusable_boot_units
   setup_typec_source_role
+}
+
+# Six stock Debian/systemd units that this image either can NEVER satisfy or must
+# not be gated on. Together they cost a shipped Rock 5B+ ~2 minutes of every boot
+# and left two units permanently `failed`, so `systemctl is-system-running` read
+# `degraded` forever — which hides genuinely new failures from an operator.
+#
+# 1-3. THE NETWORKD STACK (systemd-networkd.service/.socket/-wait-online.service).
+# NetworkManager is this image's ONLY network stack. No `.network` file ships, so
+# systemd-networkd manages ZERO links — `networkctl list` reports lo/eth0/wlan0 all
+# `unmanaged` while `nmcli device status` shows eth0 `connected`. But
+# systemd-networkd-wait-online is still pulled into network-online.target, where it
+# can never be satisfied: on the board it burned its full hardcoded 120s default and
+# exited 1 with the network completely up. Because a target only becomes active once
+# EVERY ordering dependency reaches a terminal state — failure counts — that timeout
+# held network-online.target to 2min 1.362s even though NetworkManager-wait-online
+# had already SUCCEEDED at 19.3s. Everything behind the target inherited the delay,
+# including ceralive-hostname.service and therefore ceralive.service: the operator
+# could not reach the CeraUI web UI on port 80 AT ALL for two minutes after power-on.
+#
+# Masking systemd-networkd.service itself (not just wait-online) is deliberate and is
+# what closes the resurrection path: its [Install] carries
+# `Also=systemd-networkd-wait-online.service`, and `Also=` is applied UNCONDITIONALLY
+# by `enable` — which is why Debian's own `90-systemd.preset` losing battle
+# (`enable systemd-networkd.service` two lines above
+# `disable systemd-networkd-wait-online.service`) ships wait-online ENABLED anyway.
+#
+# CRITICALLY, this does NOT touch interface naming. The `.link` files
+# install_interface_naming writes are consumed by udev's BUILT-IN `net_setup_link`,
+# which lives in systemd-udevd and is a completely separate mechanism from whether
+# the networkd DAEMON runs. eth0/wlan0 renaming — and therefore SRTLA's `eth*`/`wlan*`
+# bonding globs — are unaffected. Do NOT widen this to NetworkManager or systemd-udevd.
+#
+# 4. systemd-machine-id-commit.service exists solely to persist a machine-id that an
+# initrd generated on a TMPFS. This image never does that — but the unit is not inert
+# either, because its `ConditionPathIsMountPoint=/etc/machine-id` is SATISFIED by our
+# own `ceralive-migrate-data`, which bind-mounts /data/ceralive/machine-id onto
+# /etc/machine-id to keep host identity stable across A/B slots. The condition passes,
+# `systemd-machine-id-setup --commit` runs, and it fails with
+# `/etc/machine-id is not on a temporary file system` because the bind source is real
+# ext4 on /data. It is structurally guaranteed to fail on every boot, forever.
+#
+# 5. dnsmasq.service is the STANDALONE Debian unit, enabled by package preset and
+# never wired up by this repo. It always fails `failed to create listening socket for
+# port 53: Address already in use`, because systemd-resolved owns port 53 by design
+# (the /etc/resolv.conf stub-symlink architecture). This is NOT NetworkManager's
+# hotspot dnsmasq: NM spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`
+# AP mode, reading /etc/NetworkManager/dnsmasq-shared.d — it never starts this unit,
+# and the `dnsmasq` package stays installed so that child still has its binary.
+#
+# 6. chrony-wait.service blocks multi-user.target for ~21s running
+# `chronyc waitsync 0 0.1 0.0 1` — it waits for NTP to converge to within 0.1s. It is
+# the second-largest single unit in `systemd-analyze blame` and becomes the tallest
+# remaining pole once the networkd stall above is gone. Nothing on this device orders
+# itself after `time-sync.target` or `chrony-wait.service` — not
+# ceralive-tls-firstboot.service (which generates the per-device self-signed cert),
+# not ceralive-healthcheck.service, not RAUC, not nginx, not ceralive.service. The
+# apparent "cert is generated after the clock synced" safety today is an ACCIDENT of
+# the very 2-minute networkd stall being removed here, not a contract: there is no
+# ordering edge between the two units, so masking removes no guarantee that ever
+# existed. chronyd itself is untouched and still steps the clock (`makestep 1 3`);
+# only the boot-readiness GATE goes away. Never mask chrony.service.
+suppress_unusable_boot_units() {
+  log "masking the stock units this image can never satisfy (networkd stack, machine-id commit, standalone dnsmasq) plus chrony-wait (clock sync must not gate boot readiness)"
+  local svc
+  for svc in \
+    systemd-networkd.service \
+    systemd-networkd.socket \
+    systemd-networkd-wait-online.service \
+    systemd-machine-id-commit.service \
+    dnsmasq.service \
+    chrony-wait.service
+  do
+    mask_service "${svc}"
+  done
 }
 
 # USB-C capture reliability: pin the Type-C connector to the SOURCE role at boot.
