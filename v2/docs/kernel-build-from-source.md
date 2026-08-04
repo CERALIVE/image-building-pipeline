@@ -67,8 +67,22 @@ than trusted:
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@4809354656a16443c0b69f1e72b77f3fea1cbdae` — the
-merge of that repo's PR #1, which is CI-green applying against exactly `v7.1.5`.
+`CERALIVE/rk3588-kernel-patches@9c1cb385098d842a1d5755e3717b308a25bb8305` — the
+merge of that repo's PR #2, which is CI-green applying against exactly `v7.1.5`.
+
+That PR added patch `0006`, the **device-tree half of HDMI-RX audio capture**, and
+it is the reason this pin moved. Upstream's `0005` gives `snps_hdmirx` its driver
+half — it registers an ASoC `hdmi-audio-codec` child under
+`hdmi_receiver@fdee0000` — but touches no device tree, and ALSA does not create a
+card for a bare codec. Every image built on the previous pin therefore shipped a
+**bound** codec device and no HDMI-IN capture card at all: `/proc/asound/cards`
+listed the USB dongle, the onboard es8316, and `hdmi0`/`hdmi1` (the two HDMI
+*transmitters*), and nothing errored. `0006` adds `#sound-dai-cells` to
+`hdmi_receiver`, an `hdmirx-sound` `simple-audio-card`, and `&hdmirx_sound` +
+`&i2s7_8ch` enabled on both CeraLive boards. No `rk3588-edge.fragment` change was
+needed — `CONFIG_SND_SIMPLE_CARD`, `CONFIG_SND_SOC_ROCKCHIP_I2S_TDM` and
+`CONFIG_SND_SOC_HDMI_CODEC` were already enabled and verified present in the
+running board's config.
 
 **Why we pin a tag when Armbian tracks a branch.** Armbian maps rk3588
 `BRANCH=edge` to `KERNEL_MAJOR_MINOR=7.1` and then follows the **rolling** branch

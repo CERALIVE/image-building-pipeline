@@ -143,10 +143,13 @@ variants:
 
       # The patch series is a BUILD INPUT and is exact-pinned like every other
       # BSP input — an IMMUTABLE commit, never a branch. This SHA is the merge
-      # of CERALIVE/rk3588-kernel-patches#1 (the git-am mailbox conversion
-      # pinned at v7.1.5, CI-green against that exact kernel commit).
+      # of CERALIVE/rk3588-kernel-patches#2, which adds patch 0006: the device
+      # tree half of HDMI-RX audio capture. Upstream's 0005 registers the ASoC
+      # codec but touches no DT, and ALSA creates no card for a bare codec — so
+      # every build before this pin shipped a bound hdmi-audio-codec and no
+      # HDMI-IN capture device at all. Predecessor pin: 4809354656a1 (PR #1).
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
+      patches_commit: 9c1cb385098d842a1d5755e3717b308a25bb8305
       patches_series: patches/series
 
       defconfig_base: defconfig
