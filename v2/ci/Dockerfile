@@ -41,6 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   ca-certificates         HTTPS for apt + the pipx git fetch of mkosi
 #   reprepro                local apt repo handling for staged BSP/first-party .debs
 #   systemd-repart          Stage-4 disk/partition assembly
+#   zstd                    faster bootstrap-time compression; avoids mmdebstrap gzip fallback
 #   qemu-user-static        transparent arm64 emulation (binfmt F-flag interpreter)
 #   binfmt-support          registers the qemu interpreters
 #   pipx git python3        pinned mkosi 26 install from the upstream tag
@@ -56,6 +57,7 @@ RUN apt-get update \
       gpg \
       reprepro \
       systemd-repart \
+      zstd \
       qemu-user-static \
       binfmt-support \
       pipx \
