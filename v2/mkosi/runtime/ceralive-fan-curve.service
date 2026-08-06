@@ -1,0 +1,32 @@
+[Unit]
+Description=CeraLive fan curve — lower the pwm-fan zone's first active thermal trip
+Documentation=file:///usr/local/sbin/ceralive-fan-curve
+# The RK3588 package thermal zone ships from the device tree with its first
+# `active` trip at 55 C, so the fan stays completely silent through idle and
+# light load and then snaps on audibly. Lowering that ONE trip makes the fan
+# idle gently instead. The kernel step_wise governor still does all of the
+# actual fan control — this only moves the threshold it acts on, and it never
+# touches the 115 C critical trip, thermal_zone*/mode, or cur_state.
+# Full root cause + the safety argument: /usr/local/sbin/ceralive-fan-curve header.
+#
+# systemd-udev-trigger is the coldplug that gets the pwm-fan platform driver
+# bound and its cooling device registered; After= it is the earliest sensible
+# point, but driver probe is ASYNCHRONOUS so it is NOT a guarantee that
+# /sys/class/thermal/cooling_deviceN exists yet. The script owns that race with
+# a bounded poll rather than a fixed sleep.
+After=systemd-udev-trigger.service
+# Deliberately NOT ordered Before= anything. Nothing on the device consumes the
+# trip temperature, so adding this to another unit's critical path would buy a
+# boot-time dependency for no benefit — and a board with no pwm-fan at all
+# (x86-minipc) would then pay the script's bounded wait on the critical path.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-fan-curve
+# Must exceed the script's own 10s poll deadline so systemd never kills it
+# mid-wait and turns a slow pwm-fan probe into a unit failure.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

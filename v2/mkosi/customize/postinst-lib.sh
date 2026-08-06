@@ -334,6 +334,7 @@ configure_services() {
   done
   suppress_unusable_boot_units
   setup_typec_source_role
+  setup_fan_curve
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must
@@ -464,6 +465,63 @@ setup_typec_source_role() {
   install -D -m 0644 "${src}/ceralive-typec-source.service" "${unit_dir}/ceralive-typec-source.service"
 
   enable_service ceralive-typec-source.service
+}
+
+# Thermal comfort: lower the pwm-fan zone's FIRST `active` trip at boot.
+#
+# The RK3588 package thermal zone ships from the device tree with `active` trips
+# at 55 C and 65 C plus a `critical` trip at 115 C, and its pwm-fan cooling
+# device declares `cooling-levels = <0 120 150 180 210 240 255>` — a range a
+# Rockchip kernel maintainer confirmed reliably spins the fan, which rules out
+# the well-known "cooling-levels too low to overcome stiction" defect class. So
+# the fan is not broken; it is simply never asked to run, because the board idles
+# below 55 C. The result is a board that sits silent while heat accumulates and
+# then snaps the fan on audibly. Measured live on a Rock 5B+: 46-52 C at rest,
+# low 50s under light load, with `trip_point_1_temp` confirmed runtime-writable
+# (55000 -> 40000 -> 55000 round-trip).
+#
+# THE FIX IS ONE SYSFS WRITE, AND THAT IS THE ENTIRE SAFETY ARGUMENT. It lowers
+# the temperature of the first `active`-type trip in the zone bound to the
+# pwm-fan cooling device — nothing else. It does NOT write thermal_zone*/mode
+# (which would also disable the 115 C critical trip — categorically
+# unacceptable), does NOT write cur_state or the hwmon pwm node, and runs no
+# polling/monitoring loop. The kernel's step_wise governor already does 100% of
+# the fan control and was live-proven correct on this board: cur_state
+# auto-steps 0 -> 1 at a real trip crossing and auto-reverts when the
+# temperature falls. Move the goalpost, do not replace the referee.
+#
+# WHY THE SCRIPT DISCOVERS EVERYTHING GENERICALLY. `thermal_zoneN` and
+# `cooling_deviceN` are registration-order artefacts: they differ per board, per
+# kernel tree (vendor 6.1 BSP vs mainline/edge), and were confirmed
+# differently-numbered on real hardware. A hardcoded index is how a "working"
+# fix silently starts rewriting an unrelated zone's trip. The script therefore
+# matches cooling_device*/type == `pwm-fan`, resolves each zone's cdevN symlinks
+# to find the binding zone, and takes the FIRST trip whose type is `active`.
+#
+# BOARD-AGNOSTIC: a board with no thermal class, no pwm-fan cooling device
+# (x86-minipc), no zone bound to one, or no active trip logs an informational
+# line and exits 0. Called from configure_services on every board for exactly
+# that reason — the applicability decision belongs to the hardware at runtime,
+# not to a manifest that would have to be kept in sync by hand.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_typec_source_role / setup_provisioning), never inlined.
+# FAN_CURVE_UNIT_DIR / FAN_CURVE_SBIN_DIR override the install dirs for the
+# offline test.
+setup_fan_curve() {
+  log "lowering the pwm-fan thermal zone's first active trip at boot (ceralive-fan-curve.service — the fan should idle gently, not wait for 55 C)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-fan-curve.sh" ]] \
+    || die "fan-curve script not found: ${src}/ceralive-fan-curve.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-fan-curve.service" ]] \
+    || die "fan-curve unit not found: ${src}/ceralive-fan-curve.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${FAN_CURVE_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${FAN_CURVE_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-fan-curve.sh" "${sbin_dir}/ceralive-fan-curve"
+  install -D -m 0644 "${src}/ceralive-fan-curve.service" "${unit_dir}/ceralive-fan-curve.service"
+
+  enable_service ceralive-fan-curve.service
 }
 
 # SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs
