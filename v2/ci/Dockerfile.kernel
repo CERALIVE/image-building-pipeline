@@ -27,6 +27,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Kernel build closure, in the order `make bindeb-pkg` needs them:
 #   build-essential bc bison flex   kbuild + Kconfig parser
 #   libssl-dev libelf-dev libdw-dev module signing + objtool/BTF
+#   dwarves                         pahole, the DWARF->BTF converter
 #   gcc-aarch64-linux-gnu           the arm64 cross toolchain (RK3588 target)
 #   dpkg-dev debhelper fakeroot     bindeb-pkg's Debian packaging path
 #   kmod cpio rsync zstd xz-utils   depmod, initramfs plumbing, deb compression
@@ -50,6 +51,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #                     builds without it; the linux-headers package does not.
 #
 # libdw-dev is an unconditional `:native` build-dep of the same generated control.
+#
+# dwarves (pahole) is required by any config carrying CONFIG_DEBUG_INFO_BTF — the
+# Armbian vendor .config does. Its absence is NOT a build error: `DEBUG_INFO_BTF`
+# is gated on `PAHOLE_VERSION >= 121`, so kconfig would silently DROP the symbol
+# and ship a kernel with no BTF, which is exactly the class of silent config loss
+# lib/verify-kernel-config.sh exists to catch. Installing the tool is the fix; the
+# gate is the proof.
 RUN dpkg --add-architecture arm64 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -62,6 +70,7 @@ RUN dpkg --add-architecture arm64 \
        libssl-dev:arm64 \
        libelf-dev \
        libdw-dev \
+       dwarves \
        gcc-aarch64-linux-gnu \
        libc6-dev:arm64 \
       dpkg-dev \
@@ -87,4 +96,5 @@ RUN ccache --version \
 
 # Fail the image build LOUDLY if the cross toolchain is not what we asked for.
 RUN aarch64-linux-gnu-gcc --version \
+ && pahole --version \
  && dpkg-architecture -aarm64 -qDEB_HOST_ARCH
