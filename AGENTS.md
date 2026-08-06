@@ -54,6 +54,7 @@ image-building-pipeline/
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
+| **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
@@ -1943,6 +1944,92 @@ it. The persistent version still needs the normal on-hardware board-proof (confi
 reboot leaves `port_type` pinned and the camera enumerates exactly as the live sysfs
 poke did) before it is claimed as shipped.
 
+**The `pwm-fan` cooling device is never ASKED to run below 55 °C — so the fix is to
+move ONE trip point, not to take over the fan** [EXISTS — code merged-ready, NOT in
+any shipped release yet]
+
+The RK3588 package thermal zone comes out of the device tree with two `active` trips
+at 55 °C and 65 °C plus one `critical` trip at 115 °C, and its `pwm-fan` cooling
+device (backed by hwmon `pwmfan`) declares
+`cooling-levels = <0 120 150 180 210 240 255>`. Read on a live Rock 5B+ on 2026-08-05:
+`thermal_zone0` (`package-thermal`) drives `cooling_device4` (`pwm-fan`, `hwmon7`),
+and `trip_point_1_temp` is runtime-writable — a live round-trip `55000 → 40000 →
+55000` succeeded cleanly. Idle SoC temperature on the same board measured **46-52 °C
+at rest**, reaching the low 50s under light load.
+
+So the board is silent through its entire normal operating range and the first thing
+an operator hears is the fan snapping on at 55 °C, after heat has already
+accumulated. **This is NOT the well-known "cooling-levels start too low to overcome
+fan stiction" community defect** — an upstream Rockchip kernel maintainer confirmed
+that PWM range reliably spins this fan, and the board's own behaviour agrees. The fan
+works. It is simply not asked to run.
+
+`ceralive-fan-curve.service` (a oneshot, installed by
+`postinst-lib.sh::setup_fan_curve` from the committed standalone artifacts
+`v2/mkosi/runtime/ceralive-fan-curve.{sh,service}`) lowers the FIRST `active` trip of
+the zone bound to the `pwm-fan` cooling device to **45000 m°C (45 °C)** — one named,
+documented, env-overridable constant (`CERALIVE_FAN_TRIP_MILLIC`), clamped to a
+20-90 °C band so a retune can never push a trip up next to `critical`. 45 °C sits just
+under the measured idle band on purpose: the fan idles at its lowest cooling level and
+keeps a little air moving, instead of staying silent and then becoming audible. Be
+honest about the trade — at the bottom of that idle band the fan will be turning most
+of the time. That is the intent, and it is why the threshold is a constant rather than
+a literal buried in the write.
+
+**The safety property is that the fix reduces to a single sysfs write.** It does NOT
+write `thermal_zone*/mode` (disabling a zone would ALSO disable the 115 °C critical
+trip — categorically unacceptable), does NOT write `cooling_device*/cur_state` or the
+hwmon `pwm1` node, does NOT touch `critical`/`hot`/`passive` trips, and runs no
+polling or monitoring loop. It exits, and the kernel's `step_wise` governor does 100 %
+of the fan control from that point on — which was live-proven correct on this board:
+`cur_state` auto-steps `0 → 1` exactly at a real trip crossing and auto-reverts to `0`
+when the temperature falls back. **Move the goalpost; do not replace the referee.**
+Re-implementing a working kernel governor in userspace would be strictly more code and
+strictly more risk for no gain.
+
+**Discovery is generic, and hardcoding an index is the trap.** `thermal_zoneN` and
+`cooling_deviceN` are registration-order artefacts — they differ per board, differ
+between the vendor 6.1 BSP and the mainline/`edge` tree, and were confirmed
+differently-numbered on real hardware this session. So the script scans
+`/sys/class/thermal/cooling_device*/type` for the exact string `pwm-fan`, resolves
+every `thermal_zone*/cdevN` symlink to find the binding zone (falling back to reading
+`<cdevN>/type` directly), then walks `trip_point_0..` in **numeric** order — a glob
+would sort `trip_point_10` before `trip_point_2` — and takes the first whose
+`trip_point_N_type` reads exactly `active`. Kernel ABI reference:
+`Documentation/ABI/testing/sysfs-class-thermal`.
+
+**Board-agnostic and fail-soft by construction.** No thermal class, no `pwm-fan`
+cooling device (x86-minipc, whose ACPI thermal tree is populated but has no such
+device), no zone bound to one, or no `active` trip in that zone: informational log,
+exit 0. Only ever LOWERS, so re-running is a no-op and a board someone already tuned
+cooler keeps its value. A refused write is a **warning**, not a failure — the ABI
+documents `trip_point_Y_temp` as "RO, Optional", so a zone with no trip-temperature
+setter is a legal configuration and the board simply keeps its stock curve. A write
+the kernel **accepts and then ignores** is a different thing and fails loudly, because
+by then the exact hardware shape has already been proven present.
+
+Like the Type-C unit, the cooling device is created by an asynchronous platform-driver
+probe, so the script polls to a deadline rather than sleeping a fixed amount — but the
+deadline is deliberately short (10 s, vs 30 s for Type-C) and the unit is
+**deliberately not `Before=` anything**, because a board that will never have a
+`pwm-fan` would otherwise pay that wait on the boot critical path.
+
+Guards: `v2/tests/manifest.bats` §18f "fan curve: …" (12 tests). The fixture
+deliberately numbers everything DIFFERENTLY from the reference board — `pwm-fan` is
+`cooling_device7` (not 4), the zone is `thermal_zone3` (not 0), it hangs off that
+zone's `cdev1` behind a CPUFreq `cdev0`, and the first `active` trip is index 1 behind
+a `critical` at index 0 — so any hardcoded index fails the suite. It also pins the
+critical-never-touched property, a decoy CPUFreq-only zone whose own `active` trip
+must not move, the no-`pwm-fan` no-op, idempotency/never-raise, the band clamp, the
+loud read-back failure, and the `configure_services` wiring. `setup_fan_curve` is
+registered in `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`; nothing was added to
+`mkosi.postinst.chroot`, which stays at 925 lines against the 950 ceiling.
+
+**Not yet in a shipped release, and not yet boot-proven.** The trip write itself was
+proven by hand on real hardware; the unit that performs it at boot has not been
+through this repo's build/flash/release cycle. Confirming that a booted board reports
+the lowered trip and that the fan audibly idles is the remaining on-hardware step.
+
 ## ADD-ON SUBSYSTEM [EXISTS]
 
 Feature sysexts are optional, per-board/per-OS `.raw` artifacts delivered
@@ -2401,6 +2488,8 @@ gated item, not the package availability.
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
+- Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong is the threshold it acts on
+- Don't hardcode `thermal_zone0`/`cooling_device4` in the fan-curve script, and don't lower a trip that is not the FIRST `active` one. Both index spaces are registration-order artefacts confirmed to differ per board and per kernel tree, and the `critical` trip is the board's last line of defence
 
 ## KNOWN ISSUES / DEFERRED
 

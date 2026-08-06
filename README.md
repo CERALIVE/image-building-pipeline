@@ -329,6 +329,31 @@ merged-ready but has not been through a release — no published image carries i
 and the persistent behaviour still needs an on-hardware board-proof.** Guards:
 `v2/tests/manifest.bats` §18d.
 
+## Fan Curve
+
+The RK3588 package thermal zone ships from the device tree with its first `active`
+trip at 55 °C (plus a second at 65 °C and a `critical` trip at 115 °C), while the
+board idles at 46-52 °C. The fan is therefore silent through the entire normal
+operating range and only becomes audible once heat has already built up. The
+`pwm-fan` cooling device itself is healthy — its `cooling-levels` range reliably
+spins the fan — it is simply never asked to run.
+
+`ceralive-fan-curve.service` (a boot oneshot) lowers exactly one value: the
+temperature of the **first `active` trip** in the thermal zone bound to the
+`pwm-fan` cooling device, from 55 °C to **45 °C**. The threshold is one named,
+documented constant (`CERALIVE_FAN_TRIP_MILLIC`), clamped to a 20-90 °C band.
+
+It never writes `thermal_zone*/mode` (that would also disable the 115 °C critical
+trip), never writes `cur_state` or the hwmon PWM node, never touches any non-`active`
+trip, and runs no monitoring loop. The kernel's `step_wise` governor keeps doing all
+of the actual fan control.
+
+Discovery is fully generic — it matches `cooling_device*/type == pwm-fan`, resolves
+each zone's `cdevN` symlinks to find the binding zone, and walks trip points in
+numeric order. No zone or cooling-device index is hardcoded, because both are
+registration-order artefacts that differ per board and per kernel tree. A board with
+no such device (x86-minipc) logs one informational line and exits 0.
+
 ## Supported-Modem Matrix + WWAN Module Check
 
 The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA

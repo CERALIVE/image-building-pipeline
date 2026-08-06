@@ -3409,6 +3409,323 @@ SH
 }
 
 # ===========================================================================
+# 18f. Fan curve — the RK3588 package thermal zone ships `active` trips at 55 C
+#      and 65 C plus `critical` at 115 C, so the pwm-fan stays silent through
+#      idle (measured 46-52 C at rest on a Rock 5B+) and then snaps on audibly.
+#      setup_fan_curve (postinst-lib.sh) installs a oneshot that LOWERS exactly
+#      one value: the temperature of the FIRST `active` trip in the zone bound to
+#      the pwm-fan cooling device. The kernel step_wise governor (live-proven to
+#      auto-step cur_state 0 -> 1 at a real trip crossing and revert cleanly)
+#      keeps doing all the actual fan control.
+#
+#      The fixture below deliberately numbers everything DIFFERENTLY from the
+#      reference board — pwm-fan is cooling_device7 (not 4), the zone is
+#      thermal_zone3 (not 0), it is the zone's cdev1 (not cdev0), and the first
+#      `active` trip is index 1 behind a `critical` at index 0. A hardcoded index
+#      anywhere in the discovery therefore fails these tests. No image boot, no
+#      hardware, UNIT scope.
+# ===========================================================================
+
+FAN_SCRIPT() { printf '%s' "$V2/mkosi/runtime/ceralive-fan-curve.sh"; }
+FAN_UNIT() { printf '%s' "$V2/mkosi/runtime/ceralive-fan-curve.service"; }
+# NOTE for the static guards below: the script HEADER deliberately names the
+# reference indices it refuses to hardcode, so every "no hardcoded index" check
+# strips comment lines first and inspects executable lines only.
+
+# fan_fake_thermal <dir> — a synthetic /sys/class/thermal with a decoy CPUFreq
+# cooling device, a decoy zone that must never be touched, and the real pwm-fan
+# zone at non-reference indices.
+fan_fake_thermal() {
+  local root="$1"
+  rm -rf "$root"
+
+  mkdir -p "$root/cooling_device2" "$root/cooling_device7"
+  printf 'thermal-cpufreq-0\n' >"$root/cooling_device2/type"
+  printf 'pwm-fan\n' >"$root/cooling_device7/type"
+  printf '0\n' >"$root/cooling_device7/cur_state"
+  printf '6\n' >"$root/cooling_device7/max_state"
+
+  # Decoy zone: bound only to the CPUFreq cooling device. Its `active` trip is a
+  # tripwire — anything that writes it has stopped keying on pwm-fan.
+  mkdir -p "$root/thermal_zone0"
+  printf 'soc-thermal\n' >"$root/thermal_zone0/type"
+  printf 'enabled\n' >"$root/thermal_zone0/mode"
+  ln -s ../cooling_device2 "$root/thermal_zone0/cdev0"
+  printf '0\n' >"$root/thermal_zone0/cdev0_trip_point"
+  printf 'active\n' >"$root/thermal_zone0/trip_point_0_type"
+  printf '70000\n' >"$root/thermal_zone0/trip_point_0_temp"
+  printf 'critical\n' >"$root/thermal_zone0/trip_point_1_type"
+  printf '115000\n' >"$root/thermal_zone0/trip_point_1_temp"
+
+  # The real subject: pwm-fan hangs off cdev1, behind a CPUFreq cdev0, and the
+  # first `active` trip sits at index 1 behind a `critical` at index 0.
+  mkdir -p "$root/thermal_zone3"
+  printf 'package-thermal\n' >"$root/thermal_zone3/type"
+  printf 'enabled\n' >"$root/thermal_zone3/mode"
+  printf 'step_wise\n' >"$root/thermal_zone3/policy"
+  ln -s ../cooling_device2 "$root/thermal_zone3/cdev0"
+  printf '1\n' >"$root/thermal_zone3/cdev0_trip_point"
+  printf '1\n' >"$root/thermal_zone3/cdev0_weight"
+  ln -s ../cooling_device7 "$root/thermal_zone3/cdev1"
+  printf '1\n' >"$root/thermal_zone3/cdev1_trip_point"
+  printf '1\n' >"$root/thermal_zone3/cdev1_weight"
+  printf 'critical\n' >"$root/thermal_zone3/trip_point_0_type"
+  printf '115000\n' >"$root/thermal_zone3/trip_point_0_temp"
+  printf 'active\n' >"$root/thermal_zone3/trip_point_1_type"
+  printf '55000\n' >"$root/thermal_zone3/trip_point_1_temp"
+  printf 'active\n' >"$root/thermal_zone3/trip_point_2_type"
+  printf '65000\n' >"$root/thermal_zone3/trip_point_2_temp"
+}
+
+fan_attr() { tr -d '[:space:]' <"$1"; }
+
+@test "fan curve: the lowering script + boot unit are installed and enabled" {
+  local unit_dir="$BATS_TEST_TMPDIR/fan-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/fan-sbin"
+  local bin="$BATS_TEST_TMPDIR/fan-bin"
+  local calls="$BATS_TEST_TMPDIR/fan-calls"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$FAN_CALLS"
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" FAN_CALLS="$calls" \
+    CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
+    FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+  [ "$status" -eq 0 ]
+  [ -x "$sbin_dir/ceralive-fan-curve" ]
+  [ -f "$unit_dir/ceralive-fan-curve.service" ]
+
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-fan-curve.service"* ]]
+}
+
+@test "fan curve: discovery is generic — pwm-fan is found at ANY cooling_device/zone/cdev/trip index" {
+  # Reference hardware is cooling_device4 in thermal_zone0; this fixture is
+  # cooling_device7 in thermal_zone3 at cdev1 with the first active trip at
+  # index 1. Any hardcoded index fails here.
+  local sysfs="$BATS_TEST_TMPDIR/fan-generic"
+  fan_fake_thermal "$sysfs"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cooling_device7"* ]]
+  [[ "$output" == *"thermal_zone3"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "45000" ]
+
+  # And no executable line in the shipped script may name a concrete index.
+  run bash -c "grep -vE '^[[:space:]]*#' '$(FAN_SCRIPT)' | grep -E 'thermal_zone[0-9]|cooling_device[0-9]'"
+  [ "$status" -ne 0 ]
+}
+
+@test "fan curve: ONLY the first active trip moves — critical and every other trip are untouched" {
+  # This is the core safety property. `critical` at 115 C is the board's last
+  # line of defence; the second `active` trip and the decoy zone's own active
+  # trip are equally out of scope.
+  local sysfs="$BATS_TEST_TMPDIR/fan-scope"
+  fan_fake_thermal "$sysfs"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_0_temp")" = "115000" ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_2_temp")" = "65000" ]
+  [ "$(fan_attr "$sysfs/thermal_zone0/trip_point_0_temp")" = "70000" ]
+  [ "$(fan_attr "$sysfs/thermal_zone0/trip_point_1_temp")" = "115000" ]
+
+  # Nothing else in the tree may have been written either.
+  [ "$(fan_attr "$sysfs/thermal_zone3/mode")" = "enabled" ]
+  [ "$(fan_attr "$sysfs/thermal_zone0/mode")" = "enabled" ]
+  [ "$(fan_attr "$sysfs/cooling_device7/cur_state")" = "0" ]
+}
+
+@test "fan curve: the script never writes mode/cur_state/pwm and runs no polling loop" {
+  # Disabling a zone would ALSO disable its critical trip; driving cur_state or
+  # the hwmon pwm node means owning the fan forever. The kernel governor already
+  # works — this unit only moves the threshold it acts on.
+  local script unit
+  script="$(FAN_SCRIPT)"
+  unit="$(FAN_UNIT)"
+
+  # No executable line may even MENTION the attributes that would take ownership
+  # of the fan or switch the zone off (and with it the 115 C critical trip).
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -E '(cur_state|emul_temp|/mode|pwm1)'"
+  [ "$status" -ne 0 ]
+
+  # A oneshot that exits, never a resident monitor or a timer.
+  grep -Eq '^Type=oneshot$' "$unit"
+  run grep -E '^(Type=(simple|notify|exec)|Restart=(always|on-failure))' "$unit"
+  [ "$status" -ne 0 ]
+  run grep -E '^(OnCalendar|OnUnitActiveSec)=' "$unit"
+  [ "$status" -ne 0 ]
+
+  # Exactly ONE sysfs write exists in the whole script, and it is the trip temp.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '>\"\\\$\{temp_attr\}\"'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '^[^#]*>[[:space:]]*\"?\\\$\{(THERMAL_DIR|zone|temp_attr)'"
+  [ "$output" -eq 1 ]
+}
+
+@test "fan curve: a board with no pwm-fan cooling device is an informational no-op, not a failure" {
+  # x86-minipc has a populated /sys/class/thermal (ACPI) and no pwm-fan at all.
+  local sysfs="$BATS_TEST_TMPDIR/fan-nofan"
+  rm -rf "$sysfs"
+  mkdir -p "$sysfs/cooling_device0" "$sysfs/thermal_zone0"
+  printf 'Processor\n' >"$sysfs/cooling_device0/type"
+  printf 'acpitz\n' >"$sysfs/thermal_zone0/type"
+  ln -s ../cooling_device0 "$sysfs/thermal_zone0/cdev0"
+  printf 'active\n' >"$sysfs/thermal_zone0/trip_point_0_type"
+  printf '80000\n' >"$sysfs/thermal_zone0/trip_point_0_temp"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" CERALIVE_FAN_WAIT=1 bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no fan to re-curve"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone0/trip_point_0_temp")" = "80000" ]
+
+  # A board with no thermal class at all is equally a clean no-op.
+  run env CERALIVE_FAN_THERMAL_DIR="$BATS_TEST_TMPDIR/fan-absent" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no thermal class"* ]]
+
+  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
+  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$(FAN_SCRIPT)"
+}
+
+@test "fan curve: a pwm-fan zone with no active trip is skipped, never failed or force-written" {
+  local sysfs="$BATS_TEST_TMPDIR/fan-noactive"
+  fan_fake_thermal "$sysfs"
+  printf 'passive\n' >"$sysfs/thermal_zone3/trip_point_1_type"
+  printf 'passive\n' >"$sysfs/thermal_zone3/trip_point_2_type"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"declares no 'active' trip"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_0_temp")" = "115000" ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "55000" ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_2_temp")" = "65000" ]
+}
+
+@test "fan curve: lowering is idempotent and can only ever LOWER, never raise" {
+  local sysfs="$BATS_TEST_TMPDIR/fan-idem"
+  fan_fake_thermal "$sysfs"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "45000" ]
+
+  # Second run: no error, no rewrite, and it says so.
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"at or below"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "45000" ]
+
+  # An operator (or a future DT) that already set a COOLER trip keeps it.
+  printf '38000\n' >"$sysfs/thermal_zone3/trip_point_1_temp"
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "38000" ]
+}
+
+@test "fan curve: the threshold is one named constant, defaulting to 45000 m°C and band-clamped" {
+  # 45 C sits just under the 46-52 C idle band measured on a Rock 5B+, so the fan
+  # idles gently instead of waiting for the stock 55 C. It is a named constant
+  # precisely so it can be retuned without touching the discovery logic.
+  grep -Eq '^FAN_TRIP_MILLICELSIUS="\$\{CERALIVE_FAN_TRIP_MILLIC:-45000\}"$' "$(FAN_SCRIPT)"
+
+  local sysfs="$BATS_TEST_TMPDIR/fan-tunable"
+  fan_fake_thermal "$sysfs"
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" CERALIVE_FAN_TRIP_MILLIC=50000 bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "50000" ]
+
+  # A value anywhere near the 115 C critical trip would defeat the whole point.
+  fan_fake_thermal "$sysfs"
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" CERALIVE_FAN_TRIP_MILLIC=110000 bash "$(FAN_SCRIPT)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"outside the accepted"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_1_temp")" = "55000" ]
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" CERALIVE_FAN_TRIP_MILLIC=forty bash "$(FAN_SCRIPT)"
+  [ "$status" -ne 0 ]
+}
+
+@test "fan curve: a write the kernel ACCEPTS but ignores FAILS loudly (read-back verified)" {
+  # The observable shape of a thermal core that takes the write and then clamps
+  # or discards it: a `cat` double keeps answering the stale value, so the write
+  # succeeds and the read-back disagrees. Silently reporting that as success is
+  # exactly how a fan fix ships without ever having changed anything.
+  local sysfs="$BATS_TEST_TMPDIR/fan-stale"
+  local bin="$BATS_TEST_TMPDIR/fan-stale-bin"
+  fan_fake_thermal "$sysfs"
+  mkdir -p "$bin"
+  cat >"$bin/cat" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    */trip_point_1_temp) printf '55000\n'; exit 0 ;;
+  esac
+done
+exec "$(PATH=/usr/bin:/bin command -v cat)" "$@"
+SH
+  chmod +x "$bin/cat"
+
+  run env PATH="$bin:$PATH" CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"after accepting a write"* ]]
+}
+
+@test "fan curve: an unwritable or nonsensical trip WARNs and exits 0 (RO is a legal ABI configuration)" {
+  # `trip_point_Y_temp` is documented "RO, Optional" in
+  # Documentation/ABI/testing/sysfs-class-thermal, so a zone whose driver offers
+  # no setter is a LEGAL configuration — the board keeps its stock curve and
+  # nothing is broken. That must never become a failed unit on every boot.
+  local sysfs="$BATS_TEST_TMPDIR/fan-nonnumeric"
+  fan_fake_thermal "$sysfs"
+  ln -sf /dev/null "$sysfs/thermal_zone3/trip_point_1_temp"
+
+  run env CERALIVE_FAN_THERMAL_DIR="$sysfs" bash "$(FAN_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not a temperature"* ]]
+  [ "$(fan_attr "$sysfs/thermal_zone3/trip_point_0_temp")" = "115000" ]
+
+  if [ "$(id -u)" -ne 0 ]; then
+    local ro="$BATS_TEST_TMPDIR/fan-readonly"
+    fan_fake_thermal "$ro"
+    chmod 0444 "$ro/thermal_zone3/trip_point_1_temp"
+    run env CERALIVE_FAN_THERMAL_DIR="$ro" bash "$(FAN_SCRIPT)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"refused the write"* ]]
+    [ "$(fan_attr "$ro/thermal_zone3/trip_point_1_temp")" = "55000" ]
+  fi
+}
+
+@test "fan curve: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+  local unit_dir="$BATS_TEST_TMPDIR/fan-failclosed-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/fan-failclosed-sbin"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
+    FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"fan-curve script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-fan-curve.service" ]
+}
+
+@test "fan curve: the fix is wired into configure_services and registered in the drift gate" {
+  # An unreferenced setup function is dead code — the silent-until-55C fan ships.
+  run grep -E '^\s*setup_fan_curve$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  # Standalone-artifact idiom: defined once in postinst-lib.sh, never inlined.
+  grep -Fq 'setup_fan_curve' "$V2/ci/postinst-drift-check.sh"
+  run grep -cE '^setup_fan_curve\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
