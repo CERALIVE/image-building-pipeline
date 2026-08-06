@@ -453,6 +453,52 @@ triggers that would revisit it.
 
 ---
 
+## 9b. `vendor-patched` variant — kernel `.deb` builds and validates, never booted from this pipeline
+
+**Status:** Kernel `.deb` builds end to end on `rock-5b-plus` and passes all four
+`validate_built_kernel_deb` axes; **no image has been assembled or booted from it**
+**Location:** `v2/docs/kernel-build-from-source.md` §2b/§2c/§7, `v2/manifests/families/rk3588.yaml` (`variants.vendor-patched`), `v2/manifests/kernel/rk3588-vendor-patched.absent`
+
+**What it is:** The rk3588 family's second opt-in variant, rebuilding the **vendor
+6.1.115 BSP the shipped image actually runs** from source with
+`CERALIVE/rk3588-vendor-kernel-patches` applied, to restore HDMI-RX audio capture.
+Produces `linux-image-6.1.115-ceralive-vendor-rk35xx` = `6.1.115-ceralive1`
+(deliberately NOT the stock `linux-image-vendor-rk35xx`, so a resolver can never
+substitute the unpatched kernel).
+
+**What is proven:** the series applies cleanly with `git am` on the pinned commit;
+the fetched Armbian `.config` survives `olddefconfig` with 24 reviewed exceptions
+(`2729 of 2753`); the built `.deb` carries the board DTB, 463 `rockchip/*.dtb` and
+2,276 modules; the staged-package uniqueness check passes.
+
+**What is NOT proven:**
+
+* **No image, no boot from this pipeline.** The local runs stopped at `[4/9]`
+  because this environment has no Armbian/apt credentials, so U-Boot, firmware and
+  the Mali userspace were never staged. A credentialed host should complete `[5/9]`
+  onward exactly as `edge` does — but that has not been demonstrated.
+* **`orange-pi-5-plus` has not been built with this variant.** Both RK3588 boards
+  run the same vendor kernel and the OPi 5+ needs no
+  `variant_overrides.vendor-patched` (its DTB name `rk3588-orangepi-5-plus.dtb` is
+  the same in the vendor tree as the production path already declares), so it is
+  expected to work — expected, not shown.
+* **The audio fix itself is separately board-proven, but not end to end.** A
+  hand-built kernel with this series eliminated the PL330 descriptor rejection on a
+  real Rock 5B+ (`.omo/evidence/device-platform-wave4/`
+  `vendor-kernel-hdmi-audio-bench-boot-proof-2.md`). Two limits carry over verbatim:
+  `MAXBURST_PER_FIFO` was never proven necessary in isolation, and end-to-end HDMI
+  audio stayed blocked by the **test source**, which reported `audio_present=0`.
+  This variant makes that fix reproducible from a real build; it does not re-prove
+  the audio path.
+
+**Unblock condition:** build on a credentialed host through `[9/9]`, then flash and
+boot on a physical RK3588 board with an HDMI source that genuinely transmits
+embedded audio, and confirm `audio_present` flips to 1 with capture substreams
+present in `/proc/asound/pcm`. **D3 is not reopened** — the shipped kernel remains
+the prebuilt Armbian vendor BSP.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
@@ -464,7 +510,7 @@ triggers that would revisit it.
 | `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence TODOs (item 6) |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `v2/lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
-| `v2/docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and item 9's gaps |
+| `v2/docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and items 9 / 9b's gaps |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
 

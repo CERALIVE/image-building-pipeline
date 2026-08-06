@@ -5,8 +5,27 @@ fetched from the signed Armbian archive). That is decision **D3**, it is
 unchanged, and it is the only path any shipped image has ever taken.
 
 This document describes an **optional, explicitly opt-in** alternative: build the
-kernel and its in-tree DTBs **from pinned source** with the CeraLive RK3588 patch
+kernel and its in-tree DTBs **from pinned source** with a CeraLive RK3588 patch
 series applied, and use the resulting `.deb` instead of the Armbian one.
+
+Two variants exist, and they target **different kernel tracks with different
+patch repositories** — neither repo's patches apply to the other's tree:
+
+| Variant | Track | Source | Patch series | Why it exists |
+|---|---|---|---|---|
+| `edge` | mainline 7.1 | `linux-stable` `v7.1.5` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
+| `vendor-patched` | **vendor 6.1 BSP — the kernel the shipped image actually runs** | `armbian/linux-rockchip` `rk-6.1-rkr5.1` @ `95e85f6c` | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | restores **HDMI-RX audio capture**, which the stock vendor kernel lost |
+
+`vendor-patched` is the same 6.1.115 BSP the production path installs prebuilt,
+rebuilt from source with five patches applied — three that restore the capture
+capability, one that is **diagnostic instrumentation, not a fix**, and one that
+is the fix that diagnostic found (see
+[§2d](#2d-the-vendor-patch-series-0004-instruments-0005-fixes)). The regression it fixes is
+board-confirmed: `armbian/linux-rockchip` `78c67d98f221` (PR #430) unconditionally
+zeroed `hdmi-audio-codec` capture channels for **every** instance to fix mono
+audio on RK3576 HDMI-**TX**, and since `rk_hdmirx` registers HDMI-**RX** through
+that same codec, `/proc/asound/pcm` shows the card with zero capture substreams
+and nothing anywhere reports an error.
 
 > **Nothing here is on the production path.** With no variant selected, the
 > resolver strips the variant machinery entirely and the resolved build
@@ -57,12 +76,16 @@ than trusted:
 
 | Field | What it pins |
 |---|---|
-| `git_url` + `tag` + **`commit`** | the kernel source. `commit` is the real pin; the build fails if `tag` does not resolve to it, so a moved tag is caught instead of silently building different source |
-| `patches_git_url` + **`patches_commit`** + `patches_series` | the CeraLive patch series. `patches_commit` must be a 40-hex SHA — the schema and the build stage both refuse a branch name |
-| `defconfig_base` + `defconfig_fragment` | the config. Repo-local fragment, merged onto the in-tree defconfig |
+| `git_url` + *(optional)* `tag` + **`commit`** | the kernel source. `commit` is always the real pin; when a `tag` is declared the build fails if it does not resolve to that commit, so a moved tag is caught instead of silently building different source. See [§2b](#2b-two-source-checkout-shapes) |
+| `patches_git_url` + **`patches_commit`** + `patches_series` | the CeraLive patch series. `patches_commit` must be a 40-hex SHA — the schema and the build stage both refuse a branch name. `CERALIVE_KERNEL_PATCHES_LOCAL_REPO` can redirect the *fetch* to a local clone for bench work; it is a mirror override, never a pin override (see [§2e](#2e-bench-only-local-patch-clone)) |
+| `defconfig_base` + `defconfig_fragment` | **defconfig mode.** Repo-local fragment, merged onto the in-tree defconfig |
+| `config_git_url` + `config_commit` + `config_path` *(+ optional `config_absent_symbols`)* | **config-file mode.** A complete `.config` fetched as a plain file at a pinned revision. See [§2c](#2c-two-config-modes) |
 | `builder_image` | the toolchain, as a `repo:tag@sha256:<digest>` |
 | `local_version` + `kernel_release` + `package_version` | the produced package's identity |
 | `dtb_deb_dir` + `dtb_boot_dir` | the platform-layer DTB install mapping ([§4](#4-the-dtb-install-mapping)) |
+
+Exactly one config mode must be declared; the schema's `oneOf` refuses both and
+refuses neither.
 
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
@@ -90,6 +113,163 @@ running board's config.
 pin the tag that was its tip at import (`v7.1.5` = `155b42bec9cb`). That mapping
 is re-derived from `armbian/build` by the patches repo's `scripts/preflight.sh`
 and recorded in its `kernel-pin.env`.
+
+---
+
+## 2b. Two source-checkout shapes
+
+`commit` is always THE pin. `tag` is **optional**, and exists only so a tagged
+upstream can be proven to still resolve to that commit.
+
+| Shape | When | What `build-kernel.sh` runs |
+|---|---|---|
+| tagged | the source publishes a tag for the pin (`edge`, `v7.1.5`) | `git clone --depth 1 --branch <tag>`, then assert `HEAD == commit` |
+| commit-only | the source publishes **no tag on the pinned branch** (`vendor-patched`, `rk-6.1-rkr5.1`) | `git init` + `git fetch --depth 1 <url> <commit>` + `git checkout FETCH_HEAD`, then assert `HEAD == commit` |
+
+Both shapes end at the same assertion, so the guarantee is identical: the tree
+that gets built is the pinned commit or the build dies.
+
+**Do not fabricate a tag to make a commit-only source look tagged.** Armbian's
+vendor BSP branch `rk-6.1-rkr5.1` genuinely has no tags — that is why
+`rk3588-vendor-kernel-patches/scripts/apply.sh` fetches by SHA too. A synthetic
+tag would be a false provenance claim, and cloning the branch **tip** instead
+would silently build newer source under an unchanged pin. GitHub serves an
+arbitrary reachable SHA to a shallow fetch, so the commit-only shape costs the
+same single fetch as a tagged clone.
+
+---
+
+## 2c. Two config modes
+
+The kernel config is as load-bearing as the source, and the two shipped variants
+get theirs from structurally different places.
+
+**defconfig mode** (`edge`) — `make <defconfig_base>`, then
+`scripts/kconfig/merge_config.sh -m` the repo-local `defconfig_fragment` on top.
+Correct for a mainline-track kernel, where no upstream publishes a board config
+and the fragment is CeraLive's own reviewed statement of intent.
+
+**config-file mode** (`vendor-patched`) — fetch a **complete `.config`** as a
+plain file from `config_git_url` at `config_commit`, path `config_path`, and use
+it verbatim as the starting `.config`. Armbian publishes
+`config/kernel/linux-rk35xx-vendor.config`: the exact config
+`linux-image-vendor-rk35xx` is built from, i.e. the config the fleet is running.
+
+**Never substitute `make defconfig` for the vendor path.** A bare arm64
+`defconfig` produces a materially different driver and feature set from the
+2,753-symbol Armbian config, so a kernel built that way is not comparable to what
+the board runs — which removes the entire point of a vendor-track source build
+(the shipped kernel, plus the audio fix, and nothing else).
+
+Both modes then converge on **one** sequence — `make olddefconfig` →
+`make syncconfig` → `verify-kernel-config.sh` — so [§6b](#6b-the-fragment-survival-gate--what-the-fragment-asks-for-must-be-what-ships)'s
+survival gate covers them identically. `build-kernel.sh` deliberately keeps a
+single occurrence of each of those `make` calls; duplicating them per-branch
+breaks the static ordering guard in `manifest.bats`.
+
+### `config_absent_symbols` — the reviewed exception list
+
+A published upstream config can name symbols the pinned source tree **cannot**
+provide. Armbian's `EXTRAWIFI` step
+(`lib/functions/compilation/patch/drivers_network.sh` — `driver_rtw88`,
+`driver_rtl8852bs`, `driver_uwe5622`, …) copies whole **out-of-tree** WiFi/BT
+driver trees into `drivers/net/wireless/` and appends their Kconfig entries at
+build time, before configuring. This pipeline never invokes that framework
+([§3](#3-the-build-backend--and-what-it-is-not)), so 24 of that config's symbols
+have no Kconfig entry here and `olddefconfig` correctly discards them.
+
+`config_absent_symbols` names a repo-local file listing exactly those symbols,
+each justified in the file itself
+(`v2/manifests/kernel/rk3588-vendor-patched.absent`). It is **not** an escape
+hatch:
+
+- a symbol listed there that **did** survive fails the build as a `STALE
+  EXCEPTION`, so the list cannot rot into a blanket opt-out;
+- a dropped symbol **not** on the list still fails exactly as before;
+- both boards' real WiFi adapters are in-tree (`CONFIG_RTW89=m` for the Rock 5B+
+  RTL8852BE, `CONFIG_BRCMFMAC=m` for the OPi 5+ AP6275P) and survive the gate — a
+  guard in `kernel-config-fragment.bats` forbids either from appearing on the
+  list.
+
+Real result on the first `vendor-patched` build:
+`ok: 2729 of 2753 declared symbol(s) survived into the resolved kernel .config
+(24 reviewed exception(s))`.
+
+---
+
+## 2d. The vendor patch series: `0004` instruments, `0005` fixes
+
+`0001`-`0003` restored the HDMI-RX capture PCM and that half is board-confirmed:
+`/dev/snd/pcmC3D0c` exists, opens, and negotiates `hw_params` at several
+buffer/period geometries. It still did not produce audio. Every `read()`
+returned `EIO` and `arecord` wrote a 44-byte header-only WAV, with a `dmesg`
+cleared immediately beforehand staying completely empty — including against a
+second, EDID-confirmed audio-capable source, which retired the earlier "the test
+source carries no audio" explanation.
+
+`0004` changes no behaviour whatsoever. It raises the severity of, and adds state
+to, the failure reports that path already drops, because the silence is
+structural: ALSA's only `-EIO` on the rw transfer path is `wait_for_avail()`'s
+timeout at `pcm_dbg()` level, `snd_dmaengine_pcm_pointer()` discards its
+`dmaengine_tx_status()` return and silently reports position 0, the i2s-tdm
+interrupt that is the sole reporter of RX overrun is optional and its absence is
+unlogged, and a PL330 channel fault is `dev_info()`.
+
+`0005` is what that instrumentation led to, and it is a real fix: the PCM
+lifecycle and the HDMI-RX **audio-domain** lifecycle were never connected. Both
+gating bits — `GLOBAL_SWENABLE.AUDIO_ENABLE` and `AUDIO_PROC_CONFIG0.I2S_EN` —
+are set only by `hdmirx_delayed_work_audio()`, whose sole triggers are a
+one-shot deframer IRQ and an `rk_hdmirx` private V4L2 ioctl no ALSA client
+issues. `snd_pcm_open()`, `hw_params` and `trigger START` therefore all left the
+domain off, so nothing clocked into i2s7_8ch and `wait_for_avail()` timed out
+into `-EIO`. `0005` starts the domain from the capture open and from the paths
+that have just confirmed HDMI lock.
+
+Consequences for this repo:
+
+- **Do not read `--variant vendor-patched` as "HDMI-RX audio works."** `0005`
+  compiles clean and its reasoning is source-verified against the pinned tree,
+  but it has **not** been confirmed on a board. Board-confirmation criteria:
+  `hw_ptr` advances, the read-back line shows `RXS=1` with a **non-zero**
+  `RXFIFOLR`, and a real capture logs **zero** `capture xfer failed` lines.
+- **`0004` is retained in full until `0005` is board-confirmed** — the
+  instrumentation is how that confirmation gets read. Dropping the series back
+  to three patches is a follow-up, not a pending cleanup.
+- **`0005` may never wait on the audio *work item*, only on its completion.**
+  Its first version called `flush_delayed_work()` from `hdmirx_audio_startup()`,
+  which ASoC invokes with hdmi-codec's `hcp->lock` held, while that work calls
+  back into `plugged_cb()`, which takes the same lock — a hard deadlock that
+  fires **only when the fix works** (the no-audio path never reaches
+  `plugged_cb()`). The shipped pin waits on a `completion` the work signals
+  *before* that callback; statement order there is load-bearing.
+- **Do not respond to a fresh EIO with another burst/buffer guess.** `0003`
+  already did that, its own commit message says so, and it was not sufficient.
+
+---
+
+## 2e. Bench-only local patch clone
+
+`CERALIVE_KERNEL_PATCHES_LOCAL_REPO=/abs/path/to/clone` bind-mounts that clone
+read-only into the builder and fetches the series from it over `file://` instead
+of `patches_git_url`.
+
+It exists for one situation: iterating on a patch series whose commit is not
+pushed yet, which is exactly how `0004` above was first built. It is a **mirror**
+override, not a pin override — the manifest keeps its real `https://` URL and its
+real SHA, `patches_commit` still selects the content, and the post-checkout
+`have_p != PATCHES_COMMIT` assertion still runs — so it cannot build different
+patches, only obtain the same immutable SHA from somewhere the manifest URL
+cannot serve it yet. The build logs two `WARN` lines whenever it is active.
+
+It writes a generated gitconfig and points `GIT_CONFIG_GLOBAL` at it. That is not
+decoration and must not be "simplified" into `-c safe.directory=...` or
+`GIT_CONFIG_COUNT`: git deliberately honours `safe.directory` **only** from the
+system or global config, and the mounted clone is owned by the invoking user
+while git in the container runs as root. Doing it the other way fails the fetch
+with `detected dubious ownership`.
+
+**Never set it on a release path.** A published artifact must be reproducible
+from the manifest alone.
 
 ---
 
@@ -366,6 +546,19 @@ Honest status: **`rock-5b-plus --variant edge` has been built end to end** — a
 cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.raw`.
 **Nothing has been booted.** Everything below the compile line is still unproven.
 
+**`vendor-patched` status:** the kernel `.deb` builds and validates on all four
+axes; the series applies cleanly with `git am` against the pinned commit; the
+config-survival gate passes with 24 reviewed exceptions. It has **not been booted
+on hardware from this pipeline**. The underlying fix *was* separately board-proven
+by a hand-built kernel (`.omo/evidence/device-platform-wave4/`
+`vendor-kernel-hdmi-audio-bench-boot-proof-2.md`): the PL330 descriptor rejection
+disappeared and the board stayed healthy. Two limits from that run carry over
+verbatim and must not be overstated — `MAXBURST_PER_FIFO` was never proven
+necessary in isolation (the `RX FIFO Overrun` it addresses never occurred), and
+end-to-end HDMI audio remained blocked by the **test source**, which reported
+`audio_present=0`. This variant makes that fix reproducible from a real build
+instead of a manual patch; it does not re-prove the audio path.
+
 1. **The kernel is not built in CI.** The PR gate runs `DRY_RUN=1`, which emits
    the plan and touches no network, container or compiler. A real kernel build is
    a multi-GB clone and a long cross-compile; wiring it into the PR gate would be
@@ -512,8 +705,9 @@ no second place to keep in sync.
 | `v2/manifests/schema/family.schema.json` | `variants:` map + `kernel_source:` `$defs` |
 | `v2/manifests/schema/board.schema.json` | `variant_overrides:` map + its `$defs` |
 | `v2/manifests/boards/orange-pi-5-plus.yaml` | the `edge` DTB-name override |
-| `v2/manifests/families/rk3588.yaml` | the `edge` variant declaration + every pin |
-| `v2/manifests/kernel/rk3588-edge.fragment` | the Kconfig fragment |
+| `v2/manifests/families/rk3588.yaml` | the `edge` + `vendor-patched` variant declarations + every pin |
+| `v2/manifests/kernel/rk3588-edge.fragment` | the `edge` Kconfig fragment (defconfig mode) |
+| `v2/manifests/kernel/rk3588-vendor-patched.absent` | the `vendor-patched` reviewed allow-absent list (config-file mode, §2c) |
 | `v2/lib/resolve.py` | variant merge, `variants:`/`variant_overrides:` stripping, derived suppression set |
 | `v2/lib/resolve.sh` | `--variant` / `CERALIVE_KERNEL_VARIANT` |
 | `v2/lib/build-kernel.sh` | the build stage |
@@ -522,7 +716,7 @@ no second place to keep in sync.
 | `v2/lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
 | `v2/mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping + the `/boot` artifact mapping (§4b) |
 | `v2/lib/verify-boot-artifacts.sh` | the `[6b/9]` build gate on `/boot` completeness |
-| `v2/lib/verify-kernel-config.sh` | the in-container fragment-survival gate (§6b) |
+| `v2/lib/verify-kernel-config.sh` | the in-container config-survival gate, both modes (§2c, §6b) |
 | `v2/tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `v2/tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |
 | `v2/tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |

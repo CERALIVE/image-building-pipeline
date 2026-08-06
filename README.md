@@ -381,19 +381,54 @@ substring. Proof: `v2/run-tests` section 17.
 
 ## Kernel Build From Source (opt-in)
 
-The rk3588 family manifest carries an **opt-in** `edge` variant that builds the
-kernel and its in-tree DTBs from **pinned source** (`v7.1.5`) with the CeraLive
-RK3588 patch series applied, instead of fetching the prebuilt Armbian kernel:
+The rk3588 family manifest carries two **opt-in** variants that build the kernel
+and its in-tree DTBs from **pinned source**, instead of fetching the prebuilt
+Armbian kernel:
 
 ```bash
-./v2/build rock-5b-plus --variant edge
+./v2/build rock-5b-plus --variant edge             # mainline 7.1 track
+./v2/build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
 ```
 
+They target different kernel tracks with different patch repositories, and
+neither repository's patches apply to the other's tree:
+
+| Variant | Kernel | Patch series | Built package |
+|---|---|---|---|
+| `edge` | mainline `v7.1.5` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.5-ceralive-rk3588` |
+| `vendor-patched` | Armbian vendor BSP 6.1.115 — **the kernel the shipped image actually runs** | `CERALIVE/rk3588-vendor-kernel-patches` | `linux-image-6.1.115-ceralive-vendor-rk35xx` |
+
+`vendor-patched` rebuilds the same 6.1.115 BSP the production path installs
+prebuilt, with three patches that restore **HDMI-RX audio capture**. The stock
+vendor kernel lost it when an upstream fix for RK3576 HDMI *transmit* zeroed
+`hdmi-audio-codec` capture channels for every instance — including the codec
+RK3588 registers HDMI *receive* through. The built package is deliberately named
+differently from the stock one so a resolver can never silently substitute the
+unpatched kernel for it.
+
+Two more patches ride along. The **fourth** is diagnostic rather than
+corrective: with the first three applied the capture PCM registered and opened,
+but every `read()` still returned `EIO` while the kernel log — cleared
+immediately beforehand — stayed completely empty, so that patch changes no
+behaviour and only makes the conditions on that path printable. The **fifth** is
+the fix it led to: the HDMI-RX audio domain is enabled only by a work item that
+a capture open never triggered, so nothing ever clocked into the I2S receiver;
+the patch starts that domain from the capture lifecycle instead.
+
+`0005` compiles clean and is source-verified against the pinned tree, but it has
+**not** been confirmed on a board, and `0004` is retained precisely so that
+confirmation can be read. Do not read this variant as "HDMI-RX audio works": it
+is instrumented and repaired in source, not proven on hardware. See
+[`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §2d.
+
 Every input is exact-pinned — the kernel commit, the patch-series commit (an
-immutable SHA, never a branch), and the builder container digest — and each pin is
-verified after checkout, so a moved tag fails the build instead of silently
-building different source. The backend is plain kernel `make bindeb-pkg`; the
-Armbian build framework is consulted for the branch→version mapping only and is
+immutable SHA, never a branch), the kernel config's source revision, and the
+builder container digest — and each pin is verified after checkout, so a moved
+tag or a moved branch fails the build instead of silently building different
+source. A source whose branch publishes no tags at all (the vendor BSP) is
+fetched by exact commit rather than given a fabricated tag. The backend is plain
+kernel `make bindeb-pkg`; the Armbian build framework is consulted for the
+branch→version mapping and for the plain `.config` file it publishes, and is
 never invoked as the build system.
 
 Selecting the variant suppresses the remote fetch of the kernel/DTB packages
@@ -401,17 +436,32 @@ Selecting the variant suppresses the remote fetch of the kernel/DTB packages
 ones, and fails the build if any package name ends up with both a fetched and a
 built candidate.
 
-The kernel's config is arm64 `defconfig` plus
-[`v2/manifests/kernel/rk3588-edge.fragment`](v2/manifests/kernel/rk3588-edge.fragment),
-and `v2/lib/verify-kernel-config.sh` asserts inside the builder that every symbol
-the fragment declares survived `olddefconfig` — a leaf whose `menuconfig` parent is
-off is otherwise dropped in complete silence. Four real defects have been found
-that way, each disabling a whole capability on a booting, validating image: no
-RTL8852BE WiFi (`CONFIG_RTW89`), no `/dev/dma_heap` for MPP encode
-(`CONFIG_DMABUF_HEAPS`), a `=y` that had been resolving to `=m` for three releases
-(`CONFIG_TYPEC_FUSB302`), and no nftables at all — which failed
+The two variants get their kernel config from structurally different places.
+`edge` uses arm64 `defconfig` plus
+[`v2/manifests/kernel/rk3588-edge.fragment`](v2/manifests/kernel/rk3588-edge.fragment).
+`vendor-patched` instead fetches Armbian's **complete** published
+`config/kernel/linux-rk35xx-vendor.config` at a pinned revision and uses it
+verbatim — that is the exact config `linux-image-vendor-rk35xx` is built from, so
+a bare `make defconfig` would build a materially different driver set and stop
+being comparable to what the board runs.
+
+Either way `v2/lib/verify-kernel-config.sh` asserts inside the builder that every
+symbol the declared config names survived `olddefconfig` — a leaf whose
+`menuconfig` parent is off is otherwise dropped in complete silence. Four real
+defects have been found that way, each disabling a whole capability on a booting,
+validating image: no RTL8852BE WiFi (`CONFIG_RTW89`), no `/dev/dma_heap` for MPP
+encode (`CONFIG_DMABUF_HEAPS`), a `=y` that had been resolving to `=m` for three
+releases (`CONFIG_TYPEC_FUSB302`), and no nftables at all — which failed
 `ceralive-ingest-firewall.service` every boot and left the WAN-side drop of the
 unauthenticated RTMP/SRT ingest ports unapplied (`CONFIG_NF_TABLES`).
+
+For `vendor-patched` a small, reviewed exception list
+([`v2/manifests/kernel/rk3588-vendor-patched.absent`](v2/manifests/kernel/rk3588-vendor-patched.absent))
+records the 24 symbols Armbian's published config names for **out-of-tree** WiFi
+drivers its own build framework copies in at build time, which this pipeline
+deliberately does not run. It is not an escape hatch: a listed symbol that *did*
+survive fails the build as a stale exception, and neither shipped board's adapter
+is on the list — both are in-tree and both pass the gate.
 
 **With no variant selected the resolved production build is byte-identical to
 before this existed**, pinned by committed golden fixtures. Nothing produced by
