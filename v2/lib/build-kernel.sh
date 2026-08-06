@@ -9,13 +9,37 @@
 #
 # BACKEND (decided, pinned — see manifests/schema/family.schema.json $defs):
 #   plain kernel `make bindeb-pkg` from the pinned source tree + the applied
-#   patch series + the defconfig fragment, inside the digest-pinned builder
+#   patch series + the resolved kernel config, inside the digest-pinned builder
 #   container. The Armbian build framework is consulted ONLY for the branch/tag
-#   mapping (done upstream in CERALIVE/rk3588-kernel-patches scripts/preflight.sh
-#   and recorded in its kernel-pin.env); it is NEVER invoked as the build system.
+#   mapping (done upstream in the CERALIVE kernel-patch repos' scripts/preflight.sh
+#   and recorded in their kernel-pin.env) and — in CONFIG-FILE mode — for the
+#   plain `.config` FILE it publishes; it is NEVER invoked as the build system.
 #   That is a deliberate choice: Armbian's framework brings its own patch stack,
-#   config, packaging and userspace assumptions, and adopting it would make "what
+#   packaging and userspace assumptions, and adopting it would make "what
 #   exactly is in this kernel" unanswerable from this repo.
+#
+# TWO SOURCE-CHECKOUT SHAPES. `commit` is always THE pin. `tag` is optional:
+#   * tag present  -> `git clone --depth 1 --branch <tag>`, then assert HEAD == commit
+#                     (a moved tag fails loudly instead of silently building
+#                     different source).
+#   * tag absent   -> shallow-fetch the pinned SHA directly, then assert HEAD ==
+#                     commit. This is the ONLY correct shape for a rolling BSP
+#                     branch that publishes no tags at all (armbian/linux-rockchip
+#                     rk-6.1-rkr5.1). A synthetic tag would misrepresent the source.
+#
+# TWO CONFIG MODES, exactly one of which the manifest declares:
+#   * DEFCONFIG mode    (defconfig_base + defconfig_fragment): `make <target>` then
+#                       merge the repo-local Kconfig fragment on top.
+#   * CONFIG-FILE mode  (config_git_url + config_commit + config_path): fetch a
+#                       COMPLETE `.config` as a plain file from a pinned revision of
+#                       another repo and use it verbatim as the starting .config.
+#                       The vendor BSP works this way — Armbian publishes the exact
+#                       full config the shipped kernel is built from, and a bare
+#                       `make defconfig` would produce a materially different
+#                       driver/feature set, i.e. NOT the kernel that runs on the
+#                       board today.
+#   Both modes then run the SAME olddefconfig -> syncconfig -> verify-kernel-config
+#   sequence; the declared source config is the gate's expectation set either way.
 #
 # OUTPUT CONTRACT:
 #   exactly ONE linux-image-* .deb, carrying the kernel AND the in-tree DTBs.
@@ -38,6 +62,8 @@
 #   KERNEL_SOURCE_PATCHES_GIT_URL KERNEL_SOURCE_PATCHES_COMMIT
 #   KERNEL_SOURCE_PATCHES_SERIES
 #   KERNEL_SOURCE_DEFCONFIG_BASE KERNEL_SOURCE_DEFCONFIG_FRAGMENT
+#   KERNEL_SOURCE_CONFIG_GIT_URL KERNEL_SOURCE_CONFIG_COMMIT KERNEL_SOURCE_CONFIG_PATH
+#   KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS
 #   KERNEL_SOURCE_BUILDER_IMAGE KERNEL_SOURCE_LOCAL_VERSION
 #   KERNEL_SOURCE_KERNEL_RELEASE KERNEL_SOURCE_PACKAGE_VERSION
 #   KERNEL_SOURCE_DTB_DEB_DIR
@@ -71,6 +97,17 @@ Env:
   DRY_RUN=1                      plan only; no network, container or build
   CERALIVE_KERNEL_BUILD_JOBS     make -j (default: nproc)
   CERALIVE_KERNEL_BUILDER_IMAGE  builder image tag (default: ceralive-kernel-builder)
+  CERALIVE_KERNEL_PATCHES_LOCAL_REPO
+                                 BENCH ONLY. Absolute path to a local clone of
+                                 the patches repo, fetched instead of
+                                 kernel_source.patches_git_url. It is a MIRROR
+                                 override, not a pin override: patches_commit
+                                 still selects the content and is still asserted
+                                 after checkout, so this cannot build different
+                                 patches -- only obtain the same immutable SHA
+                                 from somewhere the manifest URL cannot serve it
+                                 yet (an unpushed commit). Never set it on a
+                                 release path.
 EOF
 }
 
@@ -252,6 +289,10 @@ main() {
   local patches_series="${KERNEL_SOURCE_PATCHES_SERIES:-}"
   local defconfig_base="${KERNEL_SOURCE_DEFCONFIG_BASE:-}"
   local fragment_rel="${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-}"
+  local config_git_url="${KERNEL_SOURCE_CONFIG_GIT_URL:-}"
+  local config_commit="${KERNEL_SOURCE_CONFIG_COMMIT:-}"
+  local config_path="${KERNEL_SOURCE_CONFIG_PATH:-}"
+  local absent_rel="${KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS:-}"
   local builder_image="${KERNEL_SOURCE_BUILDER_IMAGE:-}"
   local local_version="${KERNEL_SOURCE_LOCAL_VERSION:-}"
   local kernel_release="${KERNEL_SOURCE_KERNEL_RELEASE:-}"
@@ -261,13 +302,10 @@ main() {
   local dtb_name="${DTB_NAME:-}"
 
   require_kernel_source_field git_url "${git_url}"
-  require_kernel_source_field tag "${tag}"
   require_kernel_source_field commit "${commit}"
   require_kernel_source_field patches_git_url "${patches_url}"
   require_kernel_source_field patches_commit "${patches_commit}"
   require_kernel_source_field patches_series "${patches_series}"
-  require_kernel_source_field defconfig_base "${defconfig_base}"
-  require_kernel_source_field defconfig_fragment "${fragment_rel}"
   require_kernel_source_field builder_image "${builder_image}"
   require_kernel_source_field local_version "${local_version}"
   require_kernel_source_field kernel_release "${kernel_release}"
@@ -284,12 +322,46 @@ main() {
   [[ "${patches_commit}" =~ ^[0-9a-f]{40}$ ]] \
     || die "kernel_source.patches_commit must be an exact 40-character SHA, never a branch or tag (got '${patches_commit}')"
 
+  # Validated here rather than at mount time so a mistyped bench path fails
+  # before any container work, like every other input assertion in this block.
+  local local_patches="${CERALIVE_KERNEL_PATCHES_LOCAL_REPO:-}"
+  [[ -z "${local_patches}" || ( "${local_patches}" == /* && -d "${local_patches}/.git" ) ]] \
+    || die "CERALIVE_KERNEL_PATCHES_LOCAL_REPO must be an absolute path to a git clone (got '${local_patches}')"
+
   [[ "${arch}" == "arm64" ]] \
     || die "kernel-build-from-source is wired for arm64 only (resolved arch '${arch}'); an x86 family has no kernel_source block and must never reach this stage"
 
-  local fragment="${V2_DIR}/${fragment_rel}"
-  [[ -f "${fragment}" ]] \
-    || die "defconfig fragment not found: ${fragment} (kernel_source.defconfig_fragment='${fragment_rel}', resolved against ${V2_DIR})"
+  # The schema already enforces exactly-one-of, but a half-specified config is
+  # the one mistake that would still BUILD — producing a kernel whose driver set
+  # nobody chose — so it is re-asserted here rather than trusted.
+  local config_mode="" config_desc="" fragment="" absent_list=""
+  if [[ -n "${config_git_url}${config_commit}${config_path}" ]]; then
+    config_mode="config-file"
+    require_kernel_source_field config_git_url "${config_git_url}"
+    require_kernel_source_field config_commit "${config_commit}"
+    require_kernel_source_field config_path "${config_path}"
+    [[ -z "${defconfig_base}" && -z "${fragment_rel}" ]] \
+      || die "kernel_source declares BOTH config-file mode (config_git_url/config_commit/config_path) and defconfig mode (defconfig_base/defconfig_fragment); exactly one config source may be declared"
+    [[ "${config_commit}" =~ ^[0-9a-f]{40}$ ]] \
+      || die "kernel_source.config_commit must be an exact 40-character SHA, never a branch or tag (got '${config_commit}')"
+    config_desc="${config_path} @ ${config_commit} (${config_git_url})"
+    if [[ -n "${absent_rel}" ]]; then
+      absent_list="${V2_DIR}/${absent_rel}"
+      [[ -f "${absent_list}" ]] \
+        || die "config_absent_symbols list not found: ${absent_list} (kernel_source.config_absent_symbols='${absent_rel}', resolved against ${V2_DIR})"
+      config_desc="${config_desc} [allow-absent: ${absent_rel}]"
+    fi
+  else
+    config_mode="defconfig"
+    require_kernel_source_field defconfig_base "${defconfig_base}"
+    require_kernel_source_field defconfig_fragment "${fragment_rel}"
+    [[ -z "${absent_rel}" ]] \
+      || die "kernel_source.config_absent_symbols is only meaningful in config-file mode; a repo-local defconfig fragment declares exactly what it means and has no upstream-injected symbols to except"
+    fragment="${V2_DIR}/${fragment_rel}"
+    [[ -f "${fragment}" ]] \
+      || die "defconfig fragment not found: ${fragment} (kernel_source.defconfig_fragment='${fragment_rel}', resolved against ${V2_DIR})"
+    config_desc="${defconfig_base} + ${fragment_rel}"
+  fi
 
   local kernel_pkg="${KERNEL_PACKAGES:-}"
   # The manifest's kernel_packages under a kernel_source variant is the single
@@ -303,20 +375,29 @@ main() {
   local epoch="${SOURCE_DATE_EPOCH:-0}"
 
   log_info "=== kernel-build-from-source: board='${board}' ==="
-  log_info "  kernel      ${git_url} tag=${tag} commit=${commit}"
+  log_info "  kernel      ${git_url} tag=${tag:-<none: commit-only source>} commit=${commit}"
   log_info "  patches     ${patches_url} commit=${patches_commit} series=${patches_series}"
-  log_info "  config      ${defconfig_base} + ${fragment_rel}"
+  log_info "  config      ${config_mode}: ${config_desc}"
   log_info "  builder     ${builder_image}"
   log_info "  release     ${kernel_release} (LOCALVERSION=${local_version})"
   log_info "  package     ${kernel_pkg}=${package_version}/${arch}"
   log_info "  board DTB   ${dtb_path}"
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    log_info "DRY-RUN would run: git clone --branch ${tag} ${git_url} && git rev-parse HEAD == ${commit}"
+    if [[ -n "${tag}" ]]; then
+      log_info "DRY-RUN would run: git clone --branch ${tag} ${git_url} && git rev-parse HEAD == ${commit}"
+    else
+      log_info "DRY-RUN would run: git fetch --depth 1 ${git_url} ${commit} && git rev-parse HEAD == ${commit} (commit-only source: the pinned branch publishes no tag)"
+    fi
     log_info "DRY-RUN would run: git fetch ${patches_url} ${patches_commit} && git am \$(series ${patches_series})"
     log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image} -t $(resolve_kernel_builder_tag "${builder_image}") -f ${KERNEL_BUILDER_DOCKERFILE}"
-    log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragment_rel}"
-    log_info "DRY-RUN would run: verify-kernel-config.sh ${fragment_rel} .config (fragment-survival gate, after olddefconfig)"
+    if [[ "${config_mode}" == "config-file" ]]; then
+      log_info "DRY-RUN would run: git fetch --depth 1 ${config_git_url} ${config_commit} && cp ${config_path} .config (full config, no defconfig target)"
+      log_info "DRY-RUN would run: verify-kernel-config.sh ${config_path} .config ${absent_rel} (config-survival gate, after olddefconfig)"
+    else
+      log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragment_rel}"
+      log_info "DRY-RUN would run: verify-kernel-config.sh ${fragment_rel} .config (fragment-survival gate, after olddefconfig)"
+    fi
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
@@ -341,6 +422,41 @@ main() {
   install -d -m 0755 "${ccache_dir}"
   log_info "ccache: ${ccache_dir}"
 
+  # BENCH ONLY: fetch the SAME pinned commit from a local clone. The manifest
+  # keeps its real https URL and its real SHA; only the transport moves, and the
+  # post-checkout `have_p != PATCHES_COMMIT` assertion below still proves the
+  # exact commit was obtained.
+  #
+  # The generated gitconfig is not optional and cannot be replaced by -c or
+  # GIT_CONFIG_COUNT: git deliberately honours safe.directory ONLY from the
+  # system or global config, and the bind-mounted clone is owned by the invoking
+  # user while git in the container runs as root.
+  local -a patches_mount=() patches_env=()
+  local patches_fetch_url="${patches_url}"
+  if [[ -n "${local_patches}" ]]; then
+    cat >"${work}/gitconfig" <<-EOF
+	[safe]
+		directory = /in/patches-src
+		directory = /in/patches-src/.git
+	EOF
+    patches_mount=(
+      -v "${local_patches}:/in/patches-src:ro"
+      -v "${work}/gitconfig:/in/gitconfig:ro"
+    )
+    patches_env=(-e "GIT_CONFIG_GLOBAL=/in/gitconfig")
+    patches_fetch_url="file:///in/patches-src"
+    log_warn "BENCH: patch series fetched from local clone ${local_patches} instead of ${patches_url}"
+    log_warn "BENCH: commit ${patches_commit} is still asserted after checkout; do NOT use this on a release path"
+  fi
+
+  # In config-file mode there IS no repo-local fragment, so the mount is added
+  # only for defconfig mode; a `-v :/in/fragment.config` with an empty source is
+  # a runtime error, not a no-op.
+  local -a fragment_mount=()
+  [[ -n "${fragment}" ]] && fragment_mount=(-v "${fragment}:/in/fragment.config:ro")
+  local -a absent_mount=()
+  [[ -n "${absent_list}" ]] && absent_mount=(-v "${absent_list}:/in/allow-absent.list:ro")
+
   # The whole pinned-input dance runs INSIDE the container so the git, make and
   # toolchain versions are the pinned ones end to end — a host-side clone would
   # reintroduce exactly the host dependence the container exists to remove.
@@ -348,17 +464,24 @@ main() {
     -e "KERNEL_GIT_URL=${git_url}" \
     -e "KERNEL_TAG=${tag}" \
     -e "KERNEL_COMMIT=${commit}" \
-    -e "PATCHES_GIT_URL=${patches_url}" \
+    -e "PATCHES_GIT_URL=${patches_fetch_url}" \
     -e "PATCHES_COMMIT=${patches_commit}" \
     -e "PATCHES_SERIES=${patches_series}" \
     -e "DEFCONFIG_BASE=${defconfig_base}" \
+    -e "CONFIG_GIT_URL=${config_git_url}" \
+    -e "CONFIG_COMMIT=${config_commit}" \
+    -e "CONFIG_PATH=${config_path}" \
+    -e "CONFIG_ALLOW_ABSENT=${absent_list:+/in/allow-absent.list}" \
     -e "LOCAL_VERSION=${local_version}" \
     -e "KERNEL_RELEASE=${kernel_release}" \
     -e "PACKAGE_VERSION=${package_version}" \
     -e "KERNEL_PACKAGE=${kernel_pkg}" \
     -e "BUILD_JOBS=${KERNEL_BUILD_JOBS}" \
     -e "SOURCE_DATE_EPOCH=${epoch}" \
-    -v "${fragment}:/in/fragment.config:ro" \
+    "${patches_mount[@]}" \
+    "${patches_env[@]}" \
+    "${fragment_mount[@]}" \
+    "${absent_mount[@]}" \
     -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
     -v "${work}/out:/out" \
     -v "${ccache_dir}:/ccache" \
@@ -368,12 +491,26 @@ main() {
       export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
       export KBUILD_BUILD_USER=ceralive KBUILD_BUILD_HOST=ceralive-builder
 
-      echo "== cloning ${KERNEL_GIT_URL} at ${KERNEL_TAG}"
-      git clone --depth 1 --branch "${KERNEL_TAG}" "${KERNEL_GIT_URL}" /src/linux
-      cd /src/linux
+      if [ -n "${KERNEL_TAG}" ]; then
+        echo "== cloning ${KERNEL_GIT_URL} at ${KERNEL_TAG}"
+        git clone --depth 1 --branch "${KERNEL_TAG}" "${KERNEL_GIT_URL}" /src/linux
+        cd /src/linux
+      else
+        # Commit-only source: the pinned branch publishes no tags, so there is no
+        # ref to clone. A server that serves an arbitrary reachable SHA gives the
+        # exact tree for one shallow fetch; inventing a tag would be a lie about
+        # provenance, and cloning the branch tip would silently build newer source.
+        echo "== fetching ${KERNEL_GIT_URL} at ${KERNEL_COMMIT} (no tag on the pinned branch)"
+        mkdir -p /src/linux
+        git init -q /src/linux
+        cd /src/linux
+        git remote add origin "${KERNEL_GIT_URL}"
+        git fetch --depth 1 origin "${KERNEL_COMMIT}"
+        git checkout -q FETCH_HEAD
+      fi
       have="$(git rev-parse HEAD)"
       if [ "${have}" != "${KERNEL_COMMIT}" ]; then
-        echo "FATAL: tag ${KERNEL_TAG} resolves to ${have}, pinned commit is ${KERNEL_COMMIT} — the tag moved; refusing to build different source under the same pin" >&2
+        echo "FATAL: kernel source checked out ${have}, pinned commit is ${KERNEL_COMMIT} — refusing to build different source under the same pin" >&2
         exit 1
       fi
       git config user.email kernel-build@ceralive.tv
@@ -403,21 +540,45 @@ main() {
       fi
       echo "== applied ${applied} patch(es)"
 
-      echo "== config: ${DEFCONFIG_BASE} + fragment"
-      make -j"${BUILD_JOBS}" "${DEFCONFIG_BASE}"
-      ./scripts/kconfig/merge_config.sh -m .config /in/fragment.config
+      # Both config modes converge on ONE olddefconfig/syncconfig/verify sequence;
+      # only the way the starting .config is obtained differs. `declared_config`
+      # is the expectation set the survival gate is run against.
+      if [ -n "${CONFIG_GIT_URL}" ]; then
+        echo "== config: full .config ${CONFIG_PATH} @ ${CONFIG_COMMIT}"
+        git init -q /src/kconfig
+        git -C /src/kconfig fetch --depth 1 "${CONFIG_GIT_URL}" "${CONFIG_COMMIT}"
+        git -C /src/kconfig checkout -q FETCH_HEAD
+        have_c="$(git -C /src/kconfig rev-parse HEAD)"
+        if [ "${have_c}" != "${CONFIG_COMMIT}" ]; then
+          echo "FATAL: config repo checked out ${have_c}, pinned ${CONFIG_COMMIT}" >&2
+          exit 1
+        fi
+        if [ ! -f "/src/kconfig/${CONFIG_PATH}" ]; then
+          echo "FATAL: ${CONFIG_PATH} does not exist at ${CONFIG_COMMIT} in ${CONFIG_GIT_URL}" >&2
+          exit 1
+        fi
+        declared_config=/src/declared.config
+        cp "/src/kconfig/${CONFIG_PATH}" "${declared_config}"
+        cp "${declared_config}" .config
+      else
+        echo "== config: ${DEFCONFIG_BASE} + fragment"
+        declared_config=/in/fragment.config
+        make -j"${BUILD_JOBS}" "${DEFCONFIG_BASE}"
+        ./scripts/kconfig/merge_config.sh -m .config "${declared_config}"
+      fi
       make olddefconfig
       # `kernelrelease` is in the kernel no-sync-config-targets list, so it reads a
       # STALE include/config/auto.conf. Without this, setlocalversion still sees the
       # defconfig CONFIG_LOCALVERSION_AUTO=y and appends the git-describe suffix.
       make syncconfig
 
-      # merge_config.sh -m merges TEXT only and never reports a symbol the
+      # Neither merge_config.sh -m nor a straight `cp` reports a symbol the
       # following olddefconfig DROPS for an unmet visibility condition — which is
-      # how 7.1.5 shipped with no rtw89 WiFi driver. Runs before bindeb-pkg so
-      # the failure is fast.
-      echo "== verifying the fragment survived olddefconfig"
-      bash /in/verify-kernel-config.sh /in/fragment.config .config
+      # how 7.1.5 shipped with no rtw89 WiFi driver, and how a config-file build
+      # would silently lose e.g. BTF when its host tool is absent. Runs before
+      # bindeb-pkg so the failure is fast.
+      echo "== verifying the declared config survived olddefconfig"
+      bash /in/verify-kernel-config.sh "${declared_config}" .config ${CONFIG_ALLOW_ABSENT}
 
       release="$(make -s kernelrelease LOCALVERSION="${LOCAL_VERSION}")"
       if [ "${release}" != "${KERNEL_RELEASE}" ]; then
