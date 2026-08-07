@@ -335,6 +335,7 @@ configure_services() {
   suppress_unusable_boot_units
   setup_typec_source_role
   setup_fan_curve
+  setup_fan_kickstart
   setup_led_status
 }
 
@@ -581,6 +582,59 @@ setup_led_status() {
   install -D -m 0644 "${src}/ceralive-led-status.service" "${unit_dir}/ceralive-led-status.service"
 
   enable_service ceralive-led-status.service
+}
+
+# Break the fan's static friction when the governor first asks it to spin.
+#
+# setup_fan_curve (above) fixed WHEN the fan is asked to run. This fixes the fact
+# that the state it is asked into is too WEAK to start it from a stop: measured on
+# a live Orange Pi 5 Plus, the pwm-fan's first active state is 70/255 (~27.5% duty),
+# which sustains a turning rotor but does not break stiction on a stopped one. The
+# fan sits energised and stalled until someone nudges it by hand — the exact
+# operator report. Upstream Linux ships an in-driver equivalent
+# (`fan-stop-to-start-percent`/`-us` in pwm-fan.c), but those properties postdate
+# both v6.1 and v6.6, so this kernel has no DT knob and the fix must be userspace.
+#
+# THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so: the fan returns to
+# state 0 whenever the board cools below the trip and re-enters an active state
+# when it warms again, many times over a device's uptime. A boot-time oneshot like
+# setup_fan_curve/setup_led_status/setup_typec_source_role would fix only the first
+# dead start. Type=exec + Restart=on-failure follows the repo's existing long-running
+# precedent (ceralive-rtmp-gateway.service).
+#
+# UNLIKE setup_fan_curve, THIS ONE DOES WRITE cur_state — and that is deliberate,
+# bounded, and not a contradiction of the fan-curve rule. It writes exactly twice per
+# 0 -> nonzero edge: max_state, then the governor's own commanded state back again.
+# The restore is MANDATORY, not cosmetic: on this kernel a userspace cur_state write
+# is STICKY (cur_state_store never clears cdev->updated, thermal_cdev_update()
+# short-circuits on it, and step_wise clears it only when its target CHANGES), so
+# "write and let the governor's next poll correct it" would leave the fan at 100%
+# for as long as the temperature stayed in one trip band. Full mechanism, with the
+# exact kernel sources: the script header.
+#
+# BOARD-AGNOSTIC: no thermal class, no pwm-fan cooling device (x86-minipc), or a
+# max_state below 2 (no room to kick above the first active state) are informational
+# log-and-exit-0 outcomes. Called from configure_services on every board for that
+# reason — the applicability decision belongs to the hardware at runtime.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_fan_curve / setup_led_status), never inlined.
+# FAN_KICKSTART_UNIT_DIR / FAN_KICKSTART_SBIN_DIR override the install dirs for the
+# offline test.
+setup_fan_kickstart() {
+  log "monitoring the pwm-fan for dead starts (ceralive-fan-kickstart.service — its first active state is too weak to break stiction)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-fan-kickstart.sh" ]] \
+    || die "fan-kickstart script not found: ${src}/ceralive-fan-kickstart.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-fan-kickstart.service" ]] \
+    || die "fan-kickstart unit not found: ${src}/ceralive-fan-kickstart.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${FAN_KICKSTART_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${FAN_KICKSTART_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-fan-kickstart.sh" "${sbin_dir}/ceralive-fan-kickstart"
+  install -D -m 0644 "${src}/ceralive-fan-kickstart.service" "${unit_dir}/ceralive-fan-kickstart.service"
+
+  enable_service ceralive-fan-kickstart.service
 }
 
 # SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs

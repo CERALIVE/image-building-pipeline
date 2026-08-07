@@ -354,6 +354,40 @@ numeric order. No zone or cooling-device index is hardcoded, because both are
 registration-order artefacts that differ per board and per kernel tree. A board with
 no such device (x86-minipc) logs one informational line and exits 0.
 
+## Fan Kick-Start
+
+The fan curve above fixed *when* the fan is asked to spin. This fixes the fact that
+the state it is asked *into* cannot start it from a dead stop. On an Orange Pi 5 Plus
+the `pwm-fan` cooling device declares `cooling-levels = <0 70 75 80 100>` out of 255,
+so the first active state is only **~27.5 % duty** — enough to keep a turning rotor
+turning, not enough to break static friction on a stopped one. The fan sits energised
+and stalled until someone nudges it by hand, which is exactly the long-standing
+operator complaint that the fan "gets stuck and needs a push".
+
+`ceralive-fan-kickstart.service` watches the cooling device's own `cur_state` and, on
+a **0 → nonzero transition only**, drives it to that device's `max_state` for a
+bounded ~1 s before writing the governor's commanded state straight back. It is
+upstream Linux's own answer to this problem — `fan-stop-to-start-percent` /
+`fan-stop-to-start-us` in `pwm-fan.c` — ported to userspace because those device-tree
+properties postdate both v6.1 and v6.6 and so do not exist in this board's kernel.
+
+**The restore write is mandatory, not cosmetic.** On this kernel a userspace
+`cur_state` write is *sticky*: the sysfs store never clears the cooling device's
+`updated` flag, the thermal core's re-assert path short-circuits while that flag is
+set, and `step_wise` clears it only when its computed target changes. "Kick and let
+the governor's next poll correct it" would therefore leave the fan at full speed for
+as long as the temperature stayed inside one trip band. Writing the governor's own
+state back is what makes the full-PWM period equal to the timer instead.
+
+Unlike every other unit in this family it is **resident**, not a boot oneshot, because
+the fan returns to state 0 and re-enters an active state many times over a device's
+uptime and each re-entry is a fresh dead start. It never fires on `nonzero → nonzero`
+or on `anything → 0`, never writes the hwmon PWM nodes, `thermal_zone*/mode` or any
+trip point, and takes its kick value from the discovered device's own `max_state` —
+never a hardcoded index and never a hand-invented "100 %". A board with no `pwm-fan`,
+or one whose only active state is already `max_state` (nothing to kick above), logs
+one informational line and exits 0.
+
 ## Status LEDs
 
 The board's indicator LEDs are registered by the kernel and then left completely

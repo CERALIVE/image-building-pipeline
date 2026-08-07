@@ -1,0 +1,73 @@
+[Unit]
+Description=CeraLive fan kick-start — brief full-PWM nudge when the pwm-fan leaves a dead stop
+Documentation=file:///usr/local/sbin/ceralive-fan-kickstart
+# The board's pwm-fan enters its FIRST active state at 70/255 (~27.5% duty) —
+# measured on a real Orange Pi 5 Plus. That is enough to keep a spinning rotor
+# spinning but not to break stiction from a stop, so the fan sits energised and
+# stalled until someone nudges it by hand. This watches the cooling device's own
+# cur_state for a 0 -> nonzero transition and briefly drives it to max_state,
+# then writes the governor's own commanded state straight back.
+#
+# It never disables the governor, never writes thermal_zone*/mode, never writes
+# any trip point, and never touches the hwmon pwm1/pwm1_enable nodes. The full
+# root cause, the upstream prior art it ports, and — most importantly — WHY the
+# restore write is mandatory rather than cosmetic (a userspace cur_state write
+# is STICKY against this kernel's governor, it is NOT self-correcting) are in
+# the script header: /usr/local/sbin/ceralive-fan-kickstart.
+#
+# systemd-udev-trigger is the coldplug that gets the pwm-fan platform driver
+# bound and its cooling device registered; After= it is the earliest sensible
+# point, but driver probe is ASYNCHRONOUS so it is NOT a guarantee that
+# /sys/class/thermal/cooling_deviceN exists yet. The script owns that race with
+# a bounded poll rather than a fixed sleep.
+After=systemd-udev-trigger.service
+# ceralive-fan-curve lowers the trip this unit then watches the crossings of.
+# Neither depends on the other for correctness, but starting after it means the
+# very first crossing of the lowered trip is already covered. It is a plain
+# ordering edge, not a Requires=, so a board that has no fan curve to apply is
+# unaffected.
+After=ceralive-fan-curve.service
+
+[Service]
+# Type=exec, not the oneshot used by ceralive-fan-curve/-led-status/-typec-source:
+# this is the first genuinely RESIDENT unit in that family. It has to be, because
+# the fan drops back to state 0 whenever the board cools below the trip and
+# re-enters an active state when it warms again — many times over a device's
+# uptime, and every one of those re-entries is a fresh dead start. A boot-time
+# oneshot would fix only the first.
+#
+# `exec` rather than the bare `simple` default (matching this repo's existing
+# resident precedent, ceralive-rtmp-gateway.service): systemd only considers the
+# unit started once the binary has actually been execve'd, so a missing or
+# non-executable script is reported as a start failure instead of silently
+# "succeeding" and never watching anything.
+Type=exec
+ExecStart=/usr/local/sbin/ceralive-fan-kickstart
+
+# Restart=on-failure, deliberately NOT always. The script exits 0 on purpose on
+# any board with no pwm-fan cooling device (x86-minipc) or with no room to kick
+# above its first active state — those are informational no-ops, not faults, and
+# Restart=always would respawn them in a hot loop forever. RestartSec keeps even
+# a genuinely crashing build from becoming a spin.
+Restart=on-failure
+RestartSec=5s
+
+# This runs for the life of the device, so it is explicitly not allowed to
+# compete with the media path. The work per tick is one small sysfs read.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# ProtectKernelTunables= is deliberately left at its default (no). Enabling it
+# remounts /sys read-only, which would break the ONE write this unit exists to
+# make. Do not "harden" it on without re-reading this line.
+
+[Install]
+WantedBy=multi-user.target

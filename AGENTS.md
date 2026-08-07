@@ -55,6 +55,7 @@ image-building-pipeline/
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
+| **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `v2/mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `v2/mkosi/customize/postinst-lib.sh` `setup_led_status` + `v2/mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
@@ -2238,6 +2239,157 @@ proven by hand on real hardware; the unit that performs it at boot has not been
 through this repo's build/flash/release cycle. Confirming that a booted board reports
 the lowered trip and that the fan audibly idles is the remaining on-hardware step.
 
+**The fan's FIRST active state is 70/255 (~27.5 %) — enough to keep a spinning rotor
+spinning, not enough to start a stopped one — and a userspace `cur_state` write is
+STICKY, so the nudge MUST hand the governor's own state back** [EXISTS — code
+merged-ready, NOT in any shipped release yet]
+
+`setup_fan_curve` above fixed **when** the fan is asked to run. This is the next
+problem, and it is a different one: the state it is asked **into** cannot start it
+from a dead stop. Read on a live Orange Pi 5 Plus:
+
+```
+cooling_device4/type                    -> pwm-fan
+cooling_device4/max_state               -> 4
+pwm-fan/of_node/cooling-levels          -> 0 70 75 80 100     (out of 255)
+hwmon7/name                             -> pwmfan
+thermal_zone0/trip_point_1_temp         -> 45000              (fan-curve's fix, active)
+```
+
+Five states (0-4), so the FIRST active state — the one the governor enters when the
+zone crosses the now-45 °C trip — is `70/255 ≈ 27.5 %` duty. That is a classic
+DC-motor stiction asymmetry: sufficient to sustain rotation, insufficient to break
+static friction from rest. The fan sits energised and stalled until a fingertip
+nudges it, which is exactly the operator's report ("gets stuck, needs a push, then
+runs fine").
+
+**This is a real, upstream-acknowledged hardware behaviour with an upstream fix this
+kernel does not have.** Current Linux `pwm-fan` grew `fan-stop-to-start-percent` /
+`fan-stop-to-start-us` (`Documentation/devicetree/bindings/hwmon/pwm-fan.yaml`),
+implemented in `__set_pwm()` as *boost → `usleep_range()` → apply the real target*,
+with `ctx->pwm_usec_from_stopped` defaulting to **250 000 µs**. Those properties are
+absent from **both v6.1 and v6.6** (checked), so this board's vendor 6.1.115 BSP has
+no DT knob and the equivalent has to come from userspace.
+`ceralive-fan-kickstart.service` is a faithful userspace port of that mechanism —
+**including its explicit restore step**, which is the part that matters most.
+
+**THE LOAD-BEARING KERNEL FACT — DO NOT "SIMPLIFY" THE RESTORE AWAY.** The obvious
+design is "write `max_state`, then stop writing and let the governor's next
+scheduled poll overwrite it with whatever the real temperature calls for."
+**On this kernel that is FALSE**, and shipping it would leave the fan at 100 %
+indefinitely. Verified by reading the exact tree the board runs
+(`armbian/linux-rockchip` @ `95e85f6cb496`, 6.1.115), three facts that compose:
+
+- `drivers/thermal/thermal_sysfs.c` `cur_state_store()` calls
+  `cdev->ops->set_cur_state()` and **does NOT clear `cdev->updated`**.
+- `drivers/thermal/thermal_helpers.c` is
+  `thermal_cdev_update() { if (!cdev->updated) { __thermal_cdev_update(cdev); … } }`
+  — while `updated` is set it re-asserts **nothing at all**.
+- `drivers/thermal/gov_step_wise.c` clears `updated` **only when its newly computed
+  target differs**: `if (instance->initialized && old_target == instance->target) continue;`.
+
+So while the temperature stays inside one trip band the governor's target does not
+change, `updated` stays true, and the governor never writes again — the kick would
+persist, unbounded. Worse, `get_target_state()` derives its next step from the REAL
+current state (`clamp(cur_state + 1, lower, upper)`), so on a rising trend the
+governor **reads back the kicked value and adopts `max_state` as its own target**:
+the nudge latches itself in. Both failure modes were confirmed by source reading, and
+the kernel's own `cur_state` write path is what makes them possible.
+
+Hence the shipped design, which is a bounded three-phase transaction per edge:
+**(1)** write the device's own `max_state`; **(2)** sleep exactly `CERALIVE_FAN_KICK_MS`
+(default **1000**); **(3)** write the governor's own pre-kick commanded state back —
+*unless* `cur_state` no longer reads the kick value, in which case the governor made a
+fresher decision during the window and its newer verdict is honoured instead. The
+restore is what makes the full-PWM period equal to the sleep rather than "until the
+temperature happens to leave the band", and it restores the driver's cached state so
+step_wise's `cur_state + 1` arithmetic resumes from the correct rung.
+
+**Why 1000 ms and not upstream's 250 ms.** Upstream boosts inside the same
+`pwm_apply` that first energises the fan, so its clock starts at power-on. A polled
+userspace watcher necessarily applies the boost up to one poll interval later, by
+which point the rotor is not *about to start* but already energised and stalled —
+breaking a stall wants more margin than avoiding one. 1000 ms also clears the top of
+the ~300-800 ms spin-up band of the 40-80 mm 5 V fans these SBCs use while still
+reading as a brief transient. The risk is asymmetric: because the kick always ends in
+an explicit restore, erring long costs a fraction of a second of fan noise and can
+never be a thermal risk, while erring short silently fails to fix anything. The value
+is one named, band-clamped constant (100-5000 ms) so it can be retuned on the bench.
+
+**THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so.** Unlike
+`ceralive-fan-curve` / `-led-status` / `-typec-source`, this cannot be a boot
+oneshot: the fan drops back to state 0 whenever the board cools below the trip and
+re-enters an active state when it warms again, many times over a device's uptime, and
+**every** re-entry is a fresh dead start. `Type=exec` + `Restart=on-failure` +
+`RestartSec=5s` follows this repo's existing long-running precedent
+(`ceralive-rtmp-gateway.service`); `Type=exec` over the bare `simple` default so a
+missing or non-executable script is a start failure rather than a unit that silently
+"succeeds" and watches nothing. **`Restart=always` is deliberately WRONG here** — the
+script exits 0 on purpose on a board with no fan, and `always` would respawn that in a
+hot loop forever. It runs `Nice=10` / `CPUWeight=20` / `IOSchedulingClass=idle`,
+because it runs for the life of the device and must never compete with the media path;
+the work per tick is one small sysfs read at 4 Hz. **`ProtectKernelTunables=` is
+deliberately left at its default (`no`)** — enabling it remounts `/sys` read-only and
+would break the one write this unit exists to make.
+
+**Fires ONLY on a genuine 0 → nonzero edge.** `nonzero → nonzero` (the governor
+climbing or descending under its own control) and `anything → 0` never fire, and a
+governor that jumped straight to `max_state` is already commanding full PWM so there
+is nothing to kick above — the same skip condition upstream uses (`update = duty <
+from_stopped`). The previous state is **primed from the device at startup**, never
+assumed to be 0, so a `Restart=` mid-life does not produce a spurious nudge.
+
+**Discovery is generic, and hardcoding is the trap — same lesson as `setup_fan_curve`.**
+`cooling_device4`/`hwmon7` are registration-order artefacts. The script scans
+`cooling_device*/type` for the exact string `pwm-fan` and takes BOTH the kick value
+and the skip decision from that device's **own `max_state`**, never a hand-invented
+"100 %" and never this board's particular `0 70 75 80 100` levels, which it does not
+read at all — it works purely in cooling-state space, so it is independent of whatever
+duty cycles a given board's DT maps those states onto.
+
+**Board-agnostic and fail-soft:** no thermal class, no `pwm-fan` cooling device
+(x86-minipc), or `max_state < 2` are informational log-and-exit-0 outcomes.
+`max_state < 2` is its own explicit case: if the only active state IS `max_state`,
+entering it already commands full PWM and there is no room to kick above the target,
+so kicking would be a pointless write. Like the fan curve it polls to a short deadline
+(10 s) for the asynchronous driver probe rather than sleeping a fixed amount, and it is
+deliberately **not `Before=` anything**.
+
+**It does NOT write `pwm1`/`pwm1_enable`** (the cooling device's own `cur_state` is
+this board's sanctioned control surface; driving the hwmon node means owning the fan
+forever, including across suspend and shutdown), does NOT write `thermal_zone*/mode`,
+and does NOT touch any trip point — that is `setup_fan_curve`'s job and this unit
+deliberately does not overlap with it. `setup_fan_curve` and its two artifacts are
+byte-untouched by this change.
+
+Guards: `v2/tests/manifest.bats` §29 "fan kickstart: …" (17 tests). The fixture
+deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not the
+reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
+`cooling_device2` that must never be written, so any hardcoded index and any
+hand-invented kick value fails the suite. It pins the kick→restore round trip against
+an independently sampled `cur_state` timeline, the bounded window, all three
+never-fire edges, startup priming, the mid-kick governor-re-assert race, a
+second cooldown/reheat cycle firing again (the property that makes a oneshot wrong),
+the `max_state`-is-READ-never-a-literal contract, the no-`pwm1`/`mode`/trip rule, the
+restore write plus its `STICKY`/`cdev->updated` rationale being present, the
+no-`pwm-fan` and single-active-state no-ops, the resident-unit contract, fail-closed
+missing source, and the `configure_services` wiring. All 17 were mutation-verified:
+deleting the restore, widening the edge test, hardcoding the kick to `4`, dropping the
+single-state skip, priming to 0, and dropping the race guard each fail the suite.
+`setup_fan_kickstart` is registered in `postinst-drift-check.sh`'s
+`CONSOLIDATED_FUNCS`; nothing was added to `mkosi.postinst.chroot`.
+
+**Not yet in a shipped release, and not yet boot-proven.** The stiction diagnosis
+rests on live-hardware readings and the sticky-write mechanism on the pinned kernel
+sources; the unit itself has not been through this repo's build/flash/release cycle.
+The remaining on-hardware step is to confirm that a real 0 → 1 crossing produces an
+audible full-speed burst that settles back within ~1 s and that the fan starts every
+time without a manual push. It can be logic-verified without root the same way the LED
+fix was — mirror the real `/sys/class/thermal` into a writable `/tmp` tree
+(`cp -r --dereference` the `cooling_device*` dirs, keeping `type`/`cur_state`/`max_state`)
+and point `CERALIVE_FAN_KICK_THERMAL_DIR` at it, then drive `cur_state` 0 → 1 by hand
+and watch the monitor's journal lines and the mirrored file.
+
 **The board's indicator LEDs are registered by the kernel and then never
 configured — they sit at `trigger=none`, `brightness=0`, dark, forever** [EXISTS —
 code merged-ready, NOT in any shipped release yet]
@@ -2812,7 +2964,10 @@ gated item, not the package availability.
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
-- Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong is the threshold it acts on
+- Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop to `ceralive-fan-curve`. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong for THAT unit is the threshold it acts on. (`ceralive-fan-kickstart` is the one sanctioned exception, and only to the `cur_state`/resident-loop half: it is a separate unit that writes `cur_state` exactly twice per 0 → nonzero edge and always hands the governor's own state back. `mode`, `pwm1` and trip points remain out of bounds for both.)
+- Don't delete `ceralive-fan-kickstart`'s restore write as a redundant round trip, and don't rewrite it as "kick, then let the governor's next poll correct it". On this kernel a userspace `cur_state` write is STICKY: `cur_state_store()` never clears `cdev->updated`, `thermal_cdev_update()` short-circuits while that flag is set, and `step_wise` clears it only when its computed target CHANGES — so with the temperature inside one trip band the governor never writes again and the fan stays at 100 % indefinitely. Upstream's own in-driver version restores explicitly too
+- Don't kick to a hand-invented "100 %", to `255`, or to the reference board's `max_state` of `4`, and don't read `cooling-levels`. The kick value is the discovered device's OWN `max_state`; the unit works purely in cooling-state space so it does not care what duty cycles a board's DT maps those states onto
+- Don't give `ceralive-fan-kickstart` `Restart=always` or `ProtectKernelTunables=yes`. It exits 0 on purpose on a board with no `pwm-fan`, so `always` becomes a hot respawn loop; `ProtectKernelTunables=yes` remounts `/sys` read-only and breaks the one write the unit exists to make
 - Don't hardcode `thermal_zone0`/`cooling_device4` in the fan-curve script, and don't lower a trip that is not the FIRST `active` one. Both index spaces are registration-order artefacts confirmed to differ per board and per kernel tree, and the `critical` trip is the board's last line of defence
 - Don't write `brightness` on an LED that has a trigger, and don't hardcode `blue:indicator-1`/`green:indicator-2` in the LED script. A trigger hands the LED to the kernel — writing brightness afterwards fights it, exactly as writing `cur_state` would fight the thermal governor — and those names are vendor DTS labels with no semantics that differ per board and per kernel tree
 - Don't touch the `mmc0::`/`mmc1::` LED or go looking for a red one. The `mmc*` LEDs are the MMC core's own already-working activity LEDs, and there is NO red LED in the kernel's LED class on this board at all — the visible red one is a hardwired power-rail indicator with no software visibility

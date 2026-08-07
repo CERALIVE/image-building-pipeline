@@ -60,7 +60,7 @@ readonly CONSOLIDATED_FUNCS=(
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
   setup_provisioning setup_rtmp_gateway
   setup_ingest_firewall setup_typec_source_role setup_fan_curve
-  setup_led_status
+  setup_fan_kickstart setup_led_status
 )
 
 FAIL=0
