@@ -401,7 +401,7 @@ DIFFERENT patch repos, and neither repo's patches apply to the other's tree:
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
 | `edge` | mainline 7.1 | `v7.1.5` / `155b42bec9cb` | `CERALIVE/rk3588-kernel-patches@9c1cb385098d` | mainline option kept pinned + buildable |
-| `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@db5d0e8a0711` | restores HDMI-RX audio capture + diagnostic instrumentation |
+| `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
 Both patch commits are **immutable SHAs**, never branches. Full write-up:
 [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md).
@@ -447,10 +447,21 @@ first version (`94d20ab0a4f7`) called `flush_delayed_work()` from
 while that work calls back into `plugged_cb()`, which takes the same lock. That
 deadlock fires ONLY when the fix works — the no-audio path never reaches
 `plugged_cb()`, so a source without audio looked fine and a source with audio
-hung the capture open in D state. The shipped pin (`db5d0e8a0711`) waits on a
+hung the capture open in D state. The shipped pin (`de46c1acba42`) waits on a
 `completion` the work signals BEFORE that callback, and disarms the work under a
 gate before a synchronous cancel on every teardown path. The statement order
 there is load-bearing; do not "simplify" it back to a flush.
+
+**Pin hygiene — a squash-merge in the patches repo ORPHANS the SHA pinned here.**
+`db5d0e8a0711` was the predecessor pin and the tip of the 3-commit branch that
+became `CERALIVE/rk3588-vendor-kernel-patches` PR #1. Squash-merging it produced a
+brand-new commit (`de46c1acba42`) and discarded the originals, so `db5d0e8a0711`
+is no longer reachable from that repo's `main` and
+`git fetch --depth 1 <url> db5d0e8a0711` from a fresh clone FAILS. The PR gate
+cannot catch this — it is `DRY_RUN=1` and never fetches the patch series. After
+merging anything in either patch repo, re-pin `patches_commit` to the SHA that
+actually landed on `main`, and verify it with
+`git ls-remote <patches-url> <sha>` before committing.
 
 **Adding it required generalizing `build-kernel.sh` in exactly two places**, both
 of which are now first-class modes rather than special cases:

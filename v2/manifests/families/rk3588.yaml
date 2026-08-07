@@ -236,18 +236,27 @@ variants:
       # dmesg; 0004 made that printable; its output showed the HDMI-RX audio
       # domain is never enabled, because AUDIO_ENABLE / I2S_EN are set only by
       # rk_hdmirx's audio work and nothing in the ALSA capture path started it.
-      # 0005 starts it. Expect this pin to move again — and drop 0004 — once
-      # 0005 is confirmed on a board. Predecessor pin: e3f97655ae47 (0001-0004).
+      # 0005 starts it. Dropping 0004 now that 0005 is confirmed is a follow-up,
+      # not pending cleanup. Predecessor pin: e3f97655ae47 (0001-0004).
       #
-      # db5d0e8a0711 corrects 0005 itself: its first version waited for the
-      # audio work with flush_delayed_work() from a callback that ASoC invokes
-      # with hdmi-codec's hcp->lock held, while that work calls back into
-      # plugged_cb() which takes the same lock — a deadlock that fires only when
-      # audio IS present. It now waits on a completion the work signals before
-      # that callback, and disarms the work under a gate before a synchronous
-      # cancel on every teardown path. Predecessor pin: 94d20ab0a4f7.
+      # de46c1acba42 carries the correction to 0005 itself: its first version
+      # waited for the audio work with flush_delayed_work() from a callback that
+      # ASoC invokes with hdmi-codec's hcp->lock held, while that work calls back
+      # into plugged_cb() which takes the same lock — a deadlock that fires only
+      # when audio IS present. It now waits on a completion the work signals
+      # before that callback, and disarms the work under a gate before a
+      # synchronous cancel on every teardown path.
+      #
+      # BOARD-CONFIRMED on a Radxa ROCK 5B+: hw_ptr advanced 15934388 ->
+      # 16030718 over ~2.007 s (≈48 kHz), RXS=1 with a non-zero RXFIFOLR=0xa,
+      # zero "capture xfer failed" lines, and CeraUI's audio meters showed real
+      # fluctuating levels. This is a confirmed-working series, not a WIP one.
+      # Predecessor pin: db5d0e8a0711 (squash-merged into de46c1a via PR #1,
+      # https://github.com/CERALIVE/rk3588-vendor-kernel-patches/pull/1). The
+      # squash discarded the original commits, so db5d0e8a0711 is unreachable on
+      # that repo's main and a fresh clone's patch fetch would FAIL on it.
       patches_git_url: https://github.com/CERALIVE/rk3588-vendor-kernel-patches.git
-      patches_commit: db5d0e8a0711020d6f4782444e74a676ed6f8077
+      patches_commit: de46c1acba420d69d30a82b3bc0f526293efd9a3
       patches_series: patches/series
 
       # The exact full .config Armbian builds linux-image-vendor-rk35xx from,
