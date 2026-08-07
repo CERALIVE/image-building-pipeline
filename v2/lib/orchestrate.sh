@@ -324,10 +324,20 @@ main() {
     # build-kernel.sh is a separate process and reads the whole pin set from the
     # environment; every field it requires must be exported here or it fails
     # closed on a "half-specified pin".
-    export KERNEL_SOURCE_GIT_URL KERNEL_SOURCE_TAG KERNEL_SOURCE_COMMIT
+    export KERNEL_SOURCE_GIT_URL KERNEL_SOURCE_COMMIT
     export KERNEL_SOURCE_PATCHES_GIT_URL KERNEL_SOURCE_PATCHES_COMMIT
     export KERNEL_SOURCE_PATCHES_SERIES
-    export KERNEL_SOURCE_DEFCONFIG_BASE KERNEL_SOURCE_DEFCONFIG_FRAGMENT
+    # Optional by schema: `tag` is absent for a commit-only source, and exactly
+    # one config mode is declared, so the other mode's keys never resolve. They
+    # are defaulted rather than bare-exported so build-kernel.sh always receives
+    # a defined value and can branch on emptiness instead of on unset-ness.
+    export KERNEL_SOURCE_TAG="${KERNEL_SOURCE_TAG:-}"
+    export KERNEL_SOURCE_DEFCONFIG_BASE="${KERNEL_SOURCE_DEFCONFIG_BASE:-}"
+    export KERNEL_SOURCE_DEFCONFIG_FRAGMENT="${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-}"
+    export KERNEL_SOURCE_CONFIG_GIT_URL="${KERNEL_SOURCE_CONFIG_GIT_URL:-}"
+    export KERNEL_SOURCE_CONFIG_COMMIT="${KERNEL_SOURCE_CONFIG_COMMIT:-}"
+    export KERNEL_SOURCE_CONFIG_PATH="${KERNEL_SOURCE_CONFIG_PATH:-}"
+    export KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS="${KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS:-}"
     export KERNEL_SOURCE_BUILDER_IMAGE KERNEL_SOURCE_LOCAL_VERSION
     export KERNEL_SOURCE_KERNEL_RELEASE KERNEL_SOURCE_PACKAGE_VERSION
     export KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR

@@ -62,7 +62,11 @@ CONFIG_C="a string"
 EOF
   run "$VERIFY" "$WORK/frag" "$WORK/resolved"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"all 5 fragment symbol(s) survived"* ]]
+  # All 5 declared symbols survived, and with no allow-absent list none of them
+  # was waved through — the count of exceptions must be zero, not just absent
+  # from the message.
+  [[ "$output" == *"5 of 5 declared symbol(s) survived"* ]]
+  [[ "$output" == *"(0 reviewed exception(s))"* ]]
 }
 
 @test "verify-kernel-config: a symbol dropped entirely fails and names it" {
@@ -221,7 +225,11 @@ EOF
 @test "build-kernel.sh runs the gate after olddefconfig and before bindeb-pkg" {
   local src="$V2/lib/build-kernel.sh"
   grep -q ':/in/verify-kernel-config.sh:ro' "$src"
-  grep -q 'bash /in/verify-kernel-config.sh /in/fragment.config .config' "$src"
+  # The invocation is mode-agnostic: `declared_config` is /in/fragment.config in
+  # defconfig mode and the fetched full .config in config-file mode. Asserting a
+  # literal /in/fragment.config here would forbid the config-file mode entirely.
+  grep -q 'bash /in/verify-kernel-config.sh "${declared_config}" .config' "$src"
+  grep -q 'declared_config=/in/fragment.config' "$src"
 
   local sync verify pkg
   sync="$(grep -n 'make syncconfig' "$src" | tail -1 | cut -d: -f1)"
@@ -229,6 +237,87 @@ EOF
   pkg="$(grep -n 'bindeb-pkg$' "$src" | tail -1 | cut -d: -f1)"
   [ "$sync" -lt "$verify" ]
   [ "$verify" -lt "$pkg" ]
+}
+
+@test "build-kernel.sh gates BOTH config modes — there is exactly one verify call" {
+  # The two modes differ only in how the starting .config is obtained. A second
+  # verify invocation would mean one mode grew its own (and could lose it).
+  local src="$V2/lib/build-kernel.sh"
+  [ "$(grep -c 'bash /in/verify-kernel-config.sh' "$src")" -eq 1 ]
+  grep -q 'declared_config=/src/declared.config' "$src"
+}
+
+# --- allow-absent exceptions (config-file mode) ------------------------------
+
+@test "verify-kernel-config: an allow-absent symbol may be missing without failing" {
+  printf 'CONFIG_A=y\nCONFIG_OUT_OF_TREE=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf '# reviewed\nCONFIG_OUT_OF_TREE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 reviewed exception"* ]]
+}
+
+@test "verify-kernel-config: an allow-absent symbol that DID survive is a STALE exception and fails" {
+  # Non-vacuity: without this the list could silently become a blanket opt-out.
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_A\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"STALE EXCEPTION"* ]]
+  [[ "$output" == *"CONFIG_A"* ]]
+}
+
+@test "verify-kernel-config: the allowlist does NOT weaken the gate for unlisted symbols" {
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_SOMETHING_ELSE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CONFIG_B: DROPPED"* ]]
+}
+
+@test "verify-kernel-config: a bare (non-CONFIG_) allow-absent entry is refused" {
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf '\n' >"$WORK/res"
+  printf 'A\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"full CONFIG_ symbol name"* ]]
+}
+
+@test "verify-kernel-config: an unreadable allow-absent list fails loudly, never silently empty" {
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/does-not-exist"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"allow-absent list not readable"* ]]
+}
+
+@test "rk3588-vendor-patched.absent: every entry is a CONFIG_ symbol and the list is deduped" {
+  local list="$V2/manifests/kernel/rk3588-vendor-patched.absent"
+  [ -f "$list" ]
+  local syms
+  syms="$(sed -e 's/#.*//' "$list" | awk 'NF{print $1}')"
+  [ -n "$syms" ]
+  while IFS= read -r s; do
+    [[ "$s" == CONFIG_* ]] || { echo "not a CONFIG_ symbol: $s"; false; }
+  done <<<"$syms"
+  [ "$(wc -l <<<"$syms")" -eq "$(sort -u <<<"$syms" | wc -l)" ]
+}
+
+@test "rk3588-vendor-patched.absent: neither shipped board's WiFi driver is excepted" {
+  # Both RK3588 boards use IN-TREE drivers (RTL8852BE -> rtw89, AP6275P ->
+  # brcmfmac). If either ever appears here it means the gate was silenced on a
+  # symbol the fleet actually needs.
+  local list="$V2/manifests/kernel/rk3588-vendor-patched.absent"
+  ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
 }
 
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {

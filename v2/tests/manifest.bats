@@ -5108,6 +5108,235 @@ YAML
   grep -q 'CONFIG_LOCALVERSION_AUTO=n' "$V2/$frag"
 }
 
+# --- vendor-patched: commit-only source + full-config mode -------------------
+#
+# The vendor BSP differs from `edge` in two STRUCTURAL ways, and both were
+# generalizations of build-kernel.sh rather than special cases:
+#   Gap A  rk-6.1-rkr5.1 publishes NO tags, so `tag` had to become optional and
+#          the checkout had to learn a shallow-fetch-by-SHA shape.
+#   Gap B  Armbian ships a COMPLETE .config for this kernel; `make defconfig`
+#          would build a materially different driver set, so the config source
+#          had to learn "start from a fetched full .config".
+
+@test "vendor-patched: the variant resolves a commit-only source (NO tag) " {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_SOURCE_COMMIT='95e85f6cb496c75807c5b16f158853578e7e7d1b'"* ]]
+  # A synthetic tag would misrepresent the source: there is no such ref.
+  [[ "$output" != *"KERNEL_SOURCE_TAG="* ]]
+}
+
+@test "vendor-patched: the variant resolves the FULL Armbian .config, not a defconfig target" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_SOURCE_CONFIG_PATH='config/kernel/linux-rk35xx-vendor.config'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_CONFIG_COMMIT='5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39'"* ]]
+  # Substituting a bare defconfig would silently build a different kernel.
+  [[ "$output" != *"KERNEL_SOURCE_DEFCONFIG_BASE="* ]]
+  [[ "$output" != *"KERNEL_SOURCE_DEFCONFIG_FRAGMENT="* ]]
+}
+
+@test "vendor-patched: the built package name CANNOT collide with the stock vendor kernel" {
+  # A collision is the one failure that yields a plausible image instead of an
+  # error: the local repo would pick one by version and the board could boot the
+  # UNPATCHED kernel. The stock name must also still be suppressed from fetch.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-6.1.115-ceralive-vendor-rk35xx'"* ]]
+  [[ "$output" != *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
+  local line
+  line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
+  [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
+  [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
+}
+
+@test "vendor-patched: the allow-absent list the manifest names actually exists" {
+  local rel
+  rel="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null" \
+         | sed -n "s/^KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS='\(.*\)'$/\1/p")"
+  [ -n "$rel" ]
+  [ -f "$V2/$rel" ]
+}
+
+@test "vendor-patched: the pinned patches commit is an exact 40-hex SHA of the VENDOR repo" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
+  [ "$status" -eq 0 ]
+  # The mainline sibling's patches do not apply to this tree and vice versa.
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-vendor-kernel-patches.git'"* ]]
+  local sha
+  sha="$(sed -n "s/^KERNEL_SOURCE_PATCHES_COMMIT='\(.*\)'$/\1/p" <<<"$output")"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+}
+
+@test "vendor-patched: DRY_RUN plans a fetch-by-SHA checkout and a fetched full .config" {
+  serialize build-plan
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus --variant vendor-patched
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kernel_variant=vendor-patched"* ]]
+  [[ "$output" == *"git fetch --depth 1 https://github.com/armbian/linux-rockchip.git 95e85f6cb496c75807c5b16f158853578e7e7d1b"* ]]
+  [[ "$output" == *"commit-only source: the pinned branch publishes no tag"* ]]
+  [[ "$output" == *"cp config/kernel/linux-rk35xx-vendor.config .config (full config, no defconfig target)"* ]]
+  [[ "$output" == *"config-survival gate"* ]]
+  [[ "$output" == *"linux-image-6.1.115-ceralive-vendor-rk35xx_6.1.115-ceralive1_arm64.deb"* ]]
+  # The plan must not perform anything.
+  [[ "$output" != *"docker run"* ]]
+}
+
+@test "vendor-patched: selecting it does NOT move the edge variant" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_DEFCONFIG_BASE='defconfig'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"BUILDER_IMAGE='debian:trixie-"* ]]
+  # edge declares no config-file trio at all.
+  [[ "$output" != *"KERNEL_SOURCE_CONFIG_GIT_URL="* ]]
+}
+
+@test "bench patch clone: the override is a MIRROR, never a pin override" {
+  local src="$LIB_DIR/build-kernel.sh"
+  # The clone is read-only and reached over file://, so the container cannot
+  # write to the operator's checkout and shallow fetch still works.
+  grep -q 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$src"
+  grep -q '/in/patches-src:ro' "$src"
+  grep -q 'patches_fetch_url="file:///in/patches-src"' "$src"
+  # The pin assertion must stay UNCONDITIONAL: this may change where the commit
+  # comes from, never which commit is built.
+  grep -q 'have_p="\$(git -C /src/patches rev-parse HEAD)"' "$src"
+  grep -q 'FATAL: patches repo checked out' "$src"
+  # ... and the manifest URL keeps flowing into the log line, so a bench build
+  # still says which pin it is standing in for.
+  grep -q 'BENCH: patch series fetched from local clone' "$src"
+  grep -q 'do NOT use this on a release path' "$src"
+}
+
+@test "bench patch clone: safe.directory comes from GIT_CONFIG_GLOBAL, not -c" {
+  local src="$LIB_DIR/build-kernel.sh"
+  # git honours safe.directory ONLY from system/global config. A -c flag or a
+  # GIT_CONFIG_COUNT entry is silently ignored and the fetch dies with
+  # "detected dubious ownership", which is a real failure this already hit.
+  grep -q 'GIT_CONFIG_GLOBAL=/in/gitconfig' "$src"
+  ! grep -q 'GIT_CONFIG_KEY_0=safe.directory' "$src"
+  ! grep -qE -- '-c[[:space:]]+safe\.directory' "$src"
+}
+
+@test "bench patch clone: unset means the manifest URL is used verbatim" {
+  local src="$LIB_DIR/build-kernel.sh"
+  grep -q 'local patches_fetch_url="\${patches_url}"' "$src"
+  # And no shipped manifest may hardcode the bench path.
+  ! grep -rq 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$V2/manifests"
+}
+
+@test "bench patch clone: a relative path or a non-git dir is refused" {
+  run env DRY_RUN=0 CERALIVE_KERNEL_PATCHES_LOCAL_REPO=relative/path \
+    ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
+    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_SERIES=patches/series \
+    KERNEL_SOURCE_DEFCONFIG_BASE=defconfig \
+    KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
+    KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
+    KERNEL_SOURCE_LOCAL_VERSION=-x KERNEL_SOURCE_KERNEL_RELEASE=1.0-x \
+    KERNEL_SOURCE_PACKAGE_VERSION=1.0-x1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-x/rockchip \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/kobench"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CERALIVE_KERNEL_PATCHES_LOCAL_REPO"* ]]
+}
+
+@test "build-kernel: a half-declared config-file mode is refused before anything runs" {
+  run env DRY_RUN=1 \
+    ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
+    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_SERIES=patches/series \
+    KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
+    KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
+    KERNEL_SOURCE_LOCAL_VERSION=-x KERNEL_SOURCE_KERNEL_RELEASE=1.0-x \
+    KERNEL_SOURCE_PACKAGE_VERSION=1.0-x1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-x/rockchip \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko3"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"config_commit"* ]]
+}
+
+@test "build-kernel: declaring BOTH config modes is refused" {
+  run env DRY_RUN=1 \
+    ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
+    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_SERIES=patches/series \
+    KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
+    KERNEL_SOURCE_CONFIG_COMMIT=5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39 \
+    KERNEL_SOURCE_CONFIG_PATH=config/kernel/x.config \
+    KERNEL_SOURCE_DEFCONFIG_BASE=defconfig \
+    KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
+    KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
+    KERNEL_SOURCE_LOCAL_VERSION=-x KERNEL_SOURCE_KERNEL_RELEASE=1.0-x \
+    KERNEL_SOURCE_PACKAGE_VERSION=1.0-x1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-x/rockchip \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko4"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exactly one config source"* ]]
+}
+
+@test "build-kernel: a floating config_commit is refused before anything runs" {
+  run env DRY_RUN=1 \
+    ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
+    KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
+    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
+    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_SERIES=patches/series \
+    KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
+    KERNEL_SOURCE_CONFIG_COMMIT=main \
+    KERNEL_SOURCE_CONFIG_PATH=config/kernel/x.config \
+    KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
+    KERNEL_SOURCE_LOCAL_VERSION=-x KERNEL_SOURCE_KERNEL_RELEASE=1.0-x \
+    KERNEL_SOURCE_PACKAGE_VERSION=1.0-x1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-x/rockchip \
+    bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko5"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"never a branch or tag"* ]]
+}
+
+@test "kernel_source schema: tag is OPTIONAL, but a half config-file mode is rejected" {
+  local f="$BATS_TEST_TMPDIR/commit-only.yaml"
+  # No tag + full config-file mode: the vendor-patched shape. Must VALIDATE.
+  write_variant_family "$f" "  vendor-patched:
+    kernel_source:
+      git_url: https://example.invalid/linux.git
+      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      patches_git_url: https://example.invalid/p.git
+      patches_commit: 9c1cb385098d842a1d5755e3717b308a25bb8305
+      patches_series: patches/series
+      config_git_url: https://example.invalid/build.git
+      config_commit: 5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39
+      config_path: config/kernel/x.config
+      builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+      local_version: -x
+      kernel_release: 1.0-x
+      package_version: 1.0-x1
+      dtb_deb_dir: /usr/lib/linux-image-x/rockchip
+      dtb_boot_dir: /boot/dtb/rockchip"
+  run python3 "$RESOLVE_PY" merge --family "$f" --board "$V2/manifests/boards/rock-5b-plus.yaml" \
+    --family-schema "$V2/manifests/schema/family.schema.json" --variant vendor-patched
+  [ "$status" -eq 0 ]
+
+  # Drop config_path -> neither mode is fully declared -> rejected.
+  local g="$BATS_TEST_TMPDIR/half-config.yaml"
+  sed '/config_path:/d' "$f" >"$g"
+  run python3 "$RESOLVE_PY" merge --family "$g" --board "$V2/manifests/boards/rock-5b-plus.yaml" \
+    --family-schema "$V2/manifests/schema/family.schema.json" --variant vendor-patched
+  [ "$status" -ne 0 ]
+}
+
 @test "fetch suppression: suppressed kernel/DTB names leave the declared BSP set" {
   run bash -c "
     set -euo pipefail

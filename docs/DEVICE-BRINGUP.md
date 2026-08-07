@@ -501,6 +501,44 @@ for first-login instructions). If another device already owns `ceralive.local`,
 replace it with the selected fallback hostname shown on the HDMI/serial console,
 for example `ceralive2.local`.
 
+### First-time credential bootstrap (board-verified)
+
+A freshly-flashed, never-before-booted CeraUI image has **no usable
+credentials at all** — not SSH, not the web UI. Don't waste time guessing at an
+SSH password on a fresh board; there isn't one yet, by design (see
+[`v2/docs/ssh-hardening.md`](../v2/docs/ssh-hardening.md) for why the account
+ships password-locked). This is the practical two-stage flow to get in, verified
+live on a Rock 5B+ running a vendor-6.1 control image.
+
+**Step 1 — set the UI password.** Point a browser at `http://<board-ip>/`
+(HTTPS also works, but it's a self-signed cert — expect a browser warning; see
+the TLS front section above). On a genuine first boot, CeraUI immediately shows
+"You'll need to create a secure password to protect your account" with a New
+Password / Confirm Password form. This is also the fastest way to tell a
+first-boot state apart from an already-configured device — if you see that
+form, the board has never been through setup. Submitting it logs you straight
+into the CeraUI dashboard.
+
+**This password is web-UI-only.** It does not set, sync, or unlock an SSH
+password — SSH is a separate, independently-gated credential.
+
+**Step 2 — enable and read the SSH password.** In the logged-in UI, go to
+Settings → Developer → "SSH Access". The panel shows SSH Server: Active/Inactive;
+once active it displays an auto-generated plaintext SSH password (username is
+always `ceralive`) with Copy-to-clipboard and Reset buttons. That's what you
+hand to `ssh ceralive@<board-ip>` — confirmed working end-to-end on real
+hardware this way.
+
+**Don't assume credentials carry over between flashes.** Each fresh image is
+its own independent first-boot state and needs this same two-step bootstrap
+(UI password, then enable + read the SSH password from Settings → Developer)
+every time. A password that worked for a previous image build on the same
+board and IP will not work on a new flash.
+
+For the underlying mechanism — why the account is password-locked by default,
+and what the `CERALIVE_DEBUG_IMAGE` / `CERALIVE_DEBUG_PASSWORD_HASH` build-time
+knobs do — see [`v2/docs/ssh-hardening.md`](../v2/docs/ssh-hardening.md).
+
 **Check the boot slot:**
 
 ```bash

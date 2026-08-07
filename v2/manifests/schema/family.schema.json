@@ -126,24 +126,45 @@
       }
     },
     "kernel_source": {
-      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the defconfig fragment, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping (the kernel-patches repo's preflight) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
+      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the resolved kernel config, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping and for its published kernel .config (fetched as a plain file at a pinned revision) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nSOURCE CHECKOUT — TWO SHAPES. `commit` is ALWAYS the pin. `tag` is OPTIONAL and exists only so a tagged upstream can be verified to still resolve to that commit. A source branch that publishes no tags at all (the Armbian vendor BSP's rolling `rk-6.1-rkr5.1`) simply omits `tag`, and the build shallow-fetches the pinned SHA directly. Do NOT invent a synthetic tag to fill the field — that would misrepresent the source.\n\nCONFIG — TWO MUTUALLY EXCLUSIVE MODES, exactly one of which MUST be declared:\n  (a) DEFCONFIG mode — `defconfig_base` + `defconfig_fragment`: start from an in-tree `make <target>` defconfig and merge a repo-local Kconfig fragment on top. Used by mainline-track variants, whose upstream ships no full board config.\n  (b) CONFIG-FILE mode — `config_git_url` + `config_commit` + `config_path`: start from a COMPLETE `.config` fetched as a plain file from a pinned revision of another repository. Used by the vendor-BSP track, where Armbian publishes the exact full config the shipped kernel is built from and a bare `make defconfig` would produce a materially different driver/feature set.\nBoth modes then run `olddefconfig` + `syncconfig` and are gated identically by lib/verify-kernel-config.sh, which asserts every symbol the declared source config names survived into the resolved .config.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
       "type": "object",
       "additionalProperties": false,
       "required": [
         "git_url",
-        "tag",
         "commit",
         "patches_git_url",
         "patches_commit",
         "patches_series",
-        "defconfig_base",
-        "defconfig_fragment",
         "builder_image",
         "local_version",
         "kernel_release",
         "package_version",
         "dtb_deb_dir",
         "dtb_boot_dir"
+      ],
+      "oneOf": [
+        {
+          "title": "defconfig mode",
+          "required": ["defconfig_base", "defconfig_fragment"],
+          "not": {
+            "anyOf": [
+              { "required": ["config_git_url"] },
+              { "required": ["config_commit"] },
+              { "required": ["config_path"] },
+              { "required": ["config_absent_symbols"] }
+            ]
+          }
+        },
+        {
+          "title": "config-file mode",
+          "required": ["config_git_url", "config_commit", "config_path"],
+          "not": {
+            "anyOf": [
+              { "required": ["defconfig_base"] },
+              { "required": ["defconfig_fragment"] }
+            ]
+          }
+        }
       ],
       "properties": {
         "git_url": {
@@ -159,7 +180,7 @@
           "pattern": "^https://"
         },
         "tag": {
-          "description": "Exact source tag (e.g. v7.1.5). A tag alone is NOT the pin — `commit` is. The build fails loudly if the tag does not resolve to `commit`, so a moved tag is caught rather than silently built.",
+          "description": "OPTIONAL exact source tag (e.g. v7.1.5). A tag alone is NEVER the pin — `commit` is. When present the build clones that tag and fails loudly if it does not resolve to `commit`, so a moved tag is caught rather than silently built. OMIT it entirely when the source publishes no tag on the pinned branch (the Armbian vendor BSP's rolling rk-6.1-rkr5.1 publishes none): the build then shallow-fetches `commit` directly. NEVER fabricate a placeholder tag to satisfy this field.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
         },
@@ -185,12 +206,33 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
         },
         "defconfig_base": {
-          "description": "The in-tree defconfig target the build starts from (e.g. `defconfig` for arm64). The fragment is merged ON TOP of it.",
+          "description": "DEFCONFIG MODE (half 1 of 2). The in-tree defconfig target the build starts from (e.g. `defconfig` for arm64). The fragment is merged ON TOP of it. Mutually exclusive with the config_* trio.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
         "defconfig_fragment": {
-          "description": "Repo-relative path (from v2/) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched.",
+          "description": "DEFCONFIG MODE (half 2 of 2). Repo-relative path (from v2/) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched. Mutually exclusive with the config_* trio.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "config_git_url": {
+          "description": "CONFIG-FILE MODE (1 of 3). Repository publishing the COMPLETE kernel `.config` this variant starts from (e.g. https://github.com/armbian/build, which ships config/kernel/linux-rk35xx-vendor.config — the exact config the shipped vendor kernel is built with). The file is fetched as plain data; the publishing repo's BUILD FRAMEWORK is never invoked. Mutually exclusive with defconfig_base/defconfig_fragment.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "config_commit": {
+          "description": "CONFIG-FILE MODE (2 of 3). Exact 40-character commit of config_git_url the .config is read from. IMMUTABLE — never a branch, never a tag. A kernel config is as load-bearing as the source itself: a floating reference here would silently change which drivers ship while every other pin still looked exact.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "config_path": {
+          "description": "CONFIG-FILE MODE (3 of 3). Path INSIDE config_git_url at config_commit to the full `.config` file (e.g. config/kernel/linux-rk35xx-vendor.config). Copied verbatim to the kernel tree's .config before olddefconfig; it is NEVER edited, and lib/verify-kernel-config.sh asserts every symbol it declares survived.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "config_absent_symbols": {
+          "description": "CONFIG-FILE MODE, OPTIONAL. Repo-relative path (from v2/) to a reviewed list of CONFIG_ symbols the fetched config declares but the pinned source tree CANNOT provide, because the config's publisher injects them from out-of-tree sources its own build framework copies in (Armbian's EXTRAWIFI drivers). Without it the survival gate would fail on symbols whose absence is correct. It is NOT an escape hatch: verify-kernel-config.sh fails the build on a listed symbol that DID survive, so the list cannot rot into a blanket opt-out. Repo-local so every entry is reviewed and versioned with the pipeline.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
         },
