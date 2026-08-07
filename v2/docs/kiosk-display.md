@@ -155,6 +155,21 @@ That repo tracks three patches relevant to CeraLive's capture and encode path, e
 
 These patches are bookmarked insurance only. Do not apply them unless D3 is explicitly re-opened and a mainline pivot is approved.
 
+**This section predates the mainline track's actual bench measurement and is
+now stale insurance-only framing — see
+[`kernel-track-decision.md`](kernel-track-decision.md) for the measured
+reality.** The bookmark above describes the *unmeasured* patch set from
+`rcawston/rockchip-rk3588-mainline-patches`; `CERALIVE/rk3588-kernel-patches`
+(the fork that carries these exact patches plus a fourth, HDMI-RX audio) has
+since been bench-validated on real Rock 5B+ hardware
+(device-platform-wave4 todos 25-30). The measured verdict is
+**hold, driver work required first** — `mpph264enc` never registers on the
+edge-7.1 kernel (`encode-broken`), which alone determines the outcome under
+the plan's deterministic decision matrix regardless of H.265's cleaner
+(`encode-degraded`, bitrate-accuracy-only) result. `kernel-track-decision.md`
+is now the authoritative decision record for this mainline track; D3 remains
+NOT re-opened and production remains vendor 6.1.
+
 ---
 
 ## 4. OOM Configuration
