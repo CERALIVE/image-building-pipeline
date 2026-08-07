@@ -98,6 +98,25 @@ and assign `cera_next` — because a cascade over a single variable would fall t
 `3→2→1→0` in one pass. `itest` exists on this build and `test` string comparison is
 enough; do not reintroduce an arithmetic dependency.
 
+### The scratch address in steps 2-4 is DEFINED, never inherited
+
+`env import` / `env export` / `fatwrite` all need a scratch DRAM address, and the
+script used to spell it `${loadaddr}` without defining it — inheriting whatever the
+board's default U-Boot environment happened to hold. The Rock 5B+ defines `loadaddr`;
+the Orange Pi 5 Plus does not (`printenv loadaddr` → `"loadaddr" not defined`), even
+though `kernel_addr_r` / `fdt_addr_r` / `ramdisk_addr_r` — used in step 5 for the real
+loads — are defined on both. An empty expansion does not make the command a no-op: the
+argument vanishes, `env export -t ${loadaddr} BOOT_ORDER …` takes `BOOT_ORDER` as its
+destination, and the write faults the memory bus — `esr 0xbe000011`,
+`### ERROR ### Please RESET the board ###`, halted until a physical power cycle (not a
+crash loop; the board never reaches slot B or eMMC on its own).
+
+The script therefore does `setenv loadaddr 0x00c00000` before first use. 12 MiB is
+clear of `kernel_addr_r` (4 MiB) and far below `fdt_addr_r` (131 MiB); a full
+`env export` → `fatwrite` → `fatload` → `env import` round trip at that address was
+proven on the real Orange Pi 5 Plus. `recovery.scr.cmd` never had this defect — it
+uses only the three `*_addr_r` variables.
+
 ### A slot that cannot be loaded ABANDONS the device
 
 Steps 5's kernel and DTB loads are checked. An unguarded `ext4load` failure left the
@@ -202,7 +221,10 @@ and proves userspace state replacement stays on one filesystem.
 this board's U-Boot really answers — so a decrement that depends on it fails the
 suite instead of the fleet. It walks the whole budget (`3→2→1→0`), proves an
 exhausted A rolls over to B and that B's budget then moves too, and proves an
-unloadable kernel or DTB abandons the device rather than reaching `booti`.
+unloadable kernel or DTB abandons the device rather than reaching `booti`. It stubs
+the board default environment the same way: a run with **no `loadaddr` defined** must
+still complete the selector, and a vanished address argument is modelled as the
+terminal `SERROR` the Orange Pi really produced, never as a silent no-op.
 
 `boot-artifacts.bats` proves the `/boot` contract holds for the Armbian vendor
 layout (`Image`/`dtb` symlinks, versioned initrd) AND the source-built layout (real

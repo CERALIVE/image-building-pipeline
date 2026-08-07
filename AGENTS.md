@@ -64,7 +64,7 @@ image-building-pipeline/
 | Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats`, `v2/tests/rk3588-ab-contract.bats`, and `v2/tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `v2/lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `v2/tests/boot-artifacts.bats` — see the KEY FACT below |
-| **A/B selector arithmetic + load guards** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` KEY FACT below |
+| **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`v2/docs/X86-MINIPC-BRINGUP.md`](v2/docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
@@ -1011,6 +1011,69 @@ so a decrement that depends on it fails the suite, not the fleet. It walks the w
 budget, proves rollover to B and B's own decrement, and proves an unloadable
 kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the token
 `setexpr` outside comments.
+
+**The A/B selector must define its OWN scratch address — an inherited `loadaddr`
+is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]
+
+Third defect in the same `v2/mkosi/platform/boot/boot.scr.cmd`, found the same way
+(live interactive U-Boot over UART) but on the OTHER board, and it is worse than the
+two above: it does not crash-loop, it stops the board dead until someone pulls power.
+
+The script used `${loadaddr}` as an implicit scratch DRAM address at all eight of its
+`env import` / `env export` / `fatwrite` sites without ever defining it, i.e. it
+assumed the board's default U-Boot environment supplies one. **That is a per-board
+fact, not a U-Boot guarantee.** On a real Orange Pi 5 Plus:
+
+```
+=> printenv loadaddr
+## Error: "loadaddr" not defined
+=> printenv kernel_addr_r fdt_addr_r ramdisk_addr_r
+kernel_addr_r=0x00400000
+fdt_addr_r=0x08300000
+ramdisk_addr_r=0x0a200000
+```
+
+The three addresses the selector uses for the REAL kernel/DTB/initrd loads are fine
+on both boards; only the scratch one is absent, and only on this board — which is
+exactly why the fix above was authored and validated on a Rock 5B+ and shipped
+looking correct. With `${loadaddr}` empty the address argument does not become
+"invalid", it **disappears**: `env export -t ${loadaddr} BOOT_ORDER …` becomes
+`env export -t BOOT_ORDER …`, U-Boot parses `BOOT_ORDER` as the destination address,
+and writing the env blob there faults the SoC memory bus. The board printed the
+selector's own `BOOT_ORDER=A B A_LEFT=3 B_LEFT=3` line and then:
+
+```
+"Error" handler, esr 0xbe000011
+
+* Reason:        Exception from SError interrupt
+...
+### ERROR ### Please RESET the board ###
+```
+
+Note the handler name: this is an **SError**, a DIFFERENT exception class from the
+`"Synchronous Abort" handler, esr 0x02000000` of the unguarded-`ext4load` defect
+above. Same script, same board family, two separate signatures — do not conflate
+them when reading a UART capture.
+
+No reset loop, no fall-through to the other slot or to eMMC — UART silent across
+repeated polls, physical power cycle required. Isolated outside the script by
+replaying that single command by hand (identical PC and ESR).
+
+The selector now `setenv loadaddr 0x00c00000` before its first use, so all eight
+sites resolve to a fixed address regardless of what the board shipped. **12 MiB is
+not an arbitrary pick** — it is clear of `kernel_addr_r` (4 MiB) and far below
+`fdt_addr_r` (131 MiB) / `ramdisk_addr_r` (162 MiB), and it was proven on that board
+with a full `env export` → `fatwrite` → `fatload` → `env import` round trip that
+returned all three variables byte-for-byte with no exception. `recovery.scr.cmd` has
+never had this defect — it only ever uses the three `*_addr_r` variables.
+
+Guard: `v2/tests/boot-script-sanitize.test.sh` runs the real script against a stubbed
+default environment with **no `loadaddr` at all**, the same way it stubs `setexpr` as
+absent, and its stubs treat a vanished address argument as the terminal `SERROR` the
+board actually produced rather than a silent no-op — so this fails the suite, not the
+fleet. A static leg additionally requires the `setenv` to precede the first use.
+**Do not reintroduce a dependency on any board default-environment variable here**;
+if another scratch address is ever needed, define it in the script too.
 
 **Before ANY bench reboot into a freshly-installed slot, the OTHER slot MUST be
 confirmed-good first — otherwise automatic rollback is already disabled** [KNOWN ISSUE /
@@ -2575,6 +2638,7 @@ gated item, not the package availability.
 - Don't name a source-built kernel package after a stock one. `vendor-patched` builds `linux-image-6.1.115-ceralive-vendor-rk35xx`, never `linux-image-vendor-rk35xx`: a name collision is the one failure that produces a plausible image instead of an error, because the local repository would pick one by version and the board could boot the UNPATCHED kernel
 - Don't silence a config-survival failure by widening `kernel_source.config_absent_symbols`. Every entry is a reviewed statement that the symbol names an out-of-tree driver Armbian's framework injects and this pipeline does not; a listed symbol that DID survive fails the build as a stale exception, and that non-vacuity is what stops the list becoming a blanket opt-out of the gate
 - Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `manifest.bats` statically requires exactly one occurrence of each
+- Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
 - Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it

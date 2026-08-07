@@ -25,6 +25,26 @@
 
 echo "CeraLive A/B boot selector"
 
+# --- scratch DRAM address for every env import/export below. DEFINED HERE, NEVER
+#     INHERITED FROM THE BOARD.
+#
+# `loadaddr` is a board default-environment variable, not a U-Boot guarantee. The
+# Rock 5B+ happens to define it; the Orange Pi 5 Plus does NOT (`printenv loadaddr`
+# answers `"loadaddr" not defined`) even though kernel_addr_r/fdt_addr_r/
+# ramdisk_addr_r — used further down for the real kernel/DTB/initrd loads — are
+# defined on both. When ${loadaddr} expands to empty the address argument simply
+# disappears from the command line, so `env export -t ${loadaddr} BOOT_ORDER …`
+# takes BOOT_ORDER as its destination address and writes the env blob into
+# unresolved memory: the SoC bus raises an SError (esr 0xbe000011) and the board
+# HALTS — `### ERROR ### Please RESET the board ###`, no retry, no rollback, a
+# physical power cycle to recover.
+#
+# 0x00c00000 (12 MiB) sits clear of kernel_addr_r (4 MiB) and well below
+# fdt_addr_r (131 MiB) / ramdisk_addr_r (162 MiB). Proven on a real Orange Pi 5
+# Plus by a full round trip at this address: env export -> fatwrite -> fatload ->
+# env import returned the three variables byte-for-byte, with no exception.
+setenv loadaddr 0x00c00000
+
 # --- board specifics (console, fdtfile, board_id) from the manifest-rendered file
 setenv console "ttyS2,1500000"
 setenv fdtfile ""
