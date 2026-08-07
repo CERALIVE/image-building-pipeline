@@ -98,6 +98,10 @@ install_kernel_source_dtbs() {
 # The resulting /boot had vmlinuz-<REL> but no Image, so `ext4load … /boot/Image`
 # failed, booti jumped into unloaded DRAM and the board reset — forever.
 #
+# THEN THE SAME PATH FAILED AGAIN, on content rather than existence: the symlink
+# resolved and loaded, and booti still refused it, because bindeb-pkg ships
+# arm64's default KBUILD_IMAGE — arch/arm64/boot/Image.GZ. See the branch below.
+#
 # Gated on KERNEL_SOURCE_KERNEL_RELEASE, which the resolver emits ONLY under a
 # kernel_source variant, so this is a strict no-op on the production vendor path.
 install_kernel_source_boot_artifacts() {
@@ -106,13 +110,60 @@ install_kernel_source_boot_artifacts() {
 
   [[ -n "${release}" ]] || return 0
 
-  if [[ ! -f "${root}/boot/vmlinuz-${release}" ]]; then
+  local vmlinuz="${root}/boot/vmlinuz-${release}"
+  if [[ ! -f "${vmlinuz}" ]]; then
     log "FATAL: /boot/vmlinuz-${release} is absent after installing the source-built kernel"
     exit 1
   fi
 
-  log "linking /boot/Image -> vmlinuz-${release} (Armbian linux-image postinst parity)"
-  ln -sfn "vmlinuz-${release}" "${root}/boot/Image"
+  # Existence was not enough either. arm64 defaults KBUILD_IMAGE to
+  # arch/arm64/boot/Image.gz, and bindeb-pkg ships exactly that as vmlinuz-<REL>,
+  # so the symlink pointed at GZIP. Armbian's own vendor package does not have the
+  # problem because its framework builds with KERNEL_IMAGE_TYPE=Image.
+  #
+  # Whether a gzip Image boots is then a per-board U-Boot fact, and the two shipped
+  # boards answer differently: rock-5b-plus ships U-Boot 2026.04 (CONFIG_GZIP=y,
+  # CONFIG_CMD_UNZIP=y) and booted it fine; orange-pi-5-plus ships the Rockchip
+  # 2017.09 fork, whose config has no CONFIG_GZIP symbol at all, and it answered
+  # `Bad Linux ARM64 Image magic!` and abandoned the slot. Inheriting a board
+  # capability is the same mistake the undefined `loadaddr` already cost a board,
+  # so the raw Image is produced HERE, once, for every board.
+  local head_hex
+  head_hex="$(od -An -tx1 -j0 -N6 -v "${vmlinuz}" | tr -d ' \n')"
+  local image="${root}/boot/Image"
+  rm -f "${image}"
+
+  case "${head_hex}" in
+    1f8b*)
+      log "vmlinuz-${release} is gzip (Image.gz) — decompressing into a real /boot/Image"
+      if ! gzip -dc "${vmlinuz}" >"${image}"; then
+        log "FATAL: could not decompress /boot/vmlinuz-${release} into /boot/Image"
+        exit 1
+      fi
+      chmod 0644 "${image}"
+      ;;
+    fd377a585a00*) log "FATAL: /boot/vmlinuz-${release} is xz-compressed"          ; exit 1 ;;
+    28b52ffd*)     log "FATAL: /boot/vmlinuz-${release} is zstd-compressed"        ; exit 1 ;;
+    425a68*)       log "FATAL: /boot/vmlinuz-${release} is bzip2-compressed"       ; exit 1 ;;
+    04224d18*|02214c18*) log "FATAL: /boot/vmlinuz-${release} is lz4-compressed"   ; exit 1 ;;
+    894c5a4f*)     log "FATAL: /boot/vmlinuz-${release} is lzop-compressed"        ; exit 1 ;;
+    5d0000*)       log "FATAL: /boot/vmlinuz-${release} is lzma-compressed"        ; exit 1 ;;
+    *)
+      log "linking /boot/Image -> vmlinuz-${release} (Armbian linux-image postinst parity)"
+      ln -sfn "vmlinuz-${release}" "${image}"
+      ;;
+  esac
+
+  # The one property booti actually reads: magic 0x644d5241 ("ARM\x64",
+  # little-endian) at offset 56 of the 64-byte header
+  # (Documentation/arm64/booting.rst §4). Asserted on whatever the branches above
+  # produced, because a decompression that SUCCEEDS on the wrong payload is still
+  # an unbootable slot.
+  if [[ "$(od -An -tx1 -j56 -N4 -v "${image}" | tr -d ' \n')" != "41524d64" ]]; then
+    log "FATAL: /boot/Image carries no raw ARM64 Image magic at offset 56"
+    log "       booti would answer 'Bad Linux ARM64 Image magic!' and abandon the slot."
+    exit 1
+  fi
 
   # Armbian's postinst touches this; nand-sata-install and armbian-config both
   # probe for it, so a source-built rootfs that omits it looks unmanaged.
@@ -126,7 +177,7 @@ install_kernel_source_boot_artifacts() {
     exit 1
   fi
 
-  log "boot artifacts complete: Image -> vmlinuz-${release}, initrd.img-${release}"
+  log "boot artifacts complete: raw ARM64 /boot/Image, initrd.img-${release}"
 }
 
 prune_irrelevant_rk3588_firmware() {

@@ -543,6 +543,52 @@ occurrence of each of those `make` calls in the file.
   `/boot/dtb/rockchip/${fdtfile}` either way — proven by the very boot that failed,
   which still read the DTB (`106449 bytes read`) off exactly this layout.
   Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4b.
+- **`/boot/Image` must also be the RAW Image — `bindeb-pkg` ships `Image.gz`, and
+  only ONE of the two boards' U-Boot can cope.** Making the file exist (above) did
+  not make it loadable. On a real Orange Pi 5 Plus the selector ran the whole A/B
+  sequence cleanly, loaded 15,928,530 bytes of `/boot/Image` and the DTB, and then
+  `booti` answered `Bad Linux ARM64 Image magic!`; `md.b 0x00400000 0x40` after a
+  hand `ext4load` read `1f 8b 08 00 …` — gzip, deflate. `arch/arm64/Makefile` sets
+  `KBUILD_IMAGE := $(boot)/Image.gz` and `scripts/package/builddeb` installs
+  `$(make -s image_name)` as `/boot/vmlinuz-<REL>`, so on arm64 **every**
+  `bindeb-pkg` kernel — `edge` AND `vendor-patched` — ships a COMPRESSED vmlinuz.
+  Armbian's vendor package escapes it only because its framework builds rockchip64
+  with `KERNEL_IMAGE_TYPE="Image"`. **The ambiguity this raised is resolved, and it
+  is a per-board U-Boot fact, not a per-build artifact difference** — both boards'
+  `edge` builds emit the same `Image.gz` (the Rock 5B+ build log says
+  `GZIP arch/arm64/boot/Image.gz` in one line), but their staged
+  `u-boot-config-target-1` files (both `26.5.1`, SHA-256-verified against todo 44's
+  own component manifest) disagree: `rock-5b-plus` ships U-Boot **2026.04** with
+  `CONFIG_GZIP=y` / `CONFIG_ZLIB=y` / `CONFIG_CMD_UNZIP=y`, while
+  `orange-pi-5-plus` ships the Rockchip **2017.09** fork in which `CONFIG_GZIP`
+  does not exist as a symbol at all (`CONFIG_CMD_UNZIP` is `not set`,
+  `CONFIG_IMAGE_GZIP` is `not set`). Modern U-Boot's `booti_start()`
+  (`cmd/booti.c`) sniffs the compression and runs `image_decomp()` before
+  `booti_setup()`; 2017.09 predates that entirely — which is why the SAME kernel
+  package booted a Rock 5B+ to userspace and hid this for a release, and why the
+  Orange Pi console answers `unzip` with `Unknown command` and has no interactive
+  workaround. Same lesson as `setexpr` and `loadaddr`, third instance: **never let
+  an artifact contract rest on a board's U-Boot happening to cope.**
+  `install_kernel_source_boot_artifacts` now reads the first bytes of
+  `vmlinuz-<REL>` and, on gzip, `gzip -dc`s it into `/boot/Image` as a **REAL
+  FILE** — a symlink to the still-compressed vmlinuz is the bug, not the fix. An
+  already-raw Image keeps the vendor-parity symlink; any other recognised
+  container (xz/zstd/bzip2/lz4/lzop/lzma) is FATAL and NAMED, because guessing
+  there ships an unbootable slot on every board. It then asserts the magic
+  `0x644d5241` (`"ARM\x64"`, little-endian) at **offset 56** of the 64-byte header
+  (`Documentation/arm64/booting.rst` §4) on whatever it produced — a `gzip -dc`
+  that SUCCEEDS on the wrong payload is still an unbootable slot, so the checked
+  property is the resulting magic, never the exit status of the decompressor.
+  `verify-boot-artifacts.sh` re-asserts the same magic at `[6b/9]` on the real
+  emitted rootfs tar and names the compression it found, so the failure reads as a
+  packaging fact rather than a bootloader mystery. The packaged `vmlinuz-<REL>` is
+  left exactly as `dpkg` installed it; only `/boot/Image` is materialised, at the
+  cost of one extra decompressed kernel in `/boot`. **Invisible to the PR gate**
+  like every finding in this class — `DRY_RUN=1` never runs `[6b/9]` — and
+  invisible to the previous `[6b/9]` too, which read `tar -tv` metadata only and
+  so could see the symlink, its target and its size but never a byte of content.
+  Guards: `v2/tests/boot-artifacts.bats` (9 added cases). Full write-up:
+  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4c.
 - **`[PARTIAL]` — BOTH RK3588 boards COMPILE end to end; nothing has BOOTED.** A
   real (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
   `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
@@ -1140,6 +1186,14 @@ right after the tar is emitted, and fails the build if anything is missing.
   be a symlink to `dtb-<REL>/` or a real directory. It checks what U-Boot can load,
   not which packaging mechanism produced it — the vendor and source-built layouts
   legitimately differ (see the kernel-from-source `/boot` artifact mapping above).
+- **Layout-agnostic, but NOT content-agnostic.** It also reads the first 64 bytes of
+  the resolved `/boot/Image` and requires the raw ARM64 Image magic at offset 56,
+  naming the compression when it finds one. Metadata alone passed a gzip `Image.gz`
+  that `booti` refused on a real board — see the `bindeb-pkg` ships `Image.gz` KEY
+  FACT above. The member is extracted to a temp file rather than piped through
+  `head`: closing that pipe kills `tar` with `SIGPIPE`, and `set -o pipefail` turns
+  a correct read into a build failure — the exact bug `deb_lists_path` already
+  shipped once.
 - **Why it is not left to `tests/preflash-verify.sh`,** whose `check_rootfs_populated`
   already checks these artifacts: that tool runs on a **production-labelled `.raw` an
   operator is about to flash**, and it asserts the frozen PARTLABEL set FIRST — so a
@@ -1151,9 +1205,10 @@ right after the tar is emitted, and fails the build if anything is missing.
   sizes are readable with no loop device, no `debugfs` and no privileges — ~1 s on a
   1.5 GB tar, and it runs identically in CI.
 
-Guards: `v2/tests/boot-artifacts.bats` (17 tests — both layouts pass, the exact
+Guards: `v2/tests/boot-artifacts.bats` (27 tests — both layouts pass, the exact
 pre-fix layout is rejected, each artifact is driven out of BOTH layouts one at a
-time, plus the producing mechanisms and the orchestrator wiring).
+time, the Image FORMAT is asserted in both the verifier and the real shipped
+staging function, plus the producing mechanisms and the orchestrator wiring).
 
 **Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
 
@@ -2639,6 +2694,7 @@ gated item, not the package availability.
 - Don't silence a config-survival failure by widening `kernel_source.config_absent_symbols`. Every entry is a reviewed statement that the symbol names an out-of-tree driver Armbian's framework injects and this pipeline does not; a listed symbol that DID survive fails the build as a stale exception, and that non-vacuity is what stops the list becoming a blanket opt-out of the gate
 - Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `manifest.bats` statically requires exactly one occurrence of each
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
+- Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
 - Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it

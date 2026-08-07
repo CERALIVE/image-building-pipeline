@@ -41,12 +41,38 @@ teardown() {
   rm -rf "$WORK"
 }
 
-# A rootfs skeleton with the artifact sizes the real packages produce, so the
-# verifier's size floors are exercised rather than sidestepped by empty files.
+# A raw, self-decompressing ARM64 Linux Image: a 64-byte header whose only field
+# any boot loader keys on is the magic 0x644d5241 ("ARM\x64", little-endian) at
+# offset 56 (Documentation/arm64/booting.rst §4 "Call the kernel image"). The rest
+# is zero-padded to the requested size — the checks under test read the magic, not
+# the code0/code1 branch instructions.
+_write_arm64_image() {
+  local path="$1" bytes="${2:-12000000}"
+  {
+    head -c 56 /dev/zero
+    printf 'ARM\x64'
+    head -c $((bytes - 60)) /dev/zero
+  } >"$path"
+}
+
+# What `make bindeb-pkg` actually ships as vmlinuz-<rel> on arm64: gzip. Only the
+# header is load-bearing for the verifier (it never decompresses), so this pads a
+# real gzip member out to a realistic kernel size rather than gzipping 12 MB.
+_write_gzip_image() {
+  local path="$1" bytes="${2:-12000000}"
+  {
+    printf 'x' | gzip -c
+    head -c "$bytes" /dev/zero
+  } >"$path"
+}
+
+# A rootfs skeleton with the artifact sizes AND the artifact FORMATS the real
+# packages produce, so the verifier's size floors and its Image-format check are
+# both exercised rather than sidestepped by empty or zero-filled files.
 _seed_common() {
   local root="$1" rel="$2"
   mkdir -p "$root/boot"
-  head -c 12000000 /dev/zero >"$root/boot/vmlinuz-$rel"
+  _write_arm64_image "$root/boot/vmlinuz-$rel" 12000000
   head -c 250000   /dev/zero >"$root/boot/config-$rel"
   head -c 7000000  /dev/zero >"$root/boot/System.map-$rel"
 }
@@ -167,6 +193,69 @@ run_verify() {
   [[ "$output" == *"bytes"* ]]
 }
 
+# --- the Image must be the RAW format booti can actually start ----------------
+#
+# Second real board incident, on the OTHER board. With every artifact above
+# present and correct, an Orange Pi 5 Plus loaded 15,928,530 bytes of /boot/Image
+# and the DTB, then answered:
+#
+#     Bad Linux ARM64 Image magic!
+#
+# `md.b 0x00400000 0x40` after the load read `1f 8b 08 00 ...` — gzip. arm64's
+# KBUILD_IMAGE defaults to arch/arm64/boot/Image.gz, so `make bindeb-pkg` ships a
+# COMPRESSED vmlinuz, and that board's U-Boot (2017.09, no CONFIG_GZIP at all)
+# cannot decompress on the way in. Existence and size say nothing about this, so
+# the verifier reads the format too.
+
+@test "boot artifacts: a gzip-compressed /boot/Image is REJECTED" {
+  local root; root="$(seed_source_layout)"
+  _write_gzip_image "$root/boot/vmlinuz-7.1.5-ceralive-rk3588" 16000000
+  run_verify "$(pack "$root")"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gzip"* ]]
+  [[ "$output" == *"ARM64 Image magic"* ]]
+}
+
+@test "boot artifacts: a raw ARM64 Image passes the format check on either layout" {
+  local root
+  for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
+    run_verify "$(pack "$root")"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"raw ARM64 Image"* ]]
+  done
+}
+
+@test "boot artifacts: an Image with no ARM64 magic at offset 56 fails" {
+  # Not every wrong Image is a recognised compression format — a truncated or
+  # byte-shifted one is not, and booti rejects it identically. The check is a
+  # POSITIVE assertion on the magic, not a blocklist of signatures.
+  local root; root="$(seed_source_layout)"
+  head -c 12000000 /dev/zero >"$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+  run_verify "$(pack "$root")"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ARM64 Image magic"* ]]
+}
+
+@test "boot artifacts: an xz-compressed /boot/Image is REJECTED and named" {
+  local root; root="$(seed_source_layout)"
+  { printf '\xfd7zXZ\x00'; head -c 16000000 /dev/zero; } \
+    >"$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+  run_verify "$(pack "$root")"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"xz"* ]]
+}
+
+@test "boot artifacts: a real file /boot/Image is format-checked, not just symlinks" {
+  # After the fix the source path ships /boot/Image as a REAL decompressed file
+  # rather than a symlink, so the check must resolve both shapes.
+  local root; root="$(seed_source_layout)"
+  rm -f "$root/boot/Image"
+  _write_gzip_image "$root/boot/Image" 16000000
+  run_verify "$(pack "$root")"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gzip"* ]]
+}
+
 @test "boot artifacts: a missing board DTB fails on either layout" {
   local root
   for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
@@ -238,11 +327,12 @@ run_verify() {
 @test "platform layer: a missing initrd fails the build loudly" {
   # Silence here is what turned a packaging gap into a field crash loop.
   local postinst="$V2/mkosi/mkosi.images/platform/mkosi.postinst"
+  mkdir -p "$WORK/noinitrd/boot"
+  _write_arm64_image "$WORK/noinitrd/boot/vmlinuz-7.1.5-ceralive-rk3588" 4096
   run bash -c "
     set -euo pipefail
     BUILDROOT=$WORK/noinitrd
     mkdir -p \"\$BUILDROOT/boot\"
-    : >\"\$BUILDROOT/boot/vmlinuz-7.1.5-ceralive-rk3588\"
     KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
     log() { printf '%s\n' \"\$*\"; }
     $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst")
@@ -254,11 +344,12 @@ run_verify() {
 
 @test "platform layer: the boot-artifact step creates Image for a source kernel" {
   local postinst="$V2/mkosi/mkosi.images/platform/mkosi.postinst"
+  mkdir -p "$WORK/good/boot"
+  _write_arm64_image "$WORK/good/boot/vmlinuz-7.1.5-ceralive-rk3588" 4096
   run bash -c "
     set -euo pipefail
     BUILDROOT=$WORK/good
     mkdir -p \"\$BUILDROOT/boot\"
-    : >\"\$BUILDROOT/boot/vmlinuz-7.1.5-ceralive-rk3588\"
     : >\"\$BUILDROOT/boot/initrd.img-7.1.5-ceralive-rk3588\"
     KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
     log() { :; }
@@ -268,6 +359,101 @@ run_verify() {
   "
   [ "$status" -eq 0 ]
   [ "$output" = "vmlinuz-7.1.5-ceralive-rk3588" ]
+}
+
+# --- the staging layer must PRODUCE a raw Image, on every board ---------------
+#
+# `make bindeb-pkg` obeys arm64's KBUILD_IMAGE, which defaults to
+# arch/arm64/boot/Image.gz — so vmlinuz-<REL> in the built .deb is GZIP. Whether
+# that boots is then a per-board U-Boot fact, and the two shipped boards answer
+# differently (Rock 5B+ ships U-Boot 2026.04 with CONFIG_GZIP=y; Orange Pi 5+
+# ships the Rockchip 2017.09 fork, which has no CONFIG_GZIP symbol at all and no
+# decompression in its booti path). Inheriting a board capability is exactly the
+# mistake the loadaddr fix already cost a board, so this layer decompresses.
+
+_run_boot_artifacts() {
+  local dir="$1"
+  local postinst="$V2/mkosi/mkosi.images/platform/mkosi.postinst"
+  run bash -c "
+    set -euo pipefail
+    BUILDROOT=$dir
+    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
+    log() { printf '%s\n' \"\$*\"; }
+    $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst")
+    install_kernel_source_boot_artifacts
+  "
+}
+
+@test "platform layer: a gzip vmlinuz is decompressed into a REAL /boot/Image" {
+  local dir="$WORK/gz" rel=7.1.5-ceralive-rk3588
+  mkdir -p "$dir/boot"
+  _write_arm64_image "$WORK/raw-image" 65536
+  gzip -c "$WORK/raw-image" >"$dir/boot/vmlinuz-$rel"
+  : >"$dir/boot/initrd.img-$rel"
+
+  _run_boot_artifacts "$dir"
+  [ "$status" -eq 0 ]
+
+  # A symlink to the still-compressed vmlinuz is the bug, not the fix.
+  [ ! -L "$dir/boot/Image" ]
+  [ -f "$dir/boot/Image" ]
+  cmp "$dir/boot/Image" "$WORK/raw-image"
+  [ "$(od -An -tx1 -j56 -N4 -v "$dir/boot/Image" | tr -d ' \n')" = "41524d64" ]
+  # The packaged vmlinuz is left exactly as dpkg installed it.
+  [ "$(od -An -tx1 -j0 -N2 -v "$dir/boot/vmlinuz-$rel" | tr -d ' \n')" = "1f8b" ]
+}
+
+@test "platform layer: an already-raw vmlinuz keeps the vendor-parity symlink" {
+  local dir="$WORK/rawpath" rel=7.1.5-ceralive-rk3588
+  mkdir -p "$dir/boot"
+  _write_arm64_image "$dir/boot/vmlinuz-$rel" 65536
+  : >"$dir/boot/initrd.img-$rel"
+
+  _run_boot_artifacts "$dir"
+  [ "$status" -eq 0 ]
+  [ -L "$dir/boot/Image" ]
+  [ "$(readlink "$dir/boot/Image")" = "vmlinuz-$rel" ]
+}
+
+@test "platform layer: an unsupported kernel compression fails the build loudly" {
+  # xz/zstd/lz4 would all leave booti with a 'Bad Linux ARM64 Image magic!' on
+  # EVERY board. Guessing is not an option here, so the build stops.
+  local dir="$WORK/xz" rel=7.1.5-ceralive-rk3588
+  mkdir -p "$dir/boot"
+  { printf '\xfd7zXZ\x00'; head -c 65536 /dev/zero; } >"$dir/boot/vmlinuz-$rel"
+  : >"$dir/boot/initrd.img-$rel"
+
+  _run_boot_artifacts "$dir"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"xz"* ]]
+}
+
+@test "platform layer: a gunzip that yields a non-Image fails the build loudly" {
+  # The decompression succeeding is not the property that matters; the resulting
+  # magic is. A gzip of the wrong payload must not ship as /boot/Image.
+  local dir="$WORK/gzjunk" rel=7.1.5-ceralive-rk3588
+  mkdir -p "$dir/boot"
+  head -c 65536 /dev/zero | gzip -c >"$dir/boot/vmlinuz-$rel"
+  : >"$dir/boot/initrd.img-$rel"
+
+  _run_boot_artifacts "$dir"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ARM64 Image magic"* ]]
+}
+
+@test "platform layer: a re-run over an existing decompressed Image is idempotent" {
+  # A/B slot rebuilds and mkosi incremental caches both re-enter this path.
+  local dir="$WORK/idem" rel=7.1.5-ceralive-rk3588
+  mkdir -p "$dir/boot"
+  _write_arm64_image "$WORK/idem-src" 65536
+  gzip -c "$WORK/idem-src" >"$dir/boot/vmlinuz-$rel"
+  : >"$dir/boot/initrd.img-$rel"
+
+  _run_boot_artifacts "$dir"
+  [ "$status" -eq 0 ]
+  _run_boot_artifacts "$dir"
+  [ "$status" -eq 0 ]
+  cmp "$dir/boot/Image" "$WORK/idem-src"
 }
 
 # --- the wiring that makes it a build gate rather than a manual tool ---------
