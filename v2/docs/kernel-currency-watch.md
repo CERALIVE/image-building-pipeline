@@ -48,6 +48,24 @@ Seven independent checks all point the same direction:
 Do not re-evaluate the kernel choice unless one of these two conditions is met.
 Neither is close to firing today.
 
+**Measured reality (2026-08-07, device-platform-wave4 todos 25-30) — neither
+trigger is affected; the measurement is evidence, not a new trigger.** The
+`edge` mainline-track variant was bench-validated on real Rock 5B+ hardware:
+`mpph264enc` (H.264, the product's primary encode path) never registers at
+all — `encode-broken` — while `mpph265enc`'s declared probe subset measured
+`encode-degraded` (clean quality/kernel parity on all 6 cells; the only failing
+gate is CBR bitrate accuracy, and only on low-complexity/synthetic content).
+Full write-up, evidence citations, and the deterministic go/no-go verdict:
+[`kernel-track-decision.md`](kernel-track-decision.md). This does not confirm,
+refute, or newly justify either trigger below — Trigger 1 is about a Rockchip
+6.12+ vendor BSP (unrelated to the mainline `edge` measurement) and Trigger 2 is
+about a frozen mainline stateless H.265 *encode* uAPI (the `edge` variant uses
+the out-of-tree rcawston `rkvenc` driver, which — per the existing "does NOT
+fire either trigger" section below — is explicitly the opposite of Trigger 2's
+condition). The measurement is recorded here only as citable evidence that the
+`edge` option remains pinned-and-buildable but not production-ready, which was
+already this doc's premise before the bench session.
+
 ### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support
 
 **Condition:** Rockchip publishes a vendor BSP based on kernel **6.12 or later**
