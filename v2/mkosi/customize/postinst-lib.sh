@@ -335,6 +335,7 @@ configure_services() {
   suppress_unusable_boot_units
   setup_typec_source_role
   setup_fan_curve
+  setup_led_status
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must
@@ -522,6 +523,64 @@ setup_fan_curve() {
   install -D -m 0644 "${src}/ceralive-fan-curve.service" "${unit_dir}/ceralive-fan-curve.service"
 
   enable_service ceralive-fan-curve.service
+}
+
+# Operator feedback: give the board's indicator LEDs a default meaning at boot.
+#
+# The kernel registers this board's LEDs and then leaves the INDICATOR ones
+# entirely unconfigured — read on a live Orange Pi 5 Plus, both
+# `blue:indicator-1` (gpio-leds) and `green:indicator-2` (pwm-leds) sit at
+# `trigger = [none]` with `brightness = 0` forever. They are wired, they work,
+# and nothing ever asks them to do anything, so a headless streaming appliance
+# offers its operator zero visual evidence that it is even alive.
+#
+# The unit assigns `heartbeat` to the first discovered indicator LED (kernel is
+# scheduling) and `mmc1` to the second (the board is doing card I/O). Both are
+# stock kernel triggers and both are verified present in that LED's own
+# `trigger` menu before anything is written.
+#
+# IT NEVER WRITES `brightness`. A trigger hands the LED to the kernel; writing
+# brightness afterwards fights the trigger just installed — the same
+# "kernel does 100% of the driving" principle setup_fan_curve established for
+# the thermal governor. Set the policy, then get out of the way.
+#
+# `mmc0::` (the MMC host's own activity LED) is EXCLUDED and left exactly as the
+# kernel set it — it is not an indicator LED, it already works, and it is not
+# ours. There is NO red LED in the kernel's LED class on this board at all: the
+# red one an operator can see is, on the evidence, a hardwired power-rail
+# indicator with no software visibility. Nothing here can address it.
+#
+# WHY DISCOVERY IS GENERIC. `blue:indicator-1` / `green:indicator-2` are vendor
+# DTS labels with no semantics — they are not `status`/`activity`/`power` — and
+# they differ per board and per kernel tree. Matching either string is how a
+# "working" fix silently stops working on the next board, so the script
+# enumerates /sys/class/leds, rejects any name with a reserved field
+# (`mmc[0-9]*`, `power`), sorts for determinism and takes the first two. Same
+# never-hardcode-an-index principle as setup_fan_curve.
+#
+# BOARD-AGNOSTIC: no LED class, zero, one, or five candidate LEDs are all
+# informational log-and-exit-0 outcomes. Called from configure_services on every
+# board for exactly that reason — the applicability decision belongs to the
+# hardware at runtime, not to a manifest kept in sync by hand.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_fan_curve / setup_typec_source_role), never inlined.
+# LED_STATUS_UNIT_DIR / LED_STATUS_SBIN_DIR override the install dirs for the
+# offline test.
+setup_led_status() {
+  log "assigning default status-LED triggers at boot (ceralive-led-status.service — the indicator LEDs ship at trigger=none and never light up)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-led-status.sh" ]] \
+    || die "led-status script not found: ${src}/ceralive-led-status.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-led-status.service" ]] \
+    || die "led-status unit not found: ${src}/ceralive-led-status.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${LED_STATUS_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${LED_STATUS_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-led-status.sh" "${sbin_dir}/ceralive-led-status"
+  install -D -m 0644 "${src}/ceralive-led-status.service" "${unit_dir}/ceralive-led-status.service"
+
+  enable_service ceralive-led-status.service
 }
 
 # SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs

@@ -55,6 +55,7 @@ image-building-pipeline/
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
+| **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `v2/mkosi/customize/postinst-lib.sh` `setup_led_status` + `v2/mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
@@ -2237,6 +2238,115 @@ proven by hand on real hardware; the unit that performs it at boot has not been
 through this repo's build/flash/release cycle. Confirming that a booted board reports
 the lowered trip and that the fan audibly idles is the remaining on-hardware step.
 
+**The board's indicator LEDs are registered by the kernel and then never
+configured — they sit at `trigger=none`, `brightness=0`, dark, forever** [EXISTS —
+code merged-ready, NOT in any shipped release yet]
+
+Read on a live Orange Pi 5 Plus. The kernel's LED class holds exactly three
+entries, and the two that an operator would actually read as status are doing
+nothing at all:
+
+```
+/sys/class/leds/blue:indicator-1   -> /sys/devices/platform/gpio-leds/leds/blue:indicator-1
+/sys/class/leds/green:indicator-2  -> /sys/devices/platform/pwm-leds/leds/green:indicator-2
+/sys/class/leds/mmc0::             -> /sys/devices/platform/fe2e0000.mmc/leds/mmc0::
+```
+
+`blue:indicator-1` and `green:indicator-2` both read `trigger = [none]` and
+`brightness = 0`. They are wired, the drivers bound, and nothing in the image or
+the device tree ever asks them to do anything — so a headless streaming
+appliance with no screen gives its operator **zero** visual evidence that it
+booted, that the kernel is alive, or that it is doing any work. This is not a
+broken LED; it is an unclaimed one, exactly like the `pwm-fan` above was a
+working fan that was never asked to run.
+
+`ceralive-led-status.service` (a boot oneshot, installed by
+`postinst-lib.sh::setup_led_status` from the committed standalone artifacts
+`v2/mkosi/runtime/ceralive-led-status.{sh,service}`) assigns an ORDERED policy
+to the discovered indicator LEDs: the **first** gets `heartbeat` (the stock
+load-modulated "the kernel is scheduling" blink — meaningful on every board and
+in every state), the **second** gets `mmc1` (removable-card activity, so a
+second glance says "the board is doing I/O" and reads differently from the
+heartbeat's double-blink). Both names are confirmed present in this board's own
+trigger menu, and the script re-verifies each against that LED's `trigger`
+attribute before writing — a kernel that does not offer one is logged and
+skipped, never forced.
+
+**It never writes `brightness`, and that is the safety argument.** Installing a
+trigger hands the LED to the kernel; writing `brightness` afterwards fights the
+very trigger just installed. Same principle as the fan curve's refusal to write
+`cur_state`: set the policy, then get out of the way. The script constructs no
+`brightness` path at all, and exactly one sysfs write exists in it — the
+`trigger` attribute.
+
+**`mmc0::` is NOT one of the indicator LEDs and is deliberately untouched.** It
+is the MMC host controller's own activity LED, registered by the mmc core and
+already driven by the kernel — a separate, already-working thing. Do not "fix"
+it, and do not read its presence as evidence that the other two are configured.
+
+**There is NO red LED anywhere in the kernel's LED class on this board.** The red
+LED an operator can see next to the others is, on the evidence, a hardwired
+power-rail indicator with no software visibility whatsoever. Nothing in this
+repo — no udev rule, no sysfs write, no DT property this pipeline owns — can
+address it. It is recorded here specifically so the next person does not spend
+an afternoon looking for it in `/sys`.
+
+**THE EXCLUSION RULE, AND WHY IT IS SHAPED THIS WAY.** An LED's class name IS its
+identity (the directory basename; there is no separate `name` attribute), and
+Linux spells it `devicename:colour:function`
+(`Documentation/leds/leds-class.rst`). Real boards fill those fields
+inconsistently — this board's vendor DTS emits `blue:indicator-1` (colour first,
+no devicename) while the mmc core emits `mmc0::` (devicename first, no colour,
+no function) — so keying on field POSITION is not portable. The rule is
+therefore: split the name on `:` and reject the LED if **any** field matches
+`mmc[0-9]*` (a kernel-managed MMC activity LED) or `power` (a power-rail
+indicator must keep meaning "powered"; repurposing it destroys information
+rather than adding it). That is the entire list on purpose. A name-based
+ALLOWLIST would be worse than useless here: `indicator-1`/`indicator-2` carry no
+semantics at all — they are not `status`/`activity`/`power` — so there is
+nothing meaningful to match on, and anything surviving the two exclusions is by
+construction an unclaimed indicator.
+
+The script additionally **never re-points an LED that already has a trigger**,
+whether from a DT `default-trigger`, a previous run, or an operator. That is
+both the right policy (an LED that already means something keeps meaning it) and
+what makes the unit idempotent across reboots and A/B slot swaps. Reading the
+current trigger goes through the same bracket parse
+`ceralive-typec-source` documents for `port_type`: the attribute prints the
+WHOLE menu with the active entry bracketed (`[none] rfkill-any heartbeat mmc0
+mmc1 …`), so a naive literal compare is never true.
+
+**Board-agnostic and fail-soft by construction.** No LED class, an empty one,
+only reserved LEDs, exactly one free LED, or five of them are all informational
+log-and-exit-0 outcomes — the surplus beyond the policy's two triggers is logged
+and left exactly as the kernel set it. A refused write is a WARNING (the board
+keeps a dark LED, which is the state it shipped in) and the run continues to the
+next LED; only a write the kernel ACCEPTS and then does not honour is fatal,
+because by then the hardware shape has already been proven present. Like the fan
+curve it polls to a short deadline (10 s) rather than sleeping — `gpio-leds` and
+`pwm-leds` probe asynchronously — and it is **deliberately not `Before=`
+anything**, because nothing consumes an LED trigger and a board with no LEDs
+must not pay that wait on the boot critical path.
+
+Guards: `v2/tests/manifest.bats` §18g "led status: …" (11 tests). The fixture
+deliberately uses LED names the reference board does not have —
+`amber:status-a`, `white:status-b`, a `red:power` decoy, and the kernel LED at
+`mmc2::` rather than `mmc0::` — so any hardcoded LED name, and any `mmc0`-literal
+exclusion, fails the suite. It also pins the never-write-`brightness` property
+(both statically and by asserting the fixture's `brightness` nodes are unchanged
+after a real run), the zero/one/two/three-LED matrix, idempotency against the
+bracketed already-set form, the not-offered-trigger skip, the loud read-back
+failure, the RO-node warning, fail-closed missing source, and the
+`configure_services` wiring. `setup_led_status` is registered in
+`postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`; nothing was added to
+`mkosi.postinst.chroot`, which stays at 925 lines against the 950 ceiling.
+
+**Not yet in a shipped release, and not yet boot-proven.** The discovery and the
+policy are proven against synthetic fixtures and the LED inventory above was read
+off a real board, but no booted image has yet been observed lighting the LEDs.
+Confirming a heartbeat blink and card-activity flicker on hardware is the
+remaining step.
+
 ## ADD-ON SUBSYSTEM [EXISTS]
 
 Feature sysexts are optional, per-board/per-OS `.raw` artifacts delivered
@@ -2704,6 +2814,8 @@ gated item, not the package availability.
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
 - Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong is the threshold it acts on
 - Don't hardcode `thermal_zone0`/`cooling_device4` in the fan-curve script, and don't lower a trip that is not the FIRST `active` one. Both index spaces are registration-order artefacts confirmed to differ per board and per kernel tree, and the `critical` trip is the board's last line of defence
+- Don't write `brightness` on an LED that has a trigger, and don't hardcode `blue:indicator-1`/`green:indicator-2` in the LED script. A trigger hands the LED to the kernel — writing brightness afterwards fights it, exactly as writing `cur_state` would fight the thermal governor — and those names are vendor DTS labels with no semantics that differ per board and per kernel tree
+- Don't touch the `mmc0::`/`mmc1::` LED or go looking for a red one. The `mmc*` LEDs are the MMC core's own already-working activity LEDs, and there is NO red LED in the kernel's LED class on this board at all — the visible red one is a hardwired power-rail indicator with no software visibility
 
 ## KNOWN ISSUES / DEFERRED
 

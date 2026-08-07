@@ -3726,6 +3726,311 @@ SH
 }
 
 # ===========================================================================
+# 18g. Status LEDs — the board's indicator LEDs are registered by the kernel and
+#      then left completely unconfigured (`trigger = [none]`, `brightness = 0`),
+#      so a headless appliance gives its operator no visual feedback at all.
+#      setup_led_status (postinst-lib.sh) installs a oneshot that assigns the
+#      FIRST discovered indicator LED the `heartbeat` trigger and the SECOND the
+#      `mmc1` trigger, and writes nothing else — never `brightness`, which would
+#      fight the trigger it just installed.
+#
+#      The reference board (Orange Pi 5 Plus) names its LEDs `blue:indicator-1`
+#      (gpio-leds), `green:indicator-2` (pwm-leds) and `mmc0::` (the MMC host's
+#      own, already-working activity LED). The fixture below deliberately uses
+#      DIFFERENT names — `amber:status-a`, `white:status-b`, `mmc2::` and a
+#      `red:power` decoy — so any hardcoded LED name, and any `mmc0`-literal
+#      exclusion, fails these tests. Note the fixture's sort order is also not
+#      the discovery order of the names it stands in for. No image boot, no
+#      hardware, UNIT scope.
+# ===========================================================================
+
+LED_SCRIPT() { printf '%s' "$V2/mkosi/runtime/ceralive-led-status.sh"; }
+LED_UNIT() { printf '%s' "$V2/mkosi/runtime/ceralive-led-status.service"; }
+# NOTE for the static guards below: the script HEADER deliberately names the
+# reference board's LEDs to explain what it refuses to hardcode, so every
+# "no hardcoded name" check strips comment lines first and inspects executable
+# lines only.
+
+# led_fake_class <dir> — a synthetic /sys/class/leds carrying two free indicator
+# LEDs under names the reference board does not use, the kernel's own MMC
+# activity LED at a non-reference index, and a power-rail decoy.
+led_fake_class() {
+  local root="$1" d
+  rm -rf "$root"
+
+  for d in "amber:status-a" "white:status-b"; do
+    mkdir -p "$root/$d"
+    printf '[none] rfkill-any kbd-scrolllock heartbeat mmc0 mmc1 usbport\n' >"$root/$d/trigger"
+    printf '0\n' >"$root/$d/brightness"
+    printf '255\n' >"$root/$d/max_brightness"
+  done
+
+  # The kernel's OWN SD/eMMC activity LED. Already driven, not ours, and the
+  # index is 2 rather than the reference board's 0 on purpose.
+  mkdir -p "$root/mmc2::"
+  printf 'none rfkill-any heartbeat [mmc2] mmc1\n' >"$root/mmc2::/trigger"
+  printf '0\n' >"$root/mmc2::/brightness"
+
+  # A power-rail indicator: unclaimed, but repurposing it would destroy
+  # information rather than add it.
+  mkdir -p "$root/red:power"
+  printf '[none] rfkill-any heartbeat mmc0 mmc1\n' >"$root/red:power/trigger"
+  printf '1\n' >"$root/red:power/brightness"
+}
+
+led_attr() { tr -d '[:space:]' <"$1"; }
+
+@test "led status: the trigger script + boot unit are installed and enabled" {
+  local unit_dir="$BATS_TEST_TMPDIR/led-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/led-sbin"
+  local bin="$BATS_TEST_TMPDIR/led-bin"
+  local calls="$BATS_TEST_TMPDIR/led-calls"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$LED_CALLS"
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" LED_CALLS="$calls" \
+    CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
+    LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_led_status"
+  [ "$status" -eq 0 ]
+  [ -x "$sbin_dir/ceralive-led-status" ]
+  [ -f "$unit_dir/ceralive-led-status.service" ]
+
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-led-status.service"* ]]
+}
+
+@test "led status: discovery is generic — indicator LEDs are found under ANY name" {
+  # The reference board is blue:indicator-1 / green:indicator-2; this fixture is
+  # amber:status-a / white:status-b. Any hardcoded name fails here.
+  local sysfs="$BATS_TEST_TMPDIR/led-generic"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "heartbeat" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+
+  # And no executable line in the shipped script may name a concrete LED, a
+  # concrete LED index, or the reference board's vendor DTS labels.
+  run bash -c "grep -vE '^[[:space:]]*#' '$(LED_SCRIPT)' | grep -E 'indicator-[0-9]|blue:|green:|mmc0|led[0-9]'"
+  [ "$status" -ne 0 ]
+}
+
+@test "led status: the kernel's own mmc* LED and a power indicator are never touched" {
+  # mmc0::/mmc1:: are the MMC core's activity LEDs — already working, kernel
+  # managed, and not indicator LEDs. A power-rail LED must keep meaning "powered".
+  local sysfs="$BATS_TEST_TMPDIR/led-reserved"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mmc2::"* ]]
+  [[ "$output" == *"red:power"* ]]
+
+  [ "$(led_attr "$sysfs/mmc2::/trigger")" = "nonerfkill-anyheartbeat[mmc2]mmc1" ]
+  [ "$(led_attr "$sysfs/red:power/trigger")" = "[none]rfkill-anyheartbeatmmc0mmc1" ]
+  [ "$(led_attr "$sysfs/mmc2::/brightness")" = "0" ]
+  [ "$(led_attr "$sysfs/red:power/brightness")" = "1" ]
+}
+
+@test "led status: brightness is NEVER written and the unit runs no polling loop" {
+  # Assigning a trigger hands the LED to the kernel; writing brightness
+  # afterwards fights the very trigger just installed — the same
+  # "kernel does 100% of the driving" rule ceralive-fan-curve follows.
+  local script unit sysfs
+  script="$(LED_SCRIPT)"
+  unit="$(LED_UNIT)"
+  sysfs="$BATS_TEST_TMPDIR/led-nobrightness"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/brightness")" = "0" ]
+  [ "$(led_attr "$sysfs/white:status-b/brightness")" = "0" ]
+
+  # The script never even constructs a brightness path.
+  run grep -F '/brightness' "$script"
+  [ "$status" -ne 0 ]
+
+  # Exactly ONE sysfs write exists in the whole script, and it is the trigger.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '>\"\\\$\{trigger_attr\}\"'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '^[^#]*>[[:space:]]*\"?\\\$\{(LED_CLASS_DIR|led|trigger_attr)'"
+  [ "$output" -eq 1 ]
+
+  # A oneshot that exits, never a resident monitor or a timer.
+  grep -Eq '^Type=oneshot$' "$unit"
+  run grep -E '^(Type=(simple|notify|exec)|Restart=(always|on-failure))' "$unit"
+  [ "$status" -ne 0 ]
+  run grep -E '^(OnCalendar|OnUnitActiveSec)=' "$unit"
+  [ "$status" -ne 0 ]
+  # Nothing consumes an LED trigger, so this must not sit on any unit's
+  # critical path — a board with no LEDs would pay the bounded wait for nothing.
+  run grep -E '^Before=' "$unit"
+  [ "$status" -ne 0 ]
+}
+
+@test "led status: zero, one and more-than-two LED boards are all informational no-ops" {
+  local script sysfs
+  script="$(LED_SCRIPT)"
+
+  # No LED class at all (a board or kernel without CONFIG_LEDS_CLASS).
+  run env CERALIVE_LED_CLASS_DIR="$BATS_TEST_TMPDIR/led-absent" bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no LED class"* ]]
+
+  # An empty LED class.
+  sysfs="$BATS_TEST_TMPDIR/led-empty"
+  rm -rf "$sysfs"; mkdir -p "$sysfs"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" CERALIVE_LED_WAIT=1 bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no LEDs under"* ]]
+
+  # Only kernel-managed/reserved LEDs — nothing free to configure.
+  sysfs="$BATS_TEST_TMPDIR/led-onlymmc"
+  rm -rf "$sysfs"; mkdir -p "$sysfs/mmc1::"
+  printf 'none [mmc1] heartbeat\n' >"$sysfs/mmc1::/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" CERALIVE_LED_WAIT=1 bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kernel-managed or reserved"* ]]
+  [ "$(led_attr "$sysfs/mmc1::/trigger")" = "none[mmc1]heartbeat" ]
+
+  # Exactly one free LED: it gets the heartbeat and the policy simply runs out.
+  sysfs="$BATS_TEST_TMPDIR/led-one"
+  rm -rf "$sysfs"; mkdir -p "$sysfs/violet:lonely"
+  printf '[none] heartbeat mmc1\n' >"$sysfs/violet:lonely/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/violet:lonely/trigger")" = "heartbeat" ]
+
+  # Three free LEDs: the first two are assigned, the surplus is logged and left
+  # exactly as the kernel set it.
+  sysfs="$BATS_TEST_TMPDIR/led-three"
+  led_fake_class "$sysfs"
+  mkdir -p "$sysfs/zzz:spare"
+  printf '[none] heartbeat mmc1\n' >"$sysfs/zzz:spare/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no trigger left in the policy"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "heartbeat" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+  [ "$(led_attr "$sysfs/zzz:spare/trigger")" = "[none]heartbeatmmc1" ]
+
+  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
+  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$script"
+}
+
+@test "led status: an LED that already has a trigger is never re-pointed (idempotent)" {
+  local sysfs="$BATS_TEST_TMPDIR/led-idem"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+
+  # Re-render the trigger files the way real sysfs does — the whole menu with
+  # the active entry in brackets. A naive literal compare is never true here,
+  # which is the bracket trap ceralive-typec-source documents for port_type.
+  printf 'none rfkill-any [heartbeat] mmc0 mmc1\n' >"$sysfs/amber:status-a/trigger"
+  printf 'none rfkill-any heartbeat mmc0 [mmc1]\n' >"$sysfs/white:status-b/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already driven by the 'heartbeat' trigger"* ]]
+  [[ "$output" == *"already driven by the 'mmc1' trigger"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "nonerfkill-any[heartbeat]mmc0mmc1" ]
+
+  # An operator (or a device tree default-trigger) that already claimed an LED
+  # for something else keeps it.
+  printf 'none [panic] heartbeat mmc1\n' >"$sysfs/amber:status-a/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "none[panic]heartbeatmmc1" ]
+}
+
+@test "led status: a trigger this kernel does not offer is skipped, never forced" {
+  # The trigger menu is the kernel's own answer about what it supports; writing
+  # a name that is not in it just yields EINVAL and a failed unit on every boot.
+  local sysfs="$BATS_TEST_TMPDIR/led-notoffered"
+  led_fake_class "$sysfs"
+  printf '[none] rfkill-any usbport\n' >"$sysfs/amber:status-a/trigger"
+  printf '[none] rfkill-any usbport heartbeat\n' >"$sysfs/white:status-b/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"does not offer a 'heartbeat' trigger"* ]]
+  [[ "$output" == *"does not offer a 'mmc1' trigger"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "[none]rfkill-anyusbport" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "[none]rfkill-anyusbportheartbeat" ]
+}
+
+@test "led status: a write the kernel ACCEPTS but ignores FAILS loudly (read-back verified)" {
+  # The observable shape of an LED core that takes the write and then discards
+  # it: `cat` keeps answering the stale menu, so the write succeeds and the
+  # read-back disagrees. Reporting that as success is exactly how an LED fix
+  # ships without ever having lit anything.
+  local sysfs="$BATS_TEST_TMPDIR/led-stale"
+  local bin="$BATS_TEST_TMPDIR/led-stale-bin"
+  led_fake_class "$sysfs"
+  mkdir -p "$bin"
+  cat >"$bin/cat" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    */amber:status-a/trigger) printf '[none] heartbeat mmc0 mmc1\n'; exit 0 ;;
+  esac
+done
+exec "$(PATH=/usr/bin:/bin command -v cat)" "$@"
+SH
+  chmod +x "$bin/cat"
+
+  run env PATH="$bin:$PATH" CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"after accepting a write"* ]]
+}
+
+@test "led status: an unwritable trigger WARNs and exits 0 (a dark LED is the state it shipped in)" {
+  if [ "$(id -u)" -eq 0 ]; then skip "root ignores file permissions"; fi
+  local sysfs="$BATS_TEST_TMPDIR/led-readonly"
+  led_fake_class "$sysfs"
+  chmod 0444 "$sysfs/amber:status-a/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"refused the write"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "[none]rfkill-anykbd-scrolllockheartbeatmmc0mmc1usbport" ]
+  # The second LED is still configured — one bad node is not a reason to stop.
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+}
+
+@test "led status: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+  local unit_dir="$BATS_TEST_TMPDIR/led-failclosed-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/led-failclosed-sbin"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
+    LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_led_status"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"led-status script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-led-status.service" ]
+}
+
+@test "led status: the fix is wired into configure_services and registered in the drift gate" {
+  # An unreferenced setup function is dead code — the dark LEDs ship.
+  run grep -E '^\s*setup_led_status$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  # Standalone-artifact idiom: defined once in postinst-lib.sh, never inlined.
+  grep -Fq 'setup_led_status' "$V2/ci/postinst-drift-check.sh"
+  run grep -cE '^setup_led_status\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —

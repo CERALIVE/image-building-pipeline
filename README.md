@@ -354,6 +354,38 @@ numeric order. No zone or cooling-device index is hardcoded, because both are
 registration-order artefacts that differ per board and per kernel tree. A board with
 no such device (x86-minipc) logs one informational line and exits 0.
 
+## Status LEDs
+
+The board's indicator LEDs are registered by the kernel and then left completely
+unconfigured. On an Orange Pi 5 Plus, `blue:indicator-1` (gpio-leds) and
+`green:indicator-2` (pwm-leds) both sit at `trigger = [none]` with
+`brightness = 0` for the life of the device — wired, working, and never asked to
+do anything. A headless appliance with no screen therefore gives its operator no
+visual evidence that it booted or that it is doing any work.
+
+`ceralive-led-status.service` (a boot oneshot) assigns an ordered default policy
+to the LEDs it discovers: the **first** indicator LED gets the stock `heartbeat`
+trigger (the kernel is alive and scheduling) and the **second** gets `mmc1`
+(card activity — the board is doing I/O). Each trigger is verified to be offered
+by that LED's own `trigger` menu before anything is written.
+
+It never writes `brightness` — a trigger hands the LED to the kernel, and writing
+brightness afterwards fights the trigger just installed — and it never re-points
+an LED that already has a trigger, so it is idempotent across reboots and A/B
+slot swaps.
+
+Discovery is fully generic: the LED name is split on `:` and the LED is skipped
+if any field matches `mmc[0-9]*` (the MMC core's own, already-working activity
+LED, e.g. `mmc0::`) or `power` (a power-rail indicator must keep meaning
+"powered"). No LED name is hardcoded, because `indicator-1`/`indicator-2` are
+vendor DTS labels that carry no semantics and differ per board and per kernel
+tree. A board with no LEDs, one LED, or more than two logs one informational line
+and exits 0.
+
+There is no red LED in the kernel's LED class on this board — the visible red one
+is a hardwired power-rail indicator with no software visibility, and nothing here
+can drive it.
+
 ## Supported-Modem Matrix + WWAN Module Check
 
 The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA

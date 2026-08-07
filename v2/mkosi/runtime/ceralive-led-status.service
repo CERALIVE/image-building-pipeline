@@ -1,0 +1,33 @@
+[Unit]
+Description=CeraLive status LEDs — assign default triggers to the board's indicator LEDs
+Documentation=file:///usr/local/sbin/ceralive-led-status
+# The board's indicator LEDs are registered by the kernel and then left
+# completely unconfigured: `trigger` reads `[none]` and `brightness` reads 0, so
+# they never light up and a headless appliance gives its operator no visual
+# feedback at all. This assigns the first discovered indicator LED the standard
+# `heartbeat` trigger (the kernel is alive) and the second `mmc1` (the board is
+# doing card I/O). It never writes `brightness` — that would fight the trigger —
+# and never touches the kernel's own `mmc*` activity LED.
+# Full rationale + the exclusion rule: /usr/local/sbin/ceralive-led-status header.
+#
+# systemd-udev-trigger is the coldplug that gets the gpio-leds/pwm-leds platform
+# drivers bound and their LEDs registered; After= it is the earliest sensible
+# point, but driver probe is ASYNCHRONOUS so it is NOT a guarantee that
+# /sys/class/leds is populated yet. The script owns that race with a bounded
+# poll rather than a fixed sleep.
+After=systemd-udev-trigger.service
+# Deliberately NOT ordered Before= anything. Nothing on the device consumes an
+# LED trigger, so putting this on another unit's critical path would buy a boot
+# dependency for no benefit — and a board with no LEDs at all would then pay the
+# script's bounded wait on the critical path.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-led-status
+# Must exceed the script's own 10s poll deadline so systemd never kills it
+# mid-wait and turns a slow gpio-leds probe into a unit failure.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
