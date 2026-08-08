@@ -2224,6 +2224,42 @@ stable /dev/hdmi-in node" — asserts `DRIVERS==` (and explicitly rejects a re-s
 `ATTRS{name}==`), not `video0`-pinned, both symlink tokens, and the original
 permission rules preserved.
 
+**`snps_hdmirx` fails to PROBE at boot on Orange Pi 5+ — a TF-A/BL31 gap, no
+`/dev/video*` HDMI-RX node exists on that board at all** [FINDING — not fixed]
+
+Confirmed live on an Orange Pi 5+ this session (2026-08-08): `snps_hdmirx` never
+binds, independent of any HDMI cable or signal being connected, so there is no
+HDMI-RX capture node for cerastream or anything else to open. `dmesg` on the
+board:
+
+```
+snps_hdmirx fdee0000.hdmi_receiver: assigned reserved memory node hdmi-receiver-cma
+snps_hdmirx fdee0000.hdmi_receiver: hdmirx_phy_register_read wait cr read done failed
+snps_hdmirx fdee0000.hdmi_receiver: error -ETIMEDOUT: interrupt not functioning, open-source TF-A is required by this driver
+snps_hdmirx fdee0000.hdmi_receiver: probe with driver snps_hdmirx failed with error -110
+```
+
+The driver's own message names the cause: the interrupt path it needs is routed
+through an SMC call into ARM Trusted Firmware (BL31), and the board's running
+BL31 — `v2.13.0(release):armbian` — apparently does not carry or expose the
+support `snps_hdmirx` expects. This is a firmware gap, not a kernel or DT
+defect, and it sits upstream of anything in this repo's udev/manifest layer
+(the `DRIVERS=="rk_hdmirx|snps_hdmirx"` symlink rule above is correct and
+irrelevant here — there is no bound device for it to match).
+
+The same session confirmed the SAME kernel/image family's `snps_hdmirx` probes
+and polls **successfully** on a Rock 5B+ — `hdmirx_query_dv_timings port has no
+link!` on that board is the expected/healthy "no signal" message, not a probe
+failure. Per this file's boot-artifact documentation, each board's ATF/BL31 is
+embedded in its own bootloader payload separately (Rock 5B+ ships
+`u-boot-rockchip.bin`; Orange Pi ships `idbloader.img` + `u-boot.itb`), with no
+shared `trust.bin` — so this narrows the gap to Orange Pi 5+'s own TF-A/BL31
+build specifically, not a universal RK3588 or vendor-kernel issue.
+
+This is a FINDING, not a fix: rebuilding ARM Trusted Firmware with the
+SMC/interrupt-routing support `snps_hdmirx` requires is out of scope here and
+has not been attempted.
+
 **The USB-C connector MUST be pinned to the Type-C `source` role at boot — else the
 camera is sometimes not on the USB bus at all** [EXISTS — code merged-ready, NOT in
 any shipped release yet]
