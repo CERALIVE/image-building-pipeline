@@ -151,8 +151,26 @@ sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-a
                          # drop-in; without the sudo binary add-on enable/disable is dead code.
 
 # --- Console (HDMI readability at boot) ---------------------------------------
-kbd                      # setfont — set console font at boot for HDMI readability at any resolution
-fonts-terminus           # large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon
+kbd                      # setfont/loadkeys — systemd-vconsole-setup shells out to these, and
+                         # ceralive-console-font.service calls setfont directly. KEPT: removing
+                         # kbd would break vconsole setup, which is independent of the dead
+                         # console-font path described below.
+# fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
+                         # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
+                         # factually wrong on bookworm: fonts-terminus ships EXACTLY ONE file,
+                         # /usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf (440,944 B),
+                         # and NO console PSF font at all (the PSF set lives in xfonts-terminus /
+                         # console-setup, neither of which is installed). Verified against a built
+                         # rootfs: /usr/share/consolefonts/ is EMPTY (0 entries), so
+                         # ceralive-console-font.service's
+                         #   setfont /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
+                         #   || setfont /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz || true
+                         # can never succeed and silently no-ops on every boot. A TTF has no fbcon
+                         # consumer, and the production image ships no X/Wayland; fonts-dejavu-core
+                         # (2.88 MB, pulled by fontconfig-config) remains as the only font any
+                         # future GUI/kiosk payload would resolve. Restoring HDMI console
+                         # readability needs a real PSF provider, NOT this package — tracked
+                         # separately, see v2/docs/size-notes.md §11.
                          # NOTE: operational monitoring (htop/iotop/nethogs/vnstat) and the
                          # nano editor moved to the debug add-on (T17) — see removed.md.
 

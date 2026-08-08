@@ -55,6 +55,8 @@ BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 MEASURE_SIZE_SH="${HERE}/measure-size.sh"
+CHECK_SIZE_REGRESSION_SH="${V2_DIR}/ci/check-size-regression.sh"
+SIZE_BASELINE_DIR="${V2_DIR}/ci"
 ASSEMBLE_DISK_SH="${HERE}/assemble-disk.sh"
 ASSEMBLE_DISK_X86_SH="${HERE}/assemble-disk-x86.sh"
 BUILD_BUNDLE_SH="${HERE}/build-bundle.sh"
@@ -547,6 +549,7 @@ main() {
     log_info "[6c/9] enforcing the rootfs size budget for ${artifact}"
     "${MEASURE_SIZE_SH}" "${board}" "${artifact}" \
       || die "rootfs size budget EXCEEDED for board '${board}' (measured/budget bytes above) — slim the image (v2/docs/size-notes.md), do NOT raise rootfs_bytes_max"
+    compare_size_against_baseline "${board}" "${artifact}"
   else
     log_warn "[6c/9] INSTALL_BOOT_BSP=0 — config+package parity build; rootfs size budget not enforced (a kernel-less rootfs is not the shipped image)"
   fi
@@ -941,6 +944,49 @@ emit_artifact() {
       tar -C "/work/build/app" "${tar_repro[@]}" -cf "/out/$(basename "${artifact}")" .
   fi
   ( cd "$(dirname "${artifact}")" && sha256sum "$(basename "${artifact}")" >"$(basename "${artifact}").sha256" )
+}
+
+# ---------------------------------------------------------------------------
+# compare_size_against_baseline <board> <artifact.tar>
+#
+# The RELATIVE size gate, run against the REAL emitted tar. It was previously
+# reachable only from the v2-ci "size gate" job, which measures a synthetic 4 KB
+# tree — so it compared 4096 bytes against a ~1.4 GB baseline and could only ever
+# report an enormous shrink. That is the same vacuity that let both RK3588 boards
+# ship over the ABSOLUTE ceiling before [6c/9] existed; fixing one gate and
+# leaving the other measuring 4 KB just moves the blind spot.
+#
+# Exit policy is deliberately split, and NOT the same as the absolute gate's:
+#   exit 2 (missing/malformed baseline, or a baseline for a DIFFERENT board) is
+#          FATAL — that is a repository misconfiguration, and a silent cross-board
+#          comparison produces a confident, meaningless delta.
+#   exit 1 (growth beyond the comparator's threshold) is a loud WARNING, matching
+#          what v2-ci already does: the blocking size rule is the absolute ceiling
+#          in size-budget.json, and an intentional feature addition must not be
+#          able to fail a build that is still comfortably under it.
+# The baseline is resolved ONLY as size-baseline.<board>.json, with no
+# un-suffixed fallback: the legacy v2/ci/size-baseline.json is rock-5b-plus's
+# file, so a fallback would hand it to every board that lacks one. A board with
+# no committed baseline yet warns and passes, the same newly-added-board
+# allowance measure-size.sh makes for a null ceiling.
+# ---------------------------------------------------------------------------
+compare_size_against_baseline() {
+  local board="$1" artifact="$2" baseline measured rc=0
+
+  baseline="${SIZE_BASELINE_DIR}/size-baseline.${board}.json"
+  if [[ ! -f "${baseline}" ]]; then
+    log_warn "[6c/9] no committed size baseline for board '${board}' — relative regression check skipped (record one in ${SIZE_BASELINE_DIR})"
+    return 0
+  fi
+
+  measured="$(du --apparent-size -sb "${artifact}" | awk '{print $1}')"
+
+  "${CHECK_SIZE_REGRESSION_SH}" "${measured}" "${baseline}" "${board}" || rc=$?
+  case "${rc}" in
+    0) log_success "[6c/9] size baseline: board=${board} within threshold of $(basename "${baseline}")" ;;
+    1) log_warn "[6c/9] size baseline: board=${board} GREW beyond the regression threshold vs $(basename "${baseline}") — justify the growth and update the baseline in the same PR (v2/docs/size-notes.md §4)" ;;
+    *) die "[6c/9] size baseline unusable for board '${board}': ${baseline} (missing, malformed, or recorded for a different board)" ;;
+  esac
 }
 
 main "$@"

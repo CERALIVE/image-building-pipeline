@@ -5,5 +5,5 @@
   "artifact": "v2/images/orange-pi-5-plus/20260802T161110Z.rootfs.tar",
   "artifact_sha256": "e401f2f248a1d46fceadc99cf9daa8afd0a5bff8f4406b98d419d911985fcabd",
   "commit": "67d053a",
-  "note": "Per-board baseline. v2/ci/size-baseline.json (no board suffix) is the rock-5b-plus baseline the v2-ci size job reads today; this file is the OPi 5+ counterpart, ready for a per-board wiring. Post-prune: supersedes the 1576458240 / 20260802T133827Z baseline recorded the same day at commit 01975f6, and the 157,665,280 B drop is the Mesa software-GL file prune (size-notes.md §9). This producing build passes [6b/9] end to end — the dtb_name defect that failed the previous one was fixed in PR #94."
+  "note": "Per-board baseline, read by orchestrate.sh's [6c/9] relative gate (compare_size_against_baseline resolves size-baseline.<board>.json; there is deliberately no un-suffixed fallback, and v2/ci/size-baseline.json is now a symlink to the rock-5b-plus file so v2-ci.yml keeps working with no second copy of the number). Post-prune: supersedes the 1576458240 / 20260802T133827Z baseline recorded the same day at commit 01975f6, and the 157,665,280 B drop is the Mesa software-GL file prune (size-notes.md \u00a79). This producing build passes [6b/9] end to end \u2014 the dtb_name defect that failed the previous one was fixed in PR #94."
 }

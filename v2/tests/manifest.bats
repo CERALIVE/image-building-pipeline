@@ -1618,7 +1618,7 @@ extract_size_gate_block() {
     /^  if \[\[/ { inblk = 1; buf = $0; next }
     inblk {
       buf = buf ORS $0
-      if ($0 == "  fi") { if (buf ~ /\[6c\/9\]/) print buf; inblk = 0 }
+      if ($0 == "  fi") { if (buf ~ /\[6c\/9\]/) { print buf; exit } ; inblk = 0 }
     }
   ' "$V2/lib/orchestrate.sh"
 }
@@ -1627,17 +1627,44 @@ extract_size_gate_block() {
 # caller-supplied MEASURE_SIZE_SH, exactly as main() would.
 run_size_gate_block() {
   local install_boot_bsp="$1" budget_json="$2" artifact="$3" measure_sh="${4:-$MEASURE_SH}"
+  local baseline_spy="${5:-}"
   run bash -c "
     set -euo pipefail
     log_info()  { printf '[INFO] %s\n' \"\$*\"; }
     log_warn()  { printf '[WARN] %s\n' \"\$*\"; }
     die()       { printf '[ERROR] %s\n' \"\$*\" >&2; exit 1; }
+    compare_size_against_baseline() { if [[ -n '${baseline_spy}' ]]; then touch '${baseline_spy}'; fi; printf '[INFO] baseline-compare %s\n' \"\$1\"; }
     export SIZE_BUDGET_JSON='${budget_json}'
     MEASURE_SIZE_SH='${measure_sh}'
     INSTALL_BOOT_BSP='${install_boot_bsp}'
     board=rock-5b-plus
     artifact='${artifact}'
     $(extract_size_gate_block)
+  "
+}
+
+# Emit the real compare_size_against_baseline() out of orchestrate.sh so the
+# relative-gate cases execute the shipped function rather than a copy of it.
+extract_baseline_compare_fn() {
+  awk '
+    /^compare_size_against_baseline\(\) \{/ { inblk = 1 }
+    inblk { print }
+    inblk && /^\}/ { exit }
+  ' "$V2/lib/orchestrate.sh"
+}
+
+run_baseline_compare() {
+  local board="$1" artifact="$2" baseline_dir="$3"
+  run bash -c "
+    set -euo pipefail
+    log_info()    { printf '[INFO] %s\n' \"\$*\"; }
+    log_warn()    { printf '[WARN] %s\n' \"\$*\"; }
+    log_success() { printf '[OK] %s\n' \"\$*\"; }
+    die()         { printf '[ERROR] %s\n' \"\$*\" >&2; exit 1; }
+    SIZE_BASELINE_DIR='${baseline_dir}'
+    CHECK_SIZE_REGRESSION_SH='$V2/ci/check-size-regression.sh'
+    $(extract_baseline_compare_fn)
+    compare_size_against_baseline '${board}' '${artifact}'
   "
 }
 
@@ -1718,6 +1745,133 @@ run_size_gate_block() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"[6c/9] INSTALL_BOOT_BSP=0"* ]]
   [ ! -e "$sentinel" ]
+}
+
+@test "size-gate wiring: the shipped block runs the relative baseline check after the absolute gate" {
+  # The absolute ceiling and the relative baseline are different questions. Wiring
+  # only the ceiling leaves size-baseline.json dead data that no real build reads.
+  local tree="$BATS_TEST_TMPDIR/wired-baseline"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+  local spy="$BATS_TEST_TMPDIR/baseline-compare-ran"
+  run_size_gate_block 1 "$SIZE_BUDGET_JSON" "$tree" "$MEASURE_SH" "$spy"
+  [ "$status" -eq 0 ]
+  [ -e "$spy" ]
+
+  local block
+  block="$(extract_size_gate_block)"
+  local measure_pos baseline_pos
+  measure_pos="$(printf '%s\n' "$block" | grep -n 'MEASURE_SIZE_SH' | head -1 | cut -d: -f1)"
+  baseline_pos="$(printf '%s\n' "$block" | grep -n 'compare_size_against_baseline' | head -1 | cut -d: -f1)"
+  [ -n "$measure_pos" ] && [ -n "$baseline_pos" ]
+  [ "$measure_pos" -lt "$baseline_pos" ]
+}
+
+@test "size-baseline: every shipped RK3588 board has a REAL committed per-board baseline" {
+  # "Real" means: recorded from an actual measured artifact, not a placeholder.
+  # A baseline with no artifact/sha256/commit provenance cannot be re-derived, and
+  # a baseline above the blocking ceiling would be a baseline for an image that
+  # could never have shipped.
+  run python3 - "$V2/ci" "$SIZE_BUDGET_JSON" <<'PY'
+import json, re, sys
+from pathlib import Path
+
+ci, budget_path = Path(sys.argv[1]), Path(sys.argv[2])
+budget = json.loads(budget_path.read_text(encoding="utf-8"))
+
+for board in ("rock-5b-plus", "orange-pi-5-plus"):
+    f = ci / ("size-baseline.%s.json" % board)
+    assert f.is_file(), "missing per-board baseline: %s" % f.name
+    d = json.loads(f.read_text(encoding="utf-8"))
+    assert d.get("board") == board, "%s: board field is %r" % (f.name, d.get("board"))
+    b = d.get("bytes")
+    assert isinstance(b, int) and not isinstance(b, bool) and b > 0, (
+        "%s: bytes must be a positive int, got %r" % (f.name, b)
+    )
+    assert b > 100_000_000, (
+        "%s: bytes=%d is not a real rootfs measurement (placeholder?)" % (f.name, b)
+    )
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(d.get("recorded_at", ""))), (
+        "%s: recorded_at must be an ISO date" % f.name
+    )
+    for prov in ("artifact", "artifact_sha256", "commit"):
+        assert d.get(prov), "%s: missing provenance field %r" % (f.name, prov)
+    assert re.fullmatch(r"[0-9a-f]{64}", d["artifact_sha256"]), (
+        "%s: artifact_sha256 must be lowercase hex sha256" % f.name
+    )
+    ceiling = budget[board]["rootfs_bytes_max"]
+    assert b <= ceiling, (
+        "%s: baseline %d exceeds the blocking ceiling %d" % (f.name, b, ceiling)
+    )
+print("BASELINE-REAL-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BASELINE-REAL-OK"* ]]
+}
+
+@test "size-baseline: size-budget.json 'measured' agrees byte-for-byte with the per-board baseline" {
+  # The measured value is recorded in two registries. They are read by different
+  # consumers (the budget file by measure-size.sh's operators, the baseline file by
+  # the relative gate), so a silent divergence would make one of them a lie.
+  run python3 - "$V2/ci" "$SIZE_BUDGET_JSON" <<'PY'
+import json, sys
+from pathlib import Path
+
+ci, budget_path = Path(sys.argv[1]), Path(sys.argv[2])
+budget = json.loads(budget_path.read_text(encoding="utf-8"))
+
+for board in ("rock-5b-plus", "orange-pi-5-plus"):
+    d = json.loads((ci / ("size-baseline.%s.json" % board)).read_text(encoding="utf-8"))
+    entry = budget[board]
+    assert entry.get("measured") == d["bytes"], (
+        "%s: size-budget measured=%r != baseline bytes=%r"
+        % (board, entry.get("measured"), d["bytes"])
+    )
+    for a, b in (("measured_at", "recorded_at"), ("measured_commit", "commit"),
+                 ("measured_artifact", "artifact")):
+        assert entry.get(a) == d.get(b), (
+            "%s: size-budget %s=%r != baseline %s=%r"
+            % (board, a, entry.get(a), b, d.get(b))
+        )
+print("BASELINE-AGREE-OK")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BASELINE-AGREE-OK"* ]]
+}
+
+@test "size-baseline: the comparator REFUSES a baseline recorded for a different board" {
+  # Baselines differ between boards by tens of MB, so an unchecked file argument
+  # yields a confident, meaningless delta. This is the non-vacuity leg.
+  run "$V2/ci/check-size-regression.sh" 1412259840 "$V2/ci/size-baseline.rock-5b-plus.json" orange-pi-5-plus
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"baseline is for board"* ]]
+
+  run "$V2/ci/check-size-regression.sh" 1412259840 "$V2/ci/size-baseline.rock-5b-plus.json" rock-5b-plus
+  [ "$status" -eq 0 ]
+}
+
+@test "size-baseline: the shipped compare function DIES on a cross-board baseline and SKIPS a missing one" {
+  local tree="$BATS_TEST_TMPDIR/baseline-art"
+  mkdir -p "$tree"
+  head -c 4096 /dev/zero > "$tree/a.bin"
+
+  # A board with no committed baseline is the newly-added-board allowance: warn,
+  # do not fail. Crucially it must NOT silently fall back to another board's file.
+  local empty="$BATS_TEST_TMPDIR/baselines-empty"
+  mkdir -p "$empty"
+  cp "$V2/ci/size-baseline.rock-5b-plus.json" "$empty/size-baseline.json"
+  run_baseline_compare x86-minipc "$tree" "$empty"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no committed size baseline"* ]]
+
+  # A per-board file whose own board field disagrees is a misconfiguration, not a
+  # size event, so it must abort rather than report a delta.
+  local bad="$BATS_TEST_TMPDIR/baselines-bad"
+  mkdir -p "$bad"
+  cp "$V2/ci/size-baseline.rock-5b-plus.json" "$bad/size-baseline.x86-minipc.json"
+  run_baseline_compare x86-minipc "$tree" "$bad"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"size baseline unusable"* ]]
 }
 
 @test "size-gate wiring: the gate is NOT arch-gated (x86 carries a real ceiling too)" {

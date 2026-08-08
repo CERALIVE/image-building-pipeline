@@ -1,0 +1,9 @@
+{
+  "board": "rock-5b-plus",
+  "bytes": 1412259840,
+  "recorded_at": "2026-08-02",
+  "artifact": "v2/images/rock-5b-plus/20260802T155321Z.rootfs.tar",
+  "artifact_sha256": "544fed92f2bf88fdee7edc15a1e63aed91d2b8b911778bd0c3100074f987a342",
+  "commit": "67d053a",
+  "note": "Per-board baseline, read by orchestrate.sh's [6c/9] relative gate. Renamed from size-baseline.json in todo 31 when baselines became per-board; that path is now a symlink to this file, so v2-ci.yml's step is unchanged and there is no second copy of the number to drift. Post-prune baseline: supersedes the 1569914880 / 20260802T132149Z baseline recorded the same day at commit 01975f6; the 157,655,040 B drop is the Mesa software-GL file prune (size-notes.md \u00a79) and nothing else. Produced by a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS) and measured with v2/lib/measure-size.sh."
+}
