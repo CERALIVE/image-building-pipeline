@@ -72,19 +72,25 @@ fail() { echo "interface-naming-path-match: FAIL — $*" >&2; exit 1; }
 # postinst.d/, so it stays the path Part B sources — but the function bodies live
 # in the modules, and grepping the entry alone would fail every check below for
 # the wrong reason.
-postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
+#
+# Materialized ONCE into a variable, never piped: the reader below stops early,
+# which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail` then
+# reports a correct read as a failure. Whether it fires depends on the unread
+# bytes left against the 64 KiB pipe buffer, so the pipe form survives until a
+# module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh)"
 
 # ---------------------------------------------------------------------------
 # Part A — static contract
 # ---------------------------------------------------------------------------
 
-postinst_source_set | grep -q 'link_path_match()' \
+grep -q 'link_path_match()' <<<"${POSTINST_SRC}" \
   || fail "link_path_match() is gone from the postinst library — the .link Path= is literal again and edge images will not rename"
 
-postinst_source_set | grep -q 'Path=${match}' \
+grep -q 'Path=${match}' <<<"${POSTINST_SRC}" \
   || fail "install_interface_naming() no longer interpolates the computed match into Path= (regressed to the literal manifest value)"
 
-postinst_source_set | grep -q 'platform-\*\.%s-%s' \
+grep -q 'platform-\*\.%s-%s' <<<"${POSTINST_SRC}" \
   || fail "the controller-agnostic 'platform-*.<devtype>-pci-<bdf>' glob is gone from link_path_match()"
 
 echo "interface-naming-path-match: Part A static contract OK"

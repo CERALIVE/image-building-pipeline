@@ -48,7 +48,13 @@ pass() { printf 'kernel-freeze: %s\n' "$1"; }
 # postinst.d/, so Part B keeps sourcing it — but freeze_boot_packages itself lives
 # in a module, and extracting from the entry alone would leave every Part A
 # assertion below matching an empty body.
-postinst_source_set() { cat "${LIB}" "${POSTINST_D}"/*.sh; }
+#
+# Materialized ONCE into a variable, never piped: the reader below stops early,
+# which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail` then
+# reports a correct read as a failure. Whether it fires depends on the unread
+# bytes left against the 64 KiB pipe buffer, so the pipe form survives until a
+# module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${LIB}" "${POSTINST_D}"/*.sh)"
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "${TMPROOT}"' EXIT
@@ -56,11 +62,11 @@ trap 'rm -rf "${TMPROOT}"' EXIT
 # ---------------------------------------------------------------------------
 # PART A — static contract
 # ---------------------------------------------------------------------------
-fn_body="$(postinst_source_set | awk '
+fn_body="$(awk '
   /^freeze_boot_packages\(\) \{/ { f=1 }
   f { print }
   f && /^\}/ { exit }
-')"
+' <<<"${POSTINST_SRC}")"
 [[ -n "${fn_body}" ]] || fail "could not extract freeze_boot_packages() from the postinst library"
 
 # Assert against the EXECUTABLE body: the header prose names both apt-mark forms
@@ -92,7 +98,7 @@ grep -Eq 'linux-image-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"${fn_bod
   && fail "freeze_boot_packages() hardcodes a BSP package name — the set is manifest-resolved so every board (and the per-board U-Boot package) is covered"
 
 # Every first-party package must be refused by name.
-never="$(postinst_source_set | sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p')"
+never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
 [[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from the postinst library"
 for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive gstreamer1.0-libuvch264src modemmanager; do
   [[ " ${never} " == *" ${pkg} "* ]] \

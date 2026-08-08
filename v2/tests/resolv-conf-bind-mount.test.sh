@@ -51,13 +51,19 @@ fail() { printf 'resolv-conf-bind-mount regression: %s\n' "$1" >&2; exit 1; }
 # postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
 # postinst.d/; extracting from the entry alone would find no function body and
 # pass every static check below vacuously.
-postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
+#
+# Materialized ONCE into a variable, never piped: the reader below stops early,
+# which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail` then
+# reports a correct read as a failure. Whether it fires depends on the unread
+# bytes left against the 64 KiB pipe buffer, so the pipe form survives until a
+# module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh)"
 
-fn_body="$(postinst_source_set | awk '
+fn_body="$(awk '
   /^configure_networking\(\) \{/ { f=1 }
   f { print }
   f && /^\}/ { exit }
-')"
+' <<<"${POSTINST_SRC}")"
 [[ -n "${fn_body}" ]] || fail "could not extract configure_networking() from the postinst library"
 
 # ---------------------------------------------------------------------------

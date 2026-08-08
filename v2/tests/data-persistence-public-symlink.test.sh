@@ -47,16 +47,22 @@ fail() { printf 'data-persistence-public-symlink regression: %s\n' "$1" >&2; exi
 # postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
 # postinst.d/; the seeding block is a heredoc inside one of them, so extracting
 # from the entry alone would leave every check below matching an empty string.
-postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
+#
+# Materialized ONCE into a variable, never piped: the reader below stops early,
+# which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail` then
+# reports a correct read as a failure. Whether it fires depends on the unread
+# bytes left against the 64 KiB pipe buffer, so the pipe form survives until a
+# module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh)"
 
 # Extract the exact seeding block generated into ceralive-migrate-data (the `if [ -d
 # "$WORKDIR" ] ... fi` guard). index()-anchored so no regex escaping of the literal
 # heredoc line, and it stops at the block's own closing `fi`.
-block="$(postinst_source_set | awk '
+block="$(awk '
   index($0, "if [ -d \"$WORKDIR\" ] && ! mountpoint -q \"$WORKDIR\"; then") { f=1 }
   f { print }
   f && $0 ~ /^fi$/ { exit }
-')"
+' <<<"${POSTINST_SRC}")"
 [[ -n "${block}" ]] || fail "could not extract the WORKDIR seeding block from the postinst library"
 
 # ---------------------------------------------------------------------------
