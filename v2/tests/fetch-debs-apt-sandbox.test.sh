@@ -26,6 +26,12 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${TESTS_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${V2}/.." && pwd)"
 FETCH_DEBS="${V2}/lib/fetch-debs.sh"
+# The fetch path is the entry point PLUS its lib/fetch/ family modules. Part A
+# must scan all of them: the sandbox helpers and fetch_first_party now live in
+# lib/fetch/firstparty.sh, and a static contract that keeps looking only at the
+# entry would report PASS while asserting nothing at all — which on THIS suite
+# would mean the sandbox-override check silently stops checking.
+FETCH_SOURCES=("${FETCH_DEBS}" "${V2}"/lib/fetch/*.sh)
 HARNESS="${TESTS_DIR}/fixtures/apt-sandbox/in-container.sh"
 HARNESS_IN_CONTAINER="/repo${HARNESS#"${REPO_ROOT}"}"
 ARTIFACT_DIR="${REPO_ROOT}/test-results/flows/apt"
@@ -63,44 +69,61 @@ trap cleanup EXIT
 # Part A — static contract
 # ---------------------------------------------------------------------------
 
-if [[ "$(grep -c 'Sandbox::User' "${FETCH_DEBS}")" -eq 0 ]]; then
-	pass "no apt sandbox-user override anywhere in fetch-debs.sh (comments included)"
+if [[ "$(cat "${FETCH_SOURCES[@]}" | grep -c 'Sandbox::User')" -eq 0 ]]; then
+	pass "no apt sandbox-user override anywhere on the fetch path (all modules, comments included)"
 else
-	fail "fetch-debs.sh still spells the apt sandbox-user override: $(grep -n 'Sandbox::User' "${FETCH_DEBS}")"
+	fail "the fetch path still spells the apt sandbox-user override: $(grep -n 'Sandbox::User' "${FETCH_SOURCES[@]}")"
 fi
 
-if grep -q '^apt_sandbox_active()' "${FETCH_DEBS}" \
-	&& grep -q 'EUID == 0' "${FETCH_DEBS}" \
-	&& grep -q '^apt_sandbox_user_exists()' "${FETCH_DEBS}"; then
+if grep -q '^apt_sandbox_active()' "${FETCH_SOURCES[@]}" \
+	&& grep -q 'EUID == 0' "${FETCH_SOURCES[@]}" \
+	&& grep -q '^apt_sandbox_user_exists()' "${FETCH_SOURCES[@]}"; then
 	pass "the sandbox gate is privilege-aware (root AND the sandbox user must exist)"
 else
-	fail "fetch-debs.sh has no privilege-aware apt sandbox gate"
+	fail "the fetch path has no privilege-aware apt sandbox gate"
 fi
 
-if grep -q 'chown "${APT_SANDBOX_USER}:root" "${certs_dir}/client.key"' "${FETCH_DEBS}" \
-	&& grep -q 'chmod 400 "${certs_dir}/client.key"' "${FETCH_DEBS}"; then
+if grep -q 'chown "${APT_SANDBOX_USER}:root" "${certs_dir}/client.key"' "${FETCH_SOURCES[@]}" \
+	&& grep -q 'chmod 400 "${certs_dir}/client.key"' "${FETCH_SOURCES[@]}"; then
 	pass "the root branch hands the mTLS client key to the sandbox user at mode 0400"
 else
 	fail "the root branch does not chown/chmod the mTLS client key for the sandbox user"
 fi
 
-if grep -q 'is not readable by the invoking user' "${FETCH_DEBS}"; then
+if grep -q 'is not readable by the invoking user' "${FETCH_SOURCES[@]}"; then
 	pass "the unprivileged branch asserts the client key is readable instead of overriding apt"
 else
 	fail "the unprivileged branch does not assert client-key readability"
 fi
 
-if grep -q 'chmod 0755 "${dir}"' "${FETCH_DEBS}" \
-	&& grep -q 'apt_sandbox_make_traversable "$(dirname "${debs}")" "${debs}" "${apt_state}"' "${FETCH_DEBS}"; then
+if grep -q 'chmod 0755 "${dir}"' "${FETCH_SOURCES[@]}" \
+	&& grep -q 'apt_sandbox_make_traversable "$(dirname "${debs}")" "${debs}" "${apt_state}"' "${FETCH_SOURCES[@]}"; then
 	pass "the isolated apt state tree is given explicit traversable modes, not the ambient umask"
 else
 	fail "the isolated apt state tree is not explicitly made traversable"
 fi
 
+# The mktemp -> handover -> download ORDERING below is a within-file property, so
+# resolve the one module that carries the download transaction and assert against
+# it. Requiring all three anchors in the SAME file is itself part of the contract:
+# split across two files the ordering would be unobservable, not merely unchecked.
+DOWNLOAD_TXN_FILE=""
+for candidate in "${FETCH_SOURCES[@]}"; do
+	if grep -q 'apt_sandbox_own_download_dir "${tmpd}"' "${candidate}"; then
+		DOWNLOAD_TXN_FILE="${candidate}"
+		break
+	fi
+done
+if [[ -n "${DOWNLOAD_TXN_FILE}" ]]; then
+	pass "the first-party download transaction lives in one module ($(basename "${DOWNLOAD_TXN_FILE}"))"
+else
+	abort "no module on the fetch path performs the sandbox download-dir handover"
+fi
+
 # awk/index, not grep: a literal match with no regex escaping, and an absent
 # anchor yields "" instead of tripping `set -o pipefail` before it can be reported.
 line_of() {
-	awk -v pat="$1" 'index($0, pat) { print NR; exit }' "${FETCH_DEBS}"
+	awk -v pat="$1" 'index($0, pat) { print NR; exit }' "${DOWNLOAD_TXN_FILE}"
 }
 mktemp_line="$(line_of 'mktemp -d "${debs}/.fetch-firstparty-XXXXXX"')"
 own_line="$(line_of 'apt_sandbox_own_download_dir "${tmpd}"')"
@@ -112,7 +135,7 @@ else
 	fail "the download dir is not handed to the sandbox user between mktemp and apt-get download (mktemp=${mktemp_line:-none} own=${own_line:-none} download=${download_line:-none})"
 fi
 
-if grep -q 'chown "${APT_SANDBOX_USER}:root" "${dir}"' "${FETCH_DEBS}"; then
+if grep -q 'chown "${APT_SANDBOX_USER}:root" "${dir}"' "${FETCH_SOURCES[@]}"; then
 	pass "the download dir is CHOWNED to the sandbox user (traversal alone is not enough for a write)"
 else
 	fail "the download dir is not chowned to the sandbox user"
