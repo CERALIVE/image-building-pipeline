@@ -170,6 +170,207 @@ run_or_plan() {
 }
 
 # ---------------------------------------------------------------------------
+# Private scratch dir — ONE trap-managed directory for every transient artifact
+# this script writes OUTSIDE the staging tree (today: the Armbian InRelease /
+# Release / Packages triple, plus the retry classifier logs below).
+#
+# It is removed on EXIT and on INT/TERM/HUP, so a clean run, a die(), an
+# ERR-trap abort and an operator Ctrl-C all clean up identically. The
+# predecessor was a bare `mktemp` whose `rm -f` sat on the SUCCESS path only:
+# any failure between creation and that line leaked three files into $TMPDIR
+# permanently, and an interrupted build leaked them every single time.
+#
+# Staged .deb temporaries deliberately do NOT live here — they must share a
+# filesystem with their final name so the publish step stays an atomic rename.
+# ---------------------------------------------------------------------------
+FETCH_TMPDIR=""
+
+# fetch_scratch_init — idempotently create the scratch dir and publish its path
+# in FETCH_TMPDIR. It deliberately PRINTS NOTHING: a getter would invite
+# `dir="$(fetch_scratch_dir)"`, whose command-substitution subshell would create
+# the directory somewhere the EXIT trap's shell can never see it — a leak that
+# looks exactly like working code.
+fetch_scratch_init() {
+  if [[ -z "${FETCH_TMPDIR}" ]]; then
+    FETCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/fetch-debs.XXXXXX")"
+  fi
+  return 0
+}
+
+fetch_scratch_cleanup() {
+  if [[ -n "${FETCH_TMPDIR}" ]]; then
+    rm -rf -- "${FETCH_TMPDIR}"
+    FETCH_TMPDIR=""
+  fi
+  return 0
+}
+
+# Clean, then re-raise so the caller still observes death-by-signal (128+n)
+# rather than a fabricated clean exit.
+fetch_scratch_signal_cleanup() {
+  local sig="$1"
+  fetch_scratch_cleanup
+  trap - "${sig}" EXIT
+  kill -s "${sig}" -- "$$"
+}
+
+trap fetch_scratch_cleanup EXIT
+trap 'fetch_scratch_signal_cleanup INT' INT
+trap 'fetch_scratch_signal_cleanup TERM' TERM
+trap 'fetch_scratch_signal_cleanup HUP' HUP
+
+# ---------------------------------------------------------------------------
+# Curl transport bounds. `--retry N` alone does NOT bound a connection that is
+# accepted and then stalls: with no --max-time such a fetch hangs the build
+# forever, which is the failure mode --retry looks like it covers and does not.
+# Both flags therefore ride on EVERY curl invocation on this path, including the
+# ones the DRY-RUN plan prints — the plan is a transcript of the real command,
+# so hiding a flag from it would make the plan lie.
+#
+# --max-time is a whole-transfer cap, so it is the one bound a very large .deb
+# on a very slow link can legitimately hit; CURL_MAX_TIME is the escape hatch.
+# ---------------------------------------------------------------------------
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+[[ "${CURL_CONNECT_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] || CURL_CONNECT_TIMEOUT=10
+CURL_MAX_TIME="${CURL_MAX_TIME:-300}"
+[[ "${CURL_MAX_TIME}" =~ ^[1-9][0-9]*$ ]] || CURL_MAX_TIME=300
+CURL_TIMEOUT_OPTS=(--connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}")
+
+# ---------------------------------------------------------------------------
+# Bounded transient-failure retry.
+#
+# WHAT IS RETRIED, and nothing else: the apt-get archive round trips (`update`,
+# `download`). Those are the only steps on this path whose failure can be a
+# transient property of the network rather than a fact about the artifact.
+#
+# WHAT IS NEVER RETRIED, deliberately: GPG/InRelease signature verification, a
+# SHA-256 mismatch, a Debian control identity mismatch, a deterministic 404/403/
+# 401, and the half-supplied-credential fatal. Each of those is a VERDICT on
+# bytes already in hand — replaying it cannot change the answer, it only buys a
+# slower failure with the real diagnostic buried under two more attempts. The
+# curl fetchers keep their verification OUTSIDE any wrapper, so they are covered
+# structurally; apt-get performs its own verification internally and reports
+# every error as exit 100, so its output is classified against
+# FETCH_NO_RETRY_REGEX and a matching failure returns on the FIRST attempt.
+#
+# Every bound is finite and env-tunable; there is no unbounded loop:
+#   FETCH_RETRY_ATTEMPTS  total attempts, >= 1               (default 3)
+#   FETCH_RETRY_BACKOFF   whitespace-separated retry sleeps  (default "2 4")
+#   FETCH_RETRY_TIMEOUT   per-attempt wall clock, seconds    (default 600; 0=off)
+#   FETCH_RETRY_DEADLINE  whole-operation wall clock, secs   (default 1800; 0=off)
+#
+# The command's own output is streamed through untouched and the FINAL attempt's
+# exit status is returned verbatim, so the tool's diagnostic and the caller's
+# die() message both survive.
+# ---------------------------------------------------------------------------
+FETCH_RETRY_ATTEMPTS="${FETCH_RETRY_ATTEMPTS:-3}"
+[[ "${FETCH_RETRY_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] || FETCH_RETRY_ATTEMPTS=3
+FETCH_RETRY_BACKOFF="${FETCH_RETRY_BACKOFF:-2 4}"
+[[ "${FETCH_RETRY_BACKOFF}" =~ ^[0-9[:space:]]+$ && -n "${FETCH_RETRY_BACKOFF//[[:space:]]/}" ]] \
+  || FETCH_RETRY_BACKOFF="2 4"
+FETCH_RETRY_TIMEOUT="${FETCH_RETRY_TIMEOUT:-600}"
+[[ "${FETCH_RETRY_TIMEOUT}" =~ ^[0-9]+$ ]] || FETCH_RETRY_TIMEOUT=600
+FETCH_RETRY_DEADLINE="${FETCH_RETRY_DEADLINE:-1800}"
+[[ "${FETCH_RETRY_DEADLINE}" =~ ^[0-9]+$ ]] || FETCH_RETRY_DEADLINE=1800
+
+# Deterministic-failure markers. apt-get collapses every error to exit 100, so
+# the exit status cannot tell "the mirror timed out" from "the signature is
+# bad". These patterns name the second kind: a trust, integrity, addressing or
+# credential VERDICT that a second attempt cannot change.
+FETCH_NO_RETRY_REGEX="${FETCH_NO_RETRY_REGEX:-GPG error|NO_PUBKEY|EXPKEYSIG|BADSIG|KEYEXPIRED|REVKEYSIG|NODATA|is not signed|signature (mismatch|verification)|signature[s]? could not be verified|Hash Sum mismatch|[Cc]hecksum mismatch|404 +Not Found|403 +Forbidden|401 +Unauthorized|does not have a Release file|[Cc]ould not load client certificate|certificate verification failed}"
+FETCH_NO_RETRY_REGEX="${FETCH_NO_RETRY_REGEX%\}}"
+
+# fetch_failure_is_deterministic <log> — true when the captured output carries a
+# verdict marker, i.e. when a retry is provably pointless.
+fetch_failure_is_deterministic() {
+  local log="$1"
+  [[ -s "${log}" ]] || return 1
+  grep -Eqi -- "${FETCH_NO_RETRY_REGEX}" "${log}"
+}
+
+# retry_transient <label> <cmd...> — run <cmd> with the bounds above.
+#
+# <cmd> is invoked IN THIS SHELL, so a PATH binary, a shell function and a test
+# stub all resolve identically. The per-attempt wall-clock cap is timeout(1),
+# which can only wrap an executable, so it is applied as a prefix only when
+# <cmd> actually resolves to one — never by re-launching the command through a
+# nested `bash -c`, which would hide a function-shaped caller from itself.
+retry_transient() {
+  local label="$1"
+  local -a backoff=()
+  IFS=' ' read -r -a backoff <<<"${FETCH_RETRY_BACKOFF}"
+  (( ${#backoff[@]} > 0 )) || backoff=(2)
+
+  local attempts="${FETCH_RETRY_ATTEMPTS}"
+  local started="${SECONDS}" attempt=1 rc=0 idx wait_s elapsed log
+  fetch_scratch_init
+  log="$(mktemp "${FETCH_TMPDIR}/retry.XXXXXX")"
+
+  shift
+  local -a runner=("$@")
+  if (( FETCH_RETRY_TIMEOUT > 0 )) \
+      && [[ "$(type -t -- "$1")" == "file" ]] \
+      && command -v timeout >/dev/null 2>&1; then
+    runner=(timeout --kill-after=10s "${FETCH_RETRY_TIMEOUT}" "$@")
+  fi
+
+  while :; do
+    rc=0
+    : >"${log}"
+    "${runner[@]}" 2>&1 | tee -a "${log}" >&2 || rc=$?
+
+    if (( rc == 0 )); then
+      if (( attempt > 1 )); then
+        log_info "${label}: succeeded on attempt ${attempt}/${attempts}"
+      fi
+      rm -f "${log}"
+      return 0
+    fi
+
+    if fetch_failure_is_deterministic "${log}"; then
+      log_error "${label}: deterministic failure (signature/checksum/404/credential) on attempt ${attempt}/${attempts} — NOT retrying; exit ${rc}"
+      rm -f "${log}"
+      return "${rc}"
+    fi
+
+    if (( attempt >= attempts )); then
+      log_error "${label}: transient-failure retries exhausted after ${attempt}/${attempts} attempt(s); last exit ${rc}"
+      rm -f "${log}"
+      return "${rc}"
+    fi
+
+    idx=$(( attempt - 1 ))
+    (( idx < ${#backoff[@]} )) || idx=$(( ${#backoff[@]} - 1 ))
+    wait_s="${backoff[idx]}"
+    [[ "${wait_s}" =~ ^[0-9]+$ ]] || wait_s=2
+
+    elapsed=$(( SECONDS - started ))
+    if (( FETCH_RETRY_DEADLINE > 0 )) && (( elapsed + wait_s >= FETCH_RETRY_DEADLINE )); then
+      log_error "${label}: transient-failure retry deadline reached (${elapsed}s of ${FETCH_RETRY_DEADLINE}s) after ${attempt}/${attempts} attempt(s); last exit ${rc}"
+      rm -f "${log}"
+      return "${rc}"
+    fi
+
+    log_warn "${label}: attempt ${attempt}/${attempts} failed (exit ${rc}) — transient; retrying in ${wait_s}s"
+    sleep "${wait_s}"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
+# run_or_plan_retry <label> <cmd...> — run_or_plan with bounded transient retry.
+# The DRY-RUN plan line is byte-identical to run_or_plan's, so whether a step is
+# retryable never shows up as a difference in the resolved build plan.
+run_or_plan_retry() {
+  local label="$1"; shift
+  if [[ -n "${DRY_RUN}" ]]; then
+    log_info "DRY-RUN would run: $*"
+    return 0
+  fi
+  log_info "exec: $*"
+  retry_transient "${label}" "$@"
+}
+
+# ---------------------------------------------------------------------------
 # Bounded fetch pool. _run_bounded runs <worker> for each arg with at most
 # <max> in flight (sliding window — never an unbounded `&` fan-out). Args are
 # launched in order, so REPOS/BSP ordering (G3) is the launch order. Each child
@@ -393,8 +594,11 @@ _fetch_bsp_native_one() {
       "cd $(printf '%q' "${_BSP_DEBS}") && apt-get $(printf '%q ' "${_APT_OPTS[@]}")download $(printf '%q' "${spec}")"
     return 0
   fi
+  # `apt-get download` writes to the CWD and honours no destination option, so
+  # the cd stays OUTSIDE retry_transient — the retried unit is the bare apt-get.
   local tmpd; tmpd="$(mktemp -d "${_BSP_DEBS}/.fetch-XXXXXX")"
-  if ! ( cd "${tmpd}" && apt-get "${_APT_OPTS[@]}" download "${spec}" ); then
+  if ! ( cd "${tmpd}" && retry_transient "BSP download ${spec}" \
+      apt-get "${_APT_OPTS[@]}" download "${spec}" ); then
     rm -rf "${tmpd}"
     return 1
   fi
@@ -459,6 +663,11 @@ _fetch_bsp_native() {
   local debs="$1"; shift
   local bsp_pkgs=("$@")
 
+  # Materialise the shared scratch dir BEFORE the bounded pool forks: a worker
+  # subshell does not inherit the EXIT trap, so a dir first created inside one
+  # would never be reaped.
+  fetch_scratch_init
+
   local apt_state="${debs}/.apt-state"
   run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
   local src_list="${apt_state}/armbian.list"
@@ -478,7 +687,7 @@ _fetch_bsp_native() {
     -o "APT::Architecture=${ARCH}"
   )
 
-  run_or_plan apt-get "${apt_opts[@]}" update
+  run_or_plan_retry "Armbian apt-get update" apt-get "${apt_opts[@]}" update
   if [[ -z "${DRY_RUN}" ]]; then
     bsp_verify_native_release \
       "${apt_state}" "${ARMBIAN_APT_KEYRING}" "${ARMBIAN_SUITE}" main "${ARCH}" \
@@ -513,7 +722,7 @@ _fetch_bsp_curl_one() {
   fi
   log_info "BSP fetch (curl): ${spec}"
   if [[ -n "${DRY_RUN}" ]]; then
-    run_or_plan curl -fsSL --retry 3 \
+    run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" \
       -o "${_BSP_DEBS}/$(basename "${filename:-${pkg}.deb}")" \
       "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
     return 0
@@ -521,7 +730,7 @@ _fetch_bsp_curl_one() {
   local final tmp actual_pkg actual_version actual_arch
   final="${_BSP_DEBS}/$(basename "${filename}")"
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
-  if ! curl -fsSL --retry 3 -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
+  if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
     rm -f "${tmp}"
     return 1
   fi
@@ -580,10 +789,11 @@ _fetch_bsp_curl() {
   local release_base="${ARMBIAN_APT_URL}/dists/${ARMBIAN_SUITE}"
   local packages_rel="main/binary-${ARCH}/Packages.gz"
   local packages_url="${release_base}/${packages_rel}"
-  local packages_file; packages_file="$(mktemp)"
-  local inrelease="${packages_file}.InRelease"
-  local verified_release="${packages_file}.Release" expected_sha actual_sha
-  run_or_plan curl -fsSL --retry 3 -o "${inrelease}" "${release_base}/InRelease" \
+  fetch_scratch_init
+  local packages_file="${FETCH_TMPDIR}/Packages"
+  local inrelease="${FETCH_TMPDIR}/InRelease"
+  local verified_release="${FETCH_TMPDIR}/Release" expected_sha actual_sha
+  run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${inrelease}" "${release_base}/InRelease" \
     || die "failed to download Armbian InRelease"
   if [[ -z "${DRY_RUN}" ]]; then
     auth_verify_release_to_file \
@@ -598,7 +808,7 @@ _fetch_bsp_curl() {
     ' "${verified_release}")"
     [[ -n "${expected_sha}" ]] || die "Armbian InRelease lacks ${packages_rel} SHA256"
   fi
-  run_or_plan curl -fsSL --retry 3 -o "${packages_file}.gz" "${packages_url}" \
+  run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${packages_file}.gz" "${packages_url}" \
     || die "failed to download Armbian Packages index: ${packages_url}"
 
   if [[ -z "${DRY_RUN}" ]]; then
@@ -619,9 +829,6 @@ _fetch_bsp_curl() {
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
     || die "BSP fetch failed (curl path): one or more packages did not download"
-
-  [[ -z "${DRY_RUN}" ]] \
-    && rm -f "${packages_file}" "${inrelease}" "${verified_release}"
   return 0
 }
 
@@ -654,7 +861,7 @@ _fetch_first_party_curl_one() {
   final="${_FIRST_PARTY_DEBS}/$(basename "${filename}")"
   tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
   log_info "first-party fetch (curl): ${spec} resolved=${version}"
-  curl -fsSL --retry 3 "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
@@ -685,7 +892,7 @@ _fetch_first_party_curl() {
   fi
 
   log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
-  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
+  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
   auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
@@ -697,7 +904,7 @@ _fetch_first_party_curl() {
   [[ -n "${expected_sha}" ]] \
     || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
 
-  curl -fsSL --retry 3 "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
+  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
   actual_sha="$(sha256sum "${packages_gz}" | awk '{print $1}')"
   [[ "${actual_sha}" == "${expected_sha}" ]] \
     || die "first-party Packages.gz checksum mismatch: expected ${expected_sha}, got ${actual_sha}"
@@ -803,14 +1010,14 @@ _fetch_rk3588_userspace_one() {
 
   log_info "RK3588 userspace fetch: ${pkg} (${filename}) sha256=${sha256} <- ${url}"
   if [[ -n "${DRY_RUN}" ]]; then
-    run_or_plan curl -fsSL --retry 3 -o "${_RK3588_USERSPACE_DEBS}/${filename}" "${url}"
+    run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${_RK3588_USERSPACE_DEBS}/${filename}" "${url}"
     return 0
   fi
 
   local final tmp actual_sha actual_pkg actual_arch
   final="${_RK3588_USERSPACE_DEBS}/${filename}"
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"
-  if ! curl -fsSL --retry 3 -o "${tmp}" "${url}"; then
+  if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
     rm -f "${tmp}"
     return 1
   fi
@@ -1012,6 +1219,8 @@ fetch_first_party() {
   local debs="$1"
   local r
 
+  fetch_scratch_init
+
   log_info "first-party pins (versions.yaml):"
   for r in "${REPOS[@]}"; do
     log_info "  ${r} = $(get_pin "${r}" || true)"
@@ -1102,11 +1311,14 @@ EOF
   if [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
     _fetch_first_party_curl "${debs}" "${keyring}" "${certs_dir}" "${download_specs[@]}"
   else
-    run_or_plan apt-get "${apt_opts[@]}" update
+    run_or_plan_retry "first-party apt-get update" apt-get "${apt_opts[@]}" update
 
     local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
-    ( cd "${tmpd}" && apt-get "${apt_opts[@]}" download "${download_specs[@]}" ) \
-      || die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+    if ! ( cd "${tmpd}" && retry_transient "first-party apt-get download" \
+        apt-get "${apt_opts[@]}" download "${download_specs[@]}" ); then
+      rm -rf "${tmpd}"
+      die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+    fi
     local f publish_failed=0
     shopt -s nullglob
     for f in "${tmpd}"/*.deb; do

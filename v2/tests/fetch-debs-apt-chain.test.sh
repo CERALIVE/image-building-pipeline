@@ -88,7 +88,7 @@ while [[ $# -gt 0 ]]; do
 			out="$2"
 			shift 2
 			;;
-		--cert|--key|--retry)
+		--cert|--key|--retry|--connect-timeout|--max-time)
 			shift 2
 			;;
 		-*)
