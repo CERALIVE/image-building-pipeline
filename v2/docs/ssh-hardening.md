@@ -109,8 +109,23 @@ config, so a malformed drop-in can never wedge sshd's startup.
   (`postinst-lib.sh::configure_ssh_enablement`, called from `configure_services`).
   A production build (`CERALIVE_DEBUG_IMAGE=0`, the default) ships `ssh.service`
   **not enabled** — sshd does not start at boot. The operator turns SSH on from the
-  CeraUI UI (`systemctl start ssh`), which reveals its boot-generated password. The
-  base OS layer installs `openssh-server`, and Debian's postinst preset would enable
+  CeraUI UI (Settings → Developer → "SSH Access"), which then shows the current
+  plaintext SSH password. **This is not "the boot-generated password"** — CeraUI
+  never mints exactly one password at boot and holds it in reserve for this
+  moment. What the UI shows is whichever of three things produced the device's
+  CURRENT `config.ssh_pass`: (a) a value already persisted from a previous boot
+  (re-applied to the OS account on THIS boot if `/etc/shadow` drifted, never
+  regenerated — `ensureSshPasswordSynced()`), (b) a fresh one minted
+  unconditionally on the first boot that has never had one at all
+  (`ensureSshPasswordProvisioned()`), or (c) a fresh one minted by an explicit
+  operator "Reset SSH Password" action. All three go through the same
+  `mintAndApplySshPassword()` path in CeraUI and land in `config.ssh_pass` as
+  plaintext (see `CeraUI/docs/device-access-credentials.md` §3-4 for the full,
+  source-verified lifecycle, boot-wiring order, and the OTA re-sync behavior).
+  In practice, on a device's very first-ever boot the value an operator sees IS
+  the boot-minted one — but describing that as "the" mechanism is wrong for
+  every subsequent boot of the same device, where the UI is showing a
+  persisted-and-restored credential, not a new boot-time mint. The base OS layer installs `openssh-server`, and Debian's postinst preset would enable
   `ssh.service`, so the production branch **actively disables** `ssh.service`/
   `ssh.socket` rather than merely skipping the enable — otherwise the base-layer
   preset would leave SSH enabled. A **debug** image (`CERALIVE_DEBUG_IMAGE=1`) keeps
