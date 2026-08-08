@@ -334,6 +334,47 @@ committed baseline `v2/manifests/bsp-baseline.json`.
   determinism comparison; that comparison hashes the normalized plan, not build
   output files.
 
+## Kernel Freeze — the boot stack updates via RAUC only
+
+The kernel, device tree, board U-Boot and firmware packages change **only** when a
+full-image RAUC bundle writes a new rootfs slot. They are never changed by `apt` on
+the running device, because `docs/partition-contract.md` rule 3 puts kernel/DTB/initrd
+*inside* each slot — an in-place apt upgrade would rewrite `/boot` in the running slot
+and leave the rollback target a slot nobody tested.
+
+Every image bakes two layers of enforcement:
+
+- **`apt-mark hold`** on each package — the primary mechanism, and the only one that
+  also blocks an explicit `apt-get install <pkg>`. The build verifies each hold landed
+  and fails if one did not.
+- **`/etc/apt/preferences.d/ceralive-kernel-freeze`** — a supplementary
+  `Pin: version <installed>` / `Pin-Priority: 1001` stanza per package. It pins by
+  name+version rather than origin because the boot BSP is installed from a
+  build-time-only local package directory that has no apt-origin identity on the
+  device. Apt preferences rank candidate versions and do not forbid an explicitly
+  named one, so `apt-get install <pkg>=<ver>`, `--allow-downgrades` and `dpkg -i`
+  bypass the pin — the limitation is stated in the generated file itself, and is why
+  the hold is primary.
+
+The package set comes from the resolved manifest, so each board's own U-Boot package
+(`linux-u-boot-rock-5b-plus-vendor` / `linux-u-boot-orangepi5-plus-vendor`) is covered
+without any hardcoded name.
+
+**First-party CeraLive packages are deliberately not held.** `cerastream`,
+`ceralive-device`, `srtla-send-rs`, the forked libsrt and the ModemManager closure
+stay apt-updatable from `apt.ceralive.tv` — that is the software-update path CeraUI
+drives — and the build refuses by name if one ever reaches the freeze set. There is no
+`unattended-upgrades` on the image.
+
+**RAUC does not consult dpkg holds.** It writes the whole inactive slot without
+running dpkg or apt; the new slot arrives with its own dpkg database and its own baked
+holds. Each image freezes itself, so nothing has to be unheld before an update or
+re-held after one.
+
+Verify on a device with `apt-mark showhold`, `apt-cache policy linux-image-vendor-rk35xx`
+and `apt-get -s upgrade`. Full contract:
+[`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md).
+
 ## OTA-During-Stream Guard
 
 `/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)

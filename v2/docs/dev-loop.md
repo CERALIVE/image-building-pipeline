@@ -360,6 +360,16 @@ DEV_PUSH_BUDGET=180 ./dev-push 192.168.1.42
 
 **User config is never touched.** CeraUI's mutable state (`config.json`, auth tokens, WiFi credentials, etc.) lives on the separate `/data` partition and is never part of a sysext. Restarting `ceralive.service` re-reads it from `/data/ceralive/`.
 
+**The kernel / U-Boot / firmware row in that table is ENFORCED, not just a
+convention.** Every image `apt-mark hold`s its own kernel, DTB, board U-Boot and
+firmware packages and ships a supplementary name+version apt pin, so an
+`apt-get upgrade` on the device cannot replace them — the boot stack rides inside
+the RAUC slot and changes only when a full-image bundle writes a new one. First-party
+CeraLive packages (`cerastream`, `ceralive-device`, `srtla-send-rs`, …) are
+deliberately **not** held and stay apt-updatable. RAUC itself does not consult dpkg
+holds; each image bakes its own. Full contract, including the pin's documented
+bypass limitation: [`kernel-freeze-contract.md`](kernel-freeze-contract.md).
+
 ---
 
 ## Updating CeraUI

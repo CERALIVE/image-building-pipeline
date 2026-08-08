@@ -62,6 +62,7 @@ SHELL_SUITES=(
   "${HERE}/tests/interface-naming-path-match.test.sh"
   "${HERE}/tests/apt-preferences-baked.test.sh"
   "${HERE}/tests/apt-mtls-and-dedupe.test.sh"
+  "${HERE}/tests/kernel-freeze-guardrails.test.sh"
   "${HERE}/tests/app-layer-modem-closure.test.sh"
   "${HERE}/tests/firstparty-classification.test.sh"
   "${HERE}/tests/release-cache-contract.test.sh"

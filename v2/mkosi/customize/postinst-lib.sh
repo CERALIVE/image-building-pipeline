@@ -1768,3 +1768,171 @@ setup_ingest_firewall() {
 
   enable_service ceralive-ingest-firewall.service
 }
+
+# ---------------------------------------------------------------------------
+# KERNEL FREEZE GUARDRAILS — the boot stack changes ONLY via a RAUC full-image
+# update, never via on-device apt.
+#
+# `docs/partition-contract.md` §1 rule 3 ("Kernel rides with the rootfs") makes
+# kernel/DTB/initrd part of the rootfs SLOT, so the only sanctioned way to change
+# them is to write a whole new slot. An `apt-get upgrade` on the running device
+# would instead swap the kernel underneath a slot whose `/boot` the A/B selector
+# has already committed to, producing a slot that no longer matches what was
+# verified at install time. This function bakes the guardrails that stop it.
+#
+# TWO MECHANISMS, deliberately layered:
+#
+#   1. dpkg HOLDS (`apt-mark hold`) — the PRIMARY mechanism. A hold lives in
+#      /var/lib/dpkg/status as `Status: hold ok installed`; apt refuses to
+#      upgrade or remove a held package in any ordinary transaction, and the
+#      refusal is a hard stop rather than a preference ranking.
+#   2. An apt PREFERENCES entry (/etc/apt/preferences.d/ceralive-kernel-freeze)
+#      pinning each package BY EXACT NAME to the version that is installed, at
+#      priority 1001 — the supplementary belt to the hold's braces. It is
+#      name+version pinning, NOT origin pinning, and that is forced by how these
+#      packages arrive: the boot BSP is installed from a LOCAL, build-time-only
+#      package directory that has no apt origin identity on the device at all
+#      (mkosi's ephemeral `file:/repository`, gone by the time the image ships).
+#      There is no `Pin: origin …` or `Pin: release …` expression that can
+#      designate "the staged local set", so the only expressible pin is the one
+#      written here: the literal package name plus the literal installed version.
+#
+# THE PIN'S LIMITATION IS REAL AND IS NOT A BUG. Apt preferences rank CANDIDATE
+# versions; they do not forbid an operator from naming another version
+# explicitly. `apt-get install <pkg>=<other>`, `--allow-downgrades`, a
+# `-o Dir::Etc::Preferences=` override, or a plain `dpkg -i` all bypass it. That
+# is precisely why the hold is primary: `apt-mark hold` also blocks the explicit
+# `apt-get install <pkg>` form (apt reports the package as held back and makes no
+# change) and can only be undone by a deliberate `apt-mark unhold` or an explicit
+# `--allow-change-held-packages`. Neither mechanism is claimed to stop a root
+# operator who has decided to override it; both stop the ACCIDENT.
+#
+# RAUC DOES NOT CONSULT EITHER MECHANISM, and must not be expected to. RAUC
+# writes the whole INACTIVE slot (mkfs + image copy) — it never runs dpkg or apt,
+# so the running slot's holds are simply not in its path. The new slot arrives
+# with its OWN /var/lib/dpkg/status, carrying the holds that ITS build baked, and
+# those govern that slot's apt from its first boot. Each image therefore freezes
+# itself; the freeze is not fleet state that an update has to preserve.
+#
+# SCOPE IS THE BOOT STACK ONLY. The package names come from the resolved manifest
+# (KERNEL_PACKAGES / DTB_PACKAGES / UBOOT_PACKAGES / FIRMWARE_PACKAGES), so the
+# per-board U-Boot package is picked up automatically and no name is hardcoded
+# here. First-party CeraLive packages — cerastream, CeraUI (`ceralive-device`),
+# srtla-send-rs, the forked libsrt and the ModemManager closure — MUST stay
+# apt-updatable from apt.ceralive.tv, so they are refused by name below: a
+# manifest that ever routed one of them into a boot-BSP field fails the build
+# instead of silently shipping an unupdatable app layer.
+# ---------------------------------------------------------------------------
+
+# Package names that may NEVER be frozen. These are the first-party CeraLive
+# packages the device updates over apt from apt.ceralive.tv (see the app layer's
+# SYSEXT_APP_PKGS / APPFS_APP_PKGS / RUNTIME_APP_PKGS classification). Holding any
+# of them would break the ordinary software-update path CeraUI drives.
+CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla-send-rs srtla gstreamer1.0-libuvch264src libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+
+freeze_boot_packages() {
+  local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
+  local pref_file="${pref_dir}/ceralive-kernel-freeze"
+
+  local -a declared=()
+  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-}"
+
+  # Dedupe while preserving manifest order (kernel, dtb, u-boot, firmware).
+  local pkg seen=" " candidates=()
+  for pkg in ${declared[@]+"${declared[@]}"}; do
+    [[ -n "${pkg}" ]] || continue
+    [[ "${seen}" == *" ${pkg} "* ]] && continue
+    seen+="${pkg} "
+    candidates+=("${pkg}")
+  done
+
+  if (( ${#candidates[@]} == 0 )); then
+    log "kernel freeze: manifest declares no kernel/DTB/U-Boot/firmware packages — nothing to freeze"
+    return 0
+  fi
+
+  # Fail-closed guard: an app-layer package must never reach the freeze set.
+  for pkg in "${candidates[@]}"; do
+    if [[ " ${CERALIVE_NEVER_FREEZE_PKGS} " == *" ${pkg} "* ]]; then
+      die "kernel freeze: refusing to hold first-party package '${pkg}' — CeraLive app packages must stay apt-updatable (it reached the freeze set via KERNEL/DTB/UBOOT/FIRMWARE_PACKAGES; fix the manifest)"
+    fi
+  done
+
+  # Only INSTALLED packages can be held or pinned to an installed version.
+  local -a frozen=() versions=() absent=()
+  local state version
+  for pkg in "${candidates[@]}"; do
+    state="$(dpkg-query -W -f='${db:Status-Status} ${Version}' "${pkg}" 2>/dev/null || true)"
+    version="${state#* }"
+    if [[ "${state%% *}" != "installed" || -z "${version}" ]]; then
+      absent+=("${pkg}")
+      continue
+    fi
+    frozen+=("${pkg}")
+    versions+=("${version}")
+  done
+
+  if (( ${#absent[@]} > 0 )); then
+    # On a full device build the platform layer installed every declared boot-BSP
+    # package, so an absent one means the freeze would silently be partial.
+    if [[ "${INSTALL_BOOT_BSP:-1}" == "1" ]]; then
+      die "kernel freeze: declared boot package(s) not installed: ${absent[*]} — INSTALL_BOOT_BSP=1 promised them, so freezing only part of the boot stack would ship an image whose kernel apt can still replace"
+    fi
+    log "kernel freeze: INSTALL_BOOT_BSP=0 parity build — skipping uninstalled boot package(s): ${absent[*]}"
+  fi
+
+  if (( ${#frozen[@]} == 0 )); then
+    log "kernel freeze: no declared boot package is installed (parity build) — no holds, no pin file"
+    rm -f "${pref_file}"
+    return 0
+  fi
+
+  log "kernel freeze: holding ${#frozen[@]} boot package(s) — ${frozen[*]}"
+  apt-mark hold "${frozen[@]}"
+
+  # VERIFY the holds actually landed. A hold that silently did not apply would put
+  # an apt-upgradable kernel straight back into the fleet on an image that
+  # otherwise builds, boots and passes every other gate (same fail-closed
+  # discipline as mask_service).
+  local held; held=" $(apt-mark showhold | tr '\n' ' ')"
+  for pkg in "${frozen[@]}"; do
+    [[ "${held}" == *" ${pkg} "* ]] \
+      || die "kernel freeze: 'apt-mark hold ${pkg}' did not land — dpkg does not report it as held"
+  done
+  # …and that the guard held in the other direction too: no first-party package
+  # may be on the hold list when we are done, whatever put it there.
+  # shellcheck disable=SC2086  # the never-freeze list is a space-separated set, split on purpose
+  for pkg in ${CERALIVE_NEVER_FREEZE_PKGS}; do
+    if [[ "${held}" == *" ${pkg} "* ]]; then
+      die "kernel freeze: first-party package '${pkg}' is on dpkg's hold list — CeraLive app packages must stay apt-updatable"
+    fi
+  done
+
+  # Supplementary name+version pin (see the header for why not an origin pin, and
+  # for the documented bypass limitation).
+  mkdir -p "${pref_dir}"
+  {
+    printf '# CeraLive kernel freeze — generated by postinst-lib.sh::freeze_boot_packages.\n'
+    printf '#\n'
+    printf '# The boot stack changes ONLY via a RAUC full-image update (see\n'
+    printf '# docs/partition-contract.md rule 3 and v2/docs/kernel-freeze-contract.md).\n'
+    printf '# The PRIMARY mechanism is the dpkg hold on each package below\n'
+    printf '# (`apt-mark showhold`); this pin is supplementary.\n'
+    printf '#\n'
+    printf '# Name+version, not origin: these packages were installed from a local\n'
+    printf '# build-time package directory that has no apt origin identity on the\n'
+    printf '# device, so no `Pin: origin`/`Pin: release` expression can designate them.\n'
+    printf '#\n'
+    printf '# LIMITATION: apt preferences rank candidate versions; they do not forbid an\n'
+    printf '# explicitly named one. `apt-get install <pkg>=<version>`, --allow-downgrades,\n'
+    printf '# -o Dir::Etc::Preferences=, and `dpkg -i` all bypass this file. The dpkg hold\n'
+    printf '# is what blocks those ordinary apt forms; neither stops a root operator who\n'
+    printf '# has decided to override the freeze on purpose.\n'
+    local i
+    for (( i = 0; i < ${#frozen[@]}; i++ )); do
+      printf '\nPackage: %s\nPin: version %s\nPin-Priority: 1001\n' "${frozen[i]}" "${versions[i]}"
+    done
+  } >"${pref_file}"
+  chmod 0644 "${pref_file}"
+  log "kernel freeze: wrote ${pref_file} (name+version pins for ${#frozen[@]} package(s))"
+}
