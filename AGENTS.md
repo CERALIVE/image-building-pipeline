@@ -689,7 +689,41 @@ occurrence of each of those `make` calls in the file.
   is the mainline-track option kept pinned and buildable. See
   `v2/docs/kernel-currency-watch.md`.
 
-Guards: `manifest.bats` §26 (41 tests).
+- **The three pinned fetches retry into ATTEMPT-PRIVATE dirs, and a PIN MISMATCH
+  is never one of the retries.** `build-kernel.sh` performs three network fetches
+  back to back (kernel source, patch series, kernel config); a blip on any of
+  them used to abort a build that had already paid for the builder image, the
+  container and a multi-minute checkout. All three now go through
+  `fetch_pinned_tree`: up to 3 attempts, each wrapped in `timeout(1)` (1800s
+  default — a git that has stopped making progress does not exit on its own),
+  linear backoff. **The load-bearing half is that each attempt's directory is
+  destroyed BEFORE the attempt, not merely after it fails** — a tree half-written
+  by a killed clone makes attempt 2 fail deterministically with `destination path
+  already exists` (or a stale `.git/index.lock` on the fetch shape), so one blip
+  presents as a total outage and every manual re-run fails identically. The
+  `HEAD == commit` assertion runs **after** the loop and fails immediately: a
+  moved tag or a squash-merge-orphaned SHA is PERMANENT, and retrying it
+  re-fetches the same wrong tree three times before reporting a *network*
+  problem. Only a pin-verified tree is renamed into the path the build reads.
+  Knobs: `CERALIVE_KERNEL_GIT_{ATTEMPTS,TIMEOUT,BACKOFF}`. The helper is defined
+  host-side and **injected** into the container script with `declare -f`, so the
+  shipped loop is the same text the tests drive against a stubbed `git`.
+- **`make -j` is DERIVED from memory, not from `nproc`.** A kernel compile job
+  peaks around 1-2 GiB RSS, so `-j$(nproc)` on a core-rich, memory-thin host does
+  not build slowly — it gets OOM-killed deep inside `bindeb-pkg`, after every pin
+  has already verified. The width is `min(nproc, MemAvailable / 2 GiB)`, floor 1,
+  ceiling `nproc`, logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
+  **unconditionally, including upward**; `CERALIVE_RESOURCE_MEMINFO_FILE` (the
+  same knob `ci/check-builder-resources.sh` uses) redirects the meminfo read.
+  Both of these are **invisible to the PR gate** like everything else in `[2b/9]`
+  — it is `DRY_RUN=1` and never fetches or compiles. Guards:
+  `v2/tests/kernel-build-resilience.bats` (30 tests, mutation-verified: removing
+  the pre-attempt `rm -rf`, folding the pin check into the retry condition,
+  publishing before verifying, dropping the final-attempt cleanup, and dropping
+  the memory ceiling each fail the suite). Write-up:
+  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §3b.
+
+Guards: `manifest.bats` §26 (41 tests) + `kernel-build-resilience.bats` (30 tests).
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]

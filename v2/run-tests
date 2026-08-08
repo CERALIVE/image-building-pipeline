@@ -41,6 +41,7 @@ SUITES=(
   "${HERE}/tests/bench-partlabels.bats"
   "${HERE}/tests/boot-artifacts.bats"
   "${HERE}/tests/kernel-config-fragment.bats"
+  "${HERE}/tests/kernel-build-resilience.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
   "${HERE}/tests/packaging-hygiene.bats"
 )

@@ -304,6 +304,62 @@ these being true, and a mismatch would otherwise surface as an unbootable board.
 
 ---
 
+## 3b. Fetch resilience, and the build-job preflight
+
+Two failure modes of this stage have nothing to do with the kernel, and both are
+invisible to the PR gate (`DRY_RUN=1` never fetches and never runs `make`).
+
+**All three pinned fetches go through `fetch_pinned_tree`.** The stage performs
+three network fetches back to back — kernel source, patch series, kernel config
+— and a blip on any of them used to abort a build that had already paid for the
+builder image, the container and (for fetches 2 and 3) a multi-minute kernel
+checkout. Each fetch now gets up to `CERALIVE_KERNEL_GIT_ATTEMPTS` (3) attempts,
+each wrapped in `timeout(1)` (`CERALIVE_KERNEL_GIT_TIMEOUT`, 1800s — a git that
+has stopped making progress does not exit on its own), with a linear backoff
+(`CERALIVE_KERNEL_GIT_BACKOFF`, 5s × attempt).
+
+**Every attempt runs in a private directory that is destroyed BEFORE it starts,
+not merely after it fails.** This is the load-bearing half. A tree half-written
+by a killed clone, left where the next attempt wants to write, turns attempt 2
+into a deterministic `destination path already exists` (or a stale
+`.git/index.lock` on the fetch shape) — so one transient blip presents as a
+total outage, and the manual re-run fails the same way for the same reason.
+
+**A PIN MISMATCH IS NEVER RETRIED.** The `HEAD == commit` assertion runs *after*
+the retry loop and fails immediately. A moved tag or a SHA orphaned by a
+squash-merge (see §7's pin-hygiene note) is a PERMANENT fact about the remote:
+retrying it re-fetches the same wrong tree three times and then reports three
+failed attempts, which reads as a network problem and sends the next person to
+the wrong layer. Only a fully pin-verified tree is renamed into the path the
+build reads, so no later stage can ever see a partial or wrong checkout.
+
+The helper is defined host-side in `build-kernel.sh` and **injected** into the
+container script with `declare -f`, so the loop the real build runs is the same
+text the test suite drives against a stubbed `git`.
+
+**Build jobs are derived, not assumed.** `make -j$(nproc)` is the obvious default
+and it is the one that gets a builder OOM-killed: a kernel compile job peaks
+around 1-2 GiB RSS, so a core-rich, memory-thin host dies deep inside
+`bindeb-pkg`, after every pin has already verified. The width is
+`min(nproc, MemAvailable / 2 GiB)`, floored at 1 (a serial build beats no build)
+and ceilinged at `nproc` (spare memory buys no extra cores). The derivation is
+logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
+**unconditionally**, including upward — an operator who has measured their own
+host outranks the heuristic. `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
+`v2/ci/check-builder-resources.sh` uses) redirects the meminfo read.
+
+Guards: `v2/tests/kernel-build-resilience.bats` (30 tests — the three
+job-derivation fixtures, floor/ceiling/override/fallback legs, transient-retry
+and its non-vacuity twin, both partial-debris shapes, pre-attempt and
+final-attempt cleanup, a real `timeout(1)` leg, the never-retried pin mismatch,
+the nothing-is-published-unverified legs, and the wiring including a `bash -n`
+of the assembled container script). Mutation-verified: removing the pre-attempt
+`rm -rf`, folding the pin check into the retry condition, publishing before
+verifying, dropping the final cleanup, and dropping the memory ceiling each
+fail the suite.
+
+---
+
 ## 4. The DTB install mapping
 
 An Armbian `linux-dtb-*` package lands the board DTBs exactly where the U-Boot
@@ -801,7 +857,7 @@ no second place to keep in sync.
 | `v2/manifests/kernel/rk3588-vendor-patched.absent` | the `vendor-patched` reviewed allow-absent list (config-file mode, §2c) |
 | `v2/lib/resolve.py` | variant merge, `variants:`/`variant_overrides:` stripping, derived suppression set |
 | `v2/lib/resolve.sh` | `--variant` / `CERALIVE_KERNEL_VARIANT` |
-| `v2/lib/build-kernel.sh` | the build stage |
+| `v2/lib/build-kernel.sh` | the build stage, incl. `fetch_pinned_tree` + the build-job preflight (§3b) |
 | `v2/ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |
 | `v2/lib/orchestrate.sh` | stage wiring, suppression export, uniqueness check |
 | `v2/lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
@@ -810,5 +866,6 @@ no second place to keep in sync.
 | `v2/lib/verify-kernel-config.sh` | the in-container config-survival gate, both modes (§2c, §6b) |
 | `v2/tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `v2/tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |
+| `v2/tests/kernel-build-resilience.bats` | fetch retry, never-retried pin mismatch, build-job preflight (§3b) |
 | `v2/tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
 | `v2/tests/manifests/fixtures/vendor-baseline/` | the pre-change golden resolver output |

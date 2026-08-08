@@ -622,6 +622,20 @@ kernel `make bindeb-pkg`; the Armbian build framework is consulted for the
 branch→version mapping and for the plain `.config` file it publishes, and is
 never invoked as the build system.
 
+Each of the three network fetches is retried up to three times under a
+`timeout(1)`, and every attempt runs in a private directory destroyed *before*
+it starts — a tree half-written by a killed clone would otherwise make each
+retry fail deterministically, so one blip would present as a total outage. A
+**pin mismatch is never retried**: it is checked after the retry loop and fails
+on the spot, because a moved tag or a squash-merge-orphaned SHA is permanent and
+re-fetching it three times only misreports it as a network fault. Nothing is
+published at the path the build reads until it has verified.
+
+`make -j` is derived as `min(nproc, MemAvailable / 2 GiB)` rather than plain
+`nproc`, because a kernel compile job peaks around 1-2 GiB and a core-rich,
+memory-thin builder gets OOM-killed deep inside `bindeb-pkg` after every pin has
+already passed. `CERALIVE_KERNEL_BUILD_JOBS` overrides it unconditionally.
+
 Selecting the variant suppresses the remote fetch of the kernel/DTB packages
 (U-Boot and firmware stay prebuilt-fetched), replaces their names with the built
 ones, and fails the build if any package name ends up with both a fetched and a
