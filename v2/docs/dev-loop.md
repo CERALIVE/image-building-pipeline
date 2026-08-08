@@ -54,6 +54,39 @@ docker build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 # or: podman build -t ceralive-mkosi-builder:26 -f v2/ci/Dockerfile v2/ci
 ```
 
+### Debug image (`CERALIVE_DEBUG_IMAGE=1`) — bench ONLY, adds the tooling delta
+
+```bash
+CERALIVE_DEBUG_IMAGE=1 \
+CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) SHA-512 hash>' \
+  ./v2/build rock-5b-plus
+```
+
+This is the variant seam. It installs `manifests/packages/development.delta.list`
+on top of the production package set — `python3`, `strace`, `tcpdump` and the
+fifteen `debug-toolset` diagnostics — and keeps the access behaviour it has always
+had: the injected hash unlocks `ceralive`, `ssh.service` is enabled by default, and
+`/etc/ceralive/debug-image` is baked as the marker.
+
+The flag is validated **before** the package set is resolved, so a value other than
+`0`/`1`, a hash without the flag, or the flag without a hash all fail the build
+rather than producing a mislabelled image. With the flag unset the resolved package
+set is byte-identical to production.
+
+Orthogonal to the PARTLABEL overlay below — combine them for a bench microSD that
+also carries the tools:
+
+```bash
+CERALIVE_BENCH_LABELS=1 CERALIVE_DEBUG_IMAGE=1 \
+CERALIVE_DEBUG_PASSWORD_HASH='<hash>' ./v2/build rock-5b-plus
+```
+
+**Never on a release path.** A debug image carries an unlocked password, an enabled
+sshd and a full diagnostic toolchain; no publish job sets the flag, and the build
+logs a loud warning while it is active. For diagnostics on a *production* image use
+the signed `debug-toolset` sysext add-on instead — same toolbox, installed at
+runtime, no reflash. See the README's "Production vs Debug Image Variants".
+
 ### Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`) — bench media ONLY
 
 ```bash

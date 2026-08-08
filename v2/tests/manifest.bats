@@ -933,6 +933,14 @@ STATUS
   done
 }
 
+# runtime_pkg_lists — the SHIPPED common.sh::runtime_pkg_list_files, run in a
+# subshell so its `set -e` + ERR trap cannot escape into bats. Honours
+# CERALIVE_DEBUG_IMAGE from the caller's environment.
+runtime_pkg_lists() {
+  bash -c 'source "$1"; runtime_pkg_list_files "$2" "$3"' bash \
+    "$COMMON_SH" "$V2/manifests/packages/shared.list" "$V2/manifests/packages"
+}
+
 make_parity_rootfs() {
   local root="$1"
   mkdir -p \
@@ -946,9 +954,16 @@ make_parity_rootfs() {
     "$root/etc/apt/sources.list.d" \
     "$root/etc/systemd/network"
 
+  # File selection goes through the SHIPPED common.sh helper, never a bare
+  # `*.delta.list` glob: that glob would fold the debug-only development delta
+  # into this synthetic rootfs and make every production parity assertion below
+  # vacuously pass on packages a production image does not install.
+  local lists=() list
+  while IFS= read -r list; do [[ -n "$list" ]] && lists+=("$list"); done \
+    < <(runtime_pkg_lists)
   local packages=() package
   while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
-    < <(sed -e 's/#.*//' "$V2/manifests/packages/shared.list" "$V2/manifests/packages"/*.delta.list | awk 'NF{print $1}')
+    < <(sed -e 's/#.*//' "${lists[@]}" | awk 'NF{print $1}')
   packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 
@@ -6777,4 +6792,264 @@ SH
   # It is ADDITIVE to setup_fan_curve, which must remain untouched and separate.
   run grep -cE '^setup_fan_curve\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
+}
+
+# ===========================================================================
+# 30. Debug/production package split — the CERALIVE_DEBUG_IMAGE variant seam.
+#
+#     manifests/packages/development.delta.list is the debug-only package set:
+#     python3 + strace/tcpdump + the fifteen T17 packages the debug-toolset
+#     sysext add-on carries. It is installed ONLY when CERALIVE_DEBUG_IMAGE=1;
+#     a production build's package set must stay byte-identical to what todo 31
+#     measured and baselined.
+#
+#     THE TRAP THESE TESTS EXIST FOR: the file shares the `.delta.list` suffix
+#     with the two FAMILY deltas because it is the same format, but it is keyed
+#     on the BUILD VARIANT instead. Three places in this repo globbed
+#     `manifests/packages/*.delta.list` as a directory — lib/parity-check.sh's
+#     expected set, tests/realhw-suite.sh's synthesized dpkg status, and this
+#     file's own make_parity_rootfs fixture. Left alone, every one of them would
+#     have folded 18 debug packages into the PRODUCTION contract: parity-check
+#     would fail the [7/9] gate on a correct production image, and the fixture
+#     would have hidden it by declaring those packages installed. All three now
+#     go through common.sh::runtime_pkg_list_files, which skips the debug delta
+#     by name and re-appends it only under the flag.
+#
+#     Static + real-execution, UNIT scope: no image boot, no orchestrator run.
+# ===========================================================================
+
+DEV_DELTA_LIST() { printf '%s' "$V2/manifests/packages/development.delta.list"; }
+
+# dev_delta_expected — the exact debug-only set, sorted. Written out literally
+# rather than read from the file so a silent edit to the list is a test failure,
+# not a self-fulfilling assertion.
+dev_delta_expected() {
+  printf '%s\n' \
+    alsa-utils can-utils htop i2c-tools iotop iperf3 lsof nano \
+    netcat-openbsd nethogs pciutils pulseaudio python3 socat strace \
+    tcpdump usbutils vnstat | sort
+}
+
+active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
+
+@test "dev delta: development.delta.list exists and carries exactly the debug-only set" {
+  [ -f "$(DEV_DELTA_LIST)" ]
+  run diff <(dev_delta_expected) <(active_pkgs_of "$(DEV_DELTA_LIST)")
+  [ "$status" -eq 0 ]
+}
+
+@test "dev delta: python3 is in the delta and NOT in the production shared list" {
+  # python3 is the content-diff probe for the two variants: a real production
+  # rootfs has 552 installed packages and zero python3*, so its presence is an
+  # unambiguous signal that the debug branch actually took effect.
+  run grep -Ex 'python3[[:space:]]*(#.*)?' "$(DEV_DELTA_LIST)"
+  [ "$status" -eq 0 ]
+  run grep -qxF python3 <(active_pkgs_of "$V2/manifests/packages/shared.list")
+  [ "$status" -ne 0 ]
+}
+
+@test "dev delta: no package is duplicated from shared.list or a family delta" {
+  # A duplicate would make "debug == production + exactly this delta" untrue and
+  # would silently pull a debug package into the production image.
+  local dupes
+  dupes="$(comm -12 <(active_pkgs_of "$(DEV_DELTA_LIST)") \
+                    <(active_pkgs_of "$V2/manifests/packages/shared.list"))"
+  [ -z "$dupes" ]
+
+  local f
+  for f in "$V2/manifests/packages"/rk3588.delta.list "$V2/manifests/packages"/x86_64.delta.list; do
+    dupes="$(comm -12 <(active_pkgs_of "$(DEV_DELTA_LIST)") <(active_pkgs_of "$f"))"
+    [ -z "$dupes" ]
+  done
+}
+
+@test "dev delta: the PRODUCTION list selection is exactly shared.list + the family deltas" {
+  # The reference is todo 31's merged baseline: shared.list + both family deltas,
+  # nothing else. Drives the SHIPPED common.sh helper, flag unset.
+  local got
+  got="$(CERALIVE_DEBUG_IMAGE= runtime_pkg_lists | xargs -n1 basename | sort)"
+  run diff <(printf '%s\n' rk3588.delta.list shared.list x86_64.delta.list) <(printf '%s\n' "$got")
+  [ "$status" -eq 0 ]
+
+  # …and explicitly with the flag set to 0.
+  got="$(CERALIVE_DEBUG_IMAGE=0 runtime_pkg_lists | xargs -n1 basename | sort)"
+  run diff <(printf '%s\n' rk3588.delta.list shared.list x86_64.delta.list) <(printf '%s\n' "$got")
+  [ "$status" -eq 0 ]
+}
+
+@test "dev delta: CERALIVE_DEBUG_IMAGE=1 adds the development delta and NOTHING else" {
+  local got
+  got="$(CERALIVE_DEBUG_IMAGE=1 runtime_pkg_lists | xargs -n1 basename | sort)"
+  run diff <(printf '%s\n' development.delta.list rk3588.delta.list shared.list x86_64.delta.list) \
+           <(printf '%s\n' "$got")
+  [ "$status" -eq 0 ]
+}
+
+@test "dev delta: the resolved debug package SET equals production plus exactly the delta" {
+  local prod debug
+  prod="$(CERALIVE_DEBUG_IMAGE=0 runtime_pkg_lists | xargs sed -e 's/#.*//' | awk 'NF{print $1}' | sort -u)"
+  debug="$(CERALIVE_DEBUG_IMAGE=1 runtime_pkg_lists | xargs sed -e 's/#.*//' | awk 'NF{print $1}' | sort -u)"
+
+  # Nothing may be REMOVED by the debug branch.
+  [ -z "$(comm -23 <(printf '%s\n' "$prod") <(printf '%s\n' "$debug"))" ]
+  # What it ADDS is exactly the delta.
+  run diff <(dev_delta_expected) <(comm -13 <(printf '%s\n' "$prod") <(printf '%s\n' "$debug"))
+  [ "$status" -eq 0 ]
+}
+
+@test "dev delta: orchestrate.sh resolves the family delta by NAME and gates the dev delta on the flag" {
+  local orch="$LIB_DIR/orchestrate.sh"
+  # The family delta stays a ${FAMILY}-keyed lookup — never a directory glob,
+  # which is what would swallow development.delta.list on every board.
+  grep -Fq 'delta_list="${pkg_dir}/${FAMILY}.delta.list"' "$orch"
+  ! grep -Eq 'pkg_dir\}?"?/\*\.delta\.list' "$orch"
+
+  # The dev delta is appended ONLY inside a CERALIVE_DEBUG_IMAGE=1 branch, and a
+  # debug build with the file missing fails closed instead of silently shipping
+  # a production package set under a debug label.
+  grep -Fq 'dev_delta_list="${pkg_dir}/${DEV_DELTA_BASENAME}"' "$orch"
+  grep -Fq 'CERALIVE_DEBUG_IMAGE=1 but the development package delta is missing' "$orch"
+}
+
+@test "dev delta: the debug flag is validated BEFORE the runtime package set is resolved" {
+  # Ordering is the whole point: the package set now depends on the flag, so a
+  # value like `yes` must abort rather than quietly resolve a PRODUCTION set and
+  # fail three stages later at mkosi.
+  local orch="$LIB_DIR/orchestrate.sh"
+  local call_line res_line
+  call_line="$(grep -n '^  resolve_debug_image_flag$' "$orch" | head -1 | cut -d: -f1)"
+  res_line="$(grep -n 'SHARED_PACKAGES="\$(read_pkg_list' "$orch" | head -1 | cut -d: -f1)"
+  [ -n "$call_line" ]
+  [ -n "$res_line" ]
+  [ "$call_line" -lt "$res_line" ]
+}
+
+@test "dev delta: no consumer keeps a bare delta-list directory glob" {
+  # STRUCTURAL GUARD, not three instances: any future consumer that re-adds the
+  # glob silently reintroduces the debug-into-production leak.
+  # Comments are stripped first: this test's own prose names the offending glob.
+  local f
+  for f in "$LIB_DIR/parity-check.sh" "$TESTS_DIR/realhw-suite.sh" "$BATS_TEST_FILENAME"; do
+    run bash -c "sed 's/#.*//' \"\$1\" | grep -nE 'PKG_MANIFEST_DIR\}?\"?/\\*\\.delta\\.list|packages\"?/\\*\\.delta\\.list'" bash "$f"
+    [ "$status" -ne 0 ]
+  done
+  # …and each of them routes through the one shared selector instead.
+  grep -Fq 'runtime_pkg_list_files' "$LIB_DIR/parity-check.sh"
+  grep -Fq 'runtime_pkg_list_files' "$TESTS_DIR/realhw-suite.sh"
+  grep -Fq 'runtime_pkg_list_files' "$BATS_TEST_FILENAME"
+}
+
+@test "dev delta: parity accepts a production rootfs WITHOUT the debug packages" {
+  # Scoped to check A (the Debian package diff) rather than the overall exit
+  # status: the shared fixture deliberately omits libsrt1.5-ceralive, so a bare
+  # make_parity_rootfs already fails on a first-party gap that predates this seam
+  # and has nothing to do with it.
+  local root="$BATS_TEST_TMPDIR/devdelta-prod-rootfs"
+  make_parity_rootfs "$root"
+
+  # Rebuild the dpkg status from an EXPLICITLY production-only set — shared.list
+  # plus the two family deltas, named, never globbed. Reusing the fixture's own
+  # selection would make this vacuous: a selector that wrongly folds the debug
+  # delta in feeds BOTH the rootfs and the expectation, so they agree and the leak
+  # is invisible. Modelling a real production image is what exposes it.
+  local packages=() package
+  while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
+    < <(sed -e 's/#.*//' \
+          "$V2/manifests/packages/shared.list" \
+          "$V2/manifests/packages/rk3588.delta.list" \
+          "$V2/manifests/packages/x86_64.delta.list" | awk 'NF{print $1}')
+  packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
+
+  run "$LIB_DIR/parity-check.sh" "$root"
+  [[ "$output" == *"all Debian-sourced shared.list packages installed"* ]]
+  [[ "$output" != *"python3"* ]]
+  [[ "$output" != *"strace"* ]]
+}
+
+@test "dev delta: parity DEMANDS the debug packages when CERALIVE_DEBUG_IMAGE=1 (non-vacuity)" {
+  # The inverse leg. Without it the test above passes even if the seam does
+  # nothing at all, because "absent and never checked" looks like "absent and
+  # correctly not required".
+  local root="$BATS_TEST_TMPDIR/devdelta-debug-rootfs"
+  make_parity_rootfs "$root"          # production package set only
+  run env CERALIVE_DEBUG_IMAGE=1 "$LIB_DIR/parity-check.sh" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"python3"* ]]
+  [[ "$output" == *"strace"* ]]
+}
+
+@test "dev delta: CERALIVE_DEBUG_IMAGE reaches every subimage via PassEnvironment" {
+  # The package set is forwarded as $SHARED_PACKAGES (already propagated), but the
+  # runtime postinst also branches on the flag itself for ssh enablement, the
+  # password hash and the /etc/ceralive/debug-image marker. Read empty in a
+  # subimage chroot, a debug image would install the delta and then behave like a
+  # production one.
+  local pass_names
+  pass_names="$(sed -n 's/^PassEnvironment=//p' "$V2/mkosi/mkosi.conf")"
+  local -A in_pass=()
+  local n
+  for n in $pass_names; do in_pass["$n"]=1; done
+  [ -n "${in_pass[CERALIVE_DEBUG_IMAGE]:-}" ]
+  [ -n "${in_pass[CERALIVE_DEBUG_PASSWORD_HASH]:-}" ]
+  [ -n "${in_pass[SHARED_PACKAGES]:-}" ]
+}
+
+@test "dev delta: the debug image keeps its access behaviour (password + ssh + marker)" {
+  # The seam gained packages; it must not have lost the three things that already
+  # defined a debug image.
+  grep -Fq '/etc/ceralive/debug-image' "$POSTINST_LIB"
+  grep -Fq 'usermod --password' "$POSTINST_LIB"
+  run grep -cE '^configure_ssh_enablement\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+}
+
+@test "dev delta: the debug-toolset sysext add-on is untouched and stays the field path" {
+  # BOTH paths, not either: the add-on is the runtime/field-diagnostics route on a
+  # production image; the delta is the bench route baked at build time. The sysext
+  # builder must keep reading a --deb-staging tree and no package .list at all.
+  local descriptor="$V2/manifests/addons/debug-toolset.json"
+  [ -f "$descriptor" ]
+  grep -Fq '"id": "debug-toolset"' "$descriptor"
+  run grep -nE '\.delta\.list|packages/shared\.list' "$LIB_DIR/build-feature-sysext.sh"
+  [ "$status" -ne 0 ]
+
+  # Every package the add-on's `provides` paths come from is also in the delta, so
+  # an operator gets the same toolbox whichever route they are on.
+  local p
+  for p in alsa-utils pulseaudio usbutils pciutils lsof i2c-tools can-utils htop \
+           iotop nethogs vnstat nano iperf3 socat netcat-openbsd; do
+    grep -qxF "$p" <(active_pkgs_of "$(DEV_DELTA_LIST)")
+  done
+}
+
+@test "dev delta: 'development' is not a board family, so no board can resolve the delta as one" {
+  # The lookup orchestrate.sh performs is ${FAMILY}.delta.list. If a family named
+  # `development` ever existed, a board could pull the debug set into a production
+  # build through the ordinary family path.
+  [ ! -e "$V2/manifests/families/development.yaml" ]
+  run grep -rl '^family:[[:space:]]*development' "$V2/manifests/boards"
+  [ "$status" -ne 0 ]
+}
+
+@test "dev delta: the relative size baseline is SKIPPED for a debug build, absolute ceiling is not" {
+  # A debug image is production + ~58 MB, so it trips the comparator's 50 MB
+  # growth threshold by construction. The warning's own remedy is "update the
+  # baseline in the same PR" — from a debug build that would overwrite the
+  # PRODUCTION baseline and desync it from size-budget.json, which another test in
+  # this file fails on. Only the RELATIVE check is skipped; the absolute ceiling
+  # runs for both variants.
+  local orch="$LIB_DIR/orchestrate.sh"
+  local body
+  body="$(awk '/^compare_size_against_baseline\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$orch")"
+  [ -n "$body" ]
+  grep -Fq 'CERALIVE_DEBUG_IMAGE:-0' <<<"$body"
+  grep -Fq 'relative size baseline SKIPPED' <<<"$body"
+
+  # The absolute gate is a SEPARATE call and must NOT have grown a debug branch.
+  local stage
+  stage="$(awk '/\[6c\/9\] enforcing the rootfs size budget/{grab=1} grab{print} grab && /^  fi$/{exit}' "$orch")"
+  [ -n "$stage" ]
+  grep -Fq 'MEASURE_SIZE_SH' <<<"$stage"
+  ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
 }

@@ -50,6 +50,7 @@ image-building-pipeline/
 |------|----------|
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
+| **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `v2/manifests/packages/development.delta.list` + `v2/lib/common.sh::runtime_pkg_list_files` + `v2/lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
@@ -1420,6 +1421,77 @@ identical RAUC 1.8 defect. It is live security key material (private keys includ
 and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` — out
 of scope for this fix. Flagged for the orchestrator/user to action separately before
 production OTA can work on a 1.8 device.
+
+**The debug package delta is VARIANT-keyed, and it shares a filename suffix with
+the FAMILY deltas — so every directory glob had to be taught the difference** [EXISTS]
+
+`CERALIVE_DEBUG_IMAGE=1` now selects a package set as well as an access posture.
+`v2/manifests/packages/development.delta.list` carries 18 packages — `python3`,
+`strace`, `tcpdump`, plus the fifteen T17 diagnostics the `debug-toolset` sysext
+add-on ships — and `lib/orchestrate.sh` appends it to `$SHARED_PACKAGES` **only**
+on that branch. With the flag unset or `0` the resolved set is byte-identical to
+todo 31's measured baseline: 48 packages, `shared.list` + the resolved
+`<family>.delta.list`, nothing else.
+
+**The trap, and it is the whole reason this is a KEY FACT.** The file is keyed on
+the BUILD VARIANT, not on a board family, but it keeps the `.delta.list` suffix
+because it is literally the same format. Three places globbed
+`manifests/packages/*.delta.list` as a DIRECTORY — `lib/parity-check.sh`'s expected
+set, `tests/realhw-suite.sh`'s synthesized dpkg status, and `manifest.bats`'s own
+`make_parity_rootfs` fixture. Left alone, each would have folded the 18 debug
+packages into the PRODUCTION contract, so `parity-check.sh` would `die` at the
+`[7/9]` gate on a **correct** production image for "Debian packages MISSING:
+python3 strace tcpdump …" — and the fixture would have hidden it by declaring
+those same packages installed in the synthetic rootfs, which is how a leak like
+this passes its own test suite.
+
+All three now select their files through `lib/common.sh::runtime_pkg_list_files`,
+which skips the debug delta by name and re-appends it only when the flag is set.
+**A new consumer must use that helper**; a fresh `*.delta.list` glob silently
+reintroduces the leak. `tests/parametric.sh` names `rk3588.delta.list` and
+`x86_64.delta.list` explicitly and is unaffected;
+`tests/package-migration-coverage.sh` globs deliberately, because it builds an
+ACCOUNTING set (does a legacy package have *a* v2 home?) rather than an install
+set.
+
+Two ordering/naming facts that are load-bearing:
+
+- **The flag is normalized and validated in `main()`, before `[1/9]` resolves the
+  package set** — not in `run_mkosi_build()` at `[6/9]`, where it used to live. The
+  package set now depends on it, so `CERALIVE_DEBUG_IMAGE=yes` must abort rather
+  than quietly resolve a PRODUCTION set and fail three stages later at mkosi.
+- **`development` must never become a board family.** The family lookup is
+  `${FAMILY}.delta.list`; a `manifests/families/development.yaml` would let a board
+  pull the debug set through the ordinary production path.
+
+**Both diagnostic routes stay, and they are not redundant.** The `debug-toolset`
+sysext add-on is untouched and remains the FIELD route — installed at runtime, over
+the network, on an ordinary production image, no reflash. The delta is the BENCH
+route — baked in so a developer debugging the boot / first-boot window has the tools
+before any network or add-on manager exists. `lib/build-feature-sysext.sh` reads a
+`--deb-staging` tree and no package `.list` at all, so it is completely unaffected.
+Keep the two sets equal.
+
+**On-device BUILD tooling is still refused, in both variants.** `removed.md` §(e)'s
+compiler/VCS/runtime entries (`build-essential`, `cmake`, `gdb`, `git`, `nodejs`,
+`valgrind`, `linux-headers-*`, …) are deliberately NOT in the delta: nothing is
+compiled on a CeraLive board, and a debug image whose only difference from
+production should be diagnostic must not become a materially different system.
+
+`pulseaudio` is in the delta because it is in the add-on's `provides`, and it is
+inert: bookworm ships only USER units (`/usr/lib/systemd/user/pulseaudio.{service,socket}`)
+and this appliance has no user session, so it never autostarts and never contends
+with `alsasrc` for the capture device. Do not enable it system-wide.
+
+Guards: `v2/tests/manifest.bats` §30 (15 tests — the exact 18-package content, zero
+duplication against `shared.list` or either family delta, the production selection
+pinned to shared+family only, the debug selection adding *exactly* the delta and
+removing nothing, a real `parity-check.sh` run against a production-modelled rootfs
+plus the inverse leg proving it DEMANDS the delta under the flag, the
+no-bare-glob structural guard, the validate-before-resolve ordering, the
+PassEnvironment propagation, the retained password/ssh/marker behaviour, the
+untouched add-on, and the absent `development` family). Mutation-verified: deleting
+the name-skip in `runtime_pkg_list_files` fails 5 of them.
 
 **Image size gate — BLOCKING at 1.5 GB, and it is the `[6c/9]` BUILD stage** [EXISTS]
 

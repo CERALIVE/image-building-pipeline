@@ -132,6 +132,14 @@ config, so a malformed drop-in can never wedge sshd's startup.
   enables `ssh.service` by default** (per the enablement gate above). The build
   rejects a hash without the lab flag, and production builds never receive either
   input. Do not use this mode for fleet artifacts.
+- **The same flag also selects the package set** (todo 32): a debug image installs
+  `manifests/packages/development.delta.list` on top of the production set —
+  `python3`, `strace`, `tcpdump` and the fifteen `debug-toolset` diagnostics. That
+  is a second reason this mode is bench-only: an image carrying an unlocked
+  password, an enabled sshd AND a full diagnostic toolchain must never be
+  published. The flag is normalized and validated in `lib/orchestrate.sh` before
+  the package set is resolved, so an out-of-range value aborts the build rather
+  than silently producing a production package set under a debug label.
 - **On production, SSH is off until the operator enables it.** The device is still
   reachable on the LAN — CeraUI serves the control plane over HTTP/HTTPS and the
   appliance answers at its selected mDNS hostname after it joins a shared LAN:

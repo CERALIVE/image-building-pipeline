@@ -119,3 +119,38 @@ partlabel_prefix() {
 resolve_partlabel() {
   printf '%s%s' "$(partlabel_prefix)" "${1:?resolve_partlabel needs a partition role}"
 }
+
+# ---------------------------------------------------------------------------
+# DEV_DELTA_BASENAME + runtime_pkg_list_files <shared-list> <packages-dir>
+#
+# The canonical runtime package lists for a build, in read order. The shared list
+# is passed separately from the directory because both consumers expose them as
+# independent overrides (SHARED_LIST / PKG_MANIFEST_DIR).
+#
+# `development.delta.list` is keyed on the BUILD VARIANT, not on the board
+# family, but it shares the `.delta.list` suffix because it is the same format —
+# so every `*.delta.list` DIRECTORY GLOB in this repo would otherwise swallow it
+# and require its 18 debug packages in a PRODUCTION rootfs (parity-check.sh's
+# expected set, realhw-suite.sh's synthesized dpkg status). That is the exact
+# defect this helper exists to make impossible: the debug delta is skipped by
+# name, then re-appended ONLY when CERALIVE_DEBUG_IMAGE=1.
+#
+# Every consumer that globs the directory MUST go through this. A consumer that
+# keeps its own glob silently reintroduces the production/debug leak.
+# ---------------------------------------------------------------------------
+DEV_DELTA_BASENAME='development.delta.list'
+
+runtime_pkg_list_files() {
+  local shared="${1:?runtime_pkg_list_files needs the shared list}"
+  local dir="${2:?runtime_pkg_list_files needs the packages dir}" f
+  [[ -f "${shared}" ]] && printf '%s\n' "${shared}"
+  for f in "${dir}"/*.delta.list; do
+    [[ -f "${f}" ]] || continue
+    [[ "${f##*/}" == "${DEV_DELTA_BASENAME}" ]] && continue
+    printf '%s\n' "${f}"
+  done
+  if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" && -f "${dir}/${DEV_DELTA_BASENAME}" ]]; then
+    printf '%s\n' "${dir}/${DEV_DELTA_BASENAME}"
+  fi
+  return 0
+}

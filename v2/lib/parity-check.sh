@@ -64,16 +64,21 @@ fail() { log_error   "FAIL  $*"; FAIL=$((FAIL+1)); }
 
 # ---------------------------------------------------------------------------
 # read_manifest_packages — echo every active package in the canonical v2 runtime
-# package lists: manifests/packages/shared.list plus every <family>.delta.list.
-# Comments and blank lines are stripped. This is the SAME parse as
-# v2/tests/package-migration-coverage.sh (build_v2_set), so the MIGRATE coverage
-# gate and this REWIRE read the manifests identically.
+# package lists: manifests/packages/shared.list plus every <family>.delta.list,
+# plus the variant-keyed development.delta.list when CERALIVE_DEBUG_IMAGE=1.
+# Comments and blank lines are stripped.
+#
+# File selection is delegated to common.sh::runtime_pkg_list_files so the debug
+# delta cannot leak into a PRODUCTION parity run: a bare `*.delta.list` glob here
+# would demand python3/strace/tcpdump/… in every production rootfs and fail the
+# [7/9] gate on the very image that is correct.
 # ---------------------------------------------------------------------------
 read_manifest_packages() {
   local f
-  for f in "${SHARED_LIST}" "${PKG_MANIFEST_DIR}"/*.delta.list; do
-    [[ -f "${f}" ]] && sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
-  done
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
+  done < <(runtime_pkg_list_files "${SHARED_LIST}" "${PKG_MANIFEST_DIR}")
 }
 
 main() {

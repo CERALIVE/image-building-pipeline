@@ -140,13 +140,16 @@ trap cleanup EXIT
 # ===========================================================================
 
 # read_manifest_packages — the SAME parser parity-check.sh read_manifest_packages
-# (and package-migration-coverage.sh build_v2_set) use, so the synthesized dpkg
-# status lists exactly the shared.list + family-delta packages parity-check asserts.
+# uses, sharing common.sh::runtime_pkg_list_files for file selection, so the
+# synthesized dpkg status lists exactly the package set parity-check asserts —
+# including the CERALIVE_DEBUG_IMAGE=1 development delta, and excluding it
+# otherwise.
 read_manifest_packages() {
   local f
-  for f in "${SHARED_LIST}" "${PKG_MANIFEST_DIR}"/*.delta.list; do
-    [[ -f "${f}" ]] && sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
-  done
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
+  done < <(runtime_pkg_list_files "${SHARED_LIST}" "${PKG_MANIFEST_DIR}")
 }
 
 emit_dpkg_status() {                         # emit_dpkg_status <out>

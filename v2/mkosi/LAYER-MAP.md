@@ -79,6 +79,7 @@ runtime package is installed in the App layer, never in the BSP.
 | Contents | Source |
 |---|---|
 | Canonical runtime package set | `manifests/packages/shared.list` (+ resolved `<family>.delta.list`, currently empty) |
+| Debug-image-only package delta | `manifests/packages/development.delta.list` — resolved ONLY when `CERALIVE_DEBUG_IMAGE=1` |
 | **CeraLive SRT transport library** `libsrt1.5-ceralive` | first-party staging, installed in App |
 | RAUC A/B client `rauc` + `u-boot-tools` | shared.list (decisions.md Task 5) |
 | `rauc-hawkbit-updater` | **commented PLACEHOLDER** in shared.list (Stage 4 OTA; backport `.deb`, not in bookworm) |
@@ -90,6 +91,18 @@ list. `lib/orchestrate.sh` reads `shared.list` (+ family delta), forwards it as
 installs exactly that set (after writing the Debian sources, mirroring how the
 platform layer does its in-chroot apt install). `lib/parity-check.sh` still diffs
 the built rootfs against `configs/base/ceraui-base.conf`.
+
+**The debug variant adds ONE more list and changes nothing else.** With
+`CERALIVE_DEBUG_IMAGE=1` the orchestrator appends
+`manifests/packages/development.delta.list` to `$SHARED_PACKAGES`; the runtime
+layer's install path, the postinst, and every other layer are byte-identical to a
+production build. That file is keyed on the BUILD VARIANT, not on a board family,
+so it is unreachable through the `${FAMILY}.delta.list` lookup — and because it
+shares the `.delta.list` suffix, every consumer that globs the packages
+DIRECTORY (`lib/parity-check.sh`, `tests/realhw-suite.sh`) selects its files
+through `lib/common.sh::runtime_pkg_list_files`, which skips it by name unless
+the flag is set. Add a new consumer and it must use that helper too, or a
+production image starts failing the `[7/9]` parity gate for missing debug tools.
 
 ### libsrt — the key placement decision
 

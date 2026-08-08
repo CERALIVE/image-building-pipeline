@@ -222,6 +222,49 @@ v2/lib/build-feature-sysext.sh \
   --out dist/
 ```
 
+## Production vs Debug Image Variants
+
+Every build is one of two variants, selected by a single environment flag:
+
+```bash
+./v2/build rock-5b-plus                                    # PRODUCTION (default)
+
+CERALIVE_DEBUG_IMAGE=1 \
+CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>' \
+  ./v2/build rock-5b-plus                                  # DEBUG (bench only)
+```
+
+**Production** is the shipped image: the runtime package set is
+`manifests/packages/shared.list` plus the resolved `<family>.delta.list` and
+nothing else, `ssh.service` is not enabled, and the `ceralive` account is
+password-locked.
+
+**Debug** is that same image plus `manifests/packages/development.delta.list` —
+`python3`, `strace`, `tcpdump` and the fifteen `debug-toolset` diagnostics
+(`alsa-utils`, `usbutils`, `pciutils`, `lsof`, `i2c-tools`, `can-utils`, `htop`,
+`iotop`, `nethogs`, `vnstat`, `nano`, `iperf3`, `socat`, `netcat-openbsd`,
+`pulseaudio`) — and keeps its existing access behaviour: the injected password
+hash unlocks `ceralive`, `ssh.service` is enabled by default, and
+`/etc/ceralive/debug-image` is baked as the marker. The flag is validated before
+the package set is resolved, so a value other than `0`/`1`, a hash without the
+flag, or the flag without a hash all abort the build.
+
+The debug image is **bench only and is never published to apt or R2**. No release
+or publish path sets the flag.
+
+Both variants keep the same **field-diagnostics** route: the signed `debug-toolset`
+sysext add-on, installed at runtime on an ordinary production image with no
+reflash. The delta exists for the case the add-on cannot serve — debugging the
+boot / first-boot window, before any network or add-on manager is up. The two sets
+are deliberately identical so an operator does not have to know which route they
+are on.
+
+Adding a package to `development.delta.list` must not duplicate anything already
+in `shared.list`, and any new code that reads `manifests/packages/*.delta.list`
+must select its files through `v2/lib/common.sh::runtime_pkg_list_files` — that
+helper is what keeps the variant-keyed debug delta out of the production package
+contract. Guards: `v2/tests/manifest.bats` §30.
+
 ## Image Size Gate
 
 Every real build runs `v2/lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,

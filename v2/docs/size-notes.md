@@ -602,3 +602,56 @@ This is a correctness fix, not a size lever: the recovered payload is ~441 KB.
 **Restoring genuine HDMI console readability is a separate, still-open decision** —
 it requires shipping a real PSF provider (which *adds* bytes) or retiring the unit.
 Do not read this removal as having fixed the feature.
+
+## 12. The debug variant costs 58.11 MiB — measured, and it does NOT move the baseline (todo 32)
+
+`CERALIVE_DEBUG_IMAGE=1` now selects a package set as well as an access posture:
+the orchestrator appends `manifests/packages/development.delta.list` to
+`$SHARED_PACKAGES`. Both variants were built wet for `rock-5b-plus` on the same
+tree, same day, same BSP pins:
+
+| Variant | rootfs tar bytes | installed packages | sha256 |
+|---|---|---|---|
+| production (`CERALIVE_DEBUG_IMAGE` unset) | 1,416,232,960 | 553 | `63a7c0ff…8e8341` |
+| debug (`=1`) | 1,477,160,960 | 595 | `862415a5…a650e3` |
+| **delta** | **+60,928,000 (+58.11 MiB)** | **+42** | |
+
+42 packages added — the 18 named in the delta plus 24 transitive dependencies
+(`python3.11`/`-minimal`, `libpython3.11-stdlib`, `libpcap0.8`, `libpci3`,
+`pci.ids`, `libasound2-plugins`, `pulseaudio-utils`, `libiperf0`, …) — and **zero
+removed**: `comm -23 prod debug` is empty, which is the property that makes
+"debug == production + exactly this delta" a fact rather than a claim.
+
+Exactly two systemd units differ, and both are accounted for: `ssh.service` (the
+seam's documented behaviour) and `vnstat.service` (Debian's preset for the
+`vnstat` package — kept, because a traffic accumulator collects nothing without
+its daemon). `pulseaudio` adds **no** system unit; bookworm ships only user units
+and this appliance has no user session, so it never autostarts and never contends
+with `alsasrc` for the capture device.
+
+### Both gates, and why only one of them runs for a debug build
+
+- **The absolute ceiling runs for BOTH variants.** The debug image measured
+  1,477,160,960 B against the 1,500,000,000 B ceiling — it passes, with
+  **22,839,040 B (21.78 MiB) of headroom**. That is tight on purpose being
+  recorded here: the delta is not free to grow without re-measuring, and the
+  answer to a future overflow is to shrink the delta, never to raise
+  `rootfs_bytes_max`.
+- **The relative baseline comparison is SKIPPED for a debug build.** §4/§11's
+  comparator warns past 50 MB of growth, and a debug image clears that threshold
+  *by construction*. The first debug build duly emitted
+  `size baseline: … GREW beyond the regression threshold … justify the growth and
+  update the baseline in the same PR` — advice that is actively harmful here,
+  because the committed `ci/size-baseline.<board>.json` is a PRODUCTION artifact.
+  Updating it from a debug build would record a number no production image can
+  reproduce and desync it from `size-budget.json`, which §11's own agreement test
+  fails on. `compare_size_against_baseline` therefore returns early under the
+  flag with a log line saying so.
+
+The committed production baselines are UNCHANGED by this work. The production
+build above (1,416,232,960 B) is +1,044,480 B against the recorded 1,415,188,480 B
+— ordinary upstream Debian churn, inside the comparator's threshold, and not a
+reason to re-record.
+
+Guards: `manifest.bats` §30 — 16 tests, including the skip being scoped to the
+relative check only (the absolute stage must not grow a debug branch).
