@@ -6,6 +6,23 @@ support for Intel N100/N200 and AMD platforms.
 
 > Status: Alpha — interfaces and docs may evolve. Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
+## Build Requirements (at a glance)
+
+| Requirement | Version / detail | Verified |
+|---|---|---|
+| mkosi | ≥ 26 (native builds only; container build needs none of this host-side) | `mkosi --version` → `mkosi 26` on this host |
+| Python | ≥ 3.12 (native build host requirement) | this host runs 3.14.6 |
+| Container runtime | Docker or Podman — the container build is canonical | `docker --version` → 29.7.2; `podman --version` → 6.0.2, both present |
+| Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
+| ccache | recommended for repeat kernel-from-source builds (`--variant edge` / `--variant vendor-patched`) | `which ccache` → `/usr/bin/ccache` present on this host |
+
+This table is the quick-reference; the full, step-by-step, executed walkthrough
+— including the container-vs-native host matrix, the full board × kernel-track
+× image-variant build matrix, and every flash path — lives in
+[`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §1-4. **The container build
+is canonical** — most of the table above (mkosi/Python versions) matters only
+if you opt into `--native`; a container build only needs Docker or Podman.
+
 ## Supported Devices
 
 ### Current (RK3588-based)
@@ -157,6 +174,31 @@ offender and lists the available boards.
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
+
+### The full build matrix
+
+Every real build is a point in a 3-axis space — board × kernel track × image
+variant. Not every cell is populated: kernel-from-source variants are opt-in
+and only the `rk3588` family declares them; `x86-minipc` has no kernel-track
+axis at all (it always uses its prebuilt Debian kernel path). `PRODUCTION` is
+the default in every cell; `DEBUG` is bench-only and never published (see
+"Production vs Debug Image Variants" below).
+
+| Board | Kernel track | Command | Notes |
+|---|---|---|---|
+| `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build rock-5b-plus` | production path; the kernel the fleet actually runs |
+| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots, audio capture not board-confirmed |
+| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; MPP hardware video encode does NOT work on this track (see the pipeline `AGENTS.md` "MPP hardware video encode" KNOWN ISSUE) — bench/insurance track only |
+| `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build orange-pi-5-plus` | production path |
+| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; same MPP caveat as above |
+| `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
+| `x86-minipc` | n/a (Debian prebuilt) | `./v2/build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `v2/docs/X86-MINIPC-BRINGUP.md` |
+| any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
+
+Bulk/dry-run forms cut across every cell: `./v2/build --all`, `./v2/build --only
+<comma-list>`, and `DRY_RUN=1` in front of any of the above to resolve+fetch a
+plan with no image written (see the executed transcript in
+[`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §2).
 
 The complete hardware-free CI/test entrypoint is
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required

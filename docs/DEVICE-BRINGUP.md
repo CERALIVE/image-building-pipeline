@@ -27,10 +27,50 @@ Public developer guide for building, flashing, and iterating on CeraLive devices
 
 ## 1. Prerequisites
 
-### Host OS
+**The container build is canonical.** `./v2/build <board>` builds inside a
+pinned `debian:trixie-slim` container (`v2/ci/Dockerfile`, mkosi 26) via Docker
+or Podman. Everything below the "Required packages" heading is needed only if
+you opt into `--native` / `MKOSI_NATIVE=1` on a Debian trixie+ host — a plain
+container build needs nothing from your host beyond a working Docker or Podman
+install. See [`v2/docs/host-support.md`](../v2/docs/host-support.md) for the
+full per-distro matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon,
+WSL2).
 
-Debian 12 (Bookworm) or Ubuntu 24.04 LTS recommended. Arch Linux works with
-minor adjustments noted inline.
+**Verified on the machine that wrote this doc** (2026-08-08, Arch Linux host,
+container build path):
+
+```console
+$ mkosi --version
+mkosi 26
+$ python3 --version
+Python 3.14.6
+$ docker --version
+Docker version 29.7.2, build a7dcaa6fdb
+$ podman --version
+podman version 6.0.2
+$ which ccache
+/usr/bin/ccache
+$ df -h .
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  1.3T  984G  214G  83% /mnt/development
+```
+
+Both Docker and Podman are usable container runtimes for the canonical build.
+`ccache` is not a hard requirement for the container path (the builder image
+carries its own persistent ccache volume across runs, see the CI/build cache
+notes in the root `AGENTS.md`), but installing it locally speeds up a
+`--native` kernel-from-source build (`--variant edge` / `--variant
+vendor-patched`) materially — a full kernel `make bindeb-pkg` is the single
+most compile-heavy stage in this pipeline.
+
+**Disk.** The protected CI production-candidate job requires at least 24 GiB
+free on both the workspace and Docker-root filesystems (checked by
+`v2/ci/check-builder-resources.sh` before any BuildKit work starts). A local
+dev box does not enforce that check, but budget similarly: the mkosi build
+cache (`v2/mkosi/cache/<board>`, capped at 2 GiB in CI), the `.staging/<board>`
+tree holding fetched `.deb`s, and each board's output `.raw` (nominal 14,800
+MiB, sparse — see §2 "Artifacts" below) all live under `image-building-pipeline/`
+during a real build.
 
 ### Required packages
 
@@ -200,6 +240,72 @@ export CERALIVE_APT_MIRROR="https://<your-apt-mirror>/debian"
 
 Replace `<your-apt-mirror>` with your mirror hostname.
 
+### Opt-in kernel-build-from-source variants
+
+The `rk3588` family manifest carries two opt-in variants that compile the
+kernel and in-tree DTBs from pinned source instead of fetching the prebuilt
+Armbian kernel:
+
+```bash
+./v2/build rock-5b-plus --variant edge             # mainline 7.1 track
+./v2/build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
+```
+
+Both are compile-and-boot proven on real hardware for `rock-5b-plus`; `edge`
+is additionally proven on `orange-pi-5-plus`. Neither reopens the production
+kernel decision — the shipped image still installs the prebuilt vendor BSP
+(`./v2/build <board>` with no `--variant`), byte-identical to before these
+variants existed. Full detail, including the honest MPP hardware-encode
+limitation on `edge` and the not-yet-board-confirmed HDMI-RX audio fix on
+`vendor-patched`: [`v2/docs/kernel-build-from-source.md`](../v2/docs/kernel-build-from-source.md).
+
+### Production vs debug image variants (`CERALIVE_DEBUG_IMAGE`)
+
+```bash
+./v2/build rock-5b-plus                                    # PRODUCTION (default)
+
+CERALIVE_DEBUG_IMAGE=1 \
+CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>' \
+  ./v2/build rock-5b-plus                                  # DEBUG (bench only)
+```
+
+Production ships `shared.list` + the resolved `<family>.delta.list` only,
+`ssh.service` not enabled, and a password-locked `ceralive` account. Debug
+adds `manifests/packages/development.delta.list` (18 diagnostic packages),
+enables `ssh.service` by default, and unlocks `ceralive` with the supplied
+password hash. **The debug image is bench-only and is never published to apt
+or R2** — no release/publish path ever sets this flag. Full contract, including
+why the flag must be resolved before package-set resolution and the
+directory-glob trap this variant had to be shielded from: root
+[`AGENTS.md`](../AGENTS.md) → "The debug package delta is VARIANT-keyed" KEY
+FACT.
+
+### Image size gate
+
+Every real (non-`DRY_RUN`) build runs `v2/lib/measure-size.sh` between the
+rootfs-tar emit and the parity check. A rootfs whose apparent content exceeds
+**1.5 GB** fails the build there — no `.raw`, no `.raucb`. Both shipped RK3588
+boards currently sit under the ceiling (`rock-5b-plus` 1,412,259,840 B,
+`orange-pi-5-plus` 1,418,792,960 B, measured on real production builds). The
+gate is invisible to the `DRY_RUN=1` PR-gate path — it only runs on a real
+build — so any doc claim about it is worth re-verifying against a real build,
+not a dry run. See [`v2/docs/size-notes.md`](../v2/docs/size-notes.md) §10 for
+the exact wiring and the levers that keep both boards under the line (locale
+strip, firmware audit, the Mesa software-GL prune).
+
+### Kernel freeze contract
+
+The kernel, DTB, U-Boot, and firmware packages in every image are frozen
+against on-device `apt`: `apt-mark hold` (primary — also blocks an explicit
+`apt-get install <pkg>`) plus a supplementary name+version apt-preferences pin.
+RAUC does not consult either — it writes the whole inactive slot directly, and
+each new slot bakes its own holds. First-party CeraLive packages
+(`cerastream`, `ceralive-device`, `srtla-send-rs`, the forked `libsrt`, the
+ModemManager closure) are deliberately excluded from the freeze so
+`system.startUpdate()` keeps working. Verify on a booted device with
+`apt-mark showhold`, `apt-cache policy linux-image-vendor-rk35xx`, and
+`apt-get -s upgrade`. Full contract: [`v2/docs/kernel-freeze-contract.md`](../v2/docs/kernel-freeze-contract.md).
+
 ---
 
 ## 3. Pre-flash verification
@@ -259,6 +365,38 @@ bash v2/tests/preflash-verify.sh --self-test \
 ---
 
 ## 4. Flashing
+
+**Three flash paths exist; this section is the index, not the duplicate.**
+Full step-by-step detail for each lives at the location cited — do not copy
+that detail here on a future edit, link it:
+
+| Path | Where | Destructive? | Verified-via |
+|---|---|---|---|
+| microSD `dd` (Option A below) | §4 "Option A" in this doc | Yes — writes the target block device | `verified-via: .omo/notepads/device-platform-wave4/*` + `v2/docs/kernel-currency-watch.md` real-board history; NOT re-executed for this doc pass (see command-classification note below) |
+| `rkdeveloptool` maskrom → eMMC, CI-verified path | §4 "Option B" in this doc; tool source `v2/ci/verify-and-flash-candidate.sh` | Yes | `verified-via: .omo/evidence/device-platform-wave4/task-27-orangepi5plus-build.md`, `task-27-sd-boot-validation.md`, `task-31-measurement.md` — real board flash+boot transcripts from todos 27/31; NOT re-executed here |
+| `rkdeveloptool` manual bench 3-command path (`db`/`wl`/`rd`) | §4 "Manual bench flashing" in this doc | Yes | same citations as above — validated on real Rock 5B+ hardware in prior sessions, not re-run for this doc pass |
+
+**Command classification for this doc pass.** Per this task's constraints, no
+`dd`, `rkdeveloptool wl`, or `rkdeveloptool rd` was executed while writing this
+section — those are destructive and are cited via the transcripts above
+instead. The one **non-destructive** preflight step was actually run, on the
+machine writing this doc, to confirm the detection command itself still
+behaves as documented (no board attached, so it correctly reports none found):
+
+```console
+$ which rkdeveloptool
+/usr/bin/rkdeveloptool
+$ rkdeveloptool ld
+not found any devices!
+$ echo "exit=$?"
+exit=1
+```
+
+This is the same `rkdeveloptool ld` device-detection command all three flash
+paths use before proceeding — a non-zero exit / "not found any devices!" means
+no board is currently in Maskrom mode, which is expected when nothing is
+attached. Do not read a clean `ld` failure as a tooling problem; it means "no
+device present," not "device present but broken."
 
 ### Partition layout
 
@@ -435,6 +573,40 @@ documentation for the exact button location and timing.
 
 For full rkdeveloptool documentation, see the
 [Rockchip Linux wiki](https://opensource.rock-chips.com/wiki_Rkdeveloptool).
+
+### Experimental-image bench workflow (microSD discipline)
+
+When bench-testing an experimental build (a `--variant edge`/`--variant
+vendor-patched` kernel, or any image you don't want to risk on a board's
+production eMMC), use `CERALIVE_BENCH_LABELS=1` to relabel the GPT partitions
+(`xboot`/`xrootfs_a`/`xrootfs_b`/`xdata` instead of the frozen
+`boot`/`rootfs_a`/`rootfs_b`/`data`) and flash the image to a **microSD card**,
+not eMMC:
+
+```bash
+CERALIVE_BENCH_LABELS=1 ./v2/build rock-5b-plus --variant edge
+```
+
+This exists specifically because a bench microSD is booted on a board whose
+**eMMC already carries a production image** — the frozen contract selects
+every slot and mount by `PARTLABEL`
+([`docs/partition-contract.md`](partition-contract.md) §3), and duplicate
+labels across the two media would make `PARTLABEL=rootfs_a` ambiguous to the
+running kernel. It is bench-only tooling layered on top of the frozen
+contract, not a contract change — a bench-labelled image deliberately FAILS
+`v2/tests/preflash-verify.sh` (which asserts the production label set), so the
+eMMC flash gate refuses it by construction. No release/publish path ever sets
+this flag.
+
+**Microsd boot discipline, board-verified.** A real Rock 5B+ microSD boot
+smoke test (todo 27) confirmed a full boot to userspace with no crash loop
+under this discipline — that transcript is cited here rather than re-run,
+per the command-classification rule above (`dd`-writing a card is
+destructive). See `.omo/evidence/device-platform-wave4/task-27-sd-boot-validation.md`
+and `task-27-orangepi5plus-build.md` for the full board-proof transcripts.
+Section 2 above ("Opt-in kernel-build-from-source variants") covers building
+the experimental image itself; this section only covers the microSD-vs-eMMC
+media discipline for testing it.
 
 ---
 
@@ -855,6 +1027,37 @@ portal may be active. Look for a `CeraLive-Setup-<short-id>` hotspot and
 follow the provisioning steps in [`docs/FIRST-BOOT.md`](FIRST-BOOT.md) §3.
 
 ---
+
+## Fresh-eyes checklist
+
+Starting from zero (no prior context, no board in hand), this is the path to a
+working build:
+
+- [ ] Install Docker or Podman. That is the only host requirement for the
+      canonical container build (§1).
+- [ ] `git clone https://github.com/ceralive/image-building-pipeline.git && cd image-building-pipeline`
+- [ ] `INSTALL_BOOT_BSP=0 DRY_RUN=1 ./v2/build rock-5b-plus` — confirms manifest
+      resolution, package pin listing, and the docker builder plan with **no**
+      network or hardware touched (§2; this is the same command executed,
+      transcript captured, while writing this doc).
+- [ ] `./v2/build rock-5b-plus` for a real build (needs `apt.ceralive.tv`
+      credentials — see "APT feed" in §1; ~15-30 min on a modern host).
+- [ ] Before touching real hardware, read §3 "Pre-flash verification" and run
+      `v2/tests/preflash-verify.sh` against your build's `.raw` — it is
+      non-destructive (only reads block-device size) and catches most build
+      defects before you commit to a flash.
+- [ ] Pick ONE flash path from the table at the top of §4, matching your
+      hardware access (microSD-only bench setup vs. maskrom-capable eMMC
+      flash) — do not mix `dd`/`rkdeveloptool` guidance from memory; follow
+      the linked section exactly, since the destructive steps are not
+      re-verified per doc edit (see the command-classification note in §4).
+- [ ] After first boot, follow §5 "First-time credential bootstrap" — a fresh
+      image has NO usable credentials of any kind; do not guess at an SSH
+      password.
+- [ ] For iterative development without reflashing, switch to §6 "Dev loop".
+
+If any step here fails in a way this doc doesn't already describe, that is a
+real doc gap — file it rather than silently working around it.
 
 ## Related docs
 
