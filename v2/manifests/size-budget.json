@@ -1,7 +1,7 @@
 {
-  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling (Task 20). measure-size.sh sizes rootfs CONTENT via `du --apparent-size -sb` (real file bytes, NOT the frozen 4096 MB A/B partition — G4/E5) and exits non-zero when measured > rootfs_bytes_max. 1500000000 (1.5 GB) is a conservative post-slim ceiling: a minimal Debian bookworm arm64 rootfs with the slimmed shared.list (~35 pkgs, T17) + GStreamer + modem stack measures ~0.8-1.2 GB apparent, leaving headroom. This is a placeholder ceiling that the first real arm64 build refines downward (record the measured value, set the ceiling just above it). Keys beginning with '_' are metadata, not board entries.",
+  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling (Task 20). measure-size.sh sizes rootfs CONTENT via `du --apparent-size -sb` (real file bytes, NOT the frozen 4096 MB A/B partition \u2014 G4/E5) and exits non-zero when measured > rootfs_bytes_max. 1500000000 (1.5 GB) is a conservative post-slim ceiling: a minimal Debian bookworm arm64 rootfs with the slimmed shared.list (~35 pkgs, T17) + GStreamer + modem stack measures ~0.8-1.2 GB apparent, leaving headroom. This is a placeholder ceiling that the first real arm64 build refines downward (record the measured value, set the ceiling just above it). Keys beginning with '_' are metadata, not board entries.",
   "_baked_binaries": {
-    "_comment": "Non-apt binaries fetched + staged into the rootfs at build time (postinst-lib.sh), recorded here so the per-board rootfs_bytes_max headroom stays auditable. bytes = staged binary size measured 2026-07-02; all comfortably under the 1.5 GB ceiling. Metadata only — NOT a board entry (measure-size.sh ignores '_'-prefixed keys).",
+    "_comment": "Non-apt binaries fetched + staged into the rootfs at build time (postinst-lib.sh), recorded here so the per-board rootfs_bytes_max headroom stays auditable. bytes = staged binary size measured 2026-07-02; all comfortably under the 1.5 GB ceiling. Metadata only \u2014 NOT a board entry (measure-size.sh ignores '_'-prefixed keys).",
     "mediamtx": {
       "version": "v1.19.2",
       "staged_path": "/usr/local/bin/mediamtx",
@@ -11,22 +11,25 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP (production, no --variant, no CERALIVE_BENCH_LABELS) build. Both RK3588 boards are now UNDER the 1.5 GB ceiling after the Mesa software-GL file prune (size-notes.md §9): libLLVM-15.so*, libz3.so* and the 43-hardlink Mesa DRI megadriver, 157,637,616 B of files the device can never execute because the Mali vendor stubs win the EGL/GLES/GBM loader path. rootfs_bytes_max was NOT moved in either direction — it was not raised while the image was over, and it is not lowered now that it is under. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), and it must stay byte-identical to the matching v2/ci/size-baseline.<board>.json \u2014 manifest.bats fails the build if the two registries disagree. Both RK3588 boards are under the 1.5 GB ceiling with ~78-85 MB of headroom. rootfs_bytes_max has never been moved in either direction. See each board's note for the armbian-firmware pin caveat. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
     "rootfs_bytes_max": 1500000000,
-    "measured": 1418792960,
-    "measured_at": "2026-08-02",
-    "measured_commit": "67d053a",
-    "measured_artifact": "v2/images/orange-pi-5-plus/20260802T161110Z.rootfs.tar",
-    "note": "Post-prune measurement; the pre-prune value at commit 01975f6 was 1576458240 (artifact 20260802T133827Z.rootfs.tar), i.e. 76,458,240 B OVER the ceiling. Build+measure only — this board has no hardware validation behind it (physical swap still pending)."
+    "measured": 1422766080,
+    "measured_at": "2026-08-08",
+    "measured_commit": "a575a9a",
+    "measured_artifact": "v2/images/orange-pi-5-plus/20260808T012615Z.rootfs.tar",
+    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by v2/lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, NOT the 26.5.1 pinned in armbian-bsp-deb-versions.txt: 26.5.1 no longer exists in the Armbian archive (that package is Architecture:all and only its newest revision is kept), so the committed pin is currently unbuildable and the promotion is tracked as a SEPARATE reviewed PR per RELEASE-PROCESS.md \u00a74. The firmware delta is +3,389,440 B, well inside this comparator's threshold, so this baseline stays valid whichever way that promotion lands. Supersedes the 2026-08-02 / 67d053a baseline (1418792960); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
   },
   "rock-5b-plus": {
     "rootfs_bytes_max": 1500000000,
-    "measured": 1412259840,
-    "measured_at": "2026-08-02",
-    "measured_commit": "67d053a",
-    "measured_artifact": "v2/images/rock-5b-plus/20260802T155321Z.rootfs.tar",
-    "note": "Post-prune measurement; the pre-prune value at commit 01975f6 was 1569914880 (artifact 20260802T132149Z.rootfs.tar), i.e. 69,914,880 B OVER the ceiling."
+    "measured": 1415188480,
+    "measured_at": "2026-08-08",
+    "measured_commit": "a575a9a",
+    "measured_artifact": "v2/images/rock-5b-plus/20260808T000202Z.rootfs.tar",
+    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by v2/lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, NOT the 26.5.1 pinned in armbian-bsp-deb-versions.txt: 26.5.1 no longer exists in the Armbian archive (that package is Architecture:all and only its newest revision is kept), so the committed pin is currently unbuildable and the promotion is tracked as a SEPARATE reviewed PR per RELEASE-PROCESS.md \u00a74. The firmware delta is +3,389,440 B, well inside this comparator's threshold, so this baseline stays valid whichever way that promotion lands. Supersedes the 2026-08-02 / 67d053a baseline (1412259840); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
   },
-  "x86-minipc": { "rootfs_bytes_max": 1500000000, "measured": null }
+  "x86-minipc": {
+    "rootfs_bytes_max": 1500000000,
+    "measured": null
+  }
 }

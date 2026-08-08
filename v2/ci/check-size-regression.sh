@@ -5,13 +5,18 @@
 # Detects relative image-size regressions on top of the existing 1.5 GB absolute gate.
 # Warns on any growth; fails (exit 1) if growth exceeds 50 MB.
 #
-# Usage:  check-size-regression.sh <current-bytes> <baseline-file>
+# Usage:  check-size-regression.sh <current-bytes> <baseline-file> [board]
 #   <current-bytes>   measured rootfs size in bytes (integer)
 #   <baseline-file>   JSON file with {board, bytes, recorded_at}
+#   [board]           when given, the baseline's own "board" field MUST equal it.
+#                     Baselines are per-board and differ by tens of MB, so an
+#                     unchecked file argument silently compares one board's build
+#                     against another board's baseline and reports a meaningless
+#                     delta. Optional only to keep the two-argument CI call working.
 #
 # Exit:   0         size within baseline + 50 MB threshold
 #         1         size exceeds baseline + 50 MB
-#         2         bad args / missing baseline file / malformed JSON
+#         2         bad args / missing baseline file / malformed JSON / board mismatch
 #
 # shellcheck shell=bash
 
@@ -19,17 +24,19 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<EOF
-usage: check-size-regression.sh <current-bytes> <baseline-file>
+usage: check-size-regression.sh <current-bytes> <baseline-file> [board]
   <current-bytes>   measured rootfs size in bytes (integer)
   <baseline-file>   JSON file with {board, bytes, recorded_at}
+  [board]           require the baseline to be for exactly this board
 EOF
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -eq 2 || $# -eq 3 ]] || usage
 
 current_bytes="$1"
 baseline_file="$2"
+expect_board="${3:-}"
 
 # Validate current_bytes is a positive integer
 if ! [[ "${current_bytes}" =~ ^[0-9]+$ ]] || (( current_bytes <= 0 )); then
@@ -44,11 +51,11 @@ if [[ ! -f "${baseline_file}" ]]; then
 fi
 
 # Parse baseline JSON
-baseline_bytes=$(python3 - "${baseline_file}" <<'PY'
+baseline_bytes=$(python3 - "${baseline_file}" "${expect_board}" <<'PY'
 import json
 import sys
 
-path = sys.argv[1]
+path, expect_board = sys.argv[1], sys.argv[2]
 try:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -63,6 +70,15 @@ if not isinstance(data, dict):
 if "bytes" not in data:
     sys.stderr.write("ERROR: baseline JSON must contain 'bytes' field\n")
     sys.exit(2)
+
+if expect_board:
+    got_board = data.get("board")
+    if got_board != expect_board:
+        sys.stderr.write(
+            "ERROR: baseline is for board %r, expected %r (%s)\n"
+            % (got_board, expect_board, path)
+        )
+        sys.exit(2)
 
 baseline = data["bytes"]
 if not isinstance(baseline, int) or baseline <= 0:

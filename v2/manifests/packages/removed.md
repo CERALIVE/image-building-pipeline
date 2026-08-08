@@ -140,7 +140,20 @@ CeraUI, the streaming engine (then ceracoder, now cerastream), srtla, or the mko
 | `rsync` | dev-push / dev-sync live-reload loop (`v2/docs/dev-loop.md`). |
 | `wget` | http downloader for update/fetch infra. |
 | `usb-modeswitch` | Flips USB LTE/5G modems out of storage mode — without it USB modems never enumerate. Core to the bonded-modem datapath. |
-| `kbd` / `fonts-terminus` | `setfont` + large bitmap fonts for HDMI console readability at boot (4K fbcon). Boot-console essentials, not diagnostics. |
+| `kbd` | `setfont`/`loadkeys` — `systemd-vconsole-setup` shells out to these. Boot-console essential, not diagnostics. |
+
+**`fonts-terminus` was REMOVED in todo 31** — it was listed here as a boot-console
+essential on the strength of an annotation that does not survive contact with the
+package. On bookworm it ships exactly one file, a **TrueType** face
+(`/usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf`), and no console PSF
+font whatsoever; the PSF set is in `xfonts-terminus`/`console-setup`, neither of
+which is installed. Board-confirmed on a live Orange Pi 5+: `/usr/share/consolefonts/`
+does not exist, `dpkg -L fonts-terminus` lists only that TTF, and
+`ceralive-console-font.service` nevertheless reports `active (exited)
+status=0/SUCCESS` because its `setfont … || setfont … || true` swallows both
+failures. The HDMI console-readability feature has therefore never worked, on any
+image. Removing the package changes no behaviour; restoring the feature needs a real
+PSF provider and is tracked separately in [`v2/docs/size-notes.md`](../../docs/size-notes.md) §11.
 
 ## ESCALATION — Bluetooth stack (decision needed)
 

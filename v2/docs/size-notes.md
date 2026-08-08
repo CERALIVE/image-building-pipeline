@@ -527,3 +527,78 @@ Guards: `manifest.bats` §10 — the shipped `[6c/9]` block is extracted from
 leg, the abort leg, the loud `INSTALL_BOOT_BSP=0` skip (with a spy proving
 `measure-size.sh` is not invoked), the stage ordering, DRY_RUN unreachability, and
 that no board's ceiling has been raised above 1,500,000,000.
+
+---
+
+## 11. The RELATIVE gate now runs against the REAL baseline too (todo 31)
+
+§10 wired the **absolute** ceiling into the build and left the **relative** one
+where it was. That was half a fix, and the leftover half had exactly the defect
+§10 describes: `check-size-regression.sh` was reachable only from the same
+`v2-ci.yml` job, fed the same synthetic 4 KB tree, and therefore compared 4096
+bytes against a ~1.4 GB baseline — it could only ever report an enormous shrink.
+`v2/ci/size-baseline.json` was, in practice, data no real build ever read.
+
+### What changed
+
+- `orchestrate.sh` gained `compare_size_against_baseline()`, invoked from
+  `[6c/9]` immediately **after** the absolute gate passes, against the same
+  emitted tar.
+- Baselines are now resolved **per board** as `v2/ci/size-baseline.<board>.json`.
+  `v2/ci/size-baseline.json` is retained as a **symlink** to the `rock-5b-plus`
+  file so the existing `v2-ci.yml` step keeps working with no duplication and no
+  second copy of the number to drift.
+- `check-size-regression.sh` takes an optional third argument, the expected
+  board, and exits 2 if the baseline's own `board` field disagrees. Baselines
+  differ between boards by tens of MB, so an unchecked file argument produces a
+  confident and meaningless delta.
+
+### Exit policy (deliberately not the same as the absolute gate's)
+
+| Comparator exit | `[6c/9]` behaviour | Why |
+|---|---|---|
+| 0 | `log_success` | within threshold |
+| 1 (growth beyond threshold) | loud `log_warn` | the **blocking** size rule is the absolute ceiling in `size-budget.json`; an intentional feature addition must not fail a build that is still comfortably under it. This matches what `v2-ci.yml` already does with exit 1. |
+| 2 (missing/malformed/**wrong board**) | `die` | a repository misconfiguration, not a size event |
+| no baseline for this board | `log_warn`, pass | the same newly-added-board allowance `measure-size.sh` makes for a null ceiling. There is deliberately **no** un-suffixed fallback: `size-baseline.json` is `rock-5b-plus`'s file, so a fallback would hand it to every board that lacks one. |
+
+Guards: `manifest.bats` §10 gains five cases — the `[6c/9]` block actually calls
+the comparison and calls it *after* the absolute gate; every shipped RK3588 board
+carries a real per-board baseline with full provenance (`artifact`,
+`artifact_sha256`, `commit`, ISO `recorded_at`) that is under its own ceiling and
+is not a placeholder; `size-budget.json`'s `measured*` fields agree byte-for-byte
+with the baseline file; the comparator refuses a cross-board baseline; and the
+shipped function skips a missing baseline but dies on a mismatched one.
+
+### Console-font readability was never real — `fonts-terminus` removed
+
+Auditing `shared.list` against the built rootfs (and then against a live board)
+turned up an annotation that does not survive contact with the package.
+`fonts-terminus` was carried as *"large bitmap fonts (ter-v32n etc.) readable at
+4K on fbcon"*. On bookworm it ships **exactly one file**, a TrueType face
+(`/usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf`, 440,944 B), and no
+console PSF font at all — the PSF set lives in `xfonts-terminus` /
+`console-setup`, neither of which is installed. So:
+
+```
+# built rootfs:              /usr/share/consolefonts/  -> 0 entries
+# live Orange Pi 5+:         ls /usr/share/consolefonts/ -> No such file or directory
+# live Orange Pi 5+:         dpkg -L fonts-terminus      -> only the .ttf
+# live Orange Pi 5+:         systemctl status ceralive-console-font.service
+#                              Active: active (exited) ... status=0/SUCCESS
+```
+
+`ceralive-console-font.service` runs
+`setfont …Lat15-TerminusBold32x16.psf.gz || setfont …Uni3-TerminusBold32x16.psf.gz || true`,
+and the trailing `|| true` turns both misses into a clean success. The unit has
+therefore reported SUCCESS while doing nothing, on every boot of every image.
+
+`fonts-terminus` is removed (a TTF has no fbcon consumer and the production image
+ships no X/Wayland; `fonts-dejavu-core` remains as the font any future GUI/kiosk
+payload would resolve). **`kbd` is KEPT** — `systemd-vconsole-setup` shells out to
+its `setfont`/`loadkeys`, which is independent of the dead path above.
+
+This is a correctness fix, not a size lever: the recovered payload is ~441 KB.
+**Restoring genuine HDMI console readability is a separate, still-open decision** —
+it requires shipping a real PSF provider (which *adds* bytes) or retiring the unit.
+Do not read this removal as having fixed the feature.
