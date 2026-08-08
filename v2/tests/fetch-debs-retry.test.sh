@@ -21,6 +21,10 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${TESTS_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${V2}/.." && pwd)"
 FETCH_DEBS="${V2}/lib/fetch-debs.sh"
+# The fetch path is the entry point PLUS its lib/fetch/ family modules, so every
+# STATIC guard below must scan all of them — scanning only the entry would go
+# quietly vacuous the moment a curl call site moves into a module.
+FETCH_SOURCES=("${FETCH_DEBS}" "${V2}"/lib/fetch/*.sh)
 ARTIFACT_DIR="${REPO_ROOT}/test-results/flows/fetch-retry"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fetch-debs-retry.XXXXXX")"
 FAKE_BIN="${RUN_DIR}/bin"
@@ -473,14 +477,14 @@ pass "leg-d: a die() exit removes the scratch dir too (success/failure/signal ar
 # `--retry` alone does not bound a connection that is accepted and then stalls,
 # which is the exact hang this suite's timeouts exist to prevent.
 # ==========================================================================
-curl_invocations="$(grep -c 'curl -' "${FETCH_DEBS}")"
+curl_invocations="$(cat "${FETCH_SOURCES[@]}" | grep -c 'curl -')"
 (( curl_invocations >= 9 )) \
 	|| fail "curl-bounds: only ${curl_invocations} curl invocation(s) found — the guard's pattern has rotted"
-unbounded="$(grep -n 'curl -' "${FETCH_DEBS}" | grep -v 'CURL_TIMEOUT_OPTS' || true)"
+unbounded="$(grep -n 'curl -' "${FETCH_SOURCES[@]}" | grep -v 'CURL_TIMEOUT_OPTS' || true)"
 [[ -z "${unbounded}" ]] \
 	|| fail "curl-bounds: curl invocation(s) without CURL_TIMEOUT_OPTS:
 ${unbounded}"
-grep -q -- '--connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}"' "${FETCH_DEBS}" \
+grep -q -- '--connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CURL_MAX_TIME}"' "${FETCH_SOURCES[@]}" \
 	|| fail "curl-bounds: CURL_TIMEOUT_OPTS no longer carries --connect-timeout/--max-time"
 curl_defaults="$(bash -c 'source "$1"; printf "%s|%s" "${CURL_CONNECT_TIMEOUT}" "${CURL_MAX_TIME}"' \
 	bash "${FETCH_DEBS}")"
