@@ -7053,3 +7053,146 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   grep -Fq 'MEASURE_SIZE_SH' <<<"$stage"
   ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
 }
+
+# ===========================================================================
+# 31. Kernel freeze guardrails — the boot stack is RAUC-only, never apt.
+#
+#     docs/partition-contract.md rule 3 puts kernel/DTB/initrd INSIDE each RAUC
+#     rootfs slot, so the only sanctioned way to change them is writing a whole
+#     new slot. Nothing enforced that: the shipped image carried ZERO dpkg holds,
+#     so an `apt-get upgrade` on a running device would replace the kernel
+#     underneath a slot the A/B selector had already committed to.
+#     postinst-lib.sh::freeze_boot_packages bakes `apt-mark hold` (primary) plus
+#     a supplementary name+version apt pin.
+#
+#     THE TWO TRAPS THESE TESTS EXIST FOR:
+#       (a) A hardcoded package list would freeze ONE board. The U-Boot package
+#           name differs per board (linux-u-boot-rock-5b-plus-vendor vs
+#           linux-u-boot-orangepi5-plus-vendor), so the set must come from the
+#           resolved manifest env, and the four env vars must therefore stay on
+#           the orchestrate.sh env_names <-> mkosi.conf PassEnvironment= lockstep.
+#       (b) Freezing a FIRST-PARTY package would break the ordinary software
+#           update CeraUI drives. cerastream / ceralive-device / srtla-send-rs
+#           must never be held, and the negative assertion below is what fails if
+#           one is ever added.
+#
+#     Behavioural coverage (hold set, pin content, fail-closed legs, and a REAL
+#     `apt-get -s upgrade` dry run) lives in tests/kernel-freeze-guardrails.test.sh;
+#     these are the structural guards that belong beside the rest of the manifest
+#     and executor contracts.
+# ===========================================================================
+
+@test "kernel freeze: the freeze set is resolved from the manifest, never hardcoded" {
+  local body
+  body="$(awk '/^freeze_boot_packages\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$POSTINST_LIB")"
+  [ -n "$body" ]
+
+  local v
+  for v in KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES; do
+    grep -Fq "\${$v" <<<"$body"
+  done
+
+  # A literal BSP package name here would silently freeze one board only.
+  run grep -nE 'linux-image-vendor-rk35xx|linux-dtb-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"$body"
+  [ "$status" -ne 0 ]
+}
+
+@test "kernel freeze: both shipped RK3588 boards resolve a U-Boot package for it to hold" {
+  # The env the freeze reads is populated from these manifest fields; if a board
+  # ever stopped declaring one, its bootloader would silently drop out of the
+  # freeze while the kernel stayed held.
+  grep -Fq 'linux-u-boot-rock-5b-plus-vendor' "$V2/manifests/boards/rock-5b-plus.yaml"
+  grep -Fq 'linux-u-boot-orangepi5-plus-vendor' "$V2/manifests/boards/orange-pi-5-plus.yaml"
+  grep -Fq 'linux-image-vendor-rk35xx' "$V2/manifests/families/rk3588.yaml"
+  grep -Fq 'linux-dtb-vendor-rk35xx' "$V2/manifests/families/rk3588.yaml"
+  grep -Fq 'armbian-firmware' "$V2/manifests/families/rk3588.yaml"
+}
+
+@test "kernel freeze: NO first-party CeraLive package may ever be held" {
+  # This is the assertion that fails if someone adds an app-layer package to the
+  # freeze. cerastream and CeraUI ship over apt from apt.ceralive.tv and a hold
+  # would break `system.startUpdate()` for good.
+  local never
+  never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' "$POSTINST_LIB")"
+  [ -n "$never" ]
+
+  local p
+  for p in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive \
+           gstreamer1.0-libuvch264src modemmanager; do
+    [[ " $never " == *" $p "* ]]
+  done
+
+  # The refusal must be a hard abort, and it must be checked BEFORE any hold runs.
+  local body
+  body="$(awk '/^freeze_boot_packages\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$POSTINST_LIB")"
+  grep -Fq 'refusing to hold first-party package' <<<"$body"
+  local guard_line hold_line
+  guard_line="$(grep -n 'refusing to hold first-party package' <<<"$body" | head -1 | cut -d: -f1)"
+  hold_line="$(grep -n 'apt-mark hold' <<<"$body" | head -1 | cut -d: -f1)"
+  [ "$guard_line" -lt "$hold_line" ]
+}
+
+@test "kernel freeze: the shipped image installs no unattended-upgrades" {
+  # The freeze answers "apt must not change the kernel". Adding an automatic
+  # upgrade daemon would be answering the opposite question, and this appliance
+  # updates through RAUC only.
+  run grep -rnE '^[[:space:]]*unattended-upgrades[[:space:]]*$' "$V2/manifests/packages"
+  [ "$status" -ne 0 ]
+  run grep -rn 'unattended-upgrade' "$V2/mkosi/customize" "$V2/mkosi/mkosi.images"
+  [ "$status" -ne 0 ]
+}
+
+@test "kernel freeze: the hold is verified, not assumed" {
+  # Same fail-closed discipline as mask_service: a hold that silently did not
+  # apply ships an apt-upgradable kernel on an image that passes every other gate.
+  # Assert against the EXECUTABLE body — the header prose names `apt-mark
+  # showhold` too, and a mutation that deleted the real call still passed while
+  # this grep could see the comment.
+  local body code
+  body="$(awk '/^freeze_boot_packages\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$POSTINST_LIB")"
+  code="$(grep -vE "^[[:space:]]*#|printf '#" <<<"$body")"
+  grep -Fq 'apt-mark showhold' <<<"$code"
+  grep -Fq 'did not land' <<<"$code"
+}
+
+@test "kernel freeze: the pin is name+version, and the origin form is documented as unusable" {
+  local body
+  body="$(awk '/^freeze_boot_packages\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$POSTINST_LIB")"
+  grep -Fq 'Pin: version' <<<"$body"
+  grep -Fq 'Pin-Priority: 1001' <<<"$body"
+
+  # An emitted origin pin cannot match a locally-installed .deb; only the
+  # explanatory prose may mention one.
+  run grep -Fq 'Pin: origin' <<<"$(grep -v "printf '#" <<<"$body")"
+  [ "$status" -ne 0 ]
+
+  # The generated file must carry the bypass limitation with it onto the device.
+  grep -Fq 'LIMITATION' <<<"$body"
+}
+
+@test "kernel freeze: the runtime executor calls it, last, after every apt transaction" {
+  local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  run grep -cE '^  freeze_boot_packages( |$)' "$postinst"
+  [ "$output" -eq 1 ]
+
+  # run-all.sh's runtime modules are NOT executed by ./v2/build, so the wiring in
+  # this executor is the only thing that makes the freeze ship.
+  local main_body
+  main_body="$(awk '/^main\(\) \{/,/^\}/' "$postinst")"
+  local freeze_at hawkbit_at
+  freeze_at="$(grep -n 'freeze_boot_packages' <<<"$main_body" | cut -d: -f1)"
+  hawkbit_at="$(grep -n 'setup_hawkbit_updater' <<<"$main_body" | cut -d: -f1)"
+  [ "$freeze_at" -gt "$hawkbit_at" ]
+}
+
+@test "kernel freeze: freeze_boot_packages is on the drift gate's consolidated list" {
+  grep -Fq 'freeze_boot_packages' "$V2/ci/postinst-drift-check.sh"
+  run bash "$V2/ci/postinst-drift-check.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "kernel freeze: its behavioural suite is wired into the CI entrypoint" {
+  local suite="$TESTS_DIR/kernel-freeze-guardrails.test.sh"
+  [ -x "$suite" ]
+  grep -Fq 'kernel-freeze-guardrails.test.sh' "$V2/run-tests"
+}

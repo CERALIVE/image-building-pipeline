@@ -888,6 +888,19 @@ HBMCPATH
 # (definition: customize/postinst-lib.sh::setup_tls_proxy — sourced above)
 
 # ---------------------------------------------------------------------------
+# 19. Kernel freeze guardrails: `apt-mark hold` (primary) + a supplementary
+#     name+version apt pin on the manifest's kernel/DTB/U-Boot/firmware packages,
+#     so the boot stack changes ONLY via a RAUC full-image update — never via
+#     on-device apt (docs/partition-contract.md rule 3). freeze_boot_packages
+#     (postinst-lib.sh, sourced above) reads the package NAMES from the resolved
+#     manifest env, refuses any first-party CeraLive package by name (they stay
+#     apt-updatable), and fails the build if a hold does not land. It runs LAST in
+#     main() so every apt transaction this layer performs is already complete.
+#     Contract: v2/docs/kernel-freeze-contract.md.
+# ---------------------------------------------------------------------------
+# (definition: customize/postinst-lib.sh::freeze_boot_packages — sourced above)
+
+# ---------------------------------------------------------------------------
 # Orchestration (mirrors v1 main_customization order).
 # ---------------------------------------------------------------------------
 main() {
@@ -917,6 +930,7 @@ main() {
   setup_tls_proxy              # task 15: nginx TLS front on 443 -> 127.0.0.1:80 (port 80 kept; SC3)
   setup_rtmp_gateway           # todo 14: pinned MediaMTX LAN ingest relay (RTMP :1935 + SRT :4001 publish/live -> loopback for cerastream)
   setup_ingest_firewall        # todo 14: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
+  freeze_boot_packages         # kernel freeze: apt-mark hold + name+version pin on kernel/DTB/U-Boot/firmware — LAST, after every apt transaction in this layer
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
   log "CeraLive runtime customization complete"

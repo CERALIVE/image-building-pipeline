@@ -74,6 +74,7 @@ image-building-pipeline/
 | Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`v2/docs/size-notes.md`](v2/docs/size-notes.md) — locale strip, firmware audit, size-gate |
+| **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md) + `v2/mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
 | **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
 | **Cog on-hardware render QA checklist** | [`v2/docs/cog-display-hw-checklist.md`](v2/docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
@@ -2017,6 +2018,78 @@ runtime: the real `configure_minimal_apt` leaves exactly one Debian source), wir
 into `v2/run-tests` and `manifest.bats §22` "the build path makes client.key
 _apt-readable and dedupes Debian sources".
 
+**The boot stack is frozen against on-device apt — dpkg holds are PRIMARY, the apt
+pin is supplementary, and RAUC consults NEITHER** [EXISTS]
+
+`docs/partition-contract.md` §1 rule 3 ("Kernel rides with the rootfs") makes
+kernel/DTB/initrd part of a RAUC **slot**, so the only sanctioned way to change them
+is writing a whole new slot. Nothing enforced that: the shipped image carried **zero
+dpkg holds**, so an `apt-get upgrade` on a running device would replace the kernel
+underneath a slot the A/B selector had already committed to — leaving the rollback
+target a slot whose kernel nobody tested, with modules, DTBs and the initramfs hook
+output all half-swapped mid-uptime.
+
+`postinst-lib.sh::freeze_boot_packages` (called LAST in the runtime executor's
+`main()`, after every apt transaction that layer performs) bakes two layers:
+
+- **`apt-mark hold`** on each package — the primary mechanism. It lands in
+  `/var/lib/dpkg/status` as `Status: hold ok installed`, and it is the only one of
+  the two that also blocks the **explicit** `apt-get install <pkg>` form. The build
+  VERIFIES each hold against `apt-mark showhold` and `die`s if one did not land —
+  same fail-closed discipline as `mask_service`, for the same reason (a silently
+  unapplied hold ships an apt-upgradable kernel on an image that passes every other
+  gate).
+- **`/etc/apt/preferences.d/ceralive-kernel-freeze`** — one `Package:` / `Pin:
+  version <installed>` / `Pin-Priority: 1001` stanza per package.
+
+**The pin is name+version, NOT origin, and that is forced rather than chosen.** The
+boot BSP is installed from mkosi's LOCAL, build-time-only `file:/repository`, which
+does not exist on the shipped device — those packages carry no apt-origin identity
+there at all, so no `Pin: origin …`/`Pin: release …` expression can designate "the
+staged local set". Do not "improve" this into an origin pin like the
+`apt.ceralive.tv` 990 one; it would match nothing. **The pin is bypassable and that
+limitation is documented in the generated file itself**: `apt-get install
+<pkg>=<version>`, `--allow-downgrades`, `-o Dir::Etc::Preferences=`, and `dpkg -i`
+all ignore apt preferences. That is exactly why the hold is primary.
+
+**RAUC does not consult dpkg holds, and must not be expected to.** It never runs
+dpkg or apt — it `mkfs`es and writes the whole **inactive** slot, so the running
+slot's holds are not on its code path and a held kernel neither blocks nor filters
+an install. Because the kernel rides inside the rootfs, the new slot arrives with
+its OWN `/var/lib/dpkg/status` carrying the holds ITS build baked, and those govern
+that slot's apt from its first boot. **Each image freezes itself** — the freeze is
+not fleet state an update has to preserve, migrate or re-apply, and there is nothing
+to unhold before an update or re-hold after one.
+
+**The freeze set is manifest-resolved (`KERNEL_PACKAGES`/`DTB_PACKAGES`/
+`UBOOT_PACKAGES`/`FIRMWARE_PACKAGES`), never hardcoded** — the U-Boot package name
+differs per board (`linux-u-boot-rock-5b-plus-vendor` vs
+`linux-u-boot-orangepi5-plus-vendor`), so a literal list would freeze one board
+only, and a `--variant` build's source-built kernel package is picked up
+automatically. Those four names are already on the `orchestrate.sh` `env_names` ↔
+`mkosi.conf` `PassEnvironment=` lockstep; read empty in the subimage the freeze
+would be silently vacuous.
+
+**First-party CeraLive packages are NEVER held** — `cerastream`, `ceralive-device`,
+`srtla-send-rs`, `libsrt1.5-ceralive`, `gstreamer1.0-libuvch264src`,
+`rauc-hawkbit-updater` and the nine ModemManager closure packages must stay
+apt-updatable, because that is the update path CeraUI's `system.startUpdate()`
+drives. `CERALIVE_NEVER_FREEZE_PKGS` refuses them **by name before any hold runs**
+(a manifest that routed one into a boot-BSP field fails the build), and the function
+re-checks the hold list afterwards. **No `unattended-upgrades` is installed**, and
+adding one is forbidden: the OS updates through RAUC and the app layer through an
+operator-driven apt transaction.
+
+Guards: `v2/tests/kernel-freeze-guardrails.test.sh` (static contract; the real
+function against stubbed dpkg/apt-mark for both boards' U-Boot names; four
+fail-closed legs — first-party in the set, a hold that does not land, a partial
+freeze on a full build, a clean parity-build no-op; and a **real `apt-get -s
+upgrade`** against a synthetic apt root offering a newer kernel, with a non-vacuity
+leg proving the unfrozen fixture DOES offer it, the hold and the pin each blocking
+it independently, and `cerastream` still upgrading with the whole freeze in place)
+plus `manifest.bats` §31 (9 structural tests, mutation-verified). Full contract:
+[`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md).
+
 **`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
 `Requires=`)** [EXISTS]
 
@@ -3017,6 +3090,9 @@ gated item, not the package availability.
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
 - Don't touch runtime apt sources on the device — `E4` guardrail
+- Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla-send-rs` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently
+- Don't convert the kernel freeze's `Pin: version` into a `Pin: origin` like the apt.ceralive.tv 990 pin. The boot BSP comes from mkosi's build-time-only local repository, so it has no apt-origin identity on the device and an origin pin would match nothing. Don't hardcode a package name there either — the U-Boot package differs per board
+- Don't expect RAUC to honour a dpkg hold, or to need one lifted before an update. RAUC writes the whole inactive slot without running dpkg or apt; each image bakes the holds that govern its own slot
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
 - Don't fetch BSP packages by bare name or accept apt's latest version. Update `armbian-bsp-deb-versions.txt` only after signed-index review; update `bsp-baseline.json` with the kernel pin when its reviewed bytes change
 - Don't make a family variant implicit. `--variant` is the ONLY selector (plus `CERALIVE_KERNEL_VARIANT`); never infer one from a board, host, branch or CI context
