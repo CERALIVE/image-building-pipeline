@@ -1202,6 +1202,62 @@ fetch_bsp() {
 }
 
 # ---------------------------------------------------------------------------
+# apt sandbox plumbing for the build-time first-party fetch.
+#
+# apt drops its acquire methods to `_apt` WHENEVER it is invoked as root, so a
+# root-owned 0600 client key is unreadable to it — the device-side twin of this
+# path already paid for that once (AGENTS.md, "Baked mTLS client key MUST be
+# `_apt`-owned"). The old answer HERE was apt's sandbox-user override pinned to
+# root, which fixes no permission: it turns the sandbox OFF for the whole
+# build-time fetch. That override must never reappear in the emitted apt
+# options — the guard greps this file for its literal spelling, so do not write
+# it out even in a comment.
+#
+# Privilege-aware, because unlike the device this runs on the HOST (before any
+# container, orchestrate.sh) and is frequently NOT root: as root, hand `_apt`
+# the key and a tree it can traverse; unprivileged, apt never drops privileges
+# so the invoking user's own credentials are already the right ones; with no
+# `_apt` at all the host is non-Debian and the curl fallback owns the path.
+# ---------------------------------------------------------------------------
+APT_SANDBOX_USER="${APT_SANDBOX_USER:-_apt}"
+
+apt_sandbox_user_exists() {
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd "${APT_SANDBOX_USER}" >/dev/null 2>&1
+  else
+    grep -q "^${APT_SANDBOX_USER}:" /etc/passwd 2>/dev/null
+  fi
+}
+
+# True only when apt will actually drop privileges for this fetch.
+apt_sandbox_active() {
+  (( EUID == 0 )) || return 1
+  apt_sandbox_user_exists
+}
+
+# `_apt` must be able to TRAVERSE every directory apt reads or writes through.
+# Explicit modes, never the ambient umask — the same reason the mkosi consumer
+# directories are created with an explicit `install -d -m 0755`: a restrictive
+# runner umask otherwise hides the tree from an unprivileged helper.
+apt_sandbox_make_traversable() {
+  local dir
+  for dir in "$@"; do
+    [[ -d "${dir}" ]] || continue
+    chmod 0755 "${dir}"
+  done
+}
+
+# apt WRITES the acquired .deb into the download directory as `_apt`, so
+# traversal is not enough there: a mode-0755 root-owned download dir still
+# degrades to "Download is performed unsandboxed as root". Hand the directory
+# to `_apt` exactly the way apt hands itself its own `partial/` dirs.
+apt_sandbox_own_download_dir() {
+  local dir="$1"
+  chown "${APT_SANDBOX_USER}:root" "${dir}"
+  chmod 0700 "${dir}"
+}
+
+# ---------------------------------------------------------------------------
 # fetch_first_party — pull the first-party device .debs from apt.ceralive.tv via a
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
 # `aws s3 sync` (CI) and `gh release download` (local) paths.
@@ -1279,6 +1335,22 @@ EOF
       chmod 644 "${certs_dir}/client.crt"
       chmod 600 "${certs_dir}/client.key"
     fi
+    if apt_sandbox_active; then
+      apt_sandbox_make_traversable "$(dirname "${debs}")" "${debs}" "${apt_state}" \
+        "${apt_state}/lists" "${apt_state}/cache" "${apt_state}/cache/archives" "${certs_dir}"
+      log_info "first-party apt sandbox: root — isolated apt state made ${APT_SANDBOX_USER}-traversable"
+      if [[ -n "${crt}" ]]; then
+        chown "${APT_SANDBOX_USER}:root" "${certs_dir}/client.key"
+        chmod 400 "${certs_dir}/client.key"
+        log_info "first-party apt sandbox: mTLS client key handed to ${APT_SANDBOX_USER} (0400)"
+      fi
+    else
+      log_info "first-party apt sandbox: uid ${EUID} — apt keeps the invoking user's credentials, no override emitted"
+      if [[ -n "${crt}" ]]; then
+        [[ -r "${certs_dir}/client.key" ]] \
+          || die "mTLS client key is not readable by the invoking user (uid ${EUID}): ${certs_dir}/client.key"
+      fi
+    fi
   else
     log_info "DRY-RUN: would install GPG keyring from APT_GPG_PUBLIC_B64 -> ${keyring}"
     if [[ -n "${crt}" ]]; then
@@ -1296,7 +1368,6 @@ EOF
   )
   if [[ -n "${crt}" ]]; then
     apt_opts+=(
-      -o "APT::Sandbox::User=root"
       -o "Acquire::https::apt.ceralive.tv::SslCert=${certs_dir}/client.crt"
       -o "Acquire::https::apt.ceralive.tv::SslKey=${certs_dir}/client.key"
     )
@@ -1314,6 +1385,10 @@ EOF
     run_or_plan_retry "first-party apt-get update" apt-get "${apt_opts[@]}" update
 
     local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
+    # mktemp -d is 0700 root-owned and apt writes the .deb here AS `_apt`.
+    if apt_sandbox_active; then
+      apt_sandbox_own_download_dir "${tmpd}"
+    fi
     if ! ( cd "${tmpd}" && retry_transient "first-party apt-get download" \
         apt-get "${apt_opts[@]}" download "${download_specs[@]}" ); then
       rm -rf "${tmpd}"

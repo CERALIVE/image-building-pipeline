@@ -318,6 +318,27 @@ state** under the staging dir (the host apt config is never touched).
   before mkosi starts. The runtime postinstall receives only that validated binary
   payload; do not add `gpg` or `file` to the device package set. `APT_CERALIVE_URL`
   (default `https://apt.ceralive.tv`) is overridable.
+- **The build-time fetch keeps apt's sandbox, and it is PRIVILEGE-AWARE.** apt
+  drops its acquire methods to `_apt` whenever it is invoked as root, so this
+  path used to carry an `APT::Sandbox::User=root` override — the same "fix" the
+  device-side KEY FACT below forbids, and for the same reason: it disables the
+  sandbox rather than repairing a permission. It is gone, and the fetcher now
+  branches on whether apt will actually drop privileges. As root with `_apt`
+  present it hands `_apt` the mTLS client key (`chown _apt:root` + `chmod 400`,
+  mirroring the device mechanism) and gives the isolated apt state tree explicit
+  traversable modes; unprivileged it emits nothing at all, because apt keeps the
+  invoking user's credentials — orchestrate.sh runs the fetcher on the HOST
+  before any container, so unprivileged is the common case. A host with no `_apt`
+  at all is non-Debian and already on the curl fallback. **Traversal alone is not
+  enough for the download directory**: apt WRITES the `.deb` there as `_apt`, so
+  the `mktemp -d` (mode 0700, root-owned) is chowned to `_apt` the way apt chowns
+  its own `partial/` dirs — a mode-0755 root-owned download dir still degrades to
+  `Download is performed unsandboxed as root`. Guard:
+  `v2/tests/fetch-debs-apt-sandbox.test.sh`, which drives the shipped
+  `fetch_first_party` with a REAL apt-get against a real GPG-signed fixture
+  repository in a container at real UID 0 and unprivileged, asserts the absence
+  of that warning under a 0077 umask, and carries a control replay proving the
+  assertion is not vacuous.
 - **Arch axis only** — the source carries no board axis; `arch` is selected by
   `APT::Architecture` (apt-worker two-axis model: `channel × arch`). Resolved
   mkosi `x86-64` is normalized to Debian `amd64`; RK3588 remains `arm64`.
@@ -2021,7 +2042,10 @@ device-runtime bugs, confirmed live on real Rock 5B+ hardware:
   valid + matched — a pure permission bug, not missing/corrupt/wrong-path). Fix:
   `chown _apt:root /etc/apt/certs/client.key` + `chmod 400` (owner-read only); the
   public `client.crt` stays `644 root:root`. Do NOT weaken `APT::Sandbox::User` to
-  `root` — that disables apt sandboxing fleet-wide.
+  `root` — that disables apt sandboxing fleet-wide. The BUILD-time fetcher
+  (`lib/fetch-debs.sh::fetch_first_party`) carried exactly that override and no
+  longer does; see the build-time apt-sandbox bullet in the "First-party .deb
+  fetch" KEY FACT above for the privilege-aware replacement.
 - **Duplicate Debian source.** mkosi's own release-named bootstrap source
   (`/etc/apt/sources.list.d/${RELEASE}.sources` = `bookworm.sources`, with
   `deb-src` + `bookworm-debug`) leaks into the base rootfs and is inherited down
@@ -3159,6 +3183,7 @@ gated item, not the package availability.
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
 - Don't touch runtime apt sources on the device — `E4` guardrail
+- Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges
 - Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla-send-rs` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently
 - Don't convert the kernel freeze's `Pin: version` into a `Pin: origin` like the apt.ceralive.tv 990 pin. The boot BSP comes from mkosi's build-time-only local repository, so it has no apt-origin identity on the device and an origin pin would match nothing. Don't hardcode a package name there either — the U-Boot package differs per board
 - Don't expect RAUC to honour a dpkg hold, or to need one lifted before an update. RAUC writes the whole inactive slot without running dpkg or apt; each image bakes the holds that govern its own slot
