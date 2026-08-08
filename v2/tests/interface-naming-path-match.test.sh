@@ -61,22 +61,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 
 fail() { echo "interface-naming-path-match: FAIL — $*" >&2; exit 1; }
 
 [[ -f "${POSTINST_LIB}" ]] || fail "missing source file: ${POSTINST_LIB}"
+[[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
+
+# postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
+# postinst.d/, so it stays the path Part B sources — but the function bodies live
+# in the modules, and grepping the entry alone would fail every check below for
+# the wrong reason.
+postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
 
 # ---------------------------------------------------------------------------
 # Part A — static contract
 # ---------------------------------------------------------------------------
 
-grep -q 'link_path_match()' "${POSTINST_LIB}" \
-  || fail "link_path_match() is gone from postinst-lib.sh — the .link Path= is literal again and edge images will not rename"
+postinst_source_set | grep -q 'link_path_match()' \
+  || fail "link_path_match() is gone from the postinst library — the .link Path= is literal again and edge images will not rename"
 
-grep -q 'Path=${match}' "${POSTINST_LIB}" \
+postinst_source_set | grep -q 'Path=${match}' \
   || fail "install_interface_naming() no longer interpolates the computed match into Path= (regressed to the literal manifest value)"
 
-grep -q 'platform-\*\.%s-%s' "${POSTINST_LIB}" \
+postinst_source_set | grep -q 'platform-\*\.%s-%s' \
   || fail "the controller-agnostic 'platform-*.<devtype>-pci-<bdf>' glob is gone from link_path_match()"
 
 echo "interface-naming-path-match: Part A static contract OK"

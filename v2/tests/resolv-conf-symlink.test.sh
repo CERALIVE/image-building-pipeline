@@ -44,20 +44,28 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 STUB="/run/systemd/resolve/stub-resolv.conf"
 
 fail() { printf 'resolv-conf-symlink regression: %s\n' "$1" >&2; exit 1; }
 
 [[ -f "${POSTINST_LIB}" ]] || fail "missing source file: ${POSTINST_LIB}"
+[[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
+
+# postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
+# postinst.d/, so it stays the path to source in Part B — but the function bodies
+# live in the modules, and a static extraction pointed at the entry alone would
+# find nothing and pass every check below vacuously.
+postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
 
 # Extract the configure_networking() body (from its `func() {` to the top-level
 # closing `}` at column 0) so the static checks are scoped to that one function.
-fn_body="$(awk '
+fn_body="$(postinst_source_set | awk '
   /^configure_networking\(\) \{/ { f=1 }
   f { print }
   f && /^\}/ { exit }
-' "${POSTINST_LIB}")"
-[[ -n "${fn_body}" ]] || fail "could not extract configure_networking() from postinst-lib.sh"
+')"
+[[ -n "${fn_body}" ]] || fail "could not extract configure_networking() from the postinst library"
 
 # ---------------------------------------------------------------------------
 # Part A — static contract (always enforced)

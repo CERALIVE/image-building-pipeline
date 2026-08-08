@@ -40,18 +40,25 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 STUB="/run/systemd/resolve/stub-resolv.conf"
 
 fail() { printf 'resolv-conf-bind-mount regression: %s\n' "$1" >&2; exit 1; }
 
 [[ -f "${POSTINST_LIB}" ]] || fail "missing source file: ${POSTINST_LIB}"
+[[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
 
-fn_body="$(awk '
+# postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
+# postinst.d/; extracting from the entry alone would find no function body and
+# pass every static check below vacuously.
+postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
+
+fn_body="$(postinst_source_set | awk '
   /^configure_networking\(\) \{/ { f=1 }
   f { print }
   f && /^\}/ { exit }
-' "${POSTINST_LIB}")"
-[[ -n "${fn_body}" ]] || fail "could not extract configure_networking() from postinst-lib.sh"
+')"
+[[ -n "${fn_body}" ]] || fail "could not extract configure_networking() from the postinst library"
 
 # ---------------------------------------------------------------------------
 # Part A — static contract (always enforced)
