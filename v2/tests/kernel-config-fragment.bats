@@ -30,6 +30,10 @@
 #
 # Hardware-free and root-free: the verifier is pure text over two files.
 
+# `run !` (a self-asserting negated run) needs bats >= 1.5.0; without this line
+# every such call emits a BW02 warning.
+bats_require_minimum_version 1.5.0
+
 setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
   V2="$(cd "$TESTS_DIR/.." && pwd)"
@@ -145,7 +149,7 @@ EOF
 
 @test "rk3588-edge.fragment: TYPEC_FUSB302 declares the value kconfig can actually give it" {
   grep -qx 'CONFIG_TYPEC_FUSB302=m' "$FRAGMENT"
-  ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
 }
 
 @test "rk3588-edge.fragment: NF_TABLES declares the parent the whole nftables family sits inside" {
@@ -160,7 +164,7 @@ EOF
   # =m is NOT equivalent here: ceralive-ingest-firewall.service is a
   # DefaultDependencies=no oneshot that runs `nft -f` before the ingest gateway
   # opens its listeners, so the family must be built in.
-  ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
 }
 
 @test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.5 has no such symbol" {
@@ -168,7 +172,7 @@ EOF
   # nft_counter.o unconditionally into nf_tables-objs. Declaring CONFIG_NFT_COUNTER
   # would resolve to nothing and the gate would fail the build over a symbol the
   # kernel does not have.
-  ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
+  run ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
 }
 
 @test "rk3588-edge.fragment: the gate REJECTS the resolved .config the broken 7.1.5 build produced" {
@@ -317,7 +321,7 @@ EOF
   # brcmfmac). If either ever appears here it means the gate was silenced on a
   # symbol the fleet actually needs.
   local list="$V2/manifests/kernel/rk3588-vendor-patched.absent"
-  ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
+  run ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
 }
 
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {

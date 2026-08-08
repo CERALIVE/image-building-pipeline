@@ -14,11 +14,24 @@ assert_no_new_resources() {
   local before="$1" after="$2" added work
   added="$(comm -13 "${before}" "${after}")"
   [[ -z "${added}" ]] || { printf 'RAUC harness leaked workdirs: %s\n' "${added}" >&2; return 1; }
+  # Each check must fail the FUNCTION on its own. A bare `! cmd` here would not:
+  # `!`-negated commands are exempt from errexit, so they are three ordinary
+  # statements whose status is discarded by the next one — only the last command
+  # of the last iteration could ever have reached the caller.
   while IFS= read -r work; do
     [[ -n "${work}" ]] || continue
-    ! findmnt -rn -o TARGET,SOURCE | grep -F "/tmp/${work}" >/dev/null
-    ! losetup -l -n -O BACK-FILE | grep -F "/tmp/${work}" >/dev/null
-    ! pgrep -f "/tmp/${work}/" >/dev/null
+    if findmnt -rn -o TARGET,SOURCE | grep -F "/tmp/${work}" >/dev/null; then
+      printf 'RAUC harness leaked a mount under /tmp/%s\n' "${work}" >&2
+      return 1
+    fi
+    if losetup -l -n -O BACK-FILE | grep -F "/tmp/${work}" >/dev/null; then
+      printf 'RAUC harness leaked a loop device backed by /tmp/%s\n' "${work}" >&2
+      return 1
+    fi
+    if pgrep -f "/tmp/${work}/" >/dev/null; then
+      printf 'RAUC harness leaked a process referencing /tmp/%s\n' "${work}" >&2
+      return 1
+    fi
   done <"${after}"
 }
 
