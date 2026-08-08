@@ -36,7 +36,10 @@ chmod 0600 "\${tmp}"
 mv -f "\${tmp}" "\${keys}"
 rm -f '/data/ceralive/ssh/ci-access/${access_id}' \
   '/data/ceralive/ssh/ci-access/${access_id}.retain-once'
-! grep -Fqx -- "\${line}" "\${keys}"
+if grep -Fqx -- "\${line}" "\${keys}"; then
+  printf 'ERROR: authorized-key line still present after revocation attempt\n' >&2
+  exit 1
+fi
 test ! -e '/data/ceralive/ssh/ci-access/${access_id}'
 test ! -e '/data/ceralive/ssh/ci-access/${access_id}.retain-once'
 printf 'ephemeral_ssh_access=revoked\naccess_id=${access_id}\n'
