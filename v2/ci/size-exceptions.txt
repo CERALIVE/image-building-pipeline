@@ -10,5 +10,9 @@ v2/tests/preflash-verify.sh
 v2/tests/rk3588-ab-contract.bats
 # SIZE_OK: disk assembly is one geometry transaction with shared cleanup state.
 v2/lib/assemble-disk.sh
-# SIZE_OK: image post-install library predates this change and is shared by mkosi stages.
-v2/mkosi/customize/postinst-lib.sh
+# SIZE_OK: the hostname claim script is ONE generated payload that the real-avahi
+# contract extracts verbatim and drives; splitting the heredoc splits the harness.
+v2/mkosi/customize/postinst.d/hostname.sh
+# SIZE_OK: /data migration + the RAUC update entrypoint are generated payloads that
+# must stay one transaction with the fstab and bind-mount units that shadow them.
+v2/mkosi/customize/postinst.d/persistence.sh

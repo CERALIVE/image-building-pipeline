@@ -53,6 +53,7 @@ image-building-pipeline/
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
+| **Runtime postinst library — which module holds which function** | `v2/mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `v2/mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `v2/mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
@@ -91,6 +92,55 @@ image-building-pipeline/
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
 ## KEY FACTS
+
+**The runtime postinst library is an ENTRY plus per-concern modules — "one source
+of truth" now means "one source SET"** [EXISTS]
+
+`v2/mkosi/customize/postinst-lib.sh` is a thin entry (~84 lines): the chroot-safe
+`log`/`die`/`resolve_partlabel` fallbacks and an explicit list of the modules under
+`v2/mkosi/customize/postinst.d/` that carry the implementation. Sourcing the entry
+still yields the COMPLETE API in one `source`, so nothing about how
+`mkosi.postinst.chroot`, `customize/services.sh` or `customize/data-persistence.sh`
+consume it changed, and `main()`'s call order in the runtime executor is untouched
+— including `freeze_boot_packages` running LAST, after every apt transaction in
+that layer.
+
+| Module | Holds |
+|---|---|
+| `postinst.d/networking.sh` | `configure_networking`, `install_interface_naming` + `link_path_match`, `setup_provisioning`, `setup_ingest_firewall` |
+| `postinst.d/hostname.sh` | `setup_hostname_service` — the Avahi-arbitrated `<hostname>.local` claim |
+| `postinst.d/services.sh` | `ensure_group`/`enable_service`/`disable_service`/`mask_service`, `configure_ntp`, `install_console_font_service`, `configure_services`, `suppress_unusable_boot_units`, `setup_boot_healthcheck`, `setup_avahi_restart`, `setup_cerastream_ordering`, `setup_rtmp_gateway` |
+| `postinst.d/hardware.sh` | `setup_typec_source_role`, `setup_fan_curve`, `setup_fan_kickstart`, `setup_led_status` |
+| `postinst.d/persistence.sh` | `setup_data_persistence`, `CERALIVE_NEVER_FREEZE_PKGS` + `freeze_boot_packages` |
+| `postinst.d/tls-ssh.sh` | `configure_debug_access`, `configure_ssh_enablement`, `setup_ssh_firstboot`, `setup_tls_proxy`, `setup_cert_rotation`, `setup_paseto_public_key` |
+
+Every `postinst-lib.sh::<fn>` reference elsewhere in this file means "the postinst
+library" and still resolves — through the entry, in whichever module now holds it.
+
+**Two rules make the split safe, and both are gated.** First, EVERY module carries
+its own `declare -F`-guarded `log()`/`die()` fallbacks: the modules are sourced
+inside mkosi SUBIMAGE CHROOTS where the repo's `lib/` is NOT mounted, so a module
+may never assume anything else has been sourced. Second, the entry's module list is
+EXPLICIT, never a glob — a module that is renamed, missing from the source mount, or
+added under `postinst.d/` but never wired up must fail loudly at source time rather
+than surface later as a `command not found` in a half-configured image.
+
+`v2/ci/postinst-drift-check.sh` resolves each `CONSOLIDATED_FUNCS` entry across the
+entry + `postinst.d/` SET (still exactly one definition, still zero re-inlines into
+`mkosi.postinst.chroot`/`services.sh`/`data-persistence.sh`), and CHECK 1c enforces
+both rules above. `v2/tests/postinst-module-contract.test.sh` proves, in a scrubbed
+`env -i` shell with nothing pre-sourced, that every registry function resolves from a
+bare `source postinst-lib.sh` and that each module also sources standalone.
+
+**A static test that reads the library by TEXT must read the whole set.** Several
+harnesses extract function bodies or generated payloads out of the source
+(`real-avahi-hostname-contract.sh`, `systemd-ordering-cycle.test.sh`,
+`kernel-freeze-guardrails.test.sh`, `data-persistence-public-symlink.test.sh`, the
+`resolv-conf-*` pair, `interface-naming-path-match.test.sh`,
+`package-migration-coverage.sh`, `manifest.bats`, `bench-partlabels.bats`). Pointed
+at the entry alone they extract NOTHING, and most of their assertions then pass
+vacuously. Each one concatenates the entry + `postinst.d/*.sh` for static reads while
+still SOURCING the entry; keep that distinction when adding a new check.
 
 **Build entry point** [EXISTS]
 

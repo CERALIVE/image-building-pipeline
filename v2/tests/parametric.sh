@@ -186,8 +186,11 @@ check_shared_files() {
   local cust="${V2_DIR}/mkosi/customize"
   if [[ -d "${cust}" ]]; then
     local n
-    n="$(find "${cust}" -maxdepth 1 -name '*.sh' | wc -l | tr -d ' ')"
-    ok "customize/ modules: ${n} shared *.sh (group sha $(find "${cust}" -maxdepth 1 -name '*.sh' -exec sha256sum {} + | sort | sha256sum | cut -c1-16))"
+    # Recursive: the postinst library's per-concern modules live in
+    # customize/postinst.d/ and are part of the same shared tree, so a
+    # depth-limited hash would stop covering most of it.
+    n="$(find "${cust}" -name '*.sh' | wc -l | tr -d ' ')"
+    ok "customize/ modules: ${n} shared *.sh (group sha $(find "${cust}" -name '*.sh' -exec sha256sum {} + | sort | sha256sum | cut -c1-16))"
   else
     bad "customize/ module dir missing"
   fi
