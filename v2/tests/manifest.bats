@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 #
 # manifest.bats — CI unit suite for the CeraLive v2 manifest system.
 #
@@ -634,15 +635,15 @@ run_concurrent_hostname_scripts() {
   # retry service keeps a hard Requires= (its failure is harmless, timer refires).
   grep -Fq 'Wants=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'Wants=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
-  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
+  run ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
   grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
-  ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
+  run ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
   grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service network-online.target' \
     "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   grep -Fq 'Wants=network-online.target ceralive-hostname.service' \
     "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
-  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  run ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 @test "hostname: aligned reconciliation is a no-op" {
@@ -2460,7 +2461,7 @@ SH
   grep -q "stub orchestrator ran for board=passboard" "$passlog"
   # the failing board's stderr was captured into ITS log, not the passing one
   grep -q "simulating failure for failboard" "$faillog"
-  ! grep -q "failboard" "$passlog"
+  run ! grep -q "failboard" "$passlog"
 }
 
 # ===========================================================================
@@ -2667,7 +2668,7 @@ build_feature_fixture() {
   run gpg --list-packets "$baked"
   [ "$status" -eq 0 ]
   [[ "$output" != *"secret key"* ]]
-  ! grep -aq 'PRIVATE KEY' "$baked"
+  run ! grep -aq 'PRIVATE KEY' "$baked"
 }
 
 @test "t24 keyring: add-on keyring is a DISTINCT trust domain from the RAUC keyring" {
@@ -2865,7 +2866,7 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   # enter the sha256 comparison. Assert the plan-line anchor exists and the
   # artifact name is nowhere in that workflow.
   grep -q "would build with:" "$REPO_ROOT/.github/workflows/v2-ci.yml"
-  ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
+  run ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
 }
 
 @test "v2 CI: resolver dependency cache is content-addressed and covers every resolver job" {
@@ -5312,7 +5313,7 @@ YAML
   # so the prefix must appear on neither, on either kernel path.
   local board path
   for board in rock-5b-plus orange-pi-5-plus; do
-    ! grep -Eq '^\s*dtb_name:\s*rk3588s-' "$V2/manifests/boards/${board}.yaml"
+    run ! grep -Eq '^\s*dtb_name:\s*rk3588s-' "$V2/manifests/boards/${board}.yaml"
     for path in "" "--variant edge"; do
       run bash -c "'$RESOLVE_SH' '$board' $path 2>/dev/null"
       [ "$status" -eq 0 ]
@@ -5331,7 +5332,7 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"DTB_NAME='rk3588-rock-5b-plus.dtb'"* ]]
   done
-  ! grep -Fq 'variant_overrides' "$V2/manifests/boards/rock-5b-plus.yaml"
+  run ! grep -Fq 'variant_overrides' "$V2/manifests/boards/rock-5b-plus.yaml"
 }
 
 @test "variant_overrides: the mechanism is OPT-IN, not a silent global change" {
@@ -5698,15 +5699,15 @@ YAML
   # GIT_CONFIG_COUNT entry is silently ignored and the fetch dies with
   # "detected dubious ownership", which is a real failure this already hit.
   grep -q 'GIT_CONFIG_GLOBAL=/in/gitconfig' "$src"
-  ! grep -q 'GIT_CONFIG_KEY_0=safe.directory' "$src"
-  ! grep -qE -- '-c[[:space:]]+safe\.directory' "$src"
+  run ! grep -q 'GIT_CONFIG_KEY_0=safe.directory' "$src"
+  run ! grep -qE -- '-c[[:space:]]+safe\.directory' "$src"
 }
 
 @test "bench patch clone: unset means the manifest URL is used verbatim" {
   local src="$LIB_DIR/build-kernel.sh"
   grep -q 'local patches_fetch_url="\${patches_url}"' "$src"
   # And no shipped manifest may hardcode the bench path.
-  ! grep -rq 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$V2/manifests"
+  run ! grep -rq 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$V2/manifests"
 }
 
 @test "bench patch clone: a relative path or a non-git dir is refused" {
@@ -6423,8 +6424,8 @@ removefiles_runtime() {
   grep -Eq '^gstreamer1\.0-plugins-bad$' "$shared"
 
   local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
-  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
-  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
 }
 
 # ===========================================================================
@@ -6910,7 +6911,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   # The family delta stays a ${FAMILY}-keyed lookup — never a directory glob,
   # which is what would swallow development.delta.list on every board.
   grep -Fq 'delta_list="${pkg_dir}/${FAMILY}.delta.list"' "$orch"
-  ! grep -Eq 'pkg_dir\}?"?/\*\.delta\.list' "$orch"
+  run ! grep -Eq 'pkg_dir\}?"?/\*\.delta\.list' "$orch"
 
   # The dev delta is appended ONLY inside a CERALIVE_DEBUG_IMAGE=1 branch, and a
   # debug build with the file missing fails closed instead of silently shipping
@@ -7059,7 +7060,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   stage="$(awk '/\[6c\/9\] enforcing the rootfs size budget/{grab=1} grab{print} grab && /^  fi$/{exit}' "$orch")"
   [ -n "$stage" ]
   grep -Fq 'MEASURE_SIZE_SH' <<<"$stage"
-  ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
+  run ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
 }
 
 # ===========================================================================
