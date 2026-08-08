@@ -15,7 +15,10 @@
 #     CeraUI) → installed in the APPLICATION layer (Stage 3), never fetched from
 #     Debian by this manifest. The SRT package replaces Debian's TLS-flavor
 #     variants in the same offline local transaction; see LAYER-MAP.md §libsrt.
-#   - Development tooling (build-essential, git, vim, …) → development variant only
+#   - Debug/diagnostic tooling (python3, strace, tcpdump, htop, lsof, …) →
+#     development.delta.list, resolved ONLY when CERALIVE_DEBUG_IMAGE=1
+#   - On-device build tooling (build-essential, git, cmake, gdb, nodejs, …) →
+#     NOT shipped at all, in either variant; see removed.md §(e)
 #   - openssh-server, systemd, udev, dbus → already in the mkosi base layer
 #
 # Format: one package per line; `#` comments justify non-obvious entries.

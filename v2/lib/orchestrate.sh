@@ -192,6 +192,33 @@ read_pkg_list() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve_debug_image_flag — normalize + validate the debug/production seam.
+#
+# `CERALIVE_DEBUG_IMAGE` selects the whole variant: the development package
+# delta, the baked password hash, SSH enablement, and the /etc/ceralive/debug-image
+# marker. It used to be normalized inside run_mkosi_build(), which runs at step
+# [6/9] — LONG after the runtime package set is resolved at step [1/9]. Resolving
+# packages against an unvalidated value would let `CERALIVE_DEBUG_IMAGE=yes`
+# silently produce a PRODUCTION package set and only fail two stages later, so the
+# normalization happens here and is called before anything reads the flag.
+# Idempotent: run_mkosi_build() re-exports the already-normalized value.
+# ---------------------------------------------------------------------------
+resolve_debug_image_flag() {
+  export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
+  export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
+  case "${CERALIVE_DEBUG_IMAGE}" in
+    0|1) ;;
+    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
+  esac
+  if [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH}" && "${CERALIVE_DEBUG_IMAGE}" != "1" ]]; then
+    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
+  fi
+  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" && -z "${CERALIVE_DEBUG_PASSWORD_HASH}" ]]; then
+    die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # require_field — die loudly if a resolved param is empty (no silent defaults).
 # ---------------------------------------------------------------------------
 require_field() {
@@ -302,6 +329,13 @@ main() {
     log_warn "CERALIVE_BENCH_LABELS=1 — BENCH IMAGE: partitions will be labelled $(resolve_partlabel boot)/$(resolve_partlabel rootfs_a)/$(resolve_partlabel rootfs_b)/$(resolve_partlabel data), NOT the frozen production set. Never publish this artifact."
   fi
 
+  # Debug/production variant seam. Normalized HERE, before the runtime package set
+  # is resolved below, because that set now depends on it.
+  resolve_debug_image_flag
+  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]]; then
+    log_warn "CERALIVE_DEBUG_IMAGE=1 — DEBUG IMAGE: the development package delta is installed, the ceralive password is unlocked from CERALIVE_DEBUG_PASSWORD_HASH, ssh.service is enabled and /etc/ceralive/debug-image is baked. Bench only — never publish this artifact to apt."
+  fi
+
   # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
   # BSP declaration must fail BEFORE any fetch/build, never as a half-image.
   require_field ARCH "${ARCH:-}"
@@ -365,15 +399,29 @@ main() {
   local family_manifest="${MKOSI_DIR}/../manifests/families/${FAMILY}.yaml"
   [[ -f "${family_manifest}" ]] || die "family manifest not found: ${family_manifest}"
 
-  # shared.list (+ resolved family delta) → $SHARED_PACKAGES for the runtime layer.
+  # shared.list (+ resolved family delta, + the debug-only development delta when
+  # CERALIVE_DEBUG_IMAGE=1) → $SHARED_PACKAGES for the runtime layer.
+  #
+  # development.delta.list is keyed on the BUILD VARIANT, not on the board family,
+  # so it is deliberately NOT reachable through the ${FAMILY}.delta.list lookup —
+  # it is appended only on the debug branch. With the flag unset/0 this resolves
+  # byte-identically to before the file existed.
   local pkg_dir="${V2_DIR}/manifests/packages"
   local shared_list="${pkg_dir}/shared.list" delta_list="${pkg_dir}/${FAMILY}.delta.list"
+  local dev_delta_list="${pkg_dir}/${DEV_DELTA_BASENAME}"
   [[ -f "${shared_list}" ]] || die "canonical package list not found: ${shared_list}"
-  SHARED_PACKAGES="$(read_pkg_list "${shared_list}" "${delta_list}")"
-  [[ -n "${SHARED_PACKAGES}" ]] || die "shared.list resolved to an empty package set — refusing to build"
-  export SHARED_PACKAGES
+  local -a pkg_lists=("${shared_list}" "${delta_list}")
   local _delta_note=""
   [[ -f "${delta_list}" ]] && _delta_note=" + $(basename "${delta_list}")"
+  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]]; then
+    [[ -f "${dev_delta_list}" ]] \
+      || die "CERALIVE_DEBUG_IMAGE=1 but the development package delta is missing: ${dev_delta_list}"
+    pkg_lists+=("${dev_delta_list}")
+    _delta_note+=" + ${DEV_DELTA_BASENAME} (DEBUG)"
+  fi
+  SHARED_PACKAGES="$(read_pkg_list "${pkg_lists[@]}")"
+  [[ -n "${SHARED_PACKAGES}" ]] || die "shared.list resolved to an empty package set — refusing to build"
+  export SHARED_PACKAGES
   log_info "runtime packages: $(wc -w <<<"${SHARED_PACKAGES}") pkg(s) from shared.list${_delta_note}"
 
   # mkosi has no 'amd64'; its identifier is 'x86-64' (task 13). arm64 stays arm64.
@@ -818,18 +866,10 @@ run_mkosi_build() {
     _modem_slots+="${_slot_name,,}=${!_slot_var} "
   done
   export CERALIVE_MODEM_PORTS_SLOTS="${_modem_slots% }"
-  export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
-  export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
-  case "${CERALIVE_DEBUG_IMAGE}" in
-    0|1) ;;
-    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
-  esac
-  if [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH}" && "${CERALIVE_DEBUG_IMAGE}" != "1" ]]; then
-    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
-  fi
-  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" && -z "${CERALIVE_DEBUG_PASSWORD_HASH}" ]]; then
-    die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
-  fi
+  # Already normalized + validated by main()'s resolve_debug_image_flag, which has
+  # to run before the runtime package set is resolved. Re-run here so the contract
+  # holds no matter which call site changes first — it is idempotent.
+  resolve_debug_image_flag
 
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done
@@ -972,6 +1012,19 @@ emit_artifact() {
 # ---------------------------------------------------------------------------
 compare_size_against_baseline() {
   local board="$1" artifact="$2" baseline measured rc=0
+
+  # A debug image is production + the development delta (~58 MB on rock-5b-plus),
+  # so it exceeds the comparator's 50 MB growth threshold BY CONSTRUCTION. Warning
+  # about that is worse than useless: the warning's own remedy is "update the
+  # baseline in the same PR", and doing that from a debug build would overwrite the
+  # PRODUCTION baseline with a number no production image can ever reproduce, then
+  # desync it from size-budget.json (which manifest.bats fails on). The ABSOLUTE
+  # ceiling above still ran and still applies — only this relative comparison,
+  # whose reference is a production artifact, is skipped.
+  if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" ]]; then
+    log_warn "[6c/9] CERALIVE_DEBUG_IMAGE=1 — relative size baseline SKIPPED (the committed baseline is a PRODUCTION artifact; do NOT update it from a debug build). The absolute ceiling was enforced above."
+    return 0
+  fi
 
   baseline="${SIZE_BASELINE_DIR}/size-baseline.${board}.json"
   if [[ ! -f "${baseline}" ]]; then

@@ -59,7 +59,24 @@ minimal mkosi base never pulls them; recorded for completeness.
 ## (e) Development variant ONLY — not shipped in the standard image
 
 Per task spec: build/debug tooling belongs to a development profile, not the
-shared base. (A future `packages/development.delta.list` may formalize this.)
+shared base.
+
+**The forward reference here is now REAL: [`development.delta.list`](development.delta.list)
+exists** (todo 32). It is a **variant-keyed** delta — resolved by
+`lib/orchestrate.sh` **only** when `CERALIVE_DEBUG_IMAGE=1`, never by the
+`${FAMILY}.delta.list` lookup — so a production build's package set is unchanged.
+It carries `python3`, `strace`, `tcpdump` and the fifteen §(h) packages below.
+
+The rest of the table is deliberately **still removed**: a toolchain
+(`build-essential`, `cmake`, `pkg-config`, `gdb`, `valgrind`,
+`linux-headers-*`, `device-tree-compiler`), a language runtime (`nodejs`, `npm`,
+`python3-dev`), a VCS (`git`) and terminal multiplexers (`vim`, `screen`, `tmux`,
+`rsync` — `rsync` is in `shared.list` anyway for dev-push) are for building
+software ON the device. Nothing is compiled on a CeraLive board: every
+first-party component arrives as a signed `.deb` and the whole OS arrives as a
+RAUC bundle. Baking a compiler into an image whose ONLY differences from
+production should be diagnostic would make the debug variant a materially
+different system and undermine the point of debugging on it.
 
 | Package | Source |
 |---|---|
@@ -113,6 +130,16 @@ streaming/bonding/modem/update datapath. They are removed from the always-instal
 base and become the **seed set for the debug add-on** (T26) — installed on demand,
 never baked into every image. Each was verified to have **no runtime consumer** in
 CeraUI, the streaming engine (then ceracoder, now cerastream), srtla, or the mkosi runtime postinst before removal.
+
+**They are now ALSO in [`development.delta.list`](development.delta.list), and that
+is not a contradiction — it is two delivery routes for one toolbox.** The
+`debug-toolset` sysext add-on stays the **field** route: installed at runtime, over
+the network, on an ordinary production image, no reflash. The delta is the **bench**
+route: baked into an explicitly-marked `CERALIVE_DEBUG_IMAGE=1` image so a developer
+debugging the boot / first-boot window has the tools before any network or add-on
+manager exists. Neither route puts them in a production image, which is what the
+"Destination" column below has always meant. Keep the two sets equal: an operator
+should not have to know which route they are on.
 
 | Package | Reason for removal | Destination |
 |---|---|---|

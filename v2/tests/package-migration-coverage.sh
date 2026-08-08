@@ -4,8 +4,11 @@
 # package source-of-truth (MIGRATE step of MIGRATE -> REWIRE -> GREEN -> DELETE).
 #
 # Every package named across the two legacy sources must resolve to a v2 home:
-#   - an active install line in manifests/packages/shared.list or a
-#     manifests/packages/<family>.delta.list,
+#   - an active install line in manifests/packages/shared.list, a
+#     manifests/packages/<family>.delta.list, or the variant-keyed
+#     manifests/packages/development.delta.list (a debug-image-only home is
+#     still a v2 home — this is an ACCOUNTING set, not an install set, so the
+#     unconditional glob below is deliberate and does not gate production),
 #   - a typed BSP/HW-accel array in manifests/families/<family>.yaml,
 #   - a first-party .deb in lib/fetch-debs.sh REPOS, or
 #   - an explicit, justified non-migration in manifests/packages/removed.md.
