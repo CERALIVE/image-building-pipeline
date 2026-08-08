@@ -13,12 +13,26 @@
 # SOURCED by both tracks. This gate FAILS CI the moment that single-source
 # property is broken — i.e. drift is reintroduced.
 #
-# THREE CHECKS:
-#   1. SINGLE SOURCE  — every consolidated function is defined EXACTLY once, in
-#                       postinst-lib.sh, and is NEVER re-inlined into the runtime
-#                       executor or the customize modules (re-inlining == drift).
+# "ONE FILE" HERE MEANS "ONE SOURCE SET": postinst-lib.sh is the thin ENTRY that
+# sources the per-concern modules under customize/postinst.d/, so the single-
+# source property spans entry + modules. Every check below resolves a function
+# across that SET — a function may live in exactly one of those files and nowhere
+# else, so moving one between modules is free while defining it twice (or
+# re-inlining it into a consumer) still fails.
+#
+# FOUR CHECKS:
+#   1. SINGLE SOURCE  — every consolidated function is defined EXACTLY once across
+#                       the postinst-lib.sh + postinst.d/ set, and is NEVER
+#                       re-inlined into the runtime executor or the customize
+#                       modules (re-inlining == drift).
 #   1b. SOURCED       — postinst.chroot, services.sh and data-persistence.sh all
 #                       SOURCE postinst-lib.sh (so they actually share that copy).
+#   1c. MODULE WIRING — every postinst.d/ module is listed by the entry (an
+#                       unsourced module is dead code whose functions silently do
+#                       not exist), and every module carries its own
+#                       declare -F-guarded log()/die() fallbacks, because modules
+#                       are sourced inside mkosi subimage CHROOTS where lib/ is
+#                       not mounted and nothing else may have been sourced.
 #   2. PAYLOAD PARITY — the one remaining genuinely dual-track twin, §6 SRTLA
 #                       source-policy routing (customize/networking-srtla.sh vs the
 #                       inline §6 in postinst.chroot), must emit BYTE-IDENTICAL
@@ -42,6 +56,7 @@ MKOSI="${V2_DIR}/mkosi"
 
 POSTINST="${MKOSI}/mkosi.images/runtime/mkosi.postinst.chroot"
 LIB="${MKOSI}/customize/postinst-lib.sh"
+POSTINST_D="${MKOSI}/customize/postinst.d"
 SERVICES="${MKOSI}/customize/services.sh"
 DATAPERSIST="${MKOSI}/customize/data-persistence.sh"
 NETSRTLA="${MKOSI}/customize/networking-srtla.sh"
@@ -73,6 +88,27 @@ defcount() {
   grep -cE "^$1\(\) \{" "$2" 2>/dev/null || true
 }
 
+# defcount_set <func> — TOP-LEVEL definitions across the whole single-source set
+# (postinst-lib.sh + every postinst.d/ module). Summed rather than per-file so a
+# function may move between modules freely while a SECOND definition anywhere in
+# the set still fails the gate.
+defcount_set() {
+  local fn="$1" f total=0
+  for f in "${LIB_SET[@]}"; do
+    total=$(( total + $(defcount "${fn}" "${f}") ))
+  done
+  printf '%s' "${total}"
+}
+
+# where_defined <func> — the set file(s) that define <func>, for diagnostics.
+where_defined() {
+  local fn="$1" f found=()
+  for f in "${LIB_SET[@]}"; do
+    (( $(defcount "${fn}" "${f}") > 0 )) && found+=("$(basename "${f}")")
+  done
+  printf '%s' "${found[*]-none}"
+}
+
 # heredoc_for <file> <dest-substr> — print the body of the `cat >DEST <<DELIM`
 # here-document whose redirect target contains <dest-substr>. Keyed by destination
 # path (stable) rather than delimiter name (ambiguous: postinst.chroot reuses EOF).
@@ -93,27 +129,40 @@ main() {
   for f in "${POSTINST}" "${LIB}" "${SERVICES}" "${DATAPERSIST}" "${NETSRTLA}"; do
     [[ -f "${f}" ]] || bad "missing expected file: ${f}"
   done
+  [[ -d "${POSTINST_D}" ]] || bad "missing expected dir: ${POSTINST_D}"
   if (( FAIL )); then
     note "aborting: required files missing"
     return 1
   fi
 
+  # The single-source SET: the entry plus every module it is meant to source.
+  # Globbed rather than parsed out of the entry on purpose — CHECK 1c is what
+  # proves the two agree, so a module that exists but is never sourced is caught
+  # as a wiring failure instead of quietly dropping out of CHECK 1 as well.
+  local -a MODULES=()
+  while IFS= read -r f; do MODULES+=("${f}"); done < <(find "${POSTINST_D}" -maxdepth 1 -name '*.sh' | sort)
+  local -a LIB_SET=("${LIB}" ${MODULES[@]+"${MODULES[@]}"})
+  if (( ${#MODULES[@]} == 0 )); then
+    bad "no modules under ${POSTINST_D} — the entry cannot be a thin entry with nothing to source"
+    return 1
+  fi
+
   # --- CHECK 1: single source of truth --------------------------------------
-  note "CHECK 1 — consolidated functions defined ONCE (postinst-lib.sh), never re-inlined"
-  local fn inlib reinlined inpost insvc indp
+  note "CHECK 1 — consolidated functions defined ONCE across postinst-lib.sh + postinst.d/, never re-inlined"
+  local fn inset reinlined inpost insvc indp
   for fn in "${CONSOLIDATED_FUNCS[@]}"; do
-    inlib="$(defcount "${fn}" "${LIB}")"
+    inset="$(defcount_set "${fn}")"
     inpost="$(defcount "${fn}" "${POSTINST}")"
     insvc="$(defcount "${fn}" "${SERVICES}")"
     indp="$(defcount "${fn}" "${DATAPERSIST}")"
     reinlined=$(( inpost + insvc + indp ))
-    if [[ "${inlib}" != "1" ]]; then
-      bad "  ${fn}: defined ${inlib}× in postinst-lib.sh (expected exactly 1)"
+    if [[ "${inset}" != "1" ]]; then
+      bad "  ${fn}: defined ${inset}× across the postinst-lib.sh + postinst.d/ set (expected exactly 1; found in: $(where_defined "${fn}"))"
     fi
     if (( reinlined > 0 )); then
       bad "  ${fn}: RE-INLINED (postinst.chroot=${inpost}, services.sh=${insvc}, data-persistence.sh=${indp}) — dual-track drift reintroduced"
     fi
-    [[ "${inlib}" == "1" && "${reinlined}" -eq 0 ]] && ok "  ${fn}: single source (postinst-lib.sh)"
+    [[ "${inset}" == "1" && "${reinlined}" -eq 0 ]] && ok "  ${fn}: single source ($(where_defined "${fn}"))"
   done
 
   # --- CHECK 1b: both tracks actually source the lib ------------------------
@@ -123,6 +172,29 @@ main() {
       ok "  $(basename "${f}") sources postinst-lib.sh"
     else
       bad "  $(basename "${f}") does NOT source postinst-lib.sh"
+    fi
+  done
+
+  # --- CHECK 1c: the modules are wired up, and each is chroot-safe alone -----
+  # The entry lists its modules explicitly, so a new module that nobody added to
+  # that list defines NOTHING at runtime — the failure surfaces as a
+  # `command not found` halfway through a postinst, not here. And because the
+  # modules are sourced inside mkosi subimage chroots with no lib/ mounted, each
+  # one must carry its own declare -F-guarded log()/die() rather than assume the
+  # entry (or anything else) ran first.
+  note "CHECK 1c — every postinst.d/ module is sourced by the entry and carries the chroot-safe fallback header"
+  local module base
+  for module in "${MODULES[@]}"; do
+    base="$(basename "${module}")"
+    if grep -qE "^[[:space:]]+${base//./\\.}\$" "${LIB}"; then
+      ok "  ${base}: listed in postinst-lib.sh"
+    else
+      bad "  ${base}: NOT listed in postinst-lib.sh — an unsourced module defines nothing at runtime"
+    fi
+    if grep -qF 'declare -F log ' "${module}" && grep -qF 'declare -F die ' "${module}"; then
+      ok "  ${base}: carries the declare -F-guarded log()/die() fallbacks"
+    else
+      bad "  ${base}: MISSING the declare -F-guarded log()/die() fallbacks — it cannot be sourced in a bare chroot"
     fi
   done
 

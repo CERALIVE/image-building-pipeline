@@ -28,7 +28,15 @@ setup() {
   MEASURE_SH="$LIB_DIR/measure-size.sh"
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
-  POSTINST_LIB="$V2/mkosi/customize/postinst-lib.sh"
+  # Two handles on the same library, and the difference is load-bearing.
+  # $POSTINST_ENTRY is the file every real caller SOURCES; it is thin and only
+  # pulls in the per-concern modules under customize/postinst.d/. A static
+  # contract check must instead read the WHOLE sourced set, or it goes silently
+  # vacuous the moment a function moves between modules — so $POSTINST_LIB is
+  # that set, materialized once per test.
+  POSTINST_ENTRY="$V2/mkosi/customize/postinst-lib.sh"
+  POSTINST_LIB="$BATS_TEST_TMPDIR/postinst-lib.sourceset.sh"
+  cat "$POSTINST_ENTRY" "$V2"/mkosi/customize/postinst.d/*.sh >"$POSTINST_LIB"
   APT_CERALIVE_REPO="$V2/mkosi/customize/apt-ceralive-repo.sh"
   VERIFY_PASETO="$LIB_DIR/verify-paseto-key-encodings.sh"
   BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
@@ -2045,7 +2053,7 @@ print('CEILING-POLICY-OK')
   run env \
     CERALIVE_DEBUG_IMAGE=0 \
     CERALIVE_DEBUG_PASSWORD_HASH='' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
 }
@@ -2160,7 +2168,7 @@ SH
     DEBUG_PASSWORD_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=0 \
     CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"* ]]
@@ -2187,7 +2195,7 @@ SH
     DEBUG_PASSWORD_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=1 \
     CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -2221,7 +2229,7 @@ SH
     PATH="$bin:$PATH" \
     SSH_ENABLE_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=0 \
-    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -2251,7 +2259,7 @@ SH
     PATH="$bin:$PATH" \
     SSH_ENABLE_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=1 \
-    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -3134,11 +3142,11 @@ run_paseto_provision() {
   rm -rf "$dir"
   if [[ -z "$payload" ]]; then
     run env -u PASETO_PUBLIC_KEY_B64 PASETO_DROPIN_DIR="$dir" \
-      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+      bash -c "source '$POSTINST_ENTRY'; setup_paseto_public_key"
   else
     local b64; b64="$(printf '%s' "$payload" | base64 -w0)"
     run env PASETO_PUBLIC_KEY_B64="$b64" PASETO_DROPIN_DIR="$dir" \
-      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+      bash -c "source '$POSTINST_ENTRY'; setup_paseto_public_key"
   fi
   PASETO_DROPIN="$dir/20-paseto-public-key.conf"
 }
@@ -3200,7 +3208,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/avahi-daemon.service.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" AVAHI_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+    bash -c "source '$POSTINST_ENTRY'; setup_avahi_restart"
   [ "$status" -eq 0 ]
   [ -f "$dir/10-ceralive-restart.conf" ]
   grep -q '^\[Service\]' "$dir/10-ceralive-restart.conf"
@@ -3212,7 +3220,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/avahi-fail.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" AVAHI_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+    bash -c "source '$POSTINST_ENTRY'; setup_avahi_restart"
   [ "$status" -ne 0 ]
   [[ "$output" == *"avahi-restart source not found"* ]]
   [ ! -f "$dir/10-ceralive-restart.conf" ]
@@ -3239,7 +3247,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive.service.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -eq 0 ]
   [ -f "$dir/30-cerastream-ordering.conf" ]
   grep -q '^\[Unit\]' "$dir/30-cerastream-ordering.conf"
@@ -3254,7 +3262,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive-ordering-only.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -eq 0 ]
   run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' "$dir/30-cerastream-ordering.conf"
   [ "$status" -ne 0 ]
@@ -3269,7 +3277,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive-ordering-fail.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -ne 0 ]
   [[ "$output" == *"cerastream-ordering source not found"* ]]
   [ ! -f "$dir/30-cerastream-ordering.conf" ]
@@ -3313,7 +3321,7 @@ SH
   run env PATH="$bin:$PATH" TYPEC_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-typec-source" ]
   [ -f "$unit_dir/ceralive-typec-source.service" ]
@@ -3416,7 +3424,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/typec-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
   [ "$status" -ne 0 ]
   [[ "$output" == *"typec-source script not found"* ]]
   [ ! -e "$unit_dir/ceralive-typec-source.service" ]
@@ -3470,7 +3478,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
 
   local unit
@@ -3500,7 +3508,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
   [ -L "$dir/systemd-networkd.service" ]
   [ -L "$dir/systemd-networkd-wait-online.service" ]
@@ -3537,7 +3545,7 @@ SH
   chmod +x "$bin/systemctl"
 
   run env PATH="$bin:$PATH" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -ne 0 ]
   [[ "$output" == *"mask did not land"* ]]
   [ ! -e "$dir/systemd-networkd.service" ]
@@ -3555,7 +3563,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
 
   run grep -cE '^systemctl mask ' "$calls"
@@ -3664,7 +3672,7 @@ SH
   run env PATH="$bin:$PATH" FAN_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_curve"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-fan-curve" ]
   [ -f "$unit_dir/ceralive-fan-curve.service" ]
@@ -3878,7 +3886,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/fan-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_curve"
   [ "$status" -ne 0 ]
   [[ "$output" == *"fan-curve script not found"* ]]
   [ ! -e "$unit_dir/ceralive-fan-curve.service" ]
@@ -3965,7 +3973,7 @@ SH
   run env PATH="$bin:$PATH" LED_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_led_status"
+    bash -c "source '$POSTINST_ENTRY'; setup_led_status"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-led-status" ]
   [ -f "$unit_dir/ceralive-led-status.service" ]
@@ -4183,7 +4191,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/led-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_led_status"
+    bash -c "source '$POSTINST_ENTRY'; setup_led_status"
   [ "$status" -ne 0 ]
   [[ "$output" == *"led-status script not found"* ]]
   [ ! -e "$unit_dir/ceralive-led-status.service" ]
@@ -6502,7 +6510,7 @@ SH
   run env PATH="$bin:$PATH" FK_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_kickstart"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-fan-kickstart" ]
   [ -f "$unit_dir/ceralive-fan-kickstart.service" ]
@@ -6774,7 +6782,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/fk-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/fk-empty-src" \
     FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_kickstart"
   [ "$status" -ne 0 ]
   [[ "$output" == *"fan-kickstart script not found"* ]]
   [ ! -e "$unit_dir/ceralive-fan-kickstart.service" ]

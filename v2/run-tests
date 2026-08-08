@@ -57,6 +57,7 @@ SHELL_SUITES=(
   "${HERE}/tests/maskrom-first-realhw.test.sh"
   "${HERE}/tests/uart-console-path.test.sh"
   "${HERE}/tests/uart-bootstrap-tty.test.sh"
+  "${HERE}/tests/postinst-module-contract.test.sh"
   "${HERE}/tests/systemd-ordering-cycle.test.sh"
   "${HERE}/tests/ssh-firstboot-privsep.test.sh"
   "${HERE}/tests/data-persistence-public-symlink.test.sh"
