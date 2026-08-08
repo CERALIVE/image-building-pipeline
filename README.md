@@ -131,14 +131,13 @@ be converted by OTA.
 │   ├── manifests/         # Board/family manifests, package pins, add-on descriptors
 │   ├── lib/               # Orchestrator, assembler, bundle scripts,
 │   │   │                  #   build-all.sh (parallel runner),
-│   │   │                  #   build-feature-sysext.sh (add-on builder)
+│   │   │                  #   build-feature-sysext.sh (add-on builder),
+│   │   │                  #   fetch-debs.sh (REPOS + FIRST_PARTY_APT_PKGS)
 │   │   └── app-layer/     # sysext.sh — extract → prune → squashfs
 │   ├── docs/              # Dev loop, kiosk display, host support, size notes,
 │   │   │                  #   Cog add-on recipe, sysext refresh protocol
 │   │   └── fast-reload.md # Dev-sync live-reload loop
 │   └── tests/             # Manifest + RK3588 A/B/preflash + x86 rollback
-├── scripts/
-│   └── fetch-debs.sh      # Downloads .deb packages for REPOS array
 └── CONTRIBUTING.md        # Contribution rules
 ```
 

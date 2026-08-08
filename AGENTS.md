@@ -26,7 +26,8 @@ image-building-pipeline/
 │   │       └── addon.schema.json   # add-on descriptor JSON Schema (T21)
 │   ├── lib/                  # orchestrate.sh, assemble-disk.sh, build-bundle.sh,
 │   │   │                     #   build-all.sh (parallel runner), build-feature-sysext.sh,
-│   │   │                     #   measure-size.sh, parity-check.sh, …
+│   │   │                     #   measure-size.sh, parity-check.sh,
+│   │   │                     #   fetch-debs.sh (REPOS array + FIRST_PARTY_APT_PKGS), …
 │   │   └── app-layer/
 │   │       └── sysext.sh     # sysext build lib (extract → prune → squashfs)
 │   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
@@ -39,8 +40,6 @@ image-building-pipeline/
 │   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
 │   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
 │   └── partition-contract.md # frozen GPT layout contract
-├── scripts/
-│   └── fetch-debs.sh         # downloads .deb packages for REPOS array
 └── CONTRIBUTING.md           # contribution rules
 ```
 
@@ -49,7 +48,7 @@ image-building-pipeline/
 | Task | Location |
 |------|----------|
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
-| Add/change .deb packages | `scripts/fetch-debs.sh` → `REPOS` array |
+| Add/change .deb packages | `v2/lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `v2/manifests/packages/development.delta.list` + `v2/lib/common.sh::runtime_pkg_list_files` + `v2/lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
