@@ -396,6 +396,97 @@ first, so a bench image fails there and never reaches its artifact checks.
 
 ---
 
+## 4c. `/boot/Image` must also be the RAW Image — `bindeb-pkg` ships `Image.gz`
+
+§4b made `/boot/Image` **exist**. It did not make it **loadable**, and the same
+path failed a second time on the other board — this time with every artifact
+present, resolvable and the right size.
+
+On a real Orange Pi 5 Plus the selector ran cleanly through the whole A/B
+sequence, loaded 15,928,530 bytes of `/boot/Image` and 106,234 bytes of DTB, then:
+
+```
+15928530 bytes read in 1421 ms
+106234 bytes read in 21 ms
+Bad Linux ARM64 Image magic!
+SCRIPT FAILED: continuing...
+```
+
+Re-loading the file by hand and dumping its first bytes named the cause outright:
+
+```
+=> ext4load mmc 1:2 0x00400000 /boot/Image
+=> md.b 0x00400000 0x40
+00400000: 1f 8b 08 00 00 00 00 00 02 03 ...
+```
+
+`1f 8b` is the gzip magic and `08` is deflate. `/boot/Image` was **gzip**, and
+`booti` needs the raw, self-decompressing ARM64 Image — magic `0x644d5241`
+(`"ARM\x64"`, little-endian) at **offset 56** of its 64-byte header
+(`Documentation/arm64/booting.rst` §4). That document also states the constraint
+explicitly: *"The AArch64 kernel does not currently provide a decompressor and
+therefore requires decompression (gzip etc.) to be performed by the boot loader
+if a compressed Image target (e.g. Image.gz) is used."*
+
+**Where the gzip comes from.** `arch/arm64/Makefile` sets
+`KBUILD_IMAGE := $(boot)/Image.gz`, and `scripts/package/builddeb` installs
+`$(make -s image_name)` as `/boot/vmlinuz-<KERNELRELEASE>`. So on arm64 the
+`bindeb-pkg` `vmlinuz` is `Image.gz` by default, for **both** variants — the
+`edge` build log says so in one line: `GZIP arch/arm64/boot/Image.gz`. Armbian's
+vendor package does not have the problem because its framework builds the
+rockchip64 family with `KERNEL_IMAGE_TYPE="Image"`.
+
+**Why it booted on one board and not the other — the ambiguity, resolved.** It
+was not a per-build artifact difference: both boards' `edge` builds emit the same
+`Image.gz`. It is a per-board **U-Boot capability** difference, read straight out
+of each board's staged `u-boot-config-target-1` (both packages `26.5.1`, both
+SHA-256-verified):
+
+| Symbol | `rock-5b-plus` (U-Boot **2026.04**) | `orange-pi-5-plus` (U-Boot **2017.09**) |
+|---|---|---|
+| `CONFIG_GZIP` | `=y` | **symbol absent entirely** |
+| `CONFIG_ZLIB` | `=y` | absent |
+| `CONFIG_CMD_UNZIP` | `=y` | `# … is not set` |
+| `CONFIG_CMD_BOOTI` | `=y` | `=y` |
+| `CONFIG_IMAGE_GZIP` | — | `# … is not set` |
+
+Modern U-Boot's `booti_start()` (`cmd/booti.c`) sniffs the compression type and
+calls `image_decomp()` before `booti_setup()`, which is why the Rock 5B+ booted a
+gzip Image all the way to userspace and hid this defect for a whole release. The
+Orange Pi ships the Rockchip **2017.09** vendor fork, which predates that support
+entirely and has no gzip anywhere — hence `unzip` answering `Unknown command`
+on its console, with no interactive workaround available at all.
+
+That is the third instance of the same lesson in this file's neighbourhood
+(`setexpr`, `loadaddr`, now gzip): **an artifact contract may not be satisfied by
+a board's U-Boot happening to be able to cope.** So the raw Image is produced at
+staging time:
+
+- `install_kernel_source_boot_artifacts` reads the first bytes of
+  `vmlinuz-<REL>`. On gzip it `gzip -dc`s into `/boot/Image` as a **real file** —
+  a symlink to the still-compressed vmlinuz is the bug, not the fix. On an
+  already-raw Image it keeps the vendor-parity symlink. Any other recognised
+  container (xz / zstd / bzip2 / lz4 / lzop / lzma) is **fatal and named**,
+  because guessing there ships an unbootable slot on every board.
+- It then asserts the ARM64 magic on whatever it just produced. A decompression
+  that *succeeds* on the wrong payload is still an unbootable slot, so success of
+  `gzip` is not the property checked — the resulting magic is.
+- `verify-boot-artifacts.sh` re-asserts the same magic at `[6b/9]` against the
+  real emitted rootfs tar, and names the compression when it finds one, so the
+  failure reads as a packaging fact rather than a bootloader mystery.
+
+The packaged `vmlinuz-<REL>` is deliberately left exactly as `dpkg` installed it
+(compressed, dpkg-owned); only `/boot/Image` is materialised. The cost is one
+extra decompressed kernel in `/boot`.
+
+Guards: `v2/tests/boot-artifacts.bats` — gzip/xz/no-magic rejections through the
+verifier on both layouts, and the real shipped staging function driven against a
+gzip vmlinuz (real decompressed file, byte-identical to the source Image, vmlinuz
+untouched), a raw vmlinuz (symlink preserved), an xz vmlinuz (fatal), a gzip of a
+non-Image payload (fatal), and a re-run (idempotent).
+
+---
+
 ## 5. Integration semantics
 
 Three things change when a `kernel_source:` block resolves, and only then:

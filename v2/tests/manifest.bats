@@ -3726,6 +3726,311 @@ SH
 }
 
 # ===========================================================================
+# 18g. Status LEDs — the board's indicator LEDs are registered by the kernel and
+#      then left completely unconfigured (`trigger = [none]`, `brightness = 0`),
+#      so a headless appliance gives its operator no visual feedback at all.
+#      setup_led_status (postinst-lib.sh) installs a oneshot that assigns the
+#      FIRST discovered indicator LED the `heartbeat` trigger and the SECOND the
+#      `mmc1` trigger, and writes nothing else — never `brightness`, which would
+#      fight the trigger it just installed.
+#
+#      The reference board (Orange Pi 5 Plus) names its LEDs `blue:indicator-1`
+#      (gpio-leds), `green:indicator-2` (pwm-leds) and `mmc0::` (the MMC host's
+#      own, already-working activity LED). The fixture below deliberately uses
+#      DIFFERENT names — `amber:status-a`, `white:status-b`, `mmc2::` and a
+#      `red:power` decoy — so any hardcoded LED name, and any `mmc0`-literal
+#      exclusion, fails these tests. Note the fixture's sort order is also not
+#      the discovery order of the names it stands in for. No image boot, no
+#      hardware, UNIT scope.
+# ===========================================================================
+
+LED_SCRIPT() { printf '%s' "$V2/mkosi/runtime/ceralive-led-status.sh"; }
+LED_UNIT() { printf '%s' "$V2/mkosi/runtime/ceralive-led-status.service"; }
+# NOTE for the static guards below: the script HEADER deliberately names the
+# reference board's LEDs to explain what it refuses to hardcode, so every
+# "no hardcoded name" check strips comment lines first and inspects executable
+# lines only.
+
+# led_fake_class <dir> — a synthetic /sys/class/leds carrying two free indicator
+# LEDs under names the reference board does not use, the kernel's own MMC
+# activity LED at a non-reference index, and a power-rail decoy.
+led_fake_class() {
+  local root="$1" d
+  rm -rf "$root"
+
+  for d in "amber:status-a" "white:status-b"; do
+    mkdir -p "$root/$d"
+    printf '[none] rfkill-any kbd-scrolllock heartbeat mmc0 mmc1 usbport\n' >"$root/$d/trigger"
+    printf '0\n' >"$root/$d/brightness"
+    printf '255\n' >"$root/$d/max_brightness"
+  done
+
+  # The kernel's OWN SD/eMMC activity LED. Already driven, not ours, and the
+  # index is 2 rather than the reference board's 0 on purpose.
+  mkdir -p "$root/mmc2::"
+  printf 'none rfkill-any heartbeat [mmc2] mmc1\n' >"$root/mmc2::/trigger"
+  printf '0\n' >"$root/mmc2::/brightness"
+
+  # A power-rail indicator: unclaimed, but repurposing it would destroy
+  # information rather than add it.
+  mkdir -p "$root/red:power"
+  printf '[none] rfkill-any heartbeat mmc0 mmc1\n' >"$root/red:power/trigger"
+  printf '1\n' >"$root/red:power/brightness"
+}
+
+led_attr() { tr -d '[:space:]' <"$1"; }
+
+@test "led status: the trigger script + boot unit are installed and enabled" {
+  local unit_dir="$BATS_TEST_TMPDIR/led-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/led-sbin"
+  local bin="$BATS_TEST_TMPDIR/led-bin"
+  local calls="$BATS_TEST_TMPDIR/led-calls"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$LED_CALLS"
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" LED_CALLS="$calls" \
+    CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
+    LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_led_status"
+  [ "$status" -eq 0 ]
+  [ -x "$sbin_dir/ceralive-led-status" ]
+  [ -f "$unit_dir/ceralive-led-status.service" ]
+
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-led-status.service"* ]]
+}
+
+@test "led status: discovery is generic — indicator LEDs are found under ANY name" {
+  # The reference board is blue:indicator-1 / green:indicator-2; this fixture is
+  # amber:status-a / white:status-b. Any hardcoded name fails here.
+  local sysfs="$BATS_TEST_TMPDIR/led-generic"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "heartbeat" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+
+  # And no executable line in the shipped script may name a concrete LED, a
+  # concrete LED index, or the reference board's vendor DTS labels.
+  run bash -c "grep -vE '^[[:space:]]*#' '$(LED_SCRIPT)' | grep -E 'indicator-[0-9]|blue:|green:|mmc0|led[0-9]'"
+  [ "$status" -ne 0 ]
+}
+
+@test "led status: the kernel's own mmc* LED and a power indicator are never touched" {
+  # mmc0::/mmc1:: are the MMC core's activity LEDs — already working, kernel
+  # managed, and not indicator LEDs. A power-rail LED must keep meaning "powered".
+  local sysfs="$BATS_TEST_TMPDIR/led-reserved"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mmc2::"* ]]
+  [[ "$output" == *"red:power"* ]]
+
+  [ "$(led_attr "$sysfs/mmc2::/trigger")" = "nonerfkill-anyheartbeat[mmc2]mmc1" ]
+  [ "$(led_attr "$sysfs/red:power/trigger")" = "[none]rfkill-anyheartbeatmmc0mmc1" ]
+  [ "$(led_attr "$sysfs/mmc2::/brightness")" = "0" ]
+  [ "$(led_attr "$sysfs/red:power/brightness")" = "1" ]
+}
+
+@test "led status: brightness is NEVER written and the unit runs no polling loop" {
+  # Assigning a trigger hands the LED to the kernel; writing brightness
+  # afterwards fights the very trigger just installed — the same
+  # "kernel does 100% of the driving" rule ceralive-fan-curve follows.
+  local script unit sysfs
+  script="$(LED_SCRIPT)"
+  unit="$(LED_UNIT)"
+  sysfs="$BATS_TEST_TMPDIR/led-nobrightness"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/brightness")" = "0" ]
+  [ "$(led_attr "$sysfs/white:status-b/brightness")" = "0" ]
+
+  # The script never even constructs a brightness path.
+  run grep -F '/brightness' "$script"
+  [ "$status" -ne 0 ]
+
+  # Exactly ONE sysfs write exists in the whole script, and it is the trigger.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '>\"\\\$\{trigger_attr\}\"'"
+  [ "$output" -eq 1 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE '^[^#]*>[[:space:]]*\"?\\\$\{(LED_CLASS_DIR|led|trigger_attr)'"
+  [ "$output" -eq 1 ]
+
+  # A oneshot that exits, never a resident monitor or a timer.
+  grep -Eq '^Type=oneshot$' "$unit"
+  run grep -E '^(Type=(simple|notify|exec)|Restart=(always|on-failure))' "$unit"
+  [ "$status" -ne 0 ]
+  run grep -E '^(OnCalendar|OnUnitActiveSec)=' "$unit"
+  [ "$status" -ne 0 ]
+  # Nothing consumes an LED trigger, so this must not sit on any unit's
+  # critical path — a board with no LEDs would pay the bounded wait for nothing.
+  run grep -E '^Before=' "$unit"
+  [ "$status" -ne 0 ]
+}
+
+@test "led status: zero, one and more-than-two LED boards are all informational no-ops" {
+  local script sysfs
+  script="$(LED_SCRIPT)"
+
+  # No LED class at all (a board or kernel without CONFIG_LEDS_CLASS).
+  run env CERALIVE_LED_CLASS_DIR="$BATS_TEST_TMPDIR/led-absent" bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no LED class"* ]]
+
+  # An empty LED class.
+  sysfs="$BATS_TEST_TMPDIR/led-empty"
+  rm -rf "$sysfs"; mkdir -p "$sysfs"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" CERALIVE_LED_WAIT=1 bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no LEDs under"* ]]
+
+  # Only kernel-managed/reserved LEDs — nothing free to configure.
+  sysfs="$BATS_TEST_TMPDIR/led-onlymmc"
+  rm -rf "$sysfs"; mkdir -p "$sysfs/mmc1::"
+  printf 'none [mmc1] heartbeat\n' >"$sysfs/mmc1::/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" CERALIVE_LED_WAIT=1 bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kernel-managed or reserved"* ]]
+  [ "$(led_attr "$sysfs/mmc1::/trigger")" = "none[mmc1]heartbeat" ]
+
+  # Exactly one free LED: it gets the heartbeat and the policy simply runs out.
+  sysfs="$BATS_TEST_TMPDIR/led-one"
+  rm -rf "$sysfs"; mkdir -p "$sysfs/violet:lonely"
+  printf '[none] heartbeat mmc1\n' >"$sysfs/violet:lonely/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/violet:lonely/trigger")" = "heartbeat" ]
+
+  # Three free LEDs: the first two are assigned, the surplus is logged and left
+  # exactly as the kernel set it.
+  sysfs="$BATS_TEST_TMPDIR/led-three"
+  led_fake_class "$sysfs"
+  mkdir -p "$sysfs/zzz:spare"
+  printf '[none] heartbeat mmc1\n' >"$sysfs/zzz:spare/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no trigger left in the policy"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "heartbeat" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+  [ "$(led_attr "$sysfs/zzz:spare/trigger")" = "[none]heartbeatmmc1" ]
+
+  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
+  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$script"
+}
+
+@test "led status: an LED that already has a trigger is never re-pointed (idempotent)" {
+  local sysfs="$BATS_TEST_TMPDIR/led-idem"
+  led_fake_class "$sysfs"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+
+  # Re-render the trigger files the way real sysfs does — the whole menu with
+  # the active entry in brackets. A naive literal compare is never true here,
+  # which is the bracket trap ceralive-typec-source documents for port_type.
+  printf 'none rfkill-any [heartbeat] mmc0 mmc1\n' >"$sysfs/amber:status-a/trigger"
+  printf 'none rfkill-any heartbeat mmc0 [mmc1]\n' >"$sysfs/white:status-b/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already driven by the 'heartbeat' trigger"* ]]
+  [[ "$output" == *"already driven by the 'mmc1' trigger"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "nonerfkill-any[heartbeat]mmc0mmc1" ]
+
+  # An operator (or a device tree default-trigger) that already claimed an LED
+  # for something else keeps it.
+  printf 'none [panic] heartbeat mmc1\n' >"$sysfs/amber:status-a/trigger"
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "none[panic]heartbeatmmc1" ]
+}
+
+@test "led status: a trigger this kernel does not offer is skipped, never forced" {
+  # The trigger menu is the kernel's own answer about what it supports; writing
+  # a name that is not in it just yields EINVAL and a failed unit on every boot.
+  local sysfs="$BATS_TEST_TMPDIR/led-notoffered"
+  led_fake_class "$sysfs"
+  printf '[none] rfkill-any usbport\n' >"$sysfs/amber:status-a/trigger"
+  printf '[none] rfkill-any usbport heartbeat\n' >"$sysfs/white:status-b/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"does not offer a 'heartbeat' trigger"* ]]
+  [[ "$output" == *"does not offer a 'mmc1' trigger"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "[none]rfkill-anyusbport" ]
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "[none]rfkill-anyusbportheartbeat" ]
+}
+
+@test "led status: a write the kernel ACCEPTS but ignores FAILS loudly (read-back verified)" {
+  # The observable shape of an LED core that takes the write and then discards
+  # it: `cat` keeps answering the stale menu, so the write succeeds and the
+  # read-back disagrees. Reporting that as success is exactly how an LED fix
+  # ships without ever having lit anything.
+  local sysfs="$BATS_TEST_TMPDIR/led-stale"
+  local bin="$BATS_TEST_TMPDIR/led-stale-bin"
+  led_fake_class "$sysfs"
+  mkdir -p "$bin"
+  cat >"$bin/cat" <<'SH'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    */amber:status-a/trigger) printf '[none] heartbeat mmc0 mmc1\n'; exit 0 ;;
+  esac
+done
+exec "$(PATH=/usr/bin:/bin command -v cat)" "$@"
+SH
+  chmod +x "$bin/cat"
+
+  run env PATH="$bin:$PATH" CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"after accepting a write"* ]]
+}
+
+@test "led status: an unwritable trigger WARNs and exits 0 (a dark LED is the state it shipped in)" {
+  if [ "$(id -u)" -eq 0 ]; then skip "root ignores file permissions"; fi
+  local sysfs="$BATS_TEST_TMPDIR/led-readonly"
+  led_fake_class "$sysfs"
+  chmod 0444 "$sysfs/amber:status-a/trigger"
+
+  run env CERALIVE_LED_CLASS_DIR="$sysfs" bash "$(LED_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"refused the write"* ]]
+  [ "$(led_attr "$sysfs/amber:status-a/trigger")" = "[none]rfkill-anykbd-scrolllockheartbeatmmc0mmc1usbport" ]
+  # The second LED is still configured — one bad node is not a reason to stop.
+  [ "$(led_attr "$sysfs/white:status-b/trigger")" = "mmc1" ]
+}
+
+@test "led status: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+  local unit_dir="$BATS_TEST_TMPDIR/led-failclosed-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/led-failclosed-sbin"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
+    LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_led_status"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"led-status script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-led-status.service" ]
+}
+
+@test "led status: the fix is wired into configure_services and registered in the drift gate" {
+  # An unreferenced setup function is dead code — the dark LEDs ship.
+  run grep -E '^\s*setup_led_status$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  # Standalone-artifact idiom: defined once in postinst-lib.sh, never inlined.
+  grep -Fq 'setup_led_status' "$V2/ci/postinst-drift-check.sh"
+  run grep -cE '^setup_led_status\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+}
+
+# ===========================================================================
 # 19. fetch-debs defensive guards (Task 23) — REPOS integrity + apt URL scheme.
 #     fetch-debs.sh asserts the sacred device REPOS constant (a `die` that can
 #     ONLY fire on a wrong EDIT, never on a valid run) and WARNS — never dies —
@@ -5943,4 +6248,379 @@ removefiles_runtime() {
   local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
   ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+}
+
+# ===========================================================================
+# 29. Fan kick-start — setup_fan_curve fixed WHEN the pwm-fan is asked to spin;
+#     this covers the fact that the state it is asked INTO is too weak to start
+#     it from a dead stop. Measured on a live Orange Pi 5 Plus, the first active
+#     state is 70/255 (~27.5% duty): enough to sustain a turning rotor, not
+#     enough to break stiction on a stopped one, so the fan sits energised and
+#     stalled until someone nudges it by hand.
+#
+#     ceralive-fan-kickstart.service watches the pwm-fan cooling device's own
+#     cur_state for a 0 -> nonzero transition and, on that edge only, drives it
+#     to max_state for a bounded window before writing the governor's own
+#     commanded state straight back.
+#
+#     THE RESTORE IS THE LOAD-BEARING PART AND THESE TESTS PIN IT. On this
+#     kernel a userspace cur_state write is STICKY, not self-correcting:
+#     cur_state_store never clears cdev->updated, thermal_cdev_update()
+#     short-circuits while that flag is set, and step_wise clears it only when
+#     its computed target CHANGES. "Write max_state and let the governor's next
+#     poll fix it" would therefore leave the fan at full speed for as long as
+#     the temperature stayed inside one trip band.
+#
+#     Unlike every other unit in this family this one is RESIDENT, not a boot
+#     oneshot, because the fan returns to state 0 and re-enters an active state
+#     many times over a device's uptime and every re-entry is a fresh dead start.
+#
+#     The reference board is cooling_device4 with max_state 4 and cooling-levels
+#     `0 70 75 80 100`. The fixture below deliberately uses cooling_device6 with
+#     max_state 6 behind a decoy CPUFreq cooling_device2, so any hardcoded index
+#     and any hand-invented "100%" kick value fails these tests. No image boot,
+#     no hardware, UNIT scope.
+# ===========================================================================
+
+FANKICK_SCRIPT() { printf '%s' "$V2/mkosi/runtime/ceralive-fan-kickstart.sh"; }
+FANKICK_UNIT() { printf '%s' "$V2/mkosi/runtime/ceralive-fan-kickstart.service"; }
+
+# fankick_fake_thermal <dir> [max_state] [cur_state] — a synthetic
+# /sys/class/thermal whose pwm-fan sits at a NON-reference index behind a decoy
+# CPUFreq cooling device that must never be written.
+fankick_fake_thermal() {
+  local root="$1" max_state="${2:-6}" cur_state="${3:-0}"
+  rm -rf "$root"
+  mkdir -p "$root/cooling_device2" "$root/cooling_device6"
+
+  printf 'thermal-cpufreq-0\n' >"$root/cooling_device2/type"
+  printf '0\n' >"$root/cooling_device2/cur_state"
+  printf '5\n' >"$root/cooling_device2/max_state"
+
+  printf 'pwm-fan\n' >"$root/cooling_device6/type"
+  printf '%s\n' "$cur_state" >"$root/cooling_device6/cur_state"
+  printf '%s\n' "$max_state" >"$root/cooling_device6/max_state"
+}
+
+fankick_attr() { tr -d '[:space:]' <"$1"; }
+
+# fankick_run <sysfs> <kick_ms> <cycles> [extra env...] — drive the resident
+# monitor for a bounded number of poll ticks. CERALIVE_FAN_KICK_MAX_CYCLES is
+# the test seam that makes an ongoing monitor testable at all; production runs
+# unbounded.
+fankick_run() {
+  local sysfs="$1" kick_ms="$2" cycles="$3"; shift 3
+  env CERALIVE_FAN_KICK_THERMAL_DIR="$sysfs" \
+      CERALIVE_FAN_KICK_MS="$kick_ms" \
+      CERALIVE_FAN_KICK_POLL=0.1 \
+      CERALIVE_FAN_KICK_MAX_CYCLES="$cycles" \
+      "$@" bash "$(FANKICK_SCRIPT)"
+}
+
+@test "fan kickstart: the monitor script + unit are installed and enabled" {
+  local unit_dir="$BATS_TEST_TMPDIR/fk-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/fk-sbin"
+  local bin="$BATS_TEST_TMPDIR/fk-bin"
+  local calls="$BATS_TEST_TMPDIR/fk-calls"
+  mkdir -p "$bin"
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$FK_CALLS"
+exit 0
+SH
+  chmod +x "$bin/systemctl"
+
+  run env PATH="$bin:$PATH" FK_CALLS="$calls" \
+    CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
+    FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+  [ "$status" -eq 0 ]
+  [ -x "$sbin_dir/ceralive-fan-kickstart" ]
+  [ -f "$unit_dir/ceralive-fan-kickstart.service" ]
+
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable ceralive-fan-kickstart.service"* ]]
+}
+
+@test "fan kickstart: a genuine 0 -> nonzero edge kicks to the REAL max_state, then restores" {
+  # The reference board's max_state is 4; this fixture's is 6. A kick value that
+  # is a hand-invented "100%", a hardcoded 4, or anything but this device's own
+  # max_state fails here.
+  local sysfs="$BATS_TEST_TMPDIR/fk-edge"
+  local timeline="$BATS_TEST_TMPDIR/fk-edge-timeline"
+  fankick_fake_thermal "$sysfs" 6 0
+
+  # Governor moves it 0 -> 1 shortly after the monitor primes.
+  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state" ) &
+  # Sample cur_state independently so the kick is observed, not inferred.
+  ( for _ in $(seq 1 24); do
+      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
+      printf '\n' >>"$timeline"
+      sleep 0.1
+    done ) &
+  local sampler=$!
+
+  run fankick_run "$sysfs" 800 16
+  [ "$status" -eq 0 ]
+  wait "$sampler"
+
+  [[ "$output" == *"nudging to state 6"* ]]
+  [[ "$output" == *"max_state"* ]]
+  # It kicked: max_state was actually observed on the device mid-run.
+  grep -qx '6' "$timeline"
+  # It restored: the governor's own commanded state is what is left behind.
+  [[ "$output" == *"state 1 handed back"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "1" ]
+  # The decoy CPUFreq cooling device was never touched.
+  [ "$(fankick_attr "$sysfs/cooling_device2/cur_state")" = "0" ]
+}
+
+@test "fan kickstart: the kick is BOUNDED — it ends on its own timer, not on a governor decision" {
+  # The whole safety argument. A kick that outlived its window would sit at full
+  # PWM until the temperature left the trip band, because a userspace cur_state
+  # write is sticky against this kernel's governor.
+  local sysfs="$BATS_TEST_TMPDIR/fk-bounded"
+  local timeline="$BATS_TEST_TMPDIR/fk-bounded-timeline"
+  fankick_fake_thermal "$sysfs" 6 0
+
+  ( sleep 0.35; printf '2\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( for _ in $(seq 1 30); do
+      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
+      printf '\n' >>"$timeline"
+      sleep 0.1
+    done ) &
+  local sampler=$!
+
+  run fankick_run "$sysfs" 500 20
+  [ "$status" -eq 0 ]
+  wait "$sampler"
+
+  # Nothing external ever moved it off max_state, so if it is not at max_state
+  # by the end, the monitor's own bounded window is what ended the kick.
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "2" ]
+  # And the full-PWM period really was a period, not the whole run.
+  local at_max total
+  at_max="$(grep -cx '6' "$timeline" || true)"
+  total="$(grep -cx '[0-9]*' "$timeline" || true)"
+  [ "$at_max" -ge 1 ]
+  [ "$at_max" -lt "$total" ]
+
+  # Structurally: exactly ONE sleep spans the kick, and its length comes from a
+  # validated, band-clamped constant rather than a literal.
+  run bash -c "grep -vE '^[[:space:]]*#' '$(FANKICK_SCRIPT)' | grep -cE '^[[:space:]]*sleep \"\\\$\{KICK_SECONDS\}\"'"
+  [ "$output" -eq 1 ]
+  run fankick_run "$sysfs" 60000 4
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"outside the accepted"* ]]
+}
+
+@test "fan kickstart: nonzero -> nonzero NEVER fires — no re-kick while the fan is already turning" {
+  # The governor climbing 1 -> 3 under its own control must not be interrupted,
+  # and a poll tick that simply re-observes an active fan must not re-kick.
+  local sysfs="$BATS_TEST_TMPDIR/fk-nonzero"
+  fankick_fake_thermal "$sysfs" 6 1
+
+  ( sleep 0.35; printf '3\n' >"$sysfs/cooling_device6/cur_state" ) &
+  run fankick_run "$sysfs" 300 12
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"nudging"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "3" ]
+}
+
+@test "fan kickstart: nonzero -> 0 NEVER fires — a fan being shut off is not a dead start" {
+  local sysfs="$BATS_TEST_TMPDIR/fk-tozero"
+  fankick_fake_thermal "$sysfs" 6 2
+
+  ( sleep 0.35; printf '0\n' >"$sysfs/cooling_device6/cur_state" ) &
+  run fankick_run "$sysfs" 300 12
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"nudging"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "0" ]
+}
+
+@test "fan kickstart: 0 -> max_state NEVER fires — the governor already commands full PWM" {
+  # There is no room to kick above the target, so a write would be pointless.
+  # Same skip condition upstream's in-driver version uses (it boosts only when
+  # the target duty is BELOW the from-stopped duty).
+  local sysfs="$BATS_TEST_TMPDIR/fk-atmax"
+  fankick_fake_thermal "$sysfs" 6 0
+
+  ( sleep 0.35; printf '6\n' >"$sysfs/cooling_device6/cur_state" ) &
+  run fankick_run "$sysfs" 300 12
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"nudging"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "6" ]
+}
+
+@test "fan kickstart: priming means a monitor that STARTS on an already-spinning fan does not kick" {
+  # Restart=on-failure and a mid-life restart must not produce a spurious nudge:
+  # the previous state is seeded from the device, never assumed to be 0.
+  local sysfs="$BATS_TEST_TMPDIR/fk-prime"
+  fankick_fake_thermal "$sysfs" 6 2
+
+  run fankick_run "$sysfs" 300 6
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"currently state 2"* ]]
+  [[ "$output" != *"nudging"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "2" ]
+}
+
+@test "fan kickstart: a governor decision made DURING the kick wins — it is not overwritten by the restore" {
+  local sysfs="$BATS_TEST_TMPDIR/fk-race"
+  fankick_fake_thermal "$sysfs" 6 0
+
+  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state"
+    sleep 0.4;  printf '4\n' >"$sysfs/cooling_device6/cur_state" ) &
+  run fankick_run "$sysfs" 900 18
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nudging to state 6"* ]]
+  [[ "$output" == *"re-asserted state 4"* ]]
+  [[ "$output" != *"state 1 handed back"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "4" ]
+}
+
+@test "fan kickstart: it re-kicks on EVERY cooldown/reheat cycle — this is why it is not a oneshot" {
+  local sysfs="$BATS_TEST_TMPDIR/fk-cycles"
+  fankick_fake_thermal "$sysfs" 6 0
+
+  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state"
+    sleep 0.9;  printf '0\n' >"$sysfs/cooling_device6/cur_state"
+    sleep 0.4;  printf '1\n' >"$sysfs/cooling_device6/cur_state" ) &
+  run fankick_run "$sysfs" 300 26
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'nudging to state 6')" -eq 2 ]
+}
+
+@test "fan kickstart: discovery is generic and the kick value is READ, never a literal" {
+  local script
+  script="$(FANKICK_SCRIPT)"
+
+  # No executable line may name a concrete index, the hwmon node, or a trip point.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -E 'thermal_zone[0-9]|cooling_device[0-9]|hwmon'"
+  [ "$status" -ne 0 ]
+
+  # It selects the device by the exact `pwm-fan` type string and reads max_state.
+  grep -Fq 'readonly WANTED_CDEV_TYPE="pwm-fan"' "$script"
+  grep -Fq 'read_attr "${cdev}/max_state"' "$script"
+
+  # cur_state is written exactly twice — the kick and the restore — and BOTH
+  # values are variable references, so no hand-invented "100%" can creep in.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -cE 'write_attr \"\\\$\{cdev\}/cur_state\"'"
+  [ "$output" -eq 2 ]
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -E 'write_attr \"\\\$\{cdev\}/cur_state\" \"[0-9]'"
+  [ "$status" -ne 0 ]
+}
+
+@test "fan kickstart: the governor is nudged, never replaced — no pwm1, no mode, no trip writes" {
+  # Writing the hwmon pwm nodes means owning the fan forever (including across
+  # suspend and shutdown); writing thermal_zone*/mode would also disable that
+  # zone's critical trip. Both are out of bounds, exactly as for the fan curve.
+  local script
+  script="$(FANKICK_SCRIPT)"
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -E '(pwm1|pwm1_enable|/mode|trip_point|emul_temp)'"
+  [ "$status" -ne 0 ]
+
+  # And it must not reach for the fan curve's own artifacts.
+  run bash -c "grep -vE '^[[:space:]]*#' '$script' | grep -E 'ceralive-fan-curve'"
+  [ "$status" -ne 0 ]
+}
+
+@test "fan kickstart: the restore write is present and is NOT deletable as redundant" {
+  # A userspace cur_state write is sticky against this kernel's governor
+  # (cur_state_store leaves cdev->updated set, thermal_cdev_update()
+  # short-circuits on it, step_wise clears it only when its target changes), so
+  # the restore is the only thing that ends the kick. Pin both the code and the
+  # explanation, because the tempting "simplification" is to delete it.
+  local script
+  script="$(FANKICK_SCRIPT)"
+  grep -Fq 'write_attr "${cdev}/cur_state" "${edge_states[i]}"' "$script"
+  grep -q 'STICKY' "$script"
+  grep -q 'cdev->updated' "$script"
+}
+
+@test "fan kickstart: a board with no pwm-fan cooling device is an informational no-op" {
+  # x86-minipc has a populated ACPI thermal tree and no pwm-fan at all.
+  local sysfs="$BATS_TEST_TMPDIR/fk-nofan"
+  rm -rf "$sysfs"
+  mkdir -p "$sysfs/cooling_device0"
+  printf 'Processor\n' >"$sysfs/cooling_device0/type"
+  printf '0\n' >"$sysfs/cooling_device0/max_state"
+
+  run env CERALIVE_FAN_KICK_THERMAL_DIR="$sysfs" CERALIVE_FAN_KICK_WAIT=1 \
+    bash "$(FANKICK_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no fan to kick-start"* ]]
+
+  # A board with no thermal class at all is equally a clean no-op.
+  run env CERALIVE_FAN_KICK_THERMAL_DIR="$BATS_TEST_TMPDIR/fk-absent" \
+    bash "$(FANKICK_SCRIPT)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no thermal class"* ]]
+
+  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
+  grep -Fq 'deadline=$(( SECONDS + WAIT_SECONDS ))' "$(FANKICK_SCRIPT)"
+}
+
+@test "fan kickstart: a single-active-state board is skipped — there is nothing to kick above" {
+  # max_state == 1 means the only active state IS max_state, so entering it
+  # already commands full PWM and a kick would be a pointless write.
+  local sysfs="$BATS_TEST_TMPDIR/fk-single"
+  fankick_fake_thermal "$sysfs" 1 0
+
+  # MAX_CYCLES is a hang guard, not part of the contract: this run is supposed to
+  # exit at discovery. Without it a regression that drops the skip would leave the
+  # resident monitor looping forever and this test would hang instead of failing.
+  run fankick_run "$sysfs" 300 6
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to kick above"* ]]
+  [[ "$output" != *"nudging"* ]]
+  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "0" ]
+}
+
+@test "fan kickstart: the unit is RESIDENT (Type=exec + Restart=on-failure), not a oneshot" {
+  # The fan re-enters an active state many times over a device's uptime, so a
+  # boot oneshot would fix only the first dead start.
+  local unit
+  unit="$(FANKICK_UNIT)"
+  grep -Eq '^Type=exec$' "$unit"
+  grep -Eq '^Restart=on-failure$' "$unit"
+  grep -Eq '^RestartSec=' "$unit"
+
+  # NOT a oneshot, and NOT Restart=always: the script exits 0 on purpose on a
+  # board with no fan, and `always` would respawn that in a hot loop forever.
+  run grep -E '^Type=oneshot$' "$unit"
+  [ "$status" -ne 0 ]
+  run grep -E '^Restart=always$' "$unit"
+  [ "$status" -ne 0 ]
+
+  # Hardening must not remount /sys read-only — that would break the one write
+  # this unit exists to make.
+  run grep -E '^ProtectKernelTunables=yes$' "$unit"
+  [ "$status" -ne 0 ]
+}
+
+@test "fan kickstart: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+  local unit_dir="$BATS_TEST_TMPDIR/fk-failclosed-units"
+  local sbin_dir="$BATS_TEST_TMPDIR/fk-failclosed-sbin"
+  run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/fk-empty-src" \
+    FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
+    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"fan-kickstart script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-fan-kickstart.service" ]
+}
+
+@test "fan kickstart: the fix is wired into configure_services and registered in the drift gate" {
+  # An unreferenced setup function is dead code — the stalling fan ships.
+  run grep -E '^\s*setup_fan_kickstart$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  # Standalone-artifact idiom: defined once in postinst-lib.sh, never inlined.
+  grep -Fq 'setup_fan_kickstart' "$V2/ci/postinst-drift-check.sh"
+  run grep -cE '^setup_fan_kickstart\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+
+  # It is ADDITIVE to setup_fan_curve, which must remain untouched and separate.
+  run grep -cE '^setup_fan_curve\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
 }

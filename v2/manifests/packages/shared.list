@@ -187,6 +187,7 @@ e2fsprogs                # ships /sbin/mkfs.ext4 — rauc shells out to it to fo
                          # invisible; installing e2fsprogs made the REAL end-to-end OTA install
                          # complete successfully (signature verified, slot B activated and rebooted
                          # healthy), proving the fix on physical hardware.
+zstd                     # initramfs-tools uses it in the target rootfs to compress initrds instead of falling back to gzip.
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.

@@ -335,6 +335,8 @@ configure_services() {
   suppress_unusable_boot_units
   setup_typec_source_role
   setup_fan_curve
+  setup_fan_kickstart
+  setup_led_status
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must
@@ -522,6 +524,117 @@ setup_fan_curve() {
   install -D -m 0644 "${src}/ceralive-fan-curve.service" "${unit_dir}/ceralive-fan-curve.service"
 
   enable_service ceralive-fan-curve.service
+}
+
+# Operator feedback: give the board's indicator LEDs a default meaning at boot.
+#
+# The kernel registers this board's LEDs and then leaves the INDICATOR ones
+# entirely unconfigured — read on a live Orange Pi 5 Plus, both
+# `blue:indicator-1` (gpio-leds) and `green:indicator-2` (pwm-leds) sit at
+# `trigger = [none]` with `brightness = 0` forever. They are wired, they work,
+# and nothing ever asks them to do anything, so a headless streaming appliance
+# offers its operator zero visual evidence that it is even alive.
+#
+# The unit assigns `heartbeat` to the first discovered indicator LED (kernel is
+# scheduling) and `mmc1` to the second (the board is doing card I/O). Both are
+# stock kernel triggers and both are verified present in that LED's own
+# `trigger` menu before anything is written.
+#
+# IT NEVER WRITES `brightness`. A trigger hands the LED to the kernel; writing
+# brightness afterwards fights the trigger just installed — the same
+# "kernel does 100% of the driving" principle setup_fan_curve established for
+# the thermal governor. Set the policy, then get out of the way.
+#
+# `mmc0::` (the MMC host's own activity LED) is EXCLUDED and left exactly as the
+# kernel set it — it is not an indicator LED, it already works, and it is not
+# ours. There is NO red LED in the kernel's LED class on this board at all: the
+# red one an operator can see is, on the evidence, a hardwired power-rail
+# indicator with no software visibility. Nothing here can address it.
+#
+# WHY DISCOVERY IS GENERIC. `blue:indicator-1` / `green:indicator-2` are vendor
+# DTS labels with no semantics — they are not `status`/`activity`/`power` — and
+# they differ per board and per kernel tree. Matching either string is how a
+# "working" fix silently stops working on the next board, so the script
+# enumerates /sys/class/leds, rejects any name with a reserved field
+# (`mmc[0-9]*`, `power`), sorts for determinism and takes the first two. Same
+# never-hardcode-an-index principle as setup_fan_curve.
+#
+# BOARD-AGNOSTIC: no LED class, zero, one, or five candidate LEDs are all
+# informational log-and-exit-0 outcomes. Called from configure_services on every
+# board for exactly that reason — the applicability decision belongs to the
+# hardware at runtime, not to a manifest kept in sync by hand.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_fan_curve / setup_typec_source_role), never inlined.
+# LED_STATUS_UNIT_DIR / LED_STATUS_SBIN_DIR override the install dirs for the
+# offline test.
+setup_led_status() {
+  log "assigning default status-LED triggers at boot (ceralive-led-status.service — the indicator LEDs ship at trigger=none and never light up)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-led-status.sh" ]] \
+    || die "led-status script not found: ${src}/ceralive-led-status.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-led-status.service" ]] \
+    || die "led-status unit not found: ${src}/ceralive-led-status.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${LED_STATUS_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${LED_STATUS_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-led-status.sh" "${sbin_dir}/ceralive-led-status"
+  install -D -m 0644 "${src}/ceralive-led-status.service" "${unit_dir}/ceralive-led-status.service"
+
+  enable_service ceralive-led-status.service
+}
+
+# Break the fan's static friction when the governor first asks it to spin.
+#
+# setup_fan_curve (above) fixed WHEN the fan is asked to run. This fixes the fact
+# that the state it is asked into is too WEAK to start it from a stop: measured on
+# a live Orange Pi 5 Plus, the pwm-fan's first active state is 70/255 (~27.5% duty),
+# which sustains a turning rotor but does not break stiction on a stopped one. The
+# fan sits energised and stalled until someone nudges it by hand — the exact
+# operator report. Upstream Linux ships an in-driver equivalent
+# (`fan-stop-to-start-percent`/`-us` in pwm-fan.c), but those properties postdate
+# both v6.1 and v6.6, so this kernel has no DT knob and the fix must be userspace.
+#
+# THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so: the fan returns to
+# state 0 whenever the board cools below the trip and re-enters an active state
+# when it warms again, many times over a device's uptime. A boot-time oneshot like
+# setup_fan_curve/setup_led_status/setup_typec_source_role would fix only the first
+# dead start. Type=exec + Restart=on-failure follows the repo's existing long-running
+# precedent (ceralive-rtmp-gateway.service).
+#
+# UNLIKE setup_fan_curve, THIS ONE DOES WRITE cur_state — and that is deliberate,
+# bounded, and not a contradiction of the fan-curve rule. It writes exactly twice per
+# 0 -> nonzero edge: max_state, then the governor's own commanded state back again.
+# The restore is MANDATORY, not cosmetic: on this kernel a userspace cur_state write
+# is STICKY (cur_state_store never clears cdev->updated, thermal_cdev_update()
+# short-circuits on it, and step_wise clears it only when its target CHANGES), so
+# "write and let the governor's next poll correct it" would leave the fan at 100%
+# for as long as the temperature stayed in one trip band. Full mechanism, with the
+# exact kernel sources: the script header.
+#
+# BOARD-AGNOSTIC: no thermal class, no pwm-fan cooling device (x86-minipc), or a
+# max_state below 2 (no room to kick above the first active state) are informational
+# log-and-exit-0 outcomes. Called from configure_services on every board for that
+# reason — the applicability decision belongs to the hardware at runtime.
+#
+# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
+# (same idiom as setup_fan_curve / setup_led_status), never inlined.
+# FAN_KICKSTART_UNIT_DIR / FAN_KICKSTART_SBIN_DIR override the install dirs for the
+# offline test.
+setup_fan_kickstart() {
+  log "monitoring the pwm-fan for dead starts (ceralive-fan-kickstart.service — its first active state is too weak to break stiction)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-fan-kickstart.sh" ]] \
+    || die "fan-kickstart script not found: ${src}/ceralive-fan-kickstart.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-fan-kickstart.service" ]] \
+    || die "fan-kickstart unit not found: ${src}/ceralive-fan-kickstart.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${FAN_KICKSTART_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${FAN_KICKSTART_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-fan-kickstart.sh" "${sbin_dir}/ceralive-fan-kickstart"
+  install -D -m 0644 "${src}/ceralive-fan-kickstart.service" "${unit_dir}/ceralive-fan-kickstart.service"
+
+  enable_service ceralive-fan-kickstart.service
 }
 
 # SSH enablement gated on CERALIVE_DEBUG_IMAGE (Todo 42). The base layer installs

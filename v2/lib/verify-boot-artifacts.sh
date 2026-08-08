@@ -125,8 +125,39 @@ FAILS=0
 ok()   { printf '  ok    %s\n' "$*"; }
 bad()  { printf '  FAIL  %s\n' "$*"; FAILS=$((FAILS + 1)); }
 
+# Name a compression container from its leading bytes, so a rejection says WHICH
+# wrong thing was staged instead of only that the magic was wrong.
+compression_name() {
+  case "$1" in
+    1f8b*)         printf 'gzip' ;;
+    fd377a585a00*) printf 'xz' ;;
+    28b52ffd*)     printf 'zstd' ;;
+    425a68*)       printf 'bzip2' ;;
+    04224d18*)     printf 'lz4' ;;
+    02214c18*)     printf 'lz4 (legacy)' ;;
+    894c5a4f*)     printf 'lzop' ;;
+    5d0000*)       printf 'lzma' ;;
+    *)             return 1 ;;
+  esac
+}
+
+# Read the first 64 bytes of one tar member. `tar -tv` cannot see content, and
+# the member is stored with the `./` prefix the packer used — try both spellings.
+# The whole member is extracted to a temp file rather than piped through `head`,
+# because closing that pipe kills tar with SIGPIPE and `set -o pipefail` turns a
+# correct read into a build failure (this repo has shipped that bug once already).
+member_header() {
+  local name="$1" tmp
+  tmp="$(mktemp)"
+  if ! LC_ALL=C tar -xOf "${TAR}" "./${name}" >"${tmp}" 2>/dev/null; then
+    LC_ALL=C tar -xOf "${TAR}" "${name}" >"${tmp}" 2>/dev/null || { rm -f "${tmp}"; return 1; }
+  fi
+  od -An -tx1 -j0 -N64 -v "${tmp}" | tr -d ' \n'
+  rm -f "${tmp}"
+}
+
 check_kernel() {
-  local resolved
+  local resolved header magic comp
   if [[ -z "${TYPE[boot/Image]:-}" ]]; then
     bad "/boot/Image is absent — the selector's first load cannot succeed"
     log "  /boot entries present: $(printf '%s ' "${!TYPE[@]}" | tr ' ' '\n' \
@@ -142,7 +173,29 @@ check_kernel() {
     bad "/boot/Image -> ${resolved} is only ${SIZE[${resolved}]:-0} bytes"
     return
   fi
-  ok "/boot/Image -> ${resolved} (${SIZE[${resolved}]} bytes)"
+
+  # Present, resolvable and big enough still says nothing about whether `booti`
+  # can start it. A real Orange Pi 5 Plus loaded all 15,928,530 bytes of this
+  # file and answered `Bad Linux ARM64 Image magic!`, because arm64's KBUILD_IMAGE
+  # default makes `make bindeb-pkg` ship arch/arm64/boot/Image.GZ as vmlinuz —
+  # and that board's U-Boot has no gzip support anywhere in its booti path.
+  if ! header="$(member_header "${resolved}")"; then
+    bad "/boot/Image -> ${resolved} could not be read out of the tar"
+    return
+  fi
+  # 64-byte ARM64 Image header, Documentation/arm64/booting.rst §4: magic
+  # 0x644d5241 ("ARM\x64", little-endian) at offset 56 — hex chars 112..119.
+  magic="${header:112:8}"
+  if [[ "${magic}" != "41524d64" ]]; then
+    if comp="$(compression_name "${header}")"; then
+      bad "/boot/Image -> ${resolved} is ${comp}-compressed, not a raw ARM64 Image magic (booti cannot decompress it on every board)"
+    else
+      bad "/boot/Image -> ${resolved} has no ARM64 Image magic at offset 56 (found 0x${magic:-<short>})"
+    fi
+    return
+  fi
+
+  ok "/boot/Image -> ${resolved} (${SIZE[${resolved}]} bytes, raw ARM64 Image)"
 }
 
 check_dtb() {

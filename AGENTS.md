@@ -55,6 +55,8 @@ image-building-pipeline/
 | **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
+| **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `v2/mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
+| **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `v2/mkosi/customize/postinst-lib.sh` `setup_led_status` + `v2/mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
@@ -64,7 +66,7 @@ image-building-pipeline/
 | Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
 | v2 unit tests / boot fallback | `v2/tests/manifest.bats`, `v2/tests/rk3588-ab-contract.bats`, and `v2/tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `v2/lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `v2/tests/boot-artifacts.bats` — see the KEY FACT below |
-| **A/B selector arithmetic + load guards** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` KEY FACT below |
+| **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
 | **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
 | **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`v2/docs/X86-MINIPC-BRINGUP.md`](v2/docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
 | **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
@@ -543,6 +545,52 @@ occurrence of each of those `make` calls in the file.
   `/boot/dtb/rockchip/${fdtfile}` either way — proven by the very boot that failed,
   which still read the DTB (`106449 bytes read`) off exactly this layout.
   Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4b.
+- **`/boot/Image` must also be the RAW Image — `bindeb-pkg` ships `Image.gz`, and
+  only ONE of the two boards' U-Boot can cope.** Making the file exist (above) did
+  not make it loadable. On a real Orange Pi 5 Plus the selector ran the whole A/B
+  sequence cleanly, loaded 15,928,530 bytes of `/boot/Image` and the DTB, and then
+  `booti` answered `Bad Linux ARM64 Image magic!`; `md.b 0x00400000 0x40` after a
+  hand `ext4load` read `1f 8b 08 00 …` — gzip, deflate. `arch/arm64/Makefile` sets
+  `KBUILD_IMAGE := $(boot)/Image.gz` and `scripts/package/builddeb` installs
+  `$(make -s image_name)` as `/boot/vmlinuz-<REL>`, so on arm64 **every**
+  `bindeb-pkg` kernel — `edge` AND `vendor-patched` — ships a COMPRESSED vmlinuz.
+  Armbian's vendor package escapes it only because its framework builds rockchip64
+  with `KERNEL_IMAGE_TYPE="Image"`. **The ambiguity this raised is resolved, and it
+  is a per-board U-Boot fact, not a per-build artifact difference** — both boards'
+  `edge` builds emit the same `Image.gz` (the Rock 5B+ build log says
+  `GZIP arch/arm64/boot/Image.gz` in one line), but their staged
+  `u-boot-config-target-1` files (both `26.5.1`, SHA-256-verified against todo 44's
+  own component manifest) disagree: `rock-5b-plus` ships U-Boot **2026.04** with
+  `CONFIG_GZIP=y` / `CONFIG_ZLIB=y` / `CONFIG_CMD_UNZIP=y`, while
+  `orange-pi-5-plus` ships the Rockchip **2017.09** fork in which `CONFIG_GZIP`
+  does not exist as a symbol at all (`CONFIG_CMD_UNZIP` is `not set`,
+  `CONFIG_IMAGE_GZIP` is `not set`). Modern U-Boot's `booti_start()`
+  (`cmd/booti.c`) sniffs the compression and runs `image_decomp()` before
+  `booti_setup()`; 2017.09 predates that entirely — which is why the SAME kernel
+  package booted a Rock 5B+ to userspace and hid this for a release, and why the
+  Orange Pi console answers `unzip` with `Unknown command` and has no interactive
+  workaround. Same lesson as `setexpr` and `loadaddr`, third instance: **never let
+  an artifact contract rest on a board's U-Boot happening to cope.**
+  `install_kernel_source_boot_artifacts` now reads the first bytes of
+  `vmlinuz-<REL>` and, on gzip, `gzip -dc`s it into `/boot/Image` as a **REAL
+  FILE** — a symlink to the still-compressed vmlinuz is the bug, not the fix. An
+  already-raw Image keeps the vendor-parity symlink; any other recognised
+  container (xz/zstd/bzip2/lz4/lzop/lzma) is FATAL and NAMED, because guessing
+  there ships an unbootable slot on every board. It then asserts the magic
+  `0x644d5241` (`"ARM\x64"`, little-endian) at **offset 56** of the 64-byte header
+  (`Documentation/arm64/booting.rst` §4) on whatever it produced — a `gzip -dc`
+  that SUCCEEDS on the wrong payload is still an unbootable slot, so the checked
+  property is the resulting magic, never the exit status of the decompressor.
+  `verify-boot-artifacts.sh` re-asserts the same magic at `[6b/9]` on the real
+  emitted rootfs tar and names the compression it found, so the failure reads as a
+  packaging fact rather than a bootloader mystery. The packaged `vmlinuz-<REL>` is
+  left exactly as `dpkg` installed it; only `/boot/Image` is materialised, at the
+  cost of one extra decompressed kernel in `/boot`. **Invisible to the PR gate**
+  like every finding in this class — `DRY_RUN=1` never runs `[6b/9]` — and
+  invisible to the previous `[6b/9]` too, which read `tar -tv` metadata only and
+  so could see the symlink, its target and its size but never a byte of content.
+  Guards: `v2/tests/boot-artifacts.bats` (9 added cases). Full write-up:
+  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4c.
 - **`[PARTIAL]` — BOTH RK3588 boards COMPILE end to end; nothing has BOOTED.** A
   real (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
   `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
@@ -1012,6 +1060,69 @@ budget, proves rollover to B and B's own decrement, and proves an unloadable
 kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the token
 `setexpr` outside comments.
 
+**The A/B selector must define its OWN scratch address — an inherited `loadaddr`
+is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]
+
+Third defect in the same `v2/mkosi/platform/boot/boot.scr.cmd`, found the same way
+(live interactive U-Boot over UART) but on the OTHER board, and it is worse than the
+two above: it does not crash-loop, it stops the board dead until someone pulls power.
+
+The script used `${loadaddr}` as an implicit scratch DRAM address at all eight of its
+`env import` / `env export` / `fatwrite` sites without ever defining it, i.e. it
+assumed the board's default U-Boot environment supplies one. **That is a per-board
+fact, not a U-Boot guarantee.** On a real Orange Pi 5 Plus:
+
+```
+=> printenv loadaddr
+## Error: "loadaddr" not defined
+=> printenv kernel_addr_r fdt_addr_r ramdisk_addr_r
+kernel_addr_r=0x00400000
+fdt_addr_r=0x08300000
+ramdisk_addr_r=0x0a200000
+```
+
+The three addresses the selector uses for the REAL kernel/DTB/initrd loads are fine
+on both boards; only the scratch one is absent, and only on this board — which is
+exactly why the fix above was authored and validated on a Rock 5B+ and shipped
+looking correct. With `${loadaddr}` empty the address argument does not become
+"invalid", it **disappears**: `env export -t ${loadaddr} BOOT_ORDER …` becomes
+`env export -t BOOT_ORDER …`, U-Boot parses `BOOT_ORDER` as the destination address,
+and writing the env blob there faults the SoC memory bus. The board printed the
+selector's own `BOOT_ORDER=A B A_LEFT=3 B_LEFT=3` line and then:
+
+```
+"Error" handler, esr 0xbe000011
+
+* Reason:        Exception from SError interrupt
+...
+### ERROR ### Please RESET the board ###
+```
+
+Note the handler name: this is an **SError**, a DIFFERENT exception class from the
+`"Synchronous Abort" handler, esr 0x02000000` of the unguarded-`ext4load` defect
+above. Same script, same board family, two separate signatures — do not conflate
+them when reading a UART capture.
+
+No reset loop, no fall-through to the other slot or to eMMC — UART silent across
+repeated polls, physical power cycle required. Isolated outside the script by
+replaying that single command by hand (identical PC and ESR).
+
+The selector now `setenv loadaddr 0x00c00000` before its first use, so all eight
+sites resolve to a fixed address regardless of what the board shipped. **12 MiB is
+not an arbitrary pick** — it is clear of `kernel_addr_r` (4 MiB) and far below
+`fdt_addr_r` (131 MiB) / `ramdisk_addr_r` (162 MiB), and it was proven on that board
+with a full `env export` → `fatwrite` → `fatload` → `env import` round trip that
+returned all three variables byte-for-byte with no exception. `recovery.scr.cmd` has
+never had this defect — it only ever uses the three `*_addr_r` variables.
+
+Guard: `v2/tests/boot-script-sanitize.test.sh` runs the real script against a stubbed
+default environment with **no `loadaddr` at all**, the same way it stubs `setexpr` as
+absent, and its stubs treat a vanished address argument as the terminal `SERROR` the
+board actually produced rather than a silent no-op — so this fails the suite, not the
+fleet. A static leg additionally requires the `setenv` to precede the first use.
+**Do not reintroduce a dependency on any board default-environment variable here**;
+if another scratch address is ever needed, define it in the script too.
+
 **Before ANY bench reboot into a freshly-installed slot, the OTHER slot MUST be
 confirmed-good first — otherwise automatic rollback is already disabled** [KNOWN ISSUE /
 SAFETY RULE]
@@ -1077,6 +1188,14 @@ right after the tar is emitted, and fails the build if anything is missing.
   be a symlink to `dtb-<REL>/` or a real directory. It checks what U-Boot can load,
   not which packaging mechanism produced it — the vendor and source-built layouts
   legitimately differ (see the kernel-from-source `/boot` artifact mapping above).
+- **Layout-agnostic, but NOT content-agnostic.** It also reads the first 64 bytes of
+  the resolved `/boot/Image` and requires the raw ARM64 Image magic at offset 56,
+  naming the compression when it finds one. Metadata alone passed a gzip `Image.gz`
+  that `booti` refused on a real board — see the `bindeb-pkg` ships `Image.gz` KEY
+  FACT above. The member is extracted to a temp file rather than piped through
+  `head`: closing that pipe kills `tar` with `SIGPIPE`, and `set -o pipefail` turns
+  a correct read into a build failure — the exact bug `deb_lists_path` already
+  shipped once.
 - **Why it is not left to `tests/preflash-verify.sh`,** whose `check_rootfs_populated`
   already checks these artifacts: that tool runs on a **production-labelled `.raw` an
   operator is about to flash**, and it asserts the frozen PARTLABEL set FIRST — so a
@@ -1088,9 +1207,10 @@ right after the tar is emitted, and fails the build if anything is missing.
   sizes are readable with no loop device, no `debugfs` and no privileges — ~1 s on a
   1.5 GB tar, and it runs identically in CI.
 
-Guards: `v2/tests/boot-artifacts.bats` (17 tests — both layouts pass, the exact
+Guards: `v2/tests/boot-artifacts.bats` (27 tests — both layouts pass, the exact
 pre-fix layout is rejected, each artifact is driven out of BOTH layouts one at a
-time, plus the producing mechanisms and the orchestrator wiring).
+time, the Image FORMAT is asserted in both the verifier and the real shipped
+staging function, plus the producing mechanisms and the orchestrator wiring).
 
 **Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
 
@@ -2119,6 +2239,266 @@ proven by hand on real hardware; the unit that performs it at boot has not been
 through this repo's build/flash/release cycle. Confirming that a booted board reports
 the lowered trip and that the fan audibly idles is the remaining on-hardware step.
 
+**The fan's FIRST active state is 70/255 (~27.5 %) — enough to keep a spinning rotor
+spinning, not enough to start a stopped one — and a userspace `cur_state` write is
+STICKY, so the nudge MUST hand the governor's own state back** [EXISTS — code
+merged-ready, NOT in any shipped release yet]
+
+`setup_fan_curve` above fixed **when** the fan is asked to run. This is the next
+problem, and it is a different one: the state it is asked **into** cannot start it
+from a dead stop. Read on a live Orange Pi 5 Plus:
+
+```
+cooling_device4/type                    -> pwm-fan
+cooling_device4/max_state               -> 4
+pwm-fan/of_node/cooling-levels          -> 0 70 75 80 100     (out of 255)
+hwmon7/name                             -> pwmfan
+thermal_zone0/trip_point_1_temp         -> 45000              (fan-curve's fix, active)
+```
+
+Five states (0-4), so the FIRST active state — the one the governor enters when the
+zone crosses the now-45 °C trip — is `70/255 ≈ 27.5 %` duty. That is a classic
+DC-motor stiction asymmetry: sufficient to sustain rotation, insufficient to break
+static friction from rest. The fan sits energised and stalled until a fingertip
+nudges it, which is exactly the operator's report ("gets stuck, needs a push, then
+runs fine").
+
+**This is a real, upstream-acknowledged hardware behaviour with an upstream fix this
+kernel does not have.** Current Linux `pwm-fan` grew `fan-stop-to-start-percent` /
+`fan-stop-to-start-us` (`Documentation/devicetree/bindings/hwmon/pwm-fan.yaml`),
+implemented in `__set_pwm()` as *boost → `usleep_range()` → apply the real target*,
+with `ctx->pwm_usec_from_stopped` defaulting to **250 000 µs**. Those properties are
+absent from **both v6.1 and v6.6** (checked), so this board's vendor 6.1.115 BSP has
+no DT knob and the equivalent has to come from userspace.
+`ceralive-fan-kickstart.service` is a faithful userspace port of that mechanism —
+**including its explicit restore step**, which is the part that matters most.
+
+**THE LOAD-BEARING KERNEL FACT — DO NOT "SIMPLIFY" THE RESTORE AWAY.** The obvious
+design is "write `max_state`, then stop writing and let the governor's next
+scheduled poll overwrite it with whatever the real temperature calls for."
+**On this kernel that is FALSE**, and shipping it would leave the fan at 100 %
+indefinitely. Verified by reading the exact tree the board runs
+(`armbian/linux-rockchip` @ `95e85f6cb496`, 6.1.115), three facts that compose:
+
+- `drivers/thermal/thermal_sysfs.c` `cur_state_store()` calls
+  `cdev->ops->set_cur_state()` and **does NOT clear `cdev->updated`**.
+- `drivers/thermal/thermal_helpers.c` is
+  `thermal_cdev_update() { if (!cdev->updated) { __thermal_cdev_update(cdev); … } }`
+  — while `updated` is set it re-asserts **nothing at all**.
+- `drivers/thermal/gov_step_wise.c` clears `updated` **only when its newly computed
+  target differs**: `if (instance->initialized && old_target == instance->target) continue;`.
+
+So while the temperature stays inside one trip band the governor's target does not
+change, `updated` stays true, and the governor never writes again — the kick would
+persist, unbounded. Worse, `get_target_state()` derives its next step from the REAL
+current state (`clamp(cur_state + 1, lower, upper)`), so on a rising trend the
+governor **reads back the kicked value and adopts `max_state` as its own target**:
+the nudge latches itself in. Both failure modes were confirmed by source reading, and
+the kernel's own `cur_state` write path is what makes them possible.
+
+Hence the shipped design, which is a bounded three-phase transaction per edge:
+**(1)** write the device's own `max_state`; **(2)** sleep exactly `CERALIVE_FAN_KICK_MS`
+(default **1000**); **(3)** write the governor's own pre-kick commanded state back —
+*unless* `cur_state` no longer reads the kick value, in which case the governor made a
+fresher decision during the window and its newer verdict is honoured instead. The
+restore is what makes the full-PWM period equal to the sleep rather than "until the
+temperature happens to leave the band", and it restores the driver's cached state so
+step_wise's `cur_state + 1` arithmetic resumes from the correct rung.
+
+**Why 1000 ms and not upstream's 250 ms.** Upstream boosts inside the same
+`pwm_apply` that first energises the fan, so its clock starts at power-on. A polled
+userspace watcher necessarily applies the boost up to one poll interval later, by
+which point the rotor is not *about to start* but already energised and stalled —
+breaking a stall wants more margin than avoiding one. 1000 ms also clears the top of
+the ~300-800 ms spin-up band of the 40-80 mm 5 V fans these SBCs use while still
+reading as a brief transient. The risk is asymmetric: because the kick always ends in
+an explicit restore, erring long costs a fraction of a second of fan noise and can
+never be a thermal risk, while erring short silently fails to fix anything. The value
+is one named, band-clamped constant (100-5000 ms) so it can be retuned on the bench.
+
+**THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so.** Unlike
+`ceralive-fan-curve` / `-led-status` / `-typec-source`, this cannot be a boot
+oneshot: the fan drops back to state 0 whenever the board cools below the trip and
+re-enters an active state when it warms again, many times over a device's uptime, and
+**every** re-entry is a fresh dead start. `Type=exec` + `Restart=on-failure` +
+`RestartSec=5s` follows this repo's existing long-running precedent
+(`ceralive-rtmp-gateway.service`); `Type=exec` over the bare `simple` default so a
+missing or non-executable script is a start failure rather than a unit that silently
+"succeeds" and watches nothing. **`Restart=always` is deliberately WRONG here** — the
+script exits 0 on purpose on a board with no fan, and `always` would respawn that in a
+hot loop forever. It runs `Nice=10` / `CPUWeight=20` / `IOSchedulingClass=idle`,
+because it runs for the life of the device and must never compete with the media path;
+the work per tick is one small sysfs read at 4 Hz. **`ProtectKernelTunables=` is
+deliberately left at its default (`no`)** — enabling it remounts `/sys` read-only and
+would break the one write this unit exists to make.
+
+**Fires ONLY on a genuine 0 → nonzero edge.** `nonzero → nonzero` (the governor
+climbing or descending under its own control) and `anything → 0` never fire, and a
+governor that jumped straight to `max_state` is already commanding full PWM so there
+is nothing to kick above — the same skip condition upstream uses (`update = duty <
+from_stopped`). The previous state is **primed from the device at startup**, never
+assumed to be 0, so a `Restart=` mid-life does not produce a spurious nudge.
+
+**Discovery is generic, and hardcoding is the trap — same lesson as `setup_fan_curve`.**
+`cooling_device4`/`hwmon7` are registration-order artefacts. The script scans
+`cooling_device*/type` for the exact string `pwm-fan` and takes BOTH the kick value
+and the skip decision from that device's **own `max_state`**, never a hand-invented
+"100 %" and never this board's particular `0 70 75 80 100` levels, which it does not
+read at all — it works purely in cooling-state space, so it is independent of whatever
+duty cycles a given board's DT maps those states onto.
+
+**Board-agnostic and fail-soft:** no thermal class, no `pwm-fan` cooling device
+(x86-minipc), or `max_state < 2` are informational log-and-exit-0 outcomes.
+`max_state < 2` is its own explicit case: if the only active state IS `max_state`,
+entering it already commands full PWM and there is no room to kick above the target,
+so kicking would be a pointless write. Like the fan curve it polls to a short deadline
+(10 s) for the asynchronous driver probe rather than sleeping a fixed amount, and it is
+deliberately **not `Before=` anything**.
+
+**It does NOT write `pwm1`/`pwm1_enable`** (the cooling device's own `cur_state` is
+this board's sanctioned control surface; driving the hwmon node means owning the fan
+forever, including across suspend and shutdown), does NOT write `thermal_zone*/mode`,
+and does NOT touch any trip point — that is `setup_fan_curve`'s job and this unit
+deliberately does not overlap with it. `setup_fan_curve` and its two artifacts are
+byte-untouched by this change.
+
+Guards: `v2/tests/manifest.bats` §29 "fan kickstart: …" (17 tests). The fixture
+deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not the
+reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
+`cooling_device2` that must never be written, so any hardcoded index and any
+hand-invented kick value fails the suite. It pins the kick→restore round trip against
+an independently sampled `cur_state` timeline, the bounded window, all three
+never-fire edges, startup priming, the mid-kick governor-re-assert race, a
+second cooldown/reheat cycle firing again (the property that makes a oneshot wrong),
+the `max_state`-is-READ-never-a-literal contract, the no-`pwm1`/`mode`/trip rule, the
+restore write plus its `STICKY`/`cdev->updated` rationale being present, the
+no-`pwm-fan` and single-active-state no-ops, the resident-unit contract, fail-closed
+missing source, and the `configure_services` wiring. All 17 were mutation-verified:
+deleting the restore, widening the edge test, hardcoding the kick to `4`, dropping the
+single-state skip, priming to 0, and dropping the race guard each fail the suite.
+`setup_fan_kickstart` is registered in `postinst-drift-check.sh`'s
+`CONSOLIDATED_FUNCS`; nothing was added to `mkosi.postinst.chroot`.
+
+**Not yet in a shipped release, and not yet boot-proven.** The stiction diagnosis
+rests on live-hardware readings and the sticky-write mechanism on the pinned kernel
+sources; the unit itself has not been through this repo's build/flash/release cycle.
+The remaining on-hardware step is to confirm that a real 0 → 1 crossing produces an
+audible full-speed burst that settles back within ~1 s and that the fan starts every
+time without a manual push. It can be logic-verified without root the same way the LED
+fix was — mirror the real `/sys/class/thermal` into a writable `/tmp` tree
+(`cp -r --dereference` the `cooling_device*` dirs, keeping `type`/`cur_state`/`max_state`)
+and point `CERALIVE_FAN_KICK_THERMAL_DIR` at it, then drive `cur_state` 0 → 1 by hand
+and watch the monitor's journal lines and the mirrored file.
+
+**The board's indicator LEDs are registered by the kernel and then never
+configured — they sit at `trigger=none`, `brightness=0`, dark, forever** [EXISTS —
+code merged-ready, NOT in any shipped release yet]
+
+Read on a live Orange Pi 5 Plus. The kernel's LED class holds exactly three
+entries, and the two that an operator would actually read as status are doing
+nothing at all:
+
+```
+/sys/class/leds/blue:indicator-1   -> /sys/devices/platform/gpio-leds/leds/blue:indicator-1
+/sys/class/leds/green:indicator-2  -> /sys/devices/platform/pwm-leds/leds/green:indicator-2
+/sys/class/leds/mmc0::             -> /sys/devices/platform/fe2e0000.mmc/leds/mmc0::
+```
+
+`blue:indicator-1` and `green:indicator-2` both read `trigger = [none]` and
+`brightness = 0`. They are wired, the drivers bound, and nothing in the image or
+the device tree ever asks them to do anything — so a headless streaming
+appliance with no screen gives its operator **zero** visual evidence that it
+booted, that the kernel is alive, or that it is doing any work. This is not a
+broken LED; it is an unclaimed one, exactly like the `pwm-fan` above was a
+working fan that was never asked to run.
+
+`ceralive-led-status.service` (a boot oneshot, installed by
+`postinst-lib.sh::setup_led_status` from the committed standalone artifacts
+`v2/mkosi/runtime/ceralive-led-status.{sh,service}`) assigns an ORDERED policy
+to the discovered indicator LEDs: the **first** gets `heartbeat` (the stock
+load-modulated "the kernel is scheduling" blink — meaningful on every board and
+in every state), the **second** gets `mmc1` (removable-card activity, so a
+second glance says "the board is doing I/O" and reads differently from the
+heartbeat's double-blink). Both names are confirmed present in this board's own
+trigger menu, and the script re-verifies each against that LED's `trigger`
+attribute before writing — a kernel that does not offer one is logged and
+skipped, never forced.
+
+**It never writes `brightness`, and that is the safety argument.** Installing a
+trigger hands the LED to the kernel; writing `brightness` afterwards fights the
+very trigger just installed. Same principle as the fan curve's refusal to write
+`cur_state`: set the policy, then get out of the way. The script constructs no
+`brightness` path at all, and exactly one sysfs write exists in it — the
+`trigger` attribute.
+
+**`mmc0::` is NOT one of the indicator LEDs and is deliberately untouched.** It
+is the MMC host controller's own activity LED, registered by the mmc core and
+already driven by the kernel — a separate, already-working thing. Do not "fix"
+it, and do not read its presence as evidence that the other two are configured.
+
+**There is NO red LED anywhere in the kernel's LED class on this board.** The red
+LED an operator can see next to the others is, on the evidence, a hardwired
+power-rail indicator with no software visibility whatsoever. Nothing in this
+repo — no udev rule, no sysfs write, no DT property this pipeline owns — can
+address it. It is recorded here specifically so the next person does not spend
+an afternoon looking for it in `/sys`.
+
+**THE EXCLUSION RULE, AND WHY IT IS SHAPED THIS WAY.** An LED's class name IS its
+identity (the directory basename; there is no separate `name` attribute), and
+Linux spells it `devicename:colour:function`
+(`Documentation/leds/leds-class.rst`). Real boards fill those fields
+inconsistently — this board's vendor DTS emits `blue:indicator-1` (colour first,
+no devicename) while the mmc core emits `mmc0::` (devicename first, no colour,
+no function) — so keying on field POSITION is not portable. The rule is
+therefore: split the name on `:` and reject the LED if **any** field matches
+`mmc[0-9]*` (a kernel-managed MMC activity LED) or `power` (a power-rail
+indicator must keep meaning "powered"; repurposing it destroys information
+rather than adding it). That is the entire list on purpose. A name-based
+ALLOWLIST would be worse than useless here: `indicator-1`/`indicator-2` carry no
+semantics at all — they are not `status`/`activity`/`power` — so there is
+nothing meaningful to match on, and anything surviving the two exclusions is by
+construction an unclaimed indicator.
+
+The script additionally **never re-points an LED that already has a trigger**,
+whether from a DT `default-trigger`, a previous run, or an operator. That is
+both the right policy (an LED that already means something keeps meaning it) and
+what makes the unit idempotent across reboots and A/B slot swaps. Reading the
+current trigger goes through the same bracket parse
+`ceralive-typec-source` documents for `port_type`: the attribute prints the
+WHOLE menu with the active entry bracketed (`[none] rfkill-any heartbeat mmc0
+mmc1 …`), so a naive literal compare is never true.
+
+**Board-agnostic and fail-soft by construction.** No LED class, an empty one,
+only reserved LEDs, exactly one free LED, or five of them are all informational
+log-and-exit-0 outcomes — the surplus beyond the policy's two triggers is logged
+and left exactly as the kernel set it. A refused write is a WARNING (the board
+keeps a dark LED, which is the state it shipped in) and the run continues to the
+next LED; only a write the kernel ACCEPTS and then does not honour is fatal,
+because by then the hardware shape has already been proven present. Like the fan
+curve it polls to a short deadline (10 s) rather than sleeping — `gpio-leds` and
+`pwm-leds` probe asynchronously — and it is **deliberately not `Before=`
+anything**, because nothing consumes an LED trigger and a board with no LEDs
+must not pay that wait on the boot critical path.
+
+Guards: `v2/tests/manifest.bats` §18g "led status: …" (11 tests). The fixture
+deliberately uses LED names the reference board does not have —
+`amber:status-a`, `white:status-b`, a `red:power` decoy, and the kernel LED at
+`mmc2::` rather than `mmc0::` — so any hardcoded LED name, and any `mmc0`-literal
+exclusion, fails the suite. It also pins the never-write-`brightness` property
+(both statically and by asserting the fixture's `brightness` nodes are unchanged
+after a real run), the zero/one/two/three-LED matrix, idempotency against the
+bracketed already-set form, the not-offered-trigger skip, the loud read-back
+failure, the RO-node warning, fail-closed missing source, and the
+`configure_services` wiring. `setup_led_status` is registered in
+`postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`; nothing was added to
+`mkosi.postinst.chroot`, which stays at 925 lines against the 950 ceiling.
+
+**Not yet in a shipped release, and not yet boot-proven.** The discovery and the
+policy are proven against synthetic fixtures and the LED inventory above was read
+off a real board, but no booted image has yet been observed lighting the LEDs.
+Confirming a heartbeat blink and card-activity flicker on hardware is the
+remaining step.
+
 ## ADD-ON SUBSYSTEM [EXISTS]
 
 Feature sysexts are optional, per-board/per-OS `.raw` artifacts delivered
@@ -2575,6 +2955,8 @@ gated item, not the package availability.
 - Don't name a source-built kernel package after a stock one. `vendor-patched` builds `linux-image-6.1.115-ceralive-vendor-rk35xx`, never `linux-image-vendor-rk35xx`: a name collision is the one failure that produces a plausible image instead of an error, because the local repository would pick one by version and the board could boot the UNPATCHED kernel
 - Don't silence a config-survival failure by widening `kernel_source.config_absent_symbols`. Every entry is a reviewed statement that the symbol names an out-of-tree driver Armbian's framework injects and this pipeline does not; a listed symbol that DID survive fails the build as a stale exception, and that non-vacuity is what stops the list becoming a blanket opt-out of the gate
 - Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `manifest.bats` statically requires exactly one occurrence of each
+- Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
+- Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
 - Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
@@ -2582,8 +2964,13 @@ gated item, not the package availability.
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
-- Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong is the threshold it acts on
+- Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop to `ceralive-fan-curve`. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong for THAT unit is the threshold it acts on. (`ceralive-fan-kickstart` is the one sanctioned exception, and only to the `cur_state`/resident-loop half: it is a separate unit that writes `cur_state` exactly twice per 0 → nonzero edge and always hands the governor's own state back. `mode`, `pwm1` and trip points remain out of bounds for both.)
+- Don't delete `ceralive-fan-kickstart`'s restore write as a redundant round trip, and don't rewrite it as "kick, then let the governor's next poll correct it". On this kernel a userspace `cur_state` write is STICKY: `cur_state_store()` never clears `cdev->updated`, `thermal_cdev_update()` short-circuits while that flag is set, and `step_wise` clears it only when its computed target CHANGES — so with the temperature inside one trip band the governor never writes again and the fan stays at 100 % indefinitely. Upstream's own in-driver version restores explicitly too
+- Don't kick to a hand-invented "100 %", to `255`, or to the reference board's `max_state` of `4`, and don't read `cooling-levels`. The kick value is the discovered device's OWN `max_state`; the unit works purely in cooling-state space so it does not care what duty cycles a board's DT maps those states onto
+- Don't give `ceralive-fan-kickstart` `Restart=always` or `ProtectKernelTunables=yes`. It exits 0 on purpose on a board with no `pwm-fan`, so `always` becomes a hot respawn loop; `ProtectKernelTunables=yes` remounts `/sys` read-only and breaks the one write the unit exists to make
 - Don't hardcode `thermal_zone0`/`cooling_device4` in the fan-curve script, and don't lower a trip that is not the FIRST `active` one. Both index spaces are registration-order artefacts confirmed to differ per board and per kernel tree, and the `critical` trip is the board's last line of defence
+- Don't write `brightness` on an LED that has a trigger, and don't hardcode `blue:indicator-1`/`green:indicator-2` in the LED script. A trigger hands the LED to the kernel — writing brightness afterwards fights it, exactly as writing `cur_state` would fight the thermal governor — and those names are vendor DTS labels with no semantics that differ per board and per kernel tree
+- Don't touch the `mmc0::`/`mmc1::` LED or go looking for a red one. The `mmc*` LEDs are the MMC core's own already-working activity LEDs, and there is NO red LED in the kernel's LED class on this board at all — the visible red one is a hardwired power-rail indicator with no software visibility
 
 ## KNOWN ISSUES / DEFERRED
 
