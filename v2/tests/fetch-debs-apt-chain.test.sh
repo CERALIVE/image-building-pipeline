@@ -163,9 +163,15 @@ run_fetch_first_party() {
 	local dest="$1"
 	shift
 	mkdir -p "${dest}"
+	# Scenario-private .deb cache. These legs COUNT downloads and inject download
+	# failures, so a cache shared with an earlier leg (or with a developer's real
+	# build) would serve the very payload the leg is trying to fail — the fetch
+	# would succeed and the assertion would be measuring ambient state.
+	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_BIN}:${PATH}" \
 		FAKE_APT_LOG="${FAKE_APT_LOG}" \
+		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 	}
@@ -218,10 +224,16 @@ run_fetch_first_party_curl() {
 	local dest="$1" repo="$2"
 	shift 2
 	mkdir -p "${dest}"
+	# Scenario-private .deb cache. These legs COUNT downloads and inject download
+	# failures, so a cache shared with an earlier leg (or with a developer's real
+	# build) would serve the very payload the leg is trying to fail — the fetch
+	# would succeed and the assertion would be measuring ambient state.
+	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_CURL_BIN}:${PATH}" \
 		FAKE_REPO_DIR="${repo}" \
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
+		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 }

@@ -46,6 +46,9 @@
 #   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
 #   APT_GPG_PUBLIC_B64 first-party GPG keyring (base64; required for a real fetch)
 #   APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64   first-party mTLS client cert/key (base64)
+#   CERALIVE_DEBCACHE  0 disables the verified .deb download cache (default: on)
+#   CERALIVE_DEBCACHE_MAX_BYTES  cache ceiling, LRU-evicted   (default: 4 GiB)
+#   CERALIVE_DEBCACHE_DIR        cache location (default: ../mkosi/.staging/.debcache)
 #
 # shellcheck shell=bash
 
@@ -67,6 +70,8 @@ source "${HERE}/fetch-debs-auth.sh"
 # configuration every module reads, and the CLI — nothing else.
 # shellcheck source=fetch/retry.sh
 source "${HERE}/fetch/retry.sh"
+# shellcheck source=fetch/debcache.sh
+source "${HERE}/fetch/debcache.sh"
 # shellcheck source=fetch/pool.sh
 source "${HERE}/fetch/pool.sh"
 # shellcheck source=fetch/verify.sh
@@ -176,6 +181,7 @@ Usage:
 
 Env: CHANNEL ARCH DEST DRY_RUN ARMBIAN_APT_URL ARMBIAN_SUITE ARMBIAN_APT_KEYRING BSP_DEB_VERSIONS_FILE
      APT_CERALIVE_URL APT_GPG_PUBLIC_B64 APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64
+     CERALIVE_DEBCACHE CERALIVE_DEBCACHE_MAX_BYTES CERALIVE_DEBCACHE_DIR
 EOF
 }
 

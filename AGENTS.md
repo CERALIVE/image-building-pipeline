@@ -49,6 +49,7 @@ image-building-pipeline/
 |------|----------|
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
 | Add/change .deb packages | `v2/lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
+| **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `v2/lib/fetch/debcache.sh` + the store site in `v2/lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `v2/manifests/packages/development.delta.list` + `v2/lib/common.sh::runtime_pkg_list_files` + `v2/lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
@@ -3079,6 +3080,73 @@ default; set `CERALIVE_BUILD_LOCK_TIMEOUT=0` for fail-fast behavior or another
 non-negative number of seconds for a bounded wait. This also prevents a CI
 dry-run from deleting the staging tree of an active hardware image build.
 
+**Verified `.deb` download cache — opt-out, bounded, and NOT protected by the
+build lock above** [EXISTS]
+
+`v2/lib/fetch/debcache.sh` gives all three verified fetch families (BSP, RK3588
+userspace, first-party) a persistent content-addressed cache at
+`v2/mkosi/.staging/.debcache/`, keyed on `<package>_<version>_<arch>.deb` plus
+the artifact's expected SHA-256. A second real fetch of the same plan performs
+**zero `.deb` payload downloads** — proven end to end on the userspace family
+(6 pinned upstream packages, 6 downloads then 0, every one re-verified against
+`rk3588-userspace-deb-versions.txt`).
+
+- **Reuse can never weaken verification, and that is the whole safety argument.**
+  Every family already holds the expected SHA-256 before it downloads — from the
+  `gpgv`-verified Packages index (both BSP transports, both first-party
+  transports) or from the committed pin file (userspace) — so a HIT is checked
+  against exactly the hash the network path would have been checked against. An
+  entry whose hash no longer matches is **deleted**, not skipped: it is either
+  corrupt on disk or the archive replaced the bytes under the same filename, and
+  keeping it would re-fail every future build.
+- **Only final `.deb` payloads are cached.** `InRelease`, `Release`,
+  `Packages.gz`, the apt lists and the GPG keyring are DELIBERATELY never cached
+  — that is the rotating trust material whose entire job is to be fresh, and a
+  stale index is how a cache becomes a downgrade surface. So the "0 downloads"
+  claim is about payloads; apt/index metadata is still fetched every run.
+- **Writes go through ONE chokepoint.** `publish_staged_deb` (`fetch/pool.sh`) is
+  the single atomic-rename step all three families funnel through, and it is
+  reached only after that family's SHA + Debian control identity checks. Storing
+  there makes "cached bytes are verified bytes" a property of the call graph
+  rather than a per-family promise. Do not add a second store site.
+- **The per-board build lock does NOT protect this.** `acquire_board_lock` is
+  keyed on one board and different boards are explicitly allowed to build in
+  parallel, so two concurrent builds are two concurrent writers of the same
+  entry. The cache therefore owns a **per-cache-key `flock`** under
+  `.debcache/.locks/`, mirroring the `.staging/.locks/` idiom rather than reusing
+  that lock.
+- **The reader holds its key lock across the WHOLE hit sequence** — existence
+  check, SHA re-verification, copy-out. Releasing after the hash check is the bug
+  that looks like working code: eviction would then unlink the entry the reader
+  had just verified and was about to read. **Eviction takes each victim's own key
+  lock with `flock -n` BEFORE unlinking and SKIPS a locked victim.** Skipping
+  rather than waiting is what keeps the ordering trivial — no path ever holds two
+  key locks, so reader-vs-evictor cannot deadlock in either direction.
+- **Bounded:** `CERALIVE_DEBCACHE_MAX_BYTES` (default 4 GiB), LRU by mtime, and a
+  reuse refreshes that mtime so "least recently used" is genuinely that and not
+  "oldest download". `CERALIVE_DEBCACHE=0` disables lookup, store and eviction
+  and creates no directory at all. `CERALIVE_DEBCACHE_DIR` relocates it.
+- **Every failure is non-fatal.** An unwritable directory, a lock timeout or a
+  failed copy degrades to "download it" — the same behaviour as the disable flag.
+- **`DRY_RUN` is byte-unchanged.** The gate excludes DRY_RUN centrally rather than
+  at each call site, so a plan-only run downloads nothing, mutates nothing, and
+  emits no cache line; the resolved plan is identical to the pre-cache one
+  (paired capture, 44 lines).
+- **It survives a per-board staging wipe** because it is a SIBLING of the
+  per-board `.staging/<board>` dirs, and the existing `/.staging/` ignore rule
+  already covers it. Do not move it under a board directory.
+
+Guards: `v2/tests/debcache.test.sh` (25 legs — static contract, unit
+hit/miss/corrupt/stale/eviction/LRU-refresh, TWO real concurrent reader-vs-eviction
+legs with a live second process holding a real `flock`, and integration legs
+driving the shipped userspace fetcher over `file://` pins that count payload
+downloads). Mutation-verified: dropping the victim lock, dropping the SHA
+re-check, leaving a corrupt entry in place, unwiring a family, and releasing the
+reader's lock early each fail the suite. Both concurrency legs are needed and
+neither is duplicate coverage — the first slows the reader inside verification,
+the second slows the step between verification and the copy, and only the second
+detects an early unlock.
+
 **First-boot WiFi provisioning portal** [PARTIAL]
 
 `ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot AND a
@@ -3238,6 +3306,8 @@ gated item, not the package availability.
 - Don't convert the kernel freeze's `Pin: version` into a `Pin: origin` like the apt.ceralive.tv 990 pin. The boot BSP comes from mkosi's build-time-only local repository, so it has no apt-origin identity on the device and an origin pin would match nothing. Don't hardcode a package name there either — the U-Boot package differs per board
 - Don't expect RAUC to honour a dpkg hold, or to need one lifted before an update. RAUC writes the whole inactive slot without running dpkg or apt; each image bakes the holds that govern its own slot
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot
+- Don't cache apt index/metadata (`InRelease`, `Release`, `Packages.gz`, the apt lists, the keyring) in the `.deb` cache, and don't reuse a cached `.deb` without re-verifying its SHA-256 against fresh signed metadata. Only final verified payloads are cacheable; the index is the rotating trust material a cache must never make stale
+- Don't guard the `.deb` cache with the per-board build `flock` — that lock is keyed on ONE board and different boards build in parallel, so it cannot protect a cache they all share. Don't shorten the reader's hold either: the key lock must span existence check → SHA re-verification → copy-out, or eviction can unlink the entry between the check and the read. Eviction must take each victim's key lock (`flock -n`, skip if held) before unlinking, and no path may ever hold two key locks at once
 - Don't fetch BSP packages by bare name or accept apt's latest version. Update `armbian-bsp-deb-versions.txt` only after signed-index review; update `bsp-baseline.json` with the kernel pin when its reviewed bytes change
 - Don't make a family variant implicit. `--variant` is the ONLY selector (plus `CERALIVE_KERNEL_VARIANT`); never infer one from a board, host, branch or CI context
 - Don't pin `kernel_source.patches_commit` (or `commit`, or `builder_image`) to anything but an exact SHA/digest — a branch there is unreproducible while looking pinned, and both the schema and `build-kernel.sh` reject it

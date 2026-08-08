@@ -375,6 +375,47 @@ committed baseline `v2/manifests/bsp-baseline.json`.
   determinism comparison; that comparison hashes the normalized plan, not build
   output files.
 
+## Verified `.deb` Download Cache
+
+All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
+pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
+content-addressed cache at `v2/mkosi/.staging/.debcache/`, keyed on
+`<package>_<version>_<arch>.deb`. A second real fetch of the same plan performs
+**zero `.deb` payload downloads**.
+
+Reuse cannot weaken verification. Every family already resolves the artifact's
+expected SHA-256 *before* it downloads — from the `gpgv`-verified `Packages` index
+on the four apt/curl transports, or from the committed
+`rk3588-userspace-deb-versions.txt` pin file — so a cache hit is re-checked against
+exactly the hash the network path would have been checked against. An entry whose
+hash no longer matches is deleted and re-fetched, not skipped.
+
+Only final `.deb` payloads are cached. `InRelease`, `Release`, `Packages.gz`, the
+apt lists and the GPG keyring are never cached: that is the rotating trust material
+whose whole job is to be fresh. Index metadata is therefore still fetched on every
+run, and the "zero downloads" claim is about payloads only.
+
+Concurrency is a **per-cache-key `flock`** under `.debcache/.locks/`, not the
+orchestrator's per-board build lock — that one is keyed on a single board and
+different boards are explicitly allowed to build in parallel, so it cannot protect
+a cache all of them share. A reader holds its key lock across the whole hit
+sequence (existence check → SHA re-verification → copy-out), and eviction takes
+each victim's own key lock before unlinking, skipping any victim a reader is
+currently holding.
+
+```bash
+CERALIVE_DEBCACHE=0 ./v2/build rock-5b-plus              # disable it entirely
+CERALIVE_DEBCACHE_MAX_BYTES=8589934592 ./v2/build …      # raise the 4 GiB ceiling
+CERALIVE_DEBCACHE_DIR=/srv/debcache ./v2/build …         # relocate it
+```
+
+The cache is bounded at 4 GiB by default and evicted least-recently-used first by
+mtime, which a reuse refreshes. Disabled, the fetch behaves exactly as it did
+before the cache existed; a `DRY_RUN=1` plan never touches it and its resolved
+output is byte-identical. Every cache failure is non-fatal — an unwritable
+directory or a lost lock degrades to an ordinary download. Contract:
+`v2/tests/debcache.test.sh`.
+
 ## Kernel Freeze — the boot stack updates via RAUC only
 
 The kernel, device tree, board U-Boot and firmware packages change **only** when a

@@ -24,6 +24,7 @@
 # ---------------------------------------------------------------------------
 _BSP_DEBS=""
 _PKG_INDEX=""
+_BSP_APT_INDEX=""
 _APT_OPTS=()
 _FIRST_PARTY_DEBS=""
 _FIRST_PARTY_INDEX=""
@@ -31,10 +32,16 @@ _FIRST_PARTY_BASE_URL=""
 _FIRST_PARTY_CURL_AUTH=()
 _RK3588_USERSPACE_DEBS=""
 
+# The download cache stores HERE, not per family: a caller only reaches this line
+# after its own SHA-256 + control identity checks, so "cached bytes are verified
+# bytes" is a property of the call graph rather than a per-family promise. The
+# store runs after the rename and can never fail the fetch (debcache_store is
+# unconditionally 0).
 publish_staged_deb() {
   local source="$1" destination="$2"
   chmod 0644 "${source}" || return 1
   mv -f "${source}" "${destination}" || return 1
+  debcache_store "${destination}"
 }
 
 _run_bounded() {

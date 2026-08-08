@@ -66,6 +66,11 @@ _fetch_first_party_curl_one() {
 
   url="$(first_party_curl_url "${filename}")"
   final="${_FIRST_PARTY_DEBS}/$(basename "${filename}")"
+  # ${sha256} is the signed-InRelease-anchored Packages hash — the same verdict
+  # the download below is held to, so reuse cannot be the weaker path.
+  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}"; then
+    return 0
+  fi
   tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
   log_info "first-party fetch (curl): ${spec} resolved=${version}"
   curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
@@ -308,27 +313,56 @@ EOF
   else
     run_or_plan_retry "first-party apt-get update" apt-get "${apt_opts[@]}" update
 
-    local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
-    # mktemp -d is 0700 root-owned and apt writes the .deb here AS `_apt`.
-    if apt_sandbox_active; then
-      apt_sandbox_own_download_dir "${tmpd}"
+    # apt downloads the whole spec list in ONE invocation, so a cache hit has to
+    # be expressed by removing the spec from that list rather than by skipping a
+    # per-package download. The expected hash comes from the Packages list apt
+    # verified against the GPG-signed InRelease; with no list, nothing is removed
+    # and the transport behaves exactly as it did before the cache existed.
+    local fp_index=""
+    if debcache_enabled; then
+      fp_index="$(debcache_apt_index "${apt_state}")"
     fi
-    if ! ( cd "${tmpd}" && retry_transient "first-party apt-get download" \
-        apt-get "${apt_opts[@]}" download "${download_specs[@]}" ); then
-      rm -rf "${tmpd}"
-      die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
-    fi
-    local f publish_failed=0
-    shopt -s nullglob
-    for f in "${tmpd}"/*.deb; do
-      if ! publish_staged_deb "${f}" "${debs}/$(basename "${f}")"; then
-        publish_failed=1
-        break
+    local -a wanted=()
+    local spec hit_resolved hit_file hit_sha
+    for spec in "${download_specs[@]}"; do
+      if [[ -n "${fp_index}" ]]; then
+        hit_resolved="$(auth_lookup_package "${fp_index}" "${spec%%=*}" "${spec#*=}" "${ARCH}" || true)"
+        if [[ -n "${hit_resolved}" ]]; then
+          IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
+          if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
+              "${debs}/$(basename "${hit_file}")"; then
+            continue
+          fi
+        fi
       fi
+      wanted+=("${spec}")
     done
-    shopt -u nullglob
-    rm -rf "${tmpd}"
-    (( publish_failed == 0 )) || return 1
+
+    if (( ${#wanted[@]} > 0 )); then
+      local tmpd; tmpd="$(mktemp -d "${debs}/.fetch-firstparty-XXXXXX")"
+      # mktemp -d is 0700 root-owned and apt writes the .deb here AS `_apt`.
+      if apt_sandbox_active; then
+        apt_sandbox_own_download_dir "${tmpd}"
+      fi
+      if ! ( cd "${tmpd}" && retry_transient "first-party apt-get download" \
+          apt-get "${apt_opts[@]}" download "${wanted[@]}" ); then
+        rm -rf "${tmpd}"
+        die "first-party fetch failed (apt-get download from ${APT_CERALIVE_URL})"
+      fi
+      local f publish_failed=0
+      shopt -s nullglob
+      for f in "${tmpd}"/*.deb; do
+        if ! publish_staged_deb "${f}" "${debs}/$(basename "${f}")"; then
+          publish_failed=1
+          break
+        fi
+      done
+      shopt -u nullglob
+      rm -rf "${tmpd}"
+      (( publish_failed == 0 )) || return 1
+    else
+      log_info "first-party: every package served from the .deb cache — no apt download needed"
+    fi
   fi
 
   local pkg

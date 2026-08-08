@@ -56,6 +56,11 @@ _fetch_rk3588_userspace_one() {
 
   local final tmp actual_sha actual_pkg actual_arch
   final="${_RK3588_USERSPACE_DEBS}/${filename}"
+  # The pin file IS the expected hash, so a cached entry is re-checked against
+  # exactly what the download would have been checked against.
+  if debcache_try_hit "${filename}" "${sha256}" "${final}"; then
+    return 0
+  fi
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"
   if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
     rm -f "${tmp}"

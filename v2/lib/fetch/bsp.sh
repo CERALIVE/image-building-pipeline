@@ -42,6 +42,22 @@ _fetch_bsp_native_one() {
       "cd $(printf '%q' "${_BSP_DEBS}") && apt-get $(printf '%q ' "${_APT_OPTS[@]}")download $(printf '%q' "${spec}")"
     return 0
   fi
+  # A cache HIT needs the expected hash BEFORE anything is downloaded, and on the
+  # apt transport the only pre-download source of one is the Packages list apt
+  # itself verified against the pinned-keyring InRelease. No list, no hit — the
+  # fetch then behaves exactly as it did before the cache existed.
+  local hit_resolved hit_file hit_sha
+  if [[ -n "${_BSP_APT_INDEX}" ]]; then
+    hit_resolved="$(auth_lookup_package "${_BSP_APT_INDEX}" "${pkg}" "${spec#*=}" "${ARCH}" || true)"
+    if [[ -n "${hit_resolved}" ]]; then
+      IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
+      if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
+          "${_BSP_DEBS}/$(basename "${hit_file}")"; then
+        return 0
+      fi
+    fi
+  fi
+
   # `apt-get download` writes to the CWD and honours no destination option, so
   # the cd stays OUTSIDE retry_transient — the retried unit is the bare apt-get.
   local tmpd; tmpd="$(mktemp -d "${_BSP_DEBS}/.fetch-XXXXXX")"
@@ -121,6 +137,10 @@ _fetch_bsp_native() {
 
   _BSP_DEBS="${debs}"
   _APT_OPTS=("${apt_opts[@]}")
+  _BSP_APT_INDEX=""
+  if [[ -z "${DRY_RUN}" ]] && debcache_enabled; then
+    _BSP_APT_INDEX="$(debcache_apt_index "${apt_state}")"
+  fi
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_bsp_native_one "${bsp_pkgs[@]}" \
     || die "BSP fetch failed (native apt path): one or more packages did not download"
@@ -153,6 +173,11 @@ _fetch_bsp_curl_one() {
   fi
   local final tmp actual_pkg actual_version actual_arch
   final="${_BSP_DEBS}/$(basename "${filename}")"
+  # ${sha256} came from the gpgv-verified Packages index, so a cache hit is held
+  # to the same signed-metadata hash the download would have been.
+  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}"; then
+    return 0
+  fi
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
   if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
     rm -f "${tmp}"
