@@ -37,20 +37,27 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 
 fail() { printf 'data-persistence-public-symlink regression: %s\n' "$1" >&2; exit 1; }
 
 [[ -f "${POSTINST_LIB}" ]] || fail "missing source file: ${POSTINST_LIB}"
+[[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
+
+# postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
+# postinst.d/; the seeding block is a heredoc inside one of them, so extracting
+# from the entry alone would leave every check below matching an empty string.
+postinst_source_set() { cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh; }
 
 # Extract the exact seeding block generated into ceralive-migrate-data (the `if [ -d
 # "$WORKDIR" ] ... fi` guard). index()-anchored so no regex escaping of the literal
 # heredoc line, and it stops at the block's own closing `fi`.
-block="$(awk '
+block="$(postinst_source_set | awk '
   index($0, "if [ -d \"$WORKDIR\" ] && ! mountpoint -q \"$WORKDIR\"; then") { f=1 }
   f { print }
   f && $0 ~ /^fi$/ { exit }
-' "${POSTINST_LIB}")"
-[[ -n "${block}" ]] || fail "could not extract the WORKDIR seeding block from postinst-lib.sh"
+')"
+[[ -n "${block}" ]] || fail "could not extract the WORKDIR seeding block from the postinst library"
 
 # ---------------------------------------------------------------------------
 # Part A — static contract (always enforced)
