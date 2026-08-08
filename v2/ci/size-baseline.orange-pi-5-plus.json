@@ -1,9 +1,9 @@
 {
   "board": "orange-pi-5-plus",
-  "bytes": 1418792960,
-  "recorded_at": "2026-08-02",
-  "artifact": "v2/images/orange-pi-5-plus/20260802T161110Z.rootfs.tar",
-  "artifact_sha256": "e401f2f248a1d46fceadc99cf9daa8afd0a5bff8f4406b98d419d911985fcabd",
-  "commit": "67d053a",
-  "note": "Per-board baseline, read by orchestrate.sh's [6c/9] relative gate (compare_size_against_baseline resolves size-baseline.<board>.json; there is deliberately no un-suffixed fallback, and v2/ci/size-baseline.json is now a symlink to the rock-5b-plus file so v2-ci.yml keeps working with no second copy of the number). Post-prune: supersedes the 1576458240 / 20260802T133827Z baseline recorded the same day at commit 01975f6, and the 157,665,280 B drop is the Mesa software-GL file prune (size-notes.md \u00a79). This producing build passes [6b/9] end to end \u2014 the dtb_name defect that failed the previous one was fixed in PR #94."
+  "bytes": 1422766080,
+  "recorded_at": "2026-08-08",
+  "artifact": "v2/images/orange-pi-5-plus/20260808T012615Z.rootfs.tar",
+  "artifact_sha256": "c75dca12bd8b5da26eac3abfe382116a17f51c282330200c8e2b226628613988",
+  "commit": "a575a9a",
+  "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by v2/lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, NOT the 26.5.1 pinned in armbian-bsp-deb-versions.txt: 26.5.1 no longer exists in the Armbian archive (that package is Architecture:all and only its newest revision is kept), so the committed pin is currently unbuildable and the promotion is tracked as a SEPARATE reviewed PR per RELEASE-PROCESS.md \u00a74. The firmware delta is +3,389,440 B, well inside this comparator's threshold, so this baseline stays valid whichever way that promotion lands. Supersedes the 2026-08-02 / 67d053a baseline (1418792960); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
 }
