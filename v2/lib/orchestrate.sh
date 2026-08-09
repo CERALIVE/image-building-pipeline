@@ -128,6 +128,8 @@ STAGE_DIR="${HERE}/stages"
 source "${STAGE_DIR}/resolve.sh"
 # shellcheck source=stages/fetch.sh
 source "${STAGE_DIR}/fetch.sh"
+# shellcheck source=stages/kernel-build.sh
+source "${STAGE_DIR}/kernel-build.sh"
 
 usage() {
   cat >&2 <<EOF
@@ -280,24 +282,7 @@ main() {
   local kernel_build_dir="${staging}/kernel-build"
   stage_fetch
 
-  # Kernel from source. Runs AFTER the fetch so the uniqueness check below sees
-  # the complete fetched set, and BEFORE partitioning so the built .deb flows
-  # through exactly the same classification and staging path as a fetched one.
-  if [[ "${kernel_from_source}" == "1" ]]; then
-    log_info "[2b/9] building kernel from pinned source (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
-    "${BUILD_KERNEL_SH}" --board "${board}" --out "${kernel_build_dir}" \
-      || die "kernel-build-from-source failed for board '${board}'"
-
-    if [[ "${DRY_RUN:-0}" != "1" ]]; then
-      assert_staged_packages_unique "${staging}/debs" "${kernel_build_dir}"
-      shopt -s nullglob
-      local _kdeb
-      for _kdeb in "${kernel_build_dir}"/*.deb; do
-        "${MKOSI_PACKAGE_STAGING_SH}" "${_kdeb}" "${staging}/debs"
-      done
-      shopt -u nullglob
-    fi
-  fi
+  stage_kernel_build
 
   log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
   # The set of BSP package names (manifest-declared) is the partition key.
