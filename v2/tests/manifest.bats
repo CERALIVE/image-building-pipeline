@@ -1746,6 +1746,19 @@ run_baseline_compare() {
   [ "$dryrun_exit_line" -lt "$gate_line" ]
 }
 
+@test "size-gate wiring: main() calls the DRY_RUN plan before the gate" {
+  # Companion to the source-order case above. Now that the stage bodies are
+  # modules, the thing that actually decides reachability is main()'s CALL order,
+  # so assert that directly rather than trusting text position alone.
+  local body dry_pos gate_pos
+  body="$(sed -n '/^main() {/,/^}/p' "$V2/lib/orchestrate.sh")"
+  [ -n "$body" ]
+  dry_pos="$(printf '%s\n' "$body" | grep -n '^  stage_dry_run_plan$' | head -1 | cut -d: -f1)"
+  gate_pos="$(printf '%s\n' "$body" | grep -n '^  stage_size_gate$' | head -1 | cut -d: -f1)"
+  [ -n "$dry_pos" ] && [ -n "$gate_pos" ]
+  [ "$dry_pos" -lt "$gate_pos" ]
+}
+
 @test "size-gate wiring: the shipped block PASSES an under-budget artifact" {
   local tree="$BATS_TEST_TMPDIR/wired-ok"
   mkdir -p "$tree"
@@ -4756,8 +4769,10 @@ REPRO
   [[ "$runtime_fn" != *"gpg --"* ]]
   [[ "$runtime_fn" != *"file -b"* ]]
   grep -q 'DEARMOR_APT_KEYRING_SH=' "$V2/lib/orchestrate.sh"
-  grep -q 'APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")"' "$V2/lib/orchestrate.sh"
-  grep -q '/work/lib/dearmor-apt-keyring.sh' "$V2/lib/orchestrate.sh"
+  # DEARMOR_APT_KEYRING_SH is resolved by the orchestrator entry; both call sites
+  # are in the [5/9] mkosi module, so read that file or match nothing.
+  grep -q 'APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")"' "$V2/lib/stages/mkosi.sh"
+  grep -q '/work/lib/dearmor-apt-keyring.sh' "$V2/lib/stages/mkosi.sh"
   local failing_container_helper="$BATS_TEST_TMPDIR/failing-container-dearmor"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 37' >"$failing_container_helper"
   chmod +x "$failing_container_helper"
@@ -4766,7 +4781,7 @@ REPRO
     /if \[\[ -n "\$\{APT_GPG_PUBLIC_B64:-\}" \]\]; then/ { found=1 }
     found { print }
     found && /^[[:space:]]*fi$/ { exit }
-  ' "$V2/lib/orchestrate.sh")"
+  ' "$V2/lib/stages/mkosi.sh")"
   [[ "$container_prepare" == *'/work/lib/dearmor-apt-keyring.sh'* ]]
   run env APT_GPG_PUBLIC_B64='must-fail' bash -euo pipefail -c "${container_prepare//\/work\/lib\/dearmor-apt-keyring.sh/$failing_container_helper}"$'\nprintf "mkosi_started=yes\\n"'
   [ "$status" -eq 1 ]

@@ -2,39 +2,31 @@
 #
 # orchestrate.sh — end-to-end builder for the CeraLive v2 image pipeline.
 #
-# `build <board>` (v2/build) execs this with --board/--manifest. It turns a board
-# manifest into a flashable RK3588 rootfs by chaining the pieces built in tasks
-# 9-14:
+# `build <board>` (v2/build) execs this with --board/--manifest. This file is the
+# SEQUENCER: locations, configuration, the CLI, the per-board lock, the mkosi
+# environment contract, and main(). Each [N/9] stage BODY lives in its own module
+# under lib/stages/ and is documented there:
 #
-#   1. resolve   lib/resolve.sh <board>        → flat KEY=value build params (eval'd)
-#   2. gate      required BSP package sets present                (fail loud, pre-build)
-#   3. fetch     lib/fetch-debs.sh --family …   → stage BSP + first-party .debs
-#               (staging is always recreated and authenticated for each build)
-#   4. partition split staged .debs into BSP vs first-party by package name
-#   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
-#                → else: "cannot resolve package <name>"  ABORT, no half-image
-#   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
-#   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
-#  7b. gate      lib/verify-boot-artifacts.sh   [6b/9] → /boot carries a resolvable
-#                Image + board DTB + versioned initrd (arm64 boot-BSP builds only)
-#  7c. gate      lib/measure-size.sh            [6c/9] → rootfs CONTENT is within the
-#                per-board rootfs_bytes_max in manifests/size-budget.json. BLOCKING:
-#                an over-budget image fails HERE, so no .raw and no .raucb are cut.
-#   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
-#   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
-#                (Stage-4 flashable GPT image). FAMILY-GATED on the bootloader adapter:
-#                custom-uboot (RK3588) fills the raw idbloader gap via assemble-disk.sh;
-#                efi/grub (x86) lays an ESP + RAUC-native GRUB A/B via assemble-disk-x86.sh.
+#   [1/9]  resolve       manifest → flat build params        stages/resolve.sh
+#   [2/9]  fetch         stage BSP + first-party .debs       stages/fetch.sh
+#   [2b/9] kernel-build  kernel from pinned source (variant) stages/kernel-build.sh
+#   [3/9]  partition     classify staged .debs               stages/partition.sh
+#   [4/9]  bsp-gate      every boot-BSP package obtainable   stages/bsp-gate.sh
+#   [5/9]  mkosi         base → platform → runtime → app     stages/mkosi.sh
+#   [6/9]  tar-emit      normalized <timestamp>.rootfs.tar   stages/tar-emit.sh
+#   [6b/9] boot-verify   /boot is complete and loadable      stages/boot-verify.sh
+#   [6c/9] size-gate     rootfs is within its size budget    stages/size-gate.sh
+#   [7/9]  parity        parity vs the v2 package manifests  stages/parity.sh
+#   [8/9]  assemble      Stage-4 .raw + signed .raucb        stages/assemble.sh
 #
 # DESIGN (inherited from common.sh + learnings):
 #   * strict mode + loud ERR trap; NO `|| true` swallowing. Any mkosi/apt/dpkg
 #     failure aborts the whole build (MUST-NOT: don't swallow build errors).
 #   * ZERO hardcoded board names / package lists / device paths. Everything
 #     board-specific flows manifest → resolve.sh → environment → mkosi configs.
-#   * The rootfs.tar emit (step 7) is the parity artifact and is ALWAYS produced;
-#     step 9 lays it onto the frozen A/B GPT geometry only for the RK3588
-#     custom-uboot adapter, single-slot or A/B per the manifest's
-#     single_slot_fallback flag.
+#   * [6/9]'s rootfs.tar is the parity artifact and is ALWAYS produced; [8/9] lays
+#     it onto the frozen A/B GPT geometry only for the RK3588 custom-uboot adapter,
+#     single-slot or A/B per the manifest's single_slot_fallback flag.
 #
 # shellcheck shell=bash
 
@@ -134,6 +126,8 @@ source "${STAGE_DIR}/kernel-build.sh"
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
 source "${STAGE_DIR}/bsp-gate.sh"
+# shellcheck source=stages/mkosi.sh
+source "${STAGE_DIR}/mkosi.sh"
 # shellcheck source=stages/tar-emit.sh
 source "${STAGE_DIR}/tar-emit.sh"
 # shellcheck source=stages/boot-verify.sh
@@ -213,13 +207,11 @@ main() {
   # into one place — the stages are called from here, so bash's dynamic scoping
   # hands them these names exactly as the inline bodies had them.
   local kernel_from_source=0 family_manifest="" mkosi_arch=""
+  local ts="" rootfs_tree="" build_version=""
   local out_dir="" artifact=""
 
   stage_resolve
 
-  # -------------------------------------------------------------------------
-  # 2-4. Fetch + stage .debs, then partition them into BSP vs first-party.
-  # -------------------------------------------------------------------------
   # Staging key = the board MANIFEST STEM: unique by construction, and the same
   # key acquire_board_lock() serialises on. The app subimage rebuilds this exact
   # path from inside its chroot (--extra-tree does not reach a subimage), so the
@@ -231,104 +223,21 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
+
   stage_fetch
-
   stage_kernel_build
-
   stage_partition
-
   stage_bsp_gate
-
-  # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
-  # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before the
-  # real mkosi/container run so CI needs no network, privileged container or
-  # board. select_build_mode still runs so the plan names the concrete path
-  # (containerized default vs --native) and surfaces a missing-runtime error.
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    select_build_mode
-    local package_dir_plan="${STAGING_ROOT}/${board}/bsp"
-    local firstparty_dir_plan="${STAGING_ROOT}/${board}/firstparty"
-    if [[ "${BUILD_MODE}" != "native" ]]; then
-      package_dir_plan="/run/ceralive-bsp"
-      firstparty_dir_plan="/run/ceralive-firstparty"
-    fi
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
-    log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
-    exit 0
-  fi
-
-  # -------------------------------------------------------------------------
-  # 6. Assemble: mkosi builds base → platform → runtime → app in the trixie builder.
-  # -------------------------------------------------------------------------
-  local ts rootfs_tree build_version
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  # Bundle VERSION is embedded in manifest.raucm, so it must be deterministic
-  # (the filename ts may stay wall-clock — it is not part of the .raucb bytes).
-  build_version="$(git -C "${V2_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-  [[ -n "${build_version}" ]] || build_version="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ 2>/dev/null || printf '%s' "${SOURCE_DATE_EPOCH}")"
-  rootfs_tree="${MKOSI_DIR}/build/app"
-  log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
-  run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
-  [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
-
+  stage_dry_run_plan
+  stage_mkosi
   stage_tar_emit
-
   stage_boot_verify
-
   stage_size_gate
-
   stage_parity
-
   stage_assemble
 
   log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
-}
-
-# ---------------------------------------------------------------------------
-# select_build_mode — decide HOW mkosi runs and set the global BUILD_MODE to one
-# of: native | docker | podman. Containerized is the CANONICAL default (task 9);
-# native is opt-in (--native / MKOSI_NATIVE=1). For the container path the runtime
-# is auto-detected (docker first, then podman). Logs the chosen plan incl. the
-# pinned mkosi/Python versions, and dies with an ACTIONABLE message (not a stack
-# trace) when the container path has no runtime. Called by both the DRY_RUN plan
-# and the real run_mkosi_build, so the two never diverge.
-# ---------------------------------------------------------------------------
-select_build_mode() {
-  if [[ "${MKOSI_NATIVE:-}" == "1" ]]; then
-    BUILD_MODE="native"
-    log_info "mkosi: NATIVE build (opt-in --native/MKOSI_NATIVE=1) — host mkosi (pin: mkosi ${MKOSI_VERSION_PIN}, Python ${MKOSI_PYTHON_FLOOR}+)"
-    return 0
-  fi
-
-  if command -v docker >/dev/null 2>&1; then
-    BUILD_MODE="docker"
-  elif command -v podman >/dev/null 2>&1; then
-    BUILD_MODE="podman"
-  else
-    die "containerized build is the default but no container runtime is installed. Install docker or podman, or re-run with --native (MKOSI_NATIVE=1) to build with host mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+)."
-  fi
-  log_info "mkosi: containerized build (DEFAULT) — runtime=${BUILD_MODE}, builder ${MKOSI_BUILDER_IMAGE} (pinned: mkosi ${MKOSI_VERSION_PIN}, Python ${MKOSI_PYTHON_FLOOR}+)"
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# ensure_builder_image <runtime> — guarantee the canonical builder image exists.
-# An operator-pinned MKOSI_BUILDER_IMAGE is used verbatim (registry/local) and
-# never auto-built; the default baked tag is built from v2/ci/Dockerfile when not
-# already present locally.
-# ---------------------------------------------------------------------------
-ensure_builder_image() {
-  local runtime="$1"
-  [[ "${MKOSI_BUILDER_IMAGE_OVERRIDDEN}" == "1" ]] && return 0
-  if "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
-    return 0
-  fi
-  [[ -f "${MKOSI_BUILDER_DOCKERFILE}" ]] \
-    || die "canonical builder Dockerfile missing: ${MKOSI_BUILDER_DOCKERFILE}"
-  log_info "builder image ${MKOSI_BUILDER_IMAGE} absent — building from ${MKOSI_BUILDER_DOCKERFILE} (mkosi ${MKOSI_VERSION_PIN} + Python ${MKOSI_PYTHON_FLOOR}+)"
-  "${runtime}" build -t "${MKOSI_BUILDER_IMAGE}" -f "${MKOSI_BUILDER_DOCKERFILE}" "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" \
-    || die "failed to build the canonical mkosi builder image from ${MKOSI_BUILDER_DOCKERFILE}"
 }
 
 # ---------------------------------------------------------------------------
@@ -480,70 +389,9 @@ run_mkosi_build() {
     build
   )
 
-  select_build_mode   # sets BUILD_MODE (native|docker|podman); logs the plan
-
-  if [[ "${BUILD_MODE}" == "native" ]]; then
-    command -v mkosi >/dev/null 2>&1 \
-      || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
-    [[ -f /usr/share/keyrings/debian-archive-keyring.gpg ]] \
-      || log_warn "native build: /usr/share/keyrings/debian-archive-keyring.gpg absent — mkosi may fail to verify the Debian repos (install debian-archive-keyring)"
-    if [[ -n "${APT_GPG_PUBLIC_B64}" ]]; then
-      APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")" \
-        || die "could not prepare the binary CeraLive apt keyring for mkosi"
-      export APT_GPG_PUBLIC_B64
-    fi
-    ( cd "${MKOSI_DIR}" && mkosi "${mkosi_args[@]}" ) \
-      || die "mkosi build failed (native)"
-    return
-  fi
-
-  # Containerized (default). BUILD_MODE is the detected runtime; docker `-e NAME`
-  # forwards each value and the in-container mkosi re-declares them via --environment.
-  local runtime="${BUILD_MODE}"
-  ensure_builder_image "${runtime}"
-
-  log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (containerized, mkosi ${MKOSI_VERSION_PIN} pinned)"
-  # Stage lib/common.sh into MKOSI_DIR/lib/ so finalize scripts can source it at
-  # /work/lib/common.sh in mkosi's mount namespace (/work = mkosi workspace root).
-  mkdir -p "${MKOSI_DIR}/lib"
-  cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
-  local env_flags=() env_cli_str=""
-  for n in "${env_names[@]}"; do
-    env_flags+=(-e "${n}")
-    env_cli_str+=" --environment ${n}"
-  done
-
-  "${runtime}" run --rm --privileged \
-    "${env_flags[@]}" \
-    -e "CERALIVE_V2_DIR=/work" \
-    -v "${V2_DIR}:/work" \
-    -v "${bsp_dir}:/run/ceralive-bsp:ro" \
-    -v "${firstparty_dir}:/run/ceralive-firstparty:ro" \
-    "${MKOSI_BUILDER_IMAGE}" \
-    bash -euo pipefail -c '
-      command -v mkosi >/dev/null 2>&1 || {
-        echo "FATAL: builder image lacks mkosi — an overridden MKOSI_BUILDER_IMAGE must bake mkosi '"${MKOSI_VERSION_PIN}"' (see v2/ci/Dockerfile)" >&2
-        exit 1
-      }
-      if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
-        APT_GPG_PUBLIC_B64="$(/work/lib/dearmor-apt-keyring.sh)" || {
-          echo "FATAL: could not prepare the binary CeraLive apt keyring for mkosi" >&2
-          exit 1
-        }
-        export APT_GPG_PUBLIC_B64
-      fi
-      cd /work/mkosi
-      mkosi \
-        --architecture='"${mkosi_arch}"' \
-        --with-network=yes \
-        '"${env_cli_str}"' \
-        --environment CERALIVE_V2_DIR \
-        --cache-directory='"${cache_dir}"' \
-        --package-directory /run/ceralive-bsp \
-        --extra-tree /run/ceralive-firstparty:/opt/ceralive-staging \
-        --force \
-        build
-    ' || die "mkosi build failed (container)"
+  # Native vs containerized invocation lives in stages/mkosi.sh; it reads
+  # mkosi_args / env_names / cache_dir out of THIS frame.
+  mkosi_invoke
 }
 
 main "$@"
