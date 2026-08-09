@@ -6907,7 +6907,9 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
 }
 
 @test "dev delta: orchestrate.sh resolves the family delta by NAME and gates the dev delta on the flag" {
-  local orch="$LIB_DIR/orchestrate.sh"
+  # The [1/9] body lives in the stages/resolve.sh module; the orchestrator entry
+  # sequences it. Read the module, or these assertions match nothing and pass.
+  local orch="$LIB_DIR/stages/resolve.sh"
   # The family delta stays a ${FAMILY}-keyed lookup — never a directory glob,
   # which is what would swallow development.delta.list on every board.
   grep -Fq 'delta_list="${pkg_dir}/${FAMILY}.delta.list"' "$orch"
@@ -6924,7 +6926,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   # Ordering is the whole point: the package set now depends on the flag, so a
   # value like `yes` must abort rather than quietly resolve a PRODUCTION set and
   # fail three stages later at mkosi.
-  local orch="$LIB_DIR/orchestrate.sh"
+  local orch="$LIB_DIR/stages/resolve.sh"
   local call_line res_line
   call_line="$(grep -n '^  resolve_debug_image_flag$' "$orch" | head -1 | cut -d: -f1)"
   res_line="$(grep -n 'SHARED_PACKAGES="\$(read_pkg_list' "$orch" | head -1 | cut -d: -f1)"
