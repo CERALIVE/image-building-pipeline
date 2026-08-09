@@ -24,10 +24,11 @@ image-building-pipeline/
 │   ├── manifests/            # board/family manifests + exact package registries
 │   │   └── schema/
 │   │       └── addon.schema.json   # add-on descriptor JSON Schema (T21)
-│   ├── lib/                  # orchestrate.sh, assemble-disk.sh, build-bundle.sh,
-│   │   │                     #   build-all.sh (parallel runner), build-feature-sysext.sh,
-│   │   │                     #   measure-size.sh, parity-check.sh,
+│   ├── lib/                  # orchestrate.sh (thin SEQUENCER), assemble-disk.sh,
+│   │   │                     #   build-bundle.sh, build-all.sh (parallel runner),
+│   │   │                     #   build-feature-sysext.sh, measure-size.sh, parity-check.sh,
 │   │   │                     #   fetch-debs.sh (REPOS array + FIRST_PARTY_APT_PKGS), …
+│   │   ├── stages/           # one module per orchestrator [N/9] stage body
 │   │   └── app-layer/
 │   │       └── sysext.sh     # sysext build lib (extract → prune → squashfs)
 │   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
@@ -48,6 +49,7 @@ image-building-pipeline/
 | Task | Location |
 |------|----------|
 | Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
+| **A specific `[N/9]` build stage** | `v2/lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | Add/change .deb packages | `v2/lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `v2/lib/fetch/debcache.sh` + the store site in `v2/lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `v2/manifests/packages/development.delta.list` + `v2/lib/common.sh::runtime_pkg_list_files` + `v2/lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
@@ -142,6 +144,62 @@ harnesses extract function bodies or generated payloads out of the source
 at the entry alone they extract NOTHING, and most of their assertions then pass
 vacuously. Each one concatenates the entry + `postinst.d/*.sh` for static reads while
 still SOURCING the entry; keep that distinction when adding a new check.
+
+**`orchestrate.sh` is an ENTRY plus per-stage modules — the same shape as
+`fetch-debs.sh` and `postinst-lib.sh`** [EXISTS]
+
+`v2/lib/orchestrate.sh` is the thin SEQUENCER (397 lines, was 1,045). It keeps the
+locations, the env-overridable configuration every stage reads, `usage()`,
+`acquire_board_lock`, the mkosi ENVIRONMENT CONTRACT (`run_mkosi_build`'s
+`env_names` + exports), and `main()` — which is now a flat list of `stage_*` calls.
+Each `[N/9]` stage BODY lives in one module under `v2/lib/stages/`:
+
+| Stage | Module | Also holds |
+|---|---|---|
+| `[1/9]` | `resolve.sh` | `read_pkg_list`, `resolve_debug_image_flag`, `require_field` |
+| `[2/9]` | `fetch.sh` | staging-tree recreation (must be freshly authenticated) |
+| `[2b/9]` | `kernel-build.sh` | — |
+| `[3/9]` | `partition.sh` | `deb_pkg_name`, `assert_staged_packages_unique` |
+| `[4/9]` | `bsp-gate.sh` | — |
+| `[5/9]` | `mkosi.sh` | `select_build_mode`, `ensure_builder_image`, `mkosi_invoke` |
+| `[6/9]` | `tar-emit.sh` | `emit_artifact` |
+| `[6b/9]` | `boot-verify.sh` | — |
+| `[6c/9]` | `size-gate.sh` | `compare_size_against_baseline` |
+| `[7/9]` | `parity.sh` | — |
+| `[8/9]` | `assemble.sh` | both bootloader-adapter branches |
+
+Four rules make the split safe, and each of them is the answer to a real trap:
+
+- **Stage functions read and write `main()`'s locals through bash DYNAMIC
+  SCOPING.** `main()` declares the cross-stage state (`kernel_from_source`,
+  `family_manifest`, `mkosi_arch`, `ts`, `rootfs_tree`, `build_version`,
+  `out_dir`, `artifact`, plus the `staging`/`bsp_dir`/… block) and the modules
+  assign into that one frame — which is what makes this a relocation rather than
+  a rewrite of the data flow. Those declarations look unused in `main()` and must
+  not be "cleaned up". Every module carries a file-level
+  `# shellcheck disable=SC2154,SC2034` for exactly this, with the reason stated.
+- **The module list is EXPLICIT and ORDERED, never a glob** (the
+  `postinst-lib.sh` rule), and the order is PIPELINE order.
+- **Three things deliberately did NOT move**: `acquire_board_lock`, the
+  `local env_names=( … )` array, and `export CERALIVE_BOARD="${board}"` next to
+  the `local staging=` it keys. `env_names` is one half of the
+  `env_names` ↔ `mkosi.conf` `PassEnvironment=` lockstep, so it stays in the file
+  the guard reads; only mkosi's *invocation* moved out, as `mkosi_invoke`.
+- **A static test that reads the orchestrator by TEXT must read the whole SET**,
+  concatenated in the entry's own `source` order — the same lesson the
+  `postinst.d/` split already records. Pointed at the entry alone,
+  `manifest.bats`'s size-gate/x86/env_names extractions and
+  `mkosi-package-staging.test.sh`'s greps match NOTHING and pass vacuously. Both
+  harnesses build that set into a FILE and grep the file: piping it into `grep -q`
+  SIGPIPEs the writer and `set -o pipefail` turns a correct read into a failure.
+
+`stage_size_gate` must stay ABOVE `compare_size_against_baseline` inside
+`size-gate.sh`: `manifest.bats` extracts the shipped gate as the FIRST 2-space
+`if … fi` mentioning `[6c/9]`, and the comparator's own early-return guards
+mention it too, so reordering silently swaps which block the gate's tests execute.
+
+All 26 runtime `[N/9]` log strings are byte-identical to the pre-split file, and
+the `DRY_RUN=1` build plan is byte-identical for all three shipped boards.
 
 **Build entry point** [EXISTS]
 

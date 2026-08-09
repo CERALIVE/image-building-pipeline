@@ -37,7 +37,7 @@ Consequently, host portability reduces to a single question:
 > **Can this host run a `--privileged` Linux container with working
 > bind/overlay mounts and arm64 binfmt (or native arm64)?**
 
-`--privileged` ([`orchestrate.sh:551`](../lib/orchestrate.sh)) is there for the
+`--privileged` ([`stages/mkosi.sh::mkosi_invoke`](../lib/stages/mkosi.sh)) is there for the
 *other* stage — mkosi building the Debian rootfs (bind/overlay mounts, apt in a
 chroot ⇒ `CAP_SYS_ADMIN`) — **not** for assembly.
 
