@@ -134,6 +134,8 @@ source "${STAGE_DIR}/kernel-build.sh"
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
 source "${STAGE_DIR}/bsp-gate.sh"
+# shellcheck source=stages/parity.sh
+source "${STAGE_DIR}/parity.sh"
 # shellcheck source=stages/assemble.sh
 source "${STAGE_DIR}/assemble.sh"
 
@@ -304,17 +306,7 @@ main() {
     log_warn "[6c/9] INSTALL_BOOT_BSP=0 — config+package parity build; rootfs size budget not enforced (a kernel-less rootfs is not the shipped image)"
   fi
 
-  # -------------------------------------------------------------------------
-  # 8. Parity verification vs the v2 package manifests. The app layer now
-  #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
-  #    CI mode (debs fetched) the gate clears the first-party check via the
-  #    ceraui→ceralive-device alias in parity-check.sh. An
-  #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
-  #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
-  # -------------------------------------------------------------------------
-  log_info "[7/9] verifying parity vs v2 package manifests"
-  "${PARITY_CHECK_SH}" "${rootfs_tree}" \
-    || die "parity check FAILED for board '${board}' — image does not match the canonical package/service/user/routing set"
+  stage_parity
 
   stage_assemble
 
