@@ -2,39 +2,31 @@
 #
 # orchestrate.sh — end-to-end builder for the CeraLive v2 image pipeline.
 #
-# `build <board>` (v2/build) execs this with --board/--manifest. It turns a board
-# manifest into a flashable RK3588 rootfs by chaining the pieces built in tasks
-# 9-14:
+# `build <board>` (v2/build) execs this with --board/--manifest. This file is the
+# SEQUENCER: locations, configuration, the CLI, the per-board lock, the mkosi
+# environment contract, and main(). Each [N/9] stage BODY lives in its own module
+# under lib/stages/ and is documented there:
 #
-#   1. resolve   lib/resolve.sh <board>        → flat KEY=value build params (eval'd)
-#   2. gate      required BSP package sets present                (fail loud, pre-build)
-#   3. fetch     lib/fetch-debs.sh --family …   → stage BSP + first-party .debs
-#               (staging is always recreated and authenticated for each build)
-#   4. partition split staged .debs into BSP vs first-party by package name
-#   5. gate      every boot-BSP package obtainable (when INSTALL_BOOT_BSP=1)
-#                → else: "cannot resolve package <name>"  ABORT, no half-image
-#   6. assemble  mkosi build (base → platform → runtime → app layers) in a trixie builder
-#   7. emit      normalized images/<board>/<timestamp>.rootfs.tar (+ .sha256)
-#  7b. gate      lib/verify-boot-artifacts.sh   [6b/9] → /boot carries a resolvable
-#                Image + board DTB + versioned initrd (arm64 boot-BSP builds only)
-#  7c. gate      lib/measure-size.sh            [6c/9] → rootfs CONTENT is within the
-#                per-board rootfs_bytes_max in manifests/size-budget.json. BLOCKING:
-#                an over-budget image fails HERE, so no .raw and no .raucb are cut.
-#   8. verify    lib/parity-check.sh <rootfs>   → parity vs v2 package manifests
-#   9. disk      lib/assemble-disk.sh build → images/<board>/<timestamp>.raw
-#                (Stage-4 flashable GPT image). FAMILY-GATED on the bootloader adapter:
-#                custom-uboot (RK3588) fills the raw idbloader gap via assemble-disk.sh;
-#                efi/grub (x86) lays an ESP + RAUC-native GRUB A/B via assemble-disk-x86.sh.
+#   [1/9]  resolve       manifest → flat build params        stages/resolve.sh
+#   [2/9]  fetch         stage BSP + first-party .debs       stages/fetch.sh
+#   [2b/9] kernel-build  kernel from pinned source (variant) stages/kernel-build.sh
+#   [3/9]  partition     classify staged .debs               stages/partition.sh
+#   [4/9]  bsp-gate      every boot-BSP package obtainable   stages/bsp-gate.sh
+#   [5/9]  mkosi         base → platform → runtime → app     stages/mkosi.sh
+#   [6/9]  tar-emit      normalized <timestamp>.rootfs.tar   stages/tar-emit.sh
+#   [6b/9] boot-verify   /boot is complete and loadable      stages/boot-verify.sh
+#   [6c/9] size-gate     rootfs is within its size budget    stages/size-gate.sh
+#   [7/9]  parity        parity vs the v2 package manifests  stages/parity.sh
+#   [8/9]  assemble      Stage-4 .raw + signed .raucb        stages/assemble.sh
 #
 # DESIGN (inherited from common.sh + learnings):
 #   * strict mode + loud ERR trap; NO `|| true` swallowing. Any mkosi/apt/dpkg
 #     failure aborts the whole build (MUST-NOT: don't swallow build errors).
 #   * ZERO hardcoded board names / package lists / device paths. Everything
 #     board-specific flows manifest → resolve.sh → environment → mkosi configs.
-#   * The rootfs.tar emit (step 7) is the parity artifact and is ALWAYS produced;
-#     step 9 lays it onto the frozen A/B GPT geometry only for the RK3588
-#     custom-uboot adapter, single-slot or A/B per the manifest's
-#     single_slot_fallback flag.
+#   * [6/9]'s rootfs.tar is the parity artifact and is ALWAYS produced; [8/9] lays
+#     it onto the frozen A/B GPT geometry only for the RK3588 custom-uboot adapter,
+#     single-slot or A/B per the manifest's single_slot_fallback flag.
 #
 # shellcheck shell=bash
 
@@ -115,6 +107,38 @@ else
 fi
 MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE:-ceralive-mkosi-builder:${MKOSI_VERSION_PIN}}"
 
+# ---------------------------------------------------------------------------
+# STAGE MODULES (lib/stages/) — one module per [N/9] step; this file sequences
+# them. EXPLICIT and ORDERED, never a glob (the customize/postinst-lib.sh rule):
+# a module lost or never wired up must fail HERE, not halfway through a build as
+# `command not found`. The order is PIPELINE order, so a static test that reads
+# the orchestrator by TEXT can concatenate entry + modules and still assert
+# stage ordering.
+# ---------------------------------------------------------------------------
+STAGE_DIR="${HERE}/stages"
+# shellcheck source=stages/resolve.sh
+source "${STAGE_DIR}/resolve.sh"
+# shellcheck source=stages/fetch.sh
+source "${STAGE_DIR}/fetch.sh"
+# shellcheck source=stages/kernel-build.sh
+source "${STAGE_DIR}/kernel-build.sh"
+# shellcheck source=stages/partition.sh
+source "${STAGE_DIR}/partition.sh"
+# shellcheck source=stages/bsp-gate.sh
+source "${STAGE_DIR}/bsp-gate.sh"
+# shellcheck source=stages/mkosi.sh
+source "${STAGE_DIR}/mkosi.sh"
+# shellcheck source=stages/tar-emit.sh
+source "${STAGE_DIR}/tar-emit.sh"
+# shellcheck source=stages/boot-verify.sh
+source "${STAGE_DIR}/boot-verify.sh"
+# shellcheck source=stages/size-gate.sh
+source "${STAGE_DIR}/size-gate.sh"
+# shellcheck source=stages/parity.sh
+source "${STAGE_DIR}/parity.sh"
+# shellcheck source=stages/assemble.sh
+source "${STAGE_DIR}/assemble.sh"
+
 usage() {
   cat >&2 <<EOF
 Usage: orchestrate.sh --board <board> --manifest <file> [options]
@@ -153,122 +177,6 @@ acquire_board_lock() {
   log_info "build lock acquired for board '${board}'"
 }
 
-# ---------------------------------------------------------------------------
-# deb_pkg_name — read the Package: field of a .deb without dpkg (host is Arch).
-# Uses `ar` + tar on control.tar.* . Echoes the package name or empty.
-# ---------------------------------------------------------------------------
-deb_pkg_name() {
-  local deb="$1" tmp name=""
-  tmp="$(mktemp -d)"
-  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO -C "${tmp}" ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  fi
-  if [[ -s "${tmp}/control" ]]; then
-    name="$(awk -F': ' '/^Package:/{print $2; exit}' "${tmp}/control")"
-  fi
-  rm -rf "${tmp}"
-  printf '%s' "${name}"
-}
-
-# ---------------------------------------------------------------------------
-# read_pkg_list <file...> — emit a space-joined package set from CeraLive *.list
-# files (one package per line; `#` comments and blank lines ignored; inline
-# comments stripped). Missing files are skipped (a family may carry no delta).
-# This is how the runtime layer "references shared.list": the canonical Task-18
-# manifests/packages/shared.list (+ resolved <family>.delta.list) is read here and
-# forwarded to runtime/mkosi.postinst.chroot as $SHARED_PACKAGES — no duplicated
-# inline package list in mkosi.conf.
-# ---------------------------------------------------------------------------
-read_pkg_list() {
-  local f
-  for f in "$@"; do
-    [[ -f "${f}" ]] || continue
-    sed -e 's/#.*//' "${f}" | awk 'NF{print $1}'
-  done | sort -u | tr '\n' ' ' | sed -e 's/[[:space:]]\+$//'
-}
-
-# ---------------------------------------------------------------------------
-# resolve_debug_image_flag — normalize + validate the debug/production seam.
-#
-# `CERALIVE_DEBUG_IMAGE` selects the whole variant: the development package
-# delta, the baked password hash, SSH enablement, and the /etc/ceralive/debug-image
-# marker. It used to be normalized inside run_mkosi_build(), which runs at step
-# [6/9] — LONG after the runtime package set is resolved at step [1/9]. Resolving
-# packages against an unvalidated value would let `CERALIVE_DEBUG_IMAGE=yes`
-# silently produce a PRODUCTION package set and only fail two stages later, so the
-# normalization happens here and is called before anything reads the flag.
-# Idempotent: run_mkosi_build() re-exports the already-normalized value.
-# ---------------------------------------------------------------------------
-resolve_debug_image_flag() {
-  export CERALIVE_DEBUG_IMAGE="${CERALIVE_DEBUG_IMAGE:-0}"
-  export CERALIVE_DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH:-}"
-  case "${CERALIVE_DEBUG_IMAGE}" in
-    0|1) ;;
-    *) die "CERALIVE_DEBUG_IMAGE must be 0 or 1" ;;
-  esac
-  if [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH}" && "${CERALIVE_DEBUG_IMAGE}" != "1" ]]; then
-    die "CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"
-  fi
-  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" && -z "${CERALIVE_DEBUG_PASSWORD_HASH}" ]]; then
-    die "CERALIVE_DEBUG_IMAGE=1 requires CERALIVE_DEBUG_PASSWORD_HASH"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# require_field — die loudly if a resolved param is empty (no silent defaults).
-# ---------------------------------------------------------------------------
-require_field() {
-  local name="$1" val="$2"
-  [[ -n "${val}" ]] || die "manifest did not resolve required field '${name}' — refusing to build a half-image"
-}
-
-# ---------------------------------------------------------------------------
-# assert_staged_packages_unique <debs-dir> <built-dir>
-#
-# The kernel-from-source stage and the remote fetcher both feed the SAME local
-# package directory mkosi later resolves from. If a package name arrives from
-# both, mkosi's local repository silently picks one by version and the image
-# ships a kernel nobody chose — the worst possible failure mode for this feature,
-# because it produces a plausible image rather than an error.
-#
-# Suppression (CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS) is what should make a
-# collision impossible; this check is what proves it did. Fail closed on ANY
-# name present in both directories.
-# ---------------------------------------------------------------------------
-assert_staged_packages_unique() {
-  local fetched_dir="$1" built_dir="$2"
-  local deb pkg
-  local -A fetched=()
-  local -a collisions=()
-
-  shopt -s nullglob
-  for deb in "${fetched_dir}"/*.deb; do
-    pkg="$(deb_pkg_name "${deb}")"
-    [[ -n "${pkg}" ]] || die "unreadable staged package: $(basename "${deb}")"
-    fetched["${pkg}"]="$(basename "${deb}")"
-  done
-  for deb in "${built_dir}"/*.deb; do
-    pkg="$(deb_pkg_name "${deb}")"
-    [[ -n "${pkg}" ]] || die "unreadable built package: $(basename "${deb}")"
-    if [[ -n "${fetched[${pkg}]:-}" ]]; then
-      collisions+=("${pkg} (fetched: ${fetched[${pkg}]}, built: $(basename "${deb}"))")
-    fi
-  done
-  shopt -u nullglob
-
-  if (( ${#collisions[@]} > 0 )); then
-    for pkg in "${collisions[@]}"; do
-      log_error "duplicate candidate for staged package ${pkg}"
-    done
-    die "${#collisions[@]} package name(s) have BOTH a fetched and a locally-built candidate; the local package directory must have exactly one candidate per name. Check that kernel_source.suppressed_packages covers every name the variant replaces."
-  fi
-  log_success "staged package uniqueness verified: no name has both a fetched and a built candidate"
-}
-
 main() {
   local board="" manifest="" variant="${CERALIVE_KERNEL_VARIANT:-default}"
   while [[ $# -gt 0 ]]; do
@@ -295,147 +203,15 @@ main() {
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"
 
-  # -------------------------------------------------------------------------
-  # 1. Resolve manifest → flat build params, into THIS shell's environment.
-  #    resolve.sh dies loudly on unknown board/family, schema violations and
-  #    unresolved versions.yaml defer tokens; its failure propagates here.
-  # -------------------------------------------------------------------------
-  log_info "[1/9] resolving manifest → build params"
-  local params
-  params="$("${RESOLVE_SH}" "${board}" --variant "${variant}")" \
-    || die "manifest resolution failed for board '${board}' (variant '${variant}')"
-  eval "${params}"
-  # Export the resolved architecture and BSP package vars immediately so
-  # fetch-debs.sh (step 2) can read them. run_mkosi_build() re-exports the full
-  # set at step 6; this early export covers the fetch step which runs before mkosi.
-  export ARCH DTB_NAME UBOOT_PACKAGES KERNEL_PACKAGES DTB_PACKAGES FIRMWARE_PACKAGES \
-         HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
+  # Cross-stage state. Declared in THIS frame so every stage_* module assigns
+  # into one place — the stages are called from here, so bash's dynamic scoping
+  # hands them these names exactly as the inline bodies had them.
+  local kernel_from_source=0 family_manifest="" mkosi_arch=""
+  local ts="" rootfs_tree="" build_version=""
+  local out_dir="" artifact=""
 
-  # Reproducible builds (task 14): pin ONE epoch for the whole run so every
-  # embedded mtime (mkosi rootfs, rootfs.tar, squashfs, ext4, CMS) clamps to it.
-  # Exported here so fetch/mkosi/assemble-disk/build-bundle all inherit the value.
-  SOURCE_DATE_EPOCH="$(resolve_source_date_epoch "${V2_DIR}")"
-  CERALIVE_IMAGE_BUILD_COMMIT="${CERALIVE_IMAGE_BUILD_COMMIT:-$(git -C "${V2_DIR}/.." rev-parse HEAD)}"
-  [[ "${CERALIVE_IMAGE_BUILD_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
-    || die "CERALIVE_IMAGE_BUILD_COMMIT must be an exact 40-character commit SHA"
-  export SOURCE_DATE_EPOCH CERALIVE_IMAGE_BUILD_COMMIT
-  log_info "reproducible build: SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} ($(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo n/a))"
+  stage_resolve
 
-  # Opt-in bench PARTLABEL overlay. Logged ONLY when active so an ordinary build's
-  # plan output is unchanged, and logged LOUDLY when it is, because the resulting
-  # image is bench-only: it is not the frozen contract and must never be released.
-  export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
-  if [[ -n "$(partlabel_prefix)" ]]; then
-    log_warn "CERALIVE_BENCH_LABELS=1 — BENCH IMAGE: partitions will be labelled $(resolve_partlabel boot)/$(resolve_partlabel rootfs_a)/$(resolve_partlabel rootfs_b)/$(resolve_partlabel data), NOT the frozen production set. Never publish this artifact."
-  fi
-
-  # Debug/production variant seam. Normalized HERE, before the runtime package set
-  # is resolved below, because that set now depends on it.
-  resolve_debug_image_flag
-  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]]; then
-    log_warn "CERALIVE_DEBUG_IMAGE=1 — DEBUG IMAGE: the development package delta is installed, the ceralive password is unlocked from CERALIVE_DEBUG_PASSWORD_HASH, ssh.service is enabled and /etc/ceralive/debug-image is baked. Bench only — never publish this artifact to apt."
-  fi
-
-  # The resolver guarantees these via JSON-Schema, but assert anyway — a missing
-  # BSP declaration must fail BEFORE any fetch/build, never as a half-image.
-  require_field ARCH "${ARCH:-}"
-  require_field BOARD_ID "${BOARD_ID:-}"
-  require_field FAMILY "${FAMILY:-}"
-  require_field KERNEL_PACKAGES "${KERNEL_PACKAGES:-}"
-  require_field FIRMWARE_PACKAGES "${FIRMWARE_PACKAGES:-}"
-
-  # Kernel-build-from-source is active IFF the resolved manifest carries a
-  # kernel_source: block — i.e. only under an explicitly selected variant. The
-  # production vendor path resolves this empty and every branch below is inert.
-  local kernel_from_source=0
-  if [[ -n "${KERNEL_SOURCE_GIT_URL:-}" ]]; then
-    kernel_from_source=1
-    require_field KERNEL_SOURCE_SUPPRESSED_PACKAGES "${KERNEL_SOURCE_SUPPRESSED_PACKAGES:-}"
-    require_field KERNEL_SOURCE_DTB_DEB_DIR "${KERNEL_SOURCE_DTB_DEB_DIR:-}"
-    require_field KERNEL_SOURCE_DTB_BOOT_DIR "${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
-    # Forwarded to fetch-debs.sh so exactly these names are excluded from every
-    # remote fetch path. U-Boot and firmware are NOT in this set and stay
-    # prebuilt-fetched.
-    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS="${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
-    # build-kernel.sh is a separate process and reads the whole pin set from the
-    # environment; every field it requires must be exported here or it fails
-    # closed on a "half-specified pin".
-    export KERNEL_SOURCE_GIT_URL KERNEL_SOURCE_COMMIT
-    export KERNEL_SOURCE_PATCHES_GIT_URL KERNEL_SOURCE_PATCHES_COMMIT
-    export KERNEL_SOURCE_PATCHES_SERIES
-    # Optional by schema: `tag` is absent for a commit-only source, and exactly
-    # one config mode is declared, so the other mode's keys never resolve. They
-    # are defaulted rather than bare-exported so build-kernel.sh always receives
-    # a defined value and can branch on emptiness instead of on unset-ness.
-    export KERNEL_SOURCE_TAG="${KERNEL_SOURCE_TAG:-}"
-    export KERNEL_SOURCE_DEFCONFIG_BASE="${KERNEL_SOURCE_DEFCONFIG_BASE:-}"
-    export KERNEL_SOURCE_DEFCONFIG_FRAGMENT="${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-}"
-    export KERNEL_SOURCE_CONFIG_GIT_URL="${KERNEL_SOURCE_CONFIG_GIT_URL:-}"
-    export KERNEL_SOURCE_CONFIG_COMMIT="${KERNEL_SOURCE_CONFIG_COMMIT:-}"
-    export KERNEL_SOURCE_CONFIG_PATH="${KERNEL_SOURCE_CONFIG_PATH:-}"
-    export KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS="${KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS:-}"
-    export KERNEL_SOURCE_BUILDER_IMAGE KERNEL_SOURCE_LOCAL_VERSION
-    export KERNEL_SOURCE_KERNEL_RELEASE KERNEL_SOURCE_PACKAGE_VERSION
-    export KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
-    export KERNEL_SOURCE_MIRROR_URL="${KERNEL_SOURCE_MIRROR_URL:-}"
-    log_info "kernel from source: variant='${KERNEL_VARIANT:-${variant}}' builds ${KERNEL_PACKAGES}; remote fetch suppressed for: ${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
-  fi
-
-  # DTB/U-Boot are required only when installing the boot BSP (rk3588 carries
-  # both; x86 legitimately has neither — ACPI + UEFI). Gating on INSTALL_BOOT_BSP
-  # fixes task-32 gap G2 without changing the arm64 boot build (still =1 there).
-  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    # A kernel_source variant legitimately resolves DTB_PACKAGES empty: the
-    # built linux-image deb carries the in-tree DTBs itself, and the
-    # dtb_deb_dir -> dtb_boot_dir mapping (asserted non-empty above, and
-    # machine-verified against the real deb by build-kernel.sh) is what
-    # satisfies the board's dtb_name instead of a linux-dtb-* package.
-    if [[ "${kernel_from_source}" != "1" ]]; then
-      require_field DTB_PACKAGES "${DTB_PACKAGES:-}"
-    fi
-    require_field UBOOT_PACKAGES "${UBOOT_PACKAGES:-}"
-  fi
-
-  local family_manifest="${MKOSI_DIR}/../manifests/families/${FAMILY}.yaml"
-  [[ -f "${family_manifest}" ]] || die "family manifest not found: ${family_manifest}"
-
-  # shared.list (+ resolved family delta, + the debug-only development delta when
-  # CERALIVE_DEBUG_IMAGE=1) → $SHARED_PACKAGES for the runtime layer.
-  #
-  # development.delta.list is keyed on the BUILD VARIANT, not on the board family,
-  # so it is deliberately NOT reachable through the ${FAMILY}.delta.list lookup —
-  # it is appended only on the debug branch. With the flag unset/0 this resolves
-  # byte-identically to before the file existed.
-  local pkg_dir="${V2_DIR}/manifests/packages"
-  local shared_list="${pkg_dir}/shared.list" delta_list="${pkg_dir}/${FAMILY}.delta.list"
-  local dev_delta_list="${pkg_dir}/${DEV_DELTA_BASENAME}"
-  [[ -f "${shared_list}" ]] || die "canonical package list not found: ${shared_list}"
-  local -a pkg_lists=("${shared_list}" "${delta_list}")
-  local _delta_note=""
-  [[ -f "${delta_list}" ]] && _delta_note=" + $(basename "${delta_list}")"
-  if [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]]; then
-    [[ -f "${dev_delta_list}" ]] \
-      || die "CERALIVE_DEBUG_IMAGE=1 but the development package delta is missing: ${dev_delta_list}"
-    pkg_lists+=("${dev_delta_list}")
-    _delta_note+=" + ${DEV_DELTA_BASENAME} (DEBUG)"
-  fi
-  SHARED_PACKAGES="$(read_pkg_list "${pkg_lists[@]}")"
-  [[ -n "${SHARED_PACKAGES}" ]] || die "shared.list resolved to an empty package set — refusing to build"
-  export SHARED_PACKAGES
-  log_info "runtime packages: $(wc -w <<<"${SHARED_PACKAGES}") pkg(s) from shared.list${_delta_note}"
-
-  # mkosi has no 'amd64'; its identifier is 'x86-64' (task 13). arm64 stays arm64.
-  local mkosi_arch
-  case "${ARCH}" in
-    arm64) mkosi_arch="arm64" ;;
-    amd64|x86-64) mkosi_arch="x86-64" ;;
-    *) die "unsupported arch '${ARCH}' (manifest); expected arm64|amd64|x86-64" ;;
-  esac
-  log_info "resolved: family=${FAMILY} arch=${ARCH} (mkosi=${mkosi_arch}) board_id=${BOARD_ID}"
-
-  # -------------------------------------------------------------------------
-  # 2-4. Fetch + stage .debs, then partition them into BSP vs first-party.
-  # -------------------------------------------------------------------------
   # Staging key = the board MANIFEST STEM: unique by construction, and the same
   # key acquire_board_lock() serialises on. The app subimage rebuilds this exact
   # path from inside its chroot (--extra-tree does not reach a subimage), so the
@@ -447,300 +223,21 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
-  [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
-    || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
-  {
-    rm -rf "${staging}"
-    mkdir -p "${staging}"
-    install -d -m 0755 "${bsp_dir}" "${firstparty_dir}" "${kernel_build_dir}"
 
-    log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
-    DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
-      || die "fetch-debs failed for board '${board}'"
-
-    # Kernel from source. Runs AFTER the fetch so the uniqueness check below sees
-    # the complete fetched set, and BEFORE partitioning so the built .deb flows
-    # through exactly the same classification and staging path as a fetched one.
-    if [[ "${kernel_from_source}" == "1" ]]; then
-      log_info "[2b/9] building kernel from pinned source (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
-      "${BUILD_KERNEL_SH}" --board "${board}" --out "${kernel_build_dir}" \
-        || die "kernel-build-from-source failed for board '${board}'"
-
-      if [[ "${DRY_RUN:-0}" != "1" ]]; then
-        assert_staged_packages_unique "${staging}/debs" "${kernel_build_dir}"
-        shopt -s nullglob
-        local _kdeb
-        for _kdeb in "${kernel_build_dir}"/*.deb; do
-          "${MKOSI_PACKAGE_STAGING_SH}" "${_kdeb}" "${staging}/debs"
-        done
-        shopt -u nullglob
-      fi
-    fi
-
-    log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
-    # The set of BSP package names (manifest-declared) is the partition key.
-    local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
-    # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages
-    # + the 9-package ModemManager 1.24 closure (modem-stack v0.2.0, ~ceralive0.2.0).
-    # The fetcher stages all 14 into debs/; a name missing here fails the build as
-    # "unclassified staged package" on a real (non-DRY_RUN) build. Guarded by
-    # v2/tests/firstparty-classification.test.sh.
-    local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 "
-    local deb pkg
-    shopt -s nullglob
-    for deb in "${staging}/debs"/*.deb; do
-      pkg="$(deb_pkg_name "${deb}")"
-      if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
-        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${bsp_dir}"
-      elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
-        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${firstparty_dir}"
-      else
-        die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
-      fi
-    done
-    shopt -u nullglob
-  }
-  log_info "staged: $(find "${bsp_dir}" -name '*.deb' | wc -l) BSP, $(find "${firstparty_dir}" -name '*.deb' | wc -l) first-party .deb(s)"
-
-  # -------------------------------------------------------------------------
-  # 5. Missing-BSP gate. For a full device build the kernel/DTB/U-Boot/firmware
-  #    MUST be obtainable; if any is not staged, abort BEFORE mkosi — clean
-  #    failure, no half-image (MUST-DO: fail cleanly on missing BSP pin).
-  # -------------------------------------------------------------------------
-  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[4/9] verifying boot BSP packages are obtainable"
-    local boot_bsp_names name missing=()
-    read -ra boot_bsp_names <<<"${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES}"
-    for name in "${boot_bsp_names[@]}"; do
-      if ! compgen -G "${bsp_dir}/${name}_*.deb" >/dev/null \
-         && ! compgen -G "${bsp_dir}/${name}-*.deb" >/dev/null; then
-        missing+=("${name}")
-      fi
-    done
-    if (( ${#missing[@]} > 0 )); then
-      for name in "${missing[@]}"; do
-        log_error "cannot resolve package '${name}': no .deb staged from ${ARMBIAN_APT_URL} (${ARMBIAN_SUITE}/${ARCH})"
-      done
-      die "missing ${#missing[@]} required BSP package(s); aborting before mkosi — no half-image produced. (Set INSTALL_BOOT_BSP=0 for a config+package parity build, or provide R2/Armbian access.)"
-    fi
-    log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
-  else
-    log_warn "[4/9] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
-  fi
-
-  # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
-  # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before the
-  # real mkosi/container run so CI needs no network, privileged container or
-  # board. select_build_mode still runs so the plan names the concrete path
-  # (containerized default vs --native) and surfaces a missing-runtime error.
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    select_build_mode
-    local package_dir_plan="${STAGING_ROOT}/${board}/bsp"
-    local firstparty_dir_plan="${STAGING_ROOT}/${board}/firstparty"
-    if [[ "${BUILD_MODE}" != "native" ]]; then
-      package_dir_plan="/run/ceralive-bsp"
-      firstparty_dir_plan="/run/ceralive-firstparty"
-    fi
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
-    log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
-    exit 0
-  fi
-
-  # -------------------------------------------------------------------------
-  # 6. Assemble: mkosi builds base → platform → runtime → app in the trixie builder.
-  # -------------------------------------------------------------------------
-  local ts rootfs_tree build_version
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  # Bundle VERSION is embedded in manifest.raucm, so it must be deterministic
-  # (the filename ts may stay wall-clock — it is not part of the .raucb bytes).
-  build_version="$(git -C "${V2_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-  [[ -n "${build_version}" ]] || build_version="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ 2>/dev/null || printf '%s' "${SOURCE_DATE_EPOCH}")"
-  rootfs_tree="${MKOSI_DIR}/build/app"
-  log_info "[5/9] building image layers with mkosi (${mkosi_arch}) — base → platform → runtime → app"
-  run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
-  [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
-
-  # -------------------------------------------------------------------------
-  # 7. Emit normalized output + checksum (NOT Armbian-unofficial_*).
-  # -------------------------------------------------------------------------
-  log_info "[6/9] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
-  local out_dir="${IMAGES_DIR}/${board}" artifact
-  mkdir -p "${out_dir}"
-  artifact="${out_dir}/${ts}.rootfs.tar"
-  emit_artifact "${rootfs_tree}" "${artifact}"
-  log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
-
-  # Everything the U-Boot selector loads must actually be in that rootfs, on EVERY
-  # kernel path. This is checked here, against the emitted tar, because it is the
-  # earliest point where the real answer exists: DRY_RUN CI never runs the layers
-  # that populate /boot, and preflash-verify.sh (which does check) only runs on a
-  # production-labelled .raw an operator is about to flash — a bench image fails its
-  # PARTLABEL assertions first and never reaches the artifact checks. That gap is
-  # exactly how an `edge` image with no /boot/Image reached a board.
-  if [[ "${ARCH}" == "arm64" && "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[6b/9] verifying boot artifacts in ${artifact}"
-    "${VERIFY_BOOT_ARTIFACTS_SH}" "${artifact}" --dtb-name "${DTB_NAME}" \
-      || die "boot artifacts INCOMPLETE for board '${board}' — this image would not boot"
-  fi
-
-  # The rootfs_bytes_max in manifests/size-budget.json is documented as a BLOCKING
-  # ceiling, and until this stage existed NOTHING enforced it on a real artifact: the
-  # only live caller was the v2-ci "size gate" job, which measures a synthetic 4 KB
-  # tree. That is how both RK3588 boards shipped 65-72 MB over budget while the docs
-  # claimed the gate ran after every build. It runs here, against the same emitted
-  # tar as [6b/9] and for the same reason — the earliest point where the real answer
-  # exists. Deliberately NOT arch-gated: every shipped board carries a non-null
-  # ceiling, and gating on arm64 would exempt the one board whose size has never been
-  # measured. INSTALL_BOOT_BSP=0 IS skipped, because a kernel-less parity rootfs is
-  # not the shipped image and measuring it would be a vacuous pass.
-  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[6c/9] enforcing the rootfs size budget for ${artifact}"
-    "${MEASURE_SIZE_SH}" "${board}" "${artifact}" \
-      || die "rootfs size budget EXCEEDED for board '${board}' (measured/budget bytes above) — slim the image (v2/docs/size-notes.md), do NOT raise rootfs_bytes_max"
-    compare_size_against_baseline "${board}" "${artifact}"
-  else
-    log_warn "[6c/9] INSTALL_BOOT_BSP=0 — config+package parity build; rootfs size budget not enforced (a kernel-less rootfs is not the shipped image)"
-  fi
-
-  # -------------------------------------------------------------------------
-  # 8. Parity verification vs the v2 package manifests. The app layer now
-  #    installs the first-party .debs (Stage 3, app/mkosi.postinst.chroot), so in
-  #    CI mode (debs fetched) the gate clears the first-party check via the
-  #    ceraui→ceralive-device alias in parity-check.sh. An
-  #    offline/dev build stages no debs → installs nothing → the gate WARNs on the
-  #    absent first-party packages, by design. Documented in LAYER-MAP.md §Layer 4.
-  # -------------------------------------------------------------------------
-  log_info "[7/9] verifying parity vs v2 package manifests"
-  "${PARITY_CHECK_SH}" "${rootfs_tree}" \
-    || die "parity check FAILED for board '${board}' — image does not match the canonical package/service/user/routing set"
-
-  # -------------------------------------------------------------------------
-  # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
-  #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
-  #    .raw ALONGSIDE the rootfs.tar above. FAMILY-GATED on the resolved
-  #    rauc_bootloader_adapter: only `custom` (RK3588 vendor U-Boot, decision D3 —
-  #    the "custom-uboot" adapter) has a raw bootloader gap to fill. x86 resolves
-  #    `efi` and boots from the EFI System Partition; its disk path is task 14, so
-  #    it is skipped here. The gap write needs the staged U-Boot .deb, so a
-  #    config+package parity build (INSTALL_BOOT_BSP=0, no BSP staged) defers disk
-  #    assembly to the full device build — exactly like the boot-BSP gate above.
-  # -------------------------------------------------------------------------
-  if [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "custom" ]]; then
-    if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
-      [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
-      log_info "[8/9] Stage-4 disk assembly → ${raw_artifact} (bootloader_adapter=custom single_slot=${SINGLE_SLOT_FALLBACK:-false})"
-      "${ASSEMBLE_DISK_SH}" build \
-        --output "${raw_artifact}" \
-        "${single_slot_flag[@]}" \
-        --board "${BOARD_ID}" \
-        --bootloader-adapter "${RAUC_BOOTLOADER_ADAPTER}" \
-        --bsp-dir "${bsp_dir}" \
-        --rootfs-tree "${rootfs_tree}" \
-        || die "Stage-4 disk assembly failed for board '${board}'"
-      log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
-
-      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
-      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
-      # the .raw, emitted ALONGSIDE it. format=plain (no dm-verity, G4 deferred).
-      local bundle_artifact="${out_dir}/${ts}.raucb"
-      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
-      BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
-        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
-        || die "Stage-4 RAUC bundle build failed for board '${board}'"
-      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
-    else
-      log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
-    fi
-  elif [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "efi" || "${RAUC_BOOTLOADER_ADAPTER:-}" == "grub" ]]; then
-    # x86 (UEFI/GRUB) Stage-4 disk assembly (Task 12 — x86-disk wiring landed).
-    # x86 boots from an EFI System Partition with RAUC's NATIVE bootloader=grub backend
-    # (GRUB at the removable path /EFI/BOOT/BOOTX64.EFI + grubenv on the ESP), NOT the
-    # RK3588 raw idbloader gap, so it has its OWN offline producer lib/assemble-disk-x86.sh
-    # (ESP + the FROZEN rootfs_a/rootfs_b/data slots; repart/ untouched). Same
-    # INSTALL_BOOT_BSP gate as the custom path — the x86 .raw needs the Debian kernel
-    # inside rootfs_a, so a config+package parity build (BSP=0) defers disk assembly.
-    if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
-      [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
-      log_info "[8/9] Stage-4 x86 ESP+GRUB disk assembly → ${raw_artifact} (bootloader_adapter=${RAUC_BOOTLOADER_ADAPTER} single_slot=${SINGLE_SLOT_FALLBACK:-false})"
-      # BOARD_ID/COMPATIBLE_STRING/SERIAL_CONSOLE/SINGLE_SLOT_FALLBACK are already
-      # exported by run_mkosi_build (step 6) and read from the env by the assembler
-      # and install-x86-grub.sh esp; the flags below pin the per-run artifact + tree.
-      "${ASSEMBLE_DISK_X86_SH}" build \
-        --output "${raw_artifact}" \
-        "${single_slot_flag[@]}" \
-        --board "${BOARD_ID}" \
-        --rootfs-tree "${rootfs_tree}" \
-        || die "Stage-4 x86 disk assembly failed for board '${board}'"
-      log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
-
-      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
-      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
-      # the .raw, emitted ALONGSIDE it. build-bundle.sh is board-agnostic (it reads
-      # COMPATIBLE_STRING from the env), so the x86 path mirrors the custom path
-      # verbatim — same rootfs.tar artifact, same BUNDLE_* env. format=plain.
-      local bundle_artifact="${out_dir}/${ts}.raucb"
-      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
-      BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
-        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
-        || die "Stage-4 RAUC bundle build failed for board '${board}'"
-      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
-    else
-      log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 x86 disk assembly (flashable .raw) deferred to the full device build"
-    fi
-  else
-    die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
-  fi
+  stage_fetch
+  stage_kernel_build
+  stage_partition
+  stage_bsp_gate
+  stage_dry_run_plan
+  stage_mkosi
+  stage_tar_emit
+  stage_boot_verify
+  stage_size_gate
+  stage_parity
+  stage_assemble
 
   log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
-}
-
-# ---------------------------------------------------------------------------
-# select_build_mode — decide HOW mkosi runs and set the global BUILD_MODE to one
-# of: native | docker | podman. Containerized is the CANONICAL default (task 9);
-# native is opt-in (--native / MKOSI_NATIVE=1). For the container path the runtime
-# is auto-detected (docker first, then podman). Logs the chosen plan incl. the
-# pinned mkosi/Python versions, and dies with an ACTIONABLE message (not a stack
-# trace) when the container path has no runtime. Called by both the DRY_RUN plan
-# and the real run_mkosi_build, so the two never diverge.
-# ---------------------------------------------------------------------------
-select_build_mode() {
-  if [[ "${MKOSI_NATIVE:-}" == "1" ]]; then
-    BUILD_MODE="native"
-    log_info "mkosi: NATIVE build (opt-in --native/MKOSI_NATIVE=1) — host mkosi (pin: mkosi ${MKOSI_VERSION_PIN}, Python ${MKOSI_PYTHON_FLOOR}+)"
-    return 0
-  fi
-
-  if command -v docker >/dev/null 2>&1; then
-    BUILD_MODE="docker"
-  elif command -v podman >/dev/null 2>&1; then
-    BUILD_MODE="podman"
-  else
-    die "containerized build is the default but no container runtime is installed. Install docker or podman, or re-run with --native (MKOSI_NATIVE=1) to build with host mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+)."
-  fi
-  log_info "mkosi: containerized build (DEFAULT) — runtime=${BUILD_MODE}, builder ${MKOSI_BUILDER_IMAGE} (pinned: mkosi ${MKOSI_VERSION_PIN}, Python ${MKOSI_PYTHON_FLOOR}+)"
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# ensure_builder_image <runtime> — guarantee the canonical builder image exists.
-# An operator-pinned MKOSI_BUILDER_IMAGE is used verbatim (registry/local) and
-# never auto-built; the default baked tag is built from v2/ci/Dockerfile when not
-# already present locally.
-# ---------------------------------------------------------------------------
-ensure_builder_image() {
-  local runtime="$1"
-  [[ "${MKOSI_BUILDER_IMAGE_OVERRIDDEN}" == "1" ]] && return 0
-  if "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
-    return 0
-  fi
-  [[ -f "${MKOSI_BUILDER_DOCKERFILE}" ]] \
-    || die "canonical builder Dockerfile missing: ${MKOSI_BUILDER_DOCKERFILE}"
-  log_info "builder image ${MKOSI_BUILDER_IMAGE} absent — building from ${MKOSI_BUILDER_DOCKERFILE} (mkosi ${MKOSI_VERSION_PIN} + Python ${MKOSI_PYTHON_FLOOR}+)"
-  "${runtime}" build -t "${MKOSI_BUILDER_IMAGE}" -f "${MKOSI_BUILDER_DOCKERFILE}" "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" \
-    || die "failed to build the canonical mkosi builder image from ${MKOSI_BUILDER_DOCKERFILE}"
 }
 
 # ---------------------------------------------------------------------------
@@ -892,154 +389,9 @@ run_mkosi_build() {
     build
   )
 
-  select_build_mode   # sets BUILD_MODE (native|docker|podman); logs the plan
-
-  if [[ "${BUILD_MODE}" == "native" ]]; then
-    command -v mkosi >/dev/null 2>&1 \
-      || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
-    [[ -f /usr/share/keyrings/debian-archive-keyring.gpg ]] \
-      || log_warn "native build: /usr/share/keyrings/debian-archive-keyring.gpg absent — mkosi may fail to verify the Debian repos (install debian-archive-keyring)"
-    if [[ -n "${APT_GPG_PUBLIC_B64}" ]]; then
-      APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")" \
-        || die "could not prepare the binary CeraLive apt keyring for mkosi"
-      export APT_GPG_PUBLIC_B64
-    fi
-    ( cd "${MKOSI_DIR}" && mkosi "${mkosi_args[@]}" ) \
-      || die "mkosi build failed (native)"
-    return
-  fi
-
-  # Containerized (default). BUILD_MODE is the detected runtime; docker `-e NAME`
-  # forwards each value and the in-container mkosi re-declares them via --environment.
-  local runtime="${BUILD_MODE}"
-  ensure_builder_image "${runtime}"
-
-  log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (containerized, mkosi ${MKOSI_VERSION_PIN} pinned)"
-  # Stage lib/common.sh into MKOSI_DIR/lib/ so finalize scripts can source it at
-  # /work/lib/common.sh in mkosi's mount namespace (/work = mkosi workspace root).
-  mkdir -p "${MKOSI_DIR}/lib"
-  cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
-  local env_flags=() env_cli_str=""
-  for n in "${env_names[@]}"; do
-    env_flags+=(-e "${n}")
-    env_cli_str+=" --environment ${n}"
-  done
-
-  "${runtime}" run --rm --privileged \
-    "${env_flags[@]}" \
-    -e "CERALIVE_V2_DIR=/work" \
-    -v "${V2_DIR}:/work" \
-    -v "${bsp_dir}:/run/ceralive-bsp:ro" \
-    -v "${firstparty_dir}:/run/ceralive-firstparty:ro" \
-    "${MKOSI_BUILDER_IMAGE}" \
-    bash -euo pipefail -c '
-      command -v mkosi >/dev/null 2>&1 || {
-        echo "FATAL: builder image lacks mkosi — an overridden MKOSI_BUILDER_IMAGE must bake mkosi '"${MKOSI_VERSION_PIN}"' (see v2/ci/Dockerfile)" >&2
-        exit 1
-      }
-      if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
-        APT_GPG_PUBLIC_B64="$(/work/lib/dearmor-apt-keyring.sh)" || {
-          echo "FATAL: could not prepare the binary CeraLive apt keyring for mkosi" >&2
-          exit 1
-        }
-        export APT_GPG_PUBLIC_B64
-      fi
-      cd /work/mkosi
-      mkosi \
-        --architecture='"${mkosi_arch}"' \
-        --with-network=yes \
-        '"${env_cli_str}"' \
-        --environment CERALIVE_V2_DIR \
-        --cache-directory='"${cache_dir}"' \
-        --package-directory /run/ceralive-bsp \
-        --extra-tree /run/ceralive-firstparty:/opt/ceralive-staging \
-        --force \
-        build
-    ' || die "mkosi build failed (container)"
-}
-
-# ---------------------------------------------------------------------------
-# emit_artifact <rootfs_tree> <artifact.tar>
-# Produce a normalized, deterministic tarball + sha256. Runs in the builder
-# container when the tree is root-owned and the host can't read/tar it.
-# ---------------------------------------------------------------------------
-emit_artifact() {
-  local tree="$1" artifact="$2"
-  # Deterministic ordering + owner + clamped mtime so the same tree always tars
-  # to the same bytes (task 14). --sort=name pins entry order; gnu format avoids
-  # the per-file pax atime/ctime headers that would re-introduce wall-clock drift.
-  local -a tar_repro=(
-    --sort=name --numeric-owner --owner=0 --group=0
-    --mtime="@${SOURCE_DATE_EPOCH:-0}" --format=gnu
-  )
-  if tar -C "${tree}" "${tar_repro[@]}" -cf "${artifact}" . 2>/dev/null; then
-    :
-  else
-    log_info "rootfs is root-owned — tarring inside the builder container"
-    local runtime="docker"; command -v docker >/dev/null 2>&1 || runtime="podman"
-    "${runtime}" run --rm \
-      -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
-      -v "${MKOSI_DIR}:/work" -v "$(dirname "${artifact}")":/out \
-      "${MKOSI_BUILDER_IMAGE}" \
-      tar -C "/work/build/app" "${tar_repro[@]}" -cf "/out/$(basename "${artifact}")" .
-  fi
-  ( cd "$(dirname "${artifact}")" && sha256sum "$(basename "${artifact}")" >"$(basename "${artifact}").sha256" )
-}
-
-# ---------------------------------------------------------------------------
-# compare_size_against_baseline <board> <artifact.tar>
-#
-# The RELATIVE size gate, run against the REAL emitted tar. It was previously
-# reachable only from the v2-ci "size gate" job, which measures a synthetic 4 KB
-# tree — so it compared 4096 bytes against a ~1.4 GB baseline and could only ever
-# report an enormous shrink. That is the same vacuity that let both RK3588 boards
-# ship over the ABSOLUTE ceiling before [6c/9] existed; fixing one gate and
-# leaving the other measuring 4 KB just moves the blind spot.
-#
-# Exit policy is deliberately split, and NOT the same as the absolute gate's:
-#   exit 2 (missing/malformed baseline, or a baseline for a DIFFERENT board) is
-#          FATAL — that is a repository misconfiguration, and a silent cross-board
-#          comparison produces a confident, meaningless delta.
-#   exit 1 (growth beyond the comparator's threshold) is a loud WARNING, matching
-#          what v2-ci already does: the blocking size rule is the absolute ceiling
-#          in size-budget.json, and an intentional feature addition must not be
-#          able to fail a build that is still comfortably under it.
-# The baseline is resolved ONLY as size-baseline.<board>.json, with no
-# un-suffixed fallback: the legacy v2/ci/size-baseline.json is rock-5b-plus's
-# file, so a fallback would hand it to every board that lacks one. A board with
-# no committed baseline yet warns and passes, the same newly-added-board
-# allowance measure-size.sh makes for a null ceiling.
-# ---------------------------------------------------------------------------
-compare_size_against_baseline() {
-  local board="$1" artifact="$2" baseline measured rc=0
-
-  # A debug image is production + the development delta (~58 MB on rock-5b-plus),
-  # so it exceeds the comparator's 50 MB growth threshold BY CONSTRUCTION. Warning
-  # about that is worse than useless: the warning's own remedy is "update the
-  # baseline in the same PR", and doing that from a debug build would overwrite the
-  # PRODUCTION baseline with a number no production image can ever reproduce, then
-  # desync it from size-budget.json (which manifest.bats fails on). The ABSOLUTE
-  # ceiling above still ran and still applies — only this relative comparison,
-  # whose reference is a production artifact, is skipped.
-  if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" ]]; then
-    log_warn "[6c/9] CERALIVE_DEBUG_IMAGE=1 — relative size baseline SKIPPED (the committed baseline is a PRODUCTION artifact; do NOT update it from a debug build). The absolute ceiling was enforced above."
-    return 0
-  fi
-
-  baseline="${SIZE_BASELINE_DIR}/size-baseline.${board}.json"
-  if [[ ! -f "${baseline}" ]]; then
-    log_warn "[6c/9] no committed size baseline for board '${board}' — relative regression check skipped (record one in ${SIZE_BASELINE_DIR})"
-    return 0
-  fi
-
-  measured="$(du --apparent-size -sb "${artifact}" | awk '{print $1}')"
-
-  "${CHECK_SIZE_REGRESSION_SH}" "${measured}" "${baseline}" "${board}" || rc=$?
-  case "${rc}" in
-    0) log_success "[6c/9] size baseline: board=${board} within threshold of $(basename "${baseline}")" ;;
-    1) log_warn "[6c/9] size baseline: board=${board} GREW beyond the regression threshold vs $(basename "${baseline}") — justify the growth and update the baseline in the same PR (v2/docs/size-notes.md §4)" ;;
-    *) die "[6c/9] size baseline unusable for board '${board}': ${baseline} (missing, malformed, or recorded for a different board)" ;;
-  esac
+  # Native vs containerized invocation lives in stages/mkosi.sh; it reads
+  # mkosi_args / env_names / cache_dir out of THIS frame.
+  mkosi_invoke
 }
 
 main "$@"

@@ -30,6 +30,12 @@ setup() {
   VERIFY="$V2/lib/verify-disk.sh"
   BOOT_DIR="$V2/mkosi/platform/boot"
   FIXTURES="$TESTS_DIR/fixtures/gpt-baseline"
+  # postinst-lib.sh is the thin entry that sources customize/postinst.d/*.sh.
+  # $POSTINST_ENTRY is what a chroot sources; $POSTINST_SRC is the whole set,
+  # which is what a static check has to read to stay non-vacuous.
+  POSTINST_ENTRY="$V2/mkosi/customize/postinst-lib.sh"
+  POSTINST_SRC="$BATS_TEST_TMPDIR/postinst-lib.sourceset.sh"
+  cat "$POSTINST_ENTRY" "$V2"/mkosi/customize/postinst.d/*.sh >"$POSTINST_SRC"
 }
 
 require_disk_tools() {
@@ -251,10 +257,9 @@ install_rootfs_into() {
   # setup_data_persistence writes /etc/fstab, /usr/local/sbin and systemd units
   # in a chroot; the label derivation is contract-checked statically here and the
   # resolver itself is exercised functionally above.
-  run grep -Fq 'data_partlabel="$(resolve_partlabel data)"' \
-    "$V2/mkosi/customize/postinst-lib.sh"
+  run grep -Fq 'data_partlabel="$(resolve_partlabel data)"' "$POSTINST_SRC"
   [ "$status" -eq 0 ]
-  run grep -Fq 'data_partlabel="data"' "$V2/mkosi/customize/postinst-lib.sh"
+  run grep -Fq 'data_partlabel="data"' "$POSTINST_SRC"
   [ "$status" -ne 0 ]
 }
 

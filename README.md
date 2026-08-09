@@ -131,14 +131,13 @@ be converted by OTA.
 │   ├── manifests/         # Board/family manifests, package pins, add-on descriptors
 │   ├── lib/               # Orchestrator, assembler, bundle scripts,
 │   │   │                  #   build-all.sh (parallel runner),
-│   │   │                  #   build-feature-sysext.sh (add-on builder)
+│   │   │                  #   build-feature-sysext.sh (add-on builder),
+│   │   │                  #   fetch-debs.sh (REPOS + FIRST_PARTY_APT_PKGS)
 │   │   └── app-layer/     # sysext.sh — extract → prune → squashfs
 │   ├── docs/              # Dev loop, kiosk display, host support, size notes,
 │   │   │                  #   Cog add-on recipe, sysext refresh protocol
 │   │   └── fast-reload.md # Dev-sync live-reload loop
 │   └── tests/             # Manifest + RK3588 A/B/preflash + x86 rollback
-├── scripts/
-│   └── fetch-debs.sh      # Downloads .deb packages for REPOS array
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
@@ -187,10 +186,10 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build rock-5b-plus` | production path; the kernel the fleet actually runs |
-| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots, audio capture not board-confirmed |
-| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; MPP hardware video encode does NOT work on this track (see the pipeline `AGENTS.md` "MPP hardware video encode" KNOWN ISSUE) — bench/insurance track only |
+| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
+| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; same MPP caveat as above |
+| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./v2/build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `v2/docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -375,6 +374,47 @@ committed baseline `v2/manifests/bsp-baseline.json`.
 - The provenance artifact is deliberately **excluded** from the build-plan `sha256`
   determinism comparison; that comparison hashes the normalized plan, not build
   output files.
+
+## Verified `.deb` Download Cache
+
+All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
+pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
+content-addressed cache at `v2/mkosi/.staging/.debcache/`, keyed on
+`<package>_<version>_<arch>.deb`. A second real fetch of the same plan performs
+**zero `.deb` payload downloads**.
+
+Reuse cannot weaken verification. Every family already resolves the artifact's
+expected SHA-256 *before* it downloads — from the `gpgv`-verified `Packages` index
+on the four apt/curl transports, or from the committed
+`rk3588-userspace-deb-versions.txt` pin file — so a cache hit is re-checked against
+exactly the hash the network path would have been checked against. An entry whose
+hash no longer matches is deleted and re-fetched, not skipped.
+
+Only final `.deb` payloads are cached. `InRelease`, `Release`, `Packages.gz`, the
+apt lists and the GPG keyring are never cached: that is the rotating trust material
+whose whole job is to be fresh. Index metadata is therefore still fetched on every
+run, and the "zero downloads" claim is about payloads only.
+
+Concurrency is a **per-cache-key `flock`** under `.debcache/.locks/`, not the
+orchestrator's per-board build lock — that one is keyed on a single board and
+different boards are explicitly allowed to build in parallel, so it cannot protect
+a cache all of them share. A reader holds its key lock across the whole hit
+sequence (existence check → SHA re-verification → copy-out), and eviction takes
+each victim's own key lock before unlinking, skipping any victim a reader is
+currently holding.
+
+```bash
+CERALIVE_DEBCACHE=0 ./v2/build rock-5b-plus              # disable it entirely
+CERALIVE_DEBCACHE_MAX_BYTES=8589934592 ./v2/build …      # raise the 4 GiB ceiling
+CERALIVE_DEBCACHE_DIR=/srv/debcache ./v2/build …         # relocate it
+```
+
+The cache is bounded at 4 GiB by default and evicted least-recently-used first by
+mtime, which a reuse refreshes. Disabled, the fetch behaves exactly as it did
+before the cache existed; a `DRY_RUN=1` plan never touches it and its resolved
+output is byte-identical. Every cache failure is non-fatal — an unwritable
+directory or a lost lock degrades to an ordinary download. Contract:
+`v2/tests/debcache.test.sh`.
 
 ## Kernel Freeze — the boot stack updates via RAUC only
 
@@ -587,7 +627,7 @@ neither repository's patches apply to the other's tree:
 
 | Variant | Kernel | Patch series | Built package |
 |---|---|---|---|
-| `edge` | mainline `v7.1.5` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.5-ceralive-rk3588` |
+| `edge` | mainline `v7.1.7` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.7-ceralive-rk3588` |
 | `vendor-patched` | Armbian vendor BSP 6.1.115 — **the kernel the shipped image actually runs** | `CERALIVE/rk3588-vendor-kernel-patches` | `linux-image-6.1.115-ceralive-vendor-rk35xx` |
 
 `vendor-patched` rebuilds the same 6.1.115 BSP the production path installs
@@ -607,10 +647,14 @@ the fix it led to: the HDMI-RX audio domain is enabled only by a work item that
 a capture open never triggered, so nothing ever clocked into the I2S receiver;
 the patch starts that domain from the capture lifecycle instead.
 
-`0005` compiles clean and is source-verified against the pinned tree, but it has
-**not** been confirmed on a board, and `0004` is retained precisely so that
-confirmation can be read. Do not read this variant as "HDMI-RX audio works": it
-is instrumented and repaired in source, not proven on hardware. See
+`0005` compiles clean and is source-verified against the pinned tree. Tier 1:
+it is board-confirmed on one Radxa ROCK 5B+ test on a hand-built kernel,
+including end-to-end CeraUI audio-meter validation through the production
+cerastream sidecar. Tier 2: the pipeline-built `--variant vendor-patched`
+image has not itself been booted on hardware, and no Orange Pi 5+ evidence
+exists — `0004` is retained precisely so that a future pipeline-built-image
+confirmation can be read. Do not read this variant as "HDMI-RX audio works on
+this pipeline's image" on the strength of the Tier 1 result alone. See
 [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §2d.
 
 Every input is exact-pinned — the kernel commit, the patch-series commit (an
@@ -622,6 +666,20 @@ fetched by exact commit rather than given a fabricated tag. The backend is plain
 kernel `make bindeb-pkg`; the Armbian build framework is consulted for the
 branch→version mapping and for the plain `.config` file it publishes, and is
 never invoked as the build system.
+
+Each of the three network fetches is retried up to three times under a
+`timeout(1)`, and every attempt runs in a private directory destroyed *before*
+it starts — a tree half-written by a killed clone would otherwise make each
+retry fail deterministically, so one blip would present as a total outage. A
+**pin mismatch is never retried**: it is checked after the retry loop and fails
+on the spot, because a moved tag or a squash-merge-orphaned SHA is permanent and
+re-fetching it three times only misreports it as a network fault. Nothing is
+published at the path the build reads until it has verified.
+
+`make -j` is derived as `min(nproc, MemAvailable / 2 GiB)` rather than plain
+`nproc`, because a kernel compile job peaks around 1-2 GiB and a core-rich,
+memory-thin builder gets OOM-killed deep inside `bindeb-pkg` after every pin has
+already passed. `CERALIVE_KERNEL_BUILD_JOBS` overrides it unconditionally.
 
 Selecting the variant suppresses the remote fetch of the kernel/DTB packages
 (U-Boot and firmware stay prebuilt-fetched), replaces their names with the built
@@ -661,6 +719,13 @@ this stage has been compiled or booted yet, and it does not reopen the vendor-BS
 decision. Full detail:
 [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md);
 gaps: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) item 9.
+
+## Kernel Tracks
+
+Which patch repository feeds which opt-in variant, the pin chain from each
+repo's `kernel-pin.env` through to `rk3588.yaml`, and where each track's
+retire-on-merge status is tracked — a thin index, not a restatement — lives in
+[`v2/docs/kernel-tracks.md`](v2/docs/kernel-tracks.md).
 
 ## Kernel Currency Watch
 

@@ -30,6 +30,10 @@
 #
 # Hardware-free and root-free: the verifier is pure text over two files.
 
+# `run !` (a self-asserting negated run) needs bats >= 1.5.0; without this line
+# every such call emits a BW02 warning.
+bats_require_minimum_version 1.5.0
+
 setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
   V2="$(cd "$TESTS_DIR/.." && pwd)"
@@ -145,7 +149,7 @@ EOF
 
 @test "rk3588-edge.fragment: TYPEC_FUSB302 declares the value kconfig can actually give it" {
   grep -qx 'CONFIG_TYPEC_FUSB302=m' "$FRAGMENT"
-  ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
 }
 
 @test "rk3588-edge.fragment: NF_TABLES declares the parent the whole nftables family sits inside" {
@@ -160,15 +164,51 @@ EOF
   # =m is NOT equivalent here: ceralive-ingest-firewall.service is a
   # DefaultDependencies=no oneshot that runs `nft -f` before the ingest gateway
   # opens its listeners, so the family must be built in.
-  ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
 }
 
-@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.5 has no such symbol" {
+@test "rk3588-edge.fragment: the system-uncached dma-heap declares its own symbol under its parent" {
+  # Patch 0009's heap is what makes MPP hardware encode work on this track:
+  # librockchip_mpp hard-codes the heap NAME `system-uncached` and does not fall
+  # back to `system`. Riding on the parent would leave the gate asserting only
+  # DMABUF_HEAPS_SYSTEM=y — still true with the heap switched off — so the
+  # fragment declares the leaf and the gate proves it reached the kernel.
+  grep -qx 'CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y' "$FRAGMENT"
+  # Declare-the-parent, same rule as RTW89 and NF_TABLES: DMABUF_HEAPS_SYSTEM is
+  # this leaf's `depends on`, and DMABUF_HEAPS gates that in turn.
+  local heaps parent leaf
+  heaps="$(grep -n '^CONFIG_DMABUF_HEAPS=y$' "$FRAGMENT" | cut -d: -f1)"
+  parent="$(grep -n '^CONFIG_DMABUF_HEAPS_SYSTEM=y$' "$FRAGMENT" | cut -d: -f1)"
+  leaf="$(grep -n '^CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$heaps" -lt "$parent" ]
+  [ "$parent" -lt "$leaf" ]
+  # =m is not an option: the symbol is a bool, and a heap that registered late
+  # would be missing exactly when MPP probes for it.
+  run ! grep -qx 'CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS a config that dropped the uncached heap" {
+  # The silent no-op this declaration exists to catch: 0009's code compiles
+  # either way and dma_heap_add() for `system-uncached` simply never runs, so
+  # nothing anywhere reports an error — the board just has no such heap.
+  cat >"$WORK/no-uncached" <<'EOF'
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+CONFIG_DMABUF_HEAPS_CMA=y
+EOF
+  run "$VERIFY" "$FRAGMENT" "$WORK/no-uncached"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED: DROPPED"* ]]
+  # The heaps that DID survive must not be reported.
+  [[ "$output" != *"CONFIG_DMABUF_HEAPS_CMA"* ]]
+}
+
+@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.7 has no such symbol" {
   # The ruleset's `counter` statement is real, but net/netfilter/Makefile compiles
   # nft_counter.o unconditionally into nf_tables-objs. Declaring CONFIG_NFT_COUNTER
   # would resolve to nothing and the gate would fail the build over a symbol the
   # kernel does not have.
-  ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
+  run ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
 }
 
 @test "rk3588-edge.fragment: the gate REJECTS the resolved .config the broken 7.1.5 build produced" {
@@ -317,7 +357,7 @@ EOF
   # brcmfmac). If either ever appears here it means the gate was silenced on a
   # symbol the fleet actually needs.
   local list="$V2/manifests/kernel/rk3588-vendor-patched.absent"
-  ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
+  run ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
 }
 
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {

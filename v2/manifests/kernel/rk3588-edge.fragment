@@ -11,9 +11,10 @@
 # copying it would silently import decisions nobody here reviewed. Starting from
 # mainline defconfig and adding exactly what we need keeps every line auditable.
 #
-# NOT HARDWARE-PROVEN. Nothing in this todo compiles or boots a kernel; the
-# experimental image build is the next step. Treat every symbol below as a
-# reviewed intent, not a validated result. See
+# PARTLY HARDWARE-PROVEN as of the v7.1.7 pin. A Rock 5B+ has booted an image
+# built from this fragment and confirmed the capture/encode symbols on real
+# silicon (rkvenc, the dma-heaps, HDMI-RX). Symbols outside that path are still
+# reviewed intent rather than a validated result. See
 # v2/docs/kernel-build-from-source.md §"Known gaps".
 
 # --- Build determinism -----------------------------------------------------
@@ -83,15 +84,29 @@ CONFIG_VIDEO_ROCKCHIP_RKVENC=m
 # `chmod a+rw /dev/dma_heap` — so the absence was a contradiction in the image,
 # not a design choice.
 #
-# HONEST LIMIT: those three heap names are ROCKCHIP-BSP heaps. Mainline
-# registers only `system` (DMABUF_HEAPS_SYSTEM) and `linux,cma`
-# (DMABUF_HEAPS_CMA). Enabling these symbols is NECESSARY — with no
-# /dev/dma_heap at all, MPP cannot even reach a fallback — but whether MPP's
-# allocator settles on the mainline `system` heap is a hardware-gated question
-# that needs a rebuild and a board boot to answer. See
-# .omo/evidence/device-platform-wave4/task-hardware-audit-followup.md §5.
+# These symbols alone were NECESSARY AND NOT SUFFICIENT, and the board proved
+# it: librockchip_mpp's allocator table hard-codes the heap name
+# `system-uncached`, which stock mainline never registers, so the H.264 HAL's
+# init-time allocation failed and mpph264enc did not even register. It does NOT
+# fall back to the `system` heap. Patch 0009 of the series adds that heap; the
+# symbol below is what turns it on. See the UNCACHED block right after it.
 CONFIG_DMABUF_HEAPS=y
 CONFIG_DMABUF_HEAPS_SYSTEM=y
+# Patch 0009's downstream heap, given its OWN Kconfig symbol on purpose: a
+# hardware-unvalidated addition should be separately switchable, and — the part
+# that matters here — verify-kernel-config.sh can only prove what the fragment
+# DECLARES. Riding on the parent, the gate could assert nothing stronger than
+# DMABUF_HEAPS_SYSTEM=y, which stays true even if the heap silently vanishes.
+#
+# Declare-the-parent: DMABUF_HEAPS_SYSTEM above is the `depends on`. The other
+# dependency, ARCH_HAS_DMA_PREP_COHERENT, is `select`ed by arch/arm64/Kconfig,
+# so it needs no entry — same rule as RTW89_CORE and NF_TABLES_IPV4/IPV6.
+#
+# Board-confirmed on a Rock 5B+: /dev/dma_heap/system-uncached is a REAL heap
+# (minor 250,1 against `system`'s 250,0), mpph264enc registers, and a 1080p
+# encode produces byte-identical output across repeats — where 7.1.5 produced
+# zero bytes and, once aliased as a diagnostic, non-deterministic output.
+CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y
 # depends on DMABUF_HEAPS && DMA_CMA; DMA_CMA is already =y from defconfig.
 CONFIG_DMABUF_HEAPS_CMA=y
 
@@ -159,7 +174,7 @@ CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 # NOT DECLARED, deliberately: CONFIG_NFT_COUNTER. The `counter` statement in the
 # ruleset is real and load-bearing — it is what makes a drop visible in
-# `nft list ruleset` for on-device diagnosis — but v7.1.5 has no such symbol:
+# `nft list ruleset` for on-device diagnosis — but v7.1.7 has no such symbol:
 # net/netfilter/Makefile builds nft_counter.o unconditionally into nf_tables-objs,
 # next to nft_meta.o (the `iifname` match) and nft_chain_filter.o (the
 # `type filter hook input` base chain). Declaring it would resolve to nothing and

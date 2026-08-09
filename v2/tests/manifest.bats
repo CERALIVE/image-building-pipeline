@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 #
 # manifest.bats — CI unit suite for the CeraLive v2 manifest system.
 #
@@ -28,7 +29,15 @@ setup() {
   MEASURE_SH="$LIB_DIR/measure-size.sh"
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
-  POSTINST_LIB="$V2/mkosi/customize/postinst-lib.sh"
+  # Two handles on the same library, and the difference is load-bearing.
+  # $POSTINST_ENTRY is the file every real caller SOURCES; it is thin and only
+  # pulls in the per-concern modules under customize/postinst.d/. A static
+  # contract check must instead read the WHOLE sourced set, or it goes silently
+  # vacuous the moment a function moves between modules — so $POSTINST_LIB is
+  # that set, materialized once per test.
+  POSTINST_ENTRY="$V2/mkosi/customize/postinst-lib.sh"
+  POSTINST_LIB="$BATS_TEST_TMPDIR/postinst-lib.sourceset.sh"
+  cat "$POSTINST_ENTRY" "$V2"/mkosi/customize/postinst.d/*.sh >"$POSTINST_LIB"
   APT_CERALIVE_REPO="$V2/mkosi/customize/apt-ceralive-repo.sh"
   VERIFY_PASETO="$LIB_DIR/verify-paseto-key-encodings.sh"
   BSP_BASELINE_JSON="$V2/manifests/bsp-baseline.json"
@@ -626,15 +635,15 @@ run_concurrent_hostname_scripts() {
   # retry service keeps a hard Requires= (its failure is harmless, timer refires).
   grep -Fq 'Wants=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'Wants=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
-  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
+  run ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/runtime/ceralive-tls-firstboot.service"
   grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
-  ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
+  run ! grep -Fq 'HOSTNAME_STAMP=' "$V2/mkosi/runtime/ceralive-tls-firstboot.sh"
   grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service network-online.target' \
     "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   grep -Fq 'Wants=network-online.target ceralive-hostname.service' \
     "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
-  ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  run ! grep -Fq 'Requires=ceralive-hostname.service' "$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 }
 
 @test "hostname: aligned reconciliation is a no-op" {
@@ -1442,7 +1451,8 @@ YAML
 }
 
 @test "t14 x86 guard: orchestrate.sh wires the x86 ESP/GRUB disk path (TODO(x86-disk) closed)" {
-  local orch="$V2/lib/orchestrate.sh"
+  local orch
+  orch="$(orch_source_set)"
   # Task 12 closed the deferral: the former active TODO(x86-disk) marker is GONE.
   run grep -q 'TODO(x86-disk)' "$orch"
   [ "$status" -ne 0 ]
@@ -1626,6 +1636,23 @@ PY
 # that have no real rootfs behind them. Root-free and hardware-free — the shipped
 # block is extracted and executed against synthetic KB-sized trees.
 
+# The orchestrator is an ENTRY (lib/orchestrate.sh) plus one module per stage
+# under lib/stages/, sourced in PIPELINE order. A static check that reads it by
+# TEXT must read the whole SET in that order, or it matches nothing and passes
+# vacuously — and a stage-ORDER assertion only means something if the modules
+# appear in the entry's own source order. Written to a file, never piped: `grep -q`
+# closes the pipe and `set -o pipefail` turns a correct read into a failure.
+orch_source_set() {
+  local out="$BATS_TEST_TMPDIR/orch-source-set.sh" m
+  {
+    cat "$V2/lib/orchestrate.sh"
+    while read -r m; do cat "$V2/lib/stages/$m"; done \
+      < <(sed -n 's#^source "${STAGE_DIR}/\(.*\)"$#\1#p' "$V2/lib/orchestrate.sh")
+  } >"$out"
+  [ -s "$out" ]
+  printf '%s\n' "$out"
+}
+
 # Emit the real [6c/9] block out of orchestrate.sh so the cases below execute the
 # shipped code rather than a copy of it.
 extract_size_gate_block() {
@@ -1635,7 +1662,7 @@ extract_size_gate_block() {
       buf = buf ORS $0
       if ($0 == "  fi") { if (buf ~ /\[6c\/9\]/) { print buf; exit } ; inblk = 0 }
     }
-  ' "$V2/lib/orchestrate.sh"
+  ' "$V2/lib/stages/size-gate.sh"
 }
 
 # Drive that block with stubbed logging, a caller-supplied budget file and a
@@ -1665,7 +1692,7 @@ extract_baseline_compare_fn() {
     /^compare_size_against_baseline\(\) \{/ { inblk = 1 }
     inblk { print }
     inblk && /^\}/ { exit }
-  ' "$V2/lib/orchestrate.sh"
+  ' "$V2/lib/stages/size-gate.sh"
 }
 
 run_baseline_compare() {
@@ -1688,7 +1715,7 @@ run_baseline_compare() {
   [ "$status" -eq 0 ]
   [ -x "$MEASURE_SH" ]
 
-  run grep -F '"${MEASURE_SIZE_SH}" "${board}" "${artifact}"' "$V2/lib/orchestrate.sh"
+  run grep -F '"${MEASURE_SIZE_SH}" "${board}" "${artifact}"' "$V2/lib/stages/size-gate.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -1696,11 +1723,12 @@ run_baseline_compare() {
   # Position is the whole point: measuring before the emit has nothing to measure,
   # and measuring after Stage-4 would already have cut a .raw and a signed .raucb
   # from an over-budget image.
-  local emit_line gate_line parity_line disk_line
-  emit_line="$(grep -n '\[6/9\] emitting normalized artifact' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  parity_line="$(grep -n '\[7/9\] verifying parity' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  disk_line="$(grep -n '\[8/9\] Stage-4 disk assembly' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  local orch emit_line gate_line parity_line disk_line
+  orch="$(orch_source_set)"
+  emit_line="$(grep -n '\[6/9\] emitting normalized artifact' "$orch" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$orch" | head -1 | cut -d: -f1)"
+  parity_line="$(grep -n '\[7/9\] verifying parity' "$orch" | head -1 | cut -d: -f1)"
+  disk_line="$(grep -n '\[8/9\] Stage-4 disk assembly' "$orch" | head -1 | cut -d: -f1)"
   [ -n "$emit_line" ] && [ -n "$gate_line" ] && [ -n "$parity_line" ] && [ -n "$disk_line" ]
   [ "$emit_line" -lt "$gate_line" ]
   [ "$gate_line" -lt "$parity_line" ]
@@ -1710,11 +1738,25 @@ run_baseline_compare() {
 @test "size-gate wiring: DRY_RUN exits the orchestrator before the gate can run" {
   # DRY_RUN ships no rootfs at all, so the gate must be unreachable there — by
   # placement, not by a condition that a later edit could drop.
-  local dryrun_exit_line gate_line
-  dryrun_exit_line="$(grep -n '=== DRY-RUN complete' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  local orch dryrun_exit_line gate_line
+  orch="$(orch_source_set)"
+  dryrun_exit_line="$(grep -n '=== DRY-RUN complete' "$orch" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$orch" | head -1 | cut -d: -f1)"
   [ -n "$dryrun_exit_line" ] && [ -n "$gate_line" ]
   [ "$dryrun_exit_line" -lt "$gate_line" ]
+}
+
+@test "size-gate wiring: main() calls the DRY_RUN plan before the gate" {
+  # Companion to the source-order case above. Now that the stage bodies are
+  # modules, the thing that actually decides reachability is main()'s CALL order,
+  # so assert that directly rather than trusting text position alone.
+  local body dry_pos gate_pos
+  body="$(sed -n '/^main() {/,/^}/p' "$V2/lib/orchestrate.sh")"
+  [ -n "$body" ]
+  dry_pos="$(printf '%s\n' "$body" | grep -n '^  stage_dry_run_plan$' | head -1 | cut -d: -f1)"
+  gate_pos="$(printf '%s\n' "$body" | grep -n '^  stage_size_gate$' | head -1 | cut -d: -f1)"
+  [ -n "$dry_pos" ] && [ -n "$gate_pos" ]
+  [ "$dry_pos" -lt "$gate_pos" ]
 }
 
 @test "size-gate wiring: the shipped block PASSES an under-budget artifact" {
@@ -2045,7 +2087,7 @@ print('CEILING-POLICY-OK')
   run env \
     CERALIVE_DEBUG_IMAGE=0 \
     CERALIVE_DEBUG_PASSWORD_HASH='' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
 }
@@ -2160,7 +2202,7 @@ SH
     DEBUG_PASSWORD_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=0 \
     CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"CERALIVE_DEBUG_PASSWORD_HASH requires CERALIVE_DEBUG_IMAGE=1"* ]]
@@ -2187,7 +2229,7 @@ SH
     DEBUG_PASSWORD_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=1 \
     CERALIVE_DEBUG_PASSWORD_HASH='$6$test$hash' \
-    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_debug_access' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -2221,7 +2263,7 @@ SH
     PATH="$bin:$PATH" \
     SSH_ENABLE_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=0 \
-    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -2251,7 +2293,7 @@ SH
     PATH="$bin:$PATH" \
     SSH_ENABLE_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=1 \
-    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_LIB"
+    bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
   run cat "$calls"
@@ -2452,7 +2494,7 @@ SH
   grep -q "stub orchestrator ran for board=passboard" "$passlog"
   # the failing board's stderr was captured into ITS log, not the passing one
   grep -q "simulating failure for failboard" "$faillog"
-  ! grep -q "failboard" "$passlog"
+  run ! grep -q "failboard" "$passlog"
 }
 
 # ===========================================================================
@@ -2659,7 +2701,7 @@ build_feature_fixture() {
   run gpg --list-packets "$baked"
   [ "$status" -eq 0 ]
   [[ "$output" != *"secret key"* ]]
-  ! grep -aq 'PRIVATE KEY' "$baked"
+  run ! grep -aq 'PRIVATE KEY' "$baked"
 }
 
 @test "t24 keyring: add-on keyring is a DISTINCT trust domain from the RAUC keyring" {
@@ -2857,7 +2899,7 @@ BSP_SHA_B="2222222222222222222222222222222222222222222222222222222222222222"
   # enter the sha256 comparison. Assert the plan-line anchor exists and the
   # artifact name is nowhere in that workflow.
   grep -q "would build with:" "$REPO_ROOT/.github/workflows/v2-ci.yml"
-  ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
+  run ! grep -q "bsp-provenance" "$REPO_ROOT/.github/workflows/v2-ci.yml"
 }
 
 @test "v2 CI: resolver dependency cache is content-addressed and covers every resolver job" {
@@ -3134,11 +3176,11 @@ run_paseto_provision() {
   rm -rf "$dir"
   if [[ -z "$payload" ]]; then
     run env -u PASETO_PUBLIC_KEY_B64 PASETO_DROPIN_DIR="$dir" \
-      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+      bash -c "source '$POSTINST_ENTRY'; setup_paseto_public_key"
   else
     local b64; b64="$(printf '%s' "$payload" | base64 -w0)"
     run env PASETO_PUBLIC_KEY_B64="$b64" PASETO_DROPIN_DIR="$dir" \
-      bash -c "source '$POSTINST_LIB'; setup_paseto_public_key"
+      bash -c "source '$POSTINST_ENTRY'; setup_paseto_public_key"
   fi
   PASETO_DROPIN="$dir/20-paseto-public-key.conf"
 }
@@ -3200,7 +3242,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/avahi-daemon.service.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" AVAHI_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+    bash -c "source '$POSTINST_ENTRY'; setup_avahi_restart"
   [ "$status" -eq 0 ]
   [ -f "$dir/10-ceralive-restart.conf" ]
   grep -q '^\[Service\]' "$dir/10-ceralive-restart.conf"
@@ -3212,7 +3254,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/avahi-fail.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" AVAHI_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_avahi_restart"
+    bash -c "source '$POSTINST_ENTRY'; setup_avahi_restart"
   [ "$status" -ne 0 ]
   [[ "$output" == *"avahi-restart source not found"* ]]
   [ ! -f "$dir/10-ceralive-restart.conf" ]
@@ -3239,7 +3281,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive.service.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -eq 0 ]
   [ -f "$dir/30-cerastream-ordering.conf" ]
   grep -q '^\[Unit\]' "$dir/30-cerastream-ordering.conf"
@@ -3254,7 +3296,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive-ordering-only.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -eq 0 ]
   run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=cerastream\.service' "$dir/30-cerastream-ordering.conf"
   [ "$status" -ne 0 ]
@@ -3269,7 +3311,7 @@ run_paseto_provision() {
   local dir="$BATS_TEST_TMPDIR/ceralive-ordering-fail.d"
   rm -rf "$dir"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" CERASTREAM_ORDERING_DROPIN_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; setup_cerastream_ordering"
+    bash -c "source '$POSTINST_ENTRY'; setup_cerastream_ordering"
   [ "$status" -ne 0 ]
   [[ "$output" == *"cerastream-ordering source not found"* ]]
   [ ! -f "$dir/30-cerastream-ordering.conf" ]
@@ -3313,7 +3355,7 @@ SH
   run env PATH="$bin:$PATH" TYPEC_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-typec-source" ]
   [ -f "$unit_dir/ceralive-typec-source.service" ]
@@ -3416,7 +3458,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/typec-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_typec_source_role"
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
   [ "$status" -ne 0 ]
   [[ "$output" == *"typec-source script not found"* ]]
   [ ! -e "$unit_dir/ceralive-typec-source.service" ]
@@ -3470,7 +3512,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
 
   local unit
@@ -3500,7 +3542,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
   [ -L "$dir/systemd-networkd.service" ]
   [ -L "$dir/systemd-networkd-wait-online.service" ]
@@ -3537,7 +3579,7 @@ SH
   chmod +x "$bin/systemctl"
 
   run env PATH="$bin:$PATH" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -ne 0 ]
   [[ "$output" == *"mask did not land"* ]]
   [ ! -e "$dir/systemd-networkd.service" ]
@@ -3555,7 +3597,7 @@ SH
   mask_stub_bin "$bin"
 
   run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
-    bash -c "source '$POSTINST_LIB'; suppress_unusable_boot_units"
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
   [ "$status" -eq 0 ]
 
   run grep -cE '^systemctl mask ' "$calls"
@@ -3664,7 +3706,7 @@ SH
   run env PATH="$bin:$PATH" FAN_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_curve"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-fan-curve" ]
   [ -f "$unit_dir/ceralive-fan-curve.service" ]
@@ -3878,7 +3920,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/fan-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     FAN_CURVE_UNIT_DIR="$unit_dir" FAN_CURVE_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_curve"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_curve"
   [ "$status" -ne 0 ]
   [[ "$output" == *"fan-curve script not found"* ]]
   [ ! -e "$unit_dir/ceralive-fan-curve.service" ]
@@ -3965,7 +4007,7 @@ SH
   run env PATH="$bin:$PATH" LED_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_led_status"
+    bash -c "source '$POSTINST_ENTRY'; setup_led_status"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-led-status" ]
   [ -f "$unit_dir/ceralive-led-status.service" ]
@@ -4183,7 +4225,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/led-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
     LED_STATUS_UNIT_DIR="$unit_dir" LED_STATUS_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_led_status"
+    bash -c "source '$POSTINST_ENTRY'; setup_led_status"
   [ "$status" -ne 0 ]
   [[ "$output" == *"led-status script not found"* ]]
   [ ! -e "$unit_dir/ceralive-led-status.service" ]
@@ -4727,8 +4769,10 @@ REPRO
   [[ "$runtime_fn" != *"gpg --"* ]]
   [[ "$runtime_fn" != *"file -b"* ]]
   grep -q 'DEARMOR_APT_KEYRING_SH=' "$V2/lib/orchestrate.sh"
-  grep -q 'APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")"' "$V2/lib/orchestrate.sh"
-  grep -q '/work/lib/dearmor-apt-keyring.sh' "$V2/lib/orchestrate.sh"
+  # DEARMOR_APT_KEYRING_SH is resolved by the orchestrator entry; both call sites
+  # are in the [5/9] mkosi module, so read that file or match nothing.
+  grep -q 'APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")"' "$V2/lib/stages/mkosi.sh"
+  grep -q '/work/lib/dearmor-apt-keyring.sh' "$V2/lib/stages/mkosi.sh"
   local failing_container_helper="$BATS_TEST_TMPDIR/failing-container-dearmor"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 37' >"$failing_container_helper"
   chmod +x "$failing_container_helper"
@@ -4737,7 +4781,7 @@ REPRO
     /if \[\[ -n "\$\{APT_GPG_PUBLIC_B64:-\}" \]\]; then/ { found=1 }
     found { print }
     found && /^[[:space:]]*fi$/ { exit }
-  ' "$V2/lib/orchestrate.sh")"
+  ' "$V2/lib/stages/mkosi.sh")"
   [[ "$container_prepare" == *'/work/lib/dearmor-apt-keyring.sh'* ]]
   run env APT_GPG_PUBLIC_B64='must-fail' bash -euo pipefail -c "${container_prepare//\/work\/lib\/dearmor-apt-keyring.sh/$failing_container_helper}"$'\nprintf "mkosi_started=yes\\n"'
   [ "$status" -eq 1 ]
@@ -5274,7 +5318,7 @@ YAML
 }
 
 @test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
-  # Mainline's rockchip Makefile at the pinned v7.1.5 builds
+  # Mainline's rockchip Makefile at the pinned v7.1.7 builds
   # rk3588-orangepi-5-plus.dtb, and the override states that explicitly rather
   # than inheriting it, so a future mainline rename moves exactly one line.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus --variant edge 2>/dev/null"
@@ -5304,7 +5348,7 @@ YAML
   # so the prefix must appear on neither, on either kernel path.
   local board path
   for board in rock-5b-plus orange-pi-5-plus; do
-    ! grep -Eq '^\s*dtb_name:\s*rk3588s-' "$V2/manifests/boards/${board}.yaml"
+    run ! grep -Eq '^\s*dtb_name:\s*rk3588s-' "$V2/manifests/boards/${board}.yaml"
     for path in "" "--variant edge"; do
       run bash -c "'$RESOLVE_SH' '$board' $path 2>/dev/null"
       [ "$status" -eq 0 ]
@@ -5323,7 +5367,7 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"DTB_NAME='rk3588-rock-5b-plus.dtb'"* ]]
   done
-  ! grep -Fq 'variant_overrides' "$V2/manifests/boards/rock-5b-plus.yaml"
+  run ! grep -Fq 'variant_overrides' "$V2/manifests/boards/rock-5b-plus.yaml"
 }
 
 @test "variant_overrides: the mechanism is OPT-IN, not a silent global change" {
@@ -5442,8 +5486,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: main
       patches_series: patches/series
@@ -5451,9 +5495,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5465,8 +5509,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5474,9 +5518,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5488,7 +5532,7 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
+      tag: v7.1.7
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5496,9 +5540,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5510,8 +5554,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5519,9 +5563,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
       suppressed_packages: [linux-image-vendor-rk35xx]"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
@@ -5532,7 +5576,7 @@ YAML
 @test "kernel_source: the edge resolve replaces the kernel package and empties DTB_PACKAGES" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
   [[ "$output" == *"DTB_PACKAGES=''"* ]]
   [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
   # U-Boot and firmware are NOT replaced: they stay prebuilt-fetched.
@@ -5550,23 +5594,23 @@ YAML
   line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
   [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
   [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  [[ "$line" == *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # U-Boot / firmware must NEVER be suppressed.
   [[ "$line" != *"linux-u-boot"* ]]
   [[ "$line" != *"armbian-firmware"* ]]
 }
 
-@test "kernel_source: the pinned patches commit is the merged CERALIVE PR #2 SHA" {
-  # A regression pin on the actual value. CERALIVE/rk3588-kernel-patches#2 added
-  # patch 0006 (the HDMI-RX audio sound-card device tree) on top of PR #1's
-  # series; a silent bump here would change what the kernel contains with no
-  # other signal.
+@test "kernel_source: the pinned patches commit is the SHA that LANDED on main" {
+  # A regression pin on the actual value. This is the squash-merge of
+  # CERALIVE/rk3588-kernel-patches#4 as it landed on that repo's main, NOT the
+  # PR-head SHA the merge orphaned; a silent bump here would change what the
+  # kernel contains with no other signal.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='9c1cb385098d842a1d5755e3717b308a25bb8305'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='acb519c101fefa31f51300779f3a139bcabf6a1c'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_COMMIT='155b42bec9cbb6b8cdc47dd9bd09503a81fbe493'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
 }
 
 @test "kernel_source: the defconfig fragment the manifest names actually exists" {
@@ -5659,9 +5703,9 @@ YAML
 @test "vendor-patched: selecting it does NOT move the edge variant" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_DEFCONFIG_BASE='defconfig'"* ]]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
   [[ "$output" == *"BUILDER_IMAGE='debian:trixie-"* ]]
   # edge declares no config-file trio at all.
   [[ "$output" != *"KERNEL_SOURCE_CONFIG_GIT_URL="* ]]
@@ -5690,24 +5734,24 @@ YAML
   # GIT_CONFIG_COUNT entry is silently ignored and the fetch dies with
   # "detected dubious ownership", which is a real failure this already hit.
   grep -q 'GIT_CONFIG_GLOBAL=/in/gitconfig' "$src"
-  ! grep -q 'GIT_CONFIG_KEY_0=safe.directory' "$src"
-  ! grep -qE -- '-c[[:space:]]+safe\.directory' "$src"
+  run ! grep -q 'GIT_CONFIG_KEY_0=safe.directory' "$src"
+  run ! grep -qE -- '-c[[:space:]]+safe\.directory' "$src"
 }
 
 @test "bench patch clone: unset means the manifest URL is used verbatim" {
   local src="$LIB_DIR/build-kernel.sh"
   grep -q 'local patches_fetch_url="\${patches_url}"' "$src"
   # And no shipped manifest may hardcode the bench path.
-  ! grep -rq 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$V2/manifests"
+  run ! grep -rq 'CERALIVE_KERNEL_PATCHES_LOCAL_REPO' "$V2/manifests"
 }
 
 @test "bench patch clone: a relative path or a non-git dir is refused" {
   run env DRY_RUN=0 CERALIVE_KERNEL_PATCHES_LOCAL_REPO=relative/path \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_DEFCONFIG_BASE=defconfig \
     KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
@@ -5724,9 +5768,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
@@ -5742,9 +5786,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_CONFIG_COMMIT=5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39 \
@@ -5764,9 +5808,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_CONFIG_COMMIT=main \
@@ -5786,9 +5830,9 @@ YAML
   write_variant_family "$f" "  vendor-patched:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/p.git
-      patches_commit: 9c1cb385098d842a1d5755e3717b308a25bb8305
+      patches_commit: acb519c101fefa31f51300779f3a139bcabf6a1c
       patches_series: patches/series
       config_git_url: https://example.invalid/build.git
       config_commit: 5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39
@@ -5814,8 +5858,8 @@ YAML
 @test "fetch suppression: suppressed kernel/DTB names leave the declared BSP set" {
   run bash -c "
     set -euo pipefail
-    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.5-ceralive-rk3588'
-    export KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'
+    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.7-ceralive-rk3588'
+    export KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'
     export DTB_PACKAGES=''
     source '$FETCH_DEBS'
     collect_declared_bsp_pkgs '$V2/manifests/families/rk3588.yaml'
@@ -5823,7 +5867,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"linux-image-vendor-rk35xx"* ]]
   [[ "$output" != *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$output" != *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  [[ "$output" != *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # Everything else the family declares is untouched.
   [[ "$output" == *"armbian-firmware"* ]]
   [[ "$output" == *"gstreamer1.0-rockchip1"* ]]
@@ -5895,7 +5939,7 @@ YAML
 
   run bash -c "
     set -euo pipefail
-    ORCH='$LIB_DIR/orchestrate.sh'
+    ORCH='$LIB_DIR/stages/partition.sh'
     # Lift the orchestrator's function bodies without running main().
     eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
@@ -5916,7 +5960,7 @@ YAML
 
   run bash -c "
     set -euo pipefail
-    ORCH='$LIB_DIR/orchestrate.sh'
+    ORCH='$LIB_DIR/stages/partition.sh'
     eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
     log_success() { printf 'OK %s\n' \"\$*\" >&2; }
@@ -5930,10 +5974,10 @@ YAML
 @test "build-kernel: a non-40-hex patches pin is refused before anything runs" {
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=rk3588-rock-5b-plus.dtb \
-    KERNEL_PACKAGES=linux-image-7.1.5-ceralive-rk3588 \
+    KERNEL_PACKAGES=linux-image-7.1.7-ceralive-rk3588 \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_TAG=v7.1.5 \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_TAG=v7.1.7 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
     KERNEL_SOURCE_PATCHES_COMMIT=main \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
@@ -5941,9 +5985,9 @@ YAML
     KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
     KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
     KERNEL_SOURCE_LOCAL_VERSION=-ceralive-rk3588 \
-    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588 \
-    KERNEL_SOURCE_PACKAGE_VERSION=7.1.5-ceralive1 \
-    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip \
+    KERNEL_SOURCE_KERNEL_RELEASE=7.1.7-ceralive-rk3588 \
+    KERNEL_SOURCE_PACKAGE_VERSION=7.1.7-ceralive1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip \
     bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko"
   [ "$status" -ne 0 ]
   [[ "$output" == *"patches_commit"* ]]
@@ -5962,9 +6006,9 @@ YAML
   serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus --variant edge
   [ "$status" -eq 0 ]
-  [[ "$output" == *"git clone --branch v7.1.5"* ]]
-  [[ "$output" == *"git rev-parse HEAD == 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493"* ]]
-  [[ "$output" == *"9c1cb385098d842a1d5755e3717b308a25bb8305"* ]]
+  [[ "$output" == *"git clone --branch v7.1.7"* ]]
+  [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
+  [[ "$output" == *"acb519c101fefa31f51300779f3a139bcabf6a1c"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
@@ -6146,14 +6190,14 @@ YAML
   local fn
   fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
   local root="$BATS_TEST_TMPDIR/dtbroot"
-  mkdir -p "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip"
-  printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
+  mkdir -p "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
 
   run bash -c "
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }
     BUILDROOT='$root'
-    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip'
     KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
     DTB_NAME='rk3588-rock-5b-plus.dtb'
     $fn
@@ -6169,7 +6213,7 @@ YAML
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }
     BUILDROOT='$root'
-    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip'
     KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
     DTB_NAME='rk3588s-orangepi-5b.dtb'
     $fn
@@ -6415,8 +6459,8 @@ removefiles_runtime() {
   grep -Eq '^gstreamer1\.0-plugins-bad$' "$shared"
 
   local postinst="$V2/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
-  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
-  ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
 }
 
 # ===========================================================================
@@ -6502,7 +6546,7 @@ SH
   run env PATH="$bin:$PATH" FK_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$V2/mkosi/runtime" \
     FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_kickstart"
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-fan-kickstart" ]
   [ -f "$unit_dir/ceralive-fan-kickstart.service" ]
@@ -6774,7 +6818,7 @@ SH
   local sbin_dir="$BATS_TEST_TMPDIR/fk-failclosed-sbin"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/fk-empty-src" \
     FAN_KICKSTART_UNIT_DIR="$unit_dir" FAN_KICKSTART_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_LIB'; setup_fan_kickstart"
+    bash -c "source '$POSTINST_ENTRY'; setup_fan_kickstart"
   [ "$status" -ne 0 ]
   [[ "$output" == *"fan-kickstart script not found"* ]]
   [ ! -e "$unit_dir/ceralive-fan-kickstart.service" ]
@@ -6898,11 +6942,13 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
 }
 
 @test "dev delta: orchestrate.sh resolves the family delta by NAME and gates the dev delta on the flag" {
-  local orch="$LIB_DIR/orchestrate.sh"
+  # The [1/9] body lives in the stages/resolve.sh module; the orchestrator entry
+  # sequences it. Read the module, or these assertions match nothing and pass.
+  local orch="$LIB_DIR/stages/resolve.sh"
   # The family delta stays a ${FAMILY}-keyed lookup — never a directory glob,
   # which is what would swallow development.delta.list on every board.
   grep -Fq 'delta_list="${pkg_dir}/${FAMILY}.delta.list"' "$orch"
-  ! grep -Eq 'pkg_dir\}?"?/\*\.delta\.list' "$orch"
+  run ! grep -Eq 'pkg_dir\}?"?/\*\.delta\.list' "$orch"
 
   # The dev delta is appended ONLY inside a CERALIVE_DEBUG_IMAGE=1 branch, and a
   # debug build with the file missing fails closed instead of silently shipping
@@ -6915,7 +6961,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   # Ordering is the whole point: the package set now depends on the flag, so a
   # value like `yes` must abort rather than quietly resolve a PRODUCTION set and
   # fail three stages later at mkosi.
-  local orch="$LIB_DIR/orchestrate.sh"
+  local orch="$LIB_DIR/stages/resolve.sh"
   local call_line res_line
   call_line="$(grep -n '^  resolve_debug_image_flag$' "$orch" | head -1 | cut -d: -f1)"
   res_line="$(grep -n 'SHARED_PACKAGES="\$(read_pkg_list' "$orch" | head -1 | cut -d: -f1)"
@@ -7039,7 +7085,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   # PRODUCTION baseline and desync it from size-budget.json, which another test in
   # this file fails on. Only the RELATIVE check is skipped; the absolute ceiling
   # runs for both variants.
-  local orch="$LIB_DIR/orchestrate.sh"
+  local orch="$LIB_DIR/stages/size-gate.sh"
   local body
   body="$(awk '/^compare_size_against_baseline\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$orch")"
   [ -n "$body" ]
@@ -7051,7 +7097,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   stage="$(awk '/\[6c\/9\] enforcing the rootfs size budget/{grab=1} grab{print} grab && /^  fi$/{exit}' "$orch")"
   [ -n "$stage" ]
   grep -Fq 'MEASURE_SIZE_SH' <<<"$stage"
-  ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
+  run ! grep -Fq 'CERALIVE_DEBUG_IMAGE' <<<"$stage"
 }
 
 # ===========================================================================

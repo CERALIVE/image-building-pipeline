@@ -27,7 +27,16 @@
 
 # --- TLS / apt plumbing -------------------------------------------------------
 ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
-apt-transport-https      # https:// apt transport for the first-party repo
+# apt-transport-https    # REMOVED (todo 19, audited). On bookworm this is a
+                         # `Section: oldlibs` TRANSITIONAL DUMMY whose own Debian
+                         # description reads "https support has been moved into the apt
+                         # package in 1.5. It can be safely removed." Verified against a
+                         # built rootfs: it ships FOUR files, all under
+                         # /usr/share/doc/apt-transport-https/ — no apt method, no code at
+                         # all — and the installed apt is 2.6.1, far past the 1.5 cutover.
+                         # The device's own https+mTLS apt source (apt.ceralive.tv, see the
+                         # `_apt`-readable client-key KEY FACT in AGENTS.md) is served by
+                         # apt's built-in https method, not by this package.
 openssl                  # CLI for the first-boot self-signed TLS cert (ceralive-tls-firstboot).
                          # Priority: important on Debian (usually already present), pinned
                          # explicitly so cert generation never depends on a transitive pull.
@@ -96,7 +105,21 @@ mobile-broadband-provider-info  # ModemManager's mobile-provider / APN database
                          # a manual connection profile. Debian package (not forked).
 
 # --- WiFi ---------------------------------------------------------------------
-wireless-tools           # legacy WEXT tooling (iwconfig/iwlist) — NOT the `iw` below
+# wireless-tools         # REMOVED (todo 19, audited). Legacy WEXT tooling — it ships ONLY
+                         # iwconfig/iwlist/iwgetid/iwpriv/iwspy/iwevent, and NOTHING on this
+                         # device can invoke any of them. CeraUI's backend may execute only
+                         # the binaries in its security-reviewed allowlist
+                         # (apps/backend/src/helpers/run.ts `ALLOWED`), which carries `iw`
+                         # and NO WEXT binary, so the WEXT path is structurally unreachable
+                         # rather than merely unused. WiFi association is NetworkManager +
+                         # wpa_supplicant over D-Bus, and regulatory/channel work is
+                         # `iw reg get/set` + `iw phy` (modules/wifi/regdomain.ts) — the `iw`
+                         # entry immediately below is the package that provides it. cerastream
+                         # never touches WiFi, no shipped unit or script under v2/mkosi/ names
+                         # a WEXT binary, and no installed package Depends/Recommends it. The
+                         # only iwconfig/iwlist references anywhere are prose and CeraUI's
+                         # host-side test-harness/wifi-hwsim container (mac80211_hwsim on a
+                         # dev box), never the device.
 iw                       # nl80211 tool: `iw reg get/set` applies the operator's regulatory
                          # country, and `iw phy` is what CeraUI reads BACK to derive the
                          # AP-usable hotspot channels (no country->channel table exists
@@ -146,7 +169,20 @@ cpufrequtils             # CPU governor control for sustained encode performance
 rsync                    # file sync for dev-push/dev-sync live-reload loop (v2/docs/dev-loop.md)
 curl                     # http client — CeraUI/update flows + on-device `curl localhost`
                          # health probe (backend observability.ts). Runtime-critical: KEPT.
-wget                     # http downloader (update/fetch infra)
+# wget                   # REMOVED (todo 19, audited). The old "http downloader (update/fetch
+                         # infra)" annotation named no consumer, and there is none. The OS
+                         # update path is RAUC (`ceralive-update` → `rauc install`) plus
+                         # rauc-hawkbit-updater, which downloads through libcurl; the app
+                         # update path is `apt-get` against apt.ceralive.tv. CeraUI's backend
+                         # cannot spawn it — `wget` is absent from the run.ts `ALLOWED`
+                         # allowlist. The ONLY device-side invoker in this repo is
+                         # v2/lib/shared/health-gate-lib.sh:54, and it is the fallback arm of
+                         # `command -v curl && curl … || wget …`, whose first arm is guaranteed
+                         # by `curl` being a mandatory entry above — so the wget arm is
+                         # unreachable on any CeraLive image. CeraUI's legacy pre-.deb
+                         # install.sh does use wget, but self-provisions it
+                         # (`install_if_missing_local wget`) and is superseded by the
+                         # ceralive-device package. No installed package Depends/Recommends it.
                          # NOTE: net DIAGNOSTICS (socat/netcat-openbsd/iperf3) moved to the
                          # debug add-on (T17) — verified unused by CeraUI/streaming runtime;
                          # the chaos harness (tools/chaos) ships its own. See removed.md.
@@ -154,10 +190,18 @@ sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-a
                          # drop-in; without the sudo binary add-on enable/disable is dead code.
 
 # --- Console (HDMI readability at boot) ---------------------------------------
-kbd                      # setfont/loadkeys — systemd-vconsole-setup shells out to these, and
-                         # ceralive-console-font.service calls setfont directly. KEPT: removing
-                         # kbd would break vconsole setup, which is independent of the dead
-                         # console-font path described below.
+kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service (enabled in
+                         # multi-user.target.wants) invokes `setfont` directly, and `setfont`
+                         # ships ONLY here. CORRECTION (todo 19, audited): the previous
+                         # annotation also claimed systemd-vconsole-setup shells out to these —
+                         # that is FALSE for this image. A built rootfs carries NO *vconsole*
+                         # file anywhere (no unit, no binary) and no /etc/vconsole.conf, and
+                         # console-setup/keyboard configs are absent too, so there is no
+                         # vconsole path to break. kbd stays because it is one half of a live,
+                         # shipped, enabled unit whose OTHER half — a real PSF provider — is
+                         # the tracked gap (size-notes.md §11); dropping kbd would turn that
+                         # one-package fix into a two-package one and leave an enabled unit
+                         # naming a binary that does not exist.
 # fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
                          # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
                          # factually wrong on bookworm: fonts-terminus ships EXACTLY ONE file,

@@ -13,7 +13,7 @@ patch repositories** — neither repo's patches apply to the other's tree:
 
 | Variant | Track | Source | Patch series | Why it exists |
 |---|---|---|---|---|
-| `edge` | mainline 7.1 | `linux-stable` `v7.1.5` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
+| `edge` | mainline 7.1 | `linux-stable` `v7.1.7` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
 | `vendor-patched` | **vendor 6.1 BSP — the kernel the shipped image actually runs** | `armbian/linux-rockchip` `rk-6.1-rkr5.1` @ `95e85f6c` | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | restores **HDMI-RX audio capture**, which the stock vendor kernel lost |
 
 `vendor-patched` is the same 6.1.115 BSP the production path installs prebuilt,
@@ -90,11 +90,29 @@ refuses neither.
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@9c1cb385098d842a1d5755e3717b308a25bb8305` — the
-merge of that repo's PR #2, which is CI-green applying against exactly `v7.1.5`.
+`CERALIVE/rk3588-kernel-patches@acb519c101fefa31f51300779f3a139bcabf6a1c` — the
+commit that LANDED on that repo's `main` from its PR #4, CI-green applying
+against exactly `v7.1.7`.
 
-That PR added patch `0006`, the **device-tree half of HDMI-RX audio capture**, and
-it is the reason this pin moved. Upstream's `0005` gives `snps_hdmirx` its driver
+**Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
+and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer
+reachable from any ref, so a build pinned to it would fail its own fetch. Verify
+with `git fetch --depth 1 <patches_git_url> <sha>` from a scratch clone before
+committing the bump — the PR gate is `DRY_RUN=1` and never fetches the series.
+
+PR #4 re-anchored the whole series on `v7.1.7` and grew it to nine patches. Two of
+them are what make MPP hardware encode work on this track, and both were confirmed
+on a real Rock 5B+: `0008` sets the rkvenc DMA max segment size (imported buffer
+lengths were truncated to 64 KiB, so the IOVA guardrail rejected every encode) and
+`0009` adds the mainline `system-uncached` dma-heap `librockchip_mpp` opens by
+name. `0009` needs `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y` in
+`rk3588-edge.fragment` — without it the code compiles and `dma_heap_add()` for
+that heap simply never runs, which is precisely the silent no-op §6b's gate exists
+to catch.
+
+The predecessor pin `9c1cb385098d` was the merge of PR #2, which added patch
+`0006`, the **device-tree half of HDMI-RX audio capture**. Upstream's `0005` gives
+`snps_hdmirx` its driver
 half — it registers an ASoC `hdmi-audio-codec` child under
 `hdmi_receiver@fdee0000` — but touches no device tree, and ALSA does not create a
 card for a bare codec. Every image built on the previous pin therefore shipped a
@@ -110,7 +128,7 @@ running board's config.
 **Why we pin a tag when Armbian tracks a branch.** Armbian maps rk3588
 `BRANCH=edge` to `KERNEL_MAJOR_MINOR=7.1` and then follows the **rolling** branch
 `linux-7.1.y`. "Verified against linux-7.1.y" is not a reproducible claim, so we
-pin the tag that was its tip at import (`v7.1.5` = `155b42bec9cb`). That mapping
+pin the tag that was its tip at import (`v7.1.7` = `c7ba9d6de43e`). That mapping
 is re-derived from `armbian/build` by the patches repo's `scripts/preflight.sh`
 and recorded in its `kernel-pin.env`.
 
@@ -123,7 +141,7 @@ upstream can be proven to still resolve to that commit.
 
 | Shape | When | What `build-kernel.sh` runs |
 |---|---|---|
-| tagged | the source publishes a tag for the pin (`edge`, `v7.1.5`) | `git clone --depth 1 --branch <tag>`, then assert `HEAD == commit` |
+| tagged | the source publishes a tag for the pin (`edge`, `v7.1.7`) | `git clone --depth 1 --branch <tag>`, then assert `HEAD == commit` |
 | commit-only | the source publishes **no tag on the pinned branch** (`vendor-patched`, `rk-6.1-rkr5.1`) | `git init` + `git fetch --depth 1 <url> <commit>` + `git checkout FETCH_HEAD`, then assert `HEAD == commit` |
 
 Both shapes end at the same assertion, so the guarantee is identical: the tree
@@ -227,14 +245,22 @@ that have just confirmed HDMI lock.
 
 Consequences for this repo:
 
-- **Do not read `--variant vendor-patched` as "HDMI-RX audio works."** `0005`
-  compiles clean and its reasoning is source-verified against the pinned tree,
-  but it has **not** been confirmed on a board. Board-confirmation criteria:
-  `hw_ptr` advances, the read-back line shows `RXS=1` with a **non-zero**
-  `RXFIFOLR`, and a real capture logs **zero** `capture xfer failed` lines.
-- **`0004` is retained in full until `0005` is board-confirmed** — the
-  instrumentation is how that confirmation gets read. Dropping the series back
-  to three patches is a follow-up, not a pending cleanup.
+- **Tier 1 — CONFIRMED: `0005` is board-confirmed on one Radxa ROCK 5B+ test**
+  (image `20260806T223730Z.raw` after a clean full `dd` reflash), including
+  end-to-end CeraUI audio-meter validation through the production cerastream
+  idle audio-meter sidecar — not a one-off manual `arecord`. Board-confirmation
+  criteria: `hw_ptr` advances, the read-back line shows `RXS=1` with a
+  **non-zero** `RXFIFOLR`, and a real capture logs **zero** `capture xfer
+  failed` lines. All three held on that test.
+- **Tier 2 — OPEN: the PIPELINE-BUILT `--variant vendor-patched` image itself
+  has not been booted on hardware, and no Orange Pi 5+ evidence exists.** The
+  Radxa ROCK 5B+ confirmation above validated the patch series on a hand-built
+  kernel, not this repo's `make bindeb-pkg` output — do not conflate the two
+  when deciding whether this variant is ready to build and flash.
+- **`0004` is retained in full regardless of the `0005` confirmation above** —
+  the instrumentation is how a future pipeline-built-image confirmation gets
+  read. Dropping the series back to three patches is a follow-up, not a
+  pending cleanup.
 - **`0005` may never wait on the audio *work item*, only on its completion.**
   Its first version called `flush_delayed_work()` from `hdmirx_audio_startup()`,
   which ASoC invokes with hdmi-codec's `hcp->lock` held, while that work calls
@@ -301,6 +327,62 @@ axes against the manifest: control `Package:`, control `Version:`, control
 `dtb_deb_dir/<dtb_name>`. A mismatch on any of them is fatal — the orchestrator's
 package-name replacement and the boot script's `fdtfile` lookup both depend on
 these being true, and a mismatch would otherwise surface as an unbootable board.
+
+---
+
+## 3b. Fetch resilience, and the build-job preflight
+
+Two failure modes of this stage have nothing to do with the kernel, and both are
+invisible to the PR gate (`DRY_RUN=1` never fetches and never runs `make`).
+
+**All three pinned fetches go through `fetch_pinned_tree`.** The stage performs
+three network fetches back to back — kernel source, patch series, kernel config
+— and a blip on any of them used to abort a build that had already paid for the
+builder image, the container and (for fetches 2 and 3) a multi-minute kernel
+checkout. Each fetch now gets up to `CERALIVE_KERNEL_GIT_ATTEMPTS` (3) attempts,
+each wrapped in `timeout(1)` (`CERALIVE_KERNEL_GIT_TIMEOUT`, 1800s — a git that
+has stopped making progress does not exit on its own), with a linear backoff
+(`CERALIVE_KERNEL_GIT_BACKOFF`, 5s × attempt).
+
+**Every attempt runs in a private directory that is destroyed BEFORE it starts,
+not merely after it fails.** This is the load-bearing half. A tree half-written
+by a killed clone, left where the next attempt wants to write, turns attempt 2
+into a deterministic `destination path already exists` (or a stale
+`.git/index.lock` on the fetch shape) — so one transient blip presents as a
+total outage, and the manual re-run fails the same way for the same reason.
+
+**A PIN MISMATCH IS NEVER RETRIED.** The `HEAD == commit` assertion runs *after*
+the retry loop and fails immediately. A moved tag or a SHA orphaned by a
+squash-merge (see §7's pin-hygiene note) is a PERMANENT fact about the remote:
+retrying it re-fetches the same wrong tree three times and then reports three
+failed attempts, which reads as a network problem and sends the next person to
+the wrong layer. Only a fully pin-verified tree is renamed into the path the
+build reads, so no later stage can ever see a partial or wrong checkout.
+
+The helper is defined host-side in `build-kernel.sh` and **injected** into the
+container script with `declare -f`, so the loop the real build runs is the same
+text the test suite drives against a stubbed `git`.
+
+**Build jobs are derived, not assumed.** `make -j$(nproc)` is the obvious default
+and it is the one that gets a builder OOM-killed: a kernel compile job peaks
+around 1-2 GiB RSS, so a core-rich, memory-thin host dies deep inside
+`bindeb-pkg`, after every pin has already verified. The width is
+`min(nproc, MemAvailable / 2 GiB)`, floored at 1 (a serial build beats no build)
+and ceilinged at `nproc` (spare memory buys no extra cores). The derivation is
+logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
+**unconditionally**, including upward — an operator who has measured their own
+host outranks the heuristic. `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
+`v2/ci/check-builder-resources.sh` uses) redirects the meminfo read.
+
+Guards: `v2/tests/kernel-build-resilience.bats` (30 tests — the three
+job-derivation fixtures, floor/ceiling/override/fallback legs, transient-retry
+and its non-vacuity twin, both partial-debris shapes, pre-attempt and
+final-attempt cleanup, a real `timeout(1)` leg, the never-retried pin mismatch,
+the nothing-is-published-unverified legs, and the wiring including a `bash -n`
+of the assembled container script). Mutation-verified: removing the pre-attempt
+`rm -rf`, folding the pin check into the retry condition, publishing before
+verifying, dropping the final cleanup, and dropping the memory ceiling each
+fail the suite.
 
 ---
 
@@ -616,7 +698,7 @@ declare those too — a `select`ed helper symbol (`RTW89_CORE`, `RTW89_PCI`,
 
 **And read the Makefile as well as the Kconfig before you add a symbol.** The
 ingest ruleset uses a `counter` statement, so `CONFIG_NFT_COUNTER` looks
-obligatory — but no such symbol exists in `v7.1.5`: `net/netfilter/Makefile`
+obligatory — but no such symbol exists in `v7.1.7`: `net/netfilter/Makefile`
 compiles `nft_counter.o` unconditionally into `nf_tables-objs`, next to
 `nft_meta.o` (`iifname`) and `nft_chain_filter.o` (`type filter hook input`).
 Declaring it would resolve to nothing and this gate would reject the build. The
@@ -634,8 +716,11 @@ fully-honoured one, and the build-stage wiring order).
 ## 7. Known gaps — read before using this
 
 Honest status: **`rock-5b-plus --variant edge` has been built end to end** — a real
-cross-compile producing `linux-image-7.1.5-ceralive-rk3588` and a flashable `.raw`.
-**Nothing has been booted.** Everything below the compile line is still unproven.
+cross-compile producing `linux-image-7.1.7-ceralive-rk3588` and a flashable `.raw` —
+**and, at the `v7.1.7` pin, flashed and booted on a real Rock 5B+.** That run
+cleared the MPP hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) and
+confirmed the capture/encode symbols on silicon. It is ONE board: `orange-pi-5-plus`
+has still never booted an edge image, so every per-board claim below stands.
 
 **`vendor-patched` status:** the kernel `.deb` builds and validates on all four
 axes; the series applies cleanly with `git am` against the pinned commit; the
@@ -668,7 +753,7 @@ instead of a manual patch; it does not re-prove the audio path.
 2. **The defconfig fragment is reviewed intent, not a validated result.** It
    starts from mainline `defconfig` and adds what the CeraLive stack needs. The
    fragment is now known to *resolve and compile* — the built
-   `/boot/config-7.1.5-ceralive-rk3588` carries it — but no symbol in it has been
+   `/boot/config-7.1.7-ceralive-rk3588` carries it — but no symbol in it has been
    proven necessary *or* sufficient **on hardware**.
 
    Worse, until §6b's gate existed the built config did not even carry what the
@@ -721,7 +806,7 @@ instead of a manual patch; it does not re-prove the audio path.
    in either tree moves exactly one line.
 
    `rock-5b-plus` never needed it: it declares `rk3588-rock-5b-plus.dtb`,
-   mainline v7.1.5 builds exactly that name, and the built `.deb` ships it (228
+   mainline v7.1.7 builds exactly that name, and the built `.deb` ships it (228
    `rockchip/*.dtb` entries in total). Note that until the `deb_lists_path` fix in
    item 1, this board *also* failed the DTB check — with the divergence wording
    above and an empty "DTBs actually present" list. **An empty list there means the
@@ -759,7 +844,7 @@ dtb_name: rk3588-orangepi-5-plus.dtb         # vendor BSP, the default path
 
 variant_overrides:
   edge:
-    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.5
+    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.7
 ```
 
 The rules, all enforced:
@@ -801,7 +886,7 @@ no second place to keep in sync.
 | `v2/manifests/kernel/rk3588-vendor-patched.absent` | the `vendor-patched` reviewed allow-absent list (config-file mode, §2c) |
 | `v2/lib/resolve.py` | variant merge, `variants:`/`variant_overrides:` stripping, derived suppression set |
 | `v2/lib/resolve.sh` | `--variant` / `CERALIVE_KERNEL_VARIANT` |
-| `v2/lib/build-kernel.sh` | the build stage |
+| `v2/lib/build-kernel.sh` | the build stage, incl. `fetch_pinned_tree` + the build-job preflight (§3b) |
 | `v2/ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |
 | `v2/lib/orchestrate.sh` | stage wiring, suppression export, uniqueness check |
 | `v2/lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
@@ -810,5 +895,6 @@ no second place to keep in sync.
 | `v2/lib/verify-kernel-config.sh` | the in-container config-survival gate, both modes (§2c, §6b) |
 | `v2/tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `v2/tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |
+| `v2/tests/kernel-build-resilience.bats` | fetch retry, never-retried pin mismatch, build-job preflight (§3b) |
 | `v2/tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
 | `v2/tests/manifests/fixtures/vendor-baseline/` | the pre-change golden resolver output |

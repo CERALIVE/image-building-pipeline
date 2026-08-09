@@ -33,6 +33,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
 LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 POSTINST="${V2}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 PREF_PATH_TAIL="preferences.d/ceralive-kernel-freeze"
 
@@ -40,7 +41,20 @@ fail() { printf 'kernel-freeze-guardrails regression: %s\n' "$1" >&2; exit 1; }
 pass() { printf 'kernel-freeze: %s\n' "$1"; }
 
 [[ -f "${LIB}" ]] || fail "missing ${LIB}"
+[[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
 [[ -f "${POSTINST}" ]] || fail "missing runtime executor: ${POSTINST}"
+
+# postinst-lib.sh is the thin entry that SOURCES the per-concern modules under
+# postinst.d/, so Part B keeps sourcing it — but freeze_boot_packages itself lives
+# in a module, and extracting from the entry alone would leave every Part A
+# assertion below matching an empty body.
+#
+# Materialized ONCE into a variable, never piped: the reader below stops early,
+# which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail` then
+# reports a correct read as a failure. Whether it fires depends on the unread
+# bytes left against the 64 KiB pipe buffer, so the pipe form survives until a
+# module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${LIB}" "${POSTINST_D}"/*.sh)"
 
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "${TMPROOT}"' EXIT
@@ -52,8 +66,8 @@ fn_body="$(awk '
   /^freeze_boot_packages\(\) \{/ { f=1 }
   f { print }
   f && /^\}/ { exit }
-' "${LIB}")"
-[[ -n "${fn_body}" ]] || fail "could not extract freeze_boot_packages() from postinst-lib.sh"
+' <<<"${POSTINST_SRC}")"
+[[ -n "${fn_body}" ]] || fail "could not extract freeze_boot_packages() from the postinst library"
 
 # Assert against the EXECUTABLE body: the header prose names both apt-mark forms
 # while explaining them, so grepping the whole function lets a deleted call pass.
@@ -84,8 +98,8 @@ grep -Eq 'linux-image-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"${fn_bod
   && fail "freeze_boot_packages() hardcodes a BSP package name — the set is manifest-resolved so every board (and the per-board U-Boot package) is covered"
 
 # Every first-party package must be refused by name.
-never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' "${LIB}")"
-[[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from postinst-lib.sh"
+never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
+[[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from the postinst library"
 for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive gstreamer1.0-libuvch264src modemmanager; do
   [[ " ${never} " == *" ${pkg} "* ]] \
     || fail "CERALIVE_NEVER_FREEZE_PKGS does not protect '${pkg}' — a first-party package could be frozen and would stop being apt-updatable"

@@ -15,7 +15,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 V2="$(cd "${HERE}/.." && pwd)"
-POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_ENTRY="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 TMP="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-real-avahi.XXXXXX")"
 TAG="$(printf '%06x' "$((BASHPID % 16777215))")"
 
@@ -99,14 +100,21 @@ for command in awk avahi-daemon avahi-set-host-name busctl dbus-daemon flock ip 
   command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required for network namespaces"
-[[ -r "$POSTINST_LIB" ]] || fail "postinst library not found: $POSTINST_LIB"
+[[ -r "$POSTINST_ENTRY" ]] || fail "postinst library not found: $POSTINST_ENTRY"
+[[ -d "$POSTINST_D" ]] || fail "postinst module dir not found: $POSTINST_D"
 
+# postinst-lib.sh is a thin entry that sources the per-concern modules under
+# postinst.d/; the claim script is a heredoc inside one of them. Extract from the
+# WHOLE set so this harness keeps driving the SHIPPED script rather than silently
+# extracting nothing when the heredoc moves between modules.
 extract_hostname_script() {
+  local postinst_src
+  postinst_src="$(cat "$POSTINST_ENTRY" "$POSTINST_D"/*.sh)"
   awk '
     /cat >\/usr\/local\/sbin\/ceralive-set-hostname <<'\''EOF'\''/ { in_script = 1; next }
     in_script && /^EOF$/ { exit }
     in_script { print }
-  ' "$POSTINST_LIB"
+  ' <<<"$postinst_src"
 }
 
 create_pair() {

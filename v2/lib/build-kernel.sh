@@ -52,6 +52,18 @@
 # repo is fetched at an immutable commit. A moved tag fails loudly instead of
 # silently building different source.
 #
+# NETWORK RESILIENCE, AND THE ONE FAILURE THAT MUST NOT BE RETRIED. All three
+# pinned fetches go through fetch_pinned_tree: each attempt runs under
+# `timeout(1)` in an ATTEMPT-PRIVATE directory destroyed BEFORE it runs, because
+# a half-cloned tree left at the destination makes every later retry fail
+# deterministically ("destination path already exists", a stale index.lock) and
+# reads as a hard outage when it is really the first blip plus our own debris.
+#   A PIN MISMATCH IS NEVER RETRIED. It is checked after the retry loop and
+# fails immediately: a moved tag or an orphaned SHA is a PERMANENT fact about
+# the remote, so retrying it fetches the same wrong tree three times and reports
+# a network problem instead of a pin problem. Only a fully pin-verified tree is
+# renamed into the path the build reads.
+#
 # Usage:
 #   build-kernel.sh --board <board> --out <dir> [--ccache-dir <dir>]
 #
@@ -82,8 +94,20 @@ source "${HERE}/common.sh"
 V2_DIR="$(cd "${HERE}/.." && pwd)"
 KERNEL_BUILDER_DOCKERFILE="${V2_DIR}/ci/Dockerfile.kernel"
 KERNEL_BUILDER_IMAGE_TAG=""
-# Bounded so a hung clone cannot wedge a build host indefinitely.
-KERNEL_BUILD_JOBS="${CERALIVE_KERNEL_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# Resolved by derive_kernel_build_jobs() in main(), not at source time: the
+# derivation reads MemAvailable, and reading it once when the file is sourced
+# would sample a moment that has nothing to do with when `make` runs.
+KERNEL_BUILD_JOBS=""
+# Peak RSS of one kernel compile job, rounded up. Both the ceiling and the unit
+# are empirical, so they live here rather than inline in the arithmetic.
+KERNEL_BUILD_MEM_PER_JOB_KIB=$((2 * 1024 * 1024))
+# Bounded so a hung fetch cannot wedge a build host indefinitely, and retried so
+# one blip does not discard an already-paid-for container and checkout. These
+# defaults are mirrored by fetch_pinned_tree's own `:-` fallbacks, which is what
+# lets that function run standalone; the agreement is pinned by a test.
+KERNEL_GIT_ATTEMPTS="${CERALIVE_KERNEL_GIT_ATTEMPTS:-3}"
+KERNEL_GIT_TIMEOUT="${CERALIVE_KERNEL_GIT_TIMEOUT:-1800}"
+KERNEL_GIT_BACKOFF="${CERALIVE_KERNEL_GIT_BACKOFF:-5}"
 
 usage() {
   cat >&2 <<EOF
@@ -95,7 +119,17 @@ environment (see the header of this file).
 
 Env:
   DRY_RUN=1                      plan only; no network, container or build
-  CERALIVE_KERNEL_BUILD_JOBS     make -j (default: nproc)
+  CERALIVE_KERNEL_BUILD_JOBS     make -j; wins unconditionally
+                                 (default: min(nproc, MemAvailable / 2 GiB),
+                                 floor 1, ceiling nproc)
+  CERALIVE_RESOURCE_MEMINFO_FILE meminfo read for that derivation
+                                 (default: /proc/meminfo)
+  CERALIVE_KERNEL_GIT_ATTEMPTS   attempts per pinned fetch (default: 3). A pin
+                                 MISMATCH is never one of them -- it fails on
+                                 the spot.
+  CERALIVE_KERNEL_GIT_TIMEOUT    per-attempt timeout(1) seconds (default: 1800)
+  CERALIVE_KERNEL_GIT_BACKOFF    seconds x attempt number between retries
+                                 (default: 5)
   CERALIVE_KERNEL_BUILDER_IMAGE  builder image tag (default: ceralive-kernel-builder)
   CERALIVE_KERNEL_PATCHES_LOCAL_REPO
                                  BENCH ONLY. Absolute path to a local clone of
@@ -115,6 +149,133 @@ require_kernel_source_field() {
   local name="$1" val="$2"
   [[ -n "${val}" ]] \
     || die "kernel_source did not resolve required field '${name}' — refusing to build a kernel from a half-specified pin"
+}
+
+# ---------------------------------------------------------------------------
+# derive_kernel_build_jobs — echo the `make -j` width, and log how it got there.
+#
+# The failure this exists to prevent is not a slow build, it is a DEAD one:
+# `make -j$(nproc)` on a core-rich but memory-thin host gets OOM-killed deep
+# inside bindeb-pkg, after the clone, the patch series and the config gate have
+# all already passed — so the build burns half an hour to report a link error or
+# a bare "Killed". min(nproc, MemAvailable / 2 GiB) is the cheap guard, floored
+# at 1 (a serial build beats no build) and ceilinged at nproc (spare memory buys
+# no extra cores).
+#
+# CERALIVE_KERNEL_BUILD_JOBS wins UNCONDITIONALLY: an operator who has measured
+# their own host outranks a heuristic, including upward.
+# ---------------------------------------------------------------------------
+derive_kernel_build_jobs() {
+  local meminfo="${CERALIVE_RESOURCE_MEMINFO_FILE:-/proc/meminfo}"
+  local cpus mem_kib mem_jobs jobs
+
+  if [[ -n "${CERALIVE_KERNEL_BUILD_JOBS:-}" ]]; then
+    [[ "${CERALIVE_KERNEL_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]] \
+      || die "CERALIVE_KERNEL_BUILD_JOBS must be a positive integer (got '${CERALIVE_KERNEL_BUILD_JOBS}')"
+    log_info "build jobs: ${CERALIVE_KERNEL_BUILD_JOBS} (CERALIVE_KERNEL_BUILD_JOBS override — memory ceiling not applied)"
+    printf '%s' "${CERALIVE_KERNEL_BUILD_JOBS}"
+    return 0
+  fi
+
+  cpus="$(nproc 2>/dev/null || echo 4)"
+  [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
+
+  mem_kib="$(awk '$1 == "MemAvailable:" { print $2; found = 1 } END { if (!found) exit 1 }' \
+    "${meminfo}" 2>/dev/null)" || mem_kib=""
+  if [[ ! "${mem_kib}" =~ ^[0-9]+$ ]]; then
+    # Inventing a memory figure here would silently reintroduce the OOM default
+    # under a name that claims to have prevented it, so say what happened.
+    log_warn "build jobs: ${cpus} — no readable MemAvailable in ${meminfo}, falling back to nproc with NO memory ceiling"
+    printf '%s' "${cpus}"
+    return 0
+  fi
+
+  mem_jobs=$(( mem_kib / KERNEL_BUILD_MEM_PER_JOB_KIB ))
+  jobs=$(( mem_jobs < cpus ? mem_jobs : cpus ))
+  (( jobs >= 1 )) || jobs=1
+
+  log_info "build jobs: ${jobs} = min(nproc=${cpus}, MemAvailable ${mem_kib} kB / $((KERNEL_BUILD_MEM_PER_JOB_KIB / 1024)) MiB per job = ${mem_jobs}) — floor 1, ceiling nproc"
+  printf '%s' "${jobs}"
+}
+
+# ---------------------------------------------------------------------------
+# fetch_pinned_tree_once <work> <url> <ref> <commit> <timeout>
+#
+# ONE attempt at materialising a pinned tree in <work>. Two shapes, and the
+# choice between them is the manifest's, not a fallback:
+#   ref non-empty -> `git clone --depth 1 --branch <ref>`
+#   ref empty     -> commit-only source (the pinned branch publishes no tags, so
+#                    there is no ref to clone). Inventing a tag would be a lie
+#                    about provenance, and cloning the branch tip would silently
+#                    build newer source under an unchanged pin.
+#
+# Every network verb is wrapped in `timeout` — a git that has stopped making
+# progress does not exit on its own.
+# ---------------------------------------------------------------------------
+fetch_pinned_tree_once() {
+  local work="$1" url="$2" ref="$3" commit="$4" timeout_s="$5"
+
+  if [ -n "${ref}" ]; then
+    timeout "${timeout_s}" git clone --depth 1 --branch "${ref}" "${url}" "${work}" || return 1
+    return 0
+  fi
+
+  git init -q "${work}" || return 1
+  git -C "${work}" remote add origin "${url}" || return 1
+  timeout "${timeout_s}" git -C "${work}" fetch --depth 1 origin "${commit}" || return 1
+  git -C "${work}" checkout -q FETCH_HEAD || return 1
+}
+
+# ---------------------------------------------------------------------------
+# fetch_pinned_tree <dest> <url> <ref> <commit> <label>
+#
+# Bounded retry around fetch_pinned_tree_once, then a pin assertion, then the
+# publish. The ORDER of those three is the whole point:
+#
+#   1. Retry loop. Each attempt gets a private directory that is destroyed
+#      BEFORE it runs, never merely after it fails — a tree half-written by a
+#      killed clone turns attempt 2 into a deterministic "destination path
+#      already exists" and makes one blip look like a total outage.
+#   2. Pin assertion, OUTSIDE the loop. A wrong HEAD is not a transient
+#      condition: the tag moved, or the SHA was orphaned by a squash-merge.
+#      Retrying re-fetches the same wrong tree and then blames the network.
+#   3. Publish. <dest> only ever appears once the tree at it is pin-verified, so
+#      no later stage can read a partial or wrong checkout.
+# ---------------------------------------------------------------------------
+fetch_pinned_tree() {
+  local dest="$1" url="$2" ref="$3" commit="$4" label="$5"
+  local attempts="${CERALIVE_KERNEL_GIT_ATTEMPTS:-3}"
+  local timeout_s="${CERALIVE_KERNEL_GIT_TIMEOUT:-1800}"
+  local backoff="${CERALIVE_KERNEL_GIT_BACKOFF:-5}"
+  local work="${dest}.attempt"
+  local attempt=1 delay have
+
+  rm -rf "${dest}"
+  while : ; do
+    rm -rf "${work}"
+    if fetch_pinned_tree_once "${work}" "${url}" "${ref}" "${commit}" "${timeout_s}"; then
+      break
+    fi
+    rm -rf "${work}"
+    if [ "${attempt}" -ge "${attempts}" ]; then
+      echo "FATAL: ${label}: ${attempts} attempt(s) to obtain ${url} at ${ref:-${commit}} all failed" >&2
+      return 1
+    fi
+    delay=$(( backoff * attempt ))
+    echo "== ${label}: attempt ${attempt}/${attempts} failed, retrying in ${delay}s" >&2
+    sleep "${delay}"
+    attempt=$(( attempt + 1 ))
+  done
+
+  have="$(git -C "${work}" rev-parse HEAD)"
+  if [ "${have}" != "${commit}" ]; then
+    echo "FATAL: ${label} checked out ${have}, pinned commit is ${commit} — a moved ref or an orphaned SHA is permanent, so this is NOT retried" >&2
+    rm -rf "${work}"
+    return 1
+  fi
+
+  mv "${work}" "${dest}"
+  echo "== ${label}: ${commit} verified in ${dest} (attempt ${attempt}/${attempts})"
 }
 
 # ---------------------------------------------------------------------------
@@ -374,6 +535,8 @@ main() {
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
   local epoch="${SOURCE_DATE_EPOCH:-0}"
 
+  KERNEL_BUILD_JOBS="$(derive_kernel_build_jobs)"
+
   log_info "=== kernel-build-from-source: board='${board}' ==="
   log_info "  kernel      ${git_url} tag=${tag:-<none: commit-only source>} commit=${commit}"
   log_info "  patches     ${patches_url} commit=${patches_commit} series=${patches_series}"
@@ -400,6 +563,7 @@ main() {
     fi
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
+    log_info "DRY-RUN fetch policy: each pinned fetch runs under timeout ${KERNEL_GIT_TIMEOUT}s, up to ${KERNEL_GIT_ATTEMPTS} attempt(s) in a private attempt dir; a pin mismatch is NEVER retried"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
     return 0
   fi
@@ -457,57 +621,27 @@ main() {
   local -a absent_mount=()
   [[ -n "${absent_list}" ]] && absent_mount=(-v "${absent_list}:/in/allow-absent.list:ro")
 
-  # The whole pinned-input dance runs INSIDE the container so the git, make and
-  # toolchain versions are the pinned ones end to end — a host-side clone would
-  # reintroduce exactly the host dependence the container exists to remove.
-  "${runtime}" run --rm \
-    -e "KERNEL_GIT_URL=${git_url}" \
-    -e "KERNEL_TAG=${tag}" \
-    -e "KERNEL_COMMIT=${commit}" \
-    -e "PATCHES_GIT_URL=${patches_fetch_url}" \
-    -e "PATCHES_COMMIT=${patches_commit}" \
-    -e "PATCHES_SERIES=${patches_series}" \
-    -e "DEFCONFIG_BASE=${defconfig_base}" \
-    -e "CONFIG_GIT_URL=${config_git_url}" \
-    -e "CONFIG_COMMIT=${config_commit}" \
-    -e "CONFIG_PATH=${config_path}" \
-    -e "CONFIG_ALLOW_ABSENT=${absent_list:+/in/allow-absent.list}" \
-    -e "LOCAL_VERSION=${local_version}" \
-    -e "KERNEL_RELEASE=${kernel_release}" \
-    -e "PACKAGE_VERSION=${package_version}" \
-    -e "KERNEL_PACKAGE=${kernel_pkg}" \
-    -e "BUILD_JOBS=${KERNEL_BUILD_JOBS}" \
-    -e "SOURCE_DATE_EPOCH=${epoch}" \
-    "${patches_mount[@]}" \
-    "${patches_env[@]}" \
-    "${fragment_mount[@]}" \
-    "${absent_mount[@]}" \
-    -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
-    -v "${work}/out:/out" \
-    -v "${ccache_dir}:/ccache" \
-    "${KERNEL_BUILDER_IMAGE_TAG}" \
-    bash -euo pipefail -c '
+  # fetch_pinned_tree is defined host-side and INJECTED rather than written out a
+  # second time inline, so the retry/verify/publish loop the real build runs is
+  # byte-identical to the one the test suite drives against a stubbed git.
+  local container_script
+  container_script="$(declare -f fetch_pinned_tree_once fetch_pinned_tree)
+"'
       export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
       export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
       export KBUILD_BUILD_USER=ceralive KBUILD_BUILD_HOST=ceralive-builder
 
       if [ -n "${KERNEL_TAG}" ]; then
         echo "== cloning ${KERNEL_GIT_URL} at ${KERNEL_TAG}"
-        git clone --depth 1 --branch "${KERNEL_TAG}" "${KERNEL_GIT_URL}" /src/linux
-        cd /src/linux
+        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "${KERNEL_TAG}" "${KERNEL_COMMIT}" "kernel source"
       else
-        # Commit-only source: the pinned branch publishes no tags, so there is no
-        # ref to clone. A server that serves an arbitrary reachable SHA gives the
-        # exact tree for one shallow fetch; inventing a tag would be a lie about
-        # provenance, and cloning the branch tip would silently build newer source.
         echo "== fetching ${KERNEL_GIT_URL} at ${KERNEL_COMMIT} (no tag on the pinned branch)"
-        mkdir -p /src/linux
-        git init -q /src/linux
-        cd /src/linux
-        git remote add origin "${KERNEL_GIT_URL}"
-        git fetch --depth 1 origin "${KERNEL_COMMIT}"
-        git checkout -q FETCH_HEAD
+        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "" "${KERNEL_COMMIT}" "kernel source"
       fi
+      cd /src/linux
+      # Re-asserted on the PUBLISHED path: fetch_pinned_tree gates the rename on
+      # this same equality, so a mismatch here means the rename landed the wrong
+      # tree, which is a different bug from a moved pin and must still be fatal.
       have="$(git rev-parse HEAD)"
       if [ "${have}" != "${KERNEL_COMMIT}" ]; then
         echo "FATAL: kernel source checked out ${have}, pinned commit is ${KERNEL_COMMIT} — refusing to build different source under the same pin" >&2
@@ -517,9 +651,7 @@ main() {
       git config user.name  "CeraLive kernel build"
 
       echo "== fetching patch series at ${PATCHES_COMMIT}"
-      git init -q /src/patches
-      git -C /src/patches fetch --depth 1 "${PATCHES_GIT_URL}" "${PATCHES_COMMIT}"
-      git -C /src/patches checkout -q FETCH_HEAD
+      fetch_pinned_tree /src/patches "${PATCHES_GIT_URL}" "" "${PATCHES_COMMIT}" "patches repo"
       have_p="$(git -C /src/patches rev-parse HEAD)"
       if [ "${have_p}" != "${PATCHES_COMMIT}" ]; then
         echo "FATAL: patches repo checked out ${have_p}, pinned ${PATCHES_COMMIT}" >&2
@@ -545,9 +677,7 @@ main() {
       # is the expectation set the survival gate is run against.
       if [ -n "${CONFIG_GIT_URL}" ]; then
         echo "== config: full .config ${CONFIG_PATH} @ ${CONFIG_COMMIT}"
-        git init -q /src/kconfig
-        git -C /src/kconfig fetch --depth 1 "${CONFIG_GIT_URL}" "${CONFIG_COMMIT}"
-        git -C /src/kconfig checkout -q FETCH_HEAD
+        fetch_pinned_tree /src/kconfig "${CONFIG_GIT_URL}" "" "${CONFIG_COMMIT}" "config repo"
         have_c="$(git -C /src/kconfig rev-parse HEAD)"
         if [ "${have_c}" != "${CONFIG_COMMIT}" ]; then
           echo "FATAL: config repo checked out ${have_c}, pinned ${CONFIG_COMMIT}" >&2
@@ -594,7 +724,42 @@ main() {
 
       # bindeb-pkg writes its .debs into the parent of the source tree.
       cp /src/"${KERNEL_PACKAGE}"_*.deb /out/
-    ' || die "kernel build failed for board '${board}' (see the container log above)"
+'
+
+  # The whole pinned-input dance runs INSIDE the container so the git, make and
+  # toolchain versions are the pinned ones end to end — a host-side clone would
+  # reintroduce exactly the host dependence the container exists to remove.
+  "${runtime}" run --rm \
+    -e "KERNEL_GIT_URL=${git_url}" \
+    -e "KERNEL_TAG=${tag}" \
+    -e "KERNEL_COMMIT=${commit}" \
+    -e "PATCHES_GIT_URL=${patches_fetch_url}" \
+    -e "PATCHES_COMMIT=${patches_commit}" \
+    -e "PATCHES_SERIES=${patches_series}" \
+    -e "DEFCONFIG_BASE=${defconfig_base}" \
+    -e "CONFIG_GIT_URL=${config_git_url}" \
+    -e "CONFIG_COMMIT=${config_commit}" \
+    -e "CONFIG_PATH=${config_path}" \
+    -e "CONFIG_ALLOW_ABSENT=${absent_list:+/in/allow-absent.list}" \
+    -e "LOCAL_VERSION=${local_version}" \
+    -e "KERNEL_RELEASE=${kernel_release}" \
+    -e "PACKAGE_VERSION=${package_version}" \
+    -e "KERNEL_PACKAGE=${kernel_pkg}" \
+    -e "BUILD_JOBS=${KERNEL_BUILD_JOBS}" \
+    -e "CERALIVE_KERNEL_GIT_ATTEMPTS=${KERNEL_GIT_ATTEMPTS}" \
+    -e "CERALIVE_KERNEL_GIT_TIMEOUT=${KERNEL_GIT_TIMEOUT}" \
+    -e "CERALIVE_KERNEL_GIT_BACKOFF=${KERNEL_GIT_BACKOFF}" \
+    -e "SOURCE_DATE_EPOCH=${epoch}" \
+    "${patches_mount[@]}" \
+    "${patches_env[@]}" \
+    "${fragment_mount[@]}" \
+    "${absent_mount[@]}" \
+    -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
+    -v "${work}/out:/out" \
+    -v "${ccache_dir}:/ccache" \
+    "${KERNEL_BUILDER_IMAGE_TAG}" \
+    bash -euo pipefail -c "${container_script}" \
+    || die "kernel build failed for board '${board}' (see the container log above)"
 
   shopt -s nullglob
   local built=("${work}/out/${kernel_pkg}"_*.deb)

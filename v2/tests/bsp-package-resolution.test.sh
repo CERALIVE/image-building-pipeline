@@ -71,9 +71,9 @@ Filename: pool/linux-dtb-vendor-rk35xx_26.5.1_arm64.deb
 SHA256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 
 Package: armbian-firmware
-Version: 26.5.1
+Version: 26.8.1
 Architecture: all
-Filename: pool/armbian-firmware_26.5.1_all.deb
+Filename: pool/armbian-firmware_26.8.1_all.deb
 SHA256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 Package: linux-u-boot-rock-5b-plus-vendor
@@ -132,10 +132,14 @@ fi
 
 specs_text="$(bsp_download_specs "${rock_packages[@]}")"
 mapfile -t rock_specs <<<"${specs_text}"
+# Hardcoded on purpose: a pin promotion cannot land without editing this, which
+# forces the signed-index review. armbian-firmware's release number legitimately
+# differs — the archive keeps only the newest revision of that Architecture: all
+# package — so this also proves each name binds to its OWN pin, not one shared one.
 expected_specs=(
   linux-image-vendor-rk35xx=26.5.1
   linux-dtb-vendor-rk35xx=26.5.1
-  armbian-firmware=26.5.1
+  armbian-firmware=26.8.1
   linux-u-boot-rock-5b-plus-vendor=26.5.1
 )
 [[ "${rock_specs[*]}" == "${expected_specs[*]}" ]]
@@ -364,7 +368,7 @@ if auth_lookup_package "${TMP}/Packages.wrong-arch" linux-image-vendor-rk35xx 26
   printf 'wrong package architecture was accepted\n' >&2
   exit 1
 fi
-auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware 26.5.1 arm64 >/dev/null
+auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware 26.8.1 arm64 >/dev/null
 
 # Given authenticated Release metadata, when suite/architecture/component are
 # checked, then only the configured bookworm/main/arm64 identity is accepted.

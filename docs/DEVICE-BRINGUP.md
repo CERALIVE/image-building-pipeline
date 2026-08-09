@@ -256,8 +256,11 @@ is additionally proven on `orange-pi-5-plus`. Neither reopens the production
 kernel decision — the shipped image still installs the prebuilt vendor BSP
 (`./v2/build <board>` with no `--variant`), byte-identical to before these
 variants existed. Full detail, including the honest MPP hardware-encode
-limitation on `edge` and the not-yet-board-confirmed HDMI-RX audio fix on
-`vendor-patched`: [`v2/docs/kernel-build-from-source.md`](../v2/docs/kernel-build-from-source.md).
+limitation on `edge` and the HDMI-RX audio fix's status on `vendor-patched` —
+Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter
+validation), Tier 2 open on this pipeline's own built image, which has not
+itself been booted, with no Orange Pi 5+ evidence either way:
+[`v2/docs/kernel-build-from-source.md`](../v2/docs/kernel-build-from-source.md).
 
 ### Production vs debug image variants (`CERALIVE_DEBUG_IMAGE`)
 

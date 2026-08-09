@@ -2,12 +2,12 @@
 #
 # customize/udev.sh — hardware-access udev rules for the streaming appliance.
 #
-# DECOMPOSED FROM (UNION): userpatches/customize-image.sh:setup_hardware_access()
-# (L237-283) AND scripts/udev-rules.sh (L1-129). v1 main_customization() only
-# wrote the SHORT rule set (L242-272); udev-rules.sh held the richer vendor /
-# DRM / QMI-MBIM / netdev policy but was a separate, never-invoked script. v2
-# folds both into ONE canonical, deduplicated rules file so the comprehensive
-# policy actually ships.
+# DECOMPOSED FROM (UNION) the two v1 sources, both since deleted: the
+# customize-image.sh setup_hardware_access() hook AND a standalone udev-rules
+# script. v1 only ever wrote the SHORT rule set from the hook; the standalone
+# script held the richer vendor / DRM / QMI-MBIM / netdev policy but was never
+# invoked by any build path. v2 folds both into ONE canonical, deduplicated
+# rules file so the comprehensive policy actually ships.
 #
 # UNIFIED NAMING: file 99-ceraui-hardware.rules / 99-ceraui-devices.rules →
 # 99-ceralive-hardware.rules. The dangling SYSTEMD_WANTS=ceralive-optimize@%k
@@ -29,7 +29,8 @@ setup_hardware_access() {
 
   cat >/etc/udev/rules.d/99-ceralive-hardware.rules <<'EOF'
 # CeraLive Hardware Access Rules
-# Union of customize-image.sh:setup_hardware_access() + scripts/udev-rules.sh.
+# Union of the two retired v1 sources: the customize-image.sh
+# setup_hardware_access() hook + the standalone udev-rules script.
 
 # =============================================================================
 # USB Audio Devices

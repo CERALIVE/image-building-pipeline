@@ -6,6 +6,11 @@ V2="$(cd "${HERE}/.." && pwd)"
 ROOT="$(cd "${V2}/.." && pwd)"
 AUTH="${V2}/lib/fetch-debs-auth.sh"
 FETCH="${V2}/lib/fetch-debs.sh"
+# The fetch path is the entry point PLUS its lib/fetch/ family modules. Every
+# STATIC assertion below must scan all of them, or it goes quietly vacuous the
+# moment the code it guards moves into a module — and the `trusted=yes` leg in
+# particular must never be able to pass by looking in the wrong file.
+FETCH_SOURCES=("${FETCH}" "${V2}"/lib/fetch/*.sh)
 RELEASE_DOC="${ROOT}/docs/RELEASE-PROCESS.md"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
@@ -47,14 +52,14 @@ if bash "${AUTH}" verify-file --file "${TMP}/demo.deb" --sha256 aaaaaaaaaaaaaaaa
   printf 'wrong package hash was accepted\n' >&2
   exit 1
 fi
-if grep -qiE 'trusted[=:][[:space:]]*(yes|true)' "${FETCH}" \
+if grep -qiE 'trusted[=:][[:space:]]*(yes|true)' "${FETCH_SOURCES[@]}" \
     "${V2}/mkosi/mkosi.images/platform/mkosi.postinst"; then
   printf 'trusted=yes bypass was found in the BSP fetch path\n' >&2
   exit 1
 fi
-grep -q 'signed-by=' "${FETCH}"
-grep -q 'ARMBIAN_APT_KEYRING' "${FETCH}"
-grep -q 'auth_keyring_has_exact_fingerprints' "${FETCH}"
+grep -q 'signed-by=' "${FETCH_SOURCES[@]}"
+grep -q 'ARMBIAN_APT_KEYRING' "${FETCH_SOURCES[@]}"
+grep -q 'auth_keyring_has_exact_fingerprints' "${FETCH_SOURCES[@]}"
 mapfile -t armbian_fingerprints < <(
   bash -c 'source "$1"; printf "%s\n" "${ARMBIAN_APT_KEY_FINGERPRINTS[@]}"' bash "${FETCH}"
 )

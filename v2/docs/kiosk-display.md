@@ -163,12 +163,16 @@ reality.** The bookmark above describes the *unmeasured* patch set from
 (the fork that carries these exact patches plus a fourth, HDMI-RX audio) has
 since been bench-validated on real Rock 5B+ hardware
 (device-platform-wave4 todos 25-30). The measured verdict is
-**hold, driver work required first** — `mpph264enc` never registers on the
-edge-7.1 kernel (`encode-broken`), which alone determines the outcome under
-the plan's deterministic decision matrix regardless of H.265's cleaner
-(`encode-degraded`, bitrate-accuracy-only) result. `kernel-track-decision.md`
-is now the authoritative decision record for this mainline track; D3 remains
-NOT re-opened and production remains vendor 6.1.
+**hold, driver work required first** — `mpph264enc` never registered on the
+edge-7.1 kernel *as pinned at the time* (`encode-broken`), which alone determined
+the outcome under the plan's deterministic decision matrix regardless of H.265's
+cleaner (`encode-degraded`, bitrate-accuracy-only) result. That input has since
+changed: at the current `v7.1.7` pin, patches `0008` and `0009` fix the two
+kernel defects behind it and a real Rock 5B+ has `mpph264enc` registering and
+encoding. The verdict has **not** been re-run — see the 2026-08-09 amendment at
+the top of `kernel-track-decision.md`, which is still the authoritative decision
+record for this mainline track. **D3 remains NOT re-opened and production remains
+vendor 6.1.**
 
 ---
 

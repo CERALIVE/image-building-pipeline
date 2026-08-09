@@ -368,13 +368,13 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — compiled on rock-5b-plus, never booted
+## 9. Kernel-build-from-source variant — booted on rock-5b-plus, never booted on orange-pi-5-plus
 
-**Status:** Partially unblocked — BOTH `rock-5b-plus` and `orange-pi-5-plus` now build end to end (`.raw` + signed `.raucb`, all 14 first-party packages installed); nothing has BOOTED
+**Status:** Further unblocked — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end (`.raw` + signed `.raucb`, all 14 first-party packages installed), and at the `v7.1.7` pin a `rock-5b-plus` has been flashed and BOOTED (`7.1.7-ceralive-rk3588`); `orange-pi-5-plus` has still never booted an edge image
 **Location:** `v2/docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `v2/manifests/families/rk3588.yaml` (`variants.edge`), `v2/manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `v2/lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
-kernel + in-tree DTBs from pinned source (`v7.1.5` + the
+kernel + in-tree DTBs from pinned source (`v7.1.7` + the
 `CERALIVE/rk3588-kernel-patches` series) with `make bindeb-pkg`. The pipeline, the
 schema, the pins, the fetch suppression, the package-name replacement, the
 staged-package uniqueness check and the platform DTB install mapping all exist and
@@ -382,7 +382,7 @@ are gated by tests.
 
 **What has now been proven:** `CERALIVE_BENCH_LABELS=1 v2/build rock-5b-plus
 --variant edge` was run for real, twice, on a container host. It compiles
-`linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passes all four
+`linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passes all four
 `validate_built_kernel_deb` axes, installs the board DTB to
 `/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produces a flashable `.raw` plus a
 signed `.raucb`. The two builds agreed on every package version, every rootfs path

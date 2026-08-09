@@ -43,7 +43,19 @@ PKGDIR="${V2}/manifests/packages"
 FAMDIR="${V2}/manifests/families"
 FETCH_DEBS="${V2}/lib/fetch-debs.sh"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 RUNTIME_DIR="${V2}/mkosi/runtime"
+
+# postinst-lib.sh is a thin entry that sources the per-concern modules under
+# postinst.d/; the installer hook and its call site both live in a module, so
+# reading the entry alone would report them as missing.
+#
+# Materialized ONCE into a variable, never piped: `grep -q` stops at the first
+# match, which closes the pipe, kills `cat` with SIGPIPE, and `set -o pipefail`
+# then reports a correct read as a failure. Whether it fires depends on the
+# unread bytes left against the 64 KiB pipe buffer, so the pipe form survives
+# until a module is added and then breaks a test unrelated to the change.
+POSTINST_SRC="$(cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh)"
 
 EVIDENCE="${1:-${REPO}/test-results/migrate-package-diff.txt}"
 
@@ -51,8 +63,8 @@ for f in "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
   [[ -f "${f}" ]] || { echo "ERROR: missing v2 source: ${f}" >&2; exit 2; }
 done
 [[ -f "${RUNTIME_DIR}/ceralive-console-font.service" ]] || { echo "ERROR: missing console font unit source" >&2; exit 2; }
-[[ "$(grep -c 'install_console_font_service' "${POSTINST_LIB}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
-grep -q 'ceralive-console-font' "${POSTINST_LIB}" || { echo "ERROR: console font service is not enabled by postinst-lib" >&2; exit 2; }
+[[ "$(grep -c 'install_console_font_service' <<<"${POSTINST_SRC}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
+grep -q 'ceralive-console-font' <<<"${POSTINST_SRC}" || { echo "ERROR: console font service is not enabled by the postinst library" >&2; exit 2; }
 
 # Legacy sources were retired with the legacy Armbian build; absent => MIGRATE
 # phase is over (proof in git history; parity-check.sh now guards package loss).

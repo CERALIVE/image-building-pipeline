@@ -180,7 +180,7 @@
           "pattern": "^https://"
         },
         "tag": {
-          "description": "OPTIONAL exact source tag (e.g. v7.1.5). A tag alone is NEVER the pin — `commit` is. When present the build clones that tag and fails loudly if it does not resolve to `commit`, so a moved tag is caught rather than silently built. OMIT it entirely when the source publishes no tag on the pinned branch (the Armbian vendor BSP's rolling rk-6.1-rkr5.1 publishes none): the build then shallow-fetches `commit` directly. NEVER fabricate a placeholder tag to satisfy this field.",
+          "description": "OPTIONAL exact source tag (e.g. v7.1.7). A tag alone is NEVER the pin — `commit` is. When present the build clones that tag and fails loudly if it does not resolve to `commit`, so a moved tag is caught rather than silently built. OMIT it entirely when the source publishes no tag on the pinned branch (the Armbian vendor BSP's rolling rk-6.1-rkr5.1 publishes none): the build then shallow-fetches `commit` directly. NEVER fabricate a placeholder tag to satisfy this field.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
         },

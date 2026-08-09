@@ -13,6 +13,7 @@ UART_BOOTSTRAP="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.sh"
 UART_BOOTSTRAP_UNIT="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap.service"
 UART_BOOTSTRAP_PUBLIC="${V2}/mkosi/runtime/ceralive-ci-uart-bootstrap-public.pem"
 POSTINST_LIB="${V2}/mkosi/customize/postinst-lib.sh"
+POSTINST_D="${V2}/mkosi/customize/postinst.d"
 RELEASE_WORKFLOW="${REPO}/.github/workflows/release.yml"
 REVOKE="${V2}/ci/revoke-ephemeral-ssh.sh"
 LOADER_FETCH="${V2}/ci/fetch-rk3588-loader.sh"
@@ -122,7 +123,9 @@ for ssh_unit in ssh.service ssh.socket; do
   }
 done
 openssl pkey -pubin -in "${UART_BOOTSTRAP_PUBLIC}" -noout
-grep -Fq 'ceralive-ci-uart-bootstrap-public.pem' "${POSTINST_LIB}"
+# The postinst library is a thin entry plus per-concern modules under
+# postinst.d/; the install site is in a module, so read the whole set.
+cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh | grep -Fq 'ceralive-ci-uart-bootstrap-public.pem'
 if grep -Fq 'PRIVATE KEY' "${UART_BOOTSTRAP_PUBLIC}"; then
   printf 'Maskrom-first regression: immutable image embeds the UART signing private key\n' >&2
   exit 1

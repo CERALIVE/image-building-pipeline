@@ -459,8 +459,11 @@ _run_boot_artifacts() {
 # --- the wiring that makes it a build gate rather than a manual tool ---------
 
 @test "orchestrator: the build verifies boot artifacts before shipping the tar" {
+  # The path constant is resolved by the orchestrator entry; the gate that uses
+  # it is the [6b/9] module.
   grep -q 'VERIFY_BOOT_ARTIFACTS_SH' "$V2/lib/orchestrate.sh"
-  grep -q 'boot artifacts INCOMPLETE' "$V2/lib/orchestrate.sh"
+  grep -q 'VERIFY_BOOT_ARTIFACTS_SH' "$V2/lib/stages/boot-verify.sh"
+  grep -q 'boot artifacts INCOMPLETE' "$V2/lib/stages/boot-verify.sh"
 }
 
 @test "orchestrator: KERNEL_SOURCE_KERNEL_RELEASE reaches the platform subimage" {

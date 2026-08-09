@@ -9,6 +9,24 @@ ORCHESTRATOR="${V2}/lib/orchestrate.sh"
 PLATFORM_POSTINST="${V2}/mkosi/mkosi.images/platform/mkosi.postinst"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mkosi-package-staging.XXXXXX")"
 
+# The orchestrator is an ENTRY plus per-stage modules under lib/stages/. A static
+# check that reads it by TEXT must read the whole SET in the entry's own source
+# order, or it matches nothing and passes vacuously.
+#
+# Materialized to a FILE, never piped into `grep -q`: -q exits on the first match
+# and SIGPIPEs the writer, which `set -o pipefail` then turns into a failed run.
+ORCHESTRATOR_SOURCES="${RUN_DIR}/orchestrator-sources.sh"
+{
+	cat "${ORCHESTRATOR}"
+	while read -r _stage_module; do
+		cat "${V2}/lib/stages/${_stage_module}"
+	done < <(sed -n 's#^source "\${STAGE_DIR}/\(.*\)"$#\1#p' "${ORCHESTRATOR}")
+} >"${ORCHESTRATOR_SOURCES}"
+[[ -s "${ORCHESTRATOR_SOURCES}" ]] || {
+	printf 'FAIL could not assemble the orchestrator source set\n' >&2
+	exit 1
+}
+
 cleanup() {
 	rm -rf "${RUN_DIR}"
 }
@@ -79,18 +97,18 @@ done
 }
 
 grep -Fq "MKOSI_PACKAGE_STAGING_SH=\"\${HERE}/stage-mkosi-package.sh\"" "${ORCHESTRATOR}"
-grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\"" "${ORCHESTRATOR}"
-grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"" "${ORCHESTRATOR}"
+grep -Fq -- "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\"" "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"" "${ORCHESTRATOR_SOURCES}"
 
 # The runner service uses UMask=0077, so the checkout and .staging ancestors are
 # intentionally private. The container must mount each consumer leaf directly;
 # passing its /work path makes mkosi's unprivileged repository indexer see zero
 # packages even when the leaf and archives themselves are readable.
-grep -Fq -- '-v "${bsp_dir}:/run/ceralive-bsp:ro"' "${ORCHESTRATOR}"
-grep -Fq -- '-v "${firstparty_dir}:/run/ceralive-firstparty:ro"' "${ORCHESTRATOR}"
-grep -Fq -- '--package-directory /run/ceralive-bsp' "${ORCHESTRATOR}"
-grep -Fq -- '--extra-tree /run/ceralive-firstparty:/opt/ceralive-staging' "${ORCHESTRATOR}"
-if grep -Fq -- '--package-directory /work/mkosi/.staging/' "${ORCHESTRATOR}"; then
+grep -Fq -- '-v "${bsp_dir}:/run/ceralive-bsp:ro"' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '-v "${firstparty_dir}:/run/ceralive-firstparty:ro"' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '--package-directory /run/ceralive-bsp' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '--extra-tree /run/ceralive-firstparty:/opt/ceralive-staging' "${ORCHESTRATOR_SOURCES}"
+if grep -Fq -- '--package-directory /work/mkosi/.staging/' "${ORCHESTRATOR_SOURCES}"; then
 	printf 'FAIL containerized mkosi still traverses private /work staging ancestors\n' >&2
 	exit 1
 fi
