@@ -132,6 +132,8 @@ source "${STAGE_DIR}/fetch.sh"
 source "${STAGE_DIR}/kernel-build.sh"
 # shellcheck source=stages/partition.sh
 source "${STAGE_DIR}/partition.sh"
+# shellcheck source=stages/bsp-gate.sh
+source "${STAGE_DIR}/bsp-gate.sh"
 
 usage() {
   cat >&2 <<EOF
@@ -224,31 +226,7 @@ main() {
 
   stage_partition
 
-  # -------------------------------------------------------------------------
-  # 5. Missing-BSP gate. For a full device build the kernel/DTB/U-Boot/firmware
-  #    MUST be obtainable; if any is not staged, abort BEFORE mkosi — clean
-  #    failure, no half-image (MUST-DO: fail cleanly on missing BSP pin).
-  # -------------------------------------------------------------------------
-  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[4/9] verifying boot BSP packages are obtainable"
-    local boot_bsp_names name missing=()
-    read -ra boot_bsp_names <<<"${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES}"
-    for name in "${boot_bsp_names[@]}"; do
-      if ! compgen -G "${bsp_dir}/${name}_*.deb" >/dev/null \
-         && ! compgen -G "${bsp_dir}/${name}-*.deb" >/dev/null; then
-        missing+=("${name}")
-      fi
-    done
-    if (( ${#missing[@]} > 0 )); then
-      for name in "${missing[@]}"; do
-        log_error "cannot resolve package '${name}': no .deb staged from ${ARMBIAN_APT_URL} (${ARMBIAN_SUITE}/${ARCH})"
-      done
-      die "missing ${#missing[@]} required BSP package(s); aborting before mkosi — no half-image produced. (Set INSTALL_BOOT_BSP=0 for a config+package parity build, or provide R2/Armbian access.)"
-    fi
-    log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
-  else
-    log_warn "[4/9] INSTALL_BOOT_BSP=0 — config+package parity build; boot BSP (kernel/DTB/U-Boot/firmware) deferred to the hardware build (task 17)"
-  fi
+  stage_bsp_gate
 
   # DRY_RUN=1 (v2-ci build matrix): resolve+fetch ran with network suppressed
   # (fetch-debs run_or_plan, task 14); emit the mkosi plan and stop before the
