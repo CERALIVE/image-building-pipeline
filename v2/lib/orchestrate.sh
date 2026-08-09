@@ -134,6 +134,8 @@ source "${STAGE_DIR}/kernel-build.sh"
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
 source "${STAGE_DIR}/bsp-gate.sh"
+# shellcheck source=stages/tar-emit.sh
+source "${STAGE_DIR}/tar-emit.sh"
 # shellcheck source=stages/boot-verify.sh
 source "${STAGE_DIR}/boot-verify.sh"
 # shellcheck source=stages/size-gate.sh
@@ -211,6 +213,7 @@ main() {
   # into one place — the stages are called from here, so bash's dynamic scoping
   # hands them these names exactly as the inline bodies had them.
   local kernel_from_source=0 family_manifest="" mkosi_arch=""
+  local out_dir="" artifact=""
 
   stage_resolve
 
@@ -268,15 +271,7 @@ main() {
   run_mkosi_build "${mkosi_arch}" "${bsp_dir}" "${firstparty_dir}"
   [[ -d "${rootfs_tree}" ]] || die "mkosi did not produce an app rootfs at ${rootfs_tree}"
 
-  # -------------------------------------------------------------------------
-  # 7. Emit normalized output + checksum (NOT Armbian-unofficial_*).
-  # -------------------------------------------------------------------------
-  log_info "[6/9] emitting normalized artifact images/${board}/${ts}.rootfs.tar"
-  local out_dir="${IMAGES_DIR}/${board}" artifact
-  mkdir -p "${out_dir}"
-  artifact="${out_dir}/${ts}.rootfs.tar"
-  emit_artifact "${rootfs_tree}" "${artifact}"
-  log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
+  stage_tar_emit
 
   stage_boot_verify
 
@@ -549,34 +544,6 @@ run_mkosi_build() {
         --force \
         build
     ' || die "mkosi build failed (container)"
-}
-
-# ---------------------------------------------------------------------------
-# emit_artifact <rootfs_tree> <artifact.tar>
-# Produce a normalized, deterministic tarball + sha256. Runs in the builder
-# container when the tree is root-owned and the host can't read/tar it.
-# ---------------------------------------------------------------------------
-emit_artifact() {
-  local tree="$1" artifact="$2"
-  # Deterministic ordering + owner + clamped mtime so the same tree always tars
-  # to the same bytes (task 14). --sort=name pins entry order; gnu format avoids
-  # the per-file pax atime/ctime headers that would re-introduce wall-clock drift.
-  local -a tar_repro=(
-    --sort=name --numeric-owner --owner=0 --group=0
-    --mtime="@${SOURCE_DATE_EPOCH:-0}" --format=gnu
-  )
-  if tar -C "${tree}" "${tar_repro[@]}" -cf "${artifact}" . 2>/dev/null; then
-    :
-  else
-    log_info "rootfs is root-owned — tarring inside the builder container"
-    local runtime="docker"; command -v docker >/dev/null 2>&1 || runtime="podman"
-    "${runtime}" run --rm \
-      -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
-      -v "${MKOSI_DIR}:/work" -v "$(dirname "${artifact}")":/out \
-      "${MKOSI_BUILDER_IMAGE}" \
-      tar -C "/work/build/app" "${tar_repro[@]}" -cf "/out/$(basename "${artifact}")" .
-  fi
-  ( cd "$(dirname "${artifact}")" && sha256sum "$(basename "${artifact}")" >"$(basename "${artifact}").sha256" )
 }
 
 main "$@"
