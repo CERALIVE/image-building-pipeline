@@ -134,6 +134,8 @@ source "${STAGE_DIR}/kernel-build.sh"
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
 source "${STAGE_DIR}/bsp-gate.sh"
+# shellcheck source=stages/boot-verify.sh
+source "${STAGE_DIR}/boot-verify.sh"
 # shellcheck source=stages/size-gate.sh
 source "${STAGE_DIR}/size-gate.sh"
 # shellcheck source=stages/parity.sh
@@ -276,18 +278,7 @@ main() {
   emit_artifact "${rootfs_tree}" "${artifact}"
   log_success "artifact: ${artifact} ($(du -h "${artifact}" | cut -f1)), sha256 in ${artifact}.sha256"
 
-  # Everything the U-Boot selector loads must actually be in that rootfs, on EVERY
-  # kernel path. This is checked here, against the emitted tar, because it is the
-  # earliest point where the real answer exists: DRY_RUN CI never runs the layers
-  # that populate /boot, and preflash-verify.sh (which does check) only runs on a
-  # production-labelled .raw an operator is about to flash — a bench image fails its
-  # PARTLABEL assertions first and never reaches the artifact checks. That gap is
-  # exactly how an `edge` image with no /boot/Image reached a board.
-  if [[ "${ARCH}" == "arm64" && "${INSTALL_BOOT_BSP}" == "1" ]]; then
-    log_info "[6b/9] verifying boot artifacts in ${artifact}"
-    "${VERIFY_BOOT_ARTIFACTS_SH}" "${artifact}" --dtb-name "${DTB_NAME}" \
-      || die "boot artifacts INCOMPLETE for board '${board}' — this image would not boot"
-  fi
+  stage_boot_verify
 
   stage_size_gate
 
