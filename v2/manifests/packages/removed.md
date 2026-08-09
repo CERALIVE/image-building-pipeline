@@ -339,10 +339,10 @@ this change:
    librockchip-mpp1 / librockchip-mpp-dev`. **This is provably unrelated to this
    audit**: those packages are not in `shared.list` at all, and the failure occurs
    in the platform layer, *before* the runtime layer installs `shared.list`.
-2. The committed pin `armbian-firmware=26.5.1` is already recorded as currently
-   unbuildable in `v2/ci/size-baseline.rock-5b-plus.json`'s own note ("26.5.1 no
-   longer exists in the Armbian archive … the committed pin is currently
-   unbuildable").
+2. At the time of this audit the committed pin was `armbian-firmware=26.5.1`, a
+   version the Armbian archive no longer served. That pin has since been promoted
+   to `26.8.1` through the `docs/RELEASE-PROCESS.md` §4 signed-index review, so
+   this particular obstacle no longer applies; reason 1 above still does.
 
 Additionally, this workstation's default Docker context is **Docker Desktop**,
 which cannot preserve file ownership on the bind-mounted build tree
