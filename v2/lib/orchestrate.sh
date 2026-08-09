@@ -126,6 +126,8 @@ MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE:-ceralive-mkosi-builder:${MKOSI_VERSI
 STAGE_DIR="${HERE}/stages"
 # shellcheck source=stages/resolve.sh
 source "${STAGE_DIR}/resolve.sh"
+# shellcheck source=stages/fetch.sh
+source "${STAGE_DIR}/fetch.sh"
 
 usage() {
   cat >&2 <<EOF
@@ -276,59 +278,49 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
-  [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
-    || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
-  {
-    rm -rf "${staging}"
-    mkdir -p "${staging}"
-    install -d -m 0755 "${bsp_dir}" "${firstparty_dir}" "${kernel_build_dir}"
+  stage_fetch
 
-    log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
-    DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \
-      || die "fetch-debs failed for board '${board}'"
+  # Kernel from source. Runs AFTER the fetch so the uniqueness check below sees
+  # the complete fetched set, and BEFORE partitioning so the built .deb flows
+  # through exactly the same classification and staging path as a fetched one.
+  if [[ "${kernel_from_source}" == "1" ]]; then
+    log_info "[2b/9] building kernel from pinned source (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
+    "${BUILD_KERNEL_SH}" --board "${board}" --out "${kernel_build_dir}" \
+      || die "kernel-build-from-source failed for board '${board}'"
 
-    # Kernel from source. Runs AFTER the fetch so the uniqueness check below sees
-    # the complete fetched set, and BEFORE partitioning so the built .deb flows
-    # through exactly the same classification and staging path as a fetched one.
-    if [[ "${kernel_from_source}" == "1" ]]; then
-      log_info "[2b/9] building kernel from pinned source (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
-      "${BUILD_KERNEL_SH}" --board "${board}" --out "${kernel_build_dir}" \
-        || die "kernel-build-from-source failed for board '${board}'"
-
-      if [[ "${DRY_RUN:-0}" != "1" ]]; then
-        assert_staged_packages_unique "${staging}/debs" "${kernel_build_dir}"
-        shopt -s nullglob
-        local _kdeb
-        for _kdeb in "${kernel_build_dir}"/*.deb; do
-          "${MKOSI_PACKAGE_STAGING_SH}" "${_kdeb}" "${staging}/debs"
-        done
-        shopt -u nullglob
-      fi
+    if [[ "${DRY_RUN:-0}" != "1" ]]; then
+      assert_staged_packages_unique "${staging}/debs" "${kernel_build_dir}"
+      shopt -s nullglob
+      local _kdeb
+      for _kdeb in "${kernel_build_dir}"/*.deb; do
+        "${MKOSI_PACKAGE_STAGING_SH}" "${_kdeb}" "${staging}/debs"
+      done
+      shopt -u nullglob
     fi
+  fi
 
-    log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
-    # The set of BSP package names (manifest-declared) is the partition key.
-    local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
-    # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages
-    # + the 9-package ModemManager 1.24 closure (modem-stack v0.2.0, ~ceralive0.2.0).
-    # The fetcher stages all 14 into debs/; a name missing here fails the build as
-    # "unclassified staged package" on a real (non-DRY_RUN) build. Guarded by
-    # v2/tests/firstparty-classification.test.sh.
-    local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 "
-    local deb pkg
-    shopt -s nullglob
-    for deb in "${staging}/debs"/*.deb; do
-      pkg="$(deb_pkg_name "${deb}")"
-      if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
-        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${bsp_dir}"
-      elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
-        "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${firstparty_dir}"
-      else
-        die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
-      fi
-    done
-    shopt -u nullglob
-  }
+  log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
+  # The set of BSP package names (manifest-declared) is the partition key.
+  local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
+  # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages
+  # + the 9-package ModemManager 1.24 closure (modem-stack v0.2.0, ~ceralive0.2.0).
+  # The fetcher stages all 14 into debs/; a name missing here fails the build as
+  # "unclassified staged package" on a real (non-DRY_RUN) build. Guarded by
+  # v2/tests/firstparty-classification.test.sh.
+  local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 "
+  local deb pkg
+  shopt -s nullglob
+  for deb in "${staging}/debs"/*.deb; do
+    pkg="$(deb_pkg_name "${deb}")"
+    if [[ -n "${pkg}" && "${bsp_names}" == *" ${pkg} "* ]]; then
+      "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${bsp_dir}"
+    elif [[ -n "${pkg}" && "${firstparty_names}" == *" ${pkg} "* ]]; then
+      "${MKOSI_PACKAGE_STAGING_SH}" "${deb}" "${firstparty_dir}"
+    else
+      die "unclassified staged package: ${pkg:-<unreadable>} ($(basename "${deb}"))"
+    fi
+  done
+  shopt -u nullglob
   log_info "staged: $(find "${bsp_dir}" -name '*.deb' | wc -l) BSP, $(find "${firstparty_dir}" -name '*.deb' | wc -l) first-party .deb(s)"
 
   # -------------------------------------------------------------------------
