@@ -5904,7 +5904,7 @@ YAML
 
   run bash -c "
     set -euo pipefail
-    ORCH='$LIB_DIR/orchestrate.sh'
+    ORCH='$LIB_DIR/stages/partition.sh'
     # Lift the orchestrator's function bodies without running main().
     eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
@@ -5925,7 +5925,7 @@ YAML
 
   run bash -c "
     set -euo pipefail
-    ORCH='$LIB_DIR/orchestrate.sh'
+    ORCH='$LIB_DIR/stages/partition.sh'
     eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
     log_success() { printf 'OK %s\n' \"\$*\" >&2; }

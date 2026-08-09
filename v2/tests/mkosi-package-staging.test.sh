@@ -9,6 +9,17 @@ ORCHESTRATOR="${V2}/lib/orchestrate.sh"
 PLATFORM_POSTINST="${V2}/mkosi/mkosi.images/platform/mkosi.postinst"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mkosi-package-staging.XXXXXX")"
 
+# The orchestrator is an ENTRY plus per-stage modules under lib/stages/. A static
+# check that reads it by TEXT must read the whole SET in the entry's own source
+# order, or it matches nothing and passes vacuously.
+orchestrator_sources() {
+	local m
+	cat "${ORCHESTRATOR}"
+	while read -r m; do
+		cat "${V2}/lib/stages/${m}"
+	done < <(sed -n 's#^source "\${STAGE_DIR}/\(.*\)"$#\1#p' "${ORCHESTRATOR}")
+}
+
 cleanup() {
 	rm -rf "${RUN_DIR}"
 }
@@ -79,8 +90,8 @@ done
 }
 
 grep -Fq "MKOSI_PACKAGE_STAGING_SH=\"\${HERE}/stage-mkosi-package.sh\"" "${ORCHESTRATOR}"
-grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\"" "${ORCHESTRATOR}"
-grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"" "${ORCHESTRATOR}"
+orchestrator_sources | grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\""
+orchestrator_sources | grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\""
 
 # The runner service uses UMask=0077, so the checkout and .staging ancestors are
 # intentionally private. The container must mount each consumer leaf directly;
