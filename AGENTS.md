@@ -533,7 +533,7 @@ DIFFERENT patch repos, and neither repo's patches apply to the other's tree:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
-| `edge` | mainline 7.1 | `v7.1.5` / `155b42bec9cb` | `CERALIVE/rk3588-kernel-patches@9c1cb385098d` | mainline option kept pinned + buildable |
+| `edge` | mainline 7.1 | `v7.1.7` / `c7ba9d6de43e` | `CERALIVE/rk3588-kernel-patches@acb519c101fe` | mainline option kept pinned + buildable |
 | `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
 Both patch commits are **immutable SHAs**, never branches. Full write-up:
@@ -722,15 +722,17 @@ occurrence of each of those `make` calls in the file.
   so could see the symlink, its target and its size but never a byte of content.
   Guards: `v2/tests/boot-artifacts.bats` (9 added cases). Full write-up:
   [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4c.
-- **`[PARTIAL]` — BOTH RK3588 boards COMPILE end to end; nothing has BOOTED.** A
-  real (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
-  `linux-image-7.1.5-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
+- **BOTH RK3588 boards COMPILE end to end; ONE of them has now BOOTED.** A real
+  (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
+  `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
   `validate_built_kernel_deb` axes, installs the board DTB to
   `/boot/dtb/rockchip/`, installs all 14 first-party `.deb`s, clears the `[7/9]`
   parity gate and emits a flashable `.raw` + signed `.raucb` — proven on
   `rock-5b-plus` first, and on `orange-pi-5-plus` once the DTB-name override and
-  the first-party staging key below were both fixed. The defconfig fragment is
-  still reviewed intent rather than a hardware-validated result.
+  the first-party staging key below were both fixed. A Rock 5B+ has since been
+  flashed with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is
+  what cleared the MPP KNOWN ISSUE below. `orange-pi-5-plus` has still never
+  booted an edge image, so the fragment remains reviewed intent on that board.
   `v2/docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
@@ -853,7 +855,7 @@ occurrence of each of those `make` calls in the file.
   the memory ceiling each fail the suite). Write-up:
   [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §3b.
 
-Guards: `manifest.bats` §26 (41 tests) + `kernel-build-resilience.bats` (30 tests).
+Guards: `manifest.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
@@ -894,7 +896,7 @@ When the gate fires, do NOT silence it by deleting the line: read the symbol's
 Kconfig entry, find the `menuconfig` block it sits inside and its `depends on`,
 and declare those too. A `select`ed helper (`RTW89_CORE`/`RTW89_PCI`/`RTW89_8852B`)
 needs no entry; a `menuconfig` parent always does. Guards:
-`v2/tests/kernel-config-fragment.bats` (14 tests, incl. a red/green pair driving
+`v2/tests/kernel-config-fragment.bats` (26 tests, incl. a red/green pair driving
 the REAL fragment against a reproduction of the broken 7.1.5 answer). Full
 write-up: `v2/docs/kernel-build-from-source.md` §6b.
 
@@ -985,7 +987,7 @@ Two traps worth naming:
   **outputs**, and a correct fix adds a **fifth** card, it does not repair those.
 - The obvious suspect — `armbian/linux-rockchip` `78c67d98f221`, which zeroes
   `capture.channels_min/max` for every `hdmi-audio-codec` with no TX/RX
-  discrimination — is **vendor-BSP only**. Mainline `v7.1.5` already carries the
+  discrimination — is **vendor-BSP only**. Mainline `v7.1.7` already carries the
   upstream `no_i2s_capture` / `no_spdif_capture` pdata flags and only clears a
   direction when the registering driver asks. A parked branch in this repo
   (`fix/hdmi-rx-audio-capture-kernel-patch`, tip `5a51e2f`, deleted after todo 8)
@@ -1017,24 +1019,28 @@ with `/dev/mpp_service` present. The image also already CONTRADICTED itself:
 `chmod a+rw /dev/dma_heap`. The fragment now declares `CONFIG_DMABUF_HEAPS=y` +
 `_SYSTEM=y` + `_CMA=y` (`DMA_CMA` was already `=y`).
 
-**HONEST LIMIT — necessary, and now PROVEN not sufficient.** The three heap names
-MPP asks for are ROCKCHIP-BSP heaps; mainline registers only `system` and the CMA
-heaps. Enabling these symbols is required (with no `/dev/dma_heap` at all MPP
-cannot reach any fallback) and it is where the story stops being a config
-question — see the KNOWN ISSUE immediately below, which resolves the
-"whether MPP settles on the mainline `system` heap" question on real hardware
-(it does not, and cannot). A second, harder gap sits behind it: `librga` wants
+**HONEST LIMIT — necessary, PROVEN not sufficient, and now COMPLETED by a fourth
+symbol.** The heap names MPP asks for are ROCKCHIP-BSP heaps; stock mainline
+registers only `system` and the CMA heaps, and MPP does **not** fall back to
+`system` — it fails the allocation and the element never registers. That is why
+the fragment also declares `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y`, the symbol
+patch `0009` of the series adds for a mainline `system-uncached` heap. See the
+resolved KNOWN ISSUE immediately below. A second, harder gap sits behind it: `librga` wants
 the vendor `/dev/rga` char device, and mainline exposes RGA only as a V4L2 M2M
 node (`rockchip-rga` → `/dev/video1`). Full analysis:
 `.omo/evidence/device-platform-wave4/task-hardware-audit-followup.md` §5.
 
-**MPP hardware video encode does not work on the `edge` 7.1.5 kernel — three
-stacked defects, none of them fixable from this repo** [KNOWN ISSUE]
+**MPP hardware video encode was broken on the `edge` 7.1.5 kernel by three
+stacked defects — all three are FIXED at the `v7.1.7` pin and board-confirmed**
+[RESOLVED 2026-08-09]
 
-Root-caused on a Rock 5B+ on 2026-08-02. This is NOT a config gap and NOT a
-pipeline defect; no kernel fragment, DTS property or package pin this repo owns
-can repair it. `CONFIG_DMABUF_HEAPS` (above) was necessary and is confirmed
-insufficient. The three defects are independent and stack:
+Root-caused on a Rock 5B+ on 2026-08-02, and the fixes landed in
+`CERALIVE/rk3588-kernel-patches` rather than here — which is why the repair
+arrived as a `patches_commit` bump (`acb519c101fe`) rather than a pipeline
+change. The one thing this repo did owe is the Kconfig line that switches the
+new heap on; without it `0009` compiles and its `dma_heap_add()` never runs. The
+diagnosis below is kept in full because it is what a future regression would
+look like. The three defects are independent and stack:
 
 1. **`mpph264enc` does not register at all.** `librockchip-mpp`'s dma-heap
    allocator table hard-codes `system-uncached` as the heap for an uncached
@@ -1062,14 +1068,32 @@ insufficient. The three defects are independent and stack:
    input (1280×720 ×60: 231047 bytes, then 161997 bytes) and intermittent CABAC
    decode failures.
 
-Both real fixes are kernel changes in `CERALIVE/rk3588-kernel-patches`, not here:
-`dma_set_max_seg_size(dev, DMA_BIT_MASK(32))` in `rkvenc_hw_probe()` for (2), and
-an ACK/Rockchip-style `system-uncached` dma-heap for (1)+(3). The second was
-deliberately NOT attempted — ARM cache-alias handling done subtly wrong yields
-silent intermittent corruption in the video path, and proving it correct needs a
-real validation campaign, not a 30-frame smoke test. There is no userspace escape
-hatch: MPP's heap-name table has no environment override, and the shipped
-`librockchip-mpp1 1.5.0-1` lacks the newer upstream cached-heap fallback.
+Both real fixes are kernel changes in `CERALIVE/rk3588-kernel-patches`, not here,
+and both are now IN the pinned series: patch `0008` sets the rkvenc DMA max
+segment size for (2), and patch `0009` adds a mainline `system-uncached` dma-heap
+for (1)+(3). There is no userspace escape hatch — MPP's heap-name table has no
+environment override and the shipped `librockchip-mpp1 1.5.0-1` lacks the newer
+upstream cached-heap fallback — so the heap had to exist under that exact name.
+
+`0009` deliberately did NOT port the ACK/Rockchip heap: its one-time cache flush
+goes through `dma_heap_get_dev()`, an ACK-only helper that mainline's
+`dma-heap.h` does not export at all. It extends the pinned tree's own
+`system_heap.c` (which already registers two heaps off one `system_heap_priv`)
+with a third instance and uses `arch_dma_prep_coherent()` — the primitive
+`dma_direct_alloc()` already uses — so it introduces no new cache-maintenance
+policy. `depends on ARCH_HAS_DMA_PREP_COHERENT` is the no-silent-cached-fallback
+contract expressed at build time: on an arch that stubs the clean out, the heap
+would hand back ordinary cached memory under an uncached name.
+
+**Board-confirmed on a Rock 5B+ (2026-08-09), all three defects cleared.**
+`mpph264enc` registers (`gst-inspect-1.0` exit 0, was `No such element`); a real
+1080p encode produced 1,854,524 bytes (was 0 bytes + stream error);
+`/dev/dma_heap/system-uncached` is a REAL heap with its own minor (`250,1` vs
+`system`'s `250,0`), not an alias; the IOVA guardrail never fired across 1080p,
+4K, dual-core and a 10-minute soak while BOTH guardrail strings remain present in
+the shipped `rkvenc.ko`, so the silence is a real negative; and output was
+byte-identical across 5 repeats, three resolutions, a reboot and 5.2 GiB of
+memory pressure, decoding clean with CABAC in use.
 
 **A `/dev/dma_heap/system-uncached` symlink or `mknod` alias is NOT a workaround.**
 It makes the element register and the guardrail stop firing, which is exactly why
@@ -1078,11 +1102,17 @@ pointing it at the CMA heap instead caps out below 1080p (32 MiB CMA, fragmented
 to a ~1.9 MiB largest run; a 1080p NV12 frame needs ~3.1 MiB contiguous). It was
 used here as a diagnostic instrument only.
 
-Not currently blocking — production ships the vendor BSP (D3 unchanged), whose
-in-tree MPP stack provides all three missing pieces. This is a gate on the
-mainline-track `edge` variant only. Full evidence, verbatim logs and the
-experiment that isolated each layer:
-`.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a.
+Never blocking — production ships the vendor BSP (D3 unchanged), whose in-tree
+MPP stack always provided all three pieces; this was only ever a gate on the
+mainline-track `edge` variant. Full evidence, verbatim logs and the experiment
+that isolated each layer:
+`.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a; the
+clearing run is `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
+
+**Still UNVALIDATED beyond one board.** Everything above is one Rock 5B+. The
+Orange Pi 5 Plus column is entirely unrun, and `0008`/`0009` still carry the
+patch repo's `UNVALIDATED` marker for that reason. Do not describe edge-track
+MPP encode as validated on the fleet.
 
 **eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
@@ -1175,7 +1205,7 @@ same `select`ed-helper rule as `RTW89_CORE`/`RTW89_PCI`).
 
 **`CONFIG_NFT_COUNTER` is deliberately NOT declared, and adding it would fail the
 build.** The ruleset's `counter` statement is real and load-bearing, so the
-symbol looks obligatory — but v7.1.5 has no such symbol at all:
+symbol looks obligatory — but v7.1.7 has no such symbol at all:
 `net/netfilter/Makefile` compiles `nft_counter.o` unconditionally into
 `nf_tables-objs`, alongside `nft_meta.o` (the `iifname` match) and
 `nft_chain_filter.o` (the `type filter hook input` base chain). Declared, it

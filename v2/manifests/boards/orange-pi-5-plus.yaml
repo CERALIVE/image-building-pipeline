@@ -25,7 +25,7 @@ board_id: orangepi5-plus
 dtb_name: rk3588-orangepi-5-plus.dtb
 
 # Kept as an EXPLICIT per-variant assertion even though it now restates the
-# default: the edge variant compiles its DTBs from mainline v7.1.5, an entirely
+# default: the edge variant compiles its DTBs from mainline v7.1.7, an entirely
 # different tree from the vendor BSP above, and the two agreeing today is a fact
 # to pin rather than an invariant to assume. If either tree ever renames it, only
 # one of these two lines moves. The Rock 5B+ needs no entry for the same reason it

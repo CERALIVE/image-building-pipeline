@@ -6,6 +6,20 @@ document was written. Nothing in this record changes `armbian_branch: vendor` (D
 `REPOS`, `versions.yaml`, or any release artifact.
 
 **Recorded:** 2026-08-07 (device-platform-wave4 todo 30).
+
+> **AMENDMENT 2026-08-09 — the measurements below stand, their INPUT does not.**
+> Everything in this record was measured against the `v7.1.5` pin with a
+> six-patch series. The `edge` variant has since been re-pinned to `v7.1.7` with
+> a nine-patch series (`patches_commit acb519c101fe`), whose `0008` and `0009`
+> fix the two kernel defects behind the `encode-broken` finding. On a real Rock
+> 5B+ at that pin, `mpph264enc` **registers** and a 1080p encode produces bytes.
+> This record is NOT rewritten — it is the honest ledger of what was measured
+> when it was measured, and its verdict was mechanically correct on its inputs.
+> **The decision is unchanged: D3 is NOT re-opened and production remains vendor
+> 6.1.** Re-running the matrix on the new pin is a separate, deliberate exercise
+> that needs its own bench campaign (and at minimum a second board — the Orange
+> Pi 5 Plus column is entirely unrun). Evidence for the new result:
+> `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
 **Inputs:** todo 28 (`task-28-hdmirx-uvc-bench.md`, `task-28-journal-diff-2026-08-06.md`),
 todo 29 (`task-29-h265-probe-runbook.md`), todo 27 (`task-27-sd-boot-validation.md`,
 `task-27-orangepi5plus-build-fixed-2.md`).

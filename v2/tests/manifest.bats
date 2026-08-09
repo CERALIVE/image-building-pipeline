@@ -5318,7 +5318,7 @@ YAML
 }
 
 @test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
-  # Mainline's rockchip Makefile at the pinned v7.1.5 builds
+  # Mainline's rockchip Makefile at the pinned v7.1.7 builds
   # rk3588-orangepi-5-plus.dtb, and the override states that explicitly rather
   # than inheriting it, so a future mainline rename moves exactly one line.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus --variant edge 2>/dev/null"
@@ -5486,8 +5486,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: main
       patches_series: patches/series
@@ -5495,9 +5495,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5509,8 +5509,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5518,9 +5518,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5532,7 +5532,7 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
+      tag: v7.1.7
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5540,9 +5540,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
@@ -5554,8 +5554,8 @@ YAML
   write_variant_family "$f" "  edge:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      tag: v7.1.5
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      tag: v7.1.7
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/patches.git
       patches_commit: 4809354656a16443c0b69f1e72b77f3fea1cbdae
       patches_series: patches/series
@@ -5563,9 +5563,9 @@ YAML
       defconfig_fragment: manifests/kernel/f.fragment
       builder_image: debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.5-ceralive-rk3588
-      package_version: 7.1.5-ceralive1
-      dtb_deb_dir: /usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip
+      kernel_release: 7.1.7-ceralive-rk3588
+      package_version: 7.1.7-ceralive1
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
       suppressed_packages: [linux-image-vendor-rk35xx]"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
@@ -5576,7 +5576,7 @@ YAML
 @test "kernel_source: the edge resolve replaces the kernel package and empties DTB_PACKAGES" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
   [[ "$output" == *"DTB_PACKAGES=''"* ]]
   [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
   # U-Boot and firmware are NOT replaced: they stay prebuilt-fetched.
@@ -5594,23 +5594,23 @@ YAML
   line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
   [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
   [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  [[ "$line" == *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # U-Boot / firmware must NEVER be suppressed.
   [[ "$line" != *"linux-u-boot"* ]]
   [[ "$line" != *"armbian-firmware"* ]]
 }
 
-@test "kernel_source: the pinned patches commit is the merged CERALIVE PR #2 SHA" {
-  # A regression pin on the actual value. CERALIVE/rk3588-kernel-patches#2 added
-  # patch 0006 (the HDMI-RX audio sound-card device tree) on top of PR #1's
-  # series; a silent bump here would change what the kernel contains with no
-  # other signal.
+@test "kernel_source: the pinned patches commit is the SHA that LANDED on main" {
+  # A regression pin on the actual value. This is the squash-merge of
+  # CERALIVE/rk3588-kernel-patches#4 as it landed on that repo's main, NOT the
+  # PR-head SHA the merge orphaned; a silent bump here would change what the
+  # kernel contains with no other signal.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='9c1cb385098d842a1d5755e3717b308a25bb8305'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='acb519c101fefa31f51300779f3a139bcabf6a1c'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_COMMIT='155b42bec9cbb6b8cdc47dd9bd09503a81fbe493'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
 }
 
 @test "kernel_source: the defconfig fragment the manifest names actually exists" {
@@ -5703,9 +5703,9 @@ YAML
 @test "vendor-patched: selecting it does NOT move the edge variant" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.5'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_DEFCONFIG_BASE='defconfig'"* ]]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
   [[ "$output" == *"BUILDER_IMAGE='debian:trixie-"* ]]
   # edge declares no config-file trio at all.
   [[ "$output" != *"KERNEL_SOURCE_CONFIG_GIT_URL="* ]]
@@ -5749,9 +5749,9 @@ YAML
   run env DRY_RUN=0 CERALIVE_KERNEL_PATCHES_LOCAL_REPO=relative/path \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_DEFCONFIG_BASE=defconfig \
     KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
@@ -5768,9 +5768,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
@@ -5786,9 +5786,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_CONFIG_COMMIT=5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39 \
@@ -5808,9 +5808,9 @@ YAML
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=x.dtb KERNEL_PACKAGES=linux-image-x \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
-    KERNEL_SOURCE_PATCHES_COMMIT=9c1cb385098d842a1d5755e3717b308a25bb8305 \
+    KERNEL_SOURCE_PATCHES_COMMIT=acb519c101fefa31f51300779f3a139bcabf6a1c \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
     KERNEL_SOURCE_CONFIG_GIT_URL=https://example.invalid/build.git \
     KERNEL_SOURCE_CONFIG_COMMIT=main \
@@ -5830,9 +5830,9 @@ YAML
   write_variant_family "$f" "  vendor-patched:
     kernel_source:
       git_url: https://example.invalid/linux.git
-      commit: 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493
+      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
       patches_git_url: https://example.invalid/p.git
-      patches_commit: 9c1cb385098d842a1d5755e3717b308a25bb8305
+      patches_commit: acb519c101fefa31f51300779f3a139bcabf6a1c
       patches_series: patches/series
       config_git_url: https://example.invalid/build.git
       config_commit: 5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39
@@ -5858,8 +5858,8 @@ YAML
 @test "fetch suppression: suppressed kernel/DTB names leave the declared BSP set" {
   run bash -c "
     set -euo pipefail
-    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.5-ceralive-rk3588'
-    export KERNEL_PACKAGES='linux-image-7.1.5-ceralive-rk3588'
+    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.7-ceralive-rk3588'
+    export KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'
     export DTB_PACKAGES=''
     source '$FETCH_DEBS'
     collect_declared_bsp_pkgs '$V2/manifests/families/rk3588.yaml'
@@ -5867,7 +5867,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"linux-image-vendor-rk35xx"* ]]
   [[ "$output" != *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$output" != *"linux-image-7.1.5-ceralive-rk3588"* ]]
+  [[ "$output" != *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # Everything else the family declares is untouched.
   [[ "$output" == *"armbian-firmware"* ]]
   [[ "$output" == *"gstreamer1.0-rockchip1"* ]]
@@ -5974,10 +5974,10 @@ YAML
 @test "build-kernel: a non-40-hex patches pin is refused before anything runs" {
   run env DRY_RUN=1 \
     ARCH=arm64 DTB_NAME=rk3588-rock-5b-plus.dtb \
-    KERNEL_PACKAGES=linux-image-7.1.5-ceralive-rk3588 \
+    KERNEL_PACKAGES=linux-image-7.1.7-ceralive-rk3588 \
     KERNEL_SOURCE_GIT_URL=https://example.invalid/linux.git \
-    KERNEL_SOURCE_TAG=v7.1.5 \
-    KERNEL_SOURCE_COMMIT=155b42bec9cbb6b8cdc47dd9bd09503a81fbe493 \
+    KERNEL_SOURCE_TAG=v7.1.7 \
+    KERNEL_SOURCE_COMMIT=c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6 \
     KERNEL_SOURCE_PATCHES_GIT_URL=https://example.invalid/patches.git \
     KERNEL_SOURCE_PATCHES_COMMIT=main \
     KERNEL_SOURCE_PATCHES_SERIES=patches/series \
@@ -5985,9 +5985,9 @@ YAML
     KERNEL_SOURCE_DEFCONFIG_FRAGMENT=manifests/kernel/rk3588-edge.fragment \
     KERNEL_SOURCE_BUILDER_IMAGE='debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2' \
     KERNEL_SOURCE_LOCAL_VERSION=-ceralive-rk3588 \
-    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588 \
-    KERNEL_SOURCE_PACKAGE_VERSION=7.1.5-ceralive1 \
-    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip \
+    KERNEL_SOURCE_KERNEL_RELEASE=7.1.7-ceralive-rk3588 \
+    KERNEL_SOURCE_PACKAGE_VERSION=7.1.7-ceralive1 \
+    KERNEL_SOURCE_DTB_DEB_DIR=/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip \
     bash "$LIB_DIR/build-kernel.sh" --board rock-5b-plus --out "$BATS_TEST_TMPDIR/ko"
   [ "$status" -ne 0 ]
   [[ "$output" == *"patches_commit"* ]]
@@ -6006,9 +6006,9 @@ YAML
   serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$V2/build" rock-5b-plus --variant edge
   [ "$status" -eq 0 ]
-  [[ "$output" == *"git clone --branch v7.1.5"* ]]
-  [[ "$output" == *"git rev-parse HEAD == 155b42bec9cbb6b8cdc47dd9bd09503a81fbe493"* ]]
-  [[ "$output" == *"9c1cb385098d842a1d5755e3717b308a25bb8305"* ]]
+  [[ "$output" == *"git clone --branch v7.1.7"* ]]
+  [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
+  [[ "$output" == *"acb519c101fefa31f51300779f3a139bcabf6a1c"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
@@ -6190,14 +6190,14 @@ YAML
   local fn
   fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
   local root="$BATS_TEST_TMPDIR/dtbroot"
-  mkdir -p "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip"
-  printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
+  mkdir -p "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
 
   run bash -c "
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }
     BUILDROOT='$root'
-    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip'
     KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
     DTB_NAME='rk3588-rock-5b-plus.dtb'
     $fn
@@ -6213,7 +6213,7 @@ YAML
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }
     BUILDROOT='$root'
-    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.5-ceralive-rk3588/rockchip'
+    KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip'
     KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'
     DTB_NAME='rk3588s-orangepi-5b.dtb'
     $fn

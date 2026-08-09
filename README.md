@@ -187,9 +187,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build rock-5b-plus` | production path; the kernel the fleet actually runs |
 | `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots, audio capture not board-confirmed |
-| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; MPP hardware video encode does NOT work on this track (see the pipeline `AGENTS.md` "MPP hardware video encode" KNOWN ISSUE) — bench/insurance track only |
+| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; same MPP caveat as above |
+| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./v2/build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `v2/docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -627,7 +627,7 @@ neither repository's patches apply to the other's tree:
 
 | Variant | Kernel | Patch series | Built package |
 |---|---|---|---|
-| `edge` | mainline `v7.1.5` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.5-ceralive-rk3588` |
+| `edge` | mainline `v7.1.7` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.7-ceralive-rk3588` |
 | `vendor-patched` | Armbian vendor BSP 6.1.115 — **the kernel the shipped image actually runs** | `CERALIVE/rk3588-vendor-kernel-patches` | `linux-image-6.1.115-ceralive-vendor-rk35xx` |
 
 `vendor-patched` rebuilds the same 6.1.115 BSP the production path installs
