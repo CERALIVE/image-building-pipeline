@@ -1635,6 +1635,23 @@ PY
 # that have no real rootfs behind them. Root-free and hardware-free — the shipped
 # block is extracted and executed against synthetic KB-sized trees.
 
+# The orchestrator is an ENTRY (lib/orchestrate.sh) plus one module per stage
+# under lib/stages/, sourced in PIPELINE order. A static check that reads it by
+# TEXT must read the whole SET in that order, or it matches nothing and passes
+# vacuously — and a stage-ORDER assertion only means something if the modules
+# appear in the entry's own source order. Written to a file, never piped: `grep -q`
+# closes the pipe and `set -o pipefail` turns a correct read into a failure.
+orch_source_set() {
+  local out="$BATS_TEST_TMPDIR/orch-source-set.sh" m
+  {
+    cat "$V2/lib/orchestrate.sh"
+    while read -r m; do cat "$V2/lib/stages/$m"; done \
+      < <(sed -n 's#^source "${STAGE_DIR}/\(.*\)"$#\1#p' "$V2/lib/orchestrate.sh")
+  } >"$out"
+  [ -s "$out" ]
+  printf '%s\n' "$out"
+}
+
 # Emit the real [6c/9] block out of orchestrate.sh so the cases below execute the
 # shipped code rather than a copy of it.
 extract_size_gate_block() {
@@ -1705,11 +1722,12 @@ run_baseline_compare() {
   # Position is the whole point: measuring before the emit has nothing to measure,
   # and measuring after Stage-4 would already have cut a .raw and a signed .raucb
   # from an over-budget image.
-  local emit_line gate_line parity_line disk_line
-  emit_line="$(grep -n '\[6/9\] emitting normalized artifact' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  parity_line="$(grep -n '\[7/9\] verifying parity' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  disk_line="$(grep -n '\[8/9\] Stage-4 disk assembly' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  local orch emit_line gate_line parity_line disk_line
+  orch="$(orch_source_set)"
+  emit_line="$(grep -n '\[6/9\] emitting normalized artifact' "$orch" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$orch" | head -1 | cut -d: -f1)"
+  parity_line="$(grep -n '\[7/9\] verifying parity' "$orch" | head -1 | cut -d: -f1)"
+  disk_line="$(grep -n '\[8/9\] Stage-4 disk assembly' "$orch" | head -1 | cut -d: -f1)"
   [ -n "$emit_line" ] && [ -n "$gate_line" ] && [ -n "$parity_line" ] && [ -n "$disk_line" ]
   [ "$emit_line" -lt "$gate_line" ]
   [ "$gate_line" -lt "$parity_line" ]
@@ -1719,9 +1737,10 @@ run_baseline_compare() {
 @test "size-gate wiring: DRY_RUN exits the orchestrator before the gate can run" {
   # DRY_RUN ships no rootfs at all, so the gate must be unreachable there — by
   # placement, not by a condition that a later edit could drop.
-  local dryrun_exit_line gate_line
-  dryrun_exit_line="$(grep -n '=== DRY-RUN complete' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
-  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$V2/lib/orchestrate.sh" | head -1 | cut -d: -f1)"
+  local orch dryrun_exit_line gate_line
+  orch="$(orch_source_set)"
+  dryrun_exit_line="$(grep -n '=== DRY-RUN complete' "$orch" | head -1 | cut -d: -f1)"
+  gate_line="$(grep -n '\[6c/9\] enforcing the rootfs size budget' "$orch" | head -1 | cut -d: -f1)"
   [ -n "$dryrun_exit_line" ] && [ -n "$gate_line" ]
   [ "$dryrun_exit_line" -lt "$gate_line" ]
 }

@@ -104,11 +104,11 @@ grep -Fq -- "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"
 # intentionally private. The container must mount each consumer leaf directly;
 # passing its /work path makes mkosi's unprivileged repository indexer see zero
 # packages even when the leaf and archives themselves are readable.
-grep -Fq -- '-v "${bsp_dir}:/run/ceralive-bsp:ro"' "${ORCHESTRATOR}"
-grep -Fq -- '-v "${firstparty_dir}:/run/ceralive-firstparty:ro"' "${ORCHESTRATOR}"
-grep -Fq -- '--package-directory /run/ceralive-bsp' "${ORCHESTRATOR}"
-grep -Fq -- '--extra-tree /run/ceralive-firstparty:/opt/ceralive-staging' "${ORCHESTRATOR}"
-if grep -Fq -- '--package-directory /work/mkosi/.staging/' "${ORCHESTRATOR}"; then
+grep -Fq -- '-v "${bsp_dir}:/run/ceralive-bsp:ro"' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '-v "${firstparty_dir}:/run/ceralive-firstparty:ro"' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '--package-directory /run/ceralive-bsp' "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- '--extra-tree /run/ceralive-firstparty:/opt/ceralive-staging' "${ORCHESTRATOR_SOURCES}"
+if grep -Fq -- '--package-directory /work/mkosi/.staging/' "${ORCHESTRATOR_SOURCES}"; then
 	printf 'FAIL containerized mkosi still traverses private /work staging ancestors\n' >&2
 	exit 1
 fi
