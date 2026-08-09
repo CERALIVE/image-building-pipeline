@@ -12,12 +12,19 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mkosi-package-staging.XXXXXX")"
 # The orchestrator is an ENTRY plus per-stage modules under lib/stages/. A static
 # check that reads it by TEXT must read the whole SET in the entry's own source
 # order, or it matches nothing and passes vacuously.
-orchestrator_sources() {
-	local m
+#
+# Materialized to a FILE, never piped into `grep -q`: -q exits on the first match
+# and SIGPIPEs the writer, which `set -o pipefail` then turns into a failed run.
+ORCHESTRATOR_SOURCES="${RUN_DIR}/orchestrator-sources.sh"
+{
 	cat "${ORCHESTRATOR}"
-	while read -r m; do
-		cat "${V2}/lib/stages/${m}"
+	while read -r _stage_module; do
+		cat "${V2}/lib/stages/${_stage_module}"
 	done < <(sed -n 's#^source "\${STAGE_DIR}/\(.*\)"$#\1#p' "${ORCHESTRATOR}")
+} >"${ORCHESTRATOR_SOURCES}"
+[[ -s "${ORCHESTRATOR_SOURCES}" ]] || {
+	printf 'FAIL could not assemble the orchestrator source set\n' >&2
+	exit 1
 }
 
 cleanup() {
@@ -90,8 +97,8 @@ done
 }
 
 grep -Fq "MKOSI_PACKAGE_STAGING_SH=\"\${HERE}/stage-mkosi-package.sh\"" "${ORCHESTRATOR}"
-orchestrator_sources | grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\""
-orchestrator_sources | grep -Fq "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\""
+grep -Fq -- "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${bsp_dir}\"" "${ORCHESTRATOR_SOURCES}"
+grep -Fq -- "\"\${MKOSI_PACKAGE_STAGING_SH}\" \"\${deb}\" \"\${firstparty_dir}\"" "${ORCHESTRATOR_SOURCES}"
 
 # The runner service uses UMask=0077, so the checkout and .staging ancestors are
 # intentionally private. The container must mount each consumer leaf directly;
