@@ -29,8 +29,35 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/lib/common.sh"
 
 BOARDS_DIR="${HERE}/manifests/boards"
+FAMILIES_DIR="${HERE}/manifests/families"
 ORCHESTRATOR="${HERE}/lib/orchestrate.sh" # provided by task 16
 BUILD_ALL="${HERE}/lib/build-all.sh"      # bounded-parallel multi-board runner (task 12)
+
+# Discoverability only: list each family manifest's declared `variants:` keys,
+# read live from manifests/families/*.yaml so this text can never drift from
+# what `--variant` actually accepts (v2/docs/kernel-tracks.md). Prints nothing
+# and never fails if python3/PyYAML aren't available or no family declares
+# variants — this is help text, not a build-path dependency.
+list_declared_variants() {
+  [[ -d "${FAMILIES_DIR}" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "${FAMILIES_DIR}" <<'PYEOF' 2>/dev/null || true
+import sys, glob, os
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+
+families_dir = sys.argv[1]
+for path in sorted(glob.glob(os.path.join(families_dir, "*.yaml"))):
+    family = os.path.splitext(os.path.basename(path))[0]
+    with open(path) as handle:
+        data = yaml.safe_load(handle) or {}
+    variants = data.get("variants")
+    if isinstance(variants, dict) and variants:
+        print(f"  {family}: {', '.join(sorted(variants.keys()))}")
+PYEOF
+}
 
 usage() {
   cat >&2 <<EOF
@@ -53,6 +80,9 @@ exits non-zero if ANY board fails. DRY_RUN=1 previews the resolved board list
 source 'edge'). Omitted, it is 'default' — the production vendor path, byte-for-
 byte unchanged. It is SINGLE-BOARD ONLY and is never inferred: a variant build is
 always something an operator asked for by name.
+
+Declared variants per family (see v2/docs/kernel-tracks.md):
+$(list_declared_variants)
 EOF
 }
 

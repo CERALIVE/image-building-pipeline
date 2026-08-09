@@ -720,6 +720,13 @@ decision. Full detail:
 [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md);
 gaps: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) item 9.
 
+## Kernel Tracks
+
+Which patch repository feeds which opt-in variant, the pin chain from each
+repo's `kernel-pin.env` through to `rk3588.yaml`, and where each track's
+retire-on-merge status is tracked — a thin index, not a restatement — lives in
+[`v2/docs/kernel-tracks.md`](v2/docs/kernel-tracks.md).
+
 ## Kernel Currency Watch
 
 The image is locked to the **vendor 6.1 BSP + Rockchip MPP** for H.265 encoding.
