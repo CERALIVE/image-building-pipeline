@@ -553,14 +553,15 @@ stock name is the one failure that yields a plausible image rather than an error
 because the local repository would resolve one of the two by version and the board
 could silently boot the UNPATCHED kernel.
 
-**`0004` is DIAGNOSTIC and `0005` is the fix it found — and NEITHER has been
-confirmed on a board.** `0001`-`0003` restored the capture PCM and that half is
-board-confirmed, but every `read()` on it still returned `EIO` while `dmesg` —
-cleared immediately beforehand — stayed completely empty, including against an
-EDID-confirmed audio-capable HDMI source. `0004` changes no behaviour; it raises
-the severity of, and adds state to, the failure reports that path already drops
-(ALSA's only `-EIO` is at `pcm_dbg()` level, the dmaengine PCM pointer discards
-its status, the i2s-tdm overrun interrupt is optional and its absence unlogged,
+**`0004` is DIAGNOSTIC and `0005` is the fix it found — Tier 1 CONFIRMED on a
+hand-built kernel, Tier 2 OPEN on this repo's pipeline-built image.**
+`0001`-`0003` restored the capture PCM and that half is board-confirmed, but
+every `read()` on it still returned `EIO` while `dmesg` — cleared immediately
+beforehand — stayed completely empty, including against an EDID-confirmed
+audio-capable HDMI source. `0004` changes no behaviour; it raises the severity
+of, and adds state to, the failure reports that path already drops (ALSA's
+only `-EIO` is at `pcm_dbg()` level, the dmaengine PCM pointer discards its
+status, the i2s-tdm overrun interrupt is optional and its absence unlogged,
 and a PL330 channel fault is `dev_info()`). What it exposed is that the PCM
 lifecycle and the HDMI-RX **audio-domain** lifecycle were never connected:
 `GLOBAL_SWENABLE.AUDIO_ENABLE` and `AUDIO_PROC_CONFIG0.I2S_EN` are set ONLY by
@@ -568,11 +569,23 @@ lifecycle and the HDMI-RX **audio-domain** lifecycle were never connected:
 and an `rk_hdmirx` private V4L2 ioctl no ALSA client issues — so `snd_pcm_open()`
 / `hw_params` / `trigger START` all left the domain off and nothing clocked into
 i2s7_8ch. `0005` starts that domain from the capture open and from the paths that
-just confirmed HDMI lock. Do NOT read this variant as "HDMI-RX audio works" — it
-is instrumented and repaired in source, not proven on hardware. `0004` is
-retained in full until `0005` is board-confirmed (`hw_ptr` advancing, `RXS=1`
-with a NON-ZERO `RXFIFOLR`, and zero `capture xfer failed` lines); shrinking the
-series back to three patches is a follow-up, not pending cleanup.
+just confirmed HDMI lock.
+
+- **Tier 1 — CONFIRMED:** `0005` is board-confirmed on one Radxa ROCK 5B+ test
+  (image `20260806T223730Z.raw` after a clean full `dd` reflash) — `hw_ptr`
+  advancing, `RXS=1` with a NON-ZERO `RXFIFOLR`, and zero `capture xfer failed`
+  lines, verified end-to-end through CeraUI's live Audio levels meters riding
+  cerastream's own idle audio-meter sidecar, not a one-off manual `arecord`.
+- **Tier 2 — OPEN:** the PIPELINE-BUILT `--variant vendor-patched` image has
+  not itself been booted on hardware, and no Orange Pi 5+ evidence exists. Do
+  NOT read this variant as "HDMI-RX audio works" on the strength of the Tier 1
+  confirmation above — that test ran on a hand-built kernel from the same
+  source, not this repo's `make bindeb-pkg` output.
+
+`0004` is retained in full regardless of the confirmation above — the
+instrumentation is how a future pipeline-built-image confirmation gets read;
+shrinking the series back to three patches is a follow-up, not pending
+cleanup.
 
 **`0005` may never wait on the audio WORK ITEM, only on its completion.** Its
 first version (`94d20ab0a4f7`) called `flush_delayed_work()` from
@@ -591,10 +604,15 @@ became `CERALIVE/rk3588-vendor-kernel-patches` PR #1. Squash-merging it produced
 brand-new commit (`de46c1acba42`) and discarded the originals, so `db5d0e8a0711`
 is no longer reachable from that repo's `main` and
 `git fetch --depth 1 <url> db5d0e8a0711` from a fresh clone FAILS. The PR gate
-cannot catch this — it is `DRY_RUN=1` and never fetches the patch series. After
-merging anything in either patch repo, re-pin `patches_commit` to the SHA that
-actually landed on `main`, and verify it with
-`git ls-remote <patches-url> <sha>` before committing.
+cannot catch this — it is `DRY_RUN=1` and never fetches the patch series.
+Re-pin `patches_commit` only when the payload changes or the current pin
+becomes unreachable from `main` (a squash-merge is exactly the second case) —
+not on every merge in either patch repo. When a re-pin is warranted, point it
+at the SHA that actually landed on `main` and verify it with
+`git ls-remote <patches-url> <sha>` before committing. The docs-only commit
+`4323a16` ("Document HDMI-RX audio board confirmation") lands DOWNSTREAM OF
+(after) this payload pin `de46c1a` — it records the board confirmation, it
+does not change what is pinned, so it never triggers a re-pin on its own.
 
 **Adding it required generalizing `build-kernel.sh` in exactly two places**, both
 of which are now first-class modes rather than special cases:

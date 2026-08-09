@@ -245,14 +245,22 @@ that have just confirmed HDMI lock.
 
 Consequences for this repo:
 
-- **Do not read `--variant vendor-patched` as "HDMI-RX audio works."** `0005`
-  compiles clean and its reasoning is source-verified against the pinned tree,
-  but it has **not** been confirmed on a board. Board-confirmation criteria:
-  `hw_ptr` advances, the read-back line shows `RXS=1` with a **non-zero**
-  `RXFIFOLR`, and a real capture logs **zero** `capture xfer failed` lines.
-- **`0004` is retained in full until `0005` is board-confirmed** — the
-  instrumentation is how that confirmation gets read. Dropping the series back
-  to three patches is a follow-up, not a pending cleanup.
+- **Tier 1 — CONFIRMED: `0005` is board-confirmed on one Radxa ROCK 5B+ test**
+  (image `20260806T223730Z.raw` after a clean full `dd` reflash), including
+  end-to-end CeraUI audio-meter validation through the production cerastream
+  idle audio-meter sidecar — not a one-off manual `arecord`. Board-confirmation
+  criteria: `hw_ptr` advances, the read-back line shows `RXS=1` with a
+  **non-zero** `RXFIFOLR`, and a real capture logs **zero** `capture xfer
+  failed` lines. All three held on that test.
+- **Tier 2 — OPEN: the PIPELINE-BUILT `--variant vendor-patched` image itself
+  has not been booted on hardware, and no Orange Pi 5+ evidence exists.** The
+  Radxa ROCK 5B+ confirmation above validated the patch series on a hand-built
+  kernel, not this repo's `make bindeb-pkg` output — do not conflate the two
+  when deciding whether this variant is ready to build and flash.
+- **`0004` is retained in full regardless of the `0005` confirmation above** —
+  the instrumentation is how a future pipeline-built-image confirmation gets
+  read. Dropping the series back to three patches is a follow-up, not a
+  pending cleanup.
 - **`0005` may never wait on the audio *work item*, only on its completion.**
   Its first version called `flush_delayed_work()` from `hdmirx_audio_startup()`,
   which ASoC invokes with hdmi-codec's `hcp->lock` held, while that work calls

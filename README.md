@@ -186,7 +186,7 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build rock-5b-plus` | production path; the kernel the fleet actually runs |
-| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots, audio capture not board-confirmed |
+| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
 | `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build orange-pi-5-plus` | production path |
 | `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
@@ -647,10 +647,14 @@ the fix it led to: the HDMI-RX audio domain is enabled only by a work item that
 a capture open never triggered, so nothing ever clocked into the I2S receiver;
 the patch starts that domain from the capture lifecycle instead.
 
-`0005` compiles clean and is source-verified against the pinned tree, but it has
-**not** been confirmed on a board, and `0004` is retained precisely so that
-confirmation can be read. Do not read this variant as "HDMI-RX audio works": it
-is instrumented and repaired in source, not proven on hardware. See
+`0005` compiles clean and is source-verified against the pinned tree. Tier 1:
+it is board-confirmed on one Radxa ROCK 5B+ test on a hand-built kernel,
+including end-to-end CeraUI audio-meter validation through the production
+cerastream sidecar. Tier 2: the pipeline-built `--variant vendor-patched`
+image has not itself been booted on hardware, and no Orange Pi 5+ evidence
+exists — `0004` is retained precisely so that a future pipeline-built-image
+confirmation can be read. Do not read this variant as "HDMI-RX audio works on
+this pipeline's image" on the strength of the Tier 1 result alone. See
 [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §2d.
 
 Every input is exact-pinned — the kernel commit, the patch-series commit (an
