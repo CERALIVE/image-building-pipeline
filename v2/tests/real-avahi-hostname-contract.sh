@@ -108,11 +108,13 @@ sudo -n true 2>/dev/null || fail "passwordless sudo is required for network name
 # WHOLE set so this harness keeps driving the SHIPPED script rather than silently
 # extracting nothing when the heredoc moves between modules.
 extract_hostname_script() {
-  cat "$POSTINST_ENTRY" "$POSTINST_D"/*.sh | awk '
+  local postinst_src
+  postinst_src="$(cat "$POSTINST_ENTRY" "$POSTINST_D"/*.sh)"
+  awk '
     /cat >\/usr\/local\/sbin\/ceralive-set-hostname <<'\''EOF'\''/ { in_script = 1; next }
     in_script && /^EOF$/ { exit }
     in_script { print }
-  '
+  ' <<<"$postinst_src"
 }
 
 create_pair() {
