@@ -1662,7 +1662,7 @@ extract_size_gate_block() {
       buf = buf ORS $0
       if ($0 == "  fi") { if (buf ~ /\[6c\/9\]/) { print buf; exit } ; inblk = 0 }
     }
-  ' "$V2/lib/orchestrate.sh"
+  ' "$V2/lib/stages/size-gate.sh"
 }
 
 # Drive that block with stubbed logging, a caller-supplied budget file and a
@@ -1692,7 +1692,7 @@ extract_baseline_compare_fn() {
     /^compare_size_against_baseline\(\) \{/ { inblk = 1 }
     inblk { print }
     inblk && /^\}/ { exit }
-  ' "$V2/lib/orchestrate.sh"
+  ' "$V2/lib/stages/size-gate.sh"
 }
 
 run_baseline_compare() {
@@ -1715,7 +1715,7 @@ run_baseline_compare() {
   [ "$status" -eq 0 ]
   [ -x "$MEASURE_SH" ]
 
-  run grep -F '"${MEASURE_SIZE_SH}" "${board}" "${artifact}"' "$V2/lib/orchestrate.sh"
+  run grep -F '"${MEASURE_SIZE_SH}" "${board}" "${artifact}"' "$V2/lib/stages/size-gate.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -7070,7 +7070,7 @@ active_pkgs_of() { sed -e 's/#.*//' "$1" | awk 'NF{print $1}' | sort -u; }
   # PRODUCTION baseline and desync it from size-budget.json, which another test in
   # this file fails on. Only the RELATIVE check is skipped; the absolute ceiling
   # runs for both variants.
-  local orch="$LIB_DIR/orchestrate.sh"
+  local orch="$LIB_DIR/stages/size-gate.sh"
   local body
   body="$(awk '/^compare_size_against_baseline\(\) \{/{grab=1} grab{print} grab && /^}/{exit}' "$orch")"
   [ -n "$body" ]
