@@ -1451,7 +1451,8 @@ YAML
 }
 
 @test "t14 x86 guard: orchestrate.sh wires the x86 ESP/GRUB disk path (TODO(x86-disk) closed)" {
-  local orch="$V2/lib/orchestrate.sh"
+  local orch
+  orch="$(orch_source_set)"
   # Task 12 closed the deferral: the former active TODO(x86-disk) marker is GONE.
   run grep -q 'TODO(x86-disk)' "$orch"
   [ "$status" -ne 0 ]

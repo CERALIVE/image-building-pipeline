@@ -39,7 +39,8 @@ setup() {
   V2="$(cd "$TESTS_DIR/.." && pwd)"
   LIB_DIR="$V2/lib"
   BUILD_BUNDLE="$LIB_DIR/build-bundle.sh"
-  ORCH="$LIB_DIR/orchestrate.sh"
+  # The Stage-4 dispatch is the [8/9] module; the orchestrator entry only calls it.
+  ORCH="$LIB_DIR/stages/assemble.sh"
   DEV_KEYS="$V2/.dev-keys"
   COMPAT="ceralive-x86-minipc"
   BOARD="x86-minipc"
@@ -61,7 +62,7 @@ raucb_prereqs() {
   return 0
 }
 
-# efi_branch — extract ONLY the efi/grub adapter branch of orchestrate.sh's
+# efi_branch — extract ONLY the efi/grub adapter branch of the [8/9] module's
 # Stage-4 dispatch: from the `RAUC_BOOTLOADER_ADAPTER == "efi"` guard down to the
 # unsupported-adapter die that terminates the dispatch. Starting at the efi guard
 # guarantees any BUILD_BUNDLE_SH match is the x86 invocation, never the RK3588
@@ -100,13 +101,13 @@ build_x86_bundle() {
 }
 
 # ===========================================================================
-# 1. STATIC WIRING — orchestrate.sh's efi/grub Stage-4 branch calls
+# 1. STATIC WIRING — the [8/9] module's efi/grub Stage-4 branch calls
 #    BUILD_BUNDLE_SH. T10 closed the gap where the x86 path assembled a .raw but
 #    never produced the signed .raucb OTA; this asserts the producer is invoked
 #    inside the efi/grub branch (and that build-bundle.sh exists to be called).
 # ===========================================================================
 
-@test "x86 wiring: orchestrate.sh efi/grub Stage-4 branch invokes BUILD_BUNDLE_SH" {
+@test "x86 wiring: the [8/9] efi/grub Stage-4 branch invokes BUILD_BUNDLE_SH" {
   [ -f "$ORCH" ]
   [ -f "$BUILD_BUNDLE" ]
   run efi_branch
