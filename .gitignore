@@ -36,3 +36,7 @@ test-results-*.txt
 # image output dir. Build output, never committed, and deliberately excluded from
 # the build-matrix sha256 determinism comparison (the float would break it).
 bsp-provenance.json
+
+# mkosi scratch workspace (--workspace-directory, lib/paths.sh). Pinned beside the
+# output tree so finished subimages are renamed rather than copied across devices.
+.mkosi-workspace/

@@ -78,11 +78,13 @@ stage_dry_run_plan() {
     select_build_mode
     local package_dir_plan="${STAGING_ROOT}/${board}/bsp"
     local firstparty_dir_plan="${STAGING_ROOT}/${board}/firstparty"
+    local workspace_dir_plan="${PIPELINE_DIR}/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
     if [[ "${BUILD_MODE}" != "native" ]]; then
       package_dir_plan="/run/ceralive-bsp"
       firstparty_dir_plan="/run/ceralive-firstparty"
+      workspace_dir_plan="/work/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
     fi
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
+    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -116,6 +118,13 @@ stage_mkosi() {
 mkosi_invoke() {
   select_build_mode   # sets BUILD_MODE (native|docker|podman); logs the plan
 
+  # Same-filesystem workspace. mkosi RENAMES each finished subimage tree out of
+  # its workspace into mkosi/build/, and rename(2) cannot cross a device — with
+  # the default /var/tmp workspace every one of those eight moves degraded to a
+  # full multi-GB copy (census row 20). Created here rather than left to mkosi so
+  # a permission problem surfaces as a build error with a path in it.
+  mkdir -p "${PIPELINE_DIR}/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
+
   if [[ "${BUILD_MODE}" == "native" ]]; then
     command -v mkosi >/dev/null 2>&1 \
       || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
@@ -126,7 +135,9 @@ mkosi_invoke() {
         || die "could not prepare the binary CeraLive apt keyring for mkosi"
       export APT_GPG_PUBLIC_B64
     fi
-    ( cd "${MKOSI_DIR}" && mkosi "${mkosi_args[@]}" ) \
+    ( cd "${MKOSI_DIR}" \
+      && mkosi --workspace-directory="${PIPELINE_DIR}/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}" \
+               "${mkosi_args[@]}" ) \
       || die "mkosi build failed (native)"
     return
   fi
@@ -170,6 +181,7 @@ mkosi_invoke() {
       mkosi \
         --architecture='"${mkosi_arch}"' \
         --with-network=yes \
+        --workspace-directory=/work/'"${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"' \
         '"${env_cli_str}"' \
         --environment CERALIVE_PIPELINE_DIR \
         --cache-directory='"${cache_dir}"' \

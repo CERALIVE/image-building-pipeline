@@ -315,6 +315,57 @@ sectioned_keys() {
   done
 }
 
+@test "mkosi-contract: the mkosi workspace is pinned to the output filesystem" {
+  local paths="$PIPELINE_DIR/lib/paths.sh"
+  # shellcheck source=/dev/null
+  source "$paths"
+  [ -n "${CERALIVE_REL_MKOSI_WORKSPACE_DIR:-}" ]
+
+  # mkosi refuses a workspace inside a BuildSources= source dir, and the build's
+  # source dir IS mkosi/ (the same $SRCDIR the app layer reads staged .debs from).
+  # So the workspace must NOT be under mkosi/, and must still be repo-relative so
+  # it lands on the same device as mkosi/build.
+  [[ "$CERALIVE_REL_MKOSI_WORKSPACE_DIR" != mkosi/* ]]
+  [[ "$CERALIVE_REL_MKOSI_WORKSPACE_DIR" != /* ]]
+  [[ "$CERALIVE_REL_MKOSI_WORKSPACE_DIR" != *..* ]]
+
+  # A generated path the persistent CI runner must be allowed to delete.
+  local p found=0
+  for p in "${CERALIVE_REL_CLEANUP_PATHS[@]}"; do
+    [ "$p" = "$CERALIVE_REL_MKOSI_WORKSPACE_DIR" ] && found=1
+  done
+  [ "$found" -eq 1 ]
+
+  grep -Fq "$CERALIVE_REL_MKOSI_WORKSPACE_DIR/" "$PIPELINE_DIR/.gitignore"
+}
+
+@test "mkosi-contract: both mkosi invocations and the DRY_RUN plan pass the workspace" {
+  local stage="$PIPELINE_DIR/lib/stages/mkosi.sh"
+  # Native, container and plan must agree — a plan that omits it would make the
+  # cross-runner build-plan hash blind to this setting.
+  [ "$(grep -c -- '--workspace-directory' "$stage")" -eq 3 ]
+  grep -Fq 'mkdir -p "${PIPELINE_DIR}/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"' "$stage"
+  grep -Fq -- '--workspace-directory=/work/' "$stage"
+}
+
+@test "mkosi-contract: the release workflow may clean the workspace path" {
+  local paths="$PIPELINE_DIR/lib/paths.sh"
+  # shellcheck source=/dev/null
+  source "$paths"
+  local declared
+  declared="$(grep -E '^\s*CERALIVE_GENERATED_CLEANUP_PATHS:' \
+    "$PIPELINE_DIR/.github/workflows/release.yml" | sed -E "s/.*: '(.*)'.*/\1/")"
+  [ "$declared" = "${CERALIVE_REL_CLEANUP_PATHS[*]}" ]
+}
+
+@test "mkosi-contract: the resolved DRY_RUN plan names the pinned workspace" {
+  command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 \
+    || skip "no container runtime; select_build_mode cannot resolve a plan"
+  run env DRY_RUN=1 INSTALL_BOOT_BSP=0 "$PIPELINE_DIR/build" rock-5b-plus
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--workspace-directory=/work/.mkosi-workspace"* ]]
+}
+
 @test "mkosi-contract: the pinned mkosi parses every config with no diagnostics" {
   command -v mkosi >/dev/null 2>&1 || skip "mkosi not on PATH (canonical build is containerized)"
   local have

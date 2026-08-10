@@ -31,6 +31,19 @@ CERALIVE_REL_MKOSI_CACHE_ROOT="${CERALIVE_REL_MKOSI_DIR}/cache"
 CERALIVE_REL_STAGING_DIR="${CERALIVE_REL_MKOSI_DIR}/.staging"
 # Persistent ccache for the opt-in kernel-from-source variants.
 CERALIVE_REL_KERNEL_CCACHE_DIR="${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-ccache"
+# mkosi's scratch workspace (`--workspace-directory`). Every finished subimage is
+# RENAMED out of here into CERALIVE_REL_MKOSI_BUILD_DIR, so the two must be on one
+# filesystem: mkosi's default is /var/tmp, and on a normal dev box or CI runner
+# that is a different device from the checkout, which downgraded all eight of
+# those renames to full multi-GB COPIES ("Could not rename … falling back to
+# copying" — census row 20).
+#
+# It is a REPO-ROOT dotdir rather than mkosi/.workspace because mkosi's
+# check_workspace_directory() refuses a workspace inside any BuildSources= source
+# directory, and the build runs with the mkosi/ tree as its build source (that is
+# the same $SRCDIR the app layer reads first-party .debs from). Repo root is the
+# nearest location that is both outside that tree and on the output filesystem.
+CERALIVE_REL_MKOSI_WORKSPACE_DIR=".mkosi-workspace"
 # Final per-board artifacts (.raw / .raucb / .rootfs.tar).
 CERALIVE_REL_IMAGES_DIR="images"
 # Per-board build logs emitted by the parallel runner.
@@ -46,6 +59,7 @@ CERALIVE_REL_LOGS_DIR="logs"
 CERALIVE_REL_CLEANUP_PATHS=(
   "${CERALIVE_REL_MKOSI_BUILD_DIR}"
   "${CERALIVE_REL_MKOSI_CACHE_ROOT}"
+  "${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
 )
 
 # Board-scoped mkosi cache directory. `BOARD_ID` (the Armbian board id from the
