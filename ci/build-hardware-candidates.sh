@@ -97,7 +97,14 @@ CERALIVE_TEST_SYMBOLS=(
   CONFIG_DMABUF_HEAPS_CERALIVE_TEST
 )
 
-json_str() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
+# The value arrives on ARGV, never on stdin. A stdin-reading helper called from
+# inside a `while read` loop silently eats the loop's remaining input — which is
+# how the signer's second EKU went missing from the first tuple this emitted.
+json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
+
+json_str_list() {
+  python3 -c 'import json,sys; print(json.dumps([p for p in sys.argv[1].split(",") if p]))' "$1"
+}
 
 # A dirty worktree cannot be recorded, so it cannot be built from: the tuple
 # would otherwise name a tree hash the artifact was not produced from. There is
@@ -380,11 +387,8 @@ record_tuple() {
   raw_sha="$(sha256sum "${raw}" | cut -d' ' -f1)"
   bundle_sha="$(sha256sum "${bundle}" | cut -d' ' -f1)"
 
-  local eku_json="[]"
-  if [[ -n "${eku}" ]]; then
-    eku_json="[$(printf '%s' "${eku}" | tr ',' '\n' | while read -r e; do
-      [[ -n "${e}" ]] && printf '%s,' "$(json_str "${e}")"; done | sed 's/,$//')]"
-  fi
+  local eku_json
+  eku_json="$(json_str_list "${eku}")"
 
   {
     printf '{\n'
