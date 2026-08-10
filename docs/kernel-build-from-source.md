@@ -90,7 +90,7 @@ refuses neither.
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@7c6948b66c4d4e6347e2eff643740930900ea5dc` — the
+`CERALIVE/rk3588-kernel-patches@6b0321714a2740d2fadcfe0131a7358b4644d0dd` — the
 tip of that repo's `feat/backports-fixes-doctrim`, an eighteen-patch series
 applying against exactly `v7.1.7`, and the exact revision the Wave-8 hardware
 candidates were built from. It is a BRANCH TIP rather than a `main` commit

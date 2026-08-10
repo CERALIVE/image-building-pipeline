@@ -181,9 +181,8 @@ variants:
       # The runtime re-test on the debug slot is the confirming evidence and is
       # still pending; this pin is what a third attempt must be built from.
       #
-      # Predecessor: 7c6948b66c4d4e6347e2eff643740930900ea5dc (eighteen patches;
-      # the SHA the first debug candidate that surfaced the defects above was
-      # built from). Predecessor before that:
+      # The previous eighteen-patch pin was superseded after the first debug
+      # candidate surfaced the defects above. Predecessor before that:
       # acb519c101fefa31f51300779f3a139bcabf6a1c (nine patches; 0008
       # rkvenc DMA max segment size + 0009 mainline `system-uncached` dma-heap,
       # the pair that made MPP hardware encode work on this track — board-confirmed
