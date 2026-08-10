@@ -77,6 +77,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir>` — refuses a dirty worktree and an implicit signing state, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE` from the recorded verdict, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -558,6 +559,49 @@ each of which invalidates an assumption that looked safe on paper:
 `--candidate-pki` has no default on purpose: this repo is built and tested
 standalone (Rule D), so it may never resolve a bench PKI by proximity to its own
 checkout.
+
+**A hardware candidate is a build PLUS the three facts that make it evidence —
+`ci/build-hardware-candidates.sh` is what refuses to produce one without them**
+[EXISTS]
+
+`--only all|rock-edge|orange-edge|rock-edge-test` maps a closed candidate table
+(board × variant × debug posture) onto real `./build` runs, captured through
+`tee` under `pipefail`. It exists because a hand-run `./build` never asks the
+three questions an artifact that is about to be written to a real board has to
+answer:
+
+- **WHICH SOURCE.** It refuses a **dirty worktree** — with no override flag —
+  and stamps the committed `HEAD` and its **tree hash** into every tuple. The
+  tree hash is the one that survives a squash-merge, which is what later lets
+  the merged branch be proven to be the thing that was tested (acceptance row 48
+  compares `origin/master^{tree}` against exactly this value).
+- **WHICH TRUST.** `CERALIVE_BUILD_MODE`, `CERALIVE_RAUC_PKI_DIR` and
+  `RAUC_KEYRING_FILE` are exported **explicitly** for every real build, read from
+  the `ci/verify-bench-rauc-trust.sh` verdict and a paths-only signing env file.
+  A board the verdict could not evaluate (`UNKNOWN`) is refused rather than
+  defaulted, a half-specified signing env is refused, and `production` mode is
+  refused unless that board's `checks.production_trust_anchor` is true — so a
+  NON-PRODUCTION root can never be laundered into a release claim. Anything else
+  is labelled `development-hardware-candidate`.
+- **WHICH SYMBOLS.** A debug and a non-debug candidate differ by a handful of
+  Kconfig symbols and nothing visible in the filename, so the resolved
+  `/boot/config-<release>` is read **out of the kernel package that build
+  produced** (never a host-side re-resolution) and asserted in BOTH directions:
+  the three CeraLive test symbols must be OFF on `rock-edge` and ON on
+  `rock-edge-test`. The non-debug leg additionally runs the real
+  `required-symbols.list` + `forbidden-symbols.list` manifests against it.
+
+The **eight DRY_RUN probes** (the seven valid board×kernel-track cells plus the
+multi-board dispatch probe) run BEFORE any real build, so a plan-level
+regression is reported in seconds rather than after a kernel compile.
+`--debug-env` is required when a debug candidate is selected and refused when
+one is not; it supplies `CERALIVE_DEBUG_PASSWORD_HASH`, and the script sets
+`CERALIVE_DEBUG_IMAGE` explicitly on both branches rather than letting an
+ambient value decide. `--self-test` (12 legs) drives every refusal and both
+non-vacuity directions of the symbol assertion.
+
+Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
+resolves no verdict, PKI or evidence root by proximity to its own checkout.
 
 **Build entry point** [EXISTS]
 
