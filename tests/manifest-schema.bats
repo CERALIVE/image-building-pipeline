@@ -197,7 +197,7 @@ YAML
   mkdir -p "$stub/manifests/boards" "$stub/manifests/families" \
            "$stub/manifests/schema" "$stub/lib/shared"
   cp "$COMMON_SH" "$RESOLVE_SH" "$RESOLVE_PY" "$stub/lib/"
-  cp "$VERSIONS_LIB_SH" "$stub/lib/shared/"
+  cp "$VERSIONS_LIB_SH" "$LOG_LIB_SH" "$stub/lib/shared/"
   # Permissive schemas isolate the defer mechanism from field-shape rules.
   echo '{"type":"object"}' > "$stub/manifests/schema/board.schema.json"
   echo '{"type":"object"}' > "$stub/manifests/schema/family.schema.json"
@@ -222,7 +222,7 @@ YAML
   mkdir -p "$stub/manifests/boards" "$stub/manifests/families" \
            "$stub/manifests/schema" "$stub/lib/shared"
   cp "$COMMON_SH" "$RESOLVE_SH" "$RESOLVE_PY" "$stub/lib/"
-  cp "$VERSIONS_LIB_SH" "$stub/lib/shared/"
+  cp "$VERSIONS_LIB_SH" "$LOG_LIB_SH" "$stub/lib/shared/"
   echo '{"type":"object"}' > "$stub/manifests/schema/board.schema.json"
   echo '{"type":"object"}' > "$stub/manifests/schema/family.schema.json"
   cat > "$stub/manifests/families/pinfam.yaml" <<'YAML'

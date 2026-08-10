@@ -63,6 +63,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/lib/common.sh"
+# args_is_help / args_usage_die — the shared entry-point argument plumbing.
+# shellcheck source=lib/shared/args-lib.sh
+source "${HERE}/lib/shared/args-lib.sh"
 # explode_deb — the one shared .deb data-tarball extractor (dpkg-deb, else ar+tar).
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/lib/shared/deb-lib.sh"
@@ -217,19 +220,19 @@ main() {
   local apps=()
 
   while [[ $# -gt 0 ]]; do
+    if args_is_help "$1"; then usage; exit 0; fi
     case "$1" in
       --from-deb) FROM_DEB="${2:-}"; shift 2 ;;
       --dry-run)  DRY_RUN=1; shift ;;
       --time)     shift ;;                       # timing is always on; accepted for clarity
-      -h|--help)  usage; exit 0 ;;
-      --*)        usage; die "unknown option: $1" ;;
+      --*)        args_usage_die usage "unknown option: $1" ;;
       *)
         if [[ -z "${BOARD_IP}" ]]; then BOARD_IP="$1"; else apps+=("$1"); fi
         shift ;;
     esac
   done
 
-  [[ -n "${BOARD_IP}" ]] || { usage; die "<board-ip> is required"; }
+  [[ -n "${BOARD_IP}" ]] || args_usage_die usage "<board-ip> is required"
   (( ${#apps[@]} > 0 )) || apps=("${DEFAULT_APPS[@]}")
   [[ -z "${FROM_DEB}" || -d "${FROM_DEB}" ]] || die "--from-deb dir not found: ${FROM_DEB}"
 

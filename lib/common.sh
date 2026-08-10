@@ -3,9 +3,9 @@
 # common.sh — strict shared bash library for the CeraLive image-building v2 pipeline.
 #
 # This is the single foundation every v2 script sources. It establishes:
-#   - strict mode (set -euo pipefail)
-#   - a loud ERR trap that reports the failing file:line and command
-#   - one canonical set of structured loggers (log_info/log_warn/log_error/log_success)
+#   - the `build-strict` shell profile: set -euo pipefail plus a loud ERR trap
+#     that reports the failing file:line and command (docs/shell-profiles.md)
+#   - the canonical loggers, by sourcing lib/shared/log-lib.sh
 #   - die() for fatal exits and require_cmd() for dependency preconditions
 #
 # DESIGN RULE: there is intentionally NO `|| true` / best-effort error swallowing
@@ -28,6 +28,14 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Loggers — the ONE formatter, extracted to a standalone file so a script on the
+# device-daemon or contract-test profile can have the format without inheriting
+# this file's strict mode and ERR trap. See docs/shell-profiles.md.
+# ---------------------------------------------------------------------------
+# shellcheck source=shared/log-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/shared/log-lib.sh"
+
+# ---------------------------------------------------------------------------
 # Error trap — fail loudly with file:line context.
 # ---------------------------------------------------------------------------
 err_trap() {
@@ -37,20 +45,6 @@ err_trap() {
   exit 1
 }
 trap err_trap ERR
-
-# ---------------------------------------------------------------------------
-# Structured logging — all to stderr, timestamp-prefixed, single canonical impl.
-# ---------------------------------------------------------------------------
-_log() {
-  local level="$1"
-  shift
-  printf '[%s] %s %s\n' "${level}" "$(date '+%H:%M:%S')" "$*" >&2
-}
-
-log_info()    { _log 'INFO ' "$@"; }
-log_warn()    { _log 'WARN ' "$@"; }
-log_error()   { _log 'ERROR' "$@"; }
-log_success() { _log 'OK   ' "$@"; }
 
 # ---------------------------------------------------------------------------
 # die — log a fatal message and exit non-zero.

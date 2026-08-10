@@ -27,6 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/lib/common.sh"
+# shellcheck source=lib/shared/args-lib.sh
+source "${HERE}/lib/shared/args-lib.sh"
 
 BOARDS_DIR="${HERE}/manifests/boards"
 FAMILIES_DIR="${HERE}/manifests/families"
@@ -183,6 +185,13 @@ main() {
   local variant=""
   local -a passthrough=()
 
+  # `--only=x` / `--variant=x` are folded into their two-token form up front, so
+  # each option needs one branch rather than two. An empty inline value survives
+  # as an empty token, which is what keeps the "requires a value" errors below
+  # firing on `--only=` exactly as they did on a bare trailing `--only`.
+  args_expand_inline --only --variant -- "$@"
+  set -- ${ARGS_EXPANDED[@]+"${ARGS_EXPANDED[@]}"}
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --all)
@@ -193,29 +202,14 @@ main() {
         mode="only"
         only_csv="${2:-}"
         if [[ -z "${only_csv}" ]]; then
-          usage
-          die "--only requires a comma-separated board list (e.g. --only rock-5b-plus,x86-minipc)"
+          args_usage_die usage "--only requires a comma-separated board list (e.g. --only rock-5b-plus,x86-minipc)"
         fi
         shift 2
-        ;;
-      --only=*)
-        mode="only"
-        only_csv="${1#--only=}"
-        if [[ -z "${only_csv}" ]]; then
-          usage
-          die "--only requires a comma-separated board list (e.g. --only rock-5b-plus,x86-minipc)"
-        fi
-        shift
         ;;
       --variant)
         variant="${2:-}"
-        [[ -n "${variant}" ]] || { usage; die "--variant requires a name (e.g. --variant edge)"; }
+        [[ -n "${variant}" ]] || args_usage_die usage "--variant requires a name (e.g. --variant edge)"
         shift 2
-        ;;
-      --variant=*)
-        variant="${1#--variant=}"
-        [[ -n "${variant}" ]] || { usage; die "--variant requires a name (e.g. --variant edge)"; }
-        shift
         ;;
       --)
         shift
@@ -223,17 +217,14 @@ main() {
         break
         ;;
       -*)
-        usage
-        die "unknown option: '$1'"
+        args_usage_die usage "unknown option: '$1'"
         ;;
       *)
         if [[ "${mode}" != "single" ]]; then
-          usage
-          die "positional board '$1' cannot be combined with --${mode}"
+          args_usage_die usage "positional board '$1' cannot be combined with --${mode}"
         fi
         if [[ -n "${board}" ]]; then
-          usage
-          die "only one positional <board> is allowed (got '${board}' and '$1'); use --all or --only for multiple"
+          args_usage_die usage "only one positional <board> is allowed (got '${board}' and '$1'); use --all or --only for multiple"
         fi
         board="$1"
         shift
@@ -246,8 +237,7 @@ main() {
   case "${mode}" in
     single)
       if [[ -z "${board}" ]]; then
-        usage
-        die "missing required argument: <board> (or use --all / --only b1,b2)"
+        args_usage_die usage "missing required argument: <board> (or use --all / --only b1,b2)"
       fi
       SELECTED_BOARDS=("${board}")
       ;;
@@ -279,8 +269,7 @@ main() {
         exit 1
       fi
       if [[ ${#SELECTED_BOARDS[@]} -eq 0 ]]; then
-        usage
-        die "--only resolved to no boards (empty selection)"
+        args_usage_die usage "--only resolved to no boards (empty selection)"
       fi
       ;;
   esac
@@ -289,8 +278,7 @@ main() {
   # selection would silently apply an rk3588 overlay to an x86 board (or to a
   # board whose DTB the variant's kernel does not build). Refuse instead.
   if [[ -n "${variant}" && ${#SELECTED_BOARDS[@]} -ne 1 ]]; then
-    usage
-    die "--variant is single-board only (got ${#SELECTED_BOARDS[@]} boards: ${SELECTED_BOARDS[*]})"
+    args_usage_die usage "--variant is single-board only (got ${#SELECTED_BOARDS[@]} boards: ${SELECTED_BOARDS[*]})"
   fi
   if [[ -n "${variant}" ]]; then
     passthrough+=(--variant "${variant}")

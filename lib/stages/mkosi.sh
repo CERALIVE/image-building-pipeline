@@ -150,8 +150,11 @@ mkosi_invoke() {
   log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (containerized, mkosi ${MKOSI_VERSION_PIN} pinned)"
   # Stage lib/common.sh into MKOSI_DIR/lib/ so finalize scripts can source it at
   # /work/lib/common.sh in mkosi's mount namespace (/work = mkosi workspace root).
-  mkdir -p "${MKOSI_DIR}/lib"
+  # common.sh sources lib/shared/log-lib.sh relative to itself, so the staged
+  # copy is useless without its sibling — stage the SET, not the entry.
+  mkdir -p "${MKOSI_DIR}/lib/shared"
   cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
+  cp "${HERE}/shared/log-lib.sh" "${MKOSI_DIR}/lib/shared/log-lib.sh"
   local env_flags=() env_cli_str=""
   for n in "${env_names[@]}"; do
     env_flags+=(-e "${n}")

@@ -37,6 +37,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY="${HERE}/tests/registry.tsv"
 
+# args_has_flag — the shared entry-point argument plumbing (lib/shared/args-lib.sh).
+# run-tests has exactly one option and, unlike build/dev-push/dev-sync, has never
+# rejected an unrecognised argument; that is left alone here on purpose, because
+# tightening it would change how every existing caller behaves.
+# shellcheck source=lib/shared/args-lib.sh
+source "${HERE}/lib/shared/args-lib.sh"
+
 # The suite lists are READ from tests/registry.tsv rather than hardcoded here, so
 # there is exactly one place that answers "what does the default gate run" and a
 # new test file cannot be added without being classified. Registry row order IS
@@ -58,7 +65,7 @@ mapfile -t SHELL_RELPATHS < <(registry_paths default-shell)
 # `--list` reports the RESOLVED default set and runs nothing. It is the machine
 # -readable answer to "did this change what runs by default", and is diffed
 # against a captured baseline whenever the test layout is restructured.
-if [[ "${1:-}" == "--list" ]]; then
+if args_has_flag --list "$@"; then
   printf 'bats\t%s\n'  "${BATS_RELPATHS[@]}"
   printf 'shell\t%s\n' "${SHELL_RELPATHS[@]}"
   exit 0

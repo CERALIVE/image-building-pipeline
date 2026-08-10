@@ -74,6 +74,9 @@ source "${SYNC_DIR}/config.sh"
 # re-sources config.sh idempotently (sentinel) — no double yaml parse.
 # shellcheck source=lib/dev-sync/transport.sh
 source "${SYNC_DIR}/transport.sh"
+# args_is_help / args_usage_die — the shared entry-point argument plumbing.
+# shellcheck source=lib/shared/args-lib.sh
+source "${HERE}/lib/shared/args-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Loop configuration (env-overridable; sane defaults from the sibling layout).
@@ -634,6 +637,7 @@ main() {
   local want_all=0
 
   while [[ $# -gt 0 ]]; do
+    if args_is_help "$1"; then usage; exit 0; fi
     case "$1" in
       --all)       want_all=1; shift ;;
       --frontend)  SELECTED+=("frontend"); shift ;;
@@ -643,9 +647,8 @@ main() {
       --force)     DEV_SYNC_FORCE=1; export DEV_SYNC_FORCE; shift ;;
       --defer)     DEV_SYNC_DEFER=1; export DEV_SYNC_DEFER; shift ;;
       --dry-run)   DRY_RUN=1; shift ;;
-      -h|--help)   usage; exit 0 ;;
-      --*)         usage; die "dev-sync: unknown option '$1'" ;;
-      *)           usage; die "dev-sync: unexpected argument '$1'" ;;
+      --*)         args_usage_die usage "dev-sync: unknown option '$1'" ;;
+      *)           args_usage_die usage "dev-sync: unexpected argument '$1'" ;;
     esac
   done
 
@@ -658,8 +661,7 @@ main() {
   fi
 
   if (( ${#SELECTED[@]} == 0 )); then
-    usage
-    die "dev-sync: pick at least one of --all / --frontend / --backend / --native"
+    args_usage_die usage "dev-sync: pick at least one of --all / --frontend / --backend / --native"
   fi
 
   # De-duplicate while preserving canonical order (frontend, backend, native).

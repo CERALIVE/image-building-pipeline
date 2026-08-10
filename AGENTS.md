@@ -192,6 +192,52 @@ at the entry alone they extract NOTHING, and most of their assertions then pass
 vacuously. Each one concatenates the entry + `postinst.d/*.sh` for static reads while
 still SOURCING the entry; keep that distinction when adding a new check.
 
+**Three shell profiles, and `lib/shared/{log-lib,args-lib}.sh` are the pieces
+that cross them** [EXISTS]
+
+A census of the 185 tracked bash files found exactly three strict-mode shapes,
+and each one is a decision rather than an accident. [`docs/shell-profiles.md`](docs/shell-profiles.md)
+is the rulebook; the short form:
+
+| Profile | Shape | Who | Why not the others |
+|---|---|---|---|
+| `build-strict` | `set -euo pipefail` + `trap err_trap ERR`, via `lib/common.sh` | `build`, `run-tests`, `dev-push`, `dev-sync`, `lib/`, `ci/` | v1's silent `apt`/`dpkg` failures are the reason; hence also the no-`\|\| true` rule, which is the same rule stated twice |
+| `device-daemon` | `set -uo pipefail`, no ERR trap, self-contained `log`/`die` | `mkosi/runtime/ceralive-{healthcheck,provision,portal}.sh`, `postinst.d/*` | `-e` turns a probe that legitimately fails into a dead board; and `lib/` is not mounted in a subimage chroot |
+| `contract-test` | `set -uo pipefail`, `tests/lib/assertions.sh`, harness owns its exit code | `tests/*.sh`, the two platform `test-*fallback.sh` | under `-e` a change that breaks fifteen contracts reports one, and the next run rediscovers the rest one at a time |
+
+Both shared libraries are **profile-neutral by construction** — they set no shell
+options, install no trap and source nothing, so a device or test script can take
+the format without inheriting strict mode:
+
+- **`lib/shared/log-lib.sh`** is the ONE `[LEVEL] HH:MM:SS message` formatter
+  (five-char padded level, stderr). `common.sh` sources it and adds the strict
+  half on top. **The format is a contract**: `ci/check-build-log.sh` matches a
+  frozen 26-signature census against it and the 26 `[N/9]` stage lines are
+  compared byte-for-byte across builds.
+- **`lib/shared/args-lib.sh`** holds the three things all four entry points
+  hand-rolled — `--opt=value` splitting (`args_expand_inline`),
+  `usage; die "unknown option…"` (`args_usage_die`), and `-h|--help`
+  (`args_is_help`), plus `args_has_flag` for `run-tests --list`. It deliberately
+  does NOT own the option sets: `--variant` means nothing to `dev-sync` and
+  `--frontend` means nothing to `build`, and moving every per-flag error message
+  away from the code that produces it would have traded three small duplications
+  for one large abstraction.
+
+**Two behaviours were deliberately left alone**, because "consolidate the
+parsing" is not a licence to change the CLI. `build` still treats `--help` as an
+unknown option (it never accepted one), and `run-tests` still ignores an
+unrecognised argument (it never rejected one). Pre/post captures of 25 CLI
+invocations across all four entry points — help, invalid option, missing value,
+empty inline value, `--` passthrough, and the multi-board/variant refusals — are
+byte-identical modulo the clock, a `mktemp` suffix and live `MemAvailable`.
+
+**A staged copy of `common.sh` must carry `shared/log-lib.sh` with it.** The
+entry sources its sibling by relative path, so `lib/stages/mkosi.sh` (which
+stages `common.sh` into the container's `/work/lib/`) and the resolver stub trees
+in `manifest-schema.bats` / `resolve.test.sh` all copy the SET. This is the same
+"read/stage the whole module set, never the thin entry" rule the `postinst.d/`
+and `lib/stages/` splits already record.
+
 **`tests/registry.tsv` IS the default test set — `run-tests` reads it, it does
 not hardcode one** [EXISTS]
 

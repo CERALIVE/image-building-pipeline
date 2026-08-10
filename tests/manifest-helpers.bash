@@ -41,6 +41,9 @@ setup() {
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
   VERSIONS_LIB_SH="$LIB_DIR/shared/versions-lib.sh"
+  # common.sh sources the standalone logger, so any stub tree that copies
+  # common.sh must carry log-lib.sh beside it or the source fails.
+  LOG_LIB_SH="$LIB_DIR/shared/log-lib.sh"
   MEASURE_SH="$LIB_DIR/measure-size.sh"
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
