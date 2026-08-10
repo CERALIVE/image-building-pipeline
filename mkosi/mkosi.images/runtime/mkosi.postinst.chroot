@@ -905,6 +905,7 @@ HBMCPATH
 # ---------------------------------------------------------------------------
 main() {
   log "starting CeraLive runtime customization (board=${BOARD_ID}, release=${RELEASE}, variant=${VARIANT})"
+  install_chroot_service_policy # mkosi unlinked its own policy-rc.d with the base bootstrap; re-assert it before ANY apt transaction in this layer (census rows 9/21)
   configure_minimal_apt        # write deb822 sources first (apt-get needs them)
   install_runtime_packages     # shared.list set (forwarded as $SHARED_PACKAGES)
   create_ceralive_user

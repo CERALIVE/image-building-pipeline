@@ -205,6 +205,25 @@ prune_final_image_payload() {
   prune_package_docs
 }
 
+# install_chroot_service_policy — self-contained twin of
+# customize/postinst.d/services.sh::install_chroot_service_policy. This script
+# deliberately does not source postinst-lib.sh (it is the app layer, which owns no
+# runtime system configuration), so the four lines are repeated rather than
+# imported. Keep the two in step: mode 0755 is the load-bearing part, because
+# invoke-rc.d gates on `test -x` and reports a non-executable helper as MISSING.
+#
+# It is needed here and not merely inherited from the runtime layer because
+# `dpkg -i` of the first-party .debs and the `apt-get install -f` fallback below
+# both run outside any mkosi apt transaction, and mkosi unlinks its own copy.
+install_chroot_service_policy() {
+  local policy="${CERALIVE_POLICY_RCD:-/usr/sbin/policy-rc.d}"
+  install -d -m 0755 "$(dirname "${policy}")"
+  printf '#!/bin/sh\n# BUILD-TIME ONLY — deny every service start in the build chroot.\nexit 101\n' >"${policy}"
+  chmod 0755 "${policy}"
+  [[ -x "${policy}" ]] || die "could not install an EXECUTABLE ${policy} — invoke-rc.d would report it MISSING"
+  log "build-time service-start policy installed at ${policy} (exit 101, mode 0755)"
+}
+
 # remove_chroot_service_policy — drop the build-time policy-rc.d.
 #
 # The base layer's skeleton tree installs /usr/sbin/policy-rc.d so invoke-rc.d
@@ -252,6 +271,7 @@ prune_package_docs() {
 
 main() {
   log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
+  install_chroot_service_policy
   stage_first_party_from_source_mount
 
   if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then

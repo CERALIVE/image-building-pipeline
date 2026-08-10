@@ -74,10 +74,11 @@ RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
 # invoke-rc.d ignores it and the denial never takes effect.
 #
 # mkosi/installer/apt.py::Apt.install() drops a `#!/bin/sh\nexit 101\n` helper at
-# /usr/sbin/policy-rc.d around every apt transaction and unlinks it afterwards —
-# but it creates it under `umask(~0o644)`, i.e. mode 0644. Debian's invoke-rc.d
-# gates on `test -x "${POLICYHELPER}"` (init-system-helpers, /usr/sbin/invoke-rc.d
-# line 138), so a 0644 helper is not merely ignored, it is reported as ABSENT:
+# /usr/sbin/policy-rc.d around every apt transaction and unlinks it afterwards.
+# It writes it with `policyrcd.write_text(...)` inside `with umask(~0o644):`, and
+# the resulting file is mode 0644. Debian's invoke-rc.d gates on
+# `test -x "${POLICYHELPER}"` (init-system-helpers, /usr/sbin/invoke-rc.d line
+# 138), so a 0644 helper is not merely ignored, it is reported as ABSENT:
 #
 #   invoke-rc.d: WARNING: No init system and policy-rc.d missing! Defaulting to block.
 #   Reloading system message bus config...Failed to open connection to "system" message bus: …
@@ -85,31 +86,46 @@ RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
 #
 # The last one is the damaging shape — a maintainer script that checks
 # invoke-rc.d's status cannot distinguish "the chroot has no init" from "this
-# package is broken". This repo's own base skeleton tree ships an EXECUTABLE
-# helper for exactly that reason (mkosi/mkosi.images/base/mkosi.skeleton), and it
-# cannot survive on its own: `Apt.install()` unlinks whatever is at that path when
-# its transaction ends.
+# package is broken".
 #
-# HONEST SCOPE — this makes the helper mkosi installs actually executable, and it
-# is NOT, on its own, sufficient. A real `--variant edge` build with this patch in
-# place STILL emits census rows 8/9/21 from the base layer's own
-# `‣ Installing Debian` step, which no hook in this repository can reach. Do not
-# read this line as "the census rows are fixed"; docs/build-log-census.md carries
-# the open analysis under "Rows 8/9/21 — still emitted by a real build".
+# WHY THE FIX IS A chmod AND NOT A WIDER umask. The obvious repair — relax the
+# umask to `~0o755` — is a COMPLETE NO-OP, and it was tried first and shipped for
+# a day looking plausible. A umask can only CLEAR permission bits, never set
+# them, and Python's `open(..., "w")` (which `Path.write_text` uses) requests base
+# mode 0o666, which has no execute bit to keep:
 #
-# Scope: BUILD-TIME ONLY. The file is removed before the rootfs is sealed
+#   umask(~0o644) -> effective umask 0133 -> 0o666 & ~0133 = mode 0644
+#   umask(~0o755) -> effective umask 0022 -> 0o666 & ~0022 = mode 0644   <-- same
+#
+# So the mode has to be set EXPLICITLY after the write. That is what the patch
+# below inserts, at the same indentation, immediately after the write site.
+#
+# SCOPE — this covers every transaction mkosi itself drives through
+# `Apt.install()`, which on this image set is the BASE layer's own bootstrap (the
+# only image that declares `Packages=`). It does NOT cover the apt-get/dpkg
+# transactions this repository runs from its own postinst scripts: mkosi UNLINKS
+# the helper when its transaction ends, so the path is gone by the time
+# platform/runtime/app run. Those layers install the helper themselves —
+# customize/postinst.d/services.sh::install_chroot_service_policy and the two
+# self-contained twins in mkosi.images/{platform/mkosi.postinst,
+# app/mkosi.postinst.chroot}. Both halves are required; neither is sufficient.
+#
+# BUILD-TIME ONLY. The file is removed before the rootfs is sealed
 # (app/mkosi.postinst.chroot::remove_chroot_service_policy, which dies if it
 # survives), so nothing about the shipped device changes — this only makes the
 # denial that mkosi already intends actually happen.
 #
 # The `grep -c` assertions are the drift guard: if a future mkosi changes that
-# line, the image build FAILS here rather than silently reverting to a build log
-# full of warnings nobody reads.
+# write site, the image build FAILS here rather than silently reverting to a
+# build log full of warnings nobody reads. `py_compile` proves the inserted line
+# left a parseable module rather than a mis-indented one.
 RUN APT_PY="$(python3 -c 'import glob; print(glob.glob("/opt/pipx/venvs/mkosi/lib/python*/site-packages/mkosi/installer/apt.py")[0])')" \
- && test "$(grep -c 'with umask(~0o644):' "${APT_PY}")" = 1 \
- && sed -i 's/with umask(~0o644):/with umask(~0o755):/' "${APT_PY}" \
- && test "$(grep -c 'with umask(~0o644):' "${APT_PY}")" = 0 \
- && test "$(grep -c 'policy-rc.d' "${APT_PY}")" -ge 1 \
+ && test "$(grep -c 'policyrcd = context.root / "usr/sbin/policy-rc.d"' "${APT_PY}")" = 1 \
+ && test "$(grep -c '^ *policyrcd\.write_text(' "${APT_PY}")" = 1 \
+ && test "$(grep -c 'policyrcd\.chmod' "${APT_PY}")" = 0 \
+ && sed -i 's|^\([[:space:]]*\)policyrcd\.write_text(.*|&\n\1policyrcd.chmod(0o755)|' "${APT_PY}" \
+ && test "$(grep -c '^ *policyrcd\.chmod(0o755)$' "${APT_PY}")" = 1 \
+ && python3 -m py_compile "${APT_PY}" \
  && find /opt/pipx/venvs/mkosi -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # Fail the image build LOUDLY if the pin drifts: the builder MUST carry exactly

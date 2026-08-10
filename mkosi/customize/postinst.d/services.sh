@@ -37,6 +37,34 @@ if ! declare -F die >/dev/null 2>&1; then
   die() { log "FATAL: $*"; exit 1; }
 fi
 
+# install_chroot_service_policy — re-assert the build-time service-start denial
+# for the apt/dpkg transactions THIS repository drives itself.
+#
+# mkosi writes its own /usr/sbin/policy-rc.d around every `Apt.install()` and
+# UNLINKS it when that transaction ends (mkosi/installer/apt.py). Only the base
+# image declares `Packages=`, so once the base layer's bootstrap finishes the path
+# is GONE — and the base skeleton tree's copy goes with it, because mkosi's unlink
+# does not care who put the file there. Every later transaction this repository
+# runs from a postinst script (runtime's shared.list set, platform's BSP via
+# mkosi-install, app's first-party .debs) is therefore outside any mkosi
+# transaction and unprotected. That is what kept emitting census rows 9 and 21
+# from the runtime layer long after the base-layer half looked fixed.
+#
+# Mode 0755 is the entire point: invoke-rc.d gates on `test -x "${POLICYHELPER}"`,
+# so a non-executable helper is reported as MISSING rather than as denying.
+#
+# Removed again at the end of the layer chain by
+# app/mkosi.postinst.chroot::remove_chroot_service_policy, which DIES if it
+# survives into the sealed rootfs.
+install_chroot_service_policy() {
+  local policy="${CERALIVE_POLICY_RCD:-/usr/sbin/policy-rc.d}"
+  install -d -m 0755 "$(dirname "${policy}")"
+  printf '#!/bin/sh\n# BUILD-TIME ONLY — deny every service start in the build chroot.\nexit 101\n' >"${policy}"
+  chmod 0755 "${policy}"
+  [[ -x "${policy}" ]] || die "could not install an EXECUTABLE ${policy} — invoke-rc.d would report it MISSING"
+  log "build-time service-start policy installed at ${policy} (exit 101, mode 0755)"
+}
+
 # Idempotent group creation (replaces v1's `|| true`).
 ensure_group() {
   local grp="$1"

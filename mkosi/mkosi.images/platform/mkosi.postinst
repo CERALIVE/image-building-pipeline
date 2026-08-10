@@ -437,6 +437,26 @@ if [[ ${#bsp_pkgs[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Self-contained twin of customize/postinst.d/services.sh::install_chroot_service_policy,
+# writing into $BUILDROOT because this postinst runs on the HOST rather than in
+# the chroot. mkosi unlinks its own /usr/sbin/policy-rc.d when the base layer's
+# apt transaction ends, and `mkosi-install` is a thin `apt-get install` wrapper
+# that installs no helper of its own — so without this, every maintainer script
+# in this layer sees "No init system and policy-rc.d missing". Mode 0755 is the
+# load-bearing part: invoke-rc.d gates on `test -x` and reports a non-executable
+# helper as MISSING. Removed at the end of the layer chain by
+# app/mkosi.postinst.chroot::remove_chroot_service_policy.
+install_chroot_service_policy() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local policy="${root}/usr/sbin/policy-rc.d"
+  install -d -m 0755 "$(dirname "${policy}")"
+  printf '#!/bin/sh\n# BUILD-TIME ONLY — deny every service start in the build chroot.\nexit 101\n' >"${policy}"
+  chmod 0755 "${policy}"
+  [[ -x "${policy}" ]] || { log "FATAL: could not install an EXECUTABLE ${policy}"; exit 1; }
+  log "build-time service-start policy installed at ${policy} (exit 101, mode 0755)"
+}
+install_chroot_service_policy
+
 log "installing authenticated staged HW-accel GStreamer BSP: ${hw_gst[*]} ${gst_runtime[*]}"
 if [[ ${#hw_gst[@]} -gt 0 || ${#gst_runtime[@]} -gt 0 ]]; then
   mkosi-install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"

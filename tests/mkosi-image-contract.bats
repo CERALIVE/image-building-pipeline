@@ -454,17 +454,150 @@ PY
   [ "$pinned" = "example.invalid/custom:1" ]
 }
 
-@test "builder image: ci/Dockerfile patches mkosi's non-executable policy-rc.d, with a drift guard" {
-  # invoke-rc.d gates on `test -x`, and mkosi 26 writes the helper 0644 — so the
-  # denial it intends never happens and every apt transaction that touches a
-  # service emits the census's row-8/9/21 signatures. The patch is only safe
-  # because it is asserted to apply; a silent no-op would restore the noise.
-  run grep -F 'sed -i '"'"'s/with umask(~0o644):/with umask(~0o755):/'"'" "$PIPELINE_DIR/ci/Dockerfile"
+@test "builder image: a widened umask can NEVER make mkosi's policy-rc.d executable" {
+  # The premise of the whole fix, and the reason the first attempt (relaxing
+  # mkosi's umask from ~0o644 to ~0o755) was a silent no-op that shipped looking
+  # plausible: umask only CLEARS permission bits, and Python's open(...,"w")
+  # requests base mode 0o666, which carries no execute bit to keep. Both umasks
+  # therefore land on 0644, which invoke-rc.d reports as MISSING, not as denying.
+  run python3 - <<'PY'
+import os, sys, tempfile
+d = tempfile.mkdtemp()
+modes = []
+for u in (~0o644, ~0o755):
+    old = os.umask(u & 0o777)
+    p = os.path.join(d, "p%o" % (u & 0o777))
+    open(p, "w").write("#!/bin/sh\nexit 101\n")
+    os.umask(old)
+    modes.append(os.stat(p).st_mode & 0o777)
+print(" ".join("%04o" % m for m in modes))
+sys.exit(0 if modes == [0o644, 0o644] else 1)
+PY
   [ "$status" -eq 0 ]
-  run grep -F "test \"\$(grep -c 'with umask(~0o644):' \"\${APT_PY}\")\" = 1" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$output" = "0644 0644" ]
+}
+
+@test "builder image: ci/Dockerfile's policy-rc.d patch makes the helper executable, and is asserted to apply" {
+  # The patch is a sed into third-party Python source, so it is executed here
+  # against a fixture reproducing mkosi 26's write site rather than merely
+  # grepped for. A silent no-op restores census rows 8/9/21 on every real build.
+  local sed_line
+  sed_line="$(sed -n 's/^ *&& \(sed -i .*policyrcd\\\.write_text.*\) \\$/\1/p' "$PIPELINE_DIR/ci/Dockerfile")"
+  [ -n "$sed_line" ]
+
+  local work="$BATS_TEST_TMPDIR/apt-fixture"
+  mkdir -p "$work"
+  cat >"$work/apt.py" <<'PY'
+from mkosi.util import umask
+
+
+class Apt:
+    @classmethod
+    def install(cls, context, packages):
+        policyrcd = context.root / "usr/sbin/policy-rc.d"
+        with umask(~0o755):
+            policyrcd.parent.mkdir(parents=True, exist_ok=True)
+        with umask(~0o644):
+            policyrcd.write_text("#!/bin/sh\nexit 101\n")
+PY
+
+  # Non-vacuity: the UNPATCHED write site produces 0644.
+  run python3 "$PIPELINE_DIR/tests/fixtures/apt-policyrcd-mode.py" "$work/apt.py"
   [ "$status" -eq 0 ]
-  run grep -F "test \"\$(grep -c 'with umask(~0o644):' \"\${APT_PY}\")\" = 0" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$output" = "0644" ]
+
+  APT_PY="$work/apt.py" bash -c "$sed_line"
+  run python3 -m py_compile "$work/apt.py"
   [ "$status" -eq 0 ]
+  run grep -cE '^ *policyrcd\.chmod\(0o755\)$' "$work/apt.py"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+
+  # The patched write site produces an EXECUTABLE helper.
+  run python3 "$PIPELINE_DIR/tests/fixtures/apt-policyrcd-mode.py" "$work/apt.py"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0755" ]
+
+  # Apply-or-fail drift guards: the write site must be found exactly once and the
+  # chmod must be absent before / present exactly once after.
+  run grep -F "test \"\$(grep -c '^ *policyrcd\\.write_text(' \"\${APT_PY}\")\" = 1" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+  run grep -F "test \"\$(grep -c 'policyrcd\\.chmod' \"\${APT_PY}\")\" = 0" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+  run grep -F "test \"\$(grep -c '^ *policyrcd\\.chmod(0o755)\$' \"\${APT_PY}\")\" = 1" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+}
+
+@test "chroot service policy: every layer that runs its OWN apt/dpkg installs an executable policy-rc.d" {
+  # mkosi UNLINKS its helper when its own apt transaction ends, and only the base
+  # image declares Packages= — so platform/runtime/app run every one of their
+  # transactions with the path absent unless they re-assert it themselves. This
+  # is the half the ci/Dockerfile patch cannot reach (census rows 9 and 21).
+  local f
+  for f in "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh" \
+           "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot" \
+           "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"; do
+    run grep -cE '^install_chroot_service_policy\(\) \{' "$f"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+    run grep -F 'chmod 0755 "${policy}"' "$f"
+    [ "$status" -eq 0 ]
+  done
+
+  # Called before the layer's first package transaction, in all three layers.
+  run grep -n 'install_chroot_service_policy' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  [ "$status" -eq 0 ]
+  local policy_at apt_at
+  policy_at="$(grep -n '^  install_chroot_service_policy' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" | cut -d: -f1)"
+  apt_at="$(grep -n '^  install_runtime_packages' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" | cut -d: -f1)"
+  [ -n "$policy_at" ] && [ -n "$apt_at" ] && [ "$policy_at" -lt "$apt_at" ]
+
+  policy_at="$(grep -n '^  install_chroot_service_policy' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot" | cut -d: -f1)"
+  apt_at="$(grep -n '^  remove_chroot_service_policy' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot" | cut -d: -f1)"
+  [ -n "$policy_at" ] && [ -n "$apt_at" ] && [ "$policy_at" -lt "$apt_at" ]
+
+  policy_at="$(grep -n '^install_chroot_service_policy$' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" | cut -d: -f1)"
+  apt_at="$(grep -n '^  mkosi-install -y --no-install-recommends "\${hw_gst\[@\]}"' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" | cut -d: -f1)"
+  [ -n "$policy_at" ] && [ -n "$apt_at" ] && [ "$policy_at" -lt "$apt_at" ]
+}
+
+@test "chroot service policy: the shipped installer really produces an executable exit-101 helper" {
+  # Drive the REAL function out of the library rather than asserting on its text:
+  # the whole defect class here is a helper that exists at the right path with
+  # the wrong mode.
+  local root="$BATS_TEST_TMPDIR/policy-root"
+  mkdir -p "$root"
+  run bash -c "
+    set -euo pipefail
+    source '$PIPELINE_DIR/mkosi/customize/postinst-lib.sh'
+    CERALIVE_POLICY_RCD='$root/usr/sbin/policy-rc.d' install_chroot_service_policy
+  "
+  [ "$status" -eq 0 ]
+  [ -x "$root/usr/sbin/policy-rc.d" ]
+  run stat -c '%a' "$root/usr/sbin/policy-rc.d"
+  [ "$output" = "755" ]
+  run "$root/usr/sbin/policy-rc.d" dbus force-reload
+  [ "$status" -eq 101 ]
+
+  # Idempotent: a second call over an existing helper leaves it executable.
+  run bash -c "
+    set -euo pipefail
+    source '$PIPELINE_DIR/mkosi/customize/postinst-lib.sh'
+    CERALIVE_POLICY_RCD='$root/usr/sbin/policy-rc.d' install_chroot_service_policy
+  "
+  [ "$status" -eq 0 ]
+  [ -x "$root/usr/sbin/policy-rc.d" ]
+
+  # …and the app layer still removes it, fail-loud, so nothing ships.
+  run bash -c "
+    set -euo pipefail
+    log() { :; }
+    die() { printf 'FATAL: %s\n' \"\$*\" >&2; exit 1; }
+    eval \"\$(sed -n '/^remove_chroot_service_policy() {/,/^}/p' '$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot')\"
+    CERALIVE_POLICY_RCD='$root/usr/sbin/policy-rc.d' remove_chroot_service_policy
+  "
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/usr/sbin/policy-rc.d" ]
 }
 
 @test "size-gate wiring: orchestrate.sh resolves the release guard the size gate consults" {

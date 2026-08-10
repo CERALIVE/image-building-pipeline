@@ -127,6 +127,7 @@ tests/test-registry.test.sh	shell	unit	not-executed	the registry's own completen
 
 # --- data: fixtures and placeholders --------------------------------------
 tests/.gitkeep	fixture	support	not-executed	keeps the directory tracked
+tests/fixtures/apt-policyrcd-mode.py	fixture	support	not-executed	reports the file mode mkosi's policy-rc.d write site produces; driven by mkosi-image-contract.bats, never run directly
 tests/fixtures/apt-sandbox/in-container.sh	fixture	support	not-executed	in-container payload for the apt-sandbox suite, never run directly
 tests/fixtures/gpt-baseline/README.md	fixture	support	not-executed	provenance note for the frozen GPT baselines
 tests/fixtures/gpt-baseline/rk3588-ab.gpt	fixture	support	not-executed	frozen pre-overlay GPT baseline; a diff here is a fleet re-flash, not a test fix
