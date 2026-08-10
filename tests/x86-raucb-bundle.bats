@@ -4,7 +4,7 @@
 # wiring (T10). An OFFLINE, REAL-bundle sign + verify + tamper proof that the x86
 # (efi/grub) Stage-4 path emits a genuine signed `.raucb` the device would accept.
 #
-# This is the END-TO-END twin of manifest.bats §11 (reproducibility): there the
+# This is the END-TO-END twin of mkosi-contract.bats §11 (reproducibility): there the
 # focus is bit-determinism on the RK3588 board; here it is the x86 board's signed
 # OTA artifact — driven through the SAME board-agnostic build-bundle.sh, against
 # the committed dev PKI (.dev-keys), stamped with the x86 compatible.
@@ -31,7 +31,7 @@
 # without squashfs-tools never false-fails. The dev PKI is generated on demand,
 # so the signing chain is exercised for real when the toolchain is present.
 #
-# Run:  run-tests              (CI entrypoint — registered alongside manifest.bats)
+# Run:  run-tests              (CI entrypoint — registered alongside the manifest suites)
 #   or: bats tests/x86-raucb-bundle.bats
 
 setup() {

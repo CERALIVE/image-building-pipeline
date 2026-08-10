@@ -17,6 +17,7 @@
 #
 #   rootfs <chroot=/>   USERSPACE bits into the rootfs slot. No grub tooling needed:
 #                       - /usr/bin/ceralive-boot-state              (x86 state helper)
+#                       - /usr/lib/ceralive/boot-state-core.sh      (shared A/B core)
 #                       - /usr/lib/rauc/ceralive-rauc-boot-adapter  (RAUC backend)
 #                       - /etc/rauc/system.conf                     (bootloader=custom)
 #                       Same device-side paths as RK3588 -> RAUC system.conf is
@@ -89,6 +90,9 @@ install_rootfs() {
 
   # Install to the PLATFORM-UNIFORM device paths (same as RK3588) so RAUC
   # system.conf is identical across architectures; only the source differs.
+  # The state helper is a thin persistence adapter over the SHARED A/B core; both
+  # must land or the helper cannot resolve its core on the device.
+  install -D -m 0644 "${SCRIPT_DIR}/../boot-state-core.sh"        "${root}/usr/lib/ceralive/boot-state-core.sh"
   install -D -m 0755 "${SCRIPT_DIR}/x86-boot-state.sh"            "${root}/usr/bin/ceralive-boot-state"
   install -D -m 0755 "${SCRIPT_DIR}/x86-rauc-boot-adapter.sh"     "${root}/usr/lib/rauc/ceralive-rauc-boot-adapter"
 

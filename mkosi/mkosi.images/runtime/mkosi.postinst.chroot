@@ -170,7 +170,7 @@ EOF
 
   # apt.ceralive.tv origin pin (990) — dual-track twin of
   # apt-ceralive-repo.sh::install_apt_preferences. `./build` runs THIS executor,
-  # so the pin MUST live here too or it never ships (guarded in manifest.bats T2.6).
+  # so the pin MUST live here too or it never ships (guarded in package-contract.bats T2.6).
   mkdir -p /etc/apt/preferences.d
   cat >/etc/apt/preferences.d/ceralive <<'EOF'
 Package: *

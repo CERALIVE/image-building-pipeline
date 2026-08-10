@@ -4,8 +4,8 @@
 This is the trusted parsing/validation/merge core for the CeraLive v2 manifest
 resolver (``lib/resolve.sh``). The bash side owns orchestration, board/family
 file discovery, loud user-facing errors and ``versions.yaml`` pin resolution
-(``get_pin``, reused verbatim from ``scripts/fetch-debs.sh``). This helper owns
-the parts bash cannot do safely:
+(``get_pin``, the one shared reader in ``lib/shared/versions-lib.sh``). This
+helper owns the parts bash cannot do safely:
 
   * YAML parsing (PyYAML)
   * JSON-Schema validation (draft 2020-12, python-jsonschema)

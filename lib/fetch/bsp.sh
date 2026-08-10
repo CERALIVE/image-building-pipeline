@@ -46,10 +46,15 @@ _fetch_bsp_native_one() {
   # apt transport the only pre-download source of one is the Packages list apt
   # itself verified against the pinned-keyring InRelease. No list, no hit — the
   # fetch then behaves exactly as it did before the cache existed.
-  local hit_resolved hit_file hit_sha
+  local hit_resolved="" hit_file hit_sha hit_rc=0
   if [[ -n "${_BSP_APT_INDEX}" ]]; then
-    hit_resolved="$(auth_lookup_package "${_BSP_APT_INDEX}" "${pkg}" "${spec#*=}" "${ARCH}" || true)"
-    if [[ -n "${hit_resolved}" ]]; then
+    hit_resolved="$(index_lookup_optional "${_BSP_APT_INDEX}" "${pkg}" "${spec#*=}" "${ARCH}")" \
+      || hit_rc=$?
+    if (( hit_rc == INDEX_LOOKUP_UNUSABLE )); then
+      log_error "BSP cache probe for ${spec}: apt's verified Packages list is unusable — refusing to continue on an unverifiable index"
+      return 1
+    fi
+    if (( hit_rc == 0 )) && [[ -n "${hit_resolved}" ]]; then
       IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
       if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
           "${_BSP_DEBS}/$(basename "${hit_file}")"; then
@@ -76,11 +81,8 @@ _fetch_bsp_native_one() {
     rm -rf "${tmpd}"
     return 1
   fi
-  actual_pkg="$(deb_pkg_name "${staged[0]}")"
-  actual_version="$(deb_pkg_version "${staged[0]}")"
-  actual_arch="$(deb_pkg_arch "${staged[0]}")"
-  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${spec#*=}" \
-      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+  if ! assert_deb_identity "${staged[0]}" "${pkg}" "${spec#*=}" "${ARCH}" --arch-all-ok; then
+    actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
     log_error "BSP fetch control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
     rm -rf "${tmpd}"
     return 1
@@ -109,7 +111,7 @@ _fetch_bsp_native() {
   fetch_scratch_init
 
   local apt_state="${debs}/.apt-state"
-  run_or_plan mkdir -p "${apt_state}/lists/partial" "${apt_state}/cache/archives/partial"
+  apt_isolated_state_init "${apt_state}"
   local src_list="${apt_state}/armbian.list"
   if [[ -z "${DRY_RUN}" ]]; then
     printf 'deb [arch=%s signed-by=%s] %s %s main\n' \
@@ -118,14 +120,8 @@ _fetch_bsp_native() {
     log_info "DRY-RUN would write Armbian source: deb [arch=${ARCH}] ${ARMBIAN_APT_URL} ${ARMBIAN_SUITE} main -> ${src_list}"
   fi
 
-  local apt_opts=(
-    -o "Dir::Etc::SourceList=${src_list}"
-    -o "Dir::Etc::SourceParts=-"
-    -o "Dir::State::Lists=${apt_state}/lists"
-    -o "Dir::Cache=${apt_state}/cache"
-    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
-    -o "APT::Architecture=${ARCH}"
-  )
+  local -a apt_opts=()
+  mapfile -t apt_opts < <(apt_isolated_opts "${apt_state}" "${src_list}" "${ARCH}")
 
   run_or_plan_retry "Armbian apt-get update" apt-get "${apt_opts[@]}" update
   if [[ -z "${DRY_RUN}" ]]; then
@@ -188,11 +184,8 @@ _fetch_bsp_curl_one() {
     rm -f "${tmp}"
     return 1
   fi
-  actual_pkg="$(deb_pkg_name "${tmp}")"
-  actual_version="$(deb_pkg_version "${tmp}")"
-  actual_arch="$(deb_pkg_arch "${tmp}")"
-  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${wanted_version}" \
-      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+  if ! assert_deb_identity "${tmp}" "${pkg}" "${wanted_version}" "${ARCH}" --arch-all-ok; then
+    actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
     log_error "BSP package control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
     rm -f "${tmp}"
     return 1
@@ -224,7 +217,7 @@ _fetch_bsp_curl() {
   fetch_scratch_init
   local packages_file="${FETCH_TMPDIR}/Packages"
   local inrelease="${FETCH_TMPDIR}/InRelease"
-  local verified_release="${FETCH_TMPDIR}/Release" expected_sha actual_sha
+  local verified_release="${FETCH_TMPDIR}/Release" expected_sha
   run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${inrelease}" "${release_base}/InRelease" \
     || die "failed to download Armbian InRelease"
   if [[ -z "${DRY_RUN}" ]]; then
@@ -234,20 +227,17 @@ _fetch_bsp_curl() {
       || die "Armbian InRelease signature verification failed"
     auth_release_has_identity "${verified_release}" "${ARMBIAN_SUITE}" main "${ARCH}" \
       || die "Armbian InRelease identity mismatch: expected suite=${ARMBIAN_SUITE} component=main arch=${ARCH}"
-    expected_sha="$(awk -v path="${packages_rel}" '
-      /^SHA256:/{inside=1;next} /^[A-Za-z0-9-]+:/{inside=0}
-      inside && $3==path{print $1;exit}
-    ' "${verified_release}")"
-    [[ -n "${expected_sha}" ]] || die "Armbian InRelease lacks ${packages_rel} SHA256"
+    expected_sha="$(index_release_digest "${verified_release}" "${packages_rel}")" \
+      || die "Armbian InRelease lacks ${packages_rel} SHA256"
   fi
   run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${packages_file}.gz" "${packages_url}" \
     || die "failed to download Armbian Packages index: ${packages_url}"
 
   if [[ -z "${DRY_RUN}" ]]; then
-    actual_sha="$(sha256sum "${packages_file}.gz" | cut -d' ' -f1)"
-    [[ "${actual_sha}" == "${expected_sha}" ]] \
+    index_verify_digest "${packages_file}.gz" "${expected_sha}" "Armbian Packages.gz" \
       || die "Armbian Packages.gz checksum mismatch"
-    gzip -df "${packages_file}.gz" || die "failed to decompress Armbian Packages.gz"
+    index_decompress_gz "${packages_file}.gz" "${packages_file}" \
+      || die "failed to decompress Armbian Packages.gz"
   else
     log_info "DRY-RUN: would decompress ${packages_file}.gz"
   fi

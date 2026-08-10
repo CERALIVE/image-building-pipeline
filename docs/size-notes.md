@@ -452,7 +452,7 @@ directory. A bare `dri/*` would delete a future hardware video driver — exactl
 the `intel-media-va-driver-non-free` the x86 family notes in
 `x86_64.delta.list`. The `aarch64-linux-gnu` path prefix additionally makes the
 whole entry a no-op on non-arm64 families. Both properties are pinned by
-`manifest.bats` §28.
+`package-contract.bats` §28.
 
 ### Measured result
 
@@ -522,7 +522,7 @@ fast, hardware-free proof that the gate's own pass and fail legs work at all
 (including a sparse 2 GiB negative leg); `[6c/9]` is the second, complementary
 check that the gate meets a real artifact. Neither replaces the other.
 
-Guards: `manifest.bats` §10 — the shipped `[6c/9]` block is extracted from
+Guards: `mkosi-contract.bats` §10 — the shipped `[6c/9]` block is extracted from
 `orchestrate.sh` and executed against synthetic KB-sized trees, proving the pass
 leg, the abort leg, the loud `INSTALL_BOOT_BSP=0` skip (with a spy proving
 `measure-size.sh` is not invoked), the stage ordering, DRY_RUN unreachability, and
@@ -562,7 +562,7 @@ bytes against a ~1.4 GB baseline — it could only ever report an enormous shrin
 | 2 (missing/malformed/**wrong board**) | `die` | a repository misconfiguration, not a size event |
 | no baseline for this board | `log_warn`, pass | the same newly-added-board allowance `measure-size.sh` makes for a null ceiling. There is deliberately **no** un-suffixed fallback: `size-baseline.json` is `rock-5b-plus`'s file, so a fallback would hand it to every board that lacks one. |
 
-Guards: `manifest.bats` §10 gains five cases — the `[6c/9]` block actually calls
+Guards: `mkosi-contract.bats` §10 gains five cases — the `[6c/9]` block actually calls
 the comparison and calls it *after* the absolute gate; every shipped RK3588 board
 carries a real per-board baseline with full provenance (`artifact`,
 `artifact_sha256`, `commit`, ISO `recorded_at`) that is under its own ceiling and
@@ -653,5 +653,5 @@ build above (1,416,232,960 B) is +1,044,480 B against the recorded 1,415,188,480
 — ordinary upstream Debian churn, inside the comparator's threshold, and not a
 reason to re-record.
 
-Guards: `manifest.bats` §30 — 16 tests, including the skip being scoped to the
+Guards: `package-contract.bats` §30 — 16 tests, including the skip being scoped to the
 relative check only (the absolute stage must not grow a debug branch).

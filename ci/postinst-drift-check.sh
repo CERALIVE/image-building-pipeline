@@ -44,7 +44,7 @@
 #
 # Exit 0 iff no drift. Non-zero (1) on any drift, with the offending lines on stderr.
 #
-# Run:  ci/postinst-drift-check.sh      (also gated via tests/manifest.bats §8)
+# Run:  ci/postinst-drift-check.sh      (also gated via tests/postinst-wiring.bats §8)
 #
 # shellcheck shell=bash
 

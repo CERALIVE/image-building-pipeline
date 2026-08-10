@@ -62,6 +62,8 @@ source "${HERE}/common.sh"
 source "${HERE}/shared/yaml-lib.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
+# shellcheck source=lib/shared/versions-lib.sh
+source "${HERE}/shared/versions-lib.sh"
 # shellcheck source=lib/fetch-debs-auth.sh
 source "${HERE}/fetch-debs-auth.sh"
 
@@ -74,6 +76,10 @@ source "${HERE}/fetch/retry.sh"
 source "${HERE}/fetch/debcache.sh"
 # shellcheck source=fetch/pool.sh
 source "${HERE}/fetch/pool.sh"
+# shellcheck source=fetch/apt-lib.sh
+source "${HERE}/fetch/apt-lib.sh"
+# shellcheck source=fetch/index.sh
+source "${HERE}/fetch/index.sh"
 # shellcheck source=fetch/verify.sh
 source "${HERE}/fetch/verify.sh"
 # shellcheck source=fetch/bsp.sh

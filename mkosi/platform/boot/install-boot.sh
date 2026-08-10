@@ -17,6 +17,7 @@
 #
 #   rootfs <chroot=/>      USERSPACE bits into the rootfs slot. NO mkimage needed:
 #                          - /usr/bin/ceralive-boot-state               (state helper)
+#                          - /usr/lib/ceralive/boot-state-core.sh       (shared A/B core)
 #                          - /usr/lib/rauc/ceralive-rauc-boot-adapter   (RAUC backend)
 #                          - /etc/rauc/system.conf                      (bootloader=custom)
 #                          - /etc/fstab                                 (shared p1 at /boot)
@@ -116,6 +117,9 @@ install_rootfs() {
   [[ -n "${COMPATIBLE}" ]] || die "COMPATIBLE_STRING is unset/empty — the orchestrator must export ceralive-<board-slug> (board-specific); refusing to write a system.conf the signed bundle would reject"
   log "installing RAUC custom bootloader backend + state helper into the rootfs${root:+ (ROOT=${root})}"
 
+  # The state helper is a thin persistence adapter over the SHARED A/B core; both
+  # must land or the helper cannot resolve its core on the device.
+  install -D -m 0644 "${SCRIPT_DIR}/../boot-state-core.sh"           "${root}/usr/lib/ceralive/boot-state-core.sh"
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-boot-state.sh"          "${root}/usr/bin/ceralive-boot-state"
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-rauc-boot-adapter.sh"   "${root}/usr/lib/rauc/ceralive-rauc-boot-adapter"
 

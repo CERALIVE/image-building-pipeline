@@ -72,10 +72,8 @@ _fetch_rk3588_userspace_one() {
     rm -f "${tmp}"
     return 1
   fi
-  actual_pkg="$(deb_pkg_name "${tmp}")"
-  actual_arch="$(deb_pkg_arch "${tmp}")"
-  if [[ "${actual_pkg}" != "${pkg}" \
-      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+  if ! assert_deb_identity "${tmp}" "${pkg}" "" "${ARCH}" --arch-all-ok; then
+    actual_pkg="${DEB_ACTUAL_PKG}"; actual_arch="${DEB_ACTUAL_ARCH}"
     log_error "RK3588 userspace control mismatch for ${pkg}: package=${actual_pkg:-<missing>} architecture=${actual_arch:-<missing>} (expected ${pkg}, arch ${ARCH}|all)"
     rm -f "${tmp}"
     return 1

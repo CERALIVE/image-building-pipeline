@@ -1,5 +1,10 @@
-# SIZE_OK: legacy manifest integration suite; split requires a dedicated test-layout change.
-tests/manifest.bats
+# SIZE_OK: the shared fixture/helper home for the six manifest contract suites;
+# splitting it again would put a helper out of reach of a case that uses it.
+tests/manifest-helpers.bash
+# SIZE_OK: runtime service contracts share the hostname/mDNS and thermal fixtures.
+tests/runtime-services.bats
+# SIZE_OK: package-set contracts share the parity-rootfs and BSP provenance fixtures.
+tests/package-contract.bats
 # SIZE_OK: package transport module keeps native/curl transaction state in one process.
 lib/fetch-debs.sh
 # SIZE_OK: build orchestrator is a linear transaction with shared cleanup state.

@@ -359,9 +359,9 @@ and installs cleanly under `--no-install-recommends` in real bookworm/arm64 apt
 
 ## Guards
 
-No `tests/manifest.bats` guard names `apt-transport-https`, `wget`, or
+No manifest contract suite guard names `apt-transport-https`, `wget`, or
 `wireless-tools` as required, so **no guard edit was needed**. The one mention of
-`wireless-tools` (`manifest.bats:1988`) is explanatory prose inside the `iw` guard,
+`wireless-tools` (inside `mkosi-contract.bats`'s `iw` guard) is explanatory prose,
 whose assertion is `grep -Ex 'iw[[:space:]]*(#.*)?'` — a whole-line match that never
 matched the `wireless-tools` line. `tests/package-migration-coverage.sh` is
 unaffected: `removed.md` is one of its accepted "v2 homes", and the legacy sources

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
-# x86-boot-state.sh — x86 A/B boot-state read/write helper (RAUC custom backend
-# data layer + GRUB-selector algorithm reference). The x86/GRUB twin of the RK3588
-# ceralive-boot-state.sh: SAME A/B + bootcount MODEL (BOOT_ORDER / BOOT_<n>_LEFT),
-# SAME CLI, SAME RAUC semantics — only the STORAGE backend differs.
+# x86-boot-state.sh — x86 A/B boot-state helper: the GRUB PERSISTENCE ADAPTER
+# over the shared slot-state core (RAUC custom backend data layer +
+# GRUB-selector algorithm reference).
+#
+# SAME A/B + bootcount MODEL (BOOT_ORDER / BOOT_<n>_LEFT), SAME CLI, SAME RAUC
+# semantics as RK3588 — because both platforms now execute the SAME code: the
+# model, the subcommands and the boot-select algorithm all live in
+# ../boot-state-core.sh. This file adds ONLY the grubenv storage.
 #
 # WHY THIS EXISTS (task 33, decision D1 platform = x86; analogous to D3 on RK3588):
 # x86 boots via UEFI -> GRUB. Unlike the staged RK3588 vendor U-Boot
@@ -63,26 +67,27 @@ GRUBENV_FILE="${CERALIVE_GRUBENV:-/boot/efi/EFI/ceralive/grubenv}"
 BOOT_ATTEMPTS="${CERALIVE_BOOT_ATTEMPTS:-3}"
 GRUB_EDITENV="${GRUB_EDITENV:-grub-editenv}"
 
-# Valid slot bootnames. Symmetric A/B per the frozen partition contract
-# (rootfs_a = slot A, rootfs_b = slot B). Single-slot images carry only A.
-readonly VALID_SLOTS=("A" "B")
+BOOT_STATE_TOOL="x86-boot-state"
+# On x86 a `set-state bad` may empty BOOT_ORDER: load_state re-defaults an empty
+# grubenv to "A B", so an emptied order self-heals on the next read rather than
+# leaving a known-bad slot nominated. Making the two platforms agree here would be
+# a behaviour change, so the extraction keeps each side's existing answer.
+BOOT_STATE_KEEP_LAST_SLOT=0
 
-die() { printf 'x86-boot-state: %s\n' "$*" >&2; exit 1; }
-
-# rootfs PARTLABEL for a bootname (contract: slot A -> rootfs_a, slot B -> rootfs_b).
-slot_partlabel() {
-  case "$1" in
-    A) printf 'rootfs_a' ;;
-    B) printf 'rootfs_b' ;;
-    *) die "unknown slot '$1' (expected A or B)" ;;
-  esac
-}
-
-is_valid_slot() {
-  local s
-  for s in "${VALID_SLOTS[@]}"; do [[ "$1" == "${s}" ]] && return 0; done
-  return 1
-}
+# The shared core: beside this file in the repo tree, or at its installed device
+# path. CERALIVE_BOOT_STATE_CORE overrides both for a staged/test layout.
+BOOT_STATE_CORE="${CERALIVE_BOOT_STATE_CORE:-}"
+if [[ -z "${BOOT_STATE_CORE}" ]]; then
+  _bs_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for _bs_candidate in "${_bs_here}/../boot-state-core.sh" \
+                       /usr/lib/ceralive/boot-state-core.sh; do
+    if [[ -r "${_bs_candidate}" ]]; then BOOT_STATE_CORE="${_bs_candidate}"; break; fi
+  done
+fi
+[[ -r "${BOOT_STATE_CORE}" ]] \
+  || { printf 'x86-boot-state: shared boot-state core not found (set CERALIVE_BOOT_STATE_CORE)\n' >&2; exit 1; }
+# shellcheck source=../boot-state-core.sh
+source "${BOOT_STATE_CORE}"
 
 # ---------------------------------------------------------------------------
 # grubenv primitives. Prefer the real grub-editenv (compat guarantee); fall back
@@ -143,13 +148,10 @@ grubenv_set() {
 }
 
 # ---------------------------------------------------------------------------
-# State load/store. grubenv is the single source of truth; read it into
-# BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT, mutate in memory, then persist.
+# PERSISTENCE — grubenv is the single source of truth; read it into
+# BOOT_ORDER / BOOT_A_LEFT / BOOT_B_LEFT, the shared core mutates them in memory,
+# then persist.
 # ---------------------------------------------------------------------------
-BOOT_ORDER=""
-BOOT_A_LEFT=""
-BOOT_B_LEFT=""
-
 load_state() {
   BOOT_ORDER=""; BOOT_A_LEFT=""; BOOT_B_LEFT=""
   local key val
@@ -171,170 +173,16 @@ store_state() {
   grubenv_set "BOOT_ORDER=${BOOT_ORDER}" "BOOT_A_LEFT=${BOOT_A_LEFT}" "BOOT_B_LEFT=${BOOT_B_LEFT}"
 }
 
-left_of() { case "$1" in A) printf '%s' "${BOOT_A_LEFT}" ;; B) printf '%s' "${BOOT_B_LEFT}" ;; esac; }
-set_left() { case "$1" in A) BOOT_A_LEFT="$2" ;; B) BOOT_B_LEFT="$2" ;; esac; }
+boot_state_dump_backend() { printf 'GRUBENV_FILE=%s\n' "${GRUBENV_FILE}"; }
 
-in_order() {
-  local s
-  for s in ${BOOT_ORDER}; do [[ "${s}" == "$1" ]] && return 0; done
-  return 1
+boot_state_usage() {
+  {
+    printf 'Usage: x86-boot-state <command> [args]   (installed as /usr/bin/ceralive-boot-state)\n'
+    boot_state_command_lines
+    printf '\ngrubenv:  $CERALIVE_GRUBENV (default %s)\n' "${GRUBENV_FILE}"
+    printf 'Attempts: $CERALIVE_BOOT_ATTEMPTS (default %s)\n' "${BOOT_ATTEMPTS}"
+    printf 'Backend:  $GRUB_EDITENV (default %s; bash fallback if absent)\n' "${GRUB_EDITENV}"
+  } >&2
 }
 
-# ---------------------------------------------------------------------------
-# Subcommands (identical surface to the RK3588 ceralive-boot-state.sh).
-# ---------------------------------------------------------------------------
-
-# init [--attempts N] [--single-slot] — seed a fresh grubenv. Both slots get the
-# full budget; A leads. --single-slot drops B (contract §4 small-media fallback).
-cmd_init() {
-  local attempts="${BOOT_ATTEMPTS}" single_slot="false"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --attempts)    attempts="${2:?--attempts needs a value}"; shift 2 ;;
-      --single-slot) single_slot="true"; shift ;;
-      *) die "init: unknown argument '$1'" ;;
-    esac
-  done
-  [[ "${attempts}" =~ ^[0-9]+$ ]] || die "init: --attempts must be a non-negative integer"
-  if [[ "${single_slot}" == "true" ]]; then
-    BOOT_ORDER="A"; BOOT_A_LEFT="${attempts}"; BOOT_B_LEFT="0"
-  else
-    BOOT_ORDER="A B"; BOOT_A_LEFT="${attempts}"; BOOT_B_LEFT="${attempts}"
-  fi
-  store_state
-}
-
-cmd_get_order() { load_state; printf '%s\n' "${BOOT_ORDER}"; }
-
-cmd_get_left() {
-  local slot="${1:?get-left needs a slot}"; is_valid_slot "${slot}" || die "invalid slot '${slot}'"
-  load_state; printf '%s\n' "$(left_of "${slot}")"
-}
-
-# get-primary — first slot in BOOT_ORDER with LEFT>0 (the slot that WILL boot). If
-# all are exhausted, the head of BOOT_ORDER (last-resort), matching boot-select.
-cmd_get_primary() {
-  load_state
-  local s
-  for s in ${BOOT_ORDER}; do
-    if (( "$(left_of "${s}")" > 0 )); then printf '%s\n' "${s}"; return 0; fi
-  done
-  printf '%s\n' "${BOOT_ORDER%% *}"
-}
-
-# set-primary <slot> — move <slot> to the FRONT of BOOT_ORDER and reset its budget.
-# RAUC calls this to activate a freshly-installed slot.
-cmd_set_primary() {
-  local slot="${1:?set-primary needs a slot}"; is_valid_slot "${slot}" || die "invalid slot '${slot}'"
-  load_state
-  local rest="" s
-  for s in ${BOOT_ORDER}; do [[ "${s}" == "${slot}" ]] || rest+="${s} "; done
-  BOOT_ORDER="$(printf '%s %s' "${slot}" "${rest}" | tr -s ' ')"; BOOT_ORDER="${BOOT_ORDER% }"
-  set_left "${slot}" "${BOOT_ATTEMPTS}"
-  store_state
-}
-
-# get-state <slot> — "good" while in BOOT_ORDER with attempts left; else "bad".
-cmd_get_state() {
-  local slot="${1:?get-state needs a slot}"; is_valid_slot "${slot}" || die "invalid slot '${slot}'"
-  load_state
-  if in_order "${slot}" && (( "$(left_of "${slot}")" > 0 )); then
-    printf 'good\n'
-  else
-    printf 'bad\n'
-  fi
-}
-
-# set-state <slot> good|bad — good: reset attempts (slot proved itself). bad: zero
-# attempts AND drop from BOOT_ORDER so the selector skips it.
-cmd_set_state() {
-  local slot="${1:?set-state needs a slot}" state="${2:?set-state needs good|bad}"
-  is_valid_slot "${slot}" || die "invalid slot '${slot}'"
-  load_state
-  case "${state}" in
-    good)
-      set_left "${slot}" "${BOOT_ATTEMPTS}"
-      in_order "${slot}" || BOOT_ORDER="$(printf '%s %s' "${BOOT_ORDER}" "${slot}" | tr -s ' ')"
-      ;;
-    bad)
-      set_left "${slot}" 0
-      local rest="" s
-      for s in ${BOOT_ORDER}; do [[ "${s}" == "${slot}" ]] || rest+="${s} "; done
-      BOOT_ORDER="$(printf '%s' "${rest}" | tr -s ' ')"; BOOT_ORDER="${BOOT_ORDER% }"
-      ;;
-    *) die "set-state: state must be 'good' or 'bad' (got '${state}')" ;;
-  esac
-  store_state
-}
-
-# mark-good <slot> — convenience alias of `set-state <slot> good`.
-cmd_mark_good() { cmd_set_state "${1:?mark-good needs a slot}" good; }
-
-# boot-select — GRUB-SELECTOR SIMULATION (twin of grub.cfg). Choose the active slot
-# (first in BOOT_ORDER with LEFT>0; else head as last resort), DECREMENT its
-# counter, persist, print "<slot> <rootfs_partlabel>". Each call models one boot:
-# an OS that never mark-good's itself bleeds the counter to 0 and the next call
-# falls through to the other slot — automatic rollback.
-cmd_boot_select() {
-  load_state
-  local chosen="" s
-  for s in ${BOOT_ORDER}; do
-    if (( "$(left_of "${s}")" > 0 )); then chosen="${s}"; break; fi
-  done
-  if [[ -z "${chosen}" ]]; then
-    chosen="${BOOT_ORDER%% *}"
-    printf '%s %s\n' "${chosen}" "$(slot_partlabel "${chosen}")"
-    return 0
-  fi
-  set_left "${chosen}" "$(( "$(left_of "${chosen}")" - 1 ))"
-  store_state
-  printf '%s %s\n' "${chosen}" "$(slot_partlabel "${chosen}")"
-}
-
-cmd_dump() {
-  load_state
-  printf 'GRUBENV_FILE=%s\n' "${GRUBENV_FILE}"
-  printf 'BOOT_ORDER=%s\n' "${BOOT_ORDER}"
-  printf 'BOOT_A_LEFT=%s\n' "${BOOT_A_LEFT}"
-  printf 'BOOT_B_LEFT=%s\n' "${BOOT_B_LEFT}"
-}
-
-usage() {
-  cat >&2 <<EOF
-Usage: x86-boot-state <command> [args]   (installed as /usr/bin/ceralive-boot-state)
-  init [--attempts N] [--single-slot]   seed a fresh grubenv A/B state
-  get-order                             print BOOT_ORDER
-  get-left <A|B>                        print remaining attempts for a slot
-  get-primary                           print the slot that will boot
-  set-primary <A|B>                     activate a slot (front of order + reset)
-  get-state <A|B>                       print "good" or "bad"
-  set-state <A|B> <good|bad>            mark a slot good (reset) or bad (drop)
-  mark-good <A|B>                       alias of: set-state <A|B> good
-  boot-select                           GRUB-selector sim: pick+decrement+persist
-  dump                                  print full state
-
-grubenv:  \$CERALIVE_GRUBENV (default ${GRUBENV_FILE})
-Attempts: \$CERALIVE_BOOT_ATTEMPTS (default ${BOOT_ATTEMPTS})
-Backend:  \$GRUB_EDITENV (default ${GRUB_EDITENV}; bash fallback if absent)
-EOF
-}
-
-main() {
-  local cmd="${1:-}"; shift || true
-  case "${cmd}" in
-    init)        cmd_init "$@" ;;
-    get-order)   cmd_get_order ;;
-    get-left)    cmd_get_left "$@" ;;
-    get-primary) cmd_get_primary ;;
-    set-primary) cmd_set_primary "$@" ;;
-    get-state)   cmd_get_state "$@" ;;
-    set-state)   cmd_set_state "$@" ;;
-    mark-good)   cmd_mark_good "$@" ;;
-    boot-select) cmd_boot_select ;;
-    dump)        cmd_dump ;;
-    -h|--help|"") usage; [[ -n "${cmd}" ]] ;;
-    *) usage; die "unknown command '${cmd}'" ;;
-  esac
-}
-
-main "$@"
+boot_state_main "$@"

@@ -3,8 +3,6 @@
 # build-input-lib.sh — build-input resolution for the native (srtla)
 # dev-sync path. Resolves WHAT feeds build_app_layer for each app:
 #
-#   * _explode_deb        — standard .deb data-tarball extraction (dpkg-deb, else
-#                           ar + tar) into a staging tree (used only by --from-deb)
 #   * _stage_for          — resolve the staging tree for an app (prefer
 #                           <root>/<app>, else <root>); explode the matching .deb
 #                           first when --from-deb is active
@@ -23,34 +21,10 @@
 
 BUILD_INPUT_LIB_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# common.sh provides strict mode, the loud ERR trap, loggers, die, require_cmd.
-# shellcheck source=../common.sh
-source "${BUILD_INPUT_LIB_HERE}/../common.sh"
-
-# ---------------------------------------------------------------------------
-# _explode_deb <deb> <dest> — standard .deb data-tarball extraction into <dest>
-# (dpkg-deb when present, else ar + tar). Used only by --from-deb; the sysext
-# BUILD itself is the reused build_app_layer verb, never reimplemented here.
-# ---------------------------------------------------------------------------
-_explode_deb() {
-  local deb="$1" dest="$2"
-  mkdir -p "${dest}"
-  if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb -x "${deb}" "${dest}"
-    return 0
-  fi
-  require_cmd ar
-  require_cmd tar
-  local member
-  member="$(ar t "${deb}" | grep -E '^data\.tar' | head -n1)"
-  [[ -n "${member}" ]] || die "_explode_deb: no data.tar member in ${deb}"
-  case "${member}" in
-    *.gz)  ar p "${deb}" "${member}" | tar -xz   -C "${dest}" ;;
-    *.xz)  ar p "${deb}" "${member}" | tar -xJ   -C "${dest}" ;;
-    *.zst) ar p "${deb}" "${member}" | tar --zstd -x -C "${dest}" ;;
-    *)     ar p "${deb}" "${member}" | tar -x    -C "${dest}" ;;
-  esac
-}
+# deb-lib.sh pulls in common.sh (strict mode, loggers, die, require_cmd) and the
+# one shared .deb data-tarball extractor (explode_deb) --from-deb staging uses.
+# shellcheck source=../shared/deb-lib.sh
+source "${BUILD_INPUT_LIB_HERE}/../shared/deb-lib.sh"
 
 # ---------------------------------------------------------------------------
 # _stage_for <app> <staging_root> <out_root> — resolve the staging tree for <app>
@@ -67,7 +41,7 @@ _stage_for() {
     shopt -u nullglob
     (( ${#matches[@]} > 0 )) || die "_stage_for: no ${app}*.deb in ${FROM_DEB}"
     log_info "build(${app}): exploding prod .deb ${matches[0]}"
-    _explode_deb "${matches[0]}" "${tree}"
+    explode_deb "${matches[0]}" "${tree}"
     printf '%s' "${tree}"
     return 0
   fi

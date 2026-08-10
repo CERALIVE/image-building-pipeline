@@ -80,7 +80,7 @@ libqmi-glib5  libqmi-proxy libqmi-utils   libqrtr-glib0
 This is enforced, not merely intended: `freeze_boot_packages` **refuses by name**
 and fails the build if any of them ever reaches the freeze set (for example
 because a manifest routed one into a boot-BSP field), and it re-checks after
-holding that none of them is on dpkg's hold list. `tests/manifest.bats` §31
+holding that none of them is on dpkg's hold list. `tests/package-contract.bats` §31
 carries the negative assertion, and
 `tests/kernel-freeze-guardrails.test.sh` proves with a real
 `apt-get -s install cerastream` that the package still installs with the whole
@@ -235,6 +235,6 @@ from that board about a released image.
 | Wiring (the executor `./build` actually runs) | `mkosi/mkosi.images/runtime/mkosi.postinst.chroot` `main()`, last call |
 | Drift gate registration | `ci/postinst-drift-check.sh` `CONSOLIDATED_FUNCS` |
 | Behavioural suite (hold set, pin file, fail-closed legs, real `apt-get -s upgrade`) | `tests/kernel-freeze-guardrails.test.sh` |
-| Structural guards | `tests/manifest.bats` §31 |
+| Structural guards | `tests/package-contract.bats` §31 |
 | Partition rule this enforces | [`docs/partition-contract.md`](../../docs/partition-contract.md) §1 rule 3 |
 | What a dev-push may and may not replace | [`dev-loop.md`](dev-loop.md) → "What is and isn't updated" |

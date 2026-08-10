@@ -15,7 +15,7 @@
 #   + wrong-passphrase retry path returns to AP mode
 #   + hard-timeout path returns to AP mode (never headless-dead)
 #
-# Run: tests/provision-portal.test.sh   (also gated via tests/manifest.bats)
+# Run: tests/provision-portal.test.sh   (also gated via tests/postinst-wiring.bats)
 #
 # shellcheck shell=bash
 

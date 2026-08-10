@@ -5,7 +5,7 @@
 # isolated customize module that `./build` never invokes.
 #
 # THE GAP THIS CLOSES. Todo 8 added install_apt_preferences() to
-# customize/apt-ceralive-repo.sh (orchestrated by run-all.sh), and manifest.bats
+# customize/apt-ceralive-repo.sh (orchestrated by run-all.sh), and package-contract.bats
 # T2.6 tested THAT function in a temp dir. But the runtime image is built solely by
 # mkosi.images/runtime/mkosi.postinst.chroot::setup_ceralive_repository(), whose
 # inline twin never wrote the pin — run-all.sh's runtime modules do not run in

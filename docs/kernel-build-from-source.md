@@ -183,7 +183,7 @@ Both modes then converge on **one** sequence — `make olddefconfig` →
 `make syncconfig` → `verify-kernel-config.sh` — so [§6b](#6b-the-fragment-survival-gate--what-the-fragment-asks-for-must-be-what-ships)'s
 survival gate covers them identically. `build-kernel.sh` deliberately keeps a
 single occurrence of each of those `make` calls; duplicating them per-branch
-breaks the static ordering guard in `manifest.bats`.
+breaks the static ordering guard in `variant-contract.bats`.
 
 ### `config_absent_symbols` — the reviewed exception list
 
@@ -610,7 +610,7 @@ through exactly the same classification and staging path as a fetched one.
 
 `tests/manifests/fixtures/vendor-baseline/<board>.params` holds the resolver's
 full output for all three shipped boards, captured **before** any of this
-existed. `manifest.bats` diffs the live resolver against those fixtures for
+existed. `variant-contract.bats` diffs the live resolver against those fixtures for
 `rock-5b-plus`, `orange-pi-5-plus` and `x86-minipc`, with no variant, with an
 explicit `--variant default`, and with `CERALIVE_KERNEL_VARIANT=default`.
 
@@ -748,7 +748,7 @@ instead of a manual patch; it does not re-prove the audio path.
    invalidated, and a `deb_lists_path` that reported every present DTB as absent
    (`grep -q` closing the pipe, `tar` dying of `SIGPIPE`, `set -o pipefail`
    turning that into "not found"). All four now carry static/executable guards in
-   `manifest.bats` §26, because a static guard is the only thing a `DRY_RUN` gate
+   `variant-contract.bats` §26, because a static guard is the only thing a `DRY_RUN` gate
    can enforce. **Add a guard whenever you touch this path.**
 2. **The defconfig fragment is reviewed intent, not a validated result.** It
    starts from mainline `defconfig` and adds what the CeraLive stack needs. The
@@ -896,5 +896,5 @@ no second place to keep in sync.
 | `tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |
 | `tests/kernel-build-resilience.bats` | fetch retry, never-retried pin mismatch, build-job preflight (§3b) |
-| `tests/manifest.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
+| `tests/variant-contract.bats` §26 | 36 tests, incl. the byte-identity proof and its teeth |
 | `tests/manifests/fixtures/vendor-baseline/` | the pre-change golden resolver output |

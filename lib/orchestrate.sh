@@ -36,6 +36,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 # shellcheck source=lib/paths.sh
 source "${HERE}/paths.sh"
+# shellcheck source=lib/shared/deb-lib.sh
+source "${HERE}/shared/deb-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Locations.

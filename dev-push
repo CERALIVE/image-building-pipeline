@@ -63,6 +63,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/lib/common.sh"
+# explode_deb — the one shared .deb data-tarball extractor (dpkg-deb, else ar+tar).
+# shellcheck source=lib/shared/deb-lib.sh
+source "${HERE}/lib/shared/deb-lib.sh"
 # build_app_layer + select_backend (sources the sysext backend, the default).
 # shellcheck source=lib/app-layer/interface.sh
 source "${HERE}/lib/app-layer/interface.sh"
@@ -160,31 +163,6 @@ push_file() {
 }
 
 # ---------------------------------------------------------------------------
-# extract_deb <deb> <dest> — explode a .deb's data tarball into <dest> (a deb
-# staging tree). Prefers dpkg-deb; falls back to ar + tar (host may be Arch with
-# no dpkg, same approach as orchestrate.sh:deb_pkg_name).
-# ---------------------------------------------------------------------------
-extract_deb() {
-  local deb="$1" dest="$2"
-  mkdir -p "${dest}"
-  if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb -x "${deb}" "${dest}"
-    return
-  fi
-  require_cmd ar
-  require_cmd tar
-  local member
-  member="$(ar t "${deb}" | grep -E '^data\.tar' | head -n1)"
-  [[ -n "${member}" ]] || die "extract_deb: no data.tar member in ${deb}"
-  case "${member}" in
-    *.gz)  ar p "${deb}" "${member}" | tar -xz  -C "${dest}" ;;
-    *.xz)  ar p "${deb}" "${member}" | tar -xJ  -C "${dest}" ;;
-    *.zst) ar p "${deb}" "${member}" | tar --zstd -x -C "${dest}" ;;
-    *)     ar p "${deb}" "${member}" | tar -x   -C "${dest}" ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
 # stage_from_deb <app> <staging> — find <app>*.deb under $FROM_DEB and explode it.
 # ---------------------------------------------------------------------------
 stage_from_deb() {
@@ -196,7 +174,7 @@ stage_from_deb() {
     || die "stage_from_deb: no ${app}*.deb found in ${FROM_DEB}"
   deb="${matches[0]}"
   log_info "stage(${app}): extracting prod .deb ${deb}"
-  extract_deb "${deb}" "${staging}"
+  explode_deb "${deb}" "${staging}"
 }
 
 # ---------------------------------------------------------------------------

@@ -162,7 +162,8 @@ debcache_try_hit() {
     if ! chmod 0644 "${out}"; then rm -f -- "${out}"; exit 3; fi
     if ! mv -f -- "${out}" "${dest}"; then rm -f -- "${out}"; exit 3; fi
     # LRU is mtime-ordered, so a reuse must count as a use.
-    touch -- "${entry}" 2>/dev/null || true
+    touch -- "${entry}" 2>/dev/null \
+      || log_warn ".deb cache: could not refresh the LRU mtime for ${key} (the hit is still served; the entry just ages as if unused)"
   ) 9>"${lock}" || rc=$?
 
   case "${rc}" in

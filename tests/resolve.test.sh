@@ -92,8 +92,9 @@ fi
 # point VERSIONS_YAML at a controlled registry and assert the pin is injected.
 # ---------------------------------------------------------------------------
 STUB="${WORK}/stub"
-mkdir -p "${STUB}/manifests/boards" "${STUB}/manifests/families" "${STUB}/manifests/schema" "${STUB}/lib"
+mkdir -p "${STUB}/manifests/boards" "${STUB}/manifests/families" "${STUB}/manifests/schema" "${STUB}/lib/shared"
 cp "${PIPELINE_DIR}/lib/common.sh" "${PIPELINE_DIR}/lib/resolve.sh" "${PIPELINE_DIR}/lib/resolve.py" "${STUB}/lib/"
+cp "${PIPELINE_DIR}/lib/shared/versions-lib.sh" "${STUB}/lib/shared/"
 # Permissive schemas (accept anything) so we isolate the defer mechanism.
 echo '{"type":"object"}' > "${STUB}/manifests/schema/board.schema.json"
 echo '{"type":"object"}' > "${STUB}/manifests/schema/family.schema.json"
@@ -154,8 +155,9 @@ assert_contains "missing required field is named"          "$bad_family" "arch"
 # 6. Missing family — board refs a family with no manifest -> loud + list.
 # ---------------------------------------------------------------------------
 GHOST="${WORK}/ghost"
-mkdir -p "${GHOST}/manifests/boards" "${GHOST}/manifests/families" "${GHOST}/manifests/schema" "${GHOST}/lib"
+mkdir -p "${GHOST}/manifests/boards" "${GHOST}/manifests/families" "${GHOST}/manifests/schema" "${GHOST}/lib/shared"
 cp "${PIPELINE_DIR}/lib/common.sh" "${PIPELINE_DIR}/lib/resolve.sh" "${PIPELINE_DIR}/lib/resolve.py" "${GHOST}/lib/"
+cp "${PIPELINE_DIR}/lib/shared/versions-lib.sh" "${GHOST}/lib/shared/"
 cp "${PIPELINE_DIR}/manifests/schema/"*.json "${GHOST}/manifests/schema/"
 cp "${PIPELINE_DIR}/manifests/families/rk3588.yaml" "${GHOST}/manifests/families/"
 cat > "${GHOST}/manifests/boards/ghostboard.yaml" <<'YAML'

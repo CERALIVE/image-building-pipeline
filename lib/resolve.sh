@@ -31,8 +31,8 @@
 # versions.yaml DEFER convention
 # ------------------------------
 # Any manifest field VALUE of the form `@versions:<key>` is replaced by that
-# component's `pin:` from the repo-root versions.yaml, resolved with the SAME
-# get_pin awk used by scripts/fetch-debs.sh:24-29. A deferred-but-absent pin is
+# component's `pin:` from the repo-root versions.yaml, resolved through the ONE
+# shared reader `lib/shared/versions-lib.sh::get_pin`. A deferred-but-absent pin is
 # a hard error (we never emit a half-resolved token). Real rk3588 manifests
 # currently defer nothing, so resolution is a no-op pass-through for them; the
 # mechanism is exercised by the synthetic fixtures in tests/resolve.test.sh.
@@ -43,6 +43,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
+# shellcheck source=lib/shared/versions-lib.sh
+source "${HERE}/shared/versions-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Locations (HERE = lib).
@@ -64,18 +66,6 @@ MANIFEST_EXTS=(yaml yml)
 
 # Reserved variant name meaning "apply no overlay" — the production vendor path.
 DEFAULT_KERNEL_VARIANT="default"
-
-# ---------------------------------------------------------------------------
-# get_pin — read a component's `pin:` from versions.yaml.
-# Reused VERBATIM from scripts/fetch-debs.sh:24-29 (graceful fallback: empty
-# string when the key/file is absent; the caller decides whether that is fatal).
-# ---------------------------------------------------------------------------
-get_pin() {
-  local key="$1" file="${2:-$VERSIONS_YAML}"
-  [[ -f "$file" ]] || { echo ""; return; }
-  awk -v key="$key" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
-    f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
-}
 
 # ---------------------------------------------------------------------------
 # resolve_pins — substitute every @versions:<key> token in a raw value.
