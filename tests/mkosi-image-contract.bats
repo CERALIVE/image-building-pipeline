@@ -282,7 +282,14 @@ PY
   run grep -F 'prune_final_image_payload' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -eq 0 ]
 
-  run grep -F '/usr/lib/firmware/qcom' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  # The prune is no longer a literal list of absolute paths — it is a candidate
+  # list gated on a `modinfo -F firmware` sweep of the installed modules, so the
+  # firmware ROOT and the candidate NAME are asserted separately.
+  run grep -F 'usr/lib/firmware' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  [ "$status" -eq 0 ]
+  run grep -E '^\s+qcom intel ath10k' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  [ "$status" -eq 0 ]
+  run grep -F 'modinfo' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
 
   run grep -F '/usr/lib/firmware/intel' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
