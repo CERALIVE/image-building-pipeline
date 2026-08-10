@@ -438,16 +438,44 @@ BLOCKING.
 Four of the fixes are worth knowing before touching the files they live in,
 because each is a case where the obvious placement is the wrong one:
 
-- **`policy-rc.d` ships via a SKELETON tree, not an ExtraTree or a postinst.**
-  mkosi copies skeleton trees BEFORE the package manager runs
-  (`install_skeleton_trees` precedes `install_distribution`), which is the only
-  placement that covers the base layer's own bootstrap — an ExtraTree arrives
-  after the noise has already been emitted. It denies service STARTS only:
-  invoke-rc.d treats 101 as "do not run, this is fine" and returns success, so
-  dpkg's own exit status is untouched and a package that genuinely fails to
-  configure still fails the build. The app layer deletes it and **dies** if it
-  survives — a shipped `policy-rc.d` gives a device that installs packages and
-  silently never starts them.
+- **`policy-rc.d` needs the right MODE in THREE places, and a skeleton tree alone
+  gets none of them.** It denies service STARTS only: invoke-rc.d treats 101 as
+  "do not run, this is fine" and returns success, so dpkg's own exit status is
+  untouched and a package that genuinely fails to configure still fails the
+  build. The app layer deletes it and **dies** if it survives — a shipped
+  `policy-rc.d` gives a device that installs packages and silently never starts
+  them. Getting it to actually apply took three findings, each of which looked
+  solved before it was (full write-up: `docs/build-log-census.md` "How rows
+  8/9/21 are actually fixed"):
+  - **Mode, not placement.** invoke-rc.d gates on `test -x "${POLICYHELPER}"`, so
+    a non-executable helper is reported as MISSING, not as denying. mkosi 26
+    writes its own copy 0644. **A umask cannot repair that** — a umask only
+    CLEARS bits and Python's `open(..., "w")` requests base mode 0o666, so
+    `umask(~0o644)` and `umask(~0o755)` both yield 0644. `ci/Dockerfile` patches
+    mkosi's `apt.py` with an explicit `policyrcd.chmod(0o755)`, drift-guarded.
+  - **mkosi UNLINKS it at the end of every `Apt.install()`**, skeleton copy
+    included, and only the BASE image declares `Packages=` — `install_distribution()`
+    returns early for a `BaseTrees=` image with no packages. So platform, runtime
+    and app ran every one of their own apt/dpkg transactions with the path absent.
+    Each of those three now installs the helper itself before its first
+    transaction (`customize/postinst.d/services.sh::install_chroot_service_policy`
+    plus two self-contained twins, one for the non-chroot platform postinst that
+    writes into `$BUILDROOT`).
+  - **A `SkeletonTrees=` on the upper images is NOT an equivalent fix.**
+    `install_skeleton_trees()` sits inside mkosi's `if not cached:` branch while
+    `run_postinst_scripts()` runs unconditionally, and this repo builds
+    `Incremental=yes` — a cached layer would drop the helper and still run the
+    transactions that need it.
+
+  The base skeleton tree is retained (it covers mkosi's own bootstrap before the
+  first `Apt.install()`), but it is defence in depth, not the mechanism.
+
+  **Verifying this class of fix needs a COLD BASE LAYER.** `mkosi/cache/<board>/
+  *base.cache` must be deleted (root-owned; remove it from a throwaway container)
+  or mkosi skips `install_distribution()` and row 8's window never opens. A log
+  with no `‣  Installing Debian` line has not tested row 8 whatever the grep
+  says. A plain `./build <board>` reproduces all three signatures in roughly half
+  the time of a `--variant edge` build.
 - **`WithDocs=no` corrupted the update-alternatives database**, it was not just
   noise. It makes dpkg `--path-exclude=/usr/share/man/*`, which deletes man pages
   BEFORE the maintainer scripts that register them as alternative slaves run: 13

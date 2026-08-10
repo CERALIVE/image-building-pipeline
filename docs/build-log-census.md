@@ -68,8 +68,8 @@ than tolerating a known-bad state.
 | 5 | `update-alternatives: warning: skip creation of <PATH> because associated file <PATH> (of link group <GROUP>) doesn't exist` | 13 | mkosi:base | ceralive:image | FIXED | todo9 — caused by `WithDocs=no` path-excluding `/usr/share/man/*` before alternatives registration ran. Manpages are now present through the postinst phase and pruned at the final app layer. |
 | 6 | `update-alternatives: error: alternative path <PATH> doesn't exist` | 1 | mkosi:base | ceralive:image | FIXED | todo9 — same cause as signature 5, escalated to `error` for `/usr/share/man/man7/bash-builtins.7.gz`. Removed by the same manpage-ordering fix. |
 | 7 | `update-rc.d: warning: start and stop actions are no longer supported; falling back to defaults` | 2 | mkosi:runtime | external:cpufrequtils | ACCEPTED | `cpufrequtils`' postinst calls `update-rc.d` with legacy start/stop arguments. Not suppressible by `policy-rc.d` (update-rc.d is the enable path, not the invoke path) and not our maintainer script. |
-| 8 | `invoke-rc.d: WARNING: No init system and policy-rc.d missing! Defaulting to block.` | 2 | mkosi:base | ceralive:image | FIXED | todo10 — the build chroot has no `/sbin/init`, so invoke-rc.d complained about the absent policy file on every service-start attempt. A temporary `policy-rc.d` returning 101 is now installed for the whole package-configuration phase. |
-| 9 | `invoke-rc.d: initscript dbus, action "<ACTION>" failed.` | 3 | mkosi:runtime | ceralive:image | FIXED | todo10 — packages asked invoke-rc.d to `reload`/`force-reload` dbus inside the chroot. With `policy-rc.d` denying, the initscript is never run and cannot fail. |
+| 8 | `invoke-rc.d: WARNING: No init system and policy-rc.d missing! Defaulting to block.` | 2 | mkosi:base | ceralive:image | FIXED | todo10, completed 2026-08-10 — the build chroot has no `/sbin/init`, so invoke-rc.d complained about the absent policy file on every service-start attempt. An EXECUTABLE `policy-rc.d` returning 101 now covers the whole package-configuration phase; see "How rows 8/9/21 are actually fixed" below for the two halves that took. |
+| 9 | `invoke-rc.d: initscript dbus, action "<ACTION>" failed.` | 3 | mkosi:runtime | ceralive:image | FIXED | todo10, completed 2026-08-10 — packages asked invoke-rc.d to `reload`/`force-reload` dbus inside the chroot. With `policy-rc.d` denying, the initscript is never run and cannot fail. |
 | 10 | `invoke-rc.d: could not determine current runlevel` | 2 | mkosi:base | external:sysvinit | ACCEPTED | invoke-rc.d prints this from `get_runlevel` at line ~297, BEFORE `querypolicy` consults `policy-rc.d` at all — verified against the shipped `/usr/sbin/invoke-rc.d`. A policy file therefore cannot suppress it, and Debian's own comment marks the failure as expected in a chroot (`#823611`). |
 | 11 | `start-stop-daemon: unable to stat /usr/libexec/polkitd (No such file or directory)` | 1 | mkosi:runtime | external:policykit-1 | ACCEPTED | polkit's postinst calls `start-stop-daemon` directly rather than through invoke-rc.d, so `policy-rc.d` does not apply. External maintainer script. |
 | 12 | `W: No zstd in /usr/bin:/sbin:/bin, using gzip` | 1 | mkosi:platform | ceralive:image | FIXED | todo9 — `initramfs-tools` defaults to zstd compression but the `zstd` binary was not installed when the kernel postinst generated the initrd. `zstd` is now installed in the same transaction as `initramfs-tools`, before the kernel package. |
@@ -81,7 +81,7 @@ than tolerating a known-bad state.
 | 18 | `‣ <PATH>: Setting FinalizeScript is deprecated, please use FinalizeScripts instead.` | 2 | mkosi:config | ceralive:image | FIXED | todo8 — `base/mkosi.conf` and `platform/mkosi.conf` used the singular key. Both now use `FinalizeScripts=`. |
 | 19 | `‣ <PATH>: Setting RepartDirectories should be configured in [Output], not [Content].` | 1 | mkosi:config | ceralive:image | FIXED | todo8 — `disk/mkosi.conf` declared `RepartDirectories=` under `[Content]`. Moved to `[Output]`. |
 | 20 | `‣ Could not rename <PATH> to <PATH> as they are located on different devices, falling back to copying` | 8 | mkosi:staging | ceralive:image | FIXED | todo11 — mkosi's workspace defaulted to `/var/tmp`, a different filesystem from the repo-local output tree, so every finished layer was copied instead of renamed. The workspace is now pinned beside the output. |
-| 21 | `Reloading system message bus config...Failed to open connection to "system" message bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory` | 3 | mkosi:runtime | ceralive:image | FIXED | todo10 — printed by the dbus init script when invoke-rc.d ran it in a chroot with no running bus. With `policy-rc.d` denying, the init script is never invoked. |
+| 21 | `Reloading system message bus config...Failed to open connection to "system" message bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory` | 3 | mkosi:runtime | ceralive:image | FIXED | todo10, completed 2026-08-10 — printed by the dbus init script when invoke-rc.d ran it in a chroot with no running bus. With `policy-rc.d` denying, the init script is never invoked. |
 | 22 | `/usr/lib/tmpfiles.d/dbus.conf:13: Failed to resolve user 'messagebus': No such process` | 1 | mkosi:base | external:dbus | ACCEPTED | dbus' tmpfiles snippet is evaluated before its own sysusers entry has been applied in the chroot. Emitted by the package's own tooling; the user exists in the finished image. |
 | 23 | `<systemd-resolved postinst: /etc/resolv.conf busy (builder bind-mount)>` | 4 | mkosi:runtime | ceralive:image | ACCEPTED | Four consecutive lines (`mv: cannot move …`, `Cannot take a backup …`, `ln: failed to create symbolic link …`, `Cannot install symlink …`), collapsed to one signature. The builder bind-mounts `/etc/resolv.conf` so the chroot has DNS, which makes systemd-resolved's postinst unable to replace it. The image's own resolv.conf contract is applied later by `configure_networking` (see `tests/resolv-conf-symlink.test.sh`), so the postinst failing here is expected and inert. Unmounting during package configuration would break DNS for the rest of the layer. |
 | 24 | `Cannot open netlink socket: Protocol not supported` | 1 | mkosi:runtime | external:nftables | ACCEPTED | `nftables`' postinst tries to talk to `NETLINK_NETFILTER` inside the build chroot, which has no netfilter netlink. External maintainer script; the ruleset is applied on the device by `ceralive-ingest-firewall.service`. |
@@ -97,44 +97,66 @@ its recorded ceiling and rejects anything above it.
 
 | Signature | Max | Stage | Introduced by | Rationale |
 |---|---:|---|---|---|
-| `invoke-rc.d: policy-rc.d denied execution of <ACTION>.` | 16 | mkosi:* | todo10 | invoke-rc.d prints this (`querypolicy`, the `101)` case) every time the temporary `policy-rc.d` correctly denies a service start inside the build chroot. It is the positive evidence that the suppression is working, and it replaces signatures 8, 9 and 21. The ceiling is generous relative to the 8 denials the baseline log's blocked attempts imply, so a package set that grows a few service-starting packages does not fail the lint; a runaway does. |
+| `invoke-rc.d: policy-rc.d denied execution of <ACTION>.` | 40 | mkosi:* | todo10 | invoke-rc.d prints this (`querypolicy`, the `101)` case) every time the build-time `policy-rc.d` correctly denies a service start inside the build chroot. It is the positive evidence that the suppression is working, and it replaces signatures 8, 9 and 21. A real `rock-5b-plus --variant edge` build emits **15** (11 `start`, 2 `force-reload`, 1 `reload`, 1 `restart`); the ceiling is set well above that so a package set that grows a few service-starting packages does not fail the lint, while a runaway still does. It was 16 before the fix actually took effect, which was a guess against a log in which the denial had never once fired — the number above is measured. |
 
-## Rows 8/9/21 — still emitted by a real build (OPEN, 2026-08-10)
+## How rows 8/9/21 are actually fixed
 
-Rows 8, 9 and 21 are recorded above as `FIXED` by todo10's `policy-rc.d` skeleton
-tree. Wave 8's real `--variant edge` and `--variant edge-test` builds are the
-**first logs that ever tested that claim** (todo 9-12's acceptance rows are
-written against `$EA/wave8/builds/rock-edge.log`, which did not exist until now),
-and they **disprove it**: `ci/check-build-log.sh` reports all three as
-`REGRESSED`, at exactly their baseline counts (2 / 3 / 3).
+Rows 8, 9 and 21 were dispositioned `FIXED` at census freeze on the strength of
+the base layer's `policy-rc.d` skeleton tree, but Wave 8's real `--variant edge`
+build was the **first log that ever tested that claim** and it emitted all three
+at exactly their baseline counts. Two independent causes were found; both are
+closed, and neither one alone is sufficient.
 
-What is established:
+**1. Mode, not placement — and a umask cannot fix it.** Debian's `invoke-rc.d`
+gates the helper on `test -x "${POLICYHELPER}"` (`/usr/sbin/invoke-rc.d` line
+138), so a non-executable helper is reported as **missing** rather than as
+denying. mkosi 26's `Apt.install()` writes its own `/usr/sbin/policy-rc.d` with
+`Path.write_text()` inside `with umask(~0o644):`, producing mode 0644. The
+obvious repair — widening that umask to `~0o755` — is a **complete no-op**, and
+it shipped for a day looking plausible: a umask only ever CLEARS permission bits,
+and Python's `open(..., "w")` requests base mode 0o666, which carries no execute
+bit to keep. Both umasks land on 0644. `ci/Dockerfile` therefore inserts an
+explicit `policyrcd.chmod(0o755)` after the write, with apply-or-fail drift
+guards and a `py_compile` check.
 
-- Debian's `invoke-rc.d` gates the helper on `test -x "${POLICYHELPER}"`
-  (`/usr/sbin/invoke-rc.d` line 138), so a NON-EXECUTABLE helper is reported as
-  **missing**, not as ignored.
-- mkosi 26's `Apt.install()` (`mkosi/installer/apt.py`) writes its own
-  `/usr/sbin/policy-rc.d` under `umask(~0o644)` — mode 0644, i.e. never honoured —
-  and `unlink()`s it when the transaction ends, which is also what removes this
-  repository's skeleton copy. `ci/Dockerfile` now patches that one umask, with an
-  apply-or-fail drift guard.
-- That patch is **not sufficient**. A real build with the patched builder
-  (`ceralive-mkosi-builder:26-<sha>`) still emits all three signatures, and they
-  land inside mkosi's own `‣ Installing Debian` step for the base layer — a
-  window no skeleton tree, ExtraTree, prepare script or postinst in this
-  repository can reach.
+**2. mkosi unlinks the helper, and only the base image declares `Packages=`.**
+`Apt.install()` `unlink()`s the path when its transaction ends — including the
+skeleton tree's copy, because the unlink does not care who put the file there.
+`platform`, `runtime` and `app` set `BaseTrees=` with no `Packages=`, so mkosi's
+`install_distribution()` returns early for them and never calls `Apt.install()`
+at all. Every package transaction those layers run is one this repository drives
+itself (`runtime`'s `shared.list` install, `platform`'s BSP via `mkosi-install`,
+`app`'s first-party `dpkg -i` plus its `apt-get install -f`), and all of them ran
+with the path absent. That is precisely where rows 9 and 21 came from — inside
+the runtime layer's `‣ Running postinstall script …` step, not the base layer's
+`‣ Installing Debian`. Those three layers now install the helper themselves
+(`customize/postinst.d/services.sh::install_chroot_service_policy` plus two
+self-contained twins), before their first package transaction. The app layer's
+existing `remove_chroot_service_policy` still strips it, fail-loud, before the
+rootfs is sealed.
 
-What is NOT yet established: which write inside that step leaves the path absent
-at the moment `dbus`/`openssh-server` are configured. Candidates not yet
-eliminated are the essential-deb `extract_tar` into `context.root` and
-`usrmerge`'s conversion, both of which run in that window.
+**A skeleton tree cannot substitute for the postinst call.** `SkeletonTrees=` on
+the upper images looks equivalent and is not: `install_skeleton_trees()` runs
+inside mkosi's `if not cached:` branch while `run_postinst_scripts()` runs
+unconditionally, and this repo builds with `Incremental=yes`. A cached layer
+would silently drop the helper while still running the transactions that need it.
 
-Until it is closed, do not re-disposition these rows to `ACCEPTED` to make the
-lint green: acceptance row 10 greps the wave-8 logs for
-`invoke-rc.d: WARNING|Failed to open connection to .*message bus` directly, so
-the census disposition is not what that row tests. The honest state is that the
-`FIXED` claim is unproven and the mechanism is understood but incompletely
-diagnosed.
+**Verification.** A real `rock-5b-plus --variant edge` build with a deliberately
+purged base cache (so the base layer's own `‣ Installing Debian` really re-ran):
+rows 8/9/21 go from 2/3/3 to **0/0/0**, replaced by 15 `policy-rc.d denied
+execution` lines, and the final `app` tree carries no `/usr/sbin/policy-rc.d`.
+The base half alone was independently confirmed first on a vendor-path build,
+where the two `invoke-rc.d: WARNING` lines became two
+`policy-rc.d denied execution of start.` denials.
+
+**Faster reproduction, for the next investigation of this class.** These three
+signatures do not need the `--variant edge` kernel-from-source build: a plain
+`./build rock-5b-plus` exercises the same four layers in roughly half the time.
+What it DOES need is a cold base layer — `mkosi/cache/<board>/*base.cache` and
+`*base.manifest` must be deleted first (they are root-owned, so remove them from
+a throwaway container), otherwise mkosi skips `install_distribution()` entirely
+and row 8's window never opens. A build log with no `‣  Installing Debian` line
+in it has not tested row 8, whatever the grep says.
 
 ## Provenance of each count
 
