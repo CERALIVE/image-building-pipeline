@@ -13,6 +13,23 @@ bats_require_minimum_version 1.5.0
 
 load manifest-helpers
 
+# lib/build-kernel.sh is an ENTRY plus the lib/kernel/ concern modules it sources.
+# A check that extracts a FUNCTION BODY out of the stage by TEXT must read the
+# whole SET in the entry's own source order — pointed at the entry alone the
+# extraction yields nothing and the assertion built on it goes vacuous. The module
+# list is derived from the entry's real `source` lines, so a module dropped from
+# that list drops out of the check too.
+write_build_kernel_source_set() {
+  local out="$1" entry="$LIB_DIR/build-kernel.sh" module
+  {
+    cat "$entry"
+    while read -r module; do
+      cat "$LIB_DIR/kernel/$module"
+    done < <(sed -n 's#^source "${KERNEL_LIB_DIR}/\(.*\)"$#\1#p' "$entry")
+  } >"$out"
+  [ -s "$out" ]
+}
+
 # ===========================================================================
 # 26. Family variants + kernel-build-from-source (Task 26).
 #
@@ -893,7 +910,8 @@ YAML
   # the path IS present — grep exits at the first match and tar dies of SIGPIPE.
   # It only misfires once the listing outgrows the pipe buffer, so a tiny fixture
   # passes and a real kernel deb (thousands of DTBs and modules) never does.
-  local script="$LIB_DIR/build-kernel.sh"
+  local script="$BATS_TEST_TMPDIR/build-kernel-sources.sh"
+  write_build_kernel_source_set "$script"
   local deb="$BATS_TEST_TMPDIR/big.deb" stage="$BATS_TEST_TMPDIR/stage"
   local want='/usr/lib/linux-image-x/rockchip/rk3588-rock-5b-plus.dtb'
 
@@ -938,7 +956,8 @@ YAML
 @test "build-kernel: the builder image tag is content-addressed (an edited Dockerfile invalidates it)" {
   # ensure_kernel_builder_image skips `docker build` when the tag already exists,
   # so a constant tag would pin every host to whatever layers it first built.
-  local script="$LIB_DIR/build-kernel.sh"
+  local script="$BATS_TEST_TMPDIR/build-kernel-sources.sh"
+  write_build_kernel_source_set "$script"
   local base='debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2'
   local tag_a tag_b tag_edited edited
 

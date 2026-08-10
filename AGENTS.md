@@ -30,6 +30,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 │   │                         #   build-feature-sysext.sh, measure-size.sh, parity-check.sh,
 │   │                         #   fetch-debs.sh (REPOS array + FIRST_PARTY_APT_PKGS), …
 │   ├── stages/               # one module per orchestrator [N/9] stage body
+│   ├── kernel/               # build-kernel.sh concern modules (config/checkout/builder/package)
+│   ├── disk/                 # assemble-disk.sh concern modules (repart/slot/boot/gap/verify)
 │   └── app-layer/
 │       └── sysext.sh         # sysext build lib (extract → prune → squashfs)
 ├── mkosi/                    # mkosi config, customize hooks, runtime artifacts, platform
@@ -51,6 +53,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 |------|----------|
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
+| **Kernel-build-from-source internals** | `lib/build-kernel.sh` is a thin STAGE entry; the bodies live in `lib/kernel/{config,checkout,builder,package}.sh` — see the "build-kernel.sh and assemble-disk.sh are ENTRIES plus concern modules" KEY FACT below |
+| **RK3588 disk-assembly internals** | `lib/assemble-disk.sh` is a thin SEQUENCER entry; the bodies live in `lib/disk/{repart,slot,boot,gap,verify}.sh` — same KEY FACT |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
 | **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
 | **Read a `.deb`'s control fields / assert its identity / explode it** | `lib/shared/deb-lib.sh` — the ONE `deb_control_field` / `deb_pkg_{name,version,arch}` / `assert_deb_identity` / `explode_deb`; contract `tests/deb-lib.test.sh`. See the KEY FACT below |
@@ -245,6 +249,71 @@ mention it too, so reordering silently swaps which block the gate's tests execut
 All 26 runtime `[N/9]` log strings are byte-identical to the pre-split file, and
 the `DRY_RUN=1` build plan is byte-identical for all three shipped boards.
 
+**`build-kernel.sh` and `assemble-disk.sh` are ENTRIES plus concern modules —
+the same shape again, and the same four rules** [EXISTS]
+
+Both files kept their EXTERNAL interface exactly: same CLI flags, same env
+contract, same log strings, same exit codes. Nothing that invokes them changed.
+Every relocated function body is byte-identical to the pre-split text.
+
+`lib/build-kernel.sh` (463 lines, was 781) stays the STAGE: the CLI/`usage()`,
+the locations (`KERNEL_BUILDER_DOCKERFILE`, `CERALIVE_REL_KERNEL_CCACHE_DIR`),
+the `KERNEL_GIT_*`/`KERNEL_BUILD_JOBS` knobs, the injected `container_script`
+with its `-e` environment contract, and `main()`.
+
+| Module | Holds |
+|---|---|
+| `lib/kernel/config.sh` | `require_kernel_source_field`, `validate_kernel_source_inputs`, `resolve_kernel_config_mode` (DEFCONFIG vs CONFIG-FILE) |
+| `lib/kernel/checkout.sh` | `fetch_pinned_tree_once`, `fetch_pinned_tree` |
+| `lib/kernel/builder.sh` | `derive_kernel_build_jobs` + `KERNEL_BUILD_MEM_PER_JOB_KIB`, `select_container_runtime`, `resolve_kernel_builder_tag`, `ensure_kernel_builder_image` |
+| `lib/kernel/package.sh` | `resolve_kernel_package_name`, `deb_control_field`, `deb_data_list`, `deb_lists_path`, `validate_built_kernel_deb` |
+
+`lib/assemble-disk.sh` (340 lines, was 569) stays the SEQUENCER: the CLI, the
+FROZEN contract constants, the scratch registry, `build_disk()` and `main()`.
+
+| Module | Holds |
+|---|---|
+| `lib/disk/repart.sh` | `stage_repart_dir` |
+| `lib/disk/slot.sh` | `det_uuid`, `populate_rootfs_slot`, `_populate_rootfs_slot_in_container` |
+| `lib/disk/boot.sh` | `populate_boot_partition` |
+| `lib/disk/gap.sh` | `write_gap_bootloader` |
+| `lib/disk/verify.sh` | `verify_contract` |
+
+The four `orchestrate.sh` rules apply verbatim, and each bit again:
+
+- **Modules read and write the entry's locals through bash DYNAMIC SCOPING.**
+  `build-kernel.sh::main()` declares `config_mode`/`config_desc`/`fragment`/
+  `absent_list`/`kernel_pkg` and `kernel/{config,package}.sh` assign into that
+  frame. Those declarations look unused in `main()` and must not be "cleaned
+  up"; every module carries a file-level `# shellcheck disable=SC2154,SC2034`.
+- **Both module lists are EXPLICIT and ORDERED, never a glob**, in stage /
+  assembly order.
+- **Things that deliberately did NOT move.** `assemble-disk.sh` keeps
+  `_SCRATCH_PATHS`, `_cleanup_scratch`, `register_scratch`/`discard_scratch` and
+  the process-level `trap … EXIT` — owning that trap is only safe in a file that
+  is exclusively EXECUTED, and a module could be sourced elsewhere and clobber
+  its caller's. It also keeps its header at lines **2-40 verbatim**, because
+  `main`'s `-h` prints it with `sed -n '2,40p' "${BASH_SOURCE[0]}"`; inserting a
+  line above line 40 silently truncates the help text. `build-kernel.sh` keeps
+  the container script (three suites read it by text) and
+  `CERALIVE_REL_KERNEL_CCACHE_DIR` (`generated-paths-contract.test.sh` greps for
+  it in that exact file).
+- **A static test that reads either file by TEXT must read the whole SET.** Three
+  checks broke on this and were repaired, not weakened:
+  `kernel-build-resilience.bats`'s knob-default agreement (the two spellings now
+  sit in *different* files, so `>= 2` can only hold across the set) and
+  `variant-contract.bats`'s two `sed`-extracted function bodies
+  (`deb_data_list`/`deb_lists_path`, `resolve_kernel_builder_tag`). Each builds
+  entry + `lib/kernel/*` into a FILE via `write_build_kernel_source_set`, whose
+  module list is parsed out of the entry's OWN `source` lines — so a module
+  dropped from the list drops out of the check instead of going quietly vacuous.
+  `assemble-disk.sh` has no text-extraction harness: every suite that names it
+  (`rk3588-ab-contract.bats`, `bench-partlabels.bats`) drives its CLI.
+
+The `DRY_RUN=1` build plan is byte-identical for all three boards × all three
+variants, and `assemble-disk.sh verify` output is identical modulo the random
+GPT disk GUID and the `mktemp` path.
+
 **A build-log warning is a defect with a countdown on it — the 26 signatures are
 frozen in a census and a lint rejects anything outside it** [EXISTS]
 
@@ -329,7 +398,8 @@ Three consequences worth knowing before touching it:
   TEXT** and must lift `deb_pkg_name` + `deb_control_field` out of `deb-lib.sh` in the
   same read — the "static test that reads by TEXT must read the whole set" rule again.
 
-`lib/build-kernel.sh` deliberately keeps its own `deb_control_field`: it is the
+The kernel-build stage deliberately keeps its own `deb_control_field` (now in
+`lib/kernel/package.sh`, sourced by `lib/build-kernel.sh`): it is the
 self-contained in-builder leg and is out of this library's scope. Contract:
 `tests/deb-lib.test.sh` (happy, per-axis mismatch, corrupt archive, and the
 single-definition property itself).

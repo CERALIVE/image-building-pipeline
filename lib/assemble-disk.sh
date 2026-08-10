@@ -158,6 +158,40 @@ discard_scratch() {
 }
 
 # ---------------------------------------------------------------------------
+# CONCERN MODULES (lib/disk/) — this file stays the SEQUENCER: the CLI, the
+# locations, the FROZEN contract constants, the process-level scratch registry
+# above, build_disk() and main(). Each assembly concern lives in its own module:
+#
+#   repart.sh  partition-table definition staging (single-slot drop, bench Label=)
+#   slot.sh    factory A/B rootfs slot population (offline mkfs.ext4 -d + dd)
+#   boot.sh    boot-artifact installation into the vfat boot partition
+#   gap.sh     the 16 MB raw bootloader gap write (family-gated)
+#   verify.sh  the `verify` mode's frozen-contract check
+#
+# EXPLICIT and ORDERED, never a glob (the customize/postinst-lib.sh rule): a
+# module lost or never wired up must fail HERE, at source time, not halfway
+# through an assembly as `command not found`. The order is ASSEMBLY order.
+#
+# THREE things deliberately did NOT move. The scratch registry, `_cleanup_scratch`
+# and its process-level `trap … EXIT` stay in this file because owning that trap
+# is only safe for a file that is exclusively EXECUTED (see the WHY above); a
+# module could be sourced elsewhere and would then clobber its caller's trap.
+# The FROZEN contract constants stay because they are the contract. And the
+# header block stays lines 2-40 verbatim — `main`'s `-h` prints it by line range.
+# ---------------------------------------------------------------------------
+DISK_LIB_DIR="${HERE}/disk"
+# shellcheck source=disk/repart.sh
+source "${DISK_LIB_DIR}/repart.sh"
+# shellcheck source=disk/slot.sh
+source "${DISK_LIB_DIR}/slot.sh"
+# shellcheck source=disk/boot.sh
+source "${DISK_LIB_DIR}/boot.sh"
+# shellcheck source=disk/gap.sh
+source "${DISK_LIB_DIR}/gap.sh"
+# shellcheck source=disk/verify.sh
+source "${DISK_LIB_DIR}/verify.sh"
+
+# ---------------------------------------------------------------------------
 # assert_free_space <dir> <need_bytes> <what>
 # Pre-flight guard: fail EARLY and legibly when <dir>'s filesystem cannot hold
 # <need_bytes>, instead of letting `truncate`/`mkfs.ext4 -d` surface a raw
@@ -172,208 +206,6 @@ assert_free_space() {
     || die "could not read free space on ${dir} (df returned '${avail_bytes}')"
   (( avail_bytes >= need_bytes )) \
     || die "insufficient free space for ${what}: ${dir} has ${avail_bytes} bytes free, needs ${need_bytes} (short by $(( need_bytes - avail_bytes )) bytes) — this scratch area must be persistent, quota-safe storage, not a size-capped tmpfs like /tmp"
-}
-
-# ---------------------------------------------------------------------------
-# stage_repart_dir <dest> <single_slot:true|false>
-# Copy the committed repart defs into <dest>, dropping rootfs_b for single-slot.
-# ---------------------------------------------------------------------------
-stage_repart_dir() {
-  local dest="$1" single_slot="$2" f
-  [[ -d "${REPART_DIR}" ]] || die "repart definitions dir not found: ${REPART_DIR}"
-  mkdir -p "${dest}"
-  rm -f "${dest}"/*.conf
-  shopt -s nullglob
-  # The committed defs always carry the FROZEN production Label=. The bench
-  # overlay rewrites it on the STAGED COPY only, so mkosi/repart/*.conf — the
-  # single source of truth for the frozen contract — is never edited, and the
-  # unflagged path stays a plain cp.
-  local prefix; prefix="$(partlabel_prefix)"
-  local copied=0
-  for f in "${REPART_DIR}"/*.conf; do
-    if [[ "${single_slot}" == "true" && "$(basename "${f}")" == *rootfs_b* ]]; then
-      log_info "single-slot fallback: omitting $(basename "${f}") (no B slot)"
-      continue
-    fi
-    if [[ -n "${prefix}" ]]; then
-      sed "s|^Label=|Label=${prefix}|" "${f}" >"${dest}/$(basename "${f}")"
-    else
-      cp "${f}" "${dest}/"
-    fi
-    copied=$(( copied + 1 ))
-  done
-  shopt -u nullglob
-  (( copied > 0 )) || die "no repart *.conf staged from ${REPART_DIR}"
-}
-
-# ---------------------------------------------------------------------------
-# populate_boot_partition <bootp_img> <adapter> <board_id> <single_slot>
-# FAMILY GATE for filling the vfat boot partition with the U-Boot A/B selector
-# artifacts: boot.scr (compiled by mkimage), cera_board.env, the boot_state.txt A/B
-# seed, and recovery.scr. Only the custom-uboot adapter (RK3588) boots via
-# boot.scr; x86 (efi) populates its EFI System Partition elsewhere and is skipped.
-# install-boot.sh renders every board specific from the manifest-resolved env —
-# DTB_NAME/SERIAL_CONSOLE/COMPATIBLE_STRING are EXPLICITLY forwarded from this
-# assembler's environment (orchestrate.sh resolves+exports them from the manifest);
-# we never rely on transitive process inheritance, so a standalone assemble-disk.sh
-# call fails loudly instead of silently rendering a half-board boot partition.
-# BOARD_ID + SINGLE_SLOT_FALLBACK are forced to the values THIS assembly used so the
-# boot_state seed can never drift from the GPT actually laid. Offline + rootless: the
-# tree is mcopy'd straight into the FAT image (never loop-mounted), so a re-run only
-# overwrites (idempotent) and there is no mount to leak on error.
-# ---------------------------------------------------------------------------
-populate_boot_partition() {
-  local bootp="$1" adapter="$2" board_id="$3" single_slot="$4"
-  if [[ "${adapter}" != "custom" ]]; then
-    log_info "bootloader_adapter=${adapter:-<unset>} → SKIP boot-partition populate (only custom-uboot/RK3588 ships boot.scr/recovery.scr/cera_board.env/boot_state.txt)"
-    return 0
-  fi
-  [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to render the boot partition"
-  [[ -n "${DTB_NAME:-}" ]]        || die "bootloader_adapter=custom requires DTB_NAME (manifest dtb_name) to render the boot partition"
-  [[ -n "${SERIAL_CONSOLE:-}" ]]  || die "bootloader_adapter=custom requires SERIAL_CONSOLE (family serial_console) to render the boot console"
-  [[ -n "${COMPATIBLE_STRING:-}" ]] || die "bootloader_adapter=custom requires COMPATIBLE_STRING (orchestrator ceralive-<board-slug>) for the boot partition"
-  [[ -x "${INSTALL_BOOT_SH}" ]] || die "boot-partition installer not executable: ${INSTALL_BOOT_SH}"
-  require_cmd mcopy    # mtools — fill the FAT offline, no loop mount / no root
-  require_cmd mkimage  # u-boot-tools — install-boot.sh compiles boot.scr; the device needs it
-
-  log_info "populating boot partition (boot.scr + recovery.scr + cera_board.env + boot_state.txt, board=${board_id}, single_slot=${single_slot})"
-  local staging; staging="$(mktemp -d)"
-  register_scratch "${staging}"
-  SINGLE_SLOT_FALLBACK="${single_slot}" BOARD_ID="${board_id}" \
-    DTB_NAME="${DTB_NAME}" SERIAL_CONSOLE="${SERIAL_CONSOLE}" \
-    COMPATIBLE_STRING="${COMPATIBLE_STRING}" \
-    bash "${INSTALL_BOOT_SH}" boot-partition "${staging}"
-  # -s recurse, -o overwrite without prompt (idempotent), -Q quit on
-  # error, -m keep mtimes. Lands the staged tree at the FAT image root.
-  mcopy -i "${bootp}" -s -o -Q -m "${staging}"/* ::
-  discard_scratch "${staging}"
-  log_success "boot partition populated"
-}
-
-# ---------------------------------------------------------------------------
-# write_gap_bootloader <img> <adapter> <board_id> <bsp_dir>
-# FAMILY GATE for the RK3588 raw-gap bootloader write. Only the custom-uboot
-# adapter (rk3588, decision D3) has an idbloader+U-Boot+ATF gap to fill; x86
-# (efi) boots from the EFI System Partition and MUST be skipped. The actual
-# board-specific blob layout + offsets live in write-bootloader.sh, never here.
-# ---------------------------------------------------------------------------
-write_gap_bootloader() {
-  local img="$1" adapter="$2" board_id="$3" bsp_dir="$4"
-  case "${adapter}" in
-    custom)
-      [[ -n "${board_id}" ]] || die "bootloader_adapter=custom requires --board (or BOARD_ID) to select the RK3588 blob set"
-      [[ -n "${bsp_dir}" ]]  || die "bootloader_adapter=custom requires --bsp-dir (or BSP_DIR) — the staged Armbian U-Boot .deb lives there"
-      require_cmd "${WRITE_BOOTLOADER_SH}" 2>/dev/null || [[ -x "${WRITE_BOOTLOADER_SH}" ]] \
-        || die "bootloader writer not executable: ${WRITE_BOOTLOADER_SH}"
-      log_info "bootloader_adapter=custom → writing RK3588 bootloader into the ${GAP_MB} MiB gap (board=${board_id})"
-      "${WRITE_BOOTLOADER_SH}" write --image "${img}" --board "${board_id}" \
-        --bsp-dir "${bsp_dir}" --gap-mb "${GAP_MB}"
-      ;;
-    efi)
-      log_info "bootloader_adapter=efi → SKIP RK3588 raw-gap write (x86 boots from the EFI System Partition; no idbloader gap)"
-      ;;
-    ""|none)
-      log_warn "bootloader_adapter unset → SKIP raw-gap bootloader write (set RAUC_BOOTLOADER_ADAPTER/--bootloader-adapter for a bootable image)"
-      ;;
-    *)
-      die "unknown bootloader_adapter '${adapter}' (expected: custom | efi)"
-      ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
-# det_uuid <seed> — a STABLE RFC-4122-shaped UUID derived from <seed>. mkfs.ext4
-# would otherwise stamp a random filesystem UUID (and dir-hash seed), defeating a
-# bit-for-bit rebuild; seeding both from the board makes the slot reproducible.
-# ---------------------------------------------------------------------------
-det_uuid() {
-  local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
-  printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
-}
-
-# ---------------------------------------------------------------------------
-# Offline + rootless, matching the rest of this assembler: mkfs.ext4 -d builds a
-# pre-populated ext4 image FROM the directory (no loop mount, no root), sized to the
-# exact slot, then a single dd lands it at the slot's raw offset (conv=notrunc so the
-# surrounding partitions are untouched). An empty rootfs_tree is a no-op: the static
-# --no-format verify path passes "" and only lays GPT geometry.
-# ---------------------------------------------------------------------------
-populate_rootfs_slot() {
-  local img="$1" rootfs_tree="$2" part_num="$3" slot_label="$4"
-  [[ -n "${rootfs_tree}" ]] || return 0   # no tree provided → skip (verify path / backward compat)
-  [[ -d "${rootfs_tree}" ]] || die "rootfs tree not found: ${rootfs_tree}"
-
-  local start_sector size_sectors
-  start_sector="$(part_field "${img}" "${part_num}" 'First sector')"
-  size_sectors="$(part_field "${img}" "${part_num}" 'Partition size')"
-  [[ -n "${start_sector}" && -n "${size_sectors}" ]] \
-    || die "could not read ${slot_label} (p${part_num}) geometry from ${img}"
-  local size_bytes=$(( size_sectors * SECTOR ))
-
-  log_info "populating ${slot_label} (p${part_num}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
-  # Build the pre-sized slot image ALONGSIDE the output .raw, never in a bare
-  # `mktemp` /tmp: on the self-hosted runner /tmp is a FIXED 16 GiB tmpfs (not
-  # scaled to host RAM), and a 4096 MiB slot exhausts it → mkfs.ext4 EDQUOT
-  # (proof-5). $(dirname img) is the persistent, quota-safe filesystem the .raw
-  # itself lands on — the same convention fetch-debs.sh uses (temp next to its
-  # destination artifact). register_scratch cleans it on success AND on `die`.
-  local scratch_dir; scratch_dir="$(dirname "${img}")"
-  assert_free_space "${scratch_dir}" "${size_bytes}" "${slot_label} slot image"
-  local rootfs_img; rootfs_img="$(mktemp "${scratch_dir}/.rootfs-slot.XXXXXX")"
-  register_scratch "${rootfs_img}"
-  truncate -s "${size_bytes}" "${rootfs_img}"
-  # The mkosi rootfs tree is root-owned with 0700 system dirs (boot/loader,
-  # var/lib/private, …) a rootless host user cannot traverse. Probe readability
-  # (the tar test emit_artifact uses); if blocked, populate inside the builder
-  # container as root, which also preserves the source uid/gid/mode in the image.
-  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-${slot_label}")"
-  if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
-    require_cmd mkfs.ext4   # e2fsprogs — the -d populate is the whole rootless trick
-    mkfs.ext4 -q -L "${slot_label}" -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
-      -d "${rootfs_tree}" "${rootfs_img}" \
-      || die "mkfs.ext4 -d failed populating ${slot_label} from ${rootfs_tree}"
-  else
-    log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
-    _populate_rootfs_slot_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}" "${slot_label}"
-  fi
-  dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
-    conv=notrunc status=none
-  discard_scratch "${rootfs_img}"
-  log_success "${slot_label} populated (${size_bytes} byte slot ← partition ${part_num})"
-}
-
-# ---------------------------------------------------------------------------
-# Run `mkfs.ext4 -d` as root in the builder container so the root-owned mkosi tree
-# (0700 system dirs) is fully readable. <out_img> is a host-created, pre-sized file;
-# the container writes the populated ext4 into it in place. Mirrors emit_artifact's
-# container fallback. e2fsprogs is installed on demand (the slim builder lacks it).
-# ---------------------------------------------------------------------------
-_populate_rootfs_slot_in_container() {
-  local tree="$1" out_img="$2" fs_uuid="$3" slot_label="$4"
-  local runtime=""
-  if command -v docker >/dev/null 2>&1; then runtime="docker"
-  elif command -v podman >/dev/null 2>&1; then runtime="podman"
-  else die "rootfs tree is root-owned and neither docker nor podman is available to populate it rootlessly — run the build as root or install a container runtime"; fi
-
-  local image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
-  local img_dir img_base; img_dir="$(dirname "${out_img}")"; img_base="$(basename "${out_img}")"
-  "${runtime}" run --rm \
-    -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
-    -e "FS_UUID=${fs_uuid}" \
-    -e "FS_LABEL=${slot_label}" \
-    -v "${tree}:/rootfs-tree:ro" \
-    -v "${img_dir}:/out" \
-    "${image}" \
-    bash -euo pipefail -c '
-      export DEBIAN_FRONTEND=noninteractive
-      if ! command -v mkfs.ext4 >/dev/null 2>&1; then
-        apt-get update -qq
-        apt-get install -y --no-install-recommends \
-          -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
-      fi
-      mkfs.ext4 -q -L "${FS_LABEL}" -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
-        -d /rootfs-tree "/out/'"${img_base}"'"
-    ' || die "containerized mkfs.ext4 -d failed populating ${slot_label} from ${tree}"
 }
 
 # ---------------------------------------------------------------------------
@@ -452,67 +284,6 @@ build_disk() {
 
   discard_scratch "${defs}"
   log_success "assembled ${img}"
-}
-
-# ---------------------------------------------------------------------------
-# verify_contract — build an A/B + a single-slot test image and ASSERT both
-# against the frozen contract. Image build (build_disk) stays here; the
-# partition/gap/label assertions live in verify-disk.sh do_verify (task 6).
-# ---------------------------------------------------------------------------
-verify_contract() {
-  local tmp; tmp="$(mktemp -d)"
-  register_scratch "${tmp}"
-  local ab="${tmp}/ab.img" ss="${tmp}/singleslot.img"
-
-  echo "=============================================================="
-  echo " CeraLive Stage 4 — A/B partition layout verification"
-  echo " Contract: docs/partition-contract.md §3 (v2, FROZEN)"
-  echo " Repart defs: mkosi/repart/*.conf"
-  echo " Tooling: $(systemd-repart --version | head -1), $(sgdisk --version 2>&1 | head -1)"
-  echo "=============================================================="
-  echo
-
-  # --- A/B (>=16 GB; both current boards) -----------------------------------
-  echo "### A/B layout (SINGLE_SLOT_FALLBACK=false, ${DEFAULT_TOTAL_MB} MiB medium)"
-  build_disk "${ab}" "${DEFAULT_TOTAL_MB}" "false" "false" 2>/dev/null
-  echo
-  echo "--- sgdisk --print ---"
-  sgdisk --print "${ab}" 2>/dev/null | sed -n '/Disk /,$p'
-  echo
-  do_verify "${ab}"
-  echo
-
-  # --- Slot-swap static check (data survives A/B) ---------------------------
-  echo "### Slot-swap static check — does /data survive an A/B swap?"
-  local l_boot l_a l_b l_data
-  l_boot="$(resolve_partlabel boot)";     l_a="$(resolve_partlabel rootfs_a)"
-  l_b="$(resolve_partlabel rootfs_b)";    l_data="$(resolve_partlabel data)"
-  echo "RAUC-managed rootfs slots (swapped on update): ${l_a}, ${l_b}"
-  echo "SHARED partitions (never touched by a swap):    ${l_boot}, ${l_data}"
-  local data_start data_size
-  data_start="$(part_field "${ab}" 4 'First sector')"
-  data_size="$(part_field "${ab}" 4 'Partition size')"
-  echo "  data geometry (A active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=${l_data}"
-  echo "  simulate swap A->B: RAUC flips the active rootfs slot bootname only; it"
-  echo "  rewrites NO partition table entry. data start/size are INVARIANT =>"
-  echo "  data geometry (B active): start=${data_start} sectors, size=${data_size} sectors, PARTLABEL=${l_data}"
-  echo "  data partition is NOT in {${l_a}, ${l_b}} => mutable state SURVIVES the swap OK"
-  echo
-
-  # --- Single-slot fallback (<16 GB) ----------------------------------------
-  echo "### Single-slot fallback (SINGLE_SLOT_FALLBACK=true, ${SINGLESLOT_TOTAL_MB} MiB medium)"
-  build_disk "${ss}" "${SINGLESLOT_TOTAL_MB}" "true" "false" 2>/dev/null
-  echo
-  echo "--- sgdisk --print ---"
-  sgdisk --print "${ss}" 2>/dev/null | sed -n '/Disk /,$p'
-  echo
-  do_verify "${ss}"
-  echo
-
-  discard_scratch "${tmp}"
-  echo "=============================================================="
-  log_success "ALL contract assertions passed (A/B + single-slot)"
-  echo "=============================================================="
 }
 
 # ---------------------------------------------------------------------------

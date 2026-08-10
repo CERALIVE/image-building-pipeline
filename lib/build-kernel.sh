@@ -100,9 +100,6 @@ KERNEL_BUILDER_IMAGE_TAG=""
 # derivation reads MemAvailable, and reading it once when the file is sourced
 # would sample a moment that has nothing to do with when `make` runs.
 KERNEL_BUILD_JOBS=""
-# Peak RSS of one kernel compile job, rounded up. Both the ceiling and the unit
-# are empirical, so they live here rather than inline in the arithmetic.
-KERNEL_BUILD_MEM_PER_JOB_KIB=$((2 * 1024 * 1024))
 # Bounded so a hung fetch cannot wedge a build host indefinitely, and retried so
 # one blip does not discard an already-paid-for container and checkout. These
 # defaults are mirrored by fetch_pinned_tree's own `:-` fallbacks, which is what
@@ -110,6 +107,33 @@ KERNEL_BUILD_MEM_PER_JOB_KIB=$((2 * 1024 * 1024))
 KERNEL_GIT_ATTEMPTS="${CERALIVE_KERNEL_GIT_ATTEMPTS:-3}"
 KERNEL_GIT_TIMEOUT="${CERALIVE_KERNEL_GIT_TIMEOUT:-1800}"
 KERNEL_GIT_BACKOFF="${CERALIVE_KERNEL_GIT_BACKOFF:-5}"
+
+# ---------------------------------------------------------------------------
+# CONCERN MODULES (lib/kernel/) — this file stays the STAGE: the CLI, the
+# locations, the env-overridable knobs, the container ENVIRONMENT CONTRACT (the
+# injected container script and its -e list) and main(). Each helper concern
+# lives in its own module:
+#
+#   config.sh    input validation + DEFCONFIG vs CONFIG-FILE resolution
+#   checkout.sh  pinned fetch: bounded retry, pin assertion, publish
+#   builder.sh   builder container + the `make -j` memory preflight
+#   package.sh   built-.deb identity and four-axis validation
+#
+# EXPLICIT and ORDERED, never a glob (the customize/postinst-lib.sh rule): a
+# module lost or never wired up must fail HERE, at source time, not halfway
+# through a real build as `command not found`. The order is stage order, so a
+# static test that reads this stage by TEXT can concatenate entry + modules and
+# still assert ordering.
+# ---------------------------------------------------------------------------
+KERNEL_LIB_DIR="${HERE}/kernel"
+# shellcheck source=kernel/config.sh
+source "${KERNEL_LIB_DIR}/config.sh"
+# shellcheck source=kernel/checkout.sh
+source "${KERNEL_LIB_DIR}/checkout.sh"
+# shellcheck source=kernel/builder.sh
+source "${KERNEL_LIB_DIR}/builder.sh"
+# shellcheck source=kernel/package.sh
+source "${KERNEL_LIB_DIR}/package.sh"
 
 usage() {
   cat >&2 <<EOF
@@ -147,289 +171,6 @@ Env:
 EOF
 }
 
-require_kernel_source_field() {
-  local name="$1" val="$2"
-  [[ -n "${val}" ]] \
-    || die "kernel_source did not resolve required field '${name}' — refusing to build a kernel from a half-specified pin"
-}
-
-# ---------------------------------------------------------------------------
-# derive_kernel_build_jobs — echo the `make -j` width, and log how it got there.
-#
-# The failure this exists to prevent is not a slow build, it is a DEAD one:
-# `make -j$(nproc)` on a core-rich but memory-thin host gets OOM-killed deep
-# inside bindeb-pkg, after the clone, the patch series and the config gate have
-# all already passed — so the build burns half an hour to report a link error or
-# a bare "Killed". min(nproc, MemAvailable / 2 GiB) is the cheap guard, floored
-# at 1 (a serial build beats no build) and ceilinged at nproc (spare memory buys
-# no extra cores).
-#
-# CERALIVE_KERNEL_BUILD_JOBS wins UNCONDITIONALLY: an operator who has measured
-# their own host outranks a heuristic, including upward.
-# ---------------------------------------------------------------------------
-derive_kernel_build_jobs() {
-  local meminfo="${CERALIVE_RESOURCE_MEMINFO_FILE:-/proc/meminfo}"
-  local cpus mem_kib mem_jobs jobs
-
-  if [[ -n "${CERALIVE_KERNEL_BUILD_JOBS:-}" ]]; then
-    [[ "${CERALIVE_KERNEL_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]] \
-      || die "CERALIVE_KERNEL_BUILD_JOBS must be a positive integer (got '${CERALIVE_KERNEL_BUILD_JOBS}')"
-    log_info "build jobs: ${CERALIVE_KERNEL_BUILD_JOBS} (CERALIVE_KERNEL_BUILD_JOBS override — memory ceiling not applied)"
-    printf '%s' "${CERALIVE_KERNEL_BUILD_JOBS}"
-    return 0
-  fi
-
-  cpus="$(nproc 2>/dev/null || echo 4)"
-  [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
-
-  mem_kib="$(awk '$1 == "MemAvailable:" { print $2; found = 1 } END { if (!found) exit 1 }' \
-    "${meminfo}" 2>/dev/null)" || mem_kib=""
-  if [[ ! "${mem_kib}" =~ ^[0-9]+$ ]]; then
-    # Inventing a memory figure here would silently reintroduce the OOM default
-    # under a name that claims to have prevented it, so say what happened.
-    log_warn "build jobs: ${cpus} — no readable MemAvailable in ${meminfo}, falling back to nproc with NO memory ceiling"
-    printf '%s' "${cpus}"
-    return 0
-  fi
-
-  mem_jobs=$(( mem_kib / KERNEL_BUILD_MEM_PER_JOB_KIB ))
-  jobs=$(( mem_jobs < cpus ? mem_jobs : cpus ))
-  (( jobs >= 1 )) || jobs=1
-
-  log_info "build jobs: ${jobs} = min(nproc=${cpus}, MemAvailable ${mem_kib} kB / $((KERNEL_BUILD_MEM_PER_JOB_KIB / 1024)) MiB per job = ${mem_jobs}) — floor 1, ceiling nproc"
-  printf '%s' "${jobs}"
-}
-
-# ---------------------------------------------------------------------------
-# fetch_pinned_tree_once <work> <url> <ref> <commit> <timeout>
-#
-# ONE attempt at materialising a pinned tree in <work>. Two shapes, and the
-# choice between them is the manifest's, not a fallback:
-#   ref non-empty -> `git clone --depth 1 --branch <ref>`
-#   ref empty     -> commit-only source (the pinned branch publishes no tags, so
-#                    there is no ref to clone). Inventing a tag would be a lie
-#                    about provenance, and cloning the branch tip would silently
-#                    build newer source under an unchanged pin.
-#
-# Every network verb is wrapped in `timeout` — a git that has stopped making
-# progress does not exit on its own.
-# ---------------------------------------------------------------------------
-fetch_pinned_tree_once() {
-  local work="$1" url="$2" ref="$3" commit="$4" timeout_s="$5"
-
-  if [ -n "${ref}" ]; then
-    timeout "${timeout_s}" git clone --depth 1 --branch "${ref}" "${url}" "${work}" || return 1
-    return 0
-  fi
-
-  git init -q "${work}" || return 1
-  git -C "${work}" remote add origin "${url}" || return 1
-  timeout "${timeout_s}" git -C "${work}" fetch --depth 1 origin "${commit}" || return 1
-  git -C "${work}" checkout -q FETCH_HEAD || return 1
-}
-
-# ---------------------------------------------------------------------------
-# fetch_pinned_tree <dest> <url> <ref> <commit> <label>
-#
-# Bounded retry around fetch_pinned_tree_once, then a pin assertion, then the
-# publish. The ORDER of those three is the whole point:
-#
-#   1. Retry loop. Each attempt gets a private directory that is destroyed
-#      BEFORE it runs, never merely after it fails — a tree half-written by a
-#      killed clone turns attempt 2 into a deterministic "destination path
-#      already exists" and makes one blip look like a total outage.
-#   2. Pin assertion, OUTSIDE the loop. A wrong HEAD is not a transient
-#      condition: the tag moved, or the SHA was orphaned by a squash-merge.
-#      Retrying re-fetches the same wrong tree and then blames the network.
-#   3. Publish. <dest> only ever appears once the tree at it is pin-verified, so
-#      no later stage can read a partial or wrong checkout.
-# ---------------------------------------------------------------------------
-fetch_pinned_tree() {
-  local dest="$1" url="$2" ref="$3" commit="$4" label="$5"
-  local attempts="${CERALIVE_KERNEL_GIT_ATTEMPTS:-3}"
-  local timeout_s="${CERALIVE_KERNEL_GIT_TIMEOUT:-1800}"
-  local backoff="${CERALIVE_KERNEL_GIT_BACKOFF:-5}"
-  local work="${dest}.attempt"
-  local attempt=1 delay have
-
-  rm -rf "${dest}"
-  while : ; do
-    rm -rf "${work}"
-    if fetch_pinned_tree_once "${work}" "${url}" "${ref}" "${commit}" "${timeout_s}"; then
-      break
-    fi
-    rm -rf "${work}"
-    if [ "${attempt}" -ge "${attempts}" ]; then
-      echo "FATAL: ${label}: ${attempts} attempt(s) to obtain ${url} at ${ref:-${commit}} all failed" >&2
-      return 1
-    fi
-    delay=$(( backoff * attempt ))
-    echo "== ${label}: attempt ${attempt}/${attempts} failed, retrying in ${delay}s" >&2
-    sleep "${delay}"
-    attempt=$(( attempt + 1 ))
-  done
-
-  have="$(git -C "${work}" rev-parse HEAD)"
-  if [ "${have}" != "${commit}" ]; then
-    echo "FATAL: ${label} checked out ${have}, pinned commit is ${commit} — a moved ref or an orphaned SHA is permanent, so this is NOT retried" >&2
-    rm -rf "${work}"
-    return 1
-  fi
-
-  mv "${work}" "${dest}"
-  echo "== ${label}: ${commit} verified in ${dest} (attempt ${attempt}/${attempts})"
-}
-
-# ---------------------------------------------------------------------------
-# select_container_runtime — docker first, then podman. The kernel build is a
-# containerized stage by construction: a host-native build would silently bind
-# the produced kernel to whatever toolchain that host happens to carry.
-# ---------------------------------------------------------------------------
-select_container_runtime() {
-  if command -v docker >/dev/null 2>&1; then
-    printf 'docker'
-  elif command -v podman >/dev/null 2>&1; then
-    printf 'podman'
-  else
-    die "kernel-build-from-source needs a container runtime (docker or podman). There is deliberately no host-native fallback: a host build would bind the kernel to an unpinned toolchain."
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# resolve_kernel_builder_tag <base_image> — the builder tag, content-addressed.
-#
-# The tag embeds a digest of the Dockerfile AND the manifest's builder_image pin,
-# because ensure_kernel_builder_image below skips the build when the tag already
-# exists locally. A constant tag makes that short-circuit permanent: an edited
-# Dockerfile or a bumped builder_image pin is silently ignored on every host that
-# ever built the image once, and the stale layers keep being used. This mirrors
-# the mkosi builder, whose tag carries its version pin.
-# ---------------------------------------------------------------------------
-resolve_kernel_builder_tag() {
-  local base_image="$1" key
-  if [[ -n "${CERALIVE_KERNEL_BUILDER_IMAGE:-}" ]]; then
-    printf '%s' "${CERALIVE_KERNEL_BUILDER_IMAGE}"
-    return 0
-  fi
-  key="$( { printf '%s\n' "${base_image}"; cat "${KERNEL_BUILDER_DOCKERFILE}"; } \
-    | sha256sum | cut -c1-12 )"
-  printf 'ceralive-kernel-builder:%s' "${key}"
-}
-
-ensure_kernel_builder_image() {
-  local runtime="$1" base_image="$2" tag="$3"
-  [[ -f "${KERNEL_BUILDER_DOCKERFILE}" ]] \
-    || die "kernel builder Dockerfile missing: ${KERNEL_BUILDER_DOCKERFILE}"
-  if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then
-    log_info "kernel builder image ${tag} present"
-    return 0
-  fi
-  log_info "building kernel builder image ${tag} FROM ${base_image}"
-  "${runtime}" build \
-    --build-arg "BASE_IMAGE=${base_image}" \
-    -t "${tag}" \
-    -f "${KERNEL_BUILDER_DOCKERFILE}" \
-    "$(dirname "${KERNEL_BUILDER_DOCKERFILE}")" \
-    || die "failed to build the kernel builder image from ${KERNEL_BUILDER_DOCKERFILE}"
-}
-
-# ---------------------------------------------------------------------------
-# deb_control_field <deb> <field> — read one Debian control field without dpkg
-# (the host may be non-Debian). Mirrors orchestrate.sh::deb_pkg_name.
-# ---------------------------------------------------------------------------
-deb_control_field() {
-  local deb="$1" field="$2" tmp value=""
-  tmp="$(mktemp -d)"
-  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  fi
-  if [[ -s "${tmp}/control" ]]; then
-    value="$(awk -F': ' -v f="${field}" '$0 ~ "^" f ":" {print $2; exit}' "${tmp}/control")"
-  fi
-  rm -rf "${tmp}"
-  printf '%s' "${value}"
-}
-
-# ---------------------------------------------------------------------------
-# deb_data_list <deb> — emit the data member's tar listing, one path per line.
-#
-# The member is discovered from `ar t` rather than guessed, so a dpkg-deb that
-# switches compressor (trixie ships .xz today, .zst is the way the wind blows)
-# does not silently produce an empty listing.
-# ---------------------------------------------------------------------------
-deb_data_list() {
-  local deb="$1" members member="" m
-  members="$(ar t "${deb}" 2>/dev/null)" || return 1
-  for m in ${members}; do
-    case "${m}" in data.tar.*) member="${m}"; break ;; esac
-  done
-  [[ -n "${member}" ]] || return 1
-  case "${member}" in
-    *.zst)  ar p "${deb}" "${member}" 2>/dev/null | tar --zstd -t 2>/dev/null ;;
-    *.xz)   ar p "${deb}" "${member}" 2>/dev/null | tar -Jt     2>/dev/null ;;
-    *.gz)   ar p "${deb}" "${member}" 2>/dev/null | tar -zt     2>/dev/null ;;
-    *.bz2)  ar p "${deb}" "${member}" 2>/dev/null | tar -jt     2>/dev/null ;;
-    *.lzma) ar p "${deb}" "${member}" 2>/dev/null | tar --lzma -t 2>/dev/null ;;
-    data.tar) ar p "${deb}" "${member}" 2>/dev/null | tar -t    2>/dev/null ;;
-    *) return 1 ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
-# deb_lists_path <deb> <path> — true when the .deb data archive contains <path>.
-# Used to prove the DTB the board manifest names is really inside the built
-# kernel package, so the platform-layer install mapping is machine-verified
-# rather than merely declared.
-#
-# The listing is materialised BEFORE it is searched. Piping `tar -t` straight
-# into `grep -q` looks equivalent and is not: grep exits at the first match,
-# tar dies of SIGPIPE, and under this file's `set -o pipefail` the pipeline
-# reports failure — so a path that IS present reads as absent, every time, for
-# every board.
-# ---------------------------------------------------------------------------
-deb_lists_path() {
-  local deb="$1" want="$2" listing
-  listing="$(deb_data_list "${deb}")" || return 1
-  grep -Fqx -e "./${want#/}" -e "${want}" <<<"${listing}"
-}
-
-# ---------------------------------------------------------------------------
-# validate_built_kernel_deb — assert the produced .deb is EXACTLY what the
-# manifest declared, on all four axes the rest of the pipeline keys on:
-# package name, Debian version, architecture, and the in-deb DTB path. Any
-# mismatch is fatal: the orchestrator's package-name replacement and the boot
-# script's fdtfile lookup both depend on these being true, and a mismatch here
-# would surface much later as an unbootable image.
-# ---------------------------------------------------------------------------
-validate_built_kernel_deb() {
-  local deb="$1" want_pkg="$2" want_version="$3" want_arch="$4" dtb_path="$5"
-  local got_pkg got_version got_arch
-  got_pkg="$(deb_control_field "${deb}" Package)"
-  got_version="$(deb_control_field "${deb}" Version)"
-  got_arch="$(deb_control_field "${deb}" Architecture)"
-
-  [[ "${got_pkg}" == "${want_pkg}" ]] \
-    || die "built kernel .deb Package is '${got_pkg:-<unreadable>}' but the manifest declares '${want_pkg}' — the resolver/orchestrator package-name replacement would target a package that does not exist"
-  [[ "${got_version}" == "${want_version}" ]] \
-    || die "built kernel .deb Version is '${got_version:-<unreadable>}' but the manifest declares kernel_source.package_version '${want_version}'"
-  [[ "${got_arch}" == "${want_arch}" ]] \
-    || die "built kernel .deb Architecture is '${got_arch:-<unreadable>}' but the resolved family arch is '${want_arch}'"
-  log_success "built kernel .deb control identity verified: ${got_pkg}=${got_version}/${got_arch}"
-
-  if ! deb_lists_path "${deb}" "${dtb_path}"; then
-    log_error "built kernel .deb does not contain the board DTB at ${dtb_path}"
-    log_error "the platform-layer install mapping (kernel_source.dtb_deb_dir + the board's dtb_name) is what makes a source-built kernel satisfy the same DTB expectation an Armbian linux-dtb-* package would; it cannot be satisfied by a DTB that is not there."
-    log_error "mainline and the Armbian vendor BSP do NOT always agree on RK3588 DTB filenames; a board whose name differs per tree declares the mainline spelling in variant_overrides.edge.dtb_name. DTBs actually present in the built package:"
-    deb_data_list "${deb}" | grep -F "$(dirname "${dtb_path}")/" >&2 || true
-    die "built kernel .deb is missing ${dtb_path}"
-  fi
-  log_success "board DTB present inside the built kernel .deb: ${dtb_path}"
-}
-
 main() {
   local board="" out_dir="" ccache_dir=""
   while [[ $# -gt 0 ]]; do
@@ -463,76 +204,17 @@ main() {
   local dtb_deb_dir="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
   local arch="${ARCH:-}"
   local dtb_name="${DTB_NAME:-}"
-
-  require_kernel_source_field git_url "${git_url}"
-  require_kernel_source_field commit "${commit}"
-  require_kernel_source_field patches_git_url "${patches_url}"
-  require_kernel_source_field patches_commit "${patches_commit}"
-  require_kernel_source_field patches_series "${patches_series}"
-  require_kernel_source_field builder_image "${builder_image}"
-  require_kernel_source_field local_version "${local_version}"
-  require_kernel_source_field kernel_release "${kernel_release}"
-  require_kernel_source_field package_version "${package_version}"
-  require_kernel_source_field dtb_deb_dir "${dtb_deb_dir}"
-  require_kernel_source_field ARCH "${arch}"
-  require_kernel_source_field DTB_NAME "${dtb_name}"
-
-  # A floating patches reference would make the built kernel unreproducible
-  # while still LOOKING pinned — the exact failure mode the schema pattern and
-  # this assertion exist to make impossible.
-  [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] \
-    || die "kernel_source.commit must be an exact 40-character SHA (got '${commit}')"
-  [[ "${patches_commit}" =~ ^[0-9a-f]{40}$ ]] \
-    || die "kernel_source.patches_commit must be an exact 40-character SHA, never a branch or tag (got '${patches_commit}')"
-
-  # Validated here rather than at mount time so a mistyped bench path fails
-  # before any container work, like every other input assertion in this block.
   local local_patches="${CERALIVE_KERNEL_PATCHES_LOCAL_REPO:-}"
-  [[ -z "${local_patches}" || ( "${local_patches}" == /* && -d "${local_patches}/.git" ) ]] \
-    || die "CERALIVE_KERNEL_PATCHES_LOCAL_REPO must be an absolute path to a git clone (got '${local_patches}')"
 
-  [[ "${arch}" == "arm64" ]] \
-    || die "kernel-build-from-source is wired for arm64 only (resolved arch '${arch}'); an x86 family has no kernel_source block and must never reach this stage"
-
-  # The schema already enforces exactly-one-of, but a half-specified config is
-  # the one mistake that would still BUILD — producing a kernel whose driver set
-  # nobody chose — so it is re-asserted here rather than trusted.
+  # These four are declared HERE and assigned by the kernel/ modules through bash
+  # dynamic scoping (the lib/stages/ contract). They look unused in this frame and
+  # must not be "cleaned up".
   local config_mode="" config_desc="" fragment="" absent_list=""
-  if [[ -n "${config_git_url}${config_commit}${config_path}" ]]; then
-    config_mode="config-file"
-    require_kernel_source_field config_git_url "${config_git_url}"
-    require_kernel_source_field config_commit "${config_commit}"
-    require_kernel_source_field config_path "${config_path}"
-    [[ -z "${defconfig_base}" && -z "${fragment_rel}" ]] \
-      || die "kernel_source declares BOTH config-file mode (config_git_url/config_commit/config_path) and defconfig mode (defconfig_base/defconfig_fragment); exactly one config source may be declared"
-    [[ "${config_commit}" =~ ^[0-9a-f]{40}$ ]] \
-      || die "kernel_source.config_commit must be an exact 40-character SHA, never a branch or tag (got '${config_commit}')"
-    config_desc="${config_path} @ ${config_commit} (${config_git_url})"
-    if [[ -n "${absent_rel}" ]]; then
-      absent_list="${PIPELINE_DIR}/${absent_rel}"
-      [[ -f "${absent_list}" ]] \
-        || die "config_absent_symbols list not found: ${absent_list} (kernel_source.config_absent_symbols='${absent_rel}', resolved against ${PIPELINE_DIR})"
-      config_desc="${config_desc} [allow-absent: ${absent_rel}]"
-    fi
-  else
-    config_mode="defconfig"
-    require_kernel_source_field defconfig_base "${defconfig_base}"
-    require_kernel_source_field defconfig_fragment "${fragment_rel}"
-    [[ -z "${absent_rel}" ]] \
-      || die "kernel_source.config_absent_symbols is only meaningful in config-file mode; a repo-local defconfig fragment declares exactly what it means and has no upstream-injected symbols to except"
-    fragment="${PIPELINE_DIR}/${fragment_rel}"
-    [[ -f "${fragment}" ]] \
-      || die "defconfig fragment not found: ${fragment} (kernel_source.defconfig_fragment='${fragment_rel}', resolved against ${PIPELINE_DIR})"
-    config_desc="${defconfig_base} + ${fragment_rel}"
-  fi
+  local kernel_pkg=""
 
-  local kernel_pkg="${KERNEL_PACKAGES:-}"
-  # The manifest's kernel_packages under a kernel_source variant is the single
-  # BUILT package name; more than one has no meaning here (bindeb-pkg produces
-  # one linux-image deb) and would leave the second name unsatisfiable.
-  [[ "$(wc -w <<<"${kernel_pkg}")" == "1" ]] \
-    || die "a kernel_source variant must declare exactly ONE kernel_packages entry (the built linux-image deb); got '${kernel_pkg}'"
-  kernel_pkg="$(tr -d '[:space:]' <<<"${kernel_pkg}")"
+  validate_kernel_source_inputs
+  resolve_kernel_config_mode
+  resolve_kernel_package_name
 
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
   local epoch="${SOURCE_DATE_EPOCH:-0}"
