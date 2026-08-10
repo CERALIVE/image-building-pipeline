@@ -114,7 +114,7 @@ save_env BOOT_A_LEFT
 
 | Where | Files | Tooling | Installed by |
 |---|---|---|---|
-| **rootfs slot** (userspace) | `x86-boot-state` → `/usr/bin/ceralive-boot-state`, `x86-rauc-boot-adapter` → `/usr/lib/rauc/ceralive-rauc-boot-adapter`, `/etc/rauc/system.conf` | none | `install-x86-boot.sh rootfs` (chroot) |
+| **rootfs slot** (userspace) | `x86-boot-state` → `/usr/bin/ceralive-boot-state`, `boot-state-core.sh` → `/usr/lib/ceralive/boot-state-core.sh`, `x86-rauc-boot-adapter` → `/usr/lib/rauc/ceralive-rauc-boot-adapter`, `/etc/rauc/system.conf` | none | `install-x86-boot.sh rootfs` (chroot) |
 | **EFI System Partition** | `EFI/ceralive/grub.cfg` (rendered), `EFI/ceralive/grubenv` (seed), `grubx64.efi` | `grub-install` / `grub-editenv` (host/runtime) | `install-x86-boot.sh esp <dir>` (disk assembly) |
 
 ## State (`grubenv`, read by GRUB `load_env` and by userspace)
@@ -178,7 +178,8 @@ DTB / no U-Boot** (ACPI + UEFI) — those fields are intentionally unused here.
 
 | File | Role |
 |---|---|
-| `x86-boot-state.sh` | grubenv A/B countdown engine + CLI; userspace twin of `grub.cfg.tmpl` (→ `/usr/bin/ceralive-boot-state`) |
+| `../boot-state-core.sh` | the SHARED A/B slot-state core (model, CLI, `boot-select`), identical on RK3588 (→ `/usr/lib/ceralive/boot-state-core.sh`) |
+| `x86-boot-state.sh` | the grubenv persistence adapter over that core; userspace twin of `grub.cfg.tmpl` (→ `/usr/bin/ceralive-boot-state`) |
 | `x86-rauc-boot-adapter.sh` | RAUC custom backend (→ `/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
 | `grub.cfg.tmpl` | custom-countdown GRUB selector template (decrement ladder) |
 | `install-x86-boot.sh` | custom-path installer (`rootfs` + `esp`; generates the decrement ladder) |

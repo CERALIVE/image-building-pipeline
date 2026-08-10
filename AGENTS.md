@@ -1310,6 +1310,56 @@ fragment with the parent declared ahead of the `inet` child, `=m` rejected,
 `CONFIG_NFT_COUNTER` forbidden, and the real fragment driven against a
 reproduction of the board's own `# CONFIG_NF_TABLES is not set` answer.
 
+**One A/B slot-state core, two persistence adapters** [EXISTS]
+
+RK3588 and x86 run the SAME A/B + bootcount model (`BOOT_ORDER` + per-slot
+`BOOT_<n>_LEFT` countdown), the same RAUC custom-backend surface and the same CLI
+— and they now run the same CODE. Everything above the storage line lives in
+`mkosi/platform/boot-state-core.sh`:
+
+| Layer | File | Holds |
+|---|---|---|
+| shared core | `mkosi/platform/boot-state-core.sh` | `VALID_SLOTS`, `slot_partlabel`, `is_valid_slot`, the counter accessors, every `cmd_*` subcommand (including `boot-select`), and `boot_state_main` |
+| RK3588 adapter | `mkosi/platform/boot/ceralive-boot-state.sh` | the CRC-guarded `boot_state.txt` on the FAT boot partition (U-Boot is `ENV_IS_NOWHERE`, decision D3) |
+| x86 adapter | `mkosi/platform/x86/x86-boot-state.sh` | the `grubenv` block on the ESP, `grub-editenv` with a self-contained bash fallback |
+
+An adapter sets `BOOT_STATE_TOOL`, `BOOT_ATTEMPTS` and `BOOT_STATE_KEEP_LAST_SLOT`,
+then defines exactly four hooks — `load_state`, `store_state`,
+`boot_state_dump_backend`, `boot_state_usage` — and calls `boot_state_main "$@"`.
+Four things to know before touching any of it:
+
+- **The core ships ON the device**, installed to `/usr/lib/ceralive/boot-state-core.sh`
+  by BOTH `install-boot.sh rootfs` and `install-x86-boot.sh rootfs`. Add an
+  installer path and you must stage the core with it, or `/usr/bin/ceralive-boot-state`
+  refuses to run (loudly — it never proceeds on a half-defined state machine).
+  Resolution order is `$CERALIVE_BOOT_STATE_CORE`, then the repo-relative sibling,
+  then the device path.
+- **`BOOT_STATE_KEEP_LAST_SLOT` records a REAL behavioural difference, it is not a
+  style knob.** On RK3588 a `set-state bad` that would empty `BOOT_ORDER` keeps the
+  slot as the sole entry, because the U-Boot selector's last-resort branch boots
+  the head of `BOOT_ORDER` and an empty order leaves it nothing. x86 allows the
+  empty order and self-heals on the next `load_state`. Making the two agree is a
+  behaviour change, not an extraction — the flag is there so that change has to be
+  deliberate.
+- **The two offline platform suites grep the installed helper's own text.**
+  `test-fallback.sh` requires the literal `A/B boot-state` and `test-x86-fallback.sh`
+  the literal `x86 A/B boot-state` inside `/usr/bin/ceralive-boot-state`, and
+  `tests/rk3588-ab-contract.bats` greps it for the exact
+  `STATE_FILE="${CERALIVE_BOOT_STATE_FILE:-/boot/boot_state.txt}"` default. Those
+  strings must stay in the ADAPTER; moving them into the core makes the assertions
+  pass vacuously or fail outright.
+- **`boot_state_command_lines` is shared on purpose.** RAUC treats the two
+  platforms' command surface as identical, so the command half of `--help` comes
+  from the core; only the backend/env lines are per-adapter.
+
+Contract: `tests/boot-state-core.test.sh` — single-definition parity, a
+cross-backend equivalence diff over one command sequence, invalid-slot refusal on
+every slot-taking verb, the counter boundaries (0 budget, last attempt, exhaustion
+with no negative decrement, above-budget heal), and the staging of an identical
+core into both images. The existing `test-fallback.sh` / `test-x86-fallback.sh` /
+`tests/rk3588-ab-contract.bats` / `tests/x86-raucb-bundle.bats` /
+`tests/boot-artifacts.bats` contracts are unchanged and still pass.
+
 **The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
 load — both were real infinite-crash-loop defects** [EXISTS]
 

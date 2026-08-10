@@ -18,7 +18,7 @@ and the platform layer is the only arch-specific layer (see `../../LAYER-MAP.md`
 
 | Where | Files | Tooling | Installed by |
 |---|---|---|---|
-| **rootfs slot** (userspace) | `ceralive-boot-state` → `/usr/bin`, `ceralive-rauc-boot-adapter` → `/usr/lib/rauc`, `/etc/rauc/system.conf`, explicit p1 `/boot` fstab mount | none | `mkosi.finalize` → `install-boot.sh rootfs` (chroot) |
+| **rootfs slot** (userspace) | `ceralive-boot-state` → `/usr/bin`, `boot-state-core.sh` → `/usr/lib/ceralive`, `ceralive-rauc-boot-adapter` → `/usr/lib/rauc`, `/etc/rauc/system.conf`, explicit p1 `/boot` fstab mount | none | `mkosi.finalize` → `install-boot.sh rootfs` (chroot) |
 | **FAT boot partition** (p1) | `boot.scr`, `recovery.scr`, `cera_board.env`, `boot_state.txt` | `mkimage` (u-boot-tools) | disk assembly → `install-boot.sh boot-partition <dir>` |
 
 The split exists because `mkimage` (to compile `boot.scr`) is a **host/runtime** tool,
@@ -185,7 +185,8 @@ last-resort boots A.
 
 | File | Role |
 |---|---|
-| `ceralive-boot-state.sh` | state engine + CLI; the userspace twin of `boot.scr` (ships as `/usr/bin/ceralive-boot-state`) |
+| `../boot-state-core.sh` | the SHARED A/B slot-state core (model, CLI, `boot-select`), identical on x86 (ships as `/usr/lib/ceralive/boot-state-core.sh`) |
+| `ceralive-boot-state.sh` | the RK3588 persistence adapter over that core — CRC-guarded `boot_state.txt`; the userspace twin of `boot.scr` (ships as `/usr/bin/ceralive-boot-state`) |
 | `ceralive-rauc-boot-adapter.sh` | RAUC custom backend (`/usr/lib/rauc/ceralive-rauc-boot-adapter`) |
 | `boot.scr.cmd` | U-Boot selector source (compiled to `boot.scr`) |
 | `cera_board.env.tmpl` | board specifics template (`@CONSOLE@`/`@DTB_NAME@`/`@BOARD_ID@`) |

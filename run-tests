@@ -81,7 +81,9 @@ SHELL_SUITES=(
   "${HERE}/tests/deb-lib.test.sh"
   "${HERE}/tests/versions-lib.test.sh"
   "${HERE}/tests/apt-lib.test.sh"
+  "${HERE}/tests/boot-state-core.test.sh"
   "${HERE}/mkosi/platform/boot/test-fallback.sh"
+  "${HERE}/mkosi/platform/x86/test-x86-fallback.sh"
 )
 DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"
 REAL_AVAHI_CONTRACT="${HERE}/tests/real-avahi-hostname-contract.sh"
