@@ -130,6 +130,57 @@ Rules:
 - A bench image deliberately **fails** `tests/preflash-verify.sh`, which asserts
   the production label set — so it can never be flashed to a board's eMMC by the
   release gate.
+- **A hardware-qualification candidate must STATE the mode.**
+  `ci/build-hardware-candidates.sh` refuses to run without an explicit
+  `--bench-labels 0|1` and exports `CERALIVE_BENCH_LABELS` from it, so a candidate
+  can never inherit the value from a dispatch shell. See the section below.
+
+### `--bench-labels` is mandatory on every hardware candidate (2026-08-10 incident)
+
+`CERALIVE_BENCH_LABELS=1 ./build …` above is the hand-run form, and its
+default-to-off behaviour in `lib/orchestrate.sh` is correct — a direct build is a
+production build unless you say otherwise. **That default is exactly what must
+never apply to a candidate destined for a bench board**, and until this was fixed
+it silently could:
+
+```bash
+# the ONLY supported form — the flag has no default and no ambient fallback
+ci/build-hardware-candidates.sh --only rock-edge-test \
+  --trust-verdict verdict.json --signing-env sign.env --debug-env debug.env \
+  --evidence evidence/ --bench-labels 1
+```
+
+**What happened.** The candidate builder never threaded `CERALIVE_BENCH_LABELS`
+through to its `./build` invocation, so the value came from whatever the invoking
+shell happened to export. Orchestrator dispatches are stateless and fresh, so the
+flag was present in some dispatches and absent in others. One `rock-edge-test`
+debug candidate was consequently built with the **frozen production** PARTLABEL
+set and written to the bench microSD of a Rock 5B+ that also carries an onboard
+eMMC holding an unrelated, plain-labelled image.
+
+**What it cost.** U-Boot resolved `root=PARTLABEL=xrootfs_a` off the microSD it
+was booting from, so the board came up looking healthy — but the candidate's own
+`/etc/fstab` asked for plain `boot` and `data`, which on that rig resolve to the
+**eMMC**. Every `/boot` operation, including `rauc status mark-bad` and the
+`boot_state.txt` it persists through, therefore landed on the wrong physical
+device. The microSD's real A/B state was never updated, U-Boot correctly re-picked
+the same slot on the next boot, and the board needed a careful manual recovery
+(mounting the microSD's `xboot` by hand and rewriting the boot state).
+
+**Why a required flag rather than a documented convention.** The wrong value here
+produces a *plausible* artifact: it builds, boots, and passes every other gate.
+The failure only appears as a recovery operation silently addressing another
+medium. A value that lives in an ambient environment is also invisible to anyone
+reviewing the dispatch afterwards, which is why the flag must appear in argv. The
+script additionally logs `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`
+before each candidate build, and records `bench_labels` + `partlabel_set` in that
+candidate's artifact tuple, so which mode built a given artifact is answerable
+from the evidence trail alone rather than from memory of the dispatch.
+
+Guard: `tests/hardware-candidate-bench-labels.test.sh` (refusal even with
+`CERALIVE_BENCH_LABELS` already exported, both values observed in the environment
+`./build` actually receives, and both tuple fields), plus the tool's own
+`--self-test`.
 
 ---
 

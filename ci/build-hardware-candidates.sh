@@ -21,15 +21,32 @@
 #      handful of Kconfig symbols and nothing an operator can see from the
 #      filename. Each build's own resolved `/boot/config-<release>` is read out
 #      of the kernel package it produced and asserted in BOTH directions.
+#   4. WHICH LABELS. `CERALIVE_BENCH_LABELS` decides whether the baked fstab,
+#      RAUC slot devices and boot selector address the frozen production
+#      PARTLABEL set or the `x`-prefixed bench twin. It is exported EXPLICITLY
+#      from `--bench-labels`, which is REQUIRED — see the incident note below.
 #
 # A `production` build mode is claimed only when the verdict says the chain
 # terminates at a production trust anchor. Otherwise the mode is `development`
 # and the artifacts are labelled `development-hardware-candidate` — there is no
 # path here that upgrades a NON-PRODUCTION root into a release claim.
 #
+# WHY `--bench-labels` HAS NO DEFAULT (2026-08-10 incident):
+#   A `rock-edge-test` candidate was built by a dispatch that did not export
+#   `CERALIVE_BENCH_LABELS`, so `lib/orchestrate.sh`'s own `:-0` default (correct
+#   for a DIRECT `./build`) silently produced a PRODUCTION-labelled image for a
+#   bench Rock 5B+ that carries BOTH a bench microSD (`x`-prefixed PARTLABELs)
+#   and an onboard eMMC holding an unrelated plain-labelled image. Its `/etc/fstab`
+#   then resolved `/boot` and `/data` on the eMMC, so a RAUC recovery transition
+#   wrote A/B state to the WRONG PHYSICAL DEVICE and the board had to be recovered
+#   by hand. Every other candidate that day was built with the flag. An ambient
+#   environment is therefore not an acceptable input for this value: it is
+#   dispatch-visible only when it is stated, so this tool refuses to guess.
+#
 # Usage:
 #   build-hardware-candidates.sh --only <list> --trust-verdict <path>
 #       --signing-env <path> [--debug-env <path>] --evidence <dir>
+#       --bench-labels 0|1
 #   build-hardware-candidates.sh --self-test
 #
 #   --only          all | a comma-separated subset of:
@@ -42,6 +59,10 @@
 #   --debug-env     an env file defining CERALIVE_DEBUG_PASSWORD_HASH; REQUIRED
 #                   when a debug candidate is selected, refused otherwise
 #   --evidence      output directory for logs, configs and artifact tuples
+#   --bench-labels  REQUIRED, 0 or 1, no default and no ambient fallback:
+#                     1 = bench PARTLABEL overlay (xboot/xrootfs_a/xrootfs_b/xdata)
+#                         — for a bench card sharing a board with another image
+#                     0 = the frozen production PARTLABEL set
 #   --skip-probes   skip the eight DRY_RUN probes (they are the default)
 #
 # Every path argument is generic: this repo is built and tested standalone, so
@@ -61,9 +82,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 
 TOOL_NAME="ci/build-hardware-candidates.sh"
-SCHEMA_VERSION=1
+# 2 adds `bench_labels`. The bump is the point: a schema-1 tuple was emitted by
+# tooling that could not state which PARTLABEL set built the artifact, which is
+# exactly the artifact class that is unsafe to deploy on a dual-media bench rig.
+SCHEMA_VERSION=2
 
-usage() { sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
+usage() { sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
 say()  { printf '[cand] %s\n' "$*" >&2; }
 fail() { printf 'build-hardware-candidates: %s\n' "$*" >&2; }
 die()  { fail "$*"; exit "${2:-2}"; }
@@ -86,6 +110,14 @@ candidate_variant() {
   esac
 }
 candidate_is_debug() { [[ "$1" == "rock-edge-test" ]]; }
+
+bench_labels_desc() {
+  case "${BENCH_LABELS:-}" in
+    1) printf 'ON — xboot/xrootfs_a/xrootfs_b/xdata\n' ;;
+    0) printf 'OFF — frozen production label set\n' ;;
+    *) printf 'UNSET\n' ;;
+  esac
+}
 
 # The three CeraLive test symbols. Production must resolve all three OFF; the
 # debug variant must resolve all three ON. Both directions are asserted, because
@@ -316,9 +348,16 @@ build_candidate() {
     unset CERALIVE_DEBUG_PASSWORD_HASH || true
   fi
 
+  # Exported from the REQUIRED --bench-labels, never inherited. orchestrate.sh's
+  # own `:-0` default is correct for a direct ./build and catastrophic here: it
+  # silently bakes production PARTLABELs into an artifact destined for a bench
+  # board whose second medium already carries them (see the header incident note).
+  export CERALIVE_BENCH_LABELS="${BENCH_LABELS}"
+
   local log="${EVIDENCE_DIR}/${name}.log"
   say "building ${name}: ./build ${board} --variant ${variant}"
   say "  build mode=${CERALIVE_BUILD_MODE} label=${label} debug=${CERALIVE_DEBUG_IMAGE}"
+  say "  CERALIVE_BENCH_LABELS=${CERALIVE_BENCH_LABELS} (bench PARTLABEL overlay: $(bench_labels_desc))"
   say "  pki=${CERALIVE_RAUC_PKI_DIR} keyring=${RAUC_KEYRING_FILE}"
 
   # pipefail is already set; tee must not be allowed to mask a failed build.
@@ -390,6 +429,11 @@ record_tuple() {
   local eku_json
   eku_json="$(json_str_list "${eku}")"
 
+  local bench_json="false" partlabel_set="production-frozen"
+  if [[ "${CERALIVE_BENCH_LABELS}" == "1" ]]; then
+    bench_json="true"; partlabel_set="bench-x-prefixed"
+  fi
+
   {
     printf '{\n'
     printf '  "schema_version": %s,\n' "${SCHEMA_VERSION}"
@@ -417,6 +461,8 @@ record_tuple() {
     printf '  "loader_sha256": %s,\n'   "$(json_str "${LOADER_SHA256:-}")"
     printf '  "build_mode": %s,\n'      "$(json_str "${CERALIVE_BUILD_MODE}")"
     printf '  "debug_image": %s,\n'     "$( [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]] && echo true || echo false )"
+    printf '  "bench_labels": %s,\n'    "${bench_json}"
+    printf '  "partlabel_set": %s,\n'   "$(json_str "${partlabel_set}")"
     printf '  "ceralive_test_symbols": %s,\n' "$(json_str "${expect}")"
     printf '  "deployment_verdict": %s,\n'    "$(json_str "${verdict}")"
     printf '  "rauc_pki_dir": %s,\n'    "$(json_str "${CERALIVE_RAUC_PKI_DIR}")"
@@ -504,7 +550,7 @@ JSON
   # 5. a debug candidate with no --debug-env is refused
   if "${BASH_SOURCE[0]}" --only rock-edge-test --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
-       >/dev/null 2>&1; then
+       --bench-labels 1 >/dev/null 2>&1; then
     bad "a debug candidate without --debug-env was accepted"
   else
     ok "a debug candidate without --debug-env is refused"
@@ -514,7 +560,7 @@ JSON
   printf 'CERALIVE_RAUC_PKI_DIR=%s\n' "${t}/pki" >"${t}/half.env"
   if "${BASH_SOURCE[0]}" --only rock-edge --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/half.env" --evidence "${t}/ev" --skip-probes \
-       >/dev/null 2>&1; then
+       --bench-labels 0 >/dev/null 2>&1; then
     bad "a half-specified signing env was accepted"
   else
     ok "a half-specified signing env is refused"
@@ -523,11 +569,34 @@ JSON
   # 7. a candidate name outside the closed table is refused
   if "${BASH_SOURCE[0]}" --only x86-edge --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
-       >/dev/null 2>&1; then
+       --bench-labels 0 >/dev/null 2>&1; then
     bad "an unknown candidate name was accepted"
   else
     ok "an unknown candidate name is refused"
   fi
+
+  # 7b. --bench-labels is REQUIRED, and only 0 or 1 is a value. An ambient
+  # CERALIVE_BENCH_LABELS must not satisfy it — that is the whole defect.
+  local out
+  out="$( CERALIVE_BENCH_LABELS=1 "${BASH_SOURCE[0]}" --only rock-edge \
+            --trust-verdict "${t}/verdict.json" --signing-env "${t}/sign.env" \
+            --evidence "${t}/ev" --skip-probes 2>&1 )" \
+    && bad "a build with no --bench-labels was accepted" \
+    || {
+      [[ "${out}" == *"refusing to build without --bench-labels"* ]] \
+        && ok "a build with no --bench-labels is refused, and says why" \
+        || bad "the no---bench-labels refusal did not name the flag: ${out}"
+    }
+  local badval
+  for badval in "" yes 2 true on; do
+    if "${BASH_SOURCE[0]}" --only rock-edge --trust-verdict "${t}/verdict.json" \
+         --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
+         --bench-labels "${badval}" >/dev/null 2>&1; then
+      bad "--bench-labels accepted the non-boolean value '${badval}'"
+    else
+      ok "--bench-labels refuses the non-boolean value '${badval:-<empty>}'"
+    fi
+  done
 
   # 8. the symbol assertion is non-vacuous in BOTH directions
   printf 'CONFIG_X=y\n' >"${t}/prod.config"
@@ -554,7 +623,7 @@ JSON
 # ---------------------------------------------------------------------------
 main() {
   local only="" evidence="" debug_env="" skip_probes=0
-  TRUST_VERDICT=""; SIGNING_ENV=""
+  TRUST_VERDICT=""; SIGNING_ENV=""; BENCH_LABELS=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --only)          only="${2:-}"; shift 2 ;;
@@ -562,6 +631,7 @@ main() {
       --signing-env)   SIGNING_ENV="${2:-}"; shift 2 ;;
       --debug-env)     debug_env="${2:-}"; shift 2 ;;
       --evidence)      evidence="${2:-}"; shift 2 ;;
+      --bench-labels)  BENCH_LABELS="${2:-}"; shift 2 ;;
       --skip-probes)   skip_probes=1; shift ;;
       --self-test)     self_test; exit $? ;;
       -h|--help)       usage; exit 0 ;;
@@ -574,6 +644,19 @@ main() {
   [[ -n "${SIGNING_ENV}" ]]    || { usage; die "--signing-env is required"; }
   [[ -n "${evidence}" ]]       || { usage; die "--evidence is required"; }
   [[ -s "${TRUST_VERDICT}" ]]  || die "trust verdict is missing or empty: ${TRUST_VERDICT}"
+
+  # No default, and deliberately not read from the environment even when one is
+  # already exported: a value this tool cannot show in its own argv is a value
+  # nobody reviewing the dispatch can audit. AGENTS.md, "Bench PARTLABEL overlay".
+  [[ -n "${BENCH_LABELS}" ]] || {
+    usage
+    die "refusing to build without --bench-labels 0|1 — this script must never silently default this flag; a wrong PARTLABEL set writes A/B recovery state to the WRONG PHYSICAL DEVICE on a dual-media bench rig (see the incident writeup in AGENTS.md, 'Bench PARTLABEL overlay')"
+  }
+  case "${BENCH_LABELS}" in
+    0|1) ;;
+    *) die "--bench-labels takes exactly 0 or 1 (got '${BENCH_LABELS}')" ;;
+  esac
+  say "bench PARTLABEL overlay: CERALIVE_BENCH_LABELS=${BENCH_LABELS} ($(bench_labels_desc))"
 
   local -a selected=()
   if [[ "${only}" == "all" ]]; then

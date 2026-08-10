@@ -77,7 +77,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir>` — refuses a dirty worktree and an implicit signing state, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE` from the recorded verdict, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -588,14 +588,14 @@ each of which invalidates an assumption that looked safe on paper:
 standalone (Rule D), so it may never resolve a bench PKI by proximity to its own
 checkout.
 
-**A hardware candidate is a build PLUS the three facts that make it evidence —
+**A hardware candidate is a build PLUS the four facts that make it evidence —
 `ci/build-hardware-candidates.sh` is what refuses to produce one without them**
 [EXISTS]
 
 `--only all|rock-edge|orange-edge|rock-edge-test` maps a closed candidate table
 (board × variant × debug posture) onto real `./build` runs, captured through
 `tee` under `pipefail`. It exists because a hand-run `./build` never asks the
-three questions an artifact that is about to be written to a real board has to
+four questions an artifact that is about to be written to a real board has to
 answer:
 
 - **WHICH SOURCE.** It refuses a **dirty worktree** — with no override flag —
@@ -618,6 +618,13 @@ answer:
   the three CeraLive test symbols must be OFF on `rock-edge` and ON on
   `rock-edge-test`. The non-debug leg additionally runs the real
   `required-symbols.list` + `forbidden-symbols.list` manifests against it.
+- **WHICH LABELS.** `--bench-labels 0|1` is **REQUIRED** — there is no default and
+  no ambient fallback — and `CERALIVE_BENCH_LABELS` is exported from it for every
+  real build. See the KEY FACT immediately below; this is the one input whose
+  wrong value yields a *plausible* artifact that then writes A/B recovery state to
+  the wrong physical device. Every candidate build logs
+  `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`, and the tuple carries
+  `bench_labels` + `partlabel_set`.
 
 The **eight DRY_RUN probes** (the seven valid board×kernel-track cells plus the
 multi-board dispatch probe) run BEFORE any real build, so a plan-level
@@ -625,8 +632,16 @@ regression is reported in seconds rather than after a kernel compile.
 `--debug-env` is required when a debug candidate is selected and refused when
 one is not; it supplies `CERALIVE_DEBUG_PASSWORD_HASH`, and the script sets
 `CERALIVE_DEBUG_IMAGE` explicitly on both branches rather than letting an
-ambient value decide. `--self-test` (12 legs) drives every refusal and both
-non-vacuity directions of the symbol assertion.
+ambient value decide. `--self-test` (18 legs) drives every refusal — including
+the `--bench-labels` one — and both non-vacuity directions of the symbol
+assertion. The end-to-end contract (refusal, both exported values observed in
+the environment `./build` actually receives, and both tuple fields) is
+`tests/hardware-candidate-bench-labels.test.sh`.
+
+**The artifact tuple is at `schema_version: 2`.** The bump is `bench_labels` +
+`partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
+by tooling that COULD NOT state which PARTLABEL set built the artifact, which is
+precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
@@ -2133,6 +2148,65 @@ media make `PARTLABEL=rootfs_a` ambiguous on the running kernel.
   sets it; the orchestrator logs a loud warning while it is active, and a bench
   image deliberately FAILS `tests/preflash-verify.sh` (which asserts the
   production label set), so the eMMC flash gate refuses it.
+- **A hardware CANDIDATE must state the mode explicitly — the AMBIENT default is a
+  confirmed real-hardware defect.** `lib/orchestrate.sh`'s
+  `export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"` is correct and stays
+  as it is for a DIRECT `./build`: a hand-run build is a production build unless
+  the operator says otherwise. `ci/build-hardware-candidates.sh` is the one caller
+  that may never inherit it, and until 2026-08-10 it did — see the KEY FACT below.
+
+**A hardware candidate that does not STATE its PARTLABEL set wrote A/B recovery
+state to the wrong physical device — `--bench-labels` is therefore REQUIRED, with
+no default and no ambient fallback** [EXISTS — fixed 2026-08-10]
+
+`ci/build-hardware-candidates.sh` never threaded `CERALIVE_BENCH_LABELS` through to
+its `./build` invocation, so the value came from whatever the invoking shell
+exported. Orchestrator dispatches are **stateless and fresh**, so the flag was
+present in some dispatches and silently absent in others, where
+`lib/orchestrate.sh`'s own `:-0` default then took over.
+
+**The failure this produced is the dangerous shape: a PLAUSIBLE artifact.** A
+`rock-edge-test` debug candidate was built with the FROZEN PRODUCTION label set and
+run from the bench microSD of a Rock 5B+ that ALSO carries an onboard eMMC holding
+an unrelated, plain-labelled image. U-Boot resolved `root=PARTLABEL=xrootfs_a` off
+the medium it was booting from, so the board came up looking entirely healthy — but
+the candidate's own `/etc/fstab` asked for plain `boot` and `data`, which on that
+rig resolve to the **eMMC**. Every `/boot` operation therefore addressed the wrong
+device, including `rauc status mark-bad` and the `boot_state.txt` it persists
+through: the microSD's real A/B state was never updated, U-Boot correctly re-picked
+the same slot on the next boot, and the board required a careful manual recovery
+(mounting `xboot` by hand and rewriting the boot state). The eMMC's own unrelated
+A/B state was mutated as a side effect.
+
+The fix, and the reasoning behind each half:
+
+- **`--bench-labels 0|1` is REQUIRED and takes an explicit value.** Not
+  `${CERALIVE_BENCH_LABELS:-0}`, not a bare flag, not an env fallback. A value that
+  lives only in an ambient environment is invisible to anyone reviewing the dispatch
+  afterwards, and this input's wrong value cannot be caught by any later gate — the
+  artifact builds, boots and passes everything else. The refusal names the flag and
+  the incident. `--bench-labels` is validated to be exactly `0` or `1`; `yes`,
+  `true`, `on`, `2` and an empty value are all refused rather than coerced.
+- **`CERALIVE_BENCH_LABELS` is exported from it in `build_candidate`**, next to the
+  existing explicit `CERALIVE_BUILD_MODE` / `CERALIVE_DEBUG_IMAGE` exports and for
+  the same reason: an implicit value here is the one failure that still produces a
+  plausible artifact.
+- **Every candidate build logs the active mode** —
+  `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: ON — xboot/… | OFF — frozen
+  production label set)` — so a human reading a build log sees it without knowing to
+  look for it.
+- **The tuple records `bench_labels` (bool) + `partlabel_set`**, at
+  `schema_version: 2`. This is what makes "is this artifact safe on an
+  eMMC+microSD bench rig, or on eMMC-only/production hardware?" answerable from the
+  evidence trail rather than from memory of the dispatch.
+
+Guard: `tests/hardware-candidate-bench-labels.test.sh` drives the REAL shipped
+script inside a throwaway pipeline tree whose `./build` is a stub that dumps its own
+environment — so the exported value is observed at the only place that matters.
+Mutation-verified: reintroducing `BENCH_LABELS="${BENCH_LABELS:-${CERALIVE_BENCH_LABELS:-0}}"`
+fails four of its assertions. `--self-test` carries the refusal legs too, and every
+pre-existing refusal leg was updated to pass `--bench-labels` so it still fails for
+the reason it claims.
 
 **RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
 
@@ -4119,6 +4193,7 @@ gated item, not the package availability.
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
+- Don't give `ci/build-hardware-candidates.sh`'s `--bench-labels` a default of any kind, and don't let it fall back to an ambient `CERALIVE_BENCH_LABELS`. A candidate whose PARTLABEL set was decided by the dispatch shell builds, boots and passes every other gate, and then addresses `/boot` and `/data` on the WRONG PHYSICAL MEDIUM of a dual-media bench rig — that is a real 2026-08-10 incident, not a hypothetical. `lib/orchestrate.sh`'s own `:-0` default is for a DIRECT `./build` and stays exactly as it is
 - Don't regenerate `tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design

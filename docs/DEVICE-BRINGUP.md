@@ -601,6 +601,29 @@ contract, not a contract change — a bench-labelled image deliberately FAILS
 eMMC flash gate refuses it by construction. No release/publish path ever sets
 this flag.
 
+**Building a hardware-qualification CANDIDATE? The mode is a required flag, not
+an environment variable.** `ci/build-hardware-candidates.sh` refuses to run
+without an explicit `--bench-labels 0|1` and exports `CERALIVE_BENCH_LABELS`
+from it, so a candidate can never inherit the value from your shell:
+
+```bash
+ci/build-hardware-candidates.sh --only rock-edge-test \
+  --trust-verdict verdict.json --signing-env sign.env --debug-env debug.env \
+  --evidence evidence/ --bench-labels 1      # 1 = bench microSD, 0 = production
+```
+
+This is the direct outcome of a 2026-08-10 incident on this exact bench rig. A
+debug candidate was built without the overlay while every other candidate that
+day had it; its `/etc/fstab` then mounted `/boot` and `/data` from the board's
+onboard eMMC (which carries an unrelated image using the plain labels) rather
+than the microSD's `xboot`/`xdata`, because U-Boot resolves the ROOT filesystem
+off the medium it booted from while fstab resolves everything else by label
+alone. The board therefore looked healthy, and a RAUC recovery transition
+silently wrote its A/B state to the wrong physical device — recoverable only by
+hand. If a board has both a bench microSD and an eMMC image, `--bench-labels 1`
+is not optional. Full write-up: `AGENTS.md`, "Bench PARTLABEL overlay" and the
+candidate-builder KEY FACT; also [`dev-loop.md`](dev-loop.md).
+
 **Microsd boot discipline, board-verified.** A real Rock 5B+ microSD boot
 smoke test (todo 27) confirmed a full boot to userspace with no crash loop
 under this discipline — that transcript is cited here rather than re-run,
