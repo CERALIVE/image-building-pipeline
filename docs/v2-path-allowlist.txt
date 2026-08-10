@@ -1,0 +1,34 @@
+# v2-path-allowlist.txt — the complete, exact set of surviving "v2" path-prefix hits.
+#
+# WHY THIS FILE EXISTS: the build system used to live under a top-level `v2`
+# directory. It now lives at the repository root, so every `v2`-prefixed
+# FILESYSTEM path left in this repo is a bug. This file is the closed set of the
+# remaining matches that are NOT filesystem paths and therefore must NOT be
+# rewritten. Anything not listed here is stale and must be fixed, not appended.
+#
+# CHECKED BY (workspace orchestration tool, outside every repo):
+#   git grep -n '\bv2\x2f' >hits.txt
+#   check-path-allowlist.py --hits hits.txt --allow docs/v2-path-allowlist.txt
+# It rejects an unlisted hit, a listed row with no matching hit, a duplicate row,
+# and a malformed row.
+#
+# FORMAT: one verbatim line of `git grep -n` output per row
+# (`<path>:<line>:<content>`). Blank lines and lines starting with `#` are
+# comments. Rows may escape any byte as `\xNN` — used below for `/` (`\x2f`) so
+# that this file does not match the very pattern it documents; an allowlist that
+# quoted the pattern literally would have to list itself, forever.
+#
+# NOTE ON LINE NUMBERS: rows carry the grep line number, so editing a listed file
+# above a listed line makes the check fail loudly rather than silently drift.
+# That is intended — re-capture and update the row.
+
+# --- JSON Schema `$id` URIs (3 rows) ---------------------------------------
+# A JSON Schema `$id` is a stable IDENTIFIER, not a location. It never resolves to
+# a path on disk: `lib/resolve.py` loads these schemas from `manifests/schema/` by
+# filename and resolves `$ref`s through a local store keyed by `$id`. Rewriting an
+# `$id` invalidates every `$ref` that targets it and every validator cache keyed on
+# the old identifier, for zero gain — the version segment here names the schema
+# namespace, which did not change when the directory moved.
+manifests/schema/addon.schema.json:3:  "$id": "https:\x2f\x2fceralive.tv\x2fschema\x2fv2\x2faddon.schema.json",
+manifests/schema/board.schema.json:3:  "$id": "https:\x2f\x2fceralive.tv\x2fschema\x2fv2\x2fboard.schema.json",
+manifests/schema/family.schema.json:3:  "$id": "https:\x2f\x2fceralive.tv\x2fschema\x2fv2\x2ffamily.schema.json",

@@ -15,29 +15,30 @@ Relates to:
 ## STRUCTURE
 
 ```
-image-building-pipeline/
-├── v2/                       # current build system (mkosi v26)
-│   ├── build                 # entry point: ./v2/build <board>
-│   ├── ci/
-│   │   ├── Dockerfile        # pinned debian:trixie-slim builder (mkosi 26)
-│   │   └── publish-immutable-r2-pair.sh # approved-digest-bound RAUC publisher
-│   ├── manifests/            # board/family manifests + exact package registries
-│   │   └── schema/
-│   │       └── addon.schema.json   # add-on descriptor JSON Schema (T21)
-│   ├── lib/                  # orchestrate.sh (thin SEQUENCER), assemble-disk.sh,
-│   │   │                     #   build-bundle.sh, build-all.sh (parallel runner),
-│   │   │                     #   build-feature-sysext.sh, measure-size.sh, parity-check.sh,
-│   │   │                     #   fetch-debs.sh (REPOS array + FIRST_PARTY_APT_PKGS), …
-│   │   ├── stages/           # one module per orchestrator [N/9] stage body
-│   │   └── app-layer/
-│   │       └── sysext.sh     # sysext build lib (extract → prune → squashfs)
-│   ├── docs/                 # dev-loop.md, kiosk-display.md, host-support.md,
-│   │   │                     #   size-notes.md, cog-display-addon.md,
-│   │   │                     #   cog-display-hw-checklist.md,
-│   │   │                     #   addon-sysext-refresh.md, DEFERRED.md
-│   │   └── fast-reload.md    # dev-sync live-reload loop
-│   └── tests/                # manifests, RK3588 A/B/preflash, x86 rollback
-├── docs/
+image-building-pipeline/          # build system lives at the root (mkosi v26)
+├── build                     # entry point: ./build <board>
+├── run-tests                 # canonical test entrypoint
+├── dev-push / dev-sync       # dev-loop helpers
+├── ci/
+│   ├── Dockerfile            # pinned debian:trixie-slim builder (mkosi 26)
+│   └── publish-immutable-r2-pair.sh # approved-digest-bound RAUC publisher
+├── manifests/                # board/family manifests + exact package registries
+│   └── schema/
+│       └── addon.schema.json # add-on descriptor JSON Schema (T21)
+├── lib/                      # orchestrate.sh (thin SEQUENCER), assemble-disk.sh,
+│   │                         #   build-bundle.sh, build-all.sh (parallel runner),
+│   │                         #   build-feature-sysext.sh, measure-size.sh, parity-check.sh,
+│   │                         #   fetch-debs.sh (REPOS array + FIRST_PARTY_APT_PKGS), …
+│   ├── stages/               # one module per orchestrator [N/9] stage body
+│   └── app-layer/
+│       └── sysext.sh         # sysext build lib (extract → prune → squashfs)
+├── mkosi/                    # mkosi config, customize hooks, runtime artifacts, platform
+├── fleet/                    # hawkBit provisioning + platform bridge
+├── tests/                    # manifests, RK3588 A/B/preflash, x86 rollback
+├── docs/                     # ONE docs tree — dev-loop.md, kiosk-display.md,
+│   │                         #   host-support.md, size-notes.md, cog-display-addon.md,
+│   │                         #   cog-display-hw-checklist.md, addon-sysext-refresh.md,
+│   │                         #   DEFERRED.md, fast-reload.md (dev-sync live-reload loop)
 │   ├── FIRST-BOOT.md         # operator first-boot guide: flash → WiFi portal → SSH → CeraUI [EXISTS]
 │   ├── DEVICE-BRINGUP.md     # developer bring-up guide: build, flash, dev loop, E2E smoke test
 │   └── partition-contract.md # frozen GPT layout contract
@@ -48,49 +49,49 @@ image-building-pipeline/
 
 | Task | Location |
 |------|----------|
-| Start a build | `./v2/build <board>` — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
-| **A specific `[N/9]` build stage** | `v2/lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
-| Add/change .deb packages | `v2/lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
-| **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `v2/lib/fetch/debcache.sh` + the store site in `v2/lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
-| **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `v2/manifests/packages/development.delta.list` + `v2/lib/common.sh::runtime_pkg_list_files` + `v2/lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
-| Board/kernel customisation | `v2/manifests/boards/<board>.yaml` |
-| **Supported-modem matrix / WWAN modules** | [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `v2/lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
-| **Modem slot-UID udev generator (fail-closed)** | `v2/mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
-| **Runtime postinst library — which module holds which function** | `v2/mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `v2/mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
-| **USB-C Type-C source-role pinning (camera enumeration)** | `v2/mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `v2/mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
-| **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `v2/mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
-| **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `v2/mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `v2/mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
-| **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `v2/mkosi/customize/postinst-lib.sh` `setup_led_status` + `v2/mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
-| **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `v2/mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
+| Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
+| **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
+| Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
+| **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
+| **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
+| Board/kernel customisation | `manifests/boards/<board>.yaml` |
+| **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
+| **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
+| **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
+| **USB-C Type-C source-role pinning (camera enumeration)** | `mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
+| **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
+| **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
+| **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
+| **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
-| **Dev-sync live-reload loop** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) |
-| Manifest schema / validation | `v2/manifests/schema/{board,family}.schema.json` (enforced by `v2/lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
-| Armbian BSP Debian version pins | `v2/manifests/armbian-bsp-deb-versions.txt` |
-| v2 unit tests / boot fallback | `v2/tests/manifest.bats`, `v2/tests/rk3588-ab-contract.bats`, and `v2/tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `v2/run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `v2/mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `v2/tests/qemu-x86.sh --fallback-selftest` |
-| **`/boot` completeness (both kernel paths)** | `v2/lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `v2/tests/boot-artifacts.bats` — see the KEY FACT below |
-| **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `v2/mkosi/platform/boot/boot.scr.cmd`, proof `v2/tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
-| **x86 ESP + GRUB A/B disk assembly** | `v2/lib/assemble-disk-x86.sh` (offline producer); `v2/mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `v2/mkosi/platform/x86/test-x86-grub.sh`; rationale in [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2 |
-| **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`v2/docs/X86-MINIPC-BRINGUP.md`](v2/docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
-| **Kiosk display stack (chassis)** | [`v2/docs/kiosk-display.md`](v2/docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
+| **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
+| Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
+| Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
+| Unit tests / boot fallback | `tests/manifest.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
+| **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
+| **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
+| **x86 ESP + GRUB A/B disk assembly** | `lib/assemble-disk-x86.sh` (offline producer); `mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `mkosi/platform/x86/test-x86-grub.sh`; rationale in [`mkosi/platform/x86/README.md`](mkosi/platform/x86/README.md) §2 |
+| **x86-minipc bring-up/validation runbook** (device discovery, build/flash, first-boot, `hw-smoke.sh n100` encoder validation, `.raucb` OTA install+rollback) | [`docs/X86-MINIPC-BRINGUP.md`](docs/X86-MINIPC-BRINGUP.md) — **NOT YET VALIDATED ON HARDWARE**, runbook only |
+| **Kiosk display stack (chassis)** | [`docs/kiosk-display.md`](docs/kiosk-display.md) — units, packages, OOM, wvkbd build |
 | Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
-| **Build host support matrix** | [`v2/docs/host-support.md`](v2/docs/host-support.md) — which hosts work, what they need |
-| **Image size notes / levers** | [`v2/docs/size-notes.md`](v2/docs/size-notes.md) — locale strip, firmware audit, size-gate |
-| **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md) + `v2/mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
-| **Cog display add-on recipe** | [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
-| **Cog on-hardware render QA checklist** | [`v2/docs/cog-display-hw-checklist.md`](v2/docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
-| **sysext refresh protocol** | [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md) — update/disable lifecycle |
-| **Deferred / hardware-gated items** | [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
-| **Kernel tracks (index)** | [`v2/docs/kernel-tracks.md`](v2/docs/kernel-tracks.md) — thin lifecycle/discoverability index: which patch repo feeds which variant, the pin chain, and links to the decision/build/currency docs below (does not restate them) |
-| **Kernel currency watch** | [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
-| **Kernel build from source (opt-in variants)** | [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.1, `vendor-patched` = vendor 6.1 BSP + HDMI-RX audio fix), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config`), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
-| **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
-| Add-on descriptor schema | `v2/manifests/schema/addon.schema.json` |
-| Build a feature sysext add-on | `v2/lib/build-feature-sysext.sh` |
-| Publish a signed add-on to R2 | `v2/lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
-| Publish a hardware-approved RAUC bundle pair to R2 | `v2/ci/publish-immutable-r2-pair.sh` via [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §5; requires the independently approved candidate SHA-256 and performs private, read-only input snapshots plus create-only exact-byte recovery |
-| **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `v2/lib/verify-paseto-key-encodings.sh` |
+| **Build host support matrix** | [`docs/host-support.md`](docs/host-support.md) — which hosts work, what they need |
+| **Image size notes / levers** | [`docs/size-notes.md`](docs/size-notes.md) — locale strip, firmware audit, size-gate |
+| **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md) + `mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
+| **Cog display add-on recipe** | [`docs/cog-display-addon.md`](docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
+| **Cog on-hardware render QA checklist** | [`docs/cog-display-hw-checklist.md`](docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
+| **sysext refresh protocol** | [`docs/addon-sysext-refresh.md`](docs/addon-sysext-refresh.md) — update/disable lifecycle |
+| **Deferred / hardware-gated items** | [`docs/DEFERRED.md`](docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
+| **Kernel tracks (index)** | [`docs/kernel-tracks.md`](docs/kernel-tracks.md) — thin lifecycle/discoverability index: which patch repo feeds which variant, the pin chain, and links to the decision/build/currency docs below (does not restate them) |
+| **Kernel currency watch** | [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
+| **Kernel build from source (opt-in variants)** | [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.1, `vendor-patched` = vendor 6.1 BSP + HDMI-RX audio fix), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config`), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
+| **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`docs/dev-loop.md`](docs/dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
+| Add-on descriptor schema | `manifests/schema/addon.schema.json` |
+| Build a feature sysext add-on | `lib/build-feature-sysext.sh` |
+| Publish a signed add-on to R2 | `lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
+| Publish a hardware-approved RAUC bundle pair to R2 | `ci/publish-immutable-r2-pair.sh` via [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §5; requires the independently approved candidate SHA-256 and performs private, read-only input snapshots plus create-only exact-byte recovery |
+| **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `lib/verify-paseto-key-encodings.sh` |
 | **End-to-end release process** (build/sign → immutable candidate → manual hand-test on real HW → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
 | **apt.ceralive.tv build-credential rotation** (`APT_GPG_PUBLIC_B64`/`APT_CLIENT_CRT_B64`/`APT_CLIENT_KEY_B64`) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §7 |
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
@@ -100,9 +101,9 @@ image-building-pipeline/
 **The runtime postinst library is an ENTRY plus per-concern modules — "one source
 of truth" now means "one source SET"** [EXISTS]
 
-`v2/mkosi/customize/postinst-lib.sh` is a thin entry (~84 lines): the chroot-safe
+`mkosi/customize/postinst-lib.sh` is a thin entry (~84 lines): the chroot-safe
 `log`/`die`/`resolve_partlabel` fallbacks and an explicit list of the modules under
-`v2/mkosi/customize/postinst.d/` that carry the implementation. Sourcing the entry
+`mkosi/customize/postinst.d/` that carry the implementation. Sourcing the entry
 still yields the COMPLETE API in one `source`, so nothing about how
 `mkosi.postinst.chroot`, `customize/services.sh` or `customize/data-persistence.sh`
 consume it changed, and `main()`'s call order in the runtime executor is untouched
@@ -129,10 +130,10 @@ EXPLICIT, never a glob — a module that is renamed, missing from the source mou
 added under `postinst.d/` but never wired up must fail loudly at source time rather
 than surface later as a `command not found` in a half-configured image.
 
-`v2/ci/postinst-drift-check.sh` resolves each `CONSOLIDATED_FUNCS` entry across the
+`ci/postinst-drift-check.sh` resolves each `CONSOLIDATED_FUNCS` entry across the
 entry + `postinst.d/` SET (still exactly one definition, still zero re-inlines into
 `mkosi.postinst.chroot`/`services.sh`/`data-persistence.sh`), and CHECK 1c enforces
-both rules above. `v2/tests/postinst-module-contract.test.sh` proves, in a scrubbed
+both rules above. `tests/postinst-module-contract.test.sh` proves, in a scrubbed
 `env -i` shell with nothing pre-sourced, that every registry function resolves from a
 bare `source postinst-lib.sh` and that each module also sources standalone.
 
@@ -149,11 +150,11 @@ still SOURCING the entry; keep that distinction when adding a new check.
 **`orchestrate.sh` is an ENTRY plus per-stage modules — the same shape as
 `fetch-debs.sh` and `postinst-lib.sh`** [EXISTS]
 
-`v2/lib/orchestrate.sh` is the thin SEQUENCER (397 lines, was 1,045). It keeps the
+`lib/orchestrate.sh` is the thin SEQUENCER (397 lines, was 1,045). It keeps the
 locations, the env-overridable configuration every stage reads, `usage()`,
 `acquire_board_lock`, the mkosi ENVIRONMENT CONTRACT (`run_mkosi_build`'s
 `env_names` + exports), and `main()` — which is now a flat list of `stage_*` calls.
-Each `[N/9]` stage BODY lives in one module under `v2/lib/stages/`:
+Each `[N/9]` stage BODY lives in one module under `lib/stages/`:
 
 | Stage | Module | Also holds |
 |---|---|---|
@@ -205,28 +206,28 @@ the `DRY_RUN=1` build plan is byte-identical for all three shipped boards.
 **Build entry point** [EXISTS]
 
 The **container build is the canonical path.** The orchestrator runs mkosi v26
-inside a pinned `debian:trixie-slim` builder (`v2/ci/Dockerfile`). Native builds
+inside a pinned `debian:trixie-slim` builder (`ci/Dockerfile`). Native builds
 (`--native` / `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12
-on a Debian trixie+ host. See [`v2/docs/host-support.md`](v2/docs/host-support.md)
+on a Debian trixie+ host. See [`docs/host-support.md`](docs/host-support.md)
 for the full host matrix.
 
 ```bash
-./v2/build <board>                       # single board, e.g. ./v2/build rock-5b-plus
-./v2/build --all                         # every manifest in manifests/boards/
-./v2/build --only rock-5b-plus,x86-minipc  # validated subset
-DRY_RUN=1 ./v2/build <board>             # resolve + fetch plan only
-./v2/build <board> --native              # opt-in native build (trixie+ host only)
-MKOSI_NATIVE=1 ./v2/build <board>        # same, env-var form
-./v2/build <board> --variant edge        # opt-in family variant (mainline 7.1 kernel from source)
-./v2/build <board> --variant vendor-patched  # opt-in: vendor 6.1 BSP from source + HDMI-RX audio fix
+./build <board>                       # single board, e.g. ./build rock-5b-plus
+./build --all                         # every manifest in manifests/boards/
+./build --only rock-5b-plus,x86-minipc  # validated subset
+DRY_RUN=1 ./build <board>             # resolve + fetch plan only
+./build <board> --native              # opt-in native build (trixie+ host only)
+MKOSI_NATIVE=1 ./build <board>        # same, env-var form
+./build <board> --variant edge        # opt-in family variant (mainline 7.1 kernel from source)
+./build <board> --variant vendor-patched  # opt-in: vendor 6.1 BSP from source + HDMI-RX audio fix
 ```
 
-Entry: `v2/build` → `v2/lib/orchestrate.sh`. Produces `.raw` sysext bundles and
-`.raucb` A/B RAUC OTA packages. See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md).
+Entry: `build` → `lib/orchestrate.sh`. Produces `.raw` sysext bundles and
+`.raucb` A/B RAUC OTA packages. See [`docs/dev-loop.md`](docs/dev-loop.md).
 
 **x86 disk assembly — full A/B GRUB (Task 12)** [EXISTS]
 
-`v2/build x86-minipc` now produces a flashable `.raw` with RAUC **A/B** boot (was:
+`./build x86-minipc` now produces a flashable `.raw` with RAUC **A/B** boot (was:
 deferred `TODO(x86-disk)`, rootfs.tar only). x86 boots UEFI → GRUB from an EFI System
 Partition with RAUC's **native `bootloader=grub`** backend: `lib/assemble-disk-x86.sh`
 (the offline x86 producer, parallel to the RK3588 `assemble-disk.sh`) lays the ESP
@@ -235,7 +236,7 @@ plus the **FROZEN** `rootfs_a`/`rootfs_b`/`data` slots — `repart/` and the RK3
 assembly stay zero-diff (G3/SC6). The earlier `bootloader=custom` countdown scaffold
 is RETAINED, unchanged, only as the offline rollback-contract harness
 (`qemu-x86.sh --fallback-selftest`, `test-x86-fallback.sh`). Full rationale +
-VERIFY-FIRST finding: [`v2/mkosi/platform/x86/README.md`](v2/mkosi/platform/x86/README.md) §2.
+VERIFY-FIRST finding: [`mkosi/platform/x86/README.md`](mkosi/platform/x86/README.md) §2.
 The signed `.raucb` OTA bundle is now emitted on the x86 path too: the `efi`/`grub`
 Stage-4 branch calls `build-bundle.sh` after `assemble-disk-x86.sh`, alongside the
 `.raw`, stamped with the board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`).
@@ -253,7 +254,7 @@ successful write; a three-attempt bootcount rolls an unconfirmed slot back.
 Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
 automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
 
-`v2/tests/preflash-verify.sh` requires `--target-size-bytes` and rejects wrong GPT
+`tests/preflash-verify.sh` requires `--target-size-bytes` and rejects wrong GPT
 starts/sizes or labels, a missing idblock or second-stage FIT, external FIT payloads
 whose declared extents exceed the image/8 MiB budget or whose SHA-256 nodes mismatch,
 malformed compiled boot metadata, either slot missing its arm64 kernel/board DTB/initrd, stale boot
@@ -264,7 +265,7 @@ layout — `/boot/Image` is a symlink to `vmlinuz-<ver>` and only the versioned
 NOT dereference a symlink that is the FINAL path component (it writes the link
 target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
 follows a terminal-component symlink to the versioned target, and globs the versioned
-initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `v2/run-tests` blocks on the actual boot-script sanitizer, fallback engine,
+initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `run-tests` blocks on the actual boot-script sanitizer, fallback engine,
 mock rollback, preflash adversarial fixtures, and the two privileged hardware-free
 contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=required` exercises
 real-RAUC interruption/cleanup, while
@@ -275,7 +276,7 @@ RAUC versions without depending on the runner's boot device. A v1 single-slot
 disk cannot migrate by
 OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
-the hardware acceptance gate in `v2/docs/hardware-gated-completion.md` Item 4.
+the hardware acceptance gate in `docs/hardware-gated-completion.md` Item 4.
 
 The v2 CI Bats job installs the split Ubuntu `rauc` + `rauc-service` packages,
 starts a system D-Bus, reloads its installed policy, and then invokes the real
@@ -290,7 +291,7 @@ builds the candidate and uploads the raw image, bundle, keyring, and digest as o
 immutable artifact for an operator to download; there is no automated
 hardware-flashing gate. An operator hand-tests that exact artifact on real
 hardware before a manual release, using the bench flash-and-verify tool
-(`v2/ci/verify-and-flash-candidate.sh`), which preflights and flashes a private,
+(`ci/verify-and-flash-candidate.sh`), which preflights and flashes a private,
 digest-verified snapshot of that exact raw image. While
 the board is still in maskrom, the tool reads the exact whole-media sector range
 back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
@@ -344,7 +345,7 @@ InRelease, Packages.gz, and every package SHA-256. Manual RK3588 recovery uses
 Dispatch is by the **count of resolved boards**, not the flag: a single resolved
 board (`<board>`, or `--only`/`--all` that resolves to exactly one) execs the
 orchestrator directly; a multi-board selection is handed to the parallel runner
-`v2/lib/build-all.sh`. An unknown board in `--only` exits non-zero, names the
+`lib/build-all.sh`. An unknown board in `--only` exits non-zero, names the
 offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
@@ -362,14 +363,14 @@ receiver-side only after cutover. **Conflict declaration:** `srtla-send-rs` decl
 `srtla (<< 2026.6.2)` — which still bundled the C sender — is correctly blocked from
 coinstall, while `srtla` v2026.6.2 (the first receiver-only release) is NOT
 `<< 2026.6.2`, so it coinstalls with the Rust sender. REPOS lives in
-`v2/lib/fetch-debs.sh`.
+`lib/fetch-debs.sh`.
 
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
-`fetch_first_party` (in `v2/lib/fetch-debs.sh`) pulls the device first-party
+`fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
 this REPLACES the retired R2 `aws s3 sync` (CI) and `gh release download` (local)
-paths. It mirrors `v2/mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
+paths. It mirrors `mkosi/customize/apt-ceralive-repo.sh`: a deb822 source
 (`URIs: …/dists/{CHANNEL}/`, `Suites: ./`, GPG `Signed-By`), the GPG keyring and
 the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
@@ -380,7 +381,7 @@ state** under the staging dir (the host apt config is never touched).
   ceralive-forked (`~ceralive0.2.0`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v0.2.0). All are downloaded into `$DEST/debs/` using the pins
-  from `v2/manifests/first-party-deb-versions.txt` (14 packages total). The modem
+  from `manifests/first-party-deb-versions.txt` (14 packages total). The modem
   closure is a self-contained dependency set (`modemmanager`→`libmm-glib0`; the
   glib libs bind the qmi/mbim/qrtr transports); external deps (GLib, `libgudev`,
   `polkit`, systemd) come from Debian. The app layer classifies all nine as
@@ -423,7 +424,7 @@ state** under the staging dir (the host apt config is never touched).
   script): `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64`. They
   are NEVER hardcoded, NEVER logged, NEVER committed; a half-supplied mTLS pair is
   fatal. `APT_GPG_PUBLIC_B64` may encode either the current armored `.asc` public
-  key or a binary `.gpg` keyring: `v2/lib/dearmor-apt-keyring.sh` normalizes it
+  key or a binary `.gpg` keyring: `lib/dearmor-apt-keyring.sh` normalizes it
   and checks binary OpenPGP `file(1)` magic in the native/container build context
   before mkosi starts. The runtime postinstall receives only that validated binary
   payload; do not add `gpg` or `file` to the device package set. `APT_CERALIVE_URL`
@@ -444,7 +445,7 @@ state** under the staging dir (the host apt config is never touched).
   the `mktemp -d` (mode 0700, root-owned) is chowned to `_apt` the way apt chowns
   its own `partial/` dirs — a mode-0755 root-owned download dir still degrades to
   `Download is performed unsandboxed as root`. Guard:
-  `v2/tests/fetch-debs-apt-sandbox.test.sh`, which drives the shipped
+  `tests/fetch-debs-apt-sandbox.test.sh`, which drives the shipped
   `fetch_first_party` with a REAL apt-get against a real GPG-signed fixture
   repository in a container at real UID 0 and unprivileged, asserts the absence
   of that warning under a 0077 umask, and carries a control replay proving the
@@ -458,7 +459,7 @@ state** under the staging dir (the host apt config is never touched).
 - **BSP fetch is authenticated** — kernel/DTB/U-Boot/firmware/GStreamer come
   from signed Armbian metadata, with the exact archive-key fingerprint set and
   all content hashes checked before staging. Family manifests select package
-  names; `v2/manifests/armbian-bsp-deb-versions.txt` supplies the exact Debian
+  names; `manifests/armbian-bsp-deb-versions.txt` supplies the exact Debian
   versions. Both native apt and curl fetches re-verify the downloaded InRelease
   with `gpgv`, require signatures from both pinned archive keys, and validate the
   signed suite/component/architecture identity before any package download. The
@@ -481,7 +482,7 @@ state** under the staging dir (the host apt config is never touched).
 
 Decision D3 still selects the vendor branch through package names such as
 `linux-image-vendor-rk35xx`; exact Debian versions for every required BSP package
-are committed in `v2/manifests/armbian-bsp-deb-versions.txt`. `fetch_bsp`
+are committed in `manifests/armbian-bsp-deb-versions.txt`. `fetch_bsp`
 authenticates the exact Armbian archive-key fingerprint set, verifies `InRelease`
 and its configured suite/`main`/architecture identity, verifies the `Packages.gz`
 digest from signed metadata, preflights the complete exact package set, and
@@ -499,7 +500,7 @@ same-version content replacement observable:
   (that job hashes the normalized build-plan string, never a file tree).
 - **Drift-guard (warn-default, strict opt-in, C6b)** — `bsp_drift_check` compares
   the captured version+hash against the committed baseline
-  `v2/manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
+  `manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
   stdout. Exit policy is **opt-in**: by DEFAULT (`BSP_DRIFT_STRICT` unset/≠1) it
   **exits 0 — drift is warn-only, never fatal** (build continues, the historical
   byte-for-byte path). With **`BSP_DRIFT_STRICT=1`** a real mismatch against a
@@ -509,20 +510,20 @@ same-version content replacement observable:
   still caught. **Promotion criterion:** flipping the default to strict is a FUTURE
   change gated on (1) the baseline seeded with a real known-good version+sha256 AND
   (2) a fleet manifest run clean of drift — see
-  [`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
+  [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
 - **First-run / seeded baseline** — a new scaffold may start with `version` and
   `sha256` as `null`; the first authenticated real build seeds the baseline with
   the actual values, emits an informational note, and exits 0. Commit that seeded
   value to set the known-good content reference. Exact package selection remains
   governed by `armbian-bsp-deb-versions.txt`. Proof:
-  `v2/run-tests` section 15.
+  `run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
 **Kernel build from source — OPT-IN family variants, production path byte-identical** [PARTIAL]
 
 The family manifest gained a `variants:` map: named, **explicitly opt-in** overlays
-on the family defaults, applied only via `v2/build <board> --variant <name>` (or
+on the family defaults, applied only via `./build <board> --variant <name>` (or
 `CERALIVE_KERNEL_VARIANT`). Resolver merge order is **family → variant → board**
 (board still wins last, so board facts stay authoritative). `default` is the
 reserved no-overlay name and the schema refuses a variant literally called that.
@@ -538,7 +539,7 @@ DIFFERENT patch repos, and neither repo's patches apply to the other's tree:
 | `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
 Both patch commits are **immutable SHAs**, never branches. Full write-up:
-[`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md).
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
 
 **`vendor-patched` is the answer to "is the vendor patch repo wired in yet?" — it
 is, as of this variant.** It rebuilds the SAME 6.1.115 BSP the production path
@@ -547,7 +548,7 @@ installs prebuilt, plus five patches, fixing the board-confirmed regression wher
 `hdmi-audio-codec` capture channels for every instance — a fix for RK3576
 HDMI-**TX** that killed RK3588 HDMI-**RX**, because `rk_hdmirx` registers through
 that same codec. Build it with
-`./v2/build rock-5b-plus --variant vendor-patched`; it produces
+`./build rock-5b-plus --variant vendor-patched`; it produces
 `linux-image-6.1.115-ceralive-vendor-rk35xx` = `6.1.115-ceralive1`. **The package
 name is deliberately NOT `linux-image-vendor-rk35xx`** — a collision with the
 stock name is the one failure that yields a plausible image rather than an error,
@@ -643,7 +644,7 @@ occurrence of each of those `make` calls in the file.
 - **The production vendor path is BYTE-IDENTICAL.** `variants:` is stripped from
   the family before flattening whether or not one is selected, so a family that
   declares a variant resolves exactly like one that never did. Pinned by committed
-  golden fixtures (`v2/tests/manifests/fixtures/vendor-baseline/*.params`, captured
+  golden fixtures (`tests/manifests/fixtures/vendor-baseline/*.params`, captured
   pre-change) for all three shipped boards, plus an explicit **non-vacuity** leg
   proving the same comparison fails on the `edge` resolve.
 - **The Armbian framework is NOT the build system.** It is consulted for the
@@ -694,7 +695,7 @@ occurrence of each of those `make` calls in the file.
   `/boot/dtb` symlink, this path makes `/boot/dtb` a real dir, and U-Boot resolves
   `/boot/dtb/rockchip/${fdtfile}` either way — proven by the very boot that failed,
   which still read the DTB (`106449 bytes read`) off exactly this layout.
-  Full write-up: [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4b.
+  Full write-up: [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §4b.
 - **`/boot/Image` must also be the RAW Image — `bindeb-pkg` ships `Image.gz`, and
   only ONE of the two boards' U-Boot can cope.** Making the file exist (above) did
   not make it loadable. On a real Orange Pi 5 Plus the selector ran the whole A/B
@@ -739,10 +740,10 @@ occurrence of each of those `make` calls in the file.
   like every finding in this class — `DRY_RUN=1` never runs `[6b/9]` — and
   invisible to the previous `[6b/9]` too, which read `tar -tv` metadata only and
   so could see the symlink, its target and its size but never a byte of content.
-  Guards: `v2/tests/boot-artifacts.bats` (9 added cases). Full write-up:
-  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §4c.
+  Guards: `tests/boot-artifacts.bats` (9 added cases). Full write-up:
+  [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §4c.
 - **BOTH RK3588 boards COMPILE end to end; ONE of them has now BOOTED.** A real
-  (non-`DRY_RUN`) `v2/build <board> --variant edge` produces
+  (non-`DRY_RUN`) `./build <board> --variant edge` produces
   `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
   `validate_built_kernel_deb` axes, installs the board DTB to
   `/boot/dtb/rockchip/`, installs all 14 first-party `.deb`s, clears the `[7/9]`
@@ -752,7 +753,7 @@ occurrence of each of those `make` calls in the file.
   flashed with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is
   what cleared the MPP KNOWN ISSUE below. `orange-pi-5-plus` has still never
   booted an edge image, so the fragment remains reviewed intent on that board.
-  `v2/docs/DEFERRED.md` item 9.
+  `docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
@@ -766,9 +767,9 @@ occurrence of each of those `make` calls in the file.
   byte-identical, pinned by the same `vendor-baseline/*.params` fixtures), permits
   ONLY `dtb_name`, and is FATAL when it names a variant the family does not
   declare. `rock-5b-plus` needs none: mainline and vendor agree on its spelling.
-  With this, a real `v2/build orange-pi-5-plus --variant edge` compiles and passes
+  With this, a real `./build orange-pi-5-plus --variant edge` compiles and passes
   all four validation axes. Full write-up:
-  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §8.
+  [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §8.
 - **CORRECTION (2026-08-02) — the vendor BSP does NOT ship an `rk3588s-` spelling
   for the Orange Pi 5+, and never did.** The KEY FACT above previously read
   "mainline spells it without the `s`; the vendor BSP ships `rk3588s-`". That
@@ -784,7 +785,7 @@ occurrence of each of those `make` calls in the file.
   belongs to the genuinely-RK3588S parts (OPi 5 / 5B / 5 Pro), which the same
   package ships separately — the "5 Plus (RK3588S)" board name is the trap. The
   production `dtb_name` is now `rk3588-orangepi-5-plus.dtb`; a real
-  `./v2/build orange-pi-5-plus` clears `[6b/9]` and emits `.raw` + `.raucb`. PR
+  `./build orange-pi-5-plus` clears `[6b/9]` and emits `.raw` + `.raucb`. PR
   #84's `variant_overrides.edge.dtb_name` was and is correct — it is retained as
   an explicit per-tree assertion rather than deleted as redundant. **This class of
   defect is invisible to the PR gate**, which is `DRY_RUN=1` plan-only and never
@@ -838,7 +839,7 @@ occurrence of each of those `make` calls in the file.
   matter — without them the package NAME inherits that nondeterminism.
 - **D3 is NOT reopened.** The shipped kernel is still the Armbian vendor BSP; this
   is the mainline-track option kept pinned and buildable. See
-  `v2/docs/kernel-currency-watch.md`.
+  `docs/kernel-currency-watch.md`.
 
 - **The three pinned fetches retry into ATTEMPT-PRIVATE dirs, and a PIN MISMATCH
   is never one of the retries.** `build-kernel.sh` performs three network fetches
@@ -868,11 +869,11 @@ occurrence of each of those `make` calls in the file.
   same knob `ci/check-builder-resources.sh` uses) redirects the meminfo read.
   Both of these are **invisible to the PR gate** like everything else in `[2b/9]`
   — it is `DRY_RUN=1` and never fetches or compiles. Guards:
-  `v2/tests/kernel-build-resilience.bats` (30 tests, mutation-verified: removing
+  `tests/kernel-build-resilience.bats` (30 tests, mutation-verified: removing
   the pre-attempt `rm -rf`, folding the pin check into the retry condition,
   publishing before verifying, dropping the final-attempt cleanup, and dropping
   the memory ceiling each fail the suite). Write-up:
-  [`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §3b.
+  [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §3b.
 
 Guards: `manifest.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
 
@@ -897,7 +898,7 @@ read `# CONFIG_RTW89 is not set`. The fragment DID name the adapter
 a tristate, `depends on MAC80211`, defaulting off — so the leaf was invisible and
 discarded. Three releases of build logs said nothing.
 
-`v2/lib/verify-kernel-config.sh` closes it, running **inside the builder container
+`lib/verify-kernel-config.sh` closes it, running **inside the builder container
 right after `make syncconfig` and before `bindeb-pkg`** (mounted read-only at
 `/in/verify-kernel-config.sh`), asserting every declared symbol against the
 RESOLVED `.config`: `=y`/`=m`/`="str"` must match verbatim, `=n` and
@@ -915,9 +916,9 @@ When the gate fires, do NOT silence it by deleting the line: read the symbol's
 Kconfig entry, find the `menuconfig` block it sits inside and its `depends on`,
 and declare those too. A `select`ed helper (`RTW89_CORE`/`RTW89_PCI`/`RTW89_8852B`)
 needs no entry; a `menuconfig` parent always does. Guards:
-`v2/tests/kernel-config-fragment.bats` (26 tests, incl. a red/green pair driving
+`tests/kernel-config-fragment.bats` (26 tests, incl. a red/green pair driving
 the REAL fragment against a reproduction of the broken 7.1.5 answer). Full
-write-up: `v2/docs/kernel-build-from-source.md` §6b.
+write-up: `docs/kernel-build-from-source.md` §6b.
 
 **A `.link` `Path=` captured on the vendor BSP does NOT match on mainline — the
 platform-device name moves, and the rename silently stops** [EXISTS]
@@ -950,7 +951,7 @@ so the glob cannot over-match. A non-PCI ID_PATH (an onboard MAC such as
 `platform-fe1c0000.ethernet`) is emitted verbatim. **Do NOT "fix" a future
 mismatch by rewriting the manifest to the mainline spelling** — that just breaks
 the vendor path instead. Guard:
-`v2/tests/interface-naming-path-match.test.sh` (static contract + the real
+`tests/interface-naming-path-match.test.sh` (static contract + the real
 function driven against BOTH kernels' real ID_PATHs, with over-match legs).
 
 **The SoC HDMI-RX driver is named `rk_hdmirx` on the vendor BSP and
@@ -960,10 +961,10 @@ CODE** [EXISTS]
 Two independent defects stacked on the `/dev/hdmi-in` symlink, both confirmed on
 a live Rock 5B+ running 7.1.5 (neither symlink existed on the board):
 
-1. **Wrong writer.** The rule lived only in `v2/mkosi/customize/udev.sh`, but
-   `./v2/build` runs `mkosi.images/runtime/mkosi.postinst.chroot` — `run-all.sh`'s
+1. **Wrong writer.** The rule lived only in `mkosi/customize/udev.sh`, but
+   `./build` runs `mkosi.images/runtime/mkosi.postinst.chroot` — `run-all.sh`'s
    RUNTIME modules are NOT executed by it (only `run-all.sh base`, a fact this
-   repo already records in `v2/tests/apt-preferences-baked.test.sh`). The shipped
+   repo already records in `tests/apt-preferences-baked.test.sh`). The shipped
    `99-ceralive-hardware.rules` was the postinst twin, which had no symlink rule
    at all. The rule is now in the live writer too.
 2. **Wrong driver name.** Mainline ships the upstream Synopsys DesignWare HDMI-RX
@@ -1236,7 +1237,7 @@ and Makefile at the pinned tag instead of arguing with the gate.
 **Invisible to the PR gate**, like every finding in this class: the gate is
 `DRY_RUN=1` and never runs `[2b/9]`, and the unit fails at BOOT, not at build —
 the `.deb` validated on all four axes, `/boot` was complete, and the image booted.
-Guard: `v2/tests/kernel-config-fragment.bats` — both symbols pinned in the real
+Guard: `tests/kernel-config-fragment.bats` — both symbols pinned in the real
 fragment with the parent declared ahead of the `inet` child, `=m` rejected,
 `CONFIG_NFT_COUNTER` forbidden, and the real fragment driven against a
 reproduction of the board's own `# CONFIG_NF_TABLES is not set` answer.
@@ -1244,7 +1245,7 @@ reproduction of the board's own `# CONFIG_NF_TABLES is not set` answer.
 **The A/B selector may use NO arithmetic command, and must ABANDON a slot it cannot
 load — both were real infinite-crash-loop defects** [EXISTS]
 
-Two independent bugs in `v2/mkosi/platform/boot/boot.scr.cmd`, both found on a live
+Two independent bugs in `mkosi/platform/boot/boot.scr.cmd`, both found on a live
 Rock 5B+ over UART, both of which made a failing slot retry forever instead of
 rolling back.
 
@@ -1267,7 +1268,7 @@ rolling back.
   `/boot/initrd.img-<REL>`, so the bare-name load legitimately fails on the
   known-good path.
 
-Guard: `v2/tests/boot-script-sanitize.test.sh` stubs `setexpr` as **absent**, the way
+Guard: `tests/boot-script-sanitize.test.sh` stubs `setexpr` as **absent**, the way
 the board really answers, and executes the real script through U-Boot command stubs —
 so a decrement that depends on it fails the suite, not the fleet. It walks the whole
 budget, proves rollover to B and B's own decrement, and proves an unloadable
@@ -1277,7 +1278,7 @@ kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the 
 **The A/B selector must define its OWN scratch address — an inherited `loadaddr`
 is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]
 
-Third defect in the same `v2/mkosi/platform/boot/boot.scr.cmd`, found the same way
+Third defect in the same `mkosi/platform/boot/boot.scr.cmd`, found the same way
 (live interactive U-Boot over UART) but on the OTHER board, and it is worse than the
 two above: it does not crash-loop, it stops the board dead until someone pulls power.
 
@@ -1329,7 +1330,7 @@ with a full `env export` → `fatwrite` → `fatload` → `env import` round tri
 returned all three variables byte-for-byte with no exception. `recovery.scr.cmd` has
 never had this defect — it only ever uses the three `*_addr_r` variables.
 
-Guard: `v2/tests/boot-script-sanitize.test.sh` runs the real script against a stubbed
+Guard: `tests/boot-script-sanitize.test.sh` runs the real script against a stubbed
 default environment with **no `loadaddr` at all**, the same way it stubs `setexpr` as
 absent, and its stubs treat a vanished address argument as the terminal `SERROR` the
 board actually produced rather than a silent no-op — so this fails the suite, not the
@@ -1344,7 +1345,7 @@ SAFETY RULE]
 This is an operational precondition, not optional hygiene. With `BOOT_ORDER=A B`, if the
 running slot has already reached `BOOT_B_LEFT=0` without being marked good, a reboot into
 newly-installed A can exhaust A too and strand the board. The selector's exact
-last-resort branch in `v2/mkosi/platform/boot/boot.scr.cmd` is:
+last-resort branch in `mkosi/platform/boot/boot.scr.cmd` is:
 
 ```text
 # --- all counters exhausted -> last-resort boot the head of BOOT_ORDER (no decrement)
@@ -1393,7 +1394,7 @@ zero. Do not implement that tooling as part of this documentation-only fix.
 **`/boot` completeness is a BUILD gate (`[6b/9]`), because the two kernel paths fill
 it by different mechanisms** [EXISTS]
 
-`v2/lib/verify-boot-artifacts.sh` asserts the emitted rootfs tar carries a resolvable
+`lib/verify-boot-artifacts.sh` asserts the emitted rootfs tar carries a resolvable
 `/boot/Image`, `/boot/dtb/<soc-vendor>/${fdtfile}` and a versioned
 `/boot/initrd.img-<REL>`; `orchestrate.sh` runs it on every arm64 boot-BSP build
 right after the tar is emitted, and fails the build if anything is missing.
@@ -1421,14 +1422,14 @@ right after the tar is emitted, and fails the build if anything is missing.
   sizes are readable with no loop device, no `debugfs` and no privileges — ~1 s on a
   1.5 GB tar, and it runs identically in CI.
 
-Guards: `v2/tests/boot-artifacts.bats` (27 tests — both layouts pass, the exact
+Guards: `tests/boot-artifacts.bats` (27 tests — both layouts pass, the exact
 pre-fix layout is rejected, each artifact is driven out of BOTH layouts one at a
 time, the Image FORMAT is asserted in both the verifier and the real shipped
 staging function, plus the producing mechanisms and the orchestrator wiring).
 
 **Bench PARTLABEL overlay — OPT-IN, bench media only, production path byte-identical** [EXISTS]
 
-`CERALIVE_BENCH_LABELS=1 ./v2/build <board>` renames the frozen label set to
+`CERALIVE_BENCH_LABELS=1 ./build <board>` renames the frozen label set to
 `xboot`/`xrootfs_a`/`xrootfs_b`/`xdata`. It exists because a bench microSD is
 booted on a board whose **eMMC already carries a production image**, and the
 frozen contract selects every slot and mount by `PARTLABEL`
@@ -1438,7 +1439,7 @@ media make `PARTLABEL=rootfs_a` ambiguous on the running kernel.
 - **It is NOT a contract change.** Sizes, roles, partition order and geometry are
   untouched; `docs/partition-contract.md` stays FROZEN and unedited. This is
   additive tooling behaviour layered on top of it. The committed
-  `v2/mkosi/repart/*.conf` are never edited either — the `Label=` rewrite happens
+  `mkosi/repart/*.conf` are never edited either — the `Label=` rewrite happens
   on the STAGED COPY inside `stage_repart_dir`.
 - **Every reference site is renamed together, or the card does not boot.** GPT
   labels (`lib/assemble-disk.sh`), the contract verifier (`lib/verify-disk.sh`),
@@ -1459,12 +1460,12 @@ media make `PARTLABEL=rootfs_a` ambiguous on the running kernel.
 - **Also isolates the ext4 filesystem UUIDs.** The slot label seeds `det_uuid`, so
   the bench slots do not carry byte-identical UUIDs to the eMMC beside them.
 - **Unflagged is byte-identical to before this existed**, pinned by the committed
-  pre-overlay GPT fixtures `v2/tests/fixtures/gpt-baseline/*.gpt` (captured at
+  pre-overlay GPT fixtures `tests/fixtures/gpt-baseline/*.gpt` (captured at
   `1af9116`) plus a non-vacuity leg proving the same comparison fails on a bench
-  build. Guards: `v2/tests/bench-partlabels.bats` (13 tests).
+  build. Guards: `tests/bench-partlabels.bats` (13 tests).
 - **Bench-only, never released.** No `release.yml` job and no apt/R2 publish path
   sets it; the orchestrator logs a loud warning while it is active, and a bench
-  image deliberately FAILS `v2/tests/preflash-verify.sh` (which asserts the
+  image deliberately FAILS `tests/preflash-verify.sh` (which asserts the
   production label set), so the eMMC flash gate refuses it.
 
 **RK3588 HW-accel userspace .deb fetch — pinned upstream URLs + SHA-256** [EXISTS]
@@ -1477,7 +1478,7 @@ fetch, but URL-pinned (a pinned URL + SHA-256 needs no rotating apt index or GPG
 root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` register —
 proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
 
-- **Pin file:** `v2/manifests/rk3588-userspace-deb-versions.txt` — one record per
+- **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Six packages:
   `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 (firmware_packages),
   `gstreamer1.0-rockchip1` 1.14-4 (hw_accel_gstreamer_plugins), and
@@ -1486,7 +1487,7 @@ proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
   (`mpp-rockchip`, `rockchip-multimedia-config`, `libmali-rockchip`) + radxa
   `rk3588s2-bookworm` (the gst plugin + its ABI-paired RGA; tsukumijima ships no
   gst-rockchip mirror).
-- **Fetcher:** `fetch_rk3588_userspace` in `v2/lib/fetch-debs.sh` stages only the
+- **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
   pinned packages the resolved family declares (intersection of
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
   this set from the Armbian fetch. An x86 family declares none. DRY_RUN logs the exact
@@ -1494,8 +1495,8 @@ proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
 - **DO NOT** convert any of these into a `deb [signed-by=...] https://...` apt line —
   that is a new live trust root, exactly what the pinned-URL + SHA-256 approach avoids.
   **DO NOT** bump a pinned VERSION without re-proving HW encode (the versions are
-  empirically proven). See `v2/docs/kernel-currency-watch.md` and
-  `v2/docs/cog-display-addon.md`.
+  empirically proven). See `docs/kernel-currency-watch.md` and
+  `docs/cog-display-addon.md`.
 
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.
@@ -1504,19 +1505,19 @@ Don't hardcode versions in the script.
 **CI and release build caches** [EXISTS]
 PR CI (`v2-ci.yml`) caches only pip's download/wheel store (`~/.cache/pip`) for
 the manifest-validation and build-plan jobs. Its key includes the runner OS,
-architecture, and the hash of `v2/ci/requirements-ci.txt`; image outputs, mkosi
+architecture, and the hash of `ci/requirements-ci.txt`; image outputs, mkosi
 caches, QEMU state, and release artifacts remain uncached there.
 
 The protected release candidate (`.github/workflows/release.yml`) persists the
 two build-state stores that materially shorten a production rebuild:
 
 - BuildKit's GitHub Actions cache reuses layers from the canonical
-  `v2/ci/Dockerfile`. The scope is stable per repository, runner OS/architecture,
+  `ci/Dockerfile`. The scope is stable per repository, runner OS/architecture,
   board, and mkosi tool pin, so old commits do not create an unbounded cache
   family. The source hash is carried in the builder image tag and label; the
   Dockerfile/context digests remain BuildKit's layer keys. `mode=min` exports
   only layers needed by the loaded builder image.
-- `v2/mkosi/cache/rock-5b-plus` is restored and saved with a key containing the
+- `mkosi/cache/rock-5b-plus` is restored and saved with a key containing the
   repository, runner OS/architecture, board, mkosi pin, and build-source hash.
   Its restore prefix retains those collision boundaries. The cache is capped at
   2 GiB; size measurement, over-limit clearing, and runner-UID/GID
@@ -1524,7 +1525,7 @@ two build-state stores that materially shorten a production rebuild:
   step, because mkosi may create mode-700 root-owned entries.
 
 The persistent self-hosted runner also clears exactly the ignored generated
-paths `v2/mkosi/build` and `v2/mkosi/cache` in a digest-pinned, network-disabled
+paths `mkosi/build` and `mkosi/cache` in a digest-pinned, network-disabled
 cleanup container before checkout and in an `always()` step after the job. The
 post-run cleanup happens after a successful cache save. This bounded allowlist
 lets `actions/checkout` keep its normal clean checkout while recovering from a
@@ -1542,7 +1543,7 @@ never enter a cache key or build context.
 The protected candidate job pins `DOCKER_CONTEXT=default`; the context must
 resolve to the native Linux socket `unix:///var/run/docker.sock`, and the daemon
 must not identify as Docker Desktop. Before BuildKit or trust materialization,
-`v2/ci/check-builder-resources.sh` requires at least 16 GiB daemon-visible RAM,
+`ci/check-builder-resources.sh` requires at least 16 GiB daemon-visible RAM,
 16 GiB combined `MemAvailable` + `SwapFree` from the workflow-pinned
 `/proc/meminfo`, and 24 GiB free on both the workspace and Docker-root
 filesystems. A pressure or topology failure aborts before package fetch/build
@@ -1559,8 +1560,8 @@ Candidate sealing hard-links that immutable raw into the repo-local `candidate/`
 directory, so staging does not allocate a second multi-GiB copy; artifact upload
 uses explicit zlib compression level 6. Keep the candidate directory on the same
 filesystem, and do not replace the hard link with `cp`. Regression coverage is
-in `v2/tests/builder-resource-budget.test.sh` and
-`v2/tests/release-cache-contract.test.sh`.
+in `tests/builder-resource-budget.test.sh` and
+`tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one
@@ -1570,14 +1571,14 @@ Same source state → bit-identical `.raucb`. The orchestrator pins one
 bundle through a deterministic OpenSSL CMS path (`-noattr` → no wall-clock
 `signingTime`; real leaf key + intermediate chain, still `rauc`-verifiable) because `rauc`
 itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into the
-native `rauc bundle` signer (NOT bit-reproducible). Proof: `v2/run-tests` section
+native `rauc bundle` signer (NOT bit-reproducible). Proof: `run-tests` section
 11; double-build the same board and compare `.raucb` sha256.
 
 **RAUC test trust fixture** [EXISTS]
 
-The canonical `v2/run-tests` entrypoint invokes
-`v2/tests/generate-dev-rauc-pki.sh` before any RAUC contract suite. The generator
-creates or validates only the ignored `v2/.dev-keys/` NON-PRODUCTION fixture
+The canonical `run-tests` entrypoint invokes
+`tests/generate-dev-rauc-pki.sh` before any RAUC contract suite. The generator
+creates or validates only the ignored `.dev-keys/` NON-PRODUCTION fixture
 (including the leaf → intermediate → root chain and leaf key pairing); it never
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
@@ -1598,7 +1599,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   line in `system.conf` is ignored. So 1.8's `CMS_verify()` falls back to OpenSSL's
   default `smime_sign` purpose, which rejects a **codeSigning-only** leaf with
   `Verify error: unsuitable certificate purpose`. The dev/CI leaf
-  (`v2/tests/generate-dev-rauc-pki.sh`) now carries a **dual EKU**
+  (`tests/generate-dev-rauc-pki.sh`) now carries a **dual EKU**
   `emailProtection,codeSigning`: `emailProtection` satisfies 1.8's unconfigured
   `smime_sign` default (install succeeds), `codeSigning` keeps forward-compat with a
   future rauc ≥1.9 `check-purpose=codesign` upgrade (and the modern CI/local `rauc`
@@ -1639,7 +1640,7 @@ production OTA can work on a 1.8 device.
 the FAMILY deltas — so every directory glob had to be taught the difference** [EXISTS]
 
 `CERALIVE_DEBUG_IMAGE=1` now selects a package set as well as an access posture.
-`v2/manifests/packages/development.delta.list` carries 18 packages — `python3`,
+`manifests/packages/development.delta.list` carries 18 packages — `python3`,
 `strace`, `tcpdump`, plus the fifteen T17 diagnostics the `debug-toolset` sysext
 add-on ships — and `lib/orchestrate.sh` appends it to `$SHARED_PACKAGES` **only**
 on that branch. With the flag unset or `0` the resolved set is byte-identical to
@@ -1696,7 +1697,7 @@ inert: bookworm ships only USER units (`/usr/lib/systemd/user/pulseaudio.{servic
 and this appliance has no user session, so it never autostarts and never contends
 with `alsasrc` for the capture device. Do not enable it system-wide.
 
-Guards: `v2/tests/manifest.bats` §30 (15 tests — the exact 18-package content, zero
+Guards: `tests/manifest.bats` §30 (15 tests — the exact 18-package content, zero
 duplication against `shared.list` or either family delta, the production selection
 pinned to shared+family only, the debug selection adding *exactly* the delta and
 removing nothing, a real `parity-check.sh` run against a production-modelled rootfs
@@ -1708,12 +1709,12 @@ the name-skip in `runtime_pkg_list_files` fails 5 of them.
 
 **Image size gate — BLOCKING at 1.5 GB, and it is the `[6c/9]` BUILD stage** [EXISTS]
 
-`v2/lib/measure-size.sh` runs as `orchestrate.sh`'s `[6c/9]` stage on every real
+`lib/measure-size.sh` runs as `orchestrate.sh`'s `[6c/9]` stage on every real
 build, between the `[6/9]` tar emit and the `[7/9]` parity check. If the normalized
 rootfs tar exceeds **1.5 GB** the build `die`s there, so no `.raw` and no `.raucb`
 are cut. The threshold is post-slim (locale strip, final apt-cache cleanup,
 appliance payload pruning, and the Mesa software-GL prune below already applied).
-See [`v2/docs/size-notes.md`](v2/docs/size-notes.md) §10 for the wiring and the
+See [`docs/size-notes.md`](docs/size-notes.md) §10 for the wiring and the
 levers used to reach it.
 
 Both RK3588 boards pass it: `rock-5b-plus` 1,412,259,840 B, `orange-pi-5-plus`
@@ -1796,7 +1797,7 @@ so `mkosi.images/runtime/mkosi.conf` strips the files instead, on the same
 
 Guards: `manifest.bats` §28 (entries present; the `dri/*` widening rejected; the
 locale strip not clobbered by sharing the key; the packages never `apt remove`d).
-Full ledger: [`v2/docs/size-notes.md`](v2/docs/size-notes.md) §9.
+Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §9.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]
 
@@ -1811,7 +1812,7 @@ stopped OR not-installed unit reads `inactive` and never blocks). The list
 `srtla-send.service` (bonding SENDER). The sender unit was missing — a device
 mid-broadcast through the bonding sender could be updated out from under the
 stream; the guard now checks `srtla-send.service` too. Don't drop the receiver
-check: a single image runs either role. Proof: `v2/run-tests` section 16.
+check: a single image runs either role. Proof: `run-tests` section 16.
 
 **`/data` migration MUST seed the `public` frontend symlink — else `/` 404s** [EXISTS]
 
@@ -1831,10 +1832,10 @@ image/OTA updates keep tracking); the loop's `[ -L ]` guards keep it symlink-awa
 clobbered on a re-run / A-B swap). Because the link is absolute and `/opt/ceralive`
 and `/data/ceralive` sit at the same depth, it resolves identically post-bind. This
 is DISTINCT from the systemd ordering-cycle fixes — a content bug the graph check
-cannot see. Offline guard: `v2/tests/data-persistence-public-symlink.test.sh`
+cannot see. Offline guard: `tests/data-persistence-public-symlink.test.sh`
 (static contract on the seeding block + a runtime reproduction that seeds a
 synthetic tree and proves the symlink is preserved, resolves after the bind mount,
-is idempotent, and never clobbers an existing entry). Wired into `v2/run-tests`.
+is idempotent, and never clobbers an existing entry). Wired into `run-tests`.
 
 **`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is
 totally dead** [EXISTS]
@@ -1860,11 +1861,11 @@ failures). `configure_networking` now runs `ln -sf
 force+idempotent, so it fixes the empty file, a stale link, or an
 already-correct link, safe on every build and A/B slot swap. This is a content
 bug the `systemd-ordering-cycle` graph check cannot see. Offline guard:
-`v2/tests/resolv-conf-symlink.test.sh` (static contract on the
+`tests/resolv-conf-symlink.test.sh` (static contract on the
 `configure_networking()` body + a rootless-namespace runtime reproduction that
 seeds the exact 0-byte-regular-file bug state, runs the real function, and proves
 the result is the stub symlink — resolves through it, is idempotent, and
-force-replaces a stale link). Wired into `v2/run-tests`.
+force-replaces a stale link). Wired into `run-tests`.
 
 **Six stock units must be MASKED (never merely disabled) — they cost every boot
 2 of its 2min 6s and kept the device permanently `degraded`** [EXISTS]
@@ -2076,17 +2077,17 @@ backend runtime env so the device can VERIFY device-control / relay-config token
 - **PUBLIC ONLY** — a `k4.secret` (PASERK private) or any PEM `PRIVATE KEY` slipped
   into `PASETO_PUBLIC_KEY_B64` **FAILS the build**. The device only ever verifies;
   baking a private key would let a compromised device FORGE tokens. Proof:
-  `v2/run-tests` section 18 (bakes the key, refuses k4.secret/PEM, no-env skip,
+  `run-tests` section 18 (bakes the key, refuses k4.secret/PEM, no-env skip,
   and the cross-repo env-name lockstep against CeraUI's gate).
 - **Operator runbook + encoding verifier** — the end-to-end provisioning procedure
   (generate one Ed25519 keypair per environment; route the THREE values — `(a)`
   PASERK `k4.secret` → platform `PASETO_SIGNING_KEY`, `(b)` PASERK `k4.public` →
   platform `PASETO_PUBLIC_KEY`, `(c)` raw-base64 → image-build `PASETO_PUBLIC_KEY_B64`)
   lives in [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md).
-  `v2/lib/verify-paseto-key-encodings.sh` proves `(b)` and `(c)` decode to the **same**
+  `lib/verify-paseto-key-encodings.sh` proves `(b)` and `(c)` decode to the **same**
   32-byte public key AND that `setup_paseto_public_key` bakes the build input into the
   drop-in with zero drift (reading PUBLIC files only; never the `k4.secret`).
-  `--self-test` (ephemeral keypair, no secrets) is the `v2/run-tests` section-21 gate.
+  `--self-test` (ephemeral keypair, no secrets) is the `run-tests` section-21 gate.
 
 **avahi-daemon restart hardening — else a single mDNS crash kills `<hostname>.local`
 until reboot** [EXISTS]
@@ -2103,7 +2104,7 @@ device-reliability requirement. `setup_avahi_restart` (in `customize/postinst-li
 called from the runtime `mkosi.postinst.chroot`) bakes an ADDITIVE drop-in
 `/etc/systemd/system/avahi-daemon.service.d/10-ceralive-restart.conf` with
 `Restart=on-failure` + `RestartSec=2`, installed from the committed standalone
-artifact `v2/mkosi/runtime/avahi-daemon-restart.dropin.conf` (the SAME
+artifact `mkosi/runtime/avahi-daemon-restart.dropin.conf` (the SAME
 standalone-artifact + `postinst-lib.sh` setup-function idiom as the nginx TLS
 drop-in, never inlined in `mkosi.postinst.chroot` per the drift-gate ceiling).
 `on-failure` (not `always`) so a deliberate `systemctl stop` still stops it. This
@@ -2128,7 +2129,7 @@ empty ("No WiFi interfaces found", "No wired interfaces found", "No SIM cards
 detected", "No active links yet") AND the missing Ethernet row in "Bonded Links"
 (`BondedLinksSection.svelte` renders an `ethernet`-typed link fine — its input array
 is just empty upstream) despite a live, connected Ethernet + WiFi. The fix is one
-line — `net-tools` in `v2/manifests/packages/shared.list` (next to `iproute2`,
+line — `net-tools` in `manifests/packages/shared.list` (next to `iproute2`,
 arch-independent, every board), NOT a rewrite of `network-interfaces.ts` onto `ip`:
 CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
 (`MONITOR-NOTES.md`, `netif-migration`/`netif-same-subnet` tests, `mocks/providers/
@@ -2178,7 +2179,7 @@ tool and is its OWN Debian package.
 The trap is the name: `wireless-tools` reads like it covers this and does not — it
 ships only the legacy WEXT binaries (`iwconfig`, `iwlist`, `iwgetid`, `iwpriv`,
 `iwspy`, `iwevent`), which was confirmed against the built rootfs
-(`v2/mkosi/build/app/usr/sbin/`). Nothing else in `shared.list` depends on `iw`
+(`mkosi/build/app/usr/sbin/`). Nothing else in `shared.list` depends on `iw`
 either, so absent an explicit entry the regulatory country silently cannot be
 applied and the hotspot stays on the conservative world domain (2.4 GHz channels
 1-11 only — no channel 12/13 in ETSI countries). Guard: `manifest.bats` "runtime
@@ -2226,11 +2227,11 @@ device-runtime bugs, confirmed live on real Rock 5B+ hardware:
   (which already carried the arch axis — a postinst-vs-module drift, same class as
   the origin-pin drift the `apt-preferences-baked` guard catches).
 
-Guard: `v2/tests/apt-mtls-and-dedupe.test.sh` (Part A static: BOTH tracks
+Guard: `tests/apt-mtls-and-dedupe.test.sh` (Part A static: BOTH tracks
 `chown _apt` the key + `rm` the `${RELEASE}.sources` dupe + arch-qualified
 `binary-<arch>/` URI + no lingering root-owned `0600` key; Part B rootless-namespace
 runtime: the real `configure_minimal_apt` leaves exactly one Debian source), wired
-into `v2/run-tests` and `manifest.bats §22` "the build path makes client.key
+into `run-tests` and `manifest.bats §22` "the build path makes client.key
 _apt-readable and dedupes Debian sources".
 
 **The boot stack is frozen against on-device apt — dpkg holds are PRIMARY, the apt
@@ -2295,7 +2296,7 @@ re-checks the hold list afterwards. **No `unattended-upgrades` is installed**, a
 adding one is forbidden: the OS updates through RAUC and the app layer through an
 operator-driven apt transaction.
 
-Guards: `v2/tests/kernel-freeze-guardrails.test.sh` (static contract; the real
+Guards: `tests/kernel-freeze-guardrails.test.sh` (static contract; the real
 function against stubbed dpkg/apt-mark for both boards' U-Boot names; four
 fail-closed legs — first-party in the set, a hold that does not land, a partial
 freeze on a full build, a clean parity-build no-op; and a **real `apt-get -s
@@ -2303,7 +2304,7 @@ upgrade`** against a synthetic apt root offering a newer kernel, with a non-vacu
 leg proving the unfrozen fixture DOES offer it, the hold and the pin each blocking
 it independently, and `cerastream` still upgrading with the whole freeze in place)
 plus `manifest.bats` §31 (9 structural tests, mutation-verified). Full contract:
-[`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md).
+[`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
 **`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
 `Requires=`)** [EXISTS]
@@ -2317,7 +2318,7 @@ After` had NO mention of `cerastream.service`. `setup_cerastream_ordering` (in
 an ADDITIVE drop-in
 `/etc/systemd/system/ceralive.service.d/30-cerastream-ordering.conf` with
 `After=cerastream.service`, installed from the committed standalone artifact
-`v2/mkosi/runtime/ceralive-cerastream-ordering.dropin.conf` (the SAME
+`mkosi/runtime/ceralive-cerastream-ordering.dropin.conf` (the SAME
 standalone-artifact + `postinst-lib.sh` setup-function idiom as the avahi/TLS
 drop-ins; additive to the `ceralive.service` unit shipped by the CeraUI `.deb`, like
 `10-data-persistence.conf` / `20-paseto-public-key.conf`). **ORDERING-ONLY — never
@@ -2335,13 +2336,13 @@ cases).
 
 The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem
 source-routing, the M.2 SIM quirk, and the known-good modem table) is documented
-as-is in [`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md). That runtime stack
+as-is in [`docs/modem-matrix.md`](docs/modem-matrix.md). That runtime stack
 is **not** touched here — the doc only describes it.
 
 Because an upstream repository can replace bytes under the same Debian package
 version, a same-version Armbian re-spin could drop one of the six WWAN modules the modem stack
 binds to (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`)
-with no signal. `v2/lib/check-wwan-modules.sh` makes that observable: it inspects
+with no signal. `lib/check-wwan-modules.sh` makes that observable: it inspects
 a kernel `.deb` (or an extracted module tree) and reports each module as loadable
 (`=m`, a `<mod>.ko` file), built-in (`=y`, in `modules.builtin`), or present via
 `modules.alias`.
@@ -2353,7 +2354,7 @@ a kernel `.deb` (or an extracted module tree) and reports each module as loadabl
 - Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) before opening a `.deb`.
 - **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
   the check **always exits 0**. It never fails the build and never edits
-  `shared.list` or the kernel config. Proof: `v2/run-tests` section 17.
+  `shared.list` or the kernel config. Proof: `run-tests` section 17.
 
 **ModemManager 1.24 closure — first-party fork, app-layer install** [EXISTS]
 
@@ -2362,17 +2363,17 @@ The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
 ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
 `-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
 first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
-`v2/manifests/first-party-deb-versions.txt`, and classified `RUNTIME_APP_PKGS` by
+`manifests/first-party-deb-versions.txt`, and classified `RUNTIME_APP_PKGS` by
 the app postinst (`app/mkosi.postinst.chroot`). Their local `dpkg -i` **upgrades**
 the Debian modem packages the runtime layer pulled transitively via `shared.list`
 (`modemmanager`/`libqmi-utils`/`libmbim-utils` stay there to resolve the full
 dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come from
 Debian). The `Package: *` origin-990 pin keeps the fork winning on-device.
 `mobile-broadband-provider-info` (ModemManager's APN database, a `Recommends:`) is
-an explicit `shared.list` entry. Full source-of-truth: `v2/docs/modem-matrix.md §1`.
+an explicit `shared.list` entry. Full source-of-truth: `docs/modem-matrix.md §1`.
 Guards: `manifest.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
 exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
-`v2/tests/app-layer-modem-closure.test.sh` (executable install/classification).
+`tests/app-layer-modem-closure.test.sh` (executable install/classification).
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
 `FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 14 first-party `.deb`s
@@ -2384,13 +2385,13 @@ ModemManager-closure packages were added to `FIRST_PARTY_APT_PKGS` (fetcher) but
 to `firstparty_names` (partitioner), so the first full build after that landed blew
 up at `[3/9]` — invisible to CI because the PR gate only runs `DRY_RUN=1` plan-only
 builds (the partitioner never runs there). `firstparty_names` now lists all 14. Guard:
-`v2/tests/firstparty-classification.test.sh` (sources `FIRST_PARTY_APT_PKGS` from the
-fetcher and asserts the partitioner allowlist is a superset). Wired into `v2/run-tests`.
+`tests/firstparty-classification.test.sh` (sources `FIRST_PARTY_APT_PKGS` from the
+fetcher and asserts the partitioner allowlist is a superset). Wired into `run-tests`.
 
 **Fail-closed modem slot-UID naming (`modem_ports`)** [EXISTS]
 
 The board manifest carries an optional `modem_ports` block that gates a udev
-generator, `v2/mkosi/customize/udev.sh::generate_modem_slot_uid_rules`. It is
+generator, `mkosi/customize/udev.sh::generate_modem_slot_uid_rules`. It is
 **fail-closed**: while `status: unverified` (the shipped default on every board —
 verifying a slot map needs a physical modem on that exact board to read each
 slot's real `ID_PATH`) the generator emits **NO** generated
@@ -2402,7 +2403,7 @@ does the generator emit one `ENV{ID_MM_PHYSDEV_UID}` rule per slot. The status/s
 reach the runtime subimage chroot via `CERALIVE_MODEM_PORTS_STATUS`/`_SLOTS`
 (orchestrate.sh `env_names` ↔ `mkosi.conf` `PassEnvironment=`, same lockstep the
 interface-naming vars use). Flipping to `verified` is a separate, hardware-gated
-step (`v2/docs/modem-matrix.md §7` discovery runbook) — **do NOT flip it without
+step (`docs/modem-matrix.md §7` discovery runbook) — **do NOT flip it without
 reading real hardware ID_PATHs**. Guards: `manifest.bats §23` generator matrix
 (unverified ⇒ zero rules; unset ⇒ unverified; verified fixture ⇒ rules emitted;
 verified-with-no-slots ⇒ fail-closed; stale-file cleanup; generic-rules-untouched;
@@ -2410,7 +2411,7 @@ env lockstep).
 
 **Stable HDMI-IN capture symlink (`/dev/hdmi-in` + `/dev/hdmirx`)** [EXISTS]
 
-`v2/mkosi/customize/udev.sh::setup_hardware_access` gives the RK3588 SoC HDMI-RX
+`mkosi/customize/udev.sh::setup_hardware_access` gives the RK3588 SoC HDMI-RX
 capture node a persistent, collision-proof name via a `SYMLINK+=` rule keyed on the
 parent platform **driver** (`DRIVERS=="rk_hdmirx"`), NOT on the `/dev/videoN` index.
 This matters because a USB capture card can grab `/dev/video0` and renumber the SoC
@@ -2504,7 +2505,7 @@ present, `uvcvideo`/`snd-usb-audio` bound. Every single time.
 device tree that would otherwise carry the default comes from the Armbian BSP kernel
 package (pinned/drift-gated here, not authored here). So the fix has to be applied at
 boot. `postinst-lib.sh::setup_typec_source_role` (called from `configure_services`)
-installs two committed standalone artifacts under `v2/mkosi/runtime/` —
+installs two committed standalone artifacts under `mkosi/runtime/` —
 `ceralive-typec-source.sh` → `/usr/local/sbin/ceralive-typec-source` and
 `ceralive-typec-source.service` — and enables the unit.
 
@@ -2571,7 +2572,7 @@ works. It is simply not asked to run.
 
 `ceralive-fan-curve.service` (a oneshot, installed by
 `postinst-lib.sh::setup_fan_curve` from the committed standalone artifacts
-`v2/mkosi/runtime/ceralive-fan-curve.{sh,service}`) lowers the FIRST `active` trip of
+`mkosi/runtime/ceralive-fan-curve.{sh,service}`) lowers the FIRST `active` trip of
 the zone bound to the `pwm-fan` cooling device to **45000 m°C (45 °C)** — one named,
 documented, env-overridable constant (`CERALIVE_FAN_TRIP_MILLIC`), clamped to a
 20-90 °C band so a retune can never push a trip up next to `critical`. 45 °C sits just
@@ -2619,7 +2620,7 @@ deadline is deliberately short (10 s, vs 30 s for Type-C) and the unit is
 **deliberately not `Before=` anything**, because a board that will never have a
 `pwm-fan` would otherwise pay that wait on the boot critical path.
 
-Guards: `v2/tests/manifest.bats` §18f "fan curve: …" (12 tests). The fixture
+Guards: `tests/manifest.bats` §18f "fan curve: …" (12 tests). The fixture
 deliberately numbers everything DIFFERENTLY from the reference board — `pwm-fan` is
 `cooling_device7` (not 4), the zone is `thermal_zone3` (not 0), it hangs off that
 zone's `cdev1` behind a CPUFreq `cdev0`, and the first `active` trip is index 1 behind
@@ -2758,7 +2759,7 @@ and does NOT touch any trip point — that is `setup_fan_curve`'s job and this u
 deliberately does not overlap with it. `setup_fan_curve` and its two artifacts are
 byte-untouched by this change.
 
-Guards: `v2/tests/manifest.bats` §29 "fan kickstart: …" (17 tests). The fixture
+Guards: `tests/manifest.bats` §29 "fan kickstart: …" (17 tests). The fixture
 deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not the
 reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
 `cooling_device2` that must never be written, so any hardcoded index and any
@@ -2810,7 +2811,7 @@ working fan that was never asked to run.
 
 `ceralive-led-status.service` (a boot oneshot, installed by
 `postinst-lib.sh::setup_led_status` from the committed standalone artifacts
-`v2/mkosi/runtime/ceralive-led-status.{sh,service}`) assigns an ORDERED policy
+`mkosi/runtime/ceralive-led-status.{sh,service}`) assigns an ORDERED policy
 to the discovered indicator LEDs: the **first** gets `heartbeat` (the stock
 load-modulated "the kernel is scheduling" blink — meaningful on every board and
 in every state), the **second** gets `mmc1` (removable-card activity, so a
@@ -2876,7 +2877,7 @@ curve it polls to a short deadline (10 s) rather than sleeping — `gpio-leds` a
 anything**, because nothing consumes an LED trigger and a board with no LEDs
 must not pay that wait on the boot critical path.
 
-Guards: `v2/tests/manifest.bats` §18g "led status: …" (11 tests). The fixture
+Guards: `tests/manifest.bats` §18g "led status: …" (11 tests). The fixture
 deliberately uses LED names the reference board does not have —
 `amber:status-a`, `white:status-b`, a `red:power` decoy, and the kernel LED at
 `mmc2::` rather than `mmc0::` — so any hardcoded LED name, and any `mmc0`-literal
@@ -2902,7 +2903,7 @@ out-of-band from the base image. They extend `/usr` and `/opt` only
 (`SYSEXT_LEVEL=1`, `VERSION_ID=12`) and are managed at runtime by the CeraUI
 add-on manager.
 
-**Descriptor format** (`v2/manifests/schema/addon.schema.json`)
+**Descriptor format** (`manifests/schema/addon.schema.json`)
 
 Each add-on ships a JSON descriptor baked into the image at
 `/usr/share/ceralive/addons/<id>.json`. Required fields:
@@ -2932,14 +2933,14 @@ The keyring is baked into the image at build time via `build-feature-sysext.sh`.
 
 ```bash
 # Build a signed per-board/per-OS sysext .raw:
-v2/lib/build-feature-sysext.sh \
-  --descriptor v2/manifests/addons/<id>.sysext.conf \
+lib/build-feature-sysext.sh \
+  --descriptor manifests/addons/<id>.sysext.conf \
   --board rock-5b-plus \
   --out dist/
 # Output: dist/<id>-<board>-<os_version>.raw + dist/<id>-<board>-<os_version>.raw.sig
 ```
 
-The builder reuses `v2/lib/app-layer/sysext.sh` (extract → prune Platform/Runtime
+The builder reuses `lib/app-layer/sysext.sh` (extract → prune Platform/Runtime
 libs → assert required binaries → squashfs). The exclusion contract
 (`SYSEXT_EXCLUDE_NAMES`) prevents GPU/BSP userspace from leaking into add-on
 artifacts.
@@ -2959,7 +2960,7 @@ missing object, never a 200-empty); see `apt-worker/AGENTS.md`.
 
 **Publishing** [EXISTS]
 
-`v2/lib/upload-addons.sh` publishes a signed add-on to R2, mapping
+`lib/upload-addons.sh` publishes a signed add-on to R2, mapping
 `build-feature-sysext.sh`'s `<feature>-<board>-<os_version>.raw{,.sha256,.sig}`
 onto the delivery path above. It REFUSES to upload an unsigned (or
 unchecksummed) artifact, and pins per-file content-type so R2 stores what the
@@ -2967,7 +2968,7 @@ worker serves. CI mode reuses the `fetch-debs.sh` R2 pattern (`aws s3 cp`
 + `R2_ENDPOINT`); the `v2-ci.yml` `addon-publish` job proves the plan +
 unsigned-refusal gate under `DRY_RUN` without secrets.
 
-**sysext refresh protocol** — see [`v2/docs/addon-sysext-refresh.md`](v2/docs/addon-sysext-refresh.md)
+**sysext refresh protocol** — see [`docs/addon-sysext-refresh.md`](docs/addon-sysext-refresh.md)
 
 Services SURVIVE `systemd-sysext refresh` but keep running the old binary. The
 add-on manager must:
@@ -2981,7 +2982,7 @@ alone.
 
 `ceralive-ssh-firstboot.service` runs before `ssh.service` and `ssh.socket` on
 every boot, and both SSH activation paths require it to succeed. Standalone
-artifacts under `v2/mkosi/runtime/`
+artifacts under `mkosi/runtime/`
 (`ceralive-ssh-firstboot.{sh,service}`), installed by
 `postinst-lib.sh::setup_ssh_firstboot` — NOT inlined in `mkosi.postinst.chroot`
 (the drift gate's 950-line ceiling). Scope is locked (SC4): regenerate the baked
@@ -2991,7 +2992,7 @@ then enforces `PermitRootLogin prohibit-password` and CI-key retention policy.
 Persistent authorized-key stores are linked from `/data`; run-local CI keys survive
 only an explicitly armed, one-use reboot and are otherwise purged before sshd.
 The `ceralive` user ships password-locked (no default password); root retains
-key-based recovery access. Full behaviour: [`v2/docs/ssh-hardening.md`](v2/docs/ssh-hardening.md).
+key-based recovery access. Full behaviour: [`docs/ssh-hardening.md`](docs/ssh-hardening.md).
 For bench-only access, `CERALIVE_DEBUG_IMAGE=1` requires an externally supplied
 encrypted `CERALIVE_DEBUG_PASSWORD_HASH`; it is rejected for normal builds and
 must never be used for fleet artifacts.
@@ -3031,10 +3032,10 @@ explicitly (the SAFE half of the default deps; `sysinit.target` is ordered befor
 cycle); it runs as root against `/data`+rootfs only, so it needs no sysinit-phase
 ordering. `ConditionKernelCommandLine`/`ConditionPathExists` do NOT remove a
 unit's ordering edges — systemd wires them at transaction-build time regardless of
-the condition. Offline guard: `v2/tests/systemd-ordering-cycle.test.sh` — static
+the condition. Offline guard: `tests/systemd-ordering-cycle.test.sh` — static
 contract + `systemd-analyze verify` for zero cycles AND an ordering probe that
 proves each guard is transitively after `systemd-sysusers`/`systemd-tmpfiles`
-(a cycle-only check would miss the proof-11 gap). Wired into `v2/run-tests`.
+(a cycle-only check would miss the proof-11 gap). Wired into `run-tests`.
 
 **RK3588 CI-UART bootstrap owns the LIVE console `/dev/ttyFIQ0`, NOT `/dev/ttyS2`.**
 On RK3588 the Rockchip vendor kernel's FIQ debugger claims physical UART2 once Linux
@@ -3043,7 +3044,7 @@ and there is **no `/dev/ttyS2` device node at runtime**. So
 `ceralive-ci-uart-bootstrap.service` sets `TTYPath=/dev/ttyFIQ0` (was `/dev/ttyS2`,
 which made its `StandardInput=tty` setup fail instantly on real Rock 5B+ hardware — no
 handshake, no run-local SSH key installed), and the CI harness
-`v2/ci/uart-provision-ssh.sh` masks `serial-getty@ttyFIQ0.service` over the transient
+`ci/uart-provision-ssh.sh` masks `serial-getty@ttyFIQ0.service` over the transient
 kernel cmdline (`systemd.mask=serial-getty@ttyFIQ0.service`) so the real getty cannot
 contend for the port (masking `serial-getty@ttyS2.service` was a no-op — that unit
 never exists). This is DISTINCT from the family `serial_console: ttyS2:1500000`, which
@@ -3053,9 +3054,9 @@ debugger claims it (hence the UART helper's `=>` prompt interaction works). Do N
 rename `serial_console` to `ttyFIQ0` — that would break the early/bootloader console.
 The entire CI-UART path is RK3588-only by construction (`TTYPath` is a hardcoded
 literal, not templated; x86 uses `ttyS0` and never runs this gate). Offline guard:
-`v2/tests/uart-console-path.test.sh` (bootstrap `TTYPath` + getty mask both target
+`tests/uart-console-path.test.sh` (bootstrap `TTYPath` + getty mask both target
 `ttyFIQ0`, the two agree, and `serial_console` stays the raw-UART2 `ttyS2` early
-console). Wired into `v2/run-tests`.
+console). Wired into `run-tests`.
 
 **CI-UART bootstrap `stty` is tty-class-aware — the FIQ tty rejects the baud
 ioctl.** Once the console fix above got the bootstrap to actually run on
@@ -3071,12 +3072,12 @@ echo best-effort and NEVER fails (logs `CERALIVE_UART_BOOTSTRAP_INFO
 fiq-tty-stty-skipped`); on a real UART (a future `ttyS` board, or x86 `ttyS0`) it
 keeps the full `stty 1500000 sane -echo <&0 || fail` — deliberately NOT a blanket
 `|| true`, so a genuine mis-provision on a settable-baud board is surfaced, not
-masked. Host-side `v2/ci/uart-provision-ssh.sh` still `stty`s the CI runner's USB
+masked. Host-side `ci/uart-provision-ssh.sh` still `stty`s the CI runner's USB
 adapter at 1500000 (that adapter DOES honor it — unchanged). Offline guard:
-`v2/tests/uart-bootstrap-tty.test.sh` (exercises the shipped function against stubbed
+`tests/uart-bootstrap-tty.test.sh` (exercises the shipped function against stubbed
 FIQ + real-UART ttys: FIQ tolerant even when stty fully fails, real UART fatal on a
 baud failure) + a co-located static signature in `uart-console-path.test.sh`. Wired
-into `v2/run-tests`.
+into `run-tests`.
 
 **`ceralive-ssh-firstboot.sh` MUST create `/run/sshd` before its `sshd -t`.** The
 guard's last step validates the sshd config with `sshd -t`, which refuses to run
@@ -3089,9 +3090,9 @@ pre-creating it, `sshd -t` exits 255, `set -euo pipefail` fails the unit, and bo
 closing port 22 on EVERY boot with **zero** ordering cycles and an otherwise-healthy
 system (proof-13 real-HW UART, 2026-07-16). This is a runtime script failure, NOT a
 dependency-graph defect — `systemd-ordering-cycle.test.sh` cannot see it. The
-dedicated offline guard is `v2/tests/ssh-firstboot-privsep.test.sh` (static: the
+dedicated offline guard is `tests/ssh-firstboot-privsep.test.sh` (static: the
 `/run/sshd` creation precedes `sshd -t`; runtime: the real script survives an
-empty-`/run` first boot in a rootless namespace). Wired into `v2/run-tests`.
+empty-`/run` first boot in a rootless namespace). Wired into `run-tests`.
 
 **Deterministic first-boot hostname** [EXISTS]
 
@@ -3118,7 +3119,7 @@ refused). Its sibling network-dependent units (`ceralive-healthcheck`,
 `ceralive-hawkbit-provision`, `rauc-hawkbit-updater`) already wait for
 `network-online.target`; the hostname unit was the lone omission. This is a systemd
 ordering fix, distinct from the mDNS-arbitration logic. Offline guards:
-`v2/tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
+`tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
 dynamic ordering probe proving the unit runs after `network-online.target`) and
 `manifest.bats` "hostname:" ordering assertions.
 
@@ -3180,7 +3181,7 @@ blind spot (prior seeds never equalled the first candidate).
 
 **Build concurrency** [EXISTS]
 
-The orchestrator holds a per-board `flock` under `v2/mkosi/.staging/.locks/`
+The orchestrator holds a per-board `flock` under `mkosi/.staging/.locks/`
 before touching staging, cache, or mkosi output. Different boards remain safe to
 build in parallel. A second build of the same board waits for up to one hour by
 default; set `CERALIVE_BUILD_LOCK_TIMEOUT=0` for fail-fast behavior or another
@@ -3190,9 +3191,9 @@ dry-run from deleting the staging tree of an active hardware image build.
 **Verified `.deb` download cache — opt-out, bounded, and NOT protected by the
 build lock above** [EXISTS]
 
-`v2/lib/fetch/debcache.sh` gives all three verified fetch families (BSP, RK3588
+`lib/fetch/debcache.sh` gives all three verified fetch families (BSP, RK3588
 userspace, first-party) a persistent content-addressed cache at
-`v2/mkosi/.staging/.debcache/`, keyed on `<package>_<version>_<arch>.deb` plus
+`mkosi/.staging/.debcache/`, keyed on `<package>_<version>_<arch>.deb` plus
 the artifact's expected SHA-256. A second real fetch of the same plan performs
 **zero `.deb` payload downloads** — proven end to end on the userspace family
 (6 pinned upstream packages, 6 downloads then 0, every one re-verified against
@@ -3243,7 +3244,7 @@ the artifact's expected SHA-256. A second real fetch of the same plan performs
   per-board `.staging/<board>` dirs, and the existing `/.staging/` ignore rule
   already covers it. Do not move it under a board directory.
 
-Guards: `v2/tests/debcache.test.sh` (25 legs — static contract, unit
+Guards: `tests/debcache.test.sh` (25 legs — static contract, unit
 hit/miss/corrupt/stale/eviction/LRU-refresh, TWO real concurrent reader-vs-eviction
 legs with a live second process holding a real `flock`, and integration legs
 driving the shipped userspace fetcher over `file://` pins that count payload
@@ -3259,12 +3260,12 @@ detects an early unlock.
 `ceralive-provision.service` brings up a self-hosted WPA2 setup hotspot AND a
 captive portal so a headless, never-configured device can be handed WiFi
 credentials with no screen or keyboard. Standalone artifacts under
-`v2/mkosi/runtime/` (`ceralive-provision.{sh,service}` plus the captive portal
+`mkosi/runtime/` (`ceralive-provision.{sh,service}` plus the captive portal
 `ceralive-portal.{sh,socket,@.service}`), installed by
 `postinst-lib.sh::setup_provisioning` — NOT inlined in `mkosi.postinst.chroot`
 (drift-gate 950-line ceiling; `setup_provisioning` is in the gate's
 `CONSOLIDATED_FUNCS`). Full end-to-end flow:
-[`v2/docs/wifi-provisioning.md`](v2/docs/wifi-provisioning.md).
+[`docs/wifi-provisioning.md`](docs/wifi-provisioning.md).
 
 - **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
   there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
@@ -3333,13 +3334,13 @@ credentials with no screen or keyboard. Standalone artifacts under
   the portal-active + force flags. Plain `systemctl stop` (ExecStop) is link-down +
   portal-down only and RETAINS the AP profile + flags (shutdown must not disarm a
   pending factory reset). Offline proof harness:
-  `v2/tests/provision-portal.test.sh` (gated in `manifest.bats`).
+  `tests/provision-portal.test.sh` (gated in `manifest.bats`).
 
 **CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]
 
 The device serves the CeraUI control plane over HTTPS on **443** via `nginx-light`,
 which terminates TLS and reverse-proxies to the CeraUI backend on `127.0.0.1:80`.
-Standalone artifacts under `v2/mkosi/runtime/`
+Standalone artifacts under `mkosi/runtime/`
 (`ceralive-tls.nginx.conf`, `ceralive-tls-firstboot.{sh,service}`,
 `ceralive-tls-nginx.dropin.conf`), installed by
 `postinst-lib.sh::setup_tls_proxy` — NOT inlined in `mkosi.postinst.chroot`
@@ -3372,7 +3373,7 @@ executor and `services.sh`, like `setup_provisioning`).
   streaming stack is healthy and whose port 80 still serves.
 - **Coexistence with provisioning (Task 11):** the AP-mode portal uses port 80;
   nginx only binds 443, so there is no conflict.
-- **Size:** ~+3–4 MB; see [`v2/docs/size-notes.md §5`](v2/docs/size-notes.md).
+- **Size:** ~+3–4 MB; see [`docs/size-notes.md §5`](docs/size-notes.md).
 
 ## KIOSK STACK
 
@@ -3386,16 +3387,16 @@ from bookworm `main` (`cog` 0.16.1, `libwpewebkit-1.1-0` 2.38.6). The Mali-G610
 GPU userspace (`libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1) is now **baked into
 the base image** (Platform layer) via `firmware_packages` + the pinned userspace file
 (see the "RK3588 HW-accel userspace" KEY FACT); it stays **excluded from the sysext**
-by contract. Full recipe: [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md).
+by contract. Full recipe: [`docs/cog-display-addon.md`](docs/cog-display-addon.md).
 **Hardware-gated:** `cog.sysext.conf` wired into the build only after RK3588 render
 QA passes (same gate as Tasks 26/27/28) — on-hardware Mali EGL/GBM render is the
 gated item, not the package availability.
 
 **Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-blocked** — no RK3588 board is reachable from the dev environment (Task 1 spike: NO-GO). The architecture is fully specced; implementation waits for hardware access.
 
-**Phase-3 deferrals:** e-ink kernel DRM driver + device-tree, dual-display hybrid, on-device live-video preview, and #61 battery/power telemetry (document-only: current boards are mains-powered, no fuel-gauge IC). Full register: [`v2/docs/kiosk-display.md §7`](v2/docs/kiosk-display.md).
+**Phase-3 deferrals:** e-ink kernel DRM driver + device-tree, dual-display hybrid, on-device live-video preview, and #61 battery/power telemetry (document-only: current boards are mains-powered, no fuel-gauge IC). Full register: [`docs/kiosk-display.md §7`](docs/kiosk-display.md).
 
-**RK3588 mainline-patch contingency (D3 stays locked):** D3 (`armbian_branch: vendor`) is NOT changing. The Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265. If a mainline pivot is ever forced, the reference patch set is bookmarked in [`v2/docs/kiosk-display.md §3`](v2/docs/kiosk-display.md) (GPU contingency section): three patches from `https://github.com/rcawston/rockchip-rk3588-mainline-patches` covering VEPU580 H.265 encoder (WIP, pinned MPP fork required), HDMIRX EDID set fix, and HDMIRX plugout overflow fix. These are insurance only — do not apply without explicitly re-opening D3.
+**RK3588 mainline-patch contingency (D3 stays locked):** D3 (`armbian_branch: vendor`) is NOT changing. The Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265. If a mainline pivot is ever forced, the reference patch set is bookmarked in [`docs/kiosk-display.md §3`](docs/kiosk-display.md) (GPU contingency section): three patches from `https://github.com/rcawston/rockchip-rk3588-mainline-patches` covering VEPU580 H.265 encoder (WIP, pinned MPP fork required), HDMIRX EDID set fix, and HDMIRX plugout overflow fix. These are insurance only — do not apply without explicitly re-opening D3.
 
 ## ANTI-PATTERNS
 
@@ -3427,8 +3428,8 @@ gated item, not the package availability.
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
-- Don't regenerate `v2/tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
-- Don't regenerate `v2/tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
+- Don't regenerate `tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
+- Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
@@ -3443,7 +3444,7 @@ gated item, not the package availability.
 
 ## KNOWN ISSUES / DEFERRED
 
-Full index with file:line anchors and unblock conditions: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md).
+Full index with file:line anchors and unblock conditions: [`docs/DEFERRED.md`](docs/DEFERRED.md).
 
 **RK3588 predictable names — the subimage env-propagation contract.** The
 deterministic `eth0/eth1/wlan0` renames (`install_interface_naming()` in
@@ -3487,7 +3488,7 @@ interfaces (`usb0..7` and `enx*0..7`) and installs the same source rule + defaul
 route in tables 100–107, mirroring the dhclient-hook semantics. The dhclient hook
 is retained (harmless; still covers non-NM dhclient paths). Both drift-gated SRTLA
 payloads were twin-updated in one commit (`networking-srtla.sh` and the `§6` block
-in `mkosi.postinst.chroot`); `v2/ci/postinst-drift-check.sh` CHECK 2 confirms
+in `mkosi.postinst.chroot`); `ci/postinst-drift-check.sh` CHECK 2 confirms
 byte-parity. WiFi table assignments (120–124) are unchanged. Verify on hardware
 with a modem attached: `journalctl -t srtla-routing` and `ip rule show` after the
 modem connects.
@@ -3498,4 +3499,4 @@ are pinned today.
 
 **Cog render QA hardware-gated.** `cog.sysext.conf` + build wrapper are inert
 scaffolds until a physical RK3588 validates render (OKLCH/Tailwind v4 on WebKit
-2.38.6, Mali-G610 EGL/GBM wiring). See [`v2/docs/cog-display-addon.md §7`](v2/docs/cog-display-addon.md).
+2.38.6, Mali-G610 EGL/GBM wiring). See [`docs/cog-display-addon.md §7`](docs/cog-display-addon.md).

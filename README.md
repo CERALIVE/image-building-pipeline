@@ -65,13 +65,13 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 
 ## Build System
 
-The build path is `v2/` using mkosi v26 inside a pinned `debian:trixie-slim`
-container (`v2/ci/Dockerfile`). It produces reproducible `.raw` sysext bundles and
+The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
+container (`ci/Dockerfile`). It produces reproducible `.raw` sysext bundles and
 `.raucb` A/B RAUC OTA packages from a layered source.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
-trixie+ host. See [`v2/docs/host-support.md`](v2/docs/host-support.md) for the
+trixie+ host. See [`docs/host-support.md`](docs/host-support.md) for the
 full host matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon, WSL2).
 
 The protected production-candidate job has a stricter host contract than local
@@ -84,18 +84,18 @@ post-run cleanup removes only the ignored mkosi `build` and `cache` paths so an
 interrupted rootful build cannot block the next clean checkout.
 See the production-runner section of the host matrix for the exact checks.
 
-See [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the full dev loop.
+See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.
 
 Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
 rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
 RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
-Before flashing, run `v2/tests/preflash-verify.sh --target-size-bytes <bytes>`; it
+Before flashing, run `tests/preflash-verify.sh --target-size-bytes <bytes>`; it
 requires exact GPT geometry, both RK3588 bootloader stages, bounded and SHA-256-valid
 embedded/external FIT payloads, a compiled selector, complete kernel/DTB/initrd sets
 in both slots, and a real compatible signed bundle.
 Images are hand-tested on real hardware before a manual release is cut — there
 is no automated CI job that flashes or tests real hardware. The bench
-flash-and-verify tool (`v2/ci/verify-and-flash-candidate.sh`, run by an operator)
+flash-and-verify tool (`ci/verify-and-flash-candidate.sh`, run by an operator)
 starts with one Rock 5B+ in Maskrom, carries a SHA-256-pinned loader in the
 candidate artifact, checks loader-mode eMMC capacity, and verifies a full readback
 before reset. A canonical hash approves the Maskrom USB port before loader
@@ -123,21 +123,26 @@ be converted by OTA.
 ## Directory Structure
 
 ```
-├── v2/                    # Current build system (mkosi v26)
-│   ├── build              # Entry point: ./v2/build <board>
-│   ├── ci/
-│   │   ├── Dockerfile     # Pinned trixie-slim builder (mkosi 26)
-│   │   └── publish-immutable-r2-pair.sh # Approved RAUC bundle publisher
-│   ├── manifests/         # Board/family manifests, package pins, add-on descriptors
-│   ├── lib/               # Orchestrator, assembler, bundle scripts,
-│   │   │                  #   build-all.sh (parallel runner),
-│   │   │                  #   build-feature-sysext.sh (add-on builder),
-│   │   │                  #   fetch-debs.sh (REPOS + FIRST_PARTY_APT_PKGS)
-│   │   └── app-layer/     # sysext.sh — extract → prune → squashfs
-│   ├── docs/              # Dev loop, kiosk display, host support, size notes,
-│   │   │                  #   Cog add-on recipe, sysext refresh protocol
-│   │   └── fast-reload.md # Dev-sync live-reload loop
-│   └── tests/             # Manifest + RK3588 A/B/preflash + x86 rollback
+.                          # Build system lives at the repository root (mkosi v26)
+├── build                  # Entry point: ./build <board>
+├── run-tests              # Canonical test entrypoint
+├── dev-push / dev-sync    # Dev-loop helpers
+├── ci/
+│   ├── Dockerfile         # Pinned trixie-slim builder (mkosi 26)
+│   └── publish-immutable-r2-pair.sh # Approved RAUC bundle publisher
+├── manifests/             # Board/family manifests, package pins, add-on descriptors
+├── lib/                   # Orchestrator, assembler, bundle scripts,
+│   │                      #   build-all.sh (parallel runner),
+│   │                      #   build-feature-sysext.sh (add-on builder),
+│   │                      #   fetch-debs.sh (REPOS + FIRST_PARTY_APT_PKGS)
+│   └── app-layer/         # sysext.sh — extract → prune → squashfs
+├── mkosi/                 # mkosi config, customize hooks, runtime artifacts, platform
+├── fleet/                 # hawkBit provisioning + platform bridge
+├── docs/                  # Dev loop, kiosk display, host support, size notes,
+│   │                      #   Cog add-on recipe, sysext refresh protocol,
+│   │                      #   fast-reload.md (dev-sync live-reload loop)
+│   └── partition-contract.md # Frozen GPT layout contract
+├── tests/                 # Manifest + RK3588 A/B/preflash + x86 rollback
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
@@ -147,27 +152,27 @@ be converted by OTA.
 cd image-building-pipeline
 
 # Build for a specific board (container build — canonical)
-./v2/build rock-5b-plus
-./v2/build orange-pi-5-plus
+./build rock-5b-plus
+./build orange-pi-5-plus
 
 # Build every board manifest, or a named subset
-./v2/build --all
-./v2/build --only rock-5b-plus,x86-minipc
+./build --all
+./build --only rock-5b-plus,x86-minipc
 
 # Opt-in family variant (rk3588 'edge' = kernel built from pinned source)
-./v2/build rock-5b-plus --variant edge
+./build rock-5b-plus --variant edge
 
 # Dry run (resolve + fetch plan only, no image written)
-DRY_RUN=1 ./v2/build rock-5b-plus
-DRY_RUN=1 ./v2/build --all                 # preview the resolved board list
+DRY_RUN=1 ./build rock-5b-plus
+DRY_RUN=1 ./build --all                 # preview the resolved board list
 
 # Opt-in native build (Debian trixie+ host with mkosi ≥ 26 only)
-./v2/build rock-5b-plus --native
+./build rock-5b-plus --native
 ```
 
 A single resolved board execs the orchestrator directly. A multi-board selection
 (`--all`, or `--only` with 2+ boards) is handed to the parallel runner
-`v2/lib/build-all.sh`. An unknown board in `--only` fails loudly: it names the
+`lib/build-all.sh`. An unknown board in `--only` fails loudly: it names the
 offender and lists the available boards.
 
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
@@ -185,23 +190,23 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
-| `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build rock-5b-plus` | production path; the kernel the fleet actually runs |
-| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./v2/build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
-| `rock-5b-plus` | mainline 7.1 (source-built) | `./v2/build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
-| `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./v2/build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./v2/build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
+| `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build rock-5b-plus` | production path; the kernel the fleet actually runs |
+| `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
+| `rock-5b-plus` | mainline 7.1 (source-built) | `./build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
+| `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build orange-pi-5-plus` | production path |
+| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
-| `x86-minipc` | n/a (Debian prebuilt) | `./v2/build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `v2/docs/X86-MINIPC-BRINGUP.md` |
+| `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
 
-Bulk/dry-run forms cut across every cell: `./v2/build --all`, `./v2/build --only
+Bulk/dry-run forms cut across every cell: `./build --all`, `./build --only
 <comma-list>`, and `DRY_RUN=1` in front of any of the above to resolve+fetch a
 plan with no image written (see the executed transcript in
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §2).
 
 The complete hardware-free CI/test entrypoint is
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
-CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests`. It creates the ignored,
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests`. It creates the ignored,
 NON-PRODUCTION RAUC signing fixture on demand; production builds must still
 provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
@@ -218,7 +223,7 @@ materialize the same ignored NON-PRODUCTION fixture before resolving, so they
 do not depend on the Bats job's checkout.
 
 Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
-§5. Its low-level `v2/ci/publish-immutable-r2-pair.sh` helper requires the
+§5. Its low-level `ci/publish-immutable-r2-pair.sh` helper requires the
 independently approved candidate SHA-256, snapshots both inputs privately, and
 uses create-only writes with exact-byte retry recovery; it never deletes an
 immutable release key.
@@ -252,13 +257,13 @@ Current validated add-ons:
 
 | Add-on | Status | Notes |
 |--------|--------|-------|
-| `cog` (Cog + WPEWebKit display engine) | `[PARTIAL]` — packaging validated, hardware-gated | See [`v2/docs/cog-display-addon.md`](v2/docs/cog-display-addon.md) |
+| `cog` (Cog + WPEWebKit display engine) | `[PARTIAL]` — packaging validated, hardware-gated | See [`docs/cog-display-addon.md`](docs/cog-display-addon.md) |
 
 Build a feature sysext:
 
 ```bash
-v2/lib/build-feature-sysext.sh \
-  --descriptor v2/manifests/addons/<id>.sysext.conf \
+lib/build-feature-sysext.sh \
+  --descriptor manifests/addons/<id>.sysext.conf \
   --board rock-5b-plus \
   --out dist/
 ```
@@ -268,11 +273,11 @@ v2/lib/build-feature-sysext.sh \
 Every build is one of two variants, selected by a single environment flag:
 
 ```bash
-./v2/build rock-5b-plus                                    # PRODUCTION (default)
+./build rock-5b-plus                                    # PRODUCTION (default)
 
 CERALIVE_DEBUG_IMAGE=1 \
 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>' \
-  ./v2/build rock-5b-plus                                  # DEBUG (bench only)
+  ./build rock-5b-plus                                  # DEBUG (bench only)
 ```
 
 **Production** is the shipped image: the runtime package set is
@@ -302,19 +307,19 @@ are on.
 
 Adding a package to `development.delta.list` must not duplicate anything already
 in `shared.list`, and any new code that reads `manifests/packages/*.delta.list`
-must select its files through `v2/lib/common.sh::runtime_pkg_list_files` — that
+must select its files through `lib/common.sh::runtime_pkg_list_files` — that
 helper is what keeps the variant-keyed debug delta out of the production package
-contract. Guards: `v2/tests/manifest.bats` §30.
+contract. Guards: `tests/manifest.bats` §30.
 
 ## Image Size Gate
 
-Every real build runs `v2/lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
+Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
 apparent size exceeds **1.5 GB** the build fails there, so no `.raw` and no `.raucb`
 are produced. A `DRY_RUN=1` plan-only run never reaches it, and an
 `INSTALL_BOOT_BSP=0` parity build skips it with a warning (a kernel-less rootfs is
 not the shipped image). It is not architecture-gated — every shipped board carries a
-real ceiling. See [`v2/docs/size-notes.md`](v2/docs/size-notes.md) for the wiring
+real ceiling. See [`docs/size-notes.md`](docs/size-notes.md) for the wiring
 (§10) and the levers applied (locale strip, `WithDocs=no`, firmware audit, Mesa
 software-GL prune).
 
@@ -338,7 +343,7 @@ fails before apt runs. The SHA-pinned official key sources, identities, live
 [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §4.
 
 Family manifests select BSP package names; the reviewed exact Debian versions
-live in `v2/manifests/armbian-bsp-deb-versions.txt`. Before downloading anything,
+live in `manifests/armbian-bsp-deb-versions.txt`. Before downloading anything,
 both native apt and curl paths extract `gpgv`'s verified Release plaintext,
 require both pinned Armbian signatures, and verify that plaintext identifies the
 configured suite, `main` component, and architecture. The curl path then requires
@@ -360,10 +365,10 @@ Families with `armbian_branch: none` omit Armbian from DRY_RUN and fail closed o
 a real BSP fetch until an authenticated, exact-versioned non-Armbian package
 source is implemented.
 
-After the BSP fetch, `v2/lib/fetch-debs.sh` writes the kernel package's resolved
+After the BSP fetch, `lib/fetch-debs.sh` writes the kernel package's resolved
 version + content `sha256` to `bsp-provenance.json` in the image output dir
 (gitignored, never committed), then runs the content drift-guard against the
-committed baseline `v2/manifests/bsp-baseline.json`.
+committed baseline `manifests/bsp-baseline.json`.
 
 - A differing version **or** a same-version content-hash re-spin prints a
   `BSP drift` warning. It is warn-only by default; `BSP_DRIFT_STRICT=1` makes a
@@ -379,7 +384,7 @@ committed baseline `v2/manifests/bsp-baseline.json`.
 
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
 pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
-content-addressed cache at `v2/mkosi/.staging/.debcache/`, keyed on
+content-addressed cache at `mkosi/.staging/.debcache/`, keyed on
 `<package>_<version>_<arch>.deb`. A second real fetch of the same plan performs
 **zero `.deb` payload downloads**.
 
@@ -404,9 +409,9 @@ each victim's own key lock before unlinking, skipping any victim a reader is
 currently holding.
 
 ```bash
-CERALIVE_DEBCACHE=0 ./v2/build rock-5b-plus              # disable it entirely
-CERALIVE_DEBCACHE_MAX_BYTES=8589934592 ./v2/build …      # raise the 4 GiB ceiling
-CERALIVE_DEBCACHE_DIR=/srv/debcache ./v2/build …         # relocate it
+CERALIVE_DEBCACHE=0 ./build rock-5b-plus              # disable it entirely
+CERALIVE_DEBCACHE_MAX_BYTES=8589934592 ./build …      # raise the 4 GiB ceiling
+CERALIVE_DEBCACHE_DIR=/srv/debcache ./build …         # relocate it
 ```
 
 The cache is bounded at 4 GiB by default and evicted least-recently-used first by
@@ -414,7 +419,7 @@ mtime, which a reuse refreshes. Disabled, the fetch behaves exactly as it did
 before the cache existed; a `DRY_RUN=1` plan never touches it and its resolved
 output is byte-identical. Every cache failure is non-fatal — an unwritable
 directory or a lost lock degrades to an ordinary download. Contract:
-`v2/tests/debcache.test.sh`.
+`tests/debcache.test.sh`.
 
 ## Kernel Freeze — the boot stack updates via RAUC only
 
@@ -455,7 +460,7 @@ re-held after one.
 
 Verify on a device with `apt-mark showhold`, `apt-cache policy linux-image-vendor-rk35xx`
 and `apt-get -s upgrade`. Full contract:
-[`v2/docs/kernel-freeze-contract.md`](v2/docs/kernel-freeze-contract.md).
+[`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
 ## OTA-During-Stream Guard
 
@@ -471,7 +476,7 @@ running:
 A stopped or not-installed unit reads `inactive`, so the guard is a no-op on a
 device that isn't streaming. The sender unit (`srtla-send.service`) is the one
 that actually carries the uplink on a bonding sender device, so it is now part
-of the guard alongside the encoder and receiver. Proof: `v2/run-tests`
+of the guard alongside the encoder and receiver. Proof: `run-tests`
 section 16.
 
 ## USB-C Type-C Source-Role Pinning
@@ -493,7 +498,7 @@ Verified live on a Rock 5B+ (including straight after a cold power-cycle): with 
 port pinned, the camera enumerates within seconds on every attempt. **This code is
 merged-ready but has not been through a release — no published image carries it yet,
 and the persistent behaviour still needs an on-hardware board-proof.** Guards:
-`v2/tests/manifest.bats` §18d.
+`tests/manifest.bats` §18d.
 
 ## Fan Curve
 
@@ -591,17 +596,17 @@ can drive it.
 The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA
 modem source-routing, the M.2 SIM-detection quirk, and the known-good modem
 table) is documented as-is in
-[`v2/docs/modem-matrix.md`](v2/docs/modem-matrix.md).
+[`docs/modem-matrix.md`](docs/modem-matrix.md).
 
 Because an upstream repository can replace package bytes under the same Debian
 version, a same-version Armbian re-spin could drop one of the six WWAN kernel modules the modem stack binds to
 (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`) with no
-signal. `v2/lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted
+signal. `lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted
 module tree) and reports each module as loadable (`=m`), built-in (`=y`, in
 `modules.builtin`), or present via `modules.alias`:
 
 ```bash
-v2/lib/check-wwan-modules.sh <kernel.deb | module-tree-dir>
+lib/check-wwan-modules.sh <kernel.deb | module-tree-dir>
 ```
 
 It is **advisory only**, like the BSP drift-guard: a missing module prints a
@@ -609,7 +614,7 @@ WARNING but the check **always exits 0** — it never fails the build and never
 edits `shared.list` or the kernel config. It is hyphen/underscore aware (the
 `cdc_wdm` module ships on disk as `cdc-wdm.ko`) and matches the `option` module
 by an exact `option.ko` / `modules.builtin` / alias entry, never a bare `option`
-substring. Proof: `v2/run-tests` section 17.
+substring. Proof: `run-tests` section 17.
 
 ## Kernel Build From Source (opt-in)
 
@@ -618,8 +623,8 @@ and its in-tree DTBs from **pinned source**, instead of fetching the prebuilt
 Armbian kernel:
 
 ```bash
-./v2/build rock-5b-plus --variant edge             # mainline 7.1 track
-./v2/build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
+./build rock-5b-plus --variant edge             # mainline 7.1 track
+./build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
 ```
 
 They target different kernel tracks with different patch repositories, and
@@ -655,7 +660,7 @@ image has not itself been booted on hardware, and no Orange Pi 5+ evidence
 exists — `0004` is retained precisely so that a future pipeline-built-image
 confirmation can be read. Do not read this variant as "HDMI-RX audio works on
 this pipeline's image" on the strength of the Tier 1 result alone. See
-[`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md) §2d.
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §2d.
 
 Every input is exact-pinned — the kernel commit, the patch-series commit (an
 immutable SHA, never a branch), the kernel config's source revision, and the
@@ -688,14 +693,14 @@ built candidate.
 
 The two variants get their kernel config from structurally different places.
 `edge` uses arm64 `defconfig` plus
-[`v2/manifests/kernel/rk3588-edge.fragment`](v2/manifests/kernel/rk3588-edge.fragment).
+[`manifests/kernel/rk3588-edge.fragment`](manifests/kernel/rk3588-edge.fragment).
 `vendor-patched` instead fetches Armbian's **complete** published
 `config/kernel/linux-rk35xx-vendor.config` at a pinned revision and uses it
 verbatim — that is the exact config `linux-image-vendor-rk35xx` is built from, so
 a bare `make defconfig` would build a materially different driver set and stop
 being comparable to what the board runs.
 
-Either way `v2/lib/verify-kernel-config.sh` asserts inside the builder that every
+Either way `lib/verify-kernel-config.sh` asserts inside the builder that every
 symbol the declared config names survived `olddefconfig` — a leaf whose
 `menuconfig` parent is off is otherwise dropped in complete silence. Four real
 defects have been found that way, each disabling a whole capability on a booting,
@@ -706,7 +711,7 @@ releases (`CONFIG_TYPEC_FUSB302`), and no nftables at all — which failed
 unauthenticated RTMP/SRT ingest ports unapplied (`CONFIG_NF_TABLES`).
 
 For `vendor-patched` a small, reviewed exception list
-([`v2/manifests/kernel/rk3588-vendor-patched.absent`](v2/manifests/kernel/rk3588-vendor-patched.absent))
+([`manifests/kernel/rk3588-vendor-patched.absent`](manifests/kernel/rk3588-vendor-patched.absent))
 records the 24 symbols Armbian's published config names for **out-of-tree** WiFi
 drivers its own build framework copies in at build time, which this pipeline
 deliberately does not run. It is not an escape hatch: a listed symbol that *did*
@@ -717,15 +722,15 @@ is on the list — both are in-tree and both pass the gate.
 before this existed**, pinned by committed golden fixtures. Nothing produced by
 this stage has been compiled or booted yet, and it does not reopen the vendor-BSP
 decision. Full detail:
-[`v2/docs/kernel-build-from-source.md`](v2/docs/kernel-build-from-source.md);
-gaps: [`v2/docs/DEFERRED.md`](v2/docs/DEFERRED.md) item 9.
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md);
+gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md) item 9.
 
 ## Kernel Tracks
 
 Which patch repository feeds which opt-in variant, the pin chain from each
 repo's `kernel-pin.env` through to `rk3588.yaml`, and where each track's
 retire-on-merge status is tracked — a thin index, not a restatement — lives in
-[`v2/docs/kernel-tracks.md`](v2/docs/kernel-tracks.md).
+[`docs/kernel-tracks.md`](docs/kernel-tracks.md).
 
 ## Kernel Currency Watch
 
@@ -733,13 +738,13 @@ The image is locked to the **vendor 6.1 BSP + Rockchip MPP** for H.265 encoding.
 This decision is recorded with a 7-way evidence summary and two precise revisit
 triggers (a 6.12+ vendor BSP with MPP support, or mainline landing a frozen V4L2
 stateless H.265 encode uAPI + VEPU580 driver) in
-[`v2/docs/kernel-currency-watch.md`](v2/docs/kernel-currency-watch.md).
+[`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
 
 The MPP/GPU **userspace** that makes the vendor kernel's HW encoders reachable from
 GStreamer (`gstreamer1.0-rockchip1` + `librockchip-mpp1` + `librga2`, plus the
 Mali-G610 `libmali` blob) is not in the Armbian feed. It is baked from exact pinned
 upstream release assets, verified by SHA-256, in
-[`v2/manifests/rk3588-userspace-deb-versions.txt`](v2/manifests/rk3588-userspace-deb-versions.txt)
+[`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)
 (fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
 
 ## License

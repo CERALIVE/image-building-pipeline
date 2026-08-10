@@ -14,7 +14,7 @@ Items are documentation-only. None are resolved here.
 ## 1. OPi 5+ Interface ID_PATH Placeholders
 
 **Status:** Deferred (hardware-gated)
-**Location:** `manifests/boards/orange-pi-5-plus.yaml:45-47`
+**Location:** `manifests/boards/orange-pi-5-plus.yaml:68-70`
 **Also referenced:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs are FIXME placeholders"
 **Cross-repo:** tracked in the workspace-root `docs/DEFERRED-WORK.md` as item 3 (*Orange Pi 5+ interface ID_PATHs*); owned here.
 
@@ -33,7 +33,7 @@ only the generic `Type=wlan → wlan0` rule; the dual NICs stay non-deterministi
 **Unblock condition:** Obtain a physical Orange Pi 5+. Run
 `udevadm info /sys/class/net/<iface> | grep ID_PATH` for each onboard NIC and
 the wifi adapter, then replace each FIXME in
-`manifests/boards/orange-pi-5-plus.yaml:45-47` with the real value.
+`manifests/boards/orange-pi-5-plus.yaml:68-70` with the real value.
 Re-run `run-tests` to confirm the manifest validates.
 
 ---
@@ -186,7 +186,7 @@ the bookworm versions proved insufficient) in `versions.yaml:157` and
 ## 6. DEVICE-BRINGUP.md Hardware-Evidence Placeholders
 
 **Status:** Deferred (hardware-gated)
-**Location:** `docs/DEVICE-BRINGUP.md:296`, `docs/DEVICE-BRINGUP.md:328`, `docs/DEVICE-BRINGUP.md:413`, `docs/DEVICE-BRINGUP.md:669`
+**Location:** `docs/DEVICE-BRINGUP.md:478`, `docs/DEVICE-BRINGUP.md:618`, `docs/DEVICE-BRINGUP.md:753`, `docs/DEVICE-BRINGUP.md:1021`
 
 **What it is:** Four **Pending hardware run** placeholders in the public device
 bring-up guide await evidence from physical board runs. Each is a literal
