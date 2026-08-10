@@ -274,6 +274,7 @@ run_mkosi_build() {
     CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
     CERALIVE_BENCH_LABELS CERALIVE_BOARD
+    CERALIVE_DTB_KEEP_OVERLAYS
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -306,6 +307,11 @@ run_mkosi_build() {
   # writes the /data fstab entry and the fallback RAUC slot devices, so it has to
   # reach the SUBIMAGES too — hence the matching mkosi.conf PassEnvironment= entry.
   export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
+  # Device-tree files the installed-rootfs DTB prune must KEEP beside the board's
+  # own ${fdtfile}, space-separated and relative to each pruned directory. Empty
+  # on both shipped boards: boot.scr.cmd and recovery.scr.cmd load ${fdtfile} and
+  # nothing else, so the CeraLive boot path applies no overlay at all.
+  export CERALIVE_DTB_KEEP_OVERLAYS="${CERALIVE_DTB_KEEP_OVERLAYS:-}"
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"

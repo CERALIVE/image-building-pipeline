@@ -46,6 +46,7 @@ SUITES=(
   "${HERE}/tests/boot-artifacts.bats"
   "${HERE}/tests/kernel-config-fragment.bats"
   "${HERE}/tests/kernel-build-resilience.bats"
+  "${HERE}/tests/dtb-prune-contract.bats"
   "${HERE}/tests/x86-raucb-bundle.bats"
   "${HERE}/tests/packaging-hygiene.bats"
   "${HERE}/tests/mkosi-contract.bats"

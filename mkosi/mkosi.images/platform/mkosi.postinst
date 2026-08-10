@@ -51,6 +51,62 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 # It is fail-loud when enabled: a missing source dir or a missing board DTB means
 # the image would boot to a device-tree-less kernel, which is indistinguishable
 # from a dead board at the far end of a flash cycle.
+# prune_dtb_dir — reduce ONE installed device-tree directory to the resolved
+# board DTB plus the explicitly-named overlay files, and nothing else.
+#
+# The `edge` linux-image deb carries 228 `rockchip/*.dtb` files; a board boots
+# exactly one of them. The U-Boot selector loads `/boot/dtb/rockchip/${fdtfile}`
+# and NOTHING else — boot.scr.cmd and recovery.scr.cmd have no overlay load at
+# all — so every other blob is dead weight in the rootfs and, because the kernel
+# rides inside a RAUC slot, in both slots and in every bundle.
+#
+# THE KEEP SET IS AN ALLOWLIST, VERIFIED BEFORE ANYTHING IS DELETED. A prune that
+# removes first and discovers the board DTB was not there afterwards has already
+# produced an unbootable slot. `CERALIVE_DTB_KEEP_OVERLAYS` is a space-separated
+# list of paths RELATIVE to the directory being pruned (e.g.
+# `overlay/rk3588-something.dtbo`); it is EMPTY on both shipped boards because
+# nothing in the CeraLive boot path applies an overlay. `armbian_overlays` in the
+# board manifests is NOT that list — the schema documents it as inert, unconsumed
+# provenance metadata, and treating those names as required files would fail the
+# existence check for blobs that were never in any tree.
+#
+# This trims the INSTALLED ROOTFS ONLY. The source `.deb` in the staging pool is
+# untouched and stays full — nothing is repacked, and no claim is made anywhere
+# that the package itself became smaller.
+prune_dtb_dir() {
+  local dir="$1" label="$2" board_dtb="$3"
+  [[ -d "${dir}" ]] || { log "FATAL: cannot prune ${label}: ${dir} is not a directory"; exit 1; }
+  [[ -n "${board_dtb}" ]] || { log "FATAL: cannot prune ${label}: no board DTB name resolved"; exit 1; }
+
+  local -a keep=("${board_dtb}")
+  local -a overlays=()
+  read -r -a overlays <<<"${CERALIVE_DTB_KEEP_OVERLAYS:-}"
+  keep+=(${overlays[@]+"${overlays[@]}"})
+
+  local rel
+  for rel in "${keep[@]}"; do
+    [[ -f "${dir}/${rel}" ]] \
+      || { log "FATAL: ${label}: required device-tree file '${rel}' is absent from ${dir} — refusing to prune"; exit 1; }
+  done
+
+  local keep_list; keep_list="$(printf '%s\n' "${keep[@]}")"
+  local removed=0 path
+  while IFS= read -r -d '' path; do
+    rel="${path#"${dir}/"}"
+    grep -qxF -- "${rel}" <<<"${keep_list}" && continue
+    rm -f "${path}"
+    removed=$(( removed + 1 ))
+  done < <(find "${dir}" -type f -print0)
+
+  find "${dir}" -mindepth 1 -type d -empty -delete
+
+  for rel in "${keep[@]}"; do
+    [[ -f "${dir}/${rel}" ]] \
+      || { log "FATAL: ${label}: '${rel}' did not survive the prune of ${dir}"; exit 1; }
+  done
+  log "${label}: kept ${#keep[@]} device-tree file(s) in ${dir}, removed ${removed}"
+}
+
 install_kernel_source_dtbs() {
   local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
   local src="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
@@ -78,6 +134,12 @@ install_kernel_source_dtbs() {
     exit 1
   fi
   log "board DTB present at ${dst}/${DTB_NAME:-<unset>}"
+
+  # BOTH installed locations, not just /boot: the package-payload directory stays
+  # in the rootfs after installation, so trimming only the boot copy would leave
+  # the full 228-blob set shipping inside every slot anyway.
+  prune_dtb_dir "${root}${src}" "kernel-package DTB payload" "${DTB_NAME:-}"
+  prune_dtb_dir "${root}${dst}" "/boot device trees" "${DTB_NAME:-}"
 }
 
 # install_kernel_source_boot_artifacts — the PLATFORM-LAYER BOOT-ARTIFACT MAPPING
@@ -181,17 +243,70 @@ install_kernel_source_boot_artifacts() {
 }
 
 prune_irrelevant_rk3588_firmware() {
-	local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
-  local -a paths=(
-		"${root}/usr/lib/firmware/qcom"
-		"${root}/usr/lib/firmware/intel"
-		"${root}/usr/lib/firmware/ath10k"
-		"${root}/usr/lib/firmware/ath11k"
-		"${root}/usr/lib/firmware/ath12k"
-		"${root}/usr/lib/firmware/updates"
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local fw="${root}/usr/lib/firmware"
+
+  [[ -d "${fw}" ]] || { log "no ${fw} — nothing to prune"; return 0; }
+
+  if ! command -v modinfo >/dev/null 2>&1; then
+    log "WARNING: modinfo is unavailable — cannot prove a firmware family has no consumer, so NOTHING is pruned"
+    return 0
+  fi
+
+  local -a candidates=(
+    qcom intel ath10k ath11k ath12k updates
+    microchip nvidia tegra renesas
   )
-  log "pruning firmware irrelevant to the RK3588 platform"
-  rm -rf "${paths[@]}"
+  # Single files rather than directories: the Renesas R-Car USB3 ROM images ship
+  # at the firmware root, so a directory-only candidate list would never see them.
+  local -a candidate_files=(
+    r8a779x_usb3_rom.mem
+  )
+
+  local refs; refs="$(installed_module_firmware_refs "${root}")"
+
+  local -a pruned=() kept=()
+  local name ref blocked
+  for name in "${candidates[@]}"; do
+    [[ -e "${fw}/${name}" ]] || continue
+    blocked=""
+    while IFS= read -r ref; do
+      [[ -n "${ref}" ]] || continue
+      if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
+    done <<<"${refs}"
+    if [[ -n "${blocked}" ]]; then
+      kept+=("${name} (referenced by an installed module: ${blocked})")
+      continue
+    fi
+    rm -rf "${fw:?}/${name}"
+    pruned+=("${name}")
+  done
+
+  for name in "${candidate_files[@]}"; do
+    [[ -e "${fw}/${name}" ]] || continue
+    if grep -qxF -- "${name}" <<<"${refs}"; then
+      kept+=("${name} (referenced by an installed module)")
+      continue
+    fi
+    rm -f "${fw:?}/${name}"
+    pruned+=("${name}")
+  done
+
+  log "firmware prune: removed ${#pruned[@]} family/families with zero installed consumers${pruned[0]+: ${pruned[*]}}"
+  if (( ${#kept[@]} > 0 )); then
+    local k
+    for k in "${kept[@]}"; do
+      log "firmware prune: KEPT ${k}"
+    done
+  fi
+
+  local preserved
+  for preserved in brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi; do
+    if [[ " ${candidates[*]} " == *" ${preserved} "* ]]; then
+      log "FATAL: ${preserved} firmware is a preserved family and must never be a prune candidate"
+      exit 1
+    fi
+  done
 }
 
 # Collect the always-on HW-accel GStreamer set (parity-relevant) from env.

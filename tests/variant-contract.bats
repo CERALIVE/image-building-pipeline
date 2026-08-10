@@ -1018,7 +1018,11 @@ YAML
 @test "platform DTB mapping: copies the board DTB where the boot script looks" {
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   local fn
-  fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
+  # The whole SET, not just the entry: install_kernel_source_dtbs calls
+  # prune_dtb_dir, and lifting the caller alone yields a function that dies on an
+  # undefined helper. Same rule the postinst.d and orchestrate.sh splits already
+  # record — a static test that reads by TEXT must read every function it runs.
+  fn="$(sed -n '/^prune_dtb_dir()/,/^}/p;/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
   local root="$BATS_TEST_TMPDIR/dtbroot"
   mkdir -p "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
   printf 'dtb\n' > "$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip/rk3588-rock-5b-plus.dtb"
