@@ -205,6 +205,29 @@ prune_final_image_payload() {
   prune_package_docs
 }
 
+# remove_chroot_service_policy — drop the build-time policy-rc.d.
+#
+# The base layer's skeleton tree installs /usr/sbin/policy-rc.d so invoke-rc.d
+# declines every service start in the chroot instead of failing at it. That file
+# must NOT ship: on the device it would block systemd's own sysv compatibility
+# path and any later dpkg-driven service start. This is the last chroot script in
+# the layer chain, so here is the correct place to undo it.
+#
+# Fail-loud rather than best-effort: a policy-rc.d that survives into the rootfs
+# produces a device that installs packages and silently never starts them, which
+# is far harder to diagnose than a failed build.
+remove_chroot_service_policy() {
+  local policy="${CERALIVE_POLICY_RCD:-/usr/sbin/policy-rc.d}"
+  if [[ -e "${policy}" ]]; then
+    log "removing the build-time service-start policy (${policy})"
+    rm -f "${policy}" || true
+  fi
+  # The POSTCONDITION is the contract, not rm's exit status — hence the `|| true`
+  # above. Whatever went wrong, the only thing that matters is whether the file is
+  # still there when the rootfs is sealed.
+  [[ ! -e "${policy}" ]] || die "build-time ${policy} survived into the final rootfs"
+}
+
 # prune_package_docs — the DEFERRED half of the appliance doc strip.
 #
 # The layers above are built WithDocs=yes so that man pages exist while packages
@@ -242,6 +265,7 @@ main() {
   rm -rf "${FIRST_PARTY_DIR}"
   clean_package_download_metadata
   prune_final_image_payload
+  remove_chroot_service_policy
 
   log "APPLICATION layer complete"
 }

@@ -234,11 +234,85 @@ sectioned_keys() {
   grep -Fq 'prune_final_image_payload' "$app_postinst"
   # No earlier layer may delete docs — that would reintroduce the ordering bug for
   # every package the later layers configure.
-  run grep -rn '/usr/share/doc' \
+  run grep -rnE '(rm -rf?|find|RemoveFiles=).*/usr/share/(doc|man)' \
     "$MKOSI_DIR/mkosi.images/base" \
     "$MKOSI_DIR/mkosi.images/platform" \
     "$MKOSI_DIR/mkosi.images/runtime"
   [ "$status" -ne 0 ]
+}
+
+@test "mkosi-contract: the base layer ships a build-time policy-rc.d skeleton tree" {
+  local policy="$MKOSI_DIR/mkosi.images/base/mkosi.skeleton/usr/sbin/policy-rc.d"
+  [ -f "$policy" ]
+  [ -x "$policy" ]
+  grep -Fxq 'SkeletonTrees=mkosi.skeleton' "$MKOSI_DIR/mkosi.images/base/mkosi.conf"
+
+  # Skeleton, not ExtraTree: mkosi installs extra trees AFTER the package manager
+  # runs, which is after the base bootstrap has already emitted the noise.
+  run grep -n 'mkosi.skeleton' "$MKOSI_DIR/mkosi.images/base/mkosi.conf"
+  [ "$status" -eq 0 ]
+  run grep -rn 'ExtraTrees=.*skeleton' "$MKOSI_DIR"
+  [ "$status" -ne 0 ]
+}
+
+@test "mkosi-contract: the shipped policy-rc.d denies every invoke-rc.d form with 101" {
+  local policy="$MKOSI_DIR/mkosi.images/base/mkosi.skeleton/usr/sbin/policy-rc.d"
+  # Drive the REAL file through the exact argument shapes invoke-rc.d uses
+  # (querypolicy passes an optional leading --quiet, then initscript/action/runlevel).
+  local args
+  for args in "dbus start" "dbus force-reload 5" "--quiet dbus restart 2" "ssh stop" "dbus query"; do
+    run "$policy" $args
+    [ "$status" -eq 101 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "mkosi-contract: the app layer removes policy-rc.d and fails if it survives" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  grep -Fq 'remove_chroot_service_policy' "$app_postinst"
+
+  local fake="$BATS_TEST_TMPDIR/policy-rc.d"
+  printf 'exit 101\n' >"$fake"
+  CERALIVE_POLICY_RCD="$fake" bash -c "source '$app_postinst'; remove_chroot_service_policy"
+  [ ! -e "$fake" ]
+
+  # Idempotent: a rerun (or a build where it was never installed) is a clean no-op.
+  CERALIVE_POLICY_RCD="$fake" bash -c "source '$app_postinst'; remove_chroot_service_policy"
+
+  # Fail-closed: if the removal cannot take effect, the build must die rather than
+  # ship a rootfs whose services never start.
+  local guarded="$BATS_TEST_TMPDIR/guarded"
+  mkdir -p "$guarded"
+  run env "CERALIVE_POLICY_RCD=$guarded" \
+    bash -c "source '$app_postinst'; remove_chroot_service_policy"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"survived into the final rootfs"* ]]
+  [ -e "$guarded" ]
+}
+
+@test "mkosi-contract: policy-rc.d removal runs LAST, after every package transaction" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  local install_line remove_line
+  install_line="$(grep -n 'install_first_party_apps$' "$app_postinst" | tail -1 | cut -d: -f1)"
+  remove_line="$(grep -n '^  remove_chroot_service_policy$' "$app_postinst" | tail -1 | cut -d: -f1)"
+  [ -n "$install_line" ]
+  [ -n "$remove_line" ]
+  [ "$install_line" -lt "$remove_line" ]
+}
+
+@test "mkosi-contract: suppression never swallows a package configuration failure" {
+  # policy-rc.d only intercepts invoke-rc.d. Every package transaction must still
+  # be exit-status checked — a `|| true` here would turn a broken postinst into a
+  # silently half-configured image, which is the failure mode this todo must NOT
+  # introduce.
+  local f
+  for f in "$MKOSI_DIR/mkosi.images/platform/mkosi.postinst" \
+           "$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot" \
+           "$MKOSI_DIR/mkosi.images/runtime/mkosi.postinst.chroot"; do
+    grep -Eq '^set -euo pipefail$' "$f"
+    run grep -nE '^[[:space:]]*(mkosi-install|dpkg -i|apt-get (install|-y))[^|]*\|\|[[:space:]]*true' "$f"
+    [ "$status" -ne 0 ]
+  done
 }
 
 @test "mkosi-contract: the pinned mkosi parses every config with no diagnostics" {
