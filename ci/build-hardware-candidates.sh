@@ -300,10 +300,10 @@ build_candidate() {
   export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE
 
   if candidate_is_debug "${name}"; then
-    [[ -n "${CERALIVE_DEBUG_PASSWORD_HASH:-}" ]] \
+    [[ -n "${DEBUG_PASSWORD_HASH:-}" ]] \
       || die "candidate '${name}' is a DEBUG artifact and no CERALIVE_DEBUG_PASSWORD_HASH was supplied (--debug-env)"
     export CERALIVE_DEBUG_IMAGE=1
-    export CERALIVE_DEBUG_PASSWORD_HASH
+    export CERALIVE_DEBUG_PASSWORD_HASH="${DEBUG_PASSWORD_HASH}"
   else
     export CERALIVE_DEBUG_IMAGE=0
     unset CERALIVE_DEBUG_PASSWORD_HASH || true
@@ -592,7 +592,18 @@ main() {
   fi
 
   load_env_file "${SIGNING_ENV}" CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE
-  (( needs_debug )) && load_env_file "${debug_env}" CERALIVE_DEBUG_PASSWORD_HASH
+
+  # The debug hash is held UNEXPORTED until the one build that may see it. The
+  # orchestrator refuses CERALIVE_DEBUG_PASSWORD_HASH without
+  # CERALIVE_DEBUG_IMAGE=1, so an exported hash would fail every DRY_RUN probe
+  # and every non-debug candidate — and, worse, a version of that pairing that
+  # did not fail would ship a debug credential in a production artifact.
+  DEBUG_PASSWORD_HASH=""
+  if (( needs_debug )); then
+    load_env_file "${debug_env}" CERALIVE_DEBUG_PASSWORD_HASH
+    DEBUG_PASSWORD_HASH="${CERALIVE_DEBUG_PASSWORD_HASH}"
+    unset CERALIVE_DEBUG_PASSWORD_HASH
+  fi
 
   assert_clean_worktree "${PIPELINE_DIR}"
   A_COMMIT="$(git -C "${PIPELINE_DIR}" rev-parse HEAD)"
