@@ -21,7 +21,7 @@ canonical path.** You do **not** need `mkosi`, a Debian host, or the
 |---|---|
 | Default builder | Containerized — runs in a pinned **Debian trixie** image |
 | Container runtime | Auto-detected: **Docker**, else **Podman** (either works, same plan) |
-| Builder image | Baked from [`ci/Dockerfile`](../ci/Dockerfile): **mkosi 26** (the `.mkosi-version` pin) on trixie's **Python 3.13** (satisfies mkosi 26's ≥ 3.12 floor). Auto-built (`ceralive-mkosi-builder:26`) on first use when absent. |
+| Builder image | Baked from [`ci/Dockerfile`](../ci/Dockerfile): **mkosi 26** (the `.mkosi-version` pin) on trixie's **Python 3.13** (satisfies mkosi 26's ≥ 3.12 floor). Auto-built on first use when absent, under a CONTENT-ADDRESSED tag `ceralive-mkosi-builder:26-<12 hex of sha256(ci/Dockerfile)>` — so editing that Dockerfile produces a new tag and is actually rebuilt, instead of being masked forever by the "image already present" short-circuit. Pin your own with `MKOSI_BUILDER_IMAGE=` and it is honoured verbatim (never auto-built). |
 | Cross-arch | arm64 builds ride the host kernel's `qemu-user-static` binfmt (F-flag); the image bakes `qemu-user-static` + `binfmt-support`. |
 | No runtime present | Build stops with a clear, actionable error (install docker/podman, or use `--native`) — never a stack trace. |
 

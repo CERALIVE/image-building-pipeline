@@ -430,6 +430,43 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "builder image: the auto-built mkosi tag is content-addressed over ci/Dockerfile" {
+  # ensure_builder_image skips `docker build` when the tag already exists, so a
+  # constant tag pins every host to whatever layers it first built — an edit to
+  # ci/Dockerfile would then silently never take effect on the machine that cuts
+  # the artifacts. Same defect the kernel builder already fixed.
+  run bash -c "grep -n 'ceralive-mkosi-builder:\${MKOSI_VERSION_PIN}-\$(sha256sum' '$PIPELINE_DIR/lib/orchestrate.sh'"
+  [ "$status" -eq 0 ]
+
+  local plan_a plan_b
+  plan_a="$(DRY_RUN=1 INSTALL_BOOT_BSP=0 "$PIPELINE_DIR/build" rock-5b-plus 2>&1 \
+    | sed -n 's/.*builder \(ceralive-mkosi-builder:[^ ]*\).*/\1/p' | head -1)"
+  [[ "$plan_a" =~ ^ceralive-mkosi-builder:[0-9]+-[0-9a-f]{12}$ ]]
+
+  plan_b="$(DRY_RUN=1 INSTALL_BOOT_BSP=0 "$PIPELINE_DIR/build" rock-5b-plus 2>&1 \
+    | sed -n 's/.*builder \(ceralive-mkosi-builder:[^ ]*\).*/\1/p' | head -1)"
+  [ "$plan_a" = "$plan_b" ]
+
+  # An operator-pinned image is honoured verbatim and never content-addressed.
+  local pinned
+  pinned="$(MKOSI_BUILDER_IMAGE=example.invalid/custom:1 DRY_RUN=1 INSTALL_BOOT_BSP=0 \
+    "$PIPELINE_DIR/build" rock-5b-plus 2>&1 | sed -n 's/.*builder \(example.invalid[^ ]*\).*/\1/p' | head -1)"
+  [ "$pinned" = "example.invalid/custom:1" ]
+}
+
+@test "builder image: ci/Dockerfile patches mkosi's non-executable policy-rc.d, with a drift guard" {
+  # invoke-rc.d gates on `test -x`, and mkosi 26 writes the helper 0644 — so the
+  # denial it intends never happens and every apt transaction that touches a
+  # service emits the census's row-8/9/21 signatures. The patch is only safe
+  # because it is asserted to apply; a silent no-op would restore the noise.
+  run grep -F 'sed -i '"'"'s/with umask(~0o644):/with umask(~0o755):/'"'" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+  run grep -F "test \"\$(grep -c 'with umask(~0o644):' \"\${APT_PY}\")\" = 1" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+  run grep -F "test \"\$(grep -c 'with umask(~0o644):' \"\${APT_PY}\")\" = 0" "$PIPELINE_DIR/ci/Dockerfile"
+  [ "$status" -eq 0 ]
+}
+
 @test "size-gate wiring: orchestrate.sh resolves the release guard the size gate consults" {
   run grep -Fx 'CHECK_RELEASE_VARIANT_SH="${PIPELINE_DIR}/ci/check-release-variant.sh"' "$PIPELINE_DIR/lib/orchestrate.sh"
   [ "$status" -eq 0 ]

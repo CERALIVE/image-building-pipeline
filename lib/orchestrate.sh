@@ -110,7 +110,17 @@ if [[ -n "${MKOSI_BUILDER_IMAGE:-}" ]]; then
 else
   MKOSI_BUILDER_IMAGE_OVERRIDDEN=0
 fi
-MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE:-ceralive-mkosi-builder:${MKOSI_VERSION_PIN}}"
+# The auto-built tag is CONTENT-ADDRESSED over ci/Dockerfile, the same fix the
+# kernel builder already carries (lib/kernel/builder.sh::resolve_kernel_builder_tag).
+# With a constant tag, ensure_builder_image's "already present" short-circuit is
+# permanent: every host that built the image once keeps using it for good, so an
+# edit to ci/Dockerfile silently never takes effect anywhere. That is not
+# hypothetical — it is how the mkosi policy-rc.d patch in that file could have
+# been committed, tested green in CI on a cold runner, and changed nothing on the
+# machine that actually cuts the artifacts.
+if (( MKOSI_BUILDER_IMAGE_OVERRIDDEN == 0 )); then
+  MKOSI_BUILDER_IMAGE="ceralive-mkosi-builder:${MKOSI_VERSION_PIN}-$(sha256sum "${MKOSI_BUILDER_DOCKERFILE}" | cut -c1-12)"
+fi
 
 # ---------------------------------------------------------------------------
 # STAGE MODULES (lib/stages/) — one module per [N/9] step; this file sequences

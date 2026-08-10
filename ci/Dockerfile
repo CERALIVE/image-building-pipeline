@@ -70,6 +70,42 @@ RUN apt-get update \
 # pin). pipx isolates it in its own venv on trixie's python3 (>= 3.12 floor met).
 RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
 
+# UPSTREAM FIX — mkosi 26 writes its build-time policy-rc.d NON-EXECUTABLE, so
+# invoke-rc.d ignores it and the denial never takes effect.
+#
+# mkosi/installer/apt.py::Apt.install() drops a `#!/bin/sh\nexit 101\n` helper at
+# /usr/sbin/policy-rc.d around every apt transaction and unlinks it afterwards —
+# but it creates it under `umask(~0o644)`, i.e. mode 0644. Debian's invoke-rc.d
+# gates on `test -x "${POLICYHELPER}"` (init-system-helpers, /usr/sbin/invoke-rc.d
+# line 138), so a 0644 helper is not merely ignored, it is reported as ABSENT:
+#
+#   invoke-rc.d: WARNING: No init system and policy-rc.d missing! Defaulting to block.
+#   Reloading system message bus config...Failed to open connection to "system" message bus: …
+#   invoke-rc.d: initscript dbus, action "force-reload" failed.
+#
+# The last one is the damaging shape — a maintainer script that checks
+# invoke-rc.d's status cannot distinguish "the chroot has no init" from "this
+# package is broken". This repo's own base skeleton tree ships an EXECUTABLE
+# helper for exactly that reason (mkosi/mkosi.images/base/mkosi.skeleton), and it
+# cannot survive: mkosi's first apt transaction unlinks it and every later one
+# recreates the 0644 version. Patching the one umask here is what makes both the
+# upstream helper and ours effective, in every layer.
+#
+# Scope: BUILD-TIME ONLY. The file is removed before the rootfs is sealed
+# (app/mkosi.postinst.chroot::remove_chroot_service_policy, which dies if it
+# survives), so nothing about the shipped device changes — this only makes the
+# denial that mkosi already intends actually happen.
+#
+# The `grep -c` assertions are the drift guard: if a future mkosi changes that
+# line, the image build FAILS here rather than silently reverting to a build log
+# full of warnings nobody reads.
+RUN APT_PY="$(python3 -c 'import glob; print(glob.glob("/opt/pipx/venvs/mkosi/lib/python*/site-packages/mkosi/installer/apt.py")[0])')" \
+ && test "$(grep -c 'with umask(~0o644):' "${APT_PY}")" = 1 \
+ && sed -i 's/with umask(~0o644):/with umask(~0o755):/' "${APT_PY}" \
+ && test "$(grep -c 'with umask(~0o644):' "${APT_PY}")" = 0 \
+ && test "$(grep -c 'policy-rc.d' "${APT_PY}")" -ge 1 \
+ && find /opt/pipx/venvs/mkosi -name '__pycache__' -type d -prune -exec rm -rf {} +
+
 # Fail the image build LOUDLY if the pin drifts: the builder MUST carry exactly
 # mkosi ${MKOSI_VERSION} on a Python that meets the >= 3.12 floor.
 RUN mkosi --version \
