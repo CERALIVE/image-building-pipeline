@@ -85,7 +85,7 @@ _fetch_first_party_curl() {
   local packages_gz="${debs}/.apt-state-firstparty/Packages.gz"
   local packages="${debs}/.apt-state-firstparty/Packages"
   local verified_release="${debs}/.apt-state-firstparty/Release"
-  local expected_sha actual_sha
+  local expected_sha
 
   local -a curl_auth=()
   if [[ -n "${APT_CLIENT_CRT_B64:-}" ]]; then
@@ -97,19 +97,13 @@ _fetch_first_party_curl() {
   auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
-  expected_sha="$(awk '
-    /^SHA256:/{ in_sha=1; next }
-    /^[A-Za-z0-9-]+:/{ in_sha=0 }
-    in_sha && $3 == "Packages.gz" { print $1; exit }
-  ' "${verified_release}")"
-  [[ -n "${expected_sha}" ]] \
+  expected_sha="$(index_release_digest "${verified_release}" Packages.gz)" \
     || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
 
   curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
-  actual_sha="$(sha256sum "${packages_gz}" | awk '{print $1}')"
-  [[ "${actual_sha}" == "${expected_sha}" ]] \
-    || die "first-party Packages.gz checksum mismatch: expected ${expected_sha}, got ${actual_sha}"
-  gzip -dc "${packages_gz}" >"${packages}"
+  index_verify_digest "${packages_gz}" "${expected_sha}" "first-party Packages.gz" \
+    || die "first-party Packages.gz checksum mismatch"
+  index_decompress_gz "${packages_gz}" "${packages}"
 
   _FIRST_PARTY_DEBS="${debs}"
   _FIRST_PARTY_INDEX="${packages}"
@@ -119,62 +113,6 @@ _fetch_first_party_curl() {
   _run_bounded "${jobs}" _fetch_first_party_curl_one "${download_specs[@]}" \
     || die "first-party fetch failed (curl path): one or more packages did not download"
 }
-# ---------------------------------------------------------------------------
-# apt sandbox plumbing for the build-time first-party fetch.
-#
-# apt drops its acquire methods to `_apt` WHENEVER it is invoked as root, so a
-# root-owned 0600 client key is unreadable to it — the device-side twin of this
-# path already paid for that once (AGENTS.md, "Baked mTLS client key MUST be
-# `_apt`-owned"). The old answer HERE was apt's sandbox-user override pinned to
-# root, which fixes no permission: it turns the sandbox OFF for the whole
-# build-time fetch. That override must never reappear in the emitted apt
-# options — the guard greps this file for its literal spelling, so do not write
-# it out even in a comment.
-#
-# Privilege-aware, because unlike the device this runs on the HOST (before any
-# container, orchestrate.sh) and is frequently NOT root: as root, hand `_apt`
-# the key and a tree it can traverse; unprivileged, apt never drops privileges
-# so the invoking user's own credentials are already the right ones; with no
-# `_apt` at all the host is non-Debian and the curl fallback owns the path.
-# ---------------------------------------------------------------------------
-APT_SANDBOX_USER="${APT_SANDBOX_USER:-_apt}"
-
-apt_sandbox_user_exists() {
-  if command -v getent >/dev/null 2>&1; then
-    getent passwd "${APT_SANDBOX_USER}" >/dev/null 2>&1
-  else
-    grep -q "^${APT_SANDBOX_USER}:" /etc/passwd 2>/dev/null
-  fi
-}
-
-# True only when apt will actually drop privileges for this fetch.
-apt_sandbox_active() {
-  (( EUID == 0 )) || return 1
-  apt_sandbox_user_exists
-}
-
-# `_apt` must be able to TRAVERSE every directory apt reads or writes through.
-# Explicit modes, never the ambient umask — the same reason the mkosi consumer
-# directories are created with an explicit `install -d -m 0755`: a restrictive
-# runner umask otherwise hides the tree from an unprivileged helper.
-apt_sandbox_make_traversable() {
-  local dir
-  for dir in "$@"; do
-    [[ -d "${dir}" ]] || continue
-    chmod 0755 "${dir}"
-  done
-}
-
-# apt WRITES the acquired .deb into the download directory as `_apt`, so
-# traversal is not enough there: a mode-0755 root-owned download dir still
-# degrades to "Download is performed unsandboxed as root". Hand the directory
-# to `_apt` exactly the way apt hands itself its own `partial/` dirs.
-apt_sandbox_own_download_dir() {
-  local dir="$1"
-  chown "${APT_SANDBOX_USER}:root" "${dir}"
-  chmod 0700 "${dir}"
-}
-
 # ---------------------------------------------------------------------------
 # fetch_first_party — pull the first-party device .debs from apt.ceralive.tv via a
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
@@ -197,7 +135,7 @@ fetch_first_party() {
 
   log_info "first-party pins (versions.yaml):"
   for r in "${REPOS[@]}"; do
-    log_info "  ${r} = $(get_pin "${r}" || true)"
+    log_info "  ${r} = $(get_pin "${r}")"
   done
 
   log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
@@ -217,8 +155,7 @@ fetch_first_party() {
   local keyring="${apt_state}/ceralive-archive-keyring.gpg"
   local src_list="${apt_state}/ceralive.sources"
 
-  run_or_plan mkdir -p "${apt_state}/lists/partial" \
-    "${apt_state}/cache/archives/partial" "${certs_dir}"
+  apt_isolated_state_init "${apt_state}" "${certs_dir}"
 
   # deb822 source — the apt-ceralive-repo.sh pattern (arch-specific repo dists/{channel}/binary-{arch}/ +
   # Suites ./, GPG Signed-By); arch is chosen by APT::Architecture below.
@@ -276,14 +213,8 @@ EOF
     fi
   fi
 
-  local apt_opts=(
-    -o "Dir::Etc::SourceList=${src_list}"
-    -o "Dir::Etc::SourceParts=-"
-    -o "Dir::State::Lists=${apt_state}/lists"
-    -o "Dir::Cache=${apt_state}/cache"
-    -o "Dir::Cache::Archives=${apt_state}/cache/archives"
-    -o "APT::Architecture=${ARCH}"
-  )
+  local -a apt_opts=()
+  mapfile -t apt_opts < <(apt_isolated_opts "${apt_state}" "${src_list}" "${ARCH}")
   if [[ -n "${crt}" ]]; then
     apt_opts+=(
       -o "Acquire::https::apt.ceralive.tv::SslCert=${certs_dir}/client.crt"
@@ -312,11 +243,16 @@ EOF
       fp_index="$(debcache_apt_index "${apt_state}")"
     fi
     local -a wanted=()
-    local spec hit_resolved hit_file hit_sha
+    local spec hit_resolved hit_file hit_sha hit_rc
     for spec in "${download_specs[@]}"; do
       if [[ -n "${fp_index}" ]]; then
-        hit_resolved="$(auth_lookup_package "${fp_index}" "${spec%%=*}" "${spec#*=}" "${ARCH}" || true)"
-        if [[ -n "${hit_resolved}" ]]; then
+        hit_rc=0
+        hit_resolved="$(index_lookup_optional "${fp_index}" "${spec%%=*}" "${spec#*=}" "${ARCH}")" \
+          || hit_rc=$?
+        if (( hit_rc == INDEX_LOOKUP_UNUSABLE )); then
+          die "first-party cache probe for ${spec}: apt's verified Packages list is unusable — refusing to continue on an unverifiable index"
+        fi
+        if (( hit_rc == 0 )) && [[ -n "${hit_resolved}" ]]; then
           IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
           if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
               "${debs}/$(basename "${hit_file}")"; then

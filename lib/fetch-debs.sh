@@ -76,6 +76,10 @@ source "${HERE}/fetch/retry.sh"
 source "${HERE}/fetch/debcache.sh"
 # shellcheck source=fetch/pool.sh
 source "${HERE}/fetch/pool.sh"
+# shellcheck source=fetch/apt-lib.sh
+source "${HERE}/fetch/apt-lib.sh"
+# shellcheck source=fetch/index.sh
+source "${HERE}/fetch/index.sh"
 # shellcheck source=fetch/verify.sh
 source "${HERE}/fetch/verify.sh"
 # shellcheck source=fetch/bsp.sh

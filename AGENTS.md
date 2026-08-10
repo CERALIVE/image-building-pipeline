@@ -401,6 +401,38 @@ coinstall, while `srtla` v2026.6.2 (the first receiver-only release) is NOT
 `<< 2026.6.2`, so it coinstalls with the Rust sender. REPOS lives in
 `lib/fetch-debs.sh`.
 
+**`lib/fetch/apt-lib.sh` + `lib/fetch/index.sh` — one apt transport, one signed
+index** [EXISTS]
+
+The BSP and first-party families each had their own copy of two things. Both are
+now single definitions, and the fetch path no longer swallows a real failure:
+
+| Module | Owns |
+|---|---|
+| `lib/fetch/apt-lib.sh` | `apt_isolated_state_init` / `apt_isolated_opts` (the six `Dir::*` + `APT::Architecture` options that keep the build-time fetch out of the host apt configuration) and the privilege-aware `apt_sandbox_*` gate |
+| `lib/fetch/index.sh` | `index_release_digest`, `index_verify_digest`, `index_decompress_gz`, `index_lookup_optional` |
+
+- **`index_release_digest` always reads the gpgv-VERIFIED plaintext**, never the
+  raw `InRelease`. That is the whole reason it is one function: read it from the
+  raw file instead and an attacker-prefixed unsigned `SHA256:` block is trusted.
+  Its awk closes the block on any other column-one header, so an `MD5Sum:` entry
+  for the same path can never be substituted.
+- **`index_lookup_optional` replaced two `|| true` sites.** `auth_lookup_package`
+  answers 1 both for "this package is not in the index" (an expected verified-cache
+  miss) and for "the index is missing/empty" (a real fault). The wrapper splits
+  them — `$INDEX_LOOKUP_NOT_FOUND` (1) vs `$INDEX_LOOKUP_UNUSABLE` (2) — and BOTH
+  cache probes now fail closed on 2 instead of continuing on an unverifiable index.
+- **The apt sandbox gate moved out of `firstparty.sh` unchanged.** Nothing about it
+  was first-party specific. `tests/fetch-debs-apt-sandbox.test.sh` globs
+  `lib/fetch/*.sh`, so it still sees the definitions; the mktemp → handover →
+  download ORDERING it checks is a within-file property and deliberately stays in
+  `firstparty.sh` with the download transaction.
+
+Contract: `tests/apt-lib.test.sh` (isolated-state single definition, digest read
+from the verified plaintext only, bad-signature and wrong-digest rejection,
+wrong-architecture miss, and the no-`|| true` property itself), plus the existing
+`fetch-debs-apt-chain` / `fetch-debs-apt-sandbox` / `bsp-auth-contract` suites.
+
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
