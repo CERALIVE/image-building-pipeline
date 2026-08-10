@@ -242,6 +242,92 @@ install_kernel_source_boot_artifacts() {
   log "boot artifacts complete: raw ARM64 /boot/Image, initrd.img-${release}"
 }
 
+# prune_vendor_dtbs — the same board-only trim for the PREBUILT vendor path.
+#
+# `linux-dtb-vendor-rk35xx` installs its whole RK35xx blob set under
+# /boot/dtb-<REL>/<vendor>/ (with /boot/dtb a symlink to it), which is the
+# production path the fleet actually runs — so the source-built trim above would
+# otherwise only ever reach the two opt-in variants.
+#
+# The directory is DISCOVERED by locating the board's own DTB rather than
+# composed from a release string: the versioned directory name comes from the
+# Armbian package, not from anything this repo resolves, and a hardcoded
+# /boot/dtb-<REL> would silently no-op the moment that package's version moved.
+# `find` does not descend the /boot/dtb symlink, so the real directory is pruned
+# exactly once and the symlink keeps resolving.
+#
+# PERSISTENCE IS THE EXISTING KERNEL FREEZE, NOT A NEW MECHANISM. The DTB package
+# is in DTB_PACKAGES, so postinst-lib.sh::freeze_boot_packages already `apt-mark
+# hold`s it and pins it by name+version; there is deliberately no second hold, no
+# dpkg path-exclude and no /etc/dpkg/dpkg.cfg.d drop-in here. See
+# tests/dtb-prune-contract.bats (tag: vendor) for the reinstall simulation that
+# decides whether that is sufficient.
+prune_vendor_dtbs() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local dtb="${DTB_NAME:-}"
+
+  [[ -n "${dtb}" && "${dtb}" != "none" ]] || return 0
+  # A source-built kernel carries its own DTBs and is trimmed by
+  # install_kernel_source_dtbs; this is the prebuilt-package path only.
+  [[ -z "${KERNEL_SOURCE_KERNEL_RELEASE:-}" ]] || return 0
+  [[ -d "${root}/boot" ]] || return 0
+
+  local -a dirs=()
+  mapfile -t dirs < <(find "${root}/boot" -mindepth 2 -type f -name "${dtb}" -printf '%h\n' | sort -u)
+
+  if (( ${#dirs[@]} == 0 )); then
+    log "FATAL: board DTB ${dtb} is not present anywhere under /boot after installing ${DTB_PACKAGES:-<no dtb packages>}"
+    exit 1
+  fi
+
+  local d
+  for d in "${dirs[@]}"; do
+    prune_dtb_dir "${d}" "vendor DTB payload" "${dtb}"
+  done
+}
+
+# installed_module_firmware_refs — the CONSUMER SET.
+#
+# Every firmware file any INSTALLED module can ask for, read out of the modules
+# themselves with `modinfo -F firmware` rather than guessed from a family name.
+# A driver that is built but never loaded still counts: the request happens at
+# probe time on the device, long after this build, and a board that plugs in one
+# extra peripheral is not a rebuild.
+#
+# Paths are emitted exactly as the module spells them — relative to the firmware
+# root, e.g. `rtw89/rtw8852b_fw.bin` — which is the form the kernel resolves.
+installed_module_firmware_refs() {
+  local root="$1"
+  # merged-usr makes /lib/modules a symlink, which `find` will not descend, so
+  # the real directory is tried first.
+  local moddir="${root}/usr/lib/modules"
+  [[ -d "${moddir}" ]] || moddir="${root}/lib/modules"
+  [[ -d "${moddir}" ]] || return 0
+  find "${moddir}" -type f \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print0 \
+    | xargs -0 -r -n 32 modinfo -F firmware 2>/dev/null \
+    | sed 's#^/*##' \
+    | awk 'NF' \
+    | sort -u
+}
+
+# prune_irrelevant_rk3588_firmware — remove firmware families that NO installed
+# module can ask for, and refuse to remove anything that one can.
+#
+# THE SWEEP IS THE AUTHORISATION, not documentation of a decision already made.
+# Every candidate directory is checked against the real consumer set above and
+# is kept — loudly — if any installed module references a file inside it. That
+# is what makes adding a family to the candidate list safe: a wrong entry fails
+# the build instead of silently disabling a radio on a shipped device.
+#
+# PRESERVED FAMILIES ARE NEVER CANDIDATES. brcm/, rtl_bt/, rtw88/, rtw89/ and
+# rockchip/ carry the two shipped boards' own Wi-Fi, Bluetooth and SoC blobs.
+# mediatek/ and iwlwifi/ are preserved for a different reason: no dual-board
+# module/firmware inventory exists yet to judge them, and "probably unused" is
+# not the standard this function is held to.
+#
+# If `modinfo` is unavailable the prune does NOT fall back to deleting by name —
+# it declines entirely and says so. Removing firmware with no proof is exactly
+# the failure mode the sweep exists to prevent.
 prune_irrelevant_rk3588_firmware() {
   local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
   local fw="${root}/usr/lib/firmware"
@@ -359,6 +445,7 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
   install_kernel_source_dtbs
   install_kernel_source_boot_artifacts
+  prune_vendor_dtbs
   prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."

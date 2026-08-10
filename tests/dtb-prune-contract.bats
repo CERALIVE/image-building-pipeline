@@ -42,12 +42,14 @@ setup() {
   {
     echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
     sed -n '/^prune_dtb_dir()/,/^}/p' "$POSTINST"
+    sed -n '/^prune_vendor_dtbs()/,/^}/p' "$POSTINST"
     sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$POSTINST"
   } >"$FNS"
 
   # Non-vacuity: a renamed or reshaped function would otherwise make every case
   # below pass against an empty file.
   grep -q '^prune_dtb_dir()' "$FNS"
+  grep -q '^prune_vendor_dtbs()' "$FNS"
   grep -q '^install_kernel_source_dtbs()' "$FNS"
   bash -n "$FNS"
 }
@@ -268,17 +270,140 @@ edge_env() {
   [ "$(printf '%s\n' "$before" | grep -c '\.dtb$')" -gt 1 ]
 }
 
+# --- the prebuilt vendor path -------------------------------------------------
+
+# bats test_tags=vendor
+@test "vendor dtb prune: the versioned /boot dtb directory is trimmed to the board DTB" {
+  local dtb; dtb="$(board_dtb rock-5b-plus)"
+  local root="$WORK/root"
+  local versioned="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
+  seed_dtb_dir "$versioned" "$dtb"
+  ln -s "dtb-6.1.115-vendor-rk35xx" "$root/boot/dtb"
+
+  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' DTB_PACKAGES='linux-dtb-vendor-rk35xx' prune_vendor_dtbs"
+  [ "$status" -eq 0 ]
+
+  [ -f "$versioned/$dtb" ]
+  [ "$(find "$versioned" -type f | wc -l)" -eq 1 ]
+  # The /boot/dtb symlink is the path the U-Boot selector resolves; the prune
+  # must not have replaced or broken it.
+  [ -L "$root/boot/dtb" ]
+  [ -f "$root/boot/dtb/rockchip/$dtb" ]
+}
+
+# bats test_tags=vendor
+@test "vendor dtb prune: the directory is DISCOVERED, not composed from a release string" {
+  # A hardcoded /boot/dtb-<REL> would silently no-op the moment the Armbian
+  # package's version moved — the directory name comes from that package, not
+  # from anything this repo resolves.
+  local dtb; dtb="$(board_dtb orange-pi-5-plus)"
+  local root="$WORK/root"
+  local versioned="$root/boot/dtb-9.9.9-some-other-vendor-name/rockchip"
+  seed_dtb_dir "$versioned" "$dtb"
+
+  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
+  [ "$status" -eq 0 ]
+  [ "$(find "$versioned" -type f | wc -l)" -eq 1 ]
+  [ -f "$versioned/$dtb" ]
+}
+
+# bats test_tags=vendor
+@test "vendor dtb prune: a board DTB missing from /boot fails the build" {
+  local root="$WORK/root"
+  mkdir -p "$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
+  printf 'dtb\n' >"$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip/rk3588-evb1-v10.dtb"
+
+  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='' prune_vendor_dtbs"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not present anywhere under /boot"* ]]
+}
+
+# bats test_tags=vendor
+@test "vendor dtb prune: it declines on the source-built path and on a DTB-less board" {
+  local root="$WORK/root"
+  local versioned="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
+  seed_dtb_dir "$versioned" rk3588-rock-5b-plus.dtb
+  local before; before="$(find "$versioned" -type f | sort)"
+
+  # A kernel_source variant carries its own DTBs and is trimmed by
+  # install_kernel_source_dtbs; running both would prune the same tree twice.
+  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='7.1.7-ceralive-rk3588' prune_vendor_dtbs"
+  [ "$status" -eq 0 ]
+  [ "$(find "$versioned" -type f | sort)" = "$before" ]
+
+  # x86 has no device tree at all.
+  drive "BUILDROOT='$root' DTB_NAME='none' KERNEL_SOURCE_KERNEL_RELEASE='' prune_vendor_dtbs"
+  [ "$status" -eq 0 ]
+  [ "$(find "$versioned" -type f | sort)" = "$before" ]
+}
+
+# bats test_tags=vendor
+@test "vendor dtb prune: persistence rides the EXISTING kernel freeze, with no second hold" {
+  # The plan allows a dpkg path-exclude contract ONLY if a reinstall can bypass
+  # the freeze in a supported workflow. It cannot, for a structural reason: the
+  # boot BSP is installed from mkosi's build-time-only local `file:/repository`,
+  # which does not exist on the shipped device, so apt has no candidate for the
+  # DTB package to reinstall FROM — on top of the apt-mark hold and the
+  # name+version pin that freeze_boot_packages already applies to it.
+  local persistence="$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh"
+
+  # The DTB package reaches the freeze set through DTB_PACKAGES, which is the
+  # same manifest field prune_vendor_dtbs reports on.
+  grep -q 'DTB_PACKAGES' "$persistence"
+  grep -q 'apt-mark hold' "$persistence"
+
+  # No parallel hold mechanism was invented anywhere in the platform layer.
+  # Comments are stripped first: the function's own header explains why none of
+  # these is used, and matching that prose would make this pass for the wrong
+  # reason on a file that actually grew one.
+  run bash -c "grep -vE '^[[:space:]]*#' '$POSTINST' | grep -nE 'path-exclude|path-include|dpkg\.cfg\.d|apt-mark'"
+  [ "$status" -ne 0 ]
+
+  # And the freeze file itself is written by exactly one function.
+  [ "$(grep -c '^freeze_boot_packages()' "$persistence")" -eq 1 ]
+}
+
+# bats test_tags=vendor
+@test "vendor dtb prune: a simulated package reinstall restores the extras, so the freeze is load-bearing" {
+  # Non-vacuity for the case above. The prune is deliberately NOT self-defending
+  # — re-unpacking the package puts every blob back — which is exactly why the
+  # persistence argument has to rest on the freeze plus the absent apt origin,
+  # and why claiming "the prune is permanent" on its own would be false.
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb not available"
+  local dtb; dtb="$(board_dtb rock-5b-plus)"
+  local rel_dir="boot/dtb-6.1.115-vendor-rk35xx/rockchip"
+
+  local stage="$WORK/pkg"
+  mkdir -p "$stage/DEBIAN" "$stage/$rel_dir"
+  printf 'Package: linux-dtb-vendor-rk35xx\nVersion: 26.5.1\nArchitecture: arm64\nMaintainer: t <t@t>\nDescription: fixture\n' >"$stage/DEBIAN/control"
+  seed_dtb_dir "$stage/$rel_dir" "$dtb"
+  dpkg-deb --build --root-owner-group "$stage" "$WORK/dtb.deb" >/dev/null
+
+  local root="$WORK/root"
+  mkdir -p "$root"
+  dpkg-deb -x "$WORK/dtb.deb" "$root"
+  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
+  [ "$status" -eq 0 ]
+  [ "$(find "$root/$rel_dir" -type f | wc -l)" -eq 1 ]
+
+  dpkg-deb -x "$WORK/dtb.deb" "$root"
+  [ "$(find "$root/$rel_dir" -type f | wc -l)" -gt 1 ]
+}
+
 # --- wiring -------------------------------------------------------------------
 
 @test "dtb prune: both prune paths are actually WIRED into the boot-BSP branch" {
   # A prune nobody calls is the failure mode a synthetic-tree suite cannot see.
   grep -q 'install_kernel_source_dtbs$' "$POSTINST"
+  grep -q 'prune_vendor_dtbs$' "$POSTINST"
 
-  local install_line firmware_line
+  local install_line vendor_line firmware_line
   install_line="$(grep -n '^  install_kernel_source_dtbs$' "$POSTINST" | cut -d: -f1)"
+  vendor_line="$(grep -n '^  prune_vendor_dtbs$' "$POSTINST" | cut -d: -f1)"
   firmware_line="$(grep -n '^  prune_irrelevant_rk3588_firmware$' "$POSTINST" | cut -d: -f1)"
   [ -n "$install_line" ]
-  [ "$install_line" -lt "$firmware_line" ]
+  [ "$install_line" -lt "$vendor_line" ]
+  [ "$vendor_line" -lt "$firmware_line" ]
 }
 
 @test "dtb prune: the overlay keep-list is on the env_names <-> PassEnvironment lockstep" {
