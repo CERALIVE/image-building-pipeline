@@ -1622,5 +1622,11 @@ REPRO
 @test "kernel freeze: its behavioural suite is wired into the CI entrypoint" {
   local suite="$TESTS_DIR/kernel-freeze-guardrails.test.sh"
   [ -x "$suite" ]
-  grep -Fq 'kernel-freeze-guardrails.test.sh' "$PIPELINE_DIR/run-tests"
+  # The entrypoint's suite list moved into tests/registry.tsv, which run-tests
+  # reads; `--list` is the resolved default set, so asserting against it is the
+  # same claim against the current source of truth (and a stronger one than a
+  # text grep, which would also have matched a commented-out line).
+  run "$PIPELINE_DIR/run-tests" --list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests/kernel-freeze-guardrails.test.sh"* ]]
 }

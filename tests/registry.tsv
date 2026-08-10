@@ -1,0 +1,145 @@
+# tests/registry.tsv — the declarative catalogue of EVERY tracked file under
+# tests/, plus the two mkosi/platform harnesses run-tests executes.
+#
+# run-tests READS this file: the `default-bats` rows ARE its bats suite list and
+# the `default-shell` rows ARE its shell suite list, both in the order they
+# appear below. The hardcoded SUITES / SHELL_SUITES arrays are gone; this file is
+# the single source of truth for what the default gate runs.
+#
+# tests/test-registry.test.sh enforces, in both directions:
+#   * every tracked file under tests/ appears here exactly once,
+#   * every path here exists on disk,
+#   * every `default-*` row is executable / loadable as its kind claims,
+#   * `run-tests --list` equals the default rows verbatim.
+# There is therefore no way to add a test file and have it silently run nowhere,
+# and no way to drop one from the gate without editing this file on purpose.
+#
+# COLUMNS (tab-separated)
+#   path       repo-relative path
+#   kind       bats | shell | helper | fixture | tool
+#   tier       unit | integration | privileged | hardware-gated | support
+#   execution  default-bats     — run by ./run-tests, via bats
+#              default-shell    — run by ./run-tests, executed directly
+#              default-fixture  — run by ./run-tests before the suites (setup)
+#              default-mock     — run by ./run-tests in its mock mode
+#              opt-in           — run by ./run-tests only when its env gate is set
+#              ci-job           — run by a dedicated CI job, not by ./run-tests
+#              invoked-by-suite — has no standalone run; a default row drives it
+#              not-executed     — never executed as a test (data, or gated on hw)
+#   reason     why it carries that execution value
+#
+# path	kind	tier	execution	reason
+
+# --- setup fixture, runs first -------------------------------------------
+tests/generate-dev-rauc-pki.sh	tool	support	default-fixture	materializes the ignored NON-PRODUCTION RAUC signing fixture every RAUC contract below needs
+
+# --- bats suites (run order) ---------------------------------------------
+tests/manifest-schema.bats	bats	unit	default-bats	manifest/board/family schema validation
+tests/package-contract.bats	bats	unit	default-bats	package sets, staging classification, debug delta, kernel freeze
+tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
+tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
+tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
+tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, vendor-baseline byte parity
+tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
+tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
+tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths
+tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
+tests/kernel-build-resilience.bats	bats	unit	default-bats	pinned-fetch retry, pin-mismatch never retried, memory-derived make -j
+tests/dtb-prune-contract.bats	bats	unit	default-bats	board-only DTB trim in both locations on both kernel paths
+tests/x86-raucb-bundle.bats	bats	integration	default-bats	signed x86 RAUC bundle assembly
+tests/packaging-hygiene.bats	bats	unit	default-bats	absence guards for removed seeds, wants and legacy references
+tests/mkosi-contract.bats	bats	unit	default-bats	build-log census signatures and the lint that governs them
+
+# --- shell suites (run order) --------------------------------------------
+tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party apt chain: gpg, mTLS, curl fallback, fatal failure legs
+tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
+tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
+tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
+tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
+tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
+tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
+tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
+tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate
+tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
+tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
+tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
+tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
+tests/systemd-ordering-cycle.test.sh	shell	unit	default-shell	zero ordering cycles plus the sysinit-phase ordering probe
+tests/ssh-firstboot-privsep.test.sh	shell	unit	default-shell	/run/sshd is created before sshd -t on an empty-/run first boot
+tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data seeding loop preserves the frontend public symlink
+tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
+tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract
+tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the vendor and mainline ID_PATH spellings
+tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
+tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
+tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
+tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer
+tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-mpp-dev REMOVE verdict stays removed
+tests/app-layer-modem-closure.test.sh	shell	integration	default-shell	the nine ModemManager fork packages install and classify as app-layer
+tests/firstparty-classification.test.sh	shell	unit	default-shell	the partitioner allowlist is a superset of FIRST_PARTY_APT_PKGS
+tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys, bounds and exclusions
+tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
+tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
+tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged package modes, mounts and local-repository consumption
+tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
+tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
+tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
+tests/orchestrate-build-lock.test.sh	shell	integration	default-shell	per-board flock serialises staging, different boards stay parallel
+tests/boot-script-sanitize.test.sh	shell	unit	default-shell	the A/B selector against absent setexpr and an undefined loadaddr
+tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/identity asserter/extractor
+tests/versions-lib.test.sh	shell	unit	default-shell	the one versions.yaml pin reader
+tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-index module, no silent || true
+tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
+mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
+mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
+
+# --- run by run-tests outside the two suite lists ------------------------
+tests/rauc-rollback.sh	shell	integration	default-mock	run-tests drives its MOCK mode; LIVE mode needs BOARD_IP and real silicon
+tests/real-avahi-hostname-contract.sh	shell	privileged	opt-in	needs private network/D-Bus namespaces; gated on CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
+tests/real-rauc-contract.sh	shell	privileged	opt-in	needs a real RAUC service on the system bus; gated on CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC service harness, cleanup half; same env gate
+
+# --- driven by a default row, never standalone ---------------------------
+tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
+tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/preflash-verify.sh	tool	support	invoked-by-suite	operator preflash gate; its --self-test is driven by rk3588-ab-contract.bats and lib/stages/boot-verify.sh
+tests/provision-portal.test.sh	shell	unit	invoked-by-suite	offline captive-portal proof, gated and executed by postinst-wiring.bats
+tests/package-migration-coverage.sh	tool	support	invoked-by-suite	legacy-to-v2 package accounting set consumed by lib/parity-check.sh
+
+# --- separate CI job, deliberately not in the default gate ---------------
+tests/qemu-x86.sh	shell	integration	ci-job	boots a real qemu x86 guest; v2-ci.yml runs it as its own job because run-tests must stay hardware/qemu-free
+
+# --- hardware-gated: cannot run without a board ---------------------------
+tests/realhw-suite.sh	shell	hardware-gated	not-executed	four-part real-hardware acceptance suite; needs a booted board over SSH
+tests/realhw-smoke.sh	shell	hardware-gated	not-executed	real-hardware smoke checks; needs a booted board over SSH
+tests/addon-e2e.sh	shell	hardware-gated	not-executed	add-on install/enable/disable end to end; needs a booted board over SSH
+
+# --- unwired: honest gaps, recorded rather than hidden --------------------
+tests/resolve.test.sh	shell	unit	not-executed	self-contained and passing, but never wired into run-tests or any CI job; wiring it would change the default executed set and is a deliberate follow-up
+tests/parametric.sh	shell	unit	not-executed	parametric package/arch-fork checks, never wired into run-tests or any CI job; same follow-up as resolve.test.sh
+
+# --- the registry and its own guard ---------------------------------------
+tests/registry.tsv	fixture	support	not-executed	this file; read by run-tests to build the default suite lists and validated by tests/test-registry.test.sh
+tests/test-registry.test.sh	shell	unit	not-executed	the registry's own completeness guard; deliberately outside the default gate because it invokes run-tests --list, and adding it would change the default executed set this very test exists to pin
+
+# --- data: fixtures and placeholders --------------------------------------
+tests/.gitkeep	fixture	support	not-executed	keeps the directory tracked
+tests/fixtures/apt-sandbox/in-container.sh	fixture	support	not-executed	in-container payload for the apt-sandbox suite, never run directly
+tests/fixtures/gpt-baseline/README.md	fixture	support	not-executed	provenance note for the frozen GPT baselines
+tests/fixtures/gpt-baseline/rk3588-ab.gpt	fixture	support	not-executed	frozen pre-overlay GPT baseline; a diff here is a fleet re-flash, not a test fix
+tests/fixtures/gpt-baseline/rk3588-single-slot.gpt	fixture	support	not-executed	frozen single-slot GPT baseline
+tests/manifests/fixtures/invalid-addon-build-fixture.json	fixture	support	not-executed	negative add-on descriptor fixture
+tests/manifests/fixtures/invalid-addon-etc-provides.json	fixture	support	not-executed	negative add-on descriptor fixture
+tests/manifests/fixtures/invalid-addon-missing-sysextlevel.json	fixture	support	not-executed	negative add-on descriptor fixture
+tests/manifests/fixtures/invalid-board-bad-backend.yaml	fixture	support	not-executed	negative board manifest fixture
+tests/manifests/fixtures/invalid-board-bad-interface-key.yaml	fixture	support	not-executed	negative board manifest fixture
+tests/manifests/fixtures/invalid-board-missing-dtb_name.yaml	fixture	support	not-executed	negative board manifest fixture
+tests/manifests/fixtures/invalid-family-bad-pkg-name.yaml	fixture	support	not-executed	negative family manifest fixture
+tests/manifests/fixtures/invalid-family-empty-firmware.yaml	fixture	support	not-executed	negative family manifest fixture
+tests/manifests/fixtures/invalid-family-missing-arch.yaml	fixture	support	not-executed	negative family manifest fixture
+tests/manifests/fixtures/valid-board-interfaces.yaml	fixture	support	not-executed	positive board manifest fixture
+tests/manifests/fixtures/valid-board.yaml	fixture	support	not-executed	positive board manifest fixture
+tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive family manifest fixture
+tests/manifests/fixtures/vendor-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/manifests/fixtures/vendor-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/manifests/fixtures/vendor-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved

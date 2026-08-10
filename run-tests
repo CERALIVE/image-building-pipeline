@@ -28,73 +28,51 @@
 # Usage:  ./run-tests               (from the repo root) — auto-parallel
 #         BATS_JOBS=1 ./run-tests  (force serial)
 #         BATS_JOBS=8 ./run-tests  (force 8 workers)
+#         ./run-tests --list       (print the resolved default suite list, run nothing)
+#
+# The suite lists come from tests/registry.tsv — see the header of that file.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Suites, in run order. The RK3588 contract suite proves the production Rock 5B+
-# factory A/B geometry before the signed-bundle suites run.
-SUITES=(
-  "${HERE}/tests/manifest-schema.bats"
-  "${HERE}/tests/package-contract.bats"
-  "${HERE}/tests/postinst-wiring.bats"
-  "${HERE}/tests/mkosi-image-contract.bats"
-  "${HERE}/tests/runtime-services.bats"
-  "${HERE}/tests/variant-contract.bats"
-  "${HERE}/tests/rk3588-ab-contract.bats"
-  "${HERE}/tests/bench-partlabels.bats"
-  "${HERE}/tests/boot-artifacts.bats"
-  "${HERE}/tests/kernel-config-fragment.bats"
-  "${HERE}/tests/kernel-build-resilience.bats"
-  "${HERE}/tests/dtb-prune-contract.bats"
-  "${HERE}/tests/x86-raucb-bundle.bats"
-  "${HERE}/tests/packaging-hygiene.bats"
-  "${HERE}/tests/mkosi-contract.bats"
-)
-SHELL_SUITES=(
-  "${HERE}/tests/fetch-debs-apt-chain.test.sh"
-  "${HERE}/tests/fetch-debs-retry.test.sh"
-  "${HERE}/tests/fetch-debs-apt-sandbox.test.sh"
-  "${HERE}/tests/debcache.test.sh"
-  "${HERE}/tests/bsp-auth-contract.test.sh"
-  "${HERE}/tests/bsp-package-resolution.test.sh"
-  "${HERE}/tests/rauc-pki-contract.test.sh"
-  "${HERE}/tests/release-candidate-contract.test.sh"
-  "${HERE}/tests/preflash-fit.test.sh"
-  "${HERE}/tests/maskrom-first-realhw.test.sh"
-  "${HERE}/tests/uart-console-path.test.sh"
-  "${HERE}/tests/uart-bootstrap-tty.test.sh"
-  "${HERE}/tests/postinst-module-contract.test.sh"
-  "${HERE}/tests/systemd-ordering-cycle.test.sh"
-  "${HERE}/tests/ssh-firstboot-privsep.test.sh"
-  "${HERE}/tests/data-persistence-public-symlink.test.sh"
-  "${HERE}/tests/resolv-conf-symlink.test.sh"
-  "${HERE}/tests/resolv-conf-bind-mount.test.sh"
-  "${HERE}/tests/interface-naming-path-match.test.sh"
-  "${HERE}/tests/apt-preferences-baked.test.sh"
-  "${HERE}/tests/apt-mtls-and-dedupe.test.sh"
-  "${HERE}/tests/kernel-freeze-guardrails.test.sh"
-  "${HERE}/tests/firmware-prune.test.sh"
-  "${HERE}/tests/mpp-dev-runtime-contract.test.sh"
-  "${HERE}/tests/app-layer-modem-closure.test.sh"
-  "${HERE}/tests/firstparty-classification.test.sh"
-  "${HERE}/tests/release-cache-contract.test.sh"
-  "${HERE}/tests/generated-paths-contract.test.sh"
-  "${HERE}/tests/builder-resource-budget.test.sh"
-  "${HERE}/tests/mkosi-package-staging.test.sh"
-  "${HERE}/tests/immutable-r2-publication.test.sh"
-  "${HERE}/tests/recovery-script-contract.test.sh"
-  "${HERE}/tests/production-ci-scope-contract.test.sh"
-  "${HERE}/tests/orchestrate-build-lock.test.sh"
-  "${HERE}/tests/boot-script-sanitize.test.sh"
-  "${HERE}/tests/deb-lib.test.sh"
-  "${HERE}/tests/versions-lib.test.sh"
-  "${HERE}/tests/apt-lib.test.sh"
-  "${HERE}/tests/boot-state-core.test.sh"
-  "${HERE}/mkosi/platform/boot/test-fallback.sh"
-  "${HERE}/mkosi/platform/x86/test-x86-fallback.sh"
-)
-DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"
+REGISTRY="${HERE}/tests/registry.tsv"
+
+# The suite lists are READ from tests/registry.tsv rather than hardcoded here, so
+# there is exactly one place that answers "what does the default gate run" and a
+# new test file cannot be added without being classified. Registry row order IS
+# run order. tests/test-registry.test.sh enforces both directions of the mapping.
+registry_paths() { # <execution-value> -> repo-relative paths, in registry order
+  awk -F'\t' -v want="$1" '
+    /^[[:space:]]*(#|$)/ { next }
+    NF >= 4 && $4 == want { print $1 }
+  ' "${REGISTRY}"
+}
+
+[[ -f "${REGISTRY}" ]] || { echo "ERROR: test registry not found: ${REGISTRY}" >&2; exit 1; }
+
+mapfile -t BATS_RELPATHS  < <(registry_paths default-bats)
+mapfile -t SHELL_RELPATHS < <(registry_paths default-shell)
+[[ ${#BATS_RELPATHS[@]}  -gt 0 ]] || { echo "ERROR: registry declares no default-bats suites" >&2; exit 1; }
+[[ ${#SHELL_RELPATHS[@]} -gt 0 ]] || { echo "ERROR: registry declares no default-shell suites" >&2; exit 1; }
+
+# `--list` reports the RESOLVED default set and runs nothing. It is the machine
+# -readable answer to "did this change what runs by default", and is diffed
+# against a captured baseline whenever the test layout is restructured.
+if [[ "${1:-}" == "--list" ]]; then
+  printf 'bats\t%s\n'  "${BATS_RELPATHS[@]}"
+  printf 'shell\t%s\n' "${SHELL_RELPATHS[@]}"
+  exit 0
+fi
+
+SUITES=()
+for rel in "${BATS_RELPATHS[@]}"; do SUITES+=("${HERE}/${rel}"); done
+SHELL_SUITES=()
+for rel in "${SHELL_RELPATHS[@]}"; do SHELL_SUITES+=("${HERE}/${rel}"); done
+
+mapfile -t FIXTURE_RELPATHS < <(registry_paths default-fixture)
+[[ ${#FIXTURE_RELPATHS[@]} -eq 1 ]] \
+  || { echo "ERROR: registry must declare exactly one default-fixture row (got ${#FIXTURE_RELPATHS[@]})" >&2; exit 1; }
+DEV_PKI_GENERATOR="${HERE}/${FIXTURE_RELPATHS[0]}"
 REAL_AVAHI_CONTRACT="${HERE}/tests/real-avahi-hostname-contract.sh"
 
 if ! command -v bats >/dev/null 2>&1; then

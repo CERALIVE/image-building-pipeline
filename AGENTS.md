@@ -65,6 +65,9 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
+| **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
+| **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
+| **Which strict-mode / logging profile a script must use** | [`docs/shell-profiles.md`](docs/shell-profiles.md) — build-strict / device-daemon / contract-test |
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
@@ -188,6 +191,63 @@ harnesses extract function bodies or generated payloads out of the source
 at the entry alone they extract NOTHING, and most of their assertions then pass
 vacuously. Each one concatenates the entry + `postinst.d/*.sh` for static reads while
 still SOURCING the entry; keep that distinction when adding a new check.
+
+**`tests/registry.tsv` IS the default test set — `run-tests` reads it, it does
+not hardcode one** [EXISTS]
+
+`run-tests` used to carry two hardcoded arrays (`SUITES`, `SHELL_SUITES`). It now
+reads `tests/registry.tsv`: the `default-bats` rows ARE the bats list and the
+`default-shell` rows ARE the shell list, **in registry row order**, so the
+registry is the single answer to "what does the gate run". Every tracked file
+under `tests/` carries a row — `path`, `kind`, `tier`, `execution`, `reason` —
+including fixtures and helpers, so a new test file cannot be added and then
+silently run nowhere.
+
+Four things to know before editing it:
+
+- **`./run-tests --list` prints the resolved default set and runs nothing.** That
+  output is the machine-readable "did this change what runs by default" answer,
+  and it is the artifact a restructure is diffed against. Adding the registry
+  changed it by ZERO lines against the pre-change arrays.
+- **`tests/test-registry.test.sh` enforces both directions** — every tracked
+  `tests/` file registered exactly once with values from the closed vocabularies,
+  every registered path present and runnable as its kind claims, and
+  `--list` byte-identical to the registry's default rows. It carries a
+  non-vacuity leg (a phantom unregistered path MUST be reported) and is run
+  standalone, deliberately NOT in the default set it exists to pin.
+- **`execution` is descriptive, not aspirational.** `not-executed` rows say why:
+  hardware-gated (`realhw-*.sh`, `addon-e2e.sh`), driven by another suite
+  (`provision-portal.test.sh`, `preflash-verify.sh`), a separate CI job
+  (`qemu-x86.sh`), or an honest unwired gap — `tests/resolve.test.sh` and
+  `tests/parametric.sh` are self-contained and passing but reach no gate. Wiring
+  either one CHANGES the default executed set; do it as its own deliberate
+  change, not as a side effect.
+- **A grep of `run-tests` for a suite filename no longer proves it is wired.**
+  `package-contract.bats` §31 used to assert exactly that; it now asserts against
+  `run-tests --list`, which is both the current source of truth and a stronger
+  claim (a text grep would also match a commented-out line).
+
+**`tests/lib/assertions.sh` is the ONE result-bookkeeping library for the
+collecting shell harnesses** [EXISTS]
+
+`PASS`/`FAIL` plus `ok`/`bad`/`assert_eq`/`assert_contains` were re-derived
+verbatim in `mkosi/platform/boot/test-fallback.sh`,
+`mkosi/platform/x86/test-x86-fallback.sh` and `tests/rauc-rollback.sh` — the
+three A/B fallback and rollback proofs, one of which even labelled its copy
+"mirrors test-fallback.sh". There is now one copy, and the assertion counts are
+unchanged across the extraction (92 / 72 / 18).
+
+**The output format is load-bearing.** `'  ok   %s\n'` / `'  FAIL %s\n'` and
+`assert_eq`'s "echo the actual value on success" are what make these transcripts
+readable as evidence; changing the spacing changes every captured transcript.
+`assert_contains` is `grep -F` on a FILE because its needles are literal U-Boot
+and GRUB script fragments full of `$`, `{` and `*`.
+
+**Two look-alikes are deliberately NOT folded in.** `tests/resolve.test.sh`
+prints `PASS:`/`FAIL:` and its `assert_contains` takes a STRING haystack, not a
+file; `qemu-x86.sh`/`realhw-smoke.sh` route their counters through `common.sh`
+loggers (stderr, timestamped). Same names, different contracts — merging them
+would be a behaviour change wearing a deduplication costume.
 
 **`orchestrate.sh` is an ENTRY plus per-stage modules — the same shape as
 `fetch-debs.sh` and `postinst-lib.sh`** [EXISTS]

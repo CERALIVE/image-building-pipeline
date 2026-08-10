@@ -113,13 +113,9 @@ SSH_BASE_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=ac
   -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}" -o GlobalKnownHostsFile=/dev/null
 )
 
-# --- result bookkeeping (mirrors test-fallback.sh) -------------------------
-PASS=0; FAIL=0
-ok()   { printf '  ok   %s\n' "$*"; PASS=$((PASS+1)); }
-bad()  { printf '  FAIL %s\n' "$*"; FAIL=$((FAIL+1)); }
-assert_eq() { # <desc> <expected> <actual>
-  if [[ "$2" == "$3" ]]; then ok "$1 ($3)"; else bad "$1: expected '$2', got '$3'"; fi
-}
+# --- result bookkeeping (SHARED with test-fallback.sh, not mirrored) --------
+# shellcheck source=lib/assertions.sh
+source "${HERE}/lib/assertions.sh"
 section() { printf '\n### %s\n' "$*"; }
 phase()   { PHASE_T0=$SECONDS; printf '  ▶ %s\n' "$*"; }
 phase_done() { printf '    ⏱ %ds\n' "$(( SECONDS - PHASE_T0 ))"; }

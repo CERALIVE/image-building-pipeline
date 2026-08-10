@@ -41,15 +41,11 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 GRUBENV="${WORK}/grubenv"
 
-PASS=0; FAIL=0
-ok()   { printf '  ok   %s\n' "$*"; PASS=$((PASS+1)); }
-bad()  { printf '  FAIL %s\n' "$*"; FAIL=$((FAIL+1)); }
-assert_eq() { # <desc> <expected> <actual>
-  if [[ "$2" == "$3" ]]; then ok "$1 ($3)"; else bad "$1: expected '$2', got '$3'"; fi
-}
-assert_contains() { # <desc> <file> <needle>
-  if grep -qF -- "$3" "$2"; then ok "$1"; else bad "$1: '$3' not in $2"; fi
-}
+# Result bookkeeping + assertions: the ONE shared copy (tests/lib/assertions.sh).
+# It supplies PASS/FAIL, ok/bad and assert_eq/assert_contains with byte-identical
+# output to the inline versions this file used to carry.
+# shellcheck source=../../../tests/lib/assertions.sh
+source "${X86_DIR}/../../../tests/lib/assertions.sh"
 
 # Force the bash grubenv fallback (this host has no grub-editenv) so the test
 # exercises the self-contained path AND proves block-format compatibility.
