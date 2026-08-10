@@ -43,6 +43,8 @@ setup() {
   PIPELINE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
   SCRIPT="$PIPELINE_DIR/lib/build-kernel.sh"
   WORK="$(mktemp -d)"
+  SCRIPT_SET="$WORK/build-kernel-sources.sh"
+  write_build_kernel_source_set "$SCRIPT_SET"
   STUB_BIN="$WORK/bin"
   GIT_STUB_DIR="$WORK/gitstub"
   PINNED_SHA="1111111111111111111111111111111111111111"
@@ -62,6 +64,25 @@ teardown() {
 }
 
 # --- fixtures ---------------------------------------------------------------
+
+# lib/build-kernel.sh is an ENTRY plus the lib/kernel/ concern modules it sources,
+# so a static check that reads the stage by TEXT must read the whole SET in the
+# entry's own source order — pointed at the entry alone it matches NOTHING and
+# passes vacuously. The module list is derived from the entry's real `source`
+# lines, so a module dropped from that list drops out of the check too.
+#
+# Materialized to a FILE, never piped into `grep -q`: -q exits at the first match
+# and SIGPIPEs the writer, which `set -o pipefail` turns into a failed read.
+write_build_kernel_source_set() {
+  local out="$1" module
+  {
+    cat "$SCRIPT"
+    while read -r module; do
+      cat "$PIPELINE_DIR/lib/kernel/$module"
+    done < <(sed -n 's#^source "${KERNEL_LIB_DIR}/\(.*\)"$#\1#p' "$SCRIPT")
+  } >"$out"
+  [ -s "$out" ]
+}
 
 # A git that can be told to fail, to die half-written, or to hang — and that
 # refuses a dirty destination exactly the way the real one does, so a retry
@@ -494,11 +515,14 @@ container_script_body() {
 @test "wiring: the file-scope knob defaults agree with the helper's own fallbacks" {
   # The helper carries `:-` fallbacks so it can run standalone, which means the
   # default exists twice. Compare the two rather than restating either here.
+  # The two spellings now live in DIFFERENT files of the stage's source set (the
+  # entry's file-scope knobs, the helper's own fallbacks in kernel/checkout.sh),
+  # so this must read the whole set or the `>= 2` can never hold.
   local knob raw uniq
   for knob in ATTEMPTS TIMEOUT BACKOFF; do
-    raw="$(grep -c "CERALIVE_KERNEL_GIT_${knob}:-" "$SCRIPT")"
+    raw="$(grep -c "CERALIVE_KERNEL_GIT_${knob}:-" "$SCRIPT_SET")"
     (( raw >= 2 ))
-    uniq="$(grep -o "CERALIVE_KERNEL_GIT_${knob}:-[0-9]\+" "$SCRIPT" | sort -u | wc -l)"
+    uniq="$(grep -o "CERALIVE_KERNEL_GIT_${knob}:-[0-9]\+" "$SCRIPT_SET" | sort -u | wc -l)"
     [ "$uniq" -eq 1 ]
   done
 }
@@ -516,6 +540,7 @@ container_script_body() {
 @test "wiring: nothing computes a build-job count at source time any more" {
   # The old file-scope `nproc` assignment sampled a number that had nothing to
   # do with when `make` runs, and skipped the memory ceiling entirely.
-  run ! grep -Eq '^KERNEL_BUILD_JOBS=.*nproc' "$SCRIPT"
+  run ! grep -Eq '^KERNEL_BUILD_JOBS=.*nproc' "$SCRIPT_SET"
+  # The cross-module state variable itself stays declared in the ENTRY.
   grep -Fq 'KERNEL_BUILD_JOBS=""' "$SCRIPT"
 }

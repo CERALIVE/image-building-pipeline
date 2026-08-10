@@ -23,7 +23,8 @@ reserves a 1 MiB backup-GPT tail, so `data` = raw capacity − 8465 MiB.
 ## Bench media: `CERALIVE_BENCH_LABELS=1`
 
 These files are the frozen production source of truth and are **never edited** by
-the bench overlay. `lib/assemble-disk.sh::stage_repart_dir` rewrites `Label=` on
+the bench overlay. `lib/disk/repart.sh::stage_repart_dir` (sourced by
+`lib/assemble-disk.sh`) rewrites `Label=` on
 the STAGED COPY only, producing `xboot`/`xrootfs_a`/`xrootfs_b`/`xdata` so a bench
 microSD cannot collide with the production labels on the board's eMMC. See
 [`docs/dev-loop.md`](../../docs/dev-loop.md) → "Bench PARTLABEL overlay".

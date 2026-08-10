@@ -335,7 +335,8 @@ these being true, and a mismatch would otherwise surface as an unbootable board.
 Two failure modes of this stage have nothing to do with the kernel, and both are
 invisible to the PR gate (`DRY_RUN=1` never fetches and never runs `make`).
 
-**All three pinned fetches go through `fetch_pinned_tree`.** The stage performs
+**All three pinned fetches go through `fetch_pinned_tree`** (`lib/kernel/checkout.sh`,
+sourced by `lib/build-kernel.sh` and also injected into the container). The stage performs
 three network fetches back to back — kernel source, patch series, kernel config
 — and a blip on any of them used to abort a build that had already paid for the
 builder image, the container and (for fetches 2 and 3) a multi-minute kernel
@@ -886,7 +887,11 @@ no second place to keep in sync.
 | `manifests/kernel/rk3588-vendor-patched.absent` | the `vendor-patched` reviewed allow-absent list (config-file mode, §2c) |
 | `lib/resolve.py` | variant merge, `variants:`/`variant_overrides:` stripping, derived suppression set |
 | `lib/resolve.sh` | `--variant` / `CERALIVE_KERNEL_VARIANT` |
-| `lib/build-kernel.sh` | the build stage, incl. `fetch_pinned_tree` + the build-job preflight (§3b) |
+| `lib/build-kernel.sh` | the build stage ENTRY: CLI, knobs, the injected container script, `main()` |
+| `lib/kernel/config.sh` | input validation + DEFCONFIG vs CONFIG-FILE resolution (§2c) |
+| `lib/kernel/checkout.sh` | `fetch_pinned_tree` — bounded retry, pin assertion, publish (§3) |
+| `lib/kernel/builder.sh` | builder-container management + the build-job preflight (§3b) |
+| `lib/kernel/package.sh` | built-`.deb` identity + `deb_lists_path` DTB proof (§4) |
 | `ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |
 | `lib/orchestrate.sh` | stage wiring, suppression export, uniqueness check |
 | `lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |

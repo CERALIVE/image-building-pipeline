@@ -13,7 +13,9 @@ lib/orchestrate.sh
 tests/preflash-verify.sh
 # SIZE_OK: RK3588 contract shares expensive disk fixtures across assertions.
 tests/rk3588-ab-contract.bats
-# SIZE_OK: disk assembly is one geometry transaction with shared cleanup state.
+# SIZE_OK: the disk-assembly ENTRY keeps the geometry transaction (build_disk) and
+# the process-level scratch/EXIT-trap registry its lib/disk/ modules all call into;
+# the per-concern bodies already live in lib/disk/{repart,slot,boot,gap,verify}.sh.
 lib/assemble-disk.sh
 # SIZE_OK: the hostname claim script is ONE generated payload that the real-avahi
 # contract extracts verbatim and drives; splitting the heredoc splits the harness.
