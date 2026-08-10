@@ -75,6 +75,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Contribution rules | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | **Operator first-boot guide** | [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) — flash → WiFi portal → SSH → CeraUI |
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
+| **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
+| **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -509,6 +511,53 @@ The kernel-build stage deliberately keeps its own `deb_control_field` (now in
 self-contained in-builder leg and is out of this library's scope. Contract:
 `tests/deb-lib.test.sh` (happy, per-axis mismatch, corrupt archive, and the
 single-definition property itself).
+
+**Board preflight reads what the device HAS — three of the interfaces the tooling
+was specced against are not on a production image, and the trust answer is not
+the one the PKI directory advertises** [PARTIAL — Rock 5B+ captured, Orange Pi 5+ unreachable]
+
+`ci/capture-board-preflight.sh` inventories a bench board over SSH and
+`ci/verify-bench-rauc-trust.sh` turns that capture plus a candidate PKI into a
+per-board `RAUC` / `PHYSICAL` deployment verdict and a build mode. Both are
+READ-ONLY: the capture's remote payload is screened against a forbidden-command
+set on every invocation (including `--self-test`), so a future edit cannot add a
+write to a board quietly.
+
+Four findings from the first real capture (Rock 5B+, `7.1.7-ceralive-rk3588`),
+each of which invalidates an assumption that looked safe on paper:
+
+- **`sfdisk` is NOT installed**, even though `util-linux` 2.38.1-5+deb12u3 is.
+  Partition geometry therefore comes from `/sys/class/block/<part>/{start,size}`
+  — the same numbers in the same 512-byte sector units, readable unprivileged.
+  Do not "fix" this by adding `util-linux`'s full binary set to the image.
+- **`blkid` exists but answers nothing unprivileged**, and the capture
+  deliberately does not escalate (`sudo` on the bench user needs a password, and
+  a read-only inventory must not acquire root to begin with). Filesystem identity
+  comes from `lsblk`, which reads udev without privilege. `lspci`, `lsusb`,
+  `sgdisk` and `python3` are absent too, so PCI and USB inventory is read
+  straight from `/sys/bus/{pci,usb}/devices/*`.
+- **The EKU question must be asked of the CERTIFICATE, never of the directory.**
+  `cert-work/rauc/README.txt` documents the leaf as `codeSigning` only; the leaf
+  in that directory today actually carries `emailProtection, codeSigning`. Both
+  the doc and any assumption drawn from it are unreliable — `leaf_eku_list`
+  parses the offered leaf and the verdict is computed from what it finds. A leaf
+  with NO EKU extension at all is reported as its own distinct finding rather
+  than folded into "wrong EKU".
+- **A cryptographically perfect chain can still be barred from `production`.**
+  The Rock's installed keyring root is `CN=CeraLive CI Test Root CA
+  (NON-PRODUCTION)` (`bb:0b:d0:b2:…`), NOT the `cert-work/rauc` production root
+  (`b7:ff:3c:7b:…`), so the production PKI fails the chain leg outright and
+  selects `PHYSICAL`. The repo's own `.dev-keys` fixture DOES anchor at that
+  root and passes every cryptographic leg — and is still refused `production`,
+  because a trust anchor that names itself NON-PRODUCTION may never back a
+  production claim however valid its signature path is. That board's honest
+  verdict is `RAUC` + `development`.
+
+`--env-file` is written ONLY on a RAUC verdict, mode 0600, and holds
+`CERALIVE_RAUC_PKI_DIR` + `RAUC_KEYRING_FILE` **paths only** — never key values.
+`--candidate-pki` has no default on purpose: this repo is built and tested
+standalone (Rule D), so it may never resolve a bench PKI by proximity to its own
+checkout.
 
 **Build entry point** [EXISTS]
 
