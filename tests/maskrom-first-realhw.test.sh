@@ -64,7 +64,20 @@ db_line="$(line_of '^run_owned_db$' "${VERIFY}")"
 rfi_line="$(line_of 'run_rkdeveloptool rfi' "${VERIFY}")"
 preflight_line="$(line_of --target-size-bytes "${VERIFY}")"
 uart_arm_line="$(line_of "\"\${uart_helper}\" --serial-dev" "${VERIFY}")"
-write_line="$(line_of 'run_rkdeveloptool wl' "${VERIFY}")"
+# The raw write is now issued through the single destructive-write chokepoint,
+# so the ordering subject is the CALL SITE, not the `wl` inside that function.
+write_line="$(line_of '^perform_local_destructive_write ' "${VERIFY}")"
+identity_gate_line="$(line_of '^run_candidate_identity_gate$' "${VERIFY}")"
+local_device_guard_line="$(line_of 'guard_assert_local_block_device .flash device' "${VERIFY}")"
+local_writer_guard_line="$(line_of 'guard_assert_local_command .rkdeveloptool' "${VERIFY}")"
+confirmation_guard_line="$(line_of 'guard_require_physical_confirmation .whole-media flash' "${VERIFY}")"
+if ! (( identity_gate_line < db_line &&
+        local_device_guard_line < write_line &&
+        local_writer_guard_line < write_line &&
+        confirmation_guard_line < write_line )); then
+  printf 'Maskrom-first regression: the board-identity gate or the local-destructive-write guards do not precede the write\n' >&2
+  exit 1
+fi
 if ! (( db_function_line < db_line && db_line < rfi_line && rfi_line < preflight_line && preflight_line < uart_arm_line && uart_arm_line < write_line )); then
   printf 'Maskrom-first regression: loader capacity/preflight/write ordering is unsafe\n' >&2
   exit 1

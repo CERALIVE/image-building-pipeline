@@ -380,11 +380,38 @@ Set these operator inputs only after the host checks below pass:
 | board IP | stable board address used after first boot |
 | SSH port | `22` |
 | serial device | stable `/dev/serial/by-id/...` path, never a transient `ttyUSBN` |
-| approved Maskrom USB id SHA-256 | SHA-256 of `Vid=0x2207,Pid=0x350b,LocationID=<id> Maskrom` from the approved USB port |
+| approved Maskrom USB id SHA-256 | SHA-256 of `Vid=<vid>,Pid=<pid>,LocationID=<id> Maskrom` from the approved USB port; the VID/PID come from the board's own family manifest |
 | UART signing key | absolute path to the mode-`0600` host-local Ed25519 private key |
+| `--board` | a `manifests/boards/<board>.yaml` stem; every identity fact is derived from it |
+| `--confirm-physical-write` | `I-AM-AT-THE-BENCH:<local block device>`, typed by the operator standing at the board |
 
 SSH is fixed to `root`. The loader is candidate-bound, and there are no board
 SSH-key, password, loader-override, or power-helper inputs.
+
+### Board parameterization and the cross-board gate
+
+Nothing in the tool is hardcoded to one board. `--board` selects the manifest,
+and `ci/board-identity.sh` derives the `board_id`, DTB filename, RAUC
+`compatible=` string and Maskrom USB VID/PID from it. Before any USB operation,
+the tool reads what the candidate artifact set actually carries — `board_id` and
+`fdtfile` from `cera_board.env` on the FAT boot partition, `compatible=` from the
+bundle manifest, plus the artifact digests — and REFUSES a candidate that does not
+match on every axis. Pointing a Rock 5B+ candidate at Orange Pi identity data (or
+the reverse) fails with the media untouched. `--check-identity-only` runs exactly
+that comparison, writes the evidence tuple and performs no write, which is how the
+gate is exercised without a board (`tests/preflash-cross-board.test.sh`).
+
+### The remote-destructive-write contract
+
+A destructive write requires a LOCAL block-device path plus a physical
+confirmation naming that exact device. Every remote spelling of a target — SCP
+`user@host:/dev/...`, bare `host:/dev/...`, `ssh://`, a UNC share, a relative
+path, a `..` traversal — is refused, and so is a writer program that is a remote
+transport, whether named directly or hidden behind a same-named wrapper script.
+There is no flag and no environment variable that pushes a raw whole-media write
+down an SSH pipe. Guard: `ci/destructive-target-guard.sh`; contract:
+`tests/flash-remote-guard.test.sh`. `ci/backup-data.sh --mode restore` obeys the
+same contract for the `/data` partition.
 
 Provision the already-approved signing private key through the host's secure
 configuration channel as the operator's user; it is never stored in GitHub.

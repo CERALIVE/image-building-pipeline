@@ -1,0 +1,6 @@
+# The root .gitignore excludes *.log as build output. These are COMMITTED
+# FIXTURES — they are the whole proof that ci/check-kernel-log.sh screens both
+# directions (a real KASAN report and a real lockdep splat are REJECTED, the
+# debug kernel's own KASAN/lockdep boot banners are ACCEPTED), so they must be
+# tracked. Same reason, same shape as ci/fixtures/build-log/.gitignore.
+!*.log

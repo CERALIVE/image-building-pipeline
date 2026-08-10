@@ -1,0 +1,17 @@
+[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.412000] Lockdep is turned on.
+[  118.220114] ======================================================
+[  118.220131] WARNING: possible circular locking dependency detected
+[  118.220147] 6.1.115-ceralive-vendor-rk35xx #1 Not tainted
+[  118.220160] ------------------------------------------------------
+[  118.220172] kworker/2:1/91 is trying to acquire lock:
+[  118.220186]  ffff000804d1a0a0 (&hcp->lock){+.+.}-{3:3}, at: plugged_cb+0x2c/0x70
+[  118.220219] but task is already holding lock:
+[  118.220231]  ffff000803ba61b8 ((work_completion)(&hdmirx->delayed_work_audio)){+.+.}-{0:0}
+[  118.220268] other info that might help us debug this:
+[  118.220281]  Possible unsafe locking scenario:
+[  118.220305]        CPU0                    CPU1
+[  118.220316]        ----                    ----
+[  118.220327]   lock(&hcp->lock);
+[  118.220340]                                lock((work_completion));
+[  118.220354]  *** DEADLOCK ***

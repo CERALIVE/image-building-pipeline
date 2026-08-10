@@ -1,0 +1,58 @@
+# kernel-log-reject.signatures — the VERSIONED reject-signature set for the
+# hardware-evidence kernel-log screen (Hardware evidence tuple contract).
+#
+# Format: <verdict><TAB><id><TAB><ERE pattern>
+#   allow   the line is a benign banner and is EXEMPT from every reject pattern.
+#           Allow rules are evaluated FIRST and win.
+#   reject  the line is the START of a genuine kernel report; the log FAILS.
+#
+# The distinction that matters: a DEBUG kernel announces KASAN and lockdep at
+# boot in lines that contain the same words as a real report. Screening on the
+# word alone makes every debug boot fail, which is how a screen gets disabled.
+# Every reject pattern therefore matches a report START (`BUG:`, `Oops`,
+# `KASAN: <class> in`, a lockdep splat header, `Kernel panic`, `Tainted:` ...),
+# never a subsystem name in isolation.
+#
+# Patterns are POSIX ERE matched with `grep -E` against the WHOLE line, so a
+# dmesg/journal timestamp prefix does not need to be modelled.
+#
+# signature-set-version: 1
+
+allow	kasan-init	KASAN: initialized
+allow	kasan-init-long	KernelAddressSanitizer initialized
+allow	lockdep-on	Lockdep is turned on
+allow	lockdep-validator	Lock dependency validator: [Cc]opyright
+allow	lockdep-testsuite	Locking API testsuite started
+allow	lockdep-testsuite-ok	Good, all [0-9]+ testcases passed!
+allow	kmemleak-init	kmemleak: Kernel memory leak detector initialized
+allow	kunit-banner	KTAP version [0-9]+
+allow	ubsan-init	UBSAN: initialized
+
+reject	kasan-report	KASAN: [a-z0-9_-]+ in [^[:space:]]
+reject	kfence-report	BUG: KFENCE:
+reject	bug	(^|[[:space:]])BUG:[[:space:]]
+reject	oops	Internal error: Oops|(^|[[:space:]])Oops(:|[[:space:]])
+reject	lockdep-circular	WARNING: possible circular locking dependency detected
+reject	lockdep-recursive	possible recursive locking detected
+reject	lockdep-irq-unsafe	(WARNING: )?(possible irq lock inversion dependency|inconsistent lock state)
+reject	lockdep-deadlock	\*\*\* DEADLOCK \*\*\*
+reject	hung-task	INFO: task [^[:space:]]+ blocked for more than
+reject	rcu-stall	INFO: rcu_[a-z_]+ detected (expedited )?stalls?
+reject	soft-lockup	(soft lockup - CPU|watchdog: BUG: soft lockup)
+reject	hard-lockup	watchdog: Watchdog detected hard LOCKUP
+reject	iommu-fault	(Unhandled context fault|iommu: .*[Pp]age [Ff]ault|rk_iommu.*[Pp]age fault|arm-smmu.*[Ff]ault address)
+reject	panic	Kernel panic - not syncing|Kernel panic
+reject	tainted	Tainted:[[:space:]]
+reject	warn-at	WARNING: CPU: [0-9]+ PID: [0-9]+ at [^[:space:]]
+reject	cut-here	-+\[ cut here \]-+
+reject	call-trace	(^|[[:space:]])Call [Tt]race:[[:space:]]*$
+reject	bad-page	BUG: Bad page (state|map)
+reject	unable-to-handle	Unable to handle kernel (NULL pointer dereference|paging request|read|write)
+reject	gpf	general protection fault
+reject	list-corruption	list_(add|del) corruption
+reject	refcount	refcount_t: (underflow|overflow|addition on 0|saturated)
+reject	memory-corruption	(slab-out-of-bounds|use-after-free|double-free or invalid-free|stack-out-of-bounds|global-out-of-bounds)
+reject	driver-probe-failed	probe with driver [^[:space:]]+ failed
+reject	driver-error-code	[a-z0-9_.:-]+: error -[0-9]+: [^[:space:]]
+reject	dma-fault	(dma_fence|dmaengine).*(fault|timeout|error -[0-9]+)
+reject	oom-kill	Out of memory: Killed process

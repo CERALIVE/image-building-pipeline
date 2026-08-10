@@ -51,6 +51,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 # shellcheck source=lib/rauc-bundle-inspect.sh
 source "${PIPELINE_DIR}/lib/rauc-bundle-inspect.sh"
+# shellcheck source=ci/board-identity.sh
+source "${PIPELINE_DIR}/ci/board-identity.sh"
 IMAGES_DIR="${IMAGES_DIR:-${PIPELINE_DIR}/images}"
 
 # ---------------------------------------------------------------------------
@@ -416,16 +418,16 @@ check_boot_partition() {
   mkimage -l "${script}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
   mkimage -l "${recovery}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
   board_env="$(mtype -i "${img}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
-  grep -qx 'board_id=rock-5b-plus' <<<"${board_env}" || valid=0
-  grep -qx 'fdtfile=rk3588-rock-5b-plus.dtb' <<<"${board_env}" || valid=0
+  grep -qx "board_id=${BOARD_IDENTITY_BOARD_ID}" <<<"${board_env}" || valid=0
+  grep -qx "fdtfile=${BOARD_IDENTITY_DTB}" <<<"${board_env}" || valid=0
   rm -rf "${tmp}"
   if [[ -z "${missing}" ]] && (( valid == 1 )); then
-    pass "Boot partition: compiled AArch64 selector + Rock board metadata + recovery files"
+    pass "Boot partition: compiled AArch64 selector + ${BOARD_IDENTITY_BOARD} board metadata + recovery files"
     info "boot partition @ offset ${boot_off} — selector parses and board DTB metadata matches"
   else
-    fail "Boot partition: compiled AArch64 selector + Rock board metadata + recovery files"
+    fail "Boot partition: compiled AArch64 selector + ${BOARD_IDENTITY_BOARD} board metadata + recovery files"
     [[ -z "${missing}" ]] || info "missing from boot partition @ offset ${boot_off}:${missing}"
-    (( valid == 1 )) || info "boot.scr, recovery.scr, or Rock board metadata is malformed"
+    (( valid == 1 )) || info "boot.scr, recovery.scr, or ${BOARD_IDENTITY_BOARD} board metadata (board_id=${BOARD_IDENTITY_BOARD_ID} fdtfile=${BOARD_IDENTITY_DTB}) is malformed"
   fi
 }
 
@@ -449,7 +451,7 @@ check_boot_state() {
 # ---------------------------------------------------------------------------
 check_rauc_bundle() {
   local bundle="$1" board="$2" keyring="$3" out compatible expect
-  expect="ceralive-${board}"
+  expect="${BOARD_IDENTITY_COMPATIBLE}"
   require_tool openssl || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
   require_tool unsquashfs || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
   [[ -s "${keyring}" ]] || { fail "RAUC bundle: parses + Compatible '${expect}'"; info "keyring not found: ${keyring}"; return; }
@@ -549,7 +551,7 @@ check_rootfs_populated() {
   kernel="${artifact_dir}/Image"; dtb="${artifact_dir}/board.dtb"; initrd="${artifact_dir}/initrd.img"
   embedded_keyring="${artifact_dir}/ceralive-keyring.pem"
   debugfs_dump_resolved "${tmp}" /boot/Image "${kernel}" || artifacts_ok=0
-  debugfs_dump_resolved "${tmp}" /boot/dtb/rockchip/rk3588-rock-5b-plus.dtb "${dtb}" || artifacts_ok=0
+  debugfs_dump_resolved "${tmp}" "/boot/dtb/rockchip/${BOARD_IDENTITY_DTB}" "${dtb}" || artifacts_ok=0
   if initrd_path="$(resolve_initrd_path "${tmp}")"; then
     debugfs_dump_resolved "${tmp}" "${initrd_path}" "${initrd}" || artifacts_ok=0
   else
@@ -708,6 +710,10 @@ main() {
   done
 
   [[ -n "${keyring}" ]] || { echo "--keyring is required; production verification has no dev-key default" >&2; exit 2; }
+  # Board-derived identity: the board_id, DTB filename and RAUC compatible this
+  # gate asserts all come from manifests/boards/<board>.yaml, so pointing the gate
+  # at the wrong board REJECTS the image instead of passing it through.
+  board_identity_load "${board}" || exit 2
   [[ -n "${image}" ]]   || image="$(newest_artifact "${board}" '*.raw')"
   [[ -n "${bundle}" ]]  || bundle="$(newest_artifact "${board}" '*.raucb')"
   [[ "${target_size_bytes}" =~ ^[1-9][0-9]*$ ]] \

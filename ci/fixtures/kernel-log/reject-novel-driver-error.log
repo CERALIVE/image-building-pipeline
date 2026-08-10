@@ -1,0 +1,3 @@
+[    0.000000] Linux version 7.1.7-ceralive-rk3588 #1 SMP PREEMPT
+[    9.114221] snps_hdmirx fdee0000.hdmi_receiver: error -110: interrupt not functioning, open-source TF-A is required by this driver
+[    9.114300] snps_hdmirx fdee0000.hdmi_receiver: probe with driver snps_hdmirx failed with error -110

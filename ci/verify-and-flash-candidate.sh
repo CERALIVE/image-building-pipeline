@@ -13,14 +13,27 @@ reset_ignored_cancellation_signals() {
 }
 reset_ignored_cancellation_signals "$@"
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/board-identity.sh
+source "${HERE}/board-identity.sh"
+# shellcheck source=ci/destructive-target-guard.sh
+source "${HERE}/destructive-target-guard.sh"
+
 image="" bundle="" keyring="" loader="" board="" board_ip="" candidate_commit=""
 expected_sha="" loader_sha="" serial_dev="" uart_log="" authorized_key=""
 access_id="" access_expires="" host_epoch="" authorized_line_out="" identity_out=""
 ssh_identity="" challenge=""
 ssh_known_hosts=""
 expected_maskrom_id_sha="" uart_signing_key=""
+variant="default" manifests_dir="" mode="flash" physical_confirmation=""
+flash_device_arg=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --variant) variant="${2:-}"; shift 2 ;;
+    --manifests-dir) manifests_dir="${2:-}"; shift 2 ;;
+    --flash-device) flash_device_arg="${2:-}"; shift 2 ;;
+    --confirm-physical-write) physical_confirmation="${2:-}"; shift 2 ;;
+    --check-identity-only) mode="check-identity"; shift ;;
     --image) image="${2:-}"; shift 2 ;;
     --bundle) bundle="${2:-}"; shift 2 ;;
     --keyring) keyring="${2:-}"; shift 2 ;;
@@ -47,24 +60,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for value in image bundle keyring loader board board_ip candidate_commit expected_sha \
-  loader_sha serial_dev uart_log authorized_key access_id access_expires host_epoch \
-  ssh_identity challenge expected_maskrom_id_sha uart_signing_key ssh_known_hosts \
-  authorized_line_out identity_out; do
+for value in image bundle loader board expected_sha loader_sha identity_out; do
   [[ -n "${!value}" ]] || { printf '%s is required\n' "$value" >&2; exit 2; }
 done
-[[ -f "${image}" && -f "${bundle}" && -f "${keyring}" && -f "${loader}" ]]
-[[ -e "${serial_dev}" && -r "${serial_dev}" && -w "${serial_dev}" && \
-   -r "${authorized_key}" && -r "${ssh_identity}" ]]
-[[ -f "${uart_signing_key}" && ! -L "${uart_signing_key}" && \
-   "$(stat -c %a "${uart_signing_key}")" == 600 ]]
-[[ "${expected_sha}" =~ ^[0-9a-f]{64}$ && "${loader_sha}" =~ ^[0-9a-f]{64}$ && \
-   "${expected_maskrom_id_sha}" =~ ^[0-9a-f]{64}$ ]]
-[[ "${candidate_commit}" =~ ^[0-9a-f]{40}$ && "${challenge}" =~ ^[0-9a-f]{64}$ ]]
-[[ "${access_id}" =~ ^[A-Za-z0-9._-]{1,80}$ ]]
-[[ "${access_expires}" =~ ^[0-9]{14}Z$ && "${host_epoch}" =~ ^[0-9]{10}$ ]]
-[[ "${board}" == rock-5b-plus ]] || { printf 'hardware gate supports only rock-5b-plus\n' >&2; exit 1; }
-[[ "${SSH_USER:-root}" == root ]] || { printf 'UART bootstrap provisions only root SSH access\n' >&2; exit 1; }
+if [[ "${mode}" == flash ]]; then
+  for value in keyring board_ip candidate_commit serial_dev uart_log authorized_key \
+    access_id access_expires host_epoch ssh_identity challenge \
+    expected_maskrom_id_sha uart_signing_key ssh_known_hosts authorized_line_out; do
+    [[ -n "${!value}" ]] || { printf '%s is required\n' "$value" >&2; exit 2; }
+  done
+fi
+[[ -f "${image}" && -f "${bundle}" && -f "${loader}" ]]
+[[ "${expected_sha}" =~ ^[0-9a-f]{64}$ && "${loader_sha}" =~ ^[0-9a-f]{64}$ ]]
+
+# Every board-varying fact — board_id, DTB, RAUC compatible, Maskrom USB
+# identity — is READ from the manifest instead of hardcoded, so a candidate built
+# for the other board is rejected rather than written to this one.
+board_identity_load "${board}" "${manifests_dir}" "${variant}" || exit 1
+board_identity_require_maskrom || exit 1
+
+if [[ "${mode}" == flash ]]; then
+  [[ -f "${keyring}" ]]
+  [[ -e "${serial_dev}" && -r "${serial_dev}" && -w "${serial_dev}" && \
+     -r "${authorized_key}" && -r "${ssh_identity}" ]]
+  [[ -f "${uart_signing_key}" && ! -L "${uart_signing_key}" && \
+     "$(stat -c %a "${uart_signing_key}")" == 600 ]]
+  [[ "${expected_maskrom_id_sha}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${candidate_commit}" =~ ^[0-9a-f]{40}$ && "${challenge}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${access_id}" =~ ^[A-Za-z0-9._-]{1,80}$ ]]
+  [[ "${access_expires}" =~ ^[0-9]{14}Z$ && "${host_epoch}" =~ ^[0-9]{10}$ ]]
+  [[ "${SSH_USER:-root}" == root ]] || { printf 'UART bootstrap provisions only root SSH access\n' >&2; exit 1; }
+fi
 
 db_timeout_seconds="${CERALIVE_RKDEVELOPTOOL_DB_TIMEOUT_SECONDS:-15}"
 loader_reenumeration_timeout_seconds="${CERALIVE_LOADER_REENUMERATION_TIMEOUT_SECONDS:-10}"
@@ -101,11 +127,16 @@ validate_bounded_positive_integer_override CERALIVE_RKDEVELOPTOOL_KILL_REAP_GRAC
   "${rkdeveloptool_kill_reap_grace_seconds}" 10
 
 identity_dir="$(dirname -- "${identity_out}")"
-[[ -d "${identity_dir}" && ! -L "${identity_out}" && \
-   -d "$(dirname -- "${ssh_known_hosts}")" && ! -L "${ssh_known_hosts}" ]] || {
+[[ -d "${identity_dir}" && ! -L "${identity_out}" ]] || {
   printf 'identity output must be a non-symlink path in an existing directory: %s\n' "${identity_out}" >&2
   exit 1
 }
+if [[ "${mode}" == flash ]]; then
+  [[ -d "$(dirname -- "${ssh_known_hosts}")" && ! -L "${ssh_known_hosts}" ]] || {
+    printf 'known-hosts output must be a non-symlink path in an existing directory: %s\n' "${ssh_known_hosts}" >&2
+    exit 1
+  }
+fi
 rm -f -- "${identity_out}"
 
 validate_identity_filename() {
@@ -122,6 +153,92 @@ loader_file="$(basename -- "${loader}")"
 validate_identity_filename raw_file "${raw_file}"
 validate_identity_filename bundle_file "${bundle_file}"
 validate_identity_filename loader_file "${loader_file}"
+
+candidate_identity_reader="${CERALIVE_CANDIDATE_IDENTITY_BIN:-${HERE}/read-candidate-identity.sh}"
+candidate_board_id="" candidate_fdtfile="" candidate_compatible=""
+candidate_raw_sha256="" candidate_bundle_sha256="" candidate_loader_sha256=""
+
+# run_candidate_identity_gate — the CROSS-BOARD REJECTION. Reads what the
+# artifact set says it is and compares every axis against what the board manifest
+# says this board is. Runs BEFORE any USB, UART or destructive operation, so a
+# Rock candidate pointed at Orange Pi identity data (and the reverse) is refused
+# with the media untouched.
+run_candidate_identity_gate() {
+  local line key value mismatches=0
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      candidate_board_id)      candidate_board_id="${value}" ;;
+      candidate_fdtfile)       candidate_fdtfile="${value}" ;;
+      candidate_compatible)    candidate_compatible="${value}" ;;
+      candidate_raw_sha256)    candidate_raw_sha256="${value}" ;;
+      candidate_bundle_sha256) candidate_bundle_sha256="${value}" ;;
+      candidate_loader_sha256) candidate_loader_sha256="${value}" ;;
+    esac
+  done < <("${candidate_identity_reader}" --image "${image}" --bundle "${bundle}" \
+    --loader "${loader}")
+
+  for line in candidate_board_id candidate_fdtfile candidate_compatible \
+    candidate_raw_sha256 candidate_bundle_sha256 candidate_loader_sha256; do
+    [[ -n "${!line}" ]] || {
+      printf 'candidate identity is incomplete: %s could not be read\n' "${line}" >&2
+      exit 1
+    }
+  done
+
+  assert_identity_axis() {
+    local axis="$1" expected="$2" actual="$3"
+    [[ "${expected}" == "${actual}" ]] && return 0
+    printf 'cross-board candidate REJECTED: %s expected %s (board %s) but candidate carries %s\n' \
+      "${axis}" "${expected}" "${board}" "${actual}" >&2
+    mismatches=$((mismatches + 1))
+  }
+  assert_identity_axis board_id    "${BOARD_IDENTITY_BOARD_ID}"    "${candidate_board_id}"
+  assert_identity_axis dtb_name    "${BOARD_IDENTITY_DTB}"         "${candidate_fdtfile}"
+  assert_identity_axis compatible  "${BOARD_IDENTITY_COMPATIBLE}"  "${candidate_compatible}"
+  assert_identity_axis raw_sha256    "${expected_sha}" "${candidate_raw_sha256}"
+  assert_identity_axis loader_sha256 "${loader_sha}"   "${candidate_loader_sha256}"
+  (( mismatches == 0 )) || {
+    printf 'candidate identity does not match board %s on %s axis/axes\n' \
+      "${board}" "${mismatches}" >&2
+    exit 1
+  }
+  printf 'candidate identity matches board %s (board_id=%s dtb=%s compatible=%s)\n' \
+    "${board}" "${candidate_board_id}" "${candidate_fdtfile}" "${candidate_compatible}"
+}
+
+write_board_evidence_tuple() {
+  local dest="$1"
+  cat >>"${dest}" <<EOF
+board=${BOARD_IDENTITY_BOARD}
+board_id=${BOARD_IDENTITY_BOARD_ID}
+family=${BOARD_IDENTITY_FAMILY}
+arch=${BOARD_IDENTITY_ARCH}
+variant=${BOARD_IDENTITY_VARIANT}
+dtb_name=${BOARD_IDENTITY_DTB}
+compatible=${BOARD_IDENTITY_COMPATIBLE}
+maskrom_usb_identity=${BOARD_IDENTITY_MASKROM_VID}:${BOARD_IDENTITY_MASKROM_PID}
+bundle_sha256=${candidate_bundle_sha256}
+EOF
+}
+
+if [[ "${mode}" == check-identity ]]; then
+  run_candidate_identity_gate
+  identity_tmp="$(mktemp "${identity_dir}/.candidate-identity.XXXXXX")"
+  chmod 600 "${identity_tmp}"
+  cat >"${identity_tmp}" <<EOF
+identity_contract=board-derived-candidate-identity
+raw_file=${raw_file}
+raw_sha256=${expected_sha}
+bundle_file=${bundle_file}
+loader_file=${loader_file}
+loader_sha256=${loader_sha}
+flash_transport=${BOARD_IDENTITY_FLASH_TRANSPORT}
+destructive_write=none
+EOF
+  write_board_evidence_tuple "${identity_tmp}"
+  mv -f -- "${identity_tmp}" "${identity_out}"
+  exit 0
+fi
 
 scratch_root="${RUNNER_TEMP:-/tmp}"
 [[ -d "${scratch_root}" && -w "${scratch_root}" && ! -L "${scratch_root}" ]] || {
@@ -594,14 +711,34 @@ actual_loader_sha="$(sha256sum "${flash_loader}" | cut -d' ' -f1)"
     "${loader_sha}" "${actual_loader_sha}" >&2
   exit 1
 }
+run_candidate_identity_gate
 install -m 600 /dev/null "${ssh_known_hosts}"
 
 ssh_bin="${CERALIVE_SSH_BIN:-ssh}"
 preflash="${CERALIVE_PREFLASH_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/preflash-verify.sh}"
 ssh_user="${SSH_USER:-root}"
 ssh_port="${SSH_PORT:-22}"
-flash_device="${CERALIVE_FLASH_DEVICE:-/dev/mmcblk0}"
+flash_device="${flash_device_arg:-${CERALIVE_FLASH_DEVICE:-/dev/mmcblk0}}"
 rkdeveloptool="${CERALIVE_RKDEVELOPTOOL_BIN:-rkdeveloptool}"
+
+# The remote-destructive-write contract. The destructive target must be a LOCAL
+# block-device path and the writer must be a local program: there is deliberately
+# no flag, env var or spelling that lets this tool push raw sectors down an SSH
+# pipe. Both assertions run here, before the USB fixture is even enumerated.
+guard_assert_local_block_device 'flash device' "${flash_device}" || exit 1
+guard_assert_local_command 'rkdeveloptool' "${rkdeveloptool}" || exit 1
+guard_require_physical_confirmation 'whole-media flash' "${flash_device}" \
+  "${physical_confirmation}" || exit 1
+
+# The ONE chokepoint that writes raw sectors. It re-asserts the whole contract
+# immediately before the write, so no later edit can reach `wl` by another route.
+perform_local_destructive_write() {
+  guard_assert_local_block_device 'flash device' "${flash_device}"
+  guard_assert_local_command 'rkdeveloptool' "${rkdeveloptool}"
+  guard_require_physical_confirmation 'whole-media flash' "${flash_device}" \
+    "${physical_confirmation}"
+  run_rkdeveloptool wl 0 "$1"
+}
 uart_helper="${CERALIVE_UART_HELPER_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uart-provision-ssh.sh}"
 uart_public_key="${CERALIVE_UART_PUBLIC_KEY_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../mkosi/runtime" && pwd)/ceralive-ci-uart-bootstrap-public.pem}"
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
@@ -651,14 +788,15 @@ mapfile -t usb_devices < <(grep 'DevNo=' <<<"${ld_output}" || true)
   printf 'Rockchip target is not in Maskrom mode\n' >&2
   exit 1
 }
-[[ "${usb_devices[0]}" =~ Vid=0x2207,Pid=0x350b ]] || {
-  printf 'Maskrom target is not an RK3588 device\n' >&2
+[[ "${usb_devices[0]}" =~ Vid=${BOARD_IDENTITY_MASKROM_VID},Pid=${BOARD_IDENTITY_MASKROM_PID} ]] || {
+  printf 'Maskrom target is not a %s device (expected Vid=%s,Pid=%s)\n' \
+    "${BOARD_IDENTITY_FAMILY}" "${BOARD_IDENTITY_MASKROM_VID}" "${BOARD_IDENTITY_MASKROM_PID}" >&2
   exit 1
 }
 maskrom_identity="$(sed -E \
   's/^DevNo=[0-9]+[[:space:]]+//; s/[[:space:]]+/ /g; s/[[:space:]]+$//' \
   <<<"${usb_devices[0]}")"
-[[ "${maskrom_identity}" =~ ^Vid=0x2207,Pid=0x350b,LocationID=([0-9]+)[[:space:]]+Maskrom$ ]]
+[[ "${maskrom_identity}" =~ ^Vid=${BOARD_IDENTITY_MASKROM_VID},Pid=${BOARD_IDENTITY_MASKROM_PID},LocationID=([0-9]+)[[:space:]]+Maskrom$ ]]
 maskrom_location_id="${BASH_REMATCH[1]}"
 usb_device_sha256="$(printf '%s' "${maskrom_identity}" | sha256sum | cut -d' ' -f1)"
 [[ "${usb_device_sha256}" == "${expected_maskrom_id_sha}" ]] || {
@@ -718,7 +856,8 @@ while :; do
     loader_pid="${BASH_REMATCH[2]}"
     loader_location_id="${BASH_REMATCH[3]}"
     loader_mode="${BASH_REMATCH[5]}"
-    [[ "${loader_vid}" == 0x2207 && "${loader_pid}" == 0x350b ]] || {
+    [[ "${loader_vid}" == "${BOARD_IDENTITY_MASKROM_VID}" && \
+       "${loader_pid}" == "${BOARD_IDENTITY_MASKROM_PID}" ]] || {
       printf 'loader re-enumerated with the wrong RK3588 identity\n' >&2
       exit 1
     }
@@ -784,7 +923,7 @@ done
   printf 'UART preflight could not obtain read/write access and an exclusive lock\n' >&2
   exit 1
 }
-run_rkdeveloptool wl 0 "${flash_image}"
+perform_local_destructive_write "${flash_image}"
 [[ "$(stat -c %s "${flash_image}")" == "${image_bytes}" ]] || {
   printf 'private candidate snapshot changed size while flashing\n' >&2
   exit 1
@@ -875,7 +1014,10 @@ post_boot_known_hosts_sha256=${post_boot_known_hosts_sha256}
 post_boot_reconnect=verified
 uart_log_sha256=${uart_log_sha256}
 ephemeral_ssh_access=${access_id}
-flash_transport=maskrom-rkdeveloptool
+flash_transport=${BOARD_IDENTITY_FLASH_TRANSPORT}
+flash_device=${flash_device}
+destructive_write=local-block-device-confirmed
 EOF
+write_board_evidence_tuple "${identity_tmp}"
 mv -f -- "${identity_tmp}" "${identity_out}"
 identity_tmp=""

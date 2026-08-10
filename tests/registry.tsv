@@ -60,6 +60,8 @@ tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate
+tests/preflash-cross-board.test.sh	shell	integration	default-shell	board-derived candidate identity and cross-board rejection against real FAT/squashfs fixtures
+tests/flash-remote-guard.test.sh	shell	integration	default-shell	remote-destructive-write contract: local block device plus a physical confirmation, or no write
 tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART

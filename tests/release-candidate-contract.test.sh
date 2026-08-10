@@ -142,6 +142,30 @@ cat >"${TMP}/preflash" <<'EOF'
 #!/usr/bin/env bash
 printf 'preflash %s\n' "$*" >>"${MOCK_FLASH_LOG}"
 EOF
+# The board-derived identity gate reads the candidate's own board_id/fdtfile/
+# compatible before any USB operation. This stub stands in for the real reader
+# (which needs a genuine FAT boot partition + squashfs bundle); the reader itself
+# and the cross-board rejection it feeds are proven in
+# tests/preflash-cross-board.test.sh against real fixtures.
+cat >"${TMP}/candidate-identity" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+image="" bundle="" loader=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --image) image="$2"; shift 2 ;;
+    --bundle) bundle="$2"; shift 2 ;;
+    --loader) loader="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'candidate_board_id=%s\n' "${MOCK_CANDIDATE_BOARD_ID:-rock-5b-plus}"
+printf 'candidate_fdtfile=%s\n' "${MOCK_CANDIDATE_FDTFILE:-rk3588-rock-5b-plus.dtb}"
+printf 'candidate_compatible=%s\n' "${MOCK_CANDIDATE_COMPATIBLE:-ceralive-rock-5b-plus}"
+printf 'candidate_raw_sha256=%s\n' "$(sha256sum "${image}" | cut -d' ' -f1)"
+printf 'candidate_bundle_sha256=%s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)"
+printf 'candidate_loader_sha256=%s\n' "$(sha256sum "${loader}" | cut -d' ' -f1)"
+EOF
 cat >"${TMP}/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -392,7 +416,8 @@ printf 'restrict,expiry-time="20990101000000Z" ssh-ed25519 AAAA mock\n' >"${auth
 while [[ ! -e "${start_signal}" ]]; do sleep 0.02; done
 printf 'CERALIVE_UART_PROVISIONED %s %s\n' "${challenge}" "${candidate_commit}" >"${uart_log}"
 EOF
-chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/rkdeveloptool" "${TMP}/uart"
+chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/rkdeveloptool" "${TMP}/uart" \
+  "${TMP}/candidate-identity"
 
 common=(
   --image "${TMP}/candidate.raw"
@@ -417,6 +442,7 @@ common=(
   --known-hosts "${TMP}/known-hosts"
   --authorized-line-out "${TMP}/authorized-line"
   --identity-out "${TMP}/identity.txt"
+  --confirm-physical-write "I-AM-AT-THE-BENCH:/dev/mmcblk0"
 )
 base_env=(
   "RUNNER_TEMP=${TMP}"
@@ -428,6 +454,7 @@ base_env=(
   "CERALIVE_RECONNECT_ATTEMPTS=3"
   "CERALIVE_RECONNECT_DELAY=0"
   "CERALIVE_UART_PUBLIC_KEY_FILE=${TMP}/uart-public.pem"
+  "CERALIVE_CANDIDATE_IDENTITY_BIN=${TMP}/candidate-identity"
 )
 
 assert_healthy_loader_handoff() {
@@ -1254,6 +1281,18 @@ grep -qx 'post_boot_reconnect=verified' "${TMP}/identity.txt"
 grep -Eq '^uart_log_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
 grep -qx 'ephemeral_ssh_access=gh-123-1' "${TMP}/identity.txt"
 grep -qx 'flash_transport=maskrom-rkdeveloptool' "${TMP}/identity.txt"
+grep -qx 'flash_device=/dev/mmcblk0' "${TMP}/identity.txt"
+grep -qx 'destructive_write=local-block-device-confirmed' "${TMP}/identity.txt"
+grep -qx 'board=rock-5b-plus' "${TMP}/identity.txt"
+grep -qx 'board_id=rock-5b-plus' "${TMP}/identity.txt"
+grep -qx 'family=rk3588' "${TMP}/identity.txt"
+grep -qx 'arch=arm64' "${TMP}/identity.txt"
+grep -qx 'variant=default' "${TMP}/identity.txt"
+grep -qx 'dtb_name=rk3588-rock-5b-plus.dtb' "${TMP}/identity.txt"
+grep -qx 'compatible=ceralive-rock-5b-plus' "${TMP}/identity.txt"
+grep -qx 'maskrom_usb_identity=0x2207:0x350b' "${TMP}/identity.txt"
+grep -qx "bundle_sha256=$(sha256sum "${TMP}/candidate.raucb" | cut -d' ' -f1)" \
+  "${TMP}/identity.txt"
 grep -qx 'rkdeveloptool db .*loader.bin' "${TMP}/flash-ok.log"
 grep -qx 'rkdeveloptool rfi' "${TMP}/flash-ok.log"
 grep -qx 'rkdeveloptool rid' "${TMP}/flash-ok.log"
