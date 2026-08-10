@@ -19,7 +19,21 @@
 # (10ec:b852) with no driver bound and no `wl*` interface — with nothing in the
 # build log to suggest anything had been lost.
 #
-# Usage: verify-kernel-config.sh <declared> <resolved-.config> [<allow-absent>]
+# Usage (POSITIONAL — the in-builder form, unchanged):
+#   verify-kernel-config.sh <declared> <resolved-.config> [<allow-absent>]
+#
+# Usage (OPTIONS — the closure-manifest form):
+#   verify-kernel-config.sh --config <resolved-.config>
+#                           [--declared <declared>] [--allow-absent <list>]
+#                           [--required <list>] [--forbidden <list>]
+#
+# The two forms are the SAME checker: the positional form is exactly
+# `--declared <1> --config <2> [--allow-absent <3>]`, and an invocation written
+# either way produces the same verdict. The option form exists because the
+# dependency-closure manifests (`--required` / `--forbidden`) have no positional
+# slot, and because a resolved config can be audited against those manifests
+# with no declared fragment at all — which is what the acceptance matrix does
+# against a real build's `.config`.
 #
 # <declared> is whatever the manifest declared as the config source: a Kconfig
 # FRAGMENT (defconfig mode) or a COMPLETE .config fetched from an upstream
@@ -52,17 +66,47 @@
 set -euo pipefail
 
 usage() {
-	echo "usage: $(basename "$0") <declared> <resolved-.config> [<allow-absent>]" >&2
+	{
+		echo "usage: $(basename "$0") <declared> <resolved-.config> [<allow-absent>]"
+		echo "       $(basename "$0") --config <resolved-.config> [--declared <declared>]"
+		echo "                        [--allow-absent <list>] [--required <list>] [--forbidden <list>]"
+	} >&2
 	exit 2
 }
 
-[[ $# -eq 2 || $# -eq 3 ]] || usage
+FRAGMENT=""
+RESOLVED=""
+ALLOW_ABSENT=""
+REQUIRED_LIST=""
+FORBIDDEN_LIST=""
 
-FRAGMENT="$1"
-RESOLVED="$2"
-ALLOW_ABSENT="${3:-}"
+# A leading `-` selects the option form; anything else is the historical
+# positional form, which every in-builder invocation still uses.
+if [[ $# -gt 0 && "$1" == -* ]]; then
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--config)       [[ $# -ge 2 ]] || usage; RESOLVED="$2";      shift 2 ;;
+			--declared)     [[ $# -ge 2 ]] || usage; FRAGMENT="$2";      shift 2 ;;
+			--allow-absent) [[ $# -ge 2 ]] || usage; ALLOW_ABSENT="$2";  shift 2 ;;
+			--required)     [[ $# -ge 2 ]] || usage; REQUIRED_LIST="$2"; shift 2 ;;
+			--forbidden)    [[ $# -ge 2 ]] || usage; FORBIDDEN_LIST="$2";shift 2 ;;
+			-h|--help)      usage ;;
+			*) echo "FATAL: unknown option: $1" >&2; usage ;;
+		esac
+	done
+	[[ -n "${RESOLVED}" ]] || { echo "FATAL: --config is required" >&2; usage; }
+	[[ -n "${FRAGMENT}${REQUIRED_LIST}${FORBIDDEN_LIST}" ]] \
+		|| { echo "FATAL: nothing to check — give at least one of --declared/--required/--forbidden" >&2; usage; }
+	[[ -n "${FRAGMENT}" || -z "${ALLOW_ABSENT}" ]] \
+		|| { echo "FATAL: --allow-absent has no meaning without --declared" >&2; usage; }
+else
+	[[ $# -eq 2 || $# -eq 3 ]] || usage
+	FRAGMENT="$1"
+	RESOLVED="$2"
+	ALLOW_ABSENT="${3:-}"
+fi
 
-[[ -r "${FRAGMENT}" ]] || { echo "FATAL: fragment not readable: ${FRAGMENT}" >&2; exit 1; }
+[[ -z "${FRAGMENT}" || -r "${FRAGMENT}" ]] || { echo "FATAL: fragment not readable: ${FRAGMENT}" >&2; exit 1; }
 [[ -r "${RESOLVED}" ]] || { echo "FATAL: resolved config not readable: ${RESOLVED}" >&2; exit 1; }
 
 declare -A allow_absent=()
@@ -103,6 +147,7 @@ declare -a failures=()
 declare -i checked=0
 declare -i allowed=0
 
+if [[ -n "${FRAGMENT}" ]]; then
 while IFS= read -r line; do
 	# Strip a trailing CR so a fragment saved with CRLF endings still parses.
 	line="${line%$'\r'}"
@@ -151,6 +196,70 @@ while IFS= read -r line; do
 		failures+=("${sym}: fragment asks for ${sym}=${want}, resolved config has ${sym}=${got}")
 	fi
 done < "${FRAGMENT}"
+fi
+
+# --- closure manifests -> expectations --------------------------------------
+# A REQUIRED entry is either `CONFIG_X=<value>` (exact, same rule as a fragment
+# line) or a bare `CONFIG_X` meaning "set to something" — the form used for a
+# `menuconfig` PARENT whose own tristate value is defconfig's business, but whose
+# presence is what keeps every leaf under it visible.
+#
+# A FORBIDDEN entry is a bare symbol name and nothing else. `CONFIG_X=<value>`
+# there would read as "this exact value is banned, another is fine", which is a
+# weaker claim than the manifest is for, so it is refused as a usage error
+# rather than silently reinterpreted.
+declare -a closure_failures=()
+declare -i required_checked=0
+declare -i forbidden_checked=0
+
+if [[ -n "${REQUIRED_LIST}" ]]; then
+	[[ -r "${REQUIRED_LIST}" ]] \
+		|| { echo "FATAL: required-symbols list not readable: ${REQUIRED_LIST}" >&2; exit 1; }
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		line="${line%%#*}"
+		line="${line//[[:space:]]/}"
+		[[ -n "${line}" ]] || continue
+		[[ "${line}" == CONFIG_* ]] \
+			|| { echo "FATAL: required entry must be a full CONFIG_ symbol name: '${line}' (${REQUIRED_LIST})" >&2; exit 1; }
+		required_checked+=1
+
+		sym="${line%%=*}"
+		want=''
+		[[ "${line}" == *=* ]] && want="${line#*=}"
+
+		got=''
+		[[ -v resolved["${sym}"] ]] && got="${resolved["${sym}"]}"
+
+		if [[ ! -v resolved["${sym}"] ]]; then
+			closure_failures+=("${sym}: REQUIRED but the resolved config does not carry the symbol at all")
+		elif [[ -z "${got}" ]]; then
+			closure_failures+=("${sym}: REQUIRED but the resolved config has '# ${sym} is not set'")
+		elif [[ -n "${want}" && "${got}" != "${want}" ]]; then
+			closure_failures+=("${sym}: REQUIRED as ${sym}=${want}, resolved config has ${sym}=${got}")
+		fi
+	done < "${REQUIRED_LIST}"
+fi
+
+if [[ -n "${FORBIDDEN_LIST}" ]]; then
+	[[ -r "${FORBIDDEN_LIST}" ]] \
+		|| { echo "FATAL: forbidden-symbols list not readable: ${FORBIDDEN_LIST}" >&2; exit 1; }
+	while IFS= read -r line; do
+		line="${line%$'\r'}"
+		line="${line%%#*}"
+		line="${line//[[:space:]]/}"
+		[[ -n "${line}" ]] || continue
+		[[ "${line}" == CONFIG_* ]] \
+			|| { echo "FATAL: forbidden entry must be a full CONFIG_ symbol name: '${line}' (${FORBIDDEN_LIST})" >&2; exit 1; }
+		[[ "${line}" != *=* ]] \
+			|| { echo "FATAL: forbidden entry must be a bare symbol name, not a value assignment: '${line}' (${FORBIDDEN_LIST})" >&2; exit 1; }
+		forbidden_checked+=1
+
+		if [[ -v resolved["${line}"] && -n "${resolved["${line}"]}" ]]; then
+			closure_failures+=("${line}: FORBIDDEN but the resolved config has ${line}=${resolved["${line}"]}")
+		fi
+	done < "${FORBIDDEN_LIST}"
+fi
 
 if (( ${#failures[@]} > 0 )); then
 	{
@@ -165,7 +274,30 @@ if (( ${#failures[@]} > 0 )); then
 		echo "Check the symbol's own Kconfig entry for the parent 'menuconfig' it sits under"
 		echo "and for its 'depends on' line, and declare those in the fragment too."
 	} >&2
-	exit 1
 fi
 
-echo "ok: $(( checked - allowed )) of ${checked} declared symbol(s) survived into the resolved kernel .config (${allowed} reviewed exception(s))"
+if (( ${#closure_failures[@]} > 0 )); then
+	{
+		echo "FATAL: ${#closure_failures[@]} dependency-closure violation(s) in the resolved kernel .config"
+		echo "  resolved:  ${RESOLVED}"
+		[[ -n "${REQUIRED_LIST}" ]]  && echo "  required:  ${REQUIRED_LIST}"
+		[[ -n "${FORBIDDEN_LIST}" ]] && echo "  forbidden: ${FORBIDDEN_LIST}"
+		for f in "${closure_failures[@]}"; do
+			echo "  - ${f}"
+		done
+		echo
+		echo "A REQUIRED symbol that is absent is usually a dropped 'menuconfig' PARENT:"
+		echo "the leaves under it stop being visible and vanish without any warning."
+		echo "A FORBIDDEN symbol that is present means a platform or debug selection"
+		echo "the edge config is supposed to exclude came back in."
+	} >&2
+fi
+
+(( ${#failures[@]} + ${#closure_failures[@]} == 0 )) || exit 1
+
+if [[ -n "${FRAGMENT}" ]]; then
+	echo "ok: $(( checked - allowed )) of ${checked} declared symbol(s) survived into the resolved kernel .config (${allowed} reviewed exception(s))"
+fi
+if (( required_checked + forbidden_checked > 0 )); then
+	echo "ok: ${required_checked} required and ${forbidden_checked} forbidden symbol(s) hold in ${RESOLVED}"
+fi

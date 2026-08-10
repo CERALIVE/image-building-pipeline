@@ -360,6 +360,215 @@ EOF
   run ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
 }
 
+# --- the option interface, and its equivalence to the positional one ---------
+
+@test "verify-kernel-config: the option form and the positional form agree, pass and fail alike" {
+  # The in-builder invocation is positional and must never change; the closure
+  # manifests have no positional slot. Both spellings therefore have to be the
+  # same checker, or one of them drifts into being untested.
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/frag"
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/good"
+  printf 'CONFIG_A=y\n' >"$WORK/bad"
+
+  run "$VERIFY" "$WORK/frag" "$WORK/good"
+  local pos_ok_status="$status" pos_ok_out="$output"
+  run "$VERIFY" --declared "$WORK/frag" --config "$WORK/good"
+  [ "$status" -eq "$pos_ok_status" ]
+  [ "$output" = "$pos_ok_out" ]
+  [ "$status" -eq 0 ]
+
+  run "$VERIFY" "$WORK/frag" "$WORK/bad"
+  local pos_bad_status="$status" pos_bad_out="$output"
+  run "$VERIFY" --declared "$WORK/frag" --config "$WORK/bad"
+  [ "$status" -eq "$pos_bad_status" ]
+  [ "$output" = "$pos_bad_out" ]
+  [ "$status" -eq 1 ]
+}
+
+@test "verify-kernel-config: the option form carries the allow-absent list too" {
+  printf 'CONFIG_A=y\nCONFIG_OUT_OF_TREE=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_OUT_OF_TREE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  local pos_out="$output"
+  run "$VERIFY" --declared "$WORK/decl" --config "$WORK/res" --allow-absent "$WORK/allow"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$pos_out" ]
+}
+
+@test "verify-kernel-config: --required accepts an exact value and a bare parent alike" {
+  printf 'CONFIG_PARENT=y\nCONFIG_LEAF=m\n' >"$WORK/res"
+  printf '# a comment\nCONFIG_PARENT\nCONFIG_LEAF=m\n' >"$WORK/req"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/req"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2 required and 0 forbidden"* ]]
+}
+
+@test "verify-kernel-config: --required fails on an absent symbol, an off symbol and a wrong value" {
+  printf 'CONFIG_WRONG=m\n# CONFIG_OFF is not set\n' >"$WORK/res"
+  printf 'CONFIG_WRONG=y\nCONFIG_OFF\nCONFIG_MISSING\n' >"$WORK/req"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/req"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_WRONG: REQUIRED as CONFIG_WRONG=y, resolved config has CONFIG_WRONG=m"* ]]
+  [[ "$output" == *"CONFIG_OFF: REQUIRED but the resolved config has '# CONFIG_OFF is not set'"* ]]
+  [[ "$output" == *"CONFIG_MISSING: REQUIRED but the resolved config does not carry the symbol at all"* ]]
+  [[ "$output" == *"menuconfig"* ]]
+}
+
+@test "verify-kernel-config: --forbidden is satisfied by not-set AND by absence" {
+  printf '# CONFIG_OFF is not set\nCONFIG_KEPT=y\n' >"$WORK/res"
+  printf 'CONFIG_OFF\nCONFIG_NEVER_EXISTED\n' >"$WORK/forb"
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 0 ]
+
+  printf 'CONFIG_OFF=m\n' >>"$WORK/res"
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_OFF: FORBIDDEN but the resolved config has CONFIG_OFF=m"* ]]
+}
+
+@test "verify-kernel-config: a forbidden entry written as a value assignment is refused" {
+  # `CONFIG_X=y` here would mean "this value is banned, another is fine" — a
+  # weaker claim than the manifest makes, so it must not be silently accepted.
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_A=y\n' >"$WORK/forb"
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must be a bare symbol name"* ]]
+}
+
+@test "verify-kernel-config: an unknown option and a missing operand are usage errors, not silent passes" {
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" --config "$WORK/res" --bogus
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown option: --bogus"* ]]
+
+  run "$VERIFY" --config
+  [ "$status" -eq 2 ]
+
+  run "$VERIFY" --required "$WORK/res"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--config is required"* ]]
+
+  run "$VERIFY" --config "$WORK/res"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"nothing to check"* ]]
+}
+
+@test "verify-kernel-config: a missing manifest fails loudly, never as an empty check" {
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/absent"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"required-symbols list not readable"* ]]
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/absent"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"forbidden-symbols list not readable"* ]]
+
+  run "$VERIFY" --config "$WORK/absent" --forbidden "$WORK/res"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"resolved config not readable"* ]]
+}
+
+# --- the closure manifests themselves ----------------------------------------
+
+@test "closure manifests: every entry is a CONFIG_ symbol, deduped, and forbidden entries are bare" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ -f "$req" ]
+  [ -f "$forb" ]
+
+  local list f
+  for f in "$req" "$forb"; do
+    list="$(sed -e 's/#.*//' "$f" | awk 'NF{print $1}')"
+    [ -n "$list" ]
+    while IFS= read -r s; do
+      [[ "$s" == CONFIG_* ]] || { echo "not a CONFIG_ symbol in $f: $s"; false; }
+    done <<<"$list"
+    [ "$(wc -l <<<"$list")" -eq "$(sed 's/=.*//' <<<"$list" | sort -u | wc -l)" ]
+  done
+
+  list="$(sed -e 's/#.*//' "$forb" | awk 'NF{print $1}')"
+  run ! grep -q '=' <<<"$list"
+}
+
+@test "closure manifests: required and forbidden never name the same symbol" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local overlap
+  overlap="$(comm -12 \
+    <(sed -e 's/#.*//' "$req"  | awk 'NF{print $1}' | sed 's/=.*//' | sort -u) \
+    <(sed -e 's/#.*//' "$forb" | awk 'NF{print $1}' | sort -u))"
+  [ -z "$overlap" ] || { echo "symbol in BOTH manifests: $overlap"; false; }
+}
+
+@test "closure manifests: every menuconfig parent the four real defects taught us is REQUIRED" {
+  # RTW89, DMABUF_HEAPS, TYPEC_FUSB302 and NF_TABLES each shipped broken because
+  # a parent was missing. The parents that gate them are the ones a future
+  # fragment edit is most likely to knock out without noticing.
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local sym
+  for sym in CONFIG_MMC CONFIG_PCI CONFIG_USB_SUPPORT CONFIG_USB_SERIAL \
+             CONFIG_USB_NET_DRIVERS CONFIG_WLAN CONFIG_BT CONFIG_DRM \
+             CONFIG_SOUND CONFIG_SND CONFIG_SND_SOC CONFIG_SND_USB \
+             CONFIG_MEDIA_SUPPORT CONFIG_DMABUF_HEAPS=y CONFIG_IOMMU_SUPPORT \
+             CONFIG_THERMAL CONFIG_HWMON CONFIG_TYPEC CONFIG_NF_TABLES=y; do
+    grep -qx -- "$sym" "$req" || { echo "closure parent missing from required list: $sym"; false; }
+  done
+}
+
+@test "closure manifests: the forbidden list holds every foreign platform the fragment disables" {
+  # The two files are one statement written twice — the fragment turns the
+  # platform off, the manifest asserts it stayed off. A row present in one and
+  # absent from the other is how the trim silently reverts on a defconfig bump.
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local sym
+  while IFS= read -r sym; do
+    grep -qx -- "$sym" "$forb" \
+      || { echo "fragment disables $sym but the forbidden manifest does not assert it"; false; }
+  done < <(grep -oE '^# (CONFIG_ARCH_[A-Z0-9_]+) is not set$' "$FRAGMENT" | awk '{print $2}')
+}
+
+@test "rk3588-edge.fragment: the Rockchip-only block keeps ARCH_ROCKCHIP and drops the rest" {
+  grep -qx 'CONFIG_ARCH_ROCKCHIP=y' "$FRAGMENT"
+  run ! grep -qx '# CONFIG_ARCH_ROCKCHIP is not set' "$FRAGMENT"
+  # A trim of one or two platforms would be cosmetic; the point is the whole set.
+  [ "$(grep -cE '^# CONFIG_ARCH_[A-Z0-9_]+ is not set$' "$FRAGMENT")" -ge 40 ]
+  # ARCH_REALTEK is the Realtek SoC PLATFORM, not the RTL8852BE Wi-Fi adapter.
+  # Disabling it must never come with dropping the adapter's own driver.
+  grep -qx '# CONFIG_ARCH_REALTEK is not set' "$FRAGMENT"
+  grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS a config where a foreign platform came back" {
+  local sample
+  sample="$(grep -oE '^# (CONFIG_ARCH_[A-Z0-9_]+) is not set$' "$FRAGMENT" | awk '{print $2}' | head -1)"
+  [ -n "$sample" ]
+  printf '%s=y\n' "$sample" >"$WORK/regressed"
+  run "$VERIFY" --config "$WORK/regressed" \
+    --forbidden "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"${sample}: FORBIDDEN"* ]]
+}
+
+@test "closure manifests: production edge forbids all three CeraLive test symbols" {
+  # The edge-test variant owns the fault-injection knobs. A production artifact
+  # carrying one of them is not the kernel that was validated on hardware.
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  grep -qx 'CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST' "$forb"
+  grep -qx 'CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST' "$forb"
+  grep -qx 'CONFIG_DMABUF_HEAPS_CERALIVE_TEST' "$forb"
+  # …and the fragment must not enable them either.
+  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST|VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST|DMABUF_HEAPS_CERALIVE_TEST)=[ym]' "$FRAGMENT"
+}
+
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {
   [ -x "$VERIFY" ]
   [ -x "$PIPELINE_DIR/lib/verify-boot-artifacts.sh" ]

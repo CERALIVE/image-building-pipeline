@@ -214,3 +214,80 @@ CONFIG_NAMESPACES=y
 CONFIG_EFIVAR_FS=n
 CONFIG_FANOTIFY=y
 CONFIG_AUTOFS_FS=y
+
+# --- Rockchip-only platform scope ------------------------------------------
+# arm64 `defconfig` is a MULTI-PLATFORM config: it turns on every SoC-vendor
+# platform arch/arm64/Kconfig.platforms offers, and each one drags in its own
+# clock, pinctrl, PHY, DMA, thermal, mailbox and media drivers. None of that
+# silicon exists on an RK3588 appliance, so every one of those modules is code
+# that ships in the rootfs, is scanned by depmod, is carried in both RAUC slots,
+# and can never bind to anything.
+#
+# The whole set is disabled EXCEPT CONFIG_ARCH_ROCKCHIP. These are the prompted
+# platform symbols of the pinned v7.1.7 tree, enumerated from
+# arch/arm64/Kconfig.platforms rather than hand-listed, so a platform that
+# upstream adds later is simply absent here rather than silently re-enabled
+# under a stale list.
+#
+# CONFIG_ARCH_REALTEK IS NOT THE Wi-Fi ADAPTER. It is Realtek's RTD12xx/RTD16xx
+# SoC platform; the Rock 5B+ RTL8852BE is CONFIG_RTW89_8852BE above, a PCIe
+# device driver with no relationship to this symbol. Disabling this does not
+# touch Wi-Fi, and re-enabling it would not fix a Wi-Fi problem.
+#
+# The per-SoC leaves (ARCH_TEGRA_*_SOC, ARCH_R8A*/R9A*, …) live inside their
+# parent's `if` block and need no entry — the same select/leaf rule as
+# RTW89_CORE and NF_TABLES_IPV4. Declaring the parents is the whole mechanism.
+# CONFIG_ARCH_ACTIONS is not set
+# CONFIG_ARCH_AIROHA is not set
+# CONFIG_ARCH_ALPINE is not set
+# CONFIG_ARCH_APPLE is not set
+# CONFIG_ARCH_ARTPEC is not set
+# CONFIG_ARCH_AXIADO is not set
+# CONFIG_ARCH_BCM is not set
+# CONFIG_ARCH_BCM2835 is not set
+# CONFIG_ARCH_BCMBCA is not set
+# CONFIG_ARCH_BCM_IPROC is not set
+# CONFIG_ARCH_BERLIN is not set
+# CONFIG_ARCH_BITMAIN is not set
+# CONFIG_ARCH_BLAIZE is not set
+# CONFIG_ARCH_BRCMSTB is not set
+# CONFIG_ARCH_BST is not set
+# CONFIG_ARCH_CIX is not set
+# CONFIG_ARCH_EXYNOS is not set
+# CONFIG_ARCH_HISI is not set
+# CONFIG_ARCH_INTEL_SOCFPGA is not set
+# CONFIG_ARCH_K3 is not set
+# CONFIG_ARCH_KEEMBAY is not set
+# CONFIG_ARCH_LAN969X is not set
+# CONFIG_ARCH_LAYERSCAPE is not set
+# CONFIG_ARCH_LG1K is not set
+# CONFIG_ARCH_MA35 is not set
+# CONFIG_ARCH_MEDIATEK is not set
+# CONFIG_ARCH_MESON is not set
+# CONFIG_ARCH_MICROCHIP is not set
+# CONFIG_ARCH_MMP is not set
+# CONFIG_ARCH_MVEBU is not set
+# CONFIG_ARCH_MXC is not set
+# CONFIG_ARCH_NPCM is not set
+# CONFIG_ARCH_NXP is not set
+# CONFIG_ARCH_PENSANDO is not set
+# CONFIG_ARCH_QCOM is not set
+# CONFIG_ARCH_REALTEK is not set
+# CONFIG_ARCH_RENESAS is not set
+# CONFIG_ARCH_S32 is not set
+# CONFIG_ARCH_SEATTLE is not set
+# CONFIG_ARCH_SOPHGO is not set
+# CONFIG_ARCH_SPARX5 is not set
+# CONFIG_ARCH_SPRD is not set
+# CONFIG_ARCH_STM32 is not set
+# CONFIG_ARCH_SUNXI is not set
+# CONFIG_ARCH_SYNQUACER is not set
+# CONFIG_ARCH_TEGRA is not set
+# CONFIG_ARCH_TESLA_FSD is not set
+# CONFIG_ARCH_THUNDER is not set
+# CONFIG_ARCH_THUNDER2 is not set
+# CONFIG_ARCH_UNIPHIER is not set
+# CONFIG_ARCH_VEXPRESS is not set
+# CONFIG_ARCH_VISCONTI is not set
+# CONFIG_ARCH_XGENE is not set
+# CONFIG_ARCH_ZYNQMP is not set

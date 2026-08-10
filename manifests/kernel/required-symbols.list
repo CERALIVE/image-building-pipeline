@@ -1,0 +1,218 @@
+# CeraLive RK3588 `edge` kernel — REQUIRED symbol closure
+#
+# Checked against a REAL resolved `.config` by
+# `lib/verify-kernel-config.sh --config <.config> --required <this file>`.
+#
+# WHAT THIS IS FOR, and why it is not a duplicate of rk3588-edge.fragment.
+#
+# The fragment declares what CeraLive ADDS to arm64 `defconfig`. This file
+# declares what the finished kernel must CARRY — including everything defconfig
+# is currently expected to supply on its own. Those are different claims, and
+# only the second one survives a change to the fragment: the moment the fragment
+# turns a platform, a bus or a subsystem OFF (which the Rockchip-only block now
+# does, for 54 foreign platforms at once), a driver defconfig used to provide can
+# stop being visible, and the fragment gate cannot notice because the fragment
+# never named it.
+#
+# EVERY ENTRY IS A DEPENDENCY CLOSURE, PARENTS INCLUDED. This repository has now
+# lost four separate capabilities to exactly one mistake — naming a leaf whose
+# `menuconfig` PARENT was off, so `olddefconfig` discarded the leaf in silence
+# while the build, the package validation, the boot and the image all stayed
+# green: CONFIG_RTW89 (no Wi-Fi), CONFIG_DMABUF_HEAPS (no /dev/dma_heap, so MPP
+# encode produced zero bytes), CONFIG_TYPEC_FUSB302 (a `=y` quietly resolving to
+# `=m` for three releases) and CONFIG_NF_TABLES (no nftables at all, so the
+# WAN-side drop of the unauthenticated ingest ports never applied). So each block
+# below lists the parent that makes its leaves visible, not just the leaves.
+#
+# TWO ENTRY FORMS:
+#   CONFIG_X=<value>   exact — the value is part of the requirement
+#   CONFIG_X           set to anything — used for a `menuconfig` PARENT whose own
+#                      y/m value is defconfig's business, but whose PRESENCE is
+#                      what keeps every leaf under it visible
+#
+# A bare parent is deliberately NOT pinned to a value: pinning it would make an
+# upstream y->m change fail the build for a difference that changes nothing about
+# what the device can do. The leaves under it are pinned exactly, which is where
+# built-in-vs-module actually matters.
+
+# --- MMC / eMMC / microSD ---------------------------------------------------
+# MMC is the `menuconfig` parent; every host controller below sits inside it.
+# The board boots from eMMC through sdhci-dwcmshc and from microSD through
+# dw_mmc-rockchip, and BOTH slots of the A/B layout live on that media.
+CONFIG_MMC
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PLTFM=y
+CONFIG_MMC_SDHCI_OF_DWCMSHC=y
+CONFIG_MMC_DW=y
+CONFIG_MMC_DW_ROCKCHIP=y
+CONFIG_MMC_CQHCI=y
+
+# --- PCIe ------------------------------------------------------------------
+# Carries the RTL8125B NIC and the RTL8852BE Wi-Fi adapter on the Rock 5B+, and
+# the dual r8169 NICs on the Orange Pi 5+. PCIE_DW/PCIE_DW_HOST are selected by
+# the Rockchip controller, and PCI is the parent both sit under.
+CONFIG_PCI
+CONFIG_PCIEPORTBUS=y
+CONFIG_PCI_MSI=y
+CONFIG_PCIE_DW=y
+CONFIG_PCIE_DW_HOST=y
+CONFIG_PCIE_ROCKCHIP_DW=y
+CONFIG_PHY_ROCKCHIP_SNPS_PCIE3=y
+
+# --- USB -------------------------------------------------------------------
+# USB_SUPPORT is the outermost `menuconfig`; USB_SERIAL and USB_NET_DRIVERS are
+# each a second-level parent, and dropping either silently removes the modem
+# stack's control port or its data interfaces respectively while leaving the
+# fragment's own leaf lines looking satisfied.
+CONFIG_USB_SUPPORT
+CONFIG_USB=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PLATFORM=y
+CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_DUAL_ROLE=y
+CONFIG_PHY_ROCKCHIP_USBDP=y
+CONFIG_PHY_ROCKCHIP_NANENG_COMBO_PHY=m
+CONFIG_USB_SERIAL
+CONFIG_USB_SERIAL_OPTION=m
+CONFIG_USB_NET_DRIVERS
+CONFIG_USB_USBNET=m
+CONFIG_USB_NET_CDCETHER=m
+CONFIG_USB_NET_CDC_NCM=m
+CONFIG_USB_NET_CDC_MBIM=m
+CONFIG_USB_NET_QMI_WWAN=m
+CONFIG_USB_WDM=m
+CONFIG_USB_VIDEO_CLASS=m
+CONFIG_TYPEC
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_FUSB302=m
+CONFIG_USB_ROLE_SWITCH=y
+
+# --- Wi-Fi and Bluetooth ----------------------------------------------------
+# WLAN is the parent; WLAN_VENDOR_REALTEK and WLAN_VENDOR_BROADCOM are the
+# per-vendor gates inside it, and RTW89 is the third level that already shipped
+# broken once. Both shipped boards are covered: RTL8852BE (Rock 5B+) and the
+# AP6275P/brcmfmac part (Orange Pi 5+). BT is its own parent — the Bluetooth
+# radio enumerates over USB even though the Wi-Fi half is PCIe.
+CONFIG_WLAN
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_WLAN_VENDOR_REALTEK=y
+CONFIG_RTW89=m
+CONFIG_RTW89_8852BE=m
+CONFIG_WLAN_VENDOR_BROADCOM=y
+CONFIG_BRCMFMAC=m
+CONFIG_BT
+CONFIG_BT_HCIBTUSB=m
+CONFIG_BT_RTL=m
+CONFIG_BT_HCIBTUSB_RTL=y
+CONFIG_R8169=m
+
+# --- DRM / kiosk display ----------------------------------------------------
+# The kiosk stack (cage + Chromium, or the Cog add-on) renders through the Mali
+# userspace onto a Rockchip DRM/KMS device; DRM_ROCKCHIP is what creates it, and
+# ROCKCHIP_DW_HDMI_QP is the RK3588 HDMI transmitter it drives.
+CONFIG_DRM
+CONFIG_DRM_ROCKCHIP=m
+CONFIG_ROCKCHIP_DW_HDMI_QP=y
+CONFIG_DRM_DISPLAY_HELPER=m
+
+# --- Audio ------------------------------------------------------------------
+# SOUND -> SND -> SND_SOC is a three-deep parent chain, and SND_USB is a fourth
+# parent that gates the USB-audio leaf specifically. HDMI-RX embedded audio is a
+# simple-audio-card binding SND_SOC_HDMI_CODEC to the capture-only i2s7_8ch
+# (SND_SOC_ROCKCHIP_I2S_TDM); the always-on level meter reads the ALSA capture
+# device those produce.
+CONFIG_SOUND
+CONFIG_SND
+CONFIG_SND_SOC
+CONFIG_SND_SIMPLE_CARD=m
+CONFIG_SND_SOC_ROCKCHIP_I2S_TDM=m
+CONFIG_SND_SOC_HDMI_CODEC=m
+CONFIG_SND_USB
+CONFIG_SND_USB_AUDIO=m
+
+# --- Capture and encode (rkvenc / HDMI-RX) ---------------------------------
+# MEDIA_SUPPORT is the parent of the whole V4L2 tree. VIDEO_ROCKCHIP_RKVENC and
+# VIDEO_SYNOPSYS_HDMIRX are supplied by the pinned patch series, so an absence
+# here means the series did not apply or its Kconfig hunk was lost — which is
+# indistinguishable from a working build until a board tries to encode.
+CONFIG_MEDIA_SUPPORT
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_VIDEO_DEV=y
+CONFIG_VIDEO_ROCKCHIP_RKVENC=m
+CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
+
+# --- dma-buf userland heaps (the MPP allocator) -----------------------------
+# DMABUF_HEAPS is a `menuconfig bool` defaulting OFF — the second of the four
+# real defects. librockchip_mpp opens /dev/dma_heap/system-uncached BY NAME and
+# does not fall back to `system`, so the UNCACHED leaf is as load-bearing as the
+# parent. DMA_CMA/CMA are DMABUF_HEAPS_CMA's own dependencies.
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y
+CONFIG_DMABUF_HEAPS_CMA=y
+CONFIG_DMA_CMA=y
+CONFIG_CMA=y
+
+# --- IOMMU ------------------------------------------------------------------
+# IOMMU_SUPPORT is the `menuconfig` parent. The rkvenc encoder maps every
+# imported dma-buf through the Rockchip IOMMU; without it the encoder's own
+# address guardrail has nothing to translate against.
+CONFIG_IOMMU_SUPPORT
+CONFIG_ROCKCHIP_IOMMU=y
+CONFIG_IOMMU_DMA=y
+
+# --- Thermal and fan --------------------------------------------------------
+# THERMAL is the parent. The shipped fan units do not control the fan themselves
+# — they move the first `active` trip and kick a stalled rotor, and the kernel's
+# step_wise governor does the rest — so THERMAL_GOV_STEP_WISE and the pwm-fan
+# hwmon driver are both part of that contract, not optional extras.
+CONFIG_THERMAL
+CONFIG_THERMAL_OF=y
+CONFIG_THERMAL_GOV_STEP_WISE=y
+CONFIG_CPU_THERMAL=y
+CONFIG_ROCKCHIP_THERMAL=y
+CONFIG_HWMON
+CONFIG_SENSORS_PWM_FAN=m
+CONFIG_PWM
+CONFIG_PWM_ROCKCHIP=y
+
+# --- Status LEDs ------------------------------------------------------------
+# ceralive-led-status assigns `heartbeat` and `mmc1` triggers to the board's
+# unclaimed indicator LEDs, which requires both the LED class and those triggers
+# to exist; the LEDs themselves are gpio-leds and pwm-leds devices.
+CONFIG_NEW_LEDS
+CONFIG_LEDS_CLASS=y
+CONFIG_LEDS_GPIO=y
+CONFIG_LEDS_PWM=y
+CONFIG_LEDS_TRIGGER_HEARTBEAT=y
+
+# --- nftables (the LAN-ingest boundary) -------------------------------------
+# The fourth real defect, and the only one that was a security regression:
+# ceralive-ingest-firewall.service is what keeps the UNAUTHENTICATED RTMP/SRT
+# ingest ports off a WAN uplink. NETFILTER_NETLINK is the NETLINK_NETFILTER
+# protocol `nft` actually opens — it is promptless and nothing selects it until
+# NF_TABLES is on, which is why the board reported a missing netlink protocol
+# rather than a missing table.
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_IPV6=y
+
+# --- Storage / rootfs / RAUC ------------------------------------------------
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=m
+CONFIG_OVERLAY_FS=m
+
+# --- Rockchip platform ------------------------------------------------------
+# The one platform that must survive the Rockchip-only block in the fragment.
+CONFIG_ARCH_ROCKCHIP=y
+CONFIG_SPI_ROCKCHIP=y
+CONFIG_ROCKCHIP_SARADC=y
