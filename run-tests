@@ -78,6 +78,7 @@ SHELL_SUITES=(
   "${HERE}/tests/production-ci-scope-contract.test.sh"
   "${HERE}/tests/orchestrate-build-lock.test.sh"
   "${HERE}/tests/boot-script-sanitize.test.sh"
+  "${HERE}/tests/deb-lib.test.sh"
   "${HERE}/mkosi/platform/boot/test-fallback.sh"
 )
 DEV_PKI_GENERATOR="${HERE}/tests/generate-dev-rauc-pki.sh"

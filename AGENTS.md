@@ -52,6 +52,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
+| **Read a `.deb`'s control fields / assert its identity / explode it** | `lib/shared/deb-lib.sh` — the ONE `deb_control_field` / `deb_pkg_{name,version,arch}` / `assert_deb_identity` / `explode_deb`; contract `tests/deb-lib.test.sh`. See the KEY FACT below |
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
@@ -161,7 +162,7 @@ Each `[N/9]` stage BODY lives in one module under `lib/stages/`:
 | `[1/9]` | `resolve.sh` | `read_pkg_list`, `resolve_debug_image_flag`, `require_field` |
 | `[2/9]` | `fetch.sh` | staging-tree recreation (must be freshly authenticated) |
 | `[2b/9]` | `kernel-build.sh` | — |
-| `[3/9]` | `partition.sh` | `deb_pkg_name`, `assert_staged_packages_unique` |
+| `[3/9]` | `partition.sh` | `assert_staged_packages_unique` (its `deb_pkg_name` reader lives in `lib/shared/deb-lib.sh`) |
 | `[4/9]` | `bsp-gate.sh` | — |
 | `[5/9]` | `mkosi.sh` | `select_build_mode`, `ensure_builder_image`, `mkosi_invoke` |
 | `[6/9]` | `tar-emit.sh` | `emit_artifact` |
@@ -202,6 +203,40 @@ mention it too, so reordering silently swaps which block the gate's tests execut
 
 All 26 runtime `[N/9]` log strings are byte-identical to the pre-split file, and
 the `DRY_RUN=1` build plan is byte-identical for all three shipped boards.
+
+**`lib/shared/deb-lib.sh` is the ONE Debian control/extraction library** [EXISTS]
+
+Reading a `.deb` without dpkg (build hosts may be Arch) had been re-derived five
+times: twice verbatim inside `deb-lib.sh` itself, once in `lib/stages/partition.sh`,
+and as data-tarball extraction in `dev-push` and `lib/dev-sync/build-input-lib.sh`.
+The identity check that follows every staged download existed three more times, in
+`lib/fetch/{bsp,firstparty,userspace}.sh`. There is now exactly one of each:
+
+| Helper | Role |
+|---|---|
+| `deb_control_field <deb> <field>` | the single control-tarball walk (gz/xz/zst); empty on an unreadable archive |
+| `deb_pkg_name` / `deb_pkg_version` / `deb_pkg_arch` | thin wrappers over it |
+| `assert_deb_identity <deb> <pkg> <version\|''> <arch> [--arch-all-ok]` | the single package/version/architecture check |
+| `explode_deb <deb> <dest>` | the single data-tarball extractor (`dpkg-deb`, else `ar` + `tar`) |
+
+Three consequences worth knowing before touching it:
+
+- **`assert_deb_identity` returns, it never dies.** The fetch families disagree on
+  whether a mismatch is fatal (`firstparty`) or retryable (`bsp`, `userspace`), and
+  each keeps its own diagnostic wording. It publishes what it found in
+  `DEB_ACTUAL_PKG` / `DEB_ACTUAL_VERSION` / `DEB_ACTUAL_ARCH` so the caller's message
+  is unchanged from before the consolidation.
+- **An empty expected version skips the version leg** (the URL-pinned RK3588
+  userspace family has no version to assert), and `--arch-all-ok` is what admits
+  `Architecture: all` packages such as `armbian-firmware`.
+- **`manifest.bats` lifts `assert_staged_packages_unique` out of `partition.sh` by
+  TEXT** and must lift `deb_pkg_name` + `deb_control_field` out of `deb-lib.sh` in the
+  same read — the "static test that reads by TEXT must read the whole set" rule again.
+
+`lib/build-kernel.sh` deliberately keeps its own `deb_control_field`: it is the
+self-contained in-builder leg and is out of this library's scope. Contract:
+`tests/deb-lib.test.sh` (happy, per-axis mismatch, corrupt archive, and the
+single-definition property itself).
 
 **Build entry point** [EXISTS]
 

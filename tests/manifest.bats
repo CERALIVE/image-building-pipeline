@@ -5940,8 +5940,10 @@ YAML
   run bash -c "
     set -euo pipefail
     ORCH='$LIB_DIR/stages/partition.sh'
-    # Lift the orchestrator's function bodies without running main().
-    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
+    DEBLIB='$LIB_DIR/shared/deb-lib.sh'
+    # Lift the orchestrator's function bodies without running main(). deb_pkg_name
+    # lives in the shared deb library, so the static read must cover BOTH files.
+    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^deb_control_field()/,/^}/p' \"\$DEBLIB\"; sed -n '/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
     log_success() { printf 'OK %s\n' \"\$*\" >&2; }
     die() { printf 'DIE %s\n' \"\$*\" >&2; exit 1; }
@@ -5961,7 +5963,8 @@ YAML
   run bash -c "
     set -euo pipefail
     ORCH='$LIB_DIR/stages/partition.sh'
-    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
+    DEBLIB='$LIB_DIR/shared/deb-lib.sh'
+    eval \"\$(sed -n '/^deb_pkg_name()/,/^}/p;/^deb_control_field()/,/^}/p' \"\$DEBLIB\"; sed -n '/^assert_staged_packages_unique()/,/^}/p' \"\$ORCH\")\"
     log_error() { printf 'ERROR %s\n' \"\$*\" >&2; }
     log_success() { printf 'OK %s\n' \"\$*\" >&2; }
     die() { printf 'DIE %s\n' \"\$*\" >&2; exit 1; }

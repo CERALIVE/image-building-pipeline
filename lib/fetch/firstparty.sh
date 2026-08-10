@@ -380,10 +380,9 @@ EOF
     expected="${spec%%=*}"; expected_version="${spec#*=}"
     mapfile -t staged < <(find "${debs}" -maxdepth 1 -type f -name "${expected}_*.deb" -print)
     (( ${#staged[@]} == 1 )) || die "expected exactly one staged ${expected} .deb"
-    actual_pkg="$(deb_pkg_name "${staged[0]}")"; actual_version="$(deb_pkg_version "${staged[0]}")"
-    actual_arch="$(deb_pkg_arch "${staged[0]}")"
-    [[ "${actual_pkg}" == "${expected}" && "${actual_version}" == "${expected_version}" && "${actual_arch}" == "${ARCH}" ]] \
-      || die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"
+    assert_deb_identity "${staged[0]}" "${expected}" "${expected_version}" "${ARCH}" \
+      || { actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
+           die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"; }
   done
   log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }

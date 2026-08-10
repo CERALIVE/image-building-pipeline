@@ -76,11 +76,8 @@ _fetch_bsp_native_one() {
     rm -rf "${tmpd}"
     return 1
   fi
-  actual_pkg="$(deb_pkg_name "${staged[0]}")"
-  actual_version="$(deb_pkg_version "${staged[0]}")"
-  actual_arch="$(deb_pkg_arch "${staged[0]}")"
-  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${spec#*=}" \
-      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+  if ! assert_deb_identity "${staged[0]}" "${pkg}" "${spec#*=}" "${ARCH}" --arch-all-ok; then
+    actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
     log_error "BSP fetch control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
     rm -rf "${tmpd}"
     return 1
@@ -188,11 +185,8 @@ _fetch_bsp_curl_one() {
     rm -f "${tmp}"
     return 1
   fi
-  actual_pkg="$(deb_pkg_name "${tmp}")"
-  actual_version="$(deb_pkg_version "${tmp}")"
-  actual_arch="$(deb_pkg_arch "${tmp}")"
-  if [[ "${actual_pkg}" != "${pkg}" || "${actual_version}" != "${wanted_version}" \
-      || ( "${actual_arch}" != "${ARCH}" && "${actual_arch}" != "all" ) ]]; then
+  if ! assert_deb_identity "${tmp}" "${pkg}" "${wanted_version}" "${ARCH}" --arch-all-ok; then
+    actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
     log_error "BSP package control mismatch for ${spec}: package=${actual_pkg:-<missing>} version=${actual_version:-<missing>} architecture=${actual_arch:-<missing>}"
     rm -f "${tmp}"
     return 1

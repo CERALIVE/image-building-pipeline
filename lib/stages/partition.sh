@@ -2,35 +2,17 @@
 #
 # stages/partition.sh — orchestrator stage [3/9]: classify the staged .debs.
 #
-# Also holds the two package-identity helpers the classification rests on:
-# deb_pkg_name (used here) and assert_staged_packages_unique (used by [2b/9]).
+# Also holds assert_staged_packages_unique (used by [2b/9]). The `deb_pkg_name`
+# reader it rests on is NOT defined here: it lives in the one shared home,
+# lib/shared/deb-lib.sh, which lib/orchestrate.sh sources before this module.
+# A static test that lifts assert_staged_packages_unique out of this file by TEXT
+# must therefore lift deb_pkg_name out of deb-lib.sh in the same read.
 #
 # Sourced by lib/orchestrate.sh. See stages/resolve.sh for the dynamic-scoping
 # contract every stage module relies on.
 #
 # shellcheck shell=bash
 # shellcheck disable=SC2154
-
-# ---------------------------------------------------------------------------
-# deb_pkg_name — read the Package: field of a .deb without dpkg (host is Arch).
-# Uses `ar` + tar on control.tar.* . Echoes the package name or empty.
-# ---------------------------------------------------------------------------
-deb_pkg_name() {
-  local deb="$1" tmp name=""
-  tmp="$(mktemp -d)"
-  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO -C "${tmp}" ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  fi
-  if [[ -s "${tmp}/control" ]]; then
-    name="$(awk -F': ' '/^Package:/{print $2; exit}' "${tmp}/control")"
-  fi
-  rm -rf "${tmp}"
-  printf '%s' "${name}"
-}
 
 # ---------------------------------------------------------------------------
 # assert_staged_packages_unique <debs-dir> <built-dir>
