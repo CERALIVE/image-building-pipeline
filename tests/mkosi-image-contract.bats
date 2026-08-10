@@ -373,6 +373,68 @@ PY
   [[ "$output" == *"do NOT raise rootfs_bytes_max"* ]]
 }
 
+@test "size-gate wiring: a NON-SHIPPING kernel variant is measured and reported, never aborted" {
+  # A KASAN+lockdep bench kernel is ~170 MB over by construction. Aborting it
+  # protects a fleet the artifact can never reach — ci/check-release-variant.sh
+  # refuses to release it — while blocking the negative-path QA campaign.
+  local tree="$BATS_TEST_TMPDIR/wired-nonship"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"
+  local tight="$BATS_TEST_TMPDIR/wired-nonship-tight.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024 } }\n' > "$tight"
+  local guard="$BATS_TEST_TMPDIR/refuse-guard.sh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$guard"; chmod +x "$guard"
+
+  run_size_gate_block 1 "$tight" "$tree" "$MEASURE_SH" "" "$guard" edge-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NON-SHIPPING"* ]]
+  [[ "$output" == *"exceeds budget"* ]]
+  [[ "$output" != *"rootfs size budget EXCEEDED for board"* ]]
+}
+
+@test "size-gate wiring: a RELEASABLE variant is still aborted (the exemption is not a blanket)" {
+  # The non-vacuity half. Same over-budget artifact, same wiring, a guard that
+  # ACCEPTS the variant — the build must still die.
+  local tree="$BATS_TEST_TMPDIR/wired-ship"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"
+  local tight="$BATS_TEST_TMPDIR/wired-ship-tight.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024 } }\n' > "$tight"
+  local guard="$BATS_TEST_TMPDIR/accept-guard.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$guard"; chmod +x "$guard"
+
+  run_size_gate_block 1 "$tight" "$tree" "$MEASURE_SH" "" "$guard" edge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rootfs size budget EXCEEDED for board 'rock-5b-plus'"* ]]
+}
+
+@test "size-gate wiring: an UNRESOLVABLE release guard fails CLOSED (budget enforced)" {
+  # With no guard path the gate may not assume the artifact is non-shipping.
+  local tree="$BATS_TEST_TMPDIR/wired-noguard"
+  mkdir -p "$tree"
+  head -c 65536 /dev/zero > "$tree/big.bin"
+  local tight="$BATS_TEST_TMPDIR/wired-noguard-tight.json"
+  printf '{ "rock-5b-plus": { "rootfs_bytes_max": 1024 } }\n' > "$tight"
+
+  run_size_gate_block 1 "$tight" "$tree" "$MEASURE_SH" "" "" edge-test
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rootfs size budget EXCEEDED for board 'rock-5b-plus'"* ]]
+}
+
+@test "size-gate wiring: the REAL release guard refuses edge-test and accepts edge" {
+  # The exemption is only as good as the property it keys on, so drive the
+  # shipped guard rather than a stub.
+  run "$PIPELINE_DIR/ci/check-release-variant.sh" --variant edge-test
+  [ "$status" -ne 0 ]
+  run "$PIPELINE_DIR/ci/check-release-variant.sh" --variant edge
+  [ "$status" -eq 0 ]
+}
+
+@test "size-gate wiring: orchestrate.sh resolves the release guard the size gate consults" {
+  run grep -Fx 'CHECK_RELEASE_VARIANT_SH="${PIPELINE_DIR}/ci/check-release-variant.sh"' "$PIPELINE_DIR/lib/orchestrate.sh"
+  [ "$status" -eq 0 ]
+}
+
 @test "size-gate wiring: an INSTALL_BOOT_BSP=0 parity build skips the gate LOUDLY" {
   # A kernel-less parity rootfs is not the shipped image, so measuring it would be
   # a vacuous pass. Skipping is correct; skipping silently is not.

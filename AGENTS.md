@@ -2386,6 +2386,23 @@ worth knowing before editing it:
   placement, not a condition, so the PR gate (which is DRY_RUN plan-only) still
   cannot see this stage. Same blind spot as `[6b/9]`: every fix here needs a static
   guard.
+- **A NON-SHIPPING kernel variant is MEASURED and REPORTED, never aborted — and the
+  test is the release guard, not a name.** The ceiling governs a shippable artifact,
+  and `ci/check-release-variant.sh` is the existing authority on whether a variant
+  can ever be released (it decides by PROPERTY — the variant's fragments turn on a
+  `forbidden-symbols.list` symbol — so a renamed or future debug variant is covered
+  automatically). When that guard REFUSES the resolved `KERNEL_VARIANT`, `[6c/9]`
+  still runs `measure-size.sh` and still prints the number, but withholds the abort.
+  This is not hypothetical slack: the first real `--variant edge-test` build measured
+  **1,665,290,240 B** against the 1.5 GB ceiling — production `edge` on the same
+  commit was 1,435,555,840 B, so KASAN + lockdep + the debug package delta account
+  for ~219 MiB — and failing it would have blocked the whole Wave-8 negative-path QA
+  campaign to protect a fleet the artifact is structurally barred from reaching.
+  **It FAILS CLOSED**: an unset guard path or an unset variant enforces the budget,
+  so the production path is untouched and cannot be exempted by omission. This is
+  narrower than, and does NOT extend, the `CERALIVE_DEBUG_IMAGE=1` exemption on the
+  RELATIVE baseline below — a debug image on a *releasable* kernel track is still
+  held to the ceiling, exactly as that note says.
 - **The budget rule has exactly one implementation.** The stage invokes
   `measure-size.sh` and propagates its exit status through `die`; it does not
   re-derive the comparison. The CI synthetic-fixture job is retained unchanged as an

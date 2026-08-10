@@ -678,7 +678,7 @@ extract_size_gate_block() {
 # caller-supplied MEASURE_SIZE_SH, exactly as main() would.
 run_size_gate_block() {
   local install_boot_bsp="$1" budget_json="$2" artifact="$3" measure_sh="${4:-$MEASURE_SH}"
-  local baseline_spy="${5:-}"
+  local baseline_spy="${5:-}" release_variant_sh="${6:-}" kernel_variant="${7:-}"
   run bash -c "
     set -euo pipefail
     log_info()  { printf '[INFO] %s\n' \"\$*\"; }
@@ -687,6 +687,8 @@ run_size_gate_block() {
     compare_size_against_baseline() { if [[ -n '${baseline_spy}' ]]; then touch '${baseline_spy}'; fi; printf '[INFO] baseline-compare %s\n' \"\$1\"; }
     export SIZE_BUDGET_JSON='${budget_json}'
     MEASURE_SIZE_SH='${measure_sh}'
+    CHECK_RELEASE_VARIANT_SH='${release_variant_sh}'
+    KERNEL_VARIANT='${kernel_variant}'
     INSTALL_BOOT_BSP='${install_boot_bsp}'
     board=rock-5b-plus
     artifact='${artifact}'

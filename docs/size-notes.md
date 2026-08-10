@@ -516,6 +516,18 @@ fails the build with **no disk artifact produced at all**.
 | `INSTALL_BOOT_BSP=0` | skipped, with a `log_warn` naming the reason | a kernel-less parity rootfs is not the shipped image, so measuring it is a vacuous pass — but the skip is loud, never silent |
 | architecture | **not** gated | every shipped board carries a non-null `rootfs_bytes_max`, including `x86-minipc`; gating on arm64 would exempt the one board whose size has never been measured |
 | over budget | `die` → build aborts | the budget check itself is not reimplemented — `measure-size.sh` is invoked and its exit status propagates, so there is exactly one implementation of the rule |
+| non-shipping kernel variant | measured and **reported**, not aborted | the ceiling governs a *shippable* artifact; when `ci/check-release-variant.sh` refuses the resolved `KERNEL_VARIANT` the number is still printed but the abort is withheld. The test is that guard's PROPERTY (fragments turning on a `forbidden-symbols.list` symbol), never a variant name, so a future debug variant is covered and a rename gains nothing. **Fails closed**: an unset guard path or variant enforces the budget |
+
+The non-shipping exemption is not slack anybody wanted. The first real
+`--variant edge-test` build (2026-08-10, `rock-5b-plus`) measured
+**1,665,290,240 B** — production `edge` on the same commit was **1,435,555,840 B**,
+so KASAN + lockdep + the debug package delta cost ~219 MiB and no amount of slimming
+brings a fault-injection kernel under a ceiling written for the shipped image.
+Aborting there would have blocked the Wave-8 negative-path QA campaign in order to
+protect a fleet that `ci/check-release-variant.sh` already bars the artifact from.
+It is strictly narrower than the `CERALIVE_DEBUG_IMAGE=1` exemption on the RELATIVE
+baseline (§4): a debug image on a *releasable* kernel track is still held to the
+absolute ceiling.
 
 The existing `v2-ci.yml` synthetic-fixture job is **retained unchanged**. It is a
 fast, hardware-free proof that the gate's own pass and fail legs work at all
