@@ -142,7 +142,22 @@ jobs:
           APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
           MKOSI_BUILDER_IMAGE: ${{ steps.cache-meta.outputs.builder_image }}
           CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
-        run: ./build rock-5b-plus
+        # `set -o pipefail` is load-bearing, not boilerplate: without it the tee
+        # becomes the pipeline's exit status and a FAILED production build would
+        # report success.
+        run: |
+          set -euo pipefail
+          ./build rock-5b-plus 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
+      # A production candidate must be clean, not merely successful: the build
+      # exits 0 while emitting deprecation notices, ignored repart keys and
+      # chroot service-start failures. This is the only place a REAL production
+      # build log exists, so it is the only place the census can be enforced.
+      - name: Enforce the build-log census
+        run: |
+          set -euo pipefail
+          python3 ./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md
+          ./ci/check-build-log.sh --self-test
+          ./ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"
       - name: Build candidate-bound signed rollback probe
         env:
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki

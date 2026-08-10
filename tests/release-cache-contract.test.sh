@@ -24,9 +24,13 @@ assert workflow["permissions"]["contents"] == "read"
 assert workflow["concurrency"]["cancel-in-progress"] == "false"
 assert any(step.get("uses") == "actions/checkout@v7" for step in steps)
 assert any(step.get("name") == "Materialize release trust inputs" for step in steps)
+CANDIDATE_BUILD_RUN = (
+    "set -euo pipefail\n"
+    './build rock-5b-plus 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"\n'
+)
 assert any(
     step.get("name") == "Build exact production candidate"
-    and step.get("run") == "./build rock-5b-plus"
+    and step.get("run") == CANDIDATE_BUILD_RUN
     and step.get("env", {}).get("CERALIVE_BUILD_MODE") == "production"
     for step in steps
 )
@@ -158,6 +162,20 @@ setup_index = step_index(lambda step: step.get("uses") == "docker/setup-buildx-a
 builder_index = step_index(lambda step: step.get("uses") == "docker/build-push-action@v7")
 trust_index = step_index(lambda step: step.get("name") == "Materialize release trust inputs")
 build_index = step_index(lambda step: step.get("name") == "Build exact production candidate")
+census_index = step_index(lambda step: step.get("name") == "Enforce the build-log census")
+
+# The census gate is only meaningful against a REAL production build log, which
+# exists nowhere else — the PR gate is DRY_RUN=1 and never runs the image layers.
+# So it must sit immediately after the build, and the build must not be able to
+# hide a failure behind the tee that produces that log.
+assert build_index < census_index
+census_run = steps[census_index]["run"]
+assert "set -euo pipefail" in census_run
+assert "./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md" in census_run
+assert "./ci/check-build-log.sh --self-test" in census_run
+assert './ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"' in census_run
+assert "set -o pipefail" in steps[build_index]["run"] or "set -euo pipefail" in steps[build_index]["run"]
+assert "tee " in steps[build_index]["run"]
 restore_index = step_index(lambda step: step.get("uses") == "actions/cache/restore@v6")
 save_index = step_index(lambda step: step.get("uses") == "actions/cache/save@v6")
 bound_index = step_index(lambda step: step.get("name") == "Bound board-scoped mkosi cache")

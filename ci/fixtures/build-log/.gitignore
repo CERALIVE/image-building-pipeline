@@ -1,0 +1,4 @@
+# The root .gitignore excludes *.log as build output. These three are COMMITTED
+# FIXTURES — they are the whole proof that ci/check-build-log.sh is non-vacuous
+# (clean → 0, known-accepted → 0, novel → nonzero), so they must be tracked.
+!*.log

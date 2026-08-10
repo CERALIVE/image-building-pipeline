@@ -78,6 +78,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`docs/host-support.md`](docs/host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`docs/size-notes.md`](docs/size-notes.md) — locale strip, firmware audit, size-gate |
+| **Build-log warning/error signatures + the lint that governs them** | [`docs/build-log-census.md`](docs/build-log-census.md) + `ci/check-build-log.sh` / `ci/check-build-log-census.py` — see the KEY FACT below |
 | **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md) + `mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
 | **Cog display add-on recipe** | [`docs/cog-display-addon.md`](docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
 | **Cog on-hardware render QA checklist** | [`docs/cog-display-hw-checklist.md`](docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
@@ -202,6 +203,61 @@ mention it too, so reordering silently swaps which block the gate's tests execut
 
 All 26 runtime `[N/9]` log strings are byte-identical to the pre-split file, and
 the `DRY_RUN=1` build plan is byte-identical for all three shipped boards.
+
+**A build-log warning is a defect with a countdown on it — the 26 signatures are
+frozen in a census and a lint rejects anything outside it** [EXISTS]
+
+A real `rock-5b-plus --variant edge` build exited 0 while emitting 26 distinct
+warning/error signatures. `docs/build-log-census.md` freezes all 26 with a
+baseline count, stage, owner and a `FIXED` / `ACCEPTED` / `BLOCKING` disposition;
+`ci/check-build-log.sh` enforces it against a real build log and is wired into
+`release.yml` immediately after the production candidate build (the only place a
+real production log exists — the PR gate is `DRY_RUN=1` and never runs the image
+layers). 12 were FIXED here, 14 are ACCEPTED with a stated reason, 0 remain
+BLOCKING.
+
+Four of the fixes are worth knowing before touching the files they live in,
+because each is a case where the obvious placement is the wrong one:
+
+- **`policy-rc.d` ships via a SKELETON tree, not an ExtraTree or a postinst.**
+  mkosi copies skeleton trees BEFORE the package manager runs
+  (`install_skeleton_trees` precedes `install_distribution`), which is the only
+  placement that covers the base layer's own bootstrap — an ExtraTree arrives
+  after the noise has already been emitted. It denies service STARTS only:
+  invoke-rc.d treats 101 as "do not run, this is fine" and returns success, so
+  dpkg's own exit status is untouched and a package that genuinely fails to
+  configure still fails the build. The app layer deletes it and **dies** if it
+  survives — a shipped `policy-rc.d` gives a device that installs packages and
+  silently never starts them.
+- **`WithDocs=no` corrupted the update-alternatives database**, it was not just
+  noise. It makes dpkg `--path-exclude=/usr/share/man/*`, which deletes man pages
+  BEFORE the maintainer scripts that register them as alternative slaves run: 13
+  warnings plus one hard `update-alternatives: error`. Every layer now installs
+  docs and the FINAL app layer prunes them
+  (`app/mkosi.postinst.chroot::prune_package_docs`, which keeps
+  `/usr/share/doc/*/copyright`). Do not re-add `WithDocs=no` to any layer.
+- **`zstd` in `shared.list` is too LATE.** The runtime layer installs
+  `shared.list` after the platform layer already generated the initrd, so
+  initramfs-tools fell back to gzip on every build. `platform/mkosi.postinst`
+  installs `zstd` itself, ahead of the kernel package, on both kernel paths.
+- **mkosi's workspace must sit on the OUTPUT filesystem, and cannot live under
+  `mkosi/`.** mkosi renames each finished subimage out of its workspace into
+  `mkosi/build/`, and its `/var/tmp` default is a different device on a normal
+  box — all eight renames degraded to full multi-GB copies. The workspace is
+  pinned to the repo-root `.mkosi-workspace` (`CERALIVE_REL_MKOSI_WORKSPACE_DIR`
+  in `lib/paths.sh`, also on the CI cleanup allowlist) because mkosi's
+  `check_workspace_directory()` refuses a workspace inside any `BuildSources=`
+  source dir — and the build source IS the `mkosi/` tree.
+
+`dir not exist` is **external and stays ACCEPTED**: it is
+`rockchip-multimedia-config` 1.0.2-1's own `DEBIAN/postinst` `echo` when
+`/usr/lib64` is neither a symlink nor a directory. Nothing in this repository
+emits it, and the package is SHA-256-pinned, so the string is immutable.
+
+Guards: `tests/mkosi-contract.bats` (25 tests, mutation-verified),
+`ci/check-build-log.sh --self-test` (clean / known-accepted / novel fixtures plus
+generated regression and count-inflation cases), and
+`ci/check-build-log-census.py --expect-count 26`.
 
 **Build entry point** [EXISTS]
 

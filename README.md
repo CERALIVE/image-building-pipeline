@@ -311,6 +311,34 @@ must select its files through `lib/common.sh::runtime_pkg_list_files` — that
 helper is what keeps the variant-keyed debug delta out of the production package
 contract. Guards: `tests/manifest.bats` §30.
 
+## Build-Log Census
+
+A build that exits 0 is not the same as a build that is clean. A real
+`rock-5b-plus --variant edge` build emitted 26 distinct warning/error signatures
+on its way to a successful `.raw` + `.raucb` — among them two mkosi deprecation
+notices, three `GrowFileSystem=` keys systemd-repart silently ignored, an
+`update-alternatives: error`, an initrd that quietly fell back to gzip, and eight
+multi-GB cross-filesystem copies.
+
+[`docs/build-log-census.md`](docs/build-log-census.md) freezes all 26 with a
+baseline count, build stage, owner and a disposition — `FIXED` (removed; must
+never reappear), `ACCEPTED` (external or inherent, allowed up to its baseline
+count) or `BLOCKING`. 12 are FIXED, 14 ACCEPTED, 0 BLOCKING.
+
+```bash
+ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md  # schema
+ci/check-build-log.sh --self-test                                        # non-vacuity
+ci/check-build-log.sh <build.log>                                        # the gate
+ci/check-build-log.sh --census-report <build.log>                        # counts only
+```
+
+The lint rejects a `BLOCKING` signature, a `FIXED` regression, a signature in no
+table at all, and an `ACCEPTED` signature that appears more often than its
+baseline. There are no wildcard exceptions: every entry is compared with `==`
+against a normalized line. It runs in `release.yml` right after the production
+candidate build, which is the only place a real production build log exists — the
+PR gate is `DRY_RUN=1` and never executes the image layers.
+
 ## Image Size Gate
 
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
