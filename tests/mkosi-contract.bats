@@ -169,6 +169,78 @@ sectioned_keys() {
   [ "$status" -ne 0 ]
 }
 
+@test "mkosi-contract: every image layer installs docs (alternatives ordering)" {
+  # The counterpart of the deferred prune below. WithDocs=no here is what broke
+  # update-alternatives registration (census rows 5 and 6), so a re-slip must fail.
+  local f offenders=""
+  while read -r f; do
+    if grep -Eq '^WithDocs=no$' "$PIPELINE_DIR/$f"; then
+      offenders+="$f "
+    fi
+  done < <(all_mkosi_configs)
+  [ -z "$offenders" ] || {
+    echo "WithDocs=no deletes man pages before maintainer scripts register them: $offenders" >&2
+    return 1
+  }
+  grep -Fxq 'WithDocs=yes' "$MKOSI_DIR/mkosi.images/base/mkosi.conf"
+  grep -Fxq 'WithDocs=yes' "$MKOSI_DIR/mkosi.images/app/mkosi.conf"
+}
+
+@test "mkosi-contract: zstd is installed before the kernel package, not just via shared.list" {
+  local postinst="$MKOSI_DIR/mkosi.images/platform/mkosi.postinst"
+  grep -Fq 'mkosi-install -y --no-install-recommends zstd' "$postinst"
+
+  # Ordering IS the fix: shared.list installs zstd in the RUNTIME layer, which runs
+  # after the platform layer already generated the initrd. Assert the platform-layer
+  # install precedes the boot-BSP transaction that triggers the kernel postinst.
+  local zstd_line bsp_line
+  zstd_line="$(grep -n 'recommends zstd$' "$postinst" | head -1 | cut -d: -f1)"
+  bsp_line="$(grep -n 'installing authenticated staged boot BSP' "$postinst" | head -1 | cut -d: -f1)"
+  [ -n "$zstd_line" ]
+  [ -n "$bsp_line" ]
+  [ "$zstd_line" -lt "$bsp_line" ]
+
+  grep -Eq '^zstd\b' "$PIPELINE_DIR/manifests/packages/shared.list"
+}
+
+@test "mkosi-contract: the shipped doc prune keeps copyright and drops the rest" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  local root="$BATS_TEST_TMPDIR/doc"
+  mkdir -p "$root/libfoo1" "$root/bar" "$root/empty-after"
+  printf 'licence\n' >"$root/libfoo1/copyright"
+  printf 'changelog\n' >"$root/libfoo1/changelog.Debian.gz"
+  printf 'readme\n' >"$root/libfoo1/README.md"
+  printf 'licence\n' >"$root/bar/copyright"
+  printf 'doc\n' >"$root/empty-after/NEWS.gz"
+  ln -s libfoo1 "$root/libfoo1-udeb"
+
+  # Source the shipped script (main() is $0-guarded, so nothing destructive runs)
+  # and drive the REAL function — a static grep would not prove the find preserves
+  # copyright, and this repo has already shipped one prune that deleted too much.
+  CERALIVE_DOC_ROOT="$root" bash -c "source '$app_postinst'; prune_package_docs"
+
+  [ -f "$root/libfoo1/copyright" ]
+  [ -f "$root/bar/copyright" ]
+  [ ! -e "$root/libfoo1/changelog.Debian.gz" ]
+  [ ! -e "$root/libfoo1/README.md" ]
+  [ ! -e "$root/empty-after" ]
+  [ -L "$root/libfoo1-udeb" ]
+  [ "$(readlink "$root/libfoo1-udeb")" = "libfoo1" ]
+}
+
+@test "mkosi-contract: the deferred prune runs at the final app layer only" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  grep -Fq 'prune_package_docs' "$app_postinst"
+  grep -Fq 'prune_final_image_payload' "$app_postinst"
+  # No earlier layer may delete docs — that would reintroduce the ordering bug for
+  # every package the later layers configure.
+  run grep -rn '/usr/share/doc' \
+    "$MKOSI_DIR/mkosi.images/base" \
+    "$MKOSI_DIR/mkosi.images/platform" \
+    "$MKOSI_DIR/mkosi.images/runtime"
+  [ "$status" -ne 0 ]
+}
+
 @test "mkosi-contract: the pinned mkosi parses every config with no diagnostics" {
   command -v mkosi >/dev/null 2>&1 || skip "mkosi not on PATH (canonical build is containerized)"
   local have

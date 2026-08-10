@@ -190,8 +190,11 @@ prune_final_image_payload() {
     /usr/share/X11
     /usr/share/bash-completion
     /usr/share/gtk-3.0
+    /usr/share/gtk-doc
     /usr/share/icons/Adwaita
     /usr/share/icons/hicolor
+    /usr/share/info
+    /usr/share/lintian
     /usr/share/man
     /usr/share/mime
     /usr/share/sounds
@@ -199,6 +202,29 @@ prune_final_image_payload() {
   )
   log "pruning desktop and documentation payload from final appliance image"
   rm -rf "${paths[@]}"
+  prune_package_docs
+}
+
+# prune_package_docs — the DEFERRED half of the appliance doc strip.
+#
+# The layers above are built WithDocs=yes so that man pages exist while packages
+# are configured: several maintainer scripts register a man page as an
+# update-alternatives slave during `configure`, and dpkg's --path-exclude had
+# been deleting those files first (census rows 5 and 6 — 13 warnings and one hard
+# error, and an alternatives database that disagreed with the filesystem).
+#
+# /usr/share/doc/*/copyright is KEPT, matching what mkosi's own WithDocs=no does
+# via --path-include: the licence text is a distribution obligation, not payload.
+# Directory SYMLINKS are kept too — Debian points /usr/share/doc/<pkg> at a
+# sibling for many binary packages, and removing the link orphans that copyright.
+# CERALIVE_DOC_ROOT exists so the shipped function itself can be driven against a
+# synthetic tree by tests/mkosi-contract.bats; the build never sets it.
+prune_package_docs() {
+  local docdir="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
+  [[ -d "${docdir}" ]] || return 0
+  log "pruning ${docdir} down to copyright files (deferred from the build layers)"
+  find "${docdir}" -type f ! -name copyright -delete
+  find "${docdir}" -mindepth 1 -type d -empty -delete
 }
 
 main() {

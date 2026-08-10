@@ -131,12 +131,15 @@ mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
 	printf 'FAIL platform BSP installer is chrooted outside mkosi wrapper PATH\n' >&2
 	exit 1
 }
-# Three install sites: the HW-accel GStreamer set, initramfs-tools, and the boot
-# BSP. initramfs-tools is deliberately its OWN transaction and not one more name on
-# the boot-BSP line — a kernel .deb emits its initramfs by run-parts-ing
+# FOUR install sites: the HW-accel GStreamer set, zstd, initramfs-tools, and the
+# boot BSP. initramfs-tools is deliberately its OWN transaction and not one more
+# name on the boot-BSP line — a kernel .deb emits its initramfs by run-parts-ing
 # /etc/kernel/postinst.d, so on the source-built path the hook has to be configured
-# before the kernel is unpacked (see docs/kernel-build-from-source.md §4b).
-[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 3 ]] || {
+# before the kernel is unpacked (see docs/kernel-build-from-source.md §4b). zstd is
+# separate for the same ORDERING reason: initramfs-tools defaults to COMPRESS=zstd
+# and degrades to gzip if the binary is not already configured when the kernel
+# postinst runs, and shared.list installs it a whole layer too late.
+[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 4 ]] || {
 	printf 'FAIL platform BSP installs do not all use mkosi-install\n' >&2
 	exit 1
 }
@@ -174,10 +177,16 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 		exit 1
 	}
 
+# The ORDER is the assertion, not just the membership: zstd must be a configured
+# package before the kernel .deb's postinst generates the initramfs, or
+# initramfs-tools silently falls back to gzip. (initramfs-tools itself is absent
+# here because this fixture drives the PREBUILT vendor path, where the kernel
+# package pulls it as a hard dependency; the source-built path adds a fourth call.)
 mapfile -t install_calls <"${RUN_DIR}/mkosi-install.calls"
-[[ "${#install_calls[@]}" -eq 2 ]]
+[[ "${#install_calls[@]}" -eq 3 ]]
 [[ "${install_calls[0]}" == '-y --no-install-recommends gstreamer-bsp gstreamer-runtime' ]]
-[[ "${install_calls[1]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo' ]]
+[[ "${install_calls[1]}" == '-y --no-install-recommends zstd' ]]
+[[ "${install_calls[2]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo' ]]
 [[ "$(<"${RUN_DIR}/rm.calls")" == \
 	"-rf ${RUN_DIR}/buildroot/usr/lib/firmware/qcom ${RUN_DIR}/buildroot/usr/lib/firmware/intel ${RUN_DIR}/buildroot/usr/lib/firmware/ath10k ${RUN_DIR}/buildroot/usr/lib/firmware/ath11k ${RUN_DIR}/buildroot/usr/lib/firmware/ath12k ${RUN_DIR}/buildroot/usr/lib/firmware/updates" ]]
 
