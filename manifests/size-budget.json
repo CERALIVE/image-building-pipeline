@@ -11,7 +11,7 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), and it must stay byte-identical to the matching ci/size-baseline.<board>.json \u2014 manifest.bats fails the build if the two registries disagree. Both RK3588 boards are under the 1.5 GB ceiling with ~78-85 MB of headroom. rootfs_bytes_max has never been moved in either direction. See each board's note for the armbian-firmware pin caveat. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), and it must stay byte-identical to the matching ci/size-baseline.<board>.json \u2014 mkosi-contract.bats fails the build if the two registries disagree. Both RK3588 boards are under the 1.5 GB ceiling with ~78-85 MB of headroom. rootfs_bytes_max has never been moved in either direction. See each board's note for the armbian-firmware pin caveat. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
     "rootfs_bytes_max": 1500000000,
     "measured": 1422766080,

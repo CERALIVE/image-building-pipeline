@@ -163,7 +163,7 @@ subsystem is `[PARTIAL]` in `AGENTS.md`.
 systemd): it stubs `nmcli` / `ip` / `systemctl` / `systemd-run` / `timeout` and drives the
 real scripts through bring-up, the `GET`/`POST` page, the credential handoff, all four
 MAC6 conditions, the wrong-passphrase retry, the hard-timeout return-to-AP, and the
-out-of-band teardown verb. It is gated in `tests/manifest.bats`
+out-of-band teardown verb. It is gated in `tests/postinst-wiring.bats`
 (*"provision portal: offline harness proves the 4-condition teardown + handoff"*).
 
 On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotspot

@@ -3,7 +3,7 @@
 # which is not a legal Debian package name. The expanded schema validates each
 # package-array item against the Debian package-name pattern, so this is rejected
 # at validation (it would otherwise reach apt/dpkg as an unresolvable package).
-# manifest.bats asserts this fails with "kernel_packages" in the message.
+# manifest-schema.bats asserts this fails with "kernel_packages" in the message.
 arch: arm64
 armbian_branch: vendor
 kernel_packages:

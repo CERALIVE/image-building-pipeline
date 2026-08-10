@@ -71,7 +71,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
-| Unit tests / boot fallback | `tests/manifest.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
+| Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
 | **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
 | **x86 ESP + GRUB A/B disk assembly** | `lib/assemble-disk-x86.sh` (offline producer); `mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `mkosi/platform/x86/test-x86-grub.sh`; rationale in [`mkosi/platform/x86/README.md`](mkosi/platform/x86/README.md) §2 |
@@ -139,12 +139,51 @@ both rules above. `tests/postinst-module-contract.test.sh` proves, in a scrubbed
 `env -i` shell with nothing pre-sourced, that every registry function resolves from a
 bare `source postinst-lib.sh` and that each module also sources standalone.
 
+**`manifest.bats` is now SIX concern suites plus one helper file** [EXISTS]
+
+The 7,244-line `tests/manifest.bats` was split with every case moved VERBATIM —
+no assertion rewritten, no expected value changed, the pre-split `@test` count
+equal to the sum of the six post-split counts:
+
+| Suite | §-sections | Cases |
+|---|---:|---:|
+| `tests/manifest-schema.bats` | 1-6 | 25 |
+| `tests/package-contract.bats` | 13, 14, 14b, 15, 17, 19, 19b, 20, 22, 27, 28, 30, 31 | 92 |
+| `tests/postinst-wiring.bats` | 8, 8b, 18, 18b, 18c, 21, 23 | 41 |
+| `tests/mkosi-contract.bats` | 7, 9, 9b, 10, 11, 12 | 62 |
+| `tests/runtime-services.bats` | the hostname/mDNS block, 16, 18d, 18e, 18f, 18g, 29 | 88 |
+| `tests/variant-contract.bats` | 26 | 67 |
+| `tests/manifest-helpers.bash` | — (shared `setup` + every fixture helper) | 0 |
+
+Four things this split fixes in place, and one it deliberately does not:
+
+- **Every `§NN` marker moved with its section.** The `# ===` / `# NN. title`
+  banners are re-emitted at the head of their section in the owning suite, so the
+  dozens of `<suite>.bats §NN` citations throughout this file still resolve.
+- **ALL helpers live in `manifest-helpers.bash`, not just the "common" ones.**
+  Each suite starts with `load manifest-helpers`. Splitting helpers by apparent
+  ownership is how a relocated case silently loses a fixture; keeping one helper
+  home makes that impossible. **The helper file must never define an `@test`** —
+  the acceptance count would stop summing.
+- **`manifest-helpers.bash` is a `.bash` file on purpose.** Bats' `load` appends
+  `.bash`, and a `.bats` extension would make CI's `bats tests/*.bats` execute it
+  as a (case-less) suite.
+- **The case bodies embed whole shell scripts in heredocs** — fake `gpg`, in-namespace
+  repro harnesses — whose text contains both `foo() {` and a column-one `}`. Any
+  future re-split must track heredoc state; a naive "first `}` at column one" scan
+  truncates those cases in the middle of a heredoc.
+- **It does NOT rebalance the suites by size.** `runtime-services.bats` and
+  `package-contract.bats` are the two largest and hold `ci/size-exceptions.txt`
+  entries, because they share expensive fixtures (the hostname/mDNS harness, the
+  parity-rootfs builder) that a further split would separate from their cases.
+
 **A static test that reads the library by TEXT must read the whole set.** Several
 harnesses extract function bodies or generated payloads out of the source
 (`real-avahi-hostname-contract.sh`, `systemd-ordering-cycle.test.sh`,
 `kernel-freeze-guardrails.test.sh`, `data-persistence-public-symlink.test.sh`, the
 `resolv-conf-*` pair, `interface-naming-path-match.test.sh`,
-`package-migration-coverage.sh`, `manifest.bats`, `bench-partlabels.bats`). Pointed
+`package-migration-coverage.sh`, the manifest contract suites,
+`bench-partlabels.bats`). Pointed
 at the entry alone they extract NOTHING, and most of their assertions then pass
 vacuously. Each one concatenates the entry + `postinst.d/*.sh` for static reads while
 still SOURCING the entry; keep that distinction when adding a new check.
@@ -192,13 +231,13 @@ Four rules make the split safe, and each of them is the answer to a real trap:
 - **A static test that reads the orchestrator by TEXT must read the whole SET**,
   concatenated in the entry's own `source` order — the same lesson the
   `postinst.d/` split already records. Pointed at the entry alone,
-  `manifest.bats`'s size-gate/x86/env_names extractions and
+  `mkosi-contract.bats`'s size-gate/x86/env_names extractions and
   `mkosi-package-staging.test.sh`'s greps match NOTHING and pass vacuously. Both
   harnesses build that set into a FILE and grep the file: piping it into `grep -q`
   SIGPIPEs the writer and `set -o pipefail` turns a correct read into a failure.
 
 `stage_size_gate` must stay ABOVE `compare_size_against_baseline` inside
-`size-gate.sh`: `manifest.bats` extracts the shipped gate as the FIRST 2-space
+`size-gate.sh`: `mkosi-contract.bats` extracts the shipped gate as the FIRST 2-space
 `if … fi` mentioning `[6c/9]`, and the comparator's own early-return guards
 mention it too, so reordering silently swaps which block the gate's tests execute.
 
@@ -230,7 +269,7 @@ Three consequences worth knowing before touching it:
 - **An empty expected version skips the version leg** (the URL-pinned RK3588
   userspace family has no version to assert), and `--arch-all-ok` is what admits
   `Architecture: all` packages such as `armbian-firmware`.
-- **`manifest.bats` lifts `assert_staged_packages_unique` out of `partition.sh` by
+- **`variant-contract.bats` lifts `assert_staged_packages_unique` out of `partition.sh` by
   TEXT** and must lift `deb_pkg_name` + `deb_control_field` out of `deb-lib.sh` in the
   same read — the "static test that reads by TEXT must read the whole set" rule again.
 
@@ -706,7 +745,7 @@ of which are now first-class modes rather than special cases:
   half-specified config is the one mistake that would still BUILD.
 
 Both modes converge on ONE `olddefconfig` → `syncconfig` → `verify-kernel-config.sh`
-sequence. Keep it that way: `manifest.bats` statically requires exactly one
+sequence. Keep it that way: `variant-contract.bats` statically requires exactly one
 occurrence of each of those `make` calls in the file.
 
 - **The production vendor path is BYTE-IDENTICAL.** `variants:` is stripped from
@@ -857,7 +896,7 @@ occurrence of each of those `make` calls in the file.
   #84's `variant_overrides.edge.dtb_name` was and is correct — it is retained as
   an explicit per-tree assertion rather than deleted as redundant. **This class of
   defect is invisible to the PR gate**, which is `DRY_RUN=1` plan-only and never
-  runs `[6b/9]`, so the static guards in `manifest.bats §26` pin both boards'
+  runs `[6b/9]`, so the static guards in `variant-contract.bats §26` pin both boards'
   resolved `DTB_NAME` on both kernel paths and forbid an `rk3588s-` prefix on
   either shipped RK3588 board.
 - **The first-party staging key is `CERALIVE_BOARD` (the board manifest stem),
@@ -883,7 +922,7 @@ occurrence of each of those `make` calls in the file.
   would let two manifests sharing a `board_id` clobber each other under different
   locks. `cache/${BOARD_ID}` is a DIFFERENT tree for a different purpose and is
   deliberately not aliased onto this. A miss now LOGS the probed path instead of
-  returning silently. Guards: `manifest.bats` §27 (7 tests, incl. the real shipped
+  returning silently. Guards: `package-contract.bats` §27 (7 tests, incl. the real shipped
   stager driven against every shipped manifest with its real `board_id`, and the
   inverse leg proving a `BOARD_ID`-keyed tree is NOT picked up).
 - **The `DRY_RUN` PR gate cannot see this stage — so every fix needs a STATIC
@@ -943,7 +982,7 @@ occurrence of each of those `make` calls in the file.
   the memory ceiling each fail the suite). Write-up:
   [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §3b.
 
-Guards: `manifest.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
+Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
@@ -1044,7 +1083,7 @@ a live Rock 5B+ running 7.1.5 (neither symlink existed on the board):
 `snps_hdmirx` is the CORRECT upstream name, not a bug in itself — but it also
 leaks into the CeraUI source list as the row's `displayName`, because CeraUI's
 `onboard-display-names.ts` friendly-name map only knows the vendor spellings.
-That half is a CeraUI change, not a pipeline one. Guards: `manifest.bats`
+That half is a CeraUI change, not a pipeline one. Guards: `postinst-wiring.bats`
 "hdmi-in: …" × 3 (driver-keyed rule, present in the LIVE writer, both names).
 
 **HDMI-RX audio needs BOTH patch `0005` and patch `0006` — `0005` alone gives a
@@ -1735,7 +1774,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   shells out to `unsquashfs` to extract the plain-format bundle manifest. Build-time
   `mksquashfs` runs on the HOST/CI, so this runtime-only gap was invisible.
   `squashfs-tools` is now in `shared.list` (standard bookworm `main` — no new trust
-  source). Guard: `manifest.bats` "squashfs-tools is installed so rauc can unsquashfs
+  source). Guard: `mkosi-contract.bats` "squashfs-tools is installed so rauc can unsquashfs
   bundles".
 - **`mkfs.ext4` runtime gap.** After signature and manifest checks pass, RAUC's
   slot-write phase shells out to `/sbin/mkfs.ext4` from `e2fsprogs` to format the
@@ -1743,7 +1782,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   Rock 5B+ install reported exactly: `LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)`. Build-time tooling never needed
   `mkfs.ext4`, so this runtime-only gap was invisible. Adding `e2fsprogs` made the
   REAL end-to-end install complete successfully, activate slot B, and boot the
-  fresh slot healthy; guard: `manifest.bats` "e2fsprogs is installed so rauc can
+  fresh slot healthy; guard: `mkosi-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
 
 **PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
@@ -1769,7 +1808,7 @@ todo 31's measured baseline: 48 packages, `shared.list` + the resolved
 the BUILD VARIANT, not on a board family, but it keeps the `.delta.list` suffix
 because it is literally the same format. Three places globbed
 `manifests/packages/*.delta.list` as a DIRECTORY — `lib/parity-check.sh`'s expected
-set, `tests/realhw-suite.sh`'s synthesized dpkg status, and `manifest.bats`'s own
+set, `tests/realhw-suite.sh`'s synthesized dpkg status, and the contract suites' own
 `make_parity_rootfs` fixture. Left alone, each would have folded the 18 debug
 packages into the PRODUCTION contract, so `parity-check.sh` would `die` at the
 `[7/9]` gate on a **correct** production image for "Debian packages MISSING:
@@ -1815,7 +1854,7 @@ inert: bookworm ships only USER units (`/usr/lib/systemd/user/pulseaudio.{servic
 and this appliance has no user session, so it never autostarts and never contends
 with `alsasrc` for the capture device. Do not enable it system-wide.
 
-Guards: `tests/manifest.bats` §30 (15 tests — the exact 18-package content, zero
+Guards: `tests/package-contract.bats` §30 (15 tests — the exact 18-package content, zero
 duplication against `shared.list` or either family delta, the production selection
 pinned to shared+family only, the debug selection adding *exactly* the delta and
 removing nothing, a real `parity-check.sh` run against a production-modelled rootfs
@@ -1864,7 +1903,7 @@ worth knowing before editing it:
   independent fast proof of the gate's own pass/fail legs — `[6c/9]` complements it,
   it does not replace it.
 
-Guards: `manifest.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
+Guards: `mkosi-contract.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
 extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
 (pass leg, abort leg, spy-proven silent-skip refusal, stage ordering, DRY_RUN
 unreachability), plus a policy guard that no board's ceiling may be raised above
@@ -1913,7 +1952,7 @@ so `mkosi.images/runtime/mkosi.conf` strips the files instead, on the same
   on that real ext4 rootfs dropped 157,634,560 B — a third independent measurement
   agreeing with the tar sums.
 
-Guards: `manifest.bats` §28 (entries present; the `dri/*` widening rejected; the
+Guards: `package-contract.bats` §28 (entries present; the `dri/*` widening rejected; the
 locale strip not clobbered by sharing the key; the packages never `apt remove`d).
 Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §9.
 
@@ -2165,7 +2204,7 @@ artifact, but the timing claim above is a prediction until a board boots it.
 
 Verified in the real emitted rootfs (not merely "the postinst ran"): all six mask
 symlinks are present under `./etc/systemd/system/` in the `rock-5b-plus` build tar.
-Guards: `manifest.bats` §18e (6 tests — all six masked to `/dev/null`, the `Also=`
+Guards: `runtime-services.bats` §18e (6 tests — all six masked to `/dev/null`, the `Also=`
 resurrection path closed, mask-not-disable, the fail-closed leg proving a
 non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
 widen to NetworkManager/resolved/udevd/`chrony.service`, and the
@@ -2228,7 +2267,7 @@ drop-in, never inlined in `mkosi.postinst.chroot` per the drift-gate ceiling).
 `on-failure` (not `always`) so a deliberate `systemctl stop` still stops it. This
 is the systemd-level **defense-in-depth** layer only — the signal SOURCE (a CeraUI
 udev rule's overly-broad `pkill -f ceralive` catching avahi-daemon) is the
-ROOT-CAUSE fix, handled separately in the CeraUI repo. Guard: `manifest.bats`
+ROOT-CAUSE fix, handled separately in the CeraUI repo. Guard: `postinst-wiring.bats`
 "avahi restart: an additive Restart=on-failure drop-in is baked …" (+ fail-closed
 + executor-wiring cases).
 
@@ -2252,7 +2291,7 @@ arch-independent, every board), NOT a rewrite of `network-interfaces.ts` onto `i
 CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
 (`MONITOR-NOTES.md`, `netif-migration`/`netif-same-subnet` tests, `mocks/providers/
 network.ts`), so swapping binaries is a large unrelated risk — adding the one legacy
-binary is correctly scoped. Guards: `manifest.bats` "runtime packages: net-tools is
+binary is correctly scoped. Guards: `mkosi-contract.bats` "runtime packages: net-tools is
 installed …" + "… reaches the resolved runtime package set …".
 
 **`bluez` in `shared.list` — the Bluetooth KERNEL half already worked; the whole
@@ -2281,7 +2320,7 @@ every 5 s whenever no HDMI cable is attached, so after a few hours **1638 of 163
 lines in the ring buffer were that one message** and every boot-time line had been
 evicted. Use `journalctl -k`, `/sys/class/bluetooth/`, and `lsmod` — never a bare
 `dmesg` grep — to decide whether a driver bound on this board. Guard:
-`manifest.bats` "runtime packages: bluez is installed so the Bluetooth adapter is
+`postinst-wiring.bats` "runtime packages: bluez is installed so the Bluetooth adapter is
 usable".
 
 **`iw` in `shared.list` — `wireless-tools` is NOT the same package** [EXISTS]
@@ -2300,7 +2339,7 @@ ships only the legacy WEXT binaries (`iwconfig`, `iwlist`, `iwgetid`, `iwpriv`,
 (`mkosi/build/app/usr/sbin/`). Nothing else in `shared.list` depends on `iw`
 either, so absent an explicit entry the regulatory country silently cannot be
 applied and the hotspot stays on the conservative world domain (2.4 GHz channels
-1-11 only — no channel 12/13 in ETSI countries). Guard: `manifest.bats` "runtime
+1-11 only — no channel 12/13 in ETSI countries). Guard: `mkosi-contract.bats` "runtime
 packages: iw is installed so the regulatory domain can be applied".
 
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
@@ -2349,7 +2388,7 @@ Guard: `tests/apt-mtls-and-dedupe.test.sh` (Part A static: BOTH tracks
 `chown _apt` the key + `rm` the `${RELEASE}.sources` dupe + arch-qualified
 `binary-<arch>/` URI + no lingering root-owned `0600` key; Part B rootless-namespace
 runtime: the real `configure_minimal_apt` leaves exactly one Debian source), wired
-into `run-tests` and `manifest.bats §22` "the build path makes client.key
+into `run-tests` and `package-contract.bats §22` "the build path makes client.key
 _apt-readable and dedupes Debian sources".
 
 **The boot stack is frozen against on-device apt — dpkg holds are PRIMARY, the apt
@@ -2421,7 +2460,7 @@ freeze on a full build, a clean parity-build no-op; and a **real `apt-get -s
 upgrade`** against a synthetic apt root offering a newer kernel, with a non-vacuity
 leg proving the unfrozen fixture DOES offer it, the hold and the pin each blocking
 it independently, and `cerastream` still upgrading with the whole freeze in place)
-plus `manifest.bats` §31 (9 structural tests, mutation-verified). Full contract:
+plus `package-contract.bats` §31 (9 structural tests, mutation-verified). Full contract:
 [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
 **`ceralive.service` ordered `After=cerastream.service` — soft boot-race hint (never
@@ -2445,7 +2484,7 @@ degraded state (CeraUI `helpers/boot-guard.ts::guardNonCritical` fail-soft boot
 design) if cerastream is ever genuinely absent/masked, and `After=` on an
 out-of-transaction unit is a harmless no-op. This is the systemd-level ordering half
 only — a CeraUI-side retry/resilience fix for the one-shot connect lands separately
-in that repo. Guards: `manifest.bats` "cerastream ordering: an additive
+in that repo. Guards: `postinst-wiring.bats` "cerastream ordering: an additive
 After=cerastream.service drop-in is baked …" + "… is ordering-ONLY (no
 Requires=/Requisite=/BindsTo= hard dependency)" (+ fail-closed + executor-wiring
 cases).
@@ -2489,7 +2528,7 @@ dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come fro
 Debian). The `Package: *` origin-990 pin keeps the fork winning on-device.
 `mobile-broadband-provider-info` (ModemManager's APN database, a `Recommends:`) is
 an explicit `shared.list` entry. Full source-of-truth: `docs/modem-matrix.md §1`.
-Guards: `manifest.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
+Guards: `postinst-wiring.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
 exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
 `tests/app-layer-modem-closure.test.sh` (executable install/classification).
 
@@ -2522,7 +2561,7 @@ reach the runtime subimage chroot via `CERALIVE_MODEM_PORTS_STATUS`/`_SLOTS`
 (orchestrate.sh `env_names` ↔ `mkosi.conf` `PassEnvironment=`, same lockstep the
 interface-naming vars use). Flipping to `verified` is a separate, hardware-gated
 step (`docs/modem-matrix.md §7` discovery runbook) — **do NOT flip it without
-reading real hardware ID_PATHs**. Guards: `manifest.bats §23` generator matrix
+reading real hardware ID_PATHs**. Guards: `postinst-wiring.bats §23` generator matrix
 (unverified ⇒ zero rules; unset ⇒ unverified; verified fixture ⇒ rules emitted;
 verified-with-no-slots ⇒ fail-closed; stale-file cleanup; generic-rules-untouched;
 env lockstep).
@@ -2553,7 +2592,7 @@ symlinks resolve to the live HDMI-RX node:
 v4l2-ctl -d /dev/video0 --info  →  Driver name: rk_hdmirx
 ```
 
-Guard: `manifest.bats` "hdmi-in: a driver-keyed SYMLINK rule gives the SoC HDMI-RX a
+Guard: `postinst-wiring.bats` "hdmi-in: a driver-keyed SYMLINK rule gives the SoC HDMI-RX a
 stable /dev/hdmi-in node" — asserts `DRIVERS==` (and explicitly rejects a re-slip to
 `ATTRS{name}==`), not `video0`-pinned, both symlink tokens, and the original
 permission rules preserved.
@@ -2655,7 +2694,7 @@ Scope is deliberately ONE attribute on ONE connector: `port0/port_type` ← `sou
 Do **NOT** set `sink` or leave `dual` (`dual` is the broken default; both were settled
 by live hardware testing), and do **NOT** extend this to any `dwc3` platform-driver
 unbind/rebind — doing that by hand wedges a kernel worker on this board (separate,
-confirmed defect). Guards: `manifest.bats` §18d "typec source: …" — install+enable,
+confirmed defect). Guards: `runtime-services.bats` §18d "typec source: …" — install+enable,
 `port_type`→`source` (rejecting `sink`/`dual`), `Before=cerastream.service`
 ordering-only, the `[dual]`→`source` transition, idempotency against the bracketed
 `dual [source] sink`, the bounded wait, fail-loud read-back, fail-closed missing
@@ -2738,7 +2777,7 @@ deadline is deliberately short (10 s, vs 30 s for Type-C) and the unit is
 **deliberately not `Before=` anything**, because a board that will never have a
 `pwm-fan` would otherwise pay that wait on the boot critical path.
 
-Guards: `tests/manifest.bats` §18f "fan curve: …" (12 tests). The fixture
+Guards: `tests/runtime-services.bats` §18f "fan curve: …" (12 tests). The fixture
 deliberately numbers everything DIFFERENTLY from the reference board — `pwm-fan` is
 `cooling_device7` (not 4), the zone is `thermal_zone3` (not 0), it hangs off that
 zone's `cdev1` behind a CPUFreq `cdev0`, and the first `active` trip is index 1 behind
@@ -2877,7 +2916,7 @@ and does NOT touch any trip point — that is `setup_fan_curve`'s job and this u
 deliberately does not overlap with it. `setup_fan_curve` and its two artifacts are
 byte-untouched by this change.
 
-Guards: `tests/manifest.bats` §29 "fan kickstart: …" (17 tests). The fixture
+Guards: `tests/runtime-services.bats` §29 "fan kickstart: …" (17 tests). The fixture
 deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not the
 reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
 `cooling_device2` that must never be written, so any hardcoded index and any
@@ -2995,7 +3034,7 @@ curve it polls to a short deadline (10 s) rather than sleeping — `gpio-leds` a
 anything**, because nothing consumes an LED trigger and a board with no LEDs
 must not pay that wait on the boot critical path.
 
-Guards: `tests/manifest.bats` §18g "led status: …" (11 tests). The fixture
+Guards: `tests/runtime-services.bats` §18g "led status: …" (11 tests). The fixture
 deliberately uses LED names the reference board does not have —
 `amber:status-a`, `white:status-b`, a `red:power` decoy, and the kernel LED at
 `mmc2::` rather than `mmc0::` — so any hardcoded LED name, and any `mmc0`-literal
@@ -3123,7 +3162,7 @@ enabled-by-default behavior. The base layer installs `openssh-server`, whose Deb
 postinst preset already enables `ssh.service`, so the production branch **actively
 disables** `ssh.service`/`ssh.socket` — merely skipping the enable would leave the
 base-layer preset enablement in place. `ceralive-ssh-firstboot.service` still hardens
-SSH whenever it is eventually started, on both image kinds. Guards: `manifest.bats`
+SSH whenever it is eventually started, on both image kinds. Guards: `mkosi-contract.bats`
 "production image leaves ssh.service NOT enabled" + "lab debug image enables
 ssh.service by default".
 
@@ -3239,7 +3278,7 @@ refused). Its sibling network-dependent units (`ceralive-healthcheck`,
 ordering fix, distinct from the mDNS-arbitration logic. Offline guards:
 `tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
 dynamic ordering probe proving the unit runs after `network-online.target`) and
-`manifest.bats` "hostname:" ordering assertions.
+`runtime-services.bats` "hostname:" ordering assertions.
 
 Each service attempt has a 120-second global claim budget, 3-second command
 timeouts, and a 10-second local-lock wait. systemd caps the attempt at 150 seconds
@@ -3291,7 +3330,7 @@ state — reproduced live: same-name set → exit 1, different-name → exit 0).
   keeps a hard `Requires=` (its failure is harmless — the timer refires). This
   supersedes the "every `Requires=` consumer cascades" description above.
 
-Guards: `manifest.bats` "hostname:" gains an `AVAHI_ERR_NO_CHANGE`-accepted test, a
+Guards: `runtime-services.bats` "hostname:" gains an `AVAHI_ERR_NO_CHANGE`-accepted test, a
 readiness-wait test, and `Wants=` (not `Requires=`) graceful-degradation assertions;
 `real-avahi-hostname-contract.sh` gains a real-avahi PREOWNED scenario (daemon seeded
 `ceralive`) proving the fixed allocator claims it instead of dying — the exact CI
@@ -3419,7 +3458,7 @@ credentials with no screen or keyboard. Standalone artifacts under
   failed with error -2` / `cfg80211: failed to load regulatory.db` and NetworkManager
   reports "No WiFi interfaces found" even with a working driver (real-HW UART,
   2026-07-16; the RTL8852BE `rtw89_8852be` chip enumerates + trains PCIe fine — the
-  missing DB is a distinct gap). Guard: `manifest.bats` "wireless-regdb is installed
+  missing DB is a distinct gap). Guard: `mkosi-contract.bats` "wireless-regdb is installed
   so cfg80211 loads regulatory.db".
 - **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
   CeraUI backend (`ceralive.service`) to free port 80 and starts
@@ -3452,7 +3491,7 @@ credentials with no screen or keyboard. Standalone artifacts under
   the portal-active + force flags. Plain `systemctl stop` (ExecStop) is link-down +
   portal-down only and RETAINS the AP profile + flags (shutdown must not disarm a
   pending factory reset). Offline proof harness:
-  `tests/provision-portal.test.sh` (gated in `manifest.bats`).
+  `tests/provision-portal.test.sh` (gated in `postinst-wiring.bats`).
 
 **CeraUI TLS front — nginx on 443 (Task 15, SC3)** [EXISTS]
 
@@ -3542,7 +3581,7 @@ gated item, not the package availability.
 - Don't replace `vendor-patched`'s fetched Armbian `.config` with `make defconfig`. It is the exact config `linux-image-vendor-rk35xx` ships; a bare defconfig builds a materially different driver set, so the result is no longer comparable to the kernel the fleet runs — which is the only reason this variant exists
 - Don't name a source-built kernel package after a stock one. `vendor-patched` builds `linux-image-6.1.115-ceralive-vendor-rk35xx`, never `linux-image-vendor-rk35xx`: a name collision is the one failure that produces a plausible image instead of an error, because the local repository would pick one by version and the board could boot the UNPATCHED kernel
 - Don't silence a config-survival failure by widening `kernel_source.config_absent_symbols`. Every entry is a reviewed statement that the symbol names an out-of-tree driver Armbian's framework injects and this pipeline does not; a listed symbol that DID survive fails the build as a stale exception, and that non-vacuity is what stops the list becoming a blanket opt-out of the gate
-- Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `manifest.bats` statically requires exactly one occurrence of each
+- Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `variant-contract.bats` statically requires exactly one occurrence of each
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
@@ -3579,9 +3618,9 @@ never renamed → dropped from SRTLA's `eth*`/`wlan*` bonding globs, confirmed o
 Rock 5B+ hardware; and an empty add-on keyring → all add-on signatures rejected).
 `CERALIVE_BOARD` (the first-party staging key) is a third value on this contract:
 read empty in the app subimage it installs ZERO first-party packages, so it is in
-both lists and additionally pinned by `manifest.bats` §27.
+both lists and additionally pinned by `package-contract.bats` §27.
 `PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
-`manifest.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
+`mkosi-contract.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
 fails the build if a future `env_names` addition skips `PassEnvironment=`).
 `SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_PIPELINE_DIR` (forwarded via
 a separate `-e`/`--environment` mechanism) are the two documented legitimate

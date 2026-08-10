@@ -440,7 +440,7 @@ empty in a subimage — the very contract this bug rhymes with), and the consume
 keys off that. The stem, not `BOARD_ID`, because it is unique by construction and
 is the key `acquire_board_lock()` already serialises on; `cache/${BOARD_ID}` is a
 separate tree for a separate purpose and is untouched. A miss now logs the probed
-path instead of returning silently. Guards: `manifest.bats` §27 — the real shipped
+path instead of returning silently. Guards: `package-contract.bats` §27 — the real shipped
 stager driven against every shipped board manifest with that manifest's real
 `board_id`, plus the inverse leg proving a `BOARD_ID`-keyed tree is *not* picked
 up, plus a non-vacuity assertion that at least one shipped board really does have

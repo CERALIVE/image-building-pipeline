@@ -1,6 +1,6 @@
 # Fixture: INVALID board manifest — unknown key under interfaces:.
 # board.schema.json sets additionalProperties:false on the interfaces object, so
-# only eth0/eth1/wlan0 are permitted; eth99 is illegal. manifest.bats asserts
+# only eth0/eth1/wlan0 are permitted; eth99 is illegal. manifest-schema.bats asserts
 # this fails board-schema validation with "interfaces" in the message.
 family: rk3588
 board_id: test-board

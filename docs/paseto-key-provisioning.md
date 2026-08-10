@@ -150,7 +150,7 @@ lib/verify-paseto-key-encodings.sh --self-test
 
 The verifier prints only sha256 fingerprints + PASS/FAIL — never key bytes. A
 mismatched or private-bearing pair exits non-zero (fail loud). The same `--self-test`
-runs as a bats case in `tests/manifest.bats` (section 21), so the contract stays
+runs as a bats case in `tests/postinst-wiring.bats` (section 21), so the contract stays
 green in CI without any secret.
 
 ---

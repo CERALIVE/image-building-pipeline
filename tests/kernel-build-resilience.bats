@@ -6,7 +6,7 @@
 # WHY THIS FILE EXISTS. `[2b/9]` is invisible to the PR gate: that gate is
 # `DRY_RUN=1` and never clones, never fetches and never runs `make`. So every
 # property of the real stage has to be pinned by a static or synthetic guard
-# here, the same way §26 of manifest.bats pins the olddefconfig/syncconfig
+# here, the same way §26 of variant-contract.bats pins the olddefconfig/syncconfig
 # ordering. Two failure modes are covered:
 #
 #   1. A TRANSIENT fetch failure that is made PERMANENT by our own debris. The

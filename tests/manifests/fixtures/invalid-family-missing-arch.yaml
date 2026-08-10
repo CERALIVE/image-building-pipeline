@@ -1,5 +1,5 @@
 # Fixture: INVALID family manifest — required `arch` field omitted.
-# Identical to valid-family.yaml minus `arch:`. manifest.bats asserts this
+# Identical to valid-family.yaml minus `arch:`. manifest-schema.bats asserts this
 # fails family-schema validation with the field name "arch" in the message.
 armbian_branch: vendor
 kernel_packages:

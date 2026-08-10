@@ -47,7 +47,7 @@
 # ---------------------------------------------------------------------------
 # Every package below was verified ABSENT from `shared.list` — a duplicate would
 # make the "debug == production + exactly this delta" identity untrue and is
-# pinned by `tests/manifest.bats` §30.
+# pinned by `tests/package-contract.bats` §30.
 #
 # ---------------------------------------------------------------------------
 # MEASURED EFFECT (rock-5b-plus, real wet builds, 2026-08-08)

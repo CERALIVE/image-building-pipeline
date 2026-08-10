@@ -236,4 +236,4 @@ ttyUSB enumeration order. The flip is a distinct change from this integration �
 it is the "verified" half of the two-state contract and is **not** performed here.
 
 Proof: `run-tests` — the generator matrix (unverified ⇒ zero generated rules;
-verified fixture ⇒ rules emitted) in `manifest.bats`.
+verified fixture ⇒ rules emitted) in `postinst-wiring.bats`.

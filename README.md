@@ -142,7 +142,8 @@ be converted by OTA.
 │   │                      #   Cog add-on recipe, sysext refresh protocol,
 │   │                      #   fast-reload.md (dev-sync live-reload loop)
 │   └── partition-contract.md # Frozen GPT layout contract
-├── tests/                 # Manifest + RK3588 A/B/preflash + x86 rollback
+├── tests/                 # Six manifest contract suites + shared manifest-helpers.bash,
+│                          #   RK3588 A/B/preflash + x86 rollback
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
@@ -309,7 +310,7 @@ Adding a package to `development.delta.list` must not duplicate anything already
 in `shared.list`, and any new code that reads `manifests/packages/*.delta.list`
 must select its files through `lib/common.sh::runtime_pkg_list_files` — that
 helper is what keeps the variant-keyed debug delta out of the production package
-contract. Guards: `tests/manifest.bats` §30.
+contract. Guards: `tests/package-contract.bats` §30.
 
 ## Image Size Gate
 
@@ -498,7 +499,7 @@ Verified live on a Rock 5B+ (including straight after a cold power-cycle): with 
 port pinned, the camera enumerates within seconds on every attempt. **This code is
 merged-ready but has not been through a release — no published image carries it yet,
 and the persistent behaviour still needs an on-hardware board-proof.** Guards:
-`tests/manifest.bats` §18d.
+`tests/runtime-services.bats` §18d.
 
 ## Fan Curve
 

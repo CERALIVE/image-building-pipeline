@@ -1,6 +1,6 @@
 # Fixture: minimal VALID family manifest.
 # Carries exactly the family.schema.json `required` set with legal values.
-# Used by manifest.bats to assert a well-formed family validates (exit 0).
+# Used by manifest-schema.bats to assert a well-formed family validates (exit 0).
 arch: arm64
 armbian_branch: vendor
 kernel_packages:

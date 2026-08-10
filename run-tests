@@ -18,9 +18,9 @@
 #   BOTH a parallel backend AND flock are present, and falls back to the
 #   previous serial run otherwise — the suite stays green either way. Cases
 #   within each Bats file stay serial because they share repo-local fixtures;
-#   the three suite files still run in parallel. The few shared fixtures that
+#   the suite files still run in parallel. The few shared fixtures that
 #   need finer locking serialize themselves with flock (see `serialize` in
-#   tests/manifest.bats).
+#   tests/manifest-helpers.bash).
 #   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
 #   auto-derives from nproc, capped at 8 (this unit suite is 187 short tests —
 #   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
@@ -35,7 +35,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Suites, in run order. The RK3588 contract suite proves the production Rock 5B+
 # factory A/B geometry before the signed-bundle suites run.
 SUITES=(
-  "${HERE}/tests/manifest.bats"
+  "${HERE}/tests/manifest-schema.bats"
+  "${HERE}/tests/package-contract.bats"
+  "${HERE}/tests/postinst-wiring.bats"
+  "${HERE}/tests/mkosi-contract.bats"
+  "${HERE}/tests/runtime-services.bats"
+  "${HERE}/tests/variant-contract.bats"
   "${HERE}/tests/rk3588-ab-contract.bats"
   "${HERE}/tests/bench-partlabels.bats"
   "${HERE}/tests/boot-artifacts.bats"

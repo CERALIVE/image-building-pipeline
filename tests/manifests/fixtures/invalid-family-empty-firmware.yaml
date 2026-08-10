@@ -2,7 +2,7 @@
 # Identical to valid-family.yaml but firmware_packages: []. orchestrate.sh
 # require_field's FIRMWARE_PACKAGES unconditionally, so an empty set would pass
 # the OLD schema and only blow up at build time. The expanded schema's
-# firmware_packages.minItems=1 now rejects it at validation. manifest.bats asserts
+# firmware_packages.minItems=1 now rejects it at validation. manifest-schema.bats asserts
 # this fails family-schema validation with "firmware_packages" in the message.
 arch: arm64
 armbian_branch: vendor
