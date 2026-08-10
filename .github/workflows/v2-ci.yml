@@ -1,7 +1,7 @@
 # CeraLive v2 image pipeline — CI gate.
 #
 # The SOLE image-build CI gate: the legacy Armbian build.sh path (and its
-# build-images.yml workflow) has been removed. This workflow gates the v2/
+# build-images.yml workflow) has been removed. This workflow gates the 
 # manifest+mkosi pipeline: lint -> schema -> unit tests -> multi-arch
 # build-plan. No secrets are referenced; the build matrix runs DRY_RUN=1 so it
 # performs no real download/build (no R2 creds, no GPG, no privileged container,
@@ -12,11 +12,11 @@
 # mkosi build plan — a host-independent digest that, with T14's deterministic
 # builds, fixes the output bytes. Same digest on two hosts ⇒ same plan ⇒ (by
 # T14) bit-identical image. The only CI runner is Linux/x86_64; Fedora/Arch/
-# macOS/WSL2 are documented-not-CI-verified in v2/docs/dev-loop.md.
+# macOS/WSL2 are documented-not-CI-verified in docs/dev-loop.md.
 #
 # addon-publish (task 35) stays inside the no-secrets invariant: it runs
 # DRY_RUN=1 (plan only, uploads nothing) so the real aws-s3 upload in
-# v2/lib/upload-addons.sh never fires without R2_* creds + a signed artifact.
+# lib/upload-addons.sh never fires without R2_* creds + a signed artifact.
 #
 # Cross-runner build-plan determinism (C6b): build-plan-xrunner resolves the same
 # DRY_RUN plan on TWO INDEPENDENT runners (ubuntu-24.04 + ubuntu-22.04) and
@@ -55,9 +55,9 @@ jobs:
 
       - name: shellcheck -x all v2 bash
         run: |
-          mapfile -t files < <(git ls-files 'v2/**/*.sh' 'v2/build' 'v2/dev-push' 'v2/run-tests')
+          mapfile -t files < <(git ls-files '**/*.sh' 'build' 'dev-push' 'run-tests')
           printf 'checking %d file(s)\n' "${#files[@]}"
-          # v2/.shellcheckrc (external-sources=true, source-path=SCRIPTDIR) is
+          # .shellcheckrc (external-sources=true, source-path=SCRIPTDIR) is
           # auto-discovered from each script's parent dirs, so `source lib/*.sh`
           # resolves without per-call -x flags. --severity=warning: SC2015/SC1091
           # are info-level project baseline (see learnings, tasks 9/26/29).
@@ -78,13 +78,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/requirements-ci.txt') }}
 
       - name: Install validators
-        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
+        run: pip install --quiet --requirement ci/requirements-ci.txt
 
       - name: Validate every manifest against its schema
-        run: python3 v2/ci/validate-manifests.py
+        run: python3 ci/validate-manifests.py
 
   bats:
     name: bats manifest unit suite
@@ -101,10 +101,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/requirements-ci.txt') }}
 
       - name: Install resolver deps (resolve.py uses jsonschema + PyYAML)
-        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
+        run: pip install --quiet --requirement ci/requirements-ci.txt
 
       - name: Install bats-core
         run: |
@@ -133,7 +133,7 @@ jobs:
       - name: Run v2 manifest unit suite
         run: |
           CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-            CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+            CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests
 
   size-gate:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
@@ -157,7 +157,7 @@ jobs:
           art="${RUNNER_TEMP}/rootfs-sample"
           mkdir -p "${art}"
           head -c 4096 /dev/zero > "${art}/placeholder.bin"
-          ./v2/lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
+          ./lib/measure-size.sh rock-5b-plus "${art}" 2>&1 | tee size-report.log
           grep -Eq 'measured=[0-9]+ budget=[0-9]+ \(enforced\)' size-report.log
 
       - name: Regression check — compare against baseline (non-blocking warning)
@@ -176,7 +176,7 @@ jobs:
           # We treat exit 1 (threshold exceeded) as a warning, not a hard failure,
           # since the absolute 1.5 GB gate already passed.
           set +e
-          ./v2/ci/check-size-regression.sh "${measured_bytes}" v2/ci/size-baseline.json 2>&1 | tee size-regression.log
+          ./ci/check-size-regression.sh "${measured_bytes}" ci/size-baseline.json 2>&1 | tee size-regression.log
           exit_code=${PIPESTATUS[0]}
           set -e
           if [ "${exit_code}" -ne 0 ]; then
@@ -195,7 +195,7 @@ jobs:
           over="${RUNNER_TEMP}/rootfs-over"
           mkdir -p "${over}"
           truncate -s 2G "${over}/oversize.img"
-          if ./v2/lib/measure-size.sh rock-5b-plus "${over}" > size-over.log 2>&1; then
+          if ./lib/measure-size.sh rock-5b-plus "${over}" > size-over.log 2>&1; then
             cat size-over.log
             echo "::error::size gate did NOT fail on an over-budget rootfs"
             exit 1
@@ -204,7 +204,7 @@ jobs:
           grep -q 'exceeds budget' size-over.log
 
   addon-publish:
-    # Feature-sysext R2 publish contract. The real path (v2/lib/upload-addons.sh,
+    # Feature-sysext R2 publish contract. The real path (lib/upload-addons.sh,
     # aws s3 cp + R2 endpoint — same pattern as fetch-debs.sh) only fires with
     # R2_* creds AND a signed .raw, neither present here. So this job proves the
     # contract under DRY_RUN: a synthetic SIGNED artifact set asserts the plan
@@ -230,7 +230,7 @@ jobs:
           head -c 4096 /dev/zero > "${dist}/${stem}.raw"
           ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
           printf 'stub-detached-signature\n' > "${dist}/${stem}.raw.sig"
-          ./v2/lib/upload-addons.sh \
+          ./lib/upload-addons.sh \
             --feature debug-toolset --board rock-5b-plus --os-version 12 \
             --dist "${dist}" 2>&1 | tee addon-plan.log
           # All three artifacts must target addons/{os_version}/{board}/{feature}.
@@ -253,7 +253,7 @@ jobs:
           head -c 4096 /dev/zero > "${dist}/${stem}.raw"
           ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
           # No .raw.sig on purpose — the publisher MUST refuse to upload.
-          if ./v2/lib/upload-addons.sh \
+          if ./lib/upload-addons.sh \
                --feature debug-toolset --board rock-5b-plus --os-version 12 \
                --dist "${dist}" > addon-unsigned.log 2>&1; then
             cat addon-unsigned.log
@@ -289,20 +289,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/requirements-ci.txt') }}
 
       - name: Install resolver deps
-        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
+        run: pip install --quiet --requirement ci/requirements-ci.txt
 
       - name: Materialize non-production RAUC test fixture
-        run: ./v2/tests/generate-dev-rauc-pki.sh
+        run: ./tests/generate-dev-rauc-pki.sh
 
       - name: Dry-run build (manifest -> builder plan; no network/hardware)
         env:
           DRY_RUN: '1'
           INSTALL_BOOT_BSP: '0'
         run: |
-          ./v2/build "${{ matrix.board }}" 2>&1 | tee build-dryrun.log
+          ./build "${{ matrix.board }}" 2>&1 | tee build-dryrun.log
 
       - name: Assert no real download/build happened (no secret leakage)
         run: |
@@ -361,7 +361,7 @@ jobs:
           # parity gate — if board resolution ever became host/time-dependent
           set -euo pipefail
           repo="${GITHUB_WORKSPACE:-$PWD}"
-          ./v2/build "${{ matrix.board }}" 2>&1 | tee build-dryrun-2.log >/dev/null
+          ./build "${{ matrix.board }}" 2>&1 | tee build-dryrun-2.log >/dev/null
           plan2="$(grep -F 'would build with:' build-dryrun-2.log \
                    | sed -E 's/^.*would build with: //' \
                    | sed "s#${repo}#<REPO>#g")"
@@ -382,7 +382,7 @@ jobs:
   qemu:
     # AMD64 matrix leg only: boot the x86 (x86-minipc) disk image headlessly in
     # qemu and assert it reaches multi-user.target + ceralive.service health +
-    # critical packages (v2/tests/qemu-x86.sh, task 36). qemu is REQUIRED in CI
+    # critical packages (tests/qemu-x86.sh, task 36). qemu is REQUIRED in CI
     # (MAC4: fail loudly if missing, not skip). The DRY_RUN build-matrix above
     # ships no bootable image, so the BOOT step gracefully skips when the image
     # is absent (but qemu itself MUST be present). The SELFTEST step always runs
@@ -423,7 +423,7 @@ jobs:
       - name: SELFTEST — assertion engine + negative gate (no qemu/image needed)
         env:
           CERALIVE_QEMU_SELFTEST: '1'
-        run: ./v2/tests/qemu-x86.sh
+        run: ./tests/qemu-x86.sh
 
   # ---------------------------------------------------------------------------
   # Cross-runner build-plan determinism gate (C6b) — PLAN-ONLY, ADVISORY.
@@ -431,8 +431,8 @@ jobs:
   # WHAT: resolves the DRY_RUN mkosi build plan on TWO INDEPENDENT GitHub-hosted
   # runners (ubuntu-24.04 + ubuntu-22.04) for each board, hashes the NORMALIZED
   # plan per board (the SAME task-15 normalization the build-matrix job uses,
-  # factored into v2/ci/emit-build-plan-sha.sh), then the gate job asserts the
-  # per-board sha256 is IDENTICAL across the two runners (v2/ci/assert-xrunner-
+  # factored into ci/emit-build-plan-sha.sh), then the gate job asserts the
+  # per-board sha256 is IDENTICAL across the two runners (ci/assert-xrunner-
   # parity.sh). A divergent plan sha ⇒ the plan leaked host state ⇒ RED.
   #
   # This EXTENDS the build-matrix job's SAME-host rebuild-parity into a CROSS-host
@@ -496,13 +496,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('v2/ci/requirements-ci.txt') }}
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/requirements-ci.txt') }}
 
       - name: Install resolver deps
-        run: pip install --quiet --requirement v2/ci/requirements-ci.txt
+        run: pip install --quiet --requirement ci/requirements-ci.txt
 
       - name: Materialize non-production RAUC test fixture
-        run: ./v2/tests/generate-dev-rauc-pki.sh
+        run: ./tests/generate-dev-rauc-pki.sh
 
       - name: Resolve DRY_RUN plan → normalized sha sidecar (this runner)
         run: |
@@ -511,7 +511,7 @@ jobs:
           # emit-build-plan-sha.sh runs DRY_RUN=1 INSTALL_BOOT_BSP=0 itself, asserts
           # the container path, strips the abs repo path, and hashes the normalized
           # plan line — the SAME normalization as the build-matrix task-15 step.
-          ./v2/ci/emit-build-plan-sha.sh \
+          ./ci/emit-build-plan-sha.sh \
             --board "${{ matrix.board }}" \
             --out "test-results/xrunner__${{ matrix.os }}__${{ matrix.board }}.sha256"
           echo "sidecar (runner=${{ matrix.os }}, board=${{ matrix.board }}):"
@@ -553,4 +553,4 @@ jobs:
           # Explicit hash-equality assertion: for EVERY board, all runners must
           # agree on the normalized plan sha256. --expect-runners 2 makes a missing
           # leg a failure (never a vacuous pass). Exit 1 ⇒ determinism regression.
-          ./v2/ci/assert-xrunner-parity.sh xrunner-sidecars --expect-runners 2
+          ./ci/assert-xrunner-parity.sh xrunner-sidecars --expect-runners 2

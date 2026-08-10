@@ -1,0 +1,216 @@
+# CeraLive RK3588 `edge` kernel — Kconfig fragment
+#
+# Merged ON TOP of the in-tree arm64 `defconfig` by
+# scripts/kconfig/merge_config.sh, from lib/build-kernel.sh. Referenced by
+# manifests/families/rk3588.yaml -> variants.edge.kernel_source.defconfig_fragment.
+#
+# SCOPE: this fragment declares the symbols the CeraLive device stack needs that
+# arm64 `defconfig` does not already imply, plus the two determinism switches.
+# It is NOT a port of Armbian's linux-rockchip64-edge.config: that config is a
+# full 10k-line file tuned for Armbian's own userspace and build framework, and
+# copying it would silently import decisions nobody here reviewed. Starting from
+# mainline defconfig and adding exactly what we need keeps every line auditable.
+#
+# PARTLY HARDWARE-PROVEN as of the v7.1.7 pin. A Rock 5B+ has booted an image
+# built from this fragment and confirmed the capture/encode symbols on real
+# silicon (rkvenc, the dma-heaps, HDMI-RX). Symbols outside that path are still
+# reviewed intent rather than a validated result. See
+# docs/kernel-build-from-source.md §"Known gaps".
+
+# --- Build determinism -----------------------------------------------------
+# LOCALVERSION_AUTO would append a git description to KERNELRELEASE, which would
+# make the produced package NAME depend on the checkout state. The manifest
+# declares the exact kernel_release the build must produce, so this must be off.
+CONFIG_LOCALVERSION_AUTO=n
+# bindeb-pkg emits a separate multi-hundred-MB linux-image-*-dbg package when
+# debug info is on. The output contract is ONE linux-image deb; turn it off at
+# the source rather than deleting a package we paid to build.
+CONFIG_DEBUG_INFO_NONE=y
+
+# --- Rockchip RK3588 platform ---------------------------------------------
+CONFIG_ARCH_ROCKCHIP=y
+CONFIG_ROCKCHIP_IOMMU=y
+CONFIG_PCIE_ROCKCHIP_DW=y
+CONFIG_PHY_ROCKCHIP_SNPS_PCIE3=y
+CONFIG_PHY_ROCKCHIP_USBDP=y
+CONFIG_MMC_DW_ROCKCHIP=y
+CONFIG_MMC_SDHCI_OF_DWCMSHC=y
+CONFIG_SPI_ROCKCHIP=y
+CONFIG_PWM_ROCKCHIP=y
+CONFIG_ROCKCHIP_THERMAL=y
+CONFIG_ROCKCHIP_SARADC=y
+
+# --- Capture: SoC HDMI-RX --------------------------------------------------
+# The Synopsys HDMI-RX controller behind /dev/hdmi-in. Patches 0002/0003/0005 of
+# the CeraLive series (EDID visibility, replug overflow, audio capture) all land
+# in this driver; without the symbol the series builds nothing.
+#
+# Audio capture needs 0005 AND 0006 together: 0005 registers the ASoC codec,
+# 0006 is the device tree that binds it to i2s7_8ch as an ALSA card. The ASoC
+# symbols that card needs — SND_SIMPLE_CARD, SND_SOC_ROCKCHIP_I2S_TDM,
+# SND_SOC_HDMI_CODEC — are already =m via the in-tree defconfig, verified against
+# the board's own /proc/config.gz, so this fragment does not restate them.
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_VIDEO_DEV=y
+CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
+
+# --- Capture: USB UVC (HDMI capture dongles, DJI-class cameras) ------------
+CONFIG_USB_VIDEO_CLASS=m
+CONFIG_SND_USB_AUDIO=m
+
+# --- Encode: VEPU580 / RKVENC v2 -------------------------------------------
+# Provided by patch 0001 of the series. Asserted selectable by the patches
+# repo's own apply gate; asserted BUILT by the kernel-build stage's post-build
+# module check.
+CONFIG_VIDEO_ROCKCHIP_RKVENC=m
+
+# --- Encode: DMA-BUF userland heaps (the MPP buffer allocator) --------------
+# Rockchip MPP userspace (librockchip_mpp, which backs mpph264enc/mpph265enc)
+# allocates every frame and stream buffer through its `dma_heap` allocator,
+# which opens /dev/dma_heap/<name>. Those chardevs exist ONLY when
+# CONFIG_DMABUF_HEAPS is enabled — and DMABUF_HEAPS is a `menuconfig bool`
+# that defaults OFF, so arm64 defconfig never turns it on. It was missing here,
+# and the whole /dev/dma_heap directory was therefore absent on the 7.1.5 board:
+# a real `gst-launch-1.0 videotestsrc ! mpph264enc ! filesink` produced ZERO
+# bytes and died at buffer negotiation, even though the rkvenc driver itself was
+# built, bound to fdbd0000/fdbe0000.rkvenc-core, and exposing /dev/mpp_service.
+# This is the same `menuconfig`-parent class as the CONFIG_RTW89 drop.
+#
+# The image's own shipped udev policy already assumes these exist — the
+# rockchip-multimedia-config package's 99-rk-device-permissions.rules matches
+# KERNEL=="system-dma32" / "system-uncached" / "system-uncached-dma32" and runs
+# `chmod a+rw /dev/dma_heap` — so the absence was a contradiction in the image,
+# not a design choice.
+#
+# These symbols alone were NECESSARY AND NOT SUFFICIENT, and the board proved
+# it: librockchip_mpp's allocator table hard-codes the heap name
+# `system-uncached`, which stock mainline never registers, so the H.264 HAL's
+# init-time allocation failed and mpph264enc did not even register. It does NOT
+# fall back to the `system` heap. Patch 0009 of the series adds that heap; the
+# symbol below is what turns it on. See the UNCACHED block right after it.
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+# Patch 0009's downstream heap, given its OWN Kconfig symbol on purpose: a
+# hardware-unvalidated addition should be separately switchable, and — the part
+# that matters here — verify-kernel-config.sh can only prove what the fragment
+# DECLARES. Riding on the parent, the gate could assert nothing stronger than
+# DMABUF_HEAPS_SYSTEM=y, which stays true even if the heap silently vanishes.
+#
+# Declare-the-parent: DMABUF_HEAPS_SYSTEM above is the `depends on`. The other
+# dependency, ARCH_HAS_DMA_PREP_COHERENT, is `select`ed by arch/arm64/Kconfig,
+# so it needs no entry — same rule as RTW89_CORE and NF_TABLES_IPV4/IPV6.
+#
+# Board-confirmed on a Rock 5B+: /dev/dma_heap/system-uncached is a REAL heap
+# (minor 250,1 against `system`'s 250,0), mpph264enc registers, and a 1080p
+# encode produces byte-identical output across repeats — where 7.1.5 produced
+# zero bytes and, once aliased as a diagnostic, non-deterministic output.
+CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y
+# depends on DMABUF_HEAPS && DMA_CMA; DMA_CMA is already =y from defconfig.
+CONFIG_DMABUF_HEAPS_CMA=y
+
+# --- Networking: bonded-link uplinks ---------------------------------------
+# Onboard NICs: RTL8125B (Rock 5B+, r8169) and the OPi 5+ dual r8169.
+CONFIG_R8169=m
+# RTL8852BE WiFi (Rock 5B+), PCI 10ec:b852.
+# CONFIG_RTW89 is the `menuconfig` that gates the whole rtw89 family and it is a
+# tristate defaulting OFF, so declaring only the 8852BE leaf makes olddefconfig
+# discard the leaf and ship a kernel with no rtw89 driver at all — which is
+# exactly what 7.1.5 did until this line was added. The leaf `select`s
+# RTW89_CORE/RTW89_PCI/RTW89_8852B itself, so those need no entry. MAC80211
+# (rtw89's `depends on`) is already =m from defconfig.
+CONFIG_RTW89=m
+CONFIG_RTW89_8852BE=m
+# WWAN: the six modules lib/check-wwan-modules.sh binds the modem stack to.
+# Keep this list in lockstep with that checker — a drop here is exactly the
+# regression it exists to catch.
+CONFIG_USB_NET_CDCETHER=m
+CONFIG_USB_NET_CDC_NCM=m
+CONFIG_USB_NET_CDC_MBIM=m
+CONFIG_USB_NET_QMI_WWAN=m
+CONFIG_USB_WDM=m
+CONFIG_USB_SERIAL_OPTION=m
+
+# --- Networking: LAN-ingest ingress firewall (nftables) --------------------
+# ceralive-ingest-firewall.service loads /etc/ceralive/ingest-firewall.nft with
+# `nft -f` at boot. That ruleset IS the LAN boundary around the UNAUTHENTICATED
+# MediaMTX ingest gateway: it DROPs inbound RTMP :1935 and SRT :4001 whenever they
+# arrive on a usb*/enx*/ww*/ppp* WAN uplink. CONFIG_NF_TABLES is a tristate with a
+# prompt and NO `default`, and everything else in the family sits inside its
+# `if NF_TABLES` block, so arm64 defconfig never turns it on and this fragment
+# never named it — the same `menuconfig`-parent class as the CONFIG_RTW89 and
+# CONFIG_DMABUF_HEAPS drops. Like both of those it failed in complete build-side
+# silence: the deb validated on all four axes, /boot was complete, the image
+# booted, and the only thing that ever said so was the unit on the board.
+#
+# Confirmed live on a Rock 5B+ running the edge 7.1.5 kernel:
+#
+#   systemctl status ceralive-ingest-firewall.service
+#     Active: failed (Result: exit-code)
+#     ExecStart=/usr/sbin/nft -f /etc/ceralive/ingest-firewall.nft (status=3)
+#     nft[182]: mnl.c:60: Unable to initialize Netlink socket: Protocol not supported
+#   modprobe nfnetlink
+#     FATAL: Module nfnetlink not found in directory /lib/modules/7.1.5-ceralive-rk3588
+#   zcat /proc/config.gz | grep -iE 'NF_TABLES|NETFILTER'
+#     # CONFIG_NF_TABLES is not set
+#     CONFIG_NETFILTER=y
+#     CONFIG_NETFILTER_ADVANCED=y
+#
+# The socket `nft` cannot open is NETLINK_NETFILTER, which comes from
+# CONFIG_NETFILTER_NETLINK — a promptless tristate that NOTHING selects until
+# NF_TABLES is on. That is why the board reports a missing netlink PROTOCOL rather
+# than a missing table, and why chasing `nfnetlink` as a module is a dead end. It
+# is `select`ed by the symbol below and so needs no entry of its own.
+#
+# =y rather than =m: the ruleset is installed by a DefaultDependencies=no oneshot
+# ordered Before= the gateway opens its listeners, so the boundary has to exist
+# before any modular autoload could plausibly have run.
+CONFIG_NF_TABLES=y
+# The ruleset declares `table inet ceralive_ingest_fw` — one table covering v4 and
+# v6 — which is exactly what this bool provides. It `depends on IPV6`, already =y
+# from defconfig and verified against the board's own /proc/config.gz, and it
+# `select`s NF_TABLES_IPV4/NF_TABLES_IPV6, so neither of those needs an entry.
+CONFIG_NF_TABLES_INET=y
+# NOT DECLARED, deliberately: CONFIG_NFT_COUNTER. The `counter` statement in the
+# ruleset is real and load-bearing — it is what makes a drop visible in
+# `nft list ruleset` for on-device diagnosis — but v7.1.7 has no such symbol:
+# net/netfilter/Makefile builds nft_counter.o unconditionally into nf_tables-objs,
+# next to nft_meta.o (the `iifname` match) and nft_chain_filter.o (the
+# `type filter hook input` base chain). Declaring it would resolve to nothing and
+# verify-kernel-config.sh would correctly fail the build over a symbol the kernel
+# does not have. Declare the value kconfig can actually give, exactly as with
+# CONFIG_TYPEC_FUSB302 below.
+
+# --- Type-C / USB role switching -------------------------------------------
+# The FUSB302/TCPM connector mkosi/runtime/ceralive-typec-source.sh pins to
+# the source role. Without TYPEC_TCPM + TYPEC_FUSB302 there is no
+# /sys/class/typec/port0 for that unit to act on and the camera-enumeration race
+# returns.
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+# FUSB302 carries `depends on DRM || DRM=n`, and arm64 defconfig builds DRM as a
+# module, so kconfig caps this at =m however loudly the fragment asks for =y.
+# It asked for =y for three releases and silently got =m. That is tolerable —
+# udev auto-loads typec_fusb302 off the I2C node's OF modalias during ordinary
+# boot, and ceralive-typec-source.service POLLS for /sys/class/typec/port0 to a
+# deadline rather than assuming it is already there — so the honest value is
+# declared here instead. Do NOT "fix" this by setting CONFIG_DRM=y.
+CONFIG_TYPEC_FUSB302=m
+CONFIG_USB_ROLE_SWITCH=y
+
+# --- Storage / rootfs ------------------------------------------------------
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=m
+CONFIG_OVERLAY_FS=m
+
+# --- systemd / RAUC prerequisites ------------------------------------------
+CONFIG_CGROUPS=y
+CONFIG_NAMESPACES=y
+CONFIG_EFIVAR_FS=n
+CONFIG_FANOTIFY=y
+CONFIG_AUTOFS_FS=y

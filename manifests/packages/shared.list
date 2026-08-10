@@ -1,0 +1,267 @@
+# CeraLive — Canonical SHARED runtime package list
+#
+# Arch-independent Debian packages every CeraLive device installs, regardless of
+# SoC/board. This is the SINGLE source of truth, reconciled from three diverging
+# legacy sources (Task 18):
+#   1. configs/base/ceraui-base.conf        (BASE_PACKAGES + STREAMING_PACKAGES)
+#   2. userpatches/customize-image.sh        (the set actually installed in v1)
+#   3. configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES — BSP only)
+#
+# NOT here (by design, see removed.md for the full accounting):
+#   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
+#     rockchip-multimedia-config) → manifests/families/rk3588.yaml
+#   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
+#   - First-party .debs (the CERALIVE/srt runtime, cerastream, srtla-send-rs, and
+#     CeraUI) → installed in the APPLICATION layer (Stage 3), never fetched from
+#     Debian by this manifest. The SRT package replaces Debian's TLS-flavor
+#     variants in the same offline local transaction; see LAYER-MAP.md §libsrt.
+#   - Debug/diagnostic tooling (python3, strace, tcpdump, htop, lsof, …) →
+#     development.delta.list, resolved ONLY when CERALIVE_DEBUG_IMAGE=1
+#   - On-device build tooling (build-essential, git, cmake, gdb, nodejs, …) →
+#     NOT shipped at all, in either variant; see removed.md §(e)
+#   - openssh-server, systemd, udev, dbus → already in the mkosi base layer
+#
+# Format: one package per line; `#` comments justify non-obvious entries.
+# The mkosi runtime layer (mkosi/mkosi.images/runtime/mkosi.conf) installs
+# exactly this set; lib/parity-check.sh diffs the built rootfs against it.
+
+# --- TLS / apt plumbing -------------------------------------------------------
+ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
+# apt-transport-https    # REMOVED (todo 19, audited). On bookworm this is a
+                         # `Section: oldlibs` TRANSITIONAL DUMMY whose own Debian
+                         # description reads "https support has been moved into the apt
+                         # package in 1.5. It can be safely removed." Verified against a
+                         # built rootfs: it ships FOUR files, all under
+                         # /usr/share/doc/apt-transport-https/ — no apt method, no code at
+                         # all — and the installed apt is 2.6.1, far past the 1.5 cutover.
+                         # The device's own https+mTLS apt source (apt.ceralive.tv, see the
+                         # `_apt`-readable client-key KEY FACT in AGENTS.md) is served by
+                         # apt's built-in https method, not by this package.
+openssl                  # CLI for the first-boot self-signed TLS cert (ceralive-tls-firstboot).
+                         # Priority: important on Debian (usually already present), pinned
+                         # explicitly so cert generation never depends on a transitive pull.
+
+# --- CeraUI TLS front (Task 15, SC3) ------------------------------------------
+nginx-light              # terminates HTTPS on 443 and reverse-proxies to the CeraUI
+                         # backend on 127.0.0.1:80 (WebSocket-upgrade aware, EC6). Port 80
+                         # is LEFT to the backend (no redirect). nginx-light is the smallest
+                         # viable nginx flavour — it carries the proxy + ssl modules without
+                         # the mail/stream/extras bulk of nginx-full. Cert is per-device
+                         # self-signed on /data; see docs/size-notes.md for the size delta.
+
+# --- Network management -------------------------------------------------------
+network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
+systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
+dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
+iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
+net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
+                         # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
+                         # the `netif` broadcast (WiFi/Ethernet/cellular/bonded-link status).
+                         # This minimal bookworm image ships only modern iproute2, so WITHOUT
+                         # net-tools every poll tick fails ("Executable not found in $PATH:
+                         # \"ifconfig\"") and the Network destination renders completely empty
+                         # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a
+                         # missing Ethernet entry in Bonded Links, despite live, connected NICs
+                         # (confirmed on real Rock 5B+ hardware). CeraUI's ifconfig text-parsing is
+                         # deeply embedded in its test suite; adding the one legacy binary is the
+                         # minimal-risk fix, NOT rewriting network-interfaces.ts onto `ip`.
+ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
+
+# --- USB modem bring-up -------------------------------------------------------
+usb-modeswitch           # flips USB modems out of storage mode into modem mode —
+                         # required for USB LTE/5G modem enumeration (core datapath).
+                         # NOTE: audio (alsa-utils/pulseaudio) and the rest of the USB/HW
+                         # introspection set (usbutils/pciutils/lsof/i2c-tools/can-utils)
+                         # moved to the debug add-on (T17) — see removed.md.
+
+# --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
+gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing
+gstreamer1.0-alsa        # alsasrc — USB audio capture for audio-capable streaming pipelines
+gstreamer1.0-nice         # nicesrc — WebRTC ICE transport for peer connectivity
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+gstreamer1.0-plugins-ugly
+gstreamer1.0-libav       # libav-backed encode/decode fallback
+v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device control
+ffmpeg                   # transcode/probe utility for the pipeline
+
+# --- Modems (LTE/5G on every board) -------------------------------------------
+# These pull the FULL Debian modem dependency tree (libmm-glib0, libqmi-glib5,
+# libmbim-glib4, libqrtr-glib0, plus external deps: glib, libgudev, polkit, …) in
+# the runtime layer. The APP layer then UPGRADES the nine ceralive-forked ELF
+# packages (the ModemManager 1.24 closure staged from apt.ceralive.tv) over these
+# Debian versions in one local dpkg transaction — see mkosi.images/app/
+# mkosi.postinst.chroot RUNTIME_APP_PKGS and docs/modem-matrix.md §1.
+modemmanager             # cellular modem management daemon
+libqmi-utils             # QMI modem control (Qualcomm)
+libmbim-utils            # MBIM modem control
+mobile-broadband-provider-info  # ModemManager's mobile-provider / APN database
+                         # (/usr/share/mobile-broadband-provider-info). Only a
+                         # ModemManager `Recommends:`, so --no-install-recommends
+                         # never pulls it transitively (same trap as wireless-regdb).
+                         # Absent it, ModemManager cannot auto-resolve APN/provider
+                         # settings from the operator's MCCMNC and every SIM needs
+                         # a manual connection profile. Debian package (not forked).
+
+# --- WiFi ---------------------------------------------------------------------
+# wireless-tools         # REMOVED (todo 19, audited). Legacy WEXT tooling — it ships ONLY
+                         # iwconfig/iwlist/iwgetid/iwpriv/iwspy/iwevent, and NOTHING on this
+                         # device can invoke any of them. CeraUI's backend may execute only
+                         # the binaries in its security-reviewed allowlist
+                         # (apps/backend/src/helpers/run.ts `ALLOWED`), which carries `iw`
+                         # and NO WEXT binary, so the WEXT path is structurally unreachable
+                         # rather than merely unused. WiFi association is NetworkManager +
+                         # wpa_supplicant over D-Bus, and regulatory/channel work is
+                         # `iw reg get/set` + `iw phy` (modules/wifi/regdomain.ts) — the `iw`
+                         # entry immediately below is the package that provides it. cerastream
+                         # never touches WiFi, no shipped unit or script under mkosi/ names
+                         # a WEXT binary, and no installed package Depends/Recommends it. The
+                         # only iwconfig/iwlist references anywhere are prose and CeraUI's
+                         # host-side test-harness/wifi-hwsim container (mac80211_hwsim on a
+                         # dev box), never the device.
+iw                       # nl80211 tool: `iw reg get/set` applies the operator's regulatory
+                         # country, and `iw phy` is what CeraUI reads BACK to derive the
+                         # AP-usable hotspot channels (no country->channel table exists
+                         # anywhere). wireless-tools does NOT provide it — that package ships
+                         # only the legacy WEXT iwconfig/iwlist/iwgetid binaries — and nothing
+                         # else in this list pulls it, so without an explicit entry the
+                         # regulatory country cannot be applied and the hotspot stays on the
+                         # conservative world domain.
+wpasupplicant            # WPA client
+wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db + .p7s) — the
+                         # kernel cfg80211 subsystem loads it at boot to establish a usable
+                         # regulatory domain. It is wpasupplicant's `Recommends:`, so it is
+                         # NOT pulled transitively (this list installs with
+                         # --no-install-recommends); named explicitly or cfg80211 boots with
+                         # "Direct firmware load for regulatory.db failed with error -2" and
+                         # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
+hostapd                  # AP mode (device hotspot for config)
+
+# --- Bluetooth ----------------------------------------------------------------
+bluez                    # the Bluetooth userspace stack: bluetoothd + bluetoothctl/btmgmt.
+                         # The KERNEL half already works and always did — on a Rock 5B+ the
+                         # RTL8852BE's Bluetooth radio enumerates as USB 13d3:3572, btusb+btrtl
+                         # bind it, and /sys/class/bluetooth/hci0 exists (board-confirmed on
+                         # 7.1.5, 2026-08-02). What was missing is entirely userspace: with no
+                         # bluez there is no bluetoothd, no bluetooth.service ("Unit
+                         # bluetooth.service could not be found"), and no bluetoothctl/hciconfig,
+                         # so the adapter can never be powered up, paired or used. libbluetooth3
+                         # was present only as a transitive dependency of an unrelated package,
+                         # which is why `dpkg -l | grep blue` looked deceptively non-empty.
+                         # This is NOT an edge-kernel regression — the vendor-BSP images have the
+                         # same gap. Same class as the net-tools / iw entries above: one missing
+                         # userspace package silently disables a whole hardware feature.
+
+# --- mDNS / discovery ---------------------------------------------------------
+avahi-daemon             # .local hostname advertisement (find the box on the LAN)
+avahi-utils              # set/query Avahi's published hostname during allocation + health checks
+libnss-mdns              # NSS plugin so the box can resolve other .local hosts
+
+# --- Time ---------------------------------------------------------------------
+chrony                   # NTP client; enabled service in customize-image.sh:521.
+                         # NOTE: v1 enabled the unit but never apt-installed it — fixed here.
+
+# --- CPU / power --------------------------------------------------------------
+cpufrequtils             # CPU governor control for sustained encode performance
+
+# --- Net glue (runtime-critical) ----------------------------------------------
+rsync                    # file sync for dev-push/dev-sync live-reload loop (docs/dev-loop.md)
+curl                     # http client — CeraUI/update flows + on-device `curl localhost`
+                         # health probe (backend observability.ts). Runtime-critical: KEPT.
+# wget                   # REMOVED (todo 19, audited). The old "http downloader (update/fetch
+                         # infra)" annotation named no consumer, and there is none. The OS
+                         # update path is RAUC (`ceralive-update` → `rauc install`) plus
+                         # rauc-hawkbit-updater, which downloads through libcurl; the app
+                         # update path is `apt-get` against apt.ceralive.tv. CeraUI's backend
+                         # cannot spawn it — `wget` is absent from the run.ts `ALLOWED`
+                         # allowlist. The ONLY device-side invoker in this repo is
+                         # lib/shared/health-gate-lib.sh:54, and it is the fallback arm of
+                         # `command -v curl && curl … || wget …`, whose first arm is guaranteed
+                         # by `curl` being a mandatory entry above — so the wget arm is
+                         # unreachable on any CeraLive image. CeraUI's legacy pre-.deb
+                         # install.sh does use wget, but self-provisions it
+                         # (`install_if_missing_local wget`) and is superseded by the
+                         # ceralive-device package. No installed package Depends/Recommends it.
+                         # NOTE: net DIAGNOSTICS (socat/netcat-openbsd/iperf3) moved to the
+                         # debug add-on (T17) — verified unused by CeraUI/streaming runtime;
+                         # the chaos harness (tools/chaos) ships its own. See removed.md.
+sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-addon-helper
+                         # drop-in; without the sudo binary add-on enable/disable is dead code.
+
+# --- Console (HDMI readability at boot) ---------------------------------------
+kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service (enabled in
+                         # multi-user.target.wants) invokes `setfont` directly, and `setfont`
+                         # ships ONLY here. CORRECTION (todo 19, audited): the previous
+                         # annotation also claimed systemd-vconsole-setup shells out to these —
+                         # that is FALSE for this image. A built rootfs carries NO *vconsole*
+                         # file anywhere (no unit, no binary) and no /etc/vconsole.conf, and
+                         # console-setup/keyboard configs are absent too, so there is no
+                         # vconsole path to break. kbd stays because it is one half of a live,
+                         # shipped, enabled unit whose OTHER half — a real PSF provider — is
+                         # the tracked gap (size-notes.md §11); dropping kbd would turn that
+                         # one-package fix into a two-package one and leave an enabled unit
+                         # naming a binary that does not exist.
+# fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
+                         # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
+                         # factually wrong on bookworm: fonts-terminus ships EXACTLY ONE file,
+                         # /usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf (440,944 B),
+                         # and NO console PSF font at all (the PSF set lives in xfonts-terminus /
+                         # console-setup, neither of which is installed). Verified against a built
+                         # rootfs: /usr/share/consolefonts/ is EMPTY (0 entries), so
+                         # ceralive-console-font.service's
+                         #   setfont /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
+                         #   || setfont /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz || true
+                         # can never succeed and silently no-ops on every boot. A TTF has no fbcon
+                         # consumer, and the production image ships no X/Wayland; fonts-dejavu-core
+                         # (2.88 MB, pulled by fontconfig-config) remains as the only font any
+                         # future GUI/kiosk payload would resolve. Restoring HDMI console
+                         # readability needs a real PSF provider, NOT this package — tracked
+                         # separately, see docs/size-notes.md §11.
+                         # NOTE: operational monitoring (htop/iotop/nethogs/vnstat) and the
+                         # nano editor moved to the debug add-on (T17) — see removed.md.
+
+# --- OS-update infrastructure (Stage 2; RUNTIME layer, arch-independent) -----
+# The device SRT runtime is CeraLive's `libsrt1.5-ceralive` first-party package,
+# staged and installed by the App layer. Do not add a Debian `libsrt1.5-*` flavor
+# here: GStreamer and cerastream must resolve one forked shared object. The LAN SRT
+# ingest listener is served by MediaMTX, so no srt-tools package is needed.
+nftables                 # ships /usr/sbin/nft — loads the LAN-ingest ingress firewall
+                         # (ceralive-ingest-firewall.service): DROP inbound :1935 (RTMP) +
+                         # :4001 (SRT) on modem/WWAN/ppp uplink classes so the
+                         # UNAUTHENTICATED v1 MediaMTX ingest gateway is reachable from
+                         # LAN/hotspot ONLY, never from a WAN uplink (DEFERRED.md items 7 & 8).
+                         # libnftables1 is already pulled by the base (NetworkManager dep), so
+                         # the net add is just the nft binary + libmnl/libnftnl (~1.5 MB — see
+                         # size-notes.md §7).
+rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
+rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
+                         # SPLIT the daemon out of `rauc` (binary-only); the runtime
+                         # postinst enables rauc.service, so the service pkg is required.
+squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it to extract the
+                         # manifest (and rootfs image) from a plain-format .raucb at
+                         # `rauc info`/`rauc install` time. Absent it, install fails after
+                         # signature verification with "Failed to start unsquashfs: ... No
+                         # such file or directory" (real Rock 5B+ hardware). build-time
+                         # mksquashfs runs on the HOST/CI, so this runtime gap was invisible.
+e2fsprogs                # ships /sbin/mkfs.ext4 — rauc shells out to it to format the target
+                         # ext4 slot before copying the new rootfs image during the slot-write
+                         # phase of `rauc install`, AFTER signature + manifest checks pass.
+                         # Without it, real Rock 5B+ hardware reported exactly: "LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)".
+                         # build-time tooling never needed mkfs.ext4, so this runtime-only gap was
+                         # invisible; installing e2fsprogs made the REAL end-to-end OTA install
+                         # complete successfully (signature verified, slot B activated and rebooted
+                         # healthy), proving the fix on physical hardware.
+zstd                     # initramfs-tools uses it in the target rootfs to compress initrds instead of falling back to gzip.
+u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
+                         # selector. Generic Debian pkg (present on amd64 too); the
+                         # board-specific U-Boot BLOB is a Platform-layer BSP concern.
+# rauc-hawkbit-updater   # Stage 7 OTA (task 41). DELIBERATELY a comment, NOT an
+                         # active apt line: 1.4 is NOT in bookworm main (only sid/forky
+                         # 1.4-1) → it is a bookworm BACKPORT .deb (1.4-1~bpo12+1),
+                         # pre-staged like the first-party .debs and installed by the
+                         # RUNTIME postinst (setup_hawkbit_updater → apt-get install
+                         # ./<file>.deb, which pulls libcurl4/libglib2.0-0/libjson-glib
+                         # from bookworm main). An active line here would break the
+                         # whole-list `apt-get install` on any host without the backport.
+                         # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.

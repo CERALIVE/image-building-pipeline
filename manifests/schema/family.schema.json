@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ceralive.tv/schema/v2/family.schema.json",
+  "title": "CeraLive Image Family Manifest",
+  "description": "Family-tier manifest. Captures the SoC/architecture-level build attributes shared by every board in a family (e.g. rk3588). A single family file is referenced by many board files via the board manifest's `family` field. Only fields actually consumed by the v2 builder are modelled; descriptive hardware metadata from the legacy configs/devices/*.conf lives in the board `description`/`quirks`, not here.\n\nVARIANT MODEL: the family's TOP-LEVEL fields are the DEFAULT (vendor) variant — the production path. An optional `variants:` map declares named overlays (e.g. `edge`) that are applied ONLY when a build explicitly opts in (`build <board> --variant <name>`, `CERALIVE_KERNEL_VARIANT`). Resolver merge order is family -> variant -> board (board still wins). With no variant selected the resolver strips `variants:` and emits byte-identical params to a family that never declared one, so adding a variant can never move the production path.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "arch",
+    "armbian_branch",
+    "kernel_packages",
+    "uboot_packages",
+    "dtb_packages",
+    "firmware_packages",
+    "rauc_bootloader_adapter",
+    "partition_template",
+    "serial_console"
+  ],
+  "properties": {
+    "arch": {
+      "description": "Target CPU architecture in mkosi's identifier space (consumed by mkosi --architecture; see lib/orchestrate.sh). 'arm64' covers rk3588; 'x86-64' covers Intel N100/N200 + AMD mini-PCs. mkosi has NO 'amd64' — its x86 identifier is 'x86-64' (learnings task 13). 'amd64' is retained only as a legacy alias that orchestrate.sh maps to mkosi x86-64; NEW x86 families use 'x86-64' directly. NOTE: the Debian *package* arch is still 'amd64' (e.g. linux-image-amd64) — that lives in kernel_packages, never here.",
+      "type": "string",
+      "enum": ["arm64", "amd64", "x86-64"]
+    },
+    "armbian_branch": {
+      "description": "Armbian kernel/U-Boot branch (BRANCH= for the Armbian BSP build framework; legacy userpatches BRANCH=). rk3588 builds on 'vendor' for HDMI hdmirx + mature MPP HW-encode (decision D3). NOTE: ARMBIAN_BRANCH=current in the legacy device configs was dead metadata; the effective branch is this field. x86 families set 'none': they do not use the Armbian BSP at all (Debian generic kernel + GRUB/EFI; there is no Armbian BSP BRANCH for x86).",
+      "type": "string",
+      "enum": ["vendor", "current", "edge", "none"]
+    },
+    "kernel_packages": {
+      "description": "Armbian kernel image package(s) for the family (e.g. linux-image-vendor-rockchip64). Maps to the linux-image-* entries of BOARD_PACKAGES.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "uboot_packages": {
+      "description": "Bootloader / U-Boot blob package(s) (e.g. rkbin-rk3588). Maps to BOOTLOADER/rkbin entries. May be empty for families whose U-Boot is supplied raw outside apt (x86 declares [] — UEFI firmware lives in platform flash). Items, when present, must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "dtb_packages": {
+      "description": "Device-tree blob package(s) (e.g. linux-dtb-vendor-rockchip64). Maps to the linux-dtb-* entries of BOARD_PACKAGES. EMPTY ([]) on x86 families: x86-64 platforms enumerate hardware via ACPI and ship no device tree, so they declare no DTB package. Still REQUIRED to be present (as []) so the absence is explicit, not accidental. Items, when present, must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "firmware_packages": {
+      "description": "SoC/GPU/Wi-Fi firmware package(s) (e.g. armbian-firmware, mali-g610-firmware, firmware-realtek). Maps to firmware entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES and FIRMWARE_FILES blobs. orchestrate.sh require_field's FIRMWARE_PACKAGES unconditionally, so this MUST be a non-empty set of valid Debian package names — an empty array would otherwise pass the schema and only fail at build time.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "rauc_bootloader_adapter": {
+      "description": "RAUC bootloader backend for A/B slot selection. rk3588 defaults to 'custom' because the staged vendor U-Boot lacks persistent fw_setenv (decision D3). 'uboot' = standard fw_setenv adapter; 'custom' = FAT-file bootcount approach; 'efi'/'grub' = x86 targets.",
+      "type": "string",
+      "enum": ["uboot", "custom", "efi", "grub"],
+      "default": "custom"
+    },
+    "hw_accel_gstreamer_plugins": {
+      "description": "Hardware-accelerated GStreamer encode/decode plugin packages for the family (e.g. rk3588 MPP plugins). Optional: software-only families (generic x264) omit this. Maps to VIDEO_ENCODER/VIDEO_DECODER hardware path. Items must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "uniqueItems": true
+    },
+    "partition_template": {
+      "description": "Name of the frozen partition layout template defined in docs/partition-contract.md (e.g. 'rk3588-ab'). Reference by NAME only — partition sizes, slot roles and the single-slot threshold live in the FROZEN contract document, never in this schema.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "serial_console": {
+      "description": "Armbian SERIALCON value as '<tty>:<baud>' (e.g. 'ttyS2:1500000'). Maps to userpatches/config-*.conf SERIALCON and the CONSOLE= line.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]+:[0-9]+$"
+    },
+    "gstreamer_runtime_packages": {
+      "description": "Runtime GStreamer multimedia support packages for the family (e.g. rockchip-multimedia-config). Optional. Maps to the multimedia-config entries of BOARD_PACKAGES / EXTRA_BSP_PACKAGES. Items must be valid Debian package names.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "uniqueItems": true
+    },
+    "kernel_source": {
+      "$ref": "#/$defs/kernel_source",
+      "description": "Kernel-build-from-source declaration. Present ONLY inside a `variants:` overlay in practice — a family that declares it at top level would build every production image from source, which is never what we want today. See $defs/kernel_source."
+    },
+    "variants": {
+      "description": "Named, OPT-IN overlays on the family defaults. The key is the variant name as passed to `build <board> --variant <name>`; the value overlays a SUBSET of the family fields. `default` is a RESERVED name meaning 'no overlay' (the vendor/production path) and MUST NOT be declared here — declaring it would make the production path silently overridable. Resolver merge order: family -> variant -> board.",
+      "type": "object",
+      "minProperties": 1,
+      "not": { "required": ["default"] },
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/variant_overlay" }
+    }
+  },
+  "$defs": {
+    "variant_overlay": {
+      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB package names, and declare a kernel_source build — nothing else. Anything wider (firmware, U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "armbian_branch": {
+          "description": "Armbian branch this variant targets (same enum as the family field). An `edge` variant sets this so the Armbian mapping recorded in the kernel-patches repo's kernel-pin.env stays traceable, even though the Armbian framework is NEVER invoked as the build system (see $defs/kernel_source).",
+          "type": "string",
+          "enum": ["vendor", "current", "edge", "none"]
+        },
+        "kernel_packages": {
+          "description": "Kernel image package name(s) this variant resolves to. With a kernel_source block these are the names the BUILT .debs must carry — the build stage validates the actual Debian control `Package:` field against them and fails the build on a mismatch, so a rename cannot silently produce an unused deb.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "dtb_packages": {
+          "description": "DTB package name(s) for this variant. EMPTY ([]) when the built kernel .deb carries the in-tree DTBs itself (the `make bindeb-pkg` output contract) — the DTB path inside that deb is then declared by kernel_source.dtb_deb_dir / dtb_boot_dir.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "kernel_source": { "$ref": "#/$defs/kernel_source" }
+      }
+    },
+    "kernel_source": {
+      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the resolved kernel config, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping and for its published kernel .config (fetched as a plain file at a pinned revision) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nSOURCE CHECKOUT — TWO SHAPES. `commit` is ALWAYS the pin. `tag` is OPTIONAL and exists only so a tagged upstream can be verified to still resolve to that commit. A source branch that publishes no tags at all (the Armbian vendor BSP's rolling `rk-6.1-rkr5.1`) simply omits `tag`, and the build shallow-fetches the pinned SHA directly. Do NOT invent a synthetic tag to fill the field — that would misrepresent the source.\n\nCONFIG — TWO MUTUALLY EXCLUSIVE MODES, exactly one of which MUST be declared:\n  (a) DEFCONFIG mode — `defconfig_base` + `defconfig_fragment`: start from an in-tree `make <target>` defconfig and merge a repo-local Kconfig fragment on top. Used by mainline-track variants, whose upstream ships no full board config.\n  (b) CONFIG-FILE mode — `config_git_url` + `config_commit` + `config_path`: start from a COMPLETE `.config` fetched as a plain file from a pinned revision of another repository. Used by the vendor-BSP track, where Armbian publishes the exact full config the shipped kernel is built from and a bare `make defconfig` would produce a materially different driver/feature set.\nBoth modes then run `olddefconfig` + `syncconfig` and are gated identically by lib/verify-kernel-config.sh, which asserts every symbol the declared source config names survived into the resolved .config.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_url",
+        "commit",
+        "patches_git_url",
+        "patches_commit",
+        "patches_series",
+        "builder_image",
+        "local_version",
+        "kernel_release",
+        "package_version",
+        "dtb_deb_dir",
+        "dtb_boot_dir"
+      ],
+      "oneOf": [
+        {
+          "title": "defconfig mode",
+          "required": ["defconfig_base", "defconfig_fragment"],
+          "not": {
+            "anyOf": [
+              { "required": ["config_git_url"] },
+              { "required": ["config_commit"] },
+              { "required": ["config_path"] },
+              { "required": ["config_absent_symbols"] }
+            ]
+          }
+        },
+        {
+          "title": "config-file mode",
+          "required": ["config_git_url", "config_commit", "config_path"],
+          "not": {
+            "anyOf": [
+              { "required": ["defconfig_base"] },
+              { "required": ["defconfig_fragment"] }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "git_url": {
+          "description": "Canonical kernel source repository (e.g. the linux-stable git). Used verbatim; no mirror substitution happens implicitly.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "mirror_url": {
+          "description": "OPTIONAL faster mirror of the SAME objects. Only ever used when explicitly enabled; the pinned `commit` is verified after checkout either way, so a mirror cannot change what is built.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "tag": {
+          "description": "OPTIONAL exact source tag (e.g. v7.1.7). A tag alone is NEVER the pin — `commit` is. When present the build clones that tag and fails loudly if it does not resolve to `commit`, so a moved tag is caught rather than silently built. OMIT it entirely when the source publishes no tag on the pinned branch (the Armbian vendor BSP's rolling rk-6.1-rkr5.1 publishes none): the build then shallow-fetches `commit` directly. NEVER fabricate a placeholder tag to satisfy this field.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "commit": {
+          "description": "Exact 40-character kernel commit SHA the tag must resolve to. THE pin.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "patches_git_url": {
+          "description": "Patch-series repository (CERALIVE/rk3588-kernel-patches). A build input, pinned exactly like the kernel source itself.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "patches_commit": {
+          "description": "Exact 40-character commit of the patches repo. IMMUTABLE — never a branch name, never a tag. A floating reference here would make the built kernel unreproducible while still looking pinned.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "patches_series": {
+          "description": "Path INSIDE the patches repo to the git-am series file (one patch filename per line, `#` comments ignored). Applied in file order with `git am`.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "defconfig_base": {
+          "description": "DEFCONFIG MODE (half 1 of 2). The in-tree defconfig target the build starts from (e.g. `defconfig` for arm64). The fragment is merged ON TOP of it. Mutually exclusive with the config_* trio.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "defconfig_fragment": {
+          "description": "DEFCONFIG MODE (half 2 of 2). Repo-relative path (from ) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched. Mutually exclusive with the config_* trio.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "config_git_url": {
+          "description": "CONFIG-FILE MODE (1 of 3). Repository publishing the COMPLETE kernel `.config` this variant starts from (e.g. https://github.com/armbian/build, which ships config/kernel/linux-rk35xx-vendor.config — the exact config the shipped vendor kernel is built with). The file is fetched as plain data; the publishing repo's BUILD FRAMEWORK is never invoked. Mutually exclusive with defconfig_base/defconfig_fragment.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "config_commit": {
+          "description": "CONFIG-FILE MODE (2 of 3). Exact 40-character commit of config_git_url the .config is read from. IMMUTABLE — never a branch, never a tag. A kernel config is as load-bearing as the source itself: a floating reference here would silently change which drivers ship while every other pin still looked exact.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "config_path": {
+          "description": "CONFIG-FILE MODE (3 of 3). Path INSIDE config_git_url at config_commit to the full `.config` file (e.g. config/kernel/linux-rk35xx-vendor.config). Copied verbatim to the kernel tree's .config before olddefconfig; it is NEVER edited, and lib/verify-kernel-config.sh asserts every symbol it declares survived.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "config_absent_symbols": {
+          "description": "CONFIG-FILE MODE, OPTIONAL. Repo-relative path (from ) to a reviewed list of CONFIG_ symbols the fetched config declares but the pinned source tree CANNOT provide, because the config's publisher injects them from out-of-tree sources its own build framework copies in (Armbian's EXTRAWIFI drivers). Without it the survival gate would fail on symbols whose absence is correct. It is NOT an escape hatch: verify-kernel-config.sh fails the build on a listed symbol that DID survive, so the list cannot rot into a blanket opt-out. Repo-local so every entry is reviewed and versioned with the pipeline.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "builder_image": {
+          "description": "DIGEST-PINNED base container image for the kernel builder (repo:tag@sha256:<64 hex>). The kernel-build stage derives its toolchain image FROM this exact digest, so the manifest — not a Dockerfile default — is the pin of record.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$"
+        },
+        "local_version": {
+          "description": "LOCALVERSION passed to the kernel build (e.g. -ceralive-rk3588). Together with the source version it fixes KERNELRELEASE, and therefore the produced package name.",
+          "type": "string",
+          "pattern": "^-[a-z0-9][a-z0-9-]*$"
+        },
+        "kernel_release": {
+          "description": "The KERNELRELEASE the build MUST produce (<source version><local_version>). Declared so the build can assert it rather than discover it — a drift here means the source version moved.",
+          "type": "string",
+          "pattern": "^[0-9][A-Za-z0-9._-]*$"
+        },
+        "package_version": {
+          "description": "KDEB_PKGVERSION — the exact Debian version of the produced .deb. Validated against the built control `Version:` field.",
+          "type": "string",
+          "pattern": "^[0-9][A-Za-z0-9.+~:-]*$"
+        },
+        "dtb_deb_dir": {
+          "description": "PLATFORM-LAYER INSTALL MAPPING (source half). Absolute path INSIDE the built kernel .deb holding the board DTBs — `make bindeb-pkg` puts arm64 in-tree DTBs under /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/. The build stage asserts the board manifest's dtb_name actually exists here, so the mapping is machine-verified, not merely declared.",
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "dtb_boot_dir": {
+          "description": "PLATFORM-LAYER INSTALL MAPPING (target half). Absolute on-image path the U-Boot boot script resolves `fdtfile` under (/boot/dtb/<vendor>/ — see mkosi/platform/boot/boot.scr.cmd). The platform layer copies dtb_deb_dir -> dtb_boot_dir so a source-built kernel satisfies the SAME board DTB expectation an Armbian linux-dtb-* package would.",
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        }
+      }
+    }
+  }
+}

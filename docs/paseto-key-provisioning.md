@@ -114,7 +114,7 @@ The build consumes the device public key as the base64-wrapped env
 ```bash
 RAW_B64="$(tr -d '\r\n' < keys/prod/paseto.public.raw.b64)"
 export PASETO_PUBLIC_KEY_B64="$(printf '%s' "$RAW_B64" | base64 -w0)"
-./v2/build rock-5b-plus            # CI injects PASETO_PUBLIC_KEY_B64 from its secret store
+./build rock-5b-plus            # CI injects PASETO_PUBLIC_KEY_B64 from its secret store
 ```
 
 `orchestrate.sh` forwards `PASETO_PUBLIC_KEY_B64` into mkosi (`env_names` +
@@ -142,15 +142,15 @@ round-trips to the device key with zero drift and that a `k4.secret` is refused:
 
 ```bash
 # Verify a real gen-keys.sh output dir (PUBLIC files only):
-v2/lib/verify-paseto-key-encodings.sh --key-dir <path-to>/keys/prod
+lib/verify-paseto-key-encodings.sh --key-dir <path-to>/keys/prod
 
-# CI / no-secrets self-check (ephemeral keypair, the v2/run-tests section-21 gate):
-v2/lib/verify-paseto-key-encodings.sh --self-test
+# CI / no-secrets self-check (ephemeral keypair, the run-tests section-21 gate):
+lib/verify-paseto-key-encodings.sh --self-test
 ```
 
 The verifier prints only sha256 fingerprints + PASS/FAIL — never key bytes. A
 mismatched or private-bearing pair exits non-zero (fail loud). The same `--self-test`
-runs as a bats case in `v2/tests/manifest.bats` (section 21), so the contract stays
+runs as a bats case in `tests/manifest.bats` (section 21), so the contract stays
 green in CI without any secret.
 
 ---

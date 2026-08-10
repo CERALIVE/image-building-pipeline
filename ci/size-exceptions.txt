@@ -1,0 +1,18 @@
+# SIZE_OK: legacy manifest integration suite; split requires a dedicated test-layout change.
+tests/manifest.bats
+# SIZE_OK: package transport module keeps native/curl transaction state in one process.
+lib/fetch-debs.sh
+# SIZE_OK: build orchestrator is a linear transaction with shared cleanup state.
+lib/orchestrate.sh
+# SIZE_OK: preflash verification is one fail-closed ordered media gate.
+tests/preflash-verify.sh
+# SIZE_OK: RK3588 contract shares expensive disk fixtures across assertions.
+tests/rk3588-ab-contract.bats
+# SIZE_OK: disk assembly is one geometry transaction with shared cleanup state.
+lib/assemble-disk.sh
+# SIZE_OK: the hostname claim script is ONE generated payload that the real-avahi
+# contract extracts verbatim and drives; splitting the heredoc splits the harness.
+mkosi/customize/postinst.d/hostname.sh
+# SIZE_OK: /data migration + the RAUC update entrypoint are generated payloads that
+# must stay one transaction with the fstab and bind-mount units that shadow them.
+mkosi/customize/postinst.d/persistence.sh

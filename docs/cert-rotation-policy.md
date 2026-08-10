@@ -4,8 +4,8 @@ How the RAUC signing PKI is rotated across the fleet **without a reflash** — a
 one case (root) where a reflash is the only option, by design.
 
 - PKI design & chain: externally managed release-PKI runbook (`rauc/README.txt`)
-- Device implementation: [`v2/mkosi/runtime/cert-rotation/README.md`](../v2/mkosi/runtime/cert-rotation/README.md)
-- Builder: [`v2/lib/build-cert-rotation-bundle.sh`](../v2/lib/build-cert-rotation-bundle.sh)
+- Device implementation: [`mkosi/runtime/cert-rotation/README.md`](../mkosi/runtime/cert-rotation/README.md)
+- Builder: [`lib/build-cert-rotation-bundle.sh`](../lib/build-cert-rotation-bundle.sh)
 
 ---
 
@@ -57,7 +57,7 @@ On the release host (current leaf key still valid — this is **pre-expiry** rot
 
 ```bash
 # new-intermediate.pem must chain to the SAME root-ca.pem; new-leaf signed by it.
-v2/lib/build-cert-rotation-bundle.sh <board> new-intermediate.pem new-leaf.pem new-leaf.key
+lib/build-cert-rotation-bundle.sh <board> new-intermediate.pem new-leaf.pem new-leaf.key
 ```
 
 The builder **refuses** to produce a bundle whose new intermediate/leaf does not

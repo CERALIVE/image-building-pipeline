@@ -1,0 +1,35 @@
+{
+  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling (Task 20). measure-size.sh sizes rootfs CONTENT via `du --apparent-size -sb` (real file bytes, NOT the frozen 4096 MB A/B partition \u2014 G4/E5) and exits non-zero when measured > rootfs_bytes_max. 1500000000 (1.5 GB) is a conservative post-slim ceiling: a minimal Debian bookworm arm64 rootfs with the slimmed shared.list (~35 pkgs, T17) + GStreamer + modem stack measures ~0.8-1.2 GB apparent, leaving headroom. This is a placeholder ceiling that the first real arm64 build refines downward (record the measured value, set the ceiling just above it). Keys beginning with '_' are metadata, not board entries.",
+  "_baked_binaries": {
+    "_comment": "Non-apt binaries fetched + staged into the rootfs at build time (postinst-lib.sh), recorded here so the per-board rootfs_bytes_max headroom stays auditable. bytes = staged binary size measured 2026-07-02; all comfortably under the 1.5 GB ceiling. Metadata only \u2014 NOT a board entry (measure-size.sh ignores '_'-prefixed keys).",
+    "mediamtx": {
+      "version": "v1.19.2",
+      "staged_path": "/usr/local/bin/mediamtx",
+      "recipe": "mkosi/runtime/rtmp-gateway/mediamtx.recipe.conf",
+      "bytes_amd64": 54125337,
+      "bytes_arm64": 62164043,
+      "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
+    }
+  },
+  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), and it must stay byte-identical to the matching ci/size-baseline.<board>.json \u2014 manifest.bats fails the build if the two registries disagree. Both RK3588 boards are under the 1.5 GB ceiling with ~78-85 MB of headroom. rootfs_bytes_max has never been moved in either direction. See each board's note for the armbian-firmware pin caveat. x86-minipc has no wet build yet, so it stays null.",
+  "orange-pi-5-plus": {
+    "rootfs_bytes_max": 1500000000,
+    "measured": 1422766080,
+    "measured_at": "2026-08-08",
+    "measured_commit": "a575a9a",
+    "measured_artifact": "images/orange-pi-5-plus/20260808T012615Z.rootfs.tar",
+    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, which armbian-bsp-deb-versions.txt now pins too: the earlier 26.5.1 pin had stopped existing in the Armbian archive (that package is Architecture:all and only its newest revision is kept), and the promotion to 26.8.1 landed through the RELEASE-PROCESS.md \u00a74 signed-index review. Measurement and committed pin therefore agree, and the +3,389,440 B firmware delta is already inside this figure. Supersedes the 2026-08-02 / 67d053a baseline (1418792960); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
+  },
+  "rock-5b-plus": {
+    "rootfs_bytes_max": 1500000000,
+    "measured": 1415188480,
+    "measured_at": "2026-08-08",
+    "measured_commit": "a575a9a",
+    "measured_artifact": "images/rock-5b-plus/20260808T000202Z.rootfs.tar",
+    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, which armbian-bsp-deb-versions.txt now pins too: the earlier 26.5.1 pin had stopped existing in the Armbian archive (that package is Architecture:all and only its newest revision is kept), and the promotion to 26.8.1 landed through the RELEASE-PROCESS.md \u00a74 signed-index review. Measurement and committed pin therefore agree, and the +3,389,440 B firmware delta is already inside this figure. Supersedes the 2026-08-02 / 67d053a baseline (1412259840); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
+  },
+  "x86-minipc": {
+    "rootfs_bytes_max": 1500000000,
+    "measured": null
+  }
+}

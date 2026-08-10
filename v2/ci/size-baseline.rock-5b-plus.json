@@ -1,9 +1,0 @@
-{
-  "board": "rock-5b-plus",
-  "bytes": 1415188480,
-  "recorded_at": "2026-08-08",
-  "artifact": "v2/images/rock-5b-plus/20260808T000202Z.rootfs.tar",
-  "artifact_sha256": "21612eb2c114f3f79a7cdbead673866c578dfd9ad776205ee5764507106a4ff5",
-  "commit": "a575a9a",
-  "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by v2/lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, which armbian-bsp-deb-versions.txt now pins too: the earlier 26.5.1 pin had stopped existing in the Armbian archive (that package is Architecture:all and only its newest revision is kept), and the promotion to 26.8.1 landed through the RELEASE-PROCESS.md \u00a74 signed-index review. Measurement and committed pin therefore agree, and the +3,389,440 B firmware delta is already inside this figure. Supersedes the 2026-08-02 / 67d053a baseline (1412259840); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
-}

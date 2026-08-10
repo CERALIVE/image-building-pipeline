@@ -3464,7 +3464,7 @@ both lists and additionally pinned by `manifest.bats` §27.
 `PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
 `manifest.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
 fails the build if a future `env_names` addition skips `PassEnvironment=`).
-`SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_V2_DIR` (forwarded via
+`SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_PIPELINE_DIR` (forwarded via
 a separate `-e`/`--environment` mechanism) are the two documented legitimate
 asymmetries.
 
