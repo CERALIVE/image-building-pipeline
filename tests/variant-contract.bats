@@ -444,14 +444,15 @@ YAML
   [[ "$line" != *"armbian-firmware"* ]]
 }
 
-@test "kernel_source: the pinned patches commit is the SHA that LANDED on main" {
-  # A regression pin on the actual value. This is the squash-merge of
-  # CERALIVE/rk3588-kernel-patches#4 as it landed on that repo's main, NOT the
-  # PR-head SHA the merge orphaned; a silent bump here would change what the
-  # kernel contains with no other signal.
+@test "kernel_source: the pinned patches commit is the hardware-tested series tip" {
+  # A regression pin on the actual value: the tip of
+  # CERALIVE/rk3588-kernel-patches feat/backports-fixes-doctrim, which is the
+  # exact revision the Wave-8 hardware candidates were built from. A silent bump
+  # here would change what the kernel contains with no other signal, and would
+  # detach the hardware evidence from the series it claims to attest.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='acb519c101fefa31f51300779f3a139bcabf6a1c'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='7c6948b66c4d4e6347e2eff643740930900ea5dc'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
@@ -855,7 +856,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.7"* ]]
   [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-  [[ "$output" == *"acb519c101fefa31f51300779f3a139bcabf6a1c"* ]]
+  [[ "$output" == *"7c6948b66c4d4e6347e2eff643740930900ea5dc"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]

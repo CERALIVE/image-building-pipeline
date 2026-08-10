@@ -90,9 +90,14 @@ refuses neither.
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@acb519c101fefa31f51300779f3a139bcabf6a1c` — the
-commit that LANDED on that repo's `main` from its PR #4, CI-green applying
-against exactly `v7.1.7`.
+`CERALIVE/rk3588-kernel-patches@7c6948b66c4d4e6347e2eff643740930900ea5dc` — the
+tip of that repo's `feat/backports-fixes-doctrim`, an eighteen-patch series
+applying against exactly `v7.1.7`, and the exact revision the Wave-8 hardware
+candidates were built from. It is a BRANCH TIP rather than a `main` commit
+because that branch has not merged yet and the hardware evidence has to name the
+revision it was actually produced from; the predecessor pin
+`acb519c101fefa31f51300779f3a139bcabf6a1c` was the nine-patch commit that landed
+on `main` from PR #4.
 
 **Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
 and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer

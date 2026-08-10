@@ -148,22 +148,39 @@ variants:
       commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
 
       # The patch series is a BUILD INPUT and is exact-pinned like every other
-      # BSP input — an IMMUTABLE commit, never a branch. This SHA is what LANDED
-      # on the patch repo's main from CERALIVE/rk3588-kernel-patches#4, which
-      # re-anchors the whole series on v7.1.7 and grows it to nine patches: 0008
-      # sets the rkvenc DMA max segment size (imported buffer lengths were being
-      # truncated to 64 KiB, so the IOVA guardrail rejected every encode) and
-      # 0009 adds the mainline `system-uncached` dma-heap librockchip_mpp asks
-      # for by name. Both are what make MPP hardware encode work on this track —
-      # board-confirmed on a Rock 5B+ (mpph264enc registers, a 1080p encode
-      # produces bytes, the guardrail never fires). Predecessor: 9c1cb385098d.
+      # BSP input — an IMMUTABLE commit, never a branch.
       #
-      # Pin the SHA that landed on main, never a PR-head SHA: the squash-merge
-      # of #4 orphaned its pre-merge head 2e195f2d36db, so pinning that would
-      # pin a commit no ref reaches. Verified reachable from a scratch clone
-      # with `git fetch --depth 1 <patches_git_url> <patches_commit>`.
+      # HARDWARE-TEST SERIES TIP. This SHA is the tip of
+      # CERALIVE/rk3588-kernel-patches `feat/backports-fixes-doctrim` — the exact
+      # software state the Wave-8 hardware-qualification candidates are built
+      # from, pinned BEFORE those candidates are built so the artifacts and the
+      # patch series can never drift apart. It grows the series from nine patches
+      # to eighteen: the four approved backports (0007 iommu fetch-dte time
+      # limit — merged; 0010 combphy rterm-det-rdy, 0011/0012 dw-hdmi-qp ACR/audio
+      # — unmerged lore postings carried under the truthful `lore-posting`
+      # provenance model), and six first-party follow-ups (0013 rkvenc CeraLive
+      # test instrumentation, 0014 rkvenc teardown + service/CCU unwind, 0015
+      # rkvenc resource-error observability, 0016 rkvenc ioctl bounds, 0017
+      # HDMI-RX audio lifecycle + clock errors, 0018 truthful dma-heap partial
+      # registration). 0013/0017/0018 are what make the opt-in `edge-test`
+      # variant's deterministic fault injection possible; all three compile to
+      # nothing unless their CeraLive test symbol is enabled, which production
+      # `edge` resolves OFF (manifests/kernel/forbidden-symbols.list).
+      #
+      # Predecessor: acb519c101fefa31f51300779f3a139bcabf6a1c (nine patches; 0008
+      # rkvenc DMA max segment size + 0009 mainline `system-uncached` dma-heap,
+      # the pair that made MPP hardware encode work on this track — board-confirmed
+      # on a Rock 5B+). Predecessor before that: 9c1cb385098d.
+      #
+      # Pin a SHA that a fresh clone can reach, never a PR-head SHA: the
+      # squash-merge of #4 orphaned its pre-merge head 2e195f2d36db, so pinning
+      # that would pin a commit no ref reaches. This pin is a BRANCH TIP rather
+      # than a `main` commit on purpose — the branch has not merged yet, and the
+      # hardware evidence must name the exact revision it was produced from.
+      # Verified reachable from a scratch clone with
+      # `git fetch --depth 1 <patches_git_url> <patches_commit>`.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: acb519c101fefa31f51300779f3a139bcabf6a1c
+      patches_commit: 7c6948b66c4d4e6347e2eff643740930900ea5dc
       patches_series: patches/series
 
       defconfig_base: defconfig
