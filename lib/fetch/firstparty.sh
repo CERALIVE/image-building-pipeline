@@ -17,17 +17,6 @@
 # Bodies moved VERBATIM from fetch-debs.sh; no behaviour change.
 #
 # shellcheck shell=bash
-# ---------------------------------------------------------------------------
-# get_pin — read a component pin from versions.yaml (graceful: "" when absent).
-# Mirrors scripts/fetch-debs.sh get_pin so behaviour stays identical post-rework.
-# ---------------------------------------------------------------------------
-get_pin() {
-  local key="$1" file="${2:-$VERSIONS_YAML}"
-  [[ -f "$file" ]] || { printf ''; return; }
-  awk -v key="$key" '$0==key":"{f=1;next} f&&/^[a-zA-Z]/{f=0}
-    f&&/^[[:space:]]+pin:/{gsub(/^[[:space:]]+pin:[[:space:]]*/,"");print;exit}' "$file"
-}
-
 first_party_download_specs() {
   local pkg version
   [[ -f "${FIRST_PARTY_DEB_VERSIONS_FILE}" ]] \

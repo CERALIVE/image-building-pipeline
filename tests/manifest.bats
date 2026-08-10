@@ -26,6 +26,7 @@ setup() {
   COMMON_SH="$LIB_DIR/common.sh"
   RESOLVE_SH="$LIB_DIR/resolve.sh"
   RESOLVE_PY="$LIB_DIR/resolve.py"
+  VERSIONS_LIB_SH="$LIB_DIR/shared/versions-lib.sh"
   MEASURE_SH="$LIB_DIR/measure-size.sh"
   FETCH_DEBS="$LIB_DIR/fetch-debs.sh"
   CHECK_WWAN="$LIB_DIR/check-wwan-modules.sh"
@@ -1221,8 +1222,9 @@ YAML
 
   stub="$BATS_TEST_TMPDIR/stub"
   mkdir -p "$stub/manifests/boards" "$stub/manifests/families" \
-           "$stub/manifests/schema" "$stub/lib"
+           "$stub/manifests/schema" "$stub/lib/shared"
   cp "$COMMON_SH" "$RESOLVE_SH" "$RESOLVE_PY" "$stub/lib/"
+  cp "$VERSIONS_LIB_SH" "$stub/lib/shared/"
   # Permissive schemas isolate the defer mechanism from field-shape rules.
   echo '{"type":"object"}' > "$stub/manifests/schema/board.schema.json"
   echo '{"type":"object"}' > "$stub/manifests/schema/family.schema.json"
@@ -1245,8 +1247,9 @@ YAML
 @test "resolve: absent defer pin fails loudly (no half-resolved token)" {
   stub="$BATS_TEST_TMPDIR/stub2"
   mkdir -p "$stub/manifests/boards" "$stub/manifests/families" \
-           "$stub/manifests/schema" "$stub/lib"
+           "$stub/manifests/schema" "$stub/lib/shared"
   cp "$COMMON_SH" "$RESOLVE_SH" "$RESOLVE_PY" "$stub/lib/"
+  cp "$VERSIONS_LIB_SH" "$stub/lib/shared/"
   echo '{"type":"object"}' > "$stub/manifests/schema/board.schema.json"
   echo '{"type":"object"}' > "$stub/manifests/schema/family.schema.json"
   cat > "$stub/manifests/families/pinfam.yaml" <<'YAML'

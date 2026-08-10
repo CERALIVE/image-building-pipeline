@@ -52,6 +52,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
+| **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
 | **Read a `.deb`'s control fields / assert its identity / explode it** | `lib/shared/deb-lib.sh` — the ONE `deb_control_field` / `deb_pkg_{name,version,arch}` / `assert_deb_identity` / `explode_deb`; contract `tests/deb-lib.test.sh`. See the KEY FACT below |
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |

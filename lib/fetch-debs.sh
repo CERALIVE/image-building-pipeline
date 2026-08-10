@@ -62,6 +62,8 @@ source "${HERE}/common.sh"
 source "${HERE}/shared/yaml-lib.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
+# shellcheck source=lib/shared/versions-lib.sh
+source "${HERE}/shared/versions-lib.sh"
 # shellcheck source=lib/fetch-debs-auth.sh
 source "${HERE}/fetch-debs-auth.sh"
 
