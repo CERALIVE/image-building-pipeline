@@ -81,6 +81,26 @@ identically on the default path to a board that never did.
 An override naming a variant the family does not declare is FATAL on every
 resolve, including the default path. A silently-inert override is exactly the
 failure mode this mechanism exists to prevent.
+
+Sibling variant inheritance (`extends`)
+---------------------------------------
+A variant MAY declare ``extends: <sibling>``, making it a DELTA on that sibling
+rather than a standalone overlay. Resolution becomes ``family -> parent ->
+child -> board``, ancestor-first, and the ``extends`` key never survives into
+the result.
+
+It exists so a debug sibling of a production variant cannot drift off it. The
+`edge-test` variant is a KASAN/lockdep build of exactly what `edge` compiles, and
+a build is only evidence about production if it compiles the same source -- a
+copy-pasted sibling looks identical on the day it is written and diverges
+silently on the first `edge` re-pin. Inheriting the pins makes that divergence
+structurally impossible rather than merely discouraged.
+
+Three malformed graphs are REFUSED rather than partially applied: a parent the
+family does not declare, a variant naming itself, and any cycle. Because a child
+is schema-validated as a PARTIAL (it does not restate its parent's required
+pins), the COMPLETE contract is re-asserted here against the MERGED result -- so
+`extends` is an expression of the pin discipline, not a hole in it.
 """
 
 from __future__ import annotations
@@ -180,6 +200,101 @@ def deep_merge(base: Any, override: Any) -> Any:
 
 DEFAULT_VARIANT = "default"
 
+VARIANT_EXTENDS = "extends"
+
+# The two spellings of "which Kconfig fragment(s) does this variant merge". They
+# are mutually exclusive in the schema, so an `extends` child that declares one
+# must CLEAR the other off its inherited parent — otherwise the merged block
+# would carry both and fail its own oneOf. Keyed child-key -> sibling-to-drop.
+_CONFIG_MODE_SIBLINGS = {
+    "defconfig_fragment": "defconfig_fragments",
+    "defconfig_fragments": "defconfig_fragment",
+}
+
+
+def _clear_replaced_config_keys(base: Any, overlay: Any) -> None:
+    """Drop an inherited fragment key the child variant replaces.
+
+    ``defconfig_fragment`` (one path) and ``defconfig_fragments`` (an ordered
+    list) say the same thing two ways, so the schema admits exactly one. A child
+    that switches spelling is REPLACING its parent's declaration, not adding a
+    second one — without this the deep-merge would keep both and the resolved
+    block would be rejected by the very rule that makes it unambiguous.
+
+    Mutates ``base`` in place; ``base`` is always a fresh copy by this point.
+    """
+    if not isinstance(base, dict) or not isinstance(overlay, dict):
+        return
+    base_ks = base.get("kernel_source")
+    overlay_ks = overlay.get("kernel_source")
+    if not isinstance(base_ks, dict) or not isinstance(overlay_ks, dict):
+        return
+    for child_key, sibling in _CONFIG_MODE_SIBLINGS.items():
+        if child_key in overlay_ks and sibling in base_ks:
+            base_ks = dict(base_ks)
+            base_ks.pop(sibling, None)
+            base["kernel_source"] = base_ks
+
+
+def resolve_variant_overlay(variants: Any, variant: str, path: str) -> Any:
+    """Flatten a variant's ``extends`` chain into ONE effective overlay.
+
+    Resolution is ancestor-first — the furthest ancestor is the base and each
+    descendant is merged on top — so the declared order family -> parent ->
+    child -> board holds, and a child only has to state what it CHANGES. The
+    ``extends`` key itself never survives into the result.
+
+    Three malformed graphs are refused rather than partially applied: a parent
+    the family does not declare, a variant naming itself, and any cycle.
+    """
+    chain: "list[str]" = []
+    seen: "set[str]" = set()
+    name = variant
+    while True:
+        overlay = variants[name]
+        chain.append(name)
+        seen.add(name)
+        parent = overlay.get(VARIANT_EXTENDS) if isinstance(overlay, dict) else None
+        if parent is None:
+            break
+        if not isinstance(parent, str):
+            _die(
+                f"schema invalid: {path}: variant '{name}' extends a non-string "
+                f"value {parent!r}"
+            )
+        if parent == name:
+            _die(
+                f"schema invalid: {path}: variant '{name}' extends itself; a "
+                "variant cannot be its own parent"
+            )
+        if parent == DEFAULT_VARIANT:
+            _die(
+                f"schema invalid: {path}: variant '{name}' extends "
+                f"'{DEFAULT_VARIANT}', which is the reserved no-overlay name — "
+                "every variant already starts from the family defaults"
+            )
+        if parent not in variants:
+            available = ", ".join(sorted(variants)) if variants else "<none>"
+            _die(
+                f"schema invalid: {path}: variant '{name}' extends unknown "
+                f"variant '{parent}' (available: {available})"
+            )
+        if parent in seen:
+            cycle = " -> ".join([*chain, parent])
+            _die(f"schema invalid: {path}: variant extends cycle: {cycle}")
+        name = parent
+
+    effective: Any = {}
+    for name in reversed(chain):
+        overlay = {
+            key: value
+            for key, value in variants[name].items()
+            if key != VARIANT_EXTENDS
+        }
+        _clear_replaced_config_keys(effective, overlay)
+        effective = deep_merge(effective, overlay)
+    return effective
+
 # Family fields whose package names the remote (Armbian) fetch must skip when a
 # variant builds the kernel from source. U-Boot and firmware are deliberately
 # ABSENT: they stay prebuilt-fetched.
@@ -210,7 +325,7 @@ def _dedupe(names: "list[str]") -> "list[str]":
 
 
 def apply_variant(
-    family: Any, variant: str, path: str
+    family: Any, variant: str, path: str, schema: Any = None
 ) -> "tuple[Any, Any]":
     """Strip ``variants:`` from ``family`` and apply the selected overlay.
 
@@ -239,7 +354,22 @@ def apply_variant(
             f"schema invalid: {path}: unknown variant '{variant}' "
             f"(available: {available})"
         )
-    overlay = variants[variant]
+    overlay = resolve_variant_overlay(variants, variant, path)
+    if schema is not None and VARIANT_EXTENDS in variants[variant]:
+        # An `extends` child is schema-validated as a PARTIAL, so the complete
+        # kernel_source contract (every required pin, exactly one config mode)
+        # is only checkable once inheritance has been applied. Re-run the full
+        # overlay schema here so a child can neither drop a pin nor inherit an
+        # ambiguous config mode.
+        validate(
+            overlay,
+            {
+                "$schema": schema.get("$schema"),
+                "$ref": "#/$defs/variant_overlay",
+                "$defs": schema["$defs"],
+            },
+            f"{path} (resolved variant '{variant}')",
+        )
     return deep_merge(base, overlay), overlay
 
 
@@ -352,14 +482,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Validation is skipped only when schemas are not supplied (the synthetic
     # merge-precedence unit test). The production resolve.sh always supplies
     # both schemas.
+    family_schema: Any = None
     if args.family_schema:
-        validate(family, load_json(args.family_schema), args.family)
+        family_schema = load_json(args.family_schema)
+        validate(family, family_schema, args.family)
     if args.board_schema:
         validate(board, load_json(args.board_schema), args.board)
 
     variant = args.variant or DEFAULT_VARIANT
     pre_overlay_packages = _package_names(family, _SUPPRESSED_FIELDS)
-    base, overlay = apply_variant(family, variant, args.family)
+    base, overlay = apply_variant(
+        family, variant, args.family, family_schema if args.family_schema else None
+    )
     board_base, board_override = apply_board_variant_overrides(
         board, variant, args.board, family.get("variants")
     )

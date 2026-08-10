@@ -73,7 +73,8 @@ validate_kernel_source_inputs() {
 #
 # Reads from main()'s frame: config_git_url, config_commit, config_path,
 # defconfig_base, fragment_rel, absent_rel, PIPELINE_DIR.
-# ASSIGNS into main()'s frame: config_mode, config_desc, fragment, absent_list.
+# ASSIGNS into main()'s frame: config_mode, config_desc, absent_list, and (via
+# resolve_defconfig_fragments) fragments_rel_list and fragments.
 # ---------------------------------------------------------------------------
 resolve_kernel_config_mode() {
   if [[ -n "${config_git_url}${config_commit}${config_path}" ]]; then
@@ -95,12 +96,44 @@ resolve_kernel_config_mode() {
   else
     config_mode="defconfig"
     require_kernel_source_field defconfig_base "${defconfig_base}"
-    require_kernel_source_field defconfig_fragment "${fragment_rel}"
     [[ -z "${absent_rel}" ]] \
       || die "kernel_source.config_absent_symbols is only meaningful in config-file mode; a repo-local defconfig fragment declares exactly what it means and has no upstream-injected symbols to except"
-    fragment="${PIPELINE_DIR}/${fragment_rel}"
-    [[ -f "${fragment}" ]] \
-      || die "defconfig fragment not found: ${fragment} (kernel_source.defconfig_fragment='${fragment_rel}', resolved against ${PIPELINE_DIR})"
-    config_desc="${defconfig_base} + ${fragment_rel}"
+    resolve_defconfig_fragments
+    config_desc="${defconfig_base} + ${fragments_rel_list[*]}"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# resolve_defconfig_fragments — normalise the singular and plural fragment keys
+# into ONE ordered list.
+#
+# `defconfig_fragment` (one path) and `defconfig_fragments` (an ordered list) are
+# the same declaration written two ways, and the schema admits exactly one of
+# them. Collapsing both here — rather than branching at every consumer — is what
+# keeps a single-fragment manifest resolving byte-identically to how it always
+# has while a multi-fragment one merges in list order.
+#
+# Reads from main()'s frame: fragment_rel, fragments_rel, PIPELINE_DIR.
+# ASSIGNS into main()'s frame: fragments_rel_list, fragments.
+# ---------------------------------------------------------------------------
+resolve_defconfig_fragments() {
+  [[ -z "${fragment_rel}" || -z "${fragments_rel}" ]] \
+    || die "kernel_source declares BOTH defconfig_fragment ('${fragment_rel}') and defconfig_fragments ('${fragments_rel}'); they are the same declaration written two ways, so exactly one may be present"
+
+  local declared="${fragment_rel}${fragments_rel}"
+  require_kernel_source_field defconfig_fragment "${declared}"
+
+  # The plural key flattens to a single space-joined param, which is why word
+  # splitting is what reconstructs the list — and why a fragment path may not
+  # contain whitespace (the schema pattern already forbids it).
+  # shellcheck disable=SC2206
+  fragments_rel_list=(${declared})
+
+  local rel abs
+  for rel in "${fragments_rel_list[@]}"; do
+    abs="${PIPELINE_DIR}/${rel}"
+    [[ -f "${abs}" ]] \
+      || die "defconfig fragment not found: ${abs} (declared in kernel_source.defconfig_fragment(s) as '${rel}', resolved against ${PIPELINE_DIR})"
+    fragments+=("${abs}")
+  done
 }

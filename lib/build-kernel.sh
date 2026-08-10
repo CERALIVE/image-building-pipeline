@@ -74,6 +74,7 @@
 #   KERNEL_SOURCE_PATCHES_GIT_URL KERNEL_SOURCE_PATCHES_COMMIT
 #   KERNEL_SOURCE_PATCHES_SERIES
 #   KERNEL_SOURCE_DEFCONFIG_BASE KERNEL_SOURCE_DEFCONFIG_FRAGMENT
+#   KERNEL_SOURCE_DEFCONFIG_FRAGMENTS
 #   KERNEL_SOURCE_CONFIG_GIT_URL KERNEL_SOURCE_CONFIG_COMMIT KERNEL_SOURCE_CONFIG_PATH
 #   KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS
 #   KERNEL_SOURCE_BUILDER_IMAGE KERNEL_SOURCE_LOCAL_VERSION
@@ -193,6 +194,7 @@ main() {
   local patches_series="${KERNEL_SOURCE_PATCHES_SERIES:-}"
   local defconfig_base="${KERNEL_SOURCE_DEFCONFIG_BASE:-}"
   local fragment_rel="${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-}"
+  local fragments_rel="${KERNEL_SOURCE_DEFCONFIG_FRAGMENTS:-}"
   local config_git_url="${KERNEL_SOURCE_CONFIG_GIT_URL:-}"
   local config_commit="${KERNEL_SOURCE_CONFIG_COMMIT:-}"
   local config_path="${KERNEL_SOURCE_CONFIG_PATH:-}"
@@ -209,8 +211,9 @@ main() {
   # These four are declared HERE and assigned by the kernel/ modules through bash
   # dynamic scoping (the lib/stages/ contract). They look unused in this frame and
   # must not be "cleaned up".
-  local config_mode="" config_desc="" fragment="" absent_list=""
+  local config_mode="" config_desc="" absent_list=""
   local kernel_pkg=""
+  local -a fragments=() fragments_rel_list=()
 
   validate_kernel_source_inputs
   resolve_kernel_config_mode
@@ -242,8 +245,8 @@ main() {
       log_info "DRY-RUN would run: git fetch --depth 1 ${config_git_url} ${config_commit} && cp ${config_path} .config (full config, no defconfig target)"
       log_info "DRY-RUN would run: verify-kernel-config.sh ${config_path} .config ${absent_rel} (config-survival gate, after olddefconfig)"
     else
-      log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragment_rel}"
-      log_info "DRY-RUN would run: verify-kernel-config.sh ${fragment_rel} .config (fragment-survival gate, after olddefconfig)"
+      log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragments_rel_list[*]} (merged in this order)"
+      log_info "DRY-RUN would run: verify-kernel-config.sh ${fragments_rel_list[*]} .config (fragment-survival gate, after olddefconfig)"
     fi
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
@@ -297,11 +300,22 @@ main() {
     log_warn "BENCH: commit ${patches_commit} is still asserted after checkout; do NOT use this on a release path"
   fi
 
-  # In config-file mode there IS no repo-local fragment, so the mount is added
-  # only for defconfig mode; a `-v :/in/fragment.config` with an empty source is
-  # a runtime error, not a no-op.
+  # In config-file mode there IS no repo-local fragment, so `fragments` is empty
+  # and this loop adds no mount at all; a `-v :/in/fragment.config` with an empty
+  # source is a runtime error, not a no-op.
+  # Fragment N>1 is mounted as /in/fragment-N.config; the FIRST keeps the historical
+  # /in/fragment.config so a single-fragment build is byte-identical to before the
+  # ordered-list key existed. FRAGMENT_LIST carries the container-side paths in
+  # merge order, and it is the ONLY thing the container branches on.
   local -a fragment_mount=()
-  [[ -n "${fragment}" ]] && fragment_mount=(-v "${fragment}:/in/fragment.config:ro")
+  local fragment_list="" idx=0 frag_path
+  for frag_path in "${fragments[@]}"; do
+    idx=$(( idx + 1 ))
+    local container_path="/in/fragment.config"
+    (( idx > 1 )) && container_path="/in/fragment-${idx}.config"
+    fragment_mount+=(-v "${frag_path}:${container_path}:ro")
+    fragment_list="${fragment_list:+${fragment_list} }${container_path}"
+  done
   local -a absent_mount=()
   [[ -n "${absent_list}" ]] && absent_mount=(-v "${absent_list}:/in/allow-absent.list:ro")
 
@@ -375,10 +389,26 @@ main() {
         cp "/src/kconfig/${CONFIG_PATH}" "${declared_config}"
         cp "${declared_config}" .config
       else
-        echo "== config: ${DEFCONFIG_BASE} + fragment"
+        echo "== config: ${DEFCONFIG_BASE} + fragment(s) ${FRAGMENT_LIST}"
         declared_config=/in/fragment.config
         make -j"${BUILD_JOBS}" "${DEFCONFIG_BASE}"
-        ./scripts/kconfig/merge_config.sh -m .config "${declared_config}"
+        for frag in ${FRAGMENT_LIST}; do
+          echo "== merging ${frag}"
+          ./scripts/kconfig/merge_config.sh -m .config "${frag}"
+        done
+        case "${FRAGMENT_LIST}" in
+        *" "*)
+          # With more than one fragment the survival gate has to be run against
+          # everything that was declared, not just the first file — otherwise a
+          # symbol olddefconfig drops from a later fragment passes unnoticed,
+          # which is the exact failure mode this gate exists for.
+          declared_config=/src/declared-fragments.config
+          : >"${declared_config}"
+          for frag in ${FRAGMENT_LIST}; do
+            cat "${frag}" >>"${declared_config}"
+          done
+          ;;
+        esac
       fi
       make olddefconfig
       # `kernelrelease` is in the kernel no-sync-config-targets list, so it reads a
@@ -421,6 +451,7 @@ main() {
     -e "PATCHES_COMMIT=${patches_commit}" \
     -e "PATCHES_SERIES=${patches_series}" \
     -e "DEFCONFIG_BASE=${defconfig_base}" \
+    -e "FRAGMENT_LIST=${fragment_list}" \
     -e "CONFIG_GIT_URL=${config_git_url}" \
     -e "CONFIG_COMMIT=${config_commit}" \
     -e "CONFIG_PATH=${config_path}" \

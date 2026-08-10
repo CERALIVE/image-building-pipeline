@@ -73,6 +73,7 @@ tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= m
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
+tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
 tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer
 tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-mpp-dev REMOVE verdict stays removed
 tests/app-layer-modem-closure.test.sh	shell	integration	default-shell	the nine ModemManager fork packages install and classify as app-layer

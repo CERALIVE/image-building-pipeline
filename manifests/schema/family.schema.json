@@ -98,11 +98,23 @@
   },
   "$defs": {
     "variant_overlay": {
-      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB package names, and declare a kernel_source build — nothing else. Anything wider (firmware, U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change.",
+      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB package names, declare a kernel_source build, and (via `extends`) inherit a SIBLING variant — nothing else. Anything wider (firmware, U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change.\n\nINHERITANCE (`extends`): a variant that names a sibling is a DELTA on it, so resolution becomes family -> parent -> child -> board. Because the child no longer restates the parent's pins, its own `kernel_source` block is validated as a PARTIAL here and the COMPLETE `$defs/kernel_source` contract is re-asserted by the resolver on the MERGED result — a child can therefore never sneak past a required pin, and can never drift from its parent's pins either, because it does not carry copies of them.",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
+      "if": { "required": ["extends"] },
+      "then": {
+        "properties": { "kernel_source": { "$ref": "#/$defs/kernel_source_delta" } }
+      },
+      "else": {
+        "properties": { "kernel_source": { "$ref": "#/$defs/kernel_source" } }
+      },
       "properties": {
+        "extends": {
+          "description": "Name of the SIBLING variant this one is a delta on. Resolution order becomes family -> parent -> this -> board. The named parent must be declared in the same `variants:` map, must not be this variant itself, and the `extends` graph must be acyclic — the resolver rejects all three, so an inheritance mistake is a loud manifest error and never a silently half-applied overlay. Chains are permitted; `default` is not a legal parent (it is the reserved no-overlay name, i.e. the family defaults, which every variant already starts from).",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
         "armbian_branch": {
           "description": "Armbian branch this variant targets (same enum as the family field). An `edge` variant sets this so the Armbian mapping recorded in the kernel-patches repo's kernel-pin.env stays traceable, even though the Armbian framework is NEVER invoked as the build system (see $defs/kernel_source).",
           "type": "string",
@@ -122,11 +134,42 @@
           "minItems": 0,
           "uniqueItems": true
         },
-        "kernel_source": { "$ref": "#/$defs/kernel_source" }
+        "kernel_source": {
+          "description": "Kernel-build-from-source declaration for this variant. The REAL contract is applied by the if/then/else above: a standalone variant must satisfy the COMPLETE $defs/kernel_source, while an `extends` child is validated as $defs/kernel_source_delta (same fields, none required) because it inherits the rest. This entry exists only so `additionalProperties: false` still recognises the key — `additionalProperties` never sees inside `then`/`else`.",
+          "type": "object"
+        }
+      }
+    },
+    "kernel_source_delta": {
+      "description": "A kernel_source DELTA carried by an `extends` child variant: exactly the same field vocabulary and per-field patterns as $defs/kernel_source, with NO `required` set and NO config-mode `oneOf`. Those two obligations belong to the MERGED block, which the resolver validates against the full $defs/kernel_source after inheritance — validating them here instead would force every child to restate its parent's pins, which is precisely the byte-for-byte drift `extends` exists to make impossible.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "git_url": { "$ref": "#/$defs/kernel_source/properties/git_url" },
+        "mirror_url": { "$ref": "#/$defs/kernel_source/properties/mirror_url" },
+        "tag": { "$ref": "#/$defs/kernel_source/properties/tag" },
+        "commit": { "$ref": "#/$defs/kernel_source/properties/commit" },
+        "patches_git_url": { "$ref": "#/$defs/kernel_source/properties/patches_git_url" },
+        "patches_commit": { "$ref": "#/$defs/kernel_source/properties/patches_commit" },
+        "patches_series": { "$ref": "#/$defs/kernel_source/properties/patches_series" },
+        "defconfig_base": { "$ref": "#/$defs/kernel_source/properties/defconfig_base" },
+        "defconfig_fragment": { "$ref": "#/$defs/kernel_source/properties/defconfig_fragment" },
+        "defconfig_fragments": { "$ref": "#/$defs/kernel_source/properties/defconfig_fragments" },
+        "config_git_url": { "$ref": "#/$defs/kernel_source/properties/config_git_url" },
+        "config_commit": { "$ref": "#/$defs/kernel_source/properties/config_commit" },
+        "config_path": { "$ref": "#/$defs/kernel_source/properties/config_path" },
+        "config_absent_symbols": { "$ref": "#/$defs/kernel_source/properties/config_absent_symbols" },
+        "builder_image": { "$ref": "#/$defs/kernel_source/properties/builder_image" },
+        "local_version": { "$ref": "#/$defs/kernel_source/properties/local_version" },
+        "kernel_release": { "$ref": "#/$defs/kernel_source/properties/kernel_release" },
+        "package_version": { "$ref": "#/$defs/kernel_source/properties/package_version" },
+        "dtb_deb_dir": { "$ref": "#/$defs/kernel_source/properties/dtb_deb_dir" },
+        "dtb_boot_dir": { "$ref": "#/$defs/kernel_source/properties/dtb_boot_dir" }
       }
     },
     "kernel_source": {
-      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the resolved kernel config, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping and for its published kernel .config (fetched as a plain file at a pinned revision) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nSOURCE CHECKOUT — TWO SHAPES. `commit` is ALWAYS the pin. `tag` is OPTIONAL and exists only so a tagged upstream can be verified to still resolve to that commit. A source branch that publishes no tags at all (the Armbian vendor BSP's rolling `rk-6.1-rkr5.1`) simply omits `tag`, and the build shallow-fetches the pinned SHA directly. Do NOT invent a synthetic tag to fill the field — that would misrepresent the source.\n\nCONFIG — TWO MUTUALLY EXCLUSIVE MODES, exactly one of which MUST be declared:\n  (a) DEFCONFIG mode — `defconfig_base` + `defconfig_fragment`: start from an in-tree `make <target>` defconfig and merge a repo-local Kconfig fragment on top. Used by mainline-track variants, whose upstream ships no full board config.\n  (b) CONFIG-FILE mode — `config_git_url` + `config_commit` + `config_path`: start from a COMPLETE `.config` fetched as a plain file from a pinned revision of another repository. Used by the vendor-BSP track, where Armbian publishes the exact full config the shipped kernel is built from and a bare `make defconfig` would produce a materially different driver/feature set.\nBoth modes then run `olddefconfig` + `syncconfig` and are gated identically by lib/verify-kernel-config.sh, which asserts every symbol the declared source config names survived into the resolved .config.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
+      "description": "Build the kernel + in-tree DTBs from SOURCE instead of fetching a prebuilt Armbian kernel/DTB .deb.\n\nBACKEND (decided, pinned): plain kernel `make bindeb-pkg` from the pinned source tree + the applied patch series + the resolved kernel config, inside the digest-pinned builder container. The Armbian build framework is consulted ONLY for branch/tag mapping and for its published kernel .config (fetched as a plain file at a pinned revision) and is NEVER invoked as the build system.\n\nOUTPUT CONTRACT: exactly one `linux-image-*` .deb containing the kernel AND the in-tree DTBs. `linux-headers-*` / `linux-libc-dev` are produced by bindeb-pkg and DISCARDED before staging.\n\nINTEGRATION: when this block resolves, the remote (Armbian) fetch of the kernel/DTB package names is SUPPRESSED for the variant — U-Boot and firmware stay prebuilt-fetched — and the built package names REPLACE kernel_packages/dtb_packages for the resolver and orchestrator.\n\nEVERY input is exact-pinned. The patches repo is a build input like any other BSP input: it pins an IMMUTABLE commit, never a branch.\n\nSOURCE CHECKOUT — TWO SHAPES. `commit` is ALWAYS the pin. `tag` is OPTIONAL and exists only so a tagged upstream can be verified to still resolve to that commit. A source branch that publishes no tags at all (the Armbian vendor BSP's rolling `rk-6.1-rkr5.1`) simply omits `tag`, and the build shallow-fetches the pinned SHA directly. Do NOT invent a synthetic tag to fill the field — that would misrepresent the source.\n\nCONFIG — TWO MUTUALLY EXCLUSIVE MODES, exactly one of which MUST be declared:\n  (a) DEFCONFIG mode — `defconfig_base` plus EITHER `defconfig_fragment` (one fragment) OR `defconfig_fragments` (an ordered list, merged in order): start from an in-tree `make <target>` defconfig and merge the repo-local Kconfig fragment(s) on top. Used by mainline-track variants, whose upstream ships no full board config.\n  (b) CONFIG-FILE mode — `config_git_url` + `config_commit` + `config_path`: start from a COMPLETE `.config` fetched as a plain file from a pinned revision of another repository. Used by the vendor-BSP track, where Armbian publishes the exact full config the shipped kernel is built from and a bare `make defconfig` would produce a materially different driver/feature set.\nBoth modes then run `olddefconfig` + `syncconfig` and are gated identically by lib/verify-kernel-config.sh, which asserts every symbol the declared source config names survived into the resolved .config.\n\nDERIVED KEY: the resolver injects `suppressed_packages` (the union of the pre-overlay family kernel/DTB names and the post-merge ones) into the RESOLVED param set as KERNEL_SOURCE_SUPPRESSED_PACKAGES. It is NOT a manifest field — `additionalProperties: false` here rejects a manifest that tries to author it, so the suppression set can never drift from the replacement set.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -145,7 +188,11 @@
       "oneOf": [
         {
           "title": "defconfig mode",
-          "required": ["defconfig_base", "defconfig_fragment"],
+          "required": ["defconfig_base"],
+          "oneOf": [
+            { "required": ["defconfig_fragment"] },
+            { "required": ["defconfig_fragments"] }
+          ],
           "not": {
             "anyOf": [
               { "required": ["config_git_url"] },
@@ -161,7 +208,8 @@
           "not": {
             "anyOf": [
               { "required": ["defconfig_base"] },
-              { "required": ["defconfig_fragment"] }
+              { "required": ["defconfig_fragment"] },
+              { "required": ["defconfig_fragments"] }
             ]
           }
         }
@@ -211,9 +259,19 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
         },
         "defconfig_fragment": {
-          "description": "DEFCONFIG MODE (half 2 of 2). Repo-relative path (from ) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched. Mutually exclusive with the config_* trio.",
+          "description": "DEFCONFIG MODE (half 2 of 2), SINGULAR FORM. Repo-relative path (from ) to the Kconfig fragment merged onto defconfig_base with scripts/kconfig/merge_config.sh. Repo-local so it is reviewed and versioned with the pipeline, not fetched. Mutually exclusive with the config_* trio, and with the plural `defconfig_fragments`. This is the ORIGINAL spelling and remains fully supported: a manifest that declares one fragment this way resolves byte-identically to how it always has.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "defconfig_fragments": {
+          "description": "DEFCONFIG MODE (half 2 of 2), PLURAL FORM. An ORDERED list of repo-relative Kconfig fragment paths, each merged onto defconfig_base with scripts/kconfig/merge_config.sh IN LIST ORDER, before the single olddefconfig/syncconfig/verification sequence. Later fragments therefore win over earlier ones — put the production fragment FIRST and any additive overlay (e.g. the `edge-test` debug fragment) AFTER it.\n\nEXACTLY EQUIVALENT to `defconfig_fragment` when the list holds one entry; the singular key is the ORIGINAL spelling and stays fully supported so every pre-existing single-fragment manifest keeps resolving byte-identically. Declaring BOTH is rejected (the oneOf above) — one manifest, one answer to 'what is merged'. The survival gate runs against the CONCATENATION of the declared fragments, so a symbol dropped by olddefconfig still fails no matter which fragment declared it.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
         },
         "config_git_url": {
           "description": "CONFIG-FILE MODE (1 of 3). Repository publishing the COMPLETE kernel `.config` this variant starts from (e.g. https://github.com/armbian/build, which ships config/kernel/linux-rk35xx-vendor.config — the exact config the shipped vendor kernel is built with). The file is fetched as plain data; the publishing repo's BUILD FRAMEWORK is never invoked. Mutually exclusive with defconfig_base/defconfig_fragment.",

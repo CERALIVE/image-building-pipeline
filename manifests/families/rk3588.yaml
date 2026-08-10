@@ -187,6 +187,51 @@ variants:
       dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
 
+  # DEBUG/TEST sibling of `edge`, and NOTHING ELSE. It exists so the Wave-6
+  # negative-path QA (deterministic rkvenc/HDMI-RX fault injection, the dma-heap
+  # KUnit seam) can run on a Rock 5B+ under KASAN + lockdep. It is NEVER released:
+  # the release/publish guard (ci/check-release-variant.sh) rejects it by name, and
+  # `ci/build-hardware-candidates.sh` builds it only as an explicitly non-shipping
+  # debug artifact.
+  #
+  # `extends: edge` is the whole point. Every pin that decides WHAT SOURCE is
+  # compiled — git_url, tag, commit, patches_git_url, patches_commit,
+  # patches_series, builder_image, dtb_boot_dir — is INHERITED rather than copied,
+  # so it is structurally impossible for this variant to drift onto a different
+  # kernel or a different patch series than the production `edge` it is supposed to
+  # be a debug build OF. A copy-paste sibling would look identical on the day it was
+  # written and silently diverge on the first `edge` re-pin.
+  #
+  # The four fields below are the complete, deliberate difference, and each one is
+  # an identity so the two artifacts can never be substituted for one another:
+  # package name, LOCALVERSION, kernel release and Debian version. `dtb_deb_dir` is
+  # the fifth, and it is NOT an independent choice — `make bindeb-pkg` installs the
+  # in-tree DTBs under /usr/lib/<linux-image package>/, so it is a function of
+  # kernel_release and has to move with it or validate_built_kernel_deb fails on a
+  # path the build itself created. `dtb_boot_dir` (where the U-Boot script looks) is
+  # genuinely shared and is inherited untouched.
+  edge-test:
+    extends: edge
+
+    kernel_packages:
+      - linux-image-7.1.7-ceralive-rk3588-test
+
+    kernel_source:
+      # ORDERED, and the order is the contract: the production fragment first, the
+      # debug fragment second, so every symbol the test fragment sets wins over the
+      # production answer for the same symbol. Both are merged before the SINGLE
+      # olddefconfig/syncconfig/verify sequence, so the survival gate still runs
+      # against everything both fragments declared.
+      defconfig_fragments:
+        - manifests/kernel/rk3588-edge.fragment
+        - manifests/kernel/rk3588-edge-test.fragment
+
+      local_version: -ceralive-rk3588-test
+      kernel_release: 7.1.7-ceralive-rk3588-test
+      package_version: 7.1.7-ceralive1+test1
+
+      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588-test/rockchip
+
   # VENDOR-track kernel built FROM SOURCE: the SAME 6.1.115 BSP the production
   # path installs prebuilt, plus CERALIVE/rk3588-vendor-kernel-patches. It exists
   # to restore HDMI-RX audio capture, which the stock vendor kernel lost when

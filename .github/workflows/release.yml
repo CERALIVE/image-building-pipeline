@@ -122,6 +122,19 @@ jobs:
           path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
           key: ${{ steps.cache-meta.outputs.mkosi_key }}
           restore-keys: ${{ steps.cache-meta.outputs.mkosi_restore_prefix }}
+      # A debug/fault-injection kernel variant must never reach a release
+      # artifact. The check is a property check, not a name blocklist: it
+      # rejects any variant whose declared Kconfig fragments enable a symbol
+      # from manifests/kernel/forbidden-symbols.list, so a future debug variant
+      # is covered without editing this workflow. `--self-test` runs first so a
+      # guard that can only answer "yes" fails the job instead of passing it.
+      - name: Refuse a non-releasable kernel variant
+        env:
+          CERALIVE_KERNEL_VARIANT: ${{ env.CERALIVE_KERNEL_VARIANT }}
+        run: |
+          set -euo pipefail
+          ./ci/check-release-variant.sh --self-test
+          ./ci/check-release-variant.sh
       - name: Materialize release trust inputs
         env:
           RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
