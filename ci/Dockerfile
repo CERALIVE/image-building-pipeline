@@ -87,9 +87,15 @@ RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
 # invoke-rc.d's status cannot distinguish "the chroot has no init" from "this
 # package is broken". This repo's own base skeleton tree ships an EXECUTABLE
 # helper for exactly that reason (mkosi/mkosi.images/base/mkosi.skeleton), and it
-# cannot survive: mkosi's first apt transaction unlinks it and every later one
-# recreates the 0644 version. Patching the one umask here is what makes both the
-# upstream helper and ours effective, in every layer.
+# cannot survive on its own: `Apt.install()` unlinks whatever is at that path when
+# its transaction ends.
+#
+# HONEST SCOPE — this makes the helper mkosi installs actually executable, and it
+# is NOT, on its own, sufficient. A real `--variant edge` build with this patch in
+# place STILL emits census rows 8/9/21 from the base layer's own
+# `‣ Installing Debian` step, which no hook in this repository can reach. Do not
+# read this line as "the census rows are fixed"; docs/build-log-census.md carries
+# the open analysis under "Rows 8/9/21 — still emitted by a real build".
 #
 # Scope: BUILD-TIME ONLY. The file is removed before the rootfs is sealed
 # (app/mkosi.postinst.chroot::remove_chroot_service_policy, which dies if it

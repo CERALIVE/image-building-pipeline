@@ -99,6 +99,43 @@ its recorded ceiling and rejects anything above it.
 |---|---:|---|---|---|
 | `invoke-rc.d: policy-rc.d denied execution of <ACTION>.` | 16 | mkosi:* | todo10 | invoke-rc.d prints this (`querypolicy`, the `101)` case) every time the temporary `policy-rc.d` correctly denies a service start inside the build chroot. It is the positive evidence that the suppression is working, and it replaces signatures 8, 9 and 21. The ceiling is generous relative to the 8 denials the baseline log's blocked attempts imply, so a package set that grows a few service-starting packages does not fail the lint; a runaway does. |
 
+## Rows 8/9/21 — still emitted by a real build (OPEN, 2026-08-10)
+
+Rows 8, 9 and 21 are recorded above as `FIXED` by todo10's `policy-rc.d` skeleton
+tree. Wave 8's real `--variant edge` and `--variant edge-test` builds are the
+**first logs that ever tested that claim** (todo 9-12's acceptance rows are
+written against `$EA/wave8/builds/rock-edge.log`, which did not exist until now),
+and they **disprove it**: `ci/check-build-log.sh` reports all three as
+`REGRESSED`, at exactly their baseline counts (2 / 3 / 3).
+
+What is established:
+
+- Debian's `invoke-rc.d` gates the helper on `test -x "${POLICYHELPER}"`
+  (`/usr/sbin/invoke-rc.d` line 138), so a NON-EXECUTABLE helper is reported as
+  **missing**, not as ignored.
+- mkosi 26's `Apt.install()` (`mkosi/installer/apt.py`) writes its own
+  `/usr/sbin/policy-rc.d` under `umask(~0o644)` — mode 0644, i.e. never honoured —
+  and `unlink()`s it when the transaction ends, which is also what removes this
+  repository's skeleton copy. `ci/Dockerfile` now patches that one umask, with an
+  apply-or-fail drift guard.
+- That patch is **not sufficient**. A real build with the patched builder
+  (`ceralive-mkosi-builder:26-<sha>`) still emits all three signatures, and they
+  land inside mkosi's own `‣ Installing Debian` step for the base layer — a
+  window no skeleton tree, ExtraTree, prepare script or postinst in this
+  repository can reach.
+
+What is NOT yet established: which write inside that step leaves the path absent
+at the moment `dbus`/`openssh-server` are configured. Candidates not yet
+eliminated are the essential-deb `extract_tar` into `context.root` and
+`usrmerge`'s conversion, both of which run in that window.
+
+Until it is closed, do not re-disposition these rows to `ACCEPTED` to make the
+lint green: acceptance row 10 greps the wave-8 logs for
+`invoke-rc.d: WARNING|Failed to open connection to .*message bus` directly, so
+the census disposition is not what that row tests. The honest state is that the
+`FIXED` claim is unproven and the mechanism is understood but incompletely
+diagnosed.
+
 ## Provenance of each count
 
 Counts are the output of `ci/check-build-log.sh --census-report <log>` against
