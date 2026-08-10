@@ -38,7 +38,7 @@ SUITES=(
   "${HERE}/tests/manifest-schema.bats"
   "${HERE}/tests/package-contract.bats"
   "${HERE}/tests/postinst-wiring.bats"
-  "${HERE}/tests/mkosi-contract.bats"
+  "${HERE}/tests/mkosi-image-contract.bats"
   "${HERE}/tests/runtime-services.bats"
   "${HERE}/tests/variant-contract.bats"
   "${HERE}/tests/rk3588-ab-contract.bats"

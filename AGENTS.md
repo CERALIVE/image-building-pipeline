@@ -71,7 +71,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
-| Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
+| Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
 | **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
 | **x86 ESP + GRUB A/B disk assembly** | `lib/assemble-disk-x86.sh` (offline producer); `mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `mkosi/platform/x86/test-x86-grub.sh`; rationale in [`mkosi/platform/x86/README.md`](mkosi/platform/x86/README.md) §2 |
@@ -151,7 +151,7 @@ equal to the sum of the six post-split counts:
 | `tests/manifest-schema.bats` | 1-6 | 25 |
 | `tests/package-contract.bats` | 13, 14, 14b, 15, 17, 19, 19b, 20, 22, 27, 28, 30, 31 | 92 |
 | `tests/postinst-wiring.bats` | 8, 8b, 18, 18b, 18c, 21, 23 | 41 |
-| `tests/mkosi-contract.bats` | 7, 9, 9b, 10, 11, 12 | 62 |
+| `tests/mkosi-image-contract.bats` | 7, 9, 9b, 10, 11, 12 | 62 |
 | `tests/runtime-services.bats` | the hostname/mDNS block, 16, 18d, 18e, 18f, 18g, 29 | 88 |
 | `tests/variant-contract.bats` | 26 | 67 |
 | `tests/manifest-helpers.bash` | — (shared `setup` + every fixture helper) | 0 |
@@ -232,13 +232,13 @@ Four rules make the split safe, and each of them is the answer to a real trap:
 - **A static test that reads the orchestrator by TEXT must read the whole SET**,
   concatenated in the entry's own `source` order — the same lesson the
   `postinst.d/` split already records. Pointed at the entry alone,
-  `mkosi-contract.bats`'s size-gate/x86/env_names extractions and
+  `mkosi-image-contract.bats`'s size-gate/x86/env_names extractions and
   `mkosi-package-staging.test.sh`'s greps match NOTHING and pass vacuously. Both
   harnesses build that set into a FILE and grep the file: piping it into `grep -q`
   SIGPIPEs the writer and `set -o pipefail` turns a correct read into a failure.
 
 `stage_size_gate` must stay ABOVE `compare_size_against_baseline` inside
-`size-gate.sh`: `mkosi-contract.bats` extracts the shipped gate as the FIRST 2-space
+`size-gate.sh`: `mkosi-image-contract.bats` extracts the shipped gate as the FIRST 2-space
 `if … fi` mentioning `[6c/9]`, and the comparator's own early-return guards
 mention it too, so reordering silently swaps which block the gate's tests execute.
 
@@ -1830,7 +1830,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   shells out to `unsquashfs` to extract the plain-format bundle manifest. Build-time
   `mksquashfs` runs on the HOST/CI, so this runtime-only gap was invisible.
   `squashfs-tools` is now in `shared.list` (standard bookworm `main` — no new trust
-  source). Guard: `mkosi-contract.bats` "squashfs-tools is installed so rauc can unsquashfs
+  source). Guard: `mkosi-image-contract.bats` "squashfs-tools is installed so rauc can unsquashfs
   bundles".
 - **`mkfs.ext4` runtime gap.** After signature and manifest checks pass, RAUC's
   slot-write phase shells out to `/sbin/mkfs.ext4` from `e2fsprogs` to format the
@@ -1838,7 +1838,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   Rock 5B+ install reported exactly: `LastError: Installation error: Failed updating slot rootfs.1: failed to start mkfs.ext4: Failed to execute child process 'mkfs.ext4' (No such file or directory)`. Build-time tooling never needed
   `mkfs.ext4`, so this runtime-only gap was invisible. Adding `e2fsprogs` made the
   REAL end-to-end install complete successfully, activate slot B, and boot the
-  fresh slot healthy; guard: `mkosi-contract.bats` "e2fsprogs is installed so rauc can
+  fresh slot healthy; guard: `mkosi-image-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
 
 **PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
@@ -1959,7 +1959,7 @@ worth knowing before editing it:
   independent fast proof of the gate's own pass/fail legs — `[6c/9]` complements it,
   it does not replace it.
 
-Guards: `mkosi-contract.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
+Guards: `mkosi-image-contract.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
 extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
 (pass leg, abort leg, spy-proven silent-skip refusal, stage ordering, DRY_RUN
 unreachability), plus a policy guard that no board's ceiling may be raised above
@@ -2347,7 +2347,7 @@ arch-independent, every board), NOT a rewrite of `network-interfaces.ts` onto `i
 CeraUI's `ifconfig` text-parsing is deeply embedded across its test suite
 (`MONITOR-NOTES.md`, `netif-migration`/`netif-same-subnet` tests, `mocks/providers/
 network.ts`), so swapping binaries is a large unrelated risk — adding the one legacy
-binary is correctly scoped. Guards: `mkosi-contract.bats` "runtime packages: net-tools is
+binary is correctly scoped. Guards: `mkosi-image-contract.bats` "runtime packages: net-tools is
 installed …" + "… reaches the resolved runtime package set …".
 
 **`bluez` in `shared.list` — the Bluetooth KERNEL half already worked; the whole
@@ -2395,7 +2395,7 @@ ships only the legacy WEXT binaries (`iwconfig`, `iwlist`, `iwgetid`, `iwpriv`,
 (`mkosi/build/app/usr/sbin/`). Nothing else in `shared.list` depends on `iw`
 either, so absent an explicit entry the regulatory country silently cannot be
 applied and the hotspot stays on the conservative world domain (2.4 GHz channels
-1-11 only — no channel 12/13 in ETSI countries). Guard: `mkosi-contract.bats` "runtime
+1-11 only — no channel 12/13 in ETSI countries). Guard: `mkosi-image-contract.bats` "runtime
 packages: iw is installed so the regulatory domain can be applied".
 
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
@@ -3218,7 +3218,7 @@ enabled-by-default behavior. The base layer installs `openssh-server`, whose Deb
 postinst preset already enables `ssh.service`, so the production branch **actively
 disables** `ssh.service`/`ssh.socket` — merely skipping the enable would leave the
 base-layer preset enablement in place. `ceralive-ssh-firstboot.service` still hardens
-SSH whenever it is eventually started, on both image kinds. Guards: `mkosi-contract.bats`
+SSH whenever it is eventually started, on both image kinds. Guards: `mkosi-image-contract.bats`
 "production image leaves ssh.service NOT enabled" + "lab debug image enables
 ssh.service by default".
 
@@ -3514,7 +3514,7 @@ credentials with no screen or keyboard. Standalone artifacts under
   failed with error -2` / `cfg80211: failed to load regulatory.db` and NetworkManager
   reports "No WiFi interfaces found" even with a working driver (real-HW UART,
   2026-07-16; the RTL8852BE `rtw89_8852be` chip enumerates + trains PCIe fine — the
-  missing DB is a distinct gap). Guard: `mkosi-contract.bats` "wireless-regdb is installed
+  missing DB is a distinct gap). Guard: `mkosi-image-contract.bats` "wireless-regdb is installed
   so cfg80211 loads regulatory.db".
 - **Captive portal (Task 14):** while the AP is up, `ceralive-provision` stops the
   CeraUI backend (`ceralive.service`) to free port 80 and starts
@@ -3676,7 +3676,7 @@ Rock 5B+ hardware; and an empty add-on keyring → all add-on signatures rejecte
 read empty in the app subimage it installs ZERO first-party packages, so it is in
 both lists and additionally pinned by `package-contract.bats` §27.
 `PassEnvironment=` MUST stay in lockstep with `env_names`; the structural guard is
-`mkosi-contract.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
+`mkosi-image-contract.bats` "mkosi PassEnvironment stays in lockstep with … env_names" (it
 fails the build if a future `env_names` addition skips `PassEnvironment=`).
 `SOURCE_DATE_EPOCH` (host-side/mkosi-native) and `CERALIVE_PIPELINE_DIR` (forwarded via
 a separate `-e`/`--environment` mechanism) are the two documented legitimate

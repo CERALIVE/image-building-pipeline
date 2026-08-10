@@ -3,7 +3,7 @@
 # stages/size-gate.sh — orchestrator stage [6c/9]: the rootfs size budget.
 #
 # stage_size_gate MUST stay above compare_size_against_baseline in this file:
-# mkosi-contract.bats extracts the shipped block by taking the FIRST `  if [[ … fi`
+# mkosi-image-contract.bats extracts the shipped block by taking the FIRST `  if [[ … fi`
 # that mentions [6c/9], and the comparator's own early-return guards mention it
 # too. Reordering them silently swaps which block the gate's tests execute.
 #
@@ -72,7 +72,7 @@ compare_size_against_baseline() {
   # about that is worse than useless: the warning's own remedy is "update the
   # baseline in the same PR", and doing that from a debug build would overwrite the
   # PRODUCTION baseline with a number no production image can ever reproduce, then
-  # desync it from size-budget.json (which mkosi-contract.bats fails on). The ABSOLUTE
+  # desync it from size-budget.json (which mkosi-image-contract.bats fails on). The ABSOLUTE
   # ceiling above still ran and still applies — only this relative comparison,
   # whose reference is a production artifact, is skipped.
   if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" ]]; then

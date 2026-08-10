@@ -120,7 +120,7 @@ EOF
 # has a generic Type=wlan fallback), so ethernet keeps its kernel name and falls
 # out of SRTLA bonding — silently. mkosi.conf's PassEnvironment= MUST stay in
 # lockstep with orchestrate.sh:run_mkosi_build()'s env_names; the guard is
-# mkosi-contract.bats "mkosi PassEnvironment stays in lockstep with … env_names".
+# mkosi-image-contract.bats "mkosi PassEnvironment stays in lockstep with … env_names".
 #
 # KERNEL-PORTABLE Path= MATCHING — why the literal manifest value is not enough.
 # An ID_PATH for a PCIe NIC is `platform-<controller>-pci-<domain:bus:dev.fn>`,

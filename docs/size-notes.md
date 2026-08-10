@@ -522,7 +522,7 @@ fast, hardware-free proof that the gate's own pass and fail legs work at all
 (including a sparse 2 GiB negative leg); `[6c/9]` is the second, complementary
 check that the gate meets a real artifact. Neither replaces the other.
 
-Guards: `mkosi-contract.bats` §10 — the shipped `[6c/9]` block is extracted from
+Guards: `mkosi-image-contract.bats` §10 — the shipped `[6c/9]` block is extracted from
 `orchestrate.sh` and executed against synthetic KB-sized trees, proving the pass
 leg, the abort leg, the loud `INSTALL_BOOT_BSP=0` skip (with a spy proving
 `measure-size.sh` is not invoked), the stage ordering, DRY_RUN unreachability, and
@@ -562,7 +562,7 @@ bytes against a ~1.4 GB baseline — it could only ever report an enormous shrin
 | 2 (missing/malformed/**wrong board**) | `die` | a repository misconfiguration, not a size event |
 | no baseline for this board | `log_warn`, pass | the same newly-added-board allowance `measure-size.sh` makes for a null ceiling. There is deliberately **no** un-suffixed fallback: `size-baseline.json` is `rock-5b-plus`'s file, so a fallback would hand it to every board that lacks one. |
 
-Guards: `mkosi-contract.bats` §10 gains five cases — the `[6c/9]` block actually calls
+Guards: `mkosi-image-contract.bats` §10 gains five cases — the `[6c/9]` block actually calls
 the comparison and calls it *after* the absolute gate; every shipped RK3588 board
 carries a real per-board baseline with full provenance (`artifact`,
 `artifact_sha256`, `commit`, ISO `recorded_at`) that is under its own ceiling and

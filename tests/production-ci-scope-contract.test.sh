@@ -19,7 +19,7 @@ grep -Eq '^FROM debian:trixie-[0-9]{8}-slim@sha256:[0-9a-f]{64}$' "${PIPELINE_DI
 reject_pattern 'no x86 disk artifact present.*skip' "${REPO}/.github/workflows/v2-ci.yml"
 reject_pattern 'if ! ./ci/check-size-regression.sh' "${REPO}/.github/workflows/v2-ci.yml"
 if rg -n 'REPO_ROOT/\.\./CeraUI|PIPELINE_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./\.\./\.\.' \
-    "${PIPELINE_DIR}"/tests/{manifest-schema,package-contract,postinst-wiring,mkosi-contract,runtime-services,variant-contract}.bats \
+    "${PIPELINE_DIR}"/tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats \
     "${PIPELINE_DIR}/tests/manifest-helpers.bash" "${PIPELINE_DIR}/tests/realhw-suite.sh" \
     "${PIPELINE_DIR}/lib/build-bundle.sh" "${PIPELINE_DIR}/lib/dev-sync/config.sh"; then
   printf 'tracked code escapes the repository root\n' >&2

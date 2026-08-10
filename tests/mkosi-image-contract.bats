@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 bats_require_minimum_version 1.5.0
 #
-# mkosi-contract.bats — mkosi/orchestrator image contracts — x86 boot fallback and the
+# mkosi-image-contract.bats — mkosi/orchestrator image contracts — x86 boot fallback and the
 # RAUC-native grub disk artifacts, multi-device rootfs non-regression, the
 # size-gate scaffolding and its build gate, reproducible builds, and the
 # bounded-parallel multi-board runner.
@@ -10,7 +10,7 @@ bats_require_minimum_version 1.5.0
 # the shared setup and every fixture helper live in manifest-helpers.bash.
 #
 # Run:  run-tests              (CI entrypoint)
-#   or: bats tests/mkosi-contract.bats
+#   or: bats tests/mkosi-image-contract.bats
 
 load manifest-helpers
 

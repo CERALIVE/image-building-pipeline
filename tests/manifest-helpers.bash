@@ -4,7 +4,7 @@
 # manifest contract suites.
 #
 # `tests/manifest.bats` was one 7,244-line file. It is now six concern-scoped
-# suites — manifest-schema, package-contract, postinst-wiring, mkosi-contract,
+# suites — manifest-schema, package-contract, postinst-wiring, mkosi-image-contract,
 # runtime-services, variant-contract — each of which starts with
 # `load manifest-helpers`. The test CASES moved verbatim; this file holds
 # everything that was not a case, so that no suite can be missing a helper a
@@ -31,7 +31,7 @@
 # NOT available on the host; validation goes through python-jsonschema.
 #
 # Run:  run-tests              (CI entrypoint)
-#   or: bats tests/{manifest-schema,package-contract,postinst-wiring,mkosi-contract,runtime-services,variant-contract}.bats
+#   or: bats tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats
 
 setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"

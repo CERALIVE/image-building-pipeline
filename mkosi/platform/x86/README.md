@@ -203,7 +203,7 @@ D1 encode config (qsv primary, x264 fallback, NOT relay-only).
 owns: a **forced primary-slot failure rolls back to the known-good slot**. It drives
 this same shipped `x86-boot-state.sh` engine (no re-implementation, no qemu/GRUB/root),
 asserts the rollback contract end-to-end, and is wired into the canonical unit suite
-(`tests/mkosi-contract.bats` → `run-tests`) so CI gates on it.
+(`tests/mkosi-image-contract.bats` → `run-tests`) so CI gates on it.
 
 ## Done (Task 12) / still deferred
 
