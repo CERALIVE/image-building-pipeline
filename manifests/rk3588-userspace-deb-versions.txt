@@ -46,7 +46,6 @@ libmali-valhall-g610-g24p0-wayland-gbm  libmali-valhall-g610-g24p0-wayland-gbm_1
 
 # --- Rockchip MPP encode/decode library (tsukumijima) — the runtime the GStreamer plugin dlopens ---
 librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp1_1.5.0-1_arm64.deb
-librockchip-mpp-dev  librockchip-mpp-dev_1.5.0-1_arm64.deb  aa38d6476ff4798623b37f09845436ab80d730f42c17e305f43ba7a892ee34fe  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp-dev_1.5.0-1_arm64.deb
 
 # --- Runtime multimedia udev/config (tsukumijima) ---
 rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb

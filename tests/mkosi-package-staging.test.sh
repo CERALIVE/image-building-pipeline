@@ -159,6 +159,15 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${RM_CALLS}"' \
 	>"${RUN_DIR}/bin/rm"
 chmod 755 "${RUN_DIR}/bin/"*
 
+# The firmware prune is now GATED on a modinfo sweep of the installed modules
+# rather than deleting a fixed list of directory names, so the fixture has to
+# carry a firmware tree for it to have anything to decide about. Both classes are
+# present: candidate families, and preserved ones that must survive.
+for _fw in qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas brcm rtw89 rockchip; do
+	install -d -m 0755 "${RUN_DIR}/buildroot/usr/lib/firmware/${_fw}"
+done
+: >"${RUN_DIR}/buildroot/usr/lib/firmware/r8a779x_usb3_rom.mem"
+
 MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 	RM_CALLS="${RUN_DIR}/rm.calls" \
 	PATH="${RUN_DIR}/bin:${PATH}" \
@@ -187,7 +196,26 @@ mapfile -t install_calls <"${RUN_DIR}/mkosi-install.calls"
 [[ "${install_calls[0]}" == '-y --no-install-recommends gstreamer-bsp gstreamer-runtime' ]]
 [[ "${install_calls[1]}" == '-y --no-install-recommends zstd' ]]
 [[ "${install_calls[2]}" == '-y --no-install-recommends linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo' ]]
-[[ "$(<"${RUN_DIR}/rm.calls")" == \
-	"-rf ${RUN_DIR}/buildroot/usr/lib/firmware/qcom ${RUN_DIR}/buildroot/usr/lib/firmware/intel ${RUN_DIR}/buildroot/usr/lib/firmware/ath10k ${RUN_DIR}/buildroot/usr/lib/firmware/ath11k ${RUN_DIR}/buildroot/usr/lib/firmware/ath12k ${RUN_DIR}/buildroot/usr/lib/firmware/updates" ]]
+
+# The prune now issues ONE removal per family it has proved has no consumer, in
+# candidate order, and must issue none at all for a preserved family. Asserting
+# the exact call list keeps both halves honest: a widened candidate list and a
+# silently-skipped prune each fail here.
+_expected_rm=""
+for _fw in qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas; do
+	_expected_rm+="-rf ${RUN_DIR}/buildroot/usr/lib/firmware/${_fw}"$'\n'
+done
+_expected_rm+="-f ${RUN_DIR}/buildroot/usr/lib/firmware/r8a779x_usb3_rom.mem"
+[[ "$(<"${RUN_DIR}/rm.calls")" == "${_expected_rm}" ]] || {
+	printf 'FAIL firmware prune issued unexpected removals:\n%s\n---- expected ----\n%s\n' \
+		"$(<"${RUN_DIR}/rm.calls")" "${_expected_rm}" >&2
+	exit 1
+}
+for _fw in brcm rtw89 rockchip; do
+	if grep -q "firmware/${_fw}\$" "${RUN_DIR}/rm.calls"; then
+		printf 'FAIL preserved firmware family %s was removed\n' "${_fw}" >&2
+		exit 1
+	fi
+done
 
 printf 'PASS mkosi package consumers are readable while download temporaries stay private\n'

@@ -77,15 +77,21 @@ hw_accel_gstreamer_plugins:
 
 # Runtime multimedia support for the MPP HW-accel path. librockchip-mpp1 is the MPP
 # encode/decode runtime the gst plugin dlopens; librga2 is the RGA 2D accelerator it
-# links; rockchip-multimedia-config ships the udev/config glue; librockchip-mpp-dev
-# accompanies the MPP runtime to mirror the exact hardware-proven asset set. None are
-# in the Armbian bookworm arm64 feed — all pinned + SHA-256-verified in
+# links; rockchip-multimedia-config ships the udev/config glue. None are in the
+# Armbian bookworm arm64 feed — all pinned + SHA-256-verified in
 # ../rk3588-userspace-deb-versions.txt and staged by fetch_rk3588_userspace.
+#
+# librockchip-mpp-dev was HERE and is now removed — verdict `REMOVE`, recorded
+# with its evidence in ../packages/removed.md and pinned by
+# tests/mpp-dev-runtime-contract.test.sh. Its entire payload is 25 headers, two
+# pkg-config files and its docs; the runtime `librockchip_mpp.so` symlink is
+# shipped by librockchip-mpp1 itself, not by the -dev package, and
+# gstreamer1.0-rockchip1 links the versioned soname `librockchip_mpp.so.1` and
+# Depends on librockchip-mpp1 alone. Nothing is compiled on a CeraLive board.
 gstreamer_runtime_packages:
   - rockchip-multimedia-config
   - librga2
   - librockchip-mpp1
-  - librockchip-mpp-dev
 
 # Frozen A/B layout, docs/partition-contract.md §3 (v1). NAME reference only —
 # sizes/slot roles/threshold live in the frozen contract, never duplicated here.

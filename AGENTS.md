@@ -1040,6 +1040,162 @@ occurrence of each of those `make` calls in the file.
 
 Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
 
+**The `edge` config is ROCKCHIP-ONLY, and two closure manifests keep it that
+way** [EXISTS]
+
+arm64 `defconfig` is a MULTI-PLATFORM config: it enables all 55 SoC platforms
+`arch/arm64/Kconfig.platforms` offers, and each one drags in its own clock,
+pinctrl, PHY, DMA, thermal, mailbox and media drivers. `rk3588-edge.fragment`
+now disables every one of them except `CONFIG_ARCH_ROCKCHIP`. Measured against a
+real resolved `.config` (v7.1.7 + the pinned patch series + defconfig + the
+fragment + `olddefconfig`): **1416 modules before, 793 after**, and all 624
+dropped modules were reviewed individually — every one is a foreign-platform
+driver or a select-only helper of one (Qualcomm clock/LPASS/QDSP6, Apple SMC,
+Broadcom VC4/V3D, i.MX, Tegra, Renesas, MediaTek, TI, Xilinx…). Zero Rockchip
+drivers are dropped.
+
+Three things to know before touching it:
+
+- **The disabled list is ENUMERATED from `Kconfig.platforms`, not hand-written.**
+  A platform upstream adds later is therefore absent from the fragment rather
+  than silently re-enabled under a stale list.
+- **`CONFIG_ARCH_REALTEK` is NOT the Wi-Fi adapter.** It is Realtek's RTD12xx SoC
+  platform. The Rock 5B+ RTL8852BE is `CONFIG_RTW89_8852BE`, which the required
+  manifest pins as PRESENT. Disabling the platform does not touch Wi-Fi and
+  re-enabling it would not fix a Wi-Fi problem.
+- **The per-SoC leaves** (`ARCH_TEGRA_*_SOC`, `ARCH_R8A*`/`R9A*`, …) live inside
+  their parent's `if` block and need no entry — the same select/leaf rule as
+  `RTW89_CORE` and `NF_TABLES_IPV4`.
+
+`manifests/kernel/required-symbols.list` (106 symbols) and
+`manifests/kernel/forbidden-symbols.list` (67) are the contract, and they are
+NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
+defconfig; the manifests declare what the finished kernel must CARRY, including
+everything defconfig is expected to supply on its own. Only the second claim
+survives a fragment that turns 54 platforms off — a driver defconfig used to
+provide can stop being visible, and the fragment gate cannot notice because the
+fragment never named it.
+
+Every required entry is a dependency closure WITH ITS `menuconfig` PARENT, across
+MMC, PCIe, USB, Wi-Fi/BT, DRM, audio, rkvenc/HDMI-RX, dma-heaps, IOMMU,
+thermal/fan, LEDs and nftables — because four capabilities have already shipped
+broken here for exactly the missing-parent reason (`RTW89`, `DMABUF_HEAPS`,
+`TYPEC_FUSB302`, `NF_TABLES`). Two entry forms: `CONFIG_X=<value>` is exact, a
+bare `CONFIG_X` means "set to anything" and is used for a parent whose own y/m
+value is defconfig's business but whose PRESENCE keeps its leaves visible. A bare
+parent is deliberately not pinned to a value, so an upstream y->m change does not
+fail the build for a difference the device cannot observe.
+
+The forbidden manifest holds three classes: the 54 foreign platforms, the
+test/debug symbols production `edge` must resolve OFF (the three CeraLive test
+symbols plus KASAN/lockdep/KUnit — those belong to the opt-in `edge-test`
+variant), and `CONFIG_NFT_COUNTER`, which does not exist at this pin. Entries are
+BARE symbol names; `CONFIG_X=<value>` is refused as a usage error rather than
+reinterpreted, because "this value is banned, another is fine" is a weaker claim
+than the manifest makes.
+
+`lib/verify-kernel-config.sh` grew the option form these need —
+`--config` / `--declared` / `--allow-absent` / `--required` / `--forbidden` —
+while the POSITIONAL in-builder invocation is unchanged and still what
+`build-kernel.sh` uses. Both spellings are the same checker, and the suite proves
+they agree on a pass and on a failure. Non-vacuity: the same forbidden list
+applied to the PRE-trim config reports 50 violations. Guards:
+`tests/kernel-config-fragment.bats` (41 tests).
+
+**Board-only device trees in the installed rootfs — BOTH locations, on BOTH
+kernel paths** [EXISTS]
+
+`make bindeb-pkg` ships every in-tree arm64 DTB inside the linux-image deb (228
+`rockchip/*.dtb` on edge) and Armbian's `linux-dtb-vendor-rk35xx` does the same
+for the vendor path, while a board boots exactly ONE: `boot.scr.cmd` and
+`recovery.scr.cmd` load `/boot/dtb/rockchip/${fdtfile}` and nothing else. There
+is no overlay load anywhere in the CeraLive boot path.
+
+`prune_dtb_dir` in `platform/mkosi.postinst` reduces a directory to the board DTB
+plus an explicit overlay allowlist; `install_kernel_source_dtbs` applies it to
+BOTH the package-payload directory and the `/boot` copy, and `prune_vendor_dtbs`
+applies it to the prebuilt vendor tree. Measured on a real edge build:
+34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled in a
+factory `.raw` because the kernel rides inside a RAUC slot.
+
+- **Both locations, not one.** The package-payload directory stays in the rootfs
+  after installation, so trimming only `/boot` would leave the full set shipping.
+- **Verify BEFORE deleting, and again after.** A prune that removes first and
+  finds the board DTB missing second has already produced an unbootable slot, and
+  that failure surfaces at the far end of a flash cycle.
+- **The vendor directory is DISCOVERED, never composed from a release string.**
+  `/boot/dtb-<REL>` comes from the Armbian package, not from anything this repo
+  resolves, so a hardcoded path would silently no-op on the next version bump.
+  `find` does not descend the `/boot/dtb` symlink, so the real directory is
+  pruned once and the symlink keeps resolving.
+- **`armbian_overlays` is NOT the keep-list.** The board schema documents it as
+  inert, unconsumed provenance metadata; using it would fail the existence check
+  for blobs that were never in any kernel tree. The real knob is
+  `CERALIVE_DTB_KEEP_OVERLAYS`, empty on both shipped boards and on the
+  `env_names` <-> `PassEnvironment=` lockstep.
+- **The source `.deb` is untouched.** Nothing is repacked; the suite pins the
+  staged package's member listing AND its sha256 as unchanged across a real
+  prune.
+- **Persistence is the EXISTING kernel freeze.** The DTB package is in
+  `DTB_PACKAGES`, so `freeze_boot_packages` already holds and pins it, and the
+  boot BSP has no apt origin on the device to reinstall FROM. No second hold, no
+  dpkg path-exclude. The suite proves the prune is deliberately NOT
+  self-defending — re-unpacking the package DOES restore every blob — so the
+  argument rests on the freeze rather than on the prune.
+
+Guards: `tests/dtb-prune-contract.bats` (20 tests, six tagged `vendor`).
+
+**Firmware is pruned only where an installed-module sweep proves no consumer**
+[EXISTS]
+
+`prune_irrelevant_rk3588_firmware` used to delete six directories by NAME. It now
+reads every installed module with `modinfo -F firmware`, builds the real consumer
+set, and KEEPS — naming the exact blocking reference — any candidate a module can
+request. The candidate list is an input to that check, not the decision, which is
+what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
+`r8a779x_usb3_rom.mem` safe.
+
+- **`brcm/`, `rtl_bt/`, `rtw88/`, `rtw89/` and `rockchip/` are never candidates** —
+  they carry the two boards' own Wi-Fi, Bluetooth and SoC blobs. `mediatek/` and
+  `iwlwifi` are preserved for a different reason: no dual-board module/firmware
+  inventory exists yet to judge them.
+- **`iwlwifi` is NOT a directory.** It is ~50 top-level `iwlwifi-*.ucode` files
+  (17,427,620 B) at the firmware root, so a directory-shaped prune would no-op on
+  it. `mediatek/` is 8,452,632 B. Together 26.1% of the 99,179,459 B firmware
+  tree. Both have REAL consumers in the edge module set (55 and 15 references),
+  so neither is prunable on this evidence — whether those drivers should be built
+  at all is a config question and a dual-board question, and stays out of scope.
+- **A static source grep cannot answer this.** `MODULE_FIRMWARE()` names are
+  frequently macro-composed: a literal grep of the v7.1.7 tree finds ZERO
+  `iwlwifi`/`mediatek`/`mt76`/`rtw89` firmware strings while those drivers
+  demonstrably request firmware. Only `modinfo` against BUILT modules is truthful.
+- **The sweep already overturned the obvious answer, on real data.** Against a
+  REAL 928-module edge build (`modinfo -F firmware` over every `.ko`, 788
+  distinct references), `nvidia/` has **519 references — all from `nouveau.ko`**,
+  the mainline open-source NVIDIA GPU driver, which is a PCI driver and so
+  survives the Rockchip-only platform trim untouched. Deleting `nvidia/` by NAME
+  would have removed firmware a built, installed module can request. Four of the
+  SIX PRE-EXISTING candidates are in the same position — `intel/` (btintel),
+  `ath10k/`, `ath11k/`, `ath12k/` — so the old unconditional `rm -rf` was already
+  deleting referenced families and was only accidentally harmless, because
+  `armbian-firmware` does not ship those directories at the pinned version. All
+  five are now KEPT with the blocking reference named. Only `qcom/`, `updates/`,
+  `microchip/`, `tegra/`, `renesas/` and `r8a779x_usb3_rom.mem` have zero
+  consumers.
+- **It saves 0 bytes at the current pin, on purpose.** `armbian-firmware` is
+  already the trimmed variant and ships none of the new candidates. This is a
+  forward guard against a re-spin, not a reduction.
+- **Two failure modes are closed.** Batching through `xargs modinfo` made ONE
+  unparseable `.ko` abort the whole postinstall under `set -e`; swallowing every
+  failure is worse, because an empty consumer set authorises deleting everything.
+  The sweep tolerates an individual failure, returns non-zero when NOTHING
+  parsed, and the caller then declines and says so. Same direction when `modinfo`
+  is missing entirely: no proof, no deletion.
+- **Nothing is removed as a PACKAGE.** `armbian-firmware`, `libmali` and
+  `hostapd` all stay installed.
+
+Guard: `tests/firmware-prune.test.sh` (40 checks).
+
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
 
@@ -1692,11 +1848,19 @@ root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` reg
 proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
-  package (`package  filename  sha256  url`). Six packages:
+  package (`package  filename  sha256  url`). Five packages:
   `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 (firmware_packages),
   `gstreamer1.0-rockchip1` 1.14-4 (hw_accel_gstreamer_plugins), and
   `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
-  / `librockchip-mpp-dev` 1.5.0-1 (gstreamer_runtime_packages). Sources: tsukumijima
+  (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
+  RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
+  `tests/mpp-dev-runtime-contract.test.sh`. It is a libdevel package whose whole
+  payload is 25 headers, two `.pc` files and docs; `librockchip-mpp1` ships the
+  entire soname chain including the unversioned `librockchip_mpp.so` link, and
+  `gstreamer1.0-rockchip1` links the VERSIONED `librockchip_mpp.so.1` and depends
+  on the runtime package alone. Do not re-add it to "mirror the proven asset
+  set" — that is why it was there, and the proven half is `librockchip-mpp1`,
+  which is untouched. Sources: tsukumijima
   (`mpp-rockchip`, `rockchip-multimedia-config`, `libmali-rockchip`) + radxa
   `rk3588s2-bookworm` (the gst plugin + its ABI-paired RGA; tsukumijima ships no
   gst-rockchip mirror).

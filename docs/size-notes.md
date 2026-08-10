@@ -655,3 +655,66 @@ reason to re-record.
 
 Guards: `package-contract.bats` §30 — 16 tests, including the skip being scoped to the
 relative check only (the absolute stage must not grow a debug branch).
+
+## 13. Wave-3 payload trim — DTBs, firmware and `librockchip-mpp-dev` (todos 14-17)
+
+Three reductions land together. All figures below are MEASURED from real
+artifacts — the built rootfs trees of a real `rock-5b-plus --variant edge` build
+and the SHA-256-verified pinned `.deb`s — not estimated. The full itemized
+ledger, including the per-family firmware inventory, is regenerated at
+`test-results/pipeline-restructure-kernel-backports/wave3/size-ledger.md`.
+
+### The DTB trim is the whole story: 34,432,922 B per rootfs
+
+| Location | Before | After | Saved |
+|---|---:|---:|---:|
+| `/usr/lib/linux-image-<REL>/rockchip` (kernel-package payload) | 17,323,291 | 106,830 | 17,216,461 |
+| `/boot/dtb/rockchip` | 17,323,291 | 106,830 | 17,216,461 |
+| **per rootfs** | 34,646,582 | 213,660 | **34,432,922** |
+
+228 device trees before, one after — the board's own, at 106,830 B. Both
+locations matter: the package-payload directory stays in the rootfs after
+installation, so trimming only the `/boot` copy would have halved the saving and
+left the full set shipping regardless. Because the kernel rides inside a RAUC
+slot, a factory `.raw` carries this twice (68,865,844 B across A and B).
+
+### The firmware prune saves ZERO bytes today, and that is the point
+
+`armbian-firmware` is already the trimmed Armbian variant, and the families this
+wave added as candidates — `microchip/`, `nvidia/`, `tegra/`, `renesas/` and the
+top-level `r8a779x_usb3_rom.mem` — are all ABSENT from the real built rootfs, as
+are the six that were already on the list. The prune is therefore a forward
+guard rather than a reduction: if a future `armbian-firmware` re-spin starts
+shipping one of them it is removed automatically, and only after a
+`modinfo -F firmware` sweep of every installed module proves nothing can ask for
+it. Do not "optimise" it away for saving nothing — the same re-spin risk is why
+the BSP drift-guard exists.
+
+And the gate is not decorative. Run against a REAL 928-module edge build, the
+sweep KEEPS five of the eleven candidates because installed modules reference
+them: `nvidia/` (519 references, all from `nouveau.ko` — a PCI driver that
+survives the platform trim), `intel/` (btintel), `ath10k/`, `ath11k/` and
+`ath12k/`. Four of those five were on the PRE-EXISTING candidate list, so the old
+unconditional `rm -rf` was already deleting referenced families and was only
+accidentally harmless. Full inventory:
+`test-results/pipeline-restructure-kernel-backports/wave3/firmware-inventory.md`.
+
+### `librockchip-mpp-dev`: 223,231 B, and a verdict rather than a guess
+
+Extracted payload 223,231 B (`Installed-Size: 246` KiB): 25 headers, two
+pkg-config files, four doc files, no ELF. Verdict `REMOVE`, with the reverse-
+dependency and soname evidence, in
+[`../manifests/packages/removed.md`](../manifests/packages/removed.md).
+
+### Total, and what is deliberately NOT updated
+
+34,656,153 B per rootfs (~33.1 MiB), ~66.1 MiB per factory `.raw`.
+
+**`manifests/size-budget.json` `measured` and `ci/size-baseline.<board>.json` are
+NOT edited by this wave.** `_measurement_note` defines `measured` as the real
+`du --apparent-size -sb` of a WET vendor-BSP production build, and
+`mkosi-image-contract.bats` fails when the two registries disagree. This wave
+produced no wet build, so writing a computed figure there would substitute an
+estimate for a measurement and quietly hollow out the contract those registries
+exist to enforce. The next real production build re-measures both boards, and
+the delta above is what it should show.

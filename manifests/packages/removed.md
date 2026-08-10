@@ -366,3 +366,82 @@ whose assertion is `grep -Ex 'iw[[:space:]]*(#.*)?'` — a whole-line match that
 matched the `wireless-tools` line. `tests/package-migration-coverage.sh` is
 unaffected: `removed.md` is one of its accepted "v2 homes", and the legacy sources
 it reconciles against were retired in T24 (it SKIPs).
+
+---
+
+## `librockchip-mpp-dev` — RK3588 userspace HW-accel set
+
+**librockchip-mpp-dev: REMOVE**
+
+That line is the machine-readable verdict; `tests/mpp-dev-runtime-contract.test.sh`
+reads it and fails if the family manifest and the verdict ever disagree.
+
+### What was inspected
+
+The package was staged and its exact bytes checked against the SHA-256 in
+`manifests/rk3588-userspace-deb-versions.txt`
+(`aa38d647…ee34fe`, `librockchip-mpp-dev_1.5.0-1_arm64.deb`), then read three
+ways: its own `dpkg-deb -c` listing, the dpkg file lists a REAL build left in
+`mkosi/build/{platform,runtime,app}/var/lib/dpkg/info/librockchip-mpp-dev.list`,
+and the reverse dependencies of every other package in the pinned RK3588
+userspace set.
+
+### Payload — headers, pkg-config and docs, and nothing else
+
+44 entries, of which 25 are `/usr/include/rockchip/*.h`, two are
+`/usr/lib/aarch64-linux-gnu/pkgconfig/rockchip_{mpp,vpu}.pc`, and the remainder
+are directories plus `/usr/share/doc/librockchip-mpp-dev/`. There is **no ELF
+object, no shared library, no executable, no udev rule and no systemd unit**.
+`Installed-Size: 246`.
+
+### The one thing that would have made it runtime-relevant — and does not
+
+A `-dev` package normally owns the unversioned `lib*.so` development symlink,
+which a `dlopen("librockchip_mpp.so")` would need at runtime. **This one does
+not.** `librockchip-mpp1` ships all three of
+
+```
+/usr/lib/aarch64-linux-gnu/librockchip_mpp.so.0
+/usr/lib/aarch64-linux-gnu/librockchip_mpp.so.1 -> librockchip_mpp.so.0
+/usr/lib/aarch64-linux-gnu/librockchip_mpp.so   -> librockchip_mpp.so.1
+```
+
+so the entire soname chain, unversioned link included, is present with `-dev`
+absent.
+
+### Reverse dependencies — none on the image
+
+`librockchip-mpp-dev` `Depends: librockchip-mpp1 (= 1.5.0-1)`. The dependency is
+one-directional: nothing depends on `-dev`, so removing it cannot disturb the
+runtime. Across the pinned userspace set — `librockchip-mpp1`, `librga2`,
+`rockchip-multimedia-config`, `gstreamer1.0-rockchip1` — no `Depends:`,
+`Recommends:` or `Suggests:` field names it.
+
+### The encoder consumer resolves against the runtime package
+
+`gstreamer1.0-rockchip1`'s `libgstrockchipmpp.so` — the plugin that registers
+`mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` — has
+`NEEDED librockchip_mpp.so.1` and `NEEDED librga.so.2`, i.e. the VERSIONED
+sonames, and its control record is
+`Depends: … librga2, librockchip-mpp1, …` with no `-dev` anywhere.
+
+### Why the headers have no consumer either
+
+Nothing is compiled on a CeraLive board. On-device build tooling
+(`build-essential`, `cmake`, `gdb`, `git`, `nodejs`, `linux-headers-*`) is
+deliberately refused even from the debug package delta, so a header set and two
+`.pc` files have no reachable user in either image variant.
+
+### Verdict
+
+`librockchip-mpp-dev` is a build-time-only development package with zero runtime
+content and zero runtime reverse dependencies on the shipped image. It is removed
+from `manifests/families/rk3588.yaml` `gstreamer_runtime_packages` and its pin
+row is retired from `manifests/rk3588-userspace-deb-versions.txt`. The exact
+asset stays recoverable from this section: version `1.5.0-1`, sha256
+`aa38d6476ff4798623b37f09845436ab80d730f42c17e305f43ba7a892ee34fe`, from
+`https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp-dev_1.5.0-1_arm64.deb`.
+
+**This is not an MPP downgrade.** `librockchip-mpp1` — the runtime the whole
+hardware-encode path depends on, and the half that is board-proven — is
+untouched, at the same pin, with the same SHA-256.
