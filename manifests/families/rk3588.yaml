@@ -247,6 +247,29 @@ variants:
       # this session a fix needs fresh hardware confirmation; the corrected pin
       # has not yet been rebuilt and re-tested on the Rock 5B+.
       #
+      # It now carries 0024, which is why the pin moved off cabc6b5. While
+      # module-swap testing the previous pin on real Rock 5B+ hardware, defect G
+      # reproduced as a KASAN null-ptr-deref in __iommu_attach_group, preceded
+      # by possible recursive locking on the reset-group rwsem: after a main-core
+      # unbind, the secondary core kept its dispatch-queue slot even though its
+      # IOMMU domain pointer was NULL, so a later dispatch called
+      # iommu_attach_group() with no domain. 0024 makes dispatchability and
+      # IOMMU-domain validity the same fact: RKVENC_STAGE_QUEUE_PUBLISHED and
+      # RKVENC_STAGE_IOMMU_SHARED gate both together, and
+      # rkvenc_ccu_reshare_domain() re-attaches and republishes a secondary only
+      # after it has successfully shared the main core's domain again. The
+      # hardware result was 1/1 Oops on the unpatched module and 0/0 Oops on the
+      # patched module across repeated concurrent-encode stress. The same
+      # investigation closed defect H as a real measured MPP/GStreamer
+      # userspace behavior, not a kernel bug: rkvenc_hw_run entered 60 times and
+      # left 59 for 60 frames, with one correctly reported -ENODEV failure and
+      # no retry, while the failed frame was dropped and the stream measured
+      # 1,697,683 bytes versus 1,854,524 healthy (about 8.5% shorter). That
+      # layer is outside this driver's control, so H needs no kernel patch.
+      # Hardware re-verification via a FULL clean todo45 attempt is PENDING:
+      # the evidence above is module-swap spot-testing of 0024, not a complete
+      # clean twelve-command QA run.
+      #
       # The previous twenty-two-patch pin (ca98ea4b083e5e0ee48221de71f2e45c622bd5bc)
       # is what surfaced this 0022 regression, the twenty-patch pin before it is
       # what surfaced the 0021/0022 defects, and the nineteen-patch pin before
@@ -265,7 +288,7 @@ variants:
       # Verified reachable from a scratch clone with
       # `git fetch --depth 1 <patches_git_url> <patches_commit>`.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: cabc6b5c90136cd16941383f5caa92ad6fa609d3
+      patches_commit: b4dd39a5c0e64fb9b1605ac900578f3853aa3e16
       patches_series: patches/series
 
       defconfig_base: defconfig
