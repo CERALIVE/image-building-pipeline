@@ -471,8 +471,10 @@ because each is a case where the obvious placement is the wrong one:
   first `Apt.install()`), but it is defence in depth, not the mechanism.
 
   **Verifying this class of fix needs a COLD BASE LAYER.** `mkosi/cache/<board>/
-  *base.cache` must be deleted (root-owned; remove it from a throwaway container)
-  or mkosi skips `install_distribution()` and row 8's window never opens. A log
+  *base.cache` must be deleted (root-owned; remove it from a throwaway privileged
+  container — see the cache-privilege-domain KEY FACT below for why a `chown` is
+  the wrong tool) or mkosi skips `install_distribution()` and row 8's window
+  never opens. A log
   with no `‣  Installing Debian` line has not tested row 8 whatever the grep
   says. A plain `./build <board>` reproduces all three signatures in roughly half
   the time of a `--variant edge` build.
@@ -645,6 +647,72 @@ precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
+
+**The mkosi package cache may never cross a privilege domain, and a Docker
+Desktop daemon is REFUSED — a `chown` is the wrong tool for both** [EXISTS]
+
+`mkosi/cache/<board>/*base.cache` is a real Debian rootfs snapshot. The
+canonical containerized build writes it as **uid 0**; a `--native` build writes
+it as the **invoking user**. mkosi 26 will not reuse a cache tree whose owner uid
+is not its own (`have_cache`, `mkosi/__init__.py`) — with `--force` (which
+`lib/orchestrate.sh` always passes) `remove_image_cache` becomes
+`not have_cache(config)`, so it DELETES the foreign tree instead, via
+`mkosi.tree.rmtree`, whose `rm -rf` runs `check=True`. That deletion succeeds for
+a domain with authority over the tree and **fails the build** for one without.
+
+Two guards close it, and both fail loudly:
+
+- **`lib/common.sh::assert_container_daemon_supported <runtime>`** refuses a
+  daemon whose `OperatingSystem` contains `Docker Desktop`. Called from
+  `lib/stages/mkosi.sh::mkosi_invoke` AND
+  `lib/kernel/builder.sh::ensure_kernel_builder_image`, so the refusal lands at
+  `[2b/9]`/`[5/9]` instead of after a kernel compile. Scoped to `docker` —
+  podman on Linux is not a VM share and reports a different `info` schema.
+- **`lib/stages/mkosi.sh::assert_cache_privilege_domain <dir> <uid>`** compares
+  the cache's owner against the uid mkosi is about to run as. Absent or matching
+  → proceed. Container path (uid 0) meeting a user-owned cache → **warn**, since
+  root can discard it and the only cost is a cold base layer, which is stated
+  rather than hidden. Native path meeting a root-owned cache → **die**, naming
+  `sudo rm -rf <cache>` and the privileged-container equivalent, because mkosi
+  cannot remove it and would otherwise fail mid-build.
+
+**Why Docker Desktop specifically, on evidence rather than caution.** Its bind
+mount is a VM share whose host-side I/O is performed as the DESKTOP USER, so
+even a `--privileged` root container cannot unlink a host-uid-0 file. The
+invalidation above then dies in a wall of
+
+```
+rm: cannot remove '/work/work/mkosi/cache/rock-5b-plus/debian~bookworm~arm64~base.cache/etc/ucf.conf': Permission denied
+```
+
+**Read that path carefully — it exists in no filesystem you can `ls`.** The
+LEADING `/work` is mkosi's own sandbox remapping (`mkosi.run.workdir()` =
+`"/work"` + the absolute in-container path) and the SECOND is this pipeline's
+`-v "${PIPELINE_DIR}:/work"` mount. So a `/work/work/...` prefix is positive
+proof the failure happened INSIDE the containerized mkosi, not on the host. The
+same share also supports no POSIX ACLs or xattrs, and mkosi extracts every
+subimage with `tar --acls --xattrs`, so the base layer independently dies with
+`acl_set_file_at: Cannot set POSIX ACLs … Operation not supported` before one
+package is installed. Both were observed on a real `rock-edge-test`
+hardware-candidate build and both reproduce in three commands.
+
+**`chown -R` on the cache is NOT the repair, and this is the trap.** It is the
+obvious reading of "make the ownership consistent", and mkosi's own uid check
+turns it into a permanently cold base layer: a cache chowned to the host user is
+rejected — and then deleted — by every subsequent containerized run.
+`.github/workflows/release.yml` does chown the cache, but that is a **cache
+transport** step so `actions/cache/save` can read the tree, not a build step;
+never copy it into the local path. `mkosi/cache/kernel-ccache` is a different
+tree with a different rule: it is written and read by the kernel builder
+container as root every time, so root-owned is its correct steady state.
+
+Guard: `tests/mkosi-cache-privilege-domain.test.sh` (21 checks, mutation-verified
+— dropping either call site or softening the warn fails it), which also carries
+the negative contract that nothing under `lib/` may chown the mkosi cache.
+Host matrix consequence: macOS Apple Silicon moved from "⚠️ container-only,
+caveated" to **❌ refused** in [`docs/host-support.md`](docs/host-support.md),
+because the previous verdict reasoned about loop devices and architecture and
+never about the file share.
 
 **Build entry point** [EXISTS]
 
@@ -4172,6 +4240,8 @@ gated item, not the package availability.
 - Keep `srt` in `REPOS` and map `libsrt1.5-ceralive` through `FIRST_PARTY_APT_PKGS`; do not add a Debian `libsrt1.5-*` runtime package to `shared.list`
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
+- Don't `chown` the mkosi package cache to the invoking user to "make the ownership consistent". mkosi 26 refuses a cache tree whose owner uid is not its own and then deletes it, so a chowned cache is a permanently cold base layer that looks like a fix. Keep the cache in ONE privilege domain instead, and don't alternate `./build <board>` and `./build <board> --native` on one checkout unless you want to pay for a cold base layer every time
+- Don't run the containerized build on a Docker Desktop daemon, and don't "work around" its `rm: cannot remove …: Permission denied` or `acl_set_file_at: Operation not supported`. Its bind mount is a VM share: container root cannot unlink a host-uid-0 file and the share carries no ACLs/xattrs, so it can neither invalidate the mkosi cache nor extract a subimage. A `/work/work/...` path in an error is not a real path — it is mkosi's sandbox prefix over our own `/work` mount, and it means the failure is inside the containerized mkosi
 - Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges

@@ -85,6 +85,7 @@ tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
 tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged package modes, mounts and local-repository consumption
+tests/mkosi-cache-privilege-domain.test.sh	shell	unit	default-shell	the mkosi cache stays in one privilege domain; Docker Desktop is refused
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs

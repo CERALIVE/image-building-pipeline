@@ -109,6 +109,38 @@ stage_mkosi() {
 }
 
 # ---------------------------------------------------------------------------
+# assert_cache_privilege_domain <cache-dir> <builder-uid> — the mkosi package
+# cache may never cross a privilege domain.
+#
+# The containerized build runs mkosi as uid 0 and a --native build runs it as the
+# invoking user, so each produces a cache only its own domain owns. mkosi 26
+# refuses to reuse a cache tree owned by another uid (`have_cache`) and removes
+# it instead — harmless when it can (root discarding a user-owned tree, at the
+# cost of a cold base layer), fatal when it cannot: a --native run meeting the
+# root-owned *base.cache a containerized run left behind reports `rm: cannot
+# remove …: Permission denied` for every file in it and dies inside mkosi. Say
+# that here, with the command that repairs it, rather than after the fetch and
+# kernel stages have already been paid for.
+# ---------------------------------------------------------------------------
+assert_cache_privilege_domain() {
+  local cache_dir="${1:?assert_cache_privilege_domain needs a cache dir}"
+  local builder_uid="${2:?assert_cache_privilege_domain needs the builder uid}"
+  local owner_uid
+
+  [[ -d "${cache_dir}" ]] || return 0
+  owner_uid="$(stat -c '%u' "${cache_dir}")" \
+    || die "cannot read the owner of the mkosi cache directory ${cache_dir}"
+  [[ "${owner_uid}" == "${builder_uid}" ]] && return 0
+
+  if [[ "${builder_uid}" == "0" ]]; then
+    log_warn "mkosi cache ${cache_dir} is owned by uid ${owner_uid} and this build runs mkosi as uid 0 — mkosi will discard and rebuild it. Alternating --native and containerized builds costs a full base layer each time."
+    return 0
+  fi
+
+  die "mkosi cache ${cache_dir} is owned by uid ${owner_uid}, but --native runs mkosi as uid ${builder_uid}: mkosi 26 refuses a foreign-owned cache, then cannot remove it, and the build dies in 'rm: cannot remove …: Permission denied'. Delete it from the domain that owns it first — 'sudo rm -rf ${cache_dir}', or from a throwaway privileged container: ${BUILD_MODE:-docker} run --rm --privileged -v ${PIPELINE_DIR}:/work ${MKOSI_BUILDER_IMAGE} rm -rf -- /work/${CERALIVE_REL_MKOSI_CACHE_ROOT}"
+}
+
+# ---------------------------------------------------------------------------
 # mkosi_invoke — run mkosi natively or in the pinned builder container.
 #
 # Called by run_mkosi_build (lib/orchestrate.sh) with NO arguments: everything it
@@ -130,6 +162,7 @@ mkosi_invoke() {
       || die "native build (--native/MKOSI_NATIVE=1) requested but 'mkosi' is not on PATH — install mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+), or drop --native to use the container builder"
     [[ -f /usr/share/keyrings/debian-archive-keyring.gpg ]] \
       || log_warn "native build: /usr/share/keyrings/debian-archive-keyring.gpg absent — mkosi may fail to verify the Debian repos (install debian-archive-keyring)"
+    assert_cache_privilege_domain "${MKOSI_DIR}/${cache_dir}" "$(id -u)"
     if [[ -n "${APT_GPG_PUBLIC_B64}" ]]; then
       APT_GPG_PUBLIC_B64="$("${DEARMOR_APT_KEYRING_SH}")" \
         || die "could not prepare the binary CeraLive apt keyring for mkosi"
@@ -145,6 +178,8 @@ mkosi_invoke() {
   # Containerized (default). BUILD_MODE is the detected runtime; docker `-e NAME`
   # forwards each value and the in-container mkosi re-declares them via --environment.
   local runtime="${BUILD_MODE}"
+  assert_container_daemon_supported "${runtime}"
+  assert_cache_privilege_domain "${MKOSI_DIR}/${cache_dir}" 0
   ensure_builder_image "${runtime}"
 
   log_info "mkosi: ${runtime} builder ${MKOSI_BUILDER_IMAGE} (containerized, mkosi ${MKOSI_VERSION_PIN} pinned)"

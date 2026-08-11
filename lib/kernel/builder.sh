@@ -102,6 +102,7 @@ resolve_kernel_builder_tag() {
 
 ensure_kernel_builder_image() {
   local runtime="$1" base_image="$2" tag="$3"
+  assert_container_daemon_supported "${runtime}"
   [[ -f "${KERNEL_BUILDER_DOCKERFILE}" ]] \
     || die "kernel builder Dockerfile missing: ${KERNEL_BUILDER_DOCKERFILE}"
   if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then

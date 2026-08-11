@@ -32,10 +32,16 @@ This was proven on the live host by running steps [A]–[D] inside an
 all passed. So the famous *"Docker Desktop doesn't expose loop devices"*
 limitation **does not block CeraLive assembly**: we never use loop devices.
 
-Consequently, host portability reduces to a single question:
+Consequently, host portability reduces to two questions:
 
-> **Can this host run a `--privileged` Linux container with working
+> **1. Can this host run a `--privileged` Linux container with working
 > bind/overlay mounts and arm64 binfmt (or native arm64)?**
+>
+> **2. Is the container's bind mount a REAL kernel mount of the checkout —
+> carrying real uids, POSIX ACLs and xattrs — rather than a VM file share?**
+
+Question 2 is not a portability nicety, it is a hard gate, and the build now
+enforces it (see "Docker Desktop is refused" below).
 
 `--privileged` ([`stages/mkosi.sh::mkosi_invoke`](../lib/stages/mkosi.sh)) is there for the
 *other* stage — mkosi building the Debian rootfs (bind/overlay mounts, apt in a
@@ -50,7 +56,7 @@ chroot ⇒ `CAP_SYS_ADMIN`) — **not** for assembly.
 | **Ubuntu/Debian (CI)** | ✅ Fully supported | container *(or native)* | by parity¹ | Canonical CI builder. |
 | **Arch Linux** | ✅ Fully supported | container *(or native)* | ✅ yes | The host this spike ran on. |
 | **Fedora/RHEL** | ✅ Supported, SELinux caveat | container *(Podman or Docker)* | no | Needs SELinux volume labels. |
-| **macOS Apple Silicon** | ⚠️ Container-only, caveated | container only | no (no macOS in env) | arm64 is *native*; loop limit is moot; cannot run native mkosi. |
+| **macOS Apple Silicon** | ❌ Refused (Docker Desktop) | — | no (no macOS in env) | arm64 is native and the loop limit is moot, but the VM file share carries neither real uids nor ACLs/xattrs — the build refuses the daemon. |
 | **WSL2** | ⚠️ Container-only, caveated | container *(native possible)* | no (no Windows in env) | binfmt/WSLInterop collision needs handling. |
 
 ¹ The CI builder **is** the pinned `debian:trixie-slim` image
@@ -60,6 +66,68 @@ privileged container + arm64 binfmt, which any modern Linux CI runner does.
 
 Legend: ✅ = run it as-is · ⚠️ = works for the **container** build with the noted
 limitation + workaround; do **not** assume the **native** build works.
+
+---
+
+## Docker Desktop is refused — the bind mount cannot carry a rootfs
+
+`lib/common.sh::assert_container_daemon_supported` reads the daemon's reported
+`OperatingSystem` and **dies** when it contains `Docker Desktop`. Both the mkosi
+stage (`lib/stages/mkosi.sh::mkosi_invoke`) and the kernel-from-source stage
+(`lib/kernel/builder.sh::ensure_kernel_builder_image`) call it, so the refusal
+lands at `[2b/9]` or `[5/9]` rather than after a multi-minute compile.
+
+This is empirical, not precautionary. A Docker Desktop daemon on this repo's own
+hardware-candidate build failed in two independent ways:
+
+- **It cannot unlink a host-root-owned file, even from a `--privileged` root
+  container.** The bind mount is a VM share whose host-side I/O is performed as
+  the desktop user. mkosi/cache/`<board>`/`*base.cache` is written as uid 0 by
+  the canonical containerized build, and mkosi 26 refuses to reuse a cache tree
+  whose owner uid is not its own (`have_cache`) — it deletes it instead, through
+  `mkosi.tree.rmtree`, whose `rm -rf` runs `check=True`. Under Docker Desktop
+  every unlink is denied and the build dies in a wall of
+
+  ```
+  rm: cannot remove '/work/work/mkosi/cache/rock-5b-plus/debian~bookworm~arm64~base.cache/etc/ucf.conf': Permission denied
+  ```
+
+  That path exists in no filesystem an operator can inspect, which is what makes
+  the failure so hard to read: the **leading** `/work` is mkosi's own sandbox
+  remapping (`mkosi.run.workdir()` = `/work` + the absolute in-container path)
+  and the **second** is this pipeline's `-v "${PIPELINE_DIR}:/work"` mount.
+- **The same share supports no POSIX ACLs or xattrs**, and mkosi extracts every
+  subimage with `tar --acls --xattrs`, so the base layer dies with
+  `acl_set_file_at: Cannot set POSIX ACLs … Operation not supported` before a
+  single package is installed.
+
+Both reproduce in three commands against a scratch directory: create a tree as
+root under a **native** daemon's bind mount, then try to remove it from a
+`--privileged` container on the Docker Desktop daemon.
+
+**Do not "fix" this by chowning the cache to the invoking user.** mkosi's uid
+check would then reject the cache on every subsequent containerized run: a
+permanently cold base layer wearing the costume of a repair. The cache must stay
+inside ONE privilege domain, which is what
+`lib/stages/mkosi.sh::assert_cache_privilege_domain` asserts — see below.
+
+## The mkosi cache lives in ONE privilege domain
+
+The containerized build runs mkosi as uid 0; a `--native` build runs it as the
+invoking user. Each produces a cache only its own domain owns, and mkosi will
+not reuse the other's. `assert_cache_privilege_domain` is checked before mkosi
+starts on both paths:
+
+| Situation | Behaviour |
+|---|---|
+| cache absent | proceed |
+| owner uid == the uid mkosi will run as | proceed (warm cache) |
+| container path (uid 0) meets a user-owned cache | **warn** — root can discard it; the cost is one cold base layer, stated in the log rather than hidden |
+| native path meets a root-owned cache | **die** — mkosi cannot remove it and would fail mid-build; the message names `sudo rm -rf <cache>` and the privileged-container equivalent |
+
+Practical consequence: alternating `./build <board>` and `./build <board>
+--native` on one checkout throws the base cache away every time. Pick one mode
+per checkout.
 
 ---
 
@@ -186,12 +254,17 @@ package) for the user-namespace mapping.
 
 ---
 
-### macOS Apple Silicon (Docker Desktop) — ⚠️ container-only, caveated
+### macOS Apple Silicon (Docker Desktop) — ❌ refused
 
-> **Not validated in this environment** (no macOS host reachable). The statements
-> below are derived from documented Docker Desktop / LinuxKit behavior plus the
-> loop-free proof from the live Linux run. Treat as "should work, container-only"
-> until someone runs `./build` on an M-series Mac.
+> **Status changed.** This section previously read "⚠️ container-only, caveated —
+> should work" on the strength of documented Docker Desktop behaviour plus the
+> loop-free proof from the live Linux run. That reasoning covered loop devices
+> and architecture and never touched the file share, which is where the build
+> actually breaks: Docker Desktop's VM share carries neither host uids nor POSIX
+> ACLs/xattrs, and this pipeline needs both. `assert_container_daemon_supported`
+> now refuses the daemon outright — see "Docker Desktop is refused" above for the
+> two observed failures. Everything below about loop devices remains accurate and
+> is retained, because it explains what is NOT the problem.
 
 Docker Desktop runs containers inside a Linux VM (Virtualization.Framework /
 LinuxKit). There is **no native build path** — macOS is not Linux, so
@@ -235,9 +308,11 @@ hand, or run `losetup` in a throwaway side-container; see
 # If /work is denied: add the repo's parent to Docker Desktop shared folders.
 ```
 
-**Bottom line:** container-only; expected to work because the target arch is
-native and assembly is loop-free; flagged *caveated* solely because it is not
-yet reproduced on hardware here.
+**Bottom line:** refused. The target arch being native and assembly being
+loop-free are both true and both beside the point — the blocker is the VM file
+share, which cannot represent the root-owned, ACL/xattr-bearing Debian rootfs
+that mkosi builds. An M-series Mac needs a real Linux VM with a genuine
+filesystem (or a remote Linux daemon), not Docker Desktop's share.
 
 ---
 

@@ -148,3 +148,50 @@ runtime_pkg_list_files() {
   fi
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# assert_container_daemon_supported <runtime> — refuse a container daemon whose
+# bind mounts cannot carry a Linux rootfs.
+#
+# Every containerized stage here bind-mounts the checkout and then has ROOT
+# inside the container create, own, delete and re-create trees on it. The mkosi
+# package cache is the sharpest case: mkosi/cache/<board>/*base.cache is a real
+# rootfs snapshot, written as uid 0, and mkosi 26 both REFUSES to reuse a cache
+# tree whose owner uid differs from its own (`have_cache`) and then DELETES it
+# (`run_clean` -> `remove_cache_entries` -> `mkosi.tree.rmtree`, whose `rm -rf`
+# runs with check=True, so a failed unlink fails the build).
+#
+# A Docker Desktop daemon breaks that in two ways, both observed on this repo's
+# own hardware-candidate build rather than reasoned about:
+#
+#   * its bind mount is a VM share whose host-side I/O runs as the DESKTOP USER,
+#     so even a `--privileged` root container cannot unlink a host-uid-0 file.
+#     The invalidation above then dies in a wall of `rm: cannot remove
+#     '/work/work/mkosi/cache/…/etc/ucf.conf': Permission denied`, naming a path
+#     no filesystem the operator can see contains — the leading /work is mkosi's
+#     own sandbox remapping (`mkosi.run.workdir`), the second our `-v :/work`.
+#   * that share has no POSIX ACL/xattr support, and mkosi extracts every
+#     subimage with `tar --acls --xattrs`, so the base layer dies with
+#     `acl_set_file_at: Operation not supported` before one package is installed.
+#
+# Chowning the cache to the invoking user is NOT the escape: mkosi's uid check
+# would then reject it on every later containerized run — a permanently cold
+# cache wearing the costume of a fix. The daemon is the defect, so it is refused.
+#
+# podman on Linux is not a VM share and reports a different `info` schema, so the
+# check is scoped to docker.
+# ---------------------------------------------------------------------------
+assert_container_daemon_supported() {
+  local runtime="${1:?assert_container_daemon_supported needs a runtime}" daemon_os
+  [[ "${runtime}" == "docker" ]] || return 0
+
+  daemon_os="$("${runtime}" info --format '{{.OperatingSystem}}')" \
+    || die "cannot query the ${runtime} daemon ('${runtime} info' failed). Start it, or point DOCKER_CONTEXT/DOCKER_HOST at a live Linux daemon."
+
+  if [[ "${daemon_os}" == *"Docker Desktop"* ]]; then
+    die "containerized build refuses the Docker Desktop daemon (OperatingSystem='${daemon_os}'). Its bind mount is a VM share: root in the container cannot unlink host-root-owned files (mkosi's cache invalidation dies in 'rm: cannot remove …: Permission denied'), and it supports no POSIX ACLs/xattrs (mkosi's 'tar --acls --xattrs' dies in 'acl_set_file_at: Operation not supported'). Select a native Linux daemon — e.g. DOCKER_CONTEXT=default with unix:///var/run/docker.sock — and re-run."
+  fi
+
+  log_info "container daemon: ${daemon_os} (native bind mounts — real uids, ACLs and xattrs)"
+  return 0
+}

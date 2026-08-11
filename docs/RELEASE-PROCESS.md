@@ -235,7 +235,14 @@ The same job restores and saves only the board-specific mkosi package cache at
 OS/architecture, board, mkosi pin, and build-source hash; its fallback prefix
 keeps those axes fixed. Before saving, the workflow enforces a 2 GiB ceiling,
 measures/prunes the tree as root inside the builder container, and normalizes
-ownership to the runner so mode-700 mkosi entries remain cacheable. Image outputs,
+ownership to the runner so mode-700 mkosi entries remain cacheable. That
+normalization is a **cache-transport** step, not a build step: it exists so
+`actions/cache/save` can read the tree, and it costs the next job a cold base
+layer because mkosi 26 refuses a cache whose owner uid is not its own. Never
+copy it into the local build path — `lib/stages/mkosi.sh` deliberately keeps the
+cache inside one privilege domain instead (see
+[`host-support.md`](host-support.md) "The mkosi cache lives in ONE privilege
+domain"). Image outputs,
 `.staging`, QEMU state, apt credentials, and release artifacts are not cache
 inputs. These steps are guarded to release pushes/tags, and the trust-input
 step remains after cache restore and builder preparation; the production build,
