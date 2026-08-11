@@ -231,6 +231,22 @@ variants:
       # rebuilt and re-tested on the Rock 5B+; that cold-boot control encode is
       # the next proof, not evidence we already have.
       #
+      # It now carries 0023, which is why the pin moved off 7d96290. While
+      # confirming defect B's 0021 fix was reachable for the first time on real
+      # Rock 5B+ hardware, KASAN found a use-after-free in
+      # rkvenc_task_worker_default(). This bug was pre-existing: 0021 only made
+      # the path reachable and survivable; it did not introduce the UAF, and
+      # 0021 was neither modified nor reverted. After rkvenc_task_finish()
+      # handed off the worker's reference, it could free the task, but the
+      # worker still touched that pointer in the IRQ arm's "process timed-out
+      # tasks" section and in the failure arm's redundant wake_up(). 0023
+      # nulls the pointer after the handoff in the IRQ arm and drops that
+      # redundant wake_up(), since rkvenc_task_finish() already wakes the
+      # waiter on every path.
+      # Hardware re-verification is PENDING again: this is the fourth time in
+      # this session a fix needs fresh hardware confirmation; the corrected pin
+      # has not yet been rebuilt and re-tested on the Rock 5B+.
+      #
       # The previous twenty-two-patch pin (ca98ea4b083e5e0ee48221de71f2e45c622bd5bc)
       # is what surfaced this 0022 regression, the twenty-patch pin before it is
       # what surfaced the 0021/0022 defects, and the nineteen-patch pin before
@@ -249,7 +265,7 @@ variants:
       # Verified reachable from a scratch clone with
       # `git fetch --depth 1 <patches_git_url> <patches_commit>`.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 7d962903f5b887e0ed203dea0736357ac58425f1
+      patches_commit: cabc6b5c90136cd16941383f5caa92ad6fa609d3
       patches_series: patches/series
 
       defconfig_base: defconfig
