@@ -13,6 +13,21 @@ trap 'rm -rf "${TMP}"' EXIT
 source "${AUTH}"
 # shellcheck source=../lib/fetch-debs.sh
 source "${FETCH}"
+# shellcheck source=../lib/stages/bsp-gate.sh
+source "${PIPELINE_DIR}/lib/stages/bsp-gate.sh"
+
+auto_marker_test_dir="${TMP}/auto-marker"
+mkdir -p "${auto_marker_test_dir}"
+(
+  DRY_RUN=""
+  unset APT_GPG_PUBLIC_B64
+  DEST="${auto_marker_test_dir}"
+  fetch_bsp() { :; }
+  fetch_rk3588_userspace() { :; }
+  fetch_first_party() { :; }
+  main --family fixture.yaml --dest "${auto_marker_test_dir}" >/dev/null 2>&1
+)
+[[ -f "${auto_marker_test_dir}/.fetch-auto-dry-run" ]]
 
 # Publishing must fail closed if archive readability cannot be normalized. Bash
 # suppresses errexit inside functions reached through `if !`, so this regression
@@ -398,3 +413,27 @@ if auth_verify_file "${TMP}/http-200-body" \
 fi
 
 printf 'BSP exact-version/suite/architecture/adversarial resolution contract: PASS\n'
+
+mkdir -p "${TMP}/gate-bsp" "${TMP}/gate-staging"
+gate_output=""
+if gate_output="$(
+  INSTALL_BOOT_BSP=1
+  KERNEL_PACKAGES='linux-image-vendor-rk35xx'
+  DTB_PACKAGES=''
+  UBOOT_PACKAGES=''
+  FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'
+  bsp_dir="${TMP}/gate-bsp"
+  staging="${TMP}/gate-staging"
+  ARMBIAN_APT_URL=https://apt.example.invalid
+  ARMBIAN_SUITE=bookworm
+  ARCH=arm64
+  DRY_RUN=1
+  unset RK3588_USERSPACE_DEB_VERSIONS_FILE
+  stage_bsp_gate 2>&1
+  )"; then
+  printf 'missing BSP package gate unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q "no .deb staged from https://apt.example.invalid (bookworm/arm64)" <<<"${gate_output}"
+grep -q 'no .deb staged from the pinned GitHub release manifest (manifests/rk3588-userspace-deb-versions.txt)' <<<"${gate_output}"
+grep -q 'verify APT_GPG_PUBLIC_B64 / APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64 / ARMBIAN_APT_KEYRING are set' <<<"${gate_output}"

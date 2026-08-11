@@ -204,7 +204,9 @@ main() {
 
   # Auto-enable dry-run offline: without the apt.ceralive.tv GPG keyring there is
   # no credential to do a GPG-verified first-party fetch, so plan only.
+  local auto_dry_run=""
   if [[ -z "${DRY_RUN}" && -z "${APT_GPG_PUBLIC_B64:-}" ]]; then
+    auto_dry_run=1
     DRY_RUN=1
     log_warn "no apt.ceralive.tv GPG key (APT_GPG_PUBLIC_B64) in env — auto dry-run (plan only, downloads nothing)"
   fi
@@ -216,6 +218,9 @@ main() {
 
   local debs="${DEST}/debs"
   run_or_plan mkdir -p "${debs}"
+  if [[ -n "${auto_dry_run}" && -d "${DEST}" ]]; then
+    : >"${DEST}/.fetch-auto-dry-run"
+  fi
 
   fetch_bsp "${family}" "${debs}"
   fetch_rk3588_userspace "${family}" "${debs}"

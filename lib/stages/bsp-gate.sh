@@ -8,6 +8,16 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2154
 
+bsp_package_source_hint() {
+  local name="$1"
+  local userspace_manifest="${RK3588_USERSPACE_DEB_VERSIONS_FILE:-${PIPELINE_DIR}/manifests/rk3588-userspace-deb-versions.txt}"
+  if [[ -f "${userspace_manifest}" ]] && awk -v package="${name}" '$1 == package { found=1 } END { exit !found }' "${userspace_manifest}"; then
+    printf 'no .deb staged from the pinned GitHub release manifest (%s) — check fetch_rk3588_userspace ran' "${userspace_manifest#"${PIPELINE_DIR}/"}"
+  else
+    printf 'no .deb staged from %s (%s/%s)' "${ARMBIAN_APT_URL}" "${ARMBIAN_SUITE}" "${ARCH}"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # stage_bsp_gate — [4/9]
 #
@@ -28,10 +38,14 @@ stage_bsp_gate() {
       fi
     done
     if (( ${#missing[@]} > 0 )); then
+      local dry_run_hint=""
+      if [[ -n "${DRY_RUN:-}" || -f "${staging}/.fetch-auto-dry-run" ]]; then
+        dry_run_hint=" hint: if this was expected to be a real fetch, verify APT_GPG_PUBLIC_B64 / APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64 / ARMBIAN_APT_KEYRING are set — a missing credential silently downgrades the fetch to a dry run instead of failing loudly at fetch time"
+      fi
       for name in "${missing[@]}"; do
-        log_error "cannot resolve package '${name}': no .deb staged from ${ARMBIAN_APT_URL} (${ARMBIAN_SUITE}/${ARCH})"
+        log_error "cannot resolve package '${name}': $(bsp_package_source_hint "${name}")"
       done
-      die "missing ${#missing[@]} required BSP package(s); aborting before mkosi — no half-image produced. (Set INSTALL_BOOT_BSP=0 for a config+package parity build, or provide R2/Armbian access.)"
+      die "missing ${#missing[@]} required BSP package(s); aborting before mkosi — no half-image produced. (Set INSTALL_BOOT_BSP=0 for a config+package parity build, or provide R2/Armbian access.)${dry_run_hint}"
     fi
     log_success "all ${#boot_bsp_names[@]} boot BSP package(s) staged"
   else
