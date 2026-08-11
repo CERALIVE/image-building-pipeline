@@ -10,7 +10,13 @@
 #
 # Usage:
 #   check-kernel-log.sh [--signatures <file>] <log> [<log> ...]
+#   check-kernel-log.sh [--signatures <file>] --input <log|->
+#   journalctl -k -b -o cat | check-kernel-log.sh --input - --signatures <file>
 #   check-kernel-log.sh --self-test [--signatures <file>]
+#
+# `--input -` reads the log from stdin. A journal is often only readable as root
+# and only as a stream, so requiring a file would mean a temporary file holding
+# kernel log content — this reads the pipe directly and reports it as `<stdin>`.
 #
 # Exit codes:
 #   0  every log clean
@@ -25,7 +31,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIGNATURES="${HERE}/kernel-log-reject.signatures"
 FIXTURES="${HERE}/fixtures/kernel-log"
 
-usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 ALLOW_IDS=() ALLOW_PATTERNS=() REJECT_IDS=() REJECT_PATTERNS=()
 SIGNATURE_SET_VERSION=""
@@ -69,9 +75,9 @@ line_is_allowed() {
   return 1
 }
 
-# screen_log <file> — print one `REJECT <id> <file>:<lineno> <line>` per hit.
+# screen_log <file> [label] — print one `REJECT <id> <label>:<lineno> <line>` per hit.
 screen_log() {
-  local file="$1" line lineno=0 index hits=0
+  local file="$1" label="${2:-$1}" line lineno=0 index hits=0
   [[ -r "${file}" ]] || { printf 'log not readable: %s\n' "${file}" >&2; return 2; }
   while IFS= read -r line || [[ -n "${line}" ]]; do
     lineno=$((lineno + 1))
@@ -79,17 +85,17 @@ screen_log() {
     line_is_allowed "${line}" && continue
     for index in "${!REJECT_PATTERNS[@]}"; do
       if grep -Eq -- "${REJECT_PATTERNS[$index]}" <<<"${line}"; then
-        printf 'REJECT %s %s:%s %s\n' "${REJECT_IDS[$index]}" "${file}" "${lineno}" "${line}"
+        printf 'REJECT %s %s:%s %s\n' "${REJECT_IDS[$index]}" "${label}" "${lineno}" "${line}"
         hits=$((hits + 1))
         break
       fi
     done
   done <"${file}"
   if (( hits == 0 )); then
-    printf 'CLEAN %s (signature-set v%s)\n' "${file}" "${SIGNATURE_SET_VERSION}"
+    printf 'CLEAN %s (signature-set v%s)\n' "${label}" "${SIGNATURE_SET_VERSION}"
     return 0
   fi
-  printf 'FAIL %s: %s reject signature hit(s)\n' "${file}" "${hits}" >&2
+  printf 'FAIL %s: %s reject signature hit(s)\n' "${label}" "${hits}" >&2
   return 1
 }
 
@@ -161,6 +167,33 @@ self_test() {
     printf '  FAIL allow rules did not exempt a debug banner (rc=%s)\n' "${rc}" >&2
     failures=$((failures + 1))
   fi
+  local self="${BASH_SOURCE[0]}"
+  out="$(bash "${self}" --signatures "${SIGNATURES}" --input - \
+          <"${FIXTURES}/accept-clean-production-boot.log" 2>&1)"; rc=$?
+  if (( rc == 0 )) && grep -q '^CLEAN <stdin> ' <<<"${out}"; then
+    printf '  ok   --input - screens a clean log from stdin and labels it <stdin>\n'
+  else
+    printf '  FAIL --input - on a clean log (rc=%s)\n%s\n' "${rc}" "${out}" >&2
+    failures=$((failures + 1))
+  fi
+
+  out="$(bash "${self}" --signatures "${SIGNATURES}" --input - \
+          <"${FIXTURES}/reject-kasan-report.log" 2>&1)"; rc=$?
+  if (( rc == 1 )) && grep -q '^REJECT kasan-report <stdin>:' <<<"${out}"; then
+    printf '  ok   --input - still rejects a report read from stdin\n'
+  else
+    printf '  FAIL --input - on a report log (rc=%s)\n%s\n' "${rc}" "${out}" >&2
+    failures=$((failures + 1))
+  fi
+
+  out="$(bash "${self}" --signatures "${SIGNATURES}" --input 2>&1)"; rc=$?
+  if (( rc == 2 )); then
+    printf '  ok   --input with no value is a usage error\n'
+  else
+    printf '  FAIL --input with no value (rc=%s)\n%s\n' "${rc}" "${out}" >&2
+    failures=$((failures + 1))
+  fi
+
   rm -rf "${scratch}"
 
   if (( failures == 0 )); then
@@ -173,10 +206,14 @@ self_test() {
 }
 
 main() {
-  local mode="screen" logs=()
+  local mode="screen" logs=() read_stdin=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --signatures) SIGNATURES="${2:-}"; shift 2 ;;
+      --input)
+        [[ -n "${2:-}" ]] || { printf -- '--input needs a log path or -\n' >&2; usage >&2; exit 2; }
+        if [[ "$2" == "-" ]]; then read_stdin=1; else logs+=("$2"); fi
+        shift 2 ;;
       --self-test)  mode="self-test"; shift ;;
       -h|--help)    usage; exit 0 ;;
       -*) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -189,9 +226,15 @@ main() {
     self_test
     exit $?
   fi
-  (( ${#logs[@]} > 0 )) || { printf 'at least one log file is required\n' >&2; usage >&2; exit 2; }
+  (( ${#logs[@]} > 0 || read_stdin == 1 )) || {
+    printf 'at least one log file is required\n' >&2; usage >&2; exit 2; }
 
   local status=0 log rc
+  if (( read_stdin )); then
+    screen_log /dev/stdin "<stdin>"; rc=$?
+    (( rc == 0 )) || status=1
+    (( rc != 2 )) || exit 2
+  fi
   for log in "${logs[@]}"; do
     screen_log "${log}"; rc=$?
     (( rc == 0 )) || status=1
