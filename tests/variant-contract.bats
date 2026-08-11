@@ -452,7 +452,7 @@ YAML
   # detach the hardware evidence from the series it claims to attest.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='6b0321714a2740d2fadcfe0131a7358b4644d0dd'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='5a272f46019ed6cc6bd67b16f556e2e8afa280fe'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
@@ -856,7 +856,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.7"* ]]
   [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-  [[ "$output" == *"6b0321714a2740d2fadcfe0131a7358b4644d0dd"* ]]
+  [[ "$output" == *"5a272f46019ed6cc6bd67b16f556e2e8afa280fe"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
