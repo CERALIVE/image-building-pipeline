@@ -444,15 +444,16 @@ YAML
   [[ "$line" != *"armbian-firmware"* ]]
 }
 
-@test "kernel_source: the pinned patches commit is the hardware-tested series tip" {
+@test "kernel_source: the pinned patches commit is the next hardware-candidate series tip" {
   # A regression pin on the actual value: the tip of
   # CERALIVE/rk3588-kernel-patches feat/backports-fixes-doctrim, which is the
-  # exact revision the Wave-8 hardware candidates were built from. A silent bump
-  # here would change what the kernel contains with no other signal, and would
-  # detach the hardware evidence from the series it claims to attest.
+  # exact revision the next Wave-8 hardware candidate will be built from. A
+  # silent bump here would change what the kernel contains with no other signal,
+  # and would detach the pending hardware evidence from the series it claims to
+  # attest.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='5a272f46019ed6cc6bd67b16f556e2e8afa280fe'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='ca98ea4b083e5e0ee48221de71f2e45c622bd5bc'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
@@ -856,7 +857,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.7"* ]]
   [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-  [[ "$output" == *"5a272f46019ed6cc6bd67b16f556e2e8afa280fe"* ]]
+  [[ "$output" == *"ca98ea4b083e5e0ee48221de71f2e45c622bd5bc"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]

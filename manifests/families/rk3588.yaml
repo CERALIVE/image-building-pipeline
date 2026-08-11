@@ -195,12 +195,28 @@ variants:
       # shutdown() still end DEAD, while a core's unwind returns a fully drained
       # service to LIVE. The refusal while the core is absent is unchanged; it is
       # carried by the sub_devices[] guard, which the next probe reverses.
-      # The runtime re-test on the debug slot is the confirming evidence and is
-      # still pending; this pin is what a fourth attempt must be built from.
       #
-      # The previous nineteen-patch pin (6b0321714a2740d2fadcfe0131a7358b4644d0dd)
-      # is what surfaced the 0020 defect, and the eighteen-patch pin before it is
-      # what surfaced 0019's. Predecessor before those:
+      # It now carries 0021 and 0022, which is why the pin moved off 5a272f4.
+      # Todo45's REAL Rock 5B+ hardware fault-injection run — not a synthetic
+      # fixture or unit-test result — found two more independent defects. First,
+      # fail-clock-enable exposed a real rwsem lock imbalance: rkvenc_hw_run()
+      # can leave before acquiring the hw-run lock, while rkvenc_task_finish()
+      # released it unconditionally, producing bad unlock balance, rwsem
+      # underflow, and a PM usage-count underflow. 0021 records whether the
+      # acquisition actually happened with TASK_STATE_HW_HELD and releases only
+      # when that bit is set. Second, the same real hardware run's malformed
+      # ioctl sweep failed four of eight expected cases because register
+      # requests were not fully covered by the class map and elements were not
+      # required to be whole and aligned; 0022 adds req_fully_covered(), whole-
+      # element bounds checks, and the copy_from_user() errno fix.
+      # Hardware re-verification is PENDING: a rebuild and re-test on the Rock
+      # 5B+ is the very next step, and has not been done yet; this pin is what
+      # that attempt must be built from.
+      #
+      # The previous twenty-patch pin (5a272f46019ed6cc6bd67b16f556e2e8afa280fe)
+      # is what surfaced the 0021/0022 defects, and the nineteen-patch pin before
+      # it is what surfaced 0020's. The eighteen-patch pin before those surfaced
+      # 0019's. Predecessor before those:
       # acb519c101fefa31f51300779f3a139bcabf6a1c (nine patches; 0008
       # rkvenc DMA max segment size + 0009 mainline `system-uncached` dma-heap,
       # the pair that made MPP hardware encode work on this track — board-confirmed
@@ -214,7 +230,7 @@ variants:
       # Verified reachable from a scratch clone with
       # `git fetch --depth 1 <patches_git_url> <patches_commit>`.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 5a272f46019ed6cc6bd67b16f556e2e8afa280fe
+      patches_commit: ca98ea4b083e5e0ee48221de71f2e45c622bd5bc
       patches_series: patches/series
 
       defconfig_base: defconfig
