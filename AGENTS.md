@@ -4305,14 +4305,44 @@ fails the build if a future `env_names` addition skips `PassEnvironment=`).
 a separate `-e`/`--environment` mechanism) are the two documented legitimate
 asymmetries.
 
-**OPi 5+ interface ID_PATHs are FIXME placeholders.** `manifests/boards/orange-pi-5-plus.yaml`
-ships the `interfaces:` block with `FIXME-…` values because the board is not in
-hand. The OPi 5+ has two onboard r8169 NICs on the same driver/bus, so a generic
-`Type=ether` match races. Before building an OPi 5+ image, read the real ID_PATHs
-on the device (`udevadm info /sys/class/net/<iface> | grep ID_PATH`) and replace
-each FIXME. Until then `install_interface_naming()` skips the FIXME values and
-emits only the generic `Type=wlan → wlan0` rule; the dual NICs stay
-non-deterministic.
+**OPi 5+ interface ID_PATHs — FIXED for both wired NICs, read off real hardware.**
+`manifests/boards/orange-pi-5-plus.yaml` used to ship the `interfaces:` block with
+`FIXME-…` values because the board was not in hand, so the two onboard r8169 NICs
+raced under a generic `Type=ether` match. A physical Orange Pi 5 Plus (DT model
+*Xunlong Orange Pi 5 Plus*, `7.1.5-ceralive-rk3588`) has now been read with
+`udevadm info /sys/class/net/<iface>`:
+
+```
+enP3p49s0  ID_PATH=platform-a40c00000.pcie-pci-0003:31:00.0  MAC …:8d:c6  -> eth0
+enP4p65s0  ID_PATH=platform-a41000000.pcie-pci-0004:41:00.0  MAC …:8d:c7  -> eth1
+```
+
+Both are RTL8125 (`0x10ec:0x8125`) on `r8169`, so nothing distinguishes them but
+topology: the role assignment follows the lower PCIe controller base address, and
+the vendor's sequential MAC assignment agrees. These are the MAINLINE/edge ECAM
+controller names — correct and deliberate, because `link_path_match()` also emits
+the controller-agnostic `platform-*.pcie-pci-<bdf>` glob that covers the vendor
+BSP's `fe170000`/`fe180000` spelling (see the `.link` `Path=` KEY FACT above).
+**Do NOT rewrite them to the vendor spelling to "fix" a future mismatch.**
+
+**`wlan0` is deliberately ABSENT from the map, and that is not a leftover
+placeholder.** The bench unit has no wireless netdev to read at all — no
+`/sys/class/ieee80211`, no wireless driver loaded, only an empty
+`rfkill-pcie-wlan` stub for an unpopulated M.2 slot — so there is no ID_PATH to
+capture and none may be invented. The schema makes `wlan0` optional exactly for
+this, and `install_interface_naming()` then emits its generic `Type=wlan → wlan0`
+rule, which is the right rule for a single adapter fitted later. Add the key only
+from a real reading on a board that has one; never copy the Rock 5B+'s value
+(entirely different PCIe topology).
+
+**This moved `tests/manifests/fixtures/vendor-baseline/orange-pi-5-plus.params`,
+and that is the ONE sanctioned reason to touch it.** The anti-pattern against
+regenerating those fixtures stands: a diff there means the production path moved.
+Here it moved deliberately and the diff is exactly three lines — the two filled
+`INTERFACES_ETH*` values plus the removed `INTERFACES_WLAN0` placeholder. The
+baseline was edited surgically on those keys, never re-captured wholesale, so the
+fixture still proves what it exists to prove (that declaring a family variant is
+inert on the vendor path). A diff of any other key is still a defect.
 
 **Modem source-routing under NM `dhcp=internal` — FIXED.** NetworkManager in
 Debian bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT

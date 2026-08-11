@@ -12,8 +12,6 @@
 # file exists AND the target line(s) still carry the keyword the entry claims.
 #
 # KEYWORD CLASSES (the marker an anchored line MUST contain), keyed by path:
-#   FIXME                 — board-manifest interface placeholders awaiting the # justified: keyword class name, not a deferred-work marker
-#                           real udevadm ID_PATH (orange-pi-5-plus.yaml)
 #   Pending hardware run  — DEVICE-BRINGUP.md hardware-evidence placeholders
 #   null                  — versions.yaml hardware-gated cog/wpewebkit pins
 #
@@ -52,7 +50,6 @@ is_cross_repo() {
 # slid past the end of its file or onto a blank line.
 keyword_for() {
   case "$1" in
-    *orange-pi-5-plus.yaml) printf 'FIXME' ;; # justified: emitting the keyword string to match, not a deferred-work marker
     */DEVICE-BRINGUP.md)    printf 'Pending hardware run' ;;
     versions.yaml)          printf 'null' ;;
     *)                      printf '' ;;

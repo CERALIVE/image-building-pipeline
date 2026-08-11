@@ -56,18 +56,39 @@ single_slot_fallback: false
 # Interface identity map — pins each role to its physical port via systemd .link
 # Path= matching (ID_PATH from `udevadm info /sys/class/net/<iface>`). The OPi 5+
 # has TWO onboard r8169 NICs on the SAME driver/PCI bus, so a generic Type=ether
-# match would race and assign eth0/eth1 non-deterministically across boots. The
-# Path= values below MUST be filled in from the PHYSICAL board before building an
-# OPi 5+ image: on the device run
-#   udevadm info /sys/class/net/<iface> | grep ID_PATH
-# for each onboard NIC + the wifi adapter, then replace each FIXME below with the
-# reported ID_PATH (e.g. platform-fdf80000.pcie-pci-0001:01:00.0). Until then the
-# build emits NO per-role Path= .link (FIXME values are skipped) and only the
-# generic Type=wlan → wlan0 rule applies; the dual NICs stay non-deterministic.
+# match would race and assign eth0/eth1 non-deterministically across boots.
+#
+# Both values below were READ OFF A PHYSICAL Orange Pi 5 Plus (DT model "Xunlong
+# Orange Pi 5 Plus") running 7.1.5-ceralive-rk3588 — the MAINLINE/edge spelling,
+# so the controller name is the ECAM window (a40c00000/a41000000), not the vendor
+# BSP's APB window (fe170000/fe180000). That is fine and deliberate: the runtime
+# `link_path_match()` emits the literal value AND a controller-agnostic
+# `platform-*.pcie-pci-<bdf>` glob, and the PCI domain:bus:device.function is the
+# half that is stable across both kernel trees. Do NOT "repair" a future vendor
+# mismatch by rewriting these to the fe1x0000 spelling — that just breaks the
+# edge path instead.
+#
+#   enP3p49s0  ID_PATH=platform-a40c00000.pcie-pci-0003:31:00.0  MAC …:8d:c6
+#   enP4p65s0  ID_PATH=platform-a41000000.pcie-pci-0004:41:00.0  MAC …:8d:c7
+#
+# eth0/eth1 follow the board's own deterministic hardware ordering: the lower
+# PCIe controller base address is eth0, and the vendor's sequential MAC
+# assignment agrees with it (…c6 before …c7). Both NICs are RTL8125
+# (0x10ec:0x8125) on r8169, so nothing else distinguishes them — the point of
+# this map is a STABLE assignment, not a claim about which RJ45 the silkscreen
+# calls "LAN1".
+#
+# wlan0 is deliberately ABSENT (the schema makes it optional). This unit has NO
+# wireless netdev to read an ID_PATH from: `/sys/class/ieee80211` does not exist,
+# no wireless driver is loaded, and the only trace of the M.2 wlan slot is an
+# empty `rfkill-pcie-wlan` stub. With no entry, `install_interface_naming()`
+# emits its generic `Type=wlan → wlan0` rule, which is the correct behaviour for
+# a board whose Wi-Fi module is absent or later populated. If a Wi-Fi adapter is
+# ever fitted, read its real ID_PATH the same way and add the key — do not invent
+# one from the Rock 5B+ (different PCIe topology entirely).
 interfaces:
-  eth0: FIXME-read-from-udevadm-info-on-opi5plus-primary-port
-  eth1: FIXME-read-from-udevadm-info-on-opi5plus-secondary-port
-  wlan0: FIXME-read-from-udevadm-info-on-opi5plus-wifi
+  eth0: platform-a40c00000.pcie-pci-0003:31:00.0
+  eth1: platform-a41000000.pcie-pci-0004:41:00.0
 
 # cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
 app_backend: sysext

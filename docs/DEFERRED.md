@@ -11,30 +11,43 @@ Items are documentation-only. None are resolved here.
 
 ---
 
-## 1. OPi 5+ Interface ID_PATH Placeholders
+## 1. OPi 5+ Interface ID_PATH Placeholders — RESOLVED (both wired NICs read off hardware)
 
-**Status:** Deferred (hardware-gated)
-**Location:** `manifests/boards/orange-pi-5-plus.yaml:68-70`
-**Also referenced:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs are FIXME placeholders"
+**Status:** RESOLVED for the dual-NIC race, which was the whole defect. No
+placeholder remains in the manifest.
+**Location:** `manifests/boards/orange-pi-5-plus.yaml` (`interfaces:` block)
+**Also referenced:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs"
 **Cross-repo:** tracked in the workspace-root `docs/DEFERRED-WORK.md` as item 3 (*Orange Pi 5+ interface ID_PATHs*); owned here.
 
-**What it is:** The `interfaces:` block in the Orange Pi 5+ board manifest
-carries `FIXME-…` placeholder values for all three network interfaces
-(`eth0`, `eth1`, `wlan0`). The OPi 5+ has two onboard r8169 NICs on the same
-driver and bus, so a generic `Type=ether` udev match races between them.
-Deterministic renaming requires the real `ID_PATH` values read from the
-physical board.
+**What it was:** The `interfaces:` block carried `FIXME-…` placeholders for
+`eth0`, `eth1` and `wlan0`. The OPi 5+ has two onboard r8169 NICs on the same
+driver and bus, so a generic `Type=ether` udev match races between them and the
+two wired roles were assigned non-deterministically across boots.
 
-**Why deferred:** The board is not in hand. `ID_PATH` values are
-hardware-specific and cannot be fabricated from specs or emulation. Until they
-are filled in, `install_interface_naming()` skips the FIXME entries and emits
-only the generic `Type=wlan → wlan0` rule; the dual NICs stay non-deterministic.
+**How it was resolved:** A physical Orange Pi 5 Plus (DT model *Xunlong Orange Pi
+5 Plus*, running `7.1.5-ceralive-rk3588`) was read over SSH with
+`udevadm info /sys/class/net/<iface>`:
 
-**Unblock condition:** Obtain a physical Orange Pi 5+. Run
-`udevadm info /sys/class/net/<iface> | grep ID_PATH` for each onboard NIC and
-the wifi adapter, then replace each FIXME in
-`manifests/boards/orange-pi-5-plus.yaml:68-70` with the real value.
-Re-run `run-tests` to confirm the manifest validates.
+| Kernel name | `ID_PATH` | MAC | Manifest role |
+|---|---|---|---|
+| `enP3p49s0` | `platform-a40c00000.pcie-pci-0003:31:00.0` | `…:8d:c6` | `eth0` |
+| `enP4p65s0` | `platform-a41000000.pcie-pci-0004:41:00.0` | `…:8d:c7` | `eth1` |
+
+Both are RTL8125 (`0x10ec:0x8125`) on `r8169`, so the role assignment follows the
+board's own deterministic hardware ordering — lower PCIe controller base address
+first, which the vendor's sequential MAC assignment agrees with. The values carry
+the MAINLINE/edge ECAM controller spelling; `link_path_match()` also emits the
+controller-agnostic `platform-*.pcie-pci-<bdf>` glob, so the vendor BSP's
+`fe170000`/`fe180000` spelling matches too.
+
+**Residual, and it is NOT the deferred defect:** `wlan0` is deliberately absent
+from the map rather than filled. That bench unit has no wireless netdev at all —
+no `/sys/class/ieee80211`, no wireless driver loaded, only an empty
+`rfkill-pcie-wlan` stub for an unpopulated M.2 slot — so there is no `ID_PATH` to
+read and none may be invented. The schema makes `wlan0` optional precisely for
+this case, and `install_interface_naming()` emits its generic `Type=wlan → wlan0`
+rule, which is the correct behaviour for a single wireless adapter fitted later.
+Add the key only from a real reading on a board that has one.
 
 ---
 
