@@ -270,6 +270,32 @@ variants:
       # the evidence above is module-swap spot-testing of 0024, not a complete
       # clean twelve-command QA run.
       #
+      # It now carries 0025 and 0026, which is why the pin moved off b4dd39a.
+      # This is the last real driver defect found in this session (defect D):
+      # service-node-only unbind lets the cores unbind first through automatic
+      # device-link removal, so rkvenc_service_quiesce() sees
+      # RKVENC_DRAIN_NOT_OWNER and skips the drain entirely; the discarded
+      # timeout result could then still let devres_release_all() free srv while
+      # an open /dev/mpp_service file descriptor remained able to dereference
+      # it. The same investigation found the third sub-defect: taking a mutex
+      # inside the rkvenc_service_sessions_gone() wait_event* condition can
+      # emit __might_sleep when a session remains open at the second check.
+      # 0025 makes srv reference-counted rather than devm-allocated, publishes
+      # an embedded struct device through cdev_device_add() so its kobject
+      # parenting covers __fput()'s later cdev_put() after ->release(), and
+      # makes remove() wait unbounded and interruptible for all open-file
+      # references. Unbounded is required because expiring a bounded wait
+      # would still free reachable state; interruptible avoids deadlocking the
+      # process tree that must close the descriptor. The wait condition is
+      # mutex-free. The orchestrator independently hardware-validated the fix
+      # across 35 adversarial module-swap rounds (deadlock hunt x5, jittered
+      # close/unbind race x20, sever path x10): zero sanitizer hits, with all
+      # four unbind states (idle, held-fd, inflight, timeout-negative) passing.
+      # Final Wave completion for todo45 now depends only on (a) one full clean
+      # hardware re-run of the complete twelve-command block at this revision,
+      # and (b) attaching a physical HDMI source for the separate audio-drill
+      # requirement (finding E).
+      #
       # The previous twenty-two-patch pin (ca98ea4b083e5e0ee48221de71f2e45c622bd5bc)
       # is what surfaced this 0022 regression, the twenty-patch pin before it is
       # what surfaced the 0021/0022 defects, and the nineteen-patch pin before
@@ -288,7 +314,7 @@ variants:
       # Verified reachable from a scratch clone with
       # `git fetch --depth 1 <patches_git_url> <patches_commit>`.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: b4dd39a5c0e64fb9b1605ac900578f3853aa3e16
+      patches_commit: e09490f49bb41764bfb5c2a4c8bc6ca20317684c
       patches_series: patches/series
 
       defconfig_base: defconfig
