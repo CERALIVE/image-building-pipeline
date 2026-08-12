@@ -1,0 +1,17 @@
+[INFO ] 12:33:34 selected board 'rock-5b-plus' -> manifests/boards/rock-5b-plus.yaml
+[INFO ] 12:33:34 === CeraLive build: board='rock-5b-plus' ===
+[INFO ] 12:33:35 [1/9] resolving manifest → build params
+[INFO ] 12:33:35 [2/9] fetching .debs (BSP from Armbian + first-party from apt.ceralive.tv)
+  CC      net/core/failover.o
+  CC      drivers/scsi/scsi_error.o
+  LD [M]  drivers/crypto/caam/error.ko
+  STRIP   debian/linux-image-7.1.7-ceralive-rk3588/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/crypto/caam/error.ko
+[INFO ] 12:40:25 [5/9] building image layers with mkosi (arm64) — base → platform → runtime → app
+‣ Building base image
+‣  Installing Debian
+Setting up libgpg-error0:arm64 (1.46-1) ...
+update-alternatives: using /usr/bin/mawk to provide /usr/bin/awk (awk) in auto mode
+‣  Running finalize script /work/mkosi/mkosi.images/base/mkosi.finalize…
+‣ Building app image
+[INFO ] 12:52:17 [6/9] emitting normalized artifact images/rock-5b-plus/20260809T174025Z.rootfs.tar
+[OK   ] 12:52:52 === build complete: board='rock-5b-plus' ===

@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+#
+# platform/mkosi.postinst — install the board BSP into the image.
+#
+# Runs in mkosi's package-manager-aware postinstall sandbox after the base
+# packages are present. Every package NAME comes from the environment (manifest-resolved by
+# lib/resolve.sh, forwarded by Environment= in mkosi.conf) — there is NO board
+# name, package name or device path hardcoded here.
+#
+# Two classes of BSP:
+#   * HW-accel GStreamer (always installed; part of the ceraui-base.conf parity
+#     set: gstreamer1.0-rockchip1, rockchip-multimedia-config).
+#   * Boot BSP (kernel / DTB / U-Boot / firmware) — installed only when
+#     INSTALL_BOOT_BSP=1. It is heavy (emulated) and only matters for a bootable
+#     device image, not for the ceraui-base.conf package-parity gate, so the
+#     orchestrator can scope it independently (INSTALL_BOOT_BSP is a build-scope
+#     flag, NOT error swallowing).
+#
+# BSP packages are installed from mkosi's local package directory after the host
+# fetch verified signed Armbian metadata and package hashes. No network Armbian
+# source is added inside the image.
+
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[platform] %s\n' "$*" >&2; }
+
+ARCH="${ARCH:-arm64}"
+
+# The Rockchip RK3588 BSP exists only for arm64. On an amd64 (x86) parity/dev
+# build the platform layer is a clean pass-through — nothing to add.
+if [[ "${ARCH}" != "arm64" ]]; then
+  log "ARCH=${ARCH} is not arm64 — no RK3588 BSP to install; platform layer is a pass-through."
+  exit 0
+fi
+
+INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
+
+# install_kernel_source_dtbs — the PLATFORM-LAYER INSTALL MAPPING for a kernel
+# built from source.
+#
+# An Armbian linux-dtb-* package lands the board DTBs exactly where the U-Boot
+# boot script looks them up (/boot/dtb/<vendor>/${fdtfile}). `make bindeb-pkg`
+# does not: it ships the in-tree DTBs inside the linux-image deb under
+# /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/. This copies source -> target so
+# a source-built kernel satisfies the SAME board dtb_name expectation, with no
+# change to the boot script, the board manifest, or the disk assembler.
+#
+# Both paths come from the manifest (kernel_source.dtb_deb_dir / dtb_boot_dir)
+# and are EMPTY on the production vendor path, so this is a strict no-op there.
+# It is fail-loud when enabled: a missing source dir or a missing board DTB means
+# the image would boot to a device-tree-less kernel, which is indistinguishable
+# from a dead board at the far end of a flash cycle.
+# prune_dtb_dir — reduce ONE installed device-tree directory to the resolved
+# board DTB plus the explicitly-named overlay files, and nothing else.
+#
+# The `edge` linux-image deb carries 228 `rockchip/*.dtb` files; a board boots
+# exactly one of them. The U-Boot selector loads `/boot/dtb/rockchip/${fdtfile}`
+# and NOTHING else — boot.scr.cmd and recovery.scr.cmd have no overlay load at
+# all — so every other blob is dead weight in the rootfs and, because the kernel
+# rides inside a RAUC slot, in both slots and in every bundle.
+#
+# THE KEEP SET IS AN ALLOWLIST, VERIFIED BEFORE ANYTHING IS DELETED. A prune that
+# removes first and discovers the board DTB was not there afterwards has already
+# produced an unbootable slot. `CERALIVE_DTB_KEEP_OVERLAYS` is a space-separated
+# list of paths RELATIVE to the directory being pruned (e.g.
+# `overlay/rk3588-something.dtbo`); it is EMPTY on both shipped boards because
+# nothing in the CeraLive boot path applies an overlay. `armbian_overlays` in the
+# board manifests is NOT that list — the schema documents it as inert, unconsumed
+# provenance metadata, and treating those names as required files would fail the
+# existence check for blobs that were never in any tree.
+#
+# This trims the INSTALLED ROOTFS ONLY. The source `.deb` in the staging pool is
+# untouched and stays full — nothing is repacked, and no claim is made anywhere
+# that the package itself became smaller.
+prune_dtb_dir() {
+  local dir="$1" label="$2" board_dtb="$3"
+  [[ -d "${dir}" ]] || { log "FATAL: cannot prune ${label}: ${dir} is not a directory"; exit 1; }
+  [[ -n "${board_dtb}" ]] || { log "FATAL: cannot prune ${label}: no board DTB name resolved"; exit 1; }
+
+  local -a keep=("${board_dtb}")
+  local -a overlays=()
+  read -r -a overlays <<<"${CERALIVE_DTB_KEEP_OVERLAYS:-}"
+  keep+=(${overlays[@]+"${overlays[@]}"})
+
+  local rel
+  for rel in "${keep[@]}"; do
+    [[ -f "${dir}/${rel}" ]] \
+      || { log "FATAL: ${label}: required device-tree file '${rel}' is absent from ${dir} — refusing to prune"; exit 1; }
+  done
+
+  local keep_list; keep_list="$(printf '%s\n' "${keep[@]}")"
+  local removed=0 path
+  while IFS= read -r -d '' path; do
+    rel="${path#"${dir}/"}"
+    grep -qxF -- "${rel}" <<<"${keep_list}" && continue
+    rm -f "${path}"
+    removed=$(( removed + 1 ))
+  done < <(find "${dir}" -type f -print0)
+
+  find "${dir}" -mindepth 1 -type d -empty -delete
+
+  for rel in "${keep[@]}"; do
+    [[ -f "${dir}/${rel}" ]] \
+      || { log "FATAL: ${label}: '${rel}' did not survive the prune of ${dir}"; exit 1; }
+  done
+  log "${label}: kept ${#keep[@]} device-tree file(s) in ${dir}, removed ${removed}"
+}
+
+install_kernel_source_dtbs() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local src="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
+  local dst="${KERNEL_SOURCE_DTB_BOOT_DIR:-}"
+
+  if [[ -z "${src}" && -z "${dst}" ]]; then
+    return 0
+  fi
+  if [[ -z "${src}" || -z "${dst}" ]]; then
+    log "FATAL: kernel_source DTB mapping is half-specified (deb_dir='${src}' boot_dir='${dst}')"
+    exit 1
+  fi
+
+  if [[ ! -d "${root}${src}" ]]; then
+    log "FATAL: kernel_source.dtb_deb_dir ${src} is absent from the installed kernel package"
+    exit 1
+  fi
+
+  log "installing source-built kernel DTBs: ${src} -> ${dst}"
+  install -d -m 0755 "${root}${dst}"
+  cp -a "${root}${src}/." "${root}${dst}/"
+
+  if [[ -n "${DTB_NAME:-}" && ! -e "${root}${dst}/${DTB_NAME}" ]]; then
+    log "FATAL: board DTB ${DTB_NAME} is not present at ${dst} after the copy"
+    exit 1
+  fi
+  log "board DTB present at ${dst}/${DTB_NAME:-<unset>}"
+
+  # BOTH installed locations, not just /boot: the package-payload directory stays
+  # in the rootfs after installation, so trimming only the boot copy would leave
+  # the full 228-blob set shipping inside every slot anyway.
+  prune_dtb_dir "${root}${src}" "kernel-package DTB payload" "${DTB_NAME:-}"
+  prune_dtb_dir "${root}${dst}" "/boot device trees" "${DTB_NAME:-}"
+}
+
+# install_kernel_source_boot_artifacts — the PLATFORM-LAYER BOOT-ARTIFACT MAPPING
+# for a kernel built from source. Runs AFTER the kernel package is installed.
+#
+# WHY THIS EXISTS (real defect, found on a Rock 5B+ over UART): the U-Boot selector
+# loads /boot/Image, but nothing on the source-built path ever creates it.
+#
+#   * Armbian's linux-image-vendor-rk35xx postinst does `ln -sfv vmlinuz-<REL>
+#     /boot/Image`, and the package Depends: on initramfs-tools, so its
+#     /etc/kernel/postinst.d/initramfs-tools hook also emits initrd.img-<REL>.
+#   * `make bindeb-pkg` generates a postinst that ONLY run-parts
+#     /etc/kernel/postinst.d — no Image symlink, and no dependency that would put
+#     an initramfs hook in that directory. With the vendor kernel package replaced
+#     by the built one, initramfs-tools is not in the closure at all, so the
+#     directory is empty and the run-parts is a no-op.
+#
+# The resulting /boot had vmlinuz-<REL> but no Image, so `ext4load … /boot/Image`
+# failed, booti jumped into unloaded DRAM and the board reset — forever.
+#
+# THEN THE SAME PATH FAILED AGAIN, on content rather than existence: the symlink
+# resolved and loaded, and booti still refused it, because bindeb-pkg ships
+# arm64's default KBUILD_IMAGE — arch/arm64/boot/Image.GZ. See the branch below.
+#
+# Gated on KERNEL_SOURCE_KERNEL_RELEASE, which the resolver emits ONLY under a
+# kernel_source variant, so this is a strict no-op on the production vendor path.
+install_kernel_source_boot_artifacts() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local release="${KERNEL_SOURCE_KERNEL_RELEASE:-}"
+
+  [[ -n "${release}" ]] || return 0
+
+  local vmlinuz="${root}/boot/vmlinuz-${release}"
+  if [[ ! -f "${vmlinuz}" ]]; then
+    log "FATAL: /boot/vmlinuz-${release} is absent after installing the source-built kernel"
+    exit 1
+  fi
+
+  # Existence was not enough either. arm64 defaults KBUILD_IMAGE to
+  # arch/arm64/boot/Image.gz, and bindeb-pkg ships exactly that as vmlinuz-<REL>,
+  # so the symlink pointed at GZIP. Armbian's own vendor package does not have the
+  # problem because its framework builds with KERNEL_IMAGE_TYPE=Image.
+  #
+  # Whether a gzip Image boots is then a per-board U-Boot fact, and the two shipped
+  # boards answer differently: rock-5b-plus ships U-Boot 2026.04 (CONFIG_GZIP=y,
+  # CONFIG_CMD_UNZIP=y) and booted it fine; orange-pi-5-plus ships the Rockchip
+  # 2017.09 fork, whose config has no CONFIG_GZIP symbol at all, and it answered
+  # `Bad Linux ARM64 Image magic!` and abandoned the slot. Inheriting a board
+  # capability is the same mistake the undefined `loadaddr` already cost a board,
+  # so the raw Image is produced HERE, once, for every board.
+  local head_hex
+  head_hex="$(od -An -tx1 -j0 -N6 -v "${vmlinuz}" | tr -d ' \n')"
+  local image="${root}/boot/Image"
+  rm -f "${image}"
+
+  case "${head_hex}" in
+    1f8b*)
+      log "vmlinuz-${release} is gzip (Image.gz) — decompressing into a real /boot/Image"
+      if ! gzip -dc "${vmlinuz}" >"${image}"; then
+        log "FATAL: could not decompress /boot/vmlinuz-${release} into /boot/Image"
+        exit 1
+      fi
+      chmod 0644 "${image}"
+      ;;
+    fd377a585a00*) log "FATAL: /boot/vmlinuz-${release} is xz-compressed"          ; exit 1 ;;
+    28b52ffd*)     log "FATAL: /boot/vmlinuz-${release} is zstd-compressed"        ; exit 1 ;;
+    425a68*)       log "FATAL: /boot/vmlinuz-${release} is bzip2-compressed"       ; exit 1 ;;
+    04224d18*|02214c18*) log "FATAL: /boot/vmlinuz-${release} is lz4-compressed"   ; exit 1 ;;
+    894c5a4f*)     log "FATAL: /boot/vmlinuz-${release} is lzop-compressed"        ; exit 1 ;;
+    5d0000*)       log "FATAL: /boot/vmlinuz-${release} is lzma-compressed"        ; exit 1 ;;
+    *)
+      log "linking /boot/Image -> vmlinuz-${release} (Armbian linux-image postinst parity)"
+      ln -sfn "vmlinuz-${release}" "${image}"
+      ;;
+  esac
+
+  # The one property booti actually reads: magic 0x644d5241 ("ARM\x64",
+  # little-endian) at offset 56 of the 64-byte header
+  # (Documentation/arm64/booting.rst §4). Asserted on whatever the branches above
+  # produced, because a decompression that SUCCEEDS on the wrong payload is still
+  # an unbootable slot.
+  if [[ "$(od -An -tx1 -j56 -N4 -v "${image}" | tr -d ' \n')" != "41524d64" ]]; then
+    log "FATAL: /boot/Image carries no raw ARM64 Image magic at offset 56"
+    log "       booti would answer 'Bad Linux ARM64 Image magic!' and abandon the slot."
+    exit 1
+  fi
+
+  # Armbian's postinst touches this; nand-sata-install and armbian-config both
+  # probe for it, so a source-built rootfs that omits it looks unmanaged.
+  : >"${root}/boot/.next"
+
+  local initrd="${root}/boot/initrd.img-${release}"
+  if [[ ! -f "${initrd}" ]]; then
+    log "FATAL: /boot/initrd.img-${release} was not generated"
+    log "       initramfs-tools must be installed BEFORE the kernel package so its"
+    log "       /etc/kernel/postinst.d hook exists when the kernel postinst run-parts."
+    exit 1
+  fi
+
+  log "boot artifacts complete: raw ARM64 /boot/Image, initrd.img-${release}"
+}
+
+# prune_vendor_dtbs — the same board-only trim for the PREBUILT vendor path.
+#
+# `linux-dtb-vendor-rk35xx` installs its whole RK35xx blob set under
+# /boot/dtb-<REL>/<vendor>/ (with /boot/dtb a symlink to it), which is the
+# production path the fleet actually runs — so the source-built trim above would
+# otherwise only ever reach the two opt-in variants.
+#
+# The directory is DISCOVERED by locating the board's own DTB rather than
+# composed from a release string: the versioned directory name comes from the
+# Armbian package, not from anything this repo resolves, and a hardcoded
+# /boot/dtb-<REL> would silently no-op the moment that package's version moved.
+# `find` does not descend the /boot/dtb symlink, so the real directory is pruned
+# exactly once and the symlink keeps resolving.
+#
+# PERSISTENCE IS THE EXISTING KERNEL FREEZE, NOT A NEW MECHANISM. The DTB package
+# is in DTB_PACKAGES, so postinst-lib.sh::freeze_boot_packages already `apt-mark
+# hold`s it and pins it by name+version; there is deliberately no second hold, no
+# dpkg path-exclude and no /etc/dpkg/dpkg.cfg.d drop-in here. See
+# tests/dtb-prune-contract.bats (tag: vendor) for the reinstall simulation that
+# decides whether that is sufficient.
+prune_vendor_dtbs() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local dtb="${DTB_NAME:-}"
+
+  [[ -n "${dtb}" && "${dtb}" != "none" ]] || return 0
+  # A source-built kernel carries its own DTBs and is trimmed by
+  # install_kernel_source_dtbs; this is the prebuilt-package path only.
+  [[ -z "${KERNEL_SOURCE_KERNEL_RELEASE:-}" ]] || return 0
+  [[ -d "${root}/boot" ]] || return 0
+
+  local -a dirs=()
+  mapfile -t dirs < <(find "${root}/boot" -mindepth 2 -type f -name "${dtb}" -printf '%h\n' | sort -u)
+
+  if (( ${#dirs[@]} == 0 )); then
+    log "FATAL: board DTB ${dtb} is not present anywhere under /boot after installing ${DTB_PACKAGES:-<no dtb packages>}"
+    exit 1
+  fi
+
+  local d
+  for d in "${dirs[@]}"; do
+    prune_dtb_dir "${d}" "vendor DTB payload" "${dtb}"
+  done
+}
+
+# installed_module_firmware_refs — the CONSUMER SET.
+#
+# Every firmware file any INSTALLED module can ask for, read out of the modules
+# themselves with `modinfo -F firmware` rather than guessed from a family name.
+# A driver that is built but never loaded still counts: the request happens at
+# probe time on the device, long after this build, and a board that plugs in one
+# extra peripheral is not a rebuild.
+#
+# Paths are emitted exactly as the module spells them — relative to the firmware
+# root, e.g. `rtw89/rtw8852b_fw.bin` — which is the form the kernel resolves.
+installed_module_firmware_refs() {
+  local root="$1"
+  # merged-usr makes /lib/modules a symlink, which `find` will not descend, so
+  # the real directory is tried first.
+  local moddir="${root}/usr/lib/modules"
+  [[ -d "${moddir}" ]] || moddir="${root}/lib/modules"
+  [[ -d "${moddir}" ]] || return 0
+
+  local -a mods=()
+  mapfile -d '' -t mods < <(find "${moddir}" -type f \
+    \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print0)
+  (( ${#mods[@]} > 0 )) || return 0
+
+  # One module at a time, tolerating an individual failure but NOT a total one.
+  # Batching through xargs made a single unparseable .ko abort the whole
+  # postinstall under `set -e`; swallowing every failure instead would be worse,
+  # because a modinfo that cannot read anything yields an EMPTY consumer set and
+  # would authorise deleting every candidate family. So a run in which no module
+  # parsed at all returns non-zero and the caller declines to prune.
+  local refs="" out ko
+  local -i parsed=0
+  for ko in "${mods[@]}"; do
+    if out="$(modinfo -F firmware "${ko}" 2>/dev/null)"; then
+      parsed+=1
+      refs+="${out}"$'\n'
+    fi
+  done
+  (( parsed > 0 )) || return 1
+
+  printf '%s' "${refs}" | sed 's#^/*##' | awk 'NF' | sort -u
+}
+
+# prune_irrelevant_rk3588_firmware — remove firmware families that NO installed
+# module can ask for, and refuse to remove anything that one can.
+#
+# THE SWEEP IS THE AUTHORISATION, not documentation of a decision already made.
+# Every candidate directory is checked against the real consumer set above and
+# is kept — loudly — if any installed module references a file inside it. That
+# is what makes adding a family to the candidate list safe: a wrong entry fails
+# the build instead of silently disabling a radio on a shipped device.
+#
+# PRESERVED FAMILIES ARE NEVER CANDIDATES. brcm/, rtl_bt/, rtw88/, rtw89/ and
+# rockchip/ carry the two shipped boards' own Wi-Fi, Bluetooth and SoC blobs.
+# mediatek/ and iwlwifi/ are preserved for a different reason: no dual-board
+# module/firmware inventory exists yet to judge them, and "probably unused" is
+# not the standard this function is held to.
+#
+# If `modinfo` is unavailable the prune does NOT fall back to deleting by name —
+# it declines entirely and says so. Removing firmware with no proof is exactly
+# the failure mode the sweep exists to prevent.
+prune_irrelevant_rk3588_firmware() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local fw="${root}/usr/lib/firmware"
+
+  [[ -d "${fw}" ]] || { log "no ${fw} — nothing to prune"; return 0; }
+
+  if ! command -v modinfo >/dev/null 2>&1; then
+    log "WARNING: modinfo is unavailable — cannot prove a firmware family has no consumer, so NOTHING is pruned"
+    return 0
+  fi
+
+  local -a candidates=(
+    qcom intel ath10k ath11k ath12k updates
+    microchip nvidia tegra renesas
+  )
+  # Single files rather than directories: the Renesas R-Car USB3 ROM images ship
+  # at the firmware root, so a directory-only candidate list would never see them.
+  local -a candidate_files=(
+    r8a779x_usb3_rom.mem
+  )
+
+  local refs
+  if ! refs="$(installed_module_firmware_refs "${root}")"; then
+    log "WARNING: no installed module could be read by modinfo — the consumer set is unprovable, so NOTHING is pruned"
+    return 0
+  fi
+
+  local -a pruned=() kept=()
+  local name ref blocked
+  for name in "${candidates[@]}"; do
+    [[ -e "${fw}/${name}" ]] || continue
+    blocked=""
+    while IFS= read -r ref; do
+      [[ -n "${ref}" ]] || continue
+      if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
+    done <<<"${refs}"
+    if [[ -n "${blocked}" ]]; then
+      kept+=("${name} (referenced by an installed module: ${blocked})")
+      continue
+    fi
+    rm -rf "${fw:?}/${name}"
+    pruned+=("${name}")
+  done
+
+  for name in "${candidate_files[@]}"; do
+    [[ -e "${fw}/${name}" ]] || continue
+    if grep -qxF -- "${name}" <<<"${refs}"; then
+      kept+=("${name} (referenced by an installed module)")
+      continue
+    fi
+    rm -f "${fw:?}/${name}"
+    pruned+=("${name}")
+  done
+
+  log "firmware prune: removed ${#pruned[@]} family/families with zero installed consumers${pruned[0]+: ${pruned[*]}}"
+  if (( ${#kept[@]} > 0 )); then
+    local k
+    for k in "${kept[@]}"; do
+      log "firmware prune: KEPT ${k}"
+    done
+  fi
+
+  local preserved
+  for preserved in brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi; do
+    if [[ " ${candidates[*]} " == *" ${preserved} "* ]]; then
+      log "FATAL: ${preserved} firmware is a preserved family and must never be a prune candidate"
+      exit 1
+    fi
+  done
+}
+
+# Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
+read -r -a hw_gst <<<"${HW_ACCEL_GSTREAMER_PLUGINS:-}"
+read -r -a gst_runtime <<<"${GSTREAMER_RUNTIME_PACKAGES:-}"
+
+# Boot BSP (kernel/DTB/U-Boot/firmware) — only when explicitly requested.
+boot_bsp=()
+if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+  read -r -a _k <<<"${KERNEL_PACKAGES:-}"
+  read -r -a _d <<<"${DTB_PACKAGES:-}"
+  read -r -a _u <<<"${UBOOT_PACKAGES:-}"
+  read -r -a _f <<<"${FIRMWARE_PACKAGES:-}"
+  boot_bsp+=("${_k[@]}" "${_d[@]}" "${_u[@]}" "${_f[@]}")
+fi
+
+bsp_pkgs=("${hw_gst[@]}" "${gst_runtime[@]}" "${boot_bsp[@]}")
+if [[ ${#bsp_pkgs[@]} -eq 0 ]]; then
+  log "no BSP packages resolved from manifest — nothing to install."
+  exit 0
+fi
+
+# Self-contained twin of customize/postinst.d/services.sh::install_chroot_service_policy,
+# writing into $BUILDROOT because this postinst runs on the HOST rather than in
+# the chroot. mkosi unlinks its own /usr/sbin/policy-rc.d when the base layer's
+# apt transaction ends, and `mkosi-install` is a thin `apt-get install` wrapper
+# that installs no helper of its own — so without this, every maintainer script
+# in this layer sees "No init system and policy-rc.d missing". Mode 0755 is the
+# load-bearing part: invoke-rc.d gates on `test -x` and reports a non-executable
+# helper as MISSING. Removed at the end of the layer chain by
+# app/mkosi.postinst.chroot::remove_chroot_service_policy.
+install_chroot_service_policy() {
+  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
+  local policy="${root}/usr/sbin/policy-rc.d"
+  install -d -m 0755 "$(dirname "${policy}")"
+  printf '#!/bin/sh\n# BUILD-TIME ONLY — deny every service start in the build chroot.\nexit 101\n' >"${policy}"
+  chmod 0755 "${policy}"
+  [[ -x "${policy}" ]] || { log "FATAL: could not install an EXECUTABLE ${policy}"; exit 1; }
+  log "build-time service-start policy installed at ${policy} (exit 101, mode 0755)"
+}
+install_chroot_service_policy
+
+log "installing authenticated staged HW-accel GStreamer BSP: ${hw_gst[*]} ${gst_runtime[*]}"
+if [[ ${#hw_gst[@]} -gt 0 || ${#gst_runtime[@]} -gt 0 ]]; then
+  mkosi-install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"
+fi
+
+if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
+  # Ordering is the whole point, so this is a SEPARATE transaction rather than one
+  # more name on the line below. A kernel .deb's postinst emits the initramfs by
+  # run-parts-ing /etc/kernel/postinst.d, so the hook has to be CONFIGURED before
+  # the kernel is unpacked. In one apt invocation that ordering is incidental; the
+  # vendor path only gets it for free because initramfs-tools is a hard dependency
+  # of its kernel package. The source-built package declares no such dependency.
+  # zstd is the COMPRESSOR, not just a nicety: bookworm's initramfs-tools defaults
+  # to COMPRESS=zstd and silently degrades to gzip when /usr/bin/zstd is absent
+  # ("W: No zstd in /usr/bin:/sbin:/bin, using gzip" — census row 12). The initrd
+  # is generated by the KERNEL package's postinst, so the binary has to be
+  # configured before that transaction, on BOTH kernel paths: the vendor package
+  # pulls initramfs-tools as a hard dependency but neither package depends on
+  # zstd. A gzip initrd is bigger and slower to unpack on every single boot.
+  log "installing zstd ahead of the kernel package (initramfs-tools COMPRESS=zstd)"
+  mkosi-install -y --no-install-recommends zstd
+
+  if [[ -n "${KERNEL_SOURCE_KERNEL_RELEASE:-}" ]]; then
+    log "installing initramfs-tools ahead of the source-built kernel (initrd hook)"
+    mkosi-install -y --no-install-recommends initramfs-tools
+  fi
+  log "installing authenticated staged boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
+  mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
+  install_kernel_source_dtbs
+  install_kernel_source_boot_artifacts
+  prune_vendor_dtbs
+  prune_irrelevant_rk3588_firmware
+else
+  log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
+fi
+
+log "authenticated staged BSP layer complete."

@@ -1,0 +1,73 @@
+# CeraLive Image Board Manifest — Radxa Rock 5B+ (RK3588)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch, branch, kernel/uboot/dtb/firmware packages, rauc adapter,
+# partition_template and serial_console from families/rk3588.yaml.
+#
+# Sources: configs/devices/rock5bplus.conf (DTB_FILE, DT_OVERLAYS,
+# HARDWARE_WORKAROUNDS, M2_MODEM_SIM_WORKAROUND, INSTALLATION_NOTES),
+# userpatches/config-rock5bplus.conf (BOARD=).
+
+family: rk3588
+
+# Armbian BOARD= from userpatches/config-rock5bplus.conf.
+board_id: rock-5b-plus
+
+# DTB_FILE from configs/devices/rock5bplus.conf.
+dtb_name: rk3588-rock-5b-plus.dtb
+
+# Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+uboot_packages:
+  - linux-u-boot-rock-5b-plus-vendor
+
+# INERT/UNCONSUMED legacy metadata carried from configs/devices/rock5bplus.conf:
+# no build script reads this field and no overlay-application step exists in the
+# boot path. Real behavior lives elsewhere: USB-C source role in
+# ceralive-typec-source.service; HDMI-RX in the base DTB + udev symlink; Wi-Fi in
+# the base DTB + rtw89 (todo 28 / PR #88); and M.2 modem support in ModemManager
+# plus the m2_modem_sim_workaround quirk. Do not treat these names as applied.
+armbian_overlays:
+  - rk3588-hdmi-input
+  - rk3588-wifi-rtl8852be
+  - rk3588-m2-modem-42mm
+  - rk3588-usb-power-delivery
+
+# HARDWARE_WORKAROUNDS / M2_MODEM_SIM_WORKAROUND from configs/devices/rock5bplus.conf.
+quirks:
+  m2_modem_sim_workaround: required   # sim_card_detection_fix — M.2 B-key SIM detection
+  hdmi_input_emi_shield: true         # best-in-class EMI resistance for HDMI capture
+  usb_power_optimization: true        # 5.45 A USB budget — power-hungry modems
+
+# Production images use the frozen symmetric A/B layout. The factory assembler
+# puts the same bootable baseline in both slots, so rollback is safe before the
+# first OTA as well as after it. Existing single-slot images require a full
+# reflash because their data partition occupies the future rootfs_b range.
+single_slot_fallback: false
+
+# Interface identity map — pins each role to its physical port via systemd .link
+# Path= matching (ID_PATH from `udevadm info /sys/class/net/<iface>`). Single
+# onboard 2.5G NIC (RTL8125B, r8169 driver, fe190000.pcie PCIe bus) → eth0.
+# WiFi (RTL8852BE, rtw89_8852be, fe170000.pcie) → wlan0 via generic Type=wlan
+# fallback (only one wifi adapter, no disambiguation needed; listed here for
+# documentation completeness).
+interfaces:
+  eth0: platform-fe190000.pcie-pci-0004:41:00.0
+  wlan0: platform-fe170000.pcie-pci-0002:21:00.0
+
+# Physical modem-slot identity for deterministic ModemManager slot-UID naming.
+# UNVERIFIED until a physical modem in the M.2 B-key slot is used to read the real
+# ID_PATH on this exact board model. While unverified the udev generator emits NO
+# 78-mm-ceralive-slot-uid.rules (fail-closed — the permanent generic modem rules
+# still apply). Flipping to `verified` + populating `slots` is a separate,
+# hardware-gated step (docs/modem-matrix.md §7).
+modem_ports:
+  status: unverified
+
+# cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
+app_backend: sysext
+
+description: >-
+  Radxa Rock 5B+ (RK3588). Best HDMI-input EMI resistance (BELABOX-recommended);
+  full-featured streaming appliance. M.2 B-key 42 mm slot for 4G/5G cellular
+  modems (no 52 mm support) with a required SIM-detection workaround. Onboard
+  RTL8852BE Wi-Fi, 5.45 A USB power budget. eMMC/NVMe/microSD targets (16 GB+).

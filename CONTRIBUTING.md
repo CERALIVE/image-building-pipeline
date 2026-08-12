@@ -18,7 +18,7 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 ## Getting Started
 
 1. Fork the repo and create a feature branch
-2. Build locally — see [`v2/docs/dev-loop.md`](v2/docs/dev-loop.md) for the current mkosi-based dev loop
+2. Build locally — see [`docs/dev-loop.md`](docs/dev-loop.md) for the current mkosi-based dev loop
 3. Test the image on hardware; collect build logs from the mkosi output directory
 4. Submit a PR with a clear description and a checklist of what you tested
 

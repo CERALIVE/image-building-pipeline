@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# run-tests — single CI entrypoint for the CeraLive v2 manifest unit suite.
+#
+# Runs the manifest/orchestrator units plus the hardware-free RK3588 disk contract
+# and signed x86 bundle contract. Exits with the bats status so CI can gate on it.
+#
+# Dependencies (test-time only; NOT shipped in the device image):
+#   * bats-core   https://github.com/bats-core/bats-core   (>= 1.5)
+#       install:  git clone --depth=1 https://github.com/bats-core/bats-core.git \
+#                   && sudo bats-core/install.sh /usr/local
+#   * python3 with PyYAML + python-jsonschema (same validator resolve.py uses)
+#   * sgdisk, systemd-repart, e2fsprogs, dosfstools, mtools, u-boot-tools
+#
+# Parallelism (opt-in, automatic):
+#   bats parallelizes test files with `-j N`, which needs GNU parallel (or
+#   shenwei356/rush) on PATH. This entrypoint enables `-j` automatically when
+#   BOTH a parallel backend AND flock are present, and falls back to the
+#   previous serial run otherwise — the suite stays green either way. Cases
+#   within each Bats file stay serial because they share repo-local fixtures;
+#   the suite files still run in parallel. The few shared fixtures that
+#   need finer locking serialize themselves with flock (see `serialize` in
+#   tests/manifest-helpers.bash).
+#   Override the worker count with BATS_JOBS (or PARALLEL_JOBS); unset/0
+#   auto-derives from nproc, capped at 8 (this unit suite is 187 short tests —
+#   beyond ~8 workers the parallel fan-out overhead outweighs the gain).
+#
+# Usage:  ./run-tests               (from the repo root) — auto-parallel
+#         BATS_JOBS=1 ./run-tests  (force serial)
+#         BATS_JOBS=8 ./run-tests  (force 8 workers)
+#         ./run-tests --list       (print the resolved default suite list, run nothing)
+#
+# The suite lists come from tests/registry.tsv — see the header of that file.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGISTRY="${HERE}/tests/registry.tsv"
+
+# args_has_flag — the shared entry-point argument plumbing (lib/shared/args-lib.sh).
+# run-tests has exactly one option and, unlike build/dev-push/dev-sync, has never
+# rejected an unrecognised argument; that is left alone here on purpose, because
+# tightening it would change how every existing caller behaves.
+# shellcheck source=lib/shared/args-lib.sh
+source "${HERE}/lib/shared/args-lib.sh"
+
+# The suite lists are READ from tests/registry.tsv rather than hardcoded here, so
+# there is exactly one place that answers "what does the default gate run" and a
+# new test file cannot be added without being classified. Registry row order IS
+# run order. tests/test-registry.test.sh enforces both directions of the mapping.
+registry_paths() { # <execution-value> -> repo-relative paths, in registry order
+  awk -F'\t' -v want="$1" '
+    /^[[:space:]]*(#|$)/ { next }
+    NF >= 4 && $4 == want { print $1 }
+  ' "${REGISTRY}"
+}
+
+[[ -f "${REGISTRY}" ]] || { echo "ERROR: test registry not found: ${REGISTRY}" >&2; exit 1; }
+
+mapfile -t BATS_RELPATHS  < <(registry_paths default-bats)
+mapfile -t SHELL_RELPATHS < <(registry_paths default-shell)
+[[ ${#BATS_RELPATHS[@]}  -gt 0 ]] || { echo "ERROR: registry declares no default-bats suites" >&2; exit 1; }
+[[ ${#SHELL_RELPATHS[@]} -gt 0 ]] || { echo "ERROR: registry declares no default-shell suites" >&2; exit 1; }
+
+# `--list` reports the RESOLVED default set and runs nothing. It is the machine
+# -readable answer to "did this change what runs by default", and is diffed
+# against a captured baseline whenever the test layout is restructured.
+if args_has_flag --list "$@"; then
+  printf 'bats\t%s\n'  "${BATS_RELPATHS[@]}"
+  printf 'shell\t%s\n' "${SHELL_RELPATHS[@]}"
+  exit 0
+fi
+
+SUITES=()
+for rel in "${BATS_RELPATHS[@]}"; do SUITES+=("${HERE}/${rel}"); done
+SHELL_SUITES=()
+for rel in "${SHELL_RELPATHS[@]}"; do SHELL_SUITES+=("${HERE}/${rel}"); done
+
+mapfile -t FIXTURE_RELPATHS < <(registry_paths default-fixture)
+[[ ${#FIXTURE_RELPATHS[@]} -eq 1 ]] \
+  || { echo "ERROR: registry must declare exactly one default-fixture row (got ${#FIXTURE_RELPATHS[@]})" >&2; exit 1; }
+DEV_PKI_GENERATOR="${HERE}/${FIXTURE_RELPATHS[0]}"
+REAL_AVAHI_CONTRACT="${HERE}/tests/real-avahi-hostname-contract.sh"
+
+if ! command -v bats >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+ERROR: bats-core not found on PATH (test-time dependency).
+Install it, then re-run:
+  git clone --depth=1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+  sudo /tmp/bats-core/install.sh /usr/local
+EOF
+  exit 127
+fi
+
+for suite in "${SUITES[@]}"; do
+  if [[ ! -f "${suite}" ]]; then
+    echo "ERROR: test suite not found: ${suite}" >&2
+    exit 1
+  fi
+done
+for suite in "${SHELL_SUITES[@]}"; do
+  if [[ ! -x "${suite}" ]]; then
+    echo "ERROR: shell test suite not found or not executable: ${suite}" >&2
+    exit 1
+  fi
+done
+if [[ ! -x "${DEV_PKI_GENERATOR}" ]]; then
+  echo "ERROR: dev RAUC PKI generator not found or not executable: ${DEV_PKI_GENERATOR}" >&2
+  exit 1
+fi
+if [[ ! -x "${REAL_AVAHI_CONTRACT}" ]]; then
+  echo "ERROR: real Avahi hostname contract not found or not executable: ${REAL_AVAHI_CONTRACT}" >&2
+  exit 1
+fi
+
+"${DEV_PKI_GENERATOR}"
+
+for suite in "${SHELL_SUITES[@]}"; do
+  "${suite}"
+done
+
+# --- Decide on parallelism -------------------------------------------------
+jobs="${BATS_JOBS:-${PARALLEL_JOBS:-0}}"
+[[ "$jobs" =~ ^[0-9]+$ ]] || jobs=0           # non-numeric override -> auto
+if [[ "$jobs" -eq 0 ]]; then
+  ncpu="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+  [[ "$ncpu" =~ ^[0-9]+$ && "$ncpu" -ge 1 ]] || ncpu=1
+  jobs=$(( ncpu < 8 ? ncpu : 8 ))
+fi
+
+parallel_backend=""
+if command -v parallel >/dev/null 2>&1; then
+  parallel_backend="GNU parallel"
+elif command -v rush >/dev/null 2>&1; then
+  parallel_backend="rush"
+fi
+
+bats_args=()
+if [[ "$jobs" -gt 1 && -n "$parallel_backend" ]] && command -v flock >/dev/null 2>&1; then
+  bats_args+=( --jobs "$jobs" --no-parallelize-within-files )
+  mode="parallel — ${jobs} jobs via ${parallel_backend} (file-serial)"
+else
+  mode="serial"
+  if [[ "$jobs" -gt 1 && -z "$parallel_backend" ]]; then
+    echo "note: GNU parallel (or rush) not on PATH; running serially." \
+         "Install GNU parallel to parallelize this suite (~2-3x faster on CI)." >&2
+  fi
+fi
+
+echo "== CeraLive v2 unit suites (bats $(bats --version | awk '{print $2}')) — ${mode} =="
+bats ${bats_args[@]+"${bats_args[@]}"} "${SUITES[@]}"
+
+case "${CERALIVE_RUN_REAL_AVAHI_CONTRACT:-skip}" in
+  required)
+    echo "== CeraLive v2 real Avahi hostname collision contract =="
+    bash "${REAL_AVAHI_CONTRACT}"
+    ;;
+  skip)
+    echo "== SKIP real Avahi contract (set CERALIVE_RUN_REAL_AVAHI_CONTRACT=required) =="
+    ;;
+  *)
+    echo "ERROR: CERALIVE_RUN_REAL_AVAHI_CONTRACT must be 'required' or 'skip'" >&2
+    exit 2
+    ;;
+esac
+
+echo "== CeraLive v2 mock RAUC rollback suite =="
+CERALIVE_ROLLBACK_MODE=mock bash "${HERE}/tests/rauc-rollback.sh"
+
+# The RK3588 Bats suite invokes preflash-verify.sh --self-test against its real
+# signed-bundle fixture. The privileged RAUC service harness is opt-in locally
+# and required by CI so a developer machine is never mounted on unexpectedly.
+case "${CERALIVE_RUN_REAL_RAUC_CONTRACT:-skip}" in
+  required)
+    echo "== CeraLive v2 real RAUC interruption/cleanup contract =="
+    bash "${HERE}/tests/real-rauc-contract.sh"
+    bash "${HERE}/tests/real-rauc-cleanup-contract.test.sh"
+    ;;
+  skip)
+    echo "== SKIP real RAUC contract (set CERALIVE_RUN_REAL_RAUC_CONTRACT=required) =="
+    ;;
+  *)
+    echo "ERROR: CERALIVE_RUN_REAL_RAUC_CONTRACT must be 'required' or 'skip'" >&2
+    exit 2
+    ;;
+esac

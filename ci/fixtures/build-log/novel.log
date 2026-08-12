@@ -1,0 +1,9 @@
+[INFO ] 12:33:34 === CeraLive build: board='rock-5b-plus' ===
+‣ Building base image
+Ign:1 file:/repository ./ InRelease
+dpkg: warning: package architecture (arm64) does not match system (amd64)
+‣ Building platform image
+W: Possible missing firmware /lib/firmware/nvidia/tegra124/xusb.bin for built-in driver xhci_tegra
+dpkg: warning: unable to delete old directory '/usr/lib/aarch64-linux-gnu/dri': Directory not empty
+‣ Building app image
+[OK   ] 12:52:52 === build complete: board='rock-5b-plus' ===

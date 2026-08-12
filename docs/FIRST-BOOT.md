@@ -1,7 +1,7 @@
 # CeraLive First-Boot Guide
 
 Getting from a freshly-flashed card to a live stream. Every step here is
-verifiable against the merged runtime scripts under `v2/mkosi/runtime/`.
+verifiable against the merged runtime scripts under `mkosi/runtime/`.
 
 ---
 
@@ -25,7 +25,7 @@ then write it to a microSD card or eMMC.
 **microSD (dd):**
 
 ```bash
-BOARD_DIR="v2/images/rock-5b-plus"
+BOARD_DIR="images/rock-5b-plus"
 IMAGE="${BOARD_DIR}/$(ls -t "${BOARD_DIR}"/*.raw | head -1 | xargs basename)"
 
 sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
@@ -51,12 +51,12 @@ is reachable:
 
 | Service | What it does | Source |
 |---------|-------------|--------|
-| `ceralive-hostname.service` | Establishes one exact Avahi-owned identity: `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, ... | `v2/mkosi/customize/postinst-lib.sh` |
-| `ceralive-ssh-firstboot.service` | Regenerates per-device SSH host keys, disables root password login, arms forced password change | `v2/mkosi/runtime/ceralive-ssh-firstboot.sh` |
-| `ceralive-tls-firstboot.service` | Keeps a per-device self-signed TLS cert aligned with the committed hostname | `v2/mkosi/runtime/ceralive-tls-firstboot.sh` |
-| `ceralive-provision.service` | Evaluates whether to start the WiFi provisioning portal | `v2/mkosi/runtime/ceralive-provision.sh` |
+| `ceralive-hostname.service` | Establishes one exact Avahi-owned identity: `ceralive.local`, then `ceralive2.local`, `ceralive3.local`, ... | `mkosi/customize/postinst-lib.sh` |
+| `ceralive-ssh-firstboot.service` | Regenerates per-device SSH host keys, disables root password login, arms forced password change | `mkosi/runtime/ceralive-ssh-firstboot.sh` |
+| `ceralive-tls-firstboot.service` | Keeps a per-device self-signed TLS cert aligned with the committed hostname | `mkosi/runtime/ceralive-tls-firstboot.sh` |
+| `ceralive-provision.service` | Evaluates whether to start the WiFi provisioning portal | `mkosi/runtime/ceralive-provision.sh` |
 | `ceralive.service` | Starts the CeraUI backend (binds port 80) | CeraUI `.deb` |
-| `nginx.service` | Starts the TLS front (binds port 443) | `v2/mkosi/runtime/ceralive-tls.nginx.conf` |
+| `nginx.service` | Starts the TLS front (binds port 443) | `mkosi/runtime/ceralive-tls.nginx.conf` |
 
 **Timing:** the provisioning service waits up to 75 seconds for any network
 connectivity before deciding whether to start the WiFi portal
@@ -212,7 +212,7 @@ hardware groups.
 **There is no default password.** The account ships password-locked (`passwd
 -l`). Root is also password-locked.
 
-Source: `v2/mkosi/customize/users.sh` (password-lock); `v2/docs/ssh-hardening.md`.
+Source: `mkosi/customize/users.sh` (password-lock); `docs/ssh-hardening.md`.
 
 ### 5.2 Connecting
 

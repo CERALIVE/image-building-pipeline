@@ -1,0 +1,667 @@
+# Hardware-Gated Completion Runbook
+
+**Status:** `[GREENFIELD]` — preparation only. No item below is executed or
+confirmed complete. This document is a fill-in-the-blank checklist for the person who
+has physical hardware in hand.
+
+**Scope:** image-building-pipeline (all items), with cross-links to
+`cerastream/docs/notes/hardware-validation.md` for encoder validation.
+
+**Source of truth for the deferred-item index:** `docs/DEFERRED.md`.
+This runbook is the execution companion — it adds exact commands, file:line
+targets, and acceptance criteria. It does not replace DEFERRED.md.
+
+**Honesty rule:** no item below is marked done, confirmed, or complete. Every
+checkbox is open. Do not check a box without running the step on real hardware
+and capturing evidence to `test-results/`.
+
+---
+
+## How to use this runbook
+
+1. Work through items in order (1 → 6). Items 1 and 2 share the same board
+   bring-up session; items 3 and 4 share the same RK3588 session.
+2. For each item: run the listed commands, capture output to the named
+   evidence file, fill in the placeholder values, then check the box.
+3. After all boxes in an item are checked, satisfy its **Acceptance** criteria
+   and its **Unblock condition** before moving on.
+4. Cross-link back to DEFERRED.md and update the status label there once an
+   item is fully cleared.
+
+---
+
+## Item 1 — OPi 5+ Interface ID_PATHs
+
+**DEFERRED.md ref:** §1  
+**File to edit:** `manifests/boards/orange-pi-5-plus.yaml:45-47`  
+**Blocked on:** physical Orange Pi 5+ board
+
+### Background
+
+The OPi 5+ has two onboard r8169 NICs on the same driver and bus. A generic
+`Type=ether` udev match races between them. The board manifest ships three
+`FIXME-…` placeholder values:
+
+```yaml
+# manifests/boards/orange-pi-5-plus.yaml:45-47
+interfaces:
+  eth0: FIXME-read-from-udevadm-info-on-opi5plus-primary-port
+  eth1: FIXME-read-from-udevadm-info-on-opi5plus-secondary-port
+  wlan0: FIXME-read-from-udevadm-info-on-opi5plus-wifi
+```
+
+Until these are filled, `install_interface_naming()` skips the FIXME entries
+and emits only the generic `Type=wlan → wlan0` rule. The dual NICs stay
+non-deterministic across reboots.
+
+### Commands (run on the booted OPi 5+)
+
+```bash
+# For each network interface, read its ID_PATH:
+udevadm info /sys/class/net/eth0  | grep ID_PATH
+udevadm info /sys/class/net/eth1  | grep ID_PATH
+udevadm info /sys/class/net/wlan0 | grep ID_PATH
+```
+
+Expected output shape (example — actual values are board-specific):
+
+```
+E: ID_PATH=platform-fdf80000.pcie-pci-0001:01:00.0
+E: ID_PATH=platform-fdf80000.pcie-pci-0002:01:00.0
+E: ID_PATH=platform-fe1c0000.mmc-mmc-0:0001:1
+```
+
+### Fill-in targets
+
+Replace each FIXME in `manifests/boards/orange-pi-5-plus.yaml:45-47` with
+the real value read above:
+
+```yaml
+interfaces:
+  eth0:  <paste ID_PATH value for primary NIC here>
+  eth1:  <paste ID_PATH value for secondary NIC here>
+  wlan0: <paste ID_PATH value for wifi adapter here>
+```
+
+### Checklist
+
+- [ ] Board booted and SSH accessible.
+- [ ] `udevadm info /sys/class/net/eth0  | grep ID_PATH` — value recorded.
+- [ ] `udevadm info /sys/class/net/eth1  | grep ID_PATH` — value recorded.
+- [ ] `udevadm info /sys/class/net/wlan0 | grep ID_PATH` — value recorded.
+- [ ] All three FIXME values replaced in `orange-pi-5-plus.yaml:45-47`.
+- [ ] `run-tests` passes (manifest validates with real ID_PATHs).
+- [ ] Evidence saved to `test-results/opi5plus-id-paths-<date>.txt`.
+
+### Acceptance
+
+`run-tests` exits 0 with no FIXME values remaining in
+`manifests/boards/orange-pi-5-plus.yaml`. The `install_interface_naming()`
+function emits three per-role `Path=` `.link` rules (not just the generic wlan
+rule) when the manifest is resolved for the OPi 5+ board.
+
+### Unblock condition
+
+Obtain a physical Orange Pi 5+. Run the three `udevadm info` commands above.
+Replace each FIXME in `manifests/boards/orange-pi-5-plus.yaml:45-47` with
+the real value. Re-run `run-tests` to confirm the manifest validates.
+
+---
+
+## Item 2 — Modem Interface Deterministic Naming (usb0..7)
+
+**DEFERRED.md ref:** §2  
+**File to edit:** `manifests/boards/<board>.yaml` (or a shared family manifest)  
+**Blocked on:** physical USB or M.2 modem attached to a running CeraLive device
+
+### Background
+
+Only `eth0`, `eth1`, and `wlan0` are pinned today. Modem interfaces (`usb0`..`usb7`
+and `enx*`) keep their kernel-assigned names, which can shift across reboots or
+when multiple modems are present.
+
+Note: modem **source-routing** under NM `dhcp=internal` is already FIXED in
+software (the NM dispatcher `90-srtla-wifi-routing` now matches `usb0..7` and
+`enx*0..7`). This item is about deterministic **rename rules** only, which require
+reading the real `ID_PATH` from a physical modem.
+
+Note: deterministic modem **slot-UID naming** is a distinct, also-hardware-gated
+mechanism now wired fail-closed via the board `modem_ports` block and the
+`mkosi/customize/udev.sh::generate_modem_slot_uid_rules` generator. While
+`modem_ports.status: unverified` (the shipped default) NO slot-uid rules are
+emitted; the discovery + flip-to-`verified` runbook is in
+[`docs/modem-matrix.md §7`](modem-matrix.md). The interface **rename** below
+and the slot-**UID** mechanism are independent — either can be verified without
+the other.
+
+### Commands (run on the device with modem attached)
+
+```bash
+# List modem interfaces (names may vary):
+ip link show | grep -E 'usb[0-9]|enx'
+
+# For each modem interface found, read its ID_PATH:
+udevadm info /sys/class/net/<modem-iface> | grep ID_PATH
+
+# Confirm source-routing is working (already fixed in software):
+journalctl -t srtla-routing --no-pager -n 50
+ip rule show
+```
+
+### .link rule template
+
+Once you have the real `ID_PATH`, add a deterministic rename rule to the board
+manifest's `interfaces:` block (or a shared family manifest if the modem is
+board-agnostic):
+
+```yaml
+# In manifests/boards/<board>.yaml (or shared family manifest):
+interfaces:
+  # ... existing eth0/eth1/wlan0 entries ...
+  usb0: <paste ID_PATH value for modem interface here>
+  # Add usb1..usb7 entries if multiple modems are supported.
+```
+
+The `install_interface_naming()` function will then emit a `Path=`-based `.link`
+rule for each modem interface, pinning it to a stable name.
+
+### Twin-update requirement
+
+Any change to the modem interface naming block **also touches** the drift-gated
+SRTLA payloads. After editing the manifest, you must twin-update both:
+
+1. `lib/networking-srtla.sh` — update the interface name references.
+2. The `§6` block in `mkosi/mkosi.postinst.chroot` — keep byte-parity.
+3. Run `ci/postinst-drift-check.sh CHECK 2` to confirm parity.
+
+### Checklist
+
+- [ ] Modem attached and recognized by ModemManager (`mmcli -L`).
+- [ ] Modem interface name(s) identified (`ip link show`).
+- [ ] `udevadm info /sys/class/net/<modem-iface> | grep ID_PATH` — value(s) recorded.
+- [ ] `.link` rule(s) added to the appropriate board or family manifest.
+- [ ] `networking-srtla.sh` twin-updated.
+- [ ] `mkosi.postinst.chroot §6` twin-updated.
+- [ ] `ci/postinst-drift-check.sh CHECK 2` passes (byte-parity confirmed).
+- [ ] `run-tests` passes.
+- [ ] Evidence saved to `test-results/modem-naming-<date>.txt`.
+- [ ] Verified on hardware: `journalctl -t srtla-routing` shows modem interface
+      in tables 100–107 after modem connects.
+
+### Acceptance
+
+After a reboot with two modems attached, each modem interface resolves to its
+pinned name (not a kernel-assigned `usb0`/`usb1` that could swap). `ip rule show`
+shows source-routing rules in tables 100–107 for each modem interface.
+`ci/postinst-drift-check.sh CHECK 2` exits 0.
+
+### Unblock condition
+
+Attach a supported USB or M.2 modem to a running CeraLive device. Read
+`udevadm info /sys/class/net/<iface> | grep ID_PATH` for each modem interface.
+Add deterministic `.link` rules to the board manifest using the real `ID_PATH`
+values. Twin-update `networking-srtla.sh` and the `§6` block in
+`mkosi.postinst.chroot`; confirm `postinst-drift-check.sh CHECK 2` passes.
+
+---
+
+## Item 3 — Cog + WPEWebKit Render QA
+
+**DEFERRED.md ref:** §4 (Cog render QA) and §5 (versions.yaml null pins)  
+**Files to edit after QA passes:**
+- `manifests/addons/cog-display.json` — fill `artifact.sha256`
+- `versions.yaml:163` (root repo) — set `pin: 0.16.1-1` (or trixie equivalent)
+- `versions.yaml:170` (root repo) — set `pin: 2.38.6-1` (or trixie equivalent)
+- `docs/cog-display-addon.md` — flip status from `[PARTIAL]` to `[EXISTS]`
+- `docs/kiosk-display.md` — flip Cog status  
+**Blocked on:** physical RK3588 board (Radxa Rock 5B+ or Orange Pi 5+) with display
+
+### Background
+
+The Cog + WPEWebKit display add-on packaging is fully proven in software
+(apt index, layer contract, build+sign pipeline, descriptor schema). The
+`cog.sysext.conf` descriptor and build wrapper exist as inert scaffolds. They
+are not wired into the build or CI `addon-publish` path until a physical RK3588
+board validates render.
+
+The full step-by-step checklist lives in `docs/cog-display-hw-checklist.md`.
+This item is a summary with the key file:line targets. Run the full checklist
+there; come back here to record the sign-off.
+
+### Key commands (abbreviated — see cog-display-hw-checklist.md for full detail)
+
+```bash
+# Pre-flight: confirm Mali-G610 wayland-gbm userspace is present
+ls -l /usr/lib/aarch64-linux-gnu/libmali*
+# -> should show libmali-valhall-g610-g24p0-wayland-gbm
+
+# Build the real Cog sysext (in an emulated-arm64 bookworm chroot):
+lib/build-feature-sysext.sh \
+  --feature cog-display --board rock-5b-plus --os-version 12 \
+  --deb-staging "$staging" --out dist/
+
+# Confirm exclusion contract (no libmali/libEGL/libgbm/rockchip inside the .raw):
+unsquashfs -l dist/cog-display-rock-5b-plus-12.raw \
+  | grep -Ei 'libmali|libEGL|libgbm|rockchip'
+# -> must be empty
+
+# Activate on the board:
+# (copy .raw + .sig to /data/extensions/cog-display.raw, then drive via CeraUI add-on manager)
+systemd-sysext status   # -> cog-display listed as merged
+command -v cog cage     # -> both resolve
+cog --version           # -> 0.16.x
+
+# Render test (choose platform per cog-display-addon.md §8):
+cog --platform=drm http://127.0.0.1/
+# OR: cage -- cog http://127.0.0.1/
+
+# Capture screenshots as render evidence:
+# -> save to test-results/cog-render-<date>-*.png
+```
+
+### versions.yaml pin procedure (root repo, after QA passes)
+
+```yaml
+# versions.yaml:159-164 — replace null with confirmed version:
+cog:
+  kind: debian-apt
+  source: bookworm/main
+  package: cog
+  pin: 0.16.1-1   # <-- fill after render QA; use trixie/backport version if 2.38.6 proved insufficient
+  channel: stable
+
+# versions.yaml:166-171 — replace null with confirmed version:
+wpewebkit:
+  kind: debian-apt
+  source: bookworm/main
+  package: libwpewebkit-1.1-0
+  pin: 2.38.6-1   # <-- fill after render QA; use trixie/backport version if 2.38.6 proved insufficient
+  channel: stable
+```
+
+After editing, run `python3 ci/validate-manifests.py` to confirm.
+
+### Checklist
+
+- [ ] Pre-flight complete (cog-display-hw-checklist.md §0).
+- [ ] Real Cog sysext built and signed for each board variant (§1).
+- [ ] Exclusion contract confirmed — no `libmali*`/`libEGL*`/`libgbm*`/`rockchip*`
+      inside the `.raw` (§1).
+- [ ] Measured `.raw` size recorded; `manifests/size-budget.json` updated if needed.
+- [ ] Real `artifact.sha256` filled in `cog-display.json` (§1).
+- [ ] Add-on activated on the board; `systemd-sysext status` shows merged (§2).
+- [ ] Cog renders via libmali EGL/GBM — NOT llvmpipe fallback (§3).
+- [ ] CeraUI loads end-to-end in Cog (§3).
+- [ ] OKLCH + Tailwind v4 CSS correctness on WebKit 2.38.6 confirmed (§3).
+- [ ] Screenshots captured to `test-results/` (§3).
+- [ ] Touch input confirmed if panel fitted (§4).
+- [ ] Disable + cleanup confirmed (§6).
+- [ ] `versions.yaml:163` set to confirmed `cog` pin (root repo).
+- [ ] `versions.yaml:170` set to confirmed `wpewebkit` pin (root repo).
+- [ ] `python3 ci/validate-manifests.py` passes.
+- [ ] `cog-display-addon.md` and `kiosk-display.md` status flipped to `[EXISTS]`.
+- [ ] TD-C1/TD-C3/TD-C4 resolved.
+- [ ] `cog-display.sysext.conf` wired into build and CI `addon-publish` path.
+- [ ] Evidence saved to `test-results/cog-render-<date>-*.{txt,png}`.
+
+### Acceptance
+
+Every REQUIRED item in `docs/cog-display-hw-checklist.md` §1 through §4 and §6
+is checked on a real RK3588 with evidence captured. `cog --version` prints `0.16.x`.
+The EGL init log confirms Mali GBM platform (not llvmpipe). Screenshots show correct
+OKLCH colors and Tailwind v4 layout. `python3 ci/validate-manifests.py` exits 0
+with real `artifact.sha256` and pinned versions.
+
+### Unblock condition
+
+Run the full checklist in `docs/cog-display-hw-checklist.md` on a physical
+Radxa Rock 5B+ or Orange Pi 5+ with a display attached. Every REQUIRED item in
+§1 through §4 and §6 must pass with evidence captured to `test-results/`. On
+sign-off: fill the real `artifact.sha256` in `cog-display.json`, set
+`pin: 0.16.1-1` and `pin: 2.38.6-1` (or trixie/backport equivalents if the
+bookworm versions proved insufficient) in `versions.yaml:163` and
+`versions.yaml:170`. Re-run `python3 ci/validate-manifests.py` to confirm.
+
+---
+
+## Item 4 — Rock 5B+ A/B Hardware Validation
+
+**DEFERRED.md ref:** not a separate DEFERRED.md item — this is a build-system
+gate tracked in `AGENTS.md` (KIOSK STACK / hardware-blocked) and in the OTA
+validation path.  
+**Software prerequisite:** `[EXISTS]` — the Rock manifest enables A/B, the factory
+image populates both slots, and the custom backend/bootcount contract is covered
+offline.
+**Physical proof:** required for every release candidate through the release-only,
+Maskrom-first workflow
+
+### Background
+
+The Rock 5B+ production image uses symmetric RAUC A/B slots. The manifest resolves
+`single_slot_fallback: false`; `assemble-disk.sh` populates A and B from the same
+factory tree; and kernel arguments carry `rauc.slot=A|B`. RK3588 uses RAUC
+`bootloader=custom` because the vendor U-Boot has no persistent environment. Its
+`boot.scr` selector and FAT-backed boot state implement the three-attempt rollback.
+The release workflow builds the candidate; an operator owns the remaining
+hand-test on real hardware: Maskrom flash and readback, UART-observed first boot,
+ephemeral SSH provisioning, and the real arm64 bundle switch/rollback cycle on
+silicon. There is no automated CI job that flashes or tests real hardware.
+
+> **SAFETY GATE — DO NOT CLAIM PRODUCTION HARDWARE VALIDATION YET.**
+>
+> A/B must be enabled and both slots populated to run this validation, but no
+> offline/mock result substitutes for the physical cycle. Do not ship the board
+> as hardware-validated until every acceptance item below passes.
+
+### Launch procedure
+
+```bash
+# 1. Put the approved Rock 5B+ fixture in Maskrom and verify exactly one device.
+rkdeveloptool ld
+
+# 2. Verify the dedicated runner's board variables and labels per runner-setup.md.
+# 3. Push a newly named release/** branch at the exact approved commit.
+#    Do not rerun an old workflow run or manually flash a retained artifact.
+```
+
+The workflow verifies fixture identity and runs the pinned loader under a pinned
+leader in an owned process group with a monotonic 15-second command budget and
+bounded one-second TERM→KILL cleanup. It then allows up to 10 seconds for exactly
+the same
+VID/PID/`LocationID` to appear in `Loader` mode before querying capacity. A
+command timeout, stale or missing transition, malformed or multiple listing,
+changed fixture, or wrong mode fails without retry and before every downstream
+capacity, identity, write, readback, or reset command. The two phases emit
+distinct timeout diagnostics. After Loader proof, the workflow checks target
+capacity, writes and reads back the freshly built immutable candidate, observes the
+signed UART bootstrap, provisions temporary SSH access, and runs
+`tests/realhw-suite.sh`. It removes the temporary key and records cleanup even
+when the gate fails.
+
+### Checklist
+
+- [ ] Approved fixture starts in Maskrom; exactly one matching USB device is present.
+- [ ] Required runner variables and dedicated board labels are verified.
+- [ ] Newly named `release/**` branch points at the exact approved commit.
+- [ ] Candidate build succeeds on its first attempt and remains immutable.
+- [ ] Loader `db` and same-fixture Loader re-enumeration complete inside their
+      separate budgets with no retry.
+- [ ] Workflow-owned capacity preflight, flash, and full readback pass.
+- [ ] Signed UART identity matches the candidate commit and approved SoC.
+- [ ] Ephemeral SSH access is provisioned and removed by the workflow.
+- [ ] `rauc status` shows both A and B slots.
+- [ ] `/boot` is the shared `PARTLABEL=boot` vfat mounted read-write.
+- [ ] Both slots contain the factory baseline before the first OTA.
+- [ ] RAUC bundle installed into inactive slot without error.
+- [ ] Board rebooted into the new slot (slot-switch confirmed).
+- [ ] Workflow-owned bootcount exhaustion leaves the unconfirmed slot and rolls
+      back to the previously confirmed slot without an attended state mutation.
+- [ ] `tests/realhw-suite.sh` reports exactly `4 PASS / 0 FAIL / 0 SKIP`.
+- [ ] Candidate, UART, readback, hardware-suite, and cleanup evidence is retained
+      as workflow artifacts.
+
+### Acceptance
+
+The first-attempt release workflow is green, `rauc status` proves a successful
+slot-switch and rollback on the physical board, and `tests/realhw-suite.sh`
+reports exactly `4 PASS / 0 FAIL / 0 SKIP`. No attended command or retained image
+may substitute for candidate-bound workflow evidence.
+
+### Unblock condition
+
+Complete the Maskrom-first release workflow on a Radxa Rock 5B+. Only its
+candidate-bound evidence can confirm A/B on this board for a release. Do not
+change the manifest back to single-slot; that would make the required test
+impossible and would not provide a migration path for existing disks.
+
+---
+
+## Item 5 — DEVICE-BRINGUP.md Evidence Placeholders
+
+**DEFERRED.md ref:** §6  
+**File to edit:** `docs/DEVICE-BRINGUP.md` (lines 296, 328, 413, 669)  
+**Blocked on:** physical RK3588 board completing a first bring-up run
+
+### Background
+
+Four "**Pending hardware run**" placeholders in the public device bring-up guide
+await evidence from a real board. Each placeholder names
+`test-results/boot-log-<date>.txt` as its evidence target.
+
+| Line | Placeholder topic |
+|------|-------------------|
+| 296 | Maskrom mode entry for Rock 5B+: button location + `rkdeveloptool ld` output |
+| 328 | First-boot sequence: U-Boot → kernel → health gate → CeraUI timestamps |
+| 413 | `dev-sync --frontend` invocation and timing |
+| 669 | First-boot network troubleshooting: board not appearing on network |
+
+### Commands (run during the first bring-up session)
+
+```bash
+# uart-provision-ssh.sh owns UART from U-Boot through signed bootstrap.
+# Do not start screen, minicom, or a second reader during the gate. Afterward,
+# promote the workflow-owned log into the bring-up evidence location:
+test -s artifacts/first-boot-uart.log
+cp -- artifacts/first-boot-uart.log test-results/boot-log-$(date +%Y%m%d).txt
+
+# Line 296 — maskrom mode:
+# 1. Power off the board.
+# 2. Hold the maskrom button (record exact button location from the board's hardware manual).
+# 3. Apply power while holding the button; release after 2-3 s.
+sudo rkdeveloptool ld
+# -> record the exact output (device ID, USB path)
+
+# Line 328 — first boot:
+# Flash the image, power on, and capture the serial log.
+# Record the timestamps for each first-boot service:
+#   ceralive-hostname.service
+#   ceralive-ssh-firstboot.service
+#   ceralive-tls-firstboot.service
+#   ceralive-provision.service (if no WiFi profile)
+#   ceralive.service (CeraUI)
+# Record the exact console output for each stage.
+
+# Line 413 — dev-sync --frontend:
+BOARD_IP=<ip> ./dev-sync --frontend
+# -> record the invocation, timing, and any output
+
+# Line 669 — network troubleshooting:
+# If the board does not appear on the network after first boot:
+# 1. Check HDMI output for U-Boot and kernel messages.
+# 2. Look for CeraLive-Setup-<short-id> hotspot (WiFi provisioning portal).
+# 3. Record the exact console output and timing.
+```
+
+### Fill-in targets
+
+After the bring-up session, replace each "**Pending hardware run**" note in
+`docs/DEVICE-BRINGUP.md` with the observed procedure and output:
+
+- **Line 296:** Replace with the exact maskrom button location, the
+  `rkdeveloptool ld` output, and any board-specific quirks observed.
+- **Line 328:** Replace with the actual boot-log timestamps and exact console
+  output for each first-boot service.
+- **Line 413:** Replace with the confirmed `dev-sync --frontend` invocation,
+  timing, and output.
+- **Line 669:** Replace with the observed network troubleshooting steps and
+  timing for the specific failure mode.
+
+### Checklist
+
+- [ ] Serial capture running before power-on; output saved to
+      `test-results/boot-log-<date>.txt`.
+- [ ] Maskrom mode entered; `rkdeveloptool ld` output recorded (line 296).
+- [ ] Image flashed successfully.
+- [ ] First-boot sequence observed; timestamps and console output recorded (line 328).
+- [ ] `dev-sync --frontend` invoked and timing confirmed (line 413).
+- [ ] Network troubleshooting scenario observed (or confirmed not triggered) (line 669).
+- [ ] All four "**Pending hardware run**" notes in `docs/DEVICE-BRINGUP.md`
+      replaced with real observed output.
+- [ ] Evidence saved to `test-results/boot-log-<date>.txt`.
+
+### Acceptance
+
+No "**Pending hardware run**" text remains in `docs/DEVICE-BRINGUP.md`. Each
+replaced section contains the actual observed procedure, timestamps, and console
+output from a real board run. The evidence file `test-results/boot-log-<date>.txt`
+exists and is referenced from the updated sections.
+
+### Unblock condition
+
+Complete a physical bring-up run on a Radxa Rock 5B+ or Orange Pi 5+. Capture
+boot logs to `test-results/boot-log-<date>.txt` (the reference each placeholder
+already names). Replace each "**Pending hardware run**" note with the observed
+procedure and output.
+
+---
+
+## Item 6 — RK3588 Bench Workstation for Manual Hand-Testing
+
+**DEFERRED.md ref:** not a separate DEFERRED.md item — this is the bench
+workstation an operator uses to hand-test a release candidate on real hardware.  
+**Tooling:** `ci/verify-and-flash-candidate.sh` + `tests/realhw-suite.sh`
+(there is no automated hardware-flashing workflow)  
+**Blocked on:** a Linux host with a physical RK3588 board attached (see
+[`ci/runner-setup.md`](../ci/runner-setup.md))
+
+### Background
+
+Images are hand-tested on real hardware before a manual release is cut — there is
+no automated CI job that flashes or tests real hardware. The release workflow
+builds and uploads the exact raw image, signed good and rollback probe bundles,
+keyring, and digests; an operator downloads that immutable candidate and flashes
+it with the bench flash-and-verify tool.
+
+The bench flash-and-verify tool takes these operator inputs:
+
+| Input | Purpose |
+|----------|---------|
+| board IP | IP address of the attached RK3588 board |
+| SSH port | SSH port (default: `22`) |
+| serial device | Stable `/dev/serial/by-id/...` path for the debug UART |
+| approved Maskrom USB id SHA-256 | Approved canonical Maskrom USB identity hash required before loader transfer |
+| UART signing key | Absolute mode-`0600` path to the host-local request-signing key |
+
+The board must already be in Maskrom before flashing. The loader is hash-pinned
+inside the candidate artifact. SSH is fixed to root; its access key is generated,
+UART-provisioned, and revoked per run. The long-lived host key is preflight-matched
+to the candidate's baked public verifier before USB access. The device contributes
+a fresh signed-request nonce and persists consumed nonces plus a non-decreasing
+epoch floor, so a captured envelope cannot restore expired SSH access. That
+long-lived key is only an envelope signer and cannot log in to the board.
+
+### Bench steps
+
+```bash
+# 1. Install required tools on the bench host:
+sudo apt-get install -y rkdeveloptool openssh-client rsync
+
+# 2. Attach the RK3588 board via USB-C, stable USB-UART, and network. Put it in
+#    Maskrom and require exactly one line ending in Maskrom from rkdeveloptool ld.
+
+# 3. Configure the bench inputs (see table above) for verify-and-flash-candidate.sh.
+
+# 4. Push a release branch or tag; the release.yml build produces the immutable
+#    candidate artifact.
+gh run list --workflow=release.yml --limit 5
+
+# 5. Download the candidate artifact, then hand-flash and verify it:
+#    ci/verify-and-flash-candidate.sh ... (see ci/runner-setup.md section 8)
+#    followed by the acceptance suite tests/realhw-suite.sh.
+```
+
+### Verifying the hand-test end-to-end
+
+The bench flash-and-verify tool runs these steps in order:
+
+1. **Candidate preflash** — verify the exact raw digest, A/B media, production
+   bundle/keyring contract, loader digest, and loader-mode destination capacity.
+2. **Required flash** — digest a private candidate snapshot, use that same file
+   for preflight and the maskrom write, then read and SHA-256 the exact candidate
+   sector range before reset. The tool requires one Maskrom Rockchip target,
+   bounds the initial `db` command to 15 seconds in an owned process group, and
+   requires the same VID/PID/`LocationID` in `Loader` mode within a separate
+   10-second phase before `rfi`. Timeout cleanup is whole-group TERM then KILL
+   and reap; malformed, multiple, stale, changed, or wrong-mode transitions fail
+   without retry or downstream operations. The tool then applies a volatile
+   one-boot, data-only UART bootstrap and provisions a restricted,
+   expiring run-local root public key without modifying the artifact. The
+   bootstrap verifies an authenticated, one-hour-bounded envelope containing the
+   baked candidate commit and a fresh challenge, and `/` must resolve to the
+   flashed eMMC parent. The bootstrap has a
+   180-second timeout, no shell, and no restart. Its run-local SSH
+   host-key record is rotated only after the immutable
+   readback succeeds. Later `rkdeveloptool` operations retain their existing
+   cancellable-child cleanup so an interruption cannot leave a flash/readback
+   child or scratch candidate behind. Post-boot mutable bytes are not compared
+   to the factory raw, and identity
+   artifact filenames are validated before entering the line-oriented record.
+3. **realhw-suite.sh** — the consolidated acceptance suite: boot+service smoke,
+   encode-path init, required candidate-bound dev-loop sanity, RAUC A/B rollback.
+   Acceptance requires `RESULT: 4 PASS / 0 FAIL / 0 SKIP`.
+4. **Revoke and clean up** — removes and proves absence of the exact temporary key
+   and marker, deletes the local private key, and records identity, UART, cleanup,
+   and suite evidence.
+
+### Checklist
+
+- [ ] Bench host provisioned (Linux, `rkdeveloptool` + `openssh-client` installed).
+- [ ] RK3588 board attached (USB-C Maskrom, stable USB-UART, network) and left in Maskrom.
+- [ ] Bench inputs configured for `verify-and-flash-candidate.sh` (see table above).
+- [ ] A release branch or tag produced the immutable candidate artifact.
+- [ ] Operator flashed the candidate with `verify-and-flash-candidate.sh` (exit 0).
+- [ ] `realhw-suite.sh` exits 0 on the flashed board.
+- [ ] Evidence saved to `test-results/ceralive-rk3588-runner-<date>.txt`.
+
+### Acceptance
+
+`gh run list --workflow=release.yml` shows at least one successful candidate build
+(conclusion: `success`). The operator's hand-test records a passing
+`realhw-suite.sh` run against the exact candidate, named by its raw SHA-256.
+
+### Unblock condition
+
+Provision a Linux host with a physical RK3588 board attached (see
+[`ci/runner-setup.md`](../ci/runner-setup.md)). Build a release candidate,
+download the immutable artifact, hand-flash it with
+`ci/verify-and-flash-candidate.sh`, and confirm `tests/realhw-suite.sh`
+passes end-to-end on the flashed board.
+
+---
+
+## Cross-links
+
+| Document | Scope |
+|----------|-------|
+| `docs/DEFERRED.md` | Authoritative deferred-item index with file:line anchors |
+| `docs/cog-display-hw-checklist.md` | Full step-by-step Cog render QA runbook (Item 3) |
+| `docs/cog-display-addon.md` | Cog packaging recipe, libmali strategy, §7 hardware caveats |
+| `docs/DEVICE-BRINGUP.md` | Public bring-up guide with hardware-evidence placeholders (Item 5) |
+| `manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (Item 1) |
+| `ci/verify-and-flash-candidate.sh` | Bench flash-and-verify tool (Item 6) |
+| `tests/realhw-suite.sh` | Consolidated real-HW acceptance suite |
+| `cerastream/docs/notes/hardware-validation.md` | cerastream per-platform encoder validation matrix |
+
+The cerastream hardware-gated encoder validation (RK3588 now; x86/N100 when in hand;
+Jetson DEFERRED — not currently planned) is tracked separately in
+`cerastream/docs/notes/hardware-validation.md`. That runbook is the authoritative
+checklist for encoder validation; this document does not duplicate it. The RK3588
+bench workstation (Item 6) is the shared hardware that supports both the
+image-pipeline manual hand-test and the cerastream encoder validation on the same
+physical board.
+
+---
+
+## Evidence capture summary
+
+| Item | Evidence file |
+|------|--------------|
+| 1 — OPi 5+ ID_PATHs | `test-results/opi5plus-id-paths-<date>.txt` |
+| 2 — Modem naming | `test-results/modem-naming-<date>.txt` |
+| 3 — Cog render QA | `test-results/cog-render-<date>-*.{txt,png}` |
+| 4 — Rock 5B+ A/B | `test-results/rock5b-ab-rollback-<date>.txt` + `test-results/task-38-smoke/` |
+| 5 — DEVICE-BRINGUP | `test-results/boot-log-<date>.txt` |
+| 6 — Runner provisioning | `test-results/ceralive-rk3588-runner-<date>.txt` |
+
+All evidence files go to `test-results/` inside the `image-building-pipeline`
+repo (Rule D — never a `../`-escaping path, never a root-repo path).

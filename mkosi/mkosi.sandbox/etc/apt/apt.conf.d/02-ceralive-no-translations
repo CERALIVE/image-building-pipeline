@@ -1,0 +1,13 @@
+// Stop apt probing every configured source for translated package descriptions.
+//
+// mkosi's local package directory is a flat, unsigned file:/repository, so each
+// apt transaction asked it for Translation-en and logged the miss — 24 `Err:`
+// plus 4 `Ign:` lines in a single real build. The appliance is single-locale
+// C.UTF-8 and every gettext catalogue is stripped from the image anyway (see
+// base/mkosi.conf RemoveFiles=), so a translated description could never be
+// shown; fetching one is pure build-log noise and pure network round trips.
+//
+// This is BUILD-SANDBOX ONLY. The device's own apt configuration is written
+// separately by mkosi.images/runtime/mkosi.postinst.chroot::configure_minimal_apt
+// and is untouched by this file (E4 guardrail).
+Acquire::Languages "none";

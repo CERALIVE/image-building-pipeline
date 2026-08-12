@@ -1,0 +1,67 @@
+# CeraLive RK3588 `edge-test` kernel — DEBUG/TEST Kconfig fragment
+#
+# Merged ON TOP of rk3588-edge.fragment (which is itself merged on top of the
+# in-tree arm64 `defconfig`), in that order, by lib/build-kernel.sh. Referenced by
+# manifests/families/rk3588.yaml -> variants.edge-test.kernel_source.defconfig_fragments,
+# where it is the SECOND entry — production first, test second, so every symbol
+# here deliberately wins over the production fragment.
+#
+# THIS FRAGMENT NEVER SHIPS. It belongs to the opt-in `edge-test` variant, which
+# builds linux-image-7.1.7-ceralive-rk3588-test — a deliberately different package
+# name from production's linux-image-7.1.7-ceralive-rk3588, so the two can never be
+# resolved for one another. Every symbol below is also on
+# manifests/kernel/forbidden-symbols.list, which the PRODUCTION `edge` config is
+# gated against, so a leak into a shipped artifact fails that build rather than
+# reaching a board.
+#
+# WHAT IT IS FOR: running the Wave-6 negative-path QA on a Rock 5B+ — deterministic
+# rkvenc/HDMI-RX fault injection under a sanitizer and a lock validator, plus the
+# built-in dma-heap KUnit case. Without KASAN and lockdep the fault harnesses would
+# prove only that an error code came back, not that the teardown they force is
+# memory- and lock-correct, which is the entire point of forcing it.
+
+# --- Sanitizer: use-after-free / out-of-bounds on the rkvenc teardown paths ---
+# The session/task lifetime work (patch 0014) is precisely a use-after-free class
+# of fix, so the harness has to run under an allocator that can SEE one. Inline
+# instrumentation is the arm64 default and is what KASAN needs to report a stack.
+CONFIG_KASAN=y
+CONFIG_KASAN_GENERIC=y
+CONFIG_KASAN_INLINE=y
+CONFIG_STACKTRACE=y
+
+# --- Lock validator: the HDMI-RX audio cancel/lock-order fix (patch 0017) -----
+# PROVE_LOCKING is the symbol that actually turns lockdep on; DEBUG_LOCK_ALLOC and
+# LOCK_STAT are its companions. A cancel_delayed_work_sync() moved out from under a
+# lock the worker itself can take is only PROVEN correct by a run that would have
+# splatted before, which requires this on.
+CONFIG_DEBUG_KERNEL=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_LOCK_ALLOC=y
+CONFIG_LOCK_STAT=y
+CONFIG_DEBUG_SPINLOCK=y
+CONFIG_DEBUG_MUTEXES=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+
+# --- debugfs: the transport for every fault control --------------------------
+# All eight rkvenc/hdmirx knobs live under /sys/kernel/debug/{rkvenc,hdmirx-audio}-test.
+# The three CeraLive test symbols below `depend on DEBUG_FS`, so without this they
+# would silently resolve OFF and the harnesses would find no interface at all.
+CONFIG_DEBUG_FS=y
+
+# --- KUnit: the dma-heap partial-registration test (patch 0018) --------------
+# Built IN, not modular: ceralive_system_heap_test lives beside system_heap.c, which
+# is itself built-in (DMABUF_HEAPS_SYSTEM is bool). KUNIT_ALL_TESTS stays OFF — this
+# variant runs the one CeraLive case, not every KUnit suite in the tree.
+CONFIG_KUNIT=y
+CONFIG_KUNIT_DEBUGFS=y
+# CONFIG_KUNIT_ALL_TESTS is not set
+
+# --- The three CeraLive test symbols (rk3588-kernel-patches patch 0013) ------
+# Each compiles to NOTHING when off: the rkvenc and hdmirx controls are whole
+# translation units selected by their symbol in the driver Makefile plus inline
+# no-op stubs in the headers, and the heap seam is a KUnit suite behind an
+# IS_ENABLED() guard. Production `edge` resolves all three off and
+# lib/verify-kernel-config.sh --forbidden proves it.
+CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST=y
+CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST=y
+CONFIG_DMABUF_HEAPS_CERALIVE_TEST=y

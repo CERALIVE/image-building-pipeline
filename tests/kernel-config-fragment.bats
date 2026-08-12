@@ -1,0 +1,575 @@
+#!/usr/bin/env bats
+#
+# Kconfig-fragment survival — the contract that says what `rk3588-edge.fragment`
+# ASKS FOR is what the built kernel actually CARRIES.
+#
+# WHY THIS FILE EXISTS. A real Rock 5B+ running the `edge` 7.1.5 kernel had its
+# RTL8852BE WiFi enumerate at PCI level (vendor 0x10ec, device 0xb852, class
+# 0x028000) with NO driver bound, no `wl*` interface, and `rtw89*` absent from
+# `lsmod` — while `/lib/firmware/rtw89/rtw8852b_fw.bin` was present and
+# `cfg80211` was loaded. `/proc/config.gz` on that board read
+# `# CONFIG_RTW89 is not set`.
+#
+# The fragment DID name the adapter (`CONFIG_RTW89_8852BE=m`). It sits inside
+# `if RTW89` under a `menuconfig RTW89` that is tristate and defaults off, so
+# `make olddefconfig` discarded the leaf. Nothing warned:
+# `scripts/kconfig/merge_config.sh -m` merges text and reports only REDEFINED
+# values — its own post-merge validation pass is exactly what `-m` skips — so
+# the build log, the four-axis .deb validation, the boot, and the image all
+# stayed green with the driver simply absent.
+#
+# The same sweep caught a second, quieter instance: `CONFIG_TYPEC_FUSB302=y`
+# resolved to `=m`, because FUSB302 carries `depends on DRM || DRM=n` and arm64
+# defconfig builds DRM as a module.
+#
+# A later board run found the same class again, this time as a SECURITY gap:
+# `CONFIG_NF_TABLES` was never named either, so the edge kernel had no nftables
+# at all and `ceralive-ingest-firewall.service` failed every boot with
+# `Unable to initialize Netlink socket: Protocol not supported` — leaving the
+# WAN-side drop of the unauthenticated RTMP/SRT ingest ports silently unapplied.
+#
+# Hardware-free and root-free: the verifier is pure text over two files.
+
+# `run !` (a self-asserting negated run) needs bats >= 1.5.0; without this line
+# every such call emits a BW02 warning.
+bats_require_minimum_version 1.5.0
+
+setup() {
+  TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
+  PIPELINE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+  VERIFY="$PIPELINE_DIR/lib/verify-kernel-config.sh"
+  FRAGMENT="$PIPELINE_DIR/manifests/kernel/rk3588-edge.fragment"
+  WORK="$(mktemp -d)"
+}
+
+teardown() {
+  rm -rf "$WORK"
+}
+
+# --- the verifier itself ----------------------------------------------------
+
+@test "verify-kernel-config: a fragment fully honoured by the resolved config passes" {
+  cat >"$WORK/frag" <<'EOF'
+# a comment
+CONFIG_A=y
+CONFIG_B=m
+CONFIG_C="a string"
+CONFIG_D=n
+# CONFIG_E is not set
+EOF
+  cat >"$WORK/resolved" <<'EOF'
+CONFIG_A=y
+CONFIG_B=m
+CONFIG_C="a string"
+# CONFIG_D is not set
+# CONFIG_E is not set
+EOF
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 0 ]
+  # All 5 declared symbols survived, and with no allow-absent list none of them
+  # was waved through — the count of exceptions must be zero, not just absent
+  # from the message.
+  [[ "$output" == *"5 of 5 declared symbol(s) survived"* ]]
+  [[ "$output" == *"(0 reviewed exception(s))"* ]]
+}
+
+@test "verify-kernel-config: a symbol dropped entirely fails and names it" {
+  printf 'CONFIG_KEPT=y\nCONFIG_GONE=m\n' >"$WORK/frag"
+  printf 'CONFIG_KEPT=y\n' >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_GONE: DROPPED"* ]]
+  [[ "$output" == *"does not carry the symbol at all"* ]]
+  [[ "$output" != *"CONFIG_KEPT"* ]]
+}
+
+@test "verify-kernel-config: a symbol turned off by olddefconfig fails" {
+  printf 'CONFIG_WANTED=m\n' >"$WORK/frag"
+  printf '# CONFIG_WANTED is not set\n' >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_WANTED: DROPPED"* ]]
+  [[ "$output" == *"is not set"* ]]
+}
+
+@test "verify-kernel-config: a =y downgraded to =m fails (built-in vs module is a real difference)" {
+  printf 'CONFIG_THING=y\n' >"$WORK/frag"
+  printf 'CONFIG_THING=m\n' >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fragment asks for CONFIG_THING=y, resolved config has CONFIG_THING=m"* ]]
+}
+
+@test "verify-kernel-config: an OFF request is satisfied by absence as well as by an explicit not-set" {
+  printf 'CONFIG_OFF_A=n\n# CONFIG_OFF_B is not set\n' >"$WORK/frag"
+  : >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 0 ]
+}
+
+@test "verify-kernel-config: an OFF request that came back ON fails" {
+  printf 'CONFIG_OFF=n\n' >"$WORK/frag"
+  printf 'CONFIG_OFF=y\n' >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fragment asks for OFF, resolved config has CONFIG_OFF=y"* ]]
+}
+
+@test "verify-kernel-config: the failure names the parent-menuconfig cause" {
+  printf 'CONFIG_LEAF=m\n' >"$WORK/frag"
+  : >"$WORK/resolved"
+  run "$VERIFY" "$WORK/frag" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"menuconfig"* ]]
+  [[ "$output" == *"depends on"* ]]
+}
+
+@test "verify-kernel-config: an unreadable input fails loudly rather than passing vacuously" {
+  printf 'CONFIG_A=y\n' >"$WORK/resolved"
+  run "$VERIFY" "$WORK/absent-fragment" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"fragment not readable"* ]]
+
+  run "$VERIFY" "$WORK/resolved" "$WORK/absent-resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"resolved config not readable"* ]]
+}
+
+# --- the real fragment, against the real defect ------------------------------
+
+@test "rk3588-edge.fragment: RTW89 declares the parent menuconfig, not just the 8852BE leaf" {
+  grep -qx 'CONFIG_RTW89=m' "$FRAGMENT"
+  grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"
+  # The parent must come first so a reader meets the gate before the leaf.
+  local parent leaf
+  parent="$(grep -n '^CONFIG_RTW89=m$' "$FRAGMENT" | cut -d: -f1)"
+  leaf="$(grep -n '^CONFIG_RTW89_8852BE=m$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$parent" -lt "$leaf" ]
+}
+
+@test "rk3588-edge.fragment: TYPEC_FUSB302 declares the value kconfig can actually give it" {
+  grep -qx 'CONFIG_TYPEC_FUSB302=m' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_TYPEC_FUSB302=y' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: NF_TABLES declares the parent the whole nftables family sits inside" {
+  grep -qx 'CONFIG_NF_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_NF_TABLES_INET=y' "$FRAGMENT"
+  # NF_TABLES_INET lives inside `if NF_TABLES`, so — as with RTW89 — a reader must
+  # meet the gate before the thing it gates.
+  local parent inet
+  parent="$(grep -n '^CONFIG_NF_TABLES=y$' "$FRAGMENT" | cut -d: -f1)"
+  inet="$(grep -n '^CONFIG_NF_TABLES_INET=y$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$parent" -lt "$inet" ]
+  # =m is NOT equivalent here: ceralive-ingest-firewall.service is a
+  # DefaultDependencies=no oneshot that runs `nft -f` before the ingest gateway
+  # opens its listeners, so the family must be built in.
+  run ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the system-uncached dma-heap declares its own symbol under its parent" {
+  # Patch 0009's heap is what makes MPP hardware encode work on this track:
+  # librockchip_mpp hard-codes the heap NAME `system-uncached` and does not fall
+  # back to `system`. Riding on the parent would leave the gate asserting only
+  # DMABUF_HEAPS_SYSTEM=y — still true with the heap switched off — so the
+  # fragment declares the leaf and the gate proves it reached the kernel.
+  grep -qx 'CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y' "$FRAGMENT"
+  # Declare-the-parent, same rule as RTW89 and NF_TABLES: DMABUF_HEAPS_SYSTEM is
+  # this leaf's `depends on`, and DMABUF_HEAPS gates that in turn.
+  local heaps parent leaf
+  heaps="$(grep -n '^CONFIG_DMABUF_HEAPS=y$' "$FRAGMENT" | cut -d: -f1)"
+  parent="$(grep -n '^CONFIG_DMABUF_HEAPS_SYSTEM=y$' "$FRAGMENT" | cut -d: -f1)"
+  leaf="$(grep -n '^CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$heaps" -lt "$parent" ]
+  [ "$parent" -lt "$leaf" ]
+  # =m is not an option: the symbol is a bool, and a heap that registered late
+  # would be missing exactly when MPP probes for it.
+  run ! grep -qx 'CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS a config that dropped the uncached heap" {
+  # The silent no-op this declaration exists to catch: 0009's code compiles
+  # either way and dma_heap_add() for `system-uncached` simply never runs, so
+  # nothing anywhere reports an error — the board just has no such heap.
+  cat >"$WORK/no-uncached" <<'EOF'
+CONFIG_DMABUF_HEAPS=y
+CONFIG_DMABUF_HEAPS_SYSTEM=y
+CONFIG_DMABUF_HEAPS_CMA=y
+EOF
+  run "$VERIFY" "$FRAGMENT" "$WORK/no-uncached"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED: DROPPED"* ]]
+  # The heaps that DID survive must not be reported.
+  [[ "$output" != *"CONFIG_DMABUF_HEAPS_CMA"* ]]
+}
+
+@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.7 has no such symbol" {
+  # The ruleset's `counter` statement is real, but net/netfilter/Makefile compiles
+  # nft_counter.o unconditionally into nf_tables-objs. Declaring CONFIG_NFT_COUNTER
+  # would resolve to nothing and the gate would fail the build over a symbol the
+  # kernel does not have.
+  run ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS the resolved .config the broken 7.1.5 build produced" {
+  # A synthetic reproduction of the shipped build's answer for the symbols this
+  # defect turned on: the rtw89 family off, the nftables family off, FUSB302
+  # downgraded. The NETFILTER/IPV6 lines are the board's real answer too — they
+  # are what proves NF_TABLES was dropped for its own missing declaration and not
+  # for an unmet dependency.
+  cat >"$WORK/broken" <<'EOF'
+CONFIG_WLAN=y
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_WLAN_VENDOR_REALTEK=y
+# CONFIG_RTW88 is not set
+# CONFIG_RTW89 is not set
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_IPV6=y
+# CONFIG_NF_TABLES is not set
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TCPM=y
+CONFIG_TYPEC_FUSB302=m
+EOF
+  run "$VERIFY" "$FRAGMENT" "$WORK/broken"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_RTW89: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_RTW89_8852BE: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_NF_TABLES: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_NF_TABLES_INET: DROPPED"* ]]
+  # FUSB302 is now declared =m, so the same broken config must NOT flag it.
+  [[ "$output" != *"CONFIG_TYPEC_FUSB302"* ]]
+}
+
+@test "rk3588-edge.fragment: the gate ACCEPTS a resolved .config that honours every symbol" {
+  # Derive the expected resolved config from the fragment itself: every declared
+  # symbol echoed back verbatim. This is the green half of the red/green pair —
+  # it proves the gate is satisfiable, not merely loud.
+  : >"$WORK/honoured"
+  while IFS= read -r line; do
+    case "$line" in
+      '# CONFIG_'*' is not set') printf '%s\n' "$line" >>"$WORK/honoured" ;;
+      '#'*|'') continue ;;
+      CONFIG_*=n) printf '# %s is not set\n' "${line%%=*}" >>"$WORK/honoured" ;;
+      CONFIG_*=*) printf '%s\n' "$line" >>"$WORK/honoured" ;;
+    esac
+  done <"$FRAGMENT"
+
+  run "$VERIFY" "$FRAGMENT" "$WORK/honoured"
+  [ "$status" -eq 0 ]
+}
+
+# --- wiring ------------------------------------------------------------------
+
+@test "build-kernel.sh runs the gate after olddefconfig and before bindeb-pkg" {
+  local src="$PIPELINE_DIR/lib/build-kernel.sh"
+  grep -q ':/in/verify-kernel-config.sh:ro' "$src"
+  # The invocation is mode-agnostic: `declared_config` is /in/fragment.config in
+  # defconfig mode and the fetched full .config in config-file mode. Asserting a
+  # literal /in/fragment.config here would forbid the config-file mode entirely.
+  grep -q 'bash /in/verify-kernel-config.sh "${declared_config}" .config' "$src"
+  grep -q 'declared_config=/in/fragment.config' "$src"
+
+  local sync verify pkg
+  sync="$(grep -n 'make syncconfig' "$src" | tail -1 | cut -d: -f1)"
+  verify="$(grep -n 'bash /in/verify-kernel-config.sh' "$src" | cut -d: -f1)"
+  pkg="$(grep -n 'bindeb-pkg$' "$src" | tail -1 | cut -d: -f1)"
+  [ "$sync" -lt "$verify" ]
+  [ "$verify" -lt "$pkg" ]
+}
+
+@test "build-kernel.sh gates BOTH config modes — there is exactly one verify call" {
+  # The two modes differ only in how the starting .config is obtained. A second
+  # verify invocation would mean one mode grew its own (and could lose it).
+  local src="$PIPELINE_DIR/lib/build-kernel.sh"
+  [ "$(grep -c 'bash /in/verify-kernel-config.sh' "$src")" -eq 1 ]
+  grep -q 'declared_config=/src/declared.config' "$src"
+}
+
+# --- allow-absent exceptions (config-file mode) ------------------------------
+
+@test "verify-kernel-config: an allow-absent symbol may be missing without failing" {
+  printf 'CONFIG_A=y\nCONFIG_OUT_OF_TREE=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf '# reviewed\nCONFIG_OUT_OF_TREE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 reviewed exception"* ]]
+}
+
+@test "verify-kernel-config: an allow-absent symbol that DID survive is a STALE exception and fails" {
+  # Non-vacuity: without this the list could silently become a blanket opt-out.
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_A\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"STALE EXCEPTION"* ]]
+  [[ "$output" == *"CONFIG_A"* ]]
+}
+
+@test "verify-kernel-config: the allowlist does NOT weaken the gate for unlisted symbols" {
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_SOMETHING_ELSE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CONFIG_B: DROPPED"* ]]
+}
+
+@test "verify-kernel-config: a bare (non-CONFIG_) allow-absent entry is refused" {
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf '\n' >"$WORK/res"
+  printf 'A\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"full CONFIG_ symbol name"* ]]
+}
+
+@test "verify-kernel-config: an unreadable allow-absent list fails loudly, never silently empty" {
+  printf 'CONFIG_A=y\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/does-not-exist"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"allow-absent list not readable"* ]]
+}
+
+@test "rk3588-vendor-patched.absent: every entry is a CONFIG_ symbol and the list is deduped" {
+  local list="$PIPELINE_DIR/manifests/kernel/rk3588-vendor-patched.absent"
+  [ -f "$list" ]
+  local syms
+  syms="$(sed -e 's/#.*//' "$list" | awk 'NF{print $1}')"
+  [ -n "$syms" ]
+  while IFS= read -r s; do
+    [[ "$s" == CONFIG_* ]] || { echo "not a CONFIG_ symbol: $s"; false; }
+  done <<<"$syms"
+  [ "$(wc -l <<<"$syms")" -eq "$(sort -u <<<"$syms" | wc -l)" ]
+}
+
+@test "rk3588-vendor-patched.absent: neither shipped board's WiFi driver is excepted" {
+  # Both RK3588 boards use IN-TREE drivers (RTL8852BE -> rtw89, AP6275P ->
+  # brcmfmac). If either ever appears here it means the gate was silenced on a
+  # symbol the fleet actually needs.
+  local list="$PIPELINE_DIR/manifests/kernel/rk3588-vendor-patched.absent"
+  run ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
+}
+
+# --- the option interface, and its equivalence to the positional one ---------
+
+@test "verify-kernel-config: the option form and the positional form agree, pass and fail alike" {
+  # The in-builder invocation is positional and must never change; the closure
+  # manifests have no positional slot. Both spellings therefore have to be the
+  # same checker, or one of them drifts into being untested.
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/frag"
+  printf 'CONFIG_A=y\nCONFIG_B=m\n' >"$WORK/good"
+  printf 'CONFIG_A=y\n' >"$WORK/bad"
+
+  run "$VERIFY" "$WORK/frag" "$WORK/good"
+  local pos_ok_status="$status" pos_ok_out="$output"
+  run "$VERIFY" --declared "$WORK/frag" --config "$WORK/good"
+  [ "$status" -eq "$pos_ok_status" ]
+  [ "$output" = "$pos_ok_out" ]
+  [ "$status" -eq 0 ]
+
+  run "$VERIFY" "$WORK/frag" "$WORK/bad"
+  local pos_bad_status="$status" pos_bad_out="$output"
+  run "$VERIFY" --declared "$WORK/frag" --config "$WORK/bad"
+  [ "$status" -eq "$pos_bad_status" ]
+  [ "$output" = "$pos_bad_out" ]
+  [ "$status" -eq 1 ]
+}
+
+@test "verify-kernel-config: the option form carries the allow-absent list too" {
+  printf 'CONFIG_A=y\nCONFIG_OUT_OF_TREE=m\n' >"$WORK/decl"
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_OUT_OF_TREE\n' >"$WORK/allow"
+
+  run "$VERIFY" "$WORK/decl" "$WORK/res" "$WORK/allow"
+  local pos_out="$output"
+  run "$VERIFY" --declared "$WORK/decl" --config "$WORK/res" --allow-absent "$WORK/allow"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$pos_out" ]
+}
+
+@test "verify-kernel-config: --required accepts an exact value and a bare parent alike" {
+  printf 'CONFIG_PARENT=y\nCONFIG_LEAF=m\n' >"$WORK/res"
+  printf '# a comment\nCONFIG_PARENT\nCONFIG_LEAF=m\n' >"$WORK/req"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/req"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2 required and 0 forbidden"* ]]
+}
+
+@test "verify-kernel-config: --required fails on an absent symbol, an off symbol and a wrong value" {
+  printf 'CONFIG_WRONG=m\n# CONFIG_OFF is not set\n' >"$WORK/res"
+  printf 'CONFIG_WRONG=y\nCONFIG_OFF\nCONFIG_MISSING\n' >"$WORK/req"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/req"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_WRONG: REQUIRED as CONFIG_WRONG=y, resolved config has CONFIG_WRONG=m"* ]]
+  [[ "$output" == *"CONFIG_OFF: REQUIRED but the resolved config has '# CONFIG_OFF is not set'"* ]]
+  [[ "$output" == *"CONFIG_MISSING: REQUIRED but the resolved config does not carry the symbol at all"* ]]
+  [[ "$output" == *"menuconfig"* ]]
+}
+
+@test "verify-kernel-config: --forbidden is satisfied by not-set AND by absence" {
+  printf '# CONFIG_OFF is not set\nCONFIG_KEPT=y\n' >"$WORK/res"
+  printf 'CONFIG_OFF\nCONFIG_NEVER_EXISTED\n' >"$WORK/forb"
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 0 ]
+
+  printf 'CONFIG_OFF=m\n' >>"$WORK/res"
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_OFF: FORBIDDEN but the resolved config has CONFIG_OFF=m"* ]]
+}
+
+@test "verify-kernel-config: a forbidden entry written as a value assignment is refused" {
+  # `CONFIG_X=y` here would mean "this value is banned, another is fine" — a
+  # weaker claim than the manifest makes, so it must not be silently accepted.
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+  printf 'CONFIG_A=y\n' >"$WORK/forb"
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/forb"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must be a bare symbol name"* ]]
+}
+
+@test "verify-kernel-config: an unknown option and a missing operand are usage errors, not silent passes" {
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" --config "$WORK/res" --bogus
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown option: --bogus"* ]]
+
+  run "$VERIFY" --config
+  [ "$status" -eq 2 ]
+
+  run "$VERIFY" --required "$WORK/res"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--config is required"* ]]
+
+  run "$VERIFY" --config "$WORK/res"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"nothing to check"* ]]
+}
+
+@test "verify-kernel-config: a missing manifest fails loudly, never as an empty check" {
+  printf 'CONFIG_A=y\n' >"$WORK/res"
+
+  run "$VERIFY" --config "$WORK/res" --required "$WORK/absent"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"required-symbols list not readable"* ]]
+
+  run "$VERIFY" --config "$WORK/res" --forbidden "$WORK/absent"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"forbidden-symbols list not readable"* ]]
+
+  run "$VERIFY" --config "$WORK/absent" --forbidden "$WORK/res"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"resolved config not readable"* ]]
+}
+
+# --- the closure manifests themselves ----------------------------------------
+
+@test "closure manifests: every entry is a CONFIG_ symbol, deduped, and forbidden entries are bare" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ -f "$req" ]
+  [ -f "$forb" ]
+
+  local list f
+  for f in "$req" "$forb"; do
+    list="$(sed -e 's/#.*//' "$f" | awk 'NF{print $1}')"
+    [ -n "$list" ]
+    while IFS= read -r s; do
+      [[ "$s" == CONFIG_* ]] || { echo "not a CONFIG_ symbol in $f: $s"; false; }
+    done <<<"$list"
+    [ "$(wc -l <<<"$list")" -eq "$(sed 's/=.*//' <<<"$list" | sort -u | wc -l)" ]
+  done
+
+  list="$(sed -e 's/#.*//' "$forb" | awk 'NF{print $1}')"
+  run ! grep -q '=' <<<"$list"
+}
+
+@test "closure manifests: required and forbidden never name the same symbol" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local overlap
+  overlap="$(comm -12 \
+    <(sed -e 's/#.*//' "$req"  | awk 'NF{print $1}' | sed 's/=.*//' | sort -u) \
+    <(sed -e 's/#.*//' "$forb" | awk 'NF{print $1}' | sort -u))"
+  [ -z "$overlap" ] || { echo "symbol in BOTH manifests: $overlap"; false; }
+}
+
+@test "closure manifests: every menuconfig parent the four real defects taught us is REQUIRED" {
+  # RTW89, DMABUF_HEAPS, TYPEC_FUSB302 and NF_TABLES each shipped broken because
+  # a parent was missing. The parents that gate them are the ones a future
+  # fragment edit is most likely to knock out without noticing.
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local sym
+  for sym in CONFIG_MMC CONFIG_PCI CONFIG_USB_SUPPORT CONFIG_USB_SERIAL \
+             CONFIG_USB_NET_DRIVERS CONFIG_WLAN CONFIG_BT CONFIG_DRM \
+             CONFIG_SOUND CONFIG_SND CONFIG_SND_SOC CONFIG_SND_USB \
+             CONFIG_MEDIA_SUPPORT CONFIG_DMABUF_HEAPS=y CONFIG_IOMMU_SUPPORT \
+             CONFIG_THERMAL CONFIG_HWMON CONFIG_TYPEC CONFIG_NF_TABLES=y; do
+    grep -qx -- "$sym" "$req" || { echo "closure parent missing from required list: $sym"; false; }
+  done
+}
+
+@test "closure manifests: the forbidden list holds every foreign platform the fragment disables" {
+  # The two files are one statement written twice — the fragment turns the
+  # platform off, the manifest asserts it stayed off. A row present in one and
+  # absent from the other is how the trim silently reverts on a defconfig bump.
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local sym
+  while IFS= read -r sym; do
+    grep -qx -- "$sym" "$forb" \
+      || { echo "fragment disables $sym but the forbidden manifest does not assert it"; false; }
+  done < <(grep -oE '^# (CONFIG_ARCH_[A-Z0-9_]+) is not set$' "$FRAGMENT" | awk '{print $2}')
+}
+
+@test "rk3588-edge.fragment: the Rockchip-only block keeps ARCH_ROCKCHIP and drops the rest" {
+  grep -qx 'CONFIG_ARCH_ROCKCHIP=y' "$FRAGMENT"
+  run ! grep -qx '# CONFIG_ARCH_ROCKCHIP is not set' "$FRAGMENT"
+  # A trim of one or two platforms would be cosmetic; the point is the whole set.
+  [ "$(grep -cE '^# CONFIG_ARCH_[A-Z0-9_]+ is not set$' "$FRAGMENT")" -ge 40 ]
+  # ARCH_REALTEK is the Realtek SoC PLATFORM, not the RTL8852BE Wi-Fi adapter.
+  # Disabling it must never come with dropping the adapter's own driver.
+  grep -qx '# CONFIG_ARCH_REALTEK is not set' "$FRAGMENT"
+  grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS a config where a foreign platform came back" {
+  local sample
+  sample="$(grep -oE '^# (CONFIG_ARCH_[A-Z0-9_]+) is not set$' "$FRAGMENT" | awk '{print $2}' | head -1)"
+  [ -n "$sample" ]
+  printf '%s=y\n' "$sample" >"$WORK/regressed"
+  run "$VERIFY" --config "$WORK/regressed" \
+    --forbidden "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"${sample}: FORBIDDEN"* ]]
+}
+
+@test "closure manifests: production edge forbids all three CeraLive test symbols" {
+  # The edge-test variant owns the fault-injection knobs. A production artifact
+  # carrying one of them is not the kernel that was validated on hardware.
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  grep -qx 'CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST' "$forb"
+  grep -qx 'CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST' "$forb"
+  grep -qx 'CONFIG_DMABUF_HEAPS_CERALIVE_TEST' "$forb"
+  # …and the fragment must not enable them either.
+  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST|VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST|DMABUF_HEAPS_CERALIVE_TEST)=[ym]' "$FRAGMENT"
+}
+
+@test "verify-kernel-config.sh is executable and shipped beside the other build gates" {
+  [ -x "$VERIFY" ]
+  [ -x "$PIPELINE_DIR/lib/verify-boot-artifacts.sh" ]
+}

@@ -1,0 +1,31 @@
+[INFO ] 12:33:34 === CeraLive build: board='rock-5b-plus' ===
+[INFO ] 12:40:25 [5/9] building image layers with mkosi (arm64) — base → platform → runtime → app
+‣ Building base image
+Ign:1 file:/repository ./ InRelease
+Ign:2 file:/repository ./ Release
+dpkg: warning: package architecture (arm64) does not match system (amd64)
+dpkg: warning: overriding problem because --force enabled:
+dpkg: warning: This system uses merged-usr-via-aliased-dirs, going behind dpkg's
+dpkg: warning: back, breaking its core assumptions. This can cause silent file
+dpkg: warning: overwrites and disappearances, and its general tools misbehavior.
+dpkg: warning: See <https://wiki.debian.org/Teams/Dpkg/FAQ#broken-usrmerge>.
+/usr/lib/tmpfiles.d/dbus.conf:13: Failed to resolve user 'messagebus': No such process
+invoke-rc.d: could not determine current runlevel
+invoke-rc.d: policy-rc.d denied execution of force-reload.
+‣ Building platform image
+W: Possible missing firmware /lib/firmware/nvidia/tegra124/xusb.bin for built-in driver xhci_tegra
+Setting up rockchip-multimedia-config (1.0.2-1) ...
+dir not exist
+‣ Building runtime image
+Setting up systemd-resolved (252.39-1~deb12u2) ...
+mv: cannot move '/etc/resolv.conf' to '/etc/.resolv.conf.systemd-resolved.bak': Device or resource busy
+Cannot take a backup of /etc/resolv.conf.
+ln: failed to create symbolic link '/etc/resolv.conf': Device or resource busy
+Cannot install symlink from /etc/resolv.conf to ../run/systemd/resolve/stub-resolv.conf
+dpkg-statoverride: warning: --update given but /var/log/chrony does not exist
+update-rc.d: warning: start and stop actions are no longer supported; falling back to defaults
+Cannot open netlink socket: Protocol not supported
+start-stop-daemon: unable to stat /usr/libexec/polkitd (No such file or directory)
+invoke-rc.d: policy-rc.d denied execution of reload.
+‣ Building app image
+[OK   ] 12:52:52 === build complete: board='rock-5b-plus' ===

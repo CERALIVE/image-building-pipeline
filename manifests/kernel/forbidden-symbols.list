@@ -1,0 +1,110 @@
+# CeraLive RK3588 `edge` kernel — FORBIDDEN symbol manifest
+#
+# Checked against a REAL resolved `.config` by
+# `lib/verify-kernel-config.sh --config <.config> --forbidden <this file>`.
+#
+# Entries are BARE symbol names. A symbol listed here must resolve to not-set,
+# or be absent from the tree entirely — both mean the same thing to the build.
+# `CONFIG_X=<value>` is refused as a usage error rather than reinterpreted: this
+# manifest states "this must not be in the kernel", never "this particular value
+# is the bad one".
+#
+# THREE CLASSES, and each one is here for a different reason.
+#
+# 1. FOREIGN SoC PLATFORMS. arm64 `defconfig` enables every platform
+#    arch/arm64/Kconfig.platforms offers, and each drags in its own clock,
+#    pinctrl, PHY, DMA, thermal, mailbox and media drivers. Disabling them in
+#    rk3588-edge.fragment removed 624 modules that can never bind on this
+#    silicon. This list is what keeps them out: a defconfig refresh that
+#    re-enables one, or a fragment edit that drops a line, fails the build
+#    instead of quietly restoring the weight.
+#
+#    CONFIG_ARCH_REALTEK IS NOT THE Wi-Fi ADAPTER — it is Realtek's RTD12xx SoC
+#    platform. The Rock 5B+ RTL8852BE is CONFIG_RTW89_8852BE, which the required
+#    manifest pins as present. Do not "fix" a Wi-Fi problem by removing this row.
+#
+# 2. TEST AND DEBUG SYMBOLS. Production `edge` must resolve every fault-injection
+#    control OFF. The three CeraLive test symbols exist only under the separate
+#    opt-in `edge-test` variant, whose debugfs knobs compile to nothing unless
+#    they are set; KASAN and lockdep belong to that variant too. A production
+#    artifact that carried any of them would be a different kernel from the one
+#    validated on hardware.
+#
+# 3. SYMBOLS THAT DO NOT EXIST AT THIS PIN. CONFIG_NFT_COUNTER is real in the
+#    sense that the ruleset's `counter` statement is load-bearing, but v7.1.7
+#    compiles nft_counter.o unconditionally into nf_tables-objs and has no such
+#    symbol. It is listed so a future "obviously missing" addition to the
+#    fragment is caught here with an explanation rather than as a bare DROPPED.
+
+# --- 1. foreign SoC platforms ---------------------------------------------
+CONFIG_ARCH_ACTIONS
+CONFIG_ARCH_AIROHA
+CONFIG_ARCH_ALPINE
+CONFIG_ARCH_APPLE
+CONFIG_ARCH_ARTPEC
+CONFIG_ARCH_AXIADO
+CONFIG_ARCH_BCM
+CONFIG_ARCH_BCM2835
+CONFIG_ARCH_BCMBCA
+CONFIG_ARCH_BCM_IPROC
+CONFIG_ARCH_BERLIN
+CONFIG_ARCH_BITMAIN
+CONFIG_ARCH_BLAIZE
+CONFIG_ARCH_BRCMSTB
+CONFIG_ARCH_BST
+CONFIG_ARCH_CIX
+CONFIG_ARCH_EXYNOS
+CONFIG_ARCH_HISI
+CONFIG_ARCH_INTEL_SOCFPGA
+CONFIG_ARCH_K3
+CONFIG_ARCH_KEEMBAY
+CONFIG_ARCH_LAN969X
+CONFIG_ARCH_LAYERSCAPE
+CONFIG_ARCH_LG1K
+CONFIG_ARCH_MA35
+CONFIG_ARCH_MEDIATEK
+CONFIG_ARCH_MESON
+CONFIG_ARCH_MICROCHIP
+CONFIG_ARCH_MMP
+CONFIG_ARCH_MVEBU
+CONFIG_ARCH_MXC
+CONFIG_ARCH_NPCM
+CONFIG_ARCH_NXP
+CONFIG_ARCH_PENSANDO
+CONFIG_ARCH_QCOM
+CONFIG_ARCH_REALTEK
+CONFIG_ARCH_RENESAS
+CONFIG_ARCH_S32
+CONFIG_ARCH_SEATTLE
+CONFIG_ARCH_SOPHGO
+CONFIG_ARCH_SPARX5
+CONFIG_ARCH_SPRD
+CONFIG_ARCH_STM32
+CONFIG_ARCH_SUNXI
+CONFIG_ARCH_SYNQUACER
+CONFIG_ARCH_TEGRA
+CONFIG_ARCH_TESLA_FSD
+CONFIG_ARCH_THUNDER
+CONFIG_ARCH_THUNDER2
+CONFIG_ARCH_UNIPHIER
+CONFIG_ARCH_VEXPRESS
+CONFIG_ARCH_VISCONTI
+CONFIG_ARCH_XGENE
+CONFIG_ARCH_ZYNQMP
+
+# --- 2. test / debug / fault injection --------------------------------------
+CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST
+CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST
+CONFIG_DMABUF_HEAPS_CERALIVE_TEST
+CONFIG_KASAN
+CONFIG_KCSAN
+CONFIG_UBSAN
+CONFIG_PROVE_LOCKING
+CONFIG_DEBUG_LOCK_ALLOC
+CONFIG_LOCK_STAT
+CONFIG_KUNIT
+CONFIG_FAULT_INJECTION
+CONFIG_LOCALVERSION_AUTO
+
+# --- 3. absent at the v7.1.7 pin --------------------------------------------
+CONFIG_NFT_COUNTER

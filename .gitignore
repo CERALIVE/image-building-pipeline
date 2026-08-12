@@ -1,4 +1,7 @@
+# Build artifacts emitted by lib/orchestrate.sh — never committed.
 images/
+# Per-board build logs emitted by lib/build-all.sh — runtime only, never committed.
+logs/
 *.img
 *.img.xz
 *.sha*
@@ -20,7 +23,7 @@ Thumbs.db
 .cursor/
 
 # Non-production RAUC test keys are generated on demand and never committed.
-v2/.dev-keys/
+.dev-keys/
 
 # OpenCode agent state (local only)
 .omo/
@@ -33,3 +36,7 @@ test-results-*.txt
 # image output dir. Build output, never committed, and deliberately excluded from
 # the build-matrix sha256 determinism comparison (the float would break it).
 bsp-provenance.json
+
+# mkosi scratch workspace (--workspace-directory, lib/paths.sh). Pinned beside the
+# output tree so finished subimages are renamed rather than copied across devices.
+.mkosi-workspace/

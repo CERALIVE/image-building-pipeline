@@ -27,12 +27,12 @@ Public developer guide for building, flashing, and iterating on CeraLive devices
 
 ## 1. Prerequisites
 
-**The container build is canonical.** `./v2/build <board>` builds inside a
-pinned `debian:trixie-slim` container (`v2/ci/Dockerfile`, mkosi 26) via Docker
+**The container build is canonical.** `./build <board>` builds inside a
+pinned `debian:trixie-slim` container (`ci/Dockerfile`, mkosi 26) via Docker
 or Podman. Everything below the "Required packages" heading is needed only if
 you opt into `--native` / `MKOSI_NATIVE=1` on a Debian trixie+ host — a plain
 container build needs nothing from your host beyond a working Docker or Podman
-install. See [`v2/docs/host-support.md`](../v2/docs/host-support.md) for the
+install. See [`docs/host-support.md`](../docs/host-support.md) for the
 full per-distro matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon,
 WSL2).
 
@@ -65,9 +65,9 @@ most compile-heavy stage in this pipeline.
 
 **Disk.** The protected CI production-candidate job requires at least 24 GiB
 free on both the workspace and Docker-root filesystems (checked by
-`v2/ci/check-builder-resources.sh` before any BuildKit work starts). A local
+`ci/check-builder-resources.sh` before any BuildKit work starts). A local
 dev box does not enforce that check, but budget similarly: the mkosi build
-cache (`v2/mkosi/cache/<board>`, capped at 2 GiB in CI), the `.staging/<board>`
+cache (`mkosi/cache/<board>`, capped at 2 GiB in CI), the `.staging/<board>`
 tree holding fetched `.deb`s, and each board's output `.raw` (nominal 14,800
 MiB, sparse — see §2 "Artifacts" below) all live under `image-building-pipeline/`
 during a real build.
@@ -198,13 +198,13 @@ cd image-building-pipeline
 
 ```bash
 # Rock 5B+ (primary target)
-./v2/build rock-5b-plus
+./build rock-5b-plus
 
 # Orange Pi 5+
-./v2/build orange-pi-5-plus
+./build orange-pi-5-plus
 ```
 
-The build entry point is `v2/build`, which calls `v2/lib/orchestrate.sh`. It
+The build entry point is `build`, which calls `lib/orchestrate.sh`. It
 runs through nine stages: resolve manifest, fetch `.deb` packages, validate,
 run mkosi, assemble disk, write bootloader gap, and emit a signed `.raucb`
 bundle.
@@ -212,15 +212,15 @@ bundle.
 **Dry run** (resolve and fetch plan only, no image written):
 
 ```bash
-INSTALL_BOOT_BSP=0 DRY_RUN=1 ./v2/build rock-5b-plus
+INSTALL_BOOT_BSP=0 DRY_RUN=1 ./build rock-5b-plus
 ```
 
 ### Artifacts
 
-After a successful build, artifacts land in `v2/images/<board>/`:
+After a successful build, artifacts land in `images/<board>/`:
 
 ```text
-v2/images/rock-5b-plus/
+images/rock-5b-plus/
   20260609T075534Z.raw      # flashable disk image (sparse, 14,800 MiB nominal)
   20260609T075534Z.raucb    # signed RAUC OTA bundle
   20260609T075534Z.raucb.sha256
@@ -235,7 +235,7 @@ If you're running a local mirror or a fork of the package feed, set:
 
 ```bash
 export CERALIVE_APT_MIRROR="https://<your-apt-mirror>/debian"
-./v2/build rock-5b-plus
+./build rock-5b-plus
 ```
 
 Replace `<your-apt-mirror>` with your mirror hostname.
@@ -247,29 +247,29 @@ kernel and in-tree DTBs from pinned source instead of fetching the prebuilt
 Armbian kernel:
 
 ```bash
-./v2/build rock-5b-plus --variant edge             # mainline 7.1 track
-./v2/build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
+./build rock-5b-plus --variant edge             # mainline 7.1 track
+./build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
 ```
 
 Both are compile-and-boot proven on real hardware for `rock-5b-plus`; `edge`
 is additionally proven on `orange-pi-5-plus`. Neither reopens the production
 kernel decision — the shipped image still installs the prebuilt vendor BSP
-(`./v2/build <board>` with no `--variant`), byte-identical to before these
+(`./build <board>` with no `--variant`), byte-identical to before these
 variants existed. Full detail, including the honest MPP hardware-encode
 limitation on `edge` and the HDMI-RX audio fix's status on `vendor-patched` —
 Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter
 validation), Tier 2 open on this pipeline's own built image, which has not
 itself been booted, with no Orange Pi 5+ evidence either way:
-[`v2/docs/kernel-build-from-source.md`](../v2/docs/kernel-build-from-source.md).
+[`docs/kernel-build-from-source.md`](../docs/kernel-build-from-source.md).
 
 ### Production vs debug image variants (`CERALIVE_DEBUG_IMAGE`)
 
 ```bash
-./v2/build rock-5b-plus                                    # PRODUCTION (default)
+./build rock-5b-plus                                    # PRODUCTION (default)
 
 CERALIVE_DEBUG_IMAGE=1 \
 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>' \
-  ./v2/build rock-5b-plus                                  # DEBUG (bench only)
+  ./build rock-5b-plus                                  # DEBUG (bench only)
 ```
 
 Production ships `shared.list` + the resolved `<family>.delta.list` only,
@@ -285,14 +285,14 @@ FACT.
 
 ### Image size gate
 
-Every real (non-`DRY_RUN`) build runs `v2/lib/measure-size.sh` between the
+Every real (non-`DRY_RUN`) build runs `lib/measure-size.sh` between the
 rootfs-tar emit and the parity check. A rootfs whose apparent content exceeds
 **1.5 GB** fails the build there — no `.raw`, no `.raucb`. Both shipped RK3588
 boards currently sit under the ceiling (`rock-5b-plus` 1,412,259,840 B,
 `orange-pi-5-plus` 1,418,792,960 B, measured on real production builds). The
 gate is invisible to the `DRY_RUN=1` PR-gate path — it only runs on a real
 build — so any doc claim about it is worth re-verifying against a real build,
-not a dry run. See [`v2/docs/size-notes.md`](../v2/docs/size-notes.md) §10 for
+not a dry run. See [`docs/size-notes.md`](../docs/size-notes.md) §10 for
 the exact wiring and the levers that keep both boards under the line (locale
 strip, firmware audit, the Mesa software-GL prune).
 
@@ -307,7 +307,7 @@ each new slot bakes its own holds. First-party CeraLive packages
 ModemManager closure) are deliberately excluded from the freeze so
 `system.startUpdate()` keeps working. Verify on a booted device with
 `apt-mark showhold`, `apt-cache policy linux-image-vendor-rk35xx`, and
-`apt-get -s upgrade`. Full contract: [`v2/docs/kernel-freeze-contract.md`](../v2/docs/kernel-freeze-contract.md).
+`apt-get -s upgrade`. Full contract: [`docs/kernel-freeze-contract.md`](../docs/kernel-freeze-contract.md).
 
 ---
 
@@ -322,7 +322,7 @@ and the RAUC bundle signature/compatible contract.
 ```bash
 TARGET=/dev/sdX
 TARGET_SIZE_BYTES="$(sudo blockdev --getsize64 "${TARGET}")"
-bash v2/tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
+bash tests/preflash-verify.sh --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
 Expected output (all nine checks green):
@@ -330,9 +330,9 @@ Expected output (all nine checks green):
 ```text
 ==============================================================
  CeraLive pre-flash verification gate — board rock-5b-plus
- image:   v2/images/rock-5b-plus/<ts>.raw
- bundle:  v2/images/rock-5b-plus/<ts>.raucb
- keyring: v2/.dev-keys/dev-root-ca.pem
+ image:   images/rock-5b-plus/<ts>.raw
+ bundle:  images/rock-5b-plus/<ts>.raucb
+ keyring: .dev-keys/dev-root-ca.pem
 ==============================================================
 [PASS] GPT geometry: exact A/B starts/sizes and unique labels
 [PASS] Gap magic: RKNS (52 4b 4e 53) at sector 64
@@ -361,7 +361,7 @@ You can also run the built-in negative self-test to confirm the gate is
 non-vacuous:
 
 ```bash
-bash v2/tests/preflash-verify.sh --self-test \
+bash tests/preflash-verify.sh --self-test \
   --target-size-bytes "${TARGET_SIZE_BYTES}"
 ```
 
@@ -375,8 +375,8 @@ that detail here on a future edit, link it:
 
 | Path | Where | Destructive? | Verified-via |
 |---|---|---|---|
-| microSD `dd` (Option A below) | §4 "Option A" in this doc | Yes — writes the target block device | `verified-via: .omo/notepads/device-platform-wave4/*` + `v2/docs/kernel-currency-watch.md` real-board history; NOT re-executed for this doc pass (see command-classification note below) |
-| `rkdeveloptool` maskrom → eMMC, CI-verified path | §4 "Option B" in this doc; tool source `v2/ci/verify-and-flash-candidate.sh` | Yes | `verified-via: .omo/evidence/device-platform-wave4/task-27-orangepi5plus-build.md`, `task-27-sd-boot-validation.md`, `task-31-measurement.md` — real board flash+boot transcripts from todos 27/31; NOT re-executed here |
+| microSD `dd` (Option A below) | §4 "Option A" in this doc | Yes — writes the target block device | `verified-via: .omo/notepads/device-platform-wave4/*` + `docs/kernel-currency-watch.md` real-board history; NOT re-executed for this doc pass (see command-classification note below) |
+| `rkdeveloptool` maskrom → eMMC, CI-verified path | §4 "Option B" in this doc; tool source `ci/verify-and-flash-candidate.sh` | Yes | `verified-via: .omo/evidence/device-platform-wave4/task-27-orangepi5plus-build.md`, `task-27-sd-boot-validation.md`, `task-31-measurement.md` — real board flash+boot transcripts from todos 27/31; NOT re-executed here |
 | `rkdeveloptool` manual bench 3-command path (`db`/`wl`/`rd`) | §4 "Manual bench flashing" in this doc | Yes | same citations as above — validated on real Rock 5B+ hardware in prior sessions, not re-run for this doc pass |
 
 **Command classification for this doc pass.** Per this task's constraints, no
@@ -426,7 +426,7 @@ with the correct device. **Double-check before running** — dd to the wrong
 device is destructive.
 
 ```bash
-BOARD_DIR="v2/images/rock-5b-plus"
+BOARD_DIR="images/rock-5b-plus"
 IMAGE="${BOARD_DIR}/$(ls -t "${BOARD_DIR}"/*.raw | head -1 | xargs basename)"
 
 sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
@@ -441,11 +441,11 @@ under direct testing. On a real Rock 5B+ with a byte-verified bootable card
 inserted, a warm `sudo reboot` (no power cycle) came back up still running the
 eMMC OS: `uname -a` showed the old kernel and `/` was mounted from
 `mmcblk0p2`, not the card's `mmcblk1`. This board's own `boot.scr.cmd` (in this
-repo, `v2/mkosi/platform/boot/boot.scr.cmd`) has no cross-device chain-load
+repo, `mkosi/platform/boot/boot.scr.cmd`) has no cross-device chain-load
 logic of its own. It only acts on `${devtype}`/`${devnum}`, values U-Boot's
 generic `distro_bootcmd` framework resolves before this script ever runs. So
 the SD-vs-eMMC decision happens entirely inside this board's shipped U-Boot
-binary (reports **U-Boot 2026.04** per `v2/mkosi/platform/boot/README.md`),
+binary (reports **U-Boot 2026.04** per `mkosi/platform/boot/README.md`),
 which this pipeline does not control and which may simply behave differently
 from whatever build the Rock 5B forum posts were describing. A full cold power
 cycle (power fully removed, not a warm reboot) has not been tested and may
@@ -492,8 +492,8 @@ The general procedure for RK3588 boards:
 **Write the image:** the release-candidate build workflow (`release.yml`) produces
 the immutable candidate artifact (raw image + signed `.raucb` + pinned loader); an
 operator downloads it and flashes it with the bench flash-and-verify tool
-(`v2/ci/verify-and-flash-candidate.sh`, described in
-[`v2/ci/runner-setup.md`](../v2/ci/runner-setup.md)). The tool downloads the pinned
+(`ci/verify-and-flash-candidate.sh`, described in
+[`ci/runner-setup.md`](../ci/runner-setup.md)). The tool downloads the pinned
 loader, checks the approved Maskrom USB fixture and eMMC capacity, captures the
 initial loader command under a pinned process-group leader, and limits it with a
 monotonic 15-second budget.
@@ -550,7 +550,7 @@ a blocking foreground call wrapped in an aggressive timeout.
 
 **UART console baud rate.** The Rock 5B+, and the RK3588 board family
 generally (per the `serial_console:` value in the family manifest and
-`v2/mkosi/platform/boot/install-boot.sh`), uses **1500000 baud** on its debug
+`mkosi/platform/boot/install-boot.sh`), uses **1500000 baud** on its debug
 UART — not the 115200 baud that is correct for the x86 family. Capture the
 console with:
 
@@ -587,7 +587,7 @@ production eMMC), use `CERALIVE_BENCH_LABELS=1` to relabel the GPT partitions
 not eMMC:
 
 ```bash
-CERALIVE_BENCH_LABELS=1 ./v2/build rock-5b-plus --variant edge
+CERALIVE_BENCH_LABELS=1 ./build rock-5b-plus --variant edge
 ```
 
 This exists specifically because a bench microSD is booted on a board whose
@@ -597,9 +597,32 @@ every slot and mount by `PARTLABEL`
 labels across the two media would make `PARTLABEL=rootfs_a` ambiguous to the
 running kernel. It is bench-only tooling layered on top of the frozen
 contract, not a contract change — a bench-labelled image deliberately FAILS
-`v2/tests/preflash-verify.sh` (which asserts the production label set), so the
+`tests/preflash-verify.sh` (which asserts the production label set), so the
 eMMC flash gate refuses it by construction. No release/publish path ever sets
 this flag.
+
+**Building a hardware-qualification CANDIDATE? The mode is a required flag, not
+an environment variable.** `ci/build-hardware-candidates.sh` refuses to run
+without an explicit `--bench-labels 0|1` and exports `CERALIVE_BENCH_LABELS`
+from it, so a candidate can never inherit the value from your shell:
+
+```bash
+ci/build-hardware-candidates.sh --only rock-edge-test \
+  --trust-verdict verdict.json --signing-env sign.env --debug-env debug.env \
+  --evidence evidence/ --bench-labels 1      # 1 = bench microSD, 0 = production
+```
+
+This is the direct outcome of a 2026-08-10 incident on this exact bench rig. A
+debug candidate was built without the overlay while every other candidate that
+day had it; its `/etc/fstab` then mounted `/boot` and `/data` from the board's
+onboard eMMC (which carries an unrelated image using the plain labels) rather
+than the microSD's `xboot`/`xdata`, because U-Boot resolves the ROOT filesystem
+off the medium it booted from while fstab resolves everything else by label
+alone. The board therefore looked healthy, and a RAUC recovery transition
+silently wrote its A/B state to the wrong physical device — recoverable only by
+hand. If a board has both a bench microSD and an eMMC image, `--bench-labels 1`
+is not optional. Full write-up: `AGENTS.md`, "Bench PARTLABEL overlay" and the
+candidate-builder KEY FACT; also [`dev-loop.md`](dev-loop.md).
 
 **Microsd boot discipline, board-verified.** A real Rock 5B+ microSD boot
 smoke test (todo 27) confirmed a full boot to userspace with no crash loop
@@ -638,17 +661,17 @@ Expected first-boot sequence:
      writes `PermitRootLogin prohibit-password`, and arms a forced password
      change for the `ceralive` user (`chage -d 0`). Runs `Before=ssh.service`
      so sshd never accepts a connection before hardening is in place.
-     Source: `v2/mkosi/runtime/ceralive-ssh-firstboot.sh`.
+     Source: `mkosi/runtime/ceralive-ssh-firstboot.sh`.
    - `ceralive-tls-firstboot.service` — keeps a per-device self-signed TLS cert
      in `/data/ceralive/tls/` (RSA 2048, 3650 days, CN/SAN =
      `<hostname>.local` + device IPv4). It validates the cert/key pair and
      replaces it if deterministic collision recovery changes the hostname.
      Runs `Before=nginx.service`.
-     Source: `v2/mkosi/runtime/ceralive-tls-firstboot.sh`.
+     Source: `mkosi/runtime/ceralive-tls-firstboot.sh`.
    - `ceralive-provision.service` — evaluates whether to start the WiFi
      provisioning portal. On a device with no stored WiFi profiles and no
      wired uplink, waits 75 s then brings up the `CeraLive-Setup-<short-id>`
-     WPA2 hotspot. Source: `v2/mkosi/runtime/ceralive-provision.sh`.
+     WPA2 hotspot. Source: `mkosi/runtime/ceralive-provision.sh`.
 3. `ceralive.service` starts and binds port 80 (HTTP). If the provisioning
    portal is active, `ceralive.service` is stopped first so the portal can
    use port 80; it restarts automatically after provisioning completes.
@@ -681,7 +704,7 @@ for example `ceralive2.local`.
 A freshly-flashed, never-before-booted CeraUI image has **no usable
 credentials at all** — not SSH, not the web UI. Don't waste time guessing at an
 SSH password on a fresh board; there isn't one yet, by design (see
-[`v2/docs/ssh-hardening.md`](../v2/docs/ssh-hardening.md) for why the account
+[`docs/ssh-hardening.md`](../docs/ssh-hardening.md) for why the account
 ships password-locked). This is the practical two-stage flow to get in, verified
 live on a Rock 5B+ running a vendor-6.1 control image.
 
@@ -712,7 +735,7 @@ board and IP will not work on a new flash.
 
 For the underlying mechanism — why the account is password-locked by default,
 and what the `CERALIVE_DEBUG_IMAGE` / `CERALIVE_DEBUG_PASSWORD_HASH` build-time
-knobs do — see [`v2/docs/ssh-hardening.md`](../v2/docs/ssh-hardening.md).
+knobs do — see [`docs/ssh-hardening.md`](../docs/ssh-hardening.md).
 
 **Check the boot slot:**
 
@@ -731,7 +754,7 @@ restarts `ceralive.service`.
 ### Push srtla
 
 ```bash
-# From the image-building-pipeline/v2/ directory:
+# From the image-building-pipeline/ directory:
 
 # Push srtla (default)
 ./dev-push <board-ip> srtla
@@ -752,8 +775,8 @@ alone does not reload them.
 
 **Pending hardware run** — the `dev-sync --frontend` invocation and timing will
 be confirmed from `test-results/boot-log-<date>.txt` once a physical board is
-available. The script exists under `v2/dev-sync`; consult
-[`v2/docs/dev-loop.md`](../v2/docs/dev-loop.md) for the current reference.
+available. The script exists under `dev-sync`; consult
+[`docs/dev-loop.md`](../docs/dev-loop.md) for the current reference.
 
 ### Environment knobs
 
@@ -856,7 +879,7 @@ E2E_KEEP=1 bash tools/e2e/loopback-smoke.sh
 ### Dev builds (local and CI)
 
 The build system defaults to a throwaway dev signing key stored in
-`v2/.dev-keys/` (gitignored). This key is for local and CI builds only and
+`.dev-keys/` (gitignored). This key is for local and CI builds only and
 must never be used in production.
 
 The canonical test entrypoint creates this ignored fixture automatically on a
@@ -864,8 +887,14 @@ clean checkout:
 
 ```bash
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-  CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./v2/run-tests
+  CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+  CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
+
+All three default to `skip`, so a plain `./run-tests` on a machine without root
+or passwordless sudo still completes: the privilege-drop gate reports `SKIP` for
+the three package-index probes that need a real UID drop, and every other
+assertion runs normally.
 
 The generator validates the NON-PRODUCTION certificate chain and leaf key before
 the RAUC assertions run. Production builds still require an explicit
@@ -874,8 +903,8 @@ the RAUC assertions run. Production builds still require an explicit
 The orchestrator sets this automatically:
 
 ```bash
-# Default: uses v2/.dev-keys/ if CERALIVE_RAUC_PKI_DIR is not set
-./v2/build rock-5b-plus
+# Default: uses .dev-keys/ if CERALIVE_RAUC_PKI_DIR is not set
+./build rock-5b-plus
 ```
 
 To verify a dev-signed bundle:
@@ -883,8 +912,8 @@ To verify a dev-signed bundle:
 ```bash
 rauc info \
   -C keyring:check-purpose=codesign \
-  --keyring=v2/.dev-keys/dev-root-ca.pem \
-  v2/images/rock-5b-plus/<ts>.raucb
+  --keyring=.dev-keys/dev-root-ca.pem \
+  images/rock-5b-plus/<ts>.raucb
 ```
 
 The `-C keyring:check-purpose=codesign` flag is required. The leaf certificate
@@ -908,7 +937,7 @@ Replace `<your-signing-key>` with the path to your PKI directory:
 
 ```bash
 export CERALIVE_RAUC_PKI_DIR="<your-signing-key>"
-./v2/build rock-5b-plus
+./build rock-5b-plus
 ```
 
 ### Generating a dev key
@@ -916,7 +945,7 @@ export CERALIVE_RAUC_PKI_DIR="<your-signing-key>"
 If you need to regenerate the dev key (e.g. after expiry):
 
 ```bash
-cd v2/.dev-keys
+cd .dev-keys
 
 # Root CA
 openssl genrsa -out dev-root-ca.key 2048
@@ -961,7 +990,7 @@ ln -sf dev-leaf-signing.key leaf-signing.key
 
 ### Pre-flash gate fails on RAUC check
 
-The dev key symlinks may be missing. From `v2/.dev-keys/`:
+The dev key symlinks may be missing. From `.dev-keys/`:
 
 ```bash
 ln -sf dev-root-ca.pem root-ca.pem
@@ -1013,7 +1042,7 @@ ssh root@<board-ip> 'grep -E "^(ID|VERSION_ID)" /etc/os-release'
 Override the release fields if needed:
 
 ```bash
-SYSEXT_OS_VERSION_ID=13 ./v2/dev-push <board-ip>
+SYSEXT_OS_VERSION_ID=13 ./dev-push <board-ip>
 ```
 
 ### First boot: board does not appear on the network
@@ -1039,14 +1068,14 @@ working build:
 - [ ] Install Docker or Podman. That is the only host requirement for the
       canonical container build (§1).
 - [ ] `git clone https://github.com/ceralive/image-building-pipeline.git && cd image-building-pipeline`
-- [ ] `INSTALL_BOOT_BSP=0 DRY_RUN=1 ./v2/build rock-5b-plus` — confirms manifest
+- [ ] `INSTALL_BOOT_BSP=0 DRY_RUN=1 ./build rock-5b-plus` — confirms manifest
       resolution, package pin listing, and the docker builder plan with **no**
       network or hardware touched (§2; this is the same command executed,
       transcript captured, while writing this doc).
-- [ ] `./v2/build rock-5b-plus` for a real build (needs `apt.ceralive.tv`
+- [ ] `./build rock-5b-plus` for a real build (needs `apt.ceralive.tv`
       credentials — see "APT feed" in §1; ~15-30 min on a modern host).
 - [ ] Before touching real hardware, read §3 "Pre-flash verification" and run
-      `v2/tests/preflash-verify.sh` against your build's `.raw` — it is
+      `tests/preflash-verify.sh` against your build's `.raw` — it is
       non-destructive (only reads block-device size) and catches most build
       defects before you commit to a flash.
 - [ ] Pick ONE flash path from the table at the top of §4, matching your
@@ -1064,7 +1093,7 @@ real doc gap — file it rather than silently working around it.
 
 ## Related docs
 
-- [`v2/docs/dev-loop.md`](../v2/docs/dev-loop.md) — full dev-push reference
+- [`docs/dev-loop.md`](../docs/dev-loop.md) — full dev-push reference
 - [`docs/partition-contract.md`](partition-contract.md) — frozen GPT layout
 - [`docs/cert-rotation-policy.md`](cert-rotation-policy.md) — key rotation
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — contribution rules and testing gate

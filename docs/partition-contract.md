@@ -182,8 +182,8 @@ Notes:
 
 ## 7. STAGE-4 BUILD OUTPUT
 
-The v2 build pipeline (Stage-4, `v2/lib/assemble-disk.sh` + `v2/lib/build-bundle.sh`) now
-emits three artifacts per board under `v2/images/<board>/`:
+The v2 build pipeline (Stage-4, `lib/assemble-disk.sh` + `lib/build-bundle.sh`) now
+emits three artifacts per board under `images/<board>/`:
 
 | Artifact | Description |
 |----------|-------------|
@@ -218,7 +218,7 @@ Any change to a size, label, slot role, the threshold N, or the `/data` contract
 
 > **Additive only — the RK3588 contract above (§§1–8) is unchanged.** This section
 > documents the already-shipped x86 A/B layout produced by
-> `v2/lib/assemble-disk-x86.sh` (Task 12). The slot sizes (`rootfs_a`, `rootfs_b`,
+> `lib/assemble-disk-x86.sh` (Task 12). The slot sizes (`rootfs_a`, `rootfs_b`,
 > `data`) are **identical** to the RK3588 layout; only p1 and the bootloader model
 > differ.
 
@@ -300,7 +300,7 @@ Reference partitions by **PARTLABEL** (same rule as RK3588 — never by FS-UUID)
 
 ### 9.5 Build artifacts
 
-`v2/lib/assemble-disk-x86.sh` is the offline producer (the x86 twin of
+`lib/assemble-disk-x86.sh` is the offline producer (the x86 twin of
 `lib/assemble-disk.sh`). It uses `sgdisk` to pre-seed the ESP at sector 2048, then
 `systemd-repart --offline` to append the rootfs/data slots, then
 `grub-mkstandalone` to write `EFI/BOOT/BOOTX64.EFI` into the ESP via `mtools`
@@ -310,4 +310,4 @@ reused verbatim; only `platform/x86/10-esp.conf` replaces the RK3588
 
 Full rationale and VERIFY-FIRST finding (why mkosi-native `Bootloader=grub` is
 incompatible with the offline-assemble model):
-[`v2/mkosi/platform/x86/README.md §2`](../v2/mkosi/platform/x86/README.md).
+[`mkosi/platform/x86/README.md §2`](../mkosi/platform/x86/README.md).

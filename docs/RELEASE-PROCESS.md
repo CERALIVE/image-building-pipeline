@@ -21,7 +21,7 @@ push to release/** or vX.Y.Z tag
 release.yml: admission + production build
         │
         ▼
-./v2/build <board>  →  orchestrate.sh  →  build-bundle.sh
+./build <board>  →  orchestrate.sh  →  build-bundle.sh
         │                                       │
         │                                       ▼
         │                            signs the leaf-key .raucb,
@@ -40,7 +40,7 @@ operator uploads images/<board>/<ts>.raucb (+ .sha256) to R2
         │
         ▼
 operator registers bundles/{channel}/{board}/<ts>.raucb + rolls out via hawkBit
-(v2/fleet/hawkbit/provision.sh, platform-bridge.sh)
+(fleet/hawkbit/provision.sh, platform-bridge.sh)
         │
         ▼
 device rauc-hawkbit-updater pulls from apt.ceralive.tv/bundles/...
@@ -96,8 +96,8 @@ For the resource failure after `v2026.7.2`, the only eligible next patch is
 `release.yml` builds and uploads one immutable production candidate; there is no
 automated CI job that flashes or tests real hardware. An operator downloads the
 candidate artifact and hand-tests it on a Rock 5B+ before a manual release, using
-the bench flash-and-verify tool (`v2/ci/verify-and-flash-candidate.sh`) plus the
-acceptance suite (`v2/tests/realhw-suite.sh`). The candidate artifact carries the
+the bench flash-and-verify tool (`ci/verify-and-flash-candidate.sh`) plus the
+acceptance suite (`tests/realhw-suite.sh`). The candidate artifact carries the
 raw image, its SHA-256, the production bundle, keyring, the hash-pinned Maskrom
 loader, and the candidate commit — everything the operator needs to flash and
 validate the exact bytes that could ship.
@@ -149,16 +149,16 @@ Steps, in order:
    asynchronous CI-shell launches where SIGINT would otherwise remain ignored.
    Artifact filenames in the identity record are restricted to a safe
    line-oriented character set.
-3. **The acceptance suite** — [`v2/tests/realhw-suite.sh`](../v2/tests/realhw-suite.sh),
+3. **The acceptance suite** — [`tests/realhw-suite.sh`](../tests/realhw-suite.sh),
    which runs four sub-harnesses in sequence and aggregates one exit code:
-   - **boot+service** (`v2/tests/realhw-smoke.sh`) — boot, service, binary,
+   - **boot+service** (`tests/realhw-smoke.sh`) — boot, service, binary,
      quirk checks, and required live parity against the manifest. Missing or
      incomplete parity collection is a hard failure.
    - **encode-path init** — `cerastream --version` / `srtla_send --version`
      actually run on the board.
-   - **dev-loop sanity** — `v2/dev-push` completes in under 120s using the
+   - **dev-loop sanity** — `dev-push` completes in under 120s using the
      candidate-bound package in `DEV_DEB_DIR`; this lane is required.
-   - **RAUC A/B rollback** ([`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh))
+   - **RAUC A/B rollback** ([`tests/rauc-rollback.sh`](../tests/rauc-rollback.sh))
      — the same rollback proof described in §8, run live against real
      silicon rather than the mock harness.
 4. **Access cleanup and evidence upload** — an `always()` step removes the exact
@@ -184,10 +184,10 @@ archive keyring, and first-party apt GPG/mTLS credentials are supplied as secret
 The real build is:
 
 ```bash
-./v2/build rock-5b-plus
+./build rock-5b-plus
 ```
 
-which execs [`v2/lib/orchestrate.sh`](../v2/lib/orchestrate.sh) through its
+which execs [`lib/orchestrate.sh`](../lib/orchestrate.sh) through its
 staged pipeline (resolve manifest → fetch `.deb`s → validate → mkosi → assemble
 disk → write the bootloader gap → emit the signed `.raucb`). See
 [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2 for the full stage list and
@@ -197,7 +197,7 @@ artifact layout.
 
 The dedicated `ceralive-image-builder` runner must use the host's native Linux
 Docker daemon. The candidate job sets `DOCKER_CONTEXT=default`, and
-[`check-builder-resources.sh`](../v2/ci/check-builder-resources.sh) runs before
+[`check-builder-resources.sh`](../ci/check-builder-resources.sh) runs before
 BuildKit. It fails closed unless all of these are true:
 
 - `default` resolves to `unix:///var/run/docker.sock` and the daemon is not
@@ -223,7 +223,7 @@ a second allocated raw during the upload window.
 
 The candidate job persists only reusable build state; it never caches a
 candidate image or a trust input. BuildKit loads the canonical
-`v2/ci/Dockerfile` builder image and exports its layers through the GitHub
+`ci/Dockerfile` builder image and exports its layers through the GitHub
 Actions cache with a stable repository/OS/architecture/board/mkosi-tool scope.
 The source hash is carried in the builder tag and label, while BuildKit's
 content-addressed Dockerfile/context digests select the reusable layers. The
@@ -231,11 +231,18 @@ export uses `mode=min` so the cache contains only layers needed by the loaded
 builder image.
 
 The same job restores and saves only the board-specific mkosi package cache at
-`v2/mkosi/cache/rock-5b-plus`. Its exact key includes the repository, runner
+`mkosi/cache/rock-5b-plus`. Its exact key includes the repository, runner
 OS/architecture, board, mkosi pin, and build-source hash; its fallback prefix
 keeps those axes fixed. Before saving, the workflow enforces a 2 GiB ceiling,
 measures/prunes the tree as root inside the builder container, and normalizes
-ownership to the runner so mode-700 mkosi entries remain cacheable. Image outputs,
+ownership to the runner so mode-700 mkosi entries remain cacheable. That
+normalization is a **cache-transport** step, not a build step: it exists so
+`actions/cache/save` can read the tree, and it costs the next job a cold base
+layer because mkosi 26 refuses a cache whose owner uid is not its own. Never
+copy it into the local build path — `lib/stages/mkosi.sh` deliberately keeps the
+cache inside one privilege domain instead (see
+[`host-support.md`](host-support.md) "The mkosi cache lives in ONE privilege
+domain"). Image outputs,
 `.staging`, QEMU state, apt credentials, and release artifacts are not cache
 inputs. These steps are guarded to release pushes/tags, and the trust-input
 step remains after cache restore and builder preparation; the production build,
@@ -246,7 +253,7 @@ Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
 mTLS-authenticated apt source — the exact credential contract is
 `APT_GPG_PUBLIC_B64` / `APT_CLIENT_CRT_B64` / `APT_CLIENT_KEY_B64` in
-[`v2/lib/fetch-debs.sh`](../v2/lib/fetch-debs.sh) `fetch_first_party()`
+[`lib/fetch-debs.sh`](../lib/fetch-debs.sh) `fetch_first_party()`
 (lines ~518-637). **Section 7 below is the full rotation runbook for these
 three values** — read it before running an authenticated release build.
 
@@ -310,7 +317,7 @@ test "$(awk -F: '$1=="uid"{print $10; exit}' <<<"${new_meta}")" = \
 gpg --batch --quiet --import "${tmp}/old.asc" "${tmp}/new.asc"
 gpg --batch --yes --output "${tmp}/armbian-combined.gpg" \
   --export "${old_fpr}" "${new_fpr}"
-bash -c 'source v2/lib/fetch-debs-auth.sh; \
+bash -c 'source lib/fetch-debs-auth.sh; \
   auth_keyring_has_exact_fingerprints "$1" "$2" "$3"' \
   bash "${tmp}/armbian-combined.gpg" "${old_fpr}" "${new_fpr}"
 
@@ -323,7 +330,7 @@ base64 -w0 <"${tmp}/armbian-combined.gpg" \
 )
 ```
 
-`v2/lib/fetch-debs.sh` independently enforces exact primary-fingerprint set
+`lib/fetch-debs.sh` independently enforces exact primary-fingerprint set
 equality before either apt or the curl fallback runs. That check deliberately
 rejects old-only, new-only, malformed, revoked, expired, invalid, disabled,
 normalization-failed, and expected-plus-unrelated keyrings. Both native apt and
@@ -334,7 +341,7 @@ be valid before package download begins.
 
 Family manifests choose the required BSP package names. Production resolves those
 names only through the exact Debian versions in
-`v2/manifests/armbian-bsp-deb-versions.txt`; it never asks apt for an unqualified
+`manifests/armbian-bsp-deb-versions.txt`; it never asks apt for an unqualified
 latest package. Both fetch paths verify the dual-signed `InRelease` and require
 the configured suite, `main` component, and architecture. The curl path also
 verifies the signed `Packages.gz` digest and preflights the complete exact set
@@ -350,9 +357,9 @@ To promote a BSP version:
    Do not promote a partial set or use an unsigned mirror or HTTP status alone.
 3. Review the package contents and hardware implications. Update
    `armbian-bsp-deb-versions.txt`; when the kernel changes, update
-   `v2/manifests/bsp-baseline.json` to the reviewed version and content hash in the
+   `manifests/bsp-baseline.json` to the reviewed version and content hash in the
    same change.
-4. Run `v2/tests/bsp-package-resolution.test.sh`, `v2/run-tests`, an authenticated
+4. Run `tests/bsp-package-resolution.test.sh`, `run-tests`, an authenticated
    live BSP fetch, and a hand-test of the candidate on real hardware before shipping
    a new immutable tag.
 
@@ -363,7 +370,7 @@ commit. Never move or rerun an older tag expecting it to pick up new code.
 
 ### Signing (`build-bundle.sh`)
 
-The orchestrator's stage 8 calls [`v2/lib/build-bundle.sh`](../v2/lib/build-bundle.sh)
+The orchestrator's stage 8 calls [`lib/build-bundle.sh`](../lib/build-bundle.sh)
 to produce `images/<board>/<ts>.raucb` (+ `.sha256`), stamped with the
 board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 `BUNDLE_VERSION` (git short SHA by default). The signing contract:
@@ -392,7 +399,7 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 The RAUC signing PKI itself (root/intermediate/leaf tiers, validity, and how a
 leaf or intermediate rotates through the channel without a reflash) is a
 **separate** rotation procedure from the apt credentials in §7 — see
-[`v2/docs/cert-rotation-policy.md`](../v2/docs/cert-rotation-policy.md) for the
+[`docs/cert-rotation-policy.md`](../docs/cert-rotation-policy.md) for the
 full contract; it isn't duplicated here.
 
 ### CI determinism coverage — cross-runner build-plan gate (C6b)
@@ -406,10 +413,10 @@ host-independently.
 - The [`v2-ci.yml`](../.github/workflows/v2-ci.yml) `build-plan-xrunner` +
   `build-plan-xrunner-gate` jobs resolve the `DRY_RUN=1` mkosi plan on **two
   independent GitHub-hosted runners** (`ubuntu-24.04` + `ubuntu-22.04`), hash the
-  **normalized** per-board plan ([`v2/ci/emit-build-plan-sha.sh`](../v2/ci/emit-build-plan-sha.sh)
+  **normalized** per-board plan ([`ci/emit-build-plan-sha.sh`](../ci/emit-build-plan-sha.sh)
   — the same task-15 normalization: strip the abs repo path → `<REPO>`, sha256 the
   single line), and fail if the two runners disagree on any board's plan sha256
-  ([`v2/ci/assert-xrunner-parity.sh`](../v2/ci/assert-xrunner-parity.sh)). It
+  ([`ci/assert-xrunner-parity.sh`](../ci/assert-xrunner-parity.sh)). It
   extends the `build-matrix` job's **same-host** rebuild-parity into a **cross-host**
   check — catching host-dependence (hostname / arch / toolchain / an un-normalized
   path) a single host can never surface.
@@ -438,9 +445,9 @@ families this pipeline produces:
 
 | Artifact | R2 path | Publisher |
 |----------|---------|-----------|
-| Feature-sysext add-ons | `addons/{os_version}/{board}/{feature}.raw` | [`v2/lib/upload-addons.sh`](../v2/lib/upload-addons.sh) — **exists, automatable, CI-proven under `DRY_RUN`** (`v2-ci.yml` `addon-publish` job) |
+| Feature-sysext add-ons | `addons/{os_version}/{board}/{feature}.raw` | [`lib/upload-addons.sh`](../lib/upload-addons.sh) — **exists, automatable, CI-proven under `DRY_RUN`** (`v2-ci.yml` `addon-publish` job) |
 | CeraUI federation UI bundles | `ui-bundle/{ceraui-version}/*.js` | CeraUI's own `publish-release.yml` → `publish-federation` job — **exists in the CeraUI repo** |
-| **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | manual candidate proof, then [`publish-immutable-r2-pair.sh`](../v2/ci/publish-immutable-r2-pair.sh); **no publishing workflow** |
+| **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | manual candidate proof, then [`publish-immutable-r2-pair.sh`](../ci/publish-immutable-r2-pair.sh); **no publishing workflow** |
 
 `apt-worker/AGENTS.md` and `apt-worker/README.md` both describe the `bundles/`
 path as a pure read side (the worker range-serves whatever is already in R2)
@@ -490,7 +497,7 @@ master_status="$(gh api "repos/${repo}/compare/${merge_sha}...master" --jq .stat
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 publisher="${tmp}/publish-immutable-r2-pair.sh"
-GIT_NO_REPLACE_OBJECTS=1 git show "${merge_sha}:v2/ci/publish-immutable-r2-pair.sh" > "${publisher}"
+GIT_NO_REPLACE_OBJECTS=1 git show "${merge_sha}:ci/publish-immutable-r2-pair.sh" > "${publisher}"
 chmod 0700 "${publisher}"
 gh api "repos/${repo}/actions/runs/${run_id}/artifacts" > "${tmp}/artifacts.json"
 artifact_id="$(jq -er --arg name "${artifact_name}" '
@@ -565,11 +572,11 @@ itself.
 ### Registering the artifact with hawkBit (also manual/operator-driven)
 
 Once the bundle is on R2, the private hawkBit fleet-update engine
-([`v2/fleet/hawkbit/`](../v2/fleet/hawkbit/)) needs to know about it before any
+([`fleet/hawkbit/`](../fleet/hawkbit/)) needs to know about it before any
 device is offered the update:
 
 ```bash
-cd v2/fleet/hawkbit
+cd fleet/hawkbit
 set -a; source .env; set +a
 EXAMPLE_BUNDLE_FILE="${release_name}" ./provision.sh
 ```
@@ -577,7 +584,7 @@ EXAMPLE_BUNDLE_FILE="${release_name}" ./provision.sh
 `provision.sh` creates the RAUC software-module type, registers the artifact
 **metadata only** (filename + sha256 — hawkBit never stores the blob; devices
 fetch the blob straight from R2 via the artifact-URL rewrite, see
-[`v2/fleet/hawkbit/README.md`](../v2/fleet/hawkbit/README.md)), and creates a
+[`fleet/hawkbit/README.md`](../fleet/hawkbit/README.md)), and creates a
 `compatible`-filtered distribution set. Triggering the actual rollout to
 targets is a separate, deliberate operator action (a fresh rollout is created
 **paused** and must be explicitly started) — either via `platform-bridge.sh
@@ -592,7 +599,7 @@ contract); it does not exist in this repo.
 Two verification passes bracket the whole path, one before ship and one after:
 
 **Pre-flash (build-time, offline, this repo):**
-[`v2/tests/preflash-verify.sh`](../v2/tests/preflash-verify.sh) checks GPT
+[`tests/preflash-verify.sh`](../tests/preflash-verify.sh) checks GPT
 geometry plus `sgdisk -v`, both idblock and parsed second-stage FIT, the compiled
 boot selector and board metadata, the seeded boot state, complete arm64
 kernel/DTB/initrd sets in A and B, destination capacity, and — the one
@@ -615,7 +622,7 @@ ssh ceralive@<device> 'systemctl status ceralive-healthcheck.service'
 booted slot gets `rauc mark-good` — see §8 for the full rollback contract this
 feeds into. hawkBit's Management API also reports per-target action status
 (`RUNNING` / `FINISHED` / `ERROR`) for anyone tracking a fleet-wide rollout,
-per the integration contract in `v2/fleet/integration-contract.md`.
+per the integration contract in `fleet/integration-contract.md`.
 
 The operator's §3 hand-test on real hardware already proves the rollback and
 healthcheck contract against real silicon **before** the bundle ships —
@@ -632,12 +639,12 @@ first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from
 `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
 The device-side twin of this same contract is
-[`v2/mkosi/customize/apt-ceralive-repo.sh`](../v2/mkosi/customize/apt-ceralive-repo.sh),
+[`mkosi/customize/apt-ceralive-repo.sh`](../mkosi/customize/apt-ceralive-repo.sh),
 which bakes the same three values (as build-time inputs) into the image's own
 apt source for its own package installs.
 
 This is a **distinct** rotation from the RAUC signing PKI in
-[`v2/docs/cert-rotation-policy.md`](../v2/docs/cert-rotation-policy.md) — that
+[`docs/cert-rotation-policy.md`](../docs/cert-rotation-policy.md) — that
 doc governs the leaf/intermediate/root chain that signs `.raucb` bundles; this
 section governs the mTLS + GPG credential that authenticates a **build host**
 to the `apt.ceralive.tv` package feed. Don't conflate the two.
@@ -705,7 +712,7 @@ attempting an unverified download — see `main()` line ~671-676.
    ```
    The current secret is armored `.asc`; a binary `.gpg` public keyring is also
    accepted for compatibility. Before mkosi runs, the native host or canonical
-   builder executes `v2/lib/dearmor-apt-keyring.sh`, verifies the resulting binary
+   builder executes `lib/dearmor-apt-keyring.sh`, verifies the resulting binary
    OpenPGP keyring with `file(1)`, and forwards only the binary payload into the
    runtime postinstall. This is build-only tooling: the device image must not gain
    `gpg` or `file` for this conversion.
@@ -722,7 +729,7 @@ attempting an unverified download — see `main()` line ~671-676.
    APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64}" \
    APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64}" \
    APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64}" \
-   ./v2/lib/fetch-debs.sh --family v2/manifests/families/<family>.yaml
+   ./lib/fetch-debs.sh --family manifests/families/<family>.yaml
    ```
    A successful run logs `first-party: staged 4 .deb(s) from
    https://apt.ceralive.tv/...`. Any GPG/mTLS mismatch fails loudly at
@@ -765,7 +772,7 @@ further or to pull it from circulation.
 RAUC's A/B slot model provides bounded automatic rollback for a bad update when
 the factory image passed the A/B preflash gate and the board-specific hardware
 cycle has passed. The software contract is exercised by
-[`v2/tests/rauc-rollback.sh`](../v2/tests/rauc-rollback.sh) (run live on real
+[`tests/rauc-rollback.sh`](../tests/rauc-rollback.sh) (run live on real
 hardware as part of the §3 operator hand-test, and in a MOCK mode that drives the
 same shipped scripts without hardware):
 
@@ -784,7 +791,7 @@ same shipped scripts without hardware):
      bleeds down (3→2→1→0) across repeated boot attempts.
 4. Once the bad slot's bootcount is exhausted, the boot selector (U-Boot's
    `boot.scr` on RK3588, GRUB's `grubenv` A/B selector on x86 — see
-   `v2/mkosi/platform/x86/README.md` §2 for the x86 mirror of this contract)
+   `mkosi/platform/x86/README.md` §2 for the x86 mirror of this contract)
    **automatically falls back** to the last-known-good slot. The device
    resumes streaming on the old, still-good software with **zero operator
    intervention**.
@@ -816,10 +823,10 @@ The **x86** analogue of the RK3588 rollback contract (grubenv-based A/B,
 no RAUC-specific tooling) is proven offline, with no board and no qemu, by:
 
 ```bash
-v2/tests/qemu-x86.sh --fallback-selftest
+tests/qemu-x86.sh --fallback-selftest
 ```
 
-([`v2/tests/qemu-x86.sh`](../v2/tests/qemu-x86.sh) `run_fallback_selftest()`.)
+([`tests/qemu-x86.sh`](../tests/qemu-x86.sh) `run_fallback_selftest()`.)
 It drives the **real shipped** `x86-boot-state.sh` engine (the same one the
 on-device GRUB selector runs), forces a primary-slot failure by never
 confirming it, and asserts:
@@ -853,7 +860,7 @@ overwritten. If a published bundle is found to be bad:
      -X POST "http://127.0.0.1:8080/rest/v1/rollouts/<rollout-id>/pauseGroup"
    ```
    (or the equivalent `platform-bridge.sh` call once that verb is exposed; see
-   `v2/fleet/integration-contract.md` for the rollout-control surface).
+   `fleet/integration-contract.md` for the rollout-control surface).
 2. **Supersede, never delete.** Build a fixed bundle, sign it
    (§4), upload it under a **new** timestamped filename (§5's manual steps),
    and register it with hawkBit as a new artifact/distribution set
@@ -892,7 +899,7 @@ healthcheck's own skip-when-unconfigured logic already accounts for).
 ## See also
 
 - [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) — the developer build/flash/dev-loop guide this doc's §4 and §6 summarize.
-- [`v2/docs/cert-rotation-policy.md`](../v2/docs/cert-rotation-policy.md) — RAUC signing-PKI rotation (leaf/intermediate/root) — a distinct procedure from §7.
+- [`docs/cert-rotation-policy.md`](../docs/cert-rotation-policy.md) — RAUC signing-PKI rotation (leaf/intermediate/root) — a distinct procedure from §7.
 - [`docs/paseto-key-provisioning.md`](paseto-key-provisioning.md) — the sibling runbook style this doc follows for a different credential (device-token PASETO keys).
-- [`v2/fleet/hawkbit/README.md`](../v2/fleet/hawkbit/README.md) + [`v2/fleet/integration-contract.md`](../v2/fleet/integration-contract.md) — the fleet rollout engine referenced in §5 and §8.
-- [`v2/docs/DEFERRED.md`](../v2/docs/DEFERRED.md) — index of every other deferred/hardware-gated item in this pipeline.
+- [`fleet/hawkbit/README.md`](../fleet/hawkbit/README.md) + [`fleet/integration-contract.md`](../fleet/integration-contract.md) — the fleet rollout engine referenced in §5 and §8.
+- [`docs/DEFERRED.md`](../docs/DEFERRED.md) — index of every other deferred/hardware-gated item in this pipeline.

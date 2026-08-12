@@ -1,0 +1,5 @@
+[    0.000000] Linux version 7.1.7-ceralive-rk3588 #1 SMP PREEMPT
+[   58.113004] ------------[ cut here ]------------
+[   58.113022] WARNING: CPU: 1 PID: 402 at drivers/media/platform/rockchip/rkvenc/rkvenc.c:812 rkvenc_iova_check+0x64/0x80 [rkvenc]
+[   58.113088] Modules linked in: rkvenc rkvenc_ccu mpp_service
+[   58.113120] CPU: 1 PID: 402 Comm: cerastream Tainted: G        W          7.1.7-ceralive-rk3588 #1

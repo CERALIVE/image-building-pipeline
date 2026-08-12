@@ -1,0 +1,15 @@
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+[    0.000000] Linux version 7.1.7-ceralive-rk3588 (gcc version 12.2.0) #1 SMP PREEMPT
+[    0.000000] KASAN: initialized
+[   96.114203] ==================================================================
+[   96.114231] BUG: KASAN: use-after-free in rkvenc_dma_import_fd+0x1c4/0x2f0 [rkvenc]
+[   96.114255] Read of size 8 at addr ffff000812a4c018 by task cerastream/1421
+[   96.114271]
+[   96.114280] CPU: 3 PID: 1421 Comm: cerastream Tainted: G    B             7.1.7-ceralive-rk3588 #1
+[   96.114301] Hardware name: Radxa ROCK 5B+ (DT)
+[   96.114312] Call trace:
+[   96.114320]  dump_backtrace+0x9c/0x128
+[   96.114334]  show_stack+0x20/0x38
+[   96.114345]  kasan_report+0x84/0xa8
+[   96.114358]  rkvenc_dma_import_fd+0x1c4/0x2f0 [rkvenc]
+[   96.114379] ==================================================================

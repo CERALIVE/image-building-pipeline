@@ -1,0 +1,10 @@
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
+[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.000000] Machine model: Radxa ROCK 5B+
+[    1.223000] mmc0: new HS400 MMC card at address 0001
+[    1.240000] mmcblk0: mmc0:0001 HCG8e 58.3 GiB
+[    1.244000]  mmcblk0: p1 p2 p3 p4
+[    4.881000] rtw89_8852be 0002:21:00.0: Firmware version 0.13.36.0
+[    5.002000] Bluetooth: hci0: RTL: fw version 0x829a8ada
+[    9.882000] rk_hdmirx fdee0000.hdmirx-controller: hdmirx_query_dv_timings: port has no link
+[   12.001000] systemd[1]: Reached target multi-user.target

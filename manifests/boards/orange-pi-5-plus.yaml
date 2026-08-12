@@ -1,0 +1,100 @@
+# CeraLive Image Board Manifest — Orange Pi 5+ (RK3588)
+#
+# Validates against ../schema/board.schema.json (draft 2020-12).
+# Inherits arch, branch, kernel/uboot/dtb/firmware packages, rauc adapter,
+# partition_template and serial_console from families/rk3588.yaml.
+#
+# Sources: configs/devices/orangepi5plus.conf (DT_OVERLAYS, INSTALLATION_NOTES),
+# userpatches/config-orangepi5plus.conf (BOARD=). dtb_name is NOT taken from
+# there — it carries its own provenance below.
+
+family: rk3588
+
+# Armbian BOARD= from userpatches/config-orangepi5plus.conf.
+board_id: orangepi5-plus
+
+# The board name says "5 Plus (RK3588S)" and the DTB name does NOT follow it: the
+# 5 Plus carries the FULL RK3588, so every tree spells its DTB rk3588- with no 's'.
+# The rk3588s- prefix belongs to the genuinely-RK3588S parts, and the same vendor
+# package ships those separately (rk3588s-orangepi-5.dtb, -5b, -5-pro). Verified
+# against the pinned Armbian vendor package linux-dtb-vendor-rk35xx 26.5.1
+# (sha256 90eb41c1…a8be): it contains rk3588-orangepi-5-plus.dtb and NO
+# rk3588s-orangepi-5-plus.dtb. Armbian's own board config agrees —
+# config/boards/orangepi5-plus.conf sets BOOT_SOC="rk3588" and
+# BOOT_FDT_FILE="rockchip/rk3588-orangepi-5-plus.dtb".
+dtb_name: rk3588-orangepi-5-plus.dtb
+
+# Kept as an EXPLICIT per-variant assertion even though it now restates the
+# default: the edge variant compiles its DTBs from mainline v7.1.7, an entirely
+# different tree from the vendor BSP above, and the two agreeing today is a fact
+# to pin rather than an invariant to assume. If either tree ever renames it, only
+# one of these two lines moves. The Rock 5B+ needs no entry for the same reason it
+# never did — rk3588-rock-5b-plus.dtb in both trees.
+variant_overrides:
+  edge:
+    dtb_name: rk3588-orangepi-5-plus.dtb
+
+# Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+uboot_packages:
+  - linux-u-boot-orangepi5-plus-vendor
+
+# INERT/UNCONSUMED legacy metadata carried from configs/devices/orangepi5plus.conf:
+# no build script reads this field and no overlay-application step exists in the
+# boot path. Real behavior lives elsewhere: USB-C source role in
+# ceralive-typec-source.service; HDMI-RX in the base DTB + udev symlink; Wi-Fi in
+# the base DTB + its kernel driver; and modem support in ModemManager plus the
+# applicable modem quirk. Do not treat these names as applied.
+armbian_overlays:
+  - rk3588-hdmi-input
+  - rk3588-wifi-rtl8821cs
+  - rk3588-m2-nvme
+
+# 16 GB+ eMMC/NVMe → A/B layout fits (partition-contract §3/§5). Not the
+# single-slot fallback.
+single_slot_fallback: false
+
+# Interface identity map — pins each role to its physical port via systemd .link
+# Path= matching (ID_PATH from `udevadm info /sys/class/net/<iface>`). The OPi 5+
+# has TWO onboard r8169 NICs on the SAME driver/PCI bus, so a generic Type=ether
+# match would race and assign eth0/eth1 non-deterministically across boots.
+#
+# Both values below were READ OFF A PHYSICAL Orange Pi 5 Plus (DT model "Xunlong
+# Orange Pi 5 Plus") running 7.1.5-ceralive-rk3588 — the MAINLINE/edge spelling,
+# so the controller name is the ECAM window (a40c00000/a41000000), not the vendor
+# BSP's APB window (fe170000/fe180000). That is fine and deliberate: the runtime
+# `link_path_match()` emits the literal value AND a controller-agnostic
+# `platform-*.pcie-pci-<bdf>` glob, and the PCI domain:bus:device.function is the
+# half that is stable across both kernel trees. Do NOT "repair" a future vendor
+# mismatch by rewriting these to the fe1x0000 spelling — that just breaks the
+# edge path instead.
+#
+#   enP3p49s0  ID_PATH=platform-a40c00000.pcie-pci-0003:31:00.0  MAC …:8d:c6
+#   enP4p65s0  ID_PATH=platform-a41000000.pcie-pci-0004:41:00.0  MAC …:8d:c7
+#
+# eth0/eth1 follow the board's own deterministic hardware ordering: the lower
+# PCIe controller base address is eth0, and the vendor's sequential MAC
+# assignment agrees with it (…c6 before …c7). Both NICs are RTL8125
+# (0x10ec:0x8125) on r8169, so nothing else distinguishes them — the point of
+# this map is a STABLE assignment, not a claim about which RJ45 the silkscreen
+# calls "LAN1".
+#
+# wlan0 is deliberately ABSENT (the schema makes it optional). This unit has NO
+# wireless netdev to read an ID_PATH from: `/sys/class/ieee80211` does not exist,
+# no wireless driver is loaded, and the only trace of the M.2 wlan slot is an
+# empty `rfkill-pcie-wlan` stub. With no entry, `install_interface_naming()`
+# emits its generic `Type=wlan → wlan0` rule, which is the correct behaviour for
+# a board whose Wi-Fi module is absent or later populated. If a Wi-Fi adapter is
+# ever fitted, read its real ID_PATH the same way and add the key — do not invent
+# one from the Rock 5B+ (different PCIe topology entirely).
+interfaces:
+  eth0: platform-a40c00000.pcie-pci-0003:31:00.0
+  eth1: platform-a41000000.pcie-pci-0004:41:00.0
+
+# cerastream/srtla ship as systemd-sysext into /usr/bin (default boundary).
+app_backend: sysext
+
+description: >-
+  Orange Pi 5+ (RK3588). Best choice for HDMI-input setups (BELABOX-recommended);
+  HDMI capture less affected by EMI. Full 4K@60fps capture/encode. M.2 2280 M-key
+  slot for NVMe. Onboard RTL8821CS Wi-Fi, 3.7 A USB power budget — powers most USB
+  modems without a hub. eMMC/NVMe/microSD targets (16 GB+).
