@@ -3,3 +3,5 @@ linux-dtb-vendor-rk35xx=26.5.1
 armbian-firmware=26.8.1
 linux-u-boot-rock-5b-plus-vendor=26.5.1
 linux-u-boot-orangepi5-plus-vendor=26.5.1
+linux-u-boot-rock-5b-plus-edge=26.5.1
+linux-u-boot-orangepi5-plus-edge=26.5.1

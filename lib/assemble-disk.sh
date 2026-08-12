@@ -53,7 +53,7 @@
 # Usage:
 #   assemble-disk.sh build  --output <img> [--total-mb N] [--single-slot] [--no-format]
 #                           [--bootloader-adapter custom|efi] [--board <id>] [--bsp-dir <dir>]
-#                           [--rootfs-tree <dir>]
+#                           [--rootfs-tree <dir>] [--variant <name>]
 #   assemble-disk.sh verify [--out-dir DIR]
 #
 #   build   Produce a real-geometry disk image. --total-mb sets the medium size
@@ -64,7 +64,11 @@
 #           by the static verify path.
 #           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
 #           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
-#           RK3588 blob, efi skips it. --rootfs-tree <dir> (default ROOTFS_TREE env)
+#           RK3588 blob, efi skips it. --variant <name> (default KERNEL_VARIANT env,
+#           empty == the production vendor path) selects WHICH U-Boot blob set the
+#           gap write may use, keyed on the same board×variant tuple the resolver
+#           uses for variant_overrides.<variant>.uboot_packages.
+#           --rootfs-tree <dir> (default ROOTFS_TREE env)
 #           populates every factory rootfs slot from that tree; empty leaves the
 #           slots blank for the static geometry-only verification path.
 #   verify  Build an A/B and a single-slot test image and print + ASSERT their GPT
@@ -216,6 +220,7 @@ assert_free_space() {
 build_disk() {
   local img="$1" total_mb="$2" single_slot="$3" do_format="$4"
   local adapter="${5:-}" board_id="${6:-}" bsp_dir="${7:-}" rootfs_tree_arg="${8:-}"
+  local variant="${9:-}"
   require_cmd sgdisk
   require_cmd systemd-repart
   local defs; defs="$(mktemp -d)"
@@ -279,7 +284,7 @@ build_disk() {
   # 4. Write the family-gated bootloader into the 16 MB raw gap (real image only;
   #    the static --no-format verify path lays geometry alone and needs no blob).
   if [[ "${do_format}" == "true" ]]; then
-    write_gap_bootloader "${img}" "${adapter}" "${board_id}" "${bsp_dir}"
+    write_gap_bootloader "${img}" "${adapter}" "${board_id}" "${bsp_dir}" "${variant}"
   fi
 
   discard_scratch "${defs}"
@@ -300,6 +305,10 @@ main() {
       # blob set, bsp-dir is where fetch-debs staged the Armbian U-Boot .deb.
       local adapter="${RAUC_BOOTLOADER_ADAPTER:-}" board_id="${BOARD_ID:-}" bsp_dir="${BSP_DIR:-}"
       local rootfs_tree="${ROOTFS_TREE:-}"
+      # KERNEL_VARIANT is emitted by the resolver ONLY for a kernel-from-source
+      # variant, so an empty value IS the production path; the writer normalises
+      # it to 'default' rather than treating the absence as an error.
+      local variant="${KERNEL_VARIANT:-}"
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --output)              output="${2:-}"; shift 2 ;;
@@ -310,6 +319,7 @@ main() {
           --board)               board_id="${2:-}"; shift 2 ;;
           --bsp-dir)             bsp_dir="${2:-}"; shift 2 ;;
           --rootfs-tree)         rootfs_tree="${2:-}"; shift 2 ;;
+          --variant)             variant="${2:-}"; shift 2 ;;
           *) die "unknown build argument: $1" ;;
         esac
       done
@@ -324,7 +334,7 @@ main() {
       (( total_mb >= min_total_mb )) \
         || die "${layout_name} layout requires at least ${min_total_mb} MiB including the data floor and GPT tail (got ${total_mb} MiB)"
       build_disk "${output}" "${total_mb}" "${single_slot}" "${do_format}" \
-        "${adapter}" "${board_id}" "${bsp_dir}" "${rootfs_tree}"
+        "${adapter}" "${board_id}" "${bsp_dir}" "${rootfs_tree}" "${variant}"
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)

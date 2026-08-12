@@ -17,8 +17,31 @@ board_id: rock-5b-plus
 dtb_name: rk3588-rock-5b-plus.dtb
 
 # Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+# PRODUCTION path — deliberately unchanged.
 uboot_packages:
   - linux-u-boot-rock-5b-plus-vendor
+
+# Per-variant board facts. Only uboot_packages differs on this board: mainline
+# and the vendor BSP agree on rk3588-rock-5b-plus.dtb, so there is no dtb_name
+# entry (the Orange Pi carries one only as an explicit cross-tree assertion).
+#
+# The -edge package sits at the SAME version 26.5.1 as the vendor pin and is
+# built from Armbian's `tpl-blob-atf-mainline` boot scenario — TF-A compiled
+# from ARM-software/arm-trusted-firmware tag v2.13.0 rather than taken from
+# Rockchip's closed rkbin BL31. Unlike the Orange Pi, this board's armbian/build
+# hook carries NO `vendor` branch guard, so its shipped vendor package is very
+# likely ALREADY on that chain (both packages ship the unified
+# u-boot-rockchip.bin from U-Boot 2026.04, and snps_hdmirx already probes here).
+# The override is therefore an explicit assertion that the edge track fetches
+# the edge-branch package — not a repair — and it keeps both boards on one
+# mechanism instead of making the Orange Pi a special case.
+#
+# The blob's exact SHA-256 is pinned in manifests/bootloader-blobs.tsv and
+# asserted by lib/write-bootloader.sh before any byte reaches the raw gap.
+variant_overrides:
+  edge:
+    uboot_packages:
+      - linux-u-boot-rock-5b-plus-edge
 
 # INERT/UNCONSUMED legacy metadata carried from configs/devices/rock5bplus.conf:
 # no build script reads this field and no overlay-application step exists in the
