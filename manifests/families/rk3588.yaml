@@ -306,6 +306,19 @@ variants:
       # the pair that made MPP hardware encode work on this track — board-confirmed
       # on a Rock 5B+). Predecessor before that: 9c1cb385098d.
       #
+      # This re-pin changes NO kernel behavior. It is pure history cleanup plus
+      # first-party patch authorship attribution: 0021+0023+0024+0025 were
+      # consolidated, and the 14 first-party patches were re-attributed. The
+      # proof is git tree-object hash equivalence: e8133646d100f528c17f1834a82f20becfc48b6a
+      # before and after. Todo45's six signed receipts (33/34/35/36/37/45) were
+      # obtained against the prior tip's byte-identical content, so this pin
+      # bump does not invalidate them functionally. A CONFIRMATORY, not
+      # rediscovery, hardware re-verification is still warranted before relying
+      # on this for a merge: each receipt's recorded patches_commit is now
+      # technically stale despite the tested bytes being identical. The
+      # orchestrator will decide how to handle that observation; this pin bump
+      # does not resolve it.
+      #
       # Pin a SHA that a fresh clone can reach, never a PR-head SHA: the
       # squash-merge of #4 orphaned its pre-merge head 2e195f2d36db, so pinning
       # that would pin a commit no ref reaches. This pin is a BRANCH TIP rather
@@ -315,7 +328,7 @@ variants:
       # The branch is pushed, so `git fetch --depth 1 <patches_git_url>
       # <patches_commit>` from a scratch clone reaches this exact revision.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: df8a39ad4b0b5556f55ebfd79a9491dd3906761f
+      patches_commit: eb0f338edd6b203387ea22b4aceb6eb57136c68c
       patches_series: patches/series
 
       defconfig_base: defconfig

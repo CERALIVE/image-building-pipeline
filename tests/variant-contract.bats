@@ -453,7 +453,7 @@ YAML
   # attest.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='df8a39ad4b0b5556f55ebfd79a9491dd3906761f'"* ]]
+   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='eb0f338edd6b203387ea22b4aceb6eb57136c68c'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
@@ -857,7 +857,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.7"* ]]
   [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-  [[ "$output" == *"df8a39ad4b0b5556f55ebfd79a9491dd3906761f"* ]]
+   [[ "$output" == *"eb0f338edd6b203387ea22b4aceb6eb57136c68c"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
