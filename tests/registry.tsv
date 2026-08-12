@@ -66,6 +66,7 @@ tests/preflash-cross-board.test.sh	shell	integration	default-shell	board-derived
 tests/flash-remote-guard.test.sh	shell	integration	default-shell	remote-destructive-write contract: local block device plus a physical confirmation, or no write
 tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
 tests/hardware-candidate-bench-labels.test.sh	shell	integration	default-shell	--bench-labels is required, exported to ./build and recorded in the artifact tuple
+tests/hardware-candidate-vendor-tuple.test.sh	shell	integration	default-shell	the prebuilt-vendor candidate emits a valid tuple without source-build fields, off the BSP-staged package, without the edge symbol closure
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source

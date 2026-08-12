@@ -77,7 +77,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test\|rock-vendor --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -661,22 +661,62 @@ answer:
   `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`, and the tuple carries
   `bench_labels` + `partlabel_set`.
 
+- **WHICH RECOVERY LOADER.** The MaskROM loader is resolved PER BOARD from
+  `ci/fetch-rk3588-loader.sh`'s table (`--print-identity <board-id>`), never as one
+  constant. It is the path an operator reaches for once a candidate has already
+  bricked the board, and it is matched to a board's DDR topology rather than to
+  the SoC: the Rock binds Radxa's `rk3588_spl_loader_v1.15.113.bin`, the Orange Pi
+  binds `rk3588_spl_loader_v1.16.113.bin` from `armbian/rkbin` — the loader whose
+  embedded DDR build (`ddr-v1.16-9fffbe1e78`) is byte-identical to the one that
+  board's own running chain reports in `androidboot.fwver`. A board with no pinned
+  loader is REFUSED, never defaulted onto another board's artifact. The tuple
+  carries `loader_board` / `loader_name` / `loader_url` / `loader_sha256`.
+
 The **eight DRY_RUN probes** (the seven valid board×kernel-track cells plus the
 multi-board dispatch probe) run BEFORE any real build, so a plan-level
 regression is reported in seconds rather than after a kernel compile.
 `--debug-env` is required when a debug candidate is selected and refused when
 one is not; it supplies `CERALIVE_DEBUG_PASSWORD_HASH`, and the script sets
 `CERALIVE_DEBUG_IMAGE` explicitly on both branches rather than letting an
-ambient value decide. `--self-test` (18 legs) drives every refusal — including
-the `--bench-labels` one — and both non-vacuity directions of the symbol
-assertion. The end-to-end contract (refusal, both exported values observed in
-the environment `./build` actually receives, and both tuple fields) is
+ambient value decide. `--self-test` (25 legs) drives every refusal — including
+the `--bench-labels` one, the per-board loader table and the vendor candidate's
+mapping — and both non-vacuity directions of the symbol assertion. The end-to-end
+contract (refusal, both exported values observed in the environment `./build`
+actually receives, both tuple fields, and the no-collision property below) is
 `tests/hardware-candidate-bench-labels.test.sh`.
 
-**The artifact tuple is at `schema_version: 2`.** The bump is `bench_labels` +
+**Every evidence path carries the bench-labels mode**:
+`<candidate>.bench-labels-<0|1>.{log,config,tuple.json}`. The same candidate is
+legitimately built once per mode — bench overlay for staging media, frozen
+production set for the final medium — and those two artifacts are NOT
+interchangeable, so naming by candidate alone let the second run silently
+overwrite the first's evidence and leave an operator holding two artifacts and
+one artifact's evidence.
+
+**`rock-vendor` is the PREBUILT-vendor candidate, and it is opt-in by name.** It
+is deliberately NOT in `--only all`: it is a comparison/smoke artifact (the
+todo-19 vendor smoke test), not one of the qualification set. Four things in the
+recorder are edge-only and are branched for it — the tuple stays valid with no
+`KERNEL_SOURCE_*` fields; the kernel package is located in the BOARD'S BSP
+STAGING AREA (`mkosi/.staging/<board>/bsp`), identity-checked against
+`manifests/armbian-bsp-deb-versions.txt`, with the kernel release AND the config
+read out of the package payload; the EDGE `required`/`forbidden` manifests are
+NOT applied (`required-symbols.list` demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX`, the
+mainline driver, which a correct vendor kernel does not carry) and the vendor
+gate is instead `CONFIG_VIDEO_ROCKCHIP_HDMIRX=y` in that package's own config;
+and the candidate maps to the resolver's reserved `default`, so `./build` is
+invoked BARE — passing `--variant default` would be an error. Contract:
+`tests/hardware-candidate-vendor-tuple.test.sh` (18 legs, incl. non-vacuity for
+each vendor-specific refusal and a spy proving the edge closure never runs).
+
+**The artifact tuple is at `schema_version: 3`.** Schema 2 added `bench_labels` +
 `partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
 by tooling that COULD NOT state which PARTLABEL set built the artifact, which is
 precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
+Schema 3 makes `loader_sha256` board-specific and adds `loader_name`/`loader_url`
+/`loader_board`, `kernel_source`/`kernel_package` and `evidence_stem` — a
+schema-2 tuple recorded the RADXA loader's digest for every board, so an Orange
+Pi tuple named a loader that board's BootROM cannot be recovered with.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
@@ -4298,6 +4338,9 @@ gated item, not the package availability.
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
+- Don't record one board's MaskROM recovery loader in another board's candidate tuple, and don't collapse `ci/fetch-rk3588-loader.sh` back to a single constant. The loader's first stage is the DDR initialiser, matched to a board's memory topology — the OPi's correct loader was identified by matching the DDR build hash its own running chain reports. A tuple naming an unusable loader is read precisely when the board is already bricked
+- Don't name a candidate's evidence by candidate alone. The same candidate is built once per `--bench-labels` mode and the two artifacts are not interchangeable; every log, config and tuple is `<candidate>.bench-labels-<0|1>.<ext>` so the second run cannot overwrite the first's evidence
+- Don't apply `manifests/kernel/required-symbols.list` to the `rock-vendor` candidate. It demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX` — the MAINLINE HDMI-RX driver — and a correct vendor kernel carries `rk_hdmirx` (`CONFIG_VIDEO_ROCKCHIP_HDMIRX`) instead, so the edge closure fails a GOOD artifact. Don't pass `--variant default` for it either: `default` is the resolver's reserved no-overlay name, i.e. a bare `./build <board>`
 - Don't give `ci/build-hardware-candidates.sh`'s `--bench-labels` a default of any kind, and don't let it fall back to an ambient `CERALIVE_BENCH_LABELS`. A candidate whose PARTLABEL set was decided by the dispatch shell builds, boots and passes every other gate, and then addresses `/boot` and `/data` on the WRONG PHYSICAL MEDIUM of a dual-media bench rig — that is a real 2026-08-10 incident, not a hypothetical. `lib/orchestrate.sh`'s own `:-0` default is for a DIRECT `./build` and stays exactly as it is
 - Don't regenerate `tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
