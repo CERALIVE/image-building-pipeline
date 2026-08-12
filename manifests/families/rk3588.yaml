@@ -312,19 +312,8 @@ variants:
       # than a `main` commit on purpose — the branch has not merged yet, and the
       # hardware evidence must name the exact revision it was produced from.
       #
-      # BENCH-LOCAL AT THIS PIN, and that is a deliberate, temporary state. The
-      # current SHA adds `0026` (snps_hdmirx rst_lock -> raw_spinlock_t), which
-      # is the fix for a lockdep `Invalid wait context` that fires from the CEC
-      # hardirq during probe on any board with a real HDMI source attached and
-      # then calls debug_locks_off() — disarming lockdep for the rest of the
-      # boot and blinding every later lock assertion in every subsystem. It is
-      # NOT yet pushed, so `git fetch --depth 1 <patches_git_url>
-      # <patches_commit>` from a scratch clone FAILS today. Obtain it with the
-      # BENCH-ONLY `CERALIVE_KERNEL_PATCHES_LOCAL_REPO=<clone>` mirror override,
-      # which changes the transport only — this SHA is still asserted after
-      # checkout, so it cannot build different patches. Re-verify reachability
-      # with `git ls-remote` and delete this paragraph once the branch is
-      # pushed; never leave a release path on a bench-local pin.
+      # The branch is pushed, so `git fetch --depth 1 <patches_git_url>
+      # <patches_commit>` from a scratch clone reaches this exact revision.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
       patches_commit: df8a39ad4b0b5556f55ebfd79a9491dd3906761f
       patches_series: patches/series
