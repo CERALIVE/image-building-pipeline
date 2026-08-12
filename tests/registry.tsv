@@ -39,6 +39,7 @@ tests/package-contract.bats	bats	unit	default-bats	package sets, staging classif
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
 tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
 tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
+tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, blob hash, negative conformance fixtures
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, vendor-baseline byte parity
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
@@ -107,6 +108,7 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/edid-conformance.py	tool	support	invoked-by-suite	EDID validity + 4K60 capability checker and negative-fixture generator, driven by hdmirx-edid-contract.bats
 tests/preflash-verify.sh	tool	support	invoked-by-suite	operator preflash gate; its --self-test is driven by rk3588-ab-contract.bats and lib/stages/boot-verify.sh
 tests/provision-portal.test.sh	shell	unit	invoked-by-suite	offline captive-portal proof, gated and executed by postinst-wiring.bats
 tests/package-migration-coverage.sh	tool	support	invoked-by-suite	legacy-to-v2 package accounting set consumed by lib/parity-check.sh

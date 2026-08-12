@@ -158,6 +158,7 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_hdmirx_edid
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must
