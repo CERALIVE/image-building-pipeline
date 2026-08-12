@@ -207,11 +207,23 @@ plan with no image written (see the executed transcript in
 
 The complete hardware-free CI/test entrypoint is
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
-CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests`. It creates the ignored,
-NON-PRODUCTION RAUC signing fixture on demand; production builds must still
-provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests`. It creates the
+ignored, NON-PRODUCTION RAUC signing fixture on demand; production builds must
+still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
+
+All three default to `skip` so a developer machine is never mounted on
+unexpectedly, and CI sets each to `required`. The first two decide whether their
+suite runs at all. The third is narrower: it governs only the three
+package-index probes in `tests/mkosi-package-staging.test.sh` that must run
+`find` as a different, unprivileged UID (via `runuser` as real root, or
+passwordless `sudo`). Those probes always run when that privilege IS available,
+whichever value is set — `skip` only decides that a genuinely unavailable probe
+reports `SKIP` instead of failing, while `required` makes its absence fatal. The
+rest of that file needs no privilege and always runs, which is why it stays in
+the always-run `default-shell` set rather than being reclassified `opt-in`.
 When GNU parallel is available, Bats files run in parallel but cases within each
 file stay serial; tests that share the build staging tree also use file locks so
 CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's

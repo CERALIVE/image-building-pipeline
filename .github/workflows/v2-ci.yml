@@ -133,7 +133,8 @@ jobs:
       - name: Run v2 manifest unit suite
         run: |
           CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-            CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests
+            CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+            CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 
   size-gate:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT

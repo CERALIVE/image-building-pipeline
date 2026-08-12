@@ -280,6 +280,39 @@ Four things to know before editing it:
   `run-tests --list`, which is both the current source of truth and a stronger
   claim (a text grep would also match a commented-out line).
 
+**A privilege-needing ASSERTION inside an always-run file gets an internal gate,
+NOT a registry reclassification** [EXISTS]
+
+`tests/mkosi-package-staging.test.sh` is `default-shell` — part of the hard
+always-run gate — and it must stay that way. Most of what it asserts (mkosi
+orchestrator source assembly, buildroot structure, staging modes, the
+`mkosi-install` call ORDER, the gated firmware prune) needs no privilege at all
+and is real always-on coverage. Only THREE of its assertions do: the package-index
+probes, which must run `find` as a **different, unprivileged UID** — `runuser -u
+nobody` as real root, or `sudo -n -u nobody`.
+
+`CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT` gates exactly those three, in the same
+`required` | `skip` | `*`→`exit 2` shape as the `AVAHI`/`RAUC` gates in
+`run-tests`, defaulting to `skip` with CI setting `required` in `v2-ci.yml`.
+
+Three things to know before touching it:
+
+- **The semantics are deliberately NARROWER than the two gates it copies.**
+  Avahi/RAUC decide whether their suite RUNS; this one only decides what happens
+  when the probe is genuinely UNAVAILABLE. Real privilege is exercised whenever it
+  is present, whichever value is set — so `skip` can never quietly disable the
+  check on a machine that could have run it. Proven by a non-vacuity leg: with a
+  working `sudo`, the probe runs and the assertion still fires.
+- **Moving the WHOLE FILE to `opt-in` is the wrong fix**, and it is the tempting
+  one, because the registry already classifies genuinely-privileged files
+  (`real-rauc-contract.sh`, `real-rauc-cleanup-contract.test.sh`) that way. Here it
+  would drop every non-privileged assertion above out of every CI run to
+  accommodate three.
+- **`unshare --user --map-root-user` is a ruled-out dead end.** It is the obvious
+  way to fake privilege separation in a sandbox and it does not work: namespace UID
+  remapping does not change the real on-disk ownership checks these mode-0700 /
+  mode-0755 assertions exist to exercise.
+
 **`tests/lib/assertions.sh` is the ONE result-bookkeeping library for the
 collecting shell harnesses** [EXISTS]
 
@@ -777,11 +810,13 @@ NOT dereference a symlink that is the FINAL path component (it writes the link
 target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
 follows a terminal-component symlink to the versioned target, and globs the versioned
 initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `run-tests` blocks on the actual boot-script sanitizer, fallback engine,
-mock rollback, preflash adversarial fixtures, and the two privileged hardware-free
+mock rollback, preflash adversarial fixtures, and the three privileged hardware-free
 contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=required` exercises
-real-RAUC interruption/cleanup, while
+real-RAUC interruption/cleanup,
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required` exercises real mDNS arbitration in
-private namespaces. The RAUC harness uses the supported boot-slot override for
+private namespaces, and `CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required`
+exercises the real UID-drop package-index probes described in the KEY FACT below.
+The RAUC harness uses the supported boot-slot override for
 its synthetic file-backed slots, so the same service contract runs across CI
 RAUC versions without depending on the runner's boot device. A v1 single-slot
 disk cannot migrate by

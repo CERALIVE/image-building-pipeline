@@ -46,24 +46,65 @@ unprivileged_index() {
 	local dir="$1"
 	if [[ "$(id -u)" == "0" ]]; then
 		runuser -u nobody -- find "${dir}" -maxdepth 1 -type f -name '*.deb' -printf '%f\n' 2>/dev/null
-	elif sudo -n -u nobody true 2>/dev/null; then
-		sudo -n -u nobody -- find "${dir}" -maxdepth 1 -type f -name '*.deb' -printf '%f\n' 2>/dev/null
 	else
-		printf 'FAIL unprivileged package-index probe requires root or passwordless sudo\n' >&2
-		return 1
+		sudo -n -u nobody -- find "${dir}" -maxdepth 1 -type f -name '*.deb' -printf '%f\n' 2>/dev/null
 	fi
 }
+
+# The index probes below need GENUINE privilege separation — the `find` has to run
+# as a different, unprivileged UID, because what they assert is a real on-disk
+# ownership/mode permission check. `unshare --user --map-root-user` does NOT supply
+# it: remapping a UID inside a namespace does not change those checks. So the probe
+# needs real root (runuser) or passwordless sudo, and a sandboxed environment often
+# has neither. Every other assertion in this file needs no privilege at all and
+# always runs, which is why this file stays `default-shell` in tests/registry.tsv.
+#
+# Same opt-in shape as run-tests' CERALIVE_RUN_REAL_{AVAHI,RAUC}_CONTRACT gates:
+# `skip` locally, `required` in CI. Note the one deliberate difference — those two
+# gates decide whether the real check RUNS at all, while this one only decides what
+# happens when the probe is genuinely unavailable. Real privilege is always
+# exercised when it is present, whichever value is set.
+PRIVILEGE_DROP_CONTRACT="${CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT:-skip}"
+case "${PRIVILEGE_DROP_CONTRACT}" in
+	required | skip) ;;
+	*)
+		echo "ERROR: CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT must be 'required' or 'skip'" >&2
+		exit 2
+		;;
+esac
+
+privilege_drop_available() {
+	if [[ "$(id -u)" == "0" ]]; then
+		return 0
+	fi
+	sudo -n -u nobody true 2>/dev/null
+}
+
+if privilege_drop_available; then
+	PRIVILEGE_DROP=1
+elif [[ "${PRIVILEGE_DROP_CONTRACT}" == "required" ]]; then
+	printf 'FAIL unprivileged package-index probe requires root or passwordless sudo\n' >&2
+	exit 1
+else
+	PRIVILEGE_DROP=0
+	echo "== SKIP real privilege-drop contract (set CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required) =="
+fi
 
 for class in bsp firstparty; do
 	install -d -m 0700 "${RUN_DIR}/blocked/${class}"
 	install -m 0644 "${RUN_DIR}/private-download/demo_1.0_arm64.deb" \
 		"${RUN_DIR}/blocked/${class}/demo_1.0_arm64.deb"
+	[[ "${PRIVILEGE_DROP}" -eq 1 ]] || continue
 	[[ -z "$(unprivileged_index "${RUN_DIR}/blocked/${class}")" ]] || {
 		printf 'FAIL mode-0700 %s directory unexpectedly exposed a package index\n' "${class}" >&2
 		exit 1
 	}
 done
-printf 'PASS mode-0700 BSP and first-party directories yield empty unprivileged indexes\n'
+if [[ "${PRIVILEGE_DROP}" -eq 1 ]]; then
+	printf 'PASS mode-0700 BSP and first-party directories yield empty unprivileged indexes\n'
+else
+	printf 'SKIP mode-0700 BSP and first-party unprivileged index probe (no privilege separation)\n'
+fi
 
 umask 077
 "${HELPER}" "${RUN_DIR}/private-download/demo_1.0_arm64.deb" "${RUN_DIR}/bsp"
@@ -81,11 +122,14 @@ for dir in "${RUN_DIR}/bsp" "${RUN_DIR}/firstparty"; do
 			"$(stat -c '%a' "${dir}/demo_1.0_arm64.deb")" >&2
 		exit 1
 	}
+	[[ "${PRIVILEGE_DROP}" -eq 1 ]] || continue
 	[[ "$(unprivileged_index "${dir}")" == "demo_1.0_arm64.deb" ]] || {
 		printf 'FAIL unprivileged package index is empty: %s\n' "${dir}" >&2
 		exit 1
 	}
 done
+[[ "${PRIVILEGE_DROP}" -eq 1 ]] ||
+	printf 'SKIP mkosi consumer unprivileged index probe (no privilege separation)\n'
 
 [[ "$(stat -c '%a' "${RUN_DIR}/private-download")" == "700" ]] || {
 	printf 'FAIL private download directory permissions were widened\n' >&2

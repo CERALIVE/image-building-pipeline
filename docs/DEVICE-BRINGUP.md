@@ -887,8 +887,14 @@ clean checkout:
 
 ```bash
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
-  CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests
+  CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+  CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
+
+All three default to `skip`, so a plain `./run-tests` on a machine without root
+or passwordless sudo still completes: the privilege-drop gate reports `SKIP` for
+the three package-index probes that need a real UID drop, and every other
+assertion runs normally.
 
 The generator validates the NON-PRODUCTION certificate chain and leaf key before
 the RAUC assertions run. Production builds still require an explicit
