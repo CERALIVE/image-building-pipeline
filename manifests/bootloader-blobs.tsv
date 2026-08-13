@@ -25,11 +25,18 @@
 #   blob      blob filename inside the package payload
 #   sha256    lowercase hex SHA-256 of that blob's bytes
 #
-# PROVENANCE. Every hash below was read out of a .deb whose own SHA-256 matched
-# the entry in Armbian's gpgv-verified bookworm/main/arm64 Packages index, dual-
-# signed by DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 and
-# 8CFA83D13EB2181EEF5843E41EB30FAF236099FE. Full transcript + per-file inventory:
-# test-results/hdmirx-4k60/feasibility.md (gitignored evidence, todo 1).
+# PROVENANCE, and it is re-derivable from this file alone. Every hash below was
+# read out of a .deb whose own SHA-256 matched that package's entry in the
+# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest
+# taken from the gpgv-VERIFIED `Release` plaintext, never the raw `InRelease` —
+# under both pinned archive keys DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 and
+# 8CFA83D13EB2181EEF5843E41EB30FAF236099FE. The `package` + `version` columns are
+# the pins in manifests/armbian-bsp-deb-versions.txt, and the verification is the
+# pipeline's own lib/fetch-debs-auth.sh (auth_keyring_has_exact_fingerprints ->
+# auth_verify_release_to_file -> auth_release_has_identity), i.e. the exact code
+# a real BSP fetch runs — so a fresh checkout can reproduce every row without any
+# local artifact. Do NOT cite a path under test-results/ here: that tree is
+# gitignored repo-local evidence (Rule D) and resolves to nothing when cloned.
 #
 # TWO PAYLOAD SHAPES, and only one of them is a split. The `-current`/`-edge`
 # packages on BOTH boards, and the Rock's `-vendor` package, ship ONE unified
