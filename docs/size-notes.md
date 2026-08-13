@@ -730,3 +730,94 @@ produced no wet build, so writing a computed figure there would substitute an
 estimate for a measurement and quietly hollow out the contract those registries
 exist to enforce. The next real production build re-measures both boards, and
 the delta above is what it should show.
+
+---
+
+## 11. The vendor path was 164.9 MB over, and both causes were prunes that never reached (2026-08-13)
+
+`./build rock-5b-plus` — the PRODUCTION vendor path — measured **1,664,911,360 B**
+against the 1,500,000,000 B ceiling and was refused at `[6c/9]`, twice, on two
+different commits, byte-identically. Neither cause was new content. Both were
+existing, reviewed, documented prunes that silently did not reach the bytes they
+were written to remove, and in both cases the build log read as if they had.
+
+`rootfs_bytes_max` was not raised. The two fixes below took the same artifact to
+well under the ceiling.
+
+### Lever 1 — the vendor DTB payload: 91,117,943 B (`prune_vendor_dtbs`)
+
+The vendor BSP ships the RK35xx device-tree set **twice**, and the two packages
+disagree about where:
+
+| directory | shipped by | files | bytes | pruned before |
+|---|---|---:|---:|---|
+| `/boot/dtb-6.1.115-vendor-rk35xx/rockchip` | `linux-dtb-vendor-rk35xx` | 813 | 91,110,000-ish | yes |
+| `/usr/lib/linux-image-6.1.115-vendor-rk35xx/rockchip` | `linux-image-vendor-rk35xx` | 813 | 91,117,943 | **no** |
+
+`AGENTS.md` has said "BOTH locations, not one" since the prune landed, and
+`install_kernel_source_dtbs` does exactly that on the source-built path — it calls
+`prune_dtb_dir` twice. `prune_vendor_dtbs` searched `${root}/boot` alone, so the
+package payload was never touched. The log line
+`vendor DTB payload: kept 1 device-tree file(s) … removed 810` is what hid it: it
+is a true statement about the copy the function looked at.
+
+Both directories are now discovered the same way — by locating the board's own
+DTB, never by composing a release string — and both keep the verify-before-delete
+and verify-after-delete discipline. `/boot` missing the board DTB stays FATAL (it
+is an unbootable slot); a kernel package that ships no device trees of its own is
+a legitimate shape and is logged, not fatal.
+
+### Lever 2 — the firmware sweep had never once run: 331,729,593 B
+
+`platform/mkosi.postinst` is a NON-chroot script, so `prune_irrelevant_rk3588_firmware`
+resolves `modinfo` from the **builder image** — and `ci/Dockerfile` never installed
+`kmod`. Every real build log carried:
+
+```
+[platform] WARNING: modinfo is unavailable — cannot prove a firmware family has no
+consumer, so NOTHING is pruned
+```
+
+That fail-safe is correct and must stay: no proof, no deletion. What was missing
+is the capability it depends on. §9's sibling claim in this file — "the firmware
+prune saves ZERO bytes today, and that is the point" — was written from the
+package's contents at an older `armbian-firmware` pin and never verified against a
+built rootfs; at the current `26.8.1` pin it is simply false.
+
+`kmod` is now in the builder image, asserted by `command -v modinfo` in the same
+`RUN` block as the mkosi and pefile pin checks. Run for real against the emitted
+`rock-5b-plus` vendor rootfs, the sweep's verdicts are:
+
+| family | bytes | verdict | reason |
+|---|---:|---|---|
+| `qcom/` | 309,034,126 | PRUNE | no installed module references it |
+| `ath12k/` | 16,290,021 | PRUNE | no `ath12k` module in the vendor kernel |
+| `updates/` | 6,405,446 | PRUNE | every file has a base counterpart |
+| `intel/` | 3,131,936 | KEEP | `intel/ibt-11-5.ddc` |
+| `ath10k/` | 9,153,792 | KEEP | `ath10k/QCA6174/hw2.1/board-2.bin` |
+| `ath11k/` | 11,977,545 | KEEP | `ath11k/QCA6390/hw2.0/amss.bin` |
+| **pruned total** | **331,729,593** | | |
+
+`updates/` deserves its own line because it is the firmware loader's **override**
+directory — the kernel searches it before `/lib/firmware`. Removing it is safe
+here only because each of its files resolves to a base counterpart afterwards:
+`regulatory.db` and `regulatory.db.p7s` (supplied by `wireless-regdb` through
+update-alternatives, which is why that package is an explicit `shared.list`
+entry) and the ath11k WCN6855 hw2.0 board file. Check that property again if a
+future `armbian-firmware` starts shipping something under `updates/` with no base
+copy.
+
+### The lesson, which is the same one twice
+
+A prune that logs a plausible success is indistinguishable from a prune that
+works, and neither of these was visible to the PR gate — it is `DRY_RUN=1` and
+never runs the layers that install a kernel or firmware. Both defects were found
+by measuring the emitted rootfs tar, not by reading the build log. When a size
+number does not move after a prune lands, measure the artifact.
+
+### Registries are NOT edited here
+
+`manifests/size-budget.json` `measured` and `ci/size-baseline.<board>.json` keep
+the same rule as §10: they record a real `du --apparent-size -sb` of a wet
+production build, and a computed figure written there would substitute an estimate
+for a measurement.

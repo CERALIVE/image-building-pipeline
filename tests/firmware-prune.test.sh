@@ -273,5 +273,34 @@ else
   bad "the prune is defined but never called"
 fi
 
+# ---------------------------------------------------------------------------
+# 6. The BUILDER IMAGE must actually provide modinfo.
+#
+# Everything above proves the sweep is correct WHEN modinfo is present, including
+# the fail-safe that declines when it is not — so a builder without `kmod` takes
+# the decline branch on every real build and the whole prune is a no-op that no
+# synthetic-tree case can see. Same shape as the call-site check above: a
+# capability the function depends on, asserted where it is provisioned.
+#
+# mkosi.postinst is a NON-chroot script, so `modinfo` resolves from the builder
+# image, never from the rootfs being built — kmod does not belong in the device
+# package set.
+# ---------------------------------------------------------------------------
+BUILDER_DOCKERFILE="${PIPELINE_DIR}/ci/Dockerfile"
+if [[ -f "${BUILDER_DOCKERFILE}" ]]; then
+  if grep -qE '^ +kmod \\$' "${BUILDER_DOCKERFILE}"; then
+    ok "the canonical builder image installs kmod, so modinfo is available to the prune"
+  else
+    bad "ci/Dockerfile must install kmod — without modinfo the firmware prune declines on every build"
+  fi
+  if grep -q 'command -v modinfo' "${BUILDER_DOCKERFILE}"; then
+    ok "the builder image build FAILS if modinfo is missing"
+  else
+    bad "ci/Dockerfile must assert modinfo is present, like its mkosi/pefile pin checks"
+  fi
+else
+  bad "canonical builder Dockerfile not found at ${BUILDER_DOCKERFILE}"
+fi
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]

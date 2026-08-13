@@ -1569,20 +1569,41 @@ is no overlay load anywhere in the CeraLive boot path.
 `prune_dtb_dir` in `platform/mkosi.postinst` reduces a directory to the board DTB
 plus an explicit overlay allowlist; `install_kernel_source_dtbs` applies it to
 BOTH the package-payload directory and the `/boot` copy, and `prune_vendor_dtbs`
-applies it to the prebuilt vendor tree. Measured on a real edge build:
-34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled in a
-factory `.raw` because the kernel rides inside a RAUC slot.
+applies it to BOTH of the prebuilt vendor tree's copies. Measured on a real edge
+build: 34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled
+in a factory `.raw` because the kernel rides inside a RAUC slot.
 
 - **Both locations, not one.** The package-payload directory stays in the rootfs
   after installation, so trimming only `/boot` would leave the full set shipping.
+- **The VENDOR path honoured that rule for `/boot` only, for three releases** —
+  the second half was added 2026-08-13 after `./build rock-5b-plus` was refused at
+  `[6c/9]` measuring 1,664,911,360 B against the 1,500,000,000 B ceiling. The
+  vendor BSP ships the blob set TWICE and the two packages disagree about where:
+  `linux-dtb-vendor-rk35xx` puts 813 files under `/boot/dtb-<REL>/rockchip/`
+  while `linux-image-vendor-rk35xx` carries its own 813 under
+  `/usr/lib/linux-image-<REL>/rockchip/`. `prune_vendor_dtbs` searched
+  `${root}/boot` alone, so the build log truthfully read
+  `vendor DTB payload: kept 1 device-tree file(s) … removed 810` while
+  **814 files / 91,117,943 B** sat untouched in the package payload — in both
+  slots of every image and inside every bundle. The log line reporting a
+  successful prune is exactly what made this invisible; read it as "the copy it
+  looked at", not "the image".
+- **Neither directory is fatal in the same way.** A board DTB missing under
+  `/boot` is an unbootable slot and stays FATAL; a kernel package that ships no
+  device trees of its own is a legitimate packaging shape, so an absent payload
+  directory logs and continues. `-mindepth 2` on the `/boot` search is
+  load-bearing for a different reason: a bare DTB at the root of `/boot` would
+  otherwise nominate the directory holding `vmlinuz`, the initrd and `boot.scr`
+  as a prune target.
 - **Verify BEFORE deleting, and again after.** A prune that removes first and
   finds the board DTB missing second has already produced an unbootable slot, and
   that failure surfaces at the far end of a flash cycle.
-- **The vendor directory is DISCOVERED, never composed from a release string.**
-  `/boot/dtb-<REL>` comes from the Armbian package, not from anything this repo
-  resolves, so a hardcoded path would silently no-op on the next version bump.
-  `find` does not descend the `/boot/dtb` symlink, so the real directory is
-  pruned once and the symlink keeps resolving.
+- **Both vendor directories are DISCOVERED, never composed from a release
+  string.** `/boot/dtb-<REL>` and `/usr/lib/linux-image-<REL>` are both named by
+  the Armbian packages, not by anything this repo resolves, so a hardcoded path
+  would silently no-op on the next version bump. `find` does not descend the
+  `/boot/dtb` symlink, so the real directory is pruned once and the symlink keeps
+  resolving.
 - **`armbian_overlays` is NOT the keep-list.** The board schema documents it as
   inert, unconsumed provenance metadata; using it would fail the existence check
   for blobs that were never in any kernel tree. The real knob is
@@ -1598,7 +1619,9 @@ factory `.raw` because the kernel rides inside a RAUC slot.
   self-defending — re-unpacking the package DOES restore every blob — so the
   argument rests on the freeze rather than on the prune.
 
-Guards: `tests/dtb-prune-contract.bats` (20 tests, six tagged `vendor`).
+Guards: `tests/dtb-prune-contract.bats` (25 tests, eleven tagged `vendor` —
+including the both-locations regression, verify-before-delete inside the payload
+copy, the absent-payload no-op, and the `/boot`-is-never-a-target property).
 
 **Firmware is pruned only where an installed-module sweep proves no consumer**
 [EXISTS]
@@ -1637,9 +1660,31 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
   five are now KEPT with the blocking reference named. Only `qcom/`, `updates/`,
   `microchip/`, `tegra/`, `renesas/` and `r8a779x_usb3_rom.mem` have zero
   consumers.
-- **It saves 0 bytes at the current pin, on purpose.** `armbian-firmware` is
-  already the trimmed variant and ships none of the new candidates. This is a
-  forward guard against a re-spin, not a reduction.
+- **CORRECTION (2026-08-13) — it had never run at all, and it now saves 331 MB.**
+  The claim this bullet used to make ("saves 0 bytes at the current pin, on
+  purpose — `armbian-firmware` is already the trimmed variant and ships none of
+  the new candidates") was never measured against a real build, and both halves
+  are false at `armbian-firmware 26.8.1`. `platform/mkosi.postinst` is a
+  NON-chroot script, so it resolves `modinfo` from the **builder image** — and
+  `ci/Dockerfile` did not install `kmod`. Every real build log therefore carried
+  `WARNING: modinfo is unavailable — cannot prove a firmware family has no
+  consumer, so NOTHING is pruned` and the sweep authorised zero deletions from
+  the day it landed. The fail-safe worked exactly as designed; what was missing
+  was the capability it depends on. `kmod` is now in the builder image and its
+  presence is asserted in the same `RUN` block as the mkosi/pefile pin checks.
+  Run for real against the `rock-5b-plus` vendor rootfs the sweep prunes
+  `qcom/` (309,034,126 B), `ath12k/` (16,290,021 B) and `updates/`
+  (6,405,446 B) — **331,729,593 B** — while correctly KEEPING `intel/`
+  (`intel/ibt-11-5.ddc`), `ath10k/` (`ath10k/QCA6174/hw2.1/board-2.bin`) and
+  `ath11k/` (`ath11k/QCA6390/hw2.0/amss.bin`), each with its blocking reference
+  named. `updates/` is safe to lose because it is the loader's override
+  directory and every file it carries (`regulatory.db`, `regulatory.db.p7s`, the
+  ath11k WCN6855 hw2.0 board file) has a base counterpart the search then
+  resolves — `wireless-regdb` supplies `regulatory.db` through
+  update-alternatives, which is why that package is an explicit `shared.list`
+  entry. **`modinfo` is arch-agnostic** (it parses ELF), so the x86_64 builder
+  reads the arm64 `.ko` set correctly; do NOT "fix" a future failure here by
+  adding `kmod` to the device package set.
 - **Two failure modes are closed.** Batching through `xargs modinfo` made ONE
   unparseable `.ko` abort the whole postinstall under `set -e`; swallowing every
   failure is worse, because an empty consumer set authorises deleting everything.
@@ -1649,7 +1694,10 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
 - **Nothing is removed as a PACKAGE.** `armbian-firmware`, `libmali` and
   `hostapd` all stay installed.
 
-Guard: `tests/firmware-prune.test.sh` (40 checks).
+Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
+builder image installs `kmod` and fails its own build without `modinfo`, because
+every synthetic-tree case above passes vacuously on a builder that cannot run the
+sweep).
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
