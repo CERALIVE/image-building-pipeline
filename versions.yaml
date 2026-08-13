@@ -23,7 +23,12 @@ cerastream:
   kind: first-party
   # CalVer (YYYY.MINOR.PATCH) release tags, matching [workspace.package].version in
   # Cargo.toml.
-  pin: v2026.7.2
+  # v2026.7.3 is the FIRST release carrying b206baf ("enumerate real capture devices +
+  # detect RK3588 on Radxa ROCK 5B+", PR #38). Without it the engine answers
+  # get-capabilities with a Generic profile (hardware_accelerated:false,
+  # max_resolution 1920x1080, no `hdmi` source id), so start.pipeline:"hdmi" is
+  # rejected outright on both RK3588 boards.
+  pin: v2026.7.3
   channel: stable
 
 CeraUI:
