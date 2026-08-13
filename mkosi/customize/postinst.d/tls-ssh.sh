@@ -62,14 +62,48 @@ configure_debug_access() {
 # ship disabled-by-default. Debug (=1) keeps the historical enabled-by-default plus
 # the predefined debug password (configure_debug_access). CERALIVE_DEBUG_IMAGE is
 # validated 0/1 upstream (orchestrate.sh + configure_debug_access), so no re-check.
+
+# /etc/machine-id ships holding "uninitialized", so EVERY freshly flashed board is a
+# systemd FIRST BOOT and PID 1 runs `preset-all` — which re-applies vendor presets
+# over anything this build merely disabled. Debian's default verdict is `enable`, and
+# mkosi additionally ships /usr/lib/systemd/system-preset/80-mkosi-ssh.preset holding
+# `enable ssh.socket`, so a production image that only disabled SSH at build time
+# comes back with it ON the first time an operator powers the board up. A CeraLive
+# preset sorting ahead of mkosi's restates the build-time intent as the FIRST matching
+# preset line, so preset-all reproduces it instead of overriding it. A `mask` would
+# also survive, but `systemctl enable` refuses to act on a masked unit — that would
+# take away the operator's CeraUI SSH toggle, which is the whole point of shipping
+# SSH disabled rather than absent.
+write_ssh_preset() {
+  local dir="${CERALIVE_SYSTEMD_PRESET_DIR:-/usr/lib/systemd/system-preset}"
+  local verb="$1"
+  install -d -m 0755 "${dir}"
+  printf '%s ssh.service\ndisable ssh.socket\n' "${verb}" >"${dir}/00-ceralive-ssh.preset"
+  chmod 0644 "${dir}/00-ceralive-ssh.preset"
+}
+
+# A disable that did not land ships an SSH-reachable production image that passes
+# every other gate, so the invariant is asserted rather than assumed. Mirrors the
+# `[7/9]` parity predicate exactly: any symlink named ssh.service/ssh.socket
+# anywhere under /etc/systemd/system means the unit is enabled.
+assert_ssh_not_enabled() {
+  local dir="${CERALIVE_SYSTEMD_ETC_UNIT_DIR:-/etc/systemd/system}" found
+  found="$(find "${dir}" -type l \( -name ssh.service -o -name ssh.socket \) 2>/dev/null)"
+  [[ -z "${found}" ]] \
+    || die "production image: ssh enablement symlink(s) survived the disable: ${found//$'\n'/ }"
+}
+
 configure_ssh_enablement() {
   local mode="${CERALIVE_DEBUG_IMAGE:-0}"
   if [[ "${mode}" == "1" ]]; then
     enable_service ssh
+    write_ssh_preset enable
     log "lab debug image: ssh.service enabled by default"
   else
     disable_service ssh.service
     disable_service ssh.socket
+    write_ssh_preset disable
+    assert_ssh_not_enabled
     log "production image: ssh.service NOT enabled (operator enables via CeraUI)"
   fi
 }

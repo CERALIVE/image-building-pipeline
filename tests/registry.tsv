@@ -72,6 +72,7 @@ tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: 
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
 tests/systemd-ordering-cycle.test.sh	shell	unit	default-shell	zero ordering cycles plus the sysinit-phase ordering probe
 tests/ssh-firstboot-privsep.test.sh	shell	unit	default-shell	/run/sshd is created before sshd -t on an empty-/run first boot
+tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh stays disabled: no SIGPIPE-racing unit probe, landed-disable assertion, first-boot preset
 tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data seeding loop preserves the frontend public symlink
 tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
 tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract

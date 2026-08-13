@@ -3917,6 +3917,73 @@ SSH whenever it is eventually started, on both image kinds. Guards: `mkosi-image
 "production image leaves ssh.service NOT enabled" + "lab debug image enables
 ssh.service by default".
 
+**Both halves of that contract were silently untrue on a real build, for two
+independent reasons — a SIGPIPE race and a first-boot preset** [EXISTS — fixed
+2026-08-12]
+
+A `rock-5b-plus --variant edge` production build failed the `[7/9]` gate on
+`ssh.service is enabled but MUST be disabled-by-default`, while the SAME commit
+produced a clean `rock-vendor` image. Both defects below are invisible to the PR
+gate, which is `DRY_RUN=1` and never runs the layer that configures services.
+
+- **The disable was a no-op ~8% of the time.** `disable_service` probed with
+  `systemctl list-unit-files "$svc" | grep -q "$svc"`. `grep -q` exits at its FIRST
+  match and closes the pipe while systemctl is still writing its `1 unit files
+  listed.` trailer; systemctl takes SIGPIPE, and under the modules' `set -o
+  pipefail` the pipeline reports **141** for a unit that WAS found. The guard then
+  logged `service ssh.service not present — nothing to disable`, openssh-server's
+  own postinst `enable` survived, and the image shipped
+  `multi-user.target.wants/ssh.service` + the `sshd.service` alias. Measured
+  **23/300** against a real built arm64 rootfs — which is why it fired on one
+  board's build and not another's from one commit, and why a single offline replay
+  always passes. **This is the fourth instance of this footgun in this repo**
+  (`deb_lists_path`, `verify-boot-artifacts.sh`, and the two static harnesses that
+  build a source SET into a FILE rather than piping it). `unit_file_present()`
+  captures the output in a command substitution — no early reader, so nothing can
+  SIGPIPE the writer — and `disable_service` probes through it. The production
+  branch then **asserts** the disable landed (`assert_ssh_not_enabled`, mirroring
+  the parity predicate exactly) and `die`s otherwise: a silent miss otherwise ships
+  an SSH-reachable production image that passes every other gate.
+- **`find … | grep -q .` in `lib/parity-check.sh` is the same defect with a worse
+  failure mode**, and it sits in the gate that caught the first one. `find` keeps
+  traversing after the match it printed, so a SECOND match SIGPIPEs it and the
+  condition reads FALSE — which on the ssh leg means `ssh_enabled=0`, i.e. a false
+  **PASS** certifying an SSH-reachable production image. It measured 0/400 today
+  (with exactly one match, `find` never writes again and never sees EPIPE), so this
+  is latent rather than active — fixed anyway, via `find_first`, which captures in
+  a substitution and stops `find` itself with `-quit`.
+- **Even a landed disable does not survive first boot.** `/etc/machine-id` ships
+  holding `uninitialized`, so every freshly flashed board is a systemd FIRST BOOT
+  and PID 1 runs `preset-all` — the same mechanism `suppress_unusable_boot_units`
+  already documents. Debian's default verdict is `enable`, and mkosi additionally
+  ships `/usr/lib/systemd/system-preset/80-mkosi-ssh.preset` holding `enable
+  ssh.socket` (confirmed present in the built rootfs), so the operator's very first
+  power-on re-enabled what the build had disabled. `write_ssh_preset` emits
+  `00-ceralive-ssh.preset` — sorting AHEAD of mkosi's — restating the build-time
+  verdict as the FIRST matching preset line, `disable`/`disable` on production and
+  `enable ssh.service` + `disable ssh.socket` on debug. **A mask would also survive
+  and is the WRONG tool here**: `systemctl enable` refuses to act on a masked unit,
+  which would take away the operator's CeraUI SSH toggle — the entire reason SSH
+  ships disabled rather than absent. (It would also fail the parity check, whose
+  predicate is any `/etc/systemd/system` symlink named `ssh.service`, and a mask is
+  exactly that symlink pointing at `/dev/null`.)
+
+Guard: `tests/ssh-enablement-contract.test.sh` (23 checks) — the static no-pipe
+contract on the real function bodies, the preset ordering against mkosi's filename,
+and a runtime leg driving the REAL shipped `disable_service` 50× against a stub
+systemctl whose oversized trailer makes the old form's SIGPIPE deterministic, with a
+**non-vacuity leg proving the pre-fix piped probe silently skips the disable under
+that identical stub**, plus the fail-closed leg (a planted surviving enable symlink
+must abort the build).
+
+**Still carrying the same pattern, deliberately out of scope here and worth a
+follow-up:** `ceralive-healthcheck.sh` (`ip -o link show up | grep -v ' lo:' |
+grep -q 'state UP'` — a false negative reports no link up, which feeds the RAUC
+health verdict), `ceralive-provision.sh` (a false negative spuriously starts the
+setup AP), `ceralive-hdmirx-edid.sh`, and `build-feature-sysext.sh`'s
+`gpg --list-secret-keys | grep -q '^sec'`. Each is a producer that keeps writing
+after the matched line, under `pipefail`, with the failure silently read as "no".
+
 **`Before=ssh.socket` guards MUST be `DefaultDependencies=no` AND
 `After=sysinit.target`.** Both `ceralive-ssh-firstboot.service` and
 `ceralive-ci-uart-bootstrap.service` are `Before=ssh.socket`. `ssh.socket` is

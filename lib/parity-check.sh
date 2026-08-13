@@ -62,6 +62,22 @@ pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
 warn() { log_warn    "WARN  $*"; WARN=$((WARN+1)); }
 fail() { log_error   "FAIL  $*"; FAIL=$((FAIL+1)); }
 
+# find_first <name> [find-predicates…] -- <dir…> — first match, or empty.
+#
+# NEVER `find … | grep -q .`: find keeps traversing after the match it printed,
+# `grep -q` closes the pipe on that first line, find dies of SIGPIPE, and under
+# common.sh's `set -o pipefail` the whole condition reads FALSE for a unit that IS
+# enabled. Here that mode is a false PASS on the production ssh check — the gate
+# would certify an SSH-reachable production image. Capture in a substitution and
+# stop find itself with -quit, so nothing closes a pipe early.
+find_first() {
+  local name="$1"; shift
+  local preds=()
+  while (( $# )) && [[ "$1" != "--" ]]; do preds+=("$1"); shift; done
+  shift || true
+  find "$@" -name "${name}" "${preds[@]}" -print -quit 2>/dev/null
+}
+
 # ---------------------------------------------------------------------------
 # read_manifest_packages — echo every active package in the canonical v2 runtime
 # package lists: manifests/packages/shared.list plus every <family>.delta.list,
@@ -178,9 +194,9 @@ main() {
   log_info "--- C. services enabled ---"
   local svc svc_missing=()
   for svc in NetworkManager ModemManager chrony avahi-daemon systemd-resolved ceralive-hostname; do
-    if find "${root}/etc/systemd/system" "${root}/usr/lib/systemd/system" \
-         -name "${svc}.service" -type l 2>/dev/null | grep -q . \
-       || find "${root}/etc/systemd/system" -name "${svc}.service" 2>/dev/null | grep -q .; then
+    if [[ -n "$(find_first "${svc}.service" -type l -- \
+                  "${root}/etc/systemd/system" "${root}/usr/lib/systemd/system")" \
+       || -n "$(find_first "${svc}.service" -- "${root}/etc/systemd/system")" ]]; then
       :
     else
       svc_missing+=("${svc}")
@@ -199,7 +215,7 @@ main() {
   # production, so assert the correct per-kind invariant rather than a blanket
   # "ssh enabled" (which regressed here once #60 landed disabled-by-default).
   local ssh_enabled=0
-  if find "${root}/etc/systemd/system" -name "ssh.service" -type l 2>/dev/null | grep -q .; then
+  if [[ -n "$(find_first ssh.service -type l -- "${root}/etc/systemd/system")" ]]; then
     ssh_enabled=1
   fi
   if [[ "${CERALIVE_DEBUG_IMAGE:-0}" == "1" ]]; then

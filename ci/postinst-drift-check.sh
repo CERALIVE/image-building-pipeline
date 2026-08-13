@@ -69,8 +69,9 @@ readonly MAX_POSTINST_LINES=950
 
 # Functions consolidated into postinst-lib.sh (Task 6). The single source of truth.
 readonly CONSOLIDATED_FUNCS=(
-  ensure_group enable_service disable_service mask_service
+  ensure_group enable_service disable_service unit_file_present mask_service
   suppress_unusable_boot_units
+  configure_ssh_enablement write_ssh_preset assert_ssh_not_enabled
   configure_networking configure_services setup_hostname_service
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
   setup_provisioning setup_rtmp_gateway
