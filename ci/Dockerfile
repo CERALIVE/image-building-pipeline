@@ -46,6 +46,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   binfmt-support          registers the qemu interpreters
 #   pipx git python3        pinned mkosi 26 install from the upstream tag
 #   python3-pefile          PE/COFF parsing used by mkosi image assembly
+#   kmod                    `modinfo`, WITHOUT WHICH THE FIRMWARE PRUNE SILENTLY
+#                           NEVER RUNS. platform/mkosi.postinst::prune_irrelevant_rk3588_firmware
+#                           is a non-chroot script, so it resolves `modinfo` from
+#                           THIS image, and it correctly declines rather than
+#                           deleting firmware it cannot prove is unreferenced:
+#                           "WARNING: modinfo is unavailable — cannot prove a
+#                           firmware family has no consumer, so NOTHING is pruned".
+#                           That line was in every real build log ever produced
+#                           here, so the sweep had never authorised a single
+#                           deletion — 309 MB of `qcom/` blobs no installed module
+#                           can request shipped in both RAUC slots of every image.
+#                           modinfo parses ELF and is arch-agnostic, so the x86_64
+#                           builder reads the arm64 `.ko` set correctly.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       -o Dpkg::Options::=--force-unsafe-io \
@@ -55,6 +68,7 @@ RUN apt-get update \
       ca-certificates \
       file \
       gpg \
+      kmod \
       reprepro \
       systemd-repart \
       zstd \
@@ -133,4 +147,5 @@ RUN APT_PY="$(python3 -c 'import glob; print(glob.glob("/opt/pipx/venvs/mkosi/li
 RUN mkosi --version \
  && mkosi --version | grep -qx "mkosi ${MKOSI_VERSION}" \
  && python3 --version \
- && python3 -c "import pefile"
+ && python3 -c "import pefile" \
+ && command -v modinfo

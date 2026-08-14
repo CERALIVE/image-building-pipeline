@@ -319,16 +319,41 @@ variants:
       # orchestrator will decide how to handle that observation; this pin bump
       # does not resolve it.
       #
+      # It now carries 0027, which is why the pin moved off eb0f338. A real
+      # Rock 5B+ with a 4K59.94 source could never reach HDMI-RX lock: the
+      # source never writes the SCDC TMDS_Bit_Clock_Ratio bit, so the receiver
+      # kept its 1/10 divider on a 1/40 link and spun plugin -> wait -> not
+      # lock -> plugout forever. 0027 retries the PHY bring-up once with
+      # PHY_CONFIG.TMDS_CLOCK_RATIO forced to 1/40, clearing the forced flag on
+      # plugout so every new plug cycle still tries the spec-compliant path
+      # first. Hardware-confirmed on that board: the forced retry locks, and the
+      # controller-side descrambler self-detects from the stream — it does not
+      # need the SCDC declaration. Do NOT "improve" this by gating the recovery
+      # on CMU_TMDSQPCLK_FREQ: a 594 MHz 1/40 link mis-driven at 1/10 measures
+      # as an ordinary sub-340 MHz link (139.0 MHz was observed), so that gate
+      # would never fire in exactly the case the patch exists for.
+      #
+      # What 0027 does NOT claim, carried forward rather than dropped: no
+      # regression run against a source that DOES write SCDC, no FX3 cold
+      # power-cycle, one board / one source / one session, and nothing at all on
+      # the Orange Pi.
+      #
       # Pin a SHA that a fresh clone can reach, never a PR-head SHA: the
       # squash-merge of #4 orphaned its pre-merge head 2e195f2d36db, so pinning
-      # that would pin a commit no ref reaches. This pin is a BRANCH TIP rather
-      # than a `main` commit on purpose — the branch has not merged yet, and the
-      # hardware evidence must name the exact revision it was produced from.
-      #
-      # The branch is pushed, so `git fetch --depth 1 <patches_git_url>
-      # <patches_commit>` from a scratch clone reaches this exact revision.
+      # that would pin a commit no ref reaches. #8 was squash-merged for the
+      # same reason, so this pin is the RESULTING `main` commit 00fc0b26540e,
+      # not the pre-merge branch head ab491c0dc684. Verified before pinning:
+      # `git ls-remote https://github.com/CERALIVE/rk3588-kernel-patches.git
+      # main` answers 00fc0b26540e94d310098a32773e150dcd7bdc41, and a scratch
+      # `git init` + `git fetch --depth 1 <patches_git_url> <patches_commit>`
+      # reaches it and yields a 33-entry patches/series ending in
+      # 0027-hdmirx-phy-retry-hardening.patch, whose payload sha256 is
+      # e6a384e4205cb4bc523bd1f44a50ebcdafbf41307c52169bdc5210e76f36ed63 —
+      # byte-identical to the patch that was hardware-tested. The predecessor
+      # pin eb0f338 remains an ancestor of `main`, so nothing this pin carried
+      # was dropped by the merge.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: eb0f338edd6b203387ea22b4aceb6eb57136c68c
+      patches_commit: 00fc0b26540e94d310098a32773e150dcd7bdc41
       patches_series: patches/series
 
       defconfig_base: defconfig

@@ -1424,6 +1424,19 @@ fankick_fake_thermal() {
 
 fankick_attr() { tr -d '[:space:]' <"$1"; }
 
+# fankick_set_state <attr-path> <value> — move a fake sysfs attribute the way the
+# governor would, ATOMICALLY. `printf > attr` truncates before it writes, so a
+# concurrent reader can observe a zero-length file, which a real sysfs attribute
+# can never do (one ->show() serves a complete value or nothing). That window
+# swallowed 16 of 31 overlapping reads here, and the monitor reads an unparsable
+# cur_state as "the cooling device went away" and exits 0 — silently skipping the
+# rest of the test. `mv` in the same directory is a rename(2): whole old or whole new.
+fankick_set_state() {
+  local attr="$1" value="$2"
+  printf '%s\n' "$value" >"${attr}.new"
+  mv -f -- "${attr}.new" "${attr}"
+}
+
 # fankick_run <sysfs> <kick_ms> <cycles> [extra env...] — drive the resident
 # monitor for a bounded number of poll ticks. CERALIVE_FAN_KICK_MAX_CYCLES is
 # the test seam that makes an ongoing monitor testable at all; production runs

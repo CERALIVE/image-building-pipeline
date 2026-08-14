@@ -201,17 +201,23 @@ YAML
   done
 }
 
-@test "variant_overrides: Rock 5B+ is UNAFFECTED with and without the variant" {
-  # It declares no override and needs none — mainline and vendor agree on this
-  # board's spelling. Asserted explicitly on BOTH paths so a future accidental
-  # divergence (either tree renaming it) is caught here rather than at build.
+@test "variant_overrides: Rock 5B+ DTB is UNAFFECTED with and without the variant" {
+  # It declares no dtb_name override and needs none — mainline and vendor agree
+  # on this board's spelling. Asserted explicitly on BOTH paths so a future
+  # accidental divergence (either tree renaming it) is caught here, not at build.
+  #
+  # The board DOES declare variant_overrides now — for uboot_packages, since the
+  # edge track fetches Armbian's mainline-TF-A -edge U-Boot (todo 12). So the
+  # claim under test is narrowed to the DTB key it was always really about:
+  # the override block must not name dtb_name on this board.
   local path
   for path in "" "--variant edge"; do
     run bash -c "'$RESOLVE_SH' rock-5b-plus $path 2>/dev/null"
     [ "$status" -eq 0 ]
     [[ "$output" == *"DTB_NAME='rk3588-rock-5b-plus.dtb'"* ]]
   done
-  run ! grep -Fq 'variant_overrides' "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml"
+  run ! grep -Eq '^\s+dtb_name:' <(sed -n '/^variant_overrides:/,$p' \
+    "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml")
 }
 
 @test "variant_overrides: the mechanism is OPT-IN, not a silent global change" {
@@ -304,9 +310,12 @@ YAML
   [[ "$output" == *"variant_overrides"* ]]
 }
 
-@test "variant_overrides: schema rejects any field other than dtb_name" {
-  # Deliberately narrow. This is a DTB-naming mechanism, not a general
-  # board-overrides-the-variant escape hatch.
+@test "variant_overrides: schema rejects any field outside the permitted set" {
+  # Deliberately narrow. The permitted keys are dtb_name and uboot_packages —
+  # the two board facts that genuinely come from whichever tree/branch a variant
+  # builds — and NOT a general board-overrides-the-variant escape hatch. The
+  # per-key legs live in tests/bootloader-variant.bats; this one pins that the
+  # override stayed closed at all.
   local f="$BATS_TEST_TMPDIR/wide-override.yaml"
   write_override_board "$f" "  edge:
     kernel_packages: [linux-image-something]"
@@ -423,8 +432,12 @@ YAML
   [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
   [[ "$output" == *"DTB_PACKAGES=''"* ]]
   [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
-  # U-Boot and firmware are NOT replaced: they stay prebuilt-fetched.
-  [[ "$output" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-vendor'"* ]]
+  # U-Boot and firmware are still PREBUILT-FETCHED, never built from source —
+  # that is what kernel_source's suppression set does and does not cover, and it
+  # is unchanged. What DID change (todo 12) is WHICH prebuilt U-Boot the edge
+  # track fetches: the board's variant_overrides.edge names Armbian's
+  # mainline-TF-A -edge package. Firmware is untouched by any variant.
+  [[ "$output" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-edge'"* ]]
   [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
 }
 
@@ -445,15 +458,14 @@ YAML
 }
 
 @test "kernel_source: the pinned patches commit is the next hardware-candidate series tip" {
-  # A regression pin on the actual value: the tip of
-  # CERALIVE/rk3588-kernel-patches feat/backports-fixes-doctrim, which is the
-  # exact revision the next Wave-8 hardware candidate will be built from. A
-  # silent bump here would change what the kernel contains with no other signal,
-  # and would detach the pending hardware evidence from the series it claims to
-  # attest.
+  # A regression pin on the actual value: the CERALIVE/rk3588-kernel-patches
+  # `main` commit the hardware candidates are built from — currently the
+  # squash-merge of PR #8, which added 0027. A silent bump here would change what
+  # the kernel contains with no other signal, and would detach the hardware
+  # evidence from the series it claims to attest.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='eb0f338edd6b203387ea22b4aceb6eb57136c68c'"* ]]
+   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='00fc0b26540e94d310098a32773e150dcd7bdc41'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
@@ -673,7 +685,13 @@ YAML
 @test "kernel_source schema: tag is OPTIONAL, but a half config-file mode is rejected" {
   local f="$BATS_TEST_TMPDIR/commit-only.yaml"
   # No tag + full config-file mode: the vendor-patched shape. Must VALIDATE.
-  write_variant_family "$f" "  vendor-patched:
+  # The `edge:` stub is required because this fixture family is merged against
+  # the REAL rock-5b-plus board, whose variant_overrides names edge — and an
+  # override for a variant the family does not declare is fatal on every
+  # resolve, by design (it would otherwise sit there looking effective).
+  write_variant_family "$f" "  edge:
+    armbian_branch: edge
+  vendor-patched:
     kernel_source:
       git_url: https://example.invalid/linux.git
       commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
@@ -857,7 +875,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.1.7"* ]]
   [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-   [[ "$output" == *"eb0f338edd6b203387ea22b4aceb6eb57136c68c"* ]]
+   [[ "$output" == *"00fc0b26540e94d310098a32773e150dcd7bdc41"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]

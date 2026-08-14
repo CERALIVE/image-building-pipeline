@@ -249,10 +249,22 @@ install_kernel_source_boot_artifacts() {
 # production path the fleet actually runs — so the source-built trim above would
 # otherwise only ever reach the two opt-in variants.
 #
-# The directory is DISCOVERED by locating the board's own DTB rather than
-# composed from a release string: the versioned directory name comes from the
-# Armbian package, not from anything this repo resolves, and a hardcoded
-# /boot/dtb-<REL> would silently no-op the moment that package's version moved.
+# BOTH INSTALLED LOCATIONS, exactly as install_kernel_source_dtbs does for the
+# source-built path — and this half was MISSING for three releases. The vendor
+# BSP ships the blob set TWICE: `linux-dtb-vendor-rk35xx` puts 813 files under
+# /boot/dtb-<REL>/rockchip/, and `linux-image-vendor-rk35xx` carries its own copy
+# of the same 813 under /usr/lib/linux-image-<REL>/rockchip/. That second
+# directory stays in the rootfs after installation, so trimming only /boot left
+# 91,117,943 B of other boards' device trees in every vendor slot — and, because
+# the kernel rides inside a RAUC slot, in both slots and in every bundle.
+# Measured on a real rock-5b-plus build: /boot reported "removed 810" while the
+# package payload was untouched at 814 files.
+#
+# Each directory is DISCOVERED by locating the board's own DTB rather than
+# composed from a release string: both versioned directory names come from the
+# Armbian packages, not from anything this repo resolves, and a hardcoded
+# /boot/dtb-<REL> or /usr/lib/linux-image-<REL> would silently no-op the moment
+# that package's version moved.
 # `find` does not descend the /boot/dtb symlink, so the real directory is pruned
 # exactly once and the symlink keeps resolving.
 #
@@ -272,17 +284,39 @@ prune_vendor_dtbs() {
   [[ -z "${KERNEL_SOURCE_KERNEL_RELEASE:-}" ]] || return 0
   [[ -d "${root}/boot" ]] || return 0
 
-  local -a dirs=()
-  mapfile -t dirs < <(find "${root}/boot" -mindepth 2 -type f -name "${dtb}" -printf '%h\n' | sort -u)
+  # -mindepth 2 keeps /boot ITSELF off the candidate list. A bare DTB dropped at
+  # the root of /boot would otherwise nominate the directory that holds vmlinuz,
+  # the initrd and the boot script for a prune.
+  local -a boot_dirs=()
+  mapfile -t boot_dirs < <(find "${root}/boot" -mindepth 2 -type f -name "${dtb}" -printf '%h\n' | sort -u)
 
-  if (( ${#dirs[@]} == 0 )); then
+  if (( ${#boot_dirs[@]} == 0 )); then
     log "FATAL: board DTB ${dtb} is not present anywhere under /boot after installing ${DTB_PACKAGES:-<no dtb packages>}"
     exit 1
   fi
 
+  # The kernel package's OWN payload tree. Absence is NOT fatal here the way it is
+  # for /boot: /boot is what the U-Boot selector reads, so a board DTB missing
+  # there is an unbootable slot, while a kernel package that simply ships no DTBs
+  # of its own is a legitimate packaging shape with nothing to trim.
+  local -a payload_roots=() payload_dirs=()
+  local candidate
+  for candidate in "${root}"/usr/lib/linux-image-*; do
+    [[ -d "${candidate}" ]] && payload_roots+=("${candidate}")
+  done
+  if (( ${#payload_roots[@]} > 0 )); then
+    mapfile -t payload_dirs < <(find "${payload_roots[@]}" -mindepth 1 -type f -name "${dtb}" -printf '%h\n' | sort -u)
+  fi
+  if (( ${#payload_dirs[@]} == 0 )); then
+    log "vendor DTB prune: no kernel-package payload directory carries ${dtb} — /boot copy only"
+  fi
+
   local d
-  for d in "${dirs[@]}"; do
-    prune_dtb_dir "${d}" "vendor DTB payload" "${dtb}"
+  for d in "${boot_dirs[@]}"; do
+    prune_dtb_dir "${d}" "vendor /boot device trees" "${dtb}"
+  done
+  for d in ${payload_dirs[@]+"${payload_dirs[@]}"}; do
+    prune_dtb_dir "${d}" "vendor kernel-package DTB payload" "${dtb}"
   done
 }
 

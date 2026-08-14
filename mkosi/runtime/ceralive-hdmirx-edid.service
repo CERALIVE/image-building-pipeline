@@ -1,0 +1,51 @@
+[Unit]
+Description=CeraLive HDMI-RX — apply the product EDID to the capture receiver
+Documentation=file:///usr/local/sbin/ceralive-hdmirx-edid
+# The HDMI-RX driver ships with NO EDID and its own Kconfig says a product is
+# expected to load a custom branded one from userspace — the receiver is
+# deliberately not functional until something does. With no EDID an attached
+# source sees nothing on the DDC lines and either falls back to its most
+# conservative mode or refuses to output at all, which on a bench reads as
+# "HDMI capture is broken". The applied blob claims 3840x2160p60 plus SCDC and
+# a 600 MHz maximum TMDS character rate, which is what makes 4K60 legal for a
+# source to offer. Full root cause + the applicability table:
+# /usr/local/sbin/ceralive-hdmirx-edid header.
+#
+# systemd-udev-trigger is the coldplug that gets the hdmirx platform driver
+# bound and the /dev/hdmirx symlink written; After= it is the earliest sensible
+# point, but driver probe is ASYNCHRONOUS so it is NOT a guarantee that the node
+# exists yet. The script owns that race with a bounded poll rather than a sleep.
+After=systemd-udev-trigger.service
+# cerastream is what actually opens the capture device, and ceralive.service
+# (CeraUI) connects to cerastream's control socket exactly once at boot. Both
+# must see a receiver whose EDID is already programmed. Ordering-only: neither
+# is required to exist, and After=/Before= against an out-of-transaction unit is
+# a no-op, so this is safe on boards and slots where cerastream is absent.
+Before=cerastream.service ceralive.service
+#
+# THIS UNIT IS DELIBERATELY NOT A DEPENDENCY OF cerastream, IN EITHER DIRECTION.
+# There is no Requires=/Wants=/BindsTo= here onto cerastream, and nothing may
+# add one from cerastream's side onto this unit. A failed EDID apply MUST be
+# loudly visible in `systemctl status` / `systemctl --failed` — that is the
+# whole point of failing rather than no-opping — but it MUST NOT keep the
+# streaming stack down: USB/UVC capture does not involve the HDMI receiver at
+# all, so a board with a dead HDMI-RX must still boot into a fully usable
+# USB-capture-only device. Ordering without a requirement is exactly that
+# contract, and it mirrors ceralive-typec-source.service.
+#
+# LIFECYCLE: boot-time only. The EDID lives in driver state, so a driver
+# unbind/rebind or a module reload silently discards it and this unit does NOT
+# notice and does NOT reapply. Known limitation, not a bug — after a bench
+# rebind, run `systemctl restart ceralive-hdmirx-edid.service` explicitly.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-hdmirx-edid
+# Must exceed the script's own 30s poll deadline plus its two bounded apply
+# attempts, so systemd never kills it mid-wait and turns a slow hdmirx probe
+# into a unit failure that looks like a driver defect.
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

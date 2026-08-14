@@ -11,8 +11,39 @@ proof4_group_members() {
   local pgid="$1"
   ps -eo pid=,pgid= | awk -v pgid="${pgid}" '$2 == pgid { print $1 }'
 }
+# Ownership verdict for ONE member: 0 = ours, 1 = a live foreign process, 2 = a task
+# that already left userspace and so cannot be signalled. Verdict 2 is load-bearing —
+# the db fixture forks a keepalive `sleep` into this group every 50ms, so a listed pid
+# can be exiting by the time its environ is read, and calling that an intruder is what
+# produced the intermittent "nested db process group ownership" FIXTURE_ERROR.
+# The discriminator is an EMPTY environ, not a liveness poll: the kernel serves zero
+# bytes once a task releases its mm, and the only other mm-less tasks (kernel threads)
+# sit in pgid 0. A live foreign process always has a non-empty environ, so it is still
+# refused; an unreadable-but-live one is refused too.
+proof4_pid_ownership() {
+  local pid="$1" environ=""
+  proof4_pid_marker=""
+  if [[ -r "/proc/${pid}/environ" ]]; then
+    environ="$({ tr '\0' '\n' <"/proc/${pid}/environ"; } 2>/dev/null)" || environ=""
+    proof4_pid_marker="$(printf '%s\n' "${environ}" | \
+      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')"
+    [[ "${proof4_pid_marker}" == "${proof4_run_id}" ]] && return 0
+    [[ -n "${environ}" ]] && return 1
+  fi
+  proof4_pid_left_userspace "${pid}" && return 2
+  return 1
+}
+proof4_pid_left_userspace() {
+  local pid="$1" stat
+  for _ in $(seq 1 100); do
+    stat="$(ps -o stat= -p "${pid}" 2>/dev/null || true)"
+    [[ -z "${stat}" || "${stat}" == *Z* ]] && return 0
+    sleep 0.01
+  done
+  return 1
+}
 proof4_assert_owned_group() {
-  local pgid="$1" pid marker pid_pgid pid_sid self_pgid members=()
+  local pgid="$1" pid pid_pgid pid_sid self_pgid rc members=()
   mapfile -t members < <(proof4_group_members "${pgid}")
   (( ${#members[@]} > 0 )) || return 3
   self_pgid="$(ps -o pgid= -p "${BASHPID}")"
@@ -33,34 +64,26 @@ proof4_assert_owned_group() {
         "${pid}" "${pid_pgid}" "${pid_sid}" "${pgid}" >&2
       return 1
     }
-    if [[ ! -r "/proc/${pid}/environ" ]]; then
-      [[ ! -e "/proc/${pid}" ]] && continue
+    rc=0
+    proof4_pid_ownership "${pid}" || rc=$?
+    if (( rc == 1 )); then
+      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
+        "${pid}" "${pgid}" "${proof4_pid_marker:-missing}" >&2
       return 1
     fi
-    marker="$(tr '\0' '\n' <"/proc/${pid}/environ" | \
-      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')"
-    [[ "${marker}" == "${proof4_run_id}" ]] || {
-      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
-        "${pid}" "${pgid}" "${marker:-missing}" >&2
-      return 1
-    }
   done
 }
 proof4_cleanup_group() {
-  local pgid="$1" pid members=() marker
+  local pgid="$1" pid rc members=()
   mapfile -t members < <(proof4_group_members "${pgid}")
   for pid in "${members[@]}"; do
-    if [[ ! -r "/proc/${pid}/environ" ]]; then
-      [[ ! -e "/proc/${pid}" ]] && continue
+    rc=0
+    proof4_pid_ownership "${pid}" || rc=$?
+    if (( rc == 1 )); then
+      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
+        "${pid}" "${pgid}" "${proof4_pid_marker:-missing}" >&2
       return 1
     fi
-    marker="$(tr '\0' '\n' <"/proc/${pid}/environ" | \
-      sed -n 's/^CERALIVE_PROOF4_RUN_ID=//p')"
-    [[ "${marker}" == "${proof4_run_id}" ]] || {
-      printf 'refusing to signal unowned pid=%s pgid=%s marker=%s\n' \
-        "${pid}" "${pgid}" "${marker:-missing}" >&2
-      return 1
-    }
   done
   if (( ${#members[@]} > 0 )); then
     proof4_assert_owned_group "${pgid}"

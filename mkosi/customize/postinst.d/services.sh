@@ -77,12 +77,23 @@ enable_service() {
   systemctl enable "${svc}"
 }
 
+# NEVER `systemctl list-unit-files "$svc" | grep -q "$svc"`: `grep -q` exits at its
+# first match and closes the pipe, systemctl dies of SIGPIPE mid-trailer, and
+# `set -o pipefail` reports 141 for a unit that WAS found. Measured at 23/300 runs
+# against a real built rootfs — it silently no-op'd `disable_service ssh.service` on
+# a production build and failed the `[7/9]` disabled-by-default SSH parity gate.
+# A command substitution has no early reader, so nothing can SIGPIPE the writer.
+unit_file_present() {
+  local svc="$1" listed
+  listed="$(systemctl list-unit-files --no-legend --no-pager "${svc}" 2>/dev/null)" || return 1
+  [[ -n "${listed}" ]]
+}
+
 disable_service() {
   # Disabling a not-installed unit is a legitimate no-op (the package was never
   # added to this minimal image) — skip cleanly when the unit file is absent.
   local svc="$1"
-  if systemctl list-unit-files "${svc}" >/dev/null 2>&1 \
-     && systemctl list-unit-files "${svc}" | grep -q "${svc}"; then
+  if unit_file_present "${svc}"; then
     systemctl disable "${svc}"
   else
     log "service ${svc} not present — nothing to disable"
@@ -158,6 +169,7 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_hdmirx_edid
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must

@@ -1,0 +1,76 @@
+# manifests/bootloader-blobs.tsv — the COMMITTED source of truth for every byte
+# lib/write-bootloader.sh is allowed to write into the 16 MB raw bootloader gap.
+#
+# The writer reads this file and nothing else to answer three questions:
+#
+#   1. WHICH blobs does this board×variant tuple write?  (the rows for the tuple,
+#      in the order they appear here — that IS the dd order)
+#   2. WHERE does each one go?  (write-bootloader.sh's blob-name → sector table;
+#      deliberately NOT a column here, because an offset is on-disk geometry
+#      frozen by docs/partition-contract.md, not per-package data)
+#   3. IS THIS THE RIGHT BLOB?  (the sha256 column, asserted before the dd and
+#      re-asserted against a READBACK of the image after it)
+#
+# A tuple with no rows here is REFUSED. That is the point: the writer cannot be
+# handed a blob it has never been told about, so a silently-wrong .deb — an
+# archive re-spin under an unchanged version, a stale staged package, the OTHER
+# board's payload — fails the build against a committed pin instead of producing
+# a plausible image that bricks a board.
+#
+# COLUMNS (tab-separated)
+#   board     board_id (manifest board_id, the value passed as --board)
+#   variant   family variant name, or `default` for the production vendor path
+#   package   Debian package the blob ships in (pinned in armbian-bsp-deb-versions.txt)
+#   version   that package's exact pinned Debian version
+#   blob      blob filename inside the package payload
+#   sha256    lowercase hex SHA-256 of that blob's bytes
+#
+# PROVENANCE, and it is re-derivable from this file alone. Every hash below was
+# read out of a .deb whose own SHA-256 matched that package's entry in the
+# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest
+# taken from the gpgv-VERIFIED `Release` plaintext, never the raw `InRelease` —
+# under both pinned archive keys DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 and
+# 8CFA83D13EB2181EEF5843E41EB30FAF236099FE. The `package` + `version` columns are
+# the pins in manifests/armbian-bsp-deb-versions.txt, and the verification is the
+# pipeline's own lib/fetch-debs-auth.sh (auth_keyring_has_exact_fingerprints ->
+# auth_verify_release_to_file -> auth_release_has_identity), i.e. the exact code
+# a real BSP fetch runs — so a fresh checkout can reproduce every row without any
+# local artifact. Do NOT cite a path under test-results/ here: that tree is
+# gitignored repo-local evidence (Rule D) and resolves to nothing when cloned.
+#
+# TWO PAYLOAD SHAPES, and only one of them is a split. The `-current`/`-edge`
+# packages on BOTH boards, and the Rock's `-vendor` package, ship ONE unified
+# `u-boot-rockchip.bin` carrying idbloader (RKNS at blob offset 0) and the U-Boot
+# FIT (d00dfeed at 0x7f8000) together — a single dd at sector 64 lays both, and
+# the blob must NEVER be split. Only `linux-u-boot-orangepi5-plus-vendor` (the
+# 2017.09 Rockchip fork) ships the historical `idbloader.img` + `u-boot.itb`
+# pair, which is why that ONE tuple has two rows. Do not add split handling for
+# any other tuple — no other pinned package contains those files.
+#
+# `edge-test` and `vendor-patched` intentionally carry the VENDOR U-Boot rows:
+# neither board declares a `variant_overrides.<that variant>.uboot_packages`, so
+# the resolver hands them the board's top-level (vendor) package and these rows
+# record what will actually be written. They are not aspirational.
+#
+# board	variant	package	version	blob	sha256
+
+# --- Orange Pi 5+ ----------------------------------------------------------
+# PRODUCTION (vendor): U-Boot 2017.09 Rockchip fork, closed rkbin BL31.
+orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
+orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
+# EDGE: U-Boot 2026.01, TF-A compiled from ARM-software v2.13.0 (mainline).
+orangepi5-plus	edge	linux-u-boot-orangepi5-plus-edge	26.5.1	u-boot-rockchip.bin	4678b97472cc8b615113d839752f4db76f969ed338e1c9d31472c5121b7f7807
+orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
+orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
+orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
+orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
+
+# --- Radxa Rock 5B+ --------------------------------------------------------
+# PRODUCTION (vendor): U-Boot 2026.04, unified blob. This board's armbian/build
+# hook carries no `vendor` branch guard, so this payload already has the same
+# shape as its -current/-edge siblings; the bytes still differ, hence its own row.
+rock-5b-plus	default	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a
+# EDGE: U-Boot 2026.04, TF-A compiled from ARM-software v2.13.0 (mainline).
+rock-5b-plus	edge	linux-u-boot-rock-5b-plus-edge	26.5.1	u-boot-rockchip.bin	040addabe71b5984c65aad73972fd4ac8d5af65be82b260a945ad5f234409744
+rock-5b-plus	edge-test	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a
+rock-5b-plus	vendor-patched	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a

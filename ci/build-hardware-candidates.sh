@@ -25,6 +25,17 @@
 #      RAUC slot devices and boot selector address the frozen production
 #      PARTLABEL set or the `x`-prefixed bench twin. It is exported EXPLICITLY
 #      from `--bench-labels`, which is REQUIRED — see the incident note below.
+#   5. WHICH RECOVERY LOADER. The MaskROM loader is the path an operator reaches
+#      for once a candidate has already bricked the board, and it is matched to a
+#      BOARD (its DDR initialiser), not to the SoC. It is therefore resolved per
+#      board from ci/fetch-rk3588-loader.sh's table, never as one constant.
+#
+# WHY EVERY EVIDENCE PATH CARRIES THE BENCH-LABELS MODE. The same candidate is
+# legitimately built twice — once with the bench PARTLABEL overlay for staging
+# media and once with the frozen production set for the final medium — and those
+# two artifacts are NOT interchangeable. Naming logs, configs and tuples by
+# candidate alone let the second run silently overwrite the first's evidence, so
+# every file is `<candidate>.bench-labels-<0|1>.<ext>`.
 #
 # A `production` build mode is claimed only when the verdict says the chain
 # terminates at a production trust anchor. Otherwise the mode is `development`
@@ -53,6 +64,11 @@
 #                     rock-edge        rock-5b-plus    --variant edge       (non-debug)
 #                     orange-edge      orange-pi-5-plus --variant edge      (non-debug)
 #                     rock-edge-test   rock-5b-plus    --variant edge-test  (debug)
+#                     rock-vendor      rock-5b-plus    (no --variant: the resolver
+#                                      `default`, i.e. the PREBUILT vendor BSP
+#                                      kernel) — opt-in by name only, deliberately
+#                                      NOT in `all`: it is a comparison/smoke
+#                                      artifact, not one of the qualification set
 #   --trust-verdict the ci/verify-bench-rauc-trust.sh verdict JSON
 #   --signing-env   a PATHS-ONLY env file defining CERALIVE_RAUC_PKI_DIR and
 #                   RAUC_KEYRING_FILE
@@ -85,9 +101,13 @@ TOOL_NAME="ci/build-hardware-candidates.sh"
 # 2 adds `bench_labels`. The bump is the point: a schema-1 tuple was emitted by
 # tooling that could not state which PARTLABEL set built the artifact, which is
 # exactly the artifact class that is unsafe to deploy on a dual-media bench rig.
-SCHEMA_VERSION=2
+# 3 makes `loader_sha256` BOARD-SPECIFIC and adds `loader_name`/`loader_url`: a
+# schema-2 tuple recorded the Radxa loader's digest for every board, so an Orange
+# Pi tuple named a loader that board's BootROM cannot be recovered with. It also
+# adds `evidence_stem`, because evidence paths are now per bench-labels mode.
+SCHEMA_VERSION=3
 
-usage() { sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
+usage() { sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
 say()  { printf '[cand] %s\n' "$*" >&2; }
 fail() { printf 'build-hardware-candidates: %s\n' "$*" >&2; }
 die()  { fail "$*"; exit "${2:-2}"; }
@@ -97,19 +117,33 @@ die()  { fail "$*"; exit "${2:-2}"; }
 # whether an artifact may ever be deployed.
 candidate_board() {
   case "$1" in
-    rock-edge|rock-edge-test) printf 'rock-5b-plus\n' ;;
-    orange-edge)              printf 'orange-pi-5-plus\n' ;;
+    rock-edge|rock-edge-test|rock-vendor) printf 'rock-5b-plus\n' ;;
+    orange-edge)                          printf 'orange-pi-5-plus\n' ;;
     *) return 1 ;;
   esac
 }
+# `default` is the resolver's reserved no-overlay name: the vendor candidate is
+# built by a bare `./build <board>`, so it must NOT be passed as `--variant`.
 candidate_variant() {
   case "$1" in
     rock-edge|orange-edge) printf 'edge\n' ;;
     rock-edge-test)        printf 'edge-test\n' ;;
+    rock-vendor)           printf 'default\n' ;;
     *) return 1 ;;
   esac
 }
 candidate_is_debug() { [[ "$1" == "rock-edge-test" ]]; }
+
+# A candidate whose kernel comes from a `kernel_source:` variant, i.e. one whose
+# resolve output carries KERNEL_SOURCE_* fields and whose package lands in the
+# per-board kernel-build staging tree. The vendor candidate installs a PREBUILT
+# BSP kernel instead, so those fields are legitimately absent for it.
+candidate_is_source_built() { [[ "$(candidate_variant "$1")" != "default" ]]; }
+
+# Evidence file stem. The bench-labels mode is part of the NAME, not just of the
+# content: the same candidate is built once per mode and the two artifacts are
+# not interchangeable, so one must never overwrite the other's evidence.
+evidence_stem() { printf '%s.bench-labels-%s\n' "$1" "${BENCH_LABELS}"; }
 
 bench_labels_desc() {
   case "${BENCH_LABELS:-}" in
@@ -128,6 +162,11 @@ CERALIVE_TEST_SYMBOLS=(
   CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST
   CONFIG_DMABUF_HEAPS_CERALIVE_TEST
 )
+
+# The vendor BSP's own HDMI-RX driver symbol (rk_hdmirx). The mainline/edge
+# contract's CONFIG_VIDEO_SYNOPSYS_HDMIRX is a DIFFERENT driver and is correctly
+# absent here — that difference is why the vendor candidate gets its own gate.
+VENDOR_HDMIRX_SYMBOL="CONFIG_VIDEO_ROCKCHIP_HDMIRX"
 
 # The value arrives on ARGV, never on stdin. A stdin-reading helper called from
 # inside a `while read` loop silently eats the loop's remaining input — which is
@@ -249,31 +288,87 @@ run_dry_run_probes() {
 # The resolved config is read out of the package the build itself produced, not
 # out of a host-side re-resolution: only the former is what the board will run.
 # ---------------------------------------------------------------------------
+deb_data_tarfile() {
+  local deb="$1" tmp="$2"
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    dpkg-deb --fsys-tarfile "${deb}" >"${tmp}/data.tar"
+    return
+  fi
+  ( cd "${tmp}" && ar x "${deb}" ) || return 1
+  local member
+  member="$(find "${tmp}" -maxdepth 1 -name 'data.tar*' -print -quit)"
+  [[ -n "${member}" ]] || return 1
+  case "${member}" in
+    *.tar)    mv "${member}" "${tmp}/data.tar" ;;
+    *.tar.gz) gzip  -dc "${member}" >"${tmp}/data.tar" ;;
+    *.tar.xz) xz    -dc "${member}" >"${tmp}/data.tar" ;;
+    *.tar.zst) zstd -dc "${member}" >"${tmp}/data.tar" ;;
+    *) return 1 ;;
+  esac
+}
+
 extract_kernel_config() {
   local deb="$1" dest="$2" tmp
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
-  if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb --fsys-tarfile "${deb}" >"${tmp}/data.tar"
-  else
-    ( cd "${tmp}" && ar x "${deb}" ) || return 1
-    local member
-    member="$(find "${tmp}" -maxdepth 1 -name 'data.tar*' -print -quit)"
-    [[ -n "${member}" ]] || return 1
-    case "${member}" in
-      *.tar)    mv "${member}" "${tmp}/data.tar" ;;
-      *.tar.gz) gzip  -dc "${member}" >"${tmp}/data.tar" ;;
-      *.tar.xz) xz    -dc "${member}" >"${tmp}/data.tar" ;;
-      *.tar.zst) zstd -dc "${member}" >"${tmp}/data.tar" ;;
-      *) return 1 ;;
-    esac
-  fi
+  deb_data_tarfile "${deb}" "${tmp}" || return 1
   local name
   name="$(tar -tf "${tmp}/data.tar" | grep -E '(^|\./)boot/config-' | head -n1)"
   [[ -n "${name}" ]] || return 1
   tar -xf "${tmp}/data.tar" -O "${name}" >"${dest}"
   [[ -s "${dest}" ]]
+}
+
+# ---------------------------------------------------------------------------
+# prebuilt_kernel_release <deb> — the kernel release the PREBUILT BSP package
+# actually carries, read from its own /boot/config-<release> member. It is not
+# taken from the resolver: the vendor path has no KERNEL_SOURCE_KERNEL_RELEASE,
+# and a release string composed from a package version would be a guess.
+# ---------------------------------------------------------------------------
+prebuilt_kernel_release() {
+  local deb="$1" tmp name
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+  deb_data_tarfile "${deb}" "${tmp}" || return 1
+  name="$(tar -tf "${tmp}/data.tar" | grep -E '(^|\./)boot/config-' | head -n1)" || true
+  [[ -n "${name}" ]] || return 1
+  printf '%s' "${name##*/boot/config-}"
+}
+
+# The identity read goes through lib/shared/deb-lib.sh — the repo's ONE control
+# reader — in a SUBSHELL, because that library sources lib/common.sh, whose ERR
+# trap and loggers would otherwise replace this tool's own error handling.
+deb_field() (
+  set +Eeuo pipefail
+  # shellcheck source=../lib/shared/deb-lib.sh
+  source "${PIPELINE_DIR}/lib/shared/deb-lib.sh" >/dev/null 2>&1
+  deb_control_field "$1" "$2"
+)
+
+# ---------------------------------------------------------------------------
+# assert_prebuilt_kernel_identity <deb> <expected-package>
+#
+# A staged .deb is only evidence if it is the package the manifest named at the
+# version the repo pinned. Without this the vendor tuple would faithfully record
+# whatever archive re-spin happened to be lying in the staging tree.
+# ---------------------------------------------------------------------------
+assert_prebuilt_kernel_identity() {
+  local deb="$1" want_pkg="$2" got_pkg got_ver want_ver rc=0
+  got_pkg="$(deb_field "${deb}" Package)"
+  got_ver="$(deb_field "${deb}" Version)"
+  [[ "${got_pkg}" == "${want_pkg}" ]] || {
+    fail "staged prebuilt kernel package is '${got_pkg:-<unreadable>}', expected '${want_pkg}' (${deb})"; rc=1
+  }
+  want_ver="$(sed -n "s/^${want_pkg}=\(.*\)$/\1/p" \
+    "${PIPELINE_DIR}/manifests/armbian-bsp-deb-versions.txt" 2>/dev/null | head -n1)"
+  if [[ -n "${want_ver}" && "${got_ver}" != "${want_ver}" ]]; then
+    fail "staged '${want_pkg}' is version '${got_ver:-<unreadable>}', but manifests/armbian-bsp-deb-versions.txt pins '${want_ver}'"
+    rc=1
+  fi
+  (( rc == 0 )) && say "  prebuilt kernel package: ${got_pkg} ${got_ver} (pin-verified)"
+  return "${rc}"
 }
 
 # ---------------------------------------------------------------------------
@@ -354,14 +449,28 @@ build_candidate() {
   # board whose second medium already carries them (see the header incident note).
   export CERALIVE_BENCH_LABELS="${BENCH_LABELS}"
 
-  local log="${EVIDENCE_DIR}/${name}.log"
-  say "building ${name}: ./build ${board} --variant ${variant}"
+  # The recovery loader is resolved for THIS board. Recording another board's
+  # loader digest here would name an unusable recovery path in the evidence an
+  # operator reads precisely when the candidate has already bricked the board.
+  local loader_entry
+  loader_entry="$("${HERE}/fetch-rk3588-loader.sh" --print-identity "${board}")" \
+    || die "no MaskROM recovery loader is pinned for board '${board}' in ci/fetch-rk3588-loader.sh — refusing to emit a candidate whose recorded recovery path is another board's"
+  IFS=$'\t' read -r LOADER_NAME LOADER_SHA256 LOADER_URL <<<"${loader_entry}"
+
+  local -a build_args=("${board}")
+  [[ "${variant}" == "default" ]] || build_args+=(--variant "${variant}")
+
+  local stem log
+  stem="$(evidence_stem "${name}")"
+  log="${EVIDENCE_DIR}/${stem}.log"
+  say "building ${name}: ./build ${build_args[*]}"
   say "  build mode=${CERALIVE_BUILD_MODE} label=${label} debug=${CERALIVE_DEBUG_IMAGE}"
   say "  CERALIVE_BENCH_LABELS=${CERALIVE_BENCH_LABELS} (bench PARTLABEL overlay: $(bench_labels_desc))"
+  say "  recovery loader (${board}): ${LOADER_NAME} sha256=${LOADER_SHA256}"
   say "  pki=${CERALIVE_RAUC_PKI_DIR} keyring=${RAUC_KEYRING_FILE}"
 
   # pipefail is already set; tee must not be allowed to mask a failed build.
-  ( cd "${PIPELINE_DIR}" && ./build "${board}" --variant "${variant}" ) 2>&1 | tee "${log}"
+  ( cd "${PIPELINE_DIR}" && ./build "${build_args[@]}" ) 2>&1 | tee "${log}"
 
   record_tuple "${name}" "${board}" "${variant}" "${label}" \
     "${verdict}" "${root_fpr}" "${leaf_fpr}" "${eku}" "${log}"
@@ -383,33 +492,70 @@ record_tuple() {
   [[ -s "${bundle}" ]] || die "could not resolve the emitted .raucb from ${log}" 1
 
   local resolved
-  resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
-    lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
-    || die "could not re-resolve the manifest for ${board}/${variant}" 1
-  local kernel_commit patches_commit kernel_tag dtb_name board_id kernel_release
+  if candidate_is_source_built "${name}"; then
+    resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
+      lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
+      || die "could not re-resolve the manifest for ${board}/${variant}" 1
+  else
+    resolved="$( cd "${PIPELINE_DIR}" && lib/resolve.sh "${board}" 2>/dev/null )" \
+      || die "could not re-resolve the manifest for ${board} (no variant overlay)" 1
+  fi
+  local kernel_commit patches_commit kernel_tag dtb_name board_id kernel_release kernel_pkg
   kernel_commit="$(sed -n "s/^KERNEL_SOURCE_COMMIT='\(.*\)'$/\1/p" <<<"${resolved}")"
   kernel_tag="$(sed -n "s/^KERNEL_SOURCE_TAG='\(.*\)'$/\1/p" <<<"${resolved}")"
   patches_commit="$(sed -n "s/^KERNEL_SOURCE_PATCHES_COMMIT='\(.*\)'$/\1/p" <<<"${resolved}")"
   kernel_release="$(sed -n "s/^KERNEL_SOURCE_KERNEL_RELEASE='\(.*\)'$/\1/p" <<<"${resolved}")"
   dtb_name="$(sed -n "s/^DTB_NAME='\(.*\)'$/\1/p" <<<"${resolved}")"
   board_id="$(sed -n "s/^BOARD_ID='\(.*\)'$/\1/p" <<<"${resolved}")"
+  kernel_pkg="$(sed -n "s/^KERNEL_PACKAGES='\(.*\)'$/\1/p" <<<"${resolved}" | awk '{print $1}')"
 
-  # The resolved config comes out of the kernel package this build produced.
-  local kdeb config expect="off"
-  kdeb="$(find "${PIPELINE_DIR}/mkosi/.staging/${board}/kernel-build" -maxdepth 1 \
-            -name "linux-image-${kernel_release}_*.deb" -print -quit 2>/dev/null || true)"
-  [[ -n "${kdeb}" ]] || die "no built kernel package found for ${kernel_release}" 1
-  config="${EVIDENCE_DIR}/${name}.config"
-  extract_kernel_config "${kdeb}" "${config}" \
-    || die "could not extract /boot/config-${kernel_release} from ${kdeb}" 1
+  local kdeb config expect="off" kernel_source="prebuilt-bsp"
+  config="${EVIDENCE_DIR}/$(evidence_stem "${name}").config"
+
+  if candidate_is_source_built "${name}"; then
+    kernel_source="built-from-source"
+    [[ -n "${kernel_release}" ]] \
+      || die "candidate '${name}' resolves a kernel_source variant but no KERNEL_SOURCE_KERNEL_RELEASE" 1
+    # The resolved config comes out of the kernel package this build produced.
+    kdeb="$(find "${PIPELINE_DIR}/mkosi/.staging/${board}/kernel-build" -maxdepth 1 \
+              -name "linux-image-${kernel_release}_*.deb" -print -quit 2>/dev/null || true)"
+    [[ -n "${kdeb}" ]] || die "no built kernel package found for ${kernel_release}" 1
+    extract_kernel_config "${kdeb}" "${config}" \
+      || die "could not extract /boot/config-${kernel_release} from ${kdeb}" 1
+  else
+    # The vendor candidate ships a PREBUILT BSP kernel, so the truth about which
+    # kernel this artifact runs is the fetched .deb under the board's BSP staging
+    # area — identity-checked against the committed pin, with the release string
+    # and the config both read out of the package payload rather than resolved.
+    [[ -n "${kernel_pkg}" ]] \
+      || die "candidate '${name}' resolves no KERNEL_PACKAGES to identity-check" 1
+    kdeb="$(find "${PIPELINE_DIR}/mkosi/.staging/${board}/bsp" -maxdepth 1 \
+              -name "${kernel_pkg}_*.deb" -print -quit 2>/dev/null || true)"
+    [[ -n "${kdeb}" ]] \
+      || die "no staged prebuilt kernel package '${kernel_pkg}' under mkosi/.staging/${board}/bsp" 1
+    assert_prebuilt_kernel_identity "${kdeb}" "${kernel_pkg}" || exit 1
+    kernel_release="$(prebuilt_kernel_release "${kdeb}")" \
+      || die "could not derive a kernel release from ${kdeb} (no /boot/config-<release>)" 1
+    extract_kernel_config "${kdeb}" "${config}" \
+      || die "could not extract /boot/config-${kernel_release} from ${kdeb}" 1
+  fi
 
   candidate_is_debug "${name}" && expect="on"
   say "verifying CeraLive test symbols in ${name} (expect ${expect})"
   assert_test_symbols "${config}" "${expect}" || exit 1
 
+  if ! candidate_is_source_built "${name}"; then
+    # The edge closure manifests are the MAINLINE contract — required-symbols.list
+    # demands CONFIG_VIDEO_SYNOPSYS_HDMIRX, which the vendor kernel does not and
+    # must not carry (its HDMI-RX driver is rk_hdmirx). Applying them here would
+    # fail a correct vendor artifact, so the vendor gate is the vendor claim:
+    # the package's own config exists and carries the vendor HDMI-RX driver.
+    grep -qx "${VENDOR_HDMIRX_SYMBOL}=y" "${config}" \
+      || die "the vendor candidate '${name}' resolves ${VENDOR_HDMIRX_SYMBOL}=y nowhere in ${config} — this artifact has no vendor HDMI-RX driver" 1
+    say "  vendor gate: ${VENDOR_HDMIRX_SYMBOL}=y present in ${kernel_release}'s own config"
   # The production closure gate is the manifest, not a hand list: run the real
   # forbidden manifest against a non-debug candidate's own resolved config.
-  if [[ "${expect}" == "off" ]]; then
+  elif [[ "${expect}" == "off" ]]; then
     ( cd "${PIPELINE_DIR}" && lib/verify-kernel-config.sh \
         --config "${config}" \
         --required manifests/kernel/required-symbols.list \
@@ -458,6 +604,11 @@ record_tuple() {
     printf '  "bundle": %s,\n'          "$(json_str "$(basename "${bundle}")")"
     printf '  "bundle_path": %s,\n'     "$(json_str "${bundle}")"
     printf '  "bundle_sha256": %s,\n'   "$(json_str "${bundle_sha}")"
+    printf '  "kernel_source": %s,\n'   "$(json_str "${kernel_source}")"
+    printf '  "kernel_package": %s,\n'  "$(json_str "${kernel_pkg}")"
+    printf '  "loader_board": %s,\n'    "$(json_str "${board}")"
+    printf '  "loader_name": %s,\n'     "$(json_str "${LOADER_NAME:-}")"
+    printf '  "loader_url": %s,\n'      "$(json_str "${LOADER_URL:-}")"
     printf '  "loader_sha256": %s,\n'   "$(json_str "${LOADER_SHA256:-}")"
     printf '  "build_mode": %s,\n'      "$(json_str "${CERALIVE_BUILD_MODE}")"
     printf '  "debug_image": %s,\n'     "$( [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]] && echo true || echo false )"
@@ -470,14 +621,16 @@ record_tuple() {
     printf '  "installed_root_sha256_fingerprint": %s,\n' "$(json_str "${root_fpr}")"
     printf '  "signer_leaf_sha256_fingerprint": %s,\n'    "$(json_str "${leaf_fpr}")"
     printf '  "signer_eku": %s,\n'      "${eku_json}"
+    printf '  "evidence_stem": %s,\n'   "$(json_str "$(evidence_stem "${name}")")"
     printf '  "config": %s,\n'          "$(json_str "$(basename "${config}")")"
     printf '  "build_log": %s\n'        "$(json_str "$(basename "${log}")")"
     printf '}\n'
-  } >"${EVIDENCE_DIR}/${name}.tuple.json"
+  } >"${EVIDENCE_DIR}/$(evidence_stem "${name}").tuple.json"
 
-  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${EVIDENCE_DIR}/${name}.tuple.json" \
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+    "${EVIDENCE_DIR}/$(evidence_stem "${name}").tuple.json" \
     || die "emitted a non-parseable tuple for ${name}" 1
-  say "tuple: ${EVIDENCE_DIR}/${name}.tuple.json"
+  say "tuple: ${EVIDENCE_DIR}/$(evidence_stem "${name}").tuple.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -616,6 +769,41 @@ JSON
     && bad "the production symbol assertion passed a LEAKED debug config" \
     || ok "the production symbol assertion REJECTS a leaked debug config"
 
+  # 9. the candidate table: the vendor candidate maps to the resolver `default`
+  [[ "$(candidate_board rock-vendor)" == "rock-5b-plus" ]] \
+    && ok "rock-vendor maps to board rock-5b-plus" \
+    || bad "rock-vendor board mapping"
+  [[ "$(candidate_variant rock-vendor)" == "default" ]] \
+    && ok "rock-vendor maps to resolver variant 'default' (no kernel overlay)" \
+    || bad "rock-vendor variant mapping is not 'default'"
+  candidate_is_source_built rock-vendor \
+    && bad "rock-vendor is treated as a source-built candidate" \
+    || ok "rock-vendor is NOT source-built (no KERNEL_SOURCE_* expected)"
+  candidate_is_source_built rock-edge \
+    && ok "rock-edge IS source-built" \
+    || bad "rock-edge lost its source-built classification"
+
+  # 10. each board binds its OWN recovery loader, and they differ
+  local rock_loader opi_loader
+  rock_loader="$("${HERE}/fetch-rk3588-loader.sh" --print-sha256 rock-5b-plus)"
+  opi_loader="$("${HERE}/fetch-rk3588-loader.sh" --print-sha256 orange-pi-5-plus)"
+  [[ -n "${rock_loader}" && -n "${opi_loader}" && "${rock_loader}" != "${opi_loader}" ]] \
+    && ok "the two RK3588 boards pin DIFFERENT recovery loaders" \
+    || bad "the recovery loaders did not resolve to two distinct digests"
+  if "${HERE}/fetch-rk3588-loader.sh" --print-sha256 x86-minipc >/dev/null 2>&1; then
+    bad "a board with no pinned loader was answered anyway"
+  else
+    ok "a board with no pinned recovery loader is refused, never defaulted"
+  fi
+
+  # 11. evidence stems separate the two bench-labels modes
+  local stem_one stem_zero
+  stem_one="$(BENCH_LABELS=1; evidence_stem rock-edge)"
+  stem_zero="$(BENCH_LABELS=0; evidence_stem rock-edge)"
+  [[ "${stem_one}" != "${stem_zero}" ]] \
+    && ok "evidence stems differ across --bench-labels modes (${stem_one} vs ${stem_zero})" \
+    || bad "both bench-labels modes resolve to the same evidence stem"
+
   printf '\n== %d passed, %d failed\n' "${pass}" "${fail_n}"
   return "${rc}"
 }
@@ -666,7 +854,7 @@ main() {
     IFS=',' read -r -a selected <<<"${only}"
     for item in "${selected[@]}"; do
       candidate_board "${item}" >/dev/null \
-        || die "unknown candidate '${item}' (valid: all rock-edge orange-edge rock-edge-test)"
+        || die "unknown candidate '${item}' (valid: all rock-edge orange-edge rock-edge-test rock-vendor)"
     done
   fi
 
@@ -706,15 +894,10 @@ main() {
 
   if (( skip_probes == 0 )); then
     say "running the eight DRY_RUN probes"
-    run_dry_run_probes "${EVIDENCE_DIR}/dry-run-probes.log" \
+    run_dry_run_probes "${EVIDENCE_DIR}/dry-run-probes.bench-labels-${BENCH_LABELS}.log" \
       || die "one or more DRY_RUN probes failed — no real build was started" 1
     say "all eight DRY_RUN probes exited 0"
   fi
-
-  # The Maskrom loader digest is a constant of ci/fetch-rk3588-loader.sh; it is
-  # part of the artifact tuple because a candidate is only flashable together
-  # with the loader that was verified against it.
-  LOADER_SHA256="$(sed -n 's/^readonly LOADER_SHA256="\(.*\)"$/\1/p' "${HERE}/fetch-rk3588-loader.sh")"
 
   for c in "${selected[@]}"; do
     build_candidate "${c}"

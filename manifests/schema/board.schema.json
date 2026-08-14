@@ -90,7 +90,7 @@
       }
     },
     "variant_overrides": {
-      "description": "Per-variant overrides of this board's OWN facts. Optional. Keyed by the family variant name as passed to `build <board> --variant <name>`; `default` is RESERVED and MUST NOT be declared (the production path must never be overridable). The resolver strips this key before flattening whether or not a variant is selected, so declaring it cannot move the default resolved param set, and applies the selected entry AFTER the board merge — the board still wins last, this is just a board fact scoped to a variant. It exists because a board fact can legitimately differ per variant while remaining board-specific: a board's DTB filename comes from whichever kernel tree built it, and the Armbian vendor BSP and the mainline source the `edge` variant compiles are two different trees that need not agree on it. Naming a variant the family does not declare is a fatal manifest error on every resolve. Deliberately NARROW — see $defs/board_variant_override.",
+      "description": "Per-variant overrides of this board's OWN facts. Optional. Keyed by the family variant name as passed to `build <board> --variant <name>`; `default` is RESERVED and MUST NOT be declared (the production path must never be overridable). The resolver strips this key before flattening whether or not a variant is selected, so declaring it cannot move the default resolved param set, and applies the selected entry AFTER the board merge — the board still wins last, this is just a board fact scoped to a variant. It exists because a board fact can legitimately differ per variant while remaining board-specific: a board's DTB filename comes from whichever kernel tree built it, and its U-Boot package comes from whichever Armbian branch that variant tracks (`-vendor` = Rockchip blob BL31, `-edge` = mainline TF-A), and those trees/branches need not agree. Naming a variant the family does not declare is a fatal manifest error on every resolve. Deliberately NARROW — see $defs/board_variant_override.",
       "type": "object",
       "minProperties": 1,
       "not": { "required": ["default"] },
@@ -105,7 +105,7 @@
   },
   "$defs": {
     "board_variant_override": {
-      "description": "One named per-variant board override. Deliberately NARROW: only `dtb_name` may differ per variant, because only the DTB filename is known to diverge between the Armbian vendor BSP and the mainline source tree. This is NOT a general escape hatch for the family -> variant -> board merge order; widening it needs a matching resolver/consumer change and a reviewed reason.",
+      "description": "One named per-variant board override. Deliberately NARROW: it admits exactly TWO keys — `dtb_name` and `uboot_packages` — and `additionalProperties: false` keeps it that way. Both are board facts that legitimately differ per variant because they come from whichever tree/branch that variant builds: the DTB filename diverges between the Armbian vendor BSP and the mainline source tree, and the U-Boot package diverges between Armbian's `-vendor` (Rockchip blob BL31) and `-edge` (mainline TF-A) build of the SAME board. This is NOT a general escape hatch for the family -> variant -> board merge order; each further widening needs a matching resolver/consumer change and a reviewed reason, and each key added here MUST have a consumer that reads the per-variant value (an override nothing consumes is the silently-inert failure this whole mechanism exists to prevent).",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -114,6 +114,13 @@
           "description": "Device-tree blob filename this board's DTB carries under this variant, as built by that variant's kernel tree. Replaces the board's top-level dtb_name for this variant only, everywhere it is consumed — the U-Boot fdtfile, the disk assembler, and build-kernel.sh's validation of the built .deb.",
           "type": "string",
           "pattern": "^([A-Za-z0-9._-]+\\.dtb|none)$"
+        },
+        "uboot_packages": {
+          "description": "Armbian U-Boot package(s) this board fetches under this variant. REPLACES the board's top-level uboot_packages wholesale for this variant only (arrays never merge). Consumed by fetch_bsp (which package to fetch, version-pinned in manifests/armbian-bsp-deb-versions.txt), by freeze_boot_packages, and — with the same board+variant tuple — by lib/write-bootloader.sh, whose committed manifests/bootloader-blobs.tsv maps the tuple to the exact blob filename and SHA-256 it may write into the raw gap. Items must be valid Debian package names.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 1,
+          "uniqueItems": true
         }
       }
     }

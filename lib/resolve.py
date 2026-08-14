@@ -67,9 +67,20 @@ Board variant overrides (task 27)
 ---------------------------------
 Because the board always wins last, a family variant can never restate a
 board-specific fact — by design. But a fact can legitimately DIFFER per variant
-while still being the board's own: a board's DTB filename comes from whichever
-kernel tree built it, and the Armbian vendor BSP and the mainline source the
-``edge`` variant compiles are two different trees that need not agree on it.
+while still being the board's own. Two do, and the schema admits exactly those
+two: a board's DTB filename comes from whichever kernel tree built it, and its
+U-Boot package comes from whichever Armbian branch the variant tracks — the
+``-vendor`` build carries Rockchip's closed rkbin BL31 while ``-edge`` is built
+from the ``tpl-blob-atf-mainline`` scenario with TF-A compiled from upstream.
+Neither pair of trees/branches need agree.
+
+Both ride the SAME generic machinery below: ``uboot_packages`` needed no code
+here because ``deep_merge`` replaces arrays wholesale, so a per-variant list
+supersedes the board's top-level one by construction. What the widening does
+require is a CONSUMER — ``lib/write-bootloader.sh`` keys its committed
+``manifests/bootloader-blobs.tsv`` on the same board×variant tuple, so a
+per-variant package that resolves here can never be written as the other
+variant's blob.
 
 So the BOARD (never the family) MAY declare a ``variant_overrides:`` map keyed
 by variant name. It is applied AFTER the board merge, so board-wins-last is

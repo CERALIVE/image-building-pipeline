@@ -24,17 +24,36 @@ board_id: orangepi5-plus
 # BOOT_FDT_FILE="rockchip/rk3588-orangepi-5-plus.dtb".
 dtb_name: rk3588-orangepi-5-plus.dtb
 
-# Kept as an EXPLICIT per-variant assertion even though it now restates the
-# default: the edge variant compiles its DTBs from mainline v7.1.7, an entirely
-# different tree from the vendor BSP above, and the two agreeing today is a fact
-# to pin rather than an invariant to assume. If either tree ever renames it, only
-# one of these two lines moves. The Rock 5B+ needs no entry for the same reason it
-# never did — rk3588-rock-5b-plus.dtb in both trees.
+# Per-variant board facts. dtb_name is kept as an EXPLICIT assertion even though
+# it now restates the default: the edge variant compiles its DTBs from mainline
+# v7.1.7, an entirely different tree from the vendor BSP above, and the two
+# agreeing today is a fact to pin rather than an invariant to assume. If either
+# tree ever renames it, only one of these two lines moves.
+#
+# uboot_packages is the substantive one on THIS board. The vendor package below
+# is Armbian's 2017.09 Rockchip U-Boot fork whose boot chain carries the closed
+# rkbin BL31; the -edge package at the SAME version 26.5.1 is built from the
+# `tpl-blob-atf-mainline` boot scenario — TF-A compiled from
+# ARM-software/arm-trusted-firmware tag v2.13.0 — which is what `snps_hdmirx`
+# demands ("interrupt not functioning, open-source TF-A is required by this
+# driver", the confirmed probe failure on this board). Package existence,
+# branch attribution and payload were verified against the signed Armbian index;
+# the blob's exact SHA-256 is pinned in manifests/bootloader-blobs.tsv and
+# asserted by lib/write-bootloader.sh before anything reaches the raw gap.
+#
+# This is PROVENANCE, not a functional claim: that the resulting chain actually
+# carries mainline TF-A is proven only by snps_hdmirx probing on real hardware.
+#
+# The Rock 5B+ declares no dtb_name override for the same reason it never did
+# (rk3588-rock-5b-plus.dtb in both trees) but DOES declare the U-Boot one.
 variant_overrides:
   edge:
     dtb_name: rk3588-orangepi-5-plus.dtb
+    uboot_packages:
+      - linux-u-boot-orangepi5-plus-edge
 
 # Board-specific Armbian vendor U-Boot; overrides the family's empty default.
+# This is the PRODUCTION path and is deliberately unchanged.
 uboot_packages:
   - linux-u-boot-orangepi5-plus-vendor
 

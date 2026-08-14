@@ -77,7 +77,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test\|rock-vendor --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -661,22 +661,62 @@ answer:
   `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`, and the tuple carries
   `bench_labels` + `partlabel_set`.
 
+- **WHICH RECOVERY LOADER.** The MaskROM loader is resolved PER BOARD from
+  `ci/fetch-rk3588-loader.sh`'s table (`--print-identity <board-id>`), never as one
+  constant. It is the path an operator reaches for once a candidate has already
+  bricked the board, and it is matched to a board's DDR topology rather than to
+  the SoC: the Rock binds Radxa's `rk3588_spl_loader_v1.15.113.bin`, the Orange Pi
+  binds `rk3588_spl_loader_v1.16.113.bin` from `armbian/rkbin` — the loader whose
+  embedded DDR build (`ddr-v1.16-9fffbe1e78`) is byte-identical to the one that
+  board's own running chain reports in `androidboot.fwver`. A board with no pinned
+  loader is REFUSED, never defaulted onto another board's artifact. The tuple
+  carries `loader_board` / `loader_name` / `loader_url` / `loader_sha256`.
+
 The **eight DRY_RUN probes** (the seven valid board×kernel-track cells plus the
 multi-board dispatch probe) run BEFORE any real build, so a plan-level
 regression is reported in seconds rather than after a kernel compile.
 `--debug-env` is required when a debug candidate is selected and refused when
 one is not; it supplies `CERALIVE_DEBUG_PASSWORD_HASH`, and the script sets
 `CERALIVE_DEBUG_IMAGE` explicitly on both branches rather than letting an
-ambient value decide. `--self-test` (18 legs) drives every refusal — including
-the `--bench-labels` one — and both non-vacuity directions of the symbol
-assertion. The end-to-end contract (refusal, both exported values observed in
-the environment `./build` actually receives, and both tuple fields) is
+ambient value decide. `--self-test` (25 legs) drives every refusal — including
+the `--bench-labels` one, the per-board loader table and the vendor candidate's
+mapping — and both non-vacuity directions of the symbol assertion. The end-to-end
+contract (refusal, both exported values observed in the environment `./build`
+actually receives, both tuple fields, and the no-collision property below) is
 `tests/hardware-candidate-bench-labels.test.sh`.
 
-**The artifact tuple is at `schema_version: 2`.** The bump is `bench_labels` +
+**Every evidence path carries the bench-labels mode**:
+`<candidate>.bench-labels-<0|1>.{log,config,tuple.json}`. The same candidate is
+legitimately built once per mode — bench overlay for staging media, frozen
+production set for the final medium — and those two artifacts are NOT
+interchangeable, so naming by candidate alone let the second run silently
+overwrite the first's evidence and leave an operator holding two artifacts and
+one artifact's evidence.
+
+**`rock-vendor` is the PREBUILT-vendor candidate, and it is opt-in by name.** It
+is deliberately NOT in `--only all`: it is a comparison/smoke artifact (the
+todo-19 vendor smoke test), not one of the qualification set. Four things in the
+recorder are edge-only and are branched for it — the tuple stays valid with no
+`KERNEL_SOURCE_*` fields; the kernel package is located in the BOARD'S BSP
+STAGING AREA (`mkosi/.staging/<board>/bsp`), identity-checked against
+`manifests/armbian-bsp-deb-versions.txt`, with the kernel release AND the config
+read out of the package payload; the EDGE `required`/`forbidden` manifests are
+NOT applied (`required-symbols.list` demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX`, the
+mainline driver, which a correct vendor kernel does not carry) and the vendor
+gate is instead `CONFIG_VIDEO_ROCKCHIP_HDMIRX=y` in that package's own config;
+and the candidate maps to the resolver's reserved `default`, so `./build` is
+invoked BARE — passing `--variant default` would be an error. Contract:
+`tests/hardware-candidate-vendor-tuple.test.sh` (18 legs, incl. non-vacuity for
+each vendor-specific refusal and a spy proving the edge closure never runs).
+
+**The artifact tuple is at `schema_version: 3`.** Schema 2 added `bench_labels` +
 `partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
 by tooling that COULD NOT state which PARTLABEL set built the artifact, which is
 precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
+Schema 3 makes `loader_sha256` board-specific and adds `loader_name`/`loader_url`
+/`loader_board`, `kernel_source`/`kernel_package` and `evidence_stem` — a
+schema-2 tuple recorded the RADXA loader's digest for every board, so an Orange
+Pi tuple named a loader that board's BootROM cannot be recovered with.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
@@ -1529,20 +1569,41 @@ is no overlay load anywhere in the CeraLive boot path.
 `prune_dtb_dir` in `platform/mkosi.postinst` reduces a directory to the board DTB
 plus an explicit overlay allowlist; `install_kernel_source_dtbs` applies it to
 BOTH the package-payload directory and the `/boot` copy, and `prune_vendor_dtbs`
-applies it to the prebuilt vendor tree. Measured on a real edge build:
-34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled in a
-factory `.raw` because the kernel rides inside a RAUC slot.
+applies it to BOTH of the prebuilt vendor tree's copies. Measured on a real edge
+build: 34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled
+in a factory `.raw` because the kernel rides inside a RAUC slot.
 
 - **Both locations, not one.** The package-payload directory stays in the rootfs
   after installation, so trimming only `/boot` would leave the full set shipping.
+- **The VENDOR path honoured that rule for `/boot` only, for three releases** —
+  the second half was added 2026-08-13 after `./build rock-5b-plus` was refused at
+  `[6c/9]` measuring 1,664,911,360 B against the 1,500,000,000 B ceiling. The
+  vendor BSP ships the blob set TWICE and the two packages disagree about where:
+  `linux-dtb-vendor-rk35xx` puts 813 files under `/boot/dtb-<REL>/rockchip/`
+  while `linux-image-vendor-rk35xx` carries its own 813 under
+  `/usr/lib/linux-image-<REL>/rockchip/`. `prune_vendor_dtbs` searched
+  `${root}/boot` alone, so the build log truthfully read
+  `vendor DTB payload: kept 1 device-tree file(s) … removed 810` while
+  **814 files / 91,117,943 B** sat untouched in the package payload — in both
+  slots of every image and inside every bundle. The log line reporting a
+  successful prune is exactly what made this invisible; read it as "the copy it
+  looked at", not "the image".
+- **Neither directory is fatal in the same way.** A board DTB missing under
+  `/boot` is an unbootable slot and stays FATAL; a kernel package that ships no
+  device trees of its own is a legitimate packaging shape, so an absent payload
+  directory logs and continues. `-mindepth 2` on the `/boot` search is
+  load-bearing for a different reason: a bare DTB at the root of `/boot` would
+  otherwise nominate the directory holding `vmlinuz`, the initrd and `boot.scr`
+  as a prune target.
 - **Verify BEFORE deleting, and again after.** A prune that removes first and
   finds the board DTB missing second has already produced an unbootable slot, and
   that failure surfaces at the far end of a flash cycle.
-- **The vendor directory is DISCOVERED, never composed from a release string.**
-  `/boot/dtb-<REL>` comes from the Armbian package, not from anything this repo
-  resolves, so a hardcoded path would silently no-op on the next version bump.
-  `find` does not descend the `/boot/dtb` symlink, so the real directory is
-  pruned once and the symlink keeps resolving.
+- **Both vendor directories are DISCOVERED, never composed from a release
+  string.** `/boot/dtb-<REL>` and `/usr/lib/linux-image-<REL>` are both named by
+  the Armbian packages, not by anything this repo resolves, so a hardcoded path
+  would silently no-op on the next version bump. `find` does not descend the
+  `/boot/dtb` symlink, so the real directory is pruned once and the symlink keeps
+  resolving.
 - **`armbian_overlays` is NOT the keep-list.** The board schema documents it as
   inert, unconsumed provenance metadata; using it would fail the existence check
   for blobs that were never in any kernel tree. The real knob is
@@ -1558,7 +1619,9 @@ factory `.raw` because the kernel rides inside a RAUC slot.
   self-defending — re-unpacking the package DOES restore every blob — so the
   argument rests on the freeze rather than on the prune.
 
-Guards: `tests/dtb-prune-contract.bats` (20 tests, six tagged `vendor`).
+Guards: `tests/dtb-prune-contract.bats` (25 tests, eleven tagged `vendor` —
+including the both-locations regression, verify-before-delete inside the payload
+copy, the absent-payload no-op, and the `/boot`-is-never-a-target property).
 
 **Firmware is pruned only where an installed-module sweep proves no consumer**
 [EXISTS]
@@ -1597,9 +1660,31 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
   five are now KEPT with the blocking reference named. Only `qcom/`, `updates/`,
   `microchip/`, `tegra/`, `renesas/` and `r8a779x_usb3_rom.mem` have zero
   consumers.
-- **It saves 0 bytes at the current pin, on purpose.** `armbian-firmware` is
-  already the trimmed variant and ships none of the new candidates. This is a
-  forward guard against a re-spin, not a reduction.
+- **CORRECTION (2026-08-13) — it had never run at all, and it now saves 331 MB.**
+  The claim this bullet used to make ("saves 0 bytes at the current pin, on
+  purpose — `armbian-firmware` is already the trimmed variant and ships none of
+  the new candidates") was never measured against a real build, and both halves
+  are false at `armbian-firmware 26.8.1`. `platform/mkosi.postinst` is a
+  NON-chroot script, so it resolves `modinfo` from the **builder image** — and
+  `ci/Dockerfile` did not install `kmod`. Every real build log therefore carried
+  `WARNING: modinfo is unavailable — cannot prove a firmware family has no
+  consumer, so NOTHING is pruned` and the sweep authorised zero deletions from
+  the day it landed. The fail-safe worked exactly as designed; what was missing
+  was the capability it depends on. `kmod` is now in the builder image and its
+  presence is asserted in the same `RUN` block as the mkosi/pefile pin checks.
+  Run for real against the `rock-5b-plus` vendor rootfs the sweep prunes
+  `qcom/` (309,034,126 B), `ath12k/` (16,290,021 B) and `updates/`
+  (6,405,446 B) — **331,729,593 B** — while correctly KEEPING `intel/`
+  (`intel/ibt-11-5.ddc`), `ath10k/` (`ath10k/QCA6174/hw2.1/board-2.bin`) and
+  `ath11k/` (`ath11k/QCA6390/hw2.0/amss.bin`), each with its blocking reference
+  named. `updates/` is safe to lose because it is the loader's override
+  directory and every file it carries (`regulatory.db`, `regulatory.db.p7s`, the
+  ath11k WCN6855 hw2.0 board file) has a base counterpart the search then
+  resolves — `wireless-regdb` supplies `regulatory.db` through
+  update-alternatives, which is why that package is an explicit `shared.list`
+  entry. **`modinfo` is arch-agnostic** (it parses ELF), so the x86_64 builder
+  reads the arm64 `.ko` set correctly; do NOT "fix" a future failure here by
+  adding `kmod` to the device package set.
 - **Two failure modes are closed.** Batching through `xargs modinfo` made ONE
   unparseable `.ko` abort the whole postinstall under `set -e`; swallowing every
   failure is worse, because an empty consumer set authorises deleting everything.
@@ -1609,7 +1694,10 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
 - **Nothing is removed as a PACKAGE.** `armbian-firmware`, `libmali` and
   `hostapd` all stay installed.
 
-Guard: `tests/firmware-prune.test.sh` (40 checks).
+Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
+builder image installs `kmod` and fails its own build without `modinfo`, because
+every synthetic-tree case above passes vacuously on a builder that cannot run the
+sweep).
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
@@ -3877,6 +3965,73 @@ SSH whenever it is eventually started, on both image kinds. Guards: `mkosi-image
 "production image leaves ssh.service NOT enabled" + "lab debug image enables
 ssh.service by default".
 
+**Both halves of that contract were silently untrue on a real build, for two
+independent reasons — a SIGPIPE race and a first-boot preset** [EXISTS — fixed
+2026-08-12]
+
+A `rock-5b-plus --variant edge` production build failed the `[7/9]` gate on
+`ssh.service is enabled but MUST be disabled-by-default`, while the SAME commit
+produced a clean `rock-vendor` image. Both defects below are invisible to the PR
+gate, which is `DRY_RUN=1` and never runs the layer that configures services.
+
+- **The disable was a no-op ~8% of the time.** `disable_service` probed with
+  `systemctl list-unit-files "$svc" | grep -q "$svc"`. `grep -q` exits at its FIRST
+  match and closes the pipe while systemctl is still writing its `1 unit files
+  listed.` trailer; systemctl takes SIGPIPE, and under the modules' `set -o
+  pipefail` the pipeline reports **141** for a unit that WAS found. The guard then
+  logged `service ssh.service not present — nothing to disable`, openssh-server's
+  own postinst `enable` survived, and the image shipped
+  `multi-user.target.wants/ssh.service` + the `sshd.service` alias. Measured
+  **23/300** against a real built arm64 rootfs — which is why it fired on one
+  board's build and not another's from one commit, and why a single offline replay
+  always passes. **This is the fourth instance of this footgun in this repo**
+  (`deb_lists_path`, `verify-boot-artifacts.sh`, and the two static harnesses that
+  build a source SET into a FILE rather than piping it). `unit_file_present()`
+  captures the output in a command substitution — no early reader, so nothing can
+  SIGPIPE the writer — and `disable_service` probes through it. The production
+  branch then **asserts** the disable landed (`assert_ssh_not_enabled`, mirroring
+  the parity predicate exactly) and `die`s otherwise: a silent miss otherwise ships
+  an SSH-reachable production image that passes every other gate.
+- **`find … | grep -q .` in `lib/parity-check.sh` is the same defect with a worse
+  failure mode**, and it sits in the gate that caught the first one. `find` keeps
+  traversing after the match it printed, so a SECOND match SIGPIPEs it and the
+  condition reads FALSE — which on the ssh leg means `ssh_enabled=0`, i.e. a false
+  **PASS** certifying an SSH-reachable production image. It measured 0/400 today
+  (with exactly one match, `find` never writes again and never sees EPIPE), so this
+  is latent rather than active — fixed anyway, via `find_first`, which captures in
+  a substitution and stops `find` itself with `-quit`.
+- **Even a landed disable does not survive first boot.** `/etc/machine-id` ships
+  holding `uninitialized`, so every freshly flashed board is a systemd FIRST BOOT
+  and PID 1 runs `preset-all` — the same mechanism `suppress_unusable_boot_units`
+  already documents. Debian's default verdict is `enable`, and mkosi additionally
+  ships `/usr/lib/systemd/system-preset/80-mkosi-ssh.preset` holding `enable
+  ssh.socket` (confirmed present in the built rootfs), so the operator's very first
+  power-on re-enabled what the build had disabled. `write_ssh_preset` emits
+  `00-ceralive-ssh.preset` — sorting AHEAD of mkosi's — restating the build-time
+  verdict as the FIRST matching preset line, `disable`/`disable` on production and
+  `enable ssh.service` + `disable ssh.socket` on debug. **A mask would also survive
+  and is the WRONG tool here**: `systemctl enable` refuses to act on a masked unit,
+  which would take away the operator's CeraUI SSH toggle — the entire reason SSH
+  ships disabled rather than absent. (It would also fail the parity check, whose
+  predicate is any `/etc/systemd/system` symlink named `ssh.service`, and a mask is
+  exactly that symlink pointing at `/dev/null`.)
+
+Guard: `tests/ssh-enablement-contract.test.sh` (23 checks) — the static no-pipe
+contract on the real function bodies, the preset ordering against mkosi's filename,
+and a runtime leg driving the REAL shipped `disable_service` 50× against a stub
+systemctl whose oversized trailer makes the old form's SIGPIPE deterministic, with a
+**non-vacuity leg proving the pre-fix piped probe silently skips the disable under
+that identical stub**, plus the fail-closed leg (a planted surviving enable symlink
+must abort the build).
+
+**Still carrying the same pattern, deliberately out of scope here and worth a
+follow-up:** `ceralive-healthcheck.sh` (`ip -o link show up | grep -v ' lo:' |
+grep -q 'state UP'` — a false negative reports no link up, which feeds the RAUC
+health verdict), `ceralive-provision.sh` (a false negative spuriously starts the
+setup AP), `ceralive-hdmirx-edid.sh`, and `build-feature-sysext.sh`'s
+`gpg --list-secret-keys | grep -q '^sec'`. Each is a producer that keeps writing
+after the matched line, under `pipefail`, with the failure silently read as "no".
+
 **`Before=ssh.socket` guards MUST be `DefaultDependencies=no` AND
 `After=sysinit.target`.** Both `ceralive-ssh-firstboot.service` and
 `ceralive-ci-uart-bootstrap.service` are `Before=ssh.socket`. `ssh.socket` is
@@ -4298,6 +4453,9 @@ gated item, not the package availability.
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
 - Don't make `/boot/Image` a symlink to a `bindeb-pkg` `vmlinuz-<REL>` without reading its first bytes. arm64's `KBUILD_IMAGE` default is `arch/arm64/boot/Image.gz`, so that vmlinuz is GZIP, and whether `booti` copes is a per-board U-Boot fact the two shipped boards answer differently (2026.04 `CONFIG_GZIP=y` vs the 2017.09 Rockchip fork, which has no such symbol). Decompress it into a real file at staging time — and don't "simplify" the follow-up magic assertion away either: `gzip -dc` exiting 0 on the wrong payload still ships an unbootable slot
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
+- Don't record one board's MaskROM recovery loader in another board's candidate tuple, and don't collapse `ci/fetch-rk3588-loader.sh` back to a single constant. The loader's first stage is the DDR initialiser, matched to a board's memory topology — the OPi's correct loader was identified by matching the DDR build hash its own running chain reports. A tuple naming an unusable loader is read precisely when the board is already bricked
+- Don't name a candidate's evidence by candidate alone. The same candidate is built once per `--bench-labels` mode and the two artifacts are not interchangeable; every log, config and tuple is `<candidate>.bench-labels-<0|1>.<ext>` so the second run cannot overwrite the first's evidence
+- Don't apply `manifests/kernel/required-symbols.list` to the `rock-vendor` candidate. It demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX` — the MAINLINE HDMI-RX driver — and a correct vendor kernel carries `rk_hdmirx` (`CONFIG_VIDEO_ROCKCHIP_HDMIRX`) instead, so the edge closure fails a GOOD artifact. Don't pass `--variant default` for it either: `default` is the resolver's reserved no-overlay name, i.e. a bare `./build <board>`
 - Don't give `ci/build-hardware-candidates.sh`'s `--bench-labels` a default of any kind, and don't let it fall back to an ambient `CERALIVE_BENCH_LABELS`. A candidate whose PARTLABEL set was decided by the dispatch shell builds, boots and passes every other gate, and then addresses `/boot` and `/data` on the WRONG PHYSICAL MEDIUM of a dual-media bench rig — that is a real 2026-08-10 incident, not a hypothetical. `lib/orchestrate.sh`'s own `:-0` default is for a DIRECT `./build` and stays exactly as it is
 - Don't regenerate `tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it

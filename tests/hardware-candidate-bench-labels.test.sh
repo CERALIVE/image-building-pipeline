@@ -66,8 +66,9 @@ make_fake_pipeline() {
            "${root}/mkosi/.staging/${BOARD}/kernel-build" "${root}/out"
   cp "${TOOL}" "${root}/ci/build-hardware-candidates.sh"
 
-  printf 'readonly LOADER_SHA256="%s"\n' "$(printf 'loader' | sha256sum | cut -d' ' -f1)" \
-    >"${root}/ci/fetch-rk3588-loader.sh"
+  # The REAL board→loader table: the recorded recovery loader is board-specific,
+  # so a stub would leave that binding untested.
+  cp "${PIPELINE_DIR}/ci/fetch-rk3588-loader.sh" "${root}/ci/fetch-rk3588-loader.sh"
 
   # The stub build: record the environment it was handed, then emit the two
   # artifacts and the two log lines record_tuple parses out of the build log.
@@ -93,6 +94,7 @@ printf "KERNEL_SOURCE_PATCHES_COMMIT='%s'\n" cafebabe
 printf "KERNEL_SOURCE_KERNEL_RELEASE='%s'\n" "${KERNEL_RELEASE}"
 printf "DTB_NAME='%s'\n" rk3588-rock-5b-plus.dtb
 printf "BOARD_ID='%s'\n" "${BOARD}"
+printf "KERNEL_PACKAGES='%s'\n" "linux-image-${KERNEL_RELEASE}"
 RESOLVE
   chmod +x "${root}/lib/resolve.sh"
 
@@ -233,8 +235,8 @@ fi
 # ---------------------------------------------------------------------------
 # (d) the tuple records the mode that built THAT artifact
 # ---------------------------------------------------------------------------
-tuple_b="${WORK}/ev-b/rock-edge.tuple.json"
-tuple_c="${WORK}/ev-c/rock-edge.tuple.json"
+tuple_b="${WORK}/ev-b/rock-edge.bench-labels-1.tuple.json"
+tuple_c="${WORK}/ev-c/rock-edge.bench-labels-0.tuple.json"
 for t in "${tuple_b}" "${tuple_c}"; do
   [[ -s "${t}" ]] || bad "(d) tuple not emitted: ${t}"
 done
@@ -243,6 +245,31 @@ if [[ -s "${tuple_b}" && -s "${tuple_c}" ]]; then
   assert_eq "(d) bench build tuple records partlabel_set"     '"bench-x-prefixed"' "$(tuple_field "${tuple_b}" partlabel_set)"
   assert_eq "(d) production build tuple records bench_labels" "false" "$(tuple_field "${tuple_c}" bench_labels)"
   assert_eq "(d) production build tuple records partlabel_set" '"production-frozen"' "$(tuple_field "${tuple_c}" partlabel_set)"
+fi
+
+# ---------------------------------------------------------------------------
+# (e) NO COLLISION — the same candidate built in both modes into ONE evidence
+#     directory keeps both artifacts' evidence. Named by candidate alone, the
+#     second run silently overwrote the first, and an operator holding two
+#     artifacts had one artifact's evidence.
+# ---------------------------------------------------------------------------
+shared_ev="${WORK}/ev-shared"
+run_candidate "${ROOT}" "${INPUTS}" "${shared_ev}" "${WORK}/probe-e1" --bench-labels 1 >/dev/null 2>&1
+run_candidate "${ROOT}" "${INPUTS}" "${shared_ev}" "${WORK}/probe-e0" --bench-labels 0 >/dev/null 2>&1
+missing=""
+for f in rock-edge.bench-labels-1.tuple.json rock-edge.bench-labels-0.tuple.json \
+         rock-edge.bench-labels-1.log rock-edge.bench-labels-0.log \
+         rock-edge.bench-labels-1.config rock-edge.bench-labels-0.config; do
+  [[ -s "${shared_ev}/${f}" ]] || missing+=" ${f}"
+done
+if [[ -z "${missing}" ]]; then
+  ok "(e) both label modes coexist in one evidence dir (log, config and tuple each per-mode)"
+else
+  bad "(e) evidence collided across label modes; missing:${missing}"
+fi
+if [[ -s "${shared_ev}/rock-edge.bench-labels-1.tuple.json" ]]; then
+  assert_eq "(e) the bench-labels-1 tuple survived the later bench-labels-0 run" \
+    "true" "$(tuple_field "${shared_ev}/rock-edge.bench-labels-1.tuple.json" bench_labels)"
 fi
 
 # The shipped tool's own refusal legs.

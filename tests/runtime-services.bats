@@ -1443,7 +1443,7 @@ SH
   fankick_fake_thermal "$sysfs" 6 0
 
   # Governor moves it 0 -> 1 shortly after the monitor primes.
-  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
   # Sample cur_state independently so the kick is observed, not inferred.
   ( for _ in $(seq 1 24); do
       fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
@@ -1475,7 +1475,7 @@ SH
   local timeline="$BATS_TEST_TMPDIR/fk-bounded-timeline"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; printf '2\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 2 ) &
   ( for _ in $(seq 1 30); do
       fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
       printf '\n' >>"$timeline"
@@ -1512,7 +1512,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-nonzero"
   fankick_fake_thermal "$sysfs" 6 1
 
-  ( sleep 0.35; printf '3\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 3 ) &
   run fankick_run "$sysfs" 300 12
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
@@ -1523,7 +1523,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-tozero"
   fankick_fake_thermal "$sysfs" 6 2
 
-  ( sleep 0.35; printf '0\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 0 ) &
   run fankick_run "$sysfs" 300 12
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
@@ -1537,7 +1537,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-atmax"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; printf '6\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 6 ) &
   run fankick_run "$sysfs" 300 12
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
@@ -1561,8 +1561,8 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-race"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state"
-    sleep 0.4;  printf '4\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1
+    sleep 0.4;  fankick_set_state "$sysfs/cooling_device6/cur_state" 4 ) &
   run fankick_run "$sysfs" 900 18
   [ "$status" -eq 0 ]
   [[ "$output" == *"nudging to state 6"* ]]
@@ -1575,9 +1575,9 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-cycles"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; printf '1\n' >"$sysfs/cooling_device6/cur_state"
-    sleep 0.9;  printf '0\n' >"$sysfs/cooling_device6/cur_state"
-    sleep 0.4;  printf '1\n' >"$sysfs/cooling_device6/cur_state" ) &
+  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1
+    sleep 0.9;  fankick_set_state "$sysfs/cooling_device6/cur_state" 0
+    sleep 0.4;  fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
   run fankick_run "$sysfs" 300 26
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c 'nudging to state 6')" -eq 2 ]

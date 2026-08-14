@@ -136,6 +136,150 @@ jobs:
             CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
             CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 
+  edid-conformance:
+    # The anti-corruption gate for the CeraLive HDMI-RX product EDID.
+    #
+    # `mkosi/runtime/edid/ceralive-hdmirx.edid` is a COMMITTED 256-byte binary
+    # that ceralive-hdmirx-edid.service writes into the HDMI receiver at boot. A
+    # binary blob is the one kind of source file a reviewer cannot read, so it is
+    # also the one that can rot silently: a wrong byte does not fail to build, it
+    # ships a board that negotiates 4K30 (or nothing) and blames the cable.
+    #
+    # Three legs close that:
+    #   (i)   DRIFT — regenerate from tools/gen-hdmirx-edid.py and byte-compare
+    #         against the committed blob. A blob edited by hand, or a generator
+    #         changed without regenerating, is RED. This is what makes the
+    #         generator the source of truth and the blob merely its output.
+    #   (ii)  CONFORMITY — `edid-decode --check` must exit 0, with a non-vacuous
+    #         tamper leg proving the checker actually bites on a flipped byte.
+    #   (iii) CONTENT — the specific capabilities 4K60 capture depends on are
+    #         asserted by name. `--check` only proves the bytes are a VALID EDID;
+    #         a perfectly valid 4K30 EDID would sail through it.
+    #
+    # The generator is stdlib-only on purpose, so this job installs no Python
+    # packages and never resolves ci/requirements-ci.txt.
+    name: HDMI-RX EDID conformance (generator drift + edid-decode)
+    runs-on: ubuntu-latest
+    needs: shellcheck
+    env:
+      EDID_BLOB: mkosi/runtime/edid/ceralive-hdmirx.edid
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install edid-decode
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends edid-decode
+          edid-decode --version || true
+
+      - name: Generator is deterministic (two runs are byte-identical)
+        run: |
+          set -euo pipefail
+          # Determinism is the property the drift gate below RESTS on. A
+          # generator that embedded a build date would make every CI run red
+          # for a reason that looks like blob corruption, so prove it first.
+          python3 tools/gen-hdmirx-edid.py -o "${RUNNER_TEMP}/edid-run1.bin"
+          python3 tools/gen-hdmirx-edid.py -o "${RUNNER_TEMP}/edid-run2.bin"
+          cmp "${RUNNER_TEMP}/edid-run1.bin" "${RUNNER_TEMP}/edid-run2.bin"
+          size=$(stat -c%s "${RUNNER_TEMP}/edid-run1.bin")
+          [ "${size}" -eq 256 ] || {
+            echo "::error::generated EDID is ${size} bytes, expected 256 (2 blocks)"
+            exit 1
+          }
+          echo "generator is deterministic; 256 bytes (base + CTA-861 extension)"
+
+      - name: Drift gate — committed blob equals generator output
+        run: |
+          set -euo pipefail
+          if ! cmp "${RUNNER_TEMP}/edid-run1.bin" "${EDID_BLOB}"; then
+            echo "::error::${EDID_BLOB} does not match tools/gen-hdmirx-edid.py output"
+            echo "regenerate with: python3 tools/gen-hdmirx-edid.py -o ${EDID_BLOB}"
+            cmp -l "${RUNNER_TEMP}/edid-run1.bin" "${EDID_BLOB}" | head -40
+            exit 1
+          fi
+          sha256sum "${EDID_BLOB}"
+
+      - name: edid-decode --check passes on the committed blob
+        run: |
+          set -euo pipefail
+          edid-decode --check "${EDID_BLOB}" | tee edid-decoded.txt
+          grep -q '^EDID conformity: PASS' edid-decoded.txt
+
+      - name: Both block checksums are valid
+        run: |
+          set -euo pipefail
+          # edid-decode prints one "Checksum: 0xNN" per block, and appends
+          # "(should be 0xMM)" plus an "Invalid checksum" line when one is wrong.
+          # `|| true` on both counts: grep exits 1 on zero matches, which under
+          # `set -e` would abort the assignment before it could be reported.
+          count=$(grep -c '^Checksum: 0x' edid-decoded.txt || true)
+          [ "${count}" -eq 2 ] || {
+            echo "::error::expected 2 block checksums, found ${count}"
+            exit 1
+          }
+          bad=$(grep -cE 'Invalid checksum|Checksum: 0x[0-9a-f]+ \(should be' edid-decoded.txt || true)
+          [ "${bad}" -eq 0 ] || {
+            echo "::error::${bad} block checksum(s) invalid"
+            grep -nE 'Invalid checksum|\(should be' edid-decoded.txt
+            exit 1
+          }
+          echo "both block checksums valid"
+
+      - name: Capability assertions — 4K60 + SCDC + audio + branded identity
+        run: |
+          set -euo pipefail
+          # Each of these is a capability an operator would notice the loss of.
+          # VIC 97/96 and the 600 MHz + SCDC pair are what let a source send
+          # 4K60 at all; the audio trio is what makes embedded HDMI audio
+          # offerable; the identity pair is what stops us advertising somebody
+          # else's product name to every camera we capture from.
+          assert() {
+            local label="$1" pattern="$2"
+            if ! grep -qE -- "${pattern}" edid-decoded.txt; then
+              echo "::error::missing from decoded EDID: ${label} (/${pattern}/)"
+              exit 1
+            fi
+            printf '  ok   %s\n' "${label}"
+          }
+
+          assert 'manufacturer CRL'          '^ +Manufacturer: CRL$'
+          assert 'product name CeraLive HDMI' "^ +Display Product Name: 'CeraLive HDMI'$"
+          assert 'preferred timing 3840x2160 ~60 Hz' \
+                 '^ +DTD 1: +3840x2160 +(60\.0|59\.9)[0-9]* Hz'
+          assert 'VIC 97 (3840x2160p60)'     '^ +VIC +97: +3840x2160'
+          assert 'VIC 96 (3840x2160p50)'     '^ +VIC +96: +3840x2160'
+          assert 'Maximum TMDS Character Rate: 600' \
+                 '^ +Maximum TMDS Character Rate: 600'
+          assert 'SCDC Present'              '^ +SCDC Present$'
+          assert 'Basic audio support'       '^ +Basic audio support$'
+          assert 'LPCM audio descriptor'     '^ +Linear PCM:$'
+          assert '2-channel LPCM SAD'        '^ +Max channels: 2$'
+          assert 'LPCM sample rates 32/44.1/48 kHz' \
+                 '^ +Supported sample rates \(kHz\): 48 44\.1 32$'
+          assert 'LPCM sample sizes 16/20/24 bit' \
+                 '^ +Supported sample sizes \(bits\): 24 20 16$'
+          assert 'Speaker Allocation FL/FR'  '^ +FL/FR - Front Left/Right$'
+
+      - name: Gate bites — a tampered blob MUST fail edid-decode (non-vacuous)
+        run: |
+          set -euo pipefail
+          # Without this leg an always-passing conformity check would look
+          # identical to a working one.
+          tampered="${RUNNER_TEMP}/edid-tampered.bin"
+          cp "${EDID_BLOB}" "${tampered}"
+          printf '\x99' | dd of="${tampered}" bs=1 seek=100 count=1 conv=notrunc status=none
+          if edid-decode --check "${tampered}" > edid-tampered.txt 2>&1; then
+            cat edid-tampered.txt
+            echo "::error::edid-decode --check ACCEPTED a corrupted EDID"
+            exit 1
+          fi
+          grep -q 'Invalid checksum' edid-tampered.txt
+          echo "tamper rejected on the base-block checksum, as designed"
+
   size-gate:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
     # (du --apparent-size -sb — NOT the frozen 4096 MB partition, G4/E5). DRY_RUN
