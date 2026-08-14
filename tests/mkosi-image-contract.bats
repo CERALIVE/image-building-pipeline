@@ -1066,7 +1066,9 @@ SH
   # configure_ssh_enablement must actively DISABLE it — never call `enable ssh`.
   local bin="$BATS_TEST_TMPDIR/ssh-enable-bin"
   local calls="$BATS_TEST_TMPDIR/ssh-enable-calls"
-  mkdir -p "$bin"
+  local systemd_etc="$BATS_TEST_TMPDIR/ssh-systemd-etc"
+  local systemd_presets="$BATS_TEST_TMPDIR/ssh-systemd-presets"
+  mkdir -p "$bin" "$systemd_etc" "$systemd_presets"
 
   cat >"$bin/systemctl" <<'SH'
 #!/usr/bin/env bash
@@ -1084,6 +1086,8 @@ SH
     PATH="$bin:$PATH" \
     SSH_ENABLE_CALLS="$calls" \
     CERALIVE_DEBUG_IMAGE=0 \
+    CERALIVE_SYSTEMD_ETC_UNIT_DIR="$systemd_etc" \
+    CERALIVE_SYSTEMD_PRESET_DIR="$systemd_presets" \
     bash -c 'source "$1"; configure_ssh_enablement' bash "$POSTINST_ENTRY"
 
   [ "$status" -eq 0 ]
