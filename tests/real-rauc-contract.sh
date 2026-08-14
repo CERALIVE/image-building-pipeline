@@ -98,7 +98,8 @@ start_service() {
 
 state() {
   sudo -n env CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" \
-    CERALIVE_BOOT_STATE_BIN="${WORK}/ceralive-boot-state.sh" CERALIVE_BOOT_ATTEMPTS=3 \
+    CERALIVE_BOOT_STATE_BIN="${WORK}/ceralive-boot-state.sh" \
+    CERALIVE_BOOT_STATE_CORE="${WORK}/boot-state-core.sh" CERALIVE_BOOT_ATTEMPTS=3 \
     bash "${WORK}/ceralive-boot-state.sh" "$@"
 }
 
@@ -120,6 +121,10 @@ truncate -s 64M "${WORK}/slot-a.ext4" "${WORK}/slot-b.ext4"
 mkfs.ext4 -q -F -L rootfs_a -d "${WORK}/slot-a-tree" "${WORK}/slot-a.ext4"
 mkfs.ext4 -q -F -L rootfs_b -d "${WORK}/slot-b-tree" "${WORK}/slot-b.ext4"
 cp "${PIPELINE_DIR}/mkosi/platform/boot/ceralive-boot-state.sh" "${WORK}/ceralive-boot-state.sh"
+# The adapter SOURCES the shared slot-state core, resolving it as a repo-relative
+# sibling or at its installed device path. A mktemp staging dir is neither, so the
+# core must be staged with it and named via CERALIVE_BOOT_STATE_CORE at every call.
+cp "${PIPELINE_DIR}/mkosi/platform/boot-state-core.sh" "${WORK}/boot-state-core.sh"
 cp "${PIPELINE_DIR}/mkosi/platform/boot/ceralive-rauc-boot-adapter.sh" "${WORK}/ceralive-rauc-boot-adapter.sh"
 chmod +x "${WORK}"/ceralive-*.sh
 ln -s "${PIPELINE_DIR}/.dev-keys/dev-root-ca.pem" "${WORK}/pki/root-ca.pem"
@@ -133,6 +138,7 @@ set -euo pipefail
 work="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 printf '%s\n' "$*" >>"${work}/backend.calls"
 CERALIVE_BOOT_STATE_FILE="${work}/boot_state.txt" CERALIVE_BOOT_STATE_BIN="${work}/ceralive-boot-state.sh" \
+  CERALIVE_BOOT_STATE_CORE="${work}/boot-state-core.sh" \
   CERALIVE_KERNEL_CMDLINE_FILE="${work}/cmdline" CERALIVE_BOOT_ATTEMPTS=3 \
   bash "${work}/ceralive-rauc-boot-adapter.sh" "$@"
 if [[ -f "${work}/interrupt" && "$*" == "set-state B bad" ]]; then
@@ -165,7 +171,8 @@ type=ext4
 bootname=B
 EOF
 
-CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" CERALIVE_BOOT_ATTEMPTS=3 bash "${WORK}/ceralive-boot-state.sh" init
+CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" CERALIVE_BOOT_STATE_CORE="${WORK}/boot-state-core.sh" \
+  CERALIVE_BOOT_ATTEMPTS=3 bash "${WORK}/ceralive-boot-state.sh" init
 COMPATIBLE_STRING=ceralive-rock-5b-plus BUNDLE_VERSION=runtime-contract BUNDLE_OUT_DIR="${WORK}/bundle" \
   BUNDLE_TS=probe CERALIVE_RAUC_PKI_DIR="${WORK}/pki" REPRODUCIBLE=1 \
   bash "${PIPELINE_DIR}/lib/build-bundle.sh" rock-5b-plus "${WORK}/update-tree" >"${WORK}/bundle-build.log" 2>&1
