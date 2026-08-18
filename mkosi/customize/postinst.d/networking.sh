@@ -15,6 +15,10 @@
 #   * setup_uplink_sharing_carrier
 #                               the ceralive-share.service carrier + its teardown
 #                               script + the CeraUI After=nftables.service drop-in
+#   * setup_dongle_netns_retirement
+#                               the teardown for the RETIRED router-dongle netns
+#                               layer — this image ships none of that layer, only
+#                               the unit that clears what a board still has
 #
 # The ingest firewall lives here rather than beside setup_rtmp_gateway on purpose:
 # it is an interface-class policy (usb*/enx*/ww*/ppp*, the same classes the SRTLA
@@ -339,4 +343,41 @@ setup_uplink_sharing_carrier() {
   install -m 0644 "${src}/ceralive-share.service" "${unit_dir}/ceralive-share.service"
   install -m 0755 "${src}/ceralive-share-teardown.sh" "${sbin_dir}/ceralive-share-teardown"
   install -m 0644 "${src}/ceralive-nftables-ordering.dropin.conf" "${dropin_dir}/40-nftables-ordering.conf"
+}
+
+# ---------------------------------------------------------------------------
+# Router-dongle netns RETIREMENT (phase-C todo 39). This image installs no part
+# of that layer — no manager, no template unit, no udev claim rule, no NM
+# unmanaged-devices snippet — and a classified router dongle bonds through its
+# own enx…/eth… interface instead. What it installs is the teardown for a board
+# that USED to run it.
+#
+# The teardown is not cosmetic, and exactly one artifact is why: the layer's
+# durable slot store lives on the /data partition (dongle-netns contract, and
+# the partition-contract row that reserved it) SPECIFICALLY so that a RAUC slot
+# swap would not wipe it and renumber every dongle across an OTA. That decision
+# is what makes it the one piece of residue a new image cannot clear simply by
+# being a new rootfs — everything else is either in the rootfs a slot swap
+# replaces or in the kernel/tmpfs state its reboot clears.
+#
+# Enabled unconditionally rather than gated on a marker: a board carrying the
+# residue is indistinguishable from a clean one until something looks, and the
+# looking is what this unit does. It is idempotent and exits 0 on a clean board.
+# ---------------------------------------------------------------------------
+setup_dongle_netns_retirement() {
+  log "installing the router-dongle netns retirement teardown (ceralive-dongle-netns-retire.service — removes the /data slot store a RAUC slot swap is designed NOT to wipe)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-dongle-netns-retire.sh" ]] \
+    || die "dongle-netns retirement script not found: ${src}/ceralive-dongle-netns-retire.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-dongle-netns-retire.service" ]] \
+    || die "dongle-netns retirement unit not found: ${src}/ceralive-dongle-netns-retire.service"
+
+  local sbin_dir="${DONGLE_RETIRE_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${DONGLE_RETIRE_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-dongle-netns-retire.sh" \
+    "${sbin_dir}/ceralive-dongle-netns-retire"
+  install -D -m 0644 "${src}/ceralive-dongle-netns-retire.service" \
+    "${unit_dir}/ceralive-dongle-netns-retire.service"
+
+  enable_service ceralive-dongle-netns-retire.service
 }

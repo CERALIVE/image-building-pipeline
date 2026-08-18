@@ -70,6 +70,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
+| **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
@@ -4639,6 +4640,7 @@ gated item, not the package availability.
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT
 - Keep `srt` in `REPOS` and map `libsrt1.5-ceralive` through `FIRST_PARTY_APT_PKGS`; do not add a Debian `libsrt1.5-*` runtime package to `shared.list`
+- Don't re-introduce the router-dongle netns layer (`ceralive-dongle-netns*`, `85-ceralive-dongle-netns.rules`, the `rt_tables` 110-117 block) — it is RETIRED, a dongle bonds through its own `enx…`/`eth…` interface, and `tests/dongle-netns-retirement.test.sh` fails the build if any installer stages it again. Don't delete `ceralive-dongle-netns-retire.service` either: the layer's slot store sits on `/data` specifically to survive a slot swap, so that unit is the ONLY thing that clears it from a board that ran the layer
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't `chown` the mkosi package cache to the invoking user to "make the ownership consistent". mkosi 26 refuses a cache tree whose owner uid is not its own and then deletes it, so a chowned cache is a permanently cold base layer that looks like a fix. Keep the cache in ONE privilege domain instead, and don't alternate `./build <board>` and `./build <board> --native` on one checkout unless you want to pay for a cold base layer every time
@@ -4785,6 +4787,40 @@ residue guard, and `lib/parity-check.sh` §D now fails if any of these assets is
 present in a built rootfs. `iproute2` STAYS in `shared.list` — CeraUI still shells
 out to `ip` for its read-only route/policy diagnostics. Full decision record with
 verbatim traces: `.omo/notepads/modem-phase-c-quality/evidence/todo38.md`.
+
+**The router-dongle netns layer is RETIRED — and its one leftover is on `/data`** [REMOVED]
+
+The per-dongle network-namespace layer (`ceralive-dongle-netns@.service`, its
+reconcile timer, the `85-ceralive-dongle-netns.rules` udev claim, the
+NetworkManager unmanaged-devices snippet, the three `/usr/local/sbin/ceralive-dongle-*`
+scripts and the `rt_tables` 110-117 reservation) is not installed by any image.
+A router-mode dongle is CLASSIFIED from its USB descriptors and bonds through its
+OWN `enx…`/`eth…` interface instead, which is what every shipped image already did
+— the layer never reached a published release, so this is a retirement of an
+unmerged design rather than the removal of a deployed one.
+
+**It is not a no-op retirement, and the reason is a single deliberate design
+decision.** Every artifact above lives in the rootfs, so a RAUC slot swap boots
+without it; the namespaces, the `dg<N>h` veths, the rules/tables and
+`/run/ceralive/dongles` are kernel/tmpfs state, so the reboot that swap requires
+clears them. The durable slot store `/data/ceralive/dongle-slots.json` (+ its
+`.lock`) is the exception BY CONSTRUCTION: it was put on the data partition
+precisely so a slot swap would NOT wipe it and renumber every dongle across an
+OTA. That is exactly what makes it the one piece of residue an image update
+cannot clear by being a new image.
+
+`ceralive-dongle-netns-retire.service` is therefore shipped — the only part of the
+layer this image carries. It is a boot oneshot, ordered `RequiresMountsFor=/data`
+and `Before=NetworkManager.service`/`ceralive.service`, idempotent, and an exit-0
+no-op on a board that never ran the layer. Every name it removes is enumerated
+from the retired contract's own eight-slot allocation table, so a namespace, veth,
+rule or table the layer did not create cannot be caught by it. Contract:
+`tests/dongle-netns-retirement.test.sh` (absence from every installer + the
+teardown legs, incl. the bounded-slot and unsupported-`ip rule` negatives).
+
+CeraUI keeps its `/run/ceralive/dongles` READER, deliberately: it is tolerant of
+the directory being absent, which is what lets an old-image board and a
+post-retirement board degrade to the same silence. Do not delete it as dead code.
 
 **Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`

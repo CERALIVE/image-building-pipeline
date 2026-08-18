@@ -1,0 +1,53 @@
+[Unit]
+Description=CeraLive router-dongle netns retirement — remove the retired layer's leftovers on an upgraded board
+Documentation=file:///usr/local/sbin/ceralive-dongle-netns-retire
+
+# Phase-C todo 39 retired the router-dongle network-namespace layer. A board that
+# never ran it needs nothing and this unit exits 0 having found nothing; a board
+# that DID run it carries one piece of residue an image update cannot clear by
+# itself — the durable slot store on /data, which was put there precisely so a
+# RAUC slot swap would NOT wipe it. The full inventory and the safety argument
+# are in the script header.
+
+# There is deliberately NO ConditionPathExists guard. It would be cheap and it
+# would look tidy, and it is exactly the wrong trade here: this is the ONLY
+# teardown path the retired layer has, so a condition that is subtly wrong does
+# not cost a few syscalls at boot, it silently leaves a fleet un-retired with no
+# symptom to notice. The script's own no-residue path is a handful of stat calls.
+
+# /data is where the one OTA-surviving artifact lives, so the unit must not run
+# before that partition is available — otherwise it would find nothing, report
+# success, and leave the slot store behind forever.
+RequiresMountsFor=/data
+After=local-fs.target
+
+# BEFORE the two consumers that would otherwise observe a half-retired board:
+# NetworkManager, which is what starts managing an interface the retired layer's
+# unmanaged-devices snippet used to hold back, and CeraUI, whose netif poll reads
+# the runtime metadata directory this removes. Ordering only — neither is a
+# Requires=, so a board without either still retires cleanly.
+Before=NetworkManager.service
+Before=ceralive.service
+
+[Service]
+Type=oneshot
+# Not RemainAfterExit: this has no state to hold open, and leaving it "active"
+# would misreport a one-shot teardown as a running service for the rest of uptime.
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/ceralive-dongle-netns-retire
+
+# The script exits 0 unconditionally, including on a board with nothing to do, so
+# a non-zero exit here means the script itself is broken rather than that the
+# teardown failed — worth surfacing in `systemctl --failed` rather than retrying.
+Restart=no
+
+# It removes files under /etc, /run and /data and it deletes network namespaces,
+# so the usual filesystem/network sandboxing is deliberately NOT applied. The
+# bounded thing it may touch is enumerated in the script, not fenced by systemd.
+NoNewPrivileges=yes
+ProtectHome=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -102,6 +102,7 @@ tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/ide
 tests/versions-lib.test.sh	shell	unit	default-shell	the one versions.yaml pin reader
 tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-index module, no silent || true
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
+tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
 mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
 
