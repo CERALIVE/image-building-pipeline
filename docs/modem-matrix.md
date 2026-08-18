@@ -91,28 +91,41 @@ as-is and is not modified by the module check.
 
 ---
 
-## 4. SRTLA modem source-routing
+## 4. SRTLA modem source-routing — RETIRED
 
-Bonded streaming requires each modem uplink to be source-routed into its own
-routing table so SRTLA can bond multiple links. NetworkManager on Debian bookworm
-defaults to `dhcp=internal` and never runs the `dhclient-exit-hooks.d/` scripts,
-so the routing is installed by the NetworkManager dispatcher
-`90-srtla-wifi-routing` (`mkosi/customize/networking-srtla.sh`,
-`install_nm_dispatcher`):
+**There is no per-modem source-routing layer any more.** Bonded streaming pins
+each uplink's egress in the socket instead: `srtla_send` binds every link with
+`SO_BINDTODEVICE` plus a source-address bind, so the interface is named by the
+socket rather than inferred from a routing rule.
 
-| Interface pattern | Routing table |
-|-------------------|---------------|
-| `usb0` / `enx*0` | 100 |
-| `usb1` / `enx*1` | 101 |
-| … | … |
-| `usb7` / `enx*7` | 107 |
-| `wlan0`..`wlan4` | 120..124 |
+The retired assets — the NM dispatcher `90-srtla-wifi-routing`, the dhclient hook
+`dhclient-exit-hooks.d/srtla-source-routing`, the `rt_tables` reservations
+(`100-107 modem0..7`, `120-124 wlan0..4`), and the `networking-srtla.sh` module —
+are removed from the image, and both `ci/postinst-drift-check.sh` (CHECK 2) and
+`lib/parity-check.sh` (§D) now fail if any of them reappears.
 
-On interface `up`/`dhcp4-change` the dispatcher installs a `from <ip>` source
-rule and a default route via the modem's gateway in tables 100–107, mirroring the
-retained `dhclient-exit-hooks.d/srtla-source-routing` hook (which still covers
-non-NM dhclient paths). This is documented as-is and is not modified by the
-module check.
+Why it was retired rather than guarded, in one line each, all measured on a live
+`7.1.7-ceralive-rk3588` board: `ip rule` is unsupported there
+(`# CONFIG_IP_ADVANCED_ROUTER is not set`), an `ip route add … table N` silently
+lands in the **MAIN** table on that kernel (so the dispatcher could install a
+metric-0 default that outranks every DHCP route), it logged a success line after
+both of its mutations had failed, and its dhclient half could never run because
+`dhclient` is not installed. On the vendor kernel — where `ip rule` does work —
+its `from <source-ip>` rules cannot tell this fleet's two HiLink twins apart,
+because both lease `192.168.8.100`.
+
+Full decision record with verbatim traces:
+`.omo/notepads/modem-phase-c-quality/evidence/todo38.md`; summary in
+[`../AGENTS.md`](../AGENTS.md) → "SRTLA source-policy routing is RETIRED".
+
+`rp_filter` is a SEPARATE, RETAINED asset and is unaffected:
+`/etc/sysctl.d/60-ceralive-rp-filter.conf` still sets
+`net.ipv4.conf.{all,default}.rp_filter = 2` (loose reverse-path), written at image
+build by `postinst.d/networking.sh::install_interface_naming`. Loose RPF is what
+lets a multi-WAN board accept return traffic that arrives on a different interface
+than the route table would pick; it is required by the device-bound bond, not by
+policy routing. No runtime service writes it — CeraUI and `srtla_send` only READ
+route/rp_filter health and report it.
 
 ---
 

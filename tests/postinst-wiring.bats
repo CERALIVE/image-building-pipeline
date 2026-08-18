@@ -46,17 +46,22 @@ load manifest-helpers
   [[ "$output" == *"setup_data_persistence"* ]]
 }
 
-@test "postinst drift: gate CATCHES a divergent §6 SRTLA payload (non-vacuity)" {
-  serialize working-tree   # mutates a tracked file then restores; exclusive
-  local netsrtla="$PIPELINE_DIR/mkosi/customize/networking-srtla.sh"
-  local backup="$BATS_TEST_TMPDIR/networking-srtla.bak"
-  cp "$netsrtla" "$backup"
-  # Diverge one inline copy of the dual-track SRTLA routing payload.
-  sed -i 's/^120[[:space:]]\+wlan0$/121     wlan0/' "$netsrtla"
+@test "postinst drift: retired SRTLA source-policy routing is absent" {
   run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
-  cp "$backup" "$netsrtla"          # ALWAYS restore
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"90-srtla-wifi-routing: absent"* ]]
+  [[ "$output" == *"srtla-source-routing: absent"* ]]
+  [[ "$output" == *"configure_srtla_routing: absent"* ]]
+}
+
+@test "postinst drift: gate CATCHES a resurrected SRTLA dispatcher (non-vacuity)" {
+  serialize working-tree   # plants a file under mkosi/ then removes it; exclusive
+  local planted="$PIPELINE_DIR/mkosi/customize/.todo38-residue-probe.sh"
+  printf '#!/bin/sh\n# 90-srtla-wifi-routing\n' >"$planted"
+  run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
+  rm -f "$planted"                  # ALWAYS remove, pass or fail
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DIVERGED"* ]]
+  [[ "$output" == *"RESURRECTED"* ]]
 }
 
 # ===========================================================================

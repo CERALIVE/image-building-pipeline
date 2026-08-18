@@ -518,11 +518,7 @@ make_parity_rootfs() {
   for svc in NetworkManager ModemManager ssh chrony avahi-daemon systemd-resolved ceralive-hostname; do
     : >"$root/etc/systemd/system/$svc.service"
   done
-  printf '100 modem0\n120 wlan0\n' >"$root/etc/iproute2/rt_tables"
-  : >"$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
-  : >"$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
-  chmod +x "$root/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
-  chmod +x "$root/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
+  printf '255\tlocal\n254\tmain\n253\tdefault\n' >"$root/etc/iproute2/rt_tables"
   : >"$root/etc/udev/rules.d/99-ceralive-hardware.rules"
   : >"$root/etc/apt/sources.list.d/debian.sources"
   : >"$root/etc/apt/sources.list.d/ceralive.sources"
@@ -534,10 +530,10 @@ make_parity_rootfs() {
 # under `bats --jobs N` (which run-tests enables when GNU parallel is on
 # PATH). bats parallelizes test CASES, not the comment "sections", so any two
 # tests that touch the same mutable resource must serialize themselves:
-#   * §8 postinst-drift — two tests cp/sed-restore tracked working-tree files
-#     (mkosi.postinst.chroot, networking-srtla.sh) while a third asserts the
-#     CLEAN tree; without a lock a parallel scheduler could read the tree
-#     mid-mutation -> false failure.
+#   * §8 postinst-drift — two tests mutate the working tree (an inline twin
+#     appended to mkosi.postinst.chroot; a planted residue file under mkosi/)
+#     while a third asserts the CLEAN tree; without a lock a parallel scheduler
+#     could read the tree mid-mutation -> false failure.
 #   * §14 feature sysext — build_feature_fixture populates a per-FILE fixture
 #     dir ($BATS_FILE_TMPDIR/out) shared by five tests; only one may build it.
 #   * §9 build-plan probes — each `build` invocation removes and recreates

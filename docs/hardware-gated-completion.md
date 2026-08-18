@@ -120,10 +120,11 @@ Only `eth0`, `eth1`, and `wlan0` are pinned today. Modem interfaces (`usb0`..`us
 and `enx*`) keep their kernel-assigned names, which can shift across reboots or
 when multiple modems are present.
 
-Note: modem **source-routing** under NM `dhcp=internal` is already FIXED in
-software (the NM dispatcher `90-srtla-wifi-routing` now matches `usb0..7` and
-`enx*0..7`). This item is about deterministic **rename rules** only, which require
-reading the real `ID_PATH` from a physical modem.
+Note: modem **source-routing** is no longer a concern here at all — the SRTLA
+source-policy routing layer is RETIRED (bonding pins egress per link with
+`SO_BINDTODEVICE`; see `AGENTS.md` → "SRTLA source-policy routing is RETIRED").
+This item is about deterministic **rename rules** only, which require reading the
+real `ID_PATH` from a physical modem.
 
 Note: deterministic modem **slot-UID naming** is a distinct, also-hardware-gated
 mechanism now wired fail-closed via the board `modem_ports` block and the
@@ -165,14 +166,12 @@ interfaces:
 The `install_interface_naming()` function will then emit a `Path=`-based `.link`
 rule for each modem interface, pinning it to a stable name.
 
-### Twin-update requirement
+### Twin-update requirement — NO LONGER APPLIES
 
-Any change to the modem interface naming block **also touches** the drift-gated
-SRTLA payloads. After editing the manifest, you must twin-update both:
-
-1. `lib/networking-srtla.sh` — update the interface name references.
-2. The `§6` block in `mkosi/mkosi.postinst.chroot` — keep byte-parity.
-3. Run `ci/postinst-drift-check.sh CHECK 2` to confirm parity.
+This item used to require twin-updating the drift-gated SRTLA source-policy
+routing payloads whenever the modem interface naming block changed. That layer is
+RETIRED (see [`../AGENTS.md`](../AGENTS.md) → "SRTLA source-policy routing is
+RETIRED"), so a modem rename now touches the `.link` rules and nothing else.
 
 ### Checklist
 
@@ -180,28 +179,22 @@ SRTLA payloads. After editing the manifest, you must twin-update both:
 - [ ] Modem interface name(s) identified (`ip link show`).
 - [ ] `udevadm info /sys/class/net/<modem-iface> | grep ID_PATH` — value(s) recorded.
 - [ ] `.link` rule(s) added to the appropriate board or family manifest.
-- [ ] `networking-srtla.sh` twin-updated.
-- [ ] `mkosi.postinst.chroot §6` twin-updated.
-- [ ] `ci/postinst-drift-check.sh CHECK 2` passes (byte-parity confirmed).
 - [ ] `run-tests` passes.
 - [ ] Evidence saved to `test-results/modem-naming-<date>.txt`.
-- [ ] Verified on hardware: `journalctl -t srtla-routing` shows modem interface
-      in tables 100–107 after modem connects.
+- [ ] Verified on hardware: after a reboot with the modem attached, the interface
+      resolves to its pinned name (`ip link show`).
 
 ### Acceptance
 
 After a reboot with two modems attached, each modem interface resolves to its
-pinned name (not a kernel-assigned `usb0`/`usb1` that could swap). `ip rule show`
-shows source-routing rules in tables 100–107 for each modem interface.
-`ci/postinst-drift-check.sh CHECK 2` exits 0.
+pinned name (not a kernel-assigned `usb0`/`usb1` that could swap).
 
 ### Unblock condition
 
 Attach a supported USB or M.2 modem to a running CeraLive device. Read
 `udevadm info /sys/class/net/<iface> | grep ID_PATH` for each modem interface.
 Add deterministic `.link` rules to the board manifest using the real `ID_PATH`
-values. Twin-update `networking-srtla.sh` and the `§6` block in
-`mkosi.postinst.chroot`; confirm `postinst-drift-check.sh CHECK 2` passes.
+values.
 
 ---
 

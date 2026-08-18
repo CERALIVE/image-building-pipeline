@@ -297,10 +297,11 @@ static_rootfs_assertions() {
     fi
   fi
   if [[ "$(quirk m2_modem_sim_workaround)" == "required" ]]; then
-    if grep -qsE '^10[0-9][[:space:]]+modem[0-7]' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
-      pass "quirk m2_modem_sim_workaround: modem SRTLA routing tables present in rootfs"
+    if grep -qsF 'QUIRK m2_modem_sim_workaround' \
+         "${root}/etc/udev/rules.d/99-ceralive-hardware.rules" 2>/dev/null; then
+      pass "quirk m2_modem_sim_workaround: ModemManager SIM-detection udev rows present in rootfs"
     else
-      fail "quirk m2_modem_sim_workaround: modem routing tables absent in rootfs"
+      fail "quirk m2_modem_sim_workaround: ModemManager SIM-detection udev rows absent in rootfs"
     fi
   fi
   if [[ -n "$(quirk usb_power_optimization)" ]]; then

@@ -24,11 +24,8 @@
 #   EC4: a RAUC A/B update that PRESERVES /data keeps the stored WiFi profiles, so
 #        condition (2) is false and the portal correctly does NOT start after an OTA.
 #   CONFLICT SAFETY: the AP only comes up when there is ZERO connectivity, so srtla
-#        bonding/streaming is impossible anyway and the AP never contends with the
-#        srtla WiFi source-routing for a live uplink. The AP also leaves wlan0 with
-#        no default route, so the srtla NM dispatcher (90-srtla-wifi-routing) sees an
-#        empty GATEWAY and installs no rule/route in table 120 — it is a no-op while
-#        the portal is up.
+#        bonding/streaming is impossible anyway and the AP never contends for a live
+#        uplink.
 #
 # AP MODE: NetworkManager-NATIVE AP (802-11-wireless.mode ap + ipv4.method shared).
 #   Preferred over hostapd+dnsmasq — fewer moving parts and NO extra packages: NM

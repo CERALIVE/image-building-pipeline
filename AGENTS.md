@@ -4510,11 +4510,10 @@ credentials with no screen or keyboard. Standalone artifacts under
   (factory-reset hook) re-triggers it even when profiles exist.
 - **EC4 — OTA-safe:** a RAUC update that preserves `/data` keeps the WiFi profiles,
   so the portal correctly does **not** start after an update.
-- **Conflict safety:** the AP only runs when there is zero connectivity (so srtla
-  bonding is impossible anyway), and it leaves `wlan0` with no default route, so the
-  srtla NM dispatcher (`90-srtla-wifi-routing`) sees an empty gateway and writes no
-  rule/route in table 120 — a no-op while the portal is up. WiFi tables 120-124 are
-  untouched.
+- **Conflict safety:** the AP only runs when there is zero connectivity, so srtla
+  bonding is impossible anyway and nothing contends for the uplink. (Until this was
+  retired, the SRTLA NM dispatcher was the other half of this argument; it no longer
+  exists — see "SRTLA source-policy routing is RETIRED" below.)
 - **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
   `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
@@ -4749,20 +4748,43 @@ baseline was edited surgically on those keys, never re-captured wholesale, so th
 fixture still proves what it exists to prove (that declaring a family variant is
 inert on the vendor path). A diff of any other key is still a defect.
 
-**Modem source-routing under NM `dhcp=internal` — FIXED.** NetworkManager in
-Debian bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT
-execute `dhclient-exit-hooks.d/`, so the SRTLA dhclient hook
-(`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) never fired for
-NM-managed modems. The NM dispatcher
-(`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`) now also matches modem
-interfaces (`usb0..7` and `enx*0..7`) and installs the same source rule + default
-route in tables 100–107, mirroring the dhclient-hook semantics. The dhclient hook
-is retained (harmless; still covers non-NM dhclient paths). Both drift-gated SRTLA
-payloads were twin-updated in one commit (`networking-srtla.sh` and the `§6` block
-in `mkosi.postinst.chroot`); `ci/postinst-drift-check.sh` CHECK 2 confirms
-byte-parity. WiFi table assignments (120–124) are unchanged. Verify on hardware
-with a modem attached: `journalctl -t srtla-routing` and `ip rule show` after the
-modem connects.
+**SRTLA source-policy routing is RETIRED — and it did NOT fail closed** [REMOVED]
+
+The NM dispatcher `90-srtla-wifi-routing`, the dhclient hook
+`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`, the `rt_tables`
+reservations that named their tables (`100-107 modem0..7`, `120-124 wlan0..4`),
+and the whole `mkosi/customize/networking-srtla.sh` module are GONE. Bonding pins
+egress per link in the socket (`SO_BINDTODEVICE` + a source-address bind), so
+policy routing has no consumer.
+
+Four measurements on a live `7.1.7-ceralive-rk3588` board, in the order that
+matters:
+
+- **`ip rule` is unsupported.** `# CONFIG_IP_ADVANCED_ROUTER is not set`, so
+  `CONFIG_IP_MULTIPLE_TABLES` is absent entirely and `ip rule show` answers
+  `RTNETLINK answers: Operation not supported` (exit 255). No rule ever installed.
+- **`ip route add … table N` SILENTLY WRITES INTO MAIN.** Proven with a
+  documentation prefix: `ip route add 203.0.113.0/24 … table 121` exits 0,
+  `ip route show table 121` is EMPTY, and the route is in the MAIN table. So the
+  dispatcher's "per-modem default route" could install a `proto boot`, **metric-0**
+  default that outranks every DHCP route (metrics 101-107) — the metric-0
+  captive-portal hazard this bench has already paid for once.
+- **It then logged a success that was false.** After both mutations failed it still
+  emitted `srtla-routing: Source routing: <if> (<ip>) via <gw> table 104`.
+- **The dhclient half could never run at all** — `dhclient` is not installed and NM
+  uses `dhcp=internal`.
+
+A kernel-capability guard was REJECTED rather than overlooked: on the vendor 6.1
+kernel, where `ip rule` does work, the rules are keyed `from <source-ip>` and this
+fleet's HiLink twins both lease `192.168.8.100` — an address that cannot name a
+device, i.e. exactly the ambiguity `SO_BINDTODEVICE` exists to remove. Plan todo 40
+states the position directly: Scope forbids reopening SNAT/policy-routing bonding.
+
+`ci/postinst-drift-check.sh` CHECK 2 was INVERTED from a payload-parity check into a
+residue guard, and `lib/parity-check.sh` §D now fails if any of these assets is
+present in a built rootfs. `iproute2` STAYS in `shared.list` — CeraUI still shells
+out to `ip` for its read-only route/policy diagnostics. Full decision record with
+verbatim traces: `.omo/notepads/modem-phase-c-quality/evidence/todo38.md`.
 
 **Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`

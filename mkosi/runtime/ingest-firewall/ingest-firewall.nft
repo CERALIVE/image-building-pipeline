@@ -21,10 +21,10 @@
 # tracked in docs/DEFERRED.md items 7 & 8 (do not add a passphrase here — add
 # the firewall, ship LAN-scoped, formalize auth in Todo 22).
 #
-# INTERFACE CLASSES are the SAME ones the SRTLA source-routing dispatcher uses
-# (mkosi/customize/networking-srtla.sh / postinst §6): USB modems are usb*/
+# INTERFACE CLASSES are the image's own uplink taxonomy: USB modems are usb*/
 # enx*, WWAN modems are ww* (wwan0 / wwp* / wwx*), cellular dial-up is ppp*. This
-# does NOT invent a new classification scheme — it reuses the image's existing one.
+# does NOT invent a new classification scheme. (The retired SRTLA source-routing
+# dispatcher keyed on the same classes; this list outlived it unchanged.)
 #
 # ISOLATION: a dedicated `inet ceralive_ingest_fw` table with a policy-accept
 # chain that ONLY drops the two ingest ports on the WAN classes. It never flushes
