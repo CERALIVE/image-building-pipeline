@@ -784,6 +784,7 @@ main() {
   create_ceralive_user
   setup_ceralive_repository
   setup_hardware_access
+  apply_board_quirks           # board-manifest-gated quirk rows, APPENDED to the rules file setup_hardware_access just truncated (CERALIVE_BOARD_QUIRKS)
   apply_streaming_optimizations
   configure_networking
   configure_services

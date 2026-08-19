@@ -113,7 +113,7 @@ while IFS=$'\t' read -r path kind _tier execution _reason; do
   [[ -e "${PIPELINE_DIR}/${path}" ]] || { absent=$((absent + 1)); echo "    absent: ${path}"; continue; }
   case "${path}" in
     tests/*) ;;
-    mkosi/platform/boot/test-fallback.sh|mkosi/platform/x86/test-x86-fallback.sh) ;;
+    mkosi/platform/boot/test-fallback.sh|mkosi/platform/x86/test-x86-fallback.sh|mkosi/customize/test-quirks.sh) ;;
     *) outside=$((outside + 1)); echo "    registered path outside tests/ and not a known platform harness: ${path}" ;;
   esac
   case "${execution}" in

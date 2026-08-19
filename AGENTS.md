@@ -65,6 +65,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
+| **Board-MANIFEST-gated udev quirk rows (M.2 SIM detection) — and how a `quirks:` fact reaches a subimage chroot** | LIVE: `mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` via `CERALIVE_BOARD_QUIRKS`; canonical: `mkosi/customize/quirks.sh` (NOT on the `./build` path). Guard `tests/board-quirk-udev-rules.test.sh` — see the "board-gated M.2 SIM quirk rows now SHIP" KEY FACT below |
 | **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
@@ -3520,6 +3521,77 @@ a kernel `.deb` (or an extracted module tree) and reports each module as loadabl
 - **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
   the check **always exits 0**. It never fails the build and never edits
   `shared.list` or the kernel config. Proof: `run-tests` section 17.
+
+**The board-gated M.2 SIM quirk rows now SHIP — `CERALIVE_BOARD_QUIRKS` is how a
+board-manifest fact crosses the subimage boundary** [EXISTS — fixed 2026-08-19]
+
+`customize/quirks.sh` is (like `udev.sh` before it) a `run-all.sh` RUNTIME module,
+and `run-all.sh` is invoked from exactly one site (`mkosi.images/base/mkosi.conf`)
+as `run-all.sh base`. `run-all.sh runtime` — the selector that includes `quirks` —
+is invoked nowhere in the real build, so `dispatch_quirks` /
+`handle_m2_modem_sim_workaround` were correct, unit-tested
+(`mkosi/customize/test-quirks.sh`) and reached NO emitted image, for the life of
+the feature. Another instance of the dead-writer trap.
+
+**It could not be a one-line row-port into `setup_hardware_access`.** That writer
+is UNCONDITIONAL (every board); the M.2 SIM rows are board-GATED, and a mkosi
+SUBIMAGE CHROOT has no board manifest and no way to resolve one —
+`quirks.sh::resolve_manifest` needs a real file path or `CERALIVE_BOARD_MANIFEST`,
+and neither exists on that side of the env boundary. Hardcoding the rows into the
+unconditional writer would have destroyed the gating.
+
+**The precedent that solved it already existed: `CERALIVE_MODEM_PORTS_SLOTS`.**
+The fix follows it exactly rather than inventing a mechanism.
+
+```
+manifests/boards/<b>.yaml  quirks: {m2_modem_sim_workaround: required, …}
+  └─ resolve.py flatten            -> QUIRKS_M2_MODEM_SIM_WORKAROUND='required'
+     └─ orchestrate.sh collapse    -> CERALIVE_BOARD_QUIRKS="name=value name=value"
+        └─ env_names + mkosi.conf PassEnvironment=
+           └─ postinst.d/hardware.sh::apply_board_quirks   (LIVE ./build writer)
+              └─ /etc/udev/rules.d/99-ceralive-hardware.rules
+```
+
+Five things worth knowing before touching it:
+
+- **The resolver already flattened `quirks:`** — `QUIRKS_<NAME>` params existed
+  and were simply never consumed. Nothing in `resolve.py`, the schema or any
+  manifest changed; only the collapse + forward + consume half is new.
+- **`apply_board_quirks` lives in `postinst.d/hardware.sh`, not in
+  `setup_hardware_access`, and it is called immediately AFTER it.** That writer
+  `cat >`-TRUNCATES the rules file, so a gated append has to follow it — and
+  keeping it a separate function is also what kept `mkosi.postinst.chroot` well
+  under `ci/postinst-drift-check.sh`'s ceiling (one call line, not a rule block).
+  The ordering is asserted by line number in the guard, not left to review.
+- **EMPTY is the fail-closed state, and it is also the PassEnvironment-drift
+  state.** A board with no `quirks:` block resolves no `QUIRKS_*` params at all,
+  so the value is empty and NOTHING is emitted — which is exactly what a dropped
+  `PassEnvironment=` entry would also produce. That is the safe direction (a
+  board silently loses a workaround, never silently gains one), but it is why the
+  lockstep guard in `mkosi-image-contract.bats` matters here as much as anywhere.
+- **Value semantics are one notch STRICTER than `quirks.sh`.** That module parses
+  KEYS and ignores values, so `m2_modem_sim_workaround: false` would still apply;
+  `apply_board_quirks` refuses a falsey value (`false`/`0`/`no`/`off`) because the
+  schema admits booleans. Absent/empty value still applies (declaration by
+  presence). Unknown quirks warn and continue, as `quirks.sh` does.
+- **`usb_power_optimization` is deliberately NOT ported.** Its handler turns USB
+  autosuspend on for every USB device, which is a real runtime behaviour change on
+  a board whose job is holding several cellular modems up. It has never shipped,
+  so there is no regression to preserve, and enabling it needs its own change with
+  its own hardware evidence. The live dispatch LOGS it as declared-but-not-applied
+  rather than dropping it silently. `hdmi_input_emi_shield` stays DEFERRED
+  (DT-level), same verdict `quirks.sh` records.
+
+Guard: `tests/board-quirk-udev-rules.test.sh` (29 checks, registered
+`default-shell`). It executes every arrow above rather than grepping any of them:
+the REAL resolver runs against the REAL board manifests, the REAL collapse block
+is lifted out of `orchestrate.sh` by its own markers and run on that output, and
+the REAL `apply_board_quirks` writes into a scratch sysroot seeded with the LIVE
+writer's own rules heredoc. Both directions are proven — `rock-5b-plus` gets
+exactly two `ID_MM` rows, `orange-pi-5-plus` gets a file byte-identical to the
+live writer's payload. Mutation-verified: dropping the call site, dropping the
+`PassEnvironment=` entry, ungating the falsey check, moving the call ahead of
+`setup_hardware_access`, and dropping the drift-gate registration each fail it.
 
 **ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 

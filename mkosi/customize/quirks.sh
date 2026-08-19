@@ -32,6 +32,20 @@
 # CONTRACT: sourced by run-all.sh (chroot context). Strict; no `|| true` on real
 # work (only on bash arithmetic post-increment, which returns the pre-value).
 #
+# THIS MODULE IS NOT ON THE ./build PATH, AND NEVER WAS. run-all.sh's only caller
+# (mkosi.images/base/mkosi.conf) passes `base`, so the RUNTIME module set — this
+# file included — is never dispatched by a real image build. The rows below
+# therefore reached no emitted rootfs for the life of the feature. The LIVE path
+# is postinst.d/hardware.sh::apply_board_quirks, called by
+# mkosi.images/runtime/mkosi.postinst.chroot and gated on CERALIVE_BOARD_QUIRKS
+# (the manifest `quirks:` block, flattened by resolve.py and forwarded on the
+# orchestrate.sh env_names <-> mkosi.conf PassEnvironment= lockstep, because a
+# subimage chroot cannot resolve a board manifest). Keep the two in agreement:
+# tests/board-quirk-udev-rules.test.sh fails if the emitted M.2 SIM rows diverge.
+# Only m2_modem_sim_workaround is ported — usb_power_optimization deliberately is
+# not, because turning USB autosuspend on for a modem-bearing board is a runtime
+# behaviour change that needs its own hardware evidence.
+#
 # shellcheck shell=bash
 
 set -euo pipefail

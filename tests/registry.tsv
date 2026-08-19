@@ -1,5 +1,6 @@
 # tests/registry.tsv — the declarative catalogue of EVERY tracked file under
-# tests/, plus the two mkosi/platform harnesses run-tests executes.
+# tests/, plus the three non-tests/ harnesses run-tests executes (two under
+# mkosi/platform/, one under mkosi/customize/).
 #
 # run-tests READS this file: the `default-bats` rows ARE its bats suite list and
 # the `default-shell` rows ARE its shell suite list, both in the order they
@@ -79,6 +80,8 @@ tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data
 tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
 tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract
 tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the vendor and mainline ID_PATH spellings
+tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
+mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades

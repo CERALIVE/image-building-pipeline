@@ -284,7 +284,7 @@ run_mkosi_build() {
     APT_CLIENT_CRT_B64 APT_CLIENT_KEY_B64 APT_GPG_PUBLIC_B64
     RAUC_ROOT_CA_B64 ADDON_KEYRING_B64 PASETO_PUBLIC_KEY_B64 COMPATIBLE_STRING
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
-    CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS
+    CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS CERALIVE_BOARD_QUIRKS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
     CERALIVE_BENCH_LABELS CERALIVE_BOARD
     CERALIVE_DTB_KEEP_OVERLAYS
@@ -386,6 +386,34 @@ run_mkosi_build() {
     _modem_slots+="${_slot_name,,}=${!_slot_var} "
   done
   export CERALIVE_MODEM_PORTS_SLOTS="${_modem_slots% }"
+
+  # --- CERALIVE_BOARD_QUIRKS (board hardware-quirk dispatch) -----------------
+  # Consumed by postinst.d/hardware.sh::apply_board_quirks in the runtime chroot.
+  # The manifest `quirks:` block flattens to one QUIRKS_<NAME> param per declared
+  # quirk (resolve.py::flatten), so collapse those leaves into a single
+  # space-separated `name=value` list — the SAME wire shape as
+  # CERALIVE_MODEM_PORTS_SLOTS above, and adopted for the same reason: a subimage
+  # chroot cannot see a board manifest at all, so a board-GATED rule either
+  # arrives as an env value or it never ships. That is not hypothetical — the M.2
+  # SIM quirk's udev rows had a correct producer (customize/quirks.sh) with no
+  # ./build path to run it, so they reached no image for the life of the feature.
+  # A board with no `quirks:` block resolves no QUIRKS_* params at all, so the
+  # value is EMPTY and the runtime writer emits nothing.
+  local _quirks="" _quirk_var _quirk_name _quirk_val
+  for _quirk_var in $(compgen -v QUIRKS_ 2>/dev/null || true); do
+    _quirk_name="${_quirk_var#QUIRKS_}"
+    _quirk_val="${!_quirk_var:-}"
+    # The wire form is whitespace-separated, so a whitespace-bearing value would
+    # be re-split into two bogus tokens in the chroot. Skip it LOUDLY rather than
+    # forward something the consumer would silently mis-parse.
+    if [[ "${_quirk_val}" =~ [[:space:]] ]]; then
+      log_warn "quirks: dropping '${_quirk_name,,}' — its value contains whitespace, which the CERALIVE_BOARD_QUIRKS wire form cannot carry"
+      continue
+    fi
+    _quirks+="${_quirk_name,,}=${_quirk_val} "
+  done
+  export CERALIVE_BOARD_QUIRKS="${_quirks% }"
+
   # Already normalized + validated by main()'s resolve_debug_image_flag, which has
   # to run before the runtime package set is resolved. Re-run here so the contract
   # holds no matter which call site changes first — it is idempotent.
