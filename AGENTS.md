@@ -3122,6 +3122,92 @@ evicted. Use `journalctl -k`, `/sys/class/bluetooth/`, and `lsmod` — never a b
 `postinst-wiring.bats` "runtime packages: bluez is installed so the Bluetooth adapter is
 usable".
 
+**`bluez-alsa-utils` + `libasound2-plugin-bluez` in `shared.list` — the ALSA half
+of a Bluetooth microphone** [EXISTS]
+
+`bluez` above gets the adapter powered and paired. It does not get a single sample
+of audio off it. BlueALSA is what publishes a paired headset's SCO/HFP leg as an ALSA
+PCM (`bluealsa:DEV=<MAC>,PROFILE=sco`), and `libasound2-plugin-bluez` is the plugin
+that lets a plain `alsasrc` open that address — which is exactly how cerastream
+consumes it, through its opaque `AlsaPcmSpec` seam. Without both, a microphone pairs,
+connects, and can never be opened: the failure is silent and looks like a dead mic.
+
+**`bluetooth.service` must keep its IMAGE enable state**, so it was removed from the
+`services.sh` disable loop rather than repaired at runtime. A runtime-only `systemctl
+enable` is replaced along with the rest of `/etc` on the next RAUC A/B OTA, which
+would silently un-Bluetooth every field board on the update after the one that fixed
+it. `bluealsad` stays on-demand and is deliberately **not** image-enabled — CeraUI
+starts it symmetrically with the operator's own preference.
+
+**Naming trap worth stating once:** bookworm's `bluez-alsa-utils 4.0.0-2` installs the
+daemon as `/usr/bin/bluealsa`, while upstream bluez-alsa 4.x renamed it `bluealsad` —
+and the **unit** is `bluealsa.service` in both cases. CeraUI's `BLUEALSA_BINARIES`
+accepts both binary spellings; nothing should hardcode one.
+
+Guards: `tests/mkosi-image-contract.bats` (both packages reach the resolved runtime
+package set, plus the `configure_services` enabled-symlink fixture) and
+`tests/runtime-services.bats` (the OTA-persistence assertion — a deliberately inverted
+Bluetooth disable expectation fails the suite).
+
+**Edge-kernel wireless + Bluetooth enablement — the shipped fragment covered the
+soldered-on parts and almost nothing an operator might fit** [EXISTS]
+
+`manifests/kernel/rk3588-edge.fragment` now enumerates mt76 (MT7921E/**MT7925E**/
+MT7915E/MT7996E), iwlwifi (+IWLMVM), the whole rtw88 tree, two more rtw89 leaves,
+brcmfmac's PCIe/USB bus interfaces, ath11k (+`_PCI`) and ath12k, plus the Bluetooth
+USB and UART transports. Every symbol carries its own rationale and **every tristate
+parent is explicit** — `RTW88`/`RTW89` are `menuconfig` parents with no default, and
+omitting them silently discards their leaves, which is a failure this fragment has
+already shipped once.
+
+**The MT7925 case is the whole justification.** On the Orange Pi 5 Plus the fitted card
+enumerates cleanly at `0002:21:00.0` / `14c3:0717` and its firmware was already on the
+board — the *only* reason it had zero wiphys was that `CONFIG_MT7925E` was never
+enabled, so `modules.alias` had no entry for the device. This is worth remembering
+because it was misdiagnosed as a dead PCIe half for a long time. With the module
+closure installed, a plain reboot binds the driver and creates `phy0`/`wlan0` with
+Bands 1/2/4, AP mode, 160 MHz and non-zero EHT.
+
+**Promptless bools belong in `required-symbols.list`, never in the fragment.**
+`BT_INTEL`/`BT_BCM`/`BT_RTL`/`BT_MTK`/`BT_QCA` can only be set by a `select`
+(`BT_HCIBTUSB` selects `BT_INTEL` directly — there is no `BT_HCIBTUSB_INTEL` bool),
+and `ATH12K_PCI` does not exist at all: `pci.o` is unconditional in `ath12k-y`.
+`SERIAL_DEV_BUS=y` + `SERIAL_DEV_CTRL_TTYPORT=y` are also pinned there, because with
+`ACPI=y` on arm64 `BT_HCIUART_BCM` survives only through that pair and nothing at the
+point of use says so.
+
+**A naive `modinfo -F firmware ⊆ /lib/firmware` audit produces FALSE failures.** Three
+rules, each forced by evidence: rtw88/rtw89 declare only the newest format revision and
+fall back at runtime (the live Rock's own dmesg shows `rtw8852b_fw-2.bin` failing then
+`-1.bin` loading, on the adapter that demonstrably works); ath12k declares literal
+globs (`ath12k/WCN7850/hw2.0/*`) that never match a path verbatim; btbcm/btqca declare
+**zero** static refs and compose names at runtime, so check their blob directory
+instead. The refs also live in the chip/core modules rather than the bus leaf, so the
+audit must walk the recursive dependency closure.
+
+Cost: kernel `.deb` 22,925,760 → 23,364,668 B (**+1.91%**, well under the 25% ceiling);
+modules 928 → 960; firmware footprint **unchanged** (delta 0 — this change adds no
+blobs). Leaf selection followed the firmware rather than the other way round: rtw89
+8851BE/8852BTE/8922AE and Intel's IWLMLD are deliberately **not** declared because no
+blob ships for them, and MT7996E is the single documented exception with its gap stated
+in the comment. Guards: `lib/verify-kernel-config.sh` (zero DROPPED symbols) +
+`tests/kernel-config-fragment.bats`.
+
+**A fast iteration harness exists and you should use it.** Applying the pinned patch
+series to a shallow v7.1.7 checkout and running `defconfig` + `merge_config.sh -m` +
+`olddefconfig` reproduces the real build's module count exactly (793 → 826), so the
+fragment can be iterated in seconds instead of a ~13-minute compile.
+
+**Known image-construction defect, OWED and not fixed here:** `wireless-regdb` being
+installed is not enough. Its alternatives give `regulatory.db-debian` priority 100, and
+the custom edge kernel **rejects** that signature (`cfg80211: loaded regulatory.db is
+malformed or signature is missing/invalid`), leaving the board stuck at country `00`
+with Band 4 disabled. `update-alternatives --set regulatory.db
+/lib/firmware/regulatory.db-upstream` fixes it on a live board, but the built rootfs
+still points at the Debian pair, so this reproduces on every custom-kernel board. A
+pipeline change must select the upstream alternative (and test it) or align the
+kernel's trust configuration. Recorded in `docs/RELIABILITY-FINDINGS.md` → W3.
+
 **`iw` in `shared.list` — `wireless-tools` is NOT the same package** [EXISTS]
 
 The same class of gap as `net-tools` above, one layer over. `wireless-regdb` was
