@@ -1097,6 +1097,58 @@ SH
   [[ "$output" == *"disable ssh.service"* ]]
 }
 
+@test "Bluetooth stays enabled after configure_services so BlueALSA capture survives the image policy" {
+  local bin="$BATS_TEST_TMPDIR/bluetooth-enable-bin"
+  local calls="$BATS_TEST_TMPDIR/bluetooth-enable-calls"
+  local systemd_etc="$BATS_TEST_TMPDIR/bluetooth-systemd-etc"
+  mkdir -p "$bin" "$systemd_etc/multi-user.target.wants"
+  ln -s /lib/systemd/system/bluetooth.service \
+    "$systemd_etc/multi-user.target.wants/bluetooth.service"
+
+  cat >"$bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$BLUETOOTH_ENABLE_CALLS"
+unit="${!#}"
+case "$1" in
+  enable)
+    mkdir -p "$CERALIVE_SYSTEMD_ETC_UNIT_DIR/multi-user.target.wants"
+    ln -sfn "/lib/systemd/system/$unit" "$CERALIVE_SYSTEMD_ETC_UNIT_DIR/multi-user.target.wants/$unit"
+    ;;
+  list-unit-files) printf '%s enabled\n' "$unit" ;;
+  disable) rm -f "$CERALIVE_SYSTEMD_ETC_UNIT_DIR/multi-user.target.wants/$unit" ;;
+esac
+SH
+  chmod +x "$bin/systemctl"
+
+  run env \
+    PATH="$bin:$PATH" \
+    BLUETOOTH_ENABLE_CALLS="$calls" \
+    CERALIVE_SYSTEMD_ETC_UNIT_DIR="$systemd_etc" \
+    bash -c '
+      source "$1"
+      configure_debug_access() { :; }
+      configure_ntp() { :; }
+      install_console_font_service() { :; }
+      configure_ssh_enablement() { :; }
+      suppress_unusable_boot_units() { :; }
+      setup_typec_source_role() { :; }
+      setup_fan_curve() { :; }
+      setup_fan_kickstart() { :; }
+      setup_led_status() { :; }
+      setup_hdmirx_edid() { :; }
+      configure_services
+    ' bash "$POSTINST_ENTRY"
+
+  [ "$status" -eq 0 ]
+  [ -L "$systemd_etc/multi-user.target.wants/bluetooth.service" ]
+  [ "$(readlink "$systemd_etc/multi-user.target.wants/bluetooth.service")" = "/lib/systemd/system/bluetooth.service" ]
+  run cat "$calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"list-unit-files --no-legend --no-pager cups.service"* ]]
+  [[ "$output" != *"disable bluetooth.service"* ]]
+  [ ! -e "$systemd_etc/multi-user.target.wants/bluealsad.service" ]
+}
+
 @test "lab debug image enables ssh.service by default" {
   # Todo 42: the debug branch (CERALIVE_DEBUG_IMAGE=1) keeps the historical
   # enabled-by-default behavior — `enable ssh`, no disable.

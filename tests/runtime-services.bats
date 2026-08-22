@@ -843,6 +843,24 @@ SH
   [ "$status" -eq 0 ]
 }
 
+@test "BT policy: BlueALSA capture packages and the bluetooth enable state survive an A/B OTA" {
+  local packages="$BATS_TEST_TMPDIR/bluetooth-runtime-packages"
+  sed 's/#.*//' "$PIPELINE_DIR/manifests/packages/shared.list" | awk 'NF { print $1 }' >"$packages"
+
+  local package
+  for package in bluez bluez-alsa-utils libasound2-plugin-bluez; do
+    run grep -Fx "$package" "$packages"
+    [ "$status" -eq 0 ]
+  done
+
+  run grep -F 'disable_service cups.service' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  run grep -F 'disable_service "bluetooth.service"' "$POSTINST_LIB"
+  [ "$status" -ne 0 ]
+  run grep -E '(enable_service|systemctl enable).*bluealsad' "$POSTINST_LIB"
+  [ "$status" -ne 0 ]
+}
+
 # ===========================================================================
 # 18f. Fan curve — the RK3588 package thermal zone ships `active` trips at 55 C
 #      and 65 C plus `critical` at 115 C, so the pwm-fan stays silent through

@@ -122,6 +122,254 @@ CONFIG_R8169=m
 # (rtw89's `depends on`) is already =m from defconfig.
 CONFIG_RTW89=m
 CONFIG_RTW89_8852BE=m
+
+# --- Wireless: broad adapter coverage --------------------------------------
+# WHY THIS BLOCK EXISTS. Everything above this line is a symbol for silicon
+# soldered to one of the two shipped boards. This block is different: it covers
+# the adapter an operator FITS — the M.2 2230 card in the Rock 5B+'s E-key slot
+# or the Orange Pi 5+'s, and USB dongles — which is a runtime choice no manifest
+# can predict. A missing driver there is indistinguishable on the board from
+# dead hardware, so the fix has to be in the image rather than in a support call.
+#
+# EVERY SYMBOL BELOW IS ENUMERATED AND JUSTIFIED INDIVIDUALLY. This is NOT a
+# port of Armbian's edge config or a "turn on the whole WLAN menu" sweep — the
+# fragment's opening SCOPE paragraph forbids exactly that. Each line names the
+# adapter class it serves, and each `select`ed helper is deliberately absent
+# (the RTW89_CORE rule above).
+#
+# THE DEFCONFIG TRAP THIS BLOCK CLOSES. Some of these are ALREADY on without the
+# fragment saying anything — measured, not assumed, by resolving arm64 defconfig +
+# the pinned patch series + this fragment twice (before/after this block) and
+# diffing: MT7921E, IWLWIFI, IWLMVM, ATH11K, ATH11K_PCI, ATH12K, BRCMFMAC and
+# BRCMFMAC_SDIO were already =m/=y, as were BT, BT_HCIBTUSB and every
+# BT_HCIBTUSB_* protocol bool. Declaring them anyway is the entire point:
+# `required-symbols.list` explains that the fragment gate can only prove what the
+# fragment DECLARES, and this fragment turns 54 platforms off below, so a driver
+# defconfig happens to supply today can stop resolving tomorrow with the build,
+# the package validation and the boot all staying green. A line here that looks
+# redundant against today's defconfig is the assertion that it stays true.
+#
+# What this block genuinely ADDS (n -> m/y, same measurement): MT7925E, MT7915E,
+# MT7996E, the whole RTW88 tree, RTW89_8852AE/8852CE, BRCMFMAC_PCIE/_USB, and the
+# three UART protocol bools BT_HCIUART_3WIRE/_RTL/_INTEL. Net module count over
+# the whole config: 793 -> 826.
+#
+# FIRMWARE IS PART OF THE DECISION, and it was read out of the actual package
+# rather than assumed: every claim below about a blob was checked against the
+# staged `armbian-firmware` 26.8.1 `.deb`'s own file list. A leaf whose firmware
+# that package does not ship is either omitted, or declared with the gap stated
+# in its own comment — never declared silently.
+#
+# The `WLAN_VENDOR_*` symbols are the per-vendor `if` gates in
+# drivers/net/wireless/*/Kconfig. Each is a bool `default y`, so each resolves on
+# by itself today — and each is declared for the same reason as above: it is the
+# gate that makes every leaf under it visible, which is precisely the class of
+# parent CONFIG_RTW89 already shipped broken once for omitting.
+
+# MediaTek mt76. WLAN_VENDOR_MEDIATEK is a `bool ... default y` wrapping the whole
+# mt76 tree in `if WLAN_VENDOR_MEDIATEK` — it IS the family's only real parent, so
+# there is no second mt76-level menuconfig this block could be accused of omitting.
+# It is NOT CONFIG_ARCH_MEDIATEK, which is a foreign SoC platform disabled below.
+CONFIG_WLAN_VENDOR_MEDIATEK=y
+# MT7921E (PCIe, Wi-Fi 6): already =m from defconfig; pinned so it stays. Firmware
+# ships as mediatek/WIFI_RAM_CODE_MT7961_1.bin (+ patch MCU) — the MT7961 name is
+# the same silicon, so do not read the absent "mt7921" spelling as a missing blob.
+CONFIG_MT7921E=m
+# MT7925E (PCIe, Wi-Fi 7): the Orange Pi 5+ bench card's driver, measured n at this
+# pin — without this line that board has no wireless driver at all. Firmware is
+# present: mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin + WIFI_MT7925_PATCH_MCU.
+CONFIG_MT7925E=m
+# MT7915E (PCIe, Wi-Fi 6 4x4): the common AP-class mt76 part in M.2 adapters.
+# Firmware present: mediatek/mt7915_{rom_patch,wm,wa}.bin + the two eeprom blobs.
+CONFIG_MT7915E=m
+# MT7996E (PCIe, Wi-Fi 7 tri-band). ENABLED WITH A KNOWN FIRMWARE GAP: the
+# armbian-firmware 26.8.1 file list contains ZERO paths matching mt7996, so this
+# driver builds and binds but can never load. Declared anyway so the module exists
+# the moment the blobs land; do NOT read it as a working family. Recorded in
+# tmp/qa-evidence/dynamic-wifi-bt/edge-kernel-modules.txt.
+CONFIG_MT7996E=m
+# MT76_CORE / MT76_CONNAC_LIB / MT792x_LIB / MT79{2,5}x_COMMON are promptless
+# tristates `select`ed by the leaves above — the RTW89_CORE rule, so no entry.
+# Verified against the pinned tree: `config MT76_CORE` carries no prompt.
+
+# Intel iwlwifi. WLAN_VENDOR_INTEL is the `bool ... default y` `if` gate; IWLWIFI
+# is the tristate the PCI binding lives in and IWLMVM is the firmware personality
+# — an IWLWIFI with no MVM binds nothing modern. Both are already =m from
+# defconfig and are pinned here for the same stays-true reason as the rest.
+CONFIG_WLAN_VENDOR_INTEL=y
+# IWLWIFI: the family tristate carrying the PCI binding (depends on PCI && CFG80211).
+CONFIG_IWLWIFI=m
+# IWLMVM: the MVM firmware personality; without it IWLWIFI binds no current card.
+CONFIG_IWLMVM=m
+# HONEST COVERAGE LIMIT, from the firmware file list rather than the driver's
+# ambitions: armbian-firmware 26.8.1 ships iwlwifi-cc-a0-59.ucode (AX200) and
+# iwlwifi-ty-a0-gf-a0-{59,72,89}.ucode (AX210), plus the older 3160/3168/726x/
+# 8000/8265/9260 lines. It ships NO iwlwifi-Qu*/QuZ* (AX201) and NO iwlwifi-so-*
+# (AX211/AX411), so those cards bind and then fail the firmware load.
+#
+# NOT DECLARED, deliberately: CONFIG_IWLMLD. It is a real tristate at this pin and
+# it is the personality Intel's Wi-Fi 7 parts (BE200/BE202, iwlwifi-gl-*) need —
+# but no iwlwifi-gl-* blob ships either, so declaring it would add a module that
+# can only ever fail to load. Same rule that omits the three rtw89 leaves below;
+# MT7996E above is the ONE documented exception, and it says so in its own comment.
+
+# Realtek rtw88 (802.11ac). RTW88 is verified in the pinned tree as
+# `menuconfig RTW88 / tristate / depends on MAC80211` with NO default, and it
+# measured n before this line — the exact shape that silently discarded the RTW89
+# leaf at 7.1.5, so this parent is the whole reason the twelve leaves below
+# resolve at all. Leaf selection is not arbitrary: every chip below has its blob
+# in armbian-firmware 26.8.1 — the rtw88/ directory ships rtw8723d, rtw8821a,
+# rtw8821c, rtw8822b, rtw8822c, rtw8812a and rtw8814a firmware — and leaves whose
+# firmware that package does NOT ship are deliberately omitted.
+# RTW88_CORE/RTW88_PCI/RTW88_USB are promptless and `select`ed by the leaves, so
+# they get no entry; all three were confirmed resolving to =m in the built config.
+CONFIG_RTW88=m
+# PCIe (M.2 / mPCIe cards). Each `depends on PCI` and `select`s RTW88_PCI.
+# RTL8822BE, 2x2 11ac dual-band — the most common rtw88 M.2 part. fw rtw8822b_fw.bin.
+CONFIG_RTW88_8822BE=m
+# RTL8822CE, 2x2 11ac, the 8822B's successor. fw rtw8822c_fw.bin (+ _wow_fw.bin).
+CONFIG_RTW88_8822CE=m
+# RTL8821CE, 1x1 11ac — very common in low-cost laptops/SBC M.2 slots. fw rtw8821c_fw.bin.
+CONFIG_RTW88_8821CE=m
+# RTL8723DE, 1x1 11n + BT combo, still shipped on budget boards. fw rtw8723d_fw.bin.
+CONFIG_RTW88_8723DE=m
+# RTL8814AE, 3x3 11ac high-gain PCIe. fw rtw8814a_fw.bin.
+CONFIG_RTW88_8814AE=m
+# USB dongles. Each `depends on USB` and `select`s RTW88_USB — a genuinely separate
+# bus path from the PCIe leaves above, which is why one is pinned in required-symbols.
+# RTL8822BU, 2x2 11ac dongle. Shares rtw8822b_fw.bin with the 8822BE.
+CONFIG_RTW88_8822BU=m
+# RTL8822CU, 2x2 11ac dongle. Shares rtw8822c_fw.bin with the 8822CE.
+CONFIG_RTW88_8822CU=m
+# RTL8821CU, 1x1 11ac dongle. Shares rtw8821c_fw.bin with the 8821CE.
+CONFIG_RTW88_8821CU=m
+# RTL8723DU, 1x1 11n dongle. Shares rtw8723d_fw.bin with the 8723DE.
+CONFIG_RTW88_8723DU=m
+# RTL8821AU / 8811AU, 1x1 11ac dongle (one symbol covers both). fw rtw8821a_fw.bin.
+CONFIG_RTW88_8821AU=m
+# RTL8812AU, 2x2 11ac dongle — the classic high-power USB adapter. fw rtw8812a_fw.bin.
+CONFIG_RTW88_8812AU=m
+# RTL8814AU, 3x3 11ac dongle. Shares rtw8814a_fw.bin with the 8814AE.
+CONFIG_RTW88_8814AU=m
+
+# Realtek rtw89 (Wi-Fi 6/6E) beyond the onboard 8852BE declared above — the
+# CONFIG_RTW89 parent it needs is already declared with that board's leaf, so
+# these two ride it rather than restating it. Same firmware rule, and the rtw89/
+# directory was read to confirm it: it holds exactly rtw8852a_fw.bin,
+# rtw8852b_fw{,-1}.bin and rtw8852c_fw{,-1}.bin.
+# 8852AE (Wi-Fi 6 PCIe) — rtw8852a_fw.bin ships.
+CONFIG_RTW89_8852AE=m
+# 8852CE (Wi-Fi 6E PCIe) — rtw8852c_fw.bin + rtw8852c_fw-1.bin ship.
+CONFIG_RTW89_8852CE=m
+# NOT DECLARED, deliberately: RTW89_8851BE, RTW89_8852BTE and RTW89_8922AE. All
+# three are real symbols at this pin, but that same directory listing carries no
+# rtw8851b/rtw8852bt/rtw8922a blob, so each would be a module that can only ever
+# fail to load.
+
+# Broadcom FullMAC. THE MOST CONSEQUENTIAL LINE IN THIS BLOCK IS BRCMFMAC_PCIE.
+# BRCMFMAC is =m from defconfig, but its BUS interfaces are separate bools INSIDE
+# the driver and, verified in the pinned tree, only BRCMFMAC_SDIO carries
+# `default y`. So a defconfig brcmfmac binds SDIO parts ONLY — and the Orange Pi
+# 5+'s AP6275P is a PCIe part, i.e. the driver was present and could never have
+# bound it. Both measured n before this block. The firmware confirms the part is
+# otherwise ready to go: brcm/brcmfmac43752-pcie.bin + .clm_blob + .txt all ship.
+CONFIG_WLAN_VENDOR_BROADCOM=y
+# BRCMFMAC: the FullMAC driver itself. Already =m; it is the parent all three bus
+# bools below `depends on`, so losing it would take every bus interface with it.
+CONFIG_BRCMFMAC=m
+# SDIO: already `default y`; pinned so a bus interface cannot vanish silently.
+CONFIG_BRCMFMAC_SDIO=y
+# PCIe: the AP6275P bus. No `default` in Kconfig — this line is what enables it.
+CONFIG_BRCMFMAC_PCIE=y
+# USB: brcmfmac dongles. No `default` in Kconfig either.
+CONFIG_BRCMFMAC_USB=y
+
+# Qualcomm ath11k (Wi-Fi 6) and ath12k (Wi-Fi 7). WLAN_VENDOR_ATH is the
+# `bool ... default y` `if` gate. MHI_BUS/QRTR/QRTR_MHI are `select`ed by both
+# leaves — confirmed =m in the built config — so they get no entry.
+CONFIG_WLAN_VENDOR_ATH=y
+# ATH11K is the family tristate; ATH11K_PCI is its SEPARATE PCI bus leaf, so the
+# pair is required and neither alone is a usable adapter. Both already =m.
+# FIRMWARE TRUTH, and it is narrower than the driver: of the two ath11k parts
+# armbian-firmware 26.8.1 knows about, only WCN6855 is complete (amss.bin,
+# board-2.bin, m3.bin, regdb.bin). ath11k/QCA6390/ ships board-2.bin and NOTHING
+# else — no amss.bin, no m3.bin — so a QCA6390 binds and then fails its firmware
+# load. Read this family as WCN6855-capable, not as "ath11k works".
+CONFIG_ATH11K=m
+# ATH11K_PCI: the PCI bus leaf, a SEPARATE tristate (depends on ATH11K && PCI).
+CONFIG_ATH11K_PCI=m
+# ath12k has NO ATH12K_PCI symbol at this pin — verified twice over: no such
+# `config` exists in the tree, and drivers/net/wireless/ath/ath12k/Makefile lists
+# pci.o in the unconditional `ath12k-y` object list. So ATH12K alone IS the PCIe
+# leaf, and adding an ATH12K_PCI line would fail the gate as a nonexistent symbol.
+# (ATH12K_AHB does exist but is an IPQ5332 SoC bus needing REMOTEPROC — not an
+# M.2 card, so it is deliberately absent.) Firmware is complete for both parts:
+# ath12k/WCN7850/hw2.0/ and WCN7860/hw2.0/ each carry amss/board-2/m3/regdb.
+CONFIG_ATH12K=m
+
+# --- Bluetooth: USB and UART transports ------------------------------------
+# BT is a `menuconfig` tristate and BT_HCIBTUSB/BT_HCIUART are the two transport
+# tristates under it — the same parent/leaf shape as RTW89.
+#
+# THE VENDOR HELPERS ARE NOT DECLARED HERE, DELIBERATELY. BT_INTEL, BT_BCM,
+# BT_RTL and BT_MTK are PROMPTLESS tristates in drivers/bluetooth/Kconfig with no
+# `default`: kconfig cannot set them at all, only a `select` can. Declaring one
+# directly would be a line olddefconfig discards unless something else happened
+# to select it — the CONFIG_RTW89 failure mode wearing the opposite mask. The
+# symbols that actually turn them on are the per-protocol bools below, so those
+# are what this fragment declares; the resolved helpers are asserted in
+# required-symbols.list, which is the manifest for what the kernel must CARRY.
+# BT and the USB transport are already =m from defconfig; both are pinned because
+# every BT_HCIBTUSB_* bool below is `depends on BT_HCIBTUSB`, so losing the
+# transport would silently take all four vendor helpers with it.
+CONFIG_BT=m
+# BT_HCIBTUSB: the USB transport tristate, and the only path by which BT_INTEL is
+# turned on (it `select`s it directly — there is no BT_HCIBTUSB_INTEL bool).
+CONFIG_BT_HCIBTUSB=m
+# Selects BT_MTK — the Orange Pi 5+'s MediaTek USB radio, whose firmware ships as
+# mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin. It is the one protocol bool
+# Kconfig marks `default n`; it nonetheless measured y already, so this line is an
+# assertion rather than a change — and it is the one most worth asserting, because
+# it is the only one whose Kconfig default would not restore it.
+CONFIG_BT_HCIBTUSB_MTK=y
+# Selects BT_RTL — the Rock 5B+'s RTL8852BE Bluetooth half (USB 13d3:3572);
+# rtl_bt/ ships its blobs. `default y` in Kconfig, pinned so it stays.
+CONFIG_BT_HCIBTUSB_RTL=y
+# Selects BT_BCM — Broadcom/Cypress combo cards paired with brcmfmac above.
+# `default y` in Kconfig, pinned so it stays.
+CONFIG_BT_HCIBTUSB_BCM=y
+# BT_INTEL needs no bool of its own: BT_HCIBTUSB `select`s it directly (verified
+# in drivers/bluetooth/Kconfig), and intel/ibt-* firmware ships.
+# UART transport: the shape every SDIO/PCIe combo module's BT half uses, where
+# the radio hangs off a serial port rather than USB. Already =m; pinned as the
+# parent all seven protocol bools below `depends on`.
+CONFIG_BT_HCIUART=m
+# serdev binds a UART-attached controller as a device instead of requiring a
+# userspace hciattach. Promptless with `default y`, gated on SERIAL_DEV_BUS, and
+# four of the protocol bools below hard-`depends on` it — so it is declared as an
+# assertion, and SERIAL_DEV_BUS/SERIAL_DEV_CTRL_TTYPORT are pinned in
+# required-symbols.list for the reason spelled out there.
+CONFIG_BT_HCIUART_SERDEV=y
+# H4 is the baseline framing every UART controller speaks; several bools below
+# `select` it. Already y.
+CONFIG_BT_HCIUART_H4=y
+# Three-wire (H5) framing — measured n before this block, and BT_HCIUART_RTL
+# `select`s it, so declaring it makes the dependency explicit rather than lucky.
+CONFIG_BT_HCIUART_3WIRE=y
+# Selects BT_BCM for UART-attached Broadcom/Cypress parts (AP6275P class). It was
+# already y, and it is the most fragile line here: its Kconfig reads
+# `depends on (!ACPI || SERIAL_DEV_CTRL_TTYPORT)`, and arm64 defconfig sets
+# ACPI=y — so it survives ONLY because SERIAL_DEV_CTRL_TTYPORT resolves y, which
+# in turn holds only while SERIAL_DEV_BUS is =y rather than =m. Neither of those
+# is visible from this line, which is exactly why both are in required-symbols.
+CONFIG_BT_HCIUART_BCM=y
+# Selects BT_RTL for UART-attached Realtek parts — measured n before this block.
+CONFIG_BT_HCIUART_RTL=y
+# Selects BT_INTEL for UART-attached Intel parts — measured n before this block.
+CONFIG_BT_HCIUART_INTEL=y
+# Selects BT_QCA for UART-attached Qualcomm parts; qca/ firmware ships. Already y.
+CONFIG_BT_HCIUART_QCA=y
+
 # WWAN: the six modules lib/check-wwan-modules.sh binds the modem stack to.
 # Keep this list in lockstep with that checker — a drop here is exactly the
 # regression it exists to catch.

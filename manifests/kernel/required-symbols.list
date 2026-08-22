@@ -108,6 +108,83 @@ CONFIG_BT_RTL=m
 CONFIG_BT_HCIBTUSB_RTL=y
 CONFIG_R8169=m
 
+# --- Wi-Fi: the FITTED-adapter closure -------------------------------------
+# Everything above is silicon soldered to a shipped board. This block is the
+# adapter an operator puts in the M.2 E-key slot or a USB port, which no manifest
+# can predict — so the requirement is that the finished kernel CARRIES the
+# driver, not that any particular board uses it. Each vendor gate is listed with
+# its leaves for the reason this file's header gives: the fragment disables 54
+# platforms, and a leaf whose vendor gate stopped resolving would vanish in
+# silence.
+#
+# Bus leaves are pinned exactly; the promptless `select`ed helpers (MT76_CORE,
+# MT792x_LIB, RTW88_CORE, ATH_COMMON, MHI_BUS, QRTR...) are not listed, being
+# implied by the leaves that select them.
+CONFIG_WLAN_VENDOR_MEDIATEK=y
+CONFIG_MT7921E=m
+CONFIG_MT7925E=m
+CONFIG_MT7915E=m
+CONFIG_MT7996E=m
+CONFIG_WLAN_VENDOR_INTEL=y
+CONFIG_IWLWIFI=m
+CONFIG_IWLMVM=m
+CONFIG_WLAN_VENDOR_ATH=y
+# ATH11K + ATH11K_PCI are a PAIR: the family tristate carries no bus, so an
+# ath11k without its PCI leaf is a driver no M.2 card can bind to. NOTE the
+# firmware is narrower than the driver — armbian-firmware 26.8.1 completes
+# WCN6855 only; its ath11k/QCA6390/ holds board-2.bin with no amss.bin or m3.bin.
+CONFIG_ATH11K=m
+CONFIG_ATH11K_PCI=m
+# ath12k has no ATH12K_PCI symbol — pci.o is in the unconditional `ath12k-y`
+# object list, so this one entry IS the PCIe requirement.
+CONFIG_ATH12K=m
+CONFIG_RTW88=m
+CONFIG_RTW88_8822BE=m
+CONFIG_RTW88_8822CE=m
+CONFIG_RTW88_8821CE=m
+# One USB leaf is pinned alongside the PCIe ones on purpose: the USB dongles go
+# through the separate promptless RTW88_USB helper, so a PCIe-only requirement
+# would keep passing while every USB adapter silently stopped resolving.
+CONFIG_RTW88_8822BU=m
+CONFIG_RTW89_8852AE=m
+CONFIG_RTW89_8852CE=m
+# brcmfmac's bus interfaces are bools INSIDE the driver, and only SDIO defaults
+# on — a brcmfmac with no PCIE cannot bind an AP6275P-class card at all.
+CONFIG_BRCMFMAC_SDIO=y
+CONFIG_BRCMFMAC_PCIE=y
+CONFIG_BRCMFMAC_USB=y
+
+# --- Bluetooth: transports and the vendor helpers they select ---------------
+# BT_INTEL/BT_BCM/BT_MTK are PROMPTLESS tristates that only a `select` can turn
+# on, so they cannot be declared in the fragment — this manifest is where their
+# resolved presence is asserted, which is exactly the claim it exists to make.
+# (BT_RTL is already pinned above with the onboard RTL8852BE.)
+CONFIG_BT_INTEL=m
+CONFIG_BT_BCM=m
+CONFIG_BT_MTK=m
+CONFIG_BT_QCA=m
+CONFIG_BT_HCIBTUSB_MTK=y
+CONFIG_BT_HCIBTUSB_BCM=y
+CONFIG_BT_HCIUART=m
+CONFIG_BT_HCIUART_SERDEV=y
+CONFIG_BT_HCIUART_H4=y
+CONFIG_BT_HCIUART_3WIRE=y
+CONFIG_BT_HCIUART_BCM=y
+CONFIG_BT_HCIUART_RTL=y
+CONFIG_BT_HCIUART_INTEL=y
+CONFIG_BT_HCIUART_QCA=y
+# THE TWO SILENT GATES UNDER THE UART BLOCK ABOVE, and the reason they are pinned
+# HERE rather than left implicit. BT_HCIUART_SERDEV is promptless `default y` but
+# `depends on SERIAL_DEV_BUS`, and SERIAL_DEV_CTRL_TTYPORT is a prompted bool
+# whose own `default y` holds only while `SERIAL_DEV_BUS != m`. BT_HCIUART_BCM
+# then reads `depends on (!ACPI || SERIAL_DEV_CTRL_TTYPORT)` — and arm64 defconfig
+# sets ACPI=y, so the Broadcom UART protocol survives ONLY through that second
+# symbol. Flip SERIAL_DEV_BUS to =m and the chain collapses: CTRL_TTYPORT goes
+# not-set, BT_HCIUART_BCM is dropped, and nothing above says why. Pinning
+# SERIAL_DEV_BUS at =y specifically (never merely "set") is the load-bearing part.
+CONFIG_SERIAL_DEV_BUS=y
+CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+
 # --- DRM / kiosk display ----------------------------------------------------
 # The kiosk stack (cage + Chromium, or the Cog add-on) renders through the Mali
 # userspace onto a Rockchip DRM/KMS device; DRM_ROCKCHIP is what creates it, and

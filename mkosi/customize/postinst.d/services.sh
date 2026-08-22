@@ -161,9 +161,8 @@ configure_services() {
     enable_service "${svc}"
   done
   configure_ssh_enablement
-  for svc in bluetooth.service cups.service; do
-    disable_service "${svc}"
-  done
+  # RAUC A/B replaces /etc wholesale, so a runtime-only enable silently self-reverts on every OTA; the CeraUI boot reconciler (separate BT foundation todo) covers already-flashed images.
+  disable_service cups.service
   suppress_unusable_boot_units
   setup_typec_source_role
   setup_fan_curve
