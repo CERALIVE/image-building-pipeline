@@ -152,6 +152,8 @@ bluez                    # the Bluetooth userspace stack: bluetoothd + bluetooth
                          # This is NOT an edge-kernel regression — the vendor-BSP images have the
                          # same gap. Same class as the net-tools / iw entries above: one missing
                          # userspace package silently disables a whole hardware feature.
+bluez-alsa-utils          # BT mic capture via BlueALSA.
+libasound2-plugin-bluez   # BlueALSA ALSA PCM consumed by cerastream alsasrc.
 
 # --- mDNS / discovery ---------------------------------------------------------
 avahi-daemon             # .local hostname advertisement (find the box on the LAN)
