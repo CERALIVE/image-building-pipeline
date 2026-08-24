@@ -512,6 +512,31 @@ the prebuilt Armbian vendor BSP.
 
 ---
 
+## 10. Vendor `cls_fw` extension — on-device load and tc behavior
+
+**Status:** Hardware-gated; static build/package contract is complete
+**Location:** `lib/build-kernel-extension.sh`,
+`manifests/kernel/vendor-cls-fw.env`,
+`docs/notes/sharing-kernel-capability.md` §2c
+
+**What is proven without hardware:** the exact 26.5.1 Armbian headers exist and
+carry `Module.symvers`; the pinned vendor `net/sched/cls_fw.c` passes MODPOST,
+builds as arm64 with exact `6.1.115-vendor-rk35xx` modversions vermagic, and is
+packaged at the standard updates path with `depmod` and `modules-load.d` wiring.
+The production image still installs the unchanged prebuilt vendor kernel.
+
+**What remains:** on a board booted from a built image, require all of:
+
+1. `modprobe cls_fw` exits 0 and `modinfo cls_fw` resolves the CeraLive updates path;
+2. `lsmod` shows `cls_fw` after boot (the modules-load drop-in took effect);
+3. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
+4. marked packets increment only the selected class counter.
+
+Capture the commands and counters under `test-results/uplink-sharing/`. This is
+the behavioral/HW gate; CI intentionally asserts package/config text only.
+
+---
+
 ## Related Documents
 
 | Document | Scope |

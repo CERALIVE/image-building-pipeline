@@ -2,7 +2,7 @@
 
 Measurement of the kernel the production image **actually installs**, against the
 symbol closure the uplink-sharing work depends on. This note is the recorded
-evidence for that measurement and the single verdict it produces.
+evidence for that measurement and the out-of-tree remediation it required.
 
 - **Date:** 2026-08-24 (UTC)
 - **Subject:** `linux-image-vendor-rk35xx` **26.5.1** — kernel release
@@ -11,8 +11,8 @@ evidence for that measurement and the single verdict it produces.
 - **Method:** package inspection of the fetched `.deb` (the REQUIRED path — no
   board needed). Every row below cites the exact file **inside the extracted
   package** it was read from.
-- **Scope:** READ-ONLY measurement. Nothing in the vendor kernel, the edge
-  fragment, `versions.yaml` or any pin was modified by this work.
+- **Scope:** the Armbian kernel package remains byte-unchanged. The image now
+  adds a separately built `ceralive-cls-fw` package beside it.
 - **Raw transcript:** `test-results/uplink-sharing/todo18-matrix.log` (gitignored)
 
 ---
@@ -61,8 +61,9 @@ Evidence files extracted from it (`dpkg-deb -x`):
 ## 2. Per-symbol matrix
 
 `builtin` = resolves inside `vmlinux`, usable with no `modprobe`.
-`module` = ships as a separate `.ko`, or is compiled into a `.ko` (see §2a),
-and is **not loaded until something loads it**.
+`module` = ships as a separate `.ko`, is compiled into a `.ko` (see §2a), or is
+supplied by the separately packaged extension described in §2c, and is **not
+loaded until something loads it**.
 `ABSENT` = not built at all — no `.ko`, no `modules.dep` entry, no
 `modules.builtin` entry, no `modules.alias` entry.
 
@@ -82,7 +83,7 @@ and is **not loaded until something loads it**.
 | 10 | `NET_SCH_PRIO` | `=m` | `kernel/net/sched/sch_prio.ko` | **module** | `/boot/config-6.1.115-vendor-rk35xx:1588`; `…/modules.dep` |
 | 11 | `NET_SCH_FQ_CODEL` | `=m` | `kernel/net/sched/sch_fq_codel.ko` | **module** | `/boot/config-6.1.115-vendor-rk35xx:1606`; `…/modules.dep` |
 | 12 | `NET_SCH_HTB` | `=m` | `kernel/net/sched/sch_htb.ko` | **module** | `/boot/config-6.1.115-vendor-rk35xx:1586`; `…/modules.dep` |
-| 13 | `NET_CLS_FW` | `# … is not set` | **nothing** | **ABSENT** | `/boot/config-6.1.115-vendor-rk35xx:1623` |
+| 13 | `NET_CLS_FW` | base config: `# … is not set` | `updates/ceralive/cls_fw.ko` from `ceralive-cls-fw` | **module (out-of-tree)** | base absence: `/boot/config-6.1.115-vendor-rk35xx:1623`; extension proof: §2c |
 
 ### Optional
 
@@ -119,24 +120,48 @@ Four independent reads inside the package payload, all negative:
 | `grep -c cls_fw …/modules.builtin` / `…/modules.alias` | `0` / `0` |
 | `find` for any `*cls_fw*` / `*cls-fw*` path in the payload | no hits |
 
-There is no way to obtain this classifier on the shipped kernel at runtime — it
-is not an unloaded module, it was never compiled.
+The base package alone cannot provide this classifier: it is not an unloaded
+module and was never compiled by Armbian. Section 2c records the separate,
+ABI-matched module now added by the image pipeline.
+
+### 2c. Out-of-tree `cls_fw.ko` remediation
+
+The least-invasive option is feasible and implemented. It leaves
+`linux-image-vendor-rk35xx` 26.5.1 byte-for-byte untouched:
+
+| Evidence | Result |
+|---|---|
+| Matching headers | Armbian's signed bookworm arm64 index contains `linux-headers-vendor-rk35xx=26.5.1`; SHA-256 `12e3626e6e61b2754882f0f625e9092e5b1c13578d9b7555d38dbecabf910bf2` |
+| Build artifacts | headers carry `.config`, prepared Kbuild source, and a 1,240,815-byte `Module.symvers`; `CONFIG_MODVERSIONS=y` |
+| Source | exact `net/sched/cls_fw.c` from `armbian/linux-rockchip@95e85f6cb496`; SHA-256 `c83c4ec07b700f66919d7d54a3546ef30dea91b3e420c9b35bc69f6da92b5694` |
+| Symbol/ABI gate | Kbuild `MODPOST` succeeds against that `Module.symvers`; no unexported-symbol failure |
+| Built module | arm64 `cls_fw.ko`, `name=cls_fw`, vermagic exactly `6.1.115-vendor-rk35xx SMP mod_unload modversions aarch64` |
+| Built package | `ceralive-cls-fw_6.1.115-ceralive1_arm64.deb`, 141,718 bytes in the executed proof build; exact dependency `linux-image-vendor-rk35xx (= 26.5.1)` |
+| Installed paths | `/usr/lib/modules/6.1.115-vendor-rk35xx/updates/ceralive/cls_fw.ko`; `/usr/lib/modules-load.d/ceralive-cls-fw.conf` |
+
+`lib/build-kernel-extension.sh` downloads both inputs by immutable URL and
+SHA-256, builds in the digest-pinned GCC-13 container, rejects any vermagic or
+Debian-control mismatch, and emits only the small runtime `.deb`. The 74.8 MB
+headers tree and compiler remain build-time inputs and never enter the image.
+The package post-install runs `depmod -a 6.1.115-vendor-rk35xx`; systemd's normal
+modules-load path requests `cls_fw` at boot. Source-built kernel variants clear
+the extension package declaration because their kernel releases and vermagic
+differ.
 
 ---
 
 ## 3. VERDICT
 
-> **RED — mandatory `NET_CLS_FW` is ABSENT from the shipped vendor kernel
-> (`linux-image-vendor-rk35xx` 26.5.1 / `6.1.115-vendor-rk35xx`):
-> `/boot/config-6.1.115-vendor-rk35xx:1623` reads `# CONFIG_NET_CLS_FW is not set`,
-> and no `cls_fw.ko` exists anywhere in the package payload.**
+> **GREEN AT IMAGE-CONTRACT LEVEL — the prebuilt vendor kernel remains unchanged
+> and still omits `NET_CLS_FW`, while the production image supplies an ABI-matched
+> `cls_fw.ko` through `ceralive-cls-fw`. Static CI proves exact inputs, package
+> construction contracts, staging, boot loading, and exact vermagic.**
 
-Twelve of the thirteen mandatory symbols are present and the optional
-`NET_SCH_CAKE` is present; the verdict is RED on the single ABSENT row, per the
-gate's own rule that **any** missing mandatory symbol is RED regardless of how
-many others pass.
+All thirteen mandatory rows are now supplied and optional `NET_SCH_CAKE` remains
+present. Runtime load and behavioral `tc filter … fw` proof remain explicitly
+hardware-gated; CI does not claim either from text/package inspection.
 
-### Named consequence of the ABSENT symbol
+### Named consequence of the base-package omission
 
 `NET_CLS_FW` is the `tc` classifier that maps an skb's **firewall mark**
 (`skb->mark`, as set by nftables `meta mark set` / `ct mark`) onto a qdisc class:
@@ -145,11 +170,11 @@ many others pass.
 tc filter add dev <if> parent 1: protocol all handle <fwmark> fw classid 1:10
 ```
 
-On this kernel that command cannot succeed — the `fw` classifier cannot be
-loaded, so the canonical **"nftables marks the packet → `tc` steers it into an
-HTB/PRIO class"** bridge is unavailable in its standard form. Anything designed
-around `handle … fw classid …` will fail at runtime on a booting, otherwise
-healthy image.
+On the base kernel package alone that command cannot succeed. On a production
+image carrying `ceralive-cls-fw`, `modprobe cls_fw` is staged to register the
+`fw` classifier and restore the canonical **"nftables marks the packet → `tc`
+steers it into an HTB/PRIO class"** bridge. Actual registration and filter
+behavior remain pending the labelled hardware drill.
 
 ### Second consequence, applying to the twelve PRESENT rows
 
@@ -169,9 +194,9 @@ to state its module dependencies explicitly rather than rely on autoload timing.
 
 ## 4. Adjacent capability actually present (input to the owner question, not the verdict)
 
-Recorded so the RED can be acted on with facts rather than re-measured. These are
-**not** substitutes that change the verdict — the gate is RED and stays RED — they
-are the material the owner decision will be taken against.
+Recorded as the adjacent capability evidence that informed the remediation. None
+of these classifiers was substituted for `cls_fw`; the extension restores the
+standard firewall-mark classifier directly.
 
 Other `tc` classifiers/actions in the shipped kernel (all `=m`, from
 `/boot/config-6.1.115-vendor-rk35xx`): `NET_CLS_BASIC`, `NET_CLS_ROUTE4`,
@@ -209,7 +234,9 @@ That is the expected posture of a production image (`ssh.service` ships not
 enabled and the `ceralive` account is password-locked), not a fault. **No board
 reading is claimed here**, and none is needed: the measured artifact's SHA-256
 matches the committed `bsp-baseline.json`, so the package inspection already
-speaks for the shipped kernel.
+speaks for the shipped kernel. It does not prove the new module loads: the
+remaining board gate is `modprobe cls_fw`, `modinfo cls_fw`, and an actual
+`tc filter … fw classid` classification check, recorded in `docs/DEFERRED.md`.
 
 ---
 
