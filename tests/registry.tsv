@@ -85,6 +85,7 @@ tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only wh
 tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-mpp-dev REMOVE verdict stays removed
 tests/app-layer-modem-closure.test.sh	shell	integration	default-shell	the nine ModemManager fork packages install and classify as app-layer
 tests/firstparty-classification.test.sh	shell	unit	default-shell	the partitioner allowlist is a superset of FIRST_PARTY_APT_PKGS
+tests/firstparty-version-resolution.test.sh	shell	unit	default-shell	generic and architecture-specific first-party pins resolve to exact apt specs
 tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys, bounds and exclusions
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
