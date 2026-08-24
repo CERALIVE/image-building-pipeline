@@ -423,6 +423,13 @@ committed baseline `manifests/bsp-baseline.json`.
 
 ## Verified `.deb` Download Cache
 
+First-party package versions are selected from
+`manifests/first-party-deb-versions.txt`. A normal `package=version` entry applies
+to both architectures. When release builds produce different Debian versions per
+architecture, `package[amd64]=version` and `package[arm64]=version` override that
+generic entry. Resolution remains exact: the selected version is matched against
+the GPG-verified architecture index before its `.deb` is downloaded.
+
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
 pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
 content-addressed cache at `mkosi/.staging/.debcache/`, keyed on
