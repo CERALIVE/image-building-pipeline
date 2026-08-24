@@ -54,6 +54,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | **Kernel-build-from-source internals** | `lib/build-kernel.sh` is a thin STAGE entry; the bodies live in `lib/kernel/{config,checkout,builder,package}.sh` — see the "build-kernel.sh and assemble-disk.sh are ENTRIES plus concern modules" KEY FACT below |
+| **Production vendor `cls_fw` extension** | `lib/build-kernel-extension.sh` + `manifests/kernel/vendor-cls-fw.env` + `tests/vendor-cls-fw-contract.bats`; evidence in `docs/notes/sharing-kernel-capability.md` |
 | **RK3588 disk-assembly internals** | `lib/assemble-disk.sh` is a thin SEQUENCER entry; the bodies live in `lib/disk/{repart,slot,boot,gap,verify}.sh` — same KEY FACT |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
 | **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
@@ -1142,6 +1143,28 @@ same-version content replacement observable:
   `run-tests` section 15.
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
+
+**The production vendor kernel gains `cls_fw` as a separate ABI-matched package,
+not as a kernel-track change** [EXISTS]
+
+`linux-image-vendor-rk35xx=26.5.1` remains the exact prebuilt production kernel
+selected by D3. Its config has `# CONFIG_NET_CLS_FW is not set`, so the pipeline
+builds `ceralive-cls-fw` from the exact matching
+`linux-headers-vendor-rk35xx=26.5.1` plus
+`armbian/linux-rockchip@95e85f6cb496` `net/sched/cls_fw.c`. Both inputs are
+immutable-URL and SHA-256 pinned in `manifests/kernel/vendor-cls-fw.env`; the
+digest-pinned GCC-13 builder rejects MODPOST, module-name, exact vermagic, and
+Debian-control mismatches.
+
+The `.deb` owns
+`/usr/lib/modules/6.1.115-vendor-rk35xx/updates/ceralive/cls_fw.ko`, a
+`modules-load.d` entry, and `depmod` maintainer scripts. It depends exactly on
+`linux-image-vendor-rk35xx (= 26.5.1)`, is installed only after that kernel, and
+ships no headers/compiler. `edge` and `vendor-patched` explicitly clear
+`kernel_extension_packages` because their ABI differs. CI proves text/package
+contracts only; actual `modprobe` plus `tc filter … fw classid` behavior remains
+the hardware gate in `docs/DEFERRED.md` item 10. Full evidence:
+`docs/notes/sharing-kernel-capability.md` §2c.
 
 **Kernel build from source — OPT-IN family variants, production path byte-identical** [PARTIAL]
 

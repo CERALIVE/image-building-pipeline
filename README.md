@@ -510,6 +510,17 @@ Verify on a device with `apt-mark showhold`, `apt-cache policy linux-image-vendo
 and `apt-get -s upgrade`. Full contract:
 [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
+## Vendor-kernel firewall-mark classifier
+
+The production image keeps the prebuilt
+`linux-image-vendor-rk35xx=26.5.1` selected by D3. Because that package omits
+`NET_CLS_FW`, the build emits and installs a separate `ceralive-cls-fw` package
+from the exact matching headers and pinned vendor source. It contains only the
+ABI-matched `cls_fw.ko`, boot-load configuration, and `depmod` hooks; headers and
+compiler tooling do not ship on the device. Static proof and the remaining
+hardware-gated load/traffic check are documented in
+[`docs/notes/sharing-kernel-capability.md`](docs/notes/sharing-kernel-capability.md).
+
 ## OTA-During-Stream Guard
 
 `/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)

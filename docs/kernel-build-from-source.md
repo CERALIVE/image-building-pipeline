@@ -392,6 +392,25 @@ fail the suite.
 
 ---
 
+## 3c. Production vendor-kernel extension (not a source-built variant)
+
+The default production path still installs Armbian's prebuilt
+`linux-image-vendor-rk35xx=26.5.1`. It additionally builds
+`ceralive-cls-fw` from the matching Armbian headers and the pinned vendor tree's
+`net/sched/cls_fw.c`, because the prebuilt config omits `NET_CLS_FW` entirely.
+This does not use `bindeb-pkg`, replace the image package, apply a kernel patch,
+or select either opt-in variant.
+
+Exact input and ABI evidence are in
+[`notes/sharing-kernel-capability.md`](notes/sharing-kernel-capability.md) §2c.
+The resulting package contains only `cls_fw.ko`, a `modules-load.d` entry, and
+`depmod` maintainer scripts. Matching headers and GCC stay in the build
+container; neither is installed on the device. `edge` and `vendor-patched`
+explicitly resolve `kernel_extension_packages: []` because their release strings
+and module ABI differ.
+
+---
+
 ## 4. The DTB install mapping
 
 An Armbian `linux-dtb-*` package lands the board DTBs exactly where the U-Boot
