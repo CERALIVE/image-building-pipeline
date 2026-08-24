@@ -999,7 +999,12 @@ state** under the staging dir (the host apt config is never touched).
   ceralive-forked (`~ceralive0.2.0`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v0.2.0). All are downloaded into `$DEST/debs/` using the pins
-  from `manifests/first-party-deb-versions.txt` (14 packages total). The modem
+  from `manifests/first-party-deb-versions.txt` (14 packages total). Generic
+  `package=version` entries apply to both indexes; an exact
+  `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
+  release embeds architecture-specific build metadata, as CeraUI v2026.8.3 does.
+  `first_party_pinned_version` rejects duplicate keys and the selected exact
+  version still has to exist in the GPG-verified architecture index. The modem
   closure is a self-contained dependency set (`modemmanager`→`libmm-glib0`; the
   glib libs bind the qmi/mbim/qrtr transports); external deps (GLib, `libgudev`,
   `polkit`, systemd) come from Debian. The app layer classifies all nine as

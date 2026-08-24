@@ -506,15 +506,19 @@ PY
 }
 
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.7.2"
-  local expected_device_version="2026.7.2-20260719T181141.a881b77"
-  local device_version
+  local expected_ceraui_pin="v2026.8.4"
+  local arch expected_device_version device_version
 
   [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
-  device_version="$(awk -F= '$1 == "ceralive-device" { print $2; exit }' \
-    "$REPO_ROOT/manifests/first-party-deb-versions.txt")"
-  [ "$device_version" = "$expected_device_version" ]
-  [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
+  for arch in amd64 arm64; do
+    case "$arch" in
+      amd64) expected_device_version="2026.8.4-20260824T150955.2e0fb3b" ;;
+      arm64) expected_device_version="2026.8.4-20260824T150956.2e0fb3b" ;;
+    esac
+    device_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version ceralive-device' _ "$FETCH_DEBS")"
+    [ "$device_version" = "$expected_device_version" ]
+    [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
+  done
 }
 
 @test "fetch-debs srt pin ships libsrt1.5-ceralive bundling /usr/bin/srt-live-transmit" {

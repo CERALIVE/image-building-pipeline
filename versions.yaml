@@ -36,10 +36,18 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.7.2
-  # Release provenance: tag v2026.7.2 resolves to commit a881b77976e75e8ea51a400ae9382bfa9e87a818.
-  # Device deb: ceralive-device 2026.7.2-20260719T181141.a881b77 (live+GPG-valid, arm64+amd64).
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.7.2
+  pin: v2026.8.4
+  # Release provenance: tag v2026.8.4 resolves to commit 2e0fb3be084391b11182301bfdeeaed4d5343f6b.
+  # Device deb: ceralive-device 2026.8.4-20260824T150955.2e0fb3b (amd64) /
+  #   -20260824T150956.2e0fb3b (arm64).
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.4
+  #
+  # This pin is the component REGISTRY value; it is NOT what selects the downloaded
+  # .deb. fetch_first_party reads it only to print the "first-party pins
+  # (versions.yaml)" provenance banner (lib/fetch/firstparty.sh get_pin), while the
+  # version actually fetched comes from manifests/first-party-deb-versions.txt via
+  # first_party_download_specs. CeraUI publishes a different exact Debian version
+  # per architecture, represented there by ceralive-device[amd64] and [arm64].
   channel: stable
 
 srtla-send-rs:

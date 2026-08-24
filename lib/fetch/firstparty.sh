@@ -17,13 +17,35 @@
 # Bodies moved VERBATIM from fetch-debs.sh; no behaviour change.
 #
 # shellcheck shell=bash
+first_party_pinned_version() {
+  local pkg="$1" arch_key="${1}[${ARCH}]"
+  local -a values=()
+
+  mapfile -t values < <(awk -F= -v key="${arch_key}" '$1==key{print substr($0,length($1)+2)}' "${FIRST_PARTY_DEB_VERSIONS_FILE}")
+  (( ${#values[@]} <= 1 )) \
+    || die "duplicate architecture-specific Debian versions for first-party package ${pkg}/${ARCH}"
+  if (( ${#values[@]} == 1 )); then
+    [[ -n "${values[0]}" ]] \
+      || die "empty architecture-specific Debian version for first-party package ${pkg}/${ARCH}"
+    printf '%s\n' "${values[0]}"
+    return 0
+  fi
+
+  mapfile -t values < <(awk -F= -v key="${pkg}" '$1==key{print substr($0,length($1)+2)}' "${FIRST_PARTY_DEB_VERSIONS_FILE}")
+  (( ${#values[@]} <= 1 )) \
+    || die "duplicate generic Debian versions for first-party package ${pkg}"
+  if (( ${#values[@]} != 1 )) || [[ -z "${values[0]}" ]]; then
+    die "exact Debian version missing for first-party package ${pkg}/${ARCH}"
+  fi
+  printf '%s\n' "${values[0]}"
+}
+
 first_party_download_specs() {
   local pkg version
   [[ -f "${FIRST_PARTY_DEB_VERSIONS_FILE}" ]] \
     || die "exact first-party Debian version file missing: ${FIRST_PARTY_DEB_VERSIONS_FILE}"
   for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
-    version="$(awk -F= -v pkg="${pkg}" '$1==pkg{print substr($0,length($1)+2); exit}' "${FIRST_PARTY_DEB_VERSIONS_FILE}")"
-    [[ -n "${version}" ]] || die "exact Debian version missing for first-party package ${pkg}"
+    version="$(first_party_pinned_version "${pkg}")"
     printf '%s=%s\n' "${pkg}" "${version}"
   done
 }
