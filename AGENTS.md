@@ -568,6 +568,10 @@ Three consequences worth knowing before touching it:
 - **An empty expected version skips the version leg** (the URL-pinned RK3588
   userspace family has no version to assert), and `--arch-all-ok` is what admits
   `Architecture: all` packages such as `armbian-firmware`.
+- **First-party `Architecture: all` is package-specific.**
+  `fetch/firstparty.sh::FIRST_PARTY_ARCH_ALL_OK_PKGS` contains only
+  `ceralive-modem-support`; its staged validator adds `--arch-all-ok` only for
+  that exact package. Do not replace it with a fetch-family-wide allowance.
 - **`variant-contract.bats` lifts `assert_staged_packages_unique` out of `partition.sh` by
   TEXT** and must lift `deb_pkg_name` + `deb_control_field` out of `deb-lib.sh` in the
   same read — the "static test that reads by TEXT must read the whole set" rule again.
