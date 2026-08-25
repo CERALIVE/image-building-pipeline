@@ -512,6 +512,70 @@ the prebuilt Armbian vendor BSP.
 
 ---
 
+## 10. Vendor `cls_fw` extension — on-device load and tc behavior
+
+**Status:** Hardware-gated; static build/package contract is complete
+**Location:** `lib/build-kernel-extension.sh`,
+`manifests/kernel/vendor-cls-fw.env`,
+`docs/notes/sharing-kernel-capability.md` §2c
+
+**What is proven without hardware:** the exact 26.5.1 Armbian headers exist and
+carry `Module.symvers`; the pinned vendor `net/sched/cls_fw.c` passes MODPOST,
+builds as arm64 with exact `6.1.115-vendor-rk35xx` modversions vermagic, and is
+packaged at the standard updates path with `depmod` and `modules-load.d` wiring.
+The production image still installs the unchanged prebuilt vendor kernel.
+
+**What remains:** on a board booted from a built image, require all of:
+
+1. `modprobe cls_fw` exits 0 and `modinfo cls_fw` resolves the CeraLive updates path;
+2. `lsmod` shows `cls_fw` after boot (the modules-load drop-in took effect);
+3. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
+4. marked packets increment only the selected class counter.
+
+Capture the commands and counters under `test-results/uplink-sharing/`. This is
+the behavioral/HW gate; CI intentionally asserts package/config text only.
+
+---
+
+## 11. Uplink-sharing carrier — on-device apply, reload and teardown
+
+**Status:** Hardware-gated; static package/config/unit contract is complete
+**Location:** `mkosi/runtime/uplink-sharing/`,
+`mkosi/customize/postinst.d/networking.sh::setup_uplink_sharing_carrier`,
+`tests/uplink-sharing-carrier.bats`, `docs/notes/sharing-qdisc-matrix.md`
+
+**What is proven without hardware:** `nftables` and `conntrack-tools` reach the
+resolved runtime package set; the qdisc/netfilter availability matrix is measured
+and recorded for both kernel tracks; the image bakes no `ip_forward=1`;
+NetworkManager is pinned to `firewall-backend=nftables`; and
+`ceralive-share.service` satisfies the REQ-USB-020..026 carrier contract by text
+(two ordered validate-then-apply `ExecStart=` lines with no shell operator, an
+apply-only `ExecReload=`, an `ExecStop=` pointing at the committed teardown
+script, `After=nftables.service`, no `[Install]` section).
+
+**Why it is gated.** This repo's CI has no privileged network namespace and no
+VM, so nothing here may claim that a ruleset applies, that a reload is gap-free,
+or that a teardown restores anything. The netns half is CeraUI's required
+`unshare -rn` job; the on-device half is this item.
+
+**What remains:** on a board booted from a built image, with sharing enabled from
+the UI, require all of:
+
+1. `systemctl start ceralive-share.service` succeeds and `nft list table inet
+   ceralive_share` shows the rendered ruleset;
+2. a reweight delivered as `systemctl reload ceralive-share.service` leaves a
+   client download uninterrupted (no rule-gap), and `systemctl show -p ExecStop`
+   confirms no teardown ran;
+3. `systemctl stop ceralive-share.service` leaves no `ceralive_share` table, no
+   `ip rule` at priority 110, and no `ca00:` root qdisc on any interface;
+4. a hotspot client still reaches the internet after that stop — proving NM's
+   shared-mode NAT survived as the working floor and that `ip_forward` was not
+   zeroed out from under it.
+
+Capture the commands and outputs under `test-results/uplink-sharing/`.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
@@ -524,6 +588,8 @@ the prebuilt Armbian vendor BSP.
 | `manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and items 9 / 9b's gaps |
+| `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing + the out-of-tree `cls_fw` remediation (item 10) |
+| `docs/notes/sharing-qdisc-matrix.md` | qdisc/netfilter availability per kernel track, including the runtime cake→HTB fallback (item 11) |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
 

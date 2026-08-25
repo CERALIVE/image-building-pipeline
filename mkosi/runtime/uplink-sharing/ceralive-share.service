@@ -1,0 +1,111 @@
+[Unit]
+Description=CeraLive uplink-sharing carrier (validate then apply /run/ceralive/share.nft)
+Documentation=https://www.netfilter.org/projects/nftables/
+# UPLINK-SHARING CARRIER. CeraUI is the DECIDER and this unit is the CARRIER:
+# the backend's uplink-steering module renders a complete desired-state ruleset
+# to CERALIVE_SHARE_RULESET below and then drives this unit. This unit NEVER
+# generates ruleset content — it validates and applies whatever CeraUI already
+# wrote — so crash recovery, shutdown teardown and lifecycle belong to systemd
+# rather than to a resident daemon. Same shape as the already-shipped
+# ceralive-ingest-firewall.service, which this file is modelled on.
+#
+# THE CONTRACT IS CROSS-REPO AND BYTE-EXACT. CeraUI's
+# apps/backend/src/modules/network/uplink-steering/contracts.ts declares
+# SHARE_SERVICE / SHARE_RULESET_PATH / SHARE_TABLE, and a mismatch here is
+# SILENT on both sides: CeraUI would write a file nothing reads, or call a unit
+# that does not exist. The REQ-IDs below are the shared contract
+# (openspec/changes/uplink-sharing-balancer), cited verbatim so a future edit
+# has to argue with the requirement rather than with a comment.
+#
+#   REQ-USB-020  unit name "ceralive-share.service", ruleset path
+#                "/run/ceralive/share.nft", table "inet ceralive_share" — named
+#                constants, no inline literals in the unit or its scripts
+#   REQ-USB-021  Type=oneshot + RemainAfterExit=yes
+#   REQ-USB-022  TWO ordered ExecStart= lines — first `nft -c -f` (validate),
+#                second `nft -f` (apply). NO shell operators: systemd does NOT
+#                interpret `&&` between separate ExecStart= lines, and each line
+#                is its own exec — which IS the two-step validate-then-apply
+#                shape. Never collapse them into one line with a shell `&&`.
+#   REQ-USB-023  ExecReload= is the SAME two-step validate-then-apply,
+#                apply-only, NEVER a teardown
+#   REQ-USB-024  ExecStop= is a committed teardown SCRIPT, not an inline command
+#   REQ-USB-025  After=nftables.service
+#   REQ-USB-026  idempotent double-apply is byte-identical, and ip_forward is
+#                toggled ONLY on client-zone active<->inactive edges
+#
+# REQ-USB-025. nftables.service owns the system ruleset file; ordering after it
+# means a boot-time system ruleset can never land on top of ours. Not Requires=:
+# on this image nftables.service is not enabled, and After= on a unit outside the
+# transaction is a harmless no-op — the same ordering-only posture
+# ceralive-ingest-firewall.service takes. The matching After=nftables.service
+# drop-in for ceralive.service (the CeraUI backend, which is what issues the
+# start/reload/stop) is installed alongside this unit.
+After=nftables.service
+# Ordered after the ingest firewall so the two tables are established in a
+# deterministic order. They are disjoint by construction — `inet ceralive_share`
+# here versus `inet ceralive_ingest_fw` there — and neither unit ever flushes the
+# whole ruleset, so this is about readable ordering, not about correctness.
+After=ceralive-ingest-firewall.service
+# Tear the sharing layer down before the network goes away, and never leave our
+# table behind across a shutdown.
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+# REQ-USB-021. oneshot because there is no resident process: the unit applies a
+# file and exits. RemainAfterExit=yes because the unit must stay ACTIVE after
+# that exit — `systemctl reload` and `systemctl stop` are only meaningful on an
+# active unit, and reload is how every ordinary reweight is delivered.
+Type=oneshot
+RemainAfterExit=yes
+
+# REQ-USB-020. The constants, named once, here. Every Exec* line below and the
+# teardown script read them from this environment instead of repeating a literal.
+# These three strings are the cross-repo contract; changing one without changing
+# CeraUI's contracts.ts breaks sharing silently.
+Environment=CERALIVE_SHARE_RULESET=/run/ceralive/share.nft
+Environment=CERALIVE_SHARE_TABLE_FAMILY=inet
+Environment=CERALIVE_SHARE_TABLE_NAME=ceralive_share
+
+# REQ-USB-022. Two ordered execs, not one shell line. `nft -c -f` parses and
+# checks the ruleset against the running kernel WITHOUT committing it, so a
+# ruleset CeraUI got wrong is rejected before any rule exists; systemd runs the
+# second line only if the first exits 0, which is the whole validate-then-apply
+# guarantee. Writing `ExecStart=/usr/sbin/nft -c -f X && /usr/sbin/nft -f X`
+# would pass `&&` to nft as an argument — systemd is not a shell.
+#
+# REQ-USB-026. Neither line mutates the file or adds anything to it, so applying
+# the same ruleset twice is byte-identical by construction: idempotency is a
+# property of what CeraUI writes (an atomic table replace), and this unit
+# preserves it by being a pure carrier.
+ExecStart=/usr/sbin/nft -c -f ${CERALIVE_SHARE_RULESET}
+ExecStart=/usr/sbin/nft -f ${CERALIVE_SHARE_RULESET}
+
+# REQ-USB-023. Reload is the SAME two steps and is APPLY-ONLY. This is the path
+# every ordinary reweight takes — CeraUI rewrites the ruleset file and issues
+# `systemctl reload`, never `restart`. A restart would run ExecStop first, and
+# its teardown would open a rule-gap in which client traffic is unsteered and
+# unmasqueraded. There must be no teardown command anywhere in this block.
+ExecReload=/usr/sbin/nft -c -f ${CERALIVE_SHARE_RULESET}
+ExecReload=/usr/sbin/nft -f ${CERALIVE_SHARE_RULESET}
+
+# REQ-USB-024. A committed script, not an inline `nft delete table`, because
+# teardown is four separate things — scoped table delete, rule-band removal,
+# module-owned qdisc removal, and a CONDITIONAL ip_forward restore — and the
+# ip_forward half (REQ-USB-026) cannot be expressed as a command line at all: it
+# must restore a recorded prior value and do nothing when there is none.
+ExecStop=/usr/local/sbin/ceralive-share-teardown
+
+# NO [Install] SECTION, DELIBERATELY.
+#
+# The desired-state ruleset lives on /run, which is tmpfs — it does not survive a
+# reboot, and CeraUI re-renders and re-applies it during its own start-up. So
+# there is nothing for this unit to apply at boot, and an enabled unit would fail
+# on every boot trying to read a file that cannot exist yet.
+#
+# An [Install] section is not merely useless here, it is actively unsafe on this
+# image: /etc/machine-id ships holding `uninitialized`, so PID 1 runs `preset-all`
+# on the first boot of every freshly flashed board and Debian's default preset
+# verdict is `enable`. A unit carrying [Install] would therefore be enabled behind
+# our backs exactly once, on the boot nobody is watching. This unit is started,
+# reloaded and stopped by the CeraUI backend at RUNTIME and by nothing else.

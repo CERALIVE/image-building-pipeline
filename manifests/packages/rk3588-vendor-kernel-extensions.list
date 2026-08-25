@@ -1,0 +1,4 @@
+# Built at image-construction time, then installed after linux-image-vendor-rk35xx.
+# WHY: that prebuilt kernel omits NET_CLS_FW; ceralive-cls-fw supplies the exact-
+# vermagic firewall-mark tc classifier without shipping headers or changing D3.
+ceralive-cls-fw

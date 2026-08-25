@@ -24,6 +24,13 @@ armbian_branch: vendor
 kernel_packages:
   - linux-image-vendor-rk35xx
 
+# The stock vendor kernel omits CONFIG_NET_CLS_FW. This small, locally-built
+# package supplies the matching cls_fw.ko without replacing or rebuilding the
+# prebuilt kernel selected by D3. Its exact inputs live in
+# manifests/kernel/vendor-cls-fw.env; headers/build tooling never ship on-device.
+kernel_extension_packages:
+  - ceralive-cls-fw
+
 # RK3588 U-Boot is BOARD-SPECIFIC in the Armbian feed (linux-u-boot-<board>-vendor),
 # so the family declares none — each board names its own via the board manifest's
 # uboot_packages override (board arrays REPLACE family arrays on deep-merge). The
@@ -124,6 +131,10 @@ variants:
   # it is never invoked as the build system (see kernel_source below).
   edge:
     armbian_branch: edge
+
+    # cls_fw is tied by vermagic and package dependency to the stock vendor
+    # kernel; source-built tracks carry their own kernel capability closure.
+    kernel_extension_packages: []
 
     # The BUILT package name replaces the family's vendor kernel package for
     # resolver/orchestrator purposes. The build stage validates the actual
@@ -448,6 +459,7 @@ variants:
   # the production path still installs the prebuilt linux-image-vendor-rk35xx.
   vendor-patched:
     armbian_branch: vendor
+    kernel_extension_packages: []
 
     # Deliberately NOT `linux-image-vendor-rk35xx`. A name collision with the
     # stock package is the one failure that would produce a plausible image

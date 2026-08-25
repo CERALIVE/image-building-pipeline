@@ -34,6 +34,13 @@
       "minItems": 1,
       "uniqueItems": true
     },
+    "kernel_extension_packages": {
+      "description": "Locally built kernel-extension Debian packages installed after the selected prebuilt kernel. This is separate from kernel_packages: it never replaces the kernel and is empty on source-built variants whose kernel release differs.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+      "minItems": 0,
+      "uniqueItems": true
+    },
     "uboot_packages": {
       "description": "Bootloader / U-Boot blob package(s) (e.g. rkbin-rk3588). Maps to BOOTLOADER/rkbin entries. May be empty for families whose U-Boot is supplied raw outside apt (x86 declares [] — UEFI firmware lives in platform flash). Items, when present, must be valid Debian package names.",
       "type": "array",
@@ -125,6 +132,13 @@
           "type": "array",
           "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
           "minItems": 1,
+          "uniqueItems": true
+        },
+        "kernel_extension_packages": {
+          "description": "Kernel-extension package override. Source-built variants set [] so a module tied to the production vendor kernel release cannot leak onto another kernel track.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 0,
           "uniqueItems": true
         },
         "dtb_packages": {

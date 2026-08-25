@@ -457,8 +457,10 @@ read -r -a gst_runtime <<<"${GSTREAMER_RUNTIME_PACKAGES:-}"
 
 # Boot BSP (kernel/DTB/U-Boot/firmware) — only when explicitly requested.
 boot_bsp=()
+kernel_extensions=()
 if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
   read -r -a _k <<<"${KERNEL_PACKAGES:-}"
+  read -r -a kernel_extensions <<<"${KERNEL_EXTENSION_PACKAGES:-}"
   read -r -a _d <<<"${DTB_PACKAGES:-}"
   read -r -a _u <<<"${UBOOT_PACKAGES:-}"
   read -r -a _f <<<"${FIRMWARE_PACKAGES:-}"
@@ -519,6 +521,10 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   fi
   log "installing authenticated staged boot BSP (kernel/DTB/U-Boot/firmware): ${boot_bsp[*]}"
   mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
+  if (( ${#kernel_extensions[@]} > 0 )); then
+    log "installing kernel extension package(s) after the selected kernel: ${kernel_extensions[*]}"
+    mkosi-install -y --no-install-recommends "${kernel_extensions[@]}"
+  fi
   install_kernel_source_dtbs
   install_kernel_source_boot_artifacts
   prune_vendor_dtbs

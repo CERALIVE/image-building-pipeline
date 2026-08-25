@@ -776,9 +776,9 @@ YAML
   [[ "$output" == *"BSP set from rk3588.yaml (4 pkgs)"* ]]
   [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
   [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
-  # And the kernel-build stage never runs on the production path.
-  [[ "$output" != *"[2b/9]"* ]]
-  [[ "$output" != *"kernel from source"* ]]
+  # Production builds only the ABI-bound extension; they never rebuild the kernel.
+  [[ "$output" == *"[2b/9] building kernel extension(s) for the prebuilt vendor kernel"* ]]
+  [[ "$output" != *"building kernel from pinned source"* ]]
 }
 
 @test "orchestrate: x86 DRY_RUN is unaffected by the variant machinery" {

@@ -821,3 +821,52 @@ number does not move after a prune lands, measure the artifact.
 the same rule as §10: they record a real `du --apparent-size -sb` of a wet
 production build, and a computed figure written there would substitute an estimate
 for a measurement.
+
+---
+
+## 14. Uplink sharing — `conntrack-tools` (todo 12)
+
+### What changed
+
+`manifests/packages/shared.list` gains ONE package for the internet-sharing
+subsystem. `nftables` was already present (§7) and simply acquires a second
+consumer — `ceralive-share.service`, which applies the `inet ceralive_share`
+table CeraUI renders to `/run/ceralive/share.nft` — so it costs nothing new.
+
+- `conntrack-tools` — ships `/usr/sbin/conntrack`, the only way to delete
+  conntrack entries by MARK. On a hard-DOWN uplink the steering layer runs a
+  mark-scoped `conntrack -D` between the transition ruleset and the route-support
+  removal; `nft` removes rules, never conntrack state, so there is no substitute
+  already in the image.
+
+The other three deliverables of that work add no packages at all: the systemd
+carrier unit, its teardown script and the `ceralive.service` drop-in are text
+artifacts staged from `mkosi/runtime/uplink-sharing/`, and the
+`firewall-backend=nftables` pin is one line in a config file this repo already
+writes.
+
+### Size impact *(estimate)*
+
+Figures from bookworm `arm64` `Installed-Size` metadata — a paper estimate, the
+same basis as §7 and consistent with §1–§6.
+
+| Package | Approx installed size | Notes |
+|---|---|---|
+| `conntrack-tools` | ~0.6 MB | `conntrack`, `nfct`, `conntrackd` |
+| `libnetfilter-conntrack3` / `libnetfilter-cttimeout1` / `libnetfilter-cthelper0` / `libnetfilter-queue1` (deps) | ~0.3 MB | netfilter helper libs |
+| `libmnl0` / `libnfnetlink0` (deps) | **0 net** | already pulled by `nftables` (§7) |
+
+**Net expected delta: ~+0.9 MB.** Comfortably inside both the **1.5 GB absolute
+gate** and the **+50 MB relative regression gate** (§4). The sharing layer holds
+no persistent state: its ruleset, its shaper root record and its conntrack
+entries all live in kernel memory or on `/run`, so nothing it does grows the
+rootfs after install.
+
+### Re-evaluation / baseline note
+
+Fold this into the next wet-build baseline bump with a description naming it
+("Added conntrack-tools for mark-scoped uplink-sharing flush: +~0.9 MB"). As in
+§10 and §11, `manifests/size-budget.json` and `ci/size-baseline.<board>.json` are
+NOT edited here — they record a real `du --apparent-size -sb` of a wet production
+build, and writing a computed figure there would substitute an estimate for a
+measurement.

@@ -12,6 +12,9 @@
 #                               board with NO network gets one
 #   * setup_ingest_firewall     the WAN-side DROP that keeps the unauthenticated
 #                               RTMP/SRT ingest on the LAN
+#   * setup_uplink_sharing_carrier
+#                               the ceralive-share.service carrier + its teardown
+#                               script + the CeraUI After=nftables.service drop-in
 #
 # The ingest firewall lives here rather than beside setup_rtmp_gateway on purpose:
 # it is an interface-class policy (usb*/enx*/ww*/ppp*, the same classes the SRTLA
@@ -51,6 +54,31 @@ configure_networking() {
 [main]
 dns=systemd-resolved
 systemd-resolved=true
+# firewall-backend PIN (REQ-USB-082). NetworkManager runs its shared-mode NAT
+# (`ipv4.method shared`, which is what the hotspot and a shared-LAN ethernet port
+# use) through a firewall backend it picks ITSELF at start-up — iptables if it
+# finds an iptables binary, nftables otherwise. That choice is therefore a
+# property of the build and of PATH, not of this device's intent, and an
+# unpinned device can flip backends across an image update with nothing saying so.
+#
+# Pinned to `nftables` and NOT to `none`, deliberately. NM's own NAT is the
+# WORKING FLOOR for basic client internet: if CeraUI's per-uplink steering layer
+# (`table inet ceralive_share`, applied by ceralive-share.service) is down,
+# degraded, or not yet reconciled, hotspot clients still reach the network
+# through NM's masquerade. `none` would make our table load-bearing for plain
+# hotspot function — an availability regression with no upside. The two coexist
+# by construction: NM's rules and ours live in different tables, and ours are
+# additionally scoped by the CLIENT_FLOW conntrack bit plus a client-zone
+# `ip saddr` match, so neither can silently shadow the other.
+#
+# Pinning it to the SAME backend our own layer uses also removes the split-stack
+# case entirely — one `nft` view of the ruleset, which is what makes CeraUI's
+# read-only coexistence diagnostic able to see NM's NAT and our own at once and
+# tell them apart by table provenance. That diagnostic already treats an ABSENT
+# key as `firewall_backend_unpinned` (degraded-but-tolerated, the pre-pin fleet
+# state), so this line is what turns that reading green — do not remove it
+# expecting a neutral result.
+firewall-backend=nftables
 
 [device]
 wifi.scan-rand-mac-address=yes
@@ -263,4 +291,52 @@ setup_ingest_firewall() {
   install -m 0644 "${src}/ceralive-ingest-firewall.service" /etc/systemd/system/ceralive-ingest-firewall.service
 
   enable_service ceralive-ingest-firewall.service
+}
+
+# ---------------------------------------------------------------------------
+# Uplink-sharing CARRIER (REQ-USB-020..026): the systemd half of the internet-
+# sharing subsystem. CeraUI's uplink-steering module is the DECIDER — it renders
+# a complete desired-state nftables ruleset to /run/ceralive/share.nft — and this
+# unit is the CARRIER that validates and applies it. Same split, and the same
+# committed-artifact staging pattern, as setup_ingest_firewall above.
+#
+# THREE artifacts, and each one is load-bearing:
+#   1. ceralive-share.service          the oneshot carrier itself
+#   2. ceralive-share-teardown         its ExecStop backstop (REQ-USB-024 requires
+#                                      a committed SCRIPT, not an inline command)
+#   3. 40-nftables-ordering.conf       an additive After=nftables.service drop-in
+#                                      on ceralive.service — the unit that
+#                                      actually issues start/reload/stop, and so
+#                                      the one that can race a system ruleset load
+#
+# DELIBERATELY NOT ENABLED, unlike ceralive-ingest-firewall.service. The ruleset
+# lives on /run (tmpfs) and is authored by CeraUI at runtime, so at boot there is
+# nothing to apply and an enabled unit would fail on every boot reading a file
+# that cannot exist yet. The unit file carries no [Install] section at all, which
+# is what keeps systemd's first-boot `preset-all` (this image ships
+# /etc/machine-id holding `uninitialized`) from enabling it behind our backs.
+#
+# CERALIVE_RUNTIME_SRC must point at the runtime/ source dir. Test seams:
+#   UPLINK_SHARING_UNIT_DIR      — systemd unit dir      (default /etc/systemd/system)
+#   UPLINK_SHARING_SBIN_DIR      — teardown install dir  (default /usr/local/sbin)
+#   UPLINK_SHARING_DROPIN_DIR    — ceralive.service drop-in dir
+# ---------------------------------------------------------------------------
+setup_uplink_sharing_carrier() {
+  log "installing uplink-sharing carrier (ceralive-share.service — validate-then-apply /run/ceralive/share.nft; NOT enabled, CeraUI drives it at runtime)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/uplink-sharing"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/ceralive-share.service" ]] \
+    || die "uplink-sharing unit not found: ${src}/ceralive-share.service (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-share-teardown.sh" ]] \
+    || die "uplink-sharing teardown script not found: ${src}/ceralive-share-teardown.sh"
+  [[ -f "${src}/ceralive-nftables-ordering.dropin.conf" ]] \
+    || die "uplink-sharing nftables-ordering drop-in not found: ${src}/ceralive-nftables-ordering.dropin.conf"
+
+  local unit_dir="${UPLINK_SHARING_UNIT_DIR:-/etc/systemd/system}"
+  local sbin_dir="${UPLINK_SHARING_SBIN_DIR:-/usr/local/sbin}"
+  local dropin_dir="${UPLINK_SHARING_DROPIN_DIR:-/etc/systemd/system/ceralive.service.d}"
+
+  mkdir -p "${unit_dir}" "${sbin_dir}" "${dropin_dir}"
+  install -m 0644 "${src}/ceralive-share.service" "${unit_dir}/ceralive-share.service"
+  install -m 0755 "${src}/ceralive-share-teardown.sh" "${sbin_dir}/ceralive-share-teardown"
+  install -m 0644 "${src}/ceralive-nftables-ordering.dropin.conf" "${dropin_dir}/40-nftables-ordering.conf"
 }

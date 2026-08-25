@@ -279,6 +279,36 @@ CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 CONFIG_IPV6=y
 
+# --- Uplink sharing: steering + shaping (REQ-USB-080..084) -------------------
+# The second nftables consumer — ceralive-share.service applies the
+# `inet ceralive_share` table CeraUI renders to /run/ceralive/share.nft. These
+# are pinned here as well as declared in the fragment because the two manifests
+# make DIFFERENT claims: the fragment says what CeraLive ADDS to defconfig, this
+# says what the finished kernel must CARRY. A capability defconfig happens to
+# supply today can stop being visible tomorrow, and only this claim survives that.
+#
+# NET_CLS_FW is the `tc filter … fw classid` classifier. It is REQUIRED on this
+# (edge) track, where it is in-tree; the SHIPPED vendor kernel does not build it
+# and the production image supplies an ABI-matched out-of-tree module instead —
+# see docs/notes/sharing-kernel-capability.md §2c. This entry is about the edge
+# kernel only and must not be read as a statement about the vendor package.
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_CONNTRACK_MARK=y
+CONFIG_NF_CT_NETLINK=y
+CONFIG_NF_NAT=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_NUMGEN=y
+CONFIG_IP_MULTIPLE_TABLES=y
+CONFIG_NET_SCHED=y
+CONFIG_NET_SCH_PRIO=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_HTB=y
+CONFIG_NET_SCH_CAKE=y
+CONFIG_NET_CLS_FW=y
+
 # --- Storage / rootfs / RAUC ------------------------------------------------
 CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y

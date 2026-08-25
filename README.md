@@ -510,6 +510,72 @@ Verify on a device with `apt-mark showhold`, `apt-cache policy linux-image-vendo
 and `apt-get -s upgrade`. Full contract:
 [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
+## Vendor-kernel firewall-mark classifier
+
+The production image keeps the prebuilt
+`linux-image-vendor-rk35xx=26.5.1` selected by D3. Because that package omits
+`NET_CLS_FW`, the build emits and installs a separate `ceralive-cls-fw` package
+from the exact matching headers and pinned vendor source. It contains only the
+ABI-matched `cls_fw.ko`, boot-load configuration, and `depmod` hooks; headers and
+compiler tooling do not ship on the device. Static proof and the remaining
+hardware-gated load/traffic check are documented in
+[`docs/notes/sharing-kernel-capability.md`](docs/notes/sharing-kernel-capability.md).
+
+## Uplink Sharing — carrier, packages and network posture
+
+The device can share its bonded internet with hotspot and LAN clients. CeraUI is
+the decider: its backend renders a complete desired-state nftables ruleset to
+`/run/ceralive/share.nft` and drives `tc` for the egress shaper. This repo ships
+the parts that make those decisions land on a real board.
+
+`ceralive-share.service` is the **carrier**: a `Type=oneshot` +
+`RemainAfterExit=yes` unit whose two ordered `ExecStart=` lines validate the
+ruleset (`nft -c -f`) and then apply it (`nft -f`). They are two lines rather than
+one because systemd is not a shell — an `&&` between them would be passed to `nft`
+as an argument. `ExecReload=` repeats exactly those two steps, so an ordinary
+reweight is delivered as `systemctl reload` and never as a restart, which would
+run the teardown first and open a window with client traffic unsteered.
+`ExecStop=` runs a committed teardown script that deletes only the
+`inet ceralive_share` table, removes only our own `ip rule` band, drops only the
+shaper's reserved root qdisc, and restores `ip_forward` **only from a value it
+observed** — an unconditional zero there would cut every NetworkManager
+shared-mode client off the internet the moment sharing stopped.
+
+The unit is deliberately **not enabled** and carries no `[Install]` section: the
+ruleset lives on tmpfs and is authored at runtime, so there is nothing to apply at
+boot, and an `[Install]` section would be picked up by systemd's first-boot
+`preset-all` on every freshly flashed board.
+
+Two packages back it. `nftables` was already present for the LAN-ingest firewall
+and now has a second, independent consumer using a separate table.
+`conntrack-tools` is new and is not optional: a hard-DOWN uplink needs a
+**mark-scoped** `conntrack -D` to release the flows pinned to it, and `nft`
+removes rules, never conntrack state.
+
+NetworkManager is pinned to `firewall-backend=nftables` — not `none`, so NM's own
+shared-mode NAT stays as a working floor beneath the per-uplink masquerade even
+when the steering layer is degraded.
+
+`ip_forward` is never baked into the image. It is toggled at runtime, only on
+client-zone transitions. That is a deliberate posture: the image already runs a
+loose reverse-path filter (`rp_filter = 2`) so multi-WAN modem return traffic is
+not dropped, and loose RPF on a box that *can* forward is a different security
+posture from loose RPF on one that never does — so forwarding stays off unless an
+operator turns sharing on.
+
+Which queueing disciplines and netfilter objects each kernel track actually
+carries is measured, not assumed:
+[`docs/notes/sharing-qdisc-matrix.md`](docs/notes/sharing-qdisc-matrix.md). The
+shipped vendor kernel has `sch_cake`, `sch_htb`, `sch_fq_codel` and `sch_prio` as
+modules; it does not build `NET_CLS_FW`, which is why the image carries the
+separate `ceralive-cls-fw` package described above. The opt-in `edge` fragment
+declares the same closure in-tree.
+
+Everything CI asserts here is static — package presence, config text, kernel
+symbol declarations and unit-file content — because this repo's CI has no
+privileged network namespace. On-device apply/reload/teardown is a labelled
+hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
+
 ## OTA-During-Stream Guard
 
 `/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)
