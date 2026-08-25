@@ -931,6 +931,7 @@ main() {
   setup_tls_proxy              # task 15: nginx TLS front on 443 -> 127.0.0.1:80 (port 80 kept; SC3)
   setup_rtmp_gateway           # todo 14: pinned MediaMTX LAN ingest relay (RTMP :1935 + SRT :4001 publish/live -> loopback for cerastream)
   setup_ingest_firewall        # todo 14: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
+  setup_uplink_sharing_carrier # REQ-USB-020..026: ceralive-share.service carrier + teardown script + CeraUI After=nftables drop-in (NOT enabled; CeraUI drives it)
   freeze_boot_packages         # kernel freeze: apt-mark hold + name+version pin on kernel/DTB/U-Boot/firmware — LAST, after every apt transaction in this layer
   # First-party apps + their staging tree are handled by the APPLICATION layer
   # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.

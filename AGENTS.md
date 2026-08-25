@@ -55,6 +55,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | **Kernel-build-from-source internals** | `lib/build-kernel.sh` is a thin STAGE entry; the bodies live in `lib/kernel/{config,checkout,builder,package}.sh` — see the "build-kernel.sh and assemble-disk.sh are ENTRIES plus concern modules" KEY FACT below |
 | **Production vendor `cls_fw` extension** | `lib/build-kernel-extension.sh` + `manifests/kernel/vendor-cls-fw.env` + `tests/vendor-cls-fw-contract.bats`; evidence in `docs/notes/sharing-kernel-capability.md` |
+| **Uplink-sharing carrier (`ceralive-share.service`), its packages and its NM posture** | `mkosi/runtime/uplink-sharing/` + `mkosi/customize/postinst.d/networking.sh::setup_uplink_sharing_carrier` + `tests/uplink-sharing-carrier.bats`; per-track kernel-object evidence in `docs/notes/sharing-qdisc-matrix.md` |
 | **RK3588 disk-assembly internals** | `lib/assemble-disk.sh` is a thin SEQUENCER entry; the bodies live in `lib/disk/{repart,slot,boot,gap,verify}.sh` — same KEY FACT |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
 | **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
@@ -126,7 +127,7 @@ that layer.
 
 | Module | Holds |
 |---|---|
-| `postinst.d/networking.sh` | `configure_networking`, `install_interface_naming` + `link_path_match`, `setup_provisioning`, `setup_ingest_firewall` |
+| `postinst.d/networking.sh` | `configure_networking`, `install_interface_naming` + `link_path_match`, `setup_provisioning`, `setup_ingest_firewall`, `setup_uplink_sharing_carrier` |
 | `postinst.d/hostname.sh` | `setup_hostname_service` — the Avahi-arbitrated `<hostname>.local` claim |
 | `postinst.d/services.sh` | `ensure_group`/`enable_service`/`disable_service`/`mask_service`, `configure_ntp`, `install_console_font_service`, `configure_services`, `suppress_unusable_boot_units`, `setup_boot_healthcheck`, `setup_avahi_restart`, `setup_cerastream_ordering`, `setup_rtmp_gateway` |
 | `postinst.d/hardware.sh` | `setup_typec_source_role`, `setup_fan_curve`, `setup_fan_kickstart`, `setup_led_status` |
@@ -1165,6 +1166,95 @@ ships no headers/compiler. `edge` and `vendor-patched` explicitly clear
 contracts only; actual `modprobe` plus `tc filter … fw classid` behavior remains
 the hardware gate in `docs/DEFERRED.md` item 10. Full evidence:
 `docs/notes/sharing-kernel-capability.md` §2c.
+
+**The uplink-sharing CARRIER is an image artifact, but it is deliberately NOT
+enabled — and the reason is the one that also forbids an `[Install]` section**
+[EXISTS — static contract complete, on-device behaviour hardware-gated]
+
+CeraUI owns the DECISION (its `uplink-steering` module renders a complete
+desired-state nftables ruleset, its `uplink-shaper` module drives `tc`); this
+repo owns the CARRIER, the packages and the posture those decisions need in order
+to take effect on a real board. Four pieces ship together, and the whole thing is
+pinned by `tests/uplink-sharing-carrier.bats` (32 static cases):
+
+| Piece | Where |
+|---|---|
+| `ceralive-share.service` + its `ExecStop` teardown script + an `After=nftables.service` drop-in for `ceralive.service` | `mkosi/runtime/uplink-sharing/`, staged by `postinst.d/networking.sh::setup_uplink_sharing_carrier` |
+| `nftables` (second consumer) + `conntrack-tools` (new) | `manifests/packages/shared.list` |
+| `firewall-backend=nftables` | the `[main]` block `configure_networking` writes to `/etc/NetworkManager/conf.d/ceralive.conf` |
+| the steering/shaping symbol closure on the **edge** track only | `manifests/kernel/rk3588-edge.fragment` + `required-symbols.list` |
+
+Five things are easy to get wrong here, and each is a real failure rather than a
+style preference:
+
+- **The unit carries NO `[Install]` section and is never `enable_service`d.** The
+  desired-state ruleset lives at `/run/ceralive/share.nft`, which is tmpfs — at
+  boot there is nothing to apply, so an enabled unit fails on every boot reading
+  a file that cannot exist yet. Worse, `/etc/machine-id` ships holding
+  `uninitialized`, so PID 1 runs `preset-all` on the first boot of every freshly
+  flashed board and Debian's default verdict is `enable`: a unit carrying
+  `[Install]` would be enabled behind our backs on the one boot nobody watches.
+  This is the same first-boot preset mechanism `suppress_unusable_boot_units`
+  documents. CeraUI starts, reloads and stops it at RUNTIME and nothing else does.
+- **`ExecStart=` is TWO lines, and `ExecReload=` is the same two, apply-only.**
+  systemd is not a shell — `ExecStart=/usr/sbin/nft -c -f X && /usr/sbin/nft -f X`
+  passes `&&` to `nft` as an argument. Two lines IS the chain, and the order is
+  the guarantee: `-c` checks against the running kernel without committing, and
+  systemd runs line 2 only if line 1 exited 0. Reload must never tear anything
+  down, because a reweight through `restart` would run `ExecStop` first and open
+  a window in which client traffic is unsteered and unmasqueraded.
+- **The teardown is a committed SCRIPT because of `ip_forward`, not because of
+  the table.** An inline `nft delete table` cannot express the one rule that
+  matters: forwarding is restored ONLY from a value the script observed, and
+  nothing is written when there is no record. An unconditional `ip_forward=0` on
+  stop would cut every NetworkManager shared-mode client (hotspot, shared-LAN
+  ethernet) off the internet the moment sharing stopped, and NM would not put it
+  back because from its point of view nothing changed. The script is also the
+  reason `set -e` is absent (device-daemon profile): under `-e`, "the table was
+  already deleted" would leave the qdiscs and the rule band behind — exactly the
+  state it exists to prevent.
+- **`firewall-backend=nftables`, never `none`.** NM's shared-mode NAT is the
+  WORKING FLOOR for basic client internet when our steering layer is down or not
+  yet reconciled; `none` would make our table load-bearing for plain hotspot
+  function. The two coexist because they live in different tables and ours is
+  additionally scoped by a conntrack-provenance bit plus a client-zone `ip saddr`
+  match. CeraUI's read-only coexistence diagnostic already treats an ABSENT key
+  as `firewall_backend_unpinned` — degraded-but-tolerated, the pre-pin fleet
+  state — so removing this line does not give a neutral result, it gives a
+  degraded one.
+- **`ip_forward` is NOT baked, and that is a stated posture shift.** The image
+  already ships a LOOSE reverse-path filter (`rp_filter = 2`) because strict RPF
+  drops modem return traffic under multi-WAN source-policy routing. Loose RPF on
+  a box that never forwards is one thing; loose RPF on a box that CAN forward is
+  a different security posture. Forwarding is therefore runtime-managed and
+  edge-triggered by CeraUI, and a bats case fails the build if any manifest,
+  customize hook or runtime artifact ever bakes `ip_forward=1`.
+
+**`conntrack-tools` is not optional and `nft` cannot substitute for it.** On a
+hard-DOWN uplink the steering layer drains that uplink's flows in a fixed order —
+transition ruleset → mark-scoped `conntrack -D` → route-support removal → final
+ruleset. `nft` removes RULES, never conntrack STATE, so without the flush every
+established client flow stays pinned by its saved ct mark to an uplink that is
+already gone; and without the `--mark`/`--mask` scoping the same command would
+tear down the live SRTLA/engine flows too.
+
+**The edge-fragment additions are the OPT-IN track only, and the vendor kernel
+receives no change.** `docs/notes/sharing-qdisc-matrix.md` is the measured record
+for both tracks, re-read this session from the same `.deb` whose SHA-256 matches
+`manifests/bsp-baseline.json`. Its headline result is worth stating here because
+the opposite was expected: **`sch_cake` IS present on the shipped vendor kernel**
+(`=m`, `sch_cake.ko`), alongside `sch_htb`, `sch_fq_codel` and `sch_prio`. That
+does NOT retire CeraUI's runtime cake→HTB fallback — the engine cannot assume a
+kernel it did not build, `sch_cake` is a module and so subject to autoload, and
+nothing in the image forces cake. `NET_CLS_FW` remains the one absent row, which
+is what `ceralive-cls-fw` (above) exists for. On the edge track the whole closure
+is declared `=y`, which is the only safe value under an exact-match gate and
+matches the fragment's existing `CONFIG_NF_TABLES=y` reasoning.
+
+Behavioural proof is explicitly NOT claimed here: this repo's CI has no
+privileged netns and no VM, so every case is config text, package presence,
+kernel symbol declarations and unit-file content. The netns half is CeraUI's
+required `unshare -rn` job; the on-device half is `docs/DEFERRED.md` item 11.
 
 **Kernel build from source — OPT-IN family variants, production path byte-identical** [PARTIAL]
 

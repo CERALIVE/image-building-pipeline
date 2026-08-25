@@ -48,6 +48,7 @@ tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM6
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
 tests/kernel-build-resilience.bats	bats	unit	default-bats	pinned-fetch retry, pin-mismatch never retried, memory-derived make -j
 tests/vendor-cls-fw-contract.bats	bats	unit	default-bats	exact vendor headers/source pins, external cls_fw build, package staging and boot-load contract
+tests/uplink-sharing-carrier.bats	bats	unit	default-bats	sharing packages, qdisc matrix, ip_forward posture, ceralive-share.service REQ-USB-020..026 and the firewall-backend pin
 tests/dtb-prune-contract.bats	bats	unit	default-bats	board-only DTB trim in both locations on both kernel paths
 tests/x86-raucb-bundle.bats	bats	integration	default-bats	signed x86 RAUC bundle assembly
 tests/packaging-hygiene.bats	bats	unit	default-bats	absence guards for removed seeds, wants and legacy references

@@ -430,6 +430,88 @@ CONFIG_NF_TABLES_INET=y
 # does not have. Declare the value kconfig can actually give, exactly as with
 # CONFIG_TYPEC_FUSB302 below.
 
+# --- Networking: uplink sharing — steering + shaping (REQ-USB-080..084) -----
+# A SECOND nftables consumer, entirely disjoint from the ingest firewall above.
+# ceralive-share.service applies `table inet ceralive_share`, which CeraUI's
+# uplink-steering module renders to /run/ceralive/share.nft: client-zone traffic
+# is ct-marked, steered onto a per-uplink `ip rule` band, and masqueraded per
+# uplink; the uplink-shaper module then classifies that marked traffic into the
+# rate-capped band of a two-band root qdisc while local/SRT traffic rides the
+# uncapped one.
+#
+# Everything below was UNDECLARED before this block, and on this repo's own
+# evidence that is not the same as "off but harmless": `merge_config.sh -m`
+# reports only REDEFINED values, so a leaf whose menuconfig parent is undeclared
+# is dropped by `make olddefconfig` in complete silence — the RTW89 /
+# DMABUF_HEAPS / TYPEC_FUSB302 / NF_TABLES class, four times over.
+#
+# =y rather than =m throughout, for the same reason CONFIG_NF_TABLES is =y above:
+# on a track this repo BUILDS there is no reason to reintroduce a load-ordering
+# question it can simply not have. It is also the only safe value under an EXACT
+# -match gate — a =m declaration is at the mercy of any future `select` that
+# forces =y, while a =y whose every dependency is declared =y in this same
+# fragment is always satisfiable. The SHIPPED vendor 6.1 kernel carries this
+# whole closure as MODULES instead; that difference is measured and recorded in
+# docs/notes/sharing-qdisc-matrix.md and is not a defect on either track.
+#
+# NOT DECLARED, deliberately — CONFIG_NET_CLS, CONFIG_NF_DEFRAG_IPV4,
+# CONFIG_NF_DEFRAG_IPV6, CONFIG_NF_NAT_MASQUERADE and CONFIG_NETFILTER_NETLINK
+# are promptless symbols `select`ed by the ones below, so they need no entry of
+# their own — the same select/leaf rule as RTW89_CORE and NF_TABLES_IPV4.
+
+# Conntrack: the provenance the steering scope invariant is built on. The
+# CLIENT_FLOW bit is a ct mark set ONLY in client-zone prerouting, and every
+# masquerade rule matches it — so NF_CONNTRACK_MARK is what makes "this packet
+# entered from a client zone" survive into postrouting. NETFILTER_ADVANCED is
+# declared because NF_CONNTRACK_MARK depends on it; it is already =y on the
+# board's own /proc/config.gz (see the nftables block above), so this line
+# records the parent rather than changing anything.
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_CONNTRACK_MARK=y
+# The MARK-SCOPED hard-down flush. On a hard-DOWN uplink the steering layer runs
+# `conntrack -D --mark <m> --mask <mask>` between the transition ruleset and the
+# route-support removal; that command speaks ctnetlink, which is this symbol.
+# Without it the drain silently no-ops and every established client flow stays
+# pinned to an uplink that is already gone.
+CONFIG_NF_CT_NETLINK=y
+# NAT: NFT_NAT and NFT_MASQ both `depends on NF_NAT`, so the parent gets its own
+# line — an undeclared tristate parent is exactly how the leaves disappear.
+CONFIG_NF_NAT=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+# Weighted selection. The ruleset picks a per-uplink bucket with a
+# `numgen random mod <N> : verdict` map; without this the whole balancer degrades
+# to a single uplink.
+CONFIG_NFT_NUMGEN=y
+# The per-uplink `ip rule` band the marks select into. The image already installs
+# priority-100 source rules for modem/wifi uplinks, and the steering band sits
+# strictly after them.
+CONFIG_IP_MULTIPLE_TABLES=y
+
+# Traffic control. NET_SCHED is a `menuconfig bool` and every qdisc and
+# classifier below lives inside its `if NET_SCHED` block — the same parent shape
+# that lost RTW89 its leaves.
+CONFIG_NET_SCHED=y
+# Root hierarchy: a 2-band `prio` whose band 0 (local + SRT) is UNCAPPED with an
+# fq_codel child, and whose band 1 (client traffic) carries the only rate ceiling.
+CONFIG_NET_SCH_PRIO=y
+CONFIG_NET_SCH_FQ_CODEL=y
+# The client band's cap. CAKE is preferred; HTB is the fallback the shaper picks
+# at RUNTIME when cake is unavailable, so BOTH are declared. Declaring cake here
+# does NOT retire that fallback — the engine cannot assume a kernel it did not
+# build (rationale in docs/notes/sharing-qdisc-matrix.md §1a).
+CONFIG_NET_SCH_HTB=y
+CONFIG_NET_SCH_CAKE=y
+# The bridge between the two halves: `tc filter … handle <fwmark> fw classid`
+# maps the skb mark nftables set onto the client band. This is the symbol the
+# SHIPPED vendor kernel does not build at all, which is why the production image
+# carries the separately built ceralive-cls-fw package instead
+# (docs/notes/sharing-kernel-capability.md §2c). On this track it is in-tree, so
+# it is simply declared.
+CONFIG_NET_CLS_FW=y
+
 # --- Type-C / USB role switching -------------------------------------------
 # The FUSB302/TCPM connector mkosi/runtime/ceralive-typec-source.sh pins to
 # the source role. Without TYPEC_TCPM + TYPEC_FUSB302 there is no

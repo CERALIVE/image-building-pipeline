@@ -228,14 +228,38 @@ kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service
 # staged and installed by the App layer. Do not add a Debian `libsrt1.5-*` flavor
 # here: GStreamer and cerastream must resolve one forked shared object. The LAN SRT
 # ingest listener is served by MediaMTX, so no srt-tools package is needed.
-nftables                 # ships /usr/sbin/nft — loads the LAN-ingest ingress firewall
-                         # (ceralive-ingest-firewall.service): DROP inbound :1935 (RTMP) +
-                         # :4001 (SRT) on modem/WWAN/ppp uplink classes so the
-                         # UNAUTHENTICATED v1 MediaMTX ingest gateway is reachable from
-                         # LAN/hotspot ONLY, never from a WAN uplink (DEFERRED.md items 7 & 8).
+nftables                 # ships /usr/sbin/nft — TWO consumers, one binary.
+                         #  (1) ceralive-ingest-firewall.service: DROP inbound :1935 (RTMP) +
+                         #      :4001 (SRT) on modem/WWAN/ppp uplink classes so the
+                         #      UNAUTHENTICATED v1 MediaMTX ingest gateway is reachable from
+                         #      LAN/hotspot ONLY, never from a WAN uplink (DEFERRED.md items
+                         #      7 & 8).
+                         #  (2) ceralive-share.service (REQ-USB-020..026): the uplink-sharing
+                         #      CARRIER. CeraUI renders the desired-state steering/NAT ruleset
+                         #      to /run/ceralive/share.nft and the unit validates it with
+                         #      `nft -c -f` and applies it with `nft -f`. That table is `inet
+                         #      ceralive_share` and is disjoint from the ingest firewall's
+                         #      `inet ceralive_ingest_fw` — one binary, two independent tables.
+                         # NetworkManager is ALSO pinned to firewall-backend=nftables
+                         # (postinst.d/networking.sh), so NM's shared-mode NAT and our
+                         # per-uplink masquerade coexist on one backend rather than racing an
+                         # iptables shim.
                          # libnftables1 is already pulled by the base (NetworkManager dep), so
                          # the net add is just the nft binary + libmnl/libnftnl (~1.5 MB — see
                          # size-notes.md §7).
+conntrack-tools          # ships /usr/sbin/conntrack — the ONLY way to delete conntrack entries
+                         # by MARK. On a hard-DOWN uplink transition the steering layer
+                         # (CeraUI modules/network/uplink-steering) drains that uplink's flows
+                         # in a fixed order: transition ruleset -> MARK-SCOPED `conntrack -D`
+                         # -> route-support removal -> final ruleset. Without the flush, every
+                         # established client flow stays pinned by its saved ct mark to an
+                         # uplink that is already gone and blackholes until it times out;
+                         # WITHOUT the `--mark`/`--mask` scoping the same command would tear
+                         # down the live SRTLA/engine flows too, which is exactly what the
+                         # steering scope invariant forbids. `nft flush` cannot do this — it
+                         # removes rules, never conntrack state. Needs CONFIG_NF_CT_NETLINK
+                         # (present as a module on the shipped vendor kernel — see
+                         # docs/notes/sharing-qdisc-matrix.md).
 rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
 rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
                          # SPLIT the daemon out of `rauc` (binary-only); the runtime

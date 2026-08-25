@@ -75,7 +75,8 @@ readonly CONSOLIDATED_FUNCS=(
   configure_networking configure_services setup_hostname_service
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
   setup_provisioning setup_rtmp_gateway
-  setup_ingest_firewall setup_typec_source_role setup_fan_curve
+  setup_ingest_firewall setup_uplink_sharing_carrier
+  setup_typec_source_role setup_fan_curve
   setup_fan_kickstart setup_led_status setup_hdmirx_edid freeze_boot_packages
 )
 
