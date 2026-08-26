@@ -1,5 +1,5 @@
 # CeraLive component version registry — manually maintained; pipeline reads with graceful fallback
-# Keys under image-repos match REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs") in fetch-debs.sh
+# Keys under image-repos match REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack") in fetch-debs.sh
 # exactly. Each key resolves a published device package from apt.ceralive.tv.
 # pin: update when cutting a release.
 # cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
@@ -55,6 +55,15 @@ srtla-send-rs:
   repo: https://github.com/CERALIVE/srtla-send-rs
   kind: first-party
   pin: v3.2.0
+  channel: stable
+
+# Provenance-only: the companion package version is selected exclusively by
+# manifests/first-party-deb-versions.txt, while this pin feeds the fetch banner.
+modem-stack:
+  path: modem-stack
+  repo: https://github.com/CERALIVE/modem-stack
+  kind: first-party
+  pin: v1.3.0
   channel: stable
 
 # ── Remaining first-party repos ───────────────────────────────────────────────

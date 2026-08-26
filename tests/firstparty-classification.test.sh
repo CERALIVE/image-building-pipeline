@@ -37,6 +37,8 @@ mapfile -t fetch_pkgs < <(
 )
 (( ${#fetch_pkgs[@]} > 0 )) \
   || fail "could not read FIRST_PARTY_APT_PKGS from ${FETCH}"
+(( ${#fetch_pkgs[@]} == 15 )) \
+  || fail "expected exactly 15 fetched first-party packages, got ${#fetch_pkgs[@]}"
 
 # Extract the partitioner's exact firstparty_names allowlist literal.
 firstparty_names="$(awk -F'"' '/local firstparty_names=/ { print $2; exit }' "${ORCH}")"

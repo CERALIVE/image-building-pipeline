@@ -17,6 +17,18 @@
 # Bodies moved VERBATIM from fetch-debs.sh; no behaviour change.
 #
 # shellcheck shell=bash
+FIRST_PARTY_ARCH_ALL_OK_PKGS=(
+  "ceralive-modem-support"
+)
+
+first_party_arch_all_ok() {
+  local expected="$1" pkg
+  for pkg in "${FIRST_PARTY_ARCH_ALL_OK_PKGS[@]}"; do
+    [[ "${pkg}" == "${expected}" ]] && return 0
+  done
+  return 1
+}
+
 first_party_pinned_version() {
   local pkg="$1" arch_key="${1}[${ARCH}]"
   local -a values=()
@@ -135,6 +147,39 @@ _fetch_first_party_curl() {
   _run_bounded "${jobs}" _fetch_first_party_curl_one "${download_specs[@]}" \
     || die "first-party fetch failed (curl path): one or more packages did not download"
 }
+
+validate_first_party_staged_debs() {
+  local debs="$1"
+  shift
+  local -a download_specs=("$@") staged=() identity_opts=()
+  local pkg expected spec expected_version actual_pkg actual_version actual_arch staged_total
+
+  shopt -s nullglob
+  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
+    staged+=("${debs}/${pkg}"_*.deb)
+  done
+  shopt -u nullglob
+  (( ${#staged[@]} == ${#FIRST_PARTY_APT_PKGS[@]} )) \
+    || die "first-party fetch staged ${#staged[@]} .debs (expected exactly ${#FIRST_PARTY_APT_PKGS[@]})"
+
+  staged_total="${#staged[@]}"
+  for spec in "${download_specs[@]}"; do
+    expected="${spec%%=*}"; expected_version="${spec#*=}"
+    mapfile -t staged < <(find "${debs}" -maxdepth 1 -type f -name "${expected}_*.deb" -print)
+    (( ${#staged[@]} == 1 )) || die "expected exactly one staged ${expected} .deb"
+
+    identity_opts=()
+    if first_party_arch_all_ok "${expected}"; then
+      identity_opts+=(--arch-all-ok)
+    fi
+    assert_deb_identity "${staged[0]}" "${expected}" "${expected_version}" "${ARCH}" "${identity_opts[@]}" \
+      || { actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
+           die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"; }
+  done
+
+  log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
+}
+
 # ---------------------------------------------------------------------------
 # fetch_first_party — pull the first-party device .debs from apt.ceralive.tv via a
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
@@ -312,24 +357,5 @@ EOF
     fi
   fi
 
-  local pkg
-  local -a staged=()
-  shopt -s nullglob
-  for pkg in "${FIRST_PARTY_APT_PKGS[@]}"; do
-    staged+=("${debs}/${pkg}"_*.deb)
-  done
-  shopt -u nullglob
-  (( ${#staged[@]} == ${#FIRST_PARTY_APT_PKGS[@]} )) \
-    || die "first-party fetch staged ${#staged[@]} .debs (expected exactly ${#FIRST_PARTY_APT_PKGS[@]})"
-  local expected spec expected_version actual_pkg actual_version actual_arch staged_total
-  staged_total="${#staged[@]}"
-  for spec in "${download_specs[@]}"; do
-    expected="${spec%%=*}"; expected_version="${spec#*=}"
-    mapfile -t staged < <(find "${debs}" -maxdepth 1 -type f -name "${expected}_*.deb" -print)
-    (( ${#staged[@]} == 1 )) || die "expected exactly one staged ${expected} .deb"
-    assert_deb_identity "${staged[0]}" "${expected}" "${expected_version}" "${ARCH}" \
-      || { actual_pkg="${DEB_ACTUAL_PKG}"; actual_version="${DEB_ACTUAL_VERSION}"; actual_arch="${DEB_ACTUAL_ARCH}"
-           die "staged package identity mismatch for ${expected}: got ${actual_pkg}=${actual_version}/${actual_arch}"; }
-  done
-  log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
+  validate_first_party_staged_debs "${debs}" "${download_specs[@]}"
 }

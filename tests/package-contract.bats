@@ -691,6 +691,84 @@ PINS
   [ "$output" -eq 0 ]
 }
 
+@test "first-party validation: ceralive-modem-support Architecture: all accepts one artifact for arm64 and amd64" {
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb is required to build the fixture"
+  local root="$BATS_TEST_TMPDIR/arch-all-allowed"
+  local debs="$root/debs"
+  mkdir -p "$root/pkg/DEBIAN" "$debs"
+  cat >"$root/pkg/DEBIAN/control" <<'CONTROL'
+Package: ceralive-modem-support
+Version: 1.0.0
+Architecture: all
+Maintainer: Test <test@example.invalid>
+Description: fixture
+CONTROL
+  dpkg-deb --build "$root/pkg" "$debs/ceralive-modem-support_1.0.0_all.deb" >/dev/null
+  local deb="$debs/ceralive-modem-support_1.0.0_all.deb" digest
+  digest="$(sha256sum "$deb" | awk '{print $1}')"
+
+  run env ARCH=arm64 bash -c '
+    source "$1"
+    FIRST_PARTY_APT_PKGS=(ceralive-modem-support)
+    validate_first_party_staged_debs "$2" ceralive-modem-support=1.0.0
+  ' bash "$FETCH_DEBS" "$debs"
+  [ "$status" -eq 0 ]
+
+  run env ARCH=amd64 bash -c '
+    source "$1"
+    FIRST_PARTY_APT_PKGS=(ceralive-modem-support)
+    validate_first_party_staged_debs "$2" ceralive-modem-support=1.0.0
+  ' bash "$FETCH_DEBS" "$debs"
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$deb" | awk '{print $1}')" = "$digest" ]
+}
+
+@test "first-party validation: arch-dependent package still rejects an architecture mismatch" {
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb is required to build the fixture"
+  local root="$BATS_TEST_TMPDIR/arch-dependent"
+  local debs="$root/debs"
+  mkdir -p "$root/pkg/DEBIAN" "$debs"
+  cat >"$root/pkg/DEBIAN/control" <<'CONTROL'
+Package: cerastream
+Version: 1.0.0
+Architecture: arm64
+Maintainer: Test <test@example.invalid>
+Description: fixture
+CONTROL
+  dpkg-deb --build "$root/pkg" "$debs/cerastream_1.0.0_arm64.deb" >/dev/null
+
+  run env ARCH=amd64 bash -c '
+    source "$1"
+    FIRST_PARTY_APT_PKGS=(cerastream)
+    validate_first_party_staged_debs "$2" cerastream=1.0.0
+  ' bash "$FETCH_DEBS" "$debs"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"staged package identity mismatch for cerastream"* ]]
+}
+
+@test "first-party validation: an unallowlisted Architecture: all package is rejected" {
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb is required to build the fixture"
+  local root="$BATS_TEST_TMPDIR/arch-all-rejected"
+  local debs="$root/debs"
+  mkdir -p "$root/pkg/DEBIAN" "$debs"
+  cat >"$root/pkg/DEBIAN/control" <<'CONTROL'
+Package: unrelated-all-package
+Version: 1.0.0
+Architecture: all
+Maintainer: Test <test@example.invalid>
+Description: fixture
+CONTROL
+  dpkg-deb --build "$root/pkg" "$debs/unrelated-all-package_1.0.0_all.deb" >/dev/null
+
+  run env ARCH=amd64 bash -c '
+    source "$1"
+    FIRST_PARTY_APT_PKGS=(unrelated-all-package)
+    validate_first_party_staged_debs "$2" unrelated-all-package=1.0.0
+  ' bash "$FETCH_DEBS" "$debs"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"staged package identity mismatch for unrelated-all-package"* ]]
+}
+
 # ===========================================================================
 # 22. apt.ceralive.tv repo correctness (T2.6) — the customize module
 #     apt-ceralive-repo.sh writes the device's own apt source (deb822 with a
