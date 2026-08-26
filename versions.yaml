@@ -36,11 +36,11 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.8.4
-  # Release provenance: tag v2026.8.4 resolves to commit 2e0fb3be084391b11182301bfdeeaed4d5343f6b.
-  # Device deb: ceralive-device 2026.8.4-20260824T150955.2e0fb3b (amd64) /
-  #   -20260824T150956.2e0fb3b (arm64).
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.4
+  pin: v2026.8.5
+  # Release provenance: tag v2026.8.5 resolves to commit f08f7efea9d6b113b34f1e1609d9e8c88c29f7e4.
+  # Device deb: ceralive-device 2026.8.5-20260826T062956.f08f7ef (amd64) /
+  #   2026.8.5-20260826T063003.f08f7ef (arm64).
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.5
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
@@ -54,7 +54,7 @@ srtla-send-rs:
   path: srtla-send-rs
   repo: https://github.com/CERALIVE/srtla-send-rs
   kind: first-party
-  pin: v3.2.0
+  pin: v3.3.0
   channel: stable
 
 # Provenance-only: the companion package version is selected exclusively by

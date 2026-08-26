@@ -307,12 +307,12 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     version="$(awk -F= -v p="$pkg" '$1==p{print $2; exit}' "$pins")"
     [ -n "$version" ] || { echo "no pin for $pkg"; false; }
-    # every closure pin carries the ~ceralive0.2.0 fork suffix (published live)
-    [[ "$version" == *"~ceralive0.2.0" ]] || { echo "$pkg pin lacks ~ceralive0.2.0: $version"; false; }
+    # v1.3.0's differential release rebuilt each closure source at counter 2.
+    [[ "$version" == *"~ceralive.2" ]] || { echo "$pkg pin lacks ~ceralive.2: $version"; false; }
   done
   # spot-check the two anchor versions confirmed live on apt.ceralive.tv
-  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive0.2.0" ]
-  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive0.2.0" ]
+  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive.2" ]
+  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.2" ]
 }
 
 @test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {
