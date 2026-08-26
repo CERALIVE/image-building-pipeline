@@ -1004,10 +1004,11 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, the required capture plugin
   `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
-  ceralive-forked (`~ceralive0.2.0`) modem packages `modemmanager libmm-glib0
+  ceralive-forked (`~ceralive.2`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
-  libqrtr-glib0` (modem-stack v0.2.0). All are downloaded into `$DEST/debs/` using the pins
-  from `manifests/first-party-deb-versions.txt` (14 packages total). Generic
+  libqrtr-glib0` (modem-stack v1.3.0), plus the Architecture-all
+  `ceralive-modem-support=1.3.0` companion. All are downloaded into `$DEST/debs/`
+  using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
   release embeds architecture-specific build metadata, as CeraUI v2026.8.3 does.
@@ -3596,7 +3597,7 @@ live writer's payload. Mutation-verified: dropping the call site, dropping the
 **ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 
 The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
-(`~ceralive0.2.0`, modem-stack v0.2.0), not Debian's ModemManager. Nine
+(`~ceralive.2`, modem-stack v1.3.0), not Debian's ModemManager. Nine
 ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
 `-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
 first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
@@ -3615,6 +3616,24 @@ an explicit `shared.list` entry. Full source-of-truth: `docs/modem-matrix.md §1
 Guards: `postinst-wiring.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
 exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
 `tests/app-layer-modem-closure.test.sh` (executable install/classification).
+
+**Packaged modem files have two image-level ownership gates.** udev resolves
+rules by basename and gives `/etc` precedence over `/usr/lib`, so a same-named
+image rule can silently replace a packaged rule while dpkg still reports the
+package intact. `lib/shared/modem-support-lib.sh` detects that shadowing and
+checks every path in `manifests/modem-support-ownership.txt` has exactly one
+package owner. `lib/parity-check.sh` runs both at `[7/9]`; the two registered
+offline suites inject a basename collision, an orphan, and duplicate ownership.
+
+**`uhubctl` is a manual recovery tool, never an automatic policy.** It ships from
+Debian `shared.list` so an operator can power-cycle a physically wedged USB modem
+on a remote board. No service, timer, udev rule, or modem provider invokes it:
+an automatic port power cut during a live stream would drop that bond link.
+
+**The native FM350 check is vendor-track scoped.** `lib/check-wwan-modules.sh`
+reports `mtk_t7xx` only for a `*-vendor-rk35xx` module tree. Mainline is out of
+scope, and the USB `0e8d:7127` bench personality is not evidence that native PCIe
+`14c3:4d75` support exists. The check remains advisory in every case.
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
 `FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 15 first-party `.deb`s

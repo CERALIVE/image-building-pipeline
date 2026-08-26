@@ -15,7 +15,7 @@ check (`lib/check-wwan-modules.sh`).
 
 The image ships a ModemManager-based cellular stack. The **core ModemManager
 1.24 closure** — the nine ELF-shipping packages below — is a CeraLive fork
-(`~ceralive0.2.0`) published on `apt.ceralive.tv` (modem-stack v0.2.0), staged as
+(`~ceralive.2`) published by modem-stack v1.3.0, staged as
 first-party `.deb`s (`FIRST_PARTY_APT_PKGS` in `lib/fetch-debs.sh`, pinned in
 `manifests/first-party-deb-versions.txt`) and installed by the **app layer**
 (`RUNTIME_APP_PKGS`). It **upgrades** the Debian modem packages the runtime layer
@@ -40,6 +40,10 @@ companion staged through that same app-layer route. It owns generic modem system
 assets, including `60-ceralive-modem.rules`; the image-owned
 `99-ceralive-hardware.rules` and generated `78-mm-ceralive-slot-uid.rules` have
 distinct basenames, so udev cannot shadow the packaged companion rules.
+The `[7/9]` parity gate enforces both that basename separation and exactly one
+package owner for every path in `manifests/modem-support-ownership.txt`; the
+offline negative suites inject a basename collision, an orphan, and duplicate
+ownership so these checks cannot pass vacuously.
 
 Supporting packages that stay **Debian** (`manifests/packages/shared.list`):
 
@@ -47,6 +51,7 @@ Supporting packages that stay **Debian** (`manifests/packages/shared.list`):
 |---------|------|--------|
 | `mobile-broadband-provider-info` | Mobile-provider / APN database ModemManager reads to auto-resolve connection settings from the SIM's MCCMNC | `shared.list` §"Modems" (explicit — a `Recommends:` `--no-install-recommends` drops) |
 | `usb-modeswitch` | Flips USB modems out of mass-storage mode into modem mode so they enumerate | `shared.list` §"USB modem bring-up" |
+| `uhubctl` | Manual per-port power-cycle tool for a physically wedged USB modem; no service, timer, or udev rule invokes it automatically | `shared.list` §"USB modem bring-up" |
 | `network-manager` | Primary connection manager (WiFi/Ethernet/modem); CeraUI drives it | `shared.list` §"Network management" |
 
 `ModemManager` is enabled as a system service in
@@ -83,11 +88,15 @@ over USB internally and additionally need the SIM-detection quirk in §3.
 ## 3. M.2 SIM-detection quirk
 
 M.2 B-key modems need ModemManager forced to probe and treat the port as a modem
-candidate so SIM detection works. `mkosi/customize/quirks.sh`
-(`handle_m2_modem_sim_workaround`) adds `ENV{ID_MM_DEVICE_PROCESS}="1"` and
+candidate so SIM detection works. The live build resolves the board manifest's
+`quirks.m2_modem_sim_workaround` value into `CERALIVE_BOARD_QUIRKS`, passes it
+through the mkosi subimage environment, and
+`mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` adds
+`ENV{ID_MM_DEVICE_PROCESS}="1"` and
 `ENV{ID_MM_CANDIDATE}="1"` udev properties for the Quectel (`2c7c`) and Sierra
-(`1199`) vendor IDs already group-tagged in `udev.sh`. This is documented here
-as-is and is not modified by the module check.
+(`1199`) vendor IDs already group-tagged in `udev.sh`. Boards that do not declare
+the quirk emit no rows. The older `customize/quirks.sh` handler remains covered
+as a hermetic helper but is not the live image writer.
 
 ---
 
@@ -184,6 +193,10 @@ What it does:
   other filename or file body (a known false-positive trap).
 - Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) is available before it
   tries to open a `.deb`.
+- On a `*-vendor-rk35xx` module tree, additionally reports whether the native
+  FM350 PCIe driver `mtk_t7xx` is present. Mainline trees are explicitly out of
+  scope, and the USB `0e8d:7127` bench personality is never treated as evidence
+  for native PCIe `14c3:4d75` support.
 
 It is **advisory only**, exactly like the BSP drift-guard: a missing module
 prints a `WARNING` and the check **still exits 0**. It never fails the build and
