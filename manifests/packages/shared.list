@@ -73,6 +73,20 @@ usb-modeswitch           # flips USB modems out of storage mode into modem mode 
                          # NOTE: audio (alsa-utils/pulseaudio) and the rest of the USB/HW
                          # introspection set (usbutils/pciutils/lsof/i2c-tools/can-utils)
                          # moved to the debug add-on (T17) — see removed.md.
+uhubctl                  # per-port USB power cycling (bookworm main, ~100 KB). A wedged
+                         # LTE/5G dongle that stops answering its control port cannot be
+                         # recovered by any software reset — the datapath fix is a physical
+                         # replug, and on a headless board mounted in a rack there is nobody
+                         # to perform one. uhubctl drives the hub's PORT_POWER feature so the
+                         # device re-enumerates exactly as a replug would.
+                         # SCOPE: this entry ships the BINARY only. modem-stack exposes
+                         # uhubctl strictly as an INJECTED port with no default
+                         # implementation and it is NOT in its shipped provider set, so
+                         # nothing on the image power-cycles a port on its own. Do not add a
+                         # unit, udev rule or timer that invokes it as a side effect —
+                         # cutting power to a hub port during a live stream drops the bond
+                         # link it carries. Whether a given hub honours per-port switching is
+                         # a hardware fact (`uhubctl` reports it), never assumed here.
 
 # --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
 gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing

@@ -31,6 +31,26 @@ source "${CHECK_WWAN_HERE}/shared/deb-lib.sh"
 # The six WWAN modules the modem stack depends on (modem-matrix.md is the doc).
 WWAN_REQUIRED_MODULES=(qmi_wwan cdc_mbim cdc_wdm option cdc_ether cdc_ncm)
 
+# Native M.2 modem drivers that are NOT part of the six-module USB datapath and
+# are therefore checked SEPARATELY, and only on the kernel track that provides
+# them. mtk_t7xx is the MediaTek T700 PCIe/WWAN driver a Fibocom FM350-GL binds to
+# natively (PCI 14c3:4d75, MBIM over the wwan subsystem).
+#
+# SCOPE — this is the whole reason the check is split in two. The FM350's NATIVE
+# PCIe personality and its bench USB personality (0e8d:7127, RNDIS/serial) are
+# different device classes: a working USB adapter is not evidence that the native
+# driver is present, and the six USB modules above say nothing about it either.
+# Production ships the Armbian vendor 6.1 BSP, whose module set is a property of
+# the exact-versioned .deb, so the gate is meaningful there and is asserted there.
+# On the mainline `edge` track the answer is a Kconfig question owned by
+# manifests/kernel/rk3588-edge.fragment + verify-kernel-config.sh, not by an
+# Armbian package's bytes — so this check reports OUT OF SCOPE rather than
+# guessing. Do NOT widen the marker to a bare "vendor": the release strings that
+# actually carry this driver are 6.1.115-vendor-rk35xx (prebuilt) and
+# 6.1.115-ceralive-vendor-rk35xx (the vendor-patched variant).
+WWAN_NATIVE_M2_MODULES=(mtk_t7xx)
+WWAN_VENDOR_RELEASE_MARKER="vendor-rk35xx"
+
 # modprobe treats '-' and '_' as equivalent, and on-disk filenames disagree with
 # the loaded module name (e.g. the cdc_wdm module ships as cdc-wdm.ko). Normalise
 # both sides to '_' before comparing so cdc-wdm.ko satisfies cdc_wdm.
@@ -105,6 +125,62 @@ wwan_collect_alias() {
   done < <(find "${root}" -type f -name 'modules.alias' -print0)
 }
 
+# wwan_collect_kernel_releases <root> — the `lib/modules/<release>` directory
+# names present in the tree. Read from the tree itself rather than composed from a
+# manifest field, because a .deb's payload is the only thing that can answer which
+# kernel this actually is.
+declare -ga WWAN_KERNEL_RELEASES
+wwan_collect_kernel_releases() {
+  local root="$1" moddir sub
+  WWAN_KERNEL_RELEASES=()
+  while IFS= read -r -d '' moddir; do
+    [[ "${moddir}" == */lib/modules ]] || continue
+    while IFS= read -r -d '' sub; do
+      WWAN_KERNEL_RELEASES+=("${sub##*/}")
+    done < <(find "${moddir}" -mindepth 1 -maxdepth 1 -type d -print0)
+  done < <(find "${root}" -type d -name modules -print0)
+}
+
+wwan_tree_is_vendor_track() {
+  local release
+  for release in "${WWAN_KERNEL_RELEASES[@]}"; do
+    [[ "${release}" == *"${WWAN_VENDOR_RELEASE_MARKER}"* ]] && return 0
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# wwan_check_native_m2 — the FM350 `mtk_t7xx` presence gate, scoped to the vendor
+# track (see WWAN_NATIVE_M2_MODULES above). Consumes the maps wwan_check already
+# populated. Advisory like everything else here: ALWAYS returns 0.
+#
+# The out-of-scope branch deliberately says nothing about presence. Reporting a
+# non-vendor tree as "missing" would be a false negative dressed as a finding —
+# the driver's absence from a mainline tree is a config question, not a drop.
+# ---------------------------------------------------------------------------
+wwan_check_native_m2() {
+  local mod nmod releases
+  releases="${WWAN_KERNEL_RELEASES[*]:-<none>}"
+  if ! wwan_tree_is_vendor_track; then
+    log_info "native M.2 modem driver gate: OUT OF SCOPE for this tree (kernel release(s): ${releases}; the gate binds *${WWAN_VENDOR_RELEASE_MARKER} — the production vendor 6.1 BSP). On the mainline edge track mtk_t7xx is governed by manifests/kernel/rk3588-edge.fragment + verify-kernel-config.sh."
+    return 0
+  fi
+  log_info "native M.2 modem driver gate: vendor track detected (${releases})"
+  for mod in "${WWAN_NATIVE_M2_MODULES[@]}"; do
+    nmod="$(_wwan_norm "${mod}")"
+    if [[ -n "${WWAN_LOADABLE[${nmod}]:-}" ]]; then
+      log_success "native M.2 modem driver present: ${mod} — loadable (=m) [${WWAN_LOADABLE[${nmod}]}]"
+    elif [[ -n "${WWAN_BUILTIN[${nmod}]:-}" ]]; then
+      log_success "native M.2 modem driver present: ${mod} — built-in (=y, modules.builtin) [${WWAN_BUILTIN[${nmod}]}]"
+    elif [[ -n "${WWAN_ALIAS[${nmod}]:-}" ]]; then
+      log_success "native M.2 modem driver present: ${mod} — alias (modules.alias)"
+    else
+      log_warn "native M.2 modem driver ABSENT: ${mod} — a Fibocom FM350-GL in its NATIVE PCIe personality (14c3:4d75) cannot bind on this kernel; its bench USB personality (0e8d:7127) is a different device class and is not evidence either way. Advisory only; see docs/modem-matrix.md §8"
+    fi
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # wwan_check <module-tree-root> — scan the tree and report per-module presence.
 # Advisory: warns on any missing module, ALWAYS returns 0.
@@ -117,6 +193,7 @@ wwan_check() {
   wwan_collect_loadable "${root}"
   wwan_collect_builtin "${root}"
   wwan_collect_alias "${root}"
+  wwan_collect_kernel_releases "${root}"
 
   local mod nmod present=0 missing=0
   for mod in "${WWAN_REQUIRED_MODULES[@]}"; do
@@ -141,6 +218,8 @@ wwan_check() {
   else
     log_success "WWAN module-presence check: all ${#WWAN_REQUIRED_MODULES[@]} required modules present"
   fi
+
+  wwan_check_native_m2
   return 0
 }
 
