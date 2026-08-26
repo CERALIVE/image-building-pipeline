@@ -1,5 +1,6 @@
 # tests/registry.tsv — the declarative catalogue of EVERY tracked file under
-# tests/, plus the two mkosi/platform harnesses run-tests executes.
+# tests/, plus the three non-tests/ harnesses run-tests executes (two under
+# mkosi/platform/, one under mkosi/customize/).
 #
 # run-tests READS this file: the `default-bats` rows ARE its bats suite list and
 # the `default-shell` rows ARE its shell suite list, both in the order they
@@ -79,6 +80,8 @@ tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data
 tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
 tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract
 tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the vendor and mainline ID_PATH spellings
+tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
+mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
@@ -88,6 +91,8 @@ tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-
 tests/app-layer-modem-closure.test.sh	shell	integration	default-shell	the nine ModemManager fork packages install and classify as app-layer
 tests/firstparty-classification.test.sh	shell	unit	default-shell	the partitioner allowlist is a superset of FIRST_PARTY_APT_PKGS
 tests/firstparty-version-resolution.test.sh	shell	unit	default-shell	generic and architecture-specific first-party pins resolve to exact apt specs
+tests/udev-rule-basename-shadow.test.sh	shell	unit	default-shell	no image-owned /etc/udev/rules.d basename shadows a packaged one, with an injected-collision non-vacuity leg
+tests/modem-support-file-ownership.test.sh	shell	unit	default-shell	every modem-support file has exactly one owner: no orphans, no double ownership, negative legs for each
 tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys, bounds and exclusions
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
@@ -102,6 +107,7 @@ tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/ide
 tests/versions-lib.test.sh	shell	unit	default-shell	the one versions.yaml pin reader
 tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-index module, no silent || true
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
+tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
 mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
 

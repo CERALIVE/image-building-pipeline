@@ -171,9 +171,9 @@ Notes:
 - The `.deb`-shipped `/etc/ceralive/config.json` (build-debian-package.sh:67) and the
   static `/etc/ceralive/conf.d/*.conf` defaults remain **read-only seeds in the rootfs**;
   the **live, writable** copies live under `/data`.
-- `/etc/iproute2/rt_tables` entries and the dhclient/NetworkManager dispatcher hooks
-  (customize-image.sh §configure_srtla_routing) are **static seeds in rootfs** — they are
-  code, not state, and are reprovisioned by each slot. Only *runtime-derived* routing state
+- The SRTLA source-policy routing seeds (`rt_tables` reservations, the dhclient hook,
+  the NM dispatcher) that used to live in the rootfs are RETIRED — see `AGENTS.md`
+  → "SRTLA source-policy routing is RETIRED". Only *runtime-derived* routing state
   that must persist goes under `/data/srtla/`.
 - `/tmp/srtla_ips` stays on tmpfs (ephemeral by design). `/tmp` is tmpfs (1 GB) per
   `customize-image.sh:466`.

@@ -473,6 +473,53 @@ PY
   [[ "$output" == *"5/6 present, 1 missing"* ]]
 }
 
+@test "wwan: the native FM350 mtk_t7xx gate is OUT OF SCOPE on a mainline edge tree" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_six "$root" "7.1.7-ceralive-rk3588"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
+  [[ "$output" == *"7.1.7-ceralive-rk3588"* ]]
+  [[ "$output" != *"native M.2 modem driver ABSENT"* ]]
+}
+
+@test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a vendor tree that ships it" {
+  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.115-vendor-rk35xx"
+  wwan_stage_six "$root" "$kv"
+  mkdir -p "$root/lib/modules/$kv/kernel/drivers/net/wwan"
+  printf 'ELF' > "$root/lib/modules/$kv/kernel/drivers/net/wwan/mtk_t7xx.ko"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"vendor track detected"* ]]
+  [[ "$output" == *"native M.2 modem driver present: mtk_t7xx — loadable"* ]]
+}
+
+@test "wwan: the native FM350 mtk_t7xx gate WARNS on a vendor tree without it, and still exits 0" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_six "$root" "6.1.115-vendor-rk35xx"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"native M.2 modem driver ABSENT: mtk_t7xx"* ]]
+  [[ "$output" == *"14c3:4d75"* ]]
+  [[ "$output" == *"0e8d:7127"* ]]
+  [[ "$output" == *"all 6 required modules present"* ]]
+}
+
+@test "wwan: the vendor marker is exact — a bare '-vendor' release is NOT the vendor track" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_six "$root" "6.1.0-vendor"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
+  run bash -c "source '$CHECK_WWAN'; printf '%s' \"\$WWAN_VENDOR_RELEASE_MARKER\""
+  [ "$output" = "vendor-rk35xx" ]
+}
+
+@test "modem recovery: uhubctl ships as a manual binary with no automatic invoker" {
+  grep -Ex 'uhubctl[[:space:]]*(#.*)?' "$REPO_ROOT/manifests/packages/shared.list"
+  ! grep -rF 'uhubctl' "$REPO_ROOT/mkosi/runtime" "$REPO_ROOT/mkosi/customize"
+}
+
 @test "wwan: the check asserts a .deb extractor (dpkg-deb or ar+tar) is available" {
   # with a normal PATH the assertion passes (ar + tar are on the host)
   run bash -c "source '$CHECK_WWAN'; wwan_assert_deb_tools"
@@ -506,14 +553,14 @@ PY
 }
 
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.8.4"
+  local expected_ceraui_pin="v2026.8.5"
   local arch expected_device_version device_version
 
   [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
   for arch in amd64 arm64; do
     case "$arch" in
-      amd64) expected_device_version="2026.8.4-20260824T150955.2e0fb3b" ;;
-      arm64) expected_device_version="2026.8.4-20260824T150956.2e0fb3b" ;;
+      amd64) expected_device_version="2026.8.5-20260826T062956.f08f7ef" ;;
+      arm64) expected_device_version="2026.8.5-20260826T063003.f08f7ef" ;;
     esac
     device_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version ceralive-device' _ "$FETCH_DEBS")"
     [ "$device_version" = "$expected_device_version" ]

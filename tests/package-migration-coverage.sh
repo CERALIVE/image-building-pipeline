@@ -66,6 +66,21 @@ done
 [[ "$(grep -c 'install_console_font_service' <<<"${POSTINST_SRC}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
 grep -q 'ceralive-console-font' <<<"${POSTINST_SRC}" || { echo "ERROR: console font service is not enabled by the postinst library" >&2; exit 2; }
 
+# REPOS parse guard — asserted BEFORE the legacy-source skip below, because the
+# accounting run that consumes it is skipped on a post-T24 checkout and would
+# otherwise never exercise the regex. `build_v2_set` reads REPOS out of
+# fetch-debs.sh with a one-line sed; the array is a single line whose length is not
+# fixed (it grew from 4 to 5 when modem-stack landed), so a regex that silently
+# stopped matching would drop every first-party repo out of the accounting set and
+# report a PASS built on nothing.
+repos_parsed="$(sed -n 's/^REPOS=(\(.*\))/\1/p' "${FETCH_DEBS}" | tr -d '"' | tr ' ' '\n' | sed '/^$/d')"
+[[ -n "${repos_parsed}" ]] || { echo "ERROR: could not parse REPOS out of ${FETCH_DEBS}" >&2; exit 2; }
+for repo in srt cerastream CeraUI srtla-send-rs modem-stack; do
+  grep -qxF "${repo}" <<<"${repos_parsed}" \
+    || { echo "ERROR: REPOS parse missed '${repo}' — the accounting set would silently lose it" >&2; exit 2; }
+done
+echo "REPOS parse: $(grep -c . <<<"${repos_parsed}") first-party repo(s) resolved from lib/fetch-debs.sh"
+
 # Legacy sources were retired with the legacy Armbian build; absent => MIGRATE
 # phase is over (proof in git history; parity-check.sh now guards package loss).
 if [[ ! -f "${BASECONF}" && ! -f "${CIMG}" ]]; then
@@ -133,7 +148,7 @@ build_v2_set() {
     if [[ -f "${FETCH_DEBS}" ]]; then
       sed -n 's/^REPOS=(\(.*\))/\1/p' "${FETCH_DEBS}" | tr -d '"' | tr ' ' '\n'
     fi
-    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src libsrt1.5-ceralive
+    printf '%s\n' srtla-send-rs cerastream CeraUI ceraui ceralive-device gstreamer1.0-libuvch264src libsrt1.5-ceralive ceralive-modem-support
   } | sed '/^$/d' | sort -u
 }
 
@@ -157,7 +172,7 @@ SHARED="$(sed -e 's/#.*//' "${PKGDIR}/shared.list" | awk 'NF{print $1}' | sort -
 FAMILY="$(for y in "${FAMDIR}"/*.yaml; do grep -E '^[[:space:]]*-[[:space:]]+[a-z0-9._+-]+' "${y}" | sed -E 's/^[[:space:]]*-[[:space:]]+//' | awk '{print $1}'; done | sort -u)"
 # shellcheck disable=SC2016  # literal backticks in the regex are intentional
 REMOVED="$(grep -oE '`[^`]+`' "${PKGDIR}/removed.md" | tr -d '`' | grep -E '^[a-z0-9][a-z0-9.+*-]*$' | grep -vE '\.(conf|sh|list|yaml|yml|md|py)$' | sort -u)"
-FIRSTPARTY=$'srtla-send-rs\ncerastream\nCeraUI\nceraui\nceralive-device\nlibsrt1.5-ceralive'
+FIRSTPARTY=$'srtla-send-rs\ncerastream\nCeraUI\nceraui\nceralive-device\nlibsrt1.5-ceralive\nceralive-modem-support'
 
 mkdir -p "$(dirname "${EVIDENCE}")"
 {

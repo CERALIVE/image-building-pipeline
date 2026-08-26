@@ -53,7 +53,7 @@ nginx-light              # terminates HTTPS on 443 and reverse-proxies to the Ce
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
 systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
 dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
-iproute2                 # `ip`/rt_tables — SRTLA source-policy routing (customize-image.sh:294)
+iproute2                 # `ip` — CeraUI route/policy-route read-only diagnostics
 net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
                          # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
                          # the `netif` broadcast (WiFi/Ethernet/cellular/bonded-link status).
@@ -73,6 +73,20 @@ usb-modeswitch           # flips USB modems out of storage mode into modem mode 
                          # NOTE: audio (alsa-utils/pulseaudio) and the rest of the USB/HW
                          # introspection set (usbutils/pciutils/lsof/i2c-tools/can-utils)
                          # moved to the debug add-on (T17) — see removed.md.
+uhubctl                  # per-port USB power cycling (bookworm main, ~100 KB). A wedged
+                         # LTE/5G dongle that stops answering its control port cannot be
+                         # recovered by any software reset — the datapath fix is a physical
+                         # replug, and on a headless board mounted in a rack there is nobody
+                         # to perform one. uhubctl drives the hub's PORT_POWER feature so the
+                         # device re-enumerates exactly as a replug would.
+                         # SCOPE: this entry ships the BINARY only. modem-stack exposes
+                         # uhubctl strictly as an INJECTED port with no default
+                         # implementation and it is NOT in its shipped provider set, so
+                         # nothing on the image power-cycles a port on its own. Do not add a
+                         # unit, udev rule or timer that invokes it as a side effect —
+                         # cutting power to a hub port during a live stream drops the bond
+                         # link it carries. Whether a given hub honours per-port switching is
+                         # a hardware fact (`uhubctl` reports it), never assumed here.
 
 # --- GStreamer core (streaming pipeline; HW-accel plugin is in the family manifest)
 gstreamer1.0-tools       # gst-launch/gst-inspect — pipeline plumbing

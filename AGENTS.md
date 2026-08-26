@@ -65,11 +65,13 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
+| **Board-MANIFEST-gated udev quirk rows (M.2 SIM detection) — and how a `quirks:` fact reaches a subimage chroot** | LIVE: `mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` via `CERALIVE_BOARD_QUIRKS`; canonical: `mkosi/customize/quirks.sh` (NOT on the `./build` path). Guard `tests/board-quirk-udev-rules.test.sh` — see the "board-gated M.2 SIM quirk rows now SHIP" KEY FACT below |
 | **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
 | **USB-C Type-C source-role pinning (camera enumeration)** | `mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
+| **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
@@ -1002,10 +1004,11 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, the required capture plugin
   `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
-  ceralive-forked (`~ceralive0.2.0`) modem packages `modemmanager libmm-glib0
+  ceralive-forked (`~ceralive.2`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
-  libqrtr-glib0` (modem-stack v0.2.0). All are downloaded into `$DEST/debs/` using the pins
-  from `manifests/first-party-deb-versions.txt` (14 packages total). Generic
+  libqrtr-glib0` (modem-stack v1.3.0), plus the Architecture-all
+  `ceralive-modem-support=1.3.0` companion. All are downloaded into `$DEST/debs/`
+  using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
   release embeds architecture-specific build metadata, as CeraUI v2026.8.3 does.
@@ -3520,10 +3523,81 @@ a kernel `.deb` (or an extracted module tree) and reports each module as loadabl
   the check **always exits 0**. It never fails the build and never edits
   `shared.list` or the kernel config. Proof: `run-tests` section 17.
 
+**The board-gated M.2 SIM quirk rows now SHIP — `CERALIVE_BOARD_QUIRKS` is how a
+board-manifest fact crosses the subimage boundary** [EXISTS — fixed 2026-08-19]
+
+`customize/quirks.sh` is (like `udev.sh` before it) a `run-all.sh` RUNTIME module,
+and `run-all.sh` is invoked from exactly one site (`mkosi.images/base/mkosi.conf`)
+as `run-all.sh base`. `run-all.sh runtime` — the selector that includes `quirks` —
+is invoked nowhere in the real build, so `dispatch_quirks` /
+`handle_m2_modem_sim_workaround` were correct, unit-tested
+(`mkosi/customize/test-quirks.sh`) and reached NO emitted image, for the life of
+the feature. Another instance of the dead-writer trap.
+
+**It could not be a one-line row-port into `setup_hardware_access`.** That writer
+is UNCONDITIONAL (every board); the M.2 SIM rows are board-GATED, and a mkosi
+SUBIMAGE CHROOT has no board manifest and no way to resolve one —
+`quirks.sh::resolve_manifest` needs a real file path or `CERALIVE_BOARD_MANIFEST`,
+and neither exists on that side of the env boundary. Hardcoding the rows into the
+unconditional writer would have destroyed the gating.
+
+**The precedent that solved it already existed: `CERALIVE_MODEM_PORTS_SLOTS`.**
+The fix follows it exactly rather than inventing a mechanism.
+
+```
+manifests/boards/<b>.yaml  quirks: {m2_modem_sim_workaround: required, …}
+  └─ resolve.py flatten            -> QUIRKS_M2_MODEM_SIM_WORKAROUND='required'
+     └─ orchestrate.sh collapse    -> CERALIVE_BOARD_QUIRKS="name=value name=value"
+        └─ env_names + mkosi.conf PassEnvironment=
+           └─ postinst.d/hardware.sh::apply_board_quirks   (LIVE ./build writer)
+              └─ /etc/udev/rules.d/99-ceralive-hardware.rules
+```
+
+Five things worth knowing before touching it:
+
+- **The resolver already flattened `quirks:`** — `QUIRKS_<NAME>` params existed
+  and were simply never consumed. Nothing in `resolve.py`, the schema or any
+  manifest changed; only the collapse + forward + consume half is new.
+- **`apply_board_quirks` lives in `postinst.d/hardware.sh`, not in
+  `setup_hardware_access`, and it is called immediately AFTER it.** That writer
+  `cat >`-TRUNCATES the rules file, so a gated append has to follow it — and
+  keeping it a separate function is also what kept `mkosi.postinst.chroot` well
+  under `ci/postinst-drift-check.sh`'s ceiling (one call line, not a rule block).
+  The ordering is asserted by line number in the guard, not left to review.
+- **EMPTY is the fail-closed state, and it is also the PassEnvironment-drift
+  state.** A board with no `quirks:` block resolves no `QUIRKS_*` params at all,
+  so the value is empty and NOTHING is emitted — which is exactly what a dropped
+  `PassEnvironment=` entry would also produce. That is the safe direction (a
+  board silently loses a workaround, never silently gains one), but it is why the
+  lockstep guard in `mkosi-image-contract.bats` matters here as much as anywhere.
+- **Value semantics are one notch STRICTER than `quirks.sh`.** That module parses
+  KEYS and ignores values, so `m2_modem_sim_workaround: false` would still apply;
+  `apply_board_quirks` refuses a falsey value (`false`/`0`/`no`/`off`) because the
+  schema admits booleans. Absent/empty value still applies (declaration by
+  presence). Unknown quirks warn and continue, as `quirks.sh` does.
+- **`usb_power_optimization` is deliberately NOT ported.** Its handler turns USB
+  autosuspend on for every USB device, which is a real runtime behaviour change on
+  a board whose job is holding several cellular modems up. It has never shipped,
+  so there is no regression to preserve, and enabling it needs its own change with
+  its own hardware evidence. The live dispatch LOGS it as declared-but-not-applied
+  rather than dropping it silently. `hdmi_input_emi_shield` stays DEFERRED
+  (DT-level), same verdict `quirks.sh` records.
+
+Guard: `tests/board-quirk-udev-rules.test.sh` (29 checks, registered
+`default-shell`). It executes every arrow above rather than grepping any of them:
+the REAL resolver runs against the REAL board manifests, the REAL collapse block
+is lifted out of `orchestrate.sh` by its own markers and run on that output, and
+the REAL `apply_board_quirks` writes into a scratch sysroot seeded with the LIVE
+writer's own rules heredoc. Both directions are proven — `rock-5b-plus` gets
+exactly two `ID_MM` rows, `orange-pi-5-plus` gets a file byte-identical to the
+live writer's payload. Mutation-verified: dropping the call site, dropping the
+`PassEnvironment=` entry, ungating the falsey check, moving the call ahead of
+`setup_hardware_access`, and dropping the drift-gate registration each fail it.
+
 **ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 
 The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
-(`~ceralive0.2.0`, modem-stack v0.2.0), not Debian's ModemManager. Nine
+(`~ceralive.2`, modem-stack v1.3.0), not Debian's ModemManager. Nine
 ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
 `-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
 first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
@@ -3542,6 +3616,24 @@ an explicit `shared.list` entry. Full source-of-truth: `docs/modem-matrix.md §1
 Guards: `postinst-wiring.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
 exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
 `tests/app-layer-modem-closure.test.sh` (executable install/classification).
+
+**Packaged modem files have two image-level ownership gates.** udev resolves
+rules by basename and gives `/etc` precedence over `/usr/lib`, so a same-named
+image rule can silently replace a packaged rule while dpkg still reports the
+package intact. `lib/shared/modem-support-lib.sh` detects that shadowing and
+checks every path in `manifests/modem-support-ownership.txt` has exactly one
+package owner. `lib/parity-check.sh` runs both at `[7/9]`; the two registered
+offline suites inject a basename collision, an orphan, and duplicate ownership.
+
+**`uhubctl` is a manual recovery tool, never an automatic policy.** It ships from
+Debian `shared.list` so an operator can power-cycle a physically wedged USB modem
+on a remote board. No service, timer, udev rule, or modem provider invokes it:
+an automatic port power cut during a live stream would drop that bond link.
+
+**The native FM350 check is vendor-track scoped.** `lib/check-wwan-modules.sh`
+reports `mtk_t7xx` only for a `*-vendor-rk35xx` module tree. Mainline is out of
+scope, and the USB `0e8d:7127` bench personality is not evidence that native PCIe
+`14c3:4d75` support exists. The check remains advisory in every case.
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
 `FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 15 first-party `.deb`s
@@ -4510,11 +4602,10 @@ credentials with no screen or keyboard. Standalone artifacts under
   (factory-reset hook) re-triggers it even when profiles exist.
 - **EC4 — OTA-safe:** a RAUC update that preserves `/data` keeps the WiFi profiles,
   so the portal correctly does **not** start after an update.
-- **Conflict safety:** the AP only runs when there is zero connectivity (so srtla
-  bonding is impossible anyway), and it leaves `wlan0` with no default route, so the
-  srtla NM dispatcher (`90-srtla-wifi-routing`) sees an empty gateway and writes no
-  rule/route in table 120 — a no-op while the portal is up. WiFi tables 120-124 are
-  untouched.
+- **Conflict safety:** the AP only runs when there is zero connectivity, so srtla
+  bonding is impossible anyway and nothing contends for the uplink. (Until this was
+  retired, the SRTLA NM dispatcher was the other half of this argument; it no longer
+  exists — see "SRTLA source-policy routing is RETIRED" below.)
 - **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
   `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
@@ -4640,6 +4731,7 @@ gated item, not the package availability.
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT
 - Keep `srt` in `REPOS` and map `libsrt1.5-ceralive` through `FIRST_PARTY_APT_PKGS`; do not add a Debian `libsrt1.5-*` runtime package to `shared.list`
+- Don't re-introduce the router-dongle netns layer (`ceralive-dongle-netns*`, `85-ceralive-dongle-netns.rules`, the `rt_tables` 110-117 block) — it is RETIRED, a dongle bonds through its own `enx…`/`eth…` interface, and `tests/dongle-netns-retirement.test.sh` fails the build if any installer stages it again. Don't delete `ceralive-dongle-netns-retire.service` either: the layer's slot store sits on `/data` specifically to survive a slot swap, so that unit is the ONLY thing that clears it from a board that ran the layer
 - Don't implement kiosk units/packages without clearing the Task 1 hardware gate first
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't `chown` the mkosi package cache to the invoking user to "make the ownership consistent". mkosi 26 refuses a cache tree whose owner uid is not its own and then deletes it, so a chowned cache is a permanently cold base layer that looks like a fix. Keep the cache in ONE privilege domain instead, and don't alternate `./build <board>` and `./build <board> --native` on one checkout unless you want to pay for a cold base layer every time
@@ -4749,20 +4841,77 @@ baseline was edited surgically on those keys, never re-captured wholesale, so th
 fixture still proves what it exists to prove (that declaring a family variant is
 inert on the vendor path). A diff of any other key is still a defect.
 
-**Modem source-routing under NM `dhcp=internal` — FIXED.** NetworkManager in
-Debian bookworm defaults to `dhcp=internal` (its own DHCP client), which does NOT
-execute `dhclient-exit-hooks.d/`, so the SRTLA dhclient hook
-(`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`) never fired for
-NM-managed modems. The NM dispatcher
-(`/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing`) now also matches modem
-interfaces (`usb0..7` and `enx*0..7`) and installs the same source rule + default
-route in tables 100–107, mirroring the dhclient-hook semantics. The dhclient hook
-is retained (harmless; still covers non-NM dhclient paths). Both drift-gated SRTLA
-payloads were twin-updated in one commit (`networking-srtla.sh` and the `§6` block
-in `mkosi.postinst.chroot`); `ci/postinst-drift-check.sh` CHECK 2 confirms
-byte-parity. WiFi table assignments (120–124) are unchanged. Verify on hardware
-with a modem attached: `journalctl -t srtla-routing` and `ip rule show` after the
-modem connects.
+**SRTLA source-policy routing is RETIRED — and it did NOT fail closed** [REMOVED]
+
+The NM dispatcher `90-srtla-wifi-routing`, the dhclient hook
+`/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing`, the `rt_tables`
+reservations that named their tables (`100-107 modem0..7`, `120-124 wlan0..4`),
+and the whole `mkosi/customize/networking-srtla.sh` module are GONE. Bonding pins
+egress per link in the socket (`SO_BINDTODEVICE` + a source-address bind), so
+policy routing has no consumer.
+
+Four measurements on a live `7.1.7-ceralive-rk3588` board, in the order that
+matters:
+
+- **`ip rule` is unsupported.** `# CONFIG_IP_ADVANCED_ROUTER is not set`, so
+  `CONFIG_IP_MULTIPLE_TABLES` is absent entirely and `ip rule show` answers
+  `RTNETLINK answers: Operation not supported` (exit 255). No rule ever installed.
+- **`ip route add … table N` SILENTLY WRITES INTO MAIN.** Proven with a
+  documentation prefix: `ip route add 203.0.113.0/24 … table 121` exits 0,
+  `ip route show table 121` is EMPTY, and the route is in the MAIN table. So the
+  dispatcher's "per-modem default route" could install a `proto boot`, **metric-0**
+  default that outranks every DHCP route (metrics 101-107) — the metric-0
+  captive-portal hazard this bench has already paid for once.
+- **It then logged a success that was false.** After both mutations failed it still
+  emitted `srtla-routing: Source routing: <if> (<ip>) via <gw> table 104`.
+- **The dhclient half could never run at all** — `dhclient` is not installed and NM
+  uses `dhcp=internal`.
+
+A kernel-capability guard was REJECTED rather than overlooked: on the vendor 6.1
+kernel, where `ip rule` does work, the rules are keyed `from <source-ip>` and this
+fleet's HiLink twins both lease `192.168.8.100` — an address that cannot name a
+device, i.e. exactly the ambiguity `SO_BINDTODEVICE` exists to remove. Plan todo 40
+states the position directly: Scope forbids reopening SNAT/policy-routing bonding.
+
+`ci/postinst-drift-check.sh` CHECK 2 was INVERTED from a payload-parity check into a
+residue guard, and `lib/parity-check.sh` §D now fails if any of these assets is
+present in a built rootfs. `iproute2` STAYS in `shared.list` — CeraUI still shells
+out to `ip` for its read-only route/policy diagnostics. Full decision record with
+verbatim traces: `.omo/notepads/modem-phase-c-quality/evidence/todo38.md`.
+
+**The router-dongle netns layer is RETIRED — and its one leftover is on `/data`** [REMOVED]
+
+The per-dongle network-namespace layer (`ceralive-dongle-netns@.service`, its
+reconcile timer, the `85-ceralive-dongle-netns.rules` udev claim, the
+NetworkManager unmanaged-devices snippet, the three `/usr/local/sbin/ceralive-dongle-*`
+scripts and the `rt_tables` 110-117 reservation) is not installed by any image.
+A router-mode dongle is CLASSIFIED from its USB descriptors and bonds through its
+OWN `enx…`/`eth…` interface instead, which is what every shipped image already did
+— the layer never reached a published release, so this is a retirement of an
+unmerged design rather than the removal of a deployed one.
+
+**It is not a no-op retirement, and the reason is a single deliberate design
+decision.** Every artifact above lives in the rootfs, so a RAUC slot swap boots
+without it; the namespaces, the `dg<N>h` veths, the rules/tables and
+`/run/ceralive/dongles` are kernel/tmpfs state, so the reboot that swap requires
+clears them. The durable slot store `/data/ceralive/dongle-slots.json` (+ its
+`.lock`) is the exception BY CONSTRUCTION: it was put on the data partition
+precisely so a slot swap would NOT wipe it and renumber every dongle across an
+OTA. That is exactly what makes it the one piece of residue an image update
+cannot clear by being a new image.
+
+`ceralive-dongle-netns-retire.service` is therefore shipped — the only part of the
+layer this image carries. It is a boot oneshot, ordered `RequiresMountsFor=/data`
+and `Before=NetworkManager.service`/`ceralive.service`, idempotent, and an exit-0
+no-op on a board that never ran the layer. Every name it removes is enumerated
+from the retired contract's own eight-slot allocation table, so a namespace, veth,
+rule or table the layer did not create cannot be caught by it. Contract:
+`tests/dongle-netns-retirement.test.sh` (absence from every installer + the
+teardown legs, incl. the bounded-slot and unsupported-`ip rule` negatives).
+
+CeraUI keeps its `/run/ceralive/dongles` READER, deliberately: it is tolerant of
+the directory being absent, which is what lets an old-image board and a
+post-retirement board degrade to the same silence. Do not delete it as dead code.
 
 **Modem `usb0..7` naming is hardware-gated.** Deterministic modem renames need a
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`

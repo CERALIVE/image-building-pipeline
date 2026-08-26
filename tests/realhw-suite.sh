@@ -211,18 +211,12 @@ build_mock_fixtures() {
   printf '[Unit]\nDescription=mock ceralive\n[Service]\nExecStart=/usr/bin/cerastream\n' \
     >"${root}/etc/systemd/system/ceralive.service"
   ln -s ../ceralive.service "${root}/etc/systemd/system/multi-user.target.wants/ceralive.service"
-  # D. SRTLA source-policy routing
-  printf '100\tmodem0\n101\tmodem1\n120\twlan0\n121\twlan1\n' > "${root}/etc/iproute2/rt_tables"
+  # D. the retired SRTLA source-policy routing assets stay absent
+  printf '255\tlocal\n254\tmain\n253\tdefault\n' > "${root}/etc/iproute2/rt_tables"
   printf '[Match]\nType=wlan\n[Link]\nName=wlan0\n' \
     >"${root}/etc/systemd/network/10-ceralive-wlan0.link"
-  printf '#!/bin/sh\n# mock SRTLA dhclient source-routing hook\n' \
-    > "${root}/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing"
-  printf '#!/bin/sh\n# mock SRTLA NetworkManager wifi-routing dispatcher\n' \
-    > "${root}/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
-  chmod +x "${root}/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing" \
-           "${root}/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing"
   # E. udev (video4linux satisfies the hdmi quirk) + apt sources
-  printf 'SUBSYSTEM=="video4linux", GROUP="video"\nSUBSYSTEM=="usb", TAG+="ceralive"\n' \
+  printf 'SUBSYSTEM=="video4linux", GROUP="video"\nSUBSYSTEM=="usb", TAG+="ceralive"\n# QUIRK m2_modem_sim_workaround — force ModemManager probe for M.2 modems\nSUBSYSTEM=="usb", ATTRS{idVendor}=="2c7c", ENV{ID_MM_DEVICE_PROCESS}="1"\n' \
     > "${root}/etc/udev/rules.d/99-ceralive-hardware.rules"
   printf 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\nComponents: main\n' \
     > "${root}/etc/apt/sources.list.d/debian.sources"

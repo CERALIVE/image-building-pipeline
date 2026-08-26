@@ -803,7 +803,7 @@ same shipped scripts without hardware):
 
 The A/B contract covers the **ModemManager 1.24 closure** the same way it covers
 every other baked package: the nine fork `.deb`s (`modemmanager` +
-`libmm-glib0`/`libqmi-*`/`libmbim-*`/`libqrtr-glib0`, all `~ceralive0.2.0`) are
+`libmm-glib0`/`libqmi-*`/`libmbim-*`/`libqrtr-glib0`, all `~ceralive.2`) are
 installed into the rootfs, atomic with the RAUC slot, so a bad modem-stack bundle
 rolls back with the slot — there is no separately-updatable modem partition to
 strand. After a rollback the recovered slot runs whatever modem-stack version it

@@ -167,7 +167,8 @@ assert_repos_integrity
 # its Architecture: all modem support companion from modem-stack v1.3.0. The
 # closure is self-contained: modemmanager depends on
 # libmm-glib0, and the libmbim/libqmi/libqrtr packages provide the QMI/MBIM
-# transport its glib libs bind to — all nine carry the ~ceralive0.2.0 fork suffix.
+# transport its glib libs bind to — all nine carry the v1.3.0 release's
+# per-source `~ceralive.2` rebuild counter.
 # The companion is separately versioned at bare SemVer. They are staged like every
 # other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).

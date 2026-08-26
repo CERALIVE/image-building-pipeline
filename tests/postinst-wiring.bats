@@ -46,17 +46,22 @@ load manifest-helpers
   [[ "$output" == *"setup_data_persistence"* ]]
 }
 
-@test "postinst drift: gate CATCHES a divergent §6 SRTLA payload (non-vacuity)" {
-  serialize working-tree   # mutates a tracked file then restores; exclusive
-  local netsrtla="$PIPELINE_DIR/mkosi/customize/networking-srtla.sh"
-  local backup="$BATS_TEST_TMPDIR/networking-srtla.bak"
-  cp "$netsrtla" "$backup"
-  # Diverge one inline copy of the dual-track SRTLA routing payload.
-  sed -i 's/^120[[:space:]]\+wlan0$/121     wlan0/' "$netsrtla"
+@test "postinst drift: retired SRTLA source-policy routing is absent" {
   run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
-  cp "$backup" "$netsrtla"          # ALWAYS restore
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"90-srtla-wifi-routing: absent"* ]]
+  [[ "$output" == *"srtla-source-routing: absent"* ]]
+  [[ "$output" == *"configure_srtla_routing: absent"* ]]
+}
+
+@test "postinst drift: gate CATCHES a resurrected SRTLA dispatcher (non-vacuity)" {
+  serialize working-tree   # plants a file under mkosi/ then removes it; exclusive
+  local planted="$PIPELINE_DIR/mkosi/customize/.todo38-residue-probe.sh"
+  printf '#!/bin/sh\n# 90-srtla-wifi-routing\n' >"$planted"
+  run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
+  rm -f "$planted"                  # ALWAYS remove, pass or fail
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DIVERGED"* ]]
+  [[ "$output" == *"RESURRECTED"* ]]
 }
 
 # ===========================================================================
@@ -302,12 +307,12 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     version="$(awk -F= -v p="$pkg" '$1==p{print $2; exit}' "$pins")"
     [ -n "$version" ] || { echo "no pin for $pkg"; false; }
-    # every closure pin carries the ~ceralive0.2.0 fork suffix (published live)
-    [[ "$version" == *"~ceralive0.2.0" ]] || { echo "$pkg pin lacks ~ceralive0.2.0: $version"; false; }
+    # v1.3.0's differential release rebuilt each closure source at counter 2.
+    [[ "$version" == *"~ceralive.2" ]] || { echo "$pkg pin lacks ~ceralive.2: $version"; false; }
   done
   # spot-check the two anchor versions confirmed live on apt.ceralive.tv
-  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive0.2.0" ]
-  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive0.2.0" ]
+  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive.2" ]
+  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.2" ]
 }
 
 @test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {

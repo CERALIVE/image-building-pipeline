@@ -303,3 +303,92 @@ setup_fan_kickstart() {
 
   enable_service ceralive-fan-kickstart.service
 }
+
+# Board hardware-QUIRK udev rows — the only board-MANIFEST-gated writes this
+# image performs, and the reason they live here rather than in
+# setup_hardware_access is that they must NOT apply to every board.
+#
+# WHY THIS IS NOT LEFT TO customize/quirks.sh. That module holds the same
+# dispatch (dispatch_quirks + handle_m2_modem_sim_workaround) and it is correct —
+# but it is a run-all.sh RUNTIME module and ./build runs `run-all.sh base` ONLY,
+# so nothing it writes has ever reached an emitted rootfs. Same dead-writer trap
+# as /dev/hdmi-in. This function is on the LIVE path: mkosi.postinst.chroot calls
+# it immediately after setup_hardware_access, which TRUNCATES the rules file, so
+# these rows are appended to the policy that writer just wrote.
+#
+# HOW THE BOARD FACT GETS HERE. A subimage chroot has no board manifest and no
+# way to resolve one, so the gate arrives as CERALIVE_BOARD_QUIRKS: the manifest
+# `quirks:` block flattened by resolve.py to QUIRKS_<NAME>, collapsed by
+# lib/orchestrate.sh into a space-separated `name=value` list and forwarded on
+# the env_names <-> mkosi.conf PassEnvironment= lockstep. Exactly the mechanism
+# CERALIVE_MODEM_PORTS_SLOTS already uses. UNSET/EMPTY (a board with no `quirks:`
+# block) emits NOTHING — the gate is fail-closed in the direction that matters.
+#
+# VALUE SEMANTICS are deliberately one notch STRICTER than quirks.sh, which
+# parses keys and ignores values entirely (so `foo: false` would still apply).
+# Here a declared quirk applies unless its value is falsey, because the schema
+# admits booleans and "declared false, applied anyway" is not a defensible
+# reading of a manifest. Absent/empty value = declared by presence = applies.
+apply_board_quirks() {
+  local rules="${CERALIVE_SYSROOT:-}/etc/udev/rules.d/99-ceralive-hardware.rules"
+  local declared="${CERALIVE_BOARD_QUIRKS:-}"
+
+  if [[ -z "${declared}" ]]; then
+    log "board quirks: this board's manifest declares none — no quirk udev rules emitted"
+    return 0
+  fi
+
+  log "board quirks: dispatching from CERALIVE_BOARD_QUIRKS (${declared})"
+  mkdir -p "$(dirname -- "${rules}")"
+
+  local -a entries=()
+  read -r -a entries <<<"${declared}"
+
+  local entry name value applied=0
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    name="${entry%%=*}"
+    value=""
+    [[ "${entry}" == *=* ]] && value="${entry#*=}"
+
+    case "${value,,}" in
+      false | 0 | no | off)
+        log "board quirks: '${name}' declared with a falsey value ('${value}') — NOT applied"
+        continue
+        ;;
+    esac
+
+    case "${name}" in
+      m2_modem_sim_workaround)
+        log "board quirks: applying m2_modem_sim_workaround (ModemManager SIM-detection env for M.2 B-key modems)"
+        cat >>"${rules}" <<'QUIRK_M2_SIM'
+
+# =============================================================================
+# QUIRK m2_modem_sim_workaround — force ModemManager probe for M.2 modems
+# Board-gated: emitted only for a board whose manifest `quirks:` block declares
+# it (CERALIVE_BOARD_QUIRKS). M.2 B-key modems need ModemManager forced to probe
+# and to treat the port as a candidate, or SIM detection never happens.
+# =============================================================================
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2c7c", ENV{ID_MM_DEVICE_PROCESS}="1", ENV{ID_MM_CANDIDATE}="1"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1199", ENV{ID_MM_DEVICE_PROCESS}="1", ENV{ID_MM_CANDIDATE}="1"
+QUIRK_M2_SIM
+        applied=$((applied + 1))
+        ;;
+      usb_power_optimization)
+        # NOT ported to the live writer on purpose. quirks.sh's handler turns USB
+        # autosuspend ON for every USB device, which is a real runtime behaviour
+        # change on a board whose whole job is holding several cellular modems
+        # up — and it has never shipped, so there is no regression to preserve.
+        # Enabling it needs its own change with its own hardware evidence.
+        log "board quirks: 'usb_power_optimization' declared — NOT applied by the live writer (USB autosuspend is a runtime behaviour change on a modem-bearing board and needs its own hardware-evidenced change; see customize/quirks.sh)"
+        ;;
+      hdmi_input_emi_shield)
+        log "board quirks: 'hdmi_input_emi_shield' declared — DEFERRED (DT/hardware-level; needs a vendor kernel DT overlay, not applicable at config level)"
+        ;;
+      *)
+        log "board quirks: unknown quirk '${name}' — skipping (no handler), continuing"
+        ;;
+    esac
+  done
+
+  log "board quirks: dispatch complete — ${applied} applied"
+}

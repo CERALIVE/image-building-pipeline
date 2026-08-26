@@ -19,9 +19,12 @@
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
 #                 systemd-resolved, ceralive-hostname enabled
-#   D. ROUTING    SRTLA source-policy routing files present (rt_tables tables,
-#                 dhclient hook, NM dispatcher)
-#   E. UDEV/APT   udev hardware rules + deb822 Debian sources + apt.ceralive.tv
+#   D. ROUTING    the retired SRTLA source-policy routing assets are ABSENT
+#                 (rt_tables reservations, dhclient hook, NM dispatcher)
+#   E. UDEV/APT   udev hardware rules + deb822 Debian sources + apt.ceralive.tv,
+#                 plus two properties dpkg itself cannot report: no packaged udev
+#                 rules file shadowed by an image-owned /etc basename, and exactly
+#                 one owner for every modem-support file present
 #
 # Pure filesystem reads — NO dpkg/chroot needed (host may be Arch). Exit 0 only
 # when there are zero hard FAILs; CI-gated gaps (first-party offline) are WARNs.
@@ -32,6 +35,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
+# shellcheck source=lib/shared/modem-support-lib.sh
+source "${HERE}/shared/modem-support-lib.sh"
 
 # common.sh installs an ERR trap that exits 1; this script intentionally collects
 # failures and reports a summary, so drop the trap and own the exit code.
@@ -39,6 +44,7 @@ trap - ERR
 
 SHARED_LIST="${SHARED_LIST:-${HERE}/../manifests/packages/shared.list}"
 PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${HERE}/../manifests/packages}"
+MODEM_SUPPORT_LEDGER="${MODEM_SUPPORT_LEDGER:-${HERE}/../manifests/modem-support-ownership.txt}"
 
 # Reference names that the real .deb ships under another name. Without these
 # aliases the gate could never clear the app-layer check even after a real
@@ -247,26 +253,27 @@ main() {
     warn "ceralive.service absent — first-party CeraUI package not installed"
   fi
 
-  # ---- D. SRTLA SOURCE-POLICY ROUTING ----
-  log_info "--- D. SRTLA source-policy routing ---"
-  local routing_ok=1
-  if grep -qE '^100[[:space:]]+modem0' "${root}/etc/iproute2/rt_tables" 2>/dev/null \
-     && grep -qE '^120[[:space:]]+wlan0' "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
-    pass "rt_tables has SRTLA bonding tables (modem0..modem7 + wlan0..wlan4)"
+  # ---- D. RETIRED SRTLA SOURCE-POLICY ROUTING ----
+  # Inverted from a presence check: the layer is retired (evidence/todo38.md).
+  # Bonding pins egress per link with SO_BINDTODEVICE, and on the shipped edge
+  # kernel `ip rule` is unsupported, so these assets could only mis-route.
+  log_info "--- D. retired SRTLA source-policy routing (must be absent) ---"
+  if grep -qE '^1(0[0-7]|2[0-4])[[:space:]]+(modem|wlan)[0-7]' \
+       "${root}/etc/iproute2/rt_tables" 2>/dev/null; then
+    fail "rt_tables still reserves the retired SRTLA bonding tables"
   else
-    fail "rt_tables missing SRTLA bonding tables"; routing_ok=0
+    pass "rt_tables carries no retired SRTLA bonding tables"
   fi
-  if [[ -x "${root}/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing" ]]; then
-    pass "dhclient SRTLA source-routing hook present + executable"
+  if [[ -e "${root}/etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing" ]]; then
+    fail "retired dhclient SRTLA source-routing hook is present"
   else
-    fail "dhclient SRTLA source-routing hook missing/not executable"; routing_ok=0
+    pass "dhclient SRTLA source-routing hook absent"
   fi
-  if [[ -x "${root}/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing" ]]; then
-    pass "NetworkManager SRTLA wifi-routing dispatcher present + executable"
+  if [[ -e "${root}/etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing" ]]; then
+    fail "retired NetworkManager SRTLA wifi-routing dispatcher is present"
   else
-    fail "NetworkManager SRTLA wifi-routing dispatcher missing/not executable"; routing_ok=0
+    pass "NetworkManager SRTLA wifi-routing dispatcher absent"
   fi
-  [[ "${routing_ok}" == 1 ]] || true
 
   # ---- E. UDEV + APT ----
   log_info "--- E. udev rules + apt sources ---"
@@ -290,6 +297,21 @@ main() {
     fail "build-time Armbian pool leaked into the final image apt config"
   else
     pass "no build-time Armbian pool in final image (clean apt config)"
+  fi
+  # udev resolves rules by BASENAME and /etc wins over /usr/lib, so an image-owned
+  # /etc file sharing a packaged basename replaces the packaged rules entirely —
+  # while dpkg keeps reporting them installed and intact. No dpkg check can see it.
+  local shadowed
+  if shadowed="$(udev_shadow_scan_rootfs "${root}")"; then
+    pass "no packaged udev rules file is shadowed by an image-owned /etc/udev/rules.d basename"
+  else
+    fail "shadowed udev rule basename(s): $(tr '\n' '; ' <<<"${shadowed}")"
+  fi
+  local ownership
+  if ownership="$(modem_support_ownership_violations "${root}" "${MODEM_SUPPORT_LEDGER}")"; then
+    pass "every present modem-support file has exactly one owner (no orphans, no double ownership)"
+  else
+    fail "modem-support ownership violation(s): $(tr '\n' '; ' <<<"${ownership}")"
   fi
 
   # ---- F. INTERFACE NAMING ----

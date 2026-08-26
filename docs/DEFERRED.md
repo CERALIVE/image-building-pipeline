@@ -72,10 +72,9 @@ rename rules need hardware evidence.
 CeraLive device. Read `udevadm info /sys/class/net/<iface> | grep ID_PATH` for
 each modem interface. Add deterministic `.link` rules to
 `manifests/boards/<board>.yaml` (or a shared family manifest) using the
-real `ID_PATH` values. Note: any change to the modem interface naming block
-also touches the drift-gated SRTLA payloads (`ci/postinst-drift-check.sh`
-CHECK 2) and requires a twin-update of both `networking-srtla.sh` and the `§6`
-block in `mkosi.postinst.chroot`.
+real `ID_PATH` values. (The SRTLA source-policy routing twin-update this note
+used to require is GONE — that layer is retired; see `AGENTS.md` → "SRTLA
+source-policy routing is RETIRED".)
 
 ---
 
@@ -270,9 +269,7 @@ firewall** (`mkosi/runtime/ingest-firewall/ingest-firewall.nft` +
 `inet ceralive_ingest_fw` table DROPs inbound `:1935` (RTMP) and `:4001`
 (SRT) — both served by the single MediaMTX gateway (Todo 14) — on the
 **WAN/modem/WWAN/ppp** uplink interface classes
-(`usb*`/`enx*`/`ww*`/`ppp*` — the SAME classes the SRTLA source-routing dispatcher
-in `networking-srtla.sh`/postinst §6 uses; loopback and LAN/hotspot ifaces are
-untouched). So a publisher out on the public internet (a modem's public/CGNAT
+(`usb*`/`enx*`/`ww*`/`ppp*`; loopback and LAN/hotspot ifaces are untouched). So a publisher out on the public internet (a modem's public/CGNAT
 address) can NEVER reach the anonymous ingest, while a phone/OBS on the LAN or the
 device hotspot still can. Verified on nftables v1.1.6 by a veth/netns packet test:
 `:1935`/`:4001` ingress on a modem-class iface (`usb9`) is DROPPED (drop counters

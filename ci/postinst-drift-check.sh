@@ -33,11 +33,10 @@
 #                       declare -F-guarded log()/die() fallbacks, because modules
 #                       are sourced inside mkosi subimage CHROOTS where lib/ is
 #                       not mounted and nothing else may have been sourced.
-#   2. PAYLOAD PARITY — the one remaining genuinely dual-track twin, §6 SRTLA
-#                       source-policy routing (customize/networking-srtla.sh vs the
-#                       inline §6 in postinst.chroot), must emit BYTE-IDENTICAL
-#                       on-device files. Their heredoc payloads are diffed by
-#                       destination path; any divergence fails.
+#   2. RETIRED ROUTING — the §6 SRTLA source-policy routing layer is REMOVED
+#                       (evidence/todo38.md). This slot was its payload-parity
+#                       check and is now a residue guard: any reappearance of the
+#                       dispatcher, the dhclient hook, or the installer fails.
 #   3. LINE-COUNT     — postinst.chroot must not regrow past a ceiling (catches a
 #                       bulk re-inline of the ~744 consolidated lines even if it
 #                       somehow sidestepped checks 1/2).
@@ -59,7 +58,6 @@ LIB="${MKOSI}/customize/postinst-lib.sh"
 POSTINST_D="${MKOSI}/customize/postinst.d"
 SERVICES="${MKOSI}/customize/services.sh"
 DATAPERSIST="${MKOSI}/customize/data-persistence.sh"
-NETSRTLA="${MKOSI}/customize/networking-srtla.sh"
 
 # postinst.chroot ceiling. Post-consolidation it is ~841 lines; the consolidated
 # dual-track was ~744 lines. 950 leaves generous headroom for ordinary edits while
@@ -75,8 +73,8 @@ readonly CONSOLIDATED_FUNCS=(
   configure_networking configure_services setup_hostname_service
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
   setup_provisioning setup_rtmp_gateway
-  setup_ingest_firewall setup_uplink_sharing_carrier
-  setup_typec_source_role setup_fan_curve
+  setup_ingest_firewall setup_uplink_sharing_carrier setup_dongle_netns_retirement
+  setup_typec_source_role setup_fan_curve apply_board_quirks
   setup_fan_kickstart setup_led_status setup_hdmirx_edid freeze_boot_packages
 )
 
@@ -111,24 +109,11 @@ where_defined() {
   printf '%s' "${found[*]-none}"
 }
 
-# heredoc_for <file> <dest-substr> — print the body of the `cat >DEST <<DELIM`
-# here-document whose redirect target contains <dest-substr>. Keyed by destination
-# path (stable) rather than delimiter name (ambiguous: postinst.chroot reuses EOF).
-heredoc_for() {
-  awk -v dest="$2" '
-    !f && index($0, "cat ") && index($0, "<<") && index($0, dest) {
-      s = $0; sub(/.*<</, "", s); gsub(/[ \t"'"'"']/, "", s); delim = s; f = 1; next
-    }
-    f && $0 == delim { exit }
-    f { print }
-  ' "$1"
-}
-
 main() {
   note "=== postinst dual-track drift gate (Task 6) ==="
 
   local f
-  for f in "${POSTINST}" "${LIB}" "${SERVICES}" "${DATAPERSIST}" "${NETSRTLA}"; do
+  for f in "${POSTINST}" "${LIB}" "${SERVICES}" "${DATAPERSIST}"; do
     [[ -f "${f}" ]] || bad "missing expected file: ${f}"
   done
   [[ -d "${POSTINST_D}" ]] || bad "missing expected dir: ${POSTINST_D}"
@@ -200,21 +185,23 @@ main() {
     fi
   done
 
-  # --- CHECK 2: §6 SRTLA payload parity (remaining dual-track twin) ----------
-  note "CHECK 2 — §6 SRTLA payloads byte-identical (networking-srtla.sh vs postinst.chroot §6)"
-  local dest a b
-  for dest in /etc/iproute2/rt_tables \
-              /etc/dhcp/dhclient-exit-hooks.d/srtla-source-routing \
-              /etc/NetworkManager/dispatcher.d/90-srtla-wifi-routing; do
-    a="$(heredoc_for "${NETSRTLA}" "${dest}")"
-    b="$(heredoc_for "${POSTINST}" "${dest}")"
-    if [[ -z "${a}" || -z "${b}" ]]; then
-      bad "  ${dest}: could not extract payload from BOTH tracks (a=${#a}B, b=${#b}B)"
-    elif [[ "${a}" == "${b}" ]]; then
-      ok "  ${dest}: payload identical"
+  # --- CHECK 2: SRTLA source-policy routing stays RETIRED --------------------
+  # Was a §6 payload-parity check between two now-deleted twins. The layer is
+  # retired because on the shipped edge kernel `ip rule` is unsupported, so its
+  # `ip route add … table N` silently mutated the MAIN table and it then logged a
+  # success that was false. Inverted to a residue guard so it cannot come back.
+  note "CHECK 2 — retired SRTLA source-policy routing has not returned"
+  # Do NOT widen to ${MKOSI}: mkosi/build/ and mkosi/cache/ are gitignored rootfs
+  # output whose stale copies would fail this gate on any machine that has built.
+  local retired hits hit
+  local -a srcdirs=("${MKOSI}/customize" "${MKOSI}/mkosi.images" "${MKOSI}/runtime")
+  for retired in 90-srtla-wifi-routing srtla-source-routing configure_srtla_routing; do
+    hits="$(grep -rlF "${retired}" "${srcdirs[@]}" 2>/dev/null || true)"
+    if [[ -z "${hits}" ]]; then
+      ok "  ${retired}: absent"
     else
-      bad "  ${dest}: payload DIVERGED between networking-srtla.sh and postinst.chroot §6"
-      diff <(printf '%s\n' "${a}") <(printf '%s\n' "${b}") | sed 's/^/        /' >&2
+      bad "  ${retired}: RESURRECTED — policy routing was retired, see evidence/todo38.md"
+      while IFS= read -r hit; do printf '        %s\n' "${hit}" >&2; done <<<"${hits}"
     fi
   done
 
@@ -232,7 +219,7 @@ main() {
     note "RESULT: DRIFT DETECTED — fix the FAIL lines above (re-source postinst-lib.sh; do not re-inline)"
     return 1
   fi
-  note "RESULT: no drift — postinst-lib.sh is the single source of truth; §6 payloads in sync"
+  note "RESULT: no drift — postinst-lib.sh is the single source of truth; retired routing stays retired"
   return 0
 }
 
