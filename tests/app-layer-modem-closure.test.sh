@@ -4,15 +4,17 @@
 # the ModemManager 1.24 closure as runtime-abi packages.
 #
 # THE CONTRACT THIS PROVES. The nine fork .debs (modemmanager, libmm-glib0,
-# libmbim-glib4/proxy/utils, libqmi-glib5/proxy/utils, libqrtr-glib0) are staged
-# first-party and MUST be classified RUNTIME_APP_PKGS by
+# libmbim-glib4/proxy/utils, libqmi-glib5/proxy/utils, libqrtr-glib0) and their
+# Architecture: all support companion are staged first-party and MUST be classified
+# RUNTIME_APP_PKGS by
 # mkosi.images/app/mkosi.postinst.chroot::install_first_party_apps — never
 # SYSEXT/APPFS, never "unclassified" (which is a fatal build error). This test
 # sources that function (the script's `main` is BASH_SOURCE-guarded so its
 # destructive prune/clean steps never run here), stages fake staged .debs, stubs
 # the package tools, and asserts the classification + a clean local install.
 #
-# Positive: the 9 closure debs each log `runtime-abi` and the transaction runs.
+# Positive: the 9 closure debs and support companion each log `runtime-abi` and the
+# transaction runs.
 # Negative: a deb whose Package: name is in NO class dies with "unclassified".
 #
 # shellcheck disable=SC2317  # stub function bodies are reached via PATH, not calls
@@ -35,6 +37,7 @@ MODEM_CLOSURE=(
   libmbim-glib4 libmbim-proxy libmbim-utils
   libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0
+  ceralive-modem-support
 )
 
 # Fake package tools on PATH: dpkg-deb maps a staged file back to the Package name
@@ -86,7 +89,7 @@ run_install() {
   ' 2>&1
 }
 
-# --- Positive: the 9 closure debs classify as runtime-abi and install ---------
+# --- Positive: closure and companion classify as runtime-abi and install --------
 POS_DIR="${RUN_DIR}/staging-positive"
 stage_debs "${POS_DIR}" "${MODEM_CLOSURE[@]}"
 if ! pos_out="$(run_install "${POS_DIR}")"; then
@@ -97,15 +100,15 @@ for pkg in "${MODEM_CLOSURE[@]}"; do
   grep -Fq "runtime-abi  : ${pkg}" <<<"${pos_out}" \
     || { printf '%s\n' "${pos_out}" >&2; fail "closure deb '${pkg}' was not classified runtime-abi"; }
 done
-grep -Fq 'installing 9 first-party .deb(s)' <<<"${pos_out}" \
-  || { printf '%s\n' "${pos_out}" >&2; fail "expected a 9-deb local install transaction"; }
-# Non-vacuity: none of the closure debs slipped into the sysext or appfs class.
-if grep -Eq 'sysext-class : (modemmanager|lib(mm|mbim|qmi|qrtr))' <<<"${pos_out}" \
-   || grep -Eq 'appfs-class  : (modemmanager|lib(mm|mbim|qmi|qrtr))' <<<"${pos_out}"; then
+grep -Fq 'installing 10 first-party .deb(s)' <<<"${pos_out}" \
+  || { printf '%s\n' "${pos_out}" >&2; fail "expected a 10-deb local install transaction"; }
+# Non-vacuity: neither closure nor companion slipped into the sysext or appfs class.
+if grep -Eq 'sysext-class : (modemmanager|lib(mm|mbim|qmi|qrtr)|ceralive-modem-support)' <<<"${pos_out}" \
+   || grep -Eq 'appfs-class  : (modemmanager|lib(mm|mbim|qmi|qrtr)|ceralive-modem-support)' <<<"${pos_out}"; then
   printf '%s\n' "${pos_out}" >&2
   fail "a closure deb was misclassified as sysext/appfs"
 fi
-echo "app-layer-modem-closure: PASS positive (9 closure debs classify runtime-abi + install)"
+echo "app-layer-modem-closure: PASS positive (9 closure debs + companion classify runtime-abi + install)"
 
 # --- Negative: an unclassified deb is a fatal build error (test has teeth) -----
 NEG_DIR="${RUN_DIR}/staging-negative"

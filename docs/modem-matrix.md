@@ -35,6 +35,12 @@ These nine form a **self-contained dependency closure** (`modemmanager` →
 `libmm-glib0`; the glib libs bind to the qmi/mbim/qrtr transports). External deps
 (GLib, `libgudev`, `polkit`, systemd) come from Debian.
 
+`ceralive-modem-support=1.3.0` is a separate, `Architecture: all` first-party
+companion staged through that same app-layer route. It owns generic modem system
+assets, including `60-ceralive-modem.rules`; the image-owned
+`99-ceralive-hardware.rules` and generated `78-mm-ceralive-slot-uid.rules` have
+distinct basenames, so udev cannot shadow the packaged companion rules.
+
 Supporting packages that stay **Debian** (`manifests/packages/shared.list`):
 
 | Package | Role | Source |

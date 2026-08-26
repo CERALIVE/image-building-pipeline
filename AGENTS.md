@@ -942,7 +942,7 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
@@ -1486,7 +1486,7 @@ occurrence of each of those `make` calls in the file.
   (non-`DRY_RUN`) `./build <board> --variant edge` produces
   `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
   `validate_built_kernel_deb` axes, installs the board DTB to
-  `/boot/dtb/rockchip/`, installs all 14 first-party `.deb`s, clears the `[7/9]`
+  `/boot/dtb/rockchip/`, installs all 15 first-party `.deb`s, clears the `[7/9]`
   parity gate and emits a flashable `.raw` + signed `.raucb` — proven on
   `rock-5b-plus` first, and on `orange-pi-5-plus` once the DTB-name override and
   the first-party staging key below were both fixed. A Rock 5B+ has since been
@@ -1536,7 +1536,7 @@ occurrence of each of those `make` calls in the file.
   NOT `BOARD_ID` — and the source-mount fallback is the ONLY live delivery
   route.** mkosi's CLI `--extra-tree …:/opt/ceralive-staging` does not reach the
   `app` subimage (the same subimage-isolation trap as `PassEnvironment=`), so on
-  every board the 14 first-party `.deb`s are actually delivered by the fallback
+  every board the 15 first-party `.deb`s are actually delivered by the fallback
   `stage_first_party_from_source_mount` in `app/mkosi.postinst.chroot`. It
   rebuilds the orchestrator's staging path from inside its chroot, so producer
   and consumer must agree on the key. They did not: the consumer read
@@ -3520,7 +3520,7 @@ a kernel `.deb` (or an extracted module tree) and reports each module as loadabl
   the check **always exits 0**. It never fails the build and never edits
   `shared.list` or the kernel config. Proof: `run-tests` section 17.
 
-**ModemManager 1.24 closure — first-party fork, app-layer install** [EXISTS]
+**ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 
 The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
 (`~ceralive0.2.0`, modem-stack v0.2.0), not Debian's ModemManager. Nine
@@ -3532,7 +3532,11 @@ the app postinst (`app/mkosi.postinst.chroot`). Their local `dpkg -i` **upgrades
 the Debian modem packages the runtime layer pulled transitively via `shared.list`
 (`modemmanager`/`libqmi-utils`/`libmbim-utils` stay there to resolve the full
 dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come from
-Debian). The `Package: *` origin-990 pin keeps the fork winning on-device.
+Debian). `ceralive-modem-support=1.3.0` is the Architecture: all companion from
+modem-stack v1.3.0; it is staged exactly once and classified `RUNTIME_APP_PKGS`,
+never added to `shared.list`. `modem-stack` is in `REPOS` only for fetch-banner
+provenance; its pin does not select a downloaded package version. The `Package: *`
+origin-990 pin keeps the fork winning on-device.
 `mobile-broadband-provider-info` (ModemManager's APN database, a `Recommends:`) is
 an explicit `shared.list` entry. Full source-of-truth: `docs/modem-matrix.md §1`.
 Guards: `postinst-wiring.bats §23` (closure membership, RUNTIME_APP_PKGS classification,
@@ -3540,7 +3544,7 @@ exact pins, origin-990 wildcard coverage, DRY_RUN resolution) +
 `tests/app-layer-modem-closure.test.sh` (executable install/classification).
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
-`FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 14 first-party `.deb`s
+`FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 15 first-party `.deb`s
 into `<staging>/debs/`, the `[3/9]` step in `lib/orchestrate.sh` partitions each
 staged `.deb` into BSP vs first-party by an exact package-name allowlist
 (`firstparty_names`). A REAL (non-`DRY_RUN`) build `die`s with `unclassified staged
@@ -3548,7 +3552,7 @@ package` if a fetched first-party package is missing from that allowlist. The 9
 ModemManager-closure packages were added to `FIRST_PARTY_APT_PKGS` (fetcher) but not
 to `firstparty_names` (partitioner), so the first full build after that landed blew
 up at `[3/9]` — invisible to CI because the PR gate only runs `DRY_RUN=1` plan-only
-builds (the partitioner never runs there). `firstparty_names` now lists all 14. Guard:
+builds (the partitioner never runs there). `firstparty_names` now lists all 15. Guard:
 `tests/firstparty-classification.test.sh` (sources `FIRST_PARTY_APT_PKGS` from the
 fetcher and asserts the partitioner allowlist is a superset). Wired into `run-tests`.
 

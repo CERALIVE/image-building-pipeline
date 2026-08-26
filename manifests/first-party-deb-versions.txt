@@ -13,3 +13,4 @@ libqmi-glib5=1.38.0-1~ceralive0.2.0
 libqmi-proxy=1.38.0-1~ceralive0.2.0
 libqmi-utils=1.38.0-1~ceralive0.2.0
 libqrtr-glib0=1.4.0-1~ceralive0.2.0
+ceralive-modem-support=1.3.0

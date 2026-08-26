@@ -53,14 +53,15 @@ SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvch264src srtla-send-rs"
 APPFS_APP_PKGS="ceralive-device"
 # runtime-abi class: shared runtime libraries + first-party daemons installed into
 # the rootfs, atomic with the RAUC slot (no sysext/appfs OTA split). libsrt is the
-# forked SRT ABI; the nine ModemManager 1.24 closure packages are the CeraLive fork
-# of the cellular stack — they UPGRADE the Debian modem packages the runtime layer
-# pulled via shared.list dependencies, in the same local dpkg transaction.
+# forked SRT ABI; the nine ModemManager 1.24 closure packages and their
+# Architecture: all support companion are the CeraLive cellular stack — they
+# UPGRADE the Debian modem packages the runtime layer pulled via shared.list
+# dependencies, in the same local dpkg transaction.
 RUNTIME_APP_PKGS="libsrt1.5-ceralive \
 modemmanager libmm-glib0 \
 libmbim-glib4 libmbim-proxy libmbim-utils \
 libqmi-glib5 libqmi-proxy libqmi-utils \
-libqrtr-glib0"
+ libqrtr-glib0 ceralive-modem-support"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
 # wrongly-pruned .deb fails loudly instead of shipping an app that cannot encode/bond

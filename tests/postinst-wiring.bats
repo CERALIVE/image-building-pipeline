@@ -267,9 +267,10 @@ load manifest-helpers
 # ===========================================================================
 # 23. ModemManager 1.24 closure image integration + fail-closed modem_ports udev.
 #     The nine-package modem-stack fork (modemmanager + libmm-glib0 +
-#     libmbim/libqmi/libqrtr) is staged first-party (FIRST_PARTY_APT_PKGS),
-#     exact-pinned in first-party-deb-versions.txt, classified RUNTIME_APP_PKGS by
-#     the app postinst, and covered by the Package:* origin-990 pin. The board
+#     libmbim/libqmi/libqrtr) plus its Architecture: all support companion are
+#     staged first-party (FIRST_PARTY_APT_PKGS), exact-pinned in
+#     first-party-deb-versions.txt, classified RUNTIME_APP_PKGS by the app postinst,
+#     and covered by the Package:* origin-990 pin. The board
 #     modem_ports block drives a FAIL-CLOSED udev generator: unverified ⇒ zero
 #     generated slot-uid rules, verified fixture ⇒ rules emitted. All static /
 #     sourced-function checks — UNIT scope, no image.
@@ -281,8 +282,18 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     grep -Fxq "$pkg" <<<"$staged" || { echo "missing from FIRST_PARTY_APT_PKGS: $pkg"; false; }
   done
-  # The set grew by exactly nine (5 original + 9 closure = 14).
-  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 14 ]
+  # The set is five core packages + nine closure packages + one support companion.
+  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 15 ]
+}
+
+@test "modem support companion: is staged once at its exact Architecture-all version" {
+  local staged pins arch_all_ok
+  staged="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")"
+  [ "$(grep -Fxc 'ceralive-modem-support' <<<"$staged")" -eq 1 ]
+  pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
+  [ "$(awk -F= '$1=="ceralive-modem-support"{print $2}' "$pins")" = "1.3.0" ]
+  arch_all_ok="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_ARCH_ALL_OK_PKGS[@]}"' bash "$PIPELINE_DIR/lib/fetch/firstparty.sh")"
+  [ "$arch_all_ok" = "ceralive-modem-support" ]
 }
 
 @test "modem closure: each package has an exact live-verified Version pin in the txt" {
@@ -314,6 +325,23 @@ load manifest-helpers
   done
 }
 
+@test "modem support companion: is classified RUNTIME_APP_PKGS and has no image-owned udev basename collision" {
+  local app="$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
+  local runtime_line sysext_line appfs_line companion_rule image_rules
+  runtime_line="$(awk '/^RUNTIME_APP_PKGS=/{f=1} f{printf "%s ", $0} f&&!/\\$/{exit}' "$app")"
+  sysext_line="$(grep -E '^SYSEXT_APP_PKGS=' "$app")"
+  appfs_line="$(grep -E '^APPFS_APP_PKGS=' "$app")"
+  [[ "$runtime_line" == *" ceralive-modem-support"* || "$runtime_line" == *'"ceralive-modem-support'* ]]
+  [[ "$sysext_line" != *"ceralive-modem-support"* ]]
+  [[ "$appfs_line" != *"ceralive-modem-support"* ]]
+
+  companion_rule="60-ceralive-modem.rules"
+  image_rules="99-ceralive-hardware.rules 78-mm-ceralive-slot-uid.rules"
+  for rule in $image_rules; do
+    [ "$companion_rule" != "$rule" ] || { echo "udev basename collision: $companion_rule"; false; }
+  done
+}
+
 @test "modem closure: mobile-broadband-provider-info is in shared.list (Recommends not auto-pulled)" {
   run grep -Ex 'mobile-broadband-provider-info[[:space:]]*(#.*)?' "$PIPELINE_DIR/manifests/packages/shared.list"
   [ "$status" -eq 0 ]
@@ -341,6 +369,8 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     [[ "$output" == *"$pkg"* ]] || { echo "DRY_RUN plan missing $pkg"; false; }
   done
+  [[ "$output" == *"ceralive-modem-support=1.3.0"* ]] \
+    || { echo "DRY_RUN plan missing ceralive-modem-support=1.3.0"; false; }
   # plan-only: nothing staged
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]

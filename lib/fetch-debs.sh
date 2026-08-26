@@ -147,11 +147,11 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../versions.yaml}"
 # boot-parity-results.md). RK3588 hardware-gated profiles now track as
 # cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
-REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs")
+REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
 
 # REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
 assert_repos_integrity() {
-  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla-send-rs")
+  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
   (( ${#REPOS[@]} == ${#_sacred[@]} )) \
     || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
   local i
@@ -163,12 +163,13 @@ assert_repos_integrity() {
 assert_repos_integrity
 
 # The device first-party set: the CeraLive runtime .debs (libsrt/cerastream/
-# CeraUI/srtla-send) + the capture plugin, PLUS the ModemManager 1.24 closure —
-# the 9-package modem-stack set forked and published by modem-stack v0.2.0 on
-# apt.ceralive.tv. The closure is self-contained: modemmanager depends on
+# CeraUI/srtla-send) + the capture plugin, PLUS the ModemManager 1.24 closure and
+# its Architecture: all modem support companion from modem-stack v1.3.0. The
+# closure is self-contained: modemmanager depends on
 # libmm-glib0, and the libmbim/libqmi/libqrtr packages provide the QMI/MBIM
 # transport its glib libs bind to — all nine carry the ~ceralive0.2.0 fork suffix.
-# They are staged like every other first-party .deb (exact pins in
+# The companion is separately versioned at bare SemVer. They are staged like every
+# other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).
 # External deps (glib, libgudev, polkit, …) come from Debian via shared.list; the
 # origin-990 pin (customize/apt-ceralive-repo.sh, Package: *) keeps the fork
@@ -179,6 +180,7 @@ FIRST_PARTY_APT_PKGS=(
   "libmbim-glib4" "libmbim-proxy" "libmbim-utils"
   "libqmi-glib5" "libqmi-proxy" "libqmi-utils"
   "libqrtr-glib0"
+  "ceralive-modem-support"
 )
 usage() {
   cat >&2 <<EOF
