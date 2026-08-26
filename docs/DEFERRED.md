@@ -378,9 +378,9 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — booted on rock-5b-plus, never booted on orange-pi-5-plus
+## 9. Kernel-build-from-source variant — now booted on BOTH rk3588 boards
 
-**Status:** Partly unblocked AT THE `v7.1.7` BASE, and NOT re-measured at the current `v7.2` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and a `rock-5b-plus` was flashed and BOOTED (`7.1.7-ceralive-rk3588`); `orange-pi-5-plus` has still never booted an edge image on any pin. At `v7.2` the tree is cross-compile-proven only — no image built, flashed or booted on either board
+**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and BOTH have now been flashed and BOOTED (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. The tree has since been re-anchored to `v7.2` (see `ce4ebe7`); at `v7.2` the tree is cross-compile-proven only — no image has yet been built, flashed, or booted at this pin on either board. This todo (25) is the first attempt to close that gap on real hardware.
 **Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -404,8 +404,16 @@ and the built `/boot/config-*`. Reaching that required fixing four defects the
 `orange-pi-5-plus` has since reached the same point: after the DTB-name override
 and the staging-key fix below, `CERALIVE_BENCH_LABELS=1 build orange-pi-5-plus
 --variant edge` completes (exit 0), installs all 14 first-party `.deb`s, clears
-the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`. It, too, has never
-been booted.
+the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`.
+
+**Booted, 2026-08-26.** That artifact (`20260826T134604Z.raw`) was byte-verified by
+read-back, written to a microSD, and booted on a physical Orange Pi 5 Plus — the first
+edge boot ever recorded on this board. It reached userspace, came up on the network,
+and served the CeraUI first-run flow; the board's eMMC was not written. The USB-C
+source-role battery ran there and scored 5/6 (the sixth check is blocked on camera
+placement, not on a failure) — see the USB-C entry in `AGENTS.md` for the per-board
+verdicts. This does not promote the edge track: the deployment was bench-labelled,
+nothing was published, and production still runs the prebuilt vendor 6.1 BSP per D3.
 
 **Still deferred, and now on two axes:** the whole build/boot result above is a
 `v7.1.7` record, so the `v7.2` re-pin re-opens it — a real `--variant edge` build

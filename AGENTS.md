@@ -3790,8 +3790,8 @@ SMC/interrupt-routing support `snps_hdmirx` requires is out of scope here and
 has not been attempted.
 
 **The USB-C connector MUST be pinned to the Type-C `source` role at boot — else the
-camera is sometimes not on the USB bus at all** [EXISTS — code merged-ready, NOT in
-any shipped release yet]
+camera is sometimes not on the USB bus at all** [EXISTS — bench-validated on both
+RK3588 boards on 2026-08-26, reboot persistence PROVEN; NOT in any shipped release]
 
 `/sys/class/typec/port0` is an FUSB302 TCPM connector (`feac0000.i2c/i2c-4/4-0022`)
 that drives the DWC3 controller `fc000000.usb` through a `usb-role-switch`. The
@@ -3857,11 +3857,43 @@ ordering-only, the `[dual]`→`source` transition, idempotency against the brack
 source, and the `configure_services` wiring. `setup_typec_source_role` is registered
 in `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
 
-**Not yet in a shipped release.** This is code-complete and merged-ready only; it has
-not been through this repo's build/flash/release cycle, so no published image carries
-it. The persistent version still needs the normal on-hardware board-proof (confirm a
-reboot leaves `port_type` pinned and the camera enumerates exactly as the live sysfs
-poke did) before it is claimed as shipped.
+**Validation status, per board, as of 2026-08-26.** The service is now bench-proven on
+real hardware on both RK3588 boards, from images this pipeline built. It is still NOT
+in any shipped release: both deployments used bench-labelled artifacts
+(`CERALIVE_BENCH_LABELS=1`), nothing was published to apt or R2, and no production
+image carries the unit yet.
+
+| Board | Artifact | Result |
+|---|---|---|
+| Radxa ROCK 5B+ | bench-labelled RAUC bundle `20260826T152647Z.raucb` | **5/7 checks PASS**, 0 FAIL, 2 BLOCKED. Kernel `7.1.7-ceralive-rk3588`, unit `active (exited)` with `Result=success`, `port_type` reads `dual [source] sink`, `fusb302` bound, and all of that **survived a second reboot with no manual sysfs write**. BLOCKED: Osmo enumeration and the UVC smoke, because the camera was physically on the other board. |
+| Orange Pi 5 Plus | bench-labelled `20260826T134604Z.raw` on microSD | **5/6 checks PASS**, 0 FAIL, 1 BLOCKED. This was the **first edge boot ever recorded on this board**. Same battery: kernel, unit success, `[source]` readback, `fusb302` bound, all persisting across a reboot with no manual write. BLOCKED: Osmo enumeration and the UVC smoke, same camera-placement reason. |
+
+Two things that read as failures but are not. The blocked checks are a **precondition
+gap**, not a negative result: one DJI Osmo Pocket 3 exists on the bench and it can only
+be attached to one board at a time, so nothing was measured and nothing is claimed.
+And the Rock deployment did not land on the eMMC A/B pair the plan originally assumed.
+A fail-closed medium/slot preflight found that this specific board's eMMC holds only
+vendor-6.1 rootfs slots with no spare for edge testing, so the bundle was installed
+into the board's actual RAUC-managed slot on the bench microSD instead. Both vendor
+eMMC slots were confirmed unmounted and byte-identical (boot-state SHA-256 unchanged)
+before and after the whole exercise.
+
+**Board-specific finding: the service may not be load-bearing on the Orange Pi.** With
+no USB peer attached at all, that board already read `data_role = [host] device` and
+`power_role = [source] sink`, which is consistent with its mainline device tree's
+`try-power-role = "source"` preference and unlike the Rock's observed dual-role race.
+The unit installs, enables, exits 0, enforces the role, and persists there, so its
+*correctness* is proven on the Orange Pi; its *necessity* on that board is not. Treat
+this as a reason to keep the unit (it costs one bounded poll and is a clean no-op when
+the role is already right), not as grounds to make it board-conditional.
+
+**What is still open.** Camera enumeration and the UVC smoke on both boards, pending
+camera placement. Beyond that, the electrical-class F19 item (spontaneous CC-line
+dropout) is a **separate, still-open** problem that this work does not touch, address,
+or fix; role pinning is about which end wins arbitration, not about the CC lines
+dropping out later. And none of this changes the production kernel track: the shipped
+image still runs the prebuilt vendor 6.1 BSP, decision D3 stands exactly as written,
+and `docs/kernel-track-decision.md` is unaffected in substance.
 
 **The `pwm-fan` cooling device is never ASKED to run below 55 °C — so the fix is to
 move ONE trip point, not to take over the fan** [EXISTS — code merged-ready, NOT in

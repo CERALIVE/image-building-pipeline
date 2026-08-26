@@ -609,9 +609,18 @@ probe, so the unit polls for it to a deadline rather than sleeping a fixed amoun
 board with no Type-C connector, or a port that never appears, is a clean no-op.
 
 Verified live on a Rock 5B+ (including straight after a cold power-cycle): with the
-port pinned, the camera enumerates within seconds on every attempt. **This code is
-merged-ready but has not been through a release — no published image carries it yet,
-and the persistent behaviour still needs an on-hardware board-proof.** Guards:
+port pinned, the camera enumerates within seconds on every attempt.
+
+On 2026-08-26 the unit itself was bench-validated on real hardware on both RK3588
+boards, from images this pipeline built: a Rock 5B+ (bench RAUC bundle, 5/7 checks
+pass) and an Orange Pi 5 Plus (bench microSD, first edge boot on that board, 5/6
+checks pass). On both, the unit exits successfully, `port_type` reads
+`dual [source] sink`, `fusb302` is bound, and **all of that survives a reboot with no
+manual sysfs write** — the persistence proof that was previously missing. The
+remaining checks on both boards are blocked on camera placement (one camera, two
+boards), not on any negative result. **Both deployments used bench-labelled artifacts:
+nothing was published, and no shipped image carries the unit yet.** Per-board verdicts
+and the Orange Pi's device-tree caveat are in `AGENTS.md`. Guards:
 `tests/runtime-services.bats` §18d.
 
 ## Fan Curve
