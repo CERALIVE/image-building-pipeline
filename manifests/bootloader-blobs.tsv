@@ -56,21 +56,21 @@
 
 # --- Orange Pi 5+ ----------------------------------------------------------
 # PRODUCTION (vendor): U-Boot 2017.09 Rockchip fork, closed rkbin BL31.
-orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
-orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
+orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
+orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
 # EDGE: U-Boot 2026.01, TF-A compiled from ARM-software v2.13.0 (mainline).
-orangepi5-plus	edge	linux-u-boot-orangepi5-plus-edge	26.5.1	u-boot-rockchip.bin	4678b97472cc8b615113d839752f4db76f969ed338e1c9d31472c5121b7f7807
-orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
-orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
-orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.5.1	idbloader.img	0d16ac55deb99c7b4c4f006b9183e2e8c42dee799724b126a50fd593d69d4e71
-orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.5.1	u-boot.itb	c9cfe16d20787dedf3c45f98cb6a47391c2996eeb1dabdbba705904e51ea8d61
+orangepi5-plus	edge	linux-u-boot-orangepi5-plus-edge	26.8.3	u-boot-rockchip.bin	7b9fd2ea241b831ec7c40d790a3ad835b763de70ab60493a95ca69b4aa3b0391
+orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
+orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
+orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
+orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
 
 # --- Radxa Rock 5B+ --------------------------------------------------------
 # PRODUCTION (vendor): U-Boot 2026.04, unified blob. This board's armbian/build
 # hook carries no `vendor` branch guard, so this payload already has the same
 # shape as its -current/-edge siblings; the bytes still differ, hence its own row.
-rock-5b-plus	default	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a
+rock-5b-plus	default	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb
 # EDGE: U-Boot 2026.04, TF-A compiled from ARM-software v2.13.0 (mainline).
-rock-5b-plus	edge	linux-u-boot-rock-5b-plus-edge	26.5.1	u-boot-rockchip.bin	040addabe71b5984c65aad73972fd4ac8d5af65be82b260a945ad5f234409744
-rock-5b-plus	edge-test	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a
-rock-5b-plus	vendor-patched	linux-u-boot-rock-5b-plus-vendor	26.5.1	u-boot-rockchip.bin	9992f9b67640ca9e9cb8e7dbd2c0ba39383b0e827fba9bb374350c26a675815a
+rock-5b-plus	edge	linux-u-boot-rock-5b-plus-edge	26.8.3	u-boot-rockchip.bin	e25c276ec6961e394e5aa8f34b476bcf90367bcfd7eaeb6ebf77e684a13302cc
+rock-5b-plus	edge-test	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb
+rock-5b-plus	vendor-patched	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb
