@@ -1,0 +1,56 @@
+# CeraLive modem-support file-ownership ledger
+#
+# Every modem-support file in the emitted rootfs, and the ONE producer that owns
+# it. Read by lib/shared/modem-support-lib.sh; enforced offline by
+# tests/modem-support-file-ownership.test.sh + tests/udev-rule-basename-shadow.test.sh
+# and against a real emitted rootfs by lib/parity-check.sh §E.
+#
+# Format:  <owner><TAB or spaces><absolute rootfs path>
+#
+# Owners — a CLOSED vocabulary of exactly two values:
+#   ceralive-modem-support   shipped by the first-party companion .deb (modem-stack).
+#                            Lives under /usr only; a packaged file in /etc would be
+#                            a conffile the image could silently diverge from.
+#   image                    generated into the rootfs by an image writer and owned
+#                            by NO package. Lives under /etc only; the admin tier is
+#                            where udev/usb_modeswitch expect local policy, and it is
+#                            the tier a package upgrade never touches.
+#
+# THE RULE THIS FILE EXISTS FOR: no /etc/udev/rules.d BASENAME may equal a
+# /usr/lib/udev/rules.d BASENAME. udev resolves by basename across its search path
+# and the /etc copy wins outright, so a collision silently replaces the packaged
+# rules while `dpkg -S` still names the package and `dpkg --verify` still passes —
+# the packaged file is intact, it is simply never read. That is why the image's
+# rules are `99-ceralive-hardware.rules` / `78-mm-ceralive-slot-uid.rules` and the
+# packaged one is the modem-only `60-ceralive-modem.rules`.
+#
+# A path here does NOT have to exist in every rootfs: the slot-UID rules are
+# board-gated (fail-closed while modem_ports.status is `unverified`) and an
+# offline/dev build stages no first-party .deb at all. The checks judge who owns
+# what is present, never whether an optional file was generated.
+
+# ── Packaged: ceralive-modem-support (Architecture: all) ─────────────────────
+# Mirrors modem-stack packaging/ceralive-modem-support/debian/rules' explicit
+# per-asset installation table. Each asset goes to the directory ITS OWN consumer
+# canonically reads; the admin-override tier for each is a directory this package
+# never writes.
+ceralive-modem-support	/usr/lib/udev/rules.d/60-ceralive-modem.rules
+ceralive-modem-support	/usr/share/usb_modeswitch/12d1:1f01
+ceralive-modem-support	/usr/share/usb_modeswitch/19d2:1225
+ceralive-modem-support	/usr/lib/ceralive-modem-support/ceralive-fcc-reconcile
+ceralive-modem-support	/usr/lib/systemd/system/ceralive-fcc-reconcile.service
+ceralive-modem-support	/usr/share/ceralive-modem-support/legacy/60-ceralive-modem.rules.legacy-v1
+ceralive-modem-support	/usr/share/ceralive-modem-support/legacy-etc-overrides.sha256
+
+# ── Image-generated: owned by no package ────────────────────────────────────
+# 99-ceralive-hardware.rules is written by the LIVE runtime writer
+# (mkosi/mkosi.images/runtime/mkosi.postinst.chroot::setup_hardware_access) and by
+# the canonical mkosi/customize/udev.sh twin, then APPENDED to by the board-gated
+# M.2 SIM quirk rows (mkosi/customize/postinst.d/hardware.sh::apply_board_quirks).
+# Those quirk rows consume build-time board facts a generic package cannot know, so
+# they stay image-owned here and are deliberately NOT folded into the companion.
+image	/etc/udev/rules.d/99-ceralive-hardware.rules
+# 78-mm-ceralive-slot-uid.rules is emitted ONLY for a board whose modem_ports
+# status is `verified` (mkosi/customize/udev.sh::generate_modem_slot_uid_rules);
+# every shipped board is `unverified`, so on today's images it is absent.
+image	/etc/udev/rules.d/78-mm-ceralive-slot-uid.rules

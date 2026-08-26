@@ -21,7 +21,10 @@
 #                 systemd-resolved, ceralive-hostname enabled
 #   D. ROUTING    the retired SRTLA source-policy routing assets are ABSENT
 #                 (rt_tables reservations, dhclient hook, NM dispatcher)
-#   E. UDEV/APT   udev hardware rules + deb822 Debian sources + apt.ceralive.tv
+#   E. UDEV/APT   udev hardware rules + deb822 Debian sources + apt.ceralive.tv,
+#                 plus two properties dpkg itself cannot report: no packaged udev
+#                 rules file shadowed by an image-owned /etc basename, and exactly
+#                 one owner for every modem-support file present
 #
 # Pure filesystem reads — NO dpkg/chroot needed (host may be Arch). Exit 0 only
 # when there are zero hard FAILs; CI-gated gaps (first-party offline) are WARNs.
@@ -32,6 +35,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
+# shellcheck source=lib/shared/modem-support-lib.sh
+source "${HERE}/shared/modem-support-lib.sh"
 
 # common.sh installs an ERR trap that exits 1; this script intentionally collects
 # failures and reports a summary, so drop the trap and own the exit code.
@@ -39,6 +44,7 @@ trap - ERR
 
 SHARED_LIST="${SHARED_LIST:-${HERE}/../manifests/packages/shared.list}"
 PKG_MANIFEST_DIR="${PKG_MANIFEST_DIR:-${HERE}/../manifests/packages}"
+MODEM_SUPPORT_LEDGER="${MODEM_SUPPORT_LEDGER:-${HERE}/../manifests/modem-support-ownership.txt}"
 
 # Reference names that the real .deb ships under another name. Without these
 # aliases the gate could never clear the app-layer check even after a real
@@ -291,6 +297,21 @@ main() {
     fail "build-time Armbian pool leaked into the final image apt config"
   else
     pass "no build-time Armbian pool in final image (clean apt config)"
+  fi
+  # udev resolves rules by BASENAME and /etc wins over /usr/lib, so an image-owned
+  # /etc file sharing a packaged basename replaces the packaged rules entirely —
+  # while dpkg keeps reporting them installed and intact. No dpkg check can see it.
+  local shadowed
+  if shadowed="$(udev_shadow_scan_rootfs "${root}")"; then
+    pass "no packaged udev rules file is shadowed by an image-owned /etc/udev/rules.d basename"
+  else
+    fail "shadowed udev rule basename(s): $(tr '\n' '; ' <<<"${shadowed}")"
+  fi
+  local ownership
+  if ownership="$(modem_support_ownership_violations "${root}" "${MODEM_SUPPORT_LEDGER}")"; then
+    pass "every present modem-support file has exactly one owner (no orphans, no double ownership)"
+  else
+    fail "modem-support ownership violation(s): $(tr '\n' '; ' <<<"${ownership}")"
   fi
 
   # ---- F. INTERFACE NAMING ----
