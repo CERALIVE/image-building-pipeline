@@ -124,11 +124,18 @@ serial_console: ttyS2:1500000
 # ---------------------------------------------------------------------------
 variants:
   # Mainline-track kernel built FROM SOURCE with the CeraLive RK3588 patch
-  # series (VEPU580 encoder + the three HDMI-RX fixes). Armbian maps rk3588
-  # BRANCH=edge to KERNEL_MAJOR_MINOR=7.1; that mapping is re-derived from
-  # armbian/build by CERALIVE/rk3588-kernel-patches scripts/preflight.sh and
-  # recorded in its kernel-pin.env. Armbian is consulted for that mapping ONLY —
-  # it is never invoked as the build system (see kernel_source below).
+  # series (VEPU580 encoder + the HDMI-RX fixes). At the v7.2 base the Armbian
+  # branch whose mapping yields KERNEL_MAJOR_MINOR=7.2 is `bleedingedge`
+  # (armbian/build config/sources/families/include/rockchip64_common.inc), and
+  # this field's schema enum — vendor|current|edge|none — cannot spell it. So it
+  # STAYS `edge`, the mainline-track name, and the real mapping is re-derived
+  # from armbian/build by CERALIVE/rk3588-kernel-patches scripts/preflight.sh
+  # and recorded in its kernel-pin.env. Nothing is lost by that: no code under
+  # lib/ consumes ARMBIAN_BRANCH for a kernel_source variant, so the value is
+  # traceability metadata, and the U-Boot/firmware packages this track still
+  # fetches prebuilt are selected by NAME (the board's variant_overrides), never
+  # by this field. Armbian is consulted for the mapping ONLY — it is never
+  # invoked as the build system (see kernel_source below).
   edge:
     armbian_branch: edge
 
@@ -141,7 +148,7 @@ variants:
     # Debian control Package:/Version:/Architecture: fields against this name,
     # kernel_source.package_version and the resolved arch.
     kernel_packages:
-      - linux-image-7.1.7-ceralive-rk3588
+      - linux-image-7.2.0-ceralive-rk3588
 
     # NO separate DTB package: `make bindeb-pkg` ships the in-tree arm64 DTBs
     # inside the linux-image deb. kernel_source.dtb_deb_dir/dtb_boot_dir declare
@@ -149,222 +156,103 @@ variants:
     dtb_packages: []
 
     kernel_source:
-      # Armbian's KERNELSOURCE for edge (mainline stable). Armbian follows the
-      # ROLLING branch linux-7.1.y; we pin the exact tag that was its tip at
-      # import, because "verified against linux-7.1.y" is not a reproducible
-      # claim. commit is the real pin — a moved tag fails the build loudly.
+      # Armbian's KERNELSOURCE for the mainline track (linux-stable). This base
+      # is an EXACT RELEASE TAG, not a rolling branch tip: the 7.1 track followed
+      # linux-7.1.y and pinned whatever its tip was at import, which is not a
+      # reproducible claim; 7.2 has a real release to name, so it names it.
+      #
+      # We pin the FINAL v7.2 tag, NOT Armbian's own `tag:v7.2-rc7`. That rc is
+      # simply stale — v7.2 was tagged 2026-08-16, one day BEFORE the
+      # armbian/build revision the 7.2 mapping was read from, and Armbian's
+      # roll-over to the final tag has not been actioned. Pinning a release
+      # candidate would gate this track on a kernel nobody will ever run. The
+      # MAJOR.MINOR is identical either way, which is what makes the substitution
+      # safe. `commit` remains the real pin — a moved tag fails the build loudly.
+      #
+      # mirror_url is a faster GitHub mirror of the SAME objects and is NOTHING
+      # ELSE: build-kernel.sh consumes `git_url` only, so this key is resolved
+      # (KERNEL_SOURCE_MIRROR_URL) and then read by no build code — exactly as
+      # the schema's "only ever used when explicitly enabled" says, with nothing
+      # enabling it. It is KEPT rather than dropped for two independent reasons.
+      # It was RE-VERIFIED LIVE at this bump: gregkh/linux carries v7.2 with the
+      # same annotated tag object (237a1c39e8dfd3e1c6f1f023eea37a48ec04cc63) and
+      # the same peeled commit as kernel.org, so the mirror has not lagged. And
+      # `edge-test` inherits it as a NON-EMPTY pin, which
+      # tests/edge-test-variant.test.sh asserts. Re-check on the next bump rather
+      # than assuming either way.
       git_url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
       mirror_url: https://github.com/gregkh/linux.git
-      tag: v7.1.7
-      commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
+      tag: v7.2
+      commit: 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
 
       # The patch series is a BUILD INPUT and is exact-pinned like every other
       # BSP input — an IMMUTABLE commit, never a branch.
       #
-      # HARDWARE-TEST SERIES TIP. This SHA is the tip of
-      # CERALIVE/rk3588-kernel-patches `feat/backports-fixes-doctrim` — the exact
-      # software state the Wave-8 hardware-qualification candidates are built
-      # from, pinned BEFORE those candidates are built so the artifacts and the
-      # patch series can never drift apart. It grows the series from nine patches
-      # to eighteen: the four approved backports (0007 iommu fetch-dte time
-      # limit — merged; 0010 combphy rterm-det-rdy, 0011/0012 dw-hdmi-qp ACR/audio
-      # — unmerged lore postings carried under the truthful `lore-posting`
-      # provenance model), and six first-party follow-ups (0013 rkvenc CeraLive
-      # test instrumentation, 0014 rkvenc teardown + service/CCU unwind, 0015
-      # rkvenc resource-error observability, 0016 rkvenc ioctl bounds, 0017
-      # HDMI-RX audio lifecycle + clock errors, 0018 truthful dma-heap partial
-      # registration). 0013/0017/0018 are what make the opt-in `edge-test`
-      # variant's deterministic fault injection possible; all three compile to
-      # nothing unless their CeraLive test symbol is enabled, which production
-      # `edge` resolves OFF (manifests/kernel/forbidden-symbols.list).
+      # WHAT THIS PIN IS. b28a187269f2 is the `main` commit of
+      # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #11,
+      # the rebase of the series onto v7.2. At it, patches/series carries 22
+      # ACTIVE members in three lanes:
       #
-      # It also carries 0019, which is the reason this pin moved off
-      # 7c6948b66c4d: the FIRST debug candidate built from that SHA reached a real
-      # Rock 5B+ and its KASAN+LOCKDEP kernel reported two genuine defects during
-      # a plain, unfaulted 1080p encode — no fault injection involved. Both are
-      # 0001's as imported, not regressions from the Wave-6 work above.
-      # rkvenc_task_worker_default() took queue->pending_lock (a struct mutex)
-      # while holding queue->running_lock via spin_lock_irqsave(), i.e. a sleeping
-      # lock from atomic context; and the dma-buf import path called the LOCKED
-      # dma_buf_{map,unmap}_attachment(), which assert the caller holds
-      # dmabuf->resv, from a static importer that holds no such lock. 0019 makes
-      # pending_lock a spinlock_t and moves those calls to the _unlocked variants.
-      # 0019 is CONFIRMED on hardware: the third debug candidate ran the rkvenc
-      # fault cases with no sanitizer or lockdep report at all.
+      #   upstream/  (4)  0001 VEPU580 encoder, 0002 HDMI-RX EDID, 0003 HDMI-RX
+      #                   plugout, 0005 HDMI-RX audio — Ross Cawston's postings,
+      #                   kept byte-identical to what he published.
+      #   backports/ (3)  0010 combphy rterm-det-rdy, 0011 + 0012 dw-hdmi-qp
+      #                   ACR/audio — unmerged lore postings, carried under the
+      #                   truthful `lore-posting` provenance model.
+      #   ceralive/ (15)  0006 HDMI-RX sound card, 0008 rkvenc DMA max segment
+      #                   size, 0009 mainline `system-uncached` dma-heap,
+      #                   0013-0022 the rkvenc/HDMI-RX hardening set, 0026
+      #                   HDMI-RX register lock made hardirq-safe, 0027 HDMI-RX
+      #                   SCDC/PHY retry hardening.
       #
-      # It also carries 0020, which is why the pin moved off 6b03217. That same
-      # third attempt found a SECOND, independent defect — this one in 0014's own
-      # service lifetime model, not in imported code. rkvenc_core_unwind() ended
-      # its first step with rkvenc_service_quiesce(), which drives srv->state
-      # LIVE -> QUIESCING -> DEAD, and nothing in the driver ever restores LIVE.
-      # A single core's unbind therefore killed /dev/mpp_service permanently:
-      # every later open() got -ENODEV even though the core had re-probed cleanly
-      # and republished itself, because rkvenc_dev_open() refuses on
-      # `state != RKVENC_SRV_LIVE` as well as on a missing sub-device. 0020 keeps
-      # the drain — in-flight waiters must still be aborted before the core frees
-      # its IRQ — but gives the terminal state to the caller: service remove() and
-      # shutdown() still end DEAD, while a core's unwind returns a fully drained
-      # service to LIVE. The refusal while the core is absent is unchanged; it is
-      # carried by the sub_devices[] guard, which the next probe reverses.
+      # THE ORDINALS ARE SLOT NUMBERS, NOT A COUNT — 22 members occupy a 27-slot
+      # space and every gap is deliberate. 0004 was never published. 0007
+      # (iommu-rockchip fetch-dte time limit) is RETIRED because it LANDED
+      # UPSTREAM as 8d4346ecd495 in v7.2 — this base bump is what retired it.
+      # 0023/0024/0025 are RETIRED because they were folded into 0021. A retired
+      # ordinal is never reused. Per-patch history lives in that repo's
+      # retired/REGISTRY.md and docs/UPSTREAM-STATUS.md; do not duplicate it here
+      # and do not re-derive it from this file.
       #
-      # It now carries 0021 and 0022, which is why the pin moved off 5a272f4.
-      # Todo45's REAL Rock 5B+ hardware fault-injection run — not a synthetic
-      # fixture or unit-test result — found two more independent defects. First,
-      # fail-clock-enable exposed a real rwsem lock imbalance: rkvenc_hw_run()
-      # can leave before acquiring the hw-run lock, while rkvenc_task_finish()
-      # released it unconditionally, producing bad unlock balance, rwsem
-      # underflow, and a PM usage-count underflow. 0021 records whether the
-      # acquisition actually happened with TASK_STATE_HW_HELD and releases only
-      # when that bit is set. Second, the same real hardware run's malformed
-      # ioctl sweep failed four of eight expected cases because register
-      # requests were not fully covered by the class map and elements were not
-      # required to be whole and aligned; 0022 adds req_fully_covered(), whole-
-      # element bounds checks, and the copy_from_user() errno fix.
-      # Hardware re-verification is PENDING: a rebuild and re-test on the Rock
-      # 5B+ is the very next step, and has not been done yet; this pin is what
-      # that attempt must be built from.
+      # 0013/0017/0018 are what make the opt-in `edge-test` variant's
+      # deterministic fault injection possible; all three compile to nothing
+      # unless their CeraLive test symbol is enabled, which production `edge`
+      # resolves OFF (manifests/kernel/forbidden-symbols.list).
       #
-      # The corrected 0022 is why the pin moved off ca98ea4. That pin's own
-      # 0022 broke real hardware encode: a disciplined cold-boot, no-fault
-      # control test — not a fault-injection case — made every production MPP
-      # encode request fail with -EINVAL. The root cause was that the coverage
-      # check did not tolerate genuine, pre-existing gaps in reg_msg[] between
-      # every adjacent register-class pair; real requests can straddle one of
-      # those gaps at their trailing edge. The fix makes req_coverage_check()
-      # ask WHERE bytes were dropped — whether there is a hole inside the
-      # covered span — rather than just HOW MANY: covered bytes must form one
-      # contiguous run, and the request must fit within the register map's own
-      # extent. It therefore accepts the real 96-byte MPP request while still
-      # rejecting class-overrun, trans-table-odd-size, and bad-user-pointer.
-      # Hardware re-verification is PENDING again: this exact same lesson —
-      # fixing one thing, breaking another, and finding it only on hardware —
-      # has happened twice this session. The corrected pin has not yet been
-      # rebuilt and re-tested on the Rock 5B+; that cold-boot control encode is
-      # the next proof, not evidence we already have.
-      #
-      # It now carries 0023, which is why the pin moved off 7d96290. While
-      # confirming defect B's 0021 fix was reachable for the first time on real
-      # Rock 5B+ hardware, KASAN found a use-after-free in
-      # rkvenc_task_worker_default(). This bug was pre-existing: 0021 only made
-      # the path reachable and survivable; it did not introduce the UAF, and
-      # 0021 was neither modified nor reverted. After rkvenc_task_finish()
-      # handed off the worker's reference, it could free the task, but the
-      # worker still touched that pointer in the IRQ arm's "process timed-out
-      # tasks" section and in the failure arm's redundant wake_up(). 0023
-      # nulls the pointer after the handoff in the IRQ arm and drops that
-      # redundant wake_up(), since rkvenc_task_finish() already wakes the
-      # waiter on every path.
-      # Hardware re-verification is PENDING again: this is the fourth time in
-      # this session a fix needs fresh hardware confirmation; the corrected pin
-      # has not yet been rebuilt and re-tested on the Rock 5B+.
-      #
-      # It now carries 0024, which is why the pin moved off cabc6b5. While
-      # module-swap testing the previous pin on real Rock 5B+ hardware, defect G
-      # reproduced as a KASAN null-ptr-deref in __iommu_attach_group, preceded
-      # by possible recursive locking on the reset-group rwsem: after a main-core
-      # unbind, the secondary core kept its dispatch-queue slot even though its
-      # IOMMU domain pointer was NULL, so a later dispatch called
-      # iommu_attach_group() with no domain. 0024 makes dispatchability and
-      # IOMMU-domain validity the same fact: RKVENC_STAGE_QUEUE_PUBLISHED and
-      # RKVENC_STAGE_IOMMU_SHARED gate both together, and
-      # rkvenc_ccu_reshare_domain() re-attaches and republishes a secondary only
-      # after it has successfully shared the main core's domain again. The
-      # hardware result was 1/1 Oops on the unpatched module and 0/0 Oops on the
-      # patched module across repeated concurrent-encode stress. The same
-      # investigation closed defect H as a real measured MPP/GStreamer
-      # userspace behavior, not a kernel bug: rkvenc_hw_run entered 60 times and
-      # left 59 for 60 frames, with one correctly reported -ENODEV failure and
-      # no retry, while the failed frame was dropped and the stream measured
-      # 1,697,683 bytes versus 1,854,524 healthy (about 8.5% shorter). That
-      # layer is outside this driver's control, so H needs no kernel patch.
-      # Hardware re-verification via a FULL clean todo45 attempt is PENDING:
-      # the evidence above is module-swap spot-testing of 0024, not a complete
-      # clean twelve-command QA run.
-      #
-      # It now carries 0025 and 0026, which is why the pin moved off b4dd39a.
-      # This is the last real driver defect found in this session (defect D):
-      # service-node-only unbind lets the cores unbind first through automatic
-      # device-link removal, so rkvenc_service_quiesce() sees
-      # RKVENC_DRAIN_NOT_OWNER and skips the drain entirely; the discarded
-      # timeout result could then still let devres_release_all() free srv while
-      # an open /dev/mpp_service file descriptor remained able to dereference
-      # it. The same investigation found the third sub-defect: taking a mutex
-      # inside the rkvenc_service_sessions_gone() wait_event* condition can
-      # emit __might_sleep when a session remains open at the second check.
-      # 0025 makes srv reference-counted rather than devm-allocated, publishes
-      # an embedded struct device through cdev_device_add() so its kobject
-      # parenting covers __fput()'s later cdev_put() after ->release(), and
-      # makes remove() wait unbounded and interruptible for all open-file
-      # references. Unbounded is required because expiring a bounded wait
-      # would still free reachable state; interruptible avoids deadlocking the
-      # process tree that must close the descriptor. The wait condition is
-      # mutex-free. The orchestrator independently hardware-validated the fix
-      # across 35 adversarial module-swap rounds (deadlock hunt x5, jittered
-      # close/unbind race x20, sever path x10): zero sanitizer hits, with all
-      # four unbind states (idle, held-fd, inflight, timeout-negative) passing.
-      # Final Wave completion for todo45 now depends only on (a) one full clean
-      # hardware re-run of the complete twelve-command block at this revision,
-      # and (b) attaching a physical HDMI source for the separate audio-drill
-      # requirement (finding E).
-      #
-      # The previous twenty-two-patch pin (ca98ea4b083e5e0ee48221de71f2e45c622bd5bc)
-      # is what surfaced this 0022 regression, the twenty-patch pin before it is
-      # what surfaced the 0021/0022 defects, and the nineteen-patch pin before
-      # that is what surfaced 0020's. The eighteen-patch pin before those
-      # surfaced 0019's. Predecessor before those:
-      # acb519c101fefa31f51300779f3a139bcabf6a1c (nine patches; 0008
-      # rkvenc DMA max segment size + 0009 mainline `system-uncached` dma-heap,
-      # the pair that made MPP hardware encode work on this track — board-confirmed
-      # on a Rock 5B+). Predecessor before that: 9c1cb385098d.
-      #
-      # This re-pin changes NO kernel behavior. It is pure history cleanup plus
-      # first-party patch authorship attribution: 0021+0023+0024+0025 were
-      # consolidated, and the 14 first-party patches were re-attributed. The
-      # proof is git tree-object hash equivalence: e8133646d100f528c17f1834a82f20becfc48b6a
-      # before and after. Todo45's six signed receipts (33/34/35/36/37/45) were
-      # obtained against the prior tip's byte-identical content, so this pin
-      # bump does not invalidate them functionally. A CONFIRMATORY, not
-      # rediscovery, hardware re-verification is still warranted before relying
-      # on this for a merge: each receipt's recorded patches_commit is now
-      # technically stale despite the tested bytes being identical. The
-      # orchestrator will decide how to handle that observation; this pin bump
-      # does not resolve it.
-      #
-      # It now carries 0027, which is why the pin moved off eb0f338. A real
-      # Rock 5B+ with a 4K59.94 source could never reach HDMI-RX lock: the
-      # source never writes the SCDC TMDS_Bit_Clock_Ratio bit, so the receiver
-      # kept its 1/10 divider on a 1/40 link and spun plugin -> wait -> not
-      # lock -> plugout forever. 0027 retries the PHY bring-up once with
+      # 0027 CARRIES A WARNING THAT SURVIVED THE REBASE AND MUST NOT BE
+      # "IMPROVED". It retries the HDMI-RX PHY bring-up once with
       # PHY_CONFIG.TMDS_CLOCK_RATIO forced to 1/40, clearing the forced flag on
       # plugout so every new plug cycle still tries the spec-compliant path
-      # first. Hardware-confirmed on that board: the forced retry locks, and the
-      # controller-side descrambler self-detects from the stream — it does not
-      # need the SCDC declaration. Do NOT "improve" this by gating the recovery
-      # on CMU_TMDSQPCLK_FREQ: a 594 MHz 1/40 link mis-driven at 1/10 measures
-      # as an ordinary sub-340 MHz link (139.0 MHz was observed), so that gate
-      # would never fire in exactly the case the patch exists for.
+      # first — a 4K59.94 source that never writes the SCDC TMDS_Bit_Clock_Ratio
+      # bit otherwise spins plugin -> wait -> not lock -> plugout forever. Do NOT
+      # gate that recovery on CMU_TMDSQPCLK_FREQ: a 594 MHz 1/40 link mis-driven
+      # at 1/10 measures as an ordinary sub-340 MHz link (139.0 MHz was
+      # observed), so the gate would never fire in exactly the case the patch
+      # exists for.
       #
-      # What 0027 does NOT claim, carried forward rather than dropped: no
-      # regression run against a source that DOES write SCDC, no FX3 cold
-      # power-cycle, one board / one source / one session, and nothing at all on
-      # the Orange Pi.
+      # HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP, AND THIS IS THE HONEST
+      # STATEMENT OF IT. Every board result this series accumulated — the Rock
+      # 5B+ MPP hardware-encode confirmation, the rkvenc fault-injection
+      # receipts, the 4K HDMI-RX lock behind 0027 — was obtained against the
+      # v7.1.7 base. NOTHING has been built, flashed or booted at v7.2, on either
+      # board. What v7.2 evidence exists is a cross-compile of this exact tree
+      # (22/22 `git am` clean, Image + modules + dtbs, zero errors) plus the
+      # config-survival gate. Read this pin as compile-proven and
+      # hardware-UNVALIDATED until a board says otherwise.
       #
-      # Pin a SHA that a fresh clone can reach, never a PR-head SHA: the
-      # squash-merge of #4 orphaned its pre-merge head 2e195f2d36db, so pinning
-      # that would pin a commit no ref reaches. #8 was squash-merged for the
-      # same reason, so this pin is the RESULTING `main` commit 00fc0b26540e,
-      # not the pre-merge branch head ab491c0dc684. Verified before pinning:
-      # `git ls-remote https://github.com/CERALIVE/rk3588-kernel-patches.git
-      # main` answers 00fc0b26540e94d310098a32773e150dcd7bdc41, and a scratch
+      # PIN HYGIENE — pin a SHA a fresh clone can reach, never a PR-head SHA. A
+      # squash-merge orphans the pre-merge branch head, so pinning that would pin
+      # a commit no ref reaches; #4, #8 and #11 were all squash-merged, which is
+      # why this pin is the RESULTING `main` commit and not the branch tip.
+      # Verified before pinning: `git ls-remote
+      # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
+      # answers b28a187269f2db993e490278788e348767aa24a8, and a scratch
       # `git init` + `git fetch --depth 1 <patches_git_url> <patches_commit>`
-      # reaches it and yields a 33-entry patches/series ending in
-      # 0027-hdmirx-phy-retry-hardening.patch, whose payload sha256 is
-      # e6a384e4205cb4bc523bd1f44a50ebcdafbf41307c52169bdc5210e76f36ed63 —
-      # byte-identical to the patch that was hardware-tested. The predecessor
-      # pin eb0f338 remains an ancestor of `main`, so nothing this pin carried
-      # was dropped by the merge.
+      # reaches it and yields a 22-entry patches/series whose members are
+      # byte-identical to the merged tree — patches/ tree object
+      # c4b7d4e148032102e6707dfb88ffa90795c9c958 on both sides.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 00fc0b26540e94d310098a32773e150dcd7bdc41
+      patches_commit: b28a187269f2db993e490278788e348767aa24a8
       patches_series: patches/series
 
       defconfig_base: defconfig
@@ -375,9 +263,21 @@ variants:
       # record is this manifest line, not a Dockerfile default.
       builder_image: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
+      # kernel_release is DERIVED, never guessed: `make -s kernelrelease
+      # LOCALVERSION=-ceralive-rk3588` run against a fresh v7.2 clone at the
+      # pinned commit, with this exact 22-member series applied and the resolved
+      # defconfig+fragment synced, answers 7.2.0-ceralive-rk3588.
+      #
+      # NOTE THE `.0`, because it is the whole reason that probe is mandatory.
+      # v7.2 FINAL has SUBLEVEL=0, so KERNELVERSION is 7.2.0 — where the 7.1.7
+      # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
+      # looks right, matches the tag, and would fail build-kernel.sh's own
+      # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
+      # package_version keeps the established shape (KERNELVERSION + -ceralive1)
+      # and so moves with it; local_version carries no version and does not.
       local_version: -ceralive-rk3588
-      kernel_release: 7.1.7-ceralive-rk3588
-      package_version: 7.1.7-ceralive1
+      kernel_release: 7.2.0-ceralive-rk3588
+      package_version: 7.2.0-ceralive1
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/; the U-Boot boot script
@@ -385,7 +285,7 @@ variants:
       # boot.scr.cmd). The platform layer copies source -> target so a
       # source-built kernel satisfies the SAME board dtb_name expectation an
       # Armbian linux-dtb-* package would.
-      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
+      dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
 
   # DEBUG/TEST sibling of `edge`, and NOTHING ELSE. It exists so the Wave-6
@@ -415,7 +315,7 @@ variants:
     extends: edge
 
     kernel_packages:
-      - linux-image-7.1.7-ceralive-rk3588-test
+      - linux-image-7.2.0-ceralive-rk3588-test
 
     kernel_source:
       # ORDERED, and the order is the contract: the production fragment first, the
@@ -427,11 +327,19 @@ variants:
         - manifests/kernel/rk3588-edge.fragment
         - manifests/kernel/rk3588-edge-test.fragment
 
+      # Derived by its OWN probe, not by editing edge's answer: the same v7.2
+      # tree, series and sync sequence, re-run as `make -s kernelrelease
+      # LOCALVERSION=-ceralive-rk3588-test`, answers 7.2.0-ceralive-rk3588-test.
+      # Re-run a second time against edge-test's own TWO-fragment config it
+      # answers identically, which is the honest reason a single probe would have
+      # been enough — this fragment declares no CONFIG_LOCALVERSION, so the
+      # release string is a pure function of the kernel version and LOCALVERSION.
+      # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
-      kernel_release: 7.1.7-ceralive-rk3588-test
-      package_version: 7.1.7-ceralive1+test1
+      kernel_release: 7.2.0-ceralive-rk3588-test
+      package_version: 7.2.0-ceralive1+test1
 
-      dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588-test/rockchip
+      dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip
 
   # VENDOR-track kernel built FROM SOURCE: the SAME 6.1.115 BSP the production
   # path installs prebuilt, plus CERALIVE/rk3588-vendor-kernel-patches. It exists
