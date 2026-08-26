@@ -100,8 +100,8 @@ for pkg in "${MODEM_CLOSURE[@]}"; do
   grep -Fq "runtime-abi  : ${pkg}" <<<"${pos_out}" \
     || { printf '%s\n' "${pos_out}" >&2; fail "closure deb '${pkg}' was not classified runtime-abi"; }
 done
-grep -Fq 'installing 10 first-party .deb(s)' <<<"${pos_out}" \
-  || { printf '%s\n' "${pos_out}" >&2; fail "expected a 10-deb local install transaction"; }
+grep -Fq "installing ${#MODEM_CLOSURE[@]} first-party .deb(s)" <<<"${pos_out}" \
+  || { printf '%s\n' "${pos_out}" >&2; fail "expected a ${#MODEM_CLOSURE[@]}-deb local install transaction"; }
 # Non-vacuity: neither closure nor companion slipped into the sysext or appfs class.
 if grep -Eq 'sysext-class : (modemmanager|lib(mm|mbim|qmi|qrtr)|ceralive-modem-support)' <<<"${pos_out}" \
    || grep -Eq 'appfs-class  : (modemmanager|lib(mm|mbim|qmi|qrtr)|ceralive-modem-support)' <<<"${pos_out}"; then
