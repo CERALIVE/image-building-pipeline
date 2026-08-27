@@ -131,6 +131,7 @@ tests/qemu-x86.sh	shell	integration	ci-job	boots a real qemu x86 guest; v2-ci.ym
 # --- hardware-gated: cannot run without a board ---------------------------
 tests/realhw-suite.sh	shell	hardware-gated	not-executed	four-part real-hardware acceptance suite; needs a booted board over SSH
 tests/realhw-smoke.sh	shell	hardware-gated	not-executed	real-hardware smoke checks; needs a booted board over SSH
+tests/realhw-typec-matrix.sh	shell	hardware-gated	not-executed	interactive charged-camera Type-C role/charge matrix; needs root on a booted board and physical operator actions
 tests/addon-e2e.sh	shell	hardware-gated	not-executed	add-on install/enable/disable end to end; needs a booted board over SSH
 
 # --- unwired: honest gaps, recorded rather than hidden --------------------

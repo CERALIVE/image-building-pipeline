@@ -570,20 +570,17 @@ SH
 }
 
 # ===========================================================================
-# 18d. USB-C Type-C source role — the board's connector is a DRP (dual-role)
-#      FUSB302/TCPM port, so every fresh boot reads `[dual] source sink` and the
-#      Try.SRC/Try.SNK arbitration against the (also dual-role) camera decides
-#      the role. When it lands on sink the SoC runs as a USB peripheral and the
-#      camera's bus is absent entirely — the "camera sometimes isn't detected
-#      over USB-C" complaint. setup_typec_source_role (postinst-lib.sh) installs
-#      a oneshot that pins port_type to `source` before cerastream.service.
-#      These drive the SHIPPED function and the SHIPPED script against temp
-#      install dirs and a fake sysfs tree — no image boot, no hardware.
+# 18d. Adaptive USB-C Type-C policy — the connector remains DRP so charger and
+#      power-bank peers can make the board a sink. A udev-triggered, serialized
+#      oneshot inspects current state and requests the proven DR_SWAP whenever the
+#      port settles sink/device. These drive the shipped installer, artifacts and
+#      script against fake sysfs trees — no image boot, no hardware.
 # ===========================================================================
 
-@test "typec source: the pinning script + boot unit are installed and enabled" {
+@test "typec policy: script, unit and udev rules are installed and the boot unit is enabled" {
   local unit_dir="$BATS_TEST_TMPDIR/typec-units"
   local sbin_dir="$BATS_TEST_TMPDIR/typec-sbin"
+  local rules_dir="$BATS_TEST_TMPDIR/typec-rules"
   local bin="$BATS_TEST_TMPDIR/typec-bin"
   local calls="$BATS_TEST_TMPDIR/typec-calls"
   mkdir -p "$bin"
@@ -596,119 +593,126 @@ SH
 
   run env PATH="$bin:$PATH" TYPEC_CALLS="$calls" \
     CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" \
-    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
+    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" TYPEC_RULES_DIR="$rules_dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_policy"
   [ "$status" -eq 0 ]
-  [ -x "$sbin_dir/ceralive-typec-source" ]
-  [ -f "$unit_dir/ceralive-typec-source.service" ]
+  [ -x "$sbin_dir/ceralive-typec-policy" ]
+  [ -f "$unit_dir/ceralive-typec-policy.service" ]
+  [ -f "$rules_dir/99-ceralive-typec-policy.rules" ]
+  [ ! -e "$sbin_dir/ceralive-typec-source" ]
+  [ ! -e "$unit_dir/ceralive-typec-source.service" ]
 
   run cat "$calls"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"enable ceralive-typec-source.service"* ]]
+  [[ "$output" == *"enable ceralive-typec-policy.service"* ]]
 }
 
-@test "typec source: the target is port_type -> source (never sink, never dual)" {
-  # `dual` is the broken default and `sink` is the failure mode it resolves to;
-  # only `source` removes the arbitration. Locked against a well-meaning "fix".
-  local script="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-  grep -Fq 'WANTED_ROLE="source"' "$script"
-  grep -Fq '/port_type' "$script"
-
-  run grep -E 'WANTED_ROLE="(sink|dual)"' "$script"
-  [ "$status" -ne 0 ]
-  run grep -E '^[[:space:]]*printf .*(sink|dual).*>"\$\{ATTR\}"' "$script"
+@test "typec policy: udev add events hand off to one systemd service without RUN or change recursion" {
+  local rules="$PIPELINE_DIR/mkosi/runtime/99-ceralive-typec-policy.rules"
+  [ "$(grep -c 'ACTION=="add"' "$rules")" -eq 2 ]
+  grep -Fq 'ENV{DEVTYPE}=="typec_partner"' "$rules"
+  grep -Fq 'ENV{DEVTYPE}=="typec_port"' "$rules"
+  [ "$(grep -c 'TAG+="systemd"' "$rules")" -eq 2 ]
+  [ "$(grep -c 'ENV{SYSTEMD_WANTS}+="ceralive-typec-policy.service"' "$rules")" -eq 2 ]
+  run grep -E 'ACTION=="change"|RUN[+:]?=' "$rules"
   [ "$status" -ne 0 ]
 }
 
-@test "typec source: the unit is ordered before cerastream.service" {
-  # cerastream is what actually opens the capture device; ceralive.service is
-  # ordered after cerastream, so Before= on both covers the whole camera chain.
-  local unit="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.service"
+@test "typec policy: the retriggerable oneshot retains boot ordering before both media consumers" {
+  local unit="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
+  grep -Eq '^Type=oneshot$' "$unit"
   grep -Eq '^Before=.*\bcerastream\.service\b' "$unit"
   grep -Eq '^Before=.*\bceralive\.service\b' "$unit"
-
-  # Ordering-ONLY: a hard dependency would make a board without cerastream fail.
   run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=.*cerastream' "$unit"
   [ "$status" -ne 0 ]
-}
-
-@test "typec source: a DRP port reading [dual] is pinned to source" {
-  local sysfs="$BATS_TEST_TMPDIR/typec-drp"
-  typec_fake_sysfs "$sysfs" '[dual] source sink'
-
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
-    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"pinning port0 from 'dual' to 'source'"* ]]
-  run cat "$sysfs/port0/port_type"
-  [[ "$output" == "source" ]]
-}
-
-@test "typec source: pinning is idempotent — an already-source port is not rewritten" {
-  # The kernel prints the whole menu with the ACTIVE entry bracketed, so a
-  # pinned port reads `dual [source] sink`, NOT `source`. A naive literal
-  # comparison would miss that and rewrite port_type on every boot.
-  local sysfs="$BATS_TEST_TMPDIR/typec-idem"
-  typec_fake_sysfs "$sysfs" 'dual [source] sink'
-
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
-    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"already source"* ]]
-  # Untouched: the menu string survives, proving no write happened.
-  run cat "$sysfs/port0/port_type"
-  [[ "$output" == "dual [source] sink" ]]
-}
-
-@test "typec source: a late/absent port_type is a bounded wait, never a hang or a failure" {
-  # /sys/class/typec/port0 is created by an ASYNCHRONOUS fusb302/TCPM probe, so
-  # the script must poll to a deadline — not sleep a fixed amount and hope.
-  local sysfs="$BATS_TEST_TMPDIR/typec-empty"
-  mkdir -p "$sysfs"
-
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=1 \
-    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"did not appear within 1s"* ]]
-
-  # A board with no Type-C class at all is a clean no-op, not a boot failure.
-  run env CERALIVE_TYPEC_CLASS_DIR="$BATS_TEST_TMPDIR/typec-absent" \
-    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"nothing to pin"* ]]
-
-  # The wait is a deadline-bounded poll, not a bare fixed settle constant.
-  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
-}
-
-@test "typec source: a role change that does not take FAILS loudly (read-back verified)" {
-  # /dev/null accepts the write and reads back empty — the same observable shape
-  # as a TCPM that refuses the role change. It must not be reported as success.
-  local sysfs="$BATS_TEST_TMPDIR/typec-nulled"
-  mkdir -p "$sysfs/port0"
-  printf '%s\n' '[dual] source sink' >"$sysfs/port0/real_port_type"
-  ln -sf /dev/null "$sysfs/port0/port_type"
-
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
-    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-source.sh"
+  run grep -Eq '^RemainAfterExit=yes$' "$unit"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"after writing 'source'"* ]]
 }
 
-@test "typec source: missing runtime source FAILS the build (fail-closed, nothing installed)" {
+@test "typec policy: settled sink-device attach swaps to host before any camera can enumerate" {
+  local sysfs="$BATS_TEST_TMPDIR/typec-coldplug"
+  typec_fake_sysfs "$sysfs" 'source [sink]' 'host [device]'
+  printf '%s\n' '[dual] source sink' >"$sysfs/port0/port_type"
+  printf '%s\n' '[none] source sink' >"$sysfs/port0/preferred_role"
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DR_SWAP attempt 1/2 succeeded"* ]]
+  [ "$(cat "$sysfs/port0/data_role")" = host ]
+  [ "$(cat "$sysfs/port0/power_role")" = 'source [sink]' ]
+  [ "$(cat "$sysfs/port0/port_type")" = '[dual] source sink' ]
+  [ "$(cat "$sysfs/port0/preferred_role")" = '[none] source sink' ]
+}
+
+@test "typec policy: current-state parsing is idempotent when the coldplugged port is already host" {
+  local sysfs="$BATS_TEST_TMPDIR/typec-idem"
+  typec_fake_sysfs "$sysfs" 'source [sink]' '[host] device'
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"data_role=host — no data-role swap needed"* ]]
+  [ "$(cat "$sysfs/port0/data_role")" = '[host] device' ]
+}
+
+@test "typec policy: DR_SWAP retries once, logs both attempts, then stops" {
+  local sysfs="$BATS_TEST_TMPDIR/typec-bounded"
+  typec_fake_sysfs "$sysfs" 'source [sink]' 'host [device]'
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+    CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -ne 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'DR_SWAP attempt [12]/2: requesting')" -eq 2 ]
+  [[ "$output" == *"failed after 2 attempts"* ]]
+}
+
+@test "typec policy: connector mode, power role and preferred role have no write capability" {
+  local script="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  grep -Fq 'printf '\''%s\n'\'' host >"${DATA_ROLE_WRITE}"' "$script"
+  [ "$(grep -cE '>"\$\{[A-Z_]+\}"' "$script")" -eq 1 ]
+  run grep -E '>.*(POWER_ROLE|port_type|preferred_role)' "$script"
+  [ "$status" -ne 0 ]
+}
+
+@test "typec policy: absent partner and unsettled role attributes are bounded clean no-ops" {
+  local sysfs="$BATS_TEST_TMPDIR/typec-empty"
+  mkdir -p "$sysfs/port0"
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no attached partner"* ]]
+
+  mkdir -p "$sysfs/port0-partner"
+  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"role attributes did not settle within 0s"* ]]
+
+  run env CERALIVE_TYPEC_CLASS_DIR="$BATS_TEST_TMPDIR/typec-absent" \
+    bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to inspect"* ]]
+  grep -Fq 'deadline=$((SECONDS + WAIT_SECONDS))' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+}
+
+@test "typec policy: missing runtime source fails the build before anything is installed" {
   local unit_dir="$BATS_TEST_TMPDIR/typec-failclosed-units"
   local sbin_dir="$BATS_TEST_TMPDIR/typec-failclosed-sbin"
+  local rules_dir="$BATS_TEST_TMPDIR/typec-failclosed-rules"
   run env CERALIVE_RUNTIME_SRC="$BATS_TEST_TMPDIR/empty-src" \
-    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" \
-    bash -c "source '$POSTINST_ENTRY'; setup_typec_source_role"
+    TYPEC_UNIT_DIR="$unit_dir" TYPEC_SBIN_DIR="$sbin_dir" TYPEC_RULES_DIR="$rules_dir" \
+    bash -c "source '$POSTINST_ENTRY'; setup_typec_policy"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"typec-source script not found"* ]]
-  [ ! -e "$unit_dir/ceralive-typec-source.service" ]
+  [[ "$output" == *"typec-policy script not found"* ]]
+  [ ! -e "$unit_dir/ceralive-typec-policy.service" ]
+  [ ! -e "$rules_dir/99-ceralive-typec-policy.rules" ]
 }
 
-@test "typec source: pinning is wired into configure_services" {
-  # An unreferenced setup function is dead code — the camera race would ship.
-  run grep -E '^\s*setup_typec_source_role$' "$POSTINST_LIB"
+@test "typec policy: adaptive policy setup is wired into configure_services" {
+  run grep -E '^\s*setup_typec_policy$' "$POSTINST_LIB"
   [ "$status" -eq 0 ]
 }
 
@@ -1300,7 +1304,7 @@ SH
 
   # Re-render the trigger files the way real sysfs does — the whole menu with
   # the active entry in brackets. A naive literal compare is never true here,
-  # which is the bracket trap ceralive-typec-source documents for port_type.
+# which is the bracket trap ceralive-typec-policy documents for role attributes.
   printf 'none rfkill-any [heartbeat] mmc0 mmc1\n' >"$sysfs/amber:status-a/trigger"
   printf 'none rfkill-any heartbeat mmc0 [mmc1]\n' >"$sysfs/white:status-b/trigger"
 

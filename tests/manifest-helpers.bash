@@ -651,6 +651,7 @@ orch_source_set() {
   local out="$BATS_TEST_TMPDIR/orch-source-set.sh" m
   {
     cat "$PIPELINE_DIR/lib/orchestrate.sh"
+    # shellcheck disable=SC2016
     while read -r m; do cat "$PIPELINE_DIR/lib/stages/$m"; done \
       < <(sed -n 's#^source "${STAGE_DIR}/\(.*\)"$#\1#p' "$PIPELINE_DIR/lib/orchestrate.sh")
   } >"$out"
@@ -1016,10 +1017,12 @@ run_paseto_provision() {
 
 
 
-# typec_fake_sysfs <dir> <port_type contents> — a minimal /sys/class/typec stand-in.
+# typec_fake_sysfs <dir> <power_role contents> <data_role contents> — a settled
+# partner attachment in a minimal /sys/class/typec stand-in.
 typec_fake_sysfs() {
-  mkdir -p "$1/port0"
-  printf '%s\n' "$2" >"$1/port0/port_type"
+  mkdir -p "$1/port0" "$1/port0-partner"
+  printf '%s\n' "$2" >"$1/port0/power_role"
+  printf '%s\n' "$3" >"$1/port0/data_role"
 }
 
 

@@ -164,7 +164,7 @@ configure_services() {
   # RAUC A/B replaces /etc wholesale, so a runtime-only enable silently self-reverts on every OTA; the CeraUI boot reconciler (separate BT foundation todo) covers already-flashed images.
   disable_service cups.service
   suppress_unusable_boot_units
-  setup_typec_source_role
+  setup_typec_policy
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status

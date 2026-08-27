@@ -31,7 +31,7 @@ Before=cerastream.service ceralive.service
 # streaming stack down: USB/UVC capture does not involve the HDMI receiver at
 # all, so a board with a dead HDMI-RX must still boot into a fully usable
 # USB-capture-only device. Ordering without a requirement is exactly that
-# contract, and it mirrors ceralive-typec-source.service.
+# contract, and it mirrors ceralive-typec-policy.service.
 #
 # LIFECYCLE: boot-time only. The EDID lives in driver state, so a driver
 # unbind/rebind or a module reload silently discards it and this unit does NOT

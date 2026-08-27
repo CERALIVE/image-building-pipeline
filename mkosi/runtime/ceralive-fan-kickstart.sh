@@ -78,7 +78,7 @@
 #
 # WHY A RESIDENT MONITOR AND NOT A ONESHOT
 #
-#   Unlike ceralive-fan-curve / ceralive-led-status / ceralive-typec-source,
+#   Unlike ceralive-fan-curve / ceralive-led-status / ceralive-typec-policy,
 #   this cannot be a boot-time oneshot. The fan returns to state 0 whenever the
 #   board cools below the trip and re-enters an active state when it warms up
 #   again — many times over a device's uptime. Every one of those re-entries is
