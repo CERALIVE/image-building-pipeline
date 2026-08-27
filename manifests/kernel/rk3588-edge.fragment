@@ -531,9 +531,10 @@ CONFIG_NET_SCH_CAKE=y
 CONFIG_NET_CLS_FW=y
 
 # --- Type-C / USB role switching -------------------------------------------
-# The FUSB302/TCPM connector mkosi/runtime/ceralive-typec-source.sh pins to
-# the source role. Without TYPEC_TCPM + TYPEC_FUSB302 there is no
-# /sys/class/typec/port0 for that unit to act on and the camera-enumeration race
+# The FUSB302/TCPM connector mkosi/runtime/ceralive-typec-policy.sh acts on.
+# It leaves port_type at dual and requests a bounded DR_SWAP to host on a
+# settled sink/device attach. Without TYPEC_TCPM + TYPEC_FUSB302 there is no
+# /sys/class/typec/port0 for that policy to read and the camera-enumeration race
 # returns.
 CONFIG_TYPEC=y
 CONFIG_TYPEC_TCPM=y
@@ -541,8 +542,8 @@ CONFIG_TYPEC_TCPM=y
 # module, so kconfig caps this at =m however loudly the fragment asks for =y.
 # It asked for =y for three releases and silently got =m. That is tolerable —
 # udev auto-loads typec_fusb302 off the I2C node's OF modalias during ordinary
-# boot, and ceralive-typec-source.service POLLS for /sys/class/typec/port0 to a
-# deadline rather than assuming it is already there — so the honest value is
+# boot, and the role policy is driven by udev add events on the port and its
+# partner rather than by a fixed boot-time settle — so the honest value is
 # declared here instead. Do NOT "fix" this by setting CONFIG_DRM=y.
 CONFIG_TYPEC_FUSB302=m
 CONFIG_USB_ROLE_SWITCH=y

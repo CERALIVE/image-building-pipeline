@@ -28,7 +28,7 @@
       "pattern": "^([A-Za-z0-9._-]+\\.dtb|none)$"
     },
     "armbian_overlays": {
-      "description": "INERT/UNCONSUMED legacy metadata. No build script reads this field and no overlay-application step exists in the boot path, so these names are not applied at build time or boot. The underlying hardware behavior is implemented elsewhere: USB-C source-role pinning by ceralive-typec-source.service, HDMI-RX by the base DTB plus the driver-keyed udev symlink, RTL8852BE Wi-Fi by the base DTB plus rtw89 (todo 28 / PR #88), and M.2 modem support by ModemManager plus the m2_modem_sim_workaround quirk. Optional; retained for provenance from configs/devices/*.conf.",
+      "description": "INERT/UNCONSUMED legacy metadata. No build script reads this field and no overlay-application step exists in the boot path, so these names are not applied at build time or boot. The underlying hardware behavior is implemented elsewhere: USB-C adaptive role policy by ceralive-typec-policy (the port stays dual; a bounded DR_SWAP to host on a settled sink/device attach — this REPLACED the retired ceralive-typec-source.service force-source pin), HDMI-RX by the base DTB plus the driver-keyed udev symlink, RTL8852BE Wi-Fi by the base DTB plus rtw89 (todo 28 / PR #88), and M.2 modem support by ModemManager plus the m2_modem_sim_workaround quirk. Optional; retained for provenance from configs/devices/*.conf.",
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
       "uniqueItems": true

@@ -593,36 +593,73 @@ that actually carries the uplink on a bonding sender device, so it is now part
 of the guard alongside the encoder and receiver. Proof: `run-tests`
 section 16.
 
-## USB-C Type-C Source-Role Pinning
+## USB-C Type-C Adaptive Role Policy
 
 The board's USB-C connector is a dual-role (DRP) FUSB302/TCPM port, so on a fresh
 boot it does not pick a role — it toggles, and Try.SRC/Try.SNK arbitration on the
-cable decides. Against a camera that is *also* dual-role that arbitration genuinely
-races, and whenever it settles on the sink side the SoC runs as a USB peripheral and
-the camera never appears on the bus at all. That is the root cause of "the camera
-sometimes isn't detected over USB-C".
+cable decides. Whenever that lands on the sink side the SoC runs as a USB peripheral
+and an attached camera never appears on the bus at all. That is the root cause of
+"the camera sometimes isn't detected over USB-C".
 
-`ceralive-typec-source.service` (a oneshot ordered before `cerastream.service`) pins
-`/sys/class/typec/port0/port_type` to `source` on every boot, which removes the
-arbitration entirely. The connector attribute is created by an asynchronous driver
-probe, so the unit polls for it to a deadline rather than sleeping a fixed amount; a
-board with no Type-C connector, or a port that never appears, is a clean no-op.
+The port is deliberately **left dual-role**. `ceralive-typec-policy` — a
+udev-triggered, serialized systemd oneshot ordered before `cerastream.service` —
+inspects the port's current settled state and, when it has settled `power_role=sink`
+**and** `data_role=device`, requests a bounded (at most two attempts) **DR_SWAP** to
+`host`. That data-role swap is its entire write surface: it never writes
+`port_type`, never writes `power_role`, and never writes `preferred_role`. A board
+with no Type-C class at all, or a port that never appears, is a clean no-op.
 
-Verified live on a Rock 5B+ (including straight after a cold power-cycle): with the
-port pinned, the camera enumerates within seconds on every attempt.
+> **The earlier `port_type=source` pin is retired, and it is not coming back.**
+> Forcing the port to source made both ends present Rp, so no attachment could form
+> at all: against a DJI Osmo Pocket 3 that scored 3 of 3 physical replicates with no
+> attach (2026-08-27), each cycle hardware-confirmed by a real interrupt transition.
+> It also destroyed the charger and power-bank case, because a pinned-source port
+> can never be a sink. Leaving the port dual is what makes one policy correct for
+> both peer populations, with no peer-type special-casing anywhere in the script.
 
-On 2026-08-26 the unit itself was bench-validated on real hardware on both RK3588
-boards, from images this pipeline built: a Rock 5B+ (bench RAUC bundle, 5/7 checks
-pass) and an Orange Pi 5 Plus (bench microSD, first edge boot on that board, 5/6
-checks pass). On both, the unit exits successfully, `port_type` reads
-`dual [source] sink`, `fusb302` is bound, and **all of that survives a reboot with no
-manual sysfs write** — the persistence proof that was previously missing. The
-remaining checks on both boards are blocked on camera placement (one camera, two
-boards), not on any negative result. **Both deployments used bench-labelled artifacts:
-nothing was published, and no shipped image carries the unit yet.** Per-board verdicts
-and the Orange Pi's device-tree caveat are in `AGENTS.md`. Guards:
-`tests/runtime-services.bats` §18d.
+### Dual use — one policy, two peer populations
 
+| Peer | What happens | Verified |
+|---|---|---|
+| **A camera the board must capture from** (DJI Osmo Pocket 3, `2ca3:0023`) | If the port settles sink/device, the bounded DR_SWAP promotes the board to `host` and the camera enumerates as a real UVC capture device. If it settles source/host on its own, the policy correctly does nothing. | 2026-08-27, both RK3588 boards — cold boot with the camera already attached, hot-plug on a live board, and reboot persistence all pass with no manual command |
+| **A USB-C PD charger or power bank** | The board attaches as a normal **sink**. The same bounded DR_SWAP is attempted (same trigger, no peer detection) and the kernel refuses it outright — a plain charger has no USB data capability — after which the policy stops and leaves the power contract untouched. | 2026-08-27, Rock 5B+ — `power_role: source [sink]`, two refusals with `Operation not supported`, then a clean stop |
+
+### Charging
+
+Charging is decided by the board's device tree, not by this policy — the policy
+never writes a power role at all. Two boards, the same camera and the same policy
+script, give opposite answers, which is what isolates the variable:
+
+| Board / kernel | `try-power-role` | Charging behaviour | Scope of the claim |
+|---|---|---|---|
+| **Orange Pi 5 Plus**, edge `7.1.7-ceralive-rk3588` | `source` — its own pre-existing mainline default, unrelated to CeraLive | The port settles source/host on first attach with no swap needed at all, and charging worked immediately and reliably. No software change required on this board. | Measured 2026-08-27, operator-confirmed |
+| **Rock 5B+**, edge v7.2, **unpatched** | `sink` | The same camera lands mostly sink: **no in-band charging**, with repeated `SNK_WAIT_CAPABILITIES_TIMEOUT` and no completed PD contract. This is the honest outcome and the policy does not chase it — it never attempts a PR_SWAP, because a PR_SWAP measured 1 success, 1 timeout and 2 rejections across four attempts. | Measured 2026-08-27 |
+| **Rock 5B+**, edge v7.2, **patched** `try-power-role = "source"` | `source` | `preferred_role` reads `source` where it read `sink` before, and every observed attach cycle landed the board as source with zero failures — one fully instrumented cycle captured a clean PD source contract through to `SRC_READY` (`VBUS on`, the camera granted `5000 mV / 3000 mA` capped at 2000 mA, no reset, no timeout, no reject, `vbus5v0_typec` regulator enabled), plus multiple operator-driven replug cycles all landing source. A measurable improvement on the unpatched baseline above. | Measured 2026-08-27. **Rock 5B+ only. Requires the patched EDGE (mainline v7.2) kernel — the vendor 6.1 production track gains none of it.** A qualitative multi-cycle result, not a numeric reliability guarantee |
+
+Two things to keep straight about that last row. `try-power-role` is a **soft
+Try.SRC preference** that still completes the normal CC-toggle handshake — the exact
+opposite of the retired hard `port_type=source` pin, which skipped the handshake and
+broke attachment. And no delivered wattage or current figure exists for either
+board: there is no VBUS current-sense part on the i2c bus and the FUSB302 is a
+CC-line PD controller with no VBUS ADC, so the `tcpm_source_psy_*` hwmon nodes read
+`0` even mid-contract. Every claim above is protocol-level — VBUS enabled, PD
+contract accepted, regulator enabled — and `tcpm-source-psy-*/online` reads `0`
+while sourcing and is never treated as sourcing proof.
+
+### Still open
+
+The **F19** electrical item — spontaneous CC-line dropout, which can escalate into a
+full xHCI host-controller teardown — is a **separate, still-open, never-root-caused**
+problem that this work does not touch, address, or fix. It was already known to fire
+spontaneously even at complete idle. Role policy is about which end wins arbitration;
+it says nothing about the CC lines dropping out later.
+
+Both deployments used locally built, bench-labelled artifacts: nothing was published
+to apt or R2, and **no shipped image carries this policy yet**. Per-board verdicts,
+the retired mechanism's full post-mortem, and the udev-vs-oneshot reasoning are in
+`AGENTS.md`. Guards: `tests/runtime-services.bats` §18d ("typec policy: …", 10
+cases). The hardware-only drill that produced the peer, DR_SWAP, PR_SWAP and
+charging verdicts is `tests/realhw-typec-matrix.sh`; it is never run by CI.
 ## Fan Curve
 
 The RK3588 package thermal zone ships from the device tree with its first `active`
