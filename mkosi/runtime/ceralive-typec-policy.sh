@@ -12,7 +12,6 @@
 # PR_SWAP is intentionally not implemented. Todo 20 recorded MIXED, not the
 # required zero-failure ACCEPTED verdict, and todo 26 records the same hardware
 # result in the kernel-patch repository. Evidence:
-#   .omo/evidence/task-20-uvc-quirk-generalization.txt
 #   rk3588-kernel-patches/README.md
 #   rk3588-kernel-patches/docs/UPSTREAM-STATUS.md
 # The camera-identification condition applied only to that omitted PR_SWAP path.

@@ -1,5 +1,5 @@
 # CeraLive adaptive Type-C policy. Keep udev fast: systemd owns all settlement,
-# camera identification and bounded DR_SWAP work. Deliberately add-only because
+# bounded, role-only DR_SWAP work. Deliberately add-only because
 # a successful data-role write emits KOBJ_CHANGE on the port itself.
 ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-typec-policy.service"
 ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_port", KERNEL=="port*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ceralive-typec-policy.service"

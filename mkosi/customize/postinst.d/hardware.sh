@@ -30,14 +30,14 @@ if ! declare -F die >/dev/null 2>&1; then
   die() { log "FATAL: $*"; exit 1; }
 fi
 
-# USB-C capture reliability: keep the connector dual-role and request only the
-# evidence-backed DR_SWAP for a positively identified DJI Osmo sink/device attach.
+# USB-C capture reliability: keep the connector dual-role and request the
+# role-only DR_SWAP for any settled sink/device attach.
 # udev hands port/partner add events to the same serialized systemd oneshot; the
 # enabled unit retains deterministic coldplug ordering before the media services.
 # Installed from committed artifacts under CERALIVE_RUNTIME_SRC, never inlined.
 # TYPEC_{UNIT,SBIN,RULES}_DIR override install dirs for the offline contract.
 setup_typec_policy() {
-  log "installing the adaptive USB-C data-role policy (ceralive-typec-policy.service — preserve DRP and swap only an identified Osmo to host)"
+  log "installing the adaptive USB-C data-role policy (ceralive-typec-policy.service — preserve DRP and swap any settled sink/device attach to host)"
   local src="${CERALIVE_RUNTIME_SRC:-}"
   [[ -n "${src}" && -f "${src}/ceralive-typec-policy.sh" ]] \
     || die "typec-policy script not found: ${src}/ceralive-typec-policy.sh (is \$SRCDIR/runtime mounted?)"
