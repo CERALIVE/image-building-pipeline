@@ -60,7 +60,7 @@ the same local, build-time-only package directory, and it is not an app-layer
 package.
 
 Under an opt-in `--variant` the same fields resolve to the source-built kernel
-package (`linux-image-7.1.7-ceralive-rk3588`, or
+package (`linux-image-7.2.0-ceralive-rk3588` on the current `edge` pin, or
 `linux-image-6.1.115-ceralive-vendor-rk35xx`) and the freeze follows them
 automatically.
 

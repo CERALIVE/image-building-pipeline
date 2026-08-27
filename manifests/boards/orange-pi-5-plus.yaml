@@ -26,7 +26,7 @@ dtb_name: rk3588-orangepi-5-plus.dtb
 
 # Per-variant board facts. dtb_name is kept as an EXPLICIT assertion even though
 # it now restates the default: the edge variant compiles its DTBs from mainline
-# v7.1.7, an entirely different tree from the vendor BSP above, and the two
+# v7.2, an entirely different tree from the vendor BSP above, and the two
 # agreeing today is a fact to pin rather than an invariant to assume. If either
 # tree ever renames it, only one of these two lines moves.
 #

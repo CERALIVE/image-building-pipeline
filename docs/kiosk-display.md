@@ -167,9 +167,11 @@ since been bench-validated on real Rock 5B+ hardware
 edge-7.1 kernel *as pinned at the time* (`encode-broken`), which alone determined
 the outcome under the plan's deterministic decision matrix regardless of H.265's
 cleaner (`encode-degraded`, bitrate-accuracy-only) result. That input has since
-changed: at the current `v7.1.7` pin, patches `0008` and `0009` fix the two
-kernel defects behind it and a real Rock 5B+ has `mpph264enc` registering and
-encoding. The verdict has **not** been re-run — see the 2026-08-09 amendment at
+changed: at the `v7.1.7` pin, patches `0008` and `0009` fix the two
+kernel defects behind it and a real Rock 5B+ had `mpph264enc` registering and
+encoding. That board result is scoped to `v7.1.7`; the `edge` track has since
+re-pinned to `v7.2`, where the same patches are carried and compile-proven with
+board evidence PENDING. The verdict has **not** been re-run — see the 2026-08-09 amendment at
 the top of `kernel-track-decision.md`, which is still the authoritative decision
 record for this mainline track. **D3 remains NOT re-opened and production remains
 vendor 6.1.**

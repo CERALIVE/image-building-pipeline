@@ -193,9 +193,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build rock-5b-plus` | production path; the kernel the fleet actually runs |
 | `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
-| `rock-5b-plus` | mainline 7.1 (source-built) | `./build rock-5b-plus --variant edge` | compiles and boots; at the `v7.1.7` pin MPP hardware video encode now works here too — board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry) — still a bench/insurance track |
+| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | compiled and booted **at the `v7.1.7` pin**, where MPP hardware video encode was board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry). At the current `v7.2` pin the tree is compile-proven and no board has booted it — board evidence PENDING. Still a bench/insurance track |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.1 (source-built) | `./build orange-pi-5-plus --variant edge` | compiles and passes all four validation axes; never booted, so the MPP result above is unconfirmed on this board |
+| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | compiled and passed all four validation axes at the `v7.1.7` pin; never booted on any pin, so the MPP result above is unconfirmed on this board |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -737,7 +737,7 @@ and its in-tree DTBs from **pinned source**, instead of fetching the prebuilt
 Armbian kernel:
 
 ```bash
-./build rock-5b-plus --variant edge             # mainline 7.1 track
+./build rock-5b-plus --variant edge             # mainline 7.2 track
 ./build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
 ```
 
@@ -746,7 +746,7 @@ neither repository's patches apply to the other's tree:
 
 | Variant | Kernel | Patch series | Built package |
 |---|---|---|---|
-| `edge` | mainline `v7.1.7` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.1.7-ceralive-rk3588` |
+| `edge` | mainline `v7.2` | `CERALIVE/rk3588-kernel-patches` | `linux-image-7.2.0-ceralive-rk3588` |
 | `vendor-patched` | Armbian vendor BSP 6.1.115 — **the kernel the shipped image actually runs** | `CERALIVE/rk3588-vendor-kernel-patches` | `linux-image-6.1.115-ceralive-vendor-rk35xx` |
 
 `vendor-patched` rebuilds the same 6.1.115 BSP the production path installs
@@ -822,7 +822,11 @@ validating image: no RTL8852BE WiFi (`CONFIG_RTW89`), no `/dev/dma_heap` for MPP
 encode (`CONFIG_DMABUF_HEAPS`), a `=y` that had been resolving to `=m` for three
 releases (`CONFIG_TYPEC_FUSB302`), and no nftables at all — which failed
 `ceralive-ingest-firewall.service` every boot and left the WAN-side drop of the
-unauthenticated RTMP/SRT ingest ports unapplied (`CONFIG_NF_TABLES`).
+unauthenticated RTMP/SRT ingest ports unapplied (`CONFIG_NF_TABLES`). A fifth was
+caught at the `v7.2` base bump before it shipped: `CONFIG_IP_MULTIPLE_TABLES` was
+declared without its `depends on` parent `CONFIG_IP_ADVANCED_ROUTER`, so the
+`ip rule` band CeraUI's uplink steering selects into would have been dropped in
+silence.
 
 For `vendor-patched` a small, reviewed exception list
 ([`manifests/kernel/rk3588-vendor-patched.absent`](manifests/kernel/rk3588-vendor-patched.absent))

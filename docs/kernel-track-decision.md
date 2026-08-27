@@ -9,7 +9,7 @@ document was written. Nothing in this record changes `armbian_branch: vendor` (D
 
 > **AMENDMENT 2026-08-09 — the measurements below stand, their INPUT does not.**
 > Everything in this record was measured against the `v7.1.5` pin with a
-> six-patch series. The `edge` variant has since been re-pinned to `v7.1.7` with
+> six-patch series. The `edge` variant was then re-pinned to `v7.1.7` with
 > a nine-patch series (`patches_commit acb519c101fe`), whose `0008` and `0009`
 > fix the two kernel defects behind the `encode-broken` finding. On a real Rock
 > 5B+ at that pin, `mpph264enc` **registers** and a 1080p encode produces bytes.
@@ -20,6 +20,14 @@ document was written. Nothing in this record changes `armbian_branch: vendor` (D
 > that needs its own bench campaign (and at minimum a second board — the Orange
 > Pi 5 Plus column is entirely unrun). Evidence for the new result:
 > `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
+>
+> **FURTHER AMENDMENT — the `edge` base has moved again, to `v7.2`, and NO board
+> evidence travels with it.** The pin is now `v7.2` (`8d3ae59288f1`) with a
+> 22-member series (`patches_commit b28a187269f2`); `0008` and `0009` are still
+> in it, and the tree cross-compiles clean. The Rock 5B+ result described in the
+> paragraph above remains a **`v7.1.7`** measurement — nothing has been built,
+> flashed or booted at `v7.2` on either board. So the re-run this amendment calls
+> for is now a `v7.2` bench campaign, and the decision is doubly unchanged.
 **Inputs:** todo 28 (`task-28-hdmirx-uvc-bench.md`, `task-28-journal-diff-2026-08-06.md`),
 todo 29 (`task-29-h265-probe-runbook.md`), todo 27 (`task-27-sd-boot-validation.md`,
 `task-27-orangepi5plus-build-fixed-2.md`).

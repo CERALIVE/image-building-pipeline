@@ -9,7 +9,7 @@ if you find a fact repeated here, that is a bug in this page, not a feature.
 
 | Variant | Track | Patch repository | Retire-on-merge status |
 |---|---|---|---|
-| `edge` | mainline Armbian `edge` (7.1) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
+| `edge` | mainline (currently pinned to `v7.2`; Armbian's own `edge` mapping still names 7.2-rc7) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
 | `vendor-patched` | Armbian `vendor` (6.1 BSP — the kernel the shipped image actually runs) | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | tracked in that repo's own docs (open upstream PR #487; retires when it merges) |
 
 Both variants are declared under `rk3588`'s `variants:` map in
@@ -31,6 +31,12 @@ backward:
 
 `rk3588.yaml` is the single point where a pin becomes a build input. Nothing in
 this repo re-derives a pin independently of that file.
+
+**A base bump does not carry hardware evidence with it.** Board results are scoped
+to the base they were measured on; after a re-pin, treat the new base as
+compile-proven until a board says otherwise. The `edge` track's current `v7.2`
+pin is in exactly that state — see
+[`kernel-build-from-source.md`](kernel-build-from-source.md) §2 and §7.
 
 ## Retire-on-merge lifecycle
 

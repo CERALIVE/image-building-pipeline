@@ -203,11 +203,13 @@ EOF
   [[ "$output" != *"CONFIG_DMABUF_HEAPS_CMA"* ]]
 }
 
-@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.1.7 has no such symbol" {
+@test "rk3588-edge.fragment: NFT_COUNTER is NOT declared — v7.2 has no such symbol" {
   # The ruleset's `counter` statement is real, but net/netfilter/Makefile compiles
   # nft_counter.o unconditionally into nf_tables-objs. Declaring CONFIG_NFT_COUNTER
   # would resolve to nothing and the gate would fail the build over a symbol the
-  # kernel does not have.
+  # kernel does not have. Re-verified at the v7.2 base: a tree-wide search over
+  # every Kconfig/Kconfig.*/Makefile returns zero hits, so the row stays and its
+  # rationale is unchanged.
   run ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
 }
 
@@ -545,6 +547,31 @@ EOF
   # Disabling it must never come with dropping the adapter's own driver.
   grep -qx '# CONFIG_ARCH_REALTEK is not set' "$FRAGMENT"
   grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: ARCH_ASPEED — the platform v7.2 ADDED is disabled and forbidden" {
+  # ARCH_ASPEED is the counterexample to "a platform upstream adds later is simply
+  # absent here rather than silently re-enabled": v7.2 added the prompt to
+  # arch/arm64/Kconfig.platforms AND set it `=y` in arm64 defconfig in the same
+  # release, so a fragment that was not re-enumerated at the base bump would have
+  # shipped defconfig's own `=y` on an RK3588 kernel. Same shape as ARCH_REALTEK
+  # above: named explicitly because the generic count/derivation checks pass
+  # either way.
+  grep -qx '# CONFIG_ARCH_ASPEED is not set' "$FRAGMENT"
+  grep -qx 'CONFIG_ARCH_ASPEED' "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  # The forbidden manifest takes BARE names; a valued row is a usage error.
+  run ! grep -q '^CONFIG_ARCH_ASPEED=' "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS a resolved .config where ARCH_ASPEED survived" {
+  # The silent regression this row exists to catch: defconfig sets it, the
+  # fragment is stale, and the resolved config carries a foreign SoC platform
+  # with nothing anywhere reporting an error.
+  printf 'CONFIG_ARCH_ASPEED=y\n' >"$WORK/aspeed-back"
+  run "$VERIFY" --config "$WORK/aspeed-back" \
+    --forbidden "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_ARCH_ASPEED: FORBIDDEN"* ]]
 }
 
 @test "rk3588-edge.fragment: the gate REJECTS a config where a foreign platform came back" {

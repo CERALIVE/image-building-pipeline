@@ -10,7 +10,7 @@
 # is currently expected to supply on its own. Those are different claims, and
 # only the second one survives a change to the fragment: the moment the fragment
 # turns a platform, a bus or a subsystem OFF (which the Rockchip-only block now
-# does, for 54 foreign platforms at once), a driver defconfig used to provide can
+# does, for 55 foreign platforms at once), a driver defconfig used to provide can
 # stop being visible, and the fragment gate cannot notice because the fragment
 # never named it.
 #
@@ -113,7 +113,7 @@ CONFIG_R8169=m
 # adapter an operator puts in the M.2 E-key slot or a USB port, which no manifest
 # can predict — so the requirement is that the finished kernel CARRIES the
 # driver, not that any particular board uses it. Each vendor gate is listed with
-# its leaves for the reason this file's header gives: the fragment disables 54
+# its leaves for the reason this file's header gives: the fragment disables 55
 # platforms, and a leaf whose vendor gate stopped resolving would vanish in
 # silence.
 #

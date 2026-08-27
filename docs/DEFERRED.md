@@ -380,22 +380,24 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ## 9. Kernel-build-from-source variant — booted on rock-5b-plus, never booted on orange-pi-5-plus
 
-**Status:** Further unblocked — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end (`.raw` + signed `.raucb`, all 14 first-party packages installed), and at the `v7.1.7` pin a `rock-5b-plus` has been flashed and BOOTED (`7.1.7-ceralive-rk3588`); `orange-pi-5-plus` has still never booted an edge image
+**Status:** Partly unblocked AT THE `v7.1.7` BASE, and NOT re-measured at the current `v7.2` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and a `rock-5b-plus` was flashed and BOOTED (`7.1.7-ceralive-rk3588`); `orange-pi-5-plus` has still never booted an edge image on any pin. At `v7.2` the tree is cross-compile-proven only — no image built, flashed or booted on either board
 **Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
-kernel + in-tree DTBs from pinned source (`v7.1.7` + the
-`CERALIVE/rk3588-kernel-patches` series) with `make bindeb-pkg`. The pipeline, the
+kernel + in-tree DTBs from pinned source (`v7.2` today, `v7.1.7` when the results
+below were measured, plus the `CERALIVE/rk3588-kernel-patches` series) with
+`make bindeb-pkg`. The pipeline, the
 schema, the pins, the fetch suppression, the package-name replacement, the
 staged-package uniqueness check and the platform DTB install mapping all exist and
 are gated by tests.
 
-**What has now been proven:** `CERALIVE_BENCH_LABELS=1 build rock-5b-plus
---variant edge` was run for real, twice, on a container host. It compiles
-`linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passes all four
-`validate_built_kernel_deb` axes, installs the board DTB to
-`/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produces a flashable `.raw` plus a
-signed `.raucb`. The two builds agreed on every package version, every rootfs path
+**What was proven at `v7.1.7`:** `CERALIVE_BENCH_LABELS=1 build rock-5b-plus
+--variant edge` was run for real, twice, on a container host. It compiled
+`linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passed all four
+`validate_built_kernel_deb` axes, installed the board DTB to
+`/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produced a flashable `.raw` plus a
+signed `.raucb`. (At the current pin the derived package name is
+`linux-image-7.2.0-ceralive-rk3588`; that build has not been run.) The two builds agreed on every package version, every rootfs path
 and the built `/boot/config-*`. Reaching that required fixing four defects the
 `DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
 
@@ -405,16 +407,19 @@ and the staging-key fix below, `CERALIVE_BENCH_LABELS=1 build orange-pi-5-plus
 the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`. It, too, has never
 been booted.
 
-**Still deferred:** the PR gate still runs `DRY_RUN=1` (plan only — no network,
-container or compiler). A real build is a multi-GB clone plus a long cross-compile,
+**Still deferred, and now on two axes:** the whole build/boot result above is a
+`v7.1.7` record, so the `v7.2` re-pin re-opens it — a real `--variant edge` build
+and a board boot are both outstanding at the current pin. And the PR gate still
+runs `DRY_RUN=1` (plan only — no network, container or compiler). A real build is a multi-GB clone plus a long cross-compile,
 so running it in the PR gate remains a separate, deliberate CI-budget decision.
 
 Two consequences worth stating plainly:
 
 * The **defconfig fragment** (`manifests/kernel/rk3588-edge.fragment`) now
-  demonstrably resolves and compiles, but it is still reviewed intent rather than a
-  validated result: no symbol in it has been proven necessary *or* sufficient **on
-  hardware**.
+  demonstrably resolves and compiles (re-verified at `v7.2`: 169/169 declared
+  symbols survive, 0 forbidden violations), but it is still reviewed intent rather
+  than a validated result: no symbol in it has been proven necessary *or*
+  sufficient **on hardware**, at either base.
 * **A board's DTB filename comes from whichever kernel tree built it, and the two
   trees need not agree — RESOLVED.** Since the board wins the merge
   last, the **board** now declares the per-variant name via `variant_overrides:`
