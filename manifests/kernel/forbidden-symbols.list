@@ -31,10 +31,14 @@
 #    validated on hardware.
 #
 # 3. SYMBOLS THAT DO NOT EXIST AT THIS PIN. CONFIG_NFT_COUNTER is real in the
-#    sense that the ruleset's `counter` statement is load-bearing, but v7.1.7
+#    sense that the ruleset's `counter` statement is load-bearing, but v7.2
 #    compiles nft_counter.o unconditionally into nf_tables-objs and has no such
-#    symbol. It is listed so a future "obviously missing" addition to the
-#    fragment is caught here with an explanation rather than as a bare DROPPED.
+#    symbol. Re-verified at v7.2: a tree-wide search across every Kconfig,
+#    Kconfig.* and Makefile returns zero hits, and net/netfilter/Makefile still
+#    builds nft_counter.o into nf_tables-objs next to nft_meta.o and
+#    nft_chain_filter.o. It is listed so a future "obviously missing" addition to
+#    the fragment is caught here with an explanation rather than as a bare
+#    DROPPED.
 
 # --- 1. foreign SoC platforms ---------------------------------------------
 CONFIG_ARCH_ACTIONS
@@ -42,6 +46,14 @@ CONFIG_ARCH_AIROHA
 CONFIG_ARCH_ALPINE
 CONFIG_ARCH_APPLE
 CONFIG_ARCH_ARTPEC
+# ARCH_ASPEED is NEW AT v7.2 — the prompt was added to
+# arch/arm64/Kconfig.platforms AND set `=y` in arm64 defconfig in the same
+# release, so an un-refreshed fragment would have carried defconfig's own `=y`
+# straight into an RK3588 kernel (plus ten symbols it drags in). It is the
+# counterexample to the old "a platform upstream adds later is simply absent
+# rather than silently re-enabled" claim: the stale-list failure mode is a
+# MISSING row, not a leftover one. Re-enumerate this block at every base bump.
+CONFIG_ARCH_ASPEED
 CONFIG_ARCH_AXIADO
 CONFIG_ARCH_BCM
 CONFIG_ARCH_BCM2835
@@ -106,5 +118,5 @@ CONFIG_KUNIT
 CONFIG_FAULT_INJECTION
 CONFIG_LOCALVERSION_AUTO
 
-# --- 3. absent at the v7.1.7 pin --------------------------------------------
+# --- 3. absent at the v7.2 pin ----------------------------------------------
 CONFIG_NFT_COUNTER

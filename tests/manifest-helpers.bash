@@ -1265,6 +1265,17 @@ CTL
 
 # Write a schema-valid family carrying one variant overlay, so the negative
 # schema legs below differ from the shipped manifest in exactly one field.
+#
+# THE OVERLAYS CALLERS PASS ARE FROZEN SYNTHETIC FIXTURES, NOT MIRRORS OF THE
+# SHIPPED MANIFEST. Their kernel pins (`tag: v7.1.7`, `commit: c7ba9d6d…`,
+# `kernel_release: 7.1.7-…`) are arbitrary but INTERNALLY CONSISTENT strings
+# whose only job is to make the rest of the block schema-valid so the ONE
+# deliberately-broken field is what the validator reports. They must NOT be
+# re-pinned when the real `manifests/families/rk3588.yaml` moves to a new kernel
+# base: chasing the live pin here buys nothing, and a fixture that tracks the
+# thing it is testing against stops being an independent negative. A leg that
+# genuinely asserts the SHIPPED pin runs the real resolver instead — see the
+# `kernel_source: the pinned patches commit …` tests in variant-contract.bats.
 write_variant_family() {
   local dest="$1" overlay="$2"
   cat > "$dest" <<YAML

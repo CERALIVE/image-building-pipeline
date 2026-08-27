@@ -166,13 +166,13 @@ edge_env() {
   local board="$1" root="$2"
   local dtb; dtb="$(board_dtb "$board")"
   printf "BUILDROOT='%s' DTB_NAME='%s' KERNEL_SOURCE_DTB_DEB_DIR='%s' KERNEL_SOURCE_DTB_BOOT_DIR='%s' CERALIVE_DTB_KEEP_OVERLAYS='%s'" \
-    "$root" "$dtb" /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip /boot/dtb/rockchip "${3:-}"
+    "$root" "$dtb" /usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip /boot/dtb/rockchip "${3:-}"
 }
 
 @test "edge dtb install: rock-5b-plus keeps ONE dtb in BOTH installed locations" {
   local dtb; dtb="$(board_dtb rock-5b-plus)"
   local root="$WORK/root"
-  local payload="$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  local payload="$root/usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip"
   seed_dtb_dir "$payload" "$dtb"
 
   drive "$(edge_env rock-5b-plus "$root") install_kernel_source_dtbs"
@@ -190,7 +190,7 @@ edge_env() {
   local dtb; dtb="$(board_dtb orange-pi-5-plus)"
   [[ "$dtb" != rk3588s-* ]]
   local root="$WORK/root"
-  local payload="$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  local payload="$root/usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip"
   seed_dtb_dir "$payload" "$dtb"
 
   drive "$(edge_env orange-pi-5-plus "$root") install_kernel_source_dtbs"
@@ -207,7 +207,7 @@ edge_env() {
 @test "edge dtb install: a named overlay survives into BOTH locations" {
   local dtb; dtb="$(board_dtb rock-5b-plus)"
   local root="$WORK/root"
-  local payload="$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  local payload="$root/usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip"
   seed_dtb_dir "$payload" "$dtb"
 
   drive "$(edge_env rock-5b-plus "$root" 'overlay/rk3588-example.dtbo') install_kernel_source_dtbs"
@@ -228,11 +228,11 @@ edge_env() {
 
 @test "edge dtb install: a board DTB absent from the package still fails BEFORE any prune" {
   local root="$WORK/root"
-  local payload="$root/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  local payload="$root/usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip"
   seed_dtb_dir "$payload" rk3588-rock-5b-plus.dtb
   local before; before="$(find "$payload" -type f | sort)"
 
-  drive "BUILDROOT='$root' DTB_NAME='rk3588-no-such-board.dtb' KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip' KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip' install_kernel_source_dtbs"
+  drive "BUILDROOT='$root' DTB_NAME='rk3588-no-such-board.dtb' KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip' KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip' install_kernel_source_dtbs"
   [ "$status" -ne 0 ]
   [ "$(find "$payload" -type f | sort)" = "$before" ]
 }
@@ -247,9 +247,9 @@ edge_env() {
   local dtb; dtb="$(board_dtb rock-5b-plus)"
 
   local stage="$WORK/pkg"
-  local payload_rel="usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip"
+  local payload_rel="usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip"
   mkdir -p "$stage/DEBIAN" "$stage/$payload_rel"
-  printf 'Package: linux-image-7.1.7-ceralive-rk3588\nVersion: 7.1.7-ceralive1\nArchitecture: arm64\nMaintainer: t <t@t>\nDescription: fixture\n' >"$stage/DEBIAN/control"
+  printf 'Package: linux-image-7.2.0-ceralive-rk3588\nVersion: 7.2.0-ceralive1\nArchitecture: arm64\nMaintainer: t <t@t>\nDescription: fixture\n' >"$stage/DEBIAN/control"
   seed_dtb_dir "$stage/$payload_rel" "$dtb"
   dpkg-deb --build --root-owner-group "$stage" "$WORK/kernel.deb" >/dev/null
 
@@ -432,7 +432,7 @@ edge_env() {
 
   # A kernel_source variant carries its own DTBs and is trimmed by
   # install_kernel_source_dtbs; running both would prune the same tree twice.
-  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='7.1.7-ceralive-rk3588' prune_vendor_dtbs"
+  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='7.2.0-ceralive-rk3588' prune_vendor_dtbs"
   [ "$status" -eq 0 ]
   [ "$(find "$versioned" -type f | sort)" = "$before" ]
 

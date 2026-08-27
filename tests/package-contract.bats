@@ -474,6 +474,9 @@ PY
 }
 
 @test "wwan: the native FM350 mtk_t7xx gate is OUT OF SCOPE on a mainline edge tree" {
+  # The release string is a SYNTHETIC fixture, not the shipped pin: the only
+  # property under test is that it does NOT end in `-vendor-rk35xx`, so any
+  # mainline-shaped name serves and re-pinning it at a base bump proves nothing.
   local root="$BATS_TEST_TMPDIR/tree"
   wwan_stage_six "$root" "7.1.7-ceralive-rk3588"
   run "$CHECK_WWAN" "$root"

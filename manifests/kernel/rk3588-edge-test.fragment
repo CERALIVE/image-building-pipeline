@@ -7,8 +7,8 @@
 # here deliberately wins over the production fragment.
 #
 # THIS FRAGMENT NEVER SHIPS. It belongs to the opt-in `edge-test` variant, which
-# builds linux-image-7.1.7-ceralive-rk3588-test — a deliberately different package
-# name from production's linux-image-7.1.7-ceralive-rk3588, so the two can never be
+# builds linux-image-7.2.0-ceralive-rk3588-test — a deliberately different package
+# name from production's linux-image-7.2.0-ceralive-rk3588, so the two can never be
 # resolved for one another. Every symbol below is also on
 # manifests/kernel/forbidden-symbols.list, which the PRODUCTION `edge` config is
 # gated against, so a leak into a shipped artifact fails that build rather than

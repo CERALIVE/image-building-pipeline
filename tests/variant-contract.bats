@@ -162,9 +162,11 @@ YAML
 }
 
 @test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
-  # Mainline's rockchip Makefile at the pinned v7.1.7 builds
-  # rk3588-orangepi-5-plus.dtb, and the override states that explicitly rather
-  # than inheriting it, so a future mainline rename moves exactly one line.
+  # Mainline's rockchip Makefile at the pinned v7.2 builds
+  # rk3588-orangepi-5-plus.dtb (confirmed in the v7.2 compile evidence: `DTC
+  # arch/arm64/boot/dts/rockchip/rk3588-orangepi-5-plus.dtb`), and the override
+  # states that explicitly rather than inheriting it, so a future mainline rename
+  # moves exactly one line.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DTB_NAME='rk3588-orangepi-5-plus.dtb'"* ]]
@@ -429,7 +431,7 @@ YAML
 @test "kernel_source: the edge resolve replaces the kernel package and empties DTB_PACKAGES" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
   [[ "$output" == *"DTB_PACKAGES=''"* ]]
   [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
   # U-Boot and firmware are still PREBUILT-FETCHED, never built from source —
@@ -451,7 +453,7 @@ YAML
   line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
   [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
   [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-image-7.1.7-ceralive-rk3588"* ]]
+  [[ "$line" == *"linux-image-7.2.0-ceralive-rk3588"* ]]
   # U-Boot / firmware must NEVER be suppressed.
   [[ "$line" != *"linux-u-boot"* ]]
   [[ "$line" != *"armbian-firmware"* ]]
@@ -460,15 +462,19 @@ YAML
 @test "kernel_source: the pinned patches commit is the next hardware-candidate series tip" {
   # A regression pin on the actual value: the CERALIVE/rk3588-kernel-patches
   # `main` commit the hardware candidates are built from — currently the
-  # squash-merge of PR #8, which added 0027. A silent bump here would change what
-  # the kernel contains with no other signal, and would detach the hardware
-  # evidence from the series it claims to attest.
+  # squash-merge that re-anchored the 22-member series onto the v7.2 base. A
+  # silent bump here would change what the kernel contains with no other signal,
+  # and would detach the hardware evidence from the series it claims to attest.
+  #
+  # PIN SHAPE, not just the value: a squash-merge ORPHANS the pre-merge branch
+  # head, so this must always be the resulting `main` commit and never a PR-head
+  # SHA — a fresh clone cannot reach the latter.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='00fc0b26540e94d310098a32773e150dcd7bdc41'"* ]]
+   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='b28a187269f2db993e490278788e348767aa24a8'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_COMMIT='c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_COMMIT='8d3ae59288f1e7d58d76558a6ee96d533bc5019f'"* ]]
 }
 
 @test "kernel_source: the defconfig fragment the manifest names actually exists" {
@@ -561,9 +567,9 @@ YAML
 @test "vendor-patched: selecting it does NOT move the edge variant" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.1.7'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_DEFCONFIG_BASE='defconfig'"* ]]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
   [[ "$output" == *"BUILDER_IMAGE='debian:trixie-"* ]]
   # edge declares no config-file trio at all.
   [[ "$output" != *"KERNEL_SOURCE_CONFIG_GIT_URL="* ]]
@@ -720,6 +726,11 @@ YAML
 }
 
 @test "fetch suppression: suppressed kernel/DTB names leave the declared BSP set" {
+  # The built-kernel name here is an ENV-DRIVEN STUB, not the shipped pin: the
+  # subject is `collect_declared_bsp_pkgs`' set arithmetic, which is indifferent
+  # to the string. It is deliberately left at the older release so a reader
+  # cannot mistake it for an assertion about the current manifest — the legs that
+  # DO assert that run the real resolver.
   run bash -c "
     set -euo pipefail
     export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.7-ceralive-rk3588'
@@ -873,9 +884,9 @@ YAML
   serialize build-plan
   run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" rock-5b-plus --variant edge
   [ "$status" -eq 0 ]
-  [[ "$output" == *"git clone --branch v7.1.7"* ]]
-  [[ "$output" == *"git rev-parse HEAD == c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6"* ]]
-   [[ "$output" == *"00fc0b26540e94d310098a32773e150dcd7bdc41"* ]]
+  [[ "$output" == *"git clone --branch v7.2"* ]]
+  [[ "$output" == *"git rev-parse HEAD == 8d3ae59288f1e7d58d76558a6ee96d533bc5019f"* ]]
+   [[ "$output" == *"b28a187269f2db993e490278788e348767aa24a8"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
