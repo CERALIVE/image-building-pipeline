@@ -13,7 +13,7 @@ patch repositories** — neither repo's patches apply to the other's tree:
 
 | Variant | Track | Source | Patch series | Why it exists |
 |---|---|---|---|---|
-| `edge` | mainline 7.1 | `linux-stable` `v7.1.7` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
+| `edge` | mainline 7.2 | `linux-stable` `v7.2` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
 | `vendor-patched` | **vendor 6.1 BSP — the kernel the shipped image actually runs** | `armbian/linux-rockchip` `rk-6.1-rkr5.1` @ `95e85f6c` | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | restores **HDMI-RX audio capture**, which the stock vendor kernel lost |
 
 `vendor-patched` is the same 6.1.115 BSP the production path installs prebuilt,
@@ -90,14 +90,34 @@ refuses neither.
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@5a272f46019ed6cc6bd67b16f556e2e8afa280fe` — the
-tip of that repo's `feat/backports-fixes-doctrim`, a nineteen-patch series
-applying against exactly `v7.1.7`, and the exact revision the Wave-8 hardware
-candidates were built from. It is a BRANCH TIP rather than a `main` commit
-because that branch has not merged yet and the hardware evidence has to name the
-revision it was actually produced from; the predecessor pin
-`acb519c101fefa31f51300779f3a139bcabf6a1c` was the nine-patch commit that landed
-on `main` from PR #4.
+`CERALIVE/rk3588-kernel-patches@b28a187269f2db993e490278788e348767aa24a8` — the
+`main` commit produced by the squash-merge of PR #11, the rebase of the series
+onto `v7.2`. At it, `patches/series` carries **22 active members** in three lanes:
+four `upstream/` (`0001` VEPU580, `0002` HDMI-RX EDID, `0003` HDMI-RX plugout,
+`0005` HDMI-RX audio), three `backports/` (`0010` combphy, `0011`+`0012`
+dw-hdmi-qp), and fifteen `ceralive/` (`0006`, `0008`, `0009`, `0013`-`0022`,
+`0026`, `0027`).
+
+**The ordinals are slot numbers, not a count.** Those 22 members occupy a 27-slot
+space and every gap is deliberate: `0004` was never published, `0007`
+(iommu-rockchip fetch-dte time limit) is RETIRED because it LANDED UPSTREAM as
+`8d4346ecd495` in v7.2 — this base bump is what retired it — and `0023`/`0024`/
+`0025` were folded into `0021`. A retired ordinal is never reused. Per-patch
+history lives in that repo's `retired/REGISTRY.md` and `docs/UPSTREAM-STATUS.md`.
+
+Two predecessor pins, kept for lineage only: `5a272f46019ed6cc6bd67b16f556e2e8afa280fe`
+was the nineteen-patch `v7.1.7`-anchored series the Wave-8 hardware candidates
+were built from, and `acb519c101fefa31f51300779f3a139bcabf6a1c` before it was the
+nine-patch commit that landed on `main` from PR #4.
+
+**HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP.** Every board result this series
+accumulated — the Rock 5B+ MPP hardware-encode confirmation, the rkvenc
+fault-injection receipts, the 4K HDMI-RX lock behind `0027` — was obtained
+against the `v7.1.7` base. Nothing has been built, flashed or booted at `v7.2` on
+either board. The `v7.2` evidence is a cross-compile of this exact tree (22/22
+`git am` clean, `Image` + modules + dtbs, zero errors) plus the config-survival
+gate. Read this pin as **compile-proven and hardware-UNVALIDATED** until a board
+says otherwise.
 
 **Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
 and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer
@@ -107,10 +127,11 @@ committing the bump — the PR gate is `DRY_RUN=1` and never fetches the series.
 
 PR #4 re-anchored the whole series on `v7.1.7` and grew it to nine patches. Two of
 them are what make MPP hardware encode work on this track, and both were confirmed
-on a real Rock 5B+: `0008` sets the rkvenc DMA max segment size (imported buffer
-lengths were truncated to 64 KiB, so the IOVA guardrail rejected every encode) and
-`0009` adds the mainline `system-uncached` dma-heap `librockchip_mpp` opens by
-name. `0009` needs `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y` in
+on a real Rock 5B+ **at that `v7.1.7` base** (they are carried and compile-proven at
+`v7.2`, with board evidence PENDING): `0008` sets the rkvenc DMA max segment size
+(imported buffer lengths were truncated to 64 KiB, so the IOVA guardrail rejected
+every encode) and `0009` adds the mainline `system-uncached` dma-heap
+`librockchip_mpp` opens by name. `0009` needs `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y` in
 `rk3588-edge.fragment` — without it the code compiles and `dma_heap_add()` for
 that heap simply never runs, which is precisely the silent no-op §6b's gate exists
 to catch.
@@ -132,8 +153,15 @@ running board's config.
 
 **Why we pin a tag when Armbian tracks a branch.** Armbian maps rk3588
 `BRANCH=edge` to `KERNEL_MAJOR_MINOR=7.1` and then follows the **rolling** branch
-`linux-7.1.y`. "Verified against linux-7.1.y" is not a reproducible claim, so we
-pin the tag that was its tip at import (`v7.1.7` = `c7ba9d6de43e`). That mapping
+`linux-7.1.y`. "Verified against linux-7.1.y" is not a reproducible claim, so the
+`edge` pin has always named a real tag: `v7.1.7` = `c7ba9d6de43e` when the 7.1
+track was its tip at import, and today `v7.2` = `8d3ae59288f1` — a FINAL release
+tag rather than a branch tip. Note that Armbian's own 7.2 mapping still reads
+`tag:v7.2-rc7`; that rc is simply stale (v7.2 was tagged one day BEFORE the
+`armbian/build` revision the mapping was read from), and pinning a release
+candidate would gate this track on a kernel nobody will run. The MAJOR.MINOR is
+identical either way, which is what makes the substitution safe, and `commit`
+remains the real pin. That mapping
 is re-derived from `armbian/build` by the patches repo's `scripts/preflight.sh`
 and recorded in its `kernel-pin.env`.
 
@@ -146,7 +174,7 @@ upstream can be proven to still resolve to that commit.
 
 | Shape | When | What `build-kernel.sh` runs |
 |---|---|---|
-| tagged | the source publishes a tag for the pin (`edge`, `v7.1.7`) | `git clone --depth 1 --branch <tag>`, then assert `HEAD == commit` |
+| tagged | the source publishes a tag for the pin (`edge`, `v7.2`) | `git clone --depth 1 --branch <tag>`, then assert `HEAD == commit` |
 | commit-only | the source publishes **no tag on the pinned branch** (`vendor-patched`, `rk-6.1-rkr5.1`) | `git init` + `git fetch --depth 1 <url> <commit>` + `git checkout FETCH_HEAD`, then assert `HEAD == commit` |
 
 Both shapes end at the same assertion, so the guarantee is identical: the tree
@@ -723,7 +751,8 @@ declare those too — a `select`ed helper symbol (`RTW89_CORE`, `RTW89_PCI`,
 
 **And read the Makefile as well as the Kconfig before you add a symbol.** The
 ingest ruleset uses a `counter` statement, so `CONFIG_NFT_COUNTER` looks
-obligatory — but no such symbol exists in `v7.1.7`: `net/netfilter/Makefile`
+obligatory — but no such symbol exists in the pinned tree (re-verified at `v7.2`,
+as at `v7.1.7` before it): `net/netfilter/Makefile`
 compiles `nft_counter.o` unconditionally into `nf_tables-objs`, next to
 `nft_meta.o` (`iifname`) and `nft_chain_filter.o` (`type filter hook input`).
 Declaring it would resolve to nothing and this gate would reject the build. The
@@ -740,12 +769,21 @@ fully-honoured one, and the build-stage wiring order).
 
 ## 7. Known gaps — read before using this
 
-Honest status: **`rock-5b-plus --variant edge` has been built end to end** — a real
-cross-compile producing `linux-image-7.1.7-ceralive-rk3588` and a flashable `.raw` —
-**and, at the `v7.1.7` pin, flashed and booted on a real Rock 5B+.** That run
-cleared the MPP hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) and
-confirmed the capture/encode symbols on silicon. It is ONE board: `orange-pi-5-plus`
-has still never booted an edge image, so every per-board claim below stands.
+Honest status, and the base it is scoped to matters: **at the `v7.1.7` pin,
+`rock-5b-plus --variant edge` was built end to end** — a real cross-compile
+producing `linux-image-7.1.7-ceralive-rk3588` and a flashable `.raw` — **and
+flashed and booted on a real Rock 5B+.** That run cleared the MPP hardware-encode
+KNOWN ISSUE (see the pipeline `AGENTS.md`) and confirmed the capture/encode
+symbols on silicon AT THAT BASE. It is ONE board: `orange-pi-5-plus` has still
+never booted an edge image, so every per-board claim below stands.
+
+**At the current `v7.2` pin none of that has been repeated.** The manifest
+derives `linux-image-7.2.0-ceralive-rk3588`, the patch series applies clean and
+cross-compiles, and the config-survival/forbidden/required gates pass against the
+v7.2 resolved `.config` — but no pipeline `--variant edge` image has been
+produced, flashed or booted at `v7.2` on either board. Hardware evidence does not
+cross a base bump; treat every board result in this document as a `v7.1.7`
+record.
 
 **`vendor-patched` status:** the kernel `.deb` builds and validates on all four
 axes; the series applies cleanly with `git am` against the pinned commit; the
@@ -778,11 +816,14 @@ instead of a manual patch; it does not re-prove the audio path.
 2. **The defconfig fragment is reviewed intent, not a validated result.** It
    starts from mainline `defconfig` and adds what the CeraLive stack needs. The
    fragment is now known to *resolve and compile* — the built
-   `/boot/config-7.1.7-ceralive-rk3588` carries it — but no symbol in it has been
-   proven necessary *or* sufficient **on hardware**.
+   `/boot/config-7.1.7-ceralive-rk3588` carried it at the `v7.1.7` base — but no
+   symbol in it has been proven necessary *or* sufficient **on hardware**, at that
+   base or at `v7.2`.
 
    Worse, until §6b's gate existed the built config did not even carry what the
-   fragment ASKED for: two symbols were being silently dropped or downgraded. The
+   fragment ASKED for: two symbols were being silently dropped or downgraded, and
+   the `v7.2` bump caught a third the same way (`IP_MULTIPLE_TABLES`, parent
+   `IP_ADVANCED_ROUTER` undeclared). The
    gate now makes "the fragment is honoured" a build invariant, but that is a
    weaker claim than "the fragment is right for this board" — which still needs a
    bench run per symbol.
@@ -831,7 +872,9 @@ instead of a manual patch; it does not re-prove the audio path.
    in either tree moves exactly one line.
 
    `rock-5b-plus` never needed it: it declares `rk3588-rock-5b-plus.dtb`,
-   mainline v7.1.7 builds exactly that name, and the built `.deb` ships it (228
+   mainline builds exactly that name at both bases (the `v7.2` cross-compile
+   emitted `DTC arch/arm64/boot/dts/rockchip/rk3588-rock-5b-plus.dtb`), and the
+   `v7.1.7` `.deb` shipped it (228
    `rockchip/*.dtb` entries in total). Note that until the `deb_lists_path` fix in
    item 1, this board *also* failed the DTB check — with the divergence wording
    above and an empty "DTBs actually present" list. **An empty list there means the
@@ -869,7 +912,7 @@ dtb_name: rk3588-orangepi-5-plus.dtb         # vendor BSP, the default path
 
 variant_overrides:
   edge:
-    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline v7.1.7
+    dtb_name: rk3588-orangepi-5-plus.dtb     # mainline (same name at v7.1.7 and v7.2)
 ```
 
 The rules, all enforced:

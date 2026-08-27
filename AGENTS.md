@@ -102,7 +102,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Deferred / hardware-gated items** | [`docs/DEFERRED.md`](docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | **Kernel tracks (index)** | [`docs/kernel-tracks.md`](docs/kernel-tracks.md) — thin lifecycle/discoverability index: which patch repo feeds which variant, the pin chain, and links to the decision/build/currency docs below (does not restate them) |
 | **Kernel currency watch** | [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
-| **Kernel build from source (opt-in variants)** | [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.1, `vendor-patched` = vendor 6.1 BSP + HDMI-RX audio fix), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config`), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
+| **Kernel build from source (opt-in variants)** | [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.2, `vendor-patched` = vendor 6.1 BSP + HDMI-RX audio fix), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config`), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
 | **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`docs/dev-loop.md`](docs/dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
 | Add-on descriptor schema | `manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `lib/build-feature-sysext.sh` |
@@ -810,7 +810,7 @@ for the full host matrix.
 DRY_RUN=1 ./build <board>             # resolve + fetch plan only
 ./build <board> --native              # opt-in native build (trixie+ host only)
 MKOSI_NATIVE=1 ./build <board>        # same, env-var form
-./build <board> --variant edge        # opt-in family variant (mainline 7.1 kernel from source)
+./build <board> --variant edge        # opt-in family variant (mainline 7.2 kernel from source)
 ./build <board> --variant vendor-patched  # opt-in: vendor 6.1 BSP from source + HDMI-RX audio fix
 ```
 
@@ -1278,11 +1278,23 @@ DIFFERENT patch repos, and neither repo's patches apply to the other's tree:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
-| `edge` | mainline 7.1 | `v7.1.7` / `c7ba9d6de43e` | `CERALIVE/rk3588-kernel-patches@7c6948b66c4d` | mainline option kept pinned + buildable |
+| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@b28a187269f2` (22-member series) | mainline option kept pinned + buildable |
 | `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
 Both patch commits are **immutable SHAs**, never branches. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
+
+**HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP — read every `edge` board result
+in this file as scoped to the `v7.1.7` base it was measured on.** `edge` moved
+from `v7.1.7` to `v7.2` with the series rebased (`0007` retired: it LANDED
+upstream as `8d4346ecd495` in v7.2). Nothing has been built, flashed or booted
+at `v7.2` on either board. The v7.2 evidence that does exist is a cross-compile
+of the pinned tree (22/22 `git am` clean, `Image` + modules + dtbs, zero errors)
+plus the config-survival gate. The produced package name moves with the pin:
+`linux-image-7.2.0-ceralive-rk3588` (note the `.0` — v7.2 FINAL has
+`SUBLEVEL=0`, so a tag-shaped `7.2` would fail `lib/build-kernel.sh`'s own
+`kernelrelease` assertion). The `edge-test` sibling inherits every source pin and
+differs only in identity: `7.2.0-ceralive-rk3588-test` / `7.2.0-ceralive1+test1`.
 
 **`vendor-patched` is the answer to "is the vendor patch repo wired in yet?" — it
 is, as of this variant.** It rebuilds the SAME 6.1.115 BSP the production path
@@ -1485,18 +1497,22 @@ occurrence of each of those `make` calls in the file.
   so could see the symlink, its target and its size but never a byte of content.
   Guards: `tests/boot-artifacts.bats` (9 added cases). Full write-up:
   [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §4c.
-- **BOTH RK3588 boards COMPILE end to end; ONE of them has now BOOTED.** A real
-  (non-`DRY_RUN`) `./build <board> --variant edge` produces
-  `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passes all four
-  `validate_built_kernel_deb` axes, installs the board DTB to
-  `/boot/dtb/rockchip/`, installs all 15 first-party `.deb`s, clears the `[7/9]`
-  parity gate and emits a flashable `.raw` + signed `.raucb` — proven on
+- **BOTH RK3588 boards COMPILED end to end AT THE `v7.1.7` BASE; ONE of them
+  BOOTED there. All of it is historical — none of it was re-measured at `v7.2`.**
+  A real (non-`DRY_RUN`) `./build <board> --variant edge` at that base produced
+  `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passed all four
+  `validate_built_kernel_deb` axes, installed the board DTB to
+  `/boot/dtb/rockchip/`, installed all 15 first-party `.deb`s, cleared the `[7/9]`
+  parity gate and emitted a flashable `.raw` + signed `.raucb` — proven on
   `rock-5b-plus` first, and on `orange-pi-5-plus` once the DTB-name override and
-  the first-party staging key below were both fixed. A Rock 5B+ has since been
-  flashed with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is
-  what cleared the MPP KNOWN ISSUE below. `orange-pi-5-plus` has still never
-  booted an edge image, so the fragment remains reviewed intent on that board.
-  `docs/DEFERRED.md` item 9.
+  the first-party staging key below were both fixed. A Rock 5B+ was then flashed
+  with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is what
+  cleared the MPP KNOWN ISSUE below AT THAT BASE. `orange-pi-5-plus` has still
+  never booted an edge image, so the fragment remains reviewed intent on that
+  board. At the current `v7.2` pin the build produces
+  `linux-image-7.2.0-ceralive-rk3588` by manifest derivation and the tree is
+  cross-compile-proven, but no pipeline `--variant edge` image has been produced,
+  flashed or booted at `v7.2` on either board. `docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
@@ -1623,22 +1639,34 @@ Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats`
 **The `edge` config is ROCKCHIP-ONLY, and two closure manifests keep it that
 way** [EXISTS]
 
-arm64 `defconfig` is a MULTI-PLATFORM config: it enables all 55 SoC platforms
-`arch/arm64/Kconfig.platforms` offers, and each one drags in its own clock,
-pinctrl, PHY, DMA, thermal, mailbox and media drivers. `rk3588-edge.fragment`
-now disables every one of them except `CONFIG_ARCH_ROCKCHIP`. Measured against a
-real resolved `.config` (v7.1.7 + the pinned patch series + defconfig + the
-fragment + `olddefconfig`): **1416 modules before, 793 after**, and all 624
-dropped modules were reviewed individually — every one is a foreign-platform
-driver or a select-only helper of one (Qualcomm clock/LPASS/QDSP6, Apple SMC,
-Broadcom VC4/V3D, i.MX, Tegra, Renesas, MediaTek, TI, Xilinx…). Zero Rockchip
-drivers are dropped.
+arm64 `defconfig` is a MULTI-PLATFORM config: at the `v7.2` pin it enables all
+**56** SoC platforms `arch/arm64/Kconfig.platforms` offers (55 at `v7.1.7`, before
+`ARCH_ASPEED` gained its prompt), and each one drags in its own clock, pinctrl,
+PHY, DMA, thermal, mailbox and media drivers. `rk3588-edge.fragment` now disables
+every one of them except `CONFIG_ARCH_ROCKCHIP` — **55** `# CONFIG_ARCH_* is not
+set` rows, matched one-for-one by 55 `CONFIG_ARCH_*` rows in
+`forbidden-symbols.list`. The module-count effect was measured once, against a
+real resolved `.config` at the **`v7.1.7`** base (that base + the then-pinned
+patch series + defconfig + the fragment + `olddefconfig`): **1416 modules before,
+793 after**, and all 624 dropped modules were reviewed individually — every one is
+a foreign-platform driver or a select-only helper of one (Qualcomm
+clock/LPASS/QDSP6, Apple SMC, Broadcom VC4/V3D, i.MX, Tegra, Renesas, MediaTek,
+TI, Xilinx…). Zero Rockchip drivers are dropped. Those counts are a historical
+measurement and have not been re-taken at `v7.2`; what HAS been re-run there is
+the survival + forbidden + required gate against the v7.2 resolved `.config`
+(169/169 declared symbols survived, 0 forbidden violations).
 
 Three things to know before touching it:
 
-- **The disabled list is ENUMERATED from `Kconfig.platforms`, not hand-written.**
-  A platform upstream adds later is therefore absent from the fragment rather
-  than silently re-enabled under a stale list.
+- **The disabled list is ENUMERATED from `Kconfig.platforms`, and enumerating it
+  is MANDATORY on every base bump.** This list used to claim that a platform
+  upstream adds later is simply absent from the fragment rather than silently
+  re-enabled. `ARCH_ASPEED` retired that claim at the `v7.2` bump: upstream added
+  its prompt to `arch/arm64/Kconfig.platforms` **and** set it `=y` in arm64
+  defconfig in the SAME release, so absence from the list left defconfig's own
+  `=y` standing. The failure mode of a stale list is therefore a **missing row**,
+  which a diff of the existing rows can never find. Re-enumerate the platform
+  block from `Kconfig.platforms` at every base bump.
 - **`CONFIG_ARCH_REALTEK` is NOT the Wi-Fi adapter.** It is Realtek's RTD12xx SoC
   platform. The Rock 5B+ RTL8852BE is `CONFIG_RTW89_8852BE`, which the required
   manifest pins as PRESENT. Disabling the platform does not touch Wi-Fi and
@@ -1647,12 +1675,12 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (106 symbols) and
-`manifests/kernel/forbidden-symbols.list` (67) are the contract, and they are
+`manifests/kernel/required-symbols.list` (160 symbols) and
+`manifests/kernel/forbidden-symbols.list` (68) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
 everything defconfig is expected to supply on its own. Only the second claim
-survives a fragment that turns 54 platforms off — a driver defconfig used to
+survives a fragment that turns 55 platforms off — a driver defconfig used to
 provide can stop being visible, and the fragment gate cannot notice because the
 fragment never named it.
 
@@ -1660,13 +1688,15 @@ Every required entry is a dependency closure WITH ITS `menuconfig` PARENT, acros
 MMC, PCIe, USB, Wi-Fi/BT, DRM, audio, rkvenc/HDMI-RX, dma-heaps, IOMMU,
 thermal/fan, LEDs and nftables — because four capabilities have already shipped
 broken here for exactly the missing-parent reason (`RTW89`, `DMABUF_HEAPS`,
-`TYPEC_FUSB302`, `NF_TABLES`). Two entry forms: `CONFIG_X=<value>` is exact, a
+`TYPEC_FUSB302`, `NF_TABLES`), and a fifth (`IP_MULTIPLE_TABLES`, whose parent
+`IP_ADVANCED_ROUTER` was undeclared) was caught by this gate at the `v7.2` bump
+before it ever shipped. Two entry forms: `CONFIG_X=<value>` is exact, a
 bare `CONFIG_X` means "set to anything" and is used for a parent whose own y/m
 value is defconfig's business but whose PRESENCE keeps its leaves visible. A bare
 parent is deliberately not pinned to a value, so an upstream y->m change does not
 fail the build for a difference the device cannot observe.
 
-The forbidden manifest holds three classes: the 54 foreign platforms, the
+The forbidden manifest holds three classes: the 55 foreign platforms, the
 test/debug symbols production `edge` must resolve OFF (the three CeraLive test
 symbols plus KASAN/lockdep/KUnit — those belong to the opt-in `edge-test`
 variant), and `CONFIG_NFT_COUNTER`, which does not exist at this pin. Entries are
@@ -1954,7 +1984,8 @@ Two traps worth naming:
   **outputs**, and a correct fix adds a **fifth** card, it does not repair those.
 - The obvious suspect — `armbian/linux-rockchip` `78c67d98f221`, which zeroes
   `capture.channels_min/max` for every `hdmi-audio-codec` with no TX/RX
-  discrimination — is **vendor-BSP only**. Mainline `v7.1.7` already carries the
+  discrimination — is **vendor-BSP only**. Mainline (`v7.1.7` when this was
+  written, `v7.2` at the current pin) carries the
   upstream `no_i2s_capture` / `no_spdif_capture` pdata flags and only clears a
   direction when the registering driver asks. A parked branch in this repo
   (`fix/hdmi-rx-audio-capture-kernel-patch`, tip `5a51e2f`, deleted after todo 8)
@@ -1998,16 +2029,28 @@ node (`rockchip-rga` → `/dev/video1`). Full analysis:
 `.omo/evidence/device-platform-wave4/task-hardware-audit-followup.md` §5.
 
 **MPP hardware video encode was broken on the `edge` 7.1.5 kernel by three
-stacked defects — all three are FIXED at the `v7.1.7` pin and board-confirmed**
-[RESOLVED 2026-08-09]
+stacked defects — three defects fixed by `0008`/`0009` (+`0022`),
+board-confirmed AT `v7.1.7`; at `v7.2` the patches are carried and
+compile-proven, board evidence PENDING** [RESOLVED AT v7.1.7 — PENDING AT v7.2]
+
+Read the status line literally. `0008` and `0009` are the two fixes, `0022`
+rides with them as the rkvenc ioctl request-coverage/element-bounds hardening,
+and all three are present in the 22-member series the `v7.2` pin
+(`b28a187269f2`) carries. What is scoped to `v7.1.7` and does NOT travel is the
+BOARD evidence: the 2026-08-09 Rock 5B+ run below was measured on a `v7.1.7`
+image. At `v7.2` the series applies clean (22/22 `git am`), cross-compiles to
+`Image` + modules + dtbs with zero errors, and `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y`
+survives the config gate — and that is the whole of the v7.2 evidence. No board
+has run an MPP encode on a `v7.2` kernel. Do not read the confirmation below as
+a v7.2 result, and do not let a future edit quietly drop the base it names.
 
 Root-caused on a Rock 5B+ on 2026-08-02, and the fixes landed in
 `CERALIVE/rk3588-kernel-patches` rather than here — which is why the repair
-arrived as a `patches_commit` bump (`acb519c101fe`) rather than a pipeline
-change. The one thing this repo did owe is the Kconfig line that switches the
-new heap on; without it `0009` compiles and its `dma_heap_add()` never runs. The
-diagnosis below is kept in full because it is what a future regression would
-look like. The three defects are independent and stack:
+arrived as a `patches_commit` bump (`acb519c101fe`, at the `v7.1.7` base) rather
+than a pipeline change. The one thing this repo did owe is the Kconfig line that
+switches the new heap on; without it `0009` compiles and its `dma_heap_add()`
+never runs. The diagnosis below is kept in full because it is what a future
+regression would look like. The three defects are independent and stack:
 
 1. **`mpph264enc` does not register at all.** `librockchip-mpp`'s dma-heap
    allocator table hard-codes `system-uncached` as the heap for an uncached
@@ -2052,7 +2095,9 @@ policy. `depends on ARCH_HAS_DMA_PREP_COHERENT` is the no-silent-cached-fallback
 contract expressed at build time: on an arch that stubs the clean out, the heap
 would hand back ordinary cached memory under an uncached name.
 
-**Board-confirmed on a Rock 5B+ (2026-08-09), all three defects cleared.**
+**Board-confirmed on a Rock 5B+ (2026-08-09) AT THE `v7.1.7` BASE, all three
+defects cleared there. This is a historical measurement; it has not been
+repeated at `v7.2` and no v7.2 board evidence exists.**
 `mpph264enc` registers (`gst-inspect-1.0` exit 0, was `No such element`); a real
 1080p encode produced 1,854,524 bytes (was 0 bytes + stream error);
 `/dev/dma_heap/system-uncached` is a REAL heap with its own minor (`250,1` vs
@@ -2076,10 +2121,14 @@ that isolated each layer:
 `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a; the
 clearing run is `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
 
-**Still UNVALIDATED beyond one board.** Everything above is one Rock 5B+. The
-Orange Pi 5 Plus column is entirely unrun, and `0008`/`0009` still carry the
-patch repo's `UNVALIDATED` marker for that reason. Do not describe edge-track
-MPP encode as validated on the fleet.
+**Still UNVALIDATED beyond one board, and now unvalidated at the current base
+too.** Everything above is one Rock 5B+ on a `v7.1.7` image. The Orange Pi 5 Plus
+column is entirely unrun, and `0008`/`0009` still carry the patch repo's
+`UNVALIDATED` marker for that reason. The `v7.2` rebase adds a second axis to the
+same caveat: hardware evidence does not cross a base bump, so at the current pin
+MPP encode on the `edge` track is compile-proven only. Do not describe edge-track
+MPP encode as validated on the fleet, and do not describe it as validated at
+`v7.2` at all.
 
 **eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
@@ -2172,8 +2221,9 @@ same `select`ed-helper rule as `RTW89_CORE`/`RTW89_PCI`).
 
 **`CONFIG_NFT_COUNTER` is deliberately NOT declared, and adding it would fail the
 build.** The ruleset's `counter` statement is real and load-bearing, so the
-symbol looks obligatory — but v7.1.7 has no such symbol at all:
-`net/netfilter/Makefile` compiles `nft_counter.o` unconditionally into
+symbol looks obligatory — but the pinned tree has no such symbol at all. Verified
+again at `v7.2` (zero hits across every `Kconfig`/`Kconfig.*`/`Makefile`, as at
+`v7.1.7` before it): `net/netfilter/Makefile` compiles `nft_counter.o` unconditionally into
 `nf_tables-objs`, alongside `nft_meta.o` (the `iifname` match) and
 `nft_chain_filter.o` (the `type filter hook input` base chain). Declared, it
 would resolve to nothing and `verify-kernel-config.sh` would correctly reject the
@@ -3319,9 +3369,12 @@ in the comment. Guards: `lib/verify-kernel-config.sh` (zero DROPPED symbols) +
 `tests/kernel-config-fragment.bats`.
 
 **A fast iteration harness exists and you should use it.** Applying the pinned patch
-series to a shallow v7.1.7 checkout and running `defconfig` + `merge_config.sh -m` +
-`olddefconfig` reproduces the real build's module count exactly (793 → 826), so the
-fragment can be iterated in seconds instead of a ~13-minute compile.
+series to a shallow checkout of the pinned tag (`v7.2` today) and running `defconfig`
++ `merge_config.sh -m` + `olddefconfig` reproduces the real build's module count
+exactly, so the fragment can be iterated in seconds instead of a ~13-minute compile.
+The `793 → 826` figure quoted above was measured that way at the **`v7.1.7`** base
+and is kept as the historical record of that change; it has not been re-taken at
+`v7.2`.
 
 **Known image-construction defect, OWED and not fixed here:** `wireless-regdb` being
 installed is not enough. Its alternatives give `regulatory.db-debian` priority 100, and
@@ -4851,10 +4904,15 @@ egress per link in the socket (`SO_BINDTODEVICE` + a source-address bind), so
 policy routing has no consumer.
 
 Four measurements on a live `7.1.7-ceralive-rk3588` board, in the order that
-matters:
+matters. They are a historical record of that image, and the first one no longer
+describes the current `edge` config: `rk3588-edge.fragment` now declares
+`CONFIG_IP_ADVANCED_ROUTER=y` above its pre-existing `CONFIG_IP_MULTIPLE_TABLES=y`,
+so at the `v7.2` pin `ip rule` IS built. That does not resurrect anything below —
+the retirement stands on bonding pinning egress in the socket, not on a missing
+kernel symbol.
 
-- **`ip rule` is unsupported.** `# CONFIG_IP_ADVANCED_ROUTER is not set`, so
-  `CONFIG_IP_MULTIPLE_TABLES` is absent entirely and `ip rule show` answers
+- **`ip rule` was unsupported on that image.** `# CONFIG_IP_ADVANCED_ROUTER is not set`, so
+  `CONFIG_IP_MULTIPLE_TABLES` was absent entirely and `ip rule show` answered
   `RTNETLINK answers: Operation not supported` (exit 255). No rule ever installed.
 - **`ip route add … table N` SILENTLY WRITES INTO MAIN.** Proven with a
   documentation prefix: `ip route add 203.0.113.0/24 … table 121` exits 0,

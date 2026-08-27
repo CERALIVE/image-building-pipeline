@@ -50,7 +50,9 @@ Neither is close to firing today.
 
 **Measured reality (2026-08-07, device-platform-wave4 todos 25-30) — neither
 trigger is affected; the measurement is evidence, not a new trigger.** The
-`edge` mainline-track variant was bench-validated on real Rock 5B+ hardware:
+`edge` mainline-track variant was bench-validated on real Rock 5B+ hardware
+**against the `v7.1.5` base it was pinned to at the time** (the track has since
+moved to `v7.1.7` and then to `v7.2`; no board evidence travels with a base bump):
 `mpph264enc` (H.264, the product's primary encode path) never registers at
 all — `encode-broken` — while `mpph265enc`'s declared probe subset measured
 `encode-degraded` (clean quality/kernel parity on all 6 cells; the only failing

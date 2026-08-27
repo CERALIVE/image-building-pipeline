@@ -114,8 +114,9 @@ are removed from the image, and both `ci/postinst-drift-check.sh` (CHECK 2) and
 `lib/parity-check.sh` (§D) now fail if any of them reappears.
 
 Why it was retired rather than guarded, in one line each, all measured on a live
-`7.1.7-ceralive-rk3588` board: `ip rule` is unsupported there
-(`# CONFIG_IP_ADVANCED_ROUTER is not set`), an `ip route add … table N` silently
+`7.1.7-ceralive-rk3588` board: `ip rule` was unsupported there
+(`# CONFIG_IP_ADVANCED_ROUTER is not set` — the current `v7.2` edge fragment
+declares it `=y`, which changes the capability but not the retirement), an `ip route add … table N` silently
 lands in the **MAIN** table on that kernel (so the dispatcher could install a
 metric-0 default that outranks every DHCP route), it logged a success line after
 both of its mutations had failed, and its dhclient half could never run because
