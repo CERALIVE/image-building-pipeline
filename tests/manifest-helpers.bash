@@ -835,7 +835,9 @@ feature_prereqs() {
 # bodies still run in parallel.
 build_feature_fixture() {
   local out="$BATS_FILE_TMPDIR/out"
-  local raw="$out/demo-feature-rock-5b-plus-12.raw"
+  # Derived from the SAME mapping --os-version passes below: a hardcoded stem
+  # goes VACUOUS on a release bump (guard misses, every §14 case rebuilds).
+  local raw="$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw"
   (
     command -v flock >/dev/null 2>&1 && flock 9
     [ -f "$raw" ] && exit 0          # idempotency check INSIDE the lock (no TOCTOU)

@@ -1032,7 +1032,8 @@ SRTLA_REC=/path/to/srtla_rec bash tools/e2e/loopback-smoke.sh
 
 ### dev-push: `extension-release mismatch`
 
-The sysext `.raw` carries `ID=debian VERSION_ID=12`. If the device runs a
+The sysext `.raw` carries `ID=debian` plus the `OS_VERSION_ID` from
+[`manifests/target-release.env`](../manifests/target-release.env) (`13`). If the device runs a
 different OS version, the merge is rejected. Check the device:
 
 ```bash

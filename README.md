@@ -268,6 +268,15 @@ artifacts, served from `apt.ceralive.tv/R2` at path
 - Has a sha256 checksum verified by CeraUI before activation
 - Is managed at runtime by the CeraUI add-on manager (install, enable, disable)
 
+**The `{os_version}` axis is a RELEASE step, not a build step.** A build on the
+current mapping stamps and names its artifact for `13` and plans the `addons/13/…`
+key, but those objects do not exist in R2 until someone publishes them — and until
+they do, a trixie device that enables an add-on 404s into the reconciler's
+non-terminal `pending` phase. Publishing every add-on for the new OS line is a
+checklist item, not an automatic consequence of the suite bump:
+[`docs/addon-sysext-refresh.md`](docs/addon-sysext-refresh.md) → "The OS-version
+axis, and the release step it creates".
+
 Current validated add-ons:
 
 | Add-on | Status | Notes |
@@ -398,8 +407,10 @@ that suite ships, are declared exactly once:
 Everything downstream derives from it — mkosi's `--release`, the device's own
 deb822 apt sources, the sysext `extension-release` merge key, the add-on
 descriptors and their JSON Schema, the add-on artifact stem
-(`<feature>-<board>-<os_version>.raw`), and the board-preflight self-test
-fixture. Shell consumers read it through the one reader:
+(`<feature>-<board>-<os_version>.raw`), the R2 delivery key
+(`addons/{os_version}/{board}/{feature}.raw`, so `lib/upload-addons.sh` defaults
+`--os-version` from the same mapping the builder stamps from), and the
+board-preflight self-test fixture. Shell consumers read it through the one reader:
 
 ```bash
 source lib/shared/target-release-lib.sh

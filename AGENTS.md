@@ -139,8 +139,10 @@ because its `VERSION_ID` no longer matches the host os-release.
 | `lib/app-layer/sysext.sh` | `SYSEXT_OS_VERSION_ID` defaults to `OS_VERSION_ID` (the sysext MERGE KEY) |
 | `mkosi/app/*.sysext.conf` | `SYSEXT_OS_VERSION_ID="${OS_VERSION_ID:?…}"`, loaded by `sysext-build.lib.sh` before the descriptor is sourced |
 | `lib/build-feature-sysext.sh` | `--os-version` defaults to `OS_VERSION_ID` |
+| `lib/upload-addons.sh` | `--os-version` defaults to `OS_VERSION_ID` — the `{os_version}` axis of the R2 delivery key |
 | `ci/validate-manifests.py` | parses the mapping into `SYSEXT_VERSION_ID` (G1) |
 | `ci/capture-board-preflight.sh` | its `--self-test` os-release fixture |
+| `.github/workflows/v2-ci.yml` `addon-publish` | sources the reader for its fixture stem and its expected `addons/<ver>/` keys |
 
 Six things are worth knowing before touching any of it:
 
@@ -174,6 +176,17 @@ Six things are worth knowing before touching any of it:
   `suite-literal-ok(file): <reason>` file-wide. An EMPTY reason is rejected — the
   reason is the point. `--list` prints every accepted occurrence with what
   accepted it; `--self-test` proves the gate can reject, in both directions.
+- **The sweep also hunts the ADD-ON DELIVERY spellings, and it did not always.**
+  The os-release `VERSION_ID` travels a second route — the `{os_version}` axis of
+  the artifact stem and of the R2 key `addons/{os_version}/{board}/{feature}.raw`
+  — where it is written `--os-version 12` and `addons/12/`, neither of which
+  contains the token `VERSION_ID` or a JSON `versionId` key. The original three
+  regex alternatives were structurally blind to both, and `v2-ci.yml`'s
+  `addon-publish` job carried six such literals unannotated, asserting the add-on
+  publish contract for the retired suite while the gate reported CLEAN. Both forms
+  are now alternatives in `SUITE_LITERAL_RE` with their own `--self-test` legs. A
+  future value that reaches a THIRD spelling needs the same treatment: ask what the
+  fact is called at each site, not only where it is declared.
 - **`docs/`, `*.md`, `tests/` and `manifests/packages/` are excluded, each for a
   stated reason.** Documentation naming bookworm is CORRECT (it is the record of
   what the image used to target). **`manifests/packages/` is NO LONGER excluded** —

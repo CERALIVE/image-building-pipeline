@@ -23,8 +23,15 @@
 #   Dry-run : DRY_RUN=1 -> log the EXACT command that WOULD run; upload nothing.
 # There is deliberately no `|| true`: a real upload that fails trips the ERR trap.
 #
+# --os-version defaults to OS_VERSION_ID in manifests/target-release.env, the same
+# mapping build-feature-sysext.sh defaults from. The two MUST agree — the publisher
+# addresses the artifact by the stem the builder stamped — and deriving both from the
+# one mapping makes them agree by construction instead of by an operator restating it
+# at every call site. A wrong value cannot publish to a wrong key: the stem would name
+# no local file and upload_one dies on the missing artifact.
+#
 # Usage:
-#   upload-addons.sh --feature <name> --board <board> --os-version <ver> \
+#   upload-addons.sh --feature <name> --board <board> [--os-version <ver>] \
 #                    --dist <dir>
 #
 # Env: DRY_RUN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_ENDPOINT
@@ -36,6 +43,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
+# shellcheck source=lib/shared/target-release-lib.sh
+source "${HERE}/shared/target-release-lib.sh"
+target_release_load
 
 : "${DRY_RUN:=}"
 ADDON_PREFIX="${ADDON_PREFIX:-addons}"
@@ -61,10 +71,13 @@ content_type_for() {
 usage() {
   cat >&2 <<EOF
 Usage:
-  upload-addons.sh --feature <name> --board <board> --os-version <ver> --dist <dir>
+  upload-addons.sh --feature <name> --board <board> [--os-version <ver>] --dist <dir>
 
 Publishes <dist>/<feature>-<board>-<os_version>.raw{,.sha256,.sig} to R2 at
 ${ADDON_PREFIX}/<os_version>/<board>/<feature>.raw{,.sha256,.sig}.
+
+--os-version defaults to OS_VERSION_ID from manifests/target-release.env
+(currently ${OS_VERSION_ID}) — the same default build-feature-sysext.sh applies.
 
 Env: DRY_RUN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_ENDPOINT ADDON_PREFIX
 EOF
@@ -82,7 +95,7 @@ upload_one() {
 }
 
 main() {
-  local feature="" board="" os_version="" dist=""
+  local feature="" board="" os_version="${OS_VERSION_ID}" dist=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --feature)    feature="${2:-}";    shift 2 ;;

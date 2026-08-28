@@ -200,7 +200,7 @@ SYSEXT_REQUIRED_BINARIES="usr/bin/cog"
 #                          contract as the srtla sysext)
 SYSEXT_EXCLUDE_NAMES="libmali.so* libmali-*.so* libEGL.so* libGLESv2.so* libgbm.so* libwayland-egl.so* librockchip_mpp.so* librockchip_vpu.so* libgstrockchip*.so* gstreamer1.0-rockchip*"
 SYSEXT_OS_ID=debian
-SYSEXT_OS_VERSION_ID=12
+SYSEXT_OS_VERSION_ID="${OS_VERSION_ID:?load manifests/target-release.env first}"   # 13
 SYSEXT_LEVEL=1
 ```
 
@@ -215,7 +215,7 @@ SYSEXT_LEVEL=1
 #   build_sysext_main mkosi/app/cog.sysext.conf "${staging}" "${OUT_DIR}"
 #
 # Output: ${OUT_DIR}/cog.raw  (systemd-sysext squashfs, /usr-only, extension-release
-# stamped ID=debian VERSION_ID=12 SYSEXT_LEVEL=1 — merge-eligible on the device).
+# stamped ID=debian VERSION_ID=<OS_VERSION_ID> SYSEXT_LEVEL=1 — merge-eligible on the device).
 ```
 
 The resulting `cog.raw` is delivered and activated identically to any other

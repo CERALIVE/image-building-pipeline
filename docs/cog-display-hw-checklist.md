@@ -60,12 +60,12 @@ the bookworm `main`/arm64 apt closure.
         --deb-staging "$staging" --out dist/
       ```
 - [ ] Confirm the three artifacts per board exist and self-verify:
-      `cog-display-<board>-12.raw`, `.raw.sha256`, `.raw.sig`
+      `cog-display-<board>-<os_version>.raw`, `.raw.sha256`, `.raw.sig`
       (the builder runs `gpgv` against the exported public keyring before exit).
 - [ ] **Exclusion contract has teeth:** the build FAILS LOUDLY if any
       `SYSEXT_EXCLUDE_NAMES` glob survived the prune. Confirm no `libmali*`,
       `libEGL*`, `libgbm*`, or `librockchip_mpp*` is inside the `.raw`
-      (`unsquashfs -l dist/cog-display-rock-5b-plus-12.raw | grep -Ei 'libmali|libEGL|libgbm|rockchip'` → empty).
+      (`unsquashfs -l dist/cog-display-rock-5b-plus-13.raw | grep -Ei 'libmali|libEGL|libgbm|rockchip'` → empty).
 - [ ] **No Chromium leak:** `SYSEXT_FORBID_PACKAGES` (`chromium`, `chromium-common`,
       `libmali-valhall-g610`) never appears in the closure or the `.raw`.
 - [ ] Record the MEASURED `.raw` size and compare to the `cog-display-addon.md §6`
@@ -81,7 +81,7 @@ the bookworm `main`/arm64 apt closure.
 
 Publish to R2 (`lib/upload-addons.sh`) or hand-stage for a first bring-up:
 
-- [ ] Copy `cog-display-<board>-12.raw` (+ `.sig`) onto the board and place the
+- [ ] Copy `cog-display-<board>-<os_version>.raw` (+ `.sig`) onto the board and place the
       `.raw` in the sysext store the add-on helper scans
       (`/data/extensions/cog-display.raw`).
 - [ ] Drive enable via the CeraUI add-on manager on the REAL device (the same

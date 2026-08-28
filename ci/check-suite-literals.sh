@@ -68,7 +68,14 @@ source "${HERE}/../lib/shared/target-release-lib.sh"
 # The literals a production file may not carry unannotated. `bookworm` is the
 # retired suite name; the VERSION_ID form matches `VERSION_ID=12`, `VERSION_ID="12"`
 # and `SYSEXT_OS_VERSION_ID=12` alike, in shell, JSON and os-release syntax.
-SUITE_LITERAL_RE='bookworm|VERSION_ID[[:space:]]*=[[:space:]]*"?12"?|"versionId"[[:space:]]*:[[:space:]]*"12"'
+#
+# The last two alternatives are the ADD-ON DELIVERY forms, and they are here
+# because the first three could not see them: the os-release VERSION_ID also
+# travels as the `{os_version}` axis of the artifact stem and the R2 key, where it
+# is spelled `--os-version 12` and `addons/12/` — neither of which contains the
+# token `VERSION_ID` or a JSON `versionId` key. A v2-ci.yml job carried both,
+# unannotated and unseen, publishing the add-on contract for the retired suite.
+SUITE_LITERAL_RE='bookworm|VERSION_ID[[:space:]]*=[[:space:]]*"?12"?|"versionId"[[:space:]]*:[[:space:]]*"12"|--os-version[[:space:]]+"?12"?|addons/12/'
 
 ANNOTATION_RE='suite-literal-ok:[[:space:]]*[^[:space:]]'
 FILE_ANNOTATION_RE='suite-literal-ok\(file\):[[:space:]]*[^[:space:]]'
@@ -307,6 +314,20 @@ self_test() {
     >"${root}/mkosi/scratch.conf"
   git -C "${root}" add -A >/dev/null 2>&1
   check "a preceding-line annotation is accepted" run_audit
+  rm -f "${root}/mkosi/scratch.conf"
+  git -C "${root}" add -A >/dev/null 2>&1
+
+  # Legs: the add-on delivery forms. Neither carries the token `VERSION_ID` nor a
+  # JSON `versionId` key, so the original three alternatives passed both.
+  printf 'upload-addons.sh --feature x --board y --os-version 12 --dist d\n' \
+    >"${root}/mkosi/scratch.conf"
+  git -C "${root}" add -A >/dev/null 2>&1
+  check_fails "an unannotated '--os-version 12' is REJECTED" run_audit
+
+  printf 'grep -q s3://bucket/addons/12/rock-5b-plus/x.raw plan.log\n' \
+    >"${root}/mkosi/scratch.conf"
+  git -C "${root}" add -A >/dev/null 2>&1
+  check_fails "an unannotated 'addons/12/' delivery key is REJECTED" run_audit
   rm -f "${root}/mkosi/scratch.conf"
   git -C "${root}" add -A >/dev/null 2>&1
 

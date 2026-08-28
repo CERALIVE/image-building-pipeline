@@ -138,6 +138,15 @@ done
 
 has "build-feature-sysext.sh defaults --os-version from the mapping" \
     "${PIPELINE_DIR}/lib/build-feature-sysext.sh" 'os_version="${OS_VERSION_ID}"'
+# The publisher addresses the artifact by the stem the builder stamped, so both
+# must default from the SAME mapping or a release bump publishes to a key nothing
+# resolves. The delivery path's {os_version} axis is that same value.
+has "upload-addons.sh loads the mapping" \
+    "${PIPELINE_DIR}/lib/upload-addons.sh" 'target_release_load'
+has "upload-addons.sh defaults --os-version from the mapping" \
+    "${PIPELINE_DIR}/lib/upload-addons.sh" 'os_version="${OS_VERSION_ID}"'
+has "the addon-publish CI job derives its os_version axis" \
+    "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" 'addons/${OS_VERSION_ID}/'
 has "validate-manifests.py reads the mapping" \
     "${PIPELINE_DIR}/ci/validate-manifests.py" 'TARGET_RELEASE["OS_VERSION_ID"]'
 has "the board-preflight self-test fixture derives its os-release" \

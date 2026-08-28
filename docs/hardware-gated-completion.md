@@ -234,7 +234,7 @@ lib/build-feature-sysext.sh \
   --deb-staging "$staging" --out dist/
 
 # Confirm exclusion contract (no libmali/libEGL/libgbm/rockchip inside the .raw):
-unsquashfs -l dist/cog-display-rock-5b-plus-12.raw \
+unsquashfs -l dist/cog-display-rock-5b-plus-13.raw \
   | grep -Ei 'libmali|libEGL|libgbm|rockchip'
 # -> must be empty
 

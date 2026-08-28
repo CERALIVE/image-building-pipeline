@@ -17,7 +17,8 @@ load manifest-helpers
 # ===========================================================================
 # 13. Add-on descriptor format + conflict model (Task 21).
 #     addon.schema.json is the per-descriptor gate: G1 sysext merge identity
-#     (sysextLevel const "1", versionId const "12") and G2 the /usr+/opt-only
+#     (sysextLevel const "1", versionId const mirroring OS_VERSION_ID in
+#     manifests/target-release.env) and G2 the /usr+/opt-only
 #     provides[] boundary. validate-manifests.py layers the cross-descriptor E6
 #     model on top: no two add-ons may claim the same provides[] path unless they
 #     mutually declare each other in conflicts[] (the provides/conflicts model).

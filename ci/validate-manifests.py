@@ -10,7 +10,8 @@ CI entrypoint for the v2-ci `schema-validate` job. It:
   * validates every add-on descriptor under manifests/addons/*.json against
     addon.schema.json;
   * runs the cross-descriptor add-on checks the per-file schema cannot express:
-      G1  sysext merge identity (sysextLevel == "1", versionId == "12"),
+      G1  sysext merge identity (sysextLevel == "1", versionId == OS_VERSION_ID
+          from manifests/target-release.env — never a literal),
       G2  provides[] stays inside the sysext /usr+/opt boundary (no /etc, /var),
       E6  no two add-ons claim the same provides[] path unless they mutually
           declare each other in conflicts[] (the provides/conflicts model).
