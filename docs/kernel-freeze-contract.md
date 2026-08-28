@@ -180,6 +180,13 @@ The practical consequence for an operator: a RAUC update is the *only* thing tha
 moves the kernel, and it moves it wholesale. There is no state to unhold first and
 nothing to re-hold afterwards.
 
+The first Bookworm → Trixie/mainline update is pinned to the fleet's RAUC 1.8
+compatibility profile (`format=plain`, exact compatible string, unchanged signing
+chain). Its bootloader-boundary verdict and hardware drill are documented in
+[`ota-bookworm-trixie-transition.md`](ota-bookworm-trixie-transition.md). RAUC
+does not update the RK3588 raw bootloader gap or shared boot partition; those stay
+at their deployed bytes during the slot transition.
+
 ---
 
 ## 6. Verifying it on a device

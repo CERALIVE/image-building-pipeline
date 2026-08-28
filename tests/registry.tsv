@@ -63,6 +63,7 @@ tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/
 tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
+tests/rauc-transition-contract.test.sh	shell	unit	default-shell	first Trixie bundle remains plain-format with exact fleet compatible and signing chain for RAUC 1.8
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate
 tests/preflash-cross-board.test.sh	shell	integration	default-shell	board-derived candidate identity and cross-board rejection against real FAT/squashfs fixtures

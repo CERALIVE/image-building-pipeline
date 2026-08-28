@@ -242,6 +242,12 @@ independently approved candidate SHA-256, snapshots both inputs privately, and
 uses create-only writes with exact-byte retry recovery; it never deletes an
 immutable release key.
 
+The first Bookworm → Trixie/mainline slot update deliberately remains installable
+by the deployed RAUC 1.8 fleet: plain bundle format, byte-identical compatible
+string and signing chain, with the deployed U-Boot left outside the RAUC update.
+Verdict, evidence boundary and todo-16 A/B runbook:
+[`docs/ota-bookworm-trixie-transition.md`](docs/ota-bookworm-trixie-transition.md).
+
 ## Custom Components
 
 All custom components are distributed via .deb packages from our repository:
