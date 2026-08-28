@@ -38,7 +38,8 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
 - **Custom software stack**: `CeraUI`, `cerastream`, `srtla-send-rs`, `srt` via .deb packages
-- **Minimal system**: Debian bookworm-based with minimal apt sources
+- **Minimal system**: Debian-based with minimal apt sources; the target suite is
+  pinned once in [`manifests/target-release.env`](manifests/target-release.env)
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Predictable LAN identity**: Avahi-arbitrated `ceralive.local`, `ceralive2.local`,
   `ceralive3.local`, ... allocation with no random or hyphenated fallback
@@ -56,7 +57,7 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
-│            Debian bookworm + CeraLive Customizations        │
+│      Debian (manifests/target-release.env) + CeraLive       │
 ├─────────────────────────────────────────────────────────────┤
 │                    Hardware Layer                           │
 │  Orange Pi 5+ │ Radxa Rock 5B+ │ Future Intel/AMD devices  │
@@ -261,7 +262,8 @@ Optional capabilities are delivered as signed per-board/per-OS sysext `.raw`
 artifacts, served from `apt.ceralive.tv/R2` at path
 `addons/{os_version}/{board}/{feature}.raw`. Each add-on:
 
-- Extends `/usr` and `/opt` only (`SYSEXT_LEVEL=1`, `VERSION_ID=12`)
+- Extends `/usr` and `/opt` only (`SYSEXT_LEVEL=1`, plus the `VERSION_ID` from
+  [`manifests/target-release.env`](manifests/target-release.env) — the kernel's merge key)
 - Is GPG-signed with the add-on keyring from `cert-work/`
 - Has a sha256 checksum verified by CeraUI before activation
 - Is managed at runtime by the CeraUI add-on manager (install, enable, disable)
@@ -371,6 +373,63 @@ image for a software rasterizer that can never run, because the Mali vendor driv
 wins the EGL/GLES/GBM lookup. The metapackage stays installed (removing it would
 cascade into the GStreamer plugins cerastream needs); only its 157.6 MB of
 unreachable payload is stripped.
+
+## Target Release — one mapping, derived everywhere
+
+Which Debian suite the rootfs is built from, and which os-release `VERSION_ID`
+that suite ships, are declared exactly once:
+
+```sh
+# manifests/target-release.env
+: "${RELEASE:=trixie}"
+: "${OS_VERSION_ID:=13}"
+: "${APT_SUITE:=${RELEASE}}"
+: "${APT_SUITE_UPDATES:=${RELEASE}-updates}"
+: "${APT_SUITE_SECURITY:=${RELEASE}-security}"
+```
+
+Everything downstream derives from it — mkosi's `--release`, the device's own
+deb822 apt sources, the sysext `extension-release` merge key, the add-on
+descriptors and their JSON Schema, the add-on artifact stem
+(`<feature>-<board>-<os_version>.raw`), and the board-preflight self-test
+fixture. Shell consumers read it through the one reader:
+
+```bash
+source lib/shared/target-release-lib.sh
+target_release_load     # sets + exports RELEASE OS_VERSION_ID APT_SUITE APT_SUITE_*
+```
+
+An already-set environment variable wins, and the derived suites re-expand from
+it — which is how the value reaches an mkosi **subimage chroot**, where the file
+is not mounted and the orchestrator's forwarded `RELEASE`/`APT_SUITE*` are the
+only source. Those chroot writers fail closed if it is missing; none of them has
+a literal fallback, because a stale default produces an image that builds, boots
+and quietly names the wrong suite.
+
+**`ARMBIAN_SUITE` is a separate knob and must stay one.** It selects the Armbian
+archive the kernel/DTB/U-Boot/firmware `.deb`s come from, which Armbian versions
+on its own schedule; deriving it from `RELEASE` would repoint the boot stack at a
+suite that may not carry the RK35xx vendor BSP at all.
+
+Three sites can read no shell or Python file and therefore carry a **mirrored**
+value: mkosi's `[Distribution] Release=`, the add-on schema's `versionId` const,
+and the add-on descriptors. `ci/check-suite-literals.sh` is the gate that keeps
+them honest:
+
+```bash
+ci/check-suite-literals.sh              # the gate: literal sweep + mirror drift
+ci/check-suite-literals.sh --list       # every accepted literal and what accepted it
+ci/check-suite-literals.sh --self-test  # prove the gate can reject, both directions
+```
+
+It rejects any `bookworm` / `VERSION_ID=12` occurrence in a production file
+unless the line states why — `# suite-literal-ok: <reason>` on the line, on the
+line above (for data rows), or `# suite-literal-ok(file): <reason>` file-wide. An
+empty reason is refused. Documentation, `tests/` and `manifests/packages/` are
+excluded, each for a reason stated in the script. Contract:
+`tests/target-release-derivation.test.sh`, which additionally resolves every
+derived value against a *different* mapping so a derivation that silently
+returns a constant cannot pass.
 
 ## BSP Package Pins, Provenance + Advisory Drift-Guard
 

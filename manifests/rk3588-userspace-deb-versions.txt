@@ -2,6 +2,10 @@
 #
 # WHAT: the Rockchip RK3588 GPU/video userspace (Mali-G610 blob, MPP encode/decode
 # library, RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev
+# suite-literal-ok(file): every `bookworm` here is a THIRD-PARTY pool name — the
+# Armbian BSP feed and the radxa rk3588s2-bookworm pool — reached by exact pinned
+# URL + SHA-256. None of them is the target rootfs suite, and repointing them at
+# manifests/target-release.env would resolve to URLs that do not exist.
 # config) that the Armbian bookworm arm64 feed does NOT ship. These make the vendor
 # kernel's HW encoders reachable from GStreamer (mpph264enc/mpph265enc/mppjpegenc/
 # mppvp8enc register only when this MPP userspace is present) and give Cog/WPEWebKit

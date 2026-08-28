@@ -32,7 +32,7 @@
 #   drives wpa_supplicant in AP mode and runs its internal dnsmasq for DHCP on the
 #   shared subnet. hostapd remains in the image only as an evidence-gated fallback
 #   (NOT used here). NM-native AP is supported since NM 1.0; the image ships NM 1.42
-#   (Debian bookworm). HW caveat: AP mode also needs the wlan driver to support it
+#   (Debian bookworm). HW caveat: AP mode also needs the wlan driver to support it  # suite-literal-ok: records the suite this NetworkManager AP-mode behaviour was verified on
 #   (RK3588 onboard chip dependent) — see image-building-pipeline/AGENTS.md.
 #
 # CAPTIVE PORTAL (Task 14): served by ceralive-portal.{socket,@.service} (systemd

@@ -52,6 +52,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Task | Location |
 |------|----------|
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](docs/dev-loop.md) |
+| **Which Debian suite / os-release VERSION_ID the image targets** | `manifests/target-release.env` — the ONE mapping; read it through `lib/shared/target-release-lib.sh::target_release_load`. Gate: `ci/check-suite-literals.sh`; contract: `tests/target-release-derivation.test.sh`. See the "target release has exactly one source of truth" KEY FACT below |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | **Kernel-build-from-source internals** | `lib/build-kernel.sh` is a thin STAGE entry; the bodies live in `lib/kernel/{config,checkout,builder,package}.sh` — see the "build-kernel.sh and assemble-disk.sh are ENTRIES plus concern modules" KEY FACT below |
 | **Production vendor `cls_fw` extension** | `lib/build-kernel-extension.sh` + `manifests/kernel/vendor-cls-fw.env` + `tests/vendor-cls-fw-contract.bats`; evidence in `docs/notes/sharing-kernel-capability.md` |
@@ -114,6 +115,83 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
 ## KEY FACTS
+
+**The target Debian suite and its os-release VERSION_ID have exactly ONE source
+of truth, and a gate — not a convention — is what keeps it that way** [EXISTS]
+
+`manifests/target-release.env` declares `RELEASE`, `OS_VERSION_ID` and the three
+derived apt suites (`APT_SUITE`, `APT_SUITE_UPDATES`, `APT_SUITE_SECURITY`).
+Before it existed those two facts were spelled out independently in ten places —
+the orchestrator, `mkosi/mkosi.conf`, the runtime postinst, the device
+apt-source writer, the sysext backend, the add-on builder, both add-on
+descriptors, the add-on JSON Schema, `ci/validate-manifests.py` and a
+board-preflight fixture. A release bump was a ten-site edit whose only failure
+signal was an image that **builds, boots, and is simply wrong**: apt sources
+naming the previous suite, or a sysext the kernel silently refuses to merge
+because its `VERSION_ID` no longer matches the host os-release.
+
+| Consumer | How it derives |
+|---|---|
+| `lib/orchestrate.sh` | `target_release_load`, then forwards `RELEASE`/`OS_VERSION_ID`/`APT_SUITE*` through `env_names` **and** `mkosi.conf` `PassEnvironment=` |
+| `mkosi/mkosi.conf` | the orchestrator's `--release "${RELEASE}"` CLI flag decides every real build; the `Release=` line is a lockstep-checked MIRROR (see below) |
+| `mkosi.images/runtime/mkosi.postinst.chroot` | reads the forwarded `APT_SUITE*`; **fails closed** on an unset `RELEASE` |
+| `mkosi/customize/apt-ceralive-repo.sh` | `resolve_target_suites` — env first, then the mapping file; no literal fallback |
+| `lib/app-layer/sysext.sh` | `SYSEXT_OS_VERSION_ID` defaults to `OS_VERSION_ID` (the sysext MERGE KEY) |
+| `mkosi/app/*.sysext.conf` | `SYSEXT_OS_VERSION_ID="${OS_VERSION_ID:?…}"`, loaded by `sysext-build.lib.sh` before the descriptor is sourced |
+| `lib/build-feature-sysext.sh` | `--os-version` defaults to `OS_VERSION_ID` |
+| `ci/validate-manifests.py` | parses the mapping into `SYSEXT_VERSION_ID` (G1) |
+| `ci/capture-board-preflight.sh` | its `--self-test` os-release fixture |
+
+Six things are worth knowing before touching any of it:
+
+- **`ARMBIAN_SUITE` IS NOT THIS, and must never be derived from `RELEASE`.** It
+  names the archive the kernel/DTB/U-Boot/firmware `.deb`s are fetched from —
+  BSP-deb provenance, versioned on Armbian's own schedule. Armbian may keep
+  publishing the RK35xx vendor BSP under an older suite long after the rootfs has
+  moved on, so collapsing the two would silently repoint the boot stack at a
+  suite that does not carry it. Both `lib/orchestrate.sh` and `lib/fetch-debs.sh`
+  keep it as its own knob, and `tests/target-release-derivation.test.sh` §E is a
+  named regression pin against merging them.
+- **mkosi expands `${VAR}` in PATH-typed settings ONLY — never in
+  `[Distribution] Release=`.** Verified against the pinned mkosi 26: a
+  `Release=${RELEASE}` survives verbatim into `mkosi summary`, so writing one
+  would bootstrap a suite literally called `${RELEASE}`. That is why the
+  orchestrator passes `--release` on the CLI (the same shape as
+  `--cache-directory`) and `mkosi.conf` keeps a mirrored literal instead. Do not
+  "clean this up" into a variable.
+- **Three sites are MIRRORS because they can read no shell or Python file at
+  all** — `mkosi.conf` `Release=`, `addon.schema.json`'s `versionId.const`, and
+  the `manifests/addons/*.json` descriptors. `ci/check-suite-literals.sh` check
+  [2/2] compares each against what the mapping DECLARES and fails on any
+  disagreement, so a half-finished release bump is refused loudly rather than
+  shipping a device whose apt sources and whose sysext merge key disagree. That
+  is not hypothetical: the todo-9 scratch flip caught exactly 7 of them.
+- **The gate accepts a literal only WITH A STATED REASON.**
+  `ci/check-suite-literals.sh` check [1/2] sweeps every tracked *and untracked*
+  file (so a fresh hardcode is caught before `git add`) and rejects any
+  `bookworm` / `VERSION_ID=12` occurrence that is not annotated
+  `suite-literal-ok: <reason>` on the line, on the line above (for data rows), or
+  `suite-literal-ok(file): <reason>` file-wide. An EMPTY reason is rejected — the
+  reason is the point. `--list` prints every accepted occurrence with what
+  accepted it; `--self-test` proves the gate can reject, in both directions.
+- **`docs/`, `*.md`, `tests/` and `manifests/packages/` are excluded, each for a
+  stated reason.** Documentation naming bookworm is CORRECT (it is the record of
+  what the image used to target). `manifests/packages/` is the package-list
+  migration's surface and is an explicit EXPANSION POINT in the script: drop that
+  exclusion once that work lands.
+- **`target_release_load` vs `target_release_declared`.** The first gives the
+  EFFECTIVE values — the file is a `: "${KEY:=default}"` fragment, so an
+  already-set environment variable wins and the derived suites re-expand from it
+  (an overridden `RELEASE` yields its OWN `-updates`/`-security`, never the
+  mapping's). The second runs under `env -i` and gives what the FILE declares;
+  that is the read a lockstep check must use, or an exported override would mask
+  a drifted mirror.
+
+Guards: `tests/target-release-derivation.test.sh` (50 assertions, registered
+`default-shell`) — the mapping, the gate plus the gate's own self-test, a
+per-consumer static contract, an `ARMBIAN_SUITE`-separation pin, and a
+**flipped-mapping leg** that resolves every derived value against a different
+mapping so a wiring that reads the file but returns a constant fails.
 
 **The runtime postinst library is an ENTRY plus per-concern modules — "one source
 of truth" now means "one source SET"** [EXISTS]
@@ -4872,6 +4950,9 @@ gated item, not the package availability.
 ## ANTI-PATTERNS
 
 - Don't change REPOS order or casing — downstream scripts key on exact names
+- Don't hardcode a Debian suite or an os-release `VERSION_ID` anywhere. `manifests/target-release.env` is the one mapping; derive from it, and if an occurrence genuinely is not the target release, annotate it `suite-literal-ok: <reason>` so `ci/check-suite-literals.sh` can accept it with the reason attached
+- Don't derive `ARMBIAN_SUITE` from `RELEASE`, and don't "unify" the two. The BSP archive and the userspace suite move on different schedules; collapsing them repoints the kernel/DTB/U-Boot/firmware fetch at a suite that may not carry the RK35xx vendor BSP
+- Don't write `Release=${RELEASE}` in `mkosi/mkosi.conf`. mkosi expands `${VAR}` only in PATH-typed settings, so that bootstraps a suite literally named `${RELEASE}`; the authoritative plumb is the orchestrator's `--release` CLI flag and the config line is a gate-checked mirror
 - Don't add `ceralive-platform` to REPOS — cloud-only, not in device image
 - Don't commit GPG private keys or mTLS certs — those come from `cert-work/` at build time
 - Don't revert first-party fetch to R2 `aws s3 sync` / `gh release download` — first-party `.debs` are pulled at build time from `apt.ceralive.tv` (GPG + mTLS); see the "First-party .deb fetch" KEY FACT

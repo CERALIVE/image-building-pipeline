@@ -84,7 +84,8 @@ load manifest-helpers
 #     sysext: <feature>-<board>-<os>.raw + .raw.sha256 + .raw.sig, verifiable with
 #     gpgv against the image-baked add-on PUBLIC keyring. Guards proven here:
 #       * artifact set + sha256 integrity + GPG authenticity (gpgv OK)
-#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12
+#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 plus the
+#         VERSION_ID the target-release mapping declares (never a literal)
 #       * G2 — a staging tree with /etc (escapes the /usr+/opt boundary) is REFUSED
 #       * tamper — a flipped byte in the .raw makes gpgv FAIL (signing has teeth)
 #       * the baked keyring is PUBLIC-only and a DISTINCT trust domain from RAUC
@@ -97,9 +98,9 @@ load manifest-helpers
   feature_prereqs || skip "mksquashfs/gpg/gpgv/unsquashfs not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sha256" ]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sig" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sha256" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" ]
   [ -f "$out/addon-keyring.gpg" ]
 }
 
@@ -107,7 +108,7 @@ load manifest-helpers
   feature_prereqs || skip "signing toolchain not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
-  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-12.raw.sha256"
+  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sha256"
   [ "$status" -eq 0 ]
   [[ "$output" == *": OK"* ]]
 }
@@ -117,22 +118,22 @@ load manifest-helpers
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   run gpgv --keyring "$out/addon-keyring.gpg" \
-        "$out/demo-feature-rock-5b-plus-12.raw.sig" \
-        "$out/demo-feature-rock-5b-plus-12.raw"
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" \
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Good signature"* ]]
 }
 
-@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12" {
+@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + the mapped VERSION_ID" {
   feature_prereqs || skip "signing toolchain not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   run unsquashfs -no-progress -cat \
-        "$out/demo-feature-rock-5b-plus-12.raw" \
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" \
         usr/lib/extension-release.d/extension-release.demo-feature
   [ "$status" -eq 0 ]
   [[ "$output" == *"SYSEXT_LEVEL=1"* ]]
-  [[ "$output" == *"VERSION_ID=12"* ]]
+  [[ "$output" == *"VERSION_ID=${OS_VERSION_ID}"* ]]
 }
 
 @test "t24 sysext G2: a staging tree with /etc is REFUSED (escapes /usr+/opt boundary)" {
@@ -142,11 +143,11 @@ load manifest-helpers
   printf 'x\n'   > "$stg/usr/bin/t"
   printf 'cfg\n' > "$stg/etc/foo.conf"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature bad --board rock-5b-plus --os-version 12 \
+        --feature bad --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" --keyring "$BATS_FILE_TMPDIR/gnupg"
   [ "$status" -ne 0 ]
   [[ "$output" == *"G2 boundary"* ]]
-  [ ! -f "$out/bad-rock-5b-plus-12.raw" ]
+  [ ! -f "$out/bad-rock-5b-plus-${OS_VERSION_ID}.raw" ]
 }
 
 @test "t24 sysext tamper: a flipped byte in the .raw makes gpgv FAIL (signing has teeth)" {
@@ -154,10 +155,10 @@ load manifest-helpers
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   local tampered="$BATS_TEST_TMPDIR/tampered.raw"
-  cp "$out/demo-feature-rock-5b-plus-12.raw" "$tampered"
+  cp "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" "$tampered"
   printf '\xff' | dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
   run gpgv --keyring "$out/addon-keyring.gpg" \
-        "$out/demo-feature-rock-5b-plus-12.raw.sig" "$tampered"
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" "$tampered"
   [ "$status" -ne 0 ]
   [[ "$output" != *"Good signature"* ]]
 }
@@ -217,7 +218,7 @@ load manifest-helpers
   mkdir -p "$stg/usr/bin"
   printf 'x\n' > "$stg/usr/bin/t"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" --descriptor "$desc" \
         --keyring "$BATS_TEST_TMPDIR/c6b-gnupg"
   [ "$status" -ne 0 ]
@@ -232,13 +233,13 @@ load manifest-helpers
   mkdir -p "$stg/usr/bin"
   printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" \
         --descriptor "$PIPELINE_DIR/manifests/addons/debug-toolset.json" \
         --keyring "$BATS_TEST_TMPDIR/c6b-ok-gnupg"
   [ "$status" -eq 0 ]
   [[ "$output" == *"descriptor schema-valid"* ]]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" ]
 }
 
 # ===========================================================================

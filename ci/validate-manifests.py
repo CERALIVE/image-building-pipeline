@@ -24,6 +24,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -38,9 +39,53 @@ ADDON_SCHEMA = "addon.schema.json"
 # Overridable so the bats suite can validate a fixture tree in isolation.
 ADDONS_DIR = Path(os.environ.get("ADDONS_DIR") or (PIPELINE_DIR / "manifests" / "addons"))
 
-# sysext merge identity (G1) — must mirror lib/app-layer/sysext.sh.
+TARGET_RELEASE_ENV = Path(
+    os.environ.get("CERALIVE_TARGET_RELEASE_ENV")
+    or (PIPELINE_DIR / "manifests" / "target-release.env")
+)
+_TARGET_RELEASE_LINE = re.compile(r'^\s*:\s*"\$\{([A-Z0-9_]+):=(.*)\}"\s*$')
+
+
+def read_target_release() -> dict[str, str]:
+    """Parse manifests/target-release.env — the single target-release mapping.
+
+    The file is a bash default-assignment fragment (`: "${KEY:=value}"`), read
+    here without a shell so this validator stays a pure-Python CI entrypoint. A
+    default may reference an EARLIER key with ${KEY}, which is resolved top-down
+    exactly as bash would resolve it.
+    """
+    try:
+        text = TARGET_RELEASE_ENV.read_text()
+    except OSError as exc:
+        raise SystemExit(
+            f"FAIL cannot read the target-release mapping {TARGET_RELEASE_ENV}: {exc}"
+        ) from exc
+
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        match = _TARGET_RELEASE_LINE.match(raw)
+        if match is None:
+            continue
+        key, default = match.groups()
+        values[key] = re.sub(
+            r"\$\{([A-Z0-9_]+)\}", lambda m: values.get(m.group(1), ""), default
+        )
+    for required in ("RELEASE", "OS_VERSION_ID"):
+        if not values.get(required):
+            raise SystemExit(
+                f"FAIL {TARGET_RELEASE_ENV} declares no {required}"
+            )
+    return values
+
+
+TARGET_RELEASE = read_target_release()
+
+# sysext merge identity (G1) — must mirror lib/app-layer/sysext.sh, which reads
+# the SAME mapping. Hardcoding it here is what let the schema, the descriptors
+# and the sysext backend disagree silently: the kernel refuses to merge a .raw
+# whose VERSION_ID does not match the host, and nothing at build time notices.
 SYSEXT_LEVEL = "1"
-SYSEXT_VERSION_ID = "12"
+SYSEXT_VERSION_ID = TARGET_RELEASE["OS_VERSION_ID"]
 # Subtrees a systemd-sysext cannot overlay (G2): it merges /usr + /opt ONLY.
 FORBIDDEN_PROVIDES_PREFIXES = ("/etc", "/var")
 

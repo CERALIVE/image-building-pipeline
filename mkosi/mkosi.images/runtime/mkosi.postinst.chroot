@@ -27,7 +27,16 @@ export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[runtime] %s\n' "$*" >&2; }
 
-RELEASE="${RELEASE:-bookworm}"
+# Target suite. FAIL-CLOSED, with no literal fallback: this chroot cannot see
+# manifests/target-release.env (only $SRCDIR is mounted), so RELEASE has to arrive
+# through lib/orchestrate.sh's env_names + mkosi.conf PassEnvironment=. A default
+# here would be a second, silently-drifting source of truth — and its failure mode
+# is an image that builds and boots with apt sources naming the wrong Debian
+# release, which nothing downstream would notice.
+: "${RELEASE:?RELEASE is empty — it must be forwarded from manifests/target-release.env via lib/orchestrate.sh env_names + mkosi.conf PassEnvironment=}"
+: "${APT_SUITE:?APT_SUITE is empty — see RELEASE above; the same forwarding carries the derived suites}"
+: "${APT_SUITE_UPDATES:?APT_SUITE_UPDATES is empty — see RELEASE above}"
+: "${APT_SUITE_SECURITY:?APT_SUITE_SECURITY is empty — see RELEASE above}"
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 BOARD_ID="${BOARD_ID:-unknown}"
@@ -86,19 +95,19 @@ configure_minimal_apt() {
   cat >/etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
 URIs: http://deb.debian.org/debian
-Suites: ${RELEASE}
+Suites: ${APT_SUITE}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
 URIs: http://deb.debian.org/debian-security
-Suites: ${RELEASE}-security
+Suites: ${APT_SUITE_SECURITY}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
 URIs: http://deb.debian.org/debian
-Suites: ${RELEASE}-updates
+Suites: ${APT_SUITE_UPDATES}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
@@ -476,7 +485,7 @@ setup_addon_keyring() {
 # Inline twin of mkosi/runtime/hawkbit-updater/{config.conf,
 # rauc-hawkbit-updater.service,provision-token.sh,README.md} — keep in sync.
 #
-# The 1.4 .deb is NOT in bookworm (backport, decisions.md task 5). It is pre-staged
+# The 1.4 .deb is NOT in bookworm (backport, decisions.md task 5). It is pre-staged  # suite-literal-ok: records where the hawkbit backport was absent; the backport question is the RAUC/hawkbit surface
 # like the first-party .debs and installed here from $HAWKBIT_DEB_STAGING; if absent
 # (parity/dry/offline build) the binary install is skipped GRACEFULLY — the config,
 # provision script and CeraLive units still ship and stay inert (no binary + the
@@ -693,6 +702,7 @@ HBMCPATH
     [[ -n "${deb}" ]] && break
   done
   if [[ -n "${deb}" ]]; then
+    # suite-literal-ok: log prose about the same hawkbit backport; the RAUC/hawkbit surface owns whether a backport is still needed
     log "installing staged backport: $(basename "${deb}") (apt resolves deps from bookworm main)"
     apt-get install -y --no-install-recommends "${deb}"
     installed=1

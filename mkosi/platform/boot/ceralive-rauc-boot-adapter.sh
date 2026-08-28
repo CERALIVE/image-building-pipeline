@@ -15,7 +15,7 @@
 #
 # RAUC CUSTOM BACKEND INTERFACE (https://rauc.readthedocs.io/ integration.html):
 # RAUC invokes this script with the operation as $1 and the slot's `bootname` as the
-# trailing argument. Debian bookworm's RAUC 1.8 reads `rauc.slot=` itself and calls
+# trailing argument. Debian bookworm's RAUC 1.8 reads `rauc.slot=` itself and calls  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite; the RAUC boot contract is a separate surface
 # the four state/primary operations. RAUC 1.11+ may also call `get-current`, which
 # this backend implements for forward compatibility. Their CeraLive mapping:
 #

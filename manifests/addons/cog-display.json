@@ -6,8 +6,8 @@
   "icon": "monitor",
   "payload": { "type": "sysext" },
   "sysextLevel": "1",
-  "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "versionId": "13",
+  "compatibleOsVersions": ["13"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-{board}-{os_version}.raw",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -34,7 +34,7 @@
   "conditions": {
     "requires_display": true,
     "requires_gpu_userspace": true,
-    "min_os_version": "12",
+    "min_os_version": "13",
     "boardAllowlist": ["rock-5b-plus", "orange-pi-5-plus"]
   },
   "provides": [

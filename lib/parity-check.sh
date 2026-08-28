@@ -52,7 +52,7 @@ MODEM_SUPPORT_LEDGER="${MODEM_SUPPORT_LEDGER:-${HERE}/../manifests/modem-support
 # (The legacy belacoder→ceracoder alias is gone: ceracoder was retired 2026-06-11;
 # cerastream — the sole engine — ships under its own package name, no alias needed.)
 declare -A PKG_ALIAS=(
-  [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm
+  [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm  # suite-literal-ok: package-availability prose; the binary->package map is the package-list surface, not the target-release mapping
   [ceraui]=ceralive-device      # CeraUI .deb package name = ceralive-device
 )
 # Rockchip HW GStreamer pair — families/rk3588.yaml hw_accel_gstreamer_plugins +

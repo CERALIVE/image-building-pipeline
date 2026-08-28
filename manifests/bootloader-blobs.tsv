@@ -27,7 +27,7 @@
 #
 # PROVENANCE, and it is re-derivable from this file alone. Every hash below was
 # read out of a .deb whose own SHA-256 matched that package's entry in the
-# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest
+# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest  suite-literal-ok: the Armbian BSP index these blob digests were read from
 # taken from the gpgv-VERIFIED `Release` plaintext, never the raw `InRelease` —
 # under both pinned archive keys DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 and
 # 8CFA83D13EB2181EEF5843E41EB30FAF236099FE. The `package` + `version` columns are

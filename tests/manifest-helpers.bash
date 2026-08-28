@@ -66,6 +66,14 @@ setup() {
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
   ADDON_SCHEMA="$SCHEMA_DIR/addon.schema.json"
   VALIDATE_PY="$PIPELINE_DIR/ci/validate-manifests.py"
+  # The target-release mapping every suite/VERSION_ID expectation derives from.
+  # Fixtures MUST NOT hardcode a VERSION_ID: validate-manifests.py and the sysext
+  # backend both read this file, so a frozen fixture would start failing for the
+  # right reason at the wrong time (a release bump) and read as a broken test.
+  TARGET_RELEASE_LIB="$LIB_DIR/shared/target-release-lib.sh"
+  # shellcheck source=../lib/shared/target-release-lib.sh
+  source "$TARGET_RELEASE_LIB"
+  target_release_load
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="${PIPELINE_DIR}"
   # Locate the repo-local pin registry unless the caller provides an override.
@@ -447,8 +455,8 @@ write_addon() {
   cat > "$dir/$id.json" <<JSON
 {
   "id": "$id", "name": "$id", "version": "1.0.0", "category": "other",
-  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "${OS_VERSION_ID}",
+  "compatibleOsVersions": ["${OS_VERSION_ID}"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw",
     "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
@@ -836,7 +844,7 @@ build_feature_fixture() {
     printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
     printf 'payload\n'            > "$stg/opt/demo/data.txt"
     bash "$LIB_DIR/build-feature-sysext.sh" \
-      --feature demo-feature --board rock-5b-plus --os-version 12 \
+      --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
       --deb-staging "$stg" --out "$out" \
       --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
   ) 9>"$BATS_FILE_TMPDIR/.serialize.feature-fixture.lock"

@@ -61,12 +61,12 @@
       "const": "1"
     },
     "versionId": {
-      "description": "G1 — the VERSION_ID the extension-release file must carry to match the host os-release (Debian bookworm across the stack). MUST be the literal string '12'; the kernel refuses to merge an extension whose VERSION_ID does not match (lib/app-layer/sysext.sh: SYSEXT_OS_VERSION_ID=12).",
+      "description": "G1 — the VERSION_ID the extension-release file must carry to match the host os-release. The kernel refuses to merge an extension whose VERSION_ID does not match, so this const MIRRORS OS_VERSION_ID in manifests/target-release.env (the single target-release mapping, also read by lib/app-layer/sysext.sh and ci/validate-manifests.py). JSON Schema cannot reference that file, so ci/check-suite-literals.sh fails the build if the two ever disagree — do not edit this value without editing the mapping.",
       "type": "string",
-      "const": "12"
+      "const": "13"
     },
     "compatibleOsVersions": {
-      "description": "OS VERSION_ID strings this add-on's artifact is published for (substituted into artifact.urlTemplate's {os_version}). Optional; defaults to the single supported bookworm line. Each entry is a bare VERSION_ID token.",
+      "description": "OS VERSION_ID strings this add-on's artifact is published for (substituted into artifact.urlTemplate's {os_version}). Optional; defaults to the single supported OS line — OS_VERSION_ID in manifests/target-release.env. Each entry is a bare VERSION_ID token.",
       "type": "array",
       "items": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$" },
       "minItems": 1,
@@ -99,7 +99,7 @@
           "type": "boolean"
         },
         "min_os_version": {
-          "description": "Minimum host OS VERSION_ID required (numeric VERSION_ID compare). A host below this -> phase 'pending', lastError 'addon_os_too_old' (an OS upgrade can later satisfy it). Bare VERSION_ID token (e.g. '12' for bookworm).",
+          "description": "Minimum host OS VERSION_ID required (numeric VERSION_ID compare). A host below this -> phase 'pending', lastError 'addon_os_too_old' (an OS upgrade can later satisfy it). Bare VERSION_ID token, e.g. OS_VERSION_ID from manifests/target-release.env.",
           "type": "string",
           "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$"
         },

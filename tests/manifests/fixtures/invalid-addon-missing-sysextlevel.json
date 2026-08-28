@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "category": "other",
   "payload": { "type": "sysext" },
-  "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "versionId": "13",
+  "compatibleOsVersions": ["13"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/missing/{os_version}/missing.raw",
     "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",

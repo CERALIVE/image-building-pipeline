@@ -6,8 +6,8 @@
   "icon": "wrench",
   "payload": { "type": "sysext" },
   "sysextLevel": "1",
-  "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "versionId": "13",
+  "compatibleOsVersions": ["13"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/debug-toolset/{os_version}/debug-toolset.raw",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
