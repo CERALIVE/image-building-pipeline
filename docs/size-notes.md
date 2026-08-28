@@ -454,7 +454,22 @@ no longer the lever that matters.
 
 ### Why these files are unreachable on this device
 
-Four independent checks, all run against a real built rootfs and a real board:
+Four independent checks, all run against a real built rootfs and a real board.
+
+> **Scope, added at the trixie/mainline migration:** check 1 below is
+> VENDOR-TRACK ONLY. The mainline `edge` variant drops `libmali` from its
+> `firmware_packages` (it is ABI-bound to Rockchip's out-of-tree module and would
+> otherwise capture the EGL/GLES/GBM sonames image-wide for a driver the mainline
+> kernel cannot serve), so on that track Mesa IS reachable and
+> `dri/panthor_dri.so` is a real driver for a real GPU. **The prune stays on both
+> tracks anyway**, because checks 2-4 are unaffected: no base-image component
+> instantiates a GL element on either kernel track. The only component that wants
+> GL is the optional, inert-by-default Cog kiosk add-on, and it carries its own
+> copy of these four globs inside its own `.raw` — so the base image is
+> byte-unchanged and this ledger's 185.3 MB stands. Un-pruning on the mainline
+> path instead was measured and rejected: it would put the `edge` image near
+> 1.62 GB against the 1.5 GB `[6c/9]` ceiling. Detail:
+> [`cog-display-addon.md`](cog-display-addon.md) §5.
 
 1. **Mali wins the loader path.** `libmali-valhall-g610-g24p0-wayland-gbm` ships
    `/etc/ld.so.conf.d/00-aarch64-mali.conf` (`/usr/lib/aarch64-linux-gnu/mali`).

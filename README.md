@@ -287,7 +287,7 @@ Current validated add-ons:
 
 | Add-on | Status | Notes |
 |--------|--------|-------|
-| `cog` (Cog + WPEWebKit display engine) | `[PARTIAL]` — packaging validated, hardware-gated | See [`docs/cog-display-addon.md`](docs/cog-display-addon.md) |
+| `cog-display` (Cog + WPEWebKit display engine) | `[PARTIAL]` — trixie closure built and measured, render hardware-gated | `cog` 0.18.4-1+b1 + `libwpewebkit-2.0-1` 2.48.3-1; GPU stack is Panthor (kernel) + Mesa (userspace, carried in the `.raw`). See [`docs/cog-display-addon.md`](docs/cog-display-addon.md) |
 
 Build a feature sysext:
 
@@ -384,10 +384,20 @@ software-GL prune).
 Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
 software-GL prune — `libgl1-mesa-dri` drags Mesa's Gallium megadriver, LLVM's JIT
-and the Z3 solver into the image for a software rasterizer that can never run,
-because the Mali vendor driver wins the EGL/GLES/GBM lookup. The metapackage stays
+and the Z3 solver into the image for a rasterizer no base-image component ever
+asks for. On the vendor track the Mali blob additionally wins the EGL/GLES/GBM
+lookup, so none of it is even reachable; on the mainline `edge` track the blob is
+gone and Mesa *is* reachable, but the conclusion is unchanged because nothing in
+the base image instantiates a GL element on either track. The metapackage stays
 installed (removing it would cascade into the GStreamer plugins cerastream needs);
-only its 185.3 MB of unreachable payload is stripped.
+only its 185.3 MB of payload is stripped.
+
+The one component that does want GL — the optional, inert-by-default Cog kiosk
+add-on — therefore carries its own copy of exactly those four pruned globs inside
+its own `.raw`, so the base image is byte-unchanged and the size gate is
+untouched. Un-pruning on the mainline path instead was measured and rejected:
++185 MB would put the `edge` image near 1.62 GB against a 1.5 GB ceiling no board
+may raise.
 
 Those prune globs are **version-wildcarded on purpose**. The trixie migration
 found that the previous version-pinned ones matched almost nothing — Debian moved
@@ -993,6 +1003,14 @@ Mali-G610 `libmali` blob) is not in the Armbian feed. It is baked from exact pin
 upstream release assets, verified by SHA-256, in
 [`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)
 (fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
+
+**`libmali` is VENDOR-TRACK ONLY.** The mainline `edge` variant drops it from its
+`firmware_packages` and drives the same Mali-G610 through the in-tree open
+`panthor` DRM driver with Mesa userspace instead. The blob is ABI-bound to
+Rockchip's out-of-tree module and its `/dev/mali0`, which a mainline kernel never
+creates, and its `ld.so.conf.d` drop-in would capture `libEGL`/`libGLESv2`/`libgbm`
+image-wide for a driver that cannot work — so this is a correctness requirement,
+not a cleanup. The production path is unaffected and still ships the blob.
 
 ## License
 

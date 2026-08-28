@@ -59,6 +59,13 @@ correct rather than incidental: it is kernel-coupled GPU userspace installed fro
 the same local, build-time-only package directory, and it is not an app-layer
 package.
 
+**On the mainline `edge` track that row reads `armbian-firmware` alone**, because
+the GPU userspace follows the kernel driver: mainline binds the Mali-G610 with the
+in-tree `panthor` driver and Mesa, so the vendor blob is dropped from
+`variants.edge.firmware_packages`. The freeze mechanism is unchanged — it freezes
+whatever the resolved manifest names, which is exactly why nothing here needed a
+hardcoded package list.
+
 Under an opt-in `--variant` the same fields resolve to the source-built kernel
 package (`linux-image-7.2.0-ceralive-rk3588` on the current `edge` pin, or
 `linux-image-6.1.115-ceralive-vendor-rk35xx`) and the freeze follows them

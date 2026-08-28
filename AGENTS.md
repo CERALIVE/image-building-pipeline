@@ -98,7 +98,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Build-log warning/error signatures + the lint that governs them** | [`docs/build-log-census.md`](docs/build-log-census.md) + `ci/check-build-log.sh` / `ci/check-build-log-census.py` — see the KEY FACT below |
 | **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md) + `mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
 | **Bookworm → Trixie/mainline OTA transition (RAUC 1.8 compatibility + todo-16 A/B drill)** | [`docs/ota-bookworm-trixie-transition.md`](docs/ota-bookworm-trixie-transition.md) + `tests/rauc-transition-contract.test.sh` — plain bundle, exact compatible/signing chain, deployed U-Boot remains outside the bundle |
-| **Cog display add-on recipe** | [`docs/cog-display-addon.md`](docs/cog-display-addon.md) — Cog+WPEWebKit packaging, libmali strategy |
+| **Cog display add-on recipe** | [`docs/cog-display-addon.md`](docs/cog-display-addon.md) — Cog+WPEWebKit trixie closure, Panthor/Mesa GPU strategy |
 | **Cog on-hardware render QA checklist** | [`docs/cog-display-hw-checklist.md`](docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`docs/addon-sysext-refresh.md`](docs/addon-sysext-refresh.md) — update/disable lifecycle |
 | **Deferred / hardware-gated items** | [`docs/DEFERRED.md`](docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
@@ -1772,7 +1772,7 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (160 symbols) and
+`manifests/kernel/required-symbols.list` (161 symbols) and
 `manifests/kernel/forbidden-symbols.list` (68) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
@@ -3013,11 +3013,26 @@ straight through the 1.5 GB `[6c/9]` gate.
   name stops matching on a routine security update, silently.
   `package-contract.bats` §28 fails the build on any digit in an LLVM/Gallium
   prune glob's basename.
-- **Unreachable, four ways.** `libmali-valhall-g610-*` ships
+- **Unreachable, four ways — ON THE VENDOR TRACK. Read the scope, because the
+  mainline track retired the first of the four reasons.** `libmali-valhall-g610-*`
+  ships
   `/etc/ld.so.conf.d/00-aarch64-mali.conf`; the `00-` prefix sorts first, so
   `ld.so.cache` resolves `libEGL.so.1` / `libGLESv2.so.2` / `libgbm.so.1` to the
   Mali vendor stubs and Mesa's `libEGL_mesa`/`libgbm` — the two libraries that
-  `dlopen` a DRI driver — are never reached. The one soname Mali does NOT override,
+  `dlopen` a DRI driver — are never reached. **On the `edge` variant libmali is
+  no longer installed at all** (its `firmware_packages` drops it — see the KIOSK
+  STACK entry), so Mesa IS reachable there and `dri/panthor_dri.so` is a real
+  driver for a real GPU rather than a software rasterizer. The prune nonetheless
+  stays exactly as it is on both tracks, for a reason that survives the change:
+  **no base-image component consumes GL on either track** (cerastream
+  instantiates no GL element; of 263 shipped plugins only `libgstnvcodec.so`
+  links `libgstgl`, and `libgstopengl.so` is not installed). The one component
+  that DOES want GL is the optional, inert-by-default Cog kiosk add-on, and it
+  therefore carries its own copy of precisely these four globs inside its
+  `.raw` — nothing is shadowed, because the base has no file at those paths.
+  Un-pruning on the mainline path instead was measured and rejected: +185 MB puts
+  the `edge` image near 1.62 GB against a ceiling no board may raise. The one
+  soname Mali does NOT override,
   `libGL.so.1`, loads its driver inside `libGLX_mesa` at GLX context creation, and
   the image ships no X server or Xwayland. The `objdump -p` chain is still closed
   end to end, with one NEW hop on trixie:
@@ -4970,16 +4985,47 @@ The image ships a kiosk display stack (cage + Chromium + wvkbd) **installed but 
 
 **Repo boundary (DC-1):** the image owns the chassis (units, packages, OOM config, `OnFailure` handler). CeraUI owns the content, control, and lifecycle state (toggle RPC, token mint, state machine).
 
-**Cog display add-on (W4):** Cog + WPEWebKit is validated as a lighter alternative
-display engine, packaged as a feature sysext add-on. Acquisition path: plain `apt`
-from bookworm `main` (`cog` 0.16.1, `libwpewebkit-1.1-0` 2.38.6). The Mali-G610
-GPU userspace (`libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1) is now **baked into
-the base image** (Platform layer) via `firmware_packages` + the pinned userspace file
-(see the "RK3588 HW-accel userspace" KEY FACT); it stays **excluded from the sysext**
-by contract. Full recipe: [`docs/cog-display-addon.md`](docs/cog-display-addon.md).
-**Hardware-gated:** `cog.sysext.conf` wired into the build only after RK3588 render
-QA passes (same gate as Tasks 26/27/28) — on-hardware Mali EGL/GBM render is the
-gated item, not the package availability.
+**Cog display add-on (W4) — trixie closure + a Panthor/Mesa GPU stack:** Cog +
+WPEWebKit is validated as a lighter alternative display engine, packaged as a
+feature sysext add-on. Acquisition path is unchanged in shape — plain `apt` from
+the target suite's `main` — but **every pin and the whole GPU half moved** at the
+trixie/mainline migration, and neither was a version bump:
+
+- **The renderer package was RENAMED.** `libwpewebkit-1.1-0` does not exist in
+  trixie at all; the closure is now `cog` **0.18.4-1+b1** + `libwpewebkit-2.0-1`
+  **2.48.3-1** (+ `libicu72` → `libicu76`, `libopenjp2-7` dropped for
+  `libjxl0.11`/`libavif16`). The retired pins fail acquisition with apt exit 100
+  and zero `.deb`s — proven, not assumed. Note 2.48.3, **not** the "2.44.x" the
+  pre-migration doc forecast; that forecast was never re-checked against the
+  archive.
+- **The GPU userspace is Mesa now.** Mainline binds the Mali-G610 (a Valhall CSF
+  part) with the in-tree open **`panthor`** DRM driver — `CONFIG_DRM_PANTHOR=m`,
+  verified in the real resolved v7.2 `edge` config and pinned in
+  `manifests/kernel/required-symbols.list`. `libmali` is **off the mainline
+  path**: `manifests/families/rk3588.yaml` `variants.edge.firmware_packages`
+  lists `armbian-firmware` only. That drop is load-bearing rather than tidy — the
+  blob ships `/etc/ld.so.conf.d/00-aarch64-mali.conf`, which sorts first and
+  captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver
+  bound to a `/dev/mali0` a mainline kernel never creates
+  (armbian/build#10320), so leaving it in would not degrade GL, it would remove
+  it. **The vendor default and `vendor-patched` still ship libmali and are
+  unchanged**; retiring the pin outright belongs to the vendor-kernel
+  retirement.
+- **The Mesa half rides INSIDE the sysext**, which is the one place the
+  Platform-layer rule inverts — see the ANTI-PATTERNS entry and
+  [`docs/cog-display-addon.md`](docs/cog-display-addon.md) §5 for why (the
+  Runtime layer prunes exactly those four globs for the size gate, so the base
+  has no file at those paths to shadow).
+
+Measured, not estimated: **353,172,379 B installed / 111,521,792 B squashed**
+(real trixie arm64 closure, extracted, pruned with the real
+`SYSEXT_EXCLUDE_NAMES` and squashed as `sysext-build.lib.sh` does).
+**Hardware-gated:** the descriptor is wired into the build only after RK3588
+render QA passes (same gate as Tasks 26/27/28). The gated item is now
+**Panthor/Mesa EGL/GBM render**, not package availability — and the failure mode
+to watch for is Mesa silently falling back to `llvmpipe`, which renders
+*correctly* and so cannot be distinguished from success without checking the
+bound driver by name.
 
 **Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-blocked** — no RK3588 board is reachable from the dev environment (Task 1 spike: NO-GO). The architecture is fully specced; implementation waits for hardware access.
 
@@ -5002,7 +5048,9 @@ gated item, not the package availability.
 - Don't use `--native` as the default build path — container is canonical; native is opt-in
 - Don't `chown` the mkosi package cache to the invoking user to "make the ownership consistent". mkosi 26 refuses a cache tree whose owner uid is not its own and then deletes it, so a chowned cache is a permanently cold base layer that looks like a fix. Keep the cache in ONE privilege domain instead, and don't alternate `./build <board>` and `./build <board> --native` on one checkout unless you want to pay for a cold base layer every time
 - Don't run the containerized build on a Docker Desktop daemon, and don't "work around" its `rm: cannot remove …: Permission denied` or `acl_set_file_at: Operation not supported`. Its bind mount is a VM share: container root cannot unlink a host-uid-0 file and the share carries no ACLs/xattrs, so it can neither invalidate the mkosi cache nor extract a subimage. A `/work/work/...` path in an error is not a real path — it is mkosi's sandbox prefix over our own `/work` mount, and it means the failure is inside the containerized mkosi
-- Don't put GPU/BSP userspace (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only
+- Don't put a VENDOR GPU/BSP blob (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only, and `libmali*` additionally sits in the Cog add-on's `SYSEXT_FORBID_PACKAGES` because it is retired on the mainline path outright. **The Cog add-on carrying Mesa's `libgallium-*.so` / `dri/*_dri.so` / `libLLVM*` / `libz3*` is the ONE sanctioned exception and is not a precedent for the blobs**: those four are ordinary Debian packages the Runtime layer already installs and then `RemoveFiles=`-prunes for the size gate, so the base has no file at those paths and the add-on shadows nothing. Extend the exception only to a payload that is (a) stock Debian, (b) pruned out of the base, and (c) consumed by that add-on alone
+- Don't re-add `libmali` to the `edge` variant's `firmware_packages` to "fix" a mainline GPU problem — it is what CAUSES one. Its `00-aarch64-mali.conf` sorts first and captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver bound to a `/dev/mali0` the mainline kernel never creates, so it does not degrade GL, it removes it with no fallback. The mainline pairing is `panthor` + Mesa; the vendor tracks keep the blob and are unchanged
+- Don't drop `libGLESv2.so*` / `libwayland-egl.so*` back into the Cog sysext's `SYSEXT_EXCLUDE_NAMES`. They were there because libmali supplied those sonames; with libmali gone the Runtime layer supplies neither `libgles2` nor `libwayland-egl1`, so re-excluding them deletes libraries nothing else provides. `libEGL.so*` and `libgbm.so*` DO stay excluded — those really are base-provided (`libegl1`/`libegl-mesa0`/`libgbm1`, unpruned)
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges
 - Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla-send-rs` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently
@@ -5188,6 +5236,11 @@ post-retirement board degrade to the same silence. Do not delete it as dead code
 physical modem to read its ID_PATH; not implemented here. Only `eth0/eth1/wlan0`
 are pinned today.
 
-**Cog render QA hardware-gated.** `cog.sysext.conf` + build wrapper are inert
-scaffolds until a physical RK3588 validates render (OKLCH/Tailwind v4 on WebKit
-2.38.6, Mali-G610 EGL/GBM wiring). See [`docs/cog-display-addon.md §7`](docs/cog-display-addon.md).
+**Cog render QA hardware-gated.** `cog-display.sysext.conf` + build wrapper are
+inert scaffolds until a physical RK3588 validates render. The gated items moved
+at the trixie/mainline flip: **Panthor + Mesa EGL/GBM** wiring (not libmali), and
+OKLCH/Tailwind v4 on WebKit **2.48.3** — a far newer engine than the 2.38.6 that
+made the CSS item the deciding one, so that risk is materially reduced but still
+unverified. The closure itself is no longer gated: it resolves, downloads,
+prunes and squashes for real against the trixie arm64 index. See
+[`docs/cog-display-addon.md §7`](docs/cog-display-addon.md).

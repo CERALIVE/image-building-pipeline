@@ -224,25 +224,32 @@ there; come back here to record the sign-off.
 ### Key commands (abbreviated — see cog-display-hw-checklist.md for full detail)
 
 ```bash
-# Pre-flight: confirm Mali-G610 wayland-gbm userspace is present
-ls -l /usr/lib/aarch64-linux-gnu/libmali*
-# -> should show libmali-valhall-g610-g24p0-wayland-gbm
+# Pre-flight: confirm the MAINLINE GPU stack, and that the vendor blob is GONE
+ls -l /sys/class/drm/renderD*/device/driver   # -> resolves to .../panthor
+ls /usr/lib/aarch64-linux-gnu/libmali* 2>&1   # -> must find NOTHING
+ls /etc/ld.so.conf.d/                          # -> no *-mali.conf
 
-# Build the real Cog sysext (in an emulated-arm64 bookworm chroot):
+# Build the real Cog sysext (in an emulated-arm64 TRIXIE chroot).
+# Do NOT pass a literal --os-version; it defaults from manifests/target-release.env.
 lib/build-feature-sysext.sh \
-  --feature cog-display --board rock-5b-plus --os-version 12 \
+  --feature cog-display --board rock-5b-plus \
   --deb-staging "$staging" --out dist/
 
 # Confirm exclusion contract (no libmali/libEGL/libgbm/rockchip inside the .raw):
 unsquashfs -l dist/cog-display-rock-5b-plus-13.raw \
-  | grep -Ei 'libmali|libEGL|libgbm|rockchip'
+  | grep -Ei 'libmali|libEGL\.|libgbm\.|rockchip'
 # -> must be empty
+
+# ... and the INVERSE: the Panthor/Mesa GPU half MUST be inside it
+unsquashfs -l dist/cog-display-rock-5b-plus-13.raw \
+  | grep -E 'panthor_dri|libgallium-|libLLVM|libz3'
+# -> must list all four; empty here means the add-on merges and renders nothing
 
 # Activate on the board:
 # (copy .raw + .sig to /data/extensions/cog-display.raw, then drive via CeraUI add-on manager)
 systemd-sysext status   # -> cog-display listed as merged
 command -v cog cage     # -> both resolve
-cog --version           # -> 0.16.x
+cog --version           # -> 0.18.x
 
 # Render test (choose platform per cog-display-addon.md §8):
 cog --platform=drm http://127.0.0.1/
@@ -283,9 +290,14 @@ After editing, run `python3 ci/validate-manifests.py` to confirm.
 - [ ] Measured `.raw` size recorded; `manifests/size-budget.json` updated if needed.
 - [ ] Real `artifact.sha256` filled in `cog-display.json` (§1).
 - [ ] Add-on activated on the board; `systemd-sysext status` shows merged (§2).
-- [ ] Cog renders via libmali EGL/GBM — NOT llvmpipe fallback (§3).
+- [ ] `libmali` absent and `panthor` bound (§0) — a prerequisite, not hygiene.
+- [ ] Panthor/Mesa GPU half present inside the `.raw` (§1) and resolving on the
+      merged `/usr` (§2).
+- [ ] Cog renders via **Panthor + Mesa** EGL/GBM — **NOT llvmpipe fallback** (§3).
+      Check the bound driver by name: llvmpipe renders *correctly* and is the
+      failure most easily mistaken for success.
 - [ ] CeraUI loads end-to-end in Cog (§3).
-- [ ] OKLCH + Tailwind v4 CSS correctness on WebKit 2.38.6 confirmed (§3).
+- [ ] OKLCH + Tailwind v4 CSS correctness on WebKit 2.48.3 confirmed (§3).
 - [ ] Screenshots captured to `test-results/` (§3).
 - [ ] Touch input confirmed if panel fitted (§4).
 - [ ] Disable + cleanup confirmed (§6).

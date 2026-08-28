@@ -186,13 +186,37 @@ CONFIG_SERIAL_DEV_BUS=y
 CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
 
 # --- DRM / kiosk display ----------------------------------------------------
-# The kiosk stack (cage + Chromium, or the Cog add-on) renders through the Mali
-# userspace onto a Rockchip DRM/KMS device; DRM_ROCKCHIP is what creates it, and
-# ROCKCHIP_DW_HDMI_QP is the RK3588 HDMI transmitter it drives.
+# The kiosk stack (cage + Chromium, or the Cog add-on) renders onto a Rockchip
+# DRM/KMS device; DRM_ROCKCHIP is what creates it, and ROCKCHIP_DW_HDMI_QP is the
+# RK3588 HDMI transmitter it drives.
 CONFIG_DRM
 CONFIG_DRM_ROCKCHIP=m
 CONFIG_ROCKCHIP_DW_HDMI_QP=y
 CONFIG_DRM_DISPLAY_HELPER=m
+
+# The GPU itself. On this mainline track the Mali-G610 is bound by the in-tree
+# open `panthor` driver, NOT by Rockchip's out-of-tree vendor module + libmali
+# blob — that pairing retires with the vendor kernel era, and the blob is
+# ABI-incompatible with trixie's stack besides (armbian/build#10320). Panthor is
+# the CSF-generation driver and is the correct one for a G610: panfrost handles
+# the non-CSF Valhall parts (G68/G78), which this SoC is not.
+#
+# It is pinned HERE and NOT in rk3588-edge.fragment on purpose, and the
+# distinction is this file's whole reason to exist: arm64 defconfig already sets
+# it, so the fragment (which declares what CeraLive ADDS) has nothing to add —
+# but "defconfig happens to supply it" is exactly the claim that stops being true
+# in silence. CONFIG_RTW89, CONFIG_DMABUF_HEAPS, CONFIG_TYPEC_FUSB302 and
+# CONFIG_NF_TABLES each shipped a dead capability on a booting, validating image
+# for that reason.
+#
+# `=m` is the honest RESOLVED value, not a preference: arm64 defconfig builds
+# CONFIG_DRM=m, and a tristate that `depends on DRM` cannot resolve `=y` above a
+# modular parent. Verified against the real resolved v7.2 config for this variant
+# (rk3588-kernel-patches .omo/evidence/v72-rebase/05-compile/resolved.config:
+# CONFIG_DRM=m, CONFIG_DRM_PANTHOR=m). Its select-only helpers — DRM_EXEC,
+# DRM_GPUVM, DRM_SCHED, DRM_GEM_SHMEM_HELPER, IOMMU_IO_PGTABLE_LPAE — need no
+# entry, per the select-only rule this file already applies to RTW89_CORE.
+CONFIG_DRM_PANTHOR=m
 
 # --- Audio ------------------------------------------------------------------
 # SOUND -> SND -> SND_SOC is a three-deep parent chain, and SND_USB is a fourth

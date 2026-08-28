@@ -105,7 +105,7 @@
   },
   "$defs": {
     "variant_overlay": {
-      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB package names, declare a kernel_source build, and (via `extends`) inherit a SIBLING variant — nothing else. Anything wider (firmware, U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change.\n\nINHERITANCE (`extends`): a variant that names a sibling is a DELTA on it, so resolution becomes family -> parent -> child -> board. Because the child no longer restates the parent's pins, its own `kernel_source` block is validated as a PARTIAL here and the COMPLETE `$defs/kernel_source` contract is re-asserted by the resolver on the MERGED result — a child can therefore never sneak past a required pin, and can never drift from its parent's pins either, because it does not carry copies of them.",
+      "description": "One named variant overlay. Deliberately NARROW: a variant may retarget the kernel branch, the kernel/DTB/kernel-extension/firmware package names, declare a kernel_source build, and (via `extends`) inherit a SIBLING variant — nothing else. Anything wider (U-Boot, partition layout) would let a variant reshape the whole image and is out of scope; add fields here only with a matching resolver/orchestrator change. `firmware_packages` was admitted under exactly that rule (see its own description): the GPU userspace is a KERNEL-TRACK fact, not an image-shape one, because the vendor blob and the mainline Mesa/panthor stack drive different kernel drivers and cannot coexist.\n\nINHERITANCE (`extends`): a variant that names a sibling is a DELTA on it, so resolution becomes family -> parent -> child -> board. Because the child no longer restates the parent's pins, its own `kernel_source` block is validated as a PARTIAL here and the COMPLETE `$defs/kernel_source` contract is re-asserted by the resolver on the MERGED result — a child can therefore never sneak past a required pin, and can never drift from its parent's pins either, because it does not carry copies of them.",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -136,6 +136,13 @@
         },
         "kernel_extension_packages": {
           "description": "Kernel-extension package override. Source-built variants set [] so a module tied to the production vendor kernel release cannot leak onto another kernel track.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "firmware_packages": {
+          "description": "Firmware/GPU-userspace package override for this variant. Added deliberately and NARROWLY, for one fact the kernel track decides: which GPU USERSPACE pairs with the kernel this variant builds. The vendor 6.1 track binds the Mali-G610 with Rockchip's out-of-tree driver and needs the proprietary `libmali-valhall-g610-*` blob; the mainline track binds the same silicon with the in-tree open `panthor` DRM driver, whose userspace is Mesa. The two are NOT interchangeable — libmali ships /etc/ld.so.conf.d/00-aarch64-mali.conf, which sorts first and captures libEGL.so.1 / libGLESv2.so.2 / libgbm.so.1 for a blob that talks to a vendor /dev/mali0 the mainline kernel never creates, so leaving it on a mainline image does not degrade GL, it removes it. This is a kernel-track fact by exactly the same logic as kernel_extension_packages (whose whole reason is a module tied to one kernel release), which is why it is admitted here and U-Boot / partition layout still are not.",
           "type": "array",
           "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$" },
           "minItems": 0,

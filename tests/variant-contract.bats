@@ -153,12 +153,48 @@ YAML
 }
 
 @test "variants: schema rejects an unknown field inside a variant overlay" {
+  # This used to use firmware_packages as its example of an out-of-scope field.
+  # That field is now IN scope (see the leg below), so the example moved to one
+  # that is still genuinely image-shape rather than kernel-track: a variant that
+  # could retarget the bootloader would be able to reshape the whole image, which
+  # is exactly what `additionalProperties: false` is here to prevent.
   local f="$BATS_TEST_TMPDIR/wide-variant.yaml"
   write_variant_family "$f" "  edge:
-    firmware_packages: [something-else]"
+    uboot_packages: [something-else]"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"firmware_packages"* ]]
+  [[ "$output" == *"uboot_packages"* ]]
+
+  # ... and a second still-forbidden shape, so the leg does not rest on one name.
+  local g="$BATS_TEST_TMPDIR/wide-variant-2.yaml"
+  write_variant_family "$g" "  edge:
+    partition_template: something-else"
+  run validate_manifest "$g" "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"partition_template"* ]]
+}
+
+@test "variants: firmware_packages IS an accepted overlay field (the GPU userspace is a kernel-track fact)" {
+  # Admitted deliberately and narrowly: the vendor kernel drives the Mali-G610
+  # through Rockchip's out-of-tree module + the libmali blob, while mainline
+  # drives the same silicon through the in-tree panthor driver + Mesa. The two
+  # userspaces are not interchangeable and cannot coexist (libmali's
+  # 00-aarch64-mali.conf captures libEGL/libGLESv2/libgbm image-wide), so which
+  # one ships is decided by the kernel track — the same logic that already
+  # admits kernel_extension_packages. Pinned here so a future narrowing of the
+  # schema cannot silently put libmali back on the mainline path.
+  local f="$BATS_TEST_TMPDIR/fw-variant.yaml"
+  write_variant_family "$f" "  edge:
+    firmware_packages: [armbian-firmware]"
+  run validate_manifest "$f" "$FAMILY_SCHEMA"
+  [ "$status" -eq 0 ]
+
+  # An EMPTY list is legal too (minItems: 0), matching kernel_extension_packages.
+  local g="$BATS_TEST_TMPDIR/fw-variant-empty.yaml"
+  write_variant_family "$g" "  edge:
+    firmware_packages: []"
+  run validate_manifest "$g" "$FAMILY_SCHEMA"
+  [ "$status" -eq 0 ]
 }
 
 @test "variant_overrides: OPi 5+ --variant edge resolves the MAINLINE DTB name" {
@@ -438,9 +474,44 @@ YAML
   # that is what kernel_source's suppression set does and does not cover, and it
   # is unchanged. What DID change (todo 12) is WHICH prebuilt U-Boot the edge
   # track fetches: the board's variant_overrides.edge names Armbian's
-  # mainline-TF-A -edge package. Firmware is untouched by any variant.
+  # mainline-TF-A -edge package.
   [[ "$output" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-edge'"* ]]
+
+  # FIRMWARE is no longer untouched by this variant, and that is the point.
+  # This assertion used to read `armbian-firmware libmali-valhall-g610-…`; the
+  # mainline track drops the blob because it is ABI-bound to Rockchip's
+  # out-of-tree Mali module and its /dev/mali0 node, which a mainline kernel
+  # never creates (armbian/build#10320). Worse, libmali ships
+  # /etc/ld.so.conf.d/00-aarch64-mali.conf, whose `00-` prefix sorts first and
+  # captures libEGL.so.1 / libGLESv2.so.2 / libgbm.so.1 for the WHOLE image — so
+  # leaving it here would not degrade GL on a mainline board, it would remove it,
+  # with nothing falling back. armbian-firmware stays: it carries the WiFi/BT
+  # blobs and the GPU's own CSF firmware, which panthor loads exactly as the
+  # vendor driver did.
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+  [[ "$output" != *"libmali"* ]]
+}
+
+@test "kernel_source: the VENDOR resolve still ships libmali (the edge drop is track-scoped, not a retirement)" {
+  # The inverse of the leg above, and the one that proves the change did not leak
+  # onto the production path. Retiring the pin outright belongs to the
+  # vendor-kernel retirement, not to the GPU-stack flip.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus 2>/dev/null"
+  [ "$status" -eq 0 ]
   [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
+
+  # vendor-patched is still the vendor kernel track, so it keeps the blob too.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
+
+  # edge-test INHERITS the edge overlay rather than restating it — the whole
+  # reason `extends` exists, checked here so a debug build can never drift onto a
+  # different GPU stack than the production edge it is a debug build OF.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+  [[ "$output" != *"libmali"* ]]
 }
 
 @test "kernel_source: the derived suppression set is pre-overlay UNION post-overlay" {

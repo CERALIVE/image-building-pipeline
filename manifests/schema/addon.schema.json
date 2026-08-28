@@ -95,7 +95,7 @@
           "type": "boolean"
         },
         "requires_gpu_userspace": {
-          "description": "When true the add-on needs the Mali GPU userspace (libmali, Platform-layer) for EGL/GBM rendering. Boards/images lacking it -> phase 'unsupported', lastError 'addon_requires_gpu_userspace'.",
+          "description": "When true the add-on needs a working GPU userspace for EGL/GBM rendering. WHICH stack that is depends on the kernel track and the add-on must not assume one: the vendor track supplies the proprietary libmali blob from the Platform layer, while the mainline track binds the same GPU with the in-tree panthor driver and supplies Mesa. Boards/images lacking a usable stack -> phase 'unsupported', lastError 'addon_requires_gpu_userspace'.",
           "type": "boolean"
         },
         "min_os_version": {

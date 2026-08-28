@@ -127,21 +127,35 @@ board validates render.
 
 The hardware-gated items are:
 
-- Cog renders at all via the real Mali-G610 Valhall GPU userspace
-  (`libmali-valhall-g610-g24p0-wayland-gbm`) providing EGL/GBM
-- OKLCH and Tailwind v4 CSS correctness on WebKit 2.38.6 (the bookworm version
-  may predate the Chromium ≥111 floor assumed by the cage + Chromium kiosk path)
+- Cog renders at all through the **Panthor + Mesa** stack — the in-tree
+  `panthor` DRM driver plus Mesa's `dri/panthor_dri.so` providing EGL/GBM
+- The merged sysext's Mesa half actually resolves at runtime (the base image
+  prunes those four paths; only a merged board proves the overlay supplies them)
+- `renderD*` node mapping and permissions for the kiosk user
+- OKLCH and Tailwind v4 CSS correctness on WebKit **2.48.3** — risk materially
+  reduced versus the 2.38.6 this item was written against, but unverified
 - `cog` platform choice: direct-DRM/KMS vs under `cage` (DRM node mapping is
   itself a Task 28 hardware item)
 - Touch input through the WPE/Wayland seat (requires DSI touchscreen + calibration)
-- GLVND vs `dpkg-divert` libmali wiring
-- Measured `cog.raw` size and size-budget impact
+- Measured `.raw` size **on the device** and its `/data` impact
 
-**Why deferred:** No RK3588 board is reachable from the dev environment (Task 1
-spike verdict: NO-GO). The Mali-G610 GPU userspace is a proprietary Rockchip
-blob not present in Debian bookworm or Armbian's main feed; it cannot be
-emulated. Everything provable without hardware is already green and recorded in
-`test-results/task-39-cog-qa.txt`.
+**What is no longer gated (closed at the trixie/mainline migration):** the
+closure itself. `cog` `0.18.4-1+b1` + `libwpewebkit-2.0-1` `2.48.3-1` resolve,
+download, extract, prune and squash for real against the trixie arm64 index
+(353 172 379 B installed / 111 521 792 B squashed), and the retired bookworm pins
+demonstrably do not resolve at all. Evidence:
+`.omo/evidence/cerastream-glibc-pipewire-network-ui/todo14-cog-closure.txt` and
+`…/todo14-old-pins-negative.txt`. The former "GLVND vs `dpkg-divert` libmali
+wiring" item is **retired outright**, not deferred: `libmali` is off the mainline
+path entirely, so there is no blob to divert to.
+
+**Why the rest is still deferred:** No RK3588 board is reachable from the dev
+environment (Task 1 spike verdict: NO-GO). A GPU cannot be emulated, and the
+specific failure mode that matters here — Mesa silently falling back to
+`llvmpipe` when it cannot reach the Panthor render node — renders *correctly*
+and so cannot be distinguished from success by anything but a board. Everything
+provable without hardware is green and recorded in
+`test-results/task-39-cog-qa.txt` plus the two evidence files above.
 
 **Unblock condition:** Run the full checklist in
 `docs/cog-display-hw-checklist.md` on a physical Radxa Rock 5B+ or Orange
@@ -160,11 +174,13 @@ the build and CI `addon-publish` path; pin `cog`/`wpewebkit` versions in
 **Location:** `versions.yaml:153-165` (workspace root, consumed by `scripts/fetch-debs.sh`)
 
 **What it is:** The `cog` and `wpewebkit` entries in `versions.yaml` carry
-`pin: null`. The apt-index-validated versions (cog `0.16.1-1`,
-`libwpewebkit-1.1-0` `2.38.6-1`) are recorded in comments but not pinned,
-because pinning before render QA passes would lock a version that may need to
-change (e.g. if WebKit 2.38.6 proves insufficient for OKLCH/Tailwind v4 and a
-trixie/backport snapshot is needed instead).
+`pin: null`. The comment values recorded beside them are **stale** — they name
+the retired bookworm pins (cog `0.16.1-1`, `libwpewebkit-1.1-0` `2.38.6-1`),
+neither of which resolves on the target suite any more. The apt-index-validated
+trixie versions are **cog `0.18.4-1+b1`** and **`libwpewebkit-2.0-1` `2.48.3-1`**
+(note the package RENAME — `libwpewebkit-1.1-0` no longer exists in the archive).
+They remain unpinned because pinning before render QA passes would lock a version
+that may still need to change.
 
 ```yaml
 # versions.yaml:153-165
@@ -189,9 +205,11 @@ the bookworm versions are sufficient. The technical debt is tracked as TD-C1 in
 
 **Unblock condition:** Same gate as item 4. After the Cog render QA checklist
 passes on hardware, fill the real `artifact.sha256` in `cog-display.json`, then
-set `pin: 0.16.1-1` and `pin: 2.38.6-1` (or the trixie/backport equivalents if
-the bookworm versions proved insufficient) in `versions.yaml:157` and
-`versions.yaml:164`. Re-run `python3 ci/validate-manifests.py` to confirm.
+set `pin: 0.18.4-1+b1` and `pin: 2.48.3-1` in `versions.yaml:157` and
+`versions.yaml:164` — and correct the `package:` field of the `wpewebkit` entry
+to `libwpewebkit-2.0-1` and the `source:` field of both entries to the target
+suite while doing so, because those are wrong today regardless of the pin.
+Re-run `python3 ci/validate-manifests.py` to confirm.
 
 ---
 

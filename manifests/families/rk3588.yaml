@@ -65,6 +65,12 @@ dtb_packages:
 # docs/cog-display-addon.md §5. It unblocks the 5.4 Kiosk / Cog+WPEWebKit EGL/GBM
 # path; on-hardware render stays the HW-gated QA item (cog-display-addon.md §7). The
 # GPU's CSF firmware blob rides the vendor kernel / armbian-firmware.
+#
+# THIS IS THE VENDOR-ERA DEFAULT AND IT IS SCOPED TO THE VENDOR KERNEL. The blob
+# drives Rockchip's out-of-tree Mali driver through /dev/mali0; the mainline
+# `edge` track binds the same silicon with the in-tree open `panthor` DRM driver
+# and Mesa userspace instead, so `edge` overrides this list below and drops it.
+# Retiring the pin outright belongs to the vendor-kernel retirement, not here.
 firmware_packages:
   - armbian-firmware
   - libmali-valhall-g610-g24p0-wayland-gbm
@@ -142,6 +148,29 @@ variants:
     # cls_fw is tied by vermagic and package dependency to the stock vendor
     # kernel; source-built tracks carry their own kernel capability closure.
     kernel_extension_packages: []
+
+    # GPU USERSPACE FOLLOWS THE KERNEL DRIVER, and on this track that is Mesa,
+    # not the blob. Mainline binds the Mali-G610 — a Valhall CSF part — with the
+    # in-tree open `panthor` DRM driver; CONFIG_DRM_PANTHOR=m survives in the
+    # REAL resolved v7.2 config for this variant and is pinned in
+    # ../kernel/required-symbols.list so it can never be dropped in silence. Its
+    # userspace is Mesa's Gallium panthor/panfrost driver, which trixie ships as
+    # dri/panthor_dri.so + dri/panfrost_dri.so onto mesa-libgallium.
+    #
+    # DROPPING libmali HERE IS LOAD-BEARING, NOT TIDINESS. The blob is ABI-bound
+    # to Rockchip's out-of-tree vendor driver and its /dev/mali0 node, which a
+    # mainline kernel never creates (armbian/build#10320), AND it ships
+    # /etc/ld.so.conf.d/00-aarch64-mali.conf, whose `00-` prefix sorts first and
+    # captures libEGL.so.1 / libGLESv2.so.2 / libgbm.so.1 for the whole image.
+    # Installed on a mainline board it therefore does not merely fail to help —
+    # it shadows Mesa and leaves the device with no working EGL at all. Nothing
+    # falls back.
+    #
+    # armbian-firmware STAYS: it carries the WiFi/BT blobs and the GPU's own CSF
+    # firmware, which the panthor driver loads exactly as the vendor driver did.
+    # The vendor default (which keeps libmali) is unchanged and still ships.
+    firmware_packages:
+      - armbian-firmware
 
     # The BUILT package name replaces the family's vendor kernel package for
     # resolver/orchestrator purposes. The build stage validates the actual
