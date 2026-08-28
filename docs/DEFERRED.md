@@ -378,9 +378,9 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — booted on rock-5b-plus, never booted on orange-pi-5-plus
+## 9. Kernel-build-from-source variant — now booted on BOTH rk3588 boards
 
-**Status:** Partly unblocked AT THE `v7.1.7` BASE, and NOT re-measured at the current `v7.2` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and a `rock-5b-plus` was flashed and BOOTED (`7.1.7-ceralive-rk3588`); `orange-pi-5-plus` has still never booted an edge image on any pin. At `v7.2` the tree is cross-compile-proven only — no image built, flashed or booted on either board
+**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and BOTH have now been flashed and BOOTED (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. The tree has since been re-anchored to `v7.2` (see `ce4ebe7`); at `v7.2` the tree is cross-compile-proven only — no image has yet been built, flashed, or booted at this pin on either board. This todo (25) is the first attempt to close that gap on real hardware.
 **Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -404,8 +404,16 @@ and the built `/boot/config-*`. Reaching that required fixing four defects the
 `orange-pi-5-plus` has since reached the same point: after the DTB-name override
 and the staging-key fix below, `CERALIVE_BENCH_LABELS=1 build orange-pi-5-plus
 --variant edge` completes (exit 0), installs all 14 first-party `.deb`s, clears
-the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`. It, too, has never
-been booted.
+the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`.
+
+**Booted, 2026-08-26.** That artifact (`20260826T134604Z.raw`) was byte-verified by
+read-back, written to a microSD, and booted on a physical Orange Pi 5 Plus — the first
+edge boot ever recorded on this board. It reached userspace, came up on the network,
+and served the CeraUI first-run flow; the board's eMMC was not written. The USB-C
+source-role battery ran there and scored 5/6 (the sixth check is blocked on camera
+placement, not on a failure) — see the USB-C entry in `AGENTS.md` for the per-board
+verdicts. This does not promote the edge track: the deployment was bench-labelled,
+nothing was published, and production still runs the prebuilt vendor 6.1 BSP per D3.
 
 **Still deferred, and now on two axes:** the whole build/boot result above is a
 `v7.1.7` record, so the `v7.2` re-pin re-opens it — a real `--variant edge` build
@@ -575,6 +583,100 @@ the UI, require all of:
    zeroed out from under it.
 
 Capture the commands and outputs under `test-results/uplink-sharing/`.
+
+---
+
+## 12. `CERALIVE_BENCH_LABELS` has no verification against the physical target
+
+**Status:** Open technical debt; no automated safeguard exists. The flag's
+no-default design is CORRECT and stays as it is, so this item is about the
+MISSING second half, not about the flag.
+**Location:** `lib/orchestrate.sh` (`CERALIVE_BENCH_LABELS` export + the
+`stage_repart_dir` label rewrite), `mkosi/customize/postinst.d/persistence.sh`
+(the `/data` fstab entry), `mkosi/platform/boot/install-boot.sh` (the `/boot`
+fstab entry, RAUC `system.conf` slot devices, compiled `boot.scr`),
+`ci/build-hardware-candidates.sh` (`--bench-labels 0|1`),
+`tests/preflash-verify.sh` (production-label assertion),
+`AGENTS.md` KEY FACTs "Bench PARTLABEL overlay" and "A hardware candidate that
+does not STATE its PARTLABEL set…"
+
+**What is already correct, and must not be undone.** Requiring the operator to
+state the PARTLABEL set explicitly, with no default and no ambient fallback, is
+the deliberate half of this design and it rests on real incident history. The
+2026-08-10 incident recorded in `AGENTS.md` is exactly what an inherited ambient
+value produces: a `rock-edge-test` candidate built with the frozen production
+label set, run from a bench microSD on a board whose eMMC carried an unrelated
+plain-labelled image, addressing `/boot` and `rauc status mark-bad` on the wrong
+physical medium while looking entirely healthy. That is why
+`ci/build-hardware-candidates.sh` REFUSES a build with no `--bench-labels`, why
+the value is validated to be exactly `0` or `1`, why every candidate build logs
+the active mode, and why the artifact tuple records `bench_labels` +
+`partlabel_set`. None of that is in question here, and none of it should be
+softened on the strength of this item.
+
+**What is missing.** Nothing anywhere verifies the human's choice against the
+board it is about to be deployed to. The chain is: operator remembers the flag →
+build bakes an fstab → RAUC installs the bundle → the board tries to mount. Only
+the last step consults physical reality, and by then the image is already on the
+device. There is no preflight that reads the target block device's actual GPT
+PARTLABELs and compares them against the candidate image's baked-in `/etc/fstab`
+expectations. `tests/preflash-verify.sh` is not that check: it asserts the FROZEN
+production label set on a `.raw` an operator is about to flash, so a bench image
+fails it by design and a bench-labelled board is outside its scope entirely.
+RAUC is not that check either: it verifies the bundle signature and manifest and
+writes the slot, and it neither reads nor cares about in-rootfs fstab content.
+
+**The incident this entry records (2026-08-27).** A `rock-5b-plus --variant edge`
+build was made WITHOUT `CERALIVE_BENCH_LABELS=1` and deployed via `rauc install`
+to a board whose actual GPT uses the bench (`x`-prefixed) labels
+`xboot`/`xrootfs_a`/`xrootfs_b`/`xdata`, established in an earlier deployment
+specifically to avoid colliding with a production eMMC layout. The install
+SUCCEEDED cleanly: bundle verified, signature checked, slot B written. The
+failure surfaced only at boot, where systemd's
+`dev-disk-by-partlabel-boot.device` and `-data.device` units waited for devices
+that were never going to appear, because the rootfs's `/etc/fstab` asked for the
+production `boot` and `data` labels and this board's GPT has only `xboot` and
+`xdata`. `/boot` and `/data` never mounted, every dependent unit failed, and the
+board dropped to emergency mode. The cascade did not stop at mounts: the
+account's password-hardening step depends on `/data`, so it never completed and
+login was rejected with every credential, over every path. The UI RPC route and
+direct SSH were both unusable for the same reason. Recovery needed a UART serial
+console (`/dev/ttyUSB0`, 1500000 baud) to observe the emergency-mode diagnosis,
+and the actual repair came from U-Boot's own A/B bootcount safety net: slot B
+exhausted its attempts across two failed boots and the third power-cycle fell
+through to slot A, which worked because slot A had been explicitly marked good
+before the risky install.
+
+**This is a general risk, not a one-off.** Any future `edge` or bench-labelled
+build for this same board, or for any board whose GPT carries the bench label
+set, can reproduce it identically. The dangerous property is the shape of the
+failure: the build succeeds, the bundle validates, the install succeeds, and the
+first signal is an unbootable slot on a board that may be physically remote. The
+flag is one input among several on a long-running dispatch, and human memory is
+currently the only thing standing between a correct build and this outcome.
+
+**Unblock condition.** Add a preflight that cross-checks the candidate image's
+baked-in fstab expectations against the target device's real GPT before the
+image can boot from it, and make a mismatch a loud refusal rather than a silent
+write. Either placement works:
+
+1. **At RAUC install time**, as a pre-install hook on the device, which has the
+   advantage of running on the actual target with the actual bundle in hand; or
+2. **As a new build/deploy helper** in `ci/`, invoked before `rauc install`,
+   reading the target's PARTLABELs over the same channel the deployment uses.
+
+Either way the check must derive BOTH sides empirically: parse the
+`PARTLABEL=` entries out of the candidate rootfs's `/etc/fstab` (plus the RAUC
+`system.conf` slot devices, which move with the same overlay), enumerate the real
+labels present on the target block device, and refuse on any expected label that
+is absent. Deriving one side from a hardcoded list, or from the operator's stated
+intent rather than from the artifact, reintroduces the same class of error one
+layer up. Verify against both label sets, and include a non-vacuity leg proving
+the check actually fails a deliberately mismatched pair.
+
+**Not in scope here.** This entry is documentation of the gap. Implementing the
+preflight is separate work, and it must not weaken the explicit-flag requirement
+above, which remains the correct first line of defence.
 
 ---
 

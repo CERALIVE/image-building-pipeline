@@ -1,0 +1,18 @@
+[Unit]
+Description=CeraLive adaptive USB-C data-role policy
+Documentation=file:///usr/local/sbin/ceralive-typec-policy
+# udev requests this single oneshot for both Type-C port and partner add events.
+# systemd coalesces concurrent starts while the unit is activating, serializing
+# the policy outside udev; the rules themselves never block on sysfs settlement.
+After=systemd-udev-trigger.service
+# Preserve deterministic boot participation when a partner was already attached.
+# Ordering-only: neither consumer is required to exist.
+Before=cerastream.service ceralive.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-typec-policy
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

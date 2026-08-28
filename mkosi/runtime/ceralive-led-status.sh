@@ -138,7 +138,7 @@ die() { printf 'ceralive-led-status: %s\n' "$*" >&2; exit 1; }
 # active_trigger <trigger-file> — the entry the kernel marked active. The
 # attribute prints the WHOLE menu with the active entry in brackets
 # (`[none] rfkill-any heartbeat mmc0 mmc1 …`), so a naive literal compare is
-# never true — the same bracket trap ceralive-typec-source documents for
+# never true — the same bracket trap ceralive-typec-policy documents for
 # `port_type`. Falls back to the raw trimmed value if a kernel ever drops the
 # brackets, which degrades to "compare literally" rather than "always rewrite".
 active_trigger() {

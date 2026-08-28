@@ -1131,7 +1131,7 @@ SH
       install_console_font_service() { :; }
       configure_ssh_enablement() { :; }
       suppress_unusable_boot_units() { :; }
-      setup_typec_source_role() { :; }
+      setup_typec_policy() { :; }
       setup_fan_curve() { :; }
       setup_fan_kickstart() { :; }
       setup_led_status() { :; }

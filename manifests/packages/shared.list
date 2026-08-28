@@ -261,7 +261,11 @@ nftables                 # ships /usr/sbin/nft — TWO consumers, one binary.
                          # libnftables1 is already pulled by the base (NetworkManager dep), so
                          # the net add is just the nft binary + libmnl/libnftnl (~1.5 MB — see
                          # size-notes.md §7).
-conntrack-tools          # ships /usr/sbin/conntrack — the ONLY way to delete conntrack entries
+conntrack                # ships /usr/sbin/conntrack — the ONLY way to delete conntrack entries
+                         # NOTE the name: `conntrack-tools` is the SOURCE package; the BINARY
+                         # package Debian bookworm ships is `conntrack` (1:1.4.7-1+b2). Asking
+                         # for the source name fails the runtime layer with
+                         # `E: Unable to locate package conntrack-tools`.
                          # by MARK. On a hard-DOWN uplink transition the steering layer
                          # (CeraUI modules/network/uplink-steering) drains that uplink's flows
                          # in a fixed order: transition ruleset -> MARK-SCOPED `conntrack -D`

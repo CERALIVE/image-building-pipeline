@@ -86,15 +86,15 @@ Filename: pool/linux-dtb-vendor-rk35xx_26.5.1_arm64.deb
 SHA256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 
 Package: armbian-firmware
-Version: 26.8.1
+Version: 26.8.3
 Architecture: all
-Filename: pool/armbian-firmware_26.8.1_all.deb
+Filename: pool/armbian-firmware_26.8.3_all.deb
 SHA256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 Package: linux-u-boot-rock-5b-plus-vendor
-Version: 26.5.1
+Version: 26.8.3
 Architecture: arm64
-Filename: pool/linux-u-boot-rock-5b-plus-vendor_26.5.1_arm64.deb
+Filename: pool/linux-u-boot-rock-5b-plus-vendor_26.8.3_arm64.deb
 SHA256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 EOF
 
@@ -148,18 +148,20 @@ fi
 specs_text="$(bsp_download_specs "${rock_packages[@]}")"
 mapfile -t rock_specs <<<"${specs_text}"
 # Hardcoded on purpose: a pin promotion cannot land without editing this, which
-# forces the signed-index review. armbian-firmware's release number legitimately
-# differs — the archive keeps only the newest revision of that Architecture: all
-# package — so this also proves each name binds to its OWN pin, not one shared one.
+# forces the signed-index review. The two kernel packages and the u-boot/firmware
+# packages legitimately sit at DIFFERENT release numbers, because Armbian's
+# archive retains many revisions of linux-image/linux-dtb-vendor-rk35xx but keeps
+# only the newest revision of armbian-firmware and of each linux-u-boot-* package
+# — so this also proves each name binds to its OWN pin, not one shared one.
 expected_specs=(
   linux-image-vendor-rk35xx=26.5.1
   linux-dtb-vendor-rk35xx=26.5.1
-  armbian-firmware=26.8.1
-  linux-u-boot-rock-5b-plus-vendor=26.5.1
+  armbian-firmware=26.8.3
+  linux-u-boot-rock-5b-plus-vendor=26.8.3
 )
 [[ "${rock_specs[*]}" == "${expected_specs[*]}" ]]
 [[ "$(bsp_download_specs linux-u-boot-orangepi5-plus-vendor)" == \
-  'linux-u-boot-orangepi5-plus-vendor=26.5.1' ]]
+  'linux-u-boot-orangepi5-plus-vendor=26.8.3' ]]
 grep -q '^  - linux-u-boot-orangepi5-plus-vendor$' \
   "${PIPELINE_DIR}/manifests/boards/orange-pi-5-plus.yaml"
 
@@ -383,7 +385,7 @@ if auth_lookup_package "${TMP}/Packages.wrong-arch" linux-image-vendor-rk35xx 26
   printf 'wrong package architecture was accepted\n' >&2
   exit 1
 fi
-auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware 26.8.1 arm64 >/dev/null
+auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware 26.8.3 arm64 >/dev/null
 
 # Given authenticated Release metadata, when suite/architecture/component are
 # checked, then only the configured bookworm/main/arm64 identity is accepted.

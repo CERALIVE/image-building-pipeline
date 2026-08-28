@@ -129,6 +129,22 @@ Rock 5B+ boot smoke (the board this todo's other cells ran on) is closed, not a
 gap: full boot to userspace, SSH reachable, eMMC intact — `task-27-sd-boot-validation.md`
 §4 verdict table (lines 112-118).
 
+> **AMENDMENT 2026-08-26 — the `orangepi5-plus hardware-pending` gap row above is
+> now closed; the RECOMMENDATION is unchanged.** An edge `v7.1.7` image built by
+> this pipeline was booted on a physical Orange Pi 5 Plus for the first time on
+> 2026-08-26, from a bench-labelled microSD, and reached userspace and the network.
+> A USB-C source-role battery ran there and on a Rock 5B+ the same day; both boards
+> proved reboot persistence of the pinned `source` role. Read the per-board verdicts
+> in the pipeline `AGENTS.md` USB-C entry, not here.
+>
+> This closes a build-verified/hardware-pending gap. It changes **nothing** in the
+> decision above. The H.264 `encode-broken` finding is what forces `hold`, and the
+> matrix's `encode-broken` branch does not reference the Orange Pi's boot status,
+> cell (b), or cell (c) at all. Production remains `armbian_branch: vendor` (D3), no
+> image was published, and the F19 electrical item (spontaneous CC-line dropout,
+> cell (b)'s not-yet-loaded soak) remains open and untouched — role pinning decides
+> which end wins arbitration, not whether the CC lines later drop out.
+
 ---
 
 ## 3. The deterministic decision matrix, verbatim

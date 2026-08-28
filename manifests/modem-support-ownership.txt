@@ -50,6 +50,11 @@ ceralive-modem-support	/usr/share/ceralive-modem-support/legacy-etc-overrides.sh
 # Those quirk rows consume build-time board facts a generic package cannot know, so
 # they stay image-owned here and are deliberately NOT folded into the companion.
 image	/etc/udev/rules.d/99-ceralive-hardware.rules
+# 99-ceralive-typec-policy.rules is installed by the live runtime writer
+# (mkosi/customize/postinst.d/hardware.sh::setup_typec_policy) from the committed
+# mkosi/runtime/99-ceralive-typec-policy.rules artifact; it is image-owned because
+# the adaptive Type-C handoff is local policy, not a packaged modem asset.
+image	/etc/udev/rules.d/99-ceralive-typec-policy.rules
 # 78-mm-ceralive-slot-uid.rules is emitted ONLY for a board whose modem_ports
 # status is `verified` (mkosi/customize/udev.sh::generate_modem_slot_uid_rules);
 # every shipped board is `unverified`, so on today's images it is absent.

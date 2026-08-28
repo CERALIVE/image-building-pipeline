@@ -84,8 +84,10 @@ executable_lines() {
   [[ "$body" == *"ceralive-ingest-firewall.service"* ]]
 }
 
-@test "packages: conntrack-tools is present with the mark-scoped-flush rationale" {
-  run grep -Ex 'conntrack-tools[[:space:]]*(#.*)?' "$SHARED_LIST"
+@test "packages: conntrack is present with the mark-scoped-flush rationale" {
+  # The BINARY package is `conntrack`; `conntrack-tools` is only its SOURCE name and
+  # does not exist in bookworm, so asking for it fails the runtime layer outright.
+  run grep -Ex 'conntrack[[:space:]]*(#.*)?' "$SHARED_LIST"
   [ "$status" -eq 0 ]
 
   # The WHY is the whole point of the entry: `nft` removes RULES, never conntrack
@@ -97,14 +99,14 @@ executable_lines() {
   [[ "$body" == *"mark"* ]]
 }
 
-@test "packages: nftables and conntrack-tools both reach the resolved runtime set" {
+@test "packages: nftables and conntrack both reach the resolved runtime set" {
   # Arch-independent (shared.list), so both must land in the set the runtime layer
   # installs for EVERY board family. An entry that drifted into a delta list would
   # still `grep` above but would be missing on one family.
   local pkgs
   pkgs="$(resolved_runtime_packages)"
   [[ "$pkgs" == *nftables* ]]
-  [[ "$pkgs" == *conntrack-tools* ]]
+  [[ "$pkgs" == *conntrack* ]]
 }
 
 # --- (b) kernel-symbol availability matrix, BOTH tracks ----------------------

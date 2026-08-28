@@ -30,59 +30,30 @@ if ! declare -F die >/dev/null 2>&1; then
   die() { log "FATAL: $*"; exit 1; }
 fi
 
-# USB-C capture reliability: pin the Type-C connector to the SOURCE role at boot.
-#
-# /sys/class/typec/port0 is an FUSB302 TCPM connector (feac0000.i2c/i2c-4/4-0022)
-# that drives the DWC3 controller fc000000.usb through a usb-role-switch. The
-# device tree leaves it DRP (dual-role), so every fresh boot reads
-# `port_type = [dual] source sink` and the port does not CHOOSE a role — it
-# toggles, and Try.SRC/Try.SNK arbitration on the CC lines decides. The capture
-# camera (DJI Osmo Pocket 3) is dual-role too, so both ends toggle and the
-# arbitration is a real race: the TCPM trace shows the port cycling
-# `SNK_TRY_WAIT -> SRC_TRYWAIT` rather than converging. Whenever it lands on
-# SINK the SoC is running as a USB peripheral, so the camera is not "slow to be
-# detected" — its bus (usb9/9-1) is entirely absent from /sys/bus/usb/devices/.
-# That is the mechanism behind the long-standing "camera sometimes isn't detected
-# over USB-C" complaint. Writing `source` removes the arbitration outright and
-# the camera enumerated on every attempt in live testing (1-19 s to full UVC mode
-# switch), including straight after a cold power-cycle.
-#
-# It has to be a BOOT-TIME mechanism because `port_type` is live sysfs state: it
-# reverts to `dual` on every reboot, and there is no device-tree property we own
-# in this repo (the DT comes from the Armbian BSP kernel package, see the BSP
-# pin/drift contract) that would set it.
-#
-# WHY A SYSTEMD ONESHOT AND NOT A UDEV RULE. udev would sidestep the "does the
-# sysfs path exist yet" race for free, but it loses on three counts that matter
-# more here: (1) it cannot express ordering against cerastream.service — the unit
-# that actually opens the camera — whereas Before= can, and that ordering is the
-# actual requirement; (2) a failed ATTR{} write is a silent udevd log line, not a
-# failed unit, and this image's boot-config discipline is fail-loud with journal
-# evidence; (3) the obvious `ATTR{port_type}=="dual"` guard that would make such a
-# rule idempotent can NEVER match, because the kernel prints the whole menu with
-# the active entry bracketed (`[dual] source sink`) — a trap that yields a rule
-# that looks correct and does nothing. On top of that, a role change makes TCPM
-# emit KOBJ_CHANGE on the same device, so an unguarded rule re-triggers itself.
-# The service pays for this with a bounded poll (never a fixed sleep) for the
-# asynchronously-probed attribute; see the script header.
-#
-# Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
-# (same idiom as setup_boot_healthcheck / setup_provisioning), never inlined.
-# TYPEC_UNIT_DIR / TYPEC_SBIN_DIR override the install dirs for the offline test.
-setup_typec_source_role() {
-  log "pinning the USB-C connector to the Type-C source role at boot (ceralive-typec-source.service — DRP arbitration must not decide whether the camera enumerates)"
+# USB-C capture reliability: keep the connector dual-role and request the
+# role-only DR_SWAP for any settled sink/device attach.
+# udev hands port/partner add events to the same serialized systemd oneshot; the
+# enabled unit retains deterministic coldplug ordering before the media services.
+# Installed from committed artifacts under CERALIVE_RUNTIME_SRC, never inlined.
+# TYPEC_{UNIT,SBIN,RULES}_DIR override install dirs for the offline contract.
+setup_typec_policy() {
+  log "installing the adaptive USB-C data-role policy (ceralive-typec-policy.service — preserve DRP and swap any settled sink/device attach to host)"
   local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "${src}" && -f "${src}/ceralive-typec-source.sh" ]] \
-    || die "typec-source script not found: ${src}/ceralive-typec-source.sh (is \$SRCDIR/runtime mounted?)"
-  [[ -f "${src}/ceralive-typec-source.service" ]] \
-    || die "typec-source unit not found: ${src}/ceralive-typec-source.service (is \$SRCDIR/runtime mounted?)"
+  [[ -n "${src}" && -f "${src}/ceralive-typec-policy.sh" ]] \
+    || die "typec-policy script not found: ${src}/ceralive-typec-policy.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-typec-policy.service" ]] \
+    || die "typec-policy unit not found: ${src}/ceralive-typec-policy.service (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/99-ceralive-typec-policy.rules" ]] \
+    || die "typec-policy udev rules not found: ${src}/99-ceralive-typec-policy.rules (is \$SRCDIR/runtime mounted?)"
 
   local sbin_dir="${TYPEC_SBIN_DIR:-/usr/local/sbin}"
   local unit_dir="${TYPEC_UNIT_DIR:-/etc/systemd/system}"
-  install -D -m 0755 "${src}/ceralive-typec-source.sh" "${sbin_dir}/ceralive-typec-source"
-  install -D -m 0644 "${src}/ceralive-typec-source.service" "${unit_dir}/ceralive-typec-source.service"
+  local rules_dir="${TYPEC_RULES_DIR:-/etc/udev/rules.d}"
+  install -D -m 0755 "${src}/ceralive-typec-policy.sh" "${sbin_dir}/ceralive-typec-policy"
+  install -D -m 0644 "${src}/ceralive-typec-policy.service" "${unit_dir}/ceralive-typec-policy.service"
+  install -D -m 0644 "${src}/99-ceralive-typec-policy.rules" "${rules_dir}/99-ceralive-typec-policy.rules"
 
-  enable_service ceralive-typec-source.service
+  enable_service ceralive-typec-policy.service
 }
 
 # Thermal comfort: lower the pwm-fan zone's FIRST `active` trip at boot.
@@ -123,7 +94,7 @@ setup_typec_source_role() {
 # not to a manifest that would have to be kept in sync by hand.
 #
 # Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
-# (same idiom as setup_typec_source_role / setup_provisioning), never inlined.
+# (same idiom as setup_typec_policy / setup_provisioning), never inlined.
 # FAN_CURVE_UNIT_DIR / FAN_CURVE_SBIN_DIR override the install dirs for the
 # offline test.
 setup_fan_curve() {
@@ -181,7 +152,7 @@ setup_fan_curve() {
 # hardware at runtime, not to a manifest kept in sync by hand.
 #
 # Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
-# (same idiom as setup_fan_curve / setup_typec_source_role), never inlined.
+# (same idiom as setup_fan_curve / setup_typec_policy), never inlined.
 # LED_STATUS_UNIT_DIR / LED_STATUS_SBIN_DIR override the install dirs for the
 # offline test.
 setup_led_status() {
@@ -214,7 +185,7 @@ setup_led_status() {
 # THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so: the fan returns to
 # state 0 whenever the board cools below the trip and re-enters an active state
 # when it warms again, many times over a device's uptime. A boot-time oneshot like
-# setup_fan_curve/setup_led_status/setup_typec_source_role would fix only the first
+# setup_fan_curve/setup_led_status/setup_typec_policy would fix only the first
 # dead start. Type=exec + Restart=on-failure follows the repo's existing long-running
 # precedent (ceralive-rtmp-gateway.service).
 #
@@ -265,7 +236,7 @@ setup_led_status() {
 # BL31 probe-failure class, which a silent no-op would hide until a shoot.
 #
 # Installed from the committed standalone artifacts under CERALIVE_RUNTIME_SRC
-# (same idiom as setup_typec_source_role / setup_fan_curve), never inlined.
+# (same idiom as setup_typec_policy / setup_fan_curve), never inlined.
 # HDMIRX_EDID_UNIT_DIR / HDMIRX_EDID_SBIN_DIR / HDMIRX_EDID_BLOB_DIR override the
 # install dirs for the offline test.
 setup_hdmirx_edid() {

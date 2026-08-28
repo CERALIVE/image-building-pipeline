@@ -67,7 +67,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **Board-MANIFEST-gated udev quirk rows (M.2 SIM detection) — and how a `quirks:` fact reaches a subimage chroot** | LIVE: `mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` via `CERALIVE_BOARD_QUIRKS`; canonical: `mkosi/customize/quirks.sh` (NOT on the `./build` path). Guard `tests/board-quirk-udev-rules.test.sh` — see the "board-gated M.2 SIM quirk rows now SHIP" KEY FACT below |
 | **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
-| **USB-C Type-C source-role pinning (camera enumeration)** | `mkosi/customize/postinst-lib.sh` `setup_typec_source_role` + `mkosi/runtime/ceralive-typec-source.{sh,service}` — pins `/sys/class/typec/port0/port_type` to `source` before `cerastream.service`; see the KEY FACT below for the DRP root cause |
+| **USB-C Type-C adaptive role policy (camera enumeration + charging)** | `mkosi/customize/postinst-lib.sh` `setup_typec_policy` + `mkosi/runtime/ceralive-typec-policy.{sh,service}` + `mkosi/runtime/99-ceralive-typec-policy.rules` — leaves `port_type` at `dual` and requests a bounded DR_SWAP to `host` on a settled sink/device attach; see the KEY FACT below for the DRP root cause and for why the retired `port_type=source` pin is gone |
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
@@ -132,7 +132,7 @@ that layer.
 | `postinst.d/networking.sh` | `configure_networking`, `install_interface_naming` + `link_path_match`, `setup_provisioning`, `setup_ingest_firewall`, `setup_uplink_sharing_carrier` |
 | `postinst.d/hostname.sh` | `setup_hostname_service` — the Avahi-arbitrated `<hostname>.local` claim |
 | `postinst.d/services.sh` | `ensure_group`/`enable_service`/`disable_service`/`mask_service`, `configure_ntp`, `install_console_font_service`, `configure_services`, `suppress_unusable_boot_units`, `setup_boot_healthcheck`, `setup_avahi_restart`, `setup_cerastream_ordering`, `setup_rtmp_gateway` |
-| `postinst.d/hardware.sh` | `setup_typec_source_role`, `setup_fan_curve`, `setup_fan_kickstart`, `setup_led_status` |
+| `postinst.d/hardware.sh` | `setup_typec_policy`, `setup_fan_curve`, `setup_fan_kickstart`, `setup_led_status` |
 | `postinst.d/persistence.sh` | `setup_data_persistence`, `CERALIVE_NEVER_FREEZE_PKGS` + `freeze_boot_packages` |
 | `postinst.d/tls-ssh.sh` | `configure_debug_access`, `configure_ssh_enablement`, `setup_ssh_firstboot`, `setup_tls_proxy`, `setup_cert_rotation`, `setup_paseto_public_key` |
 
@@ -1884,9 +1884,10 @@ on purpose, and that is what caught the second instance nobody was looking for �
 `CONFIG_TYPEC_FUSB302=y` had been resolving to `=m` for three releases because
 FUSB302 carries `depends on DRM || DRM=n` and arm64 defconfig builds DRM as a
 module. The board proved `=m` is fine (`/sys/class/typec/port0` exists,
-`port_type` reads `dual [source] sink`, `fusb302` in `lsmod`) because udev
-auto-loads it off the OF modalias and `ceralive-typec-source.service` POLLS for
-the port to a deadline — so the fragment now declares the honest `=m`. **Do NOT
+`port_type` reads `[dual] source sink`, `fusb302` in `lsmod`) because udev
+auto-loads it off the OF modalias and the Type-C role policy is driven by udev
+`add` events rather than by a fixed boot-time settle — so the fragment now
+declares the honest `=m`. **Do NOT
 "fix" that one by setting `CONFIG_DRM=y`.**
 
 When the gate fires, do NOT silence it by deleting the line: read the symbol's
@@ -3789,79 +3790,170 @@ This is a FINDING, not a fix: rebuilding ARM Trusted Firmware with the
 SMC/interrupt-routing support `snps_hdmirx` requires is out of scope here and
 has not been attempted.
 
-**The USB-C connector MUST be pinned to the Type-C `source` role at boot — else the
-camera is sometimes not on the USB bus at all** [EXISTS — code merged-ready, NOT in
-any shipped release yet]
+**The USB-C connector stays DUAL-ROLE and the board ADAPTS to whatever the peer
+turns out to be — the old force-source pin is RETIRED, it deadlocked against the
+camera and broke charging** [EXISTS — board-validated on both RK3588 boards on
+2026-08-27; NOT in any shipped release]
 
 `/sys/class/typec/port0` is an FUSB302 TCPM connector (`feac0000.i2c/i2c-4/4-0022`)
 that drives the DWC3 controller `fc000000.usb` through a `usb-role-switch`. The
 device tree describes it as a **DRP** (dual-role) port, so every fresh boot comes up
 reading `port_type = [dual] source sink`. A DRP port does not *choose* a role — it
-toggles, and the role is settled by Try.SRC/Try.SNK arbitration on the CC lines
-against whatever is at the other end of the cable. The capture camera (DJI Osmo
-Pocket 3) is dual-role too, so **both** ends toggle and the arbitration is a genuine
-race with no stable winner: the TCPM trace
-(`/sys/kernel/debug/usb/tcpm-4-0022/log`) shows the port cycling
-`SNK_TRY_WAIT -> SRC_TRYWAIT` instead of converging.
+toggles, and Try.SRC/Try.SNK arbitration on the CC lines settles it against whatever
+is at the other end of the cable. When that arbitration lands the board in the
+**SNK/device** role, the SoC's own controller is a USB *peripheral*: an attached
+capture camera is not "slow to be detected", it is *undetectable*, because its bus
+(`usb9`/`9-1`) is entirely absent from `/sys/bus/usb/devices/`. That is the mechanism
+behind the long-standing operator complaint that the camera *sometimes* isn't
+detected over USB-C.
 
-When the race lands on **SNK/device role**, the SoC's own controller is running as a
-USB *peripheral*. The camera is then not "slow to be detected" — it is *undetectable*:
-its bus (`usb9`/`9-1`) is entirely absent from `/sys/bus/usb/devices/`. This is the
-mechanism behind the long-standing operator complaint that the camera *sometimes*
-isn't detected over USB-C. Confirmed live on a Rock 5B+ repeatedly on 2026-07-30,
-including immediately after a genuine cold power-cycle: fresh boot → `port_type`
-`[dual] …` → camera absent → `echo source > …/port_type` → camera enumerates in
-seconds, full UVC mode switch (`idProduct` 0020→0023), `/dev/video1`+`/dev/video2`
-present, `uvcvideo`/`snd-usb-audio` bound. Every single time.
+The mechanism of record is `ceralive-typec-policy` — a udev-triggered, serialized
+systemd oneshot installed by `postinst-lib.sh::setup_typec_policy` (called from
+`configure_services`) from three committed artifacts under `mkosi/runtime/`:
+`ceralive-typec-policy.sh` → `/usr/local/sbin/ceralive-typec-policy`,
+`ceralive-typec-policy.service`, and `99-ceralive-typec-policy.rules`. It inspects
+the port's CURRENT settled state and, when the port has settled `power_role=sink`
+AND `data_role=device`, requests a bounded (≤2 attempt) **DR_SWAP** to `host`. That
+is the whole of its write surface.
 
-`port_type` is **live sysfs state**: it reverts to `dual` on every reboot, and the
-device tree that would otherwise carry the default comes from the Armbian BSP kernel
-package (pinned/drift-gated here, not authored here). So the fix has to be applied at
-boot. `postinst-lib.sh::setup_typec_source_role` (called from `configure_services`)
-installs two committed standalone artifacts under `mkosi/runtime/` —
-`ceralive-typec-source.sh` → `/usr/local/sbin/ceralive-typec-source` and
-`ceralive-typec-source.service` — and enables the unit.
+**Everything else is deliberately never written**, and each omission is a decision
+backed by hardware evidence rather than caution:
 
-**Why a systemd oneshot and NOT a udev rule.** A udev rule
-(`SUBSYSTEM=="typec", KERNEL=="port0", ATTR{port_type}="source"`) would sidestep the
-"has the sysfs path been created yet" race for free, which is genuinely attractive.
-It loses on three counts that matter more here:
+- **`port_type` is NEVER written.** This is the headline change from the retired
+  mechanism. Leaving the port `dual` is what preserves the charger/power-bank *sink*
+  population — the second peer type the owner actually uses.
+- **`power_role` is NEVER written** — the script contains no PR_SWAP path at all,
+  omitted entirely rather than left dormant behind a flag. A PR_SWAP is a runtime
+  role-swap *request*, and the campaign's own pre-registered rule routes a `MIXED`
+  verdict down the same conservative branch as a flat rejection. Measured on the
+  Rock 5B+ on 2026-08-27 against a healthy (88%) DJI Osmo Pocket 3, on a patched
+  edge kernel that had already been given the PD dual-role capability bit: **4
+  attempts across the whole session — 1 clean success, 1 timeout into
+  `ERROR_RECOVERY`, 2 rejected** with `EPROTO` on the sysfs write. Capable, not
+  reliable, so the shipped policy never asks.
+- **`preferred_role` is NEVER written.** The DT's own Try preference is the board's
+  to state, and (see the charging section below) it is exactly the knob that made
+  the difference — but as a device-tree fact, not a runtime write.
 
-1. **It cannot express the ordering that is the actual requirement.** The fix must be
-   in place before `cerastream.service` opens the capture device; a unit says
-   `Before=cerastream.service`, a udev rule can only hope the coldplug wins the race.
-2. **It fails silently.** A rejected `ATTR{}` write is a `udevd` log line, not a
-   failed unit — the opposite of this image's fail-loud, journal-evidence discipline.
-3. **The obvious idempotency guard cannot work, and looks like it does.** The kernel
-   prints the *whole menu* with the active entry bracketed — `[dual] source sink` at
-   rest, `dual [source] sink` once pinned — so `ATTR{port_type}=="dual"` never
-   matches and the rule silently does nothing. (Same trap for a naive
-   `[ "$(cat port_type)" = source ]` in a script; the shipped script parses the
-   bracket.) On top of that a role change makes TCPM emit `KOBJ_CHANGE` on the same
-   device, so an unguarded rule re-triggers itself.
+**Why udev + a policy oneshot now WINS the argument that the boot oneshot used to
+win.** The retired `ceralive-typec-source.service` was a plain boot oneshot, and the
+reasoning that chose it over a udev rule was sound *for a one-shot write of a static
+attribute*: a unit can say `Before=cerastream.service` where a rule can only hope
+coldplug wins the race, a rejected `ATTR{}` write is a log line rather than a failed
+unit, and the kernel prints `port_type` as the whole bracketed menu (`[dual] source
+sink`), so the obvious `ATTR{port_type}=="dual"` idempotency guard never matches and
+silently does nothing. All three of those observations remain true and the bracket
+parse is still carried by the shipped script. What retired the conclusion is that
+the requirement changed from *write one attribute once* to *react to an attach*:
 
-The unit pays for that choice by owning the probe race itself: `port0` is created by
-an **asynchronous** fusb302/TCPM probe, so the script **polls to a deadline** (30 s
-default, `CERALIVE_TYPEC_WAIT`) — never a fixed settle constant. A board with no
-Type-C class at all (x86) and a port that never appears are both clean no-ops; only a
-role change that is accepted but does not take (read-back mismatch) fails loudly.
+1. **A cold boot with the camera already attached settles BEFORE the boot oneshot
+   would run.** There is no transition left to observe — the port is simply already
+   sink/device by the time userspace is up. That exact scenario failed on
+   2026-08-26 and is arm (1) of the validation below; a state-inspecting,
+   udev-triggered policy passes it because it reads current state instead of
+   assuming a fresh event.
+2. **The peer is Rp-only, so forcing source cannot form an attachment at all.**
+   Under a forced-source port the Osmo never presents Rd: **3/3 physical replicates
+   scored `RD_ABSENT` — no attach formed** — each cycle hardware-confirmed by a real
+   IRQ transition, so none was a stale read. Two Rp-presenting ends is an Rp↔Rp
+   deadlock, and no amount of ordering fixes it.
 
-Scope is deliberately ONE attribute on ONE connector: `port0/port_type` ← `source`.
-Do **NOT** set `sink` or leave `dual` (`dual` is the broken default; both were settled
-by live hardware testing), and do **NOT** extend this to any `dwc3` platform-driver
-unbind/rebind — doing that by hand wedges a kernel worker on this board (separate,
-confirmed defect). Guards: `runtime-services.bats` §18d "typec source: …" — install+enable,
-`port_type`→`source` (rejecting `sink`/`dual`), `Before=cerastream.service`
-ordering-only, the `[dual]`→`source` transition, idempotency against the bracketed
-`dual [source] sink`, the bounded wait, fail-loud read-back, fail-closed missing
-source, and the `configure_services` wiring. `setup_typec_source_role` is registered
-in `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
+The unit still owns the asynchronous-probe race the old one did: `port0` is created
+by an asynchronous fusb302/TCPM probe, so a board with no Type-C class at all (x86)
+and a port that never appears are both clean no-ops. The udev rules match
+`ACTION=="add"` only, on the partner and the port, and hand off via `TAG+="systemd"`
++ `SYSTEMD_WANTS+=` to a single serialized oneshot — no blocking `RUN=` payload, and
+no `ACTION=="change"`, because a DR_SWAP emits its own `KOBJ_CHANGE` on the same
+device and an unguarded rule would retrigger itself forever. The unit keeps the
+retired one's `Before=cerastream.service ceralive.service` ordering.
 
-**Not yet in a shipped release.** This is code-complete and merged-ready only; it has
-not been through this repo's build/flash/release cycle, so no published image carries
-it. The persistent version still needs the normal on-hardware board-proof (confirm a
-reboot leaves `port_type` pinned and the camera enumerates exactly as the live sysfs
-poke did) before it is claimed as shipped.
+**Do NOT re-gate the DR_SWAP on identifying the camera.** An early revision required
+seeing `idVendor 2ca3` on the USB bus before swapping, which is a circular
+dependency: the camera can only appear on the board's bus *after* `data_role`
+becomes host. It could never succeed for the real camera, and it was found and
+removed during live validation. A charge-only peer's refusal is already safely
+bounded by the 2-attempt cap — proven by arm (5) below, where a plain PD charger's
+swap was refused with `Operation not supported` and nothing else was touched.
+
+**Validation status, per board, 2026-08-27** (live migration off the legacy
+mechanism, then per-arm verdicts; both boards on locally-built edge kernels, nothing
+published):
+
+| Arm | Result |
+|---|---|
+| (1) cold boot with camera attached from power-on | **PASS** — `data_role` swapped automatically with no manual command; `v4l2-ctl --list-devices` shows `DJIPocket3: OsmoPocket3` as a real capture device. The exact 2026-08-26 failure, now clean. |
+| (2) hot-plug camera on a live board | **PASS** — `DR_SWAP attempt 1/2 succeeded: port0 data_role=host`; `/dev/video6`+`/dev/video7` bound to `uvcvideo`. |
+| (3) reboot persistence | **PASS** — `port_type` read `[dual] source sink` immediately post-boot and stayed there through the swap; never contaminated by a force-source write. |
+| (4) charging truth, Rock 5B+ | **RECORDED** — see the charging section below. |
+| (5) charger/power-bank peer | **PASS** — board attached as SINK (`power_role: source [sink]`), the bounded DR_SWAP was refused `Operation not supported` twice and stopped, and `power_role` was never a write target. Dual use preserved with **no peer-type special-casing** in the script. |
+| (6) Orange Pi 5 Plus re-check | **PASS** — migration clean, `port_type` `[dual]`, and the port settled `power_role=source data_role=host` on first attach with **no swap needed at all** (`no data-role swap needed` in the journal). |
+
+**Charging is a DEVICE-TREE question, not a policy question — and the answer is
+per-board and edge-kernel-scoped.** Arms (4) and (6) are the same camera, the same
+policy script (byte-identical sha256), and opposite outcomes, which isolates the
+variable to the boards' DT `try-power-role`:
+
+- **Orange Pi 5 Plus** carries `try-power-role = "source"` as its own pre-existing
+  mainline default, unrelated to and unchanged by CeraLive. Natural DRP arbitration
+  lands it source/host on first attach and charging worked immediately and reliably
+  (operator-confirmed, 2026-08-27, kernel `7.1.7-ceralive-rk3588`). No software
+  change was needed on that board.
+- **Rock 5B+** shipped `try-power-role = "sink"`. With that value, the same camera
+  landed mostly sink — no charge, with repeated `SNK_WAIT_CAPABILITIES_TIMEOUT` and
+  no completed PD contract. That is the honest `MIXED`/no-in-band-charging outcome
+  recorded in arm (4), and it is what an **unpatched** Rock does.
+- **With the `try-power-role = "source"` edge-kernel patch applied** (Rock 5B+ only,
+  mainline v7.2 series, `rk3588-kernel-patches` patch `0029`), the Rock's behaviour
+  changed measurably. After a RAUC deploy of the patched kernel on 2026-08-27,
+  `/sys/class/typec/port0/preferred_role` read `source` where it read `sink` before,
+  and **every observed attach cycle landed the board as source with zero failures**:
+  one fully instrumented cycle captured a textbook-clean PD source contract
+  (`TOGGLING → SRC_ATTACH_WAIT → SRC_ATTACHED`, `VBUS on`, camera requesting
+  `5000 mV, 3000 mA for 2000/2000 mA`, `SRC_NEGOTIATE_CAPABILITIES →
+  SRC_TRANSITION_SUPPLY → SRC_READY` with no reset, timeout or reject, and the
+  `vbus5v0_typec` regulator `enabled`), followed by multiple operator-driven
+  unplug/replug cycles in which every `PRESENT` sample read `power_role: [source]
+  sink` / `data_role: [host] device`.
+
+Read that last bullet with its scope attached, because the scope is most of the
+claim. It is a **qualitative multi-cycle improvement, not a numeric reliability
+guarantee**; it is **Rock 5B+ only**; it requires the **patched EDGE (mainline v7.2)
+kernel** and the **vendor 6.1 production track gains none of it**; and it is a
+soft Try.SRC *preference* that still completes the normal CC-toggle handshake — the
+opposite of the hard `port_type=source` pin that broke attachment 3/3. No delivered
+wattage figure exists for either board: there is no VBUS current-sense part on the
+i2c bus and the FUSB302 has no VBUS ADC, so the `tcpm_source_psy_*` hwmon
+`curr1_input`/`in0_input` nodes read `0` even mid-contract. The proof here is
+protocol-level throughout — VBUS enabled, PD contract accepted to `SRC_READY`,
+regulator enabled — and `tcpm-source-psy-*/online` reads `0` while sourcing and is
+never asserted as sourcing proof.
+
+Guards: `runtime-services.bats` §18d "typec policy: …" (10 cases) — installer +
+enablement with the legacy script/unit asserted ABSENT, the udev handoff (both
+`typec_partner` and `typec_port` add events, exactly two `SYSTEMD_WANTS+=`, zero
+`RUN=`, zero `ACTION=="change"`), `Before=` ordering onto both media consumers, the
+settled sink/device coldplug swap (driven with NO camera fixture present, which is
+what disproves the retired camera-ID gate), bracket-parse idempotency against an
+already-`[host]` port, the bounded two-attempt retry, the **no-write-capability**
+assertion on `port_type`/`power_role`/`preferred_role`, absent-partner and
+unsettled-role no-ops, fail-closed missing source, and the `configure_services`
+wiring. `setup_typec_policy` is registered in `postinst-drift-check.sh`'s
+`CONSOLIDATED_FUNCS`. `tests/realhw-typec-matrix.sh` is the hardware-only drill that
+produced the peer/DR_SWAP/PR_SWAP/charge verdicts above; it is never run by CI.
+
+**What is still open, and what this work does NOT touch.** The **F19** electrical
+item — spontaneous CC-line dropout, which can escalate into a full xHCI
+host-controller teardown (`xhci-hcd.N.auto: remove, state 4` → `USB disconnect` →
+`USB bus N deregistered`) — remains a **separate, still-open, never-root-caused**
+problem. It was independently confirmed on this board class before any of this work,
+firing spontaneously even at complete idle. On 2026-08-27 it was observed for the
+first time *correlated* with a PR_SWAP write attempt, 2 of 2; whether the
+role-transition transient causes the dropout or the timing is coincidental is **not
+established** and is recorded as an open finding, not a conclusion. Role policy is
+about which end wins arbitration; it does not and cannot fix CC lines dropping out
+later. Separately, none of this changes the production kernel track: the shipped
+image still runs the prebuilt vendor 6.1 BSP, decision D3 stands exactly as written,
+and `docs/kernel-track-decision.md` is unaffected in substance.
 
 **The `pwm-fan` cooling device is never ASKED to run below 55 °C — so the fix is to
 move ONE trip point, not to take over the fan** [EXISTS — code merged-ready, NOT in
@@ -4027,7 +4119,7 @@ never be a thermal risk, while erring short silently fails to fix anything. The 
 is one named, band-clamped constant (100-5000 ms) so it can be retuned on the bench.
 
 **THE FIRST RESIDENT UNIT IN THIS FAMILY, and necessarily so.** Unlike
-`ceralive-fan-curve` / `-led-status` / `-typec-source`, this cannot be a boot
+`ceralive-fan-curve` / `-led-status` / `-typec-policy`, this cannot be a boot
 oneshot: the fan drops back to state 0 whenever the board cools below the trip and
 re-enters an active state when it warms again, many times over a device's uptime, and
 **every** re-entry is a fresh dead start. `Type=exec` + `Restart=on-failure` +
@@ -4174,7 +4266,7 @@ whether from a DT `default-trigger`, a previous run, or an operator. That is
 both the right policy (an LED that already means something keeps meaning it) and
 what makes the unit idempotent across reboots and A/B slot swaps. Reading the
 current trigger goes through the same bracket parse
-`ceralive-typec-source` documents for `port_type`: the attribute prints the
+`ceralive-typec-policy` documents for `port_type`: the attribute prints the
 WHOLE menu with the active entry bracketed (`[none] rfkill-any heartbeat mmc0
 mmc1 …`), so a naive literal compare is never true.
 
