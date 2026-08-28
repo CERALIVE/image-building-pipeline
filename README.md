@@ -194,9 +194,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build rock-5b-plus` | production path; the kernel the fleet actually runs |
 | `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
-| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The exact pinned Trixie artifact was not built or booted, and product streaming fails on the userspace ABI mismatch. Still a bench/insurance track |
+| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted and the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39. |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The exact pinned Trixie artifact was not built or booted, product streaming fails on the userspace ABI mismatch, and HDMI video/audio remained N/A without a source |
+| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted, the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39, and HDMI video/audio remained N/A without a source. |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -993,16 +993,16 @@ retire-on-merge status is tracked — a thin index, not a restatement — lives 
 
 ## Kernel Currency Watch
 
-The image is locked to the **vendor 6.1 BSP + Rockchip MPP** for H.265 encoding.
-This decision is recorded with a 7-way evidence summary and two precise revisit
-triggers (a 6.12+ vendor BSP with MPP support, or mainline landing a frozen V4L2
-stateless H.265 encode uAPI + VEPU580 driver) in
+The Trixie migration may proceed to **mainline 7.2 + Rockchip MPP**. Both
+supported boards proved the existing MPP userspace ABI against the mainline
+kernel, and a real Debian 13 arm64 install resolved the exact URL/SHA-pinned
+`.deb`s unchanged. The explicit W3/W4 kill-switch verdict is **PROCEED** in
 [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
 
-The MPP/GPU **userspace** that makes the vendor kernel's HW encoders reachable from
-GStreamer (`gstreamer1.0-rockchip1` + `librockchip-mpp1` + `librga2`, plus the
-Mali-G610 `libmali` blob) is not in the Armbian feed. It is baked from exact pinned
-upstream release assets, verified by SHA-256, in
+The MPP **userspace** that makes either kernel track's HW encoders reachable from
+GStreamer (`gstreamer1.0-rockchip1` + `librockchip-mpp1` + `librga2`) is not in
+Debian or the Armbian feed. It is baked from exact pinned upstream release assets,
+verified by SHA-256, in
 [`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)
 (fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
 

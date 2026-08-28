@@ -1657,8 +1657,9 @@ occurrence of each of those `make` calls in the file.
   installations reporting `7.2.0-ceralive-rk3588` and passed direct software and
   MPP encode checks. Those installations are Bookworm builds whose provenance was
   not established as the exact pinned Trixie output: candidate builds stopped at
-  the authenticated apt input gate and produced no artifact, and product streaming
-  fails on the resulting userspace ABI mismatch. No pipeline-produced v7.2 image
+  the authenticated apt input gate and produced no artifact, and the installed
+  pre-fix cerastream binary requires GLIBC 2.39 unavailable on Bookworm. The MPP
+  userspace ABI itself is cleared by todo 17. No pipeline-produced v7.2 image
   has therefore been qualified. `docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
@@ -2727,11 +2728,22 @@ the reason it claims.
 
 The RK3588 GPU/video **userspace** (Mali-G610 blob, Rockchip MPP encode/decode lib,
 RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev config) is NOT
-in the Armbian bookworm arm64 feed, so it is baked from **exact upstream release-asset
+in Debian or the Armbian arm64 feed, so it is baked from **exact upstream release-asset
 URLs verified by SHA-256** — the same fail-closed, no-fallback discipline as the BSP
 fetch, but URL-pinned (a pinned URL + SHA-256 needs no rotating apt index or GPG trust
 root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` register —
 proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
+
+**The MPP subset is mainline-7.2/Trixie-compatible; the source pool name is not a
+suite constraint.** Todo 17 inventoried both supported boards while they ran
+`7.2.0-ceralive-rk3588`: each had exactly `gstreamer1.0-rockchip1=1.14-4`,
+`librockchip-mpp1=1.5.0-1` and `librga2=2.2.0-1`; the plugin's `ldd` resolved
+`librockchip_mpp.so.1` and `librga.so.2`, `gst-inspect-1.0 mpph264enc` succeeded,
+and each board completed todo 16's direct 60-second encode. Separately, a real
+Debian 13 arm64 index contained none of those package names (expected for this
+URL-pinned family) but resolved and installed the exact three `.deb`s against
+GStreamer 1.26.2 with no missing dependency. Kill-switch verdict: **PROCEED**;
+no replacement userspace build is needed.
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Five packages:

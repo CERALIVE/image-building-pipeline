@@ -48,15 +48,19 @@
 # superset of gbm and also covers direct-DRM cog). g24p0 = RK3588's G610 revision.
 libmali-valhall-g610-g24p0-wayland-gbm  libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb  533fc920220f36e0614e0e4808eabea55976c5af84f9b4996971862d183d2b62  https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb
 
-# --- Rockchip MPP encode/decode library (tsukumijima) — the runtime the GStreamer plugin dlopens ---
+# --- Rockchip MPP encode/decode library (tsukumijima) — mainline 7.2 + Trixie ABI-proven ---
+# Retained unchanged after both boards encoded for 60 s on mainline 7.2 and a real
+# Debian 13 arm64 install resolved the exact URL-pinned set against GStreamer 1.26.2.
 librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp1_1.5.0-1_arm64.deb
 
 # --- Runtime multimedia udev/config (tsukumijima) ---
 rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb
 
-# --- GStreamer MPP plugin + RGA 2D accelerator (radxa rk3588s2-bookworm pool) ---
+# --- GStreamer MPP plugin + RGA 2D accelerator (Radxa bookworm assets, Trixie-compatible) ---
 # tsukumijima publishes NO gst-rockchip build, so the plugin must come from radxa;
 # it links librga2, so the PROVEN, ABI-matched gst<->rga pair is kept together on
-# radxa rather than splitting rga to tsukumijima's same-version build.
+# radxa rather than splitting rga to tsukumijima's same-version build. The source
+# pool name is provenance, not a target-suite constraint: Trixie resolves the
+# exact pair unchanged, including librockchip_mpp.so.1 and librga.so.2.
 gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
 librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb
