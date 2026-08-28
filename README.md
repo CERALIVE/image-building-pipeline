@@ -194,9 +194,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 |---|---|---|---|
 | `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build rock-5b-plus` | production path; the kernel the fleet actually runs |
 | `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
-| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | compiled and booted **at the `v7.1.7` pin**, where MPP hardware video encode was board-confirmed on this board only (see the pipeline `AGENTS.md` "MPP hardware video encode" entry). At the current `v7.2` pin the tree is compile-proven and no board has booted it — board evidence PENDING. Still a bench/insurance track |
+| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The exact pinned Trixie artifact was not built or booted, and product streaming fails on the userspace ABI mismatch. Still a bench/insurance track |
 | `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | compiled and passed all four validation axes at the `v7.1.7` pin; never booted on any pin, so the MPP result above is unconfirmed on this board |
+| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The exact pinned Trixie artifact was not built or booted, product streaming fails on the userspace ABI mismatch, and HDMI video/audio remained N/A without a source |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -976,9 +976,11 @@ survive fails the build as a stale exception, and neither shipped board's adapte
 is on the list — both are in-tree and both pass the gate.
 
 **With no variant selected the resolved production build is byte-identical to
-before this existed**, pinned by committed golden fixtures. Nothing produced by
-this stage has been compiled or booted yet, and it does not reopen the vendor-BSP
-decision. Full detail:
+before this existed**, pinned by committed golden fixtures. The source-build
+stage is compile-proven; v7.2 has partial kernel-on-silicon evidence from existing
+Bookworm installations, but the exact pinned Trixie artifacts have not been built
+or booted and the measured candidate verdict remains FAIL. This does not reopen
+the vendor-BSP decision. Full detail:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md);
 gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md) item 9.
 

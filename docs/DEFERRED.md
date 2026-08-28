@@ -396,9 +396,9 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — now booted on BOTH rk3588 boards
+## 9. Kernel-build-from-source variant — partial v7.2 board evidence, exact image still deferred
 
-**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and BOTH have now been flashed and BOOTED (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. The tree has since been re-anchored to `v7.2` (see `ce4ebe7`); at `v7.2` the tree is cross-compile-proven only — no image has yet been built, flashed, or booted at this pin on either board. This todo (25) is the first attempt to close that gap on real hardware.
+**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all first-party packages installed), and BOTH were flashed and booted (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. At `v7.2`, both boards have now booted existing Bookworm installations reporting `7.2.0-ceralive-rk3588` and passed direct software/MPP encode checks. This is partial kernel-on-silicon evidence only: the exact pinned Trixie candidate auto-degraded to plan-only mode at the authenticated apt input gate, produced no artifact, and was neither flashed nor installed. Product streaming also fails on both Bookworm installations because `cerastream` requires unavailable `GLIBC_2.39`.
 **Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -415,7 +415,7 @@ are gated by tests.
 `validate_built_kernel_deb` axes, installed the board DTB to
 `/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produced a flashable `.raw` plus a
 signed `.raucb`. (At the current pin the derived package name is
-`linux-image-7.2.0-ceralive-rk3588`; that build has not been run.) The two builds agreed on every package version, every rootfs path
+`linux-image-7.2.0-ceralive-rk3588`; an exact current candidate build has not completed.) The two builds agreed on every package version, every rootfs path
 and the built `/boot/config-*`. Reaching that required fixing four defects the
 `DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
 
@@ -433,19 +433,23 @@ placement, not on a failure) — see the USB-C entry in `AGENTS.md` for the per-
 verdicts. This does not promote the edge track: the deployment was bench-labelled,
 nothing was published, and production still runs the prebuilt vendor 6.1 BSP per D3.
 
-**Still deferred, and now on two axes:** the whole build/boot result above is a
-`v7.1.7` record, so the `v7.2` re-pin re-opens it — a real `--variant edge` build
-and a board boot are both outstanding at the current pin. And the PR gate still
-runs `DRY_RUN=1` (plan only — no network, container or compiler). A real build is a multi-GB clone plus a long cross-compile,
-so running it in the PR gate remains a separate, deliberate CI-budget decision.
+**Still deferred, on artifact and product axes:** the pipeline-produced build/boot
+result above remains a `v7.1.7` record. The bounded v7.2 checks prove that both
+boards can exercise MPP under a kernel with the expected release string; they do
+not prove the exact manifest pins, Trixie rootfs, bundle, or product stream. A real
+authenticated `--variant edge` build and boot are still outstanding at the current
+pin. The PR gate also still runs `DRY_RUN=1` (plan only — no network, container or
+compiler). A real build is a multi-GB clone plus a long cross-compile, so running it
+in the PR gate remains a separate, deliberate CI-budget decision.
 
 Two consequences worth stating plainly:
 
 * The **defconfig fragment** (`manifests/kernel/rk3588-edge.fragment`) now
   demonstrably resolves and compiles (re-verified at `v7.2`: 169/169 declared
-  symbols survive, 0 forbidden violations), but it is still reviewed intent rather
-  than a validated result: no symbol in it has been proven necessary *or*
-  sufficient **on hardware**, at either base.
+  symbols survive, 0 forbidden violations). Direct v7.2 MPP encode on both boards
+  is supporting hardware evidence, but the fragment remains unqualified as the
+  exact current image because artifact provenance and the Trixie userspace were not
+  exercised.
 * **A board's DTB filename comes from whichever kernel tree built it, and the two
   trees need not agree — RESOLVED.** Since the board wins the merge
   last, the **board** now declares the per-variant name via `variant_overrides:`
@@ -487,10 +491,13 @@ stager driven against every shipped board manifest with that manifest's real
 up, plus a non-vacuity assertion that at least one shipped board really does have
 stem ≠ `board_id`.
 
-**Unblock condition:** flash and boot a `--variant edge` image on a physical
-RK3588 board. **D3 is not reopened by any of this** — the shipped kernel remains
-the Armbian vendor BSP; see `docs/kernel-currency-watch.md` for the two
-triggers that would revisit it.
+**Unblock condition:** produce, provenance-check, flash or safely install, and boot
+the exact pinned Trixie `--variant edge` artifact on both physical RK3588 boards;
+restore a working product-level `cerastream` start → 60 seconds → stop cycle;
+clear the Rock Bluetooth/MMC drill failures; and exercise HDMI video plus audio
+with a known-good source. **D3 is not reopened by any of this** — the shipped
+kernel remains the Armbian vendor BSP; see `docs/kernel-currency-watch.md` for the
+two triggers that would revisit it.
 
 ---
 

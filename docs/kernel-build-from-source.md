@@ -110,14 +110,15 @@ was the nineteen-patch `v7.1.7`-anchored series the Wave-8 hardware candidates
 were built from, and `acb519c101fefa31f51300779f3a139bcabf6a1c` before it was the
 nine-patch commit that landed on `main` from PR #4.
 
-**HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP.** Every board result this series
-accumulated — the Rock 5B+ MPP hardware-encode confirmation, the rkvenc
-fault-injection receipts, the 4K HDMI-RX lock behind `0027` — was obtained
-against the `v7.1.7` base. Nothing has been built, flashed or booted at `v7.2` on
-either board. The `v7.2` evidence is a cross-compile of this exact tree (22/22
-`git am` clean, `Image` + modules + dtbs, zero errors) plus the config-survival
-gate. Read this pin as **compile-proven and hardware-UNVALIDATED** until a board
-says otherwise.
+**HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP OR AN UNPROVEN ARTIFACT
+BOUNDARY.** Both boards have now booted installations reporting
+`7.2.0-ceralive-rk3588` and passed direct MPP encode checks. Those installations
+are Bookworm builds whose provenance was not established as this exact pinned
+Trixie output. Attempts to build that candidate stopped at the authenticated apt
+input gate and produced no artifact; product streaming also fails on both boards
+because their installed `cerastream` requires unavailable `GLIBC_2.39`. Read this
+pin as **compile-proven with partial v7.2 kernel-on-silicon evidence, but exact-image
+UNQUALIFIED**. The scoped results and remaining blockers are in §7.
 
 **Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
 and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer
@@ -769,21 +770,35 @@ fully-honoured one, and the build-stage wiring order).
 
 ## 7. Known gaps — read before using this
 
-Honest status, and the base it is scoped to matters: **at the `v7.1.7` pin,
-`rock-5b-plus --variant edge` was built end to end** — a real cross-compile
-producing `linux-image-7.1.7-ceralive-rk3588` and a flashable `.raw` — **and
-flashed and booted on a real Rock 5B+.** That run cleared the MPP hardware-encode
-KNOWN ISSUE (see the pipeline `AGENTS.md`) and confirmed the capture/encode
-symbols on silicon AT THAT BASE. It is ONE board: `orange-pi-5-plus` has still
-never booted an edge image, so every per-board claim below stands.
+Honest status requires separating kernel-on-silicon evidence from exact-image
+qualification:
 
-**At the current `v7.2` pin none of that has been repeated.** The manifest
-derives `linux-image-7.2.0-ceralive-rk3588`, the patch series applies clean and
-cross-compiles, and the config-survival/forbidden/required gates pass against the
-v7.2 resolved `.config` — but no pipeline `--variant edge` image has been
-produced, flashed or booted at `v7.2` on either board. Hardware evidence does not
-cross a base bump; treat every board result in this document as a `v7.1.7`
-record.
+- **At the `v7.1.7` pin, `rock-5b-plus --variant edge` was built end to end** — a
+  real cross-compile producing `linux-image-7.1.7-ceralive-rk3588` and a flashable
+  `.raw` — **and flashed and booted on a real Rock 5B+.** That run cleared the MPP
+  hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) at that base.
+- **At `v7.2`, both Rock 5B+ and Orange Pi 5 Plus have booted installations
+  reporting `7.2.0-ceralive-rk3588`.** Direct 60-second software and MPP
+  GStreamer encodes exited cleanly on both. The Orange candidate drill passed
+  11/11 commands. Rock passed 9/11: Bluetooth exposed no controller, and its MMC
+  leg failed closed because the current boot journal had no MMC signatures even
+  though its eMMC completed the bounded read.
+- **Those results do not qualify the pinned Trixie image.** Both reachable
+  installations run Debian 12 Bookworm. Candidate builds auto-degraded to
+  plan-only mode because the apt public signing key was unavailable, so no exact
+  image or RAUC bundle existed to install. No flash or OTA was attempted.
+- **The required product stream leg fails on both boards.** The installed
+  `cerastream` binary requires `GLIBC_2.39`, unavailable on Bookworm, so
+  `cerastream.service` cannot start. Direct encoder passes do not substitute for
+  the product-level start → 60 seconds → clean stop sequence.
+- **HDMI-RX remains stimulus-gated.** Both boards expose the receiver, but no
+  HDMI source was attached; timing lock and actual HDMI audio capture are N/A,
+  not passes.
+
+The v7.2 production verdict is therefore **FAIL**. Build and boot the exact pinned
+Trixie artifacts, restore product-service ABI compatibility, repeat the Rock
+drill without its two failures, and run HDMI video/audio with a known-good source
+before reopening a kernel flip or release.
 
 **`vendor-patched` status:** the kernel `.deb` builds and validates on all four
 axes; the series applies cleanly with `git am` against the pinned commit; the
