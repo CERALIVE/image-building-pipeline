@@ -257,8 +257,8 @@ load manifest-helpers
 
 @test "bsp drift: matching version+hash is no-drift (exit 0, no 'BSP drift' banner)" {
   local base="$BATS_TEST_TMPDIR/baseline-match.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" != *"BSP drift"* ]]
   [[ "$output" == *"matches known-good baseline"* ]]
@@ -266,8 +266,8 @@ load manifest-helpers
 
 @test "bsp drift: a version mismatch fires an advisory 'BSP drift' warning (exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-ver.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   [[ "$output" == *"BSP drift"* ]]
@@ -275,8 +275,8 @@ load manifest-helpers
 
 @test "bsp drift: SAME version but DIFFERENT content hash still drifts (content-hash compare, exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-hash.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_B"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_B"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   # the re-spin note proves the guard compared the hash, not just the version
@@ -286,19 +286,19 @@ load manifest-helpers
 @test "bsp drift: first run with NO baseline seeds it, notes it, exits 0" {
   local base="$BATS_TEST_TMPDIR/seed-me.json"
   [ ! -f "$base" ]
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   [ -f "$base" ]
   run cat "$base"
-  [[ "$output" == *'"version": "6.1.0-vendor"'* ]]
+  [[ "$output" == *'"version": "6.1.0-generic"'* ]]
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
 
 @test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
   local base="$BATS_TEST_TMPDIR/scaffold.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"
@@ -307,8 +307,8 @@ load manifest-helpers
 
 @test "bsp drift (C6b): default (STRICT unset) with drift warns and exits 0" {
   local base="$BATS_TEST_TMPDIR/baseline-default.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"BSP drift"* ]]
   [[ "$output" == *"advisory — build continues"* ]]
@@ -316,8 +316,8 @@ load manifest-helpers
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with drift fails (non-zero)" {
   local base="$BATS_TEST_TMPDIR/baseline-strict.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -ne 0 ]
   [[ "$output" == *"BSP drift"* ]]
   [[ "$output" == *"BSP_DRIFT_STRICT=1"* ]]
@@ -325,18 +325,18 @@ load manifest-helpers
 
 @test "bsp drift (C6b): no drift is exit 0 in BOTH default and strict modes" {
   local base="$BATS_TEST_TMPDIR/baseline-match-modes.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"matches known-good baseline"* ]]
 }
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
   local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"
@@ -345,17 +345,23 @@ load manifest-helpers
 
 @test "bsp provenance: bsp_write_json emits valid JSON with schema_version + 64-hex sha256" {
   local out="$BATS_TEST_TMPDIR/prov/bsp-provenance.json"
-  run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [ -f "$out" ]
   # parses as JSON and carries the expected shape
-  run python3 -c "import json,sys; d=json.load(open('$out')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert len(d['sha256'])==64; print('JSON-OK')"
+  run python3 -c "import json,sys; d=json.load(open('$out')); assert d['schema_version']==1; assert d['package']=='linux-image-generic-rk35xx'; assert len(d['sha256'])==64; print('JSON-OK')"
   [ "$status" -eq 0 ]
   [[ "$output" == *"JSON-OK"* ]]
 }
 
 @test "bsp provenance: the committed baseline is valid JSON and carries a valid seed state" {
-  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; v=d.get('version'); s=d.get('sha256'); assert (v is None and s is None) or (isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
+  # It is UNSEEDED (all three fields null) and that is the correct state: the
+  # drift-guard's subject is a PREBUILT kernel .deb's bytes, and no family this
+  # pipeline ships fetches one any more — rk3588 builds from pinned source and
+  # x86_64 has no Armbian BSP at all. bsp_drift_check treats a null version/sha
+  # as "first run" and seeds it, so the mechanism stays armed for a future family
+  # without pinning a package that is never downloaded.
+  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; p=d.get('package'); v=d.get('version'); s=d.get('sha256'); assert (p is None and v is None and s is None) or (isinstance(p,str) and isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
   [ "$status" -eq 0 ]
   [[ "$output" == *"BASELINE-OK"* ]]
 }
@@ -421,7 +427,7 @@ PY
 # ===========================================================================
 
 @test "wwan: all six modules present in a kernel .deb (happy path, mix of =m and =y)" {
-  local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-vendor-rk35xx.deb"
+  local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-generic-rk35xx.deb"
   mkdir -p "$stage"
   wwan_stage_six "$stage"
   make_kernel_deb "$stage" "$deb"
@@ -441,7 +447,7 @@ PY
   local root="$BATS_TEST_TMPDIR/tree"
   wwan_stage_six "$root"
   # drop cdc_ncm from modules.builtin (option stays) so exactly one is absent
-  printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-vendor/modules.builtin"
+  printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-generic/modules.builtin"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"WWAN module MISSING: cdc_ncm"* ]]
@@ -459,7 +465,7 @@ PY
 }
 
 @test "wwan: bare 'option' decoys do NOT satisfy the option module (false-positive guard)" {
-  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-vendor"
+  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-generic"
   wwan_stage_six "$root"
   local md="$root/lib/modules/$kv"
   # remove the only legitimate option signal (built-in), keep cdc_ncm built-in
@@ -475,33 +481,31 @@ PY
   [[ "$output" == *"5/6 present, 1 missing"* ]]
 }
 
-@test "wwan: the native FM350 mtk_t7xx gate is OUT OF SCOPE on a mainline edge tree" {
-  # The release string is a SYNTHETIC fixture, not the shipped pin: the only
-  # property under test is that it does NOT end in `-vendor-rk35xx`, so any
-  # mainline-shaped name serves and re-pinning it at a base bump proves nothing.
-  local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "7.1.7-ceralive-rk3588"
-  run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
-  [[ "$output" == *"7.1.7-ceralive-rk3588"* ]]
-  [[ "$output" != *"native M.2 modem driver ABSENT"* ]]
-}
-
-@test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a vendor tree that ships it" {
-  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.115-vendor-rk35xx"
+@test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a tree that ships it" {
+  # The gate used to be kernel-track-scoped: it ran only on a `*vendor-rk35xx`
+  # release and reported OUT OF SCOPE anywhere else, because the interesting
+  # subject was the prebuilt Armbian package's own bytes. That track is retired
+  # and every kernel is now built from pinned source, whose module set is exactly
+  # as inspectable — so the scoping is gone and the probe runs on any tree.
+  local root="$BATS_TEST_TMPDIR/tree" kv="7.2.0-ceralive-rk3588"
   wwan_stage_six "$root" "$kv"
   mkdir -p "$root/lib/modules/$kv/kernel/drivers/net/wwan"
   printf 'ELF' > "$root/lib/modules/$kv/kernel/drivers/net/wwan/mtk_t7xx.ko"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vendor track detected"* ]]
+  [[ "$output" == *"native M.2 modem driver gate: scanning"* ]]
   [[ "$output" == *"native M.2 modem driver present: mtk_t7xx — loadable"* ]]
+  [[ "$output" != *"OUT OF SCOPE"* ]]
 }
 
-@test "wwan: the native FM350 mtk_t7xx gate WARNS on a vendor tree without it, and still exits 0" {
+@test "wwan: the native FM350 mtk_t7xx gate WARNS on a tree without it, and still exits 0" {
+  # This is the CURRENT answer for a real production kernel, and it is a true
+  # finding rather than a regression: CONFIG_MTK_T7XX is declared in neither
+  # rk3588-edge.fragment nor required-symbols.list, so the FM350's native PCIe
+  # personality cannot bind. The retired out-of-scope branch skipped this
+  # silently; the gate now says it out loud, advisory as ever.
   local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "6.1.115-vendor-rk35xx"
+  wwan_stage_six "$root" "7.2.0-ceralive-rk3588"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"native M.2 modem driver ABSENT: mtk_t7xx"* ]]
@@ -510,14 +514,18 @@ PY
   [[ "$output" == *"all 6 required modules present"* ]]
 }
 
-@test "wwan: the vendor marker is exact — a bare '-vendor' release is NOT the vendor track" {
-  local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "6.1.0-vendor"
-  run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
-  run bash -c "source '$CHECK_WWAN'; printf '%s' \"\$WWAN_VENDOR_RELEASE_MARKER\""
-  [ "$output" = "vendor-rk35xx" ]
+@test "wwan: the native-M.2 gate is NO LONGER kernel-track-scoped" {
+  # ABSENCE GUARD for the retired release-marker branch. Re-introducing it would
+  # make the probe silent on every tree this pipeline now builds.
+  # Code only, never comments: the retirement is EXPLAINED in the script's header
+  # and that prose must stay readable.
+  local code
+  code="$(grep -v '^[[:space:]]*#' "$CHECK_WWAN")"
+  run ! grep -q 'WWAN_VENDOR_RELEASE_MARKER' <<<"$code"
+  run ! grep -q 'wwan_tree_is_vendor_track' <<<"$code"
+  run ! grep -q 'OUT OF SCOPE' <<<"$code"
+  run bash -c "source '$CHECK_WWAN'; printf '%s' \"\${WWAN_NATIVE_M2_MODULES[*]}\""
+  [ "$output" = "mtk_t7xx" ]
 }
 
 @test "modem recovery: uhubctl ships as a manual binary with no automatic invoker" {
@@ -1307,10 +1315,13 @@ REPRO
 #
 #     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches Mesa's
 #     Gallium megadriver, LLVM's JIT and Z3 for a software rasterizer the device
-#     can never execute — because the Mali vendor stubs win the EGL/GLES/GBM
-#     lookup and the only other Mesa entry point needs an X server this image
-#     does not ship. `apt remove` cascades into the plugin set cerastream needs,
-#     so the lever is file-level, like the locale strip.
+#     can never execute — no base-image component instantiates a GL element, and
+#     the only other Mesa entry point needs an X server this image does not ship.
+#     (Historically the argument also leaned on libmali's stubs winning the
+#     EGL/GLES/GBM lookup; that blob went with the vendor kernel track, and the
+#     no-GL-consumer half of the argument stands on its own.) `apt remove`
+#     cascades into the plugin set cerastream needs, so the lever is file-level,
+#     like the locale strip.
 #
 #     RETARGETED AT THE TRIXIE MIGRATION (todo 10). Trixie ships Mesa 25.0.7 and
 #     LLVM 19, and BOTH previous globs went stale in ways that fail SILENTLY:
@@ -1746,8 +1757,8 @@ REPRO
 #
 #     THE TWO TRAPS THESE TESTS EXIST FOR:
 #       (a) A hardcoded package list would freeze ONE board. The U-Boot package
-#           name differs per board (linux-u-boot-rock-5b-plus-vendor vs
-#           linux-u-boot-orangepi5-plus-vendor), so the set must come from the
+#           name differs per board (linux-u-boot-rock-5b-plus-edge vs
+#           linux-u-boot-orangepi5-plus-edge), so the set must come from the
 #           resolved manifest env, and the four env vars must therefore stay on
 #           the orchestrate.sh env_names <-> mkosi.conf PassEnvironment= lockstep.
 #       (b) Freezing a FIRST-PARTY package would break the ordinary software
@@ -1772,29 +1783,30 @@ REPRO
   done
 
   # A literal BSP package name here would silently freeze one board only.
-  run grep -nE 'linux-image-vendor-rk35xx|linux-dtb-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"$body"
+  run grep -nE 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"$body"
   [ "$status" -ne 0 ]
 }
 
 @test "kernel freeze: both shipped RK3588 boards resolve a U-Boot package for it to hold" {
   # The env the freeze reads is populated by the RESOLVER, so this asserts the
-  # resolved default rather than a grep of the manifest text: after the mainline
-  # flip the production U-Boot is each board's `-edge` package, and a grep for
-  # the vendor name would still have matched the (now opt-in) vendor rows.
+  # resolved default rather than a grep of the manifest text.
   local board out
   for board in rock-5b-plus orange-pi-5-plus; do
     out="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
     [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-"*"-edge'"* ]]
     [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
     [[ "$out" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+    # No separate DTB package on any track now — bindeb-pkg ships the in-tree
+    # DTBs inside the linux-image deb, so the freeze is a 3-package set.
+    [[ "$out" == *"DTB_PACKAGES=''"* ]]
   done
 
-  # The prebuilt vendor overlay still resolves its own set, so the freeze covers
-  # that track too for as long as it exists.
-  out="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor 2>/dev/null")"
+  # The debug sibling inherits the board's TOP-LEVEL U-Boot instead of the
+  # production `-edge` override, so the freeze must follow the manifest there too
+  # rather than assuming one package name per board.
+  out="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null")"
   [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-vendor'"* ]]
-  [[ "$out" == *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
-  [[ "$out" == *"DTB_PACKAGES='linux-dtb-vendor-rk35xx'"* ]]
+  [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588-test'"* ]]
 }
 
 @test "kernel freeze: NO first-party CeraLive package may ever be held" {

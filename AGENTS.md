@@ -83,7 +83,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test\|rock-vendor --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the eight DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the six DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -105,7 +105,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Deferred / hardware-gated items** | [`docs/DEFERRED.md`](docs/DEFERRED.md) — index of every deferred item with file:line anchors and unblock conditions |
 | **Kernel tracks (index)** | [`docs/kernel-tracks.md`](docs/kernel-tracks.md) — thin lifecycle/discoverability index: which patch repo feeds which variant, the pin chain, and links to the decision/build/currency docs below (does not restate them) |
 | **Kernel currency watch** | [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
-| **Kernel build from source (opt-in variants)** | [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.2, `vendor-patched` = vendor 6.1 BSP + HDMI-RX audio fix), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config`), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
+| **Kernel build from source (the production path)** | [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.2 and the production default, `edge-test` = its never-released debug sibling), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config` — both still supported, only the first in use), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
 | **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`docs/dev-loop.md`](docs/dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
 | Add-on descriptor schema | `manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `lib/build-feature-sysext.sh` |
@@ -846,21 +846,16 @@ interchangeable, so naming by candidate alone let the second run silently
 overwrite the first's evidence and leave an operator holding two artifacts and
 one artifact's evidence.
 
-**`rock-vendor` is the PREBUILT-vendor candidate, and it is opt-in by name.** It
-is deliberately NOT in `--only all`: it is a comparison/smoke artifact (the
-todo-19 vendor smoke test), not one of the qualification set. Four things in the
-recorder are edge-only and are branched for it — the tuple stays valid with no
-`KERNEL_SOURCE_*` fields; the kernel package is located in the BOARD'S BSP
-STAGING AREA (`mkosi/.staging/<board>/bsp`), identity-checked against
-`manifests/armbian-bsp-deb-versions.txt`, with the kernel release AND the config
-read out of the package payload; the EDGE `required`/`forbidden` manifests are
-NOT applied (`required-symbols.list` demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX`, the
-mainline driver, which a correct vendor kernel does not carry) and the vendor
-gate is instead `CONFIG_VIDEO_ROCKCHIP_HDMIRX=y` in that package's own config;
-and the candidate maps to the resolver's reserved `default`, so `./build` is
-invoked BARE — passing `--variant default` would be an error. Contract:
-`tests/hardware-candidate-vendor-tuple.test.sh` (18 legs, incl. non-vacuity for
-each vendor-specific refusal and a spy proving the edge closure never runs).
+**Every candidate is SOURCE-BUILT, and the prebuilt-kernel branch is gone.** The
+`rock-vendor` candidate — a comparison/smoke artifact that installed the prebuilt
+Armbian vendor BSP kernel — was removed with the vendor kernel track, together
+with the recorder's whole prebuilt arm (the BSP-staging package lookup, the
+`armbian-bsp-deb-versions.txt` identity check, the payload-read kernel release,
+and the vendor `CONFIG_VIDEO_ROCKCHIP_HDMIRX=y` gate that replaced the edge
+`required`/`forbidden` closure) and its contract suite. All of it is preserved at
+the annotated tag `vendor-kernel-final`. The candidate table is now
+`rock-edge` / `orange-edge` / `rock-edge-test`, and `--self-test` carries an
+absence guard proving `rock-vendor` is REFUSED rather than silently mapped.
 
 **The artifact tuple is at `schema_version: 3`.** Schema 2 added `bench_labels` +
 `partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
@@ -955,8 +950,8 @@ for the full host matrix.
 DRY_RUN=1 ./build <board>             # resolve + fetch plan only
 ./build <board> --native              # opt-in native build (trixie+ host only)
 MKOSI_NATIVE=1 ./build <board>        # same, env-var form
-./build <board> --variant edge        # opt-in family variant (mainline 7.2 kernel from source)
-./build <board> --variant vendor-patched  # opt-in: vendor 6.1 BSP from source + HDMI-RX audio fix
+./build <board> --variant edge        # the production default, named explicitly
+./build <board> --variant edge-test   # debug sibling (KASAN/lockdep); NEVER released
 ```
 
 Entry: `build` → `lib/orchestrate.sh`. Produces `.raw` sysext bundles and
@@ -1257,9 +1252,12 @@ state** under the staging dir (the host apt config is never touched).
 
 **Exact BSP package pins + advisory kernel content drift-guard** [EXISTS]
 
-Decision D3 still selects the vendor branch through package names such as
-`linux-image-vendor-rk35xx`; exact Debian versions for every required BSP package
-are committed in `manifests/armbian-bsp-deb-versions.txt`. `fetch_bsp`
+The kernel is no longer fetched at all — it is built from pinned source — so what
+`manifests/armbian-bsp-deb-versions.txt` now pins is the boot stack's REMAINING
+prebuilt half: `armbian-firmware` plus each board's `-edge` and `-vendor` U-Boot
+packages. (The `-vendor` U-Boot is a BOOTLOADER build, orthogonal to the retired
+vendor KERNEL track; `edge-test` still resolves it from the board's top-level
+`uboot_packages`.) `fetch_bsp`
 authenticates the exact Armbian archive-key fingerprint set, verifies `InRelease`
 and its configured suite/`main`/architecture identity, verifies the `Packages.gz`
 digest from signed metadata, preflights the complete exact package set, and
@@ -1305,18 +1303,27 @@ same-version content replacement observable:
 `./build <board>` therefore resolves the `edge` overlay — mainline `v7.2`, built
 from source, `linux-image-7.2.0-ceralive-rk3588`, no separate DTB package, the
 board's `-edge` U-Boot — **byte-identically to `./build <board> --variant edge`**,
-the board's own `variant_overrides.edge` included. The prebuilt Armbian vendor
-6.1 BSP that shipped every earlier image is the opt-in `vendor` overlay, and
-`--variant vendor` resolves byte-identically to the pre-flip default (pinned by
-the committed `tests/manifests/fixtures/vendor-baseline/*.params`).
+the board's own `variant_overrides.edge` included. The production resolve is
+pinned byte-for-byte by the committed
+`tests/manifests/fixtures/production-baseline/*.params`, with a non-vacuity leg
+requiring the same comparison to FAIL on `edge-test`.
+
+**The prebuilt Armbian vendor 6.1 BSP track is RETIRED** — both the `vendor`
+overlay and the source-built `vendor-patched` one, plus their pins, bootloader
+rows, allow-absent list, fixtures and tests. Everything is preserved at the
+annotated tag `vendor-kernel-final` (`git show vendor-kernel-final:<path>`). The
+family's top-level fields now describe the mainline track, which is the only
+track there is.
 
 **`default_variant` is a POINTER, not a copy of the pins, and the alternative was
 refused on evidence.** Moving `edge`'s block to the family top level would force
 `edge-test` (which `extends: edge`) to restate its parent's pins — the exact
-byte-for-byte drift `extends` exists to make impossible — and would deep-merge
-this family's defconfig mode onto `vendor-patched`'s config-FILE mode, producing
-the half-specified config `$defs/kernel_source`'s `oneOf` forbids and
-`build-kernel.sh` re-asserts. One declaration, one pin set, one answer.
+byte-for-byte drift `extends` exists to make impossible. (A second reason held
+while the source-built vendor overlay existed: the move would have deep-merged
+this family's defconfig mode onto that overlay's config-FILE mode, producing the
+half-specified config `$defs/kernel_source`'s `oneOf` forbids. That reason died
+with the overlay; the `edge-test` one stands alone.) One declaration, one pin
+set, one answer.
 
 **Three consequences worth knowing before touching any of it:**
 
@@ -1328,13 +1335,13 @@ the half-specified config `$defs/kernel_source`'s `oneOf` forbids and
 - **A family list may only hold what EVERY track needs.**
   `collect_declared_bsp_pkgs` UNIONS the family FILE's lists with the resolved
   env values, so an overlay that resolves a strict SUBSET cannot remove a name
-  that way. `libmali-valhall-g610-*` sat in the family's `firmware_packages`
-  while the `edge` overlay dropped it, so the mainline path still staged the
-  blob's `.deb` and would have died at `[3/9]` as an "unclassified staged
-  package". It is now declared by the `vendor` and `vendor-patched` overlays
-  instead. Let overlays ADD; never let one try to subtract.
+  that way. The Mali blob sat in the family's `firmware_packages` while the
+  `edge` overlay dropped it, so the mainline path still staged the blob's `.deb`
+  and would have died at `[3/9]` as an "unclassified staged package". It was
+  moved into the vendor overlays, and went with them at the retirement. Let
+  overlays ADD; never let one try to subtract.
 - **`ceralive-cls-fw` is RETIRED, mechanism included.** The prebuilt vendor
-  kernel omits `NET_CLS_FW`, so the image used to build an ABI-matched
+  kernel omitted `NET_CLS_FW`, so the image used to build an ABI-matched
   out-of-tree `cls_fw.ko` beside it. The source-built production kernel declares
   `CONFIG_NET_CLS_FW=y` in-tree (`rk3588-edge.fragment`, pinned in
   `required-symbols.list`), so the package, its pin file
@@ -1452,21 +1459,30 @@ reserved name meaning "the family's own default"; the schema refuses a variant
 literally called that, and `default_variant:` is what says which declared overlay
 that name resolves to.
 
-rk3588 ships **four** overlays. Three build the kernel + in-tree DTBs **from
+rk3588 ships **two** overlays, and BOTH build the kernel + in-tree DTBs **from
 pinned source** by `git am` + `make bindeb-pkg` inside a **digest-pinned** builder
-container with a persistent ccache; the fourth installs a prebuilt Armbian `.deb`.
-The two patch repos target DIFFERENT kernel tracks and neither one's patches apply
-to the other's tree:
+container with a persistent ccache. There is no prebuilt-kernel path left:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
 | `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@b28a187269f2` (22-member series) | **the PRODUCTION default** (`default_variant: edge`) |
 | `edge-test` | `extends: edge` | inherited | inherited | KASAN/lockdep + fault injection; never released |
-| `vendor` | vendor 6.1 BSP, **PREBUILT** | — (no source build) | — | the pre-flip production path, kept selectable; has NO `NET_CLS_FW` |
-| `vendor-patched` | vendor 6.1 BSP, source-built | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
-Both patch commits are **immutable SHAs**, never branches. Full write-up:
+The patch commit is an **immutable SHA**, never a branch. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
+
+**The Armbian vendor 6.1 BSP track is RETIRED — both overlays.** The prebuilt
+`vendor` one and the source-built one that rebuilt it with
+`CERALIVE/rk3588-vendor-kernel-patches` were removed on the mainline cutover,
+along with their pins, their bootloader rows, the `libmali` GPU blob they alone
+declared, their allow-absent symbol list, their fixtures and their tests. Every
+byte is at the annotated tag `vendor-kernel-final` —
+`git show vendor-kernel-final:<path>`. Two `build-kernel.sh` generalizations that
+track forced deliberately SURVIVE it, because they are general answers rather than
+special cases: **commit-only source checkout** (a rolling branch that publishes no
+tags) and **config-FILE mode** (start from a complete published `.config`). Both
+remain schema-enforced and covered by scratch-family legs in
+`variant-contract.bats`; do not delete either as dead code.
 
 **HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP — read every `edge` board result
 in this file as scoped to the `v7.1.7` base it was measured on.** `edge` moved
@@ -1480,80 +1496,41 @@ plus the config-survival gate. The produced package name moves with the pin:
 `kernelrelease` assertion). The `edge-test` sibling inherits every source pin and
 differs only in identity: `7.2.0-ceralive-rk3588-test` / `7.2.0-ceralive1+test1`.
 
-**`vendor-patched` is the answer to "is the vendor patch repo wired in yet?" — it
-is, as of this variant.** It rebuilds the SAME 6.1.115 BSP the production path
-installs prebuilt, plus five patches, fixing the board-confirmed regression where
+**THE RETIRED VENDOR-BSP HDMI-RX AUDIO OVERLAY — what it was, and what survives
+it.** It rebuilt the same prebuilt Armbian BSP the image used to install, plus a
+five-patch series fixing the board-confirmed regression where
 `armbian/linux-rockchip` `78c67d98f221` (PR #430) unconditionally zeroed
 `hdmi-audio-codec` capture channels for every instance — a fix for RK3576
 HDMI-**TX** that killed RK3588 HDMI-**RX**, because `rk_hdmirx` registers through
-that same codec. Build it with
-`./build rock-5b-plus --variant vendor-patched`; it produces
-`linux-image-6.1.115-ceralive-vendor-rk35xx` = `6.1.115-ceralive1`. **The package
-name is deliberately NOT `linux-image-vendor-rk35xx`** — a collision with the
-stock name is the one failure that yields a plausible image rather than an error,
-because the local repository would resolve one of the two by version and the board
-could silently boot the UNPATCHED kernel.
+that same codec. Its built package was deliberately named differently from the
+stock one, because a collision is the one failure that yields a plausible image
+rather than an error: the local repository would resolve one of the two by
+version and the board could silently boot the UNPATCHED kernel. That naming rule
+is general and is restated in ANTI-PATTERNS.
 
-**`0004` is DIAGNOSTIC and `0005` is the fix it found — Tier 1 CONFIRMED on a
-hand-built kernel, Tier 2 OPEN on this repo's pipeline-built image.**
-`0001`-`0003` restored the capture PCM and that half is board-confirmed, but
-every `read()` on it still returned `EIO` while `dmesg` — cleared immediately
-beforehand — stayed completely empty, including against an EDID-confirmed
-audio-capable HDMI source. `0004` changes no behaviour; it raises the severity
-of, and adds state to, the failure reports that path already drops (ALSA's
-only `-EIO` is at `pcm_dbg()` level, the dmaengine PCM pointer discards its
-status, the i2s-tdm overrun interrupt is optional and its absence unlogged,
-and a PL330 channel fault is `dev_info()`). What it exposed is that the PCM
-lifecycle and the HDMI-RX **audio-domain** lifecycle were never connected:
-`GLOBAL_SWENABLE.AUDIO_ENABLE` and `AUDIO_PROC_CONFIG0.I2S_EN` are set ONLY by
-`hdmirx_delayed_work_audio()`, whose only triggers are a one-shot deframer IRQ
-and an `rk_hdmirx` private V4L2 ioctl no ALSA client issues — so `snd_pcm_open()`
-/ `hw_params` / `trigger START` all left the domain off and nothing clocked into
-i2s7_8ch. `0005` starts that domain from the capture open and from the paths that
-just confirmed HDMI lock.
+Three things about it are worth carrying forward, and none of them is a claim
+about any image this pipeline builds today:
 
-- **Tier 1 — CONFIRMED:** `0005` is board-confirmed on one Radxa ROCK 5B+ test
-  (image `20260806T223730Z.raw` after a clean full `dd` reflash) — `hw_ptr`
-  advancing, `RXS=1` with a NON-ZERO `RXFIFOLR`, and zero `capture xfer failed`
-  lines, verified end-to-end through CeraUI's live Audio levels meters riding
-  cerastream's own idle audio-meter sidecar, not a one-off manual `arecord`.
-- **Tier 2 — OPEN:** the PIPELINE-BUILT `--variant vendor-patched` image has
-  not itself been booted on hardware, and no Orange Pi 5+ evidence exists. Do
-  NOT read this variant as "HDMI-RX audio works" on the strength of the Tier 1
-  confirmation above — that test ran on a hand-built kernel from the same
-  source, not this repo's `make bindeb-pkg` output.
-
-`0004` is retained in full regardless of the confirmation above — the
-instrumentation is how a future pipeline-built-image confirmation gets read;
-shrinking the series back to three patches is a follow-up, not pending
-cleanup.
-
-**`0005` may never wait on the audio WORK ITEM, only on its completion.** Its
-first version (`94d20ab0a4f7`) called `flush_delayed_work()` from
-`hdmirx_audio_startup()`, which ASoC invokes with hdmi-codec's `hcp->lock` held,
-while that work calls back into `plugged_cb()`, which takes the same lock. That
-deadlock fires ONLY when the fix works — the no-audio path never reaches
-`plugged_cb()`, so a source without audio looked fine and a source with audio
-hung the capture open in D state. The shipped pin (`de46c1acba42`) waits on a
-`completion` the work signals BEFORE that callback, and disarms the work under a
-gate before a synchronous cancel on every teardown path. The statement order
-there is load-bearing; do not "simplify" it back to a flush.
-
-**Pin hygiene — a squash-merge in the patches repo ORPHANS the SHA pinned here.**
-`db5d0e8a0711` was the predecessor pin and the tip of the 3-commit branch that
-became `CERALIVE/rk3588-vendor-kernel-patches` PR #1. Squash-merging it produced a
-brand-new commit (`de46c1acba42`) and discarded the originals, so `db5d0e8a0711`
-is no longer reachable from that repo's `main` and
-`git fetch --depth 1 <url> db5d0e8a0711` from a fresh clone FAILS. The PR gate
-cannot catch this — it is `DRY_RUN=1` and never fetches the patch series.
-Re-pin `patches_commit` only when the payload changes or the current pin
-becomes unreachable from `main` (a squash-merge is exactly the second case) —
-not on every merge in either patch repo. When a re-pin is warranted, point it
-at the SHA that actually landed on `main` and verify it with
-`git ls-remote <patches-url> <sha>` before committing. The docs-only commit
-`4323a16` ("Document HDMI-RX audio board confirmation") lands DOWNSTREAM OF
-(after) this payload pin `de46c1a` — it records the board confirmation, it
-does not change what is pinned, so it never triggers a re-pin on its own.
+- **`0004` was DIAGNOSTIC and `0005` was the fix it found.** `0001`-`0003`
+  restored the capture PCM, yet every `read()` still returned `EIO` while `dmesg`
+  — cleared immediately beforehand — stayed completely empty, including against
+  an EDID-confirmed audio-capable source. `0004` changed no behaviour; it raised
+  the severity of, and added state to, failure reports that path already dropped
+  (ALSA's only `-EIO` is at `pcm_dbg()` level, the dmaengine PCM pointer discards
+  its status, the i2s-tdm overrun interrupt is optional and its absence unlogged,
+  a PL330 channel fault is `dev_info()`). What it exposed is that the PCM
+  lifecycle and the HDMI-RX **audio-domain** lifecycle were never connected.
+  **Instrument the silent path before arguing about the driver** is the reusable
+  lesson.
+- **Its evidence was TIER 1 ONLY and must never be read as more.** `0005` was
+  board-confirmed on one Radxa ROCK 5B+ on a HAND-BUILT kernel, end-to-end
+  through CeraUI's audio meters. No image this pipeline built from that overlay
+  was ever booted, and no Orange Pi 5+ evidence existed. That gap is now permanent
+  rather than pending.
+- **HDMI-RX audio on the PRODUCTION kernel is a DIFFERENT question with its own
+  answer** — mainline patches `0005` + `0006`, where `0006` supplies the DT sound
+  card `0005` alone does not create. See that KEY FACT; do not conflate the two
+  series.
 
 **Adding it required generalizing `build-kernel.sh` in exactly two places**, both
 of which are now first-class modes rather than special cases:
@@ -1580,15 +1557,16 @@ Both modes converge on ONE `olddefconfig` → `syncconfig` → `verify-kernel-co
 sequence. Keep it that way: `variant-contract.bats` statically requires exactly one
 occurrence of each of those `make` calls in the file.
 
-- **The PREBUILT VENDOR path is BYTE-IDENTICAL, it just moved.** `variants:` and
+- **The PRODUCTION resolve is pinned BYTE-FOR-BYTE.** `variants:` and
   `default_variant:` are both stripped before flattening, so no unselected overlay
   can leak a second kernel pin into the resolved params. The golden fixtures
   (`tests/manifests/fixtures/vendor-baseline/*.params`, captured before variants
-  existed) are now compared against `--variant vendor` for the two rk3588 boards,
-  and against the bare default for `x86-minipc`, which declares no variants and no
-  `default_variant` at all. The ONE deliberate fixture change is the deleted
-  `ceralive-cls-fw` row. The **non-vacuity** leg (the same comparison must FAIL on
-  the `edge` resolve) is unchanged.
+  existed) live at `tests/manifests/fixtures/production-baseline/*.params` and are
+  compared against the PRODUCTION resolve for the two rk3588 boards, and against
+  the bare default for `x86-minipc`, which declares no variants and no
+  `default_variant` at all — byte-unchanged, which is what proves the whole
+  mechanism is opt-in. The **non-vacuity** leg requires the same comparison to
+  FAIL on the `edge-test` resolve.
 - **The Armbian framework is NOT the build system.** It is consulted for the
   `edge` → 7.1 mapping only (upstream, in the patches repo's preflight) and never
   invoked. Adopting it would import its patch stack, config and packaging and make
@@ -1617,7 +1595,7 @@ occurrence of each of those `make` calls in the file.
   strict no-op there; fail-loud when enabled.
 - **`/boot` artifact mapping — the DTB copy was NOT enough, and the gap crash-looped
   a board.** The selector's FIRST load is `/boot/Image`, and on the vendor path that
-  file exists only because Armbian's `linux-image-vendor-rk35xx` **postinst** runs
+  file existed only because the prebuilt Armbian `linux-image-*` **postinst** ran
   `ln -sfv vmlinuz-<REL> /boot/Image`; the same postinst's
   `run-parts /etc/kernel/postinst.d` emits `initrd.img-<REL>` only because that
   package `Depends: initramfs-tools`. `make bindeb-pkg` does NEITHER — its generated
@@ -1646,8 +1624,8 @@ occurrence of each of those `make` calls in the file.
   hand `ext4load` read `1f 8b 08 00 …` — gzip, deflate. `arch/arm64/Makefile` sets
   `KBUILD_IMAGE := $(boot)/Image.gz` and `scripts/package/builddeb` installs
   `$(make -s image_name)` as `/boot/vmlinuz-<REL>`, so on arm64 **every**
-  `bindeb-pkg` kernel — `edge` AND `vendor-patched` — ships a COMPRESSED vmlinuz.
-  Armbian's vendor package escapes it only because its framework builds rockchip64
+  `bindeb-pkg` kernel — `edge` AND `edge-test` — ships a COMPRESSED vmlinuz.
+  Armbian's prebuilt package escaped it only because its framework builds rockchip64
   with `KERNEL_IMAGE_TYPE="Image"`. **The ambiguity this raised is resolved, and it
   is a per-board U-Boot fact, not a per-build artifact difference** — both boards'
   `edge` builds emit the same `Image.gz` (the Rock 5B+ build log says
@@ -1915,21 +1893,25 @@ is no overlay load anywhere in the CeraLive boot path.
 
 `prune_dtb_dir` in `platform/mkosi.postinst` reduces a directory to the board DTB
 plus an explicit overlay allowlist; `install_kernel_source_dtbs` applies it to
-BOTH the package-payload directory and the `/boot` copy, and `prune_vendor_dtbs`
-applies it to BOTH of the prebuilt vendor tree's copies. Measured on a real edge
+BOTH the package-payload directory and the `/boot` copy. Measured on a real edge
 build: 34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled
 in a factory `.raw` because the kernel rides inside a RAUC slot.
 
+`prune_vendor_dtbs`, the sibling that applied the same trim to a PREBUILT Armbian
+kernel/DTB package pair, is RETIRED with the vendor kernel track (recoverable at
+the annotated tag `vendor-kernel-final`). Its cases went with it; every property
+they pinned that is still reachable is pinned by the `prune_dtb_dir` primitive
+and the source-built section of `tests/dtb-prune-contract.bats`, which drive the
+same primitive on the path that still exists.
+
 - **Both locations, not one.** The package-payload directory stays in the rootfs
   after installation, so trimming only `/boot` would leave the full set shipping.
-- **The VENDOR path honoured that rule for `/boot` only, for three releases** —
-  the second half was added 2026-08-13 after `./build rock-5b-plus` was refused at
-  `[6c/9]` measuring 1,664,911,360 B against the 1,500,000,000 B ceiling. The
-  vendor BSP ships the blob set TWICE and the two packages disagree about where:
-  `linux-dtb-vendor-rk35xx` puts 813 files under `/boot/dtb-<REL>/rockchip/`
-  while `linux-image-vendor-rk35xx` carries its own 813 under
-  `/usr/lib/linux-image-<REL>/rockchip/`. `prune_vendor_dtbs` searched
-  `${root}/boot` alone, so the build log truthfully read
+- **The retired PREBUILT path honoured that rule for `/boot` only, for three
+  releases**, and the lesson is why the rule is stated so loudly here. That BSP
+  shipped the blob set TWICE and the two packages disagreed about where: the DTB
+  package put 813 files under `/boot/dtb-<REL>/rockchip/` while the kernel package
+  carried its own 813 under `/usr/lib/linux-image-<REL>/rockchip/`. The prune
+  searched `${root}/boot` alone, so the build log truthfully read
   `vendor DTB payload: kept 1 device-tree file(s) … removed 810` while
   **814 files / 91,117,943 B** sat untouched in the package payload — in both
   slots of every image and inside every bundle. The log line reporting a
@@ -2182,7 +2164,7 @@ Two traps worth naming:
   upstream `no_i2s_capture` / `no_spdif_capture` pdata flags and only clears a
   direction when the registering driver asks. A parked branch in this repo
   (`fix/hdmi-rx-audio-capture-kernel-patch`, tip `5a51e2f`, deleted after todo 8)
-  backported that vendor fix; it is correct for `6.1.115-vendor-rk35xx` and
+  backported that vendor fix; it was correct for the retired vendor BSP and
   **does not apply to the edge kernel at all**. Do not resurrect it for `edge`.
 
 **MPP hardware encode needs `CONFIG_DMABUF_HEAPS` — without it `/dev/dma_heap`
@@ -4310,17 +4292,21 @@ kernel does not have.** Current Linux `pwm-fan` grew `fan-stop-to-start-percent`
 `fan-stop-to-start-us` (`Documentation/devicetree/bindings/hwmon/pwm-fan.yaml`),
 implemented in `__set_pwm()` as *boost → `usleep_range()` → apply the real target*,
 with `ctx->pwm_usec_from_stopped` defaulting to **250 000 µs**. Those properties are
-absent from **both v6.1 and v6.6** (checked), so this board's vendor 6.1.115 BSP has
-no DT knob and the equivalent has to come from userspace.
+a DEVICE-TREE knob, and this pipeline authors no device tree, so a board DTS that
+does not declare them gets no boost — and neither shipped board's does. (They were
+also absent from both v6.1 and v6.6 outright, which is what the measurement below
+was taken against.) The equivalent therefore has to come from userspace.
 `ceralive-fan-kickstart.service` is a faithful userspace port of that mechanism —
 **including its explicit restore step**, which is the part that matters most.
 
 **THE LOAD-BEARING KERNEL FACT — DO NOT "SIMPLIFY" THE RESTORE AWAY.** The obvious
 design is "write `max_state`, then stop writing and let the governor's next
 scheduled poll overwrite it with whatever the real temperature calls for."
-**On this kernel that is FALSE**, and shipping it would leave the fan at 100 %
-indefinitely. Verified by reading the exact tree the board runs
-(`armbian/linux-rockchip` @ `95e85f6cb496`, 6.1.115), three facts that compose:
+**That was proven FALSE**, and shipping it would leave the fan at 100 %
+indefinitely. Verified by reading the tree the board ran at the time
+(`armbian/linux-rockchip` @ `95e85f6cb496` — the retired vendor BSP; the same
+three functions have NOT been re-read against mainline v7.2, so treat the
+mechanism as proven there and unverified here), three facts that compose:
 
 - `drivers/thermal/thermal_sysfs.c` `cur_state_store()` calls
   `cdev->ops->set_cur_state()` and **does NOT clear `cdev->updated`**.
@@ -4660,7 +4646,7 @@ independent reasons — a SIGPIPE race and a first-boot preset** [EXISTS — fix
 
 A `rock-5b-plus --variant edge` production build failed the `[7/9]` gate on
 `ssh.service is enabled but MUST be disabled-by-default`, while the SAME commit
-produced a clean `rock-vendor` image. Both defects below are invisible to the PR
+produced a clean prebuilt-kernel image. Both defects below are invisible to the PR
 gate, which is `DRY_RUN=1` and never runs the layer that configures services.
 
 - **The disable was a no-op ~8% of the time.** `disable_service` probed with
@@ -5115,9 +5101,9 @@ trixie/mainline migration, and neither was a version bump:
   captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver
   bound to a `/dev/mali0` a mainline kernel never creates
   (armbian/build#10320), so leaving it in would not degrade GL, it would remove
-  it. **The vendor default and `vendor-patched` still ship libmali and are
-  unchanged**; retiring the pin outright belongs to the vendor-kernel
-  retirement.
+  it. **The vendor overlays that still shipped libmali are themselves retired**,
+  and the blob's URL/SHA pin went with them — no variant declares it and no build
+  stages it.
 - **The Mesa half rides INSIDE the sysext**, which is the one place the
   Platform-layer rule inverts — see the ANTI-PATTERNS entry and
   [`docs/cog-display-addon.md`](docs/cog-display-addon.md) §5 for why (the
@@ -5171,8 +5157,8 @@ bound driver by name.
 - Don't pin `kernel_source.patches_commit` (or `commit`, or `builder_image`) to anything but an exact SHA/digest — a branch there is unreproducible while looking pinned, and both the schema and `build-kernel.sh` reject it
 - Don't hand-write `kernel_source.suppressed_packages`; it is derived by `resolve.py` and the schema rejects an authored one
 - Don't add a synthetic `kernel_source.tag` to a source whose pinned branch publishes none (the vendor BSP's `rk-6.1-rkr5.1`). `tag` is optional precisely so the pin stays an honest commit; a placeholder tag is a false provenance claim, and cloning the branch tip instead silently builds newer source under an unchanged pin
-- Don't replace `vendor-patched`'s fetched Armbian `.config` with `make defconfig`. It is the exact config `linux-image-vendor-rk35xx` ships; a bare defconfig builds a materially different driver set, so the result is no longer comparable to the kernel the fleet runs — which is the only reason this variant exists
-- Don't name a source-built kernel package after a stock one. `vendor-patched` builds `linux-image-6.1.115-ceralive-vendor-rk35xx`, never `linux-image-vendor-rk35xx`: a name collision is the one failure that produces a plausible image instead of an error, because the local repository would pick one by version and the board could boot the UNPATCHED kernel
+- Don't replace a config-file-mode variant's fetched upstream `.config` with `make defconfig`. That config is the exact one the upstream package ships; a bare defconfig builds a materially different driver set, so the result stops being comparable to the kernel it is supposed to reproduce — which is the only reason such a variant would exist. (No shipped variant uses that mode today; the mode stays schema-gated for the next one.)
+- Don't name a source-built kernel package after a stock one. A name collision is the one failure that produces a plausible image instead of an error, because the local repository would pick one by version and the board could boot the wrong kernel. The retired source-built vendor overlay obeyed this rule deliberately, and any future BSP track must too
 - Don't silence a config-survival failure by widening `kernel_source.config_absent_symbols`. Every entry is a reviewed statement that the symbol names an out-of-tree driver Armbian's framework injects and this pipeline does not; a listed symbol that DID survive fails the build as a stale exception, and that non-vacuity is what stops the list becoming a blanket opt-out of the gate
 - Don't duplicate `make olddefconfig` / `make syncconfig` / `make -s kernelrelease` into the per-mode branches of `build-kernel.sh`. Both config modes converge on one sequence, and `variant-contract.bats` statically requires exactly one occurrence of each
 - Don't read a board default-environment variable in `boot.scr.cmd`. `loadaddr` was undefined on the Orange Pi 5 Plus while every `*_addr_r` was fine, and the empty expansion did not degrade the write — it dropped the address argument, wrote the env blob through `BOOT_ORDER`, and halted the board on an SError that only a power cycle clears. The script defines its own scratch address; a new one must be defined there too
@@ -5180,7 +5166,7 @@ bound driver by name.
 - Don't set `CERALIVE_BENCH_LABELS` on any release/publish path — it produces a bench-only image that is not the frozen contract. Don't rename a PARTLABEL at ONE site: the GPT, both fstab entries, the RAUC `system.conf` and the compiled U-Boot selector must move together or the card does not boot
 - Don't record one board's MaskROM recovery loader in another board's candidate tuple, and don't collapse `ci/fetch-rk3588-loader.sh` back to a single constant. The loader's first stage is the DDR initialiser, matched to a board's memory topology — the OPi's correct loader was identified by matching the DDR build hash its own running chain reports. A tuple naming an unusable loader is read precisely when the board is already bricked
 - Don't name a candidate's evidence by candidate alone. The same candidate is built once per `--bench-labels` mode and the two artifacts are not interchangeable; every log, config and tuple is `<candidate>.bench-labels-<0|1>.<ext>` so the second run cannot overwrite the first's evidence
-- Don't apply `manifests/kernel/required-symbols.list` to the `rock-vendor` candidate. It demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX` — the MAINLINE HDMI-RX driver — and a correct vendor kernel carries `rk_hdmirx` (`CONFIG_VIDEO_ROCKCHIP_HDMIRX`) instead, so the edge closure fails a GOOD artifact. Don't pass `--variant default` for it either: `default` is the resolver's reserved no-overlay name, i.e. a bare `./build <board>`
+- Don't re-add a prebuilt-kernel hardware candidate without re-adding its whole recorder arm. The retired `rock-vendor` needed four branches of its own — a tuple valid with no `KERNEL_SOURCE_*` fields, a BSP-staging package lookup, a pin identity check, and a DIFFERENT symbol gate, because `manifests/kernel/required-symbols.list` demands `CONFIG_VIDEO_SYNOPSYS_HDMIRX` (the MAINLINE HDMI-RX driver) and a correct vendor kernel carries `rk_hdmirx` (`CONFIG_VIDEO_ROCKCHIP_HDMIRX`) instead, so the edge closure would fail a GOOD artifact. Half of that wiring is worse than none
 - Don't give `ci/build-hardware-candidates.sh`'s `--bench-labels` a default of any kind, and don't let it fall back to an ambient `CERALIVE_BENCH_LABELS`. A candidate whose PARTLABEL set was decided by the dispatch shell builds, boots and passes every other gate, and then addresses `/boot` and `/data` on the WRONG PHYSICAL MEDIUM of a dual-media bench rig — that is a real 2026-08-10 incident, not a hypothetical. `lib/orchestrate.sh`'s own `:-0` default is for a DIRECT `./build` and stays exactly as it is
 - Don't regenerate `tests/fixtures/gpt-baseline/*.gpt` to make a test pass — like the vendor-baseline `.params`, those fixtures ARE the proof the production layout did not move. A diff there is a fleet re-flash, not a test fix
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it

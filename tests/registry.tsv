@@ -41,7 +41,7 @@ tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiri
 tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
 tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
 tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, blob hash, negative conformance fixtures
-tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, vendor-baseline byte parity
+tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity
 tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selection, committed blob-identity map, readback verification and unmapped-tuple refusal
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
@@ -69,7 +69,6 @@ tests/preflash-cross-board.test.sh	shell	integration	default-shell	board-derived
 tests/flash-remote-guard.test.sh	shell	integration	default-shell	remote-destructive-write contract: local block device plus a physical confirmation, or no write
 tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
 tests/hardware-candidate-bench-labels.test.sh	shell	integration	default-shell	--bench-labels is required, exported to ./build and recorded in the artifact tuple
-tests/hardware-candidate-vendor-tuple.test.sh	shell	integration	default-shell	the prebuilt-vendor candidate emits a valid tuple without source-build fields, off the BSP-staged package, without the edge symbol closure
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
@@ -79,7 +78,7 @@ tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh st
 tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data seeding loop preserves the frontend public symlink
 tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
 tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract
-tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the vendor and mainline ID_PATH spellings
+tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the retired-vendor and mainline ID_PATH spellings
 tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
 mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
@@ -162,6 +161,6 @@ tests/manifests/fixtures/invalid-family-missing-arch.yaml	fixture	support	not-ex
 tests/manifests/fixtures/valid-board-interfaces.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-board.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive family manifest fixture
-tests/manifests/fixtures/vendor-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
-tests/manifests/fixtures/vendor-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
-tests/manifests/fixtures/vendor-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved

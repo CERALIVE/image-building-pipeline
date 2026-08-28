@@ -810,10 +810,17 @@ were written to remove, and in both cases the build log read as if they had.
 `rootfs_bytes_max` was not raised. The two fixes below took the same artifact to
 well under the ceiling.
 
-### Lever 1 — the vendor DTB payload: 91,117,943 B (`prune_vendor_dtbs`)
+### Lever 1 — the prebuilt DTB payload: 91,117,943 B  **[HISTORICAL]**
 
-The vendor BSP ships the RK35xx device-tree set **twice**, and the two packages
-disagree about where:
+> **Historical.** `prune_vendor_dtbs` and the prebuilt Armbian kernel/DTB package
+> pair it trimmed are RETIRED with the vendor kernel track (preserved at the
+> annotated tag `vendor-kernel-final`). The LESSON below is not historical and is
+> still enforced on the source-built path by `install_kernel_source_dtbs`: prune
+> BOTH installed locations, discover each directory rather than composing it from
+> a release string, and verify before and after deleting.
+
+The prebuilt BSP shipped the RK35xx device-tree set **twice**, and the two
+packages disagreed about where:
 
 | directory | shipped by | files | bytes | pruned before |
 |---|---|---:|---:|---|

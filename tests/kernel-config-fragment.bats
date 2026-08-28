@@ -342,25 +342,16 @@ EOF
   [[ "$output" == *"allow-absent list not readable"* ]]
 }
 
-@test "rk3588-vendor-patched.absent: every entry is a CONFIG_ symbol and the list is deduped" {
-  local list="$PIPELINE_DIR/manifests/kernel/rk3588-vendor-patched.absent"
-  [ -f "$list" ]
-  local syms
-  syms="$(sed -e 's/#.*//' "$list" | awk 'NF{print $1}')"
-  [ -n "$syms" ]
-  while IFS= read -r s; do
-    [[ "$s" == CONFIG_* ]] || { echo "not a CONFIG_ symbol: $s"; false; }
-  done <<<"$syms"
-  [ "$(wc -l <<<"$syms")" -eq "$(sort -u <<<"$syms" | wc -l)" ]
-}
-
-@test "rk3588-vendor-patched.absent: neither shipped board's WiFi driver is excepted" {
-  # Both RK3588 boards use IN-TREE drivers (RTL8852BE -> rtw89, AP6275P ->
-  # brcmfmac). If either ever appears here it means the gate was silenced on a
-  # symbol the fleet actually needs.
-  local list="$PIPELINE_DIR/manifests/kernel/rk3588-vendor-patched.absent"
-  run ! grep -Eq '^CONFIG_(RTW89|RTW89_CORE|RTW89_PCI|RTW89_8852B|RTW89_8852BE|BRCMFMAC)\b' "$list"
-}
+# Two cases for the committed allow-absent list lived here — a shape check on it,
+# and a guard that neither shipped board's WiFi driver had been excepted into it.
+# Both are REMOVED because the file they read is deleted: it existed only for the
+# retired vendor-BSP config-file build, whose
+# fetched Armbian .config named 24 symbols for out-of-tree EXTRAWIFI drivers this
+# pipeline never copies in. No shipped variant uses config-file mode any more, so
+# no allow-absent list is named by any manifest. The MECHANISM is untouched and
+# still gated above — see "an unreadable allow-absent list fails loudly" and the
+# `--allow-absent` legs — so a future config-file track gets the same protection.
+# The list and its two cases are recoverable at the `vendor-kernel-final` tag.
 
 # --- the option interface, and its equivalence to the positional one ---------
 

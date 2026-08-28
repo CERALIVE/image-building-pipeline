@@ -13,14 +13,26 @@ criterion is explicitly that this matrix **names the truth including fallbacks**
 not that any particular row is green.
 
 - **Date:** 2026-08-24 (UTC)
-- **Tracks covered:** (i) the SHIPPED vendor 6.1 BSP, (ii) the opt-in
-  mainline/edge 7.1 fragment
+- **Tracks covered:** (i) the vendor 6.1 BSP — **HISTORICAL, that track is
+  RETIRED** (see the banner on §1), (ii) the mainline/edge fragment, which is now
+  the production track
 - **Raw transcript:** `test-results/uplink-sharing/todo12-qdisc-matrix.log`
   (gitignored)
 
 ---
 
-## 1. Track (i) — the SHIPPED vendor 6.1 kernel
+## 1. Track (i) — the vendor 6.1 kernel  **[HISTORICAL — RETIRED TRACK]**
+
+> **This section is a historical measurement and is retained for that reason
+> only.** The prebuilt Armbian vendor 6.1 BSP is no longer a kernel this pipeline
+> can build: the `vendor` / `vendor-patched` overlays, the
+> `linux-image-vendor-rk35xx` / `linux-dtb-vendor-rk35xx` pins and the seeded
+> `manifests/bsp-baseline.json` digest were all removed on the mainline cutover
+> and are preserved at the annotated tag `vendor-kernel-final`. Nothing below is
+> a statement about any image this pipeline produces today — read §2 for that.
+> It is kept because it is the only measured record of what that kernel carried,
+> which is what makes the "cake is present, and the runtime fallback still
+> matters" argument in §3 checkable rather than remembered.
 
 Measured by package inspection, using the same provenance chain
 `sharing-kernel-capability.md` §1 established — nothing was resolved by hand or
@@ -30,13 +42,16 @@ by "latest":
 |---|---|---|
 | apt base / suite | `https://apt.armbian.com` / `bookworm` | `lib/fetch-debs.sh` (`ARMBIAN_APT_URL`, `ARMBIAN_SUITE`) |
 | component / arch | `main` / `arm64` | `manifests/families/rk3588.yaml` (`arch: arm64`) |
-| package | `linux-image-vendor-rk35xx` | `manifests/families/rk3588.yaml` (`kernel_packages`) |
-| exact version | `26.5.1` | `manifests/armbian-bsp-deb-versions.txt:1` |
+| package | `linux-image-vendor-rk35xx` | `manifests/families/rk3588.yaml` (`kernel_packages`) — **both the field entry and the pin are now deleted; recover at tag `vendor-kernel-final`** |
+| exact version | `26.5.1` | `manifests/armbian-bsp-deb-versions.txt` (entry deleted) |
 | kernel release | `6.1.115-vendor-rk35xx` | package payload |
 
 Downloaded SHA-256 `7b70fb2d1148021275a648fb0a4c0177236c3f54bef69a02a771d6ae7d9055ed`
-— byte-for-byte the value committed in `manifests/bsp-baseline.json`, so the
-artifact read below is provably the bytes the production build stages.
+— at the time of measurement, byte-for-byte the value then committed in
+`manifests/bsp-baseline.json`, so the artifact read below was provably the bytes
+that build staged. That baseline is now UNSEEDED (no family fetches a prebuilt
+kernel), so the digest is a historical provenance record rather than a live
+cross-check.
 
 Every row cites the exact file **inside the extracted package**
 (`/boot/config-6.1.115-vendor-rk35xx`, `…/modules.builtin`, `…/modules.dep`).

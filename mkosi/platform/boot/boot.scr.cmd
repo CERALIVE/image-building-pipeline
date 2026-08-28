@@ -158,7 +158,8 @@ if test "${fdtfile}" = ""; then
 fi
 
 # DTBs live under the rockchip/ SoC-vendor subdir — the Armbian vendor kernel
-# (linux-dtb-vendor-rk35xx) installs to /boot/dtb/rockchip/, NOT /boot/dtb/ directly.
+# installed to /boot/dtb/rockchip/, NOT /boot/dtb/ directly, and the source-built
+# kernel's platform-layer DTB mapping targets the same directory.
 # Dropping the rockchip/ component makes ext4load miss the DTB; booti then runs with
 # no FDT and the kernel never comes up (U-Boot falls through to the PXE loop).
 #

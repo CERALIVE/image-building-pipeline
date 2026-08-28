@@ -1,8 +1,8 @@
-[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1 SMP PREEMPT
 [    0.412000] Lockdep is turned on.
 [  118.220114] ======================================================
 [  118.220131] WARNING: possible circular locking dependency detected
-[  118.220147] 6.1.115-ceralive-vendor-rk35xx #1 Not tainted
+[  118.220147] 7.2.0-ceralive-rk3588 #1 Not tainted
 [  118.220160] ------------------------------------------------------
 [  118.220172] kworker/2:1/91 is trying to acquire lock:
 [  118.220186]  ffff000804d1a0a0 (&hcp->lock){+.+.}-{3:3}, at: plugged_cb+0x2c/0x70

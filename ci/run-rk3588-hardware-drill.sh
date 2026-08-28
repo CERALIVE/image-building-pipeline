@@ -168,7 +168,7 @@ drill_exec_stub() {
   local host="$1" command="$2"
   printf 'STUB(%s) %s\n' "${host:-none}" "${command}"
   case "${command}" in
-    journalctl\ -k*) printf '[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1\n' ;;
+    journalctl\ -k*) printf '[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1\n' ;;
     *RESULT-FAIL*)   return 7 ;;
   esac
   return 0

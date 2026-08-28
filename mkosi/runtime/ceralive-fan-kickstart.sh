@@ -4,7 +4,15 @@
 # instant the kernel's thermal governor first asks it to spin, then put the
 # governor's own commanded state straight back.
 #
-# WHY (measured on a real Orange Pi 5 Plus, vendor 6.1.115 BSP kernel):
+# WHY (measured on a real Orange Pi 5 Plus). The measurement below was taken on
+# the Armbian vendor 6.1 BSP kernel, which is RETIRED — the board now runs the
+# source-built mainline 7.2 track. The unit is kept because the defect is a BOARD
+# fact, not a kernel one: the stiction asymmetry lives in the fan motor and in the
+# device tree's `cooling-levels`, and the mainline kernel binds the same `pwm-fan`
+# cooling device on the same hardware. Todo 16's board qualification confirmed that
+# directly — BOTH Rock 5B+ and Orange Pi 5 Plus, booted on 7.2.0-ceralive-rk3588,
+# reported "thermal zones responsive; PWM fan cooling device present". So the
+# subject of this unit still exists and is still governed the same way.
 #
 #   The fan gets stuck at a stop and needs a manual push to start turning. That
 #   is NOT the "fan never gets asked to run" problem — ceralive-fan-curve
@@ -26,18 +34,28 @@
 #   an in-driver fix for it: `fan-stop-to-start-percent` / `fan-stop-to-start-us`
 #   in Documentation/devicetree/bindings/hwmon/pwm-fan.yaml, implemented in
 #   pwm-fan.c's __set_pwm() as "boost, usleep_range(), then apply the real
-#   target". Those properties do NOT exist in v6.1 or v6.6 — they landed after
-#   both — so this board's kernel has no DT knob to set and the equivalent has
-#   to be done from userspace. This unit is a faithful userspace port of that
-#   upstream mechanism, including its explicit restore step.
+#   target". That is a DEVICE-TREE knob, and this pipeline authors no device tree
+#   (zero .dts/.dtsi files in the repo) — so even where the driver supports the
+#   properties, a board DTS that does not declare them gets no boost, and neither
+#   shipped board's DTS does. The equivalent therefore still has to be done from
+#   userspace. This unit is a faithful userspace port of that upstream mechanism,
+#   including its explicit restore step. Setting the DT properties instead is a
+#   kernel-patch change in CERALIVE/rk3588-kernel-patches with its own bench
+#   evidence, not a pipeline change.
 #
 # THE LOAD-BEARING KERNEL FACT: A USERSPACE cur_state WRITE IS **STICKY**
 #
 #   It is tempting to write max_state and simply walk away, assuming the
 #   governor's next scheduled poll overwrites the nudge with whatever the real
-#   temperature calls for. On this kernel that assumption is FALSE, and acting
-#   on it would leave the fan at 100 % indefinitely. Verified by reading the
-#   exact tree this board runs (armbian/linux-rockchip @ 95e85f6c, 6.1.115):
+#   temperature calls for. That assumption was proven FALSE, and acting on it
+#   would leave the fan at 100 % indefinitely. Verified by reading the tree the
+#   board ran at the time (armbian/linux-rockchip @ 95e85f6c — the now retired
+#   vendor BSP); the same three functions have NOT been re-read against the
+#   mainline v7.2 tree, so treat the mechanism as proven there and unverified
+#   here. That does not change the design: the restore write is correct either
+#   way, because it writes back exactly the state the governor itself commanded,
+#   and it is skipped entirely when the governor made a fresher decision during
+#   the kick window.
 #
 #     * drivers/thermal/thermal_sysfs.c cur_state_store() calls
 #       cdev->ops->set_cur_state() and does NOT clear cdev->updated.
@@ -88,8 +106,8 @@
 # WHY DISCOVERY IS GENERIC AND NOT `cooling_device4`/`hwmon7`
 #
 #   The cooling-device index is a registration-order artefact: it differs
-#   between boards, between the vendor 6.1 BSP and the mainline/edge tree, and
-#   can move when an unrelated driver's probe order changes. The same hard-won
+#   between boards and can move when an unrelated driver's probe order changes.
+#   The same hard-won
 #   lesson is already written into ceralive-fan-curve. So the device is found by
 #   scanning cooling_device*/type for the exact string `pwm-fan`, and BOTH the
 #   kick value and the skip decision are read from that device's own max_state —

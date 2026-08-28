@@ -104,17 +104,22 @@ This clears the MPP-userspace kill switch, but it does not claim that the exact
 pinned Trixie image was built or booted; that release qualification remains a
 separate gate.
 
-### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support
+### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support  **[SUPERSEDED]**
 
-**Condition:** Rockchip publishes a vendor BSP based on kernel **6.12 or later**
-that retains full MPP support, AND integrators (Armbian, JetKVM, or equivalent)
-adopt it in a stable track.
+> **Historical.** This trigger existed while production ran the prebuilt Armbian
+> vendor 6.1 BSP. That track is retired: production builds the mainline kernel
+> from pinned source, no family fetches a prebuilt kernel `.deb`, and the pins and
+> baseline named below no longer exist (recover them at the annotated tag
+> `vendor-kernel-final`). It is kept as the record of what the watch was for.
 
-**Signal to watch:** current, dual-signed Armbian metadata contains a reviewed
-`linux-image-vendor-rk35xx` version whose kernel jumps from 6.1.x to 6.12.x.
-Promoting it requires an explicit change to
-`armbian-bsp-deb-versions.txt` and `bsp-baseline.json`; an ordinary build never
-silently adopts it. The provenance log confirms the concrete version and bytes.
+**Condition (as written then):** Rockchip publishes a vendor BSP based on kernel
+**6.12 or later** that retains full MPP support, AND integrators (Armbian,
+JetKVM, or equivalent) adopt it in a stable track.
+
+**Signal that was watched:** current, dual-signed Armbian metadata containing a
+reviewed prebuilt RK35xx kernel version whose kernel jumped from 6.1.x to 6.12.x.
+Promoting it required an explicit change to `armbian-bsp-deb-versions.txt` and
+`bsp-baseline.json`; an ordinary build never silently adopted it.
 
 ## Drift-Guard Exit Policy + Strict-Gate Promotion Criterion
 

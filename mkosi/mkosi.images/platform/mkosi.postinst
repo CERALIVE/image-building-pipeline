@@ -47,7 +47,8 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-0}"
 # change to the boot script, the board manifest, or the disk assembler.
 #
 # Both paths come from the manifest (kernel_source.dtb_deb_dir / dtb_boot_dir)
-# and are EMPTY on the production vendor path, so this is a strict no-op there.
+# and are EMPTY for a family that installs a prebuilt kernel instead, so this is a
+# strict no-op there.
 # It is fail-loud when enabled: a missing source dir or a missing board DTB means
 # the image would boot to a device-tree-less kernel, which is indistinguishable
 # from a dead board at the far end of a flash cycle.
@@ -148,14 +149,15 @@ install_kernel_source_dtbs() {
 # WHY THIS EXISTS (real defect, found on a Rock 5B+ over UART): the U-Boot selector
 # loads /boot/Image, but nothing on the source-built path ever creates it.
 #
-#   * Armbian's linux-image-vendor-rk35xx postinst does `ln -sfv vmlinuz-<REL>
-#     /boot/Image`, and the package Depends: on initramfs-tools, so its
-#     /etc/kernel/postinst.d/initramfs-tools hook also emits initrd.img-<REL>.
+#   * Armbian's PREBUILT linux-image postinst — the retired vendor BSP package —
+#     did `ln -sfv vmlinuz-<REL> /boot/Image`, and Depends: on initramfs-tools, so
+#     its /etc/kernel/postinst.d/initramfs-tools hook also emitted
+#     initrd.img-<REL>. Neither is true here any more.
 #   * `make bindeb-pkg` generates a postinst that ONLY run-parts
 #     /etc/kernel/postinst.d — no Image symlink, and no dependency that would put
-#     an initramfs hook in that directory. With the vendor kernel package replaced
-#     by the built one, initramfs-tools is not in the closure at all, so the
-#     directory is empty and the run-parts is a no-op.
+#     an initramfs hook in that directory. With the prebuilt kernel package gone,
+#     initramfs-tools is not in the closure at all, so the directory is empty and
+#     the run-parts is a no-op.
 #
 # The resulting /boot had vmlinuz-<REL> but no Image, so `ext4load … /boot/Image`
 # failed, booti jumped into unloaded DRAM and the board reset — forever.
@@ -165,7 +167,8 @@ install_kernel_source_dtbs() {
 # arm64's default KBUILD_IMAGE — arch/arm64/boot/Image.GZ. See the branch below.
 #
 # Gated on KERNEL_SOURCE_KERNEL_RELEASE, which the resolver emits ONLY under a
-# kernel_source variant, so this is a strict no-op on the production vendor path.
+# kernel_source variant, so it stays a strict no-op for any family that installs a
+# prebuilt kernel package instead (x86_64 today).
 install_kernel_source_boot_artifacts() {
   local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
   local release="${KERNEL_SOURCE_KERNEL_RELEASE:-}"
@@ -180,7 +183,7 @@ install_kernel_source_boot_artifacts() {
 
   # Existence was not enough either. arm64 defaults KBUILD_IMAGE to
   # arch/arm64/boot/Image.gz, and bindeb-pkg ships exactly that as vmlinuz-<REL>,
-  # so the symlink pointed at GZIP. Armbian's own vendor package does not have the
+  # so the symlink pointed at GZIP. Armbian's own prebuilt package did not have the
   # problem because its framework builds with KERNEL_IMAGE_TYPE=Image.
   #
   # Whether a gzip Image boots is then a per-board U-Boot fact, and the two shipped
@@ -211,7 +214,7 @@ install_kernel_source_boot_artifacts() {
     894c5a4f*)     log "FATAL: /boot/vmlinuz-${release} is lzop-compressed"        ; exit 1 ;;
     5d0000*)       log "FATAL: /boot/vmlinuz-${release} is lzma-compressed"        ; exit 1 ;;
     *)
-      log "linking /boot/Image -> vmlinuz-${release} (Armbian linux-image postinst parity)"
+      log "linking /boot/Image -> vmlinuz-${release} (prebuilt linux-image postinst parity)"
       ln -sfn "vmlinuz-${release}" "${image}"
       ;;
   esac
@@ -240,84 +243,6 @@ install_kernel_source_boot_artifacts() {
   fi
 
   log "boot artifacts complete: raw ARM64 /boot/Image, initrd.img-${release}"
-}
-
-# prune_vendor_dtbs — the same board-only trim for the PREBUILT vendor path.
-#
-# `linux-dtb-vendor-rk35xx` installs its whole RK35xx blob set under
-# /boot/dtb-<REL>/<vendor>/ (with /boot/dtb a symlink to it), which is the
-# production path the fleet actually runs — so the source-built trim above would
-# otherwise only ever reach the two opt-in variants.
-#
-# BOTH INSTALLED LOCATIONS, exactly as install_kernel_source_dtbs does for the
-# source-built path — and this half was MISSING for three releases. The vendor
-# BSP ships the blob set TWICE: `linux-dtb-vendor-rk35xx` puts 813 files under
-# /boot/dtb-<REL>/rockchip/, and `linux-image-vendor-rk35xx` carries its own copy
-# of the same 813 under /usr/lib/linux-image-<REL>/rockchip/. That second
-# directory stays in the rootfs after installation, so trimming only /boot left
-# 91,117,943 B of other boards' device trees in every vendor slot — and, because
-# the kernel rides inside a RAUC slot, in both slots and in every bundle.
-# Measured on a real rock-5b-plus build: /boot reported "removed 810" while the
-# package payload was untouched at 814 files.
-#
-# Each directory is DISCOVERED by locating the board's own DTB rather than
-# composed from a release string: both versioned directory names come from the
-# Armbian packages, not from anything this repo resolves, and a hardcoded
-# /boot/dtb-<REL> or /usr/lib/linux-image-<REL> would silently no-op the moment
-# that package's version moved.
-# `find` does not descend the /boot/dtb symlink, so the real directory is pruned
-# exactly once and the symlink keeps resolving.
-#
-# PERSISTENCE IS THE EXISTING KERNEL FREEZE, NOT A NEW MECHANISM. The DTB package
-# is in DTB_PACKAGES, so postinst-lib.sh::freeze_boot_packages already `apt-mark
-# hold`s it and pins it by name+version; there is deliberately no second hold, no
-# dpkg path-exclude and no /etc/dpkg/dpkg.cfg.d drop-in here. See
-# tests/dtb-prune-contract.bats (tag: vendor) for the reinstall simulation that
-# decides whether that is sufficient.
-prune_vendor_dtbs() {
-  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
-  local dtb="${DTB_NAME:-}"
-
-  [[ -n "${dtb}" && "${dtb}" != "none" ]] || return 0
-  # A source-built kernel carries its own DTBs and is trimmed by
-  # install_kernel_source_dtbs; this is the prebuilt-package path only.
-  [[ -z "${KERNEL_SOURCE_KERNEL_RELEASE:-}" ]] || return 0
-  [[ -d "${root}/boot" ]] || return 0
-
-  # -mindepth 2 keeps /boot ITSELF off the candidate list. A bare DTB dropped at
-  # the root of /boot would otherwise nominate the directory that holds vmlinuz,
-  # the initrd and the boot script for a prune.
-  local -a boot_dirs=()
-  mapfile -t boot_dirs < <(find "${root}/boot" -mindepth 2 -type f -name "${dtb}" -printf '%h\n' | sort -u)
-
-  if (( ${#boot_dirs[@]} == 0 )); then
-    log "FATAL: board DTB ${dtb} is not present anywhere under /boot after installing ${DTB_PACKAGES:-<no dtb packages>}"
-    exit 1
-  fi
-
-  # The kernel package's OWN payload tree. Absence is NOT fatal here the way it is
-  # for /boot: /boot is what the U-Boot selector reads, so a board DTB missing
-  # there is an unbootable slot, while a kernel package that simply ships no DTBs
-  # of its own is a legitimate packaging shape with nothing to trim.
-  local -a payload_roots=() payload_dirs=()
-  local candidate
-  for candidate in "${root}"/usr/lib/linux-image-*; do
-    [[ -d "${candidate}" ]] && payload_roots+=("${candidate}")
-  done
-  if (( ${#payload_roots[@]} > 0 )); then
-    mapfile -t payload_dirs < <(find "${payload_roots[@]}" -mindepth 1 -type f -name "${dtb}" -printf '%h\n' | sort -u)
-  fi
-  if (( ${#payload_dirs[@]} == 0 )); then
-    log "vendor DTB prune: no kernel-package payload directory carries ${dtb} — /boot copy only"
-  fi
-
-  local d
-  for d in "${boot_dirs[@]}"; do
-    prune_dtb_dir "${d}" "vendor /boot device trees" "${dtb}"
-  done
-  for d in ${payload_dirs[@]+"${payload_dirs[@]}"}; do
-    prune_dtb_dir "${d}" "vendor kernel-package DTB payload" "${dtb}"
-  done
 }
 
 # installed_module_firmware_refs — the CONSUMER SET.
@@ -501,15 +426,14 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   # more name on the line below. A kernel .deb's postinst emits the initramfs by
   # run-parts-ing /etc/kernel/postinst.d, so the hook has to be CONFIGURED before
   # the kernel is unpacked. In one apt invocation that ordering is incidental; the
-  # vendor path only gets it for free because initramfs-tools is a hard dependency
-  # of its kernel package. The source-built package declares no such dependency.
+  # retired prebuilt path only got it for free because initramfs-tools was a hard
+  # dependency of its kernel package. The source-built package declares none.
   # zstd is the COMPRESSOR, not just a nicety: bookworm's initramfs-tools defaults  # suite-literal-ok: records the initramfs-tools behaviour observed on the previously targeted suite; the fix (install zstd first) is suite-independent
   # to COMPRESS=zstd and silently degrades to gzip when /usr/bin/zstd is absent
   # ("W: No zstd in /usr/bin:/sbin:/bin, using gzip" — census row 12). The initrd
   # is generated by the KERNEL package's postinst, so the binary has to be
-  # configured before that transaction, on BOTH kernel paths: the vendor package
-  # pulls initramfs-tools as a hard dependency but neither package depends on
-  # zstd. A gzip initrd is bigger and slower to unpack on every single boot.
+  # configured before that transaction: no kernel package of either shape depends
+  # on zstd. A gzip initrd is bigger and slower to unpack on every single boot.
   log "installing zstd ahead of the kernel package (initramfs-tools COMPRESS=zstd)"
   mkosi-install -y --no-install-recommends zstd
 
@@ -521,7 +445,6 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
   install_kernel_source_dtbs
   install_kernel_source_boot_artifacts
-  prune_vendor_dtbs
   prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."

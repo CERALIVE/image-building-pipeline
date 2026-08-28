@@ -40,16 +40,23 @@ WWAN_REQUIRED_MODULES=(qmi_wwan cdc_mbim cdc_wdm option cdc_ether cdc_ncm)
 # PCIe personality and its bench USB personality (0e8d:7127, RNDIS/serial) are
 # different device classes: a working USB adapter is not evidence that the native
 # driver is present, and the six USB modules above say nothing about it either.
-# Production ships the Armbian vendor 6.1 BSP, whose module set is a property of
-# the exact-versioned .deb, so the gate is meaningful there and is asserted there.
-# On the mainline `edge` track the answer is a Kconfig question owned by
-# manifests/kernel/rk3588-edge.fragment + verify-kernel-config.sh, not by an
-# Armbian package's bytes — so this check reports OUT OF SCOPE rather than
-# guessing. Do NOT widen the marker to a bare "vendor": the release strings that
-# actually carry this driver are 6.1.115-vendor-rk35xx (prebuilt) and
-# 6.1.115-ceralive-vendor-rk35xx (the vendor-patched variant).
+#
+# THE GATE USED TO BE KERNEL-TRACK-SCOPED, AND IS NOT ANY MORE. It ran only on a
+# `*vendor-rk35xx` release and reported OUT OF SCOPE elsewhere, because the
+# interesting subject was the prebuilt Armbian package's own bytes. That track is
+# retired: every kernel this pipeline ships is built from pinned source, and the
+# module set of the built .deb is exactly as real and as inspectable. So the
+# release-marker branch is gone and the probe runs on ANY tree it is pointed at.
+#
+# HONEST CONSEQUENCE, STATED RATHER THAN IMPLIED: the retired branch claimed that
+# on the mainline track mtk_t7xx was "a Kconfig question owned by
+# manifests/kernel/rk3588-edge.fragment + verify-kernel-config.sh". It is not —
+# CONFIG_MTK_T7XX appears in neither that fragment nor
+# manifests/kernel/required-symbols.list, so this advisory probe is currently the
+# ONLY signal about the FM350's native personality. Declaring the symbol (and
+# thereby moving the answer to the config gate) is a deliberate change with its
+# own hardware evidence; until then this warns truthfully instead of skipping.
 WWAN_NATIVE_M2_MODULES=(mtk_t7xx)
-WWAN_VENDOR_RELEASE_MARKER="vendor-rk35xx"
 
 # modprobe treats '-' and '_' as equivalent, and on-disk filenames disagree with
 # the loaded module name (e.g. the cdc_wdm module ships as cdc-wdm.ko). Normalise
@@ -141,31 +148,19 @@ wwan_collect_kernel_releases() {
   done < <(find "${root}" -type d -name modules -print0)
 }
 
-wwan_tree_is_vendor_track() {
-  local release
-  for release in "${WWAN_KERNEL_RELEASES[@]}"; do
-    [[ "${release}" == *"${WWAN_VENDOR_RELEASE_MARKER}"* ]] && return 0
-  done
-  return 1
-}
-
 # ---------------------------------------------------------------------------
-# wwan_check_native_m2 — the FM350 `mtk_t7xx` presence gate, scoped to the vendor
-# track (see WWAN_NATIVE_M2_MODULES above). Consumes the maps wwan_check already
-# populated. Advisory like everything else here: ALWAYS returns 0.
+# wwan_check_native_m2 — the FM350 `mtk_t7xx` presence gate (see
+# WWAN_NATIVE_M2_MODULES above). Consumes the maps wwan_check already populated.
+# Advisory like everything else here: ALWAYS returns 0.
 #
-# The out-of-scope branch deliberately says nothing about presence. Reporting a
-# non-vendor tree as "missing" would be a false negative dressed as a finding —
-# the driver's absence from a mainline tree is a config question, not a drop.
+# It runs on EVERY tree. The kernel-track scoping it used to carry existed only
+# for the retired prebuilt vendor BSP; a source-built module set is just as
+# inspectable, and skipping the probe would turn a real finding into silence.
 # ---------------------------------------------------------------------------
 wwan_check_native_m2() {
   local mod nmod releases
   releases="${WWAN_KERNEL_RELEASES[*]:-<none>}"
-  if ! wwan_tree_is_vendor_track; then
-    log_info "native M.2 modem driver gate: OUT OF SCOPE for this tree (kernel release(s): ${releases}; the gate binds *${WWAN_VENDOR_RELEASE_MARKER} — the production vendor 6.1 BSP). On the mainline edge track mtk_t7xx is governed by manifests/kernel/rk3588-edge.fragment + verify-kernel-config.sh."
-    return 0
-  fi
-  log_info "native M.2 modem driver gate: vendor track detected (${releases})"
+  log_info "native M.2 modem driver gate: scanning (kernel release(s): ${releases})"
   for mod in "${WWAN_NATIVE_M2_MODULES[@]}"; do
     nmod="$(_wwan_norm "${mod}")"
     if [[ -n "${WWAN_LOADABLE[${nmod}]:-}" ]]; then

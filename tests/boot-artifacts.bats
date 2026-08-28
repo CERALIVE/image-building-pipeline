@@ -16,15 +16,22 @@
 # The rootfs had `vmlinuz-7.2.0-ceralive-rk3588` and no `Image` at all, because the
 # two kernel paths populate /boot by DIFFERENT mechanisms:
 #
-#   vendor  — Armbian's linux-image-* postinst runs `ln -sfv vmlinuz-<rel>
-#             /boot/Image` and the package Depends: on initramfs-tools, so the
-#             /etc/kernel/postinst.d hook also writes initrd.img-<rel>.
-#             linux-dtb-* symlinks /boot/dtb -> dtb-<rel>/.
-#   source  — `make bindeb-pkg` emits a postinst that only run-parts an EMPTY
-#             /etc/kernel/postinst.d, and ships no Image symlink at all.
+#   prebuilt — an Armbian linux-image-* postinst ran `ln -sfv vmlinuz-<rel>
+#              /boot/Image` and the package Depends: on initramfs-tools, so the
+#              /etc/kernel/postinst.d hook also wrote initrd.img-<rel>, while
+#              linux-dtb-* symlinked /boot/dtb -> dtb-<rel>/.
+#   source   — `make bindeb-pkg` emits a postinst that only run-parts an EMPTY
+#              /etc/kernel/postinst.d, and ships no Image symlink at all.
 #
 # One path being complete says nothing about the other. That asymmetry is the
 # defect class, so every case below runs against BOTH layouts.
+#
+# The prebuilt kernel track is RETIRED, but the SYMLINK layout it produced is
+# deliberately still exercised, because `lib/verify-boot-artifacts.sh` is
+# layout-AGNOSTIC by design — it asserts what U-Boot can load, not which
+# packaging mechanism produced it. Dropping the symlink fixture would silently
+# narrow the verifier's tested surface to one shape. The fixture's release string
+# is therefore a neutral synthetic one, not a retired package's.
 #
 # Hardware-free and root-free: the subject is the normalized rootfs tar the build
 # already emits, so symlinks and sizes are readable with no loop device.
@@ -86,10 +93,10 @@ _seed_dtbs() {
   head -c 90000  /dev/zero >"$dir/rk3588s-orangepi-5-plus.dtb"
 }
 
-# The Armbian vendor layout, exactly as read off a known-good built image:
+# The SYMLINK layout, exactly as read off a known-good prebuilt-kernel image:
 # Image -> vmlinuz-<rel>, dtb -> dtb-<rel>/, and only the VERSIONED initrd.
-seed_vendor_layout() {
-  local root="$WORK/vendor" rel=6.1.115-vendor-rk35xx
+seed_symlink_layout() {
+  local root="$WORK/symlink" rel=6.9.0-prebuilt-rk3588
   _seed_common "$root" "$rel"
   ln -s "vmlinuz-$rel" "$root/boot/Image"
   _seed_dtbs "$root/boot/dtb-$rel/rockchip"
@@ -100,7 +107,7 @@ seed_vendor_layout() {
 }
 
 # The source-built layout — which since the mainline flip is the PRODUCTION one:
-# bindeb-pkg ships DTBs under a real /boot/dtb/<vendor>/ directory (no versioned
+# bindeb-pkg ships DTBs under a real /boot/dtb/<soc-vendor>/ directory (no versioned
 # dir, so no symlink to make), the platform layer adds the Image symlink, and
 # initramfs-tools writes the initrd. The release string here is the one the
 # manifest's default resolve produces; the case at the end of this file fails if
@@ -135,12 +142,12 @@ run_verify() {
 
 # --- the two shipped layouts both satisfy the selector -----------------------
 
-@test "boot artifacts: the Armbian vendor layout passes (Image/dtb symlinks)" {
-  run_verify "$(pack "$(seed_vendor_layout)")"
+@test "boot artifacts: the SYMLINK layout passes (Image/dtb symlinks)" {
+  run_verify "$(pack "$(seed_symlink_layout)")"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/boot/Image -> boot/vmlinuz-6.1.115-vendor-rk35xx"* ]]
-  [[ "$output" == *"boot/dtb-6.1.115-vendor-rk35xx/rockchip/$DTB"* ]]
-  [[ "$output" == *"boot/initrd.img-6.1.115-vendor-rk35xx"* ]]
+  [[ "$output" == *"/boot/Image -> boot/vmlinuz-6.9.0-prebuilt-rk3588"* ]]
+  [[ "$output" == *"boot/dtb-6.9.0-prebuilt-rk3588/rockchip/$DTB"* ]]
+  [[ "$output" == *"boot/initrd.img-6.9.0-prebuilt-rk3588"* ]]
 }
 
 @test "boot artifacts: the source-built layout passes (real dtb dir)" {
@@ -172,7 +179,7 @@ run_verify() {
 
 @test "boot artifacts: a missing Image fails on either layout" {
   local root
-  for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
+  for root in "$(seed_symlink_layout)" "$(seed_source_layout)"; do
     rm -f "$root/boot/Image"
     run_verify "$(pack "$root")"
     [ "$status" -ne 0 ]
@@ -223,7 +230,7 @@ run_verify() {
 
 @test "boot artifacts: a raw ARM64 Image passes the format check on either layout" {
   local root
-  for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
+  for root in "$(seed_symlink_layout)" "$(seed_source_layout)"; do
     run_verify "$(pack "$root")"
     [ "$status" -eq 0 ]
     [[ "$output" == *"raw ARM64 Image"* ]]
@@ -263,7 +270,7 @@ run_verify() {
 
 @test "boot artifacts: a missing board DTB fails on either layout" {
   local root
-  for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
+  for root in "$(seed_symlink_layout)" "$(seed_source_layout)"; do
     find "$root/boot" -name "$DTB" -delete
     run_verify "$(pack "$root")"
     [ "$status" -ne 0 ]
@@ -273,7 +280,7 @@ run_verify() {
 
 @test "boot artifacts: a missing versioned initrd fails on either layout" {
   local root
-  for root in "$(seed_vendor_layout)" "$(seed_source_layout)"; do
+  for root in "$(seed_symlink_layout)" "$(seed_source_layout)"; do
     rm -f "$root"/boot/initrd.img-*
     run_verify "$(pack "$root")"
     [ "$status" -ne 0 ]
@@ -311,13 +318,13 @@ run_verify() {
   [ "$initramfs_line" -lt "$kernel_line" ]
 }
 
-@test "platform layer: the boot-artifact step is a no-op on the vendor path" {
-  # The vendor kernel package already does all of this. The gate is the resolved
+@test "platform layer: the boot-artifact step is a no-op with no resolved release" {
+  # A prebuilt kernel package does all of this itself. The gate is the resolved
   # release, which is empty unless a kernel_source variant was selected.
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   run bash -c "
     set -euo pipefail
-    BUILDROOT=$WORK/novendor
+    BUILDROOT=$WORK/noprebuilt
     mkdir -p \"\$BUILDROOT/boot\"
     KERNEL_SOURCE_KERNEL_RELEASE=''
     $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst" | sed 's/^log()/_log()/')
@@ -408,7 +415,7 @@ _run_boot_artifacts() {
   [ "$(od -An -tx1 -j0 -N2 -v "$dir/boot/vmlinuz-$rel" | tr -d ' \n')" = "1f8b" ]
 }
 
-@test "platform layer: an already-raw vmlinuz keeps the vendor-parity symlink" {
+@test "platform layer: an already-raw vmlinuz keeps the prebuilt-parity symlink" {
   local dir="$WORK/rawpath" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   _write_arm64_image "$dir/boot/vmlinuz-$rel" 65536

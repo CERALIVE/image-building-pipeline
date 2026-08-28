@@ -4,9 +4,8 @@
 # carries the board's OWN device tree and not 227 other boards'.
 #
 # WHY THIS FILE EXISTS. `make bindeb-pkg` puts every in-tree arm64 DTB inside the
-# linux-image deb (228 `rockchip/*.dtb` on the edge build), and the Armbian
-# `linux-dtb-vendor-rk35xx` package does the same for the vendor path. A board
-# boots exactly ONE of them: `boot.scr.cmd` and `recovery.scr.cmd` load
+# linux-image deb (228 `rockchip/*.dtb` on the edge build). A board boots exactly
+# ONE of them: `boot.scr.cmd` and `recovery.scr.cmd` load
 # `/boot/dtb/rockchip/${fdtfile}` and nothing else — there is no overlay load
 # anywhere in the CeraLive boot path. Because the kernel rides inside a RAUC slot
 # (docs/partition-contract.md rule 3), the rest is carried in BOTH slots of every
@@ -15,10 +14,10 @@
 # TWO LOCATIONS, NOT ONE. The package-payload directory
 # (/usr/lib/linux-image-<REL>/rockchip) stays in the rootfs after installation,
 # so trimming only the /boot copy leaves the full set shipping anyway. Both are
-# asserted here, for both boards, and on BOTH kernel paths — the vendor path
-# reached only /boot for three releases, which left 91,117,943 B of other boards'
-# device trees in every production slot while the build log truthfully reported
-# "removed 810" for the copy it did trim.
+# asserted here, for both boards. That lesson was learned the expensive way on
+# the now-retired prebuilt path, which reached only /boot for three releases and
+# left 91,117,943 B of other boards' device trees in every production slot while
+# the build log truthfully reported "removed 810" for the copy it did trim.
 #
 # THE SOURCE `.deb` IS NOT TOUCHED, and this suite proves it: nothing is
 # repacked, and the staged package must list exactly the same members before and
@@ -45,14 +44,12 @@ setup() {
   {
     echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
     sed -n '/^prune_dtb_dir()/,/^}/p' "$POSTINST"
-    sed -n '/^prune_vendor_dtbs()/,/^}/p' "$POSTINST"
     sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$POSTINST"
   } >"$FNS"
 
   # Non-vacuity: a renamed or reshaped function would otherwise make every case
   # below pass against an empty file.
   grep -q '^prune_dtb_dir()' "$FNS"
-  grep -q '^prune_vendor_dtbs()' "$FNS"
   grep -q '^install_kernel_source_dtbs()' "$FNS"
   bash -n "$FNS"
 }
@@ -218,7 +215,7 @@ edge_env() {
   [ ! -f "$root/boot/dtb/rockchip/overlay/rk3588-unused.dtbo" ]
 }
 
-@test "edge dtb install: the production vendor path is still a strict no-op" {
+@test "edge dtb install: an empty mapping is still a strict no-op" {
   # Both mapping variables are empty with no kernel_source variant selected, and
   # that must remain a clean return rather than a prune of something.
   drive "BUILDROOT='$WORK/root' DTB_NAME='x.dtb' KERNEL_SOURCE_DTB_DEB_DIR='' KERNEL_SOURCE_DTB_BOOT_DIR='' install_kernel_source_dtbs"
@@ -273,242 +270,43 @@ edge_env() {
   [ "$(printf '%s\n' "$before" | grep -c '\.dtb$')" -gt 1 ]
 }
 
-# --- the prebuilt vendor path -------------------------------------------------
-
-# bats test_tags=vendor
-@test "vendor dtb prune: the versioned /boot dtb directory is trimmed to the board DTB" {
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local root="$WORK/root"
-  local versioned="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$versioned" "$dtb"
-  ln -s "dtb-6.1.115-vendor-rk35xx" "$root/boot/dtb"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' DTB_PACKAGES='linux-dtb-vendor-rk35xx' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-
-  [ -f "$versioned/$dtb" ]
-  [ "$(find "$versioned" -type f | wc -l)" -eq 1 ]
-  # The /boot/dtb symlink is the path the U-Boot selector resolves; the prune
-  # must not have replaced or broken it.
-  [ -L "$root/boot/dtb" ]
-  [ -f "$root/boot/dtb/rockchip/$dtb" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: the directory is DISCOVERED, not composed from a release string" {
-  # A hardcoded /boot/dtb-<REL> would silently no-op the moment the Armbian
-  # package's version moved — the directory name comes from that package, not
-  # from anything this repo resolves.
-  local dtb; dtb="$(board_dtb orange-pi-5-plus)"
-  local root="$WORK/root"
-  local versioned="$root/boot/dtb-9.9.9-some-other-vendor-name/rockchip"
-  seed_dtb_dir "$versioned" "$dtb"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ "$(find "$versioned" -type f | wc -l)" -eq 1 ]
-  [ -f "$versioned/$dtb" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: BOTH installed locations are trimmed, not just /boot" {
-  # THE REGRESSION CASE. The vendor BSP ships the blob set twice —
-  # linux-dtb-vendor-rk35xx under /boot/dtb-<REL>/rockchip and
-  # linux-image-vendor-rk35xx under /usr/lib/linux-image-<REL>/rockchip — and only
-  # the first was ever pruned. Against the real 26.5.1 packages that left
-  # 814 files / 91,117,943 B unreachable-but-shipped in every RAUC slot.
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local root="$WORK/root"
-  local boot_dir="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  local payload="$root/usr/lib/linux-image-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$boot_dir" "$dtb"
-  seed_dtb_dir "$payload" "$dtb"
-  ln -s "dtb-6.1.115-vendor-rk35xx" "$root/boot/dtb"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' DTB_PACKAGES='linux-dtb-vendor-rk35xx' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-
-  [ -f "$boot_dir/$dtb" ]
-  [ "$(find "$boot_dir" -type f | wc -l)" -eq 1 ]
-  [ -f "$payload/$dtb" ]
-  [ "$(find "$payload" -type f | wc -l)" -eq 1 ]
-  # The other boards' blobs are exactly what must be gone from the payload copy.
-  [ ! -f "$payload/$(board_dtb orange-pi-5-plus)" ]
-  [ -L "$root/boot/dtb" ]
-  [ -f "$root/boot/dtb/rockchip/$dtb" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: the PAYLOAD directory is DISCOVERED, not composed from a release string" {
-  # Same rule as the /boot copy: /usr/lib/linux-image-<REL> is named by the Armbian
-  # package, not by anything this repo resolves, so a hardcoded release would
-  # silently no-op on the next version bump.
-  local dtb; dtb="$(board_dtb orange-pi-5-plus)"
-  local root="$WORK/root"
-  local boot_dir="$root/boot/dtb-9.9.9-some-other-vendor-name/rockchip"
-  local payload="$root/usr/lib/linux-image-9.9.9-some-other-vendor-name/rockchip"
-  seed_dtb_dir "$boot_dir" "$dtb"
-  seed_dtb_dir "$payload" "$dtb"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ "$(find "$boot_dir" -type f | wc -l)" -eq 1 ]
-  [ "$(find "$payload" -type f | wc -l)" -eq 1 ]
-  [ -f "$payload/$dtb" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: verify-before-delete holds in the PAYLOAD copy too" {
-  # A named overlay that is absent from the payload must refuse to delete anything
-  # ANYWHERE — including the /boot copy that was already going to be trimmed.
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local root="$WORK/root"
-  local boot_dir="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  local payload="$root/usr/lib/linux-image-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$boot_dir" "$dtb"
-  seed_dtb_dir "$payload" "$dtb"
-  rm -f "$payload/overlay/rk3588-example.dtbo"
-  local before; before="$(find "$payload" -type f | sort)"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='overlay/rk3588-example.dtbo' prune_vendor_dtbs"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to prune"* ]]
-  [ "$(find "$payload" -type f | sort)" = "$before" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: a kernel package that ships no DTB payload is NOT fatal" {
-  # /boot missing the board DTB is an unbootable slot and stays fatal; a kernel
-  # package with no device trees of its own is a legitimate packaging shape with
-  # nothing to trim, so it must not fail a build that is otherwise correct.
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local root="$WORK/root"
-  local boot_dir="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$boot_dir" "$dtb"
-  mkdir -p "$root/usr/lib/linux-image-6.1.115-vendor-rk35xx"
-  printf 'not a device tree\n' >"$root/usr/lib/linux-image-6.1.115-vendor-rk35xx/README"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"no kernel-package payload directory carries"* ]]
-  [ "$(find "$boot_dir" -type f | wc -l)" -eq 1 ]
-  [ -f "$root/usr/lib/linux-image-6.1.115-vendor-rk35xx/README" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: /boot itself can never become a prune target" {
-  # -mindepth 2 is load-bearing: a bare board DTB at the root of /boot would
-  # otherwise nominate the directory holding vmlinuz, the initrd and boot.scr.
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local root="$WORK/root"
-  local boot_dir="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$boot_dir" "$dtb"
-  printf 'dtb\n' >"$root/boot/$dtb"
-  printf 'kernel\n' >"$root/boot/vmlinuz-6.1.115-vendor-rk35xx"
-
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ -f "$root/boot/vmlinuz-6.1.115-vendor-rk35xx" ]
-  [ -f "$boot_dir/$dtb" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: a board DTB missing from /boot fails the build" {
-  local root="$WORK/root"
-  mkdir -p "$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  printf 'dtb\n' >"$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip/rk3588-evb1-v10.dtb"
-
-  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='' prune_vendor_dtbs"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"is not present anywhere under /boot"* ]]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: it declines on the source-built path and on a DTB-less board" {
-  local root="$WORK/root"
-  local versioned="$root/boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-  seed_dtb_dir "$versioned" rk3588-rock-5b-plus.dtb
-  local before; before="$(find "$versioned" -type f | sort)"
-
-  # A kernel_source variant carries its own DTBs and is trimmed by
-  # install_kernel_source_dtbs; running both would prune the same tree twice.
-  drive "BUILDROOT='$root' DTB_NAME='rk3588-rock-5b-plus.dtb' KERNEL_SOURCE_KERNEL_RELEASE='7.2.0-ceralive-rk3588' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ "$(find "$versioned" -type f | sort)" = "$before" ]
-
-  # x86 has no device tree at all.
-  drive "BUILDROOT='$root' DTB_NAME='none' KERNEL_SOURCE_KERNEL_RELEASE='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ "$(find "$versioned" -type f | sort)" = "$before" ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: persistence rides the EXISTING kernel freeze, with no second hold" {
-  # The plan allows a dpkg path-exclude contract ONLY if a reinstall can bypass
-  # the freeze in a supported workflow. It cannot, for a structural reason: the
-  # boot BSP is installed from mkosi's build-time-only local `file:/repository`,
-  # which does not exist on the shipped device, so apt has no candidate for the
-  # DTB package to reinstall FROM — on top of the apt-mark hold and the
-  # name+version pin that freeze_boot_packages already applies to it.
-  local persistence="$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh"
-
-  # The DTB package reaches the freeze set through DTB_PACKAGES, which is the
-  # same manifest field prune_vendor_dtbs reports on.
-  grep -q 'DTB_PACKAGES' "$persistence"
-  grep -q 'apt-mark hold' "$persistence"
-
-  # No parallel hold mechanism was invented anywhere in the platform layer.
-  # Comments are stripped first: the function's own header explains why none of
-  # these is used, and matching that prose would make this pass for the wrong
-  # reason on a file that actually grew one.
-  run bash -c "grep -vE '^[[:space:]]*#' '$POSTINST' | grep -nE 'path-exclude|path-include|dpkg\.cfg\.d|apt-mark'"
-  [ "$status" -ne 0 ]
-
-  # And the freeze file itself is written by exactly one function.
-  [ "$(grep -c '^freeze_boot_packages()' "$persistence")" -eq 1 ]
-}
-
-# bats test_tags=vendor
-@test "vendor dtb prune: a simulated package reinstall restores the extras, so the freeze is load-bearing" {
-  # Non-vacuity for the case above. The prune is deliberately NOT self-defending
-  # — re-unpacking the package puts every blob back — which is exactly why the
-  # persistence argument has to rest on the freeze plus the absent apt origin,
-  # and why claiming "the prune is permanent" on its own would be false.
-  command -v dpkg-deb >/dev/null || skip "dpkg-deb not available"
-  local dtb; dtb="$(board_dtb rock-5b-plus)"
-  local rel_dir="boot/dtb-6.1.115-vendor-rk35xx/rockchip"
-
-  local stage="$WORK/pkg"
-  mkdir -p "$stage/DEBIAN" "$stage/$rel_dir"
-  printf 'Package: linux-dtb-vendor-rk35xx\nVersion: 26.5.1\nArchitecture: arm64\nMaintainer: t <t@t>\nDescription: fixture\n' >"$stage/DEBIAN/control"
-  seed_dtb_dir "$stage/$rel_dir" "$dtb"
-  dpkg-deb --build --root-owner-group "$stage" "$WORK/dtb.deb" >/dev/null
-
-  local root="$WORK/root"
-  mkdir -p "$root"
-  dpkg-deb -x "$WORK/dtb.deb" "$root"
-  drive "BUILDROOT='$root' DTB_NAME='$dtb' KERNEL_SOURCE_KERNEL_RELEASE='' CERALIVE_DTB_KEEP_OVERLAYS='' prune_vendor_dtbs"
-  [ "$status" -eq 0 ]
-  [ "$(find "$root/$rel_dir" -type f | wc -l)" -eq 1 ]
-
-  dpkg-deb -x "$WORK/dtb.deb" "$root"
-  [ "$(find "$root/$rel_dir" -type f | wc -l)" -gt 1 ]
-}
+# --- the prebuilt-package prune path: RETIRED ---------------------------------
+#
+# `prune_vendor_dtbs` and its eleven `bats test_tags=vendor` cases lived here.
+# The function trimmed the two directories an Armbian `linux-dtb-*` package and
+# its `linux-image-*` sibling both installed, and it was gated on an EMPTY
+# KERNEL_SOURCE_KERNEL_RELEASE — i.e. on the prebuilt kernel path. No family this
+# pipeline ships resolves a prebuilt rk35xx kernel any more (rk3588 builds from
+# pinned source; x86_64 has no device tree at all), so the function had no
+# reachable caller and was deleted with the vendor kernel track. Its cases went
+# with it because the code they covered is gone, not because they were
+# inconvenient — every property they pinned that is still reachable (verify
+# before delete, DISCOVER the directory rather than composing it from a release
+# string, both installed locations, `/boot` is never a prune target, re-running
+# is a no-op) is still pinned by the `prune_dtb_dir` primitive section and the
+# source-built `edge dtb install:` section above, which exercise the same
+# primitive on the path that still exists.
+#
+# Both the function and its cases are recoverable at the `vendor-kernel-final`
+# tag.
 
 # --- wiring -------------------------------------------------------------------
 
-@test "dtb prune: both prune paths are actually WIRED into the boot-BSP branch" {
+@test "dtb prune: the prune path is actually WIRED into the boot-BSP branch" {
   # A prune nobody calls is the failure mode a synthetic-tree suite cannot see.
   grep -q 'install_kernel_source_dtbs$' "$POSTINST"
-  grep -q 'prune_vendor_dtbs$' "$POSTINST"
 
-  local install_line vendor_line firmware_line
+  local install_line firmware_line
   install_line="$(grep -n '^  install_kernel_source_dtbs$' "$POSTINST" | cut -d: -f1)"
-  vendor_line="$(grep -n '^  prune_vendor_dtbs$' "$POSTINST" | cut -d: -f1)"
   firmware_line="$(grep -n '^  prune_irrelevant_rk3588_firmware$' "$POSTINST" | cut -d: -f1)"
   [ -n "$install_line" ]
-  [ "$install_line" -lt "$vendor_line" ]
-  [ "$vendor_line" -lt "$firmware_line" ]
+  [ -n "$firmware_line" ]
+  [ "$install_line" -lt "$firmware_line" ]
+
+  # ABSENCE GUARD: the retired prebuilt-package prune must not come back without
+  # a caller and a contract. (Same shape as tests/packaging-hygiene.bats' guards
+  # for the retired ceralive-cls-fw half.)
+  run ! grep -q 'prune_vendor_dtbs' "$POSTINST"
 }
 
 @test "dtb prune: the overlay keep-list is on the env_names <-> PassEnvironment lockstep" {

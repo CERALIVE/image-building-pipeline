@@ -4,12 +4,20 @@
 # Captures SoC/arch-level build attributes shared by every rk3588 board
 # (Orange Pi 5+, Radxa Rock 5B+). Per-board variance lives in ../boards/*.yaml.
 #
-# DECISION D3 IS SUPERSEDED FOR THE KERNEL HALF. The production kernel is now
-# the mainline 7.2 track built FROM SOURCE, selected by `default_variant: edge`
-# below; the prebuilt Armbian vendor 6.1 BSP survives only behind the explicit
-# `--variant vendor` overlay and is scheduled for removal. D3's OTHER half is
-# unchanged and still locked: RAUC bootloader adapter = `custom`, because the
-# staged U-Boot lacks persistent fw_setenv (FAT-file bootcount approach).
+# DECISION D3 IS SUPERSEDED FOR THE KERNEL HALF, AND THE VENDOR TRACK IS GONE.
+# The kernel is the mainline 7.2 track built FROM SOURCE, selected by
+# `default_variant: edge` below. The prebuilt Armbian vendor 6.1 BSP — its
+# `armbian_branch: vendor` base and its `linux-image-*` / `linux-dtb-*` package
+# pins — and the source-built overlay that rebuilt the same BSP from Armbian's
+# published .config were both removed on the mainline cutover. Every byte of that
+# machinery, exact package names and pins included, is preserved at the annotated
+# tag `vendor-kernel-final`:
+#   git show vendor-kernel-final:manifests/families/rk3588.yaml
+#
+# D3's OTHER half is unchanged and still locked: RAUC bootloader adapter =
+# `custom`, because the staged U-Boot lacks persistent fw_setenv (FAT-file
+# bootcount approach). That is a BOOTLOADER fact, and it survives the kernel
+# retirement untouched — the boards still stage Armbian's U-Boot packages.
 #
 # Sources: configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES),
 # userpatches/config-{rock5bplus,orangepi5plus}.conf (BRANCH=, EXTRA_BSP_PACKAGES),
@@ -23,85 +31,107 @@ arch: arm64
 # A variant-less `./build <board>` resolves the `edge` overlay declared below —
 # byte-identically to `./build <board> --variant edge`, board `variant_overrides`
 # for `edge` included. So the mainline 7.2 source-built kernel is what ships, and
-# the prebuilt vendor rows in the TOP-LEVEL fields under this block are no longer
-# on the default path at all: they are the base every variant overlays, reachable
-# as a resolved answer only through `--variant vendor`.
+# the TOP-LEVEL fields under this block describe that same track: they are the
+# base every overlay starts from, and since the vendor retirement there is no
+# longer any track that disagrees with them about the kernel.
 #
-# WHY A POINTER AND NOT A COPY. Moving `edge`'s block up here would force
-# `edge-test` (which `extends: edge`) to restate its parent's pins — the exact
-# byte-for-byte drift `extends` exists to make impossible — and would deep-merge
-# this file's defconfig mode onto `vendor-patched`'s config-file mode, producing
-# the half-specified config `$defs/kernel_source`'s `oneOf` forbids and
-# build-kernel.sh re-asserts. One declaration, one pin set, one answer.
+# WHY A POINTER AND NOT A COPY — STILL. `edge`'s `kernel_source` block is NOT
+# moved up here, and the reason survived the vendor removal: `edge-test`
+# `extends: edge`, and `apply_variant` validates a resolved `extends` overlay
+# against the FULL `$defs/kernel_source` contract. With edge's pins at the family
+# level that resolved overlay is a PARTIAL and fails on every required pin, so
+# the only repairs would be re-stating the parent's pins in the child — the exact
+# byte-for-byte drift `extends` exists to make impossible — or restructuring the
+# schema so every variant `kernel_source` is a delta, which leaves `extends` with
+# zero consumers. One declaration, one pin set, one answer.
+#
+# (The second historical reason — that a move would deep-merge this file's
+# defconfig mode onto the retired source-built BSP overlay's config-FILE mode and
+# produce the half-specified block `$defs/kernel_source`'s `oneOf` forbids — died
+# with that overlay. The `edge-test` reason above is on its own sufficient.)
 # ---------------------------------------------------------------------------
 default_variant: edge
 
-# BRANCH= from userpatches/config-*.conf (both boards) — NOT the dead
-# ARMBIAN_BRANCH=current in configs/devices/*.conf. This is the BASE value the
-# `vendor` overlay keeps; the production `edge` overlay retargets it.
-armbian_branch: vendor
+# The mainline track's Armbian branch name. At the v7.2 base the branch whose
+# mapping yields KERNEL_MAJOR_MINOR=7.2 is actually `bleedingedge`
+# (armbian/build config/sources/families/include/rockchip64_common.inc), which
+# this field's schema enum — vendor|current|edge|none — cannot spell. So it stays
+# `edge`, the mainline-track name, and the real mapping is re-derived from
+# armbian/build by CERALIVE/rk3588-kernel-patches scripts/preflight.sh and
+# recorded in its kernel-pin.env.
+#
+# Nothing under lib/ consumes ARMBIAN_BRANCH for a kernel_source track, so the
+# value is traceability metadata: the U-Boot and firmware packages this track
+# still fetches prebuilt are selected by NAME (the board's `uboot_packages` and
+# its `variant_overrides`), never by this field. Armbian is consulted for the
+# mapping ONLY — it is never invoked as the build system (see kernel_source).
+armbian_branch: edge
 
-# linux-image-* of BOARD_PACKAGES, resolved to the `vendor` branch. The Armbian
-# bookworm arm64 vendor kernel for RK35xx SoCs ships as -rk35xx (the  # suite-literal-ok: ARMBIAN_SUITE, the BSP feed — orthogonal to the userspace RELEASE
-# -rockchip64 name was a migration placeholder that doesn't exist in the feed).
-# NOT on the default path — see `default_variant` above.
+# The BUILT kernel package name, declared ONCE. `edge` does not restate it: the
+# family base and the production track are the same track now, and a second copy
+# is exactly the drift `default_variant` exists to avoid. The build stage
+# validates the actual Debian control Package:/Version:/Architecture: fields of
+# the .deb `make bindeb-pkg` produces against this name and
+# kernel_source.package_version, so a rename cannot silently yield an unused deb.
+#
+# It is never fetched: the resolver derives `kernel_source.suppressed_packages`
+# from this list (pre-overlay UNION post-overlay) and the Armbian fetch skips
+# every name in it. `edge-test` REPLACES this array with its own built name, and
+# the union then carries both.
 kernel_packages:
-  - linux-image-vendor-rk35xx
+  - linux-image-7.2.0-ceralive-rk3588
 
-# RK3588 U-Boot is BOARD-SPECIFIC in the Armbian feed (linux-u-boot-<board>-vendor),
+# RK3588 U-Boot is BOARD-SPECIFIC in the Armbian feed (linux-u-boot-<board>-*),
 # so the family declares none — each board names its own via the board manifest's
-# uboot_packages override (board arrays REPLACE family arrays on deep-merge). The
-# old rkbin-rk3588 entry was an internal placeholder; no such package exists in apt.
+# uboot_packages override (board arrays REPLACE family arrays on deep-merge), and
+# its `variant_overrides.edge.uboot_packages` names the mainline-TF-A `-edge`
+# build the production track fetches.
 uboot_packages: []
 
-# linux-dtb-* of BOARD_PACKAGES, resolved to the `vendor` branch. Matches the
-# -rk35xx vendor kernel naming above (the -rockchip64 name was a placeholder).
-# NOT on the default path either: the production `edge` overlay resolves
-# dtb_packages: [] because `make bindeb-pkg` ships the in-tree DTBs inside the
-# linux-image deb it builds.
-dtb_packages:
-  - linux-dtb-vendor-rk35xx
+# NO separate DTB package on any track: `make bindeb-pkg` ships the in-tree arm64
+# DTBs inside the linux-image deb it builds, and kernel_source.dtb_deb_dir /
+# dtb_boot_dir declare how that in-deb path satisfies the board manifest's
+# dtb_name expectation. The retired prebuilt vendor track was the only thing that
+# ever resolved a `linux-dtb-*` package here.
+dtb_packages: []
 
 # Shared SoC/GPU/Wi-Fi firmware. armbian-firmware is the broad Armbian firmware
-# bundle (ships realtek + broadcom WiFi blobs).
+# bundle (ships realtek + broadcom WiFi blobs) and carries the Mali GPU's own CSF
+# firmware, which the in-tree `panthor` driver loads.
 #
 # Task 19 firmware-split audit — KEEP armbian-firmware, do NOT swap to the Debian
-# split (firmware-realtek + firmware-brcm80211). Both rk3588 boards run the Armbian
-# VENDOR kernel (Decision D3) whose out-of-tree WiFi/BT drivers expect Armbian's
-# board-matched blobs AND per-board NVRAM config files:
+# split (firmware-realtek + firmware-brcm80211). Armbian ships per-board NVRAM
+# (.txt) configuration files alongside the blobs that Debian's split packages
+# omit:
 #   * Rock 5B+   → RTL8852BE  (was rtl8852be-firmware + firmware-realtek)
 #   * Orange Pi 5+ → AP6275P / brcmfmac (Broadcom)
-# Debian's split packages target the MAINLINE in-tree drivers and omit the Armbian
-# NVRAM (.txt) files, so a swap risks WiFi never associating on the vendor kernel.
-# `armbian-firmware` is already the TRIMMED Armbian variant (NOT armbian-firmware-full),
-# i.e. the narrowest safe lever available — there is no finer split that keeps the
-# vendor-kernel WiFi/BT path intact. Size/feasibility detail: docs/size-notes.md.
+# `armbian-firmware` is already the TRIMMED Armbian variant (NOT
+# armbian-firmware-full), i.e. the narrowest safe lever available.
+# Size/feasibility detail: docs/size-notes.md.
 #
-# libmali IS NOT LISTED HERE, AND THAT PLACEMENT IS LOAD-BEARING — it is declared
-# by the two VENDOR-kernel overlays instead. The Mali-G610 (Valhall) GPU userspace
-# blob drives Rockchip's out-of-tree driver through /dev/mali0, which only a vendor
-# kernel creates; the mainline track binds the same silicon with the in-tree open
-# `panthor` DRM driver and Mesa. So it is a per-overlay fact, not a family one.
+# NO libmali. The proprietary Mali-G610 (Valhall) userspace blob drove Rockchip's
+# out-of-tree kernel module through /dev/mali0, a node only the retired vendor
+# kernel created; it was declared by the two vendor overlays and went with them.
+# The mainline track binds the same silicon with the in-tree open `panthor` DRM
+# driver (CONFIG_DRM_PANTHOR=m, pinned in ../kernel/required-symbols.list) and
+# Mesa's Gallium panthor/panfrost driver. Re-adding the blob would not merely
+# fail to help: it ships /etc/ld.so.conf.d/00-aarch64-mali.conf, whose `00-`
+# prefix sorts first and captures libEGL.so.1 / libGLESv2.so.2 / libgbm.so.1 for
+# the WHOLE image, so it would shadow Mesa and leave the board with no working
+# EGL at all (armbian/build#10320).
 #
-# Declaring it here anyway would NOT be merely untidy, because the fetch path
-# unions this FILE's lists with the resolved env values (lib/fetch/bsp.sh
-# ::collect_declared_bsp_pkgs). An overlay that resolves a strict SUBSET of a
-# family list cannot remove a name that way, so the mainline default would still
-# stage the blob's .deb — and then die at [3/9] as an "unclassified staged
-# package", because the resolved FIRMWARE_PACKAGES that partitions the staging
-# tree would not name it. Keep a family list to what EVERY track needs and let
-# overlays ADD.
-#
-# The blob itself is NOT in the Armbian bookworm arm64 feed. It is pinned to an  # suite-literal-ok: names the Armbian BSP feed, not the target rootfs suite
-# exact upstream release asset and SHA-256-verified in
-# ../rk3588-userspace-deb-versions.txt (staged by fetch_rk3588_userspace, excluded
-# from the Armbian fetch). The g24p0 wayland-gbm variant is the one the kiosk
-# (cage = a Wayland compositor) needs — see docs/cog-display-addon.md §5. The
-# GPU's CSF firmware blob rides armbian-firmware on BOTH tracks.
+# KEEP A FAMILY LIST TO WHAT EVERY TRACK NEEDS. The fetch path UNIONS this FILE's
+# lists with the resolved env values (lib/fetch/bsp.sh::collect_declared_bsp_pkgs),
+# so an overlay that resolves a strict SUBSET of a family list cannot remove a
+# name that way — the build would still stage the .deb and then die at [3/9] as
+# an "unclassified staged package", because the resolved FIRMWARE_PACKAGES that
+# partitions the staging tree would not name it. Overlays ADD; they can never
+# subtract.
 firmware_packages:
   - armbian-firmware
 
-# Decision D3: vendor U-Boot has no fw_setenv → raw GPT bootcount approach.
+# Decision D3: the staged U-Boot has no persistent fw_setenv → raw GPT bootcount
+# approach. Unchanged by the kernel retirement.
 rauc_bootloader_adapter: custom
 
 # Hardware-accelerated GStreamer encode/decode (Rockchip MPP) feeding
@@ -141,14 +171,13 @@ serial_console: ttyS2:1500000
 
 # ---------------------------------------------------------------------------
 # VARIANTS. Everything above this line is the BASE every overlay below starts
-# from — it is no longer, by itself, an answer any build resolves: `edge` is the
-# production track (`default_variant:` at the top of this file) and every other
-# overlay is opt-in.
+# from. `edge` is the production track (`default_variant:` at the top of this
+# file) and carries the source-build pins; `edge-test` is its debug sibling and
+# is never released.
 #
 # Selection is never inferred from the board, the host or the branch:
-#   build rock-5b-plus                     -> `edge` (the declared default)
-#   build rock-5b-plus --variant vendor    -> the prebuilt Armbian vendor BSP
-#   build rock-5b-plus --variant <name>    (or CERALIVE_KERNEL_VARIANT=<name>)
+#   build rock-5b-plus                       -> `edge` (the declared default)
+#   build rock-5b-plus --variant edge-test   (or CERALIVE_KERNEL_VARIANT=<name>)
 #
 # `variants:` and `default_variant:` are both stripped before flattening, so no
 # unselected overlay can leak a second kernel pin into the resolved params.
@@ -156,81 +185,17 @@ serial_console: ttyS2:1500000
 # docs/kernel-currency-watch.md.
 # ---------------------------------------------------------------------------
 variants:
-  # THE PREBUILT ARMBIAN VENDOR 6.1 BSP — the path that shipped every image
-  # before the mainline flip, kept selectable while the mainline track proves
-  # itself on hardware. It is a pure restatement of this file's own top-level
-  # fields (arrays REPLACE wholesale on deep-merge, so re-declaring the branch is
-  # enough to make the overlay non-empty and to say out loud which track it is),
-  # which is why `--variant vendor` resolves byte-identically to what a bare
-  # `./build <board>` resolved before `default_variant` existed — pinned against
-  # the committed vendor-baseline fixtures.
+  # THE PRODUCTION TRACK. Mainline kernel built FROM SOURCE with the CeraLive
+  # RK3588 patch series (VEPU580 encoder + the HDMI-RX fixes).
   #
-  # It declares NO kernel_source, so the kernel/DTB packages are fetched
-  # prebuilt exactly as they always were. It also no longer carries the retired
-  # `ceralive-cls-fw` extension, so this track has NO NET_CLS_FW: that capability
-  # is in-tree on the mainline default now (rk3588-edge.fragment). Removing this
-  # overlay and every vendor row it restates is the vendor-kernel retirement.
-  vendor:
-    armbian_branch: vendor
-
-    # The Mali blob, declared HERE rather than in the family base — see the
-    # firmware_packages note above for why a family list may only hold what
-    # every track needs.
-    firmware_packages:
-      - armbian-firmware
-      - libmali-valhall-g610-g24p0-wayland-gbm
-
-  # Mainline-track kernel built FROM SOURCE with the CeraLive RK3588 patch
-  # series (VEPU580 encoder + the HDMI-RX fixes). At the v7.2 base the Armbian
-  # branch whose mapping yields KERNEL_MAJOR_MINOR=7.2 is `bleedingedge`
-  # (armbian/build config/sources/families/include/rockchip64_common.inc), and
-  # this field's schema enum — vendor|current|edge|none — cannot spell it. So it
-  # STAYS `edge`, the mainline-track name, and the real mapping is re-derived
-  # from armbian/build by CERALIVE/rk3588-kernel-patches scripts/preflight.sh
-  # and recorded in its kernel-pin.env. Nothing is lost by that: no code under
-  # lib/ consumes ARMBIAN_BRANCH for a kernel_source variant, so the value is
-  # traceability metadata, and the U-Boot/firmware packages this track still
-  # fetches prebuilt are selected by NAME (the board's variant_overrides), never
-  # by this field. Armbian is consulted for the mapping ONLY — it is never
-  # invoked as the build system (see kernel_source below).
+  # It carries ONLY `kernel_source`. Every other field it used to restate —
+  # armbian_branch, kernel_packages, dtb_packages, firmware_packages — is now
+  # declared once at the family level above, because since the vendor retirement
+  # the family base and this track are the same track and a second copy would be
+  # drift waiting to happen. `default_variant: edge` is what makes this the
+  # production answer; the block stays HERE rather than at the family level so
+  # `edge-test` can `extends:` it (see the note at the top of this file).
   edge:
-    armbian_branch: edge
-
-    # GPU USERSPACE FOLLOWS THE KERNEL DRIVER, and on this track that is Mesa,
-    # not the blob. Mainline binds the Mali-G610 — a Valhall CSF part — with the
-    # in-tree open `panthor` DRM driver; CONFIG_DRM_PANTHOR=m survives in the
-    # REAL resolved v7.2 config for this variant and is pinned in
-    # ../kernel/required-symbols.list so it can never be dropped in silence. Its
-    # userspace is Mesa's Gallium panthor/panfrost driver, which trixie ships as
-    # dri/panthor_dri.so + dri/panfrost_dri.so onto mesa-libgallium.
-    #
-    # DROPPING libmali HERE IS LOAD-BEARING, NOT TIDINESS. The blob is ABI-bound
-    # to Rockchip's out-of-tree vendor driver and its /dev/mali0 node, which a
-    # mainline kernel never creates (armbian/build#10320), AND it ships
-    # /etc/ld.so.conf.d/00-aarch64-mali.conf, whose `00-` prefix sorts first and
-    # captures libEGL.so.1 / libGLESv2.so.2 / libgbm.so.1 for the whole image.
-    # Installed on a mainline board it therefore does not merely fail to help —
-    # it shadows Mesa and leaves the device with no working EGL at all. Nothing
-    # falls back.
-    #
-    # armbian-firmware STAYS: it carries the WiFi/BT blobs and the GPU's own CSF
-    # firmware, which the panthor driver loads exactly as the vendor driver did.
-    # The `vendor` overlay (which keeps libmali) is unchanged.
-    firmware_packages:
-      - armbian-firmware
-
-    # The BUILT package name replaces the family's vendor kernel package for
-    # resolver/orchestrator purposes. The build stage validates the actual
-    # Debian control Package:/Version:/Architecture: fields against this name,
-    # kernel_source.package_version and the resolved arch.
-    kernel_packages:
-      - linux-image-7.2.0-ceralive-rk3588
-
-    # NO separate DTB package: `make bindeb-pkg` ships the in-tree arm64 DTBs
-    # inside the linux-image deb. kernel_source.dtb_deb_dir/dtb_boot_dir declare
-    # how that in-deb path satisfies the board manifest's dtb_name expectation.
-    dtb_packages: []
-
     kernel_source:
       # Armbian's KERNELSOURCE for the mainline track (linux-stable). This base
       # is an EXACT RELEASE TAG, not a rolling branch tip: the 7.1 track followed
@@ -356,11 +321,10 @@ variants:
       package_version: 7.2.0-ceralive1
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
-      # /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/; the U-Boot boot script
+      # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
       # resolves ${fdtfile} under /boot/dtb/rockchip/ (mkosi/platform/boot/
-      # boot.scr.cmd). The platform layer copies source -> target so a
-      # source-built kernel satisfies the SAME board dtb_name expectation an
-      # Armbian linux-dtb-* package would.
+      # boot.scr.cmd). The platform layer copies source -> target so the
+      # source-built kernel satisfies the board manifest's dtb_name expectation.
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
 
@@ -416,130 +380,3 @@ variants:
       package_version: 7.2.0-ceralive1+test1
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip
-
-  # VENDOR-track kernel built FROM SOURCE: the SAME 6.1.115 BSP the `vendor`
-  # overlay installs prebuilt, plus CERALIVE/rk3588-vendor-kernel-patches. It exists
-  # to restore HDMI-RX audio capture, which the stock vendor kernel lost when
-  # armbian/linux-rockchip 78c67d98f221 (PR #430) unconditionally zeroed
-  # hdmi-audio-codec capture channels for EVERY instance — a fix aimed at RK3576
-  # HDMI-TX that killed RK3588 HDMI-RX, because rk_hdmirx registers through that
-  # same codec. Board-confirmed: /proc/asound/pcm shows the card with zero
-  # capture substreams and nothing anywhere reports an error.
-  #
-  # This is NOT `edge` with a different pin. Two things are structurally
-  # different, and both are the reason build-kernel.sh grew its two general
-  # modes rather than special-casing this variant:
-  #
-  #   1. NO TAG. rk-6.1-rkr5.1 is a rolling BSP branch that publishes no tags at
-  #      all, so `tag:` is OMITTED and `commit:` is fetched directly. Do NOT add
-  #      a synthetic tag to make this look like edge — there is no such ref.
-  #   2. NO defconfig. Armbian ships a COMPLETE .config for this kernel, and it
-  #      is the config the board actually runs. `make defconfig` would build a
-  #      materially different driver/feature set, which would make any comparison
-  #      against the shipped kernel meaningless. The config_* trio fetches that
-  #      exact file at an exact armbian/build revision and uses it verbatim.
-  #
-  # It is opt-in and ships nothing: the production default is the mainline `edge`
-  # track and this overlay is reached only through `--variant vendor-patched`.
-  vendor-patched:
-    armbian_branch: vendor
-
-    # Same vendor kernel driver, so the same GPU userspace as the `vendor`
-    # overlay: /dev/mali0 exists on this track and Mesa/panthor does not.
-    firmware_packages:
-      - armbian-firmware
-      - libmali-valhall-g610-g24p0-wayland-gbm
-
-    # Deliberately NOT `linux-image-vendor-rk35xx`. A name collision with the
-    # stock package is the one failure that would produce a plausible image
-    # rather than an error — the local repository would resolve one of the two
-    # by version and the board could silently boot the UNPATCHED kernel. The
-    # orchestrator's staged-package uniqueness check exists for the same reason.
-    kernel_packages:
-      - linux-image-6.1.115-ceralive-vendor-rk35xx
-
-    # The stock vendor path DOES ship a separate linux-dtb-vendor-rk35xx, but a
-    # `make bindeb-pkg` build cannot: 6.1's scripts/package/builddeb runs
-    # dtbs_install into /usr/lib/<linux-image package> whenever
-    # CONFIG_OF_EARLY_FLATTREE is set, so the in-tree DTBs ride inside the
-    # linux-image deb exactly as they do on edge. dtb_deb_dir/dtb_boot_dir below
-    # are what satisfy the board's dtb_name instead.
-    dtb_packages: []
-
-    kernel_source:
-      git_url: https://github.com/armbian/linux-rockchip.git
-
-      # No `tag:` — see the note above. THE pin. Chosen upstream because its
-      # commit timestamp matches the running board's kernel build stamp to the
-      # second (rk3588-vendor-kernel-patches docs/PREFLIGHT.md), so this is the
-      # source of the kernel the fleet is running, not merely a nearby one.
-      commit: 95e85f6cb496c75807c5b16f158853578e7e7d1b
-
-      # Five patches: two backports of real mainline ASoC commits that replace
-      # the unconditional capture zeroing with per-instance opt-out flags
-      # (armbian/linux-rockchip PR #487 — OPEN, not merged, which is precisely
-      # why the SHAs and not the PR ref are what is pinned upstream), a
-      # first-party PL330/i2s-tdm DMA-budget change validated on a real board,
-      # a first-party DIAGNOSTIC patch that changes no behaviour, and 0005 —
-      # the fix that diagnostic found. 0001-0003 got the capture PCM to
-      # register and open while every read() still returned EIO with an empty
-      # dmesg; 0004 made that printable; its output showed the HDMI-RX audio
-      # domain is never enabled, because AUDIO_ENABLE / I2S_EN are set only by
-      # rk_hdmirx's audio work and nothing in the ALSA capture path started it.
-      # 0005 starts it. Dropping 0004 now that 0005 is confirmed is a follow-up,
-      # not pending cleanup. Predecessor pin: e3f97655ae47 (0001-0004).
-      #
-      # de46c1acba42 carries the correction to 0005 itself: its first version
-      # waited for the audio work with flush_delayed_work() from a callback that
-      # ASoC invokes with hdmi-codec's hcp->lock held, while that work calls back
-      # into plugged_cb() which takes the same lock — a deadlock that fires only
-      # when audio IS present. It now waits on a completion the work signals
-      # before that callback, and disarms the work under a gate before a
-      # synchronous cancel on every teardown path.
-      #
-      # BOARD-CONFIRMED on a Radxa ROCK 5B+: hw_ptr advanced 15934388 ->
-      # 16030718 over ~2.007 s (≈48 kHz), RXS=1 with a non-zero RXFIFOLR=0xa,
-      # zero "capture xfer failed" lines, and CeraUI's audio meters showed real
-      # fluctuating levels. This is a confirmed-working series, not a WIP one.
-      # Predecessor pin: db5d0e8a0711 (squash-merged into de46c1a via PR #1,
-      # https://github.com/CERALIVE/rk3588-vendor-kernel-patches/pull/1). The
-      # squash discarded the original commits, so db5d0e8a0711 is unreachable on
-      # that repo's main and a fresh clone's patch fetch would FAIL on it.
-      patches_git_url: https://github.com/CERALIVE/rk3588-vendor-kernel-patches.git
-      patches_commit: de46c1acba420d69d30a82b3bc0f526293efd9a3
-      patches_series: patches/series
-
-      # The exact full .config Armbian builds linux-image-vendor-rk35xx from,
-      # read as a plain FILE at a pinned revision. The Armbian build framework is
-      # never invoked. Resolution chain for this path (LINUXFAMILY=rk35xx,
-      # BRANCH=vendor -> LINUXCONFIG=linux-rk35xx-vendor) is derived and recorded
-      # in rk3588-vendor-kernel-patches/kernel-pin.env, not guessed.
-      config_git_url: https://github.com/armbian/build
-      config_commit: 5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39
-      config_path: config/kernel/linux-rk35xx-vendor.config
-
-      # That config is written for a tree Armbian has already mutated: its
-      # EXTRAWIFI step copies whole out-of-tree WiFi driver trees in before
-      # configuring. 24 of its symbols therefore have no Kconfig entry in the
-      # pinned source and are correctly discarded. Each is enumerated and
-      # justified here; the gate FAILS on a listed symbol that did survive, so
-      # the list cannot rot into a blanket opt-out. Neither shipped board's
-      # adapter is on it — both are in-tree and both survive.
-      config_absent_symbols: manifests/kernel/rk3588-vendor-patched.absent
-
-      # BOOKWORM, not trixie — and that is a deliberate divergence from `edge`.
-      # This is a 6.1 tree built with CONFIG_WERROR=y, contemporary with GCC 12;
-      # trixie's GCC 14 turns warnings the Rockchip BSP was never compiled
-      # against into hard errors. Bookworm also carries pahole 1.24, squarely
-      # inside the band 6.1's scripts/pahole-flags.sh knows about, and is the
-      # release the device itself runs. builder_image is a PER-VARIANT pin for
-      # exactly this reason: each variant pins the toolchain era its source needs.
-      # suite-literal-ok: a digest-pinned BUILDER container that must match the vendor kernel's GCC-13 ABI; it is not the target rootfs and does not move with RELEASE
-      builder_image: debian:bookworm-20260803-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
-
-      local_version: -ceralive-vendor-rk35xx
-      kernel_release: 6.1.115-ceralive-vendor-rk35xx
-      package_version: 6.1.115-ceralive1
-
-      dtb_deb_dir: /usr/lib/linux-image-6.1.115-ceralive-vendor-rk35xx/rockchip
-      dtb_boot_dir: /boot/dtb/rockchip

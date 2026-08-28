@@ -1,5 +1,5 @@
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x412fd050]
-[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1 SMP PREEMPT
 [    0.000000] Machine model: Radxa ROCK 5B+
 [    1.223000] mmc0: new HS400 MMC card at address 0001
 [    1.240000] mmcblk0: mmc0:0001 HCG8e 58.3 GiB

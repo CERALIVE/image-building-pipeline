@@ -959,7 +959,7 @@ run_ota_guard() {
 # cdc_ether loadable (.ko.xz, compressed), cdc_wdm as cdc-wdm.ko (hyphen on disk
 # — exercises the -/_ normalisation), option + cdc_ncm built-in (modules.builtin).
 wwan_stage_six() {
-  local root="$1" kv="${2:-6.1.0-vendor}"
+  local root="$1" kv="${2:-6.1.0-generic}"
   local netusb="$root/lib/modules/$kv/kernel/drivers/net/usb"
   local usbclass="$root/lib/modules/$kv/kernel/drivers/usb/class"
   mkdir -p "$netusb" "$usbclass"
@@ -980,8 +980,8 @@ make_kernel_deb() {
   tar -C "$stage" -czf "$tmp/data.tar.gz" .
   mkdir -p "$tmp/ctl"
   cat > "$tmp/ctl/control" <<'CTL'
-Package: linux-image-vendor-rk35xx
-Version: 6.1.0-vendor
+Package: linux-image-generic-rk35xx
+Version: 6.1.0-generic
 Architecture: arm64
 Maintainer: ceralive-test <test@ceralive.tv>
 Description: fixture kernel for WWAN module-presence tests
@@ -1262,7 +1262,14 @@ run_modem_generator() {
 
 
 
-VENDOR_BASELINE_DIR() { printf '%s' "$TESTS_DIR/manifests/fixtures/vendor-baseline"; }
+# The frozen golden resolves of the PRODUCTION path, one file per shipped board.
+# Formerly `vendor-baseline/`, captured when the prebuilt Armbian vendor BSP was
+# the bare default; that track is retired, so the rk3588 files were re-captured
+# from the mainline `default_variant: edge` resolve and the directory renamed to
+# say what it holds. x86-minipc.params is byte-unchanged — its family declares no
+# variants and no default_variant, so the bare default still means "apply no
+# overlay" there, which is exactly what makes it the opt-in proof.
+PRODUCTION_BASELINE_DIR() { printf '%s' "$TESTS_DIR/manifests/fixtures/production-baseline"; }
 
 # make_stub_deb <out.deb> <package> <version> <arch> — a minimal but REAL .deb
 # (debian-binary + control.tar.gz + data.tar.gz via ar) so the uniqueness check
@@ -1303,10 +1310,10 @@ write_variant_family() {
   local dest="$1" overlay="$2"
   cat > "$dest" <<YAML
 arch: arm64
-armbian_branch: vendor
-kernel_packages: [linux-image-vendor-rk35xx]
+armbian_branch: edge
+kernel_packages: [linux-image-generic-rk35xx]
 uboot_packages: []
-dtb_packages: [linux-dtb-vendor-rk35xx]
+dtb_packages: [linux-dtb-generic-rk35xx]
 firmware_packages: [armbian-firmware]
 rauc_bootloader_adapter: custom
 partition_template: rk3588-ab

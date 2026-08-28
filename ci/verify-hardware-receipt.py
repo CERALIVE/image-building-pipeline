@@ -296,7 +296,7 @@ def _build_fixture(root: Path, key: Path, pubkey: Path) -> Path:
         "sudo /tmp/ceralive-qa/hw-smoke.sh --case wifi\n"
     )
     dmesg = root / "t46.dmesg.log"
-    dmesg.write_text("[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1\n")
+    dmesg.write_text("[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1\n")
     receipt = {
         "schema_version": SCHEMA_VERSION,
         "todo": 46,
@@ -309,7 +309,7 @@ def _build_fixture(root: Path, key: Path, pubkey: Path) -> Path:
         "artifact": {
             "a_tree_hash": "0" * 40,
             "dtb": "rk3588-rock-5b-plus.dtb",
-            "kernel_release": "6.1.115-ceralive-vendor-rk35xx",
+            "kernel_release": "7.2.0-ceralive-rk3588",
             "loader_sha256": "1" * 64,
             "patches_commit": "2" * 40,
             "raw_sha256": "3" * 64,

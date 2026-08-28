@@ -1,8 +1,8 @@
-[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1 SMP PREEMPT
 [    0.412000] Lockdep is turned on.
 [   77.401220] ============================================
 [   77.401237] WARNING: possible recursive locking detected
-[   77.401252] 6.1.115-ceralive-vendor-rk35xx #1 Not tainted
+[   77.401252] 7.2.0-ceralive-rk3588 #1 Not tainted
 [   77.401266] --------------------------------------------
 [   77.401277] arecord/998 is trying to acquire lock:
 [   77.401291]  ffff0008031ca118 (&substream->self_group.mutex){+.+.}-{3:3}

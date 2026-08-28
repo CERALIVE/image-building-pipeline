@@ -34,10 +34,10 @@ write_build_kernel_source_set() {
 # 26. Family variants + kernel-build-from-source (Task 26).
 #
 #     The load-bearing property of this whole feature is a NEGATIVE one: adding
-#     an opt-in variant must not move the production vendor path by a single
-#     byte. That is pinned first (against committed golden fixtures), and pinned
-#     with an explicit non-vacuity leg, because a golden-file comparison that
-#     silently compares nothing is worse than no comparison at all.
+#     an opt-in variant must not move the PRODUCTION path by a single byte. That
+#     is pinned first (against committed golden fixtures), and pinned with an
+#     explicit non-vacuity leg, because a golden-file comparison that silently
+#     compares nothing is worse than no comparison at all.
 # ===========================================================================
 
 @test "variants: shipped rk3588 family declares edge and still validates" {
@@ -46,15 +46,24 @@ write_build_kernel_source_set() {
   [[ "$output" == *"VALID"* ]]
   grep -Eq '^variants:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
   grep -Eq '^  edge:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
-  grep -Eq '^  vendor:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  grep -Eq '^  edge-test:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
   grep -Eq '^default_variant: edge$' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  # ABSENCE GUARD for the retired prebuilt-BSP kernel track. Deliberately
+  # STRUCTURAL rather than a search for one retired package name: the property is
+  # "this family declares exactly two variants, and no manifest names a prebuilt
+  # rk35xx kernel or DTB package", which also catches a differently-named revival.
+  run python3 -c "import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); print(' '.join(sorted(d['variants'])))" \
+    "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "edge edge-test" ]
+  run ! grep -REq -- '-[[:space:]]+linux-(image|dtb)-[a-z]+-rk35xx$' "$PIPELINE_DIR/manifests/"
 }
 
 @test "variants: the DEFAULT resolve is the SOURCE-BUILT mainline kernel, on both boards" {
   # The production track flip. A variant-less build must resolve the built
   # package name, no DTB package (bindeb-pkg ships the in-tree DTBs inside the
   # linux-image deb) and a kernel_source block — and must NOT name the prebuilt
-  # vendor kernel anywhere in its resolved params.
+  # prebuilt Armbian kernel anywhere in its resolved params.
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
     run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
@@ -63,8 +72,9 @@ write_build_kernel_source_set() {
     [[ "$output" == *"DTB_PACKAGES=''"* ]]
     [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
     [[ "$output" == *"KERNEL_SOURCE_KERNEL_RELEASE='7.2.0-ceralive-rk3588'"* ]]
-    [[ "$output" != *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
-    [[ "$output" != *"DTB_PACKAGES='linux-dtb-vendor-rk35xx'"* ]]
+    # Nothing may resolve a prebuilt Armbian kernel or DTB package any more.
+    [[ "$output" != *"KERNEL_PACKAGES='linux-image-vendor"* ]]
+    [[ "$output" != *"DTB_PACKAGES='linux-dtb-"* ]]
   done
 }
 
@@ -80,18 +90,17 @@ write_build_kernel_source_set() {
   done
 }
 
-@test "variants: --variant vendor IS BYTE-IDENTICAL to the pre-flip vendor baseline" {
-  # The fixtures were captured from the resolver BEFORE variants existed, i.e.
-  # when the prebuilt vendor path WAS the bare default. Promoting the mainline
-  # track moved that answer behind `--variant vendor` and must have changed
-  # nothing else about it — the ONE deliberate difference is the retired
-  # ceralive-cls-fw row, which was deleted from the fixtures in the same change.
+@test "variants: the PRODUCTION resolve is BYTE-IDENTICAL to the committed baseline" {
+  # The golden fixtures ARE the production path. They were `vendor-baseline/`
+  # while the prebuilt Armbian BSP was the bare default; that track is retired,
+  # so the two rk3588 files were re-captured from the mainline `edge` default and
+  # the directory renamed. A diff here means the shipped resolve moved.
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
-    run bash -c "'$RESOLVE_SH' '$board' --variant vendor 2>/dev/null"
+    run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
     [ "$status" -eq 0 ]
-    if ! diff -u "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
-      printf 'vendor path moved for %s\n' "$board" >&2
+    if ! diff -u "$(PRODUCTION_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
+      printf 'production path moved for %s\n' "$board" >&2
       false
     fi
   done
@@ -103,7 +112,7 @@ write_build_kernel_source_set() {
   # new key is opt-in rather than a change to every family.
   run bash -c "'$RESOLVE_SH' x86-minipc 2>/dev/null"
   [ "$status" -eq 0 ]
-  diff -u "$(VENDOR_BASELINE_DIR)/x86-minipc.params" <(printf '%s\n' "$output") >&2
+  diff -u "$(PRODUCTION_BASELINE_DIR)/x86-minipc.params" <(printf '%s\n' "$output") >&2
   [[ "$output" == *"KERNEL_VARIANT='default'"* ]] || [[ "$output" != *"KERNEL_VARIANT="* ]]
 }
 
@@ -122,13 +131,13 @@ write_build_kernel_source_set() {
 }
 
 @test "variants: the byte-identity proof HAS TEETH (a real change makes it fail)" {
-  # Non-vacuity. Resolve with the edge variant — which genuinely differs from the
-  # vendor baseline in kernel package and branch — and require the SAME
-  # comparison to fail. Without this leg a broken fixture path would make the
-  # guard above pass forever.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  # Non-vacuity. Resolve `edge-test` — which genuinely differs from the production
+  # baseline in kernel package, kernel release and U-Boot package — and require
+  # the SAME comparison to fail. Without this leg a broken fixture path would make
+  # the guard above pass forever.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null"
   [ "$status" -eq 0 ]
-  run diff -q "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output")
+  run diff -q "$(PRODUCTION_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output")
   [ "$status" -ne 0 ]
 }
 
@@ -166,7 +175,7 @@ write_build_kernel_source_set() {
 }
 
 @test "variants: the variants: block never reaches the flattened param set" {
-  # A leaked VARIANTS_* key would (a) move the vendor path and (b) hand the
+  # A leaked VARIANTS_* key would (a) move the production path and (b) hand the
   # orchestrator a second, unselected kernel pin in its environment.
   local board
   for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
@@ -216,7 +225,7 @@ YAML
 
 @test "variants: x86 has no variants, so an edge build of x86-minipc is refused" {
   # x86_64 declares no variants at all. Asking for one must fail rather than
-  # silently resolve the vendor path under a name that promises otherwise.
+  # silently resolve the production path under a name that promises otherwise.
   run bash -c "'$RESOLVE_SH' x86-minipc --variant edge 2>&1"
   [ "$status" -ne 0 ]
   [[ "$output" == *"unknown variant 'edge'"* ]]
@@ -255,14 +264,14 @@ YAML
 }
 
 @test "variants: firmware_packages IS an accepted overlay field (the GPU userspace is a kernel-track fact)" {
-  # Admitted deliberately and narrowly: the vendor kernel drives the Mali-G610
-  # through Rockchip's out-of-tree module + the libmali blob, while mainline
-  # drives the same silicon through the in-tree panthor driver + Mesa. The two
-  # userspaces are not interchangeable and cannot coexist (libmali's
+  # Admitted deliberately and narrowly: the retired vendor kernel drove the
+  # Mali-G610 through Rockchip's out-of-tree module + the libmali blob, while
+  # mainline drives the same silicon through the in-tree panthor driver + Mesa.
+  # The two userspaces are not interchangeable and cannot coexist (libmali's
   # 00-aarch64-mali.conf captures libEGL/libGLESv2/libgbm image-wide), so which
   # one ships is decided by the kernel track, in exactly the way U-Boot and the
-  # partition layout are not. Pinned here so a future narrowing of the schema
-  # cannot silently put libmali back on the mainline path.
+  # partition layout are not. The field stays in the schema so a future track can
+  # state its own GPU userspace without another schema widening.
   local f="$BATS_TEST_TMPDIR/fw-variant.yaml"
   write_variant_family "$f" "  edge:
     firmware_packages: [armbian-firmware]"
@@ -289,13 +298,15 @@ YAML
   [[ "$output" != *"rk3588s-orangepi-5-plus.dtb"* ]]
 }
 
-@test "variant_overrides: OPi 5+ PRODUCTION path resolves the VENDOR DTB name" {
+@test "variant_overrides: OPi 5+ resolves the board's DEFAULT DTB name too" {
   # REGRESSION GUARD. The board shipped dtb_name 'rk3588s-orangepi-5-plus.dtb'
   # from its first commit, inferred from the "5 Plus (RK3588S)" marketing name.
-  # It is wrong: the 5 Plus carries the full RK3588. The pinned vendor package
-  # linux-dtb-vendor-rk35xx 26.5.1 ships rk3588-orangepi-5-plus.dtb and has NO
+  # It is wrong: the 5 Plus carries the full RK3588. The (now retired) prebuilt
+  # Armbian DTB package 26.5.1 shipped rk3588-orangepi-5-plus.dtb and had NO
   # rk3588s-orangepi-5-plus.dtb — verified by extraction, and true of every
-  # version in the Armbian archive back to 24.5.1, so this was never drift.
+  # version in the Armbian archive back to 24.5.1, so this was never drift, and
+  # mainline agrees. The board's TOP-LEVEL dtb_name is asserted here; the leg
+  # above asserts the same answer through variant_overrides.edge.
   # A real production build failed the [6b/9] boot-artifact gate on it; the
   # DRY_RUN-only PR gate never runs that stage, which is what this test replaces.
   run bash -c "'$RESOLVE_SH' orange-pi-5-plus 2>/dev/null"
@@ -320,8 +331,8 @@ YAML
 }
 
 @test "variant_overrides: Rock 5B+ DTB is UNAFFECTED with and without the variant" {
-  # It declares no dtb_name override and needs none — mainline and vendor agree
-  # on this board's spelling. Asserted explicitly on BOTH paths so a future
+  # It declares no dtb_name override and needs none — every tree agrees on this
+  # board's spelling. Asserted explicitly on BOTH paths so a future
   # accidental divergence (either tree renaming it) is caught here, not at build.
   #
   # The board DOES declare variant_overrides now — for uboot_packages, since the
@@ -360,7 +371,7 @@ YAML
 }
 
 @test "variant_overrides: the block never reaches the flattened param set" {
-  # A leaked VARIANT_OVERRIDES_* key would move the vendor path and hand the
+  # A leaked VARIANT_OVERRIDES_* key would move the production path and hand the
   # orchestrator a second, unselected DTB name in its environment.
   local path
   for path in "" "--variant edge"; do
@@ -538,7 +549,7 @@ YAML
       package_version: 7.1.7-ceralive1
       dtb_deb_dir: /usr/lib/linux-image-7.1.7-ceralive-rk3588/rockchip
       dtb_boot_dir: /boot/dtb/rockchip
-      suppressed_packages: [linux-image-vendor-rk35xx]"
+      suppressed_packages: [linux-image-stock-rk3588]"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -ne 0 ]
   [[ "$output" == *"suppressed_packages"* ]]
@@ -567,47 +578,50 @@ YAML
   # leaving it here would not degrade GL on a mainline board, it would remove it,
   # with nothing falling back. armbian-firmware stays: it carries the WiFi/BT
   # blobs and the GPU's own CSF firmware, which panthor loads exactly as the
-  # vendor driver did.
+  # retired vendor driver did.
   [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
   [[ "$output" != *"libmali"* ]]
 }
 
-@test "kernel_source: the VENDOR resolve still ships libmali (the edge drop is track-scoped, not a retirement)" {
-  # The inverse of the leg above, and the one that proves the GPU-stack flip did
-  # not leak onto the vendor track. Retiring the pin outright belongs to the
-  # vendor-kernel retirement.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor 2>/dev/null"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
-
-  # vendor-patched is still the vendor kernel track, so it keeps the blob too.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
-
-  # edge-test INHERITS the edge overlay rather than restating it — the whole
-  # reason `extends` exists, checked here so a debug build can never drift onto a
-  # different GPU stack than the production edge it is a debug build OF.
+@test "kernel_source: edge-test INHERITS the GPU stack rather than restating it" {
+  # `extends: edge` is what makes a debug build structurally unable to drift onto
+  # a different GPU userspace than the production edge it is a debug build OF.
+  # (This replaces the retired inverse leg, which asserted that the prebuilt
+  # prebuilt and source-built vendor-BSP overlays still shipped the libmali blob.
+  # Both overlays and the blob's pin are deleted, so there is nothing to invert.)
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
   [[ "$output" != *"libmali"* ]]
+
+  # And no shipped manifest may re-introduce the blob by any route. Structural,
+  # not a prose search: a YAML list ENTRY in a family/board manifest, or a pin
+  # RECORD (column 0) in the URL-pinned userspace file. The retirement notes that
+  # explain why it is gone are prose and must stay readable.
+  run ! grep -REq -- '^[[:space:]]*-[[:space:]]+libmali' \
+    "$PIPELINE_DIR/manifests/families/" "$PIPELINE_DIR/manifests/boards/"
+  run ! grep -Eq -- '^libmali' "$PIPELINE_DIR/manifests/rk3588-userspace-deb-versions.txt"
 }
 
 @test "kernel_source: the derived suppression set is pre-overlay UNION post-overlay" {
-  # Both halves matter. The pre-overlay vendor names are still in the family
-  # file (fetch-debs reads it directly); the post-overlay built name exists in
-  # no remote archive. Missing either half means a failed or wrong fetch.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
+  # Both halves matter, and `edge-test` is where they visibly differ: the family
+  # file declares the production built name (fetch-debs reads that file directly)
+  # while the overlay REPLACES it with the debug one. Neither exists in any remote
+  # archive, so missing either half means a failed or wrong fetch.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null"
   [ "$status" -eq 0 ]
   local line
   line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
-  [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-image-7.2.0-ceralive-rk3588"* ]]
+  [[ "$line" == *"linux-image-7.2.0-ceralive-rk3588"* ]]       # pre-overlay (family)
+  [[ "$line" == *"linux-image-7.2.0-ceralive-rk3588-test"* ]]  # post-overlay (variant)
   # U-Boot / firmware must NEVER be suppressed.
   [[ "$line" != *"linux-u-boot"* ]]
   [[ "$line" != *"armbian-firmware"* ]]
+
+  # The production path suppresses its own built name and nothing else.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"KERNEL_SOURCE_SUPPRESSED_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
 }
 
 @test "kernel_source: the pinned patches commit is the next hardware-candidate series tip" {
@@ -641,89 +655,29 @@ YAML
   grep -q 'CONFIG_LOCALVERSION_AUTO=n' "$PIPELINE_DIR/$frag"
 }
 
-# --- vendor-patched: commit-only source + full-config mode -------------------
+# --- edge-test: the `extends` sibling ----------------------------------------
 #
-# The vendor BSP differs from `edge` in two STRUCTURAL ways, and both were
-# generalizations of build-kernel.sh rather than special cases:
-#   Gap A  rk-6.1-rkr5.1 publishes NO tags, so `tag` had to become optional and
-#          the checkout had to learn a shallow-fetch-by-SHA shape.
-#   Gap B  Armbian ships a COMPLETE .config for this kernel; `make defconfig`
-#          would build a materially different driver set, so the config source
-#          had to learn "start from a fetched full .config".
+# The retired source-built vendor-BSP overlay lived here and carried the two
+# STRUCTURAL generalizations build-kernel.sh grew for it — an optional `tag` (a
+# rolling BSP branch publishes none) and config-FILE mode (start from a fetched
+# complete .config). Both mechanisms SURVIVE and are still gated; their coverage
+# moved to the scratch-family / env-driven legs below, which is where it always
+# belonged: they exercise the resolver, the schema and build-kernel.sh rather
+# than a shipped pin. What is gone is the shipped consumer, and with it the six
+# tests that asserted that consumer's exact pins.
 
-@test "vendor-patched: the variant resolves a commit-only source (NO tag) " {
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_COMMIT='95e85f6cb496c75807c5b16f158853578e7e7d1b'"* ]]
-  # A synthetic tag would misrepresent the source: there is no such ref.
-  [[ "$output" != *"KERNEL_SOURCE_TAG="* ]]
-}
-
-@test "vendor-patched: the variant resolves the FULL Armbian .config, not a defconfig target" {
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_SOURCE_CONFIG_PATH='config/kernel/linux-rk35xx-vendor.config'"* ]]
-  [[ "$output" == *"KERNEL_SOURCE_CONFIG_COMMIT='5e2fa21ab509e9cf6afb05f3df46c9bd2b0cfa39'"* ]]
-  # Substituting a bare defconfig would silently build a different kernel.
-  [[ "$output" != *"KERNEL_SOURCE_DEFCONFIG_BASE="* ]]
-  [[ "$output" != *"KERNEL_SOURCE_DEFCONFIG_FRAGMENT="* ]]
-}
-
-@test "vendor-patched: the built package name CANNOT collide with the stock vendor kernel" {
-  # A collision is the one failure that yields a plausible image instead of an
-  # error: the local repo would pick one by version and the board could boot the
-  # UNPATCHED kernel. The stock name must also still be suppressed from fetch.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"KERNEL_PACKAGES='linux-image-6.1.115-ceralive-vendor-rk35xx'"* ]]
-  [[ "$output" != *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
-  local line
-  line="$(grep '^KERNEL_SOURCE_SUPPRESSED_PACKAGES=' <<<"$output")"
-  [[ "$line" == *"linux-image-vendor-rk35xx"* ]]
-  [[ "$line" == *"linux-dtb-vendor-rk35xx"* ]]
-}
-
-@test "vendor-patched: the allow-absent list the manifest names actually exists" {
-  local rel
-  rel="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null" \
-         | sed -n "s/^KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS='\(.*\)'$/\1/p")"
-  [ -n "$rel" ]
-  [ -f "$PIPELINE_DIR/$rel" ]
-}
-
-@test "vendor-patched: the pinned patches commit is an exact 40-hex SHA of the VENDOR repo" {
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor-patched 2>/dev/null"
-  [ "$status" -eq 0 ]
-  # The mainline sibling's patches do not apply to this tree and vice versa.
-  [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-vendor-kernel-patches.git'"* ]]
-  local sha
-  sha="$(sed -n "s/^KERNEL_SOURCE_PATCHES_COMMIT='\(.*\)'$/\1/p" <<<"$output")"
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-}
-
-@test "vendor-patched: DRY_RUN plans a fetch-by-SHA checkout and a fetched full .config" {
-  serialize build-plan
-  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" rock-5b-plus --variant vendor-patched
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"kernel_variant=vendor-patched"* ]]
-  [[ "$output" == *"git fetch --depth 1 https://github.com/armbian/linux-rockchip.git 95e85f6cb496c75807c5b16f158853578e7e7d1b"* ]]
-  [[ "$output" == *"commit-only source: the pinned branch publishes no tag"* ]]
-  [[ "$output" == *"cp config/kernel/linux-rk35xx-vendor.config .config (full config, no defconfig target)"* ]]
-  [[ "$output" == *"config-survival gate"* ]]
-  [[ "$output" == *"linux-image-6.1.115-ceralive-vendor-rk35xx_6.1.115-ceralive1_arm64.deb"* ]]
-  # The plan must not perform anything.
-  [[ "$output" != *"docker run"* ]]
-}
-
-@test "vendor-patched: selecting it does NOT move the edge variant" {
+@test "edge-test: selecting it does NOT move the production edge variant" {
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_DEFCONFIG_BASE='defconfig'"* ]]
   [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_KERNEL_RELEASE='7.2.0-ceralive-rk3588'"* ]]
   [[ "$output" == *"BUILDER_IMAGE='debian:trixie-"* ]]
   # edge declares no config-file trio at all.
   [[ "$output" != *"KERNEL_SOURCE_CONFIG_GIT_URL="* ]]
+  # ... and the debug sibling never leaks into it.
+  [[ "$output" != *"-test"* ]]
 }
 
 @test "bench patch clone: the override is a MIRROR, never a pin override" {
@@ -841,14 +795,17 @@ YAML
 
 @test "kernel_source schema: tag is OPTIONAL, but a half config-file mode is rejected" {
   local f="$BATS_TEST_TMPDIR/commit-only.yaml"
-  # No tag + full config-file mode: the vendor-patched shape. Must VALIDATE.
+  # No tag + full config-file mode — the shape a rolling BSP branch needs (no
+  # ref to clone, and a complete published .config rather than a defconfig). No
+  # shipped variant uses it any more, but the schema still admits it and this is
+  # what keeps that admission honest. Must VALIDATE.
   # The `edge:` stub is required because this fixture family is merged against
   # the REAL rock-5b-plus board, whose variant_overrides names edge — and an
   # override for a variant the family does not declare is fatal on every
   # resolve, by design (it would otherwise sit there looking effective).
   write_variant_family "$f" "  edge:
     armbian_branch: edge
-  vendor-patched:
+  bsp-config-file:
     kernel_source:
       git_url: https://example.invalid/linux.git
       commit: c7ba9d6de43e9d9bd755b1f3c19501a38898c6b6
@@ -865,14 +822,14 @@ YAML
       dtb_deb_dir: /usr/lib/linux-image-x/rockchip
       dtb_boot_dir: /boot/dtb/rockchip"
   run python3 "$RESOLVE_PY" merge --family "$f" --board "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml" \
-    --family-schema "$PIPELINE_DIR/manifests/schema/family.schema.json" --variant vendor-patched
+    --family-schema "$PIPELINE_DIR/manifests/schema/family.schema.json" --variant bsp-config-file
   [ "$status" -eq 0 ]
 
   # Drop config_path -> neither mode is fully declared -> rejected.
   local g="$BATS_TEST_TMPDIR/half-config.yaml"
   sed '/config_path:/d' "$f" >"$g"
   run python3 "$RESOLVE_PY" merge --family "$g" --board "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml" \
-    --family-schema "$PIPELINE_DIR/manifests/schema/family.schema.json" --variant vendor-patched
+    --family-schema "$PIPELINE_DIR/manifests/schema/family.schema.json" --variant bsp-config-file
   [ "$status" -ne 0 ]
 }
 
@@ -884,22 +841,21 @@ YAML
   # DO assert that run the real resolver.
   run bash -c "
     set -euo pipefail
-    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-image-7.1.7-ceralive-rk3588'
+    export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS='linux-image-7.2.0-ceralive-rk3588 linux-image-7.1.7-ceralive-rk3588'
     export KERNEL_PACKAGES='linux-image-7.1.7-ceralive-rk3588'
     export DTB_PACKAGES=''
     source '$FETCH_DEBS'
     collect_declared_bsp_pkgs '$PIPELINE_DIR/manifests/families/rk3588.yaml'
   "
   [ "$status" -eq 0 ]
-  [[ "$output" != *"linux-image-vendor-rk35xx"* ]]
-  [[ "$output" != *"linux-dtb-vendor-rk35xx"* ]]
+  [[ "$output" != *"linux-image-7.2.0-ceralive-rk3588"* ]]
   [[ "$output" != *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # Everything else the family declares is untouched.
   [[ "$output" == *"armbian-firmware"* ]]
   [[ "$output" == *"gstreamer1.0-rockchip1"* ]]
 }
 
-@test "fetch suppression: NON-VACUOUS — without it the vendor names are still declared" {
+@test "fetch suppression: NON-VACUOUS — without it the family's kernel name is declared" {
   run bash -c "
     set -euo pipefail
     unset CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS KERNEL_PACKAGES DTB_PACKAGES
@@ -907,8 +863,7 @@ YAML
     collect_declared_bsp_pkgs '$PIPELINE_DIR/manifests/families/rk3588.yaml'
   "
   [ "$status" -eq 0 ]
-  [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
-  [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
+  [[ "$output" == *"linux-image-7.2.0-ceralive-rk3588"* ]]
 }
 
 @test "orchestrate: an edge DRY_RUN reaches the plan for BOTH rk3588 boards" {
@@ -931,23 +886,18 @@ YAML
   done
 }
 
-@test "orchestrate: NON-VACUOUS — the --variant vendor DRY_RUN still fetches kernel + DTB" {
-  serialize build-plan
-  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" rock-5b-plus --variant vendor
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"BSP set from rk3588.yaml (4 pkgs)"* ]]
-  [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
-  [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
-  # The prebuilt track never rebuilds the kernel.
-  [[ "$output" != *"building kernel from pinned source"* ]]
-}
-
 @test "orchestrate: the BARE DRY_RUN fetches U-BOOT AND FIRMWARE ONLY, on both boards" {
-  # The production fetch after the flip: the kernel and DTB come from [2b/9], so
-  # the only names the Armbian archive is still asked for are the board U-Boot
-  # and armbian-firmware. libmali is asserted ABSENT from the pinned-URL
-  # userspace set as well — it is declared by the vendor overlays only, and a
-  # blob staged here would die at [3/9] as an unclassified package.
+  # The production fetch: the kernel comes from [2b/9], so the only names the
+  # Armbian archive is still asked for are the board U-Boot and armbian-firmware.
+  # libmali is asserted ABSENT from the pinned-URL userspace set as well — it was
+  # retired with the vendor kernel track, and a blob staged here would die at
+  # [3/9] as an unclassified package.
+  #
+  # The inverse of the "(2 pkgs)" claim used to be a `--variant vendor` DRY_RUN
+  # that DID fetch a kernel + DTB. That variant is deleted, so the non-vacuity now
+  # lives one layer down, in the two `fetch suppression:` unit legs above — they
+  # drive the real `collect_declared_bsp_pkgs` with and without the suppression
+  # set and require the answer to change.
   serialize build-plan
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
@@ -955,9 +905,10 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"kernel_variant=default"* ]]
     [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware linux-u-boot-"* ]]
-    # The vendor kernel/DTB names appear ONLY in the suppression line, never in a
-    # fetch line — the "(2 pkgs)" set above is what proves that.
-    [[ "$output" == *"remote fetch suppressed for: linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx"* ]]
+    # The BUILT kernel name appears ONLY in the suppression line, never in a
+    # fetch line — the "(2 pkgs)" set above is what proves that. It exists in no
+    # remote archive, so asking for it would fail the fetch outright.
+    [[ "$output" == *"remote fetch suppressed for: linux-image-7.2.0-ceralive-rk3588"* ]]
     [[ "$output" == *"RK3588 userspace set from rk3588.yaml (4 pkgs)"* ]]
     [[ "$output" != *"libmali"* ]]
     [[ "$output" == *"[2b/9] building kernel from pinned source (variant 'edge')"* ]]
@@ -1211,7 +1162,7 @@ YAML
   fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
   [ -n "$fn" ]
 
-  # Empty mapping (the production vendor path) -> clean no-op.
+  # Empty mapping (a family that installs a prebuilt kernel) -> clean no-op.
   run bash -c "
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }
@@ -1264,7 +1215,7 @@ YAML
   [ -f "$root/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb" ]
 
   # And it is fail-loud when the board's own DTB is missing from the package —
-  # mainline and the Armbian vendor BSP do not always agree on RK3588 DTB names.
+  # trees do not always agree on RK3588 DTB names.
   run bash -c "
     set -euo pipefail
     log() { printf '[platform] %s\n' \"\$*\" >&2; }

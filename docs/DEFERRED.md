@@ -495,55 +495,40 @@ stem ≠ `board_id`.
 the exact pinned Trixie `--variant edge` artifact on both physical RK3588 boards;
 restore a working product-level `cerastream` start → 60 seconds → stop cycle;
 clear the Rock Bluetooth/MMC drill failures; and exercise HDMI video plus audio
-with a known-good source. **D3 is not reopened by any of this** — the shipped
-kernel remains the Armbian vendor BSP; see `docs/kernel-currency-watch.md` for the
-two triggers that would revisit it.
+with a known-good source. **D3's kernel half is already answered** — the shipped
+kernel IS the mainline source-built track (`default_variant: edge`), and the
+Armbian vendor BSP track was retired outright. D3's bootloader-adapter half
+(`rauc_bootloader_adapter: custom`) is untouched.
 
 ---
 
-## 9b. `vendor-patched` variant — kernel `.deb` builds and validates, never booted from this pipeline
+## 9b. Vendor-BSP HDMI-RX audio variant — **CLOSED (item retired with the track)**
 
-**Status:** Kernel `.deb` builds end to end on `rock-5b-plus` and passes all four
-`validate_built_kernel_deb` axes; **no image has been assembled or booted from it**
-**Location:** `docs/kernel-build-from-source.md` §2b/§2c/§7, `manifests/families/rk3588.yaml` (`variants.vendor-patched`), `manifests/kernel/rk3588-vendor-patched.absent`
+**Status:** No longer deferred, because the thing it deferred no longer exists.
+**Closed:** on the mainline cutover, alongside the vendor kernel retirement.
 
-**What it is:** The rk3588 family's second opt-in variant, rebuilding the **vendor
-6.1.115 BSP the shipped image actually runs** from source with
-`CERALIVE/rk3588-vendor-kernel-patches` applied, to restore HDMI-RX audio capture.
-Produces `linux-image-6.1.115-ceralive-vendor-rk35xx` = `6.1.115-ceralive1`
-(deliberately NOT the stock `linux-image-vendor-rk35xx`, so a resolver can never
-substitute the unpatched kernel).
+This item tracked the rk3588 family's source-built Armbian vendor 6.1 BSP
+overlay — the one that rebuilt the shipped BSP with
+`CERALIVE/rk3588-vendor-kernel-patches` applied to restore HDMI-RX audio capture.
+It was deferred because the kernel `.deb` built and validated but no image had
+ever been assembled or booted from it.
 
-**What is proven:** the series applies cleanly with `git am` on the pinned commit;
-the fetched Armbian `.config` survives `olddefconfig` with 24 reviewed exceptions
-(`2729 of 2753`); the built `.deb` carries the board DTB, 463 `rockchip/*.dtb` and
-2,276 modules; the staged-package uniqueness check passes.
+That overlay, its allow-absent symbol list, its bootloader rows, its fixtures and
+its tests were all removed when the vendor kernel track was retired; every byte is
+preserved at the annotated tag `vendor-kernel-final`. There is therefore no build
+left to unblock. Two facts survive the closure and are recorded here so they are
+not lost with it:
 
-**What is NOT proven:**
-
-* **No image, no boot from this pipeline.** The local runs stopped at `[4/9]`
-  because this environment has no Armbian/apt credentials, so U-Boot, firmware and
-  the Mali userspace were never staged. A credentialed host should complete `[5/9]`
-  onward exactly as `edge` does — but that has not been demonstrated.
-* **`orange-pi-5-plus` has not been built with this variant.** Both RK3588 boards
-  run the same vendor kernel and the OPi 5+ needs no
-  `variant_overrides.vendor-patched` (its DTB name `rk3588-orangepi-5-plus.dtb` is
-  the same in the vendor tree as the production path already declares), so it is
-  expected to work — expected, not shown.
-* **The audio fix itself is separately board-proven, but not end to end.** A
-  hand-built kernel with this series eliminated the PL330 descriptor rejection on a
-  real Rock 5B+ (`.omo/evidence/device-platform-wave4/`
-  `vendor-kernel-hdmi-audio-bench-boot-proof-2.md`). Two limits carry over verbatim:
-  `MAXBURST_PER_FIFO` was never proven necessary in isolation, and end-to-end HDMI
-  audio stayed blocked by the **test source**, which reported `audio_present=0`.
-  This variant makes that fix reproducible from a real build; it does not re-prove
-  the audio path.
-
-**Unblock condition:** build on a credentialed host through `[9/9]`, then flash and
-boot on a physical RK3588 board with an HDMI source that genuinely transmits
-embedded audio, and confirm `audio_present` flips to 1 with capture substreams
-present in `/proc/asound/pcm`. **D3 is not reopened** — the shipped kernel remains
-the prebuilt Armbian vendor BSP.
+* **The audio fix itself remains board-proven on a hand-built kernel** (Tier 1),
+  including a CeraUI audio-meter validation through the production cerastream
+  sidecar. That evidence is about the PATCH SERIES, which still lives in its own
+  repository, not about this pipeline.
+* **HDMI-RX audio on the PRODUCTION mainline kernel is a different question with
+  its own answer.** It is carried by patches `0005` + `0006` of the mainline
+  series (`0006` supplies the DT sound card `0005` alone does not create) — see
+  the `AGENTS.md` KEY FACT on that pair. Nothing about this closure asserts that
+  HDMI-RX audio works on a shipped image; it asserts only that the retired
+  vendor-BSP route to it is gone.
 
 ---
 

@@ -25,16 +25,16 @@ selector (`mkosi/platform/boot/boot.scr.cmd`) loads `/boot/Image`,
 it selected, and RAUC's rollback budget is the promise that a slot which fails to
 boot is abandoned for the other one.
 
-An `apt-get upgrade` that replaced `linux-image-vendor-rk35xx` in place would
+An `apt-get upgrade` that replaced the installed kernel package in place would
 break both halves of that:
 
 - It rewrites `/boot` **inside the running slot**, so the slot no longer matches
   the image that was verified, installed and marked good. The rollback target is
   now a slot whose kernel nobody tested.
-- It is not atomic with the userland. A vendor BSP kernel bump changes the module
-  ABI (`/lib/modules/<REL>`), the DTB set, and — in the vendor package's case —
-  the `initramfs-tools` hook output. Half-updating that mid-uptime is how a board
-  reboots into a slot with modules for a kernel that is no longer there.
+- It is not atomic with the userland. A kernel bump changes the module ABI
+  (`/lib/modules/<REL>`), the DTB set, and the `initramfs-tools` hook output.
+  Half-updating that mid-uptime is how a board reboots into a slot with modules
+  for a kernel that is no longer there.
 
 The sanctioned path for a kernel change is therefore: rebuild the image, publish
 a signed `.raucb`, let RAUC write the **inactive** slot, and reboot into it under
@@ -49,27 +49,29 @@ U-Boot package name differs, so a literal list would freeze one board only:
 
 | Manifest field | rock-5b-plus | orange-pi-5-plus |
 |---|---|---|
-| `kernel_packages` | `linux-image-vendor-rk35xx` | `linux-image-vendor-rk35xx` |
-| `dtb_packages` | `linux-dtb-vendor-rk35xx` | `linux-dtb-vendor-rk35xx` |
-| `uboot_packages` | `linux-u-boot-rock-5b-plus-vendor` | `linux-u-boot-orangepi5-plus-vendor` |
-| `firmware_packages` | `armbian-firmware`, `libmali-valhall-g610-g24p0-wayland-gbm` | same |
+| `kernel_packages` | `linux-image-7.2.0-ceralive-rk3588` | `linux-image-7.2.0-ceralive-rk3588` |
+| `dtb_packages` | *(empty)* | *(empty)* |
+| `uboot_packages` | `linux-u-boot-rock-5b-plus-edge` | `linux-u-boot-orangepi5-plus-edge` |
+| `firmware_packages` | `armbian-firmware` | same |
 
-`libmali` is in `firmware_packages` and is therefore frozen with the rest. That is
-correct rather than incidental: it is kernel-coupled GPU userspace installed from
-the same local, build-time-only package directory, and it is not an app-layer
-package.
+Three things about that table are worth reading carefully:
 
-**On the mainline `edge` track that row reads `armbian-firmware` alone**, because
-the GPU userspace follows the kernel driver: mainline binds the Mali-G610 with the
-in-tree `panthor` driver and Mesa, so the vendor blob is dropped from
-`variants.edge.firmware_packages`. The freeze mechanism is unchanged — it freezes
-whatever the resolved manifest names, which is exactly why nothing here needed a
-hardcoded package list.
+- **The kernel package is the one this build produced**, not one fetched from an
+  archive. It is still installed from the same local, build-time-only package
+  directory, so the freeze applies to it identically.
+- **`dtb_packages` is empty on every track**, because `make bindeb-pkg` ships the
+  in-tree DTBs inside the `linux-image` deb. A three-package freeze is the correct
+  production shape, not a partial one.
+- **`firmware_packages` is `armbian-firmware` alone.** It used to also carry the
+  proprietary `libmali-valhall-g610-*` blob, which was frozen with the rest
+  because it was kernel-coupled GPU userspace. That blob was retired with the
+  vendor kernel track — mainline binds the Mali-G610 with the in-tree `panthor`
+  driver and Mesa — so there is nothing left to freeze there.
 
-Under an opt-in `--variant` the same fields resolve to the source-built kernel
-package (`linux-image-7.2.0-ceralive-rk3588` on the current `edge` pin, or
-`linux-image-6.1.115-ceralive-vendor-rk35xx`) and the freeze follows them
-automatically.
+Under `--variant edge-test` the same fields resolve to that variant's own built
+package (`linux-image-7.2.0-ceralive-rk3588-test`) and the board's top-level
+U-Boot package, and the freeze follows them automatically. That is exactly why
+nothing here needed a hardcoded package list.
 
 ## 3. What is explicitly NOT frozen
 
@@ -109,7 +111,7 @@ so the pinned versions are the final ones.
 ### 4a. dpkg holds — the PRIMARY mechanism
 
 ```
-apt-mark hold linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx …
+apt-mark hold linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge …
 ```
 
 A hold is recorded in `/var/lib/dpkg/status` as `Status: hold ok installed`. Apt
@@ -135,8 +137,8 @@ every other gate.
 `/etc/apt/preferences.d/ceralive-kernel-freeze`, one stanza per package:
 
 ```
-Package: linux-image-vendor-rk35xx
-Pin: version 26.5.1
+Package: linux-image-7.2.0-ceralive-rk3588
+Pin: version 7.2.0-ceralive1
 Pin-Priority: 1001
 ```
 
@@ -204,7 +206,7 @@ apt-mark showhold
 
 # The supplementary pin, and the effective apt policy for the kernel
 cat /etc/apt/preferences.d/ceralive-kernel-freeze
-apt-cache policy linux-image-vendor-rk35xx
+apt-cache policy linux-image-7.2.0-ceralive-rk3588
 
 # The freeze must not touch the app layer
 apt-mark showhold | grep -E '^(cerastream|ceralive-device|srtla-send-rs)$'   # expect: no match
@@ -222,17 +224,19 @@ been kept back"* and emits no `Inst linux-image-…` line.
 
 The supported route is a new image:
 
-1. Update the exact pin in `manifests/armbian-bsp-deb-versions.txt` following
-   [`docs/RELEASE-PROCESS.md`](../../docs/RELEASE-PROCESS.md) §4 (signed-index
-   review, hardware implications) and the kernel baseline in
-   `manifests/bsp-baseline.json`.
+1. Re-pin the kernel in `manifests/families/rk3588.yaml` — the `kernel_source`
+   `tag`/`commit` and `patches_commit`, plus the `kernel_release` /
+   `package_version` / `kernel_packages` names those imply. (The prebuilt-BSP
+   route through `manifests/armbian-bsp-deb-versions.txt` +
+   `manifests/bsp-baseline.json` retired with the vendor kernel track; that file
+   now pins only U-Boot and firmware.)
 2. Build, publish the signed `.raucb`, roll it out. RAUC writes the inactive slot;
    the new slot's own holds pin the new kernel.
 
 For **bench** work only, a hold can be lifted by hand on a device:
 
 ```bash
-sudo apt-mark unhold linux-image-vendor-rk35xx
+sudo apt-mark unhold linux-image-7.2.0-ceralive-rk3588
 ```
 
 Doing that produces a slot whose `/boot` no longer matches any released image.

@@ -1,6 +1,7 @@
-# Shipped vendor-kernel capability matrix — sharing / steering / shaping primitives
+# Vendor-kernel capability matrix — sharing / steering / shaping primitives  **[HISTORICAL]**
 
-> **SUPERSEDED AS A STATEMENT ABOUT PRODUCTION — RETAINED AS EVIDENCE.**
+> **SUPERSEDED AS A STATEMENT ABOUT PRODUCTION — RETAINED AS EVIDENCE. The kernel
+> it measures is no longer buildable by this pipeline at all.**
 > When this note was written the production kernel was the PREBUILT Armbian
 > vendor 6.1 BSP, which does not build `NET_CLS_FW`, so the image carried the
 > out-of-tree `ceralive-cls-fw` module described in §2c. The production kernel is
@@ -11,9 +12,16 @@
 > fails the build if any half returns. See §7 for what that changes and what it
 > does not.
 >
-> Everything below §1-§6 is left exactly as measured. It is still the record of
-> what the vendor 6.1 BSP contains, which is what the opt-in `--variant vendor`
-> and `--variant vendor-patched` tracks still build on.
+> The two overlays that built that kernel — the prebuilt one and the source-built
+> one — were REMOVED with the vendor kernel track, together with their package
+> pins, and are preserved at the annotated tag `vendor-kernel-final`. So every
+> package name, version and path named below is a historical citation: none of it
+> resolves in the working tree any more.
+>
+> Everything below §1-§6 is nevertheless left exactly as measured. It is the only
+> record of what that kernel contained, and it is what makes §3's "cake IS present
+> and the runtime fallback still matters" argument checkable rather than
+> remembered.
 
 Measurement of the kernel the production image installed **at the time of
 measurement**, against the symbol closure the uplink-sharing work depends on.
@@ -258,17 +266,19 @@ remaining board gate is `modprobe cls_fw`, `modinfo cls_fw`, and an actual
 
 ## 6. Scope boundary — what this note is NOT about
 
-The measurement subject is the **shipped vendor 6.1 BSP** kernel package, on the
-production path. It is deliberately not a statement about either
-kernel-from-source variant:
+The measurement subject was the **prebuilt vendor 6.1 BSP** kernel package, which
+was the production path at the time. It is deliberately not a statement about the
+source-built track:
 
-- `manifests/kernel/rk3588-edge.fragment` is the **mainline/edge 7.1** track and
-  is cited above only as prior evidence and contrast. It was not read as the
-  subject and was not modified.
-- `--variant vendor-patched` rebuilds this same 6.1.115 BSP from source using
-  Armbian's published `linux-rk35xx-vendor.config`; its config content is
-  expected to track the measured one, but that was not measured here and must
-  not be inferred from this note.
+- `manifests/kernel/rk3588-edge.fragment` is the **mainline** track and is cited
+  above only as prior evidence and contrast. It was not read as the subject and
+  was not modified. What the PRODUCTION kernel carries today is declared there
+  and gated by `lib/verify-kernel-config.sh` against
+  `manifests/kernel/required-symbols.list` — read those, not this note.
+- The source-built vendor-BSP overlay rebuilt this same kernel from Armbian's
+  published `linux-rk35xx-vendor.config`. Its config content was expected to
+  track the measured one, but that was never measured, must not be inferred from
+  this note, and is now moot: that overlay is retired.
 
 ---
 
@@ -276,8 +286,9 @@ kernel-from-source variant:
 
 The kernel half of decision D3 is no longer in force. `rk3588` declares
 `default_variant: edge`, so a variant-less build resolves the mainline 7.2
-source-built kernel and the prebuilt `linux-image-vendor-rk35xx` is reachable
-only through `--variant vendor`.
+source-built kernel. The prebuilt vendor kernel was reachable through an opt-in
+overlay for one release and has since been retired outright — there is now no
+build in this pipeline that installs a prebuilt kernel `.deb`.
 
 **What that changes.** The uplink shaper's mark → band bridge is now supplied by
 `CONFIG_NET_CLS_FW=y` in `manifests/kernel/rk3588-edge.fragment`, built into the
