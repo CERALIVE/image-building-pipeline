@@ -76,6 +76,7 @@ readonly CONSOLIDATED_FUNCS=(
   setup_ingest_firewall setup_uplink_sharing_carrier setup_dongle_netns_retirement
   setup_typec_policy setup_fan_curve apply_board_quirks
   setup_fan_kickstart setup_led_status setup_hdmirx_edid freeze_boot_packages
+  setup_cpu_governor
 )
 
 FAIL=0

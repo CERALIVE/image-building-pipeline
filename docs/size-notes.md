@@ -23,9 +23,13 @@ change needed in Task 19 — verified present.
 `mkosi/mkosi.images/{base,platform,runtime,app}/mkosi.conf`:
 
 - `Locale=C.UTF-8` + `LocaleMessages=C.UTF-8` on `base` — pins `/etc/locale.conf`
-  to `LANG=C.UTF-8`. glibc 2.36 (bookworm) ships **C.UTF-8 built into libc**, so
+  to `LANG=C.UTF-8`. glibc 2.41 (trixie) ships **C.UTF-8 built into libc**, so
   no `locale-gen` run and no `/usr/lib/locale/locale-archive` are required for it
-  to work.
+  to work. Re-verified on a real trixie arm64 container (todo 10): `locale -a`
+  lists `C.utf8` with no `/usr/lib/locale` archive present, so the strip below is
+  still safe. This held on bookworm's glibc 2.36 too — the property is not new,
+  but it is the one that makes the whole locale strip safe, so it is re-checked
+  on every suite bump rather than assumed.
 - `RemoveFiles=/usr/share/locale/*,/usr/lib/locale/locale-archive` on **every**
   layer — purges gettext message catalogs (the per-language `.mo` files each
   package ships) and any compiled locale-archive a transitively-pulled `locales`
@@ -391,25 +395,62 @@ The single largest item in §8's composition is not multimedia. It is LLVM.
 
 `gstreamer1.0-plugins-bad` hard-`Depends:` its way to `libgl1-mesa-dri`, whose
 Gallium software rasterizer links LLVM's JIT — and LLVM in turn links the Z3 SMT
-solver. Three packages, 157.6 MB of shipped bytes:
+solver.
+
+**These baselines were re-measured against trixie (todo 10), and the shape
+changed enough to break the previous globs.** Trixie ships Mesa 25.0.7 and
+LLVM 19, where bookworm shipped Mesa 22.3 and LLVM 15. Measured on a real
+`debian:trixie-slim` **arm64** container with the packages installed:
 
 | file | package | bytes |
 |---|---|---:|
-| `/usr/lib/aarch64-linux-gnu/libLLVM-15.so.1` | `libllvm15` | 111,631,520 |
-| `/usr/lib/aarch64-linux-gnu/libz3.so.4` | `libz3-4` | 22,090,928 |
-| `/usr/lib/aarch64-linux-gnu/dri/*_dri.so` | `libgl1-mesa-dri` | 23,915,168 |
-| **total** | | **157,637,616** |
+| `/usr/lib/aarch64-linux-gnu/libLLVM.so.19.1` | `libllvm19` | 123,242,120 |
+| `/usr/lib/aarch64-linux-gnu/libgallium-25.0.7-2+deb13u1.so` | `mesa-libgallium` | 35,012,296 |
+| `/usr/lib/aarch64-linux-gnu/libz3.so.4` | `libz3-4` | 26,875,248 |
+| `/usr/lib/aarch64-linux-gnu/dri/libdril_dri.so` (+ 55 symlinks) | `libgl1-mesa-dri` | 133,304 |
+| **total** | | **185,262,968** |
+
+For comparison, the bookworm ledger this replaces was `libLLVM-15.so.1`
+(111,631,520) + `libz3.so.4` (22,090,928) + `dri/*_dri.so` (23,915,168) =
+**157,637,616**.
+
+### Two structural changes, and why the old globs silently missed them
+
+1. **The Gallium megadriver LEFT `libgl1-mesa-dri`.** It now ships in a
+   separate package, `mesa-libgallium`, as `libgallium-<version>.so` at the
+   library root — a path **no previous glob matched**. What remains under
+   `dri/` is 55 symlinks plus a 133 KB `libdril_dri.so` loader shim, so the
+   `dri/*_dri.so` glob still matches but now recovers almost nothing.
+2. **`libLLVM-15.so*` matched zero files.** Trixie's `libllvm19` ships the real
+   object as `libLLVM.so.19.1`; `libLLVM-19.so` is only a 15-byte symlink. The
+   version-pinned glob missed the entire 123 MB.
+
+Left unfixed, the prune would have recovered **~27 MB instead of ~185 MB**,
+leaving ~158 MB of unreachable payload in the image — enough to push both RK3588
+boards (1,412,259,840 B and 1,418,792,960 B) straight through the 1.5 GB `[6c/9]`
+size gate, which is exactly the failure mode §10 records from the last time this
+prune was absent.
+
+**The replacement globs are version-wildcarded on purpose.**
+`libLLVM*.so*` and `libgallium-*.so` are not pinned to 19 / 25.0.7, because
+pinning is what broke them: `libgallium`'s filename embeds the **full Debian
+revision** (`25.0.7-2+deb13u1`), so any Mesa point release renames the file and a
+pinned name would stop matching on a routine security update — silently, with the
+build still green.
 
 `apt remove libgl1-mesa-dri` cascades into the plugin set cerastream needs, so
 the lever is file-level `RemoveFiles=` in the runtime layer — the same technique
 as the §2 locale strip. The packages stay installed and their dpkg metadata stays
 intact; only the payload files go.
 
-**The DRI directory holds ONE file, hardlinked 43 ways.** `armada-drm_dri.so`,
-`swrast_dri.so`, `rockchip_dri.so`, `panfrost_dri.so` and 39 more are all the
-same inode — Mesa's megadriver under 43 names. Removing "just the software
-rasterizer" recovers **zero** bytes; the 23.9 MB is only released when every link
-goes. That is why the glob covers the whole `*_dri.so` set rather than one name.
+**On bookworm the DRI directory held ONE file, hardlinked 43 ways** — `swrast_dri.so`,
+`rockchip_dri.so`, `panfrost_dri.so` and 40 more were all the same inode, so
+removing "just the software rasterizer" recovered zero bytes and the glob had to
+cover the whole `*_dri.so` set. **On trixie that is no longer where the bytes
+are**: the 56 `dri/` entries are 55 real symlinks pointing at one 133 KB shim,
+and the mass moved to `libgallium-*.so`. The `*_dri.so` glob is retained (it is
+still correct, and still deliberately not a bare `dri/*` — see below), but it is
+no longer the lever that matters.
 
 ### Why these files are unreachable on this device
 
@@ -435,10 +476,20 @@ Four independent checks, all run against a real built rootfs and a real board:
    Xwayland, so there is no display for it to open. The kiosk stack
    (`kiosk-display.md`) is documented-but-unimplemented and, when it lands, is
    specced on cage/Wayland over **Mali** EGL/GBM — not Mesa.
-3. **The DT_NEEDED graph is closed.** Scanning every ELF in the rootfs:
-   `libLLVM-15.so.1` is needed by the 43 DRI links and by **nothing else**;
-   `libz3.so.4` is needed by `libLLVM-15.so.1` and by **nothing else**. Deleting
-   the DRI drivers orphans both libraries completely.
+3. **The DT_NEEDED graph is closed — with one NEW hop on trixie.** Re-scanned
+   with `objdump -p` over every installed ELF in a real trixie arm64 container:
+
+   ```
+   dri/libdril_dri.so, gbm/dri_gbm.so  ->  libgallium-25.0.7-2+deb13u1.so
+   libgallium-25.0.7-2+deb13u1.so      ->  libLLVM.so.19.1
+   libLLVM.so.19.1                     ->  libz3.so.4
+   ```
+
+   `libgallium-*.so` is needed only by the two Mesa loader shims, `libLLVM` only
+   by `libgallium`, and `libz3` only by `libLLVM` — nothing else DT_NEEDEDs any
+   of the three. The chain is still closed end to end; bookworm's version was the
+   same graph minus the `libgallium` node (there, the DRI megadriver linked
+   `libLLVM-15.so.1` directly).
 4. **Nothing GL-shaped runs.** cerastream's element vocabulary contains no
    `glimagesink` / `glupload` / `kmssink` / `waylandsink`; its WebRTC preview tier
    is `webrtcbin` + `nicesrc`, neither of which links `libgstgl`. The only shipped

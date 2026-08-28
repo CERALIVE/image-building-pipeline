@@ -1304,12 +1304,20 @@ REPRO
 # ===========================================================================
 # 28. Mesa software-GL prune — the RemoveFiles contract.
 #
-#     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches LLVM's
-#     JIT and Z3 for Mesa's software rasterizer: 157.6 MB the device can never
-#     execute, because the Mali vendor stubs win the EGL/GLES/GBM lookup and the
-#     only other Mesa entry point needs an X server this image does not ship.
-#     `apt remove` cascades into the plugin set cerastream needs, so the lever is
-#     file-level, like the locale strip.
+#     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches Mesa's
+#     Gallium megadriver, LLVM's JIT and Z3 for a software rasterizer the device
+#     can never execute — because the Mali vendor stubs win the EGL/GLES/GBM
+#     lookup and the only other Mesa entry point needs an X server this image
+#     does not ship. `apt remove` cascades into the plugin set cerastream needs,
+#     so the lever is file-level, like the locale strip.
+#
+#     RETARGETED AT THE TRIXIE MIGRATION (todo 10). Trixie ships Mesa 25.0.7 and
+#     LLVM 19, and BOTH previous globs went stale in ways that fail SILENTLY:
+#     `libLLVM-15.so*` matches nothing (the real object is `libLLVM.so.19.1`),
+#     and the Gallium megadriver moved out of `libgl1-mesa-dri` entirely into a
+#     new `mesa-libgallium` package as `libgallium-<version>.so` at the library
+#     root, which no glob covered. Unfixed the prune recovers ~27 MB instead of
+#     ~185 MB and both RK3588 boards blow the 1.5 GB `[6c/9]` gate.
 #
 #     These are STATIC guards because the prune only happens on a wet build and
 #     the PR gate is DRY_RUN=1 plan-only — the same blind spot that shipped the
@@ -1319,14 +1327,43 @@ REPRO
 #     `dri/*` would silently delete a hardware video driver on a future x86 build.
 # ===========================================================================
 
-@test "mesa-prune: the runtime layer strips libLLVM-15, libz3 and the Mesa DRI megadriver" {
+@test "mesa-prune: the runtime layer strips libgallium, libLLVM, libz3 and the Mesa DRI shims" {
   local entries
   entries="$(removefiles_runtime)"
   [ -n "$entries" ]
 
-  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libLLVM-15.so*'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libgallium-*.so'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libLLVM*.so*'* ]]
   [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libz3.so*'* ]]
   [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/dri/*_dri.so'* ]]
+}
+
+@test "mesa-prune: the LLVM and Gallium globs are version-WILDCARDED, never pinned" {
+  # This is the regression the trixie migration actually caught. A version-pinned
+  # glob does not fail loudly when the version moves — it matches zero files, the
+  # build stays green, and ~158 MB of unreachable payload ships. `libgallium`'s
+  # filename embeds the FULL Debian revision (libgallium-25.0.7-2+deb13u1.so), so
+  # a pinned name breaks on any Mesa point release, not just a major bump.
+  local entries
+  entries="$(removefiles_runtime)"
+
+  # The exact stale spelling that shipped before must never come back.
+  [[ "$entries" != *'libLLVM-15.so'* ]]
+  # No LLVM/Gallium entry may carry a literal version digit run. The check is on
+  # the BASENAME, not the whole path — the `aarch64-linux-gnu` triplet in the
+  # directory prefix legitimately contains digits.
+  local tok base
+  while IFS= read -r tok; do
+    base="${tok##*/}"
+    case "$base" in
+      libLLVM*|libgallium*)
+        [[ "$base" != *[0-9]* ]] || {
+          echo "version-pinned Mesa/LLVM prune glob: $tok" >&2
+          return 1
+        }
+        ;;
+    esac
+  done < <(printf '%s\n' "${entries//,/$'\n'}")
 }
 
 @test "mesa-prune: the DRI glob never widens to dri/* (it would eat VA-API drivers)" {
@@ -1364,7 +1401,87 @@ REPRO
 
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
-  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm[0-9]+|libz3-4|mesa-libgallium)' "$postinst"
+}
+
+# ===========================================================================
+# 28b. Trixie package-list migration — the names that CHANGED (todo 10).
+#
+#      Every name in shared.list was resolved against a real trixie arm64 index
+#      (main+contrib+non-free+non-free-firmware). Exactly two diverged, and both
+#      are pinned here because both fail in a way a plan-only PR gate cannot see:
+#      a removed package fails at `apt-get install` on a WET build only, and the
+#      governor half fails at BOOT with no error at all.
+# ===========================================================================
+
+@test "trixie-migration: cpufrequtils is gone and linux-cpupower replaced it" {
+  local shared="$PIPELINE_DIR/manifests/packages/shared.list"
+  # Debian removed cpufrequtils (out of testing 2023-10-28, unstable 2024-06-16).
+  # It has no installation candidate on trixie, so an active entry is a build
+  # failure — `E: Unable to locate package cpufrequtils`.
+  run ! grep -Eq '^cpufrequtils([[:space:]]|$)' "$shared"
+  grep -Eq '^linux-cpupower([[:space:]]|$)' "$shared"
+}
+
+@test "trixie-migration: the dead /etc/default/cpufrequtils write is gone from BOTH writers" {
+  # linux-cpupower ships exactly one file, /usr/bin/cpupower — no init script, no
+  # unit, no /etc/default hook — and nothing in trixie reads this path. Keeping
+  # the write would be a config file with no reader: a green build, a booting
+  # image, and a governor silently never applied. Both the LIVE runtime postinst
+  # and its customize twin must be clean.
+  #
+  # Both files now EXPLAIN the removal in a comment, and that comment necessarily
+  # quotes the retired line — so the assertion is on executable text only, with
+  # comments stripped. Grepping the raw file would match the explanation and make
+  # this test unfixable-by-construction.
+  local f code
+  for f in "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
+           "$PIPELINE_DIR/mkosi/customize/sysctl-tuning.sh"; do
+    code="$(grep -Ev '^[[:space:]]*#' "$f")"
+    [[ "$code" != */etc/default/cpufrequtils* ]]
+    [[ "$code" != *GOVERNOR=* ]]
+  done
+}
+
+@test "trixie-migration: ceralive-cpu-governor is the replacement applier and is wired" {
+  # Artifacts exist...
+  [ -f "$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.sh" ]
+  [ -f "$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.service" ]
+  # ...the installer installs and enables both halves...
+  local hw="$PIPELINE_DIR/mkosi/customize/postinst.d/hardware.sh"
+  grep -q 'setup_cpu_governor()' "$hw"
+  grep -q 'ceralive-cpu-governor.sh' "$hw"
+  grep -q 'ceralive-cpu-governor.service' "$hw"
+  grep -q 'enable_service ceralive-cpu-governor.service' "$hw"
+  # ...and configure_services actually calls it (an installed-but-uncalled setup
+  # function is the dead-writer trap this repo has already shipped twice).
+  grep -q '^[[:space:]]*setup_cpu_governor$' "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+}
+
+@test "trixie-migration: the governor unit pins a governor the encoder wants and writes nothing else" {
+  local sh="$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.sh"
+  grep -q 'performance' "$sh"
+  # It may drive the governor and NOTHING else — the same "move the policy, never
+  # replace the kernel's driver" rule setup_fan_curve established. The script's
+  # header states that restraint in prose, so the assertion runs on executable
+  # text with comments stripped rather than on the raw file.
+  local code
+  code="$(grep -Ev '^[[:space:]]*#' "$sh")"
+  [[ "$code" != *scaling_setspeed* ]]
+  [[ "$code" != *scaling_max_freq* ]]
+  [[ "$code" != *scaling_min_freq* ]]
+  # The only sysfs node it may READ per policy is the governor and its menu.
+  [[ "$code" == *scaling_governor* ]]
+}
+
+@test "trixie-migration: rauc-hawkbit-updater stays a comment, not an active apt line" {
+  # There is still no trixie-native package (verified against the real trixie
+  # index with every component enabled); Debian's 1.4-1 reached sid/forky only.
+  # An active line here breaks the whole-list install on any host lacking the
+  # pre-staged backport.
+  local shared="$PIPELINE_DIR/manifests/packages/shared.list"
+  run ! grep -Eq '^rauc-hawkbit-updater([[:space:]]|$)' "$shared"
+  grep -q 'rauc-hawkbit-updater' "$shared"
 }
 
 # ===========================================================================

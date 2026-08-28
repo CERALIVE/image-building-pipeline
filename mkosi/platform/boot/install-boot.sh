@@ -141,10 +141,14 @@ bootloader=custom
 boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
-# Bookworm RAUC 1.8 reads rauc.slot= itself and delegates the four state/primary
-# operations to this script. RAUC 1.11+ may also call get-current. BOOT_ORDER and
-# per-slot attempt counters live on the FAT boot partition because the staged
-# vendor U-Boot has no persistent fw_setenv (decision D3).
+# Trixie RAUC 1.13 delegates the four state/primary operations to this script
+# AND calls get-current, which the adapter already implements. That call is the
+# one behavioural difference from the bookworm 1.8 this image used to target:  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite
+# 1.8 read rauc.slot= itself and never invoked get-current, so the adapter's
+# implementation was dead forward-compat code; on 1.11+ it is live. No change
+# was needed — it was written for exactly this — but do not delete it as unused.
+# BOOT_ORDER and per-slot attempt counters live on the FAT boot partition
+# because the staged vendor U-Boot has no persistent fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
 
 [keyring]

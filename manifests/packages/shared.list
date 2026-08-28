@@ -27,13 +27,12 @@
 
 # --- TLS / apt plumbing -------------------------------------------------------
 ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
-# apt-transport-https    # REMOVED (todo 19, audited). On bookworm this is a
-                         # `Section: oldlibs` TRANSITIONAL DUMMY whose own Debian
-                         # description reads "https support has been moved into the apt
-                         # package in 1.5. It can be safely removed." Verified against a
-                         # built rootfs: it ships FOUR files, all under
-                         # /usr/share/doc/apt-transport-https/ — no apt method, no code at
-                         # all — and the installed apt is 2.6.1, far past the 1.5 cutover.
+# apt-transport-https    # REMOVED (todo 19, audited; re-verified against trixie in
+                         # todo 10). On trixie this is STILL a `Section: oldlibs`
+                         # TRANSITIONAL DUMMY (3.0.3) whose own Debian description reads
+                         # "transitional package for https support" — https support moved
+                         # into apt itself in 1.5. It ships no apt method and no code at
+                         # all, and trixie's apt is 3.0.3, far past the 1.5 cutover.
                          # The device's own https+mTLS apt source (apt.ceralive.tv, see the
                          # `_apt`-readable client-key KEY FACT in AGENTS.md) is served by
                          # apt's built-in https method, not by this package.
@@ -51,13 +50,13 @@ nginx-light              # terminates HTTPS on 443 and reverse-proxies to the Ce
 
 # --- Network management -------------------------------------------------------
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
-systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian bookworm this is a SEPARATE package (was bundled in systemd on v1's Armbian base).
+systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian trixie this is still a SEPARATE package (257.13-1~deb13u1) — it was bundled in systemd on v1's Armbian base, so it must stay named explicitly.
 dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
 iproute2                 # `ip` — CeraUI route/policy-route read-only diagnostics
 net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
                          # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
                          # the `netif` broadcast (WiFi/Ethernet/cellular/bonded-link status).
-                         # This minimal bookworm image ships only modern iproute2, so WITHOUT
+                         # This minimal trixie image ships only modern iproute2, so WITHOUT
                          # net-tools every poll tick fails ("Executable not found in $PATH:
                          # \"ifconfig\"") and the Network destination renders completely empty
                          # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a
@@ -73,7 +72,7 @@ usb-modeswitch           # flips USB modems out of storage mode into modem mode 
                          # NOTE: audio (alsa-utils/pulseaudio) and the rest of the USB/HW
                          # introspection set (usbutils/pciutils/lsof/i2c-tools/can-utils)
                          # moved to the debug add-on (T17) — see removed.md.
-uhubctl                  # per-port USB power cycling (bookworm main, ~100 KB). A wedged
+uhubctl                  # per-port USB power cycling (trixie main 2.6.0-1, ~100 KB). A wedged
                          # LTE/5G dongle that stops answering its control port cannot be
                          # recovered by any software reset — the datapath fix is a physical
                          # replug, and on a headless board mounted in a rack there is nobody
@@ -179,7 +178,40 @@ chrony                   # NTP client; enabled service in customize-image.sh:521
                          # NOTE: v1 enabled the unit but never apt-installed it — fixed here.
 
 # --- CPU / power --------------------------------------------------------------
-cpufrequtils             # CPU governor control for sustained encode performance
+linux-cpupower           # CPU governor control for sustained encode performance. RENAMED
+                         # AT THE TRIXIE MIGRATION (todo 10): the previous entry was
+                         # `cpufrequtils`, which Debian REMOVED — it left testing on
+                         # 2023-10-28 and unstable on 2024-06-16, so it exists in bookworm  # suite-literal-ok: names the suite the removed package still exists in, which is why the rename was needed
+                         # and resolves to NOTHING on trixie (verified against the real
+                         # trixie arm64 index: no candidate in main/contrib/non-free). An
+                         # unmigrated entry fails the runtime layer outright with
+                         # `E: Unable to locate package cpufrequtils`.
+                         #
+                         # THE REPLACEMENT IS NOT DROP-IN, AND THAT IS THE TRAP. Swapping
+                         # the package name alone SILENTLY LOSES the governor pin, because
+                         # the two packages deliver it by completely different means:
+                         #   * cpufrequtils shipped `/etc/init.d/cpufrequtils` +
+                         #     `S01cpufrequtils`/`S01loadcpufreq` sysv links, which read
+                         #     `GOVERNOR=` out of `/etc/default/cpufrequtils` at boot.
+                         #     That config file is what the runtime postinst wrote.
+                         #   * linux-cpupower (6.12.105-1, built from the Debian `linux`
+                         #     SOURCE package) ships EXACTLY ONE file — `/usr/bin/cpupower`.
+                         #     No unit, no init script, no `/etc/default` hook. Verified by
+                         #     `dpkg -L` in a real trixie arm64 container. Nothing anywhere
+                         #     in trixie reads `/etc/default/cpufrequtils` any more, so
+                         #     keeping that write would have left a DEAD WRITER: a config
+                         #     file with no reader and a governor that never gets applied.
+                         # The applier is therefore ours now: `ceralive-cpu-governor.service`
+                         # (mkosi/runtime/, installed by postinst.d/hardware.sh) runs
+                         # `cpupower frequency-set -g performance`. `cpufreq-set -g X` maps
+                         # to `cpupower frequency-set -g X`; `cpufreq-info` to
+                         # `cpupower frequency-info`.
+                         #
+                         # It is NOT coupled to a Debian kernel despite the 6.12.x version
+                         # string: its `Depends:` on arm64 is only `libc6` + `libcpupower1`,
+                         # with no `linux-image-*`/`linux-base` dependency, and it drives
+                         # the running kernel through sysfs. That is what makes it usable
+                         # on the Armbian vendor 6.1 BSP kernel the image actually ships.
 
 # --- Net glue (runtime-critical) ----------------------------------------------
 rsync                    # file sync for dev-push/dev-sync live-reload loop (docs/dev-loop.md)
@@ -220,9 +252,10 @@ kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service
                          # naming a binary that does not exist.
 # fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
                          # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
-                         # factually wrong on bookworm: fonts-terminus ships EXACTLY ONE file,
-                         # /usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf (440,944 B),
-                         # and NO console PSF font at all (the PSF set lives in xfonts-terminus /
+                         # factually wrong, and re-verified still wrong on trixie (todo 10):
+                         # fonts-terminus 1.2.0+ds2-4 ships EXACTLY ONE font file,
+                         # /usr/share/fonts/truetype/terminus/TerminusTTF-4.46.0.ttf, and NO
+                         # console PSF font at all (the PSF set lives in xfonts-terminus /
                          # console-setup, neither of which is installed). Verified against a built
                          # rootfs: /usr/share/consolefonts/ is EMPTY (0 entries), so
                          # ceralive-console-font.service's
@@ -263,9 +296,11 @@ nftables                 # ships /usr/sbin/nft — TWO consumers, one binary.
                          # size-notes.md §7).
 conntrack                # ships /usr/sbin/conntrack — the ONLY way to delete conntrack entries
                          # NOTE the name: `conntrack-tools` is the SOURCE package; the BINARY
-                         # package Debian bookworm ships is `conntrack` (1:1.4.7-1+b2). Asking
+                         # package Debian trixie ships is `conntrack` (1:1.4.8-2+b1). Asking
                          # for the source name fails the runtime layer with
-                         # `E: Unable to locate package conntrack-tools`.
+                         # `E: Unable to locate package conntrack-tools` — re-verified against
+                         # the real trixie arm64 index in todo 10, where `conntrack-tools`
+                         # STILL resolves to nothing in main/contrib/non-free.
                          # by MARK. On a hard-DOWN uplink transition the steering layer
                          # (CeraUI modules/network/uplink-steering) drains that uplink's flows
                          # in a fixed order: transition ruleset -> MARK-SCOPED `conntrack -D`
@@ -278,10 +313,26 @@ conntrack                # ships /usr/sbin/conntrack — the ONLY way to delete 
                          # removes rules, never conntrack state. Needs CONFIG_NF_CT_NETLINK
                          # (present as a module on the shipped vendor kernel — see
                          # docs/notes/sharing-qdisc-matrix.md).
-rauc                     # A/B update client (bookworm `rauc` 1.8-2). decisions.md T5.
-rauc-service             # ships /lib/systemd/system/rauc.service (D-Bus daemon). bookworm
-                         # SPLIT the daemon out of `rauc` (binary-only); the runtime
-                         # postinst enables rauc.service, so the service pkg is required.
+rauc                     # A/B update client. decisions.md T5. TRIXIE SHIPS 1.13-3+deb13u1
+                         # — a five-minor jump from the bookworm 1.8-2 this image used to  # suite-literal-ok: states the previously targeted RAUC version being migrated away from
+                         # target, so every "RAUC 1.8 …" statement in this repo was
+                         # re-checked in todo 10. The two that MATTER are unchanged:
+                         # 1.13 still shells out to `unsquashfs` for a plain-format
+                         # bundle's manifest and still to `mkfs.ext4` for an ext4 slot
+                         # write — and both are only `Suggests:` of the `rauc` package
+                         # (verified in the real trixie index), never `Depends:`, so
+                         # `squashfs-tools` and `e2fsprogs` below MUST stay explicit
+                         # entries or OTA breaks on-device exactly as it did before.
+                         # The `plain` bundle format is also still supported (1.10 only
+                         # began WARNING when no format is stated; verity/crypt are not
+                         # mandatory), so existing bundles keep installing.
+                         # The signing-EKU consequence is real but belongs to todo 12
+                         # (RAUC bundle-compat semantics) and is deliberately NOT actioned
+                         # here — see mkosi/runtime/rauc/system.conf for the note.
+rauc-service             # ships /usr/lib/systemd/system/rauc.service (D-Bus daemon). The
+                         # daemon is STILL split out of `rauc` (binary-only) on trixie, and
+                         # `rauc-service` is `Architecture: all` there; the runtime postinst
+                         # enables rauc.service, so the service pkg remains required.
 squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it to extract the
                          # manifest (and rootfs image) from a plain-format .raucb at
                          # `rauc info`/`rauc install` time. Absent it, install fails after
@@ -303,12 +354,27 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
 u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
                          # selector. Generic Debian pkg (present on amd64 too); the
                          # board-specific U-Boot BLOB is a Platform-layer BSP concern.
-# rauc-hawkbit-updater   # Stage 7 OTA (task 41). DELIBERATELY a comment, NOT an
-                         # active apt line: 1.4 is NOT in bookworm main (only sid/forky
-                         # 1.4-1) → it is a bookworm BACKPORT .deb (1.4-1~bpo12+1),
-                         # pre-staged like the first-party .debs and installed by the
-                         # RUNTIME postinst (setup_hawkbit_updater → apt-get install
-                         # ./<file>.deb, which pulls libcurl4/libglib2.0-0/libjson-glib
-                         # from bookworm main). An active line here would break the
-                         # whole-list `apt-get install` on any host without the backport.
+# rauc-hawkbit-updater   # Stage 7 OTA (task 41). STILL DELIBERATELY a comment, NOT an
+                         # active apt line — the trixie migration did NOT change this
+                         # verdict, only the suite it is stated against.
+                         # VERDICT (todo 10, verified against the real trixie arm64 index
+                         # with main+contrib+non-free+non-free-firmware all enabled):
+                         # there is NO trixie-native package. `rauc-hawkbit-updater` has
+                         # no installation candidate on trixie at all. Debian DOES now
+                         # carry it — accepted to unstable 2026-03-16 and migrated to
+                         # testing 2026-03-21 as 1.4-1 — but testing is forky, so it
+                         # reaches sid/forky and NOT the trixie stable suite this image
+                         # targets. Upstream's newest release is still v1.4 (2025-07-14).
+                         # So the recipe stays, REBUILT AGAINST TRIXIE: a
+                         # 1.4-1~bpo13+1-class backport .deb, pre-staged like the
+                         # first-party .debs and installed by the RUNTIME postinst
+                         # (setup_hawkbit_updater → apt-get install ./<file>.deb).
+                         # ITS RUNTIME DEPS WERE RENAMED BY THE t64 TRANSITION and a
+                         # bookworm-era recipe names packages that no longer exist:  # suite-literal-ok: warns against reusing the previously targeted suite's dependency names
+                         # `libcurl4` → `libcurl4t64`, `libglib2.0-0` → `libglib2.0-0t64`;
+                         # `libjson-glib-1.0-0` KEPT its name. Rebuilding from the current
+                         # Debian packaging (salsa `debian/rauc-hawkbit-updater`, 1.4-1)
+                         # gets those names right automatically — do not hand-port the old
+                         # bookworm dependency list. An active line here would still break  # suite-literal-ok: warns against reusing the previously targeted suite's dependency names
+                         # the whole-list `apt-get install` on any host without the backport.
                          # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.

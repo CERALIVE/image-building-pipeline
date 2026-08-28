@@ -92,11 +92,24 @@ tcpdump                  # packet capture for the bonded-uplink path; the SRTLA
 # so the baked debug image carries the identical toolbox.
 alsa-utils               # alsamixer/aplay/arecord — ALSA-level audio diagnosis.
 pulseaudio               # ships /usr/bin/pulseaudio, in the add-on's `provides`.
-                         # INERT unless invoked: bookworm ships only USER units
-                         # (/usr/lib/systemd/user/pulseaudio.{service,socket}) and
-                         # this appliance has no user session, so it never
-                         # autostarts and never contends with `alsasrc` for the
-                         # capture device. Do NOT enable it system-wide.
+                         # CORRECTED AT THE TRIXIE MIGRATION (todo 10). The previous note
+                         # claimed the package "ships only USER units". That was true on
+                         # bookworm and is NO LONGER TRUE on trixie: 17.0+dfsg1-2+b1 ships  # suite-literal-ok: records the bookworm-era claim this note corrects; the correction is the point
+                         # the two user units (/usr/lib/systemd/user/pulseaudio.service,
+                         # .socket, plus pulseaudio-x11.service) AND one SYSTEM unit,
+                         # /usr/lib/systemd/system/pulseaudio-enable-autospawn.service
+                         # (verified by `dpkg-deb -c` on the real trixie arm64 package).
+                         # The conclusion is unchanged — this appliance has no user session
+                         # so pulseaudio still never autostarts and still never contends
+                         # with `alsasrc` for the capture device — but the REASON is now
+                         # "no user session", NOT "no system unit exists". That matters
+                         # because this image's first boot runs systemd `preset-all`
+                         # (/etc/machine-id ships `uninitialized`), so a system unit CAN be
+                         # enabled behind our backs; this one only re-enables autospawn for
+                         # a session that never exists. DEBUG-IMAGE ONLY — this file is
+                         # never resolved for a production build. Do NOT enable it
+                         # system-wide, and re-check this unit if pulseaudio is ever
+                         # promoted into shared.list.
 usbutils                 # lsusb — USB enumeration during a detach/replug drill.
 pciutils                 # lspci — PCI introspection (NIC/WiFi/NVMe bring-up).
 lsof                     # which process holds the capture fd.

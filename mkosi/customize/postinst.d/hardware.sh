@@ -113,6 +113,41 @@ setup_fan_curve() {
   enable_service ceralive-fan-curve.service
 }
 
+# Pin the CPU scaling governor for sustained hardware encode.
+#
+# THIS IS A REPLACEMENT, NOT A NEW FEATURE. The governor has been pinned to
+# `performance` on every CeraLive image; what changed at the trixie migration
+# (todo 10) is WHO applies it. The pin used to be delivered entirely by the
+# `cpufrequtils` package's own sysv init script, which read `GOVERNOR=` out of
+# `/etc/default/cpufrequtils` at boot — the only thing this repo wrote was that
+# config line.
+#
+# Debian REMOVED `cpufrequtils` (out of testing 2023-10-28, out of unstable
+# 2024-06-16), so it has no installation candidate on trixie. Its successor
+# `linux-cpupower` ships EXACTLY ONE file, `/usr/bin/cpupower` — no unit, no
+# init script, no `/etc/default` hook (verified with `dpkg -L` in a real trixie
+# arm64 container), and nothing in trixie reads `/etc/default/cpufrequtils`.
+#
+# So the package rename alone would have been silent: a config write with no
+# reader, a green build, a booting image, and a governor that is never applied
+# again. The `/etc/default/cpufrequtils` writes are therefore GONE from both the
+# live runtime postinst and its customize twin, and this unit is the applier.
+setup_cpu_governor() {
+  log "pinning the CPU scaling governor at boot (ceralive-cpu-governor.service — replaces the cpufrequtils sysv mechanism Debian removed)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/ceralive-cpu-governor.sh" ]] \
+    || die "cpu-governor script not found: ${src}/ceralive-cpu-governor.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-cpu-governor.service" ]] \
+    || die "cpu-governor unit not found: ${src}/ceralive-cpu-governor.service (is \$SRCDIR/runtime mounted?)"
+
+  local sbin_dir="${CPU_GOVERNOR_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${CPU_GOVERNOR_UNIT_DIR:-/etc/systemd/system}"
+  install -D -m 0755 "${src}/ceralive-cpu-governor.sh" "${sbin_dir}/ceralive-cpu-governor"
+  install -D -m 0644 "${src}/ceralive-cpu-governor.service" "${unit_dir}/ceralive-cpu-governor.service"
+
+  enable_service ceralive-cpu-governor.service
+}
+
 # Operator feedback: give the board's indicator LEDs a default meaning at boot.
 #
 # The kernel registers this board's LEDs and then leaves the INDICATOR ones

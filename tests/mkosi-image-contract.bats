@@ -1135,6 +1135,7 @@ SH
       setup_fan_curve() { :; }
       setup_fan_kickstart() { :; }
       setup_led_status() { :; }
+      setup_cpu_governor() { :; }
       setup_hdmirx_edid() { :; }
       configure_services
     ' bash "$POSTINST_ENTRY"

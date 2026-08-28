@@ -269,7 +269,13 @@ vm.dirty_ratio = 15
 vm.dirty_background_ratio = 5
 EOF
 
-  echo 'GOVERNOR="performance"' >/etc/default/cpufrequtils
+  # The CPU governor pin is NOT written here any more. It used to be
+  # `GOVERNOR="performance"` in /etc/default/cpufrequtils, which only ever
+  # worked because the cpufrequtils package shipped the sysv init script that
+  # read it. Debian removed that package, and its trixie successor
+  # linux-cpupower ships no boot-time mechanism at all — so this write would
+  # now be a config file with no reader. The applier is
+  # ceralive-cpu-governor.service (postinst.d/hardware.sh::setup_cpu_governor).
   echo 'tmpfs /tmp tmpfs defaults,noatime,size=1G 0 0' >>/etc/fstab
 }
 

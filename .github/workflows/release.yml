@@ -88,9 +88,20 @@ jobs:
           set -euo pipefail
           board=rock-5b-plus
           repository="${REPOSITORY//\//-}"
+          # The TARGET SUITE is part of the mkosi cache identity, and it has to be
+          # in the RESTORE PREFIX, not just the key. mkosi names its own base layer
+          # `debian~<release>~<arch>~base.cache`, so a suite bump makes every cached
+          # tree unusable — but `restore-keys` is a PREFIX match, so without this
+          # axis a trixie build would still restore the whole bookworm-era cache,  # suite-literal-ok: names the retired suite whose cache trees this axis exists to stop restoring
+          # then carry those dead trees against the 2 GiB cap and risk evicting the
+          # entry it actually wants. Reading it from the one mapping keeps this in
+          # lockstep with manifests/target-release.env instead of restating a suite.
+          # shellcheck source=../../lib/shared/target-release-lib.sh
+          source lib/shared/target-release-lib.sh
+          target_release_load
           builder_scope="ceralive-builder-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}"
           builder_image="ceralive-mkosi-builder:${BUILDER_SOURCE_KEY}"
-          mkosi_prefix="mkosi-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}-source-"
+          mkosi_prefix="mkosi-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-release-${RELEASE}-tool-${MKOSI_TOOL_KEY}-source-"
           {
             echo "builder_scope=${builder_scope}"
             echo "builder_image=${builder_image}"

@@ -35,31 +35,52 @@ mirrored by inline twins written by
 layer that actually runs in the build. The postinst also installs three CeraLive
 systemd units described below. Keep the twins in sync.
 
-## The backport `.deb` (NOT in bookworm apt)
+## The backport `.deb` (NOT in trixie apt)
 
-`rauc-hawkbit-updater` 1.4 is **not** in Debian bookworm `main` — only in sid/forky
-as `1.4-1` (decisions.md task 5). It must be **built once as a bookworm backport
-`.deb`** and pre-staged for the image build, exactly like the first-party `.deb`s
-(it is **not** an `apt-get install` line in `shared.list` — that would break the
+**Verdict re-established against trixie (todo 10): there is still no
+suite-native package, so the backport recipe stays — rebuilt against trixie.**
+
+`rauc-hawkbit-updater` has **no installation candidate on trixie at all**,
+verified against the real trixie `arm64` index with `main`, `contrib`,
+`non-free` and `non-free-firmware` all enabled. Debian now *does* carry the
+package — it was accepted into unstable on 2026-03-16 and migrated to testing
+on 2026-03-21 as `1.4-1` — but testing is *forky*, so it lands in sid/forky and
+**not** in the trixie stable suite this image targets. Upstream's newest release
+is still `v1.4` (2025-07-14), so the backport tracks current upstream.
+
+It must therefore still be **built once as a trixie backport `.deb`** and
+pre-staged for the image build, exactly like the first-party `.deb`s (it is
+**not** an `apt-get install` line in `shared.list` — that would break the
 whole-list install on a build host without the backport).
 
-Build it from the Debian maintainer source (all build-deps are in bookworm `main`):
+Build it from the Debian maintainer source, which is now a real maintained
+packaging repo rather than a hand-rolled recipe:
 
 ```bash
 git clone https://salsa.debian.org/debian/rauc-hawkbit-updater.git
 cd rauc-hawkbit-updater
-# build-deps: debhelper-compat(=13) libcurl4-openssl-dev libglib2.0-dev \
-#             libjson-glib-dev meson pkgconf
-# Produce an arm64 bookworm backport on an arm64 builder (or cross):
+# Build-deps come from debian/control at the 1.4-1 packaging tag — do NOT
+# hand-copy the old bookworm list (see the t64 note below).
+# Produce an arm64 trixie backport on an arm64 builder (or cross):
 dpkg-buildpackage -us -uc -b
-#   → ../rauc-hawkbit-updater_1.4-1~bpo12+1_arm64.deb
+#   → ../rauc-hawkbit-updater_1.4-1~bpo13+1_arm64.deb
 ```
+
+> **The runtime dependency NAMES changed, and this is the trap.** The `t64`
+> time_t transition renamed the two libraries this package links: `libcurl4` is
+> now **`libcurl4t64`** and `libglib2.0-0` is now **`libglib2.0-0t64`**, while
+> `libjson-glib-1.0-0` **kept** its name. A recipe that hand-ports the old
+> bookworm dependency list therefore names packages that do not exist on trixie.
+> Building from the current `debian/control` gets all three right automatically,
+> which is why the pinned build-dep list was removed from the snippet above.
+> (For orientation: trixie's own `rauc` 1.13 `Depends:` reads
+> `libcurl3t64-gnutls`, `libglib2.0-0t64`, `libssl3t64` — same transition.)
 
 Stage that `.deb` where the runtime postinst can see it (default
 `/opt/ceralive-staging`, the same place `lib/orchestrate.sh` drops the first-party
 `.deb`s). The postinst installs it with `apt-get install -y ./<file>.deb` so apt
-resolves its runtime deps (`libcurl4`, `libglib2.0-0`, `libjson-glib-1.0-0` — all
-bookworm `main`) from the Debian sources written earlier in the same postinst.
+resolves its runtime deps from the Debian sources written earlier in the same
+postinst.
 
 > **Graceful build:** if the backport `.deb` is not staged (parity / dry / offline
 > builds), the postinst still deploys the config template, the provision script and
@@ -119,8 +140,10 @@ never in git):
 
 ## Healthcheck-gated mark-good (task 29) — the gate is **not** bypassed
 
-`rauc-hawkbit-updater` 1.4 only **installs** (RAUC D-Bus `InstallBundle`); it has
-**no `mark-good`/auto-confirm capability** (there is no such config key — the
+`rauc-hawkbit-updater` 1.4 only **installs** (RAUC D-Bus `InstallBundle`) — and it
+does so against trixie's RAUC **1.13**, not the bookworm 1.8 this design was first
+written for; the D-Bus `InstallBundle` interface it drives is unchanged across that
+jump. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
 "`mark_compatible = false` or equivalent" the task asks for is satisfied
 structurally: the updater simply cannot confirm a slot). Confirmation is RAUC's
 `boot-attempts` countdown + `ceralive-healthcheck.service`, which is the **sole**

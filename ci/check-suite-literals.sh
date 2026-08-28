@@ -83,19 +83,24 @@ FILE_ANNOTATION_RE='suite-literal-ok\(file\):[[:space:]]*[^[:space:]]'
 #                 seed a wrong-suite input precisely to prove a consumer rejects
 #                 or rewrites it. Their config-surface expectations are pinned by
 #                 the suites themselves, not by this sweep.
-#   manifests/packages/
-#                 Package lists and their removal ledger. Every mention there is
-#                 prose about which Debian release ships which package, and that
-#                 surface belongs to the package-list migration — this gate must
-#                 not collide with it. EXPANSION POINT: drop this entry once that
-#                 migration lands, and annotate what survives.
 #   mkosi/build/, mkosi/cache/, mkosi/.staging/, images/, .mkosi-workspace/
 #                 Generated build output; never sources of truth.
+#
+# `manifests/packages/` USED TO BE EXCLUDED HERE and no longer is. Todo 9 left it
+# as a marked EXPANSION POINT because the package lists were still bookworm prose
+# and the two changes would have collided; todo 10 landed that migration, so the
+# entry is GONE and `manifests/packages/*.list` is now swept like any other
+# production file. Every surviving literal in those lists carries its own
+# `suite-literal-ok:` reason. The `.md` rule above still covers
+# `manifests/packages/removed.md`, which is a historical removal ledger and is
+# correct to keep naming the suite each removal was audited against.
+# Do NOT re-add a blanket `^manifests/packages/` entry: a package list is exactly
+# where a stale suite name causes an unresolvable package rather than a stale
+# sentence, which is the failure this gate exists to catch.
 EXCLUDED_PATH_RES=(
   '^docs/'
   '\.md$'
   '^tests/'
-  '^manifests/packages/'
   '^mkosi/(build|cache|\.staging)/'
   '^images/'
   '^\.mkosi-workspace/'

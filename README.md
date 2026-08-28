@@ -368,11 +368,18 @@ software-GL prune).
 
 Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
-software-GL prune — `libgl1-mesa-dri` drags LLVM's JIT and the Z3 solver into the
-image for a software rasterizer that can never run, because the Mali vendor driver
-wins the EGL/GLES/GBM lookup. The metapackage stays installed (removing it would
-cascade into the GStreamer plugins cerastream needs); only its 157.6 MB of
-unreachable payload is stripped.
+software-GL prune — `libgl1-mesa-dri` drags Mesa's Gallium megadriver, LLVM's JIT
+and the Z3 solver into the image for a software rasterizer that can never run,
+because the Mali vendor driver wins the EGL/GLES/GBM lookup. The metapackage stays
+installed (removing it would cascade into the GStreamer plugins cerastream needs);
+only its 185.3 MB of unreachable payload is stripped.
+
+Those prune globs are **version-wildcarded on purpose**. The trixie migration
+found that the previous version-pinned ones matched almost nothing — Debian moved
+to LLVM 19 (`libLLVM.so.19.1`) and Mesa 25 moved the Gallium megadriver into a
+separate `mesa-libgallium` package — and a prune that matches nothing does not
+fail, it just silently ships ~158 MB and blows the size gate. See
+[`docs/trixie-package-resolution.md`](docs/trixie-package-resolution.md).
 
 ## Target Release — one mapping, derived everywhere
 

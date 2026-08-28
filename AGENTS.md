@@ -176,9 +176,14 @@ Six things are worth knowing before touching any of it:
   accepted it; `--self-test` proves the gate can reject, in both directions.
 - **`docs/`, `*.md`, `tests/` and `manifests/packages/` are excluded, each for a
   stated reason.** Documentation naming bookworm is CORRECT (it is the record of
-  what the image used to target). `manifests/packages/` is the package-list
-  migration's surface and is an explicit EXPANSION POINT in the script: drop that
-  exclusion once that work lands.
+  what the image used to target). **`manifests/packages/` is NO LONGER excluded** —
+  todo 9 left it as a marked EXPANSION POINT and todo 10's package-list migration
+  landed, so those lists are swept like any other production file and each
+  surviving literal carries its own `suite-literal-ok:` reason. Do not re-add a
+  blanket exclusion there: a package list is exactly where a stale suite name
+  yields an unresolvable package rather than a stale sentence.
+  `manifests/packages/removed.md` is still covered by the `.md` rule, as a
+  historical removal ledger.
 - **`target_release_load` vs `target_release_declared`.** The first gives the
   EFFECTIVE values — the file is a `: "${KEY:=default}"` fragment, so an
   already-set environment variable wins and the derived suites re-expand from it
@@ -2962,36 +2967,57 @@ extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
 unreachability), plus a policy guard that no board's ceiling may be raised above
 1,500,000,000.
 
-**157.6 MB of Mesa software-GL is `RemoveFiles=`d, and the DRI "blob" is 43
-hardlinks to ONE file** [EXISTS]
+**185.3 MB of Mesa software-GL is `RemoveFiles=`d — and the trixie migration
+proved a version-PINNED prune glob fails SILENTLY** [EXISTS]
 
 `gstreamer1.0-plugins-bad` hard-`Depends:` its way to `libgl1-mesa-dri`, whose
-Gallium software rasterizer links LLVM's JIT, which links Z3:
-`libLLVM-15.so.1` (111,631,520 B) + `libz3.so.4` (22,090,928 B) + the DRI
-megadriver (23,915,168 B) = **157,637,616 B** the device can never execute.
-`apt remove` is off the table — it cascades into the plugin set cerastream needs —
-so `mkosi.images/runtime/mkosi.conf` strips the files instead, on the same
+Gallium software rasterizer links LLVM's JIT, which links Z3. On trixie
+(Mesa 25.0.7 / LLVM 19), measured in a real trixie arm64 container:
+`libLLVM.so.19.1` (123,242,120 B) + `libgallium-25.0.7-2+deb13u1.so`
+(35,012,296 B) + `libz3.so.4` (26,875,248 B) + `dri/libdril_dri.so` (133,304 B)
+= **185,262,968 B** the device can never execute. `apt remove` is off the table —
+it cascades into the plugin set cerastream needs — so
+`mkosi.images/runtime/mkosi.conf` strips the files instead, on the same
 `RemoveFiles=` key as the Task-19 locale strip, in the layer that installs
 `shared.list`.
 
+**The bookworm globs matched almost nothing on trixie, and nothing failed.** This
+is the migration's sharpest finding, because the failure mode is a green build:
+`libLLVM-15.so*` matched **0 files** (trixie's `libllvm19` names the real object
+`libLLVM.so.19.1`; `libLLVM-19.so` is a 15 B symlink), and the Gallium megadriver
+**left `libgl1-mesa-dri` entirely** for a NEW `mesa-libgallium` package as
+`libgallium-<version>.so` at the library root, which no glob covered. The prune
+would have recovered ~27 MB instead of ~185 MB, leaving ~158 MB of unreachable
+payload and pushing both RK3588 boards (1,412,259,840 B / 1,418,792,960 B)
+straight through the 1.5 GB `[6c/9]` gate.
+
+- **The LLVM and Gallium globs are VERSION-WILDCARDED, and must stay that way.**
+  `libLLVM*.so*` and `libgallium-*.so`, never a pinned version. Pinning is what
+  broke them; and for `libgallium` wildcarding is mandatory rather than merely
+  prudent, because its filename embeds the **full Debian revision**
+  (`25.0.7-2+deb13u1`) — so any Mesa point release renames the file and a pinned
+  name stops matching on a routine security update, silently.
+  `package-contract.bats` §28 fails the build on any digit in an LLVM/Gallium
+  prune glob's basename.
 - **Unreachable, four ways.** `libmali-valhall-g610-*` ships
   `/etc/ld.so.conf.d/00-aarch64-mali.conf`; the `00-` prefix sorts first, so
   `ld.so.cache` resolves `libEGL.so.1` / `libGLESv2.so.2` / `libgbm.so.1` to the
   Mali vendor stubs and Mesa's `libEGL_mesa`/`libgbm` — the two libraries that
   `dlopen` a DRI driver — are never reached. The one soname Mali does NOT override,
   `libGL.so.1`, loads its driver inside `libGLX_mesa` at GLX context creation, and
-  the image ships no X server or Xwayland. Across the whole rootfs,
-  `libLLVM-15.so.1` is `NEEDED` by the DRI links and nothing else, and
-  `libz3.so.4` by `libLLVM-15.so.1` and nothing else. cerastream instantiates no
-  GL element (its WebRTC preview tier is `webrtcbin`+`nicesrc`); of 263 shipped
-  plugins only `libgstnvcodec.so` links `libgstgl`, and `libgstopengl.so` is not
-  installed at all.
-- **The DRI directory is ONE inode under 43 names.** Mesa builds a single Gallium
-  megadriver and hardlinks it as `swrast_dri.so`, `rockchip_dri.so`,
-  `panfrost_dri.so`, `armada-drm_dri.so` and 39 more. Removing "just the software
-  rasterizer" frees **zero** bytes; the 23.9 MB is released only when every link
-  goes. That is why the glob covers the whole set — and it costs nothing extra,
-  because once `libLLVM-15.so.1` is gone a `dlopen` of any of them already fails.
+  the image ships no X server or Xwayland. The `objdump -p` chain is still closed
+  end to end, with one NEW hop on trixie:
+  `dri/libdril_dri.so` + `gbm/dri_gbm.so` -> `libgallium-*.so` ->
+  `libLLVM.so.19.1` -> `libz3.so.4`, and nothing else needs any of the three.
+  cerastream instantiates no GL element (its WebRTC preview tier is
+  `webrtcbin`+`nicesrc`); of 263 shipped plugins only `libgstnvcodec.so` links
+  `libgstgl`, and `libgstopengl.so` is not installed at all.
+- **The DRI directory is no longer where the bytes are.** On bookworm it was ONE
+  inode hardlinked 43 ways (the megadriver, 23.9 MB), so the glob had to cover
+  the whole set or free zero bytes. On trixie those 56 entries are 55 real
+  SYMLINKS plus a 133 KB `libdril_dri.so` loader shim, and the mass moved to
+  `libgallium-*.so`. The `*_dri.so` glob is retained because it is still correct,
+  but it is no longer the lever that matters.
 - **The glob is `dri/*_dri.so`, NEVER `dri/*`.** `libva` resolves VA-API drivers as
   `<name>_drv_video.so` out of that same directory, so widening it would delete a
   future hardware video driver — exactly the `intel-media-va-driver-non-free` the
