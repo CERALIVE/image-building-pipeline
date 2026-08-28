@@ -1433,7 +1433,7 @@ tear down the live SRTLA/engine flows too.
 receives no change.** `docs/notes/sharing-qdisc-matrix.md` is the measured record
 for both tracks, re-read this session from the same `.deb` whose SHA-256 matches
 `manifests/bsp-baseline.json`. Its headline result is worth stating here because
-the opposite was expected: **`sch_cake` IS present on the shipped vendor kernel**
+the opposite was expected: **`sch_cake` was present on the retired vendor kernel**
 (`=m`, `sch_cake.ko`), alongside `sch_htb`, `sch_fq_codel` and `sch_prio`. That
 does NOT retire CeraUI's runtime cake→HTB fallback — the engine cannot assume a
 kernel it did not build, `sch_cake` is a module and so subject to autoload, and
@@ -1949,9 +1949,8 @@ same primitive on the path that still exists.
   self-defending — re-unpacking the package DOES restore every blob — so the
   argument rests on the freeze rather than on the prune.
 
-Guards: `tests/dtb-prune-contract.bats` (25 tests, eleven tagged `vendor` —
-including the both-locations regression, verify-before-delete inside the payload
-copy, the absent-payload no-op, and the `/boot`-is-never-a-target property).
+Guards: `tests/dtb-prune-contract.bats` (14 tests, with 0 active `vendor`-tagged
+cases; the vendor cases were removed with the retired track).
 
 **Firmware is pruned only where an installed-module sweep proves no consumer**
 [EXISTS]
@@ -2294,10 +2293,10 @@ pointing it at the CMA heap instead caps out below 1080p (32 MiB CMA, fragmented
 to a ~1.9 MiB largest run; a 1080p NV12 frame needs ~3.1 MiB contiguous). It was
 used here as a diagnostic instrument only.
 
-Never blocking — production ships the vendor BSP (D3 unchanged), whose in-tree
-MPP stack always provided all three pieces; this was only ever a gate on the
-mainline-track `edge` variant. Full evidence, verbatim logs and the experiment
-that isolated each layer:
+The MPP guard now protects the production build default: mainline/`edge` 7.2
+must provide all three pieces. This is not a fleet-deployment or board-
+qualification claim; the exact Trixie image remains unbuilt and unbooted on the
+bench. Full evidence, verbatim logs and the experiment that isolated each layer:
 `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a; the
 clearing run is `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
 
@@ -2336,11 +2335,12 @@ behaviour, not a regression already fixed. The pipeline authors NO device tree
 (zero `.dts`/`.dtsi`/`.dtbo` files in the repo), so it cannot express a repair:
 that is a driver patch or a board DT patch in `CERALIVE/rk3588-kernel-patches`,
 bench-validated on a spare board, **never** guessed at against a production eMMC.
-Not currently blocking — production ships the vendor BSP (D3 unchanged), which
-drives this eMMC fine. Do **not** use eMMC being unreachable as proof that a
-bench boot did not touch it; prove non-interference from the mount table and
-disjoint `PARTLABEL` namespaces instead. Full historical analysis and the
-failure observation: `.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
+This remains a qualification concern for the mainline/`edge` 7.2 production
+build default, not a vendor-BSP fallback: the vendor track is retired. Do **not**
+use eMMC being unreachable as proof that a bench boot did not touch it; prove
+non-interference from the mount table and disjoint `PARTLABEL` namespaces
+instead. Full historical analysis and the failure observation:
+`.omo/evidence/device-platform-wave4/task-28-wifi-emmc-findings.md`.
 The succeeding observation is recorded in
 `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §8a.
 
@@ -4293,8 +4293,9 @@ role-transition transient causes the dropout or the timing is coincidental is **
 established** and is recorded as an open finding, not a conclusion. Role policy is
 about which end wins arbitration; it does not and cannot fix CC lines dropping out
 later. Separately, none of this changes the production kernel track: the shipped
-image still runs the prebuilt vendor 6.1 BSP, decision D3 stands exactly as written,
-and `docs/kernel-track-decision.md` is unaffected in substance.
+ image now defaults to source-built mainline/`edge` 7.2; the vendor track and D3
+ machinery were retired and preserved at `vendor-kernel-final`. This describes
+ the build default, not fleet deployment or board qualification.
 
 **The `pwm-fan` cooling device is never ASKED to run below 55 °C — so the fix is to
 move ONE trip point, not to take over the fan** [EXISTS — code merged-ready, NOT in
@@ -5243,7 +5244,11 @@ bound driver by name.
 
 **Phase-3 deferrals:** e-ink kernel DRM driver + device-tree, dual-display hybrid, on-device live-video preview, and #61 battery/power telemetry (document-only: current boards are mains-powered, no fuel-gauge IC). Full register: [`docs/kiosk-display.md §7`](docs/kiosk-display.md).
 
-**RK3588 mainline-patch contingency (D3 stays locked):** D3 (`armbian_branch: vendor`) is NOT changing. The Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265. If a mainline pivot is ever forced, the reference patch set is bookmarked in [`docs/kiosk-display.md §3`](docs/kiosk-display.md) (GPU contingency section): three patches from `https://github.com/rcawston/rockchip-rk3588-mainline-patches` covering VEPU580 H.265 encoder (WIP, pinned MPP fork required), HDMIRX EDID set fix, and HDMIRX plugout overflow fix. These are insurance only — do not apply without explicitly re-opening D3.
+**RK3588 mainline-patch contingency is retired:** the mainline/`edge` 7.2
+production build default replaced the vendor track, and the vendor machinery is
+preserved at `vendor-kernel-final`. The old patch bookmark in
+[`docs/kiosk-display.md §3`](docs/kiosk-display.md) is historical context only,
+not an active safety fallback or instruction to re-open D3.
 
 ## ANTI-PATTERNS
 
@@ -5261,7 +5266,7 @@ bound driver by name.
 - Don't `chown` the mkosi package cache to the invoking user to "make the ownership consistent". mkosi 26 refuses a cache tree whose owner uid is not its own and then deletes it, so a chowned cache is a permanently cold base layer that looks like a fix. Keep the cache in ONE privilege domain instead, and don't alternate `./build <board>` and `./build <board> --native` on one checkout unless you want to pay for a cold base layer every time
 - Don't run the containerized build on a Docker Desktop daemon, and don't "work around" its `rm: cannot remove …: Permission denied` or `acl_set_file_at: Operation not supported`. Its bind mount is a VM share: container root cannot unlink a host-uid-0 file and the share carries no ACLs/xattrs, so it can neither invalidate the mkosi cache nor extract a subimage. A `/work/work/...` path in an error is not a real path — it is mkosi's sandbox prefix over our own `/work` mount, and it means the failure is inside the containerized mkosi
 - Don't put a VENDOR GPU/BSP blob (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only, and `libmali*` additionally sits in the Cog add-on's `SYSEXT_FORBID_PACKAGES` because it is retired on the mainline path outright. **The Cog add-on carrying Mesa's `libgallium-*.so` / `dri/*_dri.so` / `libLLVM*` / `libz3*` is the ONE sanctioned exception and is not a precedent for the blobs**: those four are ordinary Debian packages the Runtime layer already installs and then `RemoveFiles=`-prunes for the size gate, so the base has no file at those paths and the add-on shadows nothing. Extend the exception only to a payload that is (a) stock Debian, (b) pruned out of the base, and (c) consumed by that add-on alone
-- Don't re-add `libmali` to the `edge` variant's `firmware_packages` to "fix" a mainline GPU problem — it is what CAUSES one. Its `00-aarch64-mali.conf` sorts first and captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver bound to a `/dev/mali0` the mainline kernel never creates, so it does not degrade GL, it removes it with no fallback. The mainline pairing is `panthor` + Mesa; the vendor tracks keep the blob and are unchanged
+- Don't re-add `libmali` to the `edge` variant's `firmware_packages` to "fix" a mainline GPU problem — it is what CAUSES one. Its `00-aarch64-mali.conf` sorts first and captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver bound to a `/dev/mali0` the mainline kernel never creates, so it does not degrade GL, it removes it with no fallback. The production pairing is `panthor` + Mesa; the vendor track is retired and preserved only at `vendor-kernel-final`
 - Don't drop `libGLESv2.so*` / `libwayland-egl.so*` back into the Cog sysext's `SYSEXT_EXCLUDE_NAMES`. They were there because libmali supplied those sonames; with libmali gone the Runtime layer supplies neither `libgles2` nor `libwayland-egl1`, so re-excluding them deletes libraries nothing else provides. `libEGL.so*` and `libgbm.so*` DO stay excluded — those really are base-provided (`libegl1`/`libegl-mesa0`/`libgbm1`, unpruned)
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges
