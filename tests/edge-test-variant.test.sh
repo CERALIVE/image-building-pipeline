@@ -205,12 +205,25 @@ else
   bad "production edge declares exactly ONE fragment (no plural key)"
 fi
 
-# The vendor/default production path must be untouched by any of this.
+# The DEFAULT path is now the production `edge` overlay (`default_variant: edge`),
+# so it legitimately carries a kernel_source block — and must carry EXACTLY the
+# edge one, never the edge-test deltas. The property worth pinning is therefore
+# no longer "no kernel_source at all" but "byte-identical to --variant edge",
+# which is what proves default_variant is a pointer rather than a second copy.
 DEFAULT_PARAMS="$(bash "${RESOLVE_SH}" rock-5b-plus 2>/dev/null)"
-if grep -q 'KERNEL_SOURCE' <<<"${DEFAULT_PARAMS}"; then
-  bad "the default (vendor) path leaks a kernel_source block"
+if [[ "${DEFAULT_PARAMS}" == "${EDGE}" ]]; then
+  ok "the DEFAULT path resolves byte-identically to --variant edge"
 else
-  ok "the default (vendor) path resolves no kernel_source block at all"
+  bad "the DEFAULT path diverged from --variant edge"$'\n'"$(diff <(printf '%s\n' "${EDGE}") <(printf '%s\n' "${DEFAULT_PARAMS}") || true)"
+fi
+
+# The PREBUILT vendor overlay is the one that must resolve no kernel_source at
+# all — it installs an Armbian .deb rather than compiling anything.
+VENDOR_PARAMS="$(bash "${RESOLVE_SH}" rock-5b-plus --variant vendor 2>/dev/null)"
+if grep -q 'KERNEL_SOURCE' <<<"${VENDOR_PARAMS}"; then
+  bad "the prebuilt vendor path leaks a kernel_source block"
+else
+  ok "the prebuilt vendor path resolves no kernel_source block at all"
 fi
 
 # --------------------------------------------------------------------------

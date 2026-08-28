@@ -1,22 +1,26 @@
-# Kernel build from source (opt-in family variants)
+# Kernel build from source (the production path, plus opt-in variants)
 
-The device image normally installs a **prebuilt Armbian vendor kernel** (`.deb`
-fetched from the signed Armbian archive). That is decision **D3**, it is
-unchanged, and it is the only path any shipped image has ever taken.
+The device image builds its kernel and in-tree DTBs **from pinned source**, with
+the CeraLive RK3588 patch series applied, and installs the resulting `.deb`. That
+is the `edge` overlay, and `manifests/families/rk3588.yaml` names it
+`default_variant: edge` — so a variant-less `./build <board>` resolves it
+byte-identically to `./build <board> --variant edge`.
 
-This document describes an **optional, explicitly opt-in** alternative: build the
-kernel and its in-tree DTBs **from pinned source** with a CeraLive RK3588 patch
-series applied, and use the resulting `.deb` instead of the Armbian one.
+The **prebuilt Armbian vendor kernel** every earlier image shipped is now the
+opt-in `vendor` overlay. Decision D3's kernel half is answered; its
+`rauc_bootloader_adapter: custom` half is unchanged.
 
-Two variants exist, and they target **different kernel tracks with different
-patch repositories** — neither repo's patches apply to the other's tree:
+Four overlays exist. The two patch repositories target **different kernel tracks**
+and neither one's patches apply to the other's tree:
 
 | Variant | Track | Source | Patch series | Why it exists |
 |---|---|---|---|---|
-| `edge` | mainline 7.2 | `linux-stable` `v7.2` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | keeps the mainline option pinned and buildable (VEPU580 encoder + HDMI-RX) |
-| `vendor-patched` | **vendor 6.1 BSP — the kernel the shipped image actually runs** | `armbian/linux-rockchip` `rk-6.1-rkr5.1` @ `95e85f6c` | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | restores **HDMI-RX audio capture**, which the stock vendor kernel lost |
+| `edge` | mainline 7.2 | `linux-stable` `v7.2` | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | **the production default** (VEPU580 encoder + HDMI-RX) |
+| `edge-test` | `extends: edge` | inherited | inherited | KASAN/lockdep + deterministic fault injection; never released |
+| `vendor` | vendor 6.1 BSP, **prebuilt** | Armbian archive `.deb` | — | the pre-flip production path, kept selectable; see the `NET_CLS_FW` note below |
+| `vendor-patched` | vendor 6.1 BSP, source-built | `armbian/linux-rockchip` `rk-6.1-rkr5.1` @ `95e85f6c` | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | restores **HDMI-RX audio capture**, which the stock vendor kernel lost |
 
-`vendor-patched` is the same 6.1.115 BSP the production path installs prebuilt,
+`vendor-patched` is the same 6.1.115 BSP the `vendor` overlay installs prebuilt,
 rebuilt from source with five patches applied — three that restore the capture
 capability, one that is **diagnostic instrumentation, not a fix**, and one that
 is the fix that diagnostic found (see
@@ -27,10 +31,14 @@ audio on RK3576 HDMI-**TX**, and since `rk_hdmirx` registers HDMI-**RX** through
 that same codec, `/proc/asound/pcm` shows the card with zero capture substreams
 and nothing anywhere reports an error.
 
-> **Nothing here is on the production path.** With no variant selected, the
-> resolver strips the variant machinery entirely and the resolved build
-> parameters are **byte-identical** to the manifest before variants existed.
-> That is pinned by committed fixtures — see [§6](#6-how-the-vendor-path-is-proven-unmoved).
+> **The PREBUILT VENDOR path is byte-identical to what a bare build used to
+> resolve — it just moved behind `--variant vendor`.** `variants:` and
+> `default_variant:` are both stripped before flattening, so no unselected
+> overlay leaks a pin into the resolved params, and the committed fixtures now
+> compare against `--variant vendor` for the two rk3588 boards (and against the
+> bare default for `x86-minipc`, which declares neither key). The one deliberate
+> fixture change is the deleted `ceralive-cls-fw` row — see
+> [§6](#6-how-the-vendor-path-is-proven-unmoved).
 
 ---
 
@@ -421,22 +429,29 @@ fail the suite.
 
 ---
 
-## 3c. Production vendor-kernel extension (not a source-built variant)
+## 3c. The retired vendor-kernel extension (`ceralive-cls-fw`)
 
-The default production path still installs Armbian's prebuilt
-`linux-image-vendor-rk35xx=26.5.1`. It additionally builds
-`ceralive-cls-fw` from the matching Armbian headers and the pinned vendor tree's
-`net/sched/cls_fw.c`, because the prebuilt config omits `NET_CLS_FW` entirely.
-This does not use `bindeb-pkg`, replace the image package, apply a kernel patch,
-or select either opt-in variant.
+While the prebuilt vendor kernel was production, the build ALSO produced a small
+`ceralive-cls-fw` package: an ABI-matched out-of-tree `cls_fw.ko` compiled from
+the matching Armbian headers and the pinned vendor tree's `net/sched/cls_fw.c`,
+because that kernel's config omits `NET_CLS_FW` — the classifier the uplink
+shaper needs to map an nftables skb mark onto its client band.
 
-Exact input and ABI evidence are in
-[`notes/sharing-kernel-capability.md`](notes/sharing-kernel-capability.md) §2c.
-The resulting package contains only `cls_fw.ko`, a `modules-load.d` entry, and
-`depmod` maintainer scripts. Matching headers and GCC stay in the build
-container; neither is installed on the device. `edge` and `vendor-patched`
-explicitly resolve `kernel_extension_packages: []` because their release strings
-and module ABI differ.
+**It is retired, mechanism included.** The production kernel is source-built with
+`CONFIG_NET_CLS_FW=y` in `manifests/kernel/rk3588-edge.fragment` (pinned in
+`required-symbols.list`), so the classifier is built into the kernel image: no
+module, no `modules-load.d` entry, no vermagic to match. The package, its pin
+file, its package list, its builder and builder image, its contract suite and the
+whole `kernel_extension_packages` field — schema, manifest, orchestrator
+`env_names`, mkosi `PassEnvironment=`, platform postinst — are deleted, and
+`tests/packaging-hygiene.bats` fails the build if any half returns.
+
+The consequence for the opt-in `vendor` overlay is stated rather than implied:
+**it has no `NET_CLS_FW` at all.** That track is a comparison/smoke path, and
+removing it is the vendor-kernel retirement. Input and ABI evidence for the
+retired work, plus what the flip changed, are in
+[`notes/sharing-kernel-capability.md`](notes/sharing-kernel-capability.md) §2c
+and §7.
 
 ---
 

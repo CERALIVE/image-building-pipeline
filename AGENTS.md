@@ -55,7 +55,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Which Debian suite / os-release VERSION_ID the image targets** | `manifests/target-release.env` — the ONE mapping; read it through `lib/shared/target-release-lib.sh::target_release_load`. Gate: `ci/check-suite-literals.sh`; contract: `tests/target-release-derivation.test.sh`. See the "target release has exactly one source of truth" KEY FACT below |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |
 | **Kernel-build-from-source internals** | `lib/build-kernel.sh` is a thin STAGE entry; the bodies live in `lib/kernel/{config,checkout,builder,package}.sh` — see the "build-kernel.sh and assemble-disk.sh are ENTRIES plus concern modules" KEY FACT below |
-| **Production vendor `cls_fw` extension** | `lib/build-kernel-extension.sh` + `manifests/kernel/vendor-cls-fw.env` + `tests/vendor-cls-fw-contract.bats`; evidence in `docs/notes/sharing-kernel-capability.md` |
+| **Which kernel track a variant-less build resolves** | `manifests/families/rk3588.yaml` `default_variant:` + `lib/resolve.py::resolve_default_variant`; contract `tests/variant-contract.bats` §26 |
+| **The `fw` classifier the uplink shaper needs** | `manifests/kernel/rk3588-edge.fragment` `CONFIG_NET_CLS_FW=y` + `manifests/kernel/required-symbols.list`. The retired `ceralive-cls-fw` out-of-tree package is absence-guarded by `tests/packaging-hygiene.bats`; history in `docs/notes/sharing-kernel-capability.md` §2c/§7 |
 | **Uplink-sharing carrier (`ceralive-share.service`), its packages and its NM posture** | `mkosi/runtime/uplink-sharing/` + `mkosi/customize/postinst.d/networking.sh::setup_uplink_sharing_carrier` + `tests/uplink-sharing-carrier.bats`; per-track kernel-object evidence in `docs/notes/sharing-qdisc-matrix.md` |
 | **RK3588 disk-assembly internals** | `lib/assemble-disk.sh` is a thin SEQUENCER entry; the bodies live in `lib/disk/{repart,slot,boot,gap,verify}.sh` — same KEY FACT |
 | Add/change .deb packages | `lib/fetch-debs.sh` → `REPOS` array (first-party Debian package names: `FIRST_PARTY_APT_PKGS`) |
@@ -1296,27 +1297,58 @@ same-version content replacement observable:
 - **DRY_RUN stages no `.deb`**, so provenance capture is skipped under DRY_RUN — the
   CI build-matrix (DRY_RUN=1) never writes the artifact.
 
-**The production vendor kernel gains `cls_fw` as a separate ABI-matched package,
-not as a kernel-track change** [EXISTS]
+**The PRODUCTION kernel is the mainline source-built track, selected by
+`default_variant:` — and that flip retired the `cls_fw` extension outright**
+[EXISTS]
 
-`linux-image-vendor-rk35xx=26.5.1` remains the exact prebuilt production kernel
-selected by D3. Its config has `# CONFIG_NET_CLS_FW is not set`, so the pipeline
-builds `ceralive-cls-fw` from the exact matching
-`linux-headers-vendor-rk35xx=26.5.1` plus
-`armbian/linux-rockchip@95e85f6cb496` `net/sched/cls_fw.c`. Both inputs are
-immutable-URL and SHA-256 pinned in `manifests/kernel/vendor-cls-fw.env`; the
-digest-pinned GCC-13 builder rejects MODPOST, module-name, exact vermagic, and
-Debian-control mismatches.
+`manifests/families/rk3588.yaml` declares `default_variant: edge`. A variant-less
+`./build <board>` therefore resolves the `edge` overlay — mainline `v7.2`, built
+from source, `linux-image-7.2.0-ceralive-rk3588`, no separate DTB package, the
+board's `-edge` U-Boot — **byte-identically to `./build <board> --variant edge`**,
+the board's own `variant_overrides.edge` included. The prebuilt Armbian vendor
+6.1 BSP that shipped every earlier image is the opt-in `vendor` overlay, and
+`--variant vendor` resolves byte-identically to the pre-flip default (pinned by
+the committed `tests/manifests/fixtures/vendor-baseline/*.params`).
 
-The `.deb` owns
-`/usr/lib/modules/6.1.115-vendor-rk35xx/updates/ceralive/cls_fw.ko`, a
-`modules-load.d` entry, and `depmod` maintainer scripts. It depends exactly on
-`linux-image-vendor-rk35xx (= 26.5.1)`, is installed only after that kernel, and
-ships no headers/compiler. `edge` and `vendor-patched` explicitly clear
-`kernel_extension_packages` because their ABI differs. CI proves text/package
-contracts only; actual `modprobe` plus `tc filter … fw classid` behavior remains
-the hardware gate in `docs/DEFERRED.md` item 10. Full evidence:
-`docs/notes/sharing-kernel-capability.md` §2c.
+**`default_variant` is a POINTER, not a copy of the pins, and the alternative was
+refused on evidence.** Moving `edge`'s block to the family top level would force
+`edge-test` (which `extends: edge`) to restate its parent's pins — the exact
+byte-for-byte drift `extends` exists to make impossible — and would deep-merge
+this family's defconfig mode onto `vendor-patched`'s config-FILE mode, producing
+the half-specified config `$defs/kernel_source`'s `oneOf` forbids and
+`build-kernel.sh` re-asserts. One declaration, one pin set, one answer.
+
+**Three consequences worth knowing before touching any of it:**
+
+- **The BSP fetch on the production path is U-BOOT AND FIRMWARE ONLY.** The
+  kernel and DTB names are suppressed (`kernel_source.suppressed_packages`, still
+  derived not authored), so a real default build asks the Armbian archive for
+  exactly `armbian-firmware` + `linux-u-boot-<board>-edge`. Pinned by
+  `variant-contract.bats` "the BARE DRY_RUN fetches U-BOOT AND FIRMWARE ONLY".
+- **A family list may only hold what EVERY track needs.**
+  `collect_declared_bsp_pkgs` UNIONS the family FILE's lists with the resolved
+  env values, so an overlay that resolves a strict SUBSET cannot remove a name
+  that way. `libmali-valhall-g610-*` sat in the family's `firmware_packages`
+  while the `edge` overlay dropped it, so the mainline path still staged the
+  blob's `.deb` and would have died at `[3/9]` as an "unclassified staged
+  package". It is now declared by the `vendor` and `vendor-patched` overlays
+  instead. Let overlays ADD; never let one try to subtract.
+- **`ceralive-cls-fw` is RETIRED, mechanism included.** The prebuilt vendor
+  kernel omits `NET_CLS_FW`, so the image used to build an ABI-matched
+  out-of-tree `cls_fw.ko` beside it. The source-built production kernel declares
+  `CONFIG_NET_CLS_FW=y` in-tree (`rk3588-edge.fragment`, pinned in
+  `required-symbols.list`), so the package, its pin file
+  (`manifests/kernel/vendor-cls-fw.env`), its package list, its builder
+  (`lib/build-kernel-extension.sh`, `lib/kernel/build-cls-fw-container.sh`,
+  `ci/Dockerfile.kernel-module`), its contract suite and the whole
+  `kernel_extension_packages` field — schema, manifest, orchestrator `env_names`,
+  mkosi `PassEnvironment=`, platform postinst — are all gone.
+  `tests/packaging-hygiene.bats` fails the build if any half returns. **The
+  honest consequence, stated rather than implied: the opt-in `vendor` overlay now
+  has NO `NET_CLS_FW` at all.** History: `docs/notes/sharing-kernel-capability.md`
+  §2c (the work) and §7 (its retirement). The hardware gate in `docs/DEFERRED.md`
+  item 10 narrowed with it — there is no module to `modprobe`, only a real
+  `tc filter … fw classid` classification to prove.
 
 **The uplink-sharing CARRIER is an image artifact, but it is deliberately NOT
 enabled — and the reason is the one that also forbids an `[Install]` section**
@@ -1398,7 +1430,10 @@ the opposite was expected: **`sch_cake` IS present on the shipped vendor kernel*
 does NOT retire CeraUI's runtime cake→HTB fallback — the engine cannot assume a
 kernel it did not build, `sch_cake` is a module and so subject to autoload, and
 nothing in the image forces cake. `NET_CLS_FW` remains the one absent row, which
-is what `ceralive-cls-fw` (above) exists for. On the edge track the whole closure
+is what `ceralive-cls-fw` USED to exist for — the production kernel is now the
+source-built mainline track where the symbol is in-tree, so that package is
+retired and the vendor overlay simply has no `fw` classifier. On the edge track
+the whole closure
 is declared `=y`, which is the only safe value under an exact-match gate and
 matches the fragment's existing `CONFIG_NF_TABLES=y` reasoning.
 
@@ -1407,23 +1442,28 @@ privileged netns and no VM, so every case is config text, package presence,
 kernel symbol declarations and unit-file content. The netns half is CeraUI's
 required `unshare -rn` job; the on-device half is `docs/DEFERRED.md` item 11.
 
-**Kernel build from source — OPT-IN family variants, production path byte-identical** [PARTIAL]
+**Kernel build from source — the PRODUCTION path plus opt-in variants** [PARTIAL]
 
-The family manifest gained a `variants:` map: named, **explicitly opt-in** overlays
-on the family defaults, applied only via `./build <board> --variant <name>` (or
+The family manifest carries a `variants:` map: named overlays on the family
+defaults, applied via `./build <board> --variant <name>` (or
 `CERALIVE_KERNEL_VARIANT`). Resolver merge order is **family → variant → board**
 (board still wins last, so board facts stay authoritative). `default` is the
-reserved no-overlay name and the schema refuses a variant literally called that.
+reserved name meaning "the family's own default"; the schema refuses a variant
+literally called that, and `default_variant:` is what says which declared overlay
+that name resolves to.
 
-rk3588 ships **two** variants, both building the kernel + in-tree DTBs **from
+rk3588 ships **four** overlays. Three build the kernel + in-tree DTBs **from
 pinned source** by `git am` + `make bindeb-pkg` inside a **digest-pinned** builder
-container with a persistent ccache. They target DIFFERENT kernel tracks with
-DIFFERENT patch repos, and neither repo's patches apply to the other's tree:
+container with a persistent ccache; the fourth installs a prebuilt Armbian `.deb`.
+The two patch repos target DIFFERENT kernel tracks and neither one's patches apply
+to the other's tree:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
-| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@b28a187269f2` (22-member series) | mainline option kept pinned + buildable |
-| `vendor-patched` | **vendor 6.1 BSP — what the image actually runs** | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
+| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@b28a187269f2` (22-member series) | **the PRODUCTION default** (`default_variant: edge`) |
+| `edge-test` | `extends: edge` | inherited | inherited | KASAN/lockdep + fault injection; never released |
+| `vendor` | vendor 6.1 BSP, **PREBUILT** | — (no source build) | — | the pre-flip production path, kept selectable; has NO `NET_CLS_FW` |
+| `vendor-patched` | vendor 6.1 BSP, source-built | `rk-6.1-rkr5.1` @ `95e85f6cb496` (**no tag**) | `CERALIVE/rk3588-vendor-kernel-patches@de46c1acba42` | restores HDMI-RX audio capture + diagnostic instrumentation |
 
 Both patch commits are **immutable SHAs**, never branches. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
@@ -1540,12 +1580,15 @@ Both modes converge on ONE `olddefconfig` → `syncconfig` → `verify-kernel-co
 sequence. Keep it that way: `variant-contract.bats` statically requires exactly one
 occurrence of each of those `make` calls in the file.
 
-- **The production vendor path is BYTE-IDENTICAL.** `variants:` is stripped from
-  the family before flattening whether or not one is selected, so a family that
-  declares a variant resolves exactly like one that never did. Pinned by committed
-  golden fixtures (`tests/manifests/fixtures/vendor-baseline/*.params`, captured
-  pre-change) for all three shipped boards, plus an explicit **non-vacuity** leg
-  proving the same comparison fails on the `edge` resolve.
+- **The PREBUILT VENDOR path is BYTE-IDENTICAL, it just moved.** `variants:` and
+  `default_variant:` are both stripped before flattening, so no unselected overlay
+  can leak a second kernel pin into the resolved params. The golden fixtures
+  (`tests/manifests/fixtures/vendor-baseline/*.params`, captured before variants
+  existed) are now compared against `--variant vendor` for the two rk3588 boards,
+  and against the bare default for `x86-minipc`, which declares no variants and no
+  `default_variant` at all. The ONE deliberate fixture change is the deleted
+  `ceralive-cls-fw` row. The **non-vacuity** leg (the same comparison must FAIL on
+  the `edge` resolve) is unchanged.
 - **The Armbian framework is NOT the build system.** It is consulted for the
   `edge` → 7.1 mapping only (upstream, in the patches repo's preflight) and never
   invoked. Adopting it would import its patch stack, config and packaging and make
@@ -1744,9 +1787,10 @@ occurrence of each of those `make` calls in the file.
   versions, rootfs file lists and `/boot/config-*`); archive bytes are not. This is
   precisely why `CONFIG_LOCALVERSION_AUTO=n` plus the exact `kernelrelease` assertion
   matter — without them the package NAME inherits that nondeterminism.
-- **D3 is NOT reopened.** The shipped kernel is still the Armbian vendor BSP; this
-  is the mainline-track option kept pinned and buildable. See
-  `docs/kernel-currency-watch.md`.
+- **D3's KERNEL half is now answered, and its other half is untouched.** The
+  shipped kernel is the mainline source-built track (`default_variant: edge`);
+  `rauc_bootloader_adapter: custom` is unchanged and still locked. See
+  `docs/kernel-currency-watch.md` and `docs/kernel-tracks.md`.
 
 - **The three pinned fetches retry into ATTEMPT-PRIVATE dirs, and a PIN MISMATCH
   is never one of the retries.** `build-kernel.sh` performs three network fetches

@@ -51,9 +51,17 @@ order becomes ``family -> variant -> board`` — the board still wins last, so a
 variant can never override a board-specific fact.
 
 The ``variants:`` key itself is ALWAYS stripped before flattening, selected or
-not. That is what makes the production (vendor) path provably unmoved: with no
-``--variant`` the resolver emits byte-identical params to a family that never
-declared a variant at all. ``default`` is the reserved no-overlay name.
+not, so an unselected overlay can never leak a second kernel pin into the param
+set. ``default`` is the reserved name meaning "the family's own default".
+
+WHICH overlay that name resolves to is the family's to declare. With no
+``default_variant:`` key it resolves to NO overlay, and the family top-level
+fields are the production answer. With ``default_variant: <name>`` a
+variant-less build resolves that named overlay instead — byte-identically to
+passing ``--variant <name>`` — and the top-level fields become the base every
+other variant still starts from. rk3588 uses this to make the mainline
+source-built track production without copying its pins out of the ``edge``
+overlay; see ``resolve_default_variant`` for why copying was refused.
 
 When the applied overlay carries a ``kernel_source`` block the resolver also
 injects ONE derived key, ``kernel_source.suppressed_packages`` — the union of
@@ -213,6 +221,10 @@ DEFAULT_VARIANT = "default"
 
 VARIANT_EXTENDS = "extends"
 
+# The family key that says WHICH declared variant a variant-less build resolves.
+# Absent, `default` keeps its original meaning: apply no overlay at all.
+FAMILY_DEFAULT_VARIANT = "default_variant"
+
 # The two spellings of "which Kconfig fragment(s) does this variant merge". They
 # are mutually exclusive in the schema, so an `extends` child that declares one
 # must CLEAR the other off its inherited parent — otherwise the merged block
@@ -335,6 +347,46 @@ def _dedupe(names: "list[str]") -> "list[str]":
     return out
 
 
+def resolve_default_variant(family: Any, path: str) -> str:
+    """Return the variant name a variant-less build resolves for ``family``.
+
+    ``default_variant`` is what makes a track the PRODUCTION one without copying
+    its overlay to the family top level. Copying was the alternative and it is
+    strictly worse: the ``extends`` child would have to restate its parent's
+    pins (the byte-for-byte drift ``extends`` exists to make impossible) and a
+    config-file-mode variant would deep-merge onto the family's defconfig mode,
+    producing the half-specified config the schema's ``oneOf`` forbids.
+    """
+    if not isinstance(family, dict):
+        return DEFAULT_VARIANT
+    declared = family.get(FAMILY_DEFAULT_VARIANT)
+    if declared is None:
+        return DEFAULT_VARIANT
+    if not isinstance(declared, str) or not declared:
+        _die(
+            f"schema invalid: {path}: {FAMILY_DEFAULT_VARIANT} must be a "
+            f"non-empty variant name, got {declared!r}"
+        )
+    if declared == DEFAULT_VARIANT:
+        _die(
+            f"schema invalid: {path}: {FAMILY_DEFAULT_VARIANT} may not be "
+            f"'{DEFAULT_VARIANT}' — that is the reserved no-overlay name, which "
+            "is what an absent key already means"
+        )
+    variants = family.get("variants")
+    if not isinstance(variants, dict) or declared not in variants:
+        available = (
+            ", ".join(sorted(variants))
+            if isinstance(variants, dict) and variants
+            else "<none>"
+        )
+        _die(
+            f"schema invalid: {path}: {FAMILY_DEFAULT_VARIANT} names undeclared "
+            f"variant '{declared}' (available: {available})"
+        )
+    return declared
+
+
 def apply_variant(
     family: Any, variant: str, path: str, schema: Any = None
 ) -> "tuple[Any, Any]":
@@ -342,15 +394,20 @@ def apply_variant(
 
     Returns ``(base, overlay)`` where ``base`` is the family with ``variants:``
     removed and the overlay merged in (when one was selected), and ``overlay``
-    is the raw overlay mapping (or ``None`` for the default path).
+    is the raw overlay mapping (or ``None`` when no overlay applies).
 
     Stripping happens unconditionally so an unselected ``variants:`` block never
     reaches ``flatten()`` — the guarantee that declaring a variant cannot move
-    the production param set by a single byte.
+    the resolved param set by a single byte. ``default_variant`` is stripped for
+    the same reason; the caller has already resolved it to a real variant name.
     """
     if not isinstance(family, dict):
         return family, None
-    base = {key: value for key, value in family.items() if key != "variants"}
+    base = {
+        key: value
+        for key, value in family.items()
+        if key not in ("variants", FAMILY_DEFAULT_VARIANT)
+    }
     variants = family.get("variants")
 
     if variant in ("", DEFAULT_VARIANT):
@@ -501,6 +558,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         validate(board, load_json(args.board_schema), args.board)
 
     variant = args.variant or DEFAULT_VARIANT
+    if variant == DEFAULT_VARIANT:
+        variant = resolve_default_variant(family, args.family)
     pre_overlay_packages = _package_names(family, _SUPPRESSED_FIELDS)
     base, overlay = apply_variant(
         family, variant, args.family, family_schema if args.family_schema else None

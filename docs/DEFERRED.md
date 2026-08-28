@@ -547,28 +547,33 @@ the prebuilt Armbian vendor BSP.
 
 ---
 
-## 10. Vendor `cls_fw` extension — on-device load and tc behavior
+## 10. `fw` classifier — on-device tc behavior
 
-**Status:** Hardware-gated; static build/package contract is complete
-**Location:** `lib/build-kernel-extension.sh`,
-`manifests/kernel/vendor-cls-fw.env`,
-`docs/notes/sharing-kernel-capability.md` §2c
+**Status:** Hardware-gated; the static config contract is complete
+**Location:** `manifests/kernel/rk3588-edge.fragment` (`CONFIG_NET_CLS_FW=y`),
+`manifests/kernel/required-symbols.list`,
+`docs/notes/sharing-kernel-capability.md` §7
 
-**What is proven without hardware:** the exact 26.5.1 Armbian headers exist and
-carry `Module.symvers`; the pinned vendor `net/sched/cls_fw.c` passes MODPOST,
-builds as arm64 with exact `6.1.115-vendor-rk35xx` modversions vermagic, and is
-packaged at the standard updates path with `depmod` and `modules-load.d` wiring.
-The production image still installs the unchanged prebuilt vendor kernel.
+**SCOPE CHANGED 2026-08-28.** This item used to gate the out-of-tree
+`ceralive-cls-fw` module the image built for the prebuilt vendor kernel. The
+production kernel is now built from source with `CONFIG_NET_CLS_FW=y` in-tree, so
+that package and its whole `kernel_extension_packages` mechanism are retired
+(absence-guarded by `tests/packaging-hygiene.bats`). Two of the four steps below
+went with it: there is no module to `modprobe`, and no `modules-load.d` entry
+whose effect needs observing.
 
-**What remains:** on a board booted from a built image, require all of:
+**What is proven without hardware:** the symbol is declared in the production
+fragment, pinned in `required-symbols.list`, and `lib/verify-kernel-config.sh`
+asserts it survived `olddefconfig` inside the builder — the gate that already
+caught four capabilities silently dropped by an undeclared `menuconfig` parent.
 
-1. `modprobe cls_fw` exits 0 and `modinfo cls_fw` resolves the CeraLive updates path;
-2. `lsmod` shows `cls_fw` after boot (the modules-load drop-in took effect);
-3. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
-4. marked packets increment only the selected class counter.
+**What remains:** on a board booted from a built image, require both of:
+
+1. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
+2. marked packets increment only the selected class counter.
 
 Capture the commands and counters under `test-results/uplink-sharing/`. This is
-the behavioral/HW gate; CI intentionally asserts package/config text only.
+the behavioral/HW gate; CI intentionally asserts config text only.
 
 ---
 
@@ -717,7 +722,7 @@ above, which remains the correct first line of defence.
 | `manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and items 9 / 9b's gaps |
-| `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing + the out-of-tree `cls_fw` remediation (item 10) |
+| `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing, the retired out-of-tree `cls_fw` remediation, and §7 on the production-track flip (item 10) |
 | `docs/notes/sharing-qdisc-matrix.md` | qdisc/netfilter availability per kernel track, including the runtime cake→HTB fallback (item 11) |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |

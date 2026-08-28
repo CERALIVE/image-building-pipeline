@@ -46,15 +46,49 @@ write_build_kernel_source_set() {
   [[ "$output" == *"VALID"* ]]
   grep -Eq '^variants:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
   grep -Eq '^  edge:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  grep -Eq '^  vendor:' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  grep -Eq '^default_variant: edge$' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
 }
 
-@test "variants: VENDOR PATH IS BYTE-IDENTICAL for every shipped board" {
-  # THE hard requirement of task 26. The fixtures were captured from the
-  # resolver BEFORE variants existed; if declaring one moved any production
-  # parameter, this fails with a readable diff.
+@test "variants: the DEFAULT resolve is the SOURCE-BUILT mainline kernel, on both boards" {
+  # The production track flip. A variant-less build must resolve the built
+  # package name, no DTB package (bindeb-pkg ships the in-tree DTBs inside the
+  # linux-image deb) and a kernel_source block — and must NOT name the prebuilt
+  # vendor kernel anywhere in its resolved params.
   local board
-  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
+  for board in rock-5b-plus orange-pi-5-plus; do
     run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
+    [[ "$output" == *"DTB_PACKAGES=''"* ]]
+    [[ "$output" == *"KERNEL_VARIANT='edge'"* ]]
+    [[ "$output" == *"KERNEL_SOURCE_KERNEL_RELEASE='7.2.0-ceralive-rk3588'"* ]]
+    [[ "$output" != *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
+    [[ "$output" != *"DTB_PACKAGES='linux-dtb-vendor-rk35xx'"* ]]
+  done
+}
+
+@test "variants: the DEFAULT resolve is byte-identical to an explicit --variant edge" {
+  # `default_variant` must be a POINTER, not a second copy of the pins. If the
+  # two ever differ, one of them is a copy that has drifted.
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    local bare edge
+    bare="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
+    edge="$(bash -c "'$RESOLVE_SH' '$board' --variant edge 2>/dev/null")"
+    diff -u <(printf '%s\n' "$edge") <(printf '%s\n' "$bare") >&2
+  done
+}
+
+@test "variants: --variant vendor IS BYTE-IDENTICAL to the pre-flip vendor baseline" {
+  # The fixtures were captured from the resolver BEFORE variants existed, i.e.
+  # when the prebuilt vendor path WAS the bare default. Promoting the mainline
+  # track moved that answer behind `--variant vendor` and must have changed
+  # nothing else about it — the ONE deliberate difference is the retired
+  # ceralive-cls-fw row, which was deleted from the fixtures in the same change.
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run bash -c "'$RESOLVE_SH' '$board' --variant vendor 2>/dev/null"
     [ "$status" -eq 0 ]
     if ! diff -u "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
       printf 'vendor path moved for %s\n' "$board" >&2
@@ -63,26 +97,72 @@ write_build_kernel_source_set() {
   done
 }
 
-@test "variants: explicit --variant default is also byte-identical to the baseline" {
-  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant default 2>/dev/null"
+@test "variants: a family with NO default_variant is byte-unchanged on the bare default" {
+  # x86-minipc declares no variants and no default_variant, so `default` keeps
+  # its original meaning there: apply no overlay at all. This is what proves the
+  # new key is opt-in rather than a change to every family.
+  run bash -c "'$RESOLVE_SH' x86-minipc 2>/dev/null"
   [ "$status" -eq 0 ]
-  diff -u "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output") >&2
+  diff -u "$(VENDOR_BASELINE_DIR)/x86-minipc.params" <(printf '%s\n' "$output") >&2
+  [[ "$output" == *"KERNEL_VARIANT='default'"* ]] || [[ "$output" != *"KERNEL_VARIANT="* ]]
 }
 
-@test "variants: CERALIVE_KERNEL_VARIANT=default is byte-identical too" {
+@test "variants: explicit --variant default resolves the family's declared default" {
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant default 2>/dev/null"
+  [ "$status" -eq 0 ]
+  diff -u <(bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null") \
+    <(printf '%s\n' "$output") >&2
+}
+
+@test "variants: CERALIVE_KERNEL_VARIANT=default resolves it too" {
   run bash -c "CERALIVE_KERNEL_VARIANT=default '$RESOLVE_SH' rock-5b-plus 2>/dev/null"
   [ "$status" -eq 0 ]
-  diff -u "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output") >&2
+  diff -u <(bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null") \
+    <(printf '%s\n' "$output") >&2
 }
 
 @test "variants: the byte-identity proof HAS TEETH (a real change makes it fail)" {
-  # Non-vacuity. Resolve with the edge variant — which genuinely changes the
-  # kernel package and branch — and require the SAME comparison to fail. Without
-  # this leg a broken fixture path would make the guard above pass forever.
+  # Non-vacuity. Resolve with the edge variant — which genuinely differs from the
+  # vendor baseline in kernel package and branch — and require the SAME
+  # comparison to fail. Without this leg a broken fixture path would make the
+  # guard above pass forever.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
   run diff -q "$(VENDOR_BASELINE_DIR)/rock-5b-plus.params" <(printf '%s\n' "$output")
   [ "$status" -ne 0 ]
+}
+
+@test "variants: default_variant is REJECTED when it names a variant the family does not declare" {
+  local f="$BATS_TEST_TMPDIR/bad-default-variant.yaml"
+  write_variant_family "$f" "  edge:
+    armbian_branch: edge"
+  printf 'default_variant: no-such-variant\n' >>"$f"
+  run bash -c "python3 '$LIB_DIR/resolve.py' merge --family '$f' \
+    --board '$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml' \
+    --family-schema '$FAMILY_SCHEMA'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"default_variant names undeclared variant"* ]]
+}
+
+@test "variants: default_variant may not be the reserved name 'default'" {
+  local f="$BATS_TEST_TMPDIR/reserved-default-variant.yaml"
+  write_variant_family "$f" "  edge:
+    armbian_branch: edge"
+  printf 'default_variant: default\n' >>"$f"
+  run bash -c "python3 '$LIB_DIR/resolve.py' merge --family '$f' \
+    --board '$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml' \
+    --family-schema '$FAMILY_SCHEMA'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reserved no-overlay name"* ]]
+}
+
+@test "variants: default_variant never leaks into the flattened param set" {
+  local board
+  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
+    run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DEFAULT_VARIANT="* ]]
+  done
 }
 
 @test "variants: the variants: block never reaches the flattened param set" {
@@ -180,16 +260,16 @@ YAML
   # drives the same silicon through the in-tree panthor driver + Mesa. The two
   # userspaces are not interchangeable and cannot coexist (libmali's
   # 00-aarch64-mali.conf captures libEGL/libGLESv2/libgbm image-wide), so which
-  # one ships is decided by the kernel track — the same logic that already
-  # admits kernel_extension_packages. Pinned here so a future narrowing of the
-  # schema cannot silently put libmali back on the mainline path.
+  # one ships is decided by the kernel track, in exactly the way U-Boot and the
+  # partition layout are not. Pinned here so a future narrowing of the schema
+  # cannot silently put libmali back on the mainline path.
   local f="$BATS_TEST_TMPDIR/fw-variant.yaml"
   write_variant_family "$f" "  edge:
     firmware_packages: [armbian-firmware]"
   run validate_manifest "$f" "$FAMILY_SCHEMA"
   [ "$status" -eq 0 ]
 
-  # An EMPTY list is legal too (minItems: 0), matching kernel_extension_packages.
+  # An EMPTY list is legal too (minItems: 0).
   local g="$BATS_TEST_TMPDIR/fw-variant-empty.yaml"
   write_variant_family "$g" "  edge:
     firmware_packages: []"
@@ -493,10 +573,10 @@ YAML
 }
 
 @test "kernel_source: the VENDOR resolve still ships libmali (the edge drop is track-scoped, not a retirement)" {
-  # The inverse of the leg above, and the one that proves the change did not leak
-  # onto the production path. Retiring the pin outright belongs to the
-  # vendor-kernel retirement, not to the GPU-stack flip.
-  run bash -c "'$RESOLVE_SH' rock-5b-plus 2>/dev/null"
+  # The inverse of the leg above, and the one that proves the GPU-stack flip did
+  # not leak onto the vendor track. Retiring the pin outright belongs to the
+  # vendor-kernel retirement.
+  run bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor 2>/dev/null"
   [ "$status" -eq 0 ]
   [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'"* ]]
 
@@ -851,16 +931,37 @@ YAML
   done
 }
 
-@test "orchestrate: NON-VACUOUS — the vendor DRY_RUN still fetches kernel + DTB" {
+@test "orchestrate: NON-VACUOUS — the --variant vendor DRY_RUN still fetches kernel + DTB" {
   serialize build-plan
-  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" rock-5b-plus
+  run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" rock-5b-plus --variant vendor
   [ "$status" -eq 0 ]
   [[ "$output" == *"BSP set from rk3588.yaml (4 pkgs)"* ]]
   [[ "$output" == *"linux-image-vendor-rk35xx"* ]]
   [[ "$output" == *"linux-dtb-vendor-rk35xx"* ]]
-  # Production builds only the ABI-bound extension; they never rebuild the kernel.
-  [[ "$output" == *"[2b/9] building kernel extension(s) for the prebuilt vendor kernel"* ]]
+  # The prebuilt track never rebuilds the kernel.
   [[ "$output" != *"building kernel from pinned source"* ]]
+}
+
+@test "orchestrate: the BARE DRY_RUN fetches U-BOOT AND FIRMWARE ONLY, on both boards" {
+  # The production fetch after the flip: the kernel and DTB come from [2b/9], so
+  # the only names the Armbian archive is still asked for are the board U-Boot
+  # and armbian-firmware. libmali is asserted ABSENT from the pinned-URL
+  # userspace set as well — it is declared by the vendor overlays only, and a
+  # blob staged here would die at [3/9] as an unclassified package.
+  serialize build-plan
+  local board
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kernel_variant=default"* ]]
+    [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware linux-u-boot-"* ]]
+    # The vendor kernel/DTB names appear ONLY in the suppression line, never in a
+    # fetch line — the "(2 pkgs)" set above is what proves that.
+    [[ "$output" == *"remote fetch suppressed for: linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx"* ]]
+    [[ "$output" == *"RK3588 userspace set from rk3588.yaml (4 pkgs)"* ]]
+    [[ "$output" != *"libmali"* ]]
+    [[ "$output" == *"[2b/9] building kernel from pinned source (variant 'edge')"* ]]
+  done
 }
 
 @test "orchestrate: x86 DRY_RUN is unaffected by the variant machinery" {

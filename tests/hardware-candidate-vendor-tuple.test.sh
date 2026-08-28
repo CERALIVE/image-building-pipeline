@@ -21,10 +21,14 @@
 #        CONFIG_VIDEO_SYNOPSYS_HDMIRX, the MAINLINE HDMI-RX driver. The vendor
 #        kernel carries rk_hdmirx instead, so the edge closure would have FAILED a
 #        correct vendor artifact. The vendor gate is the vendor claim.
-#   (c4) CANDIDATE MAPPING — `rock-vendor` is the resolver's reserved `default`,
-#        i.e. a bare `./build <board>`; passing `--variant default` would be an
-#        error, so the absence of the flag is asserted where it matters — in the
-#        argv `./build` actually receives.
+#   (c4) CANDIDATE MAPPING — `rock-vendor` must name `--variant vendor`
+#        EXPLICITLY. It used to be the resolver's bare default, and that stopped
+#        being safe the moment the mainline source-built track was promoted to the
+#        family default: a bare `./build <board>` now resolves `edge`, so an
+#        unflagged invocation would emit an edge artifact under a name that
+#        promises a prebuilt vendor BSP kernel — a plausible artifact, which is
+#        the dangerous shape. The flag is asserted where it matters: in the argv
+#        `./build` actually receives.
 #
 # Every leg drives the REAL shipped script inside a throwaway pipeline tree. No
 # kernel is compiled and no image is written.
@@ -194,9 +198,15 @@ else
   bad "the vendor candidate failed (exit ${rc}):"$'\n'"$(cat "${LOG}")"
 fi
 
-# (c4) the resolver `default` reaches ./build as NO --variant flag at all
+# (c4) the vendor track is named EXPLICITLY in the argv ./build receives
 if [[ -s "${ARGV}" ]]; then
-  assert_eq "(c4) ./build is invoked bare, with no --variant" "${BOARD}" "$(cat "${ARGV}")"
+  assert_eq "(c4) ./build is invoked with an explicit --variant vendor" \
+    "${BOARD} --variant vendor" "$(cat "${ARGV}")"
+  if grep -q -- '--variant default' "${ARGV}"; then
+    bad "(c4) ./build was passed the reserved name 'default' instead of the vendor overlay"
+  else
+    ok "(c4) ./build is never passed the reserved name 'default'"
+  fi
 else
   bad "(c4) ./build was never invoked"
 fi
@@ -223,8 +233,8 @@ if [[ -s "${TUPLE}" ]]; then
     "\"${VENDOR_RELEASE}\"" "$(tuple_field "${TUPLE}" kernel_release)"
   assert_eq "(c2) the tuple names the prebuilt kernel package" \
     "\"${VENDOR_PKG}\"" "$(tuple_field "${TUPLE}" kernel_package)"
-  assert_eq "the tuple records the variant as the resolver default" \
-    '"default"' "$(tuple_field "${TUPLE}" variant)"
+  assert_eq "the tuple records the variant as the prebuilt vendor overlay" \
+    '"vendor"' "$(tuple_field "${TUPLE}" variant)"
   assert_eq "the tuple records the bench-labels mode" 'true' "$(tuple_field "${TUPLE}" bench_labels)"
   # (a) the recorded recovery loader is THIS board's
   assert_eq "the tuple binds the board's own recovery loader" \

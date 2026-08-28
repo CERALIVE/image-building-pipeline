@@ -13,7 +13,7 @@
 #     Starting kernel ...
 #     "Synchronous Abort" handler, esr 0x02000000
 #
-# The rootfs had `vmlinuz-7.1.5-ceralive-rk3588` and no `Image` at all, because the
+# The rootfs had `vmlinuz-7.2.0-ceralive-rk3588` and no `Image` at all, because the
 # two kernel paths populate /boot by DIFFERENT mechanisms:
 #
 #   vendor  — Armbian's linux-image-* postinst runs `ln -sfv vmlinuz-<rel>
@@ -33,7 +33,9 @@ setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
   PIPELINE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
   VERIFY="$PIPELINE_DIR/lib/verify-boot-artifacts.sh"
+  RESOLVE_SH="$PIPELINE_DIR/lib/resolve.sh"
   DTB=rk3588-rock-5b-plus.dtb
+  SOURCE_REL=7.2.0-ceralive-rk3588
   WORK="$(mktemp -d)"
 }
 
@@ -97,11 +99,14 @@ seed_vendor_layout() {
   printf '%s\n' "$root"
 }
 
-# The source-built layout AFTER this change: bindeb-pkg ships DTBs under a real
-# /boot/dtb/<vendor>/ directory (no versioned dir, so no symlink to make), the
-# platform layer adds the Image symlink, and initramfs-tools writes the initrd.
+# The source-built layout — which since the mainline flip is the PRODUCTION one:
+# bindeb-pkg ships DTBs under a real /boot/dtb/<vendor>/ directory (no versioned
+# dir, so no symlink to make), the platform layer adds the Image symlink, and
+# initramfs-tools writes the initrd. The release string here is the one the
+# manifest's default resolve produces; the case at the end of this file fails if
+# the two ever drift.
 seed_source_layout() {
-  local root="$WORK/source" rel=7.1.5-ceralive-rk3588
+  local root="$WORK/source" rel=7.2.0-ceralive-rk3588
   _seed_common "$root" "$rel"
   ln -s "vmlinuz-$rel" "$root/boot/Image"
   _seed_dtbs "$root/boot/dtb/rockchip"
@@ -112,7 +117,7 @@ seed_source_layout() {
 
 # The exact pre-fix state that reached the board.
 seed_broken_source_layout() {
-  local root="$WORK/broken" rel=7.1.5-ceralive-rk3588
+  local root="$WORK/broken" rel=7.2.0-ceralive-rk3588
   _seed_common "$root" "$rel"
   _seed_dtbs "$root/boot/dtb/rockchip"
   printf '%s\n' "$root"
@@ -141,9 +146,9 @@ run_verify() {
 @test "boot artifacts: the source-built layout passes (real dtb dir)" {
   run_verify "$(pack "$(seed_source_layout)")"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/boot/Image -> boot/vmlinuz-7.1.5-ceralive-rk3588"* ]]
+  [[ "$output" == *"/boot/Image -> boot/vmlinuz-7.2.0-ceralive-rk3588"* ]]
   [[ "$output" == *"boot/dtb/rockchip/$DTB"* ]]
-  [[ "$output" == *"boot/initrd.img-7.1.5-ceralive-rk3588"* ]]
+  [[ "$output" == *"boot/initrd.img-7.2.0-ceralive-rk3588"* ]]
 }
 
 # --- the regression itself ---------------------------------------------------
@@ -160,7 +165,7 @@ run_verify() {
   # listing is what identifies this as a packaging gap in one read.
   run_verify "$(pack "$(seed_broken_source_layout)")"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"boot/vmlinuz-7.1.5-ceralive-rk3588"* ]]
+  [[ "$output" == *"boot/vmlinuz-7.2.0-ceralive-rk3588"* ]]
 }
 
 # --- each artifact is independently load-bearing, on BOTH layouts ------------
@@ -179,7 +184,7 @@ run_verify() {
   # The failure U-Boot actually reports is identical to an absent file, so a
   # verifier that only checked for the NAME would pass a rootfs that cannot boot.
   local root; root="$(seed_source_layout)"
-  rm -f "$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+  rm -f "$root/boot/vmlinuz-7.2.0-ceralive-rk3588"
   run_verify "$(pack "$root")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a file in this rootfs"* ]]
@@ -187,7 +192,7 @@ run_verify() {
 
 @test "boot artifacts: a truncated kernel fails" {
   local root; root="$(seed_source_layout)"
-  head -c 4096 /dev/zero >"$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+  head -c 4096 /dev/zero >"$root/boot/vmlinuz-7.2.0-ceralive-rk3588"
   run_verify "$(pack "$root")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"bytes"* ]]
@@ -209,7 +214,7 @@ run_verify() {
 
 @test "boot artifacts: a gzip-compressed /boot/Image is REJECTED" {
   local root; root="$(seed_source_layout)"
-  _write_gzip_image "$root/boot/vmlinuz-7.1.5-ceralive-rk3588" 16000000
+  _write_gzip_image "$root/boot/vmlinuz-7.2.0-ceralive-rk3588" 16000000
   run_verify "$(pack "$root")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"gzip"* ]]
@@ -230,7 +235,7 @@ run_verify() {
   # byte-shifted one is not, and booti rejects it identically. The check is a
   # POSITIVE assertion on the magic, not a blocklist of signatures.
   local root; root="$(seed_source_layout)"
-  head -c 12000000 /dev/zero >"$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+  head -c 12000000 /dev/zero >"$root/boot/vmlinuz-7.2.0-ceralive-rk3588"
   run_verify "$(pack "$root")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"ARM64 Image magic"* ]]
@@ -239,7 +244,7 @@ run_verify() {
 @test "boot artifacts: an xz-compressed /boot/Image is REJECTED and named" {
   local root; root="$(seed_source_layout)"
   { printf '\xfd7zXZ\x00'; head -c 16000000 /dev/zero; } \
-    >"$root/boot/vmlinuz-7.1.5-ceralive-rk3588"
+    >"$root/boot/vmlinuz-7.2.0-ceralive-rk3588"
   run_verify "$(pack "$root")"
   [ "$status" -ne 0 ]
   [[ "$output" == *"xz"* ]]
@@ -328,37 +333,37 @@ run_verify() {
   # Silence here is what turned a packaging gap into a field crash loop.
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   mkdir -p "$WORK/noinitrd/boot"
-  _write_arm64_image "$WORK/noinitrd/boot/vmlinuz-7.1.5-ceralive-rk3588" 4096
+  _write_arm64_image "$WORK/noinitrd/boot/vmlinuz-7.2.0-ceralive-rk3588" 4096
   run bash -c "
     set -euo pipefail
     BUILDROOT=$WORK/noinitrd
     mkdir -p \"\$BUILDROOT/boot\"
-    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
+    KERNEL_SOURCE_KERNEL_RELEASE=7.2.0-ceralive-rk3588
     log() { printf '%s\n' \"\$*\"; }
     $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst")
     install_kernel_source_boot_artifacts
   "
   [ "$status" -ne 0 ]
-  [[ "$output" == *"initrd.img-7.1.5-ceralive-rk3588 was not generated"* ]]
+  [[ "$output" == *"initrd.img-7.2.0-ceralive-rk3588 was not generated"* ]]
 }
 
 @test "platform layer: the boot-artifact step creates Image for a source kernel" {
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   mkdir -p "$WORK/good/boot"
-  _write_arm64_image "$WORK/good/boot/vmlinuz-7.1.5-ceralive-rk3588" 4096
+  _write_arm64_image "$WORK/good/boot/vmlinuz-7.2.0-ceralive-rk3588" 4096
   run bash -c "
     set -euo pipefail
     BUILDROOT=$WORK/good
     mkdir -p \"\$BUILDROOT/boot\"
-    : >\"\$BUILDROOT/boot/initrd.img-7.1.5-ceralive-rk3588\"
-    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
+    : >\"\$BUILDROOT/boot/initrd.img-7.2.0-ceralive-rk3588\"
+    KERNEL_SOURCE_KERNEL_RELEASE=7.2.0-ceralive-rk3588
     log() { :; }
     $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst")
     install_kernel_source_boot_artifacts
     readlink \"\$BUILDROOT/boot/Image\"
   "
   [ "$status" -eq 0 ]
-  [ "$output" = "vmlinuz-7.1.5-ceralive-rk3588" ]
+  [ "$output" = "vmlinuz-7.2.0-ceralive-rk3588" ]
 }
 
 # --- the staging layer must PRODUCE a raw Image, on every board ---------------
@@ -377,7 +382,7 @@ _run_boot_artifacts() {
   run bash -c "
     set -euo pipefail
     BUILDROOT=$dir
-    KERNEL_SOURCE_KERNEL_RELEASE=7.1.5-ceralive-rk3588
+    KERNEL_SOURCE_KERNEL_RELEASE=7.2.0-ceralive-rk3588
     log() { printf '%s\n' \"\$*\"; }
     $(sed -n '/^install_kernel_source_boot_artifacts()/,/^}/p' "$postinst")
     install_kernel_source_boot_artifacts
@@ -385,7 +390,7 @@ _run_boot_artifacts() {
 }
 
 @test "platform layer: a gzip vmlinuz is decompressed into a REAL /boot/Image" {
-  local dir="$WORK/gz" rel=7.1.5-ceralive-rk3588
+  local dir="$WORK/gz" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   _write_arm64_image "$WORK/raw-image" 65536
   gzip -c "$WORK/raw-image" >"$dir/boot/vmlinuz-$rel"
@@ -404,7 +409,7 @@ _run_boot_artifacts() {
 }
 
 @test "platform layer: an already-raw vmlinuz keeps the vendor-parity symlink" {
-  local dir="$WORK/rawpath" rel=7.1.5-ceralive-rk3588
+  local dir="$WORK/rawpath" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   _write_arm64_image "$dir/boot/vmlinuz-$rel" 65536
   : >"$dir/boot/initrd.img-$rel"
@@ -418,7 +423,7 @@ _run_boot_artifacts() {
 @test "platform layer: an unsupported kernel compression fails the build loudly" {
   # xz/zstd/lz4 would all leave booti with a 'Bad Linux ARM64 Image magic!' on
   # EVERY board. Guessing is not an option here, so the build stops.
-  local dir="$WORK/xz" rel=7.1.5-ceralive-rk3588
+  local dir="$WORK/xz" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   { printf '\xfd7zXZ\x00'; head -c 65536 /dev/zero; } >"$dir/boot/vmlinuz-$rel"
   : >"$dir/boot/initrd.img-$rel"
@@ -431,7 +436,7 @@ _run_boot_artifacts() {
 @test "platform layer: a gunzip that yields a non-Image fails the build loudly" {
   # The decompression succeeding is not the property that matters; the resulting
   # magic is. A gzip of the wrong payload must not ship as /boot/Image.
-  local dir="$WORK/gzjunk" rel=7.1.5-ceralive-rk3588
+  local dir="$WORK/gzjunk" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   head -c 65536 /dev/zero | gzip -c >"$dir/boot/vmlinuz-$rel"
   : >"$dir/boot/initrd.img-$rel"
@@ -443,7 +448,7 @@ _run_boot_artifacts() {
 
 @test "platform layer: a re-run over an existing decompressed Image is idempotent" {
   # A/B slot rebuilds and mkosi incremental caches both re-enter this path.
-  local dir="$WORK/idem" rel=7.1.5-ceralive-rk3588
+  local dir="$WORK/idem" rel=7.2.0-ceralive-rk3588
   mkdir -p "$dir/boot"
   _write_arm64_image "$WORK/idem-src" 65536
   gzip -c "$WORK/idem-src" >"$dir/boot/vmlinuz-$rel"
@@ -472,4 +477,32 @@ _run_boot_artifacts() {
   # three separate production bugs in this repo.
   grep -qE '^\s*KERNEL_SOURCE_KERNEL_RELEASE' "$PIPELINE_DIR/lib/orchestrate.sh"
   grep -q 'PassEnvironment=KERNEL_SOURCE_KERNEL_RELEASE' "$PIPELINE_DIR/mkosi/mkosi.conf"
+}
+
+# --- the source-built layout IS the production layout ------------------------
+
+@test "boot artifacts: the source-built fixture release is the DEFAULT resolve's" {
+  # The fixtures above model the layout a real production rootfs has, so a stale
+  # release string would keep the suite green while it stopped describing any
+  # image the pipeline builds. Both shipped boards resolve the same release.
+  local board rel
+  for board in rock-5b-plus orange-pi-5-plus; do
+    rel="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null" \
+           | sed -n "s/^KERNEL_SOURCE_KERNEL_RELEASE='\(.*\)'$/\1/p")"
+    [ "$rel" = "$SOURCE_REL" ]
+  done
+}
+
+@test "boot artifacts: the DEFAULT resolve arms the source-built /boot mapping" {
+  # KERNEL_SOURCE_KERNEL_RELEASE is what tells the platform layer to create
+  # /boot/Image and pull initramfs-tools in itself; empty, the layer is a strict
+  # no-op and the slot ships with neither. It used to be empty on the production
+  # path because production installed the Armbian package. It must not be now.
+  local board out
+  for board in rock-5b-plus orange-pi-5-plus; do
+    out="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
+    [[ "$out" == *"KERNEL_SOURCE_KERNEL_RELEASE='$SOURCE_REL'"* ]]
+    [[ "$out" == *"KERNEL_SOURCE_DTB_BOOT_DIR='/boot/dtb/rockchip'"* ]]
+    [[ "$out" == *"KERNEL_SOURCE_DTB_DEB_DIR='/usr/lib/linux-image-$SOURCE_REL/rockchip'"* ]]
+  done
 }

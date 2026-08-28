@@ -161,7 +161,11 @@ cd image-building-pipeline
 ./build --all
 ./build --only rock-5b-plus,x86-minipc
 
-# Opt-in family variant (rk3588 'edge' = kernel built from pinned source)
+# The bare form IS the mainline source-built kernel (rk3588 default_variant: edge)
+./build rock-5b-plus
+
+# Opt-in overlays: the prebuilt vendor BSP, or edge named explicitly
+./build rock-5b-plus --variant vendor
 ./build rock-5b-plus --variant edge
 
 # Dry run (resolve + fetch plan only, no image written)
@@ -192,11 +196,13 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
-| `rock-5b-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build rock-5b-plus` | production path; the kernel the fleet actually runs |
+| `rock-5b-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build rock-5b-plus` | the family declares `default_variant: edge`, so a bare build resolves the `edge` overlay byte-identically to `--variant edge` |
+| `rock-5b-plus` | vendor 6.1 BSP (prebuilt) | `./build rock-5b-plus --variant vendor` | the path every earlier image shipped; now opt-in, and carries NO `NET_CLS_FW` since `ceralive-cls-fw` was retired |
 | `rock-5b-plus` | vendor 6.1 BSP, source-built + HDMI-RX audio fix | `./build rock-5b-plus --variant vendor-patched` | same 6.1.115 BSP, rebuilt from pinned source with the 5-patch HDMI-RX capture series; compiles and boots; the patch series is Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter validation), Tier 2 open on this pipeline's own built image, which has not itself been booted |
-| `rock-5b-plus` | mainline 7.2 (source-built) | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted and the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39. |
-| `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt, shipped) | `./build orange-pi-5-plus` | production path |
-| `orange-pi-5-plus` | mainline 7.2 (source-built) | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted, the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39, and HDMI video/audio remained N/A without a source. |
+| `rock-5b-plus` | mainline 7.2 (source-built), named explicitly | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted and the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39. |
+| `orange-pi-5-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build orange-pi-5-plus` | same `default_variant: edge` selection |
+| `orange-pi-5-plus` | vendor 6.1 BSP (prebuilt) | `./build orange-pi-5-plus --variant vendor` | opt-in |
+| `orange-pi-5-plus` | mainline 7.2 (source-built), named explicitly | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted, the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39, and HDMI video/audio remained N/A without a source. |
 | `orange-pi-5-plus` | vendor-patched | not yet run against this board | `variant_overrides` exist for `edge`'s DTB name; `vendor-patched` has not been separately proven on this board |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -603,15 +609,25 @@ Verify on a device with `apt-mark showhold`, `apt-cache policy linux-image-vendo
 and `apt-get -s upgrade`. Full contract:
 [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md).
 
-## Vendor-kernel firewall-mark classifier
+## Firewall-mark classifier — now in-tree
 
-The production image keeps the prebuilt
-`linux-image-vendor-rk35xx=26.5.1` selected by D3. Because that package omits
-`NET_CLS_FW`, the build emits and installs a separate `ceralive-cls-fw` package
-from the exact matching headers and pinned vendor source. It contains only the
-ABI-matched `cls_fw.ko`, boot-load configuration, and `depmod` hooks; headers and
-compiler tooling do not ship on the device. Static proof and the remaining
-hardware-gated load/traffic check are documented in
+The uplink shaper needs `NET_CLS_FW`, the `tc filter … handle <fwmark> fw
+classid` classifier that maps the skb mark nftables sets onto a qdisc class.
+
+The production kernel is built from source with `CONFIG_NET_CLS_FW=y`
+([`manifests/kernel/rk3588-edge.fragment`](manifests/kernel/rk3588-edge.fragment),
+pinned in `manifests/kernel/required-symbols.list`), so the classifier is
+built into the kernel image — no module to load, no `modules-load.d` entry, no
+vermagic to match.
+
+It used to be an out-of-tree module. The prebuilt `linux-image-vendor-rk35xx`
+omits the symbol entirely, so the image carried `ceralive-cls-fw`, a separately
+built ABI-matched `cls_fw.ko`. That package, its pins, its builder image and the
+whole `kernel_extension_packages` mechanism are **retired**;
+`tests/packaging-hygiene.bats` fails the build if any half reappears. The
+consequence for the opt-in `--variant vendor` track, stated rather than implied:
+it has no `NET_CLS_FW` at all. History and the remaining hardware-gated traffic
+check are in
 [`docs/notes/sharing-kernel-capability.md`](docs/notes/sharing-kernel-capability.md).
 
 ## Uplink Sharing — carrier, packages and network posture
@@ -876,9 +892,17 @@ and its in-tree DTBs from **pinned source**, instead of fetching the prebuilt
 Armbian kernel:
 
 ```bash
-./build rock-5b-plus --variant edge             # mainline 7.2 track
+./build rock-5b-plus                            # mainline 7.2 track (the DEFAULT)
+./build rock-5b-plus --variant edge             # the same thing, named explicitly
+./build rock-5b-plus --variant vendor           # prebuilt Armbian vendor 6.1 BSP
 ./build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
 ```
+
+`rk3588` declares `default_variant: edge`, so the mainline source-built kernel is
+what a variant-less build produces. That key is a POINTER, not a copy of the
+pins: copying the `edge` block to the family top level would force `edge-test`
+(which `extends: edge`) to restate its parent's pins and would deep-merge the
+family's defconfig mode onto `vendor-patched`'s config-file mode.
 
 They target different kernel tracks with different patch repositories, and
 neither repository's patches apply to the other's tree:
@@ -975,8 +999,9 @@ deliberately does not run. It is not an escape hatch: a listed symbol that *did*
 survive fails the build as a stale exception, and neither shipped board's adapter
 is on the list — both are in-tree and both pass the gate.
 
-**With no variant selected the resolved production build is byte-identical to
-before this existed**, pinned by committed golden fixtures. The source-build
+**`--variant vendor` is byte-identical to what a bare build resolved before the
+mainline flip**, pinned by the committed golden fixtures (the one deliberate
+difference is the retired `ceralive-cls-fw` row). The source-build
 stage is compile-proven; v7.2 has partial kernel-on-silicon evidence from existing
 Bookworm installations, but the exact pinned Trixie artifacts have not been built
 or booted and the measured candidate verdict remains FAIL. This does not reopen

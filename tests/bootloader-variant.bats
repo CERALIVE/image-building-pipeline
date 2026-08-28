@@ -163,18 +163,24 @@ make_image() {
   done
 }
 
-@test "resolver: PRODUCTION resolve is BYTE-IDENTICAL to the committed vendor baselines" {
-  # These fixtures were captured before any of this existed. A diff here is a
-  # defect in the change, never a reason to regenerate the fixture.
+@test "resolver: the PREBUILT VENDOR resolve is BYTE-IDENTICAL to the committed baselines" {
+  # These fixtures were captured before any of this existed, when the prebuilt
+  # vendor path was the bare default; it now lives behind `--variant vendor` and
+  # must otherwise be unmoved. A diff here is a defect in the change, never a
+  # reason to regenerate the fixture. x86-minipc declares no variants at all, so
+  # its bare default is still the fixture.
   local board
-  for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
-    run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run bash -c "'$RESOLVE_SH' '$board' --variant vendor 2>/dev/null"
     [ "$status" -eq 0 ]
     if ! diff -u "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
       printf 'vendor path moved for %s\n' "$board" >&2
       false
     fi
   done
+  run bash -c "'$RESOLVE_SH' x86-minipc 2>/dev/null"
+  [ "$status" -eq 0 ]
+  diff -u "$(VENDOR_BASELINE_DIR)/x86-minipc.params" <(printf '%s\n' "$output") >&2
 }
 
 @test "resolver: the byte-identity proof HAS TEETH on the U-Boot field" {
@@ -287,15 +293,30 @@ print(' '.join(sorted(d.get('variants', {}))))")"
   for board in rock-5b-plus orange-pi-5-plus; do
     board_id="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null" \
                 | sed -n "s/^BOARD_ID='\(.*\)'$/\1/p")"
-    for variant in default edge; do
+    for variant in default vendor edge; do
       flag=""
       [ "$variant" = edge ] && flag="--variant edge"
+      [ "$variant" = vendor ] && flag="--variant vendor"
       pkg="$(bash -c "'$RESOLVE_SH' '$board' $flag 2>/dev/null" \
              | sed -n "s/^UBOOT_PACKAGES='\(.*\)'$/\1/p")"
       mapped="$("$(WRITER)" plan --board "$board_id" --variant "$variant" \
                 | awk -F'\t' '{print $5}' | sort -u)"
       [ "$mapped" = "$pkg" ]
     done
+  done
+}
+
+@test "writer: the reserved 'default' rows are byte-identical to the production track's" {
+  # `default_variant: edge` makes the mainline track production, so a real build
+  # reaches the writer with the resolved name `edge`; `default` survives only as
+  # the writer's normalisation of an EMPTY --variant. Both must therefore describe
+  # the same bootloader, and a copy that drifts would write the wrong blob on the
+  # one code path nobody exercises.
+  local board_id
+  for board_id in rock-5b-plus orangepi5-plus; do
+    diff -u \
+      <("$(WRITER)" plan --board "$board_id" --variant default) \
+      <("$(WRITER)" plan --board "$board_id" --variant edge) >&2
   done
 }
 
@@ -320,17 +341,19 @@ print(' '.join(sorted(d.get('variants', {}))))")"
   done
 }
 
-@test "writer: the PRODUCTION OPi split layout is preserved verbatim" {
+@test "writer: the PREBUILT VENDOR OPi split layout is preserved verbatim" {
   # linux-u-boot-orangepi5-plus-vendor is the ONE pinned package that still
-  # ships the 2017.09 idbloader.img + u-boot.itb pair. Losing it would brick
-  # the shipped production image, which is not what this change is about.
-  run "$(WRITER)" plan --board orangepi5-plus --variant default
+  # ships the 2017.09 idbloader.img + u-boot.itb pair. It is no longer on the
+  # default path, but every image already in the field boots from it, so losing
+  # its rows would silently take the vendor track's recovery/comparison builds
+  # with it.
+  run "$(WRITER)" plan --board orangepi5-plus --variant vendor
   [ "$status" -eq 0 ]
   [[ "$output" == *$'idbloader.img\t64\t512\t'* ]]
   [[ "$output" == *$'u-boot.itb\t16384\t512\t'* ]]
 
   # The Rock's vendor package is unified, and that asymmetry is real.
-  run "$(WRITER)" plan --board rock-5b-plus --variant default
+  run "$(WRITER)" plan --board rock-5b-plus --variant vendor
   [ "$status" -eq 0 ]
   [[ "$output" == $'u-boot-rockchip.bin\t64\t512\t'* ]]
 }

@@ -311,11 +311,12 @@ CONFIG_IPV6=y
 # says what the finished kernel must CARRY. A capability defconfig happens to
 # supply today can stop being visible tomorrow, and only this claim survives that.
 #
-# NET_CLS_FW is the `tc filter … fw classid` classifier. It is REQUIRED on this
-# (edge) track, where it is in-tree; the SHIPPED vendor kernel does not build it
-# and the production image supplies an ABI-matched out-of-tree module instead —
-# see docs/notes/sharing-kernel-capability.md §2c. This entry is about the edge
-# kernel only and must not be read as a statement about the vendor package.
+# NET_CLS_FW is the `tc filter … fw classid` classifier, and this entry is now
+# the ONLY thing that keeps the uplink shaper's mark->band bridge on the image:
+# the retired `ceralive-cls-fw` out-of-tree module used to supply it for the
+# prebuilt vendor kernel, and this (edge) track — the production track — builds
+# it in-tree. Dropping this line ships a device whose shaper silently cannot
+# classify. See docs/notes/sharing-kernel-capability.md §2c.
 CONFIG_NETFILTER_ADVANCED=y
 CONFIG_NF_CONNTRACK=y
 CONFIG_NF_CONNTRACK_MARK=y

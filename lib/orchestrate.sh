@@ -52,7 +52,6 @@ FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
-BUILD_KERNEL_EXTENSION_SH="${HERE}/build-kernel-extension.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 MEASURE_SIZE_SH="${HERE}/measure-size.sh"
@@ -253,7 +252,6 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
-  local kernel_extension_build_dir="${staging}/kernel-extension-build"
 
   stage_fetch
   stage_kernel_build
@@ -291,7 +289,7 @@ run_mkosi_build() {
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
-    KERNEL_PACKAGES KERNEL_EXTENSION_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+    KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
     KERNEL_SOURCE_KERNEL_RELEASE
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
@@ -312,7 +310,7 @@ run_mkosi_build() {
   # hardcoded.
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
-  export KERNEL_PACKAGES KERNEL_EXTENSION_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+  export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
   # Kernel-from-source DTB install mapping. EMPTY on the production vendor path,
   # which is what makes the platform layer's copy step a strict no-op there:
   # a source-built kernel ships its DTBs inside the linux-image deb, an Armbian

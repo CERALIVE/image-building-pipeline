@@ -1,8 +1,24 @@
 # Shipped vendor-kernel capability matrix — sharing / steering / shaping primitives
 
-Measurement of the kernel the production image **actually installs**, against the
-symbol closure the uplink-sharing work depends on. This note is the recorded
-evidence for that measurement and the out-of-tree remediation it required.
+> **SUPERSEDED AS A STATEMENT ABOUT PRODUCTION — RETAINED AS EVIDENCE.**
+> When this note was written the production kernel was the PREBUILT Armbian
+> vendor 6.1 BSP, which does not build `NET_CLS_FW`, so the image carried the
+> out-of-tree `ceralive-cls-fw` module described in §2c. The production kernel is
+> now the mainline 7.2 track built from source (`default_variant: edge` in
+> `manifests/families/rk3588.yaml`), where `CONFIG_NET_CLS_FW=y` is in-tree and
+> built-in — so **`ceralive-cls-fw`, its pin file, its builder image and the whole
+> `kernel_extension_packages` mechanism are RETIRED**, and `tests/packaging-hygiene.bats`
+> fails the build if any half returns. See §7 for what that changes and what it
+> does not.
+>
+> Everything below §1-§6 is left exactly as measured. It is still the record of
+> what the vendor 6.1 BSP contains, which is what the opt-in `--variant vendor`
+> and `--variant vendor-patched` tracks still build on.
+
+Measurement of the kernel the production image installed **at the time of
+measurement**, against the symbol closure the uplink-sharing work depends on.
+This note is the recorded evidence for that measurement and the out-of-tree
+remediation it required.
 
 - **Date:** 2026-08-24 (UTC)
 - **Subject:** `linux-image-vendor-rk35xx` **26.5.1** — kernel release
@@ -254,5 +270,39 @@ kernel-from-source variant:
   expected to track the measured one, but that was not measured here and must
   not be inferred from this note.
 
-Decision D3 is untouched: the shipped image still installs the prebuilt
-`linux-image-vendor-rk35xx`.
+---
+
+## 7. What the production-track flip changed (2026-08-28)
+
+The kernel half of decision D3 is no longer in force. `rk3588` declares
+`default_variant: edge`, so a variant-less build resolves the mainline 7.2
+source-built kernel and the prebuilt `linux-image-vendor-rk35xx` is reachable
+only through `--variant vendor`.
+
+**What that changes.** The uplink shaper's mark → band bridge is now supplied by
+`CONFIG_NET_CLS_FW=y` in `manifests/kernel/rk3588-edge.fragment`, built into the
+kernel image itself and pinned in `manifests/kernel/required-symbols.list`. There
+is no module to load, no `modules-load.d` entry, and no vermagic to match — the
+three things that made the out-of-tree remediation fragile. Every artifact of
+that remediation is deleted:
+
+| Retired | Was |
+|---|---|
+| `manifests/kernel/vendor-cls-fw.env` | the exact headers/source pins |
+| `manifests/packages/rk3588-vendor-kernel-extensions.list` | the one-line package list |
+| `lib/build-kernel-extension.sh`, `lib/kernel/build-cls-fw-container.sh` | the builder |
+| `ci/Dockerfile.kernel-module` | the digest-pinned GCC-13 builder image |
+| `tests/vendor-cls-fw-contract.bats` | its contract suite |
+| `kernel_extension_packages` (family schema, manifest, orchestrator, mkosi `PassEnvironment=`, platform postinst) | the mechanism that carried it |
+
+**What it does NOT change.** §1-§6's measurement of the vendor 6.1 BSP is still
+accurate for that kernel, and that kernel is still buildable. The honest
+consequence, stated rather than buried: **the opt-in `vendor` overlay now has NO
+`NET_CLS_FW` at all** — the base package never built it and nothing supplies it
+any more. That track is a comparison/smoke path, not a shipping one, and its
+removal is the vendor-kernel retirement.
+
+The hardware gate in `docs/DEFERRED.md` moves with the capability: the thing to
+prove on a board is no longer `modprobe cls_fw`, it is that a real
+`tc filter … fw classid` classification works against the built-in classifier on
+the source-built kernel.

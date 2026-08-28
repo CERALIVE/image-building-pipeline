@@ -1777,14 +1777,24 @@ REPRO
 }
 
 @test "kernel freeze: both shipped RK3588 boards resolve a U-Boot package for it to hold" {
-  # The env the freeze reads is populated from these manifest fields; if a board
-  # ever stopped declaring one, its bootloader would silently drop out of the
-  # freeze while the kernel stayed held.
-  grep -Fq 'linux-u-boot-rock-5b-plus-vendor' "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml"
-  grep -Fq 'linux-u-boot-orangepi5-plus-vendor' "$PIPELINE_DIR/manifests/boards/orange-pi-5-plus.yaml"
-  grep -Fq 'linux-image-vendor-rk35xx' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
-  grep -Fq 'linux-dtb-vendor-rk35xx' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
-  grep -Fq 'armbian-firmware' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  # The env the freeze reads is populated by the RESOLVER, so this asserts the
+  # resolved default rather than a grep of the manifest text: after the mainline
+  # flip the production U-Boot is each board's `-edge` package, and a grep for
+  # the vendor name would still have matched the (now opt-in) vendor rows.
+  local board out
+  for board in rock-5b-plus orange-pi-5-plus; do
+    out="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
+    [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-"*"-edge'"* ]]
+    [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
+    [[ "$out" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+  done
+
+  # The prebuilt vendor overlay still resolves its own set, so the freeze covers
+  # that track too for as long as it exists.
+  out="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant vendor 2>/dev/null")"
+  [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-vendor'"* ]]
+  [[ "$out" == *"KERNEL_PACKAGES='linux-image-vendor-rk35xx'"* ]]
+  [[ "$out" == *"DTB_PACKAGES='linux-dtb-vendor-rk35xx'"* ]]
 }
 
 @test "kernel freeze: NO first-party CeraLive package may ever be held" {

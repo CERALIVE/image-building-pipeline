@@ -523,11 +523,15 @@ CONFIG_NET_SCH_FQ_CODEL=y
 CONFIG_NET_SCH_HTB=y
 CONFIG_NET_SCH_CAKE=y
 # The bridge between the two halves: `tc filter … handle <fwmark> fw classid`
-# maps the skb mark nftables set onto the client band. This is the symbol the
-# SHIPPED vendor kernel does not build at all, which is why the production image
-# carries the separately built ceralive-cls-fw package instead
-# (docs/notes/sharing-kernel-capability.md §2c). On this track it is in-tree, so
-# it is simply declared.
+# maps the skb mark nftables set onto the client band.
+#
+# THIS DECLARATION IS NOW THE WHOLE UPLINK-SHAPER CAPABILITY. The prebuilt vendor
+# kernel never built the symbol, so the image used to carry `ceralive-cls-fw` — a
+# separately built, vermagic-pinned out-of-tree cls_fw.ko. This fragment is the
+# production kernel's config now, so the classifier is in-tree, built-in, and
+# that package is retired (docs/notes/sharing-kernel-capability.md §2c). `=y`
+# rather than `=m`: an out-of-tree module needed a modules-load.d entry to be
+# present before the shaper first ran, and built-in removes the question.
 CONFIG_NET_CLS_FW=y
 
 # --- Type-C / USB role switching -------------------------------------------

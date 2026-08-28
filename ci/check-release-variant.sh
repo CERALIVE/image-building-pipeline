@@ -22,8 +22,11 @@
 #   ci/check-release-variant.sh --list             # print every variant + verdict
 #   ci/check-release-variant.sh --self-test        # prove both verdicts
 #
-# With no --variant it reads CERALIVE_KERNEL_VARIANT, and an empty/`default`
-# variant is the production vendor path, which is always releasable.
+# With no --variant it reads CERALIVE_KERNEL_VARIANT. An empty/`default` variant
+# is resolved through each family's `default_variant:` key and judged as that
+# variant, because the production track is now a declared overlay rather than the
+# bare family defaults. Treating `default` as "carries no fragment" would exempt
+# the shipped kernel from the only check that reads its fragments.
 
 set -euo pipefail
 
@@ -75,6 +78,24 @@ for path in sorted(glob.glob(os.path.join(family_dir, "*.yaml"))):
             cursor = node.get("extends")
         if frags:
             print(f"{name}\t" + " ".join(frags))
+PY
+}
+
+# Print every family's declared `default_variant:`, one name per line. A family
+# without the key contributes nothing, which is what keeps `default` meaning
+# "no overlay, no fragment" for those families.
+enumerate_default_variants() {
+  python3 - "$@" <<'PY'
+import glob, os, sys
+import yaml
+
+family_dir = sys.argv[1]
+for path in sorted(glob.glob(os.path.join(family_dir, "*.yaml"))):
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    name = data.get("default_variant")
+    if isinstance(name, str) and name:
+        print(name)
 PY
 }
 
@@ -170,12 +191,25 @@ main() {
     esac
   done
 
+  local out
   if [[ -z "${variant}" || "${variant}" == "default" ]]; then
-    printf 'OK default (production vendor path) carries no Kconfig fragment\n'
-    return 0
+    local declared rc=0
+    while read -r declared; do
+      [[ -n "${declared}" ]] || continue
+      if out="$(verdict_for "${declared}")"; then
+        printf 'OK default resolves variant %s: %s\n' "${declared}" "${out}"
+      else
+        printf '%s\n' "${out}" >&2
+        printf 'default_variant names a variant that must never be published.\n' >&2
+        rc=1
+      fi
+    done < <(enumerate_default_variants "${FAMILY_DIR}")
+    if (( rc == 0 )); then
+      printf 'OK default carries no forbidden symbol\n'
+    fi
+    return "${rc}"
   fi
 
-  local out
   if out="$(verdict_for "${variant}")"; then
     printf '%s\n' "${out}"
     return 0

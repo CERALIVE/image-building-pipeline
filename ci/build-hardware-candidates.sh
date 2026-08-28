@@ -64,11 +64,16 @@
 #                     rock-edge        rock-5b-plus    --variant edge       (non-debug)
 #                     orange-edge      orange-pi-5-plus --variant edge      (non-debug)
 #                     rock-edge-test   rock-5b-plus    --variant edge-test  (debug)
-#                     rock-vendor      rock-5b-plus    (no --variant: the resolver
-#                                      `default`, i.e. the PREBUILT vendor BSP
-#                                      kernel) — opt-in by name only, deliberately
-#                                      NOT in `all`: it is a comparison/smoke
-#                                      artifact, not one of the qualification set
+#                     rock-vendor      rock-5b-plus    --variant vendor     (the
+#                                      PREBUILT Armbian vendor BSP kernel) —
+#                                      opt-in by name only, deliberately NOT in
+#                                      `all`: it is a comparison/smoke artifact,
+#                                      not one of the qualification set. It became
+#                                      an explicit --variant when the mainline
+#                                      source-built track was promoted to the
+#                                      family default; a bare ./build now resolves
+#                                      `edge`, so passing no variant here would
+#                                      silently build the WRONG kernel track.
 #   --trust-verdict the ci/verify-bench-rauc-trust.sh verdict JSON
 #   --signing-env   a PATHS-ONLY env file defining CERALIVE_RAUC_PKI_DIR and
 #                   RAUC_KEYRING_FILE
@@ -79,7 +84,7 @@
 #                     1 = bench PARTLABEL overlay (xboot/xrootfs_a/xrootfs_b/xdata)
 #                         — for a bench card sharing a board with another image
 #                     0 = the frozen production PARTLABEL set
-#   --skip-probes   skip the eight DRY_RUN probes (they are the default)
+#   --skip-probes   skip the nine DRY_RUN probes (they are the default)
 #
 # Every path argument is generic: this repo is built and tested standalone, so
 # it never resolves a bench PKI, a verdict or an evidence root by proximity to
@@ -122,13 +127,16 @@ candidate_board() {
     *) return 1 ;;
   esac
 }
-# `default` is the resolver's reserved no-overlay name: the vendor candidate is
-# built by a bare `./build <board>`, so it must NOT be passed as `--variant`.
+# Every candidate names its variant EXPLICITLY, including the vendor one. A bare
+# `./build <board>` resolves the family's declared `default_variant:`, which is
+# the mainline source-built `edge` track — so the vendor candidate must ask for
+# `--variant vendor` or it would quietly produce an edge artifact under a name
+# that promises a prebuilt vendor BSP kernel.
 candidate_variant() {
   case "$1" in
     rock-edge|orange-edge) printf 'edge\n' ;;
     rock-edge-test)        printf 'edge-test\n' ;;
-    rock-vendor)           printf 'default\n' ;;
+    rock-vendor)           printf 'vendor\n' ;;
     *) return 1 ;;
   esac
 }
@@ -138,7 +146,7 @@ candidate_is_debug() { [[ "$1" == "rock-edge-test" ]]; }
 # resolve output carries KERNEL_SOURCE_* fields and whose package lands in the
 # per-board kernel-build staging tree. The vendor candidate installs a PREBUILT
 # BSP kernel instead, so those fields are legitimately absent for it.
-candidate_is_source_built() { [[ "$(candidate_variant "$1")" != "default" ]]; }
+candidate_is_source_built() { [[ "$(candidate_variant "$1")" != "vendor" ]]; }
 
 # Evidence file stem. The bench-labels mode is part of the NAME, not just of the
 # content: the same candidate is built once per mode and the two artifacts are
@@ -250,9 +258,12 @@ load_env_file() {
 }
 
 # ---------------------------------------------------------------------------
-# The eight DRY_RUN probes: the seven valid board x kernel-track cells plus one
+# The nine DRY_RUN probes: the eight valid board x kernel-track cells plus one
 # multi-board dispatch probe. They run before any real build so a plan-level
-# regression is reported in seconds rather than after a kernel compile.
+# regression is reported in seconds rather than after a kernel compile. The bare
+# board probes now exercise the mainline source-built default, so `--variant
+# vendor` is probed explicitly — otherwise the prebuilt path would lose its only
+# plan-level coverage the moment it stopped being the default.
 # ---------------------------------------------------------------------------
 run_dry_run_probes() {
   local log="$1" rc=0
@@ -260,6 +271,7 @@ run_dry_run_probes() {
     "rock-5b-plus"
     "orange-pi-5-plus"
     "x86-minipc"
+    "rock-5b-plus --variant vendor"
     "rock-5b-plus --variant edge"
     "orange-pi-5-plus --variant edge"
     "rock-5b-plus --variant vendor-patched"
@@ -457,8 +469,7 @@ build_candidate() {
     || die "no MaskROM recovery loader is pinned for board '${board}' in ci/fetch-rk3588-loader.sh — refusing to emit a candidate whose recorded recovery path is another board's"
   IFS=$'\t' read -r LOADER_NAME LOADER_SHA256 LOADER_URL <<<"${loader_entry}"
 
-  local -a build_args=("${board}")
-  [[ "${variant}" == "default" ]] || build_args+=(--variant "${variant}")
+  local -a build_args=("${board}" --variant "${variant}")
 
   local stem log
   stem="$(evidence_stem "${name}")"
@@ -769,13 +780,16 @@ JSON
     && bad "the production symbol assertion passed a LEAKED debug config" \
     || ok "the production symbol assertion REJECTS a leaked debug config"
 
-  # 9. the candidate table: the vendor candidate maps to the resolver `default`
+  # 9. the candidate table: the vendor candidate names the prebuilt overlay
   [[ "$(candidate_board rock-vendor)" == "rock-5b-plus" ]] \
     && ok "rock-vendor maps to board rock-5b-plus" \
     || bad "rock-vendor board mapping"
-  [[ "$(candidate_variant rock-vendor)" == "default" ]] \
-    && ok "rock-vendor maps to resolver variant 'default' (no kernel overlay)" \
-    || bad "rock-vendor variant mapping is not 'default'"
+  [[ "$(candidate_variant rock-vendor)" == "vendor" ]] \
+    && ok "rock-vendor maps to variant 'vendor' (the prebuilt Armbian BSP kernel)" \
+    || bad "rock-vendor variant mapping is not 'vendor'"
+  [[ "$(candidate_variant rock-vendor)" != "default" ]] \
+    && ok "rock-vendor never relies on the bare default (which now resolves edge)" \
+    || bad "rock-vendor still relies on the bare default"
   candidate_is_source_built rock-vendor \
     && bad "rock-vendor is treated as a source-built candidate" \
     || ok "rock-vendor is NOT source-built (no KERNEL_SOURCE_* expected)"

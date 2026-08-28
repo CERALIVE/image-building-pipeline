@@ -231,6 +231,46 @@ grep -qxF 'linux-u-boot-rock-5b-plus-vendor' "${B2}/holds" \
 
 pass "Part B2 OK (per-board U-Boot package resolved from the manifest, not hardcoded)"
 
+# --- B3: the PRODUCTION resolve after the source-built-kernel flip ------------
+# The default path now builds the kernel from source, so the freeze set changed
+# shape rather than content: the kernel package is the BUILT name, there is NO
+# separate DTB package at all (bindeb-pkg ships the in-tree DTBs inside the
+# linux-image deb), the U-Boot package is the board's `-edge` one, and libmali is
+# gone from firmware. The freeze must follow the manifest into all four without
+# any edit, which is exactly what a hardcoded name would have prevented.
+B3="${TMPROOT}/b3"; mkdir -p "${B3}/prefs"
+make_stubs "${B3}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware 26.8.3
+cerastream 2026.6.1"
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware" \
+  run_freeze "${B3}" "${B3}/prefs" >/dev/null
+
+held_b3="$(sort -u "${B3}/holds" | tr '\n' ' ')"
+expected_b3="armbian-firmware linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge "
+[[ "${held_b3}" == "${expected_b3}" ]] \
+  || fail "B3 hold set wrong.\n  got:      ${held_b3}\n  expected: ${expected_b3}"
+
+pref_b3="${B3}/prefs/ceralive-kernel-freeze"
+[[ -f "${pref_b3}" ]] || fail "B3 did not write ${pref_b3}"
+grep -qxF 'Package: linux-image-7.2.0-ceralive-rk3588' "${pref_b3}" \
+  || fail "B3 pin file does not name the SOURCE-BUILT kernel package"
+grep -qxF 'Pin: version 7.2.0-ceralive1' "${pref_b3}" \
+  || fail "B3 pin file does not pin the source-built package's own Debian version"
+[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b3}")" == "3" ]] \
+  || fail "B3 pin file should carry exactly 3 pinned packages (no DTB package on this path)"
+grep -q 'linux-dtb-vendor-rk35xx' "${pref_b3}" \
+  && fail "B3 pinned a vendor DTB package the source-built path does not install"
+grep -q 'libmali' "${pref_b3}" \
+  && fail "B3 pinned libmali, which the mainline track does not install"
+grep -qxF 'cerastream' "${B3}/holds" \
+  && fail "B3 froze the first-party package 'cerastream'"
+
+pass "Part B3 OK (source-built kernel + edge U-Boot held; empty DTB list is a 3-package freeze, not an error)"
+
 # --- C1: a first-party package in the freeze set must ABORT ------------------
 C1="${TMPROOT}/c1"; mkdir -p "${C1}/prefs"
 make_stubs "${C1}" "linux-image-vendor-rk35xx 26.5.1

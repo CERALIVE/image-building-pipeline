@@ -72,12 +72,16 @@ for three reasons that are all still true with cake present:
 | Symbol | `.config` | Ships as | Row |
 |---|---|---|---|
 | `NET_CLS` | `=y` (line 1620) | `vmlinux` | **builtin** (promptless; selected by any classifier) |
-| `NET_CLS_FW` | `# … is not set` (line 1623) | `updates/ceralive/cls_fw.ko`, from `ceralive-cls-fw` | **module (OUT-OF-TREE)** |
+| `NET_CLS_FW` | `# … is not set` (line 1623) | nothing, as of 2026-08-28 (see below) | **ABSENT on this track** |
 
 `cls_fw.ko` is absent from the base package on four independent reads (no `.ko`,
-no `modules.dep`, no `modules.builtin`, no `modules.alias` entry). The image
-supplies it as a separately built, ABI-matched package —
-`sharing-kernel-capability.md` §2c is the record of record for that work, and
+no `modules.dep`, no `modules.builtin`, no `modules.alias` entry). The image used
+to supply it as a separately built, ABI-matched `ceralive-cls-fw` package; that
+package is **retired**, because the production kernel is now the source-built
+mainline track where `CONFIG_NET_CLS_FW=y` is in-tree
+(`sharing-kernel-capability.md` §7). The honest consequence for THIS track, which
+is now the opt-in `--variant vendor` overlay: it has no `fw` classifier at all.
+`sharing-kernel-capability.md` §2c remains the record of the retired work, and
 **this note does not restate or re-derive it**.
 
 ### 1c. Netfilter objects the steering layer needs (todo 9)
@@ -179,16 +183,19 @@ RUNTIME, long after modular autoload is available. It is deliberately **not** a
 module posture would not support (`sharing-kernel-capability.md` §3, second
 consequence).
 
-`ceralive-cls-fw` is the one exception on the vendor track: it ships a
-`modules-load.d` entry so `cls_fw` is requested at boot rather than left to an
-autoload the `fw` classifier would have to trigger first.
+`ceralive-cls-fw` used to be the one exception on the vendor track — it shipped a
+`modules-load.d` entry so `cls_fw` was requested at boot rather than left to an
+autoload. It is retired, and on the production (mainline) track the question does
+not arise: `CONFIG_NET_CLS_FW=y` is built in, so there is nothing to autoload and
+nothing to request.
 
 ---
 
 ## 4. Scope boundary — what this note is NOT
 
-- It does **not** re-derive, restate or supersede the `ceralive-cls-fw`
-  out-of-tree module work. That is `sharing-kernel-capability.md` §2c.
+- It does **not** re-derive, restate or supersede the retired `ceralive-cls-fw`
+  out-of-tree module work. That is `sharing-kernel-capability.md` §2c (the work)
+  and §7 (its retirement).
 - It makes **no runtime claim**. Every row is package/text inspection. Actual
   `modprobe`, actual `tc qdisc add … cake`, and actual `tc filter … fw classid`
   classification remain the labelled hardware gate in `docs/DEFERRED.md`.

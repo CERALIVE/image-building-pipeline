@@ -211,8 +211,11 @@ All resolved on trixie `arm64`. `all` = `Architecture: all`.
 
 `rk3588.delta.list` and `x86_64.delta.list` carry **no active package lines** (both
 are documented-empty by design), so neither had anything to resolve.
-`rk3588-vendor-kernel-extensions.list` names `ceralive-cls-fw`, which this
-pipeline **builds**; it is not a Debian package and is correctly not in this table.
+`rk3588-vendor-kernel-extensions.list` used to name `ceralive-cls-fw`, which this
+pipeline built rather than resolved, so it was correctly absent from this table.
+That list, the package and the whole kernel-extension mechanism are retired
+(2026-08-28) — the production kernel is source-built with `CONFIG_NET_CLS_FW=y`
+in-tree — so there is nothing left to exclude.
 
 ## What this does not prove
 

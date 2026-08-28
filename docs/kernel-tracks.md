@@ -5,17 +5,53 @@ that "which repo feeds which variant, and where do I read more" has one place
 to start. Every substantive claim lives in the documents this page links to —
 if you find a fact repeated here, that is a bug in this page, not a feature.
 
+## Which track is PRODUCTION
+
+`rk3588` declares `default_variant: edge`, so a variant-less `./build <board>`
+resolves the `edge` overlay — the mainline 7.2 kernel built from source — and
+does so byte-identically to `./build <board> --variant edge`, the board's own
+`variant_overrides.edge` included. The prebuilt Armbian vendor 6.1 BSP that
+shipped every earlier image is now the opt-in `vendor` overlay.
+
+```
+./build rock-5b-plus                       # mainline 7.2, built from source
+./build rock-5b-plus --variant vendor      # prebuilt Armbian vendor 6.1 BSP
+```
+
+`default_variant` is a POINTER, not a copy of the pins. Copying `edge`'s block
+to the family top level was the alternative and it breaks two things: `edge-test`
+`extends: edge`, so it would have to restate its parent's pins (the byte-for-byte
+drift `extends` exists to prevent), and `vendor-patched` uses config-FILE mode,
+which would deep-merge onto the family's defconfig mode and produce the
+half-specified config the schema's `oneOf` forbids.
+
 ## Which patch repo feeds which track
 
 | Variant | Track | Patch repository | Retire-on-merge status |
 |---|---|---|---|
-| `edge` | mainline (currently pinned to `v7.2`; Armbian's own `edge` mapping still names 7.2-rc7) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
-| `vendor-patched` | Armbian `vendor` (6.1 BSP — the kernel the shipped image actually runs) | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | tracked in that repo's own docs (open upstream PR #487; retires when it merges) |
+| `edge` (**the production default**) | mainline (currently pinned to `v7.2`; Armbian's own `edge` mapping still names 7.2-rc7) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
+| `edge-test` | `extends: edge` — the same source, plus KASAN/lockdep and the fault-injection symbols | (inherited) | never released; `ci/check-release-variant.sh` refuses it by property |
+| `vendor` | Armbian `vendor` 6.1 BSP, PREBUILT — no patches, no source build | — | retires with the vendor machinery |
+| `vendor-patched` | Armbian `vendor` 6.1 BSP, built from source | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | tracked in that repo's own docs (open upstream PR #487; retires when it merges) |
 
-Both variants are declared under `rk3588`'s `variants:` map in
+All four are declared under `rk3588`'s `variants:` map in
 [`manifests/families/rk3588.yaml`](../manifests/families/rk3588.yaml). Neither
-repo's patches apply to the other's tree — they target different kernel majors
-and different upstream trees.
+patch repo's series applies to the other's tree — they target different kernel
+majors and different upstream trees.
+
+## What the flip took with it
+
+`NET_CLS_FW` — the `tc filter … fw classid` classifier the uplink shaper needs to
+map an nftables skb mark onto its client band — is in-tree and built-in on the
+mainline track (`CONFIG_NET_CLS_FW=y` in
+[`manifests/kernel/rk3588-edge.fragment`](../manifests/kernel/rk3588-edge.fragment),
+pinned in `required-symbols.list`). The prebuilt vendor kernel never built it, so
+the image used to carry `ceralive-cls-fw`, a separately built vermagic-pinned
+out-of-tree `cls_fw.ko`. That package, its pin file, its builder image and the
+whole `kernel_extension_packages` mechanism are **retired**; an absence guard in
+`tests/packaging-hygiene.bats` fails the build if any half comes back. The
+consequence for the opt-in `vendor` overlay is stated plainly: it has no
+`NET_CLS_FW` at all.
 
 ## The pin chain
 
@@ -54,7 +90,10 @@ status; this index only says where to look.
 ## Where the rest of the story lives
 
 - **Should `edge` ever ship in production?** — [`kernel-track-decision.md`](kernel-track-decision.md)
-  is the go/no-go decision record (currently: hold, D3 unchanged).
+  is the go/no-go decision record. It has been answered YES for the kernel half
+  of decision D3: `default_variant: edge` is that answer expressed in the
+  manifest. D3's bootloader-adapter half (`rauc_bootloader_adapter: custom`) is
+  untouched.
 - **How does a variant actually build?** — [`kernel-build-from-source.md`](kernel-build-from-source.md)
   is the full mechanism: the `variants:` model, source-checkout shapes, config
   modes, and DTB install mapping.

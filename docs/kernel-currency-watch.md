@@ -12,8 +12,14 @@ URL- and SHA-256-pinned in
 
 ## The Decision
 
-The next kernel-flip step may select the source-built mainline 7.2 kernel and
-continue to drive VEPU580 through **Rockchip MPP**. The kernel implementation
+**ACTIONED 2026-08-28.** The kernel flip this document authorised has been made:
+`manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
+variant-less build selects the source-built mainline 7.2 kernel and the prebuilt
+vendor BSP is the opt-in `vendor` overlay. The MPP userspace pins below are
+unchanged, which is exactly what this decision said would happen.
+
+The flip selects the source-built mainline 7.2 kernel and
+continues to drive VEPU580 through **Rockchip MPP**. The kernel implementation
 changes; the MPP userspace ABI does not. No replacement build from
 `tsukumijima/mpp-rockchip` is needed beyond the already-pinned
 `librockchip-mpp1` release asset.
