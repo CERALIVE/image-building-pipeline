@@ -1641,8 +1641,9 @@ occurrence of each of those `make` calls in the file.
   so could see the symlink, its target and its size but never a byte of content.
   Guards: `tests/boot-artifacts.bats` (9 added cases). Full write-up:
   [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §4c.
-- **BOTH RK3588 boards COMPILED end to end AT THE `v7.1.7` BASE; ONE of them
-  BOOTED there. All of it is historical — none of it was re-measured at `v7.2`.**
+- **BOTH RK3588 boards COMPILED end to end AT THE `v7.1.7` BASE; both booted
+  there. `v7.2` now has partial kernel-on-silicon evidence, not exact-image
+  qualification.**
   A real (non-`DRY_RUN`) `./build <board> --variant edge` at that base produced
   `linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb`), passed all four
   `validate_built_kernel_deb` axes, installed the board DTB to
@@ -1651,12 +1652,14 @@ occurrence of each of those `make` calls in the file.
   `rock-5b-plus` first, and on `orange-pi-5-plus` once the DTB-name override and
   the first-party staging key below were both fixed. A Rock 5B+ was then flashed
   with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is what
-  cleared the MPP KNOWN ISSUE below AT THAT BASE. `orange-pi-5-plus` has still
-  never booted an edge image, so the fragment remains reviewed intent on that
-  board. At the current `v7.2` pin the build produces
-  `linux-image-7.2.0-ceralive-rk3588` by manifest derivation and the tree is
-  cross-compile-proven, but no pipeline `--variant edge` image has been produced,
-  flashed or booted at `v7.2` on either board. `docs/DEFERRED.md` item 9.
+  cleared the MPP KNOWN ISSUE below AT THAT BASE. Orange Pi 5 Plus subsequently
+  booted its own v7.1.7 artifact. At `v7.2`, both boards have now run
+  installations reporting `7.2.0-ceralive-rk3588` and passed direct software and
+  MPP encode checks. Those installations are Bookworm builds whose provenance was
+  not established as the exact pinned Trixie output: candidate builds stopped at
+  the authenticated apt input gate and produced no artifact, and product streaming
+  fails on the resulting userspace ABI mismatch. No pipeline-produced v7.2 image
+  has therefore been qualified. `docs/DEFERRED.md` item 9.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
@@ -2175,8 +2178,8 @@ node (`rockchip-rga` → `/dev/video1`). Full analysis:
 
 **MPP hardware video encode was broken on the `edge` 7.1.5 kernel by three
 stacked defects — three defects fixed by `0008`/`0009` (+`0022`),
-board-confirmed AT `v7.1.7`; at `v7.2` the patches are carried and
-compile-proven, board evidence PENDING** [RESOLVED AT v7.1.7 — PENDING AT v7.2]
+board-confirmed AT `v7.1.7`; v7.2 kernel activity is now proven on both boards,
+while exact-image qualification remains pending** [RESOLVED AT v7.1.7 — PARTIAL AT v7.2]
 
 Read the status line literally. `0008` and `0009` are the two fixes, `0022`
 rides with them as the rkvenc ioctl request-coverage/element-bounds hardening,
@@ -2185,9 +2188,12 @@ and all three are present in the 22-member series the `v7.2` pin
 BOARD evidence: the 2026-08-09 Rock 5B+ run below was measured on a `v7.1.7`
 image. At `v7.2` the series applies clean (22/22 `git am`), cross-compiles to
 `Image` + modules + dtbs with zero errors, and `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y`
-survives the config gate — and that is the whole of the v7.2 evidence. No board
-has run an MPP encode on a `v7.2` kernel. Do not read the confirmation below as
-a v7.2 result, and do not let a future edit quietly drop the base it names.
+survives the config gate. Both boards have additionally completed direct
+60-second MPP encodes while running a kernel reporting
+`7.2.0-ceralive-rk3588`; debugfs encoder-clock activity changed idle → active →
+idle around those runs. That proves v7.2 kernel activity, but not this exact
+artifact: the boards run Bookworm and no pinned Trixie candidate was produced.
+Do not let the partial result erase either provenance boundary.
 
 Root-caused on a Rock 5B+ on 2026-08-02, and the fixes landed in
 `CERALIVE/rk3588-kernel-patches` rather than here — which is why the repair
@@ -2241,8 +2247,9 @@ contract expressed at build time: on an arch that stubs the clean out, the heap
 would hand back ordinary cached memory under an uncached name.
 
 **Board-confirmed on a Rock 5B+ (2026-08-09) AT THE `v7.1.7` BASE, all three
-defects cleared there. This is a historical measurement; it has not been
-repeated at `v7.2` and no v7.2 board evidence exists.**
+defects cleared there.** The detailed soak, determinism and guardrail claims
+below remain scoped to that artifact; the later v7.2 runs were bounded direct
+encode checks, not repetitions of this campaign.
 `mpph264enc` registers (`gst-inspect-1.0` exit 0, was `No such element`); a real
 1080p encode produced 1,854,524 bytes (was 0 bytes + stream error);
 `/dev/dma_heap/system-uncached` is a REAL heap with its own minor (`250,1` vs
@@ -2266,14 +2273,11 @@ that isolated each layer:
 `.omo/evidence/device-platform-wave4/task-rauc-ota-validation.md` §6.4a; the
 clearing run is `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
 
-**Still UNVALIDATED beyond one board, and now unvalidated at the current base
-too.** Everything above is one Rock 5B+ on a `v7.1.7` image. The Orange Pi 5 Plus
-column is entirely unrun, and `0008`/`0009` still carry the patch repo's
-`UNVALIDATED` marker for that reason. The `v7.2` rebase adds a second axis to the
-same caveat: hardware evidence does not cross a base bump, so at the current pin
-MPP encode on the `edge` track is compile-proven only. Do not describe edge-track
-MPP encode as validated on the fleet, and do not describe it as validated at
-`v7.2` at all.
+**Still UNQUALIFIED as an exact current image.** The detailed campaign above is
+one Rock 5B+ on a v7.1.7 pipeline artifact. The later bounded v7.2 direct-encode
+checks cover both Rock 5B+ and Orange Pi 5 Plus, but their Bookworm images were not
+proven to be the exact pinned Trixie build. Describe edge-track MPP as partially
+validated on v7.2 kernels, never as a fleet or release-image qualification.
 
 **eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]
