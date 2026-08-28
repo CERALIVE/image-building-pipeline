@@ -24,7 +24,9 @@ set -euo pipefail
 # shellcheck source=../../lib/common.sh
 source "${CERALIVE_COMMON_SH:-"$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../lib" && pwd)/common.sh"}"
 
-# Distro suite + CeraLive channel. These are configuration, not secrets.
+# Debian suite set + CeraLive channel. These are configuration, not secrets.
+# RELEASE derives only the Debian sources below: apt-worker is suite-agnostic and
+# serves its flat first-party index at dists/${APT_CHANNEL}/binary-${arch}/.
 #
 # The suite is NEVER a literal here. In a chroot it arrives as RELEASE/APT_SUITE*
 # from the build environment (lib/orchestrate.sh env_names + mkosi.conf
