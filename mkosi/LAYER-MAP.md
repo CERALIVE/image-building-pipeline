@@ -52,8 +52,9 @@ concerns belong to platform/assembly, never here.
 | HW-accel GStreamer plugin (`gstreamer1.0-rockchip1`) + runtime multimedia config (`rockchip-multimedia-config`) | family manifest `hw_accel_gstreamer_plugins` / `gstreamer_runtime_packages` |
 | Kernel / DTB / U-Boot blob / firmware (only when `INSTALL_BOOT_BSP=1`) | family manifest `kernel_packages` / `dtb_packages` / `uboot_packages` / `firmware_packages` |
 
-**WHY:** these packages are kernel-coupled and SoC-specific. The HW-accel plugin
-(Rockchip MPP) is bound to the vendor kernel (decision D3) and must NOT live in
+**WHY:** these packages are kernel-coupled and SoC-specific. The Rockchip MPP
+userspace set is ABI-proven on both vendor 6.1 and mainline 7.2, including a
+Trixie arm64 dependency solve, but remains platform-specific and must NOT live in
 the app layer. Every package **name** is resolved from the board+family manifest
 by `lib/resolve.sh` and passed in via the environment — there is zero hardcoded
 board logic in the layer config. Adding a new board never edits this layer.

@@ -116,6 +116,12 @@ ok "isolated: the apt sandbox gate is defined once, in the generic module"
 
 # ---------------------------------------------------------------------------
 # Signed index — the digest comes from the verified plaintext
+#
+# The fixture below models the ARMBIAN BSP archive, whose suite is ARMBIAN_SUITE
+# (still bookworm, and deliberately NOT derived from RELEASE — see
+# tests/target-release-derivation.test.sh §E). It is not the Debian rootfs suite,
+# so it does not move with the trixie migration. The header fields are inert
+# filler anyway: index_release_digest reads only the SHA256 block.
 # ---------------------------------------------------------------------------
 release="${WORK}/Release"
 cat >"${release}" <<'EOF'

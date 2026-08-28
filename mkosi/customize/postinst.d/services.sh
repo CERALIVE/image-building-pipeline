@@ -168,7 +168,111 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_cpu_governor
   setup_hdmirx_edid
+  setup_pipewire_system_mode
+}
+
+# --- System-mode PipeWire (ADR-0010) ---------------------------------------
+#
+# WHY THIS FUNCTION EXISTS AT ALL, rather than an `enable_service pipewire.service`
+# line above: Debian's `pipewire` and `wireplumber` packages ship USER units ONLY —
+# /usr/lib/systemd/user/{pipewire.service,pipewire.socket,filter-chain.service} and
+# /usr/lib/systemd/user/wireplumber.service, verified by `dpkg-deb -c` against the
+# real trixie arm64 packages. There is no system unit to enable and none to drop in
+# over. This device is a headless appliance with no login session, no seat and no
+# XDG_RUNTIME_DIR, so the system instances are FIRST-PARTY artifacts under
+# mkosi/runtime/pipewire/ and this is what installs them.
+#
+# Five things it establishes, and each is a stated requirement rather than a default:
+#   1. a DEDICATED system user — the daemon and the session manager never run as
+#      root. The Debian postinst creates the `pipewire` GROUP (for its packaged
+#      /etc/security/limits.d file); the matching USER does not exist until here.
+#   2. a FIXED runtime directory at /run/pipewire, 0750 pipewire:pipewire, declared
+#      once in tmpfiles.d so three units cannot drift on the mode.
+#   3. a GROUP-PERMISSIONED socket (0660) that admits the root-run cerastream.service
+#      by construction and keeps every other unprivileged process out of the graph.
+#   4. RT scheduling through the units' own Limit*= ceilings — no rtkit, which would
+#      want polkit and a session this board does not have. NOTE the trap: the
+#      packaged /etc/security/limits.d/25-pw-rlimits.conf grants the same values to
+#      @pipewire and is INERT for a systemd service (pam_limits applies to PAM
+#      sessions), so reading that file and concluding RT is handled would be wrong.
+#   5. the USER units MASKED, so there is exactly one PipeWire on the box.
+#
+# PIPEWIRE_{UNIT,USER_UNIT,CONF,TMPFILES,DBUS}_DIR / WIREPLUMBER_CONF_DIR /
+# CERASTREAM_PIPEWIRE_DROPIN_DIR override the install destinations for the offline
+# contract suite.
+setup_pipewire_system_mode() {
+  log "installing system-mode PipeWire (dedicated user, group-permissioned socket at /run/pipewire, RT limits without rtkit, headless WirePlumber profile)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/pipewire"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -d "${src}" ]] \
+    || die "pipewire runtime source not found: ${src} (is \$SRCDIR/runtime mounted?)"
+
+  local artifact
+  for artifact in pipewire.socket pipewire.service wireplumber.service \
+                  10-ceralive-system.conf 10-ceralive-headless.conf \
+                  ceralive-pipewire.tmpfiles.conf ceralive-pipewire-bluez.dbus.conf \
+                  ceralive-cerastream-pipewire.dropin.conf; do
+    [[ -f "${src}/${artifact}" ]] \
+      || die "pipewire artifact not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+
+  # 1. The dedicated system user. FAIL CLOSED: if it is somehow not created, the
+  # units' User= would be unresolvable and systemd would refuse to start them — but
+  # a silently root-running audio daemon is the failure this guards against, so the
+  # uid is checked as well as the existence.
+  local pw_user="${CERALIVE_PIPEWIRE_USER:-pipewire}"
+  ensure_group "${pw_user}"
+  if ! getent passwd "${pw_user}" >/dev/null; then
+    useradd --system --gid "${pw_user}" --no-create-home \
+      --home-dir /run/pipewire --shell /usr/sbin/nologin \
+      --comment "PipeWire system-mode daemon (CeraLive)" "${pw_user}"
+  fi
+  getent passwd "${pw_user}" >/dev/null \
+    || die "pipewire system user '${pw_user}' was not created — the audio daemon would have no non-root identity to run as"
+  [[ "$(id -u "${pw_user}")" != "0" ]] \
+    || die "pipewire system user '${pw_user}' resolves to uid 0 — the audio daemon must never run as root"
+
+  # 2. The artifacts.
+  local unit_dir="${PIPEWIRE_UNIT_DIR:-/etc/systemd/system}"
+  local user_unit_dir="${PIPEWIRE_USER_UNIT_DIR:-/etc/systemd/user}"
+  local pw_conf_dir="${PIPEWIRE_CONF_DIR:-/etc/pipewire/pipewire.conf.d}"
+  local wp_conf_dir="${WIREPLUMBER_CONF_DIR:-/etc/wireplumber/wireplumber.conf.d}"
+  local tmpfiles_dir="${PIPEWIRE_TMPFILES_DIR:-/etc/tmpfiles.d}"
+  local dbus_dir="${PIPEWIRE_DBUS_DIR:-/etc/dbus-1/system.d}"
+  local cerastream_dropin_dir="${CERASTREAM_PIPEWIRE_DROPIN_DIR:-/etc/systemd/system/cerastream.service.d}"
+
+  install -D -m 0644 "${src}/pipewire.socket"     "${unit_dir}/pipewire.socket"
+  install -D -m 0644 "${src}/pipewire.service"    "${unit_dir}/pipewire.service"
+  install -D -m 0644 "${src}/wireplumber.service" "${unit_dir}/wireplumber.service"
+  install -D -m 0644 "${src}/10-ceralive-system.conf"   "${pw_conf_dir}/10-ceralive-system.conf"
+  install -D -m 0644 "${src}/10-ceralive-headless.conf" "${wp_conf_dir}/10-ceralive-headless.conf"
+  install -D -m 0644 "${src}/ceralive-pipewire.tmpfiles.conf" "${tmpfiles_dir}/ceralive-pipewire.conf"
+  install -D -m 0644 "${src}/ceralive-pipewire-bluez.dbus.conf" "${dbus_dir}/ceralive-pipewire-bluez.conf"
+  install -D -m 0644 "${src}/ceralive-cerastream-pipewire.dropin.conf" \
+    "${cerastream_dropin_dir}/40-pipewire.conf"
+
+  # 3. Mask the packaged USER units. There is no user session on this appliance, so
+  # they cannot start today — but "cannot start today" is a property of the image's
+  # shape, not a guarantee, and the point of system mode is that exactly one PipeWire
+  # exists. A /dev/null symlink is what `systemctl --global mask` writes; writing it
+  # directly avoids depending on systemctl's user-scope behaviour inside a build
+  # chroot, and it is VERIFIED rather than assumed, like mask_service.
+  local user_unit
+  install -d -m 0755 "${user_unit_dir}"
+  for user_unit in pipewire.service pipewire.socket filter-chain.service wireplumber.service; do
+    ln -sfn /dev/null "${user_unit_dir}/${user_unit}"
+    [[ -L "${user_unit_dir}/${user_unit}" && "$(readlink "${user_unit_dir}/${user_unit}")" == "/dev/null" ]] \
+      || die "user-scope mask did not land: ${user_unit_dir}/${user_unit} is not a symlink to /dev/null"
+  done
+
+  # 4. Enable the system instances. The socket is enabled as well as the service on
+  # purpose: the socket gives the ordering edge that actually means "connectable"
+  # (see pipewire.socket), while the service keeps the always-on audio meter's daemon
+  # running from boot instead of waiting for a first client.
+  enable_service pipewire.socket
+  enable_service pipewire.service
+  enable_service wireplumber.service
 }
 
 # Six stock Debian/systemd units that this image either can NEVER satisfy or must

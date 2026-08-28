@@ -127,21 +127,35 @@ board validates render.
 
 The hardware-gated items are:
 
-- Cog renders at all via the real Mali-G610 Valhall GPU userspace
-  (`libmali-valhall-g610-g24p0-wayland-gbm`) providing EGL/GBM
-- OKLCH and Tailwind v4 CSS correctness on WebKit 2.38.6 (the bookworm version
-  may predate the Chromium ≥111 floor assumed by the cage + Chromium kiosk path)
+- Cog renders at all through the **Panthor + Mesa** stack — the in-tree
+  `panthor` DRM driver plus Mesa's `dri/panthor_dri.so` providing EGL/GBM
+- The merged sysext's Mesa half actually resolves at runtime (the base image
+  prunes those four paths; only a merged board proves the overlay supplies them)
+- `renderD*` node mapping and permissions for the kiosk user
+- OKLCH and Tailwind v4 CSS correctness on WebKit **2.48.3** — risk materially
+  reduced versus the 2.38.6 this item was written against, but unverified
 - `cog` platform choice: direct-DRM/KMS vs under `cage` (DRM node mapping is
   itself a Task 28 hardware item)
 - Touch input through the WPE/Wayland seat (requires DSI touchscreen + calibration)
-- GLVND vs `dpkg-divert` libmali wiring
-- Measured `cog.raw` size and size-budget impact
+- Measured `.raw` size **on the device** and its `/data` impact
 
-**Why deferred:** No RK3588 board is reachable from the dev environment (Task 1
-spike verdict: NO-GO). The Mali-G610 GPU userspace is a proprietary Rockchip
-blob not present in Debian bookworm or Armbian's main feed; it cannot be
-emulated. Everything provable without hardware is already green and recorded in
-`test-results/task-39-cog-qa.txt`.
+**What is no longer gated (closed at the trixie/mainline migration):** the
+closure itself. `cog` `0.18.4-1+b1` + `libwpewebkit-2.0-1` `2.48.3-1` resolve,
+download, extract, prune and squash for real against the trixie arm64 index
+(353 172 379 B installed / 111 521 792 B squashed), and the retired bookworm pins
+demonstrably do not resolve at all. Evidence:
+`.omo/evidence/cerastream-glibc-pipewire-network-ui/todo14-cog-closure.txt` and
+`…/todo14-old-pins-negative.txt`. The former "GLVND vs `dpkg-divert` libmali
+wiring" item is **retired outright**, not deferred: `libmali` is off the mainline
+path entirely, so there is no blob to divert to.
+
+**Why the rest is still deferred:** No RK3588 board is reachable from the dev
+environment (Task 1 spike verdict: NO-GO). A GPU cannot be emulated, and the
+specific failure mode that matters here — Mesa silently falling back to
+`llvmpipe` when it cannot reach the Panthor render node — renders *correctly*
+and so cannot be distinguished from success by anything but a board. Everything
+provable without hardware is green and recorded in
+`test-results/task-39-cog-qa.txt` plus the two evidence files above.
 
 **Unblock condition:** Run the full checklist in
 `docs/cog-display-hw-checklist.md` on a physical Radxa Rock 5B+ or Orange
@@ -160,11 +174,13 @@ the build and CI `addon-publish` path; pin `cog`/`wpewebkit` versions in
 **Location:** `versions.yaml:153-165` (workspace root, consumed by `scripts/fetch-debs.sh`)
 
 **What it is:** The `cog` and `wpewebkit` entries in `versions.yaml` carry
-`pin: null`. The apt-index-validated versions (cog `0.16.1-1`,
-`libwpewebkit-1.1-0` `2.38.6-1`) are recorded in comments but not pinned,
-because pinning before render QA passes would lock a version that may need to
-change (e.g. if WebKit 2.38.6 proves insufficient for OKLCH/Tailwind v4 and a
-trixie/backport snapshot is needed instead).
+`pin: null`. The comment values recorded beside them are **stale** — they name
+the retired bookworm pins (cog `0.16.1-1`, `libwpewebkit-1.1-0` `2.38.6-1`),
+neither of which resolves on the target suite any more. The apt-index-validated
+trixie versions are **cog `0.18.4-1+b1`** and **`libwpewebkit-2.0-1` `2.48.3-1`**
+(note the package RENAME — `libwpewebkit-1.1-0` no longer exists in the archive).
+They remain unpinned because pinning before render QA passes would lock a version
+that may still need to change.
 
 ```yaml
 # versions.yaml:153-165
@@ -189,9 +205,11 @@ the bookworm versions are sufficient. The technical debt is tracked as TD-C1 in
 
 **Unblock condition:** Same gate as item 4. After the Cog render QA checklist
 passes on hardware, fill the real `artifact.sha256` in `cog-display.json`, then
-set `pin: 0.16.1-1` and `pin: 2.38.6-1` (or the trixie/backport equivalents if
-the bookworm versions proved insufficient) in `versions.yaml:157` and
-`versions.yaml:164`. Re-run `python3 ci/validate-manifests.py` to confirm.
+set `pin: 0.18.4-1+b1` and `pin: 2.48.3-1` in `versions.yaml:157` and
+`versions.yaml:164` — and correct the `package:` field of the `wpewebkit` entry
+to `libwpewebkit-2.0-1` and the `source:` field of both entries to the target
+suite while doing so, because those are wrong today regardless of the pin.
+Re-run `python3 ci/validate-manifests.py` to confirm.
 
 ---
 
@@ -378,9 +396,9 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — now booted on BOTH rk3588 boards
+## 9. Kernel-build-from-source variant — partial v7.2 board evidence, exact image still deferred
 
-**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` build end to end there (`.raw` + signed `.raucb`, all 14 first-party packages installed), and BOTH have now been flashed and BOOTED (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. The tree has since been re-anchored to `v7.2` (see `ce4ebe7`); at `v7.2` the tree is cross-compile-proven only — no image has yet been built, flashed, or booted at this pin on either board. This todo (25) is the first attempt to close that gap on real hardware.
+**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all first-party packages installed), and BOTH were flashed and booted (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. At `v7.2`, both boards have now booted existing Bookworm installations reporting `7.2.0-ceralive-rk3588` and passed direct software/MPP encode checks. This is partial kernel-on-silicon evidence only: the exact pinned Trixie candidate auto-degraded to plan-only mode at the authenticated apt input gate, produced no artifact, and was neither flashed nor installed. Product streaming also fails on both Bookworm installations because `cerastream` requires unavailable `GLIBC_2.39`.
 **Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
 
 **What it is:** The rk3588 family carries an opt-in `edge` variant that builds the
@@ -397,7 +415,7 @@ are gated by tests.
 `validate_built_kernel_deb` axes, installed the board DTB to
 `/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produced a flashable `.raw` plus a
 signed `.raucb`. (At the current pin the derived package name is
-`linux-image-7.2.0-ceralive-rk3588`; that build has not been run.) The two builds agreed on every package version, every rootfs path
+`linux-image-7.2.0-ceralive-rk3588`; an exact current candidate build has not completed.) The two builds agreed on every package version, every rootfs path
 and the built `/boot/config-*`. Reaching that required fixing four defects the
 `DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
 
@@ -415,19 +433,23 @@ placement, not on a failure) — see the USB-C entry in `AGENTS.md` for the per-
 verdicts. This does not promote the edge track: the deployment was bench-labelled,
 nothing was published, and production still runs the prebuilt vendor 6.1 BSP per D3.
 
-**Still deferred, and now on two axes:** the whole build/boot result above is a
-`v7.1.7` record, so the `v7.2` re-pin re-opens it — a real `--variant edge` build
-and a board boot are both outstanding at the current pin. And the PR gate still
-runs `DRY_RUN=1` (plan only — no network, container or compiler). A real build is a multi-GB clone plus a long cross-compile,
-so running it in the PR gate remains a separate, deliberate CI-budget decision.
+**Still deferred, on artifact and product axes:** the pipeline-produced build/boot
+result above remains a `v7.1.7` record. The bounded v7.2 checks prove that both
+boards can exercise MPP under a kernel with the expected release string; they do
+not prove the exact manifest pins, Trixie rootfs, bundle, or product stream. A real
+authenticated `--variant edge` build and boot are still outstanding at the current
+pin. The PR gate also still runs `DRY_RUN=1` (plan only — no network, container or
+compiler). A real build is a multi-GB clone plus a long cross-compile, so running it
+in the PR gate remains a separate, deliberate CI-budget decision.
 
 Two consequences worth stating plainly:
 
 * The **defconfig fragment** (`manifests/kernel/rk3588-edge.fragment`) now
   demonstrably resolves and compiles (re-verified at `v7.2`: 169/169 declared
-  symbols survive, 0 forbidden violations), but it is still reviewed intent rather
-  than a validated result: no symbol in it has been proven necessary *or*
-  sufficient **on hardware**, at either base.
+  symbols survive, 0 forbidden violations). Direct v7.2 MPP encode on both boards
+  is supporting hardware evidence, but the fragment remains unqualified as the
+  exact current image because artifact provenance and the Trixie userspace were not
+  exercised.
 * **A board's DTB filename comes from whichever kernel tree built it, and the two
   trees need not agree — RESOLVED.** Since the board wins the merge
   last, the **board** now declares the per-variant name via `variant_overrides:`
@@ -469,81 +491,74 @@ stager driven against every shipped board manifest with that manifest's real
 up, plus a non-vacuity assertion that at least one shipped board really does have
 stem ≠ `board_id`.
 
-**Unblock condition:** flash and boot a `--variant edge` image on a physical
-RK3588 board. **D3 is not reopened by any of this** — the shipped kernel remains
-the Armbian vendor BSP; see `docs/kernel-currency-watch.md` for the two
-triggers that would revisit it.
+**Unblock condition:** produce, provenance-check, flash or safely install, and boot
+the exact pinned Trixie `--variant edge` artifact on both physical RK3588 boards;
+restore a working product-level `cerastream` start → 60 seconds → stop cycle;
+clear the Rock Bluetooth/MMC drill failures; and exercise HDMI video plus audio
+with a known-good source. **D3's kernel half is already answered** — the shipped
+kernel IS the mainline source-built track (`default_variant: edge`), and the
+Armbian vendor BSP track was retired outright. D3's bootloader-adapter half
+(`rauc_bootloader_adapter: custom`) is untouched.
 
 ---
 
-## 9b. `vendor-patched` variant — kernel `.deb` builds and validates, never booted from this pipeline
+## 9b. Vendor-BSP HDMI-RX audio variant — **CLOSED (item retired with the track)**
 
-**Status:** Kernel `.deb` builds end to end on `rock-5b-plus` and passes all four
-`validate_built_kernel_deb` axes; **no image has been assembled or booted from it**
-**Location:** `docs/kernel-build-from-source.md` §2b/§2c/§7, `manifests/families/rk3588.yaml` (`variants.vendor-patched`), `manifests/kernel/rk3588-vendor-patched.absent`
+**Status:** No longer deferred, because the thing it deferred no longer exists.
+**Closed:** on the mainline cutover, alongside the vendor kernel retirement.
 
-**What it is:** The rk3588 family's second opt-in variant, rebuilding the **vendor
-6.1.115 BSP the shipped image actually runs** from source with
-`CERALIVE/rk3588-vendor-kernel-patches` applied, to restore HDMI-RX audio capture.
-Produces `linux-image-6.1.115-ceralive-vendor-rk35xx` = `6.1.115-ceralive1`
-(deliberately NOT the stock `linux-image-vendor-rk35xx`, so a resolver can never
-substitute the unpatched kernel).
+This item tracked the rk3588 family's source-built Armbian vendor 6.1 BSP
+overlay — the one that rebuilt the shipped BSP with
+`CERALIVE/rk3588-vendor-kernel-patches` applied to restore HDMI-RX audio capture.
+It was deferred because the kernel `.deb` built and validated but no image had
+ever been assembled or booted from it.
 
-**What is proven:** the series applies cleanly with `git am` on the pinned commit;
-the fetched Armbian `.config` survives `olddefconfig` with 24 reviewed exceptions
-(`2729 of 2753`); the built `.deb` carries the board DTB, 463 `rockchip/*.dtb` and
-2,276 modules; the staged-package uniqueness check passes.
+That overlay, its allow-absent symbol list, its bootloader rows, its fixtures and
+its tests were all removed when the vendor kernel track was retired; every byte is
+preserved at the annotated tag `vendor-kernel-final`. There is therefore no build
+left to unblock. Two facts survive the closure and are recorded here so they are
+not lost with it:
 
-**What is NOT proven:**
-
-* **No image, no boot from this pipeline.** The local runs stopped at `[4/9]`
-  because this environment has no Armbian/apt credentials, so U-Boot, firmware and
-  the Mali userspace were never staged. A credentialed host should complete `[5/9]`
-  onward exactly as `edge` does — but that has not been demonstrated.
-* **`orange-pi-5-plus` has not been built with this variant.** Both RK3588 boards
-  run the same vendor kernel and the OPi 5+ needs no
-  `variant_overrides.vendor-patched` (its DTB name `rk3588-orangepi-5-plus.dtb` is
-  the same in the vendor tree as the production path already declares), so it is
-  expected to work — expected, not shown.
-* **The audio fix itself is separately board-proven, but not end to end.** A
-  hand-built kernel with this series eliminated the PL330 descriptor rejection on a
-  real Rock 5B+ (`.omo/evidence/device-platform-wave4/`
-  `vendor-kernel-hdmi-audio-bench-boot-proof-2.md`). Two limits carry over verbatim:
-  `MAXBURST_PER_FIFO` was never proven necessary in isolation, and end-to-end HDMI
-  audio stayed blocked by the **test source**, which reported `audio_present=0`.
-  This variant makes that fix reproducible from a real build; it does not re-prove
-  the audio path.
-
-**Unblock condition:** build on a credentialed host through `[9/9]`, then flash and
-boot on a physical RK3588 board with an HDMI source that genuinely transmits
-embedded audio, and confirm `audio_present` flips to 1 with capture substreams
-present in `/proc/asound/pcm`. **D3 is not reopened** — the shipped kernel remains
-the prebuilt Armbian vendor BSP.
+* **The audio fix itself remains board-proven on a hand-built kernel** (Tier 1),
+  including a CeraUI audio-meter validation through the production cerastream
+  sidecar. That evidence is about the PATCH SERIES, which still lives in its own
+  repository, not about this pipeline.
+* **HDMI-RX audio on the PRODUCTION mainline kernel is a different question with
+  its own answer.** It is carried by patches `0005` + `0006` of the mainline
+  series (`0006` supplies the DT sound card `0005` alone does not create) — see
+  the `AGENTS.md` KEY FACT on that pair. Nothing about this closure asserts that
+  HDMI-RX audio works on a shipped image; it asserts only that the retired
+  vendor-BSP route to it is gone.
 
 ---
 
-## 10. Vendor `cls_fw` extension — on-device load and tc behavior
+## 10. `fw` classifier — on-device tc behavior
 
-**Status:** Hardware-gated; static build/package contract is complete
-**Location:** `lib/build-kernel-extension.sh`,
-`manifests/kernel/vendor-cls-fw.env`,
-`docs/notes/sharing-kernel-capability.md` §2c
+**Status:** Hardware-gated; the static config contract is complete
+**Location:** `manifests/kernel/rk3588-edge.fragment` (`CONFIG_NET_CLS_FW=y`),
+`manifests/kernel/required-symbols.list`,
+`docs/notes/sharing-kernel-capability.md` §7
 
-**What is proven without hardware:** the exact 26.5.1 Armbian headers exist and
-carry `Module.symvers`; the pinned vendor `net/sched/cls_fw.c` passes MODPOST,
-builds as arm64 with exact `6.1.115-vendor-rk35xx` modversions vermagic, and is
-packaged at the standard updates path with `depmod` and `modules-load.d` wiring.
-The production image still installs the unchanged prebuilt vendor kernel.
+**SCOPE CHANGED 2026-08-28.** This item used to gate the out-of-tree
+`ceralive-cls-fw` module the image built for the prebuilt vendor kernel. The
+production kernel is now built from source with `CONFIG_NET_CLS_FW=y` in-tree, so
+that package and its whole `kernel_extension_packages` mechanism are retired
+(absence-guarded by `tests/packaging-hygiene.bats`). Two of the four steps below
+went with it: there is no module to `modprobe`, and no `modules-load.d` entry
+whose effect needs observing.
 
-**What remains:** on a board booted from a built image, require all of:
+**What is proven without hardware:** the symbol is declared in the production
+fragment, pinned in `required-symbols.list`, and `lib/verify-kernel-config.sh`
+asserts it survived `olddefconfig` inside the builder — the gate that already
+caught four capabilities silently dropped by an undeclared `menuconfig` parent.
 
-1. `modprobe cls_fw` exits 0 and `modinfo cls_fw` resolves the CeraLive updates path;
-2. `lsmod` shows `cls_fw` after boot (the modules-load drop-in took effect);
-3. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
-4. marked packets increment only the selected class counter.
+**What remains:** on a board booted from a built image, require both of:
+
+1. an isolated test qdisc accepts `tc filter add … handle <mark> fw classid …`;
+2. marked packets increment only the selected class counter.
 
 Capture the commands and counters under `test-results/uplink-sharing/`. This is
-the behavioral/HW gate; CI intentionally asserts package/config text only.
+the behavioral/HW gate; CI intentionally asserts config text only.
 
 ---
 
@@ -692,7 +707,7 @@ above, which remains the correct first line of defence.
 | `manifests/boards/orange-pi-5-plus.yaml` | OPi 5+ board manifest with FIXME ID_PATHs (item 1) |
 | `lib/orchestrate.sh` | x86 disk assembly — RESOLVED Task 12 (item 3); efi/grub → `assemble-disk-x86.sh` |
 | `docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and items 9 / 9b's gaps |
-| `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing + the out-of-tree `cls_fw` remediation (item 10) |
+| `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing, the retired out-of-tree `cls_fw` remediation, and §7 on the production-track flip (item 10) |
 | `docs/notes/sharing-qdisc-matrix.md` | qdisc/netfilter availability per kernel track, including the runtime cake→HTB fallback (item 11) |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |

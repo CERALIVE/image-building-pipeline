@@ -1,17 +1,25 @@
 #!/usr/bin/env bats
 #
-# packaging-hygiene.bats — absence guards for three retired build artifacts.
+# packaging-hygiene.bats — absence guards for retired build artifacts.
 #
-# An audit (device-quality-wave2 Todo 32b) found these are dead and removed them.
-# These guards fail if any is ever reintroduced:
+# An audit (device-quality-wave2 Todo 32b) found the first three are dead and
+# removed them. These guards fail if any is ever reintroduced:
 #   * structure.sh    : the 5 unread /etc/ceralive/conf.d/*.conf default seeds
 #                       (srtla/streaming/network/hardware/modems) — no consumer.
 #   * udev.sh         : the dangling SYSTEMD_WANTS=ceralive-optimize@%k want —
 #                       points at a template unit the image never ships.
 #   * x86-encode.sh   : retired-ceracoder references (cerastream is the sole engine).
 #
-# Scope note: this suite guards ONLY the three files the Todo-32b dispatch owns.
-# The parallel conf.d generation in mkosi.postinst.chroot is a separate concern
+# The fourth is the whole KERNEL-EXTENSION mechanism. It existed for exactly one
+# package — `ceralive-cls-fw`, an ABI-matched out-of-tree cls_fw.ko built because
+# the prebuilt vendor kernel omits CONFIG_NET_CLS_FW. The production kernel is now
+# built from source with `CONFIG_NET_CLS_FW=y` in-tree, so the package has no
+# reason to exist and the plumbing that carried it has no consumer. Reintroducing
+# either half would put an out-of-tree module tied to one kernel release back on
+# an image whose kernel release it does not match.
+#
+# Scope note: this suite guards ONLY the files the dispatches above own. The
+# parallel conf.d generation in mkosi.postinst.chroot is a separate concern
 # tracked elsewhere and is deliberately NOT asserted here.
 #
 # Run:  run-tests   (CI entrypoint)   or   bats tests/packaging-hygiene.bats
@@ -22,6 +30,55 @@ setup() {
   STRUCTURE_SH="$PIPELINE_DIR/mkosi/customize/structure.sh"
   UDEV_SH="$PIPELINE_DIR/mkosi/customize/udev.sh"
   X86_ENCODE_SH="$PIPELINE_DIR/mkosi/platform/x86/x86-encode.sh"
+  FAMILY_SCHEMA="$PIPELINE_DIR/manifests/schema/family.schema.json"
+  RK3588_FAMILY="$PIPELINE_DIR/manifests/families/rk3588.yaml"
+}
+
+# --- retired kernel-extension mechanism (ceralive-cls-fw) --------------------
+
+@test "cls-fw: every file of the retired kernel-extension mechanism is gone" {
+  local path
+  for path in manifests/kernel/vendor-cls-fw.env \
+              manifests/packages/rk3588-vendor-kernel-extensions.list \
+              lib/build-kernel-extension.sh \
+              lib/kernel/build-cls-fw-container.sh \
+              ci/Dockerfile.kernel-module \
+              tests/vendor-cls-fw-contract.bats; do
+    [ ! -e "$PIPELINE_DIR/$path" ]
+  done
+}
+
+@test "cls-fw: no live code path still carries KERNEL_EXTENSION_PACKAGES" {
+  # The env name was on the orchestrator's env_names <-> mkosi PassEnvironment=
+  # lockstep, so a survivor on either side is a half-removed mechanism rather
+  # than a stale string.
+  local path
+  for path in lib/orchestrate.sh lib/stages/kernel-build.sh lib/stages/fetch.sh \
+              lib/stages/partition.sh mkosi/mkosi.conf \
+              mkosi/mkosi.images/platform/mkosi.postinst; do
+    run grep -Fq 'KERNEL_EXTENSION_PACKAGES' "$PIPELINE_DIR/$path"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "cls-fw: the family schema no longer admits kernel_extension_packages" {
+  run grep -Fq 'kernel_extension_packages' "$FAMILY_SCHEMA"
+  [ "$status" -ne 0 ]
+  run grep -Fq 'kernel_extension_packages' "$RK3588_FAMILY"
+  [ "$status" -ne 0 ]
+  # Non-comment lines only, the same rule this suite already applies to udev.sh:
+  # the manifest is allowed — and expected — to say in prose why the package is
+  # gone; a live YAML row naming it is what must never come back.
+  run grep -Eq '^[[:space:]]*[^#[:space:]].*ceralive-cls-fw' "$RK3588_FAMILY"
+  [ "$status" -ne 0 ]
+}
+
+@test "GUARD BITES: a restored kernel-extension install site is detected" {
+  local scratch="$BATS_TEST_TMPDIR/platform.restored.postinst"
+  cp "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" "$scratch"
+  printf 'read -r -a kernel_extensions <<<"${KERNEL_EXTENSION_PACKAGES:-}"\n' >> "$scratch"
+  run grep -Fq 'KERNEL_EXTENSION_PACKAGES' "$scratch"
+  [ "$status" -eq 0 ]
 }
 
 @test "structure.sh: exists and is the file under guard" {

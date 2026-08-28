@@ -767,6 +767,13 @@ Scope: what happens — automatically, on-device — when a published OTA bundle
 turns out to be broken, and what an operator does to stop it from spreading
 further or to pull it from circulation.
 
+The one-time Bookworm → Trixie/mainline transition has an additional compatibility
+profile and an exact two-arm bench drill (deliberate failure → automatic Bookworm
+rollback, then healthy apply + `/data` JSON survival). Run
+[`ota-bookworm-trixie-transition.md`](ota-bookworm-trixie-transition.md) before
+using the generic fleet-response procedure below. Todo 12 establishes the
+offline contract; todo 16 executes it on hardware.
+
 ### The A/B fallback contract (automatic, on-device, no operator action needed)
 
 RAUC's A/B slot model provides bounded automatic rollback for a bad update when

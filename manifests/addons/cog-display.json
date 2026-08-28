@@ -1,40 +1,40 @@
 {
   "id": "cog-display",
   "name": "Cog Display Engine",
-  "version": "0.16.1",
+  "version": "0.18.4",
   "category": "display",
   "icon": "monitor",
   "payload": { "type": "sysext" },
   "sysextLevel": "1",
-  "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "versionId": "13",
+  "compatibleOsVersions": ["13"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-{board}-{os_version}.raw",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-{board}-{os_version}.raw.sig",
-    "sizeDownload": 57671680,
-    "sizeInstalled": 125829120
+    "sizeDownload": 111521792,
+    "sizeInstalled": 353172379
   },
   "boardVariants": {
     "rock-5b-plus": {
       "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-rock-5b-plus-{os_version}.raw",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-rock-5b-plus-{os_version}.raw.sig",
-      "sizeDownload": 57671680,
-      "sizeInstalled": 125829120
+      "sizeDownload": 111521792,
+      "sizeInstalled": 353172379
     },
     "orange-pi-5-plus": {
       "urlTemplate": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-orange-pi-5-plus-{os_version}.raw",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "gpgSigRef": "https://apt.ceralive.tv/addons/cog-display/{os_version}/cog-display-orange-pi-5-plus-{os_version}.raw.sig",
-      "sizeDownload": 57671680,
-      "sizeInstalled": 125829120
+      "sizeDownload": 111521792,
+      "sizeInstalled": 353172379
     }
   },
   "conditions": {
     "requires_display": true,
     "requires_gpu_userspace": true,
-    "min_os_version": "12",
+    "min_os_version": "13",
     "boardAllowlist": ["rock-5b-plus", "orange-pi-5-plus"]
   },
   "provides": [

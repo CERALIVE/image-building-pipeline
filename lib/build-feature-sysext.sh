@@ -14,7 +14,8 @@
 #   2. Reuses lib/app-layer/sysext.sh::build_app_layer to squash the /usr+/opt
 #      subtrees into a `.raw`, with the extension-release matching file the kernel
 #      keys merging on. G1 is pinned here: SYSEXT_LEVEL=1 (the version-decoupled
-#      ABI axis) and VERSION_ID=<os-version> (12 for the bookworm stack). The
+#      ABI axis) and VERSION_ID=<os-version>, which defaults to OS_VERSION_ID in
+#      manifests/target-release.env — never a literal. The
 #      produced extension-release is read BACK out of the squashfs and asserted to
 #      carry both — the guard has teeth, it does not merely trust the defaults.
 #   3. Names the artifact per-board/per-OS: <feature>-<board>-<os_version>.raw.
@@ -82,7 +83,8 @@ and emits, into <out>:
 Args:
   --feature <name>      add-on/feature id (descriptor stem), e.g. debug-toolset.
   --board <board>       board id the artifact is built for, e.g. rock-5b-plus.
-  --os-version <ver>    OS VERSION_ID the artifact targets. Default: 12 (bookworm).
+  --os-version <ver>    OS VERSION_ID the artifact targets. Default: OS_VERSION_ID
+                        from manifests/target-release.env (currently ${OS_VERSION_ID}).
                         Baked into the extension-release as VERSION_ID (G1).
   --deb-staging <dir>   extracted .deb staging tree (a filesystem root). ONLY the
                         /usr and /opt subtrees cross the sysext boundary (G2); a
@@ -213,7 +215,7 @@ assert_g1() {
 # build-feature-sysext — the task entry point.
 # ---------------------------------------------------------------------------
 build-feature-sysext() {
-  local feature="" board="" os_version="12" deb_staging="" out_dir="" gnupg_home=""
+  local feature="" board="" os_version="${OS_VERSION_ID}" deb_staging="" out_dir="" gnupg_home=""
   local descriptor=""
 
   while [[ $# -gt 0 ]]; do
@@ -261,7 +263,8 @@ build-feature-sysext() {
   assert_payload_boundary "${deb_staging}"
 
   # G1: pin the merge identity for build_app_layer. SYSEXT_LEVEL=1 is the stable
-  # ABI axis; VERSION_ID tracks the requested OS line (12 for bookworm).
+  # ABI axis; VERSION_ID tracks the requested OS line (--os-version, defaulted
+  # from manifests/target-release.env).
   export SYSEXT_LEVEL=1
   export SYSEXT_OS_VERSION_ID="${os_version}"
 

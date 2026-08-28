@@ -13,14 +13,26 @@ criterion is explicitly that this matrix **names the truth including fallbacks**
 not that any particular row is green.
 
 - **Date:** 2026-08-24 (UTC)
-- **Tracks covered:** (i) the SHIPPED vendor 6.1 BSP, (ii) the opt-in
-  mainline/edge 7.1 fragment
+- **Tracks covered:** (i) the vendor 6.1 BSP — **HISTORICAL, that track is
+  RETIRED** (see the banner on §1), (ii) the mainline/edge fragment, which is now
+  the production track
 - **Raw transcript:** `test-results/uplink-sharing/todo12-qdisc-matrix.log`
   (gitignored)
 
 ---
 
-## 1. Track (i) — the SHIPPED vendor 6.1 kernel
+## 1. Track (i) — the vendor 6.1 kernel  **[HISTORICAL — RETIRED TRACK]**
+
+> **This section is a historical measurement and is retained for that reason
+> only.** The prebuilt Armbian vendor 6.1 BSP is no longer a kernel this pipeline
+> can build: the `vendor` / `vendor-patched` overlays, the
+> `linux-image-vendor-rk35xx` / `linux-dtb-vendor-rk35xx` pins and the seeded
+> `manifests/bsp-baseline.json` digest were all removed on the mainline cutover
+> and are preserved at the annotated tag `vendor-kernel-final`. Nothing below is
+> a statement about any image this pipeline produces today — read §2 for that.
+> It is kept because it is the only measured record of what that kernel carried,
+> which is what makes the "cake is present, and the runtime fallback still
+> matters" argument in §3 checkable rather than remembered.
 
 Measured by package inspection, using the same provenance chain
 `sharing-kernel-capability.md` §1 established — nothing was resolved by hand or
@@ -30,13 +42,16 @@ by "latest":
 |---|---|---|
 | apt base / suite | `https://apt.armbian.com` / `bookworm` | `lib/fetch-debs.sh` (`ARMBIAN_APT_URL`, `ARMBIAN_SUITE`) |
 | component / arch | `main` / `arm64` | `manifests/families/rk3588.yaml` (`arch: arm64`) |
-| package | `linux-image-vendor-rk35xx` | `manifests/families/rk3588.yaml` (`kernel_packages`) |
-| exact version | `26.5.1` | `manifests/armbian-bsp-deb-versions.txt:1` |
+| package | `linux-image-vendor-rk35xx` | `manifests/families/rk3588.yaml` (`kernel_packages`) — **both the field entry and the pin are now deleted; recover at tag `vendor-kernel-final`** |
+| exact version | `26.5.1` | `manifests/armbian-bsp-deb-versions.txt` (entry deleted) |
 | kernel release | `6.1.115-vendor-rk35xx` | package payload |
 
 Downloaded SHA-256 `7b70fb2d1148021275a648fb0a4c0177236c3f54bef69a02a771d6ae7d9055ed`
-— byte-for-byte the value committed in `manifests/bsp-baseline.json`, so the
-artifact read below is provably the bytes the production build stages.
+— at the time of measurement, byte-for-byte the value then committed in
+`manifests/bsp-baseline.json`, so the artifact read below was provably the bytes
+that build staged. That baseline is now UNSEEDED (no family fetches a prebuilt
+kernel), so the digest is a historical provenance record rather than a live
+cross-check.
 
 Every row cites the exact file **inside the extracted package**
 (`/boot/config-6.1.115-vendor-rk35xx`, `…/modules.builtin`, `…/modules.dep`).
@@ -72,12 +87,16 @@ for three reasons that are all still true with cake present:
 | Symbol | `.config` | Ships as | Row |
 |---|---|---|---|
 | `NET_CLS` | `=y` (line 1620) | `vmlinux` | **builtin** (promptless; selected by any classifier) |
-| `NET_CLS_FW` | `# … is not set` (line 1623) | `updates/ceralive/cls_fw.ko`, from `ceralive-cls-fw` | **module (OUT-OF-TREE)** |
+| `NET_CLS_FW` | `# … is not set` (line 1623) | nothing, as of 2026-08-28 (see below) | **ABSENT on this track** |
 
 `cls_fw.ko` is absent from the base package on four independent reads (no `.ko`,
-no `modules.dep`, no `modules.builtin`, no `modules.alias` entry). The image
-supplies it as a separately built, ABI-matched package —
-`sharing-kernel-capability.md` §2c is the record of record for that work, and
+no `modules.dep`, no `modules.builtin`, no `modules.alias` entry). The image used
+to supply it as a separately built, ABI-matched `ceralive-cls-fw` package; that
+package is **retired**, because the production kernel is now the source-built
+mainline track where `CONFIG_NET_CLS_FW=y` is in-tree
+(`sharing-kernel-capability.md` §7). The honest consequence for THIS track, which
+is now the opt-in `--variant vendor` overlay: it has no `fw` classifier at all.
+`sharing-kernel-capability.md` §2c remains the record of the retired work, and
 **this note does not restate or re-derive it**.
 
 ### 1c. Netfilter objects the steering layer needs (todo 9)
@@ -179,16 +198,19 @@ RUNTIME, long after modular autoload is available. It is deliberately **not** a
 module posture would not support (`sharing-kernel-capability.md` §3, second
 consequence).
 
-`ceralive-cls-fw` is the one exception on the vendor track: it ships a
-`modules-load.d` entry so `cls_fw` is requested at boot rather than left to an
-autoload the `fw` classifier would have to trigger first.
+`ceralive-cls-fw` used to be the one exception on the vendor track — it shipped a
+`modules-load.d` entry so `cls_fw` was requested at boot rather than left to an
+autoload. It is retired, and on the production (mainline) track the question does
+not arise: `CONFIG_NET_CLS_FW=y` is built in, so there is nothing to autoload and
+nothing to request.
 
 ---
 
 ## 4. Scope boundary — what this note is NOT
 
-- It does **not** re-derive, restate or supersede the `ceralive-cls-fw`
-  out-of-tree module work. That is `sharing-kernel-capability.md` §2c.
+- It does **not** re-derive, restate or supersede the retired `ceralive-cls-fw`
+  out-of-tree module work. That is `sharing-kernel-capability.md` §2c (the work)
+  and §7 (its retirement).
 - It makes **no runtime claim**. Every row is package/text inspection. Actual
   `modprobe`, actual `tc qdisc add … cake`, and actual `tc filter … fw classid`
   classification remain the labelled hardware gate in `docs/DEFERRED.md`.

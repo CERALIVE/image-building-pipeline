@@ -121,27 +121,48 @@ The OSK is toggled by sending `SIGUSR1` (show) / `SIGUSR2` (hide) to the wvkbd p
 ## 3. Package Set (Task 27 — hardware-blocked)
 
 > **Status: planned, requires hardware validation before implementation.**
-> The package list below is the authoritative spec. wvkbd is NOT in Debian bookworm (it entered Debian at trixie). It requires build-from-source or a vetted pre-built .deb.
+> The package list below is the authoritative spec. The target suite is now **trixie**, which changes two rows outright — see the notes under the table.
 
 | Package | Source | Notes |
 |---|---|---|
-| `cage` | Debian bookworm | Wayland compositor for single-app kiosk |
-| `chromium` | Debian bookworm | Must be >= 111 for OKLCH + TailwindCSS v4 render |
-| `wvkbd` | Build from source | NOT in bookworm; entered Debian at trixie |
-| `libmali-valhall-g610-*` | Rockchip vendor | GPU userspace for RK3588 (Mali-G610); required for Chromium ozone-wayland EGL/GBM |
-| `libwayland-client0` | Debian bookworm | Wayland client library (cage dep) |
-| `libwayland-server0` | Debian bookworm | Wayland server library (cage dep) |
+| `cage` | Debian trixie | Wayland compositor for single-app kiosk (`0.2.0-2`) |
+| `chromium` | Debian trixie | Must be >= 111 for OKLCH + TailwindCSS v4 render |
+| `wvkbd` | Debian trixie | **No longer build-from-source** — wvkbd entered Debian at trixie, which is the suite the image now targets |
+| GPU userspace | see "GPU stack" below | **vendor track:** `libmali-valhall-g610-*`. **mainline track:** Mesa (`mesa-libgallium` + `libgl1-mesa-dri`), paired with the in-tree `panthor` kernel driver |
+| `libwayland-client0` | Debian trixie | Wayland client library (cage dep) |
+| `libwayland-server0` | Debian trixie | Wayland server library (cage dep) |
 
-**wvkbd build notes:**
-- Source: https://github.com/jjsullivan5196/wvkbd
-- Build deps: `libwayland-dev`, `libxkbcommon-dev`, `scdoc` (for man page)
-- The build produces `wvkbd-mobintl` (mobile international layout) and `wvkbd-full` (full keyboard)
-- The kiosk stack uses `wvkbd-mobintl` — appropriate for a touch streaming appliance
-- Pin the wvkbd commit SHA in `versions.yaml` once a vetted build is confirmed on hardware
+**wvkbd:** the build-from-source note this table used to carry is obsolete — it
+existed only because wvkbd was absent from bookworm. On trixie it is an ordinary
+archive package, so there is no commit SHA to pin and no build step. Re-confirm
+the binary name the kiosk unit invokes (`wvkbd-mobintl`, the mobile
+international layout, is the right one for a touch appliance) when the units are
+implemented.
 
-**Chromium version constraint:** bookworm ships chromium ~v120. This is >= 111, so OKLCH color space and TailwindCSS v4 render correctly. Do NOT downgrade below 111.
+**Chromium version constraint:** trixie ships a chromium well past v120, so the
+`>= 111` floor for OKLCH and TailwindCSS v4 is comfortably met. Do NOT downgrade
+below 111.
 
-**GPU contingency:** if `libmali-valhall-g610` fails to provide EGL/GBM for Chromium ozone-wayland (i.e. Chromium falls back to software rendering or refuses to start), the contingency is mainline kernel + Mesa panthor/panfrost. This collides with D3 (`armbian_branch: vendor` for HDMI hdmirx + Rockchip MPP). That collision requires a re-plan and escalation — do not attempt silently.
+**GPU stack — this is no longer a "contingency", it is the mainline answer.**
+The old text here said that if `libmali-valhall-g610` failed to provide EGL/GBM
+the fallback would be mainline + Mesa panthor/panfrost, and that doing so would
+collide with D3. Both halves have moved:
+
+- The mainline `edge` variant now exists as a first-class opt-in track and drops
+  `libmali` from its `firmware_packages` — the blob is ABI-bound to Rockchip's
+  out-of-tree module and its `/dev/mali0`, which a mainline kernel never creates
+  (armbian/build#10320), and its `00-aarch64-mali.conf` would otherwise capture
+  `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver that
+  cannot work. The mainline pairing is **`panthor` (kernel, `CONFIG_DRM_PANTHOR=m`,
+  pinned in `manifests/kernel/required-symbols.list`) + Mesa (userspace,
+  `dri/panthor_dri.so`)**.
+- **D3 is NOT reopened by any of this.** The shipped production image still
+  installs the prebuilt Armbian vendor 6.1 BSP and still uses `libmali`. The two
+  tracks each keep their own coherent GPU stack; nothing switches by default.
+
+Full detail, including why the Mesa half rides inside the Cog add-on's sysext
+rather than the base image, is in
+[`cog-display-addon.md`](cog-display-addon.md) §5.
 
 **RK3588 mainline-patch contingency bookmark:** D3 is NOT changing — the Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265 encoding, so there is no reason to pivot to mainline today. However, if a mainline pivot is ever forced (e.g. vendor BSP drops support or a critical security fix lands mainline-only), the reference path to restore hdmirx + H.265 HW-encode is:
 
@@ -240,7 +261,7 @@ Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 ga
 
 | Document | Scope |
 |---|---|
-| [`cog-display-addon.md`](cog-display-addon.md) | W4: Cog + WPEWebKit feature-sysext packaging path + libmali (Platform-layer) exclusion strategy — a lighter alternative display engine to cage + Chromium |
+| [`cog-display-addon.md`](cog-display-addon.md) | W4: Cog + WPEWebKit feature-sysext packaging path (trixie closure) + the Panthor/Mesa GPU strategy that replaced the libmali one — a lighter alternative display engine to cage + Chromium |
 | CeraUI `docs/ON_DEVICE_DISPLAY.md` | Cross-repo architecture, DC-1..DC-4, Phase-3 deferral register |
 | CeraUI `docs/KIOSK_STATE_MACHINE.md` | DC-2: 5-state machine spec |
 | CeraUI `docs/KIOSK_TOKEN_CONTRACT.md` | DC-3: loopback token spec |

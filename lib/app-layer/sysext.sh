@@ -13,21 +13,28 @@
 #   /usr/lib/extension-release.d/extension-release.<NAME>
 # containing `ID=debian` plus a VERSION_ID that matches the host os-release, or
 # the kernel refuses to merge the extension ("No suitable extensions found").
-# The device OS is Debian bookworm (VERSION_ID=12) across the whole stack.
+# That VERSION_ID is therefore not a local constant — it is the same fact
+# manifests/target-release.env pins as OS_VERSION_ID, and a hardcoded copy here
+# would make every add-on silently unmergeable the day the target suite moves.
 #
 # SYSEXT_LEVEL is the SECOND, version-decoupled matching axis. systemd's
 # extension_release_validate() keys on ID plus EITHER SYSEXT_LEVEL (when the
 # HOST os-release also carries SYSEXT_LEVEL) OR VERSION_ID otherwise. Writing
-# BOTH means: a stock bookworm host (no SYSEXT_LEVEL) matches on VERSION_ID=12,
-# while a host that opts into a stable sysext ABI (SYSEXT_LEVEL=1) keeps merging
-# our extensions across minor VERSION_ID drift without a rebuild. Belt and
+# BOTH means: a stock Debian host (no SYSEXT_LEVEL) matches on VERSION_ID, while
+# a host that opts into a stable sysext ABI (SYSEXT_LEVEL=1) keeps merging our
+# extensions across minor VERSION_ID drift without a rebuild. Belt and
 # suspenders — task-22 requirement.
 #
 # shellcheck shell=bash
 
-# Host os-release identity the device matches against. Debian bookworm.
+SYSEXT_LIB_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../shared/target-release-lib.sh
+source "${SYSEXT_LIB_HERE}/../shared/target-release-lib.sh"
+target_release_load
+
+# Host os-release identity the device matches against.
 SYSEXT_OS_ID="${SYSEXT_OS_ID:-debian}"
-SYSEXT_OS_VERSION_ID="${SYSEXT_OS_VERSION_ID:-12}"
+SYSEXT_OS_VERSION_ID="${SYSEXT_OS_VERSION_ID:-${OS_VERSION_ID}}"
 # Stable sysext ABI level — decouples merge eligibility from exact VERSION_ID.
 SYSEXT_LEVEL="${SYSEXT_LEVEL:-1}"
 

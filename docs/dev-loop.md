@@ -476,7 +476,7 @@ There is no dev-only artifact format. What you test with `dev-push` is exactly w
 
 **`extension-release mismatch` / sysext not merging**
 
-The `.raw` carries `ID=debian VERSION_ID=12`. If the device is running a different OS version, the merge is rejected. Check:
+The `.raw` carries `ID=debian` plus the `OS_VERSION_ID` from [`manifests/target-release.env`](../manifests/target-release.env) (`13`). If the device is running a different OS version, the merge is rejected. Check:
 ```bash
 ssh root@<board> 'cat /etc/os-release | grep -E "^(ID|VERSION_ID)"'
 ```

@@ -84,13 +84,18 @@ make_rootfs_tree() {
   rm -rf "$tree/.initrd-fixture"
 }
 
-# Rework a rootfs tree's /boot into the REAL Armbian kernel-package layout that
-# broke check_rootfs_populated: /boot/Image and /boot/dtb become symlinks, and
-# the initrd exists ONLY under its versioned name (no bare /boot/initrd.img).
-# The plain-file make_rootfs_tree never exercised this, so debugfs's
-# terminal-symlink dump bug stayed invisible to the suite.
+# Rework a rootfs tree's /boot into the SYMLINK kernel-package layout that broke
+# check_rootfs_populated: /boot/Image and /boot/dtb become symlinks, and the
+# initrd exists ONLY under its versioned name (no bare /boot/initrd.img). The
+# plain-file make_rootfs_tree never exercised this, so debugfs's terminal-symlink
+# dump bug stayed invisible to the suite.
+#
+# The shape came from an Armbian prebuilt kernel package, whose track is now
+# retired; the release string is therefore a neutral synthetic one. The FIXTURE
+# is kept because preflash-verify.sh is layout-agnostic on purpose and this is
+# the only case that drives its symlink arm.
 make_armbian_symlink_rootfs_tree() {
-  local tree="$1" ver=6.1.115-vendor-rk35xx
+  local tree="$1" ver=6.9.0-prebuilt-rk3588
   make_rootfs_tree "$tree"
   mv "$tree/boot/Image" "$tree/boot/vmlinuz-$ver"
   ln -s "vmlinuz-$ver" "$tree/boot/Image"

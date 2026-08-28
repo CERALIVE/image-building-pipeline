@@ -1,0 +1,35 @@
+[Unit]
+Description=CeraLive CPU governor pin — sustained-encode scaling policy
+Documentation=file:///usr/local/sbin/ceralive-cpu-governor
+# Replaces a mechanism Debian deleted. Until the trixie migration the governor
+# pin came from `cpufrequtils`' own sysv init script reading GOVERNOR= out of
+# /etc/default/cpufrequtils. Debian removed that package; its successor
+# `linux-cpupower` ships EXACTLY ONE file, /usr/bin/cpupower — no unit, no init
+# script, no /etc/default hook — so without this unit the pin would silently
+# stop being applied on every board while the build stayed green.
+# Full root cause: /usr/local/sbin/ceralive-cpu-governor header.
+#
+# cpufreq policies are registered by the CPU driver during early boot, and on
+# some SoCs that probe is asynchronous, so After= the udev coldplug is the
+# earliest sensible point rather than a guarantee. The script owns that by
+# treating "no policies" as a clean no-op instead of an error.
+After=systemd-udev-trigger.service
+# Deliberately NOT ordered Before= cerastream.service. The governor is a
+# throughput optimisation, not a correctness precondition — the encoder runs
+# correctly under any governor — so putting a bounded sysfs walk on the media
+# path's critical chain would buy boot latency for no functional guarantee.
+# This is the same reasoning ceralive-fan-curve records for not being Before=
+# anything.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-cpu-governor
+TimeoutStartSec=30
+# The one write is a sysfs governor change via cpupower; nothing else is
+# touched. ProtectKernelTunables= is deliberately left at its default (no):
+# enabling it remounts /sys read-only and would break the only thing this unit
+# does — the same trap ceralive-fan-kickstart records.
+
+[Install]
+WantedBy=multi-user.target

@@ -5,17 +5,65 @@ that "which repo feeds which variant, and where do I read more" has one place
 to start. Every substantive claim lives in the documents this page links to —
 if you find a fact repeated here, that is a bug in this page, not a feature.
 
+## Which track is PRODUCTION
+
+`rk3588` declares `default_variant: edge`, so a variant-less `./build <board>`
+resolves the `edge` overlay — the mainline 7.2 kernel built from source — and
+does so byte-identically to `./build <board> --variant edge`, the board's own
+`variant_overrides.edge` included.
+
+**The Armbian vendor 6.1 BSP track is RETIRED.** Both overlays that carried it —
+the prebuilt `vendor` one and the source-built `vendor-patched` one — were
+removed on the mainline cutover, along with their package pins, their bootloader
+rows, their fixtures and their tests. Everything is preserved at the annotated
+tag `vendor-kernel-final`; recover any of it with
+`git show vendor-kernel-final:<path>`.
+
+```
+./build rock-5b-plus                       # mainline 7.2, built from source
+./build rock-5b-plus --variant edge        # the same thing, named explicitly
+./build rock-5b-plus --variant edge-test   # its never-released debug sibling
+```
+
+`default_variant` is a POINTER, not a copy of the pins, and that is still true
+after the retirement. Copying `edge`'s block to the family top level would force
+`edge-test` (which `extends: edge`) to restate its parent's pins — the exact
+byte-for-byte drift `extends` exists to prevent. (A second reason applied while
+the source-built vendor overlay existed: its config-FILE mode would have
+deep-merged onto the family's defconfig mode and produced the half-specified
+config the schema's `oneOf` forbids. That reason died with the overlay; the
+`edge-test` one is sufficient on its own.)
+
 ## Which patch repo feeds which track
 
 | Variant | Track | Patch repository | Retire-on-merge status |
 |---|---|---|---|
-| `edge` | mainline (currently pinned to `v7.2`; Armbian's own `edge` mapping still names 7.2-rc7) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
-| `vendor-patched` | Armbian `vendor` (6.1 BSP — the kernel the shipped image actually runs) | [`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches) | tracked in that repo's own docs (open upstream PR #487; retires when it merges) |
+| `edge` (**the production default**) | mainline (currently pinned to `v7.2`; Armbian's own `edge` mapping still names 7.2-rc7) | [`CERALIVE/rk3588-kernel-patches`](https://github.com/CERALIVE/rk3588-kernel-patches) | see that repo's [`docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md) |
+| `edge-test` | `extends: edge` — the same source, plus KASAN/lockdep and the fault-injection symbols | (inherited) | never released; `ci/check-release-variant.sh` refuses it by property |
 
-Both variants are declared under `rk3588`'s `variants:` map in
-[`manifests/families/rk3588.yaml`](../manifests/families/rk3588.yaml). Neither
-repo's patches apply to the other's tree — they target different kernel majors
-and different upstream trees.
+Both are declared under `rk3588`'s `variants:` map in
+[`manifests/families/rk3588.yaml`](../manifests/families/rk3588.yaml).
+
+The two Armbian vendor 6.1 BSP rows that used to sit under these — the prebuilt
+one and the source-built one fed by
+[`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches)
+— are RETIRED. That sibling patch repository still exists and still tracks the
+open `armbian/linux-rockchip` PR #487 its series was written against, but nothing
+in this pipeline consumes it any more.
+
+## What the flip took with it
+
+`NET_CLS_FW` — the `tc filter … fw classid` classifier the uplink shaper needs to
+map an nftables skb mark onto its client band — is in-tree and built-in on the
+mainline track (`CONFIG_NET_CLS_FW=y` in
+[`manifests/kernel/rk3588-edge.fragment`](../manifests/kernel/rk3588-edge.fragment),
+pinned in `required-symbols.list`). The prebuilt vendor kernel never built it, so
+the image used to carry `ceralive-cls-fw`, a separately built vermagic-pinned
+out-of-tree `cls_fw.ko`. That package, its pin file, its builder image and the
+whole `kernel_extension_packages` mechanism are **retired**; an absence guard in
+`tests/packaging-hygiene.bats` fails the build if any half comes back. With the
+vendor track itself now retired too, there is no longer any kernel this pipeline
+builds that lacks `NET_CLS_FW`.
 
 ## The pin chain
 
@@ -45,26 +93,31 @@ moment an equivalent lands upstream — that bookkeeping lives entirely in the
 patch repo, not here:
 
 - mainline (`edge`): [`rk3588-kernel-patches/docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md)
-- vendor (`vendor-patched`): see the vendor repo's own docs for the open
-  `armbian/linux-rockchip` PR #487 this series tracks.
 
-This page does not restate either ledger. Read the linked file for current
+The vendor-BSP ledger is no longer this pipeline's concern — that track is
+retired and nothing here consumes its series.
+
+This page does not restate the ledger. Read the linked file for current
 status; this index only says where to look.
 
 ## Where the rest of the story lives
 
 - **Should `edge` ever ship in production?** — [`kernel-track-decision.md`](kernel-track-decision.md)
-  is the go/no-go decision record (currently: hold, D3 unchanged).
+  is the go/no-go decision record. It has been answered YES for the kernel half
+  of decision D3: `default_variant: edge` is that answer expressed in the
+  manifest. D3's bootloader-adapter half (`rauc_bootloader_adapter: custom`) is
+  untouched.
 - **How does a variant actually build?** — [`kernel-build-from-source.md`](kernel-build-from-source.md)
   is the full mechanism: the `variants:` model, source-checkout shapes, config
   modes, and DTB install mapping.
-- **Why is production still vendor 6.1, and when would that change?** —
-  [`kernel-currency-watch.md`](kernel-currency-watch.md) is the locked decision
-  plus the two precise revisit triggers.
+- **How the kernel-currency decision was reached, and what would revisit it** —
+  [`kernel-currency-watch.md`](kernel-currency-watch.md). Its question ("should
+  production leave vendor 6.1?") has been answered and executed; the page is the
+  evidence record plus the revisit triggers.
 
 ## Discovering declared variants
 
 `./build --help` lists the variants each family currently declares (read
 live from that family's manifest, so the help text can never drift from what
 `--variant` actually accepts). At the time of writing, only `rk3588` declares
-variants (`edge`, `vendor-patched`); `x86-minipc` has no kernel-track axis.
+variants (`edge`, `edge-test`); `x86-minipc` has no kernel-track axis.

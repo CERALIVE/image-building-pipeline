@@ -91,12 +91,42 @@ tcpdump                  # packet capture for the bonded-uplink path; the SRTLA
 # the mkosi runtime postinst. They are the add-on's payload and are re-listed here
 # so the baked debug image carries the identical toolbox.
 alsa-utils               # alsamixer/aplay/arecord — ALSA-level audio diagnosis.
-pulseaudio               # ships /usr/bin/pulseaudio, in the add-on's `provides`.
-                         # INERT unless invoked: bookworm ships only USER units
-                         # (/usr/lib/systemd/user/pulseaudio.{service,socket}) and
-                         # this appliance has no user session, so it never
-                         # autostarts and never contends with `alsasrc` for the
-                         # capture device. Do NOT enable it system-wide.
+# pulseaudio             # REMOVED (todo 28), and it is a HARD REMOVAL, not a
+                         # preference: `pipewire-alsa` — now a mandatory `shared.list`
+                         # entry — declares `Conflicts: pulseaudio`, so the two cannot
+                         # coexist in one dpkg transaction. The runtime layer installs
+                         # `shared.list` + this delta as ONE `apt-get install`, so a
+                         # DEBUG build would have failed outright. Verified against the
+                         # real trixie arm64 index rather than assumed:
+                         #   apt-get install -s pipewire-alsa pulseaudio
+                         #   -> E: Unable to correct problems, you have held broken packages.
+                         #      "Reached two conflicting decisions:
+                         #       1. pulseaudio:arm64=17.0+dfsg1-2+b1 is selected for install
+                         #       2. ... pipewire-alsa:arm64 Conflicts pulseaudio"
+                         #
+                         # It is also the right removal on the merits, independent of the
+                         # dpkg fact. PipeWire IS this image's sound server as of ADR-0010,
+                         # and shipping a second one — even an inert one that no session
+                         # ever autostarts — is the same class of error as shipping both
+                         # Bluetooth-audio providers, which that ADR forbids outright.
+                         #
+                         # WHAT WAS LOST, stated plainly: `/usr/bin/pulseaudio` is gone
+                         # from the debug toolbox, and `manifests/addons/debug-toolset.json`
+                         # dropped it from `provides` in the same change so the bench and
+                         # field routes stay the identical set (the rule this file's header
+                         # states). The diagnostic capability is not lost — PipeWire ships
+                         # `pw-cli`/`pw-dump`/`pw-top` in `pipewire-bin`, which is on EVERY
+                         # image now, production included, so audio-graph inspection got
+                         # BROADER rather than narrower.
+                         #
+                         # Historical note kept because it cost a todo to establish: on
+                         # trixie the package shipped one SYSTEM unit
+                         # (pulseaudio-enable-autospawn.service) as well as its user units,
+                         # so the old "user units only, therefore inert" reasoning was
+                         # already wrong before this removal — the correct reason was
+                         # always "no user session". A first boot here runs systemd
+                         # `preset-all` (/etc/machine-id ships `uninitialized`), so a
+                         # system unit CAN be enabled behind our backs.
 usbutils                 # lsusb — USB enumeration during a detach/replug drill.
 pciutils                 # lspci — PCI introspection (NIC/WiFi/NVMe bring-up).
 lsof                     # which process holds the capture fd.

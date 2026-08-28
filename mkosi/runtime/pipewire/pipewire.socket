@@ -1,0 +1,41 @@
+[Unit]
+Description=PipeWire Multimedia System Socket (CeraLive system mode)
+Documentation=man:pipewire(1)
+Documentation=https://docs.pipewire.org/page_daemon.html
+# WHY A SOCKET UNIT AT ALL, on a daemon that is also started at boot.
+#
+# `After=pipewire.service` on a Type=simple unit only guarantees that the daemon's
+# exec has STARTED, not that it has bound anything. cerastream's PipeWire program
+# preflight is bounded at 3 s and fails TYPED (`audio-device-unavailable:`) rather
+# than waiting, so an unlucky boot ordering would surface as a real stream-start
+# refusal. systemd binds a socket unit's listener before the service is even
+# executed, so `Before=cerastream.service` HERE is the edge that actually means
+# "the socket is connectable" — which is the ordering the engine needs.
+Before=cerastream.service
+# The runtime directory's ownership and 0750 mode are declared once, in
+# tmpfiles.d/ceralive-pipewire.conf. Neither this unit nor pipewire.service
+# re-states them, so there is exactly one place the socket's access boundary is
+# spelled.
+After=systemd-tmpfiles-setup.service
+RequiresMountsFor=/run
+
+[Socket]
+Service=pipewire.service
+# /run/pipewire/pipewire-0 — the daemon resolves the same path from
+# PIPEWIRE_RUNTIME_DIR (set on both units and on the cerastream drop-in) plus its
+# own `core.name`. Both halves are pinned; changing either one alone silently
+# splits the client and the server onto different sockets.
+ListenStream=/run/pipewire/pipewire-0
+# The ACCESS BOUNDARY, and it is deliberately group-based rather than world.
+# cerastream.service runs as root and is therefore admitted by construction — root
+# traverses a 0750 directory and opens a 0660 socket regardless of group. The group
+# is what admits a NON-root client, and 0660 (never 0666) is what keeps every other
+# unprivileged process on the board out of the media graph. A world-writable socket
+# would let any local process enumerate and open the operator's capture devices.
+SocketUser=pipewire
+SocketGroup=pipewire
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

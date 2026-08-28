@@ -24,14 +24,51 @@ set -euo pipefail
 # shellcheck source=../../lib/common.sh
 source "${CERALIVE_COMMON_SH:-"$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../lib" && pwd)/common.sh"}"
 
-# Distro suite + CeraLive channel (RELEASE→bookworm via the build env,
-# CHANNEL→stable). These are configuration, not secrets.
-APT_RELEASE="${RELEASE:-bookworm}"
+# Debian suite set + CeraLive channel. These are configuration, not secrets.
+# RELEASE derives only the Debian sources below: apt-worker is suite-agnostic and
+# serves its flat first-party index at dists/${APT_CHANNEL}/binary-${arch}/.
+#
+# The suite is NEVER a literal here. In a chroot it arrives as RELEASE/APT_SUITE*
+# from the build environment (lib/orchestrate.sh env_names + mkosi.conf
+# PassEnvironment=), which lib/orchestrate.sh itself seeds from
+# manifests/target-release.env; outside a build — a unit test sourcing this module,
+# or a standalone run from a checkout — that file is read directly. Resolution is
+# DEFERRED into configure_minimal_apt() so sourcing the module to exercise one of
+# the other functions never has to satisfy it.
 APT_CHANNEL="${CHANNEL:-stable}"
+APT_RELEASE=""
+APT_SUITE_MAIN=""
+APT_SUITE_UPD=""
+APT_SUITE_SEC=""
+
+# Resolve the target suite set from the environment, falling back to the one
+# mapping file. Fails closed: there is no literal default, because a stale one
+# ships an image whose apt sources name the wrong Debian release and nothing
+# downstream notices.
+resolve_target_suites() {
+  if [[ -z "${RELEASE:-}" ]]; then
+    local env_file="${CERALIVE_TARGET_RELEASE_ENV:-}"
+    if [[ -z "${env_file}" ]]; then
+      local repo_root
+      repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+      env_file="${repo_root}/manifests/target-release.env"
+    fi
+    [[ -r "${env_file}" ]] \
+      || die "target suite unresolved: RELEASE is unset and ${env_file} is unreadable (in a chroot RELEASE must arrive via mkosi.conf PassEnvironment=)"
+    # shellcheck source=../../manifests/target-release.env
+    source "${env_file}"
+  fi
+
+  APT_RELEASE="${RELEASE:?target suite unresolved: RELEASE is empty}"
+  APT_SUITE_MAIN="${APT_SUITE:-${APT_RELEASE}}"
+  APT_SUITE_UPD="${APT_SUITE_UPDATES:-${APT_RELEASE}-updates}"
+  APT_SUITE_SEC="${APT_SUITE_SECURITY:-${APT_RELEASE}-security}"
+}
 
 # Write the three deb822 Debian sources + non-interactive apt config.
 configure_minimal_apt() {
-  log_info "writing minimal deb822 Debian apt sources (suite=${APT_RELEASE})"
+  resolve_target_suites
+  log_info "writing minimal deb822 Debian apt sources (suite=${APT_SUITE_MAIN})"
   mkdir -p /etc/apt/sources.list.d
 
   # Remove any build-time Debian sources that leak into the rootfs — mkosi's own
@@ -46,19 +83,19 @@ configure_minimal_apt() {
   cat >/etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
 URIs: http://deb.debian.org/debian
-Suites: ${APT_RELEASE}
+Suites: ${APT_SUITE_MAIN}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
 URIs: http://deb.debian.org/debian-security
-Suites: ${APT_RELEASE}-security
+Suites: ${APT_SUITE_SEC}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
 URIs: http://deb.debian.org/debian
-Suites: ${APT_RELEASE}-updates
+Suites: ${APT_SUITE_UPD}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF

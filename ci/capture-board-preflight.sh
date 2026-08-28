@@ -539,6 +539,13 @@ capture() {
 # ---------------------------------------------------------------------------
 self_test() {
   local failures=0 tmp
+  # The os-release fixture below must model the release the image actually
+  # targets, so it is read from the ONE mapping rather than frozen. Loaded HERE
+  # and not at file scope: the real capture path runs against a live board and
+  # must not gain a dependency on a repo file it does not need.
+  # shellcheck source=../lib/shared/target-release-lib.sh
+  source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../lib/shared" && pwd)/target-release-lib.sh"
+  target_release_load
   tmp="$(mktemp -d)" || { fail "mktemp -d failed"; return 1; }
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -570,10 +577,10 @@ bootloader=custom
 [keyring]
 path=/etc/rauc/ceralive-keyring.pem
 EOF
-  cat >"${root}/etc/os-release" <<'EOF'
+  cat >"${root}/etc/os-release" <<EOF
 ID=debian
-VERSION_ID="12"
-PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+VERSION_ID="${OS_VERSION_ID}"
+PRETTY_NAME="Debian GNU/Linux ${OS_VERSION_ID} (${RELEASE})"
 EOF
   printf 'root=PARTLABEL=xrootfs_b rauc.slot=B\n' >"${root}/proc/cmdline"
   printf 'rtw89_core 700416 3 - Live 0x0\nbtusb 61440 0 - Live 0x0\n' >"${root}/proc/modules"

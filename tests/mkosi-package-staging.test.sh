@@ -175,9 +175,10 @@ mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
 	printf 'FAIL platform BSP installer is chrooted outside mkosi wrapper PATH\n' >&2
 	exit 1
 }
-# FIVE install sites: the HW-accel GStreamer set, zstd, initramfs-tools, the
-# boot BSP, and the owner-authorized Wave-0 ceralive-cls-fw kernel extension
-# added by commit c791ac2 (todo 18/12 remediation). initramfs-tools is
+# FOUR install sites: the HW-accel GStreamer set, zstd, initramfs-tools and the
+# boot BSP. A fifth used to install the ceralive-cls-fw kernel extension; that
+# package is retired — NET_CLS_FW is in-tree on the source-built production
+# kernel. initramfs-tools is
 # deliberately its OWN transaction and not one more name on the boot-BSP line —
 # a kernel .deb emits its initramfs by run-parts-ing
 # /etc/kernel/postinst.d, so on the source-built path the hook has to be configured
@@ -185,7 +186,7 @@ mount_args=(-v "${mount_source}:/run/ceralive-bsp:ro")
 # separate for the same ORDERING reason: initramfs-tools defaults to COMPRESS=zstd
 # and degrades to gzip if the binary is not already configured when the kernel
 # postinst runs, and shared.list installs it a whole layer too late.
-[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 5 ]] || {
+[[ "$(grep -Ec '^[[:space:]]*mkosi-install -y --no-install-recommends ' "${PLATFORM_POSTINST}")" -eq 4 ]] || {
 	printf 'FAIL platform BSP installs do not all use mkosi-install\n' >&2
 	exit 1
 }

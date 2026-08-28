@@ -19,7 +19,7 @@
 #
 # COLUMNS (tab-separated)
 #   board     board_id (manifest board_id, the value passed as --board)
-#   variant   family variant name, or `default` for the production vendor path
+#   variant   family variant name, or `default` for the reserved no-variant name
 #   package   Debian package the blob ships in (pinned in armbian-bsp-deb-versions.txt)
 #   version   that package's exact pinned Debian version
 #   blob      blob filename inside the package payload
@@ -27,7 +27,7 @@
 #
 # PROVENANCE, and it is re-derivable from this file alone. Every hash below was
 # read out of a .deb whose own SHA-256 matched that package's entry in the
-# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest
+# bookworm/main/arm64 `Packages` index at https://apt.armbian.com — the digest  suite-literal-ok: the Armbian BSP index these blob digests were read from
 # taken from the gpgv-VERIFIED `Release` plaintext, never the raw `InRelease` —
 # under both pinned archive keys DF00FAF1C577104B50BF1D0093D6889F9F0E78D5 and
 # 8CFA83D13EB2181EEF5843E41EB30FAF236099FE. The `package` + `version` columns are
@@ -47,30 +47,45 @@
 # pair, which is why that ONE tuple has two rows. Do not add split handling for
 # any other tuple — no other pinned package contains those files.
 #
-# `edge-test` and `vendor-patched` intentionally carry the VENDOR U-Boot rows:
-# neither board declares a `variant_overrides.<that variant>.uboot_packages`, so
-# the resolver hands them the board's top-level (vendor) package and these rows
-# record what will actually be written. They are not aspirational.
+# THE VENDOR KERNEL IS RETIRED; THE `-vendor` U-BOOT PACKAGES ARE NOT, AND THAT
+# IS NOT AN OVERSIGHT. Armbian's `-vendor` U-Boot is a BOOTLOADER build (Rockchip
+# blob BL31), orthogonal to which kernel the slot runs, and `edge-test` still
+# writes it: neither board declares a `variant_overrides.edge-test.uboot_packages`,
+# so the resolver hands that variant the board's top-level (`-vendor`) package and
+# the rows below record what will actually be written. They are not aspirational.
+# The retired vendor-kernel rows are preserved at the annotated tag
+# `vendor-kernel-final`.
+#
+# `default` AND `edge` BOTH MAP TO THE EDGE BLOB, AND THAT IS NOT A COPY-PASTE
+# SLIP. The family's `default_variant: edge` makes the mainline track production,
+# so a real build reaches the writer with the RESOLVED name `edge`
+# (lib/stages/assemble.sh passes ${KERNEL_VARIANT:-${variant}}). The reserved
+# `default` spelling survives because write-bootloader.sh normalises an EMPTY
+# --variant to it, which a direct `assemble-disk.sh` invocation can still
+# produce — and "the production path" is now the edge bootloader. The two row
+# sets must therefore stay byte-identical; tests/bootloader-variant.bats fails
+# the build if they diverge.
 #
 # board	variant	package	version	blob	sha256
 
 # --- Orange Pi 5+ ----------------------------------------------------------
-# PRODUCTION (vendor): U-Boot 2017.09 Rockchip fork, closed rkbin BL31.
-orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
-orangepi5-plus	default	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
-# EDGE: U-Boot 2026.01, TF-A compiled from ARM-software v2.13.0 (mainline).
+# PRODUCTION (= edge): U-Boot 2026.01, TF-A compiled from ARM-software v2.13.0
+# (mainline). Both spellings, byte-identical — see the note above.
+orangepi5-plus	default	linux-u-boot-orangepi5-plus-edge	26.8.3	u-boot-rockchip.bin	7b9fd2ea241b831ec7c40d790a3ad835b763de70ab60493a95ca69b4aa3b0391
 orangepi5-plus	edge	linux-u-boot-orangepi5-plus-edge	26.8.3	u-boot-rockchip.bin	7b9fd2ea241b831ec7c40d790a3ad835b763de70ab60493a95ca69b4aa3b0391
+# DEBUG SIBLING: U-Boot 2017.09 Rockchip fork, closed rkbin BL31 — the board's
+# top-level `-vendor` package, which `edge-test` inherits (see the note above).
 orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
 orangepi5-plus	edge-test	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
-orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.8.3	idbloader.img	15c6c0aff5ffd9dfe2ba3a901abd09593d89df31c7c06c47d7a5f04944a2b832
-orangepi5-plus	vendor-patched	linux-u-boot-orangepi5-plus-vendor	26.8.3	u-boot.itb	d768c1f82588a58431ffcf44c4a61585428239553abb42dfbe5390c356bdd519
 
 # --- Radxa Rock 5B+ --------------------------------------------------------
-# PRODUCTION (vendor): U-Boot 2026.04, unified blob. This board's armbian/build
-# hook carries no `vendor` branch guard, so this payload already has the same
-# shape as its -current/-edge siblings; the bytes still differ, hence its own row.
-rock-5b-plus	default	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb
-# EDGE: U-Boot 2026.04, TF-A compiled from ARM-software v2.13.0 (mainline).
+# PRODUCTION (= edge): U-Boot 2026.04, TF-A compiled from ARM-software v2.13.0
+# (mainline). Both spellings, byte-identical — see the note above.
+rock-5b-plus	default	linux-u-boot-rock-5b-plus-edge	26.8.3	u-boot-rockchip.bin	e25c276ec6961e394e5aa8f34b476bcf90367bcfd7eaeb6ebf77e684a13302cc
 rock-5b-plus	edge	linux-u-boot-rock-5b-plus-edge	26.8.3	u-boot-rockchip.bin	e25c276ec6961e394e5aa8f34b476bcf90367bcfd7eaeb6ebf77e684a13302cc
+# DEBUG SIBLING: U-Boot 2026.04, unified blob — the board's top-level `-vendor`
+# package, which `edge-test` inherits (see the note above). This board's
+# armbian/build hook carries no `vendor` branch guard, so this payload already has
+# the same shape as its -current/-edge siblings; the bytes still differ, hence its
+# own row.
 rock-5b-plus	edge-test	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb
-rock-5b-plus	vendor-patched	linux-u-boot-rock-5b-plus-vendor	26.8.3	u-boot-rockchip.bin	a3d094d8024494bde155354bc0cec1095f67a8f00c5228df9eddb0c99ce681cb

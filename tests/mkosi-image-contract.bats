@@ -884,7 +884,7 @@ print('CEILING-POLICY-OK')
 @test "runtime packages: net-tools is installed so CeraUI's ifconfig poll works" {
   # CeraUI's backend polls /sbin/ifconfig every ~5s (apps/backend
   # network-interfaces.ts run("ifconfig", [])) to build the `netif` broadcast
-  # (WiFi/Ethernet/cellular/bonded-link status). This minimal bookworm image ships
+  # (WiFi/Ethernet/cellular/bonded-link status). This minimal Debian image ships
   # only modern iproute2, so without net-tools every poll tick fails ("Executable
   # not found in $PATH: \"ifconfig\"") and the Network destination renders empty
   # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a missing
@@ -1097,7 +1097,15 @@ SH
   [[ "$output" == *"disable ssh.service"* ]]
 }
 
-@test "Bluetooth stays enabled after configure_services so BlueALSA capture survives the image policy" {
+# RETARGETED (todo 28): the rationale moved, the property did not. This case was
+# "…so BlueALSA capture survives the image policy" while bluez-alsa was the image's
+# Bluetooth-audio provider. That provider is now PipeWire's BlueZ backend
+# (libspa-0.2-bluetooth), which still needs a POWERED adapter — so bluetooth.service
+# must still keep the enable state the image gives it, and a runtime-only enable
+# would still be replaced wholesale by the next A/B OTA. The `bluealsad` absence
+# assertion below is kept for the same reason the sibling case in
+# runtime-services.bats keeps it: it is what catches a partial revert.
+@test "Bluetooth stays enabled after configure_services so PipeWire's BlueZ backend can use the adapter" {
   local bin="$BATS_TEST_TMPDIR/bluetooth-enable-bin"
   local calls="$BATS_TEST_TMPDIR/bluetooth-enable-calls"
   local systemd_etc="$BATS_TEST_TMPDIR/bluetooth-systemd-etc"
@@ -1135,7 +1143,9 @@ SH
       setup_fan_curve() { :; }
       setup_fan_kickstart() { :; }
       setup_led_status() { :; }
+      setup_cpu_governor() { :; }
       setup_hdmirx_edid() { :; }
+      setup_pipewire_system_mode() { :; }
       configure_services
     ' bash "$POSTINST_ENTRY"
 

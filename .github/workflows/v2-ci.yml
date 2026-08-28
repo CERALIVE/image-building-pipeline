@@ -63,6 +63,18 @@ jobs:
           # are info-level project baseline (see learnings, tasks 9/26/29).
           shellcheck --severity=warning -x "${files[@]}"
 
+      # Fail FAST on a re-hardcoded suite. The gate also runs later inside
+      # ./run-tests (tests/target-release-derivation.test.sh §B), but that is the
+      # heavyweight bats job behind three `needs:` hops — so a one-line suite
+      # literal would cost a full apt install, a system D-Bus and the whole
+      # contract suite before reporting. Here it costs seconds and needs nothing
+      # but bash + git. --self-test runs first because a sweep that silently read
+      # no files would report a clean tree forever.
+      - name: Target-release literal + mirror-drift gate
+        run: |
+          ci/check-suite-literals.sh --self-test
+          ci/check-suite-literals.sh
+
   schema-validate:
     name: JSON-Schema validate manifests
     runs-on: ubuntu-latest
@@ -369,19 +381,25 @@ jobs:
           R2_ENDPOINT: https://r2.example
         run: |
           set -euo pipefail
+          # The delivery path's {os_version} axis IS the target-release mapping's, so
+          # the fixture stem and the expected keys derive from it. Passing no
+          # --os-version additionally proves the publisher's own default is that
+          # same mapping, which is what keeps builder and publisher in lockstep.
+          . ./lib/shared/target-release-lib.sh
+          target_release_load
           dist="${RUNNER_TEMP}/addon-dist"
           mkdir -p "${dist}"
-          stem="debug-toolset-rock-5b-plus-12"
+          stem="debug-toolset-rock-5b-plus-${OS_VERSION_ID}"
           head -c 4096 /dev/zero > "${dist}/${stem}.raw"
           ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
           printf 'stub-detached-signature\n' > "${dist}/${stem}.raw.sig"
           ./lib/upload-addons.sh \
-            --feature debug-toolset --board rock-5b-plus --os-version 12 \
+            --feature debug-toolset --board rock-5b-plus \
             --dist "${dist}" 2>&1 | tee addon-plan.log
-          # All three artifacts must target addons/{os_version}/{board}/{feature}.
-          grep -qE 's3://apt-storage/addons/12/rock-5b-plus/debug-toolset\.raw ' addon-plan.log
-          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sha256' addon-plan.log
-          grep -q  's3://apt-storage/addons/12/rock-5b-plus/debug-toolset.raw.sig' addon-plan.log
+          key="s3://apt-storage/addons/${OS_VERSION_ID}/rock-5b-plus/debug-toolset"
+          grep -qF "${key}.raw " addon-plan.log
+          grep -qF "${key}.raw.sha256" addon-plan.log
+          grep -qF "${key}.raw.sig" addon-plan.log
           # Content-type pinned per file so R2 stores what the worker serves.
           grep -q 'debug-toolset.raw --endpoint-url https://r2.example --content-type application/octet-stream' addon-plan.log
           grep -q 'debug-toolset.raw.sig --endpoint-url https://r2.example --content-type text/plain' addon-plan.log
@@ -392,14 +410,16 @@ jobs:
           R2_BUCKET: apt-storage
           R2_ENDPOINT: https://r2.example
         run: |
+          . ./lib/shared/target-release-lib.sh
+          target_release_load
           dist="${RUNNER_TEMP}/addon-unsigned"
           mkdir -p "${dist}"
-          stem="debug-toolset-rock-5b-plus-12"
+          stem="debug-toolset-rock-5b-plus-${OS_VERSION_ID}"
           head -c 4096 /dev/zero > "${dist}/${stem}.raw"
           ( cd "${dist}" && sha256sum "${stem}.raw" > "${stem}.raw.sha256" )
           # No .raw.sig on purpose — the publisher MUST refuse to upload.
           if ./lib/upload-addons.sh \
-               --feature debug-toolset --board rock-5b-plus --os-version 12 \
+               --feature debug-toolset --board rock-5b-plus \
                --dist "${dist}" > addon-unsigned.log 2>&1; then
             cat addon-unsigned.log
             echo "::error::upload-addons.sh published an UNSIGNED add-on"

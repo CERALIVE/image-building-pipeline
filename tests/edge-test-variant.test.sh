@@ -205,12 +205,44 @@ else
   bad "production edge declares exactly ONE fragment (no plural key)"
 fi
 
-# The vendor/default production path must be untouched by any of this.
+# The DEFAULT path is now the production `edge` overlay (`default_variant: edge`),
+# so it legitimately carries a kernel_source block — and must carry EXACTLY the
+# edge one, never the edge-test deltas. The property worth pinning is therefore
+# no longer "no kernel_source at all" but "byte-identical to --variant edge",
+# which is what proves default_variant is a pointer rather than a second copy.
 DEFAULT_PARAMS="$(bash "${RESOLVE_SH}" rock-5b-plus 2>/dev/null)"
-if grep -q 'KERNEL_SOURCE' <<<"${DEFAULT_PARAMS}"; then
-  bad "the default (vendor) path leaks a kernel_source block"
+if [[ "${DEFAULT_PARAMS}" == "${EDGE}" ]]; then
+  ok "the DEFAULT path resolves byte-identically to --variant edge"
 else
-  ok "the default (vendor) path resolves no kernel_source block at all"
+  bad "the DEFAULT path diverged from --variant edge"$'\n'"$(diff <(printf '%s\n' "${EDGE}") <(printf '%s\n' "${DEFAULT_PARAMS}") || true)"
+fi
+
+# The retired prebuilt vendor overlay used to be checked here: it was the one
+# variant that had to resolve NO kernel_source at all, because it installed an
+# Armbian .deb rather than compiling anything. That overlay is gone, and the check
+# had to be rewritten rather than deleted — left as it was it would have passed
+# VACUOUSLY, because an unknown variant makes the resolver die, `2>/dev/null`
+# swallows the message, and grepping empty output for KERNEL_SOURCE always
+# "succeeds". Two real properties replace it.
+
+# (a) The retired name is REFUSED, loudly, and the refusal lists what IS declared.
+if VENDOR_ERR="$(bash "${RESOLVE_SH}" rock-5b-plus --variant vendor 2>&1)"; then
+  bad "the retired --variant vendor still resolves instead of being refused"
+elif grep -q 'edge' <<<"${VENDOR_ERR}"; then
+  ok "the retired --variant vendor is refused, and the error names the declared variants"
+else
+  bad "--variant vendor is refused but the error does not list the available variants: ${VENDOR_ERR}"
+fi
+
+# (b) The "no kernel_source => no KERNEL_SOURCE_* params" property still has a
+#     real subject: x86-minipc declares no variants and no kernel_source at all.
+X86_PARAMS="$(bash "${RESOLVE_SH}" x86-minipc 2>/dev/null)"
+if [[ -z "${X86_PARAMS}" ]]; then
+  bad "x86-minipc failed to resolve — the kernel_source-absence check would be vacuous"
+elif grep -q 'KERNEL_SOURCE' <<<"${X86_PARAMS}"; then
+  bad "a family with no kernel_source leaked a KERNEL_SOURCE_* param"
+else
+  ok "a family declaring no kernel_source resolves no KERNEL_SOURCE_* param at all"
 fi
 
 # --------------------------------------------------------------------------

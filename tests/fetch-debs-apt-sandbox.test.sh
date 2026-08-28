@@ -37,7 +37,15 @@ HARNESS_IN_CONTAINER="/repo${HARNESS#"${REPO_ROOT}"}"
 ARTIFACT_DIR="${REPO_ROOT}/test-results/flows/apt"
 RESULTS_LOG="${ARTIFACT_DIR}/fetch-debs-apt-sandbox.log"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fetch-debs-apt-sandbox.XXXXXX")"
-CONTAINER_IMAGE="${CERALIVE_APT_SANDBOX_TEST_IMAGE:-debian:bookworm-slim}"
+# The container must run the suite the IMAGE targets, not a frozen one. Part B's
+# whole claim is about apt's own sandbox behaviour — whether `_apt` exists, and
+# whether apt drops to it and then emits its unsandboxed-as-root fallback — and
+# that is apt's behaviour, which moves with the suite. Proving it on a retired
+# release would leave the shipped one unproven while the suite stayed green.
+# shellcheck source=../lib/shared/target-release-lib.sh
+source "${PIPELINE_DIR}/lib/shared/target-release-lib.sh"
+target_release_load
+CONTAINER_IMAGE="${CERALIVE_APT_SANDBOX_TEST_IMAGE:-debian:${RELEASE}-slim}"
 UNSANDBOXED_WARNING='Download is performed unsandboxed as root'
 
 mkdir -p "${ARTIFACT_DIR}"

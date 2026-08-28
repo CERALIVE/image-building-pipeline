@@ -87,7 +87,7 @@ _fetch_rk3588_userspace_one() {
 # ---------------------------------------------------------------------------
 # fetch_rk3588_userspace — stage the RK3588 HW-accel userspace .debs (Mali-G610
 # GPU blob, Rockchip MPP encode/decode lib, RGA 2D accelerator, the GStreamer MPP
-# plugin, and the multimedia udev config) that the Armbian bookworm arm64 feed
+# plugin, and the multimedia udev config) that the Armbian bookworm arm64 feed  suite-literal-ok: names the upstream Armbian feed these pins are absent from, not the target rootfs suite
 # does NOT carry. Each is pinned to an exact upstream release-asset URL and
 # verified by SHA-256 (manifests/rk3588-userspace-deb-versions.txt) — the SAME
 # fail-closed, no-fallback discipline as fetch_bsp, but URL-pinned: a pinned URL +

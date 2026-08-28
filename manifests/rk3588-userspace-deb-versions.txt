@@ -1,11 +1,15 @@
 # rk3588-userspace-deb-versions.txt — pinned RK3588 HW-accel userspace .debs
 #
-# WHAT: the Rockchip RK3588 GPU/video userspace (Mali-G610 blob, MPP encode/decode
+# WHAT: the Rockchip RK3588 video userspace (MPP encode/decode
 # library, RGA 2D accelerator, the GStreamer MPP plugin, and the multimedia udev
-# config) that the Armbian bookworm arm64 feed does NOT ship. These make the vendor
-# kernel's HW encoders reachable from GStreamer (mpph264enc/mpph265enc/mppjpegenc/
-# mppvp8enc register only when this MPP userspace is present) and give Cog/WPEWebKit
-# a working Mali EGL/GBM stack for the 5.4 Kiosk render path.
+# suite-literal-ok(file): every `bookworm` here is a THIRD-PARTY pool name — the
+# Armbian BSP feed and the radxa rk3588s2-bookworm pool — reached by exact pinned
+# URL + SHA-256. None of them is the target rootfs suite, and repointing them at
+# manifests/target-release.env would resolve to URLs that do not exist.
+# config) that the Armbian bookworm arm64 feed does NOT ship. These make the SoC's
+# HW encoders reachable from GStreamer (mpph264enc/mpph265enc/mppjpegenc/
+# mppvp8enc register only when this MPP userspace is present). The GPU half of
+# this set is gone — see the retirement note below.
 #
 # WHY PINNED URLs (not an apt source): these are NOT in a rotating apt repo we
 # trust, so they are pinned to exact upstream release-asset URLs and verified by
@@ -17,8 +21,7 @@
 #
 # PROVENANCE: proven working on real Rock 5B+ hardware (raw H.264/H.265 HW encode
 # via mpph264enc/mpph265enc, ffprobe-verified). The proven combination is
-# tsukumijima MPP 1.5.0-1 plus the ABI-matched radxa GStreamer/RGA pair; the
-# Wayland-GBM Mali variant is required by the cage-based kiosk render path.
+# tsukumijima MPP 1.5.0-1 plus the ABI-matched radxa GStreamer/RGA pair.
 #
 # FORMAT: one record per package, four whitespace-separated fields:
 #   <package>  <filename>  <sha256>  <url>
@@ -35,24 +38,32 @@
 #
 # VERSIONS ARE EMPIRICALLY PROVEN — do not bump without re-proving on hardware.
 # tsukumijima MPP 1.5.0-1 + radxa gstreamer1.0-rockchip1 1.14-4 + radxa librga2
-# 2.2.0-1 is the exact combination proven to register the MPP encoders. libmali is
-# the latest g24p0 (Valhall G610) wayland-gbm driver, per docs/cog-display-addon.md.
+# 2.2.0-1 is the exact combination proven to register the MPP encoders.
 
-# --- Mali-G610 (Valhall) GPU userspace — Platform-layer; needed for Cog/WPEWebKit EGL/GBM ---
-# wayland-gbm variant per cog-display-addon.md §5 + TD-C2 (the default kiosk uses cage,
-# a Wayland compositor, so the Wayland EGL platform is required; wayland-gbm is a
-# superset of gbm and also covers direct-DRM cog). g24p0 = RK3588's G610 revision.
-libmali-valhall-g610-g24p0-wayland-gbm  libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb  533fc920220f36e0614e0e4808eabea55976c5af84f9b4996971862d183d2b62  https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-wayland-gbm_1.9-1_arm64.deb
+# --- Mali-G610 (Valhall) GPU userspace — RETIRED with the vendor kernel track ---
+# `libmali-valhall-g610-g24p0-wayland-gbm` used to be pinned here. It is gone
+# because it is ABI-bound to Rockchip's out-of-tree Mali module and its /dev/mali0
+# node, which only the retired vendor 6.1 BSP kernel created. The mainline track
+# binds the same silicon with the in-tree open `panthor` DRM driver and Mesa, and
+# the blob's /etc/ld.so.conf.d/00-aarch64-mali.conf would capture libEGL.so.1 /
+# libGLESv2.so.2 / libgbm.so.1 image-wide for a driver that cannot work. No
+# variant declares it, so nothing would stage it either way — the pin is removed
+# so a future reader cannot mistake a dead URL for a live GPU option. The exact
+# pinned URL + SHA-256 remain recoverable at the `vendor-kernel-final` tag.
 
-# --- Rockchip MPP encode/decode library (tsukumijima) — the runtime the GStreamer plugin dlopens ---
+# --- Rockchip MPP encode/decode library (tsukumijima) — mainline 7.2 + Trixie ABI-proven ---
+# Retained unchanged after both boards encoded for 60 s on mainline 7.2 and a real
+# Debian 13 arm64 install resolved the exact URL-pinned set against GStreamer 1.26.2.
 librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd  https://github.com/tsukumijima/mpp-rockchip/releases/download/v1.5.0-1-20250110-194af18/librockchip-mpp1_1.5.0-1_arm64.deb
 
 # --- Runtime multimedia udev/config (tsukumijima) ---
 rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb
 
-# --- GStreamer MPP plugin + RGA 2D accelerator (radxa rk3588s2-bookworm pool) ---
+# --- GStreamer MPP plugin + RGA 2D accelerator (Radxa bookworm assets, Trixie-compatible) ---
 # tsukumijima publishes NO gst-rockchip build, so the plugin must come from radxa;
 # it links librga2, so the PROVEN, ABI-matched gst<->rga pair is kept together on
-# radxa rather than splitting rga to tsukumijima's same-version build.
+# radxa rather than splitting rga to tsukumijima's same-version build. The source
+# pool name is provenance, not a target-suite constraint: Trixie resolves the
+# exact pair unchanged, including librockchip_mpp.so.1 and librga.so.2.
 gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
 librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb

@@ -4,10 +4,12 @@
 # this image. A native host mkosi build is opt-in only (--native / MKOSI_NATIVE=1).
 #
 # WHY a container is the canonical builder:
-#   * mkosi 26 (the .mkosi-version pin) needs Python >= 3.12. The TARGET rootfs
-#     release (Debian bookworm) ships an older Python and can't run it; an Arch /
-#     non-Debian host lacks apt + debian-archive-keyring entirely. One pinned
-#     Debian trixie builder gives a reproducible toolchain on any host.
+#   * mkosi 26 (the .mkosi-version pin) needs Python >= 3.12, which not every
+#     host can supply, and an Arch / non-Debian host lacks apt +
+#     debian-archive-keyring entirely. One pinned Debian trixie builder gives a
+#     reproducible toolchain on any host. This pin is the BUILDER's and moves
+#     independently of the TARGET rootfs suite (../manifests/target-release.env):
+#     the two coinciding today is not a reason to couple them.
 #   * arm64 cross-builds ride the HOST kernel's qemu-user-static binfmt handler
 #     (F-flag, kernel-global — see mkosi/mkosi.conf). binfmt-support +
 #     qemu-user-static are baked in so the image is self-sufficient and the run

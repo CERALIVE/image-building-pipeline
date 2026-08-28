@@ -61,28 +61,22 @@ fi
 [[ ! -e "${TMP}/rename-failure/dest/package.deb" ]]
 
 cat >"${TMP}/Packages.current-like" <<'EOF'
-Package: linux-image-vendor-rk35xx
+Package: linux-u-boot-rock-5b-plus-edge
 Version: 26.2.1
 Architecture: arm64
-Filename: pool/linux-image-vendor-rk35xx_26.2.1_arm64.deb
+Filename: pool/linux-u-boot-rock-5b-plus-edge_26.2.1_arm64.deb
 SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-Package: linux-image-vendor-rk35xx
-Version: 26.5.1
+Package: linux-u-boot-rock-5b-plus-edge
+Version: 26.8.3
 Architecture: arm64
-Filename: pool/linux-image-vendor-rk35xx_26.5.1_arm64.deb
+Filename: pool/linux-u-boot-rock-5b-plus-edge_26.8.3_arm64.deb
 SHA256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
-Package: linux-dtb-vendor-rk35xx
-Version: 26.2.1
+Package: linux-u-boot-orangepi5-plus-edge
+Version: 26.8.3
 Architecture: arm64
-Filename: pool/linux-dtb-vendor-rk35xx_26.2.1_arm64.deb
-SHA256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-
-Package: linux-dtb-vendor-rk35xx
-Version: 26.5.1
-Architecture: arm64
-Filename: pool/linux-dtb-vendor-rk35xx_26.5.1_arm64.deb
+Filename: pool/linux-u-boot-orangepi5-plus-edge_26.8.3_arm64.deb
 SHA256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 
 Package: armbian-firmware
@@ -90,19 +84,17 @@ Version: 26.8.3
 Architecture: all
 Filename: pool/armbian-firmware_26.8.3_all.deb
 SHA256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-
-Package: linux-u-boot-rock-5b-plus-vendor
-Version: 26.8.3
-Architecture: arm64
-Filename: pool/linux-u-boot-rock-5b-plus-vendor_26.8.3_arm64.deb
-SHA256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 EOF
 
+# The PRODUCTION Armbian fetch set for rock-5b-plus after the mainline flip: the
+# kernel and DTB names are suppressed (built from pinned source at [2b/9]), so
+# the only names the archive is still asked for are the board's `-edge` U-Boot
+# and armbian-firmware. `linux-u-boot-orangepi5-plus-edge` is in the index but
+# NOT in this set, which is what the third `FAIL` below is.
 rock_packages=(
-  linux-image-vendor-rk35xx
-  linux-dtb-vendor-rk35xx
+  linux-u-boot-rock-5b-plus-edge
+  linux-u-boot-orangepi5-plus-edge
   armbian-firmware
-  linux-u-boot-rock-5b-plus-vendor
 )
 
 legacy_lookup_package() {
@@ -124,7 +116,8 @@ legacy_lookup_package() {
 }
 
 # Given the metadata shape from failed run 29289411641, when bare package names
-# are resolved, then the current failure is exactly three rejects and one match.
+# are resolved, then a bare name is ambiguous or arch-wrong far more often than
+# it is a match — which is why the production fetch resolves exact specs.
 baseline_status=()
 for package in "${rock_packages[@]}"; do
   if legacy_lookup_package "${TMP}/Packages.current-like" "${package}" arm64; then
@@ -133,8 +126,11 @@ for package in "${rock_packages[@]}"; do
     baseline_status+=(FAIL)
   fi
 done
-[[ "${baseline_status[*]}" == 'FAIL FAIL FAIL PASS' ]]
-printf 'baseline: bare BSP names reproduce FAIL FAIL FAIL PASS\n'
+# rock's U-Boot carries TWO revisions here, so a bare-name lookup is AMBIGUOUS
+# and correctly rejects; the Orange Pi's carries one arm64 record and matches;
+# armbian-firmware is `Architecture: all`, so an arm64-only bare lookup misses it.
+[[ "${baseline_status[*]}" == 'FAIL PASS FAIL' ]]
+printf 'baseline: bare BSP names reproduce FAIL PASS FAIL\n'
 
 # Given production fetch code, when the regression seam is inspected, then exact
 # BSP specs, signed-index preflight, and release-identity validation must exist.
@@ -148,22 +144,30 @@ fi
 specs_text="$(bsp_download_specs "${rock_packages[@]}")"
 mapfile -t rock_specs <<<"${specs_text}"
 # Hardcoded on purpose: a pin promotion cannot land without editing this, which
-# forces the signed-index review. The two kernel packages and the u-boot/firmware
-# packages legitimately sit at DIFFERENT release numbers, because Armbian's
-# archive retains many revisions of linux-image/linux-dtb-vendor-rk35xx but keeps
-# only the newest revision of armbian-firmware and of each linux-u-boot-* package
-# — so this also proves each name binds to its OWN pin, not one shared one.
+# forces the signed-index review. Every name resolves through its OWN entry in
+# manifests/armbian-bsp-deb-versions.txt — proven by the per-board U-Boot legs
+# below, which bind two different names from the same file — and a name with no
+# entry there dies rather than defaulting.
 expected_specs=(
-  linux-image-vendor-rk35xx=26.5.1
-  linux-dtb-vendor-rk35xx=26.5.1
+  linux-u-boot-rock-5b-plus-edge=26.8.3
+  linux-u-boot-orangepi5-plus-edge=26.8.3
   armbian-firmware=26.8.3
-  linux-u-boot-rock-5b-plus-vendor=26.8.3
 )
 [[ "${rock_specs[*]}" == "${expected_specs[*]}" ]]
 [[ "$(bsp_download_specs linux-u-boot-orangepi5-plus-vendor)" == \
   'linux-u-boot-orangepi5-plus-vendor=26.8.3' ]]
 grep -q '^  - linux-u-boot-orangepi5-plus-vendor$' \
   "${PIPELINE_DIR}/manifests/boards/orange-pi-5-plus.yaml"
+# A name the pins file does not carry must FAIL CLOSED, never resolve to a
+# newest-available guess. That is the state the retired prebuilt kernel and DTB
+# packages are now in — their pins were deleted with the track — so this leg is
+# what stops a stray reference to any unpinned BSP name from quietly resolving.
+# The subshell is required: bsp_download_specs `die`s, and a bare `if func` would
+# take the whole script down with it.
+if ( bsp_download_specs linux-image-not-pinned-rk35xx ) >/dev/null 2>&1; then
+  printf 'an unpinned BSP package name resolved instead of failing closed\n' >&2
+  exit 1
+fi
 
 # Given a non-Armbian family, DRY_RUN omits an inapplicable Armbian fetch and a
 # real fetch fails closed until an authenticated Debian BSP source is implemented.
@@ -352,20 +356,20 @@ done
 # Given stale metadata with only an older kernel, when the reviewed pin is
 # preflighted, then the resolver refuses to fall back to that older record.
 cat >"${TMP}/Packages.stale" <<'EOF'
-Package: linux-image-vendor-rk35xx
+Package: linux-u-boot-rock-5b-plus-edge
 Version: 26.2.1
 Architecture: arm64
-Filename: pool/linux-image-vendor-rk35xx_26.2.1_arm64.deb
+Filename: pool/linux-u-boot-rock-5b-plus-edge_26.2.1_arm64.deb
 SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
-if bsp_assert_index_specs "${TMP}/Packages.stale" arm64 linux-image-vendor-rk35xx=26.5.1; then
+if bsp_assert_index_specs "${TMP}/Packages.stale" arm64 linux-u-boot-rock-5b-plus-edge=26.8.3; then
   printf 'stale metadata silently changed the BSP pin\n' >&2
   exit 1
 fi
 
 # Given a signed index with only part of the required set, when the whole set is
 # preflighted, then package download cannot begin from a partial resolution.
-awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /^Package: linux-u-boot-rock-5b-plus-vendor\n/' \
+awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /^Package: armbian-firmware\n/' \
   "${TMP}/Packages.current-like" >"${TMP}/Packages.partial"
 if bsp_assert_index_specs "${TMP}/Packages.partial" arm64 "${rock_specs[@]}"; then
   printf 'partial BSP package availability was accepted\n' >&2
@@ -375,13 +379,13 @@ fi
 # Given an amd64-only record, when arm64 is requested, then it is rejected while
 # Debian's architecture-independent `all` record remains compatible.
 cat >"${TMP}/Packages.wrong-arch" <<'EOF'
-Package: linux-image-vendor-rk35xx
-Version: 26.5.1
+Package: linux-u-boot-rock-5b-plus-edge
+Version: 26.8.3
 Architecture: amd64
-Filename: pool/linux-image-vendor-rk35xx_26.5.1_amd64.deb
+Filename: pool/linux-u-boot-rock-5b-plus-edge_26.8.3_amd64.deb
 SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
-if auth_lookup_package "${TMP}/Packages.wrong-arch" linux-image-vendor-rk35xx 26.5.1 arm64; then
+if auth_lookup_package "${TMP}/Packages.wrong-arch" linux-u-boot-rock-5b-plus-edge 26.8.3 arm64; then
   printf 'wrong package architecture was accepted\n' >&2
   exit 1
 fi
@@ -417,25 +421,37 @@ fi
 printf 'BSP exact-version/suite/architecture/adversarial resolution contract: PASS\n'
 
 mkdir -p "${TMP}/gate-bsp" "${TMP}/gate-staging"
+
+# The gate reports a DIFFERENT hint per package depending on where that package
+# comes from, and both arms must stay live. Its second arm fires for a boot-field
+# package that is ALSO URL/SHA-pinned in the RK3588 userspace manifest — which
+# used to be libmali, retired with the vendor kernel track. Nothing in the shipped
+# boot fields is URL-pinned any more, so the fixture supplies its own scratch
+# manifest rather than leaning on a real pin that may not exist tomorrow.
+cat >"${TMP}/userspace-pins.txt" <<'EOF'
+gpu-blob-fixture  gpu-blob-fixture_1.0_arm64.deb  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  https://example.invalid/gpu-blob-fixture_1.0_arm64.deb
+EOF
+
 gate_output=""
 if gate_output="$(
   INSTALL_BOOT_BSP=1
-  KERNEL_PACKAGES='linux-image-vendor-rk35xx'
+  KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'
   DTB_PACKAGES=''
-  UBOOT_PACKAGES=''
-  FIRMWARE_PACKAGES='armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm'
+  UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-edge'
+  FIRMWARE_PACKAGES='armbian-firmware gpu-blob-fixture'
   bsp_dir="${TMP}/gate-bsp"
   staging="${TMP}/gate-staging"
   ARMBIAN_APT_URL=https://apt.example.invalid
   ARMBIAN_SUITE=bookworm
   ARCH=arm64
   DRY_RUN=1
-  unset RK3588_USERSPACE_DEB_VERSIONS_FILE
+  RK3588_USERSPACE_DEB_VERSIONS_FILE="${TMP}/userspace-pins.txt"
   stage_bsp_gate 2>&1
   )"; then
   printf 'missing BSP package gate unexpectedly passed\n' >&2
   exit 1
 fi
 grep -q "no .deb staged from https://apt.example.invalid (bookworm/arm64)" <<<"${gate_output}"
-grep -q 'no .deb staged from the pinned GitHub release manifest (manifests/rk3588-userspace-deb-versions.txt)' <<<"${gate_output}"
+grep -q 'no .deb staged from the pinned GitHub release manifest' <<<"${gate_output}"
+grep -q 'userspace-pins.txt' <<<"${gate_output}"
 grep -q 'verify APT_GPG_PUBLIC_B64 / APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64 / ARMBIAN_APT_KEYRING are set' <<<"${gate_output}"

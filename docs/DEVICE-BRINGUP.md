@@ -59,9 +59,10 @@ Both Docker and Podman are usable container runtimes for the canonical build.
 `ccache` is not a hard requirement for the container path (the builder image
 carries its own persistent ccache volume across runs, see the CI/build cache
 notes in the root `AGENTS.md`), but installing it locally speeds up a
-`--native` kernel-from-source build (`--variant edge` / `--variant
-vendor-patched`) materially — a full kernel `make bindeb-pkg` is the single
-most compile-heavy stage in this pipeline.
+`--native` kernel-from-source build materially — and EVERY build is one now, so
+this matters on the default path rather than only on an opt-in variant. A full
+kernel `make bindeb-pkg` is the single most compile-heavy stage in this
+pipeline.
 
 **Disk.** The protected CI production-candidate job requires at least 24 GiB
 free on both the workspace and Docker-root filesystems (checked by
@@ -242,24 +243,25 @@ Replace `<your-apt-mirror>` with your mirror hostname.
 
 ### Opt-in kernel-build-from-source variants
 
-The `rk3588` family manifest carries two opt-in variants that compile the
-kernel and in-tree DTBs from pinned source instead of fetching the prebuilt
-Armbian kernel:
+The `rk3588` family manifest declares two variants, and BOTH compile the kernel
+and in-tree DTBs from pinned source — there is no prebuilt-kernel path left:
 
 ```bash
-./build rock-5b-plus --variant edge             # mainline 7.1 track
-./build rock-5b-plus --variant vendor-patched   # vendor 6.1 BSP + HDMI-RX audio fix
+./build rock-5b-plus                            # the PRODUCTION default (= edge)
+./build rock-5b-plus --variant edge             # the same thing, named explicitly
+./build rock-5b-plus --variant edge-test        # debug sibling; NEVER released
 ```
 
-Both are compile-and-boot proven on real hardware for `rock-5b-plus`; `edge`
-is additionally proven on `orange-pi-5-plus`. Neither reopens the production
-kernel decision — the shipped image still installs the prebuilt vendor BSP
-(`./build <board>` with no `--variant`), byte-identical to before these
-variants existed. Full detail, including the honest MPP hardware-encode
-limitation on `edge` and the HDMI-RX audio fix's status on `vendor-patched` —
-Tier 1 board-confirmed on a hand-built kernel (incl. CeraUI audio-meter
-validation), Tier 2 open on this pipeline's own built image, which has not
-itself been booted, with no Orange Pi 5+ evidence either way:
+`edge` is the production track (`default_variant: edge`) and is compile-and-boot
+proven on real hardware for both `rock-5b-plus` and `orange-pi-5-plus` at the
+v7.1.7 base; the current `v7.2` pin is compile-proven with partial board
+evidence. `edge-test` is a KASAN/lockdep + fault-injection build that
+`ci/check-release-variant.sh` refuses to release by property.
+
+The Armbian vendor 6.1 BSP track — both the prebuilt overlay and the source-built
+one that carried the HDMI-RX audio fix — is RETIRED, and is preserved at the
+annotated tag `vendor-kernel-final`. Full detail, including the honest MPP
+hardware-encode and v7.2 qualification boundaries:
 [`docs/kernel-build-from-source.md`](../docs/kernel-build-from-source.md).
 
 ### Production vs debug image variants (`CERALIVE_DEBUG_IMAGE`)
@@ -306,7 +308,7 @@ each new slot bakes its own holds. First-party CeraLive packages
 (`cerastream`, `ceralive-device`, `srtla-send-rs`, the forked `libsrt`, the
 ModemManager closure) are deliberately excluded from the freeze so
 `system.startUpdate()` keeps working. Verify on a booted device with
-`apt-mark showhold`, `apt-cache policy linux-image-vendor-rk35xx`, and
+`apt-mark showhold`, `apt-cache policy linux-image-7.2.0-ceralive-rk3588`, and
 `apt-get -s upgrade`. Full contract: [`docs/kernel-freeze-contract.md`](../docs/kernel-freeze-contract.md).
 
 ---
@@ -579,9 +581,9 @@ For full rkdeveloptool documentation, see the
 
 ### Experimental-image bench workflow (microSD discipline)
 
-When bench-testing an experimental build (a `--variant edge`/`--variant
-vendor-patched` kernel, or any image you don't want to risk on a board's
-production eMMC), use `CERALIVE_BENCH_LABELS=1` to relabel the GPT partitions
+When bench-testing an experimental build (a `--variant edge-test` kernel, or any
+image you don't want to risk on a board's production eMMC), use
+`CERALIVE_BENCH_LABELS=1` to relabel the GPT partitions
 (`xboot`/`xrootfs_a`/`xrootfs_b`/`xdata` instead of the frozen
 `boot`/`rootfs_a`/`rootfs_b`/`data`) and flash the image to a **microSD card**,
 not eMMC:
@@ -1032,7 +1034,8 @@ SRTLA_REC=/path/to/srtla_rec bash tools/e2e/loopback-smoke.sh
 
 ### dev-push: `extension-release mismatch`
 
-The sysext `.raw` carries `ID=debian VERSION_ID=12`. If the device runs a
+The sysext `.raw` carries `ID=debian` plus the `OS_VERSION_ID` from
+[`manifests/target-release.env`](../manifests/target-release.env) (`13`). If the device runs a
 different OS version, the merge is rejected. Check the device:
 
 ```bash

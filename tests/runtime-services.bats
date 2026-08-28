@@ -847,14 +847,47 @@ SH
   [ "$status" -eq 0 ]
 }
 
-@test "BT policy: BlueALSA capture packages and the bluetooth enable state survive an A/B OTA" {
+# REPLACED, NOT DELETED (todo 28) — the case that used to live here was
+#
+#   "BT policy: BlueALSA capture packages and the bluetooth enable state survive an
+#    A/B OTA"
+#
+# and it asserted `bluez-alsa-utils` + `libasound2-plugin-bluez` PRESENT in
+# shared.list, plus that `bluealsad` is never image-enabled. Its subject was
+# removed from the image in the same change, so the assertion could not be kept:
+# cerastream's ADR-0010 "BT manager exclusivity" makes BlueALSA and PipeWire's BlueZ
+# backend mutually exclusive BY CONSTRUCTION — BlueZ permits exactly one provider of
+# a Bluetooth audio profile — and states outright that there is no supported "both
+# installed, one disabled" configuration, because a masked-unit arrangement is one
+# apt upgrade away from unmasking itself.
+#
+# Every property the old case pinned is pinned below, inverted where the subject
+# flipped and preserved verbatim where it did not:
+#   * the two BlueALSA packages: present -> ABSENT (the swap itself)
+#   * the replacement provider `libspa-0.2-bluetooth`: NEW, present
+#   * `bluez` present: UNCHANGED — the adapter still needs bluetoothd
+#   * bluetooth.service's image enable state surviving an A/B OTA: UNCHANGED
+#   * `bluealsad` never image-enabled: KEPT, and now additionally proven by the
+#     package being absent, so it cannot be enabled even by accident
+# The old `bluealsad` negative is deliberately retained rather than deleted with the
+# package: it is the assertion that would catch a partial revert that re-added the
+# unit without the packages.
+@test "BT policy: PipeWire's BlueZ backend REPLACES BlueALSA, and bluetooth's enable state survives an A/B OTA" {
   local packages="$BATS_TEST_TMPDIR/bluetooth-runtime-packages"
   sed 's/#.*//' "$PIPELINE_DIR/manifests/packages/shared.list" | awk 'NF { print $1 }' >"$packages"
 
+  # The adapter half is untouched: without bluez there is no bluetoothd at all.
   local package
-  for package in bluez bluez-alsa-utils libasound2-plugin-bluez; do
+  for package in bluez libspa-0.2-bluetooth; do
     run grep -Fx "$package" "$packages"
     [ "$status" -eq 0 ]
+  done
+
+  # NEVER BOTH. The exclusivity is a packaging fact, so it is asserted on the
+  # package set rather than on a unit's enable state.
+  for package in bluez-alsa-utils libasound2-plugin-bluez; do
+    run grep -Fx "$package" "$packages"
+    [ "$status" -ne 0 ]
   done
 
   run grep -F 'disable_service cups.service' "$POSTINST_LIB"
@@ -1735,5 +1768,364 @@ SH
 
   # It is ADDITIVE to setup_fan_curve, which must remain untouched and separate.
   run grep -cE '^setup_fan_curve\(\) \{' "$POSTINST_LIB"
+  [ "$output" -eq 1 ]
+}
+
+# ===========================================================================
+# 30. System-mode PipeWire (todo 28, cerastream ADR-0010).
+#
+#     The device shares ONE capture card between the always-on audio-meter
+#     sidecar and the live program-audio leg. ALSA hands out one capture handle
+#     per card, so the ALSA arm has to arbitrate them with the ADR-0007 lease;
+#     PipeWire multiplexes the device so both hold it at once. Adopting it means
+#     the image must supply a daemon that Debian ships NO SYSTEM UNIT FOR — the
+#     `pipewire` and `wireplumber` packages carry
+#     /usr/lib/systemd/user/* and nothing else — on a board with no login
+#     session, no seat and no XDG_RUNTIME_DIR.
+#
+#     setup_pipewire_system_mode (postinst.d/services.sh) is what closes that:
+#     a dedicated non-root system user, a fixed 0750 runtime dir declared once in
+#     tmpfiles.d, a 0660 group-permissioned socket, RT limits granted by the units
+#     themselves rather than by rtkit, a headless WirePlumber profile, and the
+#     packaged USER units masked so exactly one PipeWire exists.
+#
+#     These drive the SHIPPED installer and the SHIPPED artifacts against temp
+#     directories with stubbed systemctl/useradd — no image boot, no hardware,
+#     UNIT scope. The fixture deliberately places every destination somewhere
+#     other than its production path, so a hardcoded /etc path fails.
+# ===========================================================================
+
+# pw_install_env — run setup_pipewire_system_mode against a scratch sysroot.
+# Every install destination is redirected, and `useradd`/`getent`/`id`/`systemctl`
+# are stubbed so the function can be exercised unprivileged.
+pw_install_env() {
+  local root="$1"
+  mkdir -p "$root/bin" "$root/passwd.d"
+  : >"$root/calls"
+  : >"$root/passwd.d/users"
+  : >"$root/passwd.d/groups"
+
+  cat >"$root/bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$PW_CALLS"
+exit 0
+SH
+  cat >"$root/bin/getent" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  passwd) grep -qxF "$2" "$PW_USERS" ;;
+  group)  grep -qxF "$2" "$PW_GROUPS" ;;
+  *) exit 2 ;;
+esac
+SH
+  cat >"$root/bin/useradd" <<'SH'
+#!/usr/bin/env bash
+printf 'useradd %s\n' "$*" >>"$PW_CALLS"
+printf '%s\n' "${!#}" >>"$PW_USERS"
+SH
+  cat >"$root/bin/groupadd" <<'SH'
+#!/usr/bin/env bash
+printf 'groupadd %s\n' "$*" >>"$PW_CALLS"
+printf '%s\n' "${!#}" >>"$PW_GROUPS"
+SH
+  cat >"$root/bin/id" <<'SH'
+#!/usr/bin/env bash
+# Non-zero uid: the whole point of the check the function performs.
+printf '%s\n' "${PW_FAKE_UID:-970}"
+SH
+  chmod +x "$root/bin/"*
+}
+
+# pw_run — invoke the shipped installer with every destination redirected.
+pw_run() {
+  local root="$1"
+  env PATH="$root/bin:$PATH" \
+    PW_CALLS="$root/calls" PW_USERS="$root/passwd.d/users" PW_GROUPS="$root/passwd.d/groups" \
+    PW_FAKE_UID="${PW_FAKE_UID:-970}" \
+    CERALIVE_RUNTIME_SRC="${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}" \
+    PIPEWIRE_UNIT_DIR="$root/etc/systemd/system" \
+    PIPEWIRE_USER_UNIT_DIR="$root/etc/systemd/user" \
+    PIPEWIRE_CONF_DIR="$root/etc/pipewire/pipewire.conf.d" \
+    WIREPLUMBER_CONF_DIR="$root/etc/wireplumber/wireplumber.conf.d" \
+    PIPEWIRE_TMPFILES_DIR="$root/etc/tmpfiles.d" \
+    PIPEWIRE_DBUS_DIR="$root/etc/dbus-1/system.d" \
+    CERASTREAM_PIPEWIRE_DROPIN_DIR="$root/etc/systemd/system/cerastream.service.d" \
+    bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
+}
+
+PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
+
+@test "pipewire: the trixie-native package set is present and BlueALSA is gone from shared.list" {
+  # Package NAMES and their exclusivity, asserted on the one file that decides the
+  # runtime package set. The versions themselves are recorded in shared.list's own
+  # comment block after being resolved against a real trixie arm64 index — notably
+  # wireplumber 0.5.8-2, which does NOT follow PipeWire's 1.4.2 version family.
+  local packages="$BATS_TEST_TMPDIR/pw-runtime-packages"
+  sed 's/#.*//' "$PIPELINE_DIR/manifests/packages/shared.list" | awk 'NF { print $1 }' >"$packages"
+
+  local package
+  for package in pipewire wireplumber pipewire-alsa gstreamer1.0-pipewire libspa-0.2-bluetooth; do
+    run grep -Fx "$package" "$packages"
+    [ "$status" -eq 0 ]
+  done
+
+  # BT-MANAGER EXCLUSIVITY (ADR-0010). Never both, in either direction.
+  for package in bluez-alsa-utils libasound2-plugin-bluez; do
+    run grep -Fx "$package" "$packages"
+    [ "$status" -ne 0 ]
+  done
+
+  # No network/zeroconf sound-server packages either — the configuration half of
+  # the no-network rule (pipewire.service carries the structural half).
+  for package in pipewire-pulse pipewire-jack pipewire-zeroconf; do
+    run grep -Fx "$package" "$packages"
+    [ "$status" -ne 0 ]
+  done
+
+  # pipewire-alsa Conflicts: pulseaudio, and the runtime layer installs shared.list
+  # plus the debug delta as ONE apt transaction — so a surviving pulseaudio entry
+  # would break every debug build.
+  run grep -Fx pulseaudio <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/development.delta.list")
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: every system-mode artifact is installed and all three units are enabled" {
+  local root="$BATS_TEST_TMPDIR/pw-install"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+
+  [ -f "$root/etc/systemd/system/pipewire.socket" ]
+  [ -f "$root/etc/systemd/system/pipewire.service" ]
+  [ -f "$root/etc/systemd/system/wireplumber.service" ]
+  [ -f "$root/etc/pipewire/pipewire.conf.d/10-ceralive-system.conf" ]
+  [ -f "$root/etc/wireplumber/wireplumber.conf.d/10-ceralive-headless.conf" ]
+  [ -f "$root/etc/tmpfiles.d/ceralive-pipewire.conf" ]
+  [ -f "$root/etc/dbus-1/system.d/ceralive-pipewire-bluez.conf" ]
+  [ -f "$root/etc/systemd/system/cerastream.service.d/40-pipewire.conf" ]
+
+  run cat "$root/calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enable pipewire.socket"* ]]
+  [[ "$output" == *"enable pipewire.service"* ]]
+  [[ "$output" == *"enable wireplumber.service"* ]]
+}
+
+@test "pipewire: the daemon runs as a DEDICATED non-root system user, created fail-closed" {
+  local root="$BATS_TEST_TMPDIR/pw-user"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+
+  # Created with a real system identity, no home and no shell.
+  run cat "$root/calls"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"useradd --system"* ]]
+  [[ "$output" == *"--shell /usr/sbin/nologin"* ]]
+  [[ "$output" == *"--no-create-home"* ]]
+
+  # Both units run AS that user, and neither carries User=root.
+  local unit
+  for unit in pipewire.service wireplumber.service; do
+    grep -Eq '^User=pipewire$'  "$root/etc/systemd/system/$unit"
+    grep -Eq '^Group=pipewire$' "$root/etc/systemd/system/$unit"
+    run grep -Eq '^User=root$' "$root/etc/systemd/system/$unit"
+    [ "$status" -ne 0 ]
+    # /dev/snd is GROUP="audio" MODE="0664" — a supplementary group, never a
+    # capability and never root.
+    grep -Eq '^SupplementaryGroups=audio$' "$root/etc/systemd/system/$unit"
+  done
+
+  # Idempotent: a second run must not try to create the user again.
+  : >"$root/calls"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+  run grep -c '^useradd ' "$root/calls"
+  [ "$output" -eq 0 ]
+}
+
+@test "pipewire: a user that resolves to uid 0 FAILS the build (fail-closed, never a root audio daemon)" {
+  # The failure this guards is silent by nature: systemd would happily run the
+  # daemon as root and everything would appear to work, with the security posture
+  # quietly gone. So the uid is checked, not just the existence.
+  local root="$BATS_TEST_TMPDIR/pw-rootuser"
+  pw_install_env "$root"
+  PW_FAKE_UID=0 run pw_run "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must never run as root"* ]]
+}
+
+@test "pipewire: the socket is group-permissioned at a FIXED runtime dir, never world-accessible" {
+  local sock="$(PW_RUNTIME_DIR)/pipewire.socket"
+  local tmpf="$(PW_RUNTIME_DIR)/ceralive-pipewire.tmpfiles.conf"
+
+  # A FIXED system runtime dir, not $XDG_RUNTIME_DIR — there is no session here.
+  grep -Eq '^ListenStream=/run/pipewire/pipewire-0$' "$sock"
+  grep -Eq '^SocketUser=pipewire$'  "$sock"
+  grep -Eq '^SocketGroup=pipewire$' "$sock"
+  # 0660: admits the group, refuses everyone else. A 0666 socket would let ANY
+  # local process enumerate and open the operator's capture devices.
+  grep -Eq '^SocketMode=0660$' "$sock"
+  run grep -E '^SocketMode=0(6|7)(6|7)(6|7)$' "$sock"
+  [ "$status" -ne 0 ]
+
+  # The directory's mode is declared exactly ONCE, and it is not world-traversable.
+  grep -Eq '^d /run/pipewire 0750 pipewire pipewire' "$tmpf"
+  run grep -E '^d /run/pipewire 07(5|7)5' "$tmpf"
+  [ "$status" -ne 0 ]
+
+  # The client half of the same path. Without it a system service resolves no
+  # runtime dir at all and cannot connect, while the daemon sits healthy.
+  grep -Fq 'Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire' \
+    "$(PW_RUNTIME_DIR)/ceralive-cerastream-pipewire.dropin.conf"
+  grep -Fq 'core.name   = pipewire-0' "$(PW_RUNTIME_DIR)/10-ceralive-system.conf"
+}
+
+@test "pipewire: RT scheduling comes from the unit's own limits — no rtkit, no PAM" {
+  local unit="$(PW_RUNTIME_DIR)/pipewire.service"
+  # module-rt's own defaults are rt.prio 88 / rt.time 200000 / nice -11; the unit
+  # grants exactly those, so the module never asks for more than it is given.
+  grep -Eq '^LimitRTPRIO=88$'        "$unit"
+  grep -Eq '^LimitRTTIME=200000$'    "$unit"
+  grep -Eq '^LimitMEMLOCK=infinity$' "$unit"
+  grep -Eq '^LimitNICE=-11$'         "$unit"
+
+  # rtkit is a D-Bus service wanting polkit and a session; this board has neither,
+  # so it is neither installed nor referenced.
+  run grep -Fx rtkit <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/shared.list")
+  [ "$status" -ne 0 ]
+  run grep -riE 'rtkit' "$(PW_RUNTIME_DIR)/pipewire.service" "$(PW_RUNTIME_DIR)/10-ceralive-system.conf"
+  [ "$status" -eq 0 ]  # mentioned only in prose, which the next line pins
+  run grep -E '^[^#]*rtkit' "$(PW_RUNTIME_DIR)/10-ceralive-system.conf"
+  [ "$status" -ne 0 ]
+
+  # THE TRAP: pipewire-bin ships /etc/security/limits.d/25-pw-rlimits.conf granting
+  # the same values to @pipewire, and pam_limits does not apply to a systemd
+  # service. Nothing here may depend on that file.
+  run grep -rE '^[^#]*limits\.d' "$(PW_RUNTIME_DIR)"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: no network or zeroconf modules — structurally, not just by omission" {
+  local unit
+  for unit in pipewire.service wireplumber.service; do
+    local f="$(PW_RUNTIME_DIR)/$unit"
+    # AF_INET/AF_INET6 are absent, so a network module could not open a socket even
+    # if a future config drift loaded one.
+    grep -Eq '^RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH$' "$f"
+    grep -Eq '^IPAddressDeny=any$' "$f"
+    # AF_BLUETOOTH is load-bearing: the BlueZ backend's SCO/A2DP transports are
+    # PF_BLUETOOTH sockets, and dropping it fails silently rather than loudly.
+    grep -Fq 'AF_BLUETOOTH' "$f"
+    # PrivateDevices=yes would hide /dev/snd, which is the entire job.
+    run grep -Eq '^PrivateDevices=yes$' "$f"
+    [ "$status" -ne 0 ]
+  done
+
+  # No executable line in either config may name a network/discovery module.
+  run bash -c "grep -hvE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' '$(PW_RUNTIME_DIR)/10-ceralive-headless.conf' | grep -iE 'zeroconf|avahi|rtp|raop|pulse-tunnel|protocol-simple|roc-'"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: the session manager is its OWN unit, never pipewire.conf context.exec" {
+  # pipewire.conf(5): starting the session manager from context.exec "has been
+  # demoted to development aid ... Avoid [it] in production". ADR-0010 §3 pins it.
+  local wp="$(PW_RUNTIME_DIR)/wireplumber.service"
+  grep -Eq '^ExecStart=/usr/bin/wireplumber$' "$wp"
+  grep -Eq '^BindsTo=pipewire.service$' "$wp"
+  run bash -c "grep -vE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' | grep -E 'context\.exec'"
+  [ "$status" -ne 0 ]
+
+  # Drop-in ARRAY sections are APPENDED, not merged — a context.modules block here
+  # would load module-rt a SECOND time rather than reconfigure the first.
+  run bash -c "grep -vE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' | grep -E 'context\.modules'"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: the WirePlumber profile is HEADLESS — no seat, no session bus, no reservation" {
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local feature
+  for feature in support.dbus support.reserve-device support.logind \
+                 support.portal-permissionstore monitor.bluez.seat-monitoring \
+                 monitor.alsa.reserve-device; do
+    grep -Eq "^[[:space:]]*${feature//./\\.}[[:space:]]*=[[:space:]]*disabled$" "$wp"
+  done
+
+  # What must STAY on: the audio and Bluetooth device monitors are the whole point.
+  local kept
+  for kept in monitor.alsa monitor.bluez policy.standard; do
+    run bash -c "grep -vE '^[[:space:]]*#' '$wp' | grep -E '^[[:space:]]*${kept//./\\.}[[:space:]]*=[[:space:]]*disabled'"
+    [ "$status" -ne 0 ]
+  done
+
+  # `disabled` is the fail-safe verdict across versions: a feature name this
+  # WirePlumber does not have is inert, whereas `required` on a missing feature is
+  # fatal. Nothing here may use `required`.
+  run bash -c "grep -vE '^[[:space:]]*#' '$wp' | grep -E '=[[:space:]]*required'"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: the packaged USER units are masked, so exactly ONE PipeWire exists" {
+  local root="$BATS_TEST_TMPDIR/pw-mask"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+
+  local unit
+  for unit in pipewire.service pipewire.socket filter-chain.service wireplumber.service; do
+    [ -L "$root/etc/systemd/user/$unit" ]
+    [ "$(readlink "$root/etc/systemd/user/$unit")" = "/dev/null" ]
+  done
+
+  # The system instances are a DIFFERENT scope and must survive the masking.
+  [ -f "$root/etc/systemd/system/pipewire.service" ]
+  [ ! -L "$root/etc/systemd/system/pipewire.service" ]
+}
+
+@test "pipewire: the units are ordered BEFORE cerastream.service, from both sides" {
+  local unit
+  for unit in pipewire.socket pipewire.service wireplumber.service; do
+    grep -Eq '^Before=.*\bcerastream\.service\b' "$(PW_RUNTIME_DIR)/$unit"
+  done
+
+  # The socket is what makes that edge mean "connectable": systemd binds a socket
+  # unit's listener before the service is executed, whereas After= on a Type=simple
+  # service only means its exec has started.
+  grep -Eq '^Service=pipewire.service$' "$(PW_RUNTIME_DIR)/pipewire.socket"
+  local dropin="$(PW_RUNTIME_DIR)/ceralive-cerastream-pipewire.dropin.conf"
+  grep -Eq '^After=pipewire.socket wireplumber.service$' "$dropin"
+  # ORDERING-ONLY: cerastream's shipped default is backend = "alsa", which opens no
+  # PipeWire client at all, so a hard dependency would make the rollback hatch a
+  # liability.
+  grep -Eq '^Wants=pipewire.socket wireplumber.service$' "$dropin"
+  run grep -E '^(Requires|Requisite|BindsTo)=' "$dropin"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: missing runtime source FAILS the build before anything is installed" {
+  local root="$BATS_TEST_TMPDIR/pw-failclosed"
+  pw_install_env "$root"
+  PW_RUNTIME_SRC="$BATS_TEST_TMPDIR/pw-empty-src" run pw_run "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pipewire runtime source not found"* ]]
+  [ ! -e "$root/etc/systemd/system/pipewire.service" ]
+
+  # A source dir that exists but is missing ONE artifact must also fail, and name it.
+  local partial="$BATS_TEST_TMPDIR/pw-partial-src/pipewire"
+  mkdir -p "$partial"
+  cp "$(PW_RUNTIME_DIR)/pipewire.socket" "$partial/"
+  PW_RUNTIME_SRC="$BATS_TEST_TMPDIR/pw-partial-src" run pw_run "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pipewire artifact not found"* ]]
+  [ ! -e "$root/etc/systemd/system/pipewire.service" ]
+}
+
+@test "pipewire: the installer is wired into configure_services and registered in the drift gate" {
+  # An unreferenced setup function is dead code — the image would carry the packages
+  # and no system units at all, which is exactly the state Debian ships.
+  run grep -E '^\s*setup_pipewire_system_mode$' "$POSTINST_LIB"
+  [ "$status" -eq 0 ]
+  grep -Fq 'setup_pipewire_system_mode' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
+  run grep -cE '^setup_pipewire_system_mode\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
 }

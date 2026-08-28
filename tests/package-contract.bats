@@ -17,7 +17,8 @@ load manifest-helpers
 # ===========================================================================
 # 13. Add-on descriptor format + conflict model (Task 21).
 #     addon.schema.json is the per-descriptor gate: G1 sysext merge identity
-#     (sysextLevel const "1", versionId const "12") and G2 the /usr+/opt-only
+#     (sysextLevel const "1", versionId const mirroring OS_VERSION_ID in
+#     manifests/target-release.env) and G2 the /usr+/opt-only
 #     provides[] boundary. validate-manifests.py layers the cross-descriptor E6
 #     model on top: no two add-ons may claim the same provides[] path unless they
 #     mutually declare each other in conflicts[] (the provides/conflicts model).
@@ -84,7 +85,8 @@ load manifest-helpers
 #     sysext: <feature>-<board>-<os>.raw + .raw.sha256 + .raw.sig, verifiable with
 #     gpgv against the image-baked add-on PUBLIC keyring. Guards proven here:
 #       * artifact set + sha256 integrity + GPG authenticity (gpgv OK)
-#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12
+#       * G1 — the produced extension-release carries SYSEXT_LEVEL=1 plus the
+#         VERSION_ID the target-release mapping declares (never a literal)
 #       * G2 — a staging tree with /etc (escapes the /usr+/opt boundary) is REFUSED
 #       * tamper — a flipped byte in the .raw makes gpgv FAIL (signing has teeth)
 #       * the baked keyring is PUBLIC-only and a DISTINCT trust domain from RAUC
@@ -97,9 +99,9 @@ load manifest-helpers
   feature_prereqs || skip "mksquashfs/gpg/gpgv/unsquashfs not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sha256" ]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw.sig" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sha256" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" ]
   [ -f "$out/addon-keyring.gpg" ]
 }
 
@@ -107,7 +109,7 @@ load manifest-helpers
   feature_prereqs || skip "signing toolchain not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
-  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-12.raw.sha256"
+  run bash -c "cd '$out' && sha256sum -c demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sha256"
   [ "$status" -eq 0 ]
   [[ "$output" == *": OK"* ]]
 }
@@ -117,22 +119,22 @@ load manifest-helpers
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   run gpgv --keyring "$out/addon-keyring.gpg" \
-        "$out/demo-feature-rock-5b-plus-12.raw.sig" \
-        "$out/demo-feature-rock-5b-plus-12.raw"
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" \
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Good signature"* ]]
 }
 
-@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + VERSION_ID=12" {
+@test "t24 sysext G1: produced extension-release carries SYSEXT_LEVEL=1 + the mapped VERSION_ID" {
   feature_prereqs || skip "signing toolchain not available"
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   run unsquashfs -no-progress -cat \
-        "$out/demo-feature-rock-5b-plus-12.raw" \
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" \
         usr/lib/extension-release.d/extension-release.demo-feature
   [ "$status" -eq 0 ]
   [[ "$output" == *"SYSEXT_LEVEL=1"* ]]
-  [[ "$output" == *"VERSION_ID=12"* ]]
+  [[ "$output" == *"VERSION_ID=${OS_VERSION_ID}"* ]]
 }
 
 @test "t24 sysext G2: a staging tree with /etc is REFUSED (escapes /usr+/opt boundary)" {
@@ -142,11 +144,11 @@ load manifest-helpers
   printf 'x\n'   > "$stg/usr/bin/t"
   printf 'cfg\n' > "$stg/etc/foo.conf"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature bad --board rock-5b-plus --os-version 12 \
+        --feature bad --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" --keyring "$BATS_FILE_TMPDIR/gnupg"
   [ "$status" -ne 0 ]
   [[ "$output" == *"G2 boundary"* ]]
-  [ ! -f "$out/bad-rock-5b-plus-12.raw" ]
+  [ ! -f "$out/bad-rock-5b-plus-${OS_VERSION_ID}.raw" ]
 }
 
 @test "t24 sysext tamper: a flipped byte in the .raw makes gpgv FAIL (signing has teeth)" {
@@ -154,10 +156,10 @@ load manifest-helpers
   build_feature_fixture
   local out="$BATS_FILE_TMPDIR/out"
   local tampered="$BATS_TEST_TMPDIR/tampered.raw"
-  cp "$out/demo-feature-rock-5b-plus-12.raw" "$tampered"
+  cp "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" "$tampered"
   printf '\xff' | dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
   run gpgv --keyring "$out/addon-keyring.gpg" \
-        "$out/demo-feature-rock-5b-plus-12.raw.sig" "$tampered"
+        "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw.sig" "$tampered"
   [ "$status" -ne 0 ]
   [[ "$output" != *"Good signature"* ]]
 }
@@ -217,7 +219,7 @@ load manifest-helpers
   mkdir -p "$stg/usr/bin"
   printf 'x\n' > "$stg/usr/bin/t"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" --descriptor "$desc" \
         --keyring "$BATS_TEST_TMPDIR/c6b-gnupg"
   [ "$status" -ne 0 ]
@@ -232,13 +234,13 @@ load manifest-helpers
   mkdir -p "$stg/usr/bin"
   printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
   run bash "$LIB_DIR/build-feature-sysext.sh" \
-        --feature demo-feature --board rock-5b-plus --os-version 12 \
+        --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
         --deb-staging "$stg" --out "$out" \
         --descriptor "$PIPELINE_DIR/manifests/addons/debug-toolset.json" \
         --keyring "$BATS_TEST_TMPDIR/c6b-ok-gnupg"
   [ "$status" -eq 0 ]
   [[ "$output" == *"descriptor schema-valid"* ]]
-  [ -f "$out/demo-feature-rock-5b-plus-12.raw" ]
+  [ -f "$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw" ]
 }
 
 # ===========================================================================
@@ -255,8 +257,8 @@ load manifest-helpers
 
 @test "bsp drift: matching version+hash is no-drift (exit 0, no 'BSP drift' banner)" {
   local base="$BATS_TEST_TMPDIR/baseline-match.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" != *"BSP drift"* ]]
   [[ "$output" == *"matches known-good baseline"* ]]
@@ -264,8 +266,8 @@ load manifest-helpers
 
 @test "bsp drift: a version mismatch fires an advisory 'BSP drift' warning (exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-ver.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   [[ "$output" == *"BSP drift"* ]]
@@ -273,8 +275,8 @@ load manifest-helpers
 
 @test "bsp drift: SAME version but DIFFERENT content hash still drifts (content-hash compare, exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-hash.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_B"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_B"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   # the re-spin note proves the guard compared the hash, not just the version
@@ -284,19 +286,19 @@ load manifest-helpers
 @test "bsp drift: first run with NO baseline seeds it, notes it, exits 0" {
   local base="$BATS_TEST_TMPDIR/seed-me.json"
   [ ! -f "$base" ]
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   [ -f "$base" ]
   run cat "$base"
-  [[ "$output" == *'"version": "6.1.0-vendor"'* ]]
+  [[ "$output" == *'"version": "6.1.0-generic"'* ]]
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
 
 @test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
   local base="$BATS_TEST_TMPDIR/scaffold.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"
@@ -305,8 +307,8 @@ load manifest-helpers
 
 @test "bsp drift (C6b): default (STRICT unset) with drift warns and exits 0" {
   local base="$BATS_TEST_TMPDIR/baseline-default.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"BSP drift"* ]]
   [[ "$output" == *"advisory — build continues"* ]]
@@ -314,8 +316,8 @@ load manifest-helpers
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with drift fails (non-zero)" {
   local base="$BATS_TEST_TMPDIR/baseline-strict.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.99-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -ne 0 ]
   [[ "$output" == *"BSP drift"* ]]
   [[ "$output" == *"BSP_DRIFT_STRICT=1"* ]]
@@ -323,18 +325,18 @@ load manifest-helpers
 
 @test "bsp drift (C6b): no drift is exit 0 in BOTH default and strict modes" {
   local base="$BATS_TEST_TMPDIR/baseline-match-modes.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": "6.1.0-vendor", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"matches known-good baseline"* ]]
 }
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
   local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
-  printf '{ "schema_version": 1, "package": "linux-image-vendor-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
+  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"
@@ -343,17 +345,23 @@ load manifest-helpers
 
 @test "bsp provenance: bsp_write_json emits valid JSON with schema_version + 64-hex sha256" {
   local out="$BATS_TEST_TMPDIR/prov/bsp-provenance.json"
-  run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-vendor-rk35xx 6.1.0-vendor $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; bsp_write_json '$out' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [ -f "$out" ]
   # parses as JSON and carries the expected shape
-  run python3 -c "import json,sys; d=json.load(open('$out')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; assert len(d['sha256'])==64; print('JSON-OK')"
+  run python3 -c "import json,sys; d=json.load(open('$out')); assert d['schema_version']==1; assert d['package']=='linux-image-generic-rk35xx'; assert len(d['sha256'])==64; print('JSON-OK')"
   [ "$status" -eq 0 ]
   [[ "$output" == *"JSON-OK"* ]]
 }
 
 @test "bsp provenance: the committed baseline is valid JSON and carries a valid seed state" {
-  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; assert d['package']=='linux-image-vendor-rk35xx'; v=d.get('version'); s=d.get('sha256'); assert (v is None and s is None) or (isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
+  # It is UNSEEDED (all three fields null) and that is the correct state: the
+  # drift-guard's subject is a PREBUILT kernel .deb's bytes, and no family this
+  # pipeline ships fetches one any more — rk3588 builds from pinned source and
+  # x86_64 has no Armbian BSP at all. bsp_drift_check treats a null version/sha
+  # as "first run" and seeds it, so the mechanism stays armed for a future family
+  # without pinning a package that is never downloaded.
+  run python3 -c "import json,re; d=json.load(open('$BSP_BASELINE_JSON')); assert d['schema_version']==1; p=d.get('package'); v=d.get('version'); s=d.get('sha256'); assert (p is None and v is None and s is None) or (isinstance(p,str) and isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}', s or '')); print('BASELINE-OK')"
   [ "$status" -eq 0 ]
   [[ "$output" == *"BASELINE-OK"* ]]
 }
@@ -419,7 +427,7 @@ PY
 # ===========================================================================
 
 @test "wwan: all six modules present in a kernel .deb (happy path, mix of =m and =y)" {
-  local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-vendor-rk35xx.deb"
+  local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-generic-rk35xx.deb"
   mkdir -p "$stage"
   wwan_stage_six "$stage"
   make_kernel_deb "$stage" "$deb"
@@ -439,7 +447,7 @@ PY
   local root="$BATS_TEST_TMPDIR/tree"
   wwan_stage_six "$root"
   # drop cdc_ncm from modules.builtin (option stays) so exactly one is absent
-  printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-vendor/modules.builtin"
+  printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-generic/modules.builtin"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"WWAN module MISSING: cdc_ncm"* ]]
@@ -457,7 +465,7 @@ PY
 }
 
 @test "wwan: bare 'option' decoys do NOT satisfy the option module (false-positive guard)" {
-  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-vendor"
+  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-generic"
   wwan_stage_six "$root"
   local md="$root/lib/modules/$kv"
   # remove the only legitimate option signal (built-in), keep cdc_ncm built-in
@@ -473,33 +481,31 @@ PY
   [[ "$output" == *"5/6 present, 1 missing"* ]]
 }
 
-@test "wwan: the native FM350 mtk_t7xx gate is OUT OF SCOPE on a mainline edge tree" {
-  # The release string is a SYNTHETIC fixture, not the shipped pin: the only
-  # property under test is that it does NOT end in `-vendor-rk35xx`, so any
-  # mainline-shaped name serves and re-pinning it at a base bump proves nothing.
-  local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "7.1.7-ceralive-rk3588"
-  run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
-  [[ "$output" == *"7.1.7-ceralive-rk3588"* ]]
-  [[ "$output" != *"native M.2 modem driver ABSENT"* ]]
-}
-
-@test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a vendor tree that ships it" {
-  local root="$BATS_TEST_TMPDIR/tree" kv="6.1.115-vendor-rk35xx"
+@test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a tree that ships it" {
+  # The gate used to be kernel-track-scoped: it ran only on a `*vendor-rk35xx`
+  # release and reported OUT OF SCOPE anywhere else, because the interesting
+  # subject was the prebuilt Armbian package's own bytes. That track is retired
+  # and every kernel is now built from pinned source, whose module set is exactly
+  # as inspectable — so the scoping is gone and the probe runs on any tree.
+  local root="$BATS_TEST_TMPDIR/tree" kv="7.2.0-ceralive-rk3588"
   wwan_stage_six "$root" "$kv"
   mkdir -p "$root/lib/modules/$kv/kernel/drivers/net/wwan"
   printf 'ELF' > "$root/lib/modules/$kv/kernel/drivers/net/wwan/mtk_t7xx.ko"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"vendor track detected"* ]]
+  [[ "$output" == *"native M.2 modem driver gate: scanning"* ]]
   [[ "$output" == *"native M.2 modem driver present: mtk_t7xx — loadable"* ]]
+  [[ "$output" != *"OUT OF SCOPE"* ]]
 }
 
-@test "wwan: the native FM350 mtk_t7xx gate WARNS on a vendor tree without it, and still exits 0" {
+@test "wwan: the native FM350 mtk_t7xx gate WARNS on a tree without it, and still exits 0" {
+  # This is the CURRENT answer for a real production kernel, and it is a true
+  # finding rather than a regression: CONFIG_MTK_T7XX is declared in neither
+  # rk3588-edge.fragment nor required-symbols.list, so the FM350's native PCIe
+  # personality cannot bind. The retired out-of-scope branch skipped this
+  # silently; the gate now says it out loud, advisory as ever.
   local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "6.1.115-vendor-rk35xx"
+  wwan_stage_six "$root" "7.2.0-ceralive-rk3588"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"native M.2 modem driver ABSENT: mtk_t7xx"* ]]
@@ -508,14 +514,18 @@ PY
   [[ "$output" == *"all 6 required modules present"* ]]
 }
 
-@test "wwan: the vendor marker is exact — a bare '-vendor' release is NOT the vendor track" {
-  local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "6.1.0-vendor"
-  run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"native M.2 modem driver gate: OUT OF SCOPE"* ]]
-  run bash -c "source '$CHECK_WWAN'; printf '%s' \"\$WWAN_VENDOR_RELEASE_MARKER\""
-  [ "$output" = "vendor-rk35xx" ]
+@test "wwan: the native-M.2 gate is NO LONGER kernel-track-scoped" {
+  # ABSENCE GUARD for the retired release-marker branch. Re-introducing it would
+  # make the probe silent on every tree this pipeline now builds.
+  # Code only, never comments: the retirement is EXPLAINED in the script's header
+  # and that prose must stay readable.
+  local code
+  code="$(grep -v '^[[:space:]]*#' "$CHECK_WWAN")"
+  run ! grep -q 'WWAN_VENDOR_RELEASE_MARKER' <<<"$code"
+  run ! grep -q 'wwan_tree_is_vendor_track' <<<"$code"
+  run ! grep -q 'OUT OF SCOPE' <<<"$code"
+  run bash -c "source '$CHECK_WWAN'; printf '%s' \"\${WWAN_NATIVE_M2_MODULES[*]}\""
+  [ "$output" = "mtk_t7xx" ]
 }
 
 @test "modem recovery: uhubctl ships as a manual binary with no automatic invoker" {
@@ -1303,12 +1313,23 @@ REPRO
 # ===========================================================================
 # 28. Mesa software-GL prune — the RemoveFiles contract.
 #
-#     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches LLVM's
-#     JIT and Z3 for Mesa's software rasterizer: 157.6 MB the device can never
-#     execute, because the Mali vendor stubs win the EGL/GLES/GBM lookup and the
-#     only other Mesa entry point needs an X server this image does not ship.
-#     `apt remove` cascades into the plugin set cerastream needs, so the lever is
-#     file-level, like the locale strip.
+#     `gstreamer1.0-plugins-bad` reaches `libgl1-mesa-dri`, which reaches Mesa's
+#     Gallium megadriver, LLVM's JIT and Z3 for a software rasterizer the device
+#     can never execute — no base-image component instantiates a GL element, and
+#     the only other Mesa entry point needs an X server this image does not ship.
+#     (Historically the argument also leaned on libmali's stubs winning the
+#     EGL/GLES/GBM lookup; that blob went with the vendor kernel track, and the
+#     no-GL-consumer half of the argument stands on its own.) `apt remove`
+#     cascades into the plugin set cerastream needs, so the lever is file-level,
+#     like the locale strip.
+#
+#     RETARGETED AT THE TRIXIE MIGRATION (todo 10). Trixie ships Mesa 25.0.7 and
+#     LLVM 19, and BOTH previous globs went stale in ways that fail SILENTLY:
+#     `libLLVM-15.so*` matches nothing (the real object is `libLLVM.so.19.1`),
+#     and the Gallium megadriver moved out of `libgl1-mesa-dri` entirely into a
+#     new `mesa-libgallium` package as `libgallium-<version>.so` at the library
+#     root, which no glob covered. Unfixed the prune recovers ~27 MB instead of
+#     ~185 MB and both RK3588 boards blow the 1.5 GB `[6c/9]` gate.
 #
 #     These are STATIC guards because the prune only happens on a wet build and
 #     the PR gate is DRY_RUN=1 plan-only — the same blind spot that shipped the
@@ -1318,14 +1339,43 @@ REPRO
 #     `dri/*` would silently delete a hardware video driver on a future x86 build.
 # ===========================================================================
 
-@test "mesa-prune: the runtime layer strips libLLVM-15, libz3 and the Mesa DRI megadriver" {
+@test "mesa-prune: the runtime layer strips libgallium, libLLVM, libz3 and the Mesa DRI shims" {
   local entries
   entries="$(removefiles_runtime)"
   [ -n "$entries" ]
 
-  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libLLVM-15.so*'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libgallium-*.so'* ]]
+  [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libLLVM*.so*'* ]]
   [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/libz3.so*'* ]]
   [[ "$entries" == *'/usr/lib/aarch64-linux-gnu/dri/*_dri.so'* ]]
+}
+
+@test "mesa-prune: the LLVM and Gallium globs are version-WILDCARDED, never pinned" {
+  # This is the regression the trixie migration actually caught. A version-pinned
+  # glob does not fail loudly when the version moves — it matches zero files, the
+  # build stays green, and ~158 MB of unreachable payload ships. `libgallium`'s
+  # filename embeds the FULL Debian revision (libgallium-25.0.7-2+deb13u1.so), so
+  # a pinned name breaks on any Mesa point release, not just a major bump.
+  local entries
+  entries="$(removefiles_runtime)"
+
+  # The exact stale spelling that shipped before must never come back.
+  [[ "$entries" != *'libLLVM-15.so'* ]]
+  # No LLVM/Gallium entry may carry a literal version digit run. The check is on
+  # the BASENAME, not the whole path — the `aarch64-linux-gnu` triplet in the
+  # directory prefix legitimately contains digits.
+  local tok base
+  while IFS= read -r tok; do
+    base="${tok##*/}"
+    case "$base" in
+      libLLVM*|libgallium*)
+        [[ "$base" != *[0-9]* ]] || {
+          echo "version-pinned Mesa/LLVM prune glob: $tok" >&2
+          return 1
+        }
+        ;;
+    esac
+  done < <(printf '%s\n' "${entries//,/$'\n'}")
 }
 
 @test "mesa-prune: the DRI glob never widens to dri/* (it would eat VA-API drivers)" {
@@ -1363,7 +1413,87 @@ REPRO
 
   local postinst="$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*libgl1-mesa-dri' "$postinst"
-  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm15|libz3-4)' "$postinst"
+  run ! grep -Eq 'apt-get[[:space:]]+(-y[[:space:]]+)?(remove|purge)[^|;&]*(libllvm[0-9]+|libz3-4|mesa-libgallium)' "$postinst"
+}
+
+# ===========================================================================
+# 28b. Trixie package-list migration — the names that CHANGED (todo 10).
+#
+#      Every name in shared.list was resolved against a real trixie arm64 index
+#      (main+contrib+non-free+non-free-firmware). Exactly two diverged, and both
+#      are pinned here because both fail in a way a plan-only PR gate cannot see:
+#      a removed package fails at `apt-get install` on a WET build only, and the
+#      governor half fails at BOOT with no error at all.
+# ===========================================================================
+
+@test "trixie-migration: cpufrequtils is gone and linux-cpupower replaced it" {
+  local shared="$PIPELINE_DIR/manifests/packages/shared.list"
+  # Debian removed cpufrequtils (out of testing 2023-10-28, unstable 2024-06-16).
+  # It has no installation candidate on trixie, so an active entry is a build
+  # failure — `E: Unable to locate package cpufrequtils`.
+  run ! grep -Eq '^cpufrequtils([[:space:]]|$)' "$shared"
+  grep -Eq '^linux-cpupower([[:space:]]|$)' "$shared"
+}
+
+@test "trixie-migration: the dead /etc/default/cpufrequtils write is gone from BOTH writers" {
+  # linux-cpupower ships exactly one file, /usr/bin/cpupower — no init script, no
+  # unit, no /etc/default hook — and nothing in trixie reads this path. Keeping
+  # the write would be a config file with no reader: a green build, a booting
+  # image, and a governor silently never applied. Both the LIVE runtime postinst
+  # and its customize twin must be clean.
+  #
+  # Both files now EXPLAIN the removal in a comment, and that comment necessarily
+  # quotes the retired line — so the assertion is on executable text only, with
+  # comments stripped. Grepping the raw file would match the explanation and make
+  # this test unfixable-by-construction.
+  local f code
+  for f in "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
+           "$PIPELINE_DIR/mkosi/customize/sysctl-tuning.sh"; do
+    code="$(grep -Ev '^[[:space:]]*#' "$f")"
+    [[ "$code" != */etc/default/cpufrequtils* ]]
+    [[ "$code" != *GOVERNOR=* ]]
+  done
+}
+
+@test "trixie-migration: ceralive-cpu-governor is the replacement applier and is wired" {
+  # Artifacts exist...
+  [ -f "$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.sh" ]
+  [ -f "$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.service" ]
+  # ...the installer installs and enables both halves...
+  local hw="$PIPELINE_DIR/mkosi/customize/postinst.d/hardware.sh"
+  grep -q 'setup_cpu_governor()' "$hw"
+  grep -q 'ceralive-cpu-governor.sh' "$hw"
+  grep -q 'ceralive-cpu-governor.service' "$hw"
+  grep -q 'enable_service ceralive-cpu-governor.service' "$hw"
+  # ...and configure_services actually calls it (an installed-but-uncalled setup
+  # function is the dead-writer trap this repo has already shipped twice).
+  grep -q '^[[:space:]]*setup_cpu_governor$' "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+}
+
+@test "trixie-migration: the governor unit pins a governor the encoder wants and writes nothing else" {
+  local sh="$PIPELINE_DIR/mkosi/runtime/ceralive-cpu-governor.sh"
+  grep -q 'performance' "$sh"
+  # It may drive the governor and NOTHING else — the same "move the policy, never
+  # replace the kernel's driver" rule setup_fan_curve established. The script's
+  # header states that restraint in prose, so the assertion runs on executable
+  # text with comments stripped rather than on the raw file.
+  local code
+  code="$(grep -Ev '^[[:space:]]*#' "$sh")"
+  [[ "$code" != *scaling_setspeed* ]]
+  [[ "$code" != *scaling_max_freq* ]]
+  [[ "$code" != *scaling_min_freq* ]]
+  # The only sysfs node it may READ per policy is the governor and its menu.
+  [[ "$code" == *scaling_governor* ]]
+}
+
+@test "trixie-migration: rauc-hawkbit-updater stays a comment, not an active apt line" {
+  # There is still no trixie-native package (verified against the real trixie
+  # index with every component enabled); Debian's 1.4-1 reached sid/forky only.
+  # An active line here breaks the whole-list install on any host lacking the
+  # pre-staged backport.
+  local shared="$PIPELINE_DIR/manifests/packages/shared.list"
+  run ! grep -Eq '^rauc-hawkbit-updater([[:space:]]|$)' "$shared"
+  grep -q 'rauc-hawkbit-updater' "$shared"
 }
 
 # ===========================================================================
@@ -1576,11 +1706,22 @@ REPRO
 
   # Every package the add-on's `provides` paths come from is also in the delta, so
   # an operator gets the same toolbox whichever route they are on.
+  #
+  # `pulseaudio` was REMOVED from BOTH sides at todo 28 rather than dropped from one:
+  # `pipewire-alsa` (now mandatory in shared.list) declares `Conflicts: pulseaudio`,
+  # so a debug image carrying it fails its single apt transaction. The two routes
+  # therefore still carry the IDENTICAL set, which is the property this loop exists
+  # to pin — and the assertion below makes the removal explicit on both sides so a
+  # future re-add has to break a test rather than a build.
   local p
-  for p in alsa-utils pulseaudio usbutils pciutils lsof i2c-tools can-utils htop \
+  for p in alsa-utils usbutils pciutils lsof i2c-tools can-utils htop \
            iotop nethogs vnstat nano iperf3 socat netcat-openbsd; do
     grep -qxF "$p" <(active_pkgs_of "$(DEV_DELTA_LIST)")
   done
+  run grep -qxF pulseaudio <(active_pkgs_of "$(DEV_DELTA_LIST)")
+  [ "$status" -ne 0 ]
+  run grep -Fq '/usr/bin/pulseaudio' "$descriptor"
+  [ "$status" -ne 0 ]
 }
 
 @test "dev delta: 'development' is not a board family, so no board can resolve the delta as one" {
@@ -1627,8 +1768,8 @@ REPRO
 #
 #     THE TWO TRAPS THESE TESTS EXIST FOR:
 #       (a) A hardcoded package list would freeze ONE board. The U-Boot package
-#           name differs per board (linux-u-boot-rock-5b-plus-vendor vs
-#           linux-u-boot-orangepi5-plus-vendor), so the set must come from the
+#           name differs per board (linux-u-boot-rock-5b-plus-edge vs
+#           linux-u-boot-orangepi5-plus-edge), so the set must come from the
 #           resolved manifest env, and the four env vars must therefore stay on
 #           the orchestrate.sh env_names <-> mkosi.conf PassEnvironment= lockstep.
 #       (b) Freezing a FIRST-PARTY package would break the ordinary software
@@ -1653,19 +1794,30 @@ REPRO
   done
 
   # A literal BSP package name here would silently freeze one board only.
-  run grep -nE 'linux-image-vendor-rk35xx|linux-dtb-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"$body"
+  run grep -nE 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"$body"
   [ "$status" -ne 0 ]
 }
 
 @test "kernel freeze: both shipped RK3588 boards resolve a U-Boot package for it to hold" {
-  # The env the freeze reads is populated from these manifest fields; if a board
-  # ever stopped declaring one, its bootloader would silently drop out of the
-  # freeze while the kernel stayed held.
-  grep -Fq 'linux-u-boot-rock-5b-plus-vendor' "$PIPELINE_DIR/manifests/boards/rock-5b-plus.yaml"
-  grep -Fq 'linux-u-boot-orangepi5-plus-vendor' "$PIPELINE_DIR/manifests/boards/orange-pi-5-plus.yaml"
-  grep -Fq 'linux-image-vendor-rk35xx' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
-  grep -Fq 'linux-dtb-vendor-rk35xx' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
-  grep -Fq 'armbian-firmware' "$PIPELINE_DIR/manifests/families/rk3588.yaml"
+  # The env the freeze reads is populated by the RESOLVER, so this asserts the
+  # resolved default rather than a grep of the manifest text.
+  local board out
+  for board in rock-5b-plus orange-pi-5-plus; do
+    out="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
+    [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-"*"-edge'"* ]]
+    [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
+    [[ "$out" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+    # No separate DTB package on any track now — bindeb-pkg ships the in-tree
+    # DTBs inside the linux-image deb, so the freeze is a 3-package set.
+    [[ "$out" == *"DTB_PACKAGES=''"* ]]
+  done
+
+  # The debug sibling inherits the board's TOP-LEVEL U-Boot instead of the
+  # production `-edge` override, so the freeze must follow the manifest there too
+  # rather than assuming one package name per board.
+  out="$(bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null")"
+  [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-vendor'"* ]]
+  [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588-test'"* ]]
 }
 
 @test "kernel freeze: NO first-party CeraLive package may ever be held" {
@@ -1746,6 +1898,7 @@ REPRO
 }
 
 @test "kernel freeze: freeze_boot_packages is on the drift gate's consolidated list" {
+  serialize working-tree   # postinst-wiring.bats mutates the tree this gate reads
   grep -Fq 'freeze_boot_packages' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   [ "$status" -eq 0 ]

@@ -52,8 +52,13 @@ vm.dirty_ratio = 15
 vm.dirty_background_ratio = 5
 EOF
 
-  log_info "selecting performance CPU governor (/etc/default/cpufrequtils)"
-  echo 'GOVERNOR="performance"' >/etc/default/cpufrequtils
+  # CPU governor: deliberately NOT written here. This module is the canonical
+  # twin of the runtime postinst, and that writer dropped the same line at the
+  # trixie migration. `GOVERNOR="performance"` in /etc/default/cpufrequtils was
+  # only ever honoured by the cpufrequtils package's own sysv init script;
+  # Debian removed cpufrequtils, and the successor linux-cpupower ships nothing
+  # that reads it. The governor is applied by ceralive-cpu-governor.service
+  # instead (postinst.d/hardware.sh::setup_cpu_governor).
 
   log_info "configuring tmpfs /tmp (noatime, 1G) in /etc/fstab"
   if ! grep -q '^tmpfs[[:space:]]\+/tmp[[:space:]]' /etc/fstab 2>/dev/null; then

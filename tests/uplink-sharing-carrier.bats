@@ -86,7 +86,9 @@ executable_lines() {
 
 @test "packages: conntrack is present with the mark-scoped-flush rationale" {
   # The BINARY package is `conntrack`; `conntrack-tools` is only its SOURCE name and
-  # does not exist in bookworm, so asking for it fails the runtime layer outright.
+  # has no binary of that name in trixie either (verified against the real trixie
+  # index: `conntrack` 1:1.4.8-2 resolves, `conntrack-tools` has no candidate), so
+  # asking for it fails the runtime layer outright.
   run grep -Ex 'conntrack[[:space:]]*(#.*)?' "$SHARED_LIST"
   [ "$status" -eq 0 ]
 
@@ -111,7 +113,7 @@ executable_lines() {
 
 # --- (b) kernel-symbol availability matrix, BOTH tracks ----------------------
 
-@test "kernel matrix: the committed note records BOTH tracks and names the fallbacks" {
+@test "kernel matrix: the committed note records the PRODUCTION track and names the fallbacks" {
   # The acceptance criterion is that the matrix NAMES THE TRUTH including
   # fallbacks — not that any row is green. Asserting "cake present" here would be
   # asserting the measurement rather than the record of it.
@@ -119,13 +121,8 @@ executable_lines() {
   local body
   body="$(cat "$MATRIX")"
 
-  # Track (i): the shipped vendor kernel, identified by the exact package+release
-  # and by the SHA-256 that ties the measured bytes to bsp-baseline.json.
-  [[ "$body" == *"linux-image-vendor-rk35xx"* ]]
-  [[ "$body" == *"6.1.115-vendor-rk35xx"* ]]
-  [[ "$body" == *"7b70fb2d1148021275a648fb0a4c0177236c3f54bef69a02a771d6ae7d9055ed"* ]]
-
-  # Track (ii): the edge fragment.
+  # The PRODUCTION track: the edge fragment, which is what every shipped image
+  # now builds from.
   [[ "$body" == *"rk3588-edge.fragment"* ]]
 
   # Every qdisc the shaper can install, and the classifier that bridges to it.
@@ -135,17 +132,28 @@ executable_lines() {
   [[ "$body" == *"NET_SCH_PRIO"* ]]
   [[ "$body" == *"NET_CLS_FW"* ]]
 
-  # The fallback must be NAMED, not implied — cake being present on the vendor
-  # kernel does not retire todo 10's runtime HTB fallback.
+  # The fallback must be NAMED, not implied — cake having been present on a
+  # measured kernel does not retire todo 10's runtime HTB fallback.
   [[ "$body" == *"fallback"* ]]
 }
 
-@test "kernel matrix: the SHA-256 it cites is the committed bsp-baseline value" {
-  # Non-vacuity for the row above: a hardcoded digest in a note proves nothing
-  # unless it is the same digest the drift-guard defends.
-  local baseline
-  baseline="$(cat "$PIPELINE_DIR/manifests/bsp-baseline.json")"
-  [[ "$baseline" == *"7b70fb2d1148021275a648fb0a4c0177236c3f54bef69a02a771d6ae7d9055ed"* ]]
+@test "kernel matrix: the retired vendor track is kept, and kept clearly HISTORICAL" {
+  # Replaces the old "the SHA-256 it cites is the committed bsp-baseline value"
+  # non-vacuity leg, whose subject is deleted: bsp-baseline.json is now the
+  # UNSEEDED scaffold, because no family fetches a prebuilt kernel .deb for the
+  # drift-guard to hash. The measurement itself is still worth keeping — it is
+  # the only record of what that kernel carried — but a reader must not be able
+  # to mistake it for a live claim, so the marker is asserted rather than assumed.
+  local body
+  body="$(cat "$MATRIX")"
+  [[ "$body" == *"HISTORICAL"* ]]
+  [[ "$body" == *"RETIRED TRACK"* ]]
+  [[ "$body" == *"vendor-kernel-final"* ]]
+
+  # …and the baseline it used to cross-check really is unseeded now.
+  run python3 -c "import json; d=json.load(open('$PIPELINE_DIR/manifests/bsp-baseline.json')); assert d['version'] is None and d['sha256'] is None; print('UNSEEDED')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UNSEEDED"* ]]
 }
 
 @test "edge fragment: the steering + shaping closure is declared with every parent" {

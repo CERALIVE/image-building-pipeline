@@ -160,10 +160,12 @@ A module may ship either way and both satisfy the stack:
 - **Built-in (`=y`)** — compiled into the kernel image and listed in
   `lib/modules/<kver>/modules.builtin` (no `.ko` file ships).
 
-On the current Armbian vendor BSP kernel (`linux-image-vendor-rk35xx`,
-`manifests/families/rk3588.yaml`), `qmi_wwan`, `cdc_mbim`, `cdc_wdm`, and
-`option` ship loadable (`=m`), while `cdc_ether` and `cdc_ncm` are built-in
-(`=y`). Both forms are accepted.
+As measured on the Armbian vendor BSP kernel this image used to ship (that track
+is now retired — production builds the mainline kernel from pinned source),
+`qmi_wwan`, `cdc_mbim`, `cdc_wdm` and `option` shipped loadable (`=m`), while
+`cdc_ether` and `cdc_ncm` were built-in (`=y`). Both forms are accepted, and the
+check makes no assumption about which a given kernel chooses — see
+`manifests/kernel/rk3588-edge.fragment` for what the production kernel declares.
 
 ---
 

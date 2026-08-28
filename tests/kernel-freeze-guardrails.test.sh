@@ -88,13 +88,13 @@ grep -q 'Pin: origin' <<<"${fn_code}" \
   && fail "freeze_boot_packages() emits an origin pin — locally-installed boot .debs carry NO apt-origin identity on the device, so an origin pin can never match them"
 
 # The freeze set must come from the resolved manifest, never a hardcoded name:
-# the U-Boot package differs per board (linux-u-boot-rock-5b-plus-vendor vs
-# linux-u-boot-orangepi5-plus-vendor), so a literal would freeze one board only.
+# the U-Boot package differs per board (linux-u-boot-rock-5b-plus-edge vs
+# linux-u-boot-orangepi5-plus-edge), so a literal would freeze one board only.
 for var in KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES; do
   grep -q "\${${var}" <<<"${fn_body}" \
     || fail "freeze_boot_packages() no longer reads \$${var} — the freeze set must come from the resolved manifest"
 done
-grep -Eq 'linux-image-vendor-rk35xx|linux-u-boot-|armbian-firmware' <<<"${fn_body}" \
+grep -Eq 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"${fn_body}" \
   && fail "freeze_boot_packages() hardcodes a BSP package name — the set is manifest-resolved so every board (and the per-board U-Boot package) is covered"
 
 # Every first-party package must be refused by name.
@@ -169,23 +169,29 @@ run_freeze() {
   '
 }
 
-# --- B1: the happy path, modelled on the real rock-5b-plus resolve ------------
+# --- B1: the happy path, on a FULL five-package boot BSP ----------------------
+# Synthetic package names on purpose. No shipped family resolves a prebuilt
+# kernel + DTB pair any more (rk3588 builds from source, x86_64 has no DTB), but
+# freeze_boot_packages is name-agnostic by construction and this is the only leg
+# that exercises the complete shape — kernel + DTB + board U-Boot + a TWO-entry
+# firmware list — including the first-party refusal. B3 below is the shape the
+# production resolve actually produces.
 B1="${TMPROOT}/b1"; mkdir -p "${B1}/etc/apt/preferences.d"
-make_stubs "${B1}" "linux-image-vendor-rk35xx 26.5.1
-linux-dtb-vendor-rk35xx 26.5.1
+make_stubs "${B1}" "linux-image-generic-rk35xx 26.5.1
+linux-dtb-generic-rk35xx 26.5.1
 linux-u-boot-rock-5b-plus-vendor 26.5.1
 armbian-firmware 26.8.1
-libmali-valhall-g610-g24p0-wayland-gbm 1.9-1
+rk3588-extra-firmware 1.9-1
 cerastream 2026.6.1
 ceralive-device 2026.6.4"
-KERNEL_PACKAGES="linux-image-vendor-rk35xx" \
-DTB_PACKAGES="linux-dtb-vendor-rk35xx" \
+KERNEL_PACKAGES="linux-image-generic-rk35xx" \
+DTB_PACKAGES="linux-dtb-generic-rk35xx" \
 UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-vendor" \
-FIRMWARE_PACKAGES="armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm" \
+FIRMWARE_PACKAGES="armbian-firmware rk3588-extra-firmware" \
   run_freeze "${B1}" "${B1}/etc/apt/preferences.d" >/dev/null
 
 held_b1="$(sort -u "${B1}/holds" | tr '\n' ' ')"
-expected_b1="armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm linux-dtb-vendor-rk35xx linux-image-vendor-rk35xx linux-u-boot-rock-5b-plus-vendor "
+expected_b1="armbian-firmware linux-dtb-generic-rk35xx linux-image-generic-rk35xx linux-u-boot-rock-5b-plus-vendor rk3588-extra-firmware "
 [[ "${held_b1}" == "${expected_b1}" ]] \
   || fail "B1 hold set wrong.\n  got:      ${held_b1}\n  expected: ${expected_b1}"
 for pkg in cerastream ceralive-device; do
@@ -195,7 +201,7 @@ done
 
 pref_b1="${B1}/etc/apt/preferences.d/ceralive-kernel-freeze"
 [[ -f "${pref_b1}" ]] || fail "B1 did not write ${pref_b1}"
-grep -qxF 'Package: linux-image-vendor-rk35xx' "${pref_b1}" || fail "B1 pin file missing the kernel package stanza"
+grep -qxF 'Package: linux-image-generic-rk35xx' "${pref_b1}" || fail "B1 pin file missing the kernel package stanza"
 grep -qxF 'Pin: version 26.5.1' "${pref_b1}" || fail "B1 pin file does not pin the INSTALLED version (26.5.1)"
 grep -qxF 'Package: linux-u-boot-rock-5b-plus-vendor' "${pref_b1}" || fail "B1 pin file missing the board U-Boot package"
 grep -qxF 'Pin: version 26.8.1' "${pref_b1}" || fail "B1 pin file does not carry armbian-firmware's own installed version"
@@ -212,17 +218,17 @@ grep -qE '^Pin: (origin|release) ' "${pref_b1}" \
 
 pass "Part B1 OK (5 boot packages held + pinned to their installed versions; cerastream/ceralive-device untouched)"
 
-# --- B2: the OTHER board's U-Boot package, same code path --------------------
+# --- B2: the OTHER board's U-Boot package, same code path (also synthetic) ----
 B2="${TMPROOT}/b2"; mkdir -p "${B2}/prefs"
-make_stubs "${B2}" "linux-image-vendor-rk35xx 26.5.1
-linux-dtb-vendor-rk35xx 26.5.1
+make_stubs "${B2}" "linux-image-generic-rk35xx 26.5.1
+linux-dtb-generic-rk35xx 26.5.1
 linux-u-boot-orangepi5-plus-vendor 26.5.1
 armbian-firmware 26.8.1
-libmali-valhall-g610-g24p0-wayland-gbm 1.9-1"
-KERNEL_PACKAGES="linux-image-vendor-rk35xx" \
-DTB_PACKAGES="linux-dtb-vendor-rk35xx" \
+rk3588-extra-firmware 1.9-1"
+KERNEL_PACKAGES="linux-image-generic-rk35xx" \
+DTB_PACKAGES="linux-dtb-generic-rk35xx" \
 UBOOT_PACKAGES="linux-u-boot-orangepi5-plus-vendor" \
-FIRMWARE_PACKAGES="armbian-firmware libmali-valhall-g610-g24p0-wayland-gbm" \
+FIRMWARE_PACKAGES="armbian-firmware rk3588-extra-firmware" \
   run_freeze "${B2}" "${B2}/prefs" >/dev/null
 grep -qxF 'linux-u-boot-orangepi5-plus-vendor' "${B2}/holds" \
   || fail "B2 did not hold the orange-pi-5-plus U-Boot package — the per-board name is not being picked up from the manifest"
@@ -231,11 +237,51 @@ grep -qxF 'linux-u-boot-rock-5b-plus-vendor' "${B2}/holds" \
 
 pass "Part B2 OK (per-board U-Boot package resolved from the manifest, not hardcoded)"
 
+# --- B3: the PRODUCTION resolve after the source-built-kernel flip ------------
+# The default path now builds the kernel from source, so the freeze set changed
+# shape rather than content: the kernel package is the BUILT name, there is NO
+# separate DTB package at all (bindeb-pkg ships the in-tree DTBs inside the
+# linux-image deb), the U-Boot package is the board's `-edge` one, and libmali is
+# gone from firmware. The freeze must follow the manifest into all four without
+# any edit, which is exactly what a hardcoded name would have prevented.
+B3="${TMPROOT}/b3"; mkdir -p "${B3}/prefs"
+make_stubs "${B3}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware 26.8.3
+cerastream 2026.6.1"
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware" \
+  run_freeze "${B3}" "${B3}/prefs" >/dev/null
+
+held_b3="$(sort -u "${B3}/holds" | tr '\n' ' ')"
+expected_b3="armbian-firmware linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge "
+[[ "${held_b3}" == "${expected_b3}" ]] \
+  || fail "B3 hold set wrong.\n  got:      ${held_b3}\n  expected: ${expected_b3}"
+
+pref_b3="${B3}/prefs/ceralive-kernel-freeze"
+[[ -f "${pref_b3}" ]] || fail "B3 did not write ${pref_b3}"
+grep -qxF 'Package: linux-image-7.2.0-ceralive-rk3588' "${pref_b3}" \
+  || fail "B3 pin file does not name the SOURCE-BUILT kernel package"
+grep -qxF 'Pin: version 7.2.0-ceralive1' "${pref_b3}" \
+  || fail "B3 pin file does not pin the source-built package's own Debian version"
+[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b3}")" == "3" ]] \
+  || fail "B3 pin file should carry exactly 3 pinned packages (no DTB package on this path)"
+grep -qE '^Package: linux-dtb-' "${pref_b3}" \
+  && fail "B3 pinned a separate DTB package the source-built path does not install"
+grep -q 'libmali' "${pref_b3}" \
+  && fail "B3 pinned libmali, which no track installs any more"
+grep -qxF 'cerastream' "${B3}/holds" \
+  && fail "B3 froze the first-party package 'cerastream'"
+
+pass "Part B3 OK (source-built kernel + edge U-Boot held; empty DTB list is a 3-package freeze, not an error)"
+
 # --- C1: a first-party package in the freeze set must ABORT ------------------
 C1="${TMPROOT}/c1"; mkdir -p "${C1}/prefs"
-make_stubs "${C1}" "linux-image-vendor-rk35xx 26.5.1
+make_stubs "${C1}" "linux-image-generic-rk35xx 26.5.1
 cerastream 2026.6.1"
-if KERNEL_PACKAGES="linux-image-vendor-rk35xx" FIRMWARE_PACKAGES="cerastream" \
+if KERNEL_PACKAGES="linux-image-generic-rk35xx" FIRMWARE_PACKAGES="cerastream" \
      run_freeze "${C1}" "${C1}/prefs" >"${C1}/out" 2>"${C1}/err"; then
   fail "C1: freeze_boot_packages ACCEPTED a first-party package (cerastream) in the freeze set"
 fi
@@ -247,8 +293,8 @@ pass "Part C1 OK (a first-party package in the boot-BSP fields aborts the build,
 
 # --- C2: a hold that does not land must ABORT --------------------------------
 C2="${TMPROOT}/c2"; mkdir -p "${C2}/prefs"
-make_stubs "${C2}" "linux-image-vendor-rk35xx 26.5.1" 0
-if KERNEL_PACKAGES="linux-image-vendor-rk35xx" \
+make_stubs "${C2}" "linux-image-generic-rk35xx 26.5.1" 0
+if KERNEL_PACKAGES="linux-image-generic-rk35xx" \
      run_freeze "${C2}" "${C2}/prefs" >"${C2}/out" 2>"${C2}/err"; then
   fail "C2: a hold that silently did not land was accepted — that ships an apt-upgradable kernel"
 fi
@@ -260,17 +306,17 @@ pass "Part C2 OK (a hold that does not land fails the build; no pin file is writ
 
 # --- C3: full device build with a declared-but-absent boot package -> ABORT ---
 C3="${TMPROOT}/c3"; mkdir -p "${C3}/prefs"
-make_stubs "${C3}" "linux-image-vendor-rk35xx 26.5.1"
-if KERNEL_PACKAGES="linux-image-vendor-rk35xx" DTB_PACKAGES="linux-dtb-vendor-rk35xx" \
+make_stubs "${C3}" "linux-image-generic-rk35xx 26.5.1"
+if KERNEL_PACKAGES="linux-image-generic-rk35xx" DTB_PACKAGES="linux-dtb-generic-rk35xx" \
    INSTALL_BOOT_BSP=1 run_freeze "${C3}" "${C3}/prefs" >"${C3}/out" 2>"${C3}/err"; then
   fail "C3: INSTALL_BOOT_BSP=1 with an uninstalled declared boot package was accepted — the freeze would be silently partial"
 fi
-grep -q 'linux-dtb-vendor-rk35xx' "${C3}/err" || fail "C3 abort message does not name the absent package: $(cat "${C3}/err")"
+grep -q 'linux-dtb-generic-rk35xx' "${C3}/err" || fail "C3 abort message does not name the absent package: $(cat "${C3}/err")"
 
 # --- C4: parity build (INSTALL_BOOT_BSP=0) skips cleanly ---------------------
 C4="${TMPROOT}/c4"; mkdir -p "${C4}/prefs"
 make_stubs "${C4}" ""
-KERNEL_PACKAGES="linux-image-vendor-rk35xx" DTB_PACKAGES="linux-dtb-vendor-rk35xx" \
+KERNEL_PACKAGES="linux-image-generic-rk35xx" DTB_PACKAGES="linux-dtb-generic-rk35xx" \
   INSTALL_BOOT_BSP=0 run_freeze "${C4}" "${C4}/prefs" >/dev/null \
   || fail "C4: a kernel-less parity build (INSTALL_BOOT_BSP=0) must not fail the freeze"
 [[ -s "${C4}/holds" ]] && fail "C4 held a package that is not installed"
@@ -307,7 +353,7 @@ Description: kernel-freeze test fixture
 CTRL
   dpkg-deb --build --root-owner-group "${root}" "${REPO}/${name}_${version}_all.deb" >/dev/null
 }
-build_deb linux-image-vendor-rk35xx 99.9.9
+build_deb linux-image-generic-rk35xx 99.9.9
 # CalVer: the available version must sort ABOVE the installed 2026.6.1, and dpkg
 # compares the leading numeric component, so "99.9.9" would be a DOWNGRADE here.
 build_deb cerastream 2026.9.9
@@ -329,7 +375,7 @@ printf 'deb [trusted=yes] file://%s ./\n' "${REPO}" >"${APTROOT}/etc/sources.lis
 write_status() {
   local kernel_status="$1"
   cat >"${APTROOT}/status" <<STATUS
-Package: linux-image-vendor-rk35xx
+Package: linux-image-generic-rk35xx
 Status: ${kernel_status}
 Priority: optional
 Section: kernel
@@ -371,21 +417,21 @@ rm -f "${APTROOT}/etc/preferences.d/"*
 write_status "install ok installed"
 apt_sim update >/dev/null 2>&1
 d0="$(apt_sim -s upgrade 2>&1 || true)"
-grep -q '^Inst linux-image-vendor-rk35xx' <<<"${d0}" \
+grep -q '^Inst linux-image-generic-rk35xx' <<<"${d0}" \
   || fail "D0 non-vacuity FAILED: apt does not offer the kernel upgrade even without a freeze, so the fixture proves nothing.\n${d0}"
 
-pass "Part D0 OK (non-vacuity: unfrozen, 'apt-get -s upgrade' DOES offer linux-image-vendor-rk35xx 26.5.1 -> 99.9.9)"
+pass "Part D0 OK (non-vacuity: unfrozen, 'apt-get -s upgrade' DOES offer linux-image-generic-rk35xx 26.5.1 -> 99.9.9)"
 
 # --- D1 the dpkg hold alone stops it -----------------------------------------
 write_status "hold ok installed"
 d1="$(apt_sim -s upgrade 2>&1 || true)"
-grep -q '^Inst linux-image-vendor-rk35xx' <<<"${d1}" \
+grep -q '^Inst linux-image-generic-rk35xx' <<<"${d1}" \
   && fail "D1: the dpkg hold did NOT stop 'apt-get -s upgrade' from replacing the kernel.\n${d1}"
 
 # …and it also stops the EXPLICIT install form, which the pin cannot.
-d1b="$(apt_sim -s install linux-image-vendor-rk35xx 2>&1 || true)"
-grep -q '^Inst linux-image-vendor-rk35xx' <<<"${d1b}" \
-  && fail "D1: the dpkg hold did NOT stop an explicit 'apt-get install linux-image-vendor-rk35xx'.\n${d1b}"
+d1b="$(apt_sim -s install linux-image-generic-rk35xx 2>&1 || true)"
+grep -q '^Inst linux-image-generic-rk35xx' <<<"${d1b}" \
+  && fail "D1: the dpkg hold did NOT stop an explicit 'apt-get install linux-image-generic-rk35xx'.\n${d1b}"
 
 pass "Part D1 OK (dpkg hold blocks both 'upgrade' and an explicit 'install' of the kernel)"
 
@@ -393,13 +439,13 @@ pass "Part D1 OK (dpkg hold blocks both 'upgrade' and an explicit 'install' of t
 # Generated by the REAL function, from the REAL installed version, so this tests
 # the shipped pin format rather than a hand-written approximation.
 write_status "install ok installed"
-D2="${TMPROOT}/d2"; make_stubs "${D2}" "linux-image-vendor-rk35xx 26.5.1"
-KERNEL_PACKAGES="linux-image-vendor-rk35xx" \
+D2="${TMPROOT}/d2"; make_stubs "${D2}" "linux-image-generic-rk35xx 26.5.1"
+KERNEL_PACKAGES="linux-image-generic-rk35xx" \
   run_freeze "${D2}" "${APTROOT}/etc/preferences.d" >/dev/null
 [[ -f "${APTROOT}/etc/preferences.d/ceralive-kernel-freeze" ]] \
   || fail "D2: the freeze function wrote no pin file into the synthetic apt root"
 d2="$(apt_sim -s upgrade 2>&1 || true)"
-grep -q '^Inst linux-image-vendor-rk35xx' <<<"${d2}" \
+grep -q '^Inst linux-image-generic-rk35xx' <<<"${d2}" \
   && fail "D2: the shipped name+version pin did NOT hold the kernel at its installed version.\n${d2}"
 
 pass "Part D2 OK (the shipped name+version pin alone holds the kernel, with no dpkg hold in play)"
@@ -427,12 +473,18 @@ if [[ -n "${CERALIVE_FREEZE_ROOTFS_TAR:-}" ]]; then
 
   status_file="${E}/var/lib/dpkg/status"
   held_in_image="$(awk '/^Package: /{p=$2} /^Status: hold /{print p}' "${status_file}" | sort -u)"
-  for pkg in linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx armbian-firmware; do
+  # The PRODUCTION freeze set after the mainline flip: the SOURCE-BUILT kernel
+  # package, armbian-firmware, and the board's `-edge` U-Boot. There is no
+  # separate DTB package on this path at all — bindeb-pkg ships the in-tree DTBs
+  # inside the linux-image deb — so demanding one here would fail a correct image.
+  for pkg in linux-image-7.2.0-ceralive-rk3588 armbian-firmware; do
     grep -qxF "${pkg}" <<<"${held_in_image}" \
       || fail "E: '${pkg}' is NOT held in the built rootfs — the shipped image's kernel can be replaced by apt"
   done
-  grep -qE '^linux-u-boot-.*-vendor$' <<<"${held_in_image}" \
+  grep -qE '^linux-u-boot-.*-edge$' <<<"${held_in_image}" \
     || fail "E: no board U-Boot package is held in the built rootfs"
+  grep -qE '^linux-dtb-' <<<"${held_in_image}" \
+    && fail "E: a separate DTB package is held — the source-built path installs none"
   for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive; do
     grep -qxF "${pkg}" <<<"${held_in_image}" \
       && fail "E: first-party package '${pkg}' is HELD in the built rootfs — it must stay apt-updatable"

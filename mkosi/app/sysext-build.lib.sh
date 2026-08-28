@@ -25,6 +25,15 @@ SYSEXT_BUILD_LIB_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/app-layer/interface.sh
 source "${SYSEXT_BUILD_LIB_HERE}/../../lib/app-layer/interface.sh"
 
+# The descriptors below are sourced BEFORE select_backend pulls in the sysext
+# backend, so OS_VERSION_ID has to be resolved here rather than left to that
+# backend's own load — a descriptor that expanded an unset OS_VERSION_ID would
+# stamp an empty VERSION_ID into extension-release and the kernel would refuse to
+# merge the .raw with no build-time error at all.
+# shellcheck source=../../lib/shared/target-release-lib.sh
+source "${SYSEXT_BUILD_LIB_HERE}/../../lib/shared/target-release-lib.sh"
+target_release_load
+
 # ---------------------------------------------------------------------------
 # deb_extract_data <deb> <dest_dir>
 #   Unpack a .deb's data.tar.{zst,xz,gz} payload into <dest_dir>. No dpkg needed.

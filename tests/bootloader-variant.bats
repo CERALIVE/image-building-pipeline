@@ -9,14 +9,14 @@ bats_require_minimum_version 1.5.0
 #       STILL refuses anything else,
 #   (B) the resolver makes a board's `variant_overrides.<v>.uboot_packages` win
 #       over its top-level one, family -> variant -> board order intact, while
-#       the production vendor path stays BYTE-IDENTICAL to its golden fixtures,
+#       the production path stays BYTE-IDENTICAL to its golden fixtures,
 #   (C) lib/write-bootloader.sh selects blobs on the SAME board x variant tuple,
 #       refuses an unmapped one, and proves what it wrote by reading it back and
 #       hashing it against a committed SHA-256.
 #
 # The load-bearing property is negative, exactly as it is for `variants:` itself:
 # giving the edge track its own U-Boot must not move the production path by a
-# byte. That is pinned against the committed vendor-baseline fixtures AND with an
+# byte. That is pinned against the committed production-baseline fixtures AND an
 # explicit non-vacuity leg, because a golden comparison that silently compares
 # nothing is worse than no comparison at all.
 #
@@ -134,7 +134,7 @@ make_image() {
 }
 
 # ===========================================================================
-# (B) RESOLVER — edge exact, vendor byte-identical, and both proven non-vacuous.
+# (B) RESOLVER — edge exact, production byte-identical, both proven non-vacuous.
 # ===========================================================================
 
 @test "resolver: --variant edge resolves EXACTLY todo-1's pinned U-Boot package per board" {
@@ -158,37 +158,41 @@ make_image() {
     [ -n "$line" ]
     [ "$(printf '%s\n' "$line" | wc -w)" -eq 1 ]
     case "$line" in
-      *-vendor) printf 'vendor U-Boot survived into the edge resolve for %s: %s\n' "$board" "$line" >&2; false ;;
+      *-vendor) printf 'the board top-level U-Boot survived into the edge resolve for %s: %s\n' "$board" "$line" >&2; false ;;
     esac
   done
 }
 
-@test "resolver: PRODUCTION resolve is BYTE-IDENTICAL to the committed vendor baselines" {
-  # These fixtures were captured before any of this existed. A diff here is a
-  # defect in the change, never a reason to regenerate the fixture.
+@test "resolver: the PRODUCTION resolve is BYTE-IDENTICAL to the committed baselines" {
+  # A diff here is a defect in the change, never a reason to regenerate the
+  # fixture. x86-minipc declares no variants at all, so its bare default is still
+  # the fixture it always was, byte-unchanged.
   local board
   for board in rock-5b-plus orange-pi-5-plus x86-minipc; do
     run bash -c "'$RESOLVE_SH' '$board' 2>/dev/null"
     [ "$status" -eq 0 ]
-    if ! diff -u "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
-      printf 'vendor path moved for %s\n' "$board" >&2
+    if ! diff -u "$(PRODUCTION_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$output") >&2; then
+      printf 'production path moved for %s\n' "$board" >&2
       false
     fi
   done
 }
 
 @test "resolver: the byte-identity proof HAS TEETH on the U-Boot field" {
-  # Non-vacuity, aimed at THIS change specifically: the same comparison must
-  # FAIL on the edge resolve, and the diff must be the U-Boot line — otherwise
-  # a broken fixture path would let the guard above pass forever.
+  # Non-vacuity, aimed at THIS change specifically: the same comparison must FAIL
+  # on the `edge-test` resolve, and the diff must include the U-Boot line —
+  # otherwise a broken fixture path would let the guard above pass forever.
+  # edge-test is the one remaining variant that inherits the board's TOP-LEVEL
+  # U-Boot package instead of the production `-edge` override, which is exactly
+  # the field under test.
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
-    run bash -c "'$RESOLVE_SH' '$board' --variant edge 2>/dev/null"
+    run bash -c "'$RESOLVE_SH' '$board' --variant edge-test 2>/dev/null"
     [ "$status" -eq 0 ]
     local resolved="$output"
-    run diff -q "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$resolved")
+    run diff -q "$(PRODUCTION_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$resolved")
     [ "$status" -ne 0 ]
-    run diff "$(VENDOR_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$resolved")
+    run diff "$(PRODUCTION_BASELINE_DIR)/${board}.params" <(printf '%s\n' "$resolved")
     [[ "$output" == *"UBOOT_PACKAGES"* ]]
   done
 }
@@ -287,15 +291,30 @@ print(' '.join(sorted(d.get('variants', {}))))")"
   for board in rock-5b-plus orange-pi-5-plus; do
     board_id="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null" \
                 | sed -n "s/^BOARD_ID='\(.*\)'$/\1/p")"
-    for variant in default edge; do
+    for variant in default edge edge-test; do
       flag=""
       [ "$variant" = edge ] && flag="--variant edge"
+      [ "$variant" = edge-test ] && flag="--variant edge-test"
       pkg="$(bash -c "'$RESOLVE_SH' '$board' $flag 2>/dev/null" \
              | sed -n "s/^UBOOT_PACKAGES='\(.*\)'$/\1/p")"
       mapped="$("$(WRITER)" plan --board "$board_id" --variant "$variant" \
                 | awk -F'\t' '{print $5}' | sort -u)"
       [ "$mapped" = "$pkg" ]
     done
+  done
+}
+
+@test "writer: the reserved 'default' rows are byte-identical to the production track's" {
+  # `default_variant: edge` makes the mainline track production, so a real build
+  # reaches the writer with the resolved name `edge`; `default` survives only as
+  # the writer's normalisation of an EMPTY --variant. Both must therefore describe
+  # the same bootloader, and a copy that drifts would write the wrong blob on the
+  # one code path nobody exercises.
+  local board_id
+  for board_id in rock-5b-plus orangepi5-plus; do
+    diff -u \
+      <("$(WRITER)" plan --board "$board_id" --variant default) \
+      <("$(WRITER)" plan --board "$board_id" --variant edge) >&2
   done
 }
 
@@ -320,17 +339,20 @@ print(' '.join(sorted(d.get('variants', {}))))")"
   done
 }
 
-@test "writer: the PRODUCTION OPi split layout is preserved verbatim" {
-  # linux-u-boot-orangepi5-plus-vendor is the ONE pinned package that still
-  # ships the 2017.09 idbloader.img + u-boot.itb pair. Losing it would brick
-  # the shipped production image, which is not what this change is about.
-  run "$(WRITER)" plan --board orangepi5-plus --variant default
+@test "writer: the OPi SPLIT bootloader layout is preserved verbatim" {
+  # linux-u-boot-orangepi5-plus-vendor is the ONE pinned package that still ships
+  # the 2017.09 idbloader.img + u-boot.itb pair. It is not on the production path
+  # — that is the mainline-TF-A `-edge` package — but `edge-test` inherits the
+  # board's top-level U-Boot, so the split writer arm still has a live consumer
+  # and must keep working. (The retired vendor-kernel rows drove the same two
+  # blobs; only their tuples are gone.)
+  run "$(WRITER)" plan --board orangepi5-plus --variant edge-test
   [ "$status" -eq 0 ]
   [[ "$output" == *$'idbloader.img\t64\t512\t'* ]]
   [[ "$output" == *$'u-boot.itb\t16384\t512\t'* ]]
 
-  # The Rock's vendor package is unified, and that asymmetry is real.
-  run "$(WRITER)" plan --board rock-5b-plus --variant default
+  # The Rock's same-package payload is unified, and that asymmetry is real.
+  run "$(WRITER)" plan --board rock-5b-plus --variant edge-test
   [ "$status" -eq 0 ]
   [[ "$output" == $'u-boot-rockchip.bin\t64\t512\t'* ]]
 }
@@ -501,9 +523,9 @@ EOF
 }
 
 @test "wiring: an empty variant is the PRODUCTION path, not an error" {
-  # KERNEL_VARIANT is emitted by the resolver ONLY for a kernel-from-source
-  # variant, so the vendor path legitimately arrives as the empty string. If the
-  # writer rejected it, every production build would fail at Stage 4.
+  # A direct `assemble-disk.sh` invocation can still hand the writer an EMPTY
+  # --variant, which it normalises to the reserved `default`. If the writer
+  # rejected it, that path would fail at Stage 4.
   local bsp="$BATS_TEST_TMPDIR/bsp-e" map="$BATS_TEST_TMPDIR/map-e.tsv"
   local img="$BATS_TEST_TMPDIR/disk-e.raw"
   mkdir -p "$bsp"

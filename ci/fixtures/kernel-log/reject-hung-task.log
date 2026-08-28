@@ -1,5 +1,5 @@
-[    0.000000] Linux version 6.1.115-ceralive-vendor-rk35xx #1 SMP PREEMPT
+[    0.000000] Linux version 7.2.0-ceralive-rk3588 #1 SMP PREEMPT
 [  242.881120] INFO: task arecord:998 blocked for more than 122 seconds.
-[  242.881145]       Not tainted 6.1.115-ceralive-vendor-rk35xx #1
+[  242.881145]       Not tainted 7.2.0-ceralive-rk3588 #1
 [  242.881161] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
 [  242.881181] task:arecord         state:D stack:0     pid:998   ppid:1

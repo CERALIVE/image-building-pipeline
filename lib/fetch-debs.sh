@@ -41,7 +41,7 @@
 #   DEST               staging root           (default: ./out)  -> debs in $DEST/debs/
 #   DRY_RUN            1 to plan-only         (default: auto)
 #   ARMBIAN_APT_URL    Armbian apt base       (default: https://apt.armbian.com)
-#   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)
+#   ARMBIAN_SUITE      Armbian apt suite      (default: bookworm)  suite-literal-ok: the Armbian BSP archive, versioned on Armbian's schedule and orthogonal to the userspace RELEASE
 #   BSP_DEB_VERSIONS_FILE exact BSP package pins (default: manifests registry)
 #   APT_CERALIVE_URL   first-party apt base   (default: https://apt.ceralive.tv)
 #   APT_GPG_PUBLIC_B64 first-party GPG keyring (base64; required for a real fetch)
@@ -102,7 +102,7 @@ case "${ARCH}" in
 esac
 DEST="${DEST:-./out}"
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
-ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"  # suite-literal-ok: Armbian BSP-deb provenance; deriving it from RELEASE would repoint the boot stack at a suite that may not carry the RK35xx vendor BSP
 ARMBIAN_APT_KEYRING="${ARMBIAN_APT_KEYRING:-}"
 ARMBIAN_APT_KEY_FINGERPRINTS=(
   "DF00FAF1C577104B50BF1D0093D6889F9F0E78D5"

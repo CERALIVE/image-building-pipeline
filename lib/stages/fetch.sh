@@ -16,15 +16,14 @@
 # refused rather than honoured.
 #
 # Reads from main()'s frame: board, staging, bsp_dir, firstparty_dir,
-# kernel_build_dir, kernel_extension_build_dir, family_manifest.
+# kernel_build_dir, family_manifest.
 # ---------------------------------------------------------------------------
 stage_fetch() {
   [[ "${CERALIVE_REUSE_STAGING:-0}" != "1" ]] \
     || die "CERALIVE_REUSE_STAGING is forbidden: build inputs must be freshly authenticated"
   rm -rf "${staging}"
   mkdir -p "${staging}"
-  install -d -m 0755 "${bsp_dir}" "${firstparty_dir}" "${kernel_build_dir}" \
-    "${kernel_extension_build_dir}"
+  install -d -m 0755 "${bsp_dir}" "${firstparty_dir}" "${kernel_build_dir}"
 
   log_info "[2/9] fetching .debs (BSP from Armbian + first-party from R2/gh) → ${staging}"
   DEST="${staging}" "${FETCH_DEBS_SH}" --family "${family_manifest}" --dest "${staging}" \

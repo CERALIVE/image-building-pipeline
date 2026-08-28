@@ -28,6 +28,19 @@ document was written. Nothing in this record changes `armbian_branch: vendor` (D
 > paragraph above remains a **`v7.1.7`** measurement — nothing has been built,
 > flashed or booted at `v7.2` on either board. So the re-run this amendment calls
 > for is now a `v7.2` bench campaign, and the decision is doubly unchanged.
+> **SUPERSEDED 2026-08-28 — the promotion this record declined has now HAPPENED.**
+> `manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
+> variant-less build resolves the mainline source-built kernel and the prebuilt
+> vendor BSP is the opt-in `vendor` overlay. Decision D3's KERNEL half is
+> therefore answered; its `rauc_bootloader_adapter: custom` half is untouched.
+> This record is NOT rewritten: it remains the honest ledger of what was measured
+> at `v7.1.5` and why the answer was "no" THEN. The current track index is
+> [`kernel-tracks.md`](kernel-tracks.md); the mainline evidence that changed the
+> answer is `docs/kernel-currency-watch.md` (kill-switch: PROCEED) plus the
+> two-board `7.2.0-ceralive-rk3588` MPP/userspace results it cites. Read the
+> qualification boundary in the README build matrix before treating any of it as
+> a shipped-image claim.
+
 **Inputs:** todo 28 (`task-28-hdmirx-uvc-bench.md`, `task-28-journal-diff-2026-08-06.md`),
 todo 29 (`task-29-h265-probe-runbook.md`), todo 27 (`task-27-sd-boot-validation.md`,
 `task-27-orangepi5plus-build-fixed-2.md`).

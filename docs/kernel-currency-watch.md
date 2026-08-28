@@ -1,29 +1,56 @@
-# Kernel Currency Watch: Vendor 6.1 Lock + Revisit Triggers
+# Kernel Currency Watch: Mainline 7.2 + MPP Userspace
 
-**Decision recorded:** vendor BSP 6.1 + Rockchip MPP — no migration.
-**Selection mechanism:** exact BSP Debian versions ([`manifests/armbian-bsp-deb-versions.txt`](../manifests/armbian-bsp-deb-versions.txt)); the MPP/GPU **userspace** (not in the Armbian feed) is pinned + SHA-256-verified in [`manifests/rk3588-userspace-deb-versions.txt`](../manifests/rk3588-userspace-deb-versions.txt).
+**Decision recorded:** the planned Trixie/mainline 7.2 image can keep the existing
+Rockchip MPP userspace pins unchanged.
+**Kill-switch decision (2026-08-28): PROCEED with W3/W4.**
+**Selection mechanism:** the MPP userspace (not in Debian or the Armbian feed) is
+URL- and SHA-256-pinned in
+[`manifests/rk3588-userspace-deb-versions.txt`](../manifests/rk3588-userspace-deb-versions.txt).
 **Visibility mechanism:** BSP provenance/drift-guard ([`manifests/bsp-baseline.json`](../manifests/bsp-baseline.json), Task 3).
 
 ---
 
 ## The Decision
 
-The image runs `armbian_branch: vendor` (Linux 6.1 Rockchip vendor BSP). The
-streaming engine (`cerastream`) encodes H.265 via **Rockchip MPP** — the mature,
-hardware-accelerated path that the vendor BSP exposes. This is not changing.
+**ACTIONED 2026-08-28.** The kernel flip this document authorised has been made:
+`manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
+variant-less build selects the source-built mainline 7.2 kernel and the prebuilt
+vendor BSP is the opt-in `vendor` overlay. The MPP userspace pins below are
+unchanged, which is exactly what this decision said would happen.
 
-The vendor kernel exposes the MPP hardware, but the MPP **userspace** that makes it
-reachable from GStreamer is NOT in the Armbian feed: `librockchip-mpp1` 1.5.0-1
-(tsukumijima) + `gstreamer1.0-rockchip1` 1.14-4 + `librga2` 2.2.0-1 (radxa) register
-`mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc`, proven on real Rock 5B+ hardware
-(ffprobe-verified). These are baked from exact pinned release assets, SHA-256-verified
-in [`manifests/rk3588-userspace-deb-versions.txt`](../manifests/rk3588-userspace-deb-versions.txt)
-(staged by `fetch_rk3588_userspace`), not from the Armbian pool. The MPP encoder
-**version** is now part of the userspace pin set — bump only after re-proving on hardware.
+The flip selects the source-built mainline 7.2 kernel and
+continues to drive VEPU580 through **Rockchip MPP**. The kernel implementation
+changes; the MPP userspace ABI does not. No replacement build from
+`tsukumijima/mpp-rockchip` is needed beyond the already-pinned
+`librockchip-mpp1` release asset.
 
-## Why (7-Way Evidence Summary)
+The exact retained set is `librockchip-mpp1` 1.5.0-1 (tsukumijima), plus
+`gstreamer1.0-rockchip1` 1.14-4 and `librga2` 2.2.0-1 (Radxa). On both a Rock 5B+
+and an Orange Pi 5 Plus running `7.2.0-ceralive-rk3588`, the installed packages
+have exactly those versions; the plugin resolves `librockchip_mpp.so.1` and
+`librga.so.2` with no missing dependency, `gst-inspect-1.0 mpph264enc` succeeds,
+and todo 16's direct 60-second hardware encode exits cleanly. This is direct
+kernel/userspace ABI evidence on both supported boards.
 
-Seven independent checks all point the same direction:
+Debian 13's arm64 index does **not** publish any of the three package names. That
+is expected: the pipeline has always staged them as local, hash-pinned `.deb`s.
+The distinction that gates Trixie is whether those exact assets co-install with
+the Trixie index. A real `debian:trixie-slim` arm64 solve and install accepted all
+three unchanged against GStreamer 1.26.2 and the t64 transition; `ldd` on
+`libgstrockchipmpp.so` resolved both required SONAMEs and every other dependency.
+In the hardware-free container the plugin itself loads and exposes its decoder
+features; encoder registration is hardware-probed and therefore remains a board
+assertion, supplied by the two live systems above.
+
+The release assets' downloaded SHA-256 values matched the committed pins exactly.
+They remain staged by `fetch_rk3588_userspace`, not selected from Debian's index.
+Bump any one only after re-running both the Trixie solve and the hardware encode.
+
+## Historical vendor-lock evidence (superseded)
+
+The following seven checks explain the former vendor-6.1 lock. They are retained
+as history, not as the current image decision: CeraLive's pinned out-of-tree
+VEPU580 series and its board evidence now supply the mainline path.
 
 1. **Latest Armbian vendor IS 6.1.** There is no `current` or `edge` branch for
    rk3588 vendor; 6.1 is the only vendor track.
@@ -43,10 +70,11 @@ Seven independent checks all point the same direction:
 7. **The entire RK3588 IPKVM ecosystem runs MPP.** JetKVM, RustKVM, and One-KVM
    all depend on MPP — the integrator community has converged on this path.
 
-## Revisit Triggers
+## Historical Revisit Triggers
 
-Do not re-evaluate the kernel choice unless one of these two conditions is met.
-Neither is close to firing today.
+These were the conditions for revisiting the former vendor lock. The current
+mainline migration does not claim either fired; it deliberately adopts the
+pinned CeraLive out-of-tree VEPU580 path instead.
 
 **Measured reality (2026-08-07, device-platform-wave4 todos 25-30) — neither
 trigger is affected; the measurement is evidence, not a new trigger.** The
@@ -68,17 +96,30 @@ condition). The measurement is recorded here only as citable evidence that the
 `edge` option remains pinned-and-buildable but not production-ready, which was
 already this doc's premise before the bench session.
 
-### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support
+**Current measurement (2026-08-28, todos 16-17):** both supported boards running
+mainline `7.2.0-ceralive-rk3588` register `mpph264enc` and complete a direct
+60-second hardware encode with the exact retained package set. The Trixie arm64
+index independently resolves every dependency for those URL-pinned `.deb`s.
+This clears the MPP-userspace kill switch, but it does not claim that the exact
+pinned Trixie image was built or booted; that release qualification remains a
+separate gate.
 
-**Condition:** Rockchip publishes a vendor BSP based on kernel **6.12 or later**
-that retains full MPP support, AND integrators (Armbian, JetKVM, or equivalent)
-adopt it in a stable track.
+### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support  **[SUPERSEDED]**
 
-**Signal to watch:** current, dual-signed Armbian metadata contains a reviewed
-`linux-image-vendor-rk35xx` version whose kernel jumps from 6.1.x to 6.12.x.
-Promoting it requires an explicit change to
-`armbian-bsp-deb-versions.txt` and `bsp-baseline.json`; an ordinary build never
-silently adopts it. The provenance log confirms the concrete version and bytes.
+> **Historical.** This trigger existed while production ran the prebuilt Armbian
+> vendor 6.1 BSP. That track is retired: production builds the mainline kernel
+> from pinned source, no family fetches a prebuilt kernel `.deb`, and the pins and
+> baseline named below no longer exist (recover them at the annotated tag
+> `vendor-kernel-final`). It is kept as the record of what the watch was for.
+
+**Condition (as written then):** Rockchip publishes a vendor BSP based on kernel
+**6.12 or later** that retains full MPP support, AND integrators (Armbian,
+JetKVM, or equivalent) adopt it in a stable track.
+
+**Signal that was watched:** current, dual-signed Armbian metadata containing a
+reviewed prebuilt RK35xx kernel version whose kernel jumped from 6.1.x to 6.12.x.
+Promoting it required an explicit change to `armbian-bsp-deb-versions.txt` and
+`bsp-baseline.json`; an ordinary build never silently adopted it.
 
 ## Drift-Guard Exit Policy + Strict-Gate Promotion Criterion
 
@@ -124,30 +165,27 @@ vendor MPP does not provide. Those are real latency advantages. If a stable
 mainline path to VEPU580 opens, re-evaluating the encoder stack is worth the
 effort.
 
-## The `edge` build-from-source variant does NOT fire either trigger
+## Why the mainline migration does not claim either historical trigger fired
 
-The rk3588 family manifest now carries an **opt-in** `edge` variant that builds a
-mainline-track kernel from pinned source with the CeraLive RK3588 patch series
-applied (`docs/kernel-build-from-source.md`). Its existence is easy to mistake
-for a pending migration. It is not one:
+The rk3588 family manifest carries an `edge` variant that builds a mainline-track
+kernel from pinned source with the CeraLive RK3588 patch series applied
+(`docs/kernel-build-from-source.md`). The userspace kill switch now clears it for
+the next Trixie kernel-flip step; until that step lands it remains explicitly
+selected with `--variant edge`. It still does not satisfy the old in-tree trigger:
 
-- The shipped kernel is still the Armbian **vendor** BSP. No shipped image
-  selects the variant, and nothing selects it implicitly — it requires an
-  explicit `--variant edge`.
 - It carries the **out-of-tree** rcawston `rkvenc` driver as a patch. Trigger 2
   is about a **frozen, in-tree, mainline** stateless H.265 encode uAPI. Applying
   an out-of-tree driver is the opposite of that condition being met, not evidence
   of it.
-- Nothing built by it has been compiled or booted (`docs/DEFERRED.md` item 9).
+- Mainline 7.2 kernels carrying the series have booted and encoded on both
+  supported boards. The exact pipeline-produced Trixie image remains unqualified
+  until the release build/boot gate runs (`docs/DEFERRED.md` item 9).
 
-What it is: the mainline-track option kept **pinned, applying and buildable**, so
-that if a trigger above ever does fire the work starts from a known-good,
-exact-pinned base instead of from scratch. Keeping an option alive is not
-exercising it.
+This is an explicit adoption of a maintained out-of-tree path, not a claim that
+mainline gained a frozen stateless encode ABI.
 
 ## What This Doc Is Not
 
-This is a decision record, not a roadmap. It records what was true at the time of
-the decision and what would need to change to revisit it. There are no timelines,
-no commitments, and no scheduled reviews — the triggers above are the only
-criteria that matter.
+This is a decision record, not a release qualification. It clears the MPP
+userspace kill switch using board ABI evidence plus a Trixie index solve; it does
+not claim the exact Trixie image has been built, booted, or released.

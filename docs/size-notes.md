@@ -23,9 +23,13 @@ change needed in Task 19 — verified present.
 `mkosi/mkosi.images/{base,platform,runtime,app}/mkosi.conf`:
 
 - `Locale=C.UTF-8` + `LocaleMessages=C.UTF-8` on `base` — pins `/etc/locale.conf`
-  to `LANG=C.UTF-8`. glibc 2.36 (bookworm) ships **C.UTF-8 built into libc**, so
+  to `LANG=C.UTF-8`. glibc 2.41 (trixie) ships **C.UTF-8 built into libc**, so
   no `locale-gen` run and no `/usr/lib/locale/locale-archive` are required for it
-  to work.
+  to work. Re-verified on a real trixie arm64 container (todo 10): `locale -a`
+  lists `C.utf8` with no `/usr/lib/locale` archive present, so the strip below is
+  still safe. This held on bookworm's glibc 2.36 too — the property is not new,
+  but it is the one that makes the whole locale strip safe, so it is re-checked
+  on every suite bump rather than assumed.
 - `RemoveFiles=/usr/share/locale/*,/usr/lib/locale/locale-archive` on **every**
   layer — purges gettext message catalogs (the per-language `.mo` files each
   package ships) and any compiled locale-archive a transitively-pulled `locales`
@@ -391,29 +395,81 @@ The single largest item in §8's composition is not multimedia. It is LLVM.
 
 `gstreamer1.0-plugins-bad` hard-`Depends:` its way to `libgl1-mesa-dri`, whose
 Gallium software rasterizer links LLVM's JIT — and LLVM in turn links the Z3 SMT
-solver. Three packages, 157.6 MB of shipped bytes:
+solver.
+
+**These baselines were re-measured against trixie (todo 10), and the shape
+changed enough to break the previous globs.** Trixie ships Mesa 25.0.7 and
+LLVM 19, where bookworm shipped Mesa 22.3 and LLVM 15. Measured on a real
+`debian:trixie-slim` **arm64** container with the packages installed:
 
 | file | package | bytes |
 |---|---|---:|
-| `/usr/lib/aarch64-linux-gnu/libLLVM-15.so.1` | `libllvm15` | 111,631,520 |
-| `/usr/lib/aarch64-linux-gnu/libz3.so.4` | `libz3-4` | 22,090,928 |
-| `/usr/lib/aarch64-linux-gnu/dri/*_dri.so` | `libgl1-mesa-dri` | 23,915,168 |
-| **total** | | **157,637,616** |
+| `/usr/lib/aarch64-linux-gnu/libLLVM.so.19.1` | `libllvm19` | 123,242,120 |
+| `/usr/lib/aarch64-linux-gnu/libgallium-25.0.7-2+deb13u1.so` | `mesa-libgallium` | 35,012,296 |
+| `/usr/lib/aarch64-linux-gnu/libz3.so.4` | `libz3-4` | 26,875,248 |
+| `/usr/lib/aarch64-linux-gnu/dri/libdril_dri.so` (+ 55 symlinks) | `libgl1-mesa-dri` | 133,304 |
+| **total** | | **185,262,968** |
+
+For comparison, the bookworm ledger this replaces was `libLLVM-15.so.1`
+(111,631,520) + `libz3.so.4` (22,090,928) + `dri/*_dri.so` (23,915,168) =
+**157,637,616**.
+
+### Two structural changes, and why the old globs silently missed them
+
+1. **The Gallium megadriver LEFT `libgl1-mesa-dri`.** It now ships in a
+   separate package, `mesa-libgallium`, as `libgallium-<version>.so` at the
+   library root — a path **no previous glob matched**. What remains under
+   `dri/` is 55 symlinks plus a 133 KB `libdril_dri.so` loader shim, so the
+   `dri/*_dri.so` glob still matches but now recovers almost nothing.
+2. **`libLLVM-15.so*` matched zero files.** Trixie's `libllvm19` ships the real
+   object as `libLLVM.so.19.1`; `libLLVM-19.so` is only a 15-byte symlink. The
+   version-pinned glob missed the entire 123 MB.
+
+Left unfixed, the prune would have recovered **~27 MB instead of ~185 MB**,
+leaving ~158 MB of unreachable payload in the image — enough to push both RK3588
+boards (1,412,259,840 B and 1,418,792,960 B) straight through the 1.5 GB `[6c/9]`
+size gate, which is exactly the failure mode §10 records from the last time this
+prune was absent.
+
+**The replacement globs are version-wildcarded on purpose.**
+`libLLVM*.so*` and `libgallium-*.so` are not pinned to 19 / 25.0.7, because
+pinning is what broke them: `libgallium`'s filename embeds the **full Debian
+revision** (`25.0.7-2+deb13u1`), so any Mesa point release renames the file and a
+pinned name would stop matching on a routine security update — silently, with the
+build still green.
 
 `apt remove libgl1-mesa-dri` cascades into the plugin set cerastream needs, so
 the lever is file-level `RemoveFiles=` in the runtime layer — the same technique
 as the §2 locale strip. The packages stay installed and their dpkg metadata stays
 intact; only the payload files go.
 
-**The DRI directory holds ONE file, hardlinked 43 ways.** `armada-drm_dri.so`,
-`swrast_dri.so`, `rockchip_dri.so`, `panfrost_dri.so` and 39 more are all the
-same inode — Mesa's megadriver under 43 names. Removing "just the software
-rasterizer" recovers **zero** bytes; the 23.9 MB is only released when every link
-goes. That is why the glob covers the whole `*_dri.so` set rather than one name.
+**On bookworm the DRI directory held ONE file, hardlinked 43 ways** — `swrast_dri.so`,
+`rockchip_dri.so`, `panfrost_dri.so` and 40 more were all the same inode, so
+removing "just the software rasterizer" recovered zero bytes and the glob had to
+cover the whole `*_dri.so` set. **On trixie that is no longer where the bytes
+are**: the 56 `dri/` entries are 55 real symlinks pointing at one 133 KB shim,
+and the mass moved to `libgallium-*.so`. The `*_dri.so` glob is retained (it is
+still correct, and still deliberately not a bare `dri/*` — see below), but it is
+no longer the lever that matters.
 
 ### Why these files are unreachable on this device
 
-Four independent checks, all run against a real built rootfs and a real board:
+Four independent checks, all run against a real built rootfs and a real board.
+
+> **Scope, added at the trixie/mainline migration:** check 1 below is
+> VENDOR-TRACK ONLY. The mainline `edge` variant drops `libmali` from its
+> `firmware_packages` (it is ABI-bound to Rockchip's out-of-tree module and would
+> otherwise capture the EGL/GLES/GBM sonames image-wide for a driver the mainline
+> kernel cannot serve), so on that track Mesa IS reachable and
+> `dri/panthor_dri.so` is a real driver for a real GPU. **The prune stays on both
+> tracks anyway**, because checks 2-4 are unaffected: no base-image component
+> instantiates a GL element on either kernel track. The only component that wants
+> GL is the optional, inert-by-default Cog kiosk add-on, and it carries its own
+> copy of these four globs inside its own `.raw` — so the base image is
+> byte-unchanged and this ledger's 185.3 MB stands. Un-pruning on the mainline
+> path instead was measured and rejected: it would put the `edge` image near
+> 1.62 GB against the 1.5 GB `[6c/9]` ceiling. Detail:
+> [`cog-display-addon.md`](cog-display-addon.md) §5.
 
 1. **Mali wins the loader path.** `libmali-valhall-g610-g24p0-wayland-gbm` ships
    `/etc/ld.so.conf.d/00-aarch64-mali.conf` (`/usr/lib/aarch64-linux-gnu/mali`).
@@ -435,10 +491,20 @@ Four independent checks, all run against a real built rootfs and a real board:
    Xwayland, so there is no display for it to open. The kiosk stack
    (`kiosk-display.md`) is documented-but-unimplemented and, when it lands, is
    specced on cage/Wayland over **Mali** EGL/GBM — not Mesa.
-3. **The DT_NEEDED graph is closed.** Scanning every ELF in the rootfs:
-   `libLLVM-15.so.1` is needed by the 43 DRI links and by **nothing else**;
-   `libz3.so.4` is needed by `libLLVM-15.so.1` and by **nothing else**. Deleting
-   the DRI drivers orphans both libraries completely.
+3. **The DT_NEEDED graph is closed — with one NEW hop on trixie.** Re-scanned
+   with `objdump -p` over every installed ELF in a real trixie arm64 container:
+
+   ```
+   dri/libdril_dri.so, gbm/dri_gbm.so  ->  libgallium-25.0.7-2+deb13u1.so
+   libgallium-25.0.7-2+deb13u1.so      ->  libLLVM.so.19.1
+   libLLVM.so.19.1                     ->  libz3.so.4
+   ```
+
+   `libgallium-*.so` is needed only by the two Mesa loader shims, `libLLVM` only
+   by `libgallium`, and `libz3` only by `libLLVM` — nothing else DT_NEEDEDs any
+   of the three. The chain is still closed end to end; bookworm's version was the
+   same graph minus the `libgallium` node (there, the DRI megadriver linked
+   `libLLVM-15.so.1` directly).
 4. **Nothing GL-shaped runs.** cerastream's element vocabulary contains no
    `glimagesink` / `glupload` / `kmssink` / `waylandsink`; its WebRTC preview tier
    is `webrtcbin` + `nicesrc`, neither of which links `libgstgl`. The only shipped
@@ -744,10 +810,17 @@ were written to remove, and in both cases the build log read as if they had.
 `rootfs_bytes_max` was not raised. The two fixes below took the same artifact to
 well under the ceiling.
 
-### Lever 1 — the vendor DTB payload: 91,117,943 B (`prune_vendor_dtbs`)
+### Lever 1 — the prebuilt DTB payload: 91,117,943 B  **[HISTORICAL]**
 
-The vendor BSP ships the RK35xx device-tree set **twice**, and the two packages
-disagree about where:
+> **Historical.** `prune_vendor_dtbs` and the prebuilt Armbian kernel/DTB package
+> pair it trimmed are RETIRED with the vendor kernel track (preserved at the
+> annotated tag `vendor-kernel-final`). The LESSON below is not historical and is
+> still enforced on the source-built path by `install_kernel_source_dtbs`: prune
+> BOTH installed locations, discover each directory rather than composing it from
+> a release string, and verify before and after deleting.
+
+The prebuilt BSP shipped the RK35xx device-tree set **twice**, and the two
+packages disagreed about where:
 
 | directory | shipped by | files | bytes | pruned before |
 |---|---|---:|---:|---|
@@ -870,3 +943,112 @@ Fold this into the next wet-build baseline bump with a description naming it
 NOT edited here — they record a real `du --apparent-size -sb` of a wet production
 build, and writing a computed figure there would substitute an estimate for a
 measurement.
+
+---
+
+## 15. System-mode PipeWire replaces BlueALSA — measured, +20.4 MiB net (todo 28)
+
+### What changed
+
+`manifests/packages/shared.list` gains the five-package PipeWire audio stack and
+loses the two BlueALSA packages, in the SAME image release. The pairing is not a
+coincidence of timing: cerastream's `docs/adr/ADR-0010-pipewire-capture.md` "BT
+manager exclusivity" makes them mutually exclusive by construction — BlueZ permits
+exactly one service to register as the provider of a given Bluetooth audio profile
+— and states that there is no supported "both installed, one disabled" arrangement,
+because a masked unit is one `apt` upgrade away from unmasking itself.
+
+| | Package | Trixie arm64 version |
+|---|---|---|
+| **+** | `pipewire` | 1.4.2-1 |
+| **+** | `wireplumber` | **0.5.8-2** |
+| **+** | `pipewire-alsa` | 1.4.2-1 |
+| **+** | `gstreamer1.0-pipewire` | 1.4.2-1 |
+| **+** | `libspa-0.2-bluetooth` | 1.4.2-1 |
+| **−** | `bluez-alsa-utils` | 4.3.1-3 |
+| **−** | `libasound2-plugin-bluez` | 4.3.1-3 |
+
+`bluez` stays: the adapter still needs `bluetoothd` powered up whichever userspace
+consumes it. The systemd units, the two config drop-ins, the tmpfiles entry, the
+D-Bus policy and the `cerastream.service` drop-in are text artifacts staged from
+`mkosi/runtime/pipewire/` and add no packages at all.
+
+### Size impact *(MEASURED, not estimated)*
+
+Unlike §7 and §14 this is a real solve rather than a paper sum. Both sides were
+resolved with `apt-get install -s --no-install-recommends` against the **real
+trixie arm64 index** in a `debian:trixie-slim` container, using the ACTUAL
+`shared.list` set as the baseline, and the delta is `comm`'d between the two
+resolved package lists — so a package that was already present through some other
+dependency contributes zero rather than being double-counted.
+
+| | Packages | Installed size |
+|---|---:|---:|
+| before (`shared.list` as it was, with BlueALSA) | 464 | — |
+| after (BlueALSA out, PipeWire in) | 480 | — |
+| **added** (18 packages) | +18 | **+22,292 KiB** |
+| **removed** (2 packages) | −2 | **−887 KiB** |
+| **net** | **+16** | **+21,405 KiB = 21,918,720 B ≈ 20.9 MiB** |
+
+Against the **1.5 GB absolute gate** that lands the two RK3588 boards at roughly
+1,434,178,560 B (`rock-5b-plus`) and 1,440,711,680 B (`orange-pi-5-plus`), i.e.
+~66 MB of headroom remaining. It is also inside the **+50 MB relative regression
+gate** (§4) on its own, though it is the largest single addition since the Wave-3
+trim and should not be stacked with another 20 MB item without re-measuring.
+
+### The dead weight inside it, measured and DELIBERATELY not pruned
+
+`libpipewire-0.3-modules` (5,475 KiB) is the bulk of the addition and it drags two
+payloads this image can never reach:
+
+| Transitive package | Size | Why it is unreachable here |
+|---|---:|---|
+| `libffado2` + `libglibmm-2.4-1t64` + `libxml++2.6-2v5` + `libsigc++-2.0-0v5` + `libconfig++11` | ~6.0 MB | FireWire audio. No CeraLive board has a FireWire port. |
+| `libroc0.4` + `libopenfec1` | ~1.9 MB | roc-toolkit NETWORK audio, for `module-roc-sink/source` — modules this image never loads, and which `pipewire.service`'s `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH` + `IPAddressDeny=any` would refuse a socket to anyway. |
+
+That is ~7.9 MB of the 20.9 MB, and the Mesa prune in §9 is the precedent for
+removing exactly this class of payload with a `RemoveFiles=` glob.
+
+**It is deliberately NOT pruned, and the reason is the ratio rather than the
+principle.** §9's prune was worth its risk because it recovered 185 MB against a
+gate the image was otherwise 70-76 MB over; here the same technique recovers ~7.9 MB
+against ~66 MB of remaining headroom, on a stack that has never been exercised on
+this hardware. Pruning a library out from under a module that `dlopen`s it is safe
+only while the module is genuinely never loaded, and "genuinely never loaded" is
+exactly the claim the board drill has not yet tested. Revisit it if a later
+addition pushes a board within ~15 MB of the ceiling; until then the honest
+position is that the bytes are known, named and accepted.
+
+### The debug variant, and the package that had to leave
+
+`development.delta.list` lost `pulseaudio`, and it is a HARD removal rather than a
+size decision: `pipewire-alsa` declares `Conflicts: pulseaudio`, and the runtime
+layer installs `shared.list` plus the delta as one `apt-get install`, so a debug
+build carrying both fails outright. That was verified against the real index, not
+reasoned about — see `docs/trixie-package-resolution.md`.
+
+This matters for the budget as well as for correctness. §12 measured the debug
+variant at +58.11 MiB with only **21.78 MiB** of headroom under the absolute
+ceiling, and this change adds ~20.9 MiB to BOTH variants. Dropping `pulseaudio`
+recovers part of that, but **how much is genuinely unmeasured, and the obvious
+number is a trap.** Resolved on its own against a bare `debian:trixie-slim`,
+`pulseaudio` pulls a **110-package, ~171 MiB** closure — and almost all of it
+(`libglib2.0-0t64`, `libgstreamer-plugins-base1.0-0`, `iso-codes`, `fontconfig`,
+`libavcodec61`, …) is already in this image through unrelated entries, so the real
+recovery is a small fraction of that and cannot be read off a bare-container solve.
+Measuring it properly needs the same `comm`-against-the-real-baseline method the
+production figure above uses, run for the debug set.
+
+So: **a real wet DEBUG build on trixie is owed before anyone relies on the debug
+variant fitting.** The production variant is not at risk. The debug one has not
+been measured since the suite flip, and §12's figure is a bookworm-era measurement
+that this note deliberately does not carry forward as if it were current.
+
+### Re-evaluation / baseline note
+
+Fold into the next wet-build baseline bump with a description naming it ("Adopted
+system-mode PipeWire, retired BlueALSA: +20.9 MiB"). As in §10, §11 and §14,
+`manifests/size-budget.json` and `ci/size-baseline.<board>.json` are NOT edited
+here — they record a real `du --apparent-size -sb` of a wet production build, and
+the figure above is a resolved-index measurement, which is a stronger basis than
+§7/§14's paper estimates but still not an emitted rootfs.

@@ -83,7 +83,7 @@ RAUC_ROOT_KEY="${RAUC_PKI_DIR}/root-ca.key"
 
 # The signing leaf carries a DUAL EKU: emailProtection + codeSigning.
 #   * emailProtection satisfies the device's UNCONFIGURED default verify purpose.
-#     Debian bookworm ships rauc 1.8, which predates check-purpose=codesign
+#     Debian bookworm ships rauc 1.8, which predates check-purpose=codesign  suite-literal-ok: records the rauc behaviour of the PREVIOUSLY targeted suite; re-deriving the device rauc version belongs to the RAUC/OTA contract work, not to the target-release mapping
 #     (added in rauc 1.9), so its CMS_verify() falls back to OpenSSL's default
 #     smime_sign purpose. A codeSigning-ONLY leaf fails that with "unsuitable
 #     certificate purpose" — confirmed on real Rock 5B+ hardware; emailProtection
@@ -320,7 +320,7 @@ verify_openssl_bundle() {
   # Verify to the ROOT keyring with -purpose smimesign — deliberately NOT
   # -purpose any. This self-check must reproduce what the DEVICE enforces at
   # `rauc install` time, not a laxer superset. The device runs rauc 1.8 (Debian
-  # bookworm), which predates check-purpose=codesign (rauc 1.9) and therefore
+  # bookworm), which predates check-purpose=codesign (rauc 1.9) and therefore  suite-literal-ok: same previously-targeted-suite rauc note as the file header
   # falls back to OpenSSL's default smime_sign purpose. -purpose any accepted
   # ANY purpose and so silently passed a codeSigning-ONLY leaf that rauc 1.8
   # rejects on hardware ("unsuitable certificate purpose") — the exact parity gap

@@ -38,6 +38,10 @@ source "${HERE}/common.sh"
 source "${HERE}/paths.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${HERE}/shared/deb-lib.sh"
+# The ONE reader for manifests/target-release.env — the single source of truth for
+# the target Debian suite (RELEASE) and its os-release VERSION_ID.
+# shellcheck source=lib/shared/target-release-lib.sh
+source "${HERE}/shared/target-release-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Locations.
@@ -48,7 +52,6 @@ FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
-BUILD_KERNEL_EXTENSION_SH="${HERE}/build-kernel-extension.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 MEASURE_SIZE_SH="${HERE}/measure-size.sh"
@@ -84,16 +87,26 @@ rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_K
 export CERALIVE_BUILD_MODE CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
-RELEASE="${RELEASE:-bookworm}"
+# Target userspace suite + its os-release VERSION_ID, from the ONE mapping in
+# manifests/target-release.env. An already-set RELEASE still wins (the file is a
+# default-assignment fragment), and the derived APT_SUITE* values re-expand from
+# whatever RELEASE ends up being, so an operator override cannot leave the
+# bootstrap suite and the device's apt suites disagreeing.
+target_release_load
+# ARMBIAN_SUITE is a SEPARATE knob and must stay one: it names the archive the
+# kernel/DTB/U-Boot/firmware .debs are fetched from (BSP-deb provenance), which
+# Armbian versions on its own schedule. Deriving it from RELEASE would repoint the
+# boot stack at a suite that may not carry the RK35xx vendor BSP at all.
 ARMBIAN_APT_URL="${ARMBIAN_APT_URL:-https://apt.armbian.com}"
-ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"
+ARMBIAN_SUITE="${ARMBIAN_SUITE:-bookworm}"  # suite-literal-ok: Armbian BSP-deb provenance, NOT the userspace suite — see the comment above and manifests/target-release.env
 # ---------------------------------------------------------------------------
 # Builder selection (task 9). The CANONICAL build runs mkosi inside a pinned
 # Debian trixie container baked from ci/Dockerfile; native host mkosi is
 # opt-in only (--native / MKOSI_NATIVE=1). Rationale: mkosi 26 (the
-# .mkosi-version pin) needs Python >= 3.12, which bookworm (the target rootfs
-# release) can't provide and a non-Debian host lacks apt/keyring for — one pinned
-# trixie builder gives a reproducible toolchain on any host.
+# .mkosi-version pin) needs Python >= 3.12, which a non-Debian host lacks
+# apt/keyring for and which an older target rootfs release could not provide —
+# one pinned trixie builder gives a reproducible toolchain on any host,
+# independently of whatever suite manifests/target-release.env selects.
 MKOSI_NATIVE="${MKOSI_NATIVE:-}"
 # mkosi pin — single source of truth is .mkosi-version (= 26).
 MKOSI_VERSION_PIN="$(tr -d '[:space:]' <"${PIPELINE_DIR}/.mkosi-version" 2>/dev/null || true)"
@@ -239,7 +252,6 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
-  local kernel_extension_build_dir="${staging}/kernel-extension-build"
 
   stage_fetch
   stage_kernel_build
@@ -275,8 +287,9 @@ run_mkosi_build() {
   # trixie-builder mkosi 25.3 (which disagree on the [Content]/[Build] section).
   local env_names=(
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
+    OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
-    KERNEL_PACKAGES KERNEL_EXTENSION_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+    KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
     KERNEL_SOURCE_KERNEL_RELEASE
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
@@ -297,7 +310,7 @@ run_mkosi_build() {
   # hardcoded.
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
-  export KERNEL_PACKAGES KERNEL_EXTENSION_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+  export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
   # Kernel-from-source DTB install mapping. EMPTY on the production vendor path,
   # which is what makes the platform layer's copy step a strict no-op there:
   # a source-built kernel ships its DTBs inside the linux-image deb, an Armbian
@@ -422,6 +435,13 @@ run_mkosi_build() {
   local env_cli=() n
   for n in "${env_names[@]}"; do env_cli+=(--environment "${n}"); done
 
+  # The target suite is plumbed on the CLI, not left to mkosi.conf's mirrored
+  # literal: mkosi expands ${VAR} only in PATH-typed settings, so a
+  # `Release=${RELEASE}` there would be taken verbatim. Same shape as
+  # --cache-directory below — the CLI value is authoritative, the config literal
+  # only keeps a bare `mkosi build` honest and is lockstep-checked by
+  # ci/check-suite-literals.sh.
+  #
   # Per-board cache isolation (T11): scope the incremental apt cache to this
   # board so concurrent multi-board builds never share one cache dir (the race
   # T12 parallelises on). This CLI flag is the authoritative plumb; it overrides
@@ -431,6 +451,7 @@ run_mkosi_build() {
 
   local mkosi_args=(
     --architecture="${mkosi_arch}"
+    --release="${RELEASE}"
     --with-network=yes
     "${env_cli[@]}"
     --cache-directory="${cache_dir}"

@@ -15,9 +15,12 @@
 #
 # RAUC CUSTOM BACKEND INTERFACE (https://rauc.readthedocs.io/ integration.html):
 # RAUC invokes this script with the operation as $1 and the slot's `bootname` as the
-# trailing argument. Debian bookworm's RAUC 1.8 reads `rauc.slot=` itself and calls
-# the four state/primary operations. RAUC 1.11+ may also call `get-current`, which
-# this backend implements for forward compatibility. Their CeraLive mapping:
+# trailing argument. Debian trixie's RAUC 1.13 calls the four state/primary
+# operations AND `get-current`. That last one is the only behavioural difference
+# from the bookworm 1.8 this image used to target, which read `rauc.slot=` itself  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite, which is why the get-current arm looked unused
+# and never invoked it — so `get-current` below was dead forward-compat code and
+# is now a live code path. It needed no change, but do not delete it as unused.
+# Their CeraLive mapping:
 #
 #   get-current                 -> read rauc.slot=A|B from the kernel command line
 #       Print the bootname of the slot running now. Never infer this from primary:

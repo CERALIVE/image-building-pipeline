@@ -8,7 +8,7 @@
 #      `apt-get update` dies "Could not load client certificate … Error while reading
 #      file" (confirmed live on a Rock 5B+). The key must be handed to `_apt`.
 #   2. Duplicate Debian source. mkosi's release-named bootstrap source
-#      (bookworm.sources) leaks into the rootfs alongside our debian.sources, so
+#      (`${RELEASE}.sources`) leaks into the rootfs alongside our debian.sources, so
 #      apt warns "Target Packages … is configured multiple times". configure_minimal_apt
 #      must leave EXACTLY ONE Debian source (debian.sources).
 #   3. ceralive.sources repo URI. apt-worker serves the first-party repo at
@@ -33,6 +33,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST="${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 MODULE="${PIPELINE_DIR}/mkosi/customize/apt-ceralive-repo.sh"
+
+# The suite Part B drives the shipped writer with. Read from the ONE mapping so
+# this harness follows a release bump instead of silently testing the old suite.
+# shellcheck source=../lib/shared/target-release-lib.sh
+source "${PIPELINE_DIR}/lib/shared/target-release-lib.sh"
+target_release_load
 
 fail() { printf 'apt-mtls-and-dedupe regression: %s\n' "$1" >&2; exit 1; }
 
@@ -105,22 +111,29 @@ set -euo pipefail
 mount -t tmpfs none /etc
 mkdir -p /etc/apt/sources.list.d /etc/apt/apt.conf.d
 
+# The suite under test comes from the ONE mapping, never a literal: a frozen
+# suite here would keep passing after a release bump while the shipped writer
+# emitted a different one.
+RELEASE="${RELEASE}"
+APT_SUITE="${APT_SUITE}"
+APT_SUITE_UPDATES="${APT_SUITE_UPDATES}"
+APT_SUITE_SECURITY="${APT_SUITE_SECURITY}"
+
 # Seed the exact stray the fix must remove: mkosi's release-named bootstrap source,
 # duplicating the Debian archive that debian.sources also configures.
-cat >/etc/apt/sources.list.d/bookworm.sources <<'STRAY'
+cat >"/etc/apt/sources.list.d/\${RELEASE}.sources" <<STRAY
 Types: deb deb-src
 URIs: http://deb.debian.org/debian
-Suites: bookworm
+Suites: \${RELEASE}
 Components: main main
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 STRAY
 
 log() { :; }
-RELEASE="bookworm"
 eval "\$(awk '/^configure_minimal_apt\(\) \{/,/^}/' "${POSTINST}")"
 configure_minimal_apt
 
-[ ! -e /etc/apt/sources.list.d/bookworm.sources ] || { echo "FAIL: configure_minimal_apt left the mkosi release-named dupe (bookworm.sources) behind"; exit 1; }
+[ ! -e "/etc/apt/sources.list.d/\${RELEASE}.sources" ] || { echo "FAIL: configure_minimal_apt left the mkosi release-named dupe (\${RELEASE}.sources) behind"; exit 1; }
 [ -f /etc/apt/sources.list.d/debian.sources ]     || { echo "FAIL: configure_minimal_apt did not write the canonical debian.sources"; exit 1; }
 # Exactly one Debian-archive source file remains.
 n="\$(grep -rl 'deb.debian.org/debian' /etc/apt/sources.list.d/ 2>/dev/null | wc -l)"

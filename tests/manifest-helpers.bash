@@ -66,6 +66,14 @@ setup() {
   BOARD_SCHEMA="$SCHEMA_DIR/board.schema.json"
   ADDON_SCHEMA="$SCHEMA_DIR/addon.schema.json"
   VALIDATE_PY="$PIPELINE_DIR/ci/validate-manifests.py"
+  # The target-release mapping every suite/VERSION_ID expectation derives from.
+  # Fixtures MUST NOT hardcode a VERSION_ID: validate-manifests.py and the sysext
+  # backend both read this file, so a frozen fixture would start failing for the
+  # right reason at the wrong time (a release bump) and read as a broken test.
+  TARGET_RELEASE_LIB="$LIB_DIR/shared/target-release-lib.sh"
+  # shellcheck source=../lib/shared/target-release-lib.sh
+  source "$TARGET_RELEASE_LIB"
+  target_release_load
   FIXTURES="$TESTS_DIR/manifests/fixtures"
   REPO_ROOT="${PIPELINE_DIR}"
   # Locate the repo-local pin registry unless the caller provides an override.
@@ -447,8 +455,8 @@ write_addon() {
   cat > "$dir/$id.json" <<JSON
 {
   "id": "$id", "name": "$id", "version": "1.0.0", "category": "other",
-  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "12",
-  "compatibleOsVersions": ["12"],
+  "payload": { "type": "sysext" }, "sysextLevel": "1", "versionId": "${OS_VERSION_ID}",
+  "compatibleOsVersions": ["${OS_VERSION_ID}"],
   "artifact": {
     "urlTemplate": "https://apt.ceralive.tv/addons/$id/{os_version}/$id.raw",
     "sha256": "d0009ed268df5fd0ec12904201c64be392f56671a4d61acec7355188536bb5e9",
@@ -544,12 +552,22 @@ make_parity_rootfs() {
 # the rendezvous even when BATS_FILE_TMPDIR is worker-local. flock-less hosts get
 # a no-op — run-tests only requests --jobs when flock is present, so a serial
 # run never needs it.
+#
+# THE LOCK NAME IS THE RESOURCE, AND MUST NOT NAME THE SUITE FILE. run-tests
+# passes `--jobs N --no-parallelize-within-files`, so cases inside one file are
+# ALREADY serial — an intra-file lock buys nothing, and the only exclusion that
+# matters is between files. Keying the lock path on $BATS_TEST_FILENAME gave each
+# suite its own lock file, i.e. no cross-file exclusion at all: `working-tree` is
+# mutated by postinst-wiring.bats while hdmirx-edid-contract.bats and
+# package-contract.bats read the same tree through ci/postinst-drift-check.sh,
+# and `build-plan` is shared by variant-contract.bats and
+# mkosi-image-contract.bats. The resource name ("$1") is the whole key.
 serialize() {
   command -v flock >/dev/null 2>&1 || return 0
   local lockfd lock_root="${BATS_RUN_TMPDIR:-${BATS_FILE_TMPDIR:-}}"
   [[ -n "$lock_root" ]] || return 0
   mkdir -p "$lock_root/locks"
-  exec {lockfd}>"$lock_root/locks/.serialize.${BATS_TEST_FILENAME##*/}.$1.lock"
+  exec {lockfd}>"$lock_root/locks/.serialize.$1.lock"
   flock "$lockfd"
 }
 
@@ -827,7 +845,9 @@ feature_prereqs() {
 # bodies still run in parallel.
 build_feature_fixture() {
   local out="$BATS_FILE_TMPDIR/out"
-  local raw="$out/demo-feature-rock-5b-plus-12.raw"
+  # Derived from the SAME mapping --os-version passes below: a hardcoded stem
+  # goes VACUOUS on a release bump (guard misses, every §14 case rebuilds).
+  local raw="$out/demo-feature-rock-5b-plus-${OS_VERSION_ID}.raw"
   (
     command -v flock >/dev/null 2>&1 && flock 9
     [ -f "$raw" ] && exit 0          # idempotency check INSIDE the lock (no TOCTOU)
@@ -836,7 +856,7 @@ build_feature_fixture() {
     printf '#!/bin/sh\necho hi\n' > "$stg/usr/bin/demo-tool"
     printf 'payload\n'            > "$stg/opt/demo/data.txt"
     bash "$LIB_DIR/build-feature-sysext.sh" \
-      --feature demo-feature --board rock-5b-plus --os-version 12 \
+      --feature demo-feature --board rock-5b-plus --os-version "${OS_VERSION_ID}" \
       --deb-staging "$stg" --out "$out" \
       --keyring "$BATS_FILE_TMPDIR/gnupg" >/dev/null 2>&1
   ) 9>"$BATS_FILE_TMPDIR/.serialize.feature-fixture.lock"
@@ -939,7 +959,7 @@ run_ota_guard() {
 # cdc_ether loadable (.ko.xz, compressed), cdc_wdm as cdc-wdm.ko (hyphen on disk
 # — exercises the -/_ normalisation), option + cdc_ncm built-in (modules.builtin).
 wwan_stage_six() {
-  local root="$1" kv="${2:-6.1.0-vendor}"
+  local root="$1" kv="${2:-6.1.0-generic}"
   local netusb="$root/lib/modules/$kv/kernel/drivers/net/usb"
   local usbclass="$root/lib/modules/$kv/kernel/drivers/usb/class"
   mkdir -p "$netusb" "$usbclass"
@@ -960,8 +980,8 @@ make_kernel_deb() {
   tar -C "$stage" -czf "$tmp/data.tar.gz" .
   mkdir -p "$tmp/ctl"
   cat > "$tmp/ctl/control" <<'CTL'
-Package: linux-image-vendor-rk35xx
-Version: 6.1.0-vendor
+Package: linux-image-generic-rk35xx
+Version: 6.1.0-generic
 Architecture: arm64
 Maintainer: ceralive-test <test@ceralive.tv>
 Description: fixture kernel for WWAN module-presence tests
@@ -1242,7 +1262,14 @@ run_modem_generator() {
 
 
 
-VENDOR_BASELINE_DIR() { printf '%s' "$TESTS_DIR/manifests/fixtures/vendor-baseline"; }
+# The frozen golden resolves of the PRODUCTION path, one file per shipped board.
+# Formerly `vendor-baseline/`, captured when the prebuilt Armbian vendor BSP was
+# the bare default; that track is retired, so the rk3588 files were re-captured
+# from the mainline `default_variant: edge` resolve and the directory renamed to
+# say what it holds. x86-minipc.params is byte-unchanged — its family declares no
+# variants and no default_variant, so the bare default still means "apply no
+# overlay" there, which is exactly what makes it the opt-in proof.
+PRODUCTION_BASELINE_DIR() { printf '%s' "$TESTS_DIR/manifests/fixtures/production-baseline"; }
 
 # make_stub_deb <out.deb> <package> <version> <arch> — a minimal but REAL .deb
 # (debian-binary + control.tar.gz + data.tar.gz via ar) so the uniqueness check
@@ -1283,10 +1310,10 @@ write_variant_family() {
   local dest="$1" overlay="$2"
   cat > "$dest" <<YAML
 arch: arm64
-armbian_branch: vendor
-kernel_packages: [linux-image-vendor-rk35xx]
+armbian_branch: edge
+kernel_packages: [linux-image-generic-rk35xx]
 uboot_packages: []
-dtb_packages: [linux-dtb-vendor-rk35xx]
+dtb_packages: [linux-dtb-generic-rk35xx]
 firmware_packages: [armbian-firmware]
 rauc_bootloader_adapter: custom
 partition_template: rk3588-ab
@@ -1484,9 +1511,14 @@ DEV_DELTA_LIST() { printf '%s' "$PIPELINE_DIR/manifests/packages/development.del
 # rather than read from the file so a silent edit to the list is a test failure,
 # not a self-fulfilling assertion.
 dev_delta_expected() {
+  # `pulseaudio` LEFT this set at todo 28 and must never come back: the mandatory
+  # `pipewire-alsa` entry in shared.list declares `Conflicts: pulseaudio`, so a debug
+  # build carrying both fails its single apt transaction outright (verified against a
+  # real trixie arm64 index). Its diagnostic role is covered more broadly by
+  # `pipewire-bin`'s pw-cli/pw-dump/pw-top, which ship on EVERY image.
   printf '%s\n' \
     alsa-utils can-utils htop i2c-tools iotop iperf3 lsof nano \
-    netcat-openbsd nethogs pciutils pulseaudio python3 socat strace \
+    netcat-openbsd nethogs pciutils python3 socat strace \
     tcpdump usbutils vnstat | sort
 }
 
