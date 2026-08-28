@@ -1865,6 +1865,7 @@ REPRO
 }
 
 @test "kernel freeze: freeze_boot_packages is on the drift gate's consolidated list" {
+  serialize working-tree   # postinst-wiring.bats mutates the tree this gate reads
   grep -Fq 'freeze_boot_packages' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   [ "$status" -eq 0 ]

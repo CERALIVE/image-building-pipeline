@@ -63,6 +63,18 @@ jobs:
           # are info-level project baseline (see learnings, tasks 9/26/29).
           shellcheck --severity=warning -x "${files[@]}"
 
+      # Fail FAST on a re-hardcoded suite. The gate also runs later inside
+      # ./run-tests (tests/target-release-derivation.test.sh §B), but that is the
+      # heavyweight bats job behind three `needs:` hops — so a one-line suite
+      # literal would cost a full apt install, a system D-Bus and the whole
+      # contract suite before reporting. Here it costs seconds and needs nothing
+      # but bash + git. --self-test runs first because a sweep that silently read
+      # no files would report a clean tree forever.
+      - name: Target-release literal + mirror-drift gate
+        run: |
+          ci/check-suite-literals.sh --self-test
+          ci/check-suite-literals.sh
+
   schema-validate:
     name: JSON-Schema validate manifests
     runs-on: ubuntu-latest

@@ -86,7 +86,9 @@ executable_lines() {
 
 @test "packages: conntrack is present with the mark-scoped-flush rationale" {
   # The BINARY package is `conntrack`; `conntrack-tools` is only its SOURCE name and
-  # does not exist in bookworm, so asking for it fails the runtime layer outright.
+  # has no binary of that name in trixie either (verified against the real trixie
+  # index: `conntrack` 1:1.4.8-2 resolves, `conntrack-tools` has no candidate), so
+  # asking for it fails the runtime layer outright.
   run grep -Ex 'conntrack[[:space:]]*(#.*)?' "$SHARED_LIST"
   [ "$status" -eq 0 ]
 

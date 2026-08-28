@@ -325,6 +325,7 @@ SH
 @test "hdmirx edid: setup_hdmirx_edid is a single source of truth (drift gate registered)" {
   # The gate only checks the functions it is told about; an unregistered one
   # could be re-inlined into the runtime executor without anything noticing.
+  serialize working-tree   # postinst-wiring.bats mutates the tree this gate reads
   grep -Fq 'setup_hdmirx_edid' "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   run bash "$PIPELINE_DIR/ci/postinst-drift-check.sh"
   [ "$status" -eq 0 ]

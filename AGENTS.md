@@ -86,7 +86,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
-| Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared build-plan probes also lock staging); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
+| Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared working-tree and build-plan probes lock through `manifest-helpers.bash::serialize`, whose lock name is the RESOURCE and must never re-acquire a per-suite component — see the KEY FACT below); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
 | **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
 | **x86 ESP + GRUB A/B disk assembly** | `lib/assemble-disk-x86.sh` (offline producer); `mkosi/platform/x86/{install-x86-grub.sh,grub-ab.cfg,10-esp.conf}`; offline proof `mkosi/platform/x86/test-x86-grub.sh`; rationale in [`mkosi/platform/x86/README.md`](mkosi/platform/x86/README.md) §2 |
@@ -206,11 +206,32 @@ Six things are worth knowing before touching any of it:
   that is the read a lockstep check must use, or an exported override would mask
   a drifted mirror.
 
-Guards: `tests/target-release-derivation.test.sh` (50 assertions, registered
+Guards: `tests/target-release-derivation.test.sh` (53 assertions, registered
 `default-shell`) — the mapping, the gate plus the gate's own self-test, a
 per-consumer static contract, an `ARMBIAN_SUITE`-separation pin, and a
 **flipped-mapping leg** that resolves every derived value against a different
 mapping so a wiring that reads the file but returns a constant fails.
+
+**The gate runs TWICE in CI, and both wirings are deliberate.** It is an explicit
+step in `v2-ci.yml`'s `shellcheck` job — the first job, which every other job is
+`needs:`-downstream of — running `--self-test` and then the sweep, on nothing but
+bash + git. It ALSO runs inside `./run-tests` in the `bats` job, through the guard
+above. Neither is redundant: the `bats` job sits three `needs:` hops deep behind an
+apt install and a system D-Bus, so without the fast step a one-line hardcode costs
+the whole contract suite before it reports; and without the `run-tests` leg the gate
+would drop out of every local pre-push run. `--self-test` runs first at both sites,
+because a sweep that silently read no files reports a clean tree forever.
+
+**`tests/` is EXCLUDED from the sweep, so test-fixture drift has no gate.** The
+exclusion is correct — several suites seed a wrong-suite input precisely to prove a
+consumer rejects it — but it means a stale suite name in a FIXTURE is caught only by
+someone re-reading the fixtures. Todo 15 did that sweep and classified every
+occurrence; three fixtures had genuinely drifted, and the sharpest was
+`fetch-debs-apt-sandbox.test.sh` pinning a `debian:bookworm-slim` container, which
+proved apt's sandbox contract on the retired suite while the shipped one went
+unproven and the suite stayed green. Both it and `realhw-suite.sh`'s mock
+`debian.sources` now derive from the mapping. When you bump the suite, re-read
+`tests/` by hand; the gate will not do it for you.
 
 **The runtime postinst library is an ENTRY plus per-concern modules — "one source
 of truth" now means "one source SET"** [EXISTS]
@@ -413,6 +434,32 @@ Three things to know before touching it:
   way to fake privilege separation in a sandbox and it does not work: namespace UID
   remapping does not change the real on-disk ownership checks these mode-0700 /
   mode-0755 assertions exist to exercise.
+
+**`serialize <resource>`'s lock name is the RESOURCE — putting the suite filename
+in it silently disables the only exclusion that matters** [EXISTS — fixed 2026-08-28]
+
+`tests/manifest-helpers.bash::serialize` guards two shared mutable resources under
+`bats --jobs`: `working-tree` (`postinst-wiring.bats` appends a re-inlined twin to
+`mkosi.postinst.chroot` and plants a residue file under `mkosi/`, to prove
+`ci/postinst-drift-check.sh` is non-vacuous) and `build-plan` (each `build` probe
+`rm -rf`s and recreates `mkosi/.staging/<board>`).
+
+It used to open its lock file at
+`.serialize.${BATS_TEST_FILENAME##*/}.<resource>.lock`. **That is a per-suite lock,
+and cross-suite is the only exclusion there is** — `run-tests` passes
+`--no-parallelize-within-files`, so cases inside one file are already serial and an
+intra-file lock buys exactly nothing. So every suite took its own lock and none of
+them excluded any other: `hdmirx-edid-contract.bats` and `package-contract.bats` ran
+the drift gate against a tree `postinst-wiring.bats` was midway through mutating,
+and `variant-contract.bats` raced `mkosi-image-contract.bats` for the staging tree.
+
+The symptom was a suite that passed alone and failed under `./run-tests`, which
+auto-selects `--jobs` whenever GNU parallel and `flock` are present — i.e. in CI.
+The drift gate was right every time; the harness was racing it. Two edits fix it:
+the lock path is now `.serialize.<resource>.lock`, and the two suites that read the
+working tree through the drift gate call `serialize working-tree` like the mutator
+does. **Do not "namespace" the lock per suite again** — it looks like hygiene and it
+is the bug.
 
 **`tests/lib/assertions.sh` is the ONE result-bookkeeping library for the
 collecting shell harnesses** [EXISTS]

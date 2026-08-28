@@ -8,7 +8,7 @@
 #      `apt-get update` dies "Could not load client certificate … Error while reading
 #      file" (confirmed live on a Rock 5B+). The key must be handed to `_apt`.
 #   2. Duplicate Debian source. mkosi's release-named bootstrap source
-#      (bookworm.sources) leaks into the rootfs alongside our debian.sources, so
+#      (`${RELEASE}.sources`) leaks into the rootfs alongside our debian.sources, so
 #      apt warns "Target Packages … is configured multiple times". configure_minimal_apt
 #      must leave EXACTLY ONE Debian source (debian.sources).
 #   3. ceralive.sources repo URI. apt-worker serves the first-party repo at

@@ -552,12 +552,22 @@ make_parity_rootfs() {
 # the rendezvous even when BATS_FILE_TMPDIR is worker-local. flock-less hosts get
 # a no-op — run-tests only requests --jobs when flock is present, so a serial
 # run never needs it.
+#
+# THE LOCK NAME IS THE RESOURCE, AND MUST NOT NAME THE SUITE FILE. run-tests
+# passes `--jobs N --no-parallelize-within-files`, so cases inside one file are
+# ALREADY serial — an intra-file lock buys nothing, and the only exclusion that
+# matters is between files. Keying the lock path on $BATS_TEST_FILENAME gave each
+# suite its own lock file, i.e. no cross-file exclusion at all: `working-tree` is
+# mutated by postinst-wiring.bats while hdmirx-edid-contract.bats and
+# package-contract.bats read the same tree through ci/postinst-drift-check.sh,
+# and `build-plan` is shared by variant-contract.bats and
+# mkosi-image-contract.bats. The resource name ("$1") is the whole key.
 serialize() {
   command -v flock >/dev/null 2>&1 || return 0
   local lockfd lock_root="${BATS_RUN_TMPDIR:-${BATS_FILE_TMPDIR:-}}"
   [[ -n "$lock_root" ]] || return 0
   mkdir -p "$lock_root/locks"
-  exec {lockfd}>"$lock_root/locks/.serialize.${BATS_TEST_FILENAME##*/}.$1.lock"
+  exec {lockfd}>"$lock_root/locks/.serialize.$1.lock"
   flock "$lockfd"
 }
 

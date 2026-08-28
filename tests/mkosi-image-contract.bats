@@ -884,7 +884,7 @@ print('CEILING-POLICY-OK')
 @test "runtime packages: net-tools is installed so CeraUI's ifconfig poll works" {
   # CeraUI's backend polls /sbin/ifconfig every ~5s (apps/backend
   # network-interfaces.ts run("ifconfig", [])) to build the `netif` broadcast
-  # (WiFi/Ethernet/cellular/bonded-link status). This minimal bookworm image ships
+  # (WiFi/Ethernet/cellular/bonded-link status). This minimal Debian image ships
   # only modern iproute2, so without net-tools every poll tick fails ("Executable
   # not found in $PATH: \"ifconfig\"") and the Network destination renders empty
   # ("No WiFi/wired interfaces", "No SIM cards", "No active links") plus a missing

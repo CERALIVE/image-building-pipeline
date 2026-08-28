@@ -67,6 +67,13 @@ REPO_ROOT="${PIPELINE_DIR}"
 # shellcheck source=../lib/common.sh
 source "${PIPELINE_DIR}/lib/common.sh"
 
+# The mock rootfs models the SHIPPED image, so its Debian source must name the
+# suite this build targets — a frozen literal makes the fixture describe a
+# release the fleet no longer runs.
+# shellcheck source=../lib/shared/target-release-lib.sh
+source "${PIPELINE_DIR}/lib/shared/target-release-lib.sh"
+target_release_load
+
 # We aggregate sub-harness results and OWN the exit code (exactly like the
 # harnesses we call). Drop common.sh's ERR trap + set -e; keep nounset+pipefail.
 set +e
@@ -218,7 +225,7 @@ build_mock_fixtures() {
   # E. udev (video4linux satisfies the hdmi quirk) + apt sources
   printf 'SUBSYSTEM=="video4linux", GROUP="video"\nSUBSYSTEM=="usb", TAG+="ceralive"\n# QUIRK m2_modem_sim_workaround — force ModemManager probe for M.2 modems\nSUBSYSTEM=="usb", ATTRS{idVendor}=="2c7c", ENV{ID_MM_DEVICE_PROCESS}="1"\n' \
     > "${root}/etc/udev/rules.d/99-ceralive-hardware.rules"
-  printf 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\nComponents: main\n' \
+  printf 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: %s\nComponents: main\n' "${APT_SUITE}" \
     > "${root}/etc/apt/sources.list.d/debian.sources"
   printf 'Types: deb\nURIs: https://apt.ceralive.tv\nSuites: stable\nComponents: main\n' \
     > "${root}/etc/apt/sources.list.d/ceralive.sources"
