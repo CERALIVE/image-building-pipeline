@@ -17,7 +17,6 @@
   },
   "provides": [
     "/usr/bin/alsamixer",
-    "/usr/bin/pulseaudio",
     "/usr/bin/lsusb",
     "/usr/bin/lspci",
     "/usr/bin/lsof",

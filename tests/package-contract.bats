@@ -1706,11 +1706,22 @@ REPRO
 
   # Every package the add-on's `provides` paths come from is also in the delta, so
   # an operator gets the same toolbox whichever route they are on.
+  #
+  # `pulseaudio` was REMOVED from BOTH sides at todo 28 rather than dropped from one:
+  # `pipewire-alsa` (now mandatory in shared.list) declares `Conflicts: pulseaudio`,
+  # so a debug image carrying it fails its single apt transaction. The two routes
+  # therefore still carry the IDENTICAL set, which is the property this loop exists
+  # to pin — and the assertion below makes the removal explicit on both sides so a
+  # future re-add has to break a test rather than a build.
   local p
-  for p in alsa-utils pulseaudio usbutils pciutils lsof i2c-tools can-utils htop \
+  for p in alsa-utils usbutils pciutils lsof i2c-tools can-utils htop \
            iotop nethogs vnstat nano iperf3 socat netcat-openbsd; do
     grep -qxF "$p" <(active_pkgs_of "$(DEV_DELTA_LIST)")
   done
+  run grep -qxF pulseaudio <(active_pkgs_of "$(DEV_DELTA_LIST)")
+  [ "$status" -ne 0 ]
+  run grep -Fq '/usr/bin/pulseaudio' "$descriptor"
+  [ "$status" -ne 0 ]
 }
 
 @test "dev delta: 'development' is not a board family, so no board can resolve the delta as one" {

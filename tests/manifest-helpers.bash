@@ -1511,9 +1511,14 @@ DEV_DELTA_LIST() { printf '%s' "$PIPELINE_DIR/manifests/packages/development.del
 # rather than read from the file so a silent edit to the list is a test failure,
 # not a self-fulfilling assertion.
 dev_delta_expected() {
+  # `pulseaudio` LEFT this set at todo 28 and must never come back: the mandatory
+  # `pipewire-alsa` entry in shared.list declares `Conflicts: pulseaudio`, so a debug
+  # build carrying both fails its single apt transaction outright (verified against a
+  # real trixie arm64 index). Its diagnostic role is covered more broadly by
+  # `pipewire-bin`'s pw-cli/pw-dump/pw-top, which ship on EVERY image.
   printf '%s\n' \
     alsa-utils can-utils htop i2c-tools iotop iperf3 lsof nano \
-    netcat-openbsd nethogs pciutils pulseaudio python3 socat strace \
+    netcat-openbsd nethogs pciutils python3 socat strace \
     tcpdump usbutils vnstat | sort
 }
 

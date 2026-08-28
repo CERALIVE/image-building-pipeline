@@ -1,0 +1,62 @@
+[Unit]
+Description=WirePlumber session manager (CeraLive headless system mode)
+Documentation=man:wireplumber(1)
+Documentation=https://pipewire.pages.freedesktop.org/wireplumber/
+# THE SESSION MANAGER GETS ITS OWN UNIT — it is not started from pipewire.conf.
+#
+# pipewire.conf(5) on `context.exec`: "This array used to contain an entry to start
+# the session manager but this mode of operation has since been demoted to
+# development aid. Avoid starting a session manager in this way in production
+# environment." cerastream's ADR-0010 §3 carries that forward as a decision, so this
+# unit exists specifically so nobody re-adds a context.exec entry to "simplify" it.
+After=pipewire.service
+# BindsTo=, not Wants=: WirePlumber is a client of the daemon and has nothing to
+# manage without it. If pipewire.service dies, this must go with it and come back
+# with it, rather than sit alive holding stale state against a socket that no longer
+# exists.
+BindsTo=pipewire.service
+Before=cerastream.service
+ConditionPathExists=/usr/bin/wireplumber
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wireplumber
+# Same dedicated system user as the daemon, for the same reason: WirePlumber is what
+# actually loads the ALSA and BlueZ device monitors, so it is the process that parses
+# device descriptors and talks to org.bluez.
+User=pipewire
+Group=pipewire
+SupplementaryGroups=audio
+UMask=0007
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+
+# WirePlumber does not run the RT data loop (that is the daemon's), but it does host
+# SPA device monitors. The limits are granted for symmetry rather than necessity, so
+# a future monitor that wants a real-time thread is not blocked by a limit nobody
+# thought about.
+LimitRTPRIO=88
+LimitRTTIME=200000
+LimitMEMLOCK=infinity
+LimitNICE=-11
+
+Restart=on-failure
+RestartSec=2
+SyslogIdentifier=wireplumber
+
+# Same structural no-network rule as pipewire.service. AF_BLUETOOTH is load-bearing
+# HERE in particular: the BlueZ monitor (monitor.bluez, libspa-0.2-bluetooth) runs in
+# THIS process, and its SCO/A2DP transports are PF_BLUETOOTH sockets.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH
+IPAddressDeny=any
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

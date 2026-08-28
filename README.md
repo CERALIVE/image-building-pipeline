@@ -858,6 +858,68 @@ There is no red LED in the kernel's LED class on this board — the visible red 
 is a hardwired power-rail indicator with no software visibility, and nothing here
 can drive it.
 
+## Audio — system-mode PipeWire (and why BlueALSA is gone)
+
+The device shares ONE capture card between the always-on audio meter and the live
+program-audio leg. ALSA hands out exactly one capture handle per card, so the
+streaming engine has to arbitrate the two with an ownership lease. PipeWire
+multiplexes the device instead, so both hold it at the same time — which is the
+whole reason the image now ships it. The decision, its compatibility contract and
+its rollback hatch are cerastream's
+[`ADR-0010`](https://github.com/CERALIVE/cerastream/blob/main/docs/adr/ADR-0010-pipewire-capture.md);
+this repository supplies the runtime.
+
+The image installs trixie's own `pipewire` 1.4.2-1, `wireplumber` **0.5.8-2**,
+`pipewire-alsa`, `gstreamer1.0-pipewire` (the `pipewiresrc` the engine builds its
+capture source from) and `libspa-0.2-bluetooth`.
+
+**Debian ships no system unit for any of it** — `pipewire` and `wireplumber` carry
+`/usr/lib/systemd/user/*` and nothing else — and this board has no login session, no
+seat and no `XDG_RUNTIME_DIR`. So the system instances are first-party artifacts in
+`mkosi/runtime/pipewire/`, installed and enabled by
+`postinst-lib.sh::setup_pipewire_system_mode`:
+
+- a **dedicated non-root `pipewire` system user** (the Debian postinst creates only
+  the matching group), reaching `/dev/snd` through `SupplementaryGroups=audio` rather
+  than any capability. The build FAILS if that user ever resolves to uid 0.
+- a socket at a fixed **`/run/pipewire/pipewire-0`**, in a `0750` directory declared
+  once in `tmpfiles.d`, with `SocketMode=0660` and group `pipewire`. The root-run
+  `cerastream.service` is admitted by construction; nothing else unprivileged on the
+  board can reach the graph.
+- **real-time scheduling without rtkit**, granted by the units' own `LimitRTPRIO=88`
+  / `LimitRTTIME=200000` / `LimitMEMLOCK=infinity` / `LimitNICE=-11`. Note that the
+  packaged `/etc/security/limits.d/25-pw-rlimits.conf` grants the same values through
+  pam_limits and is **inert for a systemd service** — those unit directives are what
+  actually apply.
+- **no network or zeroconf modules**, enforced structurally as well as by omission:
+  `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH` plus `IPAddressDeny=any`
+  mean such a module could not open a socket even if a future config loaded one.
+  `AF_BLUETOOTH` is required, not optional — the BlueZ backend's SCO/A2DP transports
+  are `PF_BLUETOOTH` sockets.
+- a **headless WirePlumber profile** that disables the session bus, logind seat
+  monitoring, device reservation and the portal permission store, on upstream's own
+  advice for system-wide deployments. The ALSA and BlueZ device monitors stay on.
+- the packaged **user units masked**, so exactly one PipeWire exists on the box.
+
+**`bluez-alsa-utils` and `libasound2-plugin-bluez` were removed in the same
+release**, and that pairing is mandatory rather than tidy: BlueZ permits exactly one
+service to provide a given Bluetooth audio profile, so the two managers are mutually
+exclusive by construction, and ADR-0010 states there is no supported "both installed,
+one disabled" arrangement — a masked unit is one `apt` upgrade away from unmasking
+itself. `bluez` stays; the adapter still needs `bluetoothd`. `pulseaudio` also left
+the debug package delta, because `pipewire-alsa` declares `Conflicts: pulseaudio` and
+the runtime layer installs both lists in one transaction.
+
+Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
+[`docs/size-notes.md`](docs/size-notes.md) §15.
+
+**Not yet exercised on hardware.** Every claim above is a packaging, unit-file or
+configuration fact verified against the real trixie packages and upstream docs; no
+board has booted this stack. Concurrent meter + program capture on one card,
+Bluetooth SCO through the BlueZ backend, and RT scheduling actually being granted are
+owed by the PipeWire board drill. The engine's default stays `[audio] backend =
+"alsa"`, which is what makes shipping from that position acceptable.
+
 ## Supported-Modem Matrix + WWAN Module Check
 
 The cellular modem stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA

@@ -180,8 +180,13 @@ All resolved on trixie `arm64`. `all` = `Architecture: all`.
 | `wireless-regdb` | OK (all) | 2026.05.30-1~deb13u1 |
 | `hostapd` | OK | 2:2.10-24 |
 | `bluez` | OK | 5.82-1.1 |
-| `bluez-alsa-utils` | OK | 4.3.1-3 |
-| `libasound2-plugin-bluez` | OK | 4.3.1-3 |
+| `bluez-alsa-utils` | **REMOVED at todo 28** (resolved fine at 4.3.1-3; retired for BT-manager exclusivity, not for availability) | — |
+| `libasound2-plugin-bluez` | **REMOVED at todo 28** (same) | — |
+| `pipewire` | **ADDED at todo 28** | 1.4.2-1 |
+| `wireplumber` | **ADDED at todo 28** — note the version family | **0.5.8-2** |
+| `pipewire-alsa` | **ADDED at todo 28** | 1.4.2-1 |
+| `gstreamer1.0-pipewire` | **ADDED at todo 28** | 1.4.2-1 |
+| `libspa-0.2-bluetooth` | **ADDED at todo 28** | 1.4.2-1 |
 | `avahi-daemon` | OK | 0.8-16 |
 | `avahi-utils` | OK | 0.8-16 |
 | `libnss-mdns` | OK | 0.15.1-4+b1 |
@@ -203,11 +208,41 @@ All resolved on trixie `arm64`. `all` = `Architecture: all`.
 
 `development.delta.list` (debug images only) resolved clean in full: `python3`
 3.13.5-1, `strace` 6.13+ds-1, `tcpdump` 4.99.5-2, `alsa-utils` 1.2.14-1,
-`pulseaudio` 17.0+dfsg1-2+b1, `usbutils` 1:018-2, `pciutils` 1:3.13.0-2, `lsof`
+`usbutils` 1:018-2, `pciutils` 1:3.13.0-2, `lsof`
 4.99.4+dfsg-2, `i2c-tools` 4.4-2, `can-utils` 2023.03-1+b2, `htop` 3.4.1-5,
 `iotop` 0.6-42-ga14256a-0.3+b1, `nethogs` 0.8.8-1, `vnstat` 2.13-1, `nano`
 8.4-1+deb13u1, `iperf3` 3.18-2+deb13u2, `socat` 1.8.0.3-1, `netcat-openbsd`
 1.229-1.
+
+**`pulseaudio` 17.0+dfsg1-2+b1 was in that set and left at todo 28**, and the
+reason is a *conflict*, not an availability problem — which is why it does not
+appear as an `absent` row above. `pipewire-alsa` declares `Conflicts: pulseaudio`,
+and the runtime layer installs `shared.list` plus this delta as ONE `apt-get
+install`, so a debug build would have failed outright. Verified against the same
+real index rather than reasoned about:
+
+```
+$ apt-get install -s --no-install-recommends pipewire-alsa pulseaudio
+The following packages have unmet dependencies:
+ pipewire-alsa : Conflicts: pulseaudio but 17.0+dfsg1-2+b1 is to be installed
+E: Unable to correct problems, you have held broken packages.
+E: ... Reached two conflicting decisions:
+   1. pulseaudio:arm64=17.0+dfsg1-2+b1 is selected for install
+   2. ... pipewire-alsa:arm64 Conflicts pulseaudio
+```
+
+This is the third distinct shape of package surprise this migration has produced,
+after a rename (`libwpewebkit-1.1-0` → `libwpewebkit-2.0-1`) and a removal
+(`cpufrequtils`): a package that resolves perfectly well and still cannot be
+installed, because of a relation on a package added elsewhere in the same list.
+
+**Two more findings from the todo-28 resolution worth not re-deriving.**
+`wireplumber` is **0.5.8-2** and versions on its own schedule — the whole PipeWire
+family being 1.4.2-1 makes `wireplumber=1.4.2-1` the natural guess and it names a
+version that does not exist. And `libpipewire-0.3-0` is **absent**: the `t64`
+transition renamed it `libpipewire-0.3-0t64`. Nothing in `shared.list` names it
+directly (it arrives transitively through `pipewire-bin`), so a list written from
+a bookworm-era memory would fail only if someone pinned the library explicitly.
 
 `rk3588.delta.list` and `x86_64.delta.list` carry **no active package lines** (both
 are documented-empty by design), so neither had anything to resolve.

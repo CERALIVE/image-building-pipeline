@@ -73,6 +73,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
+| **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
 | **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
@@ -3520,32 +3521,150 @@ evicted. Use `journalctl -k`, `/sys/class/bluetooth/`, and `lsmod` — never a b
 `postinst-wiring.bats` "runtime packages: bluez is installed so the Bluetooth adapter is
 usable".
 
-**`bluez-alsa-utils` + `libasound2-plugin-bluez` in `shared.list` — the ALSA half
-of a Bluetooth microphone** [EXISTS]
+**SYSTEM-MODE PIPEWIRE IS THE AUDIO SERVER, AND IT RETIRED BlueALSA IN THE SAME
+RELEASE — the two BT managers are exclusive by construction, not by preference**
+[EXISTS — shipped in the image, NOT yet exercised on a board]
 
 `bluez` above gets the adapter powered and paired. It does not get a single sample
-of audio off it. BlueALSA is what publishes a paired headset's SCO/HFP leg as an ALSA
-PCM (`bluealsa:DEV=<MAC>,PROFILE=sco`), and `libasound2-plugin-bluez` is the plugin
-that lets a plain `alsasrc` open that address — which is exactly how cerastream
-consumes it, through its opaque `AlsaPcmSpec` seam. Without both, a microphone pairs,
-connects, and can never be opened: the failure is silent and looks like a dead mic.
+of audio off it. Until todo 28 that second half was BlueALSA — `bluez-alsa-utils`
+published a paired headset's SCO/HFP leg as the opaque ALSA PCM
+`bluealsa:DEV=<MAC>,PROFILE=sco` and `libasound2-plugin-bluez` was the plugin that
+let a plain `alsasrc` open it. Both packages are **REMOVED**, and their replacement
+is PipeWire's own BlueZ backend (`libspa-0.2-bluetooth`).
 
-**`bluetooth.service` must keep its IMAGE enable state**, so it was removed from the
-`services.sh` disable loop rather than repaired at runtime. A runtime-only `systemctl
-enable` is replaced along with the rest of `/etc` on the next RAUC A/B OTA, which
-would silently un-Bluetooth every field board on the update after the one that fixed
-it. `bluealsad` stays on-demand and is deliberately **not** image-enabled — CeraUI
-starts it symmetrically with the operator's own preference.
+**NEVER BOTH, and this repository is where that is enforced.** BlueZ permits exactly
+ONE service to register as the provider of a given Bluetooth audio profile, so a
+second one simply loses; bluez-alsa's own TROUBLESHOOTING §6 says running it
+alongside PipeWire with its Bluetooth modules enabled "is not advisable", and the
+observable failure is WirePlumber logging `Properties changed in unknown transport …`
+plus an explicit multiple-sound-server warning. cerastream's
+[`docs/adr/ADR-0010-pipewire-capture.md`](https://github.com/CERALIVE/cerastream/blob/main/docs/adr/ADR-0010-pipewire-capture.md)
+"BT manager exclusivity" states the rule and hands enforcement HERE, because the
+engine has deliberately no Bluetooth vocabulary at all — it receives an opaque PCM
+or a node address and nothing more, so it cannot police this. **There is no
+supported "both installed, one disabled" configuration**: a masked-unit arrangement
+is one `apt` upgrade away from unmasking itself, which is why the packages are
+removed rather than left present and suppressed.
 
-**Naming trap worth stating once:** bookworm's `bluez-alsa-utils 4.0.0-2` installs the
-daemon as `/usr/bin/bluealsa`, while upstream bluez-alsa 4.x renamed it `bluealsad` —
-and the **unit** is `bluealsa.service` in both cases. CeraUI's `BLUEALSA_BINARIES`
-accepts both binary spellings; nothing should hardcode one.
+**Debian ships NO SYSTEM UNIT for either daemon, so the system instances are
+first-party.** `dpkg-deb -c` on the real trixie arm64 packages: `pipewire` carries
+`/usr/lib/systemd/user/{pipewire.service,pipewire.socket,filter-chain.service}` and
+`wireplumber` carries `/usr/lib/systemd/user/wireplumber.service` — user units only,
+nothing to enable and nothing to drop in over. This board has no login session, no
+seat and no `XDG_RUNTIME_DIR`, so `postinst-lib.sh::setup_pipewire_system_mode`
+installs the whole stack from `mkosi/runtime/pipewire/`:
 
-Guards: `tests/mkosi-image-contract.bats` (both packages reach the resolved runtime
-package set, plus the `configure_services` enabled-symlink fixture) and
-`tests/runtime-services.bats` (the OTA-persistence assertion — a deliberately inverted
-Bluetooth disable expectation fails the suite).
+| Artifact | Lands at | Job |
+|---|---|---|
+| `pipewire.socket` | `/etc/systemd/system/` | binds `/run/pipewire/pipewire-0` **before** the daemon execs — the only ordering edge that genuinely means "connectable" |
+| `pipewire.service` | `/etc/systemd/system/` | the daemon, as the `pipewire` user |
+| `wireplumber.service` | `/etc/systemd/system/` | the session manager, `BindsTo=pipewire.service` |
+| `10-ceralive-system.conf` | `/etc/pipewire/pipewire.conf.d/` | `core.name`, 48 kHz pin, `support.dbus = false` |
+| `10-ceralive-headless.conf` | `/etc/wireplumber/wireplumber.conf.d/` | the headless profile |
+| `ceralive-pipewire.tmpfiles.conf` | `/etc/tmpfiles.d/` | `d /run/pipewire 0750 pipewire pipewire` |
+| `ceralive-pipewire-bluez.dbus.conf` | `/etc/dbus-1/system.d/` | narrow `org.bluez` access for the non-root daemon |
+| `ceralive-cerastream-pipewire.dropin.conf` | `…/cerastream.service.d/40-pipewire.conf` | `PIPEWIRE_RUNTIME_DIR` + ordering |
+
+**Six things here are decisions, and each is the answer to a way this goes wrong:**
+
+- **A DEDICATED system user, never root.** The Debian `pipewire` postinst creates
+  the `pipewire` GROUP only (for its packaged `limits.d` file); the matching USER
+  does not exist until the installer makes it. The installer FAILS THE BUILD if the
+  user resolves to uid 0, because a root audio daemon would work perfectly and
+  silently discard the whole posture. `/dev/snd/*` is `GROUP="audio" MODE="0664"`
+  (`mkosi/customize/udev.sh`), so capture is reached with `SupplementaryGroups=audio`
+  and no capability at all.
+- **THE `limits.d` FILE IS A DEAD WRITER for a systemd service.** `pipewire-bin`
+  ships `/etc/security/limits.d/25-pw-rlimits.conf` granting `@pipewire` rtprio 95 /
+  nice -19 / memlock — through **pam_limits**, which a systemd service is not
+  subject to. Reading that file and concluding RT is handled is wrong. The units'
+  own `LimitRTPRIO=88` / `LimitRTTIME=200000` / `LimitMEMLOCK=infinity` /
+  `LimitNICE=-11` are what apply, and they match `libpipewire-module-rt`'s own
+  defaults so the module never asks for more than it is granted. Same trap class as
+  todo 10's `cpufrequtils` → `linux-cpupower` config-with-no-reader.
+- **rtkit is NOT installed** and must not be. It is a D-Bus service wanting polkit
+  and a session; module-rt falls back to a direct `pthread_setschedparam` when the
+  process's rlimits allow, which is what the bullet above arranges.
+- **The socket boundary is `0750` dir + `0660` socket, group `pipewire`.**
+  `cerastream.service` runs as root and is admitted by construction; the group is
+  what would admit a non-root client, and the non-world modes are what keep every
+  other unprivileged process on the board out of a graph that can enumerate and open
+  the operator's capture devices. The directory's mode is declared exactly ONCE, in
+  tmpfiles.d, because three units with their own `RuntimeDirectoryMode=` is three
+  places for it to drift.
+- **No network or zeroconf modules, STRUCTURALLY.** Not installing `pipewire-pulse`
+  / `-jack` / `-zeroconf` and naming no such module in the drop-in is the
+  configuration half. `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH` plus
+  `IPAddressDeny=any` on both units is the half that holds even if a config drifts.
+  **`AF_BLUETOOTH` is load-bearing and easy to drop**: the BlueZ backend's SCO/A2DP
+  transports are `PF_BLUETOOTH` sockets, and removing it does not fail loudly, it
+  just makes Bluetooth capture silently never work. Equally: **never
+  `PrivateDevices=yes`** — that hides `/dev/snd`, which is the entire job.
+- **The session manager gets its own unit, never `context.exec`.** `pipewire.conf(5)`
+  says starting it that way "has been demoted to development aid" and must be avoided
+  in production; ADR-0010 §3 pins it. Related drop-in trap: `.conf.d` **array**
+  sections are APPENDED, not merged, so a `context.modules` block added to
+  reconfigure `module-rt` would load it a SECOND time. RT config therefore lives in
+  the unit, not the config.
+
+**The WirePlumber profile is headless on upstream's own advice.** Of `support.dbus`,
+the WirePlumber docs say: "On a system where WirePlumber is configured to run
+system-wide (headless, embedded, etc), this will most likely fail to load … On such
+systems it makes sense to disable this feature explicitly." So `support.dbus`,
+`support.reserve-device`, `support.logind`, `support.portal-permissionstore`,
+`monitor.bluez.seat-monitoring` and `monitor.alsa.reserve-device` are all `disabled`,
+and V4L2/libcamera monitoring is disabled too because cerastream owns capture nodes
+directly. `monitor.alsa`, `monitor.bluez` and `policy.standard` stay on — they are
+the point. **`disabled` is also the fail-safe verdict across versions**: a profile
+entry naming a feature this WirePlumber does not have is inert, whereas `required` on
+a missing feature is fatal, so the fragment cannot break a future version by naming
+one feature too many.
+
+**`bluetooth.service` must keep its IMAGE enable state**, unchanged by any of this:
+it was removed from the `services.sh` disable loop rather than repaired at runtime,
+because a runtime-only `systemctl enable` is replaced along with the rest of `/etc`
+on the next RAUC A/B OTA and would silently un-Bluetooth every field board on the
+update after the one that fixed it.
+
+**The ALSA rollback hatch is narrowed, not removed, and the difference matters.**
+`[audio] backend = "alsa"` still reaches a physical `hw:CARD=<id>` capture card
+through `alsasrc`/`gstreamer1.0-alsa`, and `pipewire-alsa`'s
+`/usr/share/alsa/alsa.conf.d/50-pipewire.conf` only redirects the ALSA **default**
+pcm, never an explicit `hw:` address. What the ALSA arm loses with these two packages
+is the `bluealsa:` opaque-PCM route to a BLUETOOTH microphone specifically. That
+hardware is reached on the PipeWire arm instead, as an ordinary node.
+
+**One package had to leave the DEBUG delta, and it was forced.** `pipewire-alsa`
+declares `Conflicts: pulseaudio`, and the runtime layer installs `shared.list` plus
+`development.delta.list` as ONE `apt-get install`, so `pulseaudio` was removed from
+the delta AND from `manifests/addons/debug-toolset.json` (the two sets are documented
+as identical). Verified against the real index, not reasoned about — see
+[`docs/trixie-package-resolution.md`](docs/trixie-package-resolution.md). The
+diagnostic capability broadened rather than narrowed: `pipewire-bin`'s
+`pw-cli`/`pw-dump`/`pw-top` ship on EVERY image now, production included.
+
+**Measured cost: +20.9 MiB net** (18 packages added, 2 removed; 464 → 480 in a real
+`apt-get install -s` solve against the trixie arm64 index). ~7.9 MB of that is
+FireWire and roc-toolkit network-audio payload inside `libpipewire-0.3-modules` that
+this image can never reach — known, named, and deliberately NOT pruned at this
+headroom. Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §15.
+
+**HONESTY BOUNDARY — no board has run this.** Every claim above is a packaging,
+config or unit-file fact verified against real trixie packages and upstream
+documentation. Nothing here has been booted: concurrent meter + program capture on
+one card, Bluetooth SCO through the BlueZ backend, and the RT scheduling actually
+being granted are all owed by the PipeWire board drill, and ADR-0010 marks the whole
+PipeWire path `[UNVERIFIED]` on this hardware for the same reason. `backend = "alsa"`
+remaining the engine default is what makes that an acceptable position to ship from.
+
+Guards: `tests/runtime-services.bats` §30 (14 cases — the package set and its
+exclusivity, every artifact installed, the non-root user with a fail-closed uid-0
+leg, the socket/dir mode boundary, the RT limits with a no-`limits.d`-dependency
+assertion, the structural no-network rule, the own-unit session manager, the headless
+profile in both directions, the masked user units, the `Before=cerastream.service`
+ordering from both sides, fail-closed missing/partial sources, and the
+`configure_services` + drift-gate wiring) plus the retargeted BT-policy case in the
+same file and in `tests/mkosi-image-contract.bats`.
 
 **Edge-kernel wireless + Bluetooth enablement — the shipped fragment covered the
 soldered-on parts and almost nothing an operator might fit** [EXISTS]

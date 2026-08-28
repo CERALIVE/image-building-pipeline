@@ -1097,7 +1097,15 @@ SH
   [[ "$output" == *"disable ssh.service"* ]]
 }
 
-@test "Bluetooth stays enabled after configure_services so BlueALSA capture survives the image policy" {
+# RETARGETED (todo 28): the rationale moved, the property did not. This case was
+# "…so BlueALSA capture survives the image policy" while bluez-alsa was the image's
+# Bluetooth-audio provider. That provider is now PipeWire's BlueZ backend
+# (libspa-0.2-bluetooth), which still needs a POWERED adapter — so bluetooth.service
+# must still keep the enable state the image gives it, and a runtime-only enable
+# would still be replaced wholesale by the next A/B OTA. The `bluealsad` absence
+# assertion below is kept for the same reason the sibling case in
+# runtime-services.bats keeps it: it is what catches a partial revert.
+@test "Bluetooth stays enabled after configure_services so PipeWire's BlueZ backend can use the adapter" {
   local bin="$BATS_TEST_TMPDIR/bluetooth-enable-bin"
   local calls="$BATS_TEST_TMPDIR/bluetooth-enable-calls"
   local systemd_etc="$BATS_TEST_TMPDIR/bluetooth-systemd-etc"
@@ -1137,6 +1145,7 @@ SH
       setup_led_status() { :; }
       setup_cpu_governor() { :; }
       setup_hdmirx_edid() { :; }
+      setup_pipewire_system_mode() { :; }
       configure_services
     ' bash "$POSTINST_ENTRY"
 

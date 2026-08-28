@@ -943,3 +943,112 @@ Fold this into the next wet-build baseline bump with a description naming it
 NOT edited here — they record a real `du --apparent-size -sb` of a wet production
 build, and writing a computed figure there would substitute an estimate for a
 measurement.
+
+---
+
+## 15. System-mode PipeWire replaces BlueALSA — measured, +20.4 MiB net (todo 28)
+
+### What changed
+
+`manifests/packages/shared.list` gains the five-package PipeWire audio stack and
+loses the two BlueALSA packages, in the SAME image release. The pairing is not a
+coincidence of timing: cerastream's `docs/adr/ADR-0010-pipewire-capture.md` "BT
+manager exclusivity" makes them mutually exclusive by construction — BlueZ permits
+exactly one service to register as the provider of a given Bluetooth audio profile
+— and states that there is no supported "both installed, one disabled" arrangement,
+because a masked unit is one `apt` upgrade away from unmasking itself.
+
+| | Package | Trixie arm64 version |
+|---|---|---|
+| **+** | `pipewire` | 1.4.2-1 |
+| **+** | `wireplumber` | **0.5.8-2** |
+| **+** | `pipewire-alsa` | 1.4.2-1 |
+| **+** | `gstreamer1.0-pipewire` | 1.4.2-1 |
+| **+** | `libspa-0.2-bluetooth` | 1.4.2-1 |
+| **−** | `bluez-alsa-utils` | 4.3.1-3 |
+| **−** | `libasound2-plugin-bluez` | 4.3.1-3 |
+
+`bluez` stays: the adapter still needs `bluetoothd` powered up whichever userspace
+consumes it. The systemd units, the two config drop-ins, the tmpfiles entry, the
+D-Bus policy and the `cerastream.service` drop-in are text artifacts staged from
+`mkosi/runtime/pipewire/` and add no packages at all.
+
+### Size impact *(MEASURED, not estimated)*
+
+Unlike §7 and §14 this is a real solve rather than a paper sum. Both sides were
+resolved with `apt-get install -s --no-install-recommends` against the **real
+trixie arm64 index** in a `debian:trixie-slim` container, using the ACTUAL
+`shared.list` set as the baseline, and the delta is `comm`'d between the two
+resolved package lists — so a package that was already present through some other
+dependency contributes zero rather than being double-counted.
+
+| | Packages | Installed size |
+|---|---:|---:|
+| before (`shared.list` as it was, with BlueALSA) | 464 | — |
+| after (BlueALSA out, PipeWire in) | 480 | — |
+| **added** (18 packages) | +18 | **+22,292 KiB** |
+| **removed** (2 packages) | −2 | **−887 KiB** |
+| **net** | **+16** | **+21,405 KiB = 21,918,720 B ≈ 20.9 MiB** |
+
+Against the **1.5 GB absolute gate** that lands the two RK3588 boards at roughly
+1,434,178,560 B (`rock-5b-plus`) and 1,440,711,680 B (`orange-pi-5-plus`), i.e.
+~66 MB of headroom remaining. It is also inside the **+50 MB relative regression
+gate** (§4) on its own, though it is the largest single addition since the Wave-3
+trim and should not be stacked with another 20 MB item without re-measuring.
+
+### The dead weight inside it, measured and DELIBERATELY not pruned
+
+`libpipewire-0.3-modules` (5,475 KiB) is the bulk of the addition and it drags two
+payloads this image can never reach:
+
+| Transitive package | Size | Why it is unreachable here |
+|---|---:|---|
+| `libffado2` + `libglibmm-2.4-1t64` + `libxml++2.6-2v5` + `libsigc++-2.0-0v5` + `libconfig++11` | ~6.0 MB | FireWire audio. No CeraLive board has a FireWire port. |
+| `libroc0.4` + `libopenfec1` | ~1.9 MB | roc-toolkit NETWORK audio, for `module-roc-sink/source` — modules this image never loads, and which `pipewire.service`'s `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH` + `IPAddressDeny=any` would refuse a socket to anyway. |
+
+That is ~7.9 MB of the 20.9 MB, and the Mesa prune in §9 is the precedent for
+removing exactly this class of payload with a `RemoveFiles=` glob.
+
+**It is deliberately NOT pruned, and the reason is the ratio rather than the
+principle.** §9's prune was worth its risk because it recovered 185 MB against a
+gate the image was otherwise 70-76 MB over; here the same technique recovers ~7.9 MB
+against ~66 MB of remaining headroom, on a stack that has never been exercised on
+this hardware. Pruning a library out from under a module that `dlopen`s it is safe
+only while the module is genuinely never loaded, and "genuinely never loaded" is
+exactly the claim the board drill has not yet tested. Revisit it if a later
+addition pushes a board within ~15 MB of the ceiling; until then the honest
+position is that the bytes are known, named and accepted.
+
+### The debug variant, and the package that had to leave
+
+`development.delta.list` lost `pulseaudio`, and it is a HARD removal rather than a
+size decision: `pipewire-alsa` declares `Conflicts: pulseaudio`, and the runtime
+layer installs `shared.list` plus the delta as one `apt-get install`, so a debug
+build carrying both fails outright. That was verified against the real index, not
+reasoned about — see `docs/trixie-package-resolution.md`.
+
+This matters for the budget as well as for correctness. §12 measured the debug
+variant at +58.11 MiB with only **21.78 MiB** of headroom under the absolute
+ceiling, and this change adds ~20.9 MiB to BOTH variants. Dropping `pulseaudio`
+recovers part of that, but **how much is genuinely unmeasured, and the obvious
+number is a trap.** Resolved on its own against a bare `debian:trixie-slim`,
+`pulseaudio` pulls a **110-package, ~171 MiB** closure — and almost all of it
+(`libglib2.0-0t64`, `libgstreamer-plugins-base1.0-0`, `iso-codes`, `fontconfig`,
+`libavcodec61`, …) is already in this image through unrelated entries, so the real
+recovery is a small fraction of that and cannot be read off a bare-container solve.
+Measuring it properly needs the same `comm`-against-the-real-baseline method the
+production figure above uses, run for the debug set.
+
+So: **a real wet DEBUG build on trixie is owed before anyone relies on the debug
+variant fitting.** The production variant is not at risk. The debug one has not
+been measured since the suite flip, and §12's figure is a bookworm-era measurement
+that this note deliberately does not carry forward as if it were current.
+
+### Re-evaluation / baseline note
+
+Fold into the next wet-build baseline bump with a description naming it ("Adopted
+system-mode PipeWire, retired BlueALSA: +20.9 MiB"). As in §10, §11 and §14,
+`manifests/size-budget.json` and `ci/size-baseline.<board>.json` are NOT edited
+here — they record a real `du --apparent-size -sb` of a wet production build, and
+the figure above is a resolved-index measurement, which is a stronger basis than
+§7/§14's paper estimates but still not an emitted rootfs.

@@ -1,0 +1,96 @@
+[Unit]
+Description=PipeWire Multimedia Service (CeraLive system mode)
+Documentation=man:pipewire(1)
+Documentation=https://docs.pipewire.org/page_daemon.html
+# SYSTEM MODE IS DELIBERATE, AND IT IS NOT UPSTREAM'S DEFAULT.
+#
+# PipeWire's normal deployment is a per-user daemon on $XDG_RUNTIME_DIR/pipewire-0.
+# This device is a headless appliance: cerastream.service and CeraUI's backend are
+# systemd SYSTEM services, there is no logged-in desktop user, no seat, no session
+# bus and nothing to socket-activate PipeWire on first use. Running it system-wide
+# is a supported and documented alternative (NixOS exposes it as
+# services.pipewire.systemWide; the Raspberry Pi OS headless recipe is the same
+# shape: a system `pipewire` user, system units, user units masked), and the
+# consequence it carries is that access control moves from "one user's runtime dir"
+# to group membership on the system socket. That is what pipewire.socket encodes.
+#
+# The Debian package ships USER units only, so there is no upstream system unit to
+# drop in over — this file IS the system instance. See cerastream
+# docs/adr/ADR-0010-pipewire-capture.md §3.
+Requires=pipewire.socket
+After=pipewire.socket
+After=systemd-tmpfiles-setup.service
+# The engine's PipeWire capture leg (both the always-on meter sidecar and the live
+# program-audio leg) opens a node on this daemon. Ordering-only: cerastream's
+# default `[audio] backend = "alsa"` never touches PipeWire at all, so a hard
+# dependency would tie a working ALSA-arm board's stream engine to a daemon it does
+# not use.
+Before=cerastream.service
+ConditionPathExists=/usr/bin/pipewire
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire
+# DEDICATED SYSTEM USER — never root. The daemon dlopen()s SPA plugins, parses
+# untrusted device descriptors and speaks to BlueZ; none of that needs privilege.
+# `pipewire` is a system user created by postinst-lib.sh::setup_pipewire_system_mode
+# (the Debian package's own postinst creates the matching GROUP and nothing else).
+User=pipewire
+Group=pipewire
+# The one privilege it does need, and it is a group not a capability: /dev/snd/* is
+# GROUP="audio" MODE="0664" (mkosi/customize/udev.sh), so ALSA capture is reachable
+# with no CAP_* and no root.
+SupplementaryGroups=audio
+UMask=0007
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+
+# --- REAL-TIME SCHEDULING, WITHOUT rtkit ------------------------------------
+# libpipewire-module-rt raises the data loop to SCHED_FIFO. It tries RTKit first and
+# falls back to a direct pthread_setschedparam when the process's own rlimits allow
+# it — so granting the rlimits here removes rtkit (a D-Bus service that wants polkit
+# and a session) from a board that has neither.
+#
+# The packaged /etc/security/limits.d/25-pw-rlimits.conf grants exactly these to
+# `@pipewire`, and it is INERT for this unit: pam_limits applies to PAM sessions,
+# and a systemd service is not one. Anyone reading that file and concluding RT is
+# already handled would be wrong — these three directives are what actually apply.
+#
+# The values match module-rt's own defaults (rt.prio 88, rt.time.soft/hard 200000,
+# nice.level -11), so the module never asks for more than the unit grants.
+LimitRTPRIO=88
+LimitRTTIME=200000
+LimitMEMLOCK=infinity
+LimitNICE=-11
+
+Restart=on-failure
+RestartSec=2
+SyslogIdentifier=pipewire
+
+# --- NO NETWORK, STRUCTURALLY --------------------------------------------------
+# ADR-0010 requires that no network or zeroconf discovery module is loaded. Not
+# installing pipewire-pulse/-jack/-zeroconf and not naming such a module in
+# pipewire.conf.d is the configuration half; this is the half that holds even if a
+# future config drifts. With AF_INET/AF_INET6 unavailable, an RTP/RAOP/zeroconf
+# module cannot open a socket at all, and IPAddressDeny=any closes the same door at
+# the cgroup BPF layer.
+#   AF_UNIX      the control socket + the system D-Bus connection
+#   AF_NETLINK   udev device enumeration (libudev)
+#   AF_BLUETOOTH the BlueZ backend's SCO/A2DP transport sockets — REQUIRED, and the
+#                one that is easy to forget: dropping it does not fail loudly, it
+#                just makes Bluetooth capture silently never work.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_BLUETOOTH
+IPAddressDeny=any
+
+# --- Modest hardening ---------------------------------------------------------
+# Deliberately NOT PrivateDevices=yes: that hides /dev/snd, which is the entire job.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

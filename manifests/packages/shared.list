@@ -165,8 +165,103 @@ bluez                    # the Bluetooth userspace stack: bluetoothd + bluetooth
                          # This is NOT an edge-kernel regression — the vendor-BSP images have the
                          # same gap. Same class as the net-tools / iw entries above: one missing
                          # userspace package silently disables a whole hardware feature.
-bluez-alsa-utils          # BT mic capture via BlueALSA.
-libasound2-plugin-bluez   # BlueALSA ALSA PCM consumed by cerastream alsasrc.
+# bluez-alsa-utils       # REMOVED (todo 28). SUPERSEDED, not dropped: PipeWire's own
+# libasound2-plugin-bluez #   BlueZ backend (libspa-0.2-bluetooth, below) is now the
+                         #   device's Bluetooth-audio provider, and the two are
+                         #   MUTUALLY EXCLUSIVE BY CONSTRUCTION rather than by
+                         #   preference. BlueZ permits exactly ONE service to register
+                         #   as the provider of a given Bluetooth audio profile, so a
+                         #   second one simply loses; bluez-alsa's own TROUBLESHOOTING
+                         #   §6 says running BlueALSA alongside PipeWire with its
+                         #   Bluetooth modules enabled "is not advisable", and the
+                         #   observable failure is WirePlumber logging
+                         #   "Properties changed in unknown transport …" plus an
+                         #   explicit multiple-sound-server warning.
+                         #   cerastream ADR-0010 "BT manager exclusivity" states the
+                         #   rule and hands enforcement to THIS repository, because the
+                         #   engine has no Bluetooth vocabulary at all: it receives an
+                         #   opaque PCM or node address and nothing more.
+                         #   THERE IS NO SUPPORTED "BOTH INSTALLED, ONE DISABLED"
+                         #   CONFIGURATION — a masked-unit arrangement is one apt
+                         #   upgrade away from unmasking itself — so the packages are
+                         #   removed rather than left present and suppressed.
+                         #   The ALSA rollback hatch is unaffected: `[audio] backend =
+                         #   "alsa"` still reaches a physical `hw:CARD=` capture card
+                         #   through `alsasrc` (gstreamer1.0-alsa, unchanged). What the
+                         #   ALSA arm loses with these two packages is the
+                         #   `bluealsa:DEV=…,PROFILE=sco` opaque-PCM route to a
+                         #   BLUETOOTH microphone specifically — that hardware is
+                         #   reached on the PipeWire arm instead, as an ordinary node.
+
+# --- Audio server (PipeWire, system mode — ADR-0010) --------------------------
+# The device shares ONE capture card between the always-on audio meter sidecar and
+# the live program-audio leg. ALSA hands out exactly one capture handle per card, so
+# under `[audio] backend = "alsa"` the engine has to arbitrate them with the ADR-0007
+# ownership lease — seven states, four bounded timers, acknowledged handoffs in both
+# directions, and an amendment history of real field defects (0/5 and 2/5 launches
+# failing `audio-device-unavailable` until a whole-launch card reservation was added).
+# PipeWire multiplexes the device instead, so both consumers hold it at once and the
+# lease stops being on the hot path. See cerastream docs/adr/ADR-0010-pipewire-capture.md.
+#
+# TRIXIE-NATIVE VERSIONS, resolved against the REAL trixie arm64 index (todo 28) —
+# NOT a forecast, and one of them is NOT what the version-family guess would give:
+#   pipewire              1.4.2-1
+#   pipewire-alsa         1.4.2-1
+#   gstreamer1.0-pipewire 1.4.2-1
+#   libspa-0.2-bluetooth  1.4.2-1
+#   wireplumber           0.5.8-2   <-- session manager versions INDEPENDENTLY of
+#                                       PipeWire; assuming 1.4.2 here would pin a
+#                                       version that does not exist. Same class of
+#                                       trap as todo 10's libwpewebkit rename.
+# `libpipewire-0.3-0` does NOT exist on trixie either — the t64 transition renamed it
+# `libpipewire-0.3-0t64`. Nothing below names it directly (it arrives transitively),
+# which is exactly why the name is recorded here rather than discovered at a flip.
+pipewire                 # the daemon itself. Debian ships it with USER units ONLY
+                         # (/usr/lib/systemd/user/{pipewire.service,pipewire.socket}) —
+                         # there is NO system unit to enable and NO system unit to drop
+                         # in over, verified by `dpkg-deb -c` on the real trixie arm64
+                         # package. This is a headless appliance with no login session,
+                         # no seat and no XDG_RUNTIME_DIR, so the SYSTEM units are
+                         # first-party and shipped from mkosi/runtime/pipewire/ by
+                         # postinst-lib.sh::setup_pipewire_system_mode.
+                         # Its postinst creates the `pipewire` system GROUP (for the
+                         # packaged /etc/security/limits.d/25-pw-rlimits.conf); the
+                         # matching system USER is ours to create, and those PAM limits
+                         # are INERT for a systemd service — the unit's own LimitRTPRIO=
+                         # / LimitRTTIME= / LimitMEMLOCK= are what actually apply.
+wireplumber              # the session manager. Upstream is unambiguous that starting a
+                         # session manager from pipewire.conf's `context.exec` "has been
+                         # demoted to development aid" and must be avoided in production
+                         # (pipewire.conf(5)), so it gets its own system unit. Also
+                         # USER-units-only in Debian. Its headless profile — no session
+                         # bus, no logind seat, no device reservation — is a first-party
+                         # wireplumber.conf.d fragment.
+pipewire-alsa            # /usr/share/alsa/alsa.conf.d/50-pipewire.conf: routes the ALSA
+                         # DEFAULT pcm through PipeWire so an ALSA-only client is not
+                         # locked out of a card the daemon holds. It does NOT intercept
+                         # an explicit `hw:CARD=<id>` address, which is the exact
+                         # vocabulary the ALSA rollback hatch uses, so `backend = "alsa"`
+                         # keeps opening the card directly.
+                         # CARRIES A HARD `Conflicts: pulseaudio` — that is why
+                         # `pulseaudio` had to leave development.delta.list; see the
+                         # removal note there. A coinstall was attempted against the real
+                         # index and REFUSED ("Reached two conflicting decisions").
+gstreamer1.0-pipewire    # `pipewiresrc` — the element cerastream builds its capture
+                         # source from on the PipeWire arm (`pipewiresrc
+                         # target-object=<node>`). Without it a PipeWire-configured graph
+                         # fails construction with the typed
+                         # GraphError::AudioBackendUnavailable and NEVER silently falls
+                         # back to ALSA, and the engine withholds its `pipewire-capture`
+                         # feature token so CeraUI gates closed. The engine `.deb`
+                         # deliberately does NOT Depends on this (the default arm does not
+                         # need it), so the image is the only thing that can supply it.
+libspa-0.2-bluetooth     # PipeWire's BlueZ backend — the replacement for bluez-alsa
+                         # above. A Bluetooth microphone becomes an ordinary PipeWire
+                         # node with a `node.name` and no `api.alsa.*` property, which
+                         # cerastream's `sources/pw_identity.rs` resolves through the
+                         # SAME resolver as a physical card. Not a `Recommends:` of
+                         # anything we install, so it must be named explicitly or BT
+                         # audio is silently absent.
 
 # --- mDNS / discovery ---------------------------------------------------------
 avahi-daemon             # .local hostname advertisement (find the box on the LAN)
