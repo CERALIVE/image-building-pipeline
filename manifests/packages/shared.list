@@ -97,6 +97,7 @@ gstreamer1.0-plugins-bad
 gstreamer1.0-plugins-ugly
 gstreamer1.0-libav       # libav-backed encode/decode fallback
 v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device control
+libv4l-0                 # rockchip-multimedia-config postinst copies libv4l2.so.0.0.0
 ffmpeg                   # transcode/probe utility for the pipeline
 
 # --- Modems (LTE/5G on every board) -------------------------------------------
