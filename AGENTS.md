@@ -21,6 +21,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 ├── dev-push / dev-sync       # dev-loop helpers
 ├── ci/
 │   ├── Dockerfile            # pinned debian:trixie-slim builder (mkosi 26)
+│   ├── seal-raw-candidate.sh # post-preflash .raw → .raw.xz + both SHA-256 records
 │   └── publish-immutable-r2-pair.sh # approved-digest-bound RAUC publisher
 ├── manifests/                # board/family manifests + exact package registries
 │   └── schema/
@@ -1022,12 +1023,15 @@ fixture before resolving, so build-plan checks are self-contained too.
 
 Production builds require one explicit RAUC PKI contract: signer root, chain,
 leaf certificate/key, and baked device keyring must match. The release workflow
-builds the candidate and uploads the raw image, bundle, keyring, and digest as one
-immutable artifact for an operator to download; there is no automated
-hardware-flashing gate. An operator hand-tests that exact artifact on real
-hardware before a manual release, using the bench flash-and-verify tool
-(`ci/verify-and-flash-candidate.sh`), which preflights and flashes a private,
-digest-verified snapshot of that exact raw image. While
+builds and preflight-verifies the sparse raw image, then seals the first-flash
+download as `.raw.xz`. It uploads that compressed transport, its checksum, the
+decompressed-byte `raw.sha256`, bundle, keyring, and loader as one immutable
+artifact for an operator to download; there is no automated hardware-flashing
+gate. An operator hand-tests that exact artifact on real hardware before a manual
+release, using the bench flash-and-verify tool
+(`ci/verify-and-flash-candidate.sh`), which verifies the compressed transport,
+materializes one private sparse snapshot, verifies it against `raw.sha256`, and
+flashes those exact decompressed bytes. While
 the board is still in maskrom, the tool reads the exact whole-media sector range
 back with `rkdeveloptool rl`, hashes the private readback, and refuses to reset
 on mismatch. The candidate artifact also carries the official Radxa Maskrom
@@ -2868,11 +2872,15 @@ the next unused patch tag at that same proven commit. Never use a new tag as the
 first production execution of the repair, and never move or rerun the failed tag.
 
 The Rock 5B+ raw's 14,800 MiB logical geometry is intentional and starts sparse.
-Candidate sealing hard-links that immutable raw into the repo-local `candidate/`
-directory, so staging does not allocate a second multi-GiB copy; artifact upload
-uses explicit zlib compression level 6. Keep the candidate directory on the same
-filesystem, and do not replace the hard link with `cp`. Regression coverage is
-in `tests/builder-resource-budget.test.sh` and
+Every construction/parity check and the release workflow's `preflash-verify.sh`
+gate reads that uncompressed raw. Candidate sealing happens afterward through
+`ci/seal-raw-candidate.sh`, which deliberately uses `xz -T0 -6`, verifies the
+decompressed stream against the original raw SHA-256, and puts only `.raw.xz`,
+its compressed SHA-256 sidecar, and `raw.sha256` in `candidate/`. The build-local
+raw remains under `images/<board>/`; the `.raucb` is untouched. Artifact upload
+uses compression level 0 because recompressing xz wastes time. Regression coverage
+is in `tests/raw-candidate-compression.test.sh`,
+`tests/release-candidate-contract.test.sh`, and
 `tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [EXISTS]

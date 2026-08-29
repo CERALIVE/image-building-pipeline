@@ -28,10 +28,11 @@ release.yml: admission + production build
         │                            verifies leaf→intermediate→root
         │
         ▼
-seal + upload one immutable candidate artifact
+verify the uncompressed raw, then seal + upload one immutable candidate artifact
+(.raw.xz + compressed and uncompressed SHA-256 records)
         │
         ▼  (MANUAL from here down — no automated hardware gate)
-operator flashes the candidate with verify-and-flash-candidate.sh and
+operator flashes the compressed candidate with verify-and-flash-candidate.sh and
 hand-tests it on a REAL RK3588 (realhw-suite.sh: boot/service,
 encode-path init, dev-loop sanity, RAUC A/B rollback)
         │
@@ -98,17 +99,19 @@ automated CI job that flashes or tests real hardware. An operator downloads the
 candidate artifact and hand-tests it on a Rock 5B+ before a manual release, using
 the bench flash-and-verify tool (`ci/verify-and-flash-candidate.sh`) plus the
 acceptance suite (`tests/realhw-suite.sh`). The candidate artifact carries the
-raw image, its SHA-256, the production bundle, keyring, the hash-pinned Maskrom
+   xz-compressed raw image, SHA-256 records for both its compressed transport and
+   decompressed bytes, the production bundle, keyring, the hash-pinned Maskrom
 loader, and the candidate commit — everything the operator needs to flash and
 validate the exact bytes that could ship.
 
 Steps, in order:
 
-1. **Candidate verification** — verify the exact raw SHA-256, production bundle,
+1. **Candidate verification** — verify the compressed download SHA-256, decompress
+   into a private sparse snapshot, verify the exact raw SHA-256, production bundle,
    embedded slot keyrings, boot artifacts, GPT geometry, loader SHA-256, and
    loader-mode eMMC capacity before any media write.
-2. **Required flash and identity proof** — copy the raw into a private snapshot,
-   verify its SHA-256, and use that same snapshot for preflight and the RK3588
+2. **Required flash and identity proof** — use that decompressed private snapshot
+   for preflight and the RK3588
    Maskrom write. The board is expected to be in Maskrom when the tool starts;
    no pre-flash SSH session, password, or power helper is required. Before reset,
    read the exact candidate sector range into a
@@ -214,10 +217,27 @@ not increase a timeout, bypass the check, or rerun/move an existing immutable
 tag.
 
 The raw disk's large logical size is flash geometry, not transport size. The
-assembler creates it sparse; candidate sealing uses a same-filesystem hard link
-instead of a byte copy, and `actions/upload-artifact` compresses the candidate at
-explicit level 6. This keeps the raw bytes and SHA-256 unchanged while avoiding
-a second allocated raw during the upload window.
+assembler creates it sparse and every build-time parity check operates on those
+uncompressed bytes. After the build-log census, `release.yml` runs
+`preflash-verify.sh` against that uncompressed `.raw`; only then does candidate
+sealing call `ci/seal-raw-candidate.sh`. The sealer uses `xz -T0 -6`: level 6 is
+a deliberate middle ground between download size and the disproportionate CPU
+cost of `-9`, while `-T0` uses the production runner's available cores. It emits
+`<timestamp>.raw.xz`, `<timestamp>.raw.xz.sha256`, and `raw.sha256` (the digest of
+the bytes obtained after decompression). It also streams the compressed output
+back through `xz -dc` and checks that digest before sealing succeeds.
+Candidate readers inspect the XZ index before extraction, reject a declared
+decompressed size above 16 GiB, require enough temporary space, and apply a
+1 GiB XZ decoder-memory ceiling. These bounds cover the frozen RK3588 disk
+geometry without allowing an untrusted transport to grow without limit.
+
+The uncompressed `.raw` remains in `images/<board>/` for build-local consumers;
+it is not copied into `candidate/`. GitHub artifact upload therefore uses
+compression level 0 rather than spending more CPU trying to recompress xz data.
+The sealer prints raw/compressed byte counts and elapsed seconds in its own
+workflow step. That timing is intentionally outside `candidate-build.log`, whose
+frozen build-log census covers the nine image-construction stages rather than
+release transport packaging.
 
 ### Production build caches
 
@@ -247,7 +267,7 @@ domain"). Image outputs,
 inputs. These steps are guarded to release pushes/tags, and the trust-input
 step remains after cache restore and builder preparation; the production build,
 candidate contents, and required real-HW workflow call are unchanged. Candidate
-sealing uses the same-filesystem hard link described above.
+sealing uses the post-verification xz step described above.
 
 Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
@@ -517,6 +537,9 @@ mkdir "${tmp}/candidate"
 unzip -q "${tmp}/candidate.zip" -d "${tmp}/candidate"
 
 candidate="${tmp}/candidate"
+raw_transport="$(find "${candidate}" -maxdepth 1 -type f -name '*.raw.xz' -print -quit)"
+test -n "${raw_transport}"
+( cd "${candidate}" && sha256sum -c "$(basename "${raw_transport}").sha256" )
 expected_raw_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/raw.sha256")"
 [[ "${expected_raw_sha}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${hand_tested_raw_sha256}" =~ ^[0-9a-f]{64}$ ]]
