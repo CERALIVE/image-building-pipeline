@@ -533,6 +533,15 @@ PY
   ! grep -rF 'uhubctl' "$REPO_ROOT/mkosi/runtime" "$REPO_ROOT/mkosi/customize"
 }
 
+@test "RK3588 multimedia config: libv4l-0 is in the earlier runtime transaction" {
+  local shared="$REPO_ROOT/manifests/packages/shared.list"
+  run grep -Ex 'libv4l-0[[:space:]]*(#.*)?' "$shared"
+  [ "$status" -eq 0 ]
+  run grep -n -E '^(v4l-utils|libv4l-0)[[:space:]]' "$shared"
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 's/^v4l-utils[[:space:]]*//p' "$shared" | head -n 1 >/dev/null; grep -n '^v4l-utils[[:space:]]' "$shared" | cut -d: -f1)" -lt "$(grep -n '^libv4l-0[[:space:]]' "$shared" | cut -d: -f1)" ]
+}
+
 @test "wwan: the check asserts a .deb extractor (dpkg-deb or ar+tar) is available" {
   # with a normal PATH the assertion passes (ar + tar are on the host)
   run bash -c "source '$CHECK_WWAN'; wwan_assert_deb_tools"
