@@ -32,10 +32,32 @@ is still required before release — see "What this does not prove" at the end.
 
 ## Result
 
-**68 names checked. 66 unchanged. 2 diverged.** No `t64` rename touched any name
-in these lists — the transition renamed transitive dependencies only
-(`libext2fs2t64`, `libcurl4t64`, `libglib2.0-0t64`, `libssl3t64` all appear in the
-solved set, but none is named by us).
+**68 names checked. 66 unchanged. 2 diverged.** At the time of that audit no `t64`
+rename touched a name in the lists. A later real image build exposed one additional
+compatibility boundary in the pinned third-party Rockchip package, described below.
+
+### `libv4l-0` → `libv4l-0t64`: apt compatibility is not dpkg compatibility
+
+Trixie installs the real library from `libv4l-0t64` at
+`/usr/lib/aarch64-linux-gnu/libv4l2.so.0.0.0`. The package declares
+`Provides: libv4l-0`, so apt can satisfy `rockchip-multimedia-config`'s old-name
+dependency. Its postinst does not stop at dependency resolution, however:
+
+```sh
+libv4l_filename=$(dpkg -L libv4l-0 | grep libv4l2.so.0.0.0)
+cp ${libv4l_filename} /usr/lib64/libv4l2.so
+```
+
+`dpkg` records the installed provider as `libv4l-0t64`, so the exact-name listing
+fails. A fileless transitional package also fails because the grep needs a payload
+path. The pipeline therefore builds an arm64 package named `libv4l-0` at fetch time.
+It depends on `libv4l-0t64` and contains one file: the collision-free symlink
+`/usr/share/libv4l-0-compat/libv4l2.so.0.0.0` pointing at the real t64 library.
+Plain `cp` dereferences that link. The package is explicitly named first in the same
+platform-layer `mkosi-install` transaction as `rockchip-multimedia-config`; it owns
+neither `/usr/lib/aarch64-linux-gnu/libv4l2.so.0.0.0` nor the adjacent soname link.
+This preserves the SHA-256-pinned third-party `.deb` unchanged while giving its
+legacy maintainer script a real dpkg package record and readable path.
 
 ### The two divergences
 
