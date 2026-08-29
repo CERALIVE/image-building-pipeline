@@ -272,14 +272,14 @@ variants:
       # exists for.
       #
       # HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP, AND THIS IS THE HONEST
-      # STATEMENT OF IT. Every board result this series accumulated — the Rock
-      # 5B+ MPP hardware-encode confirmation, the rkvenc fault-injection
-      # receipts, the 4K HDMI-RX lock behind 0027 — was obtained against the
-      # v7.1.7 base. NOTHING has been built, flashed or booted at v7.2, on either
-      # board. What v7.2 evidence exists is a cross-compile of this exact tree
-      # (22/22 `git am` clean, Image + modules + dtbs, zero errors) plus the
-      # config-survival gate. Read this pin as compile-proven and
-      # hardware-UNVALIDATED until a board says otherwise.
+      # STATEMENT OF IT. Both Rock 5B+ and Orange Pi 5 Plus boards have booted
+      # a v7.2.0-ceralive-rk3588 kernel and passed direct GStreamer generic and
+      # MPP hardware 60-second encodes, validating the kernel/userspace MPP
+      # encoder ABI on real hardware. That is narrower than full release
+      # qualification: no complete pinned Trixie candidate image has yet been
+      # built, flashed, and OTA-tested end to end. Read this pin as
+      # kernel-on-silicon compatibility-proven, with release qualification still
+      # outstanding.
       #
       # PIN HYGIENE — pin a SHA a fresh clone can reach, never a PR-head SHA. A
       # squash-merge orphans the pre-merge branch head, so pinning that would pin
