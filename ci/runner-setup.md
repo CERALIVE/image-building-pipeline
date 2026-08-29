@@ -42,8 +42,9 @@ the MOCK mode of `rauc-rollback.sh` proves the engine, not the silicon.
 - **x86_64** strongly preferred (mkosi/docker tooling, `rkdeveloptool` apt
   package, GH runner are all first-class on amd64).
 - ≥ 4 GB RAM, ≥ 40 GB free disk (build artifacts + image staging + runner work
-  dir). Candidate verification uses one private image-sized scratch object at a
-  time: first the immutable flash snapshot, then the exact media readback. It
+  dir). The downloaded candidate is `.raw.xz`. Candidate verification checks its
+  transport sidecar, materializes one private sparse raw snapshot, and later
+  replaces it with the exact media readback. It
   never retains both scratch images simultaneously.
 - Outbound HTTPS to `github.com` / `api.github.com` / `*.actions.githubusercontent.com`
   (the runner long-polls GitHub; **no inbound** port needs opening).
@@ -369,7 +370,9 @@ identity, or cleanup evidence.
 The bench flash-and-verify tool (`verify-and-flash-candidate.sh`) is run by an
 operator against the exact immutable candidate artifact downloaded from a
 `release.yml` build. It takes the immutable artifact digest, raw SHA-256, bundle,
-keyring, loader filename/SHA-256, and candidate commit as inputs. There is no
+keyring, loader filename/SHA-256, and candidate commit as inputs. The artifact
+also carries a SHA-256 sidecar for the compressed `.raw.xz`; the tool verifies it
+before decompression and records both transport and raw identities. There is no
 automated hardware-flashing job — nightly, manual-current-image, or
 pull-request-triggered.
 
