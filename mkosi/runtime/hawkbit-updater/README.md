@@ -14,7 +14,7 @@ hawkBit DDI v1 (private, 127.0.0.1:8080 behind TLS proxy/VPN)
 rauc-hawkbit-updater ──download──▶ /data/ceralive/rauc-downloads/bundle.raucb
         │  RAUC D-Bus InstallBundle                         (NOT rootfs — task 41)
         ▼
-RAUC installs to inactive slot, marks it primary (boot-attempts=3, system.conf)
+RAUC installs to inactive slot; custom backend marks it primary (FAT attempt budget=3)
         │  (updater has NO mark-good — gate is NOT bypassed)
         ▼  reboot (operator/CeraUI controlled; post_update_reboot=false)
 new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
@@ -145,10 +145,12 @@ does so against trixie's RAUC **1.13**, not the bookworm 1.8 this design was fir
 written for; the D-Bus `InstallBundle` interface it drives is unchanged across that
 jump. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
 "`mark_compatible = false` or equivalent" the task asks for is satisfied
-structurally: the updater simply cannot confirm a slot). Confirmation is RAUC's
-`boot-attempts` countdown + `ceralive-healthcheck.service`, which is the **sole**
-caller of `rauc mark-good`. A bad bundle that boots-but-can't-stream is left
-unconfirmed and rolled back on the next reboot (task 27 bootcount adapter).
+structurally: the updater simply cannot confirm a slot). Confirmation is the
+custom backend's FAT `boot_state.txt` countdown plus
+`ceralive-healthcheck.service`, which is the **sole** caller of `rauc mark-good`.
+A bad bundle that boots-but-can't-stream is left unconfirmed and rolled back on
+the next reboot (task 27 bootcount adapter). RAUC's native `boot-attempts` key is
+not used because RAUC 1.13 rejects it with `bootloader=custom`.
 
 `post_update_reboot = false` keeps the reboot under CeraLive's control (the upstream
 docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-loss

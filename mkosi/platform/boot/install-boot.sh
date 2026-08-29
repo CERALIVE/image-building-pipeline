@@ -136,9 +136,6 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=custom
-# Boot attempts per slot before the custom backend / boot.scr declare a slot bad
-# and roll back. Mirrors CERALIVE_BOOT_ATTEMPTS used by ceralive-boot-state.
-boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
 # Trixie RAUC 1.13 delegates the four state/primary operations to this script

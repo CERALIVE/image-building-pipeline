@@ -1,14 +1,15 @@
 # Bookworm → Trixie OTA transition contract and drill
 
 **Status:** `[PARTIAL]` — the transition is **OTA-feasible**, and the bundle
-compatibility contract is enforced offline. The current mainline v7.2 image has
-not yet completed this drill on hardware; todo 16 owns that execution.
+compatibility contract is enforced offline. The first mainline v7.2 Trixie drill
+reached the new slot on both RK3588 boards but exposed a producer-side RAUC 1.13
+configuration defect; the corrected image still needs the drill repeated.
 
 ## Verdict
 
 ```yaml
 transition: ota
-hardware-gated: not-run
+hardware-gated: attempted-blocked
 fleet-installer: rauc-1.8
 first-trixie-bundle-format: plain
 ```
@@ -44,6 +45,14 @@ The conclusion rests on four independently checkable facts:
    intermediate chain, verified to the same baked root. `check-purpose` stays
    unset, so both RAUC 1.8 and 1.13 use OpenSSL's `smime_sign` purpose and accept
    the existing dual-EKU leaf.
+
+The attempted drill also established one Trixie-only config constraint. RAUC
+1.13 hard-rejects `bootloader=custom` combined with RAUC's native
+`boot-attempts=` key, which is supported only by `uboot` and `barebox`. The
+RK3588 custom backend already owns the attempt budget in FAT `boot_state.txt`, so
+the three custom config writers now omit that key with no substitute. The
+opt-in real-RAUC contract loads the authoritative generated config and starts the
+service; an injected `boot-attempts=3` is its negative control.
 
 Primary references:
 
@@ -95,9 +104,10 @@ size=<generated>
 - Later releases may tighten the format only after every device has booted a
   Trixie slot and therefore runs the newer RAUC.
 
-Guard: `tests/rauc-transition-contract.test.sh`. It checks the real bundle
-writer and both `system.conf` writers, and carries format/compatible mutations
-that must be rejected.
+Guards: `tests/rauc-transition-contract.test.sh` checks the real bundle writer
+and all three custom `system.conf` writers, including the absence of RAUC-native
+attempt counting. `tests/real-rauc-contract.sh` starts a real daemon with the
+authoritative rendered config. Both suites carry mutations that must be rejected.
 
 ## Todo 16 A/B transition drill (runbook only; not executed here)
 

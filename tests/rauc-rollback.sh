@@ -55,7 +55,7 @@
 #   BUNDLE_DIR          dir holding the pre-built bundles (bad.raucb, good.raucb)
 #   BAD_BUNDLE          override the bad bundle path  (default $BUNDLE_DIR/bad.raucb)
 #   GOOD_BUNDLE         override the good bundle path (default $BUNDLE_DIR/good.raucb)
-#   BOOT_ATTEMPTS       per-slot bootcount budget (system.conf boot-attempts) (def 3)
+#   BOOT_ATTEMPTS       custom FAT per-slot bootcount budget              (def 3)
 #   REBOOT_TIMEOUT      seconds to wait for SSH to return after a reboot      (def 90)
 #   HEALTHCHECK_TIMEOUT seconds to wait for the slot to self-confirm good    (def 120)
 #   SSH_POLL_INTERVAL   seconds between SSH reachability polls                 (def 5)
@@ -466,7 +466,7 @@ main() {
   echo " Mode   : ${MODE^^}$( [[ ${MODE} == live ]] && echo " (${SSH_USER}@${BOARD_IP}:${SSH_PORT})" || echo " (simulated board; drives the REAL shipped scripts)")"
   echo " Engine : ceralive-boot-state.sh / ceralive-rauc-boot-adapter.sh"
   echo " Gate   : ceralive-healthcheck.sh (mark-good only on real streaming health)"
-  echo " Budget : boot-attempts=${BOOT_ATTEMPTS}"
+  echo " Budget : custom boot-state attempts=${BOOT_ATTEMPTS}"
   echo "=============================================================="
 
   if [[ "${MODE}" == "live" ]]; then
