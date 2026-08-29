@@ -36,11 +36,11 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.8.5
-  # Release provenance: tag v2026.8.5 resolves to commit f08f7efea9d6b113b34f1e1609d9e8c88c29f7e4.
-  # Device deb: ceralive-device 2026.8.5-20260826T062956.f08f7ef (amd64) /
-  #   2026.8.5-20260826T063003.f08f7ef (arm64).
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.5
+  pin: v2026.8.6
+  # Release provenance: tag v2026.8.6 resolves to commit 86f57602.
+  # Device deb: ceralive-device 2026.8.6-20260829T120646.86f5760 (amd64) /
+  #   2026.8.6-20260829T120645.86f5760 (arm64).
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.6
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
