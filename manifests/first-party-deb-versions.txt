@@ -1,5 +1,5 @@
 libsrt1.5-ceralive=1.5.6+ceralive.1
-cerastream=2026.8.0
+cerastream=2026.8.1
 gstreamer1.0-libuvch264src=2026.8.0
 ceralive-device[amd64]=2026.8.5-20260826T062956.f08f7ef
 ceralive-device[arm64]=2026.8.5-20260826T063003.f08f7ef
