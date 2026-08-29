@@ -229,6 +229,11 @@ images/rock-5b-plus/
 
 The `.raw` is a sparse file. Actual on-disk size is much smaller than the
 nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size.
+These are build-local artifacts. A sealed release candidate contains
+`<timestamp>.raw.xz` plus `<timestamp>.raw.xz.sha256` for download integrity and
+`raw.sha256` for the decompressed bytes that are flashed and read back. Sealing
+runs only after the workflow's uncompressed preflash gate; it uses multithreaded
+xz level 6 rather than the slower level 9.
 
 ### Custom APT mirror
 
@@ -435,6 +440,15 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
 sudo sync
 ```
 
+For a downloaded release candidate, verify and decompress it before `dd`:
+
+```bash
+sha256sum -c <timestamp>.raw.xz.sha256
+xz -dk <timestamp>.raw.xz
+sudo dd if=<timestamp>.raw of=/dev/sdX bs=4M status=progress conv=fsync
+sudo sync
+```
+
 Eject the card and insert it into the board. **Do not assume this is enough,
 verify it.** A previous version of this doc claimed the Rock 5B+ boots microSD
 before eMMC by default, citing Radxa forum guidance for the Rock 5B and the
@@ -492,11 +506,13 @@ The general procedure for RK3588 boards:
    `Maskrom` device.
 
 **Write the image:** the release-candidate build workflow (`release.yml`) produces
-the immutable candidate artifact (raw image + signed `.raucb` + pinned loader); an
+the immutable candidate artifact (compressed `.raw.xz` + both raw/transport
+SHA-256 records + signed `.raucb` + pinned loader); an
 operator downloads it and flashes it with the bench flash-and-verify tool
 (`ci/verify-and-flash-candidate.sh`, described in
 [`ci/runner-setup.md`](../ci/runner-setup.md)). The tool downloads the pinned
-loader, checks the approved Maskrom USB fixture and eMMC capacity, captures the
+loader, verifies and decompresses the raw into a private sparse snapshot, checks
+the approved Maskrom USB fixture and eMMC capacity, captures the
 initial loader command under a pinned process-group leader, and limits it with a
 monotonic 15-second budget.
 After `db` exits, a separate 10-second phase must observe the same
@@ -522,7 +538,7 @@ has been validated on real Rock 5B+ hardware.
 
 ```bash
 rkdeveloptool db  <loader.bin>      # download the loader (SPL) into device RAM
-rkdeveloptool wl 0 <image.raw>      # write the full raw image, starting at LBA 0
+rkdeveloptool wl 0 <image.raw>      # write a decompressed raw image, starting at LBA 0
 rkdeveloptool rd                    # reset the device
 ```
 
@@ -1078,7 +1094,7 @@ working build:
 - [ ] `./build rock-5b-plus` for a real build (needs `apt.ceralive.tv`
       credentials — see "APT feed" in §1; ~15-30 min on a modern host).
 - [ ] Before touching real hardware, read §3 "Pre-flash verification" and run
-      `tests/preflash-verify.sh` against your build's `.raw` — it is
+      `tests/preflash-verify.sh` against your build's uncompressed `.raw` — it is
       non-destructive (only reads block-device size) and catches most build
       defects before you commit to a flash.
 - [ ] Pick ONE flash path from the table at the top of §4, matching your

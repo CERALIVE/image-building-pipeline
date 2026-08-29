@@ -48,12 +48,32 @@ for pair in "image:${image}" "bundle:${bundle}" "loader:${loader}"; do
 done
 [[ "${gap_mb}" =~ ^[1-9][0-9]*$ ]] || { printf -- '--gap-mb must be a positive integer\n' >&2; exit 2; }
 
-for tool in mtype unsquashfs sha256sum; do
+for tool in dd df mtype unsquashfs sha256sum; do
   command -v "${tool}" >/dev/null 2>&1 || die "required tool not on PATH: ${tool}"
 done
 
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+raw_image="${image}"
+if [[ "${image}" == *.xz ]]; then
+  command -v xz >/dev/null 2>&1 || die "required tool not on PATH: xz"
+  max_raw_bytes=17179869184
+  listed_raw_bytes="$(xz --robot --list -- "${image}" | awk -F '\t' '$1 == "totals" { print $5 }')"
+  [[ "${listed_raw_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    || die "could not determine decompressed candidate size: ${image}"
+  (( listed_raw_bytes <= max_raw_bytes )) \
+    || die "decompressed candidate exceeds 16 GiB safety limit: ${listed_raw_bytes} bytes"
+  available_bytes="$(df --output=avail -B1 "${work}" | tail -n 1 | tr -d ' ')"
+  [[ "${available_bytes}" =~ ^[0-9]+$ && available_bytes -ge listed_raw_bytes ]] \
+    || die "insufficient temporary space for ${listed_raw_bytes}-byte candidate"
+  raw_image="${work}/candidate.raw"
+  xz --memlimit-decompress=1GiB -dc -- "${image}" \
+    | dd of="${raw_image}" bs=4M conv=sparse status=none \
+    || die "could not decompress candidate image: ${image}"
+fi
+
 boot_off=$(( gap_mb * 1024 * 1024 ))
-board_env="$(mtype -i "${image}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
+board_env="$(mtype -i "${raw_image}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
 [[ -n "${board_env}" ]] \
   || die "no cera_board.env on the FAT boot partition at byte offset ${boot_off}"
 
@@ -61,9 +81,6 @@ candidate_board_id="$(sed -n 's/^board_id=//p' <<<"${board_env}" | head -1 | tr 
 candidate_fdtfile="$(sed -n 's/^fdtfile=//p'  <<<"${board_env}" | head -1 | tr -d '\r')"
 [[ -n "${candidate_board_id}" ]] || die "cera_board.env carries no board_id"
 [[ -n "${candidate_fdtfile}" ]] || die "cera_board.env carries no fdtfile"
-
-work="$(mktemp -d)"
-trap 'rm -rf "${work}"' EXIT
 
 # The .raucb layout is <squashfs payload><CMS signature><8-byte big-endian
 # signature length>; the same split lib/rauc-bundle-inspect.sh performs before it
@@ -83,6 +100,6 @@ candidate_compatible="$(sed -n 's/^compatible=//p' "${work}/manifest.raucm" | he
 printf 'candidate_board_id=%s\n'      "${candidate_board_id}"
 printf 'candidate_fdtfile=%s\n'       "${candidate_fdtfile}"
 printf 'candidate_compatible=%s\n'    "${candidate_compatible}"
-printf 'candidate_raw_sha256=%s\n'    "$(sha256sum "${image}"  | cut -d' ' -f1)"
+printf 'candidate_raw_sha256=%s\n'    "$(sha256sum "${raw_image}" | cut -d' ' -f1)"
 printf 'candidate_bundle_sha256=%s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)"
 printf 'candidate_loader_sha256=%s\n' "$(sha256sum "${loader}" | cut -d' ' -f1)"

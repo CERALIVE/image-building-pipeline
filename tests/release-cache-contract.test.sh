@@ -163,12 +163,19 @@ builder_index = step_index(lambda step: step.get("uses") == "docker/build-push-a
 trust_index = step_index(lambda step: step.get("name") == "Materialize release trust inputs")
 build_index = step_index(lambda step: step.get("name") == "Build exact production candidate")
 census_index = step_index(lambda step: step.get("name") == "Enforce the build-log census")
+preflash_index = step_index(lambda step: step.get("name") == "Verify uncompressed flash image")
 
 # The census gate is only meaningful against a REAL production build log, which
 # exists nowhere else — the PR gate is DRY_RUN=1 and never runs the image layers.
 # So it must sit immediately after the build, and the build must not be able to
 # hide a failure behind the tee that produces that log.
 assert build_index < census_index
+assert census_index < preflash_index
+preflash_run = steps[preflash_index]["run"]
+assert "tests/preflash-verify.sh" in preflash_run
+assert '--image "${raws[0]}"' in preflash_run
+assert 'stat -c %s "${raws[0]}"' in preflash_run
+assert "*.raw.xz" not in preflash_run
 census_run = steps[census_index]["run"]
 assert "set -euo pipefail" in census_run
 assert "./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md" in census_run
@@ -267,10 +274,13 @@ assert "${{ secrets." not in str(restore.get("with", {}))
 assert "${{ secrets." not in str(save.get("with", {}))
 
 meta_run = steps[step_index(lambda step: step.get("id") == "meta")]["run"]
-assert 'ln "${raws[0]}" candidate/' in meta_run, (
-    "BUG: candidate staging allocates a second multi-GiB raw image instead of a hard link"
+assert './ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate' in meta_run, (
+    "BUG: sealed candidates do not use the tested raw-image xz sealer"
 )
+assert 'ln "${raws[0]}" candidate/' not in meta_run
 assert 'cp "${raws[0]}"' not in meta_run
+assert 'raw_name="$(basename "${raws[0]}").xz"' in meta_run
+assert 'raw_compressed_sha256=' in meta_run
 assert 'bundle_release_name="$(basename "${bundles[0]}")"' in meta_run, (
     "BUG: the sealed candidate loses the production bundle's publish filename"
 )
@@ -283,8 +293,8 @@ assert 'candidate/release-bundle-name.txt' in meta_run, (
 assert 'rk3588_spl_loader_v1.15.113.bin' in meta_run
 assert 'loader_sha256=' in meta_run
 upload = steps[step_index(lambda step: step.get("id") == "upload")]
-assert upload["with"].get("compression-level") == "6", (
-    "BUG: sparse candidate transport compression is not explicit"
+assert upload["with"].get("compression-level") == "0", (
+    "BUG: GitHub artifact upload recompresses an already-xz-compressed raw"
 )
 
 bound_run = steps[bound_index]["run"]

@@ -141,6 +141,12 @@ to Docker, at least 16 GiB current `MemAvailable` + `SwapFree`, and at least
 not accepted for this dedicated production job, even when it remains suitable
 for caveated local development.
 
+The host also needs `xz` from `xz-utils`. Image construction and preflash checks
+finish on the uncompressed sparse raw; candidate sealing then runs `xz -T0 -6`
+on the host and fails closed if the compressed stream does not reproduce the raw
+SHA-256. This is a release-transport requirement, not a package added to the
+device image.
+
 The workflow exports `DOCKER_CONTEXT=default`, so an interactive `docker context
 use desktop-linux` cannot redirect the runner service. It then runs:
 
