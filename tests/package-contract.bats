@@ -542,6 +542,47 @@ PY
   [ "$(sed -n 's/^v4l-utils[[:space:]]*//p' "$shared" | head -n 1 >/dev/null; grep -n '^v4l-utils[[:space:]]' "$shared" | cut -d: -f1)" -lt "$(grep -n '^libv4l-0[[:space:]]' "$shared" | cut -d: -f1)" ]
 }
 
+@test "RK3588 multimedia config: generated libv4l-0 compat package carries exactly the t64 library symlink" {
+  local debs="$BATS_TEST_TMPDIR/libv4l-compat-debs"
+  local root="$BATS_TEST_TMPDIR/libv4l-compat-root"
+  mkdir -p "$debs" "$root"
+
+  run env ARCH=arm64 SOURCE_DATE_EPOCH=1 bash -c \
+    'source "$1"; build_libv4l0_compat_deb "$2"' bash "$FETCH_DEBS" "$debs"
+  [ "$status" -eq 0 ]
+
+  local deb="$debs/libv4l-0_1.30.1-1+ceralive1_arm64.deb"
+  [ -f "$deb" ]
+  [ "$(bash -c 'source "$1"; deb_pkg_name "$2"' bash "$FETCH_DEBS" "$deb")" = "libv4l-0" ]
+  [ "$(bash -c 'source "$1"; deb_pkg_version "$2"' bash "$FETCH_DEBS" "$deb")" = "1.30.1-1+ceralive1" ]
+  [ "$(bash -c 'source "$1"; deb_pkg_arch "$2"' bash "$FETCH_DEBS" "$deb")" = "arm64" ]
+  [ "$(bash -c 'source "$1"; deb_control_field "$2" Depends' bash "$FETCH_DEBS" "$deb")" = "libv4l-0t64" ]
+
+  bash -c 'source "$1"; explode_deb "$2" "$3"' bash "$FETCH_DEBS" "$deb" "$root"
+  [ "$(find "$root" -type f | wc -l)" -eq 0 ]
+  [ "$(find "$root" -type l | wc -l)" -eq 1 ]
+  local link="$root/usr/share/libv4l-0-compat/libv4l2.so.0.0.0"
+  [ -L "$link" ]
+  [ "$(readlink "$link")" = "/usr/lib/aarch64-linux-gnu/libv4l2.so.0.0.0" ]
+
+  grep -Fq 'work="$(mktemp -d "${debs}/.libv4l-0-compat.XXXXXX")"' \
+    "$REPO_ROOT/lib/fetch/userspace.sh"
+  grep -Fq 'tmp="${work}/libv4l-0.deb"' \
+    "$REPO_ROOT/lib/fetch/userspace.sh"
+  run ! grep -Fq 'tmp="${out}.tmp"' "$REPO_ROOT/lib/fetch/userspace.sh"
+}
+
+@test "RK3588 multimedia config: libv4l-0 compat is staged and named first in the platform transaction" {
+  local userspace="$REPO_ROOT/lib/fetch/userspace.sh"
+  local partition="$REPO_ROOT/lib/stages/partition.sh"
+  local platform="$REPO_ROOT/mkosi/mkosi.images/platform/mkosi.postinst"
+
+  grep -Fq 'build_libv4l0_compat_deb "${debs}"' "$userspace"
+  grep -Eq 'bsp_names=.*libv4l-0' "$partition"
+  grep -Fq 'compat_pkgs+=(libv4l-0)' "$platform"
+  grep -Fq 'mkosi-install -y --no-install-recommends "${compat_pkgs[@]}" "${hw_gst[@]}" "${gst_runtime[@]}"' "$platform"
+}
+
 @test "wwan: the check asserts a .deb extractor (dpkg-deb or ar+tar) is available" {
   # with a normal PATH the assertion passes (ar + tar are on the host)
   run bash -c "source '$CHECK_WWAN'; wwan_assert_deb_tools"

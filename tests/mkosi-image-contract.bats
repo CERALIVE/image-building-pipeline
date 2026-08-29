@@ -557,7 +557,7 @@ PY
   [ -n "$policy_at" ] && [ -n "$apt_at" ] && [ "$policy_at" -lt "$apt_at" ]
 
   policy_at="$(grep -n '^install_chroot_service_policy$' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" | cut -d: -f1)"
-  apt_at="$(grep -n '^  mkosi-install -y --no-install-recommends "\${hw_gst\[@\]}"' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" | cut -d: -f1)"
+  apt_at="$(grep -n '^  mkosi-install -y --no-install-recommends "\${compat_pkgs\[@\]}" "\${hw_gst\[@\]}"' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst" | cut -d: -f1)"
   [ -n "$policy_at" ] && [ -n "$apt_at" ] && [ "$policy_at" -lt "$apt_at" ]
 }
 

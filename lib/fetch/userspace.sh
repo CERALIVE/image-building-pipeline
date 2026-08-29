@@ -15,6 +15,71 @@
 # Bodies moved VERBATIM from fetch-debs.sh; no behaviour change.
 #
 # shellcheck shell=bash
+
+LIBV4L0_COMPAT_VERSION="1.30.1-1+ceralive1"
+LIBV4L0_COMPAT_LINK="usr/share/libv4l-0-compat/libv4l2.so.0.0.0"
+LIBV4L0_T64_LIBRARY="/usr/lib/aarch64-linux-gnu/libv4l2.so.0.0.0"
+
+# build_libv4l0_compat_deb <debs-dir> — generate the real old-name package that
+# rockchip-multimedia-config's pre-t64 postinst asks dpkg to list. Trixie's
+# libv4l-0t64 Provides: libv4l-0 satisfies apt, but `dpkg -L libv4l-0` still has
+# no package record. A fileless transitional package also fails because the
+# postinst greps that listing for libv4l2.so.0.0.0 before copying it.
+#
+# The sole payload is therefore a collision-free symlink under /usr/share. Plain
+# `cp` in the pinned postinst dereferences it to libv4l-0t64's real library; this
+# package never owns either library path. The version sorts above 1.30.1-1 so it
+# is not caught by libv4l-0t64's `Breaks: libv4l-0 (<< 1.30.1-1)` relation.
+build_libv4l0_compat_deb() (
+  local debs="$1"
+  [[ "${ARCH}" == "arm64" ]] \
+    || die "libv4l-0 compatibility package is arm64-only (got ARCH=${ARCH})"
+  if ! command -v ar >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+    die "building libv4l-0 compatibility package requires ar and tar"
+  fi
+
+  local epoch="${SOURCE_DATE_EPOCH:-0}"
+  [[ "${epoch}" =~ ^[0-9]+$ ]] \
+    || die "SOURCE_DATE_EPOCH must be an integer (got '${epoch}')"
+  install -d -m 0755 "${debs}"
+
+  local work out tmp
+  work="$(mktemp -d "${debs}/.libv4l-0-compat.XXXXXX")"
+  trap 'rm -rf "${work}" "${tmp:-}"' EXIT
+  out="${debs}/libv4l-0_${LIBV4L0_COMPAT_VERSION}_arm64.deb"
+  tmp="${work}/libv4l-0.deb"
+
+  install -d -m 0755 "${work}/control" \
+    "${work}/data/$(dirname "${LIBV4L0_COMPAT_LINK}")"
+  cat >"${work}/control/control" <<EOF
+Package: libv4l-0
+Version: ${LIBV4L0_COMPAT_VERSION}
+Architecture: arm64
+Section: oldlibs
+Priority: optional
+Depends: libv4l-0t64
+Maintainer: CeraLive <engineering@ceralive.tv>
+Description: compatibility package for pre-t64 Rockchip multimedia configuration
+ This transitional package supplies the old dpkg package name and a collision-free
+ symlink to libv4l-0t64's libv4l2 library for legacy maintainer scripts.
+EOF
+  ln -s "${LIBV4L0_T64_LIBRARY}" "${work}/data/${LIBV4L0_COMPAT_LINK}"
+  printf '2.0\n' >"${work}/debian-binary"
+
+  tar --sort=name --mtime="@${epoch}" --owner=0 --group=0 --numeric-owner \
+    -C "${work}/control" -czf "${work}/control.tar.gz" ./control
+  tar --sort=name --mtime="@${epoch}" --owner=0 --group=0 --numeric-owner \
+    -C "${work}/data" -czf "${work}/data.tar.gz" .
+  ar rcD "${tmp}" "${work}/debian-binary" "${work}/control.tar.gz" "${work}/data.tar.gz"
+  chmod 0644 "${tmp}"
+
+  if ! assert_deb_identity "${tmp}" libv4l-0 "${LIBV4L0_COMPAT_VERSION}" arm64; then
+    die "generated libv4l-0 compatibility package has invalid Debian control identity"
+  fi
+  mv -f "${tmp}" "${out}"
+  log_success "RK3588 userspace: built libv4l-0 compatibility package -> ${out}"
+)
+
 # rk3588_userspace_pkg_names — echo every pinned userspace package NAME (col 1)
 # from the pin file. Empty (success) when the file is absent — a family that
 # declares no RK3588 userspace package simply matches none of these.
@@ -127,6 +192,18 @@ fetch_rk3588_userspace() {
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_rk3588_userspace_one "${want[@]}" \
     || die "RK3588 userspace fetch failed: one or more pinned packages did not download/verify"
+
+  local needs_libv4l0_compat=0
+  for name in "${want[@]}"; do
+    [[ "${name}" == "rockchip-multimedia-config" ]] && needs_libv4l0_compat=1
+  done
+  if (( needs_libv4l0_compat )); then
+    if [[ -n "${DRY_RUN}" ]]; then
+      log_info "DRY-RUN would build: libv4l-0_${LIBV4L0_COMPAT_VERSION}_arm64.deb (Depends: libv4l-0t64; one compatibility symlink)"
+    else
+      build_libv4l0_compat_deb "${debs}"
+    fi
+  fi
 
   if [[ -z "${DRY_RUN}" ]]; then
     local pkg

@@ -64,7 +64,7 @@ assert_staged_packages_unique() {
 stage_partition() {
   log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
   # The set of BSP package names (manifest-declared) is the partition key.
-  local bsp_names=" ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
+  local bsp_names=" libv4l-0 ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
   # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages
   # + the 9-package ModemManager 1.24 closure and its Architecture: all support
   # companion (modem-stack v1.3.0). The fetcher stages all 15 into debs/; a name missing here fails the build as

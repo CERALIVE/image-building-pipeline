@@ -379,6 +379,12 @@ prune_irrelevant_rk3588_firmware() {
 # Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
 read -r -a hw_gst <<<"${HW_ACCEL_GSTREAMER_PLUGINS:-}"
 read -r -a gst_runtime <<<"${GSTREAMER_RUNTIME_PACKAGES:-}"
+compat_pkgs=()
+for pkg in "${gst_runtime[@]}"; do
+  if [[ "${pkg}" == "rockchip-multimedia-config" ]]; then
+    compat_pkgs+=(libv4l-0)
+  fi
+done
 
 # Boot BSP (kernel/DTB/U-Boot/firmware) — only when explicitly requested.
 boot_bsp=()
@@ -390,7 +396,7 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
   boot_bsp+=("${_k[@]}" "${_d[@]}" "${_u[@]}" "${_f[@]}")
 fi
 
-bsp_pkgs=("${hw_gst[@]}" "${gst_runtime[@]}" "${boot_bsp[@]}")
+bsp_pkgs=("${compat_pkgs[@]}" "${hw_gst[@]}" "${gst_runtime[@]}" "${boot_bsp[@]}")
 if [[ ${#bsp_pkgs[@]} -eq 0 ]]; then
   log "no BSP packages resolved from manifest — nothing to install."
   exit 0
@@ -416,9 +422,9 @@ install_chroot_service_policy() {
 }
 install_chroot_service_policy
 
-log "installing authenticated staged HW-accel GStreamer BSP: ${hw_gst[*]} ${gst_runtime[*]}"
+log "installing authenticated staged HW-accel GStreamer BSP: ${compat_pkgs[*]} ${hw_gst[*]} ${gst_runtime[*]}"
 if [[ ${#hw_gst[@]} -gt 0 || ${#gst_runtime[@]} -gt 0 ]]; then
-  mkosi-install -y --no-install-recommends "${hw_gst[@]}" "${gst_runtime[@]}"
+  mkosi-install -y --no-install-recommends "${compat_pkgs[@]}" "${hw_gst[@]}" "${gst_runtime[@]}"
 fi
 
 if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
