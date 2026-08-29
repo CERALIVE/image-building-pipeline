@@ -56,7 +56,7 @@ append_be64() {
   local file="$1" value="$2" shift_bits byte
   for shift_bits in 56 48 40 32 24 16 8 0; do
     byte=$(( (value >> shift_bits) & 255 ))
-    printf "$(printf '\\x%02x' "${byte}")" >>"${file}"
+    printf '%b' "$(printf '\\x%02x' "${byte}")" >>"${file}"
   done
 }
 
@@ -104,6 +104,7 @@ check_identity() {
 echo "### 1. real fixtures are readable and self-describing"
 make_candidate rock   rock-5b-plus   rk3588-rock-5b-plus.dtb     ceralive-rock-5b-plus
 make_candidate orange orangepi5-plus rk3588-orangepi-5-plus.dtb  ceralive-orangepi5-plus
+xz -T1 -1 -c "${TMP}/rock/candidate.raw" >"${TMP}/rock/candidate.raw.xz"
 
 rock_read="$("${READER}" --image "${TMP}/rock/candidate.raw" \
   --bundle "${TMP}/rock/candidate.raucb" --loader "${TMP}/rock/loader.bin")"
@@ -113,6 +114,32 @@ assert_contains_str "the reader recovers the Rock fdtfile" \
   "${rock_read}" 'candidate_fdtfile=rk3588-rock-5b-plus.dtb'
 assert_contains_str "the reader recovers the Rock compatible from the real squashfs manifest" \
   "${rock_read}" 'candidate_compatible=ceralive-rock-5b-plus'
+
+rock_xz_read="$("${READER}" --image "${TMP}/rock/candidate.raw.xz" \
+  --bundle "${TMP}/rock/candidate.raucb" --loader "${TMP}/rock/loader.bin")"
+assert_contains_str "the reader accepts the sealed .raw.xz transport" \
+  "${rock_xz_read}" 'candidate_board_id=rock-5b-plus'
+assert_contains_str "the compressed reader reports the DECOMPRESSED raw digest" \
+  "${rock_xz_read}" "candidate_raw_sha256=$(sha256sum "${TMP}/rock/candidate.raw" | cut -d' ' -f1)"
+
+real_xz="$(command -v xz)"
+mkdir "${TMP}/bin"
+cat >"${TMP}/bin/xz" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --robot && "${2:-}" == --list ]]; then
+  printf 'totals\t1\t1\t1\t17179869185\t---\tCRC64\t0\t1\n'
+  exit 0
+fi
+exec "${REAL_XZ}" "$@"
+EOF
+chmod +x "${TMP}/bin/xz"
+oversized_output="$(REAL_XZ="${real_xz}" PATH="${TMP}/bin:${PATH}" "${READER}" \
+  --image "${TMP}/rock/candidate.raw.xz" --bundle "${TMP}/rock/candidate.raucb" \
+  --loader "${TMP}/rock/loader.bin" 2>&1)"
+oversized_rc=$?
+assert_ne "the reader rejects a declared decompressed size above 16 GiB" 0 "${oversized_rc}"
+assert_contains_str "the oversized rejection names the decompression safety limit" \
+  "${oversized_output}" 'decompressed candidate exceeds 16 GiB safety limit'
 
 orange_read="$("${READER}" --image "${TMP}/orange/candidate.raw" \
   --bundle "${TMP}/orange/candidate.raucb" --loader "${TMP}/orange/loader.bin")"

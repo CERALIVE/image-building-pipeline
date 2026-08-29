@@ -147,9 +147,11 @@ validate_identity_filename() {
   }
 }
 
-raw_file="$(basename -- "${image}")"
+transport_file="$(basename -- "${image}")"
+raw_file="${transport_file%.xz}"
 bundle_file="$(basename -- "${bundle}")"
 loader_file="$(basename -- "${loader}")"
+validate_identity_filename transport_file "${transport_file}"
 validate_identity_filename raw_file "${raw_file}"
 validate_identity_filename bundle_file "${bundle_file}"
 validate_identity_filename loader_file "${loader_file}"
@@ -157,6 +159,43 @@ validate_identity_filename loader_file "${loader_file}"
 candidate_identity_reader="${CERALIVE_CANDIDATE_IDENTITY_BIN:-${HERE}/read-candidate-identity.sh}"
 candidate_board_id="" candidate_fdtfile="" candidate_compatible=""
 candidate_raw_sha256="" candidate_bundle_sha256="" candidate_loader_sha256=""
+identity_image=""
+transport_image="${image}"
+
+verify_compressed_transport() {
+  [[ "${image}" == *.raw.xz || "${image}" == *.img.xz ]] || return 0
+  local compressed_sidecar="${image}.sha256" sidecar_line expected_transport_sha
+  local expected_transport_file actual_transport_sha
+  [[ -f "${compressed_sidecar}" && ! -L "${compressed_sidecar}" ]] || {
+    printf 'compressed candidate checksum sidecar is required: %s\n' \
+      "${compressed_sidecar}" >&2
+    exit 1
+  }
+  IFS= read -r sidecar_line <"${compressed_sidecar}" || {
+    printf 'compressed candidate checksum sidecar is unreadable\n' >&2
+    exit 1
+  }
+  [[ "${sidecar_line}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9._+-]+)$ ]] || {
+    printf 'compressed candidate checksum sidecar must contain one canonical record\n' >&2
+    exit 1
+  }
+  [[ "$(wc -l <"${compressed_sidecar}")" == 1 ]] || {
+    printf 'compressed candidate checksum sidecar must contain exactly one record\n' >&2
+    exit 1
+  }
+  expected_transport_sha="${BASH_REMATCH[1]}"
+  expected_transport_file="${BASH_REMATCH[2]}"
+  [[ "${expected_transport_file}" == "$(basename -- "${image}")" ]] || {
+    printf 'compressed candidate checksum names the wrong transport: %s\n' \
+      "${expected_transport_file}" >&2
+    exit 1
+  }
+  actual_transport_sha="$(sha256sum "${transport_image}" | cut -d' ' -f1)"
+  [[ "${actual_transport_sha}" == "${expected_transport_sha}" ]] || {
+    printf 'compressed candidate digest verification failed\n' >&2
+    exit 1
+  }
+}
 
 # run_candidate_identity_gate — the CROSS-BOARD REJECTION. Reads what the
 # artifact set says it is and compares every axis against what the board manifest
@@ -174,7 +213,7 @@ run_candidate_identity_gate() {
       candidate_bundle_sha256) candidate_bundle_sha256="${value}" ;;
       candidate_loader_sha256) candidate_loader_sha256="${value}" ;;
     esac
-  done < <("${candidate_identity_reader}" --image "${image}" --bundle "${bundle}" \
+  done < <("${candidate_identity_reader}" --image "${identity_image:-${image}}" --bundle "${bundle}" \
     --loader "${loader}")
 
   for line in candidate_board_id candidate_fdtfile candidate_compatible \
@@ -221,7 +260,22 @@ bundle_sha256=${candidate_bundle_sha256}
 EOF
 }
 
+scratch_root="${RUNNER_TEMP:-/tmp}"
+[[ -d "${scratch_root}" && -w "${scratch_root}" && ! -L "${scratch_root}" ]] || {
+  printf 'RUNNER_TEMP must be a writable non-symlink directory: %s\n' "${scratch_root}" >&2
+  exit 1
+}
+
 if [[ "${mode}" == check-identity ]]; then
+  identity_check_tmp="$(mktemp -d "${scratch_root}/ceralive-identity.XXXXXX")"
+  trap 'rm -rf -- "${identity_check_tmp}"' EXIT
+  if [[ "${image}" == *.raw.xz || "${image}" == *.img.xz ]]; then
+    transport_image="${identity_check_tmp}/$(basename -- "${image}")"
+    cp --reflink=auto --sparse=always -- "${image}" "${transport_image}"
+    chmod 400 "${transport_image}"
+    identity_image="${transport_image}"
+  fi
+  verify_compressed_transport
   run_candidate_identity_gate
   identity_tmp="$(mktemp "${identity_dir}/.candidate-identity.XXXXXX")"
   chmod 600 "${identity_tmp}"
@@ -229,6 +283,8 @@ if [[ "${mode}" == check-identity ]]; then
 identity_contract=board-derived-candidate-identity
 raw_file=${raw_file}
 raw_sha256=${expected_sha}
+transport_file=${transport_file}
+transport_sha256=$(sha256sum "${transport_image}" | cut -d' ' -f1)
 bundle_file=${bundle_file}
 loader_file=${loader_file}
 loader_sha256=${loader_sha}
@@ -240,11 +296,6 @@ EOF
   exit 0
 fi
 
-scratch_root="${RUNNER_TEMP:-/tmp}"
-[[ -d "${scratch_root}" && -w "${scratch_root}" && ! -L "${scratch_root}" ]] || {
-  printf 'RUNNER_TEMP must be a writable non-symlink directory: %s\n' "${scratch_root}" >&2
-  exit 1
-}
 verify_tmp="$(mktemp -d "${scratch_root}/ceralive-verify.XXXXXX")"
 chmod 700 "${verify_tmp}"
 flash_image="${verify_tmp}/candidate.raw"
@@ -690,7 +741,47 @@ run_loader_probe() {
   return "${status}"
 }
 
-cp --reflink=auto --sparse=always -- "${image}" "${flash_image}"
+case "${image}" in
+  *.raw.xz|*.img.xz)
+    command -v xz >/dev/null 2>&1 || {
+      printf 'xz is required to materialize compressed candidate images\n' >&2
+      exit 1
+    }
+    transport_image="${verify_tmp}/$(basename -- "${image}")"
+    cp --reflink=auto --sparse=always -- "${image}" "${transport_image}"
+    chmod 400 "${transport_image}"
+    verify_compressed_transport
+    max_raw_bytes=17179869184
+    listed_raw_bytes="$(xz --robot --list -- "${transport_image}" | awk -F '\t' '$1 == "totals" { print $5 }')"
+    [[ "${listed_raw_bytes}" =~ ^[1-9][0-9]*$ ]] || {
+      printf 'could not determine decompressed candidate size: %s\n' "${image}" >&2
+      exit 1
+    }
+    (( listed_raw_bytes <= max_raw_bytes )) || {
+      printf 'decompressed candidate exceeds 16 GiB safety limit: %s bytes\n' \
+        "${listed_raw_bytes}" >&2
+      exit 1
+    }
+    available_bytes="$(df --output=avail -B1 "${verify_tmp}" | tail -n 1 | tr -d ' ')"
+    [[ "${available_bytes}" =~ ^[0-9]+$ && available_bytes -ge listed_raw_bytes ]] || {
+      printf 'insufficient temporary space for %s-byte candidate\n' "${listed_raw_bytes}" >&2
+      exit 1
+    }
+    xz --memlimit-decompress=1GiB -dc -- "${transport_image}" \
+      | dd of="${flash_image}" bs=4M conv=sparse status=none || {
+      printf 'could not decompress candidate image: %s\n' "${image}" >&2
+      exit 1
+    }
+    ;;
+  *.raw|*.img)
+    cp --reflink=auto --sparse=always -- "${image}" "${flash_image}"
+    ;;
+  *)
+    printf 'unsupported candidate image type: %s (expected .raw, .img, .raw.xz, or .img.xz)\n' \
+      "${image}" >&2
+    exit 2
+    ;;
+esac
 chmod 400 "${flash_image}"
 actual_sha="$(sha256sum "${flash_image}" | cut -d' ' -f1)"
 [[ "${actual_sha}" == "${expected_sha}" ]] || {
@@ -711,6 +802,7 @@ actual_loader_sha="$(sha256sum "${flash_loader}" | cut -d' ' -f1)"
     "${loader_sha}" "${actual_loader_sha}" >&2
   exit 1
 }
+identity_image="${flash_image}"
 run_candidate_identity_gate
 install -m 600 /dev/null "${ssh_known_hosts}"
 
@@ -998,6 +1090,8 @@ candidate_commit=${candidate_commit}
 raw_file=${raw_file}
 raw_size=${image_bytes}
 raw_sha256=${expected_sha}
+transport_file=${transport_file}
+transport_sha256=$(sha256sum "${transport_image}" | cut -d' ' -f1)
 bundle_file=${bundle_file}
 keyring_sha256=$(sha256sum "${keyring}" | cut -d' ' -f1)
 loader_file=${loader_file}

@@ -152,6 +152,8 @@ openssl pkey -in "${TMP}/wrong-uart-signing.pem" -pubout -out "${TMP}/wrong-uart
 [[ -x "${VERIFY}" ]]
 printf 'candidate-bytes\n' >"${TMP}/candidate.raw"
 truncate -s 4096 "${TMP}/candidate.raw"
+xz -T1 -1 -c "${TMP}/candidate.raw" >"${TMP}/candidate.raw.xz"
+( cd "${TMP}" && sha256sum candidate.raw.xz > candidate.raw.xz.sha256 )
 printf 'bundle\n' >"${TMP}/candidate.raucb"
 printf 'keyring\n' >"${TMP}/keyring.pem"
 printf 'loader\n' >"${TMP}/loader.bin"
@@ -182,10 +184,18 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
+if [[ -n "${MOCK_REPLACE_TRANSPORT_AFTER_SNAPSHOT:-}" ]]; then
+  printf 'replacement-transport\n' >"${MOCK_TRANSPORT_SOURCE}"
+fi
 printf 'candidate_board_id=%s\n' "${MOCK_CANDIDATE_BOARD_ID:-rock-5b-plus}"
 printf 'candidate_fdtfile=%s\n' "${MOCK_CANDIDATE_FDTFILE:-rk3588-rock-5b-plus.dtb}"
 printf 'candidate_compatible=%s\n' "${MOCK_CANDIDATE_COMPATIBLE:-ceralive-rock-5b-plus}"
-printf 'candidate_raw_sha256=%s\n' "$(sha256sum "${image}" | cut -d' ' -f1)"
+if [[ "${image}" == *.xz ]]; then
+  raw_sha="$(xz -dc "${image}" | sha256sum | cut -d' ' -f1)"
+else
+  raw_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
+fi
+printf 'candidate_raw_sha256=%s\n' "${raw_sha}"
 printf 'candidate_bundle_sha256=%s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)"
 printf 'candidate_loader_sha256=%s\n' "$(sha256sum "${loader}" | cut -d' ' -f1)"
 EOF
@@ -443,7 +453,7 @@ chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/rkdeveloptool" "${TMP}/uart" \
   "${TMP}/candidate-identity"
 
 common=(
-  --image "${TMP}/candidate.raw"
+  --image "${TMP}/candidate.raw.xz"
   --bundle "${TMP}/candidate.raucb"
   --keyring "${TMP}/keyring.pem"
   --loader "${TMP}/loader.bin"
@@ -479,6 +489,47 @@ base_env=(
   "CERALIVE_UART_PUBLIC_KEY_FILE=${TMP}/uart-public.pem"
   "CERALIVE_CANDIDATE_IDENTITY_BIN=${TMP}/candidate-identity"
 )
+
+valid_transport_sidecar="$(<"${TMP}/candidate.raw.xz.sha256")"
+printf '%s  %s\n' "${valid_transport_sidecar%% *}" 'different.raw.xz' \
+  >"${TMP}/candidate.raw.xz.sha256"
+rm -f "${TMP}/identity.txt"
+if wrong_sidecar_name_output="$(env "${base_env[@]}" \
+    "${VERIFY}" --check-identity-only "${common[@]}" 2>&1)"; then
+  printf 'identity-only check accepted a checksum naming another transport\n' >&2
+  exit 1
+fi
+[[ "${wrong_sidecar_name_output}" == *'compressed candidate checksum names the wrong transport'* ]]
+[[ ! -e "${TMP}/identity.txt" ]]
+printf '%s\n' "${valid_transport_sidecar}" >"${TMP}/candidate.raw.xz.sha256"
+
+original_transport_sha="$(sha256sum "${TMP}/candidate.raw.xz" | cut -d' ' -f1)"
+cp "${TMP}/candidate.raw.xz" "${TMP}/candidate.raw.xz.saved"
+rm -f "${TMP}/identity.txt"
+env "${base_env[@]}" MOCK_REPLACE_TRANSPORT_AFTER_SNAPSHOT=1 \
+  MOCK_TRANSPORT_SOURCE="${TMP}/candidate.raw.xz" \
+  "${VERIFY}" --check-identity-only "${common[@]}"
+grep -qx "transport_sha256=${original_transport_sha}" "${TMP}/identity.txt"
+[[ "$(sha256sum "${TMP}/candidate.raw.xz" | cut -d' ' -f1)" != "${original_transport_sha}" ]]
+mv "${TMP}/candidate.raw.xz.saved" "${TMP}/candidate.raw.xz"
+
+mv "${TMP}/candidate.raw.xz.sha256" "${TMP}/candidate.raw.xz.sha256.saved"
+if missing_sidecar_output="$(env "${base_env[@]}" MOCK_FLASH_LOG="${TMP}/missing-sidecar.log" \
+    "${VERIFY}" "${common[@]}" 2>&1)"; then
+  printf 'compressed candidate without its download checksum was accepted\n' >&2
+  exit 1
+fi
+[[ "${missing_sidecar_output}" == *'compressed candidate checksum sidecar is required'* ]]
+[[ ! -e "${TMP}/missing-sidecar.log" ]]
+rm -f "${TMP}/identity.txt"
+if missing_identity_sidecar_output="$(env "${base_env[@]}" \
+    "${VERIFY}" --check-identity-only "${common[@]}" 2>&1)"; then
+  printf 'identity-only check accepted a compressed candidate without its checksum\n' >&2
+  exit 1
+fi
+[[ "${missing_identity_sidecar_output}" == *'compressed candidate checksum sidecar is required'* ]]
+[[ ! -e "${TMP}/identity.txt" ]]
+mv "${TMP}/candidate.raw.xz.sha256.saved" "${TMP}/candidate.raw.xz.sha256"
 
 assert_healthy_loader_handoff() {
   local case_dir="${TMP}/healthy-loader-handoff"
@@ -1282,6 +1333,8 @@ if ! env "${base_env[@]}" MOCK_RECONNECT_MODE=success MOCK_MEDIA="${TMP}/media-o
 fi
 grep -qx "candidate_commit=1111111111111111111111111111111111111111" "${TMP}/identity.txt"
 grep -qx 'raw_file=candidate.raw' "${TMP}/identity.txt"
+grep -qx 'transport_file=candidate.raw.xz' "${TMP}/identity.txt"
+grep -Eq '^transport_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
 grep -qx 'raw_size=4096' "${TMP}/identity.txt"
 grep -qx "raw_sha256=${sha}" "${TMP}/identity.txt"
 grep -qx 'bundle_file=candidate.raucb' "${TMP}/identity.txt"
