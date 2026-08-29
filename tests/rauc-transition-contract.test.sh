@@ -18,6 +18,7 @@ source "${HERE}/lib/assertions.sh"
 BUNDLE="${PIPELINE_DIR}/lib/build-bundle.sh"
 INSTALL_BOOT="${PIPELINE_DIR}/mkosi/platform/boot/install-boot.sh"
 SYSTEM_CONF="${PIPELINE_DIR}/mkosi/runtime/rauc/system.conf"
+RAUC_SETUP="${PIPELINE_DIR}/mkosi/customize/rauc-setup.sh"
 
 has() {
   local desc="$1" file="$2" needle="$3"
@@ -35,7 +36,7 @@ lacks_active_key() {
 }
 
 transition_contract_check() {
-  local bundle="$1" install_boot="$2" system_conf="$3"
+  local bundle="$1" install_boot="$2" system_conf="$3" rauc_setup="$4"
   local failures_before="${FAIL}"
 
   has "bundle manifest explicitly pins the RAUC 1.8-compatible format" \
@@ -54,6 +55,12 @@ transition_contract_check() {
     "${system_conf}" 'bundle-formats'
   lacks_active_key "verification purpose stays unchanged across the transition" \
     "${system_conf}" 'check-purpose'
+  lacks_active_key "RK3588 custom generator leaves attempt counting to its backend" \
+    "${install_boot}" 'boot-attempts'
+  lacks_active_key "committed custom fallback leaves attempt counting to its backend" \
+    "${system_conf}" 'boot-attempts'
+  lacks_active_key "self-contained custom fallback leaves attempt counting to its backend" \
+    "${rauc_setup}" 'boot-attempts'
   has "bundle signer remains the leaf key" "${bundle}" '"--key=${RAUC_LEAF_KEY}"'
   has "bundle embeds the existing intermediate chain" "${bundle}" '"--intermediate=${RAUC_CHAIN}"'
   has "bundle verifies to the existing baked root" "${bundle}" 'RAUC_ROOT_CA="${RAUC_PKI_DIR}/root-ca.pem"'
@@ -62,7 +69,7 @@ transition_contract_check() {
 }
 
 echo "== first-Trixie bundle contract =="
-transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}"
+transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}" "${RAUC_SETUP}"
 
 echo
 echo "== mutation controls =="
@@ -71,10 +78,11 @@ trap 'rm -rf "${scratch}"' EXIT
 cp "${BUNDLE}" "${scratch}/build-bundle.sh"
 cp "${INSTALL_BOOT}" "${scratch}/install-boot.sh"
 cp "${SYSTEM_CONF}" "${scratch}/system.conf"
+cp "${RAUC_SETUP}" "${scratch}/rauc-setup.sh"
 
 sed -i 's/format=plain/format=verity/' "${scratch}/build-bundle.sh"
 saved_fail="${FAIL}"
-transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" >/dev/null 2>&1
+transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
 if (( FAIL > saved_fail )); then
   ok "mutation: a verity-format transition bundle is rejected"
   FAIL="${saved_fail}"
@@ -85,12 +93,24 @@ fi
 cp "${BUNDLE}" "${scratch}/build-bundle.sh"
 sed -i 's/compatible=${compatible}/compatible=ceralive-wrong-board/' "${scratch}/build-bundle.sh"
 saved_fail="${FAIL}"
-transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" >/dev/null 2>&1
+transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
 if (( FAIL > saved_fail )); then
   ok "mutation: a hardcoded incompatible board identity is rejected"
   FAIL="${saved_fail}"
 else
   bad "mutation: a hardcoded compatible escaped the transition gate"
+fi
+
+cp "${BUNDLE}" "${scratch}/build-bundle.sh"
+cp "${INSTALL_BOOT}" "${scratch}/install-boot.sh"
+sed -i '/bootloader=custom/a boot-attempts=3' "${scratch}/install-boot.sh"
+saved_fail="${FAIL}"
+transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
+if (( FAIL > saved_fail )); then
+  ok "mutation: RAUC-native boot attempts cannot return to the custom generator"
+  FAIL="${saved_fail}"
+else
+  bad "mutation: boot-attempts escaped the custom-backend gate"
 fi
 
 echo

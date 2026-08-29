@@ -104,7 +104,6 @@ install_system_conf_fallback() {
 [system]
 compatible=${RAUC_COMPATIBLE}
 bootloader=custom
-boot-attempts=3
 
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
