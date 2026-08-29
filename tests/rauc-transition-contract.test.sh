@@ -28,7 +28,9 @@ has() {
 
 lacks_active_key() {
   local desc="$1" file="$2" key="$3"
-  if grep -Ev '^[[:space:]]*(#|$)' "${file}" | grep -qE "^[[:space:]]*${key}[[:space:]]*="; then
+  if awk -v key="${key}" \
+    '$0 !~ /^[[:space:]]*(#|$)/ && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found=1; exit } END { exit !found }' \
+    "${file}"; then
     bad "${desc}: active ${key}= found in ${file#"${PIPELINE_DIR}"/}"
   else
     ok "${desc}"
@@ -111,6 +113,18 @@ if (( FAIL > saved_fail )); then
   FAIL="${saved_fail}"
 else
   bad "mutation: boot-attempts escaped the custom-backend gate"
+fi
+
+large_conf="${scratch}/large-system.conf"
+awk 'BEGIN { print "[system]\nbootloader=custom\nboot-attempts=3"; for (i=0; i<20000; i++) print "filler_" i "=value" }' >"${large_conf}"
+saved_fail="${FAIL}"
+lacks_active_key "expanded custom config leaves attempt counting to its backend" \
+  "${large_conf}" 'boot-attempts' >/dev/null 2>&1
+if (( FAIL > saved_fail )); then
+  ok "mutation: boot-attempts is rejected under producer backpressure"
+  FAIL="${saved_fail}"
+else
+  bad "mutation: boot-attempts escaped under producer backpressure"
 fi
 
 echo
