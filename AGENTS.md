@@ -2794,6 +2794,16 @@ no replacement userspace build is needed.
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
   this set from the Armbian fetch. An x86 family declares none. DRY_RUN logs the exact
   URLs + hashes and downloads nothing.
+- **Trixie `libv4l-0` compatibility is a generated package, not a patched upstream
+  asset.** `libv4l-0t64` provides the old name to apt but dpkg records only the t64
+  name, while the pinned `rockchip-multimedia-config` postinst runs
+  `dpkg -L libv4l-0 | grep libv4l2.so.0.0.0` and then plain `cp`. A fileless package
+  cannot satisfy that grep. `fetch_rk3588_userspace` therefore builds a real arm64
+  `libv4l-0` depending on `libv4l-0t64`, with exactly one payload: a collision-free
+  `/usr/share/libv4l-0-compat/libv4l2.so.0.0.0` symlink to the t64-owned library.
+  The platform layer explicitly installs it first in the SAME `mkosi-install`
+  transaction as the Rockchip package. Never move the payload onto either
+  `/usr/lib/aarch64-linux-gnu/libv4l2.so.0*` path; both belong to `libv4l-0t64`.
 - **DO NOT** convert any of these into a `deb [signed-by=...] https://...` apt line —
   that is a new live trust root, exactly what the pinned-URL + SHA-256 approach avoids.
   **DO NOT** bump a pinned VERSION without re-proving HW encode (the versions are
