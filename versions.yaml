@@ -28,19 +28,22 @@ cerastream:
   # get-capabilities with a Generic profile (hardware_accelerated:false,
   # max_resolution 1920x1080, no `hdmi` source id), so start.pipeline:"hdmi" is
   # rejected outright on both RK3588 boards.
-  # v2026.8.0 release: arm64 + amd64 device .deb artifacts published.
-  pin: v2026.8.0
+  # v2026.8.2 release: arm64 + amd64 device .deb artifacts published.
+  pin: v2026.8.2
+  # Release provenance: tag v2026.8.2 resolves to commit 293335fd400d6febd74f7c7c36c433495d16730b.
+  # Device deb: cerastream 2026.8.2 (amd64 + arm64).
+  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.2
   channel: stable
 
 CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.8.6
-  # Release provenance: tag v2026.8.6 resolves to commit 86f57602.
-  # Device deb: ceralive-device 2026.8.6-20260829T120646.86f5760 (amd64) /
-  #   2026.8.6-20260829T120645.86f5760 (arm64).
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.6
+  pin: v2026.8.7
+  # Release provenance: tag v2026.8.7 resolves to commit e95553807f8a75e728c41fd134cb758269ffc9c8.
+  # Device deb: ceralive-device 2026.8.7-20260829T223639.e955538 (amd64) /
+  #   2026.8.7-20260829T223625.e955538 (arm64).
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.7
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
