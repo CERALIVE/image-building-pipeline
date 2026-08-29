@@ -1,6 +1,6 @@
 name: Release candidate build
 
-# Builds the exact production candidate image (raw + signed .raucb bundle + loader
+# Builds the exact production candidate image (raw.xz + signed .raucb bundle + loader
 # + rollback probe) and uploads it as one immutable artifact for a human to flash
 # and hand-test on real hardware BEFORE a manual release is cut. There is no
 # automated hardware-flashing gate on this push — images are validated locally.
@@ -182,6 +182,21 @@ jobs:
           python3 ./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md
           ./ci/check-build-log.sh --self-test
           ./ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"
+      - name: Verify uncompressed flash image
+        env:
+          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
+        run: |
+          set -euo pipefail
+          mapfile -t raws < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
+          raw_bytes="$(stat -c %s "${raws[0]}")"
+          tests/preflash-verify.sh \
+            --image "${raws[0]}" \
+            --bundle "${bundles[0]}" \
+            --board rock-5b-plus \
+            --keyring "${RAUC_KEYRING_FILE}" \
+            --target-size-bytes "${raw_bytes}"
       - name: Build candidate-bound signed rollback probe
         env:
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
@@ -207,23 +222,23 @@ jobs:
           mapfile -t dev_debs < <(find mkosi/.staging/rock-5b-plus/debs -maxdepth 1 -type f -name 'srtla-send-rs_*.deb')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 ))
           mkdir -p candidate/dev-debs
-          ln "${raws[0]}" candidate/
+          ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
           cp "${bundles[0]}" candidate/good.raucb
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
           cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
           cp "${dev_debs[0]}" candidate/dev-debs/
-          raw_name="$(basename "${raws[0]}")"; bundle_name=good.raucb
+          raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"
           [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
-          sha256sum "candidate/${raw_name}" > candidate/raw.sha256
           ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
           printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
           {
             echo "artifact_name=rock-5b-plus-${GITHUB_SHA}"
             echo "raw_filename=${raw_name}"
             echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
+            echo "raw_compressed_sha256=$(cut -d' ' -f1 "candidate/${raw_name}.sha256")"
             echo "bundle_filename=${bundle_name}"
             echo "keyring_filename=root-ca.pem"
             echo "loader_filename=${loader_name}"
@@ -236,7 +251,7 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 7
-          compression-level: 6
+          compression-level: 0
       - name: Bound board-scoped mkosi cache
         if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
         run: |
