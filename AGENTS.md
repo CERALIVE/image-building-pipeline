@@ -2895,6 +2895,26 @@ creates or validates only the ignored `.dev-keys/` NON-PRODUCTION fixture
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
 
+**RAUC `bootloader=custom` must NOT carry RAUC-native `boot-attempts` — the
+custom backend owns the counters** [EXISTS — fixed 2026-08-29]
+
+Trixie's RAUC 1.13 rejects `bootloader=custom` plus `boot-attempts=<N>` while
+loading `system.conf`: `Configuring boot attempts is valid for uboot or barebox
+only (not for custom)`. On both RK3588 images this made `rauc.service` exit 1
+before acquiring `de.pengutronix.rauc`; every `rauc status` then waited for the
+system bus's 25-second activation timeout, and the board stayed `degraded`.
+
+All three RK3588/custom writers omit the key: the authoritative
+`mkosi/platform/boot/install-boot.sh`, the committed
+`mkosi/runtime/rauc/system.conf`, and `mkosi/customize/rauc-setup.sh`'s
+self-contained fallback. No substitute RAUC key is required. Attempt counting
+remains entirely in the FAT `boot_state.txt`, U-Boot selector,
+`ceralive-boot-state`, and `ceralive-rauc-boot-adapter`; those mechanisms are
+unchanged and still default to three attempts. `tests/rauc-transition-contract.test.sh`
+guards all three writers, while the opt-in real-RAUC contract starts the daemon
+with the config rendered by the authoritative writer and carries the rejected
+pair as a negative control.
+
 **RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
 device — else OTA is 100% broken** [EXISTS]
 

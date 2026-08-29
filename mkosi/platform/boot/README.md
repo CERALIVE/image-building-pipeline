@@ -159,6 +159,13 @@ state/primary operations. RAUC 1.11+ prefers the optional `get-current` operatio
 which deliberately reads the same kernel argument because primary can change while
 the old slot is still running. State mutations delegate to `ceralive-boot-state`.
 
+The generated `system.conf` deliberately has **no `boot-attempts=` key**. RAUC
+1.13 accepts that setting only with its native `uboot` or `barebox` backends and
+rejects it with `bootloader=custom` before the daemon can acquire its D-Bus name.
+No replacement setting is needed: the FAT `boot_state.txt` counters and this
+custom backend are the sole attempt-counting mechanism, with their existing
+three-attempt default unchanged.
+
 ## Board specifics come from the manifest — never hardcoded
 
 `install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`,
