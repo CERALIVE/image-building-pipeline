@@ -151,25 +151,29 @@ touch "${WORK}/backend.calls"
 chmod 0666 "${WORK}/backend.calls"
 printf 'root=PARTLABEL=rootfs_a rauc.slot=A rw\n' >"${WORK}/cmdline"
 
-cat >"${CONF}" <<EOF
-[system]
-compatible=ceralive-rock-5b-plus
-bootloader=custom
-data-directory=${WORK}/data
-[handlers]
-bootloader-custom-backend=${WORK}/backend.sh
-[keyring]
-path=${WORK}/pki/root-ca.pem
-check-purpose=codesign
-[slot.rootfs.0]
-device=${WORK}/slot-a.ext4
-type=ext4
-bootname=A
-[slot.rootfs.1]
-device=${WORK}/slot-b.ext4
-type=ext4
-bootname=B
-EOF
+generated_root="${WORK}/generated-root"
+ROOT="${generated_root}" SERIAL_CONSOLE="ttyS2:1500000" \
+  DTB_NAME="rk3588-rock-5b-plus.dtb" BOARD_ID="rock-5b-plus" \
+  COMPATIBLE_STRING="ceralive-rock-5b-plus" SINGLE_SLOT_FALLBACK="false" \
+  bash "${PIPELINE_DIR}/mkosi/platform/boot/install-boot.sh" rootfs >/dev/null
+sed -e "/^bootloader=custom$/a data-directory=${WORK}/data" \
+  -e "s|^bootloader-custom-backend=.*$|bootloader-custom-backend=${WORK}/backend.sh|" \
+  -e "s|^path=/etc/rauc/ceralive-keyring.pem$|path=${WORK}/pki/root-ca.pem|" \
+  -e "s|^device=/dev/disk/by-partlabel/rootfs_a$|device=${WORK}/slot-a.ext4|" \
+  -e "s|^device=/dev/disk/by-partlabel/rootfs_b$|device=${WORK}/slot-b.ext4|" \
+  "${generated_root}/etc/rauc/system.conf" >"${CONF}"
+
+invalid_conf="${WORK}/system-invalid.conf"
+sed '/^bootloader=custom$/a boot-attempts=3' "${CONF}" >"${invalid_conf}"
+set +e
+timeout 10 sudo -n rauc -d -c "${invalid_conf}" service --override-boot-slot=A \
+  >"${WORK}/invalid-config.log" 2>&1
+invalid_rc=$?
+set -e
+[[ "${invalid_rc}" -ne 0 && "${invalid_rc}" -ne 124 ]]
+grep -Fq 'Configuring boot attempts is valid for uboot or barebox only (not for custom)' \
+  "${WORK}/invalid-config.log"
+printf 'INVALID_CONFIG_CONTROL=PASS boot-attempts-rejected-for-custom\n'
 
 CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" CERALIVE_BOOT_STATE_CORE="${WORK}/boot-state-core.sh" \
   CERALIVE_BOOT_ATTEMPTS=3 bash "${WORK}/ceralive-boot-state.sh" init
