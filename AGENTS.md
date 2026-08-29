@@ -1352,8 +1352,8 @@ set, one answer.
   `kernel_extension_packages` field — schema, manifest, orchestrator `env_names`,
   mkosi `PassEnvironment=`, platform postinst — are all gone.
   `tests/packaging-hygiene.bats` fails the build if any half returns. **The
-  honest consequence, stated rather than implied: the opt-in `vendor` overlay now
-  has NO `NET_CLS_FW` at all.** History: `docs/notes/sharing-kernel-capability.md`
+  honest historical consequence, stated rather than implied: the retired `vendor`
+  overlay had NO `NET_CLS_FW` at all.** History: `docs/notes/sharing-kernel-capability.md`
   §2c (the work) and §7 (its retirement). The hardware gate in `docs/DEFERRED.md`
   item 10 narrowed with it — there is no module to `modprobe`, only a real
   `tc filter … fw classid` classification to prove.
@@ -1429,7 +1429,7 @@ established client flow stays pinned by its saved ct mark to an uplink that is
 already gone; and without the `--mark`/`--mask` scoping the same command would
 tear down the live SRTLA/engine flows too.
 
-**The edge-fragment additions are the OPT-IN track only, and the vendor kernel
+**The edge-fragment additions are on the production track; the vendor kernel
 receives no change.** `docs/notes/sharing-qdisc-matrix.md` is the measured record
 for both tracks, re-read this session from the same `.deb` whose SHA-256 matches
 `manifests/bsp-baseline.json`. Its headline result is worth stating here because
