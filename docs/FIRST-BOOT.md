@@ -20,7 +20,8 @@ verifiable against the merged runtime scripts under `mkosi/runtime/`.
 ## 1. Flash the image
 
 Build the image first (see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2),
-then write it to a microSD card or eMMC.
+then write it to a microSD card or eMMC. Release downloads are `.raw.xz`; local
+builds retain an uncompressed sparse `.raw` under `images/<board>/`.
 
 **microSD (dd):**
 
@@ -31,6 +32,20 @@ IMAGE="${BOARD_DIR}/$(ls -t "${BOARD_DIR}"/*.raw | head -1 | xargs basename)"
 sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
 sudo sync
 ```
+
+For a downloaded release candidate, verify the download before decompressing,
+then flash the resulting raw bytes:
+
+```bash
+sha256sum -c <timestamp>.raw.xz.sha256
+xz -dk <timestamp>.raw.xz
+sudo dd if=<timestamp>.raw of=/dev/sdX bs=4M status=progress conv=fsync
+sudo sync
+```
+
+The candidate also includes `raw.sha256`, which identifies the decompressed bytes.
+The production bench tool verifies both digests automatically and compares the
+whole-media readback with that decompressed raw digest.
 
 Replace `/dev/sdX` with your card's device node. Double-check with `lsblk`
 before running — dd to the wrong device is destructive.

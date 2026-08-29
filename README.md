@@ -67,8 +67,11 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 ## Build System
 
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
-container (`ci/Dockerfile`). It produces reproducible `.raw` sysext bundles and
-`.raucb` A/B RAUC OTA packages from a layered source.
+container (`ci/Dockerfile`). A local full-device build produces an uncompressed,
+sparse `.raw` for verification and a `.raucb` A/B OTA package. The protected
+release path verifies that raw first, then seals the first-flash download as
+`.raw.xz` with SHA-256 sidecars for both the compressed download and decompressed
+raw bytes. The `.raucb` is already squashfs-compressed and is not recompressed.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
@@ -130,6 +133,7 @@ be converted by OTA.
 ├── dev-push / dev-sync    # Dev-loop helpers
 ├── ci/
 │   ├── Dockerfile         # Pinned trixie-slim builder (mkosi 26)
+│   ├── seal-raw-candidate.sh # Seal verified sparse raw as .raw.xz + checksums
 │   └── publish-immutable-r2-pair.sh # Approved RAUC bundle publisher
 ├── manifests/             # Board/family manifests, package pins, add-on descriptors
 ├── lib/                   # Orchestrator, assembler, bundle scripts,
@@ -244,6 +248,13 @@ Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PRO
 independently approved candidate SHA-256, snapshots both inputs privately, and
 uses create-only writes with exact-byte retry recovery; it never deletes an
 immutable release key.
+
+For a new board with no installed OS, download the sealed `.raw.xz` candidate.
+`ci/verify-and-flash-candidate.sh` verifies its adjacent `.raw.xz.sha256`,
+decompresses it into a private sparse snapshot, verifies that snapshot against
+`raw.sha256`, and hashes the exact sector range read back after flashing. Manual
+`dd` users must verify the compressed sidecar and decompress first; see
+[`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §1.
 
 The first Bookworm → Trixie/mainline slot update deliberately remains installable
 by the deployed RAUC 1.8 fleet: plain bundle format, byte-identical compatible
