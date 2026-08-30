@@ -34,6 +34,7 @@ PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST="${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 MODULE="${PIPELINE_DIR}/mkosi/customize/apt-ceralive-repo.sh"
 TAR_EMIT="${PIPELINE_DIR}/lib/stages/tar-emit.sh"
+BUNDLE_BUILDER="${PIPELINE_DIR}/lib/build-bundle.sh"
 
 # The suite Part B drives the shipped writer with. Read from the ONE mapping so
 # this harness follows a release bump instead of silently testing the old suite.
@@ -46,6 +47,7 @@ fail() { printf 'apt-mtls-and-dedupe regression: %s\n' "$1" >&2; exit 1; }
 [[ -f "${POSTINST}" ]] || fail "missing runtime executor: ${POSTINST}"
 [[ -f "${MODULE}" ]]   || fail "missing customize twin: ${MODULE}"
 [[ -f "${TAR_EMIT}" ]] || fail "missing rootfs tar emitter: ${TAR_EMIT}"
+[[ -f "${BUNDLE_BUILDER}" ]] || fail "missing RAUC bundle builder: ${BUNDLE_BUILDER}"
 
 extract_fn() { # <name> <file>
   awk -v fn="$1" '
@@ -84,6 +86,26 @@ grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' "${TAR_EMIT}" \
   && fail "rootfs tar emitter flattens ownership to root — client.key loses uid 42 in the RAUC payload"
 grep -Eq -- '--numeric-owner' "${TAR_EMIT}" \
   || fail "rootfs tar emitter must preserve numeric uid/gid metadata without name remapping"
+bundle_stage="$(extract_fn stage_rootfs "${BUNDLE_BUILDER}")"
+[[ -n "${bundle_stage}" ]] || fail "could not extract stage_rootfs() from ${BUNDLE_BUILDER}"
+grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' <<<"${bundle_stage}" \
+  && fail "RAUC directory-input tar path flattens ownership to root"
+grep -Eq -- '--numeric-owner' <<<"${bundle_stage}" \
+  || fail "RAUC directory-input tar path must preserve numeric uid/gid metadata"
+
+ownership_repro="$(mktemp -d)"
+trap 'rm -rf "${ownership_repro}"' EXIT
+mkdir -p "${ownership_repro}/rootfs/etc/apt/certs" "${ownership_repro}/content"
+install -m 0400 /dev/null "${ownership_repro}/rootfs/etc/apt/certs/client.key"
+(
+  export SOURCE_DATE_EPOCH=0
+  eval "${bundle_stage}"
+  stage_rootfs "${ownership_repro}/rootfs" "${ownership_repro}/content" >/dev/null
+)
+actual_owner="$(tar --numeric-owner -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/client.key | awk '{print $2}')"
+expected_owner="$(id -u)/$(id -g)"
+[[ "${actual_owner}" == "${expected_owner}" ]] \
+  || fail "RAUC directory-input tar changed client.key owner ${expected_owner} -> ${actual_owner}"
 
 # 2. configure_minimal_apt removes the mkosi release-named dupe AND writes debian.sources (both tracks).
 grep -Eq 'rm -f.*\$\{(RELEASE|APT_RELEASE)\}"?\.sources' <<<"${post_minapt}" \

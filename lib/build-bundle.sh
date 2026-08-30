@@ -208,7 +208,7 @@ stage_rootfs() {
   local src="$1" content="$2" image
   if [[ -d "${src}" ]]; then
     image="rootfs.tar"
-    tar --sort=name --numeric-owner --owner=0 --group=0 \
+    tar --sort=name --numeric-owner \
         --mtime="@${SOURCE_DATE_EPOCH}" --format=gnu \
         -cf "${content}/${image}" -C "${src}" .
   elif [[ -f "${src}" ]]; then
