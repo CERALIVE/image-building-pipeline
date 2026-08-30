@@ -15,6 +15,7 @@
 # bsp_dir, rootfs_tree.
 # ---------------------------------------------------------------------------
 stage_assemble() {
+  local raw_artifact=""
   # -------------------------------------------------------------------------
   # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
   #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
@@ -28,7 +29,8 @@ stage_assemble() {
   # -------------------------------------------------------------------------
   if [[ "${RAUC_BOOTLOADER_ADAPTER:-}" == "custom" ]]; then
     if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
+      raw_artifact="${out_dir}/${ts}.raw"
+      local single_slot_flag=()
       [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
       log_info "[8/9] Stage-4 disk assembly → ${raw_artifact} (bootloader_adapter=custom single_slot=${SINGLE_SLOT_FALLBACK:-false})"
       "${ASSEMBLE_DISK_SH}" build \
@@ -63,7 +65,8 @@ stage_assemble() {
     # INSTALL_BOOT_BSP gate as the custom path — the x86 .raw needs the Debian kernel
     # inside rootfs_a, so a config+package parity build (BSP=0) defers disk assembly.
     if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
-      local raw_artifact="${out_dir}/${ts}.raw" single_slot_flag=()
+      raw_artifact="${out_dir}/${ts}.raw"
+      local single_slot_flag=()
       [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
       log_info "[8/9] Stage-4 x86 ESP+GRUB disk assembly → ${raw_artifact} (bootloader_adapter=${RAUC_BOOTLOADER_ADAPTER} single_slot=${SINGLE_SLOT_FALLBACK:-false})"
       # BOARD_ID/COMPATIBLE_STRING/SERIAL_CONSOLE/SINGLE_SLOT_FALLBACK are already
@@ -93,5 +96,15 @@ stage_assemble() {
     fi
   else
     die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
+  fi
+
+  if [[ -n "${raw_artifact}" ]]; then
+    log_info "[8/9] sealing local flash image → ${raw_artifact}.xz"
+    "${SEAL_RAW_CANDIDATE_SH}" \
+      --raw "${raw_artifact}" \
+      --candidate-dir "${out_dir}" \
+      --raw-sha256 "${raw_artifact}.sha256" \
+      || die "local raw compression failed for board '${board}'"
+    log_success "compressed flash image: ${raw_artifact}.xz ($(du -h "${raw_artifact}.xz" | cut -f1)), sha256 in ${raw_artifact}.xz.sha256"
   fi
 }
