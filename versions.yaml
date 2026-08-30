@@ -28,11 +28,16 @@ cerastream:
   # get-capabilities with a Generic profile (hardware_accelerated:false,
   # max_resolution 1920x1080, no `hdmi` source id), so start.pipeline:"hdmi" is
   # rejected outright on both RK3588 boards.
-  # v2026.8.2 release: arm64 + amd64 device .deb artifacts published.
-  pin: v2026.8.2
-# Release provenance: tag v2026.8.2 resolves to commit 94f55197b469e6a79d005b736cab4ccc7e5f99a5.
-  # Device deb: cerastream 2026.8.2 (amd64 + arm64).
-  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.2
+  # v2026.8.4 is the FIRST trixie-targeted release: ci/cross/target-suite.env moved to
+  # TARGET_SUITE=trixie / GLIBC_FLOOR=2.41 / GStreamer 1.26, so the .deb declares
+  # `libc6 (>= 2.41)` and will REFUSE to configure on the older suite it no longer
+  # targets — proven in its own release smoke. It is also the
+  # release that flips `[audio] backend` to pipewire by default (todo-31 board drill
+  # PASSED) and the first carrying the ingest-source meter `level` tap (PR #134).
+  pin: v2026.8.4
+  # Release provenance: tag v2026.8.4 resolves to commit 42cb6583138b825d16b3fac17c9fc6d5b57990bb.
+  # Device deb: cerastream 2026.8.4 (amd64 + arm64), verified live in the stable index.
+  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.4
   channel: stable
 
 CeraUI:
