@@ -2882,15 +2882,16 @@ first production execution of the repair, and never move or rerun the failed tag
 
 The Rock 5B+ raw's 14,800 MiB logical geometry is intentional and starts sparse.
 Every construction/parity check and the release workflow's `preflash-verify.sh`
-gate reads that uncompressed raw. Candidate sealing happens afterward through
-`ci/seal-raw-candidate.sh`, which deliberately uses `xz -T0 -6`, verifies the
-decompressed stream against the original raw SHA-256, and puts only `.raw.xz`,
-its compressed SHA-256 sidecar, and `raw.sha256` in `candidate/`. The build-local
-raw remains under `images/<board>/`; the `.raucb` is untouched. Artifact upload
-uses compression level 0 because recompressing xz wastes time. Regression coverage
-is in `tests/raw-candidate-compression.test.sh`,
-`tests/release-candidate-contract.test.sh`, and
-`tests/release-cache-contract.test.sh`.
+gate reads that uncompressed raw. Both a local full build and candidate sealing run
+`ci/seal-raw-candidate.sh`, which deliberately uses `xz -T0 -6` and verifies the
+decompressed stream against the original raw SHA-256. Local output keeps the raw,
+adds `<timestamp>.raw.xz` plus its SHA-256 sidecar, and uses an artifact-specific
+`<timestamp>.raw.sha256` so successive local builds do not collide. Candidate output
+retains its release contract: only `.raw.xz`, its compressed SHA-256 sidecar, and
+`raw.sha256` in `candidate/`. The `.raucb` is untouched. Artifact upload uses
+compression level 0 because recompressing xz wastes time. Regression coverage is in
+`tests/raw-candidate-compression.test.sh`, `tests/local-raw-compression.test.sh`,
+`tests/release-candidate-contract.test.sh`, and `tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [EXISTS]
 Same source state → bit-identical `.raucb`. The orchestrator pins one

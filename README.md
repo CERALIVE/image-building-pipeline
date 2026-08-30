@@ -67,11 +67,11 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 ## Build System
 
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
-container (`ci/Dockerfile`). A local full-device build produces an uncompressed,
-sparse `.raw` for verification and a `.raucb` A/B OTA package. The protected
-release path verifies that raw first, then seals the first-flash download as
-`.raw.xz` with SHA-256 sidecars for both the compressed download and decompressed
-raw bytes. The `.raucb` is already squashfs-compressed and is not recompressed.
+container (`ci/Dockerfile`). A local full-device build retains its uncompressed,
+sparse `.raw`, emits the same verified `.raw.xz` transport artifact as the release
+path, and builds a `.raucb` A/B OTA package. Both paths use `xz -T0 -6` and verify
+the decompressed bytes against the raw SHA-256. The `.raucb` is already
+squashfs-compressed and is not recompressed.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
