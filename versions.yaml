@@ -44,11 +44,15 @@ CeraUI:
   path: CeraUI
   repo: https://github.com/CERALIVE/CeraUI
   kind: first-party
-  pin: v2026.8.7
-  # Release provenance: tag v2026.8.7 resolves to commit e95553807f8a75e728c41fd134cb758269ffc9c8.
-  # Device deb: ceralive-device 2026.8.7-20260829T223639.e955538 (amd64) /
-  #   2026.8.7-20260829T223625.e955538 (arm64).
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.7
+  # v2026.8.8 is the UI half of the PipeWire-default engine release: an ingest
+  # source's audio is its own in every connection state, audio device types are
+  # derived from the engine rather than restated locally, and a stale geometry
+  # override no longer blocks starting an ingest source after switching from HDMI.
+  pin: v2026.8.8
+  # Release provenance: tag v2026.8.8 resolves to commit 9fc3eea35d4200a6dcbe93ca1aae9892194dcf6c.
+  # Device deb: ceralive-device 2026.8.8-20260830T160956.9fc3eea (amd64) /
+  #   2026.8.8-20260830T160953.9fc3eea (arm64), both verified live in the stable index.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.8
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
