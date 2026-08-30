@@ -223,17 +223,21 @@ After a successful build, artifacts land in `images/<board>/`:
 ```text
 images/rock-5b-plus/
   20260609T075534Z.raw      # flashable disk image (sparse, 14,800 MiB nominal)
+  20260609T075534Z.raw.sha256
+  20260609T075534Z.raw.xz   # verified compressed transport for the same raw bytes
+  20260609T075534Z.raw.xz.sha256
   20260609T075534Z.raucb    # signed RAUC OTA bundle
   20260609T075534Z.raucb.sha256
 ```
 
 The `.raw` is a sparse file. Actual on-disk size is much smaller than the
-nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size.
-These are build-local artifacts. A sealed release candidate contains
-`<timestamp>.raw.xz` plus `<timestamp>.raw.xz.sha256` for download integrity and
-`raw.sha256` for the decompressed bytes that are flashed and read back. Sealing
-runs only after the workflow's uncompressed preflash gate; it uses multithreaded
-xz level 6 rather than the slower level 9.
+nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size. Every local
+full build also seals that exact raw through the same multithreaded `xz -T0 -6`
+path as releases, verifies the decompressed SHA-256 round trip, and writes the
+artifact-specific `.raw.sha256` and `.raw.xz.sha256` sidecars. The raw remains for
+direct flashing; the `.raucb` path is unaffected. A sealed release candidate runs
+the same sealing only after its uncompressed preflash gate and places its raw digest
+at `raw.sha256` in the candidate directory.
 
 ### Custom APT mirror
 
