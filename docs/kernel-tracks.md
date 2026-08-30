@@ -82,9 +82,12 @@ this repo re-derives a pin independently of that file.
 
 **A base bump does not carry hardware evidence with it.** Board results are scoped
 to the base they were measured on; after a re-pin, treat the new base as
-compile-proven until a board says otherwise. The `edge` track's current `v7.2`
-pin is in exactly that state — see
-[`kernel-build-from-source.md`](kernel-build-from-source.md) §2 and §7.
+compile-proven until a board says otherwise. The `edge` track's current `v7.2` pin
+has now passed that later release-image evidence: both RK3588 boards OTA-booted the
+released Trixie/mainline/PipeWire stack. See
+[`kernel-build-from-source.md`](kernel-build-from-source.md) §2 and §7 for the
+mechanism and [`ota-bookworm-trixie-transition.md`](ota-bookworm-trixie-transition.md)
+for the OTA/rollback record.
 
 ## Retire-on-merge lifecycle
 

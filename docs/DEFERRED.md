@@ -396,53 +396,31 @@ this entry's status to RESOLVED and note the evidence file here.
 
 ---
 
-## 9. Kernel-build-from-source variant — partial v7.2 board evidence, exact image still deferred
+## 9. Kernel-build-from-source variant — RESOLVED on the released Trixie image
 
-**Status:** Further unblocked at the `v7.1.7` pin — BOTH `rock-5b-plus` and `orange-pi-5-plus` built end to end there (`.raw` + signed `.raucb`, all first-party packages installed), and BOTH were flashed and booted (`7.1.7-ceralive-rk3588`), the Orange Pi for the first time on 2026-08-26. At `v7.2`, both boards have now booted existing Bookworm installations reporting `7.2.0-ceralive-rk3588` and passed direct software/MPP encode checks. This is partial kernel-on-silicon evidence only: the exact pinned Trixie candidate auto-degraded to plan-only mode at the authenticated apt input gate, produced no artifact, and was neither flashed nor installed. Product streaming also fails on both Bookworm installations because `cerastream` requires unavailable `GLIBC_2.39`.
-**Location:** `docs/kernel-build-from-source.md` §7 (*Known gaps*) and §8 (*Board variant overrides*), `manifests/families/rk3588.yaml` (`variants.edge`), `manifests/boards/orange-pi-5-plus.yaml` (`variant_overrides.edge`), `lib/build-kernel.sh`
+**Status:** RESOLVED for the platform migration. The production-default `edge`
+variant builds mainline `v7.2` plus its in-tree DTBs from pinned source, and the
+released image carries cerastream v2026.8.4 with ceralive-device v2026.8.8.
+**Location:** `docs/kernel-build-from-source.md`, `manifests/families/rk3588.yaml`
+(`variants.edge`), `lib/build-kernel.sh`
 
-**What it is:** The rk3588 family carries the production-default `edge` variant that builds the
-kernel + in-tree DTBs from pinned source (`v7.2` today, `v7.1.7` when the results
-below were measured, plus the `CERALIVE/rk3588-kernel-patches` series) with
-`make bindeb-pkg`. The pipeline, the
-schema, the pins, the fetch suppression, the package-name replacement, the
-staged-package uniqueness check and the platform DTB install mapping all exist and
-are gated by tests.
+**What completed it:** the todo-31 PipeWire drill passed on the exact
+Trixie/mainline image. Todo 37 then built signed, parity-clean images for both
+RK3588 boards, released the engine and device packages, and verified their OTA
+deployment. Both boards booted the released Trixie/mainline/PipeWire stack healthy.
+The Orange Pi additionally completed the deliberate-failure fallback and restoration
+drill, proving the RAUC rollback mechanism rather than only a happy-path update.
 
-**What was proven at `v7.1.7`:** `CERALIVE_BENCH_LABELS=1 build rock-5b-plus
---variant edge` was run for real, twice, on a container host. It compiled
-`linux-image-7.1.7-ceralive-rk3588` (228 `rockchip/*.dtb` entries), passed all four
-`validate_built_kernel_deb` axes, installed the board DTB to
-`/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb`, and produced a flashable `.raw` plus a
-signed `.raucb`. (At the current pin the derived package name is
-`linux-image-7.2.0-ceralive-rk3588`; an exact current candidate build has not completed.) The two builds agreed on every package version, every rootfs path
-and the built `/boot/config-*`. Reaching that required fixing four defects the
-`DRY_RUN` gate could not see — see `kernel-build-from-source.md` §7 item 1.
+The earlier `v7.1.7` and Bookworm direct-encode records remain historical evidence;
+they are no longer the qualification boundary for the current production image. The
+PR gate remains intentionally `DRY_RUN=1`; a real source build is still too costly
+for that PR path, but the release chain has now performed and validated the actual
+image build and OTA steps.
 
-`orange-pi-5-plus` has since reached the same point: after the DTB-name override
-and the staging-key fix below, `CERALIVE_BENCH_LABELS=1 build orange-pi-5-plus
---variant edge` completes (exit 0), installs all 14 first-party `.deb`s, clears
-the `[7/9]` parity gate, and emits a `.raw` + signed `.raucb`.
-
-**Booted, 2026-08-26.** That artifact (`20260826T134604Z.raw`) was byte-verified by
-read-back, written to a microSD, and booted on a physical Orange Pi 5 Plus — the first
-edge boot ever recorded on this board. It reached userspace, came up on the network,
-and served the CeraUI first-run flow; the board's eMMC was not written. The USB-C
-source-role battery ran there and scored 5/6 (the sixth check is blocked on camera
-placement, not on a failure) — see the USB-C entry in `AGENTS.md` for the per-board
-verdicts. This does not constitute full release qualification: the deployment was
-bench-labelled, nothing was published, and the exact Trixie candidate was not
-built or flashed. The production build default is the source-built mainline
-`edge` track; the prebuilt vendor 6.1 BSP track is retired.
-
-**Still deferred, on artifact and product axes:** the pipeline-produced build/boot
-result above remains a `v7.1.7` record. The bounded v7.2 checks prove that both
-boards can exercise MPP under a kernel with the expected release string; they do
-not prove the exact manifest pins, Trixie rootfs, bundle, or product stream. A real
-authenticated `--variant edge` build and boot are still outstanding at the current
-pin. The PR gate also still runs `DRY_RUN=1` (plan only — no network, container or
-compiler). A real build is a multi-GB clone plus a long cross-compile, so running it
-in the PR gate remains a separate, deliberate CI-budget decision.
+**Independent work that remains open:** publishing add-on artifacts for
+`os_version=13` is still a real availability gap, and Bluetooth B4 validation remains
+hardware-gated. Neither gap invalidates the completed base-image, PipeWire, kernel or
+OTA/rollback validation recorded above.
 
 Two consequences worth stating plainly:
 
@@ -493,14 +471,10 @@ stager driven against every shipped board manifest with that manifest's real
 up, plus a non-vacuity assertion that at least one shipped board really does have
 stem ≠ `board_id`.
 
-**Unblock condition:** produce, provenance-check, flash or safely install, and boot
-the exact pinned Trixie `--variant edge` artifact on both physical RK3588 boards;
-restore a working product-level `cerastream` start → 60 seconds → stop cycle;
-clear the Rock Bluetooth/MMC drill failures; and exercise HDMI video plus audio
-with a known-good source. **D3's kernel half is already answered** — the shipped
-kernel IS the mainline source-built track (`default_variant: edge`), and the
-Armbian vendor BSP track was retired outright. D3's bootloader-adapter half
-(`rauc_bootloader_adapter: custom`) is untouched.
+**No platform-migration unblock condition remains.** **D3's kernel half is
+answered** — the shipped kernel is the mainline source-built track
+(`default_variant: edge`), and the Armbian vendor BSP track is retired. D3's
+bootloader-adapter half (`rauc_bootloader_adapter: custom`) is unchanged.
 
 ---
 

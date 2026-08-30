@@ -1,6 +1,6 @@
 # Kernel Currency Watch: Mainline 7.2 + MPP Userspace
 
-**Decision recorded:** the planned Trixie/mainline 7.2 image can keep the existing
+**Decision recorded:** the released Trixie/mainline 7.2 image keeps the existing
 Rockchip MPP userspace pins unchanged.
 **Kill-switch decision (2026-08-28): PROCEED with W3/W4.**
 **Selection mechanism:** the MPP userspace (not in Debian or the Armbian feed) is
@@ -12,11 +12,11 @@ URL- and SHA-256-pinned in
 
 ## The Decision
 
-**ACTIONED 2026-08-28.** The kernel flip this document authorised has been made:
+**ACTIONED and released.** The kernel flip this document authorised has been made:
 `manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
-variant-less build selects the source-built mainline 7.2 kernel and the prebuilt
-vendor BSP is the opt-in `vendor` overlay. The MPP userspace pins below are
-unchanged, which is exactly what this decision said would happen.
+variant-less build selects the source-built mainline 7.2 kernel; the vendor BSP
+track is retired. The MPP userspace pins below are unchanged, which is exactly what
+this decision said would happen.
 
 The flip selects the source-built mainline 7.2 kernel and
 continues to drive VEPU580 through **Rockchip MPP**. The kernel implementation
@@ -96,13 +96,11 @@ condition). The measurement is recorded here only as citable evidence that the
 `edge` option remains pinned-and-buildable but not production-ready, which was
 already this doc's premise before the bench session.
 
-**Current measurement (2026-08-28, todos 16-17):** both supported boards running
-mainline `7.2.0-ceralive-rk3588` register `mpph264enc` and complete a direct
-60-second hardware encode with the exact retained package set. The Trixie arm64
-index independently resolves every dependency for those URL-pinned `.deb`s.
-This clears the MPP-userspace kill switch, but it does not claim that the exact
-pinned Trixie image was built or booted; that release qualification remains a
-separate gate.
+**Release qualification (2026-08-30):** the exact Trixie/mainline image was built,
+released with cerastream v2026.8.4 and ceralive-device v2026.8.8, and OTA-booted on
+both supported boards. The Orange Pi's deliberate-failure fallback and restoration
+arm also passed. This closes the exact-image qualification gate; Bluetooth B4
+validation remains an independent hardware-gated follow-up.
 
 ### Trigger 1 — Rockchip ships a 6.12+ vendor BSP with MPP support  **[SUPERSEDED]**
 
