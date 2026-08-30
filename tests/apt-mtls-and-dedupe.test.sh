@@ -86,6 +86,8 @@ grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' "${TAR_EMIT}" \
   && fail "rootfs tar emitter flattens ownership to root — client.key loses uid 42 in the RAUC payload"
 grep -Eq -- '--numeric-owner' "${TAR_EMIT}" \
   || fail "rootfs tar emitter must preserve numeric uid/gid metadata without name remapping"
+emit_artifact_fn="$(extract_fn emit_artifact "${TAR_EMIT}")"
+[[ -n "${emit_artifact_fn}" ]] || fail "could not extract emit_artifact() from ${TAR_EMIT}"
 bundle_stage="$(extract_fn stage_rootfs "${BUNDLE_BUILDER}")"
 [[ -n "${bundle_stage}" ]] || fail "could not extract stage_rootfs() from ${BUNDLE_BUILDER}"
 grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' <<<"${bundle_stage}" \
@@ -94,18 +96,76 @@ grep -Eq -- '--numeric-owner' <<<"${bundle_stage}" \
   || fail "RAUC directory-input tar path must preserve numeric uid/gid metadata"
 
 ownership_repro="$(mktemp -d)"
-trap 'rm -rf "${ownership_repro}"' EXIT
+cleanup_ownership_repro() {
+  if [[ -d "${ownership_repro}/exact-rootfs" && "${EUID}" != 0 ]]; then
+    sudo -n rm -rf "${ownership_repro}"
+  else
+    rm -rf "${ownership_repro}"
+  fi
+}
+trap cleanup_ownership_repro EXIT
 mkdir -p "${ownership_repro}/rootfs/etc/apt/certs" "${ownership_repro}/content"
 install -m 0400 /dev/null "${ownership_repro}/rootfs/etc/apt/certs/client.key"
+chmod 0750 "${ownership_repro}/rootfs/etc/apt/certs"
+(
+  export SOURCE_DATE_EPOCH=0
+  eval "${emit_artifact_fn}"
+  emit_artifact "${ownership_repro}/rootfs" "${ownership_repro}/normalized.tar"
+)
+expected_owner="$(id -u)/$(id -g)"
+normalized_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/normalized.tar" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
+normalized_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/normalized.tar" ./etc/apt/certs/ | awk '{print $1, $2}')"
+[[ "${normalized_key_meta}" == "-r-------- ${expected_owner}" ]] \
+  || fail "normalized rootfs tar changed client.key metadata; expected '-r-------- ${expected_owner}', got '${normalized_key_meta}'"
+[[ "${normalized_dir_meta}" == "drwxr-x--- ${expected_owner}" ]] \
+  || fail "normalized rootfs tar changed certs directory metadata; expected 'drwxr-x--- ${expected_owner}', got '${normalized_dir_meta}'"
 (
   export SOURCE_DATE_EPOCH=0
   eval "${bundle_stage}"
   stage_rootfs "${ownership_repro}/rootfs" "${ownership_repro}/content" >/dev/null
 )
-actual_owner="$(tar --numeric-owner -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/client.key | awk '{print $2}')"
-expected_owner="$(id -u)/$(id -g)"
-[[ "${actual_owner}" == "${expected_owner}" ]] \
-  || fail "RAUC directory-input tar changed client.key owner ${expected_owner} -> ${actual_owner}"
+bundle_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
+bundle_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/ | awk '{print $1, $2}')"
+[[ "${bundle_key_meta}" == "-r-------- ${expected_owner}" ]] \
+  || fail "RAUC directory-input tar changed client.key metadata; expected '-r-------- ${expected_owner}', got '${bundle_key_meta}'"
+[[ "${bundle_dir_meta}" == "drwxr-x--- ${expected_owner}" ]] \
+  || fail "RAUC directory-input tar changed certs directory metadata; expected 'drwxr-x--- ${expected_owner}', got '${bundle_dir_meta}'"
+
+if [[ "${EUID}" == 0 ]] || sudo -n true 2>/dev/null; then
+  mkdir -p "${ownership_repro}/exact-content"
+  ownership_helper="${ownership_repro}/exercise-ownership-producers.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf '%s\n' "${emit_artifact_fn}" "${bundle_stage}"
+    printf '%s\n' 'export SOURCE_DATE_EPOCH=0' 'emit_artifact "$1" "$2"' 'stage_rootfs "$1" "$3" >/dev/null'
+  } >"${ownership_helper}"
+  chmod 0755 "${ownership_helper}"
+  if [[ "${EUID}" == 0 ]]; then
+    install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/etc/apt/certs"
+    install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/etc/apt/certs/client.key"
+    "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content"
+  else
+    sudo -n install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/etc/apt/certs"
+    sudo -n install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/etc/apt/certs/client.key"
+    sudo -n "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content"
+  fi
+  for exact_tar in "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content/rootfs.tar"; do
+    exact_key_meta="$(tar --numeric-owner -tvf "${exact_tar}" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
+    exact_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${exact_tar}" ./etc/apt/certs/ | awk '{print $1, $2}')"
+    [[ "${exact_key_meta}" == '-r-------- 42/0' ]] \
+      || fail "privileged ownership fixture changed client.key metadata; expected '-r-------- 42/0', got '${exact_key_meta}'"
+    [[ "${exact_dir_meta}" == 'drwxr-x--- 42/0' ]] \
+      || fail "privileged ownership fixture changed certs directory metadata; expected 'drwxr-x--- 42/0', got '${exact_dir_meta}'"
+  done
+else
+  echo "apt-mtls-and-dedupe: exact _apt uid 42 fixture skipped (root or passwordless sudo unavailable)"
+fi
+
+fallback_argv="$(printf '%s\n' "${emit_artifact_fn}" | awk '/"\$\{runtime\}" run --rm/,/tar -C/ { print }')"
+grep -Fq -- '"${tar_repro[@]}"' <<<"${fallback_argv}" \
+  || fail "root-owned container fallback does not reuse the ownership-preserving tar argument array"
+grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' <<<"${fallback_argv}" \
+  && fail "root-owned container fallback flattens numeric ownership"
 
 # 2. configure_minimal_apt removes the mkosi release-named dupe AND writes debian.sources (both tracks).
 grep -Eq 'rm -f.*\$\{(RELEASE|APT_RELEASE)\}"?\.sources' <<<"${post_minapt}" \
