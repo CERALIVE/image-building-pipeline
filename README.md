@@ -201,9 +201,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
 | `rock-5b-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build rock-5b-plus` | the family declares `default_variant: edge`, so a bare build resolves the `edge` overlay byte-identically to `--variant edge` |
-| `rock-5b-plus` | mainline 7.2 (source-built), named explicitly | `./build rock-5b-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and 9/11 drill commands; Bluetooth and MMC-journal legs failed. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted and the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39. |
+| `rock-5b-plus` | mainline 7.2 (source-built), named explicitly | `./build rock-5b-plus --variant edge` | **released-image qualification FAIL:** the exact Trixie/v7.2 release boots and passes MPP, Wi-Fi, MMC, USB3, thermal, WWAN, HDMI lock/audio evidence, and kernel-config checks. The product lifecycle rerun is blocked by `start_invalid`, and the Bluetooth controller is present but unusable through BlueZ. |
 | `orange-pi-5-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build orange-pi-5-plus` | same `default_variant: edge` selection |
-| `orange-pi-5-plus` | mainline 7.2 (source-built), named explicitly | `./build orange-pi-5-plus --variant edge` | **partial v7.2 hardware evidence, candidate FAIL:** a Bookworm installation reporting `7.2.0-ceralive-rk3588` passed direct software/MPP 60-second encodes and all 11 drill commands. The MPP userspace ABI is cleared for Trixie, but the exact pinned Trixie artifact was not built or booted, the installed pre-fix cerastream binary still requires unavailable GLIBC 2.39, and HDMI video/audio remained N/A without a source. |
+| `orange-pi-5-plus` | mainline 7.2 (source-built), named explicitly | `./build orange-pi-5-plus --variant edge` | **released-image qualification FAIL:** the exact Trixie/v7.2 release boots and passes the full repository smoke plus MPP, thermal, WWAN, and kernel-config checks. The product lifecycle rerun is blocked by `start_invalid`; HDMI video/audio are `not-run` because no input lock was available. |
 | either RK3588 board | `edge-test` (debug sibling) | `./build <board> --variant edge-test` | KASAN + lockdep + the three CeraLive fault-injection symbols; `ci/check-release-variant.sh` refuses to release it by property, and `[6c/9]` reports its size instead of enforcing the ceiling |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -1056,7 +1056,9 @@ fixtures at `tests/manifests/fixtures/production-baseline/`, with a non-vacuity
 leg proving the same comparison fails on `edge-test`. The exact pinned
 Trixie/mainline artifacts were built, released and OTA-validated on both RK3588
 bench boards as part of the cerastream v2026.8.4 / ceralive-device v2026.8.8
-release chain. Full detail:
+release chain. The final qualification verdict remains FAIL because the product
+lifecycle rerun returned `start_invalid` on both, Rock's Bluetooth smoke failed,
+and Orange's HDMI cells were stimulus-gated. Full detail:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md);
 remaining independent hardware gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md).
 

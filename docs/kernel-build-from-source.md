@@ -115,14 +115,13 @@ were built from, and `acb519c101fefa31f51300779f3a139bcabf6a1c` before it was th
 nine-patch commit that landed on `main` from PR #4.
 
 **HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP OR AN UNPROVEN ARTIFACT
-BOUNDARY.** Both boards have now booted installations reporting
-`7.2.0-ceralive-rk3588` and passed direct MPP encode checks. Those installations
-are Bookworm builds whose provenance was not established as this exact pinned
-Trixie output. Attempts to build that candidate stopped at the authenticated apt
-input gate and produced no artifact; product streaming also fails on both boards
-because their installed `cerastream` requires unavailable `GLIBC_2.39`. Read this
-pin as **compile-proven with partial v7.2 kernel-on-silicon evidence, but exact-image
-UNQUALIFIED**. The scoped results and remaining blockers are in §7.
+BOUNDARY.** That boundary is now crossed: both supported boards booted the exact
+released Debian 13 image at `7.2.0-ceralive-rk3588` with cerastream 2026.8.4 and
+passed direct MPP encode checks. Read this pin as **compile-proven and
+released-image boot-proven**. The wider product qualification still has an honest
+FAIL verdict because the lifecycle rerun returned `start_invalid` on both boards,
+Rock's Bluetooth smoke failed, and Orange lacked HDMI stimulus. Scoped results
+and follow-ups are in §7.
 
 **Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
 and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer
@@ -813,28 +812,29 @@ qualification:
   real cross-compile producing `linux-image-7.1.7-ceralive-rk3588` and a flashable
   `.raw` — **and flashed and booted on a real Rock 5B+.** That run cleared the MPP
   hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) at that base.
-- **At `v7.2`, both Rock 5B+ and Orange Pi 5 Plus have booted installations
-  reporting `7.2.0-ceralive-rk3588`.** Direct 60-second software and MPP
-  GStreamer encodes exited cleanly on both. The Orange candidate drill passed
-  11/11 commands. Rock passed 9/11: Bluetooth exposed no controller, and its MMC
-  leg failed closed because the current boot journal had no MMC signatures even
-  though its eMMC completed the bounded read.
-- **Those results do not qualify the pinned Trixie image.** Both reachable
-  installations run Debian 12 Bookworm. Candidate builds auto-degraded to
-  plan-only mode because the apt public signing key was unavailable, so no exact
-  image or RAUC bundle existed to install. No flash or OTA was attempted.
-- **The required product stream leg fails on both boards.** The installed
-  `cerastream` binary requires `GLIBC_2.39`, unavailable on Bookworm, so
-  `cerastream.service` cannot start. Direct encoder passes do not substitute for
-  the product-level start → 60 seconds → clean stop sequence.
-- **HDMI-RX remains stimulus-gated.** Both boards expose the receiver, but no
-  HDMI source was attached; timing lock and actual HDMI audio capture are N/A,
-  not passes.
+- **At `v7.2`, both Rock 5B+ and Orange Pi 5 Plus booted the exact released
+  Debian 13 image** reporting `7.2.0-ceralive-rk3588`, cerastream 2026.8.4 and
+  ceralive-device 2026.8.8. Required product and PipeWire services are active.
+- **MPP is board-proven on both.** Decode-verified 1080p and 4K outputs, concurrent
+  600-buffer pipelines, and 20 teardown cycles passed. Orange passed all five
+  repository smoke cases; Rock passed encode, Wi-Fi, MMC and USB3, but Bluetooth
+  failed despite `/sys/class/bluetooth/hci0` existing.
+- **The required product lifecycle rerun fails on both boards.** Authenticated
+  `streaming.start({})` returns non-retriable `start_invalid` at `phase=params`,
+  so neither a 60-second run nor a clean stop can be claimed from this rerun.
+- **HDMI-RX is split by board.** Rock locked 1920×1080p59.94; todo 31 already
+  records its released-stack PipeWire HDMI-audio pass. Orange returned `No locks
+  available`, so its video and audio cells are `not-run`, never silent passes.
+- **Kernel support checks pass on both.** `CONFIG_NET_CLS_FW=y`, the required WWAN
+  module set, `pwm-fan`, and responsive thermal zones are present. Vendor
+  percentage-load files are absent as expected on mainline; readable rkvenc clock
+  counters provide binary idle/use evidence only.
 
-The v7.2 production verdict is therefore **FAIL**. Build and boot the exact pinned
-Trixie artifacts, restore product-service ABI compatibility, repeat the Rock
-drill without its two failures, and run HDMI video/audio with a known-good source
-before reopening a kernel flip or release.
+The final v7.2 qualification verdict is therefore **FAIL**, without reverting the
+already-shipped production-kernel decision. Diagnose the persisted stream input,
+restore Rock's BlueZ usability, and attach a known-good HDMI source to Orange
+before claiming a fully green two-board matrix. Command-backed detail is in
+the todo-16 qualification record maintained by the workspace orchestrator.
 
 **Source-built vendor-BSP overlay status: RETIRED, gap never closed.** Its
 kernel `.deb` built and validated on all four axes and its config-survival gate
