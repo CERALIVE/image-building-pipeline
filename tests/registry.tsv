@@ -94,6 +94,7 @@ tests/udev-rule-basename-shadow.test.sh	shell	unit	default-shell	no image-owned 
 tests/modem-support-file-ownership.test.sh	shell	unit	default-shell	every modem-support file has exactly one owner: no orphans, no double ownership, negative legs for each
 tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys, bounds and exclusions
 tests/raw-candidate-compression.test.sh	shell	integration	default-shell	sealed raw candidate uses deliberate xz settings, publishes both digests, and round-trips byte-identically
+tests/local-raw-compression.test.sh	shell	integration	default-shell	local Stage-4 raw compression retains the raw and publishes artifact-specific verified sidecars
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/target-release-derivation.test.sh	shell	unit	default-shell	every suite/VERSION_ID fact derives from manifests/target-release.env: the mapping itself, the ci/check-suite-literals.sh gate plus its own self-test, a per-consumer static contract, a flipped-mapping leg proving the derivation is not a constant, and the ARMBIAN_SUITE separation
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build

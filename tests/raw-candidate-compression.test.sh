@@ -32,6 +32,14 @@ xz -t "${compressed}"
 xz -dc "${compressed}" >"${roundtrip}"
 cmp -s "${raw}" "${roundtrip}"
 
+local_dir="${TMP}/local"
+local_raw_sidecar="${local_dir}/$(basename "${raw}").sha256"
+"${SEALER}" --raw "${raw}" --candidate-dir "${local_dir}" --raw-sha256 "${local_raw_sidecar}"
+[[ -s "${local_raw_sidecar}" ]]
+[[ ! -e "${local_dir}/raw.sha256" ]]
+[[ "$(awk 'NR == 1 { print $1 }' "${local_raw_sidecar}")" == "${raw_sha}" ]]
+( cd "${local_dir}" && sha256sum -c "$(basename "${raw}").xz.sha256" )
+
 grep -Fq 'xz level=6 threads=0' "${log}"
 grep -Eq 'raw_bytes=[0-9]+ compressed_bytes=[0-9]+ elapsed_seconds=[0-9]+' "${log}"
 if grep -Fq 'CERALIVE_RAW_XZ_LEVEL' "${SEALER}" \

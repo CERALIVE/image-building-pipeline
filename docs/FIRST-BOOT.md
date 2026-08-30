@@ -20,8 +20,9 @@ verifiable against the merged runtime scripts under `mkosi/runtime/`.
 ## 1. Flash the image
 
 Build the image first (see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2),
-then write it to a microSD card or eMMC. Release downloads are `.raw.xz`; local
-builds retain an uncompressed sparse `.raw` under `images/<board>/`.
+then write it to a microSD card or eMMC. Both release downloads and local builds
+produce `.raw.xz` transport artifacts. Local builds also retain the uncompressed,
+sparse `.raw` under `images/<board>/` for direct `dd` or OTA work.
 
 **microSD (dd):**
 
@@ -33,8 +34,8 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
 sudo sync
 ```
 
-For a downloaded release candidate, verify the download before decompressing,
-then flash the resulting raw bytes:
+For either a local build or a downloaded release candidate, verify the compressed
+transport before decompressing, then flash the resulting raw bytes:
 
 ```bash
 sha256sum -c <timestamp>.raw.xz.sha256

@@ -3,10 +3,12 @@ set -euo pipefail
 
 raw=""
 candidate_dir=""
+raw_sidecar=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --raw) raw="${2:-}"; shift 2 ;;
     --candidate-dir) candidate_dir="${2:-}"; shift 2 ;;
+    --raw-sha256) raw_sidecar="${2:-}"; shift 2 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -31,10 +33,15 @@ install -d -m 0755 "${candidate_dir}"
 raw_name="$(basename -- "${raw}")"
 compressed="${candidate_dir}/${raw_name}.xz"
 compressed_tmp="${candidate_dir}/.${raw_name}.xz.tmp"
-raw_sidecar="${candidate_dir}/raw.sha256"
+raw_sidecar="${raw_sidecar:-${candidate_dir}/raw.sha256}"
 compressed_sidecar="${compressed}.sha256"
 raw_sidecar_tmp="${candidate_dir}/.raw.sha256.tmp"
 compressed_sidecar_tmp="${candidate_dir}/.${raw_name}.xz.sha256.tmp"
+
+[[ -d "$(dirname -- "${raw_sidecar}")" ]] || {
+  printf 'raw SHA-256 sidecar parent directory does not exist: %s\n' "${raw_sidecar}" >&2
+  exit 1
+}
 
 for output in "${compressed}" "${compressed_tmp}" \
   "${raw_sidecar}" "${raw_sidecar_tmp}" "${compressed_sidecar}" \
