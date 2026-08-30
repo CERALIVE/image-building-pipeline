@@ -30,7 +30,7 @@ cerastream:
   # rejected outright on both RK3588 boards.
   # v2026.8.2 release: arm64 + amd64 device .deb artifacts published.
   pin: v2026.8.2
-  # Release provenance: tag v2026.8.2 resolves to commit 293335fd400d6febd74f7c7c36c433495d16730b.
+# Release provenance: tag v2026.8.2 resolves to commit 94f55197b469e6a79d005b736cab4ccc7e5f99a5.
   # Device deb: cerastream 2026.8.2 (amd64 + arm64).
   # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.2
   channel: stable

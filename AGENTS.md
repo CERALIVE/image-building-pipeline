@@ -1184,6 +1184,15 @@ state** under the staging dir (the host apt config is never touched).
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
   `gstlibuvch264src → gstreamer1.0-libuvch264src`.
+
+**Retroactive documentation correction (2026-08-29).** PR #125 changed the
+installed first-party `cerastream` package pin from `2026.8.0` to `2026.8.1` in
+`manifests/first-party-deb-versions.txt`; this note is a backfill and was not
+present in that PR. PR #127 added `libv4l-0` to the shipped runtime and added
+its regression test so the pinned Rockchip multimedia postinst can find the
+legacy library path on Trixie; this note likewise backfills the owning-doc
+update that was missing from that PR (later documentation did not satisfy the
+same-PR requirement).
 - **`srt` provides the device SRT runtime.** Its `libsrt1.5-ceralive` package
   replaces Debian's GnuTLS/OpenSSL variants, so GStreamer and cerastream resolve
   one forked `libsrt.so.1.5` implementation. The
