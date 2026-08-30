@@ -33,11 +33,11 @@ stage_tar_emit() {
 # ---------------------------------------------------------------------------
 emit_artifact() {
   local tree="$1" artifact="$2"
-  # Deterministic ordering + owner + clamped mtime so the same tree always tars
-  # to the same bytes (task 14). --sort=name pins entry order; gnu format avoids
-  # the per-file pax atime/ctime headers that would re-introduce wall-clock drift.
+  # Deterministic ordering + numeric ownership + clamped mtime keep the same tree
+  # byte-stable. Numeric IDs must survive: flattening them to root breaks runtime
+  # ownership such as apt's private `_apt` client key.
   local -a tar_repro=(
-    --sort=name --numeric-owner --owner=0 --group=0
+    --sort=name --numeric-owner
     --mtime="@${SOURCE_DATE_EPOCH:-0}" --format=gnu
   )
   if tar -C "${tree}" "${tar_repro[@]}" -cf "${artifact}" . 2>/dev/null; then

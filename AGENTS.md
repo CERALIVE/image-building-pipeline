@@ -3788,6 +3788,13 @@ packages: iw is installed so the regulatory domain can be applied".
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
 
+The normalized rootfs tar preserves numeric uid/gid metadata. It must never use
+`tar --owner=0 --group=0`: that would undo the `_apt:root` handoff after the
+mkosi tree passed its checks, so the RAUC payload would install the private key
+as unreadable `root:root 0400` while every build-tree assertion remained green.
+The same rule applies to `lib/build-bundle.sh`'s supported directory-input path;
+both rootfs-tar producers are covered by the APT ownership contract test.
+
 The device apt config (`mkosi.postinst.chroot::setup_ceralive_repository` +
 `configure_minimal_apt`, twinned in `customize/apt-ceralive-repo.sh`) had three
 device-runtime bugs, confirmed live on real Rock 5B+ hardware:
