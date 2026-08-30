@@ -100,7 +100,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Image size notes / levers** | [`docs/size-notes.md`](docs/size-notes.md) — locale strip, firmware audit, size-gate |
 | **Build-log warning/error signatures + the lint that governs them** | [`docs/build-log-census.md`](docs/build-log-census.md) + `ci/check-build-log.sh` / `ci/check-build-log-census.py` — see the KEY FACT below |
 | **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`docs/kernel-freeze-contract.md`](docs/kernel-freeze-contract.md) + `mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
-| **Bookworm → Trixie/mainline OTA transition (RAUC 1.8 compatibility + todo-16 A/B drill)** | [`docs/ota-bookworm-trixie-transition.md`](docs/ota-bookworm-trixie-transition.md) + `tests/rauc-transition-contract.test.sh` — plain bundle, exact compatible/signing chain, deployed U-Boot remains outside the bundle |
+| **Trixie/mainline OTA validation (RAUC compatibility + completed rollback drill)** | [`docs/ota-bookworm-trixie-transition.md`](docs/ota-bookworm-trixie-transition.md) + `tests/rauc-transition-contract.test.sh` — plain bundle, exact compatible/signing chain, deployed U-Boot remains outside the bundle |
 | **Cog display add-on recipe** | [`docs/cog-display-addon.md`](docs/cog-display-addon.md) — Cog+WPEWebKit trixie closure, Panthor/Mesa GPU strategy |
 | **Cog on-hardware render QA checklist** | [`docs/cog-display-hw-checklist.md`](docs/cog-display-hw-checklist.md) — ready-to-run RK3588 render gate (software path proven in `test-results/task-39-cog-qa.txt`) |
 | **sysext refresh protocol** | [`docs/addon-sysext-refresh.md`](docs/addon-sysext-refresh.md) — update/disable lifecycle |
@@ -3697,13 +3697,13 @@ FireWire and roc-toolkit network-audio payload inside `libpipewire-0.3-modules` 
 this image can never reach — known, named, and deliberately NOT pruned at this
 headroom. Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §15.
 
-**HONESTY BOUNDARY — no board has run this.** Every claim above is a packaging,
-config or unit-file fact verified against real trixie packages and upstream
-documentation. Nothing here has been booted: concurrent meter + program capture on
-one card, Bluetooth SCO through the BlueZ backend, and the RT scheduling actually
-being granted are all owed by the PipeWire board drill, and ADR-0010 marks the whole
-PipeWire path `[UNVERIFIED]` on this hardware for the same reason. `backend = "alsa"`
-remaining the engine default is what makes that an acceptable position to ship from.
+**Hardware validation — released and board-proven.** Todo 31 passed on the exact
+Trixie/mainline/PipeWire image. The release chain then shipped cerastream v2026.8.4
+and ceralive-device v2026.8.8, and both bench boards OTA-booted that stack healthy;
+the Orange Pi also completed the deliberate-failure fallback and restoration arm.
+`backend = "pipewire"` is now the engine default, while `backend = "alsa"` remains
+the documented one-release rollback hatch. Bluetooth B4 validation remains a separate
+hardware-gated gap and is not claimed complete here.
 
 Guards: `tests/runtime-services.bats` §30 (14 cases — the package set and its
 exclusivity, every artifact installed, the non-root user with a fail-closed uid-0

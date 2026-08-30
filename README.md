@@ -256,10 +256,11 @@ decompresses it into a private sparse snapshot, verifies that snapshot against
 `dd` users must verify the compressed sidecar and decompress first; see
 [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §1.
 
-The first Bookworm → Trixie/mainline slot update deliberately remains installable
-by the deployed RAUC 1.8 fleet: plain bundle format, byte-identical compatible
-string and signing chain, with the deployed U-Boot left outside the RAUC update.
-Verdict, evidence boundary and todo-16 A/B runbook:
+The completed Bookworm → Trixie/mainline transition used a RAUC-1.8-compatible
+plain bundle, byte-identical compatible string and signing chain, with the deployed
+U-Boot left outside the RAUC update. Both bench boards completed the production
+Trixie/mainline/PipeWire OTA; the Orange Pi additionally completed the deliberate
+failure and restoration arm. Verdict and evidence record:
 [`docs/ota-bookworm-trixie-transition.md`](docs/ota-bookworm-trixie-transition.md).
 
 ## Custom Components
@@ -924,12 +925,13 @@ the runtime layer installs both lists in one transaction.
 Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
 [`docs/size-notes.md`](docs/size-notes.md) §15.
 
-**Not yet exercised on hardware.** Every claim above is a packaging, unit-file or
-configuration fact verified against the real trixie packages and upstream docs; no
-board has booted this stack. Concurrent meter + program capture on one card,
-Bluetooth SCO through the BlueZ backend, and RT scheduling actually being granted are
-owed by the PipeWire board drill. The engine's default stays `[audio] backend =
-"alsa"`, which is what makes shipping from that position acceptable.
+**Hardware validation passed on the released stack.** Todo 31 passed on the exact
+Trixie/mainline/PipeWire image, and the release chain shipped cerastream v2026.8.4
+and ceralive-device v2026.8.8. Both bench boards OTA-booted that image healthy; the
+Orange Pi also completed the deliberate-failure fallback and restoration drill.
+The engine now defaults to `[audio] backend = "pipewire"`; `[audio] backend =
+"alsa"` remains the documented one-release rollback hatch. Bluetooth B4 hardware
+validation remains independently hardware-gated and is not implied by this result.
 
 ## Supported-Modem Matrix + WWAN Module Check
 
@@ -1051,12 +1053,12 @@ as a stale exception.
 
 **The production resolve is pinned byte-for-byte** by the committed golden
 fixtures at `tests/manifests/fixtures/production-baseline/`, with a non-vacuity
-leg proving the same comparison fails on `edge-test`. The source-build stage is
-compile-proven; v7.2 has partial kernel-on-silicon evidence from existing
-Bookworm installations, but the exact pinned Trixie artifacts have not been built
-or booted and the measured candidate verdict remains FAIL. Full detail:
+leg proving the same comparison fails on `edge-test`. The exact pinned
+Trixie/mainline artifacts were built, released and OTA-validated on both RK3588
+bench boards as part of the cerastream v2026.8.4 / ceralive-device v2026.8.8
+release chain. Full detail:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md);
-gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md) item 9.
+remaining independent hardware gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md).
 
 ## Kernel Tracks
 
