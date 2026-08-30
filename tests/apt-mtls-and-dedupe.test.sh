@@ -33,6 +33,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST="${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 MODULE="${PIPELINE_DIR}/mkosi/customize/apt-ceralive-repo.sh"
+TAR_EMIT="${PIPELINE_DIR}/lib/stages/tar-emit.sh"
 
 # The suite Part B drives the shipped writer with. Read from the ONE mapping so
 # this harness follows a release bump instead of silently testing the old suite.
@@ -44,6 +45,7 @@ fail() { printf 'apt-mtls-and-dedupe regression: %s\n' "$1" >&2; exit 1; }
 
 [[ -f "${POSTINST}" ]] || fail "missing runtime executor: ${POSTINST}"
 [[ -f "${MODULE}" ]]   || fail "missing customize twin: ${MODULE}"
+[[ -f "${TAR_EMIT}" ]] || fail "missing rootfs tar emitter: ${TAR_EMIT}"
 
 extract_fn() { # <name> <file>
   awk -v fn="$1" '
@@ -74,6 +76,14 @@ grep -Eq 'chown[[:space:]]+_apt(:root)?[[:space:]]+/etc/apt/certs/client\.key' <
   || fail "customize install_mtls_cert() no longer chowns client.key to _apt"
 grep -Eq 'chmod[[:space:]]+600[[:space:]]+/etc/apt/certs/client\.key' <<<"${mod_mtls}" \
   && fail "customize install_mtls_cert() still leaves client.key mode 600 (root-owned → unreadable by _apt)"
+
+# The RAUC payload is the normalized rootfs tar, not the mkosi tree. Flattening
+# every tar member to uid/gid 0 silently undoes the `_apt` handoff above before
+# the bundle reaches a device.
+grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' "${TAR_EMIT}" \
+  && fail "rootfs tar emitter flattens ownership to root — client.key loses uid 42 in the RAUC payload"
+grep -Eq -- '--numeric-owner' "${TAR_EMIT}" \
+  || fail "rootfs tar emitter must preserve numeric uid/gid metadata without name remapping"
 
 # 2. configure_minimal_apt removes the mkosi release-named dupe AND writes debian.sources (both tracks).
 grep -Eq 'rm -f.*\$\{(RELEASE|APT_RELEASE)\}"?\.sources' <<<"${post_minapt}" \
