@@ -14,7 +14,7 @@ srt:
   path: srt
   repo: https://github.com/CERALIVE/srt
   kind: first-party
-  pin: v1.5.6+ceralive.1
+  pin: srt-v1.5.6+ceralive.1
   channel: stable
 
 cerastream:
@@ -34,10 +34,12 @@ cerastream:
   # targets — proven in its own release smoke. It is also the
   # release that flips `[audio] backend` to pipewire by default (todo-31 board drill
   # PASSED) and the first carrying the ingest-source meter `level` tap (PR #134).
-  pin: v2026.8.4
-  # Release provenance: tag v2026.8.4 resolves to commit 42cb6583138b825d16b3fac17c9fc6d5b57990bb.
-  # Device deb: cerastream 2026.8.4 (amd64 + arm64), verified live in the stable index.
-  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.4
+  # v2026.8.6 adds the post-stop watchdog scheduler repair and is the engine in the
+  # final two-board todo-16 qualification PASS.
+  pin: v2026.8.6
+  # Release provenance: tag v2026.8.6 resolves to commit 3d367c6a2786127c309324501eb39fb4b281b387.
+  # Device deb: cerastream 2026.8.6 (amd64 + arm64), verified in the final board drill.
+  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.6
   channel: stable
 
 CeraUI:
@@ -48,11 +50,13 @@ CeraUI:
   # source's audio is its own in every connection state, audio device types are
   # derived from the engine rather than restated locally, and a stale geometry
   # override no longer blocks starting an ingest source after switching from HDMI.
-  pin: v2026.8.8
-  # Release provenance: tag v2026.8.8 resolves to commit 9fc3eea35d4200a6dcbe93ca1aae9892194dcf6c.
-  # Device deb: ceralive-device 2026.8.8-20260830T160956.9fc3eea (amd64) /
-  #   2026.8.8-20260830T160953.9fc3eea (arm64), both verified live in the stable index.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.8
+  # v2026.8.9 adds the awaited stop acknowledgement used by the final two-board
+  # todo-16 qualification PASS.
+  pin: v2026.8.9
+  # Release provenance: tag v2026.8.9 resolves to commit 4c6fe4ec75024f42a2df680a4ab20b6212579fc4.
+  # Device deb: ceralive-device 2026.8.9-20260831T020739.4c6fe4e (amd64) /
+  #   2026.8.9-20260831T020738.4c6fe4e (arm64), both published as release assets.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.9
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
@@ -103,7 +107,7 @@ gstlibuvch264src:
   path: gstlibuvch264src
   repo: https://github.com/CERALIVE/gstlibuvch264src
   kind: first-party
-  pin: v2026.7.0
+  pin: v2026.8.0
 
 image-building-pipeline:
   path: image-building-pipeline
