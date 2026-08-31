@@ -201,9 +201,9 @@ the default in every cell; `DEBUG` is bench-only and never published (see
 | Board | Kernel track | Command | Notes |
 |---|---|---|---|
 | `rock-5b-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build rock-5b-plus` | the family declares `default_variant: edge`, so a bare build resolves the `edge` overlay byte-identically to `--variant edge` |
-| `rock-5b-plus` | mainline 7.2 (source-built), named explicitly | `./build rock-5b-plus --variant edge` | **released-image qualification FAIL:** the exact Trixie/v7.2 release boots and passes MPP, Wi-Fi, MMC, USB3, thermal, WWAN, HDMI lock/audio evidence, and kernel-config checks. The product lifecycle rerun is blocked by `start_invalid`, and the Bluetooth controller is present but unusable through BlueZ. |
+| `rock-5b-plus` | mainline 7.2 (source-built), named explicitly | `./build rock-5b-plus --variant edge` | **released-image qualification PASS:** the final `cerastream 2026.8.6` / `ceralive-device 2026.8.9` deterministic reproduction streamed for 60+s, stopped cleanly, and stayed free of watchdog aborts through a 3+ minute post-stop window. Earlier `start_invalid` and BlueZ failures are superseded investigation history. |
 | `orange-pi-5-plus` | **mainline 7.2 (source-built) — PRODUCTION** | `./build orange-pi-5-plus` | same `default_variant: edge` selection |
-| `orange-pi-5-plus` | mainline 7.2 (source-built), named explicitly | `./build orange-pi-5-plus --variant edge` | **released-image qualification FAIL:** the exact Trixie/v7.2 release boots and passes the full repository smoke plus MPP, thermal, WWAN, and kernel-config checks. The product lifecycle rerun is blocked by `start_invalid`; HDMI video/audio are `not-run` because no input lock was available. |
+| `orange-pi-5-plus` | mainline 7.2 (source-built), named explicitly | `./build orange-pi-5-plus --variant edge` | **released-image qualification PASS:** the final `cerastream 2026.8.6` / `ceralive-device 2026.8.9` deterministic reproduction streamed for 60+s, stopped cleanly, and stayed free of watchdog aborts through a 3+ minute post-stop window. Earlier `start_invalid` is superseded history; HDMI video/audio remain non-blocking hardware-gated `not-run` without stimulus. |
 | either RK3588 board | `edge-test` (debug sibling) | `./build <board> --variant edge-test` | KASAN + lockdep + the three CeraLive fault-injection symbols; `ci/check-release-variant.sh` refuses to release it by property, and `[6c/9]` reports its size instead of enforcing the ceiling |
 | `x86-minipc` | n/a (Debian prebuilt) | `./build x86-minipc` | GRUB A/B disk assembly ships; **not yet validated on hardware** — see `docs/X86-MINIPC-BRINGUP.md` |
 | any board | any track | add `CERALIVE_DEBUG_IMAGE=1 CERALIVE_DEBUG_PASSWORD_HASH='<crypt(3) hash>'` | DEBUG variant — bench only, adds the development package delta and enables SSH by default; see "Production vs Debug Image Variants" below |
@@ -1055,10 +1055,12 @@ as a stale exception.
 fixtures at `tests/manifests/fixtures/production-baseline/`, with a non-vacuity
 leg proving the same comparison fails on `edge-test`. The exact pinned
 Trixie/mainline artifacts were built, released and OTA-validated on both RK3588
-bench boards as part of the cerastream v2026.8.4 / ceralive-device v2026.8.8
-release chain. The final qualification verdict remains FAIL because the product
-lifecycle rerun returned `start_invalid` on both, Rock's Bluetooth smoke failed,
-and Orange's HDMI cells were stimulus-gated. Full detail:
+bench boards. The final two-board qualification PASS used cerastream v2026.8.6 /
+ceralive-device v2026.8.9: both deterministic reproductions streamed for 60+s,
+stopped cleanly, and observed 3+ post-stop minutes with zero watchdog aborts. The
+earlier `start_invalid`, BlueZ, and Orange HDMI-stimulus findings are superseded
+investigation history; Orange HDMI remains a non-blocking hardware-gated `not-run`
+coverage gap. Full detail:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md);
 remaining independent hardware gaps: [`docs/DEFERRED.md`](docs/DEFERRED.md).
 

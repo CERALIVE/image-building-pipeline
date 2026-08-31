@@ -616,14 +616,14 @@ PY
 }
 
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.8.8"
+  local expected_ceraui_pin="v2026.8.9"
   local arch expected_device_version device_version
 
   [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
   for arch in amd64 arm64; do
     case "$arch" in
-      amd64) expected_device_version="2026.8.8-20260830T160956.9fc3eea" ;;
-      arm64) expected_device_version="2026.8.8-20260830T160953.9fc3eea" ;;
+      amd64) expected_device_version="2026.8.9-20260831T020739.4c6fe4e" ;;
+      arm64) expected_device_version="2026.8.9-20260831T020738.4c6fe4e" ;;
     esac
     device_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version ceralive-device' _ "$FETCH_DEBS")"
     [ "$device_version" = "$expected_device_version" ]
@@ -637,12 +637,12 @@ PY
   # linked against the same shared GnuTLS libsrt.so.1.5 (single-libsrt invariant) — so it
   # needs NO new FIRST_PARTY_APT_PKGS entry, only the version bump. Live + GPG-signed on
   # apt.ceralive.tv (arm64+amd64).
-  local expected_srt_pin="v1.5.6+ceralive.1"
+  local expected_srt_pin="srt-v1.5.6+ceralive.1"
   [ "$(get_pin srt)" = "$expected_srt_pin" ]
   local libsrt_version
   libsrt_version="$(awk -F= '$1 == "libsrt1.5-ceralive" { print $2; exit }' \
     "$REPO_ROOT/manifests/first-party-deb-versions.txt")"
-  [ "$libsrt_version" = "${expected_srt_pin#v}" ]
+  [ "$libsrt_version" = "${expected_srt_pin#srt-v}" ]
   # The rootfs build/install-test asserts the bundled tool actually lands on-device.
   grep -Fq '/usr/bin/srt-live-transmit' "$PIPELINE_DIR/tests/realhw-smoke.sh"
 }
