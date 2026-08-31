@@ -11,6 +11,9 @@
 #                              that drives the hardware and SSH policy modules
 #   * suppress_unusable_boot_units
 #                              the six stock units this image can never satisfy
+#   * configure_networkmanager_wait_online
+#                              gate network-online on one usable connection, not
+#                              every optional modem finishing startup
 #   * configure_ntp, install_console_font_service, setup_boot_healthcheck,
 #     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
 #
@@ -164,6 +167,7 @@ configure_services() {
   # RAUC A/B replaces /etc wholesale, so a runtime-only enable silently self-reverts on every OTA; the CeraUI boot reconciler (separate BT foundation todo) covers already-flashed images.
   disable_service cups.service
   suppress_unusable_boot_units
+  configure_networkmanager_wait_online
   setup_typec_policy
   setup_fan_curve
   setup_fan_kickstart
@@ -348,6 +352,32 @@ suppress_unusable_boot_units() {
   do
     mask_service "${svc}"
   done
+}
+
+# NetworkManager's stock wait-online unit runs `nm-online -s`: it waits for the
+# daemon's GLOBAL startup phase to finish, which means every autoconnect profile
+# must reach a conclusive activated or deactivated state. That criterion is wrong
+# for this multi-uplink appliance. An optional cellular profile can legitimately
+# remain in `prepare` forever while its modem searches for a home network; on a
+# real Rock 5B+ that left NetworkManager.Startup=true despite Ethernet already
+# providing CONNECTED_GLOBAL/full connectivity, so the unit hit its exact 60 s
+# timeout and left every boot degraded.
+#
+# Keep the unit and the network-online.target gate: ceralive-hostname.service
+# genuinely needs a usable link before publishing its mDNS identity. Override only
+# ExecStart to use nm-online's ordinary connection criterion. This succeeds once
+# ANY usable connection exists, while retaining the vendor unit's 60-second
+# NM_ONLINE_TIMEOUT and still failing honestly when the board has no connectivity.
+# This is deliberately not a mask and not a NetworkManager connectivity-check
+# change; neither addresses the disproven failure mechanism.
+configure_networkmanager_wait_online() {
+  log "configuring NetworkManager wait-online to require one usable connection (optional modem startup must not gate boot)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "${src}" && -f "${src}/NetworkManager-wait-online.dropin.conf" ]] \
+    || die "NetworkManager wait-online drop-in source not found: ${src}/NetworkManager-wait-online.dropin.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${NETWORKMANAGER_WAIT_ONLINE_DROPIN_DIR:-/etc/systemd/system/NetworkManager-wait-online.service.d}"
+  install -D -m 0644 "${src}/NetworkManager-wait-online.dropin.conf" \
+    "${dropin_dir}/10-ceralive-connection-ready.conf"
 }
 
 # ---------------------------------------------------------------------------

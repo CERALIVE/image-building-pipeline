@@ -1132,6 +1132,7 @@ SH
     PATH="$bin:$PATH" \
     BLUETOOTH_ENABLE_CALLS="$calls" \
     CERALIVE_SYSTEMD_ETC_UNIT_DIR="$systemd_etc" \
+    CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" \
     bash -c '
       source "$1"
       configure_debug_access() { :; }
