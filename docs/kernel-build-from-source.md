@@ -939,10 +939,10 @@ kernel.
    listing is broken, not that the DTB is missing.**
 5. **No `.deb` produced by this stage may be published.** It is a local build
    input only; nothing here uploads to apt/R2.
-6. **D3 is not reopened.** The shipped kernel is still the Armbian vendor BSP.
-   See [`kernel-currency-watch.md`](kernel-currency-watch.md) for the two precise
-   triggers that would revisit that decision; this variant existing is not one of
-   them.
+6. **D3 is not reopened.** The shipped kernel is the source-built mainline
+   `edge` track. Its custom RAUC bootloader adapter is unchanged; see
+   [`kernel-currency-watch.md`](kernel-currency-watch.md) for its remaining
+   maintenance criteria.
 7. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
    date from the wall clock, so the post-`am` commit SHAs differ on every run.
    `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP` are pinned and the *content* is
@@ -966,7 +966,7 @@ So the **board** (never the family) may declare a `variant_overrides:` map:
 
 ```yaml
 # manifests/boards/orange-pi-5-plus.yaml
-dtb_name: rk3588-orangepi-5-plus.dtb         # vendor BSP, the default path
+dtb_name: rk3588-orangepi-5-plus.dtb         # production `edge` default
 
 variant_overrides:
   edge:
