@@ -384,6 +384,9 @@ CONFIG_BT_HCIUART_QCA=y
 # Keep this list in lockstep with that checker — a drop here is exactly the
 # regression it exists to catch.
 CONFIG_USB_NET_CDCETHER=m
+# Host-side RNDIS for USB modems/peripherals whose only mode is RNDIS;
+# QMI and MBIM are already covered by the surrounding modules.
+CONFIG_USB_NET_RNDIS_HOST=m
 CONFIG_USB_NET_CDC_NCM=m
 CONFIG_USB_NET_CDC_MBIM=m
 CONFIG_USB_NET_QMI_WWAN=m
