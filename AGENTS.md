@@ -1501,10 +1501,13 @@ remain schema-enforced and covered by scratch-family legs in
 **HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP OR AN ARTIFACT BOUNDARY.** `edge`
 moved from `v7.1.7` to `v7.2` with the series rebased (`0007` retired: it LANDED
 upstream as `8d4346ecd495` in v7.2). Both supported boards have now booted the
-exact released Debian 13 image at `7.2.0-ceralive-rk3588`; direct MPP encode and
-the kernel support closure pass on both. The wider qualification remains FAIL:
-the product lifecycle rerun returned `start_invalid` on both boards, Rock's
-Bluetooth smoke failed, and Orange lacked HDMI stimulus. The produced package is:
+exact released Debian 13 image at `7.2.0-ceralive-rk3588`. The final deterministic
+reproduction on released `cerastream 2026.8.6` and `ceralive-device 2026.8.9`
+passed on both boards: 60+s streams, clean stops, and 3+ minute post-stop windows
+with no watchdog abort. The earlier `start_invalid`, Rock BlueZ, and Orange
+no-stimulus findings are historical and superseded for qualification; Orange HDMI
+video/audio remain a non-blocking hardware-gated `not-run` coverage gap. The
+produced package is:
 `linux-image-7.2.0-ceralive-rk3588` (note the `.0` — v7.2 FINAL has
 `SUBLEVEL=0`, so a tag-shaped `7.2` would fail `lib/build-kernel.sh`'s own
 `kernelrelease` assertion). The `edge-test` sibling inherits every source pin and
@@ -1688,10 +1691,10 @@ occurrence of each of those `make` calls in the file.
   with a `v7.1.7` edge image and booted `7.1.7-ceralive-rk3588`, which is what
   cleared the MPP KNOWN ISSUE below AT THAT BASE. Orange Pi 5 Plus subsequently
   booted its own v7.1.7 artifact. At `v7.2`, both boards now run the exact released
-  Debian 13 image with cerastream 2026.8.4 and pass direct software/MPP checks.
-  The MPP userspace ABI itself is cleared by todo 17. Exact-image boot provenance
-  is no longer the gap; the remaining product, Bluetooth, and HDMI-stimulus
-  failures are recorded in `docs/kernel-build-from-source.md` §7.
+  Debian 13 image with cerastream 2026.8.6 and ceralive-device 2026.8.9. The final
+  deterministic product lifecycle passed on both; its earlier product, Bluetooth,
+  and HDMI-stimulus failures are retained as superseded history in
+  `docs/kernel-build-from-source.md` §7.
 - **A board fact that differs per variant is declared BY THE BOARD, in
   `variant_overrides:`.** The merge order is family → variant → board and the board
   wins last, so a variant can never restate a board fact — which is also why a
@@ -2311,9 +2314,11 @@ clearing run is `.omo/evidence/image-pipeline-quality/hardware-validation-round1
 
 **Current-image MPP qualification is complete.** The detailed soak above remains
 one Rock 5B+ on v7.1.7, but the final released Trixie/v7.2 image passed the bounded
-MPP matrix on both supported boards. Do not inflate that into a fully green device
-qualification: the independent product-lifecycle, Rock Bluetooth, and Orange HDMI
-cells still keep the todo-16 verdict at FAIL.
+MPP matrix and the final product lifecycle on both supported boards. Todo-16 is a
+two-board PASS on released `cerastream 2026.8.6` / `ceralive-device 2026.8.9`;
+the preceding lifecycle, BlueZ, and HDMI-stimulus failures remain historical,
+superseded investigation evidence. Orange HDMI remains a non-blocking
+hardware-gated `not-run` coverage gap.
 
 **eMMC HS400 negotiation is inconsistent under the `edge` 7.1.5 kernel — upstream
 behaviour, NOT a pipeline defect, and deliberately unfixed** [KNOWN ISSUE]

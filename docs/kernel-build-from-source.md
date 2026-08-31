@@ -116,12 +116,14 @@ nine-patch commit that landed on `main` from PR #4.
 
 **HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP OR AN UNPROVEN ARTIFACT
 BOUNDARY.** That boundary is now crossed: both supported boards booted the exact
-released Debian 13 image at `7.2.0-ceralive-rk3588` with cerastream 2026.8.4 and
-passed direct MPP encode checks. Read this pin as **compile-proven and
-released-image boot-proven**. The wider product qualification still has an honest
-FAIL verdict because the lifecycle rerun returned `start_invalid` on both boards,
-Rock's Bluetooth smoke failed, and Orange lacked HDMI stimulus. Scoped results
-and follow-ups are in §7.
+released Debian 13 image at `7.2.0-ceralive-rk3588`. The final deterministic
+reproduction used released cerastream 2026.8.6 and ceralive-device 2026.8.9:
+both boards streamed for 60+s, stopped cleanly, and completed 3+ minute post-stop
+observations with zero watchdog aborts. Read this pin as **compile-proven,
+released-image boot-proven, and fully qualified by the two-board lifecycle PASS**.
+The earlier `start_invalid`, Rock BlueZ, and Orange no-stimulus findings are
+superseded history; Orange HDMI remains a non-blocking hardware-gated `not-run`
+coverage gap. Scoped results and history are in §7.
 
 **Pin the landed SHA, never a PR-head SHA.** A squash-merge creates a new commit
 and orphans the branch head: #4's pre-merge head `2e195f2d36db` is no longer
@@ -813,15 +815,18 @@ qualification:
   `.raw` — **and flashed and booted on a real Rock 5B+.** That run cleared the MPP
   hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) at that base.
 - **At `v7.2`, both Rock 5B+ and Orange Pi 5 Plus booted the exact released
-  Debian 13 image** reporting `7.2.0-ceralive-rk3588`, cerastream 2026.8.4 and
-  ceralive-device 2026.8.8. Required product and PipeWire services are active.
+  Debian 13 image** reporting `7.2.0-ceralive-rk3588`. The final qualification
+  used released cerastream 2026.8.6 and ceralive-device 2026.8.9; required
+  product and PipeWire services are active.
 - **MPP is board-proven on both.** Decode-verified 1080p and 4K outputs, concurrent
   600-buffer pipelines, and 20 teardown cycles passed. Orange passed all five
-  repository smoke cases; Rock passed encode, Wi-Fi, MMC and USB3, but Bluetooth
-  failed despite `/sys/class/bluetooth/hci0` existing.
-- **The required product lifecycle rerun fails on both boards.** Authenticated
-  `streaming.start({})` returns non-retriable `start_invalid` at `phase=params`,
-  so neither a 60-second run nor a clean stop can be claimed from this rerun.
+  repository smoke cases. Rock's earlier Bluetooth failure despite
+  `/sys/class/bluetooth/hci0` was a disabled `bluetooth.service`, remediated before
+  the final PASS; it remains superseded investigation history.
+- **The final required product lifecycle rerun passes on both boards.** Each
+  deterministic reproduction ran for 60+s, acknowledged a clean stop, and retained
+  a healthy same-PID engine through a 3+ minute post-stop observation with zero
+  watchdog aborts or restarts.
 - **HDMI-RX is split by board.** Rock locked 1920×1080p59.94; todo 31 already
   records its released-stack PipeWire HDMI-audio pass. Orange returned `No locks
   available`, so its video and audio cells are `not-run`, never silent passes.
@@ -830,11 +835,13 @@ qualification:
   percentage-load files are absent as expected on mainline; readable rkvenc clock
   counters provide binary idle/use evidence only.
 
-The final v7.2 qualification verdict is therefore **FAIL**, without reverting the
-already-shipped production-kernel decision. Diagnose the persisted stream input,
-restore Rock's BlueZ usability, and attach a known-good HDMI source to Orange
-before claiming a fully green two-board matrix. Command-backed detail is in
-the todo-16 qualification record maintained by the workspace orchestrator.
+The final v7.2 qualification verdict is therefore **PASS**, without changing the
+already-shipped production-kernel decision. The earlier persisted-start,
+optional-codec, BlueZ-service, and watchdog-scheduler failures are retained above
+as superseded investigation history. Orange HDMI video/audio remain a non-blocking
+hardware-gated `not-run` coverage gap until a source is attached. Command-backed
+detail is in the todo-16 qualification record maintained by the workspace
+orchestrator.
 
 **Source-built vendor-BSP overlay status: RETIRED, gap never closed.** Its
 kernel `.deb` built and validated on all four axes and its config-survival gate
