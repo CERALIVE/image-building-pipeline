@@ -76,7 +76,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
-| **Boot-time dead-weight unit masks (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)** | `mkosi/customize/postinst-lib.sh` `suppress_unusable_boot_units` + `mask_service` — see the KEY FACT below for why a `disable` is silently undone on first boot |
+| **Boot-time network readiness + dead-weight unit masks** | `mkosi/customize/postinst-lib.sh` `configure_networkmanager_wait_online` (one usable connection, not global optional-modem startup completion) + `suppress_unusable_boot_units` / `mask_service` (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait) — see the KEY FACT below |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
 | **Which strict-mode / logging profile a script must use** | [`docs/shell-profiles.md`](docs/shell-profiles.md) — build-strict / device-daemon / contract-test |
@@ -3456,6 +3456,35 @@ resurrection path closed, mask-not-disable, the fail-closed leg proving a
 non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
 widen to NetworkManager/resolved/udevd/`chrony.service`, and the
 `configure_services` wiring).
+
+**NetworkManager wait-online gates on ONE usable connection, never global startup
+completion.** The stock Trixie unit executes `nm-online -s -q`. `-s` waits for
+NetworkManager's `Startup` property to become false, which requires every
+autoconnect profile to settle. That is structurally too strong for this appliance:
+every modem profile autoconnects, and an optional modem can remain in `prepare`
+while searching indefinitely without making working Ethernet or another modem any
+less online.
+
+Root-caused on the released Rock 5B+ image on 2026-08-31. The board had exactly one
+failed unit. `NetworkManager-wait-online` ran from monotonic 11.061 s to 71.112 s
+and exited 1 at its exact 60-second timeout; `systemd-analyze time` reported
+`3.547s (kernel) + 1min 11.847s (userspace)`. At the same time NetworkManager
+reported `connected` / `full` and had reached `CONNECTED_GLOBAL` at 13.581 s, but
+its D-Bus `Startup` property remained `true`: `gsm-9` on `cdc-wdm1` was still
+`connecting (prepare)`, while ModemManager reported `searching`, packet service
+`detached`, and `roaming-not-allowed-in-location-area`. On that exact live state,
+`nm-online -q -t 5` returned 0 immediately while `nm-online -s -q -t 5` returned 1
+after five seconds — changing only the criterion toggled the failure.
+
+`configure_networkmanager_wait_online` installs the additive
+`NetworkManager-wait-online.service.d/10-ceralive-connection-ready.conf` drop-in,
+clears the vendor `ExecStart`, and replaces it with `nm-online -q`. The inherited
+`NM_ONLINE_TIMEOUT=60` remains. Do NOT mask this unit: unlike networkd's impossible
+wait, a real NetworkManager connectivity gate is useful because
+`ceralive-hostname.service` publishes mDNS after `network-online.target`. Do NOT
+change NetworkManager's connectivity checking or mutate modem profiles to address
+this boot issue; full connectivity was already proven and optional uplink search is
+valid runtime state.
 
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
