@@ -36,10 +36,14 @@ cerastream:
   # PASSED) and the first carrying the ingest-source meter `level` tap (PR #134).
   # v2026.8.6 adds the post-stop watchdog scheduler repair and is the engine in the
   # final two-board todo-16 qualification PASS.
-  pin: v2026.8.6
-  # Release provenance: tag v2026.8.6 resolves to commit 3d367c6a2786127c309324501eb39fb4b281b387.
-  # Device deb: cerastream 2026.8.6 (amd64 + arm64), verified in the final board drill.
-  # Published assets: https://github.com/CERALIVE/cerastream/releases/tag/v2026.8.6
+  # v2026.8.7 is the provenance-correct replacement for v2026.8.6: release builds
+  # now bind the protected tag, package bytes and embedded version to one main SHA.
+  pin: v2026.8.7
+  # Release provenance: tag v2026.8.7 resolves to commit ecce19245852244a6c6a6d71bcbb06009fc76c54.
+  # Device deb: cerastream 2026.8.7 (amd64 + arm64); both binaries stamp 2026.8.7+ecce192.
+  # Published assets:
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.8.7/cerastream_2026.8.7_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.8.7/cerastream_2026.8.7_amd64.deb
   channel: stable
 
 CeraUI:
