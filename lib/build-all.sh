@@ -27,6 +27,8 @@
 #
 # Env (all overridable; defaults keep `build --all` working with zero config):
 #   JOBS          max boards built concurrently   (default: min(nproc, 4))
+#   CERALIVE_BUILD_BOARD_JOBS  the explicit RAISE knob for that cap; validated,
+#                 and clamped to what memory can actually feed (see below)
 #   ORCHESTRATOR  single-board builder to spawn    (default: <here>/orchestrate.sh)
 #   BOARDS_DIR    manifest dir for find_manifest   (default: <v2>/manifests/boards)
 #   LOGS_DIR      per-board log destination        (default: <v2>/logs)
@@ -41,6 +43,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 # shellcheck source=lib/paths.sh
 source "${HERE}/paths.sh"
+# shellcheck source=lib/shared/resource-lib.sh
+source "${HERE}/shared/resource-lib.sh"
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 
@@ -56,6 +60,11 @@ LOGS_DIR="${LOGS_DIR:-${PIPELINE_DIR}/${CERALIVE_REL_LOGS_DIR}}"
 # default_jobs — bounded concurrency ceiling: min(nproc, 4). mkosi peaks RAM/IO,
 # so 4 is a deliberate safety cap (MUST-NOT: don't exhaust memory) even on hosts
 # with many cores. nproc is probed defensively so a missing nproc never aborts.
+#
+# DELIBERATELY NOT cgroup-aware, unlike everything else this change touched: the
+# cap of 4 already bounds a many-core host far below anything a cgroup would, and
+# the default is the one number a `build --all` produces with zero configuration.
+# Adaptivity here belongs behind the explicit knob below, where it is opted into.
 default_jobs() {
   local n
   n="$(nproc 2>/dev/null || echo 1)"
@@ -64,9 +73,67 @@ default_jobs() {
   printf '%s' "${n}"
 }
 
-# JOBS — sanitised to a positive integer; a bogus override falls back to the cap.
-JOBS="${JOBS:-$(default_jobs)}"
-[[ "${JOBS}" =~ ^[1-9][0-9]*$ ]] || JOBS="$(default_jobs)"
+# Empirical peak RSS of ONE concurrent board build — a full mkosi run plus its
+# container, not a compiler job, which is why it is twice the kernel figure in
+# lib/kernel/builder.sh. Both the number and the unit live next to the arithmetic
+# that consumes them.
+BUILD_BOARD_MEM_PER_JOB_KIB=$((4 * 1024 * 1024))
+
+# ---------------------------------------------------------------------------
+# resolve_board_jobs — echo the concurrency cap, and say where it came from.
+#
+# Three inputs, in precedence order, and the order is the point:
+#
+#   JOBS                       the pre-existing knob. Kept FIRST and byte-for-byte
+#                              unchanged (positive int wins, anything else falls
+#                              back to the cap) so no existing caller's behaviour
+#                              moves.
+#   CERALIVE_BUILD_BOARD_JOBS  the explicit raise knob. Validated FATALLY rather
+#                              than silently defaulted — this one exists to be
+#                              acted on, so a typo that quietly resolved to 4
+#                              would be indistinguishable from it working.
+#                              Clamped to what memory can feed, because N
+#                              concurrent mkosi builds that OOM halfway are
+#                              strictly worse than N-1 that finish.
+#   (neither)                  min(nproc, 4), exactly as before.
+# ---------------------------------------------------------------------------
+resolve_board_jobs() {
+  local requested ceiling
+
+  if [[ -n "${JOBS:-}" ]]; then
+    if [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+      printf '%s' "${JOBS}"
+    else
+      printf '%s' "$(default_jobs)"
+    fi
+    return 0
+  fi
+
+  requested="${CERALIVE_BUILD_BOARD_JOBS:-}"
+  if [[ -z "${requested}" ]]; then
+    printf '%s' "$(default_jobs)"
+    return 0
+  fi
+  [[ "${requested}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CERALIVE_BUILD_BOARD_JOBS must be a positive integer (got '${requested}')"
+
+  if ! resource_mem_budget_kib; then
+    log_warn "board jobs: ${requested} (CERALIVE_BUILD_BOARD_JOBS — neither MemAvailable nor a cgroup v2 memory.max is readable, so NO memory ceiling could be applied)"
+    printf '%s' "${requested}"
+    return 0
+  fi
+  ceiling="$(resource_jobs_for_mem "${RESOURCE_MEM_BUDGET_KIB}" "${BUILD_BOARD_MEM_PER_JOB_KIB}")"
+  (( ceiling >= 1 )) || ceiling=1
+  if (( requested > ceiling )); then
+    log_warn "board jobs: ${ceiling} — CERALIVE_BUILD_BOARD_JOBS=${requested} CLAMPED to the memory-derived ceiling ($((BUILD_BOARD_MEM_PER_JOB_KIB / 1024)) MiB per concurrent board; ${RESOURCE_MEM_BASIS})"
+    printf '%s' "${ceiling}"
+    return 0
+  fi
+  log_info "board jobs: ${requested} (CERALIVE_BUILD_BOARD_JOBS, within the memory-derived ceiling of ${ceiling})"
+  printf '%s' "${requested}"
+}
+
+JOBS="$(resolve_board_jobs)"
 
 usage() {
   cat >&2 <<EOF
@@ -79,6 +146,8 @@ each board's output captured to its own log under:
 Exit status is non-zero if ANY board fails (all boards still run to completion).
 
 Env: JOBS (default min(nproc,4)) ORCHESTRATOR BOARDS_DIR LOGS_DIR
+     CERALIVE_BUILD_BOARD_JOBS  raise the cap explicitly; a positive integer,
+                                clamped to what memory can feed (JOBS wins)
      + every env orchestrate.sh honours (DRY_RUN, INSTALL_BOOT_BSP, …)
 EOF
 }

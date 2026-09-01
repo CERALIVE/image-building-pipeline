@@ -411,22 +411,47 @@ text the test suite drives against a stubbed `git`.
 and it is the one that gets a builder OOM-killed: a kernel compile job peaks
 around 1-2 GiB RSS, so a core-rich, memory-thin host dies deep inside
 `bindeb-pkg`, after every pin has already verified. The width is
-`min(nproc, MemAvailable / 2 GiB)`, floored at 1 (a serial build beats no build)
-and ceilinged at `nproc` (spare memory buys no extra cores). The derivation is
-logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
-**unconditionally**, including upward — an operator who has measured their own
-host outranks the heuristic. `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
-`ci/check-builder-resources.sh` uses) redirects the meminfo read.
+`min(cpus, memory budget / 2 GiB)`, floored at 1 (a serial build beats no build)
+and ceilinged at `cpus` (spare memory buys no extra cores). The derivation is
+logged on every run, with the constraint that bound it named.
 
-Guards: `tests/kernel-build-resilience.bats` (30 tests — the three
-job-derivation fixtures, floor/ceiling/override/fallback legs, transient-retry
+**Both inputs are CGROUP-AWARE**, via `lib/shared/resource-lib.sh`. `nproc` and
+`MemAvailable` describe the MACHINE, and this stage runs inside a container in CI:
+a 4-CPU cgroup on a 32-core host answers 32 cores, and a memory-thin cgroup answers
+the HOST's generous `MemAvailable` right up to the moment its own limit triggers an
+OOM kill rather than reclaim. The derivation therefore walks the whole cgroup v2
+chain leaf-to-root and takes the minimum — a leaf whose `cpu.max`/`memory.max`
+reads `max` is not unlimited when an ancestor caps it — and computes memory
+headroom **per ancestor** (`memory.max_i − memory.current_i`, saturating) before
+minimising, because a higher-limit parent that sibling processes have nearly
+exhausted has less room left than an empty lower-limit leaf. A host with no cgroup
+limits finds nothing and collapses to exactly the pre-cgroup answer.
+
+`CERALIVE_KERNEL_BUILD_JOBS` is **clamped to the memory-derived ceiling**. It used
+to win unconditionally in both directions; it no longer wins upward by default,
+because the upward direction is precisely the one that produces the dead build this
+preflight exists to prevent — typically a stale `-j16` inherited from a roomier
+machine, or a CI variable set before the job was containerized.
+`CERALIVE_KERNEL_BUILD_JOBS_FORCE=1` restores the unconditional override for an
+operator who has measured their own host; a `FORCE` value that is neither `0` nor
+`1` is refused rather than silently read as "off". Every read is
+fixture-overridable — `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
+`ci/check-builder-resources.sh` uses), `CERALIVE_RESOURCE_CGROUP_ROOT`,
+`CERALIVE_RESOURCE_CGROUP_PROC_FILE` and
+`CERALIVE_RESOURCE_MEM_SAFETY_MARGIN_KIB` (default 256 MiB, applied to the cgroup
+headroom only and never to `MemAvailable`).
+
+Guards: `tests/kernel-build-resilience.bats` (32 tests — the job-derivation
+fixtures, floor/ceiling/override/clamp/FORCE/fallback legs, transient-retry
 and its non-vacuity twin, both partial-debris shapes, pre-attempt and
 final-attempt cleanup, a real `timeout(1)` leg, the never-retried pin mismatch,
 the nothing-is-published-unverified legs, and the wiring including a `bash -n`
 of the assembled container script). Mutation-verified: removing the pre-attempt
 `rm -rf`, folding the pin check into the retry condition, publishing before
 verifying, dropping the final cleanup, and dropping the memory ceiling each
-fail the suite.
+fail the suite. The cgroup half is `tests/build-parallelism.test.sh`, which drives
+the shipped derivation against fixture hierarchies covering the ancestor-limited,
+nearly-exhausted and sibling-exhausted-parent shapes.
 
 ---
 

@@ -57,6 +57,13 @@ setup() {
   done
   : >"$GIT_STUB_DIR/log"
   write_git_stub
+  # An EMPTY cgroup hierarchy, because the derivation is now cgroup-aware
+  # (lib/shared/resource-lib.sh) and the machine running this suite may well BE
+  # in a constrained cgroup — CI containers always are. Without this the answers
+  # below would depend on the runner rather than on the fixture.
+  CG_NONE="$WORK/cgroup"
+  mkdir -p "$CG_NONE"
+  printf '0::/\n' >"$CG_NONE.proc"
 }
 
 teardown() {
@@ -191,13 +198,17 @@ write_meminfo() {
   printf '%s' "$path"
 }
 
-# Drive the real derive_kernel_build_jobs with a stubbed nproc and a fixture
-# meminfo, so the arithmetic under test is the shipped one.
+# Drive the real derive_kernel_build_jobs with a stubbed nproc, a fixture meminfo
+# and an EMPTY cgroup hierarchy, so the arithmetic under test is the shipped one
+# and the answer depends on the fixture rather than on the runner's own cgroup.
+# The cgroup-limited cases live in tests/build-parallelism.test.sh.
 run_jobs() {
   local cores="$1" mem_mib="$2" meminfo
   write_nproc_stub "$cores"
   meminfo="$(write_meminfo "$mem_mib")"
   run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
     bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
 }
 
@@ -247,6 +258,8 @@ container_script_body() {
   local meminfo
   meminfo="$(write_meminfo 65536)"
   run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
     CERALIVE_KERNEL_BUILD_JOBS=2 \
     bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
   [ "$status" -eq 0 ]
@@ -254,17 +267,54 @@ container_script_body() {
   [[ "$output" == *"override"* ]]
 }
 
-@test "build jobs: the override also wins UPWARD (memory alone would say 1)" {
-  # "Unconditionally" has to include the direction the heuristic dislikes, or
-  # an operator who has measured their own host cannot act on it.
+@test "build jobs: an override ABOVE the memory ceiling is clamped to it" {
+  # The override used to win unconditionally in both directions. It no longer
+  # wins upward by default, because the direction the heuristic dislikes is
+  # exactly the one that produces the dead build this preflight exists to
+  # prevent — a stale -j16 inherited from a roomier machine or from a CI
+  # variable set before the job was containerized. The capability is not
+  # removed, it is moved behind an explicit flag (next test).
   write_nproc_stub 8
   local meminfo
   meminfo="$(write_meminfo 512)"
   run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
     CERALIVE_KERNEL_BUILD_JOBS=16 \
     bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"1" ]]
+  [[ "$output" == *"CLAMPED"* ]]
+  [[ "$output" == *"CERALIVE_KERNEL_BUILD_JOBS_FORCE=1"* ]]
+}
+
+@test "build jobs: FORCE=1 restores the upward override (memory alone would say 1)" {
+  # An operator who has measured their own host still outranks the heuristic —
+  # they just have to say so, in a variable that names itself.
+  write_nproc_stub 8
+  local meminfo
+  meminfo="$(write_meminfo 512)"
+  run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
+    CERALIVE_KERNEL_BUILD_JOBS=16 CERALIVE_KERNEL_BUILD_JOBS_FORCE=1 \
+    bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
+  [ "$status" -eq 0 ]
   [[ "$output" == *"16" ]]
+  [[ "$output" == *"FORCED"* ]]
+}
+
+@test "build jobs: a non-0/1 FORCE value is refused rather than read as 'off'" {
+  write_nproc_stub 8
+  local meminfo
+  meminfo="$(write_meminfo 512)"
+  run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
+    CERALIVE_KERNEL_BUILD_JOBS=16 CERALIVE_KERNEL_BUILD_JOBS_FORCE=true \
+    bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CERALIVE_KERNEL_BUILD_JOBS_FORCE"* ]]
 }
 
 @test "build jobs: the floor is 1 — a memory-starved host builds serially, not with -j0" {
@@ -285,6 +335,8 @@ container_script_body() {
   # a name that claims to have prevented it.
   write_nproc_stub 8
   run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$WORK/absent" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
     bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
   [ "$status" -eq 0 ]
   [[ "$output" == *"8" ]]
@@ -296,6 +348,8 @@ container_script_body() {
   local meminfo
   meminfo="$(write_meminfo 65536)"
   run env PATH="$STUB_BIN:$PATH" CERALIVE_RESOURCE_MEMINFO_FILE="$meminfo" \
+    CERALIVE_RESOURCE_CGROUP_ROOT="$CG_NONE" \
+    CERALIVE_RESOURCE_CGROUP_PROC_FILE="$CG_NONE.proc" \
     CERALIVE_KERNEL_BUILD_JOBS=all \
     bash -c "source '$SCRIPT'; derive_kernel_build_jobs"
   [ "$status" -ne 0 ]
@@ -306,7 +360,12 @@ container_script_body() {
   run_jobs 8 6144
   [ "$status" -eq 0 ]
   [[ "$output" == *"MemAvailable"* ]]
-  [[ "$output" == *"floor 1, ceiling nproc"* ]]
+  [[ "$output" == *"floor 1, ceiling cpus"* ]]
+  # The basis is named, not just the number: "which constraint bound this" is
+  # the actionable half, and on an unconstrained host it must say so explicitly
+  # rather than leaving the reader to infer it from the absence of a cgroup line.
+  [[ "$output" == *"no cgroup v2 cpu.max limit"* ]]
+  [[ "$output" == *"no cgroup v2 memory.max limit"* ]]
 }
 
 # ===========================================================================

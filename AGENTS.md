@@ -1849,22 +1849,118 @@ occurrence of each of those `make` calls in the file.
   Knobs: `CERALIVE_KERNEL_GIT_{ATTEMPTS,TIMEOUT,BACKOFF}`. The helper is defined
   host-side and **injected** into the container script with `declare -f`, so the
   shipped loop is the same text the tests drive against a stubbed `git`.
-- **`make -j` is DERIVED from memory, not from `nproc`.** A kernel compile job
-  peaks around 1-2 GiB RSS, so `-j$(nproc)` on a core-rich, memory-thin host does
-  not build slowly — it gets OOM-killed deep inside `bindeb-pkg`, after every pin
-  has already verified. The width is `min(nproc, MemAvailable / 2 GiB)`, floor 1,
-  ceiling `nproc`, logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
-  **unconditionally, including upward**; `CERALIVE_RESOURCE_MEMINFO_FILE` (the
-  same knob `ci/check-builder-resources.sh` uses) redirects the meminfo read.
-  Both of these are **invisible to the PR gate** like everything else in `[2b/9]`
-  — it is `DRY_RUN=1` and never fetches or compiles. Guards:
-  `tests/kernel-build-resilience.bats` (30 tests, mutation-verified: removing
+- **`make -j` is DERIVED from memory, not from `nproc`, and BOTH inputs are
+  CGROUP-AWARE.** A kernel compile job peaks around 1-2 GiB RSS, so `-j$(nproc)`
+  on a core-rich, memory-thin host does not build slowly — it gets OOM-killed deep
+  inside `bindeb-pkg`, after every pin has already verified. The width is
+  `min(cpus, memory budget / 2 GiB)`, floor 1, ceiling `cpus`, logged on every run
+  with the constraint that bound it NAMED. Both inputs come from
+  `lib/shared/resource-lib.sh` — see the KEY FACT below for the cgroup walk and
+  the three ways to get it wrong. `CERALIVE_KERNEL_BUILD_JOBS` is now **CLAMPED to
+  the memory-derived ceiling** rather than obeyed unconditionally;
+  `CERALIVE_KERNEL_BUILD_JOBS_FORCE=1` is the explicit way to override upward, and
+  a `FORCE` value that is neither `0` nor `1` is REFUSED rather than read as
+  "off". `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
+  `ci/check-builder-resources.sh` uses) redirects the meminfo read. All of these
+  are **invisible to the PR gate** like everything else in `[2b/9]` — it is
+  `DRY_RUN=1` and never fetches or compiles. Guards:
+  `tests/kernel-build-resilience.bats` (32 tests, mutation-verified: removing
   the pre-attempt `rm -rf`, folding the pin check into the retry condition,
   publishing before verifying, dropping the final-attempt cleanup, and dropping
-  the memory ceiling each fail the suite). Write-up:
+  the memory ceiling each fail the suite) plus
+  `tests/build-parallelism.test.sh` for the cgroup half. Write-up:
   [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §3b.
 
-Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
+Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (32 tests).
+
+**Every parallelism knob is CGROUP-AWARE, and reading only the LEAF cgroup is the
+way to get that wrong** [EXISTS]
+
+`nproc` and `MemAvailable` describe the MACHINE. Every build this pipeline runs in
+CI executes inside a cgroup that constrains it to a fraction of that machine, and
+neither reader can see the constraint: `make -j$(nproc)` inside a 4-CPU container
+on a 32-core host spawns 32 compilers that timeshare 4 CPUs, and — worse — a
+memory-thin cgroup answers a generous `MemAvailable` (which reports the HOST's
+reclaimable memory) right up to the moment its own limit is hit, at which point the
+kernel OOM-kills the compile rather than reclaiming. That is the same "dead build,
+half an hour in, after every pin has already verified" failure the memory ceiling
+above exists for, arriving through a door it could not see.
+
+`lib/shared/resource-lib.sh` is the ONE reader. It is standalone (sets no shell
+options, sources nothing) like `log-lib.sh` and `target-release-lib.sh`, and three
+consumers read it: `lib/kernel/builder.sh` (the `make -j` width),
+`lib/build-all.sh` (the multi-board cap) and `lib/fetch-debs.sh` (`FETCH_JOBS`).
+
+Four rules, each of which is a way to get this wrong that still passes a
+one-level test:
+
+- **WALK EVERY ANCESTOR, LEAF TO ROOT.** A cgroup v2 limit is inherited, so the
+  effective limit is the MINIMUM over the whole chain. A leaf whose own `cpu.max`
+  reads `max` is NOT unlimited when a parent slice caps it — reading the leaf and
+  stopping reports the machine's cores and reintroduces the defect under a name
+  that claims to have fixed it.
+- **CPU is a minimum of quotas.** `cpu.max` is `<quota> <period>` in µs; the
+  ceiling in whole CPUs is **ceil**(quota/period), and truncating silently
+  under-builds every fractional-quota cgroup.
+- **Memory headroom is computed PER ANCESTOR and only THEN minimised** — never by
+  picking the smallest absolute `memory.max` first. What a build can allocate at
+  level *i* is `memory.max_i − memory.current_i`, and a **higher**-limit parent
+  that SIBLING processes have nearly exhausted has LESS room left than a
+  lower-limit leaf that is empty. The committed fixture is exactly this shape
+  (leaf 16 GiB/0 used, parent 64 GiB/58 used): the correct answer is 2 jobs and
+  the smallest-limit-first version answers 7.
+- **Every step saturates.** `memory.current` can legitimately exceed `memory.max`
+  (the limit is enforced by reclaim/OOM, not by refusing the accounting), so an
+  unguarded subtraction underflows to a gigantic value in precisely the state that
+  must answer "one job".
+
+Two further properties are load-bearing and easy to remove by accident:
+
+- **The result channel is the `RESOURCE_*` GLOBALS, not stdout.** A derivation has
+  to report the number AND which constraint produced it, and `x="$(fn)"` runs `fn`
+  in a subshell that discards every explanatory variable it set. Do not "clean
+  this up" back into command substitution — the log line then loses the basis and
+  the operator is back to an unexplained `-j`.
+- **A namespaced container mount is the normal case, not an edge case.** Inside a
+  container `/proc/self/cgroup` still reports the HOST-relative path while the
+  mount exposes the leaf AT the mount root, so `<root><rel>` does not exist. That
+  means "the mount IS the leaf", not "there is no cgroup"; falling through to the
+  root is what keeps the walk working in the containerized build, which is the
+  case that matters most. A v1-only host (no `0::` line) correctly reads as "no v2
+  hierarchy" rather than being guessed at from a v1 controller path.
+
+**Absence is unlimited, and that is the fail-safe direction.** No cgroup v2
+hierarchy, a v1-only host and an unconstrained cgroup all resolve to "no limit
+found", so the answer collapses to exactly the pre-cgroup one and an unconfigured
+host sees **no behaviour change at all** — pinned by its own test legs. Every read
+is fixture-overridable: `CERALIVE_RESOURCE_MEMINFO_FILE`,
+`CERALIVE_RESOURCE_CGROUP_ROOT`, `CERALIVE_RESOURCE_CGROUP_PROC_FILE`, and
+`CERALIVE_RESOURCE_MEM_SAFETY_MARGIN_KIB` (default 256 MiB).
+
+**The safety margin applies to the CGROUP headroom only, never to
+`MemAvailable`.** `MemAvailable` is already a conservative kernel ESTIMATE of what
+can be handed out without swapping; `memory.max − memory.current` is a HARD WALL
+whose far side is an OOM kill, and the build is never the only thing in its cgroup.
+Applying the margin to both would change the answer on an unconstrained host, which
+this library must not do.
+
+**The two other consumers keep their existing defaults.** `lib/build-all.sh`'s cap
+is still `min(nproc, 4)` when nothing is set — deliberately NOT cgroup-adaptive,
+because the cap of 4 already bounds a many-core host far below anything a cgroup
+would, and a zero-configuration `build --all` must produce the number it always
+did. `CERALIVE_BUILD_BOARD_JOBS` is the explicit raise knob: validated FATALLY (a
+typo that quietly resolved to 4 would be indistinguishable from it working) and
+clamped to what memory can feed at 4 GiB per concurrent board. The pre-existing
+`JOBS` knob keeps absolute precedence and its exact prior semantics.
+`FETCH_JOBS` moved from a flat `4` to `min(cpus, 8)` — a verified fetch is IO-bound
+and wants more width than a compile, but an unbounded fan-out just gets
+rate-limited. This is the ONE default that changes on an unconfigured host.
+
+Guard: `tests/build-parallelism.test.sh` (53 assertions, `default-shell`) — the
+chain walk and its namespaced/v1 fallbacks, the three required fixtures above, the
+unconstrained-host no-change legs, the clamp and its `FORCE` escape, and the board
+and fetch knobs, each driven against the REAL shipped entry point rather than a
+transcription of it.
 
 **The `edge` config is ROCKCHIP-ONLY, and two closure manifests keep it that
 way** [EXISTS]

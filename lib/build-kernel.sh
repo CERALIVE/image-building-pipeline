@@ -94,6 +94,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 # shellcheck source=lib/paths.sh
 source "${HERE}/paths.sh"
+# shellcheck source=lib/shared/resource-lib.sh
+source "${HERE}/shared/resource-lib.sh"
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 KERNEL_BUILDER_DOCKERFILE="${PIPELINE_DIR}/ci/Dockerfile.kernel"

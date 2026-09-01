@@ -24,43 +24,85 @@ KERNEL_BUILD_MEM_PER_JOB_KIB=$((2 * 1024 * 1024))
 # `make -j$(nproc)` on a core-rich but memory-thin host gets OOM-killed deep
 # inside bindeb-pkg, after the clone, the patch series and the config gate have
 # all already passed — so the build burns half an hour to report a link error or
-# a bare "Killed". min(nproc, MemAvailable / 2 GiB) is the cheap guard, floored
-# at 1 (a serial build beats no build) and ceilinged at nproc (spare memory buys
-# no extra cores).
+# a bare "Killed". min(cpus, memory budget / 2 GiB) is the cheap guard, floored
+# at 1 (a serial build beats no build) and ceilinged at the CPU count (spare
+# memory buys no extra cores).
 #
-# CERALIVE_KERNEL_BUILD_JOBS wins UNCONDITIONALLY: an operator who has measured
-# their own host outranks a heuristic, including upward.
+# BOTH INPUTS ARE CGROUP-AWARE (lib/shared/resource-lib.sh). `nproc` and
+# `MemAvailable` describe the MACHINE, and this stage runs inside a container in
+# CI: a 4-CPU cgroup on a 32-core host answered 32, and a memory-thin cgroup
+# answered the HOST's generous MemAvailable right up to the OOM kill. The
+# derivation therefore walks the whole cgroup v2 chain, leaf to root, and takes
+# the minimum. An unconstrained host finds no limits and collapses to exactly the
+# pre-cgroup answer, so nothing changes there.
+#
+# CERALIVE_KERNEL_BUILD_JOBS is CLAMPED to the memory-derived ceiling rather than
+# obeyed unconditionally. An operator who has measured their own host still
+# outranks the heuristic — but a stale override inherited from a roomier machine
+# (or from a CI variable set before the job was containerized) is the same dead
+# build the ceiling exists to prevent, and it fails in a way that reads as a
+# kernel problem. CERALIVE_KERNEL_BUILD_JOBS_FORCE=1 is the explicit,
+# self-documenting way to say "yes, I mean it, including upward".
 # ---------------------------------------------------------------------------
 derive_kernel_build_jobs() {
   local meminfo="${CERALIVE_RESOURCE_MEMINFO_FILE:-/proc/meminfo}"
-  local cpus mem_kib mem_jobs jobs
+  local cpus mem_kib mem_jobs jobs override force ceiling per_job_mib
 
-  if [[ -n "${CERALIVE_KERNEL_BUILD_JOBS:-}" ]]; then
-    [[ "${CERALIVE_KERNEL_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]] \
-      || die "CERALIVE_KERNEL_BUILD_JOBS must be a positive integer (got '${CERALIVE_KERNEL_BUILD_JOBS}')"
-    log_info "build jobs: ${CERALIVE_KERNEL_BUILD_JOBS} (CERALIVE_KERNEL_BUILD_JOBS override — memory ceiling not applied)"
-    printf '%s' "${CERALIVE_KERNEL_BUILD_JOBS}"
+  per_job_mib=$((KERNEL_BUILD_MEM_PER_JOB_KIB / 1024))
+  override="${CERALIVE_KERNEL_BUILD_JOBS:-}"
+  force="${CERALIVE_KERNEL_BUILD_JOBS_FORCE:-0}"
+
+  if [[ -n "${override}" ]]; then
+    [[ "${override}" =~ ^[1-9][0-9]*$ ]] \
+      || die "CERALIVE_KERNEL_BUILD_JOBS must be a positive integer (got '${override}')"
+  fi
+  # Refused rather than guessed at: `FORCE=true` silently reading as "off" is an
+  # operator who believes the clamp is disabled while it is armed.
+  [[ "${force}" =~ ^[01]$ ]] \
+    || die "CERALIVE_KERNEL_BUILD_JOBS_FORCE must be 0 or 1 (got '${force}')"
+
+  if [[ -n "${override}" && "${force}" == "1" ]]; then
+    log_warn "build jobs: ${override} (CERALIVE_KERNEL_BUILD_JOBS override, FORCED by CERALIVE_KERNEL_BUILD_JOBS_FORCE=1 — memory ceiling NOT applied)"
+    printf '%s' "${override}"
     return 0
   fi
 
-  cpus="$(nproc 2>/dev/null || echo 4)"
-  [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
+  resource_effective_cpus
+  cpus="${RESOURCE_EFFECTIVE_CPUS}"
 
-  mem_kib="$(awk '$1 == "MemAvailable:" { print $2; found = 1 } END { if (!found) exit 1 }' \
-    "${meminfo}" 2>/dev/null)" || mem_kib=""
-  if [[ ! "${mem_kib}" =~ ^[0-9]+$ ]]; then
+  if ! resource_mem_budget_kib; then
     # Inventing a memory figure here would silently reintroduce the OOM default
     # under a name that claims to have prevented it, so say what happened.
-    log_warn "build jobs: ${cpus} — no readable MemAvailable in ${meminfo}, falling back to nproc with NO memory ceiling"
+    if [[ -n "${override}" ]]; then
+      log_warn "build jobs: ${override} (CERALIVE_KERNEL_BUILD_JOBS override — neither MemAvailable in ${meminfo} nor a cgroup v2 memory.max is readable, so NO memory ceiling could be applied)"
+      printf '%s' "${override}"
+      return 0
+    fi
+    log_warn "build jobs: ${cpus} — no readable MemAvailable in ${meminfo} and no cgroup v2 memory.max, falling back to ${RESOURCE_CPU_BASIS} with NO memory ceiling"
     printf '%s' "${cpus}"
     return 0
   fi
 
-  mem_jobs=$(( mem_kib / KERNEL_BUILD_MEM_PER_JOB_KIB ))
+  mem_kib="${RESOURCE_MEM_BUDGET_KIB}"
+  mem_jobs="$(resource_jobs_for_mem "${mem_kib}" "${KERNEL_BUILD_MEM_PER_JOB_KIB}")"
+
+  if [[ -n "${override}" ]]; then
+    ceiling="${mem_jobs}"
+    (( ceiling >= 1 )) || ceiling=1
+    if (( override > ceiling )); then
+      log_warn "build jobs: ${ceiling} — CERALIVE_KERNEL_BUILD_JOBS=${override} CLAMPED to the memory-derived ceiling (${mem_kib} kB / ${per_job_mib} MiB per job; ${RESOURCE_MEM_BASIS}); set CERALIVE_KERNEL_BUILD_JOBS_FORCE=1 to override the clamp"
+      printf '%s' "${ceiling}"
+      return 0
+    fi
+    log_info "build jobs: ${override} (CERALIVE_KERNEL_BUILD_JOBS override, within the memory-derived ceiling of ${ceiling})"
+    printf '%s' "${override}"
+    return 0
+  fi
+
   jobs=$(( mem_jobs < cpus ? mem_jobs : cpus ))
   (( jobs >= 1 )) || jobs=1
 
-  log_info "build jobs: ${jobs} = min(nproc=${cpus}, MemAvailable ${mem_kib} kB / $((KERNEL_BUILD_MEM_PER_JOB_KIB / 1024)) MiB per job = ${mem_jobs}) — floor 1, ceiling nproc"
+  log_info "build jobs: ${jobs} = min(nproc=${RESOURCE_NPROC} -> cpus ${cpus}, MemAvailable ${RESOURCE_MEM_AVAILABLE_KIB:-unreadable} kB -> budget ${mem_kib} kB / ${per_job_mib} MiB per job = ${mem_jobs}) — floor 1, ceiling cpus; cpu: ${RESOURCE_CPU_BASIS}; mem: ${RESOURCE_MEM_BASIS}"
   printf '%s' "${jobs}"
 }
 

@@ -577,6 +577,45 @@ output is byte-identical. Every cache failure is non-fatal — an unwritable
 directory or a lost lock degrades to an ordinary download. Contract:
 `tests/debcache.test.sh`.
 
+## Build Parallelism — cgroup-aware, and configurable
+
+`nproc` and `MemAvailable` describe the **machine**. Every build this pipeline runs
+in CI executes inside a cgroup that gives it a fraction of that machine, and
+neither reader can see the constraint: `make -j$(nproc)` in a 4-CPU container on a
+32-core host spawns 32 compilers that timeshare 4 CPUs, and a memory-thin cgroup
+reports the host's generous `MemAvailable` right up to the moment its own limit is
+hit — at which point the kernel OOM-kills the compile instead of reclaiming.
+
+`lib/shared/resource-lib.sh` is the one reader. It walks the process's cgroup v2
+chain **leaf to root**, because a v2 limit is inherited and the effective one is
+the minimum over the whole chain — a leaf whose own `cpu.max` reads `max` is not
+unlimited when a parent slice caps it. CPU is `ceil(quota/period)` minimised across
+ancestors. Memory headroom is computed **per ancestor** as
+`memory.max − memory.current` and only then minimised, never by picking the
+smallest absolute limit first: a higher-limit parent that sibling processes have
+nearly exhausted has less room left than an empty lower-limit leaf. Every step
+saturates, because `memory.current` can legitimately exceed `memory.max`.
+
+A host with no cgroup limits (or a v1-only host) finds nothing, and the answer
+collapses to exactly the pre-cgroup one — **an unconfigured host sees no change**,
+apart from the `FETCH_JOBS` default below.
+
+| Knob | Default | Behaviour |
+|---|---|---|
+| `CERALIVE_KERNEL_BUILD_JOBS` | derived | the `make -j` width. **Clamped** to the memory-derived ceiling; a stale `-j16` inherited from a roomier machine is the exact dead build the ceiling exists to prevent |
+| `CERALIVE_KERNEL_BUILD_JOBS_FORCE` | `0` | `1` restores the unconditional override, including upward. Any other value is refused rather than read as "off" |
+| `JOBS` | `min(nproc, 4)` | the multi-board runner's cap. Unchanged, and keeps absolute precedence |
+| `CERALIVE_BUILD_BOARD_JOBS` | unset | the explicit raise knob for that cap. A positive integer (fatal otherwise), clamped to what memory feeds at 4 GiB per concurrent board |
+| `FETCH_JOBS` | `min(cpus, 8)` | fetch concurrency, **was a flat 4**. A verified fetch is IO-bound and wants more width than a compile; the cap of 8 is where the archive starts rate-limiting |
+| `CERALIVE_RESOURCE_MEMINFO_FILE` | `/proc/meminfo` | fixture hook |
+| `CERALIVE_RESOURCE_CGROUP_ROOT` | `/sys/fs/cgroup` | fixture hook |
+| `CERALIVE_RESOURCE_CGROUP_PROC_FILE` | `/proc/self/cgroup` | fixture hook |
+| `CERALIVE_RESOURCE_MEM_SAFETY_MARGIN_KIB` | 256 MiB | subtracted from the **cgroup** headroom only — `MemAvailable` is already a conservative estimate, while `memory.max − memory.current` is a hard wall |
+
+Every derivation logs the number **and the constraint that produced it**, so an
+operator never has to reverse-engineer an unexplained `-j`. Contract:
+`tests/build-parallelism.test.sh`.
+
 ## Kernel Freeze — the boot stack updates via RAUC only
 
 The kernel, device tree, board U-Boot and firmware packages change **only** when a
@@ -1032,10 +1071,13 @@ on the spot, because a moved tag or a squash-merge-orphaned SHA is permanent and
 re-fetching it three times only misreports it as a network fault. Nothing is
 published at the path the build reads until it has verified.
 
-`make -j` is derived as `min(nproc, MemAvailable / 2 GiB)` rather than plain
+`make -j` is derived as `min(cpus, memory budget / 2 GiB)` rather than plain
 `nproc`, because a kernel compile job peaks around 1-2 GiB and a core-rich,
 memory-thin builder gets OOM-killed deep inside `bindeb-pkg` after every pin has
-already passed. `CERALIVE_KERNEL_BUILD_JOBS` overrides it unconditionally.
+already passed. Both inputs are **cgroup-aware** (see "Build Parallelism" below),
+so a containerized build plans against the CPUs and memory it actually has.
+`CERALIVE_KERNEL_BUILD_JOBS` still overrides it, but is clamped to the
+memory-derived ceiling unless `CERALIVE_KERNEL_BUILD_JOBS_FORCE=1` says otherwise.
 
 Selecting the variant suppresses the remote fetch of the kernel/DTB packages
 (U-Boot and firmware stay prebuilt-fetched), replaces their names with the built

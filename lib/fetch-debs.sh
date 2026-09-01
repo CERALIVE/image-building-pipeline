@@ -64,6 +64,8 @@ source "${HERE}/shared/yaml-lib.sh"
 source "${HERE}/shared/deb-lib.sh"
 # shellcheck source=lib/shared/versions-lib.sh
 source "${HERE}/shared/versions-lib.sh"
+# shellcheck source=lib/shared/resource-lib.sh
+source "${HERE}/shared/resource-lib.sh"
 # shellcheck source=lib/fetch-debs-auth.sh
 source "${HERE}/fetch-debs-auth.sh"
 
@@ -130,9 +132,24 @@ APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
   || log_warn "APT_CERALIVE_URL is not https:// (${APT_CERALIVE_URL}) — proceeding; transport is unverified (intended only for local/dev overrides)"
 
 # FETCH_JOBS — bounded fetch concurrency. FETCH_JOBS=1 is the strict serial
-# baseline; sanitised to a positive integer, default 4.
-FETCH_JOBS="${FETCH_JOBS:-4}"
-[[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS=4
+# baseline; sanitised to a positive integer, and the env override still wins.
+#
+# The default was a flat 4. It is now min(cpus, 8): a verified fetch is IO-bound
+# and spends most of its wall time waiting on the archive, so it wants more width
+# than a compile does — but an unbounded fan-out just gets rate-limited, hence the
+# hard cap of 8. `cpus` is the CGROUP-AWARE count (lib/shared/resource-lib.sh), so
+# a container pinned to 2 CPUs no longer opens 8 concurrent verified downloads it
+# cannot service; on an unconstrained host it is plain nproc.
+default_fetch_jobs() {
+  local cpus
+  resource_effective_cpus
+  cpus="${RESOURCE_EFFECTIVE_CPUS}"
+  [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=1
+  (( cpus > 8 )) && cpus=8
+  printf '%s' "${cpus}"
+}
+FETCH_JOBS="${FETCH_JOBS:-$(default_fetch_jobs)}"
+[[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS="$(default_fetch_jobs)"
 
 # The release registry is repo-local so standalone image builds do not depend on
 # the surrounding development workspace.
