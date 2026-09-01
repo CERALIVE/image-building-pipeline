@@ -38,12 +38,16 @@ cerastream:
   # final two-board todo-16 qualification PASS.
   # v2026.8.7 is the provenance-correct replacement for v2026.8.6: release builds
   # now bind the protected tag, package bytes and embedded version to one main SHA.
-  pin: v2026.8.7
-  # Release provenance: tag v2026.8.7 resolves to commit ecce19245852244a6c6a6d71bcbb06009fc76c54.
-  # Device deb: cerastream 2026.8.7 (amd64 + arm64); both binaries stamp 2026.8.7+ecce192.
+  # v2026.9.0 is the first release whose RK3588 HAL profile targets the encoder's
+  # actual `bitrate` GObject property, matching gstreamer1.0-rockchip-ceralive
+  # rather than the legacy Radxa gstreamer1.0-rockchip1 `bps` spelling and closing
+  # the latent silent-bitrate-break risk during the fork-package swap.
+  pin: v2026.9.0
+  # Release provenance: tag v2026.9.0 resolves to commit c0a397f05eefbc46534004ad1289c5439fb8d1d6.
+  # Device deb: cerastream 2026.9.0 (amd64 + arm64); both binaries stamp 2026.9.0+c0a397f.
   # Published assets:
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.8.7/cerastream_2026.8.7_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.8.7/cerastream_2026.8.7_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.0/cerastream_2026.9.0_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.0/cerastream_2026.9.0_amd64.deb
   channel: stable
 
 CeraUI:
