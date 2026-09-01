@@ -160,30 +160,29 @@ There is no `ceralive-2`, random-number, or random-suffix fallback. Avahi is the
 claim authority, so devices powered on together are resolved by the same mDNS
 probing that controls the name actually published on the LAN.
 
-The service accepts a candidate only after Avahi repeatedly reports its exact
-name in the running state. It then writes the same identity to the runtime system
-hostname, `/etc/hostname`, `/etc/hosts`, and the persistent index on `/data`.
-Only the selected index is persistent identity state; the local allocation lock
-stays under `/run` and is recreated on each boot.
-Those values are reconciled on every restart before CeraUI, TLS certificate
-creation, or hawkBit enrollment can start. A separate check starts 30 seconds
-after boot and repeats every 30 seconds, so devices that first boot on isolated
-networks also converge after those networks are joined. An aligned publication
-or Avahi's transient `REGISTERING` state is a no-op. An explicit conflict or
-different published name reruns the same deterministic claim sequence; consumers
-restart only after every identity surface commits the replacement name.
+If no publishable LAN address exists yet, the service first commits `ceralive`
+(or the already-selected deterministic index) as a **provisional local identity**
+to the runtime hostname, `/etc/hostname`, `/etc/hosts`, and `/data`, then exits
+successfully. It does not ask Avahi to claim a name across a collision domain that
+does not exist. This lets CeraUI and the rest of the appliance start normally on
+an offline board.
+
+Once a publishable address exists, the service accepts a final claim only after
+Avahi repeatedly reports that exact name in the running state. The 30-second
+reconciliation timer reuses the provisional index rather than allocating a new
+one. If another live device already owns it, the ordinary deterministic sequence
+advances to `ceralive2`, `ceralive3`, and so on; consumers restart only after every
+identity surface commits the replacement name. Only the selected index is
+persistent identity state; the local allocation lock stays under `/run`.
 
 A claim attempt waits for at most 120 seconds, with each Avahi command bounded to
-3 seconds; systemd caps the full attempt at 150 seconds. Unavailable or malformed
-Avahi responses fail closed, and systemd retries after 5 seconds instead of
-guessing a name. The local allocation lock is bounded to 10 seconds. A device
-without a publishable network address therefore waits rather than persisting an
-identity that Avahi has not established. The private setup-hotspot address is
-deliberately excluded because separate devices cannot arbitrate ownership across
-their isolated APs; Ethernet IPv4 link-local is still accepted as a real shared
-collision domain. After a retry succeeds, systemd requeues CeraUI, TLS/nginx,
-hawkBit enrollment, and the boot healthcheck without blocking the hostname
-service's completion.
+3 seconds; systemd caps the full attempt at 150 seconds. Once a shared collision
+domain exists, unavailable or malformed Avahi responses fail closed rather than
+guessing ownership. The local allocation lock is bounded to 10 seconds. The
+private setup-hotspot address is deliberately excluded because separate devices
+cannot arbitrate ownership across isolated APs; Ethernet IPv4 link-local is still
+accepted as a real shared collision domain. After reconciliation succeeds,
+systemd requeues CeraUI, TLS/nginx, hawkBit enrollment, and the boot healthcheck.
 
 The periodic check detects a conflict within 30 seconds after Avahi exposes it.
 Any resulting re-claim uses the same 120-second global budget and 3-second call

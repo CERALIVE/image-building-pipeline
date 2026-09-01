@@ -7,9 +7,7 @@
 # headless (serial console only), and asserts the OS actually comes up:
 #
 #   1. systemd reaches multi-user.target          (parsed from the serial boot log)
-#   2. `systemctl is-system-running` ∈ {running, degraded}
-#         (degraded is accepted — a device image with no streaming config/HW will
-#          have some inactive optional units; that is NOT a boot failure)
+#   2. `systemctl is-system-running` = running
 #   3. ceralive.service is `active` OR at least `loaded`
 #         (it legitimately may not auto-start without on-box config / capture HW —
 #          loaded-but-inactive is a PASS-with-note, not a hard fail; see task brief)
@@ -34,10 +32,11 @@
 #     image, so a missing-qemu/missing-image runner must not be a hard failure.
 #
 #   SELFTEST mode (CERALIVE_QEMU_SELFTEST=1 or `--selftest`) — qemu NOT required.
-#     Exercises the assertion ENGINE against two synthetic serial transcripts:
+#     Exercises the assertion ENGINE against three synthetic serial transcripts:
 #       * a HEALTHY transcript  → the engine MUST pass (exit 0)
 #       * a BROKEN transcript   (a critical package reported absent) → the engine
 #         MUST FAIL (non-zero)
+#       * a DEGRADED transcript → the engine MUST FAIL even with all packages present
 #     This is the harness's own negative test: it proves the gate actually trips
 #     when the image is bad, and it runs everywhere (no qemu, no image, no root) —
 #     which is how the committed task-36 evidence is produced.
@@ -354,11 +353,11 @@ assert_transcript() {
     return
   fi
 
-  # --- systemctl is-system-running ∈ {running, degraded} -----------------------
+  # --- systemctl is-system-running must be exactly running ---------------------
   local sysrun; sysrun="$(tget "${transcript}" 'SYS_RUNNING')"
   case "${sysrun}" in
     running)  pass "systemctl is-system-running = running" ;;
-    degraded) pass "systemctl is-system-running = degraded (accepted — optional units inactive without config/HW)" ;;
+    degraded) fail "systemctl is-system-running = degraded (failed units are release-blocking)" ;;
     starting|maintenance|stopping)
       fail "systemctl is-system-running = ${sysrun} (system not settled / in maintenance)" ;;
     "") fail "systemctl is-system-running produced no output (probe failed)" ;;
@@ -409,17 +408,18 @@ assert_transcript() {
 # SELFTEST — the harness's own NEGATIVE test (no qemu/image/root required).
 # ===========================================================================
 
-# synth_transcript <healthy|broken> — emit a synthetic serial transcript. The
-# broken variant reports a critical package ABSENT so the engine MUST trip.
+# synth_transcript <healthy|broken|degraded> — emit a synthetic serial transcript.
 synth_transcript() {
   local kind="$1"
+  local sysrun="running"
+  [[ "${kind}" != "degraded" ]] || sysrun="degraded"
   cat <<EOF
 [    1.234567] systemd[1]: Detected architecture x86-64.
 [    9.876543] systemd[1]: Reached target multi-user.target.
 Debian GNU/Linux 12 ceralive ttyS0
 ceralive login: root
 ${MARK_BEGIN}
-SYS_RUNNING=degraded
+SYS_RUNNING=${sysrun}
 SYS_FAILED=0
 ACTIVE:ceralive.service=inactive
 LOAD:ceralive.service=loaded
@@ -459,9 +459,10 @@ run_engine_on() {
 run_selftest() {
   log_info "=== SELFTEST: validating the assertion engine (no qemu/image) ==="
   local d; d="$(mktemp -d)"; CLEANUP_DIRS+=("${d}")
-  local healthy="${d}/healthy.log" broken="${d}/broken.log"
+  local healthy="${d}/healthy.log" broken="${d}/broken.log" degraded="${d}/degraded.log"
   synth_transcript healthy >"${healthy}"
   synth_transcript broken  >"${broken}"
+  synth_transcript degraded >"${degraded}"
 
   log_info "--- positive case: HEALTHY transcript MUST pass ---"
   if run_engine_on "${healthy}"; then
@@ -475,6 +476,13 @@ run_selftest() {
     fail "engine PASSED a broken transcript (false positive — gate does NOT trip on a missing package!)"
   else
     pass "engine correctly FAILS when a critical package/binary is absent"
+  fi
+
+  log_info "--- negative case: DEGRADED transcript MUST fail ---"
+  if run_engine_on "${degraded}"; then
+    fail "engine PASSED a degraded transcript (false positive — failed units remain hidden)"
+  else
+    pass "engine correctly FAILS when system state is degraded"
   fi
 }
 

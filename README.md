@@ -887,6 +887,30 @@ that actually carries the uplink on a bonding sender device, so it is now part
 of the guard alongside the encoder and receiver. Proof: `run-tests`
 section 16.
 
+## Offline-First Boot Readiness
+
+The image treats “no uplink yet” as a normal appliance state, not a failed boot.
+`NetworkManager-wait-online.service` is permanently masked alongside the
+systemd-networkd stack, `systemd-machine-id-commit.service`, standalone
+`dnsmasq.service`, and `chrony-wait.service` — seven masks total. A mask is
+required because both NetworkManager and networkd expose `Also=` resurrection
+paths that first-boot presets can re-enable after an ordinary disable.
+
+First-party units order after `NetworkManager.service`, never
+`network-online.target`. With no publishable LAN address the hostname allocator
+persists a provisional deterministic identity and exits successfully; its timer
+claims the same candidate when a link appears. An unreachable hawkBit enrollment
+endpoint likewise returns success, leaves a mode-0600 pending marker, and retries
+every 30 seconds without putting the system into `degraded`.
+
+The x86 QEMU acceptance engine requires `systemctl is-system-running` to equal
+`running`; a synthetic `degraded` transcript must fail. Follow-up unit ordering in
+the sibling repos is recorded, not edited here: cerastream expects
+`After=NetworkManager.service srtla-send.service` and
+`Wants=NetworkManager.service`; CeraUI's add-on reconciler expects
+`After=ceralive.service NetworkManager.service` and
+`Wants=NetworkManager.service`.
+
 ## Journal Retention and the Persistent machine-id
 
 A shipped Rock 5B+ was measured with **one boot in the journal, six lines of

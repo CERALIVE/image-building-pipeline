@@ -10,10 +10,7 @@
 #   * configure_services       the enable/disable pass, and the single call site
 #                              that drives the hardware and SSH policy modules
 #   * suppress_unusable_boot_units
-#                              the six stock units this image can never satisfy
-#   * configure_networkmanager_wait_online
-#                              gate network-online on one usable connection, not
-#                              every optional modem finishing startup
+#                              the seven stock units this image cannot use
 #   * configure_ntp, install_console_font_service, setup_boot_healthcheck,
 #     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
 #
@@ -167,7 +164,6 @@ configure_services() {
   # RAUC A/B replaces /etc wholesale, so a runtime-only enable silently self-reverts on every OTA; the CeraUI boot reconciler (separate BT foundation todo) covers already-flashed images.
   disable_service cups.service
   suppress_unusable_boot_units
-  configure_networkmanager_wait_online
   setup_typec_policy
   setup_fan_curve
   setup_fan_kickstart
@@ -279,7 +275,7 @@ setup_pipewire_system_mode() {
   enable_service wireplumber.service
 }
 
-# Six stock Debian/systemd units that this image either can NEVER satisfy or must
+# Seven stock Debian/systemd units that this image either can NEVER satisfy or must
 # not be gated on. Together they cost a shipped Rock 5B+ ~2 minutes of every boot
 # and left two units permanently `failed`, so `systemctl is-system-running` read
 # `degraded` forever — which hides genuinely new failures from an operator.
@@ -308,9 +304,15 @@ setup_pipewire_system_mode() {
 # install_interface_naming writes are consumed by udev's BUILT-IN `net_setup_link`,
 # which lives in systemd-udevd and is a completely separate mechanism from whether
 # the networkd DAEMON runs. eth0/wlan0 renaming — and therefore SRTLA's `eth*`/`wlan*`
-# bonding globs — are unaffected. Do NOT widen this to NetworkManager or systemd-udevd.
+# bonding globs — are unaffected. Do NOT widen this to NetworkManager.service or systemd-udevd.
 #
-# 4. systemd-machine-id-commit.service exists solely to persist a machine-id that an
+# 4. NetworkManager-wait-online.service is also structurally unusable for a device
+# that is expected to boot without an uplink and establish connectivity later. Its
+# packaged NetworkManager.service parent carries
+# `Also=NetworkManager-wait-online.service`, so masking the waiter itself is what
+# prevents a later enable or first-boot preset from resurrecting the 60-second gate.
+#
+# 5. systemd-machine-id-commit.service exists solely to persist a machine-id that an
 # initrd generated on a TMPFS. This image never does that. It used to be worse than
 # inert: `ceralive-migrate-data` bind-mounted /data/ceralive/machine-id onto
 # /etc/machine-id, which SATISFIED the unit's `ConditionPathIsMountPoint=`, so it ran
@@ -321,7 +323,7 @@ setup_pipewire_system_mode() {
 # STAYS: it costs nothing, and it is what keeps this true if a future mechanism ever
 # reintroduces a mount at that path.
 #
-# 5. dnsmasq.service is the STANDALONE Debian unit, enabled by package preset and
+# 6. dnsmasq.service is the STANDALONE Debian unit, enabled by package preset and
 # never wired up by this repo. It always fails `failed to create listening socket for
 # port 53: Address already in use`, because systemd-resolved owns port 53 by design
 # (the /etc/resolv.conf stub-symlink architecture). This is NOT NetworkManager's
@@ -329,7 +331,7 @@ setup_pipewire_system_mode() {
 # AP mode, reading /etc/NetworkManager/dnsmasq-shared.d — it never starts this unit,
 # and the `dnsmasq` package stays installed so that child still has its binary.
 #
-# 6. chrony-wait.service blocks multi-user.target for ~21s running
+# 7. chrony-wait.service blocks multi-user.target for ~21s running
 # `chronyc waitsync 0 0.1 0.0 1` — it waits for NTP to converge to within 0.1s. It is
 # the second-largest single unit in `systemd-analyze blame` and becomes the tallest
 # remaining pole once the networkd stall above is gone. Nothing on this device orders
@@ -342,44 +344,19 @@ setup_pipewire_system_mode() {
 # existed. chronyd itself is untouched and still steps the clock (`makestep 1 3`);
 # only the boot-readiness GATE goes away. Never mask chrony.service.
 suppress_unusable_boot_units() {
-  log "masking the stock units this image can never satisfy (networkd stack, machine-id commit, standalone dnsmasq) plus chrony-wait (clock sync must not gate boot readiness)"
+  log "masking structural wait-online gates and stock units this image cannot use (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait)"
   local svc
   for svc in \
     systemd-networkd.service \
     systemd-networkd.socket \
     systemd-networkd-wait-online.service \
+    NetworkManager-wait-online.service \
     systemd-machine-id-commit.service \
     dnsmasq.service \
     chrony-wait.service
   do
     mask_service "${svc}"
   done
-}
-
-# NetworkManager's stock wait-online unit runs `nm-online -s`: it waits for the
-# daemon's GLOBAL startup phase to finish, which means every autoconnect profile
-# must reach a conclusive activated or deactivated state. That criterion is wrong
-# for this multi-uplink appliance. An optional cellular profile can legitimately
-# remain in `prepare` forever while its modem searches for a home network; on a
-# real Rock 5B+ that left NetworkManager.Startup=true despite Ethernet already
-# providing CONNECTED_GLOBAL/full connectivity, so the unit hit its exact 60 s
-# timeout and left every boot degraded.
-#
-# Keep the unit and the network-online.target gate: ceralive-hostname.service
-# genuinely needs a usable link before publishing its mDNS identity. Override only
-# ExecStart to use nm-online's ordinary connection criterion. This succeeds once
-# ANY usable connection exists, while retaining the vendor unit's 60-second
-# NM_ONLINE_TIMEOUT and still failing honestly when the board has no connectivity.
-# This is deliberately not a mask and not a NetworkManager connectivity-check
-# change; neither addresses the disproven failure mechanism.
-configure_networkmanager_wait_online() {
-  log "configuring NetworkManager wait-online to require one usable connection (optional modem startup must not gate boot)"
-  local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "${src}" && -f "${src}/NetworkManager-wait-online.dropin.conf" ]] \
-    || die "NetworkManager wait-online drop-in source not found: ${src}/NetworkManager-wait-online.dropin.conf (is \$SRCDIR/runtime mounted?)"
-  local dropin_dir="${NETWORKMANAGER_WAIT_ONLINE_DROPIN_DIR:-/etc/systemd/system/NetworkManager-wait-online.service.d}"
-  install -D -m 0644 "${src}/NetworkManager-wait-online.dropin.conf" \
-    "${dropin_dir}/10-ceralive-connection-ready.conf"
 }
 
 # ---------------------------------------------------------------------------

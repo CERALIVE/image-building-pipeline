@@ -406,20 +406,27 @@ fi
 
 if [[ "$MODE" = reconcile ]]; then
     [ -e "$INDEX_FILE" ] || die "persisted hostname index is missing during reconciliation"
-    candidate="$(candidate_for_index "$index")"
+fi
 
-    if ! publishable_address_present; then
-        if local_identity_matches "$candidate"; then
-            if [ -e "$RESTART_PENDING_FILE" ]; then
-                restart_identity_consumers || die "failed to requeue identity consumers"
-                clear_restart_pending || die "failed to clear identity-consumer restart marker"
-                printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
-            fi
-            printf 'ceralive-set-hostname: no publishable LAN address; deferring publication reconciliation\n'
-            exit 0
+candidate="$(candidate_for_index "$index")"
+if ! publishable_address_present; then
+    if ! { [ -e "$INDEX_FILE" ] && local_identity_matches "$candidate"; }; then
+        if [[ "$MODE" = reconcile ]]; then
+            atomic_write "$RESTART_PENDING_FILE" 0600 "$candidate" \
+                || die "failed to persist identity-consumer restart marker"
         fi
-        die "local identity diverged while no publishable LAN address is available"
+        commit_identity "$index" "$candidate" || die "failed to persist provisional hostname identity"
     fi
+    if [[ "$MODE" = reconcile && -e "$RESTART_PENDING_FILE" ]]; then
+        restart_identity_consumers || die "failed to requeue identity consumers"
+        clear_restart_pending || die "failed to clear identity-consumer restart marker"
+        printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+    fi
+    printf 'ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
+    exit 0
+fi
+
+if [[ "$MODE" = reconcile ]]; then
 
     state="$(read_avahi_state)" \
         && published="$(read_avahi_hostname)" \
@@ -484,14 +491,11 @@ EOF
 Description=CeraLive unique hostname setup
 Requires=ceralive-migrate-data.service
 RequiresMountsFor=/data
-# network-online.target (link actually up), NOT just NetworkManager.service (daemon
-# up): the mDNS claim cannot succeed before an interface links. On real Rock 5B+ HW
-# this unit ran at ~15s and failed by ~15.8s while eth0 linked only at 18.89s, so it
-# failed-closed and every Requires= consumer cascaded to "Dependency failed" — a dead
-# appliance on first boot. Its sibling network units already wait for this target.
-After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service network-online.target avahi-daemon.service
+# Start after the daemons exist, but never wait for an uplink. The allocator
+# persists a provisional identity and defers publication when the device is offline.
+After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service
 Before=ceralive-tls-firstboot.service ceralive.service
-Wants=NetworkManager.service network-online.target avahi-daemon.service
+Wants=NetworkManager.service avahi-daemon.service
 ConditionPathExists=/etc/machine-id
 StartLimitIntervalSec=0
 

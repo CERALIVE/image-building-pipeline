@@ -165,7 +165,7 @@ printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
 SH
   cat >"$bin/ip" <<'SH'
 #!/usr/bin/env bash
-if [[ "$*" = *"addr show"* ]]; then
+if [[ "$*" = *"addr show"* && "${HOSTNAME_IP_SCENARIO:-online}" != offline ]]; then
   iface="${HOSTNAME_LOCAL_IFACE:-eth0}"
   printf '2: %s    inet %s/24 brd 192.168.78.255 scope global %s\n' \
     "$iface" "${HOSTNAME_LOCAL_IP:-192.168.78.50}" "$iface"
@@ -335,6 +335,7 @@ run_hostname_script() {
       HOSTNAME_SYSTEMCTL_SCENARIO="${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" \
       HOSTNAME_LOCAL_IP="${HOSTNAME_LOCAL_IP:-192.168.78.50}" \
       HOSTNAME_LOCAL_IFACE="${HOSTNAME_LOCAL_IFACE:-eth0}" \
+      HOSTNAME_IP_SCENARIO="${HOSTNAME_IP_SCENARIO:-online}" \
       AVAHI_SCENARIO="$scenario" \
       AVAHI_CLIENT_ID="$client" \
       AVAHI_DEVICE_STATE="$root/avahi" \
@@ -1082,7 +1083,9 @@ typec_fake_sysfs() {
 # mask_stub_bin <dir> — a systemctl stub that RECORDS every call and faithfully
 # reproduces `systemctl mask` (symlink the unit to /dev/null) into
 # $CERALIVE_MASK_UNIT_DIR, so the shipped function's own post-mask verification is
-# exercised rather than bypassed.
+# exercised rather than bypassed. When MASK_ENABLE_ALSO_UNIT is set, an `enable`
+# also tries to enable that unit and refuses to replace a mask, matching systemd's
+# handling of an [Install] Also= target.
 mask_stub_bin() {
   mkdir -p "$1"
   cat >"$1/systemctl" <<'SH'
@@ -1091,6 +1094,14 @@ printf 'systemctl %s\n' "$*" >>"$MASK_CALLS"
 if [ "${1:-}" = mask ]; then
   mkdir -p "$CERALIVE_MASK_UNIT_DIR"
   ln -sfn /dev/null "$CERALIVE_MASK_UNIT_DIR/$2"
+elif [ "${1:-}" = enable ] && [ -n "${MASK_ENABLE_ALSO_UNIT:-}" ]; then
+  also_path="$CERALIVE_MASK_UNIT_DIR/$MASK_ENABLE_ALSO_UNIT"
+  if [ -L "$also_path" ] && [ "$(readlink "$also_path")" = /dev/null ]; then
+    printf 'refusing to enable masked Also= unit %s\n' "$MASK_ENABLE_ALSO_UNIT" >&2
+    exit 1
+  fi
+  mkdir -p "$CERALIVE_MASK_UNIT_DIR"
+  ln -sfn /usr/lib/systemd/system/"$MASK_ENABLE_ALSO_UNIT" "$also_path"
 fi
 exit 0
 SH

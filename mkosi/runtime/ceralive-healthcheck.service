@@ -5,12 +5,12 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # PROVES it can stream gets `rauc mark-good`. A boots-but-can't-encode slot is left
 # unconfirmed and the bootcount adapter rolls it back on the next reboot.
 #
-# Run only after the app is up AND the network is online (the SRT reach check
-# needs routing). Requires=ceralive.service: if CeraUI never comes up there is
+# Run after the app and NetworkManager daemon are up. The SRT reach check is
+# explicitly non-fatal when no uplink exists. Requires=ceralive.service: if CeraUI never comes up there is
 # nothing to confirm, so the gate must not run (the slot will roll back).
 Requires=ceralive.service
-After=ceralive.service network-online.target
-Wants=network-online.target
+After=ceralive.service NetworkManager.service
+Wants=NetworkManager.service
 # Idempotency guard: once a slot is confirmed the marker exists and this unit is a
 # no-op. /data is SHARED across A/B, so ceralive-update CLEARS this marker on every
 # new bundle install — the freshly-activated slot must re-prove health before being

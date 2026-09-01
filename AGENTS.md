@@ -79,7 +79,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
-| **Boot-time network readiness + dead-weight unit masks** | `mkosi/customize/postinst-lib.sh` `configure_networkmanager_wait_online` (one usable connection, not global optional-modem startup completion) + `suppress_unusable_boot_units` / `mask_service` (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait) — see the KEY FACT below |
+| **Offline-first boot readiness + dead-weight unit masks** | `mkosi/customize/postinst.d/services.sh::suppress_unusable_boot_units` / `mask_service` (networkd stack, both wait-online paths, machine-id commit, standalone dnsmasq, chrony-wait) + `tests/runtime-services.bats` emitted-unit scan — see the KEY FACT below |
 | **Journal retention, the persistent machine-id, and the one-time journal-dir migration** | `mkosi/runtime/journald/` + `mkosi/runtime/machine-id/` installed by `mkosi/customize/postinst.d/persistence.sh` (`setup_journald_retention` / `setup_machine_id_persistence` / `setup_journal_dir_gc`); guards `tests/journal-diagnosability.bats` + `tests/systemd-ordering-cycle.test.sh` Part D — see the ~100-seconds-of-history KEY FACT below |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
@@ -3424,8 +3424,8 @@ seeds the exact 0-byte-regular-file bug state, runs the real function, and prove
 the result is the stub symlink — resolves through it, is idempotent, and
 force-replaces a stale link). Wired into `run-tests`.
 
-**Six stock units must be MASKED (never merely disabled) — they cost every boot
-2 of its 2min 6s and kept the device permanently `degraded`** [EXISTS]
+**Seven stock units must be MASKED (never merely disabled) — wait-online is not
+boot readiness for an appliance that may establish links later** [EXISTS]
 
 Root-caused on a shipped Rock 5B+ running the PRODUCTION vendor-BSP image on
 2026-08-04. `systemd-analyze time` read **`3.925s (kernel) + 2min 2.744s
@@ -3506,7 +3506,16 @@ active disable is not enough.
 `net_setup_link`**, which lives in `systemd-udevd` and is a completely separate
 mechanism from whether the networkd DAEMON runs. `eth0`/`wlan0` renaming — and
 therefore SRTLA's `eth*`/`wlan*` bonding globs — are unaffected. Do NOT widen this
-to `NetworkManager`, `systemd-resolved` or `systemd-udevd`.
+to `NetworkManager.service`, `systemd-resolved` or `systemd-udevd`.
+
+**The seventh mask is `NetworkManager-wait-online.service` itself.** Replacing
+`nm-online -s` with `nm-online -q` fixed the optional-modem case but retained the
+same structural defect for a board with no uplink at boot: the unit still waits
+60 seconds and fails even though starting offline and connecting later is normal.
+Debian's `NetworkManager.service` carries
+`Also=NetworkManager-wait-online.service`, so merely disabling the waiter is not
+durable; enabling NetworkManager or running first-boot presets can resurrect it.
+The waiter is masked to `/dev/null`, while `NetworkManager.service` stays enabled.
 
 **`systemd-machine-id-commit.service` fails forever because of OUR OWN bind mount.**
 The obvious reading — "this image's `/etc/machine-id` is a plain file on the real
@@ -3589,10 +3598,11 @@ time-sensitive, but it is an on-demand OTA operation, not a boot one.
 
 **The fix.** `postinst-lib.sh::suppress_unusable_boot_units` (called from
 `configure_services`, via a new `mask_service` helper beside
-`enable_service`/`disable_service`) masks all six:
+`enable_service`/`disable_service`) masks all seven:
 `systemd-networkd.service`, `systemd-networkd.socket`,
-`systemd-networkd-wait-online.service`, `systemd-machine-id-commit.service`,
-`dnsmasq.service`, `chrony-wait.service`. `mask_service` then **verifies** the
+`systemd-networkd-wait-online.service`, `NetworkManager-wait-online.service`,
+`systemd-machine-id-commit.service`, `dnsmasq.service`, `chrony-wait.service`.
+`mask_service` then **verifies** the
 resulting `/etc/systemd/system/<unit> -> /dev/null` symlink and `die`s if it is
 absent — a mask that silently did not land would put the defect straight back into
 the fleet on an image that otherwise builds, boots and passes every other gate. No
@@ -3600,20 +3610,21 @@ the fleet on an image that otherwise builds, boots and passes every other gate. 
 ceiling); `suppress_unusable_boot_units` + `mask_service` are registered in
 `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
 
-Expected improvement: the ~100s networkd stall and the 21s chrony-wait both leave
-the boot path, so `graphical.target` should land near **~20s instead of 2min 6s**,
-with CeraUI on :80 reachable at roughly the same point rather than two minutes in,
-and `systemctl is-system-running` reading `running` instead of `degraded`.
-**Not yet boot-proven on hardware** — the masks are verified present in the built
-artifact, but the timing claim above is a prediction until a board boots it.
+Expected improvement: both structural wait-online paths and the 21s chrony-wait
+leave the boot path. First-party services start after the NetworkManager daemon,
+not after connectivity, so a normal no-uplink boot does not create a failed unit.
+The QEMU acceptance engine now requires `systemctl is-system-running` to be exactly
+`running`; its deliberate `degraded` transcript is a required negative case.
+**Not yet re-run on hardware** — the prior six masks were verified in a real emitted
+Rock 5B+ rootfs, while the seventh mask and offline-first ordering are currently
+artifact/source-tested and await the Todo 14/22 board health rerun.
 
-Verified in the real emitted rootfs (not merely "the postinst ran"): all six mask
-symlinks are present under `./etc/systemd/system/` in the `rock-5b-plus` build tar.
-Guards: `runtime-services.bats` §18e (6 tests — all six masked to `/dev/null`, the `Also=`
-resurrection path closed, mask-not-disable, the fail-closed leg proving a
-non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
-widen to NetworkManager/resolved/udevd/`chrony.service`, and the
-`configure_services` wiring).
+Guards: `runtime-services.bats` §18e (all seven masks, both `Also=` resurrection
+paths, mask-not-disable, fail-closed landing, exact scope, configure wiring, and an
+emitted-unit scan rejecting direct `Requires=`/`Requisite=`/`BindsTo=` on the
+NetworkManager waiter). The scan also rejects any first-party unit edge to
+`network-online.target` and runs against a real emitted rootfs whenever one is
+available.
 
 **A shipped board's journal held ~100 SECONDS of per-unit history — the machine-id
 persistence that was supposed to prevent that had shipped, and was broken in two
@@ -3737,34 +3748,33 @@ on-hardware step is to confirm `/etc/machine-id` equals `/data/ceralive/machine-
 after an OTA slot swap, that `journalctl -u NetworkManager` spans more than one
 boot, and that the GC stamped once and left the live directory plus one predecessor.
 
-**NetworkManager wait-online gates on ONE usable connection, never global startup
-completion.** The stock Trixie unit executes `nm-online -s -q`. `-s` waits for
-NetworkManager's `Startup` property to become false, which requires every
-autoconnect profile to settle. That is structurally too strong for this appliance:
-every modem profile autoconnects, and an optional modem can remain in `prepare`
-while searching indefinitely without making working Ethernet or another modem any
-less online.
+**NetworkManager wait-online is masked; first-party startup is network-tolerant.**
+The stock Trixie unit executes `nm-online -s -q`, which waits for every autoconnect
+profile to settle. A released Rock 5B+ therefore failed the unit after exactly 60
+seconds while Ethernet already provided `CONNECTED_GLOBAL`: one optional modem was
+still legitimately searching. Replacing `-s` with ordinary `nm-online -q` proved
+that diagnosis, but it was not the final contract — a device with no uplink at all
+would still wait and fail. Offline boot is normal, so the drop-in and its installer
+are removed and `NetworkManager-wait-online.service` is the seventh permanent mask.
 
-Root-caused on the released Rock 5B+ image on 2026-08-31. The board had exactly one
-failed unit. `NetworkManager-wait-online` ran from monotonic 11.061 s to 71.112 s
-and exited 1 at its exact 60-second timeout; `systemd-analyze time` reported
-`3.547s (kernel) + 1min 11.847s (userspace)`. At the same time NetworkManager
-reported `connected` / `full` and had reached `CONNECTED_GLOBAL` at 13.581 s, but
-its D-Bus `Startup` property remained `true`: `gsm-9` on `cdc-wdm1` was still
-`connecting (prepare)`, while ModemManager reported `searching`, packet service
-`detached`, and `roaming-not-allowed-in-location-area`. On that exact live state,
-`nm-online -q -t 5` returned 0 immediately while `nm-online -s -q -t 5` returned 1
-after five seconds — changing only the criterion toggled the failure.
+Every first-party pipeline unit now orders only after and wants
+`NetworkManager.service`; none depends on `network-online.target`. The hostname
+allocator persists `ceralive` (or its already-selected deterministic index) as a
+provisional local identity and exits successfully when no publishable address
+exists. Its reconciliation timer claims that same candidate after a link appears.
+The healthcheck already treats an absent uplink as a non-fatal SRT-reach skip.
+hawkBit URL enrollment writes a mode-0600 pending marker and returns success when
+the endpoint is unreachable; a 30-second retry timer clears the marker and starts
+the updater only after rendering the effective config.
 
-`configure_networkmanager_wait_online` installs the additive
-`NetworkManager-wait-online.service.d/10-ceralive-connection-ready.conf` drop-in,
-clears the vendor `ExecStart`, and replaces it with `nm-online -q`. The inherited
-`NM_ONLINE_TIMEOUT=60` remains. Do NOT mask this unit: unlike networkd's impossible
-wait, a real NetworkManager connectivity gate is useful because
-`ceralive-hostname.service` publishes mDNS after `network-online.target`. Do NOT
-change NetworkManager's connectivity checking or mutate modem profiles to address
-this boot issue; full connectivity was already proven and optional uplink search is
-valid runtime state.
+Two downstream reorder expectations are recorded here rather than edited across
+repository boundaries: cerastream should carry
+`After=NetworkManager.service srtla-send.service` plus
+`Wants=NetworkManager.service`; CeraUI's add-on reconciler should carry
+`After=ceralive.service NetworkManager.service` plus
+`Wants=NetworkManager.service`. These are the exact Todo 14/22 follow-ups for the
+same shared branch/board-health rerun; neither downstream repository is modified by
+this pipeline change.
 
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
@@ -5375,33 +5385,32 @@ claim protocol arbitrates simultaneous devices. The selected index lives at
 `/data/ceralive/host_index` through the `/etc/ceralive/host_index` symlink; the
 local service lock is runtime-only state under `/run`.
 
-The unit is ordered `After=`/`Wants=network-online.target` (link actually up), NOT
-merely `After=NetworkManager.service` (daemon up). The mDNS claim (`avahi-set-host-name`
-+ Avahi `RUNNING` + a publishable LAN address) cannot succeed before an interface
-links, and every `Requires=ceralive-hostname.service` consumer (`ceralive.service`,
-`ceralive-tls-firstboot.service`, `ceralive-hawkbit-provision.service`, and
-transitively `nginx.service`/`ceralive-healthcheck.service`) cascades to "Dependency
-failed" if this unit fails on first boot. Confirmed on real Rock 5B+ hardware: the
-unit ran at ~15s and failed by ~15.8s while `eth0`'s link only came up at 18.89s, so
-the claim failed-closed and the entire appliance stack (plus `dnsmasq`, which shares
-the same start batch) never came up (`curl http://<device>/api/health` → connection
-refused). Its sibling network-dependent units (`ceralive-healthcheck`,
-`ceralive-hawkbit-provision`, `rauc-hawkbit-updater`) already wait for
-`network-online.target`; the hostname unit was the lone omission. This is a systemd
-ordering fix, distinct from the mDNS-arbitration logic. Offline guards:
-`tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
-dynamic ordering probe proving the unit runs after `network-online.target`) and
-`runtime-services.bats` "hostname:" ordering assertions.
+The unit is ordered `After=`/`Wants=NetworkManager.service` and
+`avahi-daemon.service`, never `network-online.target`. A link is not a boot
+precondition. With no publishable LAN address — including when the setup AP's own
+`192.168.42.1` is the only address — allocation commits the current deterministic
+candidate to the runtime hostname, `/etc/hostname`, `/etc/hosts`, and the persisted
+index, reports it as provisional, and exits successfully without asking Avahi to
+claim it. A later reconciliation run reuses that exact index; only a proven live
+owner advances it. This keeps the unit successful on a normal offline boot while
+preserving deterministic collision arbitration after connectivity appears.
+
+Offline guards: `tests/systemd-ordering-cycle.test.sh` statically and dynamically
+proves the NetworkManager ordering without reintroducing a wait-online edge;
+`runtime-services.bats` proves fresh offline persistence, setup-AP exclusion, later
+same-index reconciliation, and absence of first-party `network-online.target`
+dependencies.
 
 Each service attempt has a 120-second global claim budget, 3-second command
 timeouts, and a 10-second local-lock wait. systemd caps the attempt at 150 seconds
 and retries a failed attempt after 5 seconds. Missing/malformed Avahi state,
-missing tooling, and failure to establish exact ownership all fail closed; there
-is no random suffix or DNS-only availability fallback. The isolated provisioning
-AP address is not a claimable LAN identity; Ethernet IPv4 link-local remains
-eligible. A successful retry non-blockingly requeues identity consumers while
-the hostname unit remains active, so an early no-network failure does not strand
-CeraUI or TLS. On every restart the service reapplies the persisted identity to
+missing tooling, and failure to establish exact ownership while a publishable
+collision domain exists all fail closed; there is no random suffix or DNS-only
+availability fallback. Absence of such a domain is a successful provisional state,
+not an ownership failure. The isolated provisioning AP address is not a claimable
+LAN identity; Ethernet IPv4 link-local remains eligible. A successful reconciliation
+non-blockingly requeues identity consumers while the hostname unit remains active.
+On every restart the service reapplies the persisted identity to
 the runtime hostname, `/etc/hostname`, `/etc/hosts`, and Avahi before CeraUI, TLS
 certificate creation, or hawkBit enrollment may run. A separate 30-second
 reconciliation timer checks strict Avahi and local identity state. Aligned and
@@ -5414,7 +5423,7 @@ namespaces for simultaneous boot and late-LAN-merge races. Operator behavior and
 diagnostics are documented in [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §4.
 
 **Baked-hostname `AVAHI_ERR_NO_CHANGE` fix + graceful degradation (2026-07-19).**
-After the `network-online.target` ordering fix above, the claim STILL failed on
+After the former `network-online.target` ordering fix, the claim STILL failed on
 real Rock 5B+ hardware — for a different, empirically-confirmed reason. The image
 bakes `/etc/hostname=ceralive` (`configure_networking`), so the running Avahi daemon
 already publishes `ceralive` at boot. `ceralive-set-hostname` (allocate, index 1)
