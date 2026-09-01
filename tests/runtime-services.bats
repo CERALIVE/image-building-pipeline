@@ -2324,6 +2324,61 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
+@test "pipewire: the fragment is 0.5 SPA-JSON config, never a 0.4-era Lua rules block" {
+  # WirePlumber 0.4 configured itself in Lua (alsa_monitor.rules / bluez_monitor.rules
+  # in .lua.d fragments); 0.5 replaced that with SPA-JSON `wireplumber.profiles` +
+  # `<component>.rules` sections in .conf drop-ins. A 0.4 spelling that survived a
+  # migration is read by NOTHING and fails SILENTLY — the dead-writer shape.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-headless-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  local legacy
+  for legacy in alsa_monitor bluez_monitor v4l2_monitor 'lua_modules' '\.lua'; do
+    run grep -E "$legacy" "$body"
+    [ "$status" -ne 0 ]
+  done
+
+  # The 0.5 section names, read back off the shipped trixie WirePlumber 0.5.8:
+  # scripts/monitors/alsa.lua:17 and scripts/monitors/bluez.lua:18 both call
+  # Conf.get_section_as_json on exactly these.
+  grep -Eq '^monitor\.alsa\.rules[[:space:]]*=[[:space:]]*\[' "$body"
+  grep -Eq '^monitor\.bluez\.rules[[:space:]]*=[[:space:]]*\[' "$body"
+  grep -Eq '^wireplumber\.profiles[[:space:]]*=' "$body"
+}
+
+@test "pipewire: a CAPTURE node is never suspended, and a sink still is" {
+  # suspend-node.lua reads `session.suspend-timeout-seconds` off the NODE and
+  # defaults to 5 s; the value 0 is an early `return` before any timer is armed,
+  # i.e. "never" — not "immediately", and not a disabled feature.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-suspend-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  # Exactly one opt-out per monitor: ALSA (every capture card, incl. the SoC
+  # HDMI-RX) and BlueZ (a Bluetooth microphone is an ordinary node here).
+  run grep -cE '^[[:space:]]*session\.suspend-timeout-seconds[[:space:]]*=[[:space:]]*0$' "$body"
+  [ "$output" -eq 2 ]
+
+  # It must be the timeout key, never the suspend FEATURE — disabling
+  # hooks.node.suspend would also pin every sink open, which this deliberately does
+  # not do.
+  run grep -E 'hooks\.node\.suspend' "$body"
+  [ "$status" -ne 0 ]
+
+  # Capture-scoped on both monitors. `media.class` is set by the monitor BEFORE
+  # rules are applied, so it is the semantic match; the node-name globs are the
+  # second, independent match object.
+  grep -Fq 'media.class = "Audio/Source"' "$body"
+  grep -Fq 'node.name = "~alsa_input.*"' "$body"
+  grep -Fq 'node.name = "~bluez_input.*"' "$body"
+
+  # SINKS ARE LEFT ALONE — the board's analog output has no CeraLive consumer, and
+  # pinning it open would turn a capture fix into "never suspend anything".
+  run grep -E 'Audio/Sink|alsa_output|bluez_output' "$body"
+  [ "$status" -ne 0 ]
+}
+
 @test "pipewire: the packaged USER units are masked, so exactly ONE PipeWire exists" {
   local root="$BATS_TEST_TMPDIR/pw-mask"
   pw_install_env "$root"
@@ -2377,6 +2432,48 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"pipewire artifact not found"* ]]
   [ ! -e "$root/etc/systemd/system/pipewire.service" ]
+}
+
+@test "pipewire: the WirePlumber fragment LANDS in the rootfs, at the one path and only once" {
+  # The fragment is inert unless it is at the path WirePlumber reads, and a SECOND
+  # CeraLive fragment would split the headless profile from the rules that depend on
+  # it across two files merged by filename order. Both halves are checked: the
+  # shipped installer's own destination, then a real emitted rootfs when one exists.
+  local rel="etc/wireplumber/wireplumber.conf.d/10-ceralive-headless.conf"
+
+  # 1. The production default in the shipped installer — the fixture redirects it,
+  #    so without this the redirected install could pass against any path at all.
+  grep -Fq 'WIREPLUMBER_CONF_DIR:-/etc/wireplumber/wireplumber.conf.d' \
+    "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+  grep -Fq '10-ceralive-headless.conf' \
+    "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+
+  # 2. The installer really writes it, and its content is the shipped artifact.
+  local root="$BATS_TEST_TMPDIR/pw-rootfs"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+  [ -f "$root/$rel" ]
+  cmp -s "$root/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  run bash -c "ls -1 '$root/etc/wireplumber/wireplumber.conf.d' | wc -l"
+  [ "$output" -eq 1 ]
+
+  # 3. A REAL emitted rootfs when one is present — assert-when-present, exactly like
+  #    the wait-online emitted scan. This is the leg that proves the image ships it.
+  local emitted
+  local -a emitted_roots=()
+  if [ -n "${CERALIVE_ROOTFS_DIR:-}" ]; then
+    emitted_roots+=("$CERALIVE_ROOTFS_DIR")
+  else
+    emitted_roots+=("$PIPELINE_DIR/mkosi/build/app" "$PIPELINE_DIR/mkosi/build/runtime")
+  fi
+  for emitted in "${emitted_roots[@]}"; do
+    [ -d "$emitted/etc/wireplumber/wireplumber.conf.d" ] || continue
+    [ -f "$emitted/$rel" ]
+    cmp -s "$emitted/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+    run bash -c "ls -1 '$emitted/etc/wireplumber/wireplumber.conf.d' | wc -l"
+    [ "$output" -eq 1 ]
+  done
 }
 
 @test "pipewire: the installer is wired into configure_services and registered in the drift gate" {
