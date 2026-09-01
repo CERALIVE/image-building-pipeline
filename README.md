@@ -1080,7 +1080,7 @@ kernel, and a real Debian 13 arm64 install resolved the exact URL/SHA-pinned
 [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
 
 The MPP **userspace** that makes either kernel track's HW encoders reachable from
-GStreamer (`gstreamer1.0-rockchip1` + `librockchip-mpp1` + `librga2`) is not in
+GStreamer (`gstreamer1.0-rockchip-ceralive` + `librockchip-mpp1` + `librga2`) is not in
 Debian or the Armbian feed. It is baked from exact pinned upstream release assets,
 verified by SHA-256, in
 [`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)

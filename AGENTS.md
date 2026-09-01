@@ -284,7 +284,7 @@ equal to the sum of the six post-split counts:
 | Suite | §-sections | Cases |
 |---|---:|---:|
 | `tests/manifest-schema.bats` | 1-6 | 25 |
-| `tests/package-contract.bats` | 13, 14, 14b, 15, 17, 19, 19b, 20, 22, 27, 28, 30, 31 | 92 |
+| `tests/package-contract.bats` | 13, 14, 14b, 15, 17, 19, 19b, 20, 22, 27, 28, 30, 31 | 109 |
 | `tests/postinst-wiring.bats` | 8, 8b, 18, 18b, 18c, 21, 23 | 41 |
 | `tests/mkosi-image-contract.bats` | 7, 9, 9b, 10, 11, 12 | 62 |
 | `tests/runtime-services.bats` | the hostname/mDNS block, 16, 18d, 18e, 18f, 18g, 29 | 88 |
@@ -2776,7 +2776,7 @@ root). This is what makes `mpph264enc`/`mpph265enc`/`mppjpegenc`/`mppvp8enc` reg
 proven on real Rock 5B+ hardware (ffprobe-verified H.264/H.265 HW encode).
 
 **The MPP subset is mainline-7.2/Trixie-compatible; the source pool name is not a
-suite constraint.** Todo 17 inventoried both supported boards while they ran
+suite constraint.** Before the pin swap, todo 17 inventoried both supported boards while they ran
 `7.2.0-ceralive-rk3588`: each had exactly `gstreamer1.0-rockchip1=1.14-4`,
 `librockchip-mpp1=1.5.0-1` and `librga2=2.2.0-1`; the plugin's `ldd` resolved
 `librockchip_mpp.so.1` and `librga.so.2`, `gst-inspect-1.0 mpph264enc` succeeded,
@@ -2787,22 +2787,21 @@ GStreamer 1.26.2 with no missing dependency. Kill-switch verdict: **PROCEED**;
 no replacement userspace build is needed.
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
-  package (`package  filename  sha256  url`). Five packages:
-  `libmali-valhall-g610-g24p0-wayland-gbm` 1.9-1 (firmware_packages),
-  `gstreamer1.0-rockchip1` 1.14-4 (hw_accel_gstreamer_plugins), and
+  package (`package  filename  sha256  url`). Four packages:
+  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.1 (hw_accel_gstreamer_plugins), and
   `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
   (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
   RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
   `tests/mpp-dev-runtime-contract.test.sh`. It is a libdevel package whose whole
   payload is 25 headers, two `.pc` files and docs; `librockchip-mpp1` ships the
   entire soname chain including the unversioned `librockchip_mpp.so` link, and
-  `gstreamer1.0-rockchip1` links the VERSIONED `librockchip_mpp.so.1` and depends
+  `gstreamer1.0-rockchip-ceralive` links the VERSIONED `librockchip_mpp.so.1` and depends
   on the runtime package alone. Do not re-add it to "mirror the proven asset
   set" — that is why it was there, and the proven half is `librockchip-mpp1`,
-  which is untouched. Sources: tsukumijima
-  (`mpp-rockchip`, `rockchip-multimedia-config`, `libmali-rockchip`) + radxa
-  `rk3588s2-bookworm` (the gst plugin + its ABI-paired RGA; tsukumijima ships no
-  gst-rockchip mirror).
+  which is untouched. The old Radxa plugin row remains commented directly above
+  the CeraLive release-asset row as the one-line rollback lever. Sources:
+  CERALIVE/gstreamer-rockchip for the plugin, tsukumijima for MPP and multimedia
+  config, and Radxa `rk3588s2-bookworm` for the ABI-paired RGA.
 - **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
   pinned packages the resolved family declares (intersection of
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly

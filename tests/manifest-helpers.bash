@@ -514,7 +514,7 @@ make_parity_rootfs() {
   local packages=() package
   while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
     < <(sed -e 's/#.*//' "${lists[@]}" | awk 'NF{print $1}')
-  packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 
   printf 'ceralive:x:1000:1000:CeraLive:/home/ceralive:/bin/bash\n' >"$root/etc/passwd"

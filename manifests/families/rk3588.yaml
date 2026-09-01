@@ -135,14 +135,13 @@ firmware_packages:
 rauc_bootloader_adapter: custom
 
 # Hardware-accelerated GStreamer encode/decode (Rockchip MPP) feeding
-# VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp. gstreamer1.0-rockchip1 registers
+# VIDEO_ENCODER/VIDEO_DECODER=rk3588_mpp. gstreamer1.0-rockchip-ceralive registers
 # mpph264enc/mpph265enc/mppjpegenc/mppvp8enc against the MPP runtime below — PROVEN
-# on real Rock 5B+ hardware (ffprobe-verified raw H.264/H.265 HW encode). It is NOT
-# in the Armbian bookworm arm64 feed; pinned + SHA-256-verified in  # suite-literal-ok: names the Armbian BSP feed, not the target rootfs suite
-# ../rk3588-userspace-deb-versions.txt (radxa rk3588s2-bookworm build — tsukumijima  # suite-literal-ok: a third-party radxa pool NAME, pinned by URL+SHA-256
-# publishes no gst-rockchip mirror). Staged by fetch_rk3588_userspace.
+# on real Rock 5B+ hardware (ffprobe-verified raw H.264/H.265 HW encode). The
+# first-party release asset is pinned + SHA-256-verified in
+# ../rk3588-userspace-deb-versions.txt and staged by fetch_rk3588_userspace.
 hw_accel_gstreamer_plugins:
-  - gstreamer1.0-rockchip1
+  - gstreamer1.0-rockchip-ceralive
 
 # Runtime multimedia support for the MPP HW-accel path. librockchip-mpp1 is the MPP
 # encode/decode runtime the gst plugin dlopens; librga2 is the RGA 2D accelerator it
@@ -155,7 +154,7 @@ hw_accel_gstreamer_plugins:
 # tests/mpp-dev-runtime-contract.test.sh. Its entire payload is 25 headers, two
 # pkg-config files and its docs; the runtime `librockchip_mpp.so` symlink is
 # shipped by librockchip-mpp1 itself, not by the -dev package, and
-# gstreamer1.0-rockchip1 links the versioned soname `librockchip_mpp.so.1` and
+# gstreamer1.0-rockchip-ceralive links the versioned soname `librockchip_mpp.so.1` and
 # Depends on librockchip-mpp1 alone. Nothing is compiled on a CeraLive board.
 gstreamer_runtime_packages:
   - rockchip-multimedia-config

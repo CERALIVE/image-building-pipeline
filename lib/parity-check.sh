@@ -12,7 +12,7 @@
 #   A. PACKAGES   every shared.list (+ family delta) package is installed (empty
 #                 diff). Class:
 #                   debian       — must be installed now (hard FAIL if missing)
-#                   armbian-bsp  — gstreamer1.0-rockchip1 / rockchip-multimedia-config
+#                   platform     — gstreamer1.0-rockchip-ceralive / rockchip-multimedia-config
 #                                  (families/rk3588.yaml HW-accel + runtime)
 #                   first-party  — CeraLive SRT/ceraui/cerastream/srtla-send-rs (CI: apt; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
@@ -57,7 +57,7 @@ declare -A PKG_ALIAS=(
 )
 # Rockchip HW GStreamer pair — families/rk3588.yaml hw_accel_gstreamer_plugins +
 # gstreamer_runtime_packages, installed from the Armbian pool (platform layer).
-ARMBIAN_BSP_PKGS=" gstreamer1.0-rockchip1 rockchip-multimedia-config "
+PLATFORM_PKGS=" gstreamer1.0-rockchip-ceralive rockchip-multimedia-config "
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
 # Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
 # absent → reported as WARN, never silent.
@@ -137,13 +137,13 @@ main() {
   # The Armbian-BSP GStreamer pair (family manifest) and the first-party .debs
   # (App layer) live OUTSIDE the runtime package lists, so the gate must add them
   # to the checked set to keep their WARN classification below.
-  local bsp_arr=() firstparty_arr=()
-  read -ra bsp_arr        <<< "${ARMBIAN_BSP_PKGS}"
+  local platform_arr=() firstparty_arr=()
+  read -ra platform_arr   <<< "${PLATFORM_PKGS}"
   read -ra firstparty_arr <<< "${FIRST_PARTY_PKGS}"
-  expected+=("${bsp_arr[@]}" "${firstparty_arr[@]}")
+  expected+=("${platform_arr[@]}" "${firstparty_arr[@]}")
   log_info "v2 manifests declare ${n_manifest} runtime packages (shared.list + family deltas)"
 
-  local debian_missing=() armbian_missing=() firstparty_missing=() check
+  local debian_missing=() platform_missing=() firstparty_missing=() check
   for p in "${expected[@]}"; do
     check="${PKG_ALIAS[$p]:-$p}"
     if [[ "${installed}" == *" ${check} "* ]]; then
@@ -151,8 +151,8 @@ main() {
     fi
     if [[ "${FIRST_PARTY_PKGS}" == *" ${p} "* ]]; then
       firstparty_missing+=("${p}")
-    elif [[ "${ARMBIAN_BSP_PKGS}" == *" ${p} "* ]]; then
-      armbian_missing+=("${p}")
+    elif [[ "${PLATFORM_PKGS}" == *" ${p} "* ]]; then
+      platform_missing+=("${p}")
     else
       debian_missing+=("${p}")
     fi
@@ -163,10 +163,10 @@ main() {
   else
     fail "Debian packages MISSING from rootfs: ${debian_missing[*]}"
   fi
-  if (( ${#armbian_missing[@]} == 0 )); then
-    pass "Armbian-BSP GStreamer packages installed (gstreamer1.0-rockchip1, rockchip-multimedia-config)"
+  if (( ${#platform_missing[@]} == 0 )); then
+    pass "platform GStreamer packages installed (gstreamer1.0-rockchip-ceralive, rockchip-multimedia-config)"
   else
-    warn "Armbian-BSP packages not installed (need Armbian pool at build time): ${armbian_missing[*]}"
+    warn "platform packages not installed (need pinned userspace fetch at build time): ${platform_missing[*]}"
   fi
   if (( ${#firstparty_missing[@]} == 0 )); then
     pass "first-party packages installed (libsrt1.5-ceralive/ceraui/cerastream/srtla-send-rs)"

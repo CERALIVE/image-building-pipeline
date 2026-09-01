@@ -169,7 +169,7 @@ emit_dpkg_status() {                         # emit_dpkg_status <out>
   # Alias TARGETS parity-check maps to (media-ctl→v4l-utils,
   # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
   # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
-  for p in v4l-utils gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device \
+  for p in v4l-utils gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device \
     cerastream libsrt1.5-ceralive srtla-send-rs; do
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done

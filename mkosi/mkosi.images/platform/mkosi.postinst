@@ -9,7 +9,7 @@
 #
 # Two classes of BSP:
 #   * HW-accel GStreamer (always installed; part of the ceraui-base.conf parity
-#     set: gstreamer1.0-rockchip1, rockchip-multimedia-config).
+#     set: gstreamer1.0-rockchip-ceralive, rockchip-multimedia-config).
 #   * Boot BSP (kernel / DTB / U-Boot / firmware) — installed only when
 #     INSTALL_BOOT_BSP=1. It is heavy (emulated) and only matters for a bootable
 #     device image, not for the ceraui-base.conf package-parity gate, so the

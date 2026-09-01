@@ -24,8 +24,8 @@ changes; the MPP userspace ABI does not. No replacement build from
 `tsukumijima/mpp-rockchip` is needed beyond the already-pinned
 `librockchip-mpp1` release asset.
 
-The exact retained set is `librockchip-mpp1` 1.5.0-1 (tsukumijima), plus
-`gstreamer1.0-rockchip1` 1.14-4 and `librga2` 2.2.0-1 (Radxa). On both a Rock 5B+
+The exact ABI-proven set was `librockchip-mpp1` 1.5.0-1 (tsukumijima), plus the
+Radxa GStreamer plugin 1.14-4 and `librga2` 2.2.0-1. On both a Rock 5B+
 and an Orange Pi 5 Plus running `7.2.0-ceralive-rk3588`, the installed packages
 have exactly those versions; the plugin resolves `librockchip_mpp.so.1` and
 `librga.so.2` with no missing dependency, `gst-inspect-1.0 mpph264enc` succeeds,
@@ -43,8 +43,11 @@ features; encoder registration is hardware-probed and therefore remains a board
 assertion, supplied by the two live systems above.
 
 The release assets' downloaded SHA-256 values matched the committed pins exactly.
-They remain staged by `fetch_rk3588_userspace`, not selected from Debian's index.
-Bump any one only after re-running both the Trixie solve and the hardware encode.
+The GStreamer plugin pin now names the first-party
+`gstreamer1.0-rockchip-ceralive` release asset; the MPP and RGA bytes established
+by this evidence remain unchanged. All three remain staged by
+`fetch_rk3588_userspace`, not selected from Debian's index. Bump any one only
+after re-running both the Trixie solve and the hardware encode.
 
 ## Historical vendor-lock evidence (superseded)
 
