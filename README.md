@@ -940,20 +940,40 @@ modem source-routing, the M.2 SIM-detection quirk, and the known-good modem
 table) is documented as-is in
 [`docs/modem-matrix.md`](docs/modem-matrix.md).
 
-Because an upstream repository can replace package bytes under the same Debian
-version, a same-version Armbian re-spin could drop one of the six WWAN kernel modules the modem stack binds to
-(`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`) with no
-signal. `lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted
-module tree) and reports each module as loadable (`=m`), built-in (`=y`, in
-`modules.builtin`), or present via `modules.alias`:
+A kernel can pass every config gate and still ship a package with a module
+missing: `lib/verify-kernel-config.sh` proves a SYMBOL resolved in `.config`,
+which is a different claim from a `.ko` having been built into the `.deb`.
+`lib/check-wwan-modules.sh` is the second claim. It inspects a kernel `.deb` (or
+an extracted module tree) and reports each modem module as loadable (`=m`),
+built-in (`=y`, in `modules.builtin`), or present via `modules.alias`:
 
 ```bash
 lib/check-wwan-modules.sh <kernel.deb | module-tree-dir>
+lib/check-wwan-modules.sh --help
 ```
 
-It is **advisory only**, like the BSP drift-guard: a missing module prints a
-WARNING but the check **always exits 0** — it never fails the build and never
-edits `shared.list` or the kernel config. It is hyphen/underscore aware (the
+**Severity is split.** The nine **REQUIRED** USB-datapath modules — `qmi_wwan`,
+`cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`, `cdc_acm`, `qcserial`,
+`usb_wwan` — are what both shipped boards' modems actually bind through, so a
+missing one is named and the check **exits non-zero**. The four **ADVISORY**
+ones — `mhi`, `mhi_wwan_ctrl`, `mhi_wwan_mbim` and `rndis_host` — print an
+`ADVISORY` line and the check still exits 0, because no CeraLive board has
+qualified a PCIe/M.2 modem and RNDIS is a fallback QMI/MBIM already cover.
+
+The whole check used to be advisory. That is precisely how it went three
+releases without noticing that a module had been added to the kernel fragment
+and never to the checker: a warning nobody has to act on is not a gate.
+
+`CERALIVE_WWAN_CHECK_ADVISORY=1` restores that all-advisory, always-exit-0
+behaviour for bisecting a kernel change or probing a deliberately narrow tree.
+It logs that it is active, and any value other than `0`/`1` is refused rather
+than guessed at.
+
+The module set is written down once, as `<CONFIG symbol>|<module>|<severity>`
+rows, and tests check it against `manifests/kernel/required-symbols.list` in both
+directions — every symbol the checker names must be pinned there, and every
+valued modem/WWAN leaf pinned there must reach the checker. It edits nothing:
+not `shared.list`, not the kernel config. It is hyphen/underscore aware (the
 `cdc_wdm` module ships on disk as `cdc-wdm.ko`) and matches the `option` module
 by an exact `option.ko` / `modules.builtin` / alias entry, never a bare `option`
 substring. Proof: `run-tests` section 17.

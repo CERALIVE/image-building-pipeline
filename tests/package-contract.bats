@@ -415,49 +415,155 @@ PY
 }
 
 # ===========================================================================
-# 17. Advisory WWAN module-presence check (Task 5).
-#     lib/check-wwan-modules.sh inspects a kernel .deb (or an extracted
-#     module tree) and reports whether the six WWAN modules ship — loadable
-#     (=m, a <mod>.ko file), built-in (=y, modules.builtin), or via a
-#     modules.alias entry. It is ADVISORY: a missing module WARNS but the check
-#     ALWAYS exits 0 (like the BSP drift-guard). The option module is matched by
-#     option.ko / modules.builtin / alias, NEVER a bare "option" substring. These
-#     tests build fixture .debs (ar+tar) and module trees in $BATS_TEST_TMPDIR —
-#     no real BSP, UNIT scope.
+# 17. WWAN module-presence check (Task 5; severity split 2026-09).
+#     lib/check-wwan-modules.sh inspects a kernel .deb (or an extracted module
+#     tree) and reports whether each modem module ships — loadable (=m, a
+#     <mod>.ko file), built-in (=y, modules.builtin), or via a modules.alias
+#     entry. Severity is SPLIT: the nine REQUIRED USB-datapath modules fail the
+#     check closed (non-zero exit, module named), while the four ADVISORY ones
+#     (the MHI/PCIe transport plus rndis_host) only ever warn.
+#     CERALIVE_WWAN_CHECK_ADVISORY=1 restores the pre-split all-advisory
+#     behaviour. The option module is matched by option.ko / modules.builtin /
+#     alias, NEVER a bare "option" substring. These tests build fixture .debs
+#     (ar+tar) and module trees in $BATS_TEST_TMPDIR — no real BSP, UNIT scope.
 # ===========================================================================
 
-@test "wwan: all six modules present in a kernel .deb (happy path, mix of =m and =y)" {
+@test "wwan: all nine required modules present in a kernel .deb (happy path, mix of =m and =y)" {
   local stage="$BATS_TEST_TMPDIR/stage" deb="$BATS_TEST_TMPDIR/linux-image-generic-rk35xx.deb"
   mkdir -p "$stage"
-  wwan_stage_six "$stage"
+  wwan_stage_required "$stage"
+  wwan_stage_advisory "$stage"
   make_kernel_deb "$stage" "$deb"
   run "$CHECK_WWAN" "$deb"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"all 6 required modules present"* ]]
+  [[ "$output" == *"all 9 required modules present"* ]]
+  [[ "$output" == *"all 4 advisory modules present"* ]]
   [[ "$output" != *"MISSING"* ]]
   # cdc-wdm.ko (hyphen) satisfies cdc_wdm — the -/_ normalisation has teeth
   [[ "$output" == *"cdc_wdm — loadable"* ]]
+  # cdc-acm.ko (hyphen) satisfies cdc_acm, one of the modules this widening added
+  [[ "$output" == *"cdc_acm — loadable"* ]]
+  [[ "$output" == *"qcserial — loadable"* ]]
+  [[ "$output" == *"usb_wwan — loadable"* ]]
   # compressed cdc_ether.ko.xz is recognised as loadable
   [[ "$output" == *"cdc_ether — loadable"* ]]
   # built-in modules recognised via modules.builtin
   [[ "$output" == *"cdc_ncm — built-in"* ]]
 }
 
-@test "wwan: a missing module WARNS and still exits 0 (advisory, missing cdc_ncm)" {
+@test "wwan: a missing REQUIRED module NAMES it and FAILS the check (missing cdc_ncm)" {
+  # The pre-2026-09 checker warned here and exited 0. That is the whole change:
+  # a module the modem datapath cannot bind without is now a fail-closed verdict.
   local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root"
+  wwan_stage_required "$root"
   # drop cdc_ncm from modules.builtin (option stays) so exactly one is absent
   printf 'kernel/drivers/usb/serial/option.ko\n' > "$root/lib/modules/6.1.0-generic/modules.builtin"
   run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"WWAN module MISSING: cdc_ncm"* ]]
-  [[ "$output" == *"5/6 present, 1 missing"* ]]
+  [[ "$output" == *"REQUIRED"* ]]
+  [[ "$output" == *"8/9 required present, 1 missing"* ]]
+  [[ "$output" == *"this check FAILS"* ]]
+}
+
+@test "wwan: each of the three modules this widening added is REQUIRED, one at a time" {
+  # Non-vacuity for the widening itself: cdc_acm/qcserial/usb_wwan were outside
+  # the old six-module set entirely, so a tree missing any one of them used to
+  # pass silently. Driven one at a time so a single over-broad fixture cannot
+  # make all three pass together.
+  local mod
+  for mod in cdc_acm qcserial usb_wwan; do
+    local root="$BATS_TEST_TMPDIR/tree-$mod"
+    wwan_stage_required "$root"
+    case "$mod" in
+      cdc_acm)  rm "$root/lib/modules/6.1.0-generic/kernel/drivers/usb/class/cdc-acm.ko" ;;
+      qcserial) rm "$root/lib/modules/6.1.0-generic/kernel/drivers/usb/serial/qcserial.ko" ;;
+      usb_wwan) rm "$root/lib/modules/6.1.0-generic/kernel/drivers/usb/serial/usb_wwan.ko" ;;
+    esac
+    run "$CHECK_WWAN" "$root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"WWAN module MISSING: $mod"* ]]
+    [[ "$output" == *"8/9 required present, 1 missing"* ]]
+  done
+}
+
+@test "wwan: a missing ADVISORY (MHI) module prints ADVISORY and still exits 0" {
+  # The severity split's other half. The fixture stages every REQUIRED module and
+  # none of the MHI transport, which is the real shape of a shipped kernel today:
+  # no CeraLive board has qualified a PCIe modem, so this must not fail a build.
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_required "$root"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"all 9 required modules present"* ]]
+  [[ "$output" == *"WWAN advisory module MISSING: mhi "* ]]
+  [[ "$output" == *"WWAN advisory module MISSING: mhi_wwan_ctrl"* ]]
+  [[ "$output" == *"WWAN advisory module MISSING: mhi_wwan_mbim"* ]]
   [[ "$output" == *"ADVISORY"* ]]
+  [[ "$output" == *"never fails the check"* ]]
+  # an advisory absence must never be reported with the required set's wording
+  [[ "$output" != *"this check FAILS"* ]]
+}
+
+@test "wwan: rndis_host is ADVISORY, not required (the module PR #144 added to the fragment)" {
+  # D1 from the todo-50 audit: #144 declared CONFIG_USB_NET_RNDIS_HOST and the
+  # checker never heard about it. It is covered now — and covered ADVISORY,
+  # because QMI/MBIM serve every modem in the known-good table and no shipped
+  # board depends on the RNDIS fallback.
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_required "$root"
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WWAN advisory module MISSING: rndis_host"* ]]
+  [[ "$output" != *"WWAN module MISSING: rndis_host"* ]]
+}
+
+@test "wwan: CERALIVE_WWAN_CHECK_ADVISORY=1 restores the all-advisory exit-0 behaviour" {
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_required "$root"
+  rm "$root/lib/modules/6.1.0-generic/kernel/drivers/usb/serial/qcserial.ko"
+  # control: the same tree FAILS without the opt-out, so this is not vacuous
+  run "$CHECK_WWAN" "$root"
+  [ "$status" -ne 0 ]
+
+  CERALIVE_WWAN_CHECK_ADVISORY=1 run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CERALIVE_WWAN_CHECK_ADVISORY=1"* ]]
+  [[ "$output" == *"WWAN module MISSING: qcserial"* ]]
+  [[ "$output" == *"downgraded to ADVISORY"* ]]
+  [[ "$output" == *"check still passes"* ]]
+  [[ "$output" != *"this check FAILS"* ]]
+}
+
+@test "wwan: CERALIVE_WWAN_CHECK_ADVISORY refuses a value that is neither 0 nor 1" {
+  # `=true` reading as "off" would be a gate an operator believes they disabled
+  # and a build believes is armed.
+  local root="$BATS_TEST_TMPDIR/tree"
+  wwan_stage_required "$root"
+  CERALIVE_WWAN_CHECK_ADVISORY=true run "$CHECK_WWAN" "$root"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be 0 or 1"* ]]
+
+  CERALIVE_WWAN_CHECK_ADVISORY=0 run "$CHECK_WWAN" "$root"
+  [ "$status" -eq 0 ]
+}
+
+@test "wwan: --help documents the severity split and the escape hatch" {
+  run "$CHECK_WWAN" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REQUIRED"* ]]
+  [[ "$output" == *"ADVISORY"* ]]
+  [[ "$output" == *"CERALIVE_WWAN_CHECK_ADVISORY"* ]]
+
+  # a missing argument still fails, and prints the same usage
+  run "$CHECK_WWAN"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: check-wwan-modules.sh"* ]]
 }
 
 @test "wwan: a =y built-in module is recognised via modules.builtin (no .ko false-negative)" {
   local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root"   # option ships ONLY in modules.builtin, no option.ko
+  wwan_stage_required "$root"   # option ships ONLY in modules.builtin, no option.ko
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"option — built-in (=y, modules.builtin)"* ]]
@@ -466,7 +572,7 @@ PY
 
 @test "wwan: bare 'option' decoys do NOT satisfy the option module (false-positive guard)" {
   local root="$BATS_TEST_TMPDIR/tree" kv="6.1.0-generic"
-  wwan_stage_six "$root"
+  wwan_stage_required "$root"
   local md="$root/lib/modules/$kv"
   # remove the only legitimate option signal (built-in), keep cdc_ncm built-in
   printf 'kernel/drivers/net/usb/cdc_ncm.ko\n' > "$md/modules.builtin"
@@ -475,10 +581,10 @@ PY
   printf 'ELF' > "$md/kernel/drivers/net/usb/snd_usb_option_helper.ko"
   printf 'alias usb:v1234p5678option cdc_ncm\n' > "$md/modules.alias"
   run "$CHECK_WWAN" "$root"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"WWAN module MISSING: option"* ]]
-  # the other five remain present → exactly one missing
-  [[ "$output" == *"5/6 present, 1 missing"* ]]
+  # the other eight remain present → exactly one missing
+  [[ "$output" == *"8/9 required present, 1 missing"* ]]
 }
 
 @test "wwan: the native FM350 mtk_t7xx gate reports PRESENT on a tree that ships it" {
@@ -488,7 +594,7 @@ PY
   # and every kernel is now built from pinned source, whose module set is exactly
   # as inspectable — so the scoping is gone and the probe runs on any tree.
   local root="$BATS_TEST_TMPDIR/tree" kv="7.2.0-ceralive-rk3588"
-  wwan_stage_six "$root" "$kv"
+  wwan_stage_required "$root" "$kv"
   mkdir -p "$root/lib/modules/$kv/kernel/drivers/net/wwan"
   printf 'ELF' > "$root/lib/modules/$kv/kernel/drivers/net/wwan/mtk_t7xx.ko"
   run "$CHECK_WWAN" "$root"
@@ -505,13 +611,79 @@ PY
   # personality cannot bind. The retired out-of-scope branch skipped this
   # silently; the gate now says it out loud, advisory as ever.
   local root="$BATS_TEST_TMPDIR/tree"
-  wwan_stage_six "$root" "7.2.0-ceralive-rk3588"
+  wwan_stage_required "$root" "7.2.0-ceralive-rk3588"
   run "$CHECK_WWAN" "$root"
   [ "$status" -eq 0 ]
   [[ "$output" == *"native M.2 modem driver ABSENT: mtk_t7xx"* ]]
   [[ "$output" == *"14c3:4d75"* ]]
   [[ "$output" == *"0e8d:7127"* ]]
-  [[ "$output" == *"all 6 required modules present"* ]]
+  [[ "$output" == *"all 9 required modules present"* ]]
+}
+
+@test "wwan: the module set is written down ONCE — no second name array anywhere" {
+  # The single-source rule. Module NAMES may only come from WWAN_MODULE_TABLE;
+  # WWAN_REQUIRED_MODULES/WWAN_ADVISORY_MODULES must be DERIVED from it, never
+  # re-listed. A literal re-list is what lets the two halves drift apart.
+  local code
+  code="$(grep -v '^[[:space:]]*#' "$CHECK_WWAN")"
+  grep -Fq 'mapfile -t WWAN_REQUIRED_MODULES < <(wwan_table_column required 2)' <<<"$code"
+  grep -Fq 'mapfile -t WWAN_ADVISORY_MODULES < <(wwan_table_column advisory 2)' <<<"$code"
+  run ! grep -Eq 'WWAN_(REQUIRED|ADVISORY)_MODULES=\(' <<<"$code"
+
+  run bash -c "source '$CHECK_WWAN'; printf '%s\n' \"\${WWAN_REQUIRED_MODULES[@]}\" | sort | tr '\n' ' '"
+  [ "$status" -eq 0 ]
+  [ "$output" = "cdc_acm cdc_ether cdc_mbim cdc_ncm cdc_wdm option qcserial qmi_wwan usb_wwan " ]
+
+  run bash -c "source '$CHECK_WWAN'; printf '%s\n' \"\${WWAN_ADVISORY_MODULES[@]}\" | sort | tr '\n' ' '"
+  [ "$status" -eq 0 ]
+  [ "$output" = "mhi mhi_wwan_ctrl mhi_wwan_mbim rndis_host " ]
+}
+
+@test "wwan lockstep: every module the checker binds is pinned in required-symbols.list" {
+  # Direction 1 of the manifest lockstep. The checker may not claim a module the
+  # finished kernel is never asserted to carry — that would be a warning with no
+  # gate behind it.
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list" sym
+  run bash -c "source '$CHECK_WWAN'; wwan_table_column '' 1"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  while read -r sym; do
+    [ -n "$sym" ] || continue
+    grep -qE "^${sym}(=|\$)" "$req" || {
+      echo "checker table names $sym but required-symbols.list does not pin it"
+      return 1
+    }
+  done <<<"$output"
+}
+
+@test "wwan lockstep: every pinned modem/WWAN leaf symbol reaches the checker table" {
+  # Direction 2, and the one that reproduces the real regression: PR #144 added
+  # CONFIG_USB_NET_RNDIS_HOST to the kernel fragment and nothing told the
+  # checker, so the only signal for a shipped-.ko drop silently skipped it.
+  #
+  # The candidate set is DERIVED, not a third hardcoded list: the valued
+  # (=y/=m) CONFIG_USB_NET_* / CONFIG_USB_SERIAL_* / CONFIG_MHI_* rows of the
+  # manifest. Bare rows are menuconfig PARENTS (CONFIG_USB_SERIAL,
+  # CONFIG_USB_NET_DRIVERS) and build no module of their own, so the "has a
+  # value" test is what separates a leaf from its gate.
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list" table sym
+  table="$(bash -c "source '$CHECK_WWAN'; wwan_table_column '' 1")"
+  [ -n "$table" ]
+
+  local leaves
+  leaves="$(grep -oE '^CONFIG_(USB_NET_|USB_SERIAL_|MHI_)[A-Z0-9_]+=' "$req" | tr -d '=')"
+  [ -n "$leaves" ]
+  # the manifest really does carry the modem leaves this is meant to police
+  grep -qx 'CONFIG_USB_NET_RNDIS_HOST' <<<"$leaves"
+  grep -qx 'CONFIG_MHI_WWAN_MBIM' <<<"$leaves"
+
+  while read -r sym; do
+    [ -n "$sym" ] || continue
+    grep -qx "$sym" <<<"$table" || {
+      echo "required-symbols.list pins $sym but no WWAN_MODULE_TABLE row binds it to a module"
+      return 1
+    }
+  done <<<"$leaves"
 }
 
 @test "wwan: the native-M.2 gate is NO LONGER kernel-track-scoped" {

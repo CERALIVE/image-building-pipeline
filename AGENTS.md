@@ -66,7 +66,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
-| **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
+| **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + `lib/check-wwan-modules.sh` (fail-closed on the 9 required USB modules, advisory on the 4 MHI/RNDIS ones; `CERALIVE_WWAN_CHECK_ADVISORY=1` opts out) + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **Board-MANIFEST-gated udev quirk rows (M.2 SIM detection) — and how a `quirks:` fact reaches a subimage chroot** | LIVE: `mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` via `CERALIVE_BOARD_QUIRKS`; canonical: `mkosi/customize/quirks.sh` (NOT on the `./build` path). Guard `tests/board-quirk-udev-rules.test.sh` — see the "board-gated M.2 SIM quirk rows now SHIP" KEY FACT below |
 | **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
@@ -4032,29 +4032,108 @@ After=cerastream.service drop-in is baked …" + "… is ordering-ONLY (no
 Requires=/Requisite=/BindsTo= hard dependency)" (+ fail-closed + executor-wiring
 cases).
 
-**Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
+**Supported-modem matrix + the WWAN module-presence check, which is FAIL-CLOSED
+on the USB datapath and advisory only on MHI** [EXISTS — severity split 2026-09]
 
 The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem
 source-routing, the M.2 SIM quirk, and the known-good modem table) is documented
 as-is in [`docs/modem-matrix.md`](docs/modem-matrix.md). That runtime stack
 is **not** touched here — the doc only describes it.
 
-Because an upstream repository can replace bytes under the same Debian package
-version, a same-version Armbian re-spin could drop one of the six WWAN modules the modem stack
-binds to (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`)
-with no signal. `lib/check-wwan-modules.sh` makes that observable: it inspects
-a kernel `.deb` (or an extracted module tree) and reports each module as loadable
-(`=m`, a `<mod>.ko` file), built-in (`=y`, in `modules.builtin`), or present via
-`modules.alias`.
+`lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted module
+tree) and reports each modem module as loadable (`=m`, a `<mod>.ko` file),
+built-in (`=y`, in `modules.builtin`), or present via `modules.alias`. It answers
+a question **no other gate in this repo answers**: `lib/verify-kernel-config.sh`
+proves a SYMBOL RESOLVED in the built `.config`, while this proves a `.ko`
+actually SHIPPED in the built package. A config gate can be green while the
+`.deb` is missing the module.
 
-- Hyphen/underscore aware (the `cdc_wdm` module ships on disk as `cdc-wdm.ko`).
+**Severity is split, and the two halves are different claims:**
+
+| Class | Modules | On a miss |
+|---|---|---|
+| **REQUIRED** (9) | `qmi_wwan` `cdc_mbim` `cdc_wdm` `option` `cdc_ether` `cdc_ncm` `cdc_acm` `qcserial` `usb_wwan` | names the module and **EXITS NON-ZERO** |
+| **ADVISORY** (4) | `mhi` `mhi_wwan_ctrl` `mhi_wwan_mbim` `rndis_host` | prints an `ADVISORY` line, still exits 0 |
+
+The required nine are the USB datapath both shipped boards' modems bind through,
+so a drop is a fleet-visible "no modem" rather than a risk — which is exactly why
+being advisory was the wrong severity for them. **The check used to be advisory
+in its entirety**, mirroring the BSP drift-guard, and that is what let PR #144's
+gap sit open: a warning nobody has to act on is not a gate. The advisory four are
+advisory for stated, per-class reasons rather than caution — the MHI three are
+the PCIe/M.2 transport and **no CeraLive board has qualified a PCIe modem**, and
+`rndis_host` is the fallback path QMI/MBIM already cover for every modem in the
+known-good table. Promoting any of them needs a board that proves it.
+
+**`CERALIVE_WWAN_CHECK_ADVISORY=1` restores the pre-split behaviour exactly** —
+every module, required ones included, is reported ADVISORY and the check exits 0.
+It exists for bisecting a kernel change or probing a deliberately narrow tree,
+never for a release build, and it announces itself in the log so a transcript
+cannot hide it. Any value other than `0`/`1` is **refused**, not guessed at:
+`=true` silently reading as "off" would be a gate an operator believes they
+disabled and a build believes is armed.
+
+**The module set is written down exactly ONCE, and that is enforced rather than
+asked for.** `WWAN_MODULE_TABLE` carries `<CONFIG symbol>|<module>|<severity>`
+rows; `WWAN_REQUIRED_MODULES`/`WWAN_ADVISORY_MODULES` are DERIVED from it and a
+test fails on any literal re-list. The module NAME cannot be derived from the
+symbol — `CONFIG_USB_WDM` builds `cdc-wdm.ko`, `CONFIG_USB_ACM` builds
+`cdc-acm.ko`, `CONFIG_USB_SERIAL_QUALCOMM` builds `qcserial.ko` — so the binding
+has to be written somewhere; keeping the symbol beside it is what makes that one
+write CHECKABLE against `manifests/kernel/required-symbols.list` **in both
+directions**:
+
+1. every symbol in the table must be pinned in the manifest, and
+2. every valued (`=y`/`=m`) `CONFIG_USB_NET_*` / `CONFIG_USB_SERIAL_*` /
+   `CONFIG_MHI_*` row in the manifest must reach the table. That candidate set is
+   DERIVED, not a third hardcoded list — bare rows are `menuconfig` PARENTS
+   (`CONFIG_USB_SERIAL`, `CONFIG_USB_NET_DRIVERS`) that build no module of their
+   own, so "has a value" is what separates a leaf from its gate.
+
+Direction 2 is the regression that already happened: **PR #144 declared
+`CONFIG_USB_NET_RNDIS_HOST` in `manifests/kernel/rk3588-edge.fragment` and
+nothing told the checker**, so the only signal for a shipped-`.ko` drop skipped
+it in silence for three releases (todo-50 finding D1). Deleting that table row
+now fails the suite.
+
+**`mtk_t7xx` is deliberately NOT a table row.** `CONFIG_MTK_T7XX` is in neither
+the fragment nor `required-symbols.list`, so it has no manifest row to be
+cross-checked against and adding it would break the lockstep gate in the exact
+direction the gate protects. It keeps its own separate native-M.2 probe, which is
+advisory and runs on every tree. It joins the table the day the symbol is
+declared — the same hardware-evidence decision, not an extra one.
+
+- Hyphen/underscore aware (the `cdc_wdm` module ships on disk as `cdc-wdm.ko`,
+  and `cdc_acm` as `cdc-acm.ko`).
 - The `option` module is matched by an exact `option.ko` basename, a
   `…/option.ko` `modules.builtin` entry, or a `modules.alias` module token —
   **never** a bare `option` substring (a known false-positive trap).
 - Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) before opening a `.deb`.
-- **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
-  the check **always exits 0**. It never fails the build and never edits
-  `shared.list` or the kernel config. Proof: `run-tests` section 17.
+  An input it cannot inspect at all stays a warn-and-pass: that is a statement
+  about the host's tooling, not about the kernel's modules.
+- It still edits nothing — not `shared.list`, not the kernel config. The only
+  thing it changes is its own exit status.
+- **The FAIL path `exit`s rather than returning non-zero, and that is not
+  interchangeable.** A non-zero RETURN from the top-level call trips
+  `common.sh`'s ERR trap, which prints `ERROR at …: return "${rc}"` UNDER the
+  verdict and reads as the checker having crashed — sending a reader to this file
+  instead of to the module it just named. Disarming the trap from inside the
+  function cannot work either: with `errtrace` unset, bash removes the ERR trap
+  for the duration of a function and restores it on return.
+
+Guards: `tests/package-contract.bats` §17 (16 cases — the three scenarios, each
+newly-required module driven out one at a time, both lockstep directions, the
+single-source rule, the opt-out and its refused-value leg, and `--help`).
+Mutation-verified: deleting the `rndis_host` row, demoting `cdc_acm` to advisory,
+accepting a bad opt-out value, adding an unpinned table row, and dropping the
+fail-closed return each fail the suite.
+
+**KNOWN DOC GAP, deliberately not fixed here:** the WWAN block comment in
+`manifests/kernel/rk3588-edge.fragment` still says "the six modules
+lib/check-wwan-modules.sh binds the modem stack to". It is now nine required plus
+four advisory. The sentence was left alone because that file was another change's
+territory; the lockstep it describes is enforced by the two gates above rather
+than by the comment, so this is a stale sentence and not a stale contract.
 
 **The board-gated M.2 SIM quirk rows now SHIP — `CERALIVE_BOARD_QUIRKS` is how a
 board-manifest fact crosses the subimage boundary** [EXISTS — fixed 2026-08-19]
@@ -4163,10 +4242,18 @@ Debian `shared.list` so an operator can power-cycle a physically wedged USB mode
 on a remote board. No service, timer, udev rule, or modem provider invokes it:
 an automatic port power cut during a live stream would drop that bond link.
 
-**The native FM350 check is vendor-track scoped.** `lib/check-wwan-modules.sh`
-reports `mtk_t7xx` only for a `*-vendor-rk35xx` module tree. Mainline is out of
-scope, and the USB `0e8d:7127` bench personality is not evidence that native PCIe
-`14c3:4d75` support exists. The check remains advisory in every case.
+**The native FM350 check runs on EVERY tree, and it is advisory.**
+`lib/check-wwan-modules.sh` reports `mtk_t7xx` for whatever module tree it is
+pointed at. It used to be scoped to a `*-vendor-rk35xx` release, because the
+interesting subject then was a prebuilt Armbian package's own bytes; that track
+is retired, every kernel is now built from pinned source, and a source-built
+module set is exactly as inspectable — so the scoping is gone and an absence is
+said out loud instead of skipped. `tests/package-contract.bats` §17 carries an
+absence guard against the release-marker branch returning. The USB `0e8d:7127`
+bench personality remains no evidence that native PCIe `14c3:4d75` support
+exists, and this probe stays advisory in every case: it is separate from the
+required/advisory `WWAN_MODULE_TABLE` split above precisely because
+`CONFIG_MTK_T7XX` is declared nowhere, so there is no manifest row to hold it to.
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
 `FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 15 first-party `.deb`s
