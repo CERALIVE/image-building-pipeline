@@ -909,7 +909,10 @@ YAML
   serialize build-plan
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
-    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
+    # The literal documented command must exit after plan generation. DRY_RUN
+    # stages no archives, so reaching the partition/BSP gates would inspect an
+    # intentionally empty staging tree and fail.
+    run env DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
     [ "$status" -eq 0 ]
     [[ "$output" == *"kernel_variant=default"* ]]
     [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware linux-u-boot-"* ]]
@@ -920,7 +923,18 @@ YAML
     [[ "$output" == *"RK3588 userspace set from rk3588.yaml (4 pkgs)"* ]]
     [[ "$output" != *"libmali"* ]]
     [[ "$output" == *"[2b/9] building kernel from pinned source (variant 'edge')"* ]]
+    [[ "$output" == *"DRY-RUN complete: board='${board}'"* ]]
+    [[ "$output" != *"[3/9] partitioning staged .debs"* ]]
   done
+}
+
+@test "kernel build: retains the resolved config and built module inventory" {
+  local src="$PIPELINE_DIR/lib/build-kernel.sh"
+  grep -Fq 'cp .config /out/resolved.config' "$src"
+  grep -Fq 'find . -type f -name "*.ko" -printf "%P\n"' "$src"
+  grep -Fq 'install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"' "$src"
+  grep -Fq 'install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"' "$src"
+  grep -Fq 'kernel build produced no modules inventory' "$src"
 }
 
 @test "orchestrate: x86 DRY_RUN is unaffected by the variant machinery" {

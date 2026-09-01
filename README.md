@@ -185,6 +185,13 @@ A single resolved board execs the orchestrator directly. A multi-board selection
 `lib/build-all.sh`. An unknown board in `--only` fails loudly: it names the
 offender and lists the available boards.
 
+A source-kernel dry run exits after emitting the fetch and kernel plans; it does
+not send the intentionally empty staging tree through package or BSP validation.
+A real source-kernel build retains `resolved.config` (the exact post-
+`olddefconfig` configuration) and `built-modules.txt` (the sorted `.ko`
+inventory) beside the kernel `.deb` under
+`mkosi/.staging/<board>/kernel-build/`.
+
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).

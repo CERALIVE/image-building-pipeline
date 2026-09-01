@@ -87,6 +87,7 @@
 # invocation) and touches no network, no container and no disk beyond the plan.
 #
 # shellcheck shell=bash
+# shellcheck disable=SC2016  # injected bash -c payload expands inside the container
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -459,6 +460,10 @@ main() {
       echo "== verifying the declared config survived olddefconfig"
       bash /in/verify-kernel-config.sh "${declared_config}" .config ${CONFIG_ALLOW_ABSENT}
 
+      # Retain the exact post-olddefconfig answer, rather than asking a later
+      # audit to reconstruct it from the fragment and toolchain.
+      cp .config /out/resolved.config
+
       release="$(make -s kernelrelease LOCALVERSION="${LOCAL_VERSION}")"
       if [ "${release}" != "${KERNEL_RELEASE}" ]; then
         echo "FATAL: kernelrelease is ${release}, manifest declares ${KERNEL_RELEASE} — the source version moved under the pin, or LOCALVERSION drifted" >&2
@@ -470,6 +475,14 @@ main() {
         LOCALVERSION="${LOCAL_VERSION}" \
         KDEB_PKGVERSION="${PACKAGE_VERSION}" \
         bindeb-pkg
+
+      # Inventory the modules that this compile actually produced. Paths are
+      # source-tree-relative and sorted so the artifact is stable and diffable.
+      find . -type f -name "*.ko" -printf "%P\n" | LC_ALL=C sort > /out/built-modules.txt
+      if [ ! -s /out/built-modules.txt ]; then
+        echo "FATAL: kernel build produced no modules inventory" >&2
+        exit 1
+      fi
 
       # bindeb-pkg writes its .debs into the parent of the source tree.
       cp /src/"${KERNEL_PACKAGE}"_*.deb /out/
@@ -522,7 +535,10 @@ main() {
   validate_built_kernel_deb "${built[0]}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}"
 
   "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${built[0]}" "${out_dir}"
+  install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"
+  install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"
   log_success "kernel-build-from-source: staged $(basename "${built[0]}") -> ${out_dir}"
+  log_success "kernel-build-from-source: retained resolved.config + built-modules.txt -> ${out_dir}"
 }
 
 # Only run main when executed directly; sourcing (tests) gets the functions only.

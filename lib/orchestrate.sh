@@ -257,9 +257,12 @@ main() {
 
   stage_fetch
   stage_kernel_build
+  # DRY_RUN stages no archives. Exit after both fetch and source-kernel plans
+  # have been emitted, before the package partition/BSP gates inspect the
+  # intentionally empty staging tree.
+  stage_dry_run_plan
   stage_partition
   stage_bsp_gate
-  stage_dry_run_plan
   stage_mkosi
   stage_tar_emit
   stage_boot_verify

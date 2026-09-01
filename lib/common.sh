@@ -219,7 +219,7 @@ CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
 container_runtime_major() {
   local runtime="${1:?container_runtime_major needs a runtime}" out major
   out="$("${runtime}" --version 2>/dev/null)" || return 0
-  major="$(printf '%s' "${out}" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n1)"
+  major="$(printf '%s' "${out}" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   [[ "${major}" =~ ^[0-9]+$ ]] || return 0
   printf '%s' "${major}"
 }

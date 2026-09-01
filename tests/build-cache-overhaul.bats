@@ -142,6 +142,23 @@ apt_layer() {
   [[ "$output" == *"RUN --mount=type=cache"* ]]
 }
 
+@test "buildkit: a two-digit Docker major is not misread as the minor" {
+  local bin="$BATS_TEST_TMPDIR/docker-version/bin"
+  mkdir -p "$bin"
+  cat >"$bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'Docker version 29.7.2, build a7dcaa6fdb'
+EOF
+  chmod +x "$bin/docker"
+
+  run env PATH="$bin:$PATH" bash -c "
+    source '$LIB_DIR/common.sh'
+    container_runtime_major docker
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "29" ]
+}
+
 # ---------------------------------------------------------------------------
 # (b) the kernel-source mirror — static contract only
 # ---------------------------------------------------------------------------

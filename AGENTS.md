@@ -1489,6 +1489,13 @@ container with a persistent ccache. There is no prebuilt-kernel path left:
 The patch commit is an **immutable SHA**, never a branch. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
 
+Every real source-kernel build also retains `resolved.config`, copied after the
+shared `olddefconfig` / `syncconfig` / config-survival gate, and
+`built-modules.txt`, the sorted source-relative `.ko` inventory. Both live beside
+the staged kernel `.deb` under `mkosi/.staging/<board>/kernel-build/`. A
+`DRY_RUN=1` build exits after the fetch and kernel plans; it must not enter
+`[3/9]` or the BSP gate because a dry run intentionally stages no archives.
+
 **Hardware encode and decode are the CeraLive MEDIA ISLAND now, not a standalone
 V4L2 encoder — and `CONFIG_VIDEO_ROCKCHIP_RKVENC` exists in no Kconfig at this
 pin** [EXISTS — configured and dry-run-proven; NO board has run it]

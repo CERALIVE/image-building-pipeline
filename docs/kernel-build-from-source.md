@@ -362,7 +362,10 @@ reviewed fragment.
 kernel and the in-tree DTBs. `bindeb-pkg` also emits `linux-headers-*` and
 `linux-libc-dev`; both are **discarded before staging** (the device image
 installs neither). The build fails if the expected `linux-image` deb is missing
-or if more than one matches.
+or if more than one matches. The stage additionally retains two audit artifacts
+beside that `.deb`: `resolved.config`, copied after `olddefconfig`, `syncconfig`,
+and the config-survival gate; and `built-modules.txt`, a sorted inventory of the
+`.ko` files the compile actually produced.
 
 **Validated, not assumed.** Before staging, the built `.deb` is checked on four
 axes against the manifest: control `Package:`, control `Version:`, control
