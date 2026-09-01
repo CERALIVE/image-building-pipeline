@@ -213,6 +213,111 @@ EOF
   run ! grep -q '^CONFIG_NFT_COUNTER=' "$FRAGMENT"
 }
 
+# --- the modem + Bluetooth protocol closure ----------------------------------
+#
+# Nine symbols, and they are NOT all the same kind of claim. Read against the
+# pinned v7.2 tree's own resolved config, three measured `is not set` — a real
+# capability gain — and six already resolved, so their lines are ASSERTIONS of
+# the CONFIG_TYPEC_FUSB302 kind: pinned so that "defconfig happens to supply it"
+# cannot stop being true in silence.
+#
+# All nine must be MODULES. None of them is on a boot-critical path the way
+# CONFIG_NF_TABLES is (the ingest firewall runs before any autoload could), so
+# there is no reason to build them in and every reason not to grow the image.
+
+@test "rk3588-edge.fragment: the modem + Bluetooth protocol closure is declared, as MODULES" {
+  local sym
+  for sym in USB_ACM USB_SERIAL_QUALCOMM USB_SERIAL_WWAN \
+             MHI_BUS MHI_WWAN_CTRL MHI_WWAN_MBIM \
+             BT_RFCOMM BT_BNEP USB_NET_RNDIS_HOST; do
+    grep -qx "CONFIG_${sym}=m" "$FRAGMENT" \
+      || { echo "fragment does not declare CONFIG_${sym}=m"; false; }
+    # Built-in is the wrong answer for every one of them, and =y is the value a
+    # future edit is most likely to reach for.
+    run ! grep -qx "CONFIG_${sym}=y" "$FRAGMENT"
+  done
+  # Exactly nine — a duplicate line would be a defect, not a belt-and-braces.
+  [ "$(grep -cE '^CONFIG_(USB_ACM|USB_SERIAL_QUALCOMM|USB_SERIAL_WWAN|MHI_BUS|MHI_WWAN_CTRL|MHI_WWAN_MBIM|BT_RFCOMM|BT_BNEP|USB_NET_RNDIS_HOST)=m$' "$FRAGMENT")" -eq 9 ]
+}
+
+@test "rk3588-edge.fragment: MHI_BUS precedes the MHI_WWAN leaves that depend on it" {
+  # Same declare-the-parent-first rule as RTW89 and NF_TABLES. MHI_BUS is
+  # `select`ed by the ath11k/ath12k leaves, but MHI_WWAN_CTRL/MHI_WWAN_MBIM
+  # `depends on` it and select NOTHING — so dropping both Wi-Fi leaves would
+  # take the modem transport with them unless MHI_BUS is declared in its own
+  # right, which is why the ath comment no longer claims it "gets no entry".
+  local bus ctrl mbim
+  bus="$(grep -n '^CONFIG_MHI_BUS=m$' "$FRAGMENT" | cut -d: -f1)"
+  ctrl="$(grep -n '^CONFIG_MHI_WWAN_CTRL=m$' "$FRAGMENT" | cut -d: -f1)"
+  mbim="$(grep -n '^CONFIG_MHI_WWAN_MBIM=m$' "$FRAGMENT" | cut -d: -f1)"
+  [ "$bus" -lt "$ctrl" ]
+  [ "$bus" -lt "$mbim" ]
+  run ! grep -q 'MHI_BUS.*so they get no entry' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: the gate REJECTS the resolved .config v7.2 produced BEFORE this closure" {
+  # Not synthetic: these are the measured values for exactly these symbols in
+  # the v7.2 resolved config captured by the patches repo, which is what the
+  # board would have carried. Three absences and six survivors — so this is a
+  # red/green pair in ONE fixture, and it fails if the gate ever stops
+  # distinguishing them.
+  cat >"$WORK/pre-closure" <<'EOF'
+CONFIG_BT=m
+CONFIG_BT_BREDR=y
+# CONFIG_BT_RFCOMM is not set
+# CONFIG_BT_BNEP is not set
+CONFIG_WWAN=m
+CONFIG_MHI_BUS=m
+CONFIG_MHI_WWAN_CTRL=m
+CONFIG_MHI_WWAN_MBIM=m
+CONFIG_USB_ACM=m
+# CONFIG_USB_SERIAL_QUALCOMM is not set
+CONFIG_USB_SERIAL_WWAN=m
+CONFIG_USB_SERIAL_OPTION=m
+# CONFIG_USB_NET_RNDIS_HOST is not set
+EOF
+  run "$VERIFY" "$FRAGMENT" "$WORK/pre-closure"
+  [ "$status" -eq 1 ]
+  # The three that were genuinely absent must be named.
+  [[ "$output" == *"CONFIG_BT_RFCOMM: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_BT_BNEP: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_USB_SERIAL_QUALCOMM: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_USB_NET_RNDIS_HOST: DROPPED"* ]]
+  # The six that already resolved must NOT be — an assertion that fires on a
+  # config honouring it is a gate nobody can act on.
+  [[ "$output" != *"CONFIG_USB_ACM"* ]]
+  [[ "$output" != *"CONFIG_USB_SERIAL_WWAN"* ]]
+  [[ "$output" != *"CONFIG_MHI_BUS"* ]]
+  [[ "$output" != *"CONFIG_MHI_WWAN_CTRL"* ]]
+  [[ "$output" != *"CONFIG_MHI_WWAN_MBIM"* ]]
+}
+
+@test "closure manifests: the modem + Bluetooth closure is MIRRORED, parents included" {
+  # THE GAP THIS CLOSES, and it is not hypothetical. PR #144 added
+  # CONFIG_USB_NET_RNDIS_HOST=m to the fragment and never mirrored it here, so
+  # for four merged PRs the fragment line was the symbol's ONLY assertion —
+  # exactly the asymmetry required-symbols.list exists to prevent, since a later
+  # edit deleting that line would have removed the last thing checking it.
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local sym
+  for sym in USB_ACM USB_SERIAL_QUALCOMM USB_SERIAL_WWAN \
+             MHI_BUS MHI_WWAN_CTRL MHI_WWAN_MBIM \
+             BT_RFCOMM BT_BNEP USB_NET_RNDIS_HOST; do
+    grep -qx "CONFIG_${sym}=m" "$req" \
+      || { echo "fragment declares CONFIG_${sym}=m but required-symbols.list does not mirror it"; false; }
+  done
+
+  # The two menuconfig parents this closure added, in the two documented forms.
+  # WWAN is a TRISTATE parent, so it is bare — its own m-vs-y is defconfig's
+  # business and pinning it would fail the build over a difference the device
+  # cannot observe. BT_BREDR is a BOOL, where there is no such ambiguity and n
+  # is the one value that would silently take both protocol leaves with it.
+  grep -qx 'CONFIG_WWAN' "$req"
+  grep -qx 'CONFIG_BT_BREDR=y' "$req"
+  # Bare means bare: a value on WWAN would be a different, stronger claim.
+  run ! grep -q '^CONFIG_WWAN=' "$req"
+}
+
 @test "rk3588-edge.fragment: the gate REJECTS the resolved .config the broken 7.1.5 build produced" {
   # A synthetic reproduction of the shipped build's answer for the symbols this
   # defect turned on: the rtw89 family off, the nftables family off, FUSB302
