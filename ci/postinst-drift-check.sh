@@ -72,6 +72,7 @@ readonly CONSOLIDATED_FUNCS=(
   configure_ssh_enablement write_ssh_preset assert_ssh_not_enabled
   configure_networking configure_services setup_hostname_service
   setup_data_persistence setup_boot_healthcheck setup_cert_rotation
+  setup_journald_retention setup_machine_id_persistence setup_journal_dir_gc
   setup_provisioning setup_rtmp_gateway
   setup_ingest_firewall setup_uplink_sharing_carrier setup_dongle_netns_retirement
   setup_typec_policy setup_fan_curve apply_board_quirks

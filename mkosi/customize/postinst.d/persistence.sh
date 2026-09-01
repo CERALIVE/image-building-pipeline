@@ -7,10 +7,17 @@
 # both sides of the A/B boundary:
 #
 #   * setup_data_persistence  the /data skeleton, the first-boot migration and
-#                             the bind mounts that keep config, logs, WiFi
-#                             profiles and machine-id ACROSS a RAUC slot swap —
-#                             plus /usr/local/bin/ceralive-update, the entrypoint
+#                             the bind mounts that keep config, logs and WiFi
+#                             profiles ACROSS a RAUC slot swap — plus
+#                             /usr/local/bin/ceralive-update, the entrypoint
 #                             that performs the swap.
+#   * the three DIAGNOSABILITY installers (journald retention, the persistent
+#                             machine-id, the one-time journal-dir migration).
+#                             They live here because all three are statements
+#                             about what /data holds and what survives a slot
+#                             swap; machine-id in particular USED to be part of
+#                             setup_data_persistence and was moved out because a
+#                             validated identity needs its own ordered unit.
 #   * freeze_boot_packages    the apt-mark holds + name+version pin that stop the
 #                             boot stack changing WITHOUT one, because
 #                             docs/partition-contract.md rule 3 puts
@@ -121,13 +128,14 @@ if [ -d "$NM_CONN" ] && ! mountpoint -q "$NM_CONN"; then
     cp -a "$NM_CONN"/. "$DATA/nm/system-connections/" 2>/dev/null || true
 fi
 
-# Persist machine-id across A/B slots so host identity and setup identifiers are stable.
-if [ -s /etc/machine-id ] && [ ! -s "$DATA/ceralive/machine-id" ]; then
-    cp -a /etc/machine-id "$DATA/ceralive/machine-id"
-fi
-if [ -s "$DATA/ceralive/machine-id" ] && ! mountpoint -q /etc/machine-id; then
-    mount --bind "$DATA/ceralive/machine-id" /etc/machine-id 2>/dev/null || true
-fi
+# machine-id is NOT handled here. It used to be — an `[ -s ]` seed plus a
+# `mount --bind ... || true`, which accepted systemd's literal `uninitialized`
+# first-boot marker as a board identity and skipped its own bind whenever
+# /etc/machine-id was already a mountpoint. A board carrying that mechanism was
+# measured with TWENTY journal directories and an /etc copy that disagreed with
+# the /data one. It now belongs to ceralive-machine-id.service, which validates
+# the value and COMMITS it to /etc rather than mounting over it; this unit only
+# guarantees the /data/ceralive directory that holds it.
 
 # Relocate first-boot hostname state onto /data (contract §6). The local
 # allocation lock stays under /run because it is process coordination only.
@@ -267,6 +275,73 @@ echo "ceralive-update: installed to inactive slot; reboot to activate (task-29 m
 exit 0
 EOF
   chmod +x /usr/local/bin/ceralive-update
+}
+
+# ---------------------------------------------------------------------------
+# DIAGNOSABILITY — a device whose journal holds a hundred seconds of history
+# cannot be diagnosed, and this image shipped exactly that.
+#
+# Measured on a shipped Rock 5B+ (2026-08-30): one boot in the journal, six lines
+# of NetworkManager, an EMPTY wpa_supplicant unit journal, /data at 98 % full,
+# and twenty machine-id journal directories that journalctl does not read. Three
+# independent defects, so three installers — each of which is only the CARRIER
+# for a committed artifact under mkosi/runtime/, never an inlined heredoc (the
+# ci/postinst-drift-check.sh line ceiling on the runtime executor, and the same
+# standalone-artifact idiom as setup_avahi_restart / setup_tls_proxy).
+#
+# Test seams: JOURNALD_DROPIN_DIR, MACHINE_ID_{SBIN,UNIT}_DIR,
+# JOURNAL_GC_{SBIN,UNIT}_DIR.
+# ---------------------------------------------------------------------------
+
+# The journal has no budget of its own, so it inherits whatever is left of the
+# /data partition it is bind-mounted onto — which on the measured board was
+# nothing. See the drop-in's own header for the sizing argument.
+setup_journald_retention() {
+  log "installing journald retention drop-in (persistent storage, explicit /data budget, per-unit rate limits)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/journald"
+  [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/10-ceralive-journal.conf" ]] \
+    || die "journald drop-in source not found: ${src}/10-ceralive-journal.conf (is \$SRCDIR/runtime mounted?)"
+  local dropin_dir="${JOURNALD_DROPIN_DIR:-/etc/systemd/journald.conf.d}"
+  mkdir -p "${dropin_dir}"
+  install -m 0644 "${src}/10-ceralive-journal.conf" "${dropin_dir}/10-ceralive-journal.conf"
+}
+
+# The A/B-stable board identity. Its whole reason for existing is that the
+# mechanism this replaces validated nothing and bound too late; the script header
+# carries the full post-mortem.
+setup_machine_id_persistence() {
+  log "installing persistent machine-id service (validated 32-hex id on /data, committed to /etc/machine-id)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/machine-id"
+  local artifact
+  for artifact in ceralive-machine-id.sh ceralive-machine-id.service; do
+    [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/${artifact}" ]] \
+      || die "machine-id source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  local sbin_dir="${MACHINE_ID_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${MACHINE_ID_UNIT_DIR:-/etc/systemd/system}"
+  mkdir -p "${sbin_dir}" "${unit_dir}"
+  install -m 0755 "${src}/ceralive-machine-id.sh" "${sbin_dir}/ceralive-machine-id"
+  install -m 0644 "${src}/ceralive-machine-id.service" "${unit_dir}/ceralive-machine-id.service"
+  enable_service ceralive-machine-id.service
+}
+
+# The bounded migration that clears what the churn already left behind. It is
+# enabled because it has to run once on a board that has never run it; it is
+# stamped because it must never become the thing that keeps churn survivable.
+setup_journal_dir_gc() {
+  log "installing one-time journal-directory migration (retains the live machine-id's journal + one predecessor)"
+  local src="${CERALIVE_RUNTIME_SRC:-}/journald"
+  local artifact
+  for artifact in ceralive-journal-gc.sh ceralive-journal-gc.service; do
+    [[ -n "${CERALIVE_RUNTIME_SRC:-}" && -f "${src}/${artifact}" ]] \
+      || die "journal-gc source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  local sbin_dir="${JOURNAL_GC_SBIN_DIR:-/usr/local/sbin}"
+  local unit_dir="${JOURNAL_GC_UNIT_DIR:-/etc/systemd/system}"
+  mkdir -p "${sbin_dir}" "${unit_dir}"
+  install -m 0755 "${src}/ceralive-journal-gc.sh" "${sbin_dir}/ceralive-journal-gc"
+  install -m 0644 "${src}/ceralive-journal-gc.service" "${unit_dir}/ceralive-journal-gc.service"
+  enable_service ceralive-journal-gc.service
 }
 
 # ---------------------------------------------------------------------------

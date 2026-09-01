@@ -887,6 +887,62 @@ that actually carries the uplink on a bonding sender device, so it is now part
 of the guard alongside the encoder and receiver. Proof: `run-tests`
 section 16.
 
+## Journal Retention and the Persistent machine-id
+
+A shipped Rock 5B+ was measured with **one boot in the journal, six lines of
+NetworkManager history spanning about a hundred seconds, an empty
+`wpa_supplicant` journal, `/data` at 98 % full and twenty machine-id journal
+directories** — nineteen of which `journalctl` does not read. A device in that
+state cannot be diagnosed at all; every field report becomes "reproduce it while
+I watch". Three independent causes, so three fixes.
+
+**The journal now has a budget, and it is a budget against `/data`.**
+`/etc/systemd/journald.conf.d/10-ceralive-journal.conf` sets
+`Storage=persistent` with an explicit `SystemMaxUse=256M`, `SystemKeepFree=1G`
+and `SystemMaxFiles=16`. `/var/log` is bind-mounted from `/data/log`, so an
+unbounded journal does not merely lose logs — it competes with the OTA download
+directory, the cert store and the CeraUI config for the one partition that
+survives a slot swap. `RateLimitIntervalSec=`/`RateLimitBurst=` are journald's
+**per-service** limits, set well below the upstream default so one runaway unit
+can no longer evict every other unit's history. `Audit=no` stops the kernel audit
+stream, which was 144 of the last ~350 records on the measured board and has no
+reader on this image (`auditd` is not installed).
+
+**The board identity is now validated, persistent and never rotated.**
+`ceralive-machine-id.service` keeps ONE 32-lowercase-hex id at
+`/data/ceralive/machine-id` and commits it to `/etc/machine-id`. A machine-id
+persistence mechanism was already shipped and was broken in two ways that both
+look like success: it accepted any non-empty content — including the literal
+`uninitialized` this image ships as systemd's first-boot marker — and its
+`mount --bind` was silently skipped whenever `/etc/machine-id` was already a
+mountpoint, which is exactly what PID 1 leaves behind on the transient path. That
+is why the measured board had a valid id on `/data`, a *different* one in `/etc`,
+and a journal fragmented across twenty directories.
+
+The fix is a commit to the rootfs file rather than a mount, because the board
+boots with **no initramfs** (the selector loads the bare name `/boot/initrd.img`,
+the kernel package installs only `/boot/initrd.img-<REL>`, and that load is
+optional by design), so nothing can run before PID 1 reads the file. Writing it
+means PID 1 — and therefore journald, NetworkManager and the hostname service —
+resolves the persistent value on every subsequent boot of the slot. A valid id is
+never regenerated, and a fresh board adopts the id PID 1 generated instead of
+inventing a second one.
+
+**The leftover journal directories are cleaned up exactly once.**
+`ceralive-journal-gc` retains the live machine-id's directory plus at most one
+predecessor and then stamps `/data/ceralive/.journal-dir-gc-done`. It is a
+migration, not a collector: an ongoing sweep would make id churn survivable
+instead of fixed. It only ever removes directories named 32 lowercase hex digits
+directly under the journal root, and refuses to act at all if the current
+machine-id is invalid.
+
+All of this is verified offline — installers, unit ordering (via
+`systemd-analyze verify` probes), validation, never-rotate byte-equality across a
+simulated reboot and a simulated A/B slot flip, and the cleanup's retention rule.
+**None of it is boot-proven on hardware yet.** Guards:
+`tests/journal-diagnosability.bats` and `tests/systemd-ordering-cycle.test.sh`
+Part D.
+
 ## USB-C Type-C Adaptive Role Policy
 
 The board's USB-C connector is a dual-role (DRP) FUSB302/TCPM port, so on a fresh

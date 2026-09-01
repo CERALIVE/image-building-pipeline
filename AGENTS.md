@@ -80,6 +80,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
 | **Boot-time network readiness + dead-weight unit masks** | `mkosi/customize/postinst-lib.sh` `configure_networkmanager_wait_online` (one usable connection, not global optional-modem startup completion) + `suppress_unusable_boot_units` / `mask_service` (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait) — see the KEY FACT below |
+| **Journal retention, the persistent machine-id, and the one-time journal-dir migration** | `mkosi/runtime/journald/` + `mkosi/runtime/machine-id/` installed by `mkosi/customize/postinst.d/persistence.sh` (`setup_journald_retention` / `setup_machine_id_persistence` / `setup_journal_dir_gc`); guards `tests/journal-diagnosability.bats` + `tests/systemd-ordering-cycle.test.sh` Part D — see the ~100-seconds-of-history KEY FACT below |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
 | **Which strict-mode / logging profile a script must use** | [`docs/shell-profiles.md`](docs/shell-profiles.md) — build-strict / device-daemon / contract-test |
@@ -3526,17 +3527,22 @@ A plain file would SKIP the unit silently. It ran and failed:
 ```
 
 …because `postinst-lib.sh::setup_data_persistence`'s generated
-`ceralive-migrate-data` does `mount --bind "$DATA/ceralive/machine-id"
+`ceralive-migrate-data` did `mount --bind "$DATA/ceralive/machine-id"
 /etc/machine-id` to keep host identity stable across A/B slots. That bind mount
-SATISFIES `ConditionPathIsMountPoint`, the unit starts, and
-`systemd-machine-id-setup --commit` then correctly refuses because the bind SOURCE
+SATISFIED `ConditionPathIsMountPoint`, the unit started, and
+`systemd-machine-id-setup --commit` then correctly refused because the bind SOURCE
 is real ext4 on `/data`, not a tmpfs. The unit exists solely to persist a machine-id
-an initrd generated on tmpfs; this image's persistence model is the bind mount, so
-the unit is structurally guaranteed to fail on every boot, forever. Note
+an initrd generated on tmpfs.
+
+**That bind is GONE** — the machine-id is now COMMITTED to the rootfs file by
+`ceralive-machine-id.service` (see the machine-id KEY FACT below), so
+`ConditionPathIsMountPoint` no longer holds and the unit would skip silently on its
+own. **The mask stays anyway**, and deliberately: it costs nothing, and it is what
+keeps this true if any future mechanism reintroduces a mount at that path. Note
 `ceralive-hostname.service` keeps its historical
 `After=systemd-machine-id-commit.service` — that edge was ALREADY vacuous (it was
-ordering after a unit that always failed), and the real machine-id guarantee comes
-from `ceralive-migrate-data.service`, which is in the same `After=` list.
+ordering after a unit that always failed) — while the real machine-id guarantee is
+now `ceralive-machine-id.service`, which is ordered `Before=` it.
 
 **`dnsmasq.service` is the STANDALONE Debian unit, and it is NOT the hotspot's
 dnsmasq.** It always loses port 53 to `systemd-resolved`, which owns it by design
@@ -3608,6 +3614,128 @@ resurrection path closed, mask-not-disable, the fail-closed leg proving a
 non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
 widen to NetworkManager/resolved/udevd/`chrony.service`, and the
 `configure_services` wiring).
+
+**A shipped board's journal held ~100 SECONDS of per-unit history — the machine-id
+persistence that was supposed to prevent that had shipped, and was broken in two
+specific places** [EXISTS — built and gated, NOT yet boot-proven]
+
+Measured on a shipped Rock 5B+ on 2026-08-30 (evidence
+`.omo/evidence/board-diag-20260830-netmodem-192.168.78.132.md` §5.4):
+
+```
+journalctl --list-boots        ->  ONE boot
+journalctl -u NetworkManager   ->  6 lines  (08:54:03 .. 08:55:42 — ~100 seconds)
+journalctl -u wpa_supplicant   ->  EMPTY
+/data                          ->  98 % full
+ls -d /var/log/journal/*/      ->  20 directories   (largest 176 MB)
+/etc/machine-id                ->  f2346da8af8f48fdb339d17e8c21a25e
+/opt/ceralive/machine-id       ->  69eae157d96657b5f7af5a096a736fba   ← different!
+```
+
+A device that cannot answer "what happened an hour ago" turns every field report
+into "reproduce it while I watch". Three independent defects compounded, so there
+are three fixes, all installed from `mkosi/runtime/` by `postinst.d/persistence.sh`.
+
+**THE MACHINE-ID MECHANISM WAS ALREADY THERE. READ THIS BEFORE "ADDING" ONE.** The
+last two lines above are the whole diagnosis: a persistent copy existed on `/data`
+and the running system was not using it. `ceralive-migrate-data` carried
+
+```sh
+if [ -s /etc/machine-id ] && [ ! -s "$DATA/ceralive/machine-id" ]; then
+    cp -a /etc/machine-id "$DATA/ceralive/machine-id"
+fi
+if [ -s "$DATA/ceralive/machine-id" ] && ! mountpoint -q /etc/machine-id; then
+    mount --bind "$DATA/ceralive/machine-id" /etc/machine-id 2>/dev/null || true
+fi
+```
+
+and both halves fail in ways that look like success:
+
+- **`-s` is "non-empty", not "valid".** The image ships `/etc/machine-id` holding
+  the literal `uninitialized` — systemd's own first-boot marker, 14 bytes, very
+  much non-empty — so the seeder would happily promote it to the board's permanent
+  identity. A truncated write, an uppercase id or a stray second line were equally
+  acceptable.
+- **The bind is SKIPPED whenever `/etc/machine-id` is already a mountpoint**, which
+  is exactly the state PID 1 leaves when it takes the transient machine-id path,
+  and `2>/dev/null || true` swallows a failing bind as well. Either way the
+  persistent copy is never consumed — the two-different-values state above.
+
+**THERE IS NO INITRAMFS TO HOOK, AND THAT IS A PROPERTY OF THIS IMAGE.** The
+obvious "supply it earlier than PID 1" fix is an initramfs hook, and it cannot work
+here: `mkosi/platform/boot/boot.scr.cmd` loads the bare name `/boot/initrd.img`
+while the kernel package installs only `/boot/initrd.img-<REL>`, and that load is
+**optional by design** — the selector falls through to `booti ${kernel_addr_r} -
+${fdt_addr_r}`. The board boots with no initramfs at all, so nothing runs before
+PID 1 reads the file. Do not "fix" that by materialising `/boot/initrd.img`; that
+is a boot-contract change with real bricking risk, not a diagnosability change.
+
+**So the earliest supply that actually survives is a COMMIT, not a mount.**
+`ceralive-machine-id.service` writes the validated id into the rootfs
+`/etc/machine-id`, which means PID 1 — and therefore journald, NetworkManager and
+`ceralive-hostname.service` — resolves the persistent value on every subsequent
+boot of that slot, with no mount to be skipped, hidden or lost. Four rules:
+
+1. **ONE valid id, generated exactly once.** 32 lowercase hex on a single line,
+   stored at `/data/ceralive/machine-id`, which is the only partition an A/B slot
+   swap preserves.
+2. **Validated, and `uninitialized` is rejected BY NAME** as well as by shape, so
+   the journal line says which defect was found. Regeneration happens **only** then.
+3. **A valid existing id is NEVER rotated** — not on a slot swap, not on a re-run,
+   not when `/etc/machine-id` disagrees. `/data` is the identity; `/etc` is
+   reconciled TO it. A fresh board with no `/data` copy **adopts** the id PID 1
+   generated rather than inventing a second one, so the journal directory journald
+   already opened IS the permanent one.
+4. **Ordering is the point of the unit, and it is proven rather than asserted.**
+   `DefaultDependencies=no` + `Before=local-fs.target` keeps it in the same
+   early phase as `ceralive-migrate-data.service` (a normal service inherits
+   `After=basic.target`, which is after `local-fs.target` — the exact cycle that
+   unit's own header documents). `RequiresMountsFor=/data /var/log` orders it after
+   the **`/var/log` bind**, which is not cosmetic: journald caches the machine-id at
+   startup, so the restart this unit issues when the id CHANGED must happen once
+   `/var/log` is the `/data/log` bind, or the reopened journal lands in the rootfs
+   slot and dies with the next OTA. `tests/systemd-ordering-cycle.test.sh` Part D
+   proves both edges with `systemd-analyze verify` probes, and B1 proves the
+   assembled set is still acyclic.
+
+**The journald budget is against `/data`, not the rootfs.** `/var/log` is bind-mounted
+from `/data/log`, so `10-ceralive-journal.conf` states `Storage=persistent` plus an
+explicit `SystemMaxUse=256M` / `SystemKeepFree=1G` / `SystemMaxFiles=16` — a journal
+that fills `/data` does not merely lose logs, it breaks OTA downloads, the cert
+store and CeraUI config writes. `RateLimitIntervalSec=`/`RateLimitBurst=` are journald's
+**per-service** limits (`systemd-journald.conf(5)`: "this rate limiting is applied
+per-service"), set five times below the upstream default so one runaway unit can no
+longer evict every other unit's history — which is how NetworkManager ended up with
+six lines. `Audit=no` stops journald asking the kernel for the audit stream that was
+144 of the last ~350 records on the board; `auditd` is not installed, so nothing reads it.
+
+**The journal-directory cleanup is a ONE-TIME MIGRATION and must never become a
+collector.** `ceralive-journal-gc` retains the live machine-id's directory plus **at
+most one predecessor** (the most recently *modified* other directory — a machine-id
+is random, so name order carries no chronology) and stamps
+`/data/ceralive/.journal-dir-gc-done`, which lives on `/data` precisely so a slot
+swap does not re-arm it. It only ever removes DIRECTORIES that are direct children
+of the journal root AND named 32 lowercase hex digits, so a `remote-*` journal, a
+file or a symlink is untouched, and it refuses to act at all when the current
+machine-id is invalid rather than guessing which directory is live. **Do not make it
+periodic or unstamped**: a fault that quietly cleans up after itself is a fault
+nobody fixes, and the point of the machine-id work above is that there is nothing
+left to collect.
+
+Guards: `tests/journal-diagnosability.bats` (22 cases — installers and their
+fail-closed legs, both audited defects as absence guards, every malformed shape,
+byte-equality across a simulated reboot AND a simulated A/B slot flip, the adopt
+path, the restart-only-when-changed rule, the unit ordering, and the GC's
+retention/one-time/candidate-shape/refusal legs) plus
+`tests/systemd-ordering-cycle.test.sh` Part D. Mutation-verified: accepting any
+non-empty id, rotating a valid one, dropping the predecessor retention and dropping
+`/var/log` from `RequiresMountsFor=` each fail the suite.
+
+**NOT boot-proven.** Everything above is verified from the artifacts and the unit
+graph offline; no board has yet booted an image carrying it. The remaining
+on-hardware step is to confirm `/etc/machine-id` equals `/data/ceralive/machine-id`
+after an OTA slot swap, that `journalctl -u NetworkManager` spans more than one
+boot, and that the GC stamped once and left the live directory plus one predecessor.
 
 **NetworkManager wait-online gates on ONE usable connection, never global startup
 completion.** The stock Trixie unit executes `nm-online -s -q`. `-s` waits for
@@ -5765,6 +5893,10 @@ not an active safety fallback or instruction to re-open D3.
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
+- Don't reintroduce a `mount --bind` of `/data/ceralive/machine-id` onto `/etc/machine-id`, and don't accept an id because it is non-empty. That is the mechanism that shipped: `[ -s ]` promotes systemd's literal `uninitialized` first-boot marker to a board identity, and the bind is silently skipped whenever PID 1 already holds a transient machine-id mount — a measured board had a valid id on `/data`, a DIFFERENT one in `/etc`, and twenty journal directories. The id is COMMITTED to the rootfs file, which is the only supply that survives the next boot
+- Don't try to provision the machine-id from an initramfs hook. This image boots with NO initramfs: the selector loads the bare name `/boot/initrd.img`, the kernel package installs only `/boot/initrd.img-<REL>`, and that load is optional by design. Materialising `/boot/initrd.img` to make a hook possible is a boot-contract change with bricking risk, not a diagnosability change
+- Don't make the journal-directory cleanup periodic, unstamped, or unbounded, and don't widen its candidate shape beyond 32-hex DIRECTORIES. It is a one-time migration for the churn that is now fixed; an ongoing collector would make machine-id churn survivable instead of visible, and a looser match turns it into a general-purpose deleter pointed at `/var/log`
+- Don't size the journal against the rootfs. `/var/log` is the `/data/log` bind, so the budget is spent out of the same partition as the OTA download dir, the cert store and the CeraUI config — which is why `SystemKeepFree` matters as much as `SystemMaxUse`
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
 - Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop to `ceralive-fan-curve`. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong for THAT unit is the threshold it acts on. (`ceralive-fan-kickstart` is the one sanctioned exception, and only to the `cur_state`/resident-loop half: it is a separate unit that writes `cur_state` exactly twice per 0 → nonzero edge and always hands the governor's own state back. `mode`, `pwm1` and trip points remain out of bounds for both.)

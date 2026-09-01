@@ -311,13 +311,15 @@ setup_pipewire_system_mode() {
 # bonding globs — are unaffected. Do NOT widen this to NetworkManager or systemd-udevd.
 #
 # 4. systemd-machine-id-commit.service exists solely to persist a machine-id that an
-# initrd generated on a TMPFS. This image never does that — but the unit is not inert
-# either, because its `ConditionPathIsMountPoint=/etc/machine-id` is SATISFIED by our
-# own `ceralive-migrate-data`, which bind-mounts /data/ceralive/machine-id onto
-# /etc/machine-id to keep host identity stable across A/B slots. The condition passes,
-# `systemd-machine-id-setup --commit` runs, and it fails with
-# `/etc/machine-id is not on a temporary file system` because the bind source is real
-# ext4 on /data. It is structurally guaranteed to fail on every boot, forever.
+# initrd generated on a TMPFS. This image never does that. It used to be worse than
+# inert: `ceralive-migrate-data` bind-mounted /data/ceralive/machine-id onto
+# /etc/machine-id, which SATISFIED the unit's `ConditionPathIsMountPoint=`, so it ran
+# every boot and failed every boot with `/etc/machine-id is not on a temporary file
+# system` (the bind source is real ext4 on /data). That bind is gone —
+# ceralive-machine-id.service now COMMITS the validated id to the rootfs file instead
+# — so the condition is no longer satisfied and the unit would skip cleanly. The mask
+# STAYS: it costs nothing, and it is what keeps this true if a future mechanism ever
+# reintroduces a mount at that path.
 #
 # 5. dnsmasq.service is the STANDALONE Debian unit, enabled by package preset and
 # never wired up by this repo. It always fails `failed to create listening socket for

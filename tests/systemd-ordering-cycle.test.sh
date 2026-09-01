@@ -47,6 +47,7 @@ POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"
 POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"
 FIRSTBOOT="${RUNTIME}/ceralive-ssh-firstboot.service"
 CIUART="${RUNTIME}/ceralive-ci-uart-bootstrap.service"
+MACHINEID="${RUNTIME}/machine-id/ceralive-machine-id.service"
 
 fail() { printf 'systemd-ordering-cycle regression: %s\n' "$1" >&2; exit 1; }
 
@@ -145,7 +146,7 @@ S="${TMP}/root"
 ETC="${S}/etc/systemd/system"
 mkdir -p "${ETC}" "${S}/usr/lib/systemd/system" "${S}/etc/ssh" "${S}/usr/local/sbin"
 cp -a "${SYS_LIB}/." "${S}/usr/lib/systemd/system/" 2>/dev/null || true
-for exe in ceralive-ssh-firstboot ceralive-ci-uart-bootstrap ceralive-migrate-data; do
+for exe in ceralive-ssh-firstboot ceralive-ci-uart-bootstrap ceralive-migrate-data ceralive-machine-id; do
   printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/${exe}"; chmod 0755 "${S}/usr/local/sbin/${exe}"
 done
 
@@ -216,10 +217,18 @@ printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/ceralive-set-hostname"
 chmod 0755 "${S}/usr/local/sbin/ceralive-set-hostname"
 printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
 
+# The persistent machine-id unit is the newest member of the local-fs phase, and
+# it is the one whose ordering is load-bearing rather than incidental: it must
+# land after the /var/log bind (so a journald restart reopens the journal on
+# /data, not on the rootfs slot) and before every consumer that reads the id.
+# Part D probes both edges; enabling it here also puts it inside B1's acyclicity
+# proof, which is what a Before=local-fs.target unit most needs.
+cp "${MACHINEID}" "${ETC}/ceralive-machine-id.service"
+
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
   ceralive-migrate-data.service var-log.mount opt-ceralive.mount data.mount \
-  ceralive.service ceralive-hostname.service >/dev/null 2>&1 || true
+  ceralive.service ceralive-hostname.service ceralive-machine-id.service >/dev/null 2>&1 || true
 mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
 ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
@@ -301,5 +310,20 @@ if [[ -f "${SYS_LIB}/network-online.target" ]]; then
 else
   echo "systemd-ordering-cycle: network-online.target absent — skipping Part C dynamic probe (static contract enforced in Part A)"
 fi
+
+# --- Part D: prove the machine-id unit is supplied EARLY ENOUGH -------------------
+# Same probe technique as B2/C. Two edges, each of which is a real defect if it
+# is missing:
+#   * after var-log.mount — journald caches the machine-id at startup, so the
+#     restart this unit issues must happen once /var/log is the /data bind, or
+#     the reopened journal lands in the rootfs slot and is lost on the next OTA.
+#   * before ceralive-hostname.service — that unit DIES on a machine-id that is
+#     not a committed 32-hex value (postinst.d/hostname.sh), and it is the first
+#     consumer to read it.
+probe_orders_after ceralive-machine-id.service var-log.mount \
+  || fail "ceralive-machine-id.service is NOT ordered after var-log.mount — a journald restart would reopen the journal on the rootfs slot"
+probe_orders_after ceralive-hostname.service ceralive-machine-id.service \
+  || fail "ceralive-hostname.service is NOT ordered after ceralive-machine-id.service — it would read whatever id PID 1 invented"
+echo "systemd-ordering-cycle: Part D machine-id ordering OK (after the /var/log bind, before its consumers)"
 
 echo "systemd-ordering-cycle regression: PASS"
