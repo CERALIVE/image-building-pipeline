@@ -692,7 +692,7 @@ JSON
     || bad "rock-edge-test variant mapping is not 'edge-test'"
   candidate_board rock-vendor >/dev/null 2>&1 \
     && bad "the retired rock-vendor candidate is still in the table" \
-    || ok "rock-vendor is REFUSED (the prebuilt vendor kernel track is retired)"
+    || ok "rock-vendor is REFUSED (the prebuilt vendor-track kernel is retired)"
   candidate_variant rock-vendor >/dev/null 2>&1 \
     && bad "rock-vendor still resolves a variant" \
     || ok "rock-vendor resolves no variant"
