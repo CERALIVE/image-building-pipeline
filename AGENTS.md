@@ -3776,6 +3776,23 @@ repository boundaries: cerastream should carry
 same shared branch/board-health rerun; neither downstream repository is modified by
 this pipeline change.
 
+**The boot-budget gate enforces matched cold boots; QEMU is parser evidence only.**
+
+`ci/check-boot-budget.sh` consumes a versioned TSV of cold-boot samples and
+requires at least three rows for one board with artifact, slot, peripheral fixture,
+and uplink state held constant. It reports kernel/userspace median + range and
+fails when the userspace median exceeds the explicitly supplied threshold.
+`--basis` is mandatory and there is deliberately no default RK3588 threshold:
+the number must come from privileged board measurements, never from a source-level
+estimate or the old unmatched Rock-offline/Orange-live diagnostic pair.
+
+`tests/qemu-x86.sh` now records systemd manager monotonic userspace timing in its
+transcript. SELFTEST applies a synthetic threshold and requires an intentionally
+slowed transcript to fail. This is labelled an auxiliary x86 parser-level guard
+at every output site; it is not a substitute for either RK3588 board and may never
+be copied into a board budget. Contract: `tests/boot-budget.test.sh`; operator
+procedure: [`docs/boot-performance.md`](docs/boot-performance.md).
+
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
 `setup_paseto_public_key` (in `customize/postinst-lib.sh`, called by the runtime

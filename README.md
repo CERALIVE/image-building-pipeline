@@ -911,6 +911,14 @@ the sibling repos is recorded, not edited here: cerastream expects
 `After=ceralive.service NetworkManager.service` and
 `Wants=NetworkManager.service`.
 
+Boot speed is governed by a matched-cold-boot budget rather than an estimated
+source-level target. `ci/check-boot-budget.sh` requires at least three samples
+with the artifact, slot, peripherals, and uplink state held constant, reports
+median + range, and blocks an over-budget userspace median. Board thresholds are
+intentionally unset until privileged measurements on both RK3588 boards supply
+their basis. The QEMU transcript timing check is only an auxiliary parser guard,
+not an RK3588 measurement. See [`docs/boot-performance.md`](docs/boot-performance.md).
+
 ## Journal Retention and the Persistent machine-id
 
 A shipped Rock 5B+ was measured with **one boot in the journal, six lines of
