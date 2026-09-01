@@ -100,6 +100,7 @@ tests/local-raw-compression.test.sh	shell	integration	default-shell	local Stage-
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/target-release-derivation.test.sh	shell	unit	default-shell	every suite/VERSION_ID fact derives from manifests/target-release.env: the mapping itself, the ci/check-suite-literals.sh gate plus its own self-test, a per-consumer static contract, a flipped-mapping leg proving the derivation is not a constant, and the ARMBIAN_SUITE separation
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
+tests/boot-budget.test.sh	shell	unit	default-shell	matched three-cold-boot median/range budget gate plus auxiliary x86 transcript timing parser and slowed-fixture rejection
 tests/build-parallelism.test.sh	shell	unit	default-shell	cgroup v2 leaf-to-root job derivation: ancestor-limited CPU, per-ancestor saturating memory headroom, the build-jobs clamp and its FORCE escape, and the board/fetch concurrency knobs
 tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged package modes, mounts and local-repository consumption
 tests/mkosi-cache-privilege-domain.test.sh	shell	unit	default-shell	the mkosi cache stays in one privilege domain; Docker Desktop is refused

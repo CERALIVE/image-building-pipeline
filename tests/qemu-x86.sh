@@ -70,6 +70,9 @@
 #   CERALIVE_QEMU_SELFTEST=1   force SELFTEST mode (negative test of the engine)
 #   QEMU_TRANSCRIPT            assert an EXISTING transcript file instead of booting
 #                              (engine-only; used by SELFTEST and for offline replay)
+#   CERALIVE_QEMU_BOOT_BUDGET_USEC
+#                              optional x86 userspace threshold. This is an auxiliary
+#                              parser guard only, never an RK3588 board budget.
 #
 # Exit 0 on pass (or graceful skip); non-zero iff a hard assertion failed.
 #
@@ -111,6 +114,7 @@ SERIAL_USER="${SERIAL_USER:-root}"
 SERIAL_PASSWORD="${SERIAL_PASSWORD:-}"
 OVMF_PATH="${OVMF_PATH:-}"
 QEMU_TRANSCRIPT="${QEMU_TRANSCRIPT:-}"
+QEMU_BOOT_BUDGET_USEC="${CERALIVE_QEMU_BOOT_BUDGET_USEC:-}"
 
 # The main application unit. ceralive.service is what the CeraUI .deb ships
 # (mkosi/app/build-ceraui-appfs.sh: /etc/systemd/system/ceralive.service). Accept
@@ -246,6 +250,10 @@ guest_probe_script() {
   printf 'echo %s\n' "${MARK_BEGIN}"
   printf 'echo "SYS_RUNNING=$(systemctl is-system-running 2>/dev/null || true)"\n'
   printf 'echo "SYS_FAILED=$(systemctl --failed --no-legend --plain 2>/dev/null | wc -l)"\n'
+  # Manager monotonic timestamps are locale-independent and are the same values
+  # systemd-analyze uses for its userspace duration. Empty means the manager had
+  # not settled or the systemd version did not expose the property.
+  printf 'u=$(systemctl show --property=UserspaceTimestampMonotonic --value 2>/dev/null); f=$(systemctl show --property=FinishTimestampMonotonic --value 2>/dev/null); case "${u}:${f}" in *[!0-9:]*|:*|*:) echo "BOOT_USERSPACE_USEC=" ;; *) echo "BOOT_USERSPACE_USEC=$((f-u))" ;; esac\n'
   # ceralive.service (or ceraui.service): report both active-state and load-state.
   local svc
   for svc in "${APP_SERVICE_CANDIDATES[@]}"; do
@@ -364,6 +372,28 @@ assert_transcript() {
     *)  fail "systemctl is-system-running = '${sysrun}' (unexpected state)" ;;
   esac
 
+  # --- Auxiliary x86 timing observation / optional parser budget ---------------
+  # This protects transcript parsing and CI wiring only. RK3588 release budgets
+  # come from matched cold boots and ci/check-boot-budget.sh, never from QEMU.
+  local boot_userspace_usec
+  boot_userspace_usec="$(tget "${transcript}" 'BOOT_USERSPACE_USEC')"
+  if [[ -z "${boot_userspace_usec}" ]]; then
+    warn "auxiliary x86 timing unavailable (not an RK3588 board-budget result)"
+  elif [[ ! "${boot_userspace_usec}" =~ ^[0-9]+$ ]]; then
+    fail "auxiliary x86 timing parser received invalid BOOT_USERSPACE_USEC='${boot_userspace_usec}'"
+  else
+    pass "auxiliary x86 timing parser guard observed userspace=${boot_userspace_usec}us (not an RK3588 budget)"
+    if [[ -n "${QEMU_BOOT_BUDGET_USEC}" ]]; then
+      if [[ ! "${QEMU_BOOT_BUDGET_USEC}" =~ ^[0-9]+$ ]]; then
+        fail "CERALIVE_QEMU_BOOT_BUDGET_USEC is not an unsigned integer: ${QEMU_BOOT_BUDGET_USEC}"
+      elif (( boot_userspace_usec <= QEMU_BOOT_BUDGET_USEC )); then
+        pass "auxiliary x86 userspace timing is within ${QEMU_BOOT_BUDGET_USEC}us"
+      else
+        fail "auxiliary x86 userspace timing ${boot_userspace_usec}us exceeds ${QEMU_BOOT_BUDGET_USEC}us"
+      fi
+    fi
+  fi
+
   # --- ceralive.service (active preferred; loaded accepted) --------------------
   local svc active_state load_state decided=""
   for svc in "${APP_SERVICE_CANDIDATES[@]}"; do
@@ -408,11 +438,13 @@ assert_transcript() {
 # SELFTEST — the harness's own NEGATIVE test (no qemu/image/root required).
 # ===========================================================================
 
-# synth_transcript <healthy|broken|degraded> — emit a synthetic serial transcript.
+# synth_transcript <healthy|broken|degraded|slowed> — emit a synthetic serial transcript.
 synth_transcript() {
   local kind="$1"
   local sysrun="running"
+  local boot_userspace_usec=9876543
   [[ "${kind}" != "degraded" ]] || sysrun="degraded"
+  [[ "${kind}" != "slowed" ]] || boot_userspace_usec=12000001
   cat <<EOF
 [    1.234567] systemd[1]: Detected architecture x86-64.
 [    9.876543] systemd[1]: Reached target multi-user.target.
@@ -421,6 +453,7 @@ ceralive login: root
 ${MARK_BEGIN}
 SYS_RUNNING=${sysrun}
 SYS_FAILED=0
+BOOT_USERSPACE_USEC=${boot_userspace_usec}
 ACTIVE:ceralive.service=inactive
 LOAD:ceralive.service=loaded
 ACTIVE:ceraui.service=inactive
@@ -459,10 +492,16 @@ run_engine_on() {
 run_selftest() {
   log_info "=== SELFTEST: validating the assertion engine (no qemu/image) ==="
   local d; d="$(mktemp -d)"; CLEANUP_DIRS+=("${d}")
-  local healthy="${d}/healthy.log" broken="${d}/broken.log" degraded="${d}/degraded.log"
+  local healthy="${d}/healthy.log" broken="${d}/broken.log" degraded="${d}/degraded.log" slowed="${d}/slowed.log"
   synth_transcript healthy >"${healthy}"
   synth_transcript broken  >"${broken}"
   synth_transcript degraded >"${degraded}"
+  synth_transcript slowed >"${slowed}"
+
+  # Deliberately synthetic and deliberately labelled auxiliary. No x86 image is
+  # booted in SELFTEST, and this value must never be copied into an RK3588 budget.
+  local saved_qemu_budget="${QEMU_BOOT_BUDGET_USEC}"
+  QEMU_BOOT_BUDGET_USEC=10000000
 
   log_info "--- positive case: HEALTHY transcript MUST pass ---"
   if run_engine_on "${healthy}"; then
@@ -484,6 +523,14 @@ run_selftest() {
   else
     pass "engine correctly FAILS when system state is degraded"
   fi
+
+  log_info "--- negative case: SLOWED transcript MUST fail the auxiliary x86 parser budget ---"
+  if run_engine_on "${slowed}"; then
+    fail "engine PASSED a slowed transcript (false positive — auxiliary timing gate did not bite)"
+  else
+    pass "engine correctly FAILS a slowed transcript above the auxiliary x86 budget"
+  fi
+  QEMU_BOOT_BUDGET_USEC="${saved_qemu_budget}"
 }
 
 # ===========================================================================
