@@ -147,7 +147,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Reverse dependencies — nothing on the image asks for -dev.
 # ---------------------------------------------------------------------------
-build_deb gstreamer1.0-rockchip1 'librga2, librockchip-mpp1, libgstreamer1.0-0' "${WORK}/gst.deb" \
+build_deb gstreamer1.0-rockchip-ceralive 'librga2, librockchip-mpp1, libgstreamer1.0-0' "${WORK}/gst.deb" \
   usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstrockchipmpp.so
 build_deb librga2 'libc6, libstdc++6' "${WORK}/rga.deb" \
   usr/lib/aarch64-linux-gnu/librga.so.2

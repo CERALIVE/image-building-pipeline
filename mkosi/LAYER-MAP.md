@@ -49,7 +49,7 @@ concerns belong to platform/assembly, never here.
 
 | Contents | Source |
 |---|---|
-| HW-accel GStreamer plugin (`gstreamer1.0-rockchip1`) + runtime multimedia config (`rockchip-multimedia-config`) | family manifest `hw_accel_gstreamer_plugins` / `gstreamer_runtime_packages` |
+| HW-accel GStreamer plugin (`gstreamer1.0-rockchip-ceralive`) + runtime multimedia config (`rockchip-multimedia-config`) | family manifest `hw_accel_gstreamer_plugins` / `gstreamer_runtime_packages` |
 | Kernel / DTB / U-Boot blob / firmware (only when `INSTALL_BOOT_BSP=1`) | family manifest `kernel_packages` / `dtb_packages` / `uboot_packages` / `firmware_packages` |
 
 **WHY:** these packages are kernel-coupled and SoC-specific. The Rockchip MPP

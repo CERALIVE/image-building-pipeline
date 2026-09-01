@@ -852,7 +852,7 @@ YAML
   [[ "$output" != *"linux-image-7.1.7-ceralive-rk3588"* ]]
   # Everything else the family declares is untouched.
   [[ "$output" == *"armbian-firmware"* ]]
-  [[ "$output" == *"gstreamer1.0-rockchip1"* ]]
+  [[ "$output" == *"gstreamer1.0-rockchip-ceralive"* ]]
 }
 
 @test "fetch suppression: NON-VACUOUS — without it the family's kernel name is declared" {

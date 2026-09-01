@@ -8,7 +8,7 @@
 #   3. configs/devices/{rock5bplus,orangepi5plus}.conf (BOARD_PACKAGES — BSP only)
 #
 # NOT here (by design, see removed.md for the full accounting):
-#   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip1,
+#   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip-ceralive,
 #     rockchip-multimedia-config) → manifests/families/rk3588.yaml
 #   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
 #   - First-party .debs (the CERALIVE/srt runtime, cerastream, srtla-send-rs, and

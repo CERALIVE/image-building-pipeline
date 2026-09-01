@@ -1698,7 +1698,7 @@ REPRO
           "$PIPELINE_DIR/manifests/packages/shared.list" \
           "$PIPELINE_DIR/manifests/packages/rk3588.delta.list" \
           "$PIPELINE_DIR/manifests/packages/x86_64.delta.list" | awk 'NF{print $1}')
-  packages+=(gstreamer1.0-rockchip1 rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 
   run "$LIB_DIR/parity-check.sh" "$root"
@@ -1717,6 +1717,22 @@ REPRO
   [ "$status" -ne 0 ]
   [[ "$output" == *"python3"* ]]
   [[ "$output" == *"strace"* ]]
+}
+
+@test "RK3588 plugin package and shared object remain covered by both sysext exclusion sets" {
+  local conf patterns pattern package_matched so_matched
+  for conf in "$PIPELINE_DIR/mkosi/app/cog-display.sysext.conf" \
+              "$PIPELINE_DIR/mkosi/app/srtla.sysext.conf"; do
+    patterns="$(sed -n 's/^SYSEXT_EXCLUDE_NAMES="\(.*\)"$/\1/p' "$conf")"
+    package_matched=0
+    so_matched=0
+    for pattern in $patterns; do
+      [[ "gstreamer1.0-rockchip-ceralive" == $pattern ]] && package_matched=1
+      [[ "libgstrockchipmpp.so" == $pattern ]] && so_matched=1
+    done
+    [ "$package_matched" -eq 1 ]
+    [ "$so_matched" -eq 1 ]
+  done
 }
 
 @test "dev delta: CERALIVE_DEBUG_IMAGE reaches every subimage via PassEnvironment" {

@@ -23,7 +23,7 @@ These must NOT be duplicated in the package lists (MUST-NOT honored).
 
 | Package | Legacy source(s) | Canonical home (family field) |
 |---|---|---|
-| `gstreamer1.0-rockchip1` | ceraui-base STREAMING | `hw_accel_gstreamer_plugins` |
+| `gstreamer1.0-rockchip1` | ceraui-base STREAMING | Replaced by `gstreamer1.0-rockchip-ceralive` in `hw_accel_gstreamer_plugins`; see the explicit removal verdict below. |
 | `rockchip-multimedia-config` | ceraui-base STREAMING; both `BOARD_PACKAGES`; rock5bplus EXTRA_BSP | `gstreamer_runtime_packages` |
 | `linux-image-current-rockchip64` | both `BOARD_PACKAGES` | `kernel_packages` (resolved to `vendor`, D3) |
 | `linux-dtb-current-rockchip64` | both `BOARD_PACKAGES` | `dtb_packages` (resolved to `vendor`, D3) |
@@ -366,6 +366,23 @@ whose assertion is `grep -Ex 'iw[[:space:]]*(#.*)?'` — a whole-line match that
 matched the `wireless-tools` line. `tests/package-migration-coverage.sh` is
 unaffected: `removed.md` is one of its accepted "v2 homes", and the legacy sources
 it reconciles against were retired in T24 (it SKIPs).
+
+---
+
+## `gstreamer1.0-rockchip1` — replaced by the CeraLive fork
+
+**gstreamer1.0-rockchip1: REMOVE**
+
+The Radxa `1.14-4` package is replaced in the RK3588 platform-layer URL+SHA
+manifest by `gstreamer1.0-rockchip-ceralive` `1.14.4+ceralive.1`. The replacement
+keeps the `gstreamer1.0-rockchip` package prefix, the
+`libgstrockchipmpp.so` plugin filename, and the same `librockchip_mpp.so.1` /
+`librga.so.2` runtime ABI while carrying the CeraLive verified-fix ledger.
+
+This is a pin swap, not a layer move: the fork is not in `REPOS` or
+`FIRST_PARTY_APT_PKGS`. The old package's exact filename, SHA-256, and Radxa URL
+remain as a one-line commented rollback row immediately beside the active pin in
+`manifests/rk3588-userspace-deb-versions.txt`.
 
 ---
 

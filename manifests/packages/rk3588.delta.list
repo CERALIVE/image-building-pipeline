@@ -14,7 +14,7 @@
 # RK3588-specific packages and their canonical home are listed below as comments
 # (NOT active install lines):
 #
-#   gstreamer1.0-rockchip1      → families/rk3588.yaml: hw_accel_gstreamer_plugins
+#   gstreamer1.0-rockchip-ceralive → families/rk3588.yaml: hw_accel_gstreamer_plugins
 #   rockchip-multimedia-config  → families/rk3588.yaml: gstreamer_runtime_packages
 #   linux-image-vendor-rockchip64 → families/rk3588.yaml: kernel_packages
 #   linux-dtb-vendor-rockchip64   → families/rk3588.yaml: dtb_packages

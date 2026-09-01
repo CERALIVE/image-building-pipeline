@@ -37,8 +37,9 @@
 # fetches exactly the ones the resolved family declares.
 #
 # VERSIONS ARE EMPIRICALLY PROVEN — do not bump without re-proving on hardware.
-# tsukumijima MPP 1.5.0-1 + radxa gstreamer1.0-rockchip1 1.14-4 + radxa librga2
-# 2.2.0-1 is the exact combination proven to register the MPP encoders.
+# tsukumijima MPP 1.5.0-1 + CeraLive gstreamer1.0-rockchip-ceralive
+# 1.14.4+ceralive.1 + radxa librga2 2.2.0-1 is the exact combination selected
+# for the MPP encoders.
 
 # --- Mali-G610 (Valhall) GPU userspace — RETIRED with the vendor kernel track ---
 # `libmali-valhall-g610-g24p0-wayland-gbm` used to be pinned here. It is gone
@@ -59,11 +60,10 @@ librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c0965818
 # --- Runtime multimedia udev/config (tsukumijima) ---
 rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb
 
-# --- GStreamer MPP plugin + RGA 2D accelerator (Radxa bookworm assets, Trixie-compatible) ---
-# tsukumijima publishes NO gst-rockchip build, so the plugin must come from radxa;
-# it links librga2, so the PROVEN, ABI-matched gst<->rga pair is kept together on
-# radxa rather than splitting rga to tsukumijima's same-version build. The source
-# pool name is provenance, not a target-suite constraint: Trixie resolves the
-# exact pair unchanged, including librockchip_mpp.so.1 and librga.so.2.
-gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
+# --- First-party GStreamer MPP plugin + Radxa RGA 2D accelerator ---
+# The CeraLive fork preserves the package prefix and libgstrockchipmpp.so filename
+# while shipping the verified fix ledger. The commented Radxa row is the one-line
+# rollback lever; librga2 remains byte-identical and independently pinned below.
+# gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
+gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.1_arm64.deb  b4b56053cf8ed57a4dc8d5490c60911f5c6594a3933f4dd2752c7e5d0a7feab2  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.1/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.1_arm64.deb
 librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb
