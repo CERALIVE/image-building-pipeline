@@ -59,7 +59,12 @@ ensure_builder_image() {
   [[ -f "${MKOSI_BUILDER_DOCKERFILE}" ]] \
     || die "canonical builder Dockerfile missing: ${MKOSI_BUILDER_DOCKERFILE}"
   log_info "builder image ${MKOSI_BUILDER_IMAGE} absent — building from ${MKOSI_BUILDER_DOCKERFILE} (mkosi ${MKOSI_VERSION_PIN} + Python ${MKOSI_PYTHON_FLOOR}+)"
-  "${runtime}" build -t "${MKOSI_BUILDER_IMAGE}" -f "${MKOSI_BUILDER_DOCKERFILE}" "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" \
+  local -a proxy_args=()
+  mapfile -t proxy_args < <(container_build_proxy_args)
+  (( ${#proxy_args[@]} )) && log_info "apt proxy: CERALIVE_APT_PROXY -> --build-arg APT_PROXY (http only)"
+  container_image_build "${runtime}" \
+    "${proxy_args[@]}" \
+    -t "${MKOSI_BUILDER_IMAGE}" -f "${MKOSI_BUILDER_DOCKERFILE}" "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" \
     || die "failed to build the canonical mkosi builder image from ${MKOSI_BUILDER_DOCKERFILE}"
 }
 
@@ -84,7 +89,7 @@ stage_dry_run_plan() {
       firstparty_dir_plan="/run/ceralive-firstparty"
       workspace_dir_plan="/work/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
     fi
-    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --release=${RELEASE} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=cache/${board} --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
+    log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --release=${RELEASE} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=cache/${board}/$(ceralive_mkosi_cache_domain) --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
   fi

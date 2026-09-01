@@ -577,6 +577,142 @@ output is byte-identical. Every cache failure is non-fatal — an unwritable
 directory or a lost lock degrades to an ordinary download. Contract:
 `tests/debcache.test.sh`.
 
+## Builder-Image apt Cache, Kernel-Source Mirror and the Optional apt Proxy
+
+The `.deb` cache above covers the packages that go *into the image*. Three more
+caches cover what the build itself downloads: the builder images' own apt
+transactions, the pinned kernel source tree, and — optionally — everything, via a
+local proxy.
+
+### BuildKit apt cache mounts
+
+`ci/Dockerfile` and `ci/Dockerfile.kernel` mount BuildKit caches over
+`/var/cache/apt` and `/var/lib/apt/lists` (both `sharing=locked`, because
+`lib/build-all.sh` builds boards concurrently). A rebuild that genuinely
+re-executes the apt layer downloads no packages at all:
+
+| ci/Dockerfile apt layer | cold | layer cache pruned, cache mounts kept |
+|---|---|---|
+| apt reports | `Need to get 129 MB of archives` | `Need to get 0 B/129 MB of archives` |
+| package `Get:` lines | 114 | **0** |
+| index | 3 × `Get:` | 3 × `Hit:` |
+
+`ci/Dockerfile.kernel` behaves the same (`136 MB/184 MB` → `0 B/184 MB`), and
+because both files mount the same cache they share it — the kernel builder's
+first cold build already found 48 MB of its closure present.
+
+Two things make that work and are easy to undo by accident, so both are pinned by
+`tests/build-cache-overhaul.bats`:
+
+- **`docker-clean` is moved aside for the transaction and moved back.** Every
+  Debian image ships `/etc/apt/apt.conf.d/docker-clean`, whose `DPkg::Post-Invoke`
+  deletes `/var/cache/apt/archives/*.deb` at the end of the very `apt-get` that
+  filled the mount. Left in place, the cache is populated and then emptied on
+  every build and the hit rate is permanently zero. Restoring it afterwards keeps
+  the finished builder image's `/etc/apt` byte-identical to its base's.
+- **No apt layer may end in `rm -rf /var/lib/apt/lists/*`.** Under a cache mount
+  that path *is* the cache. The size argument for the cleanup does not survive
+  either: a cache-mounted directory contributes nothing to the image layer.
+
+`RUN --mount` needs BuildKit, and the legacy `docker build` builder does not
+ignore the flag — it refuses to parse the Dockerfile. So `lib/common.sh`'s
+`container_image_build` is the one entry point both builder-image build sites go
+through: it sets `DOCKER_BUILDKIT=1` for docker, needs no switch for podman, and
+refuses a runtime below the floor where cache mounts exist (docker 23, podman 4)
+with a message naming the real cause.
+
+> **Measuring this yourself:** `docker build --no-cache` is the wrong tool. It
+> resets the cache mounts as well as the layer cache, so the second build looks
+> exactly like the first and the cache appears not to work. Prune only the layer
+> cache — `docker builder prune -af --filter=type=regular` — and the apt layer
+> re-executes against a warm mount.
+
+### Persistent kernel-source mirror
+
+Every build fetched the whole pinned kernel tree again. `mkosi/cache/kernel-src.git`
+is an optional bare mirror; when it holds the pinned commit the in-container
+checkout becomes a local `git clone --shared` with **no network at all**, and the
+mirror is only fetched when the pin actually moves.
+
+```bash
+CERALIVE_KERNEL_SRC_MIRROR=1 ./build rock-5b-plus     # create it (once), then use it
+./build rock-5b-plus                                  # `auto`: uses it because it exists
+CERALIVE_KERNEL_SRC_MIRROR=0 ./build rock-5b-plus     # off
+```
+
+`auto` is the default and it never *creates* a mirror, because the payoff is
+strictly for a host that builds repeatedly: `mkosi/cache` is on the CI cleanup
+allowlist, so an ephemeral runner would pay a full mirror clone per job and never
+read it back. Opting a long-lived builder in is one env var, once.
+
+The mirror is fetched under a **per-mirror `flock`** and then mounted read-only
+into the builder. That lock is a correctness fix rather than a speedup: boards
+build concurrently and all resolve the same kernel pin, so two unlocked
+`git fetch`es write one object store and leave it corrupt. `gc.auto` is disabled
+on the mirror for the other half of the same problem — an automatic gc is the one
+operation that would delete objects a concurrent reader is using. A mirror that
+does not carry the pin is a cache **miss**, never a different build: the checkout
+falls back to the network and the `HEAD == commit` assertion still runs. Contract:
+`tests/kernel-src-mirror.test.sh`, which builds a mirror, destroys the upstream,
+and requires the checkout to succeed anyway — plus the inverse leg requiring the
+same checkout without the mirror to fail.
+
+The patch series and the kernel config deliberately get **no** mirror; they are
+small and must stay fresh.
+
+### mkosi cache privilege domains
+
+A containerized build runs mkosi as uid 0; a `--native` build runs it as the
+invoking user. mkosi 26 refuses to reuse a cache tree it does not own and, under
+`--force`, deletes it — so alternating the two on one checkout used to throw away
+the whole base layer every time, silently. Each domain now has its own leaf:
+
+```
+mkosi/cache/<board>/container
+mkosi/cache/<board>/native
+```
+
+Both live under the same per-board root CI saves and restores, so nothing about
+the release cache changes. `MKOSI_NATIVE` alone selects the domain — docker and
+podman both run mkosi as uid 0 and are one domain, not two. The existing
+ownership assertion stays, because separate leaves make a collision unlikely but
+not impossible (a `sudo ./build --native` still owns the native leaf as root).
+
+### Opt-in apt proxy (apt-cacher-ng)
+
+`CERALIVE_APT_PROXY` is unset by default and, unset, changes nothing: the fetch
+passes apt exactly the options it passed before, and the Dockerfiles' build arg
+expands to empty. Set, it is threaded into `lib/fetch/apt-lib.sh`'s option builder
+and into both Dockerfiles as `--build-arg APT_PROXY=`.
+
+Quickstart, on the build host:
+
+```bash
+sudo apt-get install -y apt-cacher-ng          # Debian/Ubuntu
+# or: docker run -d --name acng -p 3142:3142 -v acng:/var/cache/apt-cacher-ng \
+#       sameersbn/apt-cacher-ng
+
+export CERALIVE_APT_PROXY=http://127.0.0.1:3142
+./build rock-5b-plus
+```
+
+Point it at a LAN host (`http://cache.lan:3142`) to share one cache across
+machines. Verify it is working from apt-cacher-ng's own report page at
+`http://127.0.0.1:3142/acng-report.html`.
+
+**It is http-only, deliberately.** `apt.ceralive.tv` is https with an mTLS client
+certificate: a proxy can cache none of that payload and only adds a handshake that
+can fail for reasons unrelated to apt. The win is the plain-http Debian and
+Armbian archive traffic, which is also the bulk of the bytes.
+
+**A proxy cannot weaken verification.** Every fetch family here verifies *after*
+acquisition — `gpgv` over `InRelease`, then the SHA-256 that signed plaintext
+declares, or a committed pin's hash. Bytes from a proxy are checked against exactly
+the same expectations as bytes from the origin, so a proxy that served something
+else fails the build instead of poisoning it. No proxy option touches apt's
+authentication settings, and `tests/apt-lib.test.sh` asserts that in both
+directions.
+
 ## Build Parallelism — cgroup-aware, and configurable
 
 `nproc` and `MemAvailable` describe the **machine**. Every build this pipeline runs

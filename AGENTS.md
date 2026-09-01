@@ -64,6 +64,9 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
 | **Read a `.deb`'s control fields / assert its identity / explode it** | `lib/shared/deb-lib.sh` — the ONE `deb_control_field` / `deb_pkg_{name,version,arch}` / `assert_deb_identity` / `explode_deb`; contract `tests/deb-lib.test.sh`. See the KEY FACT below |
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
+| **Builder-image apt cache mounts / BuildKit / the apt proxy (`CERALIVE_APT_PROXY`)** | `ci/Dockerfile`, `ci/Dockerfile.kernel`, `lib/common.sh::container_image_build`, `lib/fetch/apt-lib.sh::apt_proxy_opts` — see the KEY FACTs below; operator quickstart in [`README.md`](README.md) |
+| **Persistent kernel-source mirror (`CERALIVE_KERNEL_SRC_MIRROR`)** | `lib/kernel/checkout.sh` (`kernel_src_mirror_*`) + the `:ro` mount in `lib/build-kernel.sh` — see the KEY FACT below |
+| **Which mkosi cache leaf a build uses (container vs native)** | `lib/paths.sh::ceralive_mkosi_cache_domain` + `lib/orchestrate.sh`'s `cache_dir` — see the privilege-domain KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
 | **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + `lib/check-wwan-modules.sh` (fail-closed on the 9 required USB modules, advisory on the 4 MHI/RNDIS ones; `CERALIVE_WWAN_CHECK_ADVISORY=1` opts out) + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
@@ -5393,6 +5396,151 @@ reader's lock early each fail the suite. Both concurrency legs are needed and
 neither is duplicate coverage — the first slows the reader inside verification,
 the second slows the step between verification and the copy, and only the second
 detects an early unlock.
+
+**The builder images' OWN apt traffic is cache-mounted, and TWO things silently
+defeat that — one of them ships in every Debian base image** [EXISTS]
+
+`ci/Dockerfile` and `ci/Dockerfile.kernel` mount BuildKit caches over
+`/var/cache/apt` and `/var/lib/apt/lists`, `sharing=locked` because
+`lib/build-all.sh` builds boards concurrently and two apt transactions writing one
+archive directory is a corrupt partial download rather than a slow one. Measured
+on this repo's own Dockerfiles, cold vs a rebuild whose apt layer genuinely
+re-executed:
+
+| | `ci/Dockerfile` | `ci/Dockerfile.kernel` |
+|---|---|---|
+| cold | `Need to get 129 MB of archives`, 114 package `Get:` | `Need to get 136 MB/184 MB`, 109 package `Get:` |
+| warm | `Need to get 0 B/129 MB`, **0** package `Get:` | `Need to get 0 B/184 MB`, **0** package `Get:` |
+| index | 3 × `Get:` -> 3 × `Hit:` | 3 × `Hit:` both runs |
+
+Both files mount the SAME cache, so they share it: the kernel builder's first cold
+build already found ~48 MB of its closure present from the mkosi builder's run.
+
+- **`docker-clean` is the one that ships in every Debian image.**
+  `/etc/apt/apt.conf.d/docker-clean` carries a `DPkg::Post-Invoke` that
+  `rm -f`s `/var/cache/apt/archives/*.deb` at the end of the very `apt-get` that
+  filled the mount. Left in place the cache is dutifully populated and then
+  emptied on every single build: green, real mount, permanent zero hit rate. It is
+  moved aside for the transaction and moved BACK, so the finished builder image's
+  `/etc/apt` is byte-identical to its base's (verified by `ls` diff against the
+  pinned base) and no `99ceralive-*` drop-in ever ships.
+- **`rm -rf /var/lib/apt/lists/*` must not end an apt layer.** Under a cache mount
+  that path IS the cache, so the cleanup deletes the index it exists to leave
+  behind. The size argument does not survive either — a cache-mounted directory
+  contributes nothing to the image layer at all.
+- **`docker build --no-cache` is NOT how to test this.** It resets cache mounts
+  along with the layer cache, so the second build re-downloads everything and the
+  cache looks broken. That is what the first measurement of this change reported
+  before the confound was isolated. Prune only the layer cache —
+  `docker builder prune -af --filter=type=regular` — and the layer re-executes
+  against a warm mount.
+
+**`RUN --mount` and BuildKit are ONE change, not two.** The legacy `docker build`
+builder does not ignore an unknown `--mount` flag, it refuses to PARSE the
+Dockerfile, so a build site that forgets `DOCKER_BUILDKIT=1` fails inside a file
+the operator did not write. `lib/common.sh::container_image_build` is therefore the
+single entry point both builder-image build sites go through — it sets
+`DOCKER_BUILDKIT=1` for docker, sets nothing for podman (buildah parses
+`RUN --mount` natively), and refuses a runtime below the floor where the cache
+mount TYPE exists (docker 23 / podman 4) rather than letting it fail obscurely. An
+unparsable version string WARNS and proceeds: the build then fails on its own with
+the Dockerfile line in hand, which beats a guess. A bare `"${runtime}" build` is
+absence-guarded.
+
+Guards: `tests/build-cache-overhaul.bats` (27 cases — the mounts and their
+`sharing=locked`, the docker-clean round trip, the absent lists-cleanup, the
+untouched digest pins, both build sites, the no-bare-build rule, and the version
+floor's refusal).
+
+**The pinned kernel source has a persistent bare mirror, and its flock is a
+CORRECTNESS fix rather than a speedup** [EXISTS]
+
+`mkosi/cache/kernel-src.git` (`CERALIVE_REL_KERNEL_SRC_MIRROR_DIR`) is an optional
+bare mirror of `kernel_source.git_url`. When it already carries the pinned commit,
+`fetch_pinned_tree_once` materialises `/src/linux` with a local
+`git clone --shared` off the read-only mount — no network, and no object copy
+either, because the clone records an alternates entry.
+
+- **The flock prevents real corruption.** `lib/build-all.sh` builds boards
+  CONCURRENTLY and every board resolves the same kernel pin, so two unlocked
+  `git fetch`es write one object store — which git does not defend against and
+  which leaves a mirror that fails every later build until someone deletes it by
+  hand. The lock is per MIRROR (the resource), never per board or per caller: a
+  lock name carrying the caller's identity excludes nothing, which is the exact
+  bug `tests/manifest-helpers.bash::serialize` already shipped once.
+- **Fetch under the lock, read afterwards.** The lock is released before the
+  builder container starts and the mirror is mounted `:ro`, so a concurrent fetch
+  can only ADD objects while this build reads. `gc.auto=0` is set at creation for
+  the other half: an automatic gc is the one git operation that would DELETE
+  objects a concurrent reader is using.
+- **`auto` is the default and it never CREATES a mirror.** `mkosi/cache` is on the
+  CI cleanup allowlist, so an ephemeral runner would pay a full mirror clone per
+  job and never read it back — a guaranteed loss. `CERALIVE_KERNEL_SRC_MIRROR=1`
+  opts a long-lived builder in, once; `0` disables it. Any other value is REFUSED,
+  not read as "off".
+- **A mirror that lacks the pin is a MISS, never a different build.** The checkout
+  falls back to the network and the `HEAD == commit` assertion still runs, so the
+  mirror can never change WHAT is built — only where the bytes came from. Only the
+  KERNEL SOURCE gets one; the patch series and the config are small and stay fresh.
+- **Every knob is read AT CALL TIME.** Latching `CERALIVE_KERNEL_SRC_MIRROR` into a
+  file-scope variable at source time gives two spellings that agree only until
+  something sets the env var after sourcing — which made three of this suite's own
+  mode assertions pass vacuously before it was fixed.
+- **The mirror needs `safe.directory`.** It is host-user-owned and git in the
+  container runs as root, so it joins the bench patch clone in the generated
+  `GIT_CONFIG_GLOBAL` gitconfig; git honours `safe.directory` only from system or
+  global config, never from `-c`.
+
+Guard: `tests/kernel-src-mirror.test.sh` (26 assertions). Its technique is what
+makes the result unfakeable: every reuse leg builds the mirror, **destroys the
+upstream**, and then requires the checkout to succeed — with a non-vacuity leg
+requiring the identical checkout WITHOUT the mirror to fail. It also drives a real
+`flock` holder (prepare blocks ~1.7 s behind a 2 s holder), a real concurrent
+prepare pair left `git fsck`-clean, and the timeout/miss/mode paths.
+
+**The mkosi package cache is split by PRIVILEGE DOMAIN, so a container and a
+--native build stop invalidating each other** [EXISTS]
+
+`--cache-directory` resolves to `cache/${BOARD_ID}/${domain}` where the domain is
+`container` or `native` (`lib/paths.sh::ceralive_mkosi_cache_domain`). mkosi 26
+refuses to reuse a cache tree whose owner uid is not its own and, with `--force`,
+DELETES it — so one shared leaf meant alternating the two build modes threw away
+the whole base layer every time, reported as nothing at all because "mkosi rebuilt
+the base" looks identical to "the base was stale".
+
+- **`MKOSI_NATIVE` alone is the discriminator.** docker and podman both run mkosi
+  as uid 0 in a privileged container, so they are one domain, not two.
+- **Both leaves sit under the SAME per-board root** `release.yml` saves and
+  restores, so nothing about the CI cache changes and
+  `ci/check-canonical-paths.sh --cache-dir` still compares against
+  `board_mkosi_cache_dir`. `emit-canonical-paths.sh` gained
+  `board_mkosi_cache_dir_{container,native}` beside it.
+- **`assert_cache_privilege_domain` STAYS.** Separate leaves make a collision
+  unlikely, not impossible: a `sudo ./build --native` owns the native leaf as root
+  and the next unprivileged native build must still be told why, with the command
+  that repairs it.
+
+**An opt-in apt proxy (`CERALIVE_APT_PROXY`), http-only on purpose** [EXISTS]
+
+Unset it is a NO-OP down to the token count — `apt_isolated_opts` emits the same
+12 tokens it always did and the Dockerfiles' `APT_PROXY` build arg expands to
+empty. Set, it adds exactly one `-o Acquire::http::Proxy=` pair and is threaded
+into both builder images as `--build-arg APT_PROXY=`, written and removed inside
+the single RUN that uses it so a host-local URL (which may carry credentials)
+never survives into a shared layer.
+
+- **https is never proxied.** `apt.ceralive.tv` is https WITH AN mTLS CLIENT
+  CERTIFICATE: a cache can do nothing with that payload and the only thing a proxy
+  adds is a handshake that can fail for reasons unrelated to apt. The win is the
+  plain-http Debian/Armbian archive traffic, which is also the bulk of the bytes.
+- **A proxy cannot weaken verification, and no proxy option may try.** Every family
+  verifies AFTER acquisition — `gpgv` over `InRelease`, then the SHA-256 that
+  signed plaintext declares, or a committed pin's hash — so proxied bytes are
+  checked against exactly the expectations origin bytes would be.
+  `tests/apt-lib.test.sh` asserts the emitted set contains no
+  `AllowInsecureRepositories` / `AllowUnauthenticated` / `Check-Valid-Until=false`.
+- Operator quickstart (apt-cacher-ng, local or LAN): [`README.md`](README.md) →
+  "Builder-Image apt Cache, Kernel-Source Mirror and the Optional apt Proxy".
 
 **First-boot WiFi provisioning portal** [PARTIAL]
 

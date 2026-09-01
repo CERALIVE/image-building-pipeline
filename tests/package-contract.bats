@@ -1500,8 +1500,9 @@ REPRO
   grep -Fq 'export CERALIVE_BOARD="${board}"' "$orchestrate"
 
   # And the per-board mkosi cache stays keyed by BOARD_ID — a DIFFERENT tree for
-  # a different purpose, deliberately not aliased onto the staging key.
-  grep -Fq 'local cache_dir="cache/${BOARD_ID}"' "$orchestrate"
+  # a different purpose, deliberately not aliased onto the staging key. Its
+  # second axis is the privilege domain, never the staging key either.
+  grep -Fq 'local cache_dir="cache/${BOARD_ID}/${cache_domain}"' "$orchestrate"
 }
 
 @test "firstparty-staging: the consumer never re-slips to BOARD_ID" {

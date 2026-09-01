@@ -31,6 +31,11 @@ CERALIVE_REL_MKOSI_CACHE_ROOT="${CERALIVE_REL_MKOSI_DIR}/cache"
 CERALIVE_REL_STAGING_DIR="${CERALIVE_REL_MKOSI_DIR}/.staging"
 # Persistent ccache for the opt-in kernel-from-source variants.
 CERALIVE_REL_KERNEL_CCACHE_DIR="${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-ccache"
+# Persistent bare mirror of the pinned kernel source. A SIBLING of the ccache and
+# of the per-board caches for the same reason they are siblings of each other: a
+# per-board `rm -rf` must not reach it, and the CI cleanup allowlist already
+# covers the whole cache root.
+CERALIVE_REL_KERNEL_SRC_MIRROR_DIR="${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-src.git"
 # mkosi's scratch workspace (`--workspace-directory`). Every finished subimage is
 # RENAMED out of here into CERALIVE_REL_MKOSI_BUILD_DIR, so the two must be on one
 # filesystem: mkosi's default is /var/tmp, and on a normal dev box or CI runner
@@ -64,8 +69,36 @@ CERALIVE_REL_CLEANUP_PATHS=(
 
 # Board-scoped mkosi cache directory. `BOARD_ID` (the Armbian board id from the
 # board manifest) is the key mkosi itself uses via `CacheDirectory=`.
+#
+# With a DOMAIN argument this returns the per-privilege-domain leaf mkosi is
+# actually pointed at; without one it returns the board ROOT that holds every
+# domain, which is the unit a CI cache saves and restores.
 ceralive_rel_board_mkosi_cache_dir() {
-  printf '%s/%s\n' "${CERALIVE_REL_MKOSI_CACHE_ROOT}" "$1"
+  local board="$1" domain="${2:-}"
+  if [[ -n "${domain}" ]]; then
+    printf '%s/%s/%s\n' "${CERALIVE_REL_MKOSI_CACHE_ROOT}" "${board}" "${domain}"
+    return 0
+  fi
+  printf '%s/%s\n' "${CERALIVE_REL_MKOSI_CACHE_ROOT}" "${board}"
+}
+
+# ceralive_mkosi_cache_domain — which privilege domain THIS build's mkosi runs in.
+#
+# mkosi 26 refuses to reuse a cache tree whose owner uid is not its own, and with
+# `--force` it then DELETES it. The containerized build runs mkosi as uid 0 and a
+# --native build runs it as the invoking user, so alternating the two on one
+# checkout used to invalidate the whole base layer every single time — silently,
+# because "mkosi rebuilt the base" looks identical to "the base was stale".
+# Giving each domain its own cache leaf means neither can invalidate the other,
+# and each keeps a warm cache of its own.
+#
+# The discriminator is MKOSI_NATIVE and nothing else: docker and podman both run
+# mkosi as uid 0 in a privileged container, so they are one domain, not two.
+# ceralive_assert_cleanup_allowed is unaffected — both leaves live under the
+# already-allowlisted cache root.
+ceralive_mkosi_cache_domain() {
+  [[ "${MKOSI_NATIVE:-}" == "1" ]] && { printf 'native\n'; return 0; }
+  printf 'container\n'
 }
 
 # Fail unless every supplied path is on the cleanup allowlist verbatim.

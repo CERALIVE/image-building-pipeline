@@ -1105,7 +1105,16 @@ YAML
   # arm64 HOST arch. Installing only the amd64 one aborts the package build at
   # dpkg-checkbuilddeps, before any compilation — invisible to a DRY_RUN gate.
   local df="$PIPELINE_DIR/ci/Dockerfile.kernel"
-  grep -Eq '^RUN dpkg --add-architecture arm64' "$df"
+  # The foreign architecture must be registered BEFORE `apt-get update`, or the
+  # arm64 index is never fetched and every :arm64 build-dep is unresolvable. The
+  # ORDER is the property; which RUN line it sits on is not (it moved into the
+  # cache-mounted apt layer when the BuildKit mounts landed).
+  local add_arch update_line
+  add_arch="$(grep -n 'dpkg --add-architecture arm64' "$df" | head -1 | cut -d: -f1)"
+  update_line="$(grep -n 'apt-get update' "$df" | head -1 | cut -d: -f1)"
+  [ -n "$add_arch" ]
+  [ -n "$update_line" ]
+  [ "$add_arch" -lt "$update_line" ]
   grep -Eq '^ +libssl-dev \\$' "$df"
   grep -Eq '^ +libssl-dev:arm64 \\$' "$df"
   grep -Eq '^ +libdw-dev \\$' "$df"

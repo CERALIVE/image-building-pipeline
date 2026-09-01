@@ -88,6 +88,40 @@ for i in "${!opts[@]}"; do
 done
 ok "isolated: every Dir:: option stays inside the supplied state directory"
 
+# ---------------------------------------------------------------------------
+# Opt-in apt proxy (CERALIVE_APT_PROXY)
+# ---------------------------------------------------------------------------
+# Unset must be a NO-OP down to the token count: an unconfigured build has to
+# pass apt exactly the argument vector it passed before the proxy existed.
+mapfile -t noproxy < <(CERALIVE_APT_PROXY='' lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+(( ${#noproxy[@]} == 12 )) \
+  || fail "an unset CERALIVE_APT_PROXY changed the option vector (${#noproxy[@]} tokens, expected 12)"
+ok "proxy: unset CERALIVE_APT_PROXY emits nothing at all"
+
+mapfile -t proxied < <(CERALIVE_APT_PROXY=http://acng.lan:3142 lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+(( ${#proxied[@]} == 14 )) \
+  || fail "CERALIVE_APT_PROXY emitted ${#proxied[@]} tokens, expected 14 (the six pairs plus one)"
+joined_proxied="${proxied[*]}"
+[[ "${joined_proxied}" == *"Acquire::http::Proxy=http://acng.lan:3142"* ]] \
+  || fail "CERALIVE_APT_PROXY did not reach Acquire::http::Proxy"
+ok "proxy: a set CERALIVE_APT_PROXY adds exactly one -o Acquire::http::Proxy pair"
+
+# https must stay DIRECT. apt.ceralive.tv is fetched with an mTLS client
+# certificate, so routing it through a proxy buys nothing a cache can use and
+# adds a handshake that can fail for reasons unrelated to apt.
+[[ "${joined_proxied}" != *"Acquire::https::Proxy"* ]] \
+  || fail "the proxy option set touches https, which would interpose on the mTLS first-party fetch"
+ok "proxy: https is never proxied, so the mTLS first-party transport is untouched"
+
+# A proxy is an acquisition-path change only. If it ever became a verification
+# change the whole fetch chain would be worthless, so no proxy option may weaken
+# apt's own authentication.
+for forbidden in "Acquire::AllowInsecureRepositories" "Acquire::AllowDowngradeToInsecureRepositories" "APT::Get::AllowUnauthenticated" "Acquire::Check-Valid-Until=false" "gpgv"; do
+  [[ "${joined_proxied}" != *"${forbidden}"* ]] \
+    || fail "the proxy option set contains '${forbidden}' — a cache may never relax verification"
+done
+ok "proxy: no option in the proxied set relaxes apt authentication"
+
 state="${WORK}/apt-state"
 lib_eval 'apt_isolated_state_init "$1" "$2"' "${state}" "${state}/certs" >/dev/null 2>&1
 for d in lists/partial cache/archives/partial certs; do

@@ -31,6 +31,18 @@ FROM debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd
 # mkosi version pin — MUST match .mkosi-version (26).
 ARG MKOSI_VERSION=26
 
+# OPT-IN apt proxy (CERALIVE_APT_PROXY, threaded in by lib/stages/mkosi.sh).
+# Unset is the default and the apt layer then behaves exactly as it did before
+# this arg existed.
+#
+# HTTP ONLY, deliberately: an apt-cacher-ng in front of deb.debian.org is a pure
+# win, while https stays direct so no proxy is ever interposed on a TLS path.
+#
+# INVARIANT: a proxy URL is a host-local fact and may carry credentials, so it
+# must never survive into a shared builder layer. Its drop-in is therefore
+# confined to the single RUN that uses it.
+ARG APT_PROXY=
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PIPX_HOME=/opt/pipx \
     PIPX_BIN_DIR=/usr/local/bin \
@@ -61,8 +73,39 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #                           can request shipped in both RAUC slots of every image.
 #                           modinfo parses ELF and is arch-agnostic, so the x86_64
 #                           builder reads the arm64 `.ko` set correctly.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+#
+# BUILDKIT CACHE MOUNTS, and the two things that make them actually retain
+# anything (both were load-bearing, neither is obvious):
+#
+#   * `docker-clean` — every Debian image ships
+#     /etc/apt/apt.conf.d/docker-clean, whose DPkg::Post-Invoke `rm -f
+#     /var/cache/apt/archives/*.deb` fires at the END of this very apt-get. With
+#     it in place the cache mount is dutifully populated and then emptied before
+#     the layer finishes, so a rebuild re-downloads everything while the mount
+#     reports a hit rate of zero. It is moved aside for the transaction and moved
+#     BACK, so the finished image's /etc/apt is byte-identical to the base's.
+#   * NO `rm -rf /var/lib/apt/lists/*` may end this layer. Under a cache mount
+#     that path IS the cache, so the cleanup deletes the index it is supposed to
+#     leave behind. The size argument for it does not survive either: a
+#     cache-mounted directory contributes nothing to the image layer at all.
+#
+# `sharing=locked` because lib/build-all.sh builds boards concurrently and two
+# apt transactions writing one archive directory is a corrupt partial download,
+# not a slow one.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eu; \
+    [ -f /etc/apt/apt.conf.d/docker-clean ] \
+      && mv /etc/apt/apt.conf.d/docker-clean /tmp/ceralive-docker-clean || true; \
+    printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\n' \
+      > /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    if [ -n "${APT_PROXY}" ]; then \
+      printf 'Acquire::http::Proxy "%s";\n' "${APT_PROXY}" \
+        > /etc/apt/apt.conf.d/99ceralive-proxy; \
+    fi; \
+    mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
       -o Dpkg::Options::=--force-unsafe-io \
       debian-archive-keyring \
       apt-utils \
@@ -79,8 +122,10 @@ RUN apt-get update \
       pipx \
       git \
       python3 \
-      python3-pefile \
- && rm -rf /var/lib/apt/lists/*
+      python3-pefile; \
+    rm -f /etc/apt/apt.conf.d/99ceralive-proxy /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    [ -f /tmp/ceralive-docker-clean ] \
+      && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
 
 # Pin mkosi to the exact upstream tag (trixie apt mkosi is 25.3 — too old for the
 # pin). pipx isolates it in its own venv on trixie's python3 (>= 3.12 floor met).

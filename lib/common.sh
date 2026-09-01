@@ -195,3 +195,70 @@ assert_container_daemon_supported() {
   log_info "container daemon: ${daemon_os} (native bind mounts — real uids, ACLs and xattrs)"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# BUILDER-IMAGE BUILDS — one entry point, because both Dockerfiles depend on
+# BuildKit-era `RUN --mount=type=cache` for their apt layers.
+#
+# `docker build` still selects the LEGACY builder on a plain daemon, and the
+# legacy builder does not merely IGNORE a `--mount` flag — it refuses to parse
+# the Dockerfile ("Unknown flag: mount"). DOCKER_BUILDKIT=1 is therefore a
+# correctness requirement here rather than a speed knob, and it is set in this
+# one function so a third build site cannot be added without it.
+#
+# podman needs no equivalent switch (buildah parses RUN --mount natively) but it
+# does need a floor: the `cache` mount TYPE landed in buildah 1.24 / podman 4.0.
+# Below that the same Dockerfile fails inside a file the operator did not write,
+# so the floor is asserted here with a message that names the real cause.
+# ---------------------------------------------------------------------------
+CONTAINER_BUILD_MIN_DOCKER_MAJOR="${CONTAINER_BUILD_MIN_DOCKER_MAJOR:-23}"
+CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
+
+# Echo the leading integer of `<runtime> --version`, or nothing when the output
+# has a shape this refuses to guess at.
+container_runtime_major() {
+  local runtime="${1:?container_runtime_major needs a runtime}" out major
+  out="$("${runtime}" --version 2>/dev/null)" || return 0
+  major="$(printf '%s' "${out}" | sed -n 's/.*[^0-9]\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n1)"
+  [[ "${major}" =~ ^[0-9]+$ ]] || return 0
+  printf '%s' "${major}"
+}
+
+assert_container_build_cache_mounts() {
+  local runtime="${1:?assert_container_build_cache_mounts needs a runtime}"
+  local major floor
+  case "${runtime}" in
+    docker) floor="${CONTAINER_BUILD_MIN_DOCKER_MAJOR}" ;;
+    podman) floor="${CONTAINER_BUILD_MIN_PODMAN_MAJOR}" ;;
+    *) return 0 ;;
+  esac
+  major="$(container_runtime_major "${runtime}")"
+  # An unparsable version is not a refusal: the build then fails on its own, with
+  # the Dockerfile line in hand, which is a better diagnostic than a guess made
+  # from a version string this did not recognise.
+  if [[ -z "${major}" ]]; then
+    log_warn "could not read a ${runtime} version — proceeding, but ci/Dockerfile* need ${runtime} >= ${floor} for 'RUN --mount=type=cache'"
+    return 0
+  fi
+  (( major >= floor )) && return 0
+  die "ci/Dockerfile and ci/Dockerfile.kernel use 'RUN --mount=type=cache' for their apt layers, which needs ${runtime} >= ${floor} (found ${major}). Upgrade ${runtime}, or build the builder image elsewhere and pin it with MKOSI_BUILDER_IMAGE / CERALIVE_KERNEL_BUILDER_IMAGE."
+}
+
+# container_image_build <runtime> <build args...>
+container_image_build() {
+  local runtime="${1:?container_image_build needs a runtime}"; shift
+  assert_container_build_cache_mounts "${runtime}"
+  if [[ "${runtime}" == "docker" ]]; then
+    DOCKER_BUILDKIT=1 "${runtime}" build "$@"
+    return
+  fi
+  "${runtime}" build "$@"
+}
+
+# container_build_proxy_args — emit `--build-arg APT_PROXY=<url>` when, and only
+# when, CERALIVE_APT_PROXY is set. Unset emits NOTHING, so an unconfigured build
+# passes the same argument vector it did before the proxy existed.
+container_build_proxy_args() {
+  [[ -n "${CERALIVE_APT_PROXY:-}" ]] || return 0
+  printf '%s\n' --build-arg "APT_PROXY=${CERALIVE_APT_PROXY}"
+}

@@ -29,12 +29,34 @@ for required in \
   'mkosi_cache_root=mkosi/cache' \
   'staging_dir=mkosi/.staging' \
   'kernel_ccache_dir=mkosi/cache/kernel-ccache' \
+  'kernel_src_mirror_dir=mkosi/cache/kernel-src.git' \
   'images_dir=images' \
-  'board_mkosi_cache_dir=mkosi/cache/rock-5b-plus'
+  'board_mkosi_cache_dir=mkosi/cache/rock-5b-plus' \
+  'board_mkosi_cache_dir_container=mkosi/cache/rock-5b-plus/container' \
+  'board_mkosi_cache_dir_native=mkosi/cache/rock-5b-plus/native'
 do
   grep -Fqx "${required}" <<<"${emitted}" \
     || fail "emit-canonical-paths.sh does not emit '${required}'"
 done
+
+# The two privilege domains must be LEAVES of the board root, not siblings of it:
+# release.yml saves and restores the board root, so a domain outside it would be
+# a cache CI silently never persists.
+board_root="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --board rock-5b-plus --get board_mkosi_cache_dir)"
+for domain in container native; do
+  leaf="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --board rock-5b-plus --get "board_mkosi_cache_dir_${domain}")"
+  [[ "${leaf}" == "${board_root}/${domain}" ]] \
+    || fail "the ${domain} mkosi cache '${leaf}' is not a leaf of the board root '${board_root}'"
+done
+
+# The kernel-source mirror is a SIBLING of the per-board caches, so a per-board
+# wipe cannot reach it, and it is under the cache root the CI cleanup allowlist
+# already covers.
+mirror_dir="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --get kernel_src_mirror_dir)"
+[[ "${mirror_dir}" == "$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --get mkosi_cache_root)/"* ]] \
+  || fail "the kernel source mirror '${mirror_dir}' is not under the mkosi cache root"
+[[ "${mirror_dir}" != "${board_root}/"* ]] \
+  || fail "the kernel source mirror '${mirror_dir}' sits under a per-board cache a board wipe would delete"
 
 # The orchestrator, kernel builder and parallel runner must DERIVE, not restate.
 grep -Fq 'source "${HERE}/paths.sh"' "${PIPELINE_DIR}/lib/orchestrate.sh" \
@@ -54,7 +76,7 @@ done
 # The mkosi CLI cache flag is spelled relative to the mkosi CONFIG DIR, so it is
 # the one place a bare `cache/<board>` is correct. Prove it composes onto the
 # canonical repo-relative root rather than being an independent second literal.
-mkosi_rel_cache="$(sed -n 's/^  local cache_dir="\(.*\)\/\${BOARD_ID}"$/\1/p' "${PIPELINE_DIR}/lib/orchestrate.sh")"
+mkosi_rel_cache="$(sed -n 's/^  local cache_dir="\(.*\)\/\${BOARD_ID}\/.*"$/\1/p' "${PIPELINE_DIR}/lib/orchestrate.sh")"
 [[ -n "${mkosi_rel_cache}" ]] || fail "could not read the mkosi CLI cache dir out of orchestrate.sh"
 canonical_root="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --get mkosi_cache_root)"
 canonical_mkosi="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --get mkosi_dir)"

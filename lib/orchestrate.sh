@@ -450,7 +450,14 @@ run_mkosi_build() {
   # T12 parallelises on). This CLI flag is the authoritative plumb; it overrides
   # the env-expanded default in mkosi/mkosi.conf and they resolve to the same
   # path. Relative to the mkosi config dir (MKOSI_DIR / /work/mkosi in-container).
-  local cache_dir="cache/${BOARD_ID}"
+  #
+  # The second axis is the PRIVILEGE DOMAIN (paths.sh::ceralive_mkosi_cache_domain):
+  # a containerized and a --native build own their caches as different uids, and
+  # mkosi discards a cache it does not own, so sharing one leaf made every
+  # alternation a cold base layer.
+  local cache_domain
+  cache_domain="$(ceralive_mkosi_cache_domain)"
+  local cache_dir="cache/${BOARD_ID}/${cache_domain}"
 
   local mkosi_args=(
     --architecture="${mkosi_arch}"
