@@ -1,9 +1,9 @@
 # CeraLive v2 — kernel-build-from-source container (Task 26).
 #
 # Used ONLY by lib/build-kernel.sh, which runs `make bindeb-pkg` inside this
-# image for an opt-in family variant that declares a `kernel_source:` block
-# (today: rk3588 `edge`). The default vendor path never builds this image and
-# never runs this stage.
+# image for any resolve that declares a `kernel_source:` block — on rk3588 that
+# is every build, `edge` being the production default_variant. A prebuilt-BSP
+# family (x86-minipc) never builds this image and never runs this stage.
 #
 # THE BASE IMAGE IS NOT PINNED HERE. BASE_IMAGE is REQUIRED and is supplied by
 # lib/build-kernel.sh from the manifest's kernel_source.builder_image, which the
@@ -52,8 +52,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 # libdw-dev is an unconditional `:native` build-dep of the same generated control.
 #
-# dwarves (pahole) is required by any config carrying CONFIG_DEBUG_INFO_BTF — the
-# Armbian vendor .config does. Its absence is NOT a build error: `DEBUG_INFO_BTF`
+# dwarves (pahole) is required by any config carrying CONFIG_DEBUG_INFO_BTF, which
+# nothing in this repo declares either way — it is inherited from whatever base
+# config a track starts from. Its absence is NOT a build error: `DEBUG_INFO_BTF`
 # is gated on `PAHOLE_VERSION >= 121`, so kconfig would silently DROP the symbol
 # and ship a kernel with no BTF, which is exactly the class of silent config loss
 # lib/verify-kernel-config.sh exists to catch. Installing the tool is the fix; the

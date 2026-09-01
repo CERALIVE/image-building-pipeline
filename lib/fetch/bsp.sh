@@ -264,15 +264,15 @@ _fetch_bsp_curl() {
 # consumed by BOTH fetch_bsp (the Armbian set, minus userspace pins) and
 # fetch_rk3588_userspace (the pinned-URL subset).
 #
-# KERNEL-FROM-SOURCE SUPPRESSION (task 26). When an opt-in family variant builds
-# the kernel from source, CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS names exactly the
+# KERNEL-FROM-SOURCE SUPPRESSION (task 26). When a resolved manifest builds the
+# kernel from source, CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS names exactly the
 # kernel/DTB packages that must NOT be fetched remotely — both the pre-overlay
-# vendor names (which the family file still lists) and the post-overlay built
+# family names (which the family file still lists) and the post-overlay built
 # names (which no remote archive carries). Filtering HERE rather than in each
 # fetcher means a suppressed package is invisible to every remote path at once.
 # U-Boot and firmware are deliberately never in that set: they stay prebuilt-
 # fetched. The list is DERIVED by resolve.py, never authored, so it cannot drift
-# from the replacement set. Empty/unset on the production vendor path.
+# from the replacement set. Empty/unset on a prebuilt-BSP resolve.
 # ---------------------------------------------------------------------------
 collect_declared_bsp_pkgs() {
   local family="$1"

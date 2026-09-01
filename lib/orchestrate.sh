@@ -178,8 +178,9 @@ Builds the CeraLive v2 image for <board> from its manifest.
 Options:
   --native           build with HOST mkosi instead of the default container
                      (same as MKOSI_NATIVE=1)
-  --variant <name>   apply an OPT-IN family variant overlay (default: 'default',
-                     the production vendor path). Never inferred.
+  --variant <name>   name a family variant overlay explicitly (default:
+                     'default', the family's own default_variant — on rk3588 the
+                     production mainline 'edge' track). Never inferred.
 
 Env:
   INSTALL_BOOT_BSP   1 (default) full device build incl. kernel/DTB/U-Boot/firmware
@@ -220,7 +221,7 @@ main() {
       *) usage; die "unknown argument: $1" ;;
     esac
   done
-  [[ -n "${variant}" ]] || die "--variant requires a name (use 'default' for the production vendor path)"
+  [[ -n "${variant}" ]] || die "--variant requires a name (use 'default' for the family's own default track)"
 
   [[ -n "${board}" ]]    || { usage; die "--board is required"; }
   [[ -n "${manifest}" ]] || { usage; die "--manifest is required"; }
@@ -312,10 +313,11 @@ run_mkosi_build() {
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
-  # Kernel-from-source DTB install mapping. EMPTY on the production vendor path,
-  # which is what makes the platform layer's copy step a strict no-op there:
-  # a source-built kernel ships its DTBs inside the linux-image deb, an Armbian
-  # linux-dtb-* package already puts them where the boot script looks.
+  # Kernel-from-source DTB install mapping. EMPTY on a prebuilt-BSP resolve — a
+  # family or variant declaring no `kernel_source:` block — which is what makes
+  # the platform layer's copy step a strict no-op there: a source-built kernel
+  # ships its DTBs inside the linux-image deb, while an Armbian linux-dtb-*
+  # package already puts them where the boot script looks.
   export KERNEL_VARIANT="${KERNEL_VARIANT:-}"
   export KERNEL_SOURCE_DTB_DEB_DIR="${KERNEL_SOURCE_DTB_DEB_DIR:-}"
   export KERNEL_SOURCE_DTB_BOOT_DIR="${KERNEL_SOURCE_DTB_BOOT_DIR:-}"

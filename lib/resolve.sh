@@ -20,8 +20,11 @@
 # the kernel to a build-from-source pin). Selection is EXPLICIT ONLY — via
 # `--variant <name>` or CERALIVE_KERNEL_VARIANT — and is never inferred from the
 # board, the host or the environment beyond that one variable. With no variant
-# the resolver strips `variants:` and emits byte-identical params to a family
-# that never declared one, so the production (vendor) path cannot move.
+# the reserved name `default` applies, which resolves the family's own
+# `default_variant:` (rk3588: `edge`, the production mainline track) or no
+# overlay at all for a family that declares none. Both `variants:` and
+# `default_variant:` are stripped before flattening, so an unselected overlay
+# can never leak a second kernel pin into the resolved params.
 #
 # Design rules (inherited from lib/common.sh + learnings):
 #   * strict mode + loud ERR trap (common.sh); NO `|| true` anywhere.
@@ -64,7 +67,8 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../versions.yaml}"
 # Manifest file extensions we accept, in precedence order.
 MANIFEST_EXTS=(yaml yml)
 
-# Reserved variant name meaning "apply no overlay" — the production vendor path.
+# Reserved variant name meaning "whatever the family declares as its own default"
+# — the family's `default_variant:`, or no overlay when it declares none.
 DEFAULT_KERNEL_VARIANT="default"
 
 # ---------------------------------------------------------------------------
@@ -129,8 +133,9 @@ Resolves a board manifest into a flat KEY=value build-parameter set on stdout:
 
   <board>            manifest stem under ${BOARDS_DIR}/
   --variant <name>   family variant overlay to apply (default: '${DEFAULT_KERNEL_VARIANT}'
-                     = no overlay, the production vendor path). Also settable
-                     with CERALIVE_KERNEL_VARIANT. NEVER inferred.
+                     = the family's own default_variant, or no overlay when it
+                     declares none). Also settable with CERALIVE_KERNEL_VARIANT.
+                     NEVER inferred.
 EOF
 }
 
@@ -157,7 +162,7 @@ resolve() {
     usage
     die "missing required argument: <board>"
   fi
-  [[ -n "$variant" ]] || die "--variant requires a name (use '${DEFAULT_KERNEL_VARIANT}' for the production vendor path)"
+  [[ -n "$variant" ]] || die "--variant requires a name (use '${DEFAULT_KERNEL_VARIANT}' for the family's own default track)"
 
   # 1. Locate the board manifest.
   local board_file

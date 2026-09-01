@@ -124,8 +124,9 @@ stage_resolve() {
   require_field FIRMWARE_PACKAGES "${FIRMWARE_PACKAGES:-}"
 
   # Kernel-build-from-source is active IFF the resolved manifest carries a
-  # kernel_source: block — i.e. only under an explicitly selected variant. The
-  # production vendor path resolves this empty and every branch below is inert.
+  # kernel_source: block — on rk3588 that is every build, since both its
+  # variants build from source. A prebuilt-BSP resolve (a family or variant
+  # declaring no such block) leaves this empty and every branch below is inert.
   kernel_from_source=0
   if [[ -n "${KERNEL_SOURCE_GIT_URL:-}" ]]; then
     kernel_from_source=1

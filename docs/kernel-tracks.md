@@ -12,27 +12,30 @@ resolves the `edge` overlay — the mainline 7.2 kernel built from source — an
 does so byte-identically to `./build <board> --variant edge`, the board's own
 `variant_overrides.edge` included.
 
-**The Armbian vendor 6.1 BSP track is RETIRED.** Both overlays that carried it —
-the prebuilt `vendor` one and the source-built `vendor-patched` one — were
-removed on the mainline cutover, along with their package pins, their bootloader
-rows, their fixtures and their tests. Everything is preserved at the annotated
-tag `vendor-kernel-final`; recover any of it with
-`git show vendor-kernel-final:<path>`.
-
 ```
 ./build rock-5b-plus                       # mainline 7.2, built from source
 ./build rock-5b-plus --variant edge        # the same thing, named explicitly
 ./build rock-5b-plus --variant edge-test   # its never-released debug sibling
 ```
 
-`default_variant` is a POINTER, not a copy of the pins, and that is still true
-after the retirement. Copying `edge`'s block to the family top level would force
-`edge-test` (which `extends: edge`) to restate its parent's pins — the exact
-byte-for-byte drift `extends` exists to prevent. (A second reason applied while
-the source-built vendor overlay existed: its config-FILE mode would have
-deep-merged onto the family's defconfig mode and produced the half-specified
-config the schema's `oneOf` forbids. That reason died with the overlay; the
-`edge-test` one is sufficient on its own.)
+`default_variant` is a POINTER, not a copy of the pins. Copying `edge`'s block to
+the family top level would force `edge-test` (which `extends: edge`) to restate
+its parent's pins — the exact byte-for-byte drift `extends` exists to prevent.
+
+## The retired Armbian vendor 6.1 BSP track
+
+**It is retired from this pipeline, and nothing here consumes it.** Both overlays
+that carried it — the prebuilt `vendor` one and the source-built `vendor-patched`
+one — were removed on the mainline cutover along with their package pins,
+bootloader rows, the `libmali` GPU blob, their fixtures and their tests; every
+byte is recoverable at the annotated tag `vendor-kernel-final`
+(`git show vendor-kernel-final:<path>`). Its patch series lives on in
+[`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches),
+which is **fully ACTIVE and open to contributions** — it is deliberately preserved
+as a reference for anyone building a custom vendor-kernel image, and it still
+tracks the open `armbian/linux-rockchip` PR #487 its series was written against.
+Retired here does not mean archived there; do not read this section as a reason to
+close, archive or delete that repository.
 
 ## Which patch repo feeds which track
 
@@ -42,14 +45,9 @@ config the schema's `oneOf` forbids. That reason died with the overlay; the
 | `edge-test` | `extends: edge` — the same source, plus KASAN/lockdep and the fault-injection symbols | (inherited) | never released; `ci/check-release-variant.sh` refuses it by property |
 
 Both are declared under `rk3588`'s `variants:` map in
-[`manifests/families/rk3588.yaml`](../manifests/families/rk3588.yaml).
-
-The two Armbian vendor 6.1 BSP rows that used to sit under these — the prebuilt
-one and the source-built one fed by
-[`CERALIVE/rk3588-vendor-kernel-patches`](https://github.com/CERALIVE/rk3588-vendor-kernel-patches)
-— are RETIRED. That sibling patch repository still exists and still tracks the
-open `armbian/linux-rockchip` PR #487 its series was written against, but nothing
-in this pipeline consumes it any more.
+[`manifests/families/rk3588.yaml`](../manifests/families/rk3588.yaml). These two
+rows are the whole table — the two Armbian 6.1 BSP rows that used to sit under
+them went with the retirement above.
 
 ## What the flip took with it
 
@@ -57,13 +55,12 @@ in this pipeline consumes it any more.
 map an nftables skb mark onto its client band — is in-tree and built-in on the
 mainline track (`CONFIG_NET_CLS_FW=y` in
 [`manifests/kernel/rk3588-edge.fragment`](../manifests/kernel/rk3588-edge.fragment),
-pinned in `required-symbols.list`). The prebuilt vendor kernel never built it, so
+pinned in `required-symbols.list`). The retired prebuilt kernel never built it, so
 the image used to carry `ceralive-cls-fw`, a separately built vermagic-pinned
 out-of-tree `cls_fw.ko`. That package, its pin file, its builder image and the
 whole `kernel_extension_packages` mechanism are **retired**; an absence guard in
-`tests/packaging-hygiene.bats` fails the build if any half comes back. With the
-vendor track itself now retired too, there is no longer any kernel this pipeline
-builds that lacks `NET_CLS_FW`.
+`tests/packaging-hygiene.bats` fails the build if any half comes back. Every
+kernel this pipeline builds today carries `NET_CLS_FW` in-tree.
 
 ## The pin chain
 
@@ -97,11 +94,10 @@ patch repo, not here:
 
 - mainline (`edge`): [`rk3588-kernel-patches/docs/UPSTREAM-STATUS.md`](https://github.com/CERALIVE/rk3588-kernel-patches/blob/main/docs/UPSTREAM-STATUS.md)
 
-The vendor-BSP ledger is no longer this pipeline's concern — that track is
-retired and nothing here consumes its series.
-
-This page does not restate the ledger. Read the linked file for current
-status; this index only says where to look.
+That is the only ledger this pipeline has a stake in; the retired track's is its
+own repository's business (see the retirement note above). This page does not
+restate either. Read the linked file for current status; this index only says
+where to look.
 
 ## Where the rest of the story lives
 

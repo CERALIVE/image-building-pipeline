@@ -2,10 +2,11 @@
 #
 # build-kernel.sh — kernel-build-from-source stage for the CeraLive v2 pipeline.
 #
-# OPT-IN ONLY. This stage runs when, and only when, the resolved manifest carries
-# a `kernel_source:` block — which today happens only under an explicitly
-# selected family variant (`build <board> --variant edge`). The production
-# vendor path never reaches this file.
+# This stage runs when, and only when, the resolved manifest carries a
+# `kernel_source:` block. On rk3588 that is EVERY build, because the family
+# declares `default_variant: edge` and both its variants build from source; a
+# family or variant that declares no such block (x86-minipc) never reaches this
+# file.
 #
 # BACKEND (decided, pinned — see manifests/schema/family.schema.json $defs):
 #   plain kernel `make bindeb-pkg` from the pinned source tree + the applied

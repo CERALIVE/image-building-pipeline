@@ -65,8 +65,8 @@
 #                     orange-edge      orange-pi-5-plus --variant edge      (non-debug)
 #                     rock-edge-test   rock-5b-plus    --variant edge-test  (debug)
 #
-#                   The prebuilt-vendor candidate `rock-vendor` is GONE with the
-#                   vendor kernel track; every candidate now builds from pinned
+#                   The prebuilt candidate `rock-vendor` is GONE with the retired
+#                   Armbian 6.1 BSP track; every candidate now builds from pinned
 #                   source. Its wiring is preserved at the `vendor-kernel-final`
 #                   tag.
 #   --trust-verdict the ci/verify-bench-rauc-trust.sh verdict JSON

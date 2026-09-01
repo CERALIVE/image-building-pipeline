@@ -78,10 +78,11 @@ concurrently (bounded by JOBS), each to its own log under logs/, and the run
 exits non-zero if ANY board fails. DRY_RUN=1 previews the resolved board list
 (printed, exit 0) before the runner is reached.
 
---variant selects an OPT-IN family variant (e.g. rk3588's kernel-build-from-
-source 'edge'). Omitted, it is 'default' — the production vendor path, byte-for-
-byte unchanged. It is SINGLE-BOARD ONLY and is never inferred: a variant build is
-always something an operator asked for by name.
+--variant names a family variant explicitly (e.g. rk3588's debug sibling
+'edge-test'). Omitted, it is 'default' — the family's own default_variant, which
+on rk3588 is the PRODUCTION mainline source-built 'edge' track, resolved
+byte-identically to naming it. It is SINGLE-BOARD ONLY and is never inferred: a
+named variant build is always something an operator asked for by name.
 
 Declared variants per family (see docs/kernel-tracks.md):
 $(list_declared_variants)

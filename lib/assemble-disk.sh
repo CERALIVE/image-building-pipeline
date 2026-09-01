@@ -65,7 +65,7 @@
 #           --bootloader-adapter/--board/--bsp-dir (default: RAUC_BOOTLOADER_ADAPTER/
 #           BOARD_ID/BSP_DIR env) drive the gap bootloader write; custom writes the
 #           RK3588 blob, efi skips it. --variant <name> (default KERNEL_VARIANT env,
-#           empty == the production vendor path) selects WHICH U-Boot blob set the
+#           empty == a prebuilt-BSP resolve) selects WHICH U-Boot blob set the
 #           gap write may use, keyed on the same board×variant tuple the resolver
 #           uses for variant_overrides.<variant>.uboot_packages.
 #           --rootfs-tree <dir> (default ROOTFS_TREE env)
