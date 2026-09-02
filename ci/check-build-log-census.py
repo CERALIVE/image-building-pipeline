@@ -35,6 +35,10 @@ DISPOSITIONS = ("FIXED", "ACCEPTED", "BLOCKING")
 STAGES = (
     "resolve",
     "fetch",
+    # The two `docker build` runs that produce ci/Dockerfile{,.kernel}, whose
+    # diagnostics carry the `<builder>` marker and are a different subject from
+    # any device-image layer.
+    "builder-image",
     "kernel-build",
     "mkosi:config",
     "mkosi:base",

@@ -372,13 +372,13 @@ notices, three `GrowFileSystem=` keys systemd-repart silently ignored, an
 `update-alternatives: error`, an initrd that quietly fell back to gzip, and eight
 multi-GB cross-filesystem copies.
 
-[`docs/build-log-census.md`](docs/build-log-census.md) freezes all 26 with a
-baseline count, build stage, owner and a disposition — `FIXED` (removed; must
+[`docs/build-log-census.md`](docs/build-log-census.md) freezes 34 signatures with
+a baseline count, build stage, owner and a disposition — `FIXED` (removed; must
 never reappear), `ACCEPTED` (external or inherent, allowed up to its baseline
-count) or `BLOCKING`. 12 are FIXED, 14 ACCEPTED, 0 BLOCKING.
+count) or `BLOCKING`. 12 are FIXED, 22 ACCEPTED, 0 BLOCKING.
 
 ```bash
-ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md  # schema
+ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md  # schema
 ci/check-build-log.sh --self-test                                        # non-vacuity
 ci/check-build-log.sh <build.log>                                        # the gate
 ci/check-build-log.sh --census-report <build.log>                        # counts only
@@ -390,6 +390,23 @@ baseline. There are no wildcard exceptions: every entry is compared with `==`
 against a normalized line. It runs in `release.yml` right after the production
 candidate build, which is the only place a real production build log exists — the
 PR gate is `DRY_RUN=1` and never executes the image layers.
+
+Rows 27-34 are the result of auditing the anchor VOCABULARY rather than the
+dispositions. Every line of a real 20,016-line Debian 13 build log matching
+`-iE 'error|warn|fail|denied|permission|cannot|unable'` was classified: 220
+matched, 142 were already anchored, and of the 93 that were not, 51 are substring
+noise (`libgpg-error0`, `liberror-perl`, `net/core/failover.o`, a patch filename)
+and 42 were real diagnostics the anchors could not see — the two builder-image
+builds' own `update-alternatives`/`invoke-rc.d` output behind BuildKit's
+`#<step> <elapsed> ` prefix, its Dockerfile-lint report, and the `runit:` and
+`Running in chroot, …` service-suppression paths that sit beside the
+`invoke-rc.d` denial the census already knew about. All eight are `ACCEPTED`; none
+was a defect.
+
+The keyword sweep is how the gaps were found and is **not** what the lint does.
+It is strictly weaker in the other direction: 35 anchored lines in that same log
+carry none of those keywords at all (`Ign:<N> …`, `invoke-rc.d: could not
+determine current runlevel`, `dir not exist`).
 
 ## Image Size Gate
 
@@ -527,8 +544,20 @@ version + content `sha256` to `bsp-provenance.json` in the image output dir
 committed baseline `manifests/bsp-baseline.json`.
 
 - A differing version **or** a same-version content-hash re-spin prints a
-  `BSP drift` warning. It is warn-only by default; `BSP_DRIFT_STRICT=1` makes a
-  mismatch against a seeded baseline fatal.
+  `BSP drift` banner. On the **release path** — any build with
+  `CERALIVE_BUILD_MODE=production`, which is what `release.yml` sets and what
+  `ci/build-hardware-candidates.sh` refuses unless the board's trust anchor
+  really is a production root — that banner is **fatal**. A development build
+  reports it and continues, so local iteration is not blocked.
+- The escape hatches are explicit and both directions are documented:
+  `BSP_DRIFT_STRICT=1` opts in anywhere, and `BSP_DRIFT_STRICT=0` is the opt-out
+  that wins **even on the release path**, for the one case the gate exists to
+  make deliberate — knowingly shipping a drifted BSP. Any other value is refused
+  rather than read as "off", because a typo that quietly disabled a release gate
+  is indistinguishable from the gate working. Every banner names the rule that
+  decided it, so an operator never has to guess which knob won.
+- Seeding is always exempt: an unseeded/first-run baseline and a clean match are
+  exit 0 in every mode, so a fresh baseline can never fail a release build.
 - The baseline is seeded with the reviewed Armbian 26.5.1 kernel package version
   and SHA-256. A package promotion requires an authenticated signed-index review
   and explicit updates to the version registry and kernel baseline.

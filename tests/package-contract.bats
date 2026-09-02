@@ -247,10 +247,15 @@ load manifest-helpers
 # 15. BSP provenance + advisory kernel drift-guard (Task 3).
 #     fetch-debs.sh records the exact-versioned kernel BSP's resolved version +
 #     content sha256 into a gitignored bsp-provenance.json, then runs a drift
-#     guard against the committed manifests/bsp-baseline.json. It warns by
-#     default and is fatal only with BSP_DRIFT_STRICT=1; it compares the CONTENT
-#     hash (not just the version), so a same-version re-spin is still caught, and
-#     seeds the baseline on first run. These tests source the fetch helpers
+#     guard against the committed manifests/bsp-baseline.json. It is STRICT on
+#     the release path (CERALIVE_BUILD_MODE=production) and advisory for a
+#     development build, with BSP_DRIFT_STRICT overriding in either direction;
+#     it compares the CONTENT hash (not just the version), so a same-version
+#     re-spin is still caught, and seeds the baseline on first run.
+#
+#     Every case below sets CERALIVE_BUILD_MODE explicitly. Leaving it ambient
+#     would make the advisory cases pass or fail on the invoking shell, which is
+#     exactly the drift the mode axis exists to remove. These tests source the fetch helpers
 #     directly and drive the guard with synthetic version/hash inputs
 #     — no apt, no real .deb — so they fit this UNIT suite.
 # ===========================================================================
@@ -258,7 +263,7 @@ load manifest-helpers
 @test "bsp drift: matching version+hash is no-drift (exit 0, no 'BSP drift' banner)" {
   local base="$BATS_TEST_TMPDIR/baseline-match.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" != *"BSP drift"* ]]
   [[ "$output" == *"matches known-good baseline"* ]]
@@ -267,7 +272,7 @@ load manifest-helpers
 @test "bsp drift: a version mismatch fires an advisory 'BSP drift' warning (exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-ver.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   [[ "$output" == *"BSP drift"* ]]
@@ -276,7 +281,7 @@ load manifest-helpers
 @test "bsp drift: SAME version but DIFFERENT content hash still drifts (content-hash compare, exit 0)" {
   local base="$BATS_TEST_TMPDIR/baseline-hash.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_B"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_B"
   [ "$status" -eq 0 ]
   [[ "$output" =~ [Dd]rift ]]
   # the re-spin note proves the guard compared the hash, not just the version
@@ -286,7 +291,7 @@ load manifest-helpers
 @test "bsp drift: first run with NO baseline seeds it, notes it, exits 0" {
   local base="$BATS_TEST_TMPDIR/seed-me.json"
   [ ! -f "$base" ]
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   [ -f "$base" ]
@@ -298,26 +303,93 @@ load manifest-helpers
 @test "bsp drift: an UNSEEDED (null) baseline scaffold is treated as first run (seeds, exit 0)" {
   local base="$BATS_TEST_TMPDIR/scaffold.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"
   [[ "$output" == *"$BSP_SHA_A"* ]]
 }
 
-@test "bsp drift (C6b): default (STRICT unset) with drift warns and exits 0" {
+@test "bsp drift (C6b): a DEVELOPMENT build with drift warns and exits 0" {
   local base="$BATS_TEST_TMPDIR/baseline-default.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"BSP drift"* ]]
-  [[ "$output" == *"advisory — build continues"* ]]
+  [[ "$output" == *"advisory"* ]]
+  [[ "$output" == *"build continues"* ]]
+  # the banner must name the rule that decided, so an operator is never left
+  # guessing which of the three knobs produced the verdict
+  [[ "$output" == *"CERALIVE_BUILD_MODE=development"* ]]
+}
+
+@test "bsp drift (release): a PRODUCTION build with drift FAILS by default (no env opt-in)" {
+  local base="$BATS_TEST_TMPDIR/baseline-release.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BSP drift"* ]]
+  [[ "$output" == *"strict"* ]]
+  [[ "$output" == *"CERALIVE_BUILD_MODE=production"* ]]
+  # BSP_DRIFT_STRICT is never set here: this is the DEFAULT on the release path
+  [[ "$output" != *"BSP_DRIFT_STRICT=1 opt-in"* ]]
+}
+
+@test "bsp drift (release): a PRODUCTION build catches a SAME-version content re-spin" {
+  # the substitution the exact version pin cannot see, on the path that ships
+  local base="$BATS_TEST_TMPDIR/baseline-respin.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_B"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"re-spin"* ]]
+}
+
+@test "bsp drift (release): BSP_DRIFT_STRICT=0 opts OUT even on the release path" {
+  local base="$BATS_TEST_TMPDIR/baseline-optout.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production BSP_DRIFT_STRICT=0 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"BSP_DRIFT_STRICT=0 opt-out"* ]]
+}
+
+@test "bsp drift (release): a PRODUCTION build with NO drift is still exit 0" {
+  local base="$BATS_TEST_TMPDIR/baseline-release-clean.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"matches known-good baseline"* ]]
+}
+
+@test "bsp drift (release): a PRODUCTION build with an UNSEEDED baseline seeds and exits 0" {
+  # a fresh baseline may never fail a strict build — otherwise the first release
+  # after a scaffold is unbuildable
+  local base="$BATS_TEST_TMPDIR/scaffold-release.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first run"* ]]
+}
+
+@test "bsp drift: a BSP_DRIFT_STRICT value that is neither 0 nor 1 is REFUSED, not read as off" {
+  local base="$BATS_TEST_TMPDIR/baseline-bogus.json"
+  printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=production BSP_DRIFT_STRICT=false bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be 0 or 1"* ]]
+}
+
+@test "bsp drift: the release path is wired through CERALIVE_BUILD_MODE, which orchestrate.sh exports" {
+  # the guard runs host-side in [2/9] as a child of the orchestrator, so it only
+  # ever sees the mode if the orchestrator exports it
+  grep -Eq '^export CERALIVE_BUILD_MODE' "$PIPELINE_DIR/lib/orchestrate.sh" \
+    || grep -Eq '^export CERALIVE_BUILD_MODE ' "$PIPELINE_DIR/lib/orchestrate.sh"
+  grep -q 'CERALIVE_BUILD_MODE' "$PIPELINE_DIR/lib/fetch/verify.sh"
 }
 
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with drift fails (non-zero)" {
   local base="$BATS_TEST_TMPDIR/baseline-strict.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.99-generic $BSP_SHA_A"
   [ "$status" -ne 0 ]
   [[ "$output" == *"BSP drift"* ]]
   [[ "$output" == *"BSP_DRIFT_STRICT=1"* ]]
@@ -326,9 +398,9 @@ load manifest-helpers
 @test "bsp drift (C6b): no drift is exit 0 in BOTH default and strict modes" {
   local base="$BATS_TEST_TMPDIR/baseline-match-modes.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": "6.1.0-generic", "sha256": "%s" }\n' "$BSP_SHA_A" > "$base"
-  run bash -c "source '$FETCH_DEBS'; bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"matches known-good baseline"* ]]
 }
@@ -336,7 +408,7 @@ load manifest-helpers
 @test "bsp drift (C6b): BSP_DRIFT_STRICT=1 with an UNSEEDED baseline seeds and exits 0 (seeding is exempt)" {
   local base="$BATS_TEST_TMPDIR/scaffold-strict.json"
   printf '{ "schema_version": 1, "package": "linux-image-generic-rk35xx", "version": null, "sha256": null }\n' > "$base"
-  run bash -c "source '$FETCH_DEBS'; BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
+  run bash -c "source '$FETCH_DEBS'; CERALIVE_BUILD_MODE=development BSP_DRIFT_STRICT=1 bsp_drift_check '$base' linux-image-generic-rk35xx 6.1.0-generic $BSP_SHA_A"
   [ "$status" -eq 0 ]
   [[ "$output" == *"first run"* ]]
   run cat "$base"

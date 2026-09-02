@@ -15,11 +15,45 @@ nothing else.
 | Evidence SHA-256 | `615feb5e48c8b970cd2645033a8c95dbbe77cdceb5cdf220839642e8eb3c2bd5` |
 | Lines | 26,404 |
 | Outcome | build completed (`.raw` + signed `.raucb` emitted) |
-| Signatures | 26 |
+| Signatures | 34 (26 frozen at the original freeze + 8 from the coverage sweep below) |
 
 The evidence copy lives under the gitignored `test-results/` tree, so a fresh
 checkout will not have it. It is reproduced by re-running the same board/variant
 build; the SHA-256 above identifies the exact bytes this census was frozen from.
+
+### Coverage sweep (rows 27-34)
+
+Rows 1-26 are unchanged and still describe the 2026-08-09 bookworm/vendor
+baseline log. Rows 27-34 come from auditing the ANCHOR VOCABULARY — not the
+dispositions — against a second, later artifact:
+
+| field | value |
+|---|---|
+| Sweep log | real `rock-5b-plus` (default `edge`) Debian 13 build, `INSTALL_BOOT_BSP=1`, 2026-09-01 |
+| Evidence copy | `.omo/evidence/task-12-trixie-pipewire-build-audit/build-complete.log` |
+| Lines | 20,016 |
+| Outcome | build completed, exit 0 (`.raw` + `.raw.xz` + signed `.raucb` emitted) |
+
+Every line of that log matching `-iE 'error|warn|fail|denied|permission|cannot|
+unable'` was classified. 220 matched; 142 were already anchored; of the 93 that
+were not, 51 are substring noise no keyword grep can distinguish from a
+diagnostic (`libgpg-error0`, `liberror-perl`, `net/core/failover.o`,
+`0015-rkvenc-resource-error-observability.patch`, and this pipeline's own log
+prose) and 42 were real diagnostics in the eight families now recorded as rows
+27-34. After the widening, 204 of the same 220 lines are anchored and the
+residue is exactly those 51 noise lines.
+
+The sweep is how the gaps were FOUND; it is not what the lint does, and it is
+strictly weaker in the other direction — 35 anchored lines in that same log
+carry none of those keywords at all (`Ign:<N> …`, `invoke-rc.d: could not
+determine current runlevel`, `dir not exist`). Do not replace the anchors with
+the keyword pattern.
+
+None of the eight is a defect. Six are external maintainer scripts or the base
+image's own tooling; two (`<builder-image lint: …>`, and the builder-image
+`update-alternatives` pair) report deliberate design decisions this repository
+documents elsewhere. The full triage table is in
+`.omo/evidence/task-13-trixie-pipewire-build-audit.md`.
 
 ## Diagnostic surface
 
@@ -32,14 +66,21 @@ anchor set is deliberately tool-prefix based (`dpkg:`, `update-alternatives:`,
 
 Normalization, in order:
 
-1. Strip a trailing `\r` (the mkosi/dpkg legs of the log are CRLF) and the
-   pipeline's own `[LEVEL] HH:MM:SS ` prefix.
+1. Strip a trailing `\r` (the mkosi/dpkg legs of the log are CRLF), BuildKit's
+   SGR colour codes, and the pipeline's own `[LEVEL] HH:MM:SS ` prefix; then
+   collapse BuildKit's per-line `#<step> <elapsed> ` prefix to the fixed marker
+   `<builder> `. That last one is a REWRITE rather than a deletion on purpose:
+   the two builder-image builds emit some of the same tool diagnostics as the
+   device-image layers, and rows 5 and 6 are `FIXED` — i.e. any occurrence
+   fails — about the device image alone, so deleting the prefix would fail every
+   clean release build. The marker is what keeps the two subjects apart, and it
+   is also what the `Stage`/`Owner` columns record.
 2. Apply the ordered rule table in `ci/check-build-log.sh::normalize_log`, which
    replaces variable substrings with the placeholders `<PATH>`, `<N>`,
-   `<DRIVER>`, `<ACTION>`, `<GROUP>`, `<VALUE>`, and collapses two multi-line
-   diagnostics (dpkg's four-line merged-usr advisory, systemd-resolved's
-   four-line `/etc/resolv.conf` block) onto one signature each by exact-line
-   match.
+   `<DRIVER>`, `<ACTION>`, `<GROUP>`, `<VALUE>`, `<SERVICE>`, `<COMMAND>`, and
+   collapses three multi-line diagnostics (dpkg's four-line merged-usr advisory,
+   systemd-resolved's four-line `/etc/resolv.conf` block, BuildKit's three-line
+   Dockerfile-lint report) onto one signature each by exact-line match.
 
 Every rule is an exact string or an exact-line mapping. There are no wildcard
 allowlist entries: a signature either normalizes to a string that appears
@@ -57,7 +98,7 @@ verbatim in the tables below, or it is novel and rejected.
 `FIXED` against the todo that removes it, so the lint rejects a regression rather
 than tolerating a known-bad state.
 
-## Census (26 signatures)
+## Census (34 signatures)
 
 | # | Signature | Baseline | Stage | Owner | Disposition | Note |
 |---:|---|---:|---|---|---|---|
@@ -67,7 +108,7 @@ than tolerating a known-bad state.
 | 4 | `dpkg-statoverride: warning: --update given but /var/log/chrony does not exist` | 1 | mkosi:runtime | external:chrony | ACCEPTED | Emitted by chrony's own postinst, which statoverrides a log directory systemd-tmpfiles creates at boot. External maintainer script; harmless in a chroot. |
 | 5 | `update-alternatives: warning: skip creation of <PATH> because associated file <PATH> (of link group <GROUP>) doesn't exist` | 13 | mkosi:base | ceralive:image | FIXED | todo9 — caused by `WithDocs=no` path-excluding `/usr/share/man/*` before alternatives registration ran. Manpages are now present through the postinst phase and pruned at the final app layer. |
 | 6 | `update-alternatives: error: alternative path <PATH> doesn't exist` | 1 | mkosi:base | ceralive:image | FIXED | todo9 — same cause as signature 5, escalated to `error` for `/usr/share/man/man7/bash-builtins.7.gz`. Removed by the same manpage-ordering fix. |
-| 7 | `update-rc.d: warning: start and stop actions are no longer supported; falling back to defaults` | 2 | mkosi:runtime | external:cpufrequtils | ACCEPTED | `cpufrequtils`' postinst called `update-rc.d` with legacy start/stop arguments. Not suppressible by `policy-rc.d` (update-rc.d is the enable path, not the invoke path) and not our maintainer script. **Expected to fall to 0 on trixie**: Debian removed `cpufrequtils` and the trixie migration replaced it with `linux-cpupower`, which ships no init script at all. The baseline is a CEILING, not a floor, so 0 occurrences passes and the row is retained rather than deleted — the census count is frozen at 26, and a signature that stops occurring is not the same as one that was never real. Re-confirm on the first real trixie production build and retire the row deliberately if it stays at 0. |
+| 7 | `update-rc.d: warning: start and stop actions are no longer supported; falling back to defaults` | 2 | mkosi:runtime | external:cpufrequtils | ACCEPTED | `cpufrequtils`' postinst called `update-rc.d` with legacy start/stop arguments. Not suppressible by `policy-rc.d` (update-rc.d is the enable path, not the invoke path) and not our maintainer script. **Expected to fall to 0 on trixie**: Debian removed `cpufrequtils` and the trixie migration replaced it with `linux-cpupower`, which ships no init script at all. The baseline is a CEILING, not a floor, so 0 occurrences passes and the row is retained rather than deleted — a signature that stops occurring is not the same as one that was never real, and a row is only ever retired deliberately, never because a later log happened not to emit it. Confirmed at 0 on the 2026-09-01 trixie sweep log; retained pending a deliberate retirement decision. |
 | 8 | `invoke-rc.d: WARNING: No init system and policy-rc.d missing! Defaulting to block.` | 2 | mkosi:base | ceralive:image | FIXED | todo10, completed 2026-08-10 — the build chroot has no `/sbin/init`, so invoke-rc.d complained about the absent policy file on every service-start attempt. An EXECUTABLE `policy-rc.d` returning 101 now covers the whole package-configuration phase; see "How rows 8/9/21 are actually fixed" below for the two halves that took. |
 | 9 | `invoke-rc.d: initscript dbus, action "<ACTION>" failed.` | 3 | mkosi:runtime | ceralive:image | FIXED | todo10, completed 2026-08-10 — packages asked invoke-rc.d to `reload`/`force-reload` dbus inside the chroot. With `policy-rc.d` denying, the initscript is never run and cannot fail. |
 | 10 | `invoke-rc.d: could not determine current runlevel` | 2 | mkosi:base | external:sysvinit | ACCEPTED | invoke-rc.d prints this from `get_runlevel` at line ~297, BEFORE `querypolicy` consults `policy-rc.d` at all — verified against the shipped `/usr/sbin/invoke-rc.d`. A policy file therefore cannot suppress it, and Debian's own comment marks the failure as expected in a chroot (`#823611`). |
@@ -87,6 +128,14 @@ than tolerating a known-bad state.
 | 24 | `Cannot open netlink socket: Protocol not supported` | 1 | mkosi:runtime | external:nftables | ACCEPTED | `nftables`' postinst tries to talk to `NETLINK_NETFILTER` inside the build chroot, which has no netfilter netlink. External maintainer script; the ruleset is applied on the device by `ceralive-ingest-firewall.service`. |
 | 25 | `dir not exist` | 1 | mkosi:platform | external:rockchip-multimedia-config | ACCEPTED | Diagnosed in todo11 and confirmed EXTERNAL. `rockchip-multimedia-config` 1.0.2-1's `DEBIAN/postinst` `configure` branch reads `else echo "dir not exist"; ln -s /lib /usr/lib64; …` when `/usr/lib64` is neither a symlink nor a directory. It is that package's own unconditional `echo`, not a diagnostic and not ours; the branch it announces does exactly what it should. The package is pinned by SHA-256 in `manifests/rk3588-userspace-deb-versions.txt`, so this string is immutable at that pin. |
 | 26 | `Configured GrowFileSystem=<VALUE> for partition type 'linux-generic' that doesn't support it, ignoring.` | 3 | assemble:repart | ceralive:image | FIXED | todo8 — `repart/{20-rootfs_a,30-rootfs_b,40-data}.conf` set `GrowFileSystem=` on `Type=linux-generic` partitions, which systemd-repart does not support and ignores. The keys are removed; `/data` still grows on first boot via the `x-systemd.growfs` fstab option that was already doing the work. |
+| 27 | `<builder> update-alternatives: warning: skip creation of <PATH> because associated file <PATH> (of link group <GROUP>) doesn't exist` | 48 | builder-image | external:dpkg | ACCEPTED | Emitted while `ci/Dockerfile` and `ci/Dockerfile.kernel` install their own toolchains (automake, xz-utils, fakeroot, bison, sysvinit's `mt`) into `debian:trixie-slim`, which ships no manpages. Read the `<builder>` marker literally: this is a BUILDER-IMAGE signature and is deliberately NOT the same signature as row 5, which is `FIXED` about the DEVICE IMAGE layers. Merging them would fail every clean release build. 34 observed; the ceiling carries headroom for a builder toolchain that grows a few alternatives, and a runaway still fails. |
+| 28 | `<builder> update-alternatives: warning: forcing reinstallation of alternative <PATH> because link group <GROUP> is broken` | 4 | builder-image | external:dpkg | ACCEPTED | The `pager` link group arrives half-registered in the slim base (`/bin/more` present, its manpage absent), so `util-linux`' postinst re-registers it. Same builder-image scope and same manpage-less cause as row 27; not reachable from this repository, which does not choose the base image's file set. 2 observed. |
+| 29 | `<builder> invoke-rc.d: policy-rc.d denied execution of <ACTION>.` | 8 | builder-image | external:debian | ACCEPTED | The official `debian:*-slim` images ship their own `/usr/sbin/policy-rc.d` returning 101, so a package that tries to start a service during the builder-image build is correctly refused. Positive evidence, exactly as the post-fix row below is for the device image — and a SEPARATE signature from it, because that row's ceiling governs the image layers this repository controls. 2 observed. |
+| 30 | `<builder> invoke-rc.d: could not determine current runlevel` | 4 | builder-image | external:sysvinit | ACCEPTED | The builder-image half of row 10, with the same cause: invoke-rc.d's `get_runlevel` runs before `querypolicy` consults `policy-rc.d`, so no policy file can suppress it in a container with no init. 2 observed. |
+| 31 | `<builder-image lint: InvalidDefaultArgInFrom on the required BASE_IMAGE arg>` | 3 | builder-image | ceralive:image | ACCEPTED | BuildKit's Dockerfile linter observing that `ci/Dockerfile.kernel`'s `ARG BASE_IMAGE` has no default, which is the documented design: the builder digest is pinned in the board manifest's `kernel_source.builder_image` so it is reviewed beside the kernel and patch pins, and `lib/build-kernel.sh` fails the build when `BASE_IMAGE` is unset. Giving it a default would move a reviewed pin into a Dockerfile line nobody reads. Three lines of one diagnostic (`#<n> WARN: …`, the `N warning(s) found …` summary, its ` - <Rule>: … (line <n>)` bullet) collapse onto this signature. The summary line is rule-agnostic and so rides this signature whichever rule fires, but a second lint rule still fails the lint through its own two NOVEL lines. |
+| 32 | `runit: <SERVICE>: start action denied by policy-rc.d` | 8 | mkosi:runtime | external:debian | ACCEPTED | Debian's `runit-helper`, invoked by the `openssh-server` and `dnsmasq` postinsts alongside `invoke-rc.d`, announcing the same `policy-rc.d` denial in its own words. Positive evidence that service starts are suppressed in the build chroot, on a second code path from the post-fix row below. 2 observed. |
+| 33 | `Running in chroot, ignoring request.` | 32 | mkosi:runtime | external:systemd | ACCEPTED | `deb-systemd-invoke` declining a start/restart because `systemd_running_in_chroot` is true. A third independent suppression path — it needs no `policy-rc.d` at all — and the one whose ABSENCE would mean units were really being started inside the chroot. 16 observed; the ceiling carries headroom because the count tracks the number of service-owning packages in `shared.list`. |
+| 34 | `Running in chroot, ignoring command '<COMMAND>'` | 4 | mkosi:runtime | external:systemd | ACCEPTED | The `deb-systemd-helper` sibling of row 33, for a `daemon-reload` rather than a unit start. Same chroot detection, same inert outcome: unit enablement symlinks are still written, only the reload is skipped. 1 observed. |
 
 ## Post-fix expected signatures
 

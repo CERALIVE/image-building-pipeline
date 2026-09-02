@@ -348,7 +348,7 @@ the format without inheriting strict mode:
 - **`lib/shared/log-lib.sh`** is the ONE `[LEVEL] HH:MM:SS message` formatter
   (five-char padded level, stderr). `common.sh` sources it and adds the strict
   half on top. **The format is a contract**: `ci/check-build-log.sh` matches a
-  frozen 26-signature census against it and the 26 `[N/9]` stage lines are
+  frozen 34-signature census against it and the 26 `[N/9]` stage lines are
   compared byte-for-byte across builds.
 - **`lib/shared/args-lib.sh`** holds the three things all four entry points
   hand-rolled — `--opt=value` splitting (`args_expand_inline`),
@@ -611,17 +611,48 @@ The `DRY_RUN=1` build plan is byte-identical for all three boards × all three
 variants, and `assemble-disk.sh verify` output is identical modulo the random
 GPT disk GUID and the `mktemp` path.
 
-**A build-log warning is a defect with a countdown on it — the 26 signatures are
+**A build-log warning is a defect with a countdown on it — the 34 signatures are
 frozen in a census and a lint rejects anything outside it** [EXISTS]
 
 A real `rock-5b-plus --variant edge` build exited 0 while emitting 26 distinct
-warning/error signatures. `docs/build-log-census.md` freezes all 26 with a
+warning/error signatures. `docs/build-log-census.md` freezes 34 with a
 baseline count, stage, owner and a `FIXED` / `ACCEPTED` / `BLOCKING` disposition;
 `ci/check-build-log.sh` enforces it against a real build log and is wired into
 `release.yml` immediately after the production candidate build (the only place a
 real production log exists — the PR gate is `DRY_RUN=1` and never runs the image
-layers). 12 were FIXED here, 14 are ACCEPTED with a stated reason, 0 remain
+layers). 12 were FIXED here, 22 are ACCEPTED with a stated reason, 0 remain
 BLOCKING.
+
+**Rows 27-34 came from auditing the ANCHOR VOCABULARY, not the dispositions, and
+the method is the reusable part.** Every line of a real 20,016-line trixie build
+matching `-iE 'error|warn|fail|denied|permission|cannot|unable'` was classified:
+220 matched, 142 were already anchored, and of the remaining 93, **51 are
+substring noise no keyword grep can tell from a diagnostic** — the packages
+`libgpg-error0`/`liberror-perl`, kernel objects like `net/core/failover.o`,
+patch filenames, and this pipeline's own prose ("…additive Restart=on-failure
+drop-in…"). The other 42 were real diagnostics in four families the anchors could
+not see. All are ACCEPTED; none was a defect.
+
+Three things about that audit are worth carrying forward:
+
+- **The sweep is how gaps are FOUND; it is not what the lint does, and it is
+  strictly WEAKER in the other direction.** 35 anchored lines in that same log
+  carry none of those keywords at all (`Ign:<N> …`, `invoke-rc.d: could not
+  determine current runlevel`, `dir not exist`). Widening coverage means adding
+  anchors, never replacing them with the keyword pattern.
+- **BuildKit's `#<step> <elapsed> ` prefix is REWRITTEN to `<builder> `, never
+  deleted — and deleting it is the obvious simplification that reds every clean
+  release build.** The two builder-image builds emit 34 `update-alternatives:
+  warning: skip creation of …` lines while installing automake/xz-utils/fakeroot
+  into a manpage-less slim base. Row 5 is `FIXED` — any occurrence fails —
+  because todo9 removed that cause in the DEVICE IMAGE layers. Same text, two
+  subjects, and the marker is what keeps them apart. `--self-test` drives the
+  pair on one line of text in both directions.
+- **The third find came from ADJACENCY, not from the pattern.** `Running in
+  chroot, ignoring request.` (16×) carries none of the sweep's keywords; it was
+  found sitting next to the `runit:` denial that does. It is the
+  `deb-systemd-invoke` suppression path, and its ABSENCE would be the real
+  defect — it would mean units were genuinely being started inside the chroot.
 
 Four of the fixes are worth knowing before touching the files they live in,
 because each is a case where the obvious placement is the wrong one:
@@ -692,9 +723,10 @@ because each is a case where the obvious placement is the wrong one:
 emits it, and the package is SHA-256-pinned, so the string is immutable.
 
 Guards: `tests/mkosi-contract.bats` (25 tests, mutation-verified),
-`ci/check-build-log.sh --self-test` (clean / known-accepted / novel fixtures plus
-generated regression and count-inflation cases), and
-`ci/check-build-log-census.py --expect-count 26`.
+`ci/check-build-log.sh --self-test` (clean / known-accepted / novel /
+builder-image fixtures, plus generated regression, count-inflation, SGR-stripping
+and device-vs-builder `update-alternatives` cases), and
+`ci/check-build-log-census.py --expect-count 34`.
 
 **`lib/shared/deb-lib.sh` is the ONE Debian control/extraction library** [EXISTS]
 
@@ -1291,19 +1323,34 @@ same-version content replacement observable:
   rest of the BSP set. The artifact is **gitignored, never committed**, and
   deliberately **excluded from the build-matrix `sha256` determinism comparison**
   (that job hashes the normalized build-plan string, never a file tree).
-- **Drift-guard (warn-default, strict opt-in, C6b)** — `bsp_drift_check` compares
-  the captured version+hash against the committed baseline
-  `manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
-  stdout. Exit policy is **opt-in**: by DEFAULT (`BSP_DRIFT_STRICT` unset/≠1) it
-  **exits 0 — drift is warn-only, never fatal** (build continues, the historical
-  byte-for-byte path). With **`BSP_DRIFT_STRICT=1`** a real mismatch against a
-  SEEDED baseline **exits non-zero, failing the build** (the seeding run + a clean
-  match stay exit 0 regardless — a fresh baseline can never fail a strict build). It
-  compares the **content hash, not just the version**, so a same-version re-spin is
-  still caught. **Promotion criterion:** flipping the default to strict is a FUTURE
-  change gated on (1) the baseline seeded with a real known-good version+sha256 AND
-  (2) a fleet manifest run clean of drift — see
-  [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
+- **Drift-guard — STRICT ON THE RELEASE PATH, advisory for development** —
+  `bsp_drift_check` compares the captured version+hash against the committed
+  baseline `manifests/bsp-baseline.json`, and on a mismatch prints a `BSP drift`
+  banner to stdout. It compares the **content hash, not just the version**, so a
+  same-version re-spin is still caught — which is the whole point, because that
+  is the one substitution the exact version pin cannot see.
+
+  `bsp_drift_strict` resolves the exit policy, highest precedence first:
+  **`BSP_DRIFT_STRICT=0`** (the documented OPT-OUT — it must outrank the release
+  marker or it is not an opt-out, only a default), **`BSP_DRIFT_STRICT=1`**
+  (explicit opt-in anywhere), **`CERALIVE_BUILD_MODE=production`** (STRICT BY
+  DEFAULT), else advisory. Any other `BSP_DRIFT_STRICT` value is **refused**, not
+  read as "off": a typo that quietly disabled a release gate is
+  indistinguishable from the gate working. The deciding rule is published in
+  `BSP_DRIFT_STRICT_REASON` and named in both the banner and the log line.
+
+  **`CERALIVE_BUILD_MODE=production` IS the release path, and reusing it was the
+  point.** `lib/orchestrate.sh` normalizes and exports it, `release.yml` sets it
+  on the candidate build, and `ci/build-hardware-candidates.sh` refuses it unless
+  that board's `checks.production_trust_anchor` is true — so it already means
+  "this artifact is intended for the fleet" and cannot be forgotten when a new
+  release path is added, the way a bespoke marker could. The seeding run and a
+  clean match stay exit 0 in every mode: a fresh baseline can never fail a
+  release build. The promotion criterion this replaces (a fleet manifest run
+  clean of drift) is satisfied — the baseline is seeded with a reviewed
+  known-good version+sha256 and the 2026-09-01 real trixie build matched it.
+  Guards: `tests/package-contract.bats` §15 (13 cases; mutation-verified —
+  ignoring the release marker reds two of them).
 - **First-run / seeded baseline** — a new scaffold may start with `version` and
   `sha256` as `null`; the first authenticated real build seeds the baseline with
   the actual values, emits an informational note, and exits 0. Commit that seeded
