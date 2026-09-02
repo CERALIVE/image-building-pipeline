@@ -67,7 +67,7 @@ stage_partition() {
   local bsp_names=" libv4l-0 ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
   # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages
   # + the 9-package ModemManager 1.24 closure and its Architecture: all support
-  # companion (modem-stack v1.3.0). The fetcher stages all 15 into debs/; a name missing here fails the build as
+  # companion (modem-stack v1.4.0). The fetcher stages all 15 into debs/; a name missing here fails the build as
   # "unclassified staged package" on a real (non-DRY_RUN) build. Guarded by
   # tests/firstparty-classification.test.sh.
   local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvch264src ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 ceralive-modem-support "
