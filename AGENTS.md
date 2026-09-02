@@ -1185,10 +1185,10 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, the required capture plugin
   `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
-  ceralive-forked (`~ceralive.2`) modem packages `modemmanager libmm-glib0
+  ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
-  libqrtr-glib0` (modem-stack v1.3.0), plus the Architecture-all
-  `ceralive-modem-support=1.3.0` companion. All are downloaded into `$DEST/debs/`
+  libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
+  `ceralive-modem-support=1.4.0` companion. All are downloaded into `$DEST/debs/`
   using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
@@ -4517,7 +4517,7 @@ live writer's payload. Mutation-verified: dropping the call site, dropping the
 **ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 
 The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
-(`~ceralive.2`, modem-stack v1.3.0), not Debian's ModemManager. Nine
+(`~ceralive.3`, modem-stack v1.4.0), not Debian's ModemManager. Nine
 ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
 `-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
 first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
@@ -4526,8 +4526,8 @@ the app postinst (`app/mkosi.postinst.chroot`). Their local `dpkg -i` **upgrades
 the Debian modem packages the runtime layer pulled transitively via `shared.list`
 (`modemmanager`/`libqmi-utils`/`libmbim-utils` stay there to resolve the full
 dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come from
-Debian). `ceralive-modem-support=1.3.0` is the Architecture: all companion from
-modem-stack v1.3.0; it is staged exactly once and classified `RUNTIME_APP_PKGS`,
+Debian). `ceralive-modem-support=1.4.0` is the Architecture: all companion from
+modem-stack v1.4.0; it is staged exactly once and classified `RUNTIME_APP_PKGS`,
 never added to `shared.list`. `modem-stack` is in `REPOS` only for fetch-banner
 provenance; its pin does not select a downloaded package version. The `Package: *`
 origin-990 pin keeps the fork winning on-device.

@@ -16,7 +16,7 @@ modules and advisory on the four MHI/RNDIS ones** — see §6.
 
 The image ships a ModemManager-based cellular stack. The **core ModemManager
 1.24 closure** — the nine ELF-shipping packages below — is a CeraLive fork
-(`~ceralive.2`) published by modem-stack v1.3.0, staged as
+(`~ceralive.3`) published by modem-stack v1.4.0, staged as
 first-party `.deb`s (`FIRST_PARTY_APT_PKGS` in `lib/fetch-debs.sh`, pinned in
 `manifests/first-party-deb-versions.txt`) and installed by the **app layer**
 (`RUNTIME_APP_PKGS`). It **upgrades** the Debian modem packages the runtime layer
@@ -36,7 +36,7 @@ These nine form a **self-contained dependency closure** (`modemmanager` →
 `libmm-glib0`; the glib libs bind to the qmi/mbim/qrtr transports). External deps
 (GLib, `libgudev`, `polkit`, systemd) come from Debian.
 
-`ceralive-modem-support=1.3.0` is a separate, `Architecture: all` first-party
+`ceralive-modem-support=1.4.0` is a separate, `Architecture: all` first-party
 companion staged through that same app-layer route. It owns generic modem system
 assets, including `60-ceralive-modem.rules`; the image-owned
 `99-ceralive-hardware.rules` and generated `78-mm-ceralive-slot-uid.rules` have
