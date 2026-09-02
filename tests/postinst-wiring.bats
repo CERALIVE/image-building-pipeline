@@ -296,7 +296,7 @@ load manifest-helpers
   staged="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")"
   [ "$(grep -Fxc 'ceralive-modem-support' <<<"$staged")" -eq 1 ]
   pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
-  [ "$(awk -F= '$1=="ceralive-modem-support"{print $2}' "$pins")" = "1.3.0" ]
+  [ "$(awk -F= '$1=="ceralive-modem-support"{print $2}' "$pins")" = "1.4.0" ]
   arch_all_ok="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_ARCH_ALL_OK_PKGS[@]}"' bash "$PIPELINE_DIR/lib/fetch/firstparty.sh")"
   [ "$arch_all_ok" = "ceralive-modem-support" ]
 }
@@ -307,12 +307,12 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     version="$(awk -F= -v p="$pkg" '$1==p{print $2; exit}' "$pins")"
     [ -n "$version" ] || { echo "no pin for $pkg"; false; }
-    # v1.3.0's differential release rebuilt each closure source at counter 2.
-    [[ "$version" == *"~ceralive.2" ]] || { echo "$pkg pin lacks ~ceralive.2: $version"; false; }
+    # v1.4.0's differential release rebuilt each closure source at counter 3.
+    [[ "$version" == *"~ceralive.3" ]] || { echo "$pkg pin lacks ~ceralive.3: $version"; false; }
   done
   # spot-check the two anchor versions confirmed live on apt.ceralive.tv
-  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive.2" ]
-  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.2" ]
+  [ "$(awk -F= '$1=="modemmanager"{print $2}' "$pins")" = "1.24.2-2~ceralive.3" ]
+  [ "$(awk -F= '$1=="libqrtr-glib0"{print $2}' "$pins")" = "1.4.0-1~ceralive.3" ]
 }
 
 @test "modem closure: the app postinst classifies all nine as RUNTIME_APP_PKGS (never sysext/appfs)" {
@@ -374,8 +374,8 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     [[ "$output" == *"$pkg"* ]] || { echo "DRY_RUN plan missing $pkg"; false; }
   done
-  [[ "$output" == *"ceralive-modem-support=1.3.0"* ]] \
-    || { echo "DRY_RUN plan missing ceralive-modem-support=1.3.0"; false; }
+  [[ "$output" == *"ceralive-modem-support=1.4.0"* ]] \
+    || { echo "DRY_RUN plan missing ceralive-modem-support=1.4.0"; false; }
   # plan-only: nothing staged
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]

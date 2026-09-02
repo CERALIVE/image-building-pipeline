@@ -42,12 +42,13 @@ cerastream:
   # actual `bitrate` GObject property, matching gstreamer1.0-rockchip-ceralive
   # rather than the legacy Radxa plugin's `bps` spelling and closing
   # the stream-start failure that would otherwise occur during the fork-package swap.
-  pin: v2026.9.0
-  # Release provenance: tag v2026.9.0 resolves to commit c0a397f05eefbc46534004ad1289c5439fb8d1d6.
-  # Device deb: cerastream 2026.9.0 (amd64 + arm64); both binaries stamp 2026.9.0+c0a397f.
+  # v2026.9.1 adds the selectable ALSA/PipeWire backend contract and carries the
+  # network-tolerant service ordering required by the offline-first image.
+  pin: v2026.9.1
+  # Device deb: cerastream 2026.9.1 (amd64 + arm64).
   # Published assets:
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.0/cerastream_2026.9.0_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.0/cerastream_2026.9.0_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.1/cerastream_2026.9.1_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.1/cerastream_2026.9.1_amd64.deb
   channel: stable
 
 CeraUI:
@@ -60,11 +61,12 @@ CeraUI:
   # override no longer blocks starting an ingest source after switching from HDMI.
   # v2026.8.9 adds the awaited stop acknowledgement used by the final two-board
   # todo-16 qualification PASS.
-  pin: v2026.8.9
-  # Release provenance: tag v2026.8.9 resolves to commit 4c6fe4ec75024f42a2df680a4ab20b6212579fc4.
-  # Device deb: ceralive-device 2026.8.9-20260831T020739.4c6fe4e (amd64) /
-  #   2026.8.9-20260831T020738.4c6fe4e (arm64), both published as release assets.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.8.9
+  # v2026.9.0 adds the operator-facing audio-backend selector and PipeWire/BlueALSA
+  # provider reconciliation consumed by this candidate image.
+  pin: v2026.9.0
+  # Device deb: ceralive-device 2026.9.0-20260902T184024.b720f33 (amd64) /
+  #   2026.9.0-20260902T184015.b720f33 (arm64), both published as release assets.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.9.0
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins
@@ -87,7 +89,7 @@ modem-stack:
   path: modem-stack
   repo: https://github.com/CERALIVE/modem-stack
   kind: first-party
-  pin: v1.3.0
+  pin: v1.4.0
   channel: stable
 
 # ── Remaining first-party repos ───────────────────────────────────────────────
