@@ -40,3 +40,4 @@ bsp-provenance.json
 # mkosi scratch workspace (--workspace-directory, lib/paths.sh). Pinned beside the
 # output tree so finished subimages are renamed rather than copied across devices.
 .mkosi-workspace/
+.build-secrets/
