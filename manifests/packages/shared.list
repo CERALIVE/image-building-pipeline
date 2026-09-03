@@ -334,6 +334,18 @@ sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-a
                          # drop-in; without the sudo binary add-on enable/disable is dead code.
 
 # --- Console (HDMI readability at boot) ---------------------------------------
+login                    # ships /bin/login for the UART/serial getty recovery path. On a
+                         # real bench board's SD card, chroots of BOTH RAUC rootfs slots
+                         # reported `dpkg -l login` as `un` (never installed), so
+                         # serial-getty@ttyFIQ0.service could print its banner but could NEVER
+                         # produce a login shell, regardless of password. This was a structural
+                         # package-graph gap: login was absent from every list and nothing pulled
+                         # it in transitively, not corruption in either slot. Installing Debian
+                         # trixie-security's login 1:4.16.0-2+really2.41.5-0+deb13u1 in each
+                         # chroot restored /bin/login (and /usr/bin/login) immediately with zero
+                         # new dependencies beyond already-installed libc6, libpam0g,
+                         # libpam-modules and debconf. Keep it explicit so every image retains
+                         # UART recovery; see mkosi-image-contract.bats' login guards.
 kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service (enabled in
                          # multi-user.target.wants) invokes `setfont` directly, and `setfont`
                          # ships ONLY here. CORRECTION (todo 19, audited): the previous
