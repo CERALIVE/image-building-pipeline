@@ -46,6 +46,7 @@ MACHINE_ID_UNIT()   { printf '%s' "$PIPELINE_DIR/mkosi/runtime/machine-id/cerali
 JOURNAL_GC_SCRIPT() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/ceralive-journal-gc.sh"; }
 JOURNAL_GC_UNIT()   { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/ceralive-journal-gc.service"; }
 JOURNALD_DROPIN()   { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/10-ceralive-journal.conf"; }
+JOURNAL_FLUSH_DROPIN() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/journald/10-ceralive-journal-flush.conf"; }
 RUNTIME_EXECUTOR()  { printf '%s' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"; }
 
 # A board whose /data already holds a valid identity, seeded exactly as the
@@ -75,12 +76,15 @@ id_of() { tr -d '\n' <"$1"; }
 
 @test "journald retention: the drop-in is installed where journald reads it" {
   local dropin_dir="$BATS_TEST_TMPDIR/journald.conf.d"
+  local flush_dropin_dir="$BATS_TEST_TMPDIR/systemd-journal-flush.service.d"
 
   run env CERALIVE_RUNTIME_SRC="$PIPELINE_DIR/mkosi/runtime" \
     JOURNALD_DROPIN_DIR="$dropin_dir" \
+    JOURNAL_FLUSH_DROPIN_DIR="$flush_dropin_dir" \
     bash -c "source '$POSTINST_ENTRY'; setup_journald_retention"
   [ "$status" -eq 0 ]
   [ -f "$dropin_dir/10-ceralive-journal.conf" ]
+  [ -f "$flush_dropin_dir/10-ceralive-persistence.conf" ]
 
   # journald.conf.d files are read in lexical order; a 10- prefix is what keeps
   # this ahead of anything a package might drop in later.

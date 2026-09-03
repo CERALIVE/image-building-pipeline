@@ -48,10 +48,11 @@ POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"
 FIRSTBOOT="${RUNTIME}/ceralive-ssh-firstboot.service"
 CIUART="${RUNTIME}/ceralive-ci-uart-bootstrap.service"
 MACHINEID="${RUNTIME}/machine-id/ceralive-machine-id.service"
+JOURNAL_FLUSH_DROPIN="${RUNTIME}/journald/10-ceralive-journal-flush.conf"
 
 fail() { printf 'systemd-ordering-cycle regression: %s\n' "$1" >&2; exit 1; }
 
-for f in "${FIRSTBOOT}" "${CIUART}" "${POSTINST_ENTRY}"; do
+for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${POSTINST_ENTRY}"; do
   [[ -f "${f}" ]] || fail "missing source file: ${f}"
 done
 [[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
@@ -122,6 +123,17 @@ grep -Eq '^Wants=.*\bNetworkManager\.service\b' <<<"${hostname_unit}" \
   || fail "ceralive-hostname.service lacks Wants=NetworkManager.service"
 grep -Eq '\bnetwork-online\.target\b' <<<"${hostname_unit}" \
   && fail "ceralive-hostname.service must not depend on network-online.target"
+
+# The stock flush unit already RequiresMountsFor=/var/log/journal, but the
+# machine-id unit can restart journald after committing the persistent id. The
+# two early-boot jobs must be serialized so journalctl --flush cannot race that
+# restart. A hard requirement keeps the ordering true even if enablement moves.
+grep -Eq '^Requires=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service does not require machine-id reconciliation"
+grep -Eq '^After=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service can race the machine-id-triggered journald restart"
+grep -Eq '^RequiresMountsFor=.*\B/var/log/journal\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service does not explicitly retain the persistent /var/log mount guard"
 
 echo "systemd-ordering-cycle: Part A static contract OK"
 
@@ -232,6 +244,8 @@ printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
 # Part D probes both edges; enabling it here also puts it inside B1's acyclicity
 # proof, which is what a Before=local-fs.target unit most needs.
 cp "${MACHINEID}" "${ETC}/ceralive-machine-id.service"
+mkdir -p "${ETC}/systemd-journal-flush.service.d"
+cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive-persistence.conf"
 
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
@@ -329,6 +343,10 @@ probe_orders_after ceralive-machine-id.service var-log.mount \
   || fail "ceralive-machine-id.service is NOT ordered after var-log.mount — a journald restart would reopen the journal on the rootfs slot"
 probe_orders_after ceralive-hostname.service ceralive-machine-id.service \
   || fail "ceralive-hostname.service is NOT ordered after ceralive-machine-id.service — it would read whatever id PID 1 invented"
-echo "systemd-ordering-cycle: Part D machine-id ordering OK (after the /var/log bind, before its consumers)"
+probe_orders_after systemd-journal-flush.service ceralive-machine-id.service \
+  || fail "systemd-journal-flush.service is NOT ordered after ceralive-machine-id.service — journalctl --flush can race its journald restart"
+probe_orders_after systemd-journal-flush.service var-log.mount \
+  || fail "systemd-journal-flush.service is NOT ordered after var-log.mount — persistent flush can target the rootfs slot"
+echo "systemd-ordering-cycle: Part D persistence ordering OK (mount, machine-id reconciliation, journal flush, consumers)"
 
 echo "systemd-ordering-cycle regression: PASS"

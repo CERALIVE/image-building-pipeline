@@ -3763,6 +3763,29 @@ boot of that slot, with no mount to be skipped, hidden or lost. Four rules:
    proves both edges with `systemd-analyze verify` probes, and B1 proves the
    assembled set is still acyclic.
 
+   **The restart and the stock journal flush are one serialized transaction.**
+   Trixie's `systemd-journal-flush.service` already carries
+   `RequiresMountsFor=/var/log/journal`, so early journald correctly starts on
+   `/run` and the flush cannot precede `var-log.mount`; journald itself must stay
+   early and gets no mount dependency. What the stock unit cannot know is that
+   `ceralive-machine-id.service` may restart journald in the same early-boot
+   window. Without an edge between them, `journalctl --flush` and that restart
+   could run concurrently. The installed
+   `systemd-journal-flush.service.d/10-ceralive-persistence.conf` therefore adds
+   `Requires=` + `After=ceralive-machine-id.service` and restates
+   `RequiresMountsFor=/var/log/journal`: mount → machine-id reconciliation and
+   possible restart → one persistent flush. Part D dynamically proves all three
+   edges and the assembled graph remains cycle-free.
+
+   This investigation also re-proved the separate application chain rather than
+   changing it: `ceralive.service` has
+   `RequiresMountsFor=/opt/ceralive /var/log`, each bind mount has
+   `Requires=ceralive-migrate-data.service`, and migration has
+   `RequiresMountsFor=/data`. The lost boot log cannot prove what wrote slot A's
+   anomalous password, but CeraUI starting against a pre-bind `config.json` is
+   not permitted by the generated graph and the wait-online mask changes none of
+   these edges.
+
 **The journald budget is against `/data`, not the rootfs.** `/var/log` is bind-mounted
 from `/data/log`, so `10-ceralive-journal.conf` states `Storage=persistent` plus an
 explicit `SystemMaxUse=256M` / `SystemKeepFree=1G` / `SystemMaxFiles=16` — a journal
@@ -4185,6 +4208,26 @@ either, so absent an explicit entry the regulatory country silently cannot be
 applied and the hotspot stays on the conservative world domain (2.4 GHz channels
 1-11 only — no channel 12/13 in ETSI countries). Guard: `mkosi-image-contract.bats` "runtime
 packages: iw is installed so the regulatory domain can be applied".
+
+**`login` in `shared.list` — without `/bin/login`, UART/serial getty can NEVER
+produce a recovery shell** [EXISTS]
+
+Confirmed directly on a real bench board's SD card: chroots of BOTH RAUC slots
+(`rootfs.0` and `rootfs.1`) reported `dpkg -l login` as `un` — never installed.
+That leaves `serial-getty@ttyFIQ0.service` / `agetty` able to render a login
+banner but unable to execute `/bin/login`, so no password can ever produce a
+shell; the console simply returns to its banner forever. This is a permanent,
+structural package-graph gap, not slot corruption or a one-off: `login` was in
+neither `shared.list` nor any delta list, and no installed package pulled it in.
+
+Installing Debian trixie-security `login` **1:4.16.0-2+really2.41.5-0+deb13u1**
+inside each chroot immediately restored `/bin/login` and `/usr/bin/login` (133560
+bytes) with zero broken or new dependencies beyond the already-installed `libc6`,
+`libpam0g`, `libpam-modules` and `debconf`. `shared.list` now names `login`
+explicitly in its Console section so every future RK3588 and x86 image has a
+functional UART recovery path. Guards: `mkosi-image-contract.bats` "runtime
+packages: login is installed so UART/serial console recovery works" and "runtime
+packages: login reaches the resolved runtime package set (rk3588 + x86)".
 
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
