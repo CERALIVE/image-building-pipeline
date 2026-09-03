@@ -415,16 +415,16 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 6. Production resolves all three CeraLive test symbols OFF
+# 6. Production resolves the CeraLive test seam OFF
 # --------------------------------------------------------------------------
 
 PROD_FRAG="${PIPELINE_DIR}/manifests/kernel/rk3588-edge.fragment"
 TEST_FRAG="${PIPELINE_DIR}/manifests/kernel/rk3588-edge-test.fragment"
 FORBIDDEN="${PIPELINE_DIR}/manifests/kernel/forbidden-symbols.list"
 
-for sym in CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST \
-           CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST \
-           CONFIG_DMABUF_HEAPS_CERALIVE_TEST
+CERALIVE_TEST_SEAM=(CONFIG_ROCKCHIP_MPP_CERALIVE_TEST)
+
+for sym in "${CERALIVE_TEST_SEAM[@]}"
 do
   if grep -qx "${sym}" "${FORBIDDEN}"; then
     ok "production forbids ${sym}"
@@ -454,9 +454,7 @@ else
   bad "verify-kernel-config --forbidden ACCEPTS a config with the test symbols off"
 fi
 
-for sym in CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST \
-           CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST \
-           CONFIG_DMABUF_HEAPS_CERALIVE_TEST
+for sym in "${CERALIVE_TEST_SEAM[@]}"
 do
   printf 'CONFIG_ARCH_ROCKCHIP=y\n%s=y\n' "${sym}" >"${WORK}/config-leaked"
   if bash "${VERIFY}" --config "${WORK}/config-leaked" --forbidden "${FORBIDDEN}" >/dev/null 2>&1; then

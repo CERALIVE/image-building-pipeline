@@ -94,20 +94,35 @@ refuses neither.
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
 ~4,900 lines to the kernel the device runs. A floating `main` there would leave
 the build reproducible in appearance and not in fact. Today's pin is
-`CERALIVE/rk3588-kernel-patches@b28a187269f2db993e490278788e348767aa24a8` — the
-`main` commit produced by the squash-merge of PR #11, the rebase of the series
-onto `v7.2`. At it, `patches/series` carries **22 active members** in three lanes:
-four `upstream/` (`0001` VEPU580, `0002` HDMI-RX EDID, `0003` HDMI-RX plugout,
-`0005` HDMI-RX audio), three `backports/` (`0010` combphy, `0011`+`0012`
-dw-hdmi-qp), and fifteen `ceralive/` (`0006`, `0008`, `0009`, `0013`-`0022`,
-`0026`, `0027`).
+`CERALIVE/rk3588-kernel-patches@cb491dc16fc102649c7d4c003ea954cfa9e3c494` — the
+`main` commit produced by the squash-merge of PR #13, which added the `island/`
+lane. At it, `patches/series` carries **22 active members** in four lanes:
+three `upstream/` (`0002` HDMI-RX EDID, `0003` HDMI-RX plugout, `0005` HDMI-RX
+audio), three `backports/` (`0010` combphy, `0011`+`0012` dw-hdmi-qp), nine
+`ceralive/` (`0006`, `0009`, `0017`, `0018`, `0026`, `0027`, `0028`-`0030`), and
+seven `island/` (`0031`-`0037` — the `rk3588-media-island` v2026.9.0 release asset,
+ingested byte-preserved).
 
-**The ordinals are slot numbers, not a count.** Those 22 members occupy a 27-slot
+**22 members at this pin and 22 at the previous one is arithmetic, not
+continuity.** The `island/` lane contributes seven and ten are retired at the same
+commit: `0001` — the standalone VEPU580 V4L2 encoder — plus its nine rkvenc
+siblings `0008`, `0013`-`0016` and `0019`-`0022`, each superseded by island source.
+Hardware encode is therefore a client of the Rockchip MPP service at this pin and
+not a driver of its own, which is why `CONFIG_VIDEO_ROCKCHIP_RKVENC` exists in no
+Kconfig here and `manifests/kernel/rk3588-edge.fragment` declares
+`CONFIG_ROCKCHIP_MPP_SERVICE=m` plus its three `=y` client bools instead. The same
+retirement removed all three old `*_CERALIVE_TEST` symbols — retired `0013`
+declared them together — so `edge-test` now enables the single
+`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST`.
+
+**The ordinals are slot numbers, not a count.** Those 22 members occupy a 37-slot
 space and every gap is deliberate: `0004` was never published, `0007`
 (iommu-rockchip fetch-dte time limit) is RETIRED because it LANDED UPSTREAM as
-`8d4346ecd495` in v7.2 — this base bump is what retired it — and `0023`/`0024`/
-`0025` were folded into `0021`. A retired ordinal is never reused. Per-patch
-history lives in that repo's `retired/REGISTRY.md` and `docs/UPSTREAM-STATUS.md`.
+`8d4346ecd495` in v7.2 — the v7.2 base bump is what retired it — and `0023`/`0024`/
+`0025` were folded into `0021`, which is itself now retired. A retired ordinal is
+never reused, which is why the island lane starts at `0031` rather than reclaiming
+`0001`. Per-patch history lives in that repo's `retired/REGISTRY.md` and
+`docs/UPSTREAM-STATUS.md`.
 
 Two predecessor pins, kept for lineage only: `5a272f46019ed6cc6bd67b16f556e2e8afa280fe`
 was the nineteen-patch `v7.1.7`-anchored series the Wave-8 hardware candidates

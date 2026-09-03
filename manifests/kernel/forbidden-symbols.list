@@ -24,11 +24,17 @@
 #    manifest pins as present. Do not "fix" a Wi-Fi problem by removing this row.
 #
 # 2. TEST AND DEBUG SYMBOLS. Production `edge` must resolve every fault-injection
-#    control OFF. The three CeraLive test symbols exist only under the separate
-#    opt-in `edge-test` variant, whose debugfs knobs compile to nothing unless
-#    they are set; KASAN and lockdep belong to that variant too. A production
-#    artifact that carried any of them would be a different kernel from the one
-#    validated on hardware.
+#    control OFF. The CeraLive test seam exists only under the separate opt-in
+#    `edge-test` variant, whose debugfs knobs compile to nothing unless it is set;
+#    KASAN and lockdep belong to that variant too. A production artifact that
+#    carried any of them would be a different kernel from the one validated on
+#    hardware.
+#
+# 2b. THE ISLAND'S NON-COMPILED MPP CLIENTS. A closed capability surface is a
+#    contract, not a default: the island compiles three clients and every other
+#    one is source-only behind `depends on BROKEN`. These rows put that gate in
+#    the image, so lifting a `BROKEN` upstream of us cannot quietly add a fourth
+#    client to a shipped kernel.
 #
 # 3. SYMBOLS THAT DO NOT EXIST AT THIS PIN. CONFIG_NFT_COUNTER is real in the
 #    sense that the ruleset's `counter` statement is load-bearing, but v7.2
@@ -105,9 +111,17 @@ CONFIG_ARCH_XGENE
 CONFIG_ARCH_ZYNQMP
 
 # --- 2. test / debug / fault injection --------------------------------------
-CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST
-CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST
-CONFIG_DMABUF_HEAPS_CERALIVE_TEST
+# THE THREE OLD CeraLive TEST SYMBOLS ARE GONE, ALL THREE OF THEM, AND THAT IS MORE
+# THAN THE OBVIOUS ONE. `VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST`,
+# `VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST` and `DMABUF_HEAPS_CERALIVE_TEST` were all
+# three declared by ONE patch — the retired `0013` instrumentation member — even
+# though the code they gated lived across the rkvenc, hdmirx and dma-heap patches.
+# So retiring `0013` took the hdmirx and dma-heap symbols with it even though `0017`
+# and `0018` survive. Verified against the applied tree at this `patches_commit`:
+# none of the three names appears in any Kconfig. The island's own seam replaces all
+# three, and it carries the same contract — `depends on DEBUG_FS`, `default n`,
+# compiles to nothing when off — so production `edge` must resolve it OFF.
+CONFIG_ROCKCHIP_MPP_CERALIVE_TEST
 CONFIG_KASAN
 CONFIG_KCSAN
 CONFIG_UBSAN
@@ -116,7 +130,44 @@ CONFIG_DEBUG_LOCK_ALLOC
 CONFIG_LOCK_STAT
 CONFIG_KUNIT
 CONFIG_FAULT_INJECTION
+# KMEMLEAK was in NEITHER list before this change, and it is the one debug switch
+# whose cost is invisible in a symbol survey: it is a `bool` that arm64 defconfig
+# leaves off, so nothing was wrong — but it allocates a metadata object per kernel
+# allocation and would turn a production encode path into a scanner. This row is
+# therefore NON-VACUOUS BY INTENT RATHER THAN BY MEASUREMENT: it also measured
+# not-set against the PRE-change resolved config, so it guards a future addition to
+# the debug fragment leaking into production, not a defect being removed today.
+CONFIG_DEBUG_KMEMLEAK
 CONFIG_LOCALVERSION_AUTO
+
+# --- 2b. MNH-23: the island's non-compiled MPP clients ----------------------
+# The island compiles EXACTLY THREE MPP clients — RKVENC2, RKVDEC2, JPGDEC — and its
+# own ANTI-PATTERNS forbid a fourth. Every other client is retained as source for
+# provenance behind `depends on BROKEN`, which is deliberate fail-closed policy and
+# not a statement about the code. `BROKEN` makes them unselectable today; this block
+# is what makes a future edit that lifts one visible HERE, in the image that would
+# ship it, instead of only in the island's own review. Two of them are load-bearing
+# refusals rather than housekeeping: AV1DEC would advertise an AV1 decoder whose
+# Verisilicon provider is intentionally absent, and JPGENC would contend with
+# mainline Hantro for the JPEG-encode block.
+#
+# NOTE THE SPELLING: the JPEG encoder's symbol is ROCKCHIP_MPP_JPGENC. There is no
+# `ROCKCHIP_MPP_RKJPEGE` — `RKJPEGE` is the block name in the Kconfig prompt text,
+# and a forbidden row naming it would silently guard nothing while the real symbol
+# went unguarded.
+CONFIG_ROCKCHIP_MPP_RKVDEC
+CONFIG_ROCKCHIP_MPP_RKVENC
+CONFIG_ROCKCHIP_MPP_VDPU1
+CONFIG_ROCKCHIP_MPP_VEPU1
+CONFIG_ROCKCHIP_MPP_VDPU2
+CONFIG_ROCKCHIP_MPP_VEPU2
+CONFIG_ROCKCHIP_MPP_VEPU22
+CONFIG_ROCKCHIP_MPP_IEP2
+CONFIG_ROCKCHIP_MPP_JPGENC
+CONFIG_ROCKCHIP_MPP_AV1DEC
+CONFIG_ROCKCHIP_MPP_VDPP
+CONFIG_ROCKCHIP_MPP_RKVENC2_DEVFREQ
+CONFIG_ROCKCHIP_MPP_RKVDEC2_DEVFREQ
 
 # --- 3. absent at the v7.2 pin ----------------------------------------------
 CONFIG_NFT_COUNTER

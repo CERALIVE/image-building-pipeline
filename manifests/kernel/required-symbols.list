@@ -233,17 +233,70 @@ CONFIG_SND_SOC_HDMI_CODEC=m
 CONFIG_SND_USB
 CONFIG_SND_USB_AUDIO=m
 
-# --- Capture and encode (rkvenc / HDMI-RX) ---------------------------------
-# MEDIA_SUPPORT is the parent of the whole V4L2 tree. VIDEO_ROCKCHIP_RKVENC and
-# VIDEO_SYNOPSYS_HDMIRX are supplied by the pinned patch series, so an absence
-# here means the series did not apply or its Kconfig hunk was lost — which is
-# indistinguishable from a working build until a board tries to encode.
+# --- Capture, encode and decode (media island / HDMI-RX) --------------------
+# MEDIA_SUPPORT is the parent of the whole V4L2 tree. MEDIA_PLATFORM_DRIVERS is the
+# `if` gate around every `source` line in drivers/media/platform/Kconfig, so it is
+# the real parent of BOTH the Synopsys HDMI-RX driver and the Rockchip m2m drivers
+# below; MEDIA_PLATFORM_SUPPORT only gates the `source` of that file, which is why
+# naming it alone was never the whole closure. V4L_MEM2MEM_DRIVERS is a second
+# prompted bool with no default that VIDEO_ROCKCHIP_RGA and VIDEO_HANTRO each
+# `depends on` directly.
+#
+# VIDEO_SYNOPSYS_HDMIRX is supplied by the pinned patch series, so an absence here
+# means the series did not apply or its Kconfig hunk was lost — which is
+# indistinguishable from a working build until a board tries to capture.
 CONFIG_MEDIA_SUPPORT
 CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_DRIVERS=y
 CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_V4L_MEM2MEM_DRIVERS=y
 CONFIG_VIDEO_DEV=y
-CONFIG_VIDEO_ROCKCHIP_RKVENC=m
 CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
+
+# --- The CeraLive RK3588 media island (MPP service + three clients) ---------
+# VIDEO_ROCKCHIP_RKVENC=m USED TO BE THE ROW HERE AND THE SYMBOL NO LONGER EXISTS.
+# The `island/` lane retired patch 0001 and its nine rkvenc siblings; hardware encode
+# is now one client of the Rockchip MPP service carried as source by
+# `rk3588-media-island`. What the finished kernel must CARRY is the service module
+# plus the three clients compiled into it.
+#
+# ROCKCHIP_MPP_SERVICE is the only tristate of the four — RKVENC2, RKVDEC2 and
+# JPGDEC are bools inside its `if` block, linked into `rk_vcodec.ko` — so their
+# values are `=y` and a `=m` here would be a manifest that can never be satisfied.
+#
+# ROCKCHIP_MPP_PROC_FS IS PROMPTLESS, WHICH IS WHY IT IS HERE AND NOT IN THE
+# FRAGMENT. kconfig cannot be directed by a fragment line for a symbol with no
+# prompt (the BT_INTEL/BT_MTK rule), and it is not cosmetic: `/proc/mpp_service/load`
+# and `sessions-summary` are the island's frozen operator telemetry surface, and the
+# driver treats a missing procfs root as an init failure rather than a degraded
+# start. PROC_FS is its `depends on`.
+CONFIG_PROC_FS=y
+CONFIG_ROCKCHIP_MPP_SERVICE=m
+CONFIG_ROCKCHIP_MPP_PROC_FS=y
+CONFIG_ROCKCHIP_MPP_RKVENC2=y
+CONFIG_ROCKCHIP_MPP_RKVDEC2=y
+CONFIG_ROCKCHIP_MPP_JPGDEC=y
+
+# --- Mainline media drivers that stay BUILT alongside the island ------------
+# VIDEO_ROCKCHIP_VDEC is the reversibility guarantee, not a live decoder: the island
+# owns both decoder nodes by `compatible`, so this driver binds nothing and is kept
+# built purely so the handover can be undone by a device-tree change instead of a
+# kernel rebuild. VIDEO_ROCKCHIP_RGA still owns every RGA node at this pin — the
+# island's RGA `compatible` flips are unshipped — and it is pinned here for the first
+# time so "RGA ownership did not move" is a checked claim rather than a sentence.
+# VIDEO_HANTRO keeps vpu121/vepu121_0/av1d, which the island never claims.
+CONFIG_VIDEO_ROCKCHIP_VDEC=m
+CONFIG_VIDEO_ROCKCHIP_RGA=m
+CONFIG_VIDEO_HANTRO=m
+# The V4L2 core facilities all three `select`, asserted as resolved rather than
+# declared in the fragment — a `select`ed symbol named in a fragment is at the mercy
+# of its selectors, so the fragment gate is the wrong place for it and this manifest
+# is the right one. MEDIA_CONTROLLER and VIDEO_V4L2_SUBDEV_API are bools, so their
+# value is pinned; V4L2_MEM2MEM_DEV is a promptless TRISTATE whose y-vs-m is decided
+# by whichever driver selects it, so it is deliberately left unpinned.
+CONFIG_MEDIA_CONTROLLER=y
+CONFIG_VIDEO_V4L2_SUBDEV_API=y
+CONFIG_V4L2_MEM2MEM_DEV
 
 # --- dma-buf userland heaps (the MPP allocator) -----------------------------
 # DMABUF_HEAPS is a `menuconfig bool` defaulting OFF — the second of the four

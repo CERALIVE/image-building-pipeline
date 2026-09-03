@@ -636,7 +636,7 @@ YAML
   # SHA — a fresh clone cannot reach the latter.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='b28a187269f2db993e490278788e348767aa24a8'"* ]]
+   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='cb491dc16fc102649c7d4c003ea954cfa9e3c494'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='8d3ae59288f1e7d58d76558a6ee96d533bc5019f'"* ]]
@@ -648,9 +648,17 @@ YAML
           | sed -n "s/^KERNEL_SOURCE_DEFCONFIG_FRAGMENT='\(.*\)'$/\1/p")"
   [ -n "$frag" ]
   [ -f "$PIPELINE_DIR/$frag" ]
-  # The two symbols the whole variant exists for.
-  grep -q 'CONFIG_VIDEO_ROCKCHIP_RKVENC=' "$PIPELINE_DIR/$frag"
+  # The symbols the whole variant exists for: hardware capture, and hardware
+  # encode/decode through the media island's MPP service.
   grep -q 'CONFIG_VIDEO_SYNOPSYS_HDMIRX=' "$PIPELINE_DIR/$frag"
+  grep -q '^CONFIG_ROCKCHIP_MPP_SERVICE=m$' "$PIPELINE_DIR/$frag"
+  grep -q '^CONFIG_ROCKCHIP_MPP_RKVENC2=y$' "$PIPELINE_DIR/$frag"
+  grep -q '^CONFIG_ROCKCHIP_MPP_RKVDEC2=y$' "$PIPELINE_DIR/$frag"
+  grep -q '^CONFIG_ROCKCHIP_MPP_JPGDEC=y$' "$PIPELINE_DIR/$frag"
+  # The standalone V4L2 encoder the island superseded must NOT come back: the
+  # symbol exists in no Kconfig at this patches_commit, so a row for it would be a
+  # DROPPED symbol that only a real build could catch.
+  run ! grep -q 'CONFIG_VIDEO_ROCKCHIP_RKVENC=' "$PIPELINE_DIR/$frag"
   # Determinism switch: an auto localversion would change the package NAME.
   grep -q 'CONFIG_LOCALVERSION_AUTO=n' "$PIPELINE_DIR/$frag"
 }
@@ -1009,7 +1017,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.2"* ]]
   [[ "$output" == *"git rev-parse HEAD == 8d3ae59288f1e7d58d76558a6ee96d533bc5019f"* ]]
-   [[ "$output" == *"b28a187269f2db993e490278788e348767aa24a8"* ]]
+   [[ "$output" == *"cb491dc16fc102649c7d4c003ea954cfa9e3c494"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]

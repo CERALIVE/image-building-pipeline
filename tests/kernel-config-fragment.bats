@@ -576,15 +576,80 @@ EOF
   [[ "$output" == *"${sample}: FORBIDDEN"* ]]
 }
 
-@test "closure manifests: production edge forbids all three CeraLive test symbols" {
+@test "closure manifests: production edge forbids the CeraLive test seam" {
   # The edge-test variant owns the fault-injection knobs. A production artifact
   # carrying one of them is not the kernel that was validated on hardware.
   local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
-  grep -qx 'CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST' "$forb"
-  grep -qx 'CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST' "$forb"
-  grep -qx 'CONFIG_DMABUF_HEAPS_CERALIVE_TEST' "$forb"
-  # …and the fragment must not enable them either.
-  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST|VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST|DMABUF_HEAPS_CERALIVE_TEST)=[ym]' "$FRAGMENT"
+  grep -qx 'CONFIG_ROCKCHIP_MPP_CERALIVE_TEST' "$forb"
+  # …and the fragment must not enable it either.
+  run ! grep -qE '^CONFIG_ROCKCHIP_MPP_CERALIVE_TEST=[ym]' "$FRAGMENT"
+  # The three symbols the island's seam replaced were ALL declared by the retired
+  # 0013 member, so none of them exists at this patches_commit. A forbidden row for
+  # one would be silently vacuous, and an edge-test row would be a DROPPED symbol.
+  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST|VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST|DMABUF_HEAPS_CERALIVE_TEST)$' "$forb"
+}
+
+@test "closure manifests: the island MPP closure is declared with its parents" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  local sym
+  # The service module plus the three compiled clients, in the ONLY values kconfig
+  # can give them: SERVICE is the tristate, the clients are bools inside its `if`.
+  for sym in 'CONFIG_ROCKCHIP_MPP_SERVICE=m' \
+             'CONFIG_ROCKCHIP_MPP_RKVENC2=y' \
+             'CONFIG_ROCKCHIP_MPP_RKVDEC2=y' \
+             'CONFIG_ROCKCHIP_MPP_JPGDEC=y'; do
+    grep -qx "$sym" "$FRAGMENT"
+    grep -qx "$sym" "$req"
+  done
+  # The two menuconfig parents this block used to ride undeclared. Neither may be
+  # dropped: MEDIA_PLATFORM_DRIVERS gates every `source` in the media platform
+  # Kconfig, V4L_MEM2MEM_DRIVERS is what RGA and Hantro `depends on`.
+  for sym in 'CONFIG_MEDIA_PLATFORM_DRIVERS=y' 'CONFIG_V4L_MEM2MEM_DRIVERS=y'; do
+    grep -qx "$sym" "$FRAGMENT"
+    grep -qx "$sym" "$req"
+  done
+  # Promptless, so it may only be ASSERTED — a fragment cannot direct kconfig here.
+  grep -qx 'CONFIG_ROCKCHIP_MPP_PROC_FS=y' "$req"
+  run ! grep -q 'CONFIG_ROCKCHIP_MPP_PROC_FS' "$FRAGMENT"
+}
+
+@test "closure manifests: mainline rkvdec and RGA stay BUILT, never Kconfig-excluded" {
+  local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  # Reversibility: the island owns the decoder nodes by `compatible`, so rkvdec
+  # binds nothing — and is kept built so the handover is undone by a device-tree
+  # change rather than a kernel rebuild. RGA ownership does not move in this pin at
+  # all, which is why VIDEO_ROCKCHIP_RGA is REQUIRED here and not forbidden.
+  local sym
+  for sym in 'CONFIG_VIDEO_ROCKCHIP_VDEC=m' 'CONFIG_VIDEO_ROCKCHIP_RGA=m' 'CONFIG_VIDEO_HANTRO=m'; do
+    grep -qx "$sym" "$FRAGMENT"
+    grep -qx "$sym" "$req"
+  done
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_VDEC|VIDEO_ROCKCHIP_RGA|VIDEO_HANTRO)$' "$forb"
+}
+
+@test "closure manifests: MNH-23 — only the three compiled MPP clients are permitted" {
+  # The island compiles RKVENC2, RKVDEC2 and JPGDEC and no others; every remaining
+  # client is source-only behind `depends on BROKEN`. These rows put that gate in
+  # the image, so lifting a BROKEN upstream of us cannot add a fourth client to a
+  # shipped kernel. The JPEG encoder's symbol is JPGENC — RKJPEGE is the block name
+  # in its prompt text, and a row naming that would guard nothing.
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local sym
+  for sym in RKVDEC RKVENC VDPU1 VEPU1 VDPU2 VEPU2 VEPU22 IEP2 JPGENC AV1DEC VDPP \
+             RKVENC2_DEVFREQ RKVDEC2_DEVFREQ; do
+    grep -qx "CONFIG_ROCKCHIP_MPP_${sym}" "$forb"
+  done
+  run ! grep -qx 'CONFIG_ROCKCHIP_MPP_RKJPEGE' "$forb"
+  # …and none of the three compiled clients may appear in the forbidden manifest.
+  run ! grep -qE '^CONFIG_ROCKCHIP_MPP_(RKVENC2|RKVDEC2|JPGDEC)$' "$forb"
+}
+
+@test "closure manifests: KMEMLEAK is forbidden for production edge" {
+  # A bool arm64 defconfig leaves off, so nothing is broken today — but it adds a
+  # metadata object per kernel allocation and would turn the encode path into a
+  # scanner. It was in NEITHER manifest before, which is the gap this closes.
+  grep -qx 'CONFIG_DEBUG_KMEMLEAK' "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
 }
 
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {
