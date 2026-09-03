@@ -228,36 +228,56 @@ variants:
       # The patch series is a BUILD INPUT and is exact-pinned like every other
       # BSP input — an IMMUTABLE commit, never a branch.
       #
-      # WHAT THIS PIN IS. b28a187269f2 is the `main` commit of
-      # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #11,
-      # the rebase of the series onto v7.2. At it, patches/series carries 22
-      # ACTIVE members in three lanes:
+      # WHAT THIS PIN IS. cb491dc16fc1 is the `main` commit of
+      # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #13,
+      # which added the `island/` lane. At it, patches/series carries 22 ACTIVE
+      # members in FOUR lanes:
       #
-      #   upstream/  (4)  0001 VEPU580 encoder, 0002 HDMI-RX EDID, 0003 HDMI-RX
-      #                   plugout, 0005 HDMI-RX audio — Ross Cawston's postings,
-      #                   kept byte-identical to what he published.
+      #   upstream/  (3)  0002 HDMI-RX EDID, 0003 HDMI-RX plugout, 0005 HDMI-RX
+      #                   audio — Ross Cawston's postings, kept byte-identical to
+      #                   what he published.
       #   backports/ (3)  0010 combphy rterm-det-rdy, 0011 + 0012 dw-hdmi-qp
       #                   ACR/audio — unmerged lore postings, carried under the
       #                   truthful `lore-posting` provenance model.
-      #   ceralive/ (15)  0006 HDMI-RX sound card, 0008 rkvenc DMA max segment
-      #                   size, 0009 mainline `system-uncached` dma-heap,
-      #                   0013-0022 the rkvenc/HDMI-RX hardening set, 0026
-      #                   HDMI-RX register lock made hardirq-safe, 0027 HDMI-RX
-      #                   SCDC/PHY retry hardening.
+      #   ceralive/  (9)  0006 HDMI-RX sound card, 0009 mainline `system-uncached`
+      #                   dma-heap, 0017 HDMI-RX audio lifecycle, 0018 dma-heap
+      #                   truthful partial registration, 0026 HDMI-RX register lock
+      #                   made hardirq-safe, 0027 HDMI-RX SCDC/PHY retry hardening,
+      #                   0028-0030 the Type-C dual-role-power set.
+      #   island/    (7)  0031-0037 — the `rk3588-media-island` v2026.9.0 release
+      #                   asset, ingested BYTE-PRESERVED: the MPP + multi_rga driver
+      #                   source, the drivers/video/rockchip Kconfig/Makefile hooks,
+      #                   the two IOMMU provider exports, and the three MPP
+      #                   device-tree ownership hunks (encoder, decoders, jpegd).
       #
-      # THE ORDINALS ARE SLOT NUMBERS, NOT A COUNT — 22 members occupy a 27-slot
+      # A 22-MEMBER SERIES AT BOTH THIS PIN AND THE PREVIOUS ONE IS A COINCIDENCE OF
+      # ARITHMETIC, NOT CONTINUITY. The `island/` lane contributes seven members and
+      # ten are retired at the same commit: 0001, the standalone VEPU580 V4L2 encoder,
+      # and its nine rkvenc siblings 0008, 0013-0016 and 0019-0022 — each superseded
+      # by island source rather than dropped. Hardware encode is therefore a client of
+      # the Rockchip MPP service here and not a driver of its own, so
+      # CONFIG_VIDEO_ROCKCHIP_RKVENC exists in no Kconfig at this pin and
+      # manifests/kernel/rk3588-edge.fragment names the island's symbols instead.
+      #
+      # THE ORDINALS ARE SLOT NUMBERS, NOT A COUNT — 22 members occupy a 37-slot
       # space and every gap is deliberate. 0004 was never published. 0007
       # (iommu-rockchip fetch-dte time limit) is RETIRED because it LANDED
-      # UPSTREAM as 8d4346ecd495 in v7.2 — this base bump is what retired it.
-      # 0023/0024/0025 are RETIRED because they were folded into 0021. A retired
-      # ordinal is never reused. Per-patch history lives in that repo's
-      # retired/REGISTRY.md and docs/UPSTREAM-STATUS.md; do not duplicate it here
-      # and do not re-derive it from this file.
+      # UPSTREAM as 8d4346ecd495 in v7.2 — the v7.2 base bump retired it.
+      # 0023/0024/0025 were RETIRED because they were folded into 0021, which is
+      # itself now retired. A retired ordinal is never reused, which is why the
+      # island lane starts at 0031 rather than reclaiming 0001. Per-patch history
+      # lives in that repo's retired/REGISTRY.md and docs/UPSTREAM-STATUS.md; do
+      # not duplicate it here and do not re-derive it from this file.
       #
-      # 0013/0017/0018 are what make the opt-in `edge-test` variant's
-      # deterministic fault injection possible; all three compile to nothing
-      # unless their CeraLive test symbol is enabled, which production `edge`
-      # resolves OFF (manifests/kernel/forbidden-symbols.list).
+      # THE `edge-test` FAULT-INJECTION SEAM MOVED WITH THE ENCODER, AND ALL THREE
+      # OF ITS OLD SYMBOLS WENT — not just the encoder's. Retired 0013 declared
+      # VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST, VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST and
+      # DMABUF_HEAPS_CERALIVE_TEST in one place even though the code they gated sat
+      # across three patches, so retiring it removed the hdmirx and dma-heap symbols
+      # too while 0017 and 0018 survive. The island's own
+      # ROCKCHIP_MPP_CERALIVE_TEST replaces all three under the same contract:
+      # `depends on DEBUG_FS`, `default n`, zero bytes when off, and production
+      # `edge` resolves it OFF (manifests/kernel/forbidden-symbols.list).
       #
       # 0027 CARRIES A WARNING THAT SURVIVED THE REBASE AND MUST NOT BE
       # "IMPROVED". It retries the HDMI-RX PHY bring-up once with
@@ -286,13 +306,12 @@ variants:
       # why this pin is the RESULTING `main` commit and not the branch tip.
       # Verified before pinning: `git ls-remote
       # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
-      # answers b28a187269f2db993e490278788e348767aa24a8, and a scratch
-      # `git init` + `git fetch --depth 1 <patches_git_url> <patches_commit>`
-      # reaches it and yields a 22-entry patches/series whose members are
-      # byte-identical to the merged tree — patches/ tree object
-      # c4b7d4e148032102e6707dfb88ffa90795c9c958 on both sides.
+      # answers cb491dc16fc102649c7d4c003ea954cfa9e3c494, that commit reaches a
+      # 22-entry patches/series (patches/ tree object
+      # fc4e4d9a58db3536cbf5fd9bcdb3388ec0dff12b), and the whole series applies to
+      # v7.2 with its own post-apply gate green.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: b28a187269f2db993e490278788e348767aa24a8
+      patches_commit: cb491dc16fc102649c7d4c003ea954cfa9e3c494
       patches_series: patches/series
 
       defconfig_base: defconfig

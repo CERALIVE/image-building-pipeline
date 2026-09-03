@@ -85,7 +85,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the six DRY_RUN probes first, and asserts the three CeraLive test symbols OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the six DRY_RUN probes first, and asserts the CeraLive test seam OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -805,7 +805,7 @@ answer:
   Kconfig symbols and nothing visible in the filename, so the resolved
   `/boot/config-<release>` is read **out of the kernel package that build
   produced** (never a host-side re-resolution) and asserted in BOTH directions:
-  the three CeraLive test symbols must be OFF on `rock-edge` and ON on
+  the CeraLive test seam must be OFF on `rock-edge` and ON on
   `rock-edge-test`. The non-debug leg additionally runs the real
   `required-symbols.list` + `forbidden-symbols.list` manifests against it.
 - **WHICH LABELS.** `--bench-labels 0|1` is **REQUIRED** — there is no default and
@@ -1479,11 +1479,58 @@ container with a persistent ccache. There is no prebuilt-kernel path left:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
-| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@b28a187269f2` (22-member series) | **the PRODUCTION default** (`default_variant: edge`) |
+| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@cb491dc16fc1` (22-member series, `island/` lane included) | **the PRODUCTION default** (`default_variant: edge`) |
 | `edge-test` | `extends: edge` | inherited | inherited | KASAN/lockdep + fault injection; never released |
 
 The patch commit is an **immutable SHA**, never a branch. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
+
+**Hardware encode and decode are the CeraLive MEDIA ISLAND now, not a standalone
+V4L2 encoder — and `CONFIG_VIDEO_ROCKCHIP_RKVENC` exists in no Kconfig at this
+pin** [EXISTS — configured and dry-run-proven; NO board has run it]
+
+The `patches_commit` bump to `cb491dc16fc1` brought the `island/` lane, which
+ingests the `rk3588-media-island` v2026.9.0 release asset byte-preserved and
+retires ten superseded rkvenc members with it (`0001` plus `0008`, `0013`-`0016`
+and `0019`-`0022`). The pipeline still sees ONE patch repository and ONE pin — the
+mechanism is unchanged — but the symbols on the far side of it are entirely
+different, and four things about them are easy to get wrong:
+
+- **The three client symbols are `bool`, not `tristate`, so `=m` would be DROPPED
+  in silence.** Only `ROCKCHIP_MPP_SERVICE` is a tristate (`=m`, the module
+  `rk_vcodec.ko`); `ROCKCHIP_MPP_RKVENC2`, `_RKVDEC2` and `_JPGDEC` are bools
+  inside its `if ROCKCHIP_MPP_SERVICE` block whose objects link into that one
+  module, so `=y` is the only value kconfig can give them. Same
+  declare-the-honest-resolved-value discipline as `CONFIG_TYPEC_FUSB302=m`.
+- **Every island row resolves on by its OWN Kconfig default**, so the fragment
+  lines are assertions rather than the thing that enables anything. That is the
+  stays-true rule, not redundancy: the island owns those defaults and this
+  fragment is where the image states that it depends on them.
+  `ROCKCHIP_MPP_PROC_FS` is deliberately NOT in the fragment — it is a promptless
+  bool, so it is asserted in `required-symbols.list` instead (the BT_INTEL rule),
+  and it is load-bearing: `/proc/mpp_service/load` is the island's frozen operator
+  telemetry surface.
+- **`MEDIA_PLATFORM_DRIVERS` was an UNDECLARED menuconfig parent, and it gated the
+  HDMI-RX driver too.** `drivers/media/platform/Kconfig` wraps every `source` line
+  in `if MEDIA_PLATFORM_DRIVERS`; the fragment named only
+  `MEDIA_PLATFORM_SUPPORT`, which merely gates the `source` of that file. Turning
+  the real parent off drops `VIDEO_SYNOPSYS_HDMIRX`, `VIDEO_ROCKCHIP_VDEC`,
+  `VIDEO_ROCKCHIP_RGA` and `VIDEO_HANTRO` together — reproduced deliberately. Both
+  it and `V4L_MEM2MEM_DRIVERS` (what RGA and Hantro `depends on`) are now declared.
+- **Mainline `rkvdec` and `rockchip-rga` stay BUILT, and that is the rollback
+  design rather than an oversight.** The island owns nodes by device-tree
+  `compatible`, so `rockchip-vdec.ko` binds nothing and exists purely so the
+  handover is undone by a device-tree change instead of a kernel rebuild. Never
+  express that exclusivity in Kconfig — the island's own ANTI-PATTERNS forbid a
+  `depends on !VIDEO_ROCKCHIP_VDEC`. `VIDEO_ROCKCHIP_RGA` is REQUIRED, not
+  forbidden: RGA ownership does not move at this pin, and the island's own
+  `ROCKCHIP_MULTI_RGA` (which resolves `=m` by its Kconfig default and binds
+  nothing yet) is deliberately left undeclared until the RGA flip declares it.
+
+**Not board-proven.** Both boards × both variants dry-run clean and the resolved
+`.config` passes the declared/required/forbidden gate, but no image has been built
+non-DRY_RUN, flashed, or booted with the island. The wording to use is "the
+pipeline pins it", never "devices ship it".
 
 **The Armbian vendor 6.1 BSP track is RETIRED — both overlays.** The prebuilt
 `vendor` one and the source-built one that rebuilt it with
@@ -1837,7 +1884,8 @@ clock/LPASS/QDSP6, Apple SMC, Broadcom VC4/V3D, i.MX, Tegra, Renesas, MediaTek,
 TI, Xilinx…). Zero Rockchip drivers are dropped. Those counts are a historical
 measurement and have not been re-taken at `v7.2`; what HAS been re-run there is
 the survival + forbidden + required gate against the v7.2 resolved `.config`
-(169/169 declared symbols survived, 0 forbidden violations).
+(178/178 declared symbols survived, 0 forbidden violations, at the `cb491dc16fc1`
+patch pin).
 
 Three things to know before touching it:
 
@@ -1858,8 +1906,8 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (161 symbols) and
-`manifests/kernel/forbidden-symbols.list` (68) are the contract, and they are
+`manifests/kernel/required-symbols.list` (174 symbols) and
+`manifests/kernel/forbidden-symbols.list` (80) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
 everything defconfig is expected to supply on its own. Only the second claim
@@ -1879,10 +1927,14 @@ value is defconfig's business but whose PRESENCE keeps its leaves visible. A bar
 parent is deliberately not pinned to a value, so an upstream y->m change does not
 fail the build for a difference the device cannot observe.
 
-The forbidden manifest holds three classes: the 55 foreign platforms, the
-test/debug symbols production `edge` must resolve OFF (the three CeraLive test
-symbols plus KASAN/lockdep/KUnit — those belong to the opt-in `edge-test`
-variant), and `CONFIG_NFT_COUNTER`, which does not exist at this pin. Entries are
+The forbidden manifest holds four classes: the 55 foreign platforms, the
+test/debug symbols production `edge` must resolve OFF (the island's
+`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST` seam plus KASAN/lockdep/KUnit/KMEMLEAK — those
+belong to the opt-in `edge-test` variant), the island's thirteen NON-COMPILED MPP
+clients (the MNH-23 gate: exactly `RKVENC2`, `RKVDEC2` and `JPGDEC` are compiled
+and every other client is source-only behind `depends on BROKEN`, so these rows
+make a lifted `BROKEN` fail HERE rather than only in the island's own review), and
+`CONFIG_NFT_COUNTER`, which does not exist at this pin. Entries are
 BARE symbol names; `CONFIG_X=<value>` is refused as a usage error rather than
 reinterpreted, because "this value is banned, another is fine" is a weaker claim
 than the manifest makes.
@@ -2222,8 +2274,10 @@ board-confirmed AT `v7.1.7`; v7.2 released-image MPP is now proven on both board
 
 Read the status line literally. `0008` and `0009` are the two fixes, `0022`
 rides with them as the rkvenc ioctl request-coverage/element-bounds hardening,
-and all three are present in the 22-member series the `v7.2` pin
-(`b28a187269f2`) carries. What is scoped to `v7.1.7` and does NOT travel is the
+and `0009` is present in the 22-member series the `v7.2` pin
+(`cb491dc16fc1`) carries — while `0008` and `0022` were RETIRED into
+`rk3588-media-island` source by the `island/` lane, which supersedes the
+standalone rkvenc driver they hardened. What is scoped to `v7.1.7` and does NOT travel is the
 BOARD evidence: the 2026-08-09 Rock 5B+ run below was measured on a `v7.1.7`
 image. At `v7.2` the series applies clean (22/22 `git am`), cross-compiles to
 `Image` + modules + dtbs with zero errors, and `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y`

@@ -148,14 +148,17 @@ bench_labels_desc() {
   esac
 }
 
-# The three CeraLive test symbols. Production must resolve all three OFF; the
-# debug variant must resolve all three ON. Both directions are asserted, because
-# a debug build that silently lost its instrumentation passes every other gate
-# and then produces no fault-injection surface on the bench.
+# The CeraLive test symbols. Production must resolve every one OFF; the debug
+# variant must resolve every one ON. Both directions are asserted, because a debug
+# build that silently lost its instrumentation passes every other gate and then
+# produces no fault-injection surface on the bench.
+#
+# Do NOT re-add VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST / _HDMIRX_CERALIVE_TEST /
+# DMABUF_HEAPS_CERALIVE_TEST: all three were declared by the retired `0013` member
+# and no longer exist, so `off` would pass vacuously and `on` would fail every
+# debug build. The array shape is kept for the next seam.
 CERALIVE_TEST_SYMBOLS=(
-  CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST
-  CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST
-  CONFIG_DMABUF_HEAPS_CERALIVE_TEST
+  CONFIG_ROCKCHIP_MPP_CERALIVE_TEST
 )
 
 
@@ -549,7 +552,7 @@ record_tuple() {
 # self-test — the refusals, not the builds. Each leg drives the shipped code.
 # ---------------------------------------------------------------------------
 self_test() {
-  local t rc=0 pass=0 fail_n=0
+  local t rc=0 pass=0 fail_n=0 dbg_sym
   t="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${t}'" RETURN
@@ -671,9 +674,7 @@ JSON
   assert_test_symbols "${t}/prod.config" on >/dev/null 2>&1 \
     && bad "the debug symbol assertion passed a config with no test symbols" \
     || ok "the debug symbol assertion REJECTS a config with no test symbols"
-  { printf 'CONFIG_VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST=y\n'
-    printf 'CONFIG_VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST=y\n'
-    printf 'CONFIG_DMABUF_HEAPS_CERALIVE_TEST=y\n'; } >"${t}/dbg.config"
+  for dbg_sym in "${CERALIVE_TEST_SYMBOLS[@]}"; do printf '%s=y\n' "${dbg_sym}"; done >"${t}/dbg.config"
   assert_test_symbols "${t}/dbg.config" on >/dev/null 2>&1 \
     && ok "a debug config passes the debug symbol assertion" \
     || bad "debug symbol assertion rejected a debug config"

@@ -50,9 +50,24 @@ CONFIG_ROCKCHIP_SARADC=y
 # symbols that card needs — SND_SIMPLE_CARD, SND_SOC_ROCKCHIP_I2S_TDM,
 # SND_SOC_HDMI_CODEC — are already =m via the in-tree defconfig, verified against
 # the board's own /proc/config.gz, so this fragment does not restate them.
+#
+# MEDIA_PLATFORM_DRIVERS AND V4L_MEM2MEM_DRIVERS ARE THE TWO PARENTS THIS BLOCK
+# USED TO RIDE UNDECLARED. `drivers/media/platform/Kconfig` wraps every one of its
+# `source` lines — synopsys/ and rockchip/ included — in `if MEDIA_PLATFORM_DRIVERS`,
+# so that symbol is the real gate on VIDEO_SYNOPSYS_HDMIRX as well as on the
+# rkvdec/rga/hantro rows below, and MEDIA_PLATFORM_SUPPORT (which the fragment did
+# name) only gates the `source` of that file. V4L_MEM2MEM_DRIVERS is a second
+# prompted bool with NO default that VIDEO_ROCKCHIP_RGA and VIDEO_HANTRO both
+# `depends on` directly. Both resolve on today — MEDIA_PLATFORM_DRIVERS is
+# `default "y"` and V4L_MEM2MEM_DRIVERS is already pulled on by defconfig's own
+# m2m drivers — so these two lines are assertions, per the stays-true rule, and
+# they are exactly the `menuconfig`-parent class that has cost this fragment four
+# capabilities already.
 CONFIG_MEDIA_SUPPORT=y
 CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_DRIVERS=y
 CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_V4L_MEM2MEM_DRIVERS=y
 CONFIG_VIDEO_DEV=y
 CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
 
@@ -60,11 +75,69 @@ CONFIG_VIDEO_SYNOPSYS_HDMIRX=m
 CONFIG_USB_VIDEO_CLASS=m
 CONFIG_SND_USB_AUDIO=m
 
-# --- Encode: VEPU580 / RKVENC v2 -------------------------------------------
-# Provided by patch 0001 of the series. Asserted selectable by the patches
-# repo's own apply gate; asserted BUILT by the kernel-build stage's post-build
-# module check.
-CONFIG_VIDEO_ROCKCHIP_RKVENC=m
+# --- Encode + decode: the CeraLive RK3588 media island ----------------------
+# The standalone `VIDEO_ROCKCHIP_RKVENC` V4L2 encoder that used to sit here is
+# GONE. It came from patch 0001 of the series, and the `island/` lane retired 0001
+# together with nine sibling rkvenc members — the encoder is now one client of the
+# Rockchip MPP service that `rk3588-media-island` v2026.9.0 carries as maintained
+# source. The symbol does not exist in the tree at this `patches_commit` at all, so
+# leaving the old row here would fail verify-kernel-config.sh as a DROPPED symbol.
+#
+# THE THREE CLIENT SYMBOLS ARE `bool`, NOT `tristate` — `=m` WOULD BE DROPPED.
+# Only ROCKCHIP_MPP_SERVICE is a tristate; RKVENC2/RKVDEC2/JPGDEC are bools inside
+# its `if ROCKCHIP_MPP_SERVICE` block whose objects are linked into that one
+# module (`rk_vcodec.ko`), so `=y` is the only value kconfig can give them. This is
+# the same declare-the-value-kconfig-can-actually-give discipline as
+# CONFIG_TYPEC_FUSB302=m below.
+#
+# Every row in this block resolves on by its OWN Kconfig default at this pin —
+# SERVICE is `default m`, the three clients are `default y` — so all four are
+# assertions rather than the thing that turns anything on. That is deliberate and
+# is the whole point of the stays-true rule: the island's Kconfig defaults are the
+# island's business, and this fragment is where the image states that it depends on
+# them. Their `depends on` parents, ARCH_ROCKCHIP and ROCKCHIP_IOMMU, are declared
+# in the Rockchip platform block above. ROCKCHIP_MPP_PROC_FS is deliberately absent
+# here: it is a PROMPTLESS bool, so kconfig cannot be directed by a fragment line,
+# and it is asserted in required-symbols.list instead (the BT_INTEL/BT_MTK rule).
+CONFIG_ROCKCHIP_MPP_SERVICE=m
+CONFIG_ROCKCHIP_MPP_RKVENC2=y
+CONFIG_ROCKCHIP_MPP_RKVDEC2=y
+CONFIG_ROCKCHIP_MPP_JPGDEC=y
+# MAINLINE rkvdec, KEPT BUILT ON PURPOSE, BINDING NOTHING. The island owns the two
+# decoder nodes by device-tree `compatible` (`rockchip,rkv-decoder-v2`), so this
+# driver has no node left to match and its module is dead weight in the strictest
+# sense — which is exactly why it stays. Keeping it built is what makes the silicon
+# handover reversible by a device-tree change rather than a kernel rebuild, and it
+# keeps the upstream-migration target alive in the same image. The island repo's
+# ANTI-PATTERNS forbid expressing that exclusivity in Kconfig
+# (`depends on !VIDEO_ROCKCHIP_VDEC`) for the same reason. It measured NOT SET at
+# this pin, so unlike the four rows above this one is a real change: rkvdec is a
+# `tristate` whose `depends on` are ARCH_ROCKCHIP and VIDEO_DEV (both declared) plus
+# the MEDIA_PLATFORM_DRIVERS gate declared in the capture block; MEDIA_CONTROLLER,
+# V4L2_MEM2MEM_DEV, V4L2_H264, V4L2_VP9 and the videobuf2 helpers are all `select`ed
+# by it and therefore get no entry — the RTW89_CORE rule.
+CONFIG_VIDEO_ROCKCHIP_VDEC=m
+# MAINLINE RGA, DECLARED FOR THE FIRST TIME. It has been resolving `=m` off
+# defconfig with nothing asserting it, which under this fragment's own rules is not
+# the same as being safe. RGA ownership is UNCHANGED by this change: the island's
+# RGA2/RGA3 `compatible` flips are still unshipped (`integration/pending/`), so
+# `rockchip-rga` still owns every RGA node. This row is what makes that statement
+# checkable. `depends on` V4L_MEM2MEM_DRIVERS, VIDEO_DEV and ARCH_ROCKCHIP, all
+# declared. It becomes a forbidden-list entry at the LATER RGA flip, once no node is
+# left for it to bind — not here.
+CONFIG_VIDEO_ROCKCHIP_RGA=m
+# HANTRO, ASSERTED. It keeps the blocks the island does not claim — vpu121,
+# vepu121_0 and av1d — so it is not a rollback target like rkvdec but a co-resident
+# owner. Same three `depends on` as RGA above.
+CONFIG_VIDEO_HANTRO=m
+#
+# NOT DECLARED HERE, DELIBERATELY: CONFIG_ROCKCHIP_MULTI_RGA. The island ships the
+# vendor `multi_rga` driver as source and its Kconfig is `default m`, so it resolves
+# `=m` at this pin by itself and `rga3.ko` is built — measured, not assumed. It binds
+# nothing, because no node carries an island RGA compatible yet. Declaring it, and
+# the RGA_ASYNC/RGA_PROC_FS bools under it, belongs to the RGA flip that also moves
+# VIDEO_ROCKCHIP_RGA to the forbidden list; splitting the two halves across two
+# changes is what keeps a one-line revert between them meaningful.
 
 # --- Encode: DMA-BUF userland heaps (the MPP buffer allocator) --------------
 # Rockchip MPP userspace (librockchip_mpp, which backs mpph264enc/mpph265enc)
