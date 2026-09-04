@@ -169,5 +169,11 @@ CONFIG_ROCKCHIP_MPP_VDPP
 CONFIG_ROCKCHIP_MPP_RKVENC2_DEVFREQ
 CONFIG_ROCKCHIP_MPP_RKVDEC2_DEVFREQ
 
+# --- 2c. RGA ownership moved to the media island ----------------------------
+# The v2026.9.2 island lane gives RGA3 core0/core1 and RGA2 sole multi_rga
+# compatibles. Mainline rockchip-rga would bind nothing, so production forbids its
+# dead module rather than carrying it as an unused rollback target.
+CONFIG_VIDEO_ROCKCHIP_RGA
+
 # --- 3. absent at the v7.2 pin ----------------------------------------------
 CONFIG_NFT_COUNTER

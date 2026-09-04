@@ -228,9 +228,9 @@ variants:
       # The patch series is a BUILD INPUT and is exact-pinned like every other
       # BSP input — an IMMUTABLE commit, never a branch.
       #
-      # WHAT THIS PIN IS. cb491dc16fc1 is the `main` commit of
-      # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #13,
-      # which added the `island/` lane. At it, patches/series carries 22 ACTIVE
+      # WHAT THIS PIN IS. 365b24632940 is the `main` commit of
+      # CERALIVE/rk3588-kernel-patches produced by the squash-merge of PR #15,
+      # which advances the `island/` lane to v2026.9.2. At it, patches/series carries 24 ACTIVE
       # members in FOUR lanes:
       #
       #   upstream/  (3)  0002 HDMI-RX EDID, 0003 HDMI-RX plugout, 0005 HDMI-RX
@@ -244,22 +244,11 @@ variants:
       #                   truthful partial registration, 0026 HDMI-RX register lock
       #                   made hardirq-safe, 0027 HDMI-RX SCDC/PHY retry hardening,
       #                   0028-0030 the Type-C dual-role-power set.
-      #   island/    (7)  0031-0037 — the `rk3588-media-island` v2026.9.0 release
-      #                   asset, ingested BYTE-PRESERVED: the MPP + multi_rga driver
-      #                   source, the drivers/video/rockchip Kconfig/Makefile hooks,
-      #                   the two IOMMU provider exports, and the three MPP
-      #                   device-tree ownership hunks (encoder, decoders, jpegd).
+      #   island/    (9)  0031-0039 — the `rk3588-media-island` v2026.9.2 release
+      #                   asset, ingested BYTE-PRESERVED. 0038/0039 move the RGA3
+      #                   pair and RGA2 to multi_rga ownership by compatible.
       #
-      # A 22-MEMBER SERIES AT BOTH THIS PIN AND THE PREVIOUS ONE IS A COINCIDENCE OF
-      # ARITHMETIC, NOT CONTINUITY. The `island/` lane contributes seven members and
-      # ten are retired at the same commit: 0001, the standalone VEPU580 V4L2 encoder,
-      # and its nine rkvenc siblings 0008, 0013-0016 and 0019-0022 — each superseded
-      # by island source rather than dropped. Hardware encode is therefore a client of
-      # the Rockchip MPP service here and not a driver of its own, so
-      # CONFIG_VIDEO_ROCKCHIP_RKVENC exists in no Kconfig at this pin and
-      # manifests/kernel/rk3588-edge.fragment names the island's symbols instead.
-      #
-      # THE ORDINALS ARE SLOT NUMBERS, NOT A COUNT — 22 members occupy a 37-slot
+      # THE ORDINALS ARE SLOT NUMBERS, NOT A COUNT — 24 members occupy a 39-slot
       # space and every gap is deliberate. 0004 was never published. 0007
       # (iommu-rockchip fetch-dte time limit) is RETIRED because it LANDED
       # UPSTREAM as 8d4346ecd495 in v7.2 — the v7.2 base bump retired it.
@@ -306,12 +295,11 @@ variants:
       # why this pin is the RESULTING `main` commit and not the branch tip.
       # Verified before pinning: `git ls-remote
       # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
-      # answers cb491dc16fc102649c7d4c003ea954cfa9e3c494, that commit reaches a
-      # 22-entry patches/series (patches/ tree object
-      # fc4e4d9a58db3536cbf5fd9bcdb3388ec0dff12b), and the whole series applies to
+      # answers 365b2463294019e3d4e2d5718a787c2055f4ab59, that commit reaches a
+      # 24-entry patches/series, and the whole series applies to
       # v7.2 with its own post-apply gate green.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: cb491dc16fc102649c7d4c003ea954cfa9e3c494
+      patches_commit: 365b2463294019e3d4e2d5718a787c2055f4ab59
       patches_series: patches/series
 
       defconfig_base: defconfig
@@ -324,7 +312,7 @@ variants:
 
       # kernel_release is DERIVED, never guessed: `make -s kernelrelease
       # LOCALVERSION=-ceralive-rk3588` run against a fresh v7.2 clone at the
-      # pinned commit, with this exact 22-member series applied and the resolved
+       # pinned commit, with this exact 24-member series applied and the resolved
       # defconfig+fragment synced, answers 7.2.0-ceralive-rk3588.
       #
       # NOTE THE `.0`, because it is the whole reason that probe is mandatory.
