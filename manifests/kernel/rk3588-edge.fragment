@@ -117,28 +117,18 @@ CONFIG_ROCKCHIP_MPP_JPGDEC=y
 # V4L2_MEM2MEM_DEV, V4L2_H264, V4L2_VP9 and the videobuf2 helpers are all `select`ed
 # by it and therefore get no entry — the RTW89_CORE rule.
 CONFIG_VIDEO_ROCKCHIP_VDEC=m
-# MAINLINE RGA, DECLARED FOR THE FIRST TIME. It has been resolving `=m` off
-# defconfig with nothing asserting it, which under this fragment's own rules is not
-# the same as being safe. RGA ownership is UNCHANGED by this change: the island's
-# RGA2/RGA3 `compatible` flips are still unshipped (`integration/pending/`), so
-# `rockchip-rga` still owns every RGA node. This row is what makes that statement
-# checkable. `depends on` V4L_MEM2MEM_DRIVERS, VIDEO_DEV and ARCH_ROCKCHIP, all
-# declared. It becomes a forbidden-list entry at the LATER RGA flip, once no node is
-# left for it to bind — not here.
-CONFIG_VIDEO_ROCKCHIP_RGA=m
+# --- RGA: the island owns RGA3 core0/core1 and RGA2 -------------------------
+# `ROCKCHIP_MULTI_RGA` binds the three island-compatible nodes at this pin and
+# produces `rga_multicore.ko`, which owns /dev/rga. Its two Kconfig parents are
+# declared above: ARCH_ROCKCHIP and ROCKCHIP_IOMMU. The mainline V4L2 driver has no
+# device-tree node left to bind, so it is intentionally absent here and forbidden by
+# the production closure rather than kept as a dead module.
+CONFIG_ROCKCHIP_MULTI_RGA=m
 # HANTRO, ASSERTED. It keeps the blocks the island does not claim — vpu121,
 # vepu121_0 and av1d — so it is not a rollback target like rkvdec but a co-resident
 # owner. Same three `depends on` as RGA above.
 CONFIG_VIDEO_HANTRO=m
 #
-# NOT DECLARED HERE, DELIBERATELY: CONFIG_ROCKCHIP_MULTI_RGA. The island ships the
-# vendor `multi_rga` driver as source and its Kconfig is `default m`, so it resolves
-# `=m` at this pin by itself and `rga3.ko` is built — measured, not assumed. It binds
-# nothing, because no node carries an island RGA compatible yet. Declaring it, and
-# the RGA_ASYNC/RGA_PROC_FS bools under it, belongs to the RGA flip that also moves
-# VIDEO_ROCKCHIP_RGA to the forbidden list; splitting the two halves across two
-# changes is what keeps a one-line revert between them meaningful.
-
 # --- Encode: DMA-BUF userland heaps (the MPP buffer allocator) --------------
 # Rockchip MPP userspace (librockchip_mpp, which backs mpph264enc/mpph265enc)
 # allocates every frame and stream buffer through its `dma_heap` allocator,

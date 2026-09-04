@@ -718,19 +718,28 @@ EOF
   run ! grep -q 'CONFIG_ROCKCHIP_MPP_PROC_FS' "$FRAGMENT"
 }
 
-@test "closure manifests: mainline rkvdec and RGA stay BUILT, never Kconfig-excluded" {
+@test "closure manifests: RGA ownership moves to multi_rga and forbids mainline rockchip-rga" {
   local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
-  # Reversibility: the island owns the decoder nodes by `compatible`, so rkvdec
-  # binds nothing — and is kept built so the handover is undone by a device-tree
-  # change rather than a kernel rebuild. RGA ownership does not move in this pin at
-  # all, which is why VIDEO_ROCKCHIP_RGA is REQUIRED here and not forbidden.
+  # The three RGA nodes move together. multi_rga depends on ARCH_ROCKCHIP and
+  # ROCKCHIP_IOMMU, so every member of that Kconfig closure must be explicit.
   local sym
-  for sym in 'CONFIG_VIDEO_ROCKCHIP_VDEC=m' 'CONFIG_VIDEO_ROCKCHIP_RGA=m' 'CONFIG_VIDEO_HANTRO=m'; do
+  for sym in 'CONFIG_ARCH_ROCKCHIP=y' 'CONFIG_ROCKCHIP_IOMMU=y' 'CONFIG_ROCKCHIP_MULTI_RGA=m'; do
     grep -qx "$sym" "$FRAGMENT"
     grep -qx "$sym" "$req"
   done
   local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
-  run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_VDEC|VIDEO_ROCKCHIP_RGA|VIDEO_HANTRO)$' "$forb"
+  run ! grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA=m' "$FRAGMENT"
+  run ! grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA=m' "$req"
+  grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA' "$forb"
+}
+
+@test "closure manifests: VIDEO_ROCKCHIP_RGA forbidden gate is non-vacuous" {
+  printf 'CONFIG_VIDEO_ROCKCHIP_RGA=m\n' >"$WORK/pre-rga-flip"
+  run "$VERIFY" --config "$WORK/pre-rga-flip" \
+    --forbidden "$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1 dependency-closure violation"* ]]
+  [[ "$output" == *"CONFIG_VIDEO_ROCKCHIP_RGA: FORBIDDEN"* ]]
 }
 
 @test "closure manifests: MNH-23 — only the three compiled MPP clients are permitted" {

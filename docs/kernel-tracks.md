@@ -77,6 +77,9 @@ backward:
 `rk3588.yaml` is the single point where a pin becomes a build input. Nothing in
 this repo re-derives a pin independently of that file.
 
+Media-island reversibility: RGA rollback = `patches_commit` back to `cb491dc`
+(one line); the pre-flip image sits on the other RAUC slot until the next deploy.
+
 **A base bump does not carry hardware evidence with it.** Board results are scoped
 to the base they were measured on; after a re-pin, treat the new base as
 compile-proven until a board says otherwise. The `edge` track's current `v7.2` pin
