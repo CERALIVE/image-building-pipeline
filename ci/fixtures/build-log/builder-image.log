@@ -1,0 +1,22 @@
+[INFO ] 12:33:34 === CeraLive build: board='rock-5b-plus' ===
+[INFO ] 12:33:35 [2b/9] building kernel from pinned source
+building kernel builder image ceralive-kernel-builder:3bfa348bc8af FROM debian:trixie-slim@sha256:28de0877
+#1 [internal] load build definition from Dockerfile.kernel
+#1 WARN: InvalidDefaultArgInFrom: Default value for ARG ${BASE_IMAGE} results in empty or invalid base image name (line 21)
+#5 24.35 update-alternatives: warning: skip creation of /usr/share/man/man1/lzma.1.gz because associated file /usr/share/man/man1/xz.1.gz (of link group lzma) doesn't exist
+#5 24.42 update-alternatives: warning: forcing reinstallation of alternative /bin/more because link group pager is broken
+#5 24.53 invoke-rc.d: could not determine current runlevel
+#5 24.53 invoke-rc.d: policy-rc.d denied execution of start.
+#5 27.98 Setting up liberror-perl (0.17030-1) ...
+#8 DONE 18.3s
+ 1 warning found (use docker --debug to expand):
+ - InvalidDefaultArgInFrom: Default value for ARG ${BASE_IMAGE} results in empty or invalid base image name (line 21)
+[INFO ] 12:40:25 [5/9] building image layers with mkosi (arm64) — base → platform → runtime → app
+‣ Building runtime image
+Setting up openssh-server (1:10.0p1-7) ...
+runit: ssh: start action denied by policy-rc.d
+invoke-rc.d: policy-rc.d denied execution of start.
+Running in chroot, ignoring request.
+Setting up dbus (1.16.2-2) ...
+Running in chroot, ignoring command 'daemon-reload'
+[OK   ] 12:52:52 === build complete: board='rock-5b-plus' ===

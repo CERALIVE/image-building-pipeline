@@ -47,10 +47,12 @@ POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"
 POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"
 FIRSTBOOT="${RUNTIME}/ceralive-ssh-firstboot.service"
 CIUART="${RUNTIME}/ceralive-ci-uart-bootstrap.service"
+MACHINEID="${RUNTIME}/machine-id/ceralive-machine-id.service"
+JOURNAL_FLUSH_DROPIN="${RUNTIME}/journald/10-ceralive-journal-flush.conf"
 
 fail() { printf 'systemd-ordering-cycle regression: %s\n' "$1" >&2; exit 1; }
 
-for f in "${FIRSTBOOT}" "${CIUART}" "${POSTINST_ENTRY}"; do
+for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${POSTINST_ENTRY}"; do
   [[ -f "${f}" ]] || fail "missing source file: ${f}"
 done
 [[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
@@ -106,21 +108,32 @@ grep -Eq '^Before=.*\blocal-fs\.target\b' <<<"${mig}" \
 grep -Eq '\bsysinit\.target\b' <<<"${mig}" \
   && fail "ceralive-migrate-data.service must NOT reference sysinit.target — it runs in the local-fs phase (would cycle)"
 
-# ceralive-hostname.service (generated inline by postinst-lib.sh) does an mDNS
-# hostname claim that CANNOT succeed before a network link is up. Ordering only
-# After=NetworkManager.service (daemon up) let it run before eth0 linked on real
-# Rock 5B+ hardware, so it failed-closed and every Requires= consumer cascaded to
-# "Dependency failed". It MUST order After=/Wants=network-online.target (link up).
+# ceralive-hostname.service (generated inline by postinst-lib.sh) delegates
+# no-uplink handling to its allocator. It must order after NetworkManager starts,
+# but a network-online.target edge would make ordinary offline boot fail.
 hostname_unit="$(awk '
   /cat >\/etc\/systemd\/system\/ceralive-hostname\.service <<'\''EOF'\''/ { f=1; next }
   f && /^EOF$/ { exit }
   f { print }
 ' <<<"${POSTINST_SRC}")"
 [[ -n "${hostname_unit}" ]] || fail "could not extract ceralive-hostname.service heredoc from the postinst library"
-grep -Eq '^After=.*\bnetwork-online\.target\b' <<<"${hostname_unit}" \
-  || fail "ceralive-hostname.service lacks After=network-online.target — mDNS claim races ahead of the link (first-boot cascade regression)"
-grep -Eq '^Wants=.*\bnetwork-online\.target\b' <<<"${hostname_unit}" \
-  || fail "ceralive-hostname.service lacks Wants=network-online.target — network-online.target is never pulled in, so After= is a no-op"
+grep -Eq '^After=.*\bNetworkManager\.service\b' <<<"${hostname_unit}" \
+  || fail "ceralive-hostname.service lacks After=NetworkManager.service"
+grep -Eq '^Wants=.*\bNetworkManager\.service\b' <<<"${hostname_unit}" \
+  || fail "ceralive-hostname.service lacks Wants=NetworkManager.service"
+grep -Eq '\bnetwork-online\.target\b' <<<"${hostname_unit}" \
+  && fail "ceralive-hostname.service must not depend on network-online.target"
+
+# The stock flush unit already RequiresMountsFor=/var/log/journal, but the
+# machine-id unit can restart journald after committing the persistent id. The
+# two early-boot jobs must be serialized so journalctl --flush cannot race that
+# restart. A hard requirement keeps the ordering true even if enablement moves.
+grep -Eq '^Requires=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service does not require machine-id reconciliation"
+grep -Eq '^After=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service can race the machine-id-triggered journald restart"
+grep -Eq '^RequiresMountsFor=.*\B/var/log/journal\b' "${JOURNAL_FLUSH_DROPIN}" \
+  || fail "systemd-journal-flush.service does not explicitly retain the persistent /var/log mount guard"
 
 echo "systemd-ordering-cycle: Part A static contract OK"
 
@@ -145,7 +158,7 @@ S="${TMP}/root"
 ETC="${S}/etc/systemd/system"
 mkdir -p "${ETC}" "${S}/usr/lib/systemd/system" "${S}/etc/ssh" "${S}/usr/local/sbin"
 cp -a "${SYS_LIB}/." "${S}/usr/lib/systemd/system/" 2>/dev/null || true
-for exe in ceralive-ssh-firstboot ceralive-ci-uart-bootstrap ceralive-migrate-data; do
+for exe in ceralive-ssh-firstboot ceralive-ci-uart-bootstrap ceralive-migrate-data ceralive-machine-id; do
   printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/${exe}"; chmod 0755 "${S}/usr/local/sbin/${exe}"
 done
 
@@ -208,6 +221,14 @@ ExecStart=/bin/true
 [Install]
 WantedBy=multi-user.target
 EOF
+cat >"${ETC}/NetworkManager.service" <<'EOF'
+[Unit]
+Description=NetworkManager stub
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # Render the REAL ceralive-hostname.service (not a stub) so B1 acyclicity also
 # proves the network-online.target addition introduced no cycle, and Part C can
@@ -216,10 +237,21 @@ printf '#!/bin/sh\nexit 0\n' >"${S}/usr/local/sbin/ceralive-set-hostname"
 chmod 0755 "${S}/usr/local/sbin/ceralive-set-hostname"
 printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
 
+# The persistent machine-id unit is the newest member of the local-fs phase, and
+# it is the one whose ordering is load-bearing rather than incidental: it must
+# land after the /var/log bind (so a journald restart reopens the journal on
+# /data, not on the rootfs slot) and before every consumer that reads the id.
+# Part D probes both edges; enabling it here also puts it inside B1's acyclicity
+# proof, which is what a Before=local-fs.target unit most needs.
+cp "${MACHINEID}" "${ETC}/ceralive-machine-id.service"
+mkdir -p "${ETC}/systemd-journal-flush.service.d"
+cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive-persistence.conf"
+
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
   ceralive-migrate-data.service var-log.mount opt-ceralive.mount data.mount \
-  ceralive.service ceralive-hostname.service >/dev/null 2>&1 || true
+  ceralive.service NetworkManager.service ceralive-hostname.service \
+  ceralive-machine-id.service >/dev/null 2>&1 || true
 mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
 ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
@@ -289,17 +321,32 @@ fi
 
 echo "systemd-ordering-cycle: Part B2 sysinit ordering OK (guards run after sysusers/tmpfiles)"
 
-# --- Part C: prove ceralive-hostname.service is ordered After network-online.target ---
+# --- Part C: prove ceralive-hostname.service is ordered After NetworkManager.service ---
 # Same probe technique as B2: a unit After=ceralive-hostname.service
-# Before=network-online.target closes a cycle iff the hostname unit is genuinely
-# ordered after network-online.target. This is the dynamic proof of Defect 2's fix
+# Before=NetworkManager.service closes a cycle iff the hostname unit is genuinely
+# ordered after NetworkManager.service. This is the dynamic proof of the boot contract
 # (the static After=/Wants= assertion is in Part A).
-if [[ -f "${SYS_LIB}/network-online.target" ]]; then
-  probe_orders_after ceralive-hostname.service network-online.target \
-    || fail "ceralive-hostname.service is NOT ordered after network-online.target (first-boot mDNS-before-link cascade regression)"
-  echo "systemd-ordering-cycle: Part C network-online ordering OK (hostname runs after the link is up)"
-else
-  echo "systemd-ordering-cycle: network-online.target absent — skipping Part C dynamic probe (static contract enforced in Part A)"
-fi
+probe_orders_after ceralive-hostname.service NetworkManager.service \
+  || fail "ceralive-hostname.service is NOT ordered after NetworkManager.service"
+echo "systemd-ordering-cycle: Part C NetworkManager ordering OK (hostname starts without an uplink gate)"
+
+# --- Part D: prove the machine-id unit is supplied EARLY ENOUGH -------------------
+# Same probe technique as B2/C. Two edges, each of which is a real defect if it
+# is missing:
+#   * after var-log.mount — journald caches the machine-id at startup, so the
+#     restart this unit issues must happen once /var/log is the /data bind, or
+#     the reopened journal lands in the rootfs slot and is lost on the next OTA.
+#   * before ceralive-hostname.service — that unit DIES on a machine-id that is
+#     not a committed 32-hex value (postinst.d/hostname.sh), and it is the first
+#     consumer to read it.
+probe_orders_after ceralive-machine-id.service var-log.mount \
+  || fail "ceralive-machine-id.service is NOT ordered after var-log.mount — a journald restart would reopen the journal on the rootfs slot"
+probe_orders_after ceralive-hostname.service ceralive-machine-id.service \
+  || fail "ceralive-hostname.service is NOT ordered after ceralive-machine-id.service — it would read whatever id PID 1 invented"
+probe_orders_after systemd-journal-flush.service ceralive-machine-id.service \
+  || fail "systemd-journal-flush.service is NOT ordered after ceralive-machine-id.service — journalctl --flush can race its journald restart"
+probe_orders_after systemd-journal-flush.service var-log.mount \
+  || fail "systemd-journal-flush.service is NOT ordered after var-log.mount — persistent flush can target the rootfs slot"
+echo "systemd-ordering-cycle: Part D persistence ordering OK (mount, machine-id reconciliation, journal flush, consumers)"
 
 echo "systemd-ordering-cycle regression: PASS"

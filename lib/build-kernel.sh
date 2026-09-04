@@ -2,10 +2,11 @@
 #
 # build-kernel.sh — kernel-build-from-source stage for the CeraLive v2 pipeline.
 #
-# OPT-IN ONLY. This stage runs when, and only when, the resolved manifest carries
-# a `kernel_source:` block — which today happens only under an explicitly
-# selected family variant (`build <board> --variant edge`). The production
-# vendor path never reaches this file.
+# This stage runs when, and only when, the resolved manifest carries a
+# `kernel_source:` block. On rk3588 that is EVERY build, because the family
+# declares `default_variant: edge` and both its variants build from source; a
+# family or variant that declares no such block (x86-minipc) never reaches this
+# file.
 #
 # BACKEND (decided, pinned — see manifests/schema/family.schema.json $defs):
 #   plain kernel `make bindeb-pkg` from the pinned source tree + the applied
@@ -86,6 +87,7 @@
 # invocation) and touches no network, no container and no disk beyond the plan.
 #
 # shellcheck shell=bash
+# shellcheck disable=SC2016  # injected bash -c payload expands inside the container
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -93,6 +95,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 # shellcheck source=lib/paths.sh
 source "${HERE}/paths.sh"
+# shellcheck source=lib/shared/resource-lib.sh
+source "${HERE}/shared/resource-lib.sh"
 
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 KERNEL_BUILDER_DOCKERFILE="${PIPELINE_DIR}/ci/Dockerfile.kernel"
@@ -169,6 +173,20 @@ Env:
                                  from somewhere the manifest URL cannot serve it
                                  yet (an unpushed commit). Never set it on a
                                  release path.
+  CERALIVE_KERNEL_SRC_MIRROR     persistent bare mirror of the pinned kernel
+                                 source: auto (default -- use one that exists,
+                                 never create it), 1 (create + use), 0 (off).
+                                 A mirror that carries the pinned commit is
+                                 cloned locally with NO network at all; one that
+                                 does not is a cache miss, never a different
+                                 build.
+  CERALIVE_KERNEL_SRC_MIRROR_DIR mirror location (default:
+                                 ${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR})
+  CERALIVE_KERNEL_SRC_MIRROR_LOCK_TIMEOUT
+                                 seconds to wait for the per-mirror flock
+                                 (default: 3600). Boards build concurrently and
+                                 share one mirror, so the lock is what keeps two
+                                 fetches from corrupting one object store.
 EOF
 }
 
@@ -251,6 +269,7 @@ main() {
     log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_info "DRY-RUN fetch policy: each pinned fetch runs under timeout ${KERNEL_GIT_TIMEOUT}s, up to ${KERNEL_GIT_ATTEMPTS} attempt(s) in a private attempt dir; a pin mismatch is NEVER retried"
+    log_info "DRY-RUN source mirror: CERALIVE_KERNEL_SRC_MIRROR=$(kernel_src_mirror_mode), mirror dir $(kernel_src_mirror_dir) (a mirror holding ${commit} is cloned locally with no network; the patch series and config are always fetched fresh)"
     log_success "=== DRY-RUN complete: kernel-build plan emitted; no network, container or build touched ==="
     return 0
   fi
@@ -273,31 +292,46 @@ main() {
   install -d -m 0755 "${ccache_dir}"
   log_info "ccache: ${ccache_dir}"
 
+  # The persistent kernel-source mirror, prepared (and locked) HOST-side, then
+  # mounted READ-ONLY so the container can only read it. See lib/kernel/checkout.sh.
+  local -a mirror_mount=()
+  local mirror_container=""
+  if kernel_src_mirror_prepare "${git_url}" "${commit}"; then
+    mirror_mount=(-v "${KERNEL_SRC_MIRROR_PATH}:/src/mirror.git:ro")
+    mirror_container="/src/mirror.git"
+  else
+    log_info "kernel source: no mirror (${KERNEL_SRC_MIRROR_BASIS}) — fetching from ${git_url}"
+  fi
+
   # BENCH ONLY: fetch the SAME pinned commit from a local clone. The manifest
   # keeps its real https URL and its real SHA; only the transport moves, and the
   # post-checkout `have_p != PATCHES_COMMIT` assertion below still proves the
   # exact commit was obtained.
-  #
-  # The generated gitconfig is not optional and cannot be replaced by -c or
-  # GIT_CONFIG_COUNT: git deliberately honours safe.directory ONLY from the
-  # system or global config, and the bind-mounted clone is owned by the invoking
-  # user while git in the container runs as root.
-  local -a patches_mount=() patches_env=()
+  local -a patches_mount=()
   local patches_fetch_url="${patches_url}"
   if [[ -n "${local_patches}" ]]; then
-    cat >"${work}/gitconfig" <<-EOF
-	[safe]
-		directory = /in/patches-src
-		directory = /in/patches-src/.git
-	EOF
-    patches_mount=(
-      -v "${local_patches}:/in/patches-src:ro"
-      -v "${work}/gitconfig:/in/gitconfig:ro"
-    )
-    patches_env=(-e "GIT_CONFIG_GLOBAL=/in/gitconfig")
+    patches_mount=(-v "${local_patches}:/in/patches-src:ro")
     patches_fetch_url="file:///in/patches-src"
     log_warn "BENCH: patch series fetched from local clone ${local_patches} instead of ${patches_url}"
     log_warn "BENCH: commit ${patches_commit} is still asserted after checkout; do NOT use this on a release path"
+  fi
+
+  # The generated gitconfig is not optional and cannot be replaced by -c or
+  # GIT_CONFIG_COUNT: git deliberately honours safe.directory ONLY from the
+  # system or global config, and every host tree mounted here is owned by the
+  # invoking user while git in the container runs as root. Both the bench patch
+  # clone and the source mirror need an entry, so the file is built from whatever
+  # is actually mounted rather than being owned by either feature.
+  local -a git_safe_dirs=() patches_env=()
+  [[ -n "${local_patches}" ]] && git_safe_dirs+=(/in/patches-src /in/patches-src/.git)
+  [[ -n "${mirror_container}" ]] && git_safe_dirs+=("${mirror_container}")
+  if (( ${#git_safe_dirs[@]} > 0 )); then
+    {
+      printf '[safe]\n'
+      printf '\tdirectory = %s\n' "${git_safe_dirs[@]}"
+    } >"${work}/gitconfig"
+    patches_mount+=(-v "${work}/gitconfig:/in/gitconfig:ro")
+    patches_env=(-e "GIT_CONFIG_GLOBAL=/in/gitconfig")
   fi
 
   # In config-file mode there IS no repo-local fragment, so `fragments` is empty
@@ -329,12 +363,14 @@ main() {
       export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
       export KBUILD_BUILD_USER=ceralive KBUILD_BUILD_HOST=ceralive-builder
 
+      # KERNEL_SRC_MIRROR is the ONLY fetch here that gets one: the patch series
+      # and the kernel config below deliberately stay fresh network fetches.
       if [ -n "${KERNEL_TAG}" ]; then
         echo "== cloning ${KERNEL_GIT_URL} at ${KERNEL_TAG}"
-        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "${KERNEL_TAG}" "${KERNEL_COMMIT}" "kernel source"
+        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "${KERNEL_TAG}" "${KERNEL_COMMIT}" "kernel source" "${KERNEL_SRC_MIRROR}"
       else
         echo "== fetching ${KERNEL_GIT_URL} at ${KERNEL_COMMIT} (no tag on the pinned branch)"
-        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "" "${KERNEL_COMMIT}" "kernel source"
+        fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "" "${KERNEL_COMMIT}" "kernel source" "${KERNEL_SRC_MIRROR}"
       fi
       cd /src/linux
       # Re-asserted on the PUBLISHED path: fetch_pinned_tree gates the rename on
@@ -424,6 +460,10 @@ main() {
       echo "== verifying the declared config survived olddefconfig"
       bash /in/verify-kernel-config.sh "${declared_config}" .config ${CONFIG_ALLOW_ABSENT}
 
+      # Retain the exact post-olddefconfig answer, rather than asking a later
+      # audit to reconstruct it from the fragment and toolchain.
+      cp .config /out/resolved.config
+
       release="$(make -s kernelrelease LOCALVERSION="${LOCAL_VERSION}")"
       if [ "${release}" != "${KERNEL_RELEASE}" ]; then
         echo "FATAL: kernelrelease is ${release}, manifest declares ${KERNEL_RELEASE} — the source version moved under the pin, or LOCALVERSION drifted" >&2
@@ -436,6 +476,14 @@ main() {
         KDEB_PKGVERSION="${PACKAGE_VERSION}" \
         bindeb-pkg
 
+      # Inventory the modules that this compile actually produced. Paths are
+      # source-tree-relative and sorted so the artifact is stable and diffable.
+      find . -type f -name "*.ko" -printf "%P\n" | LC_ALL=C sort > /out/built-modules.txt
+      if [ ! -s /out/built-modules.txt ]; then
+        echo "FATAL: kernel build produced no modules inventory" >&2
+        exit 1
+      fi
+
       # bindeb-pkg writes its .debs into the parent of the source tree.
       cp /src/"${KERNEL_PACKAGE}"_*.deb /out/
 '
@@ -447,6 +495,7 @@ main() {
     -e "KERNEL_GIT_URL=${git_url}" \
     -e "KERNEL_TAG=${tag}" \
     -e "KERNEL_COMMIT=${commit}" \
+    -e "KERNEL_SRC_MIRROR=${mirror_container}" \
     -e "PATCHES_GIT_URL=${patches_fetch_url}" \
     -e "PATCHES_COMMIT=${patches_commit}" \
     -e "PATCHES_SERIES=${patches_series}" \
@@ -465,6 +514,7 @@ main() {
     -e "CERALIVE_KERNEL_GIT_TIMEOUT=${KERNEL_GIT_TIMEOUT}" \
     -e "CERALIVE_KERNEL_GIT_BACKOFF=${KERNEL_GIT_BACKOFF}" \
     -e "SOURCE_DATE_EPOCH=${epoch}" \
+    "${mirror_mount[@]}" \
     "${patches_mount[@]}" \
     "${patches_env[@]}" \
     "${fragment_mount[@]}" \
@@ -485,7 +535,10 @@ main() {
   validate_built_kernel_deb "${built[0]}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}"
 
   "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${built[0]}" "${out_dir}"
+  install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"
+  install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"
   log_success "kernel-build-from-source: staged $(basename "${built[0]}") -> ${out_dir}"
+  log_success "kernel-build-from-source: retained resolved.config + built-modules.txt -> ${out_dir}"
 }
 
 # Only run main when executed directly; sourcing (tests) gets the functions only.

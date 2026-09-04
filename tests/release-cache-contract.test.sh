@@ -26,7 +26,7 @@ assert any(step.get("uses") == "actions/checkout@v7" for step in steps)
 assert any(step.get("name") == "Materialize release trust inputs" for step in steps)
 CANDIDATE_BUILD_RUN = (
     "set -euo pipefail\n"
-    './build rock-5b-plus 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"\n'
+    './build "${CERALIVE_RELEASE_BOARD}" 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"\n'
 )
 assert any(
     step.get("name") == "Build exact production candidate"
@@ -34,6 +34,14 @@ assert any(
     and step.get("env", {}).get("CERALIVE_BUILD_MODE") == "production"
     for step in steps
 )
+
+# A self-hosted runner has no ambient job budget, so the candidate job must
+# carry its own. Without it a wedged build holds the only image builder
+# indefinitely, and nothing in the workflow ever reports it.
+assert "timeout-minutes" in candidate, (
+    "BUG: the release candidate job has no timeout; a hung build holds the self-hosted runner forever"
+)
+assert 0 < int(candidate["timeout-minutes"]) <= 360
 assert any(step.get("id") == "upload" and step.get("uses") == "actions/upload-artifact@v7" for step in steps)
 assert "realhw" not in workflow["jobs"], (
     "BUG: the automated real-HW flashing gate was removed; images are hand-tested before a manual release"
@@ -178,7 +186,7 @@ assert 'stat -c %s "${raws[0]}"' in preflash_run
 assert "*.raw.xz" not in preflash_run
 census_run = steps[census_index]["run"]
 assert "set -euo pipefail" in census_run
-assert "./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md" in census_run
+assert "./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md" in census_run
 assert "./ci/check-build-log.sh --self-test" in census_run
 assert './ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"' in census_run
 assert "set -o pipefail" in steps[build_index]["run"] or "set -euo pipefail" in steps[build_index]["run"]
@@ -247,14 +255,42 @@ assert "hashFiles('build'" in cache_meta_env["MKOSI_SOURCE_KEY"]
 assert "lib/**/*.sh" in cache_meta_env["MKOSI_SOURCE_KEY"]
 assert "mkosi/**/*" in cache_meta_env["MKOSI_SOURCE_KEY"]
 assert "hashFiles('ci/Dockerfile'" in cache_meta_env["BUILDER_SOURCE_KEY"]
-for key_fragment in ("REPOSITORY", "RUNNER_OS_NAME", "RUNNER_ARCH_NAME", "rock-5b-plus", "MKOSI_TOOL_KEY", "MKOSI_SOURCE_KEY"):
+# The cache scope is keyed on the board, and the board is declared ONCE. A
+# repeated literal here would key the cache for one board while ./build built
+# another — a silent mismatch that restores and then saves the wrong tree.
+for key_fragment in ("REPOSITORY", "RUNNER_OS_NAME", "RUNNER_ARCH_NAME", "CERALIVE_RELEASE_BOARD", "MKOSI_TOOL_KEY", "MKOSI_SOURCE_KEY"):
     assert key_fragment in cache_meta["run"]
+assert 'board="${CERALIVE_RELEASE_BOARD}"' in cache_meta["run"], (
+    "BUG: the cache-key step re-declares the board instead of reading CERALIVE_RELEASE_BOARD"
+)
+assert "rock-5b-plus" not in cache_meta["run"], (
+    "BUG: the release cache scope re-hardcodes the board instead of deriving it"
+)
+for scope_key in ("builder_scope", "mkosi_prefix"):
+    assert "${board}" in cache_meta["run"].split(f"{scope_key}=", 1)[1].split("\n", 1)[0], scope_key
 assert "builder_scope=" in cache_meta["run"]
 assert "builder_image=" in cache_meta["run"]
 require_guard(setup)
 require_guard(builder)
 
-assert job_env["CERALIVE_MKOSI_CACHE_DIR"] == "mkosi/cache/rock-5b-plus"
+release_board = job_env["CERALIVE_RELEASE_BOARD"]
+# GitHub does not expose the `env` context to other entries of the same `env`
+# map, so the cache dir cannot interpolate the board and repeats it instead.
+# That is safe ONLY because "Assert canonical generated paths" compares the two
+# against lib/paths.sh; the assertion below is what keeps that step honest.
+assert job_env["CERALIVE_MKOSI_CACHE_DIR"] == f"mkosi/cache/{release_board}"
+assert_paths = steps[step_index(lambda step: step.get("name") == "Assert canonical generated paths")]
+assert '--board "${CERALIVE_RELEASE_BOARD}"' in assert_paths["run"]
+assert '--cache-dir "${DECLARED_CACHE_DIR}"' in assert_paths["run"]
+# every remaining board reference derives from the one declaration
+board_literals = sum(
+    step_text.count(release_board)
+    for step in steps
+    for step_text in (step.get("run", ""), str(step.get("env", {})), str(step.get("with", {})))
+)
+assert board_literals == 0, (
+    f"BUG: {board_literals} step(s) re-hardcode the board instead of using CERALIVE_RELEASE_BOARD"
+)
 assert int(job_env["CERALIVE_MKOSI_CACHE_MAX_BYTES"]) < 10 * 1024**3
 
 restore = steps[restore_index]
@@ -306,7 +342,7 @@ assert "CACHE_UID" in bound_run and "CACHE_GID" in bound_run
 assert "CACHE_MAX_BYTES" in bound_run
 assert "chown -R" in bound_run
 assert "final_bytes" in bound_run
-assert "cache/rock-5b-plus" not in bound_run or "CERALIVE_MKOSI_CACHE_DIR" in bound_run
+assert "CERALIVE_MKOSI_CACHE_DIR" in bound_run
 
 cache_paths = [
     step.get("with", {}).get("path", "")

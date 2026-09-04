@@ -1,0 +1,30 @@
+[Unit]
+Description=CeraLive one-time journal-directory migration (machine-id churn cleanup)
+Documentation=file:///usr/local/sbin/ceralive-journal-gc
+# ONE-TIME, not ongoing. The unit is enabled and therefore starts on every boot,
+# but the script's own stamp on /data makes every run after the first a two-line
+# no-op. That is deliberate: the stamp has to live on /data so an A/B slot swap
+# does not re-arm the cleanup, and a stamp is the only mechanism that survives a
+# rootfs replacement. An ongoing collector would hide machine-id churn instead of
+# leaving it fixed by ceralive-machine-id.service.
+#
+# After=systemd-journal-flush.service so journald has already migrated its
+# runtime journal into /var/log/journal — deleting directories out from under an
+# in-progress flush would be a race for no reason. This is an ordinary late unit
+# with default dependencies: nothing on the device consumes it, so it is
+# deliberately Before= nothing.
+RequiresMountsFor=/data /var/log
+After=ceralive-machine-id.service systemd-journal-flush.service
+ConditionPathIsMountPoint=/data
+ConditionPathExists=!/data/ceralive/.journal-dir-gc-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-journal-gc
+# It runs once in the life of a board and competes with nothing that matters.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

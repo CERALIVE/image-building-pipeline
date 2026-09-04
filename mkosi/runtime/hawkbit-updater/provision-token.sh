@@ -2,8 +2,8 @@
 #
 # provision-token.sh — per-device hawkBit DDI enrollment for rauc-hawkbit-updater.
 #
-# Installed on-device as /usr/local/sbin/ceralive-hawkbit-provision and run once
-# per boot by ceralive-hawkbit-provision.service (oneshot, RemainAfterExit). It is
+# Installed on-device as /usr/local/sbin/ceralive-hawkbit-provision and run by
+# the initial enrollment service plus its bounded retry timer. It is
 # the SECURE-ENROLLMENT half of task 41: the image NEVER bakes a shared static
 # token; this script provisions a per-device token onto /data on first boot.
 #
@@ -48,6 +48,7 @@ ENROLL_CONF="${CERALIVE_HAWKBIT_ENROLL_CONF:-/data/ceralive/hawkbit.conf}"
 TOKEN_FILE="${CERALIVE_HAWKBIT_TOKEN_FILE:-/data/ceralive/hawkbit-token}"
 TEMPLATE="${CERALIVE_HAWKBIT_TEMPLATE:-/etc/rauc-hawkbit-updater/config.conf}"
 EFFECTIVE="${CERALIVE_HAWKBIT_EFFECTIVE:-/data/ceralive/hawkbit-updater/config.conf}"
+PENDING_FILE="${CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pending}"
 RAUC_SYSTEM_CONF="${CERALIVE_RAUC_SYSTEM_CONF:-/etc/rauc/system.conf}"
 # mTLS client cert reused for an optional provisioning-endpoint fetch (task: "token
 # fetched from a provisioning endpoint on first boot").
@@ -56,6 +57,12 @@ APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-/etc/apt/certs/client.key}"
 
 log()  { printf '%s: %s\n' "${PROG}" "$*"; }
 die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
+
+mark_retry_pending() {
+  install -d -m 0700 "$(dirname "${PENDING_FILE}")"
+  ( umask 077; printf 'token endpoint unavailable\n' >"${PENDING_FILE}" )
+  chmod 0600 "${PENDING_FILE}"
+}
 
 # read_compatible — the device's RAUC `compatible` (board-aware, single source of
 # truth). Empty if system.conf is absent (un-provisioned RAUC) — non-fatal.
@@ -69,16 +76,15 @@ read_compatible() {
 # fetch_token_from_url URL — pull a per-device token over mTLS, echo it.
 fetch_token_from_url() {
   local url="$1"
-  command -v curl >/dev/null 2>&1 || die "curl missing — cannot fetch token from ${url}"
+  command -v curl >/dev/null 2>&1 || return 69
   local -a auth=()
   if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
     auth=(--cert "${APT_CLIENT_CRT}" --key "${APT_CLIENT_KEY}")
   fi
   local token
-  token="$(curl -fsS "${auth[@]}" "${url}")" \
-    || die "provisioning endpoint fetch failed: ${url}"
+  token="$(curl -fsS "${auth[@]}" "${url}")" || return 75
   token="$(printf '%s' "${token}" | tr -d '\r\n[:space:]')"
-  [ -n "${token}" ] || die "provisioning endpoint returned an empty token: ${url}"
+  [ -n "${token}" ] || return 65
   printf '%s' "${token}"
 }
 
@@ -99,14 +105,29 @@ main() {
   [ -n "${HAWKBIT_SERVER}" ] || die "${ENROLL_CONF}: HAWKBIT_SERVER is required"
 
   # 1. Resolve + persist the token (target token preferred; else gateway; else fetch).
-  local auth_kind="" token=""
+  local auth_kind="" token="" fetch_rc=0
   if [ -n "${HAWKBIT_TARGET_TOKEN}" ]; then
     auth_kind="auth_token"; token="${HAWKBIT_TARGET_TOKEN}"
   elif [ -n "${HAWKBIT_GATEWAY_TOKEN}" ]; then
     auth_kind="gateway_token"; token="${HAWKBIT_GATEWAY_TOKEN}"
   elif [ -n "${HAWKBIT_PROVISION_URL}" ]; then
     log "fetching per-device token from provisioning endpoint"
-    auth_kind="auth_token"; token="$(fetch_token_from_url "${HAWKBIT_PROVISION_URL}")"
+    auth_kind="auth_token"
+    if token="$(fetch_token_from_url "${HAWKBIT_PROVISION_URL}")"; then
+      :
+    else
+      fetch_rc=$?
+      case "${fetch_rc}" in
+        75)
+          mark_retry_pending
+          log "provisioning endpoint unavailable; retry pending at ${PENDING_FILE}"
+          return 0
+          ;;
+        69) die "curl missing — cannot fetch token from ${HAWKBIT_PROVISION_URL}" ;;
+        65) die "provisioning endpoint returned an empty token: ${HAWKBIT_PROVISION_URL}" ;;
+        *) die "provisioning endpoint fetch failed: ${HAWKBIT_PROVISION_URL}" ;;
+      esac
+    fi
   elif [ -s "${TOKEN_FILE}" ]; then
     log "reusing previously provisioned token at ${TOKEN_FILE}"
     auth_kind="auth_token"; token="$(tr -d '\r\n[:space:]' <"${TOKEN_FILE}")"
@@ -141,6 +162,7 @@ main() {
   install -d -m 0700 "$(dirname "${EFFECTIVE}")"
   ( umask 077; printf '%s\n' "${content}" >"${EFFECTIVE}" )
   chmod 0600 "${EFFECTIVE}"
+  rm -f -- "${PENDING_FILE}"
   log "rendered effective config → ${EFFECTIVE} (mode 0600; auth=${auth_kind}, target=${target_name}, compatible=${compatible:-<none>})"
   log "rauc-hawkbit-updater.service may now start (its ConditionPathExists is satisfied)"
 }

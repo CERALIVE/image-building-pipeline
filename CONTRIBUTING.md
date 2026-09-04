@@ -28,7 +28,8 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 - Keep user‑facing branding as CeraLive; internal tool paths may use `ceraui`
 - Prefer Armbian userpatches: `userpatches/customize-image.sh`, overlays, configs
 - Keep images minimal; avoid unnecessary packages and services
-- Use vendor kernel branch for RK3588 stability; name outputs with `stable`
+- RK3588 kernels are built from pinned source on the mainline `edge` track
+  (`default_variant: edge`); do not reintroduce a prebuilt-BSP kernel path
 
 ## Code Style
 

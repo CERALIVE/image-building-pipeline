@@ -165,7 +165,7 @@ printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
 SH
   cat >"$bin/ip" <<'SH'
 #!/usr/bin/env bash
-if [[ "$*" = *"addr show"* ]]; then
+if [[ "$*" = *"addr show"* && "${HOSTNAME_IP_SCENARIO:-online}" != offline ]]; then
   iface="${HOSTNAME_LOCAL_IFACE:-eth0}"
   printf '2: %s    inet %s/24 brd 192.168.78.255 scope global %s\n' \
     "$iface" "${HOSTNAME_LOCAL_IP:-192.168.78.50}" "$iface"
@@ -335,6 +335,7 @@ run_hostname_script() {
       HOSTNAME_SYSTEMCTL_SCENARIO="${HOSTNAME_SYSTEMCTL_SCENARIO:-normal}" \
       HOSTNAME_LOCAL_IP="${HOSTNAME_LOCAL_IP:-192.168.78.50}" \
       HOSTNAME_LOCAL_IFACE="${HOSTNAME_LOCAL_IFACE:-eth0}" \
+      HOSTNAME_IP_SCENARIO="${HOSTNAME_IP_SCENARIO:-online}" \
       AVAHI_SCENARIO="$scenario" \
       AVAHI_CLIENT_ID="$client" \
       AVAHI_DEVICE_STATE="$root/avahi" \
@@ -954,21 +955,45 @@ run_ota_guard() {
 
 
 
-# wwan_stage_six <root> [kver] — stage a module tree carrying all six WWAN
-# modules with a deliberate MIX of forms: qmi_wwan/cdc_mbim loadable (.ko),
-# cdc_ether loadable (.ko.xz, compressed), cdc_wdm as cdc-wdm.ko (hyphen on disk
-# — exercises the -/_ normalisation), option + cdc_ncm built-in (modules.builtin).
-wwan_stage_six() {
+# wwan_stage_required <root> [kver] — stage a module tree carrying all NINE
+# REQUIRED WWAN modules with a deliberate MIX of forms: qmi_wwan/cdc_mbim/
+# qcserial/usb_wwan loadable (.ko), cdc_ether loadable (.ko.xz, compressed),
+# cdc_wdm and cdc_acm as cdc-wdm.ko / cdc-acm.ko (hyphen on disk — exercises the
+# -/_ normalisation), option + cdc_ncm built-in (modules.builtin).
+#
+# It stages NONE of the ADVISORY set (mhi, mhi_wwan_ctrl, mhi_wwan_mbim,
+# rndis_host), which is deliberate and load-bearing: this is the fixture that
+# proves an advisory absence is reported and still exits 0. Use wwan_stage_advisory
+# on top of it for the everything-present case.
+wwan_stage_required() {
   local root="$1" kv="${2:-6.1.0-generic}"
   local netusb="$root/lib/modules/$kv/kernel/drivers/net/usb"
   local usbclass="$root/lib/modules/$kv/kernel/drivers/usb/class"
-  mkdir -p "$netusb" "$usbclass"
+  local usbserial="$root/lib/modules/$kv/kernel/drivers/usb/serial"
+  mkdir -p "$netusb" "$usbclass" "$usbserial"
   printf 'ELF' > "$netusb/qmi_wwan.ko"
   printf 'ELF' > "$netusb/cdc_mbim.ko"
   printf 'ELF' > "$netusb/cdc_ether.ko.xz"
   printf 'ELF' > "$usbclass/cdc-wdm.ko"
+  printf 'ELF' > "$usbclass/cdc-acm.ko"
+  printf 'ELF' > "$usbserial/qcserial.ko"
+  printf 'ELF' > "$usbserial/usb_wwan.ko"
   printf 'kernel/drivers/usb/serial/option.ko\nkernel/drivers/net/usb/cdc_ncm.ko\n' \
     > "$root/lib/modules/$kv/modules.builtin"
+}
+
+# wwan_stage_advisory <root> [kver] — stage the four ADVISORY modules: the three
+# MHI/PCIe transport ones plus host-side rndis_host.
+wwan_stage_advisory() {
+  local root="$1" kv="${2:-6.1.0-generic}"
+  local netusb="$root/lib/modules/$kv/kernel/drivers/net/usb"
+  local netwwan="$root/lib/modules/$kv/kernel/drivers/net/wwan"
+  local mhihost="$root/lib/modules/$kv/kernel/drivers/bus/mhi/host"
+  mkdir -p "$netusb" "$netwwan" "$mhihost"
+  printf 'ELF' > "$mhihost/mhi.ko"
+  printf 'ELF' > "$netwwan/mhi_wwan_ctrl.ko"
+  printf 'ELF' > "$netwwan/mhi_wwan_mbim.ko"
+  printf 'ELF' > "$netusb/rndis_host.ko"
 }
 
 # make_kernel_deb <stage> <out.deb> — pack a staged rootfs dir into a minimal but
@@ -1058,7 +1083,9 @@ typec_fake_sysfs() {
 # mask_stub_bin <dir> — a systemctl stub that RECORDS every call and faithfully
 # reproduces `systemctl mask` (symlink the unit to /dev/null) into
 # $CERALIVE_MASK_UNIT_DIR, so the shipped function's own post-mask verification is
-# exercised rather than bypassed.
+# exercised rather than bypassed. When MASK_ENABLE_ALSO_UNIT is set, an `enable`
+# also tries to enable that unit and refuses to replace a mask, matching systemd's
+# handling of an [Install] Also= target.
 mask_stub_bin() {
   mkdir -p "$1"
   cat >"$1/systemctl" <<'SH'
@@ -1067,6 +1094,14 @@ printf 'systemctl %s\n' "$*" >>"$MASK_CALLS"
 if [ "${1:-}" = mask ]; then
   mkdir -p "$CERALIVE_MASK_UNIT_DIR"
   ln -sfn /dev/null "$CERALIVE_MASK_UNIT_DIR/$2"
+elif [ "${1:-}" = enable ] && [ -n "${MASK_ENABLE_ALSO_UNIT:-}" ]; then
+  also_path="$CERALIVE_MASK_UNIT_DIR/$MASK_ENABLE_ALSO_UNIT"
+  if [ -L "$also_path" ] && [ "$(readlink "$also_path")" = /dev/null ]; then
+    printf 'refusing to enable masked Also= unit %s\n' "$MASK_ENABLE_ALSO_UNIT" >&2
+    exit 1
+  fi
+  mkdir -p "$CERALIVE_MASK_UNIT_DIR"
+  ln -sfn /usr/lib/systemd/system/"$MASK_ENABLE_ALSO_UNIT" "$also_path"
 fi
 exit 0
 SH

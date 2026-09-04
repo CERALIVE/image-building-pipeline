@@ -21,7 +21,8 @@
 # same-version re-spin observable against the reviewed baseline.
 #
 # HARD CONTRACTS:
-#   * WARN by default; BSP_DRIFT_STRICT=1 makes a seeded mismatch fatal.
+#   * STRICT on the release path (CERALIVE_BUILD_MODE=production), warn-only for
+#     a development build; BSP_DRIFT_STRICT overrides in either direction.
 #   * Content hash, not just version — a same-version re-spin is still caught.
 #   * The provenance artifact is gitignored build output, deliberately EXCLUDED
 #     from the normalized build-plan comparison.
@@ -58,19 +59,9 @@ EOF
 # A mismatch prints a "BSP drift" banner to stdout (the user-facing advisory signal)
 # plus structured detail on stderr.
 #
-# Exit policy is opt-in (C6b):
-#   * DEFAULT (BSP_DRIFT_STRICT unset/≠1) — WARN-ONLY: drift prints the banner and
-#     still returns 0. The package version remains exact; this reports a content
-#     replacement or an intentional version/baseline mismatch.
-#   * BSP_DRIFT_STRICT=1 — STRICT: a real version/hash mismatch against a SEEDED
-#     baseline returns non-zero, failing the build. The seeding run (unseeded/first
-#     run) and a clean match are ALWAYS exit 0 regardless of this flag — a fresh
-#     baseline can never fail a strict build.
-#
-# Promotion criterion (why default is still warn): flipping the default to strict
-# (blocking) remains gated on a fleet manifest run confirming that every board
-# resolves to the seeded known-good BSP with no outstanding drift. Operators/CI
-# that want the gate today opt in with BSP_DRIFT_STRICT=1.
+# Exit policy is decided by bsp_drift_strict below. The seeding run (unseeded /
+# first run) and a clean match are ALWAYS exit 0 regardless of it — a fresh
+# baseline can never fail a strict build.
 bsp_drift_check() {
   local baseline="$1" pkg="$2" version="$3" sha="$4"
   local base_ver base_sha
@@ -89,13 +80,14 @@ bsp_drift_check() {
     return 0
   fi
 
-  local strict=0
-  [[ "${BSP_DRIFT_STRICT:-}" == "1" ]] && strict=1
+  local strict=0 reason=""
+  if bsp_drift_strict; then strict=1; fi
+  reason="${BSP_DRIFT_STRICT_REASON}"
 
   if [[ "${strict}" -eq 1 ]]; then
-    printf 'BSP drift: %s differs from the known-good baseline (BSP_DRIFT_STRICT=1 — failing the build)\n' "${pkg}"
+    printf 'BSP drift: %s differs from the known-good baseline (strict: %s — failing the build)\n' "${pkg}" "${reason}"
   else
-    printf 'BSP drift: %s differs from the known-good baseline (advisory — build continues)\n' "${pkg}"
+    printf 'BSP drift: %s differs from the known-good baseline (advisory: %s — build continues)\n' "${pkg}" "${reason}"
   fi
   log_warn "BSP drift detail — baseline: version=${base_ver} sha256=${base_sha}"
   log_warn "BSP drift detail — current : version=${version} sha256=${sha}"
@@ -104,10 +96,51 @@ bsp_drift_check() {
   fi
 
   if [[ "${strict}" -eq 1 ]]; then
-    log_warn "BSP drift: strict mode (BSP_DRIFT_STRICT=1) — returning non-zero to fail the build"
+    log_warn "BSP drift: ${reason} — returning non-zero to fail the build"
     return 1
   fi
+  log_warn "BSP drift: ${reason} — build continues"
   return 0
+}
+
+# bsp_drift_strict — 0 when a seeded mismatch must FAIL the build, 1 otherwise.
+# Publishes the deciding rule in BSP_DRIFT_STRICT_REASON so both the banner and
+# the log line name it, rather than leaving an operator to guess which knob won.
+#
+# Precedence, highest first:
+#   1. BSP_DRIFT_STRICT=0        — the documented OPT-OUT. Wins even on the
+#      release path, for the one case the gate exists to make deliberate:
+#      shipping a knowingly-drifted BSP. It has to outrank the release marker or
+#      it is not an opt-out, only a default.
+#   2. BSP_DRIFT_STRICT=1        — explicit opt-in anywhere, unchanged.
+#   3. CERALIVE_BUILD_MODE=production — STRICT BY DEFAULT. This is the release
+#      path: lib/orchestrate.sh normalizes and exports the value, release.yml
+#      sets it, and ci/build-hardware-candidates.sh refuses it unless the board's
+#      trust anchor really is a production root. An artifact built for the fleet
+#      may not silently absorb an unreviewed same-version BSP content re-spin,
+#      which is the one thing the exact version pin cannot catch.
+#   4. otherwise                 — warn-only, so a development build still
+#      reports drift without blocking local iteration.
+#
+# Any BSP_DRIFT_STRICT value other than 0/1 is REFUSED rather than read as "off":
+# a typo that quietly disabled a release gate is indistinguishable from the gate
+# working, which is the failure this whole guard exists to prevent.
+BSP_DRIFT_STRICT_REASON=""
+bsp_drift_strict() {
+  local requested="${BSP_DRIFT_STRICT:-}"
+  case "${requested}" in
+    "") ;;
+    0) BSP_DRIFT_STRICT_REASON="BSP_DRIFT_STRICT=0 opt-out"; return 1 ;;
+    1) BSP_DRIFT_STRICT_REASON="BSP_DRIFT_STRICT=1 opt-in"; return 0 ;;
+    *) die "BSP_DRIFT_STRICT must be 0 or 1, got '${requested}'" ;;
+  esac
+
+  if [[ "${CERALIVE_BUILD_MODE:-development}" == "production" ]]; then
+    BSP_DRIFT_STRICT_REASON="release path (CERALIVE_BUILD_MODE=production); opt out with BSP_DRIFT_STRICT=0"
+    return 0
+  fi
+  BSP_DRIFT_STRICT_REASON="development build (CERALIVE_BUILD_MODE=${CERALIVE_BUILD_MODE:-development}); a release-path build fails on this"
+  return 1
 }
 
 # bsp_capture_provenance <out_dir> <debs_dir> <kernel_pkg> — locate the fetched

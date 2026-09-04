@@ -6,8 +6,9 @@ ships the WWAN modules that stack depends on. It is a description of what the
 image does today — not a roadmap.
 
 The modem runtime stack is complete and production-grade. Nothing here changes
-it; this page documents it and pairs it with an **advisory** module-presence
-check (`lib/check-wwan-modules.sh`).
+it; this page documents it and pairs it with the module-presence check
+(`lib/check-wwan-modules.sh`), which is **fail-closed on the nine required USB
+modules and advisory on the four MHI/RNDIS ones** — see §6.
 
 ---
 
@@ -15,7 +16,7 @@ check (`lib/check-wwan-modules.sh`).
 
 The image ships a ModemManager-based cellular stack. The **core ModemManager
 1.24 closure** — the nine ELF-shipping packages below — is a CeraLive fork
-(`~ceralive.2`) published by modem-stack v1.3.0, staged as
+(`~ceralive.3`) published by modem-stack v1.4.0, staged as
 first-party `.deb`s (`FIRST_PARTY_APT_PKGS` in `lib/fetch-debs.sh`, pinned in
 `manifests/first-party-deb-versions.txt`) and installed by the **app layer**
 (`RUNTIME_APP_PKGS`). It **upgrades** the Debian modem packages the runtime layer
@@ -35,7 +36,7 @@ These nine form a **self-contained dependency closure** (`modemmanager` →
 `libmm-glib0`; the glib libs bind to the qmi/mbim/qrtr transports). External deps
 (GLib, `libgudev`, `polkit`, systemd) come from Debian.
 
-`ceralive-modem-support=1.3.0` is a separate, `Architecture: all` first-party
+`ceralive-modem-support=1.4.0` is a separate, `Architecture: all` first-party
 companion staged through that same app-layer route. It owns generic modem system
 assets, including `60-ceralive-modem.rules`; the image-owned
 `99-ceralive-hardware.rules` and generated `78-mm-ceralive-slot-uid.rules` have
@@ -142,16 +143,28 @@ route/rp_filter health and report it.
 ## 5. Required WWAN kernel modules
 
 The userspace stack above is inert unless the kernel exposes the WWAN network and
-serial drivers the modems bind to. The cellular datapath depends on six modules:
+serial drivers the modems bind to. Nine modules are **required** — a missing one
+fails the §6 check — and four more are checked **advisory**:
 
-| Module | Purpose |
-|--------|---------|
-| `qmi_wwan` | QMI WWAN network device (Qualcomm modems) |
-| `cdc_mbim` | MBIM WWAN network device (USB CDC MBIM) |
-| `cdc_wdm` | USB CDC WDM character device — the QMI/MBIM control channel (`/dev/cdc-wdm*`); the on-disk file is `cdc-wdm.ko` |
-| `option` | USB serial driver for modem AT/diagnostic ports |
-| `cdc_ether` | USB CDC Ethernet (ECM) network device |
-| `cdc_ncm` | USB CDC NCM network device |
+| Module | Class | Purpose |
+|--------|-------|---------|
+| `qmi_wwan` | required | QMI WWAN network device (Qualcomm modems) |
+| `cdc_mbim` | required | MBIM WWAN network device (USB CDC MBIM) |
+| `cdc_wdm` | required | USB CDC WDM character device — the QMI/MBIM control channel (`/dev/cdc-wdm*`); the on-disk file is `cdc-wdm.ko` |
+| `option` | required | USB serial driver for modem AT/diagnostic ports |
+| `cdc_ether` | required | USB CDC Ethernet (ECM) network device |
+| `cdc_ncm` | required | USB CDC NCM network device |
+| `cdc_acm` | required | the `/dev/ttyACM*` AT control port a large share of modems expose; on-disk file `cdc-acm.ko` |
+| `qcserial` | required | control ports for Qualcomm modems that do NOT present the `option` interface layout — without it ModemManager sees a data interface and nothing to drive it with |
+| `usb_wwan` | required | the promptless USB-serial helper BOTH `option` and `qcserial` select; losing it takes both control-port drivers while their own symbols still look satisfied |
+| `mhi` | advisory | the PCIe/M.2 MHI bus itself |
+| `mhi_wwan_ctrl` | advisory | MHI AT/MBIM/QMI/DIAG control channels |
+| `mhi_wwan_mbim` | advisory | MHI data netdev |
+| `rndis_host` | advisory | host-side RNDIS, for a modem or tethered peripheral whose only mode is RNDIS |
+
+The three MHI rows are the PCIe/M.2 attach path rather than the USB one, and no
+CeraLive board has qualified a PCIe modem — hence advisory. `rndis_host` is
+advisory because QMI and MBIM already cover every modem in §4's table.
 
 A module may ship either way and both satisfy the stack:
 
@@ -171,15 +184,58 @@ check makes no assumption about which a given kernel chooses — see
 
 ## 6. Build-time module-presence check
 
-The kernel package is exact-versioned in
-`manifests/armbian-bsp-deb-versions.txt`. An upstream repository can still
-replace bytes under the same Debian version, so a same-version Armbian re-spin
-could drop one of the six modules with no signal. `lib/check-wwan-modules.sh`
-makes that observable.
+`lib/verify-kernel-config.sh` proves a kernel SYMBOL resolved in the built
+`.config`. That is not the same claim as a `.ko` having shipped in the built
+package, and a config gate can be green while the `.deb` is missing the module.
+`lib/check-wwan-modules.sh` is the second claim, and it is what makes a dropped
+module observable.
 
 ```bash
 lib/check-wwan-modules.sh <kernel.deb | module-tree-dir>
+lib/check-wwan-modules.sh --help
 ```
+
+### Severity: nine required, four advisory
+
+| Class | Modules | On a miss |
+|---|---|---|
+| **REQUIRED** | `qmi_wwan` `cdc_mbim` `cdc_wdm` `option` `cdc_ether` `cdc_ncm` `cdc_acm` `qcserial` `usb_wwan` | the module is NAMED and the check **exits non-zero** |
+| **ADVISORY** | `mhi` `mhi_wwan_ctrl` `mhi_wwan_mbim` `rndis_host` | an `ADVISORY` line; the check still exits 0 |
+
+The required nine are the USB datapath the modems in §4's known-good table
+actually bind through — the two vendor protocols (QMI, MBIM), their shared
+`/dev/cdc-wdm` control device, the generic CDC data interfaces, and the serial
+control ports ModemManager drives (`option` and `qcserial` between them cover the
+two USB interface layouts, `usb_wwan` is the promptless helper both select, and
+`cdc_acm` is the `/dev/ttyACM*` AT port). Losing any one of them is a
+fleet-visible "no modem", so it fails closed.
+
+The advisory four are advisory for stated reasons, not caution. The three MHI
+modules are the PCIe/M.2 transport and **no CeraLive board has qualified a PCIe
+modem**; `rndis_host` is the RNDIS fallback that QMI and MBIM already cover for
+every modem in §4. Their symbols are still pinned, so the capability cannot
+vanish unnoticed — but a build must not fail over hardware nobody has proven on a
+bench. Promoting one needs a board that proves it.
+
+`CERALIVE_WWAN_CHECK_ADVISORY=1` reports **every** module ADVISORY and always
+exits 0 — the behaviour the whole check had before the split. It is for bisecting
+a kernel change or probing a deliberately narrow tree, never a release build; it
+logs that it is active, and any value other than `0`/`1` is refused rather than
+guessed at.
+
+### The list lives in ONE place, and that is enforced
+
+`WWAN_MODULE_TABLE` carries `<CONFIG symbol>|<module>|<severity>` rows and the
+required/advisory arrays are derived from it. The module name cannot be derived
+from the symbol (`CONFIG_USB_WDM` → `cdc-wdm.ko`, `CONFIG_USB_ACM` →
+`cdc-acm.ko`, `CONFIG_USB_SERIAL_QUALCOMM` → `qcserial.ko`), so keeping the
+symbol beside the name is what lets `tests/package-contract.bats` §17 check the
+table against `manifests/kernel/required-symbols.list` in **both** directions —
+no symbol the checker names may go unpinned, and no valued modem/WWAN leaf in the
+manifest may fail to reach the checker. The second direction is a real
+regression, not a hypothetical: `CONFIG_USB_NET_RNDIS_HOST` reached the kernel
+fragment and never reached this checker, so the module went uninspected for three
+releases.
 
 What it does:
 
@@ -196,15 +252,21 @@ What it does:
   other filename or file body (a known false-positive trap).
 - Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) is available before it
   tries to open a `.deb`.
-- On a `*-vendor-rk35xx` module tree, additionally reports whether the native
-  FM350 PCIe driver `mtk_t7xx` is present. Mainline trees are explicitly out of
-  scope, and the USB `0e8d:7127` bench personality is never treated as evidence
-  for native PCIe `14c3:4d75` support.
+- Additionally reports, on **every** tree, whether the native FM350 PCIe driver
+  `mtk_t7xx` is present. That probe used to be scoped to a `*-vendor-rk35xx`
+  tree; the prebuilt vendor track is retired and a source-built module set is
+  just as inspectable, so it now runs everywhere and says an absence out loud
+  instead of skipping it. It is advisory in every case, and separate from the
+  table above because `CONFIG_MTK_T7XX` is declared in neither the fragment nor
+  `required-symbols.list` — there is no manifest row to hold it to. The USB
+  `0e8d:7127` bench personality is never treated as evidence for native PCIe
+  `14c3:4d75` support.
 
-It is **advisory only**, exactly like the BSP drift-guard: a missing module
-prints a `WARNING` and the check **still exits 0**. It never fails the build and
-never edits `shared.list` or the kernel config — reacting to a warning (sourcing
-a kernel that ships the module, or adding it) is a human decision.
+A missing **advisory** module prints a `WARNING` and the check still exits 0; it
+never edits `shared.list` or the kernel config, and reacting to it (sourcing a
+kernel that ships the module, or declaring it) stays a human decision. A missing
+**required** module exits non-zero, because a warning nobody has to act on is not
+a gate — which is exactly how the `rndis_host` omission above survived.
 
 Proof: `run-tests` section 17.
 

@@ -904,6 +904,27 @@ print('CEILING-POLICY-OK')
   [[ "$pkgs" == *net-tools* ]]
 }
 
+@test "runtime packages: login is installed so UART/serial console recovery works" {
+  # agetty can render a prompt without /bin/login, but cannot create a shell after
+  # authentication. Chroots of BOTH RAUC slots on a real bench board reported
+  # `dpkg -l login` as `un` (never installed), so serial-getty@ttyFIQ0 printed its
+  # banner forever regardless of password. `login` is not pulled transitively by
+  # this image, so keep the package explicit in the shared runtime manifest.
+  run grep -Ex 'login[[:space:]]*(#.*)?' "$PIPELINE_DIR/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
+@test "runtime packages: login reaches the resolved runtime package set (rk3588 + x86)" {
+  # login is arch-independent (shared.list), so it must appear in the runtime
+  # package set the runtime layer installs for EVERY board family — the same
+  # sed|awk projection make_parity_rootfs uses to model the installed set. A
+  # missing/misplaced entry (e.g. accidentally landing in a delta list only) would
+  # leave UART recovery unusable on one family; this asserts the shared list carries it.
+  local pkgs
+  pkgs="$(sed -e 's/#.*//' "$PIPELINE_DIR/manifests/packages/shared.list" | awk 'NF{print $1}')"
+  [[ "$pkgs" == *login* ]]
+}
+
 @test "production image leaves debug access disabled without failing finalization" {
   run env \
     CERALIVE_DEBUG_IMAGE=0 \

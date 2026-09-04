@@ -15,7 +15,7 @@
 #     [LEVEL] HH:MM:SS message
 #
 # with a five-character, space-padded level and everything on STDERR. Build logs
-# are parsed by ci/check-build-log.sh against a frozen 26-signature census
+# are parsed by ci/check-build-log.sh against a frozen 34-signature census
 # (docs/build-log-census.md), and orchestrator stage lines are compared
 # byte-for-byte across builds. Changing the padding, the separator, the clock
 # format or the stream is a change to every one of those comparisons.

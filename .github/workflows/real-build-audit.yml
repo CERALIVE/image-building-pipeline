@@ -1,0 +1,64 @@
+name: Scheduled real image build audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-build:
+    runs-on: [self-hosted, ceralive-image-builder]
+    timeout-minutes: 240
+    env:
+      DOCKER_CONTEXT: default
+      CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
+      CERALIVE_RELEASE_BOARD: rock-5b-plus
+      CERALIVE_MKOSI_CACHE_DIR: mkosi/cache/rock-5b-plus
+      CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
+    steps:
+      - name: Remove stale generated paths before checkout
+        run: rm -rf mkosi/build mkosi/cache .mkosi-workspace
+      - uses: actions/checkout@v7
+      - name: Check builder resource budget
+        run: ./ci/check-builder-resources.sh
+      - name: Set up BuildKit
+        uses: docker/setup-buildx-action@v4
+      - name: Materialize build trust inputs
+        env:
+          RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
+          ARMBIAN_APT_KEYRING_B64: ${{ secrets.ARMBIAN_APT_KEYRING_B64 }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${RAUC_RELEASE_PKI_TAR_B64}" | base64 -d | tar -xz -C "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
+      - name: Build production image without publishing
+        env:
+          CERALIVE_BUILD_MODE: production
+          CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
+          APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
+          PASETO_PUBLIC_KEY_B64: ${{ secrets.PASETO_PUBLIC_KEY_B64 }}
+          CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+        run: |
+          set -euo pipefail
+          ./build "${CERALIVE_RELEASE_BOARD}" 2>&1 | tee "${RUNNER_TEMP}/real-build.log"
+      - name: Enforce build-log census
+        run: |
+          set -euo pipefail
+          python3 ./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md
+          ./ci/check-build-log.sh --self-test
+          ./ci/check-build-log.sh "${RUNNER_TEMP}/real-build.log"
+      - name: Remove generated build paths
+        if: ${{ always() }}
+        run: rm -rf mkosi/build mkosi/cache .mkosi-workspace

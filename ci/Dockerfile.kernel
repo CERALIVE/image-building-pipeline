@@ -1,9 +1,9 @@
 # CeraLive v2 — kernel-build-from-source container (Task 26).
 #
 # Used ONLY by lib/build-kernel.sh, which runs `make bindeb-pkg` inside this
-# image for an opt-in family variant that declares a `kernel_source:` block
-# (today: rk3588 `edge`). The default vendor path never builds this image and
-# never runs this stage.
+# image for any resolve that declares a `kernel_source:` block — on rk3588 that
+# is every build, `edge` being the production default_variant. A prebuilt-BSP
+# family (x86-minipc) never builds this image and never runs this stage.
 #
 # THE BASE IMAGE IS NOT PINNED HERE. BASE_IMAGE is REQUIRED and is supplied by
 # lib/build-kernel.sh from the manifest's kernel_source.builder_image, which the
@@ -19,6 +19,11 @@
 # across machines.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
+
+# OPT-IN apt proxy — same contract as ci/Dockerfile: http only, unset by default,
+# and confined to the single RUN that uses it so no host-local proxy URL (which
+# may carry credentials) survives into a shared builder layer.
+ARG APT_PROXY=
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CCACHE_DIR=/ccache \
@@ -52,27 +57,47 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 # libdw-dev is an unconditional `:native` build-dep of the same generated control.
 #
-# dwarves (pahole) is required by any config carrying CONFIG_DEBUG_INFO_BTF — the
-# Armbian vendor .config does. Its absence is NOT a build error: `DEBUG_INFO_BTF`
+# dwarves (pahole) is required by any config carrying CONFIG_DEBUG_INFO_BTF, which
+# nothing in this repo declares either way — it is inherited from whatever base
+# config a track starts from. Its absence is NOT a build error: `DEBUG_INFO_BTF`
 # is gated on `PAHOLE_VERSION >= 121`, so kconfig would silently DROP the symbol
 # and ship a kernel with no BTF, which is exactly the class of silent config loss
 # lib/verify-kernel-config.sh exists to catch. Installing the tool is the fix; the
 # gate is the proof.
-RUN dpkg --add-architecture arm64 \
- && apt-get update \
- && apt-get install -y --no-install-recommends \
-       -o Dpkg::Options::=--force-unsafe-io \
-       build-essential \
-       bc \
-       bison \
-       flex \
-       libssl-dev \
-       libssl-dev:arm64 \
-       libelf-dev \
-       libdw-dev \
-       dwarves \
-       gcc-aarch64-linux-gnu \
-       libc6-dev:arm64 \
+#
+# The cache mounts, the docker-clean move-aside and the ABSENCE of an
+# `rm -rf /var/lib/apt/lists/*` are the same contract ci/Dockerfile documents at
+# length; read it there. This closure is the expensive one — the arm64 foreign
+# architecture roughly doubles the index fetch and the cross toolchain is the
+# largest single download in the pipeline — so it is also the layer with the most
+# to lose from a cache mount that silently retains nothing.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eu; \
+    [ -f /etc/apt/apt.conf.d/docker-clean ] \
+      && mv /etc/apt/apt.conf.d/docker-clean /tmp/ceralive-docker-clean || true; \
+    printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\n' \
+      > /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    if [ -n "${APT_PROXY}" ]; then \
+      printf 'Acquire::http::Proxy "%s";\n' "${APT_PROXY}" \
+        > /etc/apt/apt.conf.d/99ceralive-proxy; \
+    fi; \
+    mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial; \
+    dpkg --add-architecture arm64; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      -o Dpkg::Options::=--force-unsafe-io \
+      build-essential \
+      bc \
+      bison \
+      flex \
+      libssl-dev \
+      libssl-dev:arm64 \
+      libelf-dev \
+      libdw-dev \
+      dwarves \
+      gcc-aarch64-linux-gnu \
+      libc6-dev:arm64 \
       dpkg-dev \
       debhelper \
       fakeroot \
@@ -84,8 +109,10 @@ RUN dpkg --add-architecture arm64 \
       git \
       ca-certificates \
       python3 \
-      ccache \
- && rm -rf /var/lib/apt/lists/*
+      ccache; \
+    rm -f /etc/apt/apt.conf.d/99ceralive-proxy /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    [ -f /tmp/ceralive-docker-clean ] \
+      && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
 
 # ccache wrappers for the cross compiler. /usr/lib/ccache is first on PATH, so a
 # plain `aarch64-linux-gnu-gcc` invocation from kbuild is cached without the

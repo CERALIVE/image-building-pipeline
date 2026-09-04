@@ -671,6 +671,29 @@ above, which remains the correct first line of defence.
 
 ---
 
+## 13. First-party `.deb` producer target-suite parity
+
+**Status:** Deferred (cross-repository implementation work).
+**Location:** [`deb-producer-suite-parity.md`](deb-producer-suite-parity.md)
+
+**What it is:** The image now targets Debian Trixie, while several first-party
+package release paths retain a fixed Bookworm build environment or run directly
+on the GitHub runner. The audit records the exact release-path evidence for six
+producers and distinguishes an existing historical GLIBC ceiling from a target
+suite-derived assertion.
+
+**Why deferred:** A meaningful repair belongs in each producer repository. It
+needs one producer-owned target declaration to drive its release container, its
+`libc6` dependency, and the final-artifact GLIBC ceiling check. Copying a Trixie
+literal into this image builder would add a second source of truth rather than
+close the drift risk.
+
+**Unblock condition:** Complete every `DSP-*` exit criterion in
+[`deb-producer-suite-parity.md`](deb-producer-suite-parity.md), then refresh the
+posture table from the released workflow evidence.
+
+---
+
 ## Related Documents
 
 | Document | Scope |
@@ -685,6 +708,7 @@ above, which remains the correct first line of defence.
 | `docs/kernel-build-from-source.md` | Opt-in kernel-from-source variants: pins, backend, integration semantics, and items 9 / 9b's gaps |
 | `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing, the retired out-of-tree `cls_fw` remediation, and §7 on the production-track flip (item 10) |
 | `docs/notes/sharing-qdisc-matrix.md` | qdisc/netfilter availability per kernel track, including the runtime cake→HTB fallback (item 11) |
+| `docs/deb-producer-suite-parity.md` | Release-path suite and GLIBC posture for the six first-party `.deb` producers (item 13) |
 | `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
 

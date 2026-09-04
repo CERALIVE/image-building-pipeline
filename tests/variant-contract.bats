@@ -909,7 +909,10 @@ YAML
   serialize build-plan
   local board
   for board in rock-5b-plus orange-pi-5-plus; do
-    run env INSTALL_BOOT_BSP=0 DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
+    # The literal documented command must exit after plan generation. DRY_RUN
+    # stages no archives, so reaching the partition/BSP gates would inspect an
+    # intentionally empty staging tree and fail.
+    run env DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
     [ "$status" -eq 0 ]
     [[ "$output" == *"kernel_variant=default"* ]]
     [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware linux-u-boot-"* ]]
@@ -920,7 +923,18 @@ YAML
     [[ "$output" == *"RK3588 userspace set from rk3588.yaml (4 pkgs)"* ]]
     [[ "$output" != *"libmali"* ]]
     [[ "$output" == *"[2b/9] building kernel from pinned source (variant 'edge')"* ]]
+    [[ "$output" == *"DRY-RUN complete: board='${board}'"* ]]
+    [[ "$output" != *"[3/9] partitioning staged .debs"* ]]
   done
+}
+
+@test "kernel build: retains the resolved config and built module inventory" {
+  local src="$PIPELINE_DIR/lib/build-kernel.sh"
+  grep -Fq 'cp .config /out/resolved.config' "$src"
+  grep -Fq 'find . -type f -name "*.ko" -printf "%P\n"' "$src"
+  grep -Fq 'install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"' "$src"
+  grep -Fq 'install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"' "$src"
+  grep -Fq 'kernel build produced no modules inventory' "$src"
 }
 
 @test "orchestrate: x86 DRY_RUN is unaffected by the variant machinery" {
@@ -1105,7 +1119,16 @@ YAML
   # arm64 HOST arch. Installing only the amd64 one aborts the package build at
   # dpkg-checkbuilddeps, before any compilation — invisible to a DRY_RUN gate.
   local df="$PIPELINE_DIR/ci/Dockerfile.kernel"
-  grep -Eq '^RUN dpkg --add-architecture arm64' "$df"
+  # The foreign architecture must be registered BEFORE `apt-get update`, or the
+  # arm64 index is never fetched and every :arm64 build-dep is unresolvable. The
+  # ORDER is the property; which RUN line it sits on is not (it moved into the
+  # cache-mounted apt layer when the BuildKit mounts landed).
+  local add_arch update_line
+  add_arch="$(grep -n 'dpkg --add-architecture arm64' "$df" | head -1 | cut -d: -f1)"
+  update_line="$(grep -n 'apt-get update' "$df" | head -1 | cut -d: -f1)"
+  [ -n "$add_arch" ]
+  [ -n "$update_line" ]
+  [ "$add_arch" -lt "$update_line" ]
   grep -Eq '^ +libssl-dev \\$' "$df"
   grep -Eq '^ +libssl-dev:arm64 \\$' "$df"
   grep -Eq '^ +libdw-dev \\$' "$df"

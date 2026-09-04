@@ -352,9 +352,9 @@ main() {
       *) die "unknown argument: $1" ;;
     esac
   done
-  # An empty --variant is the production path, not an error: the orchestrator
-  # forwards KERNEL_VARIANT, which resolve.py emits ONLY for a kernel-from-source
-  # variant, so the vendor path legitimately arrives as "".
+  # An empty --variant is legitimate, not an error: the orchestrator forwards
+  # KERNEL_VARIANT, which resolve.py emits ONLY for a kernel-from-source
+  # variant, so a prebuilt-BSP resolve arrives as "".
   [[ -n "${variant}" ]] || variant="${DEFAULT_VARIANT}"
 
   case "${mode}" in

@@ -11,9 +11,11 @@
 # Usage:
 #   emit-canonical-paths.sh [--board <board>] [--get <key>]
 #
-#   --board  resolve the board-scoped mkosi cache directory too (needs the
+#   --board  resolve the board-scoped mkosi cache directories too (needs the
 #            board manifest; the key is the manifest's `board_id`, exactly what
-#            mkosi's `CacheDirectory=cache/${BOARD_ID}` expands to)
+#            mkosi's `CacheDirectory=cache/${BOARD_ID}` expands to). Emits the
+#            board ROOT — the unit release.yml saves and restores — plus the two
+#            privilege-domain leaves a real build actually points mkosi at.
 #   --get    print only that key's value, unquoted and newline-terminated
 #
 # Default output is `key=value`, one per line, sorted by emission order.
@@ -56,6 +58,7 @@ emit mkosi_cache_root        "${CERALIVE_REL_MKOSI_CACHE_ROOT}"
 emit mkosi_workspace_dir     "${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
 emit staging_dir             "${CERALIVE_REL_STAGING_DIR}"
 emit kernel_ccache_dir       "${CERALIVE_REL_KERNEL_CCACHE_DIR}"
+emit kernel_src_mirror_dir   "${CERALIVE_REL_KERNEL_SRC_MIRROR_DIR}"
 emit images_dir              "${CERALIVE_REL_IMAGES_DIR}"
 emit logs_dir                "${CERALIVE_REL_LOGS_DIR}"
 emit cleanup_paths           "${CERALIVE_REL_CLEANUP_PATHS[*]}"
@@ -73,6 +76,8 @@ print(value)
 ' "${manifest}")"
   emit board_id              "${board_id}"
   emit board_mkosi_cache_dir "$(ceralive_rel_board_mkosi_cache_dir "${board_id}")"
+  emit board_mkosi_cache_dir_container "$(ceralive_rel_board_mkosi_cache_dir "${board_id}" container)"
+  emit board_mkosi_cache_dir_native    "$(ceralive_rel_board_mkosi_cache_dir "${board_id}" native)"
 fi
 
 if [[ -n "${want}" ]]; then

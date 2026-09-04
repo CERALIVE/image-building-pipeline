@@ -64,9 +64,12 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Read a component pin out of `versions.yaml`** | `lib/shared/versions-lib.sh::get_pin` — the ONE reader; `lib/resolve.sh` (`@versions:<key>` defer tokens) and the first-party fetch both source it. Contract `tests/versions-lib.test.sh` |
 | **Read a `.deb`'s control fields / assert its identity / explode it** | `lib/shared/deb-lib.sh` — the ONE `deb_control_field` / `deb_pkg_{name,version,arch}` / `assert_deb_identity` / `explode_deb`; contract `tests/deb-lib.test.sh`. See the KEY FACT below |
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
+| **Builder-image apt cache mounts / BuildKit / the apt proxy (`CERALIVE_APT_PROXY`)** | `ci/Dockerfile`, `ci/Dockerfile.kernel`, `lib/common.sh::container_image_build`, `lib/fetch/apt-lib.sh::apt_proxy_opts` — see the KEY FACTs below; operator quickstart in [`README.md`](README.md) |
+| **Persistent kernel-source mirror (`CERALIVE_KERNEL_SRC_MIRROR`)** | `lib/kernel/checkout.sh` (`kernel_src_mirror_*`) + the `:ro` mount in `lib/build-kernel.sh` — see the KEY FACT below |
+| **Which mkosi cache leaf a build uses (container vs native)** | `lib/paths.sh::ceralive_mkosi_cache_domain` + `lib/orchestrate.sh`'s `cache_dir` — see the privilege-domain KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
-| **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + the advisory check `lib/check-wwan-modules.sh` + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
+| **Supported-modem matrix / WWAN modules** | [`docs/modem-matrix.md`](docs/modem-matrix.md) — cellular stack (ModemManager 1.24 fork closure §1) + `lib/check-wwan-modules.sh` (fail-closed on the 9 required USB modules, advisory on the 4 MHI/RNDIS ones; `CERALIVE_WWAN_CHECK_ADVISORY=1` opts out) + fail-closed `modem_ports` slot-UID discovery runbook (§7) |
 | **Modem slot-UID udev generator (fail-closed)** | `mkosi/customize/udev.sh` `generate_modem_slot_uid_rules` — emits nothing while board `modem_ports.status: unverified`; permanent generic modem rules in `setup_hardware_access` are separate and always ship |
 | **Board-MANIFEST-gated udev quirk rows (M.2 SIM detection) — and how a `quirks:` fact reaches a subimage chroot** | LIVE: `mkosi/customize/postinst.d/hardware.sh::apply_board_quirks` via `CERALIVE_BOARD_QUIRKS`; canonical: `mkosi/customize/quirks.sh` (NOT on the `./build` path). Guard `tests/board-quirk-udev-rules.test.sh` — see the "board-gated M.2 SIM quirk rows now SHIP" KEY FACT below |
 | **Runtime postinst library — which module holds which function** | `mkosi/customize/postinst-lib.sh` is a thin ENTRY; the implementations live in `mkosi/customize/postinst.d/{networking,hostname,services,hardware,persistence,tls-ssh}.sh` — see the KEY FACT below. Every `postinst-lib.sh::<fn>` reference in this file means "the postinst library", and resolves through that entry |
@@ -76,7 +79,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
 | **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
-| **Boot-time network readiness + dead-weight unit masks** | `mkosi/customize/postinst-lib.sh` `configure_networkmanager_wait_online` (one usable connection, not global optional-modem startup completion) + `suppress_unusable_boot_units` / `mask_service` (networkd stack, machine-id commit, standalone dnsmasq, chrony-wait) — see the KEY FACT below |
+| **Offline-first boot readiness + dead-weight unit masks** | `mkosi/customize/postinst.d/services.sh::suppress_unusable_boot_units` / `mask_service` (networkd stack, both wait-online paths, machine-id commit, standalone dnsmasq, chrony-wait) + `tests/runtime-services.bats` emitted-unit scan — see the KEY FACT below |
+| **Journal retention, the persistent machine-id, and the one-time journal-dir migration** | `mkosi/runtime/journald/` + `mkosi/runtime/machine-id/` installed by `mkosi/customize/postinst.d/persistence.sh` (`setup_journald_retention` / `setup_machine_id_persistence` / `setup_journal_dir_gc`); guards `tests/journal-diagnosability.bats` + `tests/systemd-ordering-cycle.test.sh` Part D — see the ~100-seconds-of-history KEY FACT below |
 | **Which tests exist, which run by default, and why** | `tests/registry.tsv` — the declarative catalogue `run-tests` READS to build its suite lists; guard `tests/test-registry.test.sh`. See the KEY FACT below |
 | **Shared assertions for the collecting shell harnesses** | `tests/lib/assertions.sh` — the ONE `PASS`/`FAIL` + `ok`/`bad`/`assert_eq`/`assert_contains` |
 | **Which strict-mode / logging profile a script must use** | [`docs/shell-profiles.md`](docs/shell-profiles.md) — build-strict / device-daemon / contract-test |
@@ -344,7 +348,7 @@ the format without inheriting strict mode:
 - **`lib/shared/log-lib.sh`** is the ONE `[LEVEL] HH:MM:SS message` formatter
   (five-char padded level, stderr). `common.sh` sources it and adds the strict
   half on top. **The format is a contract**: `ci/check-build-log.sh` matches a
-  frozen 26-signature census against it and the 26 `[N/9]` stage lines are
+  frozen 34-signature census against it and the 26 `[N/9]` stage lines are
   compared byte-for-byte across builds.
 - **`lib/shared/args-lib.sh`** holds the three things all four entry points
   hand-rolled — `--opt=value` splitting (`args_expand_inline`),
@@ -607,17 +611,48 @@ The `DRY_RUN=1` build plan is byte-identical for all three boards × all three
 variants, and `assemble-disk.sh verify` output is identical modulo the random
 GPT disk GUID and the `mktemp` path.
 
-**A build-log warning is a defect with a countdown on it — the 26 signatures are
+**A build-log warning is a defect with a countdown on it — the 34 signatures are
 frozen in a census and a lint rejects anything outside it** [EXISTS]
 
 A real `rock-5b-plus --variant edge` build exited 0 while emitting 26 distinct
-warning/error signatures. `docs/build-log-census.md` freezes all 26 with a
+warning/error signatures. `docs/build-log-census.md` freezes 34 with a
 baseline count, stage, owner and a `FIXED` / `ACCEPTED` / `BLOCKING` disposition;
 `ci/check-build-log.sh` enforces it against a real build log and is wired into
 `release.yml` immediately after the production candidate build (the only place a
 real production log exists — the PR gate is `DRY_RUN=1` and never runs the image
-layers). 12 were FIXED here, 14 are ACCEPTED with a stated reason, 0 remain
+layers). 12 were FIXED here, 22 are ACCEPTED with a stated reason, 0 remain
 BLOCKING.
+
+**Rows 27-34 came from auditing the ANCHOR VOCABULARY, not the dispositions, and
+the method is the reusable part.** Every line of a real 20,016-line trixie build
+matching `-iE 'error|warn|fail|denied|permission|cannot|unable'` was classified:
+220 matched, 142 were already anchored, and of the remaining 93, **51 are
+substring noise no keyword grep can tell from a diagnostic** — the packages
+`libgpg-error0`/`liberror-perl`, kernel objects like `net/core/failover.o`,
+patch filenames, and this pipeline's own prose ("…additive Restart=on-failure
+drop-in…"). The other 42 were real diagnostics in four families the anchors could
+not see. All are ACCEPTED; none was a defect.
+
+Three things about that audit are worth carrying forward:
+
+- **The sweep is how gaps are FOUND; it is not what the lint does, and it is
+  strictly WEAKER in the other direction.** 35 anchored lines in that same log
+  carry none of those keywords at all (`Ign:<N> …`, `invoke-rc.d: could not
+  determine current runlevel`, `dir not exist`). Widening coverage means adding
+  anchors, never replacing them with the keyword pattern.
+- **BuildKit's `#<step> <elapsed> ` prefix is REWRITTEN to `<builder> `, never
+  deleted — and deleting it is the obvious simplification that reds every clean
+  release build.** The two builder-image builds emit 34 `update-alternatives:
+  warning: skip creation of …` lines while installing automake/xz-utils/fakeroot
+  into a manpage-less slim base. Row 5 is `FIXED` — any occurrence fails —
+  because todo9 removed that cause in the DEVICE IMAGE layers. Same text, two
+  subjects, and the marker is what keeps them apart. `--self-test` drives the
+  pair on one line of text in both directions.
+- **The third find came from ADJACENCY, not from the pattern.** `Running in
+  chroot, ignoring request.` (16×) carries none of the sweep's keywords; it was
+  found sitting next to the `runit:` denial that does. It is the
+  `deb-systemd-invoke` suppression path, and its ABSENCE would be the real
+  defect — it would mean units were genuinely being started inside the chroot.
 
 Four of the fixes are worth knowing before touching the files they live in,
 because each is a case where the obvious placement is the wrong one:
@@ -688,9 +723,10 @@ because each is a case where the obvious placement is the wrong one:
 emits it, and the package is SHA-256-pinned, so the string is immutable.
 
 Guards: `tests/mkosi-contract.bats` (25 tests, mutation-verified),
-`ci/check-build-log.sh --self-test` (clean / known-accepted / novel fixtures plus
-generated regression and count-inflation cases), and
-`ci/check-build-log-census.py --expect-count 26`.
+`ci/check-build-log.sh --self-test` (clean / known-accepted / novel /
+builder-image fixtures, plus generated regression, count-inflation, SGR-stripping
+and device-vs-builder `update-alternatives` cases), and
+`ci/check-build-log-census.py --expect-count 34`.
 
 **`lib/shared/deb-lib.sh` is the ONE Debian control/extraction library** [EXISTS]
 
@@ -1149,10 +1185,10 @@ state** under the staging dir (the host apt config is never touched).
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, the required capture plugin
   `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
-  ceralive-forked (`~ceralive.2`) modem packages `modemmanager libmm-glib0
+  ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
-  libqrtr-glib0` (modem-stack v1.3.0), plus the Architecture-all
-  `ceralive-modem-support=1.3.0` companion. All are downloaded into `$DEST/debs/`
+  libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
+  `ceralive-modem-support=1.4.0` companion. All are downloaded into `$DEST/debs/`
   using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
@@ -1287,19 +1323,34 @@ same-version content replacement observable:
   rest of the BSP set. The artifact is **gitignored, never committed**, and
   deliberately **excluded from the build-matrix `sha256` determinism comparison**
   (that job hashes the normalized build-plan string, never a file tree).
-- **Drift-guard (warn-default, strict opt-in, C6b)** — `bsp_drift_check` compares
-  the captured version+hash against the committed baseline
-  `manifests/bsp-baseline.json`. On a mismatch it prints a `BSP drift` banner to
-  stdout. Exit policy is **opt-in**: by DEFAULT (`BSP_DRIFT_STRICT` unset/≠1) it
-  **exits 0 — drift is warn-only, never fatal** (build continues, the historical
-  byte-for-byte path). With **`BSP_DRIFT_STRICT=1`** a real mismatch against a
-  SEEDED baseline **exits non-zero, failing the build** (the seeding run + a clean
-  match stay exit 0 regardless — a fresh baseline can never fail a strict build). It
-  compares the **content hash, not just the version**, so a same-version re-spin is
-  still caught. **Promotion criterion:** flipping the default to strict is a FUTURE
-  change gated on (1) the baseline seeded with a real known-good version+sha256 AND
-  (2) a fleet manifest run clean of drift — see
-  [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
+- **Drift-guard — STRICT ON THE RELEASE PATH, advisory for development** —
+  `bsp_drift_check` compares the captured version+hash against the committed
+  baseline `manifests/bsp-baseline.json`, and on a mismatch prints a `BSP drift`
+  banner to stdout. It compares the **content hash, not just the version**, so a
+  same-version re-spin is still caught — which is the whole point, because that
+  is the one substitution the exact version pin cannot see.
+
+  `bsp_drift_strict` resolves the exit policy, highest precedence first:
+  **`BSP_DRIFT_STRICT=0`** (the documented OPT-OUT — it must outrank the release
+  marker or it is not an opt-out, only a default), **`BSP_DRIFT_STRICT=1`**
+  (explicit opt-in anywhere), **`CERALIVE_BUILD_MODE=production`** (STRICT BY
+  DEFAULT), else advisory. Any other `BSP_DRIFT_STRICT` value is **refused**, not
+  read as "off": a typo that quietly disabled a release gate is
+  indistinguishable from the gate working. The deciding rule is published in
+  `BSP_DRIFT_STRICT_REASON` and named in both the banner and the log line.
+
+  **`CERALIVE_BUILD_MODE=production` IS the release path, and reusing it was the
+  point.** `lib/orchestrate.sh` normalizes and exports it, `release.yml` sets it
+  on the candidate build, and `ci/build-hardware-candidates.sh` refuses it unless
+  that board's `checks.production_trust_anchor` is true — so it already means
+  "this artifact is intended for the fleet" and cannot be forgotten when a new
+  release path is added, the way a bespoke marker could. The seeding run and a
+  clean match stay exit 0 in every mode: a fresh baseline can never fail a
+  release build. The promotion criterion this replaces (a fleet manifest run
+  clean of drift) is satisfied — the baseline is seeded with a reviewed
+  known-good version+sha256 and the 2026-09-01 real trixie build matched it.
+  Guards: `tests/package-contract.bats` §15 (13 cases; mutation-verified —
+  ignoring the release marker reds two of them).
 - **First-run / seeded baseline** — a new scaffold may start with `version` and
   `sha256` as `null`; the first authenticated real build seeds the baseline with
   the actual values, emits an informational note, and exits 0. Commit that seeded
@@ -1484,6 +1535,13 @@ container with a persistent ccache. There is no prebuilt-kernel path left:
 
 The patch commit is an **immutable SHA**, never a branch. Full write-up:
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md).
+
+Every real source-kernel build also retains `resolved.config`, copied after the
+shared `olddefconfig` / `syncconfig` / config-survival gate, and
+`built-modules.txt`, the sorted source-relative `.ko` inventory. Both live beside
+the staged kernel `.deb` under `mkosi/.staging/<board>/kernel-build/`. A
+`DRY_RUN=1` build exits after the fetch and kernel plans; it must not enter
+`[3/9]` or the BSP gate because a dry run intentionally stages no archives.
 
 **Hardware encode and decode are the CeraLive MEDIA ISLAND now, not a standalone
 V4L2 encoder — and `CONFIG_VIDEO_ROCKCHIP_RKVENC` exists in no Kconfig at this
@@ -1849,22 +1907,118 @@ occurrence of each of those `make` calls in the file.
   Knobs: `CERALIVE_KERNEL_GIT_{ATTEMPTS,TIMEOUT,BACKOFF}`. The helper is defined
   host-side and **injected** into the container script with `declare -f`, so the
   shipped loop is the same text the tests drive against a stubbed `git`.
-- **`make -j` is DERIVED from memory, not from `nproc`.** A kernel compile job
-  peaks around 1-2 GiB RSS, so `-j$(nproc)` on a core-rich, memory-thin host does
-  not build slowly — it gets OOM-killed deep inside `bindeb-pkg`, after every pin
-  has already verified. The width is `min(nproc, MemAvailable / 2 GiB)`, floor 1,
-  ceiling `nproc`, logged on every run. `CERALIVE_KERNEL_BUILD_JOBS` overrides it
-  **unconditionally, including upward**; `CERALIVE_RESOURCE_MEMINFO_FILE` (the
-  same knob `ci/check-builder-resources.sh` uses) redirects the meminfo read.
-  Both of these are **invisible to the PR gate** like everything else in `[2b/9]`
-  — it is `DRY_RUN=1` and never fetches or compiles. Guards:
-  `tests/kernel-build-resilience.bats` (30 tests, mutation-verified: removing
+- **`make -j` is DERIVED from memory, not from `nproc`, and BOTH inputs are
+  CGROUP-AWARE.** A kernel compile job peaks around 1-2 GiB RSS, so `-j$(nproc)`
+  on a core-rich, memory-thin host does not build slowly — it gets OOM-killed deep
+  inside `bindeb-pkg`, after every pin has already verified. The width is
+  `min(cpus, memory budget / 2 GiB)`, floor 1, ceiling `cpus`, logged on every run
+  with the constraint that bound it NAMED. Both inputs come from
+  `lib/shared/resource-lib.sh` — see the KEY FACT below for the cgroup walk and
+  the three ways to get it wrong. `CERALIVE_KERNEL_BUILD_JOBS` is now **CLAMPED to
+  the memory-derived ceiling** rather than obeyed unconditionally;
+  `CERALIVE_KERNEL_BUILD_JOBS_FORCE=1` is the explicit way to override upward, and
+  a `FORCE` value that is neither `0` nor `1` is REFUSED rather than read as
+  "off". `CERALIVE_RESOURCE_MEMINFO_FILE` (the same knob
+  `ci/check-builder-resources.sh` uses) redirects the meminfo read. All of these
+  are **invisible to the PR gate** like everything else in `[2b/9]` — it is
+  `DRY_RUN=1` and never fetches or compiles. Guards:
+  `tests/kernel-build-resilience.bats` (32 tests, mutation-verified: removing
   the pre-attempt `rm -rf`, folding the pin check into the retry condition,
   publishing before verifying, dropping the final-attempt cleanup, and dropping
-  the memory ceiling each fail the suite). Write-up:
+  the memory ceiling each fail the suite) plus
+  `tests/build-parallelism.test.sh` for the cgroup half. Write-up:
   [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §3b.
 
-Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (30 tests).
+Guards: `variant-contract.bats` §26 (67 tests) + `kernel-build-resilience.bats` (32 tests).
+
+**Every parallelism knob is CGROUP-AWARE, and reading only the LEAF cgroup is the
+way to get that wrong** [EXISTS]
+
+`nproc` and `MemAvailable` describe the MACHINE. Every build this pipeline runs in
+CI executes inside a cgroup that constrains it to a fraction of that machine, and
+neither reader can see the constraint: `make -j$(nproc)` inside a 4-CPU container
+on a 32-core host spawns 32 compilers that timeshare 4 CPUs, and — worse — a
+memory-thin cgroup answers a generous `MemAvailable` (which reports the HOST's
+reclaimable memory) right up to the moment its own limit is hit, at which point the
+kernel OOM-kills the compile rather than reclaiming. That is the same "dead build,
+half an hour in, after every pin has already verified" failure the memory ceiling
+above exists for, arriving through a door it could not see.
+
+`lib/shared/resource-lib.sh` is the ONE reader. It is standalone (sets no shell
+options, sources nothing) like `log-lib.sh` and `target-release-lib.sh`, and three
+consumers read it: `lib/kernel/builder.sh` (the `make -j` width),
+`lib/build-all.sh` (the multi-board cap) and `lib/fetch-debs.sh` (`FETCH_JOBS`).
+
+Four rules, each of which is a way to get this wrong that still passes a
+one-level test:
+
+- **WALK EVERY ANCESTOR, LEAF TO ROOT.** A cgroup v2 limit is inherited, so the
+  effective limit is the MINIMUM over the whole chain. A leaf whose own `cpu.max`
+  reads `max` is NOT unlimited when a parent slice caps it — reading the leaf and
+  stopping reports the machine's cores and reintroduces the defect under a name
+  that claims to have fixed it.
+- **CPU is a minimum of quotas.** `cpu.max` is `<quota> <period>` in µs; the
+  ceiling in whole CPUs is **ceil**(quota/period), and truncating silently
+  under-builds every fractional-quota cgroup.
+- **Memory headroom is computed PER ANCESTOR and only THEN minimised** — never by
+  picking the smallest absolute `memory.max` first. What a build can allocate at
+  level *i* is `memory.max_i − memory.current_i`, and a **higher**-limit parent
+  that SIBLING processes have nearly exhausted has LESS room left than a
+  lower-limit leaf that is empty. The committed fixture is exactly this shape
+  (leaf 16 GiB/0 used, parent 64 GiB/58 used): the correct answer is 2 jobs and
+  the smallest-limit-first version answers 7.
+- **Every step saturates.** `memory.current` can legitimately exceed `memory.max`
+  (the limit is enforced by reclaim/OOM, not by refusing the accounting), so an
+  unguarded subtraction underflows to a gigantic value in precisely the state that
+  must answer "one job".
+
+Two further properties are load-bearing and easy to remove by accident:
+
+- **The result channel is the `RESOURCE_*` GLOBALS, not stdout.** A derivation has
+  to report the number AND which constraint produced it, and `x="$(fn)"` runs `fn`
+  in a subshell that discards every explanatory variable it set. Do not "clean
+  this up" back into command substitution — the log line then loses the basis and
+  the operator is back to an unexplained `-j`.
+- **A namespaced container mount is the normal case, not an edge case.** Inside a
+  container `/proc/self/cgroup` still reports the HOST-relative path while the
+  mount exposes the leaf AT the mount root, so `<root><rel>` does not exist. That
+  means "the mount IS the leaf", not "there is no cgroup"; falling through to the
+  root is what keeps the walk working in the containerized build, which is the
+  case that matters most. A v1-only host (no `0::` line) correctly reads as "no v2
+  hierarchy" rather than being guessed at from a v1 controller path.
+
+**Absence is unlimited, and that is the fail-safe direction.** No cgroup v2
+hierarchy, a v1-only host and an unconstrained cgroup all resolve to "no limit
+found", so the answer collapses to exactly the pre-cgroup one and an unconfigured
+host sees **no behaviour change at all** — pinned by its own test legs. Every read
+is fixture-overridable: `CERALIVE_RESOURCE_MEMINFO_FILE`,
+`CERALIVE_RESOURCE_CGROUP_ROOT`, `CERALIVE_RESOURCE_CGROUP_PROC_FILE`, and
+`CERALIVE_RESOURCE_MEM_SAFETY_MARGIN_KIB` (default 256 MiB).
+
+**The safety margin applies to the CGROUP headroom only, never to
+`MemAvailable`.** `MemAvailable` is already a conservative kernel ESTIMATE of what
+can be handed out without swapping; `memory.max − memory.current` is a HARD WALL
+whose far side is an OOM kill, and the build is never the only thing in its cgroup.
+Applying the margin to both would change the answer on an unconstrained host, which
+this library must not do.
+
+**The two other consumers keep their existing defaults.** `lib/build-all.sh`'s cap
+is still `min(nproc, 4)` when nothing is set — deliberately NOT cgroup-adaptive,
+because the cap of 4 already bounds a many-core host far below anything a cgroup
+would, and a zero-configuration `build --all` must produce the number it always
+did. `CERALIVE_BUILD_BOARD_JOBS` is the explicit raise knob: validated FATALLY (a
+typo that quietly resolved to 4 would be indistinguishable from it working) and
+clamped to what memory can feed at 4 GiB per concurrent board. The pre-existing
+`JOBS` knob keeps absolute precedence and its exact prior semantics.
+`FETCH_JOBS` moved from a flat `4` to `min(cpus, 8)` — a verified fetch is IO-bound
+and wants more width than a compile, but an unbounded fan-out just gets
+rate-limited. This is the ONE default that changes on an unconfigured host.
+
+Guard: `tests/build-parallelism.test.sh` (53 assertions, `default-shell`) — the
+chain walk and its namespaced/v1 fallbacks, the three required fixtures above, the
+unconstrained-host no-change legs, the clamp and its `FORCE` escape, and the board
+and fetch knobs, each driven against the REAL shipped entry point rather than a
+transcription of it.
 
 **The `edge` config is ROCKCHIP-ONLY, and two closure manifests keep it that
 way** [EXISTS]
@@ -3324,8 +3478,8 @@ seeds the exact 0-byte-regular-file bug state, runs the real function, and prove
 the result is the stub symlink — resolves through it, is idempotent, and
 force-replaces a stale link). Wired into `run-tests`.
 
-**Six stock units must be MASKED (never merely disabled) — they cost every boot
-2 of its 2min 6s and kept the device permanently `degraded`** [EXISTS]
+**Seven stock units must be MASKED (never merely disabled) — wait-online is not
+boot readiness for an appliance that may establish links later** [EXISTS]
 
 Root-caused on a shipped Rock 5B+ running the PRODUCTION vendor-BSP image on
 2026-08-04. `systemd-analyze time` read **`3.925s (kernel) + 2min 2.744s
@@ -3406,7 +3560,16 @@ active disable is not enough.
 `net_setup_link`**, which lives in `systemd-udevd` and is a completely separate
 mechanism from whether the networkd DAEMON runs. `eth0`/`wlan0` renaming — and
 therefore SRTLA's `eth*`/`wlan*` bonding globs — are unaffected. Do NOT widen this
-to `NetworkManager`, `systemd-resolved` or `systemd-udevd`.
+to `NetworkManager.service`, `systemd-resolved` or `systemd-udevd`.
+
+**The seventh mask is `NetworkManager-wait-online.service` itself.** Replacing
+`nm-online -s` with `nm-online -q` fixed the optional-modem case but retained the
+same structural defect for a board with no uplink at boot: the unit still waits
+60 seconds and fails even though starting offline and connecting later is normal.
+Debian's `NetworkManager.service` carries
+`Also=NetworkManager-wait-online.service`, so merely disabling the waiter is not
+durable; enabling NetworkManager or running first-boot presets can resurrect it.
+The waiter is masked to `/dev/null`, while `NetworkManager.service` stays enabled.
 
 **`systemd-machine-id-commit.service` fails forever because of OUR OWN bind mount.**
 The obvious reading — "this image's `/etc/machine-id` is a plain file on the real
@@ -3427,17 +3590,22 @@ A plain file would SKIP the unit silently. It ran and failed:
 ```
 
 …because `postinst-lib.sh::setup_data_persistence`'s generated
-`ceralive-migrate-data` does `mount --bind "$DATA/ceralive/machine-id"
+`ceralive-migrate-data` did `mount --bind "$DATA/ceralive/machine-id"
 /etc/machine-id` to keep host identity stable across A/B slots. That bind mount
-SATISFIES `ConditionPathIsMountPoint`, the unit starts, and
-`systemd-machine-id-setup --commit` then correctly refuses because the bind SOURCE
+SATISFIED `ConditionPathIsMountPoint`, the unit started, and
+`systemd-machine-id-setup --commit` then correctly refused because the bind SOURCE
 is real ext4 on `/data`, not a tmpfs. The unit exists solely to persist a machine-id
-an initrd generated on tmpfs; this image's persistence model is the bind mount, so
-the unit is structurally guaranteed to fail on every boot, forever. Note
+an initrd generated on tmpfs.
+
+**That bind is GONE** — the machine-id is now COMMITTED to the rootfs file by
+`ceralive-machine-id.service` (see the machine-id KEY FACT below), so
+`ConditionPathIsMountPoint` no longer holds and the unit would skip silently on its
+own. **The mask stays anyway**, and deliberately: it costs nothing, and it is what
+keeps this true if any future mechanism reintroduces a mount at that path. Note
 `ceralive-hostname.service` keeps its historical
 `After=systemd-machine-id-commit.service` — that edge was ALREADY vacuous (it was
-ordering after a unit that always failed), and the real machine-id guarantee comes
-from `ceralive-migrate-data.service`, which is in the same `After=` list.
+ordering after a unit that always failed) — while the real machine-id guarantee is
+now `ceralive-machine-id.service`, which is ordered `Before=` it.
 
 **`dnsmasq.service` is the STANDALONE Debian unit, and it is NOT the hotspot's
 dnsmasq.** It always loses port 53 to `systemd-resolved`, which owns it by design
@@ -3484,10 +3652,11 @@ time-sensitive, but it is an on-demand OTA operation, not a boot one.
 
 **The fix.** `postinst-lib.sh::suppress_unusable_boot_units` (called from
 `configure_services`, via a new `mask_service` helper beside
-`enable_service`/`disable_service`) masks all six:
+`enable_service`/`disable_service`) masks all seven:
 `systemd-networkd.service`, `systemd-networkd.socket`,
-`systemd-networkd-wait-online.service`, `systemd-machine-id-commit.service`,
-`dnsmasq.service`, `chrony-wait.service`. `mask_service` then **verifies** the
+`systemd-networkd-wait-online.service`, `NetworkManager-wait-online.service`,
+`systemd-machine-id-commit.service`, `dnsmasq.service`, `chrony-wait.service`.
+`mask_service` then **verifies** the
 resulting `/etc/systemd/system/<unit> -> /dev/null` symlink and `die`s if it is
 absent — a mask that silently did not land would put the defect straight back into
 the fleet on an image that otherwise builds, boots and passes every other gate. No
@@ -3495,49 +3664,211 @@ the fleet on an image that otherwise builds, boots and passes every other gate. 
 ceiling); `suppress_unusable_boot_units` + `mask_service` are registered in
 `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`.
 
-Expected improvement: the ~100s networkd stall and the 21s chrony-wait both leave
-the boot path, so `graphical.target` should land near **~20s instead of 2min 6s**,
-with CeraUI on :80 reachable at roughly the same point rather than two minutes in,
-and `systemctl is-system-running` reading `running` instead of `degraded`.
-**Not yet boot-proven on hardware** — the masks are verified present in the built
-artifact, but the timing claim above is a prediction until a board boots it.
+Expected improvement: both structural wait-online paths and the 21s chrony-wait
+leave the boot path. First-party services start after the NetworkManager daemon,
+not after connectivity, so a normal no-uplink boot does not create a failed unit.
+The QEMU acceptance engine now requires `systemctl is-system-running` to be exactly
+`running`; its deliberate `degraded` transcript is a required negative case.
+**Not yet re-run on hardware** — the prior six masks were verified in a real emitted
+Rock 5B+ rootfs, while the seventh mask and offline-first ordering are currently
+artifact/source-tested and await the Todo 14/22 board health rerun.
 
-Verified in the real emitted rootfs (not merely "the postinst ran"): all six mask
-symlinks are present under `./etc/systemd/system/` in the `rock-5b-plus` build tar.
-Guards: `runtime-services.bats` §18e (6 tests — all six masked to `/dev/null`, the `Also=`
-resurrection path closed, mask-not-disable, the fail-closed leg proving a
-non-landing mask ABORTS the build, an exact masked-unit count of 6 that refuses to
-widen to NetworkManager/resolved/udevd/`chrony.service`, and the
-`configure_services` wiring).
+Guards: `runtime-services.bats` §18e (all seven masks, both `Also=` resurrection
+paths, mask-not-disable, fail-closed landing, exact scope, configure wiring, and an
+emitted-unit scan rejecting direct `Requires=`/`Requisite=`/`BindsTo=` on the
+NetworkManager waiter). The scan also rejects any first-party unit edge to
+`network-online.target` and runs against a real emitted rootfs whenever one is
+available.
 
-**NetworkManager wait-online gates on ONE usable connection, never global startup
-completion.** The stock Trixie unit executes `nm-online -s -q`. `-s` waits for
-NetworkManager's `Startup` property to become false, which requires every
-autoconnect profile to settle. That is structurally too strong for this appliance:
-every modem profile autoconnects, and an optional modem can remain in `prepare`
-while searching indefinitely without making working Ethernet or another modem any
-less online.
+**A shipped board's journal held ~100 SECONDS of per-unit history — the machine-id
+persistence that was supposed to prevent that had shipped, and was broken in two
+specific places** [EXISTS — built and gated, NOT yet boot-proven]
 
-Root-caused on the released Rock 5B+ image on 2026-08-31. The board had exactly one
-failed unit. `NetworkManager-wait-online` ran from monotonic 11.061 s to 71.112 s
-and exited 1 at its exact 60-second timeout; `systemd-analyze time` reported
-`3.547s (kernel) + 1min 11.847s (userspace)`. At the same time NetworkManager
-reported `connected` / `full` and had reached `CONNECTED_GLOBAL` at 13.581 s, but
-its D-Bus `Startup` property remained `true`: `gsm-9` on `cdc-wdm1` was still
-`connecting (prepare)`, while ModemManager reported `searching`, packet service
-`detached`, and `roaming-not-allowed-in-location-area`. On that exact live state,
-`nm-online -q -t 5` returned 0 immediately while `nm-online -s -q -t 5` returned 1
-after five seconds — changing only the criterion toggled the failure.
+Measured on a shipped Rock 5B+ on 2026-08-30 (evidence
+`.omo/evidence/board-diag-20260830-netmodem-192.168.78.132.md` §5.4):
 
-`configure_networkmanager_wait_online` installs the additive
-`NetworkManager-wait-online.service.d/10-ceralive-connection-ready.conf` drop-in,
-clears the vendor `ExecStart`, and replaces it with `nm-online -q`. The inherited
-`NM_ONLINE_TIMEOUT=60` remains. Do NOT mask this unit: unlike networkd's impossible
-wait, a real NetworkManager connectivity gate is useful because
-`ceralive-hostname.service` publishes mDNS after `network-online.target`. Do NOT
-change NetworkManager's connectivity checking or mutate modem profiles to address
-this boot issue; full connectivity was already proven and optional uplink search is
-valid runtime state.
+```
+journalctl --list-boots        ->  ONE boot
+journalctl -u NetworkManager   ->  6 lines  (08:54:03 .. 08:55:42 — ~100 seconds)
+journalctl -u wpa_supplicant   ->  EMPTY
+/data                          ->  98 % full
+ls -d /var/log/journal/*/      ->  20 directories   (largest 176 MB)
+/etc/machine-id                ->  f2346da8af8f48fdb339d17e8c21a25e
+/opt/ceralive/machine-id       ->  69eae157d96657b5f7af5a096a736fba   ← different!
+```
+
+A device that cannot answer "what happened an hour ago" turns every field report
+into "reproduce it while I watch". Three independent defects compounded, so there
+are three fixes, all installed from `mkosi/runtime/` by `postinst.d/persistence.sh`.
+
+**THE MACHINE-ID MECHANISM WAS ALREADY THERE. READ THIS BEFORE "ADDING" ONE.** The
+last two lines above are the whole diagnosis: a persistent copy existed on `/data`
+and the running system was not using it. `ceralive-migrate-data` carried
+
+```sh
+if [ -s /etc/machine-id ] && [ ! -s "$DATA/ceralive/machine-id" ]; then
+    cp -a /etc/machine-id "$DATA/ceralive/machine-id"
+fi
+if [ -s "$DATA/ceralive/machine-id" ] && ! mountpoint -q /etc/machine-id; then
+    mount --bind "$DATA/ceralive/machine-id" /etc/machine-id 2>/dev/null || true
+fi
+```
+
+and both halves fail in ways that look like success:
+
+- **`-s` is "non-empty", not "valid".** The image ships `/etc/machine-id` holding
+  the literal `uninitialized` — systemd's own first-boot marker, 14 bytes, very
+  much non-empty — so the seeder would happily promote it to the board's permanent
+  identity. A truncated write, an uppercase id or a stray second line were equally
+  acceptable.
+- **The bind is SKIPPED whenever `/etc/machine-id` is already a mountpoint**, which
+  is exactly the state PID 1 leaves when it takes the transient machine-id path,
+  and `2>/dev/null || true` swallows a failing bind as well. Either way the
+  persistent copy is never consumed — the two-different-values state above.
+
+**THERE IS NO INITRAMFS TO HOOK, AND THAT IS A PROPERTY OF THIS IMAGE.** The
+obvious "supply it earlier than PID 1" fix is an initramfs hook, and it cannot work
+here: `mkosi/platform/boot/boot.scr.cmd` loads the bare name `/boot/initrd.img`
+while the kernel package installs only `/boot/initrd.img-<REL>`, and that load is
+**optional by design** — the selector falls through to `booti ${kernel_addr_r} -
+${fdt_addr_r}`. The board boots with no initramfs at all, so nothing runs before
+PID 1 reads the file. Do not "fix" that by materialising `/boot/initrd.img`; that
+is a boot-contract change with real bricking risk, not a diagnosability change.
+
+**So the earliest supply that actually survives is a COMMIT, not a mount.**
+`ceralive-machine-id.service` writes the validated id into the rootfs
+`/etc/machine-id`, which means PID 1 — and therefore journald, NetworkManager and
+`ceralive-hostname.service` — resolves the persistent value on every subsequent
+boot of that slot, with no mount to be skipped, hidden or lost. Four rules:
+
+1. **ONE valid id, generated exactly once.** 32 lowercase hex on a single line,
+   stored at `/data/ceralive/machine-id`, which is the only partition an A/B slot
+   swap preserves.
+2. **Validated, and `uninitialized` is rejected BY NAME** as well as by shape, so
+   the journal line says which defect was found. Regeneration happens **only** then.
+3. **A valid existing id is NEVER rotated** — not on a slot swap, not on a re-run,
+   not when `/etc/machine-id` disagrees. `/data` is the identity; `/etc` is
+   reconciled TO it. A fresh board with no `/data` copy **adopts** the id PID 1
+   generated rather than inventing a second one, so the journal directory journald
+   already opened IS the permanent one.
+4. **Ordering is the point of the unit, and it is proven rather than asserted.**
+   `DefaultDependencies=no` + `Before=local-fs.target` keeps it in the same
+   early phase as `ceralive-migrate-data.service` (a normal service inherits
+   `After=basic.target`, which is after `local-fs.target` — the exact cycle that
+   unit's own header documents). `RequiresMountsFor=/data /var/log` orders it after
+   the **`/var/log` bind**, which is not cosmetic: journald caches the machine-id at
+   startup, so the restart this unit issues when the id CHANGED must happen once
+   `/var/log` is the `/data/log` bind, or the reopened journal lands in the rootfs
+   slot and dies with the next OTA. `tests/systemd-ordering-cycle.test.sh` Part D
+   proves both edges with `systemd-analyze verify` probes, and B1 proves the
+   assembled set is still acyclic.
+
+   **The restart and the stock journal flush are one serialized transaction.**
+   Trixie's `systemd-journal-flush.service` already carries
+   `RequiresMountsFor=/var/log/journal`, so early journald correctly starts on
+   `/run` and the flush cannot precede `var-log.mount`; journald itself must stay
+   early and gets no mount dependency. What the stock unit cannot know is that
+   `ceralive-machine-id.service` may restart journald in the same early-boot
+   window. Without an edge between them, `journalctl --flush` and that restart
+   could run concurrently. The installed
+   `systemd-journal-flush.service.d/10-ceralive-persistence.conf` therefore adds
+   `Requires=` + `After=ceralive-machine-id.service` and restates
+   `RequiresMountsFor=/var/log/journal`: mount → machine-id reconciliation and
+   possible restart → one persistent flush. Part D dynamically proves all three
+   edges and the assembled graph remains cycle-free.
+
+   This investigation also re-proved the separate application chain rather than
+   changing it: `ceralive.service` has
+   `RequiresMountsFor=/opt/ceralive /var/log`, each bind mount has
+   `Requires=ceralive-migrate-data.service`, and migration has
+   `RequiresMountsFor=/data`. The lost boot log cannot prove what wrote slot A's
+   anomalous password, but CeraUI starting against a pre-bind `config.json` is
+   not permitted by the generated graph and the wait-online mask changes none of
+   these edges.
+
+**The journald budget is against `/data`, not the rootfs.** `/var/log` is bind-mounted
+from `/data/log`, so `10-ceralive-journal.conf` states `Storage=persistent` plus an
+explicit `SystemMaxUse=256M` / `SystemKeepFree=1G` / `SystemMaxFiles=16` — a journal
+that fills `/data` does not merely lose logs, it breaks OTA downloads, the cert
+store and CeraUI config writes. `RateLimitIntervalSec=`/`RateLimitBurst=` are journald's
+**per-service** limits (`systemd-journald.conf(5)`: "this rate limiting is applied
+per-service"), set five times below the upstream default so one runaway unit can no
+longer evict every other unit's history — which is how NetworkManager ended up with
+six lines. `Audit=no` stops journald asking the kernel for the audit stream that was
+144 of the last ~350 records on the board; `auditd` is not installed, so nothing reads it.
+
+**The journal-directory cleanup is a ONE-TIME MIGRATION and must never become a
+collector.** `ceralive-journal-gc` retains the live machine-id's directory plus **at
+most one predecessor** (the most recently *modified* other directory — a machine-id
+is random, so name order carries no chronology) and stamps
+`/data/ceralive/.journal-dir-gc-done`, which lives on `/data` precisely so a slot
+swap does not re-arm it. It only ever removes DIRECTORIES that are direct children
+of the journal root AND named 32 lowercase hex digits, so a `remote-*` journal, a
+file or a symlink is untouched, and it refuses to act at all when the current
+machine-id is invalid rather than guessing which directory is live. **Do not make it
+periodic or unstamped**: a fault that quietly cleans up after itself is a fault
+nobody fixes, and the point of the machine-id work above is that there is nothing
+left to collect.
+
+Guards: `tests/journal-diagnosability.bats` (22 cases — installers and their
+fail-closed legs, both audited defects as absence guards, every malformed shape,
+byte-equality across a simulated reboot AND a simulated A/B slot flip, the adopt
+path, the restart-only-when-changed rule, the unit ordering, and the GC's
+retention/one-time/candidate-shape/refusal legs) plus
+`tests/systemd-ordering-cycle.test.sh` Part D. Mutation-verified: accepting any
+non-empty id, rotating a valid one, dropping the predecessor retention and dropping
+`/var/log` from `RequiresMountsFor=` each fail the suite.
+
+**NOT boot-proven.** Everything above is verified from the artifacts and the unit
+graph offline; no board has yet booted an image carrying it. The remaining
+on-hardware step is to confirm `/etc/machine-id` equals `/data/ceralive/machine-id`
+after an OTA slot swap, that `journalctl -u NetworkManager` spans more than one
+boot, and that the GC stamped once and left the live directory plus one predecessor.
+
+**NetworkManager wait-online is masked; first-party startup is network-tolerant.**
+The stock Trixie unit executes `nm-online -s -q`, which waits for every autoconnect
+profile to settle. A released Rock 5B+ therefore failed the unit after exactly 60
+seconds while Ethernet already provided `CONNECTED_GLOBAL`: one optional modem was
+still legitimately searching. Replacing `-s` with ordinary `nm-online -q` proved
+that diagnosis, but it was not the final contract — a device with no uplink at all
+would still wait and fail. Offline boot is normal, so the drop-in and its installer
+are removed and `NetworkManager-wait-online.service` is the seventh permanent mask.
+
+Every first-party pipeline unit now orders only after and wants
+`NetworkManager.service`; none depends on `network-online.target`. The hostname
+allocator persists `ceralive` (or its already-selected deterministic index) as a
+provisional local identity and exits successfully when no publishable address
+exists. Its reconciliation timer claims that same candidate after a link appears.
+The healthcheck already treats an absent uplink as a non-fatal SRT-reach skip.
+hawkBit URL enrollment writes a mode-0600 pending marker and returns success when
+the endpoint is unreachable; a 30-second retry timer clears the marker and starts
+the updater only after rendering the effective config.
+
+Two downstream reorder expectations are recorded here rather than edited across
+repository boundaries: cerastream should carry
+`After=NetworkManager.service srtla-send.service` plus
+`Wants=NetworkManager.service`; CeraUI's add-on reconciler should carry
+`After=ceralive.service NetworkManager.service` plus
+`Wants=NetworkManager.service`. These are the exact Todo 14/22 follow-ups for the
+same shared branch/board-health rerun; neither downstream repository is modified by
+this pipeline change.
+
+**The boot-budget gate enforces matched cold boots; QEMU is parser evidence only.**
+
+`ci/check-boot-budget.sh` consumes a versioned TSV of cold-boot samples and
+requires at least three rows for one board with artifact, slot, peripheral fixture,
+and uplink state held constant. It reports kernel/userspace median + range and
+fails when the userspace median exceeds the explicitly supplied threshold.
+`--basis` is mandatory and there is deliberately no default RK3588 threshold:
+the number must come from privileged board measurements, never from a source-level
+estimate or the old unmatched Rock-offline/Orange-live diagnostic pair.
+
+`tests/qemu-x86.sh` now records systemd manager monotonic userspace timing in its
+transcript. SELFTEST applies a synthetic threshold and requires an intentionally
+slowed transcript to fail. This is labelled an auxiliary x86 parser-level guard
+at every output site; it is not a substitute for either RK3588 board and may never
+be copied into a board budget. Contract: `tests/boot-budget.test.sh`; operator
+procedure: [`docs/boot-performance.md`](docs/boot-performance.md).
 
 **PASETO device-token PUBLIC key provisioning (ADR-0006 D2)** [EXISTS]
 
@@ -3878,6 +4209,26 @@ applied and the hotspot stays on the conservative world domain (2.4 GHz channels
 1-11 only — no channel 12/13 in ETSI countries). Guard: `mkosi-image-contract.bats` "runtime
 packages: iw is installed so the regulatory domain can be applied".
 
+**`login` in `shared.list` — without `/bin/login`, UART/serial getty can NEVER
+produce a recovery shell** [EXISTS]
+
+Confirmed directly on a real bench board's SD card: chroots of BOTH RAUC slots
+(`rootfs.0` and `rootfs.1`) reported `dpkg -l login` as `un` — never installed.
+That leaves `serial-getty@ttyFIQ0.service` / `agetty` able to render a login
+banner but unable to execute `/bin/login`, so no password can ever produce a
+shell; the console simply returns to its banner forever. This is a permanent,
+structural package-graph gap, not slot corruption or a one-off: `login` was in
+neither `shared.list` nor any delta list, and no installed package pulled it in.
+
+Installing Debian trixie-security `login` **1:4.16.0-2+really2.41.5-0+deb13u1**
+inside each chroot immediately restored `/bin/login` and `/usr/bin/login` (133560
+bytes) with zero broken or new dependencies beyond the already-installed `libc6`,
+`libpam0g`, `libpam-modules` and `debconf`. `shared.list` now names `login`
+explicitly in its Console section so every future RK3588 and x86 image has a
+functional UART recovery path. Guards: `mkosi-image-contract.bats` "runtime
+packages: login is installed so UART/serial console recovery works" and "runtime
+packages: login reaches the resolved runtime package set (rk3588 + x86)".
+
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
 
@@ -4032,29 +4383,108 @@ After=cerastream.service drop-in is baked …" + "… is ordering-ONLY (no
 Requires=/Requisite=/BindsTo= hard dependency)" (+ fail-closed + executor-wiring
 cases).
 
-**Supported-modem matrix + advisory WWAN module-presence check** [EXISTS]
+**Supported-modem matrix + the WWAN module-presence check, which is FAIL-CLOSED
+on the USB datapath and advisory only on MHI** [EXISTS — severity split 2026-09]
 
 The cellular stack (ModemManager + libqmi/libmbim + usb-modeswitch, SRTLA modem
 source-routing, the M.2 SIM quirk, and the known-good modem table) is documented
 as-is in [`docs/modem-matrix.md`](docs/modem-matrix.md). That runtime stack
 is **not** touched here — the doc only describes it.
 
-Because an upstream repository can replace bytes under the same Debian package
-version, a same-version Armbian re-spin could drop one of the six WWAN modules the modem stack
-binds to (`qmi_wwan`, `cdc_mbim`, `cdc_wdm`, `option`, `cdc_ether`, `cdc_ncm`)
-with no signal. `lib/check-wwan-modules.sh` makes that observable: it inspects
-a kernel `.deb` (or an extracted module tree) and reports each module as loadable
-(`=m`, a `<mod>.ko` file), built-in (`=y`, in `modules.builtin`), or present via
-`modules.alias`.
+`lib/check-wwan-modules.sh` inspects a kernel `.deb` (or an extracted module
+tree) and reports each modem module as loadable (`=m`, a `<mod>.ko` file),
+built-in (`=y`, in `modules.builtin`), or present via `modules.alias`. It answers
+a question **no other gate in this repo answers**: `lib/verify-kernel-config.sh`
+proves a SYMBOL RESOLVED in the built `.config`, while this proves a `.ko`
+actually SHIPPED in the built package. A config gate can be green while the
+`.deb` is missing the module.
 
-- Hyphen/underscore aware (the `cdc_wdm` module ships on disk as `cdc-wdm.ko`).
+**Severity is split, and the two halves are different claims:**
+
+| Class | Modules | On a miss |
+|---|---|---|
+| **REQUIRED** (9) | `qmi_wwan` `cdc_mbim` `cdc_wdm` `option` `cdc_ether` `cdc_ncm` `cdc_acm` `qcserial` `usb_wwan` | names the module and **EXITS NON-ZERO** |
+| **ADVISORY** (4) | `mhi` `mhi_wwan_ctrl` `mhi_wwan_mbim` `rndis_host` | prints an `ADVISORY` line, still exits 0 |
+
+The required nine are the USB datapath both shipped boards' modems bind through,
+so a drop is a fleet-visible "no modem" rather than a risk — which is exactly why
+being advisory was the wrong severity for them. **The check used to be advisory
+in its entirety**, mirroring the BSP drift-guard, and that is what let PR #144's
+gap sit open: a warning nobody has to act on is not a gate. The advisory four are
+advisory for stated, per-class reasons rather than caution — the MHI three are
+the PCIe/M.2 transport and **no CeraLive board has qualified a PCIe modem**, and
+`rndis_host` is the fallback path QMI/MBIM already cover for every modem in the
+known-good table. Promoting any of them needs a board that proves it.
+
+**`CERALIVE_WWAN_CHECK_ADVISORY=1` restores the pre-split behaviour exactly** —
+every module, required ones included, is reported ADVISORY and the check exits 0.
+It exists for bisecting a kernel change or probing a deliberately narrow tree,
+never for a release build, and it announces itself in the log so a transcript
+cannot hide it. Any value other than `0`/`1` is **refused**, not guessed at:
+`=true` silently reading as "off" would be a gate an operator believes they
+disabled and a build believes is armed.
+
+**The module set is written down exactly ONCE, and that is enforced rather than
+asked for.** `WWAN_MODULE_TABLE` carries `<CONFIG symbol>|<module>|<severity>`
+rows; `WWAN_REQUIRED_MODULES`/`WWAN_ADVISORY_MODULES` are DERIVED from it and a
+test fails on any literal re-list. The module NAME cannot be derived from the
+symbol — `CONFIG_USB_WDM` builds `cdc-wdm.ko`, `CONFIG_USB_ACM` builds
+`cdc-acm.ko`, `CONFIG_USB_SERIAL_QUALCOMM` builds `qcserial.ko` — so the binding
+has to be written somewhere; keeping the symbol beside it is what makes that one
+write CHECKABLE against `manifests/kernel/required-symbols.list` **in both
+directions**:
+
+1. every symbol in the table must be pinned in the manifest, and
+2. every valued (`=y`/`=m`) `CONFIG_USB_NET_*` / `CONFIG_USB_SERIAL_*` /
+   `CONFIG_MHI_*` row in the manifest must reach the table. That candidate set is
+   DERIVED, not a third hardcoded list — bare rows are `menuconfig` PARENTS
+   (`CONFIG_USB_SERIAL`, `CONFIG_USB_NET_DRIVERS`) that build no module of their
+   own, so "has a value" is what separates a leaf from its gate.
+
+Direction 2 is the regression that already happened: **PR #144 declared
+`CONFIG_USB_NET_RNDIS_HOST` in `manifests/kernel/rk3588-edge.fragment` and
+nothing told the checker**, so the only signal for a shipped-`.ko` drop skipped
+it in silence for three releases (todo-50 finding D1). Deleting that table row
+now fails the suite.
+
+**`mtk_t7xx` is deliberately NOT a table row.** `CONFIG_MTK_T7XX` is in neither
+the fragment nor `required-symbols.list`, so it has no manifest row to be
+cross-checked against and adding it would break the lockstep gate in the exact
+direction the gate protects. It keeps its own separate native-M.2 probe, which is
+advisory and runs on every tree. It joins the table the day the symbol is
+declared — the same hardware-evidence decision, not an extra one.
+
+- Hyphen/underscore aware (the `cdc_wdm` module ships on disk as `cdc-wdm.ko`,
+  and `cdc_acm` as `cdc-acm.ko`).
 - The `option` module is matched by an exact `option.ko` basename, a
   `…/option.ko` `modules.builtin` entry, or a `modules.alias` module token —
   **never** a bare `option` substring (a known false-positive trap).
 - Asserts a `.deb` extractor (`dpkg-deb`, or `ar`+`tar`) before opening a `.deb`.
-- **Advisory only**, exactly like the BSP drift-guard: a missing module WARNS but
-  the check **always exits 0**. It never fails the build and never edits
-  `shared.list` or the kernel config. Proof: `run-tests` section 17.
+  An input it cannot inspect at all stays a warn-and-pass: that is a statement
+  about the host's tooling, not about the kernel's modules.
+- It still edits nothing — not `shared.list`, not the kernel config. The only
+  thing it changes is its own exit status.
+- **The FAIL path `exit`s rather than returning non-zero, and that is not
+  interchangeable.** A non-zero RETURN from the top-level call trips
+  `common.sh`'s ERR trap, which prints `ERROR at …: return "${rc}"` UNDER the
+  verdict and reads as the checker having crashed — sending a reader to this file
+  instead of to the module it just named. Disarming the trap from inside the
+  function cannot work either: with `errtrace` unset, bash removes the ERR trap
+  for the duration of a function and restores it on return.
+
+Guards: `tests/package-contract.bats` §17 (16 cases — the three scenarios, each
+newly-required module driven out one at a time, both lockstep directions, the
+single-source rule, the opt-out and its refused-value leg, and `--help`).
+Mutation-verified: deleting the `rndis_host` row, demoting `cdc_acm` to advisory,
+accepting a bad opt-out value, adding an unpinned table row, and dropping the
+fail-closed return each fail the suite.
+
+**KNOWN DOC GAP, deliberately not fixed here:** the WWAN block comment in
+`manifests/kernel/rk3588-edge.fragment` still says "the six modules
+lib/check-wwan-modules.sh binds the modem stack to". It is now nine required plus
+four advisory. The sentence was left alone because that file was another change's
+territory; the lockstep it describes is enforced by the two gates above rather
+than by the comment, so this is a stale sentence and not a stale contract.
 
 **The board-gated M.2 SIM quirk rows now SHIP — `CERALIVE_BOARD_QUIRKS` is how a
 board-manifest fact crosses the subimage boundary** [EXISTS — fixed 2026-08-19]
@@ -4130,7 +4560,7 @@ live writer's payload. Mutation-verified: dropping the call site, dropping the
 **ModemManager 1.24 closure + support companion — first-party app-layer install** [EXISTS]
 
 The device's core cellular stack is the **CeraLive ModemManager 1.24 fork**
-(`~ceralive.2`, modem-stack v1.3.0), not Debian's ModemManager. Nine
+(`~ceralive.3`, modem-stack v1.4.0), not Debian's ModemManager. Nine
 ELF-shipping packages — `modemmanager` + `libmm-glib0` + `libmbim-glib4`/`-proxy`/
 `-utils` + `libqmi-glib5`/`-proxy`/`-utils` + `libqrtr-glib0` — are staged
 first-party (`FIRST_PARTY_APT_PKGS`), exact-pinned in
@@ -4139,8 +4569,8 @@ the app postinst (`app/mkosi.postinst.chroot`). Their local `dpkg -i` **upgrades
 the Debian modem packages the runtime layer pulled transitively via `shared.list`
 (`modemmanager`/`libqmi-utils`/`libmbim-utils` stay there to resolve the full
 dependency tree; external deps — GLib/`libgudev`/`polkit`/systemd — come from
-Debian). `ceralive-modem-support=1.3.0` is the Architecture: all companion from
-modem-stack v1.3.0; it is staged exactly once and classified `RUNTIME_APP_PKGS`,
+Debian). `ceralive-modem-support=1.4.0` is the Architecture: all companion from
+modem-stack v1.4.0; it is staged exactly once and classified `RUNTIME_APP_PKGS`,
 never added to `shared.list`. `modem-stack` is in `REPOS` only for fetch-banner
 provenance; its pin does not select a downloaded package version. The `Package: *`
 origin-990 pin keeps the fork winning on-device.
@@ -4163,10 +4593,18 @@ Debian `shared.list` so an operator can power-cycle a physically wedged USB mode
 on a remote board. No service, timer, udev rule, or modem provider invokes it:
 an automatic port power cut during a live stream would drop that bond link.
 
-**The native FM350 check is vendor-track scoped.** `lib/check-wwan-modules.sh`
-reports `mtk_t7xx` only for a `*-vendor-rk35xx` module tree. Mainline is out of
-scope, and the USB `0e8d:7127` bench personality is not evidence that native PCIe
-`14c3:4d75` support exists. The check remains advisory in every case.
+**The native FM350 check runs on EVERY tree, and it is advisory.**
+`lib/check-wwan-modules.sh` reports `mtk_t7xx` for whatever module tree it is
+pointed at. It used to be scoped to a `*-vendor-rk35xx` release, because the
+interesting subject then was a prebuilt Armbian package's own bytes; that track
+is retired, every kernel is now built from pinned source, and a source-built
+module set is exactly as inspectable — so the scoping is gone and an absence is
+said out loud instead of skipped. `tests/package-contract.bats` §17 carries an
+absence guard against the release-marker branch returning. The USB `0e8d:7127`
+bench personality remains no evidence that native PCIe `14c3:4d75` support
+exists, and this probe stays advisory in every case: it is separate from the
+required/advisory `WWAN_MODULE_TABLE` split above precisely because
+`CONFIG_MTK_T7XX` is declared nowhere, so there is no manifest row to hold it to.
 
 **`orchestrate.sh` `[3/9]` partitioner allowlist MUST cover every
 `FIRST_PARTY_APT_PKGS` entry.** After the fetcher stages all 15 first-party `.deb`s
@@ -5061,33 +5499,32 @@ claim protocol arbitrates simultaneous devices. The selected index lives at
 `/data/ceralive/host_index` through the `/etc/ceralive/host_index` symlink; the
 local service lock is runtime-only state under `/run`.
 
-The unit is ordered `After=`/`Wants=network-online.target` (link actually up), NOT
-merely `After=NetworkManager.service` (daemon up). The mDNS claim (`avahi-set-host-name`
-+ Avahi `RUNNING` + a publishable LAN address) cannot succeed before an interface
-links, and every `Requires=ceralive-hostname.service` consumer (`ceralive.service`,
-`ceralive-tls-firstboot.service`, `ceralive-hawkbit-provision.service`, and
-transitively `nginx.service`/`ceralive-healthcheck.service`) cascades to "Dependency
-failed" if this unit fails on first boot. Confirmed on real Rock 5B+ hardware: the
-unit ran at ~15s and failed by ~15.8s while `eth0`'s link only came up at 18.89s, so
-the claim failed-closed and the entire appliance stack (plus `dnsmasq`, which shares
-the same start batch) never came up (`curl http://<device>/api/health` → connection
-refused). Its sibling network-dependent units (`ceralive-healthcheck`,
-`ceralive-hawkbit-provision`, `rauc-hawkbit-updater`) already wait for
-`network-online.target`; the hostname unit was the lone omission. This is a systemd
-ordering fix, distinct from the mDNS-arbitration logic. Offline guards:
-`tests/systemd-ordering-cycle.test.sh` (static `After=`/`Wants=` contract + a
-dynamic ordering probe proving the unit runs after `network-online.target`) and
-`runtime-services.bats` "hostname:" ordering assertions.
+The unit is ordered `After=`/`Wants=NetworkManager.service` and
+`avahi-daemon.service`, never `network-online.target`. A link is not a boot
+precondition. With no publishable LAN address — including when the setup AP's own
+`192.168.42.1` is the only address — allocation commits the current deterministic
+candidate to the runtime hostname, `/etc/hostname`, `/etc/hosts`, and the persisted
+index, reports it as provisional, and exits successfully without asking Avahi to
+claim it. A later reconciliation run reuses that exact index; only a proven live
+owner advances it. This keeps the unit successful on a normal offline boot while
+preserving deterministic collision arbitration after connectivity appears.
+
+Offline guards: `tests/systemd-ordering-cycle.test.sh` statically and dynamically
+proves the NetworkManager ordering without reintroducing a wait-online edge;
+`runtime-services.bats` proves fresh offline persistence, setup-AP exclusion, later
+same-index reconciliation, and absence of first-party `network-online.target`
+dependencies.
 
 Each service attempt has a 120-second global claim budget, 3-second command
 timeouts, and a 10-second local-lock wait. systemd caps the attempt at 150 seconds
 and retries a failed attempt after 5 seconds. Missing/malformed Avahi state,
-missing tooling, and failure to establish exact ownership all fail closed; there
-is no random suffix or DNS-only availability fallback. The isolated provisioning
-AP address is not a claimable LAN identity; Ethernet IPv4 link-local remains
-eligible. A successful retry non-blockingly requeues identity consumers while
-the hostname unit remains active, so an early no-network failure does not strand
-CeraUI or TLS. On every restart the service reapplies the persisted identity to
+missing tooling, and failure to establish exact ownership while a publishable
+collision domain exists all fail closed; there is no random suffix or DNS-only
+availability fallback. Absence of such a domain is a successful provisional state,
+not an ownership failure. The isolated provisioning AP address is not a claimable
+LAN identity; Ethernet IPv4 link-local remains eligible. A successful reconciliation
+non-blockingly requeues identity consumers while the hostname unit remains active.
+On every restart the service reapplies the persisted identity to
 the runtime hostname, `/etc/hostname`, `/etc/hosts`, and Avahi before CeraUI, TLS
 certificate creation, or hawkBit enrollment may run. A separate 30-second
 reconciliation timer checks strict Avahi and local identity state. Aligned and
@@ -5100,7 +5537,7 @@ namespaces for simultaneous boot and late-LAN-merge races. Operator behavior and
 diagnostics are documented in [`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §4.
 
 **Baked-hostname `AVAHI_ERR_NO_CHANGE` fix + graceful degradation (2026-07-19).**
-After the `network-online.target` ordering fix above, the claim STILL failed on
+After the former `network-online.target` ordering fix, the claim STILL failed on
 real Rock 5B+ hardware — for a different, empirically-confirmed reason. The image
 bakes `/etc/hostname=ceralive` (`configure_networking`), so the running Avahi daemon
 already publishes `ceralive` at boot. `ceralive-set-hostname` (allocate, index 1)
@@ -5210,6 +5647,151 @@ reader's lock early each fail the suite. Both concurrency legs are needed and
 neither is duplicate coverage — the first slows the reader inside verification,
 the second slows the step between verification and the copy, and only the second
 detects an early unlock.
+
+**The builder images' OWN apt traffic is cache-mounted, and TWO things silently
+defeat that — one of them ships in every Debian base image** [EXISTS]
+
+`ci/Dockerfile` and `ci/Dockerfile.kernel` mount BuildKit caches over
+`/var/cache/apt` and `/var/lib/apt/lists`, `sharing=locked` because
+`lib/build-all.sh` builds boards concurrently and two apt transactions writing one
+archive directory is a corrupt partial download rather than a slow one. Measured
+on this repo's own Dockerfiles, cold vs a rebuild whose apt layer genuinely
+re-executed:
+
+| | `ci/Dockerfile` | `ci/Dockerfile.kernel` |
+|---|---|---|
+| cold | `Need to get 129 MB of archives`, 114 package `Get:` | `Need to get 136 MB/184 MB`, 109 package `Get:` |
+| warm | `Need to get 0 B/129 MB`, **0** package `Get:` | `Need to get 0 B/184 MB`, **0** package `Get:` |
+| index | 3 × `Get:` -> 3 × `Hit:` | 3 × `Hit:` both runs |
+
+Both files mount the SAME cache, so they share it: the kernel builder's first cold
+build already found ~48 MB of its closure present from the mkosi builder's run.
+
+- **`docker-clean` is the one that ships in every Debian image.**
+  `/etc/apt/apt.conf.d/docker-clean` carries a `DPkg::Post-Invoke` that
+  `rm -f`s `/var/cache/apt/archives/*.deb` at the end of the very `apt-get` that
+  filled the mount. Left in place the cache is dutifully populated and then
+  emptied on every single build: green, real mount, permanent zero hit rate. It is
+  moved aside for the transaction and moved BACK, so the finished builder image's
+  `/etc/apt` is byte-identical to its base's (verified by `ls` diff against the
+  pinned base) and no `99ceralive-*` drop-in ever ships.
+- **`rm -rf /var/lib/apt/lists/*` must not end an apt layer.** Under a cache mount
+  that path IS the cache, so the cleanup deletes the index it exists to leave
+  behind. The size argument does not survive either — a cache-mounted directory
+  contributes nothing to the image layer at all.
+- **`docker build --no-cache` is NOT how to test this.** It resets cache mounts
+  along with the layer cache, so the second build re-downloads everything and the
+  cache looks broken. That is what the first measurement of this change reported
+  before the confound was isolated. Prune only the layer cache —
+  `docker builder prune -af --filter=type=regular` — and the layer re-executes
+  against a warm mount.
+
+**`RUN --mount` and BuildKit are ONE change, not two.** The legacy `docker build`
+builder does not ignore an unknown `--mount` flag, it refuses to PARSE the
+Dockerfile, so a build site that forgets `DOCKER_BUILDKIT=1` fails inside a file
+the operator did not write. `lib/common.sh::container_image_build` is therefore the
+single entry point both builder-image build sites go through — it sets
+`DOCKER_BUILDKIT=1` for docker, sets nothing for podman (buildah parses
+`RUN --mount` natively), and refuses a runtime below the floor where the cache
+mount TYPE exists (docker 23 / podman 4) rather than letting it fail obscurely. An
+unparsable version string WARNS and proceeds: the build then fails on its own with
+the Dockerfile line in hand, which beats a guess. A bare `"${runtime}" build` is
+absence-guarded.
+
+Guards: `tests/build-cache-overhaul.bats` (27 cases — the mounts and their
+`sharing=locked`, the docker-clean round trip, the absent lists-cleanup, the
+untouched digest pins, both build sites, the no-bare-build rule, and the version
+floor's refusal).
+
+**The pinned kernel source has a persistent bare mirror, and its flock is a
+CORRECTNESS fix rather than a speedup** [EXISTS]
+
+`mkosi/cache/kernel-src.git` (`CERALIVE_REL_KERNEL_SRC_MIRROR_DIR`) is an optional
+bare mirror of `kernel_source.git_url`. When it already carries the pinned commit,
+`fetch_pinned_tree_once` materialises `/src/linux` with a local
+`git clone --shared` off the read-only mount — no network, and no object copy
+either, because the clone records an alternates entry.
+
+- **The flock prevents real corruption.** `lib/build-all.sh` builds boards
+  CONCURRENTLY and every board resolves the same kernel pin, so two unlocked
+  `git fetch`es write one object store — which git does not defend against and
+  which leaves a mirror that fails every later build until someone deletes it by
+  hand. The lock is per MIRROR (the resource), never per board or per caller: a
+  lock name carrying the caller's identity excludes nothing, which is the exact
+  bug `tests/manifest-helpers.bash::serialize` already shipped once.
+- **Fetch under the lock, read afterwards.** The lock is released before the
+  builder container starts and the mirror is mounted `:ro`, so a concurrent fetch
+  can only ADD objects while this build reads. `gc.auto=0` is set at creation for
+  the other half: an automatic gc is the one git operation that would DELETE
+  objects a concurrent reader is using.
+- **`auto` is the default and it never CREATES a mirror.** `mkosi/cache` is on the
+  CI cleanup allowlist, so an ephemeral runner would pay a full mirror clone per
+  job and never read it back — a guaranteed loss. `CERALIVE_KERNEL_SRC_MIRROR=1`
+  opts a long-lived builder in, once; `0` disables it. Any other value is REFUSED,
+  not read as "off".
+- **A mirror that lacks the pin is a MISS, never a different build.** The checkout
+  falls back to the network and the `HEAD == commit` assertion still runs, so the
+  mirror can never change WHAT is built — only where the bytes came from. Only the
+  KERNEL SOURCE gets one; the patch series and the config are small and stay fresh.
+- **Every knob is read AT CALL TIME.** Latching `CERALIVE_KERNEL_SRC_MIRROR` into a
+  file-scope variable at source time gives two spellings that agree only until
+  something sets the env var after sourcing — which made three of this suite's own
+  mode assertions pass vacuously before it was fixed.
+- **The mirror needs `safe.directory`.** It is host-user-owned and git in the
+  container runs as root, so it joins the bench patch clone in the generated
+  `GIT_CONFIG_GLOBAL` gitconfig; git honours `safe.directory` only from system or
+  global config, never from `-c`.
+
+Guard: `tests/kernel-src-mirror.test.sh` (26 assertions). Its technique is what
+makes the result unfakeable: every reuse leg builds the mirror, **destroys the
+upstream**, and then requires the checkout to succeed — with a non-vacuity leg
+requiring the identical checkout WITHOUT the mirror to fail. It also drives a real
+`flock` holder (prepare blocks ~1.7 s behind a 2 s holder), a real concurrent
+prepare pair left `git fsck`-clean, and the timeout/miss/mode paths.
+
+**The mkosi package cache is split by PRIVILEGE DOMAIN, so a container and a
+--native build stop invalidating each other** [EXISTS]
+
+`--cache-directory` resolves to `cache/${BOARD_ID}/${domain}` where the domain is
+`container` or `native` (`lib/paths.sh::ceralive_mkosi_cache_domain`). mkosi 26
+refuses to reuse a cache tree whose owner uid is not its own and, with `--force`,
+DELETES it — so one shared leaf meant alternating the two build modes threw away
+the whole base layer every time, reported as nothing at all because "mkosi rebuilt
+the base" looks identical to "the base was stale".
+
+- **`MKOSI_NATIVE` alone is the discriminator.** docker and podman both run mkosi
+  as uid 0 in a privileged container, so they are one domain, not two.
+- **Both leaves sit under the SAME per-board root** `release.yml` saves and
+  restores, so nothing about the CI cache changes and
+  `ci/check-canonical-paths.sh --cache-dir` still compares against
+  `board_mkosi_cache_dir`. `emit-canonical-paths.sh` gained
+  `board_mkosi_cache_dir_{container,native}` beside it.
+- **`assert_cache_privilege_domain` STAYS.** Separate leaves make a collision
+  unlikely, not impossible: a `sudo ./build --native` owns the native leaf as root
+  and the next unprivileged native build must still be told why, with the command
+  that repairs it.
+
+**An opt-in apt proxy (`CERALIVE_APT_PROXY`), http-only on purpose** [EXISTS]
+
+Unset it is a NO-OP down to the token count — `apt_isolated_opts` emits the same
+12 tokens it always did and the Dockerfiles' `APT_PROXY` build arg expands to
+empty. Set, it adds exactly one `-o Acquire::http::Proxy=` pair and is threaded
+into both builder images as `--build-arg APT_PROXY=`, written and removed inside
+the single RUN that uses it so a host-local URL (which may carry credentials)
+never survives into a shared layer.
+
+- **https is never proxied.** `apt.ceralive.tv` is https WITH AN mTLS CLIENT
+  CERTIFICATE: a cache can do nothing with that payload and the only thing a proxy
+  adds is a handshake that can fail for reasons unrelated to apt. The win is the
+  plain-http Debian/Armbian archive traffic, which is also the bulk of the bytes.
+- **A proxy cannot weaken verification, and no proxy option may try.** Every family
+  verifies AFTER acquisition — `gpgv` over `InRelease`, then the SHA-256 that
+  signed plaintext declares, or a committed pin's hash — so proxied bytes are
+  checked against exactly the expectations origin bytes would be.
+  `tests/apt-lib.test.sh` asserts the emitted set contains no
+  `AllowInsecureRepositories` / `AllowUnauthenticated` / `Check-Valid-Until=false`.
+- Operator quickstart (apt-cacher-ng, local or LAN): [`README.md`](README.md) →
+  "Builder-Image apt Cache, Kernel-Source Mirror and the Optional apt Proxy".
 
 **First-boot WiFi provisioning portal** [PARTIAL]
 
@@ -5434,6 +6016,10 @@ not an active safety fallback or instruction to re-open D3.
 - Don't regenerate `tests/manifests/fixtures/vendor-baseline/*.params` to make a test pass — those fixtures ARE the proof that the production path did not move. A diff there means the change moved it
 - Don't add `bsp-provenance.json` to the build-matrix `sha256` determinism comparison — it is gitignored build output by design
 - Don't "simplify" `suppress_unusable_boot_units` to `disable_service`. `/etc/machine-id` ships `uninitialized`, so PID 1 runs `preset-all` on first boot and re-enables anything merely disabled; `systemd-networkd.service`'s `Also=systemd-networkd-wait-online.service` overrides even the preset's own `disable` verdict. Only a mask survives
+- Don't reintroduce a `mount --bind` of `/data/ceralive/machine-id` onto `/etc/machine-id`, and don't accept an id because it is non-empty. That is the mechanism that shipped: `[ -s ]` promotes systemd's literal `uninitialized` first-boot marker to a board identity, and the bind is silently skipped whenever PID 1 already holds a transient machine-id mount — a measured board had a valid id on `/data`, a DIFFERENT one in `/etc`, and twenty journal directories. The id is COMMITTED to the rootfs file, which is the only supply that survives the next boot
+- Don't try to provision the machine-id from an initramfs hook. This image boots with NO initramfs: the selector loads the bare name `/boot/initrd.img`, the kernel package installs only `/boot/initrd.img-<REL>`, and that load is optional by design. Materialising `/boot/initrd.img` to make a hook possible is a boot-contract change with bricking risk, not a diagnosability change
+- Don't make the journal-directory cleanup periodic, unstamped, or unbounded, and don't widen its candidate shape beyond 32-hex DIRECTORIES. It is a one-time migration for the churn that is now fixed; an ongoing collector would make machine-id churn survivable instead of visible, and a looser match turns it into a general-purpose deleter pointed at `/var/log`
+- Don't size the journal against the rootfs. `/var/log` is the `/data/log` bind, so the budget is spent out of the same partition as the OTA download dir, the cert store and the CeraUI config — which is why `SystemKeepFree` matters as much as `SystemMaxUse`
 - Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot — NetworkManager spawns its own dnsmasq CHILD PROCESS for `ipv4.method shared`; the standalone unit only ever fights `systemd-resolved` for port 53. Don't drop `dnsmasq` from `shared.list` either: that child needs the binary
 - Don't widen the boot-unit masks to `NetworkManager`, `systemd-resolved`, `systemd-udevd` or `chrony.service`. The `.link` interface-naming files are consumed by udev's built-in `net_setup_link`, not by the networkd daemon, and `chrony-wait` is the boot GATE — `chronyd` itself must keep running
 - Don't "improve" the fan curve by writing `thermal_zone*/mode`, `cooling_device*/cur_state` or the hwmon `pwm1` node, and don't add a userspace polling loop to `ceralive-fan-curve`. Disabling a zone also disables its 115 °C `critical` trip; driving `cur_state` means owning the fan forever, including across suspend and shutdown. The kernel `step_wise` governor is board-proven correct — the only thing that was ever wrong for THAT unit is the threshold it acts on. (`ceralive-fan-kickstart` is the one sanctioned exception, and only to the `cur_state`/resident-loop half: it is a separate unit that writes `cur_state` exactly twice per 0 → nonzero edge and always hands the governor's own state back. `mode`, `pwm1` and trip points remain out of bounds for both.)

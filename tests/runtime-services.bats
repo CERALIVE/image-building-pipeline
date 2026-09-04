@@ -261,14 +261,14 @@ load manifest-helpers
   grep -Fq 'OnUnitActiveSec=30s' "$POSTINST_LIB"
   grep -Fq 'Unit=ceralive-hostname-reconcile.service' "$POSTINST_LIB"
   grep -Fq 'RuntimeDirectory=ceralive-hostname' "$POSTINST_LIB"
-  # ceralive-hostname.service MUST wait for network-online.target (link up), not
-  # just NetworkManager.service (daemon up) — else the mDNS claim runs before eth0
-  # links and every Requires= consumer cascades to "Dependency failed" on first boot
-  # (real Rock 5B+ regression). After=/Wants= both carry network-online.target.
-  grep -Fq 'After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service network-online.target avahi-daemon.service' "$POSTINST_LIB"
-  grep -Fq 'Wants=NetworkManager.service network-online.target avahi-daemon.service' "$POSTINST_LIB"
-  [[ "$hostname_unit" == *'After='*'network-online.target'*'avahi-daemon.service'* ]]
-  [[ "$hostname_unit" == *'Wants=NetworkManager.service network-online.target avahi-daemon.service'* ]]
+  # Startup must wait for the network manager daemon, never for a usable uplink.
+  # The hostname allocator owns offline deferral; a structural wait-online gate
+  # would turn normal no-uplink boot into a failed system state.
+  grep -Fq 'After=systemd-machine-id-commit.service ceralive-migrate-data.service NetworkManager.service avahi-daemon.service' "$POSTINST_LIB"
+  grep -Fq 'Wants=NetworkManager.service avahi-daemon.service' "$POSTINST_LIB"
+  [[ "$hostname_unit" == *'After='*'NetworkManager.service'*'avahi-daemon.service'* ]]
+  [[ "$hostname_unit" == *'Wants=NetworkManager.service avahi-daemon.service'* ]]
+  [[ "$hostname_unit" != *'network-online.target'* ]]
   # Graceful degradation: appliance consumers Wants= (not Requires=) the hostname
   # claim, so a failed claim boots on the baked default instead of cascading
   # DEPEND failures across ceralive.service/nginx/tls/hawkbit. Only the reconcile
@@ -279,11 +279,23 @@ load manifest-helpers
   grep -Fq 'Requires=ceralive-hostname.service' "$POSTINST_LIB"
   grep -Fq 'x509 -in "$cert" -noout -checkhost "$FQDN"' "$PIPELINE_DIR/mkosi/runtime/ceralive-tls-firstboot.sh"
   run ! grep -Fq 'HOSTNAME_STAMP=' "$PIPELINE_DIR/mkosi/runtime/ceralive-tls-firstboot.sh"
-  grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service network-online.target' \
+  grep -Fq 'After=ceralive-migrate-data.service ceralive-hostname.service NetworkManager.service' \
     "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
-  grep -Fq 'Wants=network-online.target ceralive-hostname.service' \
+  grep -Fq 'Wants=NetworkManager.service ceralive-hostname.service' \
     "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
   run ! grep -Fq 'Requires=ceralive-hostname.service' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+
+  grep -Fq 'After=ceralive.service NetworkManager.service' \
+    "$PIPELINE_DIR/mkosi/runtime/ceralive-healthcheck.service"
+  grep -Fq 'Wants=NetworkManager.service' \
+    "$PIPELINE_DIR/mkosi/runtime/ceralive-healthcheck.service"
+  grep -Fq 'After=ceralive-hawkbit-provision.service NetworkManager.service' \
+    "$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/rauc-hawkbit-updater.service"
+  grep -Fq 'Wants=NetworkManager.service ceralive-hawkbit-provision.service' \
+    "$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/rauc-hawkbit-updater.service"
+  run ! grep -R -F 'network-online.target' \
+    "$PIPELINE_DIR/mkosi/runtime/ceralive-healthcheck.service" \
+    "$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/rauc-hawkbit-updater.service"
 }
 
 @test "hostname: aligned reconciliation is a no-op" {
@@ -486,9 +498,36 @@ SH
   local root="$BATS_TEST_TMPDIR/setup-ap-only"
   make_hostname_fixture "$root"
   HOSTNAME_LOCAL_IP=192.168.42.1 HOSTNAME_LOCAL_IFACE=wlan0 run run_hostname_script "$root"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"index=<missing>"* ]]
-  [[ "$output" == *"hostname-file=<missing>"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"persisted provisional identity ceralive.local"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"published=<missing>"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+  printf '%s\n' "$output"
+}
+
+@test "hostname: fresh offline allocation persists a reusable provisional identity" {
+  local root="$BATS_TEST_TMPDIR/fresh-offline"
+  make_hostname_fixture "$root"
+
+  HOSTNAME_IP_SCENARIO=offline run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"persisted provisional identity ceralive.local"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"system-hostname=ceralive"* ]]
+  [[ "$output" == *"hostname-file=ceralive"* ]]
+  [[ "$output" == *"hosts=ceralive"* ]]
+  [[ "$output" == *"published=<missing>"* ]]
+
+  printf 'factory-seed\n' >"$root/avahi/published"
+  : >"$root/calls"
+  run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reconciled and established ceralive.local"* ]]
+  [[ "$output" == *"index=1"* ]]
+  [[ "$output" == *"published=ceralive"* ]]
+  [[ "$output" != *"avahi-set-host-name ceralive2"* ]]
   printf '%s\n' "$output"
 }
 
@@ -524,6 +563,121 @@ SH
   [[ "$output" == *"hostname-file=<missing>"* ]]
   [[ "$output" == *"published=<missing>"* ]]
   printf '%s\n' "$output"
+}
+
+@test "hawkbit enrollment: an offline token endpoint exits successfully and leaves a retry pending" {
+  local canonical="$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/provision-token.sh"
+  local inline="$BATS_TEST_TMPDIR/ceralive-hawkbit-provision-inline"
+  awk '
+    /cat >\/usr\/local\/sbin\/ceralive-hawkbit-provision <<'\''HBPROV'\''/ { f=1; next }
+    f && /^HBPROV$/ { exit }
+    f { print }
+  ' "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" >"$inline"
+  chmod +x "$inline"
+
+  local script label root
+  for script in "$canonical" "$inline"; do
+    label="$(basename "$script")"
+    root="$BATS_TEST_TMPDIR/hawkbit-$label"
+    mkdir -p "$root/bin" "$root/data" "$root/etc"
+    cat >"$root/enroll.conf" <<'EOF'
+HAWKBIT_SERVER=hawkbit.example:8080
+HAWKBIT_PROVISION_URL=https://provision.example/token
+HAWKBIT_TARGET_NAME=test-device
+EOF
+    cat >"$root/template.conf" <<'EOF'
+[client]
+hawkbit_server=@HAWKBIT_SERVER@
+@HAWKBIT_AUTH_LINE@
+target_name=@HAWKBIT_TARGET_NAME@
+ssl=@HAWKBIT_SSL@
+ssl_verify=@HAWKBIT_SSL_VERIFY@
+tenant_id=@HAWKBIT_TENANT@
+[device]
+compatible=@COMPATIBLE@
+EOF
+    printf '[system]\ncompatible=ceralive-test\n' >"$root/system.conf"
+    cat >"$root/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "${HAWKBIT_CURL_MODE:-offline}" in
+  online) printf 'device-token\n' ;;
+  empty) exit 0 ;;
+  *) exit 7 ;;
+esac
+EOF
+    chmod +x "$root/bin/curl"
+
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=offline \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"retry pending"* ]]
+    [ -f "$root/data/provision.pending" ]
+    [ "$(stat -c '%a' "$root/data/provision.pending")" = 600 ]
+    [ ! -e "$root/data/token" ]
+    [ ! -e "$root/data/effective.conf" ]
+
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/data/provision.pending" ]
+    [ "$(cat "$root/data/token")" = device-token ]
+    grep -Fq 'auth_token                = device-token' "$root/data/effective.conf"
+    grep -Fq 'compatible=ceralive-test' "$root/data/effective.conf"
+
+    rm -f "$root/data/token" "$root/data/effective.conf"
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=empty \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"returned an empty token"* ]]
+    [ ! -e "$root/data/provision.pending" ]
+
+    local no_curl="$root/no-curl"
+    mkdir -p "$no_curl"
+    run env PATH="$no_curl" \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      "$BASH" "$script"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"curl missing"* ]]
+    [ ! -e "$root/data/provision.pending" ]
+    [ ! -e "$root/data/token" ]
+    [ ! -e "$root/data/effective.conf" ]
+  done
+}
+
+@test "hawkbit enrollment: generated retry timer re-runs only pending enrollment" {
+  local postinst="$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  grep -Fq 'CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pending' \
+    "$PIPELINE_DIR/mkosi/runtime/hawkbit-updater/provision-token.sh"
+  grep -Fq 'CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pending' "$postinst"
+  grep -Fq 'ceralive-hawkbit-provision-retry.service' "$postinst"
+  grep -Fq 'ConditionPathExists=/data/ceralive/hawkbit-provision.pending' "$postinst"
+  grep -Fq 'Unit=ceralive-hawkbit-provision-retry.service' "$postinst"
+  grep -Fq 'OnUnitInactiveSec=30s' "$postinst"
+  grep -Fq 'ExecStartPost=-/usr/bin/systemctl --no-block start rauc-hawkbit-updater.service' "$postinst"
+  grep -Fq 'enable_service ceralive-hawkbit-provision-retry.timer' "$postinst"
 }
 
 # ===========================================================================
@@ -717,8 +871,8 @@ SH
 }
 
 # ===========================================================================
-# 18e. Boot dead-weight masks — six stock units that cost a shipped Rock 5B+
-#      ~2 minutes of EVERY boot and left it permanently `degraded`.
+# 18e. Boot dead-weight masks — seven stock units that made an offline appliance
+#      wait up to ~2 minutes and left it permanently `degraded`.
 #      systemd-networkd{,.socket,-wait-online} can never be satisfied (NM owns
 #      every link; networkctl reports all `unmanaged`), yet wait-online burned a
 #      flat 120s inside network-online.target and held ceralive.service — the
@@ -726,13 +880,15 @@ SH
 #      systemd-machine-id-commit fails forever because OUR OWN migrate-data bind
 #      mount satisfies its ConditionPathIsMountPoint while the bind source is real
 #      ext4. Standalone dnsmasq.service always loses port 53 to systemd-resolved.
+#      NetworkManager-wait-online additionally makes a normal no-uplink boot fail
+#      after 60s even though this appliance is expected to establish links later.
 #      chrony-wait blocks multi-user.target ~21s for NTP convergence nothing
 #      orders itself after. These drive the SHIPPED function against a temp mask
 #      dir (CERALIVE_MASK_UNIT_DIR) with a faithful `systemctl mask` stub — no
 #      image boot, no hardware, UNIT scope.
 # ===========================================================================
 
-@test "boot unit masks: all six unusable/blocking units are masked to /dev/null" {
+@test "boot unit masks: all seven unusable/blocking units are masked to /dev/null" {
   local bin="$BATS_TEST_TMPDIR/mask-bin"
   local calls="$BATS_TEST_TMPDIR/mask-calls"
   local dir="$BATS_TEST_TMPDIR/mask-units"
@@ -746,11 +902,113 @@ SH
   local unit
   for unit in systemd-networkd.service systemd-networkd.socket \
               systemd-networkd-wait-online.service \
+              NetworkManager-wait-online.service \
               systemd-machine-id-commit.service dnsmasq.service \
               chrony-wait.service; do
     [ -L "$dir/$unit" ]
     [ "$(readlink "$dir/$unit")" = "/dev/null" ]
   done
+}
+
+@test "boot unit masks: NetworkManager.service Also= cannot resurrect its masked wait-online unit" {
+  # Debian's emitted NetworkManager.service enables its wait-online sibling through
+  # [Install] Also=. NetworkManager itself must remain enabled, so the waiter's own
+  # mask is the resurrection barrier. Use the emitted unit when a real rootfs is
+  # present; otherwise keep the vendor premise explicit in a hermetic fixture.
+  local emitted=""
+  local candidate
+  for candidate in \
+    "$PIPELINE_DIR/mkosi/build/app/usr/lib/systemd/system/NetworkManager.service" \
+    "$PIPELINE_DIR/mkosi/build/runtime/usr/lib/systemd/system/NetworkManager.service"; do
+    if [ -f "$candidate" ]; then
+      emitted="$candidate"
+      break
+    fi
+  done
+  if [ -z "$emitted" ]; then
+    emitted="$BATS_TEST_TMPDIR/NetworkManager.service"
+    cat >"$emitted" <<'EOF'
+[Install]
+WantedBy=multi-user.target
+Also=NetworkManager-wait-online.service
+EOF
+  fi
+  grep -Fq 'Also=NetworkManager-wait-online.service' "$emitted"
+
+  local bin="$BATS_TEST_TMPDIR/mask-nm-also-bin"
+  local calls="$BATS_TEST_TMPDIR/mask-nm-also-calls"
+  local dir="$BATS_TEST_TMPDIR/mask-nm-also-units"
+  rm -rf "$bin" "$calls" "$dir"
+  mask_stub_bin "$bin"
+
+  run env PATH="$bin:$PATH" MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
+    bash -c "source '$POSTINST_ENTRY'; suppress_unusable_boot_units"
+  [ "$status" -eq 0 ]
+  [ -L "$dir/NetworkManager-wait-online.service" ]
+  [ "$(readlink "$dir/NetworkManager-wait-online.service")" = /dev/null ]
+
+  run env MASK_CALLS="$calls" CERALIVE_MASK_UNIT_DIR="$dir" \
+    MASK_ENABLE_ALSO_UNIT=NetworkManager-wait-online.service \
+    "$bin/systemctl" enable NetworkManager.service
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to enable masked Also= unit"* ]]
+  [ "$(readlink "$dir/NetworkManager-wait-online.service")" = /dev/null ]
+}
+
+@test "boot unit masks: emitted rootfs has no hard dependency on NetworkManager wait-online" {
+  local modeled="$BATS_TEST_TMPDIR/emitted-rootfs"
+  local units="$modeled/etc/systemd/system"
+  mkdir -p "$units"
+  grep -R -h -E '^(After|Wants|Requires|Requisite|BindsTo)=' \
+    "$PIPELINE_DIR/mkosi/runtime" \
+    "$PIPELINE_DIR/mkosi/customize" \
+    "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
+    >"$units/first-party-emitted-directives.service"
+  [ -s "$units/first-party-emitted-directives.service" ]
+
+  scan_wait_online_hard_deps() {
+    local root="$1"
+    local dir rc
+    local -a dirs=()
+    for dir in "$root/etc/systemd/system" "$root/usr/lib/systemd/system" \
+               "$root/lib/systemd/system"; do
+      [ ! -d "$dir" ] || dirs+=("$dir")
+    done
+    [ "${#dirs[@]}" -gt 0 ] || return 2
+    grep -R -E \
+      '^(Requires|Requisite|BindsTo)=.*NetworkManager-wait-online\.service([[:space:]]|$)' \
+      "${dirs[@]}" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 1 ]
+  }
+
+  run scan_wait_online_hard_deps "$modeled"
+  [ "$status" -eq 0 ]
+  run grep -R -E \
+    '^(After|Wants|Requires|Requisite|BindsTo)=.*network-online\.target([[:space:]]|$)' \
+    "$PIPELINE_DIR/mkosi/runtime" "$PIPELINE_DIR/mkosi/customize" \
+    "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  [ "$status" -eq 1 ]
+
+  local emitted
+  local -a emitted_roots=()
+  if [ -n "${CERALIVE_ROOTFS_DIR:-}" ]; then
+    emitted_roots+=("$CERALIVE_ROOTFS_DIR")
+  else
+    emitted_roots+=("$PIPELINE_DIR/mkosi/build/app" "$PIPELINE_DIR/mkosi/build/runtime")
+  fi
+  for emitted in "${emitted_roots[@]}"; do
+    if [ -d "$emitted/etc/systemd/system" ] || [ -d "$emitted/usr/lib/systemd/system" ] \
+      || [ -d "$emitted/lib/systemd/system" ]; then
+      run scan_wait_online_hard_deps "$emitted"
+      [ "$status" -eq 0 ]
+    fi
+  done
+
+  printf 'Requires=NetworkManager-wait-online.service\n' \
+    >>"$units/first-party-emitted-directives.service"
+  run scan_wait_online_hard_deps "$modeled"
+  [ "$status" -ne 0 ]
 }
 
 @test "boot unit masks: masking systemd-networkd.service itself closes the Also= resurrection path" {
@@ -785,7 +1043,7 @@ SH
   [ "$status" -eq 0 ]
 
   local unit
-  for unit in systemd-networkd systemd-networkd-wait-online \
+  for unit in systemd-networkd systemd-networkd-wait-online NetworkManager-wait-online \
               systemd-machine-id-commit dnsmasq chrony-wait; do
     run grep -E "disable_service ${unit}" "$POSTINST_LIB"
     [ "$status" -ne 0 ]
@@ -813,8 +1071,9 @@ SH
   [ ! -e "$dir/systemd-networkd.service" ]
 }
 
-@test "boot unit masks: NEVER widen to NetworkManager, resolved, udevd or chronyd" {
-  # NM is the only network stack; systemd-resolved owns :53 and the resolv.conf stub;
+@test "boot unit masks: NEVER widen to NetworkManager.service, resolved, udevd or chronyd" {
+  # NetworkManager is the only network stack; only its wait-online sibling is
+  # structurally unusable. systemd-resolved owns :53 and the resolv.conf stub;
   # systemd-udevd's BUILT-IN net_setup_link (not networkd) consumes the .link files
   # that produce eth0/wlan0 for SRTLA's bonding globs; chrony.service is the NTP
   # daemon itself — only its boot-blocking chrony-wait sibling may be masked.
@@ -829,7 +1088,7 @@ SH
   [ "$status" -eq 0 ]
 
   run grep -cE '^systemctl mask ' "$calls"
-  [ "$output" -eq 6 ]
+  [ "$output" -eq 7 ]
 
   run grep -E '^systemctl mask (NetworkManager|systemd-resolved|systemd-udevd|systemd-networkd-generator|chrony)\.(service|socket)$' "$calls"
   [ "$status" -ne 0 ]
@@ -2065,6 +2324,61 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
+@test "pipewire: the fragment is 0.5 SPA-JSON config, never a 0.4-era Lua rules block" {
+  # WirePlumber 0.4 configured itself in Lua (alsa_monitor.rules / bluez_monitor.rules
+  # in .lua.d fragments); 0.5 replaced that with SPA-JSON `wireplumber.profiles` +
+  # `<component>.rules` sections in .conf drop-ins. A 0.4 spelling that survived a
+  # migration is read by NOTHING and fails SILENTLY — the dead-writer shape.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-headless-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  local legacy
+  for legacy in alsa_monitor bluez_monitor v4l2_monitor 'lua_modules' '\.lua'; do
+    run grep -E "$legacy" "$body"
+    [ "$status" -ne 0 ]
+  done
+
+  # The 0.5 section names, read back off the shipped trixie WirePlumber 0.5.8:
+  # scripts/monitors/alsa.lua:17 and scripts/monitors/bluez.lua:18 both call
+  # Conf.get_section_as_json on exactly these.
+  grep -Eq '^monitor\.alsa\.rules[[:space:]]*=[[:space:]]*\[' "$body"
+  grep -Eq '^monitor\.bluez\.rules[[:space:]]*=[[:space:]]*\[' "$body"
+  grep -Eq '^wireplumber\.profiles[[:space:]]*=' "$body"
+}
+
+@test "pipewire: a CAPTURE node is never suspended, and a sink still is" {
+  # suspend-node.lua reads `session.suspend-timeout-seconds` off the NODE and
+  # defaults to 5 s; the value 0 is an early `return` before any timer is armed,
+  # i.e. "never" — not "immediately", and not a disabled feature.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-suspend-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  # Exactly one opt-out per monitor: ALSA (every capture card, incl. the SoC
+  # HDMI-RX) and BlueZ (a Bluetooth microphone is an ordinary node here).
+  run grep -cE '^[[:space:]]*session\.suspend-timeout-seconds[[:space:]]*=[[:space:]]*0$' "$body"
+  [ "$output" -eq 2 ]
+
+  # It must be the timeout key, never the suspend FEATURE — disabling
+  # hooks.node.suspend would also pin every sink open, which this deliberately does
+  # not do.
+  run grep -E 'hooks\.node\.suspend' "$body"
+  [ "$status" -ne 0 ]
+
+  # Capture-scoped on both monitors. `media.class` is set by the monitor BEFORE
+  # rules are applied, so it is the semantic match; the node-name globs are the
+  # second, independent match object.
+  grep -Fq 'media.class = "Audio/Source"' "$body"
+  grep -Fq 'node.name = "~alsa_input.*"' "$body"
+  grep -Fq 'node.name = "~bluez_input.*"' "$body"
+
+  # SINKS ARE LEFT ALONE — the board's analog output has no CeraLive consumer, and
+  # pinning it open would turn a capture fix into "never suspend anything".
+  run grep -E 'Audio/Sink|alsa_output|bluez_output' "$body"
+  [ "$status" -ne 0 ]
+}
+
 @test "pipewire: the packaged USER units are masked, so exactly ONE PipeWire exists" {
   local root="$BATS_TEST_TMPDIR/pw-mask"
   pw_install_env "$root"
@@ -2118,6 +2432,48 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"pipewire artifact not found"* ]]
   [ ! -e "$root/etc/systemd/system/pipewire.service" ]
+}
+
+@test "pipewire: the WirePlumber fragment LANDS in the rootfs, at the one path and only once" {
+  # The fragment is inert unless it is at the path WirePlumber reads, and a SECOND
+  # CeraLive fragment would split the headless profile from the rules that depend on
+  # it across two files merged by filename order. Both halves are checked: the
+  # shipped installer's own destination, then a real emitted rootfs when one exists.
+  local rel="etc/wireplumber/wireplumber.conf.d/10-ceralive-headless.conf"
+
+  # 1. The production default in the shipped installer — the fixture redirects it,
+  #    so without this the redirected install could pass against any path at all.
+  grep -Fq 'WIREPLUMBER_CONF_DIR:-/etc/wireplumber/wireplumber.conf.d' \
+    "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+  grep -Fq '10-ceralive-headless.conf' \
+    "$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
+
+  # 2. The installer really writes it, and its content is the shipped artifact.
+  local root="$BATS_TEST_TMPDIR/pw-rootfs"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+  [ -f "$root/$rel" ]
+  cmp -s "$root/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  run bash -c "ls -1 '$root/etc/wireplumber/wireplumber.conf.d' | wc -l"
+  [ "$output" -eq 1 ]
+
+  # 3. A REAL emitted rootfs when one is present — assert-when-present, exactly like
+  #    the wait-online emitted scan. This is the leg that proves the image ships it.
+  local emitted
+  local -a emitted_roots=()
+  if [ -n "${CERALIVE_ROOTFS_DIR:-}" ]; then
+    emitted_roots+=("$CERALIVE_ROOTFS_DIR")
+  else
+    emitted_roots+=("$PIPELINE_DIR/mkosi/build/app" "$PIPELINE_DIR/mkosi/build/runtime")
+  fi
+  for emitted in "${emitted_roots[@]}"; do
+    [ -d "$emitted/etc/wireplumber/wireplumber.conf.d" ] || continue
+    [ -f "$emitted/$rel" ]
+    cmp -s "$emitted/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+    run bash -c "ls -1 '$emitted/etc/wireplumber/wireplumber.conf.d' | wc -l"
+    [ "$output" -eq 1 ]
+  done
 }
 
 @test "pipewire: the installer is wired into configure_services and registered in the drift gate" {

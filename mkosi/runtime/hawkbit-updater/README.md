@@ -26,14 +26,14 @@ new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
 |------|--------------|------|
 | `config.conf` | `/etc/rauc-hawkbit-updater/config.conf` | Baked-in **template** (`@PLACEHOLDERS@`, **no token**). |
 | `rauc-hawkbit-updater.service` | `/etc/systemd/system/rauc-hawkbit-updater.service.d/10-ceralive.conf` | Drop-in over the `.deb` unit: `-c` the `/data` config + gate on it. |
-| `provision-token.sh` | `/usr/local/sbin/ceralive-hawkbit-provision` | First-boot per-device enrollment + config render. |
+| `provision-token.sh` | `/usr/local/sbin/ceralive-hawkbit-provision` | Per-device enrollment + offline-safe pending retry state + config render. |
 | `README.md` | — | This document. |
 
 **Dual-track** (the project convention, tasks 26/29/30): these canonical files are
 mirrored by inline twins written by
 `mkosi.images/runtime/mkosi.postinst.chroot::setup_hawkbit_updater()`, which is the
-layer that actually runs in the build. The postinst also installs three CeraLive
-systemd units described below. Keep the twins in sync.
+layer that actually runs in the build. The postinst also installs five CeraLive
+systemd unit files described below. Keep the twins in sync.
 
 ## The backport `.deb` (NOT in trixie apt)
 
@@ -84,7 +84,7 @@ postinst.
 
 > **Graceful build:** if the backport `.deb` is not staged (parity / dry / offline
 > builds), the postinst still deploys the config template, the provision script and
-> the three CeraLive units, logs a clear warning, and skips only the binary install
+> the five CeraLive unit files, logs a clear warning, and skips only the binary install
 > — mirroring the postinst's "no secret in env → install placeholder" pattern. The
 > units stay inert (no binary, and the updater is gated on the un-rendered config),
 > so a package-less image is safe.
@@ -118,8 +118,17 @@ never in git):
    - renders the **effective** config to `/data/ceralive/hawkbit-updater/config.conf`
      (`0600`) — placeholders filled, the auth line set to `auth_token` **or**
      `gateway_token`, and `compatible` read from `/etc/rauc/system.conf` (board-aware,
-     so the Runtime layer stays arch-neutral and the rollout target filter
-     `attribute.compatible==ceralive-<family>` matches — task 40).
+      so the Runtime layer stays arch-neutral and the rollout target filter
+      `attribute.compatible==ceralive-<family>` matches — task 40).
+
+   If a configured `HAWKBIT_PROVISION_URL` cannot be reached while the device is
+   offline, the script does **not** fail the boot. It writes
+   `/data/ceralive/hawkbit-provision.pending` mode `0600`, exits successfully, and
+   leaves the effective updater config absent. The retry timer runs the same
+   canonical script every 30 seconds while that marker exists. A successful fetch
+   renders the config, removes the marker, and starts the updater. Missing tools,
+   malformed enrollment, or an empty endpoint response still fail honestly; only
+   endpoint unavailability is deferred.
 
 3. `rauc-hawkbit-updater.service` runs with `-c /data/ceralive/hawkbit-updater/config.conf`
    and is **gated** on that file existing — so an un-enrolled device never polls
@@ -179,6 +188,7 @@ slot re-proves health after reboot.
 | Unit | Type | Role |
 |------|------|------|
 | `ceralive-hawkbit-provision.service` | oneshot | First-boot enrollment + config render (gated on `/data/ceralive/hawkbit.conf`). |
+| `ceralive-hawkbit-provision-retry.timer` + `.service` | timer/oneshot | Retry only while the mode-0600 pending marker exists; ordered after NetworkManager, never network-online. |
 | `rauc-hawkbit-updater.service` (+ drop-in) | daemon | Polls DDI; gated on the rendered `/data` config; `-c` it. |
 | `ceralive-hawkbit-marker-clear.path` + `.service` | path/oneshot | Clear `.slot-marked-good` when a bundle is downloaded (A/B correctness). |
 
@@ -187,6 +197,9 @@ slot re-proves health after reboot.
 - `shellcheck` clean on `provision-token.sh` (and the postinst twin).
 - `config.conf` parses as a GLib key-file; the rendered effective config has no
   leftover `@PLACEHOLDER@` and carries the token only on `/data` (`0600`).
+- `runtime-services.bats` drives both the canonical script and the live inline
+  twin through an offline fetch followed by a successful retry, and verifies the
+  pending marker/timer contract.
 
 ## Related tasks
 

@@ -41,6 +41,7 @@ tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiri
 tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
 tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
 tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, blob hash, negative conformance fixtures
+tests/journal-diagnosability.bats	bats	unit	default-bats	journald retention budget, validated persistent machine-id, one-time journal-dir migration
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity
 tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selection, committed blob-identity map, readback verification and unmapped-tuple refusal
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
@@ -48,6 +49,7 @@ tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overla
 tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
 tests/kernel-build-resilience.bats	bats	unit	default-bats	pinned-fetch retry, pin-mismatch never retried, memory-derived make -j
+tests/build-cache-overhaul.bats	bats	unit	default-bats	BuildKit apt cache mounts, kernel-source mirror wiring, mkosi cache privilege domains and the opt-in apt proxy
 tests/uplink-sharing-carrier.bats	bats	unit	default-bats	sharing packages, qdisc matrix, ip_forward posture, ceralive-share.service REQ-USB-020..026 and the firewall-backend pin
 tests/dtb-prune-contract.bats	bats	unit	default-bats	board-only DTB trim in both locations on both kernel paths
 tests/x86-raucb-bundle.bats	bats	integration	default-bats	signed x86 RAUC bundle assembly
@@ -98,8 +100,11 @@ tests/local-raw-compression.test.sh	shell	integration	default-shell	local Stage-
 tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
 tests/target-release-derivation.test.sh	shell	unit	default-shell	every suite/VERSION_ID fact derives from manifests/target-release.env: the mapping itself, the ci/check-suite-literals.sh gate plus its own self-test, a per-consumer static contract, a flipped-mapping leg proving the derivation is not a constant, and the ARMBIAN_SUITE separation
 tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
+tests/boot-budget.test.sh	shell	unit	default-shell	matched three-cold-boot median/range budget gate plus auxiliary x86 transcript timing parser and slowed-fixture rejection
+tests/build-parallelism.test.sh	shell	unit	default-shell	cgroup v2 leaf-to-root job derivation: ancestor-limited CPU, per-ancestor saturating memory headroom, the build-jobs clamp and its FORCE escape, and the board/fetch concurrency knobs
 tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged package modes, mounts and local-repository consumption
 tests/mkosi-cache-privilege-domain.test.sh	shell	unit	default-shell	the mkosi cache stays in one privilege domain; Docker Desktop is refused
+tests/kernel-src-mirror.test.sh	shell	unit	default-shell	persistent kernel-source mirror: reuse with the upstream destroyed, its non-vacuity leg, the per-mirror flock and the auto/0/1 modes
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs

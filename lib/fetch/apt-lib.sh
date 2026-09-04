@@ -43,6 +43,32 @@ apt_isolated_opts() {
     -o "Dir::Cache=${apt_state}/cache" \
     -o "Dir::Cache::Archives=${apt_state}/cache/archives" \
     -o "APT::Architecture=${arch}"
+  apt_proxy_opts
+}
+
+# ---------------------------------------------------------------------------
+# apt_proxy_opts — emit `-o Acquire::http::Proxy=<url>` when, and only when,
+# CERALIVE_APT_PROXY is set. Unset emits NOTHING, so an unconfigured fetch passes
+# byte-identically the option set it passed before this existed.
+#
+# A CACHING PROXY CANNOT WEAKEN VERIFICATION, and that is worth stating because
+# it is the obvious objection. Every family here verifies AFTER acquisition —
+# gpgv over InRelease, then the SHA-256 that signed plaintext declares, or a
+# committed pin's hash. Bytes from a proxy are checked against exactly the same
+# expectations as bytes from the origin; a proxy that served something else
+# fails the build instead of poisoning it.
+#
+# HTTP ONLY, deliberately, and this is the part not to "fix" later:
+#   * apt.ceralive.tv is https WITH AN mTLS CLIENT CERTIFICATE. Routing it at a
+#     proxy buys nothing (the payload is opaque to any cache) and adds a way for
+#     the client-certificate handshake to fail that has nothing to do with apt.
+#   * apt-cacher-ng's actual win is the plain-http Debian/Armbian archive traffic,
+#     which is also the bulk of the bytes.
+# ---------------------------------------------------------------------------
+apt_proxy_opts() {
+  local proxy="${CERALIVE_APT_PROXY:-}"
+  [[ -n "${proxy}" ]] || return 0
+  printf '%s\n' -o "Acquire::http::Proxy=${proxy}"
 }
 
 # ---------------------------------------------------------------------------

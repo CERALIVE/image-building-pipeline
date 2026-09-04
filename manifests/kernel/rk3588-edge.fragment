@@ -368,8 +368,11 @@ CONFIG_BRCMFMAC_PCIE=y
 CONFIG_BRCMFMAC_USB=y
 
 # Qualcomm ath11k (Wi-Fi 6) and ath12k (Wi-Fi 7). WLAN_VENDOR_ATH is the
-# `bool ... default y` `if` gate. MHI_BUS/QRTR/QRTR_MHI are `select`ed by both
-# leaves — confirmed =m in the built config — so they get no entry.
+# `bool ... default y` `if` gate. QRTR/QRTR_MHI are `select`ed by both leaves —
+# confirmed =m in the built config — so they get no entry. MHI_BUS is selected
+# here too, but it is NO LONGER select-only and so DOES get one: the modem
+# block's MHI_WWAN_CTRL/MHI_WWAN_MBIM `depends on` it, which selects nothing.
+# It is declared there, with the modem leaves that need it.
 CONFIG_WLAN_VENDOR_ATH=y
 # ATH11K is the family tristate; ATH11K_PCI is its SEPARATE PCI bus leaf, so the
 # pair is required and neither alone is a usable adapter. Both already =m.
@@ -453,6 +456,27 @@ CONFIG_BT_HCIUART_INTEL=y
 # Selects BT_QCA for UART-attached Qualcomm parts; qca/ firmware ships. Already y.
 CONFIG_BT_HCIUART_QCA=y
 
+# --- Bluetooth: the two BR/EDR PROTOCOL modules, which are NOT transports ---
+# Everything above gets the CONTROLLER on the bus. Neither line below does any
+# of that; they are the L2CAP-layer protocols BlueZ opens SOCKETS on, and both
+# measured `is not set` in the resolved v7.2 config, so a paired device could be
+# reached only through the profiles that need neither.
+#
+# Both are prompted tristates under `depends on BT_BREDR` — a `bool ... default
+# y` that resolves =y here — so declaring them is a real change rather than an
+# assertion, and BT_BREDR is pinned in required-symbols.list as the gate that
+# would take both leaves with it if it ever stopped resolving.
+#
+# RFCOMM is the serial-port emulation HFP/HSP run their control channel over,
+# which is the path a Bluetooth MICROPHONE is reached by — PipeWire's BlueZ
+# backend opens AF_BLUETOOTH/BTPROTO_RFCOMM directly, so this is the kernel half
+# of the BT-mic capture the image already ships the userspace for.
+CONFIG_BT_RFCOMM=m
+# BNEP is Ethernet emulation over Bluetooth and is what bluetoothd's PAN
+# (NAP/PANU) profile registration requires; it `select`s CRC32, which therefore
+# needs no entry of its own.
+CONFIG_BT_BNEP=m
+
 # WWAN: the six modules lib/check-wwan-modules.sh binds the modem stack to.
 # Keep this list in lockstep with that checker — a drop here is exactly the
 # regression it exists to catch.
@@ -465,6 +489,53 @@ CONFIG_USB_NET_CDC_MBIM=m
 CONFIG_USB_NET_QMI_WWAN=m
 CONFIG_USB_WDM=m
 CONFIG_USB_SERIAL_OPTION=m
+
+# --- Modem: control ports and the PCIe (MHI) transport ----------------------
+# THE BLOCK ABOVE IS THE CHECKER'S LIST; THIS ONE IS NOT. `check-wwan-modules.sh`
+# binds a narrower set than the fragment now declares, so do not read the two
+# blocks as one — reconciling the checker with the fragment is its own change.
+#
+# Every symbol below was read against the pinned v7.2 tree and its resolved
+# config before being written here, and each line says which of the two it is:
+# a real CHANGE (the symbol did not resolve) or an ASSERTION (it already did,
+# and is pinned so it cannot stop). That distinction is the whole point — an
+# assertion is exactly what CONFIG_TYPEC_FUSB302 and CONFIG_RTW89 needed and
+# did not have.
+
+# CHANGE — measured `# CONFIG_USB_SERIAL_QUALCOMM is not set`. qcserial is the
+# control-port driver for Qualcomm-based USB modems that do NOT present the
+# `option` interface layout, so without it ModemManager sees the data interface
+# and no AT/QMI port to drive it with.
+CONFIG_USB_SERIAL_QUALCOMM=m
+# ASSERTION, and a DELIBERATE EXCEPTION to this file's promptless rule — read
+# before copying the pattern. USB_SERIAL_WWAN is a bare `tristate` with NO
+# prompt (drivers/usb/serial/Kconfig), so kconfig cannot set it and only a
+# `select` can. It is normally the shape that belongs in required-symbols.list
+# alone. It is declared here anyway because BOTH of its selectors —
+# USB_SERIAL_OPTION above and USB_SERIAL_QUALCOMM directly above — are declared
+# in THIS file, so its value is not luck: it is determined by two lines a
+# reviewer can see, and it resolves =m today. Do not add a promptless symbol
+# here whose selector is NOT declared in this fragment.
+CONFIG_USB_SERIAL_WWAN=m
+# ASSERTION — already =m from defconfig. CDC-ACM is the /dev/ttyACM* AT control
+# port a large share of USB modems expose, and it is `depends on TTY` (=y), so
+# nothing in the Rockchip-only platform trim can reach it. Pinned because it is
+# supplied by defconfig, which is precisely the claim that stops being true in
+# silence.
+CONFIG_USB_ACM=m
+# ASSERTION — already =m, but for a reason that is about to stop being the only
+# one: MHI_BUS is `select`ed by the ath11k/ath12k leaves above, and the two
+# MHI_WWAN leaves below `depends on` it rather than selecting it. So a future
+# edit dropping both ath leaves would take the modem transport with them. It is
+# a prompted tristate, so declaring it is legitimate.
+CONFIG_MHI_BUS=m
+# ASSERTION ×2 — both already =m. These are the PCIe/M.2 modem path, not the USB
+# one: MHI_WWAN_CTRL exposes the AT/MBIM/QMI/DIAG control channels and
+# MHI_WWAN_MBIM the data netdev. Both sit inside `if WWAN` on a `tristate "WWAN
+# Driver Core"` that resolves =m, which is why =m (never =y) is the only value
+# they can take here; WWAN itself is pinned in required-symbols.list as the gate.
+CONFIG_MHI_WWAN_CTRL=m
+CONFIG_MHI_WWAN_MBIM=m
 
 # --- Networking: LAN-ingest ingress firewall (nftables) --------------------
 # ceralive-ingest-firewall.service loads /etc/ceralive/ingest-firewall.nft with

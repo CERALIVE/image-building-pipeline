@@ -75,9 +75,25 @@ CONFIG_PHY_ROCKCHIP_USBDP=y
 CONFIG_PHY_ROCKCHIP_NANENG_COMBO_PHY=m
 CONFIG_USB_SERIAL
 CONFIG_USB_SERIAL_OPTION=m
+# qcserial — the control-port driver for Qualcomm-based USB modems that do NOT
+# present the `option` interface layout. USB_SERIAL_WWAN is the shared helper
+# both it and USB_SERIAL_OPTION `select`; it is a PROMPTLESS tristate that
+# kconfig cannot set at all, which makes this manifest the honest place to
+# assert it — a select-only symbol is exactly what this file is for.
+CONFIG_USB_SERIAL_QUALCOMM=m
+CONFIG_USB_SERIAL_WWAN=m
+# CDC-ACM — the /dev/ttyACM* AT control port a large share of USB modems expose.
+# Supplied by defconfig today, which is why it is pinned: "defconfig happens to
+# provide it" is the claim that stops being true in silence.
+CONFIG_USB_ACM=m
 CONFIG_USB_NET_DRIVERS
 CONFIG_USB_USBNET=m
 CONFIG_USB_NET_CDCETHER=m
+# Host-side RNDIS, for USB modems whose only mode is RNDIS. It reached the
+# fragment in PR #144 and was never mirrored here, so the fragment line was its
+# ONLY assertion — precisely the asymmetry this file exists to close, since a
+# later edit deleting that line would have removed the last thing checking it.
+CONFIG_USB_NET_RNDIS_HOST=m
 CONFIG_USB_NET_CDC_NCM=m
 CONFIG_USB_NET_CDC_MBIM=m
 CONFIG_USB_NET_QMI_WWAN=m
@@ -87,6 +103,26 @@ CONFIG_TYPEC
 CONFIG_TYPEC_TCPM=y
 CONFIG_TYPEC_FUSB302=m
 CONFIG_USB_ROLE_SWITCH=y
+
+# --- Cellular modem: the PCIe (MHI) transport -------------------------------
+# The USB block above is one of the two ways a modem attaches; this is the other.
+# An M.2 / PCIe Qualcomm modem speaks MHI, not USB, so none of the cdc/option
+# symbols above can reach it and its absence looks exactly like "no modem".
+#
+# WWAN is the `tristate "WWAN Driver Core"` MENUCONFIG PARENT — both leaves below
+# sit inside its `if WWAN` block, so losing it discards both in silence, which is
+# this file's founding failure mode. It is bare rather than pinned to a value
+# because its own m-vs-y is defconfig's business; the leaves are pinned exactly,
+# and they can only be =m while the parent is =m.
+#
+# MHI_BUS is the transport itself. It is `select`ed by the ath11k/ath12k leaves,
+# but the two MHI_WWAN leaves `depends on` it and select nothing, so dropping
+# both Wi-Fi leaves would take the modem path with them — that is why it is
+# pinned here and declared in the fragment rather than left select-only.
+CONFIG_WWAN
+CONFIG_MHI_BUS=m
+CONFIG_MHI_WWAN_CTRL=m
+CONFIG_MHI_WWAN_MBIM=m
 
 # --- Wi-Fi and Bluetooth ----------------------------------------------------
 # WLAN is the parent; WLAN_VENDOR_REALTEK and WLAN_VENDOR_BROADCOM are the
@@ -184,6 +220,25 @@ CONFIG_BT_HCIUART_QCA=y
 # SERIAL_DEV_BUS at =y specifically (never merely "set") is the load-bearing part.
 CONFIG_SERIAL_DEV_BUS=y
 CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
+
+# --- Bluetooth: the BR/EDR PROTOCOL modules ---------------------------------
+# Everything above is TRANSPORT — it gets a controller onto the bus. These two
+# are the protocols BlueZ opens sockets on once it is there, and both measured
+# `is not set`, so they are a real capability gain rather than an assertion.
+#
+# BT_BREDR is their `depends on` parent: a `bool ... default y` under BT. It is
+# pinned at =y specifically, not left bare, because it is a BOOL — there is no
+# m-vs-y for defconfig to have an opinion about, and n is the one value that
+# would silently take both leaves with it.
+#
+# RFCOMM carries the HFP/HSP control channel, which is how a Bluetooth
+# MICROPHONE is reached: PipeWire's BlueZ backend opens BTPROTO_RFCOMM sockets
+# directly, so this is the kernel half of a capability whose userspace the image
+# already ships. BNEP is Ethernet-over-Bluetooth, required by bluetoothd's PAN
+# profile registration.
+CONFIG_BT_BREDR=y
+CONFIG_BT_RFCOMM=m
+CONFIG_BT_BNEP=m
 
 # --- DRM / kiosk display ----------------------------------------------------
 # The kiosk stack (cage + Chromium, or the Cog add-on) renders onto a Rockchip

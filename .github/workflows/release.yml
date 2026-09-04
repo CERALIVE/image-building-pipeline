@@ -20,9 +20,22 @@ concurrency:
 jobs:
   candidate:
     runs-on: [self-hosted, ceralive-image-builder]
+    # A self-hosted runner has no ambient job budget, so a build that wedges
+    # (a hung git fetch, a stalled docker pull) would hold the only image
+    # builder until someone notices. The bound is deliberately far above a
+    # real run — a cold candidate builds two builder images and the kernel
+    # from source — so it can only ever catch a hang, never a slow build.
+    timeout-minutes: 240
     env:
       DOCKER_CONTEXT: default
       CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
+      # The ONE board declaration: every step below derives its build target,
+      # artifact paths and cache scope from this. CERALIVE_MKOSI_CACHE_DIR
+      # cannot interpolate it — GitHub does not expose the `env` context to
+      # other entries of the same `env` map — so it repeats the board and the
+      # "Assert canonical generated paths" step proves the two agree against
+      # lib/paths.sh rather than trusting them to.
+      CERALIVE_RELEASE_BOARD: rock-5b-plus
       CERALIVE_MKOSI_CACHE_DIR: mkosi/cache/rock-5b-plus
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
       # The ONLY declaration of the generated paths this persistent runner may
@@ -69,7 +82,7 @@ jobs:
           DECLARED_CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
         run: |
           ./ci/check-canonical-paths.sh \
-            --board rock-5b-plus \
+            --board "${CERALIVE_RELEASE_BOARD}" \
             --cache-dir "${DECLARED_CACHE_DIR}" \
             --cleanup "${DECLARED_CLEANUP_PATHS}"
       - name: Resolve release cache keys
@@ -86,7 +99,7 @@ jobs:
             ${{ hashFiles('ci/Dockerfile', 'ci/requirements-ci.txt', '.mkosi-version') }}
         run: |
           set -euo pipefail
-          board=rock-5b-plus
+          board="${CERALIVE_RELEASE_BOARD}"
           repository="${REPOSITORY//\//-}"
           # The TARGET SUITE is part of the mkosi cache identity, and it has to be
           # in the RESTORE PREFIX, not just the key. mkosi names its own base layer
@@ -157,6 +170,11 @@ jobs:
           printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
       - name: Build exact production candidate
         env:
+          # Also what makes the BSP content drift-guard STRICT rather than
+          # advisory (lib/fetch/verify.sh::bsp_drift_strict): a fleet artifact
+          # may not silently absorb an unreviewed same-version kernel-BSP
+          # re-spin, which is the one substitution the exact version pin cannot
+          # catch. BSP_DRIFT_STRICT=0 is the deliberate opt-out.
           CERALIVE_BUILD_MODE: production
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
           RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
@@ -171,7 +189,7 @@ jobs:
         # report success.
         run: |
           set -euo pipefail
-          ./build rock-5b-plus 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
+          ./build "${CERALIVE_RELEASE_BOARD}" 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
       # A production candidate must be clean, not merely successful: the build
       # exits 0 while emitting deprecation notices, ignored repart keys and
       # chroot service-start failures. This is the only place a REAL production
@@ -179,7 +197,7 @@ jobs:
       - name: Enforce the build-log census
         run: |
           set -euo pipefail
-          python3 ./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md
+          python3 ./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md
           ./ci/check-build-log.sh --self-test
           ./ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"
       - name: Verify uncompressed flash image
@@ -187,39 +205,39 @@ jobs:
           RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
         run: |
           set -euo pipefail
-          mapfile -t raws < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
-          mapfile -t bundles < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
+          mapfile -t raws < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
           raw_bytes="$(stat -c %s "${raws[0]}")"
           tests/preflash-verify.sh \
             --image "${raws[0]}" \
             --bundle "${bundles[0]}" \
-            --board rock-5b-plus \
+            --board "${CERALIVE_RELEASE_BOARD}" \
             --keyring "${RAUC_KEYRING_FILE}" \
             --target-size-bytes "${raw_bytes}"
       - name: Build candidate-bound signed rollback probe
         env:
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
-          COMPATIBLE_STRING: ceralive-rock-5b-plus
+          COMPATIBLE_STRING: ceralive-${{ env.CERALIVE_RELEASE_BOARD }}
         run: |
           set -euo pipefail
-          mapfile -t roots < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.rootfs.tar')
+          mapfile -t roots < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.rootfs.tar')
           (( ${#roots[@]} == 1 ))
           mkdir -p "${RUNNER_TEMP}/rollback-root/etc/systemd/system" "${RUNNER_TEMP}/rollback-bundle"
           tar -xf "${roots[0]}" -C "${RUNNER_TEMP}/rollback-root"
           ln -sf /dev/null "${RUNNER_TEMP}/rollback-root/etc/systemd/system/ceralive.service"
           BUNDLE_VERSION="${GITHUB_SHA}-rollback-probe" \
             BUNDLE_OUT_DIR="${RUNNER_TEMP}/rollback-bundle" BUNDLE_TS=bad \
-            ./lib/build-bundle.sh rock-5b-plus "${RUNNER_TEMP}/rollback-root"
+            ./lib/build-bundle.sh "${CERALIVE_RELEASE_BOARD}" "${RUNNER_TEMP}/rollback-root"
       - name: Fetch hash-pinned RK3588 Maskrom loader
         run: ./ci/fetch-rk3588-loader.sh "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"
       - id: meta
         name: Seal candidate metadata
         run: |
           set -euo pipefail
-          mapfile -t raws < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
-          mapfile -t bundles < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
-          mapfile -t dev_debs < <(find mkosi/.staging/rock-5b-plus/debs -maxdepth 1 -type f -name 'srtla-send-rs_*.deb')
+          mapfile -t raws < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
+          mapfile -t dev_debs < <(find "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/debs" -maxdepth 1 -type f -name 'srtla-send-rs_*.deb')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 ))
           mkdir -p candidate/dev-debs
           ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
@@ -235,7 +253,7 @@ jobs:
           ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
           printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
           {
-            echo "artifact_name=rock-5b-plus-${GITHUB_SHA}"
+            echo "artifact_name=${CERALIVE_RELEASE_BOARD}-${GITHUB_SHA}"
             echo "raw_filename=${raw_name}"
             echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
             echo "raw_compressed_sha256=$(cut -d' ' -f1 "candidate/${raw_name}.sha256")"
@@ -263,7 +281,7 @@ jobs:
           runner_gid="$(id -g)"
           # Single source of truth: compare against what the build resolves,
           # never against a second copy of the literal.
-          expected_cache_dir="$(./ci/emit-canonical-paths.sh --board rock-5b-plus --get board_mkosi_cache_dir)"
+          expected_cache_dir="$(./ci/emit-canonical-paths.sh --board "${CERALIVE_RELEASE_BOARD}" --get board_mkosi_cache_dir)"
           [[ "${cache_dir}" == "${expected_cache_dir}" ]]
           [[ "${max_bytes}" =~ ^[0-9]+$ ]]
           docker run --rm \

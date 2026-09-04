@@ -11,7 +11,7 @@
 #   2. GATE start on that effective config existing — so an un-enrolled device
 #      (no /data/ceralive/hawkbit.conf yet → nothing rendered) never starts the
 #      updater and never polls hawkBit with an empty token.
-#   3. Order it after the data mount, the network, and the enrollment oneshot.
+#   3. Order it after the data mount, NetworkManager, and the enrollment oneshot.
 #
 # The updater only INSTALLS bundles (RAUC D-Bus InstallBundle); it never calls
 # `rauc mark-good`. Slot confirmation/rollback stays with ceralive-healthcheck.service
@@ -22,8 +22,8 @@
 # onto /data by ceralive-hawkbit-provision.service. Fail-closed: no config → inert.
 ConditionPathExists=/data/ceralive/hawkbit-updater/config.conf
 RequiresMountsFor=/data
-After=ceralive-hawkbit-provision.service network-online.target
-Wants=network-online.target ceralive-hawkbit-provision.service
+After=ceralive-hawkbit-provision.service NetworkManager.service
+Wants=NetworkManager.service ceralive-hawkbit-provision.service
 
 [Service]
 # Reset the .deb unit's ExecStart, then run against the /data effective config.

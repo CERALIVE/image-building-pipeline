@@ -64,6 +64,8 @@ source "${HERE}/shared/yaml-lib.sh"
 source "${HERE}/shared/deb-lib.sh"
 # shellcheck source=lib/shared/versions-lib.sh
 source "${HERE}/shared/versions-lib.sh"
+# shellcheck source=lib/shared/resource-lib.sh
+source "${HERE}/shared/resource-lib.sh"
 # shellcheck source=lib/fetch-debs-auth.sh
 source "${HERE}/fetch-debs-auth.sh"
 
@@ -130,9 +132,24 @@ APT_CERALIVE_URL="${APT_CERALIVE_URL:-https://apt.ceralive.tv}"
   || log_warn "APT_CERALIVE_URL is not https:// (${APT_CERALIVE_URL}) — proceeding; transport is unverified (intended only for local/dev overrides)"
 
 # FETCH_JOBS — bounded fetch concurrency. FETCH_JOBS=1 is the strict serial
-# baseline; sanitised to a positive integer, default 4.
-FETCH_JOBS="${FETCH_JOBS:-4}"
-[[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS=4
+# baseline; sanitised to a positive integer, and the env override still wins.
+#
+# The default was a flat 4. It is now min(cpus, 8): a verified fetch is IO-bound
+# and spends most of its wall time waiting on the archive, so it wants more width
+# than a compile does — but an unbounded fan-out just gets rate-limited, hence the
+# hard cap of 8. `cpus` is the CGROUP-AWARE count (lib/shared/resource-lib.sh), so
+# a container pinned to 2 CPUs no longer opens 8 concurrent verified downloads it
+# cannot service; on an unconstrained host it is plain nproc.
+default_fetch_jobs() {
+  local cpus
+  resource_effective_cpus
+  cpus="${RESOURCE_EFFECTIVE_CPUS}"
+  [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=1
+  (( cpus > 8 )) && cpus=8
+  printf '%s' "${cpus}"
+}
+FETCH_JOBS="${FETCH_JOBS:-$(default_fetch_jobs)}"
+[[ "${FETCH_JOBS}" =~ ^[1-9][0-9]*$ ]] || FETCH_JOBS="$(default_fetch_jobs)"
 
 # The release registry is repo-local so standalone image builds do not depend on
 # the surrounding development workspace.
@@ -164,11 +181,11 @@ assert_repos_integrity
 
 # The device first-party set: the CeraLive runtime .debs (libsrt/cerastream/
 # CeraUI/srtla-send) + the capture plugin, PLUS the ModemManager 1.24 closure and
-# its Architecture: all modem support companion from modem-stack v1.3.0. The
+# its Architecture: all modem support companion from modem-stack v1.4.0. The
 # closure is self-contained: modemmanager depends on
 # libmm-glib0, and the libmbim/libqmi/libqrtr packages provide the QMI/MBIM
-# transport its glib libs bind to — all nine carry the v1.3.0 release's
-# per-source `~ceralive.2` rebuild counter.
+# transport its glib libs bind to — all nine carry the v1.4.0 release's
+# per-source `~ceralive.3` rebuild counter.
 # The companion is separately versioned at bare SemVer. They are staged like every
 # other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).

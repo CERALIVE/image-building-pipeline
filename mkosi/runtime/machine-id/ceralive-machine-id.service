@@ -1,0 +1,42 @@
+[Unit]
+Description=CeraLive persistent machine-id (validate on /data, commit to /etc)
+Documentation=file:///usr/local/sbin/ceralive-machine-id
+# ORDERING IS THE POINT OF THIS UNIT, so read it before changing any line.
+#
+# The identity lives on /data (the only partition an A/B slot swap preserves),
+# and the running copy lives in the rootfs slot's /etc/machine-id. Reconciling
+# them needs /data mounted, which is strictly later than PID 1 — so this unit
+# can never be the FIRST reader of the id on a freshly written slot. What it can
+# do, and does, is make every subsequent boot of that slot read the right value
+# straight out of /etc/machine-id, with no mount and no ordering to get wrong.
+#
+# After=var-log.mount (expressed as RequiresMountsFor=/var/log) is deliberate and
+# is NOT merely "after /data". journald caches the machine-id at startup and this
+# image bind-mounts /var/log from /data/log, so a journald restart issued BEFORE
+# that bind would reopen the journal on the rootfs slot. Running after the bind
+# is what puts the reopened journal on /data under the corrected id.
+#
+# DefaultDependencies=no + Before=local-fs.target keeps it in the same early
+# local-fs phase as ceralive-migrate-data.service: a normal service would
+# inherit After=basic.target, and basic.target is after local-fs.target, which
+# closes exactly the ordering cycle that unit's own header documents.
+DefaultDependencies=no
+Conflicts=shutdown.target
+RequiresMountsFor=/data /var/log
+After=ceralive-migrate-data.service
+Before=local-fs.target shutdown.target ceralive-hostname.service ceralive.service
+# No /data, no identity to reconcile — and a board booting without its data
+# partition must not be blocked on one.
+ConditionPathIsMountPoint=/data
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-machine-id
+# The script exits 0 on every failure path, so a non-zero status here means the
+# script itself is broken rather than the board. Bound it anyway: the optional
+# journald restart is the one step that talks to another unit.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=local-fs.target
