@@ -127,10 +127,11 @@ parent's `.ko`, not into `vmlinux`.
 
 ## 2. Track (ii) — the mainline/edge 7.1 fragment
 
-`manifests/kernel/rk3588-edge.fragment` is the **opt-in `--variant edge` track
-only**. It is NOT the production path (root `AGENTS.md` D3/D9): the shipped image
-installs the prebuilt vendor kernel, and **this commit changes no kernel on that
-path.**
+`manifests/kernel/rk3588-edge.fragment` is the fragment for the mainline/edge
+track. **As of the mainline cutover that track IS the production path**
+(`rk3588.yaml` `default_variant: edge`); the wording below was written while the
+prebuilt vendor kernel still shipped, and "this commit changes no kernel on that
+path" describes the commit that added these rows, not today's build.
 
 Before this commit the fragment declared exactly two symbols from the sharing
 closure — `CONFIG_NF_TABLES=y` and `CONFIG_NF_TABLES_INET=y`, both added for the
@@ -170,8 +171,8 @@ weakened):
 invites a stale line the day upstream re-parents it — the same select/leaf rule
 the fragment already applies to `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-**Why `=y` and not `=m` on this track.** The vendor kernel ships these as
-modules and that is fine for a userspace-driven consumer (§3). The fragment
+**Why `=y` and not `=m` on this track.** The retired vendor kernel shipped these
+as modules and that was fine for a userspace-driven consumer (§3). The fragment
 declares `=y` for the same reason it already declares `CONFIG_NF_TABLES=y` at
 line 417: on a track this repo *builds*, there is no reason to reintroduce a load
 -ordering question it can simply not have, and `verify-kernel-config.sh` matches
@@ -180,8 +181,8 @@ future `select` that forces `=y`. Every dependency of every row above is declare
 `=y` in the same fragment, so kconfig can honour all of them.
 
 **This is a DIFFERENCE between the tracks, not a claim that either is wrong.**
-The production board runs modules; the edge board would run builtins. Both
-satisfy the closure.
+The retired vendor track ran modules; the production board now runs the builtins
+declared here. Both satisfy the closure.
 
 ---
 
@@ -214,6 +215,8 @@ nothing to request.
 - It makes **no runtime claim**. Every row is package/text inspection. Actual
   `modprobe`, actual `tc qdisc add … cake`, and actual `tc filter … fw classid`
   classification remain the labelled hardware gate in `docs/DEFERRED.md`.
-- It changes **no kernel on the production path**. Decision D3 is untouched: the
-  shipped image still installs the prebuilt `linux-image-vendor-rk35xx` 26.5.1,
-  byte-unchanged.
+- It changed **no kernel on the production path as it stood when these rows were
+  added** — the shipped image then installed the prebuilt
+  `linux-image-vendor-rk35xx` 26.5.1, byte-unchanged. That vendor track is now
+  retired and the source-built mainline/edge kernel is production, so this
+  scope note is history rather than a live claim.
