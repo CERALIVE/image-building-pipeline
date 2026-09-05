@@ -149,24 +149,42 @@ jobs:
             CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 
   edid-conformance:
-    # The anti-corruption gate for the CeraLive HDMI-RX product EDID.
+    # The anti-corruption gate for the CeraLive HDMI-RX product EDIDs.
     #
-    # `mkosi/runtime/edid/ceralive-hdmirx.edid` is a COMMITTED 256-byte binary
-    # that ceralive-hdmirx-edid.service writes into the HDMI receiver at boot. A
-    # binary blob is the one kind of source file a reviewer cannot read, so it is
-    # also the one that can rot silently: a wrong byte does not fail to build, it
-    # ships a board that negotiates 4K30 (or nothing) and blames the cable.
+    # `mkosi/runtime/edid/ceralive-hdmirx-<profile>.edid` are COMMITTED 256-byte
+    # binaries that ceralive-hdmirx-edid.service writes into the HDMI receiver at
+    # boot. A binary blob is the one kind of source file a reviewer cannot read,
+    # so it is also the one that can rot silently: a wrong byte does not fail to
+    # build, it ships a board that negotiates 4K30 (or nothing) and blames the
+    # cable.
     #
-    # Three legs close that:
-    #   (i)   DRIFT — regenerate from tools/gen-hdmirx-edid.py and byte-compare
-    #         against the committed blob. A blob edited by hand, or a generator
+    # TWO PROFILES, AND THE CONTENT GATE IS DIFFERENT FOR EACH. `full` is the
+    # permissive 4K60 advertisement; `robust-4k60` is an HDMI 1.4-class one that
+    # deliberately OMITS the HDMI Forum VSDB and offers 4K60 only as 4:2:0.
+    # Several properties that are required in one are forbidden in the other, so
+    # each profile carries both a "must contain" and a "must NOT contain" table
+    # below. A single shared table would pass a blob that shipped the wrong
+    # posture.
+    #
+    # Five legs close this:
+    #   (i)   PROFILE SET — the generator's own list is the authority, and the
+    #         committed blobs are exactly that set. A profile added to the
+    #         generator with no committed blob (or the reverse) is RED here.
+    #   (ii)  DRIFT — regenerate from tools/gen-hdmirx-edid.py and byte-compare
+    #         against each committed blob. A blob edited by hand, or a generator
     #         changed without regenerating, is RED. This is what makes the
-    #         generator the source of truth and the blob merely its output.
-    #   (ii)  CONFORMITY — `edid-decode --check` must exit 0, with a non-vacuous
+    #         generator the source of truth and the blobs merely its output.
+    #   (iii) DECODED TEXT — the committed .txt beside each blob is what a human
+    #         actually reviews, so it must describe THAT blob. Its embedded hex
+    #         dump is compared against the blob's real bytes, which is a
+    #         version-independent way to catch a stale decode (diffing the whole
+    #         file would go red on any edid-decode version bump instead).
+    #   (iv)  CONFORMITY — `edid-decode --check` must exit 0, with a non-vacuous
     #         tamper leg proving the checker actually bites on a flipped byte.
-    #   (iii) CONTENT — the specific capabilities 4K60 capture depends on are
-    #         asserted by name. `--check` only proves the bytes are a VALID EDID;
-    #         a perfectly valid 4K30 EDID would sail through it.
+    #   (v)   CONTENT — the specific capabilities each profile depends on are
+    #         asserted by name, in both directions. `--check` only proves the
+    #         bytes are a VALID EDID; a perfectly valid blob carrying the wrong
+    #         profile's blocks would sail through it.
     #
     # The generator is stdlib-only on purpose, so this job installs no Python
     # packages and never resolves ci/requirements-ci.txt.
@@ -174,7 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: shellcheck
     env:
-      EDID_BLOB: mkosi/runtime/edid/ceralive-hdmirx.edid
+      EDID_DIR: mkosi/runtime/edid
     steps:
       - uses: actions/checkout@v7
 
@@ -188,109 +206,271 @@ jobs:
           sudo apt-get install -y --no-install-recommends edid-decode
           edid-decode --version || true
 
+      - name: Profile set — the generator's list IS the committed blob set
+        run: |
+          set -euo pipefail
+          # The generator is the authority. A profile it declares with no
+          # committed blob would ship a selectable option that programs nothing;
+          # a committed blob it does not declare is an unreachable file that no
+          # drift gate below would ever regenerate.
+          python3 tools/gen-hdmirx-edid.py --list-profiles | sort >/tmp/declared
+          for blob in "${EDID_DIR}"/ceralive-hdmirx-*.edid; do
+            name="${blob##*/ceralive-hdmirx-}"
+            printf '%s\n' "${name%.edid}"
+          done | sort >/tmp/committed
+          if ! diff -u /tmp/declared /tmp/committed; then
+            echo "::error::declared profiles and committed blobs disagree"
+            exit 1
+          fi
+          echo "profiles: $(tr '\n' ' ' </tmp/declared)"
+
       - name: Generator is deterministic (two runs are byte-identical)
         run: |
           set -euo pipefail
           # Determinism is the property the drift gate below RESTS on. A
           # generator that embedded a build date would make every CI run red
           # for a reason that looks like blob corruption, so prove it first.
-          python3 tools/gen-hdmirx-edid.py -o "${RUNNER_TEMP}/edid-run1.bin"
-          python3 tools/gen-hdmirx-edid.py -o "${RUNNER_TEMP}/edid-run2.bin"
-          cmp "${RUNNER_TEMP}/edid-run1.bin" "${RUNNER_TEMP}/edid-run2.bin"
-          size=$(stat -c%s "${RUNNER_TEMP}/edid-run1.bin")
-          [ "${size}" -eq 256 ] || {
-            echo "::error::generated EDID is ${size} bytes, expected 256 (2 blocks)"
-            exit 1
-          }
-          echo "generator is deterministic; 256 bytes (base + CTA-861 extension)"
+          while read -r profile; do
+            python3 tools/gen-hdmirx-edid.py -p "${profile}" -o "${RUNNER_TEMP}/${profile}-run1.bin"
+            python3 tools/gen-hdmirx-edid.py -p "${profile}" -o "${RUNNER_TEMP}/${profile}-run2.bin"
+            cmp "${RUNNER_TEMP}/${profile}-run1.bin" "${RUNNER_TEMP}/${profile}-run2.bin"
+            size=$(stat -c%s "${RUNNER_TEMP}/${profile}-run1.bin")
+            [ "${size}" -eq 256 ] || {
+              echo "::error::generated ${profile} EDID is ${size} bytes, expected 256 (2 blocks)"
+              exit 1
+            }
+            printf '  ok   %s is deterministic; 256 bytes (base + CTA-861 extension)\n' "${profile}"
+          done </tmp/declared
 
-      - name: Drift gate — committed blob equals generator output
+      - name: Drift gate — every committed blob equals its generator output
         run: |
           set -euo pipefail
-          if ! cmp "${RUNNER_TEMP}/edid-run1.bin" "${EDID_BLOB}"; then
-            echo "::error::${EDID_BLOB} does not match tools/gen-hdmirx-edid.py output"
-            echo "regenerate with: python3 tools/gen-hdmirx-edid.py -o ${EDID_BLOB}"
-            cmp -l "${RUNNER_TEMP}/edid-run1.bin" "${EDID_BLOB}" | head -40
+          while read -r profile; do
+            blob="${EDID_DIR}/ceralive-hdmirx-${profile}.edid"
+            if ! cmp "${RUNNER_TEMP}/${profile}-run1.bin" "${blob}"; then
+              echo "::error::${blob} does not match tools/gen-hdmirx-edid.py --profile ${profile} output"
+              echo "regenerate with: python3 tools/gen-hdmirx-edid.py -p ${profile} -o ${blob}"
+              cmp -l "${RUNNER_TEMP}/${profile}-run1.bin" "${blob}" | head -40
+              exit 1
+            fi
+            sha256sum "${blob}"
+          done </tmp/declared
+
+      - name: The two profiles are DIFFERENT blobs
+        run: |
+          set -euo pipefail
+          # Two identical blobs would make the runtime profile choice a no-op
+          # that still logs a profile name — the worst kind of working feature.
+          if cmp -s "${EDID_DIR}/ceralive-hdmirx-full.edid" \
+                    "${EDID_DIR}/ceralive-hdmirx-robust-4k60.edid"; then
+            echo "::error::the full and robust-4k60 blobs are byte-identical"
             exit 1
           fi
-          sha256sum "${EDID_BLOB}"
+          echo "the two profiles differ, as they must"
 
-      - name: edid-decode --check passes on the committed blob
+      - name: Committed decoded text describes the committed blob
         run: |
           set -euo pipefail
-          edid-decode --check "${EDID_BLOB}" | tee edid-decoded.txt
-          grep -q '^EDID conformity: PASS' edid-decoded.txt
+          # The .txt is the human-review artifact. A stale one is worse than a
+          # missing one: it reads as reviewed. Its leading hex dump is compared
+          # to the real bytes, which is independent of the edid-decode version
+          # that happens to be installed on this runner.
+          while read -r profile; do
+            blob="${EDID_DIR}/ceralive-hdmirx-${profile}.edid"
+            python3 - "${blob}" "${blob}.txt" <<'PY'
+          import re, sys
+          blob, text = sys.argv[1], sys.argv[2]
+          raw = open(blob, "rb").read()
+          body = open(text).read().split("----------------")[0]
+          hexed = bytes.fromhex("".join(re.findall(r"^(?:[0-9a-f]{2} ?)+$", body, re.M)))
+          if hexed != raw:
+              sys.exit(f"::error::{text} hex dump does not match {blob} "
+                       f"({len(hexed)} decoded bytes vs {len(raw)})")
+          print(f"  ok   {text} decodes the committed {len(raw)}-byte blob")
+          PY
+            grep -q '^EDID conformity: PASS$' "${blob}.txt" || {
+              echo "::error::${blob}.txt does not record a PASS verdict"
+              exit 1
+            }
+          done </tmp/declared
 
-      - name: Both block checksums are valid
+      - name: edid-decode --check passes on every committed blob
+        run: |
+          set -euo pipefail
+          while read -r profile; do
+            blob="${EDID_DIR}/ceralive-hdmirx-${profile}.edid"
+            edid-decode --check "${blob}" | tee "${RUNNER_TEMP}/${profile}-decoded.txt"
+            grep -q '^EDID conformity: PASS' "${RUNNER_TEMP}/${profile}-decoded.txt"
+          done </tmp/declared
+
+      - name: Both block checksums are valid, in every blob
         run: |
           set -euo pipefail
           # edid-decode prints one "Checksum: 0xNN" per block, and appends
           # "(should be 0xMM)" plus an "Invalid checksum" line when one is wrong.
           # `|| true` on both counts: grep exits 1 on zero matches, which under
           # `set -e` would abort the assignment before it could be reported.
-          count=$(grep -c '^Checksum: 0x' edid-decoded.txt || true)
-          [ "${count}" -eq 2 ] || {
-            echo "::error::expected 2 block checksums, found ${count}"
-            exit 1
-          }
-          bad=$(grep -cE 'Invalid checksum|Checksum: 0x[0-9a-f]+ \(should be' edid-decoded.txt || true)
-          [ "${bad}" -eq 0 ] || {
-            echo "::error::${bad} block checksum(s) invalid"
-            grep -nE 'Invalid checksum|\(should be' edid-decoded.txt
-            exit 1
-          }
-          echo "both block checksums valid"
+          while read -r profile; do
+            decoded="${RUNNER_TEMP}/${profile}-decoded.txt"
+            count=$(grep -c '^Checksum: 0x' "${decoded}" || true)
+            [ "${count}" -eq 2 ] || {
+              echo "::error::${profile}: expected 2 block checksums, found ${count}"
+              exit 1
+            }
+            bad=$(grep -cE 'Invalid checksum|Checksum: 0x[0-9a-f]+ \(should be' "${decoded}" || true)
+            [ "${bad}" -eq 0 ] || {
+              echo "::error::${profile}: ${bad} block checksum(s) invalid"
+              grep -nE 'Invalid checksum|\(should be' "${decoded}"
+              exit 1
+            }
+            printf '  ok   %s: both block checksums valid\n' "${profile}"
+          done </tmp/declared
 
-      - name: Capability assertions — 4K60 + SCDC + audio + branded identity
+      - name: Capability assertions — per profile, in BOTH directions
         run: |
           set -euo pipefail
-          # Each of these is a capability an operator would notice the loss of.
-          # VIC 97/96 and the 600 MHz + SCDC pair are what let a source send
-          # 4K60 at all; the audio trio is what makes embedded HDMI audio
-          # offerable; the identity pair is what stops us advertising somebody
-          # else's product name to every camera we capture from.
+          # Each of these is a capability an operator would notice the loss of,
+          # or a claim whose PRESENCE would defeat the profile's whole purpose.
+          decoded=""
           assert() {
             local label="$1" pattern="$2"
-            if ! grep -qE -- "${pattern}" edid-decoded.txt; then
+            if ! grep -qE -- "${pattern}" "${decoded}"; then
               echo "::error::missing from decoded EDID: ${label} (/${pattern}/)"
               exit 1
             fi
-            printf '  ok   %s\n' "${label}"
+            printf '  ok       %s\n' "${label}"
+          }
+          refute() {
+            local label="$1" pattern="$2"
+            if grep -qE -- "${pattern}" "${decoded}"; then
+              echo "::error::MUST NOT be in decoded EDID: ${label} (/${pattern}/)"
+              grep -nE -- "${pattern}" "${decoded}"
+              exit 1
+            fi
+            printf '  ok       no %s\n' "${label}"
           }
 
-          assert 'manufacturer CRL'          '^ +Manufacturer: CRL$'
-          assert 'product name CeraLive HDMI' "^ +Display Product Name: 'CeraLive HDMI'$"
-          assert 'preferred timing 3840x2160 ~60 Hz' \
-                 '^ +DTD 1: +3840x2160 +(60\.0|59\.9)[0-9]* Hz'
-          assert 'VIC 97 (3840x2160p60)'     '^ +VIC +97: +3840x2160'
-          assert 'VIC 96 (3840x2160p50)'     '^ +VIC +96: +3840x2160'
-          assert 'Maximum TMDS Character Rate: 600' \
-                 '^ +Maximum TMDS Character Rate: 600'
-          assert 'SCDC Present'              '^ +SCDC Present$'
-          assert 'Basic audio support'       '^ +Basic audio support$'
-          assert 'LPCM audio descriptor'     '^ +Linear PCM:$'
-          assert '2-channel LPCM SAD'        '^ +Max channels: 2$'
-          assert 'LPCM sample rates 32/44.1/48 kHz' \
-                 '^ +Supported sample rates \(kHz\): 48 44\.1 32$'
-          assert 'LPCM sample sizes 16/20/24 bit' \
-                 '^ +Supported sample sizes \(bits\): 24 20 16$'
-          assert 'Speaker Allocation FL/FR'  '^ +FL/FR - Front Left/Right$'
+          while read -r profile; do
+            decoded="${RUNNER_TEMP}/${profile}-decoded.txt"
+            printf '%s:\n' "${profile}"
+
+            # --- shared by both profiles ---------------------------------
+            # The identity pair is what stops us advertising somebody else's
+            # product name to every camera we capture from.
+            assert 'manufacturer CRL'          '^ +Manufacturer: CRL$'
+            assert 'product name CeraLive HDMI' "^ +Display Product Name: 'CeraLive HDMI'$"
+            assert 'legacy HDMI VSDB max TMDS clock 300 MHz' \
+                   '^ +Maximum TMDS clock: 300 MHz$'
+            assert 'Basic audio support'       '^ +Basic audio support$'
+            assert 'LPCM audio descriptor'     '^ +Linear PCM:$'
+            assert '2-channel LPCM SAD'        '^ +Max channels: 2$'
+            # 88.2/96 kHz are advertised because the engine resamples on the way
+            # in: accepting a higher-rate embedded stream beats refusing it and
+            # having the source fall back to no audio at all.
+            assert 'LPCM sample rates 32/44.1/48/88.2/96 kHz' \
+                   '^ +Supported sample rates \(kHz\): 96 88\.2 48 44\.1 32$'
+            assert 'LPCM sample sizes 16/20/24 bit' \
+                   '^ +Supported sample sizes \(bits\): 24 20 16$'
+            assert 'Speaker Allocation FL/FR'  '^ +FL/FR - Front Left/Right$'
+            assert 'YCbCr 4:2:2'               '^ +Supports YCbCr 4:2:2$'
+            # Dropped in BOTH profiles: the engine cannot consume NV24, so
+            # advertising 4:4:4 invites a format the pipeline would discard.
+            refute 'YCbCr 4:4:4'               '^ +Supports YCbCr 4:4:4$'
+
+            case "${profile}" in
+              full)
+                # VIC 97/96 plus the 600 MHz + SCDC pair are what let a source
+                # send 4K60 at all; the Y420CMDB adds 4:2:0 to modes that are
+                # already RGB/4:2:2-capable, which is why it is a CAPABILITY MAP
+                # and not a Y420VDB (that would mean 4:2:0-ONLY).
+                assert 'preferred timing 3840x2160 ~60 Hz' \
+                       '^ +DTD 1: +3840x2160 +(60\.0|59\.9)[0-9]* Hz'
+                assert 'VIC 97 (3840x2160p60)'     '^ +VIC +97: +3840x2160'
+                assert 'VIC 96 (3840x2160p50)'     '^ +VIC +96: +3840x2160'
+                assert 'Maximum TMDS Character Rate: 600' \
+                       '^ +Maximum TMDS Character Rate: 600'
+                assert 'SCDC Present'              '^ +SCDC Present$'
+                assert 'YCbCr 4:2:0 Capability Map Data Block' \
+                       '^ +YCbCr 4:2:0 Capability Map Data Block:$'
+                refute 'YCbCr 4:2:0 Video Data Block' \
+                       '^ +YCbCr 4:2:0 Video Data Block:$'
+                ;;
+              robust-4k60)
+                # An HDMI 1.4-class advertisement: no HDMI Forum VSDB at all, so
+                # no SCDC and no >300 MHz claim, and 4K60 offered ONLY as 4:2:0.
+                # The preferred timing must itself be sendable without
+                # scrambling, or the profile offers a mode it just said the
+                # source cannot signal.
+                assert 'preferred timing 3840x2160 ~30 Hz' \
+                       '^ +DTD 1: +3840x2160 +(30\.0|29\.9)[0-9]* Hz'
+                assert 'preferred timing at 297 MHz' \
+                       '^ +DTD 1: .* 297\.000000 MHz'
+                assert 'second timing 1920x1080 ~60 Hz' \
+                       '^ +DTD 2: +1920x1080 +(60\.0|59\.9)[0-9]* Hz'
+                assert 'monitor range max dotclock 300 MHz' \
+                       '^ +Monitor ranges .*max dotclock 300 MHz$'
+                assert 'YCbCr 4:2:0 Video Data Block' \
+                       '^ +YCbCr 4:2:0 Video Data Block:$'
+                assert 'VIC 95 (3840x2160p30) still offered' \
+                       '^ +VIC +95: +3840x2160'
+                refute 'HDMI Forum VSDB' \
+                       '^ +Vendor-Specific Data Block \(HDMI Forum\)'
+                refute 'SCDC Present'              '^ +SCDC Present$'
+                refute 'a >300 MHz TMDS character rate' \
+                       '^ +Maximum TMDS Character Rate:'
+                refute 'YCbCr 4:2:0 Capability Map Data Block' \
+                       '^ +YCbCr 4:2:0 Capability Map Data Block:$'
+                ;;
+              *)
+                echo "::error::profile '${profile}' has no assertion table"
+                exit 1
+                ;;
+            esac
+          done </tmp/declared
+
+      - name: 4K60 appears in exactly ONE of the two 4:2:0 block kinds, per profile
+        run: |
+          set -euo pipefail
+          # The Y420VDB/Y420CMDB pair is the sharpest edge in this change: they
+          # differ by one byte on the wire and make opposite claims. A blob that
+          # listed VIC 97 in the ordinary Video Data Block AND in a Y420VDB
+          # would be self-contradictory ("4:2:0-only" and "also RGB") while
+          # remaining a structurally valid EDID that --check accepts.
+          vdb_has() {
+            sed -n '/^ *Video Data Block:$/,/^ *[A-Z].*:$/p' "$1" \
+              | grep -qE "^ +VIC +$2: "
+          }
+          full="${RUNNER_TEMP}/full-decoded.txt"
+          robust="${RUNNER_TEMP}/robust-4k60-decoded.txt"
+          for vic in 97 96; do
+            vdb_has "${full}" "${vic}" || {
+              echo "::error::full: VIC ${vic} must be in the ordinary Video Data Block"; exit 1; }
+            if vdb_has "${robust}" "${vic}"; then
+              echo "::error::robust-4k60: VIC ${vic} must NOT be in the ordinary Video Data Block (it is 4:2:0-only there)"
+              exit 1
+            fi
+            printf '  ok   VIC %s: in full'"'"'s VDB, absent from robust-4k60'"'"'s\n' "${vic}"
+          done
 
       - name: Gate bites — a tampered blob MUST fail edid-decode (non-vacuous)
         run: |
           set -euo pipefail
           # Without this leg an always-passing conformity check would look
-          # identical to a working one.
-          tampered="${RUNNER_TEMP}/edid-tampered.bin"
-          cp "${EDID_BLOB}" "${tampered}"
-          printf '\x99' | dd of="${tampered}" bs=1 seek=100 count=1 conv=notrunc status=none
-          if edid-decode --check "${tampered}" > edid-tampered.txt 2>&1; then
-            cat edid-tampered.txt
-            echo "::error::edid-decode --check ACCEPTED a corrupted EDID"
-            exit 1
-          fi
-          grep -q 'Invalid checksum' edid-tampered.txt
-          echo "tamper rejected on the base-block checksum, as designed"
+          # identical to a working one. Run against every profile, because a
+          # loop that only ever tampered with the first blob would be as
+          # vacuous as no loop at all.
+          while read -r profile; do
+            tampered="${RUNNER_TEMP}/${profile}-tampered.bin"
+            cp "${EDID_DIR}/ceralive-hdmirx-${profile}.edid" "${tampered}"
+            printf '\x99' | dd of="${tampered}" bs=1 seek=100 count=1 conv=notrunc status=none
+            if edid-decode --check "${tampered}" > "${RUNNER_TEMP}/${profile}-tampered.txt" 2>&1; then
+              cat "${RUNNER_TEMP}/${profile}-tampered.txt"
+              echo "::error::edid-decode --check ACCEPTED a corrupted ${profile} EDID"
+              exit 1
+            fi
+            grep -q 'Invalid checksum' "${RUNNER_TEMP}/${profile}-tampered.txt"
+            printf '  ok   %s: tamper rejected on the base-block checksum, as designed\n' "${profile}"
+          done </tmp/declared
 
   size-gate:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
