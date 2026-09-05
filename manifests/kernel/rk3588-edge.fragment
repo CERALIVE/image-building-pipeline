@@ -385,7 +385,7 @@ CONFIG_ATH11K_PCI=m
 # ath12k/WCN7850/hw2.0/ and WCN7860/hw2.0/ each carry amss/board-2/m3/regdb.
 CONFIG_ATH12K=m
 
-# --- Bluetooth: USB and UART transports ------------------------------------
+# --- Bluetooth: maximum-stable v7.2 closure --------------------------------
 # BT is a `menuconfig` tristate and BT_HCIBTUSB/BT_HCIUART are the two transport
 # tristates under it — the same parent/leaf shape as RTW89.
 #
@@ -401,9 +401,16 @@ CONFIG_ATH12K=m
 # every BT_HCIBTUSB_* bool below is `depends on BT_HCIBTUSB`, so losing the
 # transport would silently take all four vendor helpers with it.
 CONFIG_BT=m
-# BT_HCIBTUSB: the USB transport tristate, and the only path by which BT_INTEL is
-# turned on (it `select`s it directly — there is no BT_HCIBTUSB_INTEL bool).
+# Classic and LE are independent bools; LE is off in the inherited defconfig.
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_LE_L2CAP_ECRED=y
+# BT_HCIBTUSB selects BT_INTEL directly, as do Intel's UART/PCIe paths;
+# there is no BT_HCIBTUSB_INTEL bool.
 CONFIG_BT_HCIBTUSB=m
+# Keep endpoint synchronization, never opt USB radios into default autosuspend.
+CONFIG_BT_HCIBTUSB_POLL_SYNC=y
+# CONFIG_BT_HCIBTUSB_AUTOSUSPEND is not set
 # Selects BT_MTK — the Orange Pi 5+'s MediaTek USB radio, whose firmware ships as
 # mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin. It is the one protocol bool
 # Kconfig marks `default n`; it nonetheless measured y already, so this line is an
@@ -447,6 +454,25 @@ CONFIG_BT_HCIUART_RTL=y
 CONFIG_BT_HCIUART_INTEL=y
 # Selects BT_QCA for UART-attached Qualcomm parts; qca/ firmware ships. Already y.
 CONFIG_BT_HCIUART_QCA=y
+# HCILL (TI) and Marvell require SERDEV; ATH3K/AG6XX require HCIUART.
+# All four select H4; AG6XX additionally selects the promptless BT_INTEL helper.
+CONFIG_BT_HCIUART_LL=y
+CONFIG_BT_HCIUART_ATH3K=y
+CONFIG_BT_HCIUART_AG6XX=y
+CONFIG_BT_HCIUART_MRVL=y
+
+# USB firmware loader and SDIO/UART/PCIe transports remain loadable modules.
+# MTK's USB-or-!HCIBTUSB_MTK gate is satisfied by USB=y. Intel PCIe needs
+# PCI && ACPI, not ARCH_X86; both gates survive the Rockchip-only platform trim.
+# Firmware retention/availability is a separate image gate, not proven by Kconfig.
+CONFIG_BT_ATH3K=m
+CONFIG_BT_HCIBTSDIO=m
+CONFIG_BT_MRVL=m
+CONFIG_BT_MRVL_SDIO=m
+CONFIG_BT_MTKSDIO=m
+CONFIG_BT_MTKUART=m
+CONFIG_BT_NXPUART=m
+CONFIG_BT_INTEL_PCIE=m
 
 # --- Bluetooth: the two BR/EDR PROTOCOL modules, which are NOT transports ---
 # Everything above gets the CONTROLLER on the bus. Neither line below does any
@@ -464,10 +490,31 @@ CONFIG_BT_HCIUART_QCA=y
 # backend opens AF_BLUETOOTH/BTPROTO_RFCOMM directly, so this is the kernel half
 # of the BT-mic capture the image already ships the userspace for.
 CONFIG_BT_RFCOMM=m
+CONFIG_BT_RFCOMM_TTY=y
 # BNEP is Ethernet emulation over Bluetooth and is what bluetoothd's PAN
 # (NAP/PANU) profile registration requires; it `select`s CRC32, which therefore
 # needs no entry of its own.
 CONFIG_BT_BNEP=m
+CONFIG_BT_BNEP_MC_FILTER=y
+CONFIG_BT_BNEP_PROTO_FILTER=y
+# Classic HID uses HIDP; userspace HID transports use UHID under INPUT/HID_SUPPORT/HID.
+CONFIG_BT_HIDP=m
+CONFIG_UHID=m
+
+# No virtual controllers, boot selftests, debugfs, SoC-specific or obsolete
+# transports, or LE IPv6 compression in this production closure.
+# CONFIG_BT_HCIVHCI is not set
+# CONFIG_BT_SELFTEST is not set
+# CONFIG_BT_SELFTEST_ECDH is not set
+# CONFIG_BT_SELFTEST_SMP is not set
+# CONFIG_BT_DEBUGFS is not set
+# CONFIG_BT_QCOMSMD is not set
+# CONFIG_BT_HCIUART_AML is not set
+# CONFIG_BT_HCIUART_NOKIA is not set
+# CONFIG_BT_HCIBPA10X is not set
+# CONFIG_BT_HCIBFUSB is not set
+# CONFIG_BT_HCIBCM203X is not set
+# CONFIG_BT_6LOWPAN is not set
 
 # WWAN: the six modules lib/check-wwan-modules.sh binds the modem stack to.
 # Keep this list in lockstep with that checker — a drop here is exactly the
@@ -695,6 +742,10 @@ CONFIG_USB_ROLE_SWITCH=y
 CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_SQUASHFS=y
+# lib/app-layer/sysext.sh omits -comp: its gzip-default .raw add-ons are
+# kernel-mounted by systemd-sysext. RAUC plain bundles use userspace unsquashfs
+# and are NOT the reason for this kernel decompressor requirement.
+CONFIG_SQUASHFS_ZLIB=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_BLK_DEV_DM=y
 CONFIG_DM_VERITY=m

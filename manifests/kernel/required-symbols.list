@@ -138,7 +138,7 @@ CONFIG_RTW89=m
 CONFIG_RTW89_8852BE=m
 CONFIG_WLAN_VENDOR_BROADCOM=y
 CONFIG_BRCMFMAC=m
-CONFIG_BT
+CONFIG_BT=m
 CONFIG_BT_HCIBTUSB=m
 CONFIG_BT_RTL=m
 CONFIG_BT_HCIBTUSB_RTL=y
@@ -209,6 +209,20 @@ CONFIG_BT_HCIUART_BCM=y
 CONFIG_BT_HCIUART_RTL=y
 CONFIG_BT_HCIUART_INTEL=y
 CONFIG_BT_HCIUART_QCA=y
+# Maximum-stable v7.2 transport closure; each tristate stays modular.
+CONFIG_BT_HCIBTUSB_POLL_SYNC=y
+CONFIG_BT_ATH3K=m
+CONFIG_BT_HCIBTSDIO=m
+CONFIG_BT_HCIUART_LL=y
+CONFIG_BT_HCIUART_ATH3K=y
+CONFIG_BT_HCIUART_AG6XX=y
+CONFIG_BT_HCIUART_MRVL=y
+CONFIG_BT_MRVL=m
+CONFIG_BT_MRVL_SDIO=m
+CONFIG_BT_MTKSDIO=m
+CONFIG_BT_MTKUART=m
+CONFIG_BT_NXPUART=m
+CONFIG_BT_INTEL_PCIE=m
 # THE TWO SILENT GATES UNDER THE UART BLOCK ABOVE, and the reason they are pinned
 # HERE rather than left implicit. BT_HCIUART_SERDEV is promptless `default y` but
 # `depends on SERIAL_DEV_BUS`, and SERIAL_DEV_CTRL_TTYPORT is a prompted bool
@@ -237,8 +251,15 @@ CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
 # already ships. BNEP is Ethernet-over-Bluetooth, required by bluetoothd's PAN
 # profile registration.
 CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_LE_L2CAP_ECRED=y
 CONFIG_BT_RFCOMM=m
+CONFIG_BT_RFCOMM_TTY=y
 CONFIG_BT_BNEP=m
+CONFIG_BT_BNEP_MC_FILTER=y
+CONFIG_BT_BNEP_PROTO_FILTER=y
+CONFIG_BT_HIDP=m
+CONFIG_UHID=m
 
 # --- DRM / kiosk display ----------------------------------------------------
 # The kiosk stack (cage + Chromium, or the Cog add-on) renders onto a Rockchip
@@ -450,6 +471,9 @@ CONFIG_NET_CLS_FW=y
 CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_SQUASHFS=y
+# Kernel-mounted add-ons from lib/app-layer/sysext.sh use mksquashfs's gzip
+# default; RAUC's userspace unsquashfs path does not motivate this symbol.
+CONFIG_SQUASHFS_ZLIB=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_BLK_DEV_DM=y
 CONFIG_DM_VERITY=m
