@@ -15,6 +15,9 @@
 #      dists/<channel>/binary-<arch>/ (confirmed 200); a bare dists/<channel>/ 404s the
 #      Release file. The URI MUST be arch-qualified (…/binary-<arch>/), matching the
 #      known-working fetch-debs.sh `fetch_first_party` and the customize module.
+#   4. Per-slot apt storage. The active rootfs slot is not an apt-cache bind, so its
+#      generated config must suppress undisplayable translations and retain indexes
+#      compressed. Both configure_minimal_apt twins must render the same payload.
 #
 # THE GAP THIS CLOSES (same lesson as apt-preferences-baked.test.sh): `./build`
 # runs mkosi.images/runtime/mkosi.postinst.chroot, NOT customize/apt-ceralive-repo.sh.
@@ -184,7 +187,21 @@ grep -Eq 'URIs:[[:space:]]*https://[^[:space:]]*/dists/\$\{CHANNEL\}/[[:space:]]
 grep -Eq 'URIs:.*/dists/\$\{APT_CHANNEL\}/binary-' <<<"${mod_src}" \
   || fail "customize configure_ceralive_source() URI is not arch-qualified (…/binary-<arch>/)"
 
-echo "apt-mtls-and-dedupe: Part A static contract OK (both tracks: _apt-owned key + single Debian source + arch-qualified repo URI)"
+for source_name in runtime customize; do
+  case "${source_name}" in
+    runtime) apt_writer="${post_minapt}" ;;
+    customize) apt_writer="${mod_minapt}" ;;
+  esac
+  for directive in \
+    'Acquire::Languages "none";' \
+    'Acquire::GzipIndexes "true";' \
+    'Acquire::CompressionTypes::Order "gz";'; do
+    grep -Fqx "    printf '${directive}\\n'" <<<"${apt_writer}" \
+      || fail "${source_name} configure_minimal_apt() no longer emits ${directive} into 99ceralive"
+  done
+done
+
+echo "apt-mtls-and-dedupe: Part A static contract OK (both tracks: _apt-owned key + single Debian source + arch-qualified repo URI + slot-safe apt config)"
 
 # ---------------------------------------------------------------------------
 # Part B — runtime dedupe reproduction in a rootless user+mount namespace
@@ -230,10 +247,58 @@ configure_minimal_apt
 # Exactly one Debian-archive source file remains.
 n="\$(grep -rl 'deb.debian.org/debian' /etc/apt/sources.list.d/ 2>/dev/null | wc -l)"
 [ "\$n" -eq 1 ] || { echo "FAIL: expected exactly ONE Debian source, found \$n"; ls -1 /etc/apt/sources.list.d/; exit 1; }
+
+mkdir -p /tmp/apt-runtime
+cp /etc/apt/apt.conf.d/99ceralive /tmp/apt-runtime/99ceralive
+cp /etc/apt/sources.list.d/debian.sources /tmp/apt-runtime/debian.sources
+
+# The customize module has broader setup context, so compare only the generated
+# payloads rather than function text. Its suite resolver is the production contract.
+resolve_target_suites() {
+  APT_RELEASE="\${RELEASE}"
+  APT_SUITE_MAIN="\${APT_SUITE}"
+  APT_SUITE_UPD="\${APT_SUITE_UPDATES}"
+  APT_SUITE_SEC="\${APT_SUITE_SECURITY}"
+}
+log_info() { :; }
+eval "\$(awk '/^configure_minimal_apt\(\) \{/,/^}/' "${MODULE}")"
+configure_minimal_apt
+
+cmp -s /tmp/apt-runtime/99ceralive /etc/apt/apt.conf.d/99ceralive \
+  || { echo "FAIL: runtime and customize configure_minimal_apt payloads differ for 99ceralive"; exit 1; }
+cmp -s /tmp/apt-runtime/debian.sources /etc/apt/sources.list.d/debian.sources \
+  || { echo "FAIL: runtime and customize configure_minimal_apt payloads differ for debian.sources"; exit 1; }
+
+cat >/tmp/expected-debian.sources <<EXPECTED_SOURCES
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: \${APT_SUITE}
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian-security
+Suites: \${APT_SUITE_SECURITY}
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: \${APT_SUITE_UPDATES}
+Components: main non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EXPECTED_SOURCES
+cmp -s /tmp/expected-debian.sources /etc/apt/sources.list.d/debian.sources \
+  || { echo "FAIL: configure_minimal_apt changed one of the three Debian sources"; exit 1; }
+
+grep -Fqx 'APT::Install-Recommends "false";' /etc/apt/apt.conf.d/99ceralive \
+  || { echo "FAIL: configure_minimal_apt changed APT::Install-Recommends"; exit 1; }
+grep -Fqx 'DPkg::Options { "--force-confdef"; "--force-confold"; };' /etc/apt/apt.conf.d/99ceralive \
+  || { echo "FAIL: configure_minimal_apt changed DPkg::Options"; exit 1; }
 REPRO_EOF
 
 if unshare -rm --map-root-user bash "${REPRO}"; then
-  echo "apt-mtls-and-dedupe: Part B runtime OK (build-path configure_minimal_apt leaves exactly one Debian source)"
+  echo "apt-mtls-and-dedupe: Part B runtime OK (both configure_minimal_apt twins agree on apt payloads and preserve the three Debian sources)"
 else
   fail "the real configure_minimal_apt() did not dedupe to a single Debian source"
 fi
