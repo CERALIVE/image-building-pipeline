@@ -337,7 +337,8 @@ CONFIG_ROCKCHIP_MPP_JPGDEC=y
 # owns both decoder nodes by `compatible`, so this driver binds nothing and is kept
 # built purely so the handover can be undone by a device-tree change instead of a
 # kernel rebuild. VIDEO_ROCKCHIP_RGA still owns every RGA node at this pin — the
-# island's RGA `compatible` flips are unshipped — and it is pinned here for the first
+# island's RGA `compatible` flips exist upstream as `0038`/`0039` but are not carried
+# by `cb491dc16fc1`, so nothing here binds them — and it is pinned here for the first
 # time so "RGA ownership did not move" is a checked claim rather than a sentence.
 # VIDEO_HANTRO keeps vpu121/vepu121_0/av1d, which the island never claims.
 CONFIG_VIDEO_ROCKCHIP_VDEC=m

@@ -62,6 +62,32 @@ whole `kernel_extension_packages` mechanism are **retired**; an absence guard in
 `tests/packaging-hygiene.bats` fails the build if any half comes back. Every
 kernel this pipeline builds today carries `NET_CLS_FW` in-tree.
 
+## The media-island handover has TWO reversibility points, and only the first exists
+
+The island silicon handover is staged, and each stage is a `patches_commit` bump
+that can be undone with a one-line revert. That is the whole reason it is two
+bumps and not one — folding them together would erase the rollback point between
+them, and the second flip is the riskier one.
+
+| Point | `patches_commit` | What moves | Status |
+|---|---|---|---|
+| **1 — the MPP flip** | `cb491dc16fc1` | `mpp_srv` + RKVENC2/RKVDEC2/JPGDEC take the encoder, both decoder nodes and `jpegd` by DT `compatible`. Mainline `rkvdec` stays BUILT and binds nothing. | **PINNED** in `manifests/families/rk3588.yaml` (pipeline PR #148, `cc38ae4`). Configured and dry-run-proven; **no board has booted it** |
+| **2 — the RGA flip** | *not pinned* | RGA2/RGA3 move from mainline `rockchip-rga` to the island's `multi_rga`; `CONFIG_ROCKCHIP_MULTI_RGA` gets declared and `CONFIG_VIDEO_ROCKCHIP_RGA` moves to the forbidden list | **NOT REACHED.** The patches exist upstream (`0038`/`0039` in `rk3588-kernel-patches`, island `v2026.9.1`/`v2026.9.2`) but this repo pins neither |
+
+Two things follow, and both are easy to get backwards:
+
+- **Decoder truth at the current pin:** the island owns `vdec0`/`vdec1` and
+  `jpegd`; mainline `rkvdec` is compiled and idle by design.
+- **RGA truth at the current pin:** mainline `rockchip-rga` still owns every RGA
+  node. The island's `multi_rga` resolves `=m` off its own Kconfig default and
+  `rga3.ko` is built, but it binds nothing, because no node carries an island RGA
+  compatible in the pinned series. "The flip is written upstream" is not "the
+  flip shipped" — the pipeline consumes patch text by exact SHA.
+
+Neither point is board-proven. The wording to use throughout is "the pipeline
+pins it", never "devices ship it", until a real non-DRY_RUN build has been
+flashed and booted.
+
 ## The pin chain
 
 Each patch repo owns its own `kernel-pin.env`, which records the exact upstream

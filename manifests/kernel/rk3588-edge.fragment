@@ -120,8 +120,12 @@ CONFIG_VIDEO_ROCKCHIP_VDEC=m
 # MAINLINE RGA, DECLARED FOR THE FIRST TIME. It has been resolving `=m` off
 # defconfig with nothing asserting it, which under this fragment's own rules is not
 # the same as being safe. RGA ownership is UNCHANGED by this change: the island's
-# RGA2/RGA3 `compatible` flips are still unshipped (`integration/pending/`), so
-# `rockchip-rga` still owns every RGA node. This row is what makes that statement
+# RGA2/RGA3 `compatible` flips DO now exist upstream — they are `0038`/`0039` in
+# `rk3588-kernel-patches`, landed with island `v2026.9.1`/`v2026.9.2` — but they are
+# NOT at this pin, which is still `cb491dc16fc1` (a seven-member `island/` lane,
+# `0031`-`0037`). Read the distinction literally: the flip is written, not shipped,
+# and this repo consumes patch text only by exact SHA. So `rockchip-rga` still owns
+# every RGA node on every image this pipeline builds. This row is what makes that
 # checkable. `depends on` V4L_MEM2MEM_DRIVERS, VIDEO_DEV and ARCH_ROCKCHIP, all
 # declared. It becomes a forbidden-list entry at the LATER RGA flip, once no node is
 # left for it to bind — not here.
