@@ -6,16 +6,36 @@ Documentation=file:///usr/local/sbin/ceralive-hdmirx-edid
 # deliberately not functional until something does. With no EDID an attached
 # source sees nothing on the DDC lines and either falls back to its most
 # conservative mode or refuses to output at all, which on a bench reads as
-# "HDMI capture is broken". The applied blob claims 3840x2160p60 plus SCDC and
-# a 600 MHz maximum TMDS character rate, which is what makes 4K60 legal for a
-# source to offer. Full root cause + the applicability table:
+# "HDMI capture is broken". Full root cause + the applicability table:
 # /usr/local/sbin/ceralive-hdmirx-edid header.
+#
+# The image ships TWO committed blobs and this unit programs exactly one of
+# them, selected by `hdmirx.edid_profile` in /data/ceralive/hdmirx.conf:
+#   full (the default) — 4K60 at 594 MHz with SCDC and a 600 MHz HF-VSDB rate,
+#     the pair that makes 4K60 legal for a source to offer, plus a Y420CMDB.
+#   robust-4k60        — an HDMI 1.4-class advertisement with no HF-VSDB and so
+#     no SCDC, 4K60 offered only as 4:2:0, preferred timing 4K30 at 297 MHz.
+# An absent, unreadable, or unrecognised selector resolves to `full`, so a fresh
+# or upgraded device behaves exactly as it did before profiles existed.
 #
 # systemd-udev-trigger is the coldplug that gets the hdmirx platform driver
 # bound and the /dev/hdmirx symlink written; After= it is the earliest sensible
 # point, but driver probe is ASYNCHRONOUS so it is NOT a guarantee that the node
 # exists yet. The script owns that race with a bounded poll rather than a sleep.
-After=systemd-udev-trigger.service
+#
+# data.mount carries /data/ceralive/hdmirx.conf, the one file that says WHICH of
+# the two committed EDID profiles is active. Ordering after it is what stops a
+# board that has selected `robust-4k60` from being programmed with `full`
+# because the selector had not been mounted yet.
+#
+# ORDERING-ONLY, AND NEVER RequiresMountsFor=/data — that is the whole point of
+# spelling the mount unit out by hand. RequiresMountsFor= adds Requires= as well
+# as After=, so a board whose /data failed to mount would not merely lose its
+# profile SELECTION, it would get NO EDID AT ALL and a dead receiver. The
+# script's own resolution table already treats an unreachable config as "use the
+# default", which is strictly the better outcome. An After= onto a unit that
+# does not exist is a no-op, so this is equally safe on a board with no /data.
+After=systemd-udev-trigger.service data.mount
 # cerastream is what actually opens the capture device, and ceralive.service
 # (CeraUI) connects to cerastream's control socket exactly once at boot. Both
 # must see a receiver whose EDID is already programmed. Ordering-only: neither
@@ -36,7 +56,16 @@ Before=cerastream.service ceralive.service
 # LIFECYCLE: boot-time only. The EDID lives in driver state, so a driver
 # unbind/rebind or a module reload silently discards it and this unit does NOT
 # notice and does NOT reapply. Known limitation, not a bug — after a bench
-# rebind, run `systemctl restart ceralive-hdmirx-edid.service` explicitly.
+# rebind, run `systemctl restart ceralive-hdmirx-edid.service` explicitly. The
+# same restart is how a changed profile is applied.
+#
+# NEVER MID-STREAM. VIDIOC_S_EDID drops HPD, writes, and raises HPD again, which
+# under a live capture is a source-side mode renegotiation in the middle of a
+# broadcast. The kernel enforces this — the HDMI-RX driver answers -EBUSY while
+# the node is streaming — and the script HONOURS that answer: it refuses without
+# retrying and without forcing, and exits non-zero so the refusal is visible
+# rather than reading as an applied EDID. Boot is safe by construction because
+# nothing has opened the capture device yet.
 
 [Service]
 Type=oneshot

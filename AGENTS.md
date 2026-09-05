@@ -77,6 +77,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Fan curve — lower the pwm-fan zone's first `active` thermal trip** | `mkosi/customize/postinst-lib.sh` `setup_fan_curve` + `mkosi/runtime/ceralive-fan-curve.{sh,service}` — generically discovers the zone bound to the `pwm-fan` cooling device and lowers its first `active` trip to 45 °C; the `critical` trip and `thermal_zone*/mode` are never touched. See the KEY FACT below |
 | **Fan kick-start — brief full-PWM nudge so the fan can start from a dead stop** | `mkosi/customize/postinst-lib.sh` `setup_fan_kickstart` + `mkosi/runtime/ceralive-fan-kickstart.{sh,service}` — the RESIDENT monitor (not a oneshot) that watches the `pwm-fan` cooling device's `cur_state` for a 0 → nonzero edge, drives it to `max_state` for ~1 s, then writes the governor's own state back. The restore is mandatory, not cosmetic — a userspace `cur_state` write is STICKY on this kernel. See the KEY FACT below |
 | **Status LEDs — give the board's unconfigured indicator LEDs a default trigger** | `mkosi/customize/postinst-lib.sh` `setup_led_status` + `mkosi/runtime/ceralive-led-status.{sh,service}` — generically discovers the non-`mmc*`, non-`power` indicator LEDs and assigns `heartbeat` to the first and `mmc1` to the second; `brightness` is never written and the kernel's own `mmc0::` LED is never touched. See the KEY FACT below |
+| **HDMI-RX product EDID — the two profiles, the blobs, and the per-device selector** | `tools/gen-hdmirx-edid.py` (`--profile full\|robust-4k60`, `--list-profiles`) → `mkosi/runtime/edid/ceralive-hdmirx-<profile>.edid` + its committed `.txt` decode; applied by `mkosi/runtime/ceralive-hdmirx-edid.{sh,service}`, installed by `postinst.d/hardware.sh::setup_hdmirx_edid`. Which profile is active is read from `hdmirx.edid_profile` in `/data/ceralive/hdmirx.conf`, defaulting and falling back to `full`. See the KEY FACT below |
 | **System-mode PipeWire — the audio server, and the reason `bluez-alsa` is gone** | `mkosi/customize/postinst-lib.sh` `setup_pipewire_system_mode` + `mkosi/runtime/pipewire/` (three system units Debian ships none of, two config drop-ins, tmpfiles, a narrow `org.bluez` D-Bus policy, and the `cerastream.service` drop-in that supplies `PIPEWIRE_RUNTIME_DIR`). Dedicated non-root `pipewire` user, `0750` runtime dir + `0660` socket, RT via the units' own `Limit*=` (**never** the packaged `limits.d`, which pam_limits makes inert for a service), no rtkit, no network address families. BT-manager exclusivity per cerastream ADR-0010: PipeWire's BlueZ backend REPLACES `bluealsad` and the two may never coexist. See the KEY FACT below |
 | **Router-dongle netns RETIREMENT (the layer is gone; this is its teardown)** | `mkosi/customize/postinst.d/networking.sh` `setup_dongle_netns_retirement` + `mkosi/runtime/ceralive-dongle-netns-retire.{sh,service}` — a boot oneshot that clears an upgraded board's leftovers, the only one of which an OTA cannot clear by itself is the `/data` slot store (put there deliberately to survive a slot swap). Contract `tests/dongle-netns-retirement.test.sh`; see the KNOWN ISSUES entry |
 | **Offline-first boot readiness + dead-weight unit masks** | `mkosi/customize/postinst.d/services.sh::suppress_unusable_boot_units` / `mask_service` (networkd stack, both wait-online paths, machine-id commit, standalone dnsmasq, chrony-wait) + `tests/runtime-services.bats` emitted-unit scan — see the KEY FACT below |
@@ -4671,6 +4672,111 @@ stable /dev/hdmi-in node" — asserts `DRIVERS==` (and explicitly rejects a re-s
 `ATTRS{name}==`), not `video0`-pinned, both symlink tokens, and the original
 permission rules preserved.
 
+**The HDMI-RX EDID ships as TWO profiles, one of which is selected per DEVICE on
+`/data` — and Y420CMDB vs Y420VDB is the byte that decides whether the choice
+means anything** [EXISTS — offline-verified, NOT board-proven]
+
+The receiver has no EDID of its own, so `ceralive-hdmirx-edid.service` writes one
+at boot. The image now carries **both** committed blobs and programs exactly one:
+
+| Profile | Advertises | For |
+|---|---|---|
+| `full` (default) | 4K60 at 594 MHz over RGB/4:2:2, HF-VSDB with SCDC Present + 600 MHz Max_TMDS_Character_Rate, plus a **Y420CMDB** marking VIC 97/96 as ALSO 4:2:0 | the permissive posture — everything the receiver can take |
+| `robust-4k60` | an HDMI 1.4-class posture: **no HF-VSDB at all** (so no SCDC, 300 MHz ceiling), 4K60 offered ONLY through a **Y420VDB**, preferred DTD 4K30 @ 297 MHz with 1080p60 second | a source that cannot hold a clean 594 MHz link, so it falls back to safer signalling instead of failing |
+
+Six things here are decisions rather than detail, and each is a way to get this
+wrong that still produces a structurally valid EDID:
+
+- **Y420CMDB (ext tag 0x0F) and Y420VDB (0x0E) differ by ONE BYTE and mean
+  opposite things.** A Y420VDB lists VICs supported **only** in 4:2:0; a Y420CMDB
+  is a bitmap over the ordinary Video Data Block saying already-listed modes are
+  **additionally** 4:2:0-capable. `full`'s 4K60 modes are genuinely RGB/4:2:2, so
+  it must use the capability map — a Y420VDB there would delete the RGB path.
+  `robust-4k60` makes the 4:2:0-only claim, so it must use the Y420VDB **and**
+  remove VIC 97/96 from the ordinary VDB, because a VIC in both blocks is not
+  4:2:0-only. `edid-decode --check` accepts the swap in either direction, which
+  is exactly why each profile asserts its own block AND the absence of the other,
+  and why `y420-block-swap` is a committed negative fixture.
+- **The Y420CMDB bitmap indexes SVD POSITIONS, not VICs**, LSB-first per byte. It
+  is derived from the live SVD list in the generator rather than hardcoded:
+  reordering the VDB silently repoints a hardcoded bitmap at the wrong modes.
+- **YCbCr 4:4:4 is dropped from BOTH profiles**, deliberately. The engine cannot
+  consume NV24, so advertising 4:4:4 invites a format the pipeline would have to
+  discard. That is a claim about the ENGINE; re-adding the bit belongs with the
+  change that teaches the engine NV24, not with a receiver change.
+- **The legacy HDMI VSDB reads 300 MHz in both profiles and that is not a typo
+  for 340.** 300 MHz is what the HDMI 1.4b VSDB field expresses here; the 340 MHz
+  figure people reach for is HDMI 2.0's SCRAMBLING THRESHOLD, a different field
+  of a different block (the HF-VSDB). In `full` the >300 claim is the HF-VSDB's;
+  in `robust-4k60` there is no HF-VSDB, so this 300 MHz IS the advertised ceiling.
+- **Each profile carries its OWN product code** (`full` 0x0002, `robust-4k60`
+  0x0003; the pre-profile 0x0001 is retired, not reused). A source caches an EDID
+  on manufacturer + product code + serial, so two different advertisements under
+  one code is how a camera keeps negotiating against last week's profile.
+- **Whether a real source actually picks 4:2:0 when offered `robust-4k60` is an
+  EMPIRICAL, per-source question.** Nothing here claims it does. This work
+  produces a correct, spec-conformant blob; the behaviour of any given camera is
+  a bench matrix that has not been run.
+
+**The selector is ONE file with ONE key, on `/data`.**
+`/data/ceralive/hdmirx.conf`, key `hdmirx.edid_profile`, value `full` or
+`robust-4k60`. `/data` because that is the only partition an A/B OTA preserves
+(`docs/partition-contract.md`) — a rootfs-slot path would drop the operator's
+choice on the next update, silently, and the board would come back on the
+default. The file is **parsed, never sourced**: the key contains a dot so it is
+not a shell identifier, and sourcing a device-writable file is root code
+execution at boot. Every unhappy path resolves to `full` and LOGS why — absent
+file, absent key, non-regular/unreadable file, a file larger than 64 KiB, an
+unrecognised value (quoted verbatim in the warning), or a known profile whose
+blob is missing. Only a missing `full` blob is fatal, because there is then
+nothing to fall back to.
+
+**`After=data.mount`, and NEVER `RequiresMountsFor=/data`.** The ordering is what
+stops a board that selected `robust-4k60` being programmed with `full` because
+the selector had not been mounted yet. `RequiresMountsFor=` would add a
+`Requires=` too, so a board whose `/data` failed to mount would get **no EDID at
+all** instead of the default one — strictly worse than losing the selection. An
+`After=` onto a unit that does not exist is a no-op, so it is equally safe on a
+board with no `/data`. The unit's existing no-hard-dependency contract with
+`cerastream.service` is unchanged.
+
+**WRITING AN EDID IS A LIVE RENEGOTIATION, so the kernel's `-EBUSY` is honoured,
+never worked around.** `VIDIOC_S_EDID` drops HPD, writes, and raises HPD again;
+under a live capture that is a source-side mode renegotiation mid-broadcast. The
+HDMI-RX driver rejects the write with `-EBUSY` while the node is streaming, and
+the script treats that as a TERMINAL, NON-RETRIED refusal: it is deliberately not
+folded into the bounded retry (a stream lasts minutes, the budget is two attempts
+a second apart), and it exits NON-ZERO, because `Type=oneshot` +
+`RemainAfterExit=yes` would otherwise render an unapplied EDID as
+`active (exited)`. Nothing on that path unbinds, forces or stops a stream, and a
+test scans the script's executable lines to keep it that way. Boot is safe by
+construction — nothing has opened the capture device yet.
+
+**The profile list is written down THREE times and cannot be deduplicated**: a
+subimage chroot can source neither `tools/gen-hdmirx-edid.py` nor the runtime
+script, so the set appears in the generator's `PROFILES`, the runtime script's
+`KNOWN_PROFILES`, and `postinst.d/hardware.sh`'s `HDMIRX_EDID_PROFILES`. A test
+pins all three against `gen-hdmirx-edid.py --list-profiles`, so adding a profile
+in one place is a red test rather than a blob nothing installs.
+
+Guards: `tests/hdmirx-edid-contract.bats` (38 cases — install/enable/modes for
+both blobs, the pinned per-profile SHA-256s, the three-copy profile lockstep, the
+full runtime resolution matrix driven against the REAL shipped script with a fake
+sysfs and a stub `v4l2-ctl` (default / selected / other-key / unknown / corrupt /
+oversized / not-a-file / missing-blob / missing-default), the EBUSY refusal, the
+`After=data.mount`-without-`RequiresMountsFor` pair, each blob passing its own
+profile check and FAILING the other's, and four negative fixtures) plus the
+`edid-conformance` CI job, which now runs drift, decoded-text currency,
+conformity and a both-directions content table over every declared profile.
+
+**NOT board-proven.** Everything above is verified offline — generated bytes,
+`edid-decode` decodes, and the shipped script driven against a synthetic board.
+No image has been built or flashed with the two blobs, no receiver has been
+programmed with `robust-4k60`, and the `-EBUSY` half additionally assumes a
+kernel guard that is being implemented separately in `rk3588-kernel-patches`; the
+script's handling is written to that contract and exercised against a stub, not
+against a driver that has returned it.
+
 **`snps_hdmirx` fails to PROBE at boot on Orange Pi 5+ — a TF-A/BL31 gap, no
 `/dev/video*` HDMI-RX node exists on that board at all** [FINDING — not fixed]
 
@@ -6029,6 +6135,12 @@ not an active safety fallback or instruction to re-open D3.
 - Don't hardcode `thermal_zone0`/`cooling_device4` in the fan-curve script, and don't lower a trip that is not the FIRST `active` one. Both index spaces are registration-order artefacts confirmed to differ per board and per kernel tree, and the `critical` trip is the board's last line of defence
 - Don't write `brightness` on an LED that has a trigger, and don't hardcode `blue:indicator-1`/`green:indicator-2` in the LED script. A trigger hands the LED to the kernel — writing brightness afterwards fights it, exactly as writing `cur_state` would fight the thermal governor — and those names are vendor DTS labels with no semantics that differ per board and per kernel tree
 - Don't touch the `mmc0::`/`mmc1::` LED or go looking for a red one. The `mmc*` LEDs are the MMC core's own already-working activity LEDs, and there is NO red LED in the kernel's LED class on this board at all — the visible red one is a hardwired power-rail indicator with no software visibility
+- Don't hand-edit an EDID blob or a committed `.edid.txt`. `tools/gen-hdmirx-edid.py` is the source of truth and the blobs are its output; the decode is `edid-decode --check <blob>` redirected to the `.txt` beside it. CI regenerates both and byte-compares, and separately compares the `.txt`'s embedded hex dump against the real bytes — a `.txt` describing a different blob is worse than none, because it reads as a reviewed artifact
+- Don't use a Y420VDB to say "these modes are also 4:2:0", and don't use a Y420CMDB to say "these modes are 4:2:0-only". The two extended tags differ by ONE byte (0x0E vs 0x0F), make opposite claims about which pixel formats a source may send, and `edid-decode --check` accepts the swap in either direction. A mode listed in a Y420VDB must also be REMOVED from the ordinary Video Data Block, or it is not 4:2:0-only. Don't hardcode a Y420CMDB bitmap either — it indexes SVD POSITIONS, so reordering the VDB repoints it at the wrong modes in silence
+- Don't "correct" the legacy HDMI VSDB's 300 MHz max TMDS clock to 340. 340 MHz is HDMI 2.0's SCRAMBLING THRESHOLD and lives in a different field of a different block; in `robust-4k60` that 300 MHz IS the advertised ceiling, and the whole profile exists to state it
+- Don't re-add the CTA YCbCr 4:4:4 flag to either EDID profile as an EDID change. It is dropped because the ENGINE cannot consume NV24; the bit comes back with the change that teaches the engine NV24, not before
+- Don't give `ceralive-hdmirx-edid.service` a `RequiresMountsFor=/data` to "fix" the profile selector's ordering. That adds `Requires=` as well as `After=`, so a board whose `/data` failed to mount would get NO EDID at all instead of the default one — the `After=data.mount` is deliberate and is the whole ordering
+- Don't retry, work around, or force past an `-EBUSY` from `VIDIOC_S_EDID`. It means the capture node is STREAMING, and the write drops HPD and renegotiates the operator's source mid-broadcast. Refuse, loudly and non-zero; an exit 0 there renders an unapplied EDID as `active (exited)` under `RemainAfterExit=yes`
 
 ## KNOWN ISSUES / DEFERRED
 
