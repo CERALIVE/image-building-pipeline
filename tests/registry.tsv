@@ -62,6 +62,7 @@ tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and b
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
 tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
 tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
+tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
 tests/rauc-transition-contract.test.sh	shell	unit	default-shell	first Trixie bundle remains plain-format with exact fleet compatible and signing chain for RAUC 1.8
