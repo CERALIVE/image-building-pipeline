@@ -124,6 +124,20 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**A patch-series pin update includes the independent test expectations.**
+`tests/variant-contract.bats` checks the exact reviewed `patches_commit` in both
+the resolver output and the kernel DRY_RUN plan. Update both assertions alongside
+the manifest and the production-baseline fixtures when deliberately changing that
+pin; do not derive their expected value from the manifest under test. PR #150's
+RGA pin update initially left both assertions on the previous MPP-only pin.
+
+When diagnosing CI, distinguish expected negative-test output from a failing
+suite: `tests/maskrom-first-realhw.test.sh` deliberately executes the release
+workflow's immutable-candidate guard with `RUN_ATTEMPT=2`, expects rejection, and
+prints `Maskrom-first real-HW contract: PASS` afterwards. Its emitted `::error::`
+message is not evidence of a candidate-name collision or a failed contract.
+The real release guard must continue to refuse every attempt other than 1.
+
 **The target Debian suite and its os-release VERSION_ID have exactly ONE source
 of truth, and a gate — not a convention — is what keeps it that way** [EXISTS]
 

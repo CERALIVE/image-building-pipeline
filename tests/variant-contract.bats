@@ -627,7 +627,7 @@ YAML
 @test "kernel_source: the pinned patches commit is the next hardware-candidate series tip" {
   # A regression pin on the actual value: the CERALIVE/rk3588-kernel-patches
   # `main` commit the hardware candidates are built from — currently the
-  # squash-merge that re-anchored the 22-member series onto the v7.2 base. A
+  # squash-merge of PR #15 carrying the 24-member series and island v2026.9.2. A
   # silent bump here would change what the kernel contains with no other signal,
   # and would detach the hardware evidence from the series it claims to attest.
   #
@@ -636,7 +636,7 @@ YAML
   # SHA — a fresh clone cannot reach the latter.
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge 2>/dev/null"
   [ "$status" -eq 0 ]
-   [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='cb491dc16fc102649c7d4c003ea954cfa9e3c494'"* ]]
+  [[ "$output" == *"KERNEL_SOURCE_PATCHES_COMMIT='365b2463294019e3d4e2d5718a787c2055f4ab59'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_PATCHES_GIT_URL='https://github.com/CERALIVE/rk3588-kernel-patches.git'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_TAG='v7.2'"* ]]
   [[ "$output" == *"KERNEL_SOURCE_COMMIT='8d3ae59288f1e7d58d76558a6ee96d533bc5019f'"* ]]
@@ -1031,7 +1031,7 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone --branch v7.2"* ]]
   [[ "$output" == *"git rev-parse HEAD == 8d3ae59288f1e7d58d76558a6ee96d533bc5019f"* ]]
-   [[ "$output" == *"cb491dc16fc102649c7d4c003ea954cfa9e3c494"* ]]
+  [[ "$output" == *"365b2463294019e3d4e2d5718a787c2055f4ab59"* ]]
   [[ "$output" == *"BASE_IMAGE=debian:trixie-20260623-slim@sha256:"* ]]
   [[ "$output" == *"bindeb-pkg"* ]]
   [[ "$output" == *"linux-headers-*/linux-libc-dev discarded"* ]]
