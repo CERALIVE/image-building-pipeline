@@ -127,6 +127,15 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**Offline image scans must not follow absolute unit aliases into the host.**
+The wait-online contract scans regular unit files under the image's `/etc`,
+`/usr/lib` and `/lib` systemd directories with `grep -r`, not `-R`; installed
+absolute aliases otherwise cause host-relative missing-file errors. Its synthetic
+absolute-alias and injected hard-dependency legs protect both directions.
+`tests/mkosi-contract.bats` also requires the intentional device-side apt hygiene
+in both writers; the former BUILD-only translation assertion is retired by that
+policy. Executable output parity: `tests/apt-mtls-and-dedupe.test.sh`.
+
 **RK3588 full firmware adoption supersedes the trimmed-package/1.5 GB history
 below** [EXISTS — integration gated, full-image and new-adapter hardware proof pending].
 `firmware_packages` selects only `armbian-firmware-full=26.8.3`. Both signed-index

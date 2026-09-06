@@ -986,6 +986,8 @@ EOF
     [ "$rc" -eq 1 ]
   }
 
+  ln -s /usr/lib/systemd/system/ceralive-offline-scan-fixture.service \
+    "$units/ceralive-offline-scan-alias.service"
   run scan_wait_online_hard_deps "$modeled"
   [ "$status" -eq 0 ]
   run grep -R -E \

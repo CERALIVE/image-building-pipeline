@@ -92,6 +92,15 @@ passes a gate and then fails on a board.
 
 ### Why 3.5 GB and not 4 GiB
 
+Before capacity inspection, each emitted image must carry the three intentional
+device apt directives in `99ceralive`: `Acquire::Languages "none";`,
+`Acquire::GzipIndexes "true";`, and `Acquire::CompressionTypes::Order "gz";`.
+The build-sandbox translation policy remains separate. Guards:
+`tests/apt-mtls-and-dedupe.test.sh` (executed twin outputs) and
+`tests/mkosi-contract.bats` (both writers). Offline unit scans inspect image unit
+files, not absolute aliases resolved against the host; the absolute-alias and
+injected hard-dependency cases live in `tests/runtime-services.bats`.
+
 Because apparent content bytes are not filesystem bytes, and the gap is not
 small. Every file is rounded up to a 4 KiB block, and the full archive adds
 ~4,380 of them; the per-file rounding on the archive delta alone accounts for
