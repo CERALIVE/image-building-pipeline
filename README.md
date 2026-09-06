@@ -574,6 +574,12 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
+The engine pin is `cerastream=2026.9.2`, the released DMA-BUF startup and
+preview/start-lifecycle repair. Both architecture packages are served by APT and
+were byte-compared with checksum-verified assets downloaded using authenticated
+GitHub access (`CERALIVE/cerastream` is private). This is a package-pin
+update, not a claim that a new device image has already been built or flashed.
+
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
 pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
 content-addressed cache at `mkosi/.staging/.debcache/`, keyed on
