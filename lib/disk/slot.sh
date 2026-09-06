@@ -64,6 +64,8 @@ populate_rootfs_slot() {
     log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
     _populate_rootfs_slot_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}" "${slot_label}"
   fi
+  slot_reserve_assert_ext4 "${rootfs_img}" "${slot_label}" \
+    || die "populated ${slot_label} fails ext4 available-byte/inode reserve"
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
   discard_scratch "${rootfs_img}"

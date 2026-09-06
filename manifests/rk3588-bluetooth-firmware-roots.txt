@@ -1,0 +1,95 @@
+# class module firmware-root-or-object # review basis
+# Derived from the production v7.2 Bluetooth/UHID recursive module closure.
+# static rows: actual modinfo -F firmware; runtime rows: driver request naming.
+# No kernel archive reproducibility pin: each image rechecks its own module tree.
+static ath3k ath3k-1.fw
+static btintel intel/ibt-11-5.ddc
+static btintel intel/ibt-11-5.sfi
+static btintel intel/ibt-12-16.ddc
+static btintel intel/ibt-12-16.sfi
+static btmrvl_sdio mrvl/sd8688.bin
+static btmrvl_sdio mrvl/sd8688_helper.bin
+static btmrvl_sdio mrvl/sd8787_uapsta.bin
+static btmrvl_sdio mrvl/sd8797_uapsta.bin
+static btmrvl_sdio mrvl/sd8887_uapsta.bin
+static btmrvl_sdio mrvl/sd8897_uapsta.bin
+static btmrvl_sdio mrvl/sdsd8977_combo_v2.bin
+static btmrvl_sdio mrvl/sdsd8997_combo_v4.bin
+static btmtk mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin
+static btmtk mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin
+static btmtk mediatek/mt7622pr2h.bin
+static btmtk mediatek/mt7663pr2h.bin
+static btmtk mediatek/mt7668pr2h.bin
+static btmtk mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin
+static btrtl rtl_bt/rtl8723a_fw.bin
+static btrtl rtl_bt/rtl8723b_config.bin
+static btrtl rtl_bt/rtl8723b_fw.bin
+static btrtl rtl_bt/rtl8723bs_config.bin
+static btrtl rtl_bt/rtl8723bs_fw.bin
+static btrtl rtl_bt/rtl8723cs_cg_config.bin
+static btrtl rtl_bt/rtl8723cs_cg_fw.bin
+static btrtl rtl_bt/rtl8723cs_vf_config.bin
+static btrtl rtl_bt/rtl8723cs_vf_fw.bin
+static btrtl rtl_bt/rtl8723cs_xx_config.bin
+static btrtl rtl_bt/rtl8723cs_xx_fw.bin
+static btrtl rtl_bt/rtl8723d_config.bin
+static btrtl rtl_bt/rtl8723d_fw.bin
+static btrtl rtl_bt/rtl8723ds_config.bin
+static btrtl rtl_bt/rtl8723ds_fw.bin
+static btrtl rtl_bt/rtl8761a_config.bin
+static btrtl rtl_bt/rtl8761a_fw.bin
+static btrtl rtl_bt/rtl8761b_config.bin
+static btrtl rtl_bt/rtl8761b_fw.bin
+static btrtl rtl_bt/rtl8761bu_config.bin
+static btrtl rtl_bt/rtl8761bu_fw.bin
+static btrtl rtl_bt/rtl8761cu_config.bin
+static btrtl rtl_bt/rtl8761cu_fw.bin
+static btrtl rtl_bt/rtl8821a_config.bin
+static btrtl rtl_bt/rtl8821a_fw.bin
+static btrtl rtl_bt/rtl8821c_config.bin
+static btrtl rtl_bt/rtl8821c_fw.bin
+static btrtl rtl_bt/rtl8821cs_config.bin
+static btrtl rtl_bt/rtl8821cs_fw.bin
+static btrtl rtl_bt/rtl8822b_config.bin
+static btrtl rtl_bt/rtl8822b_fw.bin
+static btrtl rtl_bt/rtl8822cs_config.bin
+static btrtl rtl_bt/rtl8822cs_fw.bin
+static btrtl rtl_bt/rtl8822cu_config.bin
+static btrtl rtl_bt/rtl8822cu_fw.bin
+static btrtl rtl_bt/rtl8851bu_config.bin
+static btrtl rtl_bt/rtl8851bu_fw.bin
+static btrtl rtl_bt/rtl8852au_config.bin
+static btrtl rtl_bt/rtl8852au_fw.bin
+static btrtl rtl_bt/rtl8852bs_config.bin
+static btrtl rtl_bt/rtl8852bs_fw.bin
+static btrtl rtl_bt/rtl8852btu_config.bin
+static btrtl rtl_bt/rtl8852btu_fw.bin
+static btrtl rtl_bt/rtl8852bu_config.bin
+static btrtl rtl_bt/rtl8852bu_fw.bin
+static btrtl rtl_bt/rtl8852cu_config.bin
+static btrtl rtl_bt/rtl8852cu_fw.bin
+static btrtl rtl_bt/rtl8852cu_fw_v2.bin
+static btrtl rtl_bt/rtl8922au_config.bin
+static btrtl rtl_bt/rtl8922au_fw.bin
+# CLOSED owner-reviewed static gaps, not runtime-composed exemptions. Both chips
+# are future/third-party hardware only; no currently shipped target uses them.
+# Board basis: AGENTS.md firmware-prune / wireless sections; rk3588.yaml radio note
+# (Rock RTL8852BE, Orange AP6275P; a fitted Orange MT7925 is NOT MT7927).
+reviewed-hardware-gap btmrvl_sdio mrvl/sd8987_uapsta.bin # Static btmrvl_sdio.c MODULE_FIRMWARE; no shipped Marvell SD8987 SDIO target; forward-hardware module only; absent from frozen full 26.8.3.
+reviewed-hardware-gap btmtk mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin # Static btmtk.c MODULE_FIRMWARE; no shipped MT7927 target; forward-hardware module only; absent from frozen full 26.8.3.
+runtime-composed btrtl rtl_bt/ # btrtl.c chip table plus runtime config/firmware suffix selection
+runtime-composed btintel intel/ibt-* # btintel.c hardware/firmware revision formatting (SFI/DDC/BSEQ)
+runtime-composed btmtk mediatek/BT_RAM_CODE_* # btmtk.c chip/revision formatting
+runtime-composed btmtk mediatek/mt7925/BT_RAM_CODE_* # btmtk.c MT7925 naming; MT7927's absent static path is ONLY the explicit gap above
+runtime-composed btbcm brcm/BCM*.hcd # btbcm.c chip/board/USB identity names in upstream location
+runtime-composed btbcm brcm/bcm*.hcd # Armbian lower-case Broadcom overlay payloads
+runtime-composed btbcm brcm/SYN*.hcd # btbcm.c Synaptics chip naming
+runtime-composed btbcm BCM*.hcd # Armbian top-level Broadcom overlay
+runtime-composed btbcm ap6210/bcm*.hcd # Armbian board overlay
+runtime-composed btbcm ap6212/bcm*.hcd # Armbian board overlay
+runtime-composed btbcm ap6275p/BCM*.hcd # Armbian AP6275P board overlay
+runtime-composed btqca qca/ # btqca.c SoC/ROM revision and board-ID paths
+runtime-composed ath3k ar3k/ # ath3k.c ramps/tables selected by ROM and clock
+runtime-composed hci_uart mrvl/ # hci_mrvl.c UART helper/firmware names
+runtime-composed btnxpuart nxp/ # btnxpuart.c chip/boot-signature helper and UART image selection
+runtime-composed hci_uart ti-connectivity/TIInit_*.bts # hci_ll.c TI ROM version formatted as TIInit_%d.%d.%d.bts

@@ -79,10 +79,10 @@ Architecture: arm64
 Filename: pool/linux-u-boot-orangepi5-plus-edge_26.8.3_arm64.deb
 SHA256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 
-Package: armbian-firmware
+Package: armbian-firmware-full
 Version: 26.8.3
 Architecture: all
-Filename: pool/armbian-firmware_26.8.3_all.deb
+Filename: pool/armbian-firmware-full_26.8.3_all.deb
 SHA256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 EOF
 
@@ -94,7 +94,7 @@ EOF
 rock_packages=(
   linux-u-boot-rock-5b-plus-edge
   linux-u-boot-orangepi5-plus-edge
-  armbian-firmware
+  armbian-firmware-full
 )
 
 legacy_lookup_package() {
@@ -151,7 +151,7 @@ mapfile -t rock_specs <<<"${specs_text}"
 expected_specs=(
   linux-u-boot-rock-5b-plus-edge=26.8.3
   linux-u-boot-orangepi5-plus-edge=26.8.3
-  armbian-firmware=26.8.3
+  armbian-firmware-full=26.8.3
 )
 [[ "${rock_specs[*]}" == "${expected_specs[*]}" ]]
 [[ "$(bsp_download_specs linux-u-boot-orangepi5-plus-vendor)" == \
@@ -369,7 +369,7 @@ fi
 
 # Given a signed index with only part of the required set, when the whole set is
 # preflighted, then package download cannot begin from a partial resolution.
-awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /^Package: armbian-firmware\n/' \
+awk 'BEGIN { RS=""; ORS="\n\n" } $0 !~ /^Package: armbian-firmware-full\n/' \
   "${TMP}/Packages.current-like" >"${TMP}/Packages.partial"
 if bsp_assert_index_specs "${TMP}/Packages.partial" arm64 "${rock_specs[@]}"; then
   printf 'partial BSP package availability was accepted\n' >&2
@@ -389,7 +389,7 @@ if auth_lookup_package "${TMP}/Packages.wrong-arch" linux-u-boot-rock-5b-plus-ed
   printf 'wrong package architecture was accepted\n' >&2
   exit 1
 fi
-auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware 26.8.3 arm64 >/dev/null
+auth_lookup_package "${TMP}/Packages.current-like" armbian-firmware-full 26.8.3 arm64 >/dev/null
 
 # Given authenticated Release metadata, when suite/architecture/component are
 # checked, then only the configured bookworm/main/arm64 identity is accepted.
@@ -438,7 +438,7 @@ if gate_output="$(
   KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'
   DTB_PACKAGES=''
   UBOOT_PACKAGES='linux-u-boot-rock-5b-plus-edge'
-  FIRMWARE_PACKAGES='armbian-firmware gpu-blob-fixture'
+  FIRMWARE_PACKAGES='armbian-firmware-full gpu-blob-fixture'
   bsp_dir="${TMP}/gate-bsp"
   staging="${TMP}/gate-staging"
   ARMBIAN_APT_URL=https://apt.example.invalid

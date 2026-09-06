@@ -579,7 +579,7 @@ YAML
   # with nothing falling back. armbian-firmware stays: it carries the WiFi/BT
   # blobs and the GPU's own CSF firmware, which panthor loads exactly as the
   # retired vendor driver did.
-  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware-full'"* ]]
   [[ "$output" != *"libmali"* ]]
 }
 
@@ -591,7 +591,7 @@ YAML
   # Both overlays and the blob's pin are deleted, so there is nothing to invert.)
   run bash -c "'$RESOLVE_SH' rock-5b-plus --variant edge-test 2>/dev/null"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+  [[ "$output" == *"FIRMWARE_PACKAGES='armbian-firmware-full'"* ]]
   [[ "$output" != *"libmali"* ]]
 
   # And no shipped manifest may re-introduce the blob by any route. Structural,
@@ -915,7 +915,7 @@ YAML
     run env DRY_RUN=1 bash "$PIPELINE_DIR/build" "$board"
     [ "$status" -eq 0 ]
     [[ "$output" == *"kernel_variant=default"* ]]
-    [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware linux-u-boot-"* ]]
+    [[ "$output" == *"BSP set from rk3588.yaml (2 pkgs): armbian-firmware-full linux-u-boot-"* ]]
     # The BUILT kernel name appears ONLY in the suppression line, never in a
     # fetch line — the "(2 pkgs)" set above is what proves that. It exists in no
     # remote archive, so asking for it would fail the fetch outright.

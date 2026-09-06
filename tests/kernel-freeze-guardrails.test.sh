@@ -247,16 +247,16 @@ pass "Part B2 OK (per-board U-Boot package resolved from the manifest, not hardc
 B3="${TMPROOT}/b3"; mkdir -p "${B3}/prefs"
 make_stubs "${B3}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
 linux-u-boot-rock-5b-plus-edge 26.8.3
-armbian-firmware 26.8.3
+armbian-firmware-full 26.8.3
 cerastream 2026.6.1"
 KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
 DTB_PACKAGES="" \
 UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
-FIRMWARE_PACKAGES="armbian-firmware" \
+FIRMWARE_PACKAGES="armbian-firmware-full" \
   run_freeze "${B3}" "${B3}/prefs" >/dev/null
 
 held_b3="$(sort -u "${B3}/holds" | tr '\n' ' ')"
-expected_b3="armbian-firmware linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge "
+expected_b3="armbian-firmware-full linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge "
 [[ "${held_b3}" == "${expected_b3}" ]] \
   || fail "B3 hold set wrong.\n  got:      ${held_b3}\n  expected: ${expected_b3}"
 
@@ -477,7 +477,7 @@ if [[ -n "${CERALIVE_FREEZE_ROOTFS_TAR:-}" ]]; then
   # package, armbian-firmware, and the board's `-edge` U-Boot. There is no
   # separate DTB package on this path at all — bindeb-pkg ships the in-tree DTBs
   # inside the linux-image deb — so demanding one here would fail a correct image.
-  for pkg in linux-image-7.2.0-ceralive-rk3588 armbian-firmware; do
+  for pkg in linux-image-7.2.0-ceralive-rk3588 armbian-firmware-full; do
     grep -qxF "${pkg}" <<<"${held_in_image}" \
       || fail "E: '${pkg}' is NOT held in the built rootfs — the shipped image's kernel can be replaced by apt"
   done

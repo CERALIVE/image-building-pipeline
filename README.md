@@ -410,9 +410,22 @@ determine current runlevel`, `dir not exist`).
 
 ## Image Size Gate
 
+**Current RK3588 policy:** exact-version and archive-content-pinned
+`armbian-firmware-full=26.8.3` replaces the trimmed package. Both RK3588 content
+ceilings are **3.5 GB**; x86 remains **1.5 GB**. Each populated 4096 MiB RK3588 slot
+must also retain **512 MiB available (`bavail`) bytes** and
+`max(ceil(total_inodes/10),20000)` free inodes. Assembly and preflash enforce the
+same assertion. Bluetooth roots survive the consumer-based prune, with exactly
+two reviewed future-hardware static-firmware gaps. See
+[`Full firmware and populated-slot safety`](docs/bluetooth-firmware-closure.md)
+for the check commands, exceptions and validation boundary. Both full image
+builds and new-adapter hardware validation remain separate gates.
+
+### Historical slim-package measurements (retired RK3588 1.5 GB placeholder)
+
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
-apparent size exceeds **1.5 GB** the build fails there, so no `.raw` and no `.raucb`
+apparent size exceeds its **per-board ceiling** the build fails there, so no `.raw` and no `.raucb`
 are produced. A `DRY_RUN=1` plan-only run never reaches it, and an
 `INSTALL_BOOT_BSP=0` parity build skips it with a warning (a kernel-less rootfs is
 not the shipped image). It is not architecture-gated — every shipped board carries a
@@ -420,7 +433,7 @@ real ceiling. See [`docs/size-notes.md`](docs/size-notes.md) for the wiring
 (§10) and the levers applied (locale strip, `WithDocs=no`, firmware audit, Mesa
 software-GL prune).
 
-Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
+Both RK3588 boards were under the old ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
 software-GL prune — `libgl1-mesa-dri` drags Mesa's Gallium megadriver, LLVM's JIT
 and the Z3 solver into the image for a rasterizer no base-image component ever

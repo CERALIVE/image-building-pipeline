@@ -1,5 +1,16 @@
 # CeraLive v2 — Image Size Notes
 
+**Current full-firmware policy:** RK3588 content ceilings are 3,500,000,000 B;
+x86 remains 1,500,000,000 B. The universal 1.5 GB placeholder and measurements
+below are historical. Neither the full archive's Installed-Size delta nor the
+~3.30 GB planning projection is a wet-build measurement. Frozen 4096M RK3588
+slots additionally require 536,870,912 **bavail** bytes and
+`max(ceil(total_inodes/10),20000)` free inodes after population. The shared gate
+subtracts both root-reserved blocks and ext4's internal extent reserve.
+See [full-firmware closure and slot contract](bluetooth-firmware-closure.md).
+Both full production images still need rebuilding and measurement; the existing
+per-board `measured` baselines are intentionally not overwritten by estimates.
+
 Running record of size-reduction levers applied to the mkosi build and the
 rationale behind each. Numbers marked *(estimate)* are derived from Debian
 `Installed-Size` metadata and published Armbian package sizes, not from a wet

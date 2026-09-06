@@ -40,8 +40,8 @@ write_small_repart_defs() {
 Type=linux-generic
 Label=rootfs_a
 Format=ext4
-SizeMinBytes=16M
-SizeMaxBytes=16M
+SizeMinBytes=1024M
+SizeMaxBytes=1024M
 GrowFileSystem=off
 EOF
   cat >"$defs/30-rootfs_b.conf" <<'EOF'
@@ -49,8 +49,8 @@ EOF
 Type=linux-generic
 Label=rootfs_b
 Format=ext4
-SizeMinBytes=16M
-SizeMaxBytes=16M
+SizeMinBytes=1024M
+SizeMaxBytes=1024M
 GrowFileSystem=off
 EOF
   cat >"$defs/40-data.conf" <<'EOF'

@@ -94,7 +94,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
-| Prospective full-firmware archive content pin (not yet adopted) | `manifests/armbian-firmware-content.json`, `lib/shared/firmware-content.sh`, `tests/firmware-content.test.sh`; authenticated preflight and non-authoritative capacity bounds: [`docs/firmware-content-preflight.md`](docs/firmware-content-preflight.md) |
+| Full-firmware archive pin, Bluetooth closure and populated-slot reserve | [`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md); `manifests/armbian-firmware-content.json`, `manifests/rk3588-bluetooth-firmware-roots.txt`, `lib/check-bluetooth-firmware.sh`, `lib/shared/slot-reserve.sh` |
 | Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared working-tree and build-plan probes lock through `manifest-helpers.bash::serialize`, whose lock name is the RESOURCE and must never re-acquire a per-suite component — see the KEY FACT below); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
 | **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
@@ -125,6 +125,20 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
 ## KEY FACTS
+
+**RK3588 full firmware adoption supersedes the trimmed-package/1.5 GB history
+below** [EXISTS — integration gated, full-image and new-adapter hardware proof pending].
+`firmware_packages` selects only `armbian-firmware-full=26.8.3`. Both signed-index
+transports and staged bytes must match the committed **.deb ARCHIVE FILE** SHA.
+The production Bluetooth/UHID closure is checked before pruning; runtime roots
+and all static objects survive it. Exactly two static references carry closed,
+owner-reviewed `reviewed-hardware-gap` exceptions, never runtime misclassification.
+Both RK3588 content ceilings are 3.5 GB; x86 stays 1.5 GB. Frozen 4096M slots each
+must retain 512 MiB **bavail** and `max(ceil(inodes/10),20000)` free inodes after
+population, enforced by assembly, `verify-disk.sh check-slot` and preflash.
+The old measured baselines remain historical, not measurements of this change.
+Contract, driver/board citations, exact gaps and executable tests:
+[`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md).
 
 **A patch-series pin update includes the independent test expectations.**
 `tests/variant-contract.bats` checks the exact reviewed `patches_commit` in both

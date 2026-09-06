@@ -51,4 +51,20 @@ cat "${TMP}/Packages" <(printf '\n') "${TMP}/Packages" >"${TMP}/duplicate-index"
 if firmware_content_assert_index "${pin}" "${TMP}/duplicate-index" > /dev/null 2>&1; then
   printf 'FAIL: accepted ambiguous signed index\n' >&2; exit 1
 fi
-printf 'PASS: strict firmware pin and signed-index lockstep contract\n'
+sha="$(jq -r .archive_sha256 "${ROOT}/manifests/armbian-firmware-content.json")"
+sed "s/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/${sha}/" "${TMP}/Packages" >"${TMP}/committed-index"
+bsp_assert_firmware_content "${TMP}/committed-index" armbian-firmware-full=26.8.3
+if bsp_assert_firmware_content "${TMP}/Packages" armbian-firmware-full=26.8.3 >/dev/null 2>&1; then
+  printf 'FAIL: fetch accepts a same-version firmware re-spin\n' >&2; exit 1
+fi
+for transport in _fetch_bsp_native _fetch_bsp_curl; do
+  body="$(declare -f "${transport}")"
+  pin_line="$(grep -n 'bsp_assert_firmware_content' <<<"${body}" | cut -d: -f1)"
+  pool_line="$(grep -n '_run_bounded' <<<"${body}" | cut -d: -f1)"
+  [[ -n "${pin_line}" && -n "${pool_line}" && "${pin_line}" -lt "${pool_line}" ]]
+done
+if (DRY_RUN=1 FIRMWARE_PACKAGES=armbian-firmware fetch_bsp "${ROOT}/manifests/families/rk3588.yaml" "${TMP}") >"${TMP}/coexist" 2>&1; then
+  printf 'FAIL: full and trimmed firmware coexistence accepted\n' >&2; exit 1
+fi
+grep -q 'must not coexist' "${TMP}/coexist"
+printf 'PASS: strict firmware pin, signed-index lockstep, both fetch transports and coexistence contract\n'

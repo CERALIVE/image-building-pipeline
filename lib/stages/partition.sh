@@ -63,6 +63,7 @@ assert_staged_packages_unique() {
 # ---------------------------------------------------------------------------
 stage_partition() {
   log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
+  cp "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" "${staging}/rk3588-bluetooth-firmware-roots.txt"
   # The set of BSP package names (manifest-declared) is the partition key.
   local bsp_names=" libv4l-0 ${KERNEL_PACKAGES} ${DTB_PACKAGES} ${UBOOT_PACKAGES} ${FIRMWARE_PACKAGES} ${HW_ACCEL_GSTREAMER_PLUGINS:-} ${GSTREAMER_RUNTIME_PACKAGES:-} "
   # MUST stay a superset of fetch-debs.sh FIRST_PARTY_APT_PKGS: the 5 core packages

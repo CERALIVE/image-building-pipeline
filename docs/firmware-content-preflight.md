@@ -1,9 +1,11 @@
 # Full-firmware artifact preflight [PARTIAL]
 
 Reviewed 2026-09-05 at `07df945c2fe31343da2014b202fe84390e31185c`.
-This records a prospective package, not an image adoption or hardware result.
-Production still selects `armbian-firmware=26.8.3`; package selection, pruning,
-the 1.5 GB production ceiling and both 4096M slot definitions are unchanged.
+This records the pre-adoption review, not a full-image or hardware result.
+The subsequent [full-firmware adoption](bluetooth-firmware-closure.md) selects
+`armbian-firmware-full=26.8.3`, adds Bluetooth-aware retention and 3.5 GB RK3588
+content ceilings plus actual slot-reserve gates. Both 4096M definitions remain
+unchanged; the projections below remain historical, non-authoritative estimates.
 
 ## Authenticated identity
 
@@ -30,8 +32,8 @@ missing/extra keys, malformed digest, foreign identity and incorrect sizes.
 The comparison refuses missing, duplicate or disagreeing exact records, including
 duplicate relevant fields. **Authenticate the index first:** comparison alone
 does not establish trust. `tests/firmware-content.test.sh` is registered in the
-default gate. Fetch enforcement of this new pin is a subsequent adoption step;
-the existing production fetch is intentionally unchanged here.
+default gate. Both BSP fetch transports now enforce this pin; see the adoption
+contract linked above. The authentication record here predates that integration.
 
 ## Capacity ledger: planning estimates only
 

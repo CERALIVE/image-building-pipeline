@@ -326,6 +326,10 @@ prune_irrelevant_rk3588_firmware() {
     r8a779x_usb3_rom.mem
   )
 
+  if declare -F bluetooth_firmware_assert_candidates >/dev/null; then
+    bluetooth_firmware_assert_candidates "${candidates[@]}" "${candidate_files[@]}" || exit 1
+  fi
+
   local refs
   if ! refs="$(installed_module_firmware_refs "${root}")"; then
     log "WARNING: no installed module could be read by modinfo — the consumer set is unprovable, so NOTHING is pruned"
@@ -337,6 +341,9 @@ prune_irrelevant_rk3588_firmware() {
   for name in "${candidates[@]}"; do
     [[ -e "${fw}/${name}" ]] || continue
     blocked=""
+    for ref in "${BT_FW_OBJECTS[@]}"; do
+      if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
+    done
     while IFS= read -r ref; do
       [[ -n "${ref}" ]] || continue
       if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
@@ -374,6 +381,9 @@ prune_irrelevant_rk3588_firmware() {
       exit 1
     fi
   done
+  if declare -F bluetooth_firmware_assert_retained >/dev/null; then
+    bluetooth_firmware_assert_retained "${fw}" || exit 1
+  fi
 }
 
 # Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
@@ -451,6 +461,13 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
   mkosi-install -y --no-install-recommends "${boot_bsp[@]}"
   install_kernel_source_dtbs
   install_kernel_source_boot_artifacts
+  if [[ " ${FIRMWARE_PACKAGES:-} " == *" armbian-firmware-full "* ]]; then
+    source "${SRCDIR:?}/customize/bluetooth-firmware.sh"
+    bluetooth_firmware_prepare \
+      "${BUILDROOT}/usr/lib/modules/${KERNEL_SOURCE_KERNEL_RELEASE:?}" \
+      "${BUILDROOT}/usr/lib/firmware" \
+      "${SRCDIR}/.staging/${CERALIVE_BOARD:?}/rk3588-bluetooth-firmware-roots.txt"
+  fi
   prune_irrelevant_rk3588_firmware
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
