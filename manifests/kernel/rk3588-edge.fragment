@@ -121,9 +121,11 @@ CONFIG_VIDEO_ROCKCHIP_VDEC=m
 # `ROCKCHIP_MULTI_RGA` binds the three island-compatible nodes at this pin and
 # produces `rga_multicore.ko`, which owns /dev/rga. Its two Kconfig parents are
 # declared above: ARCH_ROCKCHIP and ROCKCHIP_IOMMU. The mainline V4L2 driver has no
-# device-tree node left to bind, so it is intentionally absent here and forbidden by
-# the production closure rather than kept as a dead module.
+# device-tree node left to bind and is forbidden by the production closure.
+# arm64 defconfig explicitly enables it as =m; omitting the fragment override
+# leaves that value intact through olddefconfig. Disable it explicitly instead.
 CONFIG_ROCKCHIP_MULTI_RGA=m
+# CONFIG_VIDEO_ROCKCHIP_RGA is not set
 # HANTRO, ASSERTED. It keeps the blocks the island does not claim — vpu121,
 # vepu121_0 and av1d — so it is not a rollback target like rkvdec but a co-resident
 # owner. Same three `depends on` as RGA above.

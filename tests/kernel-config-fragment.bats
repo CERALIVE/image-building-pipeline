@@ -728,6 +728,8 @@ EOF
     grep -qx "$sym" "$req"
   done
   local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  # Removing an enable line does not override arm64 defconfig's own =m.
+  grep -qx '# CONFIG_VIDEO_ROCKCHIP_RGA is not set' "$FRAGMENT"
   run ! grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA=m' "$FRAGMENT"
   run ! grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA=m' "$req"
   grep -qx 'CONFIG_VIDEO_ROCKCHIP_RGA' "$forb"
