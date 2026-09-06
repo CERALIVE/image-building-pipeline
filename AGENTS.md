@@ -125,6 +125,20 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**A patch-series pin update includes the independent test expectations.**
+`tests/variant-contract.bats` checks the exact reviewed `patches_commit` in both
+the resolver output and the kernel DRY_RUN plan. Update both assertions alongside
+the manifest and the production-baseline fixtures when deliberately changing that
+pin; do not derive their expected value from the manifest under test. PR #150's
+RGA pin update initially left both assertions on the previous MPP-only pin.
+
+When diagnosing CI, distinguish expected negative-test output from a failing
+suite: `tests/maskrom-first-realhw.test.sh` deliberately executes the release
+workflow's immutable-candidate guard with `RUN_ATTEMPT=2`, expects rejection, and
+prints `Maskrom-first real-HW contract: PASS` afterwards. Its emitted `::error::`
+message is not evidence of a candidate-name collision or a failed contract.
+The real release guard must continue to refuse every attempt other than 1.
+
 **The target Debian suite and its os-release VERSION_ID have exactly ONE source
 of truth, and a gate — not a convention — is what keeps it that way** [EXISTS]
 
@@ -1576,15 +1590,15 @@ different, and four things about them are easy to get wrong:
   the real parent off drops `VIDEO_SYNOPSYS_HDMIRX`, `VIDEO_ROCKCHIP_VDEC`,
   `VIDEO_ROCKCHIP_RGA` and `VIDEO_HANTRO` together — reproduced deliberately. Both
   it and `V4L_MEM2MEM_DRIVERS` (what RGA and Hantro `depends on`) are now declared.
-- **Mainline `rkvdec` and `rockchip-rga` stay BUILT, and that is the rollback
-  design rather than an oversight.** The island owns nodes by device-tree
+- **Mainline `rkvdec` stays BUILT, and that is the rollback design rather than
+  an oversight.** The island owns nodes by device-tree
   `compatible`, so `rockchip-vdec.ko` binds nothing and exists purely so the
   handover is undone by a device-tree change instead of a kernel rebuild. Never
   express that exclusivity in Kconfig — the island's own ANTI-PATTERNS forbid a
-  `depends on !VIDEO_ROCKCHIP_VDEC`. `VIDEO_ROCKCHIP_RGA` is REQUIRED, not
-  forbidden: RGA ownership does not move at this pin, and the island's own
-  `ROCKCHIP_MULTI_RGA` (which resolves `=m` by its Kconfig default and binds
-  nothing yet) is deliberately left undeclared until the RGA flip declares it.
+  `depends on !VIDEO_ROCKCHIP_VDEC`. RGA was kept built at the MPP-only
+  `cb491dc16fc1` pin, but PR #150's `365b24632940` pin moves all three RGA nodes
+  to the island. `ROCKCHIP_MULTI_RGA=m` is now declared and required;
+  `VIDEO_ROCKCHIP_RGA` is forbidden and explicitly disabled in the fragment.
 
 **Not board-proven.** Both boards × both variants dry-run clean and the resolved
 `.config` passes the declared/required/forbidden gate, but no image has been built
@@ -2023,6 +2037,18 @@ transcription of it.
 
 **The `edge` config is ROCKCHIP-ONLY, and two closure manifests keep it that
 way** [EXISTS]
+
+**Forbidding a driver does not disable it.** PR #150 removed the fragment's
+`CONFIG_VIDEO_ROCKCHIP_RGA=m` override but left arm64 `defconfig`'s own `=m`
+intact. At v7.2 the driver's prompted tristate has no Kconfig default; its
+`V4L_MEM2MEM_DRIVERS`, `VIDEO_DEV`, and `ARCH_ROCKCHIP` dependencies remain on.
+The fragment now explicitly declares `# CONFIG_VIDEO_ROCKCHIP_RGA is not set`
+beside `CONFIG_ROCKCHIP_MULTI_RGA=m`, with the forbidden entry unchanged.
+`tests/kernel-config-fragment.bats` requires that disable directive, not merely
+the absence of an enable line. The builder's positional survival check does
+not read the closure manifests: use the full resolved-config invocation in
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md) §6b
+before accepting a candidate. No driver or device-tree change is implied.
 
 arm64 `defconfig` is a MULTI-PLATFORM config: at the `v7.2` pin it enables all
 **56** SoC platforms `arch/arm64/Kconfig.platforms` offers (55 at `v7.1.7`, before

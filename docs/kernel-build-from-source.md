@@ -815,6 +815,45 @@ FUSB302, nftables) plus the `NFT_COUNTER` absence guard, a red/green pair drivin
 the real fragment against a reproduction of the broken 7.1.5 answer and against a
 fully-honoured one, and the build-stage wiring order).
 
+### Required/forbidden closure — stronger than declared-symbol survival
+
+The positional invocation inside `lib/build-kernel.sh` checks only declared
+symbols. To audit the complete production `edge` closure, run this from the
+pipeline checkout against the **resolved** config, never against the fragment
+as a substitute for that config:
+
+```bash
+lib/verify-kernel-config.sh \
+  --config <resolved.config> \
+  --declared manifests/kernel/rk3588-edge.fragment \
+  --required manifests/kernel/required-symbols.list \
+  --forbidden manifests/kernel/forbidden-symbols.list
+```
+
+For a config-only check, apply the manifest's pinned patch series to its pinned
+kernel source, then run `make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+defconfig`, `scripts/kconfig/merge_config.sh -m .config <absolute-fragment-path>`,
+`make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig`, and
+`make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- syncconfig`. Supply that
+`.config` to the invocation above. A full build retains the same artifact at
+`mkosi/.staging/<board>/kernel-build/resolved.config`.
+
+**PR #150 exposed the inverse of the missing-parent failure:** removing
+`CONFIG_VIDEO_ROCKCHIP_RGA=m` from the fragment did not disable the driver.
+At kernel `8d3ae59288f1` with patch series `365b24632940`,
+`arch/arm64/configs/defconfig` explicitly sets it to `m`. Its Kconfig entry in
+`drivers/media/platform/rockchip/rga/Kconfig` is a prompted tristate with no
+default, depending on `V4L_MEM2MEM_DRIVERS`, `VIDEO_DEV`, and
+`ARCH_ROCKCHIP || COMPILE_TEST`; the media-platform parent gates also remain
+enabled. The inherited module therefore survives `olddefconfig`, and only the
+full closure audit rejects it when the fragment says nothing about it.
+
+The fix is `# CONFIG_VIDEO_ROCKCHIP_RGA is not set` beside the island's
+`CONFIG_ROCKCHIP_MULTI_RGA=m`. The existing forbidden entry stays unchanged.
+The ownership contract test requires the explicit disable so a future deletion
+cannot pass the text-only PR gate again. This proves config policy, not a
+hardware ownership or boot result; those still require a rebuilt candidate.
+
 ---
 
 ## 7. Known gaps — read before using this
