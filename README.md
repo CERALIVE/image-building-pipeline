@@ -580,6 +580,12 @@ were byte-compared with checksum-verified assets downloaded using authenticated
 GitHub access (`CERALIVE/cerastream` is private). This is a package-pin
 update, not a claim that a new device image has already been built or flashed.
 
+CeraUI is pinned to release v2026.9.1 using its exact per-architecture Debian
+versions. Its published cerastream bindings understand schema 0.17.0, matching
+the engine pin above. Both downloaded Debian assets passed independent SHA-256
+verification. Fresh-image boot and media qualification remain separate gates;
+the documented early-import SIGUSR1 residual window is unchanged.
+
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
 pins, and the first-party packages from `apt.ceralive.tv` — share a persistent
 content-addressed cache at `mkosi/.staging/.debcache/`, keyed on

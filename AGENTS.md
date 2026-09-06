@@ -1189,6 +1189,19 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
+**CeraUI pin (2026-09-06):** the architecture-qualified `ceralive-device` rows in
+`manifests/first-party-deb-versions.txt` select the checksum-verified v2026.9.1
+release assets at `f3c52d5`, with the matching provenance tag in `versions.yaml`.
+Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, matching
+the unchanged engine 2026.9.2 pin. The accepted early-import SIGUSR1 residual
+window remains; the pin alone claims no fresh-image hardware qualification.
+
+The emitted-rootfs wait-online test scans canonical unit files without following
+absolute aliases into the build host (`grep -r`, not `-R`). Its fixture includes
+an absolute alias, and the existing injected forbidden dependency still fails.
+Otherwise a valid image's absolute systemd symlinks produce grep exit 2 on the
+host and falsely fail the dependency-absence gate.
+
 **cerastream pin (2026-09-06):** `manifests/first-party-deb-versions.txt` selects
 released `2026.9.2` on both architectures; repo-local `versions.yaml` records
 the matching tag. Both packages were downloaded through authenticated GitHub
