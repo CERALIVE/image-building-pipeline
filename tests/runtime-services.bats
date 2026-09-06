@@ -965,6 +965,8 @@ EOF
     "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
     >"$units/first-party-emitted-directives.service"
   [ -s "$units/first-party-emitted-directives.service" ]
+  ln -s /etc/systemd/system/first-party-emitted-directives.service \
+    "$units/emitted-alias.service"
 
   scan_wait_online_hard_deps() {
     local root="$1"
@@ -975,7 +977,9 @@ EOF
       [ ! -d "$dir" ] || dirs+=("$dir")
     done
     [ "${#dirs[@]}" -gt 0 ] || return 2
-    grep -R -E \
+    # Absolute unit aliases belong to the image, not the build host. Scan the
+    # canonical files in all three unit directories without following aliases.
+    grep -r -E \
       '^(Requires|Requisite|BindsTo)=.*NetworkManager-wait-online\.service([[:space:]]|$)' \
       "${dirs[@]}" >/dev/null 2>&1
     rc=$?
