@@ -3023,7 +3023,7 @@ no replacement userspace build is needed.
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Four packages:
-  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.1 (hw_accel_gstreamer_plugins), and
+  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.2 (hw_accel_gstreamer_plugins), and
   `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
   (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
   RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
@@ -3037,6 +3037,10 @@ no replacement userspace build is needed.
   the CeraLive release-asset row as the one-line rollback lever. Sources:
   CERALIVE/gstreamer-rockchip for the plugin, tsukumijima for MPP and multimedia
   config, and Radxa `rk3588s2-bookworm` for the ABI-paired RGA.
+  The `.2` plugin release adds `libgstrockchiprga.so` with `rgaconvert` and
+  `rgacompositor`; `.1` predates those factories. The pipeline pins the released
+  bytes to enable fresh-image qualification, not to claim either board has run
+  this package. MPP and librga pins are unchanged.
 - **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
   pinned packages the resolved family declares (intersection of
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
