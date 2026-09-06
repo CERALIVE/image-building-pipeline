@@ -931,12 +931,34 @@ symbol declarations and unit-file content — because this repo's CI has no
 privileged network namespace. On-device apply/reload/teardown is a labelled
 hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
-## OTA-During-Stream Guard
+## Update Paths — three of them, and CeraUI drives only one
 
-`/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)
-refuses to install a bundle while the device is actively streaming. It checks
-all three live-media units with `systemctl is-active` and aborts if any is
-running:
+These are independent mechanisms with different triggers, and reading them as one
+"update button" is how the wrong thing gets debugged:
+
+| Path | Trigger | What it does |
+|---|---|---|
+| **apt package upgrade** | CeraUI's update button — its `system.startUpdate` RPC reaches `startSoftwareUpdate()`, which launches a detached `systemd-run` unit executing `/usr/bin/apt-get` | Upgrades the first-party app packages from `apt.ceralive.tv`. Never touches the frozen boot stack (see "Kernel Freeze" above) |
+| **RAUC OS update, automatic** | `rauc-hawkbit-updater` | Downloads a bundle to `/data/ceralive/rauc-downloads/bundle.raucb`, then installs it over D-Bus `InstallBundle`. This is the only automatic RAUC trigger on the device |
+| **RAUC OS update, manual** | An operator running `/usr/local/bin/ceralive-update` | **Inert by default.** `persistence.sh` seeds `/data/ceralive/update.conf` with an empty `BUNDLE_URL`, and the script refuses to run without one |
+
+**CeraUI does not invoke `ceralive-update`.** No caller of it exists anywhere in
+the workspace. CeraUI's other RAUC contact is `rauc status`, which is read-only
+slot observation, not installation.
+
+**Operational trap on the manual path, pre-existing and untouched here.** Debian's
+`rauc` 1.13 is built `-Dstreaming=true`, and a streaming-enabled RAUC **rejects a
+remote `plain` bundle** (`Bundle format 'plain' not supported in streaming mode`)
+rather than downloading it. So an operator who sets `BUNDLE_URL` to an `https://`
+URL gets a hard failure: today that field must name a **local file path**. This is
+existing behaviour, recorded rather than fixed.
+
+### OTA-During-Stream Guard
+
+`/usr/local/bin/ceralive-update` — the manual path above — refuses to install a
+bundle while the device is actively streaming. The guard is real and correct; it
+simply belongs to that path, and applies whenever the script is run. It checks all
+three live-media units with `systemctl is-active` and aborts if any is running:
 
 - `cerastream.service` — the encoder
 - `srtla.service` — the bonding **receiver** role

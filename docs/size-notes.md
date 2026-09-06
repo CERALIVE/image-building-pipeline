@@ -11,6 +11,37 @@ See [full-firmware closure and slot contract](bluetooth-firmware-closure.md).
 Both full production images still need rebuilding and measurement; the existing
 per-board `measured` baselines are intentionally not overwritten by estimates.
 
+**Why those three numbers are three different numbers.** They are not
+alternative spellings of one budget, and treating them as such is how a build
+passes a gate and then fails on a board:
+
+- The **4096 MiB slot** is frozen partition geometry
+  (`docs/partition-contract.md`), not a size policy. Nothing here may move it.
+- The **3.5 GB content ceiling** is an early, cheap *estimate* gate on apparent
+  bytes. It sits well under the partition because apparent bytes are not
+  filesystem bytes — 4 KiB per-file rounding alone costs ~9.7 MB across the full
+  firmware archive's ~4,380 extra files, before ext4 metadata, the inode table,
+  the journal and the root-reserved pool. A ceiling at the partition size would
+  pass a build the slot cannot hold. x86 keeps 1.5 GB because it selects no
+  Armbian firmware package at all, so none of this reasoning transfers to it.
+- The **512 MiB `bavail` reserve** is the measured safety property, and it is a
+  one-OTA-cycle working margin rather than a fudge factor: apt's cache and lists
+  are **not** on `/data`, so every downloaded archive and every dpkg transient
+  unpack lands in the active rootfs slot, alongside the journal and normal
+  runtime churn. It asserts `bavail`, never `bfree`, because `bfree` counts the
+  root-reserved pool an ordinary writer can never obtain.
+- The **inode floor `max(ceil(total_inodes/10), 20000)`** takes whichever term is
+  larger because the two fail at opposite ends of the size range: the 10% term is
+  what scales on a large slot (a fixed count would pass a filesystem nearly out
+  of inodes while blocks remain free — ENOSPC with free space), and the 20000
+  floor is what holds on a small one, where 10% of a modest inode table is a
+  number no real package transaction survives.
+
+A ceiling is never raised to accommodate an overage, and a reserve is never
+lowered to accommodate a fixture. When a synthetic fixture could not satisfy the
+real reserve it was grown from 16M to 1024M; a fixture small enough to dodge the
+assertion proves only that the assertion does not run.
+
 Running record of size-reduction levers applied to the mkosi build and the
 rationale behind each. Numbers marked *(estimate)* are derived from Debian
 `Installed-Size` metadata and published Armbian package sizes, not from a wet

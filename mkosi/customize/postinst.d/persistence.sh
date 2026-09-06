@@ -238,9 +238,11 @@ EOF
   mkdir -p /usr/local/bin
   cat >/usr/local/bin/ceralive-update <<EOF
 #!/bin/bash
-# CeraLive OS update entrypoint — invoked by CeraUI system.startUpdate() (target
-# wiring). Installs a RAUC bundle whose URL
-# is read from persistent /data; the post-reboot mark-good is the task-29 gate.
+# CeraLive MANUAL OS update entrypoint — run by an operator, NOT by CeraUI.
+# CeraUI's system.startUpdate RPC is the apt package path and never calls this
+# script; rauc-hawkbit-updater is the only automatic RAUC trigger. Installs a
+# RAUC bundle whose URL is read from persistent /data, and is inert until an
+# operator sets BUNDLE_URL there; the post-reboot mark-good is the task-29 gate.
 set -euo pipefail
 CONF="${data_root}/ceralive/update.conf"
 DATA="${data_root}"
