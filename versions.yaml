@@ -48,7 +48,7 @@ cerastream:
   # and completed-PLAYING validation; both codec receiver soaks passed on Orange Pi.
   pin: v2026.9.2
   # Device deb: cerastream 2026.9.2 (amd64 + arm64).
-  # Published assets:
+  # Published assets (private GitHub; authenticated download required):
   #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_arm64.deb
   #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_amd64.deb
   channel: stable

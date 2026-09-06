@@ -1191,8 +1191,10 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 
 **cerastream pin (2026-09-06):** `manifests/first-party-deb-versions.txt` selects
 released `2026.9.2` on both architectures; repo-local `versions.yaml` records
-the matching tag. Both GitHub packages were checksum-verified and byte-compared
-with their served APT copies. The release fixes capture-probe/live allocation,
+the matching tag. Both packages were downloaded through authenticated GitHub
+access, checksum-verified and byte-compared with their served APT copies.
+`CERALIVE/cerastream` is private; anonymous GitHub URLs return 404, while APT is
+the image's package delivery channel. The release fixes capture-probe/live allocation,
 hardware-preview recovery and false-positive PLAYING startup. Its Orange Pi
 H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
 is an owner-accepted non-blocking observation, not a claimed transport fix.
