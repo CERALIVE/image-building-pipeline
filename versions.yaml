@@ -44,11 +44,13 @@ cerastream:
   # the stream-start failure that would otherwise occur during the fork-package swap.
   # v2026.9.1 adds the selectable ALSA/PipeWire backend contract and carries the
   # network-tolerant service ordering required by the offline-first image.
-  pin: v2026.9.1
-  # Device deb: cerastream 2026.9.1 (amd64 + arm64).
+  # v2026.9.2 restores DMA-BUF capture startup, hardware-preview idle gating,
+  # and completed-PLAYING validation; both codec receiver soaks passed on Orange Pi.
+  pin: v2026.9.2
+  # Device deb: cerastream 2026.9.2 (amd64 + arm64).
   # Published assets:
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.1/cerastream_2026.9.1_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.1/cerastream_2026.9.1_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_amd64.deb
   channel: stable
 
 CeraUI:

@@ -1189,6 +1189,15 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
+**cerastream pin (2026-09-06):** `manifests/first-party-deb-versions.txt` selects
+released `2026.9.2` on both architectures; repo-local `versions.yaml` records
+the matching tag. Both GitHub packages were checksum-verified and byte-compared
+with their served APT copies. The release fixes capture-probe/live allocation,
+hardware-preview recovery and false-positive PLAYING startup. Its Orange Pi
+H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
+is an owner-accepted non-blocking observation, not a claimed transport fix.
+This pin does not claim a new image has been built, flashed or hardware-qualified.
+
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
 this REPLACES the retired R2 `aws s3 sync` (CI) and `gh release download` (local)
