@@ -13,6 +13,26 @@ bats_require_minimum_version 1.5.0
 
 load manifest-helpers
 
+@test "hostname: real Avahi socket paths fit D-Bus even with a long TMPDIR" {
+  local long_tmp="$BATS_TEST_TMPDIR/long-checkout-path-for-disk-backed-image-fixtures"
+  local allocation
+  mkdir -p "$long_tmp"
+  allocation="$(awk '/^TMP=/ { print; found++ } END { if (found != 1) exit 1 }' \
+    "$BATS_TEST_DIRNAME/real-avahi-hostname-contract.sh")"
+  [ -n "$allocation" ]
+  run env LC_ALL=C TMPDIR="$long_tmp" bash -euo pipefail -c '
+    eval "$1"
+    trap '\''rm -rf -- "$TMP"'\'' EXIT
+    path="$TMP/concurrent/device-a/bus"
+    printf "socket_path_bytes=%s path=%s\n" "${#path}" "$path"
+    # libdbus rejects paths above 99 bytes, below the Linux sun_path limit.
+    [[ "$TMP" = /* && -d "$TMP" && ${#path} -le 99 ]]
+    [[ "$(stat -c %a "$TMP")" = 700 ]]
+  ' bash "$allocation"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "hostname: no collision commits and publishes ceralive" {
   local root="$BATS_TEST_TMPDIR/no-collision"
   make_hostname_fixture "$root"
