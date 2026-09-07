@@ -102,6 +102,11 @@ EOF
 
   printf 'APT::Install-Recommends "false";\n' >/etc/apt/apt.conf.d/99ceralive
   printf 'DPkg::Options { "--force-confdef"; "--force-confold"; };\n' >>/etc/apt/apt.conf.d/99ceralive
+  {
+    printf 'Acquire::Languages "none";\n'
+    printf 'Acquire::GzipIndexes "true";\n'
+    printf 'Acquire::CompressionTypes::Order "gz";\n'
+  } >>/etc/apt/apt.conf.d/99ceralive
 }
 
 # Install the mTLS client certificate (CI mode).

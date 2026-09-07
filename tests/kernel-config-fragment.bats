@@ -1,4 +1,6 @@
 #!/usr/bin/env bats
+# allow: SIZE_OK — existing registered kernel-contract suite; this config-only
+# task explicitly extends this file without splitting suites or changing the registry.
 #
 # Kconfig-fragment survival — the contract that says what `rk3588-edge.fragment`
 # ASKS FOR is what the built kernel actually CARRIES.
@@ -39,6 +41,25 @@ setup() {
   PIPELINE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
   VERIFY="$PIPELINE_DIR/lib/verify-kernel-config.sh"
   FRAGMENT="$PIPELINE_DIR/manifests/kernel/rk3588-edge.fragment"
+  REQUIRED="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
+  FORBIDDEN="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  BT_POSITIVE=(
+    BT=m BT_BREDR=y BT_LE=y BT_LE_L2CAP_ECRED=y
+    BT_RFCOMM=m BT_RFCOMM_TTY=y BT_BNEP=m BT_BNEP_MC_FILTER=y
+    BT_BNEP_PROTO_FILTER=y BT_HIDP=m UHID=m
+    BT_HCIBTUSB=m BT_HCIBTUSB_POLL_SYNC=y BT_HCIBTUSB_BCM=y
+    BT_HCIBTUSB_MTK=y BT_HCIBTUSB_RTL=y BT_ATH3K=m BT_HCIBTSDIO=m
+    BT_HCIUART=m BT_HCIUART_SERDEV=y BT_HCIUART_H4=y BT_HCIUART_3WIRE=y
+    BT_HCIUART_BCM=y BT_HCIUART_RTL=y BT_HCIUART_INTEL=y BT_HCIUART_QCA=y
+    BT_HCIUART_LL=y BT_HCIUART_ATH3K=y BT_HCIUART_AG6XX=y BT_HCIUART_MRVL=y
+    BT_MRVL=m BT_MRVL_SDIO=m BT_MTKSDIO=m BT_MTKUART=m BT_NXPUART=m
+    BT_INTEL_PCIE=m SQUASHFS_ZLIB=y
+  )
+  BT_NEGATIVE=(
+    BT_HCIVHCI BT_SELFTEST BT_SELFTEST_ECDH BT_SELFTEST_SMP BT_DEBUGFS
+    BT_QCOMSMD BT_HCIUART_AML BT_HCIUART_NOKIA BT_HCIBPA10X BT_HCIBFUSB
+    BT_HCIBCM203X BT_6LOWPAN BT_HCIBTUSB_AUTOSUSPEND
+  )
   WORK="$(mktemp -d)"
 }
 
@@ -614,7 +635,7 @@ EOF
   local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
   local sym
   for sym in CONFIG_MMC CONFIG_PCI CONFIG_USB_SUPPORT CONFIG_USB_SERIAL \
-             CONFIG_USB_NET_DRIVERS CONFIG_WLAN CONFIG_BT CONFIG_DRM \
+              CONFIG_USB_NET_DRIVERS CONFIG_WLAN CONFIG_BT=m CONFIG_DRM \
              CONFIG_SOUND CONFIG_SND CONFIG_SND_SOC CONFIG_SND_USB \
              CONFIG_MEDIA_SUPPORT CONFIG_DMABUF_HEAPS=y CONFIG_IOMMU_SUPPORT \
              CONFIG_THERMAL CONFIG_HWMON CONFIG_TYPEC CONFIG_NF_TABLES=y; do
@@ -771,4 +792,69 @@ EOF
 @test "verify-kernel-config.sh is executable and shipped beside the other build gates" {
   [ -x "$VERIFY" ]
   [ -x "$PIPELINE_DIR/lib/verify-boot-artifacts.sh" ]
+}
+
+@test "Bluetooth closure: every positive has its exact pin in fragment and required manifest" {
+  # Given the reviewed v7.2 contract, When reading each declaration, Then require
+  # one exact value in both independent inputs, never a bare BT parent or =y transport.
+  local entry file
+  for entry in "${BT_POSITIVE[@]}"; do
+    for file in "$FRAGMENT" "$REQUIRED"; do
+      [ "$(grep -cFx "CONFIG_$entry" "$file")" -eq 1 ] \
+        || { echo "missing/duplicate CONFIG_$entry in $file"; return 1; }
+    done
+  done
+}
+
+@test "Bluetooth closure: every negative is explicitly off and forbidden by name" {
+  # Given the closed negative set, When reading policy, Then both inputs forbid it.
+  local sym
+  for sym in "${BT_NEGATIVE[@]}"; do
+    grep -qxF "# CONFIG_$sym is not set" "$FRAGMENT" \
+      || { echo "fragment must explicitly disable CONFIG_$sym"; return 1; }
+    grep -qxF "CONFIG_$sym" "$FORBIDDEN" \
+      || { echo "forbidden manifest must name CONFIG_$sym"; return 1; }
+  done
+}
+
+@test "Bluetooth closure: verifier rejects every positive when its resolved value changes" {
+  # Given a complete synthetic checker fixture (NOT Kconfig resolution evidence),
+  # When one reviewed value changes, Then the real required-manifest gate names it.
+  awk '/^CONFIG_/ { if ($0 !~ /=/) $0=$0 "=y"; print }' "$REQUIRED" >"$WORK/good"
+  local entry sym wrong
+  for entry in "${BT_POSITIVE[@]}"; do
+    sym="CONFIG_${entry%=*}"
+    case "${entry#*=}" in m) wrong=y ;; y) wrong=m ;; esac
+    awk -F= -v sym="$sym" '$1 != sym' "$WORK/good" >"$WORK/wrong"
+    printf '%s=%s\n' "$sym" "$wrong" >>"$WORK/wrong"
+    run "$VERIFY" --config "$WORK/wrong" --required "$REQUIRED"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"$sym: REQUIRED as $sym=${entry#*=}"* ]]
+  done
+}
+
+@test "Bluetooth closure: verifier rejects every positive when resolution drops it" {
+  # Given a complete checker fixture, When one value is absent, Then reject by name.
+  awk '/^CONFIG_/ { if ($0 !~ /=/) $0=$0 "=y"; print }' "$REQUIRED" >"$WORK/good"
+  local entry sym
+  for entry in "${BT_POSITIVE[@]}"; do
+    sym="CONFIG_${entry%=*}"
+    awk -F= -v sym="$sym" '$1 != sym' "$WORK/good" >"$WORK/dropped"
+    run "$VERIFY" --config "$WORK/dropped" --required "$REQUIRED"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"$sym: REQUIRED but"* ]]
+  done
+}
+
+@test "Bluetooth closure: verifier rejects every forbidden symbol when enabled" {
+  # Given a forbidden manifest, When a named symbol is enabled, Then reject y AND m.
+  local sym value
+  for sym in "${BT_NEGATIVE[@]}"; do
+    for value in y m; do
+      printf 'CONFIG_%s=%s\n' "$sym" "$value" >"$WORK/enabled"
+      run "$VERIFY" --config "$WORK/enabled" --forbidden "$FORBIDDEN"
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"CONFIG_$sym: FORBIDDEN"* ]]
+    done
+  done
 }

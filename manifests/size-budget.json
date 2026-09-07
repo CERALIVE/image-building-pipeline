@@ -1,5 +1,5 @@
 {
-  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling (Task 20). measure-size.sh sizes rootfs CONTENT via `du --apparent-size -sb` (real file bytes, NOT the frozen 4096 MB A/B partition \u2014 G4/E5) and exits non-zero when measured > rootfs_bytes_max. 1500000000 (1.5 GB) is a conservative post-slim ceiling: a minimal Debian bookworm arm64 rootfs (suite-literal-ok: the suite this ceiling was MEASURED on; the number is the budget, and re-measuring it belongs to the size-gate work) with the slimmed shared.list (~35 pkgs, T17) + GStreamer + modem stack measures ~0.8-1.2 GB apparent, leaving headroom. This is a placeholder ceiling that the first real arm64 build refines downward (record the measured value, set the ceiling just above it). Keys beginning with '_' are metadata, not board entries.",
+  "_comment": "rootfs_bytes_max is the BLOCKING per-board content ceiling, not the frozen 4096M ext4 slot size. The universal 1500000000-byte placeholder is retired for RK3588 full-firmware adoption: both boards use 3500000000, x86 remains 1500000000. Budget review uses wet per-board measurements and stays below the frozen slot minus 536870912 bytes; actual populated-slot bavail and inode reserves are checked independently. Planning estimates authorize no artifact. See docs/bluetooth-firmware-closure.md. Keys beginning with '_' are metadata, not board entries.",
   "_baked_binaries": {
     "_comment": "Non-apt binaries fetched + staged into the rootfs at build time (postinst-lib.sh), recorded here so the per-board rootfs_bytes_max headroom stays auditable. bytes = staged binary size measured 2026-07-02; all comfortably under the 1.5 GB ceiling. Metadata only \u2014 NOT a board entry (measure-size.sh ignores '_'-prefixed keys).",
     "mediamtx": {
@@ -11,9 +11,9 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` is the REAL `du --apparent-size -sb <board>/<ts>.rootfs.tar` of a wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), and it must stay byte-identical to the matching ci/size-baseline.<board>.json \u2014 mkosi-image-contract.bats fails the build if the two registries disagree. Both RK3588 boards are under the 1.5 GB ceiling with ~78-85 MB of headroom. rootfs_bytes_max has never been moved in either direction. See each board's note for the armbian-firmware pin caveat. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` retains REAL historical wet vendor-BSP rootfs.tar measurements, byte-identical to ci/size-baseline.<board>.json. These are NOT full-firmware/mainline image measurements; no planning projection replaces them. Both boards require fresh wet builds after adoption. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
-    "rootfs_bytes_max": 1500000000,
+    "rootfs_bytes_max": 3500000000,
     "measured": 1422766080,
     "measured_at": "2026-08-08",
     "measured_commit": "a575a9a",
@@ -21,7 +21,7 @@
     "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, and that is NO LONGER the committed pin: armbian-bsp-deb-versions.txt was promoted to 26.8.3 on 2026-08-26 because the Armbian archive keeps only the newest revision of that Architecture:all package and 26.8.1 had been purged from both the index and the pool. This measurement therefore PREDATES the current pin, and the 26.8.1 -> 26.8.3 firmware delta is NOT reflected in the figure below; re-measure on the next wet vendor-BSP build. The earlier 26.5.1 -> 26.8.1 promotion's +3,389,440 B firmware delta IS already inside it. Supersedes the 2026-08-02 / 67d053a baseline (1418792960); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
   },
   "rock-5b-plus": {
-    "rootfs_bytes_max": 1500000000,
+    "rootfs_bytes_max": 3500000000,
     "measured": 1415188480,
     "measured_at": "2026-08-08",
     "measured_commit": "a575a9a",

@@ -94,6 +94,8 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
+| Full-firmware provenance, Bluetooth prune closure, slot budget and the hardware-honesty boundary | [`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md) — the WHY behind each number; `manifests/armbian-firmware-content.json`, `manifests/rk3588-bluetooth-firmware-roots.txt`, `lib/check-bluetooth-firmware.sh`, `lib/shared/slot-reserve.sh` |
+| **Which update path a symptom belongs to** (apt vs automatic RAUC vs the manual, inert-by-default `ceralive-update`) | the OTA-during-stream guard KEY FACT below, and [`README.md`](README.md) → "Update Paths". CeraUI's update button is the **apt** path and never invokes `ceralive-update` |
 | Unit tests / boot fallback | the six manifest contract suites `tests/{manifest-schema,package-contract,postinst-wiring,mkosi-image-contract,runtime-services,variant-contract}.bats`, `tests/rk3588-ab-contract.bats`, and `tests/packaging-hygiene.bats` (absence guards for the removed conf.d seeds / `ceralive-optimize@` want / ceracoder x86 refs) via `run-tests` (GNU-parallel runs files in parallel but cases within each file stay serial; shared working-tree and build-plan probes lock through `manifest-helpers.bash::serialize`, whose lock name is the RESOURCE and must never re-acquire a per-suite component — see the KEY FACT below); RK3588 bootcount proof: `mkosi/platform/boot/test-fallback.sh`; x86 forced-primary proof: `tests/qemu-x86.sh --fallback-selftest` |
 | **`/boot` completeness (both kernel paths)** | `lib/verify-boot-artifacts.sh` (the `[6b/9]` build gate), `tests/boot-artifacts.bats` — see the KEY FACT below |
 | **A/B selector arithmetic + load guards + its own scratch `loadaddr`** | `mkosi/platform/boot/boot.scr.cmd`, proof `tests/boot-script-sanitize.test.sh` — see the no-`setexpr` and the undefined-`loadaddr` SError KEY FACTs below |
@@ -124,6 +126,29 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
 ## KEY FACTS
+
+**Offline image scans must not follow absolute unit aliases into the host.**
+The wait-online contract scans regular unit files under the image's `/etc`,
+`/usr/lib` and `/lib` systemd directories with `grep -r`, not `-R`; installed
+absolute aliases otherwise cause host-relative missing-file errors. Its synthetic
+absolute-alias and injected hard-dependency legs protect both directions.
+`tests/mkosi-contract.bats` also requires the intentional device-side apt hygiene
+in both writers; the former BUILD-only translation assertion is retired by that
+policy. Executable output parity: `tests/apt-mtls-and-dedupe.test.sh`.
+
+**RK3588 full firmware adoption supersedes the trimmed-package/1.5 GB history
+below** [EXISTS — integration gated, full-image and new-adapter hardware proof pending].
+`firmware_packages` selects only `armbian-firmware-full=26.8.3`. Both signed-index
+transports and staged bytes must match the committed **.deb ARCHIVE FILE** SHA.
+The production Bluetooth/UHID closure is checked before pruning; runtime roots
+and all static objects survive it. Exactly two static references carry closed,
+owner-reviewed `reviewed-hardware-gap` exceptions, never runtime misclassification.
+Both RK3588 content ceilings are 3.5 GB; x86 stays 1.5 GB. Frozen 4096M slots each
+must retain 512 MiB **bavail** and `max(ceil(inodes/10),20000)` free inodes after
+population, enforced by assembly, `verify-disk.sh check-slot` and preflash.
+The old measured baselines remain historical, not measurements of this change.
+Contract, driver/board citations, exact gaps and executable tests:
+[`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md).
 
 **A patch-series pin update includes the independent test expectations.**
 `tests/variant-contract.bats` checks the exact reviewed `patches_commit` in both
@@ -3200,7 +3225,9 @@ pair as a negative control.
 device — else OTA is 100% broken** [EXISTS]
 
 The device runs Debian bookworm's `rauc 1.8-2`. `rauc install` (the config-driven
-path `ceralive-update` / CeraUI `system.startUpdate()` actually use) failed on real
+path the MANUAL `ceralive-update` script uses — NOT CeraUI's
+`system.startUpdate()`, which is the apt package path; see the OTA-during-stream
+guard KEY FACT for the three separate update paths) failed on real
 Rock 5B+ hardware in three stacked ways, all fixed here. A REAL, complete,
 end-to-end OTA install with all three fixes combined has now been PROVEN on
 physical Rock 5B+ hardware: signature verified, manifest checked, slot B was
@@ -3467,9 +3494,30 @@ Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §9.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]
 
+**There are THREE update paths and CeraUI drives only the apt one — this guard is
+on a different path than the one people assume.** CeraUI's update button is the
+**apt package** path: its `system.startUpdate` RPC reaches `startSoftwareUpdate()`,
+which launches a detached `systemd-run` unit executing `/usr/bin/apt-get`. It does
+**not** invoke `ceralive-update`; no caller of that script exists anywhere in the
+workspace, and CeraUI's `rauc status` use is read-only slot observation, not
+installation. `rauc-hawkbit-updater` is the only AUTOMATIC RAUC OS-update trigger,
+staging to `/data/ceralive/rauc-downloads/bundle.raucb` before a D-Bus
+`InstallBundle`. `/usr/local/bin/ceralive-update` is the MANUAL path, and it is
+**inert by default** because `persistence.sh` seeds `update.conf` with an empty
+`BUNDLE_URL` and the script refuses to run without one.
+
+One operational trap on that manual path, existing behaviour that predates and is
+untouched by this text: Debian's `rauc` 1.13 is built `-Dstreaming=true`, and a
+streaming-enabled RAUC **rejects a remote `plain` bundle**
+(`Bundle format 'plain' not supported in streaming mode`) instead of downloading
+it — so an operator who sets `BUNDLE_URL` to an `https://` URL gets a hard
+failure, and that field must name a local file path today. Do not "fix" it here.
+This does **not** make the guard below unreachable: the guard is correct and still
+applies whenever the script is run.
+
 `/usr/local/bin/ceralive-update` (generated by
-`postinst-lib.sh::setup_data_persistence`, invoked by CeraUI
-`system.startUpdate()`) installs the RAUC bundle named by `BUNDLE_URL` in
+`postinst-lib.sh::setup_data_persistence`, run MANUALLY by an operator) installs
+the RAUC bundle named by `BUNDLE_URL` in
 `/data/ceralive/update.conf`. Before it touches RAUC it bails if any active unit
 in its stream-guard list is running — `systemctl is-active --quiet` (so a
 stopped OR not-installed unit reads `inactive` and never blocks). The list

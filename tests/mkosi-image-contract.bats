@@ -257,10 +257,10 @@ PY
   done
 }
 
-@test "size-gate: a tree over the COMMITTED ceiling fails the gate (sparse 2 GiB > 1.5 GB budget)" {
+@test "size-gate: a tree over the COMMITTED ceiling fails the gate (sparse 3500000001 > 3500000000)" {
   local tree="$BATS_TEST_TMPDIR/rootfs-over"
   mkdir -p "$tree"
-  truncate -s 2G "$tree/oversize.img"
+  truncate -s 3500000001 "$tree/oversize.img"
   run "$MEASURE_SH" rock-5b-plus "$tree"
   [ "$status" -ne 0 ]
   [[ "$output" == *"exceeds budget"* ]]
@@ -355,7 +355,7 @@ PY
   run_size_gate_block 1 "$SIZE_BUDGET_JSON" "$tree"
   [ "$status" -eq 0 ]
   [[ "$output" == *"[6c/9] enforcing the rootfs size budget"* ]]
-  [[ "$output" =~ measured=[0-9]+\ budget=1500000000\ \(enforced\) ]]
+  [[ "$output" =~ measured=[0-9]+\ budget=3500000000\ \(enforced\) ]]
 }
 
 @test "size-gate wiring: the shipped block ABORTS the build on an over-budget artifact" {
@@ -773,10 +773,7 @@ print('X86-CEILING-OK')
   [[ "$output" == *"X86-CEILING-OK"* ]]
 }
 
-@test "size-gate: no board's ceiling may be raised above 1.5 GB" {
-  # Raising rootfs_bytes_max to match an overage launders it into a passing gate.
-  # Both RK3588 boards were 65-76 MB over and the ceiling was never moved; that is
-  # the precedent this pins. Lowering stays allowed.
+@test "size-gate: board-measured ceilings stay below the frozen slot with reserve" {
   run python3 -c "
 import json
 d = json.load(open('$SIZE_BUDGET_JSON', encoding='utf-8'))
@@ -784,7 +781,11 @@ for name, entry in d.items():
     if name.startswith('_'):
         continue
     limit = entry['rootfs_bytes_max']
-    assert limit <= 1500000000, '%s: rootfs_bytes_max %d exceeds the 1.5 GB policy ceiling' % (name, limit)
+    maximum = 1500000000 if name == 'x86-minipc' else 3500000000
+    assert 0 < limit <= maximum < 4096 * 1024 * 1024 - 536870912, name
+    if entry.get('measured') is not None:
+        assert entry['measured'] <= limit, '%s measured payload exceeds budget' % name
+        assert entry.get('measured_at') and entry.get('measured_commit'), name
 print('CEILING-POLICY-OK')
 "
   [ "$status" -eq 0 ]

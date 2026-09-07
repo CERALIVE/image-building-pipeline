@@ -410,9 +410,22 @@ determine current runlevel`, `dir not exist`).
 
 ## Image Size Gate
 
+**Current RK3588 policy:** exact-version and archive-content-pinned
+`armbian-firmware-full=26.8.3` replaces the trimmed package. Both RK3588 content
+ceilings are **3.5 GB**; x86 remains **1.5 GB**. Each populated 4096 MiB RK3588 slot
+must also retain **512 MiB available (`bavail`) bytes** and
+`max(ceil(total_inodes/10),20000)` free inodes. Assembly and preflash enforce the
+same assertion. Bluetooth roots survive the consumer-based prune, with exactly
+two reviewed future-hardware static-firmware gaps. See
+[`Full firmware and populated-slot safety`](docs/bluetooth-firmware-closure.md)
+for the check commands, exceptions and validation boundary. Both full image
+builds and new-adapter hardware validation remain separate gates.
+
+### Historical slim-package measurements (retired RK3588 1.5 GB placeholder)
+
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
-apparent size exceeds **1.5 GB** the build fails there, so no `.raw` and no `.raucb`
+apparent size exceeds its **per-board ceiling** the build fails there, so no `.raw` and no `.raucb`
 are produced. A `DRY_RUN=1` plan-only run never reaches it, and an
 `INSTALL_BOOT_BSP=0` parity build skips it with a warning (a kernel-less rootfs is
 not the shipped image). It is not architecture-gated — every shipped board carries a
@@ -420,7 +433,7 @@ real ceiling. See [`docs/size-notes.md`](docs/size-notes.md) for the wiring
 (§10) and the levers applied (locale strip, `WithDocs=no`, firmware audit, Mesa
 software-GL prune).
 
-Both RK3588 boards are under the ceiling: `rock-5b-plus` 1,412,259,840 B and
+Both RK3588 boards were under the old ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
 software-GL prune — `libgl1-mesa-dri` drags Mesa's Gallium megadriver, LLVM's JIT
 and the Z3 solver into the image for a rasterizer no base-image component ever
@@ -918,12 +931,34 @@ symbol declarations and unit-file content — because this repo's CI has no
 privileged network namespace. On-device apply/reload/teardown is a labelled
 hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
-## OTA-During-Stream Guard
+## Update Paths — three of them, and CeraUI drives only one
 
-`/usr/local/bin/ceralive-update` (the RAUC update entrypoint CeraUI invokes)
-refuses to install a bundle while the device is actively streaming. It checks
-all three live-media units with `systemctl is-active` and aborts if any is
-running:
+These are independent mechanisms with different triggers, and reading them as one
+"update button" is how the wrong thing gets debugged:
+
+| Path | Trigger | What it does |
+|---|---|---|
+| **apt package upgrade** | CeraUI's update button — its `system.startUpdate` RPC reaches `startSoftwareUpdate()`, which launches a detached `systemd-run` unit executing `/usr/bin/apt-get` | Upgrades the first-party app packages from `apt.ceralive.tv`. Never touches the frozen boot stack (see "Kernel Freeze" above) |
+| **RAUC OS update, automatic** | `rauc-hawkbit-updater` | Downloads a bundle to `/data/ceralive/rauc-downloads/bundle.raucb`, then installs it over D-Bus `InstallBundle`. This is the only automatic RAUC trigger on the device |
+| **RAUC OS update, manual** | An operator running `/usr/local/bin/ceralive-update` | **Inert by default.** `persistence.sh` seeds `/data/ceralive/update.conf` with an empty `BUNDLE_URL`, and the script refuses to run without one |
+
+**CeraUI does not invoke `ceralive-update`.** No caller of it exists anywhere in
+the workspace. CeraUI's other RAUC contact is `rauc status`, which is read-only
+slot observation, not installation.
+
+**Operational trap on the manual path, pre-existing and untouched here.** Debian's
+`rauc` 1.13 is built `-Dstreaming=true`, and a streaming-enabled RAUC **rejects a
+remote `plain` bundle** (`Bundle format 'plain' not supported in streaming mode`)
+rather than downloading it. So an operator who sets `BUNDLE_URL` to an `https://`
+URL gets a hard failure: today that field must name a **local file path**. This is
+existing behaviour, recorded rather than fixed.
+
+### OTA-During-Stream Guard
+
+`/usr/local/bin/ceralive-update` — the manual path above — refuses to install a
+bundle while the device is actively streaming. The guard is real and correct; it
+simply belongs to that path, and applies whenever the script is run. It checks all
+three live-media units with `systemctl is-active` and aborts if any is running:
 
 - `cerastream.service` — the encoder
 - `srtla.service` — the bonding **receiver** role

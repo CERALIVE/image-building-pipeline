@@ -53,6 +53,7 @@ PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 source "${PIPELINE_DIR}/lib/rauc-bundle-inspect.sh"
 # shellcheck source=ci/board-identity.sh
 source "${PIPELINE_DIR}/ci/board-identity.sh"
+source "${PIPELINE_DIR}/lib/shared/slot-reserve.sh"
 IMAGES_DIR="${IMAGES_DIR:-${PIPELINE_DIR}/images}"
 
 # ---------------------------------------------------------------------------
@@ -538,6 +539,11 @@ check_rootfs_populated() {
   # conv=sparse keeps the slice ~rootfs-sized on disk despite the 4 GiB logical size.
   dd if="${img}" of="${tmp}" bs="${SECTOR}" skip="${start_sector}" count="${size_sectors}" \
     conv=sparse status=none 2>/dev/null
+  if slot_reserve_assert_ext4 "${tmp}" "${label}"; then
+    pass "${label} ext4 available-byte/inode reserve"
+  else
+    fail "${label} ext4 available-byte/inode reserve"
+  fi
   local found=""
   local p
   for p in /usr/lib/systemd/systemd /sbin/init; do

@@ -140,6 +140,24 @@ CONFIG_FAULT_INJECTION
 CONFIG_DEBUG_KMEMLEAK
 CONFIG_LOCALVERSION_AUTO
 
+# --- Bluetooth: production exclusions --------------------------------------
+# Virtual HCI, selftests/debugfs, Qualcomm SMD, Amlogic/Nokia UART protocols,
+# obsolete USB devices and 6LoWPAN are outside the maximum-stable closure.
+# USB autosuspend stays opt-out by default, independently of transport presence.
+CONFIG_BT_HCIVHCI
+CONFIG_BT_SELFTEST
+CONFIG_BT_SELFTEST_ECDH
+CONFIG_BT_SELFTEST_SMP
+CONFIG_BT_DEBUGFS
+CONFIG_BT_QCOMSMD
+CONFIG_BT_HCIUART_AML
+CONFIG_BT_HCIUART_NOKIA
+CONFIG_BT_HCIBPA10X
+CONFIG_BT_HCIBFUSB
+CONFIG_BT_HCIBCM203X
+CONFIG_BT_6LOWPAN
+CONFIG_BT_HCIBTUSB_AUTOSUSPEND
+
 # --- 2b. MNH-23: the island's non-compiled MPP clients ----------------------
 # The island compiles EXACTLY THREE MPP clients — RKVENC2, RKVDEC2, JPGDEC — and its
 # own ANTI-PATTERNS forbid a fourth. Every other client is retained as source for

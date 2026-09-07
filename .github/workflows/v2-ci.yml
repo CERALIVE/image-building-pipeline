@@ -476,7 +476,7 @@ jobs:
     # Blocking per-board size ceiling. measure-size.sh sizes rootfs CONTENT
     # (du --apparent-size -sb — NOT the frozen 4096 MB partition, G4/E5). DRY_RUN
     # ships no real rootfs, so the positive leg uses a synthetic under-budget tree
-    # and the negative leg a sparse 2 GiB tree that MUST trip the gate — without
+    # and the negative leg a sparse 4 GiB tree that MUST trip the gate — without
     # the negative leg an always-passing gate would look identical.
     name: rootfs size gate (blocking)
     runs-on: ubuntu-latest
@@ -531,7 +531,7 @@ jobs:
           # so the grep below sees it; the if guards the gate's non-zero exit.
           over="${RUNNER_TEMP}/rootfs-over"
           mkdir -p "${over}"
-          truncate -s 2G "${over}/oversize.img"
+          truncate -s 4G "${over}/oversize.img"
           if ./lib/measure-size.sh rock-5b-plus "${over}" > size-over.log 2>&1; then
             cat size-over.log
             echo "::error::size gate did NOT fail on an over-budget rootfs"

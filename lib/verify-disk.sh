@@ -21,6 +21,7 @@
 #
 # Usage:
 #   verify-disk.sh do_verify <img> <board>
+#   verify-disk.sh check-slot <populated.ext4> <rootfs_a|rootfs_b>
 #
 #   do_verify  Assert a PRE-BUILT disk image against the contract and exit non-zero
 #              on the first failed assertion. The layout (A/B vs single-slot) is
@@ -36,6 +37,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
+source "${HERE}/shared/slot-reserve.sh"
 
 # ---------------------------------------------------------------------------
 # FROZEN contract constants (docs/partition-contract.md §3). Sizes in MB == MiB.
@@ -162,6 +164,10 @@ main() {
   case "${mode}" in
     do_verify)
       do_verify "$@"
+      ;;
+    check-slot)
+      [[ $# == 2 ]] || die "check-slot requires <populated.ext4> <slot-label>"
+      slot_reserve_assert_ext4 "$1" "$2" || die "populated slot reserve failed"
       ;;
     -h|--help|"")
       sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

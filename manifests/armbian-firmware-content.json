@@ -1,0 +1,8 @@
+{
+  "package": "armbian-firmware-full",
+  "version": "26.8.3",
+  "architecture": "all",
+  "archive_sha256": "13d10a85a1fa02a989eb2c3e9696f3c931bc9cf2b6059e435c4bd2c75ec53d19",
+  "compressed_bytes": 763716604,
+  "installed_kib": 2283248
+}

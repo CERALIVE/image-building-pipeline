@@ -95,18 +95,18 @@ uboot_packages: []
 # ever resolved a `linux-dtb-*` package here.
 dtb_packages: []
 
-# Shared SoC/GPU/Wi-Fi firmware. armbian-firmware is the broad Armbian firmware
+# Shared SoC/GPU/Wi-Fi firmware. armbian-firmware-full is the broad Armbian firmware
 # bundle (ships realtek + broadcom WiFi blobs) and carries the Mali GPU's own CSF
 # firmware, which the in-tree `panthor` driver loads.
 #
-# Task 19 firmware-split audit — KEEP armbian-firmware, do NOT swap to the Debian
+# Task 19 firmware-split audit — keep Armbian ownership, do NOT swap to the Debian
 # split (firmware-realtek + firmware-brcm80211). Armbian ships per-board NVRAM
 # (.txt) configuration files alongside the blobs that Debian's split packages
 # omit:
 #   * Rock 5B+   → RTL8852BE  (was rtl8852be-firmware + firmware-realtek)
 #   * Orange Pi 5+ → AP6275P / brcmfmac (Broadcom)
-# `armbian-firmware` is already the TRIMMED Armbian variant (NOT
-# armbian-firmware-full), i.e. the narrowest safe lever available.
+# The full archive replaces the trimmed package for the Bluetooth closure.
+# Version AND .deb archive SHA are frozen; reviewed roots survive consumer pruning.
 # Size/feasibility detail: docs/size-notes.md.
 #
 # NO libmali. The proprietary Mali-G610 (Valhall) userspace blob drove Rockchip's
@@ -128,7 +128,7 @@ dtb_packages: []
 # partitions the staging tree would not name it. Overlays ADD; they can never
 # subtract.
 firmware_packages:
-  - armbian-firmware
+  - armbian-firmware-full
 
 # Decision D3: the staged U-Boot has no persistent fw_setenv → raw GPT bootcount
 # approach. Unchanged by the kernel retirement.

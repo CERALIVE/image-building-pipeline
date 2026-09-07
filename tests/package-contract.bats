@@ -2117,7 +2117,7 @@ REPRO
     out="$(bash -c "'$RESOLVE_SH' '$board' 2>/dev/null")"
     [[ "$out" == *"UBOOT_PACKAGES='linux-u-boot-"*"-edge'"* ]]
     [[ "$out" == *"KERNEL_PACKAGES='linux-image-7.2.0-ceralive-rk3588'"* ]]
-    [[ "$out" == *"FIRMWARE_PACKAGES='armbian-firmware'"* ]]
+    [[ "$out" == *"FIRMWARE_PACKAGES='armbian-firmware-full'"* ]]
     # No separate DTB package on any track now — bindeb-pkg ships the in-tree
     # DTBs inside the linux-image deb, so the freeze is a 3-package set.
     [[ "$out" == *"DTB_PACKAGES=''"* ]]

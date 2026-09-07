@@ -11,6 +11,18 @@
 # Bodies moved VERBATIM from fetch-debs.sh; no behaviour change.
 #
 # shellcheck shell=bash
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/firmware-content.sh"
+
+bsp_assert_firmware_content() {
+  local index="$1" spec
+  shift
+  for spec in "$@"; do
+    if [[ "${spec%%=*}" == armbian-firmware-full ]]; then
+      firmware_content_assert_index "${HERE}/../manifests/armbian-firmware-content.json" "${index}" || return 1
+    fi
+  done
+}
+
 bsp_download_specs() {
   [[ -f "${BSP_DEB_VERSIONS_FILE}" ]] \
     || die "exact BSP Debian version file missing: ${BSP_DEB_VERSIONS_FILE}"
@@ -134,8 +146,10 @@ _fetch_bsp_native() {
   _BSP_DEBS="${debs}"
   _APT_OPTS=("${apt_opts[@]}")
   _BSP_APT_INDEX=""
-  if [[ -z "${DRY_RUN}" ]] && debcache_enabled; then
+  if [[ -z "${DRY_RUN}" ]]; then
     _BSP_APT_INDEX="$(debcache_apt_index "${apt_state}")"
+    bsp_assert_firmware_content "${_BSP_APT_INDEX}" "${bsp_pkgs[@]}" \
+      || die "BSP firmware archive content pin rejected native signed index"
   fi
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_bsp_native_one "${bsp_pkgs[@]}" \
@@ -247,6 +261,8 @@ _fetch_bsp_curl() {
   if [[ -z "${DRY_RUN}" ]]; then
     bsp_assert_index_specs "${_PKG_INDEX}" "${ARCH}" "${bsp_pkgs[@]}" \
       || die "BSP signed index preflight failed before package downloads"
+    bsp_assert_firmware_content "${_PKG_INDEX}" "${bsp_pkgs[@]}" \
+      || die "BSP firmware archive content pin rejected curl signed index"
   fi
   local jobs="${FETCH_JOBS}"; [[ -n "${DRY_RUN}" ]] && jobs=1
   _run_bounded "${jobs}" _fetch_bsp_curl_one "${bsp_pkgs[@]}" \
@@ -323,6 +339,9 @@ fetch_bsp() {
 
   local -a declared=()
   mapfile -t declared < <(collect_declared_bsp_pkgs "${family}")
+  if [[ " ${declared[*]} " == *' armbian-firmware-full '* && " ${declared[*]} " == *' armbian-firmware '* ]]; then
+    die "BSP firmware packages must not coexist: armbian-firmware and armbian-firmware-full"
+  fi
   if (( ${#declared[@]} == 0 )); then
     die "fetch_bsp: no BSP packages found in ${family} or env (expected kernel/dtb/uboot/firmware names)"
   fi
@@ -378,6 +397,25 @@ fetch_bsp() {
     _fetch_bsp_native "${debs}" "${bsp_specs[@]}"
   else
     _fetch_bsp_curl "${debs}" "${bsp_specs[@]}"
+  fi
+
+  if [[ -z "${DRY_RUN}" && " ${bsp_pkgs[*]} " == *' armbian-firmware-full '* ]]; then
+    local firmware_deb firmware_pin firmware_count=0
+    firmware_pin="$(firmware_content_read "${HERE}/../manifests/armbian-firmware-content.json")" \
+      || die "invalid firmware archive content pin"
+    for firmware_deb in "${debs}"/*.deb; do
+      [[ "$(deb_pkg_name "${firmware_deb}")" == armbian-firmware-full ]] || continue
+      firmware_count=$((firmware_count + 1))
+      local pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib
+      IFS=$'\t' read -r pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib <<<"${firmware_pin}"
+      if ! assert_deb_identity "${firmware_deb}" "${pin_pkg}" "${pin_version}" "${pin_arch}" \
+        || ! auth_verify_file "${firmware_deb}" "${pin_sha}" \
+        || [[ "$(stat -c %s "${firmware_deb}")" != "${pin_bytes}" ]] \
+        || [[ "$(deb_control_field "${firmware_deb}" Installed-Size)" != "${pin_kib}" ]]; then
+        die "staged firmware .deb ARCHIVE FILE differs from committed content pin"
+      fi
+    done
+    (( firmware_count == 1 )) || die "expected exactly one pinned full firmware archive; got ${firmware_count}"
   fi
 
   # Provenance + content drift-guard for the exact-versioned kernel BSP. The board

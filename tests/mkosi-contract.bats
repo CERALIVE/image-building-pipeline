@@ -162,11 +162,17 @@ sectioned_keys() {
   grep -Fq 'Acquire::Languages "none";' "$conf"
 }
 
-@test "mkosi-contract: the translation setting is BUILD-only, not device apt config" {
-  # E4 guardrail: the device's runtime apt configuration is written by the runtime
-  # postinst and must not inherit a build-sandbox acquire policy.
-  run grep -rn 'Acquire::Languages' "$MKOSI_DIR/mkosi.images" "$MKOSI_DIR/customize"
-  [ "$status" -ne 0 ]
+@test "mkosi-contract: device apt hygiene is explicit in both runtime writers" {
+  # Runtime hygiene is now deliberate policy, not leaked sandbox configuration.
+  # The executable twin-output contract additionally verifies their emitted files.
+  local writer directive
+  for writer in "$MKOSI_DIR/mkosi.images/runtime/mkosi.postinst.chroot" \
+                "$MKOSI_DIR/customize/apt-ceralive-repo.sh"; do
+    for directive in 'Acquire::Languages "none";' 'Acquire::GzipIndexes "true";' \
+                     'Acquire::CompressionTypes::Order "gz";'; do
+      grep -Fq "$directive" "$writer"
+    done
+  done
 }
 
 @test "mkosi-contract: every image layer installs docs (alternatives ordering)" {
