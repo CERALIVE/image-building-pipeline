@@ -875,8 +875,7 @@ jobs:
   build-plan-xrunner:
     name: build-plan cross-runner sha (${{ matrix.os }} / ${{ matrix.board }}) [plan-only]
     runs-on: ${{ matrix.os }}
-    needs: [changes, bats]
-    if: needs.changes.outputs.code == 'true'
+    needs: bats
     # Advisory by default; promote to blocking via repo var XRUNNER_PARITY_BLOCKING.
     continue-on-error: ${{ vars.XRUNNER_PARITY_BLOCKING != 'true' }}
     strategy:
@@ -927,8 +926,7 @@ jobs:
   build-plan-xrunner-gate:
     name: build-plan cross-runner determinism gate [plan-only, advisory]
     runs-on: ubuntu-latest
-    needs: [changes, build-plan-xrunner]
-    if: needs.changes.outputs.code == 'true'
+    needs: build-plan-xrunner
     # Advisory by default (see PROMOTION NOTE above); flip to blocking by setting
     # the repo variable XRUNNER_PARITY_BLOCKING=true after a green in-budget run.
     continue-on-error: ${{ vars.XRUNNER_PARITY_BLOCKING != 'true' }}
