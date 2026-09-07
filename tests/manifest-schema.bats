@@ -259,3 +259,9 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" == *"not found"* ]]
 }
+
+# Deliberately failing test. Proves the CI summary job reports RED when a bats
+# unit test fails. Never merged.
+@test "non-vacuity probe: the summary job must go red on a failing bats test" {
+  [ 1 -eq 2 ]
+}
