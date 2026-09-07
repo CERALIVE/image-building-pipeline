@@ -127,6 +127,17 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**The real-Avahi harness needs a bounded socket path, not the image TMPDIR.**
+`tests/real-avahi-hostname-contract.sh` creates its small, mode-0700 fixture at
+`/var/tmp/ceralive-real-avahi.XXXXXX`, independently of the suite's `TMPDIR`.
+libdbus rejects socket paths over 99 bytes: a long checkout plus
+`images/ceralive-real-avahi.XXXXXX/concurrent/device-a/bus` can exceed that
+before any daemon enters a network namespace. Keep disk-heavy tests on their
+chosen scratch volume; do not propagate that path into this socket fixture.
+D-Bus startup failures print the daemon log before trap cleanup removes it.
+The long-TMPDIR regression lives in `tests/runtime-services.bats`; the real
+contract still proves concurrent claims, preowned names and late-LAN merges.
+
 **Offline image scans must not follow absolute unit aliases into the host.**
 The wait-online contract scans regular unit files under the image's `/etc`,
 `/usr/lib` and `/lib` systemd directories with `grep -r`, not `-R`; installed

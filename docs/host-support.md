@@ -69,6 +69,30 @@ limitation + workaround; do **not** assume the **native** build works.
 
 ---
 
+## Privileged contract prerequisites
+
+Run the complete hardware-free gate with all three contracts required:
+
+```sh
+CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
+CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
+```
+
+The host needs passwordless/cached `sudo`, network and mount namespace support,
+Avahi plus D-Bus tools, and the RAUC/loop/mount prerequisites described in the
+README. The Avahi harness starts its private D-Bus as the invoking user in the
+host network namespace; only Avahi enters the isolated network/mount namespaces.
+
+The Avahi fixture is small and uses a unique, mode-0700 directory under
+`/var/tmp`, intentionally independent of `TMPDIR`. libdbus rejects socket
+pathnames over 99 bytes, so a disk-backed `TMPDIR` under a long checkout can
+make D-Bus exit with `Socket name too long` even though the same command works
+under a short path. The harness prints D-Bus stderr on startup failure before
+removing its private resources. Do not disable security policy or skip the real
+contract to address a pathname-length error. Disk-heavy tests can retain their
+disk-backed scratch directory; the Avahi fixture contains no board images.
+
 ## Docker Desktop is refused — the bind mount cannot carry a rootfs
 
 `lib/common.sh::assert_container_daemon_supported` reads the daemon's reported

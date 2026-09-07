@@ -17,7 +17,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"
 POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"
-TMP="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-real-avahi.XXXXXX")"
+# D-Bus rejects socket paths over 99 bytes. The suite's disk-backed TMPDIR
+# can already exceed that once /concurrent/device-a/bus is appended. This
+# small, ephemeral fixture needs a bounded path, not the image scratch volume.
+TMP="$(mktemp -d /var/tmp/ceralive-real-avahi.XXXXXX)"
 TAG="$(printf '%06x' "$((BASHPID % 16777215))")"
 
 declare -a NETNS_NAMES=()
@@ -268,9 +271,13 @@ EOF
   printf '%s\n' "$dbus_pgid" >"$root/dbus.pgid"
   for _ in $(seq 1 100); do
     [[ -S "$root/bus" ]] && break
+    kill -0 "$dbus_pgid" 2>/dev/null || break
     sleep 0.05
   done
-  [[ -S "$root/bus" ]] || fail "private D-Bus did not create $root/bus"
+  [[ -S "$root/bus" ]] || {
+    cat "$root/dbus.log" >&2
+    fail "private D-Bus did not create $root/bus"
+  }
 
   setsid sudo -n env RUN_DIR="$root/run" CONF="$root/avahi.conf" \
     DBUS_SYSTEM_BUS_ADDRESS="unix:path=$root/bus" \

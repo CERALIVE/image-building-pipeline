@@ -229,6 +229,12 @@ still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses privat
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
 
+The Avahi harness keeps its small, private fixture under `/var/tmp` regardless
+of `TMPDIR`: libdbus rejects socket paths longer than 99 bytes, so a long
+checkout-relative scratch path can prevent the private bus from starting.
+Disk-heavy suites still honor their own scratch configuration. See
+[`Privileged contract prerequisites`](docs/host-support.md#privileged-contract-prerequisites).
+
 All three default to `skip` so a developer machine is never mounted on
 unexpectedly, and CI sets each to `required`. The first two decide whether their
 suite runs at all. The third is narrower: it governs only the three
