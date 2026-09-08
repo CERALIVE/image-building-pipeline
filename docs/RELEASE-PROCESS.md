@@ -924,6 +924,62 @@ line tells you whether the bundle itself was bad or whether the failure is
 environmental (e.g. no SRT reachability at that specific site, which the
 healthcheck's own skip-when-unconfigured logic already accounts for).
 
+### FINDING — the mark-good marker is a PERMANENT flag, so a healthy slot's boot budget only ever counts down [OPEN — documented, not fixed]
+
+The idempotency marker `/data/ceralive/.slot-marked-good` has no per-boot
+lifecycle. Once written it disables the healthcheck for the rest of that
+device's life, so the boot-attempt budget the healthcheck exists to reset is
+never reset again — it decrements on every reboot, clean or otherwise, until it
+hits zero and RAUC reports a genuinely healthy running slot as `bad`.
+
+**What is broken.** Two independent guards test the marker, and neither one
+looks at anything but its bare existence:
+
+- `mkosi/runtime/ceralive-healthcheck.service` carries
+  `ConditionPathExists=!/data/ceralive/.slot-marked-good`, so systemd skips the
+  unit entirely — it is not run and its probes are not evaluated.
+- `mkosi/runtime/ceralive-healthcheck.sh` `main()` independently tests
+  `[ -e "${MARKER}" ]` and exits 0 before any check runs.
+
+Neither examines the marker's age, its contents, or any correlation with the
+current boot ID or RAUC slot generation. The only thing that ever clears it is
+`ceralive-update` — the manual, inert-by-default RAUC path — which `rm -f`s it
+after `rauc install` so a freshly-activated slot cannot inherit the other slot's
+confirmation. That covers the slot-swap case it was written for and nothing
+else. `rauc-hawkbit-updater`, the automatic RAUC trigger, does not clear it, and
+no unit clears it on an ordinary boot.
+
+**Why the budget then bleeds out.** `mkosi/platform/boot-state-core.sh` resets a
+slot's `BOOT_<n>_LEFT` back to `BOOT_ATTEMPTS` only on `set-state <slot> good`,
+and on device the sole caller of that path is the healthcheck's
+`rauc status mark-good`. Skip the healthcheck and the reset never happens, while
+the selector keeps decrementing the counter once per boot. Every reboot is a
+one-way step toward zero.
+
+**Observed on hardware.** On a Rock 5B+, `/data/ceralive/.slot-marked-good` was
+dated `2026-07-19T17:06:10Z` — five weeks before the run that found it — and
+`BOOT_A_LEFT` had reached `0`, with RAUC reporting the currently-booted slot as
+`bad`. Read against the all-counters-exhausted branch of
+`mkosi/platform/boot/boot.scr.cmd`, that is one reboot away from an unwanted
+fallback to the other, stale slot. The board was not unhealthy at any point:
+independent verification over the same session confirmed MPP hardware
+encode/decode, RGA scheduler probing, the expected package versions, and a clean
+kernel journal. This is a bookkeeping defect in the marker's lifecycle, not
+evidence of an unstable board — and because the marker is a build-time design
+rather than device state, every device running the same image is affected.
+
+**What a fix would have to change.** The marker's lifecycle, not the probes. It
+has to stop being a permanent flag and start being scoped to one boot or one
+slot generation — cleared early in boot before the healthcheck unit would run,
+or keyed to the current boot ID / RAUC slot generation and treated as absent
+when that key no longer matches. Note that both guards would have to move
+together: repairing only the script leaves `ConditionPathExists=` skipping the
+unit, and repairing only the unit leaves the script's own early exit in place.
+
+**This entry is documentation only.** No code changed with it — not the marker
+handling, not the systemd condition, not `boot-state-core.sh`. The fix is future
+work and is deliberately out of scope here.
+
 ---
 
 ## See also
