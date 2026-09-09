@@ -907,6 +907,11 @@ The healthcheck (`ceralive-healthcheck.sh`, gated by
 boot log:
 
 - It is the **sole** gate on `rauc mark-good` — nothing else confirms a slot.
+- Confirmation is scoped to the current kernel boot ID, stored beside the
+  timestamp in `/data/ceralive/.slot-marked-good`. A previous boot's marker,
+  including a legacy timestamp-only one, never suppresses checks. Same-slot
+  reboots must replenish the attempt budget just as A/B swaps do; install-time
+  marker removal alone cannot provide that guarantee.
 - It is deliberately **non-fatal** for cosmetic/secondary probes (e.g. the mDNS
   probe, or the HTTPS `:443` check on a device whose uplink is briefly down
   during provisioning) — see this repo's `AGENTS.md` "CeraUI TLS front" section.

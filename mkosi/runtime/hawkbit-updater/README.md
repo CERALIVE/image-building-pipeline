@@ -166,22 +166,18 @@ docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-
 risk). Reboot is triggered by the operator / CeraUI, like the manual `ceralive-update`
 path.
 
-### Cross-slot marker clear (the task-29 brick #2 fix, for the hawkBit path)
+### Boot-scoped confirmation and the legacy marker clear
 
-`/data` is shared across A/B, so the `ceralive-update` script clears
-`/data/ceralive/.slot-marked-good` after a manual `rauc install` — otherwise the old
-slot's "good" marker makes the new slot's healthcheck a no-op and a **healthy update
-rolls back**. The hawkBit path bypasses `ceralive-update`, so this layer ships its
-own clear hook: `ceralive-hawkbit-marker-clear.path` watches
-`/data/ceralive/rauc-downloads/*.raucb` and runs `ceralive-hawkbit-marker-clear.service`
-(`rm -f /data/ceralive/.slot-marked-good`). Clearing when a bundle is downloaded is
-race-safe: the running (healthy) slot's healthcheck already ran this boot; the new
-slot re-proves health after reboot.
+`/data/ceralive/.slot-marked-good` now records the kernel boot ID beside its
+timestamp. Only that same boot may reuse the result. A new boot always verifies
+again, including a same-slot reboot: the bootloader decrements its attempt budget
+even without an install. Timestamp-only markers from old images are stale.
 
-> On real hardware the deeper hook is RAUC's custom bootloader backend
-> (`ceralive-rauc-boot-adapter set-primary`, task 27) — clearing the marker there
-> would cover every install path. That file is out of task-41 scope; the path-unit
-> here is the in-scope, self-contained equivalent.
+The existing `ceralive-update` post-install removal and
+`ceralive-hawkbit-marker-clear.path` download-triggered removal remain compatible,
+but correctness no longer depends on either one. Direct RAUC installs and manual
+slot selection need no special marker-clear hook. The unit must not carry a
+persistent `ConditionPathExists` gate ahead of the script's boot-aware predicate.
 
 ## CeraLive systemd units (written by the postinst)
 
@@ -190,7 +186,7 @@ slot re-proves health after reboot.
 | `ceralive-hawkbit-provision.service` | oneshot | First-boot enrollment + config render (gated on `/data/ceralive/hawkbit.conf`). |
 | `ceralive-hawkbit-provision-retry.timer` + `.service` | timer/oneshot | Retry only while the mode-0600 pending marker exists; ordered after NetworkManager, never network-online. |
 | `rauc-hawkbit-updater.service` (+ drop-in) | daemon | Polls DDI; gated on the rendered `/data` config; `-c` it. |
-| `ceralive-hawkbit-marker-clear.path` + `.service` | path/oneshot | Clear `.slot-marked-good` when a bundle is downloaded (A/B correctness). |
+| `ceralive-hawkbit-marker-clear.path` + `.service` | path/oneshot | Legacy download-triggered marker clear; boot-scoped verification is authoritative. |
 
 ## Verification (offline; no board / no real hawkBit)
 

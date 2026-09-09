@@ -945,6 +945,13 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — three of them, and CeraUI drives only one
 
+Boot health confirmation runs on every new kernel boot, including ordinary
+same-slot reboots. The persistent `.slot-marked-good` marker suppresses only
+repeat invocations within the boot whose ID it records. Old markers cannot
+satisfy another slot's healthcheck or let its attempt budget decay. Existing
+service, binary-load and configured reachability checks still gate RAUC mark-good;
+a failed check never refreshes the marker.
+
 These are independent mechanisms with different triggers, and reading them as one
 "update button" is how the wrong thing gets debugged:
 

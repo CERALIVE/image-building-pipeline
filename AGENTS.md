@@ -127,6 +127,17 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**Health confirmation is boot-scoped, never install-scoped.**
+`ceralive-healthcheck.service` always dispatches after CeraUI; it has no persistent
+marker existence gate. The script accepts `.slot-marked-good` only when its
+`boot-id` line matches the current kernel boot ID, and writes that identity only
+after all existing checks and RAUC mark-good succeed. Legacy timestamp-only
+markers and previous-boot markers cannot suppress verification, on either an A/B
+swap or an ordinary reboot. Boot identity read failure is fail-closed. Existing
+OTA marker removers remain compatible but are no longer required for correctness.
+`tests/healthcheck-boot-marker.bats` replays the stale Rock marker against actual
+boot-state helpers, including exhausted counters and unhealthy negative controls.
+
 **Device Debian sources use HTTPS and retain explicit `Signed-By`.** Both
 `configure_minimal_apt` writers emit HTTPS for all three suites. A Rock board's
 IPv6 HTTP path returned a carrier captive portal, producing apt `NOSPLIT`/`NODATA`
