@@ -466,6 +466,12 @@ fail, it just silently ships ~158 MB and blows the size gate. See
 
 ## Target Release — one mapping, derived everywhere
 
+Device Debian sources use HTTPS with the Debian archive keyring explicitly
+selected by `Signed-By`. TLS prevents a carrier's HTTP captive portal from
+substituting an HTML page for signed repository metadata. It does not repair a
+broken address family: CeraUI selects a working family per apt run, without a
+persistent ForceIPv4 setting. Signature and validity-date checks remain enabled.
+
 Which Debian suite the rootfs is built from, and which os-release `VERSION_ID`
 that suite ships, are declared exactly once:
 

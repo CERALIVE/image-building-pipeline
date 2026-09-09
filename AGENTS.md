@@ -127,6 +127,16 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**Device Debian sources use HTTPS and retain explicit `Signed-By`.** Both
+`configure_minimal_apt` writers emit HTTPS for all three suites. A Rock board's
+IPv6 HTTP path returned a carrier captive portal, producing apt `NOSPLIT`/`NODATA`
+signature failures while IPv4 served the signed index. TLS prevents that content
+substitution; it does not repair an unreachable IPv6 path. CeraUI's independent
+per-run family probe selects the working family; never bake ForceIPv4 into the
+image or disable signature/date/TLS checks. The real-writer payload regression
+is in `tests/apt-mtls-and-dedupe.test.sh`. No installed board source is migrated
+in place; the source change arrives with a new image.
+
 **The real-Avahi harness needs a bounded socket path, not the image TMPDIR.**
 `tests/real-avahi-hostname-contract.sh` creates its small, mode-0700 fixture at
 `/var/tmp/ceralive-real-avahi.XXXXXX`, independently of the suite's `TMPDIR`.
