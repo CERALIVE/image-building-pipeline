@@ -82,19 +82,19 @@ configure_minimal_apt() {
 
   cat >/etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
-URIs: http://deb.debian.org/debian
+URIs: https://deb.debian.org/debian
 Suites: ${APT_SUITE_MAIN}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://deb.debian.org/debian-security
+URIs: https://deb.debian.org/debian-security
 Suites: ${APT_SUITE_SEC}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://deb.debian.org/debian
+URIs: https://deb.debian.org/debian
 Suites: ${APT_SUITE_UPD}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

@@ -40,6 +40,7 @@ tests/package-contract.bats	bats	unit	default-bats	package sets, staging classif
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
 tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
 tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
+tests/healthcheck-boot-marker.bats	bats	unit	default-bats	boot-scoped health confirmation, stale shared marker and exhausted slot budget regressions
 tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, per-profile blob hashes, runtime profile resolution + fallback, negative conformance fixtures
 tests/journal-diagnosability.bats	bats	unit	default-bats	journald retention budget, validated persistent machine-id, one-time journal-dir migration
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity

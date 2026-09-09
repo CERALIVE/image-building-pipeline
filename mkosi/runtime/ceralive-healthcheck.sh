@@ -39,11 +39,9 @@
 #   HEALTHCHECK_TIMEOUT        overall seconds to reach health      (default 60)
 #   HEALTHCHECK_RETRY_INTERVAL seconds between attempts             (default 5)
 #
-# IDEMPOTENCY: on success a marker (/data/ceralive/.slot-marked-good) is written
-# and the unit's ConditionPathExists makes subsequent boots a no-op. /data is
-# SHARED across the A/B slots, so the marker is CLEARED by ceralive-update on every
-# new bundle install — a freshly-activated slot must re-prove health before it is
-# confirmed (otherwise a healthy slot B would inherit A's marker and roll back).
+# IDEMPOTENCY is per BOOT, not per install: the bootloader spends an attempt on
+# every boot, including an ordinary reboot of the same slot. /data is shared,
+# so only a marker carrying this kernel boot_id can suppress repeated checks.
 #
 # This is a standalone DEVICE script: it does NOT source the repo lib/common.sh
 # (not present on the device). DUAL-TRACK: an inline twin lives in
@@ -60,6 +58,8 @@ PROG="ceralive-healthcheck"
 # --- config: defaults first, then /data/ceralive/update.conf overrides them ----
 CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
 MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
+BOOT_ID_FILE="${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+BOOT_ID=""
 
 CERALIVE_SERVICE="${CERALIVE_SERVICE:-ceralive.service}"
 IRL_SERVER_HOST=""
@@ -238,6 +238,11 @@ run_checks() {
    return 0
 }
 
+marker_matches_boot() {
+  [ -n "${BOOT_ID}" ] && [ -f "${MARKER}" ] &&
+    grep -Fxq "boot-id ${BOOT_ID}" "${MARKER}"
+}
+
 mark_good() {
   if ! command -v "${RAUC_BIN}" >/dev/null 2>&1; then
     fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
@@ -245,8 +250,14 @@ mark_good() {
   fi
   log "all health checks passed — calling '${RAUC_BIN} status mark-good'"
   if "${RAUC_BIN}" status mark-good; then
-    mkdir -p "$(dirname "${MARKER}")"
-    printf 'marked-good %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${MARKER}"
+    local temporary="${MARKER}.tmp.$$"
+    if ! { mkdir -p "$(dirname "${MARKER}")" &&
+      printf 'marked-good %s\nboot-id %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BOOT_ID}" >"${temporary}" &&
+      mv -f "${temporary}" "${MARKER}"; }; then
+      rm -f "${temporary}"
+      fail "slot marked good but boot marker could not be written"
+      return 1
+    fi
     log "slot marked good; wrote idempotency marker ${MARKER}"
     return 0
   fi
@@ -257,9 +268,17 @@ mark_good() {
 main() {
   load_conf
 
-  if [ -e "${MARKER}" ]; then
-    log "marker ${MARKER} present — this slot is already confirmed good; no-op"
+  if ! BOOT_ID="$(cat "${BOOT_ID_FILE}")" ||
+    [[ ! ${BOOT_ID} =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    fail "cannot establish current boot identity — slot left unconfirmed"
+    exit 1
+  fi
+  if marker_matches_boot; then
+    log "marker ${MARKER} matches this boot — already confirmed good; no-op"
     exit 0
+  fi
+  if [ -e "${MARKER}" ]; then
+    log "marker ${MARKER} belongs to an earlier boot — re-verifying current slot"
   fi
 
   local now deadline attempt

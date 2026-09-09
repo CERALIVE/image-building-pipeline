@@ -18,6 +18,8 @@
 #   4. Per-slot apt storage. The active rootfs slot is not an apt-cache bind, so its
 #      generated config must suppress undisplayable translations and retain indexes
 #      compressed. Both configure_minimal_apt twins must render the same payload.
+#   5. Rock 2026-09-09: IPv6 HTTP returned a Tigo captive 302, then apt rejected
+#      NOSPLIT/NODATA. Device sources require TLS as well as the existing Signed-By.
 #
 # THE GAP THIS CLOSES (same lesson as apt-preferences-baked.test.sh): `./build`
 # runs mkosi.images/runtime/mkosi.postinst.chroot, NOT customize/apt-ceralive-repo.sh.
@@ -271,19 +273,19 @@ cmp -s /tmp/apt-runtime/debian.sources /etc/apt/sources.list.d/debian.sources \
 
 cat >/tmp/expected-debian.sources <<EXPECTED_SOURCES
 Types: deb
-URIs: http://deb.debian.org/debian
+URIs: https://deb.debian.org/debian
 Suites: \${APT_SUITE}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://deb.debian.org/debian-security
+URIs: https://deb.debian.org/debian-security
 Suites: \${APT_SUITE_SECURITY}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://deb.debian.org/debian
+URIs: https://deb.debian.org/debian
 Suites: \${APT_SUITE_UPDATES}
 Components: main non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

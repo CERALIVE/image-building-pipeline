@@ -466,6 +466,12 @@ fail, it just silently ships ~158 MB and blows the size gate. See
 
 ## Target Release — one mapping, derived everywhere
 
+Device Debian sources use HTTPS with the Debian archive keyring explicitly
+selected by `Signed-By`. TLS prevents a carrier's HTTP captive portal from
+substituting an HTML page for signed repository metadata. It does not repair a
+broken address family: CeraUI selects a working family per apt run, without a
+persistent ForceIPv4 setting. Signature and validity-date checks remain enabled.
+
 Which Debian suite the rootfs is built from, and which os-release `VERSION_ID`
 that suite ships, are declared exactly once:
 
@@ -938,6 +944,13 @@ privileged network namespace. On-device apply/reload/teardown is a labelled
 hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — three of them, and CeraUI drives only one
+
+Boot health confirmation runs on every new kernel boot, including ordinary
+same-slot reboots. The persistent `.slot-marked-good` marker suppresses only
+repeat invocations within the boot whose ID it records. Old markers cannot
+satisfy another slot's healthcheck or let its attempt budget decay. Existing
+service, binary-load and configured reachability checks still gate RAUC mark-good;
+a failed check never refreshes the marker.
 
 These are independent mechanisms with different triggers, and reading them as one
 "update button" is how the wrong thing gets debugged:

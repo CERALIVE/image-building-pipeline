@@ -11,11 +11,8 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 Requires=ceralive.service
 After=ceralive.service NetworkManager.service
 Wants=NetworkManager.service
-# Idempotency guard: once a slot is confirmed the marker exists and this unit is a
-# no-op. /data is SHARED across A/B, so ceralive-update CLEARS this marker on every
-# new bundle install — the freshly-activated slot must re-prove health before being
-# confirmed (otherwise a healthy slot would inherit the other slot's marker).
-ConditionPathExists=!/data/ceralive/.slot-marked-good
+# The script scopes idempotency to kernel boot_id. A persistent-path condition
+# would skip new-slot AND ordinary same-slot boots while their attempt budget falls.
 
 [Service]
 Type=oneshot
