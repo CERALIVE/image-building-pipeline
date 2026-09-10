@@ -96,13 +96,29 @@ CONFIG_SND_USB_AUDIO=m
 # is the whole point of the stays-true rule: the island's Kconfig defaults are the
 # island's business, and this fragment is where the image states that it depends on
 # them. Their `depends on` parents, ARCH_ROCKCHIP and ROCKCHIP_IOMMU, are declared
-# in the Rockchip platform block above. ROCKCHIP_MPP_PROC_FS is deliberately absent
-# here: it is a PROMPTLESS bool, so kconfig cannot be directed by a fragment line,
-# and it is asserted in required-symbols.list instead (the BT_INTEL/BT_MTK rule).
+# in the Rockchip platform block above. ROCKCHIP_MPP_PROC_FS is a PROMPTLESS bool,
+# but the island's own production telemetry contract declares and asserts its =y
+# default, so this fragment does the same rather than leaving the operator surface
+# implicit (the BT_INTEL/BT_MTK rule).
 CONFIG_ROCKCHIP_MPP_SERVICE=m
 CONFIG_ROCKCHIP_MPP_RKVENC2=y
 CONFIG_ROCKCHIP_MPP_RKVDEC2=y
 CONFIG_ROCKCHIP_MPP_JPGDEC=y
+# --- Island MPP telemetry: production observability contract ----------------
+# These declarations come verbatim from rk3588-media-island's CI-gated production
+# fragment. MPP procfs reports the service's load, while debugfs plus the default
+# trace infrastructure make the accompanying IOMMU and scheduling measurements
+# available without enabling the heavyweight function tracer on a shipped image.
+#
+# This is a measured production gap, not speculative diagnostics: todo-26 found
+# no IOMMU mapping count on Rock because production resolved `# CONFIG_FTRACE is
+# not set`. Keep the function tracer explicitly OFF; the required counters and
+# default trace events do not need its probe overhead.
+CONFIG_ROCKCHIP_MPP_PROC_FS=y
+CONFIG_DEBUG_FS=y
+CONFIG_FTRACE=y
+CONFIG_ENABLE_DEFAULT_TRACERS=y
+# CONFIG_FUNCTION_TRACER is not set
 # MAINLINE rkvdec, KEPT BUILT ON PURPOSE, BINDING NOTHING. The island owns the two
 # decoder nodes by device-tree `compatible` (`rockchip,rkv-decoder-v2`), so this
 # driver has no node left to match and its module is dead weight in the strictest
@@ -126,6 +142,15 @@ CONFIG_VIDEO_ROCKCHIP_VDEC=m
 # leaves that value intact through olddefconfig. Disable it explicitly instead.
 CONFIG_ROCKCHIP_MULTI_RGA=m
 # CONFIG_VIDEO_ROCKCHIP_RGA is not set
+# The island's CI-gated production telemetry contract also keeps RGA's asynchronous
+# API and procfs/debugfs counters enabled. The same todo-26 Rock qualification that
+# exposed the missing FTRACE base could not read RGA debugfs counters, so retaining
+# these exact declarations makes the production image diagnosable without turning
+# on the function tracer or the legacy genpool allocator.
+CONFIG_ROCKCHIP_RGA_ASYNC=y
+CONFIG_ROCKCHIP_RGA_PROC_FS=y
+CONFIG_ROCKCHIP_RGA_DEBUG_FS=y
+# CONFIG_ROCKCHIP_RGA_GENPOOL is not set
 # HANTRO, ASSERTED. It keeps the blocks the island does not claim — vpu121,
 # vepu121_0 and av1d — so it is not a rollback target like rkvdec but a co-resident
 # owner. Same three `depends on` as RGA above.
