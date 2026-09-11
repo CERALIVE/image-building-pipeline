@@ -734,9 +734,28 @@ EOF
     grep -qx "$sym" "$FRAGMENT"
     grep -qx "$sym" "$req"
   done
-  # Promptless, so it may only be ASSERTED — a fragment cannot direct kconfig here.
+  # Promptless, so the production fragment ASSERTS the island's =y default and
+  # required-symbols.list independently verifies the resolved value.
   grep -qx 'CONFIG_ROCKCHIP_MPP_PROC_FS=y' "$req"
-  run ! grep -q 'CONFIG_ROCKCHIP_MPP_PROC_FS' "$FRAGMENT"
+  grep -qx 'CONFIG_ROCKCHIP_MPP_PROC_FS=y' "$FRAGMENT"
+}
+
+@test "rk3588-edge.fragment: island production telemetry remains diagnosable without function tracing" {
+  # The island's CI-gated production contract requires MPP/RGA counters plus the
+  # debugfs/FTRACE base they use. Function tracing stays off: the counters must not
+  # impose its runtime probe overhead on a production encoder.
+  local sym
+  for sym in 'CONFIG_ROCKCHIP_MPP_PROC_FS=y' \
+             'CONFIG_DEBUG_FS=y' \
+             'CONFIG_FTRACE=y' \
+             'CONFIG_ENABLE_DEFAULT_TRACERS=y' \
+             '# CONFIG_FUNCTION_TRACER is not set' \
+             'CONFIG_ROCKCHIP_RGA_ASYNC=y' \
+             'CONFIG_ROCKCHIP_RGA_PROC_FS=y' \
+             'CONFIG_ROCKCHIP_RGA_DEBUG_FS=y' \
+             '# CONFIG_ROCKCHIP_RGA_GENPOOL is not set'; do
+    grep -qx "$sym" "$FRAGMENT"
+  done
 }
 
 @test "closure manifests: RGA ownership moves to multi_rga and forbids mainline rockchip-rga" {
