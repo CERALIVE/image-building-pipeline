@@ -479,6 +479,57 @@ CONFIG_BLK_DEV_DM=y
 CONFIG_DM_VERITY=m
 CONFIG_OVERLAY_FS=m
 
+# --- Post-mortem forensics for a SILENT reset -------------------------------
+# rk3588-edge.fragment declares the four symbols that let an unexplained reset
+# leave evidence behind, and says why each one. This block is the DIFFERENT
+# claim — that the finished kernel CARRIES them, parents included. Without it a
+# `menuconfig` parent moving under any of them lets `olddefconfig` discard the
+# leaf in silence while the build, the package validation, the boot and the image
+# all stay green: the RTW89 / DMABUF_HEAPS / TYPEC_FUSB302 / NF_TABLES failure
+# again, in the one subsystem whose absence is invisible until the next reset
+# nobody can explain.
+#
+# PSTORE is the `depends on` both pstore leaves sit under, and it is pinned at =y
+# rather than left bare BECAUSE of PSTORE_RAM: that leaf is a TRISTATE, and a
+# tristate cannot resolve =y above a modular parent, so an upstream y->m on the
+# parent would silently take the =y below it with it. PSTORE_CONSOLE is a plain
+# bool whose only dependency is PSTORE — the fragment is where its purpose is
+# argued; here it is simply the leaf that must survive.
+#
+# REED_SOLOMON is pinned as a GUARD, not as an enable. PSTORE_RAM `select`s it
+# and Kconfig's select PROMOTES its =m to =y, so this row asserts the resolved
+# value — which is the CONFIG_TYPEC_FUSB302 failure written down, a `=y` quietly
+# resolving to `=m` for three releases. Its REED_SOLOMON_ENC8/_DEC8 companions
+# are promptless and select-only, so they need no entry (the RTW89_CORE rule),
+# and there is no PSTORE_ZONE symbol at this pin for a row to name.
+#
+# WATCHDOG is the `menuconfig` parent, pinned at =y rather than bare because it
+# is a BOOL: there is no m-vs-y for defconfig to have an opinion about, and n is
+# the one value that would take its leaves with it. WATCHDOG_SYSFS carries no
+# `depends on` of its own — WATCHDOG is the whole of its visibility.
+#
+# WATCHDOG_CORE and DW_WATCHDOG complete that closure, and BOTH are supplied by
+# defconfig today, which is exactly why they are pinned. The sysfs attribute
+# group lives in the watchdog CORE and is attached to a registered DEVICE, and
+# the DesignWare WDT is the only watchdog this SoC brings up — so `bootstatus`
+# with no core is nothing to read, and with no device is nowhere to read it.
+# "defconfig happens to provide it" is the claim this file exists to stop being
+# true in silence.
+#
+# NOT SUFFICIENT ON ITS OWN, and pinning changes nothing about that: ramoops
+# still needs a reserved memory region. With no DT reserved-memory node (or
+# ramoops.mem_address= on the cmdline) ramoops_init registers nothing,
+# /sys/fs/pstore stays empty, and these symbols are inert — a safe no-op, but a
+# no-op. That node is a separate change in rk3588-kernel-patches.
+CONFIG_PSTORE=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_REED_SOLOMON=y
+CONFIG_WATCHDOG=y
+CONFIG_WATCHDOG_CORE=y
+CONFIG_WATCHDOG_SYSFS=y
+CONFIG_DW_WATCHDOG=y
+
 # --- Rockchip platform ------------------------------------------------------
 # The one platform that must survive the Rockchip-only block in the fragment.
 CONFIG_ARCH_ROCKCHIP=y
