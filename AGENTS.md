@@ -2168,8 +2168,8 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (174 symbols) and
-`manifests/kernel/forbidden-symbols.list` (80) are the contract, and they are
+`manifests/kernel/required-symbols.list` (214 symbols) and
+`manifests/kernel/forbidden-symbols.list` (94) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
 everything defconfig is expected to supply on its own. Only the second claim

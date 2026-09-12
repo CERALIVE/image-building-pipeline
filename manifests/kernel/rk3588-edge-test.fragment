@@ -42,6 +42,41 @@ CONFIG_DEBUG_SPINLOCK=y
 CONFIG_DEBUG_MUTEXES=y
 CONFIG_DEBUG_ATOMIC_SLEEP=y
 
+# --- Lockup detectors: the SILENT-RESET evidence that never existed ----------
+# All three measured `is not set` in the built 7.2.0 config, and that default is
+# not merely a missing nicety — it is what made a specific piece of reasoning
+# about the silent SoC reset VACUOUS. "Zero hung-task and soft-lockup markers in
+# the journal" was cited as evidence during that investigation; with all three
+# detectors compiled out, the kernel could never have emitted such a marker, so
+# their absence said nothing whatsoever about the fault. These lines are what
+# make that observation mean something the next time it is made.
+#
+# TEST-ONLY, DELIBERATELY. Each armed detector costs a per-CPU hrtimer plus a
+# per-CPU watchdog kthread, and a board held at sustained encode load is exactly
+# the workload that starves one of them long enough to report a lockup that is
+# really just latency — a false positive on the production track would be worse
+# than the silence it replaced. Production takes only the four free post-mortem
+# symbols in rk3588-edge.fragment; this variant takes the noisy ones.
+#
+# DEBUG_KERNEL above is the `depends on` all three share, so they are declared
+# after it — the same declare-the-parent-first rule the production fragment
+# applies to RTW89 and NF_TABLES. SOFTLOCKUP_DETECTOR and HARDLOCKUP_DETECTOR
+# each `select LOCKUP_DETECTOR`, so that symbol gets no entry of its own (the
+# RTW89_CORE rule). DETECT_HUNG_TASK is `default SOFTLOCKUP_DETECTOR` and would
+# follow it on anyway; it is declared so the gate proves it rather than assuming
+# the default held.
+#
+# HARDLOCKUP_DETECTOR's SECOND `depends on` — one of the three
+# HAVE_HARDLOCKUP_DETECTOR_{PERF,BUDDY,ARCH} backends — is satisfied here by
+# BUDDY: HAVE_HARDLOCKUP_DETECTOR_BUDDY=y is already resolved in the built
+# config, and the symbol `imply`s HARDLOCKUP_DETECTOR_BUDDY. Do NOT reach for
+# CONFIG_ARM64_PSEUDO_NMI to get the PERF backend instead. It is unnecessary,
+# and it changes interrupt delivery on the very board whose timing fault is
+# being chased — a debug kernel that perturbs the bug is not evidence.
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_DETECT_HUNG_TASK=y
+
 # --- debugfs: the transport for every fault control --------------------------
 # The island's fault and timeout knobs live under debugfs, and the CeraLive test
 # symbol below `depends on DEBUG_FS`, so without this it would silently resolve OFF
