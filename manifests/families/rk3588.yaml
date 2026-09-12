@@ -295,11 +295,11 @@ variants:
       # why this pin is the RESULTING `main` commit and not the branch tip.
       # Verified before pinning: `git ls-remote
       # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
-      # answers b41a82a92b6b2262eb02aadba5428d5cd5b2ef92, that commit reaches a
-      # 32-entry patches/series, and the whole series applies to
+      # answers 087b440ffcb1676be1f35a6dccd9b2c46edebbd6, that commit reaches a
+      # 33-entry patches/series, and the whole series applies to
       # v7.2 with its own post-apply gate green.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: b41a82a92b6b2262eb02aadba5428d5cd5b2ef92
+      patches_commit: 087b440ffcb1676be1f35a6dccd9b2c46edebbd6
       patches_series: patches/series
 
       defconfig_base: defconfig
