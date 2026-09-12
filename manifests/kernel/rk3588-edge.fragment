@@ -783,6 +783,45 @@ CONFIG_EFIVAR_FS=n
 CONFIG_FANOTIFY=y
 CONFIG_AUTOFS_FS=y
 
+# --- Post-mortem forensics for a SILENT reset -------------------------------
+# Two boards have reset under media load with NO panic, NO Oops, NO SError and
+# NO kernel message of any kind, recovering on their own. Every investigation so
+# far has been forensics on ABSENCE: the reset leaves nothing behind, so the only
+# evidence anyone has ever had came from a heartbeat an operator happened to be
+# running at the time. These four symbols make the next one self-documenting.
+#
+# WATCHDOG_SYSFS is free and is the one that may answer the question outright.
+# CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED=y (arm64 defconfig) means that if the
+# bootloader armed the DesignWare WDT, the KERNEL adopts it and pings it from a
+# workqueue with no userspace involvement at all — so "nothing opens
+# /dev/watchdog" and "RuntimeWatchdogUSec=0" are both true AND consistent with the
+# watchdog resetting the SoC. Without this symbol the watchdog core compiles out
+# its sysfs attribute group, so `bootstatus` does not exist and WDIOF_CARDRESET —
+# a direct statement that the watchdog caused the last reset — is unreadable. The
+# ioctl form is not a substitute: opening /dev/watchdog ARMS it.
+#
+# PSTORE_CONSOLE is what preserves the kernel's own console across the reset.
+# PSTORE=y and PSTORE_RAM=m are already on, but that combination captures ONLY on
+# an oops/panic via the kmsg_dumper — and these resets produce neither, so nothing
+# is ever dumped. PSTORE_CONSOLE mirrors console output continuously instead,
+# which is the only mode that can survive a fault with no software involvement.
+#
+# PSTORE_RAM moves =m -> =y because a module loads far too late to hold the
+# previous boot's buffer, and REED_SOLOMON follows it: PSTORE_RAM `select`s it for
+# ECC, and a =y driver cannot link a =m dependency. Kconfig's select PROMOTES, so
+# this line is an assertion rather than the thing that enables it — declared
+# anyway, because the failure it guards against is exactly CONFIG_TYPEC_FUSB302's:
+# a =y that silently resolved to =m and stayed that way for three releases.
+#
+# NOT SUFFICIENT ON ITS OWN: ramoops still needs a reserved memory region. Without
+# a DT reserved-memory node (or ramoops.mem_address= on the cmdline) ramoops_init
+# registers nothing, /sys/fs/pstore stays empty, and these symbols are inert — a
+# safe no-op, but a no-op. The DT node lives in rk3588-kernel-patches.
+CONFIG_WATCHDOG_SYSFS=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_REED_SOLOMON=y
+
 # --- Rockchip-only platform scope ------------------------------------------
 # arm64 `defconfig` is a MULTI-PLATFORM config: it turns on every SoC-vendor
 # platform arch/arm64/Kconfig.platforms offers, and each one drags in its own

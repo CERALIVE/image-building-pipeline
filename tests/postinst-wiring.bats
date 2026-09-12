@@ -332,7 +332,7 @@ load manifest-helpers
 
 @test "modem support companion: is classified RUNTIME_APP_PKGS and has no image-owned udev basename collision" {
   local app="$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
-  local runtime_line sysext_line appfs_line companion_rule image_rules
+  local runtime_line sysext_line appfs_line companion_rule companion_path image_rules ledger
   runtime_line="$(awk '/^RUNTIME_APP_PKGS=/{f=1} f{printf "%s ", $0} f&&!/\\$/{exit}' "$app")"
   sysext_line="$(grep -E '^SYSEXT_APP_PKGS=' "$app")"
   appfs_line="$(grep -E '^APPFS_APP_PKGS=' "$app")"
@@ -341,6 +341,11 @@ load manifest-helpers
   [[ "$appfs_line" != *"ceralive-modem-support"* ]]
 
   companion_rule="60-ceralive-modem.rules"
+  companion_path="/usr/lib/udev/rules.d/$companion_rule"
+  ledger="$PIPELINE_DIR/manifests/modem-support-ownership.txt"
+  [ "$(awk -F'\t' -v owner="ceralive-modem-support" -v path="$companion_path" '$1 == owner && $2 == path{n++} END{print n+0}' "$ledger")" -eq 1 ]
+  [ "$(awk -F'\t' -v owner="ceralive-modem-support" '$1 == owner && $2 ~ /^\/usr\/lib\/udev\/rules\.d\//{n++} END{print n+0}' "$ledger")" -eq 1 ]
+  [ "$(awk -F'\t' -v owner="ceralive-modem-support" -v path="/etc/udev/rules.d/$companion_rule" '$1 == owner && $2 == path{n++} END{print n+0}' "$ledger")" -eq 0 ]
   image_rules="99-ceralive-hardware.rules 78-mm-ceralive-slot-uid.rules"
   for rule in $image_rules; do
     [ "$companion_rule" != "$rule" ] || { echo "udev basename collision: $companion_rule"; false; }
