@@ -1,0 +1,946 @@
+# stash@{1}
+# 2026-08-29 17:43:26 -0500
+# On fix/rauc-custom-boot-attempts: preserve unrelated rauc custom boot attempts work
+#
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 4491f33..c7d5d9b 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -1,6 +1,6 @@
+ name: Release candidate build
+ 
+-# Builds the exact production candidate image (raw + signed .raucb bundle + loader
++# Builds the exact production candidate image (raw.xz + signed .raucb bundle + loader
+ # + rollback probe) and uploads it as one immutable artifact for a human to flash
+ # and hand-test on real hardware BEFORE a manual release is cut. There is no
+ # automated hardware-flashing gate on this push — images are validated locally.
+@@ -182,6 +182,21 @@ jobs:
+           python3 ./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md
+           ./ci/check-build-log.sh --self-test
+           ./ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"
++      - name: Verify uncompressed flash image
++        env:
++          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
++        run: |
++          set -euo pipefail
++          mapfile -t raws < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raw')
++          mapfile -t bundles < <(find images/rock-5b-plus -maxdepth 1 -type f -name '*.raucb')
++          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
++          raw_bytes="$(stat -c %s "${raws[0]}")"
++          tests/preflash-verify.sh \
++            --image "${raws[0]}" \
++            --bundle "${bundles[0]}" \
++            --board rock-5b-plus \
++            --keyring "${RAUC_KEYRING_FILE}" \
++            --target-size-bytes "${raw_bytes}"
+       - name: Build candidate-bound signed rollback probe
+         env:
+           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+@@ -207,23 +222,23 @@ jobs:
+           mapfile -t dev_debs < <(find mkosi/.staging/rock-5b-plus/debs -maxdepth 1 -type f -name 'srtla-send-rs_*.deb')
+           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 ))
+           mkdir -p candidate/dev-debs
+-          ln "${raws[0]}" candidate/
++          ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
+           cp "${bundles[0]}" candidate/good.raucb
+           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
+           cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
+           cp "${dev_debs[0]}" candidate/dev-debs/
+-          raw_name="$(basename "${raws[0]}")"; bundle_name=good.raucb
++          raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
+           loader_name=rk3588_spl_loader_v1.15.113.bin
+           bundle_release_name="$(basename "${bundles[0]}")"
+           [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
+-          sha256sum "candidate/${raw_name}" > candidate/raw.sha256
+           ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+           printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
+           {
+             echo "artifact_name=rock-5b-plus-${GITHUB_SHA}"
+             echo "raw_filename=${raw_name}"
+             echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
++            echo "raw_compressed_sha256=$(cut -d' ' -f1 "candidate/${raw_name}.sha256")"
+             echo "bundle_filename=${bundle_name}"
+             echo "keyring_filename=root-ca.pem"
+             echo "loader_filename=${loader_name}"
+@@ -236,7 +251,7 @@ jobs:
+           path: candidate/
+           if-no-files-found: error
+           retention-days: 7
+-          compression-level: 6
++          compression-level: 0
+       - name: Bound board-scoped mkosi cache
+         if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+         run: |
+diff --git a/AGENTS.md b/AGENTS.md
+index 9abf0fe..13b4b32 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -21,6 +21,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
+ ├── dev-push / dev-sync       # dev-loop helpers
+ ├── ci/
+ │   ├── Dockerfile            # pinned debian:trixie-slim builder (mkosi 26)
++│   ├── seal-raw-candidate.sh # post-preflash .raw → .raw.xz + both SHA-256 records
+ │   └── publish-immutable-r2-pair.sh # approved-digest-bound RAUC publisher
+ ├── manifests/                # board/family manifests + exact package registries
+ │   └── schema/
+@@ -2868,11 +2869,15 @@ the next unused patch tag at that same proven commit. Never use a new tag as the
+ first production execution of the repair, and never move or rerun the failed tag.
+ 
+ The Rock 5B+ raw's 14,800 MiB logical geometry is intentional and starts sparse.
+-Candidate sealing hard-links that immutable raw into the repo-local `candidate/`
+-directory, so staging does not allocate a second multi-GiB copy; artifact upload
+-uses explicit zlib compression level 6. Keep the candidate directory on the same
+-filesystem, and do not replace the hard link with `cp`. Regression coverage is
+-in `tests/builder-resource-budget.test.sh` and
++Every construction/parity check and the release workflow's `preflash-verify.sh`
++gate reads that uncompressed raw. Candidate sealing happens afterward through
++`ci/seal-raw-candidate.sh`, which deliberately uses `xz -T0 -6`, verifies the
++decompressed stream against the original raw SHA-256, and puts only `.raw.xz`,
++its compressed SHA-256 sidecar, and `raw.sha256` in `candidate/`. The build-local
++raw remains under `images/<board>/`; the `.raucb` is untouched. Artifact upload
++uses compression level 0 because recompressing xz wastes time. Regression coverage
++is in `tests/raw-candidate-compression.test.sh`,
++`tests/release-candidate-contract.test.sh`, and
+ `tests/release-cache-contract.test.sh`.
+ 
+ **Reproducible builds** [EXISTS]
+@@ -2895,6 +2900,26 @@ creates or validates only the ignored `.dev-keys/` NON-PRODUCTION fixture
+ provides a production default. Production image builds still require an explicit
+ `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
+ 
++**RAUC `bootloader=custom` must NOT carry RAUC-native `boot-attempts` — the
++custom backend owns the counters** [EXISTS — fixed 2026-08-29]
++
++Trixie's RAUC 1.13 rejects `bootloader=custom` plus `boot-attempts=<N>` while
++loading `system.conf`: `Configuring boot attempts is valid for uboot or barebox
++only (not for custom)`. On both RK3588 images this made `rauc.service` exit 1
++before acquiring `de.pengutronix.rauc`; every `rauc status` then waited for the
++system bus's 25-second activation timeout, and the board stayed `degraded`.
++
++All three RK3588/custom writers omit the key: the authoritative
++`mkosi/platform/boot/install-boot.sh`, the committed
++`mkosi/runtime/rauc/system.conf`, and `mkosi/customize/rauc-setup.sh`'s
++self-contained fallback. No substitute RAUC key is required. Attempt counting
++remains entirely in the FAT `boot_state.txt`, U-Boot selector,
++`ceralive-boot-state`, and `ceralive-rauc-boot-adapter`; those mechanisms are
++unchanged and still default to three attempts. `tests/rauc-transition-contract.test.sh`
++guards all three writers, while the opt-in real-RAUC contract starts the daemon
++with the config rendered by the authoritative writer and carries the rejected
++pair as a negative control.
++
+ **RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
+ device — else OTA is 100% broken** [EXISTS]
+ 
+diff --git a/README.md b/README.md
+index 409d8ab..e9e3299 100644
+--- a/README.md
++++ b/README.md
+@@ -67,8 +67,11 @@ if you opt into `--native`; a container build only needs Docker or Podman.
+ ## Build System
+ 
+ The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
+-container (`ci/Dockerfile`). It produces reproducible `.raw` sysext bundles and
+-`.raucb` A/B RAUC OTA packages from a layered source.
++container (`ci/Dockerfile`). A local full-device build produces an uncompressed,
++sparse `.raw` for verification and a `.raucb` A/B OTA package. The protected
++release path verifies that raw first, then seals the first-flash download as
++`.raw.xz` with SHA-256 sidecars for both the compressed download and decompressed
++raw bytes. The `.raucb` is already squashfs-compressed and is not recompressed.
+ 
+ **The container build is canonical.** Native builds (`--native` /
+ `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
+@@ -245,6 +248,13 @@ independently approved candidate SHA-256, snapshots both inputs privately, and
+ uses create-only writes with exact-byte retry recovery; it never deletes an
+ immutable release key.
+ 
++For a new board with no installed OS, download the sealed `.raw.xz` candidate.
++`ci/verify-and-flash-candidate.sh` verifies its adjacent `.raw.xz.sha256`,
++decompresses it into a private sparse snapshot, verifies that snapshot against
++`raw.sha256`, and hashes the exact sector range read back after flashing. Manual
++`dd` users must verify the compressed sidecar and decompress first; see
++[`docs/FIRST-BOOT.md`](docs/FIRST-BOOT.md) §1.
++
+ The first Bookworm → Trixie/mainline slot update deliberately remains installable
+ by the deployed RAUC 1.8 fleet: plain bundle format, byte-identical compatible
+ string and signing chain, with the deployed U-Boot left outside the RAUC update.
+diff --git a/ci/read-candidate-identity.sh b/ci/read-candidate-identity.sh
+index c6ee853..ab4cf80 100755
+--- a/ci/read-candidate-identity.sh
++++ b/ci/read-candidate-identity.sh
+@@ -48,12 +48,22 @@ for pair in "image:${image}" "bundle:${bundle}" "loader:${loader}"; do
+ done
+ [[ "${gap_mb}" =~ ^[1-9][0-9]*$ ]] || { printf -- '--gap-mb must be a positive integer\n' >&2; exit 2; }
+ 
+-for tool in mtype unsquashfs sha256sum; do
++for tool in dd mtype unsquashfs sha256sum; do
+   command -v "${tool}" >/dev/null 2>&1 || die "required tool not on PATH: ${tool}"
+ done
+ 
++work="$(mktemp -d)"
++trap 'rm -rf "${work}"' EXIT
++raw_image="${image}"
++if [[ "${image}" == *.xz ]]; then
++  command -v xz >/dev/null 2>&1 || die "required tool not on PATH: xz"
++  raw_image="${work}/candidate.raw"
++  xz -dc -- "${image}" | dd of="${raw_image}" bs=4M conv=sparse status=none \
++    || die "could not decompress candidate image: ${image}"
++fi
++
+ boot_off=$(( gap_mb * 1024 * 1024 ))
+-board_env="$(mtype -i "${image}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
++board_env="$(mtype -i "${raw_image}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
+ [[ -n "${board_env}" ]] \
+   || die "no cera_board.env on the FAT boot partition at byte offset ${boot_off}"
+ 
+@@ -62,9 +72,6 @@ candidate_fdtfile="$(sed -n 's/^fdtfile=//p'  <<<"${board_env}" | head -1 | tr -
+ [[ -n "${candidate_board_id}" ]] || die "cera_board.env carries no board_id"
+ [[ -n "${candidate_fdtfile}" ]] || die "cera_board.env carries no fdtfile"
+ 
+-work="$(mktemp -d)"
+-trap 'rm -rf "${work}"' EXIT
+-
+ # The .raucb layout is <squashfs payload><CMS signature><8-byte big-endian
+ # signature length>; the same split lib/rauc-bundle-inspect.sh performs before it
+ # verifies. Reading the trailer is what makes the payload boundary knowable.
+@@ -83,6 +90,6 @@ candidate_compatible="$(sed -n 's/^compatible=//p' "${work}/manifest.raucm" | he
+ printf 'candidate_board_id=%s\n'      "${candidate_board_id}"
+ printf 'candidate_fdtfile=%s\n'       "${candidate_fdtfile}"
+ printf 'candidate_compatible=%s\n'    "${candidate_compatible}"
+-printf 'candidate_raw_sha256=%s\n'    "$(sha256sum "${image}"  | cut -d' ' -f1)"
++printf 'candidate_raw_sha256=%s\n'    "$(sha256sum "${raw_image}" | cut -d' ' -f1)"
+ printf 'candidate_bundle_sha256=%s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)"
+ printf 'candidate_loader_sha256=%s\n' "$(sha256sum "${loader}" | cut -d' ' -f1)"
+diff --git a/ci/runner-setup.md b/ci/runner-setup.md
+index 6a9713b..2cbc783 100644
+--- a/ci/runner-setup.md
++++ b/ci/runner-setup.md
+@@ -42,8 +42,9 @@ the MOCK mode of `rauc-rollback.sh` proves the engine, not the silicon.
+ - **x86_64** strongly preferred (mkosi/docker tooling, `rkdeveloptool` apt
+   package, GH runner are all first-class on amd64).
+ - ≥ 4 GB RAM, ≥ 40 GB free disk (build artifacts + image staging + runner work
+-  dir). Candidate verification uses one private image-sized scratch object at a
+-  time: first the immutable flash snapshot, then the exact media readback. It
++  dir). The downloaded candidate is `.raw.xz`. Candidate verification checks its
++  transport sidecar, materializes one private sparse raw snapshot, and later
++  replaces it with the exact media readback. It
+   never retains both scratch images simultaneously.
+ - Outbound HTTPS to `github.com` / `api.github.com` / `*.actions.githubusercontent.com`
+   (the runner long-polls GitHub; **no inbound** port needs opening).
+@@ -369,7 +370,9 @@ identity, or cleanup evidence.
+ The bench flash-and-verify tool (`verify-and-flash-candidate.sh`) is run by an
+ operator against the exact immutable candidate artifact downloaded from a
+ `release.yml` build. It takes the immutable artifact digest, raw SHA-256, bundle,
+-keyring, loader filename/SHA-256, and candidate commit as inputs. There is no
++keyring, loader filename/SHA-256, and candidate commit as inputs. The artifact
++also carries a SHA-256 sidecar for the compressed `.raw.xz`; the tool verifies it
++before decompression and records both transport and raw identities. There is no
+ automated hardware-flashing job — nightly, manual-current-image, or
+ pull-request-triggered.
+ 
+diff --git a/ci/verify-and-flash-candidate.sh b/ci/verify-and-flash-candidate.sh
+index 2c8c9a7..e25644b 100755
+--- a/ci/verify-and-flash-candidate.sh
++++ b/ci/verify-and-flash-candidate.sh
+@@ -147,9 +147,11 @@ validate_identity_filename() {
+   }
+ }
+ 
+-raw_file="$(basename -- "${image}")"
++transport_file="$(basename -- "${image}")"
++raw_file="${transport_file%.xz}"
+ bundle_file="$(basename -- "${bundle}")"
+ loader_file="$(basename -- "${loader}")"
++validate_identity_filename transport_file "${transport_file}"
+ validate_identity_filename raw_file "${raw_file}"
+ validate_identity_filename bundle_file "${bundle_file}"
+ validate_identity_filename loader_file "${loader_file}"
+@@ -157,6 +159,7 @@ validate_identity_filename loader_file "${loader_file}"
+ candidate_identity_reader="${CERALIVE_CANDIDATE_IDENTITY_BIN:-${HERE}/read-candidate-identity.sh}"
+ candidate_board_id="" candidate_fdtfile="" candidate_compatible=""
+ candidate_raw_sha256="" candidate_bundle_sha256="" candidate_loader_sha256=""
++identity_image=""
+ 
+ # run_candidate_identity_gate — the CROSS-BOARD REJECTION. Reads what the
+ # artifact set says it is and compares every axis against what the board manifest
+@@ -174,7 +177,7 @@ run_candidate_identity_gate() {
+       candidate_bundle_sha256) candidate_bundle_sha256="${value}" ;;
+       candidate_loader_sha256) candidate_loader_sha256="${value}" ;;
+     esac
+-  done < <("${candidate_identity_reader}" --image "${image}" --bundle "${bundle}" \
++  done < <("${candidate_identity_reader}" --image "${identity_image:-${image}}" --bundle "${bundle}" \
+     --loader "${loader}")
+ 
+   for line in candidate_board_id candidate_fdtfile candidate_compatible \
+@@ -229,6 +232,8 @@ if [[ "${mode}" == check-identity ]]; then
+ identity_contract=board-derived-candidate-identity
+ raw_file=${raw_file}
+ raw_sha256=${expected_sha}
++transport_file=${transport_file}
++transport_sha256=$(sha256sum "${image}" | cut -d' ' -f1)
+ bundle_file=${bundle_file}
+ loader_file=${loader_file}
+ loader_sha256=${loader_sha}
+@@ -690,7 +695,37 @@ run_loader_probe() {
+   return "${status}"
+ }
+ 
+-cp --reflink=auto --sparse=always -- "${image}" "${flash_image}"
++case "${image}" in
++  *.raw.xz|*.img.xz)
++    command -v xz >/dev/null 2>&1 || {
++      printf 'xz is required to materialize compressed candidate images\n' >&2
++      exit 1
++    }
++    compressed_sidecar="${image}.sha256"
++    [[ -f "${compressed_sidecar}" && ! -L "${compressed_sidecar}" ]] || {
++      printf 'compressed candidate checksum sidecar is required: %s\n' \
++        "${compressed_sidecar}" >&2
++      exit 1
++    }
++    ( cd "$(dirname -- "${image}")" \
++      && sha256sum -c "$(basename -- "${compressed_sidecar}")" ) || {
++      printf 'compressed candidate digest verification failed\n' >&2
++      exit 1
++    }
++    xz -dc -- "${image}" | dd of="${flash_image}" bs=4M conv=sparse status=none || {
++      printf 'could not decompress candidate image: %s\n' "${image}" >&2
++      exit 1
++    }
++    ;;
++  *.raw|*.img)
++    cp --reflink=auto --sparse=always -- "${image}" "${flash_image}"
++    ;;
++  *)
++    printf 'unsupported candidate image type: %s (expected .raw, .img, .raw.xz, or .img.xz)\n' \
++      "${image}" >&2
++    exit 2
++    ;;
++esac
+ chmod 400 "${flash_image}"
+ actual_sha="$(sha256sum "${flash_image}" | cut -d' ' -f1)"
+ [[ "${actual_sha}" == "${expected_sha}" ]] || {
+@@ -711,6 +746,7 @@ actual_loader_sha="$(sha256sum "${flash_loader}" | cut -d' ' -f1)"
+     "${loader_sha}" "${actual_loader_sha}" >&2
+   exit 1
+ }
++identity_image="${flash_image}"
+ run_candidate_identity_gate
+ install -m 600 /dev/null "${ssh_known_hosts}"
+ 
+@@ -998,6 +1034,8 @@ candidate_commit=${candidate_commit}
+ raw_file=${raw_file}
+ raw_size=${image_bytes}
+ raw_sha256=${expected_sha}
++transport_file=${transport_file}
++transport_sha256=$(sha256sum "${image}" | cut -d' ' -f1)
+ bundle_file=${bundle_file}
+ keyring_sha256=$(sha256sum "${keyring}" | cut -d' ' -f1)
+ loader_file=${loader_file}
+diff --git a/docs/DEVICE-BRINGUP.md b/docs/DEVICE-BRINGUP.md
+index cbc017d..b7b68da 100644
+--- a/docs/DEVICE-BRINGUP.md
++++ b/docs/DEVICE-BRINGUP.md
+@@ -229,6 +229,11 @@ images/rock-5b-plus/
+ 
+ The `.raw` is a sparse file. Actual on-disk size is much smaller than the
+ nominal 14,800 MiB. Use `du -sh` to see the allocated host-file size.
++These are build-local artifacts. A sealed release candidate contains
++`<timestamp>.raw.xz` plus `<timestamp>.raw.xz.sha256` for download integrity and
++`raw.sha256` for the decompressed bytes that are flashed and read back. Sealing
++runs only after the workflow's uncompressed preflash gate; it uses multithreaded
++xz level 6 rather than the slower level 9.
+ 
+ ### Custom APT mirror
+ 
+@@ -435,6 +440,15 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
+ sudo sync
+ ```
+ 
++For a downloaded release candidate, verify and decompress it before `dd`:
++
++```bash
++sha256sum -c <timestamp>.raw.xz.sha256
++xz -dk <timestamp>.raw.xz
++sudo dd if=<timestamp>.raw of=/dev/sdX bs=4M status=progress conv=fsync
++sudo sync
++```
++
+ Eject the card and insert it into the board. **Do not assume this is enough,
+ verify it.** A previous version of this doc claimed the Rock 5B+ boots microSD
+ before eMMC by default, citing Radxa forum guidance for the Rock 5B and the
+@@ -492,11 +506,13 @@ The general procedure for RK3588 boards:
+    `Maskrom` device.
+ 
+ **Write the image:** the release-candidate build workflow (`release.yml`) produces
+-the immutable candidate artifact (raw image + signed `.raucb` + pinned loader); an
++the immutable candidate artifact (compressed `.raw.xz` + both raw/transport
++SHA-256 records + signed `.raucb` + pinned loader); an
+ operator downloads it and flashes it with the bench flash-and-verify tool
+ (`ci/verify-and-flash-candidate.sh`, described in
+ [`ci/runner-setup.md`](../ci/runner-setup.md)). The tool downloads the pinned
+-loader, checks the approved Maskrom USB fixture and eMMC capacity, captures the
++loader, verifies and decompresses the raw into a private sparse snapshot, checks
++the approved Maskrom USB fixture and eMMC capacity, captures the
+ initial loader command under a pinned process-group leader, and limits it with a
+ monotonic 15-second budget.
+ After `db` exits, a separate 10-second phase must observe the same
+@@ -522,7 +538,7 @@ has been validated on real Rock 5B+ hardware.
+ 
+ ```bash
+ rkdeveloptool db  <loader.bin>      # download the loader (SPL) into device RAM
+-rkdeveloptool wl 0 <image.raw>      # write the full raw image, starting at LBA 0
++rkdeveloptool wl 0 <image.raw>      # write a decompressed raw image, starting at LBA 0
+ rkdeveloptool rd                    # reset the device
+ ```
+ 
+@@ -1078,7 +1094,7 @@ working build:
+ - [ ] `./build rock-5b-plus` for a real build (needs `apt.ceralive.tv`
+       credentials — see "APT feed" in §1; ~15-30 min on a modern host).
+ - [ ] Before touching real hardware, read §3 "Pre-flash verification" and run
+-      `tests/preflash-verify.sh` against your build's `.raw` — it is
++      `tests/preflash-verify.sh` against your build's uncompressed `.raw` — it is
+       non-destructive (only reads block-device size) and catches most build
+       defects before you commit to a flash.
+ - [ ] Pick ONE flash path from the table at the top of §4, matching your
+diff --git a/docs/FIRST-BOOT.md b/docs/FIRST-BOOT.md
+index e85bf35..44c8029 100644
+--- a/docs/FIRST-BOOT.md
++++ b/docs/FIRST-BOOT.md
+@@ -20,7 +20,8 @@ verifiable against the merged runtime scripts under `mkosi/runtime/`.
+ ## 1. Flash the image
+ 
+ Build the image first (see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2),
+-then write it to a microSD card or eMMC.
++then write it to a microSD card or eMMC. Release downloads are `.raw.xz`; local
++builds retain an uncompressed sparse `.raw` under `images/<board>/`.
+ 
+ **microSD (dd):**
+ 
+@@ -32,6 +33,20 @@ sudo dd if="${IMAGE}" of=/dev/sdX bs=4M status=progress conv=fsync
+ sudo sync
+ ```
+ 
++For a downloaded release candidate, verify the download before decompressing,
++then flash the resulting raw bytes:
++
++```bash
++sha256sum -c <timestamp>.raw.xz.sha256
++xz -dk <timestamp>.raw.xz
++sudo dd if=<timestamp>.raw of=/dev/sdX bs=4M status=progress conv=fsync
++sudo sync
++```
++
++The candidate also includes `raw.sha256`, which identifies the decompressed bytes.
++The production bench tool verifies both digests automatically and compares the
++whole-media readback with that decompressed raw digest.
++
+ Replace `/dev/sdX` with your card's device node. Double-check with `lsblk`
+ before running — dd to the wrong device is destructive.
+ 
+diff --git a/docs/RELEASE-PROCESS.md b/docs/RELEASE-PROCESS.md
+index 5ceee26..29c85c1 100644
+--- a/docs/RELEASE-PROCESS.md
++++ b/docs/RELEASE-PROCESS.md
+@@ -517,6 +517,9 @@ mkdir "${tmp}/candidate"
+ unzip -q "${tmp}/candidate.zip" -d "${tmp}/candidate"
+ 
+ candidate="${tmp}/candidate"
++raw_transport="$(find "${candidate}" -maxdepth 1 -type f -name '*.raw.xz' -print -quit)"
++test -n "${raw_transport}"
++( cd "${candidate}" && sha256sum -c "$(basename "${raw_transport}").sha256" )
+ expected_raw_sha="$(awk 'NR == 1 { print $1 }' "${candidate}/raw.sha256")"
+ [[ "${expected_raw_sha}" =~ ^[0-9a-f]{64}$ ]]
+ [[ "${hand_tested_raw_sha256}" =~ ^[0-9a-f]{64}$ ]]
+diff --git a/docs/host-support.md b/docs/host-support.md
+index d4ccd77..e70938a 100644
+--- a/docs/host-support.md
++++ b/docs/host-support.md
+@@ -141,6 +141,12 @@ to Docker, at least 16 GiB current `MemAvailable` + `SwapFree`, and at least
+ not accepted for this dedicated production job, even when it remains suitable
+ for caveated local development.
+ 
++The host also needs `xz` from `xz-utils`. Image construction and preflash checks
++finish on the uncompressed sparse raw; candidate sealing then runs `xz -T0 -6`
++on the host and fails closed if the compressed stream does not reproduce the raw
++SHA-256. This is a release-transport requirement, not a package added to the
++device image.
++
+ The workflow exports `DOCKER_CONTEXT=default`, so an interactive `docker context
+ use desktop-linux` cannot redirect the runner service. It then runs:
+ 
+diff --git a/docs/ota-bookworm-trixie-transition.md b/docs/ota-bookworm-trixie-transition.md
+index 7d1f242..70b6a8b 100644
+--- a/docs/ota-bookworm-trixie-transition.md
++++ b/docs/ota-bookworm-trixie-transition.md
+@@ -1,14 +1,15 @@
+ # Bookworm → Trixie OTA transition contract and drill
+ 
+ **Status:** `[PARTIAL]` — the transition is **OTA-feasible**, and the bundle
+-compatibility contract is enforced offline. The current mainline v7.2 image has
+-not yet completed this drill on hardware; todo 16 owns that execution.
++compatibility contract is enforced offline. The first mainline v7.2 Trixie drill
++reached the new slot on both RK3588 boards but exposed a producer-side RAUC 1.13
++configuration defect; the corrected image still needs the drill repeated.
+ 
+ ## Verdict
+ 
+ ```yaml
+ transition: ota
+-hardware-gated: not-run
++hardware-gated: attempted-blocked
+ fleet-installer: rauc-1.8
+ first-trixie-bundle-format: plain
+ ```
+@@ -45,6 +46,14 @@ The conclusion rests on four independently checkable facts:
+    unset, so both RAUC 1.8 and 1.13 use OpenSSL's `smime_sign` purpose and accept
+    the existing dual-EKU leaf.
+ 
++The attempted drill also established one Trixie-only config constraint. RAUC
++1.13 hard-rejects `bootloader=custom` combined with RAUC's native
++`boot-attempts=` key, which is supported only by `uboot` and `barebox`. The
++RK3588 custom backend already owns the attempt budget in FAT `boot_state.txt`, so
++the three custom config writers now omit that key with no substitute. The
++opt-in real-RAUC contract loads the authoritative generated config and starts the
++service; an injected `boot-attempts=3` is its negative control.
++
+ Primary references:
+ 
+ - [RAUC 1.13 compatibility policy](https://rauc.readthedocs.io/en/v1.13/basic.html#forward-and-backward-compatibility)
+@@ -95,9 +104,10 @@ size=<generated>
+ - Later releases may tighten the format only after every device has booted a
+   Trixie slot and therefore runs the newer RAUC.
+ 
+-Guard: `tests/rauc-transition-contract.test.sh`. It checks the real bundle
+-writer and both `system.conf` writers, and carries format/compatible mutations
+-that must be rejected.
++Guards: `tests/rauc-transition-contract.test.sh` checks the real bundle writer
++and all three custom `system.conf` writers, including the absence of RAUC-native
++attempt counting. `tests/real-rauc-contract.sh` starts a real daemon with the
++authoritative rendered config. Both suites carry mutations that must be rejected.
+ 
+ ## Todo 16 A/B transition drill (runbook only; not executed here)
+ 
+diff --git a/mkosi/customize/rauc-setup.sh b/mkosi/customize/rauc-setup.sh
+index c5ffc90..96f3895 100644
+--- a/mkosi/customize/rauc-setup.sh
++++ b/mkosi/customize/rauc-setup.sh
+@@ -104,7 +104,6 @@ install_system_conf_fallback() {
+ [system]
+ compatible=${RAUC_COMPATIBLE}
+ bootloader=custom
+-boot-attempts=3
+ 
+ [handlers]
+ bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+diff --git a/mkosi/platform/boot/README.md b/mkosi/platform/boot/README.md
+index 1917685..d5d32d2 100644
+--- a/mkosi/platform/boot/README.md
++++ b/mkosi/platform/boot/README.md
+@@ -159,6 +159,13 @@ state/primary operations. RAUC 1.11+ prefers the optional `get-current` operatio
+ which deliberately reads the same kernel argument because primary can change while
+ the old slot is still running. State mutations delegate to `ceralive-boot-state`.
+ 
++The generated `system.conf` deliberately has **no `boot-attempts=` key**. RAUC
++1.13 accepts that setting only with its native `uboot` or `barebox` backends and
++rejects it with `bootloader=custom` before the daemon can acquire its D-Bus name.
++No replacement setting is needed: the FAT `boot_state.txt` counters and this
++custom backend are the sole attempt-counting mechanism, with their existing
++three-attempt default unchanged.
++
+ ## Board specifics come from the manifest — never hardcoded
+ 
+ `install-boot.sh` reads `SERIAL_CONSOLE`, `DTB_NAME`, `BOARD_ID`,
+diff --git a/mkosi/platform/boot/install-boot.sh b/mkosi/platform/boot/install-boot.sh
+index 9d18867..ed86b8c 100755
+--- a/mkosi/platform/boot/install-boot.sh
++++ b/mkosi/platform/boot/install-boot.sh
+@@ -136,9 +136,6 @@ install_rootfs() {
+ [system]
+ compatible=${COMPATIBLE}
+ bootloader=custom
+-# Boot attempts per slot before the custom backend / boot.scr declare a slot bad
+-# and roll back. Mirrors CERALIVE_BOOT_ATTEMPTS used by ceralive-boot-state.
+-boot-attempts=${BOOT_ATTEMPTS}
+ 
+ [handlers]
+ # Trixie RAUC 1.13 delegates the four state/primary operations to this script
+diff --git a/mkosi/runtime/hawkbit-updater/README.md b/mkosi/runtime/hawkbit-updater/README.md
+index 27e4c36..e9ed9fa 100644
+--- a/mkosi/runtime/hawkbit-updater/README.md
++++ b/mkosi/runtime/hawkbit-updater/README.md
+@@ -14,7 +14,7 @@ hawkBit DDI v1 (private, 127.0.0.1:8080 behind TLS proxy/VPN)
+ rauc-hawkbit-updater ──download──▶ /data/ceralive/rauc-downloads/bundle.raucb
+         │  RAUC D-Bus InstallBundle                         (NOT rootfs — task 41)
+         ▼
+-RAUC installs to inactive slot, marks it primary (boot-attempts=3, system.conf)
++RAUC installs to inactive slot; custom backend marks it primary (FAT attempt budget=3)
+         │  (updater has NO mark-good — gate is NOT bypassed)
+         ▼  reboot (operator/CeraUI controlled; post_update_reboot=false)
+ new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
+@@ -145,10 +145,12 @@ does so against trixie's RAUC **1.13**, not the bookworm 1.8 this design was fir
+ written for; the D-Bus `InstallBundle` interface it drives is unchanged across that
+ jump. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
+ "`mark_compatible = false` or equivalent" the task asks for is satisfied
+-structurally: the updater simply cannot confirm a slot). Confirmation is RAUC's
+-`boot-attempts` countdown + `ceralive-healthcheck.service`, which is the **sole**
+-caller of `rauc mark-good`. A bad bundle that boots-but-can't-stream is left
+-unconfirmed and rolled back on the next reboot (task 27 bootcount adapter).
++structurally: the updater simply cannot confirm a slot). Confirmation is the
++custom backend's FAT `boot_state.txt` countdown plus
++`ceralive-healthcheck.service`, which is the **sole** caller of `rauc mark-good`.
++A bad bundle that boots-but-can't-stream is left unconfirmed and rolled back on
++the next reboot (task 27 bootcount adapter). RAUC's native `boot-attempts` key is
++not used because RAUC 1.13 rejects it with `bootloader=custom`.
+ 
+ `post_update_reboot = false` keeps the reboot under CeraLive's control (the upstream
+ docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-loss
+diff --git a/mkosi/runtime/hawkbit-updater/config.conf b/mkosi/runtime/hawkbit-updater/config.conf
+index 4e229c7..e4cb5f5 100644
+--- a/mkosi/runtime/hawkbit-updater/config.conf
++++ b/mkosi/runtime/hawkbit-updater/config.conf
+@@ -20,8 +20,8 @@
+ # HEALTHCHECK GATE (task 29) — the updater does NOT confirm the slot:
+ #   rauc-hawkbit-updater 1.4 only INSTALLS a bundle (via RAUC's D-Bus
+ #   InstallBundle). It has NO `mark-good`/auto-confirm capability, so it CANNOT
+-#   bypass the healthcheck gate. RAUC marks the freshly-installed slot primary with
+-#   a bounded boot-attempts count (system.conf, task 26/27); on the next boot
++#   bypass the healthcheck gate. The custom backend marks the freshly-installed
++#   slot primary with a bounded FAT boot_state.txt attempt count (task 26/27); on the next boot
+ #   ceralive-healthcheck.service (task 29) is the SOLE caller of `rauc mark-good`,
+ #   and rolls the slot back if streaming health is not proven.
+ #   `post_update_reboot = false` keeps the reboot under CeraLive's control (the
+diff --git a/mkosi/runtime/rauc/system.conf b/mkosi/runtime/rauc/system.conf
+index c6da43e..f0ced6c 100644
+--- a/mkosi/runtime/rauc/system.conf
++++ b/mkosi/runtime/rauc/system.conf
+@@ -27,9 +27,6 @@
+ # guard. It MUST match the compatible baked into the signed .raucb.
+ compatible=@COMPATIBLE_STRING@
+ bootloader=custom
+-# Boot attempts per slot before the custom backend / boot.scr declare a slot bad
+-# and roll back. Mirrors CERALIVE_BOOT_ATTEMPTS used by ceralive-boot-state.
+-boot-attempts=3
+ 
+ [handlers]
+ # Trixie RAUC 1.13 delegates the four state/primary operations to this script
+diff --git a/tests/preflash-cross-board.test.sh b/tests/preflash-cross-board.test.sh
+index 64e0bf7..2b42bce 100755
+--- a/tests/preflash-cross-board.test.sh
++++ b/tests/preflash-cross-board.test.sh
+@@ -56,7 +56,7 @@ append_be64() {
+   local file="$1" value="$2" shift_bits byte
+   for shift_bits in 56 48 40 32 24 16 8 0; do
+     byte=$(( (value >> shift_bits) & 255 ))
+-    printf "$(printf '\\x%02x' "${byte}")" >>"${file}"
++    printf '%b' "$(printf '\\x%02x' "${byte}")" >>"${file}"
+   done
+ }
+ 
+@@ -104,6 +104,7 @@ check_identity() {
+ echo "### 1. real fixtures are readable and self-describing"
+ make_candidate rock   rock-5b-plus   rk3588-rock-5b-plus.dtb     ceralive-rock-5b-plus
+ make_candidate orange orangepi5-plus rk3588-orangepi-5-plus.dtb  ceralive-orangepi5-plus
++xz -T1 -1 -c "${TMP}/rock/candidate.raw" >"${TMP}/rock/candidate.raw.xz"
+ 
+ rock_read="$("${READER}" --image "${TMP}/rock/candidate.raw" \
+   --bundle "${TMP}/rock/candidate.raucb" --loader "${TMP}/rock/loader.bin")"
+@@ -114,6 +115,13 @@ assert_contains_str "the reader recovers the Rock fdtfile" \
+ assert_contains_str "the reader recovers the Rock compatible from the real squashfs manifest" \
+   "${rock_read}" 'candidate_compatible=ceralive-rock-5b-plus'
+ 
++rock_xz_read="$("${READER}" --image "${TMP}/rock/candidate.raw.xz" \
++  --bundle "${TMP}/rock/candidate.raucb" --loader "${TMP}/rock/loader.bin")"
++assert_contains_str "the reader accepts the sealed .raw.xz transport" \
++  "${rock_xz_read}" 'candidate_board_id=rock-5b-plus'
++assert_contains_str "the compressed reader reports the DECOMPRESSED raw digest" \
++  "${rock_xz_read}" "candidate_raw_sha256=$(sha256sum "${TMP}/rock/candidate.raw" | cut -d' ' -f1)"
++
+ orange_read="$("${READER}" --image "${TMP}/orange/candidate.raw" \
+   --bundle "${TMP}/orange/candidate.raucb" --loader "${TMP}/orange/loader.bin")"
+ assert_contains_str "the reader recovers the Orange Pi board_id" \
+diff --git a/tests/rauc-rollback.sh b/tests/rauc-rollback.sh
+index 70fdc04..923d58f 100755
+--- a/tests/rauc-rollback.sh
++++ b/tests/rauc-rollback.sh
+@@ -55,7 +55,7 @@
+ #   BUNDLE_DIR          dir holding the pre-built bundles (bad.raucb, good.raucb)
+ #   BAD_BUNDLE          override the bad bundle path  (default $BUNDLE_DIR/bad.raucb)
+ #   GOOD_BUNDLE         override the good bundle path (default $BUNDLE_DIR/good.raucb)
+-#   BOOT_ATTEMPTS       per-slot bootcount budget (system.conf boot-attempts) (def 3)
++#   BOOT_ATTEMPTS       custom FAT per-slot bootcount budget              (def 3)
+ #   REBOOT_TIMEOUT      seconds to wait for SSH to return after a reboot      (def 90)
+ #   HEALTHCHECK_TIMEOUT seconds to wait for the slot to self-confirm good    (def 120)
+ #   SSH_POLL_INTERVAL   seconds between SSH reachability polls                 (def 5)
+@@ -466,7 +466,7 @@ main() {
+   echo " Mode   : ${MODE^^}$( [[ ${MODE} == live ]] && echo " (${SSH_USER}@${BOARD_IP}:${SSH_PORT})" || echo " (simulated board; drives the REAL shipped scripts)")"
+   echo " Engine : ceralive-boot-state.sh / ceralive-rauc-boot-adapter.sh"
+   echo " Gate   : ceralive-healthcheck.sh (mark-good only on real streaming health)"
+-  echo " Budget : boot-attempts=${BOOT_ATTEMPTS}"
++  echo " Budget : custom boot-state attempts=${BOOT_ATTEMPTS}"
+   echo "=============================================================="
+ 
+   if [[ "${MODE}" == "live" ]]; then
+diff --git a/tests/rauc-transition-contract.test.sh b/tests/rauc-transition-contract.test.sh
+index fdfa3a6..c89f47f 100755
+--- a/tests/rauc-transition-contract.test.sh
++++ b/tests/rauc-transition-contract.test.sh
+@@ -18,6 +18,7 @@ source "${HERE}/lib/assertions.sh"
+ BUNDLE="${PIPELINE_DIR}/lib/build-bundle.sh"
+ INSTALL_BOOT="${PIPELINE_DIR}/mkosi/platform/boot/install-boot.sh"
+ SYSTEM_CONF="${PIPELINE_DIR}/mkosi/runtime/rauc/system.conf"
++RAUC_SETUP="${PIPELINE_DIR}/mkosi/customize/rauc-setup.sh"
+ 
+ has() {
+   local desc="$1" file="$2" needle="$3"
+@@ -35,7 +36,7 @@ lacks_active_key() {
+ }
+ 
+ transition_contract_check() {
+-  local bundle="$1" install_boot="$2" system_conf="$3"
++  local bundle="$1" install_boot="$2" system_conf="$3" rauc_setup="$4"
+   local failures_before="${FAIL}"
+ 
+   has "bundle manifest explicitly pins the RAUC 1.8-compatible format" \
+@@ -54,6 +55,12 @@ transition_contract_check() {
+     "${system_conf}" 'bundle-formats'
+   lacks_active_key "verification purpose stays unchanged across the transition" \
+     "${system_conf}" 'check-purpose'
++  lacks_active_key "RK3588 custom generator leaves attempt counting to its backend" \
++    "${install_boot}" 'boot-attempts'
++  lacks_active_key "committed custom fallback leaves attempt counting to its backend" \
++    "${system_conf}" 'boot-attempts'
++  lacks_active_key "self-contained custom fallback leaves attempt counting to its backend" \
++    "${rauc_setup}" 'boot-attempts'
+   has "bundle signer remains the leaf key" "${bundle}" '"--key=${RAUC_LEAF_KEY}"'
+   has "bundle embeds the existing intermediate chain" "${bundle}" '"--intermediate=${RAUC_CHAIN}"'
+   has "bundle verifies to the existing baked root" "${bundle}" 'RAUC_ROOT_CA="${RAUC_PKI_DIR}/root-ca.pem"'
+@@ -62,19 +69,21 @@ transition_contract_check() {
+ }
+ 
+ echo "== first-Trixie bundle contract =="
+-transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}"
++transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}" "${RAUC_SETUP}"
+ 
+ echo
+ echo "== mutation controls =="
+ scratch="$(mktemp -d)"
+ trap 'rm -rf "${scratch}"' EXIT
+ cp "${BUNDLE}" "${scratch}/build-bundle.sh"
++cp "${BUNDLE}" "${scratch}/build-bundle.sh"
+ cp "${INSTALL_BOOT}" "${scratch}/install-boot.sh"
+ cp "${SYSTEM_CONF}" "${scratch}/system.conf"
++cp "${RAUC_SETUP}" "${scratch}/rauc-setup.sh"
+ 
+ sed -i 's/format=plain/format=verity/' "${scratch}/build-bundle.sh"
+ saved_fail="${FAIL}"
+-transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" >/dev/null 2>&1
++transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
+ if (( FAIL > saved_fail )); then
+   ok "mutation: a verity-format transition bundle is rejected"
+   FAIL="${saved_fail}"
+@@ -85,7 +94,7 @@ fi
+ cp "${BUNDLE}" "${scratch}/build-bundle.sh"
+ sed -i 's/compatible=${compatible}/compatible=ceralive-wrong-board/' "${scratch}/build-bundle.sh"
+ saved_fail="${FAIL}"
+-transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" >/dev/null 2>&1
++transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
+ if (( FAIL > saved_fail )); then
+   ok "mutation: a hardcoded incompatible board identity is rejected"
+   FAIL="${saved_fail}"
+@@ -93,6 +102,17 @@ else
+   bad "mutation: a hardcoded compatible escaped the transition gate"
+ fi
+ 
++cp "${INSTALL_BOOT}" "${scratch}/install-boot.sh"
++sed -i '/bootloader=custom/a boot-attempts=3' "${scratch}/install-boot.sh"
++saved_fail="${FAIL}"
++transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
++if (( FAIL > saved_fail )); then
++  ok "mutation: RAUC-native boot attempts cannot return to the custom generator"
++  FAIL="${saved_fail}"
++else
++  bad "mutation: boot-attempts escaped the custom-backend gate"
++fi
++
+ echo
+ if (( FAIL == 0 )); then
+   echo "rauc transition contract: PASS (${PASS} assertions)"
+diff --git a/tests/real-rauc-contract.sh b/tests/real-rauc-contract.sh
+index da95710..1fac34e 100755
+--- a/tests/real-rauc-contract.sh
++++ b/tests/real-rauc-contract.sh
+@@ -151,25 +151,29 @@ touch "${WORK}/backend.calls"
+ chmod 0666 "${WORK}/backend.calls"
+ printf 'root=PARTLABEL=rootfs_a rauc.slot=A rw\n' >"${WORK}/cmdline"
+ 
+-cat >"${CONF}" <<EOF
+-[system]
+-compatible=ceralive-rock-5b-plus
+-bootloader=custom
+-data-directory=${WORK}/data
+-[handlers]
+-bootloader-custom-backend=${WORK}/backend.sh
+-[keyring]
+-path=${WORK}/pki/root-ca.pem
+-check-purpose=codesign
+-[slot.rootfs.0]
+-device=${WORK}/slot-a.ext4
+-type=ext4
+-bootname=A
+-[slot.rootfs.1]
+-device=${WORK}/slot-b.ext4
+-type=ext4
+-bootname=B
+-EOF
++generated_root="${WORK}/generated-root"
++ROOT="${generated_root}" SERIAL_CONSOLE="ttyS2:1500000" \
++  DTB_NAME="rk3588-rock-5b-plus.dtb" BOARD_ID="rock-5b-plus" \
++  COMPATIBLE_STRING="ceralive-rock-5b-plus" SINGLE_SLOT_FALLBACK="false" \
++  bash "${PIPELINE_DIR}/mkosi/platform/boot/install-boot.sh" rootfs >/dev/null
++sed -e "/^bootloader=custom$/a data-directory=${WORK}/data" \
++  -e "s|^bootloader-custom-backend=.*$|bootloader-custom-backend=${WORK}/backend.sh|" \
++  -e "s|^path=/etc/rauc/ceralive-keyring.pem$|path=${WORK}/pki/root-ca.pem|" \
++  -e "s|^device=/dev/disk/by-partlabel/rootfs_a$|device=${WORK}/slot-a.ext4|" \
++  -e "s|^device=/dev/disk/by-partlabel/rootfs_b$|device=${WORK}/slot-b.ext4|" \
++  "${generated_root}/etc/rauc/system.conf" >"${CONF}"
++
++invalid_conf="${WORK}/system-invalid.conf"
++sed '/^bootloader=custom$/a boot-attempts=3' "${CONF}" >"${invalid_conf}"
++set +e
++timeout 10 sudo -n rauc -d -c "${invalid_conf}" service --override-boot-slot=A \
++  >"${WORK}/invalid-config.log" 2>&1
++invalid_rc=$?
++set -e
++[[ "${invalid_rc}" -ne 0 && "${invalid_rc}" -ne 124 ]]
++grep -Fq 'Configuring boot attempts is valid for uboot or barebox only (not for custom)' \
++  "${WORK}/invalid-config.log"
++printf 'INVALID_CONFIG_CONTROL=PASS boot-attempts-rejected-for-custom\n'
+ 
+ CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" CERALIVE_BOOT_STATE_CORE="${WORK}/boot-state-core.sh" \
+   CERALIVE_BOOT_ATTEMPTS=3 bash "${WORK}/ceralive-boot-state.sh" init
+diff --git a/tests/registry.tsv b/tests/registry.tsv
+index c7e2ecb..c04cd57 100644
+--- a/tests/registry.tsv
++++ b/tests/registry.tsv
+@@ -93,6 +93,7 @@ tests/firstparty-version-resolution.test.sh	shell	unit	default-shell	generic and
+ tests/udev-rule-basename-shadow.test.sh	shell	unit	default-shell	no image-owned /etc/udev/rules.d basename shadows a packaged one, with an injected-collision non-vacuity leg
+ tests/modem-support-file-ownership.test.sh	shell	unit	default-shell	every modem-support file has exactly one owner: no orphans, no double ownership, negative legs for each
+ tests/release-cache-contract.test.sh	shell	unit	default-shell	release cache keys, bounds and exclusions
++tests/raw-candidate-compression.test.sh	shell	integration	default-shell	sealed raw candidate uses deliberate xz settings, publishes both digests, and round-trips byte-identically
+ tests/generated-paths-contract.test.sh	shell	unit	default-shell	generated/ignored paths stay on the cleanup allowlist
+ tests/target-release-derivation.test.sh	shell	unit	default-shell	every suite/VERSION_ID fact derives from manifests/target-release.env: the mapping itself, the ci/check-suite-literals.sh gate plus its own self-test, a per-consumer static contract, a flipped-mapping leg proving the derivation is not a constant, and the ARMBIAN_SUITE separation
+ tests/builder-resource-budget.test.sh	shell	unit	default-shell	production runner RAM/swap/disk floors reject before build
+diff --git a/tests/release-cache-contract.test.sh b/tests/release-cache-contract.test.sh
+index 06f8430..0107ae2 100755
+--- a/tests/release-cache-contract.test.sh
++++ b/tests/release-cache-contract.test.sh
+@@ -163,12 +163,19 @@ builder_index = step_index(lambda step: step.get("uses") == "docker/build-push-a
+ trust_index = step_index(lambda step: step.get("name") == "Materialize release trust inputs")
+ build_index = step_index(lambda step: step.get("name") == "Build exact production candidate")
+ census_index = step_index(lambda step: step.get("name") == "Enforce the build-log census")
++preflash_index = step_index(lambda step: step.get("name") == "Verify uncompressed flash image")
+ 
+ # The census gate is only meaningful against a REAL production build log, which
+ # exists nowhere else — the PR gate is DRY_RUN=1 and never runs the image layers.
+ # So it must sit immediately after the build, and the build must not be able to
+ # hide a failure behind the tee that produces that log.
+ assert build_index < census_index
++assert census_index < preflash_index
++preflash_run = steps[preflash_index]["run"]
++assert "tests/preflash-verify.sh" in preflash_run
++assert '--image "${raws[0]}"' in preflash_run
++assert 'stat -c %s "${raws[0]}"' in preflash_run
++assert "*.raw.xz" not in preflash_run
+ census_run = steps[census_index]["run"]
+ assert "set -euo pipefail" in census_run
+ assert "./ci/check-build-log-census.py --expect-count 26 docs/build-log-census.md" in census_run
+@@ -267,10 +274,13 @@ assert "${{ secrets." not in str(restore.get("with", {}))
+ assert "${{ secrets." not in str(save.get("with", {}))
+ 
+ meta_run = steps[step_index(lambda step: step.get("id") == "meta")]["run"]
+-assert 'ln "${raws[0]}" candidate/' in meta_run, (
+-    "BUG: candidate staging allocates a second multi-GiB raw image instead of a hard link"
++assert './ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate' in meta_run, (
++    "BUG: sealed candidates do not use the tested raw-image xz sealer"
+ )
++assert 'ln "${raws[0]}" candidate/' not in meta_run
+ assert 'cp "${raws[0]}"' not in meta_run
++assert 'raw_name="$(basename "${raws[0]}").xz"' in meta_run
++assert 'raw_compressed_sha256=' in meta_run
+ assert 'bundle_release_name="$(basename "${bundles[0]}")"' in meta_run, (
+     "BUG: the sealed candidate loses the production bundle's publish filename"
+ )
+@@ -283,8 +293,8 @@ assert 'candidate/release-bundle-name.txt' in meta_run, (
+ assert 'rk3588_spl_loader_v1.15.113.bin' in meta_run
+ assert 'loader_sha256=' in meta_run
+ upload = steps[step_index(lambda step: step.get("id") == "upload")]
+-assert upload["with"].get("compression-level") == "6", (
+-    "BUG: sparse candidate transport compression is not explicit"
++assert upload["with"].get("compression-level") == "0", (
++    "BUG: GitHub artifact upload recompresses an already-xz-compressed raw"
+ )
+ 
+ bound_run = steps[bound_index]["run"]
+diff --git a/tests/release-candidate-contract.test.sh b/tests/release-candidate-contract.test.sh
+index db51c31..6ce70ca 100755
+--- a/tests/release-candidate-contract.test.sh
++++ b/tests/release-candidate-contract.test.sh
+@@ -152,6 +152,8 @@ openssl pkey -in "${TMP}/wrong-uart-signing.pem" -pubout -out "${TMP}/wrong-uart
+ [[ -x "${VERIFY}" ]]
+ printf 'candidate-bytes\n' >"${TMP}/candidate.raw"
+ truncate -s 4096 "${TMP}/candidate.raw"
++xz -T1 -1 -c "${TMP}/candidate.raw" >"${TMP}/candidate.raw.xz"
++( cd "${TMP}" && sha256sum candidate.raw.xz > candidate.raw.xz.sha256 )
+ printf 'bundle\n' >"${TMP}/candidate.raucb"
+ printf 'keyring\n' >"${TMP}/keyring.pem"
+ printf 'loader\n' >"${TMP}/loader.bin"
+@@ -185,7 +187,12 @@ done
+ printf 'candidate_board_id=%s\n' "${MOCK_CANDIDATE_BOARD_ID:-rock-5b-plus}"
+ printf 'candidate_fdtfile=%s\n' "${MOCK_CANDIDATE_FDTFILE:-rk3588-rock-5b-plus.dtb}"
+ printf 'candidate_compatible=%s\n' "${MOCK_CANDIDATE_COMPATIBLE:-ceralive-rock-5b-plus}"
+-printf 'candidate_raw_sha256=%s\n' "$(sha256sum "${image}" | cut -d' ' -f1)"
++if [[ "${image}" == *.xz ]]; then
++  raw_sha="$(xz -dc "${image}" | sha256sum | cut -d' ' -f1)"
++else
++  raw_sha="$(sha256sum "${image}" | cut -d' ' -f1)"
++fi
++printf 'candidate_raw_sha256=%s\n' "${raw_sha}"
+ printf 'candidate_bundle_sha256=%s\n' "$(sha256sum "${bundle}" | cut -d' ' -f1)"
+ printf 'candidate_loader_sha256=%s\n' "$(sha256sum "${loader}" | cut -d' ' -f1)"
+ EOF
+@@ -443,7 +450,7 @@ chmod +x "${TMP}/preflash" "${TMP}/ssh" "${TMP}/rkdeveloptool" "${TMP}/uart" \
+   "${TMP}/candidate-identity"
+ 
+ common=(
+-  --image "${TMP}/candidate.raw"
++  --image "${TMP}/candidate.raw.xz"
+   --bundle "${TMP}/candidate.raucb"
+   --keyring "${TMP}/keyring.pem"
+   --loader "${TMP}/loader.bin"
+@@ -480,6 +487,16 @@ base_env=(
+   "CERALIVE_CANDIDATE_IDENTITY_BIN=${TMP}/candidate-identity"
+ )
+ 
++mv "${TMP}/candidate.raw.xz.sha256" "${TMP}/candidate.raw.xz.sha256.saved"
++if missing_sidecar_output="$(env "${base_env[@]}" MOCK_FLASH_LOG="${TMP}/missing-sidecar.log" \
++    "${VERIFY}" "${common[@]}" 2>&1)"; then
++  printf 'compressed candidate without its download checksum was accepted\n' >&2
++  exit 1
++fi
++[[ "${missing_sidecar_output}" == *'compressed candidate checksum sidecar is required'* ]]
++[[ ! -e "${TMP}/missing-sidecar.log" ]]
++mv "${TMP}/candidate.raw.xz.sha256.saved" "${TMP}/candidate.raw.xz.sha256"
++
+ assert_healthy_loader_handoff() {
+   local case_dir="${TMP}/healthy-loader-handoff"
+   local expected_events
+@@ -1282,6 +1299,8 @@ if ! env "${base_env[@]}" MOCK_RECONNECT_MODE=success MOCK_MEDIA="${TMP}/media-o
+ fi
+ grep -qx "candidate_commit=1111111111111111111111111111111111111111" "${TMP}/identity.txt"
+ grep -qx 'raw_file=candidate.raw' "${TMP}/identity.txt"
++grep -qx 'transport_file=candidate.raw.xz' "${TMP}/identity.txt"
++grep -Eq '^transport_sha256=[0-9a-f]{64}$' "${TMP}/identity.txt"
+ grep -qx 'raw_size=4096' "${TMP}/identity.txt"
+ grep -qx "raw_sha256=${sha}" "${TMP}/identity.txt"
+ grep -qx 'bundle_file=candidate.raucb' "${TMP}/identity.txt"
