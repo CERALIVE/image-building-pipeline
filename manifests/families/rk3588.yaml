@@ -299,7 +299,7 @@ variants:
       # 24-entry patches/series, and the whole series applies to
       # v7.2 with its own post-apply gate green.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 365b2463294019e3d4e2d5718a787c2055f4ab59
+      patches_commit: b41a82a92b6b2262eb02aadba5428d5cd5b2ef92
       patches_series: patches/series
 
       defconfig_base: defconfig
