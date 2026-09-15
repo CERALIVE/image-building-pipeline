@@ -83,6 +83,10 @@ build_deb() {
     printf 'Package: %s\nVersion: 1.5.0-1\nArchitecture: arm64\n' "${name}"
     printf 'Maintainer: fixture <f@f>\nDescription: fixture\n'
     [[ -n "${depends}" ]] && printf 'Depends: %s\n' "${depends}"
+    if [[ -n "${FIXTURE_PROVIDES:-}" ]]; then
+      printf 'Provides: %s\n' "${FIXTURE_PROVIDES}"
+      printf 'Conflicts: librga2\nReplaces: librga2\n'
+    fi
   } >"${stage}/DEBIAN/control"
   local rel
   for rel in "$@"; do
@@ -149,7 +153,7 @@ fi
 # ---------------------------------------------------------------------------
 build_deb gstreamer1.0-rockchip-ceralive 'librga2, librockchip-mpp1, libgstreamer1.0-0' "${WORK}/gst.deb" \
   usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstrockchipmpp.so
-build_deb librga2 'libc6, libstdc++6' "${WORK}/rga.deb" \
+FIXTURE_PROVIDES='librga2 (= 2.2.0)' build_deb librga2-ceralive 'libc6, libstdc++6' "${WORK}/rga.deb" \
   usr/lib/aarch64-linux-gnu/librga.so.2
 build_deb rockchip-multimedia-config '' "${WORK}/rmc.deb" \
   lib/udev/rules.d/99-rk-device-permissions.rules
@@ -168,6 +172,63 @@ check "REMOVE-UNSAFE" "$(rdepends_verdict librockchip-mpp1 "${WORK}/mpp-dev.deb"
   "librockchip-mpp-dev DOES depend on librockchip-mpp1 (the direction that exists)"
 check "REMOVE-SAFE" "$(rdepends_verdict librockchip-mpp-dev "${WORK}/mpp1.deb")" \
   "librockchip-mpp1 does NOT depend on -dev (the direction that would block removal)"
+
+# Exercise dpkg's dependency resolver, not a string match that merely sees a
+# Provides field. The consumer keeps its old dependency; only the provider moves.
+command -v dpkg-checkbuilddeps >/dev/null 2>&1 || { echo "FAIL: dpkg-checkbuilddeps is required"; exit 1; }
+mkdir -p "${WORK}/dpkg"
+printf 'Source: fixture\n\nPackage: fixture\nArchitecture: any\nDescription: fixture\n' >"${WORK}/consumer-control"
+{
+  dpkg-deb -f "${WORK}/rga.deb"
+  printf 'Status: install ok installed\n\n'
+} >"${WORK}/dpkg/status"
+GST_DEPENDS="$(dpkg-deb -f "${WORK}/gst.deb" Depends)"
+RGA_DEPENDS="${GST_DEPENDS%%,*}"
+check librga2 "${RGA_DEPENDS}" "the GStreamer consumer still depends on the legacy package name"
+if dpkg-checkbuilddeps --admindir="${WORK}/dpkg" -a arm64 -I -d "${RGA_DEPENDS}" -c '' "${WORK}/consumer-control"; then
+  ok "librga2-ceralive satisfies the GStreamer librga2 dependency through Provides"
+else
+  bad "the fork must satisfy the unchanged GStreamer dependency"
+fi
+if dpkg-checkbuilddeps --admindir="${WORK}/dpkg" -a arm64 -I -d 'librga2 (= 2.2.0)' -c '' "${WORK}/consumer-control"; then
+  ok "the frozen versioned librga2 compatibility name is satisfied"
+else
+  bad "the fork must provide librga2 at the frozen packaging version"
+fi
+sed '/^Provides:/d' "${WORK}/dpkg/status" >"${WORK}/status-without-provides"
+cp "${WORK}/status-without-provides" "${WORK}/dpkg/status"
+if dpkg-checkbuilddeps --admindir="${WORK}/dpkg" -a arm64 -I -d "${RGA_DEPENDS}" -c '' "${WORK}/consumer-control" >"${WORK}/missing-provides.log" 2>&1; then
+  bad "NON-VACUITY: the renamed package without Provides must not satisfy librga2"
+else
+  ok "NON-VACUITY: dropping Provides breaks the unchanged GStreamer dependency"
+fi
+
+check 1 "$(grep -cE '^librga2-ceralive[[:space:]]' "${PINS}" || true)" \
+  "the RGA runtime has exactly one active fork pin"
+check 0 "$(grep -cE '^librga2[[:space:]]' "${PINS}" || true)" \
+  "the Radxa RGA runtime is not an active pin"
+if awk '/^librga2-ceralive[[:space:]]/ { if (previous !~ /^# librga2[[:space:]]/) exit 1; found=1 } { previous=$0 } END { if (!found) exit 1 }' "${PINS}"; then
+  ok "the commented Radxa rollback row is directly above the fork pin"
+else
+  bad "the R0 pin must retain its adjacent Radxa rollback row"
+fi
+check 1 "$(grep -cE '^[[:space:]]*-[[:space:]]*librga2-ceralive[[:space:]]*$' "${FAMILY}" || true)" \
+  "the family declares the fork runtime"
+check 0 "$(grep -cE '^[[:space:]]*-[[:space:]]*librga2[[:space:]]*$' "${FAMILY}" || true)" \
+  "the family no longer requests the replaced runtime"
+for board in orange-pi-5-plus rock-5b-plus; do
+  if grep -qE "^GSTREAMER_RUNTIME_PACKAGES='[^']* librga2-ceralive " \
+    "${HERE}/manifests/fixtures/production-baseline/${board}.params"; then
+    ok "${board} production fixture expects the fork runtime"
+  else
+    bad "${board} production fixture must follow the runtime rename"
+  fi
+done
+if grep -qE '^PLATFORM_PKGS="[^"]* librga2-ceralive ' "${PIPELINE_DIR}/lib/parity-check.sh"; then
+  ok "parity checks the fork runtime in the platform layer"
+else
+  bad "parity must include the fork runtime in PLATFORM_PKGS"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. The encoder consumer resolves the VERSIONED soname. A plugin linking the

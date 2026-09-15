@@ -3105,7 +3105,7 @@ no replacement userspace build is needed.
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Four packages:
   `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.2 (hw_accel_gstreamer_plugins), and
-  `rockchip-multimedia-config` 1.0.2-1 / `librga2` 2.2.0-1 / `librockchip-mpp1` 1.5.0-1
+  `rockchip-multimedia-config` 1.0.2-1 / `librga2-ceralive` 1.10.1+ceralive.1 / `librockchip-mpp1` 1.5.0-1
   (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
   RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
   `tests/mpp-dev-runtime-contract.test.sh`. It is a libdevel package whose whole
@@ -3117,11 +3117,11 @@ no replacement userspace build is needed.
   which is untouched. The old Radxa plugin row remains commented directly above
   the CeraLive release-asset row as the one-line rollback lever. Sources:
   CERALIVE/gstreamer-rockchip for the plugin, tsukumijima for MPP and multimedia
-  config, and Radxa `rk3588s2-bookworm` for the ABI-paired RGA.
+  config, and CERALIVE/librga for the R0 RGA compatibility rebuild.
   The `.2` plugin release adds `libgstrockchiprga.so` with `rgaconvert` and
   `rgacompositor`; `.1` predates those factories. The pipeline pins the released
   bytes to enable fresh-image qualification, not to claim either board has run
-  this package. MPP and librga pins are unchanged.
+  this package. The MPP pin is unchanged; the RGA R0 swap is described below.
 - **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
   pinned packages the resolved family declares (intersection of
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
@@ -3142,6 +3142,25 @@ no replacement userspace build is needed.
   **DO NOT** bump a pinned VERSION without re-proving HW encode (the versions are
   empirically proven). See `docs/kernel-currency-watch.md` and
   `docs/cog-display-addon.md`.
+
+**CeraLive librga R0 stays a platform-layer URL+SHA swap, permanently** [EXISTS]
+
+`librga2-ceralive` `1.10.1+ceralive.1` replaces Radxa's `librga2` runtime in
+the pin file, family manifest, both production fixtures, runtime-contract test
+and parity platform list. The Radxa row remains commented directly above the
+active pin. Downloaded R0 bytes were checked: `Provides: librga2 (= 2.2.0)`,
+`Conflicts: librga2`, `Replaces: librga2`, ELF SONAME `librga.so.2`. The
+runtime-contract test uses dpkg's resolver to prove the unchanged GStreamer
+dependency works through Provides and fails when Provides is removed.
+
+Neither librga package belongs in `REPOS`, `FIRST_PARTY_APT_PKGS`, or the
+app-layer fetch path. The matching `librga-ceralive-dev` release artifact is
+indexed, retained and protected alongside its runtime, but its headers,
+`librga.pc` and unversioned link are build dependencies, not device-image
+additions. Both exact artifact URLs and digests are recorded in
+[`docs/librga-r0-swap.md`](docs/librga-r0-swap.md). R1 is a separate later PR
+after its own release and hardware gate. This swap does not change the kernel
+patch pin or claim a board has booted the new image.
 
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.

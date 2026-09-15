@@ -144,7 +144,7 @@ hw_accel_gstreamer_plugins:
   - gstreamer1.0-rockchip-ceralive
 
 # Runtime multimedia support for the MPP HW-accel path. librockchip-mpp1 is the MPP
-# encode/decode runtime the gst plugin dlopens; librga2 is the RGA 2D accelerator it
+# encode/decode runtime the gst plugin dlopens; librga2-ceralive is the RGA 2D accelerator it
 # links; rockchip-multimedia-config ships the udev/config glue. None are in the
 # Armbian bookworm arm64 feed — all pinned + SHA-256-verified in  # suite-literal-ok: names the Armbian BSP feed, not the target rootfs suite
 # ../rk3588-userspace-deb-versions.txt and staged by fetch_rk3588_userspace.
@@ -158,7 +158,7 @@ hw_accel_gstreamer_plugins:
 # Depends on librockchip-mpp1 alone. Nothing is compiled on a CeraLive board.
 gstreamer_runtime_packages:
   - rockchip-multimedia-config
-  - librga2
+  - librga2-ceralive
   - librockchip-mpp1
 
 # Frozen A/B layout, docs/partition-contract.md §3 (v1). NAME reference only —

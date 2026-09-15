@@ -1518,11 +1518,22 @@ kernel, and a real Debian 13 arm64 install resolved the exact URL/SHA-pinned
 [`docs/kernel-currency-watch.md`](docs/kernel-currency-watch.md).
 
 The MPP **userspace** that makes either kernel track's HW encoders reachable from
-GStreamer (`gstreamer1.0-rockchip-ceralive` + `librockchip-mpp1` + `librga2`) is not in
+GStreamer (`gstreamer1.0-rockchip-ceralive` + `librockchip-mpp1` + `librga2-ceralive`) is not in
 Debian or the Armbian feed. It is baked from exact pinned upstream release assets,
 verified by SHA-256, in
 [`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)
 (fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
+
+The RGA pin selects CeraLive **R0 `1.10.1+ceralive.1`**, a compatibility rebuild
+of Radxa's embedded 1.10.1 API, not a feature upgrade. The runtime provides the
+old `librga2 (= 2.2.0)` dependency and retains SONAME `librga.so.2`. The Radxa
+row is commented directly above it for rollback. This remains a platform-layer
+URL+SHA swap, never a `REPOS` or `FIRST_PARTY_APT_PKGS` addition. The matching
+`librga-ceralive-dev` artifact remains a separately distributed build dependency,
+indexed, retained and protected alongside the runtime; it is not installed in
+the device image. Exact artifacts and validation scope:
+[`R0 librga swap`](docs/librga-r0-swap.md). **R1 requires a separate later PR**
+after its release and hardware gate; this pin claims no fresh-image board result.
 
 **`libmali` is RETIRED, with the vendor kernel track.** No variant declares it
 and its URL/SHA pin is deleted (recoverable at the `vendor-kernel-final` tag).
