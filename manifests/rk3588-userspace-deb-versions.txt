@@ -66,7 +66,7 @@ rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9
 # while shipping the verified fix ledger. The commented Radxa row is the one-line
 # rollback lever; the RGA runtime has its own independent pin and rollback below.
 # gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
-gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.2_arm64.deb  9e0c139704f2743139b8328144e51ff22c17004d83fae62335e2df0751336e2b  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.2/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.2_arm64.deb
+gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.5_arm64.deb  9b991e6320f13c4a281308c49fe9df7518e837e38a3e2db5e6ade4ad6f805e1a  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.5/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.5_arm64.deb
 
 # --- CeraLive RGA R0: same 1.10.1 API, not the later R1 upgrade ---
 # Provides librga2 (= 2.2.0), Conflicts/Replaces librga2, SONAME librga.so.2.
