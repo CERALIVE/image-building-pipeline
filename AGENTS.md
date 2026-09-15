@@ -189,16 +189,21 @@ the manifest and the production-baseline fixtures when deliberately changing tha
 pin; do not derive their expected value from the manifest under test. PR #150's
 RGA pin update initially left both assertions on the previous MPP-only pin.
 
-**Island `v2026.9.4` is a qualification candidate, not a shipped image.** The
+**Island `v2026.9.4` passed Rock qualification, not a fleet release.** The
 proposed `patches_commit` is kernel-patches PR #24's merged
 `9a8be32fe6b54773b01c61119f578bf8cf10b08e`, carrying the approved RGA ownership
-repairs. This image PR stays OPEN through branch-built board qualification:
-software CI does not authorize its merge. Board qualification has NOT run.
+repairs. The artifact-bound Rock 5B+ remeasurement passed on 2026-09-15,
+including all ten former JOURNAL-ERROR rows and restoration to production B.
+Rock qualification is sufficient for this above-4-GiB memory-routing pin;
+the separate librga R1 release's both-board evidence bar does not apply here.
+There is no separate owner-authorization merge gate. PR #165 still needs a
+fresh independent review of its corrected head before merge.
 Reset failure now retains the faulted core's memory and power until reboot;
-unload refuses rather than hangs. See
+unload refuses rather than hangs; fault-injected recovery was not exercised. See
 [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694)
-for the release tuple and remaining gate. No package, Kconfig or layout changes
-accompany this pin.
+for the measured tuple and proof boundaries. The post-R0-rebase image is not
+claimed as a newly board-tested artifact. No package, Kconfig or layout changes
+accompany this kernel pin relative to its updated base.
 
 When diagnosing CI, distinguish expected negative-test output from a failing
 suite: `tests/maskrom-first-realhw.test.sh` deliberately executes the release
