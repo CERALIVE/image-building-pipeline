@@ -382,18 +382,16 @@ been proven, so it is stated separately from everything above.
 | The reserve gate is real, not synthetic-only | A real populated 1 GiB ext4 fixture passes; mutating its root-reserved-block pool makes it fail while `bfree` would still overstate usable space; restoring 5% passes |
 | The gates run in the default suite | Complete three-`required` gate exit 0; closure suite 28/28, slot reserve 29/29, legacy prune 42/42, Bats 803 cases / 801 passed / 0 failures (two pre-existing environment skips) |
 
-### NOT proven, and not claimed anywhere
+### Later full-image evidence and remaining limits
 
-- **No production image has been built with this firmware pin.** Everything above
-  is archive-level, module-level, and synthetic-assembled-filesystem evidence.
-  Both RK3588 images still owe a real build and inspection, which is a separate
-  gate; until it runs, the honest phrasing is "the pipeline pins it", never
-  "devices ship it". In particular there is **no wet measurement** of either
-  board's rootfs against the 3.5 GB ceiling, and **no measurement** of a real
-  assembled slot's `bavail`/inode reserve at production geometry — the reserve
-  evidence above is a 1 GiB fixture and a synthetic 1024M partition.
-- **No board has been flashed with a full-firmware image**, so nothing here has
-  booted on real hardware.
+- **The Rock full-image build and boot ran on 2026-09-15.** The
+  [artifact-bound RGA qualification receipt](kernel-build-from-source.md#rga-ownership-candidate--island-v202694)
+  records a complete `edge` candidate carrying this firmware pin, real absolute
+  size and populated-slot reserve checks, RAUC installation, boot and restoration
+  to production B. The archive/module/fixture evidence above retains its original
+  scope; it is no longer the only evidence that an image can be built. This
+  receipt is not a fleet release, an Orange Pi result, or qualification of the
+  later R0 userspace combination. No new footprint or reserve number is inferred.
 - **No new Bluetooth or Wi-Fi adapter has been physically attached** to a board
   running this firmware set. Blobs present plus drivers built is **not** an
   attachment result, and no sentence in this repository may say a listed adapter
