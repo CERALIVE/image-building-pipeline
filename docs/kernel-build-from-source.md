@@ -81,8 +81,8 @@ and GNU build ID `6c24e0a11be06900bf113556d88b6f3bad565e3d`.
 the observed above-4-GiB addressability failure, with approximately 4.25 GiB above
 that line versus Orange Pi's 256 MiB. The both-board requirement belongs to the
 separate **librga R1 release**, not this kernel pin. There is **no separate
-owner-authorization merge gate**; the corrected PR head needs fresh independent
-review before merge. Host CI remains software evidence, not board evidence.
+owner-authorization merge gate**. Changes require independent exact-head review
+before merge. Host CI remains software evidence, not board evidence.
 
 The branch was subsequently rebased onto the independently merged R0 librga pin
 (PR #166). The Rock receipt qualifies the unchanged kernel fix on the measured
@@ -105,7 +105,7 @@ documented and untouched in the linked release; it is not a clock-leak claim.
 Relative to the post-#166 base, only the kernel pin, its independent test
 expectations and documentation change. Both production-baseline fixtures change
 only that pin field. Qualification and restoration evidence remain attached to
-the open PR. The previous pin `087b440ffcb1676be1f35a6dccd9b2c46edebbd6`
+PR #165. The previous pin `087b440ffcb1676be1f35a6dccd9b2c46edebbd6`
 is the rollback coordinate, with its matching test expectations. This records a
 qualified branch-built candidate, not a released fleet image.
 
@@ -161,8 +161,9 @@ Exactly one config mode must be declared; the schema's `oneOf` refuses both and
 refuses neither.
 
 **Why the patches repo is pinned like a BSP input.** It is one. It contributes
-~4,900 lines to the kernel the device runs. A floating `main` there would leave
-the build reproducible in appearance and not in fact. Today's pin is
+maintained driver source to the kernel the device runs. A floating `main` there
+would leave the build reproducible in appearance and not in fact. The historical
+MPP-island introduction pin was
 `CERALIVE/rk3588-kernel-patches@cb491dc16fc102649c7d4c003ea954cfa9e3c494` — the
 `main` commit produced by the squash-merge of PR #13, which added the `island/`
 lane. At it, `patches/series` carries **22 active members** in four lanes:
@@ -172,7 +173,10 @@ audio), three `backports/` (`0010` combphy, `0011`+`0012` dw-hdmi-qp), nine
 seven `island/` (`0031`-`0037` — the `rk3588-media-island` v2026.9.0 release asset,
 ingested byte-preserved).
 
-**22 members at this pin and 22 at the previous one is arithmetic, not
+The current RGA repair pin and its artifact-bound qualification are recorded in
+§1 above; the following member counts describe the MPP-island introduction only.
+
+**22 members at that pin and 22 at the previous one is arithmetic, not
 continuity.** The `island/` lane contributes seven and ten are retired at the same
 commit: `0001` — the standalone VEPU580 V4L2 encoder — plus its nine rkvenc
 siblings `0008`, `0013`-`0016` and `0019`-`0022`, each superseded by island source.
@@ -203,8 +207,9 @@ BOUNDARY.** That boundary is now crossed: both supported boards booted the exact
 released Debian 13 image at `7.2.0-ceralive-rk3588`. The final deterministic
 reproduction used released cerastream 2026.8.6 and ceralive-device 2026.8.9:
 both boards streamed for 60+s, stopped cleanly, and completed 3+ minute post-stop
-observations with zero watchdog aborts. Read this pin as **compile-proven,
-released-image boot-proven, and fully qualified by the two-board lifecycle PASS**.
+observations with zero watchdog aborts. Those released artifacts are
+**compile-proven, boot-proven, and qualified by the two-board lifecycle PASS**;
+that result does not transfer to later pin combinations.
 The earlier `start_invalid`, Rock BlueZ, and Orange no-stimulus findings are
 superseded history; Orange HDMI remains a non-blocking hardware-gated `not-run`
 coverage gap. Scoped results and history are in §7.
@@ -217,11 +222,13 @@ committing the bump — the PR gate is `DRY_RUN=1` and never fetches the series.
 
 PR #4 re-anchored the whole series on `v7.1.7` and grew it to nine patches. Two of
 them are what make MPP hardware encode work on this track, and both were confirmed
-on a real Rock 5B+ **at that `v7.1.7` base** (they are carried and compile-proven at
-`v7.2`, with board evidence PENDING): `0008` sets the rkvenc DMA max segment size
+on a real Rock 5B+ **at that `v7.1.7` base**. The later released Trixie/v7.2 MPP
+qualification passed on both boards (§7); it is separate evidence, not a transfer
+of the v7.1.7 result. Historically, `0008` set the rkvenc DMA max segment size
 (imported buffer lengths were truncated to 64 KiB, so the IOVA guardrail rejected
 every encode) and `0009` adds the mainline `system-uncached` dma-heap
-`librockchip_mpp` opens by name. `0009` needs `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y` in
+`librockchip_mpp` opens by name. `0008` was subsequently retired into island source;
+`0009` remains and needs `CONFIG_DMABUF_HEAPS_SYSTEM_UNCACHED=y` in
 `rk3588-edge.fragment` — without it the code compiles and `dma_heap_add()` for
 that heap simply never runs, which is precisely the silent no-op §6b's gate exists
 to catch.
@@ -918,7 +925,8 @@ The fix is `# CONFIG_VIDEO_ROCKCHIP_RGA is not set` beside the island's
 `CONFIG_ROCKCHIP_MULTI_RGA=m`. The existing forbidden entry stays unchanged.
 The ownership contract test requires the explicit disable so a future deletion
 cannot pass the text-only PR gate again. This proves config policy, not a
-hardware ownership or boot result; those still require a rebuilt candidate.
+hardware ownership or boot result. The separate artifact-bound Rock candidate
+result in §1 supplies the RGA kernel-pin evidence, not this static assertion.
 
 ---
 
@@ -982,12 +990,12 @@ history and its Tier-1-only limits.
    turning that into "not found"). All four now carry static/executable guards in
    `variant-contract.bats` §26, because a static guard is the only thing a `DRY_RUN` gate
    can enforce. **Add a guard whenever you touch this path.**
-2. **The defconfig fragment is reviewed intent, not a validated result.** It
-   starts from mainline `defconfig` and adds what the CeraLive stack needs. The
-   fragment is now known to *resolve and compile* — the built
-   `/boot/config-7.1.7-ceralive-rk3588` carried it at the `v7.1.7` base — but no
-   symbol in it has been proven necessary *or* sufficient **on hardware**, at that
-   base or at `v7.2`.
+2. **Config survival is not exhaustive per-symbol hardware proof.** The fragment
+   resolves and compiles, and the released Trixie/v7.2 artifacts passed the bounded
+   board matrix above. §6b also records hardware-confirmed missing-parent defects.
+   Neither result proves every symbol individually necessary or every possible
+   peripheral/workload supported; do not turn this narrower limit into a claim
+   that the complete image has never been qualified.
 
    Worse, until §6b's gate existed the built config did not even carry what the
    fragment ASKED for: two symbols were being silently dropped or downgraded, and

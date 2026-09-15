@@ -279,15 +279,14 @@ variants:
       # observed), so the gate would never fire in exactly the case the patch
       # exists for.
       #
-      # HARDWARE EVIDENCE DOES NOT CROSS A BASE BUMP, AND THIS IS THE HONEST
-      # STATEMENT OF IT. Both Rock 5B+ and Orange Pi 5 Plus boards have booted
-      # a v7.2.0-ceralive-rk3588 kernel and passed direct GStreamer generic and
-      # MPP hardware 60-second encodes, validating the kernel/userspace MPP
-      # encoder ABI on real hardware. That is narrower than full release
-      # qualification: no complete pinned Trixie candidate image has yet been
-      # built, flashed, and OTA-tested end to end. Read this pin as
-      # kernel-on-silicon compatibility-proven, with release qualification still
-      # outstanding.
+      # HARDWARE EVIDENCE IS ARTIFACT-BOUND. The released Trixie/v7.2 images
+      # completed build, boot, MPP and OTA qualification on both RK3588 boards;
+      # that historical platform result is not evidence for every later pin.
+      # The v2026.9.4 kernel repair separately passed the specified Rock 5B+
+      # workloads on a full branch-built edge candidate on 2026-09-15, followed
+      # by verified restoration to production B. That Rock receipt is sufficient
+      # for this kernel pin; it is not a fleet release or qualification of an
+      # image combining the later R0 userspace swap with this kernel.
       #
       # PIN HYGIENE — pin a SHA a fresh clone can reach, never a PR-head SHA. A
       # squash-merge orphans the pre-merge branch head, so pinning that would pin
@@ -300,7 +299,7 @@ variants:
       # v7.2 with its own post-apply gate green.
       # Island v2026.9.4: artifact-bound Rock qualification passed 2026-09-15.
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
-      # Post-R0 rebase is not a new board-tested image; independent review remains.
+      # Changes require independent exact-head review before merge.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
       patches_commit: 9a8be32fe6b54773b01c61119f578bf8cf10b08e
       patches_series: patches/series
