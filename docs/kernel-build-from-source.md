@@ -43,6 +43,37 @@ Two overlays exist, and both build from pinned source:
 
 ## 1. The variant model
 
+### RGA ownership candidate — island v2026.9.4
+
+The proposed patch-series pin is
+`9a8be32fe6b54773b01c61119f578bf8cf10b08e`, the merged
+[kernel-patches PR #24](https://github.com/CERALIVE/rk3588-kernel-patches/pull/24).
+It carries [island v2026.9.4](https://github.com/CERALIVE/rk3588-media-island/releases/tag/v2026.9.4)
+at `e23dae264ae91811730f79c12bc8527a98435774`; the generated mailbox asset's
+SHA-256 is `f64bebb369afa13e1fa37c733e7fa69021ff14f4be2da8d88235ba8d66488820`.
+
+**Board qualification has NOT run. Keep this image pin PR OPEN and unmerged**
+until branch-built candidates pass the board gate and the owner authorizes the
+merge. Host tests, producer module builds and consumer patch application are
+software evidence only. Neither earlier board results nor the unchanged `v7.2`
+version string qualify these new bytes. `edge-test` inherits the same pin; this
+change does not enable the optional RGA fault-injection configuration.
+
+The release replaces the shared RGA page-table ring with job-owned tables,
+requires RGA2-owned execution DMA mappings and DMA-address PTEs, and bounds
+queue admission/expiry/cancellation with an explicit 1,000 ms deadline. A reset
+failure retains the faulted core's memory, mappings and power until reboot;
+unload refuses rather than hangs. Review found no new reboot deadlock, but
+hardware recovery has not been qualified. Bounded re-reset is future work.
+The producer's pre-existing MPP hardening checker stale-wrapper failure remains
+documented and untouched in the linked release; it is not a clock-leak claim.
+
+Only the pin, its independent test expectations and documentation change. The
+two production-baseline fixtures change that one field, not their other bytes.
+Before a future merge, retain artifact-bound board evidence and recovery results
+on the open PR. The previous pin `087b440ffcb1676be1f35a6dccd9b2c46edebbd6`
+is the rollback coordinate; no release, full image build or flash is claimed here.
+
 `manifests/schema/family.schema.json` gives a family an optional `variants:`
 map. Its keys are variant names; each value is a **narrow** overlay that may set
 only `armbian_branch`, `kernel_packages`, `dtb_packages` and `kernel_source`.

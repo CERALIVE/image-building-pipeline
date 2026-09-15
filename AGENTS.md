@@ -189,6 +189,17 @@ the manifest and the production-baseline fixtures when deliberately changing tha
 pin; do not derive their expected value from the manifest under test. PR #150's
 RGA pin update initially left both assertions on the previous MPP-only pin.
 
+**Island `v2026.9.4` is a qualification candidate, not a shipped image.** The
+proposed `patches_commit` is kernel-patches PR #24's merged
+`9a8be32fe6b54773b01c61119f578bf8cf10b08e`, carrying the approved RGA ownership
+repairs. This image PR stays OPEN through branch-built board qualification:
+software CI does not authorize its merge. Board qualification has NOT run.
+Reset failure now retains the faulted core's memory and power until reboot;
+unload refuses rather than hangs. See
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694)
+for the release tuple and remaining gate. No package, Kconfig or layout changes
+accompany this pin.
+
 When diagnosing CI, distinguish expected negative-test output from a failing
 suite: `tests/maskrom-first-realhw.test.sh` deliberately executes the release
 workflow's immutable-candidate guard with `RUN_ATTEMPT=2`, expects rejection, and

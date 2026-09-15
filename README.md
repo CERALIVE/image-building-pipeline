@@ -1395,6 +1395,13 @@ substring. Proof: `run-tests` section 17.
 
 ## Kernel Build From Source (the production path)
 
+The island `v2026.9.4` RGA ownership pin is a **qualification candidate**, not a
+shipped-image claim. Its image PR must remain open until board qualification,
+which has NOT run. The new fail-closed reset behavior retains memory and power
+until reboot and refuses unload. Release coordinates, rollback pin and the
+hardware gate are recorded in
+[`kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
+
 **Every kernel this pipeline ships is built from pinned source.** The rk3588
 family manifest declares two variants and both do so — there is no prebuilt-kernel
 path left:
