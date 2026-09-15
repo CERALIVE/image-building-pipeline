@@ -149,9 +149,9 @@ demonstrably do not resolve at all. Evidence:
 wiring" item is **retired outright**, not deferred: `libmali` is off the mainline
 path entirely, so there is no blob to divert to.
 
-**Why the rest is still deferred:** No RK3588 board is reachable from the dev
-environment (Task 1 spike verdict: NO-GO). A GPU cannot be emulated, and the
-specific failure mode that matters here — Mesa silently falling back to
+**Why the rest is still deferred:** No artifact-bound Panthor/Mesa/Cog/display
+checklist has run with the required display hardware. A GPU cannot be emulated,
+and the specific failure mode that matters here — Mesa silently falling back to
 `llvmpipe` when it cannot reach the Panthor render node — renders *correctly*
 and so cannot be distinguished from success by anything but a board. Everything
 provable without hardware is green and recorded in

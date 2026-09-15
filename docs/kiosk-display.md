@@ -246,7 +246,10 @@ The postinst must be idempotent (re-running it on an already-configured system m
 
 The following items are explicitly deferred to Phase 3. They are NOT present in the current image.
 
-All Phase-3 items are hardware-blocked: no RK3588 board is reachable from the development environment (Task 1 spike verdict: NO-GO). See CeraUI `docs/ON_DEVICE_DISPLAY.md` §6 for the full deferral register with rationale.
+All Phase-3 items are hardware-blocked by the display-specific gate: no
+artifact-bound Panthor/Mesa/Cog/display checklist has run with the required
+display hardware. See CeraUI `docs/ON_DEVICE_DISPLAY.md` §6 for the full
+deferral register with rationale.
 
 | Item | Blocked on |
 |---|---|
@@ -255,7 +258,9 @@ All Phase-3 items are hardware-blocked: no RK3588 board is reachable from the de
 | **P3-3: On-device live-video preview** | Hardware access + encoder/decoder pipeline design |
 | **P3-4: Battery/power telemetry (#61)** | Document-only: current boards are mains-powered, no fuel-gauge IC present |
 
-Tasks 26, 27, 28, and 30 are all hardware-blocked for the same reason (Task 1 gate not cleared). They are designed and specced; implementation waits for hardware access.
+Tasks 26, 27, 28, and 30 are all hardware-blocked by the same display-specific
+gate. They are designed and specced; implementation waits for the required
+artifact-bound checklist.
 
 ---
 
