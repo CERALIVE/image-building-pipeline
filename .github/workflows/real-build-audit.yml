@@ -26,6 +26,8 @@ jobs:
       - name: Remove stale generated paths before checkout
         run: rm -rf mkosi/build mkosi/cache .mkosi-workspace
       - uses: actions/checkout@v7
+      - name: First-party release pin currency
+        run: python3 ci/check-first-party-pins.py --max-age-hours 24
       - name: Check builder resource budget
         run: ./ci/check-builder-resources.sh
       - name: Set up BuildKit

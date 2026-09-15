@@ -122,6 +122,9 @@ jobs:
           ci/check-suite-literals.sh --self-test
           ci/check-suite-literals.sh
 
+      - name: First-party release pin currency
+        run: python3 ci/check-first-party-pins.py
+
   schema-validate:
     name: JSON-Schema validate manifests
     runs-on: ubuntu-latest

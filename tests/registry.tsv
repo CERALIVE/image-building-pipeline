@@ -29,6 +29,9 @@
 #              not-executed     — never executed as a test (data, or gated on hw)
 #   reason     why it carries that execution value
 #
+tests/first-party-pin-currency.test.sh	shell	unit	default-shell	Offline release-pin CLI negative controls and workflow invocation coverage
+tests/pin_currency_test.py	tool	unit	invoked-by-suite	Driven by first-party-pin-currency.test.sh
+#
 # path	kind	tier	execution	reason
 
 # --- setup fixture, runs first -------------------------------------------

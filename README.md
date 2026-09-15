@@ -593,6 +593,14 @@ committed baseline `manifests/bsp-baseline.json`.
 
 ## Verified `.deb` Download Cache
 
+**Release currency is checked separately from checksums.** CI reconciles app
+pins on both architectures, `versions.yaml` provenance and the CeraLive platform
+pins against an authenticated, bounded-age release catalog. Stale pins fail;
+intentional rollbacks require exact, reasoned, expiring exceptions. The optional
+saved-inventory report makes APT-installed drift visible without accessing a
+board. Commands, freshness limits and override examples:
+[`First-party pin currency`](docs/first-party-pin-currency.md).
+
 First-party package versions are selected from
 `manifests/first-party-deb-versions.txt`. A normal `package=version` entry applies
 to both architectures. When release builds produce different Debian versions per

@@ -76,6 +76,8 @@ jobs:
             "${CLEANUP_IMAGE}" \
             rm -rf -- "${targets[@]}"
       - uses: actions/checkout@v7
+      - name: First-party release pin currency
+        run: python3 ci/check-first-party-pins.py --max-age-hours 24
       - name: Assert canonical generated paths
         env:
           DECLARED_CACHE_DIR: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
