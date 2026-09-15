@@ -12,7 +12,7 @@
 #   A. PACKAGES   every shared.list (+ family delta) package is installed (empty
 #                 diff). Class:
 #                   debian       — must be installed now (hard FAIL if missing)
-#                   platform     — gstreamer1.0-rockchip-ceralive / rockchip-multimedia-config
+#                   platform     — gstreamer1.0-rockchip-ceralive / rockchip-multimedia-config / librga2-ceralive
 #                                  (families/rk3588.yaml HW-accel + runtime)
 #                   first-party  — CeraLive SRT/ceraui/cerastream/srtla-send-rs (CI: apt; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
@@ -55,9 +55,9 @@ declare -A PKG_ALIAS=(
   [media-ctl]=v4l-utils         # media-ctl binary ships in v4l-utils on bookworm  # suite-literal-ok: package-availability prose; the binary->package map is the package-list surface, not the target-release mapping
   [ceraui]=ceralive-device      # CeraUI .deb package name = ceralive-device
 )
-# Rockchip HW GStreamer pair — families/rk3588.yaml hw_accel_gstreamer_plugins +
-# gstreamer_runtime_packages, installed from the Armbian pool (platform layer).
-PLATFORM_PKGS=" gstreamer1.0-rockchip-ceralive rockchip-multimedia-config "
+# Rockchip HW GStreamer/RGA — families/rk3588.yaml hw_accel_gstreamer_plugins +
+# gstreamer_runtime_packages, installed from URL+SHA pins (platform layer).
+PLATFORM_PKGS=" gstreamer1.0-rockchip-ceralive rockchip-multimedia-config librga2-ceralive "
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
 # Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
 # absent → reported as WARN, never silent.
@@ -134,7 +134,7 @@ main() {
   while IFS= read -r p; do [[ -n "${p}" ]] && expected+=("${p}"); done \
     < <(read_manifest_packages)
   local n_manifest="${#expected[@]}"
-  # The Armbian-BSP GStreamer pair (family manifest) and the first-party .debs
+  # The URL-pinned platform packages (family manifest) and the first-party .debs
   # (App layer) live OUTSIDE the runtime package lists, so the gate must add them
   # to the checked set to keep their WARN classification below.
   local platform_arr=() firstparty_arr=()
@@ -164,7 +164,7 @@ main() {
     fail "Debian packages MISSING from rootfs: ${debian_missing[*]}"
   fi
   if (( ${#platform_missing[@]} == 0 )); then
-    pass "platform GStreamer packages installed (gstreamer1.0-rockchip-ceralive, rockchip-multimedia-config)"
+    pass "platform GStreamer/RGA packages installed (${PLATFORM_PKGS# })"
   else
     warn "platform packages not installed (need pinned userspace fetch at build time): ${platform_missing[*]}"
   fi

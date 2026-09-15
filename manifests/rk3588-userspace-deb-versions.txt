@@ -61,10 +61,16 @@ librockchip-mpp1  librockchip-mpp1_1.5.0-1_arm64.deb  fe839d41010def25b2c0965818
 # --- Runtime multimedia udev/config (tsukumijima) ---
 rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9198a730e780ccd38c890d7d15f149b8454d265c4af785c1fd7460c38  https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb
 
-# --- First-party GStreamer MPP plugin + Radxa RGA 2D accelerator ---
+# --- First-party GStreamer MPP plugin ---
 # The CeraLive fork preserves the package prefix and libgstrockchipmpp.so filename
 # while shipping the verified fix ledger. The commented Radxa row is the one-line
-# rollback lever; librga2 remains byte-identical and independently pinned below.
+# rollback lever; the RGA runtime has its own independent pin and rollback below.
 # gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
 gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.2_arm64.deb  9e0c139704f2743139b8328144e51ff22c17004d83fae62335e2df0751336e2b  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.2/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.2_arm64.deb
-librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb
+
+# --- CeraLive RGA R0: same 1.10.1 API, not the later R1 upgrade ---
+# Provides librga2 (= 2.2.0), Conflicts/Replaces librga2, SONAME librga.so.2.
+# The matching librga-ceralive-dev release is recorded in docs/librga-r0-swap.md;
+# headers stay a build dependency, not an addition to the device runtime set.
+# librga2  librga2_2.2.0-1_arm64.deb  ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/libr/librga/librga2_2.2.0-1_arm64.deb
+librga2-ceralive  librga2-ceralive_1.10.1+ceralive.1_arm64.deb  7c59bade43e2f8bb4c31e0ae965bee480128aa128528fdc88e8bc082e98ec498  https://github.com/CERALIVE/librga/releases/download/1.10.1%2Bceralive.1/librga2-ceralive_1.10.1%2Bceralive.1_arm64.deb

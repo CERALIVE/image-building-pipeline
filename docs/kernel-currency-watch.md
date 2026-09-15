@@ -1,7 +1,7 @@
 # Kernel Currency Watch: Mainline 7.2 + MPP Userspace
 
 **Decision recorded:** the released Trixie/mainline 7.2 image keeps the existing
-Rockchip MPP userspace pins unchanged.
+Rockchip MPP library pin unchanged. Later plugin and RGA swaps are recorded below.
 **Kill-switch decision (2026-08-28): PROCEED with W3/W4.**
 **Selection mechanism:** the MPP userspace (not in Debian or the Armbian feed) is
 URL- and SHA-256-pinned in
@@ -15,8 +15,8 @@ URL- and SHA-256-pinned in
 **ACTIONED and released.** The kernel flip this document authorised has been made:
 `manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
 variant-less build selects the source-built mainline 7.2 kernel; the vendor BSP
-track is retired. The MPP userspace pins below are unchanged, which is exactly what
-this decision said would happen.
+track is retired. The MPP library pin below is unchanged. The historical
+qualification set predates the subsequent CeraLive plugin and RGA swaps.
 
 The flip selects the source-built mainline 7.2 kernel and
 continues to drive VEPU580 through **Rockchip MPP**. The kernel implementation
@@ -27,9 +27,9 @@ changes; the MPP userspace ABI does not. No replacement build from
 The exact ABI-proven set was `librockchip-mpp1` 1.5.0-1 (tsukumijima), plus the
 Radxa GStreamer plugin 1.14-4 and `librga2` 2.2.0-1. On both a Rock 5B+
 and an Orange Pi 5 Plus running `7.2.0-ceralive-rk3588`, the installed packages
-have exactly those versions; the plugin resolves `librockchip_mpp.so.1` and
-`librga.so.2` with no missing dependency, `gst-inspect-1.0 mpph264enc` succeeds,
-and todo 16's direct 60-second hardware encode exits cleanly. This is direct
+had exactly those versions; the plugin resolved `librockchip_mpp.so.1` and
+`librga.so.2` with no missing dependency, `gst-inspect-1.0 mpph264enc` succeeded,
+and todo 16's direct 60-second hardware encode exited cleanly. This is direct
 kernel/userspace ABI evidence on both supported boards.
 
 Debian 13's arm64 index does **not** publish any of the three package names. That
@@ -44,10 +44,14 @@ assertion, supplied by the two live systems above.
 
 The release assets' downloaded SHA-256 values matched the committed pins exactly.
 The GStreamer plugin pin now names the first-party
-`gstreamer1.0-rockchip-ceralive` release asset; the MPP and RGA bytes established
-by this evidence remain unchanged. All three remain staged by
-`fetch_rk3588_userspace`, not selected from Debian's index. Bump any one only
-after re-running both the Trixie solve and the hardware encode.
+`gstreamer1.0-rockchip-ceralive` release asset. The RGA runtime now selects
+`librga2-ceralive` R0 `1.10.1+ceralive.1`, after its separate both-board gate;
+only the MPP library bytes remain unchanged. R0 preserves SONAME `librga.so.2`
+and provides `librga2 (= 2.2.0)`, so the plugin's existing dependency still
+resolves. All three remain staged by `fetch_rk3588_userspace`, not selected
+from Debian's index. The earlier hardware evidence is not qualification of a
+new image. See [the R0 swap record](librga-r0-swap.md) for both release assets
+and their digests. R1 is unreleased and remains a separate, hardware-gated PR.
 
 ## Historical vendor-lock evidence (superseded)
 
