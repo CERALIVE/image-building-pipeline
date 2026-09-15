@@ -1268,9 +1268,11 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 **CeraUI pin (2026-09-06):** the architecture-qualified `ceralive-device` rows in
 `manifests/first-party-deb-versions.txt` select the checksum-verified v2026.9.1
 release assets at `f3c52d5`, with the matching provenance tag in `versions.yaml`.
-Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, matching
-the unchanged engine 2026.9.2 pin. The accepted early-import SIGUSR1 residual
-window remains; the pin alone claims no fresh-image hardware qualification.
+Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, compatible
+with the engine 2026.9.3 schema 0.18.0 because the evolution is additive and
+CeraUI v2026.9.1 does not consume the new session-switch fields. The accepted
+early-import SIGUSR1 residual window remains; the pin alone claims no fresh-image
+hardware qualification.
 
 The emitted-rootfs wait-online test scans canonical unit files without following
 absolute aliases into the build host (`grep -r`, not `-R`). Its fixture includes
@@ -1288,6 +1290,16 @@ hardware-preview recovery and false-positive PLAYING startup. Its Orange Pi
 H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
 is an owner-accepted non-blocking observation, not a claimed transport fix.
 This pin does not claim a new image has been built, flashed or hardware-qualified.
+
+**cerastream pin (2026-09-15):** `manifests/first-party-deb-versions.txt` selects
+released `2026.9.3` on both architectures; repo-local `versions.yaml` records
+the matching tag. The arm64 package served through APT has SHA-256
+`a768ef05eec85f318bd57ae3190c5c0126a97aab0368652e7f105ccc3afc3f9a`, matching
+the immutable release asset. `CERALIVE/cerastream` is private; anonymous GitHub
+URLs return 404, while APT is the image's package delivery channel. This release
+derives capture preflight geometry from queried DV timings rather than stale
+applied format state. This pin does not claim a new image has been built,
+flashed or hardware-qualified.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
