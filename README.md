@@ -600,11 +600,13 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.2`, the released DMA-BUF startup and
-preview/start-lifecycle repair. Both architecture packages are served by APT and
-were byte-compared with checksum-verified assets downloaded using authenticated
-GitHub access (`CERALIVE/cerastream` is private). This is a package-pin
-update, not a claim that a new device image has already been built or flashed.
+The engine pin is `cerastream=2026.9.3`, which derives capture preflight geometry
+from queried DV timings rather than stale applied format state. Both architecture
+packages are served by APT; the arm64 package's SHA-256 is
+`a768ef05eec85f318bd57ae3190c5c0126a97aab0368652e7f105ccc3afc3f9a`, matching
+the immutable release asset (`CERALIVE/cerastream` is private). This is a
+package-pin update, not a claim that a new device image has already been built
+or flashed.
 
 CeraUI is pinned to release v2026.9.1 using its exact per-architecture Debian
 versions. Its published cerastream bindings understand schema 0.17.0, matching

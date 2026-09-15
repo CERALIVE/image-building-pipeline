@@ -44,13 +44,16 @@ cerastream:
   # the stream-start failure that would otherwise occur during the fork-package swap.
   # v2026.9.1 adds the selectable ALSA/PipeWire backend contract and carries the
   # network-tolerant service ordering required by the offline-first image.
-  # v2026.9.2 restores DMA-BUF capture startup, hardware-preview idle gating,
-  # and completed-PLAYING validation; both codec receiver soaks passed on Orange Pi.
+  # The previous v2026.9.2 release restored DMA-BUF capture startup,
+  # hardware-preview idle gating, and completed-PLAYING validation; both codec
+  # receiver soaks passed on Orange Pi.
+  # v2026.9.3 derives capture preflight geometry from queried DV timings rather
+  # than rejecting a source because its applied format is stale.
   pin: v2026.9.3
-  # Device deb: cerastream 2026.9.2 (amd64 + arm64).
+  # Device deb: cerastream 2026.9.3 (amd64 + arm64).
   # Published assets (private GitHub; authenticated download required):
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.2/cerastream_2026.9.2_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.3/cerastream_2026.9.3_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.3/cerastream_2026.9.3_amd64.deb
   channel: stable
 
 CeraUI:
@@ -65,7 +68,7 @@ CeraUI:
   # todo-16 qualification PASS.
   # v2026.9.0 adds the operator-facing audio-backend selector and PipeWire/BlueALSA
   # provider reconciliation consumed by this candidate image.
-  # v2026.9.1 consumes the published schema-0.17.0 bindings for cerastream 2026.9.2.
+  # v2026.9.1 publishes schema-0.17.0 bindings, matching cerastream 2026.9.3.
   pin: v2026.9.1
   # Device deb: ceralive-device 2026.9.1-20260906T194138.f3c52d5 (amd64) /
   #   2026.9.1-20260906T194131.f3c52d5 (arm64), independently checksum-verified.
