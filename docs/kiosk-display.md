@@ -24,7 +24,7 @@ The postinst script (`mkosi/mkosi.images/runtime/mkosi.postinst.chroot`) is resp
 ## 2. Systemd Units (Task 26 — hardware-blocked)
 
 > **Status: planned, requires hardware validation before implementation.**
-> The unit design below is the authoritative spec. Implementation is blocked on Task 1 (RK3588 display-stack spike: NO-GO — no board reachable). Do not implement until the hardware gate clears.
+> The unit design below is the authoritative spec. Implementation is gated on Task 1's RK3588 display-stack spike. Its original NO-GO recorded no reachable board in that session; later kernel qualification does not prove display rendering or clear this separate gate.
 
 ### `kiosk.service`
 
@@ -148,7 +148,7 @@ The old text here said that if `libmali-valhall-g610` failed to provide EGL/GBM
 the fallback would be mainline + Mesa panthor/panfrost, and that doing so would
 collide with D3. Both halves have moved:
 
-- The mainline `edge` variant now exists as a first-class opt-in track and drops
+- The mainline `edge` variant is the production default and excludes
   `libmali` from its `firmware_packages` — the blob is ABI-bound to Rockchip's
   out-of-tree module and its `/dev/mali0`, which a mainline kernel never creates
   (armbian/build#10320), and its `00-aarch64-mali.conf` would otherwise capture
@@ -156,15 +156,16 @@ collide with D3. Both halves have moved:
   cannot work. The mainline pairing is **`panthor` (kernel, `CONFIG_DRM_PANTHOR=m`,
   pinned in `manifests/kernel/required-symbols.list`) + Mesa (userspace,
   `dri/panthor_dri.so`)**.
-- **D3 is NOT reopened by any of this.** The shipped production image still
-  installs the prebuilt Armbian vendor 6.1 BSP and still uses `libmali`. The two
-  tracks each keep their own coherent GPU stack; nothing switches by default.
+- **The kernel-track decision is settled separately from kiosk rendering.**
+  Production is source-built mainline v7.2; the vendor 6.1 overlays and `libmali`
+  are retired. The RAUC custom bootloader adapter is unchanged.
 
 Full detail, including why the Mesa half rides inside the Cog add-on's sysext
 rather than the base image, is in
 [`cog-display-addon.md`](cog-display-addon.md) §5.
 
-**RK3588 mainline-patch contingency bookmark:** D3 is NOT changing — the Armbian vendor BSP kernel already provides HDMI hdmirx and mature Rockchip MPP H.265 encoding, so there is no reason to pivot to mainline today. However, if a mainline pivot is ever forced (e.g. vendor BSP drops support or a critical security fix lands mainline-only), the reference path to restore hdmirx + H.265 HW-encode is:
+**Historical mainline-patch bookmark:** before the production cutover, the
+reference path for HDMI-RX and H.265 encode was:
 
 > https://github.com/rcawston/rockchip-rk3588-mainline-patches
 
@@ -174,7 +175,8 @@ That repo tracks three patches relevant to CeraLive's capture and encode path, e
 2. **HDMIRX EDID set fix** — corrects EDID negotiation on the RK3588 HDMI input block. Without this, some sources may fail to lock or negotiate incorrect resolutions.
 3. **HDMIRX plugout overflow fix** — prevents a buffer overflow triggered by hot-unplugging the HDMI source. Required for reliable hdmirx operation in a live-streaming context where cables are swapped frequently.
 
-These patches are bookmarked insurance only. Do not apply them unless D3 is explicitly re-opened and a mainline pivot is approved.
+This is provenance, not an alternate install recipe or an authorization gate.
+The pipeline consumes only its pinned `CERALIVE/rk3588-kernel-patches` series.
 
 **This section predates the mainline track's actual bench measurement and is
 now stale insurance-only framing — see
@@ -190,12 +192,12 @@ the outcome under the plan's deterministic decision matrix regardless of H.265's
 cleaner (`encode-degraded`, bitrate-accuracy-only) result. That input has since
 changed: at the `v7.1.7` pin, patches `0008` and `0009` fix the two
 kernel defects behind it and a real Rock 5B+ had `mpph264enc` registering and
-encoding. That board result is scoped to `v7.1.7`; the `edge` track has since
-re-pinned to `v7.2`, where the same patches are carried and compile-proven with
-board evidence PENDING. The verdict has **not** been re-run — see the 2026-08-09 amendment at
-the top of `kernel-track-decision.md`, which is still the authoritative decision
-record for this mainline track. **D3 remains NOT re-opened and production remains
-vendor 6.1.**
+encoding. That result remains scoped to `v7.1.7`. The later released Trixie/v7.2
+images passed their own board qualification, and the island v2026.9.4 RGA repair
+passed the separate Rock candidate qualification on 2026-09-15; see
+[`kernel-build-from-source.md`](kernel-build-from-source.md). The old hold verdict
+in `kernel-track-decision.md` is historical, not the current production decision.
+None of these encode/kernel results qualifies Panthor/Mesa kiosk rendering.
 
 ---
 

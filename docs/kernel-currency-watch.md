@@ -174,23 +174,26 @@ effort.
 
 The rk3588 family manifest carries an `edge` variant that builds a mainline-track
 kernel from pinned source with the CeraLive RK3588 patch series applied
-(`docs/kernel-build-from-source.md`). The userspace kill switch now clears it for
-the next Trixie kernel-flip step; until that step lands it remains explicitly
-selected with `--variant edge`. It still does not satisfy the old in-tree trigger:
+(`docs/kernel-build-from-source.md`). The userspace kill switch cleared the
+Trixie kernel flip, and `default_variant: edge` now selects it by default.
+It still does not satisfy the old in-tree trigger:
 
-- It carries the **out-of-tree** rcawston `rkvenc` driver as a patch. Trigger 2
+- It adopted the **out-of-tree** rcawston `rkvenc` driver and later the maintained
+  CeraLive MPP island. Trigger 2
   is about a **frozen, in-tree, mainline** stateless H.265 encode uAPI. Applying
   an out-of-tree driver is the opposite of that condition being met, not evidence
   of it.
-- Mainline 7.2 kernels carrying the series have booted and encoded on both
-  supported boards. The exact pipeline-produced Trixie image remains unqualified
-  until the release build/boot gate runs (`docs/DEFERRED.md` item 9).
+- The exact released Trixie/mainline images completed build, boot, encode and
+  OTA qualification (`docs/DEFERRED.md` item 9). The later island v2026.9.4 RGA
+  repair has its own passed Rock candidate receipt in
+  [`kernel-build-from-source.md`](kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
+  Neither result qualifies a newly combined post-R0 image.
 
 This is an explicit adoption of a maintained out-of-tree path, not a claim that
 mainline gained a frozen stateless encode ABI.
 
 ## What This Doc Is Not
 
-This is a decision record, not a release qualification. It clears the MPP
-userspace kill switch using board ABI evidence plus a Trixie index solve; it does
-not claim the exact Trixie image has been built, booted, or released.
+This is a decision record, not a substitute for artifact-bound qualification.
+The original kill-switch evidence was board ABI checks plus a Trixie index solve;
+the later build, boot and release receipts cited above supply those separate facts.

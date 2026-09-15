@@ -396,7 +396,9 @@ of ~120 MB installed / ~55 MB squashed.
 
 Everything above is **packaging validation** — provable from the apt index, the
 layer contract and a real closure build, without a board. What **cannot** be
-validated without a physical **RK3588** (Task 1 spike: NO-GO, no board reachable)
+validated without a physical **RK3588** (the original Task 1 spike recorded
+NO-GO with no board reachable in that session; later kernel qualification is not
+display-render evidence)
 and is therefore deferred:
 
 | QA item | Why it needs hardware | Change at this migration |

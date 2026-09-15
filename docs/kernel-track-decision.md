@@ -1,9 +1,13 @@
 # Kernel Dual-Track Decision Record: edge 7.1 Promotion Go/No-Go
 
-**Status: DOCUMENTATION ONLY. No kernel promotion. No image publish. No production
-change of any kind.** Production continues to run vendor 6.1 exactly as before this
-document was written. Nothing in this record changes `armbian_branch: vendor` (D3),
-`REPOS`, `versions.yaml`, or any release artifact.
+**Status: HISTORICAL decision record, superseded by the mainline production
+cutover.** The measurements and dated decisions below describe their original
+tuples, not today's qualification state. The released Trixie/v7.2 images passed
+the later board qualification, and the island v2026.9.4 kernel repair passed its
+separate Rock candidate qualification on 2026-09-15. See
+[`kernel-build-from-source.md`](kernel-build-from-source.md) for both records;
+neither is a new post-R0 combined-image result. This document changes no pin or
+release artifact.
 
 **Recorded:** 2026-08-07 (device-platform-wave4 todo 30).
 
@@ -21,13 +25,13 @@ document was written. Nothing in this record changes `armbian_branch: vendor` (D
 > Pi 5 Plus column is entirely unrun). Evidence for the new result:
 > `.omo/evidence/image-pipeline-quality/hardware-validation-round1.md`.
 >
-> **FURTHER AMENDMENT — the `edge` base has moved again, to `v7.2`, and NO board
-> evidence travels with it.** The pin is now `v7.2` (`8d3ae59288f1`) with a
+> **HISTORICAL pre-qualification amendment — the `edge` base moved to `v7.2`;
+> no board evidence transferred automatically.** The pin then was `v7.2` (`8d3ae59288f1`) with a
 > 22-member series (`patches_commit b28a187269f2`); `0008` and `0009` are still
 > in it, and the tree cross-compiles clean. The Rock 5B+ result described in the
-> paragraph above remains a **`v7.1.7`** measurement — nothing has been built,
-> flashed or booted at `v7.2` on either board. So the re-run this amendment calls
-> for is now a `v7.2` bench campaign, and the decision is doubly unchanged.
+> paragraph above remains a **`v7.1.7`** measurement. At the time of this amendment
+> neither board had a v7.2 build/boot receipt; the later released-image
+> qualification cited at the top closes that gap without rewriting those results.
 > **SUPERSEDED 2026-08-28 — the promotion this record declined has now HAPPENED.**
 > `manifests/families/rk3588.yaml` declares `default_variant: edge`, so a
 > variant-less build resolves the mainline source-built kernel and the prebuilt
