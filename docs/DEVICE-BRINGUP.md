@@ -660,10 +660,11 @@ media discipline for testing it.
 
 ## 5. First boot
 
-**Pending hardware run** — boot log timestamps and exact console output will be
-filled from `test-results/boot-log-<date>.txt` once a physical board is
-available. The software-side first-boot sequence is described below based on
-the merged service implementations.
+**Pending hardware run** — this placeholder is for a guide-specific first-boot
+console transcript, not general board qualification. Released Trixie/v7.2 images
+and the 2026-09-15 Rock RGA candidate have booted; see
+[`kernel-build-from-source.md`](kernel-build-from-source.md) for the scoped
+receipts. The sequence below describes the merged services, not measured timings.
 
 Expected first-boot sequence:
 
