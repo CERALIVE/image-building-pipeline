@@ -52,27 +52,62 @@ It carries [island v2026.9.4](https://github.com/CERALIVE/rk3588-media-island/re
 at `e23dae264ae91811730f79c12bc8527a98435774`; the generated mailbox asset's
 SHA-256 is `f64bebb369afa13e1fa37c733e7fa69021ff14f4be2da8d88235ba8d66488820`.
 
-**Board qualification has NOT run. Keep this image pin PR OPEN and unmerged**
-until branch-built candidates pass the board gate and the owner authorizes the
-merge. Host tests, producer module builds and consumer patch application are
-software evidence only. Neither earlier board results nor the unchanged `v7.2`
-version string qualify these new bytes. `edge-test` inherits the same pin; this
-change does not enable the optional RGA fault-injection configuration.
+**Rock 5B+ qualification passed on 2026-09-15.** The
+[artifact-bound qualification receipt](https://github.com/CERALIVE/image-building-pipeline/pull/165#issuecomment-5676910668)
+records a full branch-built `edge` image, boot, workload remeasurement and
+restoration to production B. The measured image head was
+`cedca351778ee4ee66f99e193a6ce212aef096c0`, tree
+`4f7ef7192a8d9d3e6503dc400cee9442f83dff61`; bundle
+`20260915T070833Z.raucb` SHA-256
+`a6380d0d1bf72f9e945f717ebe45e6df68563807bf61578f07480a1a364a0c83`.
+The live RGA module matched the candidate's SHA-256
+`33d750e2e37a99302d97a47378bdf358256b7c0caa1c2f3c6f918732b2ed8560`
+and GNU build ID `6c24e0a11be06900bf113556d88b6f3bad565e3d`.
+
+- All ten former JOURNAL-ERROR rows passed: seven forced-RGA2 operations,
+  H.264/H.265 four-stream rows and H.264 eight-stream conservation.
+- The separate H.265 eight-stream deficit was **not reproduced**: all eight
+  branches accepted/emitted 1,021/1,021, versus the prior 1,021/1,020 deficit
+  on two branches. This is not proof that the mapping repair caused it to vanish.
+- All **32/32 `mm_flag` observations were `0x2`**, with UNDER_4G clear;
+  these are repeated mapping observations, not 32 independent allocations.
+  Forced RGA2 staging completed **8/8 attempts**, with zero failures and active
+  staging count/bytes returning to zero.
+- The trace captured **306 real USB/MMC swiotlb bounces and zero RGA bounces**,
+  with 346/346 events retained and no lost events on any of eight CPUs. This
+  positive control proves the RGA absence was not a disabled or broken trace.
+
+**Single-Rock qualification is sufficient for this kernel pin.** Rock exercises
+the observed above-4-GiB addressability failure, with approximately 4.25 GiB above
+that line versus Orange Pi's 256 MiB. The both-board requirement belongs to the
+separate **librga R1 release**, not this kernel pin. There is **no separate
+owner-authorization merge gate**; the corrected PR head needs fresh independent
+review before merge. Host CI remains software evidence, not board evidence.
+
+The branch was subsequently rebased onto the independently merged R0 librga pin
+(PR #166). The Rock receipt qualifies the unchanged kernel fix on the measured
+tuple above, not a newly built or board-tested post-rebase image. `edge-test`
+inherits the same kernel pin; this change does not enable the optional RGA
+fault-injection configuration.
 
 The release replaces the shared RGA page-table ring with job-owned tables,
 requires RGA2-owned execution DMA mappings and DMA-address PTEs, and bounds
 queue admission/expiry/cancellation with an explicit 1,000 ms deadline. A reset
 failure retains the faulted core's memory, mappings and power until reboot;
-unload refuses rather than hangs. Review found no new reboot deadlock, but
-hardware recovery has not been qualified. Bounded re-reset is future work.
+unload refuses rather than hangs. Normal return to production B passed, but
+failed-reset injection, faulted-core retention/unload refusal and simultaneous
+live-PTE occupancy beyond the former ring capacity were not stress-qualified.
+Low-buffer/USERPTR execution-map ownership and PTE addresses were not directly
+observed through public board telemetry. Bounded re-reset is future work.
 The producer's pre-existing MPP hardening checker stale-wrapper failure remains
 documented and untouched in the linked release; it is not a clock-leak claim.
 
-Only the pin, its independent test expectations and documentation change. The
-two production-baseline fixtures change that one field, not their other bytes.
-Before a future merge, retain artifact-bound board evidence and recovery results
-on the open PR. The previous pin `087b440ffcb1676be1f35a6dccd9b2c46edebbd6`
-is the rollback coordinate; no release, full image build or flash is claimed here.
+Relative to the post-#166 base, only the kernel pin, its independent test
+expectations and documentation change. Both production-baseline fixtures change
+only that pin field. Qualification and restoration evidence remain attached to
+the open PR. The previous pin `087b440ffcb1676be1f35a6dccd9b2c46edebbd6`
+is the rollback coordinate, with its matching test expectations. This records a
+qualified branch-built candidate, not a released fleet image.
 
 `manifests/schema/family.schema.json` gives a family an optional `variants:`
 map. Its keys are variant names; each value is a **narrow** overlay that may set
