@@ -1268,9 +1268,11 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 **CeraUI pin (2026-09-06):** the architecture-qualified `ceralive-device` rows in
 `manifests/first-party-deb-versions.txt` select the checksum-verified v2026.9.1
 release assets at `f3c52d5`, with the matching provenance tag in `versions.yaml`.
-Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, matching
-the engine 2026.9.3 pin. The accepted early-import SIGUSR1 residual
-window remains; the pin alone claims no fresh-image hardware qualification.
+Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, compatible
+with the engine 2026.9.3 schema 0.18.0 because the evolution is additive and
+CeraUI v2026.9.1 does not consume the new session-switch fields. The accepted
+early-import SIGUSR1 residual window remains; the pin alone claims no fresh-image
+hardware qualification.
 
 The emitted-rootfs wait-online test scans canonical unit files without following
 absolute aliases into the build host (`grep -r`, not `-R`). Its fixture includes
