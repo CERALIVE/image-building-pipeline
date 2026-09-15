@@ -1278,6 +1278,17 @@ an absolute alias, and the existing injected forbidden dependency still fails.
 Otherwise a valid image's absolute systemd symlinks produce grep exit 2 on the
 host and falsely fail the dependency-absence gate.
 
+**cerastream pin (2026-09-06):** `manifests/first-party-deb-versions.txt` selects
+released `2026.9.2` on both architectures; repo-local `versions.yaml` records
+the matching tag. Both packages were downloaded through authenticated GitHub
+access, checksum-verified and byte-compared with their served APT copies.
+`CERALIVE/cerastream` is private; anonymous GitHub URLs return 404, while APT is
+the image's package delivery channel. The release fixes capture-probe/live allocation,
+hardware-preview recovery and false-positive PLAYING startup. Its Orange Pi
+H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
+is an owner-accepted non-blocking observation, not a claimed transport fix.
+This pin does not claim a new image has been built, flashed or hardware-qualified.
+
 **cerastream pin (2026-09-15):** `manifests/first-party-deb-versions.txt` selects
 released `2026.9.3` on both architectures; repo-local `versions.yaml` records
 the matching tag. The arm64 package served through APT has SHA-256
