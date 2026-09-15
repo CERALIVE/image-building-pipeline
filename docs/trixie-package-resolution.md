@@ -276,7 +276,10 @@ in-tree — so there is nothing left to exclude.
 
 ## What this does not prove
 
-Stated explicitly so the release chain does not over-read it:
+These limits describe this historical index-resolution exercise, not all later
+pipeline work. The released Trixie/v7.2 qualification and the 2026-09-15 Rock RGA
+candidate have separate build/boot receipts in
+[`kernel-build-from-source.md`](kernel-build-from-source.md).
 
 - **No rootfs was built.** This is index resolution plus a whole-set dependency
   solve, executed in a `debian:trixie-slim` arm64 container. It proves every name
@@ -285,8 +288,10 @@ Stated explicitly so the release chain does not over-read it:
 - **The size-gate consequence is computed, not measured.** The ~185 MB prune total
   is summed from real file sizes in that container, but no `[6c/9]` measurement was
   taken against a real emitted rootfs tar.
-- **The governor unit has not run on hardware.** It is proven against synthetic
+- **This exercise did not test the governor unit on hardware.** It is proven against synthetic
   policy trees (apply-and-verify, no-cpufreq no-op, and an unavailable-governor
   refusal), not on a board.
 
-A real CI-dispatched `./build` on the trixie suite remains required before release.
+A release needs its own real build receipt; an index solve cannot substitute for
+one. The later receipts above supersede any blanket claim that no Trixie image
+has been built, without expanding this exercise's evidence.
