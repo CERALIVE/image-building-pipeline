@@ -425,13 +425,17 @@ impossible and would not provide a migration path for existing disks.
 
 **DEFERRED.md ref:** §6  
 **File to edit:** `docs/DEVICE-BRINGUP.md` (lines 296, 328, 413, 669)  
-**Blocked on:** physical RK3588 board completing a first bring-up run
+**Blocked on:** incorporating topic-specific bring-up evidence into the guide
 
 ### Background
 
 Four "**Pending hardware run**" placeholders in the public device bring-up guide
-await evidence from a real board. Each placeholder names
-`test-results/boot-log-<date>.txt` as its evidence target.
+need topic-specific transcripts. Each placeholder names
+`test-results/boot-log-<date>.txt` as its evidence target. This is not an unrun
+kernel qualification: the released Trixie/v7.2 images and the 2026-09-15 Rock
+RGA candidate have separate passed receipts in
+[`kernel-build-from-source.md`](kernel-build-from-source.md). Those receipts
+do not supply every console excerpt or dev-sync timing this guide requests.
 
 | Line | Placeholder topic |
 |------|-------------------|

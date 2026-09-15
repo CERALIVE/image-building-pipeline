@@ -149,9 +149,9 @@ demonstrably do not resolve at all. Evidence:
 wiring" item is **retired outright**, not deferred: `libmali` is off the mainline
 path entirely, so there is no blob to divert to.
 
-**Why the rest is still deferred:** No RK3588 board is reachable from the dev
-environment (Task 1 spike verdict: NO-GO). A GPU cannot be emulated, and the
-specific failure mode that matters here — Mesa silently falling back to
+**Why the rest is still deferred:** No artifact-bound Panthor/Mesa/Cog/display
+checklist has run with the required display hardware. A GPU cannot be emulated,
+and the specific failure mode that matters here — Mesa silently falling back to
 `llvmpipe` when it cannot reach the Panthor render node — renders *correctly*
 and so cannot be distinguished from success by anything but a board. Everything
 provable without hardware is green and recorded in
@@ -229,8 +229,10 @@ points at `test-results/boot-log-<date>.txt` as its evidence target:
   real bring-up run.
 - **Line 328** — first-boot sequence: the expected U-Boot → kernel → health
   gate → CeraUI sequence is described, but the boot-log timestamps and exact
-  console output are pending because no board has been booted with a CeraLive
-  image yet.
+  console transcript has not been incorporated into this guide. CeraLive images
+  have booted and completed Trixie/v7.2 qualification (item 9); the 2026-09-15
+  Rock RGA candidate adds its own artifact-bound result. This is a guide-evidence
+  gap, not a claim that board boot or kernel-pin qualification has never run.
 - **Line 413** — `dev-sync --frontend` invocation and behavior: the dev-sync
   frontend path is specced (`dev-sync`; see `docs/dev-loop.md`) but the
   confirmed invocation and timing are placeholders pending hardware evidence.
@@ -426,10 +428,11 @@ Two consequences worth stating plainly:
 
 * The **defconfig fragment** (`manifests/kernel/rk3588-edge.fragment`) now
   demonstrably resolves and compiles (re-verified at `v7.2`: 169/169 declared
-  symbols survive, 0 forbidden violations). Direct v7.2 MPP encode on both boards
-  is supporting hardware evidence, but the fragment remains unqualified as the
-  exact current image because artifact provenance and the Trixie userspace were not
-  exercised.
+  symbols survive, 0 forbidden violations, at that historical pin). The released
+  Trixie artifacts subsequently passed the bounded board qualification above.
+  That does not prove every symbol individually necessary or every later pin
+  combination qualified. The separate Rock RGA kernel-pin result is recorded in
+  [`kernel-build-from-source.md`](kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
 * **A board's DTB filename comes from whichever kernel tree built it, and the two
   trees need not agree — RESOLVED.** Since the board wins the merge
   last, the **board** now declares the per-variant name via `variant_overrides:`

@@ -424,8 +424,9 @@ must also retain **512 MiB available (`bavail`) bytes** and
 same assertion. Bluetooth roots survive the consumer-based prune, with exactly
 two reviewed future-hardware static-firmware gaps. See
 [`Full firmware and populated-slot safety`](docs/bluetooth-firmware-closure.md)
-for the check commands, exceptions and validation boundary. Both full image
-builds and new-adapter hardware validation remain separate gates.
+for the check commands, exceptions and validation boundary. The 2026-09-15 Rock
+RGA candidate completed a full image build and boot with this firmware closure;
+new-adapter validation is separate and is not implied by that result.
 
 ### Historical slim-package measurements (retired RK3588 1.5 GB placeholder)
 
@@ -1073,7 +1074,10 @@ machine-id is invalid.
 All of this is verified offline — installers, unit ordering (via
 `systemd-analyze verify` probes), validation, never-rotate byte-equality across a
 simulated reboot and a simulated A/B slot flip, and the cleanup's retention rule.
-**None of it is boot-proven on hardware yet.** Guards:
+The Rock RGA candidate booted with these artifacts on 2026-09-15, but its
+qualification did not measure cross-boot machine-id equality, journal retention
+or the one-time GC result. Those specific checks remain unproven by that receipt.
+Guards:
 `tests/journal-diagnosability.bats` and `tests/systemd-ordering-cycle.test.sh`
 Part D.
 
@@ -1280,10 +1284,10 @@ review. CI regenerates both, byte-compares them, checks each `.txt` really
 decodes the blob beside it, and asserts each profile's blocks by name in both
 directions — what must be present, and what must not.
 
-> Offline-verified only. No image has been built or flashed carrying the two
-> blobs, and no receiver has been programmed with `robust-4k60`. Whether a given
-> real camera actually chooses 4:2:0 when offered that profile is an empirical,
-> per-source question that needs a bench.
+> The 2026-09-15 Rock RGA candidate built and booted with the two blobs, but its
+> qualification did not exercise profile switching or `robust-4k60` negotiation.
+> Whether a given camera chooses 4:2:0 with that profile remains an empirical,
+> per-source question; image inclusion is not profile-behaviour validation.
 
 ## Audio — system-mode PipeWire (and why BlueALSA is gone)
 
@@ -1395,6 +1399,15 @@ substring. Proof: `run-tests` section 17.
 
 ## Kernel Build From Source (the production path)
 
+The island `v2026.9.4` RGA ownership pin **passed artifact-bound Rock 5B+
+qualification on 2026-09-15**, including restoration to production B. This is
+sufficient for this memory-routing pin, not a fleet-release or post-rebase
+image-qualification claim. Changes require independent exact-head review before
+merge; there is no separate owner-authorization merge gate. The fail-closed reset behavior retains
+memory and power until reboot and refuses unload; fault-injected recovery was
+not exercised. Release coordinates, rollback pin and qualification scope are in
+[`kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
+
 **Every kernel this pipeline ships is built from pinned source.** The rk3588
 family manifest declares two variants and both do so — there is no prebuilt-kernel
 path left:
@@ -1491,9 +1504,9 @@ as a stale exception.
 
 **The production resolve is pinned byte-for-byte** by the committed golden
 fixtures at `tests/manifests/fixtures/production-baseline/`, with a non-vacuity
-leg proving the same comparison fails on `edge-test`. The exact pinned
-Trixie/mainline artifacts were built, released and OTA-validated on both RK3588
-bench boards. The final two-board qualification PASS used cerastream v2026.8.6 /
+leg proving the same comparison fails on `edge-test`. The historical released
+Trixie/mainline artifacts were built and OTA-validated on both RK3588 bench
+boards; this does not qualify every later pin combination. That two-board PASS used cerastream v2026.8.6 /
 ceralive-device v2026.8.9: both deterministic reproductions streamed for 60+s,
 stopped cleanly, and observed 3+ post-stop minutes with zero watchdog aborts. The
 earlier `start_invalid`, BlueZ, and Orange HDMI-stimulus findings are superseded

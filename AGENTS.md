@@ -169,7 +169,7 @@ in both writers; the former BUILD-only translation assertion is retired by that
 policy. Executable output parity: `tests/apt-mtls-and-dedupe.test.sh`.
 
 **RK3588 full firmware adoption supersedes the trimmed-package/1.5 GB history
-below** [EXISTS — integration gated, full-image and new-adapter hardware proof pending].
+below** [EXISTS — Rock candidate built and booted; new-adapter validation separate].
 `firmware_packages` selects only `armbian-firmware-full=26.8.3`. Both signed-index
 transports and staged bytes must match the committed **.deb ARCHIVE FILE** SHA.
 The production Bluetooth/UHID closure is checked before pruning; runtime roots
@@ -179,6 +179,9 @@ Both RK3588 content ceilings are 3.5 GB; x86 stays 1.5 GB. Frozen 4096M slots ea
 must retain 512 MiB **bavail** and `max(ceil(inodes/10),20000)` free inodes after
 population, enforced by assembly, `verify-disk.sh check-slot` and preflash.
 The old measured baselines remain historical, not measurements of this change.
+The 2026-09-15 Rock RGA candidate passed its real size and populated-slot reserve
+checks; its receipt does not qualify new Bluetooth/Wi-Fi adapters or the later
+R0 userspace combination.
 Contract, driver/board citations, exact gaps and executable tests:
 [`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md).
 
@@ -188,6 +191,22 @@ the resolver output and the kernel DRY_RUN plan. Update both assertions alongsid
 the manifest and the production-baseline fixtures when deliberately changing that
 pin; do not derive their expected value from the manifest under test. PR #150's
 RGA pin update initially left both assertions on the previous MPP-only pin.
+
+**Island `v2026.9.4` passed Rock qualification, not a fleet release.** The
+proposed `patches_commit` is kernel-patches PR #24's merged
+`9a8be32fe6b54773b01c61119f578bf8cf10b08e`, carrying the approved RGA ownership
+repairs. The artifact-bound Rock 5B+ remeasurement passed on 2026-09-15,
+including all ten former JOURNAL-ERROR rows and restoration to production B.
+Rock qualification is sufficient for this above-4-GiB memory-routing pin;
+the separate librga R1 release's both-board evidence bar does not apply here.
+There is no separate owner-authorization merge gate. Changes require independent
+exact-head review before merge.
+Reset failure now retains the faulted core's memory and power until reboot;
+unload refuses rather than hangs; fault-injected recovery was not exercised. See
+[`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694)
+for the measured tuple and proof boundaries. The post-R0-rebase image is not
+claimed as a newly board-tested artifact. No package, Kconfig or layout changes
+accompany this kernel pin relative to its updated base.
 
 When diagnosing CI, distinguish expected negative-test output from a failing
 suite: `tests/maskrom-first-realhw.test.sh` deliberately executes the release
@@ -841,7 +860,7 @@ single-definition property itself).
 
 **Board preflight reads what the device HAS — three of the interfaces the tooling
 was specced against are not on a production image, and the trust answer is not
-the one the PKI directory advertises** [PARTIAL — Rock 5B+ captured, Orange Pi 5+ unreachable]
+the one the PKI directory advertises** [EXISTS — initial Rock capture described below]
 
 `ci/capture-board-preflight.sh` inventories a bench board over SSH and
 `ci/verify-bench-rauc-trust.sh` turns that capture plus a candidate PKI into a
@@ -1626,7 +1645,7 @@ container with a persistent ccache. There is no prebuilt-kernel path left:
 
 | Variant | Track | Source pin | Patch repo | Purpose |
 |---|---|---|---|---|
-| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches@cb491dc16fc1` (22-member series, `island/` lane included) | **the PRODUCTION default** (`default_variant: edge`) |
+| `edge` | mainline 7.2 | `v7.2` / `8d3ae59288f1` | `CERALIVE/rk3588-kernel-patches` (current pin and receipt in the RGA ownership KEY FACT above) | **the PRODUCTION default** (`default_variant: edge`) |
 | `edge-test` | `extends: edge` | inherited | inherited | KASAN/lockdep + fault injection; never released |
 
 The patch commit is an **immutable SHA**, never a branch. Full write-up:
@@ -1641,7 +1660,7 @@ the staged kernel `.deb` under `mkosi/.staging/<board>/kernel-build/`. A
 
 **Hardware encode and decode are the CeraLive MEDIA ISLAND now, not a standalone
 V4L2 encoder — and `CONFIG_VIDEO_ROCKCHIP_RKVENC` exists in no Kconfig at this
-pin** [EXISTS — configured and dry-run-proven; NO board has run it]
+pin** [EXISTS — artifact-bound Rock RGA qualification passed]
 
 The `patches_commit` bump to `cb491dc16fc1` brought the `island/` lane, which
 ingests the `rk3588-media-island` v2026.9.0 release asset byte-preserved and
@@ -1681,10 +1700,13 @@ different, and four things about them are easy to get wrong:
   to the island. `ROCKCHIP_MULTI_RGA=m` is now declared and required;
   `VIDEO_ROCKCHIP_RGA` is forbidden and explicitly disabled in the fragment.
 
-**Not board-proven.** Both boards × both variants dry-run clean and the resolved
-`.config` passes the declared/required/forbidden gate, but no image has been built
-non-DRY_RUN, flashed, or booted with the island. The wording to use is "the
-pipeline pins it", never "devices ship it".
+**Board evidence is artifact-bound.** The full branch-built Rock `edge` candidate
+carrying island v2026.9.4 booted and passed the specified RGA/encode workloads on
+2026-09-15, with its live module hash and build ID matched to the candidate.
+Production B was restored afterwards. This supersedes the former blanket
+island-never-built/booted claim, not the untested driver paths or the distinction
+between a qualified candidate and a fleet release. See the RGA ownership receipt
+in [`docs/kernel-build-from-source.md`](docs/kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
 
 **The Armbian vendor 6.1 BSP track is RETIRED — both overlays.** The prebuilt
 `vendor` one and the source-built one that rebuilt it with
@@ -3823,9 +3845,11 @@ leave the boot path. First-party services start after the NetworkManager daemon,
 not after connectivity, so a normal no-uplink boot does not create a failed unit.
 The QEMU acceptance engine now requires `systemctl is-system-running` to be exactly
 `running`; its deliberate `degraded` transcript is a required negative case.
-**Not yet re-run on hardware** — the prior six masks were verified in a real emitted
-Rock 5B+ rootfs, while the seventh mask and offline-first ordering are currently
-artifact/source-tested and await the Todo 14/22 board health rerun.
+**Boot evidence is narrower than offline-first acceptance.** The 2026-09-15 Rock
+RGA candidate completed boot and automatic health confirmation with these
+artifacts. Its receipt does not exercise a no-uplink cold boot, late-link
+reconciliation or the matched boot-budget matrix; those specific scenarios
+remain separate coverage, not an unrun RGA kernel-pin gate.
 
 Guards: `runtime-services.bats` §18e (all seven masks, both `Also=` resurrection
 paths, mask-not-disable, fail-closed landing, exact scope, configure wiring, and an
@@ -3836,7 +3860,7 @@ available.
 
 **A shipped board's journal held ~100 SECONDS of per-unit history — the machine-id
 persistence that was supposed to prevent that had shipped, and was broken in two
-specific places** [EXISTS — built and gated, NOT yet boot-proven]
+specific places** [EXISTS — carried by a booted candidate; retention checks separate]
 
 Measured on a shipped Rock 5B+ on 2026-08-30 (evidence
 `.omo/evidence/board-diag-20260830-netmodem-192.168.78.132.md` §5.4):
@@ -3973,9 +3997,9 @@ retention/one-time/candidate-shape/refusal legs) plus
 non-empty id, rotating a valid one, dropping the predecessor retention and dropping
 `/var/log` from `RequiresMountsFor=` each fail the suite.
 
-**NOT boot-proven.** Everything above is verified from the artifacts and the unit
-graph offline; no board has yet booted an image carrying it. The remaining
-on-hardware step is to confirm `/etc/machine-id` equals `/data/ceralive/machine-id`
+**Retention behaviour is not proved by a successful boot.** The Rock RGA candidate
+booted with these artifacts on 2026-09-15, but its receipt does not confirm
+`/etc/machine-id` equals `/data/ceralive/machine-id`
 after an OTA slot swap, that `journalctl -u NetworkManager` spans more than one
 boot, and that the GC stamped once and left the live directory plus one predecessor.
 
@@ -4139,7 +4163,7 @@ usable".
 
 **SYSTEM-MODE PIPEWIRE IS THE AUDIO SERVER, AND IT RETIRED BlueALSA IN THE SAME
 RELEASE — the two BT managers are exclusive by construction, not by preference**
-[EXISTS — shipped in the image, NOT yet exercised on a board]
+[EXISTS — released-stack evidence below; Bluetooth B4 remains separate]
 
 `bluez` above gets the adapter powered and paired. It does not get a single sample
 of audio off it. Until todo 28 that second half was BlueALSA — `bluez-alsa-utils`
@@ -4922,10 +4946,10 @@ profile check and FAILING the other's, and four negative fixtures) plus the
 `edid-conformance` CI job, which now runs drift, decoded-text currency,
 conformity and a both-directions content table over every declared profile.
 
-**NOT board-proven.** Everything above is verified offline — generated bytes,
-`edid-decode` decodes, and the shipped script driven against a synthetic board.
-No image has been built or flashed with the two blobs, no receiver has been
-programmed with `robust-4k60`, and the `-EBUSY` half additionally assumes a
+**Profile behaviour is not qualified by image inclusion.** The 2026-09-15 Rock
+RGA candidate built and booted with these blobs. Generated-byte, `edid-decode`
+and synthetic-script checks are proven offline, but that RGA receipt does not
+exercise `robust-4k60` negotiation or profile switching. The `-EBUSY` half assumes a
 kernel guard that is being implemented separately in `rk3588-kernel-patches`; the
 script's handling is written to that contract and exercised against a stub, not
 against a driver that has returned it.
@@ -5213,10 +5237,11 @@ loud read-back failure, and the `configure_services` wiring. `setup_fan_curve` i
 registered in `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`; nothing was added to
 `mkosi.postinst.chroot`, which stays at 925 lines against the 950 ceiling.
 
-**Not yet in a shipped release, and not yet boot-proven.** The trip write itself was
-proven by hand on real hardware; the unit that performs it at boot has not been
-through this repo's build/flash/release cycle. Confirming that a booted board reports
-the lowered trip and that the fan audibly idles is the remaining on-hardware step.
+**Image inclusion is not a fan-policy qualification.** The 2026-09-15 Rock RGA
+candidate built and booted with this unit; its receipt is not a fleet release or
+a measurement of the trip and fan response. The trip write was separately proven
+by hand. An artifact-bound lowered-trip and audible-idle result is still needed
+to qualify the automatic policy, not to repeat the RGA kernel-pin acceptance.
 
 **The fan's FIRST active state is 70/255 (~27.5 %) — enough to keep a spinning rotor
 spinning, not enough to start a stopped one — and a userspace `cur_state` write is
@@ -5362,9 +5387,10 @@ single-state skip, priming to 0, and dropping the race guard each fail the suite
 `setup_fan_kickstart` is registered in `postinst-drift-check.sh`'s
 `CONSOLIDATED_FUNCS`; nothing was added to `mkosi.postinst.chroot`.
 
-**Not yet in a shipped release, and not yet boot-proven.** The stiction diagnosis
+**Kick-start behaviour needs its own measurement.** The stiction diagnosis
 rests on live-hardware readings and the sticky-write mechanism on the pinned kernel
-sources; the unit itself has not been through this repo's build/flash/release cycle.
+sources. The unit was carried by the booted 2026-09-15 Rock RGA candidate, but
+that receipt did not measure kick-start behaviour and is not a fleet release.
 The remaining on-hardware step is to confirm that a real 0 → 1 crossing produces an
 audible full-speed burst that settles back within ~1 s and that the fan starts every
 time without a manual push. It can be logic-verified without root the same way the LED
@@ -5476,11 +5502,11 @@ failure, the RO-node warning, fail-closed missing source, and the
 `postinst-drift-check.sh`'s `CONSOLIDATED_FUNCS`; nothing was added to
 `mkosi.postinst.chroot`, which stays at 925 lines against the 950 ceiling.
 
-**Not yet in a shipped release, and not yet boot-proven.** The discovery and the
-policy are proven against synthetic fixtures and the LED inventory above was read
-off a real board, but no booted image has yet been observed lighting the LEDs.
-Confirming a heartbeat blink and card-activity flicker on hardware is the
-remaining step.
+**LED behaviour needs its own measurement.** The discovery and policy are proven
+against synthetic fixtures, and the inventory above was read off a real board.
+The 2026-09-15 Rock RGA candidate booted with the unit, but that receipt does not
+record heartbeat blink or card-activity flicker. Those visual checks remain
+separate from kernel-pin acceptance; no fleet release is inferred.
 
 ## ADD-ON SUBSYSTEM [EXISTS]
 
@@ -6219,7 +6245,7 @@ to watch for is Mesa silently falling back to `llvmpipe`, which renders
 *correctly* and so cannot be distinguished from success without checking the
 bound driver by name.
 
-**Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-blocked** — no RK3588 board is reachable from the dev environment (Task 1 spike: NO-GO). The architecture is fully specced; implementation waits for hardware access.
+**Implementation status:** Tasks 26 (systemd units), 27 (packages), 28 (RK3588 dual-GPU udev + touch calibration), and 30 (integration validation) are **hardware-gated** by the display-stack spike. Its original NO-GO recorded no reachable board in that session, not a permanent access state. Later Trixie and Rock RGA qualification do not exercise display rendering or clear that separate gate.
 
 **Phase-3 deferrals:** e-ink kernel DRM driver + device-tree, dual-display hybrid, on-device live-video preview, and #61 battery/power telemetry (document-only: current boards are mains-powered, no fuel-gauge IC). Full register: [`docs/kiosk-display.md §7`](docs/kiosk-display.md).
 
