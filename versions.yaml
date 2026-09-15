@@ -68,7 +68,8 @@ CeraUI:
   # todo-16 qualification PASS.
   # v2026.9.0 adds the operator-facing audio-backend selector and PipeWire/BlueALSA
   # provider reconciliation consumed by this candidate image.
-  # v2026.9.1 publishes schema-0.17.0 bindings, matching cerastream 2026.9.3.
+  # v2026.9.1 consumes the published schema-0.17.0 cerastream bindings through
+  # its @ceralive/cerastream npm registry dependency.
   pin: v2026.9.1
   # Device deb: ceralive-device 2026.9.1-20260906T194138.f3c52d5 (amd64) /
   #   2026.9.1-20260906T194131.f3c52d5 (arm64), independently checksum-verified.
