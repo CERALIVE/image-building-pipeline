@@ -146,6 +146,10 @@ Exact-version, reasoned, expiring rollback exceptions live in
 `manifests/first-party-pin-overrides.json`; they cannot waive unverifiable inputs.
 The registered CLI test includes both incident downgrades and executes the
 actual workflow guard commands against positive and negative fixtures.
+Its historical engine `.3` and plugin `.5` fixture inputs are explicit, so
+refreshing the live catalog cannot invalidate the scenarios or silently turn
+their downgrade mutations into no-ops. Production currency still checks the
+refreshed catalog against the real pins in the separate workflow step.
 `--installed` reports saved inventory drift without connecting to hardware.
 Full policy, freshness limitation and rollback procedure:
 [`docs/first-party-pin-currency.md`](docs/first-party-pin-currency.md).
@@ -1314,15 +1318,15 @@ H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
 is an owner-accepted non-blocking observation, not a claimed transport fix.
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 
-**cerastream pin (2026-09-15):** `manifests/first-party-deb-versions.txt` selects
-released `2026.9.3` on both architectures; repo-local `versions.yaml` records
-the matching tag. The arm64 package served through APT has SHA-256
-`a768ef05eec85f318bd57ae3190c5c0126a97aab0368652e7f105ccc3afc3f9a`, matching
-the immutable release asset. `CERALIVE/cerastream` is private; anonymous GitHub
-URLs return 404, while APT is the image's package delivery channel. This release
-derives capture preflight geometry from queried DV timings rather than stale
-applied format state. This pin does not claim a new image has been built,
-flashed or hardware-qualified.
+**cerastream pin (2026-09-16):** `manifests/first-party-deb-versions.txt` selects
+released `2026.9.4` on both architectures; repo-local `versions.yaml` records
+`v2026.9.4`. Both APT packages were fetched and byte-compared with authenticated
+GitHub release downloads before pinning. This release carries the canonical
+`gstreamer1.0-libuvcsrc` dependency and forced-IDR delivery through the encoder
+src pad with actual acceptance reporting. The release catalog was refreshed
+through the existing authenticated command; no guard or override changed.
+Exact hashes and serving proof: [`media pin receipt`](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
+This pin does not claim a new image has been built, flashed or hardware-qualified.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
@@ -3161,7 +3165,7 @@ no replacement userspace build is needed.
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Four packages:
-  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.2 (hw_accel_gstreamer_plugins), and
+  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.6 (hw_accel_gstreamer_plugins), and
   `rockchip-multimedia-config` 1.0.2-1 / `librga2-ceralive` 1.10.1+ceralive.1 / `librockchip-mpp1` 1.5.0-1
   (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
   RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
@@ -3176,7 +3180,13 @@ no replacement userspace build is needed.
   CERALIVE/gstreamer-rockchip for the plugin, tsukumijima for MPP and multimedia
   config, and CERALIVE/librga for the R0 RGA compatibility rebuild.
   The `.2` plugin release adds `libgstrockchiprga.so` with `rgaconvert` and
-  `rgacompositor`; `.1` predates those factories. The pipeline pins the released
+  `rgacompositor`; `.1` predates those factories. The `.6` pin carries compositor
+  pre-scale, bt709 colorimetry, pool-reference and allocator-lifetime fixes.
+  Its checksum was independently computed from downloaded release bytes and
+  matched against the fetched stable APT artifact before pinning; see the
+  [media pin receipt](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
+  It stays platform-layer only, never in `REPOS` or `FIRST_PARTY_APT_PKGS`.
+  The pipeline pins the released
   bytes to enable fresh-image qualification, not to claim either board has run
   this package. The MPP pin is unchanged; the RGA R0 swap is described below.
 - **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
