@@ -1,6 +1,10 @@
 # librga R0 platform-layer swap
 
-The RK3588 image selects `librga2-ceralive` **1.10.1+ceralive.1** through
+Historical receipt for merged [PR #166](https://github.com/CERALIVE/image-building-pipeline/pull/166).
+The current [R1 pin and serving receipt](librga-r1-pin.md) supersedes the active
+version below, not this R0 build evidence.
+
+The R0 swap selected `librga2-ceralive` **1.10.1+ceralive.1** through
 `manifests/rk3588-userspace-deb-versions.txt`. This is R0 only: a compatibility
 rebuild of the 1.10.1 API embedded in Radxa's `librga2 2.2.0-1`, whose 2.2.0
 label is a packaging version, not the API version. R0's neutrality evidence is
@@ -63,7 +67,8 @@ inputs. A dry run proves manifest selection only; a real image build proves
 download, staging, dependency resolution and image assembly. Neither proves
 boot or media behavior on a board. No flashing, OTA, slot mutation or board
 commands are part of this change, and the separate island kernel-pin PR is
-untouched. **R1 is unreleased, hardware-gated, and requires a separate later PR.**
+untouched. At this R0 measurement, R1 was unreleased and required a separate
+later PR; it has since released, as recorded in the R1 receipt linked above.
 
 ### Local result — 2026-09-15
 
