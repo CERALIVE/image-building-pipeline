@@ -612,13 +612,16 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.3`, which derives capture preflight geometry
-from queried DV timings rather than stale applied format state. Both architecture
-packages are served by APT; the arm64 package's SHA-256 is
-`a768ef05eec85f318bd57ae3190c5c0126a97aab0368652e7f105ccc3afc3f9a`, matching
-the immutable release asset (`CERALIVE/cerastream` is private). This is a
-package-pin update, not a claim that a new device image has already been built
-or flashed.
+The engine pin is `cerastream=2026.9.4`, carrying the canonical libuvcsrc
+dependency and forced-IDR delivery through the encoder src pad with actual
+acceptance reporting. Both architecture packages are served by APT and were
+byte-compared with their authenticated GitHub release downloads. The RK3588
+plugin pin is `1.14.4+ceralive.6`, retaining its platform-layer URL+SHA route
+and commented Radxa rollback row. It carries compositor pre-scale, bt709
+colorimetry, pool-reference and allocator-lifetime fixes. Exact serving proof:
+[`Media pin receipt`](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
+These are package-pin updates, not a claim that a new device image has been
+built, flashed or hardware-qualified.
 
 CeraUI is pinned to release v2026.9.1 using its exact per-architecture Debian
 versions. Its published cerastream bindings use schema 0.17.0, compatible with

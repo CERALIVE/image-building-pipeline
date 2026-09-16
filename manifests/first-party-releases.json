@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-16T08:24:11.878537+00:00",
+  "checked_at": "2026-09-16T14:49:29.051695+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -13,11 +13,11 @@
     },
     {
       "component": "cerastream",
-      "tag": "v2026.9.3",
-      "published_at": "2026-09-14T11:36:36Z",
+      "tag": "v2026.9.4",
+      "published_at": "2026-09-16T12:42:56Z",
       "packages": {
-        "cerastream[amd64]": "2026.9.3",
-        "cerastream[arm64]": "2026.9.3"
+        "cerastream[amd64]": "2026.9.4",
+        "cerastream[arm64]": "2026.9.4"
       }
     },
     {
@@ -31,10 +31,10 @@
     },
     {
       "component": "gstreamer-rockchip",
-      "tag": "1.14.4+ceralive.5",
-      "published_at": "2026-09-15T15:19:28Z",
+      "tag": "1.14.4+ceralive.6",
+      "published_at": "2026-09-16T13:39:08Z",
       "packages": {
-        "gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.5"
+        "gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.6"
       }
     },
     {

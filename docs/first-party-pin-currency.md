@@ -98,6 +98,50 @@ to catch APT changes or new releases instantaneously. For the freshest manual
 pre-build check, run `--refresh --max-age-hours 24` immediately before `./build`.
 Direct local `./build` is unchanged; CI is the enforced surface in this change.
 
+## Media pin serving receipt — 2026-09-16
+
+The plugin `1.14.4+ceralive.6` and engine `2026.9.4` were fetched from the
+stable APT indexes **before** their image pins changed. Both architecture
+`InRelease` signatures verified with the existing archive key
+`3BD975960D38C74A5F06A8044F6501E14003A6B3`; each `Packages.gz` hash matched
+its signed Release record. Index URLs:
+
+- `https://apt.ceralive.tv/dists/stable/binary-arm64/Packages.gz`
+- `https://apt.ceralive.tv/dists/stable/binary-amd64/Packages.gz`
+
+Each index's `Filename: ./<filename>` resolved against its architecture-qualified
+stable directory. Every APT archive was fetched with mTLS and normal TLS
+verification, independently hashed with `sha256sum`, and byte-compared with a
+separate authenticated GitHub release download using `cmp`.
+
+| Package / architecture | Version | APT SHA-256 = GitHub asset SHA-256 = index SHA-256 |
+|---|---|---|
+| `gstreamer1.0-rockchip-ceralive` / arm64 | `1.14.4+ceralive.6` | `d131e443dcd88fb7988773b10c9b0125a65536ceb11128f41b3644a0fb41a3b5` |
+| `cerastream` / arm64 | `2026.9.4` | `c0c1ab87a07c50c4f3b04da84390273988dff007f1ac628e3cb521a8a1ab5819` |
+| `cerastream` / amd64 | `2026.9.4` | `f4ce664356c7a37f6433547590d5bf92f0bd1b922d5c32707740e8b63842f433` |
+
+GitHub sources are `CERALIVE/gstreamer-rockchip` release `1.14.4+ceralive.6`
+and private `CERALIVE/cerastream` release `v2026.9.4`, with filenames
+`<package>_<version>_<architecture>.deb`. Debian control fields independently
+confirmed all three identities. The engine declares the canonical
+`gstreamer1.0-libuvcsrc` dependency already pinned by this pipeline.
+
+The plugin's platform manifest uses the checksum **computed from the downloaded
+archive**, not a copied sidecar or workflow verdict. Its commented Radxa rollback
+row survives unchanged; it remains outside `REPOS` and `FIRST_PARTY_APT_PKGS`.
+The engine stays app-layer, with unprefixed Debian version and `v`-prefixed
+repo-local provenance tag. The catalog was refreshed through `--refresh`, which
+correctly reported the old pins stale before they changed; no guard, test or
+rollback override was weakened. No image build, flash or new hardware
+qualification is implied by this receipt.
+
+Refreshing the catalog exposed unit fixtures that copied live release values
+while hardcoding historical `.3`/`.5` scenarios. The fixture setup now fixes
+both sides of those historical inputs explicitly; every existing assertion
+remains, including `.2` → `.3` engine and `.2` → `.5` plugin downgrade
+rejections. The production CLI and workflow step still check real current pins
+against the refreshed catalog, independently of these historical fixtures.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as

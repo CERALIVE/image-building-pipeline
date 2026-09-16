@@ -49,11 +49,13 @@ cerastream:
   # receiver soaks passed on Orange Pi.
   # v2026.9.3 derives capture preflight geometry from queried DV timings rather
   # than rejecting a source because its applied format is stale.
-  pin: v2026.9.3
-  # Device deb: cerastream 2026.9.3 (amd64 + arm64).
+  # v2026.9.4 uses the canonical libuvcsrc dependency and delivers forced-IDR
+  # requests through the encoder src pad, reporting actual acceptance.
+  pin: v2026.9.4
+  # Device deb: cerastream 2026.9.4 (amd64 + arm64).
   # Published assets (private GitHub; authenticated download required):
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.3/cerastream_2026.9.3_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.3/cerastream_2026.9.3_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.4/cerastream_2026.9.4_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.4/cerastream_2026.9.4_amd64.deb
   channel: stable
 
 CeraUI:
