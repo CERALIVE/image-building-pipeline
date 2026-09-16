@@ -8,7 +8,13 @@ against the same suite and proves that the final ELF does not exceed the device'
 glibc floor. It is an evidence inventory, not a claim that a missing assertion is
 covered by another repository's image build.
 
-## Posture table
+The table and DSP ledger retain the **2026-09-01 historical audit**, with the UVC
+producer now named by its canonical repository `gstlibuvcsrc`. Its later
+v2026.9.0 release uses Trixie and declares `libc6 (>= 2.41)`; the package migration
+is recorded in [UVC package migration](uvc-package-migration.md). Producer-side
+suite-gate follow-up is separate; this input rename does not close DSP-5.
+
+## Posture table (historical audit)
 
 | Producer | Release artifact path | Build-suite declaration | Declared-target-suite gate | GLIBC-floor assertion | Posture |
 |---|---|---|---|---|---|
@@ -17,7 +23,7 @@ covered by another repository's image build.
 | `CeraUI` | `.github/workflows/publish-release.yml:365-417` builds the `arm64` and `amd64` packages on `ubuntu-latest`. | Runner userland; no Debian suite declaration. | No. | No release-path ELF GLIBC ceiling assertion. | **Deferred gap**. |
 | `srtla-send-rs` | `.github/workflows/release.yml:148-227` builds both package arches in `debian:bookworm-slim`. | Fixed Bookworm container (`:152-155`). | No target-suite reader or equality assertion. | Yes for the historical Bookworm floor: `:210-219` rejects imports newer than `GLIBC_2.36`. | **Deferred gap** — the assertion is real but not derived from the Trixie target. |
 | `modem-stack` | `.github/workflows/release.yml:284-291` invokes `packaging/ci/build-bookworm.sh` for both arches. | Build script name and repository packaging contract identify Bookworm; no release-workflow target-suite input. | No. | No release-workflow GLIBC import ceiling assertion identified. | **Deferred gap**. |
-| `gstlibuvch264src` | `.github/workflows/publish-release.yml:91-137` builds the Docker runtime payload then packages it. | `Dockerfile:4-7` pins a Bookworm-slim digest. | No target-suite reader or equality assertion. | Partial: `publish-release.yml:115-121` rejects `GLIBC_2.38` and `GLIBC_2.39`; it also declares `libc6 (>= 2.36)` at `:132-136`. | **Deferred gap** — a static historical floor, not the device-target floor. |
+| `gstlibuvcsrc` | `.github/workflows/publish-release.yml:91-137` builds the Docker runtime payload then packages it. | `Dockerfile:4-7` pins a Bookworm-slim digest. | No target-suite reader or equality assertion. | Partial: `publish-release.yml:115-121` rejects `GLIBC_2.38` and `GLIBC_2.39`; it also declares `libc6 (>= 2.36)` at `:132-136`. | **Deferred gap** — a static historical floor, not the device-target floor. |
 
 ## What this audit does and does not prove
 
@@ -42,7 +48,7 @@ in the owning producer repository; do not duplicate suite constants in this pipe
 | DSP-2 | `CeraUI` | Debian package builds on the runner with neither declared suite nor ELF floor gate. | Package build runs in the declared target-suite environment and validates every shipped native ELF against its floor. |
 | DSP-3 | `srtla-send-rs` | Existing Bookworm/2.36 gate is not tied to the device target. | Container and `GLIBC_*` ceiling derive from one producer-owned target declaration. |
 | DSP-4 | `modem-stack` | Differential package builds have no target-suite input or final ELF ceiling gate. | Both architecture builds derive suite/floor from one declaration and inspect all shipped ELF payloads. |
-| DSP-5 | `gstlibuvch264src` | Bookworm digest and 2.36/2.39 checks are independent historical literals. | Build base, GLIBC ceiling, and `libc6` floor derive from one target declaration; plugin and bundled `libuvc` are both checked. |
+| DSP-5 | `gstlibuvcsrc` | Bookworm digest and 2.36/2.39 checks are independent historical literals. | Build base, GLIBC ceiling, and `libc6` floor derive from one target declaration; plugin and bundled `libuvc` are both checked. |
 
 `docs/DEFERRED.md` carries this ledger's lifecycle pointer so this audit does not
 look like closed implementation work.

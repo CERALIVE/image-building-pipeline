@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-15T22:36:53.641454+00:00",
+  "checked_at": "2026-09-16T08:24:11.878537+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -21,12 +21,12 @@
       }
     },
     {
-      "component": "gstlibuvch264src",
-      "tag": "v2026.8.0",
-      "published_at": "2026-08-27T22:08:25Z",
+      "component": "gstlibuvcsrc",
+      "tag": "v2026.9.0",
+      "published_at": "2026-09-16T07:18:29Z",
       "packages": {
-        "gstreamer1.0-libuvch264src[amd64]": "2026.8.0",
-        "gstreamer1.0-libuvch264src[arm64]": "2026.8.0"
+        "gstreamer1.0-libuvcsrc[amd64]": "2026.9.0",
+        "gstreamer1.0-libuvcsrc[arm64]": "2026.9.0"
       }
     },
     {

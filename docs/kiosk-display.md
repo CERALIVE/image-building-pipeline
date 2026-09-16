@@ -224,7 +224,7 @@ These notes apply to the Orange Pi 5+ and Radxa Rock 5B+ targets.
 
 **Touch input:** the RK3588 DSI touchscreen controller appears as a `/dev/input/eventN` device. cage passes input events to Chromium automatically via the Wayland seat. Touch calibration (mapping the touch coordinates to the display geometry) is a Task 28 item and requires physical hardware.
 
-**HDMI input vs display output:** the RK3588 HDMI input (hdmirx, used for capture) and HDMI output (used for the kiosk display) are separate hardware blocks. They do not conflict. The kiosk display uses the HDMI output; the streaming engine uses the HDMI input via the `gstlibuvch264src` GStreamer element.
+**HDMI input vs display output:** the RK3588 HDMI input (hdmirx, used for capture) and HDMI output (used for the kiosk display) are separate hardware blocks. They do not conflict. The kiosk display uses the HDMI output; the streaming engine captures HDMI through V4L2. The separate `gstlibuvcsrc` plugin handles userspace USB UVC capture, not HDMI-RX.
 
 ---
 

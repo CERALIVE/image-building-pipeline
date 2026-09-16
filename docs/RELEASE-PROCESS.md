@@ -270,7 +270,7 @@ candidate contents, and required real-HW workflow call are unchanged. Candidate
 sealing uses the post-verification xz step described above.
 
 Fetching the five first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
-`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
+`gstreamer1.0-libuvcsrc`, `ceralive-device`, `srtla-send-rs`) from `apt.ceralive.tv` needs a GPG-verified,
 mTLS-authenticated apt source — the exact credential contract is
 `APT_GPG_PUBLIC_B64` / `APT_CLIENT_CRT_B64` / `APT_CLIENT_KEY_B64` in
 [`lib/fetch-debs.sh`](../lib/fetch-debs.sh) `fetch_first_party()`
@@ -659,7 +659,7 @@ contract held for this specific rollout, not re-deriving it from scratch.
 Scope: `APT_GPG_PUBLIC_B64`, `APT_CLIENT_CRT_B64`, `APT_CLIENT_KEY_B64` — the
 three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the five
 first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
-`gstreamer1.0-libuvch264src`, `ceralive-device`, `srtla-send-rs`) from
+`gstreamer1.0-libuvcsrc`, `ceralive-device`, `srtla-send-rs`) from
 `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
 The device-side twin of this same contract is
 [`mkosi/customize/apt-ceralive-repo.sh`](../mkosi/customize/apt-ceralive-repo.sh),

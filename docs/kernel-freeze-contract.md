@@ -81,7 +81,7 @@ Every first-party CeraLive package stays **apt-updatable**, because
 
 ```
 cerastream            ceralive-device (CeraUI)   srtla-send-rs
-libsrt1.5-ceralive    gstreamer1.0-libuvch264src rauc-hawkbit-updater
+libsrt1.5-ceralive    gstreamer1.0-libuvcsrc rauc-hawkbit-updater
 modemmanager  libmm-glib0  libmbim-glib4  libmbim-proxy  libmbim-utils
 libqmi-glib5  libqmi-proxy libqmi-utils   libqrtr-glib0
 ```

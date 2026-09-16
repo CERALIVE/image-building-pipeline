@@ -1,5 +1,9 @@
 # CeraLive Image Building Pipeline
 
+The [UVC package migration](docs/uvc-package-migration.md) is [EXISTS]: the pipeline
+pins the released, APT-served `gstreamer1.0-libuvcsrc=2026.9.0` on both architectures.
+This is an input migration, not a claim that a new image was built or flashed.
+
 A build pipeline for creating ready-to-use images for ARM-based streaming devices,
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future
 support for Intel N100/N200 and AMD platforms.

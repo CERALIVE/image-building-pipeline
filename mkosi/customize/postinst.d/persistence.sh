@@ -410,7 +410,7 @@ setup_journal_dir_gc() {
 # packages the device updates over apt from apt.ceralive.tv (see the app layer's
 # SYSEXT_APP_PKGS / APPFS_APP_PKGS / RUNTIME_APP_PKGS classification). Holding any
 # of them would break the ordinary software-update path CeraUI drives.
-CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla-send-rs srtla gstreamer1.0-libuvch264src libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla-send-rs srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
 
 freeze_boot_packages() {
   local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"

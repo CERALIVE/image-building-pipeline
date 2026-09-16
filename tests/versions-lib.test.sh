@@ -68,7 +68,7 @@ srtla:
   pin: 9b0b4fa
 CeraUI:
   pin: 2026.6.3
-gstlibuvch264src:
+fixture264src:
   pin: 0.4.2
 no-pin-here:
   repo: CERALIVE/nothing
@@ -78,7 +78,7 @@ YAML
 
 expect_pin "known: a plain key returns its pin"            "v1.5.4-ceralive1" srt              "${fixture}"
 expect_pin "known: a mixed-case key returns its pin"       "2026.6.3"         CeraUI           "${fixture}"
-expect_pin "known: a digit-bearing key returns its pin"    "0.4.2"            gstlibuvch264src "${fixture}"
+expect_pin "known: a digit-bearing key returns its pin"    "0.4.2"            fixture264src    "${fixture}"
 expect_pin "known: leading whitespace in the value is stripped" "spaced-value" trailing        "${fixture}"
 
 # The exact-match property, and the reason it matters: `srt` is a prefix of
