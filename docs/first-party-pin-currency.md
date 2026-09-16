@@ -36,7 +36,7 @@ before building, using a tighter evidence-age bound.
 | `manifests/first-party-releases.json` | Independently observed published stable release and package versions, not copied from image pins |
 
 Covered components: `srt`, `cerastream`, `CeraUI`, `srtla-send-rs`,
-`gstlibuvch264src`, `modem-stack`, `gstreamer-rockchip`, and `librga`.
+`gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, and `librga`.
 The modem companion follows its release tag; its nine upstream-versioned
 packages are compared individually against the release's package manifest.
 Their per-source rebuild counters are **not** inferred from the component tag.
