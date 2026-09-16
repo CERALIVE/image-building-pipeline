@@ -127,6 +127,23 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 
 ## KEY FACTS
 
+**First-party pin currency is a separate CI gate from artifact integrity** [EXISTS].
+`ci/check-first-party-pins.py` checks both app architectures, repo-local
+`versions.yaml` provenance and platform URL/filename versions against the
+authenticated, committed `manifests/first-party-releases.json` catalog.
+It covers the fetcher's complete app set (including capture and modem closure)
+plus the CeraLive plugin and librga runtime. Missing/malformed/expired evidence
+fails closed. PR evidence is bounded to seven days; real CI builds to 24 hours.
+`--refresh` requires authenticated `gh` access to the private component repos,
+updates evidence only, and never changes pins. No automatic refresh bot ships.
+Exact-version, reasoned, expiring rollback exceptions live in
+`manifests/first-party-pin-overrides.json`; they cannot waive unverifiable inputs.
+The registered CLI test includes both incident downgrades and executes the
+actual workflow guard commands against positive and negative fixtures.
+`--installed` reports saved inventory drift without connecting to hardware.
+Full policy, freshness limitation and rollback procedure:
+[`docs/first-party-pin-currency.md`](docs/first-party-pin-currency.md).
+
 **Health confirmation is boot-scoped, never install-scoped.**
 `ceralive-healthcheck.service` always dispatches after CeraUI; it has no persistent
 marker existence gate. The script accepts `.slot-marked-good` only when its

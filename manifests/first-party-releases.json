@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-09-15T22:36:53.641454+00:00",
+  "releases": [
+    {
+      "component": "CeraUI",
+      "tag": "v2026.9.1",
+      "published_at": "2026-09-06T19:42:57Z",
+      "packages": {
+        "ceralive-device[arm64]": "2026.9.1-20260906T194131.f3c52d5",
+        "ceralive-device[amd64]": "2026.9.1-20260906T194138.f3c52d5"
+      }
+    },
+    {
+      "component": "cerastream",
+      "tag": "v2026.9.3",
+      "published_at": "2026-09-14T11:36:36Z",
+      "packages": {
+        "cerastream[amd64]": "2026.9.3",
+        "cerastream[arm64]": "2026.9.3"
+      }
+    },
+    {
+      "component": "gstlibuvch264src",
+      "tag": "v2026.8.0",
+      "published_at": "2026-08-27T22:08:25Z",
+      "packages": {
+        "gstreamer1.0-libuvch264src[amd64]": "2026.8.0",
+        "gstreamer1.0-libuvch264src[arm64]": "2026.8.0"
+      }
+    },
+    {
+      "component": "gstreamer-rockchip",
+      "tag": "1.14.4+ceralive.5",
+      "published_at": "2026-09-15T15:19:28Z",
+      "packages": {
+        "gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.5"
+      }
+    },
+    {
+      "component": "librga",
+      "tag": "1.10.1+ceralive.1",
+      "published_at": "2026-09-13T03:29:30Z",
+      "packages": {
+        "librga2-ceralive[arm64]": "1.10.1+ceralive.1"
+      }
+    },
+    {
+      "component": "modem-stack",
+      "tag": "v1.4.0",
+      "published_at": "2026-09-02T03:50:53Z",
+      "packages": {
+        "ceralive-modem-support[all]": "1.4.0",
+        "libmbim-glib4[amd64]": "1.34.0-1~ceralive.3",
+        "libmbim-proxy[amd64]": "1.34.0-1~ceralive.3",
+        "libmbim-utils[amd64]": "1.34.0-1~ceralive.3",
+        "libmm-glib0[amd64]": "1.24.2-2~ceralive.3",
+        "libqmi-glib5[amd64]": "1.38.0-1~ceralive.3",
+        "libqmi-proxy[amd64]": "1.38.0-1~ceralive.3",
+        "libqmi-utils[amd64]": "1.38.0-1~ceralive.3",
+        "libqrtr-glib0[amd64]": "1.4.0-1~ceralive.3",
+        "modemmanager[amd64]": "1.24.2-2~ceralive.3",
+        "libmbim-glib4[arm64]": "1.34.0-1~ceralive.3",
+        "libmbim-proxy[arm64]": "1.34.0-1~ceralive.3",
+        "libmbim-utils[arm64]": "1.34.0-1~ceralive.3",
+        "libmm-glib0[arm64]": "1.24.2-2~ceralive.3",
+        "libqmi-glib5[arm64]": "1.38.0-1~ceralive.3",
+        "libqmi-proxy[arm64]": "1.38.0-1~ceralive.3",
+        "libqmi-utils[arm64]": "1.38.0-1~ceralive.3",
+        "libqrtr-glib0[arm64]": "1.4.0-1~ceralive.3",
+        "modemmanager[arm64]": "1.24.2-2~ceralive.3"
+      }
+    },
+    {
+      "component": "srt",
+      "tag": "srt-v1.5.6+ceralive.1",
+      "published_at": "2026-07-21T22:29:30Z",
+      "packages": {
+        "libsrt1.5-ceralive[amd64]": "1.5.6+ceralive.1",
+        "libsrt1.5-ceralive[arm64]": "1.5.6+ceralive.1"
+      }
+    },
+    {
+      "component": "srtla-send-rs",
+      "tag": "v3.3.0",
+      "published_at": "2026-08-21T03:40:10Z",
+      "packages": {
+        "srtla-send-rs[amd64]": "3.3.0",
+        "srtla-send-rs[arm64]": "3.3.0"
+      }
+    }
+  ]
+}
