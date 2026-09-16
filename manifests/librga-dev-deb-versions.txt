@@ -1,0 +1,6 @@
+# Paired platform build-dependency coordinate; NOT an installed-image package.
+# Same package/filename/sha256/url format as rk3588-userspace-deb-versions.txt.
+# Checked alongside the runtime by tests/mpp-dev-runtime-contract.test.sh;
+# deliberately not consumed by fetch-debs.sh or declared by a device family.
+# librga-ceralive-dev librga-ceralive-dev_1.10.1+ceralive.1_arm64.deb b0eba393b056b68f6bca346c4d6e18edcd91cd44066e5a69630435752bed6e11 https://github.com/CERALIVE/librga/releases/download/1.10.1%2Bceralive.1/librga-ceralive-dev_1.10.1%2Bceralive.1_arm64.deb
+librga-ceralive-dev librga-ceralive-dev_1.10.5+ceralive.1_arm64.deb 8dd35334ed1022ff8e64a86b3ac426abb847bf36f3ccff2746a658ccc0d8577a https://github.com/CERALIVE/librga/releases/download/1.10.5%2Bceralive.1/librga-ceralive-dev_1.10.5%2Bceralive.1_arm64.deb

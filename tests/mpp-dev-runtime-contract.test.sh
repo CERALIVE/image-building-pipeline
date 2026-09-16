@@ -207,11 +207,30 @@ check 1 "$(grep -cE '^librga2-ceralive[[:space:]]' "${PINS}" || true)" \
   "the RGA runtime has exactly one active fork pin"
 check 0 "$(grep -cE '^librga2[[:space:]]' "${PINS}" || true)" \
   "the Radxa RGA runtime is not an active pin"
-if awk '/^librga2-ceralive[[:space:]]/ { if (previous !~ /^# librga2[[:space:]]/) exit 1; found=1 } { previous=$0 } END { if (!found) exit 1 }' "${PINS}"; then
-  ok "the commented Radxa rollback row is directly above the fork pin"
+if awk '
+  /^librga2-ceralive[[:space:]]/ {
+    if (older !~ /^# librga2[[:space:]]+librga2_2[.]2[.]0-1_arm64[.]deb / ||
+        previous !~ /^# librga2-ceralive[[:space:]]+librga2-ceralive_1[.]10[.]1[+]ceralive[.]1_arm64[.]deb /) exit 1
+    found=1
+  }
+  { older=previous; previous=$0 }
+  END { if (!found) exit 1 }
+' "${PINS}"; then
+  ok "the commented Radxa and R0 rollback rows directly precede the R1 pin"
 else
-  bad "the R0 pin must retain its adjacent Radxa rollback row"
+  bad "the R1 pin must retain both adjacent runtime rollback rows"
 fi
+
+# Independent release expectations reject a plausible but wrong archive digest.
+check 'librga2-ceralive_1.10.5+ceralive.1_arm64.deb 5f8ea1f259b95d5bf6fbe68edf03bf08820ab7bc8d4d17bfc1fc4a00344c7bb3 https://github.com/CERALIVE/librga/releases/download/1.10.5%2Bceralive.1/librga2-ceralive_1.10.5%2Bceralive.1_arm64.deb' \
+  "$(awk '$1 == "librga2-ceralive" { print $2, $3, $4 }' "${PINS}")" \
+  "the runtime pin selects the independently verified published R1 archive"
+DEV_PINS="${PIPELINE_DIR}/manifests/librga-dev-deb-versions.txt"
+check 'librga-ceralive-dev librga-ceralive-dev_1.10.5+ceralive.1_arm64.deb 8dd35334ed1022ff8e64a86b3ac426abb847bf36f3ccff2746a658ccc0d8577a https://github.com/CERALIVE/librga/releases/download/1.10.5%2Bceralive.1/librga-ceralive-dev_1.10.5%2Bceralive.1_arm64.deb' \
+  "$(awk 'NF && $1 !~ /^#/ { print $0 }' "${DEV_PINS}")" \
+  "the development pin selects the matching published R1 archive"
+check 0 "$(grep -cE '^[[:space:]]*-[[:space:]]*librga-ceralive-dev[[:space:]]*$' "${FAMILY}" || true)" \
+  "the paired development pin does not add headers to the device image"
 check 1 "$(grep -cE '^[[:space:]]*-[[:space:]]*librga2-ceralive[[:space:]]*$' "${FAMILY}" || true)" \
   "the family declares the fork runtime"
 check 0 "$(grep -cE '^[[:space:]]*-[[:space:]]*librga2[[:space:]]*$' "${FAMILY}" || true)" \
