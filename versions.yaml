@@ -120,9 +120,9 @@ ceralive-platform:
   kind: first-party
   pin: latest
 
-gstlibuvch264src:
-  path: gstlibuvch264src
-  repo: https://github.com/CERALIVE/gstlibuvch264src
+gstlibuvcsrc:
+  path: gstlibuvcsrc
+  repo: https://github.com/CERALIVE/gstlibuvcsrc
   kind: first-party
   pin: v2026.8.0
 

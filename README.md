@@ -1,5 +1,9 @@
 # CeraLive Image Building Pipeline
 
+The [UVC package migration](docs/uvc-package-migration.md) is [PARTIAL]: canonical
+producer and package-name classification are prepared; the exact fetch pin waits
+for a published `gstreamer1.0-libuvcsrc` package. No speculative version is used.
+
 A build pipeline for creating ready-to-use images for ARM-based streaming devices,
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future
 support for Intel N100/N200 and AMD platforms.

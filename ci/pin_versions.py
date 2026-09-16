@@ -15,7 +15,7 @@ class PinError(ValueError):
 APP_COMPONENTS: Final = {
     "libsrt1.5-ceralive": "srt", "cerastream": "cerastream",
     "ceralive-device": "CeraUI", "srtla-send-rs": "srtla-send-rs",
-    "gstreamer1.0-libuvch264src": "gstlibuvch264src",
+    "gstreamer1.0-libuvch264src": "gstlibuvcsrc",
     "ceralive-modem-support": "modem-stack",
     "modemmanager": "modem-stack", "libmm-glib0": "modem-stack",
     "libmbim-glib4": "modem-stack", "libmbim-proxy": "modem-stack",

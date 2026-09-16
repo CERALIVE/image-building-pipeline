@@ -100,7 +100,7 @@ grep -Eq 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"${fn_body}" \
 # Every first-party package must be refused by name.
 never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
 [[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from the postinst library"
-for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive gstreamer1.0-libuvch264src modemmanager; do
+for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive gstreamer1.0-libuvcsrc gstreamer1.0-libuvch264src modemmanager; do
   [[ " ${never} " == *" ${pkg} "* ]] \
     || fail "CERALIVE_NEVER_FREEZE_PKGS does not protect '${pkg}' — a first-party package could be frozen and would stop being apt-updatable"
 done

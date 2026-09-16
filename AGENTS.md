@@ -1,5 +1,10 @@
 # image-building-pipeline
 
+**UVC rename [PARTIAL]:** `gstlibuvcsrc` is the canonical producer. See
+[`docs/uvc-package-migration.md`](docs/uvc-package-migration.md) for the exact-name
+contracts and publication-gated pin/fetch switch. Do not claim a new-name package
+is installed while the active pin still names the published old package.
+
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
@@ -1363,7 +1368,7 @@ state** under the staging dir (the host apt config is never touched).
   unaffected. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
-  `gstlibuvch264src → gstreamer1.0-libuvch264src`.
+`gstlibuvcsrc → gstreamer1.0-libuvcsrc` (current published input still uses the compatibility package name).
 
 **Retroactive documentation correction (2026-08-29).** PR #125 changed the
 installed first-party `cerastream` package pin from `2026.8.0` to `2026.8.1` in
@@ -1376,7 +1381,7 @@ same-PR requirement).
 - **`srt` provides the device SRT runtime.** Its `libsrt1.5-ceralive` package
   replaces Debian's GnuTLS/OpenSSL variants, so GStreamer and cerastream resolve
   one forked `libsrt.so.1.5` implementation. The
-  `gstlibuvch264src` stays out of `REPOS`, but its Debian binary
+`gstlibuvcsrc` stays out of `REPOS`, but its Debian binary
   `gstreamer1.0-libuvch264src` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
   plugins, including the explicit `gstreamer1.0-alsa` ALSA source plugin (RØDE/ALSA

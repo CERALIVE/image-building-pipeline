@@ -21,7 +21,7 @@
       }
     },
     {
-      "component": "gstlibuvch264src",
+      "component": "gstlibuvcsrc",
       "tag": "v2026.8.0",
       "published_at": "2026-08-27T22:08:25Z",
       "packages": {
