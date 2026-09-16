@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-16T14:49:29.051695+00:00",
+  "checked_at": "2026-09-16T22:40:39.590614+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -39,10 +39,10 @@
     },
     {
       "component": "librga",
-      "tag": "1.10.1+ceralive.1",
-      "published_at": "2026-09-13T03:29:30Z",
+      "tag": "1.10.5+ceralive.1",
+      "published_at": "2026-09-16T22:02:05Z",
       "packages": {
-        "librga2-ceralive[arm64]": "1.10.1+ceralive.1"
+        "librga2-ceralive[arm64]": "1.10.5+ceralive.1"
       }
     },
     {

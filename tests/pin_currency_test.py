@@ -31,6 +31,7 @@ class PinCurrencyTest(unittest.TestCase):
         for component, tag, packages in (
             ("cerastream", "v2026.9.3", {"cerastream[amd64]": "2026.9.3", "cerastream[arm64]": "2026.9.3"}),
             ("gstreamer-rockchip", "1.14.4+ceralive.5", {"gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.5"}),
+            ("librga", "1.10.1+ceralive.1", {"librga2-ceralive[arm64]": "1.10.1+ceralive.1"}),
         ):
             release = next(row for row in self.data["releases"] if row["component"] == component)
             release.update(tag=tag, packages=packages)
@@ -40,6 +41,12 @@ class PinCurrencyTest(unittest.TestCase):
                "9b991e6320f13c4a281308c49fe9df7518e837e38a3e2db5e6ade4ad6f805e1a  "
                f"https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.5/{plugin}_1.14.4%2Bceralive.5_arm64.deb")
         pins.write_text("\n".join(row if line.startswith(plugin + " ") else line
+                                  for line in pins.read_text().splitlines()) + "\n")
+        rga = "librga2-ceralive"
+        row = (f"{rga}  {rga}_1.10.1+ceralive.1_arm64.deb  "
+               "7c59bade43e2f8bb4c31e0ae965bee480128aa128528fdc88e8bc082e98ec498  "
+               f"https://github.com/CERALIVE/librga/releases/download/1.10.1%2Bceralive.1/{rga}_1.10.1%2Bceralive.1_arm64.deb")
+        pins.write_text("\n".join(row if line.startswith(rga + " ") else line
                                   for line in pins.read_text().splitlines()) + "\n")
         self.save_catalog()
         self.overrides = self.root / "overrides.json"

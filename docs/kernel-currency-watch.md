@@ -45,13 +45,14 @@ assertion, supplied by the two live systems above.
 The release assets' downloaded SHA-256 values matched the committed pins exactly.
 The GStreamer plugin pin now names the first-party
 `gstreamer1.0-rockchip-ceralive` release asset. The RGA runtime now selects
-`librga2-ceralive` R0 `1.10.1+ceralive.1`, after its separate both-board gate;
-only the MPP library bytes remain unchanged. R0 preserves SONAME `librga.so.2`
+`librga2-ceralive` R1 `1.10.5+ceralive.1`, following the separate R0 swap;
+only the MPP library bytes remain unchanged. R1 preserves SONAME `librga.so.2`
 and provides `librga2 (= 2.2.0)`, so the plugin's existing dependency still
 resolves. All three remain staged by `fetch_rk3588_userspace`, not selected
 from Debian's index. The earlier hardware evidence is not qualification of a
-new image. See [the R0 swap record](librga-r0-swap.md) for both release assets
-and their digests. R1 is unreleased and remains a separate, hardware-gated PR.
+new image. See [the R1 pin record](librga-r1-pin.md) for both published artifacts,
+their independently computed digests, serving proof and loader-activation caveat.
+The [R0 swap record](librga-r0-swap.md) remains historical build evidence.
 
 ## Historical vendor-lock evidence (superseded)
 

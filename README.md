@@ -1556,16 +1556,18 @@ verified by SHA-256, in
 [`manifests/rk3588-userspace-deb-versions.txt`](manifests/rk3588-userspace-deb-versions.txt)
 (fetched by `fetch_rk3588_userspace`) — no live third-party apt source is added.
 
-The RGA pin selects CeraLive **R0 `1.10.1+ceralive.1`**, a compatibility rebuild
-of Radxa's embedded 1.10.1 API, not a feature upgrade. The runtime provides the
-old `librga2 (= 2.2.0)` dependency and retains SONAME `librga.so.2`. The Radxa
-row is commented directly above it for rollback. This remains a platform-layer
+The RGA pin selects released CeraLive **R1 `1.10.5+ceralive.1`**, including the
+YUV-destination blend-validation fix needed by composition. The runtime provides
+the old `librga2 (= 2.2.0)` dependency and retains SONAME `librga.so.2`. Both
+Radxa and R0 rows are commented above it for rollback. This remains a platform-layer
 URL+SHA swap, never a `REPOS` or `FIRST_PARTY_APT_PKGS` addition. The matching
 `librga-ceralive-dev` artifact remains a separately distributed build dependency,
 indexed, retained and protected alongside the runtime; it is not installed in
-the device image. Exact artifacts and validation scope:
-[`R0 librga swap`](docs/librga-r0-swap.md). **R1 requires a separate later PR**
-after its release and hardware gate; this pin claims no fresh-image board result.
+the device image. Its matching URL+SHA coordinate is pinned separately in
+`manifests/librga-dev-deb-versions.txt` and checked alongside the runtime.
+Exact artifacts, stable-index serving proof and the missing-`ldconfig` trigger
+caveat: [`R1 librga pin`](docs/librga-r1-pin.md). This pin claims no image build,
+fresh-image board result, normal-loader activation or working PiP.
 
 **`libmali` is RETIRED, with the vendor kernel track.** No variant declares it
 and its URL/SHA pin is deleted (recoverable at the `vendor-kernel-final` tag).
