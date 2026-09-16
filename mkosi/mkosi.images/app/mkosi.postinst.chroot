@@ -49,7 +49,7 @@ FIRST_PARTY_DIR="/opt/ceralive-staging"
 # apt-get for both — see header. rauc-hawkbit-updater is NOT a first-party app: it
 # is the runtime layer's OTA backport (setup_hawkbit_updater), so it is skipped here
 # if it happens to share the staging dir.
-SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvch264src srtla-send-rs"
+SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvcsrc srtla-send-rs"
 APPFS_APP_PKGS="ceralive-device"
 # runtime-abi class: shared runtime libraries + first-party daemons installed into
 # the rootfs, atomic with the RAUC slot (no sysext/appfs OTA split). libsrt is the

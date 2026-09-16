@@ -71,7 +71,7 @@ stage_partition() {
   # companion (modem-stack v1.4.0). The fetcher stages all 15 into debs/; a name missing here fails the build as
   # "unclassified staged package" on a real (non-DRY_RUN) build. Guarded by
   # tests/firstparty-classification.test.sh.
-  local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvcsrc gstreamer1.0-libuvch264src ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 ceralive-modem-support "
+  local firstparty_names=" libsrt1.5-ceralive cerastream gstreamer1.0-libuvcsrc ceralive-device srtla-send-rs modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0 ceralive-modem-support "
   local deb pkg
   shopt -s nullglob
   for deb in "${staging}/debs"/*.deb; do

@@ -1037,7 +1037,7 @@ PINS
   [[ "$output" == *"DRY-RUN would run:"* ]]
   [[ "$output" == *"download"* ]]
   [[ "$output" == *"cerastream"* ]]
-  [[ "$output" == *"gstreamer1.0-libuvch264src"* ]]
+  [[ "$output" == *"gstreamer1.0-libuvcsrc=2026.9.0"* ]]
   [[ "$output" == *"ceralive-device"* ]]
   [[ "$output" == *"srtla-send-rs"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
@@ -2141,7 +2141,7 @@ REPRO
 
   local p
   for p in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive \
-           gstreamer1.0-libuvch264src modemmanager; do
+           gstreamer1.0-libuvcsrc modemmanager; do
     [[ " $never " == *" $p "* ]]
   done
 

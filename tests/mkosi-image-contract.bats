@@ -804,7 +804,7 @@ print('CEILING-POLICY-OK')
 }
 
 @test "app-layer: first-party install is closed over staged packages and runtime deps" {
-  run grep -F 'gstreamer1.0-libuvch264src' "$FETCH_DEBS"
+  run grep -F 'gstreamer1.0-libuvcsrc' "$FETCH_DEBS"
   [ "$status" -eq 0 ]
 
   run grep -F 'dpkg -i "${debs[@]}"' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"

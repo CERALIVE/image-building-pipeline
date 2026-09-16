@@ -1,9 +1,10 @@
 # image-building-pipeline
 
-**UVC rename [PARTIAL]:** `gstlibuvcsrc` is the canonical producer. See
-[`docs/uvc-package-migration.md`](docs/uvc-package-migration.md) for the exact-name
-contracts and publication-gated pin/fetch switch. Do not claim a new-name package
-is installed while the active pin still names the published old package.
+**UVC package migration [EXISTS]:** the pipeline pins the released and APT-served
+`gstreamer1.0-libuvcsrc=2026.9.0` from `gstlibuvcsrc`. Fetch, app-layer install,
+partition classification, never-freeze policy and release currency use only the
+canonical package name. No new image or board installation is implied. Evidence:
+[`docs/uvc-package-migration.md`](docs/uvc-package-migration.md).
 
 ## ROLE IN THE GROUP
 
@@ -1333,7 +1334,7 @@ state** under the staging dir (the host apt config is never touched).
 
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
   `cerastream ceralive-device srtla-send-rs`, the required capture plugin
-  `gstreamer1.0-libuvch264src`, PLUS the **ModemManager 1.24 closure** — the nine
+  `gstreamer1.0-libuvcsrc`, PLUS the **ModemManager 1.24 closure** — the nine
   ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
@@ -1368,7 +1369,7 @@ state** under the staging dir (the host apt config is never touched).
   unaffected. These are Debian **Package** names — a
   deliberate mapping off `REPOS` (the directory/pin names), notably
   `srt → libsrt1.5-ceralive`, `CeraUI → ceralive-device`, and
-`gstlibuvcsrc → gstreamer1.0-libuvcsrc` (current published input still uses the compatibility package name).
+  `gstlibuvcsrc → gstreamer1.0-libuvcsrc`.
 
 **Retroactive documentation correction (2026-08-29).** PR #125 changed the
 installed first-party `cerastream` package pin from `2026.8.0` to `2026.8.1` in
@@ -1381,8 +1382,8 @@ same-PR requirement).
 - **`srt` provides the device SRT runtime.** Its `libsrt1.5-ceralive` package
   replaces Debian's GnuTLS/OpenSSL variants, so GStreamer and cerastream resolve
   one forked `libsrt.so.1.5` implementation. The
-`gstlibuvcsrc` stays out of `REPOS`, but its Debian binary
-  `gstreamer1.0-libuvch264src` is staged so the app layer can install all
+  `gstlibuvcsrc` stays out of `REPOS`, but its Debian binary
+  `gstreamer1.0-libuvcsrc` is staged so the app layer can install all
   first-party packages from local `.deb`s with no downloads; `libgstreamer*`
   plugins, including the explicit `gstreamer1.0-alsa` ALSA source plugin (RØDE/ALSA
   capture + always-on audio meter) and `gstreamer1.0-nice` (libnice — the `nicesrc`
@@ -4550,7 +4551,7 @@ automatically. Those four names are already on the `orchestrate.sh` `env_names` 
 would be silently vacuous.
 
 **First-party CeraLive packages are NEVER held** — `cerastream`, `ceralive-device`,
-`srtla-send-rs`, `libsrt1.5-ceralive`, `gstreamer1.0-libuvch264src`,
+`srtla-send-rs`, `libsrt1.5-ceralive`, `gstreamer1.0-libuvcsrc`,
 `rauc-hawkbit-updater` and the nine ModemManager closure packages must stay
 apt-updatable, because that is the update path CeraUI's `system.startUpdate()`
 drives. `CERALIVE_NEVER_FREEZE_PKGS` refuses them **by name before any hold runs**
