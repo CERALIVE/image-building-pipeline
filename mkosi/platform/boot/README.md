@@ -58,9 +58,10 @@ device, so `ceralive-boot-state` writes it defensively:
   and moved over the destination on the same filesystem. A tmpfs staging file is not
   used because cross-filesystem `mv` degrades into copy-then-unlink and is not atomic.
 - **CRC guard** — `BOOT_CRC` is the POSIX `cksum` of the three data lines. On read,
-  a truncated / empty / missing / byte-flipped (bad-CRC) file is detected and the
-  helper falls back to the **safe defaults** (`BOOT_ORDER=A B`, both budgets full)
-  **and rewrites a clean file**. It never aborts the boot path.
+  a present file that is truncated, empty, unreadable, or byte-flipped (bad-CRC) is
+  refused loudly. The helper never substitutes a plausible recovery state. Only an
+  accessible absent file uses fresh-device defaults (`BOOT_ORDER=A B`, both budgets
+  full).
 - **U-Boot interop** — the in-U-Boot selector rewrites `boot_state.txt` via
   `env export`, which cannot emit a checksum. A well-formed file **without** a
   `BOOT_CRC` line is therefore trusted (not reset) so the bootcount the bootloader
@@ -71,8 +72,8 @@ device, so `ceralive-boot-state` writes it defensively:
 
 1. U-Boot runs `boot.scr` (compiled from `boot.scr.cmd`).
 2. It imports `cera_board.env` (console, fdtfile) and `boot_state.txt`.
-3. It rejects missing, unknown, duplicate, non-numeric, or out-of-budget state and
-   persists factory-safe `A B` / `3,3` defaults before slot resolution.
+3. It rejects unreadable, unknown, duplicate, non-numeric, or out-of-budget state;
+   only an accessible missing file receives factory-safe `A B` / `3,3` defaults.
 4. It picks the first slot in `BOOT_ORDER` with `*_LEFT > 0` (the primary),
    **decrements** that slot's counter, and persists the file (`fatwrite`).
 5. It boots the kernel/DTB/initrd from that slot's `/boot` with
@@ -218,10 +219,11 @@ RAUC backend roundtrip including fail-closed `get-current`; `mark-good` reset;
 single-slot has no phantom B; board
 specifics differ per board (not hardcoded); `system.conf` shape; that
 `boot.scr.cmd` matches the tested engine (decrement + fatwrite + manifest
-console/fdtfile + PARTLABEL slot select); the actual script is also executed through
-U-Boot command stubs against missing and malformed imported state. Corruption resilience —
-truncated / empty / missing / bad-CRC files yield the safe defaults + a clean
-rewrite (never a crash), while a well-formed no-CRC file is trusted. It also rejects
+  console/fdtfile + PARTLABEL slot select); the actual script is also executed through
+  U-Boot command stubs against missing and malformed imported state. Corruption resilience —
+  accessible missing files use fresh defaults, while unreadable, truncated, empty,
+  bad-CRC, duplicate and out-of-budget files fail loudly rather than fabricating state;
+  a well-formed no-CRC file is trusted. It also rejects
 duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,
 and proves userspace state replacement stays on one filesystem.
 
