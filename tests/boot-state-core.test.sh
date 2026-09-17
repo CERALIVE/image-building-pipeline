@@ -43,6 +43,14 @@ rk()  { CERALIVE_BOOT_STATE_FILE="${WORK}/rk/boot_state.txt" CERALIVE_BOOT_ATTEM
 x86() { CERALIVE_GRUBENV="${WORK}/x86/grubenv" CERALIVE_BOOT_ATTEMPTS=3 \
           GRUB_EDITENV=/nonexistent-grub-editenv bash "${X86_HELPER}" "$@"; }
 reset_backends() { rm -rf "${WORK}/rk" "${WORK}/x86"; mkdir -p "${WORK}/rk" "${WORK}/x86"; }
+run_nobody() {
+  local output="$1"; shift
+  set +e
+  sudo -n -u nobody "$@" 2>&1 | tee "${output}" >/dev/null
+  local rc="${PIPESTATUS[0]}"
+  set -e
+  return "${rc}"
+}
 
 # ---------------------------------------------------------------------------
 # Parity — one definition of every state verb, in the core
@@ -209,19 +217,92 @@ done
 ok "counters: 3->2->1->0 exhausts the budget and mark-good restores it from zero"
 
 # An out-of-budget counter is stale/corrupt state. The RK backend's CRC-guarded
-# reader must heal it back to the safe defaults rather than honour it.
+# reader must refuse it rather than honouring it or fabricating defaults.
 reset_backends
-rk init >/dev/null
 printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=99\nBOOT_B_LEFT=3\n' >"${WORK}/rk/boot_state.txt"
-[[ "$(rk get-left A)" == "3" ]] \
-  || fail "an above-budget counter was honoured instead of healed (got $(rk get-left A))"
+if rk get-left A >"${WORK}/stale.out" 2>&1; then
+  fail "an above-budget counter was honoured instead of refused"
+fi
+grep -qi 'corrupt\|budget' "${WORK}/stale.out" || fail "stale budget was not named"
 printf 'BOOT_ORDER=A A\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\n' >"${WORK}/rk/boot_state.txt"
-[[ "$(rk get-order)" == "A B" ]] \
-  || fail "a duplicated slot in BOOT_ORDER was honoured instead of healed"
+if rk get-order >"${WORK}/duplicate.out" 2>&1; then
+  fail "a duplicated slot in BOOT_ORDER was honoured instead of refused"
+fi
+grep -qi 'corrupt\|duplicate' "${WORK}/duplicate.out" || fail "duplicate state was not named"
 printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=x\nBOOT_B_LEFT=3\n' >"${WORK}/rk/boot_state.txt"
-[[ "$(rk get-left A)" == "3" ]] \
-  || fail "a non-numeric counter was honoured instead of healed"
-ok "counters: an above-budget, duplicated or non-numeric state heals to the safe defaults"
+if rk get-left A >"${WORK}/nonnumeric.out" 2>&1; then
+  fail "a non-numeric counter was honoured instead of refused"
+fi
+grep -qi 'corrupt\|invalid' "${WORK}/nonnumeric.out" || fail "non-numeric state was not named"
+ok "counters: an above-budget, duplicated or non-numeric state is refused loudly"
+
+# A readable state file is authoritative even when its contents are damaged. A
+# non-root reader must not turn an unreadable, truncated, or bad-CRC file into a
+# plausible full-budget answer.
+assert_rk_refuses_unreadable_state() {
+  local state_dir="${WORK}/rk-unreadable"
+  local state_file="${state_dir}/boot_state.txt"
+  mkdir -p "${state_dir}"
+  printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\n' >"${state_file}"
+  chmod 000 "${state_file}"
+  chmod 700 "${state_dir}"
+  if run_nobody "${WORK}/unreadable.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+    fail "RK dump accepted a mode-000 state file as defaults"
+  fi
+  grep -qi 'unreadable\|permission' "${WORK}/unreadable.out" \
+    || fail "unreadable RK state was not named: $(cat "${WORK}/unreadable.out")"
+}
+
+assert_rk_refuses_corrupt_state() {
+  local state_dir="${WORK}/rk-corrupt"
+  local state_file="${state_dir}/boot_state.txt"
+  mkdir -p "${state_dir}"
+  printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\n' >"${state_file}"
+  if run_nobody "${WORK}/truncated.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+    fail "RK dump accepted a truncated state file as defaults"
+  fi
+  grep -qi 'corrupt\|truncat\|invalid' "${WORK}/truncated.out" \
+    || fail "truncated RK state was not named: $(cat "${WORK}/truncated.out")"
+
+  printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\nBOOT_CRC=1\n' >"${state_file}"
+  if run_nobody "${WORK}/bad-crc.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+    fail "RK dump accepted a bad-CRC state file as defaults"
+  fi
+  grep -qi 'crc\|corrupt\|invalid' "${WORK}/bad-crc.out" \
+    || fail "bad-CRC RK state was not named: $(cat "${WORK}/bad-crc.out")"
+}
+
+reset_backends
+rm -f "${WORK}/rk/boot_state.txt"
+[[ "$(rk get-order)" == "A B" ]] || fail "an absent RK state file did not use the fresh-device defaults"
+ok "defaults: an accessible absent state file uses the fresh-device defaults"
+
+assert_rk_refuses_unreadable_state
+assert_rk_refuses_corrupt_state
+ok "corruption: unreadable and truncated state are refused instead of fabricated"
+
+x86 init >/dev/null
+x86_state="${WORK}/x86/grubenv"
+chmod 000 "${x86_state}"
+chmod 700 "${WORK}/x86"
+if run_nobody "${WORK}/x86-unreadable.out" env CERALIVE_GRUBENV="${x86_state}" \
+    CERALIVE_BOOT_ATTEMPTS=3 GRUB_EDITENV=/nonexistent-grub-editenv bash "${X86_HELPER}" dump; then
+  fail "x86 dump accepted an unreadable grubenv as defaults"
+fi
+grep -qi 'unreadable\|permission\|inaccessible' "${WORK}/x86-unreadable.out" \
+  || fail "unreadable x86 grubenv was not named"
+chmod 755 "${WORK}/x86"
+chmod 644 "${x86_state}"
+printf 'x' >"${x86_state}"
+if x86 dump >"${WORK}/x86-truncated.out" 2>&1; then
+  fail "x86 dump accepted a truncated grubenv as defaults"
+fi
+grep -qi 'truncated\|invalid size' "${WORK}/x86-truncated.out" \
+  || fail "truncated x86 grubenv was not named"
+ok "corruption: x86 unreadable and truncated grubenv are refused"
 
 # ---------------------------------------------------------------------------
 # Staging — the core must land in BOTH images beside its adapter

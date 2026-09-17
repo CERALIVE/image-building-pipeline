@@ -209,13 +209,12 @@ assert_contains "accepts volatile one-boot arguments" "${BOOT_DIR}/boot.scr.cmd"
 assert_contains "clears volatile arguments before boot" "${BOOT_DIR}/boot.scr.cmd" 'setenv cera_transient_bootargs'
 
 echo
-echo "### 8. Corruption resilience — atomic write + CRC validation + safe defaults"
+echo "### 8. Corruption resilience — atomic write + CRC validation + fail-closed reads"
 # A power-loss during the FAT rewrite can leave boot_state.txt truncated, empty or
-# byte-flipped. The engine MUST never crash on a corrupt file: it validates an
-# embedded CRC line and, on ANY failure, returns the safe defaults (A B, full budget)
-# AND rewrites a clean, CRC-armoured file. A file written by the U-Boot selector has
-# NO CRC line (its `env export` cannot emit one) — that is NOT corruption, so a
-# well-formed no-CRC file is trusted (else every real boot's bootcount would be wiped).
+# byte-flipped. A present file MUST fail loudly on any validation error rather than
+# fabricating a recovery state. A file written by the U-Boot selector has NO CRC line
+# (its `env export` cannot emit one) — that is NOT corruption, so a well-formed no-CRC
+# file is trusted (else every real boot's bootcount would be wiped).
 
 # 8a. A healthy write embeds a CRC line (the atomic write stages it then mv-s it in).
 bs init >/dev/null
@@ -225,36 +224,23 @@ assert_contains "init writes a BOOT_CRC checksum line" "${STATE}" "BOOT_CRC="
 bs boot-select >/dev/null            # A_LEFT 3 -> 2, rewritten with a fresh CRC
 assert_eq "valid CRC preserved (no false reset)" "2" "$(bs get-left A)"
 
-# 8c. BAD CRC -> safe defaults + clean rewrite (the byte-flip / partial-write case).
+# 8c. BAD CRC -> loud refusal (the byte-flip / partial-write case).
 printf 'BOOT_ORDER=B A\nBOOT_A_LEFT=1\nBOOT_B_LEFT=1\nBOOT_CRC=0\n' >"${STATE}"
-crc_rc=0; order="$(bs get-order)" || crc_rc=$?
-assert_eq "bad-CRC never crashes (exit 0)"         "0"   "${crc_rc}"
-assert_eq "bad-CRC -> BOOT_ORDER safe default A B" "A B" "${order}"
-assert_eq "bad-CRC -> attempts reset to budget"    "3"   "$(bs get-left A)"
-assert_contains "bad-CRC rewrote a clean order"    "${STATE}" "BOOT_ORDER=A B"
+if bs get-order >/dev/null 2>&1; then bad "bad-CRC was accepted"; else ok "bad-CRC is refused"; fi
 
-# 8d. TRUNCATED file (cut off mid-write) -> safe defaults + clean rewrite.
+# 8d. TRUNCATED file (cut off mid-write) -> loud refusal.
 printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=2\nBOOT_B_' >"${STATE}"
-tr_rc=0; order="$(bs get-order)" || tr_rc=$?
-assert_eq "truncated never crashes (exit 0)"       "0"   "${tr_rc}"
-assert_eq "truncated -> BOOT_ORDER safe default"   "A B" "${order}"
-assert_eq "truncated -> attempts reset to budget"  "3"   "$(bs get-left A)"
-assert_contains "truncated rewrote a clean CRC file" "${STATE}" "BOOT_CRC="
+if bs get-order >/dev/null 2>&1; then bad "truncated state was accepted"; else ok "truncated state is refused"; fi
 
-# 8e. EMPTY file (0 bytes) -> safe defaults + clean rewrite.
+# 8e. EMPTY file (0 bytes) -> loud refusal.
 : >"${STATE}"
-empty_rc=0; order="$(bs get-order)" || empty_rc=$?
-assert_eq "empty never crashes (exit 0)"           "0"   "${empty_rc}"
-assert_eq "empty -> BOOT_ORDER safe default"       "A B" "${order}"
-assert_contains "empty rewrote a clean CRC file"   "${STATE}" "BOOT_CRC="
+if bs get-order >/dev/null 2>&1; then bad "empty state was accepted"; else ok "empty state is refused"; fi
 
-# 8f. MISSING file -> safe defaults + a fresh clean file is created.
+# 8f. MISSING file -> safe defaults without fabricating a persistent file.
 rm -f "${STATE}"
-miss_rc=0; order="$(bs get-order)" || miss_rc=$?
-assert_eq "missing never crashes (exit 0)"         "0"   "${miss_rc}"
+order="$(bs get-order)"
 assert_eq "missing -> BOOT_ORDER safe default"     "A B" "${order}"
-if [[ -f "${STATE}" ]]; then ok "missing -> a clean state file was created"; else bad "missing -> no state file created"; fi
-assert_contains "created file carries a CRC line"  "${STATE}" "BOOT_CRC="
+if [[ ! -e "${STATE}" ]]; then ok "missing -> no fabricated state file created"; else bad "missing -> unexpected state file created"; fi
 
 # 8g. LEGACY no-CRC file (the U-Boot selector's env-export write) is TRUSTED, not
 #     reset — otherwise the bootcount the bootloader just decremented would be lost.
@@ -262,10 +248,10 @@ printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=2\nBOOT_B_LEFT=3\n' >"${STATE}"
 assert_eq "legacy no-CRC well-formed file is trusted" "2" "$(bs get-left A)"
 
 printf 'BOOT_ORDER=A A\nBOOT_A_LEFT=2\nBOOT_B_LEFT=3\n' >"${STATE}"
-assert_eq "duplicate BOOT_ORDER heals to unique A B" "A B" "$(bs get-order)"
+if bs get-order >/dev/null 2>&1; then bad "duplicate BOOT_ORDER was accepted"; else ok "duplicate BOOT_ORDER is refused"; fi
 
 printf 'BOOT_ORDER=B A\nBOOT_A_LEFT=3\nBOOT_B_LEFT=999\n' >"${STATE}"
-assert_eq "counter above budget heals to configured attempts" "3" "$(bs get-left B)"
+if bs get-left B >/dev/null 2>&1; then bad "counter above budget was accepted"; else ok "counter above budget is refused"; fi
 
 printf 'BOOT_ORDER=A\nBOOT_A_LEFT=1\nBOOT_B_LEFT=0\n' >"${STATE}"
 bs set-state A bad
