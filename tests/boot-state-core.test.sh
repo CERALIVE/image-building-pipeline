@@ -34,7 +34,16 @@ for f in "${CORE}" "${RK_HELPER}" "${X86_HELPER}"; do
 done
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
+chmod 755 "${WORK}"
+NONROOT_ROOT="$(mktemp -d /tmp/boot-state-adapters.XXXXXX)"
+mkdir -p "${NONROOT_ROOT}/boot" "${NONROOT_ROOT}/x86"
+cp "${RK_HELPER}" "${NONROOT_ROOT}/boot/ceralive-boot-state.sh"
+cp "${X86_HELPER}" "${NONROOT_ROOT}/x86/x86-boot-state.sh"
+cp "${CORE}" "${NONROOT_ROOT}/boot-state-core.sh"
+chmod 755 "${NONROOT_ROOT}" "${NONROOT_ROOT}/boot" "${NONROOT_ROOT}/x86"
+trap 'rm -rf "${WORK}" "${NONROOT_ROOT}"' EXIT
+NONROOT_RK_HELPER="${NONROOT_ROOT}/boot/ceralive-boot-state.sh"
+NONROOT_X86_HELPER="${NONROOT_ROOT}/x86/x86-boot-state.sh"
 
 # Both adapters are driven through the same wrapper so every leg below can be run
 # against either backend without knowing which one it is talking to.
@@ -247,7 +256,7 @@ assert_rk_refuses_unreadable_state() {
   chmod 000 "${state_file}"
   chmod 700 "${state_dir}"
   if run_nobody "${WORK}/unreadable.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
-      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a mode-000 state file as defaults"
   fi
   grep -qi 'unreadable\|permission' "${WORK}/unreadable.out" \
@@ -260,7 +269,7 @@ assert_rk_refuses_corrupt_state() {
   mkdir -p "${state_dir}"
   printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\n' >"${state_file}"
   if run_nobody "${WORK}/truncated.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
-      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a truncated state file as defaults"
   fi
   grep -qi 'corrupt\|truncat\|invalid' "${WORK}/truncated.out" \
@@ -268,7 +277,7 @@ assert_rk_refuses_corrupt_state() {
 
   printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\nBOOT_CRC=1\n' >"${state_file}"
   if run_nobody "${WORK}/bad-crc.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
-      CERALIVE_BOOT_ATTEMPTS=3 bash "${RK_HELPER}" dump; then
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a bad-CRC state file as defaults"
   fi
   grep -qi 'crc\|corrupt\|invalid' "${WORK}/bad-crc.out" \
@@ -289,7 +298,7 @@ x86_state="${WORK}/x86/grubenv"
 chmod 000 "${x86_state}"
 chmod 700 "${WORK}/x86"
 if run_nobody "${WORK}/x86-unreadable.out" env CERALIVE_GRUBENV="${x86_state}" \
-    CERALIVE_BOOT_ATTEMPTS=3 GRUB_EDITENV=/nonexistent-grub-editenv bash "${X86_HELPER}" dump; then
+    CERALIVE_BOOT_ATTEMPTS=3 GRUB_EDITENV=/nonexistent-grub-editenv bash "${NONROOT_X86_HELPER}" dump; then
   fail "x86 dump accepted an unreadable grubenv as defaults"
 fi
 grep -qi 'unreadable\|permission\|inaccessible' "${WORK}/x86-unreadable.out" \
