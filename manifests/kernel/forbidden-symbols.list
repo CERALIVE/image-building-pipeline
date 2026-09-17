@@ -139,6 +139,12 @@ CONFIG_FAULT_INJECTION
 # the debug fragment leaking into production, not a defect being removed today.
 CONFIG_DEBUG_KMEMLEAK
 CONFIG_LOCALVERSION_AUTO
+# IOMMU attribution instrumentation is restricted to edge-test. DMA-API
+# debugging adds per-map overhead, and kprobes/function tracing add runtime
+# hook and text-instrumentation cost; none belongs in production edge.
+CONFIG_DMA_API_DEBUG
+CONFIG_KPROBES
+CONFIG_FUNCTION_TRACER
 
 # --- Bluetooth: production exclusions --------------------------------------
 # Virtual HCI, selftests/debugfs, Qualcomm SMD, Amlogic/Nokia UART protocols,
