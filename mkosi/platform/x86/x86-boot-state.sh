@@ -154,19 +154,43 @@ grubenv_set() {
 # ---------------------------------------------------------------------------
 load_state() {
   BOOT_ORDER=""; BOOT_A_LEFT=""; BOOT_B_LEFT=""
-  local key val
+  local state_dir listed key val
+  state_dir="$(dirname "${GRUBENV_FILE}")"
+  if [[ ! -e "${GRUBENV_FILE}" && ! -L "${GRUBENV_FILE}" ]]; then
+    [[ -d "${state_dir}" && -x "${state_dir}" ]] \
+      || die "cannot inspect grubenv ${GRUBENV_FILE}: parent directory is inaccessible"
+    BOOT_ORDER="A B"; BOOT_A_LEFT="${BOOT_ATTEMPTS}"; BOOT_B_LEFT="${BOOT_ATTEMPTS}"
+    return 0
+  fi
+  [[ -f "${GRUBENV_FILE}" ]] || die "grubenv ${GRUBENV_FILE} is not a regular file"
+  [[ -r "${GRUBENV_FILE}" ]] || die "grubenv ${GRUBENV_FILE} is unreadable"
+  [[ "$(stat -c '%s' "${GRUBENV_FILE}")" -eq "${GRUBENV_SIZE}" ]] \
+    || die "grubenv ${GRUBENV_FILE} is truncated or has invalid size"
+  if ! listed="$(grubenv_list)"; then
+    die "cannot read grubenv ${GRUBENV_FILE}"
+  fi
   while IFS='=' read -r key val; do
     val="${val%$'\r'}"
     case "${key}" in
-      BOOT_ORDER)  BOOT_ORDER="${val}" ;;
+      BOOT_ORDER) BOOT_ORDER="${val}" ;;
       BOOT_A_LEFT) BOOT_A_LEFT="${val}" ;;
       BOOT_B_LEFT) BOOT_B_LEFT="${val}" ;;
     esac
-  done < <(grubenv_list)
-  # Defaults make a missing/partial grubenv safe: both slots full budget, A leads.
-  [[ -n "${BOOT_ORDER}"  ]] || BOOT_ORDER="A B"
-  [[ -n "${BOOT_A_LEFT}" ]] || BOOT_A_LEFT="${BOOT_ATTEMPTS}"
-  [[ -n "${BOOT_B_LEFT}" ]] || BOOT_B_LEFT="${BOOT_ATTEMPTS}"
+  done <<<"${listed}"
+  [[ -n "${BOOT_ORDER}" && -n "${BOOT_A_LEFT}" && -n "${BOOT_B_LEFT}" ]] \
+    || die "grubenv ${GRUBENV_FILE} is corrupt: incomplete boot state"
+  [[ "${BOOT_A_LEFT}" =~ ^[0-9]+$ && "${BOOT_B_LEFT}" =~ ^[0-9]+$ ]] \
+    || die "grubenv ${GRUBENV_FILE} is corrupt: non-numeric attempt budget"
+  (( BOOT_A_LEFT <= BOOT_ATTEMPTS && BOOT_B_LEFT <= BOOT_ATTEMPTS )) \
+    || die "grubenv ${GRUBENV_FILE} is corrupt: attempt budget exceeds ${BOOT_ATTEMPTS}"
+  local s seen_a=0 seen_b=0
+  for s in ${BOOT_ORDER}; do
+    is_valid_slot "${s}" || die "grubenv ${GRUBENV_FILE} is corrupt: invalid slot order"
+    case "${s}" in
+      A) (( seen_a == 0 )) || die "grubenv ${GRUBENV_FILE} is corrupt: duplicate slot A"; seen_a=1 ;;
+      B) (( seen_b == 0 )) || die "grubenv ${GRUBENV_FILE} is corrupt: duplicate slot B"; seen_b=1 ;;
+    esac
+  done
 }
 
 store_state() {

@@ -31,13 +31,11 @@
 # worst outcome). Writes are made durable beside the destination and replaced with
 # a same-filesystem `mv -f`; cross-filesystem `mv` is copy-then-unlink, not atomic.
 # The BOOT_CRC line lets the reader detect a truncated / empty / byte-flipped file
-# even when that write is interrupted by power loss. On ANY validation failure the
-# reader falls back to
-# the safe defaults (BOOT_ORDER="A B", both budgets full) AND rewrites a clean file
-# — it NEVER aborts the boot path. A file WITHOUT a BOOT_CRC line is NOT treated as
-# corrupt: the in-U-Boot selector rewrites boot_state.txt via `env export`, which
-# cannot emit a checksum, so a well-formed no-CRC file is trusted (otherwise the
-# bootcount the bootloader just decremented would be wiped on the next userspace read).
+# even when that write is interrupted by power loss. A present file that cannot be
+# read or validated is a hard error: fabricated defaults are unsafe for dump and
+# recovery decisions. A file WITHOUT a BOOT_CRC line is trusted only when its fields
+# are well-formed: the in-U-Boot selector rewrites boot_state.txt via `env export`,
+# which cannot emit a checksum.
 #
 # BOOTLOADER ALGORITHM (the `boot-select` subcommand) is a faithful userspace twin
 # of the on-device `boot.scr` selector: pick the first slot in BOOT_ORDER whose
@@ -118,38 +116,33 @@ state_fields_valid() {
 
 load_state() {
   BOOT_ORDER=""; BOOT_A_LEFT=""; BOOT_B_LEFT=""
-  local stored_crc="" corrupt=0
-  if [[ ! -f "${STATE_FILE}" ]]; then
-    corrupt=1
-  elif [[ ! -s "${STATE_FILE}" ]]; then
-    corrupt=1
-  else
-    local key val
-    while IFS='=' read -r key val; do
-      val="${val%$'\r'}"              # FAT/U-Boot tooling may write CRLF
-      case "${key}" in
-        BOOT_ORDER)  BOOT_ORDER="${val}" ;;
-        BOOT_A_LEFT) BOOT_A_LEFT="${val}" ;;
-        BOOT_B_LEFT) BOOT_B_LEFT="${val}" ;;
-        BOOT_CRC)    stored_crc="${val}" ;;
-      esac
-    done <"${STATE_FILE}"
-    # Malformed fields are always corruption. A present CRC must match; a MISSING CRC
-    # is trusted (the U-Boot selector's env-export write carries none) — see the
-    # CORRUPTION SAFETY note in the header for why this must not reset the bootcount.
-    if ! state_fields_valid; then
-      corrupt=1
-    elif [[ -n "${stored_crc}" && "${stored_crc}" != "$(crc_of_payload)" ]]; then
-      corrupt=1
-    fi
-  fi
-
-  if (( corrupt == 1 )); then
+  local stored_crc="" state_dir key val
+  state_dir="$(dirname "${STATE_FILE}")"
+  if [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]]; then
+    [[ -d "${state_dir}" && -x "${state_dir}" ]] \
+      || die "cannot inspect state file ${STATE_FILE}: parent directory is inaccessible"
     BOOT_ORDER="A B"
     BOOT_A_LEFT="${BOOT_ATTEMPTS}"
     BOOT_B_LEFT="${BOOT_ATTEMPTS}"
-    ( store_state ) >/dev/null 2>&1 || true   # best-effort heal; never abort the boot
+    return 0
   fi
+  [[ -f "${STATE_FILE}" ]] || die "state file ${STATE_FILE} is not a regular file"
+  [[ -r "${STATE_FILE}" ]] || die "state file ${STATE_FILE} is unreadable"
+  [[ -s "${STATE_FILE}" ]] || die "state file ${STATE_FILE} is truncated"
+  if ! while IFS='=' read -r key val; do
+    val="${val%$'\r'}"
+    case "${key}" in
+      BOOT_ORDER)  BOOT_ORDER="${val}" ;;
+      BOOT_A_LEFT) BOOT_A_LEFT="${val}" ;;
+      BOOT_B_LEFT) BOOT_B_LEFT="${val}" ;;
+      BOOT_CRC)    stored_crc="${val}" ;;
+    esac
+  done <"${STATE_FILE}"; then
+    die "cannot read state file ${STATE_FILE}"
+  fi
+  state_fields_valid || die "state file ${STATE_FILE} is corrupt: invalid state fields"
+  [[ -z "${stored_crc}" || "${stored_crc}" == "$(crc_of_payload)" ]] \
+    || die "state file ${STATE_FILE} is corrupt: CRC mismatch"
 }
 
 store_state() {
