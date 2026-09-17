@@ -111,3 +111,18 @@ CONFIG_KUNIT_DEBUGFS=y
 # It is a `bool` inside `if ROCKCHIP_MPP_SERVICE`, like the three client symbols the
 # production fragment declares, so `=y` is the only value kconfig can give it.
 CONFIG_ROCKCHIP_MPP_CERALIVE_TEST=y
+
+# --- IOMMU attribution instrumentation --------------------------------------
+# These options make the existing IOMMU map/unmap activity observable with the
+# DMA-API tracker and function/kprobe instrumentation used by the RGA ledger.
+# They are deliberately debug-variant-only: DMA_API_DEBUG adds per-map checks,
+# while KPROBES and FUNCTION_TRACER add runtime instrumentation hooks.
+#
+# FUNCTION_TRACER is nested under the FTRACE menu; the production fragment
+# already keeps CONFIG_FTRACE=y for its lightweight event tracing. KPROBES'
+# HAVE_KPROBES dependency is selected by arm64, and DMA_API_DEBUG has no
+# user-selectable parent in the pinned v7.2 Kconfig. The selected
+# NEED_DMA_MAP_STATE helper is not a separate user choice.
+CONFIG_DMA_API_DEBUG=y
+CONFIG_KPROBES=y
+CONFIG_FUNCTION_TRACER=y

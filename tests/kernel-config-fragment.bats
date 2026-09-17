@@ -715,6 +715,38 @@ EOF
   run ! grep -qE '^CONFIG_(VIDEO_ROCKCHIP_RKVENC_CERALIVE_TEST|VIDEO_ROCKCHIP_HDMIRX_CERALIVE_TEST|DMABUF_HEAPS_CERALIVE_TEST)$' "$forb"
 }
 
+@test "edge-test: IOMMU attribution instrumentation is debug-only and production-forbidden" {
+  local test_fragment="$PIPELINE_DIR/manifests/kernel/rk3588-edge-test.fragment"
+  local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
+  local sym
+
+  for sym in CONFIG_DMA_API_DEBUG CONFIG_KPROBES CONFIG_FUNCTION_TRACER; do
+    grep -qx "${sym}=y" "$test_fragment"
+    grep -qx "$sym" "$forb"
+    run ! grep -qx "${sym}=y" "$FRAGMENT"
+  done
+
+  # FTRACE is the existing production parent for FUNCTION_TRACER; the costly
+  # function-entry instrumentation itself must be enabled only by edge-test.
+  grep -qx 'CONFIG_FTRACE=y' "$FRAGMENT"
+  grep -qx 'CONFIG_FUNCTION_TRACER=y' "$test_fragment"
+
+  # Non-vacuity: the real verifier must reject a deliberately wrong answer.
+  cat >"$WORK/iommu-declared" <<'EOF'
+CONFIG_DMA_API_DEBUG=y
+CONFIG_KPROBES=y
+CONFIG_FUNCTION_TRACER=y
+EOF
+  cat >"$WORK/iommu-wrong" <<'EOF'
+# CONFIG_DMA_API_DEBUG is not set
+# CONFIG_KPROBES is not set
+# CONFIG_FUNCTION_TRACER is not set
+EOF
+  run "$VERIFY" "$WORK/iommu-declared" "$WORK/iommu-wrong"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_DMA_API_DEBUG: DROPPED"* ]]
+}
+
 @test "closure manifests: the island MPP closure is declared with its parents" {
   local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
   local sym
