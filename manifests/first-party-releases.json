@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-16T22:40:39.590614+00:00",
+  "checked_at": "2026-09-17T14:50:51.998957+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -13,11 +13,11 @@
     },
     {
       "component": "cerastream",
-      "tag": "v2026.9.4",
-      "published_at": "2026-09-16T12:42:56Z",
+      "tag": "v2026.9.5",
+      "published_at": "2026-09-17T14:39:51Z",
       "packages": {
-        "cerastream[amd64]": "2026.9.4",
-        "cerastream[arm64]": "2026.9.4"
+        "cerastream[amd64]": "2026.9.5",
+        "cerastream[arm64]": "2026.9.5"
       }
     },
     {
