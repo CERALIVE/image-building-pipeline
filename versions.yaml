@@ -51,11 +51,16 @@ cerastream:
   # than rejecting a source because its applied format is stale.
   # v2026.9.4 uses the canonical libuvcsrc dependency and delivers forced-IDR
   # requests through the encoder src pad, reporting actual acceptance.
-  pin: v2026.9.4
-  # Device deb: cerastream 2026.9.4 (amd64 + arm64).
+  # v2026.9.5 repairs composition disable and switching allocation: an explicit
+  # `change-config.composition: null` clears composition transactionally, and the
+  # allocation router excludes `framerate` from its layout comparison so a capture
+  # cadence that differs from the encode cadence across videorate is no longer
+  # refused by the allocation guard.
+  pin: v2026.9.5
+  # Device deb: cerastream 2026.9.5 (amd64 + arm64).
   # Published assets (private GitHub; authenticated download required):
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.4/cerastream_2026.9.4_arm64.deb
-  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.4/cerastream_2026.9.4_amd64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.5/cerastream_2026.9.5_arm64.deb
+  #   https://github.com/CERALIVE/cerastream/releases/download/v2026.9.5/cerastream_2026.9.5_amd64.deb
   channel: stable
 
 CeraUI:

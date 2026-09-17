@@ -142,6 +142,42 @@ remains, including `.2` → `.3` engine and `.2` → `.5` plugin downgrade
 rejections. The production CLI and workflow step still check real current pins
 against the refreshed catalog, independently of these historical fixtures.
 
+## Engine pin serving receipt — 2026-09-17
+
+The engine `2026.9.5` was fetched from the stable APT indexes **before** its image
+pin changed, on both architectures:
+
+- `https://apt.ceralive.tv/dists/stable/binary-arm64/Packages.gz`
+- `https://apt.ceralive.tv/dists/stable/binary-amd64/Packages.gz`
+
+Each index's `Filename: ./<filename>` resolved against its architecture-qualified
+stable directory. Every APT archive was independently hashed with `sha256sum` and
+byte-compared with a separate authenticated GitHub release download using `cmp`;
+both comparisons reported the files identical.
+
+| Package / architecture | Version | APT SHA-256 = GitHub asset SHA-256 = index SHA-256 |
+|---|---|---|
+| `cerastream` / arm64 | `2026.9.5` | `367376cd87912880d4af1ebc4d6b2df50314a072b974ce82803ceb94de42e64d` |
+| `cerastream` / amd64 | `2026.9.5` | `495fd58d397b6e5833b0ad84f1d4ff640a7bb27488fb2b58f31c89a2c9d40eab` |
+
+GitHub source is private `CERALIVE/cerastream` release `v2026.9.5`, with filenames
+`<package>_<version>_<architecture>.deb`. Debian control fields independently
+confirmed both identities; the engine still declares `libc6 (>= 2.41)` and the
+canonical `gstreamer1.0-libuvcsrc` dependency already pinned by this pipeline.
+
+The stable index was not immediately current at release time. The `apt-reindex`
+`repository_dispatch` fired 9 s after the last asset upload and the reindex run
+rewrote `Packages.gz` roughly 100 s later, so a read taken inside that window — or
+against an edge cache entry, which the object serves with `cache-control:
+public, max-age=3600` — still reported `2026.9.4`. That is publication latency plus
+caching, not the historical publisher-provisioning gap: the dispatch was delivered,
+the run completed successfully, and no manual re-trigger was performed.
+
+The engine stays app-layer, with unprefixed Debian version and `v`-prefixed
+repo-local provenance tag. The catalog was refreshed through `--refresh`; no guard,
+test or rollback override was weakened. No image build, flash or new hardware
+qualification is implied by this receipt.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as
