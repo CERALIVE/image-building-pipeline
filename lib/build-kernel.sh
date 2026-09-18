@@ -434,15 +434,14 @@ main() {
         done
         case "${FRAGMENT_LIST}" in
         *" "*)
-          # With more than one fragment the survival gate has to be run against
-          # everything that was declared, not just the first file — otherwise a
-          # symbol olddefconfig drops from a later fragment passes unnoticed,
-          # which is the exact failure mode this gate exists for.
+          # Use the SAME ordered text merge for the expectation set: later
+          # fragments override earlier declarations, including an explicit OFF.
+          # Start empty, not from defconfig or the resolved .config. This keeps
+          # every non-overridden declaration from every fragment, even symbols
+          # olddefconfig will drop, without asserting two contradictory values.
           declared_config=/src/declared-fragments.config
-          : >"${declared_config}"
-          for frag in ${FRAGMENT_LIST}; do
-            cat "${frag}" >>"${declared_config}"
-          done
+          KCONFIG_CONFIG="${declared_config}" \
+            ./scripts/kconfig/merge_config.sh -m /dev/null ${FRAGMENT_LIST}
           ;;
         esac
       fi
