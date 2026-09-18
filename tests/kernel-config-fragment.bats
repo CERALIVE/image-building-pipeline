@@ -244,6 +244,36 @@ EOF
   [[ "$output" != *"CONFIG_FUNCTION_TRACER:"* ]]
 }
 
+@test "edge-test: function tracing overrides the mutually exclusive inherited default-tracer selector" {
+  local debug="$PIPELINE_DIR/manifests/kernel/rk3588-edge-test.fragment"
+  # The impossible ON request comes from the base, so mere absence in the
+  # overlay is insufficient. An explicit OFF must override it, without a
+  # second ON declaration anywhere in the debug fragment.
+  grep -qx 'CONFIG_ENABLE_DEFAULT_TRACERS=y' "$FRAGMENT"
+  grep -qx '# CONFIG_FUNCTION_TRACER is not set' "$FRAGMENT"
+  grep -qx '# CONFIG_ENABLE_DEFAULT_TRACERS is not set' "$debug"
+  run ! grep -q '^CONFIG_ENABLE_DEFAULT_TRACERS=' "$debug"
+  local symbol
+  for symbol in FUNCTION_TRACER KPROBES DMA_API_DEBUG; do
+    grep -qx "CONFIG_${symbol}=y" "$debug"
+    grep -qx "CONFIG_${symbol}" "$FORBIDDEN"
+  done
+
+  # Exercise the real overlay with the selected capability present, then
+  # recreate the incompatible request in a private copy. The verifier must
+  # still reject it; the fix is a declaration correction, not an exemption.
+  cp "$debug" "$WORK/resolved"
+  printf 'CONFIG_GENERIC_TRACER=y\nCONFIG_TRACING=y\nCONFIG_EVENT_TRACING=y\nCONFIG_CONTEXT_SWITCH_TRACER=y\n' \
+    >>"$WORK/resolved"
+  run "$VERIFY" "$debug" "$WORK/resolved"
+  [ "$status" -eq 0 ]
+  cp "$debug" "$WORK/incompatible"
+  printf 'CONFIG_ENABLE_DEFAULT_TRACERS=y\n' >>"$WORK/incompatible"
+  run "$VERIFY" "$WORK/incompatible" "$WORK/resolved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CONFIG_ENABLE_DEFAULT_TRACERS: DROPPED"* ]]
+}
+
 @test "rk3588-edge.fragment: RTW89 declares the parent menuconfig, not just the 8852BE leaf" {
   grep -qx 'CONFIG_RTW89=m' "$FRAGMENT"
   grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"

@@ -126,3 +126,11 @@ CONFIG_ROCKCHIP_MPP_CERALIVE_TEST=y
 CONFIG_DMA_API_DEBUG=y
 CONFIG_KPROBES=y
 CONFIG_FUNCTION_TRACER=y
+
+# v7.2 kernel/trace/Kconfig: ENABLE_DEFAULT_TRACERS depends on !GENERIC_TRACER,
+# but FUNCTION_TRACER selects GENERIC_TRACER. Override the inherited production
+# selector: both cannot be ON. No tracing capability is lost — GENERIC_TRACER
+# selects TRACING, which selects EVENT_TRACING and hence CONTEXT_SWITCH_TRACER.
+# Keep all three instrumentation options above; do not exempt a dropped symbol
+# from the survival gate or change the production fragment.
+# CONFIG_ENABLE_DEFAULT_TRACERS is not set
