@@ -158,6 +158,92 @@ EOF
 
 # --- the real fragment, against the real defect ------------------------------
 
+# Execute the builder's declaration-assembly block, not a transcription. Only
+# container paths are relocated. The kernel-owned merger is a boundary double:
+# assert its exact invocation and return an independently authored merged input.
+# The real pinned merger/Kconfig are exercised by the non-DRY_RUN build.
+assemble_declared_fragments() {
+  local block
+  block="$(sed -n '/^        case "${FRAGMENT_LIST}" in$/,/^        esac$/p' \
+    "$PIPELINE_DIR/lib/build-kernel.sh")"
+  [[ -n "$block" ]] || return 1
+  mkdir -p "$WORK/scripts/kconfig"
+  cat >"$WORK/scripts/kconfig/merge_config.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 4 && "$1" == -m && "$2" == /dev/null ]]
+[[ "$3" == "$WORK/base" && "$4" == "$WORK/overlay" ]]
+[[ "$KCONFIG_CONFIG" == "$WORK/declared-fragments.config" ]]
+cmp .config "$WORK/resolved-before-assembly"
+cp "$WORK/expected-declarations" "$KCONFIG_CONFIG"
+EOF
+  chmod +x "$WORK/scripts/kconfig/merge_config.sh"
+  cp "$WORK/resolved" "$WORK/.config"
+  cp "$WORK/resolved" "$WORK/resolved-before-assembly"
+  (
+    cd "$WORK"
+    export WORK
+    FRAGMENT_LIST="$WORK/base $WORK/overlay"
+    declared_config="$WORK/base"
+    eval "${block//\/src\//$WORK/}"
+    cmp .config "$WORK/resolved-before-assembly"
+    "$VERIFY" "$declared_config" .config
+  )
+}
+
+@test "fragment overlays: builder honours later OFF-to-ON and ON-to-OFF declarations" {
+  cat >"$WORK/base" <<'EOF'
+# CONFIG_FUNCTION_TRACER is not set
+CONFIG_DISABLE_ME=y
+CONFIG_BASE_ONLY=m
+EOF
+  cat >"$WORK/overlay" <<'EOF'
+CONFIG_FUNCTION_TRACER=y
+# CONFIG_DISABLE_ME is not set
+CONFIG_OVERLAY_ONLY=y
+EOF
+  cat >"$WORK/expected-declarations" <<'EOF'
+CONFIG_BASE_ONLY=m
+CONFIG_FUNCTION_TRACER=y
+# CONFIG_DISABLE_ME is not set
+CONFIG_OVERLAY_ONLY=y
+EOF
+  cp "$WORK/expected-declarations" "$WORK/resolved"
+  run assemble_declared_fragments
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"4 of 4 declared symbol(s) survived"* ]]
+  [[ "$output" == *"(0 reviewed exception(s))"* ]]
+}
+
+@test "fragment overlays: builder still rejects dropped base and later-overlay symbols" {
+  printf 'CONFIG_BASE_ONLY=m\n# CONFIG_FUNCTION_TRACER is not set\n' >"$WORK/base"
+  printf 'CONFIG_FUNCTION_TRACER=y\nCONFIG_OVERLAY_ONLY=y\n' >"$WORK/overlay"
+  printf 'CONFIG_BASE_ONLY=m\nCONFIG_FUNCTION_TRACER=y\nCONFIG_OVERLAY_ONLY=y\n' \
+    >"$WORK/expected-declarations"
+  printf 'CONFIG_FUNCTION_TRACER=y\n' >"$WORK/resolved"
+  run assemble_declared_fragments
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"2 of 3 fragment symbol(s) did not survive"* ]]
+  [[ "$output" == *"CONFIG_BASE_ONLY: DROPPED"* ]]
+  [[ "$output" == *"CONFIG_OVERLAY_ONLY: DROPPED"* ]]
+  [[ "$output" != *"CONFIG_FUNCTION_TRACER:"* ]]
+}
+
+@test "fragment overlays: fixing the contradiction does not exempt ENABLE_DEFAULT_TRACERS" {
+  printf 'CONFIG_ENABLE_DEFAULT_TRACERS=y\n# CONFIG_FUNCTION_TRACER is not set\n' >"$WORK/base"
+  printf 'CONFIG_FUNCTION_TRACER=y\n' >"$WORK/overlay"
+  printf 'CONFIG_ENABLE_DEFAULT_TRACERS=y\nCONFIG_FUNCTION_TRACER=y\n' >"$WORK/expected-declarations"
+  # Pinned Kconfig: FUNCTION_TRACER selects GENERIC_TRACER; the default-tracer
+  # switch depends on !GENERIC_TRACER. It really drops, unlike the stale OFF
+  # assertion. Fixing assembly must leave this unresolved declaration visible.
+  printf 'CONFIG_FUNCTION_TRACER=y\nCONFIG_GENERIC_TRACER=y\nCONFIG_TRACING=y\n' >"$WORK/resolved"
+  run assemble_declared_fragments
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1 of 2 fragment symbol(s) did not survive"* ]]
+  [[ "$output" == *"CONFIG_ENABLE_DEFAULT_TRACERS: DROPPED"* ]]
+  [[ "$output" != *"CONFIG_FUNCTION_TRACER:"* ]]
+}
+
 @test "rk3588-edge.fragment: RTW89 declares the parent menuconfig, not just the 8852BE leaf" {
   grep -qx 'CONFIG_RTW89=m' "$FRAGMENT"
   grep -qx 'CONFIG_RTW89_8852BE=m' "$FRAGMENT"
