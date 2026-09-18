@@ -612,24 +612,31 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.4`, carrying the canonical libuvcsrc
-dependency and forced-IDR delivery through the encoder src pad with actual
-acceptance reporting. Both architecture packages are served by APT and were
-byte-compared with their authenticated GitHub release downloads. The RK3588
-plugin pin is `1.14.4+ceralive.6`, retaining its platform-layer URL+SHA route
-and commented Radxa rollback row. It carries compositor pre-scale, bt709
-colorimetry, pool-reference and allocator-lifetime fixes. Exact serving proof:
+The engine pin is `cerastream=2026.9.5` (PR #173). It keeps `2026.9.4`'s
+canonical `gstreamer1.0-libuvcsrc` package dependency and forced-IDR delivery
+through the encoder src pad with actual acceptance reporting, and adds the
+transactional composition clear plus the allocation router's framerate-agnostic
+layout comparison. Both architecture packages are served by APT and were
+byte-compared with their authenticated GitHub release downloads before pinning.
+The RK3588 plugin pin is `1.14.4+ceralive.6`, retaining its platform-layer
+URL+SHA route and commented Radxa rollback row. It carries compositor pre-scale,
+bt709 colorimetry, pool-reference and allocator-lifetime fixes. Exact serving
+proof for the plugin and for the preceding `2026.9.4` engine pin:
 [`Media pin receipt`](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to release v2026.9.1 using its exact per-architecture Debian
-versions. Its published cerastream bindings use schema 0.17.0, compatible with
-the engine's 0.18.0 schema because the evolution is additive and CeraUI v2026.9.1
-does not consume the new session-switch fields. Both downloaded Debian assets
-passed independent SHA-256 verification. Fresh-image boot and media qualification
-remain separate gates; the documented early-import SIGUSR1 residual window is
-unchanged.
+CeraUI is pinned to release v2026.9.2 (tag commit `7b53288`) using its exact
+per-architecture Debian versions, `2026.9.2-20260917T155634.7b53288` (amd64) and
+`2026.9.2-20260917T155656.7b53288` (arm64). It is the operator-facing half of the
+composition-lifecycle fixes whose engine half shipped in cerastream 2026.9.5: the
+previously pinned v2026.9.1 accepted a composition clear into its own config
+without forwarding a change-config to the engine, and wedged at
+`stop_failed` / `START_IN_PROGRESS` after an engine loss until an operator issued
+an explicit stop. Both downloaded Debian assets were byte-compared against
+authenticated GitHub release downloads before pinning. Fresh-image boot and media
+qualification remain separate gates; the documented early-import SIGUSR1 residual
+window is unchanged.
 
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
 pins, and the first-party packages from `apt.ceralive.tv` — share a persistent

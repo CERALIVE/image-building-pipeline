@@ -1292,14 +1292,15 @@ wrong-architecture miss, and the no-`|| true` property itself), plus the existin
 
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
-**CeraUI pin (2026-09-06):** the architecture-qualified `ceralive-device` rows in
-`manifests/first-party-deb-versions.txt` select the checksum-verified v2026.9.1
+**CeraUI pin (2026-09-06, superseded by the 2026-09-17 pin below):** the
+architecture-qualified `ceralive-device` rows in
+`manifests/first-party-deb-versions.txt` selected the checksum-verified v2026.9.1
 release assets at `f3c52d5`, with the matching provenance tag in `versions.yaml`.
-Both consumers now carry cerastream bindings 2026.9.5/schema 0.17.0, compatible
+Both consumers then carried cerastream bindings 2026.9.5/schema 0.17.0, compatible
 with the engine 2026.9.3 schema 0.18.0 because the evolution is additive and
 CeraUI v2026.9.1 does not consume the new session-switch fields. The accepted
 early-import SIGUSR1 residual window remains; the pin alone claims no fresh-image
-hardware qualification.
+hardware qualification. The rows have since advanced to v2026.9.2.
 
 The emitted-rootfs wait-online test scans canonical unit files without following
 absolute aliases into the build host (`grep -r`, not `-R`). Its fixture includes
@@ -1318,15 +1319,36 @@ H.265/H.264 receiver trials passed 60 seconds; the earlier unexplained cutoff
 is an owner-accepted non-blocking observation, not a claimed transport fix.
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 
-**cerastream pin (2026-09-16):** `manifests/first-party-deb-versions.txt` selects
-released `2026.9.4` on both architectures; repo-local `versions.yaml` records
-`v2026.9.4`. Both APT packages were fetched and byte-compared with authenticated
-GitHub release downloads before pinning. This release carries the canonical
+**cerastream pin (2026-09-16, superseded by the 2026-09-17 pin below):**
+`manifests/first-party-deb-versions.txt` selected released `2026.9.4` on both
+architectures; repo-local `versions.yaml` recorded `v2026.9.4`. Both APT
+packages were fetched and byte-compared with authenticated GitHub release
+downloads before pinning. This release carries the canonical
 `gstreamer1.0-libuvcsrc` dependency and forced-IDR delivery through the encoder
 src pad with actual acceptance reporting. The release catalog was refreshed
 through the existing authenticated command; no guard or override changed.
 Exact hashes and serving proof: [`media pin receipt`](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
 This pin does not claim a new image has been built, flashed or hardware-qualified.
+The engine row has since advanced to `2026.9.5`.
+
+**cerastream + CeraUI pins (2026-09-17):** the CURRENT app-layer pins.
+`manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.5` on both
+architectures (PR #173) and the architecture-qualified `ceralive-device` rows
+`2026.9.2-20260917T155634.7b53288` (amd64) / `2026.9.2-20260917T155656.7b53288`
+(arm64); repo-local `versions.yaml` records `v2026.9.5` and `v2026.9.2`. Engine
+`2026.9.5` repairs composition disable (an explicit `change-config.composition:
+null` clears composition transactionally) and the switching allocation guard (the
+allocation router no longer compares `framerate`, so a capture cadence that
+differs from the encode cadence across `videorate` is accepted); its
+`gstreamer1.0-libuvcsrc` dependency is unchanged from `2026.9.4`. CeraUI v2026.9.2
+is the operator-facing half of those composition-lifecycle fixes: v2026.9.1
+accepted a composition clear into its own config without forwarding a
+change-config to the engine, and wedged at `stop_failed` / `START_IN_PROGRESS`
+after an engine loss until an operator issued an explicit stop. All four packages
+were fetched from the stable signed indexes and byte-compared with authenticated
+GitHub release downloads before pinning; the release catalog was refreshed through
+the existing authenticated command and no guard or override changed. Neither pin
+claims a new image has been built, flashed or hardware-qualified.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
