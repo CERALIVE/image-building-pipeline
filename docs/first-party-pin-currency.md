@@ -100,6 +100,11 @@ Direct local `./build` is unchanged; CI is the enforced surface in this change.
 
 ## Media pin serving receipt — 2026-09-16
 
+> Scope: this receipt covers the plugin pin, which is still current, and the
+> engine pin as it stood on 2026-09-16. The engine row in
+> `manifests/first-party-deb-versions.txt` advanced to `cerastream=2026.9.5` on
+> 2026-09-17 (PR #173); the hashes below do not describe that package.
+
 The plugin `1.14.4+ceralive.6` and engine `2026.9.4` were fetched from the
 stable APT indexes **before** their image pins changed. Both architecture
 `InRelease` signatures verified with the existing archive key
