@@ -294,14 +294,14 @@ variants:
       # why this pin is the RESULTING `main` commit and not the branch tip.
       # Verified before pinning: `git ls-remote
       # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
-      # answers 9a8be32fe6b54773b01c61119f578bf8cf10b08e, that commit reaches a
+      # answers 6996f96bc883f637ddac11f81871a256632f3f48, that commit reaches a
       # 33-entry patches/series, and the whole series applies to
       # v7.2 with its own post-apply gate green.
       # Island v2026.9.4: artifact-bound Rock qualification passed 2026-09-15.
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
       # Changes require independent exact-head review before merge.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 9a8be32fe6b54773b01c61119f578bf8cf10b08e
+      patches_commit: 6996f96bc883f637ddac11f81871a256632f3f48
       patches_series: patches/series
 
       defconfig_base: defconfig
