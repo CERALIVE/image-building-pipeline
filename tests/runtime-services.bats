@@ -2405,6 +2405,62 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
+@test "pipewire: the HDMI-RX capture card can never be parked at profile 'off'" {
+  # An ACP profile set is built ONCE at device creation. A live OPi 5+ enumerated
+  # `off`+`pro-audio` ONLY when the card was probed with no HDMI audio present, and
+  # `scripts/device/find-best-profile.lua` excludes `pro-audio` BY NAME — so the
+  # fallback chain reached `off`, no node was published, and the engine refused
+  # `hw:CARD=HDMIIN` with `audio-device-unavailable` for the whole uptime.
+  # `device.profile.priority.rules` is read by `find-preferred-profile.lua`, which
+  # runs `before` that chooser and has no such exclusion.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-profile-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  grep -Eq '^device\.profile\.priority\.rules[[:space:]]*=[[:space:]]*\[' "$body"
+
+  # The ORDER is the contract: the real stereo input profile first so the good path
+  # is unchanged, `pro-audio` second as the floor for the degraded enumeration.
+  grep -Fq 'priorities = [ "input:stereo-fallback", "pro-audio" ]' "$body"
+
+  # Dropping the floor is exactly no fix (the name is absent in the degraded set, the
+  # hook returns nothing, and find-best-profile parks the card at `off` again).
+  run grep -E 'priorities[[:space:]]*=[[:space:]]*\[[[:space:]]*"input:stereo-fallback"[[:space:]]*\]' "$body"
+  [ "$status" -ne 0 ]
+
+  # Reordering would take the 8-channel AUX raw node on a board that has a proper
+  # 2ch FL/FR profile — a downgrade, not a floor.
+  run grep -E 'priorities[[:space:]]*=[[:space:]]*\[[[:space:]]*"pro-audio"' "$body"
+  [ "$status" -ne 0 ]
+
+  # Three OR-ed match alternatives so one missing key cannot silently disable it.
+  grep -Fq 'alsa.id = "HDMIIN"' "$body"
+  grep -Fq 'device.name = "~alsa_card.platform-hdmi-receiver-sound.*"' "$body"
+  grep -Fq 'device.name = "~alsa_card.platform-hdmirx-sound.*"' "$body"
+
+  # SCOPE: the analog card and the two HDMI TRANSMITTER cards keep whatever the
+  # automatic policy picks for them, so they must never be named here.
+  run grep -E 'alsa_card\.platform-sound|platform-hdmi0-sound|platform-hdmi1-sound' "$body"
+  [ "$status" -ne 0 ]
+}
+
+@test "pipewire: the profile rule reaches the image as part of the ONE headless fragment" {
+  # The fragment is deliberately singular (see the file's own header), so the profile
+  # floor must ride in it rather than in a second drop-in that merges by filename.
+  local root="$BATS_TEST_TMPDIR/pw-profile-installed"
+  pw_install_env "$root"
+  run pw_run "$root"
+  [ "$status" -eq 0 ]
+
+  local rel="etc/wireplumber/wireplumber.conf.d/10-ceralive-headless.conf"
+  [ -f "$root/$rel" ]
+  grep -Eq '^device\.profile\.priority\.rules[[:space:]]*=' "$root/$rel"
+
+  # Still exactly one CeraLive fragment in that directory.
+  run bash -c "ls -1 '$root/etc/wireplumber/wireplumber.conf.d' | wc -l"
+  [ "$output" -eq 1 ]
+}
+
 @test "pipewire: the packaged USER units are masked, so exactly ONE PipeWire exists" {
   local root="$BATS_TEST_TMPDIR/pw-mask"
   pw_install_env "$root"
