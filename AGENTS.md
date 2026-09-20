@@ -1331,24 +1331,39 @@ Exact hashes and serving proof: [`media pin receipt`](docs/first-party-pin-curre
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 The engine row has since advanced to `2026.9.5`.
 
-**cerastream + CeraUI pins (2026-09-17):** the CURRENT app-layer pins.
+**cerastream + CeraUI pins (2026-09-20):** the CURRENT app-layer pins.
 `manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.5` on both
-architectures (PR #173) and the architecture-qualified `ceralive-device` rows
-`2026.9.2-20260917T155634.7b53288` (amd64) / `2026.9.2-20260917T155656.7b53288`
-(arm64); repo-local `versions.yaml` records `v2026.9.5` and `v2026.9.2`. Engine
+architectures (unchanged — `v2026.9.5` is still the newest engine release) and the
+architecture-qualified `ceralive-device` rows
+`2026.9.3-20260920T155651.ec522ad` (amd64) / `2026.9.3-20260920T155654.ec522ad`
+(arm64); repo-local `versions.yaml` records `v2026.9.5` and `v2026.9.3`. Engine
 `2026.9.5` repairs composition disable (an explicit `change-config.composition:
 null` clears composition transactionally) and the switching allocation guard (the
 allocation router no longer compares `framerate`, so a capture cadence that
 differs from the encode cadence across `videorate` is accepted); its
-`gstreamer1.0-libuvcsrc` dependency is unchanged from `2026.9.4`. CeraUI v2026.9.2
-is the operator-facing half of those composition-lifecycle fixes: v2026.9.1
-accepted a composition clear into its own config without forwarding a
-change-config to the engine, and wedged at `stop_failed` / `START_IN_PROGRESS`
-after an engine loss until an operator issued an explicit stop. All four packages
-were fetched from the stable signed indexes and byte-compared with authenticated
-GitHub release downloads before pinning; the release catalog was refreshed through
-the existing authenticated command and no guard or override changed. Neither pin
-claims a new image has been built, flashed or hardware-qualified.
+`gstreamer1.0-libuvcsrc` dependency is unchanged from `2026.9.4`. CeraUI v2026.9.3
+repairs source enumeration for multi-node cameras and HDMI audio card identity,
+keeps generic raw capture inputs visible and honestly labelled as non-streamable
+rather than dropping them, classifies `libuvcsrc` as an application package, and
+retains the working address family plus alternate default routes during
+connectivity fallback and host-route repair; it consumes the published
+`@ceralive/cerastream` 2026.9.10 bindings (schema 0.20.0). Both `ceralive-device`
+release assets were downloaded through authenticated GitHub access and
+independently hashed against their published sidecars, and the CeraUI release run
+verified the same bytes against the stable signed index on both architectures.
+Neither pin claims a new image has been built, flashed or hardware-qualified.
+
+**KNOWN GAP, pre-existing and NOT introduced by this pin.** The release-evidence
+catalog `manifests/first-party-releases.json` still carries
+`checked_at=2026-09-17T16:10:16Z`, because `--refresh` now fails closed with
+`UNVERIFIABLE: newest release lacks srtla-send-rs[amd64]: v4.1.0`. That is the
+srtla cutover: `srtla-send-rs` v4.1.0 publishes `srtla_4.1.0_<arch>.deb`, not
+`srtla-send-rs_*.deb`, and the refresh requires the NEWEST release of a component
+to carry all of that component's image packages with no fallback to an older
+complete one. The ordinary PR gate is unaffected — its evidence bound is 168 h and
+a forward pin is CURRENT by design — but the 24 h release-candidate/scheduled-real-build
+bound will fail until the discovery is taught the cutover's package rename. The
+catalog was deliberately NOT hand-edited and `checked_at` was NOT restamped.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
@@ -3187,7 +3202,7 @@ no replacement userspace build is needed.
 
 - **Pin file:** `manifests/rk3588-userspace-deb-versions.txt` — one record per
   package (`package  filename  sha256  url`). Four packages:
-  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.6 (hw_accel_gstreamer_plugins), and
+  `gstreamer1.0-rockchip-ceralive` 1.14.4+ceralive.7 (hw_accel_gstreamer_plugins), and
   `rockchip-multimedia-config` 1.0.2-1 / `librga2-ceralive` 1.10.5+ceralive.1 / `librockchip-mpp1` 1.5.0-1
   (gstreamer_runtime_packages). `librockchip-mpp-dev` 1.5.0-1 was a sixth and is
   RETIRED — verdict `REMOVE`, evidence in `manifests/packages/removed.md`, guard
@@ -3202,11 +3217,16 @@ no replacement userspace build is needed.
   CERALIVE/gstreamer-rockchip for the plugin, tsukumijima for MPP and multimedia
   config, and CERALIVE/librga for the R1 RGA release.
   The `.2` plugin release adds `libgstrockchiprga.so` with `rgaconvert` and
-  `rgacompositor`; `.1` predates those factories. The `.6` pin carries compositor
-  pre-scale, bt709 colorimetry, pool-reference and allocator-lifetime fixes.
-  Its checksum was independently computed from downloaded release bytes and
-  matched against the fetched stable APT artifact before pinning; see the
-  [media pin receipt](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
+  `rgacompositor`; `.1` predates those factories. The superseded `.6` release
+  carried compositor pre-scale, bt709 colorimetry, pool-reference and
+  allocator-lifetime fixes; the active `.7` pin adds the C6b explicit-colour and
+  im2d compatibility boundary, a bounded `rgaconvert` stop with independent fence
+  quarantine, a bounded DMA-BUF handle cache, real RKVENC fault detection driving
+  the existing encoder restart, an encoder teardown-admission fix, and lets a
+  delayed `rgacompositor` primary start without killing composition. Its checksum
+  was independently computed from the downloaded release bytes and matched its
+  published `.sha256` sidecar before pinning; the `.6` row is retained commented
+  directly above it as the one-line rollback.
   It stays platform-layer only, never in `REPOS` or `FIRST_PARTY_APT_PKGS`.
   The pipeline pins the released
   bytes to enable fresh-image qualification, not to claim either board has run

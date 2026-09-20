@@ -85,13 +85,22 @@ CeraUI:
   # operator issued an explicit stop. This release forwards the transactional clear and
   # retires the engine-loss wedge, so the already-released engine fixes become reachable
   # through the product rather than only through direct IPC.
-  pin: v2026.9.2
-  # Device deb: ceralive-device 2026.9.2-20260917T155634.7b53288 (amd64) /
-  #   2026.9.2-20260917T155656.7b53288 (arm64). Both were fetched from the stable
-  #   signed index and byte-compared against authenticated GitHub release downloads:
-  #   amd64 3c682fcde13b3a0ff1c334354459d188ea4908570231f814fb127a35b3b45bd4,
-  #   arm64 cd4721e71f2f656c013dd95d0957abe11be184d3a66dfb843e9d9ffaebdf00d9.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.9.2
+  # v2026.9.3 repairs source enumeration for multi-node cameras and HDMI audio card
+  # identity, keeps generic raw capture inputs visible (and honestly labelled as
+  # non-streamable) instead of dropping them, classifies libuvcsrc as an application
+  # package, and retains the working address family plus alternate default routes
+  # during connectivity fallback and host-route repair. It consumes the published
+  # @ceralive/cerastream 2026.9.10 bindings (schema 0.20.0) and pins
+  # @ceralive/modem-control at the already-released 1.4.0.
+  pin: v2026.9.3
+  # Device deb: ceralive-device 2026.9.3-20260920T155651.ec522ad (amd64) /
+  #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded
+  #   through authenticated GitHub access and independently hashed; each matched its
+  #   published sidecar, and the CeraUI release run verified the same bytes against
+  #   the stable signed index on both architectures:
+  #   amd64 8452af3793872f2f252992fdce8624a3ba825059cf0389d9536756e9446940cf,
+  #   arm64 53967660c7655f1f030a79c8ebd7fc4006a7de67f88cded1968e9e6a55cfd937.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.9.3
   #
   # This pin is the component REGISTRY value; it is NOT what selects the downloaded
   # .deb. fetch_first_party reads it only to print the "first-party pins

@@ -618,23 +618,32 @@ through the encoder src pad with actual acceptance reporting, and adds the
 transactional composition clear plus the allocation router's framerate-agnostic
 layout comparison. Both architecture packages are served by APT and were
 byte-compared with their authenticated GitHub release downloads before pinning.
-The RK3588 plugin pin is `1.14.4+ceralive.6`, retaining its platform-layer
-URL+SHA route and commented Radxa rollback row. It carries compositor pre-scale,
-bt709 colorimetry, pool-reference and allocator-lifetime fixes. Exact serving
-proof for the plugin and for the preceding `2026.9.4` engine pin:
+The RK3588 plugin pin is `1.14.4+ceralive.7`, retaining its platform-layer
+URL+SHA route; both the superseded `.6` fork row and the original Radxa row are
+kept commented above it as rollback levers. On top of `.6`'s compositor
+pre-scale, bt709 colorimetry, pool-reference and allocator-lifetime fixes it
+adds the C6b explicit-colour and im2d compatibility boundary, a bounded
+`rgaconvert` stop with independent fence quarantine, a bounded DMA-BUF handle
+cache, real RKVENC fault detection driving the existing encoder restart, an
+encoder teardown-admission fix, and a delayed `rgacompositor` primary that no
+longer kills composition. Its checksum was independently computed from the
+downloaded release bytes and matched its published `.sha256` sidecar.
+Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 [`Media pin receipt`](docs/first-party-pin-currency.md#media-pin-serving-receipt--2026-09-16).
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to release v2026.9.2 (tag commit `7b53288`) using its exact
-per-architecture Debian versions, `2026.9.2-20260917T155634.7b53288` (amd64) and
-`2026.9.2-20260917T155656.7b53288` (arm64). It is the operator-facing half of the
-composition-lifecycle fixes whose engine half shipped in cerastream 2026.9.5: the
-previously pinned v2026.9.1 accepted a composition clear into its own config
-without forwarding a change-config to the engine, and wedged at
-`stop_failed` / `START_IN_PROGRESS` after an engine loss until an operator issued
-an explicit stop. Both downloaded Debian assets were byte-compared against
-authenticated GitHub release downloads before pinning. Fresh-image boot and media
+CeraUI is pinned to release v2026.9.3 (tag commit `ec522ad`) using its exact
+per-architecture Debian versions, `2026.9.3-20260920T155651.ec522ad` (amd64) and
+`2026.9.3-20260920T155654.ec522ad` (arm64). It repairs source enumeration for
+multi-node cameras and HDMI audio card identity, keeps generic raw capture inputs
+visible and honestly labelled as non-streamable rather than dropping them,
+classifies `libuvcsrc` as an application package, and retains the working address
+family plus alternate default routes during connectivity fallback and host-route
+repair; it consumes the published `@ceralive/cerastream` 2026.9.10 bindings
+(schema 0.20.0). Both downloaded Debian assets were independently hashed against
+their published sidecars, and the CeraUI release run verified the same bytes
+against the stable signed index on both architectures. Fresh-image boot and media
 qualification remain separate gates; the documented early-import SIGUSR1 residual
 window is unchanged.
 

@@ -63,10 +63,13 @@ rockchip-multimedia-config  rockchip-multimedia-config_1.0.2-1_all.deb  579ba2a9
 
 # --- First-party GStreamer MPP plugin ---
 # The CeraLive fork preserves the package prefix and libgstrockchipmpp.so filename
-# while shipping the verified fix ledger. The commented Radxa row is the one-line
-# rollback lever; the RGA runtime has its own independent pin and rollback below.
+# while shipping the verified fix ledger. The two commented rows above the active
+# pin are the one-line rollback levers — the previous `.6` fork release first, and
+# the original Radxa build behind it. The RGA runtime has its own independent pin
+# and rollback below.
 # gstreamer1.0-rockchip1  gstreamer1.0-rockchip1_1.14-4_arm64.deb  e0db29effa6643017295596cceb035d281822c72f99813b9338cf0357f9af16f  https://radxa-repo.github.io/rk3588s2-bookworm/pool/main/g/gstreamer1.0-rockchip/gstreamer1.0-rockchip1_1.14-4_arm64.deb
-gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.6_arm64.deb  d131e443dcd88fb7988773b10c9b0125a65536ceb11128f41b3644a0fb41a3b5  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.6/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.6_arm64.deb
+# gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.6_arm64.deb  d131e443dcd88fb7988773b10c9b0125a65536ceb11128f41b3644a0fb41a3b5  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.6/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.6_arm64.deb
+gstreamer1.0-rockchip-ceralive  gstreamer1.0-rockchip-ceralive_1.14.4+ceralive.7_arm64.deb  4fc628a08f04535cc7802e0b67f53f599a2d594b8fb98e56a91d0033314bce66  https://github.com/CERALIVE/gstreamer-rockchip/releases/download/1.14.4%2Bceralive.7/gstreamer1.0-rockchip-ceralive_1.14.4%2Bceralive.7_arm64.deb
 
 # --- CeraLive RGA R1: published 1.10.5 runtime; Radxa and R0 rollback coordinates ---
 # Provides librga2 (= 2.2.0), Conflicts/Replaces librga2, SONAME librga.so.2.
