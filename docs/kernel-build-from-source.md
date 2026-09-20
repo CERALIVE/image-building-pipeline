@@ -43,6 +43,22 @@ Two overlays exist, and both build from pinned source:
 
 ## 1. The variant model
 
+### Current pin — island v2026.9.5
+
+`manifests/families/rk3588.yaml` pins `patches_commit`
+`6996f96bc883f637ddac11f81871a256632f3f48`, the merged
+[kernel-patches PR #25](https://github.com/CERALIVE/rk3588-kernel-patches/pull/25),
+carrying [island v2026.9.5](https://github.com/CERALIVE/rk3588-media-island/releases/tag/v2026.9.5)
+— the RGA job-lifecycle race fix (an admitted job's allocation could be released
+by completion while the submitting path still read it; the `rga_job_commit`
+KASAN use-after-free seen on the Rock `edge-test` slot on 2026-09-18). Landed by
+[image PR #179](https://github.com/CERALIVE/image-building-pipeline/pull/179),
+pin-only, with the Rock `edge-test` qualification recorded in its body: 8 clean
+composition cycles, 8 engine-restart cycles and a 300 s soak with encoder, decoder
+and RGA loaded, no kernel fault report, board restored to its production slot.
+No production slot has booted an image built from this pin; the `v2026.9.4`
+receipt below is the last artifact-bound production-candidate qualification.
+
 ### RGA ownership candidate — island v2026.9.4
 
 The proposed patch-series pin is
