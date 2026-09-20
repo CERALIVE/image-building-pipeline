@@ -416,7 +416,7 @@ convention.** Every image `apt-mark hold`s its own kernel, DTB, board U-Boot and
 firmware packages and ships a supplementary name+version apt pin, so an
 `apt-get upgrade` on the device cannot replace them — the boot stack rides inside
 the RAUC slot and changes only when a full-image bundle writes a new one. First-party
-CeraLive packages (`cerastream`, `ceralive-device`, `srtla-send-rs`, …) are
+CeraLive packages (`cerastream`, `ceralive-device`, `srtla`, …) are
 deliberately **not** held and stay apt-updatable. RAUC itself does not consult dpkg
 holds; each image bakes its own. Full contract, including the pin's documented
 bypass limitation: [`kernel-freeze-contract.md`](kernel-freeze-contract.md).

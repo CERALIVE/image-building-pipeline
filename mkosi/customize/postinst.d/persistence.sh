@@ -400,7 +400,7 @@ setup_journal_dir_gc() {
 # (KERNEL_PACKAGES / DTB_PACKAGES / UBOOT_PACKAGES / FIRMWARE_PACKAGES), so the
 # per-board U-Boot package is picked up automatically and no name is hardcoded
 # here. First-party CeraLive packages — cerastream, CeraUI (`ceralive-device`),
-# srtla-send-rs, the forked libsrt and the ModemManager closure — MUST stay
+# srtla, the forked libsrt and the ModemManager closure — MUST stay
 # apt-updatable from apt.ceralive.tv, so they are refused by name below: a
 # manifest that ever routed one of them into a boot-BSP field fails the build
 # instead of silently shipping an unupdatable app layer.
@@ -410,7 +410,7 @@ setup_journal_dir_gc() {
 # packages the device updates over apt from apt.ceralive.tv (see the app layer's
 # SYSEXT_APP_PKGS / APPFS_APP_PKGS / RUNTIME_APP_PKGS classification). Holding any
 # of them would break the ordinary software-update path CeraUI drives.
-CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla-send-rs srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
 
 freeze_boot_packages() {
   local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"

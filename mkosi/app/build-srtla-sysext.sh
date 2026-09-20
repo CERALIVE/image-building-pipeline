@@ -2,8 +2,8 @@
 #
 # build-srtla-sysext.sh — produce srtla.raw (Stage 3, task 22).
 #
-# Consumes a first-party .deb staging dir, extracts /usr/bin/srtla_send and
-# /usr/bin/srtla_rec (pruning any Runtime-owned libsrt that a .deb wrongly
+# Consumes a first-party .deb staging dir, extracts /usr/bin/srtla_send
+# (pruning any Runtime-owned libsrt that a .deb wrongly
 # bundled), and emits a signed-matchable systemd-sysext squashfs via the
 # app-layer contract.
 #

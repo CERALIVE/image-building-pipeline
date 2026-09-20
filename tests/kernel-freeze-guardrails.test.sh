@@ -11,7 +11,7 @@
 # happily replace the kernel underneath a slot the A/B selector had already
 # committed to. postinst-lib.sh::freeze_boot_packages bakes the guardrails; this
 # file proves they are baked, that they actually stop apt, and — the inverse that
-# matters just as much — that cerastream / CeraUI / srtla-send-rs stay upgradable.
+# matters just as much — that cerastream / CeraUI / srtla stay upgradable.
 #
 # PART A  static contract   — the freeze function and its wiring exist as shipped.
 # PART B  runtime behaviour — the REAL function against stubbed dpkg/apt-mark:
@@ -100,7 +100,7 @@ grep -Eq 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"${fn_body}" \
 # Every first-party package must be refused by name.
 never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
 [[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from the postinst library"
-for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive gstreamer1.0-libuvcsrc modemmanager; do
+for pkg in cerastream ceralive-device srtla libsrt1.5-ceralive gstreamer1.0-libuvcsrc modemmanager; do
   [[ " ${never} " == *" ${pkg} "* ]] \
     || fail "CERALIVE_NEVER_FREEZE_PKGS does not protect '${pkg}' — a first-party package could be frozen and would stop being apt-updatable"
 done
@@ -485,7 +485,7 @@ if [[ -n "${CERALIVE_FREEZE_ROOTFS_TAR:-}" ]]; then
     || fail "E: no board U-Boot package is held in the built rootfs"
   grep -qE '^linux-dtb-' <<<"${held_in_image}" \
     && fail "E: a separate DTB package is held — the source-built path installs none"
-  for pkg in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive; do
+  for pkg in cerastream ceralive-device srtla libsrt1.5-ceralive; do
     grep -qxF "${pkg}" <<<"${held_in_image}" \
       && fail "E: first-party package '${pkg}' is HELD in the built rootfs — it must stay apt-updatable"
   done

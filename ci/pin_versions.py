@@ -14,7 +14,7 @@ class PinError(ValueError):
 
 APP_COMPONENTS: Final = {
     "libsrt1.5-ceralive": "srt", "cerastream": "cerastream",
-    "ceralive-device": "CeraUI", "srtla-send-rs": "srtla-send-rs",
+    "ceralive-device": "CeraUI", "srtla": "srtla",
     "gstreamer1.0-libuvcsrc": "gstlibuvcsrc",
     "ceralive-modem-support": "modem-stack",
     "modemmanager": "modem-stack", "libmm-glib0": "modem-stack",
@@ -32,6 +32,18 @@ PREDECESSORS: Final = {
 }
 EXTERNAL: Final = {"librockchip-mpp1", "rockchip-multimedia-config"}
 COMPONENTS: Final = frozenset(APP_COMPONENTS.values()) | frozenset(PLATFORM_COMPONENTS.values())
+# Component identity and GitHub repository name are NOT interchangeable: the `srtla`
+# package is published from a repository that was never renamed, and `CERALIVE/srtla`
+# is a DIFFERENT repository (the retired C receiver). Resolve a repository here for
+# GitHub calls only; registry, manifest and catalog keys stay the component name.
+COMPONENT_REPOS: Final = {
+    "srt": "srt", "cerastream": "cerastream", "CeraUI": "CeraUI",
+    "srtla": "srtla-send-rs", "gstlibuvcsrc": "gstlibuvcsrc",
+    "modem-stack": "modem-stack",
+    "gstreamer-rockchip": "gstreamer-rockchip", "librga": "librga",
+}
+if COMPONENT_REPOS.keys() != COMPONENTS:
+    raise PinError(f"component/repository mapping drift: {COMPONENT_REPOS.keys() ^ COMPONENTS}")
 
 
 def release_version(value: str) -> str:
@@ -137,7 +149,7 @@ def image_pins(root: Path) -> tuple[Pin, ...]:
         replacement = package in PREDECESSORS
         if not replacement:
             parts = unquote(parsed.path).split("/")
-            if parsed.netloc != "github.com" or len(parts) != 7 or parts[1:5] != ["CERALIVE", component, "releases", "download"]:
+            if parsed.netloc != "github.com" or len(parts) != 7 or parts[1:5] != ["CERALIVE", COMPONENT_REPOS[component], "releases", "download"]:
                 raise PinError(f"wrong first-party release URL: {package}")
             if compare(parts[5], match[1]) != 0:
                 raise PinError(f"platform tag/filename version mismatch: {package}")

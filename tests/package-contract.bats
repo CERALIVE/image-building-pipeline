@@ -1039,7 +1039,7 @@ PINS
   [[ "$output" == *"cerastream"* ]]
   [[ "$output" == *"gstreamer1.0-libuvcsrc=2026.9.0"* ]]
   [[ "$output" == *"ceralive-device"* ]]
-  [[ "$output" == *"srtla-send-rs"* ]]
+  [[ "$output" == *"srtla"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]
@@ -1943,7 +1943,7 @@ REPRO
           "$PIPELINE_DIR/manifests/packages/shared.list" \
           "$PIPELINE_DIR/manifests/packages/rk3588.delta.list" \
           "$PIPELINE_DIR/manifests/packages/x86_64.delta.list" | awk 'NF{print $1}')
-  packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla-send-rs)
+  packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 
   run "$LIB_DIR/parity-check.sh" "$root"
@@ -2084,7 +2084,7 @@ REPRO
 #           resolved manifest env, and the four env vars must therefore stay on
 #           the orchestrate.sh env_names <-> mkosi.conf PassEnvironment= lockstep.
 #       (b) Freezing a FIRST-PARTY package would break the ordinary software
-#           update CeraUI drives. cerastream / ceralive-device / srtla-send-rs
+#           update CeraUI drives. cerastream / ceralive-device / srtla
 #           must never be held, and the negative assertion below is what fails if
 #           one is ever added.
 #
@@ -2140,7 +2140,7 @@ REPRO
   [ -n "$never" ]
 
   local p
-  for p in cerastream ceralive-device srtla-send-rs libsrt1.5-ceralive \
+  for p in cerastream ceralive-device srtla libsrt1.5-ceralive \
            gstreamer1.0-libuvcsrc modemmanager; do
     [[ " $never " == *" $p "* ]]
   done

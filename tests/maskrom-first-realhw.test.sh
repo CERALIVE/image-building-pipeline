@@ -183,7 +183,7 @@ grep -Fq '.retain-once' "${PIPELINE_DIR}/tests/rauc-rollback.sh" || {
   printf 'Maskrom-first regression: RAUC reboot does not arm boot-scoped SSH retention\n' >&2
   exit 1
 }
-grep -Fq -- "-name 'srtla-send-rs_*.deb'" "${RELEASE_WORKFLOW}"
+grep -Fq -- "-name 'srtla_*.deb'" "${RELEASE_WORKFLOW}"
 if grep -Fq 'path (4.4)' "${PIPELINE_DIR}/ci/runner-setup.md"; then
   printf 'Maskrom-first regression: runner guide still advertises an SSH/dd production flash path\n' >&2
   exit 1

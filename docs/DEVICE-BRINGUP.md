@@ -314,7 +314,7 @@ against on-device `apt`: `apt-mark hold` (primary — also blocks an explicit
 `apt-get install <pkg>`) plus a supplementary name+version apt-preferences pin.
 RAUC does not consult either — it writes the whole inactive slot directly, and
 each new slot bakes its own holds. First-party CeraLive packages
-(`cerastream`, `ceralive-device`, `srtla-send-rs`, the forked `libsrt`, the
+(`cerastream`, `ceralive-device`, `srtla`, the forked `libsrt`, the
 ModemManager closure) are deliberately excluded from the freeze so
 `system.startUpdate()` keeps working. Verify on a booted device with
 `apt-mark showhold`, `apt-cache policy linux-image-7.2.0-ceralive-rk3588`, and

@@ -11,7 +11,7 @@
 #   - BSP / HW-accel (kernel, DTB, U-Boot, firmware, gstreamer1.0-rockchip-ceralive,
 #     rockchip-multimedia-config) → manifests/families/rk3588.yaml
 #   - RK3588-specific runtime deltas → rk3588.delta.list (currently empty)
-#   - First-party .debs (the CERALIVE/srt runtime, cerastream, srtla-send-rs, and
+#   - First-party .debs (the CERALIVE/srt runtime, cerastream, srtla, and
 #     CeraUI) → installed in the APPLICATION layer (Stage 3), never fetched from
 #     Debian by this manifest. The SRT package replaces Debian's TLS-flavor
 #     variants in the same offline local transaction; see LAYER-MAP.md §libsrt.

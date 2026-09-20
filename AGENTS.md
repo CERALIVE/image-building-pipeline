@@ -9,7 +9,7 @@ canonical package name. No new image or board installation is implied. Evidence:
 ## ROLE IN THE GROUP
 
 Assembly hub for the device image. Pulls every device-side first-party component
-(.deb packages from `srtla-send-rs`, `cerastream`, `CeraUI`), drives a
+(.deb packages from `srtla`, `cerastream`, `CeraUI`), drives a
 containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 (Orange Pi 5+, Radxa Rock 5B+).
 
@@ -1243,20 +1243,22 @@ offender, and lists the available boards — it is never silently skipped.
 
 **REPOS array — case and order are sacred**
 ```bash
-REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
+REPOS=("srt" "cerastream" "CeraUI" "srtla" "modem-stack")
 ```
 `cerastream` is the sole streaming engine — `ceracoder` was retired 2026-06-11
 after the generic boot-parity profile passed
 (`cerastream/docs/notes/boot-parity-results.md`); RK3588 hardware-gated profiles
 now track as cerastream hardware validation, while Jetson profiles are DEFERRED —
-not currently planned. `srtla-send-rs` is
-the Rust sender fork (v1.0.0+) added at cutover (Task 20); `srtla` is
-receiver-side only after cutover. **Conflict declaration:** `srtla-send-rs` declares
-`Conflicts: srtla (<< 2026.6.2)` (SRTLA_CUTOVER_VERSION); any pre-cutover
-`srtla (<< 2026.6.2)` — which still bundled the C sender — is correctly blocked from
-coinstall, while `srtla` v2026.6.2 (the first receiver-only release) is NOT
-`<< 2026.6.2`, so it coinstalls with the Rust sender. REPOS lives in
-`lib/fetch-debs.sh`.
+not currently planned. `srtla` is the Rust sender, shipped as Debian package
+`srtla` from 4.1.0 onwards; it took over the `srtla` package name from the C
+implementation at the 4.1.0 cutover, so the REPOS entry that used to carry the
+sender repository's own name is now simply `srtla` and there is no separate
+receiver entry. The name is a COMPONENT, not a repository: the sender is still
+built from the GitHub repository that was never renamed, and `ci/pin_versions.py`
+`COMPONENT_REPOS` is the only place that mapping lives. The former
+`Conflicts: srtla (<< 2026.6.2)` cutover declaration is retired with it — one
+package now owns the name, so there is nothing left to conflict with. REPOS lives
+in `lib/fetch-debs.sh`.
 
 **`lib/fetch/apt-lib.sh` + `lib/fetch/index.sh` — one apt transport, one signed
 index** [EXISTS]
@@ -1374,7 +1376,7 @@ the mTLS client cert/key injected from the environment, all in an **isolated apt
 state** under the staging dir (the host apt config is never touched).
 
 - **Packages staged** (`FIRST_PARTY_APT_PKGS`): `libsrt1.5-ceralive`,
-  `cerastream ceralive-device srtla-send-rs`, the required capture plugin
+  `cerastream ceralive-device srtla`, the required capture plugin
   `gstreamer1.0-libuvcsrc`, PLUS the **ModemManager 1.24 closure** — the nine
   ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
@@ -4676,7 +4678,7 @@ automatically. Those four names are already on the `orchestrate.sh` `env_names` 
 would be silently vacuous.
 
 **First-party CeraLive packages are NEVER held** — `cerastream`, `ceralive-device`,
-`srtla-send-rs`, `libsrt1.5-ceralive`, `gstreamer1.0-libuvcsrc`,
+`srtla`, `libsrt1.5-ceralive`, `gstreamer1.0-libuvcsrc`,
 `rauc-hawkbit-updater` and the nine ModemManager closure packages must stay
 apt-updatable, because that is the update path CeraUI's `system.startUpdate()`
 drives. `CERALIVE_NEVER_FREEZE_PKGS` refuses them **by name before any hold runs**
@@ -6436,7 +6438,7 @@ not an active safety fallback or instruction to re-open D3.
 - Don't re-add `pro-audio` to the HDMI-RX `device.profile.priority.rules` list, in any position, to "fix" a card parked at `off`. On a board with no HDMI signal that profile publishes an `Audio/Source` whose I2S PCM cannot `set_hw_params` (ENOLINK → `suspended -> error`), and cerastream's always-on meter then builds and abandons one capture pipeline — node, GStreamer task thread and ~8 fds — against it every 30 s, measured at +15.6 fds/min idle and fatal at ~66 minutes. Fix the engine's unbounded sidecar retry first; the conf's own ordered-list section states both conditions
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges
-- Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla-send-rs` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently
+- Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently
 - Don't convert the kernel freeze's `Pin: version` into a `Pin: origin` like the apt.ceralive.tv 990 pin. The boot BSP comes from mkosi's build-time-only local repository, so it has no apt-origin identity on the device and an origin pin would match nothing. Don't hardcode a package name there either — the U-Boot package differs per board
 - Don't expect RAUC to honour a dpkg hold, or to need one lifted before an update. RAUC writes the whole inactive slot without running dpkg or apt; each image bakes the holds that govern its own slot
 - Don't let add-ons gate OTA healthcheck/rollback — add-ons are orthogonal to the RAUC A/B slot

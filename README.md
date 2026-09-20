@@ -41,7 +41,7 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 
 - **Streaming-focused**: SRTLA bonding, WiFi management, HDMI capture
 - **Hardware acceleration**: Rockchip MPP integration for encoding
-- **Custom software stack**: `CeraUI`, `cerastream`, `srtla-send-rs`, `srt` via .deb packages
+- **Custom software stack**: `CeraUI`, `cerastream`, `srtla`, `srt` via .deb packages
 - **Minimal system**: Debian-based with minimal apt sources; the target suite is
   pinned once in [`manifests/target-release.env`](manifests/target-release.env)
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
@@ -57,7 +57,7 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 ┌─────────────────────────────────────────────────────────────┐
 │                    CeraUI Application                       │
 ├─────────────────────────────────────────────────────────────┤
-│ cerastream  │ srtla-send-rs│     srt     │   WiFi Manager   │
+│ cerastream  │ srtla│     srt     │   WiFi Manager   │
 ├─────────────────────────────────────────────────────────────┤
 │           GStreamer + Rockchip MPP (Hardware Encoding)      │
 ├─────────────────────────────────────────────────────────────┤
@@ -888,7 +888,7 @@ The package set comes from the resolved manifest, so each board's own U-Boot pac
 without any hardcoded name.
 
 **First-party CeraLive packages are deliberately not held.** `cerastream`,
-`ceralive-device`, `srtla-send-rs`, the forked libsrt and the ModemManager closure
+`ceralive-device`, `srtla`, the forked libsrt and the ModemManager closure
 stay apt-updatable from `apt.ceralive.tv` — that is the software-update path CeraUI
 drives — and the build refuses by name if one ever reaches the freeze set. There is no
 `unattended-upgrades` on the image.

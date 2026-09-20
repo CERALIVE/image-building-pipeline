@@ -10,7 +10,7 @@
 #
 # WHAT INSTALLS HERE (LAYER-MAP.md §Layer 4):
 #   * libsrt1.5-ceralive — runtime ABI package, replacing Debian TLS flavors.
-#   * cerastream / srtla-send-rs — SYSEXT-class: pure /usr binaries.
+#   * cerastream / srtla — SYSEXT-class: pure /usr binaries.
 #   * CeraUI (ceralive-device .deb)           — APPFS-class: a full-filesystem payload
 #       (/usr/local/bin + /etc + /var/www) that CANNOT be a sysext — a sysext merges
 #       only /usr+/opt, never /etc or /var. Its OTA delivery is the appfs backend
@@ -49,7 +49,7 @@ FIRST_PARTY_DIR="/opt/ceralive-staging"
 # apt-get for both — see header. rauc-hawkbit-updater is NOT a first-party app: it
 # is the runtime layer's OTA backport (setup_hawkbit_updater), so it is skipped here
 # if it happens to share the staging dir.
-SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvcsrc srtla-send-rs"
+SYSEXT_APP_PKGS="cerastream gstreamer1.0-libuvcsrc srtla"
 APPFS_APP_PKGS="ceralive-device"
 # runtime-abi class: shared runtime libraries + first-party daemons installed into
 # the rootfs, atomic with the RAUC slot (no sysext/appfs OTA split). libsrt is the
@@ -68,7 +68,7 @@ libqmi-glib5 libqmi-proxy libqmi-utils \
 # (non-vacuity, mirroring mkosi/app/sysext-build.lib.sh's required-binary guard).
 declare -A REQUIRED_BINARIES=(
   [cerastream]="/usr/bin/cerastream"
-  [srtla-send-rs]="/usr/bin/srtla_send"
+  [srtla]="/usr/bin/srtla_send"
 )
 
 stage_first_party_from_source_mount() {

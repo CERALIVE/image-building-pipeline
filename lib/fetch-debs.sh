@@ -12,7 +12,7 @@
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
 #                      container via Docker/Podman.
 #   2. First-party   — CeraLive SRT / cerastream / gstreamer1.0-libuvcsrc /
-#                      ceralive-device (CeraUI) / srtla-send-rs .debs, PULLED FROM
+#                      ceralive-device (CeraUI) / srtla .debs, PULLED FROM
 #                      apt.ceralive.tv via a GPG-verified, mTLS-authenticated apt
 #                      source. The app layer installs the staged local .debs with
 #                      no downloads. Debian's TLS-flavor libsrt packages are replaced
@@ -164,11 +164,11 @@ VERSIONS_YAML="${VERSIONS_YAML:-${HERE}/../versions.yaml}"
 # boot-parity-results.md). RK3588 hardware-gated profiles now track as
 # cerastream hardware-validation work; Jetson is deferred and not currently planned.
 #
-REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
+REPOS=("srt" "cerastream" "CeraUI" "srtla" "modem-stack")
 
 # REPOS integrity guard — belt-and-suspenders on the hardcoded constant above.
 assert_repos_integrity() {
-  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack")
+  local -a _sacred=("srt" "cerastream" "CeraUI" "srtla" "modem-stack")
   (( ${#REPOS[@]} == ${#_sacred[@]} )) \
     || die "REPOS integrity: expected exactly ${#_sacred[@]} sacred entries, found ${#REPOS[@]} (${REPOS[*]:-}) — REPOS contents are sacred"
   local i
@@ -193,7 +193,7 @@ assert_repos_integrity
 # origin-990 pin (customize/apt-ceralive-repo.sh, Package: *) keeps the fork
 # winning on-device.
 FIRST_PARTY_APT_PKGS=(
-  "libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvcsrc" "ceralive-device" "srtla-send-rs"
+  "libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvcsrc" "ceralive-device" "srtla"
   "modemmanager" "libmm-glib0"
   "libmbim-glib4" "libmbim-proxy" "libmbim-utils"
   "libqmi-glib5" "libqmi-proxy" "libqmi-utils"
