@@ -1379,6 +1379,19 @@ the runtime layer installs both lists in one transaction.
 Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
 [`docs/size-notes.md`](docs/size-notes.md) §15.
 
+**The HDMI-RX card's profile rule names `input:stereo-fallback` and nothing else.**
+WirePlumber picks that profile deterministically whenever the card enumerated one,
+which is the case on any board probed with HDMI audio present. When the card was
+probed with no signal at all, ACP can describe no input profile, the card parks at
+`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until something
+re-enumerates the card — a known, deliberate limitation. The `pro-audio` floor that
+used to cover that case is removed: it published a capture node whose PCM cannot
+start without a signal (`set_hw_params: Link has been severed`), and the engine's
+always-on meter then leaked one PipeWire capture pipeline every 30 s against it —
+measured +15.6 fds/min idle on a Rock 5B+, exhausting the engine's 1024-descriptor
+limit and SIGABRT-ing it after about 66 minutes. The conditions for restoring it are
+written down in `AGENTS.md` and in the config file itself.
+
 **Hardware validation passed on the released stack.** Todo 31 passed on the exact
 Trixie/mainline/PipeWire image, and the release chain shipped cerastream v2026.8.4
 and ceralive-device v2026.8.8. Both bench boards OTA-booted that image healthy; the
