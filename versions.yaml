@@ -119,11 +119,15 @@ modem-stack:
 
 # ── Remaining first-party repos ───────────────────────────────────────────────
 
+# Transitional cutover entry: `srtla` now names the Rust SENDER package (built from
+# the srtla-send-rs repo as Debian package `srtla`). The `srtla-send-rs` key above is
+# retained unchanged so the APT index keeps serving 3.1.0/3.2.0/3.3.0 during the
+# transition; the two keys are removed in the later retirement step.
 srtla:
-  path: srtla
-  repo: https://github.com/CERALIVE/srtla
-  kind: first-party-receiver
-  pin: v2026.6.2
+  path: srtla-send-rs
+  repo: https://github.com/CERALIVE/srtla-send-rs
+  kind: first-party
+  pin: v4.1.0
   channel: stable
 
 apt-worker:
