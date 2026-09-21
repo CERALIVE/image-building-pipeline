@@ -190,24 +190,24 @@ EOF
 #     its own source first). This mirrors the platform layer's in-chroot apt usage.
 # ---------------------------------------------------------------------------
 # retry_apt: a passing bootstrap_ca_trust probe does not guarantee the real
-# call seconds later (observed live: probe OK, then EVERY mirror IP failed
-# cert-verify for the next 3 attempts too -- a short, total burst, not one
-# bad server; ForceIPv4 above did not change it, so it is not an IPv6
-# fallback delay either). Exit code alone is not enough: `apt-get update`
+# call seconds later. Two live runs since this existed both exhausted their
+# whole backoff window (first 6s, then a widened 155s) with EVERY mirror IP
+# failing cert-verify on EVERY attempt -- not a brief blip, so the backoff
+# is widened again; if this window is not enough either, the flakiness
+# outlasts realistic in-build retrying and needs a caching mirror, not a
+# bigger number here. Exit code alone is not enough either: `apt-get update`
 # exits 0 on a partial fetch failure ("W: Failed to fetch", stale/no index
 # kept) -- observed live, that starves the install with "Unable to locate
 # package" for everything, so output is checked for that marker too.
-# 6 attempts, 5/10/20/40/80s backoff: long enough to ride out a burst that
-# past evidence shows clears within roughly a minute.
 retry_apt() {
   local label="$1"; shift
-  local attempt backoff=(5 10 20 40 80) out rc
-  for attempt in 1 2 3 4 5 6; do
+  local attempt backoff=(10 20 40 60 90 120 150) out rc
+  for attempt in 1 2 3 4 5 6 7 8; do
     out="$("$@" 2>&1)"; rc=$?
     printf '%s\n' "${out}"
     [[ "${rc}" -eq 0 && "${out}" != *'Failed to fetch'* ]] && return 0
-    (( attempt < 6 )) || { log "FATAL: ${label} failed after 6 attempts"; return 1; }
-    log "${label}: attempt ${attempt}/6 failed — retrying in ${backoff[attempt - 1]}s"
+    (( attempt < 8 )) || { log "FATAL: ${label} failed after 8 attempts"; return 1; }
+    log "${label}: attempt ${attempt}/8 failed — retrying in ${backoff[attempt - 1]}s"
     sleep "${backoff[attempt - 1]}"
   done
 }
