@@ -189,7 +189,11 @@ _fetch_bsp_curl_one() {
     return 0
   fi
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
-  if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
+  # -C - resumes curl's own --retry at the byte it left off, so a large .deb
+  # too slow for one --max-time window keeps progress across attempts instead
+  # of restarting at 0 every time (observed live: 4 attempts each reset and
+  # never finished the same 763 MB file). Safe: ${tmp} is a fresh mktemp file.
+  if ! curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
     rm -f "${tmp}"
     return 1
   fi

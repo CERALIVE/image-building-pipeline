@@ -127,7 +127,10 @@ _fetch_rk3588_userspace_one() {
     return 0
   fi
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"
-  if ! curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
+  # -C - lets a large .deb resume across curl's own --retry attempts instead
+  # of restarting at 0 each time — see lib/fetch/bsp.sh for the reproduced
+  # failure this fixes. Safe: ${tmp} is a fresh mktemp file.
+  if ! curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
     rm -f "${tmp}"
     return 1
   fi

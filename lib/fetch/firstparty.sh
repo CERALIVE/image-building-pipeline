@@ -96,7 +96,10 @@ _fetch_first_party_curl_one() {
   fi
   tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
   log_info "first-party fetch (curl): ${spec} resolved=${version}"
-  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+  # -C - lets a large .deb resume across curl's own --retry attempts instead
+  # of restarting at 0 each time — see lib/fetch/bsp.sh for the reproduced
+  # failure this fixes. Safe: ${tmp} is a fresh mktemp file.
+  curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
