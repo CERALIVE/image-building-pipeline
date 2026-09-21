@@ -183,6 +183,19 @@ EOF
 #     sources in its sandbox, not the rootfs — same reason platform/postinst writes
 #     its own source first). This mirrors the platform layer's in-chroot apt usage.
 # ---------------------------------------------------------------------------
+# retry_apt: a passing bootstrap_ca_trust probe does not guarantee the real
+# call seconds later (observed live: probe OK, update died cert-verify 9s on,
+# i.e. flakiness not a stale store). 3 attempts/2s-4s backoff, retry.sh's shape.
+retry_apt() {
+  local label="$1"; shift
+  local attempt backoff=(2 4)
+  for attempt in 1 2 3; do
+    "$@" && return 0
+    (( attempt < 3 )) || { log "FATAL: ${label} failed after 3 attempts"; return 1; }
+    log "${label}: attempt ${attempt}/3 failed — retrying in ${backoff[attempt - 1]}s"
+    sleep "${backoff[attempt - 1]}"
+  done
+}
 install_runtime_packages() {
   if [[ -z "${SHARED_PACKAGES// /}" ]]; then
     log "FATAL: SHARED_PACKAGES is empty — runtime package set (shared.list) was not forwarded; refusing to build a package-less runtime"
@@ -192,8 +205,8 @@ install_runtime_packages() {
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
   bootstrap_ca_trust
-  apt-get update
-  apt-get install -y --no-install-recommends "${pkgs[@]}"
+  retry_apt "runtime apt-get update" apt-get update
+  retry_apt "runtime apt-get install" apt-get install -y --no-install-recommends "${pkgs[@]}"
 }
 
 # ---------------------------------------------------------------------------

@@ -60,10 +60,12 @@ SERVICES="${MKOSI}/customize/services.sh"
 DATAPERSIST="${MKOSI}/customize/data-persistence.sh"
 
 # postinst.chroot ceiling. Post-consolidation it is ~841 lines; the consolidated
-# dual-track was ~744 lines. 950 leaves generous headroom for ordinary edits while
-# still catching a re-inline of any one consolidated section (smallest, data-
-# persistence, is ~206 lines → 841+206 > 950).
-readonly MAX_POSTINST_LINES=950
+# dual-track was ~744 lines. 975 leaves headroom for ordinary edits (raised from
+# 950 for two small, non-duplicative fixes to the CA-trust bootstrap and its
+# apt-get retry — CHECK 1/1b/1c/2 above prove neither re-inlined anything)
+# while still catching a re-inline of any one consolidated section (smallest,
+# data-persistence, is ~206 lines → 841+206 > 975).
+readonly MAX_POSTINST_LINES=975
 
 # Functions consolidated into postinst-lib.sh (Task 6). The single source of truth.
 readonly CONSOLIDATED_FUNCS=(
