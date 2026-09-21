@@ -189,11 +189,17 @@ _fetch_bsp_curl_one() {
     return 0
   fi
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"
-  # -C - resumes curl's own --retry at the byte it left off, so a large .deb
-  # too slow for one --max-time window keeps progress across attempts instead
-  # of restarting at 0 every time (observed live: 4 attempts each reset and
-  # never finished the same 763 MB file). Safe: ${tmp} is a fresh mktemp file.
-  if ! curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
+  # -C - resumes curl's own --retry at the byte it left off; retry_transient
+  # then re-invokes the WHOLE command (still resuming via -C -) if even that
+  # was not enough -- observed live: 4 internal attempts on a slow link moved
+  # real, accumulating progress but never finished inside curl's own budget.
+  # FETCH_RETRY_TIMEOUT=0 skips retry_transient's own outer timeout() here:
+  # curl's --max-time already bounds each attempt, and a shorter outer one
+  # would kill a still-progressing transfer. Deadline widened so 3 full curl
+  # runs (each up to ~1200s) fit. ${tmp} is a fresh mktemp file: safe to resume.
+  if ! FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
+      "BSP curl fetch ${spec}" \
+      curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
     rm -f "${tmp}"
     return 1
   fi
