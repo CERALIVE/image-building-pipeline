@@ -184,13 +184,20 @@ EOF
 #     its own source first). This mirrors the platform layer's in-chroot apt usage.
 # ---------------------------------------------------------------------------
 # retry_apt: a passing bootstrap_ca_trust probe does not guarantee the real
-# call seconds later (observed live: probe OK, update died cert-verify 9s on,
-# i.e. flakiness not a stale store). 3 attempts/2s-4s backoff, retry.sh's shape.
+# call seconds later (observed live: flakiness not a stale store). Exit code
+# alone is not enough either: `apt-get update` exits 0 on a partial fetch
+# failure (every source can die cert-verify and it still reports success,
+# logging only "W: Failed to fetch") -- observed live, that "success" then
+# starves the following install with "Unable to locate package" for
+# everything. Output is checked for that marker too. 3 attempts/2s-4s
+# backoff, retry.sh's shape.
 retry_apt() {
   local label="$1"; shift
-  local attempt backoff=(2 4)
+  local attempt backoff=(2 4) out rc
   for attempt in 1 2 3; do
-    "$@" && return 0
+    out="$("$@" 2>&1)"; rc=$?
+    printf '%s\n' "${out}"
+    [[ "${rc}" -eq 0 && "${out}" != *'Failed to fetch'* ]] && return 0
     (( attempt < 3 )) || { log "FATAL: ${label} failed after 3 attempts"; return 1; }
     log "${label}: attempt ${attempt}/3 failed — retrying in ${backoff[attempt - 1]}s"
     sleep "${backoff[attempt - 1]}"
