@@ -124,28 +124,12 @@ EOF
 # ---------------------------------------------------------------------------
 # 2a. CA-trust bootstrap — the ONE apt transaction that cannot use the shipped
 #     HTTPS sources, because it is the transaction that creates the trust store.
-#
-#     configure_minimal_apt writes three HTTPS Debian sources (the device
-#     contract: TLS stops a carrier HTTP captive portal substituting an HTML page
-#     for signed repository metadata). At THIS point in the build the chroot has
-#     no CA store at all — `ca-certificates` is itself a member of shared.list,
-#     i.e. one of the packages about to be installed — so every HTTPS fetch fails
-#     `SSL routines::certificate verify failed` and apt then reports EVERY package
-#     in the set as "Unable to locate package", including stock ones like `sudo`
-#     and `rsync`. That is a build-time chicken-and-egg, not a device problem.
-#
-#     So: fetch ONLY `ca-certificates`, through a throwaway HTTP source that is
-#     visible for that single transaction and then deleted. Integrity is
-#     unchanged — the bootstrap source carries the same explicit `Signed-By`
-#     Debian archive keyring, so the package is still signature-verified; HTTP
-#     only removes the transport confidentiality apt never relied on for trust.
-#     Nothing the device ships is touched: `debian.sources` keeps its HTTPS
-#     payload byte-for-byte (pinned by tests/apt-mtls-and-dedupe.test.sh), and
-#     every later transaction — the rest of shared.list, apt.ceralive.tv, and the
-#     device's own updates — runs over HTTPS against the store this created.
-#
-#     A tree that already has a CA store skips the bootstrap entirely, so this is
-#     a no-op the day the base layer grows one.
+#     `ca-certificates` is a member of shared.list and the minimal base carries
+#     none, so against HTTPS every fetch dies `certificate verify failed` and apt
+#     reports EVERY package as "Unable to locate". Fetch only that one package
+#     through a throwaway HTTP source; it keeps the same explicit `Signed-By`
+#     keyring, so the package stays signature-verified. Nothing shipped changes —
+#     see AGENTS.md → "HTTPS sources need a CA store".
 # ---------------------------------------------------------------------------
 bootstrap_ca_trust() {
   if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
