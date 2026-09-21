@@ -1360,13 +1360,18 @@ Exact hashes and serving proof: [`media pin receipt`](docs/first-party-pin-curre
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 The engine row has since advanced to `2026.9.5`.
 
-**cerastream + CeraUI pins (2026-09-20):** the CURRENT app-layer pins.
-`manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.5` on both
-architectures (unchanged — `v2026.9.5` is still the newest engine release) and the
+**cerastream + CeraUI pins (engine updated 2026-09-21):** the CURRENT app-layer pins.
+`manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.6` on both
+architectures and the unchanged
 architecture-qualified `ceralive-device` rows
 `2026.9.3-20260920T155651.ec522ad` (amd64) / `2026.9.3-20260920T155654.ec522ad`
-(arm64); repo-local `versions.yaml` records `v2026.9.5` and `v2026.9.3`. Engine
-`2026.9.5` repairs composition disable (an explicit `change-config.composition:
+(arm64); repo-local `versions.yaml` records `v2026.9.6` and `v2026.9.3`. Engine
+`2026.9.6` retains audio-meter, idle-preview and program-session teardown ownership
+across timeouts (engine PRs #199–#201), fencing replacement capture until release
+completes. Both architecture assets were independently checksum-verified; see the
+[`engine pin receipt`](docs/first-party-pin-currency.md#engine-pin-receipt--2026-09-21).
+The HDMI-RX profile floor remains removed; this pin does not qualify restoring it.
+The retained `2026.9.5` fixes repair composition disable (an explicit `change-config.composition:
 null` clears composition transactionally) and the switching allocation guard (the
 allocation router no longer compares `framerate`, so a capture cadence that
 differs from the encode cadence across `videorate` is accepted); its

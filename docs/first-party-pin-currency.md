@@ -187,6 +187,39 @@ repo-local provenance tag. The catalog was refreshed through `--refresh`; no gua
 test or rollback override was weakened. No image build, flash or new hardware
 qualification is implied by this receipt.
 
+## Engine pin receipt — 2026-09-21
+
+The pipeline selects `cerastream=2026.9.6` on both architectures and records
+`v2026.9.6` in its repo-local provenance registry. Authenticated `gh release view`
+and the tag-ref API independently identify the published release and commit
+`b3eb2a0767687415401998353337c3413c09fda9`. Both downloaded Debian assets match
+their published sidecars and GitHub asset digests; their control fields confirm
+`Package: cerastream`, `Version: 2026.9.6` and the respective architecture.
+The pipeline's real first-party curl transport also fetched both exact versions
+through the stable GPG-verified architecture indexes. `cmp` proved both APT
+archives byte-identical to the separate GitHub downloads.
+
+| Architecture | Release asset | Verified SHA-256 |
+|---|---|---|
+| arm64 | `cerastream_2026.9.6_arm64.deb` | `75cf2ecbd37957b9bf3d5d2091d670cb0a14a035b0aac7d7d12757b3a2518f3a` |
+| amd64 | `cerastream_2026.9.6_amd64.deb` | `22fbcd010ab95d767ef4535701888c25d552321f32e2b1e49b130a0e391cf175` |
+
+This release includes the audio-meter, idle-preview and program-session
+teardown-ownership fixes (engine PRs #199–#201). A teardown timeout no longer
+permits replacement capture to race unresolved native cleanup. The release keeps
+the existing published bindings; this is a binary package bump, not an npm bump.
+
+The image does not build cerastream from a sibling checkout. Its exact Debian
+version selects a record in the freshly GPG-verified architecture index, and the
+fetcher verifies the archive's SHA-256 and Debian control identity. The producer
+tag is therefore checked in the producer repository, not with a cross-repository
+Git ancestry test. Image-source ancestry separately proves inclusion of required
+pipeline changes. The package-contract test pins both architecture selectors and
+the provenance tag independently to this release.
+
+All other component pins, the MPP userspace pin and the HDMI-RX profile policy
+remain unchanged. This receipt is not a board soak, flash or OTA authorization.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as
