@@ -188,7 +188,13 @@ It still does not satisfy the old in-tree trigger:
   OTA qualification (`docs/DEFERRED.md` item 9). The later island v2026.9.4 RGA
   repair has its own passed Rock candidate receipt in
   [`kernel-build-from-source.md`](kernel-build-from-source.md#rga-ownership-candidate--island-v202694).
-  Neither result qualifies a newly combined post-R0 image.
+  The current pin, island v2026.9.5, is recorded in the same document with its
+  Rock `edge-test` qualification and, since 2026-09-21, the both-board production-slot
+  boot of the image built from it. That boot is an installed-kernel receipt; it
+  does not by itself re-run the OTA qualification rows.
+- The upstream-currency window checks for the carried `backports/` rows live in
+  `rk3588-kernel-patches/docs/UPSTREAM-STATUS.md` (2026-09-06 window: `0011`
+  merged upstream, release still projected; `0010` re-posted unchanged).
 
 This is an explicit adoption of a maintained out-of-tree path, not a claim that
 mainline gained a frozen stateless encode ABI.

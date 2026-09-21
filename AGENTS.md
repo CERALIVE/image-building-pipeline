@@ -1385,7 +1385,14 @@ connectivity fallback and host-route repair; it consumes the published
 release assets were downloaded through authenticated GitHub access and
 independently hashed against their published sidecars, and the CeraUI release run
 verified the same bytes against the stable signed index on both architectures.
-Neither pin claims a new image has been built, flashed or hardware-qualified.
+Neither pin claimed a new image when it landed. Both have since been built and
+booted: on 2026-09-21 the Rock 5B+ and the Orange Pi 5+ each promoted the image
+built from these pins to RAUC slot A and read `cerastream 2026.9.6` and
+`ceralive-device 2026.9.3-20260920T155654.ec522ad` back through `dpkg-query` on
+the booted slot, `systemctl --failed` empty, `ceralive-healthcheck.service`
+self-marking the slot good, `apt-get update` exit 0, and the previous production
+payload retained good on slot B. That is a boot receipt, not hardware
+qualification of every stream path; the drill rows keep their own verdicts.
 
 **KNOWN GAP, pre-existing and NOT introduced by this pin.** The release-evidence
 catalog `manifests/first-party-releases.json` still carries
@@ -3262,9 +3269,16 @@ no replacement userspace build is needed.
   published `.sha256` sidecar before pinning; the `.6` row is retained commented
   directly above it as the one-line rollback.
   It stays platform-layer only, never in `REPOS` or `FIRST_PARTY_APT_PKGS`.
-  The pipeline pins the released
-  bytes to enable fresh-image qualification, not to claim either board has run
-  this package. The MPP pin is unchanged; the RGA R1 pin is described below.
+  The pipeline pins the released bytes, and since 2026-09-21 both boards have
+  run this exact package from a production slot: the Rock 5B+ and the Orange
+  Pi 5+ each promoted the image built from this manifest (PR #183 pins plus the
+  PR #187 cerastream `2026.9.6` pin) to RAUC slot A, booted it, and read
+  `gstreamer1.0-rockchip-ceralive 1.14.4+ceralive.7` back through `dpkg-query`
+  on the booted slot with `ceralive-healthcheck.service` self-marking the slot
+  good. That boot is the installed-package receipt; the per-element drill
+  verdicts stay in the fork's `tests/board/DRILL-RESULTS.md` and root
+  `docs/COMPLETENESS-MATRIX.md` §2.2. The MPP pin is unchanged; the RGA R1 pin
+  is described below.
 - **Fetcher:** `fetch_rk3588_userspace` in `lib/fetch-debs.sh` stages only the
   pinned packages the resolved family declares (intersection of
   `collect_declared_bsp_pkgs` and the pin file's names); `fetch_bsp` EXCLUDES exactly
@@ -3305,9 +3319,15 @@ Both published archives were independently hashed and byte-compared against
 stable APT downloads; the published hashes differ from the local R1 candidates.
 See [`docs/librga-r1-pin.md`](docs/librga-r1-pin.md) for exact identities.
 Neither package contains maintainer scripts or triggers: installation alone
-does not prove `ldconfig` ran or the normal loader uses R1. No image build,
-board delivery or PiP success is claimed by this pin. Kernel, plugin and engine
-pins are unchanged.
+does not prove `ldconfig` ran or the normal loader uses R1. The pin itself
+claimed no image build or board delivery when it landed; both have since
+happened. On 2026-09-21 both bench boards booted the image built from this
+manifest from RAUC slot A and read `librga2-ceralive 1.10.5+ceralive.1` back
+through `dpkg-query` on the booted slot, healthcheck self-marked good. PiP or
+composition success is still not claimed by that boot; those rows keep their
+own verdicts in root `docs/COMPLETENESS-MATRIX.md` §2.2. Kernel, plugin and
+engine pins moved separately (island `v2026.9.5`, fork `.7`, cerastream
+`2026.9.6`) and are described in their own sections.
 
 **versions.yaml** [EXISTS]
 `fetch-debs.sh` and `resolve.sh` read pin versions from the repo-local `versions.yaml`.

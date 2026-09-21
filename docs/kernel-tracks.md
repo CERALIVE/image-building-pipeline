@@ -77,8 +77,40 @@ backward:
 `rk3588.yaml` is the single point where a pin becomes a build input. Nothing in
 this repo re-derives a pin independently of that file.
 
-Media-island reversibility: RGA rollback = `patches_commit` back to `cb491dc`
-(one line); the pre-flip image sits on the other RAUC slot until the next deploy.
+## The media-island handover: two reversibility points, both crossed
+
+The island silicon handover was staged as two `patches_commit` bumps, each a
+one-line revert, because the two flips carry different risk and folding them
+would have erased the rollback point between them. Both have now been crossed
+on `master`; the table records the pin that crossed each one and where the
+current pin sits.
+
+| Point | `patches_commit` | What moved | Status |
+|---|---|---|---|
+| 1 — the MPP flip | `cb491dc16fc1` (PR #148) | `mpp_srv` + RKVENC2/RKVDEC2/JPGDEC take the encoder, both decoder nodes and `jpegd` by DT `compatible`; the standalone VEPU580 driver and its nine rkvenc siblings retire. Mainline `rkvdec` stays BUILT and binds nothing. | crossed; superseded by later pins |
+| 2 — the RGA flip | `365b24632940` (PR #150, island `v2026.9.2`) | RGA3 core0/core1 and RGA2 move from mainline `rockchip-rga` to the island's `multi_rga`; `CONFIG_ROCKCHIP_MULTI_RGA=m` declared, `CONFIG_VIDEO_ROCKCHIP_RGA` explicitly `not set` and on the forbidden list. | crossed; superseded by later pins |
+| current | `6996f96bc883` (PR #179, island `v2026.9.5`) | RGA job-lifecycle race fix on top of `v2026.9.4`'s RGA ownership repairs (`9a8be32fe6b5`, PR #165). | **pinned on `master` and booted**: Rock `edge-test` qualification PASS 2026-09-19 (PR #179 body); on 2026-09-21 both bench boards promoted the image built from this pin (the PR #183/#187 manifest) to RAUC slot A and booted `linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1` from it, healthcheck self-marked good, previous payload retained good on slot B |
+
+Decoder truth at every pin from point 1 on: the island owns `vdec0`/`vdec1` and
+`jpegd`; mainline `rkvdec` is compiled and idle by design so the handover can be
+undone by a device-tree change instead of a kernel rebuild. RGA truth from point
+2 on: `multi_rga` owns all three cores behind one `/dev/rga`; `rockchip-rga` binds
+nothing. Rollback of the current pin is `patches_commit` back to the previous
+lane commit (one line); the pre-bump image sits on the other RAUC slot until the
+next deploy.
+
+"The pipeline pins it" and "a board booted it" stay different sentences. Both
+bench boards have booted images built from point-2-era pins (`365b2463`,
+`b41a82a9`/`v2026.9.3`, `9a8be32f`/`v2026.9.4` on the Rock `edge-test` slot) —
+the board rows in root `docs/COMPLETENESS-MATRIX.md` §2.2 name each run's pin.
+The `v2026.9.5` pin crossed from "pinned" to "booted" on 2026-09-21: the image
+built from it (with the PR #183 userspace pins and the PR #187 cerastream
+`2026.9.6` pin) was installed into slot A on the Rock 5B+ and the Orange Pi 5+,
+promoted with `ceralive-boot-state set-primary A`, and each board came up on
+`rauc.slot=A` with `systemctl --failed` empty and `ceralive-healthcheck.service`
+marking the slot good with the current boot's own `boot-id`. Slot B keeps the
+previous production payload as the rollback. A clean boot is the installed-kernel
+receipt only; the drill rows keep their own verdicts.
 
 **A base bump does not carry hardware evidence with it.** Board results are scoped
 to the base they were measured on; after a re-pin, treat the new base as
