@@ -859,6 +859,17 @@ PY
   [ "$output" = "$REPO_ROOT/versions.yaml" ]
 }
 
+@test "fetch-debs cerastream registry and both architectures select the sidecar-ownership release" {
+  local expected_engine_version="2026.9.6"
+  local arch engine_version
+
+  [ "$(get_pin cerastream)" = "v${expected_engine_version}" ]
+  for arch in amd64 arm64; do
+    engine_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version cerastream' _ "$FETCH_DEBS")"
+    [ "$engine_version" = "$expected_engine_version" ]
+  done
+}
+
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
   local expected_ceraui_pin="v2026.9.3"
   local arch expected_device_version device_version

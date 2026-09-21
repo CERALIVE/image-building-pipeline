@@ -612,12 +612,13 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.5` (PR #173). It keeps `2026.9.4`'s
-canonical `gstreamer1.0-libuvcsrc` package dependency and forced-IDR delivery
-through the encoder src pad with actual acceptance reporting, and adds the
-transactional composition clear plus the allocation router's framerate-agnostic
-layout comparison. Both architecture packages are served by APT and were
-byte-compared with their authenticated GitHub release downloads before pinning.
+The engine pin is `cerastream=2026.9.6`. It retains audio-meter, idle-preview
+and program-session teardown ownership across timeouts, fencing replacement
+capture until release completes (engine PRs #199–#201). The canonical
+`gstreamer1.0-libuvcsrc` dependency and earlier composition fixes remain.
+Both architecture release assets were independently checksum-verified before
+pinning. Release identity and the exact-version APT verification mechanism:
+[`Engine pin receipt`](docs/first-party-pin-currency.md#engine-pin-receipt--2026-09-21).
 The RK3588 plugin pin is `1.14.4+ceralive.7`, retaining its platform-layer
 URL+SHA route; both the superseded `.6` fork row and the original Radxa row are
 kept commented above it as rollback levers. On top of `.6`'s compositor
