@@ -56,8 +56,11 @@ KASAN use-after-free seen on the Rock `edge-test` slot on 2026-09-18). Landed by
 pin-only, with the Rock `edge-test` qualification recorded in its body: 8 clean
 composition cycles, 8 engine-restart cycles and a 300 s soak with encoder, decoder
 and RGA loaded, no kernel fault report, board restored to its production slot.
-No production slot has booted an image built from this pin; the `v2026.9.4`
-receipt below is the last artifact-bound production-candidate qualification.
+On 2026-09-21 both bench boards booted an image built from this pin from a
+production slot (RAUC slot A, promoted by `set-primary`, healthcheck self-marked
+good, `linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1` installed); the
+`v2026.9.4` receipt below is the last artifact-bound production-candidate
+qualification before that boot.
 
 ### RGA ownership candidate — island v2026.9.4
 
