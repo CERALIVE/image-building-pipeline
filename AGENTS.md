@@ -175,6 +175,33 @@ image or disable signature/date/TLS checks. The real-writer payload regression
 is in `tests/apt-mtls-and-dedupe.test.sh`. No installed board source is migrated
 in place; the source change arrives with a new image.
 
+**HTTPS sources need a CA store, and the runtime layer is the transaction that
+creates one — so it bootstraps `ca-certificates` over HTTP first.** The base layer
+is deliberately minimal (systemd, udev, openssh-server, dbus) and carries no trust
+store, and `ca-certificates` is a member of `shared.list` — i.e. one of the very
+packages the runtime postinst is about to install. Against the HTTPS sources that
+is unsatisfiable: every fetch fails `SSL routines::certificate verify failed`, and
+apt then reports EVERY package in the set as "Unable to locate package", stock ones
+like `sudo` and `rsync` included. That is what a real `./build rock-5b-plus` did
+from the HTTPS flip (2026-09-08) until this bootstrap landed — **no device image
+could be built at all**, masked because `real-build-audit.yml` was already failing
+earlier, at its pre-checkout cleanup.
+`bootstrap_ca_trust` (`mkosi.images/runtime/mkosi.postinst.chroot`) fetches ONLY
+`ca-certificates`, through a throwaway HTTP deb822 source made the sole visible one
+for that single transaction via `Dir::Etc::sourcelist=/dev/null` +
+`Dir::Etc::sourceparts=<tmpdir>`, then deletes it. Integrity is unchanged: the
+bootstrap source carries the same explicit `Signed-By` Debian archive keyring, so
+the package is still signature-verified — HTTP drops only transport confidentiality,
+which apt never relied on for trust. **Nothing shipped changes**: `configure_minimal_apt`
+is untouched and `debian.sources` keeps its HTTPS payload byte-for-byte (still
+pinned by `tests/apt-mtls-and-dedupe.test.sh`), and every later transaction — the
+rest of `shared.list`, `apt.ceralive.tv`, and the device's own updates — runs over
+HTTPS against the store the bootstrap created. A tree that already has
+`/etc/ssl/certs/ca-certificates.crt` skips it entirely, so it self-retires the day
+the base layer grows a trust store. Do NOT "fix" this by putting the device sources
+back on HTTP, by disabling peer verification, or by adding `ca-certificates` to the
+base layer's minimal set.
+
 **The real-Avahi harness needs a bounded socket path, not the image TMPDIR.**
 `tests/real-avahi-hostname-contract.sh` creates its small, mode-0700 fixture at
 `/var/tmp/ceralive-real-avahi.XXXXXX`, independently of the suite's `TMPDIR`.

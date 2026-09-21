@@ -122,6 +122,49 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 2a. CA-trust bootstrap — the ONE apt transaction that cannot use the shipped
+#     HTTPS sources, because it is the transaction that creates the trust store.
+#     `ca-certificates` is a member of shared.list and the minimal base carries
+#     none, so against HTTPS every fetch dies `certificate verify failed` and apt
+#     reports EVERY package as "Unable to locate". Fetch only that one package
+#     through a throwaway HTTP source; it keeps the same explicit `Signed-By`
+#     keyring, so the package stays signature-verified. Nothing shipped changes —
+#     see AGENTS.md → "HTTPS sources need a CA store".
+# ---------------------------------------------------------------------------
+bootstrap_ca_trust() {
+  if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
+    log "CA trust store already present — skipping the HTTPS bootstrap"
+    return 0
+  fi
+
+  log "bootstrapping ca-certificates over HTTP (chroot has no CA store yet; the shipped sources stay HTTPS)"
+  local boot_dir='/tmp/ceralive-ca-bootstrap'
+  rm -rf "${boot_dir}"
+  mkdir -p "${boot_dir}"
+  cat >"${boot_dir}/bootstrap.sources" <<EOF
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${APT_SUITE}
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+
+  # Dir::Etc::sourcelist=/dev/null + sourceparts=<dir> makes the bootstrap source
+  # the ONLY one apt can see for these two commands, so it cannot fall back to
+  # the (still unusable) HTTPS sources while resolving ca-certificates.
+  local -a scope=(-o "Dir::Etc::sourcelist=/dev/null" -o "Dir::Etc::sourceparts=${boot_dir}")
+  apt-get "${scope[@]}" update
+  apt-get "${scope[@]}" install -y --no-install-recommends ca-certificates
+  rm -rf "${boot_dir}"
+
+  if [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+    log "FATAL: ca-certificates bootstrap produced no CA store — the HTTPS sources cannot be used"
+    exit 1
+  fi
+  log "CA trust store installed — continuing over the shipped HTTPS sources"
+}
+
+# ---------------------------------------------------------------------------
 # 2b. Runtime package install from the canonical Task-18 list.
 #     SOURCE OF TRUTH = manifests/packages/shared.list (+ resolved family delta),
 #     read by lib/orchestrate.sh and forwarded here as $SHARED_PACKAGES. There is
@@ -138,6 +181,7 @@ install_runtime_packages() {
   local pkgs
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
+  bootstrap_ca_trust
   apt-get update
   apt-get install -y --no-install-recommends "${pkgs[@]}"
 }
