@@ -876,12 +876,12 @@ PY
 }
 
 @test "fetch-debs srt pin ships libsrt1.5-ceralive bundling /usr/bin/srt-live-transmit" {
-  # srt 1.5.6+ceralive.1 (upstream v1.5.6 KMREQ CVE fixes, built off master) still
+  # srt 1.5.7+ceralive.2 (Haivision v1.5.7 carrying the three CeraLive socket options)
   # bundles srt-live-transmit into the EXISTING libsrt1.5-ceralive .deb (PR #18 "Path A"),
   # linked against the same shared GnuTLS libsrt.so.1.5 (single-libsrt invariant) — so it
   # needs NO new FIRST_PARTY_APT_PKGS entry, only the version bump. Live + GPG-signed on
   # apt.ceralive.tv (arm64+amd64).
-  local expected_srt_pin="srt-v1.5.6+ceralive.1"
+  local expected_srt_pin="srt-v1.5.7+ceralive.2"
   [ "$(get_pin srt)" = "$expected_srt_pin" ]
   local libsrt_version
   libsrt_version="$(awk -F= '$1 == "libsrt1.5-ceralive" { print $2; exit }' \
