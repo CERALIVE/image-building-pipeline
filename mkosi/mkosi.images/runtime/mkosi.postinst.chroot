@@ -130,14 +130,36 @@ EOF
 #     through a throwaway HTTP source; it keeps the same explicit `Signed-By`
 #     keyring, so the package stays signature-verified. Nothing shipped changes —
 #     see AGENTS.md → "HTTPS sources need a CA store".
+#
+#     The skip check does NOT stop at "a file exists" — a base layer that
+#     already carries a `ca-certificates` package (Packages= in
+#     mkosi.images/base/mkosi.conf) can produce a non-empty
+#     /etc/ssl/certs/ca-certificates.crt that is nonetheless the WRONG bundle
+#     for right now: an apt-resolved base-bootstrap snapshot can predate
+#     whatever intermediate CA deb.debian.org's current edge certificate chain
+#     needs, so the file is present and non-empty yet still fails to validate
+#     the live shipped source with `certificate verify failed`. A real-build
+#     run reproduced exactly this three times in a row: "CA trust store
+#     already present — skipping the HTTPS bootstrap" logged, immediately
+#     followed by the main `apt-get update` against the real HTTPS sources
+#     dying with that same error. The check now proves the inherited store
+#     actually validates the real shipped source (the `debian.sources` deb822
+#     file `configure_minimal_apt` writes before this runs) by running the
+#     exact same `apt-get update` the caller is about to run, and only skips
+#     the bootstrap when that live probe succeeds — any failure (missing file,
+#     stale bundle, network hiccup) falls through to the HTTP-bootstrap fetch.
+#     `curl`/`wget` are NOT used here on purpose: both are `shared.list`
+#     entries this same layer is about to install, so neither is guaranteed
+#     present yet at this point in the chroot — `apt` is the only fetcher this
+#     script can rely on this early (it is a base-layer `Packages=` entry).
 # ---------------------------------------------------------------------------
 bootstrap_ca_trust() {
-  if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
-    log "CA trust store already present — skipping the HTTPS bootstrap"
+  if [[ -s /etc/ssl/certs/ca-certificates.crt ]] && apt-get update >/dev/null 2>&1; then
+    log "CA trust store already present and validates the live HTTPS source — skipping the HTTPS bootstrap"
     return 0
   fi
 
-  log "bootstrapping ca-certificates over HTTP (chroot has no CA store yet; the shipped sources stay HTTPS)"
+  log "bootstrapping ca-certificates over HTTP (inherited CA store missing or does not validate the live source; the shipped sources stay HTTPS)"
   local boot_dir='/tmp/ceralive-ca-bootstrap'
   rm -rf "${boot_dir}"
   mkdir -p "${boot_dir}"
