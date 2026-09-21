@@ -159,7 +159,7 @@ printf ',"device_tree_compatible":%s' \
 printf ',"packages":'
 if have dpkg-query; then
   jmulti "$(dpkg-query -W -f='${Package} ${Version}\n' \
-      ceralive-device cerastream srtla-send-rs libsrt1.5-ceralive rauc \
+      ceralive-device cerastream srtla libsrt1.5-ceralive rauc \
       util-linux kmod 2>/dev/null)"
 else
   printf 'null'

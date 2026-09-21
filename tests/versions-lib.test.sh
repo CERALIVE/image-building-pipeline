@@ -166,7 +166,7 @@ printf 'epsilon:\n  pin epsilon-pin\n' >"${nocolon}"
 expect_pin "malformed: a pin without a colon is not a pin" "" epsilon "${nocolon}"
 
 # --- the shipped registry actually resolves ---------------------------------
-for key in srt cerastream CeraUI srtla-send-rs; do
+for key in srt cerastream CeraUI srtla; do
   [[ -n "$(get_pin "${key}" "${SHIPPED_YAML}")" ]] \
     || fail "the shipped versions.yaml has no resolvable pin for '${key}'"
 done

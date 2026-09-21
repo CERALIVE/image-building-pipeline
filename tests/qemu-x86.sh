@@ -12,7 +12,7 @@
 #         (it legitimately may not auto-start without on-box config / capture HW —
 #          loaded-but-inactive is a PASS-with-note, not a hard fail; see task brief)
 #   4. key packages/binaries present: systemd, udev (real .debs) + cerastream,
-#      srtla_send (first-party /usr/bin binary from srtla-send-rs)
+#      srtla_send (first-party /usr/bin binary from srtla)
 #
 # It is explicitly NOT a substitute for the RK3588 real-hardware gate (realhw-
 # smoke.sh LIVE + task 38) and does NOT attempt a streaming encode (no VAAPI/QSV

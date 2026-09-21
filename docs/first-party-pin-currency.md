@@ -35,8 +35,12 @@ before building, using a tighter evidence-age bound.
 | `manifests/rk3588-userspace-deb-versions.txt` | Active first-party platform filename version and decoded GitHub URL tag; commented predecessors do not count |
 | `manifests/first-party-releases.json` | Independently observed published stable release and package versions, not copied from image pins |
 
-Covered components: `srt`, `cerastream`, `CeraUI`, `srtla-send-rs`,
+Covered components: `srt`, `cerastream`, `CeraUI`, `srtla`,
 `gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, and `librga`.
+Component `srtla` is the Rust sender, renamed from `srtla-send-rs` at the 4.1.0
+cutover; its GitHub repository was not renamed, so `ci/pin_versions.py`
+`COMPONENT_REPOS` — not the component name — resolves the repository for release
+lookups, and `CERALIVE/srtla` (the retired C receiver) is never queried.
 The modem companion follows its release tag; its nine upstream-versioned
 packages are compared individually against the release's package manifest.
 Their per-source rebuild counters are **not** inferred from the component tag.

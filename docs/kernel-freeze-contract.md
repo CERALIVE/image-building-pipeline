@@ -80,7 +80,7 @@ Every first-party CeraLive package stays **apt-updatable**, because
 `system.startUpdate()` drives:
 
 ```
-cerastream            ceralive-device (CeraUI)   srtla-send-rs
+cerastream            ceralive-device (CeraUI)   srtla
 libsrt1.5-ceralive    gstreamer1.0-libuvcsrc rauc-hawkbit-updater
 modemmanager  libmm-glib0  libmbim-glib4  libmbim-proxy  libmbim-utils
 libqmi-glib5  libqmi-proxy libqmi-utils   libqrtr-glib0
@@ -209,7 +209,7 @@ cat /etc/apt/preferences.d/ceralive-kernel-freeze
 apt-cache policy linux-image-7.2.0-ceralive-rk3588
 
 # The freeze must not touch the app layer
-apt-mark showhold | grep -E '^(cerastream|ceralive-device|srtla-send-rs)$'   # expect: no match
+apt-mark showhold | grep -E '^(cerastream|ceralive-device|srtla)$'   # expect: no match
 
 # A dry run must not offer the kernel
 apt-get -s upgrade

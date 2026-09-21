@@ -55,7 +55,7 @@ if [[ "${command_name}" == "download" ]]; then
 		fi
 		pkg="${arg%%=*}"
 		version="${arg#*=}"
-		if [[ "${FAKE_APT_MODE:-ok}" == missing-one && "${pkg}" == srtla-send-rs ]]; then
+		if [[ "${FAKE_APT_MODE:-ok}" == missing-one && "${pkg}" == srtla ]]; then
 			continue
 		fi
 		tmp="$(mktemp -d)"

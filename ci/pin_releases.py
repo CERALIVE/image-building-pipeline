@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pin_versions import APP_COMPONENTS, COMPONENTS, PLATFORM_COMPONENTS, PinError, compare, release_version
+from pin_versions import APP_COMPONENTS, COMPONENT_REPOS, COMPONENTS, PLATFORM_COMPONENTS, PinError, compare, release_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +84,8 @@ def github(args: list[str]) -> str:
 
 
 def discover_release(component: str) -> Release:
-    pages = json.loads(github(["api", f"repos/CERALIVE/{component}/releases?per_page=100", "--paginate", "--slurp"]))
+    repo = COMPONENT_REPOS[component]
+    pages = json.loads(github(["api", f"repos/CERALIVE/{repo}/releases?per_page=100", "--paginate", "--slurp"]))
     candidates = []
     for page in pages:
         for row in page:
@@ -105,7 +106,7 @@ def discover_release(component: str) -> Release:
     packages: dict[str, str] = {}
     owned = {pkg for pkg, owner in (APP_COMPONENTS | PLATFORM_COMPONENTS).items() if owner == component}
     if component == "modem-stack":
-        manifest = github(["release", "download", newest["tag_name"], "--repo", f"CERALIVE/{component}", "--pattern", "release-manifest.txt", "--output", "-"])
+        manifest = github(["release", "download", newest["tag_name"], "--repo", f"CERALIVE/{repo}", "--pattern", "release-manifest.txt", "--output", "-"])
         if f"tag: {newest['tag_name']}" not in manifest.splitlines():
             raise PinError("modem release manifest tag mismatch")
         for line in manifest.splitlines():

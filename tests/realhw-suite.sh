@@ -170,7 +170,7 @@ emit_dpkg_status() {                         # emit_dpkg_status <out>
   # ceraui→ceralive-device) + Armbian-BSP + first-party → list as installed, so the
   # synthetic rootfs is an all-PASS reference matching a REAL build's package names.
   for p in v4l-utils gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device \
-    cerastream libsrt1.5-ceralive srtla-send-rs; do
+    cerastream libsrt1.5-ceralive srtla; do
     printf 'Package: %s\nStatus: install ok installed\nVersion: 0-mock\n\n' "${p}" >> "${out}"
   done
 }
@@ -292,7 +292,7 @@ sec_dev_loop() {
   local log="${EVIDENCE_DIR}/03-dev-loop.log" rc
   if [[ "${MODE}" == "live" ]]; then
     if [[ -z "${DEV_DEB_DIR}" ]]; then
-      echo "FAIL — LIVE candidate gate requires DEV_DEB_DIR with the staged arm64 srtla-send-rs package." \
+      echo "FAIL — LIVE candidate gate requires DEV_DEB_DIR with the staged arm64 srtla package." \
         | tee "${log}"
       return 1
     fi

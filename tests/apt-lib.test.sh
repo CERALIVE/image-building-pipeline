@@ -260,10 +260,10 @@ Version: 2026.6.1
 Filename: ./cerastream_2026.6.1_arm64.deb
 SHA256: aaaa
 
-Package: srtla-send-rs
+Package: srtla
 Architecture: amd64
 Version: 1.0.0
-Filename: ./srtla-send-rs_1.0.0_amd64.deb
+Filename: ./srtla_1.0.0_amd64.deb
 SHA256: bbbb
 EOF
 
@@ -280,7 +280,7 @@ ok "optional: a genuine miss returns the NOT_FOUND sentinel (1)"
 # WRONG ARCH is a miss, not a hit: staging an amd64 .deb into an arm64 image is
 # exactly the silent corruption this lookup exists to prevent.
 rc=0
-lib_eval 'index_lookup_optional "$1" srtla-send-rs 1.0.0 arm64' "${pkgindex}" >/dev/null 2>&1 || rc=$?
+lib_eval 'index_lookup_optional "$1" srtla 1.0.0 arm64' "${pkgindex}" >/dev/null 2>&1 || rc=$?
 [[ "${rc}" == "1" ]] || fail "a wrong-architecture entry returned ${rc}, expected NOT_FOUND (1)"
 ok "optional: an entry for another architecture is a miss, never a hit"
 

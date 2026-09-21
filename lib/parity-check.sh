@@ -14,7 +14,7 @@
 #                   debian       — must be installed now (hard FAIL if missing)
 #                   platform     — gstreamer1.0-rockchip-ceralive / rockchip-multimedia-config / librga2-ceralive
 #                                  (families/rk3588.yaml HW-accel + runtime)
-#                   first-party  — CeraLive SRT/ceraui/cerastream/srtla-send-rs (CI: apt; offline → WARN)
+#                   first-party  — CeraLive SRT/ceraui/cerastream/srtla (CI: apt; offline → WARN)
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
@@ -61,7 +61,7 @@ PLATFORM_PKGS=" gstreamer1.0-rockchip-ceralive rockchip-multimedia-config librga
 # First-party .debs (App layer) — built upstream, fetched in CI from R2/gh.
 # Mirrors fetch-debs.sh REPOS (+ the ceraui alias above). Offline these are
 # absent → reported as WARN, never silent.
-FIRST_PARTY_PKGS=" libsrt1.5-ceralive ceraui cerastream srtla-send-rs "
+FIRST_PARTY_PKGS=" libsrt1.5-ceralive ceraui cerastream srtla "
 
 PASS=0; WARN=0; FAIL=0
 pass() { log_success "PASS  $*"; PASS=$((PASS+1)); }
@@ -169,7 +169,7 @@ main() {
     warn "platform packages not installed (need pinned userspace fetch at build time): ${platform_missing[*]}"
   fi
   if (( ${#firstparty_missing[@]} == 0 )); then
-    pass "first-party packages installed (libsrt1.5-ceralive/ceraui/cerastream/srtla-send-rs)"
+    pass "first-party packages installed (libsrt1.5-ceralive/ceraui/cerastream/srtla)"
   else
     fail "first-party packages MISSING from rootfs: ${firstparty_missing[*]}"
   fi

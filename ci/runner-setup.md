@@ -22,7 +22,7 @@ The two LIVE acceptance harnesses need to **boot a real board and talk to it**:
 
 | Harness | What LIVE mode needs from the bench |
 |---|---|
-| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`root@…`, restricted run-local key auth); asserts login, `ceralive`/`ceraui.service` active, `cerastream`/`srtla_send`/`srtla_rec` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
+| `realhw-smoke.sh` (LIVE) | `BOARD_IP` reachable over SSH (`root@…`, restricted run-local key auth); asserts login, `ceralive`/`ceraui.service` active, `cerastream`/`srtla_send` present + `--version`, manifest-quirk HW (`/dev/video*`, modem, udev rule), and a full `parity-check.sh` over an rsync of the live rootfs. |
 | `rauc-rollback.sh` (LIVE) | `BOARD_IP` + signed bundles in `BUNDLE_DIR` (`bad.raucb`, `good.raucb`); does `scp`+`rauc install`, `systemctl reboot`, **re-poll SSH after each reboot**, reads booted slot from `/proc/cmdline` (`root=PARTLABEL=rootfs_a\|b`). Proves a bad slot bleeds bootcount 3→2→1→0 and falls back to A; a good slot mark-goods and persists. |
 
 No cloud VM has USB/serial/board access. Only a machine physically wired to an

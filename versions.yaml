@@ -1,5 +1,5 @@
 # CeraLive component version registry — manually maintained; pipeline reads with graceful fallback
-# Keys under image-repos match REPOS=("srt" "cerastream" "CeraUI" "srtla-send-rs" "modem-stack") in fetch-debs.sh
+# Keys under image-repos match REPOS=("srt" "cerastream" "CeraUI" "srtla" "modem-stack") in fetch-debs.sh
 # exactly. Each key resolves a published device package from apt.ceralive.tv.
 # pin: update when cutting a release.
 # cerastream is the SOLE streaming engine (ceracoder fully retired 2026-06-11, post boot-parity
@@ -110,11 +110,15 @@ CeraUI:
   # per architecture, represented there by ceralive-device[amd64] and [arm64].
   channel: stable
 
-srtla-send-rs:
+# `srtla` is the Rust SENDER, shipped as Debian package `srtla`; the C receiver pin
+# it replaced was retired at the 4.1.0 cutover. Selector, manifest and catalog
+# identity are all `srtla` — only `path`/`repo` below still name the GitHub
+# repository directory, which was never renamed.
+srtla:
   path: srtla-send-rs
   repo: https://github.com/CERALIVE/srtla-send-rs
   kind: first-party
-  pin: v3.3.0
+  pin: v4.1.0
   channel: stable
 
 # Provenance-only: the companion package version is selected exclusively by
@@ -127,17 +131,6 @@ modem-stack:
   channel: stable
 
 # ── Remaining first-party repos ───────────────────────────────────────────────
-
-# Transitional cutover entry: `srtla` now names the Rust SENDER package (built from
-# the srtla-send-rs repo as Debian package `srtla`). The `srtla-send-rs` key above is
-# retained unchanged so the APT index keeps serving 3.1.0/3.2.0/3.3.0 during the
-# transition; the two keys are removed in the later retirement step.
-srtla:
-  path: srtla-send-rs
-  repo: https://github.com/CERALIVE/srtla-send-rs
-  kind: first-party
-  pin: v4.1.0
-  channel: stable
 
 apt-worker:
   path: apt-worker

@@ -115,7 +115,7 @@ lib_eval 'explode_deb "$1" "$2"' "${good}" "${exploded}" >/dev/null
 ok "happy: explode_deb extracts the data tarball"
 
 # --- wrong identity ---------------------------------------------------------
-if lib_eval 'assert_deb_identity "$1" srtla-send-rs 2026.6.1 arm64' "${good}"; then
+if lib_eval 'assert_deb_identity "$1" srtla 2026.6.1 arm64' "${good}"; then
   fail "a WRONG PACKAGE NAME was accepted"
 fi
 ok "wrong: a mismatched package name is rejected"

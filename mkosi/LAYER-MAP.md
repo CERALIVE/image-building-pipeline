@@ -125,7 +125,7 @@ flavor builds in one process.
 | Installs (the `.deb`) | In-image path | OTA-delivery backend |
 |---|---|---|
 | `libsrt1.5-ceralive` | `/usr/lib/<triplet>` | first-party runtime ABI payload |
-| `cerastream`, `srtla-send-rs` | `/usr/bin` | sysext/app binary payload |
+| `cerastream`, `srtla` | `/usr/bin` | sysext/app binary payload |
 | `CeraUI` (`ceralive-device` `.deb`) | `/usr/local/bin` + `/etc` + `/var/www` | appfs payload (`mkosi/app/build-ceraui-appfs.sh`) |
 
 **STATUS (Stage 3): REAL INSTALL.** `mkosi.images/app/mkosi.postinst.chroot` installs
