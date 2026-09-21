@@ -4397,6 +4397,75 @@ ordering from both sides, fail-closed missing/partial sources, and the
 `configure_services` + drift-gate wiring) plus the retargeted BT-policy case in the
 same file and in `tests/mkosi-image-contract.bats`.
 
+**The HDMI-RX profile rule may name `input:stereo-fallback` and NOTHING ELSE — the
+`pro-audio` floor published a node that can never start, and the engine leaked one
+whole capture pipeline every 30 s against it** [EXISTS — board-measured 2026-09-20]
+
+PR #180 gave `alsa_card.platform-hdmi-receiver-sound` a
+`device.profile.priority.rules` entry so `find-preferred-profile.lua` selects a real
+input profile deterministically instead of letting `find-best-profile.lua`'s
+`pro-audio` exclusion park the card at `off`. That half is correct and is kept. Its
+SECOND entry — `pro-audio`, as a floor for the degraded profile set a board probed
+with no HDMI audio enumerates — is **removed**, because it killed the engine on any
+board left idle for an hour.
+
+The chain, measured end to end on a Rock 5B+ with no HDMI source attached, which is
+the normal idle state of a device waiting for a camera:
+
+1. The floor selects `pro-audio`, publishing
+   `alsa_input.platform-hdmi-receiver-sound.pro-input-0` as an `Audio/Source`.
+2. With no signal the I2S capture PCM cannot `set_hw_params`: the driver answers
+   ENOLINK, `spa.alsa` logs `set_hw_params: Link has been severed`, and the node goes
+   `suspended -> error (Start error: Link has been severed)`. **It is a node that
+   exists and can never start** — visibility without function.
+3. cerastream enumerates it as a third audio device (`device enumeration settled …
+   (3 device(s))` vs 2 without it) and its always-on meter targets it. The link fails
+   (`pw.link: one of the nodes is in error out:error in:suspended`), the sidecar never
+   delivers a sample, and the engine builds a NEW `Stream/Input/Audio` node every
+   **30.2 s** and never destroys the previous one.
+4. The leak is thread-visible: `meter_alsasrc:src` GStreamer task threads accumulate
+   one per cycle, all parked in `futex_do_wait`, so that sidecar pipeline never
+   reaches NULL and is abandoned with its PipeWire stream. **+1 node, +1 thread and
+   +8..9 fds every 30 s — +15.6 fds/min idle**, against the unit's default soft
+   `RLIMIT_NOFILE` of 1024. At ~66 min MPP's `dma_heap` allocation hits `EMFILE`, the
+   pipeline errors `not-negotiated`, frames stop, and the 90 s watchdog SIGABRTs
+   `cerastream`. That is exactly how todo 35's 3 h soak died.
+
+**Three arms isolate it to this list and nothing else** — one board, one engine
+binary (`cerastream 2026.9.5`), one image:
+
+| arm | HDMI-RX node | fd rate |
+|---|---|---|
+| rule WITH the `pro-audio` floor | `pro-input-0`, `state: error` | **+15.6/min** |
+| rule WITHOUT it (what ships now) | absent — card at `off` | **0.0/min, flat** |
+| rule without it + profile forced to `pro-audio` by hand (`pw-cli set-param`) | `pro-input-0`, `state: error` | **+18.3/min** |
+
+The third arm is what makes this a MECHANISM rather than a correlation: the leak
+follows the ERRORED NODE, not the text of the config file. Production slot B, which
+has never carried this rule, sat flat at 49 fds for 2 h 30 m on the same engine.
+
+**The trade is stated rather than buried.** Removing the floor restores PR #180's
+original defect IN THE DEGRADED SET ONLY — a board probed with no HDMI audio parks
+the card at `off` and `hw:CARD=HDMIIN` leaves `list-devices` until something
+re-enumerates it. That is an operator-visible limitation, and it is strictly better
+than the alternative: the floor's benefit in that same degraded set was never
+demonstrated (the node it publishes cannot start without a signal), while its cost is
+a proven fleet-wide engine death.
+
+**The floor may come back only when BOTH of these are true**, and this is a
+cerastream-side debt rather than a pipeline one: (a) the engine bounds or quarantines
+a `MeterSidecarPipeline` whose release does not complete instead of abandoning it,
+and stops re-creating a sidecar for a target that has repeatedly failed, so an
+errored capture node costs a CONSTANT rather than a linear number of descriptors;
+and (b) somebody measures that a `pro-audio` HDMI-RX node actually starts and
+delivers once a signal arrives, which has never been done.
+
+Guards: `tests/runtime-services.bats` "pipewire: the HDMI-RX profile rule selects the
+real input profile and NEVER pro-audio" — the single-entry list plus a
+`priorities = … pro-audio` absence check in ANY position, mutation-verified (restoring
+the two-entry form reds it). Evidence:
+`.omo/evidence/task-35-rock-fd-leak-fix-*` in the workspace root.
+
 **Edge-kernel wireless + Bluetooth enablement — the shipped fragment covered the
 soldered-on parts and almost nothing an operator might fit** [EXISTS]
 
@@ -6364,6 +6433,7 @@ not an active safety fallback or instruction to re-open D3.
 - Don't put a VENDOR GPU/BSP blob (`libmali*`, `librockchip_mpp*`) in any add-on sysext — Platform-layer only, and `libmali*` additionally sits in the Cog add-on's `SYSEXT_FORBID_PACKAGES` because it is retired on the mainline path outright. **The Cog add-on carrying Mesa's `libgallium-*.so` / `dri/*_dri.so` / `libLLVM*` / `libz3*` is the ONE sanctioned exception and is not a precedent for the blobs**: those four are ordinary Debian packages the Runtime layer already installs and then `RemoveFiles=`-prunes for the size gate, so the base has no file at those paths and the add-on shadows nothing. Extend the exception only to a payload that is (a) stock Debian, (b) pruned out of the base, and (c) consumed by that add-on alone
 - Don't re-add `libmali` to the `edge` variant's `firmware_packages` to "fix" a mainline GPU problem — it is what CAUSES one. Its `00-aarch64-mali.conf` sorts first and captures `libEGL.so.1`/`libGLESv2.so.2`/`libgbm.so.1` image-wide for a driver bound to a `/dev/mali0` the mainline kernel never creates, so it does not degrade GL, it removes it with no fallback. The production pairing is `panthor` + Mesa; the vendor track is retired and preserved only at `vendor-kernel-final`
 - Don't drop `libGLESv2.so*` / `libwayland-egl.so*` back into the Cog sysext's `SYSEXT_EXCLUDE_NAMES`. They were there because libmali supplied those sonames; with libmali gone the Runtime layer supplies neither `libgles2` nor `libwayland-egl1`, so re-excluding them deletes libraries nothing else provides. `libEGL.so*` and `libgbm.so*` DO stay excluded — those really are base-provided (`libegl1`/`libegl-mesa0`/`libgbm1`, unpruned)
+- Don't re-add `pro-audio` to the HDMI-RX `device.profile.priority.rules` list, in any position, to "fix" a card parked at `off`. On a board with no HDMI signal that profile publishes an `Audio/Source` whose I2S PCM cannot `set_hw_params` (ENOLINK → `suspended -> error`), and cerastream's always-on meter then builds and abandons one capture pipeline — node, GStreamer task thread and ~8 fds — against it every 30 s, measured at +15.6 fds/min idle and fatal at ~66 minutes. Fix the engine's unbounded sidecar retry first; the conf's own ordered-list section states both conditions
 - Don't touch runtime apt sources on the device — `E4` guardrail
 - Don't reintroduce an `APT::Sandbox::User` override on either apt path. On the device it disables sandboxing fleet-wide; in `fetch-debs.sh::fetch_first_party` it silently hid a permission bug the privilege-aware branch now fixes properly. Don't "fix" a `Download is performed unsandboxed as root` warning with it either — that warning means `_apt` cannot reach a directory, so widen the traversal (and chown the download dir, which apt writes to as `_apt`), never the privileges
 - Don't hold a first-party CeraLive package, and don't add `unattended-upgrades`. The kernel freeze exists so apt cannot change the BOOT stack; `cerastream`/`ceralive-device`/`srtla-send-rs` and the ModemManager closure update over apt from apt.ceralive.tv and holding one would break `system.startUpdate()` permanently

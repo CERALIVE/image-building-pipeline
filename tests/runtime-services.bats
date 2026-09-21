@@ -2405,32 +2405,33 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
-@test "pipewire: the HDMI-RX capture card can never be parked at profile 'off'" {
+@test "pipewire: the HDMI-RX profile rule selects the real input profile and NEVER pro-audio" {
   # An ACP profile set is built ONCE at device creation. A live OPi 5+ enumerated
   # `off`+`pro-audio` ONLY when the card was probed with no HDMI audio present, and
   # `scripts/device/find-best-profile.lua` excludes `pro-audio` BY NAME — so the
   # fallback chain reached `off`, no node was published, and the engine refused
   # `hw:CARD=HDMIIN` with `audio-device-unavailable` for the whole uptime.
   # `device.profile.priority.rules` is read by `find-preferred-profile.lua`, which
-  # runs `before` that chooser and has no such exclusion.
+  # runs `before` that chooser and has no such exclusion. That half is kept.
   local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
   local body="$BATS_TEST_TMPDIR/wp-profile-body"
   grep -vE '^[[:space:]]*#' "$wp" >"$body"
 
   grep -Eq '^device\.profile\.priority\.rules[[:space:]]*=[[:space:]]*\[' "$body"
 
-  # The ORDER is the contract: the real stereo input profile first so the good path
-  # is unchanged, `pro-audio` second as the floor for the degraded enumeration.
-  grep -Fq 'priorities = [ "input:stereo-fallback", "pro-audio" ]' "$body"
+  # EXACTLY ONE entry. The real stereo input profile is the whole list, so the good
+  # path is bit-for-bit what it was and the degraded set is left to park at `off`.
+  grep -Fq 'priorities = [ "input:stereo-fallback" ]' "$body"
 
-  # Dropping the floor is exactly no fix (the name is absent in the degraded set, the
-  # hook returns nothing, and find-best-profile parks the card at `off` again).
-  run grep -E 'priorities[[:space:]]*=[[:space:]]*\[[[:space:]]*"input:stereo-fallback"[[:space:]]*\]' "$body"
-  [ "$status" -ne 0 ]
-
-  # Reordering would take the 8-channel AUX raw node on a board that has a proper
-  # 2ch FL/FR profile — a downgrade, not a floor.
-  run grep -E 'priorities[[:space:]]*=[[:space:]]*\[[[:space:]]*"pro-audio"' "$body"
+  # `pro-audio` MAY NOT APPEAR ANYWHERE IN THIS RULE, in any position. Selecting it
+  # publishes an `Audio/Source` whose I2S PCM cannot `set_hw_params` without an HDMI
+  # signal (ENOLINK -> `suspended -> error`), and cerastream's always-on meter then
+  # builds and abandons one PipeWire capture stream every 30 s against it: measured
+  # +15.6 fds/min idle on a Rock 5B+ (2026-09-20), exhausting the engine unit's
+  # default soft RLIMIT_NOFILE of 1024 and SIGABRT-ing cerastream at ~66 minutes.
+  # Restoring it requires an engine that bounds a failed sidecar open — see the
+  # conf's own ordered-list section.
+  run grep -E 'priorities[[:space:]]*=.*pro-audio' "$body"
   [ "$status" -ne 0 ]
 
   # Three OR-ed match alternatives so one missing key cannot silently disable it.
