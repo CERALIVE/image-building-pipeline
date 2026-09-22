@@ -106,9 +106,6 @@ EOF
     printf 'Acquire::Languages "none";\n'
     printf 'Acquire::GzipIndexes "true";\n'
     printf 'Acquire::CompressionTypes::Order "gz";\n'
-    # Twin of the same fix in mkosi.images/runtime/mkosi.postinst.chroot: this
-    # host has no IPv6 default route to deb.debian.org, only a global address.
-    printf 'Acquire::ForceIPv4 "true";\n'
   } >>/etc/apt/apt.conf.d/99ceralive
 }
 
