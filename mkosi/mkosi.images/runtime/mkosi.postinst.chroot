@@ -118,12 +118,6 @@ EOF
     printf 'Acquire::Languages "none";\n'
     printf 'Acquire::GzipIndexes "true";\n'
     printf 'Acquire::CompressionTypes::Order "gz";\n'
-    # This host has a global-scope IPv6 address but no IPv6 default route
-    # (confirmed: `ip -6 route show default` empty) -- a slower fail-over
-    # than "no IPv6 at all" in some stacks, and a plausible contributor to
-    # the intermittent HTTPS failures retry_apt otherwise papers over.
-    # apt.ceralive.tv is IPv4-only already; this only affects deb.debian.org.
-    printf 'Acquire::ForceIPv4 "true";\n'
   } >>/etc/apt/apt.conf.d/99ceralive
 }
 
