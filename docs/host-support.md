@@ -295,14 +295,41 @@ Run
 [`35889225710`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35889225710)
 (head `86bc968`) established that the literal gateway is reachable from the
 actual runtime chroot: all three `InRelease` files were acquired through
-`172.17.0.1:3142`. They were then rejected by the chroot's `sqv` verifier
-(exit 123 with no explanatory text in apt's normal output). The build still
-fails closed on signature verification. The same cache route and signed
-Debian indexes verify in a local arm64 mkosi sandbox, both from a base tree
-and an existing runtime tree; this does not prove the runner's signature path.
-The first-failure diagnostic now prints keyring/verifier identity and apt's
-signature-debug replay to distinguish inaccessible trust material from bad
-metadata or a sandbox-specific verifier failure. No green audit is claimed yet.
+`172.17.0.1:3142`, but apt reported `sqv` exit 123. The decisive probes ran
+**inside the failing chroot**, not in a reconstructed rootfs:
+
+- [`35896791171`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35896791171):
+  root's `sqv` verified three signatures on the cache-fetched Debian
+  `InRelease`; `_apt` could not even launch `sqv --version` (`Permission
+  denied`). The reported 123 was apt's subprocess launch failure, not a bad
+  signature or an `sqv` signature-rejection exit code.
+- [`35899522292`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35899522292):
+  `/usr` was root-owned mode **0700**, despite `/usr/bin/sqv` mode 0755 and
+  the Debian keyring mode 0644. `_apt` could not launch even `/usr/bin/true`;
+  root still verified the same signed index. The local arm64 replay had used a
+  pre-existing, traversable `/usr`, explaining its disagreement with CI.
+
+Before the runtime's first apt transaction, the build now restores only `/usr`
+to standard mode 0755 and checks that `_apt` can execute. A local arm64
+reproduction with `/usr=0700` failed `_apt` execution and passed after the
+helper ran. Neither apt authentication nor the installed HTTPS `debian.sources`
+is relaxed. Run
+[`35902300468`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35902300468)
+then completed the signed Debian update and runtime package installation, installed
+all 15 first-party packages, verified the boot artifacts and populated both rootfs
+slots (20/0/0 parity). This is the real-run receipt that the `sqv` boundary is
+repaired; it is **not** a green audit.
+
+That run failed later while signing the RAUC bundle: OpenSSL CMS verification
+with `-purpose smimesign` returned `Verify error: unsuitable certificate purpose`
+for the CI-provided release leaf. The production leaf is documented as
+codeSigning-only; the secret's actual EKU needs a metadata-only check before
+choosing the remedy. This is an independent production-signing decision. Do not
+turn off CMS verification, substitute `-purpose any`, or silently use a
+development signer for this production-mode audit. An owner-approved signer
+rotation compatible with the device verifier, or an explicitly approved
+end-to-end RAUC purpose-policy change, is required. **Two consecutive successful
+audit runs remain outstanding**, so Todo 13 and its dependents stay blocked.
 
 ## Per-host detail
 
