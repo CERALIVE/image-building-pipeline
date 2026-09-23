@@ -1552,7 +1552,7 @@ dev_delta_expected() {
   # real trixie arm64 index). Its diagnostic role is covered more broadly by
   # `pipewire-bin`'s pw-cli/pw-dump/pw-top, which ship on EVERY image.
   printf '%s\n' \
-    alsa-utils can-utils htop i2c-tools iotop iperf3 lsof nano \
+    alsa-utils can-utils ffmpeg htop i2c-tools iotop iperf3 lsof nano \
     netcat-openbsd nethogs pciutils python3 socat strace \
     tcpdump usbutils vnstat | sort
 }
