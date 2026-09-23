@@ -6270,11 +6270,22 @@ the base" looks identical to "the base was stale".
   and the next unprivileged native build must still be told why, with the command
   that repairs it.
 
-**An opt-in apt proxy (`CERALIVE_APT_PROXY`), http-only on purpose** [EXISTS]
+**A local apt-cacher-ng proxy is auto-detected; mTLS remains direct** [EXISTS]
 
-Unset it is a NO-OP down to the token count — `apt_isolated_opts` emits the same
-12 tokens it always did and the Dockerfiles' `APT_PROXY` build arg expands to
-empty. Set, it adds exactly one `-o Acquire::http::Proxy=` pair and is threaded
+`./dev-cache up|down|status` manages the digest-pinned Compose service and its
+persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142
+for one second, then uses it or logs a direct fallback. `=off` opts out;
+an explicit HTTP URL selects a LAN cache. Docker builds and the mkosi builder
+container translate loopback to the host gateway. The runtime postinst uses a
+temporary Debian-only `HTTPS///` source for its package transactions and removes
+it before the rootfs ships; the device's `debian.sources` remains unchanged.
+The cache server's CONNECT allowlist is exactly `apt.ceralive.tv:443`, but the
+first-party apt source is never sent through it by this build. The CA bootstrap
+remains isolated and signature verification is unchanged. Guard:
+`tests/apt-lib.test.sh` plus `tests/apt-mtls-and-dedupe.test.sh`.
+
+With no cache (or `=off`), `apt_isolated_opts` emits the same 12 tokens as
+before. With a cache, it adds one `-o Acquire::http::Proxy=` pair and is threaded
 into both builder images as `--build-arg APT_PROXY=`, written and removed inside
 the single RUN that uses it so a host-local URL (which may carry credentials)
 never survives into a shared layer.

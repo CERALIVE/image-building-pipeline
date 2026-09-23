@@ -90,6 +90,11 @@ stage_dry_run_plan() {
       workspace_dir_plan="/work/${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"
     fi
     log_info "[5/9] DRY_RUN=1 (${BUILD_MODE}) — would build with: mkosi --architecture=${mkosi_arch} --release=${RELEASE} --with-network=yes --workspace-directory=${workspace_dir_plan} --cache-directory=cache/${board}/$(ceralive_mkosi_cache_domain) --package-directory ${package_dir_plan} --extra-tree ${firstparty_dir_plan}:/opt/ceralive-staging --force build"
+    local -a proxy_plan_args=()
+    mapfile -t proxy_plan_args < <(container_build_proxy_args)
+    if [[ "${BUILD_MODE}" != native && ${#proxy_plan_args[@]} -gt 0 ]]; then
+      log_info "[5/9] DRY_RUN builder apt cache: ${proxy_plan_args[*]}; runtime Debian uses temporary HTTPS/// remap via CERALIVE_BUILD_APT_PROXY=$(apt_proxy_container_url)"
+    fi
     log_success "=== DRY-RUN complete: board='${board}' (${mkosi_arch}) resolved → ${BUILD_MODE} builder plan emitted; no network/hardware touched ==="
     exit 0
   fi
@@ -195,13 +200,17 @@ mkosi_invoke() {
   mkdir -p "${MKOSI_DIR}/lib/shared"
   cp "${HERE}/common.sh" "${MKOSI_DIR}/lib/common.sh"
   cp "${HERE}/shared/log-lib.sh" "${MKOSI_DIR}/lib/shared/log-lib.sh"
+  cp "${HERE}/shared/apt-proxy-lib.sh" "${MKOSI_DIR}/lib/shared/apt-proxy-lib.sh"
   local env_flags=() env_cli_str=""
   for n in "${env_names[@]}"; do
     env_flags+=(-e "${n}")
     env_cli_str+=" --environment ${n}"
   done
 
+  local -a cache_host_args=()
+  mapfile -t cache_host_args < <(apt_proxy_container_host_args)
   "${runtime}" run --rm --privileged \
+    "${cache_host_args[@]}" \
     "${env_flags[@]}" \
     -e "CERALIVE_PIPELINE_DIR=/work" \
     -v "${PIPELINE_DIR}:/work" \

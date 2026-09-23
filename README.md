@@ -788,34 +788,36 @@ podman both run mkosi as uid 0 and are one domain, not two. The existing
 ownership assertion stays, because separate leaves make a collision unlikely but
 not impossible (a `sudo ./build --native` still owns the native leaf as root).
 
-### Opt-in apt proxy (apt-cacher-ng)
-
-`CERALIVE_APT_PROXY` is unset by default and, unset, changes nothing: the fetch
-passes apt exactly the options it passed before, and the Dockerfiles' build arg
-expands to empty. Set, it is threaded into `lib/fetch/apt-lib.sh`'s option builder
-and into both Dockerfiles as `--build-arg APT_PROXY=`.
-
-Quickstart, on the build host:
+### Default local apt proxy (apt-cacher-ng)
 
 ```bash
-sudo apt-get install -y apt-cacher-ng          # Debian/Ubuntu
-# or: docker run -d --name acng -p 3142:3142 -v acng:/var/cache/apt-cacher-ng \
-#       sameersbn/apt-cacher-ng
-
-export CERALIVE_APT_PROXY=http://127.0.0.1:3142
+./dev-cache up                     # digest-pinned, persistent named volume
+./dev-cache status                 # check the local report endpoint
+DRY_RUN=1 ./build rock-5b-plus    # prints selected cache or direct path
 ./build rock-5b-plus
+./dev-cache down                   # keeps the volume for the next build
 ```
 
-Point it at a LAN host (`http://cache.lan:3142`) to share one cache across
-machines. Verify it is working from apt-cacher-ng's own report page at
-`http://127.0.0.1:3142/acng-report.html`.
+When `CERALIVE_APT_PROXY` is **unset**, the build probes
+`http://127.0.0.1:3142/acng-report.html` with a one-second deadline. A responding
+cache is used for host APT fetches and both builder Dockerfiles; an unavailable
+cache falls back to direct APT and logs that choice. Docker containers reach the
+host cache via the host gateway (not their own loopback). Use
+`CERALIVE_APT_PROXY=off ./build …` to opt out, or set an explicit HTTP URL such as
+`http://cache.lan:3142` for a shared runner cache. The Compose service publishes
+port 3142: restrict access to trusted build hosts at the runner firewall.
 
-**It is http-only, deliberately.** `apt.ceralive.tv` is https with an mTLS client
-certificate: a proxy can cache none of that payload and only adds a handshake that
-can fail for reasons unrelated to apt. The win is the plain-http Debian and
-Armbian archive traffic, which is also the bulk of the bytes.
+**Only Debian archive downloads inside the build are remapped.** The runtime
+postinstall gives its Debian HTTPS apt transactions temporary `HTTPS///` source
+URLs so apt-cacher-ng fetches and caches upstream over TLS; it removes those
+temporary sources after the transaction. The device's installed `debian.sources`
+stays byte-identical (HTTPS and `Signed-By`), and the first-party
+`apt.ceralive.tv` mTLS source is never routed through the cache. The cache's
+CONNECT allowlist names only `apt.ceralive.tv:443`, for explicit clients that
+need a tunnel; it does not make this build use one. No apt signature, expiry,
+or TLS verification setting changes. See [runner setup](docs/host-support.md#persistent-debian-apt-cache-on-build-hosts).
 
-**A proxy cannot weaken verification.** Every fetch family here verifies *after*
+**The cache cannot weaken verification.** Every fetch family here verifies *after*
 acquisition — `gpgv` over `InRelease`, then the SHA-256 that signed plaintext
 declares, or a committed pin's hash. Bytes from a proxy are checked against exactly
 the same expectations as bytes from the origin, so a proxy that served something

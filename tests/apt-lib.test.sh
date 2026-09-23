@@ -62,7 +62,7 @@ lib_eval() {
 # ---------------------------------------------------------------------------
 # Isolated apt state
 # ---------------------------------------------------------------------------
-mapfile -t opts < <(lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+mapfile -t opts < <(CERALIVE_APT_PROXY=off lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
 (( ${#opts[@]} == 12 )) || fail "apt_isolated_opts emitted ${#opts[@]} tokens, expected 12"
 joined="${opts[*]}"
 for expect in \
@@ -89,14 +89,41 @@ done
 ok "isolated: every Dir:: option stays inside the supplied state directory"
 
 # ---------------------------------------------------------------------------
-# Opt-in apt proxy (CERALIVE_APT_PROXY)
+# Automatic apt proxy (CERALIVE_APT_PROXY)
 # ---------------------------------------------------------------------------
 # Unset must be a NO-OP down to the token count: an unconfigured build has to
 # pass apt exactly the argument vector it passed before the proxy existed.
-mapfile -t noproxy < <(CERALIVE_APT_PROXY='' lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+mapfile -t noproxy < <(CERALIVE_APT_PROXY=off lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
 (( ${#noproxy[@]} == 12 )) \
   || fail "an unset CERALIVE_APT_PROXY changed the option vector (${#noproxy[@]} tokens, expected 12)"
-ok "proxy: unset CERALIVE_APT_PROXY emits nothing at all"
+ok "proxy: CERALIVE_APT_PROXY=off emits nothing at all"
+
+mkdir -p "${WORK}/bin"
+cat >"${WORK}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+[[ "$*" == *'--connect-timeout 1 --max-time 1 http://127.0.0.1:3142/acng-report.html'* ]] || exit 42
+[[ "${CACHE_FIXTURE:-down}" == up ]]
+EOF
+chmod +x "${WORK}/bin/curl"
+mapfile -t detected < <(unset CERALIVE_APT_PROXY; CACHE_FIXTURE=up PATH="${WORK}/bin:${PATH}" \
+  lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+(( ${#detected[@]} == 14 )) || fail "responding cache was not detected"
+[[ "${detected[*]}" == *'Acquire::http::Proxy=http://127.0.0.1:3142'* ]] \
+  || fail "detected proxy did not reach apt's HTTP acquisition"
+mapfile -t absent < <(unset CERALIVE_APT_PROXY; CACHE_FIXTURE=down PATH="${WORK}/bin:${PATH}" \
+  lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+(( ${#absent[@]} == 12 )) || fail "unavailable cache did not fall back to direct APT"
+mapfile -t disabled < <(CERALIVE_APT_PROXY=off CACHE_FIXTURE=up PATH="${WORK}/bin:${PATH}" \
+  lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
+(( ${#disabled[@]} == 12 )) || fail "off did not override an available cache"
+ok "proxy: report probe selects the local cache, failure and off stay direct"
+
+mapfile -t container_args < <(env -u CERALIVE_APT_PROXY CACHE_FIXTURE=up PATH="${WORK}/bin:${PATH}" \
+  bash -c 'source "$1/lib/common.sh"; container_build_proxy_args' _ "${PIPELINE_DIR}")
+[[ "${container_args[*]}" == *'host.docker.internal:host-gateway'* \
+  && "${container_args[*]}" == *'APT_PROXY=http://host.docker.internal:3142'* ]] \
+  || fail "local cache cannot be reached from the builder container"
+ok "proxy: Docker build args translate host-local cache to the host gateway"
 
 mapfile -t proxied < <(CERALIVE_APT_PROXY=http://acng.lan:3142 lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
 (( ${#proxied[@]} == 14 )) \
@@ -116,11 +143,24 @@ ok "proxy: https is never proxied, so the mTLS first-party transport is untouche
 # A proxy is an acquisition-path change only. If it ever became a verification
 # change the whole fetch chain would be worthless, so no proxy option may weaken
 # apt's own authentication.
-for forbidden in "Acquire::AllowInsecureRepositories" "Acquire::AllowDowngradeToInsecureRepositories" "APT::Get::AllowUnauthenticated" "Acquire::Check-Valid-Until=false" "gpgv"; do
-  [[ "${joined_proxied}" != *"${forbidden}"* ]] \
-    || fail "the proxy option set contains '${forbidden}' — a cache may never relax verification"
+for options in "${joined_proxied}" "${detected[*]}" "${absent[*]}" "${disabled[*]}"; do
+  [[ "${options}" != *"Acquire::https::Proxy"* ]] || fail "HTTPS mTLS was proxied"
+  for forbidden in "Acquire::AllowInsecureRepositories" "Acquire::AllowDowngradeToInsecureRepositories" "APT::Get::AllowUnauthenticated" "Acquire::Check-Valid-Until=false" "Acquire::https::Verify-Peer=false" "gpgv"; do
+    [[ "${options}" != *"${forbidden}"* ]] \
+      || fail "the proxy option set contains '${forbidden}' — a cache may never relax verification"
+  done
 done
-ok "proxy: no option in the proxied set relaxes apt authentication"
+ok "proxy: no option in any cache-on/off set relaxes TLS or apt authentication"
+
+grep -Fqx 'PassThroughPattern: ^apt\.ceralive\.tv:443$' "${PIPELINE_DIR}/ci/apt-cache/ceralive.conf" \
+  || fail "CONNECT allowlist must name only the first-party mTLS origin"
+grep -Fq 'PassEnvironment=CERALIVE_BUILD_APT_PROXY' "${PIPELINE_DIR}/mkosi/mkosi.conf" \
+  || fail "build-only cache URL is not forwarded to the runtime postinst"
+grep -Fq 'HTTPS///deb.debian.org/' "${PIPELINE_DIR}/mkosi/runtime/build-apt-cache.sh" \
+  || fail "runtime postinst does not remap Debian HTTPS inside its build transaction"
+grep -Fq 'source "${CERALIVE_RUNTIME_SRC}/build-apt-cache.sh"' "${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
+  || fail "runtime postinst does not load the build-only remap"
+ok "proxy: CONNECT is exact-host scoped and Debian remap stays in the build postinst"
 
 state="${WORK}/apt-state"
 lib_eval 'apt_isolated_state_init "$1" "$2"' "${state}" "${state}/certs" >/dev/null 2>&1

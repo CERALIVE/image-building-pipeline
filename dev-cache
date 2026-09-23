@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Manage the host-local, persistent Debian APT cache. Not part of the image.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE="${HERE}/ci/apt-cache/compose.yml"
+
+case "${1:-}" in
+  up)
+    docker compose -f "${COMPOSE}" up -d --wait
+    ;;
+  down)
+    docker compose -f "${COMPOSE}" down
+    ;;
+  status)
+    docker compose -f "${COMPOSE}" ps
+    if curl --noproxy '*' -sf --connect-timeout 1 --max-time 1 \
+        http://127.0.0.1:3142/acng-report.html >/dev/null; then
+      printf 'apt cache: available on http://127.0.0.1:3142\n'
+    else
+      printf 'apt cache: unavailable (builds use direct APT)\n'
+    fi
+    ;;
+  *)
+    printf 'Usage: %s {up|down|status}\n' "$0" >&2
+    exit 2
+    ;;
+esac

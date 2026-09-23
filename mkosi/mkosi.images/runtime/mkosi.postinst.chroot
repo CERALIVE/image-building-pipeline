@@ -205,6 +205,7 @@ retry_apt() {
     sleep "${backoff[attempt - 1]}"
   done
 }
+source "${CERALIVE_RUNTIME_SRC}/build-apt-cache.sh"
 install_runtime_packages() {
   if [[ -z "${SHARED_PACKAGES// /}" ]]; then
     log "FATAL: SHARED_PACKAGES is empty — runtime package set (shared.list) was not forwarded; refusing to build a package-less runtime"
@@ -214,8 +215,7 @@ install_runtime_packages() {
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
   bootstrap_ca_trust
-  retry_apt "runtime apt-get update" apt-get update
-  retry_apt "runtime apt-get install" apt-get install -y --no-install-recommends "${pkgs[@]}"
+  runtime_debian_apt_install "${pkgs[@]}"
 }
 
 # ---------------------------------------------------------------------------

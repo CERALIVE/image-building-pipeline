@@ -233,6 +233,14 @@ main() {
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"
+  local apt_proxy
+  apt_proxy="$(apt_proxy_url)"
+  if [[ -n "${apt_proxy}" ]]; then
+    export CERALIVE_APT_PROXY="${apt_proxy}"
+    log_info "apt cache: ${apt_proxy} (HTTP fetches; first-party mTLS stays direct)"
+  else
+    log_info "apt cache: unavailable or disabled — using direct APT"
+  fi
 
   # Cross-stage state. Declared in THIS frame so every stage_* module assigns
   # into one place — the stages are called from here, so bash's dynamic scoping
@@ -293,6 +301,7 @@ run_mkosi_build() {
   local env_names=(
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
+    CERALIVE_BUILD_APT_PROXY
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
@@ -347,6 +356,12 @@ run_mkosi_build() {
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
+  if [[ "${MKOSI_NATIVE:-0}" == 1 ]]; then
+    CERALIVE_BUILD_APT_PROXY="$(apt_proxy_url)"
+  else
+    CERALIVE_BUILD_APT_PROXY="$(apt_proxy_container_url)"
+  fi
+  export CERALIVE_BUILD_APT_PROXY
 
   # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64

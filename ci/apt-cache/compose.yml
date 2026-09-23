@@ -1,0 +1,12 @@
+services:
+  apt-cache:
+    image: docker.io/sameersbn/apt-cacher-ng@sha256:82f55f9c8f627cee8ef5f710c1745388d79d3a3f2f3150353e6500021bec11b4
+    restart: unless-stopped
+    ports:
+      - "3142:3142"
+    volumes:
+      - apt-cache:/var/cache/apt-cacher-ng
+      - ./ceralive.conf:/etc/apt-cacher-ng/zz-ceralive.conf:ro
+
+volumes:
+  apt-cache:

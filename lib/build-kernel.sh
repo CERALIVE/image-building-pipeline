@@ -258,7 +258,13 @@ main() {
       log_info "DRY-RUN would run: git fetch --depth 1 ${git_url} ${commit} && git rev-parse HEAD == ${commit} (commit-only source: the pinned branch publishes no tag)"
     fi
     log_info "DRY-RUN would run: git fetch ${patches_url} ${patches_commit} && git am \$(series ${patches_series})"
-    log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image} -t $(resolve_kernel_builder_tag "${builder_image}") -f ${KERNEL_BUILDER_DOCKERFILE}"
+    local -a proxy_plan_args=()
+    mapfile -t proxy_plan_args < <(container_build_proxy_args)
+    local proxy_plan_suffix=''
+    if (( ${#proxy_plan_args[@]} )); then
+      proxy_plan_suffix=" ${proxy_plan_args[*]}"
+    fi
+    log_info "DRY-RUN would run: <runtime> build --build-arg BASE_IMAGE=${builder_image}${proxy_plan_suffix} -t $(resolve_kernel_builder_tag "${builder_image}") -f ${KERNEL_BUILDER_DOCKERFILE}"
     if [[ "${config_mode}" == "config-file" ]]; then
       log_info "DRY-RUN would run: git fetch --depth 1 ${config_git_url} ${config_commit} && cp ${config_path} .config (full config, no defconfig target)"
       log_info "DRY-RUN would run: verify-kernel-config.sh ${config_path} .config ${absent_rel} (config-survival gate, after olddefconfig)"

@@ -12,6 +12,9 @@
 #
 # shellcheck shell=bash
 
+# shellcheck source=../shared/apt-proxy-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/apt-proxy-lib.sh"
+
 # ---------------------------------------------------------------------------
 # apt_isolated_state_init <apt_state> [extra-dir ...] — create the throwaway apt
 # state tree. `lists/partial` and `cache/archives/partial` are apt's own layout;
@@ -66,7 +69,8 @@ apt_isolated_opts() {
 #     which is also the bulk of the bytes.
 # ---------------------------------------------------------------------------
 apt_proxy_opts() {
-  local proxy="${CERALIVE_APT_PROXY:-}"
+  local proxy
+  proxy="$(apt_proxy_url)"
   [[ -n "${proxy}" ]] || return 0
   printf '%s\n' -o "Acquire::http::Proxy=${proxy}"
 }
