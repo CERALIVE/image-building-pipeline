@@ -14,6 +14,47 @@ runtime_build_apt_signature_diagnostics() {
   stat -Lc 'keyring: %a %u:%g %s %n' /usr/share/keyrings/debian-archive-keyring.gpg
   stat -c 'sqv: %a %u:%g %s %n' /usr/bin/sqv
   stat -c 'build-only source: %a %u:%g %s %n' "${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  local index="/tmp/ceralive-sqv-probe.$$.InRelease" rc=0
+  log "probing sqv directly as root and _apt in the failing runtime sandbox"
+  if /usr/bin/sqv --version 2>&1; then
+    log "root sqv --version: exit 0"
+  else
+    rc=$?; log "root sqv --version: exit ${rc}"
+  fi
+  if runuser -u _apt -- /usr/bin/sqv --version 2>&1; then
+    log "_apt sqv --version: exit 0"
+  else
+    rc=$?; log "_apt sqv --version: exit ${rc}"
+  fi
+  if /usr/lib/apt/apt-helper download-file \
+    "${CERALIVE_BUILD_APT_PROXY}/HTTPS///deb.debian.org/debian/dists/${APT_SUITE}/InRelease" \
+    "${index}" 2>&1; then
+    chmod 0644 "${index}"
+    stat -c 'acquired InRelease: %a %u:%g %s %n' "${index}"
+    local user output
+    for user in root _apt; do
+      output="/tmp/ceralive-sqv-probe.$$.${user}.verified"
+      if [[ "${user}" == root ]]; then
+        if /usr/bin/sqv --keyring /usr/share/keyrings/debian-archive-keyring.gpg \
+          --cleartext --output "${output}" --verbose "${index}" 2>&1; then
+          log "root direct sqv verification: exit 0"
+        else
+          rc=$?; log "root direct sqv verification: exit ${rc}"
+        fi
+      elif runuser -u _apt -- /usr/bin/sqv \
+        --keyring /usr/share/keyrings/debian-archive-keyring.gpg \
+        --cleartext --output "${output}" --verbose "${index}" 2>&1; then
+        log "_apt direct sqv verification: exit 0"
+      else
+        rc=$?; log "_apt direct sqv verification: exit ${rc}"
+      fi
+      rm -f -- "${output}"
+    done
+    rm -f -- "${index}"
+  else
+    rc=$?; log "apt-helper could not acquire diagnostic InRelease: exit ${rc}"
+    rm -f -- "${index}"
+  fi
   log "replaying apt update with signature-verifier debug (verification still enforced)"
   if apt-get -o Debug::Acquire::gpgv=true update 2>&1; then
     log "signature-verifier diagnostic replay succeeded"
