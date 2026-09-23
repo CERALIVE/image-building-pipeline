@@ -3486,14 +3486,18 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   fresh slot healthy; guard: `mkosi-image-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
 
-**Production source PKI and the Actions secret are distinct copies.** The locally
-provisioned `cert-work/rauc/leaf-signing.pem` already carries both EKUs and chains
-under its existing root for `smimesign`; no new leaf or CA is needed for that
-source. The scheduled audit instead reads `RAUC_RELEASE_PKI_TAR_B64` from Actions,
-whose last update predates that leaf and whose bundle failed the S/MIME check in
-run 35902300468. The audit now checks the supplied signer before the expensive
-build. Rotate the secret only after comparing its public root identity against
-the locally provisioned production root; keep the root and intermediate unchanged.
+**Production source PKI and the Actions secret are distinct copies, and the
+secret has been rotated to match.** The locally provisioned
+`cert-work/rauc/leaf-signing.pem` already carried both EKUs and chained under its
+existing root for `smimesign`, so no new leaf or CA was needed. The scheduled
+audit reads `RAUC_RELEASE_PKI_TAR_B64` from Actions, and run 35902300468 failed
+its S/MIME check because that secret still held a pre-2026-07-18 codeSigning-only
+leaf. The audit now checks the supplied signer before the expensive build; the
+pre-rotation secret was rejected by that gate in run 35908288341 with the same
+`unsuitable certificate purpose`. `RAUC_RELEASE_PKI_TAR_B64` was then rotated to
+the current production PKI — root and intermediate byte-unchanged, leaf
+reissued with `emailProtection, codeSigning` — and the audit passed twice
+consecutively (runs 35908389533 and 35911623365 at `6614ada`).
 
 **The debug package delta is VARIANT-keyed, and it shares a filename suffix with
 the FAMILY deltas — so every directory glob had to be taught the difference** [EXISTS]
@@ -6298,10 +6302,13 @@ restores `/usr` to 0755 before any apt transaction and fails closed if `_apt`
 still cannot execute. Run 35902300468 crossed that boundary and completed
 runtime and app installation, then failed at the independent RAUC CMS
 signer-purpose gate (`unsuitable certificate purpose` under `-purpose
-smimesign`). The locally provisioned production leaf already passes that purpose;
-the CI secret is an older copy. A pre-build signer gate and public-root identity
-receipt precede any secret rotation. No green audit is claimed until two
-consecutive real successes. See `docs/host-support.md` for the evidence.
+smimesign`) because the Actions release-PKI secret still held an older,
+codeSigning-only leaf. A pre-build signer gate now rejects that before the
+expensive build — run 35908288341 demonstrated exactly that refusal — and
+`RAUC_RELEASE_PKI_TAR_B64` was rotated to the current dual-EKU production leaf
+(root and intermediate unchanged). The audit has since passed twice
+consecutively: runs 35908389533 and 35911623365 at `6614ada`. See
+`docs/host-support.md` for the evidence.
 
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142

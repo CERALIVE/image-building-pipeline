@@ -326,15 +326,24 @@ for the CI-provided release leaf. The separate, locally provisioned production
 leaf in `cert-work/rauc/` was inspected on 2026-09-23: its actual EKU is
 `emailProtection, codeSigning`, and `openssl verify -purpose smimesign` succeeds
 through the existing intermediate to the existing root. The intermediate's
-private key is locally available, but **no new leaf is needed**. The Actions
-secret was last updated 2026-07-13, before the current leaf's 2026-07-18 issue
-date, and cannot contain that leaf. The audit now preflights the supplied leaf
-against the unchanged root for both S/MIME and code-signing purposes before
-spending time on a real build; the test drives a valid, codeSigning-only negative
-fixture against the same check. Compare the public root identity printed by the
-preflight to the local production root before replacing the Actions secret.
-Never weaken CMS verification or use the non-production test fixture here.
-**Two consecutive successful audit runs remain outstanding** until verified.
+private key is locally available, and **no new leaf was needed** — the correctly
+purposed one already existed. The Actions secret `RAUC_RELEASE_PKI_TAR_B64` still
+held a pre-2026-07-18 codeSigning-only leaf, so it was rotated on 2026-09-23
+19:17:56Z to the current production PKI. The public root is unchanged at
+`b7ff3c7b…`, so the baked device keyring is untouched. The audit preflights the
+supplied leaf against that root for both S/MIME and code-signing purposes before
+spending time on a real build; the pre-rotation secret was refused by exactly
+that gate in run
+[`35908288341`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35908288341),
+and the test drives a valid, codeSigning-only negative fixture against the same
+check. Never weaken CMS verification or use the non-production test fixture here.
+**The audit has since passed twice consecutively.** Runs
+[`35908389533`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35908389533)
+and
+[`35911623365`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35911623365)
+each built the full production-mode image at `6614ada`; the bundle was signed by
+the rotated leaf and its `leaf -> intermediate -> root` chain verified before the
+run sealed the artifact.
 
 ## Per-host detail
 

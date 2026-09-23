@@ -92,11 +92,14 @@ post-run cleanup removes only the ignored mkosi `build` and `cache` paths so an
 interrupted rootful build cannot block the next clean checkout.
 The separate scheduled real-build audit requires the local Debian cache before
 building to avoid the runner's diagnosed direct-apt TLS failure; it is not a PR
-check. Its `_apt`/`sqv` execution repair is real-run proven, but its RAUC bundle
-now fails the separate release-certificate-purpose check; no green audit is
-claimed. The locally provisioned production leaf is already dual-EKU, but the
-Actions secret predates it. A pre-build gate now rejects a stale signer and
-exposes the public root identity for a safe secret rotation.
+check. Its `_apt`/`sqv` execution repair and its release-signer rotation are both
+real-run proven. A pre-build gate checks the supplied signer against the device
+keyring's root for the S/MIME and code-signing purposes the bundle is verified
+with; after `RAUC_RELEASE_PKI_TAR_B64` was rotated to the current dual-EKU
+production leaf (same root and intermediate, so the device keyring is unchanged)
+the audit passed twice consecutively — runs `35908389533` and `35911623365` at
+`6614ada`, each a full production-mode build whose signed bundle verified
+`leaf -> intermediate -> root`.
 See the production-runner section of the host matrix for the exact checks.
 
 See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.
