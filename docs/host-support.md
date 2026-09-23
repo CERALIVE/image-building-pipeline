@@ -231,6 +231,46 @@ and cannot resolve packages from mkosi's ephemeral `file:/repository`.
 
 ---
 
+### Scheduled real-build audit: Debian TLS on the runner (2026-09-23)
+
+The scheduled audit runs on the same native-Linux builder but is **not** a
+required PR check. Runs
+[`35626350745`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35626350745)
+and [`35669090715`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35669090715)
+reached runtime postinstall and then failed direct `apt-get update` against
+`deb.debian.org` with `certificate verify failed`; their post-job bare `rm -rf`
+also failed on root-owned mkosi cache files. Audit run
+[`35852947598`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35852947598)
+reproduced the TLS failure after containerized cleanup cleared those paths.
+The runtime-chroot capture at the **first** failed apt acquisition recorded:
+
+- `date -u`: Wed Sep 23 11:27:57 UTC 2026. The CA bundle existed and was
+  nonempty (`224449` bytes). The bootstrap's earlier direct apt probe printed
+  “validates … skipping”, but apt can return exit 0 even when it reports failed
+  index fetches, so that message is not proof of a working direct apt TLS path.
+- Direct `openssl s_client -4 -connect deb.debian.org:443 -servername
+  deb.debian.org -verify_hostname deb.debian.org -verify_return_error` reached
+  `151.101.194.132`: TLS 1.3, `Verification: OK`, verified hostname, leaf
+  `CN=cdn-fastly.deb.debian.org`, issuer Let's Encrypt `YR2`, valid Aug 9–Nov 7.
+  No TLS-rewriting middlebox was observed on this IPv4 route.
+- The equivalent `-6` connection failed with `Network is unreachable` before
+  a certificate was presented. But apt's failed attempts reported **IPv4** Fastly
+  addresses (`151.101.*.132`), so unavailable IPv6 does not explain apt's
+  certificate-verification failure. Eight direct apt retries all failed.
+
+The failure is therefore on the runner's **direct apt HTTPS acquisition path**,
+not a missing CA store, a wrong clock, a demonstrated intercepted TLS peer, or
+an IPv6-only apt route. OpenSSL success alone does not identify the precise
+libapt/GnuTLS rejection; do not invent an issuer or disable verification. The
+audit now brings up the digest-pinned apt-cacher-ng service and **requires** its
+report endpoint before the build. It pins `CERALIVE_APT_PROXY` to the local
+listener for this job, so loss of the cache fails closed rather than reverting
+to direct apt. The existing runtime-only Debian `HTTPS///` remap moves the
+upstream TLS leg to apt-cacher-ng, while Debian archive signatures and package
+digests remain checked and the installed HTTPS source remains unchanged. The
+first-party mTLS fetch stays DIRECT. A run proving the remapped install works
+is required before this is called resolved.
+
 ## Per-host detail
 
 ### Ubuntu/Debian (CI baseline) — ✅ fully supported
