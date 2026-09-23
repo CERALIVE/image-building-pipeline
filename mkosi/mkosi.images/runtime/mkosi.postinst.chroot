@@ -193,6 +193,7 @@ EOF
 # exits 0 on a partial fetch failure ("W: Failed to fetch", stale/no index
 # kept) -- observed live, that starves the install with "Unable to locate
 # package" for everything, so output is checked for that marker too.
+source "${CERALIVE_RUNTIME_SRC}/build-tls-diagnostics.sh"
 retry_apt() {
   local label="$1"; shift
   local attempt backoff=(10 20 40 60 90 120 150) out rc
@@ -200,6 +201,9 @@ retry_apt() {
     out="$("$@" 2>&1)"; rc=$?
     printf '%s\n' "${out}"
     [[ "${rc}" -eq 0 && "${out}" != *'Failed to fetch'* ]] && return 0
+    if (( attempt == 1 )) && [[ "${out}" == *'certificate verify failed'* ]]; then
+      diagnose_debian_tls_failure
+    fi
     (( attempt < 8 )) || { log "FATAL: ${label} failed after 8 attempts"; return 1; }
     log "${label}: attempt ${attempt}/8 failed — retrying in ${backoff[attempt - 1]}s"
     sleep "${backoff[attempt - 1]}"
