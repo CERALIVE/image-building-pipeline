@@ -6272,6 +6272,15 @@ the base" looks identical to "the base was stale".
 
 **A local apt-cacher-ng proxy is auto-detected; mTLS remains direct** [EXISTS]
 
+The scheduled `real-build-audit.yml` is an exception to auto-detect's silent
+direct fallback: runner evidence from 2026-09-23 showed a populated CA bundle,
+valid direct IPv4 OpenSSL peer (Fastly / Let's Encrypt), no IPv6 route, but eight
+direct apt HTTPS attempts failing certificate verification on IPv4. The audit
+starts the pinned cache and requires its report endpoint, then sets an explicit
+runner-local proxy so runtime Debian `HTTPS///` acquisition cannot silently
+return to the failing direct apt path. The installed image source and first-party
+mTLS remain unchanged. Details and run ID: `docs/host-support.md` runner section.
+
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142
 for one second, then uses it or logs a direct fallback. `=off` opts out;

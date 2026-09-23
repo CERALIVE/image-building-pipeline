@@ -90,6 +90,9 @@ least 24 GiB free. Docker Desktop is not a supported production runner daemon.
 On the persistent self-hosted runner, digest-pinned pre-checkout and `always()`
 post-run cleanup removes only the ignored mkosi `build` and `cache` paths so an
 interrupted rootful build cannot block the next clean checkout.
+The separate scheduled real-build audit requires the local Debian cache before
+building to avoid the runner's diagnosed direct-apt TLS failure; it is not a PR
+check. Its evidence and the cache setup are in the host matrix.
 See the production-runner section of the host matrix for the exact checks.
 
 See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.
