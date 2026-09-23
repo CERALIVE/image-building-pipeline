@@ -6290,6 +6290,12 @@ existing build-only `CERALIVE_BUILD_APT_PROXY` contract; an absent mapping fails
 closed. `--with-network=yes` preserves the network path, not the outer hosts
 file. A local nested-sandbox reachability probe passed, but two successful real
 audits are still needed before declaring the runner fixed.
+Run 35889225710 proved the literal cache URL acquired all three Debian
+`InRelease` files inside the actual chroot, but `sqv` rejected them with exit
+123 and no normal-output detail. A separate local arm64 mkosi-sandbox replay
+verified them; the runner's cause remains open. The first failure now emits
+signature-debug evidence without relaxing verification (see the runner section
+of `docs/host-support.md`).
 
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142

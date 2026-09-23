@@ -204,6 +204,9 @@ retry_apt() {
     if (( attempt == 1 )) && [[ "${out}" == *'certificate verify failed'* ]]; then
       diagnose_debian_tls_failure
     fi
+    if (( attempt == 1 )) && [[ "${out}" == *'sqv returned an error code'* ]]; then
+      runtime_build_apt_signature_diagnostics
+    fi
     (( attempt < 8 )) || { log "FATAL: ${label} failed after 8 attempts"; return 1; }
     log "${label}: attempt ${attempt}/8 failed — retrying in ${backoff[attempt - 1]}s"
     sleep "${backoff[attempt - 1]}"

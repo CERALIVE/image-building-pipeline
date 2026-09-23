@@ -291,6 +291,19 @@ digests remain checked and the installed HTTPS source remains unchanged. The
 first-party mTLS fetch stays DIRECT. A run proving the remapped install works
 is required before this is called resolved.
 
+Run
+[`35889225710`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35889225710)
+(head `86bc968`) established that the literal gateway is reachable from the
+actual runtime chroot: all three `InRelease` files were acquired through
+`172.17.0.1:3142`. They were then rejected by the chroot's `sqv` verifier
+(exit 123 with no explanatory text in apt's normal output). The build still
+fails closed on signature verification. The same cache route and signed
+Debian indexes verify in a local arm64 mkosi sandbox, both from a base tree
+and an existing runtime tree; this does not prove the runner's signature path.
+The first-failure diagnostic now prints keyring/verifier identity and apt's
+signature-debug replay to distinguish inaccessible trust material from bad
+metadata or a sandbox-specific verifier failure. No green audit is claimed yet.
+
 ## Per-host detail
 
 ### Ubuntu/Debian (CI baseline) — ✅ fully supported

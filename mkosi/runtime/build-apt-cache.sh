@@ -8,6 +8,20 @@ runtime_build_apt_cleanup() {
   rm -rf "${CERALIVE_BUILD_APT_DIR}"
 }
 
+runtime_build_apt_signature_diagnostics() {
+  log "Debian signature failure: inspecting the runtime chroot's archive keyring and verifier"
+  date -u
+  stat -Lc 'keyring: %a %u:%g %s %n' /usr/share/keyrings/debian-archive-keyring.gpg
+  stat -c 'sqv: %a %u:%g %s %n' /usr/bin/sqv
+  stat -c 'build-only source: %a %u:%g %s %n' "${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  log "replaying apt update with signature-verifier debug (verification still enforced)"
+  if apt-get -o Debug::Acquire::gpgv=true update 2>&1; then
+    log "signature-verifier diagnostic replay succeeded"
+  else
+    log "signature-verifier diagnostic replay failed"
+  fi
+}
+
 # The remap stays active for the REST of the layer, not only the shared.list
 # transaction: apt reads only lists that match its configured sources, so
 # switching back would leave later in-layer installs (the staged hawkbit .deb
