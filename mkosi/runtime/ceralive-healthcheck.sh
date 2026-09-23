@@ -59,6 +59,7 @@ PROG="ceralive-healthcheck"
 CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
 MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
 BOOT_ID_FILE="${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+PARTLABEL_FAILURE="${CERALIVE_PARTLABEL_FAILURE:-/run/ceralive/partlabel-guard.failed}"
 BOOT_ID=""
 
 CERALIVE_SERVICE="${CERALIVE_SERVICE:-ceralive.service}"
@@ -89,6 +90,106 @@ HTTP_STATUS_PATH="${HTTP_STATUS_PATH:-/status}"
 ts()   { date -u +%H:%M:%SZ; }
 log()  { printf '%s %s: %s\n' "$(ts)" "${PROG}" "$*"; }
 fail() { printf '%s %s: FAIL: %s\n' "$(ts)" "${PROG}" "$*" >&2; }
+
+guard_violation() {
+  fail "PARTLABEL guard: $*"
+  mkdir -p "$(dirname "${PARTLABEL_FAILURE}")" &&
+    printf '%s\n' "$*" >>"${PARTLABEL_FAILURE}"
+  return 0
+}
+
+partlabel_guard() {
+  local fstab="${CERALIVE_PARTLABEL_FSTAB:-/etc/fstab}"
+  local conf="${CERALIVE_PARTLABEL_RAUC_CONF:-/etc/rauc/system.conf}"
+  local lsblk_bin="${CERALIVE_PARTLABEL_LSBLK:-lsblk}"
+  local findmnt_bin="${CERALIVE_PARTLABEL_FINDMNT:-findmnt}"
+  local rows path parent label type line mount source disk="" expected actual
+  local -A parents=() labels=() devices=()
+  local -a refs=()
+  rm -f -- "${PARTLABEL_FAILURE}" || return 1
+  if ! rows="$("${lsblk_bin}" -P -o PATH,PKNAME,PARTLABEL,TYPE)"; then
+    guard_violation 'lsblk partition inventory unavailable'; return
+  fi
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^PATH=\"([^\"]*)\"[[:space:]]PKNAME=\"([^\"]*)\"[[:space:]]PARTLABEL=\"([^\"]*)\"[[:space:]]TYPE=\"([^\"]*)\"$ ]] || {
+      guard_violation "malformed lsblk row: ${line}"; return;
+    }
+    path="${BASH_REMATCH[1]}"; parent="${BASH_REMATCH[2]##*/}"
+    label="${BASH_REMATCH[3]}"; type="${BASH_REMATCH[4]}"
+    [[ "${type}" == part ]] || continue
+    if [[ -z "${path}" || -z "${parent}" ]]; then
+      guard_violation "partition has no device or parent disk: ${line}"; return
+    fi
+    parents["${path}"]="${parent}"
+    devices["${path}"]="${label}"
+    if [[ -n "${label}" ]]; then
+      if [[ -n "${labels[${label}]:-}" && "${labels[${label}]}" != "${parent}" ]]; then
+        labels["${label}"]+=" ${parent}"
+      else
+        labels["${label}"]="${parent}"
+      fi
+    fi
+  done <<<"${rows}"
+  if [[ ! -r "${fstab}" || ! -r "${conf}" ]]; then
+    guard_violation "fstab or RAUC system.conf unavailable: ${fstab} ${conf}"; return
+  fi
+  for mount in /boot /data; do
+    expected="$(awk -v mount="${mount}" '$1 ~ /^PARTLABEL=/ && $2 == mount {sub(/^PARTLABEL=/,"",$1); print $1}' "${fstab}")"
+    [[ -n "${expected}" && "${expected}" != *$'\n'* ]] || {
+      guard_violation "fstab ${mount} PARTLABEL missing or ambiguous: ${expected}"; return;
+    }
+    refs+=("${expected}")
+  done
+  for mount in 0 1; do
+    expected="$(awk -v section="[slot.rootfs.${mount}]" '$0 == section {inside=1; next} /^\[/ {inside=0} inside && /^device=\/dev\/disk\/by-partlabel\// {sub(/^device=\/dev\/disk\/by-partlabel\//, ""); print}' "${conf}")"
+    [[ -n "${expected}" && "${expected}" != *$'\n'* ]] || {
+      guard_violation "RAUC rootfs.${mount} PARTLABEL missing or ambiguous: ${expected}"; return;
+    }
+    refs+=("${expected}")
+  done
+  for label in "${refs[@]}"; do
+    if [[ -z "${labels[${label}]:-}" ]]; then
+      guard_violation "referenced PARTLABEL=${label} absent on all disks"; return
+    fi
+    if [[ "${labels[${label}]}" == *' '* ]]; then
+      guard_violation "duplicate PARTLABEL=${label} across disks ${labels[${label}]}"; return
+    fi
+  done
+  for mount in / /boot /data; do
+    source="$("${findmnt_bin}" -n -o SOURCE "${mount}")" || {
+      guard_violation "${mount} mount source unavailable"; return;
+    }
+    source="$(readlink -f -- "${source}")" || {
+      guard_violation "${mount} source cannot be resolved: ${source}"; return;
+    }
+    parent="${parents[${source}]:-}"
+    [[ -n "${parent}" ]] || { guard_violation "${mount} source ${source} is not an inventoried partition"; return; }
+    if [[ -n "${disk}" && "${parent}" != "${disk}" ]]; then
+      guard_violation "cross-disk mount: / on ${disk}, ${mount} on ${parent} (${source})"; return
+    fi
+    disk="${parent}"
+    if [[ "${mount}" != / ]]; then
+      if [[ "${mount}" == /boot ]]; then expected="${refs[0]}"; else expected="${refs[1]}"; fi
+      actual="${devices[${source}]:-}"
+      [[ "${actual}" == "${expected}" ]] || {
+        guard_violation "${mount} source ${source} has PARTLABEL=${actual}, fstab expects ${expected}"; return;
+      }
+    else
+      actual="${devices[${source}]:-}"
+      [[ "${actual}" == "${refs[2]}" || "${actual}" == "${refs[3]}" ]] || {
+        guard_violation "/ source ${source} has PARTLABEL=${actual}, RAUC expects ${refs[2]} or ${refs[3]}"; return;
+      }
+    fi
+  done
+  log "PARTLABEL guard: /, /boot and /data on ${disk}; referenced labels unique"
+}
+
+partlabel_guard_ok() {
+  if [[ -e "${PARTLABEL_FAILURE}" ]]; then
+    fail "PARTLABEL guard refused mark-good: $(<"${PARTLABEL_FAILURE}")"
+    return 1
+  fi
+}
 
 load_conf() {
   if [ -r "${CONF}" ]; then
@@ -244,6 +345,7 @@ marker_matches_boot() {
 }
 
 mark_good() {
+   partlabel_guard_ok || return 1
   if ! command -v "${RAUC_BIN}" >/dev/null 2>&1; then
     fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
     return 1
@@ -266,6 +368,7 @@ mark_good() {
 }
 
 main() {
+   partlabel_guard_ok || exit 1
   load_conf
 
   if ! BOOT_ID="$(cat "${BOOT_ID_FILE}")" ||
@@ -289,7 +392,8 @@ main() {
   while :; do
     attempt=$(( attempt + 1 ))
     log "streaming healthcheck attempt #${attempt} (deadline in $(( deadline - $(date +%s) ))s)"
-    if run_checks; then
+   if run_checks; then
+       partlabel_guard_ok || exit 1
       mark_good
       exit $?
     fi
@@ -302,4 +406,8 @@ main() {
   done
 }
 
-main "$@"
+if [[ "${1:-}" == --partlabel-guard ]]; then
+  partlabel_guard
+else
+  main "$@"
+fi

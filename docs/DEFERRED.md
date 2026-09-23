@@ -582,9 +582,23 @@ Capture the commands and outputs under `test-results/uplink-sharing/`.
 
 ## 12. `CERALIVE_BENCH_LABELS` has no verification against the physical target
 
-**Status:** Open technical debt; no automated safeguard exists. The flag's
-no-default design is CORRECT and stays as it is, so this item is about the
-MISSING second half, not about the flag.
+**Status:** Closed for the Maskrom/eMMC flash path (update-system-overhaul Todo 18,
+2026-09-23). The explicit `--bench-labels` build input remains mandatory. This is
+offline fixture evidence, not a fresh hardware flash or a RAUC pre-install hook.
+`ci/verify-and-flash-candidate.sh` now invokes the raw-image label gate on its
+SHA-verified private snapshot before USB handoff or any write. That gate reads GPT
+labels and both slots' baked `/etc/fstab` and `/etc/rauc/system.conf` through
+`sgdisk`/`debugfs`; `--target-medium sd` cannot enter this eMMC-only writer. At
+boot, the enabled `ceralive-partlabel-guard.service` checks actual `/`, `/boot`,
+`/data` parent disks and duplicate referenced labels using plain `findmnt` and
+`lsblk -P`, records exact violations under `/run/ceralive/partlabel-guard.failed`,
+and lets boot continue. `ceralive-healthcheck.sh` refuses mark-good on that marker.
+Evidence: `tests/partlabel-guard.test.sh` (matching GPT, mismatched B-slot fstab,
+same-disk, cross-disk, duplicate-label and mark-good refusal); registered in
+`tests/registry.tsv`. Offline transcripts:
+`/mnt/development/ceralive/.omo/evidence/update-system-overhaul/task-18/guard-test.txt`
+and `cross-disk.txt`. Direct RAUC installs outside this flash tool remain an
+independent deployment route and are not claimed to receive the pre-write check.
 **Location:** `lib/orchestrate.sh` (`CERALIVE_BENCH_LABELS` export + the
 `stage_repart_dir` label rewrite), `mkosi/customize/postinst.d/persistence.sh`
 (the `/data` fstab entry), `mkosi/platform/boot/install-boot.sh` (the `/boot`
@@ -608,7 +622,7 @@ the active mode, and why the artifact tuple records `bench_labels` +
 `partlabel_set`. None of that is in question here, and none of it should be
 softened on the strength of this item.
 
-**What is missing.** Nothing anywhere verifies the human's choice against the
+**Historical gap (before Todo 18).** Nothing verified the human's choice against the
 board it is about to be deployed to. The chain is: operator remembers the flag →
 build bakes an fstab → RAUC installs the bundle → the board tries to mount. Only
 the last step consults physical reality, and by then the image is already on the
@@ -649,7 +663,7 @@ first signal is an unbootable slot on a board that may be physically remote. The
 flag is one input among several on a long-running dispatch, and human memory is
 currently the only thing standing between a correct build and this outcome.
 
-**Unblock condition.** Add a preflight that cross-checks the candidate image's
+**Original unblock condition (now met for the flash path above).** Add a preflight that cross-checks the candidate image's
 baked-in fstab expectations against the target device's real GPT before the
 image can boot from it, and make a mismatch a loud refusal rather than a silent
 write. Either placement works:
@@ -668,9 +682,9 @@ intent rather than from the artifact, reintroduces the same class of error one
 layer up. Verify against both label sets, and include a non-vacuity leg proving
 the check actually fails a deliberately mismatched pair.
 
-**Not in scope here.** This entry is documentation of the gap. Implementing the
-preflight is separate work, and it must not weaken the explicit-flag requirement
-above, which remains the correct first line of defence.
+**Boundary:** No PARTLABEL or partition geometry is changed. The boot guard
+observes and reports; it does not repair a wrong mount or block PID 1. A direct
+RAUC-install preflight remains outside this implementation's claimed coverage.
 
 ---
 

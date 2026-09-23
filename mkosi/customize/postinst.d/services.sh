@@ -375,6 +375,10 @@ setup_boot_healthcheck() {
   install -m 0755 "${src}/ceralive-healthcheck.sh" /usr/local/bin/ceralive-healthcheck.sh
   install -m 0644 "${src}/ceralive-healthcheck.service" /etc/systemd/system/ceralive-healthcheck.service
   enable_service ceralive-healthcheck.service
+  [[ -f "${src}/ceralive-partlabel-guard.service" ]] \
+    || die "PARTLABEL guard unit source not found: ${src}/ceralive-partlabel-guard.service"
+  install -m 0644 "${src}/ceralive-partlabel-guard.service" /etc/systemd/system/ceralive-partlabel-guard.service
+  enable_service ceralive-partlabel-guard.service
 }
 # ---------------------------------------------------------------------------
 # avahi-daemon restart hardening (defense-in-depth mDNS reliability): stock Debian's
