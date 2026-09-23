@@ -37,6 +37,30 @@ lacks_active_key() {
   fi
 }
 
+check_system_conf_writers() {
+  local -a writers=()
+  local file name key
+  mapfile -t writers < <(grep -rlE --include='*.sh' --include='*.conf' --include='*.chroot' \
+    '^[[:space:]]*bootloader=(custom|grub)[[:space:]]*$' \
+    "${PIPELINE_DIR}/mkosi" "${PIPELINE_DIR}/lib" | sort)
+  if (( ${#writers[@]} >= 5 )); then
+    ok "discovered ${#writers[@]} system.conf writers (minimum 5)"
+  else
+    bad "discovered only ${#writers[@]} system.conf writers (minimum 5)"
+  fi
+  for file in "${writers[@]}"; do
+    name="${file#"${PIPELINE_DIR}"/}"
+    for key in '[slot.rootfs.0]' '[slot.rootfs.1]' '[slot.certs.0]' \
+      'device=/data/ceralive/certs/.rauc-certs-slot' 'type=raw'; do
+      has "${name} declares ${key}" "${file}" "${key}"
+    done
+    if grep -Eq '^[[:space:]]*bootloader=custom[[:space:]]*$' "${file}"; then
+      lacks_active_key "${name} custom backend owns boot attempts" "${file}" 'boot-attempts'
+    fi
+    lacks_active_key "${name} does not persist ForceIPv4" "${file}" 'Acquire::ForceIPv4'
+  done
+}
+
 transition_contract_check() {
   local bundle="$1" install_boot="$2" system_conf="$3" rauc_setup="$4"
   local failures_before="${FAIL}"
@@ -72,6 +96,8 @@ transition_contract_check() {
 
 echo "== first-Trixie bundle contract =="
 transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}" "${RAUC_SETUP}"
+echo "== all system.conf writers =="
+check_system_conf_writers
 
 echo
 echo "== mutation controls =="

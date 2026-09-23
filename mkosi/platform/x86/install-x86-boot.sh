@@ -103,9 +103,6 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=custom
-# Boot attempts per slot before the custom backend / grub.cfg declare a slot bad
-# and roll back. Mirrors CERALIVE_BOOT_ATTEMPTS used by ceralive-boot-state.
-boot-attempts=${BOOT_ATTEMPTS}
 
 [handlers]
 # RAUC bootloader=custom delegates every boot-state op to this script
@@ -132,6 +129,12 @@ type=ext4
 bootname=B
 EOF
     fi
+    cat <<EOF
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
+EOF
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
 

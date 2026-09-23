@@ -191,6 +191,12 @@ type=ext4
 bootname=B
 EOF
     fi
+    cat <<EOF
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
+EOF
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
 

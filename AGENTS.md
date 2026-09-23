@@ -3429,16 +3429,21 @@ only (not for custom)`. On both RK3588 images this made `rauc.service` exit 1
 before acquiring `de.pengutronix.rauc`; every `rauc status` then waited for the
 system bus's 25-second activation timeout, and the board stayed `degraded`.
 
-All three RK3588/custom writers omit the key: the authoritative
+All custom writers omit the key: the authoritative
 `mkosi/platform/boot/install-boot.sh`, the committed
-`mkosi/runtime/rauc/system.conf`, and `mkosi/customize/rauc-setup.sh`'s
-self-contained fallback. No substitute RAUC key is required. Attempt counting
+`mkosi/runtime/rauc/system.conf`, `mkosi/customize/rauc-setup.sh`'s
+self-contained fallback, the runtime postinst fallback, and the retained x86
+custom harness writer. No substitute RAUC key is required. Attempt counting
 remains entirely in the FAT `boot_state.txt`, U-Boot selector,
 `ceralive-boot-state`, and `ceralive-rauc-boot-adapter`; those mechanisms are
-unchanged and still default to three attempts. `tests/rauc-transition-contract.test.sh`
-guards all three writers, while the opt-in real-RAUC contract starts the daemon
-with the config rendered by the authoritative writer and carries the rejected
-pair as a negative control.
+unchanged and still default to three attempts. All six system.conf writers,
+including x86 GRUB, declare the persistent raw cert-rotation slot; the contract
+discovers them by active `bootloader=` and rejects an absent cert slot, missing
+rootfs slots, custom boot attempts, or persistent ForceIPv4 by filename.
+`tests/real-rauc-contract.sh` installs a signed cert-rotation payload into a
+file-backed fixture with a re-signed, host-safe hook; it does not rotate host
+certificates or touch a board. The existing negative control still proves real
+RAUC rejects custom `boot-attempts`.
 
 **RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
 device — else OTA is 100% broken** [EXISTS]

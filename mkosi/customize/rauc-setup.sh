@@ -120,6 +120,10 @@ bootname=A
 device=/dev/disk/by-partlabel/${slot_b}
 type=ext4
 bootname=B
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
 EOF
   fi
   chmod 0644 "${RAUC_SYSTEM_CONF}"
