@@ -36,6 +36,18 @@ rauc_pki_resolve() {
   cert_pub="$(openssl x509 -in "${pki}/leaf-signing.pem" -pubkey -noout)"
   key_pub="$(openssl pkey -in "${pki}/leaf-signing.key" -pubout 2>/dev/null)"
   [[ "${cert_pub}" == "${key_pub}" ]] || { printf 'RAUC leaf certificate/private key mismatch\n' >&2; return 1; }
+  # RAUC's unconfigured CMS verifier requires S/MIME signing; the host's
+  # codesign check alone would accept a leaf that the device rejects.
+  openssl verify -purpose smimesign -CAfile "${keyring}" \
+    -untrusted "${pki}/chain.pem" "${pki}/leaf-signing.pem" >/dev/null || {
+    printf 'RAUC leaf is not valid for the device S/MIME signing purpose\n' >&2
+    return 1
+  }
+  openssl verify -purpose codesign -CAfile "${keyring}" \
+    -untrusted "${pki}/chain.pem" "${pki}/leaf-signing.pem" >/dev/null || {
+    printf 'RAUC leaf is not valid for code signing\n' >&2
+    return 1
+  }
   CERALIVE_RAUC_PKI_DIR="${pki}"
   RAUC_KEYRING_FILE="${keyring}"
   RAUC_ROOT_SHA256="$(rauc_cert_sha256 "${keyring}")"

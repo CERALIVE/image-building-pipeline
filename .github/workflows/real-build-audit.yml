@@ -74,6 +74,15 @@ jobs:
           install -d -m 0700 "${RUNNER_TEMP}/release-pki"
           printf '%s' "${RAUC_RELEASE_PKI_TAR_B64}" | base64 -d | tar -xz -C "${RUNNER_TEMP}/release-pki"
           printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
+      - name: Check release signer before the expensive build
+        run: |
+          set -euo pipefail
+          # Public root identity only: compare to the offline production root
+          # before rotating the Actions secret; never print private key material.
+          openssl x509 -in "${RUNNER_TEMP}/release-pki/root-ca.pem" -outform DER | sha256sum
+          lib/rauc-pki-contract.sh resolve --mode production \
+            --pki-dir "${RUNNER_TEMP}/release-pki" \
+            --keyring "${RUNNER_TEMP}/release-pki/root-ca.pem"
       - name: Build production image without publishing
         env:
           CERALIVE_BUILD_MODE: production
