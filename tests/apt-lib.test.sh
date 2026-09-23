@@ -125,6 +125,26 @@ mapfile -t container_args < <(env -u CERALIVE_APT_PROXY CACHE_FIXTURE=up PATH="$
   || fail "local cache cannot be reached from the builder container"
 ok "proxy: Docker build args translate host-local cache to the host gateway"
 
+nested_lib="${PIPELINE_DIR}/lib/shared/apt-proxy-lib.sh"
+nested_url="$(NESTED_LIB="${nested_lib}" bash -c '
+  source "${NESTED_LIB}"
+  getent() { [[ "$*" == "ahostsv4 host.docker.internal" ]] && printf "172.17.0.1 STREAM host.docker.internal\n"; }
+  apt_proxy_nested_chroot_url http://host.docker.internal:3142
+')" || fail "outer builder did not resolve its Docker host gateway"
+[[ "${nested_url}" == http://172.17.0.1:3142 ]] || fail "nested chroot was given the Docker-only hostname"
+if NESTED_LIB="${nested_lib}" bash -c '
+  source "${NESTED_LIB}"
+  getent() { return 2; }
+  apt_proxy_nested_chroot_url http://host.docker.internal:3142
+' >/dev/null; then
+  fail "missing Docker host mapping did not fail closed"
+fi
+[[ "$(NESTED_LIB="${nested_lib}" bash -c 'source "${NESTED_LIB}"; apt_proxy_nested_chroot_url http://cache.lan:3142')" == http://cache.lan:3142 ]] \
+  || fail "explicit LAN cache URL was changed"
+grep -Fq 'apt_proxy_nested_chroot_url "${CERALIVE_BUILD_APT_PROXY}"' "${PIPELINE_DIR}/lib/stages/mkosi.sh" \
+  || fail "outer builder did not resolve the cache before starting mkosi"
+ok "proxy: nested chroot gets literal host-gateway IP; absent mapping fails closed"
+
 mapfile -t proxied < <(CERALIVE_APT_PROXY=http://acng.lan:3142 lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
 (( ${#proxied[@]} == 16 )) \
   || fail "CERALIVE_APT_PROXY emitted ${#proxied[@]} tokens, expected 16 (the six pairs plus http proxy and https DIRECT)"

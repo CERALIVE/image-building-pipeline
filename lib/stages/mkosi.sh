@@ -229,6 +229,15 @@ mkosi_invoke() {
         }
         export APT_GPG_PUBLIC_B64
       fi
+      if [[ "${CERALIVE_BUILD_APT_PROXY:-}" == "http://host.docker.internal:3142" ]]; then
+        source /work/lib/shared/apt-proxy-lib.sh
+        CERALIVE_BUILD_APT_PROXY="$(apt_proxy_nested_chroot_url "${CERALIVE_BUILD_APT_PROXY}")" || {
+          echo "FATAL: cannot resolve Docker host gateway for the nested runtime Debian cache" >&2
+          exit 1
+        }
+        export CERALIVE_BUILD_APT_PROXY
+        echo "mkosi: nested runtime Debian cache at ${CERALIVE_BUILD_APT_PROXY} (build-only)"
+      fi
       cd /work/mkosi
       mkosi \
         --architecture='"${mkosi_arch}"' \

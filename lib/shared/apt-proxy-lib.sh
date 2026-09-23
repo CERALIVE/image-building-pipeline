@@ -32,3 +32,18 @@ apt_proxy_container_host_args() {
       printf '%s\n' --add-host 'host.docker.internal:host-gateway' ;;
   esac
 }
+
+# Docker's --add-host mapping lives in the builder container's /etc/hosts, not
+# in the rootfs mkosi mounts over /etc for its postinstall chroot. Resolve it in
+# the outer container (the network namespace the chroot uses) before mkosi starts.
+apt_proxy_nested_chroot_url() {
+  local url="${1:-}" records address
+  if [[ "${url}" != 'http://host.docker.internal:3142' ]]; then
+    printf '%s\n' "${url}"
+    return 0
+  fi
+  records="$(getent ahostsv4 host.docker.internal)" || return 1
+  read -r address _ <<<"${records}" || return 1
+  [[ "${address}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  printf 'http://%s:3142\n' "${address}"
+}

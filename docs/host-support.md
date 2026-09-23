@@ -270,7 +270,22 @@ restrictive umask made `ci/apt-cache/ceralive.conf` unreadable to the container'
 unprivileged apt-cacher-ng process (runs `35856518948`, `35856704302`). The audit
 copies only this public config to a mode-0644 file under `RUNNER_TEMP`, mounts
 that copy, and removes the copy after the job; local Compose users retain the
-default checked-out config. The existing runtime-only Debian `HTTPS///` remap moves the
+default checked-out config. Run
+[`35856946523`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35856946523)
+then proved the cache healthy and the runtime remap active, but its nested mkosi
+postinstall failed to resolve `host.docker.internal` on every apt attempt. The
+outer builder gets that name via Docker `--add-host`; mkosi mounts the target
+rootfs over `/etc` inside its sandbox, hiding the outer `/etc/hosts`. With
+`--with-network=yes` the sandbox keeps the network path but not the alias. The
+builder therefore resolves the host-gateway mapping to an IPv4 literal **before**
+invoking mkosi, then forwards that build-only URL through the existing
+`CERALIVE_BUILD_APT_PROXY` environment contract. A missing mapping aborts the
+build, never falls back to direct acquisition. Do not substitute the runner's
+default-route address: the required address is Docker's *host-gateway mapping
+inside the builder*, not an inferred runner route. A local mkosi-sandbox probe
+with an empty `/etc/hosts` reached the live cache at the mapped IPv4 address;
+the scheduled audit still needs two consecutive successful end-to-end receipts.
+The existing runtime-only Debian `HTTPS///` remap moves the
 upstream TLS leg to apt-cacher-ng, while Debian archive signatures and package
 digests remain checked and the installed HTTPS source remains unchanged. The
 first-party mTLS fetch stays DIRECT. A run proving the remapped install works

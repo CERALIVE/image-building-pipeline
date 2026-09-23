@@ -6283,6 +6283,14 @@ also hid the Compose config from apt-cacher-ng; the audit mounts a mode-0644
 copy of that public file from `RUNNER_TEMP` instead. The installed image source and first-party
 mTLS remain unchanged. Details and run ID: `docs/host-support.md` runner section.
 
+Docker's outer `--add-host` entry for `host.docker.internal` is absent from the
+mkosi postinstall rootfs mounted over `/etc`. The outer builder resolves that
+alias to a literal IPv4 gateway before mkosi starts and forwards it through the
+existing build-only `CERALIVE_BUILD_APT_PROXY` contract; an absent mapping fails
+closed. `--with-network=yes` preserves the network path, not the outer hosts
+file. A local nested-sandbox reachability probe passed, but two successful real
+audits are still needed before declaring the runner fixed.
+
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142
 for one second, then uses it or logs a direct fallback. `=off` opts out;
