@@ -58,7 +58,9 @@ cerastream:
   # refused by the allocation guard.
   # v2026.9.6 retains audio-meter, idle-preview and program-session teardown
   # ownership across timeouts; replacement capture stays fenced until release.
-  pin: v2026.9.6
+  # v2026.9.7 (capture-failover-resilience): standby continuity, one capture-loss
+  # policy, recovery lanes, internal transitions and backup source modes.
+  pin: v2026.9.7
   # Device deb: cerastream 2026.9.6 (amd64 + arm64).
   # Tag commit: b3eb2a0767687415401998353337c3413c09fda9.
   # Downloaded assets match the published SHA-256 sidecars:
@@ -98,7 +100,9 @@ CeraUI:
   # during connectivity fallback and host-route repair. It consumes the published
   # @ceralive/cerastream 2026.9.10 bindings (schema 0.20.0) and pins
   # @ceralive/modem-control at the already-released 1.4.0.
-  pin: v2026.9.3
+  # v2026.9.4 (capture-failover-resilience): capture-resilience operator surfaces
+  # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
+  pin: v2026.9.4
   # Device deb: ceralive-device 2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded
   #   through authenticated GitHub access and independently hashed; each matched its
