@@ -6278,7 +6278,9 @@ valid direct IPv4 OpenSSL peer (Fastly / Let's Encrypt), no IPv6 route, but eigh
 direct apt HTTPS attempts failing certificate verification on IPv4. The audit
 starts the pinned cache and requires its report endpoint, then sets an explicit
 runner-local proxy so runtime Debian `HTTPS///` acquisition cannot silently
-return to the failing direct apt path. The installed image source and first-party
+return to the failing direct apt path. The runner's restrictive checkout umask
+also hid the Compose config from apt-cacher-ng; the audit mounts a mode-0644
+copy of that public file from `RUNNER_TEMP` instead. The installed image source and first-party
 mTLS remain unchanged. Details and run ID: `docs/host-support.md` runner section.
 
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its

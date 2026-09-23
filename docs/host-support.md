@@ -265,7 +265,12 @@ libapt/GnuTLS rejection; do not invent an issuer or disable verification. The
 audit now brings up the digest-pinned apt-cacher-ng service and **requires** its
 report endpoint before the build. It pins `CERALIVE_APT_PROXY` to the local
 listener for this job, so loss of the cache fails closed rather than reverting
-to direct apt. The existing runtime-only Debian `HTTPS///` remap moves the
+to direct apt. The first cache startup failed on this runner because the checkout's
+restrictive umask made `ci/apt-cache/ceralive.conf` unreadable to the container's
+unprivileged apt-cacher-ng process (runs `35856518948`, `35856704302`). The audit
+copies only this public config to a mode-0644 file under `RUNNER_TEMP`, mounts
+that copy, and removes the copy after the job; local Compose users retain the
+default checked-out config. The existing runtime-only Debian `HTTPS///` remap moves the
 upstream TLS leg to apt-cacher-ng, while Debian archive signatures and package
 digests remain checked and the installed HTTPS source remains unchanged. The
 first-party mTLS fetch stays DIRECT. A run proving the remapped install works
