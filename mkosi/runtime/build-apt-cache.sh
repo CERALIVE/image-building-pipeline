@@ -11,9 +11,21 @@ runtime_build_apt_cleanup() {
 runtime_build_apt_signature_diagnostics() {
   log "Debian signature failure: inspecting the runtime chroot's archive keyring and verifier"
   date -u
+  umask
   stat -Lc 'keyring: %a %u:%g %s %n' /usr/share/keyrings/debian-archive-keyring.gpg
   stat -c 'sqv: %a %u:%g %s %n' /usr/bin/sqv
   stat -c 'build-only source: %a %u:%g %s %n' "${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  stat -Lc 'executable ancestor: %a %u:%g %n' / /usr /usr/bin /lib /usr/lib /usr/lib/aarch64-linux-gnu
+  if stat -Lc 'apt lists: %a %u:%g %n' /var/lib/apt /var/lib/apt/lists /var/lib/apt/lists/partial; then
+    :
+  else
+    log "apt lists path unavailable at signature failure"
+  fi
+  if runuser -u _apt -- /usr/bin/true; then
+    log "_apt /usr/bin/true: exit 0"
+  else
+    log "_apt /usr/bin/true: exit $?"
+  fi
   local index="/tmp/ceralive-sqv-probe.$$.InRelease" rc=0
   log "probing sqv directly as root and _apt in the failing runtime sandbox"
   if /usr/bin/sqv --version 2>&1; then
