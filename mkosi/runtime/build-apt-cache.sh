@@ -8,6 +8,19 @@ runtime_build_apt_cleanup() {
   rm -rf "${CERALIVE_BUILD_APT_DIR}"
 }
 
+runtime_build_apt_prepare_usr() {
+  local mode
+  mode="$(stat -c %a /usr)" || return 1
+  if [[ "${mode}" != 755 ]]; then
+    log "restoring /usr traversal (mode ${mode} -> 0755) before sandboxed apt verification"
+    chmod 0755 /usr || return 1
+  fi
+  if ! runuser -u _apt -- /usr/bin/true; then
+    log "FATAL: _apt still cannot execute through /usr after restoring its mode"
+    return 1
+  fi
+}
+
 runtime_build_apt_signature_diagnostics() {
   log "Debian signature failure: inspecting the runtime chroot's archive keyring and verifier"
   date -u

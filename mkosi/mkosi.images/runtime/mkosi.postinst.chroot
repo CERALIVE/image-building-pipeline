@@ -142,6 +142,7 @@ EOF
 #     apt (base Packages=) is the only guaranteed fetcher at this point.
 # ---------------------------------------------------------------------------
 bootstrap_ca_trust() {
+  runtime_build_apt_prepare_usr || exit 1
   if [[ -s /etc/ssl/certs/ca-certificates.crt ]] && apt-get update >/dev/null 2>&1; then
     log "CA trust store already present and validates the live HTTPS source — skipping the HTTPS bootstrap"
     return 0
@@ -184,15 +185,11 @@ EOF
 #     its own source first). This mirrors the platform layer's in-chroot apt usage.
 # ---------------------------------------------------------------------------
 # retry_apt: a passing bootstrap_ca_trust probe does not guarantee the real
-# call seconds later. Two live runs since this existed both exhausted their
-# whole backoff window (first 6s, then a widened 155s) with EVERY mirror IP
-# failing cert-verify on EVERY attempt -- not a brief blip, so the backoff
-# is widened again; if this window is not enough either, the flakiness
-# outlasts realistic in-build retrying and needs a caching mirror, not a
-# bigger number here. Exit code alone is not enough either: `apt-get update`
-# exits 0 on a partial fetch failure ("W: Failed to fetch", stale/no index
-# kept) -- observed live, that starves the install with "Unable to locate
-# package" for everything, so output is checked for that marker too.
+# call seconds later. Direct HTTPS failed every attempt on the runner; the
+# build-only cache is the remedy, not further backoff. Also apt-get update can
+# exit 0 on a partial fetch failure ("W: Failed to fetch", stale/no index kept),
+# starving the install with "Unable to locate package" for everything. Check
+# output as well as exit status so that a partial update cannot report success.
 source "${CERALIVE_RUNTIME_SRC}/build-tls-diagnostics.sh"
 retry_apt() {
   local label="$1"; shift

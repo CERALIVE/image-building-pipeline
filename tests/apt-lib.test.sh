@@ -187,6 +187,19 @@ grep -Fq 'source "${CERALIVE_RUNTIME_SRC}/build-apt-cache.sh"' "${PIPELINE_DIR}/
   || fail "runtime postinst does not load the build-only remap"
 ok "proxy: CONNECT is exact-host scoped and Debian remap stays in the build postinst"
 
+runtime_postinst="${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+runtime_helper="${PIPELINE_DIR}/mkosi/runtime/build-apt-cache.sh"
+grep -Fq 'runtime_build_apt_prepare_usr || exit 1' "${runtime_postinst}" \
+  || fail "runtime must restore /usr traversal before CA bootstrap and sandboxed apt"
+grep -Fq 'chmod 0755 /usr || return 1' "${runtime_helper}" \
+  || fail "runtime repair no longer makes /usr traversable by _apt"
+grep -Fq 'runuser -u _apt -- /usr/bin/true' "${runtime_helper}" \
+  || fail "runtime repair no longer proves unprivileged execution works"
+[[ "$(grep -n 'runtime_build_apt_prepare_usr || exit 1' "${runtime_postinst}" | cut -d: -f1)" -lt \
+   "$(grep -n 'apt-get update >/dev/null' "${runtime_postinst}" | cut -d: -f1)" ]] \
+  || fail "the /usr permission repair runs after apt already invoked sqv"
+ok "proxy: _apt can execute sqv after restoring only /usr traversal, before any apt update"
+
 # Drive the REAL runtime helper: the remap must reach every later apt call in the
 # layer (APT_CONFIG), leave the shipped source byte-identical, and vanish on exit.
 remap_src="${WORK}/debian.sources"
