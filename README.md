@@ -94,7 +94,9 @@ The separate scheduled real-build audit requires the local Debian cache before
 building to avoid the runner's diagnosed direct-apt TLS failure; it is not a PR
 check. Its `_apt`/`sqv` execution repair is real-run proven, but its RAUC bundle
 now fails the separate release-certificate-purpose check; no green audit is
-claimed. Evidence and the required signer decision are in the host matrix.
+claimed. The locally provisioned production leaf is already dual-EKU, but the
+Actions secret predates it. A pre-build gate now rejects a stale signer and
+exposes the public root identity for a safe secret rotation.
 See the production-runner section of the host matrix for the exact checks.
 
 See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.

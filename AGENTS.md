@@ -3486,13 +3486,14 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   fresh slot healthy; guard: `mkosi-image-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
 
-**PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
-touched here.** `/mnt/development/ceralive/cert-work/rauc/gen-certs.sh` generates the
-production leaf with the same `extendedKeyUsage = codeSigning` only — so it has the
-identical RAUC 1.8 defect. It is live security key material (private keys included)
-and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` — out
-of scope for this fix. Flagged for the orchestrator/user to action separately before
-production OTA can work on a 1.8 device.
+**Production source PKI and the Actions secret are distinct copies.** The locally
+provisioned `cert-work/rauc/leaf-signing.pem` already carries both EKUs and chains
+under its existing root for `smimesign`; no new leaf or CA is needed for that
+source. The scheduled audit instead reads `RAUC_RELEASE_PKI_TAR_B64` from Actions,
+whose last update predates that leaf and whose bundle failed the S/MIME check in
+run 35902300468. The audit now checks the supplied signer before the expensive
+build. Rotate the secret only after comparing its public root identity against
+the locally provisioned production root; keep the root and intermediate unchanged.
 
 **The debug package delta is VARIANT-keyed, and it shares a filename suffix with
 the FAMILY deltas — so every directory glob had to be taught the difference** [EXISTS]
@@ -6297,9 +6298,10 @@ restores `/usr` to 0755 before any apt transaction and fails closed if `_apt`
 still cannot execute. Run 35902300468 crossed that boundary and completed
 runtime and app installation, then failed at the independent RAUC CMS
 signer-purpose gate (`unsuitable certificate purpose` under `-purpose
-smimesign`). No green audit is claimed; two consecutive successes await an
-owner-approved production signing resolution. See `docs/host-support.md` for
-the evidence and policy boundary.
+smimesign`). The locally provisioned production leaf already passes that purpose;
+the CI secret is an older copy. A pre-build signer gate and public-root identity
+receipt precede any secret rotation. No green audit is claimed until two
+consecutive real successes. See `docs/host-support.md` for the evidence.
 
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142

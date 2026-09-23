@@ -322,14 +322,19 @@ repaired; it is **not** a green audit.
 
 That run failed later while signing the RAUC bundle: OpenSSL CMS verification
 with `-purpose smimesign` returned `Verify error: unsuitable certificate purpose`
-for the CI-provided release leaf. The production leaf is documented as
-codeSigning-only; the secret's actual EKU needs a metadata-only check before
-choosing the remedy. This is an independent production-signing decision. Do not
-turn off CMS verification, substitute `-purpose any`, or silently use a
-development signer for this production-mode audit. An owner-approved signer
-rotation compatible with the device verifier, or an explicitly approved
-end-to-end RAUC purpose-policy change, is required. **Two consecutive successful
-audit runs remain outstanding**, so Todo 13 and its dependents stay blocked.
+for the CI-provided release leaf. The separate, locally provisioned production
+leaf in `cert-work/rauc/` was inspected on 2026-09-23: its actual EKU is
+`emailProtection, codeSigning`, and `openssl verify -purpose smimesign` succeeds
+through the existing intermediate to the existing root. The intermediate's
+private key is locally available, but **no new leaf is needed**. The Actions
+secret was last updated 2026-07-13, before the current leaf's 2026-07-18 issue
+date, and cannot contain that leaf. The audit now preflights the supplied leaf
+against the unchanged root for both S/MIME and code-signing purposes before
+spending time on a real build; the test drives a valid, codeSigning-only negative
+fixture against the same check. Compare the public root identity printed by the
+preflight to the local production root before replacing the Actions secret.
+Never weaken CMS verification or use the non-production test fixture here.
+**Two consecutive successful audit runs remain outstanding** until verified.
 
 ## Per-host detail
 
