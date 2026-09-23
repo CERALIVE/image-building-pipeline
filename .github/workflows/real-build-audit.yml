@@ -56,7 +56,10 @@ jobs:
       - name: Require Debian build cache on this runner
         run: |
           set -euo pipefail
-          ./dev-cache up
+          if ! ./dev-cache up; then
+            docker compose -f ci/apt-cache/compose.yml logs --no-color apt-cache
+            exit 1
+          fi
           curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 --max-time 3 \
             http://127.0.0.1:3142/acng-report.html >/dev/null
       - name: Materialize build trust inputs
