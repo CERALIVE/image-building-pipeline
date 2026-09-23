@@ -314,8 +314,9 @@ stop_service
 [[ "$(sha256sum "${WORK}/slot-a.ext4" | cut -d' ' -f1)" == "${a_before}" ]]
 [[ "$(debugfs -R 'cat /etc/ceralive-rauc-probe' "${WORK}/slot-b.ext4" 2>/dev/null)" == updated-arm64-bundle ]]
 [[ "$(sha256sum "${WORK}/data/certs/.rauc-certs-slot" | cut -d' ' -f1)" == "${cert_before}" ]]
-cmp "${WORK}/pki/next-leaf.pem" "${WORK}/data/certs/incoming/leaf.pem"
-grep -Fxq 'start --no-block cert-rotation.service' "${WORK}/rotation-hook.calls"
+[[ "$(sudo -n stat -c '%u' "${WORK}/data/certs/incoming")" == 0 ]]
+sudo -n cmp "${WORK}/pki/next-leaf.pem" "${WORK}/data/certs/incoming/leaf.pem"
+sudo -n grep -Fxq 'start --no-block cert-rotation.service' "${WORK}/rotation-hook.calls"
 printf 'CERT_ROTATION=PASS signed-rotation-bundle-installed hook-staged-new-leaf rootfs-unchanged\n'
 
 [[ "$(state boot-select)" == "B rootfs_b" ]]
