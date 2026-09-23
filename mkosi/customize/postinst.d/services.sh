@@ -11,7 +11,7 @@
 #                              that drives the hardware and SSH policy modules
 #   * suppress_unusable_boot_units
 #                              the seven stock units this image cannot use
-#   * configure_ntp, install_console_font_service, setup_boot_healthcheck,
+#   * configure_ntp, setup_boot_healthcheck,
 #     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
 #
 # NOT to be confused with customize/services.sh one directory up: that is a
@@ -142,22 +142,13 @@ EOF
   fi
 }
 
-install_console_font_service() {
-  local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "${src}" && -f "${src}/ceralive-console-font.service" ]] \
-    || die "console font service source not found: ${src}/ceralive-console-font.service (is \$SRCDIR/runtime mounted?)"
-
-  install -m 0644 "${src}/ceralive-console-font.service" /etc/systemd/system/ceralive-console-font.service
-}
-
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
   configure_debug_access
   configure_ntp  # install NTP pools before enabling chrony
-  install_console_font_service
   local svc
-  for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon ceralive-console-font; do
+  for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon; do
     enable_service "${svc}"
   done
   configure_ssh_enablement

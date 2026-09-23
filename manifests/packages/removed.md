@@ -54,7 +54,8 @@ minimal mkosi base never pulls them; recorded for completeness.
 `desktop-*`, `x11-*`, `gnome-*`, `kde-*`, `libreoffice-*`, `firefox*`,
 `chromium*`, `games-*`, `documentation`, `man-db`, `info`,
 `firmware-linux-nonfree` (VARIANT_MINIMAL_EXTRA_EXCLUDES),
-`ffmpeg-minimal` (VARIANT_MINIMAL_EXTRA_EXCLUDES — superseded by `ffmpeg` in shared.list).
+`ffmpeg-minimal` (VARIANT_MINIMAL_EXTRA_EXCLUDES — superseded by full `ffmpeg`, now
+debug-only; see Todo 30 below).
 
 ## (e) Development variant ONLY — not shipped in the standard image
 
@@ -167,7 +168,6 @@ should not have to know which route they are on.
 | `rsync` | dev-push / dev-sync live-reload loop (`docs/dev-loop.md`). |
 | `wget` | http downloader for update/fetch infra. |
 | `usb-modeswitch` | Flips USB LTE/5G modems out of storage mode — without it USB modems never enumerate. Core to the bonded-modem datapath. |
-| `kbd` | `setfont`/`loadkeys` — `systemd-vconsole-setup` shells out to these. Boot-console essential, not diagnostics. |
 
 **`fonts-terminus` was REMOVED in todo 31** — it was listed here as a boot-console
 essential on the strength of an annotation that does not survive contact with the
@@ -203,6 +203,23 @@ Orange Pi 5+, not `ceraui-base.conf`), and the `bluetooth` service is explicitly
 > shared list. **Owner sign-off requested before image release.**
 
 ---
+
+# Todo 30 — evidence-gated image slimming
+
+Consumer evidence is saved at
+`/mnt/development/ceralive/.omo/evidence/update-system-overhaul/task-30/consumers.txt`.
+The required `cerastream/src` path is absent in this checkout, so the completed
+scan substituted its actual production source root, `cerastream/crates`, and
+excluded tests and documentation. The scratch-copy mutation proof at
+`task-30/consumer-guard.txt` plants an `ipcalc` invocation and proves the
+removal check refuses it.
+
+| Package / artifact | Verdict | Reason / destination |
+|---|---|---|
+| `ffmpeg` | **MOVE TO DEBUG** | `ffprobe` is used only by CI/hardware validation; production runtime has no consumer. It is in `development.delta.list` and the `debug-toolset` add-on exposes `/usr/bin/ffmpeg` and `/usr/bin/ffprobe`. |
+| `ipcalc` | **REMOVE** | No runtime consumer survived the scan; its retired NetworkManager dispatcher was the only prior rationale. |
+| `u-boot-tools` | **REMOVE FROM IMAGE** | `mkimage` remains a host-side disk-assembly tool, not a device-runtime dependency; no device invoker survived the scan. |
+| `kbd` + `ceralive-console-font.service` | **REMOVE** | The unit always swallowed failed `setfont` calls because no PSF font provider ships. With that no-op unit retired, `setfont`/`loadkeys` have no runtime consumer. |
 
 # Todo 19 — evidence-gated `shared.list` audit (per-package verdicts)
 
@@ -244,7 +261,7 @@ Evidence classes used in the table:
 | 8 | `curl` | KEEP | INVOKE: `lib/shared/health-gate-lib.sh:54` device-side health probe; CeraUI update flows; the guaranteed first arm of every `curl … || wget …` fallback in this repo. | all |
 | 9 | `dnsmasq` | KEEP | **Must-NOT-Have list.** KEYFACT "Don't unmask `dnsmasq.service` believing it serves the WiFi hotspot": NetworkManager spawns its OWN dnsmasq **child process** for `ipv4.method shared`, and that child needs this package's binary. The standalone unit is masked; the package is not. | all |
 | 10 | `e2fsprogs` | KEEP | **Must-NOT-Have list.** KEYFACT "RAUC 1.8 needs … `mkfs.ext4`": real Rock 5B+ OTA failed `failed to start mkfs.ext4` until this was added. | all |
-| 11 | `ffmpeg` | KEEP | INVOKE (on-board): `cerastream/tests/hw-smoke.sh:35` (`FFPROBE="${FFPROBE:-ffprobe}"`) — Phase B asserts "a non-empty MPEG-TS whose codec ffprobe confirms", and the script is explicitly board-only ("this only ever validates on the actual board"). `cerastream/tests/boot-parity.sh:270` (`ffprobe -v error`) is CHECK 5, and the RK3588 hardware profiles of that gate are still OWED (root `AGENTS.md`). `manifests/families/rk3588.yaml:71` records the shipped MPP HW-encode claim as "ffprobe-verified … on real Rock 5B+ hardware". **The "engine is GStreamer-based so ffmpeg is dead" reading is wrong**: the libav *elements* (`avdec_*`/`avenc_*`) come from `gstreamer1.0-libav`→`libav*`, not from this package — but the on-board validation gate does need the CLI. | all |
+| 11 | `ffmpeg` | **MOVE TO DEBUG (Todo 30)** | The CLI remains necessary for CI/hardware validation but has no production-runtime consumer. `gstreamer1.0-libav` still provides the runtime libav elements. | debug only |
 | 12 | `gstreamer1.0-alsa` | KEEP | **Must-NOT-Have list.** PLUGIN: `alsasrc` — USB/RØDE audio capture + the always-on audio meter; KEYFACT "First-party .deb fetch" names it explicitly because `--no-install-recommends` will not pull it. | all |
 | 13 | `gstreamer1.0-libav` | KEEP | PLUGIN: supplies `avdec_h264`/`avdec_h265`/`avdec_aac`/`avenc_aac`, which cerastream names as real element factories — `cerastream-hal/src/decoder_selection.rs:181-192` (software fallback rung of every platform ladder), `graph/builder.rs:129`, `graph/templates/{n100,jetson,rk3588}.rs`. | all |
 | 14 | `gstreamer1.0-nice` | KEEP | **Must-NOT-Have list.** PLUGIN: `nicesrc` — the libnice ICE transport the cerastream WebRTC preview tier requires; root `AGENTS.md` calls libnice "a device-image dependency, not just a build flag". | all |
@@ -254,10 +271,10 @@ Evidence classes used in the table:
 | 18 | `gstreamer1.0-plugins-ugly` | KEEP | PLUGIN: `x264enc` — the `generic` software-encode profile, which is the platform every non-hardware boot-parity run uses (`cerastream/tests/hw-smoke.sh` `generic/h264` → `x264enc`). | all |
 | 19 | `gstreamer1.0-tools` | KEEP | INVOKE (on-board): `gst-inspect-1.0` / `gst-launch-1.0` are the whole of `cerastream/tests/hw-smoke.sh` Phase A + B, and `gst-inspect-1.0` is the board evidence cited throughout AGENTS.md (e.g. the Mesa prune's "264 plugins / 1548 features"). | all |
 | 20 | `hostapd` | **DEFER** | Positive non-use today: ROOTFS shows `/etc/hostapd/` holds only the package's own `ifupdown.sh` — **no `hostapd.conf`**, and nothing under `mkosi/` ever writes one, so the enabled `hostapd.service`'s `ConditionFileNotEmpty=/etc/hostapd/hostapd.conf` skips it on every boot. `mkosi/runtime/ceralive-provision.sh:34-36` states AP mode is NM-native and "hostapd remains in the image only as an evidence-gated fallback". RDEP: none. The only invoker anywhere is CeraUI's host-side `test-harness/wifi-hwsim/` container. **BUT** the mechanism it backstops is `[PARTIAL]`: AGENTS.md "First-boot WiFi provisioning portal" carries "HW caveat: AP mode also requires the onboard wlan driver to support it (RK3588 chip dependent) — to be validated on hardware". Deleting the sanctioned fallback before the primary is board-proven would be size-driven, not evidence-driven. **Unblock condition:** NM-native AP mode board-confirmed on both RK3588 boards (the `[PARTIAL]` cleared) → then REMOVE (2,297 KB). | all |
-| 21 | `ipcalc` | **RE-EVALUATE (todo 41)** | Its ONLY stated consumer was the SRTLA source-routing dhclient hook (`networking-srtla.sh:106-107`, `ipcalc -n`/`-p` for the per-link policy tables), and that layer is RETIRED — so this row's justification no longer holds. Deliberately NOT removed here: dropping a package from `shared.list` is image-slimming scope. Re-audit for a remaining consumer, then keep or remove. | all |
+| 21 | `ipcalc` | **REMOVE (Todo 30)** | The retired SRTLA source-routing hook was its only rationale; the completed consumer scan found no replacement runtime consumer. | all |
 | 22 | `iproute2` | KEEP | INVOKE: `ip` for CeraUI's read-only route/policy-route diagnostics (`policy-route-check.ts`, `gateways.ts`); `ip` is in CeraUI's `run.ts` `ALLOWED` allowlist. SRTLA source-policy routing was retired, `ip` itself is still required. | all |
 | 23 | `iw` | KEEP | **Must-NOT-Have list.** INVOKE: `CeraUI/apps/backend/src/modules/wifi/regdomain.ts:423/435/447` — `iw reg set`, `iw reg get`, `iw phy`; `"iw"` is in the `run.ts` `ALLOWED` allowlist. KEYFACT "`iw` in `shared.list` — `wireless-tools` is NOT the same package". | all |
-| 24 | `kbd` | KEEP | INVOKE: `mkosi/runtime/ceralive-console-font.service:9` calls `setfont` directly, and the unit is enabled in `multi-user.target.wants/`; `setfont` ships only here. **CORRECTION recorded in `shared.list`:** the old rationale also claimed `systemd-vconsole-setup` shells out to these — FALSE for this image (a built rootfs contains no `*vconsole*` file at all and no `/etc/vconsole.conf`). Kept because it is one half of a live shipped unit whose other half — a real PSF provider — is the tracked gap (`size-notes.md` §11); dropping it would turn a one-package fix into a two-package one and leave an enabled unit naming a missing binary. | all |
+| 24 | `kbd` | **REMOVE (Todo 30)** | The broken console-font unit is retired: no PSF provider exists, it swallowed its `setfont` failures, and the image has no vconsole path. No runtime `setfont`/`loadkeys` consumer remains. | all |
 | 25 | `libmbim-utils` | KEEP | KEYFACT "ModemManager 1.24 closure": stays in `shared.list` to resolve the Debian modem dependency tree, then the app layer UPGRADES it with the current `~ceralive.3` fork. Removing it breaks that dependency resolution. | all |
 | 26 | `libnss-mdns` | KEEP | NSS plugin so the device can RESOLVE other `.local` hosts (the reverse direction from `avahi-daemon`); referenced by `/etc/nsswitch.conf` in the built rootfs. | all |
 | 27 | `libqmi-utils` | KEEP | Same KEYFACT as `libmbim-utils` — Qualcomm QMI half of the ModemManager closure. | all |
@@ -274,7 +291,7 @@ Evidence classes used in the table:
 | 38 | `squashfs-tools` | KEEP | **Must-NOT-Have list.** KEYFACT "RAUC 1.8 needs … `unsquashfs`" — real Rock 5B+ install failed `Failed to start unsquashfs` until this was added. | all |
 | 39 | `sudo` | KEEP | INVOKE: `CeraUI/apps/backend/src/helpers/addon-helper.ts:45,99` — `deps.exec(SUDO, [HELPER_BIN, …])` against the narrow `/etc/sudoers.d/ceralive-addon-helper` drop-in. Without it add-on enable/disable is dead code. | all |
 | 40 | `systemd-resolved` | KEEP | KEYFACT "`/etc/resolv.conf` MUST be the systemd-resolved stub symlink — else DNS is totally dead": NetworkManager runs `dns=systemd-resolved`, so this package IS the resolver. Separate package on bookworm. | all |
-| 41 | `u-boot-tools` | KEEP | `fw_setenv`/`fw_getenv` + `mkimage` for the RAUC bootloader environment / boot selector; generic (present on the x86 path too). | all |
+| 41 | `u-boot-tools` | **REMOVE FROM IMAGE (Todo 30)** | The environment backend is intentionally not `fw_setenv`; `mkimage` is required only while the host assembles a boot partition. No device-runtime invoker remains. | all |
 | 42 | `usb-modeswitch` | KEEP | Flips USB LTE/5G modems out of storage mode; without it USB modems never enumerate — core to the bonded-modem datapath (already recorded as a verified KEEP in §(h) above). | all |
 | 43 | `v4l-utils` | KEEP | Ships BOTH `v4l2-ctl` and `media-ctl` (the latter has no standalone Debian package — see §(c) and the `parity-check.sh` `PKG_ALIAS[media-ctl]=v4l-utils`). `v4l2-ctl -d /dev/video0 --info` is the board-evidence tool for the HDMI-RX symlink KEYFACT. | all |
 | 44 | `wget` | **REMOVE** | The old "http downloader (update/fetch infra)" annotation named no consumer, and there is none. (i) The OS update path is RAUC (`ceralive-update` → `rauc install`) + `rauc-hawkbit-updater`, which downloads via **libcurl**; the app update path is `apt-get` from apt.ceralive.tv. (ii) CeraUI's backend structurally cannot spawn it — `wget` is absent from `apps/backend/src/helpers/run.ts` `ALLOWED`, which the file calls "the single source of truth … adding a binary here is a security decision". (iii) The ONLY device-side invoker in this repo is `lib/shared/health-gate-lib.sh:54`, the fallback arm of `command -v curl && curl … \|\| wget …` — and `curl` is a mandatory `shared.list` entry, so that arm is unreachable on any CeraLive image. (iv) `CeraUI/install.sh:261` (the legacy pre-`.deb` installer, superseded by `ceralive-device`) uses wget but self-provisions it (`install_if_missing_local wget`). (v) RDEP: none. | all |

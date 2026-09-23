@@ -84,6 +84,8 @@ strace                   # syscall tracing — the first tool reached for when a
                          # capture/encode process blocks or dies with no log.
 tcpdump                  # packet capture for the bonded-uplink path; the SRTLA
                          # link math is invisible without it on a live board.
+ffmpeg                   # ffmpeg/ffprobe CLI for stream inspection and conversion; CI and
+                          # hardware validation use ffprobe, never the production runtime.
 
 # --- The T17 debug-toolset seed set (removed.md §(h)) -------------------------
 # These fifteen were moved OUT of the mandatory `shared.list` by the T17 slimming

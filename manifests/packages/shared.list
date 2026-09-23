@@ -64,7 +64,6 @@ net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it ev
                          # (confirmed on real Rock 5B+ hardware). CeraUI's ifconfig text-parsing is
                          # deeply embedded in its test suite; adding the one legacy binary is the
                          # minimal-risk fix, NOT rewriting network-interfaces.ts onto `ip`.
-ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
 
 # --- USB modem bring-up -------------------------------------------------------
 usb-modeswitch           # flips USB modems out of storage mode into modem mode —
@@ -98,7 +97,6 @@ gstreamer1.0-plugins-ugly
 gstreamer1.0-libav       # libav-backed encode/decode fallback
 v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device control
 libv4l-0                 # rockchip-multimedia-config postinst copies libv4l2.so.0.0.0
-ffmpeg                   # transcode/probe utility for the pipeline
 
 # --- Modems (LTE/5G on every board) -------------------------------------------
 # These pull the FULL Debian modem dependency tree (libmm-glib0, libqmi-glib5,
@@ -333,7 +331,7 @@ curl                     # http client — CeraUI/update flows + on-device `curl
 sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-addon-helper
                          # drop-in; without the sudo binary add-on enable/disable is dead code.
 
-# --- Console (HDMI readability at boot) ---------------------------------------
+# --- Console (UART recovery) ---------------------------------------------------
 login                    # ships /bin/login for the UART/serial getty recovery path. On a
                          # real bench board's SD card, chroots of BOTH RAUC rootfs slots
                          # reported `dpkg -l login` as `un` (never installed), so
@@ -346,18 +344,6 @@ login                    # ships /bin/login for the UART/serial getty recovery p
                          # new dependencies beyond already-installed libc6, libpam0g,
                          # libpam-modules and debconf. Keep it explicit so every image retains
                          # UART recovery; see mkosi-image-contract.bats' login guards.
-kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service (enabled in
-                         # multi-user.target.wants) invokes `setfont` directly, and `setfont`
-                         # ships ONLY here. CORRECTION (todo 19, audited): the previous
-                         # annotation also claimed systemd-vconsole-setup shells out to these —
-                         # that is FALSE for this image. A built rootfs carries NO *vconsole*
-                         # file anywhere (no unit, no binary) and no /etc/vconsole.conf, and
-                         # console-setup/keyboard configs are absent too, so there is no
-                         # vconsole path to break. kbd stays because it is one half of a live,
-                         # shipped, enabled unit whose OTHER half — a real PSF provider — is
-                         # the tracked gap (size-notes.md §11); dropping kbd would turn that
-                         # one-package fix into a two-package one and leave an enabled unit
-                         # naming a binary that does not exist.
 # fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
                          # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
                          # factually wrong, and re-verified still wrong on trixie (todo 10):
@@ -459,9 +445,6 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
                          #   NOTE: this entry alone is too LATE for the build — the runtime layer installs shared.list
                          #   after the platform layer already generated the initrd, so platform/mkosi.postinst installs
                          #   zstd itself ahead of the kernel package. Keep both; this one owns the on-device presence.
-u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
-                         # selector. Generic Debian pkg (present on amd64 too); the
-                         # board-specific U-Boot BLOB is a Platform-layer BSP concern.
 # rauc-hawkbit-updater   # Stage 7 OTA (task 41). STILL DELIBERATELY a comment, NOT an
                          # active apt line — the trixie migration did NOT change this
                          # verdict, only the suite it is stated against.
