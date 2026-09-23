@@ -206,6 +206,15 @@ CERALIVE_BUILD_APT_PROXY='http://evil/;rm' bash -c '
   ' _ "${PIPELINE_DIR}" && fail "runtime remap accepted a malformed cache URL"
 ok "proxy: runtime remap spans the layer via APT_CONFIG, keeps shipped sources, cleans up"
 
+audit_workflow="${PIPELINE_DIR}/.github/workflows/real-build-audit.yml"
+grep -Fq './dev-cache up' "${audit_workflow}" \
+  || fail "real-build audit does not provision its runner's Debian cache"
+grep -Fq 'CERALIVE_APT_PROXY: http://127.0.0.1:3142' "${audit_workflow}" \
+  || fail "real-build audit can silently fall back to the broken direct TLS path"
+grep -Fq 'http://127.0.0.1:3142/acng-report.html' "${audit_workflow}" \
+  || fail "real-build audit does not confirm the cache is answering before building"
+ok "proxy: real-build audit requires the local mirror and refuses a silent direct fallback"
+
 state="${WORK}/apt-state"
 lib_eval 'apt_isolated_state_init "$1" "$2"' "${state}" "${state}/certs" >/dev/null 2>&1
 for d in lists/partial cache/archives/partial certs; do

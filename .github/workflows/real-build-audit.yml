@@ -53,6 +53,12 @@ jobs:
         run: ./ci/check-builder-resources.sh
       - name: Set up BuildKit
         uses: docker/setup-buildx-action@v4
+      - name: Require Debian build cache on this runner
+        run: |
+          set -euo pipefail
+          ./dev-cache up
+          curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 --max-time 3 \
+            http://127.0.0.1:3142/acng-report.html >/dev/null
       - name: Materialize build trust inputs
         env:
           RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
@@ -66,6 +72,7 @@ jobs:
         env:
           CERALIVE_BUILD_MODE: production
           CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
+          CERALIVE_APT_PROXY: http://127.0.0.1:3142
           APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
           APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
           APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
