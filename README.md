@@ -205,6 +205,16 @@ A real source-kernel build retains `resolved.config` (the exact post-
 `olddefconfig` configuration) and `built-modules.txt` (the sorted `.ko`
 inventory) beside the kernel `.deb` under
 `mkosi/.staging/<board>/kernel-build/`.
+With `CERALIVE_KERNEL_ARTIFACT_CACHE=auto` (the default), a successful build also
+stores these three files with per-file SHA-256 in
+`mkosi/cache/kernel-artifacts/<input-key>/`. A subsequent exact-input build
+reuses them only after validating the checksums, Debian identity/board DTB and
+resolved Kconfig survival plus required/forbidden symbols. A corrupt entry is
+discarded and rebuilt. `CERALIVE_KERNEL_ARTIFACT_CACHE=0` disables both lookup
+and storage; any other value is refused. The input key includes source/patch/config
+pins, ordered fragment bytes, variant, output identity and timestamp, the actual
+builder image ID and build/verifier code bytes. It does not use mtimes. This is a
+local build cache, not an image or board qualification receipt.
 
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see

@@ -139,6 +139,8 @@ source "${KERNEL_LIB_DIR}/checkout.sh"
 source "${KERNEL_LIB_DIR}/builder.sh"
 # shellcheck source=kernel/package.sh
 source "${KERNEL_LIB_DIR}/package.sh"
+# shellcheck source=kernel/artifact-cache.sh
+source "${KERNEL_LIB_DIR}/artifact-cache.sh"
 
 usage() {
   cat >&2 <<EOF
@@ -187,6 +189,9 @@ Env:
                                  (default: 3600). Boards build concurrently and
                                  share one mirror, so the lock is what keeps two
                                  fetches from corrupting one object store.
+  CERALIVE_KERNEL_ARTIFACT_CACHE
+                                  auto (default) or 0 (disable). Hits revalidate
+                                  the deb and resolved kernel configuration.
 EOF
 }
 
@@ -236,6 +241,8 @@ main() {
   validate_kernel_source_inputs
   resolve_kernel_config_mode
   resolve_kernel_package_name
+  local cache_mode
+  cache_mode="$(kernel_artifact_cache_mode)"
 
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
   local epoch="${SOURCE_DATE_EPOCH:-0}"
@@ -287,6 +294,18 @@ main() {
   runtime="$(select_container_runtime)"
   KERNEL_BUILDER_IMAGE_TAG="$(resolve_kernel_builder_tag "${builder_image}")"
   ensure_kernel_builder_image "${runtime}" "${builder_image}" "${KERNEL_BUILDER_IMAGE_TAG}"
+
+  local builder_digest cache_key="" deb_name="${kernel_pkg}_${package_version}_${arch}.deb"
+  if [[ "${cache_mode}" == 'auto' ]]; then
+    builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
+      || die "cannot inspect kernel builder image identity"
+    [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
+    cache_key="$(kernel_artifact_cache_key)"
+    if kernel_artifact_cache_hit "${cache_key}" "${out_dir}" "${deb_name}"; then
+      log_success "kernel-build-from-source: staged verified cache artifact -> ${out_dir}"
+      return 0
+    fi
+  fi
 
   local work
   work="$(mktemp -d)"
@@ -538,10 +557,15 @@ main() {
     || die "kernel build produced ${#built[@]} '${kernel_pkg}' .deb(s); the output contract is exactly one linux-image deb"
 
   validate_built_kernel_deb "${built[0]}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}"
+  kernel_artifact_verify_config "${work}/out/resolved.config" \
+    || die "built kernel configuration failed survival/closure validation"
 
   "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${built[0]}" "${out_dir}"
   install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"
   install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"
+  if [[ "${cache_mode}" == 'auto' ]]; then
+    kernel_artifact_cache_store "${cache_key}" "${built[0]}" "${work}/out"
+  fi
   log_success "kernel-build-from-source: staged $(basename "${built[0]}") -> ${out_dir}"
   log_success "kernel-build-from-source: retained resolved.config + built-modules.txt -> ${out_dir}"
 }

@@ -72,6 +72,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Verified `.deb` download cache (`CERALIVE_DEBCACHE`)** | `lib/fetch/debcache.sh` + the store site in `lib/fetch/pool.sh::publish_staged_deb` — see the KEY FACT below |
 | **Builder-image apt cache mounts / BuildKit / the apt proxy (`CERALIVE_APT_PROXY`)** | `ci/Dockerfile`, `ci/Dockerfile.kernel`, `lib/common.sh::container_image_build`, `lib/fetch/apt-lib.sh::apt_proxy_opts` — see the KEY FACTs below; operator quickstart in [`README.md`](README.md) |
 | **Persistent kernel-source mirror (`CERALIVE_KERNEL_SRC_MIRROR`)** | `lib/kernel/checkout.sh` (`kernel_src_mirror_*`) + the `:ro` mount in `lib/build-kernel.sh` — see the KEY FACT below |
+| **Verified kernel artifact cache** | `lib/kernel/artifact-cache.sh`, called by `lib/build-kernel.sh`; `tests/kernel-artifact-cache.test.sh` guards key/validation/corruption/off |
 | **Which mkosi cache leaf a build uses (container vs native)** | `lib/paths.sh::ceralive_mkosi_cache_domain` + `lib/orchestrate.sh`'s `cache_dir` — see the privilege-domain KEY FACT below |
 | **Production vs debug package split (`CERALIVE_DEBUG_IMAGE`)** | `manifests/packages/development.delta.list` + `lib/common.sh::runtime_pkg_list_files` + `lib/orchestrate.sh` (`resolve_debug_image_flag`, the `[1/9]` package resolution) — see the KEY FACT below |
 | Board/kernel customisation | `manifests/boards/<board>.yaml` |
@@ -6206,6 +6207,28 @@ Guards: `tests/build-cache-overhaul.bats` (27 cases — the mounts and their
 `sharing=locked`, the docker-clean round trip, the absent lists-cleanup, the
 untouched digest pins, both build sites, the no-bare-build rule, and the version
 floor's refusal).
+
+**The kernel artifact cache is keyed by exact inputs and validates on every hit**
+[EXISTS — offline contract; runner timing not yet measured].
+
+`lib/kernel/artifact-cache.sh` stores the one built `linux-image-*.deb` plus
+`resolved.config` and `built-modules.txt` under
+`mkosi/cache/kernel-artifacts/<sha256>/`, with a JSON manifest containing each
+file's SHA-256. The key covers source URL/tag/commit, patch URL/commit/series,
+both config modes (config revision/path or ordered fragment names and BYTES),
+allow-absent bytes, variant and output identity, SOURCE_DATE_EPOCH, actual builder
+image ID, Dockerfile and all kernel stage/module/verifier script bytes. It never
+uses mtimes. A hit rechecks every digest, the real four-axis deb validator, the
+declared-symbol survival gate and required/forbidden closure on the stored config;
+the debug `edge-test` variant intentionally does not apply production's forbidden
+list. A hash-valid but semantically bad entry is evicted just like a corrupt
+archive. The per-key flock spans validation and copy-out, and store publishes
+through a private directory and atomic rename. A failed cache lookup/store
+degrades to an ordinary build. `CERALIVE_KERNEL_ARTIFACT_CACHE=auto|0` is the
+entire interface; any other value fails before builder work. The cache is under
+the runner's existing `mkosi/cache` cleanup allowlist, so a separate audit job
+cannot reuse an earlier run's artifact without changing the runner persistence
+policy. Offline guard: `tests/kernel-artifact-cache.test.sh` (registered default).
 
 **The pinned kernel source has a persistent bare mirror, and its flock is a
 CORRECTNESS fix rather than a speedup** [EXISTS]
