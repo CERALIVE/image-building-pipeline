@@ -6288,14 +6288,18 @@ mkosi postinstall rootfs mounted over `/etc`. The outer builder resolves that
 alias to a literal IPv4 gateway before mkosi starts and forwards it through the
 existing build-only `CERALIVE_BUILD_APT_PROXY` contract; an absent mapping fails
 closed. `--with-network=yes` preserves the network path, not the outer hosts
-file. A local nested-sandbox reachability probe passed, but two successful real
-audits are still needed before declaring the runner fixed.
-Run 35889225710 proved the literal cache URL acquired all three Debian
-`InRelease` files inside the actual chroot, but `sqv` rejected them with exit
-123 and no normal-output detail. A separate local arm64 mkosi-sandbox replay
-verified them; the runner's cause remains open. The first failure now emits
-signature-debug evidence without relaxing verification (see the runner section
-of `docs/host-support.md`).
+file. A local nested-sandbox reachability probe passed. Run 35889225710
+acquired all three Debian `InRelease` files inside the actual chroot, but apt
+reported `sqv` exit 123. Runs 35896791171 and 35899522292 isolated the cause:
+the runtime tree's `/usr` was root:root 0700, so `_apt` could not execute even
+`true`, while root's `sqv` verified the same signed index. The runtime now
+restores `/usr` to 0755 before any apt transaction and fails closed if `_apt`
+still cannot execute. Run 35902300468 crossed that boundary and completed
+runtime and app installation, then failed at the independent RAUC CMS
+signer-purpose gate (`unsuitable certificate purpose` under `-purpose
+smimesign`). No green audit is claimed; two consecutive successes await an
+owner-approved production signing resolution. See `docs/host-support.md` for
+the evidence and policy boundary.
 
 `./dev-cache up|down|status` manages the digest-pinned Compose service and its
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142

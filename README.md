@@ -92,7 +92,9 @@ post-run cleanup removes only the ignored mkosi `build` and `cache` paths so an
 interrupted rootful build cannot block the next clean checkout.
 The separate scheduled real-build audit requires the local Debian cache before
 building to avoid the runner's diagnosed direct-apt TLS failure; it is not a PR
-check. Its evidence and the cache setup are in the host matrix.
+check. Its `_apt`/`sqv` execution repair is real-run proven, but its RAUC bundle
+now fails the separate release-certificate-purpose check; no green audit is
+claimed. Evidence and the required signer decision are in the host matrix.
 See the production-runner section of the host matrix for the exact checks.
 
 See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.
