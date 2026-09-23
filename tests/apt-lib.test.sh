@@ -209,11 +209,15 @@ ok "proxy: runtime remap spans the layer via APT_CONFIG, keeps shipped sources, 
 audit_workflow="${PIPELINE_DIR}/.github/workflows/real-build-audit.yml"
 grep -Fq './dev-cache up' "${audit_workflow}" \
   || fail "real-build audit does not provision its runner's Debian cache"
+grep -Fq 'install -m 0644 ci/apt-cache/ceralive.conf "${CERALIVE_APT_CACHE_CONFIG}"' "${audit_workflow}" \
+  || fail "restrictive runner umask makes the cache's config unreadable"
+grep -Fq '${CERALIVE_APT_CACHE_CONFIG:-./ceralive.conf}' "${PIPELINE_DIR}/ci/apt-cache/compose.yml" \
+  || fail "runner's readable cache config is not mounted by Compose"
 grep -Fq 'CERALIVE_APT_PROXY: http://127.0.0.1:3142' "${audit_workflow}" \
   || fail "real-build audit can silently fall back to the broken direct TLS path"
 grep -Fq 'http://127.0.0.1:3142/acng-report.html' "${audit_workflow}" \
   || fail "real-build audit does not confirm the cache is answering before building"
-ok "proxy: real-build audit requires the local mirror and refuses a silent direct fallback"
+ok "proxy: real-build audit mounts readable cache config and refuses a silent direct fallback"
 
 state="${WORK}/apt-state"
 lib_eval 'apt_isolated_state_init "$1" "$2"' "${state}" "${state}/certs" >/dev/null 2>&1

@@ -6,7 +6,7 @@ services:
       - "3142:3142"
     volumes:
       - apt-cache:/var/cache/apt-cacher-ng
-      - ./ceralive.conf:/etc/apt-cacher-ng/zz-ceralive.conf:ro
+      - ${CERALIVE_APT_CACHE_CONFIG:-./ceralive.conf}:/etc/apt-cacher-ng/zz-ceralive.conf:ro
 
 volumes:
   apt-cache:
