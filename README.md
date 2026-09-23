@@ -808,11 +808,14 @@ host cache via the host gateway (not their own loopback). Use
 port 3142: restrict access to trusted build hosts at the runner firewall.
 
 **Only Debian archive downloads inside the build are remapped.** The runtime
-postinstall gives its Debian HTTPS apt transactions temporary `HTTPS///` source
-URLs so apt-cacher-ng fetches and caches upstream over TLS; it removes those
-temporary sources after the transaction. The device's installed `debian.sources`
+postinstall points every apt call in that layer at a temporary `HTTPS///` copy
+of the Debian source (through an exported `APT_CONFIG`, never a file under
+`/etc/apt`), so apt-cacher-ng fetches and caches upstream over TLS; the copy is
+removed when the layer exits. The device's installed `debian.sources`
 stays byte-identical (HTTPS and `Signed-By`), and the first-party
-`apt.ceralive.tv` mTLS source is never routed through the cache. The cache's
+`apt.ceralive.tv` mTLS source is never routed through the cache: apt's https
+method would otherwise inherit the http proxy, so every proxied apt call also
+carries `Acquire::https::Proxy=DIRECT`. The cache's
 CONNECT allowlist names only `apt.ceralive.tv:443`, for explicit clients that
 need a tunnel; it does not make this build use one. No apt signature, expiry,
 or TLS verification setting changes. See [runner setup](docs/host-support.md#persistent-debian-apt-cache-on-build-hosts).

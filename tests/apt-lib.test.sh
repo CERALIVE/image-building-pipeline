@@ -107,7 +107,7 @@ EOF
 chmod +x "${WORK}/bin/curl"
 mapfile -t detected < <(unset CERALIVE_APT_PROXY; CACHE_FIXTURE=up PATH="${WORK}/bin:${PATH}" \
   lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
-(( ${#detected[@]} == 14 )) || fail "responding cache was not detected"
+(( ${#detected[@]} == 16 )) || fail "responding cache was not detected"
 [[ "${detected[*]}" == *'Acquire::http::Proxy=http://127.0.0.1:3142'* ]] \
   || fail "detected proxy did not reach apt's HTTP acquisition"
 mapfile -t absent < <(unset CERALIVE_APT_PROXY; CACHE_FIXTURE=down PATH="${WORK}/bin:${PATH}" \
@@ -126,25 +126,30 @@ mapfile -t container_args < <(env -u CERALIVE_APT_PROXY CACHE_FIXTURE=up PATH="$
 ok "proxy: Docker build args translate host-local cache to the host gateway"
 
 mapfile -t proxied < <(CERALIVE_APT_PROXY=http://acng.lan:3142 lib_eval 'apt_isolated_opts "$1" "$2" "$3"' /st /st/src.list arm64)
-(( ${#proxied[@]} == 14 )) \
-  || fail "CERALIVE_APT_PROXY emitted ${#proxied[@]} tokens, expected 14 (the six pairs plus one)"
+(( ${#proxied[@]} == 16 )) \
+  || fail "CERALIVE_APT_PROXY emitted ${#proxied[@]} tokens, expected 16 (the six pairs plus http proxy and https DIRECT)"
 joined_proxied="${proxied[*]}"
 [[ "${joined_proxied}" == *"Acquire::http::Proxy=http://acng.lan:3142"* ]] \
   || fail "CERALIVE_APT_PROXY did not reach Acquire::http::Proxy"
-ok "proxy: a set CERALIVE_APT_PROXY adds exactly one -o Acquire::http::Proxy pair"
+ok "proxy: a set CERALIVE_APT_PROXY adds exactly the http proxy pair and the https DIRECT pair"
 
 # https must stay DIRECT. apt.ceralive.tv is fetched with an mTLS client
-# certificate, so routing it through a proxy buys nothing a cache can use and
-# adds a handshake that can fail for reasons unrelated to apt.
-[[ "${joined_proxied}" != *"Acquire::https::Proxy"* ]] \
-  || fail "the proxy option set touches https, which would interpose on the mTLS first-party fetch"
+# certificate, and apt's https method inherits Acquire::http::Proxy unless an
+# https value is set, so DIRECT has to be stated rather than implied by absence.
+for options in "${joined_proxied}" "${detected[*]}"; do
+  [[ "${options}" == *"Acquire::https::Proxy=DIRECT"* ]] \
+    || fail "an http proxy without https DIRECT CONNECTs the mTLS first-party fetch through the cache"
+  [[ "$(grep -o 'Acquire::https::Proxy=[^ ]*' <<<"${options}")" == "Acquire::https::Proxy=DIRECT" ]] \
+    || fail "https was pointed at a proxy instead of DIRECT"
+done
 ok "proxy: https is never proxied, so the mTLS first-party transport is untouched"
 
 # A proxy is an acquisition-path change only. If it ever became a verification
 # change the whole fetch chain would be worthless, so no proxy option may weaken
 # apt's own authentication.
 for options in "${joined_proxied}" "${detected[*]}" "${absent[*]}" "${disabled[*]}"; do
-  [[ "${options}" != *"Acquire::https::Proxy"* ]] || fail "HTTPS mTLS was proxied"
+  [[ "$(grep -o 'Acquire::https::Proxy=[^ ]*' <<<"${options}")" =~ ^(Acquire::https::Proxy=DIRECT)?$ ]] \
+    || fail "HTTPS mTLS was proxied"
   for forbidden in "Acquire::AllowInsecureRepositories" "Acquire::AllowDowngradeToInsecureRepositories" "APT::Get::AllowUnauthenticated" "Acquire::Check-Valid-Until=false" "Acquire::https::Verify-Peer=false" "gpgv"; do
     [[ "${options}" != *"${forbidden}"* ]] \
       || fail "the proxy option set contains '${forbidden}' — a cache may never relax verification"
@@ -161,6 +166,45 @@ grep -Fq 'HTTPS///deb.debian.org/' "${PIPELINE_DIR}/mkosi/runtime/build-apt-cach
 grep -Fq 'source "${CERALIVE_RUNTIME_SRC}/build-apt-cache.sh"' "${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
   || fail "runtime postinst does not load the build-only remap"
 ok "proxy: CONNECT is exact-host scoped and Debian remap stays in the build postinst"
+
+# Drive the REAL runtime helper: the remap must reach every later apt call in the
+# layer (APT_CONFIG), leave the shipped source byte-identical, and vanish on exit.
+remap_src="${WORK}/debian.sources"
+printf 'Types: deb\nURIs: https://deb.debian.org/debian\nSuites: trixie\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' >"${remap_src}"
+cp "${remap_src}" "${WORK}/debian.sources.orig"
+remap_out="$(CERALIVE_BUILD_APT_PROXY=http://host.docker.internal:3142 \
+  CERALIVE_BUILD_APT_SHIPPED_SOURCES="${remap_src}" bash -c '
+    log() { :; }
+    source "$1/mkosi/runtime/build-apt-cache.sh"
+    runtime_build_apt_scope || exit 9
+    printf "dir=%s\n" "${CERALIVE_BUILD_APT_DIR}"
+    cat "${APT_CONFIG}" "${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  ' _ "${PIPELINE_DIR}")" || fail "runtime remap refused a valid build-only cache URL"
+remap_dir="$(sed -n 's/^dir=//p' <<<"${remap_out}")"
+[[ "${remap_out}" == *'URIs: http://host.docker.internal:3142/HTTPS///deb.debian.org/debian'* ]] \
+  || fail "runtime remap did not rewrite Debian HTTPS to the cache's HTTPS/// form"
+[[ "${remap_out}" == *'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg'* ]] \
+  || fail "runtime remap dropped the explicit Signed-By keyring"
+[[ "${remap_out}" == *"Dir::Etc::sourcelist \"/dev/null\";"* ]] \
+  || fail "runtime remap leaves the shipped source visible alongside the remapped one"
+cmp -s "${remap_src}" "${WORK}/debian.sources.orig" \
+  || fail "runtime remap modified the shipped debian.sources"
+[[ -n "${remap_dir}" && ! -e "${remap_dir}" ]] \
+  || fail "runtime remap left its build-only source behind after the layer exited"
+for forbidden in "Verify-Peer" "Verify-Host" "AllowInsecure" "AllowUnauthenticated" "Check-Valid-Until" "trusted=yes"; do
+  [[ "${remap_out}" != *"${forbidden}"* ]] || fail "runtime remap introduced '${forbidden}'"
+done
+nocache="$(CERALIVE_BUILD_APT_PROXY='' bash -c '
+    log() { :; }; unset APT_CONFIG
+    source "$1/mkosi/runtime/build-apt-cache.sh"
+    runtime_build_apt_scope; printf "%s" "${APT_CONFIG:-unset}"
+  ' _ "${PIPELINE_DIR}")"
+[[ "${nocache}" == unset ]] || fail "no build cache must leave apt on the shipped sources"
+CERALIVE_BUILD_APT_PROXY='http://evil/;rm' bash -c '
+    log() { :; }
+    source "$1/mkosi/runtime/build-apt-cache.sh"; runtime_build_apt_scope
+  ' _ "${PIPELINE_DIR}" && fail "runtime remap accepted a malformed cache URL"
+ok "proxy: runtime remap spans the layer via APT_CONFIG, keeps shipped sources, cleans up"
 
 state="${WORK}/apt-state"
 lib_eval 'apt_isolated_state_init "$1" "$2"' "${state}" "${state}/certs" >/dev/null 2>&1

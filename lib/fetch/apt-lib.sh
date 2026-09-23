@@ -67,12 +67,16 @@ apt_isolated_opts() {
 #     the client-certificate handshake to fail that has nothing to do with apt.
 #   * apt-cacher-ng's actual win is the plain-http Debian/Armbian archive traffic,
 #     which is also the bulk of the bytes.
+#   * apt's https method INHERITS Acquire::http::Proxy when no https value is
+#     set (apt.conf(5), measured: a dead http proxy breaks an https fetch). So
+#     "http only" needs Acquire::https::Proxy=DIRECT stated explicitly; without
+#     it every https fetch, apt.ceralive.tv included, CONNECTs through the cache.
 # ---------------------------------------------------------------------------
 apt_proxy_opts() {
   local proxy
   proxy="$(apt_proxy_url)"
   [[ -n "${proxy}" ]] || return 0
-  printf '%s\n' -o "Acquire::http::Proxy=${proxy}"
+  printf '%s\n' -o "Acquire::http::Proxy=${proxy}" -o "Acquire::https::Proxy=DIRECT"
 }
 
 # ---------------------------------------------------------------------------

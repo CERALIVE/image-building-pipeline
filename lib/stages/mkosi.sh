@@ -61,7 +61,7 @@ ensure_builder_image() {
   log_info "builder image ${MKOSI_BUILDER_IMAGE} absent — building from ${MKOSI_BUILDER_DOCKERFILE} (mkosi ${MKOSI_VERSION_PIN} + Python ${MKOSI_PYTHON_FLOOR}+)"
   local -a proxy_args=()
   mapfile -t proxy_args < <(container_build_proxy_args)
-  (( ${#proxy_args[@]} )) && log_info "apt proxy: CERALIVE_APT_PROXY -> --build-arg APT_PROXY (http only)"
+  (( ${#proxy_args[@]} )) && log_info "apt proxy: ${proxy_args[*]} (http only; https DIRECT)"
   container_image_build "${runtime}" \
     "${proxy_args[@]}" \
     -t "${MKOSI_BUILDER_IMAGE}" -f "${MKOSI_BUILDER_DOCKERFILE}" "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" \

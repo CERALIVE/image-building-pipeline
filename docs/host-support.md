@@ -155,9 +155,7 @@ per checkout.
 
 ---
 
-## Protected production-candidate runner
-
-### Persistent Debian APT cache on build hosts
+## Persistent Debian APT cache on build hosts
 
 Install Docker Compose on a Linux build runner, then run `./dev-cache up` from
 this checkout (or `docker compose -f ci/apt-cache/compose.yml up -d --wait` in
@@ -171,17 +169,22 @@ per-build job. Limit incoming TCP 3142 to trusted runners with the host firewall
 The build probes loopback within one second when `CERALIVE_APT_PROXY` is unset,
 logs the choice, and falls back to direct acquisition when absent. Explicit
 `CERALIVE_APT_PROXY=off` disables it. The host-side fetcher uses HTTP proxy
-options; Dockerfile APT uses build args and the host-gateway mapping; the runtime
-postinst temporarily remaps Debian HTTPS sources through apt-cacher-ng's
-`HTTPS///` URL format. The cache verifies upstream TLS, while APT still verifies
-the Debian archive signature. The build-only remap is deleted before packaging:
-installed `debian.sources` remains the exact HTTPS deb822 payload on the device.
-The first-party `apt.ceralive.tv` source retains its direct mTLS transport.
+options with `Acquire::https::Proxy=DIRECT` (apt's https method otherwise inherits
+the http proxy and would CONNECT first-party mTLS through the cache); Dockerfile APT uses build args and the host-gateway mapping; the runtime
+postinst remaps Debian HTTPS sources through apt-cacher-ng's `HTTPS///` URL
+format for every apt call in the runtime layer, via an exported `APT_CONFIG` that
+points at a `/tmp` source directory. The cache verifies upstream TLS, while APT
+still verifies the Debian archive signature. Nothing under `/etc/apt` changes and
+the `/tmp` directory is removed when the layer exits: installed `debian.sources`
+remains the exact HTTPS deb822 payload on the device. The first-party
+`apt.ceralive.tv` source retains its direct mTLS transport.
 
 Check `DRY_RUN=1 ./build rock-5b-plus` both with the service up and down to
 confirm the chosen proxy/direct path before a real build. The plan does not
 execute mkosi postinstall; a real-build audit is required to prove runtime
 acquisition on a particular runner.
+
+## Protected production-candidate runner
 
 The developer matrix above describes functional portability. The protected
 GitHub release candidate has a narrower, fail-closed resource contract: a native

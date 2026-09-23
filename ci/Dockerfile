@@ -31,12 +31,14 @@ FROM debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd
 # mkosi version pin — MUST match .mkosi-version (26).
 ARG MKOSI_VERSION=26
 
-# OPT-IN apt proxy (CERALIVE_APT_PROXY, threaded in by lib/stages/mkosi.sh).
-# Unset is the default and the apt layer then behaves exactly as it did before
-# this arg existed.
+# apt proxy (CERALIVE_APT_PROXY, or an auto-detected local cache, threaded in by
+# lib/common.sh::container_build_proxy_args). Empty is the no-cache default and
+# the apt layer then behaves exactly as it did before this arg existed.
 #
 # HTTP ONLY, deliberately: an apt-cacher-ng in front of deb.debian.org is a pure
-# win, while https stays direct so no proxy is ever interposed on a TLS path.
+# win. apt's https method INHERITS Acquire::http::Proxy when no https value is
+# set, so https is pinned DIRECT explicitly; leaving it unset would CONNECT every
+# TLS fetch through the cache.
 #
 # INVARIANT: a proxy URL is a host-local fact and may carry credentials, so it
 # must never survive into a shared builder layer. Its drop-in is therefore
@@ -100,7 +102,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\n' \
       > /etc/apt/apt.conf.d/99ceralive-keep-cache; \
     if [ -n "${APT_PROXY}" ]; then \
-      printf 'Acquire::http::Proxy "%s";\n' "${APT_PROXY}" \
+      printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "DIRECT";\n' "${APT_PROXY}" \
         > /etc/apt/apt.conf.d/99ceralive-proxy; \
     fi; \
     mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial; \

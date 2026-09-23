@@ -255,9 +255,10 @@ container_image_build() {
   "${runtime}" build "$@"
 }
 
-# container_build_proxy_args — emit `--build-arg APT_PROXY=<url>` when, and only
-# when, CERALIVE_APT_PROXY is set. Unset emits NOTHING, so an unconfigured build
-# passes the same argument vector it did before the proxy existed.
+# container_build_proxy_args — emit `--build-arg APT_PROXY=<url>` (plus the
+# host-gateway mapping for a loopback cache) when CERALIVE_APT_PROXY names a
+# cache or an unset one finds a local cache answering. No cache or `=off` emits
+# NOTHING, so the build passes the argument vector it did before the proxy existed.
 if [[ -f "$(dirname "${BASH_SOURCE[0]}")/shared/apt-proxy-lib.sh" ]]; then
   # shellcheck source=shared/apt-proxy-lib.sh
   source "$(dirname "${BASH_SOURCE[0]}")/shared/apt-proxy-lib.sh"

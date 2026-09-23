@@ -6276,16 +6276,21 @@ the base" looks identical to "the base was stale".
 persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142
 for one second, then uses it or logs a direct fallback. `=off` opts out;
 an explicit HTTP URL selects a LAN cache. Docker builds and the mkosi builder
-container translate loopback to the host gateway. The runtime postinst uses a
-temporary Debian-only `HTTPS///` source for its package transactions and removes
-it before the rootfs ships; the device's `debian.sources` remains unchanged.
+container translate loopback to the host gateway. The runtime postinst exports
+`APT_CONFIG` at a `/tmp` Debian-only `HTTPS///` source for EVERY later apt call in
+the layer, removed by an EXIT trap; nothing under `/etc/apt` changes, so the
+device's `debian.sources` is unchanged. Scoping it to one transaction is wrong:
+apt reads only lists matching its configured sources, so the staged hawkbit
+`.deb` install would then see no Debian index when the cache is on.
 The cache server's CONNECT allowlist is exactly `apt.ceralive.tv:443`, but the
 first-party apt source is never sent through it by this build. The CA bootstrap
 remains isolated and signature verification is unchanged. Guard:
 `tests/apt-lib.test.sh` plus `tests/apt-mtls-and-dedupe.test.sh`.
 
 With no cache (or `=off`), `apt_isolated_opts` emits the same 12 tokens as
-before. With a cache, it adds one `-o Acquire::http::Proxy=` pair and is threaded
+before. With a cache, it adds `-o Acquire::http::Proxy=<url>` plus
+`-o Acquire::https::Proxy=DIRECT` (both builder Dockerfiles write the same pair)
+and is threaded
 into both builder images as `--build-arg APT_PROXY=`, written and removed inside
 the single RUN that uses it so a host-local URL (which may carry credentials)
 never survives into a shared layer.
@@ -6294,6 +6299,13 @@ never survives into a shared layer.
   CERTIFICATE: a cache can do nothing with that payload and the only thing a proxy
   adds is a handshake that can fail for reasons unrelated to apt. The win is the
   plain-http Debian/Armbian archive traffic, which is also the bulk of the bytes.
+  **"Never proxied" needs `Acquire::https::Proxy=DIRECT` stated, not implied.**
+  apt's https method INHERITS `Acquire::http::Proxy` when no https value is set:
+  a dead http proxy was measured to break an `https://deb.debian.org` fetch, and
+  `=DIRECT` restored the direct origin connection. Without it every first-party
+  fetch would CONNECT through the cache, and Debian-host `https://apt.armbian.com`
+  BSP fetches would hit the CONNECT allowlist's 403. `tests/apt-lib.test.sh`
+  fails if the DIRECT pair is missing or names anything else.
 - **A proxy cannot weaken verification, and no proxy option may try.** Every family
   verifies AFTER acquisition — `gpgv` over `InRelease`, then the SHA-256 that
   signed plaintext declares, or a committed pin's hash — so proxied bytes are
