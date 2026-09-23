@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-21T01:54:43.084488+00:00",
+  "checked_at": "2026-09-23T11:08:24.155998+00:00",
   "releases": [
     {
       "component": "CeraUI",
-      "tag": "v2026.9.2",
-      "published_at": "2026-09-17T16:05:52Z",
+      "tag": "v2026.9.3",
+      "published_at": "2026-09-20T15:58:27Z",
       "packages": {
-        "ceralive-device[amd64]": "2026.9.2-20260917T155634.7b53288",
-        "ceralive-device[arm64]": "2026.9.2-20260917T155656.7b53288"
+        "ceralive-device[amd64]": "2026.9.3-20260920T155651.ec522ad",
+        "ceralive-device[arm64]": "2026.9.3-20260920T155654.ec522ad"
       }
     },
     {
       "component": "cerastream",
-      "tag": "v2026.9.5",
-      "published_at": "2026-09-17T14:39:51Z",
+      "tag": "v2026.9.6",
+      "published_at": "2026-09-21T12:27:05Z",
       "packages": {
-        "cerastream[amd64]": "2026.9.5",
-        "cerastream[arm64]": "2026.9.5"
+        "cerastream[amd64]": "2026.9.6",
+        "cerastream[arm64]": "2026.9.6"
       }
     },
     {
@@ -31,16 +31,16 @@
     },
     {
       "component": "gstreamer-rockchip",
-      "tag": "1.14.4+ceralive.6",
-      "published_at": "2026-09-16T13:39:08Z",
+      "tag": "1.14.4+ceralive.7",
+      "published_at": "2026-09-20T13:40:43Z",
       "packages": {
-        "gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.6"
+        "gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.7"
       }
     },
     {
       "component": "librga",
       "tag": "1.10.5+ceralive.1",
-      "published_at": "2026-09-16T22:02:05Z",
+      "published_at": "2026-09-17T21:29:36Z",
       "packages": {
         "librga2-ceralive[arm64]": "1.10.5+ceralive.1"
       }
@@ -82,11 +82,11 @@
     },
     {
       "component": "srtla",
-      "tag": "v3.3.0",
-      "published_at": "2026-08-21T03:40:10Z",
+      "tag": "v4.1.0",
+      "published_at": "2026-09-20T20:28:31Z",
       "packages": {
-        "srtla[amd64]": "3.3.0",
-        "srtla[arm64]": "3.3.0"
+        "srtla[amd64]": "4.1.0",
+        "srtla[arm64]": "4.1.0"
       }
     }
   ]
