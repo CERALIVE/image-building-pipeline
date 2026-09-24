@@ -22,6 +22,14 @@
 #                             boot stack changing WITHOUT one, because
 #                             docs/partition-contract.md rule 3 puts
 #                             kernel/DTB/initrd inside the slot.
+#   * setup_slot_sync         installs /usr/libexec/ceralive/ceralive-slot-sync
+#                             (task 26) — the verified local rsync mirror of the
+#                             booted slot onto the other, lagged one — plus its
+#                             oneshot unit and rsync exclude list. Called from
+#                             configure_services() (postinst.d/services.sh),
+#                             not from this module's own callers, the same
+#                             cross-module pattern hardware.sh's setup_*
+#                             functions already use.
 #
 # They are the same contract read forwards and backwards — state is persistent
 # because the rootfs is disposable, and the rootfs is only safely disposable
@@ -285,6 +293,27 @@ echo "ceralive-update: installed to inactive slot but not activated; activate it
 exit 0
 EOF
   chmod +x /usr/local/bin/ceralive-update
+}
+
+# --- Verified local slot mirror (task 26, Metis G3/G4/G14) -----------------
+# Installs the standalone artifacts under mkosi/runtime/ (same idiom as
+# setup_avahi_restart / setup_tls_proxy — never inlined here): the script at
+# /usr/libexec/ceralive/ceralive-slot-sync, its rsync exclude list at
+# /usr/lib/ceralive/slot-sync.exclude, and ceralive-slot-sync.service. The unit
+# carries NO [Install] section (see the committed unit file for why) and is
+# therefore never enable_service'd here — nothing calls this at boot; a future
+# lagged-mirror orchestrator starts it on demand.
+setup_slot_sync() {
+  log "installing verified local slot mirror (ceralive-slot-sync)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local artifact
+  for artifact in ceralive-slot-sync.sh ceralive-slot-sync.service ceralive-slot-sync.exclude; do
+    [[ -n "${src}" && -f "${src}/${artifact}" ]] \
+      || die "slot-sync source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  install -D -m 0755 "${src}/ceralive-slot-sync.sh" /usr/libexec/ceralive/ceralive-slot-sync
+  install -D -m 0644 "${src}/ceralive-slot-sync.exclude" /usr/lib/ceralive/slot-sync.exclude
+  install -D -m 0644 "${src}/ceralive-slot-sync.service" /etc/systemd/system/ceralive-slot-sync.service
 }
 
 # ---------------------------------------------------------------------------

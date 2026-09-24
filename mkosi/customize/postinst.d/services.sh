@@ -19,9 +19,10 @@
 # module the postinst entry sources. The drift gate keys on full paths, so the
 # shared basename is safe — but they are different files with different callers.
 #
-# configure_services calls into hardware.sh and tls-ssh.sh. That is a runtime
-# call, not a source-time one, so module load order stays irrelevant; the entry
-# sources every module before anything is invoked.
+# configure_services calls into hardware.sh, tls-ssh.sh AND persistence.sh
+# (setup_slot_sync, task 26). That is a runtime call, not a source-time one, so
+# module load order stays irrelevant; the entry sources every module before
+# anything is invoked.
 #
 # CHROOT-SAFE STANDALONE: like every module under postinst.d/, this file carries
 # its own declare -F-guarded log()/die() fallbacks. The modules are sourced
@@ -163,6 +164,7 @@ configure_services() {
   setup_hdmirx_edid
   setup_pipewire_system_mode
   setup_rauc_activation
+  setup_slot_sync
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP
