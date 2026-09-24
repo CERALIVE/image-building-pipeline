@@ -10,6 +10,7 @@
 #   [1/9]  resolve       manifest → flat build params        stages/resolve.sh
 #   [2/9]  fetch         stage BSP + first-party .debs       stages/fetch.sh
 #   [2b/9] kernel-build  kernel from pinned source (variant) stages/kernel-build.sh
+#   [2c/9] rauc-build    rauc from pinned upstream source    stages/rauc-build.sh
 #   [3/9]  partition     classify staged .debs               stages/partition.sh
 #   [4/9]  bsp-gate      every boot-BSP package obtainable   stages/bsp-gate.sh
 #   [5/9]  mkosi         base → platform → runtime → app     stages/mkosi.sh
@@ -53,6 +54,7 @@ FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
+BUILD_RAUC_SH="${HERE}/build-rauc.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 MEASURE_SIZE_SH="${HERE}/measure-size.sh"
@@ -153,6 +155,8 @@ source "${STAGE_DIR}/resolve.sh"
 source "${STAGE_DIR}/fetch.sh"
 # shellcheck source=stages/kernel-build.sh
 source "${STAGE_DIR}/kernel-build.sh"
+# shellcheck source=stages/rauc-build.sh
+source "${STAGE_DIR}/rauc-build.sh"
 # shellcheck source=stages/partition.sh
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
@@ -265,9 +269,11 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
+  local rauc_build_dir="${staging}/rauc-build"
 
   stage_fetch
   stage_kernel_build
+  stage_rauc_build
   # DRY_RUN stages no archives. Exit after both fetch and source-kernel plans
   # have been emitted, before the package partition/BSP gates inspect the
   # intentionally empty staging tree.

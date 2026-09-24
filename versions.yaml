@@ -168,6 +168,37 @@ irl-srt-server:
   kind: first-party
   pin: latest
 
+# ── Platform-layer in-pipeline builds (no CeraLive-owned sibling repo) ────────
+
+# rauc — Todo 22 RAUC-version-path follow-up (decisions.md, 2026-09-24, "Todo 22
+# RAUC version path — FINAL RULING"). UNLIKE every entry above, `repo:` here is
+# upstream RAUC's own repository, not a CeraLive fork — this pipeline carries
+# zero CeraLive patches to either RAUC's source or Debian's packaging of it
+# (Option A of the ruling: in-pipeline build, no new repo). `path: null` for the
+# same reason: there is no sibling checkout for `path` to name.
+#
+# This entry is PROVENANCE ONLY, matching gstreamer-rockchip/librga's own
+# "platform-layer pin" shape as the closer precedent for a URL+SHA-delivered
+# userspace component (vs. the kernel's kernel_source: block, which lives in
+# the family manifest and pins a git commit, not a versions.yaml entry) — but
+# unlike those two, nothing reads this key via lib/shared/versions-lib.sh::get_pin;
+# the ACTUAL build-input pins lib/build-rauc.sh consumes live in
+# manifests/rauc-deb-versions.txt (upstream tarball URL+SHA-256 plus the exact
+# Debian unstable source-package coordinates verified via gpgv+Sources), for
+# the same reason the kernel's own exact commit pins are file-based rather than
+# a single version string.
+rauc:
+  path: null
+  repo: https://github.com/rauc/rauc
+  kind: platform-pin
+  pin: v1.15.2
+  # Packaged with Debian unstable's OWN, byte-unmodified packaging directory
+  # (source version 1.15.2-1) — see manifests/rauc-deb-versions.txt for the full
+  # rationale, including why unstable's packaging is used rather than trixie's
+  # own (trixie's 1.13-3+deb13u1 patch series does not apply cleanly to 1.15.2;
+  # four of its six patches are already incorporated upstream, empirically
+  # verified). Built version: 1.15.2-1+ceralive.1 (rauc + rauc-service).
+
 # ── Local PKI (no remote, no pin) ─────────────────────────────────────────────
 
 cert-work:

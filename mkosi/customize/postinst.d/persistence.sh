@@ -449,12 +449,26 @@ setup_journal_dir_gc() {
 # of them would break the ordinary software-update path CeraUI drives.
 CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
 
+# RAUC itself (Todo 22 RAUC-version-path follow-up, decisions.md 2026-09-24):
+# frozen alongside the boot stack, not apt-updatable. UNLIKE
+# KERNEL_PACKAGES/DTB_PACKAGES/UBOOT_PACKAGES/FIRMWARE_PACKAGES this pair is not
+# board/family-manifest-resolved — rauc/rauc-service are fixed names installed
+# identically on every board via the platform-layer pin
+# (mkosi/mkosi.images/runtime/mkosi.postinst), so a fixed default here (same
+# pattern as CERALIVE_NEVER_FREEZE_PKGS immediately above) is correct rather
+# than a manifest-resolved list. RAUC's own version can then only change via a
+# full, tested image OTA — never a stray `apt upgrade` — closing a pre-existing
+# gap (the plain shared.list rauc/rauc-service rows were never held before
+# either). No collision with CERALIVE_NEVER_FREEZE_PKGS: RAUC is neither
+# first-party nor meant to be apt-updatable, so it belongs in THIS held set.
+RAUC_PACKAGES="${RAUC_PACKAGES:-rauc rauc-service}"
+
 freeze_boot_packages() {
   local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
   local pref_file="${pref_dir}/ceralive-kernel-freeze"
 
   local -a declared=()
-  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-}"
+  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-} ${RAUC_PACKAGES:-}"
 
   # Dedupe while preserving manifest order (kernel, dtb, u-boot, firmware).
   local pkg seen=" " candidates=()
