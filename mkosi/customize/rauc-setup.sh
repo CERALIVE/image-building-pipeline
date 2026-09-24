@@ -104,6 +104,12 @@ install_system_conf_fallback() {
 [system]
 compatible=${RAUC_COMPATIBLE}
 bootloader=custom
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter

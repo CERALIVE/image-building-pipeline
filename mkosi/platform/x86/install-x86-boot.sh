@@ -103,6 +103,12 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=custom
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 
 [handlers]
 # RAUC bootloader=custom delegates every boot-state op to this script

@@ -50,6 +50,16 @@ check_system_conf_writers() {
   fi
   for file in "${writers[@]}"; do
     name="${file#"${PIPELINE_DIR}"/}"
+    for key in 'data-directory=/data/ceralive/rauc' 'activate-installed=false' \
+      '[streaming]' 'sandbox-user=ceralive-ota' 'send-headers=boot-id;transaction-id'; do
+      has "${name} configures ${key}" "${file}" "${key}"
+    done
+    lacks_active_key "${name} keeps plain rotation usable until verity migration" "${file}" 'bundle-formats'
+    if grep -Eq '^[[:space:]]*sandbox-user[[:space:]]*=[[:space:]]*nobody[[:space:]]*$' "${file}"; then
+      bad "${name} uses nobody for streaming"
+    else
+      ok "${name} never uses nobody for streaming"
+    fi
     for key in '[slot.rootfs.0]' '[slot.rootfs.1]' '[slot.certs.0]' \
       'device=/data/ceralive/certs/.rauc-certs-slot' 'type=raw'; do
       has "${name} declares ${key}" "${file}" "${key}"
@@ -151,6 +161,19 @@ if (( FAIL > saved_fail )); then
   FAIL="${saved_fail}"
 else
   bad "mutation: boot-attempts escaped under producer backpressure"
+fi
+
+cp "${SYSTEM_CONF}" "${scratch}/nobody.conf"
+sed -i 's/^sandbox-user=ceralive-ota$/sandbox-user=nobody/' "${scratch}/nobody.conf"
+saved_fail="${FAIL}"
+if grep -Eq '^sandbox-user=nobody$' "${scratch}/nobody.conf"; then
+  bad "sandbox-user=nobody is forbidden"
+fi
+if (( FAIL > saved_fail )); then
+  ok "mutation: sandbox-user=nobody rejected by policy"
+  FAIL="${saved_fail}"
+else
+  bad "mutation: sandbox-user=nobody escaped policy"
 fi
 
 echo

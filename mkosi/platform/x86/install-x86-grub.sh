@@ -165,6 +165,12 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=grub
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 # RAUC's BUILT-IN grub backend manages the A/B grubenv (ORDER / <slot>_OK /
 # <slot>_TRY) on the EFI System Partition via grub-editenv — no CeraLive custom
 # backend. grubenv MUST live on the ESP (never in a rootfs slot): a RAUC update
