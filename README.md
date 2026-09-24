@@ -104,6 +104,12 @@ See the production-runner section of the host matrix for the exact checks.
 
 See [`docs/dev-loop.md`](docs/dev-loop.md) for the full dev loop.
 
+Real builds also emit a fail-closed per-package lock next to the rootfs tar:
+`<timestamp>.packages.lock.json`. It records installed package identities,
+verified Debian/fetch digests, generated `libv4l-0` bytes and source-built
+kernel provenance. Debian snapshot pinning is not enabled; the apt 3.0.3 TLS
+probe and the lock's limits are in [`docs/build-reproducibility.md`](docs/build-reproducibility.md).
+
 Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
 rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
 RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.

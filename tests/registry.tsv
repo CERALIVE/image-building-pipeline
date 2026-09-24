@@ -65,6 +65,7 @@ tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party a
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
 tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
+tests/packages-lock.test.sh	shell	integration	default-shell	verified apt/fetch/generated receipts, source-built kernel and unaccounted-package refusal
 tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
 tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses

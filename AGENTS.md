@@ -3403,6 +3403,14 @@ compression level 0 because recompressing xz wastes time. Regression coverage is
 `tests/release-candidate-contract.test.sh`, and `tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [EXISTS]
+The `[6d/9]` package lock is [PARTIAL — fixture verified, real image pending]:
+base/platform/runtime/app apt receipts read their own apt-verified Packages
+indexes before cleanup; staged first-party/BSP/userspace digests reuse the
+fetcher's verified metadata/pins; only generated `libv4l-0` hashes its own
+freshly created bytes. The final dpkg-status reconciliation fails on any
+unaccounted package. Source-built kernel entries carry commit pins and an
+artifact hash map, not an apt origin. `docs/build-reproducibility.md` records
+the real apt 3.0.3 snapshot TLS failure; there is no snapshot override.
 Same source state → bit-identical `.raucb`. The orchestrator pins one
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
 `common.sh::resolve_source_date_epoch`) and exports it so every embedded mtime

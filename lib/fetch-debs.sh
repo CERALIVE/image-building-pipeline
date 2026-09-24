@@ -91,6 +91,8 @@ source "${HERE}/fetch/bsp.sh"
 source "${HERE}/fetch/userspace.sh"
 # shellcheck source=fetch/firstparty.sh
 source "${HERE}/fetch/firstparty.sh"
+# shellcheck source=fetch/lock.sh
+source "${HERE}/fetch/lock.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; package names come from manifests and exact
@@ -247,6 +249,7 @@ main() {
   fetch_bsp "${family}" "${debs}"
   fetch_rk3588_userspace "${family}" "${debs}"
   fetch_first_party "${debs}"
+  fetch_lock_sidecar
 
   log_success "staging complete -> ${debs} (mkosi runtime/assembly layer consumes this)"
 }

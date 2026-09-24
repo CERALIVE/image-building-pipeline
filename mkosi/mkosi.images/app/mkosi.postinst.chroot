@@ -284,6 +284,7 @@ main() {
   # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
   # consumes it (local .deb install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
+  bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
   clean_package_download_metadata
   prune_final_image_payload
   remove_chroot_service_policy
