@@ -243,6 +243,7 @@ main() {
   resolve_kernel_package_name
   local cache_mode
   cache_mode="$(kernel_artifact_cache_mode)"
+  ceralive_remote_cache_mode >/dev/null
 
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
   local epoch="${SOURCE_DATE_EPOCH:-0}"

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # shellcheck disable=SC2154
+# shellcheck source=../shared/remote-cache.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/remote-cache.sh"
 
 kernel_artifact_cache_mode() {
   case "${CERALIVE_KERNEL_ARTIFACT_CACHE:-auto}" in
@@ -31,6 +33,7 @@ kernel_artifact_cache_key() {
       "${HERE}/build-kernel.sh" "${KERNEL_LIB_DIR}/config.sh" \
       "${KERNEL_LIB_DIR}/checkout.sh" "${KERNEL_LIB_DIR}/builder.sh" \
       "${KERNEL_LIB_DIR}/package.sh" "${KERNEL_LIB_DIR}/artifact-cache.sh" \
+      "${HERE}/shared/remote-cache.sh" \
       "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}" \
       "${KERNEL_BUILDER_DOCKERFILE}"; do
       [[ -n "${file}" ]] || continue
@@ -125,10 +128,54 @@ PY
   return "${rc}"
 }
 
+kernel_artifact_cache_remote_fill() {
+  local key="$1" deb_name="$2" root entry tmp base file rc=0
+  [[ "${DRY_RUN:-0}" != 1 ]] || return 1
+  [[ "$(ceralive_remote_cache_mode)" == auto ]] || return 1
+  [[ "${key}" =~ ^[0-9a-f]{64}$ && "${deb_name}" =~ ^[A-Za-z0-9._+~-]+\.deb$ ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  base="$(ceralive_remote_cache_url)" || return 1
+  root="$(kernel_artifact_cache_root)"
+  entry="${root}/${key}"
+  mkdir -p "${root}/.locks" || return 1
+  tmp="$(mktemp -d "${root}/.remote.XXXXXXXX")" || return 1
+  for file in manifest.json "${deb_name}" resolved.config built-modules.txt; do
+    if ! curl --fail --silent --show-error --proto '=https,http' \
+        --connect-timeout 2 --max-time 120 \
+        -o "${tmp}/${file}" "${base}/kernel/${key}/${file}" 2>/dev/null; then
+      rm -rf -- "${tmp}"
+      return 1
+    fi
+  done
+  # The manifest only binds the four downloaded files to each other. The key
+  # comes from pinned build inputs; the four-axis deb gate and Kconfig survival
+  # plus required/forbidden closure are rerun, never delegated to R2.
+  if ! kernel_artifact_cache_intact "${tmp}" "${deb_name}" ||
+     ! (validate_built_kernel_deb "${tmp}/${deb_name}" "${kernel_pkg}" "${package_version}" "${arch}" "${dtb_path}" &&
+        kernel_artifact_verify_config "${tmp}/resolved.config"); then
+    log_warn "kernel remote cache rejected invalid manifest/deb/config for ${key} — rebuilding"
+    rm -rf -- "${tmp}"
+    return 1
+  fi
+  (
+    flock -w 3600 9 || exit 1
+    if [[ -d "${entry}" ]]; then
+      rm -rf -- "${tmp}"
+    else
+      mv -- "${tmp}" "${entry}" || exit 1
+    fi
+  ) 9>"${root}/.locks/${key}.lock" || rc=$?
+  if (( rc != 0 )); then rm -rf -- "${tmp}"; return 1; fi
+  log_info "kernel remote cache HIT ${key} (manifest and kernel gates verified)"
+}
+
 kernel_artifact_cache_hit() {
   local key="$1" out="$2" deb_name="$3" root entry rc=0
   root="$(kernel_artifact_cache_root)"
   entry="${root}/${key}"
+  if [[ ! -d "${entry}" ]]; then
+    kernel_artifact_cache_remote_fill "${key}" "${deb_name}" || :
+  fi
   [[ -d "${entry}" ]] || return 1
   mkdir -p "${root}/.locks" || return 1
   (
@@ -145,7 +192,13 @@ kernel_artifact_cache_hit() {
     install -m 0644 "${entry}/resolved.config" "${out}/resolved.config" || exit 1
     install -m 0644 "${entry}/built-modules.txt" "${out}/built-modules.txt" || exit 1
   ) 9>"${root}/.locks/${key}.lock" || rc=$?
-  (( rc == 0 )) || return 1
+  if (( rc != 0 )); then
+    if [[ ! -d "${entry}" ]] && kernel_artifact_cache_remote_fill "${key}" "${deb_name}"; then
+      kernel_artifact_cache_hit "${key}" "${out}" "${deb_name}"
+      return $?
+    fi
+    return 1
+  fi
   log_info "kernel artifact cache HIT ${key}"
 }
 

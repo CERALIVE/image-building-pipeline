@@ -6258,6 +6258,23 @@ the runner's existing `mkosi/cache` cleanup allowlist, so a separate audit job
 cannot reuse an earlier run's artifact without changing the runner persistence
 policy. Offline guard: `tests/kernel-artifact-cache.test.sh` (registered default).
 
+**Shared remote build cache [PARTIAL — fixture-verified, R2 publication pending].**
+`CERALIVE_REMOTE_CACHE=auto|0` adds a remote read tier after local lookup.
+`.deb` GETs use `build-cache.ceralive.tv/debs/<expected-sha>/<filename>`; the
+caller supplies that SHA from its independently verified Packages index or
+committed userspace pin. Remote bytes and Debian control identity must match
+before reaching the existing
+verified publisher, which fills staging and local cache. A wrong hash warns and
+falls back to origin. Kernel GETs use `kernel/<input-key>/` and require all
+manifest hashes plus the existing four-axis deb and Kconfig survival/closure
+checks before atomically filling the local cache. DRY_RUN, disabled mode, local
+locking, eviction and no-metadata caching remain intact. Only `release.yml` and
+`real-build-audit.yml` invoke the create-only R2 uploader after a verified build
+and with all `R2_BUILD_CACHE_*` secrets; absent secrets report `r2.build-cache
+BLOCKED-if-absent`. Fixture tests do not establish a live object or close the
+separate Todo-15 runner timing proof. Guards: `tests/debcache.test.sh` and
+`tests/kernel-artifact-cache.test.sh`.
+
 **The pinned kernel source has a persistent bare mirror, and its flock is a
 CORRECTNESS fix rather than a speedup** [EXISTS]
 

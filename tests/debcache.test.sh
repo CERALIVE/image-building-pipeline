@@ -36,8 +36,11 @@ FETCH_SOURCES=("${FETCH_DEBS}" "${PIPELINE_DIR}"/lib/fetch/*.sh)
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/debcache.XXXXXX")"
 REAL_CURL="$(command -v curl)"
 REAL_SHA256SUM="$(command -v sha256sum)"
+# Legacy local-cache legs are intentionally offline; remote legs opt in below.
+export CERALIVE_REMOTE_CACHE=0
 
 cleanup() {
+	if [[ -n "${HTTP_PID:-}" ]]; then kill "${HTTP_PID}" 2>/dev/null || :; wait "${HTTP_PID}" 2>/dev/null || :; fi
 	rm -rf "${RUN_DIR}"
 }
 trap cleanup EXIT
@@ -517,5 +520,119 @@ if grep -q '.deb cache' "${RUN_DIR}/run5.log"; then
 	fail "DRY_RUN emitted cache lines — the resolved plan must be byte-unchanged" "${RUN_DIR}/run5.log"
 fi
 pass "integration: DRY_RUN downloads nothing, mutates nothing, and says nothing about the cache"
+
+REMOTE_ROOT="${RUN_DIR}/remote-http"
+mkdir -p "${REMOTE_ROOT}/debs/${PKGA_SHA}"
+cp "${POOL}/pkga_1.0-1_arm64.deb" "${REMOTE_ROOT}/debs/${PKGA_SHA}/pkga_1.0-1_arm64.deb"
+cat >"${RUN_DIR}/server.py" <<'PY'
+import http.server
+import pathlib
+import sys
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), lambda *args, **kwargs: http.server.SimpleHTTPRequestHandler(*args, directory=sys.argv[1], **kwargs))
+pathlib.Path(sys.argv[2]).write_text(str(server.server_port))
+server.serve_forever()
+PY
+python3 "${RUN_DIR}/server.py" "${REMOTE_ROOT}" "${RUN_DIR}/port" >"${RUN_DIR}/http.log" 2>&1 &
+HTTP_PID=$!
+for _ in $(seq 1 50); do [[ -s "${RUN_DIR}/port" ]] && break; sleep 0.1; done
+[[ -s "${RUN_DIR}/port" ]] || fail 'HTTP fixture failed to start' "${RUN_DIR}/http.log"
+REMOTE_URL="http://127.0.0.1:$(<"${RUN_DIR}/port")"
+
+rm -f "${INT_CACHE}/pkga_1.0-1_arm64.deb"
+if ! run_userspace "${RUN_DIR}/remote-hit" "${RUN_DIR}/remote-hit.log" \
+    'CERALIVE_REMOTE_CACHE=auto' "CERALIVE_REMOTE_CACHE_URL=${REMOTE_URL}"; then
+  fail 'verified remote hit failed' "${RUN_DIR}/remote-hit.log"
+fi
+if [[ "$(curl_count)" != 1 || "$(sha_of "${INT_CACHE}/pkga_1.0-1_arm64.deb")" != "${PKGA_SHA}" ]] \
+    || ! grep -q 'remote cache HIT' "${RUN_DIR}/remote-hit.log"; then
+  fail 'remote hit did not verify and fill the local cache without origin fetch' "${RUN_DIR}/remote-hit.log"
+fi
+pass 'remote HTTP: verified hit fills local cache; origin is not contacted for that payload'
+
+make_deb "${RUN_DIR}/wrong_1.0-1_arm64.deb" impostor 1.0-1 arm64 wrong-control
+WRONG_SHA="$(sha_of "${RUN_DIR}/wrong_1.0-1_arm64.deb")"
+mkdir -p "${REMOTE_ROOT}/debs/${WRONG_SHA}"
+cp "${RUN_DIR}/wrong_1.0-1_arm64.deb" "${REMOTE_ROOT}/debs/${WRONG_SHA}/wrong_1.0-1_arm64.deb"
+if ( CERALIVE_REMOTE_CACHE=auto CERALIVE_REMOTE_CACHE_URL="${REMOTE_URL}" \
+    debcache_remote_hit 'wrong_1.0-1_arm64.deb' "${WRONG_SHA}" \
+    "${RUN_DIR}/remote-hit/wrong_1.0-1_arm64.deb" wrong 1.0-1 arm64 ) >"${RUN_DIR}/wrong-control.log" 2>&1; then
+  fail 'a hash-valid remote archive with wrong Debian control identity was published' "${RUN_DIR}/wrong-control.log"
+fi
+if [[ -e "${RUN_DIR}/remote-hit/wrong_1.0-1_arm64.deb" || -e "${INT_CACHE}/wrong_1.0-1_arm64.deb" ]] ||
+    ! grep -q 'control identity mismatch' "${RUN_DIR}/wrong-control.log"; then
+  fail 'wrong-control remote archive was not rejected before publishing' "${RUN_DIR}/wrong-control.log"
+fi
+pass 'remote HTTP: signed/pinned digest does not waive Debian control identity'
+
+rm -f "${INT_CACHE}/pkga_1.0-1_arm64.deb"
+printf 'tampered\n' >"${REMOTE_ROOT}/debs/${PKGA_SHA}/pkga_1.0-1_arm64.deb"
+if ! run_userspace "${RUN_DIR}/remote-corrupt" "${RUN_DIR}/remote-corrupt.log" \
+    'CERALIVE_REMOTE_CACHE=auto' "CERALIVE_REMOTE_CACHE_URL=${REMOTE_URL}"; then
+  fail 'corrupt remote should fall back to pinned origin' "${RUN_DIR}/remote-corrupt.log"
+fi
+if [[ "$(curl_count)" != 2 || "$(sha_of "${INT_CACHE}/pkga_1.0-1_arm64.deb")" != "${PKGA_SHA}" ]] \
+    || ! grep -q 'remote cache.*SHA-256 mismatch' "${RUN_DIR}/remote-corrupt.log"; then
+  fail 'corrupt remote was not warned and replaced by verified origin bytes' "${RUN_DIR}/remote-corrupt.log"
+fi
+pass 'remote HTTP corrupt-remote leg: warning, origin fallback, verified local repair'
+
+rm -f "${INT_CACHE}/pkga_1.0-1_arm64.deb"
+if ! run_userspace "${RUN_DIR}/remote-off" "${RUN_DIR}/remote-off.log" \
+    'CERALIVE_REMOTE_CACHE=0' "CERALIVE_REMOTE_CACHE_URL=${REMOTE_URL}"; then
+  fail 'remote disabled fetch failed' "${RUN_DIR}/remote-off.log"
+fi
+if [[ "$(curl_count)" != 1 ]] || grep -q "${REMOTE_URL}" "${COUNT_DIR}/curl"; then
+  fail 'remote disabled still contacted HTTP fixture' "${RUN_DIR}/remote-off.log"
+fi
+pass 'remote HTTP: disabled mode makes zero remote requests'
+
+snapshot "${INT_CACHE}" >"${RUN_DIR}/remote-before"
+if ! run_userspace "${RUN_DIR}/remote-dry" "${RUN_DIR}/remote-dry.log" \
+    'CERALIVE_REMOTE_CACHE=auto' "CERALIVE_REMOTE_CACHE_URL=${REMOTE_URL}" 'DRY_RUN=1'; then
+  fail 'remote dry run failed' "${RUN_DIR}/remote-dry.log"
+fi
+snapshot "${INT_CACHE}" >"${RUN_DIR}/remote-after"
+if [[ "$(curl_count)" != 0 ]] || ! diff -q "${RUN_DIR}/remote-before" "${RUN_DIR}/remote-after" >/dev/null \
+    || grep -q 'remote cache' "${RUN_DIR}/remote-dry.log"; then
+  fail 'DRY_RUN contacted cache or changed its output' "${RUN_DIR}/remote-dry.log"
+fi
+pass 'remote HTTP: DRY_RUN makes no cache or network calls and emits no cache lines'
+kill "${HTTP_PID}"; wait "${HTTP_PID}" 2>/dev/null || :
+HTTP_PID=''
+
+if ( CERALIVE_REMOTE_CACHE=invalid; debcache_remote_mode ) >/dev/null 2>&1; then
+  fail 'invalid remote cache mode silently accepted'
+fi
+pass 'remote mode: invalid values are refused'
+
+UPLOADER="${PIPELINE_DIR}/ci/upload-build-cache.sh"
+if GITHUB_ACTIONS='' bash "${UPLOADER}" rock-5b-plus >"${RUN_DIR}/upload-denied.log" 2>&1; then
+  fail 'developer invocation could enter the R2 writer' "${RUN_DIR}/upload-denied.log"
+fi
+if ! grep -q 'CI-only' "${RUN_DIR}/upload-denied.log"; then
+  fail 'developer upload refusal did not name its boundary' "${RUN_DIR}/upload-denied.log"
+fi
+pass 'CI writer: developer invocation is refused before any network operation'
+
+if GITHUB_ACTIONS=true GITHUB_WORKFLOW='Release candidate build' \
+    R2_BUILD_CACHE_ACCOUNT_ID='' bash "${UPLOADER}" rock-5b-plus >"${RUN_DIR}/upload-unprovisioned.log" 2>&1; then
+  fail 'unprovisioned CI invocation reached the R2 writer' "${RUN_DIR}/upload-unprovisioned.log"
+fi
+if ! grep -q 'all R2_BUILD_CACHE_\* secrets' "${RUN_DIR}/upload-unprovisioned.log"; then
+  fail 'missing credentials were not refused before upload' "${RUN_DIR}/upload-unprovisioned.log"
+fi
+pass 'CI writer: absent R2 secrets refuse upload before any network operation'
+
+if ! grep -Fq -- "--if-none-match '*'" "${UPLOADER}" ||
+    ! grep -q 'cmp -s.*existing' "${UPLOADER}"; then
+  fail 'R2 upload does not use create-only writes and byte-compare on collision'
+fi
+for workflow in release real-build-audit; do
+  if ! grep -q 'bash ci/upload-build-cache.sh' "${PIPELINE_DIR}/.github/workflows/${workflow}.yml"; then
+    fail "${workflow} does not gate the CI writer"
+  fi
+done
+pass 'CI writer: named workflows gate create-only uploads with exact-byte collision verification'
 
 printf 'ALL DEBCACHE CONTRACT LEGS PASSED\n'

@@ -35,6 +35,7 @@ else
 fi
 
 source "${ROOT}/lib/kernel/artifact-cache.sh"
+export CERALIVE_REMOTE_CACHE=0
 source "${ROOT}/lib/kernel/package.sh"
 log_info() { :; }
 log_warn() { printf '%s\n' "$*" >>"${WORK}/warnings"; }
@@ -96,9 +97,10 @@ fragments+=("${WORK}/fragment-2")
 fragments=("${WORK}/fragment")
 
 KEY_HERE="${WORK}/source/lib"
-mkdir -p "${KEY_HERE}/kernel" "${WORK}/source/ci"
+mkdir -p "${KEY_HERE}/kernel" "${KEY_HERE}/shared" "${WORK}/source/ci"
 cp "${ROOT}/lib/build-kernel.sh" "${ROOT}/lib/verify-kernel-config.sh" "${KEY_HERE}/"
 cp "${ROOT}/lib/kernel/"*.sh "${KEY_HERE}/kernel/"
+cp "${ROOT}/lib/shared/remote-cache.sh" "${KEY_HERE}/shared/"
 cp "${ROOT}/ci/Dockerfile.kernel" "${WORK}/source/ci/"
 HERE="${KEY_HERE}"
 KERNEL_LIB_DIR="${HERE}/kernel"
@@ -107,7 +109,7 @@ SOURCE_KEY="$(kernel_artifact_cache_key)"
 for file in "${HERE}/build-kernel.sh" "${HERE}/verify-kernel-config.sh" \
   "${KERNEL_LIB_DIR}/config.sh" "${KERNEL_LIB_DIR}/checkout.sh" \
   "${KERNEL_LIB_DIR}/builder.sh" "${KERNEL_LIB_DIR}/package.sh" \
-  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}"; do
+  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}"; do
   printf '\n' >>"${file}"
   [[ "$(kernel_artifact_cache_key)" != "${SOURCE_KEY}" ]] && ok "key changes with $(basename "${file}") bytes" || bad "key ignores ${file}"
   truncate -s -1 "${file}"
@@ -186,5 +188,52 @@ if grep -Fq 'if [[ "${cache_mode}" == '\''auto'\'' ]]' "${ROOT}/lib/build-kernel
 else
   bad 'off mode can still enter cache path'
 fi
+
+kernel_artifact_cache_store "${BASE_KEY}" "${WORK}/built/${kernel_pkg}_${package_version}_${arch}.deb" "${WORK}/built"
+REMOTE_ENTRY="${WORK}/http-root/kernel/${BASE_KEY}"
+mkdir -p "${REMOTE_ENTRY}"
+cp "${ENTRY}/"* "${REMOTE_ENTRY}/"
+rm -rf "${ENTRY}"
+cat >"${WORK}/server.py" <<'PY'
+import http.server
+import pathlib
+import sys
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), lambda *args, **kwargs: http.server.SimpleHTTPRequestHandler(*args, directory=sys.argv[1], **kwargs))
+pathlib.Path(sys.argv[2]).write_text(str(server.server_port))
+server.serve_forever()
+PY
+python3 "${WORK}/server.py" "${WORK}/http-root" "${WORK}/port" >"${WORK}/http.log" 2>&1 &
+HTTP_PID=$!
+for _ in $(seq 1 50); do [[ -s "${WORK}/port" ]] && break; sleep 0.1; done
+CERALIVE_REMOTE_CACHE=auto
+CERALIVE_REMOTE_CACHE_URL="http://127.0.0.1:$(<"${WORK}/port")"
+export CERALIVE_REMOTE_CACHE_URL
+if kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" && [[ -f "${ENTRY}/manifest.json" ]]; then
+  ok 'remote kernel HTTP hit verifies manifest, deb and config before local publication'
+else
+  bad 'remote kernel HTTP hit failed'
+fi
+printf x >>"${ENTRY}/${kernel_pkg}_${package_version}_${arch}.deb"
+if kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" &&
+   cmp -s "${ENTRY}/${kernel_pkg}_${package_version}_${arch}.deb" "${REMOTE_ENTRY}/${kernel_pkg}_${package_version}_${arch}.deb"; then
+  ok 'corrupt local kernel entry is evicted and refilled from validated remote bytes'
+else
+  bad 'corrupt local kernel entry skipped the remote tier'
+fi
+rm -rf "${ENTRY}"
+printf '# CONFIG_CACHE_TEST is not set\nCONFIG_CACHE_BAD=y\n' >"${REMOTE_ENTRY}/resolved.config"
+kernel_artifact_cache_manifest "${REMOTE_ENTRY}" "${kernel_pkg}_${package_version}_${arch}.deb"
+if kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" 2>/dev/null; then
+  bad 'hash-valid remote kernel config bypassed semantic validation'
+else
+  ok 'hash-valid remote kernel with invalid config falls back to source build'
+fi
+[[ ! -d "${ENTRY}" ]] && ok 'invalid remote kernel entry never reached local cache' || bad 'invalid remote kernel entry published locally'
+CERALIVE_REMOTE_CACHE=0
+requests_before="$(wc -l <"${WORK}/http.log")"
+kernel_artifact_cache_hit "${BASE_KEY}" "${WORK}/staged" "${kernel_pkg}_${package_version}_${arch}.deb" 2>/dev/null
+[[ "$(wc -l <"${WORK}/http.log")" == "${requests_before}" ]] && ok 'remote-disabled kernel lookup does no HTTP' || bad 'remote-disabled kernel lookup contacted HTTP'
+kill "${HTTP_PID}"; wait "${HTTP_PID}" 2>/dev/null || :
 printf 'Kernel artifact cache contract: %s passed, %s failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

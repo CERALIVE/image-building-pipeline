@@ -41,6 +41,8 @@
 # (= lib) for the repo-local default cache path, and DRY_RUN from fetch/retry.sh.
 #
 # shellcheck shell=bash
+# shellcheck source=../shared/remote-cache.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/remote-cache.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration. CERALIVE_DEBCACHE=0 disables the cache completely: no lookup,
@@ -123,6 +125,46 @@ debcache_key_is_valid() {
 debcache_entry_path() { printf '%s/%s' "${DEBCACHE_DIR}" "$1"; }
 debcache_lock_path()  { printf '%s/.locks/%s.lock' "${DEBCACHE_DIR}" "$1"; }
 
+debcache_remote_mode() { ceralive_remote_cache_mode; }
+
+debcache_remote_hit() {
+  local key="$1" expected="$2" dest="$3" pkg="${4:-}" version="${5:-}" arch="${6:-}" all_ok="${7:-}" tmp actual base
+  [[ -z "${DRY_RUN:-}" ]] || return 1
+  [[ "$(debcache_remote_mode)" == auto ]] || return 1
+  debcache_key_is_valid "${key}" || return 1
+  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ -n "${pkg}" && -n "${arch}" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  base="$(ceralive_remote_cache_url)" || return 1
+  tmp="$(mktemp "$(dirname "${dest}")/.debcache-remote-XXXXXX")" || return 1
+  if ! curl --fail --silent --show-error "${CURL_TIMEOUT_OPTS[@]}" --proto '=https,http' \
+      --connect-timeout 2 --max-time 120 \
+      -o "${tmp}" "${base}/debs/${expected}/${key}" 2>/dev/null; then
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  actual="$(sha256sum "${tmp}" | cut -d' ' -f1)"
+  # BSP/first-party pass a digest from their verified Packages index; userspace
+  # passes its committed URL+SHA pin. R2 never supplies this expectation.
+  if [[ "${actual}" != "${expected}" ]]; then
+    log_warn ".deb remote cache: SHA-256 mismatch for ${key} — rejecting remote bytes and falling back to origin"
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  local -a identity_opts=()
+  [[ "${all_ok}" != '--arch-all-ok' ]] || identity_opts+=(--arch-all-ok)
+  if ! assert_deb_identity "${tmp}" "${pkg}" "${version}" "${arch}" "${identity_opts[@]}"; then
+    log_warn ".deb remote cache: control identity mismatch for ${key} — rejecting remote bytes and falling back to origin"
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  if ! publish_staged_deb "${tmp}" "${dest}"; then
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  log_info ".deb remote cache HIT: ${key} (sha256 independently verified) -> ${dest}"
+}
+
 # ---------------------------------------------------------------------------
 # debcache_try_hit <key> <expected_sha256> <destination>
 #
@@ -168,8 +210,8 @@ debcache_try_hit() {
 
   case "${rc}" in
     0) log_info ".deb cache HIT: ${key} (sha256 re-verified) -> ${dest}"; return 0 ;;
-    1) return 1 ;;
-    2) log_warn ".deb cache: stored ${key} failed SHA-256 re-verification — entry deleted, re-fetching"; return 1 ;;
+    1) debcache_remote_hit "${key}" "${expected}" "${dest}" "${@:4}"; return $? ;;
+    2) log_warn ".deb cache: stored ${key} failed SHA-256 re-verification — entry deleted, re-fetching"; debcache_remote_hit "${key}" "${expected}" "${dest}" "${@:4}"; return $? ;;
     3) log_warn ".deb cache: could not copy ${key} out of the cache — re-fetching"; return 1 ;;
     4) log_warn ".deb cache: timed out waiting for the ${key} entry lock — re-fetching"; return 1 ;;
     *) return 1 ;;

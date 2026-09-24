@@ -49,6 +49,7 @@
 #   CERALIVE_DEBCACHE  0 disables the verified .deb download cache (default: on)
 #   CERALIVE_DEBCACHE_MAX_BYTES  cache ceiling, LRU-evicted   (default: 4 GiB)
 #   CERALIVE_DEBCACHE_DIR        cache location (default: ../mkosi/.staging/.debcache)
+#   CERALIVE_REMOTE_CACHE auto|0 shared verified R2 read tier (default: auto)
 #
 # shellcheck shell=bash
 
@@ -232,6 +233,7 @@ main() {
   fi
 
   [[ -n "${family}" ]] || { usage; die "--family <manifest.yaml> is required"; }
+  ceralive_remote_cache_mode >/dev/null
 
   log_info "=== fetch-debs (mkosi staging) ==="
   log_info "channel=${CHANNEL} arch=${ARCH} dest=${DEST} dry_run=${DRY_RUN:-0}"

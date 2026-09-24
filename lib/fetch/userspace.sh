@@ -123,7 +123,7 @@ _fetch_rk3588_userspace_one() {
   final="${_RK3588_USERSPACE_DEBS}/${filename}"
   # The pin file IS the expected hash, so a cached entry is re-checked against
   # exactly what the download would have been checked against.
-  if debcache_try_hit "${filename}" "${sha256}" "${final}"; then
+  if debcache_try_hit "${filename}" "${sha256}" "${final}" "${pkg}" '' "${ARCH}" --arch-all-ok; then
     return 0
   fi
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"

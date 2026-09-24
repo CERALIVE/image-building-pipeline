@@ -91,7 +91,9 @@ _fetch_first_party_curl_one() {
   final="${_FIRST_PARTY_DEBS}/$(basename "${filename}")"
   # ${sha256} is the signed-InRelease-anchored Packages hash — the same verdict
   # the download below is held to, so reuse cannot be the weaker path.
-  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}"; then
+  local all_ok=''
+  first_party_arch_all_ok "${spec%%=*}" && all_ok='--arch-all-ok'
+  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}" "${spec%%=*}" "${spec#*=}" "${ARCH}" "${all_ok}"; then
     return 0
   fi
   tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
@@ -325,8 +327,10 @@ EOF
         fi
         if (( hit_rc == 0 )) && [[ -n "${hit_resolved}" ]]; then
           IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
+          local all_ok=''
+          first_party_arch_all_ok "${spec%%=*}" && all_ok='--arch-all-ok'
           if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
-              "${debs}/$(basename "${hit_file}")"; then
+              "${debs}/$(basename "${hit_file}")" "${spec%%=*}" "${spec#*=}" "${ARCH}" "${all_ok}"; then
             continue
           fi
         fi

@@ -104,6 +104,22 @@ jobs:
           python3 ./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md
           ./ci/check-build-log.sh --self-test
           ./ci/check-build-log.sh "${RUNNER_TEMP}/real-build.log"
+      - name: Publish verified shared build cache when provisioned
+        env:
+          R2_BUILD_CACHE_ACCOUNT_ID: ${{ secrets.R2_BUILD_CACHE_ACCOUNT_ID }}
+          R2_BUILD_CACHE_BUCKET: ${{ secrets.R2_BUILD_CACHE_BUCKET }}
+          R2_BUILD_CACHE_ACCESS_KEY_ID: ${{ secrets.R2_BUILD_CACHE_ACCESS_KEY_ID }}
+          R2_BUILD_CACHE_SECRET_ACCESS_KEY: ${{ secrets.R2_BUILD_CACHE_SECRET_ACCESS_KEY }}
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+        run: |
+          set -euo pipefail
+          if [[ -n "${R2_BUILD_CACHE_ACCOUNT_ID}" && -n "${R2_BUILD_CACHE_BUCKET}" &&
+                -n "${R2_BUILD_CACHE_ACCESS_KEY_ID}" && -n "${R2_BUILD_CACHE_SECRET_ACCESS_KEY}" ]]; then
+            bash ci/upload-build-cache.sh "${CERALIVE_RELEASE_BOARD}"
+          else
+            echo 'r2.build-cache BLOCKED-if-absent: R2_BUILD_CACHE_* secrets are not provisioned; no upload attempted'
+          fi
       - name: Remove generated build paths
         if: ${{ always() }}
         env:

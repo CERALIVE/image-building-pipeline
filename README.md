@@ -216,6 +216,13 @@ pins, ordered fragment bytes, variant, output identity and timestamp, the actual
 builder image ID and build/verifier code bytes. It does not use mtimes. This is a
 local build cache, not an image or board qualification receipt.
 
+With `CERALIVE_REMOTE_CACHE=auto` (default), a local kernel miss can fetch
+`https://build-cache.ceralive.tv/kernel/<input-key>/` before compiling. The four
+files must pass `manifest.json` digests, Debian identity/board DTB checks and
+resolved Kconfig survival plus required/forbidden closure before local reuse.
+A bad or unavailable remote entry falls back to the source build. The separate
+real-CI-runner cache-hit timing proof remains open.
+
 For the full developer bring-up guide (prerequisites, flashing, dev loop, E2E
 smoke test, and signing), see
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md).
@@ -681,6 +688,24 @@ on the four apt/curl transports, or from the committed
 exactly the hash the network path would have been checked against. An entry whose
 hash no longer matches is deleted and re-fetched, not skipped.
 
+On a local miss, `CERALIVE_REMOTE_CACHE=auto` tries
+`https://build-cache.ceralive.tv/debs/<sha256>/<filename>` before origin. The
+digest comes from the fetch family's signed Packages index or committed userspace
+pin, never from the remote cache. They also pass the calling family's Debian
+control identity check. Verified hits use the existing atomic publisher
+to fill the local cache; corrupt remote bytes warn and fall back to origin.
+`CERALIVE_REMOTE_CACHE=0` selects local-only operation; other values are refused.
+`CERALIVE_DEBCACHE=0` still disables the whole `.deb` cache and `DRY_RUN=1`
+consults neither tier. Apt indexes and signing metadata are never cached.
+
+Only `release.yml` and `real-build-audit.yml` upload, after build verification
+and only when all `R2_BUILD_CACHE_*` secrets are present. The uploader verifies
+staged bytes against signed metadata/pins and kernel artifacts against manifest,
+deb/DTB and Kconfig gates; S3 `put-object --if-none-match '*'` prevents overwrites
+and an existing object is accepted only after byte comparison. Developer builds
+never upload. Missing credentials report `r2.build-cache BLOCKED-if-absent`;
+there is no served-R2 HTTP 200 proof until a credentialed CI build runs.
+
 Only final `.deb` payloads are cached. `InRelease`, `Release`, `Packages.gz`, the
 apt lists and the GPG keyring are never cached: that is the rotating trust material
 whose whole job is to be fresh. Index metadata is therefore still fetched on every
@@ -698,6 +723,7 @@ currently holding.
 CERALIVE_DEBCACHE=0 ./build rock-5b-plus              # disable it entirely
 CERALIVE_DEBCACHE_MAX_BYTES=8589934592 ./build …      # raise the 4 GiB ceiling
 CERALIVE_DEBCACHE_DIR=/srv/debcache ./build …         # relocate it
+CERALIVE_REMOTE_CACHE=0 ./build rock-5b-plus           # local-only read tier
 ```
 
 The cache is bounded at 4 GiB by default and evicted least-recently-used first by
