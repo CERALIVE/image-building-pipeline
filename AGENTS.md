@@ -3424,6 +3424,16 @@ branch are retired. `rauc bundle` signs with leaf and intermediate in the canoni
 builder container; `rauc info --keyring` verifies against the root. Section 11
 and `tests/verity-bundle.test.sh` cover this boundary; no boot is claimed.
 
+The rootfs also carries `/etc/ceralive/image-build-commit` (git SHA identity)
+and `/etc/ceralive/image-version` (wall-clock `YYYYMMDDTHHMMSSZ` build-recency
+diagnostic, outside `SOURCE_DATE_EPOCH`); neither is an OS release version.
+Only an explicit `CERALIVE_OS_RELEASE_VERSION=YYYY.MINOR.PATCH` on a real build
+adds `/etc/ceralive/os-release-version` as one newline-terminated, mode-0444
+CalVer line. With the variable absent, ordinary CI/dev builds write no such
+file: release cutting/publishing does not exist yet. This conditional stamp
+addresses the dpkg-comparability gap found by the CeraUI OS-update-agent consumer:
+only this CalVer can be compared with the channel manifest's CalVer `version`.
+
 **RAUC test trust fixture** [EXISTS]
 
 The canonical `run-tests` entrypoint invokes

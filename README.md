@@ -115,9 +115,15 @@ probe and the lock's limits are in [`docs/build-reproducibility.md`](docs/build-
 With fixed source state and `SOURCE_DATE_EPOCH`, the ext4 rootfs content is
 reproducible **except** for `/etc/ceralive/image-version`: every build writes its
 actual UTC postinstall time there as one `YYYYMMDDTHHMMSSZ` line (mode 0444),
-independent of `SOURCE_DATE_EPOCH`. CeraUI's OS-update agent uses this
-dpkg-comparable value to reject an older or identical image. The separate
-`/etc/ceralive/image-build-commit` identity marker and its consumers are unchanged.
+independent of `SOURCE_DATE_EPOCH`. The separate
+`/etc/ceralive/image-build-commit` git SHA identity marker and its consumers are unchanged.
+Neither marker is an OS release version. Only a deliberate real build with
+`CERALIVE_OS_RELEASE_VERSION=YYYY.MINOR.PATCH` writes
+`/etc/ceralive/os-release-version` as one newline-terminated CalVer line (mode
+0444); ordinary CI/dev builds leave that file absent. This fills the
+dpkg-comparability gap found by CeraUI's OS-update-agent consumer: only the
+CalVer stamp can be compared with a channel manifest's CalVer `version`.
+No release-cutting or publishing mechanism sets this variable yet.
 Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
 reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
 from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)

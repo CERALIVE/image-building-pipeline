@@ -108,6 +108,58 @@ load manifest-helpers
     "$first" "$second" "$SOURCE_DATE_EPOCH"
 }
 
+# Lift the actual postinst writer, including its optional guard and validation.
+# Only its /etc/ceralive/ destinations are redirected by the callers below.
+os_release_version_writer() {
+  awk '
+    /^setup_ssh_firstboot\(\) \{/ { in_function = 1 }
+    in_function && /printf .*image-build-commit$/ { copying = 1 }
+    in_function && /enable_service ceralive-ssh-firstboot.service/ { exit }
+    copying { print }
+  ' "$PIPELINE_DIR/mkosi/customize/postinst.d/tls-ssh.sh"
+}
+
+@test "os-release-version: absent or empty build input creates no stamp" {
+  local root="$BATS_TEST_TMPDIR/absent" empty_root="$BATS_TEST_TMPDIR/empty" writer
+  mkdir -p "$root" "$empty_root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  unset CERALIVE_OS_RELEASE_VERSION
+  eval "${writer//\/etc\/ceralive\//$root/}"
+  [ ! -e "$root/os-release-version" ]
+  CERALIVE_OS_RELEASE_VERSION=''
+  eval "${writer//\/etc\/ceralive\//$empty_root/}"
+  [ ! -e "$empty_root/os-release-version" ]
+}
+
+@test "os-release-version: CalVer creates one newline-terminated read-only line" {
+  local root="$BATS_TEST_TMPDIR/valid" writer
+  mkdir -p "$root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  CERALIVE_OS_RELEASE_VERSION=2026.10.0
+  eval "${writer//\/etc\/ceralive\//$root/}"
+  cmp -s "$root/os-release-version" <(printf '2026.10.0\n')
+  [ "$(wc -l <"$root/os-release-version")" -eq 1 ]
+  [ "$(stat -c %a "$root/os-release-version")" = 444 ]
+}
+
+@test "os-release-version: malformed CalVer dies without creating a stamp" {
+  local root="$BATS_TEST_TMPDIR/invalid" writer
+  mkdir -p "$root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  writer="${writer//\/etc\/ceralive\//$root/}"
+  run env CERALIVE_IMAGE_BUILD_COMMIT="$CERALIVE_IMAGE_BUILD_COMMIT" CERALIVE_OS_RELEASE_VERSION=not-a-version \
+    bash -c 'die() { printf "%s\n" "$*" >&2; exit 1; }; eval "$1"' _ "$writer"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'CERALIVE_OS_RELEASE_VERSION must be YYYY.MINOR.PATCH CalVer'* ]]
+  [ ! -e "$root/os-release-version" ]
+}
+
 # ===========================================================================
 # 8b. First-boot WiFi provisioning captive portal (Task 14).
 #     The offline proof harness stubs nmcli/ip/systemctl/systemd-run and drives the
