@@ -435,6 +435,7 @@ EOF
 setup_rauc_client() {
   local keyring=/etc/rauc/ceralive-keyring.pem
   local sysconf=/etc/rauc/system.conf
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC}/rauc/ceralive-post-install" /usr/lib/rauc/ceralive-post-install
   # ARCH-NEUTRAL fallback. The orchestrator ALWAYS sets COMPATIBLE_STRING from the
   # resolved manifest (lib/orchestrate.sh: COMPATIBLE_STRING=ceralive-${FAMILY}), so
   # this default is only reached when the postinst is run with no env at all. It must
@@ -448,7 +449,7 @@ setup_rauc_client() {
   local slot_a slot_b
   slot_a="$(resolve_partlabel rootfs_a)"
   slot_b="$(resolve_partlabel rootfs_b)"
-  log "wiring RAUC update client (keyring + system.conf + service)"
+  log "wiring RAUC update client (keyring + system.conf + post-install + service)"
   mkdir -p /etc/rauc
 
   if [[ -n "${RAUC_ROOT_CA_B64:-}" ]]; then
@@ -479,6 +480,7 @@ sandbox-user=ceralive-ota
 send-headers=boot-id;transaction-id
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+post-install=/usr/lib/rauc/ceralive-post-install
 [keyring]
 path=${keyring}
 
@@ -498,7 +500,6 @@ type=raw
 EOF
     chmod 0644 "${sysconf}"
   fi
-
   if [[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]; then
     log "FATAL: rauc.service not present — the 'rauc-service' package (shared.list) is not installed"
     exit 1

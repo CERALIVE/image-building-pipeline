@@ -16,7 +16,7 @@
 #                       partition (offset GAP_MB * 1 MiB).
 #   5. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
 #                       attempt budget for both populated factory slots.
-#   6. RAUC bundle    — CMS verifies to the release root and manifest Compatible matches
+#   6. RAUC bundle    — rauc info verifies to the root, verity/adaptive full slot, compatible matches
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
@@ -511,8 +511,8 @@ check_boot_state() {
 check_rauc_bundle() {
   local bundle="$1" board="$2" keyring="$3" out compatible expect
   expect="${BOARD_IDENTITY_COMPATIBLE}"
-  require_tool openssl || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
-  require_tool unsquashfs || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool rauc || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool python3 || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
   [[ -s "${keyring}" ]] || { fail "RAUC bundle: parses + Compatible '${expect}'"; info "keyring not found: ${keyring}"; return; }
   if ! out="$(rauc_bundle_verify_and_compatible "${bundle}" "${keyring}" 2>&1)"; then
     fail "RAUC bundle: parses + Compatible '${expect}'"
@@ -522,7 +522,7 @@ check_rauc_bundle() {
   compatible="$(printf '%s\n' "${out}" | tail -1)"
   if [[ "${compatible}" == "${expect}" ]]; then
     pass "RAUC bundle: parses + Compatible '${expect}'"
-    info "Compatible: '${compatible}'; signature verified (check-purpose=codesign)"
+    info "Compatible: '${compatible}'; verity signature verified (check-purpose=codesign), adaptive full slot"
   else
     fail "RAUC bundle: parses + Compatible '${expect}'"
     info "Compatible: '${compatible}' (expected '${expect}')"

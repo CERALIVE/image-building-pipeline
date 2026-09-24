@@ -70,7 +70,9 @@ tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-
 tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
-tests/rauc-transition-contract.test.sh	shell	unit	default-shell	first Trixie bundle remains plain-format with exact fleet compatible and signing chain for RAUC 1.8
+tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration retains compatible, signing chain, and six RAUC writer invariants
+tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
+tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and premature feature refusal
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate

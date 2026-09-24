@@ -245,6 +245,7 @@ out of both layouts one at a time so no single case carries the suite.
 
 - `lib/assemble-disk.sh` writes these artifacts into the factory image and populates
   both A/B rootfs filesystems.
-- `lib/build-bundle.sh` emits the signed plain-format `.raucb`; the immutable root CA
+- `lib/build-bundle.sh` emits the signed verity/adaptive `.raucb`; the immutable root CA
   is installed as `/etc/rauc/keyring.pem`.
-- dm-verity is future bundle hardening and is not part of the current slot contract.
+- The system-level post-install handler relabels the inactive ext4 slot from its
+  own GPT PARTLABEL; missing labels fail OTA instead of guessing a boot label.

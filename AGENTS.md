@@ -3402,7 +3402,7 @@ compression level 0 because recompressing xz wastes time. Regression coverage is
 `tests/raw-candidate-compression.test.sh`, `tests/local-raw-compression.test.sh`,
 `tests/release-candidate-contract.test.sh`, and `tests/release-cache-contract.test.sh`.
 
-**Reproducible builds** [EXISTS]
+**Reproducible builds** [PARTIAL — verity producer on integration branch]
 The `[6d/9]` package lock is [PARTIAL — fixture verified, real image pending]:
 base/platform/runtime/app apt receipts read their own apt-verified Packages
 indexes before cleanup; staged first-party/BSP/userspace digests reuse the
@@ -3411,15 +3411,18 @@ freshly created bytes. The final dpkg-status reconciliation fails on any
 unaccounted package. Source-built kernel entries carry commit pins and an
 artifact hash map, not an apt origin. `docs/build-reproducibility.md` records
 the real apt 3.0.3 snapshot TLS failure; there is no snapshot override.
-Same source state → bit-identical `.raucb`. The orchestrator pins one
+The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
-`common.sh::resolve_source_date_epoch`) and exports it so every embedded mtime
-(rootfs.tar, squashfs, ext4, mkosi) clamps to it. `build-bundle.sh` signs the RAUC
-bundle through a deterministic OpenSSL CMS path (`-noattr` → no wall-clock
-`signingTime`; real leaf key + intermediate chain, still `rauc`-verifiable) because `rauc`
-itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into the
-native `rauc bundle` signer (NOT bit-reproducible). Proof: `run-tests` section
-11; double-build the same board and compare `.raucb` sha256.
+`common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle
+producer share `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
+deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
+Factory slots start with their own labels; the bundle's neutral-labelled image is
+relabelled after install from the written partition's own GPT PARTLABEL. The signed
+verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces
+variable CMS/verity metadata. The OpenSSL plain-format signer and `REPRODUCIBLE=0`
+branch are retired. `rauc bundle` signs with leaf and intermediate in the canonical
+builder container; `rauc info --keyring` verifies against the root. Section 11
+and `tests/verity-bundle.test.sh` cover this boundary; no boot is claimed.
 
 **RAUC test trust fixture** [EXISTS]
 
@@ -3464,15 +3467,19 @@ declaration and creates the no-home/nologin account; runtime installs tmpfiles
 for RAUC metadata (0700 root) and update state (0750 root:ceralive). The
 build-generated `/usr/lib/ceralive/update-capabilities.json` records the real
 OTA and `_apt` UIDs but advertises **no features yet**: the schema lists the
-eight planned names, while verity, orchestration, origin protection, slot-sync
-and credential support remain later tasks. Never promote a name before its
-implementation and tests land. `bundle-formats=-plain` is deliberately absent
-until Todo 22 migrates **both** OS and cert-rotation bundle writers; otherwise
-the existing signed rotation bundle becomes uninstallable. Manual
+eight planned names, while orchestration, origin protection, slot-sync and
+credential support remain later tasks. Never promote a name before its
+implementation and tests land. Both new OS and cert-rotation bundle producers now
+emit verity; the OS image is adaptive (`block-hash-index`) and exactly 4096 MiB.
+All six system.conf writers install and wire `/usr/lib/rauc/ceralive-post-install`:
+each written rootfs gets its ext4 label from that partition's own live GPT
+PARTLABEL, and a missing label aborts the installation. The certs slot is skipped.
+`bundle-formats=-plain` remains absent for historical local-bundle compatibility,
+not as a fallback producer path. Manual
 `ceralive-update` remains a bench/recovery path only: HTTPS requires a verity
 bundle, installs under the shared lock with the stream guard, and leaves the
-inactive slot staged (not automatically boot-selected). Todo 22 enables verity;
-Todos 29/35 finalize and advertise the complete image contract before release.
+inactive slot staged (not automatically boot-selected). Todos 29/35 finalize and
+advertise the complete image contract before release.
 Guards: `tests/rauc-transition-contract.test.sh`,
 `tests/update-capabilities.test.sh`, `tests/kernel-config-fragment.bats`, and
 the file-backed real-RAUC service contract.

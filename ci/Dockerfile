@@ -62,6 +62,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   binfmt-support          registers the qemu interpreters
 #   pipx git python3        pinned mkosi 26 install from the upstream tag
 #   python3-pefile          PE/COFF parsing used by mkosi image assembly
+#   e2fsprogs               mkfs.ext4/e2label for the shared slot-image writer
+#                           (lib/disk/slot-image.sh) when it falls back to running
+#                           inside this container. Deliberately NOT paired with an
+#                           apt `rauc` package: Debian trixie's `rauc` is 1.13,
+#                           which cannot build/verify format=verity bundles the way
+#                           this pipeline now needs (Todo-22 RAUC-version ruling).
+#                           The bundle-build container path (build-bundle.sh's
+#                           bundle_with_rauc) installs the pipeline's OWN
+#                           source-built RAUC 1.15.2 .deb pair (lib/build-rauc.sh,
+#                           staged at RAUC_DEB_DIR) into this image at bundle-build
+#                           time instead — never add `rauc` back here, it would
+#                           silently reintroduce the stale-1.13 bundling path this
+#                           fixed.
 #   kmod                    `modinfo`, WITHOUT WHICH THE FIRMWARE PRUNE SILENTLY
 #                           NEVER RUNS. platform/mkosi.postinst::prune_irrelevant_rk3588_firmware
 #                           is a non-chroot script, so it resolves `modinfo` from
@@ -117,6 +130,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       gpg \
       kmod \
       reprepro \
+      e2fsprogs \
       systemd-repart \
       zstd \
       qemu-user-static \

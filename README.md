@@ -110,6 +110,20 @@ verified Debian/fetch digests, generated `libv4l-0` bytes and source-built
 kernel provenance. Debian snapshot pinning is not enabled; the apt 3.0.3 TLS
 probe and the lock's limits are in [`docs/build-reproducibility.md`](docs/build-reproducibility.md).
 
+### Reproducible builds
+
+With fixed source state and `SOURCE_DATE_EPOCH`, the ext4 rootfs **content** is
+reproducible. Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
+reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
+from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)
+or bench (`xrootfs_a/b`); an unreadable label aborts installation. New OS bundles
+are `format=verity` with `adaptive=block-hash-index`; cert-rotation bundles also
+use verity. The signed `.raucb` container is **not bit-reproducible**: native
+RAUC's CMS/verity metadata varies between signings. The deterministic OpenSSL
+plain-format signer has been removed. Verification remains `rauc info --keyring`
+against the device root CA. These changes are on the integration branch; no newly
+built or booted device image is claimed.
+
 Rock 5B+ production images use a populated A/B factory layout: both 4096 MiB
 rootfs slots carry the baseline OS, slot A starts primary, and RAUC uses the
 RK3588 custom bootcount backend with explicit `rauc.slot=A|B` kernel arguments.
@@ -1063,9 +1077,9 @@ RAUC 1.13 now has a dedicated non-login `ceralive-ota` streaming identity, persi
 `/data/ceralive/rauc` metadata and `activate-installed=false` in every system.conf
 writer. The manual entrypoint accepts an absolute local bundle path or an HTTPS
 **verity** URL and holds `/run/lock/ceralive-update.lock` through install. A remote
-**plain** bundle is still rejected by RAUC streaming; until Todo 22 migrates both
-OS and cert-rotation writers to verity, plain remains permitted **locally** and
-`bundle-formats=-plain` MUST NOT be enabled. Installation stages an inactive slot;
+**plain** bundle is still rejected by RAUC streaming. Both new OS and cert-rotation
+bundles are verity; historical plain bundles remain permitted locally during the
+transition (no `bundle-formats=-plain` exclusion yet). Installation stages an inactive slot;
 it does not make it the next boot slot. Activation at clean idle shutdown and the
 scheduled/automatic trigger belong to the future CeraUI integration, not this
 manual recovery script. Do not reboot expecting a staged slot to boot automatically.
@@ -1073,9 +1087,9 @@ manual recovery script. Do not reboot expecting a staged slot to boot automatica
 `/usr/lib/ceralive/update-capabilities.json` is generated from the actual
 `ceralive-ota` and `_apt` UIDs. Its schema enumerates the target feature names,
 but `features` is currently **empty**: no image built at this integration point
-implements the entire orchestrator, origin protection, slot mirror, verity or
-credential contract. The advertising gate refuses premature feature overrides;
-Todo 22 enables verity first, then Todos 29/35 must add the remaining mechanisms
+implements the entire orchestrator, origin protection, slot mirror or credential
+contract. The advertising gate refuses premature feature overrides; the verity
+producer alone does not justify advertising a completed feature. Todos 29/35 must add the remaining mechanisms
 and their tests before a shippable image advertises them. This branch is not a
 released/booted image.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# rauc-transition-contract.test.sh — pin the first Trixie bundle to the subset
-# accepted by the deployed Bookworm RAUC 1.8 fleet.
+# rauc-transition-contract.test.sh — preserve board identity, PKI, and all six
+# config writers while moving the OS and rotation producers to RAUC verity.
 #
 # PROFILE: contract-test (docs/shell-profiles.md).
 # shellcheck shell=bash
@@ -51,10 +51,11 @@ check_system_conf_writers() {
   for file in "${writers[@]}"; do
     name="${file#"${PIPELINE_DIR}"/}"
     for key in 'data-directory=/data/ceralive/rauc' 'activate-installed=false' \
-      '[streaming]' 'sandbox-user=ceralive-ota' 'send-headers=boot-id;transaction-id'; do
+      '[streaming]' 'sandbox-user=ceralive-ota' 'send-headers=boot-id;transaction-id' \
+      'post-install=/usr/lib/rauc/ceralive-post-install'; do
       has "${name} configures ${key}" "${file}" "${key}"
     done
-    lacks_active_key "${name} keeps plain rotation usable until verity migration" "${file}" 'bundle-formats'
+    lacks_active_key "${name} does not retroactively reject installed legacy bundles" "${file}" 'bundle-formats'
     if grep -Eq '^[[:space:]]*sandbox-user[[:space:]]*=[[:space:]]*nobody[[:space:]]*$' "${file}"; then
       bad "${name} uses nobody for streaming"
     else
@@ -75,8 +76,10 @@ transition_contract_check() {
   local bundle="$1" install_boot="$2" system_conf="$3" rauc_setup="$4"
   local failures_before="${FAIL}"
 
-  has "bundle manifest explicitly pins the RAUC 1.8-compatible format" \
-    "${bundle}" 'format=plain'
+  has "bundle manifest explicitly pins the verity format" \
+    "${bundle}" 'format=verity'
+  has "bundle manifest requires adaptive blocks" "${bundle}" 'adaptive=block-hash-index'
+  has "bundle manifest carries full-slot ext4" "${bundle}" 'filename=rootfs.ext4'
   has "bundle manifest copies the resolved compatible byte-for-byte" \
     "${bundle}" 'compatible=${compatible}'
   has "bundle compatible comes from COMPATIBLE_STRING with no guessed value" \
@@ -87,7 +90,7 @@ transition_contract_check() {
     "${install_boot}" 'COMPATIBLE="${COMPATIBLE_STRING:-}"'
   has "fallback system.conf retains the compatible substitution token" \
     "${system_conf}" 'compatible=@COMPATIBLE_STRING@'
-  lacks_active_key "fleet system.conf does not exclude plain bundles" \
+  lacks_active_key "fleet system.conf does not retroactively exclude plain bundles" \
     "${system_conf}" 'bundle-formats'
   lacks_active_key "verification purpose stays unchanged across the transition" \
     "${system_conf}" 'check-purpose'
@@ -97,8 +100,8 @@ transition_contract_check() {
     "${system_conf}" 'boot-attempts'
   lacks_active_key "self-contained custom fallback leaves attempt counting to its backend" \
     "${rauc_setup}" 'boot-attempts'
-  has "bundle signer remains the leaf key" "${bundle}" '"--key=${RAUC_LEAF_KEY}"'
-  has "bundle embeds the existing intermediate chain" "${bundle}" '"--intermediate=${RAUC_CHAIN}"'
+  has "bundle signer remains the leaf key" "${bundle}" '--key="${RAUC_LEAF_KEY}"'
+  has "bundle embeds the existing intermediate chain" "${bundle}" '--intermediate="${RAUC_CHAIN}"'
   has "bundle verifies to the existing baked root" "${bundle}" 'RAUC_ROOT_CA="${RAUC_PKI_DIR}/root-ca.pem"'
 
   (( FAIL == failures_before ))
@@ -118,14 +121,14 @@ cp "${INSTALL_BOOT}" "${scratch}/install-boot.sh"
 cp "${SYSTEM_CONF}" "${scratch}/system.conf"
 cp "${RAUC_SETUP}" "${scratch}/rauc-setup.sh"
 
-sed -i 's/format=plain/format=verity/' "${scratch}/build-bundle.sh"
+sed -i 's/format=verity/format=plain/' "${scratch}/build-bundle.sh"
 saved_fail="${FAIL}"
 transition_contract_check "${scratch}/build-bundle.sh" "${scratch}/install-boot.sh" "${scratch}/system.conf" "${scratch}/rauc-setup.sh" >/dev/null 2>&1
 if (( FAIL > saved_fail )); then
-  ok "mutation: a verity-format transition bundle is rejected"
+  ok "mutation: a plain-format OS bundle is rejected"
   FAIL="${saved_fail}"
 else
-  bad "mutation: format=verity escaped the RAUC 1.8 transition gate"
+  bad "mutation: format=plain escaped the verity gate"
 fi
 
 cp "${BUNDLE}" "${scratch}/build-bundle.sh"

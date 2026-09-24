@@ -113,6 +113,7 @@ send-headers=boot-id;transaction-id
 
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]
 path=${RAUC_KEYRING_DEST}
@@ -152,6 +153,8 @@ enable_rauc_service() {
 
 setup_rauc_client() {
   log_info "wiring RAUC A/B update client (keyring + system.conf + service)"
+  [[ -s "${RAUC_SRC_DIR}/ceralive-post-install" ]] || die "missing RAUC post-install handler"
+  install -D -m 0755 "${RAUC_SRC_DIR}/ceralive-post-install" /usr/lib/rauc/ceralive-post-install
   install_keyring
   install_system_conf_fallback
   enable_rauc_service

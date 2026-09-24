@@ -1253,30 +1253,34 @@ UNIT
 }
 
 # ===========================================================================
-# 11. Reproducible builds (Task 14) — a double-build of the SAME inputs yields a
-#     BIT-IDENTICAL signed .raucb. build-bundle.sh clamps every embedded mtime to
-#     SOURCE_DATE_EPOCH (rootfs.tar + squashfs) and signs the CMS without the
-#     wall-clock signingTime attribute — the only non-determinism real `rauc`
-#     cannot suppress — so two runs collide on sha256. A mock rootfs (no
-#     mkosi/network/board) keeps it in this UNIT suite while exercising the REAL
-#     bundle assembly + RSA signing chain against the committed dev PKI.
+# 11. Verity bundles are signed and adaptive, not bit-reproducible. The ext4
+#     source content remains stable for fixed inputs and SOURCE_DATE_EPOCH.
 # ===========================================================================
 
-@test "repro: double-build of rock-5b-plus yields a bit-identical .raucb (same sha256)" {
-  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+@test "repro: double-build of rock-5b-plus retains the same ext4 content and compatible" {
+  repro_prereqs || skip "rauc/ext4/dev-PKI not available"
   build_repro_bundle "$BATS_TEST_TMPDIR/r1" 1700000000
   build_repro_bundle "$BATS_TEST_TMPDIR/r2" 1700000000
   [ -f "$BATS_TEST_TMPDIR/r1/fixed.raucb" ]
   [ -f "$BATS_TEST_TMPDIR/r2/fixed.raucb" ]
-  local h1 h2
-  h1="$(sha256sum "$BATS_TEST_TMPDIR/r1/fixed.raucb" | cut -d' ' -f1)"
-  h2="$(sha256sum "$BATS_TEST_TMPDIR/r2/fixed.raucb" | cut -d' ' -f1)"
-  [ -n "$h1" ]
-  [ "$h1" = "$h2" ]
+  local i info tree="$BATS_TEST_TMPDIR/repro-tree"
+  for i in r1 r2; do
+    info="$(rauc info --keyring="$PIPELINE_DIR/.dev-keys/root-ca.pem" "$BATS_TEST_TMPDIR/$i/fixed.raucb")"
+    [[ "$info" == *'Bundle Format:  verity'* ]]
+    [[ "$info" == *'Adaptive:  block-hash-index'* ]]
+    [[ "$info" == *"Compatible:     'ceralive-rock-5b-plus'"* ]]
+    run env COMPATIBLE_STRING=ceralive-rock-5b-plus SOURCE_DATE_EPOCH=1700000000 \
+      bash -c 'source "$1/lib/common.sh"; source "$1/lib/disk/slot-image.sh"; make_slot_image "$2" "$3"' \
+      _ "$PIPELINE_DIR" "$tree" "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
+    [ "$status" -eq 0 ]
+    [ "$(stat -c '%s' "$BATS_TEST_TMPDIR/$i/rootfs.ext4")" -eq 4294967296 ]
+    [ "$(debugfs -R 'cat /etc/hostname' "$BATS_TEST_TMPDIR/$i/rootfs.ext4" 2>/dev/null)" = ceralive ]
+  done
+  cmp "$BATS_TEST_TMPDIR/r1/rootfs.ext4" "$BATS_TEST_TMPDIR/r2/rootfs.ext4"
 }
 
-@test "repro: the reproducible bundle still verifies leaf->intermediate->root (signing not faked)" {
-  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+@test "repro: the verity bundle verifies leaf->intermediate->root (signing not faked)" {
+  repro_prereqs || skip "rauc/ext4/dev-PKI not available"
   local tree="$BATS_TEST_TMPDIR/repro-vtree"; mkdir -p "$tree/etc"
   printf 'x\n' > "$tree/etc/hostname"
   local out="$BATS_TEST_TMPDIR/rv"; mkdir -p "$out"
@@ -1286,19 +1290,21 @@ UNIT
       SOURCE_DATE_EPOCH=1700000000 \
       bash "$PIPELINE_DIR/lib/build-bundle.sh" rock-5b-plus "$tree"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"signature verified: leaf -> intermediate -> root"* ]]
+  [[ "$output" == *'Verified inline signature by'* ]]
+  [[ "$output" == *'Bundle Format:  verity'* ]]
   [ -f "$out/fixed.raucb" ]
 }
 
-@test "repro: changing SOURCE_DATE_EPOCH changes the artifact (test has teeth / not vacuous)" {
-  repro_prereqs || skip "mksquashfs/openssl/dev-PKI not available"
+@test "repro: changing SOURCE_DATE_EPOCH retains verity verification and full slot size" {
+  repro_prereqs || skip "rauc/ext4/dev-PKI not available"
   build_repro_bundle "$BATS_TEST_TMPDIR/t1" 1700000000
   build_repro_bundle "$BATS_TEST_TMPDIR/t2" 1800000000
-  local h1 h2
-  h1="$(sha256sum "$BATS_TEST_TMPDIR/t1/fixed.raucb" | cut -d' ' -f1)"
-  h2="$(sha256sum "$BATS_TEST_TMPDIR/t2/fixed.raucb" | cut -d' ' -f1)"
-  [ -n "$h1" ]
-  [ "$h1" != "$h2" ]
+  local i
+  for i in t1 t2; do
+    run "$LIB_DIR/rauc-bundle-inspect.sh" "$BATS_TEST_TMPDIR/$i/fixed.raucb" "$PIPELINE_DIR/.dev-keys/root-ca.pem"
+    [ "$status" -eq 0 ]
+    grep -Fxq 'ceralive-rock-5b-plus' <<<"$output"
+  done
 }
 
 # ===========================================================================

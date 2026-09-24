@@ -3,7 +3,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
-WORK="$(mktemp -d /tmp/ceralive-rauc-contract.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-rauc-contract.XXXXXX")"
 CONF="${WORK}/system.conf"
 BUNDLE="${WORK}/bundle/probe.raucb"
 service_pid=""
@@ -47,7 +47,15 @@ release_harness_mounts() {
     [[ -n "${target}" ]] || continue
     backing=""
     [[ "${source}" == /dev/loop* ]] && backing="$(losetup -n -O BACK-FILE "${source}" 2>/dev/null || true)"
-    if [[ "${source}" == "${WORK}"/* || "${backing}" == "${WORK}"/* ]]; then
+    # A verity bundle mounts through a dm-verity device (source /dev/dm-N)
+    # layered on the loop device, so neither the WORK-prefix nor the
+    # loop-backing check above ever matches it directly. RAUC's own
+    # mount-prefix default (unconfigured by every fixture here) is
+    # /mnt/rauc/, which nothing else in this harness ever mounts onto, so
+    # matching on TARGET is the unambiguous, harness-scoped signal. RAUC
+    # opens the verity mapping with deferred-remove, so this umount alone
+    # releases both the dm device and its underlying loop.
+    if [[ "${source}" == "${WORK}"/* || "${backing}" == "${WORK}"/* || "${target}" == /mnt/rauc/* ]]; then
       sudo -n umount "${target}" 2>/dev/null || true
     fi
   done < <(findmnt -rn -o TARGET,SOURCE 2>/dev/null || true)
@@ -129,6 +137,27 @@ start_service() {
   return 1
 }
 
+# start_service_auto <log> — the BOOT_SLOT_PRIORITY leg's own twin of
+# start_service(), deliberately WITHOUT --override-boot-slot: this leg exists
+# specifically to exercise RAUC's real (non-overridden) booted-slot detection
+# (r_context's get_bootname(), which --override-boot-slot bypasses entirely).
+start_service_auto() {
+  local log="$1" _
+  run_service() { exec sudo -n env PATH="${WORK}/bin:${PATH}" rauc -d -c "${CONF}" service; }
+  run_service >"${log}" 2>&1 &
+  service_pid=$!
+  for _ in $(seq 1 100); do
+    if rauc -c "${CONF}" status >/dev/null 2>&1 && \
+      busctl --system --auto-start=no status de.pengutronix.rauc >/dev/null 2>&1; then
+      return 0
+    fi
+    kill -0 "${service_pid}" 2>/dev/null || break
+    sleep 0.1
+  done
+  sed -n '1,200p' "${log}" >&2
+  return 1
+}
+
 state() {
   sudo -n env CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" \
     CERALIVE_BOOT_STATE_BIN="${WORK}/ceralive-boot-state.sh" \
@@ -138,7 +167,7 @@ state() {
 
 exec 9>/tmp/ceralive-real-rauc-contract.lock
 flock 9
-for tool in rauc mkfs.ext4 debugfs findmnt losetup sudo timeout flock openssl busctl; do
+for tool in rauc mkfs.ext4 debugfs findmnt losetup sudo timeout flock openssl busctl sgdisk e2label lsblk; do
   command -v "${tool}" >/dev/null 2>&1 || { printf 'missing real RAUC prerequisite: %s\n' "${tool}" >&2; exit 127; }
 done
 sudo -n true
@@ -152,7 +181,7 @@ done
 printf 'factory-slot-a\n' >"${WORK}/slot-a-tree/etc/ceralive-rauc-probe"
 printf 'factory-slot-b\n' >"${WORK}/slot-b-tree/etc/ceralive-rauc-probe"
 printf 'updated-arm64-bundle\n' >"${WORK}/update-tree/etc/ceralive-rauc-probe"
-truncate -s 64M "${WORK}/slot-a.ext4" "${WORK}/slot-b.ext4"
+truncate -s 4096M "${WORK}/slot-a.ext4" "${WORK}/slot-b.ext4"
 mkfs.ext4 -q -F -L rootfs_a -d "${WORK}/slot-a-tree" "${WORK}/slot-a.ext4"
 mkfs.ext4 -q -F -L rootfs_b -d "${WORK}/slot-b-tree" "${WORK}/slot-b.ext4"
 cp "${PIPELINE_DIR}/mkosi/platform/boot/ceralive-boot-state.sh" "${WORK}/ceralive-boot-state.sh"
@@ -197,6 +226,7 @@ sed -e "s|^data-directory=/data/ceralive/rauc$|data-directory=${WORK}/data/rauc|
   -e "s|^device=/dev/disk/by-partlabel/rootfs_a$|device=${WORK}/slot-a.ext4|" \
   -e "s|^device=/dev/disk/by-partlabel/rootfs_b$|device=${WORK}/slot-b.ext4|" \
   -e "s|^device=/data/ceralive/certs/.rauc-certs-slot$|device=${WORK}/data/certs/.rauc-certs-slot|" \
+  -e 's|^post-install=/usr/lib/rauc/ceralive-post-install$|post-install=/bin/true|' \
   "${generated_root}/etc/rauc/system.conf" >"${CONF}"
 sudo -n mkdir -p "${WORK}/data/rauc"
 getent passwd ceralive-ota >/dev/null
@@ -216,7 +246,7 @@ printf 'INVALID_CONFIG_CONTROL=PASS boot-attempts-rejected-for-custom\n'
 CERALIVE_BOOT_STATE_FILE="${WORK}/boot_state.txt" CERALIVE_BOOT_STATE_CORE="${WORK}/boot-state-core.sh" \
   CERALIVE_BOOT_ATTEMPTS=3 bash "${WORK}/ceralive-boot-state.sh" init
 COMPATIBLE_STRING=ceralive-rock-5b-plus BUNDLE_VERSION=runtime-contract BUNDLE_OUT_DIR="${WORK}/bundle" \
-  BUNDLE_TS=probe CERALIVE_RAUC_PKI_DIR="${WORK}/pki" REPRODUCIBLE=1 \
+  BUNDLE_TS=probe CERALIVE_RAUC_PKI_DIR="${WORK}/pki" \
   bash "${PIPELINE_DIR}/lib/build-bundle.sh" rock-5b-plus "${WORK}/update-tree" >"${WORK}/bundle-build.log" 2>&1
 
 printf 'RAUC_VERSION=%s\n' "$(rauc --version)"
@@ -261,6 +291,92 @@ release_harness_mounts
 [[ "$(debugfs -R 'cat /etc/ceralive-rauc-probe' "${WORK}/slot-a.ext4" 2>/dev/null)" == factory-slot-a ]]
 [[ "$(sha256sum "${WORK}/slot-a.ext4" | cut -d' ' -f1)" == "${a_before}" ]]
 printf 'RETRY=PASS primary=A inactive-slot-updated-not-activated\n'
+
+rauc info --keyring="${WORK}/pki/root-ca.pem" "${BUNDLE}" >"${WORK}/rauc-info.txt"
+grep -Fq 'Bundle Format:  verity' "${WORK}/rauc-info.txt"
+grep -Fq 'Adaptive:  block-hash-index' "${WORK}/rauc-info.txt"
+printf 'VERITY_INFO=PASS adaptive block-hash-index\n'
+
+truncate -s 8300M "${WORK}/gpt.raw"
+sgdisk -o -n 1:2048:+4096M -c 1:rootfs_a -n 2:0:+4096M -c 2:rootfs_b "${WORK}/gpt.raw" >/dev/null
+gpt_loop="$(sudo -n losetup --find --show --partscan "${WORK}/gpt.raw")"
+for _ in $(seq 1 30); do
+  [[ -b "${gpt_loop}p1" && -b "${gpt_loop}p2" ]] && break
+  sleep 0.1
+done
+# --partscan makes the kernel register both partitions in sysfs, but a
+# harness container with no udev running never gets the matching /dev nodes
+# from that alone. Fall back to mknod from the devt sysfs already publishes,
+# so this leg does not depend on udev being present in the execution
+# environment.
+if [[ ! -b "${gpt_loop}p1" || ! -b "${gpt_loop}p2" ]]; then
+  gpt_loop_base="${gpt_loop#/dev/}"
+  for part in 1 2; do
+    node="${gpt_loop}p${part}"
+    [[ -b "${node}" ]] && continue
+    sys_dev="/sys/class/block/${gpt_loop_base}/${gpt_loop_base}p${part}/dev"
+    [[ -r "${sys_dev}" ]] || continue
+    devt="$(<"${sys_dev}")"
+    sudo -n mknod -m 0660 "${node}" b "${devt%%:*}" "${devt##*:}"
+    sudo -n chown root:disk "${node}" 2>/dev/null || true
+  done
+fi
+[[ -b "${gpt_loop}p1" && -b "${gpt_loop}p2" ]]
+sudo -n mkfs.ext4 -q -F -L rootfs_a "${gpt_loop}p1"
+sudo -n mkfs.ext4 -q -F -L rootfs_b "${gpt_loop}p2"
+[[ "$(sudo -n lsblk -ndo PARTLABEL "${gpt_loop}p2")" == rootfs_b ]]
+sed -e "s|^device=${WORK}/slot-a.ext4$|device=${gpt_loop}p1|" \
+    -e "s|^device=${WORK}/slot-b.ext4$|device=${gpt_loop}p2|" \
+    -e "s|^post-install=/bin/true$|post-install=${generated_root}/usr/lib/rauc/ceralive-post-install|" \
+    "${CONF}" >"${WORK}/gpt-system.conf"
+CONF="${WORK}/gpt-system.conf"
+start_service "${WORK}/service-gpt.log"
+timeout 120 rauc -c "${CONF}" install "${BUNDLE}" >"${WORK}/client-gpt.log" 2>&1
+stop_service
+[[ "$(sudo -n e2label "${gpt_loop}p2")" == rootfs_b ]]
+[[ "$(sudo -n lsblk -ndo PARTLABEL "${gpt_loop}p2")" == rootfs_b ]]
+printf 'GPT_LABEL=PASS installed verity rootfs_b has its own GPT PARTLABEL as ext4 label\n'
+sudo -n losetup -d "${gpt_loop}"
+CONF="${WORK}/system.conf"
+
+# BOOT_SLOT_PRIORITY — RAUC 1.15 (PR #1712) now consults the bootloader-custom
+# backend's own get-current BEFORE falling back to generic root= kernel-cmdline
+# parsing (previously get-current was tried only as a last resort AFTER root=
+# parsing failed). The Todo-22 RAUC-version ruling flagged this for
+# re-validation against CeraLive's real adapter, not assumption.
+# --override-boot-slot cannot exercise this at all: it bypasses RAUC's own
+# get_bootname() resolution entirely, which is why every earlier leg above
+# uses it and none of them proves anything about slot-detection priority.
+#
+# The real (faked) /proc/cmdline carries root=PARTLABEL=rootfs_b — no
+# rauc.slot= — and rootfs_b is a REAL, valid symlink resolving to slot B's own
+# device, so root= parsing alone would genuinely resolve to B. The real
+# backend.sh wrapper's adapter (unaffected by this fake — it reads
+# CERALIVE_KERNEL_CMDLINE_FILE=${WORK}/cmdline, which still carries
+# rauc.slot=A) answers "A". Only if RAUC 1.15.2 actually asks the custom
+# backend before falling through to root= does the service resolve slot A.
+sudo -n mkdir -p /dev/disk/by-partlabel
+sudo -n ln -sf "${WORK}/slot-b.ext4" /dev/disk/by-partlabel/rootfs_b
+printf 'root=PARTLABEL=rootfs_b console=ttyS2\n' >"${WORK}/priority-cmdline"
+sudo -n mount --bind "${WORK}/priority-cmdline" /proc/cmdline
+priority_log="${WORK}/service-priority.log"
+start_service_auto "${priority_log}"
+priority_status="$(rauc -c "${CONF}" status --output-format=json)"
+stop_service
+sudo -n umount /proc/cmdline
+sudo -n rm -f /dev/disk/by-partlabel/rootfs_b
+python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+booted = data.get("booted")
+assert booted == "A", (
+    "expected booted=A (custom-backend get-current outranking a validly-"
+    f"resolvable conflicting root=), got {booted!r}"
+)
+' "${priority_status}"
+grep -Fq 'Resolved custom backend bootname to A' "${priority_log}"
+printf 'BOOT_SLOT_PRIORITY=PASS custom-backend get-current outranks a validly-resolvable conflicting root= (RAUC 1.15 PR#1712)\n'
+
 start_service "${WORK}/service-activation.log"
 rauc -c "${CONF}" status mark-active other >/dev/null
 stop_service
@@ -311,8 +427,12 @@ cat >"${WORK}/bin/systemctl" <<EOF
 printf '%s\n' "\$*" >>'${WORK}/rotation-hook.calls'
 EOF
 chmod +x "${WORK}/bin/systemctl"
+# Re-signing this tiny extracted content (matching build-cert-rotation-bundle.sh's
+# own RAUC_BUNDLE_MKSQUASHFS_ARGS use) needs the same squashfs-floor workaround:
+# compressed, it lands at or under RAUC's 4096-byte verity minimum.
 rauc bundle --cert="${WORK}/pki/leaf-signing.pem" \
   --key="${WORK}/pki/leaf-signing.key" --intermediate="${WORK}/pki/chain.pem" \
+  --mksquashfs-args="-noD -noF" \
   "${WORK}/rotation" "${WORK}/bundle/rotation-fixture.raucb" \
   >"${WORK}/rotation-sign.log" 2>&1
 cert_before="$(sha256sum "${WORK}/data/certs/.rauc-certs-slot" | cut -d' ' -f1)"
