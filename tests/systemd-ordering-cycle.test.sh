@@ -350,3 +350,7 @@ probe_orders_after systemd-journal-flush.service var-log.mount \
 echo "systemd-ordering-cycle: Part D persistence ordering OK (mount, machine-id reconciliation, journal flush, consumers)"
 
 echo "systemd-ordering-cycle regression: PASS"
+
+# Activation uses the opposite default-dependency rule from the early boot
+# guards above: stopping at shutdown requires the implicit shutdown conflict.
+bash "${RUNTIME}/rauc-activation.test.sh"

@@ -162,6 +162,34 @@ configure_services() {
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
+  setup_rauc_activation
+}
+
+# The unit is installed on both architectures from one source; x86's GRUB ESP
+# lives at /boot/efi, while RK3588's boot-state FAT is mounted at /boot.
+setup_rauc_activation() {
+  local src="${CERALIVE_RUNTIME_SRC:-}" arch unit_dir="${CERALIVE_RAUC_ACTIVATE_UNIT_DIR:-/etc/systemd/system}"
+  local helper_dir="${CERALIVE_RAUC_ACTIVATE_HELPER_DIR:-/usr/libexec/ceralive}"
+  [[ -n "$src" ]] || die 'RAUC activation source directory missing'
+  local artifact
+  for artifact in ceralive-rauc-activate.sh ceralive-rauc-activate.service ceralive-rauc-arm@.service; do
+    [[ -f "$src/$artifact" ]] || die "RAUC activation artifact missing: $src/$artifact"
+  done
+  arch="$(dpkg --print-architecture)" || die 'cannot detect target architecture for boot mount'
+  case "$arch" in amd64|arm64) ;; *) die "unsupported activation architecture: $arch" ;; esac
+  install -D -m 0755 "$src/ceralive-rauc-activate.sh" "$helper_dir/ceralive-rauc-activate"
+  install -d -m 0755 "$unit_dir"
+  if [[ "$arch" == amd64 ]]; then
+    sed 's#RequiresMountsFor=/boot$#RequiresMountsFor=/boot/efi#; s#RequiresMountsFor=/data /boot$#RequiresMountsFor=/data /boot/efi#' \
+      "$src/ceralive-rauc-activate.service" >"$unit_dir/ceralive-rauc-activate.service"
+    sed 's#RequiresMountsFor=/boot$#RequiresMountsFor=/boot/efi#; s#RequiresMountsFor=/data /boot$#RequiresMountsFor=/data /boot/efi#' \
+      "$src/ceralive-rauc-arm@.service" >"$unit_dir/ceralive-rauc-arm@.service"
+  else
+    install -m 0644 "$src/ceralive-rauc-activate.service" "$unit_dir/ceralive-rauc-activate.service"
+    install -m 0644 "$src/ceralive-rauc-arm@.service" "$unit_dir/ceralive-rauc-arm@.service"
+  fi
+  chmod 0644 "$unit_dir/ceralive-rauc-activate.service" "$unit_dir/ceralive-rauc-arm@.service"
+  enable_service ceralive-rauc-activate.service
 }
 
 # --- System-mode PipeWire (ADR-0010) ---------------------------------------
