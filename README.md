@@ -112,8 +112,13 @@ probe and the lock's limits are in [`docs/build-reproducibility.md`](docs/build-
 
 ### Reproducible builds
 
-With fixed source state and `SOURCE_DATE_EPOCH`, the ext4 rootfs **content** is
-reproducible. Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
+With fixed source state and `SOURCE_DATE_EPOCH`, the ext4 rootfs content is
+reproducible **except** for `/etc/ceralive/image-version`: every build writes its
+actual UTC postinstall time there as one `YYYYMMDDTHHMMSSZ` line (mode 0444),
+independent of `SOURCE_DATE_EPOCH`. CeraUI's OS-update agent uses this
+dpkg-comparable value to reject an older or identical image. The separate
+`/etc/ceralive/image-build-commit` identity marker and its consumers are unchanged.
+Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
 reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
 from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)
 or bench (`xrootfs_a/b`); an unreadable label aborts installation. New OS bundles

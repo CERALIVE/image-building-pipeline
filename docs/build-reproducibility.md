@@ -9,6 +9,15 @@ The lock records `built_at` (UTC wall time), the already-resolved
 files keyed by suite, and each package's provenance and SHA-256. An unknown
 installed package is a fatal build error, not a null hash or a placeholder.
 
+**Deliberate wall-clock exception:** every real runtime postinstall writes
+`/etc/ceralive/image-version` as one UTC `YYYYMMDDTHHMMSSZ` line (mode 0444),
+using `date -u +%Y%m%dT%H%M%SZ` at the writing step rather than the pinned
+`SOURCE_DATE_EPOCH`. This makes a later rebuild of the same commit orderable by
+`dpkg --compare-versions` for the cross-repo OS-update anti-downgrade check.
+It means images built at different times are intentionally **not byte-identical**
+even with all other inputs fixed; the existing `/etc/ceralive/image-build-commit`
+remains the separate, unchanged source/audit identity.
+
 There are three package hash sources, and no general fourth one:
 
 1. The base, platform, runtime and app layers capture newly configured Debian
