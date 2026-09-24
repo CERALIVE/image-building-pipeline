@@ -118,7 +118,10 @@ start_service() {
   run_service >"${log}" 2>&1 &
   service_pid=$!
   for _ in $(seq 1 100); do
-    rauc -c "${CONF}" status >/dev/null 2>&1 && return 0
+    if rauc -c "${CONF}" status >/dev/null 2>&1 && \
+      busctl --system --auto-start=no status de.pengutronix.rauc >/dev/null 2>&1; then
+      return 0
+    fi
     kill -0 "${service_pid}" 2>/dev/null || break
     sleep 0.1
   done
@@ -135,7 +138,7 @@ state() {
 
 exec 9>/tmp/ceralive-real-rauc-contract.lock
 flock 9
-for tool in rauc mkfs.ext4 debugfs findmnt losetup sudo timeout flock openssl; do
+for tool in rauc mkfs.ext4 debugfs findmnt losetup sudo timeout flock openssl busctl; do
   command -v "${tool}" >/dev/null 2>&1 || { printf 'missing real RAUC prerequisite: %s\n' "${tool}" >&2; exit 127; }
 done
 sudo -n true
@@ -188,13 +191,15 @@ ROOT="${generated_root}" SERIAL_CONSOLE="ttyS2:1500000" \
   DTB_NAME="rk3588-rock-5b-plus.dtb" BOARD_ID="rock-5b-plus" \
   COMPATIBLE_STRING="ceralive-rock-5b-plus" SINGLE_SLOT_FALLBACK="false" \
   bash "${PIPELINE_DIR}/mkosi/platform/boot/install-boot.sh" rootfs >/dev/null
-sed -e "/^bootloader=custom$/a data-directory=${WORK}/data" \
+sed -e "s|^data-directory=/data/ceralive/rauc$|data-directory=${WORK}/data/rauc|" \
   -e "s|^bootloader-custom-backend=.*$|bootloader-custom-backend=${WORK}/backend.sh|" \
   -e "s|^path=/etc/rauc/ceralive-keyring.pem$|path=${WORK}/pki/root-ca.pem|" \
   -e "s|^device=/dev/disk/by-partlabel/rootfs_a$|device=${WORK}/slot-a.ext4|" \
   -e "s|^device=/dev/disk/by-partlabel/rootfs_b$|device=${WORK}/slot-b.ext4|" \
   -e "s|^device=/data/ceralive/certs/.rauc-certs-slot$|device=${WORK}/data/certs/.rauc-certs-slot|" \
   "${generated_root}/etc/rauc/system.conf" >"${CONF}"
+sudo -n mkdir -p "${WORK}/data/rauc"
+getent passwd ceralive-ota >/dev/null
 
 invalid_conf="${WORK}/system-invalid.conf"
 sed '/^bootloader=custom$/a boot-attempts=3' "${CONF}" >"${invalid_conf}"
@@ -251,11 +256,16 @@ start_service "${WORK}/service-retry.log"
 timeout 60 rauc -c "${CONF}" install "${BUNDLE}" >"${WORK}/client-retry.log" 2>&1
 stop_service
 release_harness_mounts
-[[ "$(state get-primary)" == B ]]
+[[ "$(state get-primary)" == A ]]
 [[ "$(debugfs -R 'cat /etc/ceralive-rauc-probe' "${WORK}/slot-b.ext4" 2>/dev/null)" == updated-arm64-bundle ]]
 [[ "$(debugfs -R 'cat /etc/ceralive-rauc-probe' "${WORK}/slot-a.ext4" 2>/dev/null)" == factory-slot-a ]]
 [[ "$(sha256sum "${WORK}/slot-a.ext4" | cut -d' ' -f1)" == "${a_before}" ]]
-printf 'RETRY=PASS primary=B inactive-slot-updated\n'
+printf 'RETRY=PASS primary=A inactive-slot-updated-not-activated\n'
+start_service "${WORK}/service-activation.log"
+rauc -c "${CONF}" status mark-active other >/dev/null
+stop_service
+[[ "$(state get-primary)" == B ]]
+printf 'ACTIVATION=PASS explicit-mark-active-after-install\n'
 
 # Build with the real rotation producer and a NEW test leaf under the same
 # non-production intermediate. Re-sign only after relocating the install hook's
