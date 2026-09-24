@@ -860,7 +860,7 @@ PY
 }
 
 @test "fetch-debs cerastream registry and both architectures select the sidecar-ownership release" {
-  local expected_engine_version="2026.9.7"
+  local expected_engine_version="2026.9.8"
   local arch engine_version
 
   [ "$(get_pin cerastream)" = "v${expected_engine_version}" ]
