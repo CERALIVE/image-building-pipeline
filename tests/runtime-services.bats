@@ -743,6 +743,21 @@ EOF
   [[ "$output" == *"installed to inactive slot"* ]]
 }
 
+@test "ota manual path accepts HTTPS verity URL only under the shared exclusive update lock" {
+  run_ota_guard ""
+  [ "$status" -eq 0 ]
+  grep -Fq 'flock -n -x 9' "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh"
+  grep -Fq '/run/lock/ceralive-update.lock' "$PIPELINE_DIR/mkosi/customize/postinst.d/persistence.sh"
+  local lock="$BATS_TEST_TMPDIR/manual-update.lock"
+  exec 8>"$lock"
+  flock -x 8
+  run_ota_guard ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'update lock busy'* ]]
+  flock -u 8
+  exec 8>&-
+}
+
 # ===========================================================================
 # 18d. Adaptive USB-C Type-C policy — the connector remains DRP so charger and
 #      power-bank peers can make the board a sink. A udev-triggered, serialized

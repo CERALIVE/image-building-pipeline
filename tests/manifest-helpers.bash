@@ -946,7 +946,7 @@ run_ota_guard() {
   render_ceralive_update "$conf" "$data" > "$script"
   chmod +x "$script"
   local bin; bin="$(ota_stub_bin)"
-  run env ACTIVE_SVCS="$active" PATH="$bin:$PATH" bash "$script"
+  run env ACTIVE_SVCS="$active" CERALIVE_UPDATE_LOCK_PATH="$BATS_TEST_TMPDIR/manual-update.lock" PATH="$bin:$PATH" bash "$script"
 }
 
 

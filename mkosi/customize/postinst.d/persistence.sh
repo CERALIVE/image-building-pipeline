@@ -153,7 +153,7 @@ if [ ! -e "$DATA/ceralive/update.conf" ]; then
     cat >"$DATA/ceralive/update.conf" <<'CONF'
 # CeraLive OS update (RAUC) configuration — persistent /data, editable on device.
 # Consumed by /usr/local/bin/ceralive-update.
-# BUNDLE_URL : full URL / apt.ceralive.tv path of the .raucb. Empty = OTA disabled.
+# BUNDLE_URL : local .raucb or HTTPS verity bundle. Empty = OTA disabled.
 # CHANNEL    : release channel hint (informational; URL is authoritative).
 BUNDLE_URL=
 CHANNEL=stable
@@ -258,6 +258,14 @@ mountpoint -q "$DATA" || die "$DATA is not mounted; refusing to update"
 # shellcheck disable=SC1090
 . "$CONF"
 [ -n "${BUNDLE_URL:-}" ] || die "BUNDLE_URL is empty in $CONF; OTA disabled"
+case "$BUNDLE_URL" in
+    https://*|/*) ;;
+    *) die "BUNDLE_URL must be HTTPS or an absolute local path" ;;
+esac
+
+LOCK="${CERALIVE_UPDATE_LOCK_PATH:-/run/lock/ceralive-update.lock}"
+exec 9>"$LOCK"
+flock -n -x 9 || die "update lock busy: $LOCK"
 
 for svc in cerastream.service srtla.service srtla-send.service; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -268,12 +276,12 @@ done
 echo "ceralive-update: installing RAUC bundle from $CONF (BUNDLE_URL=$BUNDLE_URL)"
 rauc install "$BUNDLE_URL"
 
-# Force the freshly-activated slot to re-prove streaming health before it is
+# Force the staged slot to re-prove streaming health after activation before it is
 # confirmed: /data is shared across A/B, so the new slot must NOT inherit this
 # slot's mark-good marker (task 29). The boot healthcheck re-creates it on success.
 rm -f "$DATA/ceralive/.slot-marked-good"
 
-echo "ceralive-update: installed to inactive slot; reboot to activate (task-29 mark-good confirms or rolls back)."
+echo "ceralive-update: installed to inactive slot but not activated; activate it at a clean idle shutdown before reboot."
 exit 0
 EOF
   chmod +x /usr/local/bin/ceralive-update
