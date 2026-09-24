@@ -472,10 +472,13 @@ setup_rauc_client() {
 [system]
 compatible=${compatible}
 bootloader=custom
-
+data-directory=/data/ceralive/rauc
+activate-installed=false
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
-
 [keyring]
 path=${keyring}
 
@@ -505,6 +508,7 @@ EOF
   else
     log "rauc.service is D-Bus-activated (no [Install]) — live on demand via the rauc CLI"
   fi
+  install -D -m 0644 "${CERALIVE_RUNTIME_SRC}/rauc/ceralive-ota.tmpfiles.conf" /usr/lib/tmpfiles.d/ceralive-ota.conf && bash "${CERALIVE_RUNTIME_SRC}/rauc/install-update-capabilities.sh" /
 }
 
 # ---------------------------------------------------------------------------
