@@ -60,7 +60,15 @@ cerastream:
   # ownership across timeouts; replacement capture stays fenced until release.
   # v2026.9.7 (capture-failover-resilience): standby continuity, one capture-loss
   # policy, recovery lanes, internal transitions and backup source modes.
-  pin: v2026.9.7
+  # 2026-09-23 git-history remediation: v2026.9.7's merge commit (8f540fa6) carried
+  # an unauthorized attribution trailer (root ceralive AGENTS.md Rule C). It is
+  # permanently immutable (cerastream's active, no-bypass tag-protection ruleset)
+  # and stays on GitHub as a deprecated, superseded artifact — this pipeline no
+  # longer pins it. v2026.9.8 is a new release of the IDENTICAL corrected code
+  # (byte-identical tree, zero behavior change), tag v2026.9.8 ->
+  # cbfae2f3b166203a73cfb14870eef7b5a3ecba94, confirmed serving on both
+  # apt.ceralive.tv stable indexes. See ceralive/docs/RELIABILITY-FINDINGS.md C4.
+  pin: v2026.9.8
   # Device deb: cerastream 2026.9.6 (amd64 + arm64).
   # Tag commit: b3eb2a0767687415401998353337c3413c09fda9.
   # Downloaded assets match the published SHA-256 sidecars:

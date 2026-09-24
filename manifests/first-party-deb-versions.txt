@@ -1,5 +1,5 @@
 libsrt1.5-ceralive=1.5.7+ceralive.2
-cerastream=2026.9.7
+cerastream=2026.9.8
 gstreamer1.0-libuvcsrc=2026.9.0
 ceralive-device[amd64]=2026.9.4-20260923T212001.159f99b
 ceralive-device[arm64]=2026.9.4-20260923T212013.159f99b
