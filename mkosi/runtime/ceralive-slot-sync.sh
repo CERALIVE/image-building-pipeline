@@ -126,7 +126,7 @@ BOOT_ID_FILE="${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_
 DPKG_STATUS_FILE="${CERALIVE_DPKG_STATUS_FILE:-/var/lib/dpkg/status}"
 HAWKBIT_SERVICE="${CERALIVE_HAWKBIT_SERVICE:-rauc-hawkbit-updater.service}"
 OS_RELEASE_FILE="${CERALIVE_OS_RELEASE_FILE:-/etc/os-release}"
-IMAGE_VERSION_FILE="${CERALIVE_IMAGE_VERSION_FILE:-/etc/ceralive/image-version}"
+IMAGE_VERSION_FILE="${CERALIVE_IMAGE_VERSION_FILE:-/etc/ceralive/image-build-commit}"
 
 # Test seams: stubbed in the offline proof harness; the real tools on device.
 RAUC_BIN="${RAUC_BIN:-rauc}"

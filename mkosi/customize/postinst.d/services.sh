@@ -165,6 +165,19 @@ configure_services() {
   setup_pipewire_system_mode
   setup_rauc_activation
   setup_slot_sync
+  setup_dpkg_recovery
+}
+
+# Unlike the on-demand slot mirror, recovery must run before the app at boot.
+setup_dpkg_recovery() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local helper_dir="${CERALIVE_DPKG_RECOVER_HELPER_DIR:-/usr/libexec/ceralive}"
+  local unit_dir="${CERALIVE_DPKG_RECOVER_UNIT_DIR:-/etc/systemd/system}"
+  [[ -n "${src}" && -f "${src}/ceralive-dpkg-recover.sh" && -f "${src}/ceralive-dpkg-recover.service" ]] \
+    || die "dpkg recovery source missing from ${src}"
+  install -D -m 0755 "${src}/ceralive-dpkg-recover.sh" "${helper_dir}/ceralive-dpkg-recover"
+  install -D -m 0644 "${src}/ceralive-dpkg-recover.service" "${unit_dir}/ceralive-dpkg-recover.service"
+  enable_service ceralive-dpkg-recover.service
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP

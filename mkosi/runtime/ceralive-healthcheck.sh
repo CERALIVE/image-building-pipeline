@@ -60,6 +60,14 @@ CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
 MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
 BOOT_ID_FILE="${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
 PARTLABEL_FAILURE="${CERALIVE_PARTLABEL_FAILURE:-/run/ceralive/partlabel-guard.failed}"
+UPDATES_DIR="${CERALIVE_DPKG_UPDATES_DIR:-/var/lib/dpkg/updates}"
+DPKG_STATUS_FILE="${CERALIVE_DPKG_STATUS_FILE:-/var/lib/dpkg/status}"
+HEALTHY_STATE_FILE="${CERALIVE_HEALTHY_STATE_FILE:-${CERALIVE_UPDATE_STATE_DIR:-/data/ceralive/update-state}/healthy-state.json}"
+OS_RELEASE_FILE="${CERALIVE_OS_RELEASE_FILE:-/etc/os-release}"
+IMAGE_VERSION_FILE="${CERALIVE_IMAGE_VERSION_FILE:-/etc/ceralive/image-build-commit}"
+CMDLINE_FILE="${CERALIVE_HEALTHCHECK_CMDLINE_FILE:-/proc/cmdline}"
+DEBUG_MARKER="${CERALIVE_DEBUG_MARKER:-/etc/ceralive/debug-image}"
+FORCE_FAIL_MARKER="${CERALIVE_FORCE_HEALTHCHECK_FAIL:-/usr/lib/ceralive/testing/force-healthcheck-fail}"
 BOOT_ID=""
 
 CERALIVE_SERVICE="${CERALIVE_SERVICE:-ceralive.service}"
@@ -74,6 +82,7 @@ SRT_CONNECT_TIMEOUT="${SRT_CONNECT_TIMEOUT:-5}"
 
 # Test seams: stubbed in the offline proof harness; the real tools on device.
 RAUC_BIN="${RAUC_BIN:-rauc}"
+DPKG_BIN="${DPKG_BIN:-dpkg}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 # Streaming binaries to probe (resolved via PATH; /usr/bin on device).
 # cerastream replaced ceracoder as the sole streaming engine (retired 2026-06-11).
@@ -189,6 +198,82 @@ partlabel_guard_ok() {
     fail "PARTLABEL guard refused mark-good: $(<"${PARTLABEL_FAILURE}")"
     return 1
   fi
+}
+
+dpkg_integrity_ok() {
+  local audit
+  local -a entries
+  [[ -d "${UPDATES_DIR}" && -r "${DPKG_STATUS_FILE}" ]] || { fail 'dpkg database unavailable'; return 1; }
+  shopt -s nullglob dotglob
+  entries=("${UPDATES_DIR}"/*)
+  shopt -u nullglob dotglob
+  if ((${#entries[@]} > 0)); then
+    fail 'dpkg updates directory is not empty'
+    return 1
+  fi
+  if ! audit="$("${DPKG_BIN}" --audit 2>&1)" || [[ -n "${audit}" ]]; then
+    fail "dpkg audit failed: ${audit}"
+    return 1
+  fi
+}
+
+drill_guard_ok() {
+  if [[ -e "${DEBUG_MARKER}" && -e "${FORCE_FAIL_MARKER}" ]]; then
+    fail 'debug-image healthcheck failure injection armed'
+    return 1
+  fi
+}
+
+current_build_id() {
+  local id=""
+  if [[ -r "${OS_RELEASE_FILE}" ]]; then
+    id="$(sed -n 's/^BUILD_ID=//p' "${OS_RELEASE_FILE}" | head -n1 | tr -d '"')"
+  fi
+  if [[ -z "${id}" && -r "${IMAGE_VERSION_FILE}" ]]; then
+    id="$(tr -d '\n' <"${IMAGE_VERSION_FILE}")"
+  fi
+  [[ "${id}" =~ ^[a-zA-Z0-9._:+-]+$ ]] || return 1
+  printf '%s' "${id}"
+}
+
+boot_slot() {
+  local cmdline token slot=""
+  [[ -r "${CMDLINE_FILE}" ]] || return 1
+  cmdline="$(<"${CMDLINE_FILE}")" || return 1
+  for token in ${cmdline}; do
+    case "${token}" in
+      cera_slot=*) slot="${token#cera_slot=}" ;;
+      rauc.slot=*)
+        [[ -z "${slot}" || "${slot}" == "${token#rauc.slot=}" ]] || return 1
+        slot="${token#rauc.slot=}"
+        ;;
+    esac
+  done
+  [[ "${slot}" == A || "${slot}" == B ]] || return 1
+  printf '%s' "${slot}"
+}
+
+record_healthy_state() {
+  local slot="$1" build_id="$2" status_sha="$3" recorded_at temporary
+  recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  temporary="${HEALTHY_STATE_FILE}.tmp.$$"
+  mkdir -p "$(dirname "${HEALTHY_STATE_FILE}")" || return 1
+  if ! printf '{"boot_id":"%s","slot":"%s","build_id":"%s","dpkg_status_sha256":"%s","recorded_at":"%s"}\n' \
+    "${BOOT_ID}" "${slot}" "${build_id}" "${status_sha}" "${recorded_at}" >"${temporary}" ||
+    ! mv -f "${temporary}" "${HEALTHY_STATE_FILE}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+}
+
+healthy_state_matches_boot() {
+  [[ -r "${HEALTHY_STATE_FILE}" ]] || return 1
+  local build_id status_sha
+  build_id="$(current_build_id)" || return 1
+  status_sha="$(sha256sum "${DPKG_STATUS_FILE}" | cut -d' ' -f1)" || return 1
+  grep -Fq '"boot_id":"'"${BOOT_ID}"'"' "${HEALTHY_STATE_FILE}" &&
+    grep -Fq '"build_id":"'"${build_id}"'"' "${HEALTHY_STATE_FILE}" &&
+    grep -Fq '"dpkg_status_sha256":"'"${status_sha}"'"' "${HEALTHY_STATE_FILE}"
 }
 
 load_conf() {
@@ -345,7 +430,13 @@ marker_matches_boot() {
 }
 
 mark_good() {
-   partlabel_guard_ok || return 1
+   partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || return 1
+   local slot build_id status_sha
+   if ! slot="$(boot_slot)" || ! build_id="$(current_build_id)" ||
+      ! status_sha="$(sha256sum "${DPKG_STATUS_FILE}" | cut -d' ' -f1)"; then
+     fail 'cannot establish slot, image build or dpkg status digest'
+     return 1
+   fi
   if ! command -v "${RAUC_BIN}" >/dev/null 2>&1; then
     fail "rauc ('${RAUC_BIN}') not found — cannot mark the slot good"
     return 1
@@ -360,7 +451,11 @@ mark_good() {
       fail "slot marked good but boot marker could not be written"
       return 1
     fi
-    log "slot marked good; wrote idempotency marker ${MARKER}"
+    if ! record_healthy_state "${slot}" "${build_id}" "${status_sha}"; then
+      fail "slot marked good but healthy-state record could not be written"
+      return 1
+    fi
+    log "slot marked good; wrote idempotency marker ${MARKER} and ${HEALTHY_STATE_FILE}"
     return 0
   fi
   fail "'${RAUC_BIN} status mark-good' failed — slot left unconfirmed (will roll back)"
@@ -368,7 +463,7 @@ mark_good() {
 }
 
 main() {
-   partlabel_guard_ok || exit 1
+   partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
   load_conf
 
   if ! BOOT_ID="$(cat "${BOOT_ID_FILE}")" ||
@@ -376,7 +471,7 @@ main() {
     fail "cannot establish current boot identity — slot left unconfirmed"
     exit 1
   fi
-  if marker_matches_boot; then
+  if marker_matches_boot && healthy_state_matches_boot; then
     log "marker ${MARKER} matches this boot — already confirmed good; no-op"
     exit 0
   fi
@@ -393,7 +488,7 @@ main() {
     attempt=$(( attempt + 1 ))
     log "streaming healthcheck attempt #${attempt} (deadline in $(( deadline - $(date +%s) ))s)"
    if run_checks; then
-       partlabel_guard_ok || exit 1
+        partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
       mark_good
       exit $?
     fi
