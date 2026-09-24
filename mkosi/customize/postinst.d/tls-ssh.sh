@@ -138,6 +138,9 @@ setup_ssh_firstboot() {
   install -m 0444 "${src}/ceralive-ci-uart-bootstrap-public.pem" /etc/ceralive/uart-bootstrap-public.pem
   printf '%s\n' "${CERALIVE_IMAGE_BUILD_COMMIT}" >/etc/ceralive/image-build-commit
   chmod 0444 /etc/ceralive/image-build-commit
+  # OS ordering needs real build time, not reproducibility-pinned SOURCE_DATE_EPOCH.
+  date -u +%Y%m%dT%H%M%SZ >/etc/ceralive/image-version
+  chmod 0444 /etc/ceralive/image-version
   enable_service ceralive-ssh-firstboot.service
   enable_service ceralive-ci-uart-bootstrap.service
 }

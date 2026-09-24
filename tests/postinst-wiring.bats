@@ -64,6 +64,50 @@ load manifest-helpers
   [[ "$output" == *"RESURRECTED"* ]]
 }
 
+@test "postinst image version: two real writer invocations advance despite frozen SOURCE_DATE_EPOCH" {
+  local src="$PIPELINE_DIR/mkosi/customize/postinst.d/tls-ssh.sh"
+  local first_root="$BATS_TEST_TMPDIR/image-version-first"
+  local second_root="$BATS_TEST_TMPDIR/image-version-second"
+  local writer first second before after
+  mkdir -p "$first_root" "$second_root"
+
+  # Execute the actual adjacent writes from setup_ssh_firstboot, redirecting only
+  # their /etc/ceralive/ destinations so this test never writes to the host.
+  writer="$(awk '
+    /^setup_ssh_firstboot\(\) \{/ { in_function = 1 }
+    in_function && /printf .*image-build-commit$/ { copying = 1 }
+    in_function && /enable_service ceralive-ssh-firstboot.service/ { exit }
+    copying { print }
+  ' "$src")"
+  [[ "$writer" == *'image-build-commit'* && "$writer" == *'image-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  SOURCE_DATE_EPOCH=1577836800
+  before="$(date -u +%Y%m%dT%H%M%SZ)"
+  eval "${writer//\/etc\/ceralive\//$first_root/}"
+  first="$(<"$first_root/image-version")"
+  [[ "$first" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+  [ "$(wc -l <"$first_root/image-version")" -eq 1 ]
+  [ "$(stat -c %a "$first_root/image-version")" = 444 ]
+  [ "$(stat -c %a "$first_root/image-build-commit")" = 444 ]
+  [ "$(<"$first_root/image-build-commit")" = "$CERALIVE_IMAGE_BUILD_COMMIT" ]
+
+  sleep 2
+  eval "${writer//\/etc\/ceralive\//$second_root/}"
+  second="$(<"$second_root/image-version")"
+  after="$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ "$second" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+  [ "$(wc -l <"$second_root/image-version")" -eq 1 ]
+  [ "$(stat -c %a "$second_root/image-version")" = 444 ]
+  [ "$(stat -c %a "$second_root/image-build-commit")" = 444 ]
+  [ "$(<"$second_root/image-build-commit")" = "$CERALIVE_IMAGE_BUILD_COMMIT" ]
+  [ "$first" != "$second" ]
+  dpkg --compare-versions "$first" ge "$before"
+  dpkg --compare-versions "$after" ge "$second"
+  dpkg --compare-versions "$second" gt "$first"
+  printf 'image-version first=%s second=%s SOURCE_DATE_EPOCH=%s (monotonically advancing)\n' \
+    "$first" "$second" "$SOURCE_DATE_EPOCH"
+}
+
 # ===========================================================================
 # 8b. First-boot WiFi provisioning captive portal (Task 14).
 #     The offline proof harness stubs nmcli/ip/systemctl/systemd-run and drives the
