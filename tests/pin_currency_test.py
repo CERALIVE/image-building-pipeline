@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci"))
-from pin_releases import discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
+from pin_releases import Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
 from pin_versions import PinError, compare, release_version  # noqa: E402 - standalone CLI module path
 
 
@@ -27,11 +27,14 @@ class PinCurrencyTest(unittest.TestCase):
         self.catalog = self.root / "releases.json"
         self.data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
         self.data["checked_at"] = datetime.now(timezone.utc).isoformat()
-        # Synthetic-only release evidence: the live catalog stays untouched until publication.
-        self.data["releases"].append({"component": "apt-credentials", "tag": "apt-credentials-v1.0.0",
-            "published_at": "2026-09-23T00:00:00Z", "packages": {"ceralive-apt-credentials[all]": "1.0.0"}})
+        credentials = {"component": "apt-credentials", "tag": "apt-credentials-v1.0.0",
+            "published_at": "2026-09-23T00:00:00Z", "packages": {"ceralive-apt-credentials[all]": "1.0.0"}}
+        self.data["releases"] = [row for row in self.data["releases"] if row["component"] != "apt-credentials"]
+        self.data["releases"].append(credentials)
         # Historical incident fixtures must not follow the live release catalog.
         for component, tag, packages in (
+            ("CeraUI", "v2026.9.3", {"ceralive-device[amd64]": "2026.9.3-20260920T155651.ec522ad",
+                                   "ceralive-device[arm64]": "2026.9.3-20260920T155654.ec522ad"}),
             ("cerastream", "v2026.9.3", {"cerastream[amd64]": "2026.9.3", "cerastream[arm64]": "2026.9.3"}),
             ("gstreamer-rockchip", "1.14.4+ceralive.5", {"gstreamer1.0-rockchip-ceralive[arm64]": "1.14.4+ceralive.5"}),
             ("librga", "1.10.1+ceralive.1", {"librga2-ceralive[arm64]": "1.10.1+ceralive.1"}),
@@ -138,6 +141,39 @@ class PinCurrencyTest(unittest.TestCase):
         self.data["releases"].pop()
         self.save_catalog()
         self.assertEqual(self.run_guard().returncode, 2)
+
+    def test_refresh_adds_component_absent_from_previous_catalog(self) -> None:
+        # Given an older catalog from before apt-credentials joined COMPONENTS.
+        releases = {row["component"]: Release(**row) for row in self.data["releases"]}
+        self.data["releases"] = [row for row in self.data["releases"] if row["component"] != "apt-credentials"]
+        self.save_catalog()
+
+        # When all current components are discovered and compared with that catalog.
+        with patch("pin_releases.discover_release", side_effect=lambda component: releases[component]):
+            refreshed = refresh_catalog(self.catalog)
+
+        # Then the newly discovered component is recorded without prior evidence to regress.
+        self.assertEqual(len(refreshed.releases), len(releases))
+        self.assertEqual(next(row for row in refreshed.releases if row.component == "apt-credentials").tag,
+                         "apt-credentials-v1.0.0")
+        self.assertEqual({row["component"] for row in json.loads(self.catalog.read_text())["releases"]}, set(releases))
+
+    def test_refresh_still_rejects_regression_in_previous_catalog(self) -> None:
+        # Given an older catalog missing apt-credentials but recording a newer engine.
+        releases = {row["component"]: Release(**row) for row in self.data["releases"]}
+        self.data["releases"] = [row for row in self.data["releases"] if row["component"] != "apt-credentials"]
+        engine = next(row for row in self.data["releases"] if row["component"] == "cerastream")
+        engine["tag"] = "v2026.9.4"
+        self.save_catalog()
+        previous = self.catalog.read_text()
+
+        # When discovery reports a lower engine version despite adding the new component.
+        with patch("pin_releases.discover_release", side_effect=lambda component: releases[component]):
+            with self.assertRaisesRegex(PinError, "release evidence regressed: cerastream"):
+                refresh_catalog(self.catalog)
+
+        # Then the previous evidence is preserved byte-for-byte.
+        self.assertEqual(self.catalog.read_text(), previous)
 
     def test_catalog_package_omission_fails(self) -> None:
         engine = next(r for r in self.data["releases"] if r["component"] == "cerastream")

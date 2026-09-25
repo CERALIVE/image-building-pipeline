@@ -78,10 +78,13 @@ GitHub's manually selected `latest` flag or a lexicographic tag maximum.
 It requires the selected newest release to carry all image packages. It
 never falls back to an older complete release if the newest is incomplete.
 Only `apt-credentials-v*` tags in `apt-worker` are considered for the credentials
-component; Worker tags cannot substitute for it. Until its first release is
-published, `--refresh` fails closed and preserves the committed catalog. Offline
-CLI tests append a synthetic credentials row to their private fixture only;
-that is not publication evidence.
+component; Worker tags cannot substitute for it. The first release,
+`apt-credentials-v1.0.0`, is published and served on beta (stable promotion is a
+separate step). A previous catalog predating a component may omit it during
+refresh's regression comparison, but the newly written catalog must cover every
+current component. Previously recorded components still fail on a lower discovered
+version. Ordinary catalog checks remain strict. Offline CLI tests pin a synthetic
+historical credentials row in their private fixture independently of live releases.
 It updates only the catalog, **never the three pin inputs or overrides**.
 If pins are stale, a successful catalog refresh still exits **1** after
 writing the new evidence; this is the expected signal to review the pins.

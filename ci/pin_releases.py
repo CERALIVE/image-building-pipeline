@@ -33,7 +33,7 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def parse_catalog(text: str) -> Catalog:
+def parse_catalog(text: str, *, require_complete: bool = True) -> Catalog:
     data = json.loads(text, object_pairs_hook=unique_object)
     if not isinstance(data, dict) or set(data) != {"schema_version", "checked_at", "releases"} or data["schema_version"] != 1:
         raise PinError("invalid release catalog schema")
@@ -59,7 +59,7 @@ def parse_catalog(text: str) -> Catalog:
                 raise PinError(f"invalid published package: {key}")
             release_version(value)
         releases.append(Release(component, row["tag"], row["published_at"], packages))
-    if {r.component for r in releases} != COMPONENTS:
+    if require_complete and {r.component for r in releases} != COMPONENTS:
         raise PinError("release catalog must cover every image component")
     return Catalog(checked_at, tuple(releases))
 
@@ -140,7 +140,7 @@ def refresh_catalog(path: Path) -> Catalog:
     ]}, indent=2) + "\n"
     catalog = parse_catalog(text)
     if path.exists():
-        previous = parse_catalog(path.read_text())
+        previous = parse_catalog(path.read_text(), require_complete=False)
         for old in previous.releases:
             new = next(r for r in releases if r.component == old.component)
             if compare(new.tag, old.tag) < 0:

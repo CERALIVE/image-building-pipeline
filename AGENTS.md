@@ -142,7 +142,11 @@ It covers the fetcher's complete app set (including capture and modem closure)
 plus the CeraLive plugin and librga runtime. Missing/malformed/expired evidence
 fails closed. PR evidence is bounded to seven days; real CI builds to 24 hours.
 `--refresh` requires authenticated `gh` access to the private component repos,
-updates evidence only, and never changes pins. No automatic refresh bot ships.
+updates evidence only, and never changes pins. It accepts a previous catalog
+missing a newly added component solely for regression comparison; the new catalog
+and ordinary checks still require every current component, and any previously
+recorded component whose release version regresses still fails. No automatic
+refresh bot ships.
 Exact-version, reasoned, expiring rollback exceptions live in
 `manifests/first-party-pin-overrides.json`; they cannot waive unverifiable inputs.
 The registered CLI test includes both incident downgrades and executes the
@@ -3633,8 +3637,8 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   format ext4 slots".
 
 **Origin protection is PER PACKAGE NAME, one manifest drives build-time
-RemoveFiles= AND the on-device reprune hook, and the credentials package stays
-honestly BLOCKED (Todo 29, update-system-overhaul)** [PARTIAL — integration
+RemoveFiles= AND the on-device reprune hook; stable-channel credentials delivery
+remains BLOCKED (Todo 29, update-system-overhaul)** [PARTIAL — integration
 branch, not a shipped image]
 
 The former `Package: * / Pin: origin apt.ceralive.tv / Pin-Priority: 990`
@@ -3754,22 +3758,23 @@ URL+SHA pin, see the "CeraLive librga stays a platform-layer URL+SHA swap"
 section) and must stay apt-updatable, unlike the genuinely third-party MPP
 runtime/config-glue/generated-compat trio.
 
-**`ceralive-apt-credentials` — wired but publication-blocked.** Its exact
+**`ceralive-apt-credentials` — wired; stable-channel delivery pending.** Its exact
 `1.0.0` package pin, Architecture: all fetch allowance, partition classification,
 and app-layer `RUNTIME_APP_PKGS` install are now present. The separate
 `apt-credentials:` registry block pins `apt-credentials-v1.0.0` from the
 `apt-worker` repository; the Worker's own `apt-worker: pin: latest` block is
-unchanged. `DRY_RUN` can list the pinned package without fetching it, but a real
-build fails closed until Todo 12 publishes and serves that exact release. The
+unchanged. `DRY_RUN` can list the pinned package without fetching it. The
+GitHub release is published and served on beta; a stable-channel real build
+remains blocked until the separate promotion to stable. The
 runtime executor no longer decodes CI's `APT_CLIENT_*` key into the image;
 build-time first-party fetch authentication still uses those CI inputs. The
 package's postinst owns the device APT TLS config and `_apt`-readable key under
 `/usr/share/ceralive/apt-credentials/`. hawkBit provisioning prefers that pair,
 using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
-No package release, refreshed catalog entry, built image, or board installation
-is claimed by this wiring. Until the real release exists, `--refresh` and the
-live pin-currency gate deliberately fail closed; only offline tests use a
-synthetic release row.
+The authenticated `--refresh` now records the release as the ninth component;
+previous catalogs without its row remain valid only for regression comparison.
+The live currency check reports newer CeraUI and cerastream releases as STALE,
+without changing image pins. No new image or board installation is claimed.
 
 Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
 mechanism, proven against real mkosi with a mutation leg),

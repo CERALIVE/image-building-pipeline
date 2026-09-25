@@ -6,9 +6,11 @@ This is an input migration, not a claim that a new image was built or flashed.
 
 The update-system integration branch now selects `ceralive-apt-credentials=1.0.0`
 as an app-layer package rather than baking CI's APT client key into the runtime
-image. Its `apt-credentials-v1.0.0` release is not yet published or served:
-plan-only builds can name it, but real fetches and the live release-currency
-gate fail closed until publication. This is not a shipped-image claim.
+image. Its `apt-credentials-v1.0.0` GitHub release exists and is served on the
+beta APT channel; promotion to stable is separate and a stable-channel real
+build remains blocked. The authenticated release-currency refresh now records
+the new component even when its previous catalog predates it; it still fails
+on a downgrade of any previously recorded component. This is not a shipped-image claim.
 
 A build pipeline for creating ready-to-use images for ARM-based streaming devices,
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future

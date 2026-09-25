@@ -1,23 +1,31 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-23T11:08:24.155998+00:00",
+  "checked_at": "2026-09-25T22:36:50.699356+00:00",
   "releases": [
     {
       "component": "CeraUI",
-      "tag": "v2026.9.3",
-      "published_at": "2026-09-20T15:58:27Z",
+      "tag": "v2026.9.4",
+      "published_at": "2026-09-23T21:21:33Z",
       "packages": {
-        "ceralive-device[amd64]": "2026.9.3-20260920T155651.ec522ad",
-        "ceralive-device[arm64]": "2026.9.3-20260920T155654.ec522ad"
+        "ceralive-device[amd64]": "2026.9.4-20260923T212001.159f99b",
+        "ceralive-device[arm64]": "2026.9.4-20260923T212013.159f99b"
+      }
+    },
+    {
+      "component": "apt-credentials",
+      "tag": "apt-credentials-v1.0.0",
+      "published_at": "2026-09-25T22:16:32Z",
+      "packages": {
+        "ceralive-apt-credentials[all]": "1.0.0"
       }
     },
     {
       "component": "cerastream",
-      "tag": "v2026.9.6",
-      "published_at": "2026-09-21T12:27:05Z",
+      "tag": "v2026.9.8",
+      "published_at": "2026-09-24T00:13:24Z",
       "packages": {
-        "cerastream[amd64]": "2026.9.6",
-        "cerastream[arm64]": "2026.9.6"
+        "cerastream[amd64]": "2026.9.8",
+        "cerastream[arm64]": "2026.9.8"
       }
     },
     {
