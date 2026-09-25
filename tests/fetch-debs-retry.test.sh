@@ -157,6 +157,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "${out}" && -n "${url}" ]] || exit 2
 printf '%s\n' "${url}" >>"${COUNT_DIR}/curl-urls"
+case "${url}" in
+	https://apt.ceralive.tv/dists/*|https://apt.armbian.com/*) ;;
+	*) exit 22 ;;
+esac
 
 if [[ -n "${FAKE_CURL_HANG_ON:-}" && "${url}" == *"${FAKE_CURL_HANG_ON}" ]]; then
 	# Snapshot the scratch state BEFORE stalling: the signal leg needs proof the
@@ -210,6 +214,7 @@ run_first_party_native() {
 		COUNT_DIR="${COUNT_DIR}" \
 		APT_GPG_PUBLIC_B64="${KEY_B64}" \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
+		CERALIVE_REMOTE_CACHE=0 \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 }
@@ -267,6 +272,7 @@ run_first_party_curl() {
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
 		APT_GPG_PUBLIC_B64="${KEY_B64}" \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
+		CERALIVE_REMOTE_CACHE=0 \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 }
