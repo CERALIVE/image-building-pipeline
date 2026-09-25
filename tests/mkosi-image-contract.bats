@@ -848,6 +848,22 @@ print('CEILING-POLICY-OK')
   [ "$status" -eq 0 ]
 }
 
+@test "runtime packages: proven NM-native portal does not install hostapd" {
+  local packages="$PIPELINE_DIR/manifests/packages"
+  run grep -Ex 'hostapd[[:space:]]*(#.*)?' "$packages/shared.list" "$packages/rk3588.delta.list" "$packages/x86_64.delta.list" "$packages/development.delta.list"
+  [ "$status" -eq 1 ]
+
+  local dependency
+  for dependency in network-manager dnsmasq wpasupplicant; do
+    run grep -Ex "${dependency}[[:space:]]*(#.*)?" "$packages/shared.list"
+    [ "$status" -eq 0 ]
+  done
+  run grep -F '802-11-wireless.mode ap' "$PIPELINE_DIR/mkosi/runtime/ceralive-provision.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'ipv4.method shared' "$PIPELINE_DIR/mkosi/runtime/ceralive-provision.sh"
+  [ "$status" -eq 0 ]
+}
+
 @test "runtime packages: iw is installed so the regulatory domain can be applied" {
   # `wireless-tools` looks like it covers this and does NOT: it ships only the
   # legacy WEXT binaries (iwconfig/iwlist/iwgetid/iwpriv/iwspy). The nl80211 `iw`

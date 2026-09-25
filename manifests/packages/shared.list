@@ -51,7 +51,7 @@ nginx-light              # terminates HTTPS on 443 and reverse-proxies to the Ce
 # --- Network management -------------------------------------------------------
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
 systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian trixie this is still a SEPARATE package (257.13-1~deb13u1) — it was bundled in systemd on v1's Armbian base, so it must stay named explicitly.
-dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
+dnsmasq                  # NetworkManager shared-mode AP DHCP/DNS child (not the masked standalone unit)
 iproute2                 # `ip` — CeraUI route/policy-route read-only diagnostics
 net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
                          # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
@@ -148,7 +148,6 @@ wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db +
                          # --no-install-recommends); named explicitly or cfg80211 boots with
                          # "Direct firmware load for regulatory.db failed with error -2" and
                          # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
-hostapd                  # AP mode (device hotspot for config)
 
 # --- Bluetooth ----------------------------------------------------------------
 bluez                    # the Bluetooth userspace stack: bluetoothd + bluetoothctl/btmgmt.
