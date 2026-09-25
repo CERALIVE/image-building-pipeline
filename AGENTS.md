@@ -1322,6 +1322,16 @@ from the verified plaintext only, bad-signature and wrong-digest rejection,
 wrong-architecture miss, and the no-`|| true` property itself), plus the existing
 `fetch-debs-apt-chain` / `fetch-debs-apt-sandbox` / `bsp-auth-contract` suites.
 
+`fetch-debs-apt-chain` and `fetch-debs-retry` isolate their native and curl
+scenarios with private local `.deb` caches and disable the separate remote read
+tier. Their fake curl serves only the fixture-backed origins (first-party and,
+for the retry signal leg, Armbian): accepting a cache-host URL solely because it ends
+in `.deb` bypasses the curl publisher and makes the mode-failure/cleanup test
+report success without exercising the failure. The failure leg checks that the
+real publisher reached its temporary-file chmod, exited non-zero and left no
+temporary or final `.deb` files; the retry suite counts only the real origin
+attempt when it checks a checksum verdict is not retried.
+
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
 **CeraUI pin (2026-09-06, superseded by the 2026-09-17 pin below):** the
