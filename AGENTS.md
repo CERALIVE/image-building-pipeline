@@ -2498,8 +2498,8 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
   The sweep tolerates an individual failure, returns non-zero when NOTHING
   parsed, and the caller then declines and says so. Same direction when `modinfo`
   is missing entirely: no proof, no deletion.
-- **Nothing is removed as a PACKAGE.** `armbian-firmware`, `libmali` and
-  `hostapd` all stay installed.
+- **Nothing is removed as a PACKAGE by this firmware prune.** The independent
+  Todo-48 AP drill removes `hostapd` from the future image package list, not here.
 
 Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
 builder image installs `kmod` and fails its own build without `modinfo`, because
@@ -6718,12 +6718,18 @@ credentials with no screen or keyboard. Standalone artifacts under
   exists — see "SRTLA source-policy routing is RETIRED" below.)
 - **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
-  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
-  image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
-  (machine-id-derived setup identifier), passphrase `ceralive-setup`
-  (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
-  requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
-  validated on hardware, hence `[PARTIAL]`.
+  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). Both RK3588 boards
+  passed the 2026-09-25 Todo-48 force-portal → AP → teardown drill on the current
+  production image: wlan0 advertised AP support, `ceralive-ap` activated in AP
+  mode at `192.168.42.1/24`, NM spawned its dnsmasq child, no hostapd process ran,
+  and each board returned to disconnected wlan0 with portal socket inactive and
+  CeraUI active. The missing `iw` was substituted by NM state/mode plus the
+  kernel's gateway address and the real dnsmasq child. `hostapd` is removed from
+  the future image package list, not uninstalled from either tested board.
+  SSID `CeraLive-Setup-<short-id>` (machine-id-derived setup identifier), passphrase
+  `ceralive-setup` (documented default), gateway `192.168.42.1/24`. The wider
+  provisioning flow remains `[PARTIAL]`: no physical client join or credential
+  handoff was exercised by this AP-only drill.
 - **Regulatory DB (`wireless-regdb`) is an EXPLICIT `shared.list` entry.** WiFi in
   ANY mode (client or the AP above) needs `/lib/firmware/regulatory.db` (+ `.p7s`),
   which the kernel `cfg80211` subsystem loads at boot to establish a usable
