@@ -223,27 +223,12 @@ install_runtime_packages() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. CeraLive apt repository (mTLS + GPG). Secrets come from env (CI); never
-#    hardcoded. Local/dev build without secrets installs the source + an empty
-#    keyring placeholder, exactly as v1 did.
+# 3. CeraLive apt repository (GPG). The app-layer credentials package owns the
+#    device mTLS cert/key; CI APT_CLIENT_* remains build-time fetch input only.
 # ---------------------------------------------------------------------------
 setup_ceralive_repository() {
   log "configuring apt.ceralive.tv repository (channel=${CHANNEL})"
-  mkdir -p /etc/opt/ceralive /etc/apt/certs /usr/share/keyrings
-
-  if [[ -n "${APT_CLIENT_CRT_B64:-}" && -n "${APT_CLIENT_KEY_B64:-}" ]]; then
-    log "CI mode: installing mTLS client certificate"
-    printf '%s' "${APT_CLIENT_CRT_B64}" | base64 -d >/etc/apt/certs/client.crt
-    printf '%s' "${APT_CLIENT_KEY_B64}" | base64 -d >/etc/apt/certs/client.key
-    chown _apt:root /etc/apt/certs/client.key && chmod 400 /etc/apt/certs/client.key  # apt fetches as the _apt sandbox user; a root:root 0600 key is unreadable → "Could not load client certificate"
-    chmod 644 /etc/apt/certs/client.crt
-    cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
-Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
-Acquire::https::apt.ceralive.tv::SslKey  "/etc/apt/certs/client.key";
-SSLEOF
-  else
-    log "no mTLS secrets in env — skipping client-cert injection (CI provides them)"
-  fi
+  mkdir -p /etc/opt/ceralive /usr/share/keyrings
 
   if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
     log "installing build-validated CeraLive apt GPG public key from env"
@@ -266,7 +251,8 @@ EOF
   # apt-ceralive-repo.sh::install_apt_preferences. `./build` runs THIS executor,
   # so the pin MUST live here too or it never ships (guarded in
   # apt-preferences-baked.test.sh). Replaces the former Package: * wildcard;
-  # see that function's header comment for the full name+-1-stanza rationale.
+   # see that function's header comment for the first-match rule and why the
+   # exact-name archive wildcard must reject every OTHER origin, not the installed version.
   mkdir -p /etc/apt/preferences.d
   rm -f /etc/apt/preferences.d/ceralive
   {
@@ -278,7 +264,7 @@ EOF
         [[ -n "${pkg}" ]] || continue
         case "${pkg}" in \#*) continue ;; esac
         printf '\nPackage: %s\nPin: origin apt.ceralive.tv\nPin-Priority: 990\n' "${pkg}"
-        printf '\nPackage: %s\nPin: release o=Debian\nPin-Priority: -1\n' "${pkg}"
+         printf '\nPackage: %s\nPin: origin *\nPin-Priority: -1\n' "${pkg}"
       done < <(printf '%s' "${CERALIVE_FIRST_PARTY_NAMES_B64}" | base64 -d)
     else
       log "no CERALIVE_FIRST_PARTY_NAMES_B64 in env — writing an empty origin-preferences file (standalone/offline build)"
@@ -683,8 +669,15 @@ TEMPLATE="${CERALIVE_HAWKBIT_TEMPLATE:-/etc/rauc-hawkbit-updater/config.conf}"
 EFFECTIVE="${CERALIVE_HAWKBIT_EFFECTIVE:-/data/ceralive/hawkbit-updater/config.conf}"
 PENDING_FILE="${CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pending}"
 RAUC_SYSTEM_CONF="${CERALIVE_RAUC_SYSTEM_CONF:-/etc/rauc/system.conf}"
-APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-/etc/apt/certs/client.crt}"
-APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-/etc/apt/certs/client.key}"
+credentials_dir="${CERALIVE_APT_CREDENTIALS_DIR:-/usr/share/ceralive/apt-credentials}"
+legacy_certs_dir="${CERALIVE_APT_LEGACY_CERTS_DIR:-/etc/apt/certs}"
+if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${credentials_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${credentials_dir}/client.key}"
+else
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${legacy_certs_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${legacy_certs_dir}/client.key}"
+fi
 
 log()  { printf '%s: %s\n' "${PROG}" "$*"; }
 die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
@@ -705,6 +698,9 @@ read_compatible() {
 fetch_token_from_url() {
   local url="$1"
   command -v curl >/dev/null 2>&1 || return 69
+  if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+    [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ] || return 75
+  fi
   local -a auth=()
   if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
     auth=(--cert "${APT_CLIENT_CRT}" --key "${APT_CLIENT_KEY}")

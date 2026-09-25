@@ -144,6 +144,13 @@ apt-worker:
   kind: first-party
   pin: latest
 
+apt-credentials:
+  path: apt-worker
+  repo: https://github.com/CERALIVE/apt-worker
+  kind: first-party
+  pin: apt-credentials-v1.0.0
+  channel: stable
+
 ceralive-platform:
   path: ceralive-platform
   repo: https://github.com/CERALIVE/ceralive-platform

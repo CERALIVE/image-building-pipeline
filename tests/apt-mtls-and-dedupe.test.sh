@@ -3,10 +3,8 @@
 # apt-mtls-and-dedupe.test.sh — guard the two on-device apt regressions this fix
 # repairs, against the functions the REAL build runs (not only the customize twin):
 #
-#   1. mTLS client-KEY readability. apt's https fetcher runs sandboxed as the `_apt`
-#      user, so a `root:root` mode-0600 /etc/apt/certs/client.key is UNREADABLE and
-#      `apt-get update` dies "Could not load client certificate … Error while reading
-#      file" (confirmed live on a Rock 5B+). The key must be handed to `_apt`.
+#   1. Device mTLS key comes from the app-layer credentials package, not the
+#      build-time APT_CLIENT_* secrets. Its postinst gives the key to `_apt`.
 #   2. Duplicate Debian source. mkosi's release-named bootstrap source
 #      (`${RELEASE}.sources`) leaks into the rootfs alongside our debian.sources, so
 #      apt warns "Target Packages … is configured multiple times". configure_minimal_apt
@@ -28,7 +26,8 @@
 # configure_minimal_apt against a scratch chroot filesystem.
 #
 # NEVER prints key material: Part B seeds only a synthetic Debian source; the mTLS
-# key path is asserted statically (Part A) and proven at runtime on the live device.
+# key path is asserted statically (Part A); the synthetic payload tests only
+# numeric ownership preservation and never reads a real credential.
 #
 # shellcheck disable=SC2016
 
@@ -40,6 +39,8 @@ POSTINST="${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
 MODULE="${PIPELINE_DIR}/mkosi/customize/apt-ceralive-repo.sh"
 TAR_EMIT="${PIPELINE_DIR}/lib/stages/tar-emit.sh"
 BUNDLE_BUILDER="${PIPELINE_DIR}/lib/build-bundle.sh"
+SLOT_IMAGE="${PIPELINE_DIR}/lib/disk/slot-image.sh"
+FACTORY_SLOT="${PIPELINE_DIR}/lib/disk/slot.sh"
 
 # The suite Part B drives the shipped writer with. Read from the ONE mapping so
 # this harness follows a release bump instead of silently testing the old suite.
@@ -53,6 +54,8 @@ fail() { printf 'apt-mtls-and-dedupe regression: %s\n' "$1" >&2; exit 1; }
 [[ -f "${MODULE}" ]]   || fail "missing customize twin: ${MODULE}"
 [[ -f "${TAR_EMIT}" ]] || fail "missing rootfs tar emitter: ${TAR_EMIT}"
 [[ -f "${BUNDLE_BUILDER}" ]] || fail "missing RAUC bundle builder: ${BUNDLE_BUILDER}"
+[[ -f "${SLOT_IMAGE}" ]] || fail "missing shared ext4 slot writer: ${SLOT_IMAGE}"
+[[ -f "${FACTORY_SLOT}" ]] || fail "missing factory slot writer: ${FACTORY_SLOT}"
 
 extract_fn() { # <name> <file>
   awk -v fn="$1" '
@@ -64,41 +67,60 @@ extract_fn() { # <name> <file>
 
 post_repo="$(extract_fn setup_ceralive_repository "${POSTINST}")"
 post_minapt="$(extract_fn configure_minimal_apt "${POSTINST}")"
-mod_mtls="$(extract_fn install_mtls_cert "${MODULE}")"
 mod_minapt="$(extract_fn configure_minimal_apt "${MODULE}")"
 mod_src="$(extract_fn configure_ceralive_source "${MODULE}")"
 [[ -n "${post_repo}" && -n "${post_minapt}" ]] || fail "could not extract runtime apt functions from ${POSTINST}"
-[[ -n "${mod_mtls}"  && -n "${mod_minapt}" && -n "${mod_src}" ]] || fail "could not extract customize apt functions from ${MODULE}"
+[[ -n "${mod_minapt}" && -n "${mod_src}" ]] || fail "could not extract customize apt functions from ${MODULE}"
 
 # ---------------------------------------------------------------------------
 # Part A — static contract (always enforced)
 # ---------------------------------------------------------------------------
 
-# 1. mTLS key is handed to _apt, and the old root-owned 0600 key is GONE (both tracks).
-grep -Eq 'chown[[:space:]]+_apt(:root)?[[:space:]]+/etc/apt/certs/client\.key' <<<"${post_repo}" \
-  || fail "runtime setup_ceralive_repository() no longer chowns client.key to _apt — apt's _apt fetcher cannot read a root-owned key"
-grep -Eq 'chmod[[:space:]]+600[[:space:]]+/etc/apt/certs/client\.key' <<<"${post_repo}" \
-  && fail "runtime setup_ceralive_repository() still leaves client.key mode 600 (root-owned → unreadable by _apt)"
-grep -Eq 'chown[[:space:]]+_apt(:root)?[[:space:]]+/etc/apt/certs/client\.key' <<<"${mod_mtls}" \
-  || fail "customize install_mtls_cert() no longer chowns client.key to _apt"
-grep -Eq 'chmod[[:space:]]+600[[:space:]]+/etc/apt/certs/client\.key' <<<"${mod_mtls}" \
-  && fail "customize install_mtls_cert() still leaves client.key mode 600 (root-owned → unreadable by _apt)"
+# 1. Neither on-device writer decodes CI's build-only mTLS key. The packaged
+# key still needs its numeric _apt ownership preserved across tar and ext4.
+if grep -Eq 'APT_CLIENT_(CRT|KEY)_B64|/etc/apt/certs/client\.(crt|key)|install_mtls_cert' <<<"${post_repo}"; then
+  fail 'runtime writer still bakes a CI client credential into the device'
+fi
+if grep -v '^[[:space:]]*#' "${MODULE}" | grep -Eq 'APT_CLIENT_(CRT|KEY)_B64|/etc/apt/certs/client\.(crt|key)|install_mtls_cert'; then
+  fail 'customize writer still bakes a CI client credential into the device'
+fi
+grep -Fq 'ceralive-apt-credentials' "${PIPELINE_DIR}/mkosi/mkosi.images/app/mkosi.postinst.chroot" \
+  || fail 'app layer does not install the credentials package'
 
-# The RAUC payload is the normalized rootfs tar, not the mkosi tree. Flattening
-# every tar member to uid/gid 0 silently undoes the `_apt` handoff above before
-# the bundle reaches a device.
+# The normalized tar is the parity artifact. Factory and verity OTA both build
+# ext4 from the tree through the shared writer; verify ownership in that image.
 grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' "${TAR_EMIT}" \
   && fail "rootfs tar emitter flattens ownership to root — client.key loses uid 42 in the RAUC payload"
 grep -Eq -- '--numeric-owner' "${TAR_EMIT}" \
   || fail "rootfs tar emitter must preserve numeric uid/gid metadata without name remapping"
 emit_artifact_fn="$(extract_fn emit_artifact "${TAR_EMIT}")"
 [[ -n "${emit_artifact_fn}" ]] || fail "could not extract emit_artifact() from ${TAR_EMIT}"
-bundle_stage="$(extract_fn stage_rootfs "${BUNDLE_BUILDER}")"
-[[ -n "${bundle_stage}" ]] || fail "could not extract stage_rootfs() from ${BUNDLE_BUILDER}"
-grep -Eq -- '--owner(=|[[:space:]])0|--group(=|[[:space:]])0' <<<"${bundle_stage}" \
-  && fail "RAUC directory-input tar path flattens ownership to root"
-grep -Eq -- '--numeric-owner' <<<"${bundle_stage}" \
-  || fail "RAUC directory-input tar path must preserve numeric uid/gid metadata"
+grep -Fqx 'source "${HERE}/disk/slot-image.sh"' "${BUNDLE_BUILDER}" \
+  || fail "verity bundle no longer sources the shared slot-image producer"
+grep -Fqx 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slot-image.sh"' "${FACTORY_SLOT}" \
+  || fail "factory slot no longer sources the same slot-image producer"
+bundle_build="$(extract_fn build-bundle "${BUNDLE_BUILDER}")"
+factory_build="$(extract_fn populate_rootfs_slot "${FACTORY_SLOT}")"
+[[ -n "${bundle_build}" && -n "${factory_build}" ]] || fail 'could not extract the two slot-image callers'
+grep -Fq 'SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4"' <<<"${bundle_build}" \
+  || fail 'verity bundle no longer passes its rootfs tree to the shared slot-image producer'
+grep -Fq 'SLOT_IMAGE_LABEL="${slot_label}" make_slot_image "${rootfs_tree}" "${rootfs_img}"' <<<"${factory_build}" \
+  || fail 'factory no longer passes its rootfs tree to the shared slot-image producer'
+slot_writer="$(extract_fn make_slot_image "${SLOT_IMAGE}")"
+[[ -n "${slot_writer}" ]] || fail "could not extract make_slot_image() from ${SLOT_IMAGE}"
+grep -Fq -- '-d "${tree}" "${out}"' <<<"${slot_writer}" \
+  || fail 'shared producer no longer populates ext4 from the rootfs tree'
+
+require_cmd() { command -v "$1" >/dev/null || fail "missing required command: $1"; }
+# shellcheck source=../lib/disk/slot-image.sh
+source "${SLOT_IMAGE}"
+command -v debugfs >/dev/null || fail 'debugfs is required to inspect ext4 ownership'
+ext4_owner_is() { # <image> <path> <mode> <uid> <gid>
+  local metadata
+  metadata="$(debugfs -R "stat $2" "$1" 2>/dev/null)" || return 1
+  [[ "${metadata}" =~ Mode:[[:space:]]*"$3"([[:space:]]|$) ]] &&
+    [[ "${metadata}" =~ User:[[:space:]]*"$4"[[:space:]]+Group:[[:space:]]*"$5"([[:space:]]|$) ]]
+}
 
 ownership_repro="$(mktemp -d)"
 cleanup_ownership_repro() {
@@ -109,59 +131,63 @@ cleanup_ownership_repro() {
   fi
 }
 trap cleanup_ownership_repro EXIT
-mkdir -p "${ownership_repro}/rootfs/etc/apt/certs" "${ownership_repro}/content"
-install -m 0400 /dev/null "${ownership_repro}/rootfs/etc/apt/certs/client.key"
-chmod 0750 "${ownership_repro}/rootfs/etc/apt/certs"
+mkdir -p "${ownership_repro}/rootfs/usr/share/ceralive/apt-credentials"
+install -m 0400 /dev/null "${ownership_repro}/rootfs/usr/share/ceralive/apt-credentials/client.key"
+chmod 0750 "${ownership_repro}/rootfs/usr/share/ceralive/apt-credentials"
 (
   export SOURCE_DATE_EPOCH=0
   eval "${emit_artifact_fn}"
   emit_artifact "${ownership_repro}/rootfs" "${ownership_repro}/normalized.tar"
 )
 expected_owner="$(id -u)/$(id -g)"
-normalized_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/normalized.tar" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
-normalized_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/normalized.tar" ./etc/apt/certs/ | awk '{print $1, $2}')"
+normalized_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/normalized.tar" ./usr/share/ceralive/apt-credentials/client.key | awk '{print $1, $2}')"
+normalized_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/normalized.tar" ./usr/share/ceralive/apt-credentials/ | awk '{print $1, $2}')"
 [[ "${normalized_key_meta}" == "-r-------- ${expected_owner}" ]] \
   || fail "normalized rootfs tar changed client.key metadata; expected '-r-------- ${expected_owner}', got '${normalized_key_meta}'"
 [[ "${normalized_dir_meta}" == "drwxr-x--- ${expected_owner}" ]] \
   || fail "normalized rootfs tar changed certs directory metadata; expected 'drwxr-x--- ${expected_owner}', got '${normalized_dir_meta}'"
-(
-  export SOURCE_DATE_EPOCH=0
-  eval "${bundle_stage}"
-  stage_rootfs "${ownership_repro}/rootfs" "${ownership_repro}/content" >/dev/null
-)
-bundle_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
-bundle_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/content/rootfs.tar" ./etc/apt/certs/ | awk '{print $1, $2}')"
-[[ "${bundle_key_meta}" == "-r-------- ${expected_owner}" ]] \
-  || fail "RAUC directory-input tar changed client.key metadata; expected '-r-------- ${expected_owner}', got '${bundle_key_meta}'"
-[[ "${bundle_dir_meta}" == "drwxr-x--- ${expected_owner}" ]] \
-  || fail "RAUC directory-input tar changed certs directory metadata; expected 'drwxr-x--- ${expected_owner}', got '${bundle_dir_meta}'"
+SLOT_IMAGE_LABEL=rootfs make_slot_image "${ownership_repro}/rootfs" "${ownership_repro}/rootfs.ext4" >/dev/null \
+  || fail 'shared producer failed to populate the ext4 fixture'
+ext4_owner_is "${ownership_repro}/rootfs.ext4" /usr/share/ceralive/apt-credentials/client.key 0400 "$(id -u)" "$(id -g)" \
+  || fail 'verity/factory ext4 image changed client.key owner or mode'
+ext4_owner_is "${ownership_repro}/rootfs.ext4" /usr/share/ceralive/apt-credentials 0750 "$(id -u)" "$(id -g)" \
+  || fail 'verity/factory ext4 image changed certs directory owner or mode'
+# Mutate the produced image itself: this check must reject a key restored as
+# world-readable rather than certifying an image solely from its source tree.
+debugfs -w -R 'set_inode_field /usr/share/ceralive/apt-credentials/client.key mode 0644' "${ownership_repro}/rootfs.ext4" >/dev/null 2>&1 \
+  || fail 'could not inject ext4 key-mode mutation'
+ext4_owner_is "${ownership_repro}/rootfs.ext4" /usr/share/ceralive/apt-credentials/client.key 0400 "$(id -u)" "$(id -g)" \
+  && fail 'world-readable ext4 client.key mutation escaped the ownership assertion'
+echo 'apt-mtls-and-dedupe: world-readable ext4 client.key mutation RED'
 
 if [[ "${EUID}" == 0 ]] || sudo -n true 2>/dev/null; then
-  mkdir -p "${ownership_repro}/exact-content"
   ownership_helper="${ownership_repro}/exercise-ownership-producers.sh"
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
-    printf '%s\n' "${emit_artifact_fn}" "${bundle_stage}"
-    printf '%s\n' 'export SOURCE_DATE_EPOCH=0' 'emit_artifact "$1" "$2"' 'stage_rootfs "$1" "$3" >/dev/null'
+    declare -f fail require_cmd
+    printf '%s\n' "${emit_artifact_fn}"
+    printf '%s\n' 'export SOURCE_DATE_EPOCH=0' 'emit_artifact "$1" "$2"'
+    printf 'source %q\n' "${SLOT_IMAGE}"
+    printf '%s\n' 'SLOT_IMAGE_LABEL=rootfs make_slot_image "$1" "$3" >/dev/null'
   } >"${ownership_helper}"
   chmod 0755 "${ownership_helper}"
   if [[ "${EUID}" == 0 ]]; then
-    install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/etc/apt/certs"
-    install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/etc/apt/certs/client.key"
-    "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content"
+    install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/usr/share/ceralive/apt-credentials"
+    install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/usr/share/ceralive/apt-credentials/client.key"
+    "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-rootfs.ext4"
   else
-    sudo -n install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/etc/apt/certs"
-    sudo -n install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/etc/apt/certs/client.key"
-    sudo -n "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content"
+    sudo -n install -d -o 42 -g 0 -m 0750 "${ownership_repro}/exact-rootfs/usr/share/ceralive/apt-credentials"
+    sudo -n install -o 42 -g 0 -m 0400 /dev/null "${ownership_repro}/exact-rootfs/usr/share/ceralive/apt-credentials/client.key"
+    sudo -n "${ownership_helper}" "${ownership_repro}/exact-rootfs" "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-rootfs.ext4"
   fi
-  for exact_tar in "${ownership_repro}/exact-normalized.tar" "${ownership_repro}/exact-content/rootfs.tar"; do
-    exact_key_meta="$(tar --numeric-owner -tvf "${exact_tar}" ./etc/apt/certs/client.key | awk '{print $1, $2}')"
-    exact_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${exact_tar}" ./etc/apt/certs/ | awk '{print $1, $2}')"
-    [[ "${exact_key_meta}" == '-r-------- 42/0' ]] \
-      || fail "privileged ownership fixture changed client.key metadata; expected '-r-------- 42/0', got '${exact_key_meta}'"
-    [[ "${exact_dir_meta}" == 'drwxr-x--- 42/0' ]] \
-      || fail "privileged ownership fixture changed certs directory metadata; expected 'drwxr-x--- 42/0', got '${exact_dir_meta}'"
-  done
+  exact_key_meta="$(tar --numeric-owner -tvf "${ownership_repro}/exact-normalized.tar" ./usr/share/ceralive/apt-credentials/client.key | awk '{print $1, $2}')"
+  exact_dir_meta="$(tar --numeric-owner --no-recursion -tvf "${ownership_repro}/exact-normalized.tar" ./usr/share/ceralive/apt-credentials/ | awk '{print $1, $2}')"
+  [[ "${exact_key_meta}" == '-r-------- 42/0' ]] || fail 'normalized tar lost _apt key ownership'
+  [[ "${exact_dir_meta}" == 'drwxr-x--- 42/0' ]] || fail 'normalized tar lost _apt certs directory ownership'
+  ext4_owner_is "${ownership_repro}/exact-rootfs.ext4" /usr/share/ceralive/apt-credentials/client.key 0400 42 0 \
+    || fail 'ext4 image lost _apt key ownership'
+  ext4_owner_is "${ownership_repro}/exact-rootfs.ext4" /usr/share/ceralive/apt-credentials 0750 42 0 \
+    || fail 'ext4 image lost _apt certs directory ownership'
 else
   echo "apt-mtls-and-dedupe: exact _apt uid 42 fixture skipped (root or passwordless sudo unavailable)"
 fi
@@ -203,7 +229,7 @@ for source_name in runtime customize; do
   done
 done
 
-echo "apt-mtls-and-dedupe: Part A static contract OK (both tracks: _apt-owned key + single Debian source + arch-qualified repo URI + slot-safe apt config)"
+echo "apt-mtls-and-dedupe: Part A static contract OK (no baked key; packaged key ownership preserved; single Debian source + arch-qualified repo URI + slot-safe apt config)"
 
 # ---------------------------------------------------------------------------
 # Part B — runtime dedupe reproduction in a rootless user+mount namespace

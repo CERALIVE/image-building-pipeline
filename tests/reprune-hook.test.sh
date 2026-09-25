@@ -132,4 +132,22 @@ rc=$?
 
 echo "reprune-hook: Part B4 OK (never fails dpkg, even on an unremovable/nonexistent target)"
 
+B5="${WORK}/b5"
+mkdir -p "${B5}/usr/share" "${B5}/keep" "${B5}/usr/lib/locale"
+printf 'outside sentinel\n' >"${B5}/keep/messages.mo"
+ln -s "${B5}/keep" "${B5}/usr/share/locale"
+printf 'safe to prune\n' >"${B5}/usr/lib/locale/locale-archive"
+PRUNE_LIST_B5="${WORK}/b5-prune.list"
+printf '%s/usr/share/locale/*\n%s/usr/lib/locale/locale-archive\n' "${B5}" "${B5}" >"${PRUNE_LIST_B5}"
+out="$(CERALIVE_PRUNE_PATHS_LIST="${PRUNE_LIST_B5}" CERALIVE_DOC_ROOT="${B5}/no-doc-dir" "${REPRUNE_SCRIPT}" 2>&1)"
+rc=$?
+[[ "${rc}" -eq 0 ]] || fail "B5: unsafe parent must not break the apt transaction (exit ${rc})"
+[[ "$(<"${B5}/keep/messages.mo")" == 'outside sentinel' ]] \
+  || fail "B5: symlinked /usr/share/locale parent deleted the outside sentinel"
+[[ -L "${B5}/usr/share/locale" ]] || fail "B5: symlinked locale parent was removed"
+[[ ! -e "${B5}/usr/lib/locale/locale-archive" ]] || fail "B5: safe subsequent manifest entry was not pruned"
+[[ "${out}" == *"symlink"* ]] || fail "B5: skipped unsafe glob needs a symlink diagnostic"
+
+echo "reprune-hook: Part B5 OK (symlink-parent glob skipped; outside bytes intact)"
+
 echo "reprune-hook regression: PASS"

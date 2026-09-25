@@ -1051,6 +1051,7 @@ PINS
   [[ "$output" == *"gstreamer1.0-libuvcsrc=2026.9.0"* ]]
   [[ "$output" == *"ceralive-device"* ]]
   [[ "$output" == *"srtla"* ]]
+  [[ "$output" == *"ceralive-apt-credentials=1.0.0"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]
@@ -1086,6 +1087,33 @@ CONTROL
   ' bash "$FETCH_DEBS" "$debs"
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$deb" | awk '{print $1}')" = "$digest" ]
+}
+
+@test "first-party validation: one apt credentials Architecture: all archive serves both index architectures" {
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb is required to build the fixture"
+  local root="$BATS_TEST_TMPDIR/apt-credentials-all" debs
+  debs="$root/debs"
+  mkdir -p "$root/pkg/DEBIAN" "$debs"
+  cat >"$root/pkg/DEBIAN/control" <<'CONTROL'
+Package: ceralive-apt-credentials
+Version: 1.0.0
+Architecture: all
+Maintainer: Test <test@example.invalid>
+Description: fixture (no key material)
+CONTROL
+  dpkg-deb --build "$root/pkg" "$debs/ceralive-apt-credentials_1.0.0_all.deb" >/dev/null
+  local digest
+  digest="$(sha256sum "$debs/ceralive-apt-credentials_1.0.0_all.deb" | awk '{print $1}')"
+  local arch
+  for arch in arm64 amd64; do
+    run env ARCH="$arch" bash -c '
+      source "$1"
+      FIRST_PARTY_APT_PKGS=(ceralive-apt-credentials)
+      validate_first_party_staged_debs "$2" ceralive-apt-credentials=1.0.0
+    ' bash "$FETCH_DEBS" "$debs"
+    [ "$status" -eq 0 ]
+    [ "$(sha256sum "$debs/ceralive-apt-credentials_1.0.0_all.deb" | awk '{print $1}')" = "$digest" ]
+  done
 }
 
 @test "first-party validation: arch-dependent package still rejects an architecture mismatch" {
@@ -1182,7 +1210,7 @@ CONTROL
   [[ "$output" == *"empty placeholder"* ]]
 }
 
-@test "apt ceralive (T2.6): the apt.ceralive.tv origin is pinned PER PACKAGE NAME at Pin-Priority 990, Debian refused at -1 (Todo 29)" {
+@test "apt ceralive (T2.6): each exact first-party name prefers apt.ceralive.tv at 990, all other origins at -1 (Todo 29)" {
   local dir="$BATS_TEST_TMPDIR/apt-prefs/preferences.d"
   local names_b64; names_b64="$(printf 'cerastream\nceralive-device\n' | base64 -w0)"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
@@ -1195,7 +1223,7 @@ CONTROL
   grep -qxF 'Package: ceralive-device' "$dir/ceralive-origin"
   grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
   grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
-  grep -qxF 'Pin: release o=Debian' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin *' "$dir/ceralive-origin"
   grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
   # every 990 stanza has a matching -1 stanza for the SAME package name
   local n990 nminus1

@@ -443,11 +443,11 @@ setup_journal_dir_gc() {
 # instead of silently shipping an unupdatable app layer.
 # ---------------------------------------------------------------------------
 
-# Package names that may NEVER be frozen. These are the first-party CeraLive
-# packages the device updates over apt from apt.ceralive.tv (see the app layer's
-# SYSEXT_APP_PKGS / APPFS_APP_PKGS / RUNTIME_APP_PKGS classification). Holding any
-# of them would break the ordinary software-update path CeraUI drives.
-CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+# Package names that may NEVER be frozen. Mirror every active name in
+# manifests/first-party-apt-names.txt (plus the legacy rauc-hawkbit-updater):
+# that host manifest is not accessible inside this subimage chroot. The test
+# checks exact set equality, so a new first-party name cannot escape the guard.
+CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device ceralive-modem-support srtla gstreamer1.0-libuvcsrc gstreamer1.0-rockchip-ceralive librga2-ceralive ceralive-apt-credentials libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
 
 # RAUC itself (Todo 22 RAUC-version-path follow-up, decisions.md 2026-09-24):
 # frozen alongside the boot stack, not apt-updatable. UNLIKE

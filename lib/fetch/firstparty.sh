@@ -19,6 +19,7 @@
 # shellcheck shell=bash
 FIRST_PARTY_ARCH_ALL_OK_PKGS=(
   "ceralive-modem-support"
+  "ceralive-apt-credentials"
 )
 
 first_party_arch_all_ok() {

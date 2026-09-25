@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
 #
 # customize/apt-ceralive-repo.sh — minimal Debian apt sources + the CeraLive
-# apt.ceralive.tv repository (mTLS client cert + GPG keyring).
+# apt.ceralive.tv repository (GPG keyring; mTLS supplied by the app package).
 #
 # DECOMPOSED FROM: userpatches/customize-image.sh:configure_minimal_apt()
 # (L53-88) and setup_ceraui_repository() (L91-141).
 #
-# SECRETS: the mTLS client cert/key and the GPG public key arrive ONLY through
-# the environment (APT_CLIENT_CRT_B64 / APT_CLIENT_KEY_B64 / APT_GPG_PUBLIC_B64),
-# base64-encoded. They are NEVER hardcoded and NEVER committed. CI injects them;
-# a local/dev build without them installs the source + an empty keyring
-# placeholder — a loud, explicit branch, not a
-# silent skip.
+# The public GPG key arrives via APT_GPG_PUBLIC_B64. CI's APT_CLIENT_* pair
+# authenticates only the build-time fetch; this writer never decodes it.
 #
-# CONTRACT: sourced by run-all.sh (chroot context). Strict; no `|| true`. A
-# partially-supplied mTLS pair (one of cert/key set, the other not) is a
-# misconfiguration and is fatal via die().
+# CONTRACT: sourced by run-all.sh (chroot context). Strict; no `|| true`.
 #
 # shellcheck shell=bash
 
@@ -109,34 +103,6 @@ EOF
   } >>/etc/apt/apt.conf.d/99ceralive
 }
 
-# Install the mTLS client certificate (CI mode).
-install_mtls_cert() {
-  local crt="${APT_CLIENT_CRT_B64:-}" key="${APT_CLIENT_KEY_B64:-}"
-
-  # Reject a half-configured pair loudly — a build that thinks it is in CI mode
-  # but is missing half the credential would silently produce an unusable repo.
-  if [[ -n "${crt}" && -z "${key}" ]] || [[ -z "${crt}" && -n "${key}" ]]; then
-    die "incomplete mTLS pair: set BOTH APT_CLIENT_CRT_B64 and APT_CLIENT_KEY_B64, or neither"
-  fi
-
-  if [[ -z "${crt}" ]]; then
-    log_warn "no mTLS secrets in env — skipping client-cert injection (CI provides them)"
-    return 0
-  fi
-
-  log_info "CI mode: installing apt.ceralive.tv mTLS client certificate"
-  printf '%s' "${crt}" | base64 -d >/etc/apt/certs/client.crt
-  printf '%s' "${key}" | base64 -d >/etc/apt/certs/client.key
-  # apt's https fetcher runs as sandbox user `_apt`; a root:root 0600 key is unreadable there ("Could not load client certificate"). Hand the key to `_apt`, owner-read only.
-  chown _apt:root /etc/apt/certs/client.key
-  chmod 400 /etc/apt/certs/client.key
-  chmod 644 /etc/apt/certs/client.crt
-  cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
-Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
-Acquire::https::apt.ceralive.tv::SslKey  "/etc/apt/certs/client.key";
-SSLEOF
-}
-
 # Install the GPG public keyring used to verify apt.ceralive.tv packages.
 # Resolution order: env → file → empty placeholder.
 install_gpg_keyring() {
@@ -172,9 +138,12 @@ EOF
 # manifests/first-party-apt-names.txt. Priority 990 sits just below apt's
 # "always" (1000) and above the archive default (500), so our build wins
 # without silently downgrading an already-installed newer Debian candidate; the
-# paired -1 stanza REFUSES a same-name Debian/radxa package outright, so a
-# same-name Debian build can never win a resolution against ours even without
-# the origin pin's help. The libsrt coinstall model stays
+# paired origin-wildcard -1 stanza refuses every other archive's version of
+# that exact package name, regardless of its Release fields or hostname,
+# without pinning the installed dpkg version. The 990 stanza must
+# come first: APT uses the first matching specific pin for a package version.
+# Debian-only rejection left other archives at priority 500 when ours was absent.
+# The libsrt coinstall model stays
 # Provides/Conflicts/Replaces (orthogonal to this origin pin). Names arrive
 # base64-forwarded (CERALIVE_FIRST_PARTY_NAMES_B64) because a subimage chroot
 # cannot read a path above $SRCDIR — same constraint as APT_GPG_PUBLIC_B64
@@ -199,15 +168,14 @@ install_apt_preferences() {
       [[ -n "${pkg}" ]] || continue
       case "${pkg}" in \#*) continue ;; esac
       printf '\nPackage: %s\nPin: origin apt.ceralive.tv\nPin-Priority: 990\n' "${pkg}"
-      printf '\nPackage: %s\nPin: release o=Debian\nPin-Priority: -1\n' "${pkg}"
+       printf '\nPackage: %s\nPin: origin *\nPin-Priority: -1\n' "${pkg}"
     done <<<"${names}"
   } >"${dir}/ceralive-origin"
 }
 
 configure_apt_ceralive_repo() {
-  mkdir -p /etc/opt/ceralive /etc/apt/certs /usr/share/keyrings
+  mkdir -p /etc/opt/ceralive /usr/share/keyrings
   configure_minimal_apt
-  install_mtls_cert
   install_gpg_keyring
   configure_ceralive_source
   install_apt_preferences

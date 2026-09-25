@@ -51,6 +51,7 @@
 # `(13/trixie)` automatic signing key already required as a build/runtime
 # dependency elsewhere in this pipeline (ci/Dockerfile, mkosi.postinst.chroot) —
 # confirmed empirically: `gpgv --keyring debian-archive-keyring.gpg InRelease`
+# suite-literal-ok: names which Debian signing keys dual-sign the upstream unstable suite; not this image's target suite
 # for the unstable suite verifies under BOTH the 12/bookworm and 13/trixie
 # automatic signing keys (Debian dual-signs unstable with recent-release keys
 # ahead of the next stable release). No new trust root is introduced.

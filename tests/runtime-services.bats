@@ -599,7 +599,11 @@ SH
   for script in "$canonical" "$inline"; do
     label="$(basename "$script")"
     root="$BATS_TEST_TMPDIR/hawkbit-$label"
-    mkdir -p "$root/bin" "$root/data" "$root/etc"
+    mkdir -p "$root/bin" "$root/data" "$root/etc" "$root/apt-credentials" "$root/legacy-certs"
+    printf 'package cert\n' >"$root/apt-credentials/client.crt"
+    printf 'package key\n' >"$root/apt-credentials/client.key"
+    printf 'legacy cert\n' >"$root/legacy-certs/client.crt"
+    printf 'legacy key\n' >"$root/legacy-certs/client.key"
     cat >"$root/enroll.conf" <<'EOF'
 HAWKBIT_SERVER=hawkbit.example:8080
 HAWKBIT_PROVISION_URL=https://provision.example/token
@@ -619,6 +623,7 @@ EOF
     printf '[system]\ncompatible=ceralive-test\n' >"$root/system.conf"
     cat >"$root/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"${HAWKBIT_CURL_ARGS_LOG}"
 case "${HAWKBIT_CURL_MODE:-offline}" in
   online) printf 'device-token\n' ;;
   empty) exit 0 ;;
@@ -626,8 +631,10 @@ case "${HAWKBIT_CURL_MODE:-offline}" in
 esac
 EOF
     chmod +x "$root/bin/curl"
+    local cert_args="$root/curl-args.log"
 
-    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=offline \
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=offline HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
       CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
       CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
       CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
@@ -642,7 +649,8 @@ EOF
     [ ! -e "$root/data/token" ]
     [ ! -e "$root/data/effective.conf" ]
 
-    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online \
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
       CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
       CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
       CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
@@ -655,9 +663,46 @@ EOF
     [ "$(cat "$root/data/token")" = device-token ]
     grep -Fq 'auth_token                = device-token' "$root/data/effective.conf"
     grep -Fq 'compatible=ceralive-test' "$root/data/effective.conf"
+    grep -Fq -- "--cert $root/apt-credentials/client.crt --key $root/apt-credentials/client.key" "$cert_args"
+    ! grep -Fq -- "--cert $root/legacy-certs/client.crt" "$cert_args"
+
+    # A legacy image without either packaged file can still enroll until upgraded.
+    rm -f "$root/apt-credentials/client.crt" "$root/apt-credentials/client.key"
+    : >"$cert_args"
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -eq 0 ]
+    grep -Fq -- "--cert $root/legacy-certs/client.crt --key $root/legacy-certs/client.key" "$cert_args"
+
+    # A partially installed package must not fall back to the legacy pair.
+    printf 'package cert\n' >"$root/apt-credentials/client.crt"
+    : >"$cert_args"
+    rm -f "$root/data/token" "$root/data/effective.conf"
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=online HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
+      CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
+      CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
+      CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
+      CERALIVE_HAWKBIT_EFFECTIVE="$root/data/effective.conf" \
+      CERALIVE_HAWKBIT_PENDING="$root/data/provision.pending" \
+      CERALIVE_RAUC_SYSTEM_CONF="$root/system.conf" \
+      bash "$script"
+    [ "$status" -eq 0 ]
+    [ -f "$root/data/provision.pending" ]
+    [ ! -s "$cert_args" ]
+    [ ! -e "$root/data/token" ]
+    rm -f "$root/apt-credentials/client.crt" "$root/data/provision.pending"
 
     rm -f "$root/data/token" "$root/data/effective.conf"
-    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=empty \
+    run env PATH="$root/bin:$PATH" HAWKBIT_CURL_MODE=empty HAWKBIT_CURL_ARGS_LOG="$cert_args" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
       CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
       CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
       CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \
@@ -672,6 +717,7 @@ EOF
     local no_curl="$root/no-curl"
     mkdir -p "$no_curl"
     run env PATH="$no_curl" \
+      CERALIVE_APT_CREDENTIALS_DIR="$root/apt-credentials" CERALIVE_APT_LEGACY_CERTS_DIR="$root/legacy-certs" \
       CERALIVE_HAWKBIT_ENROLL_CONF="$root/enroll.conf" \
       CERALIVE_HAWKBIT_TOKEN_FILE="$root/data/token" \
       CERALIVE_HAWKBIT_TEMPLATE="$root/template.conf" \

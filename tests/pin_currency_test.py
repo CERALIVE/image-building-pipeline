@@ -13,7 +13,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci"))
 from pin_releases import discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
-from pin_versions import PinError, compare  # noqa: E402 - standalone CLI module path
+from pin_versions import PinError, compare, release_version  # noqa: E402 - standalone CLI module path
 
 
 class PinCurrencyTest(unittest.TestCase):
@@ -27,6 +27,9 @@ class PinCurrencyTest(unittest.TestCase):
         self.catalog = self.root / "releases.json"
         self.data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
         self.data["checked_at"] = datetime.now(timezone.utc).isoformat()
+        # Synthetic-only release evidence: the live catalog stays untouched until publication.
+        self.data["releases"].append({"component": "apt-credentials", "tag": "apt-credentials-v1.0.0",
+            "published_at": "2026-09-23T00:00:00Z", "packages": {"ceralive-apt-credentials[all]": "1.0.0"}})
         # Historical incident fixtures must not follow the live release catalog.
         for component, tag, packages in (
             ("cerastream", "v2026.9.3", {"cerastream[amd64]": "2026.9.3", "cerastream[arm64]": "2026.9.3"}),
@@ -158,6 +161,14 @@ class PinCurrencyTest(unittest.TestCase):
         registry.write_text(registry.read_text().replace("pin: v2026.9.3", "pin: v2026.9.2"))
         self.assertEqual(self.run_guard().returncode, 2)
 
+    def test_missing_apt_credentials_registry_pin_fails(self) -> None:
+        registry = self.root / "versions.yaml"
+        import re
+        registry.write_text(re.sub(r"^apt-credentials:\n(?:  .*\n)+\n", "", registry.read_text(), count=1, flags=re.M))
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing/duplicate registry pin: apt-credentials", result.stderr)
+
     def test_unknown_app_package_fails(self) -> None:
         fetcher = self.root / "lib/fetch-debs.sh"
         fetcher.write_text(fetcher.read_text().replace("FIRST_PARTY_APT_PKGS=(", 'FIRST_PARTY_APT_PKGS=("new-package" '))
@@ -238,6 +249,9 @@ class PinCurrencyTest(unittest.TestCase):
 
 
 class VersionTest(unittest.TestCase):
+    def test_apt_credentials_tag_version(self) -> None:
+        self.assertEqual(release_version("apt-credentials-v1.0.1"), "1.0.1")
+
     def test_real_schemes(self) -> None:
         for left, right, expected in (
             ("1.14.4+ceralive.10", "1.14.4+ceralive.9", 1),
@@ -266,6 +280,20 @@ class VersionTest(unittest.TestCase):
         with patch("pin_releases.github", return_value=json.dumps(data)):
             result = discover_release("gstreamer-rockchip")
         self.assertEqual(result.tag, "1.14.4+ceralive.10")
+
+    def test_apt_credentials_discovery_skips_worker_releases_and_accepts_all_arches(self) -> None:
+        data = [[{"tag_name": tag, "draft": False, "prerelease": False,
+                  "published_at": "2026-09-24T00:00:00Z", "assets": assets}
+                 for tag, assets in (
+                     ("v2026.9.0", []),
+                     ("apt-credentials-v1.0.0", [{"name": "ceralive-apt-credentials_1.0.0_all.deb"}]),
+                     ("apt-credentials-v1.0.1", [{"name": "ceralive-apt-credentials_1.0.1_all.deb"}]),
+                 )]]
+        with patch("pin_releases.github", return_value=json.dumps(data)) as request:
+            result = discover_release("apt-credentials")
+        self.assertEqual(request.call_args.args[0][1], "repos/CERALIVE/apt-worker/releases?per_page=100")
+        self.assertEqual(result.tag, "apt-credentials-v1.0.1")
+        self.assertEqual(result.packages, {"ceralive-apt-credentials[all]": "1.0.1"})
 
     def test_unavailable_github_fails_closed(self) -> None:
         failed = subprocess.CompletedProcess([], 1, "", "HTTP 503")

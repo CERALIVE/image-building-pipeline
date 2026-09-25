@@ -226,6 +226,11 @@ specifics differ per board (not hardcoded); `system.conf` shape; that
   a well-formed no-CRC file is trusted. It also rejects
 duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,
 and proves userspace state replacement stays on one filesystem.
+The offline health cases execute the unchanged production healthcheck with a
+synthetic clean dpkg database, boot slot and build identity. Both no-receiver
+and no-link cases must mark good; a dead encoder must fail at its loader probe,
+and a missing dpkg status must refuse confirmation. Failed probes print their
+healthcheck log so an unrelated precondition cannot make a negative pass vacuously.
 
 `boot-script-sanitize.test.sh` additionally stubs `setexpr` as **absent** — the way
 this board's U-Boot really answers — so a decrement that depends on it fails the

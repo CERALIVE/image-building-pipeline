@@ -36,7 +36,8 @@ before building, using a tighter evidence-age bound.
 | `manifests/first-party-releases.json` | Independently observed published stable release and package versions, not copied from image pins |
 
 Covered components: `srt`, `cerastream`, `CeraUI`, `srtla`,
-`gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, and `librga`.
+`gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, `librga`, and
+`apt-credentials` (from the `apt-worker` repository, not its Worker release train).
 Component `srtla` is the Rust sender, renamed from `srtla-send-rs` at the 4.1.0
 cutover; its GitHub repository was not renamed, so `ci/pin_versions.py`
 `COMPONENT_REPOS` — not the component name — resolves the repository for release
@@ -53,7 +54,7 @@ release pins. They keep their existing gates. Neither platform library moves
 into `REPOS` or the app layer. `librga-ceralive-dev` is not an image package.
 
 Version comparison uses Debian's numeric comparator after removing an optional
-`v`/`srt-v` prefix and recognized hash/timestamp build suffixes. In particular,
+`v`/`srt-v`/`apt-credentials-v` prefix and recognized hash/timestamp build suffixes. In particular,
 `+ceralive.10` is **newer** than `+ceralive.9`; that suffix is never discarded
 as SemVer build metadata. Unknown version schemes fail closed.
 
@@ -65,7 +66,7 @@ cerastream, and an anonymous 404 is not proof that a newer release is absent.
 This keeps PR checks deterministic within an explicitly bounded observation
 window and avoids exposing a cross-repository credential to PR code.
 
-Refresh using a local `gh` login with read access to **all eight** repositories:
+Refresh using a local `gh` login with read access to all component repositories:
 
 ```sh
 python3 ci/check-first-party-pins.py --refresh
@@ -76,6 +77,11 @@ binding-only release trains, and picks the greatest component version, not
 GitHub's manually selected `latest` flag or a lexicographic tag maximum.
 It requires the selected newest release to carry all image packages. It
 never falls back to an older complete release if the newest is incomplete.
+Only `apt-credentials-v*` tags in `apt-worker` are considered for the credentials
+component; Worker tags cannot substitute for it. Until its first release is
+published, `--refresh` fails closed and preserves the committed catalog. Offline
+CLI tests append a synthetic credentials row to their private fixture only;
+that is not publication evidence.
 It updates only the catalog, **never the three pin inputs or overrides**.
 If pins are stale, a successful catalog refresh still exits **1** after
 writing the new evidence; this is the expected signal to review the pins.

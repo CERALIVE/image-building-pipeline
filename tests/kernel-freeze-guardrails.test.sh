@@ -377,6 +377,43 @@ grep -q "refusing to hold first-party package 'cerastream'" "${C1}/err" \
 
 pass "Part C1 OK (a first-party package in the boot-BSP fields aborts the build, holding nothing)"
 
+# --- C1b: each newly origin-protected name must fail before apt-mark ---------
+# Exercise the actual freeze function with each name misrouted into a boot-BSP
+# field. Keep RAUC installed so a refusal cannot pass by accident as an absent
+# package; an attempted hold is recorded even if the function later aborts.
+c1b_fail=0
+for pkg in gstreamer1.0-rockchip-ceralive librga2-ceralive ceralive-apt-credentials; do
+  C1B="${TMPROOT}/c1b-${pkg}"; mkdir -p "${C1B}/prefs"
+  make_stubs "${C1B}" "linux-image-generic-rk35xx 26.5.1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
+${pkg} 1.0.0"
+  if KERNEL_PACKAGES="linux-image-generic-rk35xx" FIRMWARE_PACKAGES="${pkg}" \
+       run_freeze "${C1B}" "${C1B}/prefs" >"${C1B}/out" 2>"${C1B}/err"; then
+    printf 'C1b: %s was accepted as boot BSP\n' "${pkg}" >&2
+    c1b_fail=1
+  elif ! grep -qF "refusing to hold first-party package '${pkg}'" "${C1B}/err"; then
+    printf 'C1b: %s was not refused as first-party: %s\n' "${pkg}" "$(<"${C1B}/err")" >&2
+    c1b_fail=1
+  fi
+  if [[ -s "${C1B}/holds" || -e "${C1B}/prefs/ceralive-kernel-freeze" ]]; then
+    printf 'C1b: %s reached apt-mark or the pin writer before refusal\n' "${pkg}" >&2
+    c1b_fail=1
+  fi
+done
+(( c1b_fail == 0 )) || fail "C1b: first-party boot-BSP injection did not fail before apt-mark for all three names"
+
+# The default chroot-safe literal must agree with the manifest used by both
+# origin-pin writers. RAUC's legacy updater is deliberately protected too, but
+# is not a CeraLive-published name; no other extras or missing names are allowed.
+manifest_names="$(grep -vE '^[[:space:]]*(#|$)' "${PIPELINE_DIR}/manifests/first-party-apt-names.txt" | sort -u)"
+read -r -a never_array <<<"${never}"
+never_names="$(printf '%s\n' "${never_array[@]}" | sort -u)"
+expected_never="$(printf '%s\n%s\n' "${manifest_names}" rauc-hawkbit-updater | sort -u)"
+[[ "${never_names}" == "${expected_never}" ]] \
+  || fail "C1b: default never-freeze names differ from first-party apt manifest plus rauc-hawkbit-updater: $(diff -u <(printf '%s\n' "${expected_never}") <(printf '%s\n' "${never_names}") || true)"
+pass "Part C1b OK (every origin-protected name refused before apt-mark; default set equals the manifest plus legacy updater)"
+
 # --- C2: a hold that does not land must ABORT --------------------------------
 C2="${TMPROOT}/c2"; mkdir -p "${C2}/prefs"
 make_stubs "${C2}" "linux-image-generic-rk35xx 26.5.1

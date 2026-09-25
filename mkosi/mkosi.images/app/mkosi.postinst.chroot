@@ -61,7 +61,7 @@ RUNTIME_APP_PKGS="libsrt1.5-ceralive \
 modemmanager libmm-glib0 \
 libmbim-glib4 libmbim-proxy libmbim-utils \
 libqmi-glib5 libqmi-proxy libqmi-utils \
- libqrtr-glib0 ceralive-modem-support"
+ libqrtr-glib0 ceralive-modem-support ceralive-apt-credentials"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
 # wrongly-pruned .deb fails loudly instead of shipping an app that cannot encode/bond
@@ -262,6 +262,29 @@ remove_chroot_service_policy() {
 # sibling for many binary packages, and removing the link orphans that copyright.
 # CERALIVE_DOC_ROOT exists so the shipped function itself can be driven against a
 # synthetic tree by tests/mkosi-contract.bats; the build never sets it.
+safe_prune_parent() {
+  local glob="$1" remainder component parent=""
+  [[ "${glob}" == /* ]] || { log "skipping unsafe non-absolute glob: ${glob}"; return 1; }
+  remainder="${glob#/}"
+  while [[ "${remainder}" == */* ]]; do
+    component="${remainder%%/*}"
+    remainder="${remainder#*/}"
+    if [[ -z "${component}" || "${component}" == . || "${component}" == .. ||
+          "${component}" == *'*'* || "${component}" == *'?'* ||
+          "${component}" == *'['* || "${component}" == *']'* ]]; then
+      log "skipping unsafe glob parent: ${glob}"
+      return 1
+    fi
+    parent+="/${component}"
+    if [[ -L "${parent}" ]]; then
+      log "skipping glob with symlink parent ${parent}: ${glob}"
+      return 1
+    fi
+  done
+  [[ -n "${remainder}" && "${remainder}" != . && "${remainder}" != .. ]] \
+    || { log "skipping unsafe glob: ${glob}"; return 1; }
+}
+
 prune_package_docs() {
   local docdir="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
   if [[ -d "${docdir}" ]]; then
@@ -279,13 +302,19 @@ prune_package_docs() {
   # manifest drives every consumer, not that this pass finds anything new.
   local prune_list="${CERALIVE_PRUNE_PATHS_LIST:-/usr/lib/ceralive/prune-paths.list}"
   if [[ -r "${prune_list}" ]]; then
-    local line
+    local line target
+    local IFS=
+    shopt -s nullglob
     while IFS= read -r line || [[ -n "${line}" ]]; do
       [[ -n "${line}" ]] || continue
       case "${line}" in \#*) continue ;; esac
-      # shellcheck disable=SC2086 # deliberately unquoted: prune-paths.list entries are globs
-      rm -rf -- ${line} 2>/dev/null || true
+      safe_prune_parent "${line}" || continue
+      # shellcheck disable=SC2086 # glob expansion is required; IFS is empty, so paths are not word-split
+      for target in ${line}; do
+        rm -rf -- "${target}" 2>/dev/null || true
+      done
     done <"${prune_list}"
+    shopt -u nullglob
   fi
 }
 

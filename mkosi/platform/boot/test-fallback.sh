@@ -138,6 +138,8 @@ assert_contains "rock-5b cera_board.env: board_id from manifest" "${r5b}/cera_bo
 assert_contains "opi5 cera_board.env: DIFFERENT fdtfile" "${opi}/cera_board.env" "fdtfile=rk3588s-orangepi-5-plus.dtb"
 assert_contains "recovery script loads slot A from p2" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 2'
 assert_contains "recovery script loads slot B from p3" "${BOOT_DIR}/recovery.scr.cmd" 'setenv cera_part 3'
+# The U-Boot variables are the literal contract, not shell expansions.
+# shellcheck disable=SC2016
 assert_contains "recovery script loads kernel from selected rootfs" "${BOOT_DIR}/recovery.scr.cmd" 'ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image'
 if [[ -f "${r5b}/boot.scr" ]]; then ok "boot.scr compiled (mkimage present)"; \
   else assert_contains "boot.scr.cmd staged (mkimage absent)" "${r5b}/boot.scr.cmd" "CeraLive A/B boot selector"; fi
@@ -297,19 +299,40 @@ mk_stub() { # <name> <line...> ; writes an executable stub of those body lines
 }
 mk_stub systemctl  'exit 0'
 mk_stub rauc       'exit 0'
+mk_stub dpkg       '[[ "$*" == --audit ]]'
 mk_stub cerastream  'echo "cerastream (stub) 0.0.0"; exit 0'
 mk_stub srtla_send 'echo "srtla_send (stub)"; exit 0'
 mk_stub cerastream_dead \
   'echo "cerastream: error while loading shared libraries: libsrt.so.1.5: cannot open shared object file" >&2' \
   'exit 127'
 mk_stub ip 'echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000"'
+mkdir -p "${WORK}/dpkg-updates"
+printf 'Package: cerastream\nStatus: install ok installed\n' >"${WORK}/dpkg-status"
+printf 'root=PARTLABEL=rootfs_a rauc.slot=A\n' >"${WORK}/hc-cmdline"
+printf 'BUILD_ID="fallback-fixture"\n' >"${WORK}/hc-os-release"
+printf '847ee4ac-0b00-4043-8d1b-5a5e1eb5b930\n' >"${WORK}/hc-boot-id"
 
 run_healthcheck() { # <conf> <marker> [cerastream-bin] -> healthcheck exit code
+  local rc=0
   CERALIVE_HEALTHCHECK_CONF="$1" CERALIVE_HEALTHCHECK_MARKER="$2" \
   SYSTEMCTL_BIN="${HC_STUBS}/systemctl" RAUC_BIN="${HC_STUBS}/rauc" \
+  DPKG_BIN="${HC_STUBS}/dpkg" CERALIVE_DPKG_UPDATES_DIR="${WORK}/dpkg-updates" \
+  CERALIVE_DPKG_STATUS_FILE="${WORK}/dpkg-status" \
+  CERALIVE_HEALTHCHECK_CMDLINE_FILE="${WORK}/hc-cmdline" \
+  CERALIVE_OS_RELEASE_FILE="${WORK}/hc-os-release" \
+  CERALIVE_HEALTHCHECK_BOOT_ID_FILE="${WORK}/hc-boot-id" \
+  CERALIVE_HEALTHY_STATE_FILE="${WORK}/healthy-state.json" \
+  CERALIVE_PARTLABEL_FAILURE="${WORK}/partlabel-guard.failed" \
+  CERALIVE_DEBUG_MARKER="${WORK}/debug-image" \
+  CERALIVE_FORCE_HEALTHCHECK_FAIL="${WORK}/force-healthcheck-fail" \
   CERASTREAM_BIN="${3:-${HC_STUBS}/cerastream}" SRTLA_SEND_BIN="${HC_STUBS}/srtla_send" \
   IP_BIN="${HC_STUBS}/ip" \
-    bash "${HEALTHCHECK}" >/dev/null 2>&1
+    bash "${HEALTHCHECK}" >"${WORK}/healthcheck.log" 2>&1 || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    printf '  healthcheck exit %s (%s):\n' "${rc}" "$1" >&2
+    while IFS= read -r line; do printf '    %s\n' "${line}" >&2; done <"${WORK}/healthcheck.log"
+  fi
+  return "${rc}"
 }
 
 # 9a. OFFLINE, no upstream configured (IRL_SERVER_HOST unset) -> reach SKIPPED.
@@ -317,6 +340,7 @@ printf 'HEALTHCHECK_TIMEOUT=5\nHEALTHCHECK_RETRY_INTERVAL=1\n' >"${WORK}/hc-offl
 hc_rc=0; run_healthcheck "${WORK}/hc-offline.conf" "${WORK}/marker-offline" || hc_rc=$?
 assert_eq "offline (no SRT host) gate marks good -> exit 0" "0" "${hc_rc}"
 if [[ -f "${WORK}/marker-offline" ]]; then ok "offline gate wrote the mark-good marker"; else bad "offline gate wrote NO marker"; fi
+assert_contains "offline gate recorded healthy slot A" "${WORK}/healthy-state.json" '"slot":"A"'
 
 # 9b. OFFLINE with a host configured but NO link up -> reach SKIPPED by the new
 #     no-network guard (host is unreachable TEST-NET, only loopback is up).
@@ -330,6 +354,14 @@ printf 'HEALTHCHECK_TIMEOUT=0\nHEALTHCHECK_RETRY_INTERVAL=1\n' >"${WORK}/hc-dead
 hc_rc=0; run_healthcheck "${WORK}/hc-dead.conf" "${WORK}/marker-dead" "${HC_STUBS}/cerastream_dead" || hc_rc=$?
 if [[ "${hc_rc}" -ne 0 ]]; then ok "dead-encoder gate FAILS (exit ${hc_rc}, no mark-good)"; else bad "dead-encoder gate exited 0 — would brick"; fi
 if [[ ! -f "${WORK}/marker-dead" ]]; then ok "dead-encoder gate wrote NO mark-good marker"; else bad "dead-encoder gate wrote a marker despite failure"; fi
+assert_contains "dead encoder failed at loader probe (not an unrelated prerequisite)" "${WORK}/healthcheck.log" 'cannot load its shared libraries'
+
+# Missing dpkg metadata was the old fixture defect. Prove the REAL gate refuses it
+# even with a loadable encoder, rather than teaching the healthcheck to bypass it.
+rm -f "${WORK}/dpkg-status"
+hc_rc=0; run_healthcheck "${WORK}/hc-offline.conf" "${WORK}/marker-no-dpkg" || hc_rc=$?
+if [[ "${hc_rc}" -ne 0 && ! -e "${WORK}/marker-no-dpkg" ]]; then ok "missing dpkg status refuses offline mark-good"; else bad "missing dpkg status was accepted"; fi
+assert_contains "old fixture defect reports dpkg database unavailable" "${WORK}/healthcheck.log" 'FAIL: dpkg database unavailable'
 
 echo
 echo "=============================================================="

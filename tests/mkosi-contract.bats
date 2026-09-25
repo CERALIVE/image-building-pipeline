@@ -263,6 +263,29 @@ sectioned_keys() {
   [ -e "$root2/kept/file" ]
 }
 
+@test "mkosi-contract: prune_package_docs skips a symlinked locale parent without deleting outside bytes" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  local root="$BATS_TEST_TMPDIR/symlink-parent"
+  local prune_list="$BATS_TEST_TMPDIR/symlink-parent-prune.list"
+  mkdir -p "$root/usr/share" "$root/usr/lib/locale" "$root/keep" "$root/doc/libfoo"
+  printf 'outside sentinel\n' >"$root/keep/messages.mo"
+  printf 'safe to prune\n' >"$root/usr/lib/locale/locale-archive"
+  printf 'licence\n' >"$root/doc/libfoo/copyright"
+  printf 'changelog\n' >"$root/doc/libfoo/changelog.gz"
+  ln -s "$root/keep" "$root/usr/share/locale"
+  printf '%s/usr/share/locale/*\n%s/usr/lib/locale/locale-archive\n' "$root" "$root" >"$prune_list"
+
+  run env CERALIVE_DOC_ROOT="$root/doc" CERALIVE_PRUNE_PATHS_LIST="$prune_list" \
+    bash -c "source '$app_postinst'; prune_package_docs"
+  [ "$status" -eq 0 ]
+  [ "$(<"$root/keep/messages.mo")" = 'outside sentinel' ]
+  [ -L "$root/usr/share/locale" ]
+  [ ! -e "$root/usr/lib/locale/locale-archive" ]
+  [ -f "$root/doc/libfoo/copyright" ]
+  [ ! -e "$root/doc/libfoo/changelog.gz" ]
+  [[ "$output" == *"symlink"* ]]
+}
+
 @test "mkosi-contract: the deferred prune runs at the final app layer only" {
   local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
   grep -Fq 'prune_package_docs' "$app_postinst"

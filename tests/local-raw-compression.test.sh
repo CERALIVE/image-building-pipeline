@@ -26,6 +26,8 @@ EOF
 cat >"${TMP}/build-bundle" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+: "${MKOSI_BUILDER_IMAGE:?builder image is required}" "${RAUC_DEB_DIR:?RAUC build directory is required}"
+[[ -d "${RAUC_DEB_DIR}" ]]
 printf 'bundle\n' >"${BUNDLE_OUT_DIR}/${BUNDLE_TS}.raucb"
 EOF
 chmod +x "${TMP}/assemble-disk" "${TMP}/build-bundle"
@@ -43,16 +45,18 @@ BOARD_ID='fixture-board'
 COMPATIBLE_STRING='ceralive-fixture-board'
 CERALIVE_RAUC_PKI_DIR="${TMP}/pki"
 bsp_dir="${TMP}/bsp"
+rauc_build_dir="${TMP}/rauc-build"
 rootfs_tree="${TMP}/rootfs"
 artifact="${TMP}/rootfs.tar"
 build_version='fixture'
+MKOSI_BUILDER_IMAGE='fixture-builder'
 ASSEMBLE_DISK_SH="${TMP}/assemble-disk"
 BUILD_BUNDLE_SH="${TMP}/build-bundle"
 SEAL_RAW_CANDIDATE_SH="${PIPELINE_DIR}/ci/seal-raw-candidate.sh"
 export board variant RAUC_BOOTLOADER_ADAPTER INSTALL_BOOT_BSP SINGLE_SLOT_FALLBACK
-export BOARD_ID COMPATIBLE_STRING CERALIVE_RAUC_PKI_DIR bsp_dir rootfs_tree
-export artifact build_version ASSEMBLE_DISK_SH BUILD_BUNDLE_SH SEAL_RAW_CANDIDATE_SH
-mkdir -p "${out_dir}" "${bsp_dir}" "${rootfs_tree}"
+export BOARD_ID COMPATIBLE_STRING CERALIVE_RAUC_PKI_DIR bsp_dir rauc_build_dir rootfs_tree
+export artifact build_version MKOSI_BUILDER_IMAGE ASSEMBLE_DISK_SH BUILD_BUNDLE_SH SEAL_RAW_CANDIDATE_SH
+mkdir -p "${out_dir}" "${bsp_dir}" "${rauc_build_dir}" "${rootfs_tree}"
 
 # shellcheck disable=SC1090 # STAGE resolves to the repository's shipped stage module.
 source "${STAGE}"
@@ -64,8 +68,22 @@ raw_sha="$(sha256sum "${raw_artifact}" | cut -d' ' -f1)"
 [[ -s "${raw_artifact}.xz.sha256" ]]
 [[ -s "${raw_artifact}.sha256" ]]
 [[ "$(awk 'NR == 1 { print $1 }' "${raw_artifact}.sha256")" == "${raw_sha}" ]]
-( cd "${out_dir}" && sha256sum -c "$(basename "${raw_artifact}").xz.sha256" )
+( cd "${out_dir}" && sha256sum -c "$(basename "${raw_artifact}").sha256" && sha256sum -c "$(basename "${raw_artifact}").xz.sha256" )
 [[ "$(xz -dc -- "${raw_artifact}.xz" | sha256sum | cut -d' ' -f1)" == "${raw_sha}" ]]
 [[ -s "${out_dir}/${ts}.raucb" ]]
+
+if ( unset MKOSI_BUILDER_IMAGE; out_dir="${TMP}/missing-builder"; mkdir -p "${out_dir}"; stage_assemble ) >"${TMP}/missing-builder.log" 2>&1; then
+  printf 'stage_assemble accepted a missing builder image\n' >&2
+  exit 1
+fi
+grep -Fq 'MKOSI_BUILDER_IMAGE: unbound variable' "${TMP}/missing-builder.log"
+
+cp -- "${raw_artifact}.xz" "${TMP}/truncated.raw.xz"
+truncate -s "$(( $(stat -c %s "${TMP}/truncated.raw.xz") - 1 ))" "${TMP}/truncated.raw.xz"
+if xz -t -- "${TMP}/truncated.raw.xz" >"${TMP}/truncated.log" 2>&1; then
+  printf 'truncated compressed raw passed xz integrity verification\n' >&2
+  exit 1
+fi
+grep -Fq 'Unexpected end of input' "${TMP}/truncated.log"
 
 printf 'local raw compression wiring: PASS\n'

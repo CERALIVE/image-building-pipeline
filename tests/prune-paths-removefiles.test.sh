@@ -86,8 +86,8 @@ source "${PIPELINE_DIR}/lib/stages/mkosi.sh"
 
 SCRATCH_MKOSI="${WORK}/mkosi-scratch"
 mkdir -p "${SCRATCH_MKOSI}/mkosi.images/runtime"
-MKOSI_DIR="${SCRATCH_MKOSI}" PIPELINE_DIR="${WORK}" CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE}" \
-  generate_prune_local_conf >/dev/null 2>&1 \
+export MKOSI_DIR="${SCRATCH_MKOSI}"
+CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE}" generate_prune_local_conf >/dev/null 2>&1 \
   || fail "Part B: generate_prune_local_conf() (the real shipped stage function) failed"
 
 GENERATED="${SCRATCH_MKOSI}/mkosi.images/runtime/mkosi.local.conf"
@@ -98,19 +98,18 @@ grep -qxF "RemoveFiles=${expected_csv}" "${GENERATED}" \
 
 echo "prune-paths-removefiles: Part B OK (real generate_prune_local_conf() writes a valid mkosi.local.conf)"
 
-# Idempotent overwrite: a second call with a DIFFERENT manifest must fully
-# replace the content, never append to a stale file from a prior build.
 FIXTURE2="${WORK}/fixture2.list"
 printf '/only/this/glob/*\n' >"${FIXTURE2}"
-MKOSI_DIR="${SCRATCH_MKOSI}" PIPELINE_DIR="${WORK}" CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE2}" \
-  generate_prune_local_conf >/dev/null 2>&1 \
+prune_local_conf_cleanup
+[[ ! -e "${GENERATED}" ]] || fail "Part B: cleanup left a generated mkosi config behind"
+CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE2}" generate_prune_local_conf >/dev/null 2>&1 \
   || fail "Part B (idempotency leg): second generate_prune_local_conf() call failed"
 grep -qxF 'RemoveFiles=/only/this/glob/*' "${GENERATED}" \
   || fail "Part B (idempotency leg): regenerated file does not carry the new manifest's globs"
 grep -qF '/trailing/whitespace/glob/*' "${GENERATED}" \
   && fail "Part B (idempotency leg): regenerated file STILL carries the FIRST manifest's globs — not an overwrite"
 
-echo "prune-paths-removefiles: Part B (idempotent overwrite) OK"
+echo "prune-paths-removefiles: Part B (clean regeneration) OK"
 
 # ===========================================================================
 # Part C — REAL mkosi: a synthetic top-level project proves mkosi's own
@@ -126,7 +125,10 @@ fi
 
 MKOSI_PROJECT="${WORK}/mkosi-project"
 mkdir -p "${MKOSI_PROJECT}"
-cat >"${MKOSI_PROJECT}/mkosi.conf" <<'EOF'
+STATIC_REMOVE="$(grep '^RemoveFiles=' "${PIPELINE_DIR}/mkosi/mkosi.images/runtime/mkosi.conf")"
+[[ "${STATIC_REMOVE}" == *'/usr/lib/aarch64-linux-gnu/libgallium-*.so'* ]] \
+  || fail "Part C: shipped static Mesa prune missing before real mkosi check"
+cat >"${MKOSI_PROJECT}/mkosi.conf" <<EOF
 [Distribution]
 Distribution=debian
 Release=trixie
@@ -135,7 +137,7 @@ Release=trixie
 Format=none
 
 [Content]
-RemoveFiles=/usr/share/locale/*,/usr/lib/locale/locale-archive
+${STATIC_REMOVE}
 EOF
 
 before_summary="$(cd "${MKOSI_PROJECT}" && mkosi summary 2>&1)"
@@ -152,6 +154,10 @@ after_summary="$(cd "${MKOSI_PROJECT}" && mkosi summary 2>&1)"
   || fail "Part C: after adding mkosi.local.conf, the STATIC baseline RemoveFiles= entry is GONE — mkosi.local.conf REPLACED instead of merging"
 [[ "${after_summary}" == *'/usr/lib/locale/locale-archive'* ]] \
   || fail "Part C: static baseline's second entry lost after merge"
+[[ "${after_summary}" == *'/usr/lib/aarch64-linux-gnu/libgallium-*.so'* &&
+   "${after_summary}" == *'/usr/lib/aarch64-linux-gnu/libLLVM*.so*'* &&
+   "${after_summary}" == *'/usr/lib/aarch64-linux-gnu/dri/*_dri.so'* ]] \
+  || fail "Part C: actual static Mesa/LLVM/DRI globs lost after generated merge"
 [[ "${after_summary}" == *'/only/this/glob/*'* ]] \
   || fail "Part C: the manifest-sourced glob from mkosi.local.conf is ABSENT from mkosi's resolved RemoveFiles= — the single-source mechanism does not actually reach mkosi"
 
@@ -175,5 +181,106 @@ if [[ "${mutated_summary}" == *'/only/this/glob/*'* ]]; then
   fail "mutation proof FAILED: a RemoveFiles= key mis-sectioned into [Match] was still merged — the Part C assertion is vacuous and cannot distinguish a working merge from a broken one"
 fi
 echo "prune-paths-removefiles: mutation proof OK (a mis-sectioned RemoveFiles= is correctly NOT merged, proving the Part C assertion is non-vacuous)"
+
+# Part D — run the shipped stage in a child process, not a reimplementation.
+# The fixture has no package fetch, secrets or real mkosi invocation.
+HARNESS="${WORK}/stage-harness.sh"
+cat >"${HARNESS}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "${REPO}/lib/shared/prune-paths-lib.sh"
+source "${REPO}/lib/stages/mkosi.sh"
+log_info() { :; }
+log_success() { :; }
+die() { printf 'stage refusal: %s\n' "$*" >&2; exit 1; }
+select_build_mode() { BUILD_MODE=native; }
+ceralive_mkosi_cache_domain() { printf native; }
+container_build_proxy_args() { :; }
+PIPELINE_DIR="${ROOT}"
+MKOSI_DIR="${ROOT}/mkosi"
+STAGING_ROOT="${ROOT}/staging"
+mkdir -p "${MKOSI_DIR}/mkosi.images/runtime" "${STAGING_ROOT}"
+CERALIVE_PRUNE_PATHS_MANIFEST="${REPO}/manifests/prune-paths.list"
+board=fixture RELEASE=trixie CERALIVE_REL_MKOSI_WORKSPACE_DIR=.mkosi-workspace
+mkosi_arch=x86-64 bsp_dir=/unused firstparty_dir=/unused SOURCE_DATE_EPOCH=0
+run_mkosi_build() {
+  [[ -f "${MKOSI_DIR}/mkosi.images/runtime/mkosi.local.conf" ]] || exit 91
+  printf 'entered\n' >"${ROOT}/entered"
+  case "${MODE}" in
+    success) mkdir -p "${MKOSI_DIR}/build/app" ;;
+    failure) return 42 ;;
+    replaced)
+      rm -- "${MKOSI_DIR}/mkosi.images/runtime/mkosi.local.conf"
+      printf '[Content]\nRemoveFiles=/operator/new\n' >"${MKOSI_DIR}/mkosi.images/runtime/mkosi.local.conf"
+      return 42 ;;
+    wait) while :; do sleep 0.1; done ;;
+  esac
+}
+prune_local_conf_install_traps
+prune_local_conf_preflight
+[[ ! -e "${MKOSI_DIR}/mkosi.images/runtime/mkosi.local.conf" ]] || exit 92
+[[ "${MODE}" != pre-stage-failure ]] || exit 41
+if [[ "${MODE}" == dry-run ]]; then
+  stage_dry_run_plan
+  exit 93
+fi
+stage_mkosi
+EOF
+
+run_fixture() {
+  REPO="${PIPELINE_DIR}" ROOT="${WORK}/lifecycle" MODE="$1" DRY_RUN="${DRY_RUN:-0}" \
+    bash "${HARNESS}"
+}
+
+LIFECYCLE="${WORK}/lifecycle/mkosi/mkosi.images/runtime/mkosi.local.conf"
+mkdir -p "$(dirname "${LIFECYCLE}")"
+# Reproduce an aborted older invocation by leaving its exact generated payload.
+cp "${GENERATED}" "${LIFECYCLE}"
+DRY_RUN=1 run_fixture dry-run || fail "Part D: DRY_RUN fixture failed"
+[[ ! -e "${LIFECYCLE}" ]] || fail "Part D: DRY_RUN retained an old generated RemoveFiles= config"
+[[ ! -e "${WORK}/lifecycle/entered" ]] || fail "Part D: DRY_RUN invoked mkosi"
+cp "${GENERATED}" "${LIFECYCLE}"
+if run_fixture pre-stage-failure; then fail "Part D: pre-stage abort succeeded"; fi
+[[ ! -e "${LIFECYCLE}" ]] || fail "Part D: pre-stage abort retained stale generated config"
+
+run_fixture success || fail "Part D: success fixture failed"
+[[ ! -e "${LIFECYCLE}" ]] || fail "Part D: successful mkosi left a generated config behind"
+if run_fixture failure; then fail "Part D: failed mkosi was reported successful"; fi
+[[ ! -e "${LIFECYCLE}" ]] || fail "Part D: failed mkosi left a generated config behind"
+
+for signal in INT TERM; do
+  if MODE=wait DRY_RUN=0 REPO="${PIPELINE_DIR}" ROOT="${WORK}/lifecycle" \
+    timeout -s "${signal}" 1s bash "${HARNESS}"; then
+    fail "Part D: ${signal} fixture incorrectly succeeded"
+  fi
+  [[ -e "${WORK}/lifecycle/entered" ]] || fail "Part D: ${signal} fixture never reached mkosi"
+  [[ ! -e "${LIFECYCLE}" ]] || fail "Part D: ${signal} left a generated config behind"
+done
+
+# Ambiguous operator config is neither overwritten nor removed on a dry run.
+printf '[Content]\nRemoveFiles=/operator/keep\n' >"${LIFECYCLE}"
+cp "${LIFECYCLE}" "${WORK}/operator-copy"
+if DRY_RUN=1 run_fixture dry-run; then fail "Part D: operator-owned config was admitted"; fi
+cmp -s "${LIFECYCLE}" "${WORK}/operator-copy" || fail "Part D: operator-owned config was clobbered"
+rm -- "${LIFECYCLE}"
+ln -s "${WORK}/operator-copy" "${LIFECYCLE}"
+if DRY_RUN=1 run_fixture dry-run; then fail "Part D: operator-owned symlink was admitted"; fi
+[[ -L "${LIFECYCLE}" ]] || fail "Part D: operator-owned symlink was removed"
+cmp -s "${WORK}/operator-copy" "${LIFECYCLE}" || fail "Part D: symlink target changed"
+rm -- "${LIFECYCLE}"
+if run_fixture replaced; then fail "Part D: replaced config was admitted"; fi
+cmp -s "${LIFECYCLE}" "${WORK}/operator-copy" \
+  && fail "Part D: replacement did not carry the changed operator value"
+grep -qxF 'RemoveFiles=/operator/new' "${LIFECYCLE}" \
+  || fail "Part D: cleanup removed or rewrote a replaced operator config"
+echo "prune-paths-removefiles: Part D OK (stale/dry-run, success, failure, INT, TERM, ambiguous owner)"
+
+ORCHESTRATOR="${PIPELINE_DIR}/lib/orchestrate.sh"
+grep -Fq 'prune_local_conf_install_traps' "${ORCHESTRATOR}" \
+  || fail "Part D: orchestrator no longer installs EXIT/INT/TERM cleanup"
+preflight_line="$(grep -nF '  prune_local_conf_preflight' "${ORCHESTRATOR}" | cut -d: -f1)"
+fetch_line="$(grep -nF '  stage_fetch' "${ORCHESTRATOR}" | cut -d: -f1)"
+[[ -n "${preflight_line}" && -n "${fetch_line}" && ${preflight_line} -lt ${fetch_line} ]] \
+  || fail "Part D: stale-file cleanup must precede fetch and DRY_RUN early exit"
 
 echo "prune-paths-removefiles regression: PASS"

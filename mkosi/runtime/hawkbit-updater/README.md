@@ -113,7 +113,9 @@ never in git):
 2. `ceralive-hawkbit-provision.service` (oneshot, `ConditionPathExists=` that file)
    runs `provision-token.sh`, which:
    - resolves the token (target token / gateway token / fetched over mTLS using the
-     existing apt client cert), persists it to `/data/ceralive/hawkbit-token`
+     packaged `/usr/share/ceralive/apt-credentials/client.{crt,key}` pair, falling
+     back to the legacy `/etc/apt/certs/client.{crt,key}` pair only when both
+     packaged files are absent), persists it to `/data/ceralive/hawkbit-token`
      (`0600`, the canonical store);
    - renders the **effective** config to `/data/ceralive/hawkbit-updater/config.conf`
      (`0600`) — placeholders filled, the auth line set to `auth_token` **or**

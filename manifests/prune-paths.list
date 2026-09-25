@@ -6,8 +6,11 @@
 # THREE CONSUMERS, ONE LIST:
 #
 #   1. Build-time: lib/stages/mkosi.sh generates
-#      mkosi/mkosi.images/runtime/mkosi.local.conf (gitignored, regenerated on
-#      every real build) with `RemoveFiles=<these globs, comma-joined>`. mkosi
+#      mkosi/mkosi.images/runtime/mkosi.local.conf (gitignored, present only
+#      during the owning real mkosi invocation) with `RemoveFiles=<these globs,
+#      comma-joined>`. An old generated copy is removed before a build or
+#      DRY_RUN; an unrelated local operator config makes the build refuse.
+#      mkosi
 #      APPENDS list-type settings across config files (its own documented
 #      cascade rule — a repeated setting is a collection merge, not an
 #      override), so this ADDS to, and never replaces, the runtime layer's

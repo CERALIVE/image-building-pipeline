@@ -10,8 +10,10 @@
 # For each name, both writers emit a PAIR of stanzas: our origin at 990 (below
 # apt's "always" 1000, above the archive default 500 — so our build wins
 # without silently downgrading an already-installed newer Debian candidate),
-# and any same-name Debian package pinned to -1 (refused outright), so a
-# same-name Debian/radxa build can never win a resolution against ours. This
+# and every other archive's same-name version pinned to -1 with `Pin: origin *`
+# (refused outright, without pinning an already-installed version),
+# even when apt.ceralive.tv does not publish that name. The exact-host stanza
+# comes first so its 990 priority wins APT's first-specific-match rule. This
 # REPLACES the former blanket `Package: * / Pin: origin apt.ceralive.tv /
 # Pin-Priority: 990` wildcard, which pinned every future apt.ceralive.tv
 # publication sight-unseen — origin protection is now per exact name.
@@ -20,9 +22,8 @@
 # / package-layer.ts roster) plus the two platform-layer forks consumed via a
 # URL+SHA pin swap (gstreamer-rockchip-fork, librga-fork — NOT REPOS entries,
 # see root AGENTS.md) plus the fleet apt-credentials companion (Todo 11/29;
-# see the FETCH/INSTALL wiring note in AGENTS.md for its current BLOCKED
-# status — origin-pin readiness here does not imply it is fetched or
-# installed yet).
+# see the FETCH/INSTALL wiring note in AGENTS.md: the release is not published
+# yet, so a real fetch still fails closed).
 ceralive-device
 ceralive-modem-support
 cerastream

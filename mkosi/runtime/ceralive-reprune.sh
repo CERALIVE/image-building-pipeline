@@ -41,17 +41,46 @@ DOC_ROOT="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
 
 log() { printf '%s: %s\n' "${PROG}" "$*" >&2; }
 
+safe_prune_parent() {
+  local glob="$1" remainder component parent=""
+  [[ "${glob}" == /* ]] || { log "skipping unsafe non-absolute glob: ${glob}"; return 1; }
+  remainder="${glob#/}"
+  while [[ "${remainder}" == */* ]]; do
+    component="${remainder%%/*}"
+    remainder="${remainder#*/}"
+    if [[ -z "${component}" || "${component}" == . || "${component}" == .. ||
+          "${component}" == *'*'* || "${component}" == *'?'* ||
+          "${component}" == *'['* || "${component}" == *']'* ]]; then
+      log "skipping unsafe glob parent: ${glob}"
+      return 1
+    fi
+    parent+="/${component}"
+    if [[ -L "${parent}" ]]; then
+      log "skipping glob with symlink parent ${parent}: ${glob}"
+      return 1
+    fi
+  done
+  [[ -n "${remainder}" && "${remainder}" != . && "${remainder}" != .. ]] \
+    || { log "skipping unsafe glob: ${glob}"; return 1; }
+}
+
 prune_manifest_globs() {
   [[ -r "${PRUNE_PATHS_FILE}" ]] || { log "no readable ${PRUNE_PATHS_FILE} — nothing to reprune"; return 0; }
-  local line
+  local line target
+  local IFS=
+  shopt -s nullglob
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [[ -n "${line}" ]] || continue
     case "${line}" in \#*) continue ;; esac
-    # shellcheck disable=SC2086 # deliberately unquoted: prune-paths.list entries are globs
-    rm -rf -- ${line} 2>/dev/null || log "could not remove glob (non-fatal): ${line}"
+    safe_prune_parent "${line}" || continue
+    # shellcheck disable=SC2086 # glob expansion is required; IFS is empty, so paths are not word-split
+    for target in ${line}; do
+      rm -rf -- "${target}" 2>/dev/null || log "could not remove glob (non-fatal): ${line}"
+    done
   done <"${PRUNE_PATHS_FILE}"
+  shopt -u nullglob
 }
 
 prune_docs_to_copyright() {

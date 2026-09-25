@@ -193,7 +193,7 @@ assert_repos_integrity
 # other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).
 # External deps (glib, libgudev, polkit, …) come from Debian via shared.list; the
-# origin-990 pin (customize/apt-ceralive-repo.sh, Package: *) keeps the fork
+# per-name origin-990 pin (customize/apt-ceralive-repo.sh) keeps the fork
 # winning on-device.
 FIRST_PARTY_APT_PKGS=(
   "libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvcsrc" "ceralive-device" "srtla"
@@ -202,6 +202,7 @@ FIRST_PARTY_APT_PKGS=(
   "libqmi-glib5" "libqmi-proxy" "libqmi-utils"
   "libqrtr-glib0"
   "ceralive-modem-support"
+  "ceralive-apt-credentials"
 )
 usage() {
   cat >&2 <<EOF

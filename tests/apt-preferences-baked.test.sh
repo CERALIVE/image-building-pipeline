@@ -49,8 +49,8 @@ grep -Eq 'Pin: origin apt\.ceralive\.tv' <<<"${fn_body}" \
   || fail "setup_ceralive_repository() no longer pins the apt.ceralive.tv origin"
 grep -Eq 'Pin-Priority: 990' <<<"${fn_body}" \
   || fail "setup_ceralive_repository() no longer sets Pin-Priority: 990"
-grep -Eq 'Pin: release o=Debian' <<<"${fn_body}" \
-  || fail "setup_ceralive_repository() no longer refuses a same-name Debian package (Pin: release o=Debian) — Todo 29's -1 stanza is missing"
+grep -Eq 'Pin: origin \*' <<<"${fn_body}" \
+  || fail "setup_ceralive_repository() no longer refuses every other origin of a first-party name — Todo 29's -1 stanza is missing"
 grep -Eq "rm -f /etc/apt/preferences\.d/ceralive\$" <<<"${fn_body}" \
   || fail "setup_ceralive_repository() no longer removes the RETIRED /etc/apt/preferences.d/ceralive wildcard file"
 
@@ -92,7 +92,7 @@ setup_ceralive_repository
 grep -qxF 'Package: cerastream' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Package: cerastream'"; exit 1; }
 grep -qxF 'Pin: origin apt.ceralive.tv' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin: origin apt.ceralive.tv'"; exit 1; }
 grep -qxF 'Pin-Priority: 990' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin-Priority: 990'"; exit 1; }
-grep -qxF 'Pin: release o=Debian' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing the -1 Debian-refusal stanza"; exit 1; }
+grep -qxF 'Pin: origin *' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing the -1 all-other-origins stanza"; exit 1; }
 grep -qxF 'Pin-Priority: -1' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin-Priority: -1'"; exit 1; }
 # and the source it pins must be present too (sanity: same function writes both).
 grep -q '^URIs: https://apt.ceralive.tv/' /etc/apt/sources.list.d/ceralive.sources || { echo "FAIL: ceralive.sources not written alongside the pin"; exit 1; }

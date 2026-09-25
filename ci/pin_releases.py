@@ -93,7 +93,7 @@ def discover_release(component: str) -> Release:
                 continue
             tag = row["tag_name"]
             # Binding-only and inherited upstream releases are different release trains.
-            if tag.startswith("bindings-") or (component == "srt" and not tag.startswith("srt-v")):
+            if tag.startswith("bindings-") or (component == "srt" and not tag.startswith("srt-v")) or (component == "apt-credentials" and not tag.startswith("apt-credentials-v")):
                 continue
             release_version(tag)
             candidates.append(row)

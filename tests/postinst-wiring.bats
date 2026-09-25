@@ -383,8 +383,8 @@ os_release_version_writer() {
   for pkg in $MODEM_CLOSURE_PKGS; do
     grep -Fxq "$pkg" <<<"$staged" || { echo "missing from FIRST_PARTY_APT_PKGS: $pkg"; false; }
   done
-  # The set is five core packages + nine closure packages + one support companion.
-  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 15 ]
+  # Five core packages + nine closure packages + modem and apt credentials companions.
+  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 16 ]
 }
 
 @test "modem support companion: is staged once at its exact Architecture-all version" {
@@ -394,7 +394,7 @@ os_release_version_writer() {
   pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
   [ "$(awk -F= '$1=="ceralive-modem-support"{print $2}' "$pins")" = "1.4.0" ]
   arch_all_ok="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_ARCH_ALL_OK_PKGS[@]}"' bash "$PIPELINE_DIR/lib/fetch/firstparty.sh")"
-  [ "$arch_all_ok" = "ceralive-modem-support" ]
+  [ "$arch_all_ok" = $'ceralive-modem-support\nceralive-apt-credentials' ]
 }
 
 @test "modem closure: each package has an exact live-verified Version pin in the txt" {
@@ -473,7 +473,7 @@ os_release_version_writer() {
   done
   grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
   grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
-  grep -qxF 'Pin: release o=Debian' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin *' "$dir/ceralive-origin"
   grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
   # every one of the nine closure names must ALSO be present in the manifest
   # itself, or a future manifest edit could silently drop closure coverage.

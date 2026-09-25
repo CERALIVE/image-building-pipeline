@@ -52,8 +52,15 @@ PENDING_FILE="${CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pendi
 RAUC_SYSTEM_CONF="${CERALIVE_RAUC_SYSTEM_CONF:-/etc/rauc/system.conf}"
 # mTLS client cert reused for an optional provisioning-endpoint fetch (task: "token
 # fetched from a provisioning endpoint on first boot").
-APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-/etc/apt/certs/client.crt}"
-APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-/etc/apt/certs/client.key}"
+credentials_dir="${CERALIVE_APT_CREDENTIALS_DIR:-/usr/share/ceralive/apt-credentials}"
+legacy_certs_dir="${CERALIVE_APT_LEGACY_CERTS_DIR:-/etc/apt/certs}"
+if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${credentials_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${credentials_dir}/client.key}"
+else
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${legacy_certs_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${legacy_certs_dir}/client.key}"
+fi
 
 log()  { printf '%s: %s\n' "${PROG}" "$*"; }
 die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
@@ -77,6 +84,9 @@ read_compatible() {
 fetch_token_from_url() {
   local url="$1"
   command -v curl >/dev/null 2>&1 || return 69
+  if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+    [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ] || return 75
+  fi
   local -a auth=()
   if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
     auth=(--cert "${APT_CLIENT_CRT}" --key "${APT_CLIENT_KEY}")

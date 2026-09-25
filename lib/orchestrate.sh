@@ -242,6 +242,8 @@ main() {
   require_cmd tar
   require_cmd flock
   acquire_board_lock "${board}"
+  prune_local_conf_install_traps
+  prune_local_conf_preflight
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"

@@ -14,7 +14,7 @@ containerized mkosi v26 build, and produces a flashable image for RK3588 targets
 (Orange Pi 5+, Radxa Rock 5B+).
 
 Relates to:
-- `cert-work/` — GPG signing key injected into image; mTLS certs baked in; add-on keyring sourced from here; PASETO device-token PUBLIC key (`paseto/`) provisioned into the CeraUI runtime env
+- `cert-work/` — GPG signing key injected into image; build-time mTLS credentials stay in CI, while device mTLS comes from the app-layer credentials package; add-on keyring sourced from here; PASETO device-token PUBLIC key (`paseto/`) provisioned into the CeraUI runtime env
 - `apt-worker/` — runtime apt source on device points to `apt.ceralive.tv` (Cloudflare R2); add-on `.raw` artifacts served from R2 path `addons/{os_version}/{board}/{feature}.raw`
 - `versions.yaml` — standalone pin registry consumed by `fetch-debs.sh` [EXISTS]
 
@@ -3645,9 +3645,15 @@ package name CeraLive publishes; both apt-preferences writers
 dual-track twin `mkosi.images/runtime/mkosi.postinst.chroot::
 setup_ceralive_repository`, the one `./build` actually runs) generate
 `/etc/apt/preferences.d/ceralive-origin` from it: per name, `Pin: origin
-apt.ceralive.tv / Pin-Priority: 990` PLUS `Pin: release o=Debian /
-Pin-Priority: -1`, so a same-name Debian/radxa build can never win a resolution
-against ours even without the origin pin's help. The name list is forwarded
+apt.ceralive.tv / Pin-Priority: 990` FIRST, then `Pin: origin * /
+Pin-Priority: -1`. APT uses the first matching specific stanza: our archive
+gets 990 when present, while Debian AND every other origin's same-name version
+gets -1 even if ours has no candidate. The origin wildcard matches archive
+hosts, not the installed version (`Pin: version *` AND `Pin: release *` both
+pinned the installed 10.0 to -1 in the real offline APT fixture, leaving
+`Candidate: (none)` despite our 2.0 at 990). This does not scope a wildcard package
+name or affect unrelated Debian packages. A priority below 1000 never silently
+downgrades a newer installed version. The name list is forwarded
 base64 (`CERALIVE_FIRST_PARTY_NAMES_B64`, `PassEnvironment=`) — a subimage
 chroot cannot read a path above `$SRCDIR`, the same constraint documented for
 `manifests/target-release.env` above.
@@ -3666,6 +3672,14 @@ generate_prune_local_conf()` runs at the top of `stage_mkosi()` (real builds
 only — `DRY_RUN` exits before this stage), reads the manifest via
 `lib/shared/prune-paths-lib.sh`, and writes a GITIGNORED
 `mkosi.images/runtime/mkosi.local.conf` with `[Content]\nRemoveFiles=<csv>`.
+The file exists ONLY while the owning mkosi invocation runs: before any fetch
+or DRY_RUN, the orchestrator removes a stale copy only if its complete four-line
+generated signature matches; a symlink, malformed file or operator config is
+refused untouched. A shared lock serializes this config across board builds.
+EXIT/INT/TERM cleanup and post-invocation cleanup remove only the owned inode
+with unchanged content, including on a failed mkosi invocation. The existing
+ERR trap remains responsible for reporting build failures. A standalone mkosi
+call after any completed build sees no generated config.
 mkosi's own cascade rule for list-type settings is "merged by appending the
 new values to the previously configured values" (mkosi.1.md), verified against
 the REAL pinned mkosi (`tests/prune-paths-removefiles.test.sh` Part C, with a
@@ -3740,26 +3754,22 @@ URL+SHA pin, see the "CeraLive librga stays a platform-layer URL+SHA swap"
 section) and must stay apt-updatable, unlike the genuinely third-party MPP
 runtime/config-glue/generated-compat trio.
 
-**`ceralive-apt-credentials` — origin-pin-ready, fetch/install DELIBERATELY
-BLOCKED.** It is in `manifests/first-party-apt-names.txt` (so the
-origin-preferences file is forward-ready the moment it publishes), but it is
-NOT added to `lib/fetch-debs.sh::FIRST_PARTY_APT_PKGS`,
-`manifests/first-party-deb-versions.txt`, the `lib/stages/partition.sh`
-first-party allowlist, or the app layer's `RUNTIME_APP_PKGS`. This is
-deliberate, not an oversight: `lib/fetch/firstparty.sh::
-first_party_download_specs()` calls `first_party_pinned_version()` for EVERY
-name in `FIRST_PARTY_APT_PKGS` UNCONDITIONALLY — even under `DRY_RUN`, since
-that call sits before any `if [[ -z "${DRY_RUN}" ]]` branch in
-`fetch_first_party()` — so adding an unpublished package there would `die` on
-every real build AND every `DRY_RUN` plan. `ceralive-apt-credentials 1.0.0` is
-built (`apt-worker`, Todo 11) but not yet released (Todo 12). Per the owner's
-explicit instruction for this task, this stays honestly BLOCKED rather than
-fabricating a pin against a release that does not exist; the plan's own "DRY_RUN
-plan lists ceralive-apt-credentials" acceptance wording is not literally
-satisfiable without either a real publish or a new "optional/unpinned package"
-concept in the fetch path (out of scope here, and its own real security-review
-surface). Wiring the fetch/install path is Todo 12's own follow-through once
-`apt-credentials-v1.0.0` is real.
+**`ceralive-apt-credentials` — wired but publication-blocked.** Its exact
+`1.0.0` package pin, Architecture: all fetch allowance, partition classification,
+and app-layer `RUNTIME_APP_PKGS` install are now present. The separate
+`apt-credentials:` registry block pins `apt-credentials-v1.0.0` from the
+`apt-worker` repository; the Worker's own `apt-worker: pin: latest` block is
+unchanged. `DRY_RUN` can list the pinned package without fetching it, but a real
+build fails closed until Todo 12 publishes and serves that exact release. The
+runtime executor no longer decodes CI's `APT_CLIENT_*` key into the image;
+build-time first-party fetch authentication still uses those CI inputs. The
+package's postinst owns the device APT TLS config and `_apt`-readable key under
+`/usr/share/ceralive/apt-credentials/`. hawkBit provisioning prefers that pair,
+using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
+No package release, refreshed catalog entry, built image, or board installation
+is claimed by this wiring. Until the real release exists, `--refresh` and the
+live pin-currency gate deliberately fail closed; only offline tests use a
+synthetic release row.
 
 Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
 mechanism, proven against real mkosi with a mutation leg),
@@ -4908,6 +4918,13 @@ explicitly in its Console section so every future RK3588 and x86 image has a
 functional UART recovery path. Guards: `mkosi-image-contract.bats` "runtime
 packages: login is installed so UART/serial console recovery works" and "runtime
 packages: login reaches the resolved runtime package set (rk3588 + x86)".
+
+**Historical baked-key ownership contract (superseded for new images):** the
+following incident explains why numeric `_apt` ownership remains necessary for
+the packaged key after tar/ext4 assembly. The runtime executor no longer bakes
+`APT_CLIENT_*` into `/etc/apt/certs`; `ceralive-apt-credentials` supplies the key
+under `/usr/share/ceralive/apt-credentials` from the app layer instead. The
+Debian-source deduplication and arch-qualified source constraints still apply.
 
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
