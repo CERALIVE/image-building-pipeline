@@ -453,17 +453,34 @@ os_release_version_writer() {
   [ "$status" -eq 0 ]
 }
 
-@test "modem closure: the Package:* origin-990 pin covers the closure (wildcard, not per-package)" {
-  # The closure debs are served from the apt.ceralive.tv origin. The pin is
-  # `Package: *` at Pin-Priority 990, so it covers EVERY package that origin
-  # carries — including all nine — with no per-package enumeration needed.
+@test "modem closure: the per-name origin-990 pin covers every closure package (Todo 29: retired the Package:* wildcard)" {
+  # Todo 29 (update-system-overhaul) replaced the blanket `Package: *` wildcard
+  # with a per-name file generated from manifests/first-party-apt-names.txt.
+  # The modem closure's nine packages must each carry their own 990/-1 stanza
+  # pair, sourced from that manifest, never a wildcard.
   local dir="$BATS_TEST_TMPDIR/modem-prefs/preferences.d"
+  local names_b64
+  names_b64="$(base64 -w0 "$PIPELINE_DIR/manifests/first-party-apt-names.txt")"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    CERALIVE_FIRST_PARTY_NAMES_B64="$names_b64" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
   [ "$status" -eq 0 ]
-  grep -qxF 'Package: *' "$dir/ceralive"
-  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive"
-  grep -qxF 'Pin-Priority: 990' "$dir/ceralive"
+  [ ! -e "$dir/ceralive" ]
+  local pkg
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    grep -qxF "Package: ${pkg}" "$dir/ceralive-origin" \
+      || { echo "ceralive-origin missing a stanza for closure package ${pkg}"; false; }
+  done
+  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
+  grep -qxF 'Pin: release o=Debian' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
+  # every one of the nine closure names must ALSO be present in the manifest
+  # itself, or a future manifest edit could silently drop closure coverage.
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    grep -qxF "${pkg}" "$PIPELINE_DIR/manifests/first-party-apt-names.txt" \
+      || { echo "manifests/first-party-apt-names.txt is missing closure package ${pkg}"; false; }
+  done
 }
 
 @test "modem closure: DRY_RUN fetch_first_party resolves every closure package" {

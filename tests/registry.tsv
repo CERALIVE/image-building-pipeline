@@ -94,6 +94,8 @@ tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= m
 tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
 mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
+tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
+tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel

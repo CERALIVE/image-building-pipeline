@@ -1182,17 +1182,39 @@ CONTROL
   [[ "$output" == *"empty placeholder"* ]]
 }
 
-@test "apt ceralive (T2.6): the apt.ceralive.tv origin is pinned at Pin-Priority 990" {
+@test "apt ceralive (T2.6): the apt.ceralive.tv origin is pinned PER PACKAGE NAME at Pin-Priority 990, Debian refused at -1 (Todo 29)" {
   local dir="$BATS_TEST_TMPDIR/apt-prefs/preferences.d"
+  local names_b64; names_b64="$(printf 'cerastream\nceralive-device\n' | base64 -w0)"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    CERALIVE_FIRST_PARTY_NAMES_B64="$names_b64" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
   [ "$status" -eq 0 ]
-  [ -f "$dir/ceralive" ]
-  grep -q '^Package: \*$' "$dir/ceralive"
-  grep -q '^Pin: origin apt.ceralive.tv$' "$dir/ceralive"
-  grep -q '^Pin-Priority: 990$' "$dir/ceralive"
+  [ ! -e "$dir/ceralive" ]   # the former Package: * wildcard file must be GONE
+  [ -f "$dir/ceralive-origin" ]
+  grep -qxF 'Package: cerastream' "$dir/ceralive-origin"
+  grep -qxF 'Package: ceralive-device' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
+  grep -qxF 'Pin: release o=Debian' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
+  # every 990 stanza has a matching -1 stanza for the SAME package name
+  local n990 nminus1
+  n990="$(grep -cxF 'Pin-Priority: 990' "$dir/ceralive-origin")"
+  nminus1="$(grep -cxF 'Pin-Priority: -1' "$dir/ceralive-origin")"
+  [ "$n990" -eq 2 ]
+  [ "$nminus1" -eq 2 ]
   grep -q '^  install_apt_preferences$' "$APT_CERALIVE_REPO"
   printf '%s\n' "$output"
+}
+
+@test "apt ceralive (T2.6): install_apt_preferences degrades gracefully with no names in env (standalone build)" {
+  local dir="$BATS_TEST_TMPDIR/apt-prefs-empty/preferences.d"
+  run env -u CERALIVE_FIRST_PARTY_NAMES_B64 APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
+  [ "$status" -eq 0 ]
+  [ -f "$dir/ceralive-origin" ]
+  ! grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
+  [[ "$output" == *"standalone/offline build"* ]]
 }
 
 # The guard ABOVE proves the customize MODULE (apt-ceralive-repo.sh) pins the origin

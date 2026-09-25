@@ -264,10 +264,29 @@ remove_chroot_service_policy() {
 # synthetic tree by tests/mkosi-contract.bats; the build never sets it.
 prune_package_docs() {
   local docdir="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
-  [[ -d "${docdir}" ]] || return 0
-  log "pruning ${docdir} down to copyright files (deferred from the build layers)"
-  find "${docdir}" -type f ! -name copyright -delete
-  find "${docdir}" -mindepth 1 -type d -empty -delete
+  if [[ -d "${docdir}" ]]; then
+    log "pruning ${docdir} down to copyright files (deferred from the build layers)"
+    find "${docdir}" -type f ! -name copyright -delete
+    find "${docdir}" -mindepth 1 -type d -empty -delete
+  fi
+
+  # Todo 29 (update-system-overhaul): also apply the single prune-paths
+  # manifest's globs. The runtime layer already wrote this file (BaseTrees=
+  # %O/runtime inherits it), so no env var is needed here — it is read
+  # directly, matching manifests/prune-paths.list's own documented single-
+  # source design. Safe and redundant-by-design at this point (the runtime
+  # layer already stripped these paths); the point is proving the SAME
+  # manifest drives every consumer, not that this pass finds anything new.
+  local prune_list="${CERALIVE_PRUNE_PATHS_LIST:-/usr/lib/ceralive/prune-paths.list}"
+  if [[ -r "${prune_list}" ]]; then
+    local line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -n "${line}" ]] || continue
+      case "${line}" in \#*) continue ;; esac
+      # shellcheck disable=SC2086 # deliberately unquoted: prune-paths.list entries are globs
+      rm -rf -- ${line} 2>/dev/null || true
+    done <"${prune_list}"
+  fi
 }
 
 main() {

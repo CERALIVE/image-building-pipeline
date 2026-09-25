@@ -463,12 +463,33 @@ CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-de
 # first-party nor meant to be apt-updatable, so it belongs in THIS held set.
 RAUC_PACKAGES="${RAUC_PACKAGES:-rauc rauc-service}"
 
+# Third-party RK3588 MPP runtime (Todo 29, update-system-overhaul): held
+# alongside RAUC for the same reason — none is a CeraLive-owned package, so
+# holding them does not violate CERALIVE_NEVER_FREEZE_PKGS, and none is
+# board/family-manifest-resolved by name (the family manifest's own
+# gstreamer_runtime_packages also carries librga2-ceralive, our OWN fork, which
+# must stay apt-updatable and is therefore deliberately NOT in this fixed set).
+# Root AGENTS.md "Origin protection replaces version freezes" names this exact
+# set: librockchip-mpp1, rockchip-multimedia-config, libv4l-0.
+MPP_COMPAT_PACKAGES="${MPP_COMPAT_PACKAGES:-librockchip-mpp1 rockchip-multimedia-config libv4l-0}"
+
 freeze_boot_packages() {
   local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
   local pref_file="${pref_dir}/ceralive-kernel-freeze"
 
+  # Gated on the RESOLVED gstreamer_runtime_packages membership (family
+  # manifest -> GSTREAMER_RUNTIME_PACKAGES, already forwarded/exported), not a
+  # blind ARCH check: only a build that actually resolved
+  # rockchip-multimedia-config into its platform-layer install set has these
+  # third-party packages installed to hold. Empty/unset on every non-RK3588
+  # build (and on every existing test fixture, which never sets this var), so
+  # freeze_boot_packages' "declared but not installed -> die under
+  # INSTALL_BOOT_BSP=1" fail-closed check is never spuriously tripped.
+  local mpp_compat=""
+  [[ " ${GSTREAMER_RUNTIME_PACKAGES:-} " == *" rockchip-multimedia-config "* ]] && mpp_compat="${MPP_COMPAT_PACKAGES}"
+
   local -a declared=()
-  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-} ${RAUC_PACKAGES:-}"
+  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-} ${RAUC_PACKAGES:-} ${mpp_compat}"
 
   # Dedupe while preserving manifest order (kernel, dtb, u-boot, firmware).
   local pkg seen=" " candidates=()

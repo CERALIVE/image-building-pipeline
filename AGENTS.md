@@ -3494,6 +3494,87 @@ Guards: `tests/rauc-transition-contract.test.sh`,
 `tests/update-capabilities.test.sh`, `tests/kernel-config-fragment.bats`, and
 the file-backed real-RAUC service contract.
 
+**Verified local slot mirror (`ceralive-slot-sync`, task 26) — a local rsync
+mirror of the healthy booted slot onto the other, lagged one, entirely outside
+`rauc install`** [EXISTS — artifact code-complete; the lagged-mirror orchestrator
+that starts it is a later task]
+
+`/usr/libexec/ceralive/ceralive-slot-sync` closes a gap RAUC's own A/B model
+cannot see: RAUC only knows about a slot it wrote through `rauc install`, so an
+apt package update on the BOOTED slot (the software-update path CeraUI's
+`system.startUpdate()` drives) leaves the OTHER slot silently stale — and if
+that stale slot is ever activated (rollback, a bench A/B flip, an operator
+mistake), it boots an old, unpatched image. `check` prints every gate INPUT as
+JSON and takes no lock; `run` takes `/run/lock/ceralive-update.lock` then
+`/var/lib/dpkg/lock-frontend` (both `flock -n`, in that order, held for the
+whole operation) and refuses (exit 75, named reason) on the first of six gates
+to fail: `/run/ceralive/partlabel-guard.failed` present, `dpkg --audit`
+non-empty, RAUC `Operation` != idle (`busctl get-property … Installer
+Operation`), the OTHER rootfs-class slot installed-but-not-activated (a genuine
+pending OTA must never be silently overwritten), `rauc-hawkbit-updater.service`
+active, or `healthy-state.json` (todo 27) not matching the current boot_id +
+dpkg status sha256 + build_id — the G3 lagged-mirror gate: only a state that has
+already survived a reboot and the boot healthcheck may ever be mirrored.
+
+The OTHER slot's device and name are resolved from `rauc status --detailed
+--output-format=json`, never a hardcoded PARTLABEL — RAUC's JSON shape nests
+each slot as `{"<name>":{"class",...,["bundle"],["installed"],["activated"],
+"status"}}`, and "installed but not activated" is exactly "has an `installed`
+object but no `activated` one", matching RAUC's own readable-formatter rule.
+The mirror itself is `rauc status mark-bad other`, mount the other slot rw,
+`mount --bind` (never `--rbind`) the running root onto a source mountpoint,
+`rsync -aHAXS --checksum --numeric-ids --delete --exclude-from=/usr/lib/ceralive/
+slot-sync.exclude`, `sync`, a `dpkg --root=<target> --verify` vs `--root=<source>
+--verify` comparison (IDENTICAL, not empty — this image legitimately modifies
+conffiles) filtered through `/usr/lib/ceralive/prune-paths.list` when that
+todo-29 file exists, unmount, `e2fsck -fn`, delete the target slot's stale
+adaptive-index `hash-*` subdirectories under `/data/ceralive/rauc/slot.<name>/`
+(RAUC 1.13's own `r_slot_get_checksum_data_directory` + `hash_index.c` layout —
+a missing index is regenerated on demand, which is the documented safe outcome),
+write `sync-receipt.json` (RAUC's own slot status keeps the OLD bundle version
+for a slot this script wrote, so the UI and drills read the mirrored version
+from this receipt instead), then `rauc status mark-good other`.
+
+**The non-recursive bind mount is load-bearing for a second reason beyond
+`/boot`.** `mount --bind` (never `--rbind`) exposes whatever is on the running
+root filesystem's OWN ext4-level tree at a path a live submount currently
+shadows — the FAT `/boot` (`mkosi/platform/boot/install-boot.sh:171-180`) is the
+documented case, but the exact same mechanism is why the exclude list can safely
+list `/dev/*` and still admit a handful of static device special files by
+`--include=` (placed before `--exclude-from=` on the command line, since a plain
+exclude-from file cannot itself express an include override): the non-recursive
+bind never carries devtmpfs's LIVE population into the source view either, so
+what rsync actually sees under `.../source/dev` is the same disk-backed content
+`.../source/boot` exposes, not the running system's ephemeral device nodes.
+
+**SIGTERM must kill the rsync child's whole PROCESS GROUP, not just its PID —
+this was a real bug, found by the privileged test leg, not merely a review
+finding.** `cmd_run` runs `rsync` under `set -m` specifically so the
+backgrounded job becomes its own process-group leader; `on_sigterm` then sends
+`TERM` to `-RSYNC_PID` (the group), unmounts, and exits 143 leaving the target
+slot exactly as bad as `mark-bad other` left it at the start. Killing only the
+single PID looked correct in review and in a fast unprivileged stub test, but
+real `rsync` (and the test's own sleep-based stub) forks a child that inherits
+the script's open flock'd lock fd — killing only the parent orphans that child,
+which then keeps the lock held for as long as it happens to keep running,
+producing a spurious `update-lock-busy` refusal on the very next invocation.
+
+Tests: `tests/slot-sync.test.sh` — the full six-gate + two-lock refusal matrix,
+the `check` JSON shape, the dpkg-verify comparison (mismatch aborts, identical
+non-empty passes, a prune-paths.list-matched difference is a non-issue), the
+mark-bad-before-mark-good ordering, the SIGTERM contract, and the shipped
+`--checksum` invocation proven against a same-size/same-mtime/different-content
+file — all unprivileged, `default-shell`. A second, internally-gated leg
+(`CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required|skip`, default `skip`, same
+shape as this repo's other real-* contracts) drives a REAL loop-mounted ext4
+target through the real script with real `mount`/`rsync`/`e2fsck`, proving
+xattr/ACL/file-capability/hardlink/sparse-file preservation and the
+hidden-ext4-under-a-non-recursive-bind trick in isolation first. It needs root
+or passwordless sudo plus `losetup`/`mkfs.ext4`/`setfacl`/`setcap`/etc, which
+this repo's own dev host lacks (`sudo -n true` fails here too, same as the
+Todo-17/21 precedent) — it was run and passed inside a disposable privileged
+Debian trixie container, the same technique `tests/real-rauc-contract.sh` uses.
+
 **RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
 device — else OTA is 100% broken** [EXISTS]
 
@@ -3540,6 +3621,144 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   REAL end-to-end install complete successfully, activate slot B, and boot the
   fresh slot healthy; guard: `mkosi-image-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
+
+**Origin protection is PER PACKAGE NAME, one manifest drives build-time
+RemoveFiles= AND the on-device reprune hook, and the credentials package stays
+honestly BLOCKED (Todo 29, update-system-overhaul)** [PARTIAL — integration
+branch, not a shipped image]
+
+The former `Package: * / Pin: origin apt.ceralive.tv / Pin-Priority: 990`
+wildcard — which pinned every future apt.ceralive.tv publication sight-unseen —
+is retired. `manifests/first-party-apt-names.txt` is the single list of every
+package name CeraLive publishes; both apt-preferences writers
+(`mkosi/customize/apt-ceralive-repo.sh::install_apt_preferences` and its
+dual-track twin `mkosi.images/runtime/mkosi.postinst.chroot::
+setup_ceralive_repository`, the one `./build` actually runs) generate
+`/etc/apt/preferences.d/ceralive-origin` from it: per name, `Pin: origin
+apt.ceralive.tv / Pin-Priority: 990` PLUS `Pin: release o=Debian /
+Pin-Priority: -1`, so a same-name Debian/radxa build can never win a resolution
+against ours even without the origin pin's help. The name list is forwarded
+base64 (`CERALIVE_FIRST_PARTY_NAMES_B64`, `PassEnvironment=`) — a subimage
+chroot cannot read a path above `$SRCDIR`, the same constraint documented for
+`manifests/target-release.env` above.
+
+**The RemoveFiles= single-source mechanism — the central design decision.**
+`manifests/prune-paths.list` (one glob per line, `#` comments) is the ONE
+source for three consumers, and getting the FIRST one working was the actual
+hard problem: `RemoveFiles=` is a plain mkosi `[Content]` setting with no
+script hook and no `${VAR}` expansion (PATH-typed settings expand `${VAR}`;
+`RemoveFiles=`, metavar `GLOB`, is a bare string list and does not — verified
+against mkosi's own `config_make_list_parser()`, `parse=str`, no
+`expandvars`). So a subimage's `RemoveFiles=` cannot be made to read a file
+`AT PARSE TIME` by any mkosi-native mechanism. The resolution is mkosi's own
+documented "local configuration" convention: `lib/stages/mkosi.sh::
+generate_prune_local_conf()` runs at the top of `stage_mkosi()` (real builds
+only — `DRY_RUN` exits before this stage), reads the manifest via
+`lib/shared/prune-paths-lib.sh`, and writes a GITIGNORED
+`mkosi.images/runtime/mkosi.local.conf` with `[Content]\nRemoveFiles=<csv>`.
+mkosi's own cascade rule for list-type settings is "merged by appending the
+new values to the previously configured values" (mkosi.1.md), verified against
+the REAL pinned mkosi (`tests/prune-paths-removefiles.test.sh` Part C, with a
+mutation-proof leg: a RemoveFiles= key mis-sectioned into `[Match]` is
+correctly NOT merged) — so this file ADDS the manifest's globs to, and can
+NEVER replace, the runtime layer's hand-maintained Mesa/LLVM globs.
+
+**Deliberately narrow content, for a reason `tests/mkosi-contract.bats` already
+enforces.** `manifests/prune-paths.list` carries ONLY the locale/i18n strip
+(`/usr/share/locale/*`, `/usr/lib/locale/locale-archive`) — safe at ANY layer,
+including base/platform/runtime, because it is not update-alternatives
+registered. The existing "the deferred prune runs at the final app layer only"
+test refuses any `RemoveFiles=`/`rm -rf`/`find` touching `/usr/share/(doc|man)`
+in base/platform/runtime — the doc/man appliance-payload strip stays exactly
+where it already was, in the APP layer's own hardcoded
+`prune_final_image_payload()`/`prune_package_docs()` (unchanged), which is
+deliberately excluded from that same grep. Putting doc/man globs into the
+runtime layer's generated `RemoveFiles=` would have reopened the exact
+update-alternatives corruption bug documented above ("`WithDocs=no` corrupted
+the update-alternatives database").
+
+**Two more consumers, one on-device and one build-time, both reading the SAME
+manifest rather than duplicating its content.** The runtime executor's new
+`setup_prune_reprune_and_cache()` (called right after `setup_ceralive_repository`
+in `main()`) decodes `CERALIVE_PRUNE_PATHS_B64` (same base64-forwarding idiom)
+into `/usr/lib/ceralive/prune-paths.list` on the device — the exact path
+`ceralive-slot-sync.sh`'s dpkg-verify filter (task 26, above) already reads —
+and installs `/usr/libexec/ceralive/ceralive-reprune` (`mkosi/runtime/
+ceralive-reprune.sh`) as a `DPkg::Post-Invoke` hook
+(`/etc/apt/apt.conf.d/80ceralive-reprune`), so a future apt transaction that
+reintroduces a pruned path (e.g. locale files shipped by an upgraded
+dependency, once Todo 35's apt-all-packages capability lands) gets re-pruned —
+"keeps prunes across upgrades" without ever using `dpkg --path-exclude` (which
+this project cannot use, for the exact reason `WithDocs=no` above already
+documents). The hook NEVER fails the apt transaction it rides on: every step is
+best-effort, logged, and the script always exits 0
+(`tests/reprune-hook.test.sh` Part B4 drives an unremovable/nonexistent target
+through it and asserts exit 0). The app layer's `prune_package_docs()`
+ADDITIONALLY applies the same on-device `/usr/lib/ceralive/prune-paths.list`
+(read directly — the app layer already inherited the runtime layer's rootfs via
+`BaseTrees=%O/runtime`, so no env var is needed at that layer) — redundant with
+the runtime layer's own build-time prune at that point, which is exactly the
+proof that one manifest drives every consumer rather than three copies of the
+same glob list.
+
+`/etc/apt/apt.conf.d/81ceralive-cache` sets `Dir::Cache::archives
+"/data/ceralive/apt-archives/"` (+ tmpfiles.d creating that dir and its
+`partial/` subdir), so downloaded `.deb`s persist across reboots and future
+software updates instead of the rootfs slot's own (small, RAUC-swapped)
+`/var/cache/apt/archives`.
+
+**Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
+RESOLVED package membership, never a blind architecture check.**
+`freeze_boot_packages` (the Kernel Freeze KEY FACT below) now also holds
+`librockchip-mpp1`, `rockchip-multimedia-config` and `libv4l-0` — third-party,
+never CeraLive-owned, so this does not touch `CERALIVE_NEVER_FREEZE_PKGS`.
+Deliberately NOT gated on `ARCH` (every existing fixture in
+`tests/kernel-freeze-guardrails.test.sh` never sets `ARCH`, so an `ARCH`-based
+gate would have silently added these names to EVERY existing test's `declared`
+set and broken the whole 700-line suite under its own
+"declared-but-not-installed dies when `INSTALL_BOOT_BSP=1`" fail-closed rule —
+found and fixed before it shipped). The real gate is membership: `[[ "
+${GSTREAMER_RUNTIME_PACKAGES:-} " == *" rockchip-multimedia-config "* ]]`,
+checking the SAME family-manifest-resolved env var `bsp_names`
+(`lib/stages/partition.sh`) already keys its own MPP classification on — so the
+hold only ever fires on a build that actually resolved these packages into its
+platform-layer install set, and is a clean no-op (never a false die) on any
+build (including x86, and every pre-existing test fixture) that did not.
+`librga2-ceralive` is deliberately EXCLUDED from this set even though it is
+ALSO in `gstreamer_runtime_packages` — it is OUR OWN fork (platform-layer
+URL+SHA pin, see the "CeraLive librga stays a platform-layer URL+SHA swap"
+section) and must stay apt-updatable, unlike the genuinely third-party MPP
+runtime/config-glue/generated-compat trio.
+
+**`ceralive-apt-credentials` — origin-pin-ready, fetch/install DELIBERATELY
+BLOCKED.** It is in `manifests/first-party-apt-names.txt` (so the
+origin-preferences file is forward-ready the moment it publishes), but it is
+NOT added to `lib/fetch-debs.sh::FIRST_PARTY_APT_PKGS`,
+`manifests/first-party-deb-versions.txt`, the `lib/stages/partition.sh`
+first-party allowlist, or the app layer's `RUNTIME_APP_PKGS`. This is
+deliberate, not an oversight: `lib/fetch/firstparty.sh::
+first_party_download_specs()` calls `first_party_pinned_version()` for EVERY
+name in `FIRST_PARTY_APT_PKGS` UNCONDITIONALLY — even under `DRY_RUN`, since
+that call sits before any `if [[ -z "${DRY_RUN}" ]]` branch in
+`fetch_first_party()` — so adding an unpublished package there would `die` on
+every real build AND every `DRY_RUN` plan. `ceralive-apt-credentials 1.0.0` is
+built (`apt-worker`, Todo 11) but not yet released (Todo 12). Per the owner's
+explicit instruction for this task, this stays honestly BLOCKED rather than
+fabricating a pin against a release that does not exist; the plan's own "DRY_RUN
+plan lists ceralive-apt-credentials" acceptance wording is not literally
+satisfiable without either a real publish or a new "optional/unpinned package"
+concept in the fetch path (out of scope here, and its own real security-review
+surface). Wiring the fetch/install path is Todo 12's own follow-through once
+`apt-credentials-v1.0.0` is real.
+
+Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
+mechanism, proven against real mkosi with a mutation leg),
+`tests/reprune-hook.test.sh` (device script + writer wiring),
+`tests/kernel-freeze-guardrails.test.sh` Parts B3b/B3c (MPP hold, both
+directions), `tests/apt-preferences-baked.test.sh` +
+`tests/package-contract.bats` §22 (per-name origin pin, both tracks),
+`tests/mkosi-contract.bats` (prune_package_docs manifest consumption; the
+final-app-layer-only doc/man exclusion is unaffected).
 
 **Production source PKI and the Actions secret are distinct copies, and the
 secret has been rotated to match.** The locally provisioned

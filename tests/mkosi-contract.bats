@@ -234,6 +234,35 @@ sectioned_keys() {
   [ "$(readlink "$root/libfoo1-udeb")" = "libfoo1" ]
 }
 
+@test "mkosi-contract: prune_package_docs also applies the on-device prune-paths.list globs (Todo 29)" {
+  local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
+  local root="$BATS_TEST_TMPDIR/doc-plus-manifest"
+  mkdir -p "$root/libfoo1" "$root/extra-glob-target"
+  printf 'licence\n' >"$root/libfoo1/copyright"
+  printf 'changelog\n' >"$root/libfoo1/changelog.Debian.gz"
+  : >"$root/extra-glob-target/strip-me"
+
+  local prune_list="$BATS_TEST_TMPDIR/device-prune-paths.list"
+  printf '# comment\n%s/extra-glob-target/*\n' "$root" >"$prune_list"
+
+  CERALIVE_DOC_ROOT="$root/libfoo1-nonexistent-so-this-leg-is-glob-only" \
+    CERALIVE_PRUNE_PATHS_LIST="$prune_list" \
+    bash -c "source '$app_postinst'; prune_package_docs"
+
+  [ ! -e "$root/extra-glob-target/strip-me" ]
+
+  # Absent manifest is a safe no-op — matches the runtime doc-prune leg's own
+  # graceful degradation (offline/dev builds, or a host running this bash -c
+  # directly, never ship /usr/lib/ceralive/prune-paths.list).
+  local root2="$BATS_TEST_TMPDIR/doc-no-manifest"
+  mkdir -p "$root2/kept"
+  : >"$root2/kept/file"
+  CERALIVE_DOC_ROOT="$root2/no-such-doc-dir" \
+    CERALIVE_PRUNE_PATHS_LIST="$BATS_TEST_TMPDIR/absent-manifest.list" \
+    bash -c "source '$app_postinst'; prune_package_docs"
+  [ -e "$root2/kept/file" ]
+}
+
 @test "mkosi-contract: the deferred prune runs at the final app layer only" {
   local app_postinst="$MKOSI_DIR/mkosi.images/app/mkosi.postinst.chroot"
   grep -Fq 'prune_package_docs' "$app_postinst"

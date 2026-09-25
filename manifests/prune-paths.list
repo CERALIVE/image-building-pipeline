@@ -1,0 +1,52 @@
+# CeraLive prune-paths manifest — the SINGLE SOURCE for every "safe to strip
+# after packages are configured" glob in the image pipeline (Todo 29,
+# update-system-overhaul). One glob pattern per line; blank lines and lines
+# starting with `#` are ignored by every reader.
+#
+# THREE CONSUMERS, ONE LIST:
+#
+#   1. Build-time: lib/stages/mkosi.sh generates
+#      mkosi/mkosi.images/runtime/mkosi.local.conf (gitignored, regenerated on
+#      every real build) with `RemoveFiles=<these globs, comma-joined>`. mkosi
+#      APPENDS list-type settings across config files (its own documented
+#      cascade rule — a repeated setting is a collection merge, not an
+#      override), so this ADDS to, and never replaces, the runtime layer's
+#      existing static RemoveFiles= line (arch-specific Mesa/LLVM globs stay
+#      there, hand-maintained — see mkosi.images/runtime/mkosi.conf for why).
+#
+#      SCOPE, DELIBERATELY NARROW: only content that is safe to remove at ANY
+#      layer, including base/platform/runtime, belongs here — i.e. content
+#      that is NOT update-alternatives-registered. `tests/mkosi-contract.bats`
+#      "the deferred prune runs at the final app layer only" enforces this by
+#      refusing any `/usr/share/(doc|man)` reference in base/platform/runtime.
+#      Do NOT add doc/man/X11/icon paths here; those stay the app layer's own
+#      prune_final_image_payload()/prune_package_docs() hardcoded set, run
+#      strictly after every layer's packages (including first-party apps) have
+#      finished configuring.
+#
+#   2. Device-installed copy: the runtime layer's chroot postinst decodes the
+#      base64-forwarded content of THIS file (CERALIVE_PRUNE_PATHS_B64,
+#      PassEnvironment=, since a subimage chroot cannot read a path above
+#      $SRCDIR — see mkosi/mkosi.conf's own comment on target-release.env for
+#      the identical constraint) and writes it verbatim to
+#      /usr/lib/ceralive/prune-paths.list. Two on-device readers:
+#        - /usr/libexec/ceralive/ceralive-reprune (mkosi/runtime/ceralive-reprune.sh),
+#          a DPkg::Post-Invoke hook (/etc/apt/apt.conf.d/80ceralive-reprune)
+#          that re-applies these globs after EVERY future apt transaction, so
+#          a package that reintroduces a pruned path (e.g. locale files
+#          shipped by a newly upgraded dependency) does not silently undo the
+#          build-time prune. Never fails the apt transaction (logs, exit 0).
+#        - ceralive-slot-sync's dpkg --verify comparison (todo 26), which
+#          filters expected cross-slot differences through this same file.
+#
+#   3. The app layer's prune_package_docs() (mkosi.images/app/mkosi.postinst.chroot)
+#      ALSO applies these same globs (reading the already-installed device copy
+#      at /usr/lib/ceralive/prune-paths.list, inherited via BaseTrees=%O/runtime)
+#      as an additional pass alongside its existing /usr/share/doc
+#      copyright-only reduction. Safe and redundant-by-design at that point —
+#      the runtime layer already stripped these — proving the same manifest
+#      drives every layer without duplicating the literal glob list.
+#
+# CONTENT: the locale/i18n strip, safe everywhere (not alternatives-registered).
+/usr/share/locale/*
+/usr/lib/locale/locale-archive

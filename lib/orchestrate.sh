@@ -44,6 +44,11 @@ source "${HERE}/shared/deb-lib.sh"
 # the target Debian suite (RELEASE) and its os-release VERSION_ID.
 # shellcheck source=lib/shared/target-release-lib.sh
 source "${HERE}/shared/target-release-lib.sh"
+# The ONE reader for manifests/prune-paths.list (Todo 29) — feeds the generated
+# runtime mkosi.local.conf RemoveFiles= (stages/mkosi.sh) and the base64 content
+# forwarded to the device (run_mkosi_build below).
+# shellcheck source=lib/shared/prune-paths-lib.sh
+source "${HERE}/shared/prune-paths-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Locations.
@@ -329,6 +334,7 @@ run_mkosi_build() {
     CERALIVE_OS_RELEASE_VERSION
     CERALIVE_BENCH_LABELS CERALIVE_BOARD
     CERALIVE_DTB_KEEP_OVERLAYS
+    CERALIVE_PRUNE_PATHS_B64 CERALIVE_FIRST_PARTY_NAMES_B64
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -356,6 +362,18 @@ run_mkosi_build() {
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
   export CERALIVE_IMAGE_BUILD_COMMIT
   export CERALIVE_OS_RELEASE_VERSION="${CERALIVE_OS_RELEASE_VERSION:-}"
+
+  # Todo 29 (update-system-overhaul): the SINGLE prune-paths and first-party
+  # origin-name manifests, forwarded base64 (same idiom as APT_GPG_PUBLIC_B64
+  # below) so the runtime chroot postinst — which cannot read a path above
+  # $SRCDIR — can materialize /usr/lib/ceralive/prune-paths.list and the
+  # per-name apt-preferences stanzas without repo access. Empty (not absent) on
+  # a standalone `mkosi build` that bypasses this orchestrator: both writers
+  # degrade gracefully — see setup_ceralive_repository()/install_apt_preferences().
+  export CERALIVE_PRUNE_PATHS_B64
+  CERALIVE_PRUNE_PATHS_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/prune-paths.list")"
+  export CERALIVE_FIRST_PARTY_NAMES_B64
+  CERALIVE_FIRST_PARTY_NAMES_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/first-party-apt-names.txt")"
   # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
   # lib/assemble-disk.sh; default false (A/B). See mkosi/repart/README.md.
   export SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"

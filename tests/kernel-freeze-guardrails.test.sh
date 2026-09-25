@@ -307,6 +307,62 @@ grep -qxF 'cerastream' "${B3}/holds" \
 
 pass "Part B3 OK (source-built kernel + edge U-Boot + rauc + rauc-service held; empty DTB list is a 5-package freeze, not an error)"
 
+# --- B3b: a REAL RK3588 resolve also holds the third-party MPP runtime -------
+# (Todo 29, update-system-overhaul). Same shape as B3, plus GSTREAMER_RUNTIME_PACKAGES
+# carrying the real family-manifest set (rockchip-multimedia-config librga2-ceralive
+# librockchip-mpp1) — the exact membership signal freeze_boot_packages gates on.
+# librga2-ceralive is OUR OWN fork and must NOT be held; libv4l-0 is a fixed
+# companion with no manifest entry and must be held anyway.
+B3B="${TMPROOT}/b3b"; mkdir -p "${B3B}/prefs"
+make_stubs "${B3B}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware-full 26.8.3
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
+librockchip-mpp1 1.5.0-1
+rockchip-multimedia-config 1.0.2-1
+libv4l-0 1.30.1-1
+librga2-ceralive 1.10.5+ceralive.1
+cerastream 2026.6.1"
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware-full" \
+GSTREAMER_RUNTIME_PACKAGES="rockchip-multimedia-config librga2-ceralive librockchip-mpp1" \
+  run_freeze "${B3B}" "${B3B}/prefs" >/dev/null
+
+held_b3b="$(sort -u "${B3B}/holds" | tr '\n' ' ')"
+expected_b3b="armbian-firmware-full librockchip-mpp1 libv4l-0 linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge rauc rauc-service rockchip-multimedia-config "
+[[ "${held_b3b}" == "${expected_b3b}" ]] \
+  || fail "B3b hold set wrong.\n  got:      ${held_b3b}\n  expected: ${expected_b3b}"
+grep -qxF 'librga2-ceralive' "${B3B}/holds" \
+  && fail "B3b held librga2-ceralive — that is OUR OWN fork and must stay apt-updatable"
+grep -qxF 'cerastream' "${B3B}/holds" \
+  && fail "B3b froze the first-party package 'cerastream'"
+
+pass "Part B3b OK (real RK3588 resolve holds librockchip-mpp1/rockchip-multimedia-config/libv4l-0; librga2-ceralive stays unheld)"
+
+# --- B3c: with GSTREAMER_RUNTIME_PACKAGES unset (x86 / non-MPP resolve), the -
+#          MPP packages are never declared, so an x86 build that never
+#          installed them cannot die on "declared but not installed" ----------
+B3C="${TMPROOT}/b3c"; mkdir -p "${B3C}/prefs"
+make_stubs "${B3C}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware-full 26.8.3
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1"
+GSTREAMER_RUNTIME_PACKAGES="" \
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware-full" \
+  run_freeze "${B3C}" "${B3C}/prefs" >/dev/null \
+  || fail "B3c: an x86/non-MPP resolve with GSTREAMER_RUNTIME_PACKAGES unset must not die"
+grep -qxF 'librockchip-mpp1' "${B3C}/holds" \
+  && fail "B3c held librockchip-mpp1 despite GSTREAMER_RUNTIME_PACKAGES not naming rockchip-multimedia-config"
+
+pass "Part B3c OK (GSTREAMER_RUNTIME_PACKAGES unset -> MPP packages never declared, no false die)"
+
 # --- C1: a first-party package in the freeze set must ABORT ------------------
 C1="${TMPROOT}/c1"; mkdir -p "${C1}/prefs"
 make_stubs "${C1}" "linux-image-generic-rk35xx 26.5.1
