@@ -150,12 +150,25 @@ backend re-binds 80, nginx's upstream recovers, and the device is reachable at
 its selected mDNS hostname on the new network (`https://ceralive.local`,
 `https://ceralive2.local`, and so on).
 
-## Hardware caveat (`[PARTIAL]`)
+## Hardware qualification (`[PARTIAL]` overall)
 
-NM-native AP mode also requires the onboard wlan driver to support it (RK3588 chip
-dependent). The portal, credential handoff, and four-condition teardown are implemented
-and verified offline, but **on-hardware AP-mode validation is still pending** — hence the
-subsystem is `[PARTIAL]` in `AGENTS.md`.
+Both RK3588 boards passed the 2026-09-25 Todo-48 force-portal → NM-native AP →
+out-of-band teardown drill on their current production images. On each board
+`nmcli -g WIFI-PROPERTIES.AP device show wlan0` returned `yes`; the `ceralive-ap`
+connection reached `GENERAL.STATE:activated` and `802-11-wireless.mode:ap`,
+`wlan0` held `192.168.42.1/24`, NetworkManager spawned a dnsmasq DHCP child,
+and no `hostapd` process ran. After `/usr/local/sbin/ceralive-provision teardown`,
+both boards returned to disconnected wlan0, inactive portal socket, active CeraUI,
+absent force/active flags, and no AP profile. Both SSH connections used `eth0`
+throughout. `iw` was absent on these production images, so the independent
+corroboration was the actual kernel gateway address and NM dnsmasq process rather
+than `iw dev`'s interface-type display. The named four-file Todo-48 transcript
+set and its digests are recorded in `manifests/packages/removed.md`.
+
+This closes the AP-capability gate for removing `hostapd` from **future builds**.
+The boards were not re-imaged without it, and the operator's physical client join,
+credential POST and automatic credential-handoff path were not exercised by this
+drill. The provisioning subsystem remains `[PARTIAL]` for those separate paths.
 
 ## Verification
 

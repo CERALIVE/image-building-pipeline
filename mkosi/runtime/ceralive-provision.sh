@@ -30,10 +30,10 @@
 # AP MODE: NetworkManager-NATIVE AP (802-11-wireless.mode ap + ipv4.method shared).
 #   Preferred over hostapd+dnsmasq — fewer moving parts and NO extra packages: NM
 #   drives wpa_supplicant in AP mode and runs its internal dnsmasq for DHCP on the
-#   shared subnet. hostapd remains in the image only as an evidence-gated fallback
-#   (NOT used here). NM-native AP is supported since NM 1.0; the image ships NM 1.42
-#   (Debian bookworm). HW caveat: AP mode also needs the wlan driver to support it  # suite-literal-ok: records the suite this NetworkManager AP-mode behaviour was verified on
-#   (RK3588 onboard chip dependent) — see image-building-pipeline/AGENTS.md.
+#   shared subnet. Both RK3588 boards passed the hardware AP/teardown drill on
+#   2026-09-25; hostapd is no longer explicitly installed. NM-native AP is
+#   supported since NM 1.0. AP mode still needs a capable wlan driver; both
+#   shipped RK3588 boards passed that hardware check — see AGENTS.md.
 #
 # CAPTIVE PORTAL (Task 14): served by ceralive-portal.{socket,@.service} (systemd
 #   socket activation, Accept=yes) running the bash handler /usr/local/sbin/ceralive-portal

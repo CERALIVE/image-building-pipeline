@@ -53,6 +53,10 @@ if you opt into `--native`; a container build only needs Docker or Podman.
 - **Ready-to-use**: Images for eMMC/SD cards, no additional setup required
 - **Predictable LAN identity**: Avahi-arbitrated `ceralive.local`, `ceralive2.local`,
   `ceralive3.local`, ... allocation with no random or hyphenated fallback
+- **Wi-Fi setup AP**: NetworkManager-native portal AP and teardown passed on both
+  RK3588 boards (Todo 48, 2026-09-25). Future images omit unused `hostapd`;
+  client credential handoff remains a separate hardware-validation gap (see
+  [`docs/wifi-provisioning.md`](docs/wifi-provisioning.md)).
 - **Device support**: Automatic USB audio/video device detection and access
 - **Modem support**: M.2 and USB 4G/5G modems
 - **Feature add-ons**: Optional per-board/per-OS sysext `.raw` artifacts (display engine, debug tools, etc.)
