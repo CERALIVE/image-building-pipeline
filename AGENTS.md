@@ -127,12 +127,30 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | Build a feature sysext add-on | `lib/build-feature-sysext.sh` |
 | Publish a signed add-on to R2 | `lib/upload-addons.sh` (CI: `v2-ci.yml` `addon-publish` job) |
 | Publish a hardware-approved RAUC bundle pair to R2 | `ci/publish-immutable-r2-pair.sh` via [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §5; requires the independently approved candidate SHA-256 and performs private, read-only input snapshots plus create-only exact-byte recovery |
+| Publish signed OS channel manifests and chunked releases | `ci/publish-release.sh` and `.github/workflows/publish-release.yml`; immutable 256 MiB parts, one two-file index, CMS codeSigning-only leaf, signed channel pointer last; `tests/publish-release.test.sh` |
 | **PASETO device-token key provisioning** | [`docs/paseto-key-provisioning.md`](docs/paseto-key-provisioning.md) — generate per-env keypair, route the 3 values; verify with `lib/verify-paseto-key-encodings.sh` |
 | **End-to-end release process** (build/sign → immutable candidate → manual hand-test on real HW → manual R2 publish) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1-6 |
 | **apt.ceralive.tv build-credential rotation** (`APT_GPG_PUBLIC_B64`/`APT_CLIENT_CRT_B64`/`APT_CLIENT_KEY_B64`) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §7 |
 | **OTA-rollback runbook** (bad `.raucb` fleet response, A/B fallback, pulling a published bundle) | [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §8 |
 
 ## KEY FACTS
+
+**Chunked OS publishing [PARTIAL — workflow and local contract complete; candidate and live drill separate].**
+`ci/publish-release.sh` uses the extracted `ci/r2-immutable-lib.sh::put_or_verify`
+primitive shared with the legacy RAUC pair publisher: release parts, index, lock,
+checksum list and per-channel membership markers are create-only and exact-byte
+recoverable. A single `index.json` carries `bundle.raucb` and `flash.raw.xz`;
+the latter is genuine xz, not the candidate's zstd transport renamed. Channel
+manifests carry the strict CeraUI v1 fields and the pinned CeraUI minimum; the
+dedicated `cert-work/rauc/ota-manifest-signer` leaf has codeSigning alone, unlike
+the dual-EKU bundle leaf. Signatures upload before the channel JSON; the JSON
+uses an ETag compare-and-swap and is the commit point. The `release` environment
+has a required owner reviewer, and the non-cancelling workflow concurrency group
+serializes writers (including refresh and prune). Markers make membership explicit:
+prune retains the newest three stable/beta versions combined, newest one drill
+version and every version referenced by any channel; unmarked versions are never
+pruned. See `docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
+available for old consumers; this workflow does not replace it.
 
 **First-party pin currency is a separate CI gate from artifact integrity** [EXISTS].
 `ci/check-first-party-pins.py` checks both app architectures, repo-local

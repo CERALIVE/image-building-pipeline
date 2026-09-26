@@ -336,6 +336,16 @@ independently approved candidate SHA-256, snapshots both inputs privately, and
 uses create-only writes with exact-byte retry recovery; it never deletes an
 immutable release key.
 
+The new OS-channel path uses `ci/publish-release.sh` through the approved
+`publish-release.yml` dispatch. It splits a real xz flash transport and verity
+bundle into 256 MiB immutable parts, publishes one index, then a dedicated
+codeSigning-only CMS signature and channel manifest (JSON last). `publish`,
+`promote`, `refresh`, `prune`, `--dry-run` and the 600 MiB `--selftest` are
+separate modes. Current zstd candidates are decoded and re-encoded as xz;
+earlier xz candidates are copied as-is. Both verify the original raw checksum. See the
+runbook for the retention and approval boundaries; existence of this publisher
+does not certify any candidate or authorize a stable/beta release.
+
 For a new board with no installed OS, download the sealed `.raw.xz` candidate.
 `ci/verify-and-flash-candidate.sh` verifies its adjacent `.raw.xz.sha256`,
 decompresses it into a private sparse snapshot, verifies that snapshot against
