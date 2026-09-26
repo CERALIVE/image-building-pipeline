@@ -18,7 +18,7 @@ already-baked `/etc/ceralive/image-build-commit` if absent; the slot-sync gate
 reads the same inputs. An unidentifiable slot or build refuses confirmation.
 
 The deliberate-failure drill requires **both** `/etc/ceralive/debug-image` and
-`/usr/lib/ceralive/testing/force-healthcheck-fail`. Either file alone is inert;
+`/etc/ceralive/testing/force-healthcheck-fail`. Either file alone is inert;
 normal production cannot arm the hook with only the testing file. This is an
 offline contract, not a claim of a new built/booted image or a completed updater.
 
