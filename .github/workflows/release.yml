@@ -256,7 +256,8 @@ jobs:
           mapfile -t raws < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raw')
           mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
           mapfile -t dev_debs < <(find "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/debs" -maxdepth 1 -type f -name 'srtla_*.deb')
-          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 ))
+          mapfile -t locks < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.packages.lock.json')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 && ${#locks[@]} == 1 ))
           mkdir -p candidate/dev-debs
           ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
           cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
@@ -264,6 +265,7 @@ jobs:
           cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
           cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
           cp "${dev_debs[0]}" candidate/dev-debs/
+          cp "${locks[0]}" candidate/packages.lock.json
           raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"
