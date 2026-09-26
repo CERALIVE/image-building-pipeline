@@ -314,6 +314,28 @@ run_mkosi_build() {
   cp "${HERE}/fetch-debs-auth.sh" "${MKOSI_DIR}/lib/fetch-debs-auth.sh"
   cp "${HERE}/fetch/index.sh" "${MKOSI_DIR}/lib/fetch/index.sh"
 
+  # Per-board, per-privilege-domain mkosi cache leaf (paths.sh::
+  # ceralive_mkosi_cache_domain), computed HERE — before env_names — so it can be
+  # forwarded as CERALIVE_MKOSI_CACHE_DIR. Relative to MKOSI_DIR, which is exactly
+  # $SRCDIR/$CHROOT_SRCDIR inside every subimage script, so a postinst/finalize
+  # hook can resolve it as "${SRCDIR}/${CERALIVE_MKOSI_CACHE_DIR}" with no
+  # knowledge of mkosi's own cache_key format. See the --cache-directory use
+  # below and mkosi/runtime/packages-lock-capture.sh for why this exists: mkosi
+  # >= 25 syncs apt's verified InRelease/Packages ONCE into
+  # "<cache-directory>/<cache_key>.metadata.cache/lib/apt/lists/" and bind-mounts
+  # that into a package-manager-aware sandbox only for the duration of an actual
+  # apt/dpkg operation — it is NEVER copied into the built rootfs itself, so
+  # /var/lib/apt/lists stays permanently empty inside every subimage regardless
+  # of CleanPackageMetadata=. That metadata-cache directory is the one place the
+  # real, gpgv-verified index still lives on disk after the sync, and it is a
+  # plain subdirectory of $SRCDIR (mkosi/cache/…), reachable from every
+  # postinst/finalize hook — chrooted or not — because mkosi re-binds /work
+  # (and therefore $CHROOT_SRCDIR) even after a mkosi-chroot re-root into
+  # /buildroot.
+  local cache_domain
+  cache_domain="$(ceralive_mkosi_cache_domain)"
+  local cache_dir="cache/${BOARD_ID}/${cache_domain}"
+
   # The board/product/secret values mkosi must forward into the post-install
   # scripts. Passed as `--environment NAME` CLI flags (bare name = inherit from
   # the invoking environment) so the same set works on host mkosi 26 and the
@@ -334,7 +356,7 @@ run_mkosi_build() {
     CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS CERALIVE_BOARD_QUIRKS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
     CERALIVE_OS_RELEASE_VERSION
-    CERALIVE_BENCH_LABELS CERALIVE_BOARD
+    CERALIVE_BENCH_LABELS CERALIVE_BOARD CERALIVE_MKOSI_CACHE_DIR
     CERALIVE_DTB_KEEP_OVERLAYS
     CERALIVE_PRUNE_PATHS_B64 CERALIVE_FIRST_PARTY_NAMES_B64
     SOURCE_DATE_EPOCH
@@ -383,6 +405,8 @@ run_mkosi_build() {
   # writes the /data fstab entry and the fallback RAUC slot devices, so it has to
   # reach the SUBIMAGES too — hence the matching mkosi.conf PassEnvironment= entry.
   export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
+  # See the cache_dir computation at the top of this function for why this exists.
+  export CERALIVE_MKOSI_CACHE_DIR="${cache_dir}"
   # Device-tree files the installed-rootfs DTB prune must KEEP beside the board's
   # own ${fdtfile}, space-separated and relative to each pruned directory. Empty
   # on both shipped boards: boot.scr.cmd and recovery.scr.cmd load ${fdtfile} and
@@ -507,10 +531,8 @@ run_mkosi_build() {
   # The second axis is the PRIVILEGE DOMAIN (paths.sh::ceralive_mkosi_cache_domain):
   # a containerized and a --native build own their caches as different uids, and
   # mkosi discards a cache it does not own, so sharing one leaf made every
-  # alternation a cold base layer.
-  local cache_domain
-  cache_domain="$(ceralive_mkosi_cache_domain)"
-  local cache_dir="cache/${BOARD_ID}/${cache_domain}"
+  # alternation a cold base layer. (cache_domain/cache_dir are computed once, at
+  # the top of this function, so CERALIVE_MKOSI_CACHE_DIR can reuse them too.)
 
   local mkosi_args=(
     --architecture="${mkosi_arch}"
