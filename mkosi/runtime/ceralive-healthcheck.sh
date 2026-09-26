@@ -67,7 +67,7 @@ OS_RELEASE_FILE="${CERALIVE_OS_RELEASE_FILE:-/etc/os-release}"
 IMAGE_VERSION_FILE="${CERALIVE_IMAGE_VERSION_FILE:-/etc/ceralive/image-build-commit}"
 CMDLINE_FILE="${CERALIVE_HEALTHCHECK_CMDLINE_FILE:-/proc/cmdline}"
 DEBUG_MARKER="${CERALIVE_DEBUG_MARKER:-/etc/ceralive/debug-image}"
-FORCE_FAIL_MARKER="${CERALIVE_FORCE_HEALTHCHECK_FAIL:-/usr/lib/ceralive/testing/force-healthcheck-fail}"
+FORCE_FAIL_MARKER="${CERALIVE_FORCE_HEALTHCHECK_FAIL:-/etc/ceralive/testing/force-healthcheck-fail}"
 BOOT_ID=""
 
 CERALIVE_SERVICE="${CERALIVE_SERVICE:-ceralive.service}"

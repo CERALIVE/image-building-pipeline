@@ -160,6 +160,24 @@ PY
   ! grep -q mark-good "$TEST_CALLS"
 }
 
+@test "debug marker honors the /etc testing hook before an already-good fast path" {
+  touch "$CERALIVE_DEBUG_MARKER" "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
+  printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'debug-image healthcheck failure injection armed'* ]]
+  ! grep -q mark-good "$TEST_CALLS"
+}
+
+@test "without debug marker the same /etc testing hook is inert" {
+  touch "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'healthcheck failure injection armed'* ]]
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
+  grep -Fq '/etc/ceralive/testing/force-healthcheck-fail' "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+}
+
 @test "dpkg recovery skips clean state, repairs pending state, and records failure" {
   local recover="$ROOT/mkosi/runtime/ceralive-dpkg-recover.sh"
   run bash "$recover"
