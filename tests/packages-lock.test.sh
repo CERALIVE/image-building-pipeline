@@ -6,11 +6,15 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 root="$work/root"
 stage="$work/staging"
-mkdir -p "$root/usr/lib/ceralive/build-lock" "$root/var/lib/dpkg" "$stage/packages-lock" "$stage/kernel-build" "$work/out"
+mkdir -p "$root/usr/lib/ceralive/build-lock" "$root/var/lib/dpkg" "$stage/packages-lock" "$stage/kernel-build" "$stage/rauc-build" "$work/out"
 
 hash_a="$(printf apt | sha256sum | cut -d' ' -f1)"
 hash_k="$(printf kernel | sha256sum | cut -d' ' -f1)"
 printf kernel >"$stage/kernel-build/linux-image-test_1_arm64.deb"
+hash_r="$(printf raucfixture | sha256sum | cut -d' ' -f1)"
+hash_rs="$(printf raucservicefixture | sha256sum | cut -d' ' -f1)"
+printf raucfixture >"$stage/rauc-build/rauc_9.9.9-fixture_arm64.deb"
+printf raucservicefixture >"$stage/rauc-build/rauc-service_9.9.9-fixture_all.deb"
 mkdir -p "$work/control/DEBIAN" "$stage/debs"
 printf 'Package: local-example\nVersion: 2.0\nArchitecture: all\nMaintainer: Fixture <fixture@example.invalid>\nDescription: fixture\n' >"$work/control/DEBIAN/control"
 dpkg-deb --root-owner-group --build "$work/control" "$stage/debs/local-example_2.0_all.deb" >/dev/null
@@ -60,13 +64,23 @@ Package: linux-image-test
 Status: hold ok installed
 Architecture: arm64
 Version: 1
+
+Package: rauc
+Status: install ok installed
+Architecture: arm64
+Version: 9.9.9-fixture
+
+Package: rauc-service
+Status: install ok installed
+Architecture: all
+Version: 9.9.9-fixture
 EOF
 printf '{"name":"apt-example","version":"1.0","arch":"arm64","origin":"debian","sha256":"%s"}\n' "$hash_a" >"$root/usr/lib/ceralive/build-lock/base.jsonl"
 printf 'trixie\tWed, 23 Sep 2026 00:00:00 UTC\ntrixie-security\tWed, 23 Sep 2026 01:00:00 UTC\n' >"$root/usr/lib/ceralive/build-lock/runtime.dates"
 
 args=("$root" "$stage" "$work/out/20260924.packages.lock.json" 1780000000 2026-09-24T12:00:00Z aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
 python3 "$HERE/lib/packages-lock.py" merge "${args[@]}"
-python3 - "${args[2]}" "$hash_a" "$hash_b" "$hash_c" "$hash_k" <<'PY'
+python3 - "${args[2]}" "$hash_a" "$hash_b" "$hash_c" "$hash_k" "$hash_r" "$hash_rs" <<'PY'
 import json
 import sys
 lock = json.load(open(sys.argv[1]))
@@ -74,10 +88,12 @@ assert lock['built_at'] == '2026-09-24T12:00:00Z'
 assert lock['source_date_epoch'] == 1780000000
 assert lock['debian_release_dates']['trixie'] == 'Wed, 23 Sep 2026 00:00:00 UTC'
 entries = {p['name']: p for p in lock['packages']}
-assert len(entries) == 4
+assert len(entries) == 6
 for name, origin, sha in [('apt-example', 'debian', sys.argv[2]),
                           ('local-example', 'bsp', sys.argv[3]),
-                          ('libv4l-0', 'generated-locally', sys.argv[4])]:
+                          ('libv4l-0', 'generated-locally', sys.argv[4]),
+                          ('rauc', 'generated-locally', sys.argv[6]),
+                          ('rauc-service', 'generated-locally', sys.argv[7])]:
     entry = entries[name]
     assert (entry['origin'], entry['sha256']) == (origin, sha)
     assert set(entry) == {'name', 'version', 'arch', 'origin', 'sha256'}
@@ -94,4 +110,4 @@ if python3 "$HERE/lib/packages-lock.py" merge "${args[@]}" >"$work/error" 2>&1; 
   exit 1
 fi
 grep -q 'genuinely-unaccounted' "$work/error"
-printf 'packages-lock: PASS cases (a)/(b)/(c), source-built kernel, fail-closed novel package\n'
+printf 'packages-lock: PASS cases (a)/(b)/(c), source-built kernel, generated-locally rauc/rauc-service, fail-closed novel package\n'
