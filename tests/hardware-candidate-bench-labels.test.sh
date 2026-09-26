@@ -77,6 +77,12 @@ make_fake_pipeline() {
 set -euo pipefail
 printf 'CERALIVE_BENCH_LABELS=%s\n' "\${CERALIVE_BENCH_LABELS-<UNSET>}" >"\${CERALIVE_BENCH_PROBE}"
 printf 'CERALIVE_BUILD_MODE=%s\n'   "\${CERALIVE_BUILD_MODE-<UNSET>}"  >>"\${CERALIVE_BENCH_PROBE}"
+printf 'CERALIVE_DEBUG_IMAGE=%s\n'  "\${CERALIVE_DEBUG_IMAGE-<UNSET>}" >>"\${CERALIVE_BENCH_PROBE}"
+printf 'CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR=%s\n' "\${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR-<UNSET>}" >>"\${CERALIVE_BENCH_PROBE}"
+if [[ -n "\${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
+  printf '[{"package":"ceralive-device","version":"99.2","arch":"arm64","sha256":"%s","filename":"ceralive-device_99.2_arm64.deb"}]\n' \
+    "\$(printf x | sha256sum | cut -d' ' -f1)" >"${root}/mkosi/.staging/${BOARD}/first-party-local-override.json"
+fi
 raw="${root}/out/image.raw"
 bundle="${root}/out/image.raucb"
 printf 'raw\n' >"\${raw}"
@@ -271,6 +277,77 @@ if [[ -s "${shared_ev}/rock-edge.bench-labels-1.tuple.json" ]]; then
   assert_eq "(e) the bench-labels-1 tuple survived the later bench-labels-0 run" \
     "true" "$(tuple_field "${shared_ev}/rock-edge.bench-labels-1.tuple.json" bench_labels)"
 fi
+
+# ---------------------------------------------------------------------------
+# (f) schema 4: first_party_local_overrides is always present, [] when unused
+# ---------------------------------------------------------------------------
+if [[ -s "${tuple_c}" ]]; then
+  assert_eq "(f) tuple is schema_version 4" "4" "$(tuple_field "${tuple_c}" schema_version)"
+  assert_eq "(f) unused override records an empty array" "[]" "$(tuple_field "${tuple_c}" first_party_local_overrides)"
+  assert_eq "(f) edge candidate without --debug-image is not a debug image" "false" "$(tuple_field "${tuple_c}" debug_image)"
+fi
+if grep -qF 'CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR=<UNSET>' "${probe_c}"; then
+  ok "(f) no override variable reaches ./build when the flag is absent"
+else
+  bad "(f) override variable leaked into ./build without the flag"
+fi
+
+mkdir -p "${INPUTS}/local-debs"
+printf "CERALIVE_DEBUG_PASSWORD_HASH='\$6\$fake\$hash'\n" >"${INPUTS}/debug.env"
+probe_g="${WORK}/probe-g"
+run_candidate "${ROOT}" "${INPUTS}" "${WORK}/ev-g" "${probe_g}" --bench-labels 1 \
+  --first-party-local-debs "${INPUTS}/local-debs" --debug-image --debug-env "${INPUTS}/debug.env" \
+  >"${WORK}/log-g" 2>&1
+rc_g=$?
+if (( rc_g == 0 )); then
+  ok "(g) development edge candidate accepts --first-party-local-debs and --debug-image"
+else
+  bad "(g) override/debug-image candidate failed (exit ${rc_g}):"$'\n'"$(cat "${WORK}/log-g")"
+fi
+assert_contains "(g) ./build received the local override dir" "${probe_g}" \
+  "CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR=${INPUTS}/local-debs"
+assert_contains "(g) --debug-image exports CERALIVE_DEBUG_IMAGE=1 on an edge candidate" "${probe_g}" \
+  'CERALIVE_DEBUG_IMAGE=1'
+tuple_g="${WORK}/ev-g/rock-edge.bench-labels-1.tuple.json"
+if [[ -s "${tuple_g}" ]]; then
+  assert_eq "(g) tuple debug_image reflects --debug-image" "true" "$(tuple_field "${tuple_g}" debug_image)"
+  assert_eq "(g) --debug-image does not flip the kernel test-seam expectation" '"off"' \
+    "$(tuple_field "${tuple_g}" ceralive_test_symbols)"
+  if python3 - "${tuple_g}" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))["first_party_local_overrides"]
+assert isinstance(rows, list) and len(rows) == 1
+assert set(rows[0]) == {"package", "version", "arch", "sha256", "filename"}
+assert rows[0]["package"] == "ceralive-device" and rows[0]["version"] == "99.2"
+PY
+  then ok "(g) tuple carries the build's override manifest"; else bad "(g) tuple override shape"; fi
+else
+  bad "(g) tuple not emitted: ${tuple_g}"
+fi
+
+if run_candidate "${ROOT}" "${INPUTS}" "${WORK}/ev-h" "${WORK}/probe-h" --bench-labels 1 \
+     --debug-image >/dev/null 2>&1; then
+  bad "(h) --debug-image without --debug-env was accepted"
+else
+  ok "(h) --debug-image requires --debug-env"
+fi
+
+sed 's/"build_mode":"development"/"build_mode":"production"/; s/"production_trust_anchor":false/"production_trust_anchor":true/' \
+  "${INPUTS}/verdict.json" >"${INPUTS}/verdict-prod.json"
+cp "${INPUTS}/verdict.json" "${INPUTS}/verdict-dev.json"
+cp "${INPUTS}/verdict-prod.json" "${INPUTS}/verdict.json"
+for extra in "--first-party-local-debs ${INPUTS}/local-debs" "--debug-image --debug-env ${INPUTS}/debug.env"; do
+  probe_p="${WORK}/probe-prod-${extra%% *}"
+  # shellcheck disable=SC2086
+  out_p="$(run_candidate "${ROOT}" "${INPUTS}" "${WORK}/ev-p" "${probe_p}" --bench-labels 0 ${extra} 2>&1)"
+  rc_p=$?
+  if (( rc_p != 0 )) && [[ "${out_p}" == *"board '${BOARD}' has production build_mode"* ]] && [[ ! -e "${probe_p}" ]]; then
+    ok "(i) production verdict refuses ${extra%% *} before ./build, naming the board"
+  else
+    bad "(i) production verdict did not refuse ${extra%% *} (exit ${rc_p}): ${out_p}"
+  fi
+done
+cp "${INPUTS}/verdict-dev.json" "${INPUTS}/verdict.json"
 
 # The shipped tool's own refusal legs.
 if "${TOOL}" --self-test >"${WORK}/selftest.log" 2>&1; then

@@ -56,7 +56,8 @@
 #
 # Usage:
 #   build-hardware-candidates.sh --only <list> --trust-verdict <path>
-#       --signing-env <path> [--debug-env <path>] --evidence <dir>
+#       --signing-env <path> [--debug-env <path>] [--debug-image]
+#       [--first-party-local-debs <dir>] --evidence <dir>
 #       --bench-labels 0|1
 #   build-hardware-candidates.sh --self-test
 #
@@ -74,6 +75,8 @@
 #                   RAUC_KEYRING_FILE
 #   --debug-env     an env file defining CERALIVE_DEBUG_PASSWORD_HASH; REQUIRED
 #                   when a debug candidate is selected, refused otherwise
+#   --debug-image   bake the debug image posture on any selected kernel variant
+#   --first-party-local-debs  bench-only first-party .deb overrides (development only)
 #   --evidence      output directory for logs, configs and artifact tuples
 #   --bench-labels  REQUIRED, 0 or 1, no default and no ambient fallback:
 #                     1 = bench PARTLABEL overlay (xboot/xrootfs_a/xrootfs_b/xdata)
@@ -105,9 +108,10 @@ TOOL_NAME="ci/build-hardware-candidates.sh"
 # schema-2 tuple recorded the Radxa loader's digest for every board, so an Orange
 # Pi tuple named a loader that board's BootROM cannot be recovered with. It also
 # adds `evidence_stem`, because evidence paths are now per bench-labels mode.
-SCHEMA_VERSION=3
+# 4 records local .deb identities that have no signed-index provenance.
+SCHEMA_VERSION=4
 
-usage() { sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
+usage() { sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
 say()  { printf '[cand] %s\n' "$*" >&2; }
 fail() { printf 'build-hardware-candidates: %s\n' "$*" >&2; }
 die()  { fail "$*"; exit "${2:-2}"; }
@@ -133,7 +137,8 @@ candidate_variant() {
     *) return 1 ;;
   esac
 }
-candidate_is_debug() { [[ "$1" == "rock-edge-test" ]]; }
+candidate_kernel_test_seam() { [[ "$1" == "rock-edge-test" ]]; }
+candidate_debug_image() { candidate_kernel_test_seam "$1" || (( DEBUG_IMAGE == 1 )); }
 
 # Evidence file stem. The bench-labels mode is part of the NAME, not just of the
 # content: the same candidate is built once per mode and the two artifacts are
@@ -376,7 +381,7 @@ build_candidate() {
   export CERALIVE_BUILD_MODE="${mode}"
   export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE
 
-  if candidate_is_debug "${name}"; then
+  if candidate_debug_image "${name}"; then
     [[ -n "${DEBUG_PASSWORD_HASH:-}" ]] \
       || die "candidate '${name}' is a DEBUG artifact and no CERALIVE_DEBUG_PASSWORD_HASH was supplied (--debug-env)"
     export CERALIVE_DEBUG_IMAGE=1
@@ -412,7 +417,11 @@ build_candidate() {
   say "  pki=${CERALIVE_RAUC_PKI_DIR} keyring=${RAUC_KEYRING_FILE}"
 
   # pipefail is already set; tee must not be allowed to mask a failed build.
-  ( cd "${PIPELINE_DIR}" && ./build "${build_args[@]}" ) 2>&1 | tee "${log}"
+  ( cd "${PIPELINE_DIR}"
+    if [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]]; then
+      export CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${FIRST_PARTY_LOCAL_DEBS}"
+    fi
+    ./build "${build_args[@]}" ) 2>&1 | tee "${log}"
 
   record_tuple "${name}" "${board}" "${variant}" "${label}" \
     "${verdict}" "${root_fpr}" "${leaf_fpr}" "${eku}" "${log}"
@@ -464,7 +473,7 @@ record_tuple() {
   extract_kernel_config "${kdeb}" "${config}" \
     || die "could not extract /boot/config-${kernel_release} from ${kdeb}" 1
 
-  candidate_is_debug "${name}" && expect="on"
+  candidate_kernel_test_seam "${name}" && expect="on"
   say "verifying CeraLive test symbols in ${name} (expect ${expect})"
   assert_test_symbols "${config}" "${expect}" || exit 1
 
@@ -493,6 +502,20 @@ record_tuple() {
   local bench_json="false" partlabel_set="production-frozen"
   if [[ "${CERALIVE_BENCH_LABELS}" == "1" ]]; then
     bench_json="true"; partlabel_set="bench-x-prefixed"
+  fi
+
+  local local_overrides='[]' override_file="${PIPELINE_DIR}/mkosi/.staging/${board}/first-party-local-override.json"
+  if [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]]; then
+    [[ -s "${override_file}" ]] || die "local first-party override manifest missing for ${name}: ${override_file}" 1
+    local_overrides="$(python3 - "${override_file}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    entries = json.load(source)
+assert isinstance(entries, list)
+assert all(isinstance(entry, dict) and set(entry) == {"package", "version", "arch", "sha256", "filename"} for entry in entries)
+print(json.dumps(entries, separators=(",", ":")))
+PY
+)" || die "invalid local first-party override manifest for ${name}" 1
   fi
 
   {
@@ -527,6 +550,7 @@ record_tuple() {
     printf '  "loader_sha256": %s,\n'   "$(json_str "${LOADER_SHA256:-}")"
     printf '  "build_mode": %s,\n'      "$(json_str "${CERALIVE_BUILD_MODE}")"
     printf '  "debug_image": %s,\n'     "$( [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]] && echo true || echo false )"
+    printf '  "first_party_local_overrides": %s,\n' "${local_overrides}"
     printf '  "bench_labels": %s,\n'    "${bench_json}"
     printf '  "partlabel_set": %s,\n'   "$(json_str "${partlabel_set}")"
     printf '  "ceralive_test_symbols": %s,\n' "$(json_str "${expect}")"
@@ -724,7 +748,9 @@ JSON
 
 # ---------------------------------------------------------------------------
 main() {
-  local only="" evidence="" debug_env="" skip_probes=0
+  local only="" evidence="" debug_env="" skip_probes=0 local_debs_flag=0
+  DEBUG_IMAGE=0 FIRST_PARTY_LOCAL_DEBS=""
+  unset CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR
   TRUST_VERDICT=""; SIGNING_ENV=""; BENCH_LABELS=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -732,6 +758,8 @@ main() {
       --trust-verdict) TRUST_VERDICT="${2:-}"; shift 2 ;;
       --signing-env)   SIGNING_ENV="${2:-}"; shift 2 ;;
       --debug-env)     debug_env="${2:-}"; shift 2 ;;
+      --debug-image)   DEBUG_IMAGE=1; shift ;;
+      --first-party-local-debs) local_debs_flag=1; FIRST_PARTY_LOCAL_DEBS="${2:-}"; shift 2 ;;
       --evidence)      evidence="${2:-}"; shift 2 ;;
       --bench-labels)  BENCH_LABELS="${2:-}"; shift 2 ;;
       --skip-probes)   skip_probes=1; shift ;;
@@ -772,8 +800,23 @@ main() {
     done
   fi
 
-  local needs_debug=0 c
-  for c in "${selected[@]}"; do candidate_is_debug "${c}" && needs_debug=1; done
+  if (( local_debs_flag )); then
+    [[ -d "${FIRST_PARTY_LOCAL_DEBS}" ]] || die "--first-party-local-debs is not a directory: ${FIRST_PARTY_LOCAL_DEBS}"
+    FIRST_PARTY_LOCAL_DEBS="$(cd "${FIRST_PARTY_LOCAL_DEBS}" && pwd)"
+  fi
+  local c board verdict_line verdict mode pki root_fpr leaf_fpr eku prod_anchor
+  for c in "${selected[@]}"; do
+    board="$(candidate_board "${c}")"
+    verdict_line="$(read_verdict "${TRUST_VERDICT}" "${board}")" \
+      || die "no trust verdict recorded for board '${board}' in ${TRUST_VERDICT}"
+    IFS='|' read -r verdict mode pki root_fpr leaf_fpr eku prod_anchor <<<"${verdict_line}"
+    if [[ "${mode}" == production ]] && { [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]] || (( DEBUG_IMAGE == 1 )); }; then
+      die "board '${board}' has production build_mode: --first-party-local-debs / --debug-image refused"
+    fi
+  done
+
+  local needs_debug=0
+  for c in "${selected[@]}"; do candidate_debug_image "${c}" && needs_debug=1; done
   if (( needs_debug )); then
     [[ -n "${debug_env}" ]] || die "a DEBUG candidate is selected but --debug-env was not supplied"
   elif [[ -n "${debug_env}" ]]; then

@@ -1063,7 +1063,7 @@ the annotated tag `vendor-kernel-final`. The candidate table is now
 `rock-edge` / `orange-edge` / `rock-edge-test`, and `--self-test` carries an
 absence guard proving `rock-vendor` is REFUSED rather than silently mapped.
 
-**The artifact tuple is at `schema_version: 3`.** Schema 2 added `bench_labels` +
+**The artifact tuple is at `schema_version: 4`.** Schema 2 added `bench_labels` +
 `partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
 by tooling that COULD NOT state which PARTLABEL set built the artifact, which is
 precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
@@ -1071,6 +1071,18 @@ Schema 3 makes `loader_sha256` board-specific and adds `loader_name`/`loader_url
 /`loader_board`, `kernel_source`/`kernel_package` and `evidence_stem` — a
 schema-2 tuple recorded the RADXA loader's digest for every board, so an Orange
 Pi tuple named a loader that board's BootROM cannot be recovered with.
+Schema 4 adds `first_party_local_overrides`: the build's own
+`first-party-local-override.json` (`package`/`version`/`arch`/`sha256`/`filename`
+per entry, `[]` without `--first-party-local-debs`). A bench override's bytes come
+from no signed APT index, so the tuple is the only record of what was baked in;
+`fetch_first_party` refuses the override under `CERALIVE_BUILD_MODE=production`
+or `GITHUB_ACTIONS=true`, never stores it in `.debcache`, and validates the
+override's own control version. The candidate tool refuses both
+`--first-party-local-debs` and `--debug-image` when any selected board's verdict
+is `production`. `--debug-image` sets the debug posture on any variant without
+changing the kernel test-seam expectation, which stays keyed on `rock-edge-test`;
+`debug_image` records the posture, `ceralive_test_symbols` the seam. Under the
+debug marker only, the healthcheck fails on `/etc/ceralive/testing/force-healthcheck-fail`.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
