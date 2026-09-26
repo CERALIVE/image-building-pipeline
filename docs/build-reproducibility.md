@@ -40,6 +40,14 @@ There are three package hash sources, and no general fourth one:
    `origin: generated-locally`. A future generator receives no automatic
    exemption: without a receipt its installed package fails the final merge.
 
+The bench-only first-party local override is an explicit exception to the signed
+index path in item 2. Its fetch-time `first-party-local-override.json` records
+the staged filename and SHA-256. The fetch lock reads that entry by package name,
+checks its control version, filename, architecture and staged bytes, and emits
+`origin: first-party-local-override`, never `first-party` (which means verified
+apt.ceralive.tv index provenance). Packages without an override still require
+the signed-index lookup. This exception is refused in production and CI builds.
+
 The source-built `linux-image-*` package is separate from those three paths.
 Its lock entry has `origin: source-built`, the immutable kernel and patch
 commit pins, and `artifact.sha256` keyed by the generated `.deb` filename,

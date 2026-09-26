@@ -3455,6 +3455,11 @@ freshly created bytes. The final dpkg-status reconciliation fails on any
 unaccounted package. Source-built kernel entries carry commit pins and an
 artifact hash map, not an apt origin. `docs/build-reproducibility.md` records
 the real apt 3.0.3 snapshot TLS failure; there is no snapshot override.
+Bench-only local first-party `.deb`s are the explicit exception: the fetch lock
+reads their recorded filename/version/architecture/SHA-256 from
+`first-party-local-override.json`, verifies staged bytes, and emits
+`first-party-local-override` rather than falsely claiming signed-index
+`first-party` provenance. All other first-party names still require the index.
 The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
 `common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle

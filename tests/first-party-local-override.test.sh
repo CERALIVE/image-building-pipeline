@@ -175,5 +175,49 @@ if grep -l 'CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR' "${ROOT}"/.github/workflows/*.y
 else
   ok 'no GitHub workflow sets the bench-only override variable'
 fi
+
+make_deb ceralive-device 99.2 arm64 "${TEST_OVERRIDE}/local.deb"
+export TEST_LOCK_DEST="${WORK}/locked"
+mkdir -p "${TEST_LOCK_DEST}/debs"
+if env DEST="${TEST_LOCK_DEST}" CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${TEST_OVERRIDE}" bash -c '
+  source "$1"
+  FIRST_PARTY_APT_PKGS=(ceralive-device)
+  FIRST_PARTY_DEB_VERSIONS_FILE="$TEST_PINS"
+  fetch_first_party "$DEST/debs"
+  fetch_lock_sidecar
+' _ "${ROOT}/lib/fetch-debs.sh" >"${WORK}/locked.log" 2>&1; then
+  if python3 - "${TEST_LOCK_DEST}" <<'PY'
+import hashlib, json, pathlib, sys
+dest = pathlib.Path(sys.argv[1])
+override, = json.loads((dest / "first-party-local-override.json").read_text())
+receipt, = [json.loads(line) for line in (dest / "packages-lock/fetch.jsonl").read_text().splitlines()]
+assert receipt == {"name": override["package"], "version": override["version"],
+                   "arch": override["arch"], "origin": "first-party-local-override",
+                   "sha256": override["sha256"]}
+assert override["sha256"] == hashlib.sha256((dest / "debs" / override["filename"]).read_bytes()).hexdigest()
+PY
+  then ok 'real fetch sidecar preserves local override origin and recorded sha256'; else bad 'local override lock receipt mismatch'; fi
+else
+  bad "real fetch sidecar rejected local override: $(<"${WORK}/locked.log")"
+fi
+python3 - "${TEST_LOCK_DEST}/first-party-local-override.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    rows = json.load(source)
+rows[0]["sha256"] = "0" * 64
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump(rows, output)
+PY
+if env DEST="${TEST_LOCK_DEST}" bash -c '
+  source "$1"
+  FIRST_PARTY_APT_PKGS=(ceralive-device)
+  fetch_lock_sidecar
+' _ "${ROOT}/lib/fetch-debs.sh" >"${WORK}/tampered-lock.log" 2>&1; then
+  bad 'sidecar accepted a local override with a tampered recorded sha256'
+elif grep -Fq 'verified digest identity mismatch for ceralive-device=99.2/arm64' "${WORK}/tampered-lock.log"; then
+  ok 'sidecar refuses tampered local override digest via identity check'
+else
+  bad "sidecar rejected tampering for the wrong reason: $(<"${WORK}/tampered-lock.log")"
+fi
 printf '\n== %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]
