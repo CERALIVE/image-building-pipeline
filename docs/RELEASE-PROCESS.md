@@ -456,18 +456,18 @@ host-independently.
 
 ---
 
-## 5. R2 upload — the ACTUAL mechanism (MANUAL today)
+## 5. R2 upload — legacy bundle pair and signed image channels
 
-**There is no CI job or high-level candidate publisher for signed OS `.raucb`
-bundles.** The tested low-level helper performs only the final immutable R2 pair
-write after an operator completes every proof below. Compare the three artifact
-families this pipeline produces:
+The legacy bundle-pair path below remains manual for old consumers. The new
+`images.ceralive.tv` OS channel publisher is a separate, environment-gated
+workflow described after it. Compare the artifact families:
 
 | Artifact | R2 path | Publisher |
 |----------|---------|-----------|
 | Feature-sysext add-ons | `addons/{os_version}/{board}/{feature}.raw` | [`lib/upload-addons.sh`](../lib/upload-addons.sh) — **exists, automatable, CI-proven under `DRY_RUN`** (`v2-ci.yml` `addon-publish` job) |
 | CeraUI federation UI bundles | `ui-bundle/{ceraui-version}/*.js` | CeraUI's own `publish-release.yml` → `publish-federation` job — **exists in the CeraUI repo** |
 | **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | manual candidate proof, then [`publish-immutable-r2-pair.sh`](../ci/publish-immutable-r2-pair.sh); **no publishing workflow** |
+| **Signed OS image channels** | `releases/{board}/{version}/` plus `channels/{channel}/{board}.json[.sig]` | [`publish-release.sh`](../ci/publish-release.sh) via approved [`publish-release.yml`](../.github/workflows/publish-release.yml) |
 
 `apt-worker/AGENTS.md` and `apt-worker/README.md` both describe the `bundles/`
 path as a pure read side (the worker range-serves whatever is already in R2)
@@ -586,11 +586,52 @@ deletes a release key. Any
 mismatched collision or unverifiable read aborts before hawkBit registration;
 never replace an existing release key.
 
-**Future work.** The remaining gap is a high-level publisher that performs the
-candidate/workflow/hardware checks above automatically and a protected
-release-triggered job analogous to `v2-ci.yml`'s `addon-publish`. The low-level
-immutable R2 pair helper deliberately does not select or trust a candidate by
-itself.
+### Signed channel publishing (new OS agent)
+
+The manual `Publish signed image release` workflow asks for mode (`publish`,
+`promote`, `refresh`, `prune`), comma-separated boards, channel and (for publish
+or promote) OS CalVer. Publish additionally requires the **successful** release
+candidate run ID. The `release` GitHub environment requires owner approval;
+every invocation joins one non-cancelling publisher concurrency group. A
+release-candidate archive must include `good.raucb`, both transport checksums,
+`raw.sha256` and `packages.lock.json`. Current `.raw.zst` candidates are decoded
+and recompressed to actual xz; earlier `.raw.xz` candidates are copied. In both
+cases the bytes after decompression must match the
+original raw SHA. The publisher independently rechecks both file hashes and
+pins `min_ceraui_version` from the repo-local CeraUI version registry. If the
+candidate lacks a package lock (older releases), it is **not** publishable.
+Before approving, the owner must match the candidate run SHA/artifact and the
+real board hand-test; the workflow verifies the successful run and its downloaded
+archive, but does not perform a physical board test.
+
+The release is stored under `releases/<board>/<CalVer>/`: 268435456-byte
+create-only parts for both `bundle.raucb` and `flash.raw.xz`; one schema-1
+`index.json` with both files' complete digests, sizes and ordered parts;
+`packages.lock.json`; `SHA256SUMS`; and create-only
+`channels/<channel>` membership marker. All immutable writes use the same
+conditional/exact-byte-recovery primitive as the legacy publisher. Only after
+they succeed does the publisher sign the strict schema-1 channel manifest with
+the dedicated `CeraLive OTA Manifest Signer` (codeSigning only, **not** the
+dual-EKU bundle signer), upload the detached DER CMS `.sig`, and put `.json`
+**last**, conditional on the previous channel ETag. Its serial increases once
+per publish/promotion/refresh on that channel, and the 90-day validity window
+starts at that operation. `refresh` retains version and artifact bytes and
+uploads **no parts**; it is required before a rarely-released channel expires.
+`promote` requires a beta manifest naming the exact version and matching the
+immutable index; it uploads no parts. A failed conditional manifest write is a
+serial replay refusal, not licence to overwrite a release object.
+
+`prune --board <b> --channel-family` inventories all release keys, protects every
+version referenced by **any** of the three current channel manifests, keeps the
+three newest marked stable/beta versions across those two channels combined and
+one newest drill version, and deletes only eligible keys under that board's
+`releases/` prefix. A version with **no channel marker** is never pruned.
+`--dry-run` performs the real inventory/read and prints exact planned keys with
+no R2 mutations; use it before pruning. `--selftest` publishes a unique synthetic
+600 MiB logical file in three parts, compares an HTTP Range crossing the first
+part boundary, and cleans up only the unique test prefix. Local stub/CMS contract:
+`bash tests/publish-release.test.sh`. Live publishing by this executor is
+restricted to `drill`; stable/beta require the owner to approve and dispatch.
 
 ### Registering the artifact with hawkBit (also manual/operator-driven)
 
