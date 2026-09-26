@@ -94,6 +94,31 @@ def merge(
                     "artifact": {"sha256": {deb.name: hashlib.sha256(deb.read_bytes()).hexdigest()}},
                 }
             )
+        elif identity["name"] in ("rauc", "rauc-service"):
+            # [2c/9] (lib/stages/rauc-build.sh) compiles the pipeline's own RAUC pin
+            # from pinned upstream source into staging/rauc-build/*.deb — the same
+            # "produced by this build's own container, never fetched from any apt
+            # archive or index" shape as the generated-locally libv4l-0 sidecar, minus
+            # a git-commit object to report (RAUC's build stage carries no equivalent
+            # pin this merge can read, unlike the kernel branch above). Hash the
+            # staged .deb bytes directly rather than requiring a fetch-stage sidecar.
+            debs = list((staging / "rauc-build").glob("*.deb"))
+            matches = [
+                deb
+                for deb in debs
+                if deb.name.startswith(identity["name"] + "_")
+                and deb.name.endswith("_" + identity["arch"] + ".deb")
+            ]
+            if len(matches) != 1:
+                raise LockError(f"rauc platform pin {key}: expected one staged artifact, got {len(matches)}")
+            deb = matches[0]
+            packages.append(
+                {
+                    **identity,
+                    "origin": "generated-locally",
+                    "sha256": hashlib.sha256(deb.read_bytes()).hexdigest(),
+                }
+            )
         else:
             receipt = receipts.get(key)
             if receipt is None:
