@@ -46,6 +46,7 @@ COMPATIBLE_STRING='ceralive-fixture-board'
 CERALIVE_RAUC_PKI_DIR="${TMP}/pki"
 bsp_dir="${TMP}/bsp"
 rauc_build_dir="${TMP}/rauc-build"
+rauc_build_dir_host="${rauc_build_dir}"
 rootfs_tree="${TMP}/rootfs"
 artifact="${TMP}/rootfs.tar"
 build_version='fixture'
@@ -54,7 +55,7 @@ ASSEMBLE_DISK_SH="${TMP}/assemble-disk"
 BUILD_BUNDLE_SH="${TMP}/build-bundle"
 SEAL_RAW_CANDIDATE_SH="${PIPELINE_DIR}/ci/seal-raw-candidate.sh"
 export board variant RAUC_BOOTLOADER_ADAPTER INSTALL_BOOT_BSP SINGLE_SLOT_FALLBACK
-export BOARD_ID COMPATIBLE_STRING CERALIVE_RAUC_PKI_DIR bsp_dir rauc_build_dir rootfs_tree
+export BOARD_ID COMPATIBLE_STRING CERALIVE_RAUC_PKI_DIR bsp_dir rauc_build_dir rauc_build_dir_host rootfs_tree
 export artifact build_version MKOSI_BUILDER_IMAGE ASSEMBLE_DISK_SH BUILD_BUNDLE_SH SEAL_RAW_CANDIDATE_SH
 mkdir -p "${out_dir}" "${bsp_dir}" "${rauc_build_dir}" "${rootfs_tree}"
 

@@ -79,21 +79,32 @@ bundle_with_rauc() {
     image="${MKOSI_BUILDER_IMAGE}"
     out_dir="$(dirname "${out}")"
     # ci/Dockerfile deliberately ships no `rauc` (Debian trixie's is 1.13, which
-    # cannot build/verify format=verity bundles). The pipeline's own source-built
-    # RAUC 1.15.2 pair (lib/build-rauc.sh, staged by stage_rauc_build at
-    # RAUC_DEB_DIR) is installed into the container at bundle-build time instead,
-    # so this path never silently falls back to a stale system rauc.
+    # cannot build/verify format=verity bundles). This container is AMD64-native
+    # (debian:trixie-slim, no arch qualifier), so RAUC_DEB_DIR here MUST be the
+    # HOST-NATIVE (amd64) pair stage_rauc_build ([2c/9]) builds at
+    # rauc_build_dir_host — never the target board's own rauc pair (which may be
+    # a different architecture, e.g. arm64 for RK3588): apt's ordinary default
+    # resolution only works because this transaction sees a single self-consistent
+    # amd64 rauc+rauc-service pair, with zero foreign-arch candidates.
     [[ -n "${RAUC_DEB_DIR:-}" && -d "${RAUC_DEB_DIR}" ]] \
-      || die "RAUC_DEB_DIR is required for the containerized bundle build (the RAUC 1.15.2 .deb pair from stage [2c/9]/lib/build-rauc.sh)"
+      || die "RAUC_DEB_DIR is required for the containerized bundle build (the host-native RAUC 1.15.2 .deb pair from stage [2c/9]/lib/build-rauc.sh)"
     assert_no_root_signing rauc bundle --key=/pki/leaf-signing.key
+    # /bundle is writable: since RAUC 1.12, `rauc bundle` hard-links the whole
+    # content dir into a .rauc-workdir it creates INSIDE it, so a read-only
+    # mount here fails every containerized build ("Read-only file system") —
+    # not a signing/security boundary, since ${content} is this function's own
+    # ephemeral mktemp scratch dir, discarded by build-bundle()'s RETURN trap.
     "${runtime}" run --rm \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
       -e "RAUC_BUNDLE_MKSQUASHFS_ARGS=${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" \
-      -v "${content}:/bundle:ro" -v "${out_dir}:/out" \
+      -v "${content}:/bundle" -v "${out_dir}:/out" \
       -v "${RAUC_PKI_DIR}:/pki:ro" -v "${RAUC_DEB_DIR}:/rauc-debs:ro" "${image}" \
       bash -euo pipefail -c '
         apt-get update -qq
-        apt-get install -y --no-install-recommends /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb >/dev/null
+        # squashfs-tools is only a Suggests: of rauc (bundle CREATION is a
+        # build-host operation; unsquashfs alone — a Depends: — is enough on
+        # the device to INSTALL one), so this builder needs it named explicitly.
+        apt-get install -y --no-install-recommends squashfs-tools /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb >/dev/null
         extra=()
         [[ -n "${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" ]] && extra=("--mksquashfs-args=${RAUC_BUNDLE_MKSQUASHFS_ARGS}")
         rauc bundle --cert=/pki/leaf-signing.pem --key=/pki/leaf-signing.key \

@@ -12,7 +12,7 @@
 # stage_assemble — [8/9]
 #
 # Reads from main()'s frame: board, ts, out_dir, artifact, build_version,
-# bsp_dir, rootfs_tree, rauc_build_dir.
+# bsp_dir, rootfs_tree, rauc_build_dir_host.
 # ---------------------------------------------------------------------------
 stage_assemble() {
   local raw_artifact=""
@@ -51,7 +51,7 @@ stage_assemble() {
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
-        RAUC_DEB_DIR="${rauc_build_dir}" \
+        RAUC_DEB_DIR="${rauc_build_dir_host}" \
         "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
       log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
@@ -91,7 +91,7 @@ stage_assemble() {
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
-        RAUC_DEB_DIR="${rauc_build_dir}" \
+        RAUC_DEB_DIR="${rauc_build_dir_host}" \
         "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
       log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"

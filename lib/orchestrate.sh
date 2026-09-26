@@ -259,7 +259,7 @@ main() {
   # Cross-stage state. Declared in THIS frame so every stage_* module assigns
   # into one place — the stages are called from here, so bash's dynamic scoping
   # hands them these names exactly as the inline bodies had them.
-  local kernel_from_source=0 family_manifest="" mkosi_arch=""
+  local kernel_from_source=0 family_manifest="" mkosi_arch="" rauc_build_dir_host=""
   local ts="" rootfs_tree="" build_version=""
   local out_dir="" artifact=""
 
