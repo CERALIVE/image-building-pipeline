@@ -187,6 +187,64 @@ validate_first_party_staged_debs() {
   log_success "first-party: staged ${staged_total} .deb(s) from ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/"
 }
 
+# Local inputs are intentionally NOT passed through publish_staged_deb: that
+# helper stores every result in the signed-index-verified content cache.
+first_party_local_overrides() {
+  local debs="$1" directory="$2" file pkg version deb_arch sha filename tmp spec index
+  local -a files=() records=() selected=() identity_opts=()
+  local -A overridden=()
+  [[ -d "${directory}" ]] || die "first-party local override directory missing: ${directory}"
+  shopt -s nullglob
+  files=("${directory}"/*.deb)
+  shopt -u nullglob
+  for file in "${files[@]}"; do
+    [[ -f "${file}" && ! -L "${file}" ]] || die "first-party local override must be a regular .deb: ${file}"
+    pkg="$(deb_pkg_name "${file}")"
+    version="$(deb_pkg_version "${file}")"
+    deb_arch="$(deb_pkg_arch "${file}")"
+    [[ -n "${pkg}" && -n "${version}" && -n "${deb_arch}" ]] \
+      || die "first-party local override has incomplete Debian control identity: ${file}"
+    local allowed=0 name
+    for name in "${FIRST_PARTY_APT_PKGS[@]}"; do
+      [[ "${pkg}" == "${name}" ]] && allowed=1
+    done
+    (( allowed )) || die "unknown first-party local override package: ${pkg}"
+    [[ -z "${overridden[${pkg}]:-}" ]] || die "duplicate first-party local override package: ${pkg}"
+    identity_opts=()
+    if first_party_arch_all_ok "${pkg}"; then identity_opts+=(--arch-all-ok); fi
+    assert_deb_identity "${file}" "${pkg}" "${version}" "${ARCH}" "${identity_opts[@]}" \
+      || die "first-party local override architecture/identity mismatch for ${pkg}: ${deb_arch} (expected ${ARCH})"
+    overridden["${pkg}"]="${version}"
+    sha="$(sha256sum "${file}" | cut -d' ' -f1)"
+    filename="${pkg}_${version}_${deb_arch}.deb"
+    tmp="$(mktemp "${debs}/.tmp-firstparty-local-XXXXXX")"
+    if ! cp -- "${file}" "${tmp}" || ! chmod 0644 "${tmp}" || ! mv -f "${tmp}" "${debs}/${filename}"; then
+      rm -f "${tmp}"
+      die "cannot stage first-party local override: ${file}"
+    fi
+    records+=("${pkg}" "${version}" "${deb_arch}" "${sha}" "${filename}")
+    log_warn "FIRST-PARTY LOCAL OVERRIDE (bench only): ${pkg}=${version} sha256=${sha}"
+  done
+  for spec in "${download_specs[@]}"; do
+    [[ -n "${overridden[${spec%%=*}]:-}" ]] || selected+=("${spec}")
+  done
+  download_specs=("${selected[@]}")
+  for index in "${!staged_specs[@]}"; do
+    pkg="${staged_specs[index]%%=*}"
+    if [[ -n "${overridden[${pkg}]:-}" ]]; then
+      staged_specs[index]="${pkg}=${overridden[${pkg}]}"
+    fi
+  done
+  python3 - "${DEST}/first-party-local-override.json" "${records[@]}" <<'PY'
+import json, sys
+fields = ("package", "version", "arch", "sha256", "filename")
+values = sys.argv[2:]
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump([dict(zip(fields, values[i:i + 5])) for i in range(0, len(values), 5)], output)
+    output.write("\n")
+PY
+}
+
 # ---------------------------------------------------------------------------
 # fetch_first_party — pull the first-party device .debs from apt.ceralive.tv via a
 # GPG-verified, mTLS-authenticated apt source. REPLACES the retired R2
@@ -205,6 +263,13 @@ fetch_first_party() {
   local debs="$1"
   local r
 
+  if [[ -n "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
+    [[ "${CERALIVE_BUILD_MODE:-}" != production ]] \
+      || die "first-party local override refused in production mode"
+    [[ "${GITHUB_ACTIONS:-}" != true ]] \
+      || die "first-party local override refused in GitHub Actions"
+  fi
+
   fetch_scratch_init
 
   log_info "first-party pins (versions.yaml):"
@@ -217,6 +282,14 @@ fetch_first_party() {
   local -a download_specs=()
   mapfile -t download_specs < <(first_party_download_specs)
   log_info "first-party apt specs: ${download_specs[*]}"
+  local -a staged_specs=("${download_specs[@]}")
+  if [[ -z "${DRY_RUN}" ]]; then
+    if [[ -n "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
+      first_party_local_overrides "${debs}" "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR}"
+    else
+      printf '[]\n' >"${DEST}/first-party-local-override.json"
+    fi
+  fi
 
   # mTLS pair must be whole (both or neither) — apt-ceralive-repo.sh contract.
   local crt="${APT_CLIENT_CRT_B64:-}" key="${APT_CLIENT_KEY_B64:-}"
@@ -302,7 +375,9 @@ EOF
     return 0
   fi
 
-  if [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
+  if (( ${#download_specs[@]} == 0 )); then
+    log_info "first-party: every package supplied locally — no apt download needed"
+  elif [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
     _fetch_first_party_curl "${debs}" "${keyring}" "${certs_dir}" "${download_specs[@]}"
   else
     run_or_plan_retry "first-party apt-get update" apt-get "${apt_opts[@]}" update
@@ -366,5 +441,5 @@ EOF
     fi
   fi
 
-  validate_first_party_staged_debs "${debs}" "${download_specs[@]}"
+  validate_first_party_staged_debs "${debs}" "${staged_specs[@]}"
 }
