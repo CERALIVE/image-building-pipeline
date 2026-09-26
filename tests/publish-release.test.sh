@@ -45,7 +45,13 @@ elif op=='head-object':
     print('"'+hashlib.md5(path.read_bytes()).hexdigest()+'"')
 elif op=='list-objects-v2':
     prefix=flag('--prefix','')
-    print(json.dumps({'Contents':[{'Key':str(p.relative_to(root))} for p in root.rglob('*') if p.is_file() and str(p.relative_to(root)).startswith(prefix)]}))
+    keys=sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and str(p.relative_to(root)).startswith(prefix))
+    start=int(flag('--continuation-token','0'))
+    size=int(os.environ.get('STUB_PAGE_SIZE','100000'))
+    page=keys[start:start+size]
+    response={'Contents':[{'Key':item} for item in page], 'IsTruncated':start+size<len(keys)}
+    if response['IsTruncated'] and os.environ.get('STUB_NO_NEXT')!='1':response['NextContinuationToken']=str(start+size)
+    print(json.dumps(response))
 elif op=='delete-object':
     path.unlink(missing_ok=True);print('{}')
 else:error('UnsupportedOperation')
@@ -154,13 +160,18 @@ printf 'PASS: stale channel ETag refuses serial replay\n'
 for v in 2026.10.2 2026.10.3 2026.10.4 2026.10.5; do publish "$v" beta >/dev/null; done
 mkdir -p "$tmp/objects/releases/rock-5b-plus/2026.9.9"
 printf orphan >"$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
-output="$(bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family --dry-run)"
+output="$(STUB_PAGE_SIZE=3 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family --dry-run)"
 [[ "$output" == *'2026.10.2'* && "$output" != *'2026.10.1/'* && "$output" != *'2026.9.9/'* ]] || { printf 'FAIL: prune plan not 3 newest + referenced + unmarked\n' >&2; exit 1; }
+if STUB_PAGE_SIZE=3 STUB_NO_NEXT=1 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/incomplete.log" 2>&1; then
+  printf 'FAIL: incomplete inventory was accepted\n' >&2; exit 1
+fi
+assert grep -q 'incomplete R2 inventory' "$tmp/incomplete.log"
 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >/dev/null
 assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
 printf 'PASS: prune keeps 3 newest + references, leaves unmarked versions alone\n'
+printf 'PASS: paginated inventory complete; missing continuation refuses deletion\n'
 publish 2026.11.1 drill >/dev/null
 publish 2026.11.2 drill >/dev/null
 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >/dev/null

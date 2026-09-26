@@ -273,10 +273,40 @@ PY
     advance_channel "$channel" "$version" "$tmp/refresh.json" '' ''
     ;;
   prune)
-    list="$(s3 list-objects-v2 --prefix "releases/$board/" --output json)" || die 'R2 inventory failed; refusing prune'
-    printf '%s' "$list" >"$tmp/list.json"
+    token=''; : >"$tmp/keys.txt"
+    while :; do
+      args=(--prefix "releases/$board/" --no-paginate --output json)
+      [[ -z "$token" ]] || args+=(--continuation-token "$token")
+      if ! s3 list-objects-v2 "${args[@]}" >"$tmp/page.json"; then
+        die 'R2 inventory failed; refusing prune'
+      fi
+      next="$(python3 - "$tmp/page.json" "$tmp/keys.txt" "$token" <<'PY'
+import json,sys
+page=json.load(open(sys.argv[1]))
+assert isinstance(page.get('Contents',[]),list)
+keys=[entry['Key'] for entry in page.get('Contents',[])]
+assert all(isinstance(key,str) for key in keys)
+with open(sys.argv[2],'a') as output:
+    for key in keys: output.write(key+'\n')
+if page.get('IsTruncated'):
+    next_token=page['NextContinuationToken']
+    assert isinstance(next_token,str) and next_token and next_token!=sys.argv[3]
+    print(next_token)
+PY
+)" || die 'incomplete R2 inventory; refusing prune'
+      [[ -n "$next" ]] || break
+      token="$next"
+    done
+    python3 - "$tmp/keys.txt" "$tmp/list.json" <<'PY'
+import json,sys
+keys=open(sys.argv[1]).read().splitlines()
+assert len(keys)==len(set(keys)), 'duplicate object in R2 inventory'
+with open(sys.argv[2],'w') as output:json.dump({'Contents':[{'Key':key} for key in keys]},output)
+PY
     for c in stable beta drill; do
-      if ! read_channel "$c" "$tmp/ref-$c.json"; then printf '{}' >"$tmp/ref-$c.json"; fi
+      if ! read_channel "$c" "$tmp/ref-$c.json"; then
+        printf '{}' >"$tmp/ref-$c.json"
+      fi
     done
     python3 - "$tmp/list.json" "$board" "$tmp" <<'PY' >"$tmp/prune-keys"
 import json,re,sys
