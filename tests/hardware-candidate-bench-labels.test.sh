@@ -61,7 +61,7 @@ BOARD="rock-5b-plus"
 # its own checkout, so a copied tree is a complete, isolated fixture.
 # ---------------------------------------------------------------------------
 make_fake_pipeline() {
-  local root="$1"
+  local root="$1" resolver="${2:-stub}"
   mkdir -p "${root}/ci" "${root}/lib" "${root}/manifests/kernel" \
            "${root}/mkosi/.staging/${BOARD}/kernel-build" "${root}/out"
   cp "${TOOL}" "${root}/ci/build-hardware-candidates.sh"
@@ -92,7 +92,14 @@ printf 'emitted signed bundle: %s\n' "\${bundle}"
 STUB
   chmod +x "${root}/build"
 
-  cat >"${root}/lib/resolve.sh" <<RESOLVE
+  if [[ "${resolver}" == real ]]; then
+    # Resolve the actual family and board manifests, not a second copy of their pins.
+    cat >"${root}/lib/resolve.sh" <<RESOLVE
+#!/usr/bin/env bash
+exec "${PIPELINE_DIR}/lib/resolve.sh" "\$@"
+RESOLVE
+  else
+    cat >"${root}/lib/resolve.sh" <<RESOLVE
 #!/usr/bin/env bash
 printf "KERNEL_SOURCE_COMMIT='%s'\n" deadbeef
 printf "KERNEL_SOURCE_TAG='%s'\n" v9.9.9
@@ -102,6 +109,7 @@ printf "DTB_NAME='%s'\n" rk3588-rock-5b-plus.dtb
 printf "BOARD_ID='%s'\n" "${BOARD}"
 printf "KERNEL_PACKAGES='%s'\n" "linux-image-${KERNEL_RELEASE}"
 RESOLVE
+  fi
   chmod +x "${root}/lib/resolve.sh"
 
   printf '#!/usr/bin/env bash\nexit 0\n' >"${root}/lib/verify-kernel-config.sh"
@@ -126,6 +134,9 @@ make_kernel_deb() {
   mkdir -p "${stage}/root/boot"
   printf 'CONFIG_ARCH_ROCKCHIP=y\nCONFIG_DMABUF_HEAPS=y\n' \
     >"${stage}/root/boot/config-${KERNEL_RELEASE}"
+  if [[ "${2:-}" == debug ]]; then
+    printf 'CONFIG_ROCKCHIP_MPP_CERALIVE_TEST=y\n' >>"${stage}/root/boot/config-${KERNEL_RELEASE}"
+  fi
   tar -C "${stage}/root" -czf "${stage}/data.tar.gz" ./boot
   mkdir -p "${stage}/ctl"
   printf 'Package: linux-image-%s\nVersion: 1\nArchitecture: arm64\n' "${KERNEL_RELEASE}" \
@@ -348,6 +359,65 @@ for extra in "--first-party-local-debs ${INPUTS}/local-debs" "--debug-image --de
   fi
 done
 cp "${INPUTS}/verdict-dev.json" "${INPUTS}/verdict.json"
+
+# The non-default candidate builds with --variant edge-test; its recorder must
+# resolve the same overlay. Keep BOTH kernel debs in this fixture so the old
+# default-variant path can emit a plausible, but wrong, tuple instead of dying.
+debug_root="${WORK}/debug-pipeline"
+make_fake_pipeline "${debug_root}" real
+debug_resolved="$("${PIPELINE_DIR}/lib/resolve.sh" "${BOARD}" --variant edge-test)"
+default_resolved="$("${PIPELINE_DIR}/lib/resolve.sh" "${BOARD}")"
+resolved_field() { sed -n "s/^${2}='\(.*\)'$/\1/p" <<<"$1"; }
+debug_release="$(resolved_field "${debug_resolved}" KERNEL_SOURCE_KERNEL_RELEASE)"
+default_release="$(resolved_field "${default_resolved}" KERNEL_SOURCE_KERNEL_RELEASE)"
+if [[ -n "${debug_release}" && -n "${default_release}" && "${debug_release}" != "${default_release}" ]]; then
+  ok "(j) real edge-test manifest differs from the default edge release"
+else
+  bad "(j) resolver did not distinguish edge-test from default edge"
+fi
+for release in "${debug_release}" "${default_release}"; do
+  KERNEL_RELEASE="${release}" make_kernel_deb \
+    "${debug_root}/mkosi/.staging/${BOARD}/kernel-build/linux-image-${release}_1_arm64.deb" debug
+done
+debug_log="${WORK}/debug-log"
+debug_probe="${WORK}/debug-probe"
+CERALIVE_KERNEL_VARIANT=edge \
+  CERALIVE_BENCH_PROBE="${debug_probe}" "${debug_root}/ci/build-hardware-candidates.sh" \
+    --only rock-edge-test --trust-verdict "${INPUTS}/verdict.json" \
+    --signing-env "${INPUTS}/sign.env" --debug-env "${INPUTS}/debug.env" \
+    --evidence "${WORK}/debug-evidence" --skip-probes --bench-labels 1 >"${debug_log}" 2>&1
+debug_rc=$?
+if (( debug_rc == 0 )); then
+  ok "(j) non-default source-built candidate completed against the real resolver"
+else
+  bad "(j) edge-test candidate failed (exit ${debug_rc}):$(<"${debug_log}")"
+fi
+debug_tuple="${WORK}/debug-evidence/rock-edge-test.bench-labels-1.tuple.json"
+if [[ -s "${debug_tuple}" ]]; then
+  assert_eq "(j) tuple records the explicit non-default variant" '"edge-test"' "$(tuple_field "${debug_tuple}" variant)"
+  for pair in 'kernel_release KERNEL_SOURCE_KERNEL_RELEASE' \
+              'kernel_package KERNEL_PACKAGES' \
+              'kernel_source_tag KERNEL_SOURCE_TAG' \
+              'kernel_source_commit KERNEL_SOURCE_COMMIT' \
+              'patches_commit KERNEL_SOURCE_PATCHES_COMMIT'; do
+    read -r tuple_key resolved_key <<<"${pair}"
+    assert_eq "(j) ${tuple_key} follows real edge-test resolution" \
+      "\"$(resolved_field "${debug_resolved}" "${resolved_key}")\"" \
+      "$(tuple_field "${debug_tuple}" "${tuple_key}")"
+  done
+  if [[ "$(tuple_field "${debug_tuple}" kernel_release)" != "\"${default_release}\"" ]]; then
+    ok "(j) tuple did not silently use the default edge release"
+  else
+    bad "(j) tuple silently used the default edge release"
+  fi
+else
+  bad "(j) edge-test tuple not emitted"
+fi
+if grep -qF 'command not found' "${debug_log}"; then
+  bad "(j) recorder invoked an undefined command"
+else
+  ok "(j) recorder emitted no command-not-found diagnostic"
+fi
 
 # The shipped tool's own refusal legs.
 if "${TOOL}" --self-test >"${WORK}/selftest.log" 2>&1; then

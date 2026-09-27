@@ -443,14 +443,9 @@ record_tuple() {
   [[ -s "${bundle}" ]] || die "could not resolve the emitted .raucb from ${log}" 1
 
   local resolved
-  if candidate_is_source_built "${name}"; then
-    resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
-      lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
-      || die "could not re-resolve the manifest for ${board}/${variant}" 1
-  else
-    resolved="$( cd "${PIPELINE_DIR}" && lib/resolve.sh "${board}" 2>/dev/null )" \
-      || die "could not re-resolve the manifest for ${board} (no variant overlay)" 1
-  fi
+  resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
+    lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
+    || die "could not re-resolve the manifest for ${board}/${variant}" 1
   local kernel_commit patches_commit kernel_tag dtb_name board_id kernel_release kernel_pkg
   kernel_commit="$(sed -n "s/^KERNEL_SOURCE_COMMIT='\(.*\)'$/\1/p" <<<"${resolved}")"
   kernel_tag="$(sed -n "s/^KERNEL_SOURCE_TAG='\(.*\)'$/\1/p" <<<"${resolved}")"
