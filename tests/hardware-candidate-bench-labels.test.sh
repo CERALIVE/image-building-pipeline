@@ -78,6 +78,7 @@ set -euo pipefail
 printf 'CERALIVE_BENCH_LABELS=%s\n' "\${CERALIVE_BENCH_LABELS-<UNSET>}" >"\${CERALIVE_BENCH_PROBE}"
 printf 'CERALIVE_BUILD_MODE=%s\n'   "\${CERALIVE_BUILD_MODE-<UNSET>}"  >>"\${CERALIVE_BENCH_PROBE}"
 printf 'CERALIVE_DEBUG_IMAGE=%s\n'  "\${CERALIVE_DEBUG_IMAGE-<UNSET>}" >>"\${CERALIVE_BENCH_PROBE}"
+printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "\${CERALIVE_OS_RELEASE_VERSION-<UNSET>}" >>"\${CERALIVE_BENCH_PROBE}"
 printf 'CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR=%s\n' "\${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR-<UNSET>}" >>"\${CERALIVE_BENCH_PROBE}"
 if [[ -n "\${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
   printf '[{"package":"ceralive-device","version":"99.2","arch":"arm64","sha256":"%s","filename":"ceralive-device_99.2_arm64.deb"}]\n' \
@@ -87,6 +88,19 @@ raw="${root}/out/image.raw"
 bundle="${root}/out/image.raucb"
 printf 'raw\n' >"\${raw}"
 printf 'bundle\n' >"\${bundle}"
+mkdir -p "${root}/out/rootfs/etc/ceralive"
+case "\${CERALIVE_FAKE_STAMP:-valid}" in
+  valid) printf '%s\n' "\${CERALIVE_OS_RELEASE_VERSION}" >"${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+  missing) rm -f "${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+  wrong) printf '2026.10.99\n' >"${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+  malformed) printf 'not-calver\n' >"${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+  extra) printf '%s\nextra\n' "\${CERALIVE_OS_RELEASE_VERSION}" >"${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+  no-newline) printf '%s' "\${CERALIVE_OS_RELEASE_VERSION}" >"${root}/out/rootfs/etc/ceralive/os-release-version" ;;
+esac
+tar -C "${root}/out/rootfs" -cf "${root}/out/image.rootfs.tar" ./etc
+if [[ "\${CERALIVE_FAKE_STAMP:-}" == corrupt ]]; then
+  printf 'not a tar archive\n' >"${root}/out/image.rootfs.tar"
+fi
 printf 'emitted flashable image: %s\n' "\${raw}"
 printf 'emitted signed bundle: %s\n' "\${bundle}"
 STUB
@@ -171,7 +185,7 @@ run_candidate() {
     --trust-verdict "${inputs}/verdict.json" \
     --signing-env "${inputs}/sign.env" \
     --evidence "${ev}" \
-    --skip-probes "$@"
+    --skip-probes --os-release-version 2026.10.2 "$@"
 }
 
 tuple_field() {
@@ -221,6 +235,7 @@ else
   bad "(b) --bench-labels 1 failed (exit ${rc_b}):"$'\n'"$(cat "${log_b}")"
 fi
 assert_contains "(b) ./build received CERALIVE_BENCH_LABELS=1" "${probe_b}" 'CERALIVE_BENCH_LABELS=1'
+assert_contains "(b) ./build received explicit OS CalVer" "${probe_b}" 'CERALIVE_OS_RELEASE_VERSION=2026.10.2'
 assert_contains "(b) the active mode is logged for the build" "${log_b}" \
   'CERALIVE_BENCH_LABELS=1 (bench PARTLABEL overlay: ON'
 
@@ -229,7 +244,7 @@ assert_contains "(b) the active mode is logged for the build" "${log_b}" \
 # ---------------------------------------------------------------------------
 probe_c="${WORK}/probe-c"
 log_c="${WORK}/log-c"
-CERALIVE_BENCH_LABELS=1 \
+CERALIVE_BENCH_LABELS=1 CERALIVE_OS_RELEASE_VERSION=2026.10.9 \
   run_candidate "${ROOT}" "${INPUTS}" "${WORK}/ev-c" "${probe_c}" --bench-labels 0 >"${log_c}" 2>&1
 rc_c=$?
 if (( rc_c == 0 )); then
@@ -238,6 +253,10 @@ else
   bad "(c) --bench-labels 0 failed (exit ${rc_c}):"$'\n'"$(cat "${log_c}")"
 fi
 assert_contains "(c) ./build received CERALIVE_BENCH_LABELS=0" "${probe_c}" 'CERALIVE_BENCH_LABELS=0'
+assert_eq "(c) tuple records the read-back CalVer" '"2026.10.2"' \
+  "$(tuple_field "${WORK}/ev-c/rock-edge.bench-labels-0.tuple.json" os_release_version)"
+assert_contains "(c) explicit CalVer overrides contradicting ambient value" "${probe_c}" \
+  'CERALIVE_OS_RELEASE_VERSION=2026.10.2'
 assert_contains "(c) the active mode is logged for the build" "${log_c}" \
   'CERALIVE_BENCH_LABELS=0 (bench PARTLABEL overlay: OFF'
 
@@ -297,6 +316,40 @@ if [[ -s "${tuple_c}" ]]; then
   assert_eq "(f) unused override records an empty array" "[]" "$(tuple_field "${tuple_c}" first_party_local_overrides)"
   assert_eq "(f) edge candidate without --debug-image is not a debug image" "false" "$(tuple_field "${tuple_c}" debug_image)"
 fi
+
+for invalid in missing empty malformed; do
+  probe_version="${WORK}/probe-version-${invalid}"
+  case "${invalid}" in
+    missing) version_args=() ;;
+    empty) version_args=(--os-release-version '') ;;
+    malformed) version_args=(--os-release-version 2026.10.bad) ;;
+  esac
+  version_out="$(CERALIVE_OS_RELEASE_VERSION=2026.10.9 CERALIVE_BENCH_PROBE="${probe_version}" \
+    "${ROOT}/ci/build-hardware-candidates.sh" --only rock-edge \
+    --trust-verdict "${WORK}/nonexistent-verdict" --signing-env "${WORK}/nonexistent-signing" \
+    --evidence "${WORK}/ev-version-${invalid}" --bench-labels 0 --skip-probes \
+    "${version_args[@]}" 2>&1)"
+  version_rc=$?
+  if (( version_rc != 0 )) && [[ "${version_out}" == *"--os-release-version"* ]] \
+       && [[ "${version_out}" != *"trust verdict is missing"* ]] && [[ ! -e "${probe_version}" ]]; then
+    ok "CalVer ${invalid} refused before credentials and ./build despite ambient value"
+  else
+    bad "CalVer ${invalid} preflight: exit=${version_rc}, output=${version_out}"
+  fi
+done
+
+for fixture in missing wrong malformed extra no-newline corrupt; do
+  bad_ev="${WORK}/ev-stamp-${fixture}"
+  CERALIVE_FAKE_STAMP="${fixture}" CERALIVE_OS_RELEASE_VERSION=2026.10.9 \
+    run_candidate "${ROOT}" "${INPUTS}" "${bad_ev}" "${WORK}/probe-stamp-${fixture}" \
+      --bench-labels 0 >"${WORK}/log-stamp-${fixture}" 2>&1
+  stamp_rc=$?
+  if (( stamp_rc != 0 )) && [[ ! -e "${bad_ev}/rock-edge.bench-labels-0.tuple.json" ]]; then
+    ok "actual rootfs tar ${fixture} stamp refused before tuple"
+  else
+    bad "actual rootfs tar ${fixture} stamp passed or emitted a tuple (exit ${stamp_rc})"
+  fi
+done
 if grep -qF 'CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR=<UNSET>' "${probe_c}"; then
   ok "(f) no override variable reaches ./build when the flag is absent"
 else
@@ -322,6 +375,8 @@ assert_contains "(g) --debug-image exports CERALIVE_DEBUG_IMAGE=1 on an edge can
 tuple_g="${WORK}/ev-g/rock-edge.bench-labels-1.tuple.json"
 if [[ -s "${tuple_g}" ]]; then
   assert_eq "(g) tuple debug_image reflects --debug-image" "true" "$(tuple_field "${tuple_g}" debug_image)"
+  assert_eq "(g) debug tuple records actual rootfs CalVer" '"2026.10.2"' "$(tuple_field "${tuple_g}" os_release_version)"
+  assert_contains "(g) debug ./build received explicit CalVer" "${probe_g}" 'CERALIVE_OS_RELEASE_VERSION=2026.10.2'
   assert_eq "(g) --debug-image does not flip the kernel test-seam expectation" '"off"' \
     "$(tuple_field "${tuple_g}" ceralive_test_symbols)"
   if python3 - "${tuple_g}" <<'PY'
@@ -385,7 +440,8 @@ CERALIVE_KERNEL_VARIANT=edge \
   CERALIVE_BENCH_PROBE="${debug_probe}" "${debug_root}/ci/build-hardware-candidates.sh" \
     --only rock-edge-test --trust-verdict "${INPUTS}/verdict.json" \
     --signing-env "${INPUTS}/sign.env" --debug-env "${INPUTS}/debug.env" \
-    --evidence "${WORK}/debug-evidence" --skip-probes --bench-labels 1 >"${debug_log}" 2>&1
+    --evidence "${WORK}/debug-evidence" --skip-probes --bench-labels 1 \
+    --os-release-version 2026.10.3 >"${debug_log}" 2>&1
 debug_rc=$?
 if (( debug_rc == 0 )); then
   ok "(j) non-default source-built candidate completed against the real resolver"
@@ -394,6 +450,8 @@ else
 fi
 debug_tuple="${WORK}/debug-evidence/rock-edge-test.bench-labels-1.tuple.json"
 if [[ -s "${debug_tuple}" ]]; then
+  assert_eq "(j) edge-test tuple records actual rootfs CalVer" '"2026.10.3"' "$(tuple_field "${debug_tuple}" os_release_version)"
+  assert_contains "(j) edge-test ./build received explicit CalVer" "${debug_probe}" 'CERALIVE_OS_RELEASE_VERSION=2026.10.3'
   assert_eq "(j) tuple records the explicit non-default variant" '"edge-test"' "$(tuple_field "${debug_tuple}" variant)"
   for pair in 'kernel_release KERNEL_SOURCE_KERNEL_RELEASE' \
               'kernel_package KERNEL_PACKAGES' \

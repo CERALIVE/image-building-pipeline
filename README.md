@@ -136,6 +136,20 @@ Neither marker is an OS release version. Only a deliberate real build with
 dpkg-comparability gap found by CeraUI's OS-update-agent consumer: only the
 CalVer stamp can be compared with a channel manifest's CalVer `version`.
 No release-cutting or publishing mechanism sets this variable yet.
+The hardware-candidate wrapper sets it only from its required explicit
+`--os-release-version` flag; this is not a release-cutting or publishing step.
+
+For a hardware drill candidate, use `ci/build-hardware-candidates.sh` with
+`--only <candidate> --trust-verdict <path> --signing-env <path> --evidence <dir>
+--bench-labels 0|1 --os-release-version YYYY.MINOR.PATCH` (and `--debug-image
+--debug-env <path>` for a debug image). The flag is mandatory even when
+`CERALIVE_OS_RELEASE_VERSION` is present in the shell; that ambient value is
+ignored. After `./build`, the wrapper reads the stamp from the emitted
+`rootfs.tar`, rejects absent, malformed, mismatched or non-newline-terminated
+content, and only then records `os_release_version` in its schema-4 tuple.
+The six existing Todo-44 artifacts predate this check and lack the stamp; they
+must be rebuilt before any OS-update drill publication. Neither the wrapper nor
+the old artifacts constitute a released or board-qualified image.
 Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
 reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
 from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)

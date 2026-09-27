@@ -97,7 +97,7 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 | **Manual bench flashing (dev/debug only, real-HW validated)** | [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §4 "Manual bench flashing" — direct `rkdeveloptool db`/`wl`/`rd`, timeout discipline, UART baud, and log-parsing gotchas; NOT a production/recovery path (see the CI release gate in the same section) |
 | **Read-only bench board inventory (kernel, RAUC slots, layout, PCI/USB, installed keyring)** | `ci/capture-board-preflight.sh --host <h> --board <b> --out <dir>` — SSH capture using only interfaces the production package set actually ships; `--self-test` drives the real payload against a fixture sysfs. See the board-preflight KEY FACT below |
 | **Is a candidate RAUC signer trusted by THIS board (RAUC vs PHYSICAL deployment)?** | `ci/verify-bench-rauc-trust.sh --preflight-root <dir> --candidate-pki <dir> --out <path>` — leaf→intermediate→installed-root, key match, keyUsage, EKUs read empirically off the offered leaf, and rauc 1.8's own `smimesign` purpose. See the board-preflight KEY FACT below |
-| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1` — refuses a dirty worktree, an implicit signing state and an unstated PARTLABEL set, exports `CERALIVE_BUILD_MODE`/`CERALIVE_RAUC_PKI_DIR`/`RAUC_KEYRING_FILE`/`CERALIVE_BENCH_LABELS` explicitly, runs the six DRY_RUN probes first, and asserts the CeraLive test seam OFF on a non-debug candidate and ON on the debug one. See the candidate-builder KEY FACT below |
+| **Build the hardware-qualification candidates (and the non-shipping debug artifact)** | `ci/build-hardware-candidates.sh --only all\|rock-edge\|orange-edge\|rock-edge-test --trust-verdict <path> --signing-env <path> [--debug-env <path>] --evidence <dir> --bench-labels 0\|1 --os-release-version YYYY.MINOR.PATCH` — refuses a dirty worktree, implicit signing/labels/CalVer, exports the explicit build inputs, verifies the emitted rootfs tar's OS stamp before writing a schema-4 tuple, then asserts the kernel test seam. See the candidate-builder KEY FACT below |
 | **Dev-sync live-reload loop** | [`docs/dev-loop.md`](docs/dev-loop.md) |
 | Manifest schema / validation | `manifests/schema/{board,family}.schema.json` (enforced by `lib/resolve.py`; an invalid manifest fails at validation, not at build). The family schema also carries the `variants:` map + `kernel_source:` `$defs` — see the kernel-build-from-source KEY FACT |
 | Armbian BSP Debian version pins | `manifests/armbian-bsp-deb-versions.txt` |
@@ -1023,6 +1023,18 @@ answer:
   the wrong physical device. Every candidate build logs
   `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`, and the tuple carries
   `bench_labels` + `partlabel_set`.
+
+- **WHICH OS RELEASE.** `--os-release-version YYYY.MINOR.PATCH` is REQUIRED for
+  every real candidate, debug or non-debug, with no ambient
+  `CERALIVE_OS_RELEASE_VERSION` fallback. The wrapper exports exactly the flag's
+  value to `./build`, then extracts `./etc/ceralive/os-release-version` from the
+  actual emitted `<timestamp>.rootfs.tar` and requires exactly one matching
+  newline-terminated CalVer line before writing the schema-4 tuple's additive
+  `os_release_version`. Missing, malformed, mismatched or unreadable tar content
+  fails the candidate. The six older Todo-44 candidates have no such stamp and
+  cannot be published as OS-update drill images: CeraUI refuses them with
+  `booted_version_unknown`. Rebuild them with explicit version assignments;
+  this does not make them released or board-qualified.
 
 - **WHICH RECOVERY LOADER.** The MaskROM loader is resolved PER BOARD from
   `ci/fetch-rk3588-loader.sh`'s table (`--print-identity <board-id>`), never as one
