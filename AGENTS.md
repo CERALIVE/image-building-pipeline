@@ -3541,11 +3541,14 @@ contract and additionally set persistent `data-directory=/data/ceralive/rauc`,
 declaration and creates the no-home/nologin account; runtime installs tmpfiles
 for RAUC metadata (0700 root) and update state (0750 root:ceralive). The
 build-generated `/usr/lib/ceralive/update-capabilities.json` records the real
-OTA and `_apt` UIDs but advertises **no features yet**: the schema lists the
-eight planned names, while orchestration, origin protection, slot-sync and
-credential support remain later tasks. Never promote a name before its
-implementation and tests land. Both new OS and cert-rotation bundle producers now
-emit verity; the OS image is adaptive (`block-hash-index`) and exactly 4096 MiB.
+OTA and `_apt` UIDs and advertises all eight schema-1 features unconditionally:
+`rauc-verity-streaming`, `rauc-activate-on-shutdown`, `slot-sync`,
+`origin-protection`, `apt-all-packages`, `reprune-hook`, `apt-credentials`,
+`transport-uidrange`. The matching image mechanisms and CeraUI consumers have
+landed on their integration branches; earlier built drill candidates still carry
+the old empty array and are not qualified by this source change. Both new OS and
+cert-rotation bundle producers now emit verity; the OS image is adaptive
+(`block-hash-index`) and exactly 4096 MiB.
 All six system.conf writers install and wire `/usr/lib/rauc/ceralive-post-install`:
 each written rootfs gets its ext4 label from that partition's own live GPT
 PARTLABEL, and a missing label aborts the installation. The certs slot is skipped.
@@ -3553,8 +3556,9 @@ PARTLABEL, and a missing label aborts the installation. The certs slot is skippe
 not as a fallback producer path. Manual
 `ceralive-update` remains a bench/recovery path only: HTTPS requires a verity
 bundle, installs under the shared lock with the stream guard, and leaves the
-inactive slot staged (not automatically boot-selected). Todos 29/35 finalize and
-advertise the complete image contract before release.
+inactive slot staged (not automatically boot-selected). New images built from
+this branch carry the complete advertised contract; release/board verification
+remains separate.
 Guards: `tests/rauc-transition-contract.test.sh`,
 `tests/update-capabilities.test.sh`, `tests/kernel-config-fragment.bats`, and
 the file-backed real-RAUC service contract.

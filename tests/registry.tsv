@@ -74,7 +74,7 @@ tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration
 tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
 tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
-tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and premature feature refusal
+tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
 tests/flash-download.test.sh	shell	integration	default-shell	local HTTP fixture: bounded parallel parts, interrupted resume, corruption retry, full SHA refusal and traversal guard

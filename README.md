@@ -1140,13 +1140,12 @@ scheduled/automatic trigger belong to the future CeraUI integration, not this
 manual recovery script. Do not reboot expecting a staged slot to boot automatically.
 
 `/usr/lib/ceralive/update-capabilities.json` is generated from the actual
-`ceralive-ota` and `_apt` UIDs. Its schema enumerates the target feature names,
-but `features` is currently **empty**: no image built at this integration point
-implements the entire orchestrator, origin protection, slot mirror or credential
-contract. The advertising gate refuses premature feature overrides; the verity
-producer alone does not justify advertising a completed feature. Todos 29/35 must add the remaining mechanisms
-and their tests before a shippable image advertises them. This branch is not a
-released/booted image.
+`ceralive-ota` and `_apt` UIDs and advertises all eight schema-1 update features:
+RAUC verity streaming, deferred activation, slot sync, origin protection,
+all-package APT, reprune hook, APT credentials and UID-range transport.
+The image-side mechanisms and CeraUI consumers are implemented on their
+integration branches; this source change alone does not rebuild the earlier
+drill candidates or establish a released/booted capable image.
 
 ### OTA-During-Stream Guard
 

@@ -25,7 +25,11 @@ EOF
 chmod +x "$WORK/bin/getent"
 PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root"
 jq -e --argjson ota 657 --argjson apt 42 \
-  '.schema == 1 and .ota_uid == $ota and .apt_uid == $apt and .features == []' \
+  '.schema == 1 and .ota_uid == $ota and .apt_uid == $apt and .features == [
+    "rauc-verity-streaming", "rauc-activate-on-shutdown", "slot-sync",
+    "origin-protection", "apt-all-packages", "reprune-hook",
+    "apt-credentials", "transport-uidrange"
+  ]' \
   "$WORK/root/usr/lib/ceralive/update-capabilities.json" >/dev/null
 python3 - "$ROOT/mkosi/runtime/rauc/update-capabilities.schema.json" "$WORK/root/usr/lib/ceralive/update-capabilities.json" <<'PY'
 import json, sys
@@ -33,13 +37,4 @@ from jsonschema import validate
 with open(sys.argv[1]) as schema, open(sys.argv[2]) as data:
     validate(json.load(data), json.load(schema))
 PY
-if PATH="$WORK/bin:$PATH" CERALIVE_UPDATE_FEATURES=apt-all-packages \
-  "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root" >"$WORK/early" 2>&1; then
-  printf 'premature apt-all-packages advertisement accepted\n' >&2; exit 1
-fi
-if PATH="$WORK/bin:$PATH" CERALIVE_UPDATE_FEATURES=rauc-verity-streaming \
-  "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root" >"$WORK/early" 2>&1; then
-  printf 'premature verity advertisement accepted\n' >&2; exit 1
-fi
-grep -Fq 'not implemented' "$WORK/early"
-echo 'update capability contract: PASS (actual UIDs, schema, premature feature refusal)'
+echo 'update capability contract: PASS (actual UIDs, schema, full feature set)'
