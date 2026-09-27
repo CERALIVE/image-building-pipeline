@@ -255,10 +255,14 @@ owner-reviewed `reviewed-hardware-gap` exceptions, never runtime misclassificati
 Both RK3588 content ceilings are 3.5 GB; x86 stays 1.5 GB. Frozen 4096M slots each
 must retain 512 MiB **bavail** and `max(ceil(inodes/10),20000)` free inodes after
 population, enforced by assembly, `verify-disk.sh check-slot` and preflash.
-The old measured baselines remain historical, not measurements of this change.
-The 2026-09-15 Rock RGA candidate passed its real size and populated-slot reserve
-checks; its receipt does not qualify new Bluetooth/Wi-Fi adapters or the later
-R0 userspace combination.
+The current per-board size baselines are wet v2 mainline/full-firmware development
+hardware candidates (2026-09-26), not the historical vendor-BSP measurements.
+They carry an unreleased CeraUI PR-head local .deb override and non-production
+RAUC signing. Both passed the absolute size gate; neither is a production image
+qualification or an installed-board measurement. The 2026-09-15 Rock RGA
+candidate separately passed real size and populated-slot reserve checks; that
+receipt does not qualify new Bluetooth/Wi-Fi adapters or the later R0 userspace
+combination.
 Contract, driver/board citations, exact gaps and executable tests:
 [`docs/bluetooth-firmware-closure.md`](docs/bluetooth-firmware-closure.md).
 
@@ -3904,20 +3908,24 @@ PassEnvironment propagation, the retained password/ssh/marker behaviour, the
 untouched add-on, and the absent `development` family). Mutation-verified: deleting
 the name-skip in `runtime_pkg_list_files` fails 5 of them.
 
-**Image size gate — BLOCKING at 1.5 GB, and it is the `[6c/9]` BUILD stage** [EXISTS]
+**Image size gate — BLOCKING at 3.5 GB on RK3588 (1.5 GB on x86), at `[6c/9]`** [EXISTS]
 
 `lib/measure-size.sh` runs as `orchestrate.sh`'s `[6c/9]` stage on every real
 build, between the `[6/9]` tar emit and the `[7/9]` parity check. If the normalized
-rootfs tar exceeds **1.5 GB** the build `die`s there, so no `.raw` and no `.raucb`
+rootfs tar exceeds its board's ceiling the build `die`s there, so no `.raw` and no `.raucb`
 are cut. The threshold is post-slim (locale strip, final apt-cache cleanup,
 appliance payload pruning, and the Mesa software-GL prune below already applied).
 See [`docs/size-notes.md`](docs/size-notes.md) §10 for the wiring and the
 levers used to reach it.
 
-Both RK3588 boards pass it: `rock-5b-plus` 1,412,259,840 B, `orange-pi-5-plus`
-1,418,792,960 B (real wet vendor-BSP production builds, 2026-08-02). They were
-~70-76 MB OVER until the Mesa software-GL prune below; `rootfs_bytes_max` has never
-been moved to accommodate an overage.
+The v2 non-debug, production-label candidates measured `rock-5b-plus`
+2,730,854,400 B and `orange-pi-5-plus` 2,729,502,720 B from real rootfs tars,
+both under 3,500,000,000 B. These are **development hardware candidates** with
+an unreleased CeraUI PR-head override, not production image qualification.
+The old wet vendor-BSP builds measured 1,412,259,840 B and 1,418,792,960 B
+against the retired 1.5 GB RK3588 ceiling; they were ~70-76 MB over before
+the Mesa software-GL prune. That ceiling was never raised to accommodate an
+overage; the later 3.5 GB policy is for full-firmware adoption.
 
 **For three releases this "blocking" gate had never once run against a real
 image** — and that is why the overage shipped. `orchestrate.sh` had no measurement
@@ -3963,8 +3971,8 @@ worth knowing before editing it:
 Guards: `mkosi-image-contract.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
 extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
 (pass leg, abort leg, spy-proven silent-skip refusal, stage ordering, DRY_RUN
-unreachability), plus a policy guard that no board's ceiling may be raised above
-1,500,000,000.
+unreachability), plus a policy guard that RK3588 ceilings stay at or below
+3,500,000,000 and x86 at or below 1,500,000,000.
 
 **185.3 MB of Mesa software-GL is `RemoveFiles=`d — and the trixie migration
 proved a version-PINNED prune glob fails SILENTLY** [EXISTS]

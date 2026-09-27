@@ -118,10 +118,12 @@ exists to fail early and cheaply; it is not the safety property.
 so none of the reasoning above applies to it and raising it would be borrowing a
 justification from a different board family.
 
-The retired universal 1.5 GB placeholder and the pre-adoption per-board
-measurements are preserved as history in [`size-notes.md`](size-notes.md). They
-predate this adoption and are **not** measurements of it; no planning projection
-in that file is a wet-build number.
+The retired universal 1.5 GB placeholder and pre-adoption vendor-BSP per-board
+measurements are preserved as history in [`size-notes.md`](size-notes.md).
+They are not full-firmware measurements. That document now also records the
+two real v2 mainline/full-firmware development-candidate tar measurements;
+neither the planning projection nor these non-production-signed, PR-head-override
+candidates qualify a production image or a booted board.
 
 ### Why `bavail`, never `bfree`
 

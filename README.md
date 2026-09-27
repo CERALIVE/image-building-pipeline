@@ -512,7 +512,13 @@ for the check commands, exceptions and validation boundary. The 2026-09-15 Rock
 RGA candidate completed a full image build and boot with this firmware closure;
 new-adapter validation is separate and is not implied by that result.
 
-### Historical slim-package measurements (retired RK3588 1.5 GB placeholder)
+The current baseline is measured from the two real v2 `edge`/mainline,
+full-firmware rootfs tars (2026-09-26): Rock 5B+ **2,730,854,400 B**, Orange Pi
+5+ **2,729,502,720 B**. Both passed the 3.5 GB absolute gate. They are
+**development hardware candidates**, non-debug with production PARTLABELs but
+carrying an unreleased CeraUI PR-head local .deb override and a non-production
+RAUC signer. They have not been booted or production-image-qualified; the older
+vendor-BSP baseline numbers below are historical, not the current registry.
 
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
@@ -521,8 +527,10 @@ are produced. A `DRY_RUN=1` plan-only run never reaches it, and an
 `INSTALL_BOOT_BSP=0` parity build skips it with a warning (a kernel-less rootfs is
 not the shipped image). It is not architecture-gated — every shipped board carries a
 real ceiling. See [`docs/size-notes.md`](docs/size-notes.md) for the wiring
-(§10) and the levers applied (locale strip, `WithDocs=no`, firmware audit, Mesa
+ (§10) and the levers applied (locale strip, final-layer doc prune, firmware audit, Mesa
 software-GL prune).
+
+### Historical slim-package measurements (retired RK3588 1.5 GB placeholder)
 
 Both RK3588 boards were under the old ceiling: `rock-5b-plus` 1,412,259,840 B and
 `orange-pi-5-plus` 1,418,792,960 B. The largest single lever is the Mesa
@@ -538,9 +546,9 @@ only its 185.3 MB of payload is stripped.
 The one component that does want GL — the optional, inert-by-default Cog kiosk
 add-on — therefore carries its own copy of exactly those four pruned globs inside
 its own `.raw`, so the base image is byte-unchanged and the size gate is
-untouched. Un-pruning on the mainline path instead was measured and rejected:
-+185 MB would put the `edge` image near 1.62 GB against a 1.5 GB ceiling no board
-may raise.
+untouched. Under the retired 1.5 GB RK3588 policy, un-pruning on the mainline
+path was measured and rejected: +185 MB would have put that historical `edge`
+image near 1.62 GB. The current RK3588 ceiling is 3.5 GB.
 
 Those prune globs are **version-wildcarded on purpose**. The trixie migration
 found that the previous version-pinned ones matched almost nothing — Debian moved

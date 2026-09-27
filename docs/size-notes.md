@@ -1,15 +1,22 @@
 # CeraLive v2 — Image Size Notes
 
 **Current full-firmware policy:** RK3588 content ceilings are 3,500,000,000 B;
-x86 remains 1,500,000,000 B. The universal 1.5 GB placeholder and measurements
-below are historical. Neither the full archive's Installed-Size delta nor the
-~3.30 GB planning projection is a wet-build measurement. Frozen 4096M RK3588
+x86 remains 1,500,000,000 B. The universal 1.5 GB placeholder and vendor-BSP
+measurements below are historical. Neither the full archive's Installed-Size
+delta nor the ~3.30 GB planning projection is a wet-build measurement. Frozen 4096M RK3588
 slots additionally require 536,870,912 **bavail** bytes and
 `max(ceil(total_inodes/10),20000)` free inodes after population. The shared gate
 subtracts both root-reserved blocks and ext4's internal extent reserve.
 See [full-firmware closure and slot contract](bluetooth-firmware-closure.md).
-Both full production images still need rebuilding and measurement; the existing
-per-board `measured` baselines are intentionally not overwritten by estimates.
+Both v2 mainline/full-firmware development hardware candidates now have real wet
+rootfs tar measurements: Rock 5B+ **2,730,854,400 B** (artifact
+`20260926T224052Z.rootfs.tar`) and Orange Pi 5+ **2,729,502,720 B** (artifact
+`20260926T212336Z.rootfs.tar`). Both passed the absolute 3.5 GB gate and now
+anchor the per-board measured/baseline registries. They are non-debug builds with
+production PARTLABELs but include an **unreleased CeraUI PR-head local .deb
+override** and use a non-production RAUC signer. This is build evidence, not
+production-image qualification or an installed-board result; the old vendor-BSP
+measurements remain historical below.
 
 **Why those three numbers are three different numbers.** They are not
 alternative spellings of one budget, and treating them as such is how a build
