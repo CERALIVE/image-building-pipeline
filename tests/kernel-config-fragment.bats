@@ -876,6 +876,18 @@ EOF
   [[ "$output" == *"CONFIG_DMA_API_DEBUG: DROPPED"* ]]
 }
 
+@test "closure manifests: both IP rule families survive for the boot update-route sweep" {
+  grep -qx 'CONFIG_IP_MULTIPLE_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_IPV6_MULTIPLE_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_IP_MULTIPLE_TABLES=y' "$REQUIRED"
+  grep -qx 'CONFIG_IPV6_MULTIPLE_TABLES=y' "$REQUIRED"
+
+  printf 'CONFIG_IP_MULTIPLE_TABLES=y\nCONFIG_IPV6=y\n# CONFIG_IPV6_MULTIPLE_TABLES is not set\n' >"$WORK/ipv4-only"
+  run "$VERIFY" --config "$WORK/ipv4-only" --required "$REQUIRED"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'CONFIG_IPV6_MULTIPLE_TABLES: REQUIRED'* ]]
+}
+
 @test "closure manifests: the island MPP closure is declared with its parents" {
   local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
   local sym

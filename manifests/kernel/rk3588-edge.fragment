@@ -718,6 +718,10 @@ CONFIG_NFT_NUMGEN=y
 # verify-kernel-config.sh; do not "fix" that by deleting the leaf.
 CONFIG_IP_ADVANCED_ROUTER=y
 CONFIG_IP_MULTIPLE_TABLES=y
+# IPv6's counterpart is inside `if IPV6` (enabled by arm64 defconfig), with no
+# IP_ADVANCED_ROUTER-style parent; it selects FIB_RULES itself. The update-route
+# boot sweep inventories both families, so IPv4 alone cannot support it.
+CONFIG_IPV6_MULTIPLE_TABLES=y
 
 # Traffic control. NET_SCHED is a `menuconfig bool` and every qdisc and
 # classifier below lives inside its `if NET_SCHED` block — the same parent shape

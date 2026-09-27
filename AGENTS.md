@@ -2370,8 +2370,8 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (214 symbols) and
-`manifests/kernel/forbidden-symbols.list` (94) are the contract, and they are
+`manifests/kernel/required-symbols.list` (216 symbols) and
+`manifests/kernel/forbidden-symbols.list` (97) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
 everything defconfig is expected to supply on its own. Only the second claim
@@ -2390,6 +2390,18 @@ bare `CONFIG_X` means "set to anything" and is used for a parent whose own y/m
 value is defconfig's business but whose PRESENCE keeps its leaves visible. A bare
 parent is deliberately not pinned to a value, so an upstream y->m change does not
 fail the build for a difference the device cannot observe.
+
+**IPv6 policy routing is also required on production `edge` (2026-09-27 fix).**
+The boot-time CeraUI update-route sweep inventories `ip -4 rule show` AND
+`ip -6 rule show`; the latter returned exit 255 on a real Rock 5B+ with
+`CONFIG_IPV6=y` but `# CONFIG_IPV6_MULTIPLE_TABLES is not set`, leaving the
+one-shot sweep incomplete and transport-pinned OS operations blocked for that
+backend lifetime. At pinned `v7.2` commit `8d3ae59288f1`,
+`net/ipv6/Kconfig:6-19,237-241` puts `IPV6_MULTIPLE_TABLES` under `if IPV6`,
+with no additional `depends on`, and selects `FIB_RULES`. Therefore the fragment
+declares only `CONFIG_IPV6_MULTIPLE_TABLES=y` beside the existing IPv4 lines;
+`required-symbols.list` independently gates that resolved value. Candidate build
+and bench results are recorded in the dated update-system decisions log.
 
 The forbidden manifest holds four classes: the 55 foreign platforms, the
 test/debug symbols production `edge` must resolve OFF (the island's
