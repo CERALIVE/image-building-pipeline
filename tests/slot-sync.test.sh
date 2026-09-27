@@ -294,6 +294,24 @@ printf '%s' "${out}" | grep -qF 'dpkg-lock-busy' && ok "lock 2 reason in stderr"
 # ===========================================================================
 
 reset_happy_fixtures
+cp "${HERE}/fixtures/rauc-1.15.2-rock-status.json" "${RAUC_JSON_FIXTURE}"
+eval "$(sed -n '/^json_slots_array()/,/^}/p; /^json_slot_names()/,/^}/p; /^json_slot_object()/,/^}/p' "${SCRIPT}")"
+real_rauc_json="$(<"${RAUC_JSON_FIXTURE}")"
+assert_eq "real RAUC 1.15.2: names exclude all nested bundle keys" $'rootfs.1\nrootfs.0\ncerts.0' "$(json_slot_names "${real_rauc_json}")"
+real_slot="$(json_slot_object "${real_rauc_json}" rootfs.0)"
+[[ "${real_slot}" == *'"slot_status":{"bundle":{"compatible":null}}}' ]] && ok "real RAUC 1.15.2: slot object includes the complete nested bundle" || bad "truncated slot object: ${real_slot}"
+deep_replacement='"compatible":{"extra":{"depth":4}}'
+deep_json="${real_rauc_json//\"compatible\":null/${deep_replacement}}"
+deep_slot="$(json_slot_object "${deep_json}" rootfs.0)"
+[[ "${deep_slot}" == *'"compatible":{"extra":{"depth":4}}}}}' ]] && ok "nested object depth beyond RAUC 1.15.2 stays balanced" || bad "truncated deep slot object: ${deep_slot}"
+healthy_state_write "wrong-boot-id" "${DPKG_SHA}" "${BUILD_ID}"
+out="$(run_check)"; rc=$?
+assert_eq "real RAUC 1.15.2: check exits successfully" 0 "${rc}"
+printf '%s' "${out}" | grep -qF '"other_slot":"rootfs.0"' && ok "real RAUC 1.15.2: only the inactive rootfs slot is selected" || bad "check output: ${out}"
+printf '%s' "${out}" | grep -qF '"other_slot_device":"/dev/disk/by-partlabel/rootfs_a"' && ok "real RAUC 1.15.2: complete nested slot object exposes device" || bad "check output: ${out}"
+printf '%s' "${out}" | grep -qF '"refuse_reason":"healthy-state-mismatch"' && ok "real RAUC 1.15.2: reports the actual blocking gate" || bad "check output: ${out}"
+
+reset_happy_fixtures
 out="$(run_check)"; rc=$?
 assert_eq "check exit code on healthy fixture" 0 "${rc}"
 printf '%s' "${out}" | grep -qF '"would_refuse":false' && ok "check: healthy fixture would not refuse" || bad "check output: ${out}"

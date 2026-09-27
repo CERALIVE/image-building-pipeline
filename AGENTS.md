@@ -3586,6 +3586,12 @@ The OTHER slot's device and name are resolved from `rauc status --detailed
 each slot as `{"<name>":{"class",...,["bundle"],["installed"],["activated"],
 "status"}}`, and "installed but not activated" is exactly "has an `installed`
 object but no `activated` one", matching RAUC's own readable-formatter rule.
+RAUC 1.15.2 also emits `slot_status.bundle` within each slot: the parser first
+isolates the `slots` array, enumerates only its immediate slot keys, and uses
+recursive balanced-object matching to retain complete slot objects at any depth.
+The verbatim Rock 5B+ RAUC 1.15.2 capture in
+`tests/fixtures/rauc-1.15.2-rock-status.json` pins this alongside the older flat
+fixture; neither nested `bundle` nor another sub-object key is a slot name.
 The mirror itself is `rauc status mark-bad other`, mount the other slot rw,
 `mount --bind` (never `--rbind`) the running root onto a source mountpoint,
 `rsync -aHAXS --checksum --numeric-ids --delete --exclude-from=/usr/lib/ceralive/

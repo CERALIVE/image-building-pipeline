@@ -174,6 +174,7 @@ tests/test-registry.test.sh	shell	unit	not-executed	the registry's own completen
 tests/.gitkeep	fixture	support	not-executed	keeps the directory tracked
 tests/fixtures/apt-policyrcd-mode.py	fixture	support	not-executed	reports the file mode mkosi's policy-rc.d write site produces; driven by mkosi-image-contract.bats, never run directly
 tests/fixtures/apt-sandbox/in-container.sh	fixture	support	not-executed	in-container payload for the apt-sandbox suite, never run directly
+tests/fixtures/rauc-1.15.2-rock-status.json	fixture	support	not-executed	verbatim Rock 5B+ RAUC 1.15.2 detailed JSON; consumed by slot-sync.test.sh
 tests/fixtures/gpt-baseline/README.md	fixture	support	not-executed	provenance note for the frozen GPT baselines
 tests/fixtures/gpt-baseline/rk3588-ab.gpt	fixture	support	not-executed	frozen pre-overlay GPT baseline; a diff here is a fleet re-flash, not a test fix
 tests/fixtures/gpt-baseline/rk3588-single-slot.gpt	fixture	support	not-executed	frozen single-slot GPT baseline

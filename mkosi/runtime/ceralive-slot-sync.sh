@@ -211,28 +211,29 @@ _json_flat_field() {
   sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "${file}" | head -n1
 }
 
-# json_slot_names <json> — every slot-name KEY that opens a nested object at
-# the top level of the "slots" array, e.g. "rootfs.0", "rootfs.1", "certs.0".
-# Bounded to RAUC's own emitted shape: a slot-name key is the ONLY place in the
-# whole document where an opening '{' is immediately followed by a quoted key
-# that itself maps to another object (every other object-valued key — bundle,
-# checksum, installed, activated — is preceded by a comma, never by '{').
-json_slot_names() {
-  printf '%s' "$1" | grep -oP '\{"\K[^"]+(?=":\{)' 2>/dev/null
+# RAUC emits compact JSON with a slots array of single-key objects. Recursion
+# balances arbitrary object depth (including slot_status.bundle on RAUC 1.15);
+# quoted strings are atomic so braces in values do not change the depth.
+json_slots_array() {
+  printf '%s' "$1" | grep -oP '(?(DEFINE)(?<obj>\{(?:[^{}"]|"(?:\\.|[^"\\])*"|(?&obj))*\}))"slots":\K\[(?:(?&obj),?)*\]' 2>/dev/null
 }
 
-# json_slot_object <json> <name> — the slotname's own detail object, "{...}",
-# bounded to TWO levels of brace nesting (matching RAUC's own shape: a slot
-# object's sub-objects — bundle/checksum/installed/activated — are themselves
-# flat, so this never needs a third level).
+# json_slot_names <json> — only immediate children of the slots array, not
+# object keys nested within a slot (e.g. RAUC 1.15's slot_status.bundle).
+json_slot_names() {
+  json_slots_array "$1" | grep -oP '(?<=\[|\},)\{"\K[^"]+(?=":\{)' 2>/dev/null
+}
+
+# json_slot_object <json> <name> — the COMPLETE slot detail object, even when
+# a field contains another nested object. Only search the slots array.
 json_slot_object() {
   local json="$1" name="$2" esc
   esc="$(printf '%s' "${name}" | sed 's/[.[$*^\\]/\\&/g')"
-  printf '%s' "${json}" | grep -oP "\"${esc}\":\\K\\{(?:[^{}]|\\{[^{}]*\\})*\\}" 2>/dev/null | head -n1
+  json_slots_array "${json}" | grep -oP "(?(DEFINE)(?<obj>\\{(?:[^{}\"]|\"(?:\\\\.|[^\"\\\\])*\"|(?&obj))*\\}))\\{\"${esc}\":\\K(?&obj)" 2>/dev/null | head -n1
 }
 
-# json_field <obj> <field> — a flat string field ANYWHERE inside a bounded
-# 2-level object (works for both top-level slot fields like "device" and
+# json_field <obj> <field> — a flat string field ANYWHERE inside a slot object
+# (works for both top-level slot fields like "device" and
 # nested ones like "bundle":{"version":...} — RAUC's field names never repeat
 # across that boundary, so an unscoped search is unambiguous in practice).
 json_field() {
