@@ -242,6 +242,7 @@ fi
 
 REPRO="$(mktemp)"
 trap 'rm -f "${REPRO}"' EXIT
+AWK_BIN="$(readlink -f "$(command -v awk)")"
 cat >"${REPRO}" <<REPRO_EOF
 set -euo pipefail
 # Scratch chroot filesystem: tmpfs over /etc so the host is never touched.
@@ -267,7 +268,7 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 STRAY
 
 log() { :; }
-eval "\$(awk '/^configure_minimal_apt\(\) \{/,/^}/' "${POSTINST}")"
+eval "\$("${AWK_BIN}" '/^configure_minimal_apt\(\) \{/,/^}/' "${POSTINST}")"
 configure_minimal_apt
 
 [ ! -e "/etc/apt/sources.list.d/\${RELEASE}.sources" ] || { echo "FAIL: configure_minimal_apt left the mkosi release-named dupe (\${RELEASE}.sources) behind"; exit 1; }
@@ -289,7 +290,7 @@ resolve_target_suites() {
   APT_SUITE_SEC="\${APT_SUITE_SECURITY}"
 }
 log_info() { :; }
-eval "\$(awk '/^configure_minimal_apt\(\) \{/,/^}/' "${MODULE}")"
+eval "\$("${AWK_BIN}" '/^configure_minimal_apt\(\) \{/,/^}/' "${MODULE}")"
 configure_minimal_apt
 
 cmp -s /tmp/apt-runtime/99ceralive /etc/apt/apt.conf.d/99ceralive \
