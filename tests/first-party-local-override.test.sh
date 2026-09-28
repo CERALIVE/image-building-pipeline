@@ -6,6 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 # shellcheck source=tests/lib/assertions.sh
 source "${HERE}/lib/assertions.sh"
+unset CI GITHUB_ACTIONS CERALIVE_BUILD_MODE
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/first-party-override-XXXXXX")"
 trap 'rm -rf "${WORK}"' EXIT
 for tool in dpkg-deb python3 sha256sum; do
@@ -122,7 +123,7 @@ reject() {
   fi
 }
 reject production 'refused in production mode' CERALIVE_BUILD_MODE=production CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${TEST_OVERRIDE}"
-reject actions 'refused in GitHub Actions' GITHUB_ACTIONS=true CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${TEST_OVERRIDE}"
+reject actions 'refused in GitHub Actions' CI=true GITHUB_ACTIONS=true CERALIVE_BUILD_MODE=development CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${TEST_OVERRIDE}"
 make_deb wrong-name 99.2 arm64 "${TEST_OVERRIDE}/local.deb"
 reject unknown 'unknown first-party local override package' CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${TEST_OVERRIDE}"
 make_deb ceralive-device 99.2 arm64 "${TEST_OVERRIDE}/local.deb"
