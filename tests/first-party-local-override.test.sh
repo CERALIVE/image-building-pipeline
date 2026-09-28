@@ -143,9 +143,42 @@ else
 fi
 
 # Captured once from the pre-change fetch_first_party with the same deterministic
-# logger and fixed DEST; compare the complete plan, not selected substrings.
+# logger and fixed DEST; keep its pins fixed too, so later image releases do not
+# change the subject of this local-override regression.
+cat >"${WORK}/golden-versions.yaml" <<'PINS'
+srt:
+  pin: srt-v1.5.7+ceralive.2
+cerastream:
+  pin: v2026.9.6
+CeraUI:
+  pin: v2026.9.3
+srtla:
+  pin: v4.1.0
+modem-stack:
+  pin: v1.4.0
+PINS
+cat >"${WORK}/golden-debs.txt" <<'PINS'
+libsrt1.5-ceralive=1.5.7+ceralive.2
+cerastream=2026.9.6
+gstreamer1.0-libuvcsrc=2026.9.0
+ceralive-device[amd64]=2026.9.3-20260920T155651.ec522ad
+ceralive-device[arm64]=2026.9.3-20260920T155654.ec522ad
+srtla=4.1.0
+modemmanager=1.24.2-2~ceralive.3
+libmm-glib0=1.24.2-2~ceralive.3
+libmbim-glib4=1.34.0-1~ceralive.3
+libmbim-proxy=1.34.0-1~ceralive.3
+libmbim-utils=1.34.0-1~ceralive.3
+libqmi-glib5=1.38.0-1~ceralive.3
+libqmi-proxy=1.38.0-1~ceralive.3
+libqmi-utils=1.38.0-1~ceralive.3
+libqrtr-glib0=1.4.0-1~ceralive.3
+ceralive-modem-support=1.4.0
+ceralive-apt-credentials=1.0.0
+PINS
 plan() {
   DRY_RUN=1 DEST=/tmp/ceralive-task44-golden ARCH=arm64 CERALIVE_APT_PROXY=off \
+    VERSIONS_YAML="${WORK}/golden-versions.yaml" FIRST_PARTY_DEB_VERSIONS_FILE="${WORK}/golden-debs.txt" \
     bash -c 'source "$1" >/dev/null; log_info() { printf "INFO %s\n" "$*"; }; log_warn() { printf "WARN %s\n" "$*"; }; log_success() { printf "OK %s\n" "$*"; }; fetch_first_party "${DEST}/debs"' _ "${ROOT}/lib/fetch-debs.sh"
 }
 read -r -d '' baseline <<'PLAN' || :
