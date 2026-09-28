@@ -157,9 +157,10 @@ recover_channel() {
 read_channel() {
   local c="$1" destination="$2"
   if read_key "$(channel_key "$c")" "$destination"; then
-    if [[ "$mode" != prune ]]; then
-      read_key "$(channel_key "$c").sig" "$destination.sig" || die "signed channel signature absent: $c"
-      verify_cms "$destination" "$destination.sig" || recover_channel "$c" "$destination"
+    read_key "$(channel_key "$c").sig" "$destination.sig" || die "signed channel signature absent: $c"
+    if ! verify_cms "$destination" "$destination.sig"; then
+      [[ "$mode" != prune ]] || die "signed channel verification failed: $c; refusing prune"
+      recover_channel "$c" "$destination"
     fi
     python3 - "$destination" "$board" "$c" <<'PY'
 import json,sys

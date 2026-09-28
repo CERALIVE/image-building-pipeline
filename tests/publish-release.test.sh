@@ -334,6 +334,34 @@ if STUB_PAGE_SIZE=3 STUB_NO_NEXT=1 bash "$repo/ci/publish-release.sh" prune --bo
   printf 'FAIL: incomplete inventory was accepted\n' >&2; exit 1
 fi
 assert grep -q 'incomplete R2 inventory' "$tmp/incomplete.log"
+stable_pointer="$tmp/objects/channels/stable/rock-5b-plus.json"
+cp "$stable_pointer" "$tmp/stable-prune-valid.json"
+cp "$stable_pointer.sig" "$tmp/stable-prune-valid.sig"
+assert test -f "$base/index.json"
+assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
+python3 - "$stable_pointer" <<'PY'
+import json,sys
+p=sys.argv[1];m=json.load(open(p))
+assert m['version']=='2026.10.1' and m['channel']=='stable'
+m['version']='2026.10.5'
+with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
+PY
+if bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/prune-tampered.log" 2>&1; then
+  printf 'FAIL: prune accepted tampered stable pointer and deleted its signed-only release\n' >&2; exit 1
+fi
+assert grep -q 'signed channel verification failed: stable' "$tmp/prune-tampered.log"
+assert test -f "$base/index.json"
+assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
+cp "$tmp/stable-prune-valid.json" "$stable_pointer"
+rm "$stable_pointer.sig"
+if bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/prune-unsigned.log" 2>&1; then
+  printf 'FAIL: prune accepted an unsigned stable pointer\n' >&2; exit 1
+fi
+assert grep -q 'signed channel signature absent: stable' "$tmp/prune-unsigned.log"
+assert test -f "$base/index.json"
+assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
+cp "$tmp/stable-prune-valid.sig" "$stable_pointer.sig"
+printf 'PASS: tampered or unsigned channel refuses prune before any eligible release deletion\n'
 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >/dev/null
 assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
@@ -350,6 +378,9 @@ python3 - "$repo/.github/workflows/publish-release.yml" "$tmp" <<'PY'
 import pathlib,sys,yaml
 w=yaml.safe_load(open(sys.argv[1]))
 steps=w['jobs']['publish']['steps']
+signer=next(s for s in steps if s.get('name')=='Materialize dedicated signer')
+assert 'if' not in signer, 'prune must materialize the existing CMS verification root'
+pathlib.Path(sys.argv[2],'workflow-signer.sh').write_text(signer['run']+'\n')
 for name,target in (('Validate dispatch and candidate provenance','workflow-validate.sh'),
                     ('Publish, promote, refresh, or prune','workflow-publish.sh')):
     step=next(s for s in steps if s.get('name')==name)
@@ -387,6 +418,12 @@ EXPECT_ETAG="${saved_etag//\"/}" workflow_refresh >"$tmp/workflow-unquoted.log" 
 assert test ! -e "$tmp/workflow-argv"
 export EXPECT_SERIAL="$saved_serial" EXPECT_ETAG="$saved_etag"
 printf 'PASS: workflow refresh passes observed serial + quoted ETag and refuses missing/stale values\n'
+OTA_MANIFEST_SIGNER_TAR_B64="$(tar -czf - -C "$tmp/signer" leaf.key leaf.pem intermediate-ca.pem root-ca.pem | base64 -w0)"
+export OTA_MANIFEST_SIGNER_TAR_B64
+MODE=prune /bin/bash "$tmp/workflow-signer.sh"
+assert cmp "$tmp/signer/root-ca.pem" "$RUNNER_TEMP/ota-manifest-signer/root-ca.pem"
+unset OTA_MANIFEST_SIGNER_TAR_B64
+printf 'PASS: prune workflow provides the existing CMS verification root\n'
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"
