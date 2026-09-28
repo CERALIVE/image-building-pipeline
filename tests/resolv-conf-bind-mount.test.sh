@@ -128,6 +128,13 @@ mount --bind /tmp/host-resolv.conf /etc/resolv.conf
 
 mountpoint -q /etc/resolv.conf || { echo "seed precondition failed: /etc/resolv.conf is not a mountpoint"; exit 1; }
 
+# Docker's covered resolv.conf bind remains in mountinfo after /etc is mounted
+# anew; a symlink at this path proves the fixture's visible bind is gone.
+mountpoint() {
+  if [[ "\$1" == -q && "\$2" == /etc/resolv.conf && -L /etc/resolv.conf ]]; then return 1; fi
+  command mountpoint "\$@"
+}
+
 # shellcheck source=/dev/null
 source "${POSTINST_LIB}"
 log() { :; }
