@@ -5,6 +5,10 @@ umask 077
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/objects" "$tmp/signer" "$tmp/other" "$tmp/publisher-tmp"
+mkdir -p "$tmp/publisher-cwd"
+ln -s "$repo/lib" "$tmp/publisher-cwd/lib"
+ln -s "$repo/manifests" "$tmp/publisher-cwd/manifests"
+printf 'CeraUI:\n  pin: v2026.9.3\n' >"$tmp/publisher-cwd/versions.yaml"
 export TMPDIR="$tmp/publisher-tmp"
 export STUB_R2="$tmp/objects" STUB_LOG="$tmp/aws.log" R2_IMAGES_BUCKET=ceralive-images
 export R2_IMAGES_ENDPOINT="https://stub.invalid" R2_IMAGES_ACCESS_KEY_ID=stub R2_IMAGES_SECRET_ACCESS_KEY=stub
@@ -90,15 +94,18 @@ make_bundle ceralive-rock-5b-plus "$tmp/bundle.raucb"
 printf 'flash-content\n' >"$tmp/flash.raw"
 xz -c "$tmp/flash.raw" >"$tmp/flash.raw.xz"
 ( cd "$tmp" && sha256sum flash.raw > raw.sha256 )
+publisher() {
+  ( cd "$tmp/publisher-cwd" && bash "$repo/ci/publish-release.sh" "$@" )
+}
 publish() {
   local v="$1" c="$2"
-  bash "$repo/ci/publish-release.sh" publish --board rock-5b-plus --version "$v" --channel "$c" --bundle "$tmp/bundle.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json"
+  publisher publish --board rock-5b-plus --version "$v" --channel "$c" --bundle "$tmp/bundle.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json"
 }
 refresh() {
   local b="$1" c="$2" serial="$3" file etag
   file="$tmp/objects/channels/$c/$b.json"
   etag="\"$(openssl dgst -md5 "$file" | cut -d' ' -f2)\""
-  bash "$repo/ci/publish-release.sh" refresh --board "$b" --channel "$c" --expect-serial "$serial" --expect-etag "$etag"
+  publisher refresh --board "$b" --channel "$c" --expect-serial "$serial" --expect-etag "$etag"
 }
 assert() { "$@" || { printf 'FAIL: %s\n' "$*" >&2; exit 1; }; }
 publish 2026.10.1 beta
@@ -144,7 +151,7 @@ cp "$tmp/original.raucb" "$tmp/bundle.raucb"
 printf 'second signed candidate\n' >"$tmp/rootfs/etc/hostname"
 mkfs.ext4 -q -F -d "$tmp/rootfs" "$tmp/rauc-input/rootfs.ext4"
 make_bundle ceralive-rock-5b-plus "$tmp/changed-valid.raucb"
-if bash "$repo/ci/publish-release.sh" publish --board rock-5b-plus --version 2026.10.1 --channel drill \
+if publisher publish --board rock-5b-plus --version 2026.10.1 --channel drill \
     --bundle "$tmp/changed-valid.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/immutable-collision.log" 2>&1; then
   printf 'FAIL: valid changed bundle replaced immutable release\n' >&2; exit 1
 fi
@@ -160,14 +167,14 @@ with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
 PY
 openssl cms -sign -binary -in "$beta" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
   -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$beta.sig" >/dev/null
-if bash "$repo/ci/publish-release.sh" promote --board rock-5b-plus --version 2026.10.1 --to stable >"$tmp/promote-mismatch.log" 2>&1; then
+if publisher promote --board rock-5b-plus --version 2026.10.1 --to stable >"$tmp/promote-mismatch.log" 2>&1; then
   printf 'FAIL: promote accepted signed mismatched compatible\n' >&2; exit 1
 fi
 assert grep -q 'channel compatible mismatch' "$tmp/promote-mismatch.log"
 assert test ! -e "$base/channels/stable"
 cp "$tmp/beta-valid.json" "$beta"; cp "$tmp/beta-valid.sig" "$beta.sig"
 printf 'PASS: promotion refuses a signed incompatible beta pointer before membership write\n'
-bash "$repo/ci/publish-release.sh" promote --board rock-5b-plus --version 2026.10.1 --to stable
+publisher promote --board rock-5b-plus --version 2026.10.1 --to stable
 after="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 [[ "$before" == "$after" ]] || { printf 'FAIL: promote uploaded parts\n' >&2; exit 1; }
 assert test -f "$base/channels/stable"
@@ -248,7 +255,7 @@ make_bundle ceralive-orangepi5-plus "$tmp/opi.raucb"
 make_bundle ceralive-orangepi5-plus-extra "$tmp/near.raucb"
 for pair in "rock-5b-plus:$tmp/opi.raucb" "orange-pi-5-plus:$tmp/bundle.raucb" "orange-pi-5-plus:$tmp/near.raucb"; do
   b="${pair%%:*}" candidate="${pair#*:}"
-  if bash "$repo/ci/publish-release.sh" publish --board "$b" --version 2026.12.1 --channel drill \
+  if publisher publish --board "$b" --version 2026.12.1 --channel drill \
       --bundle "$candidate" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/mismatch.log" 2>&1; then
     printf 'FAIL: cross-board/near-spelling bundle accepted: %s\n' "$pair" >&2; exit 1
   fi
@@ -257,7 +264,7 @@ done
 assert test ! -e "$tmp/objects/releases/orange-pi-5-plus/2026.12.1/index.json"
 printf 'PASS: cross-board and near-spelling signed bundles refused before immutable writes\n'
 
-bash "$repo/ci/publish-release.sh" publish --board orange-pi-5-plus --version 2026.12.1 --channel drill \
+publisher publish --board orange-pi-5-plus --version 2026.12.1 --channel drill \
   --bundle "$tmp/opi.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >/dev/null
 opi="$tmp/objects/channels/drill/orange-pi-5-plus.json"
 python3 - "$opi" <<'PY'
@@ -325,12 +332,18 @@ if refresh orange-pi-5-plus drill 5 >"$tmp/bad-signature.log" 2>&1; then printf 
 assert grep -q 'signed channel verification failed' "$tmp/bad-signature.log"
 cp "$tmp/opi.good.sig" "$opi.sig"
 printf 'PASS: signed wrong URL and immutable part drift both refuse refresh\n'
+printf 'CeraUI:\n  pin: v2026.10.9\n' >"$tmp/publisher-cwd/versions.yaml"
 for v in 2026.10.2 2026.10.3 2026.10.4 2026.10.5; do publish "$v" beta >/dev/null; done
+python3 - "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['min_ceraui_version']=='2026.10.9'
+PY
+printf 'PASS: a changed fixture pin reaches the next published channel\n'
 mkdir -p "$tmp/objects/releases/rock-5b-plus/2026.9.9"
 printf orphan >"$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
-output="$(STUB_PAGE_SIZE=3 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family --dry-run)"
+output="$(STUB_PAGE_SIZE=3 publisher prune --board rock-5b-plus --channel-family --dry-run)"
 [[ "$output" == *'2026.10.2'* && "$output" != *'2026.10.1/'* && "$output" != *'2026.9.9/'* ]] || { printf 'FAIL: prune plan not 3 newest + referenced + unmarked\n' >&2; exit 1; }
-if STUB_PAGE_SIZE=3 STUB_NO_NEXT=1 bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/incomplete.log" 2>&1; then
+if STUB_PAGE_SIZE=3 STUB_NO_NEXT=1 publisher prune --board rock-5b-plus --channel-family >"$tmp/incomplete.log" 2>&1; then
   printf 'FAIL: incomplete inventory was accepted\n' >&2; exit 1
 fi
 assert grep -q 'incomplete R2 inventory' "$tmp/incomplete.log"
@@ -346,7 +359,7 @@ assert m['version']=='2026.10.1' and m['channel']=='stable'
 m['version']='2026.10.5'
 with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
 PY
-if bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/prune-tampered.log" 2>&1; then
+if publisher prune --board rock-5b-plus --channel-family >"$tmp/prune-tampered.log" 2>&1; then
   printf 'FAIL: prune accepted tampered stable pointer and deleted its signed-only release\n' >&2; exit 1
 fi
 assert grep -q 'signed channel verification failed: stable' "$tmp/prune-tampered.log"
@@ -354,7 +367,7 @@ assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
 cp "$tmp/stable-prune-valid.json" "$stable_pointer"
 rm "$stable_pointer.sig"
-if bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >"$tmp/prune-unsigned.log" 2>&1; then
+if publisher prune --board rock-5b-plus --channel-family >"$tmp/prune-unsigned.log" 2>&1; then
   printf 'FAIL: prune accepted an unsigned stable pointer\n' >&2; exit 1
 fi
 assert grep -q 'signed channel signature absent: stable' "$tmp/prune-unsigned.log"
@@ -362,7 +375,7 @@ assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
 cp "$tmp/stable-prune-valid.sig" "$stable_pointer.sig"
 printf 'PASS: tampered or unsigned channel refuses prune before any eligible release deletion\n'
-bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >/dev/null
+publisher prune --board rock-5b-plus --channel-family >/dev/null
 assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
@@ -370,7 +383,7 @@ printf 'PASS: prune keeps 3 newest + references, leaves unmarked versions alone\
 printf 'PASS: paginated inventory complete; missing continuation refuses deletion\n'
 publish 2026.11.1 drill >/dev/null
 publish 2026.11.2 drill >/dev/null
-bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >/dev/null
+publisher prune --board rock-5b-plus --channel-family >/dev/null
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.11.1/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.11.2/index.json"
 printf 'PASS: drill retains one newest marked version\n'
