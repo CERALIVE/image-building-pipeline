@@ -152,6 +152,13 @@ sizes and SHA-256. Existing channel JSON must have a valid dedicated CMS
 signature; refresh accepts only the historical product-stem compatible as a
 repairable previous claim, with exact board/version/URLs/digests still required.
 Refresh needs the observed serial and quoted ETag as explicit preconditions;
+the workflow takes one board and both reviewed values, re-reads the JSON/ETag,
+rejects drift and forwards those exact values. Before the signature PUT the
+publisher creates a create-only recovery intent holding both CMS-signed pairs.
+An interrupted write can finish by JSON ETag CAS only after authenticating the
+old and new signatures, exact bytes, serial and indexed RAUC identity. Foreign
+or drifted inputs are refused; the two PUTs still expose a temporary unverifiable
+pair until retry, so recovery does not imply atomic availability.
 an old signed Orange pointer can be corrected without changing any release key.
 The workflow selects a bench root only for `drill` and the production release
 root for stable/beta (including promotion); no implicit trust root is allowed.

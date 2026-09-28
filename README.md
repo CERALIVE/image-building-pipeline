@@ -356,7 +356,11 @@ bundle into 256 MiB immutable parts, publishes one index, then a dedicated
 codeSigning-only CMS signature and channel manifest (JSON last). `publish`,
 `promote`, `refresh`, `prune`, `--dry-run` and the 600 MiB `--selftest` are
 separate modes. Current zstd candidates are decoded and re-encoded as xz;
-earlier xz candidates are copied as-is. Both verify the original raw checksum. See the
+earlier xz candidates are copied as-is. Both verify the original raw checksum.
+`refresh` takes a single board and an observed serial plus quoted JSON ETag,
+which CI rechecks before forwarding. A create-only recovery intent lets a retry
+authenticate and finish an interrupted signature-first write by JSON ETag CAS;
+readers can still see a mismatched pair until then and must fail closed. See the
 runbook for the retention, RAUC-compatible identity (Orange's board ID differs
 from its product slug), verified bundle/index, and pointer-only refresh gates;
 existence of this publisher does not certify any candidate or authorize a

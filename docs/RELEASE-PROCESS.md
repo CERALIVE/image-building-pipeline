@@ -593,7 +593,14 @@ The manual `Publish signed image release` workflow asks for mode (`publish`,
 or promote) OS CalVer. Publish additionally requires the **successful** release
 candidate run ID. The `release` GitHub environment requires owner approval;
 every invocation joins one non-cancelling publisher concurrency group. A
-release-candidate archive must include `good.raucb`, both transport checksums,
+workflow `refresh` accepts exactly one board and requires the operator's observed
+`expect_serial` and **quoted** JSON `expect_etag`. It fetches that board's JSON
+and ETag again in the approved job, refuses stale/missing inputs, and forwards
+both as `--expect-serial` / `--expect-etag` to the publisher. Read the current
+signed pointer and its R2 ETag using the procedure below before dispatch; do
+not enter an unquoted digest or use a serial from another board.
+
+A release-candidate archive must include `good.raucb`, both transport checksums,
 `raw.sha256` and `packages.lock.json`. Current `.raw.zst` candidates are decoded
 and recompressed to actual xz; earlier `.raw.xz` candidates are copied. In both
 cases the bytes after decompression must match the
@@ -640,6 +647,30 @@ quoted, observed `--expect-etag` of the current JSON, checked again before
 signature-first/JSON-last ETag CAS. If JSON CAS fails while the old JSON ETag
 is still current, a conditional write restores the old signature; a concurrent
 change is not overwritten. No immutable release is re-signed or rewritten.
+
+The two channel objects are **not atomic**. Before changing `.json.sig`, the
+publisher creates an immutable recovery intent under
+`channels/<channel>/<board>.json.recovery/`, keyed by the prior JSON ETag,
+operation and version. It contains byte-for-byte copies of the previously
+CMS-signed pair (if present) and the new pair; it is not trusted merely because
+it exists. On retry after a process dies between the signature and JSON PUT,
+the publisher checks the prior JSON against its observed ETag and saved bytes,
+verifies **both** CMS signatures and signer identities, checks the new serial,
+board/channel/version and indexed artifact identities against the reverified
+RAUC bundle, and requires the currently exposed signature to match the saved
+new signature exactly. Only then may it commit the saved new JSON with
+`If-Match` against the prior ETag and verify the resulting pair by readback.
+For an interrupted first publication (no prior JSON), the next identical
+`publish` reuses the authenticated intent and commits with `If-None-Match`.
+Foreign signatures, changed JSON/ETag, drifted parts/index, absent trust roots
+and stale refresh preconditions fail closed: **never re-sign the old JSON** or
+delete/rewrite immutable release bytes to bypass the refusal. The intent is
+retained as an audit/retry record; ordinary successful operations also create
+one. During the interval between the two PUTs readers may still see an
+unverifiable pair and must fail closed; this is recoverability, **not** atomic
+availability or a guarantee of uninterrupted service. Retry the same reviewed
+operation with the same preconditions; if the pair is foreign/drifted, stop and
+adjudicate rather than forcing a write.
 
 The workflow materializes the RAUC root separately from the CMS manifest
 signer: stable/beta (and promotion to stable) use `RAUC_RELEASE_PKI_TAR_B64`'s
