@@ -209,8 +209,11 @@ run_first_party_native() {
 	# build) would serve the very payload the leg is trying to fail — the fetch
 	# would succeed and the assertion would be measuring ambient state.
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
+	# fetch-debs.sh reads DEST from the ENVIRONMENT at source time, before
+	# fetch_first_party runs — the script's ${DEST}, not our ${dest}, drives outputs.
 	env \
 		PATH="${FAKE_BIN}:${PATH}" \
+		DEST="${dest}" \
 		COUNT_DIR="${COUNT_DIR}" \
 		APT_GPG_PUBLIC_B64="${KEY_B64}" \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
@@ -267,6 +270,7 @@ run_first_party_curl() {
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_CURL_BIN}:${PATH}" \
+		DEST="${dest}" \
 		COUNT_DIR="${COUNT_DIR}" \
 		FAKE_REPO_DIR="${repo}" \
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
