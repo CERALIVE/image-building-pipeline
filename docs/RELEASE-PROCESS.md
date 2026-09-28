@@ -621,6 +621,76 @@ uploads **no parts**; it is required before a rarely-released channel expires.
 immutable index; it uploads no parts. A failed conditional manifest write is a
 serial replay refusal, not licence to overwrite a release object.
 
+**Signed board identity is not the filename stem.** `board` and the release
+URL use the product manifest stem (`orange-pi-5-plus`); `compatible` is derived
+through the validated board resolver's `BOARD_ID` (`orangepi5-plus`) and equals
+the signed RAUC bundle/system.conf value `ceralive-orangepi5-plus`. Rock's
+stem and `BOARD_ID` both happen to be `rock-5b-plus`. The publisher reads the
+immutable index and every part back from R2, validates part and whole-file
+lengths/digests, then runs `rauc info -C keyring:check-purpose=codesign`
+against the reconstructed bundle and an explicit `RAUC_BUNDLE_KEYRING`. Missing
+root, missing part, invalid signature, wrong compatible, or wrong signed pointer
+URL/digest aborts before any channel signature or JSON write. `publish` also
+preflights its candidate signature before any immutable write. `promote` and
+`refresh` verify the prior channel CMS under the dedicated manifest signer
+root; only refresh accepts the old, demonstrably wrong product-stem compatible
+as a source and replaces it with the verified value. It never treats that
+legacy claim as install authority. Refresh requires `--expect-serial` and the
+quoted, observed `--expect-etag` of the current JSON, checked again before
+signature-first/JSON-last ETag CAS. If JSON CAS fails while the old JSON ETag
+is still current, a conditional write restores the old signature; a concurrent
+change is not overwritten. No immutable release is re-signed or rewritten.
+
+The workflow materializes the RAUC root separately from the CMS manifest
+signer: stable/beta (and promotion to stable) use `RAUC_RELEASE_PKI_TAR_B64`'s
+production `root-ca.pem`; drill requires the separately provisioned
+`RAUC_BENCH_ROOT_CA_B64` (base64 of the bench root certificate). A missing
+secret fails closed. For a reviewed **pointer-only Orange drill repair** after
+both the publisher and device consumer fixes pass their own reviews, use this
+procedure; it is **not authorization to run it during a blocked drill**:
+
+```bash
+# Export R2_IMAGES_ENDPOINT, R2_IMAGES_ACCESS_KEY_ID and
+# R2_IMAGES_SECRET_ACCESS_KEY through the private credential source first.
+export RAUC_BUNDLE_KEYRING=<reviewed-bench-root-ca.pem>
+export OTA_MANIFEST_SIGNER_DIR=<reviewed-manifest-signer-directory>
+bucket=ceralive-images
+endpoint="$R2_IMAGES_ENDPOINT"
+key=channels/drill/orange-pi-5-plus.json
+work="$(mktemp -d)"    # remove this private directory after verification
+aws s3api get-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key" "$work/old.json"
+aws s3api get-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key.sig" "$work/old.sig"
+etag="$(aws s3api head-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key" --query ETag --output text)"
+test "$etag" = "\"$(openssl dgst -md5 "$work/old.json" | cut -d' ' -f2)\""
+openssl cms -verify -binary -inform DER -in "$work/old.sig" -content "$work/old.json" \
+  -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign -out /dev/null
+python3 - "$work/old.json" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+assert (m['schema'],m['board'],m['channel'],m['version'],m['serial'],m['compatible']) == \
+       (1,'orange-pi-5-plus','drill','2026.10.6',4,'ceralive-orange-pi-5-plus')
+assert m['bundle']['sha256']=='1820b2b0035b1c3cfa9ff04fcce97a38535c21b793db0e49204b74455dc7f46e'
+PY
+# Re-run only after both repo reviews, device binary verification, and bench approval.
+bash ci/publish-release.sh refresh --board orange-pi-5-plus --channel drill \
+  --expect-serial 4 --expect-etag "$etag"
+```
+
+The command itself re-reads and verifies the immutable 2026.10.6 index,
+bundle parts, whole digest and RAUC signature/compatible under the bench root.
+It changes **only** `channels/drill/orange-pi-5-plus.json{,.sig}`; the existing
+release prefix, Rock pointer and stable/beta pointers are untouched. If the
+live serial, ETag, bundle digest or signer differs, **stop**, never force a
+same-version overwrite. Afterwards fetch both new objects over the public
+`https://images.ceralive.tv/channels/drill/orange-pi-5-plus.json{,.sig}` origin
+(not just R2), run the same `openssl cms -verify ... -purpose codesign` with
+`-content <fetched.json>` and the reviewed manifest root, and confirm signed
+`serial:5`, `board:orange-pi-5-plus`, `compatible:ceralive-orangepi5-plus`,
+unchanged `version`, bundle/flash URLs, sizes, hashes and lock URL. Verify the
+served bundle with `rauc info` under the reviewed bench root and match its
+whole-file SHA-256 to the signed pointer. A CMS-valid but false compatible is
+not a successful repair.
+
 `prune --board <b> --channel-family` inventories all release keys, protects every
 version referenced by **any** of the three current channel manifests, keeps the
 three newest marked stable/beta versions across those two channels combined and
