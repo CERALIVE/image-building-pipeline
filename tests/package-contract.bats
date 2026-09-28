@@ -1290,7 +1290,8 @@ CONTROL
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" >"$armored"
 
-  local armored_b64 binary_b64
+  local armored_b64 binary_b64 awk_bin
+  awk_bin="$(readlink -f "$(command -v awk)")"
   armored_b64="$(base64 -w0 "$armored")"
   run env APT_GPG_PUBLIC_B64="$armored_b64" "$dearmor"
   [ "$status" -eq 0 ]
@@ -1350,6 +1351,7 @@ extract_fn() {
 }
 
 mkdir -p "$work/bin"
+ln -s "$4" "$work/bin/awk"
 mount -t tmpfs tmpfs /etc
 mount -t tmpfs tmpfs /usr/share
 mkdir -p /etc/opt/ceralive /etc/apt/certs /etc/apt/apt.conf.d /etc/apt/sources.list.d \
@@ -1455,7 +1457,7 @@ printf 'runtime-keyring: success published expected bytes mode=0644 owner=root:r
 REPRO
 
   run unshare -rm --map-root-user bash "$repro" "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
-    "$binary_b64" "$BATS_TEST_TMPDIR"
+    "$binary_b64" "$BATS_TEST_TMPDIR" "$awk_bin"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
   [[ "$output" != *"$binary_b64"* ]]
