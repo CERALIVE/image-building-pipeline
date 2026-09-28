@@ -80,16 +80,86 @@ current_etag() {
 }
 channel_key() { printf 'channels/%s/%s.json' "$1" "$board"; }
 release_prefix() { printf 'releases/%s/%s' "$board" "$1"; }
+verify_cms() {
+  local content="$1" signature="$2"
+  [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
+  openssl cms -verify -binary -inform DER -in "$signature" -content "$content" \
+    -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign \
+    -signer "$tmp/read-signer.pem" -out /dev/null >/dev/null 2>&1 || return 1
+  [[ "$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)" == *'CN=CeraLive OTA Manifest Signer'* ]]
+}
+intent_key() {
+  local c="$1" etag="$2"
+  [[ -n "$etag" ]] || etag="initial-$version"
+  printf '%s.recovery/%s-%s-%s' "$(channel_key "$c")" "${etag//\"/}" "$mode" "$version"
+}
+load_intent() {
+  local c="$1" old="$2" old_etag="$3" next="$4" signature="$5" key
+  key="$(intent_key "$c" "$old_etag")"
+  read_key "$key" "$tmp/intent.json" || return 1
+  python3 - "$tmp/intent.json" "$old" "$next" "$signature" "$mode" "$board" "$c" "$version" <<'PY' || die 'channel recovery intent identity mismatch'
+import base64,json,sys
+path,old,nxt,sig,mode,board,channel,version=sys.argv[1:]
+i=json.load(open(path))
+assert i['schema']==1 and (i['mode'],i['board'],i['channel'],i['version'])==(mode,board,channel,version)
+for name,target in (('old',old),('next',nxt),('signature',sig)):
+    with open(target,'wb') as f:f.write(base64.b64decode(i[name],validate=True))
+PY
+  [[ -z "$old_etag" || -s "$old" ]] || die 'channel recovery missing prior JSON'
+  [[ -z "$old_etag" || "\"$(openssl dgst -md5 "$old" | cut -d' ' -f2)\"" == "$old_etag" ]] || die 'channel recovery prior ETag mismatch'
+  if [[ -n "$old_etag" ]]; then
+    python3 - "$tmp/intent.json" "$old.sig" <<'PY' || die 'channel recovery prior signature invalid'
+import base64,json,sys
+with open(sys.argv[2],'wb') as f:f.write(base64.b64decode(json.load(open(sys.argv[1]))['old_signature'],validate=True))
+PY
+    verify_cms "$old" "$old.sig" || die 'channel recovery prior signature invalid'
+  fi
+  verify_cms "$next" "$signature" || die 'channel recovery next signature invalid'
+  python3 - "$old" "$next" "$board" "$c" "$version" <<'PY' || die 'channel recovery serial/identity mismatch'
+import json,sys
+old,nxt,board,channel,version=sys.argv[1:]
+new=json.load(open(nxt));previous=json.load(open(old)) if open(old).read(1) else None
+assert (new['schema'],new['board'],new['channel'],new['version'])==(1,board,channel,version)
+assert new['serial']==(previous['serial']+1 if previous else 1)
+assert previous is None or (previous['schema'],previous['board'],previous['channel'])==(1,board,channel)
+PY
+  if [[ "$mode" == refresh ]]; then
+    [[ -n "$old_etag" && "$old_etag" == "$expect_etag" && "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$old")" == "$expect_serial" ]] || die 'refresh precondition: serial or ETag changed'
+  fi
+  verify_release "$version"
+  verify_pointer_source "$next" "$version" no
+}
+recover_channel() {
+  local c="$1" current="$2" key etag recorded="$tmp/recovery-old.json" next="$tmp/recovery-next.json" sig="$tmp/recovery-next.sig"
+  key="$(channel_key "$c")"
+  etag="$(current_etag "$key")"
+  [[ "$etag" == "\"$(openssl dgst -md5 "$current" | cut -d' ' -f2)\"" ]] || die 'channel changed during recovery read'
+  if [[ "$mode" == refresh ]]; then
+    version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$current")"
+    [[ "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || die 'invalid recovery CalVer'
+  fi
+  load_intent "$c" "$recorded" "$etag" "$next" "$sig" || die "signed channel verification failed: $c"
+  cmp -s "$current" "$recorded" || die 'channel recovery prior JSON changed'
+  read_key "$key.sig" "$tmp/recovery-current.sig" || die 'channel recovery signature absent'
+  cmp -s "$sig" "$tmp/recovery-current.sig" || die 'channel recovery foreign signature refused'
+  [[ "$(current_etag "$key.sig")" == "\"$(openssl dgst -md5 "$sig" | cut -d' ' -f2)\"" ]] || die 'channel recovery signature changed'
+  s3 put-object --key "$key" --body "$next" --content-type application/json --cache-control no-cache \
+    --if-match "$etag" >/dev/null || die 'channel recovery JSON CAS failed'
+  read_key "$key" "$tmp/recovery-committed.json" || die 'channel recovery readback absent'
+  read_key "$key.sig" "$tmp/recovery-committed.sig" || die 'channel recovery signature readback absent'
+  if ! cmp -s "$next" "$tmp/recovery-committed.json" || ! cmp -s "$sig" "$tmp/recovery-committed.sig" || \
+     ! verify_cms "$tmp/recovery-committed.json" "$tmp/recovery-committed.sig"; then
+    die 'channel recovery readback mismatch'
+  fi
+  printf 'Recovered signed channel %s at serial %s\n' "$c" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$next")"
+  exit 0
+}
 read_channel() {
   local c="$1" destination="$2"
   if read_key "$(channel_key "$c")" "$destination"; then
     if [[ "$mode" != prune ]]; then
       read_key "$(channel_key "$c").sig" "$destination.sig" || die "signed channel signature absent: $c"
-      [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
-      openssl cms -verify -binary -inform DER -in "$destination.sig" -content "$destination" \
-        -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign \
-        -signer "$tmp/read-signer.pem" -out /dev/null >/dev/null 2>&1 || die "signed channel verification failed: $c"
-      [[ "$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)" == *'CN=CeraLive OTA Manifest Signer'* ]] || die 'signed channel signer identity mismatch'
+      verify_cms "$destination" "$destination.sig" || recover_channel "$c" "$destination"
     fi
     python3 - "$destination" "$board" "$c" <<'PY'
 import json,sys
@@ -212,7 +282,7 @@ PY
 }
 advance_channel() {
   local c="$1" v="$2" from="$3" minimum="$4" raw="$5"
-  local key old_serial=0 etag='' sig_etag='' prior="$tmp/current-$c.json" next="$tmp/next-$c.json"
+  local key old_serial=0 etag='' sig_etag='' prior="$tmp/current-$c.json" next="$tmp/next-$c.json" reuse=0
   key="$(channel_key "$c")"
   if read_channel "$c" "$prior"; then
     if [[ -z "$from" ]] && python3 - "$prior" "$v" <<'PY'
@@ -235,8 +305,19 @@ PY
   fi
   source lib/shared/target-release-lib.sh
   target_release_load
-  write_manifest "$c" "$v" "$from" "$((old_serial + 1))" "$next" "$minimum" "$raw"
-  if (( old_serial > 0 )); then
+  if read_key "$(intent_key "$c" "$etag")" "$tmp/prior-intent.json"; then
+    load_intent "$c" "$tmp/intent-old.json" "$etag" "$next" "$tmp/channel.sig" || die 'channel intent disappeared'
+    if [[ -n "$etag" ]]; then
+      cmp -s "$prior" "$tmp/intent-old.json" || die 'channel recovery prior JSON changed'
+      cmp -s "$prior.sig" "$tmp/intent-old.json.sig" || die 'channel recovery prior signature changed'
+    else
+      [[ ! -s "$tmp/intent-old.json" ]] || die 'channel recovery unexpected prior JSON'
+    fi
+    reuse=1
+  else
+    write_manifest "$c" "$v" "$from" "$((old_serial + 1))" "$next" "$minimum" "$raw"
+  fi
+  if (( old_serial > 0 && reuse == 0 )); then
     python3 - "$next" "$prior" <<'PY'
 import datetime,json,sys
 new,old=(json.load(open(p)) for p in sys.argv[1:])
@@ -251,15 +332,39 @@ PY
   printf 'channel=%s board=%s version=%s serial=%s -> %s\n' "$c" "$board" "$v" "$old_serial" "$((old_serial+1))"
   if [[ "$dry_run" == 1 ]]; then printf 'PLAN channel signature %s.sig then manifest %s LAST\n' "$key" "$key"; return; fi
   signer_check
-  openssl cms -sign -binary -in "$next" -signer "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" \
-    -inkey "$OTA_MANIFEST_SIGNER_DIR/leaf.key" -certfile "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" \
-    -outform DER -out "$tmp/channel.sig" >/dev/null
+  if [[ "$reuse" == 0 ]]; then
+    openssl cms -sign -binary -in "$next" -signer "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" \
+      -inkey "$OTA_MANIFEST_SIGNER_DIR/leaf.key" -certfile "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" \
+      -outform DER -out "$tmp/channel.sig" >/dev/null
+  fi
   openssl cms -verify -binary -inform DER -in "$tmp/channel.sig" -content "$next" \
     -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1 || die 'manifest CMS verification failed'
+  # Persist both authenticated pairs before exposing the new signature. The JSON CAS
+  # is still the commit; a retry can finish it only if the current sig matches this intent.
+  if [[ "$reuse" == 0 ]]; then
+    python3 - "$mode" "$board" "$c" "$v" "$prior" "$next" "$tmp/channel.sig" "$tmp/intent-write.json" <<'PY'
+import base64,json,sys
+mode,board,channel,version,old,nxt,sig,out=sys.argv[1:]
+read=lambda p:base64.b64encode(open(p,'rb').read()).decode('ascii')
+i={'schema':1,'mode':mode,'board':board,'channel':channel,'version':version,
+   'old':read(old) if __import__('os').path.isfile(old) else '',
+   'old_signature':read(old+'.sig') if __import__('os').path.isfile(old+'.sig') else '',
+   'next':read(nxt),'signature':read(sig)}
+with open(out,'w') as f:json.dump(i,f,separators=(',',':'));f.write('\n')
+PY
+    immutable "$(intent_key "$c" "$etag")" "$tmp/intent-write.json" application/json
+  fi
   # The workflow serializes channel writers; an ETag CAS also refuses stale manifests.
   local args=(--key "$key.sig" --body "$tmp/channel.sig" --content-type application/pkcs7-signature)
-  if [[ -n "$sig_etag" ]]; then args+=(--if-match "$sig_etag"); else args+=(--if-none-match '*'); fi
-  s3 put-object "${args[@]}" >/dev/null || die 'channel signature changed during publication'
+  if [[ -n "$sig_etag" ]]; then
+    args+=(--if-match "$sig_etag")
+  elif [[ "$reuse" == 1 ]] && read_key "$key.sig" "$tmp/existing-initial.sig"; then
+    cmp -s "$tmp/existing-initial.sig" "$tmp/channel.sig" || die 'channel recovery foreign signature refused'
+    args=()
+  else
+    args+=(--if-none-match '*')
+  fi
+  if (( ${#args[@]} )); then s3 put-object "${args[@]}" >/dev/null || die 'channel signature changed during publication'; fi
   args=(--key "$key" --body "$next" --content-type application/json --cache-control no-cache)
   if [[ -n "$etag" ]]; then args+=(--if-match "$etag"); else args+=(--if-none-match '*'); fi
   if ! s3 put-object "${args[@]}" >/dev/null; then

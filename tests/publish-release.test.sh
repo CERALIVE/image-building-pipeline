@@ -4,14 +4,15 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 umask 077
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/objects" "$tmp/signer" "$tmp/other"
+mkdir -p "$tmp/bin" "$tmp/objects" "$tmp/signer" "$tmp/other" "$tmp/publisher-tmp"
+export TMPDIR="$tmp/publisher-tmp"
 export STUB_R2="$tmp/objects" STUB_LOG="$tmp/aws.log" R2_IMAGES_BUCKET=ceralive-images
 export R2_IMAGES_ENDPOINT="https://stub.invalid" R2_IMAGES_ACCESS_KEY_ID=stub R2_IMAGES_SECRET_ACCESS_KEY=stub
 export OTA_MANIFEST_SIGNER_DIR="$tmp/signer"
 export RAUC_BUNDLE_KEYRING="$tmp/signer/root-ca.pem"
 cat >"$tmp/bin/aws" <<'PY'
 #!/usr/bin/env python3
-import hashlib,json,os,pathlib,shutil,sys
+import hashlib,json,os,pathlib,shutil,signal,sys
 args=sys.argv[1:]
 assert args.pop(0)=='s3api'
 op=args.pop(0)
@@ -31,6 +32,8 @@ if op=='put-object':
     if os.environ.get('STUB_REPLAY')=='1' and key.startswith('channels/') and key.endswith('.json'):error('PreconditionFailed')
     path.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(flag('--body'),path)
+    if os.environ.get('STUB_KILL_AFTER_SIG')=='1' and key.startswith('channels/') and key.endswith('.json.sig'):
+        os.kill(os.getppid(),signal.SIGKILL)
     print('{}')
 elif op=='get-object':
     if not path.is_file():error('NoSuchKey')
@@ -195,12 +198,48 @@ openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/
 openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
 assert test "$(openssl x509 -in "$tmp/bundle.pem" -noout -subject -nameopt RFC2253)" = 'subject=CN=CeraLive Bundle Signer'
 printf 'PASS: bundle leaf cryptographically valid but identity gate refuses it\n'
-if STUB_REPLAY=1 refresh rock-5b-plus beta 2 >"$tmp/serial-refuse.txt" 2>&1; then
+cp "$channel" "$tmp/pre-interruption.json"
+cp "$channel.sig" "$tmp/pre-interruption.sig"
+if (STUB_KILL_AFTER_SIG=1 refresh rock-5b-plus beta 2 >"$tmp/interrupt.log" 2>&1) 2>/dev/null; then
+  printf 'FAIL: publisher survived injected process kill after signature PUT\n' >&2; exit 1
+fi
+assert cmp "$channel" "$tmp/pre-interruption.json"
+if cmp -s "$channel.sig" "$tmp/pre-interruption.sig"; then
+  printf 'FAIL: injection did not write new signature before killing publisher\n' >&2; exit 1
+fi
+cp "$channel.sig" "$tmp/interrupted.sig"
+printf 'foreign signature\n' >"$channel.sig"
+if refresh rock-5b-plus beta 2 >"$tmp/foreign-recovery.log" 2>&1; then
+  printf 'FAIL: foreign signature repaired as if it were the interrupted write\n' >&2; exit 1
+fi
+assert grep -q 'foreign signature refused' "$tmp/foreign-recovery.log"
+assert cmp "$channel" "$tmp/pre-interruption.json"
+cp "$tmp/interrupted.sig" "$channel.sig"
+cp "$base/index.json" "$tmp/recovery-index.good"
+printf 'index drift\n' >"$base/index.json"
+if refresh rock-5b-plus beta 2 >"$tmp/recovery-drift.log" 2>&1; then
+  printf 'FAIL: recovery accepted drifted immutable index\n' >&2; exit 1
+fi
+assert cmp "$channel" "$tmp/pre-interruption.json"
+cp "$tmp/recovery-index.good" "$base/index.json"
+refresh rock-5b-plus beta 2 >"$tmp/recovered.log"
+openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+assert test "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$channel")" = 3
+printf 'PASS: killed between signature and JSON PUT; authenticated retry repairs pair\n'
+if (STUB_KILL_AFTER_SIG=1 publish 2026.10.8 drill >"$tmp/initial-interrupt.log" 2>&1) 2>/dev/null; then
+  printf 'FAIL: initial publisher survived injected kill\n' >&2; exit 1
+fi
+assert test ! -e "$tmp/objects/channels/drill/rock-5b-plus.json"
+publish 2026.10.8 drill >"$tmp/initial-recovered.log"
+openssl cms -verify -binary -inform DER -in "$tmp/objects/channels/drill/rock-5b-plus.json.sig" \
+  -content "$tmp/objects/channels/drill/rock-5b-plus.json" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+printf 'PASS: initial channel signature-only interruption resumes from authenticated intent\n'
+if STUB_REPLAY=1 refresh rock-5b-plus beta 3 >"$tmp/serial-refuse.txt" 2>&1; then
   printf 'FAIL: stale serial accepted\n' >&2; exit 1
 fi
 assert grep -q 'serial replay refused' "$tmp/serial-refuse.txt"
 printf 'PASS: stale channel ETag refuses serial replay\n'
-if refresh rock-5b-plus beta 1 >"$tmp/stale-precondition.log" 2>&1; then
+if refresh rock-5b-plus beta 2 >"$tmp/stale-precondition.log" 2>&1; then
   printf 'FAIL: stale serial accepted\n' >&2; exit 1
 fi
 assert grep -q 'refresh precondition' "$tmp/stale-precondition.log"
@@ -307,6 +346,47 @@ bash "$repo/ci/publish-release.sh" prune --board rock-5b-plus --channel-family >
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.11.1/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.11.2/index.json"
 printf 'PASS: drill retains one newest marked version\n'
+python3 - "$repo/.github/workflows/publish-release.yml" "$tmp" <<'PY'
+import pathlib,sys,yaml
+w=yaml.safe_load(open(sys.argv[1]))
+steps=w['jobs']['publish']['steps']
+for name,target in (('Validate dispatch and candidate provenance','workflow-validate.sh'),
+                    ('Publish, promote, refresh, or prune','workflow-publish.sh')):
+    step=next(s for s in steps if s.get('name')==name)
+    pathlib.Path(sys.argv[2],target).write_text(step['run']+'\n')
+PY
+cat >"$tmp/bin/bash" <<'SH'
+#!/bin/sh
+if [ "$1" = ci/publish-release.sh ]; then
+  shift
+  printf '%s\n' "$@" >"$STUB_WORKFLOW_ARGV"
+  exit 0
+fi
+exec /bin/bash "$@"
+SH
+chmod 700 "$tmp/bin/bash"
+export MODE=refresh BOARDS=rock-5b-plus CHANNEL=beta VERSION='' CANDIDATE_RUN='' GH_TOKEN=stub
+export RUNNER_TEMP="$tmp" GITHUB_REPOSITORY=CERALIVE/image-building-pipeline STUB_WORKFLOW_ARGV="$tmp/workflow-argv"
+EXPECT_SERIAL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$channel")"
+EXPECT_ETAG="$(python3 -c 'import hashlib,json,sys;print(json.dumps(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest()))' "$channel")"
+export EXPECT_SERIAL EXPECT_ETAG
+workflow_refresh() { /bin/bash "$tmp/workflow-validate.sh" && /bin/bash "$tmp/workflow-publish.sh"; }
+workflow_refresh >"$tmp/workflow-success.log" 2>&1
+python3 - "$tmp/workflow-argv" "$EXPECT_SERIAL" "$EXPECT_ETAG" <<'PY'
+import sys
+assert open(sys.argv[1]).read().splitlines()==['refresh','--board','rock-5b-plus','--channel','beta',
+    '--expect-serial',sys.argv[2],'--expect-etag',sys.argv[3]]
+PY
+rm "$tmp/workflow-argv"
+saved_serial="$EXPECT_SERIAL" saved_etag="$EXPECT_ETAG"
+EXPECT_SERIAL='' workflow_refresh >"$tmp/workflow-missing.log" 2>&1 && { printf 'FAIL: workflow accepted missing serial\n' >&2; exit 1; }
+EXPECT_ETAG='' workflow_refresh >"$tmp/workflow-missing-etag.log" 2>&1 && { printf 'FAIL: workflow accepted missing ETag\n' >&2; exit 1; }
+EXPECT_SERIAL="$((saved_serial-1))" workflow_refresh >"$tmp/workflow-stale-serial.log" 2>&1 && { printf 'FAIL: workflow accepted stale serial\n' >&2; exit 1; }
+EXPECT_ETAG='"00000000000000000000000000000000"' workflow_refresh >"$tmp/workflow-stale-etag.log" 2>&1 && { printf 'FAIL: workflow accepted stale ETag\n' >&2; exit 1; }
+EXPECT_ETAG="${saved_etag//\"/}" workflow_refresh >"$tmp/workflow-unquoted.log" 2>&1 && { printf 'FAIL: workflow accepted unquoted ETag\n' >&2; exit 1; }
+assert test ! -e "$tmp/workflow-argv"
+export EXPECT_SERIAL="$saved_serial" EXPECT_ETAG="$saved_etag"
+printf 'PASS: workflow refresh passes observed serial + quoted ETag and refuses missing/stale values\n'
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"
