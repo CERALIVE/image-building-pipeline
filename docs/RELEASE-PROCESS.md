@@ -709,8 +709,9 @@ bash ci/publish-release.sh refresh --board orange-pi-5-plus --channel drill \
 
 The command itself re-reads and verifies the immutable 2026.10.6 index,
 bundle parts, whole digest and RAUC signature/compatible under the bench root.
-It changes **only** `channels/drill/orange-pi-5-plus.json{,.sig}`; the existing
-release prefix, Rock pointer and stable/beta pointers are untouched. If the
+It updates `channels/drill/orange-pi-5-plus.json{,.sig}` and creates an immutable
+`channels/drill/orange-pi-5-plus.json.recovery/` intent. The existing release
+prefix, Rock pointer and stable/beta pointers are untouched. If the
 live serial, ETag, bundle digest or signer differs, **stop**, never force a
 same-version overwrite. Afterwards fetch both new objects over the public
 `https://images.ceralive.tv/channels/drill/orange-pi-5-plus.json{,.sig}` origin
@@ -723,10 +724,15 @@ whole-file SHA-256 to the signed pointer. A CMS-valid but false compatible is
 not a successful repair.
 
 `prune --board <b> --channel-family` inventories all release keys, protects every
-version referenced by **any** of the three current channel manifests, keeps the
-three newest marked stable/beta versions across those two channels combined and
+version referenced by **any** of the three current CMS-verified channel pairs,
+keeps the three newest marked stable/beta versions across those two channels combined and
 one newest drill version, and deletes only eligible keys under that board's
 `releases/` prefix. A version with **no channel marker** is never pruned.
+The workflow supplies the existing manifest-signer root to prune as well as
+publish/refresh. Before planning or deleting any release key, prune requires
+every present channel JSON to have a valid `.json.sig` under that root (including
+the dedicated signer identity); a missing or mismatched signature refuses the
+whole operation. An absent channel remains absent, not a fabricated reference.
 `--dry-run` performs the real inventory/read and prints exact planned keys with
 no R2 mutations; use it before pruning. `--selftest` publishes a unique synthetic
 600 MiB logical file in three parts, compares an HTTP Range crossing the first

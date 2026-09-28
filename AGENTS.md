@@ -169,8 +169,11 @@ uses an ETag compare-and-swap and is the commit point. The `release` environment
 has a required owner reviewer, and the non-cancelling workflow concurrency group
 serializes writers (including refresh and prune). Markers make membership explicit:
 prune retains the newest three stable/beta versions combined, newest one drill
-version and every version referenced by any channel; unmarked versions are never
-pruned. See `docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
+version and every version referenced by any channel; it verifies every present
+channel's CMS signature with the same manifest root before deriving references
+or deleting anything, and refuses on an absent or invalid signature. The workflow
+provides that root for prune too. Unmarked versions are never pruned. See
+`docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
 available for old consumers; this workflow does not replace it.
 
 **First-party pin currency is a separate CI gate from artifact integrity** [EXISTS].
