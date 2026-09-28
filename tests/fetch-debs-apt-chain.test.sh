@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Positional arguments expand in the child bash -c.
 
 set -euo pipefail
 
@@ -19,7 +20,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${FAKE_BIN}" "${FAKE_CURL_BIN}" "${ARTIFACT_DIR}"
+# The real fetcher writes its override receipt under DEST even without overrides.
+# Keep that output in this run's private tree rather than depending on repo/out.
+FETCH_OUT="${RUN_DIR}/out"
+mkdir -p "${FAKE_BIN}" "${FAKE_CURL_BIN}" "${ARTIFACT_DIR}" "${FETCH_OUT}"
 
 cat >"${FAKE_BIN}/apt-get" <<'SH'
 #!/usr/bin/env bash
@@ -175,6 +179,7 @@ run_fetch_first_party() {
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_BIN}:${PATH}" \
+		DEST="${FETCH_OUT}" \
 		FAKE_APT_LOG="${FAKE_APT_LOG}" \
 		FAKE_CHMOD_LOG="${FAKE_CHMOD_LOG}" \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
@@ -238,6 +243,7 @@ run_fetch_first_party_curl() {
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_CURL_BIN}:${PATH}" \
+		DEST="${FETCH_OUT}" \
 		FAKE_REPO_DIR="${repo}" \
 		FAKE_CHMOD_LOG="${FAKE_CHMOD_LOG}" \
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
