@@ -38,11 +38,15 @@ umask 077
 mkdir -p -- "$out"
 out="$(realpath -- "$out")"
 tmp="$(mktemp -d -p "$out" .flash-download.XXXXXXXX)"
+flash_tmp=''
 cleanup() {
+  [[ -z "$flash_tmp" ]] || rm -f -- "$flash_tmp"
   rm -rf -- "$tmp"
 }
 workers=()
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 get() {
   local url="$1" dest="$2" expected="$3" status
@@ -88,6 +92,11 @@ mkdir -p -- "$release"
 release="$release/$version"
 [[ ! -L "$release" ]] || die 'version output is a symlink'
 mkdir -p -- "$release"
+flash="$release/flash.raw.xz"
+[[ ! -L "$flash" && ( ! -e "$flash" || -f "$flash" ) && ! -L "$flash.partial" && ( ! -e "$flash.partial" || -f "$flash.partial" ) ]] || die 'unsafe assembled path'
+# An earlier invocation may have left either name behind. Never expose its bytes
+# while fetching or verifying parts, even if this invocation fails before assembly.
+rm -f -- "$flash" "$flash.partial"
 prefix="$base/releases/$board/$version"
 get "$prefix/index.json" "$tmp/index.json" 200 || die 'release index fetch failed'
 get "$prefix/SHA256SUMS" "$tmp/SHA256SUMS" 200 || die 'release checksums fetch failed'
@@ -187,8 +196,6 @@ for pid in "${workers[@]}"; do wait "$pid" || failed=1; done
 workers=()
 (( failed == 0 )) || die 'part download failed'
 
-flash="$release/flash.raw.xz"
-[[ ! -L "$flash" && ( ! -e "$flash" || -f "$flash" ) ]] || die 'unsafe assembled path'
 flash_size="$(python3 - "$tmp/channel.json" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))['flash']['size'])
@@ -199,14 +206,11 @@ import json,sys
 print(json.load(open(sys.argv[1]))['flash']['sha256'])
 PY
 )"
-if ! sha_ok "$flash" "$flash_size" "$flash_sha"; then
-  [[ ! -L "$flash.partial" && ( ! -e "$flash.partial" || -f "$flash.partial" ) ]] || die 'unsafe assembly path'
-  rm -f -- "$flash"
-  : >"$flash.partial"
-  while IFS=$'\t' read -r name size digest; do cat -- "$release/$name" >>"$flash.partial"; done <"$tmp/parts.tsv"
-  sha_ok "$flash.partial" "$flash_size" "$flash_sha" || die 'full flash SHA-256 mismatch'
-  mv -- "$flash.partial" "$flash"
-fi
+flash_tmp="$(mktemp -p "$release" .flash.raw.xz.XXXXXXXX)"
+while IFS=$'\t' read -r name size digest; do cat -- "$release/$name" >>"$flash_tmp"; done <"$tmp/parts.tsv"
+sha_ok "$flash_tmp" "$flash_size" "$flash_sha" || die 'full flash SHA-256 mismatch'
+mv -- "$flash_tmp" "$flash"
+flash_tmp=''
 printf 'verified compressed flash: %s\n' "$flash"
 if (( decompress )); then
   raw="$release/flash.raw"

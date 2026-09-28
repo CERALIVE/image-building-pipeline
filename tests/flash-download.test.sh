@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+downloader="${FLASH_DOWNLOAD_SCRIPT:-$repo/tools/flash-download.sh}"
 tmp="$(mktemp -d -p "${TMPDIR:-/tmp}" flash-download.XXXXXXXX)"
 server=''
 cleanup() { [[ -z "$server" ]] || { kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; }; rm -rf -- "$tmp"; }
@@ -68,7 +69,7 @@ class Handler(BaseHTTPRequestHandler):
             peak = max(active, int((root/'max-active').read_text() or '0'))
             (root/'max-active').write_text(str(peak))
         try:
-            if path.name.endswith('part0001') and (root/'fail').exists():
+            if (path.name.endswith('part0001') and (root/'fail').exists()) or (path.name.endswith('part0000') and (root/'fail-first').exists()):
                 time.sleep(1)
                 self.send_error(503); return
             if not path.is_file(): self.send_error(404); return
@@ -81,8 +82,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(length))
             if start: self.send_header('Content-Range', f'bytes {start}-{path.stat().st_size-1}/{path.stat().st_size}')
             self.end_headers()
-            if path.name.endswith('part0001') and (root/'corrupt').exists():
-                (root/'corrupt').unlink()
+            if path.name.endswith('part0001') and ((root/'corrupt').exists() or (root/'corrupt-always').exists()):
+                (root/'corrupt').unlink(missing_ok=True)
                 self.wfile.write(b'X'*length)
                 return
             if path.name.endswith('part0001'): time.sleep(0.2)
@@ -108,7 +109,7 @@ p=pathlib.Path(sys.argv[1]);p.write_text(p.read_text().replace('BASE',sys.argv[2
 PY
 sign() { openssl cms -sign -binary -in "$channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" -outform DER -out "$channel.sig" >/dev/null; }
 sign
-run() { bash "$repo/tools/flash-download.sh" --board rock-5b-plus --out "$tmp/out" --jobs 2 --keyring "$tmp/root.pem"; }
+run() { bash "$downloader" --board rock-5b-plus --out "$tmp/out" --jobs 2 --keyring "$tmp/root.pem"; }
 printf '1' >"$tmp/site/fail"
 if run >"$tmp/first.log" 2>&1; then printf 'FAIL: interrupted fetch accepted\n' >&2; exit 1; fi
 part0="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0000"
@@ -133,6 +134,29 @@ PY
 [[ "$(sha256sum "$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz" | cut -d' ' -f1)" == "$(sha256sum "$release/flash.raw.xz" | cut -d' ' -f1)" ]] || exit 1
 printf 'PASS: parallel fetch, interrupted-run reuse, corrupted part re-fetched\n'
 
+final="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz"
+part1="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0001"
+failure=0
+printf 'corrupt assembled file\n' >"$final"
+rm -- "$part1"
+touch "$tmp/site/corrupt-always"
+if run >"$tmp/corrupt-part.log" 2>&1; then printf 'FAIL: corrupt part accepted\n' >&2; exit 1; fi
+[[ ! -e "$final" ]] || { printf 'FAIL: corrupt part left final image\n' >&2; failure=1; }
+grep -q 'part download failed' "$tmp/corrupt-part.log"
+rm -- "$tmp/site/corrupt-always"
+
+printf 'corrupt assembled file\n' >"$final"
+printf 'corrupt cached part\n' >"$part0"
+touch "$tmp/site/fail-first"
+if run >"$tmp/unavailable.log" 2>&1; then printf 'FAIL: unavailable part accepted\n' >&2; exit 1; fi
+[[ ! -e "$final" ]] || { printf 'FAIL: unavailable part left final image\n' >&2; failure=1; }
+grep -q 'part download failed' "$tmp/unavailable.log"
+rm -- "$tmp/site/fail-first"
+(( failure == 0 )) || exit 1
+run >"$tmp/recovered.log" 2>&1
+cmp -- "$release/flash.raw.xz" "$final"
+printf 'PASS: corrupt part and unavailable origin remove stale final; recovery verifies exact image\n'
+
 mkdir -p "$tmp/badout"
 python3 - "$release/index.json" "$release/SHA256SUMS" "$channel" <<'PY'
 import hashlib,json,pathlib,sys
@@ -146,17 +170,18 @@ lines=s.read_text().splitlines()
 s.write_text('\n'.join((hashlib.sha256(i.read_bytes()).hexdigest()+'  index.json') if l.endswith('  index.json') else (wrong+'  flash.raw.xz') if l.endswith('  flash.raw.xz') else l for l in lines)+'\n')
 PY
 sign
-if bash "$repo/tools/flash-download.sh" --board rock-5b-plus --out "$tmp/badout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mismatch.log" 2>&1; then
+if bash "$downloader" --board rock-5b-plus --out "$tmp/badout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mismatch.log" 2>&1; then
   printf 'FAIL: full-hash mismatch accepted\n' >&2; exit 1
 fi
 grep -q 'full flash SHA-256 mismatch' "$tmp/mismatch.log"
-[[ ! -f "$tmp/badout/rock-5b-plus/2026.10.1/flash.raw.xz" ]] || exit 1
+[[ ! -e "$tmp/badout/rock-5b-plus/2026.10.1/flash.raw.xz" ]] || exit 1
+[[ -z "$(compgen -G "$tmp/badout/rock-5b-plus/2026.10.1/.flash.raw.xz.*")" ]] || exit 1
 printf 'PASS: final full-hash mismatch refused (valid per-part hashes)\n'
 
-python3 - "$repo/tools/flash-download.sh" "$tmp/no-full-check.sh" <<'PY'
+python3 - "$downloader" "$tmp/no-full-check.sh" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]).read_text()
-old='sha_ok "$flash.partial" "$flash_size" "$flash_sha" || die \'full flash SHA-256 mismatch\''
+old='sha_ok "$flash_tmp" "$flash_size" "$flash_sha" || die \'full flash SHA-256 mismatch\''
 assert p.count(old)==1
 pathlib.Path(sys.argv[2]).write_text(p.replace(old, ':'))
 PY
@@ -169,7 +194,7 @@ import hashlib,json,pathlib,sys
 p,s=map(pathlib.Path,sys.argv[1:]);i=json.loads(p.read_text());i['files']['flash.raw.xz']['parts'][1]['name']='../../outside';p.write_text(json.dumps(i))
 s.write_text('\n'.join((hashlib.sha256(p.read_bytes()).hexdigest()+'  index.json') if l.endswith('  index.json') else l for l in s.read_text().splitlines())+'\n')
 PY
-if bash "$repo/tools/flash-download.sh" --board rock-5b-plus --out "$tmp/badout" --keyring "$tmp/root.pem" >"$tmp/traversal.log" 2>&1; then
+if bash "$downloader" --board rock-5b-plus --out "$tmp/badout" --keyring "$tmp/root.pem" >"$tmp/traversal.log" 2>&1; then
   printf 'FAIL: traversal accepted\n' >&2; exit 1
 fi
 grep -q 'invalid release metadata' "$tmp/traversal.log"
@@ -197,7 +222,7 @@ root=pathlib.Path(sys.argv[1]);h=lambda p: hashlib.sha256(p.read_bytes()).hexdig
 PY
 sign
 mkdir -p "$tmp/rawout"
-bash "$repo/tools/flash-download.sh" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/raw.log" 2>&1
+bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/raw.log" 2>&1
 cmp "$tmp/raw-source" "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
 printf 'PASS: optional xz extraction verifies raw SHA-256\n'
 python3 - "$channel" <<'PY'
@@ -206,7 +231,7 @@ p=pathlib.Path(sys.argv[1]);m=json.loads(p.read_text());m['flash']['raw_sha256']
 PY
 sign
 mkdir -p "$tmp/wrongraw"
-if bash "$repo/tools/flash-download.sh" --board rock-5b-plus --out "$tmp/wrongraw" --keyring "$tmp/root.pem" --decompress >"$tmp/wrongraw.log" 2>&1; then
+if bash "$downloader" --board rock-5b-plus --out "$tmp/wrongraw" --keyring "$tmp/root.pem" --decompress >"$tmp/wrongraw.log" 2>&1; then
   printf 'FAIL: wrong raw checksum accepted\n' >&2; exit 1
 fi
 grep -q 'raw SHA-256 mismatch' "$tmp/wrongraw.log"
