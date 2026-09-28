@@ -85,7 +85,6 @@ jobs:
             echo 'refresh preconditions apply only to refresh' >&2; exit 2
           fi
       - name: Materialize dedicated signer
-        if: ${{ inputs.mode != 'prune' }}
         env:
           OTA_MANIFEST_SIGNER_TAR_B64: ${{ secrets.OTA_MANIFEST_SIGNER_TAR_B64 }}
         run: |
