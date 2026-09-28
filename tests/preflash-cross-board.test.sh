@@ -73,6 +73,7 @@ make_candidate() {
   rauc bundle --cert="${PIPELINE_DIR}/.dev-keys/leaf-signing.pem" \
     --key="${PIPELINE_DIR}/.dev-keys/leaf-signing.key" \
     --intermediate="${PIPELINE_DIR}/.dev-keys/chain.pem" \
+    --mksquashfs-args="-noD -noF" \
     "${dir}/bundle" "${dir}/candidate.raucb" >/dev/null
 
   printf 'rk3588-loader-%s\n' "${name}" >"${dir}/loader.bin"

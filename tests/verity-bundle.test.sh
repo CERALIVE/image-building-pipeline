@@ -25,7 +25,8 @@ adaptive=block-hash-index
 MANIFEST
 keys="${repo}/.dev-keys"
 rauc bundle --cert="${keys}/leaf-signing.pem" --key="${keys}/leaf-signing.key" \
-  --intermediate="${keys}/chain.pem" "${work}/bundle" "${work}/fixture.raucb" >/dev/null
+  --intermediate="${keys}/chain.pem" --mksquashfs-args="-noD -noF" \
+  "${work}/bundle" "${work}/fixture.raucb" >/dev/null
 rauc info --keyring="${keys}/root-ca.pem" "${work}/fixture.raucb" >"${work}/info"
 grep -iq 'Bundle Format:.*verity' "${work}/info"
 grep -iq 'adaptive.*block-hash-index' "${work}/info"
@@ -34,5 +35,8 @@ printf 'FIXTURE=PASS verity adaptive block-hash-index signature verified\n'
 grep -q 'make_slot_image' "${repo}/lib/build-bundle.sh"
 grep -q 'format=verity' "${repo}/lib/build-bundle.sh"
 grep -q 'adaptive=block-hash-index' "${repo}/lib/build-bundle.sh"
-! grep -q 'bundle_with_openssl' "${repo}/lib/build-bundle.sh"
+if grep -q 'bundle_with_openssl' "${repo}/lib/build-bundle.sh"; then
+  printf 'FAIL: retired OpenSSL bundle producer is still present\n' >&2
+  exit 1
+fi
 printf 'PRODUCER=PASS shared full-size ext4 verity producer\n'
