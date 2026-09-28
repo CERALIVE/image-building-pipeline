@@ -357,8 +357,10 @@ codeSigning-only CMS signature and channel manifest (JSON last). `publish`,
 `promote`, `refresh`, `prune`, `--dry-run` and the 600 MiB `--selftest` are
 separate modes. Current zstd candidates are decoded and re-encoded as xz;
 earlier xz candidates are copied as-is. Both verify the original raw checksum. See the
-runbook for the retention and approval boundaries; existence of this publisher
-does not certify any candidate or authorize a stable/beta release.
+runbook for the retention, RAUC-compatible identity (Orange's board ID differs
+from its product slug), verified bundle/index, and pointer-only refresh gates;
+existence of this publisher does not certify any candidate or authorize a
+stable/beta release.
 
 For a new board with no installed OS, download the sealed `.raw.xz` candidate.
 `ci/verify-and-flash-candidate.sh` verifies its adjacent `.raw.xz.sha256`,

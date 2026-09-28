@@ -141,7 +141,21 @@ primitive shared with the legacy RAUC pair publisher: release parts, index, lock
 checksum list and per-channel membership markers are create-only and exact-byte
 recoverable. A single `index.json` carries `bundle.raucb` and `flash.raw.xz`;
 the latter is genuine xz, not the candidate's zstd transport renamed. Channel
-manifests carry the strict CeraUI v1 fields and the pinned CeraUI minimum; the
+manifests carry the strict CeraUI v1 fields and the pinned CeraUI minimum. The
+product manifest stem remains the signed `board`/URL key, while `compatible`
+is `ceralive-<resolved BOARD_ID>` (Orange: `ceralive-orangepi5-plus`, NOT
+`ceralive-orange-pi-5-plus`; Rock coincides). Before signing any publish,
+promote or refresh pointer, the publisher verifies a real RAUC signature under
+an explicitly provided bundle root, matches its compatible exactly, and
+reconstructs the immutable indexed bundle and flash from R2 parts to check
+sizes and SHA-256. Existing channel JSON must have a valid dedicated CMS
+signature; refresh accepts only the historical product-stem compatible as a
+repairable previous claim, with exact board/version/URLs/digests still required.
+Refresh needs the observed serial and quoted ETag as explicit preconditions;
+an old signed Orange pointer can be corrected without changing any release key.
+The workflow selects a bench root only for `drill` and the production release
+root for stable/beta (including promotion); no implicit trust root is allowed.
+This is code/test coverage, not a claim that serial 4 was refreshed live. The
 dedicated `cert-work/rauc/ota-manifest-signer` leaf has codeSigning alone, unlike
 the dual-EKU bundle leaf. Signatures upload before the channel JSON; the JSON
 uses an ETag compare-and-swap and is the commit point. The `release` environment
