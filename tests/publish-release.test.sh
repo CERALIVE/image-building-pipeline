@@ -8,6 +8,7 @@ mkdir -p "$tmp/bin" "$tmp/objects" "$tmp/signer" "$tmp/other"
 export STUB_R2="$tmp/objects" STUB_LOG="$tmp/aws.log" R2_IMAGES_BUCKET=ceralive-images
 export R2_IMAGES_ENDPOINT="https://stub.invalid" R2_IMAGES_ACCESS_KEY_ID=stub R2_IMAGES_SECRET_ACCESS_KEY=stub
 export OTA_MANIFEST_SIGNER_DIR="$tmp/signer"
+export RAUC_BUNDLE_KEYRING="$tmp/signer/root-ca.pem"
 cat >"$tmp/bin/aws" <<'PY'
 #!/usr/bin/env python3
 import hashlib,json,os,pathlib,shutil,sys
@@ -71,13 +72,30 @@ done
 cp "$tmp/manifest.key" "$tmp/signer/leaf.key"
 cp "$tmp/manifest.pem" "$tmp/signer/leaf.pem"
 printf '{"schema":1}\n' >"$tmp/lock.json"
-printf 'bundle-content\n' >"$tmp/bundle.raucb"
+mkdir -p "$tmp/rootfs/etc" "$tmp/rauc-input"
+printf 'publisher fixture\n' >"$tmp/rootfs/etc/hostname"
+dd if=/dev/urandom of="$tmp/rootfs/etc/fixture" bs=16K count=1 status=none
+truncate -s 16M "$tmp/rauc-input/rootfs.ext4"
+mkfs.ext4 -q -F -d "$tmp/rootfs" "$tmp/rauc-input/rootfs.ext4"
+make_bundle() {
+  local compatible="$1" output="$2"
+  printf '[update]\ncompatible=%s\nversion=1\n\n[bundle]\nformat=verity\n\n[image.rootfs]\nfilename=rootfs.ext4\n' "$compatible" >"$tmp/rauc-input/manifest.raucm"
+  rauc bundle --cert="$tmp/bundle.pem" --key="$tmp/bundle.key" --intermediate="$tmp/signer/intermediate-ca.pem" \
+    "$tmp/rauc-input" "$output" >/dev/null
+}
+make_bundle ceralive-rock-5b-plus "$tmp/bundle.raucb"
 printf 'flash-content\n' >"$tmp/flash.raw"
 xz -c "$tmp/flash.raw" >"$tmp/flash.raw.xz"
 ( cd "$tmp" && sha256sum flash.raw > raw.sha256 )
 publish() {
   local v="$1" c="$2"
   bash "$repo/ci/publish-release.sh" publish --board rock-5b-plus --version "$v" --channel "$c" --bundle "$tmp/bundle.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json"
+}
+refresh() {
+  local b="$1" c="$2" serial="$3" file etag
+  file="$tmp/objects/channels/$c/$b.json"
+  etag="\"$(openssl dgst -md5 "$file" | cut -d' ' -f2)\""
+  bash "$repo/ci/publish-release.sh" refresh --board "$b" --channel "$c" --expect-serial "$serial" --expect-etag "$etag"
 }
 assert() { "$@" || { printf 'FAIL: %s\n' "$*" >&2; exit 1; }; }
 publish 2026.10.1 beta
@@ -112,15 +130,40 @@ if ! grep -q 'serial replay refused' "$tmp/collision.log"; then
   exit 1
 fi
 printf 'PASS: create-only collision refused\n'
+cp "$tmp/bundle.raucb" "$tmp/original.raucb"
 printf 'changed-bundle\n' >"$tmp/bundle.raucb"
 if publish 2026.10.1 drill >"$tmp/content-collision.log" 2>&1; then
   printf 'FAIL: changed immutable part accepted\n' >&2; exit 1
 fi
-assert grep -q 'immutable R2 key exists with different bytes' "$tmp/content-collision.log"
+assert grep -q 'signed bundle verification failed' "$tmp/content-collision.log"
 assert test ! -e "$tmp/objects/channels/drill/rock-5b-plus.json"
-printf 'bundle-content\n' >"$tmp/bundle.raucb"
+cp "$tmp/original.raucb" "$tmp/bundle.raucb"
+printf 'second signed candidate\n' >"$tmp/rootfs/etc/hostname"
+mkfs.ext4 -q -F -d "$tmp/rootfs" "$tmp/rauc-input/rootfs.ext4"
+make_bundle ceralive-rock-5b-plus "$tmp/changed-valid.raucb"
+if bash "$repo/ci/publish-release.sh" publish --board rock-5b-plus --version 2026.10.1 --channel drill \
+    --bundle "$tmp/changed-valid.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/immutable-collision.log" 2>&1; then
+  printf 'FAIL: valid changed bundle replaced immutable release\n' >&2; exit 1
+fi
+assert grep -q 'immutable R2 key exists with different bytes' "$tmp/immutable-collision.log"
 printf 'PASS: changed immutable part refused before channel mutation\n'
 before="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
+beta="$tmp/objects/channels/beta/rock-5b-plus.json"
+cp "$beta" "$tmp/beta-valid.json"; cp "$beta.sig" "$tmp/beta-valid.sig"
+python3 - "$beta" <<'PY'
+import json,sys
+p=sys.argv[1];m=json.load(open(p));m['compatible']='ceralive-orange-pi-5-plus'
+with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
+PY
+openssl cms -sign -binary -in "$beta" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
+  -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$beta.sig" >/dev/null
+if bash "$repo/ci/publish-release.sh" promote --board rock-5b-plus --version 2026.10.1 --to stable >"$tmp/promote-mismatch.log" 2>&1; then
+  printf 'FAIL: promote accepted signed mismatched compatible\n' >&2; exit 1
+fi
+assert grep -q 'channel compatible mismatch' "$tmp/promote-mismatch.log"
+assert test ! -e "$base/channels/stable"
+cp "$tmp/beta-valid.json" "$beta"; cp "$tmp/beta-valid.sig" "$beta.sig"
+printf 'PASS: promotion refuses a signed incompatible beta pointer before membership write\n'
 bash "$repo/ci/publish-release.sh" promote --board rock-5b-plus --version 2026.10.1 --to stable
 after="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 [[ "$before" == "$after" ]] || { printf 'FAIL: promote uploaded parts\n' >&2; exit 1; }
@@ -132,7 +175,7 @@ PY
 printf 'PASS: promote reused existing parts\n'
 before="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 cp "$channel" "$tmp/beta-before.json"
-bash "$repo/ci/publish-release.sh" refresh --board rock-5b-plus --channel beta
+refresh rock-5b-plus beta 1
 after="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 [[ "$before" == "$after" ]] || { printf 'FAIL: refresh uploaded parts\n' >&2; exit 1; }
 python3 - "$channel" "$tmp/objects/channels/stable/rock-5b-plus.json" "$tmp/beta-before.json" <<'PY'
@@ -143,7 +186,7 @@ assert b['published_at']>old['published_at'] and b['expires_at']>old['expires_at
 PY
 printf 'PASS: refresh preserved artifacts, advanced serial and expiry, no parts\n'
 cp "$tmp/bundle.pem" "$tmp/signer/leaf.pem";cp "$tmp/bundle.key" "$tmp/signer/leaf.key"
-if bash "$repo/ci/publish-release.sh" refresh --board rock-5b-plus --channel beta >"$tmp/wrong-signer.log" 2>&1; then
+if refresh rock-5b-plus beta 2 >"$tmp/wrong-signer.log" 2>&1; then
   printf 'FAIL: bundle leaf signed a manifest\n' >&2; exit 1
 fi
 assert grep -q 'wrong manifest signer CN' "$tmp/wrong-signer.log"
@@ -152,11 +195,97 @@ openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/
 openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
 assert test "$(openssl x509 -in "$tmp/bundle.pem" -noout -subject -nameopt RFC2253)" = 'subject=CN=CeraLive Bundle Signer'
 printf 'PASS: bundle leaf cryptographically valid but identity gate refuses it\n'
-if STUB_REPLAY=1 bash "$repo/ci/publish-release.sh" refresh --board rock-5b-plus --channel beta >"$tmp/serial-refuse.txt" 2>&1; then
+if STUB_REPLAY=1 refresh rock-5b-plus beta 2 >"$tmp/serial-refuse.txt" 2>&1; then
   printf 'FAIL: stale serial accepted\n' >&2; exit 1
 fi
 assert grep -q 'serial replay refused' "$tmp/serial-refuse.txt"
 printf 'PASS: stale channel ETag refuses serial replay\n'
+if refresh rock-5b-plus beta 1 >"$tmp/stale-precondition.log" 2>&1; then
+  printf 'FAIL: stale serial accepted\n' >&2; exit 1
+fi
+assert grep -q 'refresh precondition' "$tmp/stale-precondition.log"
+
+make_bundle ceralive-orangepi5-plus "$tmp/opi.raucb"
+make_bundle ceralive-orangepi5-plus-extra "$tmp/near.raucb"
+for pair in "rock-5b-plus:$tmp/opi.raucb" "orange-pi-5-plus:$tmp/bundle.raucb" "orange-pi-5-plus:$tmp/near.raucb"; do
+  b="${pair%%:*}" candidate="${pair#*:}"
+  if bash "$repo/ci/publish-release.sh" publish --board "$b" --version 2026.12.1 --channel drill \
+      --bundle "$candidate" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/mismatch.log" 2>&1; then
+    printf 'FAIL: cross-board/near-spelling bundle accepted: %s\n' "$pair" >&2; exit 1
+  fi
+  assert grep -q 'signed bundle compatible mismatch' "$tmp/mismatch.log"
+done
+assert test ! -e "$tmp/objects/releases/orange-pi-5-plus/2026.12.1/index.json"
+printf 'PASS: cross-board and near-spelling signed bundles refused before immutable writes\n'
+
+bash "$repo/ci/publish-release.sh" publish --board orange-pi-5-plus --version 2026.12.1 --channel drill \
+  --bundle "$tmp/opi.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >/dev/null
+opi="$tmp/objects/channels/drill/orange-pi-5-plus.json"
+python3 - "$opi" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]));assert m['compatible']=='ceralive-orangepi5-plus' and m['board']=='orange-pi-5-plus' and m['serial']==1
+PY
+opi_base="$tmp/objects/releases/orange-pi-5-plus/2026.12.1"
+opi_index_before="$(sha256sum "$opi_base/index.json")"
+opi_parts_before="$(sha256sum "$opi_base"/*.part*)"
+cp "$opi" "$tmp/opi-original.json"
+python3 - "$opi" <<'PY'
+import json,sys
+p=sys.argv[1];m=json.load(open(p));m['compatible']='ceralive-orange-pi-5-plus';m['serial']=4
+with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
+PY
+openssl cms -sign -binary -in "$opi" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
+  -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$opi.sig" >/dev/null
+before="$(grep -c '^put-object releases/orange-pi-5-plus/' "$tmp/aws.log")"
+refresh orange-pi-5-plus drill 4 >/dev/null
+after="$(grep -c '^put-object releases/orange-pi-5-plus/' "$tmp/aws.log")"
+[[ "$before" == "$after" && "$opi_index_before" == "$(sha256sum "$opi_base/index.json")" && "$opi_parts_before" == "$(sha256sum "$opi_base"/*.part*)" ]] || { printf 'FAIL: refresh rewrote release\n' >&2; exit 1; }
+python3 - "$opi" "$tmp/opi-original.json" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]));old=json.load(open(sys.argv[2]))
+assert m['compatible']=='ceralive-orangepi5-plus' and m['board']=='orange-pi-5-plus' and m['serial']==5
+assert m['bundle']['url']=='https://images.ceralive.tv/releases/orange-pi-5-plus/2026.12.1/bundle.raucb'
+assert m['version']==old['version'] and m['bundle']==old['bundle'] and m['flash']==old['flash'] and m['lock_url']==old['lock_url']
+PY
+openssl cms -verify -binary -inform DER -in "$opi.sig" -content "$opi" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+printf 'PASS: legacy signed Orange pointer refresh corrects compatible at serial 5 without release writes\n'
+
+cp "$opi" "$tmp/opi.good.json"; cp "$opi.sig" "$tmp/opi.good.sig"
+python3 - "$opi" <<'PY'
+import json,sys
+p=sys.argv[1];m=json.load(open(p));m['bundle']['url']=m['bundle']['url'].replace('orange-pi-5-plus','rock-5b-plus')
+with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
+PY
+openssl cms -sign -binary -in "$opi" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
+  -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$opi.sig" >/dev/null
+if refresh orange-pi-5-plus drill 5 >"$tmp/wrong-url.log" 2>&1; then printf 'FAIL: signed cross-board URL accepted\n' >&2; exit 1; fi
+assert grep -q 'channel bundle/index mismatch' "$tmp/wrong-url.log"
+cp "$tmp/opi.good.json" "$opi";cp "$tmp/opi.good.sig" "$opi.sig"
+part="$opi_base/bundle.raucb.part0000";cp "$part" "$tmp/part.good"
+printf wrong >>"$part"
+if refresh orange-pi-5-plus drill 5 >"$tmp/drift.log" 2>&1; then printf 'FAIL: drifted release part accepted\n' >&2; exit 1; fi
+assert grep -q 'release part drift' "$tmp/drift.log"
+cp "$tmp/part.good" "$part"
+cp "$opi_base/index.json" "$tmp/index.good"
+python3 - "$opi_base/index.json" <<'PY'
+import json,sys
+p=sys.argv[1];i=json.load(open(p));i['files']['bundle.raucb']['sha256']='0'*64
+with open(p,'w') as f:json.dump(i,f)
+PY
+if refresh orange-pi-5-plus drill 5 >"$tmp/index-drift.log" 2>&1; then printf 'FAIL: drifted index accepted\n' >&2; exit 1; fi
+assert grep -q 'bundle.raucb digest differs from index' "$tmp/index-drift.log"
+cp "$tmp/index.good" "$opi_base/index.json"
+python3 - "$opi.sig" <<'PY'
+import sys
+p=sys.argv[1]
+with open(p,'rb') as f:content=bytearray(f.read())
+content[-1]^=1
+with open(p,'wb') as f:f.write(content)
+PY
+if refresh orange-pi-5-plus drill 5 >"$tmp/bad-signature.log" 2>&1; then printf 'FAIL: unsigned old pointer accepted\n' >&2; exit 1; fi
+assert grep -q 'signed channel verification failed' "$tmp/bad-signature.log"
+cp "$tmp/opi.good.sig" "$opi.sig"
+printf 'PASS: signed wrong URL and immutable part drift both refuse refresh\n'
 for v in 2026.10.2 2026.10.3 2026.10.4 2026.10.5; do publish "$v" beta >/dev/null; done
 mkdir -p "$tmp/objects/releases/rock-5b-plus/2026.9.9"
 printf orphan >"$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"

@@ -5,21 +5,22 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
   printf '%s\n' 'publish-release.sh publish --board B --version YYYY.M.P --channel stable|beta|drill --bundle FILE --flash FILE --raw-sha256 FILE --lock FILE [--dry-run]' \
     'publish-release.sh promote --board B --version YYYY.M.P --to stable [--dry-run]' \
-    'publish-release.sh refresh --board B --channel stable|beta|drill [--dry-run]' \
+    'publish-release.sh refresh --board B --channel stable|beta|drill --expect-serial N --expect-etag "\"MD5\"" [--dry-run]' \
     'publish-release.sh prune --board B --channel-family [--dry-run]' \
     'publish-release.sh --selftest [--dry-run]'
 }
 
 mode="${1:-}"; [[ -n "$mode" ]] || { usage; exit 2; }; shift
-board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0
+board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0 expect_serial='' expect_etag=''
 while (($#)); do
   case "$1" in
-    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock)
+    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock|--expect-serial|--expect-etag)
       (($# >= 2)) || die "missing value for $1"
       case "$1" in
         --board) board="$2" ;; --version) version="$2" ;; --channel) channel="$2" ;;
         --to) to="$2" ;; --bundle) bundle="$2" ;; --flash) flash="$2" ;;
         --raw-sha256) raw_sha256="$2" ;; --lock) lock="$2" ;;
+        --expect-serial) expect_serial="$2" ;; --expect-etag) expect_etag="$2" ;;
       esac
       shift 2 ;;
     --dry-run) dry_run=1; shift ;;
@@ -35,6 +36,8 @@ done
 [[ "$mode" != publish || ( -n "$channel" && -f "$bundle" && -f "$flash" && -f "$raw_sha256" && -f "$lock" ) ]] || die 'publish requires channel and all four input files'
 [[ "$mode" != promote || "$to" == stable ]] || die 'promotion target must be stable'
 [[ "$mode" != refresh || -n "$channel" ]] || die 'refresh needs channel'
+[[ "$mode" != refresh || ( "$expect_serial" =~ ^[1-9][0-9]*$ && "$expect_etag" =~ ^\"[a-fA-F0-9]{32}\"$ ) ]] || die 'refresh needs --expect-serial and quoted --expect-etag'
+[[ "$mode" == refresh || ( -z "$expect_serial" && -z "$expect_etag" ) ]] || die 'expect-serial/etag only apply to refresh'
 [[ "$mode" != prune || ( -z "$channel" && "$channel_family" == 1 ) ]] || die 'prune requires --channel-family (not --channel)'
 [[ "$mode" == prune || "$channel_family" == 0 ]] || die '--channel-family only applies to prune'
 command -v aws >/dev/null || die 'aws CLI is required'
@@ -80,6 +83,14 @@ release_prefix() { printf 'releases/%s/%s' "$board" "$1"; }
 read_channel() {
   local c="$1" destination="$2"
   if read_key "$(channel_key "$c")" "$destination"; then
+    if [[ "$mode" != prune ]]; then
+      read_key "$(channel_key "$c").sig" "$destination.sig" || die "signed channel signature absent: $c"
+      [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
+      openssl cms -verify -binary -inform DER -in "$destination.sig" -content "$destination" \
+        -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign \
+        -signer "$tmp/read-signer.pem" -out /dev/null >/dev/null 2>&1 || die "signed channel verification failed: $c"
+      [[ "$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)" == *'CN=CeraLive OTA Manifest Signer'* ]] || die 'signed channel signer identity mismatch'
+    fi
     python3 - "$destination" "$board" "$c" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
@@ -90,6 +101,79 @@ PY
     return 0
   fi
   return 1
+}
+resolve_compatible() {
+  local params
+  params="$(bash "$(dirname "${BASH_SOURCE[0]}")/../lib/resolve.sh" "$board")" || die "cannot resolve board: $board"
+  compatible="$(python3 - "$params" <<'PY'
+import ast,re,sys
+matches=[line.split('=',1)[1] for line in sys.argv[1].splitlines() if line.startswith('BOARD_ID=')]
+assert len(matches)==1, 'resolved board_id absent or ambiguous'
+board_id=ast.literal_eval(matches[0])
+assert isinstance(board_id,str) and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*',board_id), 'invalid board_id'
+print('ceralive-'+board_id)
+PY
+)" || die 'invalid resolved board identity'
+}
+verify_release() {
+  local v="$1" index="$tmp/index.json" name part size digest actual_size actual_digest
+  local prefix
+  prefix="$(release_prefix "$v")"
+  read_key "$prefix/index.json" "$index" || die 'release index absent'
+  python3 - "$index" >"$tmp/release-parts" <<'PY'
+import json,re,sys
+i=json.load(open(sys.argv[1]))
+assert i['schema']==1 and set(i['files'])=={'bundle.raucb','flash.raw.xz'}, 'release index files invalid'
+for name,entry in i['files'].items():
+    assert isinstance(entry['size'],int) and entry['size']>0 and re.fullmatch(r'[0-9a-f]{64}',entry['sha256'])
+    assert entry['chunk_size']==268435456 and entry['parts'], 'invalid release chunking'
+    assert sum(p['size'] for p in entry['parts'])==entry['size'], 'release size mismatch'
+    for n,p in enumerate(entry['parts']):
+        assert p['name']==f'{name}.part{n:04d}' and isinstance(p['size'],int) and 0<p['size']<=268435456
+        assert re.fullmatch(r'[0-9a-f]{64}',p['sha256']), 'invalid part digest'
+        print(name,p['name'],p['size'],p['sha256'])
+PY
+  : >"$tmp/verified-bundle.raucb"
+  : >"$tmp/verified-flash.raw.xz"
+  while read -r name part size digest; do
+    read_key "$prefix/$part" "$tmp/verified-part" || die "release part absent: $part"
+    actual_size="$(stat -c %s "$tmp/verified-part")"
+    actual_digest="$(sha256sum "$tmp/verified-part" | cut -d' ' -f1)"
+    [[ "$actual_size" == "$size" && "$actual_digest" == "$digest" ]] || die "release part drift: $part"
+    cat "$tmp/verified-part" >>"$tmp/verified-$name"
+  done <"$tmp/release-parts"
+  python3 - "$index" "$tmp" <<'PY'
+import hashlib,json,os,sys
+for name,entry in json.load(open(sys.argv[1]))['files'].items():
+    path=os.path.join(sys.argv[2],f'verified-{name}')
+    assert os.path.getsize(path)==entry['size'], f'{name} size differs from index'
+    h=hashlib.sha256()
+    with open(path,'rb') as f:
+        for block in iter(lambda:f.read(4*1024*1024),b''):h.update(block)
+    assert h.hexdigest()==entry['sha256'], f'{name} digest differs from index'
+PY
+  [[ -f "${RAUC_BUNDLE_KEYRING:-}" ]] || die 'RAUC_BUNDLE_KEYRING is required for signed bundle verification'
+  command -v rauc >/dev/null || die 'rauc is required for signed bundle verification'
+  rauc info -C keyring:check-purpose=codesign --keyring="$RAUC_BUNDLE_KEYRING" \
+    --output-format=json "$tmp/verified-bundle.raucb" >"$tmp/bundle-info.json" || die 'signed bundle verification failed'
+  python3 - "$tmp/bundle-info.json" "$compatible" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['compatible']==sys.argv[2], 'signed bundle compatible mismatch'
+PY
+}
+verify_pointer_source() {
+  local source="$1" v="$2" allow_legacy="$3"
+  python3 - "$source" "$tmp/index.json" "$board" "$v" "$compatible" "$allow_legacy" <<'PY'
+import json,sys
+source,index,board,version,compatible,allow_legacy=sys.argv[1:]
+m=json.load(open(source));files=json.load(open(index))['files']
+prefix=f'https://images.ceralive.tv/releases/{board}/{version}/'
+assert m['schema']==1 and m['board']==board and m['version']==version, 'channel release identity mismatch'
+assert m['compatible']==compatible or (allow_legacy=='yes' and m['compatible']==f'ceralive-{board}'), 'channel compatible mismatch'
+assert m['bundle']=={'url':prefix+'bundle.raucb','size':files['bundle.raucb']['size'],'sha256':files['bundle.raucb']['sha256']}, 'channel bundle/index mismatch'
+assert m['flash']['url']==prefix+'flash.raw.xz' and m['flash']['size']==files['flash.raw.xz']['size'] and m['flash']['sha256']==files['flash.raw.xz']['sha256'], 'channel flash/index mismatch'
+assert m['lock_url']==prefix+'packages.lock.json', 'channel lock URL mismatch'
+PY
 }
 signer_check() {
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.key" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/intermediate-ca.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'dedicated manifest signer files absent'
@@ -103,9 +187,9 @@ signer_check() {
 }
 write_manifest() {
   local c="$1" v="$2" source="$3" serial="$4" output="$5" min_version="$6" raw="$7"
-  python3 - "$c" "$v" "$source" "$serial" "$output" "$min_version" "$raw" "$board" "${OS_VERSION_ID}" <<'PY'
+  python3 - "$c" "$v" "$source" "$serial" "$output" "$min_version" "$raw" "$board" "${OS_VERSION_ID}" "$compatible" <<'PY'
 import datetime,json,sys
-c,v,source,serial,out,minimum,raw,board,osid=sys.argv[1:]
+c,v,source,serial,out,minimum,raw,board,osid,compatible=sys.argv[1:]
 now=datetime.datetime.now(datetime.timezone.utc)
 stamp=lambda d:d.strftime('%Y-%m-%dT%H:%M:%SZ')
 prefix=f'https://images.ceralive.tv/releases/{board}/{v}/'
@@ -113,9 +197,10 @@ if source:
     m=json.load(open(source))
     assert m['board']==board and m['version']==v and m['schema']==1
     m['channel']=c
+    m['compatible']=compatible
 else:
     index=json.load(open(out+'.index'))['files']
-    m={'schema':1,'board':board,'compatible':f'ceralive-{board}',
+    m={'schema':1,'board':board,'compatible':compatible,
        'channel':c,'version':v,'os_version_id':osid,'min_ceraui_version':minimum,
        'bundle':{'url':prefix+'bundle.raucb','size':index['bundle.raucb']['size'],'sha256':index['bundle.raucb']['sha256']},
        'flash':{'url':prefix+'flash.raw.xz','size':index['flash.raw.xz']['size'],'sha256':index['flash.raw.xz']['sha256'],'raw_sha256':raw},
@@ -127,7 +212,7 @@ PY
 }
 advance_channel() {
   local c="$1" v="$2" from="$3" minimum="$4" raw="$5"
-  local key old_serial=0 etag='' prior="$tmp/current-$c.json" next="$tmp/next-$c.json"
+  local key old_serial=0 etag='' sig_etag='' prior="$tmp/current-$c.json" next="$tmp/next-$c.json"
   key="$(channel_key "$c")"
   if read_channel "$c" "$prior"; then
     if [[ -z "$from" ]] && python3 - "$prior" "$v" <<'PY'
@@ -141,6 +226,12 @@ print(json.load(open(sys.argv[1]))['serial'])
 PY
 )"
     etag="$(current_etag "$key")"
+    [[ "$etag" == "\"$(openssl dgst -md5 "$prior" | cut -d' ' -f2)\"" ]] || die 'channel changed between signed read and ETag read'
+    sig_etag="$(current_etag "$key.sig")"
+    [[ "$sig_etag" == "\"$(openssl dgst -md5 "$prior.sig" | cut -d' ' -f2)\"" ]] || die 'channel signature changed between signed read and ETag read'
+    if [[ "$mode" == refresh ]]; then
+      [[ "$old_serial" == "$expect_serial" && "$etag" == "$expect_etag" ]] || die 'refresh precondition: serial or ETag changed'
+    fi
   fi
   source lib/shared/target-release-lib.sh
   target_release_load
@@ -167,10 +258,18 @@ PY
     -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1 || die 'manifest CMS verification failed'
   # The workflow serializes channel writers; an ETag CAS also refuses stale manifests.
   local args=(--key "$key.sig" --body "$tmp/channel.sig" --content-type application/pkcs7-signature)
-  s3 put-object "${args[@]}" >/dev/null
+  if [[ -n "$sig_etag" ]]; then args+=(--if-match "$sig_etag"); else args+=(--if-none-match '*'); fi
+  s3 put-object "${args[@]}" >/dev/null || die 'channel signature changed during publication'
   args=(--key "$key" --body "$next" --content-type application/json --cache-control no-cache)
   if [[ -n "$etag" ]]; then args+=(--if-match "$etag"); else args+=(--if-none-match '*'); fi
-  s3 put-object "${args[@]}" >/dev/null || die 'serial replay refused: channel changed during publication'
+  if ! s3 put-object "${args[@]}" >/dev/null; then
+    if [[ -n "$etag" && "$(current_etag "$key")" == "$etag" ]]; then
+      s3 put-object --key "$key.sig" --body "$prior.sig" --content-type application/pkcs7-signature \
+        --if-match "\"$(openssl dgst -md5 "$tmp/channel.sig" | cut -d' ' -f2)\"" >/dev/null \
+        || die 'serial replay refused: signature rollback failed; inspect channel pair'
+    fi
+    die 'serial replay refused: channel changed during publication'
+  fi
 }
 parse_checksum() {
   local sidecar="$1" filename="$2" digest
@@ -216,6 +315,7 @@ PY
 }
 case "$mode" in
   publish)
+    resolve_compatible
     [[ "$(basename "$bundle")" == *.raucb && "$(basename "$flash")" == *.raw.xz ]] || die 'publish expects .raucb and .raw.xz files (never relabel zstd bytes)'
     xz -t "$flash" || die 'flash is not a valid xz stream'
     raw="$(parse_checksum "$raw_sha256" "$(basename "$flash" .xz)")"
@@ -232,6 +332,13 @@ PY
 )"
     prefix="$(release_prefix "$version")"
     cp --reflink=auto -- "$bundle" "$tmp/bundle.raucb"
+    [[ -f "${RAUC_BUNDLE_KEYRING:-}" ]] || die 'RAUC_BUNDLE_KEYRING is required for signed bundle verification'
+    command -v rauc >/dev/null || die 'rauc is required for signed bundle verification'
+    rauc info -C keyring:check-purpose=codesign --keyring="$RAUC_BUNDLE_KEYRING" --output-format=json "$tmp/bundle.raucb" >"$tmp/local-bundle-info.json" || die 'signed bundle verification failed'
+    python3 - "$tmp/local-bundle-info.json" "$compatible" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['compatible']==sys.argv[2], 'signed bundle compatible mismatch'
+PY
     cp --reflink=auto -- "$flash" "$tmp/flash.raw.xz"
     cp -- "$lock" "$tmp/packages.lock.json"
     python3 -m json.tool "$tmp/packages.lock.json" >/dev/null || die 'invalid package lock JSON'
@@ -245,31 +352,32 @@ PY
     immutable "$prefix/index.json" "$tmp/index.json" application/json
     printf '%s\n' "$version" >"$tmp/marker"
     immutable "$prefix/channels/$channel" "$tmp/marker" text/plain
+    if [[ "$dry_run" != 1 ]]; then verify_release "$version"; fi
     cp "$tmp/index.json" "$tmp/next-$channel.json.index"
     advance_channel "$channel" "$version" '' "$min" "$raw"
     ;;
   promote)
+    resolve_compatible
     prefix="$(release_prefix "$version")"
     [[ "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || die 'version required'
-    read_key "$prefix/index.json" "$tmp/index.json" || die 'release index absent: cannot promote'
     read_channel beta "$tmp/beta.json" || die 'beta manifest absent: cannot promote'
-    python3 - "$tmp/beta.json" "$version" "$tmp/index.json" <<'PY'
-import json,sys
-m=json.load(open(sys.argv[1])); i=json.load(open(sys.argv[3]))['files']
-assert m['version']==sys.argv[2] and set(i)=={'bundle.raucb','flash.raw.xz'}
-assert all(m[k]['sha256']==i[n]['sha256'] for k,n in [('bundle','bundle.raucb'),('flash','flash.raw.xz')])
-PY
+    verify_release "$version"
+    verify_pointer_source "$tmp/beta.json" "$version" no
     printf '%s\n' "$version" >"$tmp/marker"
     immutable "$prefix/channels/stable" "$tmp/marker" text/plain
     advance_channel stable "$version" "$tmp/beta.json" '' ''
     ;;
   refresh)
+    resolve_compatible
     read_channel "$channel" "$tmp/refresh.json" || die 'channel manifest absent: cannot refresh'
     version="$(python3 - "$tmp/refresh.json" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))['version'])
 PY
 )"
+    [[ "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || die 'invalid signed channel version'
+    verify_release "$version"
+    verify_pointer_source "$tmp/refresh.json" "$version" yes
     advance_channel "$channel" "$version" "$tmp/refresh.json" '' ''
     ;;
   prune)
