@@ -1653,17 +1653,25 @@ REPRO
   # Explicit regression pin on top of the structural lockstep guard: this value
   # is consumed inside a subimage chroot, so a name in env_names alone reads
   # EMPTY there — silently — and the stager degrades to installing nothing.
-  grep -Eq '^[[:space:]]+CERALIVE_BENCH_LABELS CERALIVE_BOARD$' "$LIB_DIR/orchestrate.sh"
+  local env_names env_without_board env_re
+  env_names="$(sed -n '/^[[:space:]]*local env_names=(/,/^[[:space:]]*)/p' "$LIB_DIR/orchestrate.sh")"
+  [ -n "$env_names" ]
+  env_re='^[[:space:]]+([A-Z0-9_]+[[:space:]]+)*CERALIVE_BOARD([[:space:]]+[A-Z0-9_]+)*[[:space:]]*$'
+  grep -Eq "$env_re" <<< "$env_names"
+  env_without_board="$(sed -E 's/(^|[[:space:]])CERALIVE_BOARD([[:space:]]|$)/\1CERALIVE_BOARD_BACKUP\2/g' <<< "$env_names")"
+  [ "$env_without_board" != "$env_names" ]
+  ! grep -Eq "$env_re" <<< "$env_without_board"
+  ! grep -Eq "$env_re" <<< '# CERALIVE_BOARD'
 
-  local pass_names
-  pass_names="$(sed -n 's/^PassEnvironment=//p' "$PIPELINE_DIR/mkosi/mkosi.conf")"
+  local pass_names pass_without_board pass_re
+  pass_names="$(sed -n '/^PassEnvironment=/p' "$PIPELINE_DIR/mkosi/mkosi.conf")"
   [ -n "$pass_names" ]
-
-  local n found=0
-  for n in $pass_names; do
-    [ "$n" = CERALIVE_BOARD ] && found=1
-  done
-  [ "$found" -eq 1 ]
+  pass_re='^PassEnvironment=([A-Z0-9_]+[[:space:]]+)*CERALIVE_BOARD([[:space:]]+[A-Z0-9_]+)*[[:space:]]*$'
+  grep -Eq "$pass_re" <<< "$pass_names"
+  pass_without_board="$(sed -E 's/(^|[[:space:]])CERALIVE_BOARD([[:space:]]|$)/\1CERALIVE_BOARD_BACKUP\2/g' <<< "$pass_names")"
+  [ "$pass_without_board" != "$pass_names" ]
+  ! grep -Eq "$pass_re" <<< "$pass_without_board"
+  ! grep -Eq "$pass_re" <<< '# PassEnvironment=CERALIVE_BOARD'
 }
 
 # ===========================================================================
