@@ -25,6 +25,14 @@ on:
         type: choice
         options: [publish, promote, refresh, prune]
         required: true
+      expect_serial:
+        description: Observed channel serial (refresh only, one board)
+        type: string
+        required: false
+      expect_etag:
+        description: Observed quoted JSON ETag (refresh only, one board)
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -48,6 +56,8 @@ jobs:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
           CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          EXPECT_SERIAL: ${{ inputs.expect_serial }}
+          EXPECT_ETAG: ${{ inputs.expect_etag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -66,6 +76,13 @@ jobs:
               --jq '.path' | grep -qx '.github/workflows/release.yml'
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
               --jq '.event' | grep -qx push
+          fi
+          if [[ "$MODE" == refresh ]]; then
+            [[ "$BOARDS" != *,* && "$EXPECT_SERIAL" =~ ^[1-9][0-9]*$ && "$EXPECT_ETAG" =~ ^\"[a-fA-F0-9]{32}\"$ ]] || {
+              echo 'refresh requires one board, observed serial, and quoted JSON ETag' >&2; exit 2;
+            }
+          elif [[ -n "$EXPECT_SERIAL" || -n "$EXPECT_ETAG" ]]; then
+            echo 'refresh preconditions apply only to refresh' >&2; exit 2
           fi
       - name: Materialize dedicated signer
         if: ${{ inputs.mode != 'prune' }}
@@ -104,6 +121,8 @@ jobs:
           VERSION: ${{ inputs.version }}
           CHANNEL: ${{ inputs.channel }}
           CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          EXPECT_SERIAL: ${{ inputs.expect_serial }}
+          EXPECT_ETAG: ${{ inputs.expect_etag }}
           GH_TOKEN: ${{ github.token }}
           OTA_MANIFEST_SIGNER_DIR: ${{ runner.temp }}/ota-manifest-signer
           RAUC_BUNDLE_KEYRING: ${{ runner.temp }}/rauc-bundle-root.pem
@@ -147,11 +166,23 @@ jobs:
                   --raw-sha256 "$dir/flash.raw.sha256" --lock "$dir/packages.lock.json"
                 ;;
               promote) bash ci/publish-release.sh promote --board "$board" --version "$VERSION" --to stable ;;
-              refresh) bash ci/publish-release.sh refresh --board "$board" --channel "$CHANNEL" ;;
+              refresh)
+                key="channels/${CHANNEL}/${board}.json"
+                aws s3api get-object --bucket "$R2_IMAGES_BUCKET" --endpoint-url "$R2_IMAGES_ENDPOINT" \
+                  --key "$key" "${RUNNER_TEMP}/refresh-observed.json" >/dev/null
+                observed_serial="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "${RUNNER_TEMP}/refresh-observed.json")"
+                observed_etag="$(aws s3api head-object --bucket "$R2_IMAGES_BUCKET" --endpoint-url "$R2_IMAGES_ENDPOINT" \
+                  --key "$key" --query ETag --output text)"
+                [[ "$observed_serial" == "$EXPECT_SERIAL" && "$observed_etag" == "$EXPECT_ETAG" ]] || {
+                  echo 'refresh serial/ETag drifted since approval' >&2; exit 1;
+                }
+                bash ci/publish-release.sh refresh --board "$board" --channel "$CHANNEL" \
+                  --expect-serial "$observed_serial" --expect-etag "$observed_etag"
+                ;;
               prune) bash ci/publish-release.sh prune --board "$board" --channel-family ;;
             esac
           done
       - name: Remove materialized secrets and candidate copies
         if: ${{ always() }}
         run: |
-          rm -rf "${RUNNER_TEMP}/ota-manifest-signer" "${RUNNER_TEMP}/rauc-bundle-root.pem" "${RUNNER_TEMP}/candidate-"* "${RUNNER_TEMP}/candidate-sha"
+          rm -rf "${RUNNER_TEMP}/ota-manifest-signer" "${RUNNER_TEMP}/rauc-bundle-root.pem" "${RUNNER_TEMP}/candidate-"* "${RUNNER_TEMP}/candidate-sha" "${RUNNER_TEMP}/refresh-observed.json"
