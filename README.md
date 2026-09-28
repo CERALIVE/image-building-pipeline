@@ -337,10 +337,12 @@ When GNU parallel is available, Bats files run in parallel but cases within each
 file stay serial; tests that share the build staging tree also use file locks so
 CI concurrency cannot alter their assertions. The real-RAUC harness uses RAUC's
 supported boot-slot override for its synthetic file-backed slots, so CI does not
-depend on the runner's boot device. The CI Bats job also installs Ubuntu's split
-`rauc` + `rauc-service` packages and starts a system D-Bus before the required
-real-RAUC contract, reloading the installed bus policy; it does not substitute
-a session bus or skip the service check. Standalone DRY_RUN build-plan jobs also
+depend on the runner's boot device. The CI Bats job builds RAUC 1.15.2 from the
+image's pinned source, caches the install, and installs its CLI, systemd unit
+and D-Bus activation/policy files instead of Ubuntu's older `rauc`/`rauc-service`
+pair. It verifies the executable version and reloads the system bus policy
+before the required real-RAUC contract; it does not substitute a session bus or
+skip the service check. Standalone DRY_RUN build-plan jobs also
 materialize the same ignored NON-PRODUCTION fixture before resolving, so they
 do not depend on the Bats job's checkout.
 

@@ -180,9 +180,80 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            avahi-daemon avahi-utils cpio dbus device-tree-compiler dosfstools \
-            e2fsprogs gdisk iproute2 mtools procps rauc rauc-service socat \
-            squashfs-tools systemd u-boot-tools util-linux
+            avahi-daemon avahi-utils build-essential cpio curl dbus \
+            device-tree-compiler dosfstools e2fsprogs gdisk iproute2 kmod \
+            libcurl4-openssl-dev libdbus-1-dev libfdisk-dev libglib2.0-dev \
+            libjson-glib-dev libnl-genl-3-dev libssl-dev meson mtools \
+            ninja-build pkg-config procps socat squashfs-tools systemd \
+            u-boot-tools util-linux zstd
+
+      - name: Read shipped RAUC source pin
+        id: rauc-pin
+        run: |
+          set -euo pipefail
+          pin() { awk -F= -v k="$1" '$1 == k { print $2; exit }' manifests/rauc-deb-versions.txt; }
+          version="$(pin UPSTREAM_VERSION)"
+          url="$(pin UPSTREAM_URL)"
+          sha256="$(pin UPSTREAM_SHA256)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$sha256" =~ ^[0-9a-f]{64}$ && \
+             "$url" == "https://github.com/rauc/rauc/releases/download/v${version}/rauc-${version}.tar.xz" ]]
+          printf 'version=%s\nsha256=%s\nurl=%s\n' "$version" "$sha256" "$url" >>"$GITHUB_OUTPUT"
+
+      - name: Cache pinned RAUC build
+        id: rauc-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/rauc-ci-install
+          key: rauc-meson-${{ runner.os }}-${{ runner.arch }}-${{ steps.rauc-pin.outputs.version }}-${{ steps.rauc-pin.outputs.sha256 }}
+
+      - name: Build pinned RAUC CLI and service
+        if: steps.rauc-cache.outputs.cache-hit != 'true'
+        env:
+          RAUC_CI_INSTALL: ${{ runner.temp }}/rauc-ci-install
+          RAUC_PIN_URL: ${{ steps.rauc-pin.outputs.url }}
+          RAUC_PIN_SHA256: ${{ steps.rauc-pin.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          curl -fsSL --retry 3 --connect-timeout 30 --max-time 300 "$RAUC_PIN_URL" -o "$work/rauc.tar.xz"
+          printf '%s  %s\n' "$RAUC_PIN_SHA256" "$work/rauc.tar.xz" | sha256sum -c -
+          mkdir -p "$work/source"
+          tar -xf "$work/rauc.tar.xz" -C "$work/source" --strip-components=1
+          meson setup "$work/build" "$work/source" --prefix=/usr/local \
+            -Dtests=false -Dgpt=enabled -Dstreaming=true -Djson=enabled \
+            -Dsystemdunitdir=/usr/lib/systemd/system \
+            -Ddbussystemservicedir=/usr/share/dbus-1/system-services \
+            -Ddbuspolicydir=/usr/share/dbus-1/system.d
+          meson compile -C "$work/build"
+          meson install -C "$work/build" --destdir "$RAUC_CI_INSTALL"
+
+      - name: Install and verify pinned RAUC service
+        env:
+          RAUC_CI_INSTALL: ${{ runner.temp }}/rauc-ci-install
+          RAUC_PIN_VERSION: ${{ steps.rauc-pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          # No Ubuntu rauc/rauc-service package: both D-Bus activation and the
+          # systemd unit must resolve the same binary, not the distro's 1.11.3.
+          test -x "$RAUC_CI_INSTALL/usr/local/bin/rauc"
+          test -f "$RAUC_CI_INSTALL/usr/share/dbus-1/system-services/de.pengutronix.rauc.service"
+          test -f "$RAUC_CI_INSTALL/usr/share/dbus-1/system.d/de.pengutronix.rauc.conf"
+          test -f "$RAUC_CI_INSTALL/usr/lib/systemd/system/rauc.service"
+          sudo cp -a "$RAUC_CI_INSTALL/usr/local/." /usr/local/
+          sudo cp "$RAUC_CI_INSTALL/usr/share/dbus-1/system-services/de.pengutronix.rauc.service" /usr/share/dbus-1/system-services/
+          sudo cp "$RAUC_CI_INSTALL/usr/share/dbus-1/system.d/de.pengutronix.rauc.conf" /usr/share/dbus-1/system.d/
+          sudo cp "$RAUC_CI_INSTALL/usr/lib/systemd/system/rauc.service" /usr/lib/systemd/system/
+          grep -Fq 'Exec=/usr/local/libexec/rauc-service.sh' /usr/share/dbus-1/system-services/de.pengutronix.rauc.service
+          grep -Fq 'exec /usr/local/bin/rauc service' /usr/local/libexec/rauc-service.sh
+          grep -Fq 'ExecStart=/usr/local/bin/rauc ' /usr/lib/systemd/system/rauc.service
+          test "$(command -v rauc)" = /usr/local/bin/rauc
+          test "$(rauc --version)" = "rauc ${RAUC_PIN_VERSION}"
+          if ! getent passwd ceralive-ota >/dev/null; then
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin ceralive-ota
+          fi
+          test "$(id -u ceralive-ota)" != 0
+          rauc --version
 
       - name: Start system D-Bus for real RAUC contract
         run: |

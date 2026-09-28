@@ -1265,16 +1265,19 @@ real-RAUC interruption/cleanup,
 private namespaces, and `CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required`
 exercises the real UID-drop package-index probes described in the KEY FACT below.
 The RAUC harness uses the supported boot-slot override for
-its synthetic file-backed slots, so the same service contract runs across CI
-RAUC versions without depending on the runner's boot device. A v1 single-slot
+its synthetic file-backed slots, so the service contract does not depend on the
+runner's boot device. A v1 single-slot
 disk cannot migrate by
 OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `docs/hardware-gated-completion.md` Item 4.
 
-The v2 CI Bats job installs the split Ubuntu `rauc` + `rauc-service` packages,
-starts a system D-Bus, reloads its installed policy, and then invokes the real
-RAUC contract; the harness requires RAUC to own its normal system-bus service
+The v2 CI Bats job builds upstream RAUC 1.15.2 from the image's SHA-256-pinned
+source, caches the Meson install, and installs its CLI plus systemd/D-Bus service
+files and policy instead of Ubuntu's older `rauc`/`rauc-service` pair. It fails
+on a version mismatch, provisions the non-root `ceralive-ota` fixture account,
+starts a system D-Bus, reloads its installed policy, and
+then invokes the real RAUC contract; the harness requires its normal system-bus service
 name and does not replace that check with a session bus or a skipped test. The
 standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
 fixture before resolving, so build-plan checks are self-contained too.
@@ -3433,10 +3436,10 @@ engine pins moved separately (island `v2026.9.5`, fork `.7`, cerastream
 Don't hardcode versions in the script.
 
 **CI and release build caches** [EXISTS]
-PR CI (`v2-ci.yml`) caches only pip's download/wheel store (`~/.cache/pip`) for
-the manifest-validation and build-plan jobs. Its key includes the runner OS,
-architecture, and the hash of `ci/requirements-ci.txt`; image outputs, mkosi
-caches, QEMU state, and release artifacts remain uncached there.
+PR CI (`v2-ci.yml`) caches pip's download/wheel store (`~/.cache/pip`) for
+the manifest-validation and build-plan jobs and the Bats job's compiled RAUC
+install, keyed by the pinned upstream version and source SHA-256. Image outputs,
+mkosi caches, QEMU state, and release artifacts remain uncached there.
 
 The protected release candidate (`.github/workflows/release.yml`) persists the
 two build-state stores that materially shorten a production rebuild:
