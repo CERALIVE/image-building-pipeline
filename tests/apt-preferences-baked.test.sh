@@ -67,6 +67,7 @@ fi
 
 REPRO="$(mktemp)"
 trap 'rm -f "${REPRO}"' EXIT
+AWK_BIN="$(readlink -f "$(command -v awk)")"
 cat >"${REPRO}" <<REPRO_EOF
 set -euo pipefail
 # Scratch chroot filesystem: tmpfs over the absolute trees the function writes, so
@@ -84,7 +85,7 @@ mkdir -p /etc/apt/sources.list.d /etc/apt/apt.conf.d /etc/apt/certs
 log() { :; }
 CHANNEL="stable"
 export CERALIVE_FIRST_PARTY_NAMES_B64="\$(printf 'cerastream\n' | base64 -w0)"
-eval "\$(awk '/^setup_ceralive_repository\(\) \{/,/^}/' "${POSTINST}")"
+eval "\$("${AWK_BIN}" '/^setup_ceralive_repository\(\) \{/,/^}/' "${POSTINST}")"
 setup_ceralive_repository
 
 [ ! -e /etc/apt/preferences.d/ceralive ] || { echo "FAIL: the retired /etc/apt/preferences.d/ceralive wildcard file still exists"; exit 1; }
