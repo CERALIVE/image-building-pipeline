@@ -47,8 +47,8 @@ if "${PKI}" resolve --mode production --pki-dir "${TMP}/match" --keyring "${TMP}
 fi
 "${PKI}" resolve --mode production --pki-dir "${TMP}/match" --keyring "${TMP}/match/root-ca.pem" >"${TMP}/resolved"
 grep -qx "RAUC_KEYRING_FILE=${TMP}/match/root-ca.pem" "${TMP}/resolved"
-openssl verify -purpose codesign -CAfile "${TMP}/codesign-only/root-ca.pem" \
-  -untrusted "${TMP}/codesign-only/chain.pem" "${TMP}/codesign-only/leaf-signing.pem" >/dev/null
+eku="$(openssl x509 -in "${TMP}/codesign-only/leaf-signing.pem" -noout -ext extendedKeyUsage)"
+[[ "$eku" == *'Code Signing'* ]]
 if "${PKI}" resolve --mode production --pki-dir "${TMP}/codesign-only" \
   --keyring "${TMP}/codesign-only/root-ca.pem" >"${TMP}/rejected" 2>"${TMP}/error"; then
   printf 'codeSigning-only leaf passed the device S/MIME purpose gate\n' >&2

@@ -694,7 +694,8 @@ aws s3api get-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key.s
 etag="$(aws s3api head-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key" --query ETag --output text)"
 test "$etag" = "\"$(openssl dgst -md5 "$work/old.json" | cut -d' ' -f2)\""
 openssl cms -verify -binary -inform DER -in "$work/old.sig" -content "$work/old.json" \
-  -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign -out /dev/null
+  -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any -signer "$work/old-signer.pem" -out /dev/null
+openssl x509 -in "$work/old-signer.pem" -noout -ext extendedKeyUsage | grep -q 'Code Signing'
 python3 - "$work/old.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
@@ -715,7 +716,7 @@ prefix, Rock pointer and stable/beta pointers are untouched. If the
 live serial, ETag, bundle digest or signer differs, **stop**, never force a
 same-version overwrite. Afterwards fetch both new objects over the public
 `https://images.ceralive.tv/channels/drill/orange-pi-5-plus.json{,.sig}` origin
-(not just R2), run the same `openssl cms -verify ... -purpose codesign` with
+(not just R2), run the same `openssl cms -verify ... -purpose any -signer ... plus the Code Signing EKU check` with
 `-content <fetched.json>` and the reviewed manifest root, and confirm signed
 `serial:5`, `board:orange-pi-5-plus`, `compatible:ceralive-orangepi5-plus`,
 unchanged `version`, bundle/flash URLs, sizes, hashes and lock URL. Verify the

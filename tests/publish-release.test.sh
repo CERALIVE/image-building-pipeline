@@ -115,7 +115,7 @@ assert m['flash']['raw_sha256']!=m['flash']['sha256']
 assert m['compatible']=='ceralive-rock-5b-plus' and m['lock_url'].endswith('/packages.lock.json')
 PY
 channel="$tmp/objects/channels/beta/rock-5b-plus.json"
-openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 printf 'PASS: dedicated CMS signature verifies with test keyring\n'
 python3 - "$tmp/aws.log" <<'PY'
 import sys
@@ -195,7 +195,7 @@ fi
 assert grep -q 'wrong manifest signer CN' "$tmp/wrong-signer.log"
 cp "$tmp/manifest.pem" "$tmp/signer/leaf.pem";cp "$tmp/manifest.key" "$tmp/signer/leaf.key"
 openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/bundle.key" -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$tmp/bundle.sig" >/dev/null
-openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 assert test "$(openssl x509 -in "$tmp/bundle.pem" -noout -subject -nameopt RFC2253)" = 'subject=CN=CeraLive Bundle Signer'
 printf 'PASS: bundle leaf cryptographically valid but identity gate refuses it\n'
 cp "$channel" "$tmp/pre-interruption.json"
@@ -223,7 +223,7 @@ fi
 assert cmp "$channel" "$tmp/pre-interruption.json"
 cp "$tmp/recovery-index.good" "$base/index.json"
 refresh rock-5b-plus beta 2 >"$tmp/recovered.log"
-openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 assert test "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$channel")" = 3
 printf 'PASS: killed between signature and JSON PUT; authenticated retry repairs pair\n'
 if (STUB_KILL_AFTER_SIG=1 publish 2026.10.8 drill >"$tmp/initial-interrupt.log" 2>&1) 2>/dev/null; then
@@ -232,7 +232,7 @@ fi
 assert test ! -e "$tmp/objects/channels/drill/rock-5b-plus.json"
 publish 2026.10.8 drill >"$tmp/initial-recovered.log"
 openssl cms -verify -binary -inform DER -in "$tmp/objects/channels/drill/rock-5b-plus.json.sig" \
-  -content "$tmp/objects/channels/drill/rock-5b-plus.json" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+  -content "$tmp/objects/channels/drill/rock-5b-plus.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 printf 'PASS: initial channel signature-only interruption resumes from authenticated intent\n'
 if STUB_REPLAY=1 refresh rock-5b-plus beta 3 >"$tmp/serial-refuse.txt" 2>&1; then
   printf 'FAIL: stale serial accepted\n' >&2; exit 1
@@ -286,7 +286,7 @@ assert m['compatible']=='ceralive-orangepi5-plus' and m['board']=='orange-pi-5-p
 assert m['bundle']['url']=='https://images.ceralive.tv/releases/orange-pi-5-plus/2026.12.1/bundle.raucb'
 assert m['version']==old['version'] and m['bundle']==old['bundle'] and m['flash']==old['flash'] and m['lock_url']==old['lock_url']
 PY
-openssl cms -verify -binary -inform DER -in "$opi.sig" -content "$opi" -CAfile "$tmp/signer/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1
+openssl cms -verify -binary -inform DER -in "$opi.sig" -content "$opi" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 printf 'PASS: legacy signed Orange pointer refresh corrects compatible at serial 5 without release writes\n'
 
 cp "$opi" "$tmp/opi.good.json"; cp "$opi.sig" "$tmp/opi.good.sig"

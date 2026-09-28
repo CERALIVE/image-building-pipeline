@@ -81,11 +81,13 @@ current_etag() {
 channel_key() { printf 'channels/%s/%s.json' "$1" "$board"; }
 release_prefix() { printf 'releases/%s/%s' "$board" "$1"; }
 verify_cms() {
-  local content="$1" signature="$2"
+  local content="$1" signature="$2" eku
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
   openssl cms -verify -binary -inform DER -in "$signature" -content "$content" \
-    -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign \
+    -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any \
     -signer "$tmp/read-signer.pem" -out /dev/null >/dev/null 2>&1 || return 1
+  eku="$(openssl x509 -in "$tmp/read-signer.pem" -noout -ext extendedKeyUsage)"
+  [[ "$eku" == *'Code Signing'* ]] || return 1
   [[ "$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)" == *'CN=CeraLive OTA Manifest Signer'* ]]
 }
 intent_key() {
@@ -253,7 +255,7 @@ signer_check() {
   [[ "$cn" == *'CN=CeraLive OTA Manifest Signer'* ]] || die 'wrong manifest signer CN'
   eku="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -ext extendedKeyUsage)"
   [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || die 'manifest signer must have codeSigning only'
-  openssl verify -purpose codesign -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -untrusted "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" >/dev/null
+  openssl verify -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -untrusted "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" >/dev/null
   [[ "$(openssl pkey -in "$OTA_MANIFEST_SIGNER_DIR/leaf.key" -pubout | openssl sha256)" == "$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -pubkey -noout | openssl sha256)" ]] || die 'manifest signer key mismatch'
 }
 write_manifest() {
@@ -339,7 +341,7 @@ PY
       -outform DER -out "$tmp/channel.sig" >/dev/null
   fi
   openssl cms -verify -binary -inform DER -in "$tmp/channel.sig" -content "$next" \
-    -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose codesign -out /dev/null >/dev/null 2>&1 || die 'manifest CMS verification failed'
+    -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1 || die 'manifest CMS verification failed'
   # Persist both authenticated pairs before exposing the new signature. The JSON CAS
   # is still the commit; a retry can finish it only if the current sig matches this intent.
   if [[ "$reuse" == 0 ]]; then

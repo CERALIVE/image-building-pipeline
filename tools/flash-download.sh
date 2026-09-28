@@ -55,7 +55,9 @@ get "$channel_url" "$tmp/channel.json" 200 || die 'channel manifest fetch failed
 if [[ -n "$keyring" ]]; then
   get "$channel_url.sig" "$tmp/channel.sig" 200 || die 'channel signature fetch failed'
   openssl cms -verify -binary -inform DER -in "$tmp/channel.sig" -content "$tmp/channel.json" \
-    -CAfile "$keyring" -purpose codesign -out /dev/null >/dev/null 2>&1 || die 'channel CMS verification failed'
+    -CAfile "$keyring" -purpose any -signer "$tmp/channel-signer.pem" -out /dev/null >/dev/null 2>&1 || die 'channel CMS verification failed'
+  eku="$(openssl x509 -in "$tmp/channel-signer.pem" -noout -ext extendedKeyUsage)"
+  [[ "$eku" == *'Code Signing'* ]] || die 'channel signer must have Code Signing EKU'
 else
   printf '%s\n' 'WARNING: unsigned verification skipped; sha256 only (no authenticated release identity)' >&2
 fi
