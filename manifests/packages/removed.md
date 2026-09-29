@@ -206,13 +206,10 @@ Orange Pi 5+, not `ceraui-base.conf`), and the `bluetooth` service is explicitly
 
 # Todo 30 — evidence-gated image slimming
 
-Consumer evidence is saved at
-`/mnt/development/ceralive/.omo/evidence/update-system-overhaul/task-30/consumers.txt`.
-The required `cerastream/src` path is absent in this checkout, so the completed
-scan substituted its actual production source root, `cerastream/crates`, and
-excluded tests and documentation. The scratch-copy mutation proof at
-`task-30/consumer-guard.txt` plants an `ipcalc` invocation and proves the
-removal check refuses it.
+The completed consumer scan covered the engine's production source under
+`cerastream/crates` (not the nonexistent `cerastream/src`) and excluded tests and
+documentation. Its consumer inventory and an `ipcalc`-injection mutation proof
+are retained as operator-local scratch evidence, not inputs to this repository.
 
 | Package / artifact | Verdict | Reason / destination |
 |---|---|---|

@@ -70,9 +70,9 @@ both normal and snapshot suites, `Snapshot: enable` in both deb822 stanzas,
 `APT::Snapshot=20260920T000000Z`, and
 `Acquire::Check-Valid-Until=true`. `APT::Update::Error-Mode=any` also made a
 partial index fetch fatal instead of accepting apt's possible exit-0 warning.
-The complete command and unedited output are at the main-workspace
-`.omo/evidence/update-system-overhaul/task-20/snapshot-probe.txt`. Here is the
-**complete output**, including the non-snapshot traffic and bootstrap:
+The complete command and unedited output are retained in operator-local scratch
+evidence, not an input to this standalone repository. Here is the **complete
+output**, including the non-snapshot traffic and bootstrap:
 
 ```text
 apt 3.0.3 (amd64)

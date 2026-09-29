@@ -3,9 +3,8 @@
 **Status: [EXISTS]** — new build stage, functional and tested (real privileged
 container: version check, D-Bus service ownership via the existing real-RAUC
 contract harness, `apt-mark` freeze proof), not yet exercised by a full board
-image build. This document is the canonical write-up; see also
-`.omo/notepads/update-system-overhaul/decisions.md` "Todo 22 RAUC version path
-— FINAL RULING" (2026-09-24, binding) for the policy decision this implements.
+image build. This document records the owner's binding 2026-09-24 decision to
+build RAUC 1.15.2 from source rather than ship Trixie's 1.13 package.
 
 ## Why this exists
 

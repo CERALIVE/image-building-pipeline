@@ -595,9 +595,9 @@ boot, the enabled `ceralive-partlabel-guard.service` checks actual `/`, `/boot`,
 and lets boot continue. `ceralive-healthcheck.sh` refuses mark-good on that marker.
 Evidence: `tests/partlabel-guard.test.sh` (matching GPT, mismatched B-slot fstab,
 same-disk, cross-disk, duplicate-label and mark-good refusal); registered in
-`tests/registry.tsv`. Offline transcripts:
-`/mnt/development/ceralive/.omo/evidence/update-system-overhaul/task-18/guard-test.txt`
-and `cross-disk.txt`. Direct RAUC installs outside this flash tool remain an
+`tests/registry.tsv`. Offline guard and cross-disk transcripts are retained in
+operator-local scratch evidence, not in this standalone repository. Direct RAUC
+installs outside this flash tool remain an
 independent deployment route and are not claimed to receive the pre-write check.
 **Location:** `lib/orchestrate.sh` (`CERALIVE_BENCH_LABELS` export + the
 `stage_repart_dir` label rewrite), `mkosi/customize/postinst.d/persistence.sh`
