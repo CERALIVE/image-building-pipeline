@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+python3 - "$repo/.github/workflows/publish-release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+workflow = Path(sys.argv[1]).read_text()
+step = workflow.split('- name: Publish, promote, refresh, or prune', 1)[1].split('- name: Remove materialized secrets', 1)[0]
+script = step.split('run: |', 1)[1]
+before_read = script.split('aws s3api get-object', 1)[0]
+for destination, source in (
+    ('AWS_ACCESS_KEY_ID', 'R2_IMAGES_ACCESS_KEY_ID'),
+    ('AWS_SECRET_ACCESS_KEY', 'R2_IMAGES_SECRET_ACCESS_KEY'),
+):
+    assert f'export {destination}="${source}"' in before_read, f'{destination} not exported before refresh pre-read'
+assert 'export AWS_DEFAULT_REGION=auto' in before_read, 'refresh pre-read missing AWS region'
+PY
+printf 'PASS: workflow refresh pre-read authenticates before its direct AWS calls\n'
 umask 077
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -205,6 +221,18 @@ openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/
 openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 assert test "$(openssl x509 -in "$tmp/bundle.pem" -noout -subject -nameopt RFC2253)" = 'subject=CN=CeraLive Bundle Signer'
 printf 'PASS: bundle leaf cryptographically valid but identity gate refuses it\n'
+openssl x509 -req -in "$tmp/manifest.csr" -CA "$tmp/signer/intermediate-ca.pem" \
+  -CAkey "$tmp/signer/intermediate-ca.key" -CAcreateserial -days 10 \
+  -extfile "$tmp/bundle.ext" -out "$tmp/dual-manifest.pem" >/dev/null 2>&1
+cp "$channel.sig" "$tmp/manifest-original.sig"
+openssl cms -sign -binary -in "$channel" -signer "$tmp/dual-manifest.pem" \
+  -inkey "$tmp/manifest.key" -certfile "$tmp/signer/intermediate-ca.pem" \
+  -outform DER -out "$channel.sig" >/dev/null
+if publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/dual-prune.log" 2>&1; then
+  printf 'FAIL: dual-EKU channel signer accepted by publisher prune\n' >&2; exit 1
+fi
+cp "$tmp/manifest-original.sig" "$channel.sig"
+printf 'PASS: publisher refuses a valid chain with bundle EKU under the correct manifest CN\n'
 cp "$channel" "$tmp/pre-interruption.json"
 cp "$channel.sig" "$tmp/pre-interruption.sig"
 if (STUB_KILL_AFTER_SIG=1 refresh rock-5b-plus beta 2 >"$tmp/interrupt.log" 2>&1) 2>/dev/null; then

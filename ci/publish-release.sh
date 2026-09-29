@@ -81,14 +81,16 @@ current_etag() {
 channel_key() { printf 'channels/%s/%s.json' "$1" "$board"; }
 release_prefix() { printf 'releases/%s/%s' "$board" "$1"; }
 verify_cms() {
-  local content="$1" signature="$2" eku
+  local content="$1" signature="$2" eku subject cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
   openssl cms -verify -binary -inform DER -in "$signature" -content "$content" \
     -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any \
     -signer "$tmp/read-signer.pem" -out /dev/null >/dev/null 2>&1 || return 1
+  [[ "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$tmp/read-signer.pem")" == 1 ]] || return 1
   eku="$(openssl x509 -in "$tmp/read-signer.pem" -noout -ext extendedKeyUsage)"
-  [[ "$eku" == *'Code Signing'* ]] || return 1
-  [[ "$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)" == *'CN=CeraLive OTA Manifest Signer'* ]]
+  [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || return 1
+  subject="$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)"
+  [[ "$subject" =~ $cn_pattern ]]
 }
 intent_key() {
   local c="$1" etag="$2"
@@ -250,9 +252,9 @@ PY
 }
 signer_check() {
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.key" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/intermediate-ca.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'dedicated manifest signer files absent'
-  local cn eku
+  local cn eku cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
   cn="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -subject -nameopt RFC2253)"
-  [[ "$cn" == *'CN=CeraLive OTA Manifest Signer'* ]] || die 'wrong manifest signer CN'
+  [[ "$cn" =~ $cn_pattern ]] || die 'wrong manifest signer CN'
   eku="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -ext extendedKeyUsage)"
   [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || die 'manifest signer must have codeSigning only'
   openssl verify -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -untrusted "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" >/dev/null
