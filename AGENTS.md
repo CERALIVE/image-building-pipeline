@@ -175,6 +175,12 @@ or deleting anything, and refuses on an absent or invalid signature. The workflo
 provides that root for prune too. Unmarked versions are never pruned. See
 `docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
 available for old consumers; this workflow does not replace it.
+The standalone `tools/flash-download.sh` reads the same resolved `BOARD_ID` for
+RAUC compatible (not the product manifest stem), checks the CMS leaf CN and
+codeSigning without emailProtection under `--keyring`, and retires stale raw
+output before extraction. Without a keyring it is explicitly unauthenticated;
+its SHA-256 checks alone cannot establish release identity. The refresh workflow
+exports R2 credentials to AWS before its direct JSON/ETag pre-read.
 
 **First-party pin currency is a separate CI gate from artifact integrity** [EXISTS].
 `ci/check-first-party-pins.py` checks both app architectures, repo-local
@@ -3795,6 +3801,9 @@ downgrades a newer installed version. The name list is forwarded
 base64 (`CERALIVE_FIRST_PARTY_NAMES_B64`, `PassEnvironment=`) — a subimage
 chroot cannot read a path above `$SRCDIR`, the same constraint documented for
 `manifests/target-release.env` above.
+Both writers fail the build on an absent, empty, malformed or incomplete names
+input rather than emitting an empty origin policy while the capability file
+declares `origin-protection`; the valid 18-name pin payload is unchanged.
 
 **The RemoveFiles= single-source mechanism — the central design decision.**
 `manifests/prune-paths.list` (one glob per line, `#` comments) is the ONE

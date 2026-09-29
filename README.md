@@ -362,11 +362,19 @@ earlier xz candidates are copied as-is. Both verify the original raw checksum.
 `refresh` takes a single board and an observed serial plus quoted JSON ETag,
 which CI rechecks before forwarding. A create-only recovery intent lets a retry
 authenticate and finish an interrupted signature-first write by JSON ETag CAS;
+the workflow exports its R2 credentials before the direct refresh pre-read.
 readers can still see a mismatched pair until then and must fail closed. See the
 runbook for the retention, RAUC-compatible identity (Orange's board ID differs
 from its product slug), verified bundle/index, and pointer-only refresh gates;
 existence of this publisher does not certify any candidate or authorize a
 stable/beta release.
+
+`tools/flash-download.sh` accepts a channel manifest only for the board's
+resolver-derived RAUC compatible; a provided `--keyring` additionally requires
+the dedicated manifest signer CN, Code Signing EKU and no E-mail Protection.
+Without `--keyring` it is unauthenticated by design: SHA-256 alone is not a
+release-identity check. Invalid pre-existing raw output is removed before a
+`--decompress` attempt, including when that attempt fails.
 
 For a new board with no installed OS, download the sealed `.raw.xz` candidate.
 `ci/verify-and-flash-candidate.sh` verifies its adjacent `.raw.xz.sha256`,
@@ -1143,7 +1151,7 @@ These are independent mechanisms with different triggers, and reading them as on
 the workspace. CeraUI's other RAUC contact is `rauc status`, which is read-only
 slot observation, not installation.
 
-RAUC 1.13 now has a dedicated non-login `ceralive-ota` streaming identity, persistent
+The pinned RAUC 1.15.2 has a dedicated non-login `ceralive-ota` streaming identity, persistent
 `/data/ceralive/rauc` metadata and `activate-installed=false` in every system.conf
 writer. The manual entrypoint accepts an absolute local bundle path or an HTTPS
 **verity** URL and holds `/run/lock/ceralive-update.lock` through install. A remote
@@ -1151,7 +1159,7 @@ writer. The manual entrypoint accepts an absolute local bundle path or an HTTPS
 bundles are verity; historical plain bundles remain permitted locally during the
 transition (no `bundle-formats=-plain` exclusion yet). Installation stages an inactive slot;
 it does not make it the next boot slot. Activation at clean idle shutdown and the
-scheduled/automatic trigger belong to the future CeraUI integration, not this
+scheduled/automatic trigger belong to CeraUI's capability-gated orchestrator, not this
 manual recovery script. Do not reboot expecting a staged slot to boot automatically.
 
 `/usr/lib/ceralive/update-capabilities.json` is generated from the actual
