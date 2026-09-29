@@ -12,11 +12,64 @@ channel="$tmp/site/channels/stable/rock-5b-plus.json"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/root.key" -out "$tmp/root.pem" -days 1 \
   -subj '/CN=Fixture Root' -addext 'basicConstraints=critical,CA:TRUE' \
   -addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
+make_intermediate() {
+  local name="$1" subject="$2" ca="${3:-$tmp/root}"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tmp/$name.key" -out "$tmp/$name.csr" \
+    -subj "$subject" >/dev/null 2>&1
+  printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$tmp/$name.ext"
+  openssl x509 -req -in "$tmp/$name.csr" -CA "$ca.pem" -CAkey "$ca.key" \
+    -CAcreateserial -days 1 -extfile "$tmp/$name.ext" -out "$tmp/$name.pem" >/dev/null 2>&1
+}
+make_intermediate intermediate '/O=CeraLive/CN=CeraLive RAUC Intermediate CA'
+make_intermediate bench '/O=CeraLive/CN=CeraLive RAUC Bench Intermediate CA'
+make_intermediate alternate '/O=CeraLive/CN=CeraLive Other Intermediate CA'
+make_intermediate near '/OU=Extra/O=CeraLive/CN=CeraLive RAUC Intermediate CA'
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/foreign-root.key" -out "$tmp/foreign-root.pem" -days 1 \
+  -subj '/CN=Foreign Root' -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
+make_intermediate foreign '/O=CeraLive/CN=CeraLive RAUC Intermediate CA' "$tmp/foreign-root"
 openssl req -newkey rsa:2048 -nodes -keyout "$tmp/leaf.key" -out "$tmp/leaf.csr" \
   -subj '/CN=CeraLive OTA Manifest Signer' >/dev/null 2>&1
 printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n' >"$tmp/leaf.ext"
-openssl x509 -req -in "$tmp/leaf.csr" -CA "$tmp/root.pem" -CAkey "$tmp/root.key" \
-  -CAcreateserial -days 1 -extfile "$tmp/leaf.ext" -out "$tmp/leaf.pem" >/dev/null 2>&1
+issue_leaf() {
+  local name="$1" ca="$2"
+  openssl x509 -req -in "$tmp/leaf.csr" -CA "$tmp/$ca.pem" -CAkey "$tmp/$ca.key" \
+    -CAcreateserial -days 1 -extfile "$tmp/leaf.ext" -out "$tmp/$name.pem" >/dev/null 2>&1
+}
+issue_leaf leaf intermediate
+issue_leaf bench-leaf bench
+issue_leaf root-leaf root
+issue_leaf alternate-leaf alternate
+issue_leaf near-leaf near
+issue_leaf foreign-leaf foreign
+printf '1000\n' >"$tmp/serial"
+: >"$tmp/cert-index"
+printf 'unique_subject = no\n' >"$tmp/cert-index.attr"
+cat >"$tmp/dates.cnf" <<EOF
+[ca]
+default_ca = fixture
+[fixture]
+database = $tmp/cert-index
+new_certs_dir = $tmp
+certificate = $tmp/intermediate.pem
+private_key = $tmp/intermediate.key
+serial = $tmp/serial
+default_md = sha256
+policy = names
+x509_extensions = leaf_ext
+[names]
+commonName = supplied
+[leaf_ext]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+EOF
+openssl ca -batch -config "$tmp/dates.cnf" -startdate 20250101000000Z -enddate 20250102000000Z \
+  -in "$tmp/leaf.csr" -out "$tmp/expired-leaf.pem" >/dev/null 2>&1
+openssl req -new -key "$tmp/leaf.key" -subj '/O=CeraLive/CN=CeraLive OTA Manifest Signer' \
+  -out "$tmp/future.csr" >/dev/null 2>&1
+openssl ca -batch -config "$tmp/dates.cnf" -startdate 20350101000000Z -enddate 20360101000000Z \
+  -in "$tmp/future.csr" -out "$tmp/future-leaf.pem" >/dev/null 2>&1
 python3 - "$release" "$channel" <<'PY'
 import hashlib, json, pathlib, sys
 root, channel = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
@@ -107,7 +160,13 @@ python3 - "$channel" "$CERALIVE_FLASH_BASE_URL" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]);p.write_text(p.read_text().replace('BASE',sys.argv[2]))
 PY
-sign() { openssl cms -sign -binary -in "$channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" -outform DER -out "$channel.sig" >/dev/null; }
+sign() {
+  local cert="${1:-$tmp/leaf.pem}" chain="${2-$tmp/intermediate.pem}"
+  local args=()
+  [[ -z "$chain" ]] || args=(-certfile "$chain")
+  openssl cms -sign -binary -in "$channel" -signer "$cert" -inkey "$tmp/leaf.key" \
+    "${args[@]}" -outform DER -out "$channel.sig" >/dev/null
+}
 sign
 run() { bash "$downloader" --board rock-5b-plus --out "$tmp/out" --jobs 2 --keyring "$tmp/root.pem"; }
 orange_channel="$tmp/site/channels/stable/orange-pi-5-plus.json"
@@ -123,7 +182,8 @@ for entry in ('bundle', 'flash'):
     manifest[entry]['url'] = manifest[entry]['url'].replace('/rock-5b-plus/', '/orange-pi-5-plus/')
 target.write_text(json.dumps(manifest))
 PY
-openssl cms -sign -binary -in "$orange_channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" -outform DER -out "$orange_channel.sig" >/dev/null
+openssl cms -sign -binary -in "$orange_channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" \
+  -certfile "$tmp/intermediate.pem" -outform DER -out "$orange_channel.sig" >/dev/null
 if ! bash "$downloader" --board orange-pi-5-plus --out "$tmp/orangeout" --keyring "$tmp/root.pem" >"$tmp/orange.log" 2>&1; then
   printf 'FAIL: correctly signed Orange manifest refused\n' >&2; exit 1
 fi
@@ -145,6 +205,79 @@ fi
 cp "$tmp/orange-channel.json" "$orange_channel"
 cp "$tmp/orange-channel.sig" "$orange_channel.sig"
 printf 'PASS: signed Orange manifest and both cross-board refusals\n'
+mkdir -p "$tmp/tools"
+ln -s "$repo/lib" "$tmp/lib"
+python3 - "$downloader" "$tmp/tools/no-compatible.sh" <<'PY'
+import pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+check="assert m['compatible'] == compatible"
+assert text.count(check)==1
+pathlib.Path(sys.argv[2]).write_text(text.replace(check,'pass'))
+PY
+for pair in "rock-5b-plus:$channel:ceralive-rock-5b-plus-extra" \
+            "orange-pi-5-plus:$orange_channel:ceralive-orange-pi-5-plus"; do
+  IFS=: read -r selected target wrong <<<"$pair"
+  cp "$target" "$tmp/$selected-good.json"
+  cp "$target.sig" "$tmp/$selected-good.sig"
+  python3 - "$target" "$wrong" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);m=json.loads(p.read_text());m['compatible']=sys.argv[2];p.write_text(json.dumps(m))
+PY
+  openssl cms -sign -binary -in "$target" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" \
+    -certfile "$tmp/intermediate.pem" -outform DER -out "$target.sig" >/dev/null
+  if bash "$downloader" --board "$selected" --out "$tmp/out" --keyring "$tmp/root.pem" >"$tmp/$selected-compatible.log" 2>&1; then
+    printf 'FAIL: same-board wrong compatible accepted: %s\n' "$selected" >&2; exit 1
+  fi
+  if ! bash "$tmp/tools/no-compatible.sh" --board "$selected" --out "$tmp/compatible-mutant-out" --keyring "$tmp/root.pem" >"$tmp/$selected-compatible-mutant.log" 2>&1; then
+    printf 'FAIL: compatible mutation did not accept %s\n' "$selected" >&2
+    cat "$tmp/$selected-compatible-mutant.log" >&2
+    exit 1
+  fi
+  cp "$tmp/$selected-good.json" "$target"
+  cp "$tmp/$selected-good.sig" "$target.sig"
+done
+printf 'PASS: same-board wrong compatible refused for both boards; removing comparison accepts both\n'
+sign "$tmp/bench-leaf.pem" "$tmp/bench.pem"
+bash "$downloader" --board rock-5b-plus --out "$tmp/issuer-accepted-out" --keyring "$tmp/root.pem" >"$tmp/bench-issuer.log" 2>&1
+sign
+for variant in root alternate near; do
+  chain="$tmp/$variant.pem"
+  [[ "$variant" != root ]] || chain=''
+  sign "$tmp/$variant-leaf.pem" "$chain"
+  if run >"$tmp/$variant-issuer.log" 2>&1; then
+    printf 'FAIL: %s-issued manifest signer accepted\n' "$variant" >&2; exit 1
+  fi
+  issuer="$(openssl x509 -in "$tmp/$variant-leaf.pem" -noout -issuer -nameopt RFC2253)"
+  grep -F -- "${issuer#issuer=}" "$tmp/$variant-issuer.log" >/dev/null || {
+    printf 'FAIL: refused %s issuer was not diagnosed\n' "$variant" >&2; exit 1;
+  }
+done
+for variant in foreign expired future; do
+  chain="$tmp/intermediate.pem"
+  [[ "$variant" != foreign ]] || chain="$tmp/foreign.pem"
+  sign "$tmp/$variant-leaf.pem" "$chain"
+  if run >"$tmp/$variant-invalid-chain.log" 2>&1; then
+    printf 'FAIL: %s manifest signer accepted against root keyring\n' "$variant" >&2; exit 1
+  fi
+  grep -F 'channel CMS verification failed' "$tmp/$variant-invalid-chain.log" >/dev/null
+done
+python3 - "$downloader" "$tmp/tools/no-issuer.sh" <<'PY'
+import pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+check='manifest_signer_issuer_allowed "$issuer" || die "channel signer issuer refused: $issuer"'
+assert text.count(check)==1
+pathlib.Path(sys.argv[2]).write_text(text.replace(check, ':'))
+PY
+for variant in root alternate; do
+  chain="$tmp/$variant.pem"
+  [[ "$variant" != root ]] || chain=''
+  sign "$tmp/$variant-leaf.pem" "$chain"
+  bash "$tmp/tools/no-issuer.sh" --board rock-5b-plus --out "$tmp/issuer-mutant-out" --keyring "$tmp/root.pem" >"$tmp/$variant-issuer-mutant.log" 2>&1 || {
+    printf 'FAIL: removing issuer check did not accept %s-issued signer\n' "$variant" >&2; exit 1;
+  }
+done
+sign
+printf 'PASS: production and bench issuers accepted; root-direct, alternate and near-miss refused; foreign-root/expired/future chains refused; issuer mutation accepts root/alternate\n'
 openssl req -newkey rsa:2048 -nodes -keyout "$tmp/bundle.key" -out "$tmp/bundle.csr" \
   -subj '/CN=CeraLive OTA Manifest Signer' >/dev/null 2>&1
 printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection\n' >"$tmp/bundle.ext"
@@ -228,7 +361,6 @@ grep -q 'full flash SHA-256 mismatch' "$tmp/mismatch.log"
 [[ -z "$(compgen -G "$tmp/badout/rock-5b-plus/2026.10.1/.flash.raw.xz.*")" ]] || exit 1
 printf 'PASS: final full-hash mismatch refused (valid per-part hashes)\n'
 
-mkdir -p "$tmp/tools"
 python3 - "$downloader" "$tmp/tools/no-full-check.sh" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]).read_text()
@@ -236,7 +368,6 @@ old='sha_ok "$flash_tmp" "$flash_size" "$flash_sha" || die \'full flash SHA-256 
 assert p.count(old)==1
 pathlib.Path(sys.argv[2]).write_text(p.replace(old, ':'))
 PY
-ln -s "$repo/lib" "$tmp/lib"
 mkdir -p "$tmp/mutantout"
 bash "$tmp/tools/no-full-check.sh" --board rock-5b-plus --out "$tmp/mutantout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mutant.log" 2>&1
 printf 'PASS: removing full SHA guard makes mismatch fixture wrongly succeed (non-vacuity)\n'

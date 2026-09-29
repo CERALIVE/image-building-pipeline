@@ -2,6 +2,18 @@
 set -euo pipefail
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# Production and non-production bench RAUC intermediates are the only manifest issuers.
+readonly -a MANIFEST_SIGNER_ISSUERS=(
+  'CN=CeraLive RAUC Intermediate CA,O=CeraLive'
+  'CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive'
+)
+manifest_signer_issuer_allowed() {
+  local accepted
+  for accepted in "${MANIFEST_SIGNER_ISSUERS[@]}"; do
+    [[ "$1" == "$accepted" ]] && return 0
+  done
+  return 1
+}
 usage() {
   printf '%s\n' 'flash-download.sh --board B [--channel stable|beta|drill] [--out DIR] [--jobs 8] [--keyring ROOT.pem] [--decompress]' \
     'Without --keyring: UNAUTHENTICATED (SHA-256 integrity only; no trusted release identity).'
@@ -78,6 +90,9 @@ if [[ -n "$keyring" ]]; then
   [[ "$subject" =~ $cn_pattern ]] || die 'channel signer CN must be CeraLive OTA Manifest Signer'
   eku="$(openssl x509 -in "$tmp/channel-signer.pem" -noout -ext extendedKeyUsage)"
   [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || die 'channel signer must have Code Signing without E-mail Protection EKU'
+  issuer="$(openssl x509 -in "$tmp/channel-signer.pem" -noout -issuer -nameopt RFC2253)" || die 'channel signer issuer unreadable'
+  issuer="${issuer#issuer=}"
+  manifest_signer_issuer_allowed "$issuer" || die "channel signer issuer refused: $issuer"
 else
   printf '%s\n' 'WARNING: unsigned verification skipped; sha256 only (no authenticated release identity)' >&2
 fi
