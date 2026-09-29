@@ -73,6 +73,13 @@ SH
   bash "$TEST_STATE_HELPER" set-state B bad
 }
 
+teardown() {
+  if [[ -n "${DPKG_HOLDER_PID:-}" ]]; then
+    kill "$DPKG_HOLDER_PID" 2>/dev/null || true
+    wait "$DPKG_HOLDER_PID" 2>/dev/null || true
+  fi
+}
+
 @test "broken dpkg refuses mark-good even when the current boot marker exists" {
   printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
   export TEST_DPKG_BAD=1
@@ -91,6 +98,39 @@ SH
   run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
+}
+
+@test "an app restart during a live dpkg transaction cannot requeue the boot healthcheck" {
+  local unit="$ROOT/mkosi/runtime/ceralive-healthcheck.service"
+  local lock="$BATS_TEST_TMPDIR/lock-frontend"
+  printf 'pending\n' > "$CERALIVE_DPKG_UPDATES_DIR/0000"
+  flock -x "$lock" sleep 10 &
+  DPKG_HOLDER_PID=$!
+  local busy=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! flock -n "$lock" true; then busy=1; break; fi
+    sleep 0.01
+  done
+  [ "$busy" -eq 1 ]
+
+  # This is the exact dpkg state seen on the Orange Pi. An explicit check must
+  # still refuse it; the unit must not be stopped/restarted by ceralive's restart.
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'dpkg updates directory is not empty'* ]]
+  ! grep -q mark-good "$TEST_CALLS"
+  grep -Fxq 'Wants=ceralive.service' "$unit"
+  grep -Eq '^After=.*ceralive\.service' "$unit"
+  ! grep -Eq '^(Requires|BindsTo|PartOf|Requisite)=.*ceralive\.service' "$unit"
+}
+
+@test "an interrupted dpkg with no live transaction still fails closed" {
+  printf 'pending\n' > "$CERALIVE_DPKG_UPDATES_DIR/0000"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'dpkg updates directory is not empty'* ]]
+  ! grep -q mark-good "$TEST_CALLS"
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
 }
 
 @test "dpkg audit reporting a broken package refuses mark-good and triggers recovery" {
@@ -294,5 +334,5 @@ PY
 @test "systemd must dispatch the boot-aware predicate even with a persistent marker" {
   run grep -Eq '^ConditionPathExists=.*slot-marked-good' "$ROOT/mkosi/runtime/ceralive-healthcheck.service"
   [ "$status" -eq 1 ]
-  grep -Fxq Requires=ceralive.service "$ROOT/mkosi/runtime/ceralive-healthcheck.service"
+  grep -Fxq Wants=ceralive.service "$ROOT/mkosi/runtime/ceralive-healthcheck.service"
 }
