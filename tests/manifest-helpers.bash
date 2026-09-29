@@ -774,18 +774,18 @@ run_baseline_compare() {
 
 
 
-# repro_prereqs — the deterministic signer needs mksquashfs + openssl + the dev
-# PKI. Anything missing → the test SKIPs (still green) rather than false-fails.
+# repro_prereqs — verity signing needs RAUC, ext4 tools and dev PKI.
 repro_prereqs() {
-  command -v mksquashfs >/dev/null 2>&1 || return 1
-  command -v openssl    >/dev/null 2>&1 || return 1
+  command -v rauc >/dev/null 2>&1 || return 1
+  command -v mkfs.ext4 >/dev/null 2>&1 || return 1
+  command -v dumpe2fs >/dev/null 2>&1 || return 1
   [ -s "$PIPELINE_DIR/.dev-keys/leaf-signing.key" ] || return 1
   return 0
 }
 
 # build_repro_bundle <out-dir> <source-date-epoch> — build the SAME mock rootfs
 # into <out-dir> with a fixed compatible/version/ts. Echoes nothing; the bundle
-# lands at <out-dir>/fixed.raucb.
+# lands at <out-dir>/fixed.raucb, with a verified verity manifest.
 build_repro_bundle() {
   local out="$1" sde="$2"
   local tree="$BATS_TEST_TMPDIR/repro-tree"
@@ -946,7 +946,7 @@ run_ota_guard() {
   render_ceralive_update "$conf" "$data" > "$script"
   chmod +x "$script"
   local bin; bin="$(ota_stub_bin)"
-  run env ACTIVE_SVCS="$active" PATH="$bin:$PATH" bash "$script"
+  run env ACTIVE_SVCS="$active" CERALIVE_UPDATE_LOCK_PATH="$BATS_TEST_TMPDIR/manual-update.lock" PATH="$bin:$PATH" bash "$script"
 }
 
 
@@ -1552,7 +1552,7 @@ dev_delta_expected() {
   # real trixie arm64 index). Its diagnostic role is covered more broadly by
   # `pipewire-bin`'s pw-cli/pw-dump/pw-top, which ship on EVERY image.
   printf '%s\n' \
-    alsa-utils can-utils htop i2c-tools iotop iperf3 lsof nano \
+    alsa-utils can-utils ffmpeg htop i2c-tools iotop iperf3 lsof nano \
     netcat-openbsd nethogs pciutils python3 socat strace \
     tcpdump usbutils vnstat | sort
 }

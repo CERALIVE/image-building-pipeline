@@ -1,0 +1,29 @@
+[Unit]
+Description=CeraLive verified local mirror of the healthy running slot into the other slot
+Documentation=file:///usr/share/doc/ceralive/partition-contract.md
+# Task 26 (Metis G3/G4/G14). NEVER enabled/started at boot — this unit carries
+# NO [Install] section on purpose. It is started on demand, exclusively by the
+# future lagged-mirror orchestrator (todo 27's healthcheck / the CeraUI update
+# agent) via `systemctl start --no-block ceralive-slot-sync.service`, after the
+# booted slot's OWN healthy-state.json has already survived a reboot and a
+# streaming healthcheck. There is nothing here for `preset-all` to resurrect.
+Requires=ceralive-healthcheck.service
+After=ceralive-healthcheck.service
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-slot-sync run
+# This is a full rsync -H of a whole rootfs slot: real I/O and CPU cost that
+# must never contend with the encode/bond media path or an operator's UI while
+# it runs. Idle scheduling class + the lowest CPU nice both push it behind
+# every normal-priority unit on the box — including a stream that starts
+# mid-sync, which the plan explicitly allows (Todo 26/27's "allowed during
+# streams (local-only)").
+Nice=19
+IOSchedulingClass=idle
+# The script itself owns the SIGTERM contract (unmount, leave the target slot
+# bad, exit 143) — do not shorten this below the time a real ext4 rsync +
+# dpkg --verify + e2fsck pass can legitimately take on a full slot.
+TimeoutStopSec=120
+KillSignal=SIGTERM

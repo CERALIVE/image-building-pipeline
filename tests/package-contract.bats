@@ -1051,6 +1051,7 @@ PINS
   [[ "$output" == *"gstreamer1.0-libuvcsrc=2026.9.0"* ]]
   [[ "$output" == *"ceralive-device"* ]]
   [[ "$output" == *"srtla"* ]]
+  [[ "$output" == *"ceralive-apt-credentials=1.0.0"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]
@@ -1086,6 +1087,33 @@ CONTROL
   ' bash "$FETCH_DEBS" "$debs"
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$deb" | awk '{print $1}')" = "$digest" ]
+}
+
+@test "first-party validation: one apt credentials Architecture: all archive serves both index architectures" {
+  command -v dpkg-deb >/dev/null || skip "dpkg-deb is required to build the fixture"
+  local root="$BATS_TEST_TMPDIR/apt-credentials-all" debs
+  debs="$root/debs"
+  mkdir -p "$root/pkg/DEBIAN" "$debs"
+  cat >"$root/pkg/DEBIAN/control" <<'CONTROL'
+Package: ceralive-apt-credentials
+Version: 1.0.0
+Architecture: all
+Maintainer: Test <test@example.invalid>
+Description: fixture (no key material)
+CONTROL
+  dpkg-deb --build "$root/pkg" "$debs/ceralive-apt-credentials_1.0.0_all.deb" >/dev/null
+  local digest
+  digest="$(sha256sum "$debs/ceralive-apt-credentials_1.0.0_all.deb" | awk '{print $1}')"
+  local arch
+  for arch in arm64 amd64; do
+    run env ARCH="$arch" bash -c '
+      source "$1"
+      FIRST_PARTY_APT_PKGS=(ceralive-apt-credentials)
+      validate_first_party_staged_debs "$2" ceralive-apt-credentials=1.0.0
+    ' bash "$FETCH_DEBS" "$debs"
+    [ "$status" -eq 0 ]
+    [ "$(sha256sum "$debs/ceralive-apt-credentials_1.0.0_all.deb" | awk '{print $1}')" = "$digest" ]
+  done
 }
 
 @test "first-party validation: arch-dependent package still rejects an architecture mismatch" {
@@ -1182,17 +1210,38 @@ CONTROL
   [[ "$output" == *"empty placeholder"* ]]
 }
 
-@test "apt ceralive (T2.6): the apt.ceralive.tv origin is pinned at Pin-Priority 990" {
+@test "apt ceralive (T2.6): each exact first-party name prefers apt.ceralive.tv at 990, all other origins at -1 (Todo 29)" {
   local dir="$BATS_TEST_TMPDIR/apt-prefs/preferences.d"
+  local names_b64; names_b64="$(base64 -w0 "$PIPELINE_DIR/manifests/first-party-apt-names.txt")"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    CERALIVE_FIRST_PARTY_NAMES_B64="$names_b64" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
   [ "$status" -eq 0 ]
-  [ -f "$dir/ceralive" ]
-  grep -q '^Package: \*$' "$dir/ceralive"
-  grep -q '^Pin: origin apt.ceralive.tv$' "$dir/ceralive"
-  grep -q '^Pin-Priority: 990$' "$dir/ceralive"
+  [ ! -e "$dir/ceralive" ]   # the former Package: * wildcard file must be GONE
+  [ -f "$dir/ceralive-origin" ]
+  grep -qxF 'Package: cerastream' "$dir/ceralive-origin"
+  grep -qxF 'Package: ceralive-device' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin *' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
+  # every 990 stanza has a matching -1 stanza for the SAME package name
+  local n990 nminus1
+  n990="$(grep -cxF 'Pin-Priority: 990' "$dir/ceralive-origin")"
+  nminus1="$(grep -cxF 'Pin-Priority: -1' "$dir/ceralive-origin")"
+  [ "$n990" -eq 18 ]
+  [ "$nminus1" -eq 18 ]
   grep -q '^  install_apt_preferences$' "$APT_CERALIVE_REPO"
   printf '%s\n' "$output"
+}
+
+@test "apt ceralive (T2.6): missing first-party names refuse an unprotected image" {
+  local dir="$BATS_TEST_TMPDIR/apt-prefs-empty/preferences.d"
+  run env -u CERALIVE_FIRST_PARTY_NAMES_B64 APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
+  [ "$status" -ne 0 ]
+  [ ! -e "$dir/ceralive-origin" ]
+  [[ "$output" == *"CERALIVE_FIRST_PARTY_NAMES_B64 is required"* ]]
 }
 
 # The guard ABOVE proves the customize MODULE (apt-ceralive-repo.sh) pins the origin
@@ -1240,7 +1289,8 @@ CONTROL
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" >"$armored"
 
-  local armored_b64 binary_b64
+  local armored_b64 binary_b64 awk_bin
+  awk_bin="$(readlink -f "$(command -v awk)")"
   armored_b64="$(base64 -w0 "$armored")"
   run env APT_GPG_PUBLIC_B64="$armored_b64" "$dearmor"
   [ "$status" -eq 0 ]
@@ -1290,6 +1340,9 @@ work="$3"
 final=/usr/share/keyrings/ceralive-archive-keyring.gpg
 expected="$work/expected-runtime-keyring.gpg"
 old="$work/old-runtime-keyring.gpg"
+CERALIVE_RUNTIME_SRC="$5"
+CERALIVE_FIRST_PARTY_NAMES_B64="$(base64 -w0 <"$6")"
+die() { printf 'runtime-keyring: %s\n' "$*" >&2; exit 1; }
 
 extract_fn() {
   awk -v fn="$1" '
@@ -1300,6 +1353,7 @@ extract_fn() {
 }
 
 mkdir -p "$work/bin"
+ln -s "$4" "$work/bin/awk"
 mount -t tmpfs tmpfs /etc
 mount -t tmpfs tmpfs /usr/share
 mkdir -p /etc/opt/ceralive /etc/apt/certs /etc/apt/apt.conf.d /etc/apt/sources.list.d \
@@ -1405,7 +1459,7 @@ printf 'runtime-keyring: success published expected bytes mode=0644 owner=root:r
 REPRO
 
   run unshare -rm --map-root-user bash "$repro" "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
-    "$binary_b64" "$BATS_TEST_TMPDIR"
+    "$binary_b64" "$BATS_TEST_TMPDIR" "$awk_bin" "$PIPELINE_DIR/mkosi/runtime" "$PIPELINE_DIR/manifests/first-party-apt-names.txt"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
   [[ "$output" != *"$binary_b64"* ]]
@@ -1603,17 +1657,25 @@ REPRO
   # Explicit regression pin on top of the structural lockstep guard: this value
   # is consumed inside a subimage chroot, so a name in env_names alone reads
   # EMPTY there — silently — and the stager degrades to installing nothing.
-  grep -Eq '^[[:space:]]+CERALIVE_BENCH_LABELS CERALIVE_BOARD$' "$LIB_DIR/orchestrate.sh"
+  local env_names env_without_board env_re
+  env_names="$(sed -n '/^[[:space:]]*local env_names=(/,/^[[:space:]]*)/p' "$LIB_DIR/orchestrate.sh")"
+  [ -n "$env_names" ]
+  env_re='^[[:space:]]+([A-Z0-9_]+[[:space:]]+)*CERALIVE_BOARD([[:space:]]+[A-Z0-9_]+)*[[:space:]]*$'
+  grep -Eq "$env_re" <<< "$env_names"
+  env_without_board="$(sed -E 's/(^|[[:space:]])CERALIVE_BOARD([[:space:]]|$)/\1CERALIVE_BOARD_BACKUP\2/g' <<< "$env_names")"
+  [ "$env_without_board" != "$env_names" ]
+  ! grep -Eq "$env_re" <<< "$env_without_board"
+  ! grep -Eq "$env_re" <<< '# CERALIVE_BOARD'
 
-  local pass_names
-  pass_names="$(sed -n 's/^PassEnvironment=//p' "$PIPELINE_DIR/mkosi/mkosi.conf")"
+  local pass_names pass_without_board pass_re
+  pass_names="$(sed -n '/^PassEnvironment=/p' "$PIPELINE_DIR/mkosi/mkosi.conf")"
   [ -n "$pass_names" ]
-
-  local n found=0
-  for n in $pass_names; do
-    [ "$n" = CERALIVE_BOARD ] && found=1
-  done
-  [ "$found" -eq 1 ]
+  pass_re='^PassEnvironment=([A-Z0-9_]+[[:space:]]+)*CERALIVE_BOARD([[:space:]]+[A-Z0-9_]+)*[[:space:]]*$'
+  grep -Eq "$pass_re" <<< "$pass_names"
+  pass_without_board="$(sed -E 's/(^|[[:space:]])CERALIVE_BOARD([[:space:]]|$)/\1CERALIVE_BOARD_BACKUP\2/g' <<< "$pass_names")"
+  [ "$pass_without_board" != "$pass_names" ]
+  ! grep -Eq "$pass_re" <<< "$pass_without_board"
+  ! grep -Eq "$pass_re" <<< '# PassEnvironment=CERALIVE_BOARD'
 }
 
 # ===========================================================================

@@ -51,7 +51,7 @@ nginx-light              # terminates HTTPS on 443 and reverse-proxies to the Ce
 # --- Network management -------------------------------------------------------
 network-manager          # primary connection manager (WiFi/Ethernet/modem); CeraUI drives it
 systemd-resolved         # DNS resolver; NetworkManager uses dns=systemd-resolved (postinst-lib.sh). On Debian trixie this is still a SEPARATE package (257.13-1~deb13u1) — it was bundled in systemd on v1's Armbian base, so it must stay named explicitly.
-dnsmasq                  # DHCP/DNS for hostapd AP mode + local resolution
+dnsmasq                  # NetworkManager shared-mode AP DHCP/DNS child (not the masked standalone unit)
 iproute2                 # `ip` — CeraUI route/policy-route read-only diagnostics
 net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it every ~5s
                          # (apps/backend network-interfaces.ts run("ifconfig", [])) to build
@@ -64,7 +64,6 @@ net-tools                # ships /sbin/ifconfig — CeraUI's backend polls it ev
                          # (confirmed on real Rock 5B+ hardware). CeraUI's ifconfig text-parsing is
                          # deeply embedded in its test suite; adding the one legacy binary is the
                          # minimal-risk fix, NOT rewriting network-interfaces.ts onto `ip`.
-ipcalc                   # subnet math in the NM dispatcher (customize-image.sh:358)
 
 # --- USB modem bring-up -------------------------------------------------------
 usb-modeswitch           # flips USB modems out of storage mode into modem mode —
@@ -98,7 +97,6 @@ gstreamer1.0-plugins-ugly
 gstreamer1.0-libav       # libav-backed encode/decode fallback
 v4l-utils                # v4l2-ctl + media-ctl for HDMI/UVC capture device control
 libv4l-0                 # rockchip-multimedia-config postinst copies libv4l2.so.0.0.0
-ffmpeg                   # transcode/probe utility for the pipeline
 
 # --- Modems (LTE/5G on every board) -------------------------------------------
 # These pull the FULL Debian modem dependency tree (libmm-glib0, libqmi-glib5,
@@ -150,7 +148,6 @@ wireless-regdb           # wireless regulatory DB (/lib/firmware/regulatory.db +
                          # --no-install-recommends); named explicitly or cfg80211 boots with
                          # "Direct firmware load for regulatory.db failed with error -2" and
                          # NetworkManager finds no usable WiFi interface (real-HW UART, 2026-07-16).
-hostapd                  # AP mode (device hotspot for config)
 
 # --- Bluetooth ----------------------------------------------------------------
 bluez                    # the Bluetooth userspace stack: bluetoothd + bluetoothctl/btmgmt.
@@ -333,7 +330,7 @@ curl                     # http client — CeraUI/update flows + on-device `curl
 sudo                     # required by CeraUI's narrow /etc/sudoers.d/ceralive-addon-helper
                          # drop-in; without the sudo binary add-on enable/disable is dead code.
 
-# --- Console (HDMI readability at boot) ---------------------------------------
+# --- Console (UART recovery) ---------------------------------------------------
 login                    # ships /bin/login for the UART/serial getty recovery path. On a
                          # real bench board's SD card, chroots of BOTH RAUC rootfs slots
                          # reported `dpkg -l login` as `un` (never installed), so
@@ -346,18 +343,6 @@ login                    # ships /bin/login for the UART/serial getty recovery p
                          # new dependencies beyond already-installed libc6, libpam0g,
                          # libpam-modules and debconf. Keep it explicit so every image retains
                          # UART recovery; see mkosi-image-contract.bats' login guards.
-kbd                      # setfont/loadkeys. KEPT: ceralive-console-font.service (enabled in
-                         # multi-user.target.wants) invokes `setfont` directly, and `setfont`
-                         # ships ONLY here. CORRECTION (todo 19, audited): the previous
-                         # annotation also claimed systemd-vconsole-setup shells out to these —
-                         # that is FALSE for this image. A built rootfs carries NO *vconsole*
-                         # file anywhere (no unit, no binary) and no /etc/vconsole.conf, and
-                         # console-setup/keyboard configs are absent too, so there is no
-                         # vconsole path to break. kbd stays because it is one half of a live,
-                         # shipped, enabled unit whose OTHER half — a real PSF provider — is
-                         # the tracked gap (size-notes.md §11); dropping kbd would turn that
-                         # one-package fix into a two-package one and leave an enabled unit
-                         # naming a binary that does not exist.
 # fonts-terminus         # REMOVED (todo 31, measured). The annotation this replaces claimed
                          # "large bitmap fonts (ter-v32n etc.) readable at 4K on fbcon" — that is
                          # factually wrong, and re-verified still wrong on trixie (todo 10):
@@ -421,26 +406,50 @@ conntrack                # ships /usr/sbin/conntrack — the ONLY way to delete 
                          # removes rules, never conntrack state. Needs CONFIG_NF_CT_NETLINK
                          # (present as a module on the shipped vendor kernel — see
                          # docs/notes/sharing-qdisc-matrix.md).
-rauc                     # A/B update client. decisions.md T5. TRIXIE SHIPS 1.13-3+deb13u1
-                         # — a five-minor jump from the bookworm 1.8-2 this image used to  # suite-literal-ok: states the previously targeted RAUC version being migrated away from
-                         # target, so every "RAUC 1.8 …" statement in this repo was
-                         # re-checked in todo 10. The two that MATTER are unchanged:
-                         # 1.13 still shells out to `unsquashfs` for a plain-format
-                         # bundle's manifest and still to `mkfs.ext4` for an ext4 slot
-                         # write — and both are only `Suggests:` of the `rauc` package
-                         # (verified in the real trixie index), never `Depends:`, so
-                         # `squashfs-tools` and `e2fsprogs` below MUST stay explicit
-                         # entries or OTA breaks on-device exactly as it did before.
-                         # The `plain` bundle format is also still supported (1.10 only
-                         # began WARNING when no format is stated; verity/crypt are not
-                         # mandatory), so existing bundles keep installing.
-                         # The signing-EKU consequence is real but belongs to todo 12
-                         # (RAUC bundle-compat semantics) and is deliberately NOT actioned
-                         # here — see mkosi/runtime/rauc/system.conf for the note.
-rauc-service             # ships /usr/lib/systemd/system/rauc.service (D-Bus daemon). The
-                         # daemon is STILL split out of `rauc` (binary-only) on trixie, and
-                         # `rauc-service` is `Architecture: all` there; the runtime postinst
-                         # enables rauc.service, so the service pkg remains required.
+# rauc / rauc-service — SUPERSEDED here by the platform-layer pin, Todo 22 RAUC
+# version path ruling (decisions.md, 2026-09-24). Trixie's stock 1.13-3+deb13u1
+# cannot mount a dm-verity RAUC bundle on this repo's Linux 7.2 track (upstream
+# fix landed in v1.15.1, PR #1846); rather than backport a narrow patch onto
+# 1.13, this pipeline now BUILDS upstream v1.15.2 from source, packaged with
+# Debian's own unmodified packaging directory (zero CeraLive patches — see
+# manifests/rauc-deb-versions.txt), and installs it via
+# mkosi/mkosi.images/runtime/mkosi.postinst's `mkosi-install` from the local
+# package directory stage_rauc_build ([2c/9]) stages — the SAME mechanism
+# gstreamer1.0-rockchip1 -> -ceralive and librga2 -> -ceralive already use, one
+# layer over (runtime, not platform — RAUC ships on x86 too, and platform is
+# arch-gated arm64-only). Both rows below are commented out, matching this
+# repo's own one-line-rollback convention: reinstate the two plain lines (and
+# delete mkosi.postinst + stage_rauc_build's call in orchestrate.sh) to revert
+# to stock Debian trixie RAUC.
+#
+# The original entries + their full historical rationale (still true of
+# Debian's own 1.13-3+deb13u1 packaging, which the source-built 1.15.2-1
+# scaffolding is unmodified from) are preserved here, commented:
+#
+# rauc                     # A/B update client. decisions.md T5. TRIXIE SHIPS 1.13-3+deb13u1
+#                          # — a five-minor jump from the bookworm 1.8-2 this image used to  # suite-literal-ok: states the previously targeted RAUC version being migrated away from
+#                          # target, so every "RAUC 1.8 …" statement in this repo was
+#                          # re-checked in todo 10. The two that MATTER are unchanged:
+#                          # 1.13 still shells out to `unsquashfs` for a plain-format
+#                          # bundle's manifest and still to `mkfs.ext4` for an ext4 slot
+#                          # write — and both are only `Suggests:` of the `rauc` package
+#                          # (verified in the real trixie index), never `Depends:`, so
+#                          # `squashfs-tools` and `e2fsprogs` below MUST stay explicit
+#                          # entries or OTA breaks on-device exactly as it did before.
+#                          # The `plain` bundle format is also still supported (1.10 only
+#                          # began WARNING when no format is stated; verity/crypt are not
+#                          # mandatory), so existing bundles keep installing.
+#                          # The signing-EKU consequence is real but belongs to todo 12
+#                          # (RAUC bundle-compat semantics) and is deliberately NOT actioned
+#                          # here — see mkosi/runtime/rauc/system.conf for the note.
+# rauc-service             # ships /usr/lib/systemd/system/rauc.service (D-Bus daemon). The
+#                          # daemon is STILL split out of `rauc` (binary-only) on trixie, and
+#                          # `rauc-service` is `Architecture: all` there; the runtime postinst
+#                          # enables rauc.service, so the service pkg remains required.
+#
+# squashfs-tools and e2fsprogs below remain required regardless of RAUC's
+# source (both `unsquashfs`/`mkfs.ext4` reasoning is unchanged by the version
+# bump — Debian's own packaging carries the same Suggests:-only relationship).
 squashfs-tools           # ships /usr/bin/unsquashfs — rauc shells out to it to extract the
                          # manifest (and rootfs image) from a plain-format .raucb at
                          # `rauc info`/`rauc install` time. Absent it, install fails after
@@ -459,9 +468,6 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
                          #   NOTE: this entry alone is too LATE for the build — the runtime layer installs shared.list
                          #   after the platform layer already generated the initrd, so platform/mkosi.postinst installs
                          #   zstd itself ahead of the kernel package. Keep both; this one owns the on-device presence.
-u-boot-tools             # fw_setenv/fw_getenv + mkimage — RAUC bootloader env / boot
-                         # selector. Generic Debian pkg (present on amd64 too); the
-                         # board-specific U-Boot BLOB is a Platform-layer BSP concern.
 # rauc-hawkbit-updater   # Stage 7 OTA (task 41). STILL DELIBERATELY a comment, NOT an
                          # active apt line — the trixie migration did NOT change this
                          # verdict, only the suite it is stated against.

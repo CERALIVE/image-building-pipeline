@@ -6,9 +6,11 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # unconfirmed and the bootcount adapter rolls it back on the next reboot.
 #
 # Run after the app and NetworkManager daemon are up. The SRT reach check is
-# explicitly non-fatal when no uplink exists. Requires=ceralive.service: if CeraUI never comes up there is
-# nothing to confirm, so the gate must not run (the slot will roll back).
-Requires=ceralive.service
+# explicitly non-fatal when no uplink exists. Wants, not Requires: a package
+# postinst restarts ceralive.service while dpkg owns /var/lib/dpkg/updates;
+# a hard dependency stops/restarts this boot-only check mid-transaction.
+# If the app cannot start, check_service_active fails and leaves the slot unconfirmed.
+Wants=ceralive.service
 After=ceralive.service NetworkManager.service
 Wants=NetworkManager.service
 # The script scopes idempotency to kernel boot_id. A persistent-path condition

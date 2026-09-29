@@ -274,14 +274,26 @@ EOF
 @test "proxy: no Dockerfile proxies https, so no TLS path is ever interposed on" {
   local f
   for f in "$DOCKERFILE" "$DOCKERFILE_KERNEL"; do
-    run grep -Fq 'Acquire::https::Proxy' "$f"
-    [ "$status" -ne 0 ]
+    run grep -o 'Acquire::https::Proxy[^;]*' "$f"
+    [ "$status" -eq 0 ]
+    [ "$output" = 'Acquire::https::Proxy "DIRECT"' ]
   done
 }
 
-@test "proxy: the build-arg is emitted only when CERALIVE_APT_PROXY is set" {
-  run bash -c "source '$LIB_DIR/common.sh' >/dev/null 2>&1; container_build_proxy_args"
+@test "proxy: the build-arg is emitted only when a cache is configured or detected" {
+  local stub="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$stub"
+  printf '#!/bin/sh\n[ "$CACHE_FIXTURE" = up ]\n' >"$stub/curl"
+  chmod +x "$stub/curl"
+  run env -u CERALIVE_APT_PROXY CACHE_FIXTURE=down PATH="$stub:$PATH" \
+    bash -c "source '$LIB_DIR/common.sh' >/dev/null 2>&1; container_build_proxy_args"
   [ -z "$output" ]
+  run env CERALIVE_APT_PROXY=off CACHE_FIXTURE=up PATH="$stub:$PATH" \
+    bash -c "source '$LIB_DIR/common.sh' >/dev/null 2>&1; container_build_proxy_args"
+  [ -z "$output" ]
+  run env -u CERALIVE_APT_PROXY CACHE_FIXTURE=up PATH="$stub:$PATH" \
+    bash -c "source '$LIB_DIR/common.sh' >/dev/null 2>&1; container_build_proxy_args"
+  [[ "$output" == *'APT_PROXY=http://host.docker.internal:3142'* ]]
   run bash -c "source '$LIB_DIR/common.sh' >/dev/null 2>&1; CERALIVE_APT_PROXY=http://acng.lan:3142 container_build_proxy_args"
   [ "${lines[0]}" = "--build-arg" ]
   [ "${lines[1]}" = "APT_PROXY=http://acng.lan:3142" ]

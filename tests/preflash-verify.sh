@@ -16,7 +16,7 @@
 #                       partition (offset GAP_MB * 1 MiB).
 #   5. Boot state     — boot_state.txt starts with BOOT_ORDER=A B and a positive
 #                       attempt budget for both populated factory slots.
-#   6. RAUC bundle    — CMS verifies to the release root and manifest Compatible matches
+#   6. RAUC bundle    — rauc info verifies to the root, verity/adaptive full slot, compatible matches
 #                       is ceralive-<board>. The dev/prod leaf carries
 #                       EKU=codeSigning only, so verification MUST pass
 #                       `-C keyring:check-purpose=codesign` (see T13 findings).
@@ -128,6 +128,64 @@ check_gpt_geometry() {
     fail "GPT geometry: exact A/B starts/sizes and unique labels"
     info "got labels='${norm}' starts=${p1_start},${p2_start},${p3_start},${p4_start} sizes=${p1_size},${p2_size},${p3_size},${p4_size}"
   fi
+}
+
+# Compare the actual GPT with BOTH installed rootfs slots, not a build flag or a
+# production-label constant. This also runs independently of the production-only
+# geometry gate so the flash tool can inspect bench-labelled candidates.
+check_candidate_partlabels() {
+  local img="$1" part info label start size slot tmp fstab rauc key value
+  local -a gpt=() expected=() names=(boot rootfs_a rootfs_b data)
+  local -A seen=()
+  if ! command -v sgdisk >/dev/null || ! command -v debugfs >/dev/null; then
+    printf 'PARTLABEL preflight: sgdisk and debugfs are required\n' >&2; return 1;
+  fi
+  for part in 1 2 3 4; do
+    info="$(sgdisk -i "${part}" "${img}" 2>/dev/null)" || return 1
+    label="$(sed -n "s/^Partition name: '\(.*\)'$/\1/p" <<<"${info}")"
+    start="$(sed -n 's/^First sector: \([0-9]*\).*/\1/p' <<<"${info}")"
+    size="$(sed -n 's/^Partition size: \([0-9]*\).*/\1/p' <<<"${info}")"
+    if [[ -z "${label}" || ! "${start}" =~ ^[0-9]+$ || ! "${size}" =~ ^[1-9][0-9]*$ || -n "${seen[${label}]:-}" ]]; then
+      printf 'PARTLABEL preflight: missing/duplicate GPT label or geometry at p%s: %s\n' "${part}" "${label}" >&2
+      return 1
+    fi
+    seen["${label}"]=1
+    gpt+=("${label}")
+  done
+  for part in 2 3; do
+    info="$(sgdisk -i "${part}" "${img}" 2>/dev/null)" || return 1
+    start="$(sed -n 's/^First sector: \([0-9]*\).*/\1/p' <<<"${info}")"
+    size="$(sed -n 's/^Partition size: \([0-9]*\).*/\1/p' <<<"${info}")"
+    slot="$(mktemp)" || return 1
+    if ! dd if="${img}" of="${slot}" bs=512 skip="${start}" count="${size}" conv=sparse status=none 2>/dev/null; then
+      rm -f "${slot}"; return 1
+    fi
+    fstab="$(debugfs -R 'cat /etc/fstab' "${slot}" 2>/dev/null)"
+    rauc="$(debugfs -R 'cat /etc/rauc/system.conf' "${slot}" 2>/dev/null)"
+    rm -f "${slot}"
+    for key in boot data; do
+      value="$(awk -v mount="/${key}" '$1 ~ /^PARTLABEL=/ && $2 == mount {sub(/^PARTLABEL=/,"",$1); print $1}' <<<"${fstab}")"
+      [[ "${value}" != *$'\n'* && -n "${value}" ]] || {
+        printf 'PARTLABEL preflight: rootfs p%s fstab /%s missing or ambiguous\n' "${part}" "${key}" >&2; return 1;
+      }
+      if [[ "${key}" == boot ]]; then expected[0]="${value}"; else expected[3]="${value}"; fi
+    done
+    for key in 0 1; do
+      value="$(awk -v section="[slot.rootfs.${key}]" '$0 == section {inside=1; next} /^\[/ {inside=0} inside && /^device=/ {sub(/^device=\/dev\/disk\/by-partlabel\//, ""); print}' <<<"${rauc}")"
+      [[ "${value}" != *$'\n'* && -n "${value}" && "${value}" != /dev/* ]] || {
+        printf 'PARTLABEL preflight: rootfs p%s RAUC slot %s missing or ambiguous\n' "${part}" "${key}" >&2; return 1;
+      }
+      expected[key + 1]="${value}"
+    done
+    for key in 0 1 2 3; do
+      if [[ "${expected[${key}]}" != "${gpt[${key}]}" ]]; then
+        printf 'PARTLABEL preflight: rootfs p%s %s expects %s but GPT p%s is %s\n' \
+          "${part}" "${names[${key}]}" "${expected[${key}]}" "$((key + 1))" "${gpt[${key}]}" >&2
+        return 1
+      fi
+    done
+  done
+  printf 'PARTLABEL preflight: GPT and both baked fstab/RAUC slots agree (%s)\n' "${gpt[*]}"
 }
 
 part_value() {
@@ -453,8 +511,8 @@ check_boot_state() {
 check_rauc_bundle() {
   local bundle="$1" board="$2" keyring="$3" out compatible expect
   expect="${BOARD_IDENTITY_COMPATIBLE}"
-  require_tool openssl || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
-  require_tool unsquashfs || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool rauc || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
+  require_tool python3 || { fail "RAUC bundle: parses + Compatible '${expect}'"; return; }
   [[ -s "${keyring}" ]] || { fail "RAUC bundle: parses + Compatible '${expect}'"; info "keyring not found: ${keyring}"; return; }
   if ! out="$(rauc_bundle_verify_and_compatible "${bundle}" "${keyring}" 2>&1)"; then
     fail "RAUC bundle: parses + Compatible '${expect}'"
@@ -464,7 +522,7 @@ check_rauc_bundle() {
   compatible="$(printf '%s\n' "${out}" | tail -1)"
   if [[ "${compatible}" == "${expect}" ]]; then
     pass "RAUC bundle: parses + Compatible '${expect}'"
-    info "Compatible: '${compatible}'; signature verified (check-purpose=codesign)"
+    info "Compatible: '${compatible}'; verity signature verified (check-purpose=codesign), adaptive full slot"
   else
     fail "RAUC bundle: parses + Compatible '${expect}'"
     info "Compatible: '${compatible}' (expected '${expect}')"
@@ -710,11 +768,17 @@ main() {
       --gap-mb)    gap_mb="${2:-}"; shift 2 ;;
       --target-size-bytes) target_size_bytes="${2:-}"; shift 2 ;;
       --self-test) mode="self-test"; shift ;;
+      --labels-only) mode="labels-only"; shift ;;
       -h|--help)   usage; exit 0 ;;
       *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
     esac
   done
 
+  if [[ "${mode}" == labels-only ]]; then
+    [[ -n "${image}" && -f "${image}" ]] || { echo "--labels-only requires --image <raw>" >&2; exit 2; }
+    check_candidate_partlabels "${image}"
+    return $?
+  fi
   [[ -n "${keyring}" ]] || { echo "--keyring is required; production verification has no dev-key default" >&2; exit 2; }
   # Board-derived identity: the board_id, DTB filename and RAUC compatible this
   # gate asserts all come from manifests/boards/<board>.yaml, so pointing the gate

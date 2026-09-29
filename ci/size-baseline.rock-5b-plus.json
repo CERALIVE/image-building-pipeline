@@ -1,9 +1,9 @@
 {
   "board": "rock-5b-plus",
-  "bytes": 1415188480,
-  "recorded_at": "2026-08-08",
-  "artifact": "images/rock-5b-plus/20260808T000202Z.rootfs.tar",
-  "artifact_sha256": "21612eb2c114f3f79a7cdbead673866c578dfd9ad776205ee5764507106a4ff5",
-  "commit": "a575a9a",
-  "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, and that is NO LONGER the committed pin: armbian-bsp-deb-versions.txt was promoted to 26.8.3 on 2026-08-26 because the Armbian archive keeps only the newest revision of that Architecture:all package and 26.8.1 had been purged from both the index and the pool. This measurement therefore PREDATES the current pin, and the 26.8.1 -> 26.8.3 firmware delta is NOT reflected in the figure below; re-measure on the next wet vendor-BSP build. The earlier 26.5.1 -> 26.8.1 promotion's +3,389,440 B firmware delta IS already inside it. Supersedes the 2026-08-02 / 67d053a baseline (1412259840); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
+  "bytes": 2730854400,
+  "recorded_at": "2026-09-26",
+  "artifact": "images/rock-5b-plus/20260926T224052Z.rootfs.tar",
+  "artifact_sha256": "f9af2b4e32d4872b80bf8519d38911b58d4efb90d8373847ae0dd1ebe6c16e95",
+  "commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
+  "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
 }

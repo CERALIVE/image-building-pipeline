@@ -1,0 +1,9 @@
+[Unit]
+Description=Manage staged RAUC activation (%i)
+Wants=rauc.service
+After=rauc.service dbus.service
+RequiresMountsFor=/data /boot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-rauc-activate --%i

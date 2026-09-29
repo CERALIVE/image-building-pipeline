@@ -30,8 +30,43 @@ setup() {
   STRUCTURE_SH="$PIPELINE_DIR/mkosi/customize/structure.sh"
   UDEV_SH="$PIPELINE_DIR/mkosi/customize/udev.sh"
   X86_ENCODE_SH="$PIPELINE_DIR/mkosi/platform/x86/x86-encode.sh"
+  SHARED_LIST="$PIPELINE_DIR/manifests/packages/shared.list"
+  DEBUG_LIST="$PIPELINE_DIR/manifests/packages/development.delta.list"
+  DEBUG_TOOLSET="$PIPELINE_DIR/manifests/addons/debug-toolset.json"
+  SERVICES_SH="$PIPELINE_DIR/mkosi/customize/postinst.d/services.sh"
   FAMILY_SCHEMA="$PIPELINE_DIR/manifests/schema/family.schema.json"
   RK3588_FAMILY="$PIPELINE_DIR/manifests/families/rk3588.yaml"
+}
+
+# --- Todo 30 image slimming ----------------------------------------------------
+
+@test "slimming: production packages and the broken console-font unit stay absent" {
+  local package
+  for package in ffmpeg ipcalc u-boot-tools kbd; do
+    run grep -Eq "^[[:space:]]*${package}([[:space:]]|$)" "$SHARED_LIST"
+    [ "$status" -ne 0 ]
+  done
+
+  [ ! -e "$PIPELINE_DIR/mkosi/runtime/ceralive-console-font.service" ]
+  run grep -Eq '^[[:space:]]*[^#[:space:]].*(install_console_font_service|ceralive-console-font)' "$SERVICES_SH"
+  [ "$status" -ne 0 ]
+}
+
+@test "slimming: ffmpeg is available only through the debug delivery paths" {
+  run grep -Eq '^[[:space:]]*ffmpeg([[:space:]]|$)' "$DEBUG_LIST"
+  [ "$status" -eq 0 ]
+  run grep -Fq '"/usr/bin/ffmpeg"' "$DEBUG_TOOLSET"
+  [ "$status" -eq 0 ]
+  run grep -Fq '"/usr/bin/ffprobe"' "$DEBUG_TOOLSET"
+  [ "$status" -eq 0 ]
+}
+
+@test "GUARD BITES: reintroducing a slimmed runtime package is detected" {
+  local scratch="$BATS_TEST_TMPDIR/shared.list"
+  cp "$SHARED_LIST" "$scratch"
+  printf 'ipcalc\n' >> "$scratch"
+  run grep -Eq '^[[:space:]]*ipcalc([[:space:]]|$)' "$scratch"
+  [ "$status" -eq 0 ]
 }
 
 # --- retired kernel-extension mechanism (ceralive-cls-fw) --------------------

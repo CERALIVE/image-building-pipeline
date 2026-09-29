@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# A [handlers] post-install= entry is RAUC's plain system-level hook, not the
+# bootloader-custom-backend operation protocol: install.c's
+# launch_and_wait_handler() call for postinstall_handler passes a NULL argv,
+# so RAUC never invokes this script with a phase name on $1 — only via the
+# RAUC_* environment (RAUC_TARGET_SLOTS / RAUC_SLOT_CLASS_N /
+# RAUC_SLOT_DEVICE_N, from install.c's prepare_environment()). An earlier
+# revision of this handler asserted $1 == post-install, which made every real
+# invocation fail with "Post-install handler error: Child process exited with
+# code 1" before a single slot was ever relabelled.
+[[ -n "${RAUC_TARGET_SLOTS:-}" ]] || { printf 'RAUC_TARGET_SLOTS is empty\n' >&2; exit 1; }
+
+for slot in ${RAUC_TARGET_SLOTS}; do
+  [[ "${slot}" =~ ^[0-9]+$ ]] || { printf 'invalid RAUC target slot index: %s\n' "${slot}" >&2; exit 1; }
+  class_var="RAUC_SLOT_CLASS_${slot}"
+  device_var="RAUC_SLOT_DEVICE_${slot}"
+  class="${!class_var:-}"
+  [[ -n "${class}" ]] || { printf 'missing class for RAUC target slot %s\n' "${slot}" >&2; exit 1; }
+  [[ "${class}" == rootfs ]] || continue
+  device="${!device_var:-}"
+  [[ -n "${device}" ]] || { printf 'missing device for RAUC target slot %s\n' "${slot}" >&2; exit 1; }
+
+  resolved="$(readlink -f "${device}")" || resolved=""
+  label=""
+  if [[ -n "${resolved}" ]]; then
+    label="$(lsblk -ndo PARTLABEL "${resolved}" 2>/dev/null)" || label=""
+  fi
+  if [[ -z "${label}" ]]; then
+    label="$(blkid -p -o value -s PART_ENTRY_NAME "${device}" 2>/dev/null)" || label=""
+  fi
+  if [[ -z "${label}" || "${label}" =~ [[:space:]] ]]; then
+    printf 'missing or ambiguous GPT PARTLABEL for %s (slot %s); refusing to relabel\n' "${device}" "${slot}" >&2
+    exit 1
+  fi
+  e2label "${device}" "${label}"
+done

@@ -37,8 +37,8 @@ mapfile -t fetch_pkgs < <(
 )
 (( ${#fetch_pkgs[@]} > 0 )) \
   || fail "could not read FIRST_PARTY_APT_PKGS from ${FETCH}"
-(( ${#fetch_pkgs[@]} == 15 )) \
-  || fail "expected exactly 15 fetched first-party packages, got ${#fetch_pkgs[@]}"
+(( ${#fetch_pkgs[@]} == 16 )) \
+  || fail "expected exactly 16 fetched first-party packages, got ${#fetch_pkgs[@]}"
 
 # Extract the partitioner's exact firstparty_names allowlist literal.
 firstparty_names="$(awk -F'"' '/local firstparty_names=/ { print $2; exit }' "${ORCH}")"
@@ -60,5 +60,7 @@ for required in modemmanager libmbim-glib4 libqmi-glib5 libqrtr-glib0; do
   [[ "${firstparty_names}" == *" ${required} "* ]] \
     || fail "expected ModemManager-closure package '${required}' in firstparty_names"
 done
+[[ " ${firstparty_names} " == *" ceralive-apt-credentials "* ]] \
+  || fail "credentials package would be unclassified by the partitioner"
 
 printf 'firstparty-classification: PASS (all %d fetched first-party packages are classifiable)\n' "${#fetch_pkgs[@]}"

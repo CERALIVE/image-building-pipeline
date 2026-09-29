@@ -29,7 +29,9 @@
     "/usr/bin/nano",
     "/usr/bin/iperf3",
     "/usr/bin/socat",
-    "/usr/bin/nc.openbsd"
+    "/usr/bin/nc.openbsd",
+    "/usr/bin/ffmpeg",
+    "/usr/bin/ffprobe"
   ],
   "deps": [],
   "conflicts": [],

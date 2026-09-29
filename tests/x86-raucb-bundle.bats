@@ -13,10 +13,8 @@
 #   1. STATIC WIRING : orchestrate.sh's efi/grub Stage-4 branch invokes
 #                      BUILD_BUNDLE_SH — the x86 path actually produces a bundle.
 #   2. REAL SIGN+VERIFY : build-bundle.sh x86-minipc <rootfs> produces a real
-#                      `.raucb`; its CMS chain verifies leaf -> intermediate ->
-#                      root against the dev root-CA keyring (openssl cms -verify).
-#   3. TAMPER : flipping one byte of the bundle payload makes verification FAIL
-#                      (the signature has teeth — a mutated slot image is rejected).
+#                      verity/adaptive `.raucb`; RAUC verifies its leaf chain.
+#   3. TAMPER : corrupt the signed trailer and require RAUC info to reject it.
 #   4. MANIFEST : the manifest.raucm embedded IN the produced bundle carries
 #                      compatible=ceralive-x86-minipc (what `rauc install` matches
 #                      against the device system.conf).
@@ -26,9 +24,9 @@
 # touches the production signing PKI, and uses only a repo-local path
 # (CERALIVE_RAUC_PKI_DIR="$PIPELINE_DIR/.dev-keys") — no path escapes this checkout (Rule D).
 #
-# Dependency: bats-core + mksquashfs + unsquashfs + openssl. Missing toolchain ->
+# Dependency: bats-core + rauc + e2fsprogs. Missing toolchain ->
 # the real-bundle sections SKIP (still green), exactly like §11/§14 — a host
-# without squashfs-tools never false-fails. The dev PKI is generated on demand,
+# without RAUC never false-fails. The dev PKI is generated on demand,
 # so the signing chain is exercised for real when the toolchain is present.
 #
 # Run:  run-tests              (CI entrypoint — registered alongside the manifest suites)
@@ -50,13 +48,11 @@ setup() {
 # Helpers
 # ---------------------------------------------------------------------------
 
-# raucb_prereqs — the real signer/verifier needs mksquashfs + unsquashfs +
-# openssl, plus the committed dev PKI. Anything missing -> the test SKIPs (still
-# green) rather than false-fail on a host without squashfs-tools.
+# raucb_prereqs — the real signer/verifier needs RAUC and ext4 tools.
 raucb_prereqs() {
-  command -v mksquashfs >/dev/null 2>&1 || return 1
-  command -v unsquashfs >/dev/null 2>&1 || return 1
-  command -v openssl    >/dev/null 2>&1 || return 1
+  command -v rauc       >/dev/null 2>&1 || return 1
+  command -v mkfs.ext4 >/dev/null 2>&1 || return 1
+  command -v dumpe2fs  >/dev/null 2>&1 || return 1
   [ -s "$DEV_KEYS/leaf-signing.key" ] || return 1
   [ -s "$DEV_KEYS/root-ca.pem" ]       || return 1
   return 0
@@ -130,8 +126,8 @@ build_x86_bundle() {
 #    chain the device trusts, exercised end-to-end (no DRY_RUN, no mock signer).
 # ===========================================================================
 
-@test "x86 raucb: build-bundle.sh produces a real signed .raucb (CMS verifies to root)" {
-  raucb_prereqs || skip "mksquashfs/unsquashfs/openssl/dev-PKI not available"
+@test "x86 raucb: build-bundle.sh produces a real signed verity/adaptive .raucb" {
+  raucb_prereqs || skip "rauc/ext4/dev-PKI not available"
   local tree="$BATS_TEST_TMPDIR/rootfs" out="$BATS_TEST_TMPDIR/out"
   mkdir -p "$tree/etc" "$out"
   printf 'ceralive\n' > "$tree/etc/hostname"
@@ -141,14 +137,14 @@ build_x86_bundle() {
       SOURCE_DATE_EPOCH=1700000000 \
       bash "$BUILD_BUNDLE" "$BOARD" "$tree"
   [ "$status" -eq 0 ]
-  # The real signing chain verified — not a mocked/echoed signature.
-  [[ "$output" == *"signature verified: leaf -> intermediate -> root"* ]]
-  # A real artifact landed and is a genuine squashfs-payload RAUC bundle (magic 'hsqs').
+  [[ "$output" == *'Verified inline signature by'* ]]
+  [[ "$output" == *'Bundle Format:  verity'* ]]
+  [[ "$output" == *'Adaptive:  block-hash-index'* ]]
   [ -s "$out/x86.raucb" ]
   [ -f "$out/x86.raucb.sha256" ]
-  local magic
-  magic="$(head -c 4 "$out/x86.raucb")"
-  [ "$magic" = "hsqs" ]
+  run "$LIB_DIR/rauc-bundle-inspect.sh" "$out/x86.raucb" "$DEV_KEYS/root-ca.pem"
+  [ "$status" -eq 0 ]
+  grep -Fxq "$COMPAT" <<<"$output"
 }
 
 # ===========================================================================
@@ -156,34 +152,27 @@ build_x86_bundle() {
 #    Proves the signature has teeth: a mutated rootfs slot image (the exact
 #    attack RAUC's CMS chain exists to stop) is REJECTED by verify_openssl_bundle
 #    against the root keyring. We drive the SHIPPED verifier (sourced from
-#    build-bundle.sh) so the test exercises the real device-equivalent check.
+#    rauc info --keyring, the same verification the device uses.
 # ===========================================================================
 
-@test "x86 raucb tamper: a flipped payload byte makes the bundle FAIL verification" {
-  raucb_prereqs || skip "mksquashfs/unsquashfs/openssl/dev-PKI not available"
+@test "x86 raucb tamper: a corrupted signed trailer makes RAUC reject the bundle" {
+  raucb_prereqs || skip "rauc/ext4/dev-PKI not available"
   build_x86_bundle
   local bundle="$BATS_FILE_TMPDIR/out/x86.raucb"
   [ -s "$bundle" ]
 
   # Sanity: the pristine bundle verifies (so a later failure is the tamper, not setup).
-  run env CERALIVE_RAUC_PKI_DIR="$DEV_KEYS" bash -c \
-      "source '$BUILD_BUNDLE'; verify_openssl_bundle '$bundle'"
+  run rauc info --keyring="$DEV_KEYS/root-ca.pem" "$bundle"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"signature verified"* ]]
+  [[ "$output" == *'Bundle Format:  verity'* ]]
 
-  # Flip one byte INSIDE the squashfs payload (offset 64 — well inside the
-  # superblock, far from the trailing CMS+length), leaving the trailer intact so
-  # the verifier still splits payload/sig correctly and the CMS content mismatch
-  # is what trips it.
   local tampered="$BATS_TEST_TMPDIR/tampered.raucb"
   cp "$bundle" "$tampered"
-  printf '\xff' | dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
+  printf '\xff' | dd of="$tampered" bs=1 seek="$(($(stat -c %s "$tampered") - 16))" count=1 conv=notrunc 2>/dev/null
 
-  run env CERALIVE_RAUC_PKI_DIR="$DEV_KEYS" bash -c \
-      "source '$BUILD_BUNDLE'; verify_openssl_bundle '$tampered'"
+  run rauc info --keyring="$DEV_KEYS/root-ca.pem" "$tampered"
   [ "$status" -ne 0 ]
-  [[ "$output" != *"signature verified"* ]]
-  [[ "$output" == *"did NOT verify"* ]]
+  [[ "$output" != *'Bundle Format:  verity'* ]]
 }
 
 # ===========================================================================
@@ -195,13 +184,13 @@ build_x86_bundle() {
 # ===========================================================================
 
 @test "x86 raucb manifest: embedded manifest.raucm has compatible=ceralive-x86-minipc" {
-  raucb_prereqs || skip "mksquashfs/unsquashfs/openssl/dev-PKI not available"
+  raucb_prereqs || skip "rauc/ext4/dev-PKI not available"
   build_x86_bundle
   local bundle="$BATS_FILE_TMPDIR/out/x86.raucb"
   [ -s "$bundle" ]
-  run unsquashfs -no-progress -cat "$bundle" manifest.raucm
+  run rauc info --keyring="$DEV_KEYS/root-ca.pem" --output-format=json "$bundle"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"compatible=ceralive-x86-minipc"* ]]
+  [[ "$output" == *'"compatible":"ceralive-x86-minipc"'* ]]
   # Non-vacuity: the board-agnostic builder did NOT leak the RK3588 compatible.
-  [[ "$output" != *"compatible=ceralive-rock-5b-plus"* ]]
+  [[ "$output" != *'"compatible":"ceralive-rock-5b-plus"'* ]]
 }

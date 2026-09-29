@@ -14,3 +14,4 @@ libqmi-proxy=1.38.0-1~ceralive.3
 libqmi-utils=1.38.0-1~ceralive.3
 libqrtr-glib0=1.4.0-1~ceralive.3
 ceralive-modem-support=1.4.0
+ceralive-apt-credentials=1.0.0

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Positional arguments expand in the child bash -c.
 #
 # Container-side half of tests/fetch-debs-apt-sandbox.test.sh.
 #
@@ -88,14 +89,19 @@ chmod 0755 "${bin}/ar"
 # a restrictive-umask runner would create it, so the traversability fix is what
 # makes apt able to keep its sandbox rather than the ambient mode.
 dest="${WORK}/staging"
+fetch_out="${WORK}/out"
 (
 	umask 0077
 	mkdir -p "${dest}/debs"
 )
+# The rootless leg cannot write under the root-owned /repo copy. Keep the
+# fetcher's receipt in the per-leg work tree, created before invoking it.
+install -d -m 0755 "${fetch_out}"
 
 rc=0
 env \
 	PATH="${bin}:${PATH}" \
+	DEST="${fetch_out}" \
 	CERALIVE_TEST_APT_ARGV_LOG="${argv_log}" \
 	CHANNEL=stable \
 	ARCH=arm64 \

@@ -1,0 +1,11 @@
+[Unit]
+Description=CeraLive PARTLABEL and boot-medium safety observation
+After=local-fs.target
+Before=ceralive-healthcheck.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ceralive-healthcheck.sh --partlabel-guard
+
+[Install]
+WantedBy=multi-user.target

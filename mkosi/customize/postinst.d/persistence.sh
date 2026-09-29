@@ -22,6 +22,14 @@
 #                             boot stack changing WITHOUT one, because
 #                             docs/partition-contract.md rule 3 puts
 #                             kernel/DTB/initrd inside the slot.
+#   * setup_slot_sync         installs /usr/libexec/ceralive/ceralive-slot-sync
+#                             (task 26) — the verified local rsync mirror of the
+#                             booted slot onto the other, lagged one — plus its
+#                             oneshot unit and rsync exclude list. Called from
+#                             configure_services() (postinst.d/services.sh),
+#                             not from this module's own callers, the same
+#                             cross-module pattern hardware.sh's setup_*
+#                             functions already use.
 #
 # They are the same contract read forwards and backwards — state is persistent
 # because the rootfs is disposable, and the rootfs is only safely disposable
@@ -153,7 +161,7 @@ if [ ! -e "$DATA/ceralive/update.conf" ]; then
     cat >"$DATA/ceralive/update.conf" <<'CONF'
 # CeraLive OS update (RAUC) configuration — persistent /data, editable on device.
 # Consumed by /usr/local/bin/ceralive-update.
-# BUNDLE_URL : full URL / apt.ceralive.tv path of the .raucb. Empty = OTA disabled.
+# BUNDLE_URL : local .raucb or HTTPS verity bundle. Empty = OTA disabled.
 # CHANNEL    : release channel hint (informational; URL is authoritative).
 BUNDLE_URL=
 CHANNEL=stable
@@ -240,7 +248,7 @@ EOF
 #!/bin/bash
 # CeraLive MANUAL OS update entrypoint — run by an operator, NOT by CeraUI.
 # CeraUI's system.startUpdate RPC is the apt package path and never calls this
-# script; rauc-hawkbit-updater is the only automatic RAUC trigger. Installs a
+  # script; hawkBit is dormant and CeraUI orchestrates automatic OS updates. Installs a
 # RAUC bundle whose URL is read from persistent /data, and is inert until an
 # operator sets BUNDLE_URL there; the post-reboot mark-good is the task-29 gate.
 set -euo pipefail
@@ -258,6 +266,14 @@ mountpoint -q "$DATA" || die "$DATA is not mounted; refusing to update"
 # shellcheck disable=SC1090
 . "$CONF"
 [ -n "${BUNDLE_URL:-}" ] || die "BUNDLE_URL is empty in $CONF; OTA disabled"
+case "$BUNDLE_URL" in
+    https://*|/*) ;;
+    *) die "BUNDLE_URL must be HTTPS or an absolute local path" ;;
+esac
+
+LOCK="${CERALIVE_UPDATE_LOCK_PATH:-/run/lock/ceralive-update.lock}"
+exec 9>"$LOCK"
+flock -n -x 9 || die "update lock busy: $LOCK"
 
 for svc in cerastream.service srtla.service srtla-send.service; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -268,15 +284,36 @@ done
 echo "ceralive-update: installing RAUC bundle from $CONF (BUNDLE_URL=$BUNDLE_URL)"
 rauc install "$BUNDLE_URL"
 
-# Force the freshly-activated slot to re-prove streaming health before it is
+# Force the staged slot to re-prove streaming health after activation before it is
 # confirmed: /data is shared across A/B, so the new slot must NOT inherit this
 # slot's mark-good marker (task 29). The boot healthcheck re-creates it on success.
 rm -f "$DATA/ceralive/.slot-marked-good"
 
-echo "ceralive-update: installed to inactive slot; reboot to activate (task-29 mark-good confirms or rolls back)."
+echo "ceralive-update: installed to inactive slot but not activated; activate it at a clean idle shutdown before reboot."
 exit 0
 EOF
   chmod +x /usr/local/bin/ceralive-update
+}
+
+# --- Verified local slot mirror (task 26, Metis G3/G4/G14) -----------------
+# Installs the standalone artifacts under mkosi/runtime/ (same idiom as
+# setup_avahi_restart / setup_tls_proxy — never inlined here): the script at
+# /usr/libexec/ceralive/ceralive-slot-sync, its rsync exclude list at
+# /usr/lib/ceralive/slot-sync.exclude, and ceralive-slot-sync.service. The unit
+# carries NO [Install] section (see the committed unit file for why) and is
+# therefore never enable_service'd here — nothing calls this at boot; a future
+# lagged-mirror orchestrator starts it on demand.
+setup_slot_sync() {
+  log "installing verified local slot mirror (ceralive-slot-sync)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local artifact
+  for artifact in ceralive-slot-sync.sh ceralive-slot-sync.service ceralive-slot-sync.exclude; do
+    [[ -n "${src}" && -f "${src}/${artifact}" ]] \
+      || die "slot-sync source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  install -D -m 0755 "${src}/ceralive-slot-sync.sh" /usr/libexec/ceralive/ceralive-slot-sync
+  install -D -m 0644 "${src}/ceralive-slot-sync.exclude" /usr/lib/ceralive/slot-sync.exclude
+  install -D -m 0644 "${src}/ceralive-slot-sync.service" /etc/systemd/system/ceralive-slot-sync.service
 }
 
 # ---------------------------------------------------------------------------
@@ -406,18 +443,53 @@ setup_journal_dir_gc() {
 # instead of silently shipping an unupdatable app layer.
 # ---------------------------------------------------------------------------
 
-# Package names that may NEVER be frozen. These are the first-party CeraLive
-# packages the device updates over apt from apt.ceralive.tv (see the app layer's
-# SYSEXT_APP_PKGS / APPFS_APP_PKGS / RUNTIME_APP_PKGS classification). Holding any
-# of them would break the ordinary software-update path CeraUI drives.
-CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device srtla gstreamer1.0-libuvcsrc libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+# Package names that may NEVER be frozen. Mirror every active name in
+# manifests/first-party-apt-names.txt (plus the legacy rauc-hawkbit-updater):
+# that host manifest is not accessible inside this subimage chroot. The test
+# checks exact set equality, so a new first-party name cannot escape the guard.
+CERALIVE_NEVER_FREEZE_PKGS="${CERALIVE_NEVER_FREEZE_PKGS:-cerastream ceralive-device ceralive-modem-support srtla gstreamer1.0-libuvcsrc gstreamer1.0-rockchip-ceralive librga2-ceralive ceralive-apt-credentials libsrt1.5-ceralive rauc-hawkbit-updater modemmanager libmm-glib0 libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils libqrtr-glib0}"
+
+# RAUC itself (Todo 22 RAUC-version-path follow-up, decisions.md 2026-09-24):
+# frozen alongside the boot stack, not apt-updatable. UNLIKE
+# KERNEL_PACKAGES/DTB_PACKAGES/UBOOT_PACKAGES/FIRMWARE_PACKAGES this pair is not
+# board/family-manifest-resolved — rauc/rauc-service are fixed names installed
+# identically on every board via the platform-layer pin
+# (mkosi/mkosi.images/runtime/mkosi.postinst), so a fixed default here (same
+# pattern as CERALIVE_NEVER_FREEZE_PKGS immediately above) is correct rather
+# than a manifest-resolved list. RAUC's own version can then only change via a
+# full, tested image OTA — never a stray `apt upgrade` — closing a pre-existing
+# gap (the plain shared.list rauc/rauc-service rows were never held before
+# either). No collision with CERALIVE_NEVER_FREEZE_PKGS: RAUC is neither
+# first-party nor meant to be apt-updatable, so it belongs in THIS held set.
+RAUC_PACKAGES="${RAUC_PACKAGES:-rauc rauc-service}"
+
+# Third-party RK3588 MPP runtime (Todo 29, update-system-overhaul): held
+# alongside RAUC for the same reason — none is a CeraLive-owned package, so
+# holding them does not violate CERALIVE_NEVER_FREEZE_PKGS, and none is
+# board/family-manifest-resolved by name (the family manifest's own
+# gstreamer_runtime_packages also carries librga2-ceralive, our OWN fork, which
+# must stay apt-updatable and is therefore deliberately NOT in this fixed set).
+# Root AGENTS.md "Origin protection replaces version freezes" names this exact
+# set: librockchip-mpp1, rockchip-multimedia-config, libv4l-0.
+MPP_COMPAT_PACKAGES="${MPP_COMPAT_PACKAGES:-librockchip-mpp1 rockchip-multimedia-config libv4l-0}"
 
 freeze_boot_packages() {
   local pref_dir="${CERALIVE_APT_PREFERENCES_DIR:-/etc/apt/preferences.d}"
   local pref_file="${pref_dir}/ceralive-kernel-freeze"
 
+  # Gated on the RESOLVED gstreamer_runtime_packages membership (family
+  # manifest -> GSTREAMER_RUNTIME_PACKAGES, already forwarded/exported), not a
+  # blind ARCH check: only a build that actually resolved
+  # rockchip-multimedia-config into its platform-layer install set has these
+  # third-party packages installed to hold. Empty/unset on every non-RK3588
+  # build (and on every existing test fixture, which never sets this var), so
+  # freeze_boot_packages' "declared but not installed -> die under
+  # INSTALL_BOOT_BSP=1" fail-closed check is never spuriously tripped.
+  local mpp_compat=""
+  [[ " ${GSTREAMER_RUNTIME_PACKAGES:-} " == *" rockchip-multimedia-config "* ]] && mpp_compat="${MPP_COMPAT_PACKAGES}"
+
   local -a declared=()
-  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-}"
+  read -r -a declared <<<"${KERNEL_PACKAGES:-} ${DTB_PACKAGES:-} ${UBOOT_PACKAGES:-} ${FIRMWARE_PACKAGES:-} ${RAUC_PACKAGES:-} ${mpp_compat}"
 
   # Dedupe while preserving manifest order (kernel, dtb, u-boot, firmware).
   local pkg seen=" " candidates=()

@@ -43,12 +43,16 @@ fn_body="$(awk '
 # ---------------------------------------------------------------------------
 # Part A — static contract (always enforced)
 # ---------------------------------------------------------------------------
-grep -Eq '/etc/apt/preferences\.d/ceralive' <<<"${fn_body}" \
-  || fail "setup_ceralive_repository() no longer writes /etc/apt/preferences.d/ceralive — the apt.ceralive.tv origin pin never ships (run-all.sh's module is not run by ./build)"
-grep -Eq '^Pin: origin apt\.ceralive\.tv$' <<<"${fn_body}" \
+grep -Eq '/etc/apt/preferences\.d/ceralive-origin' <<<"${fn_body}" \
+  || fail "setup_ceralive_repository() no longer writes /etc/apt/preferences.d/ceralive-origin — the apt.ceralive.tv origin pin never ships (run-all.sh's module is not run by ./build)"
+grep -Eq 'Pin: origin apt\.ceralive\.tv' <<<"${fn_body}" \
   || fail "setup_ceralive_repository() no longer pins the apt.ceralive.tv origin"
-grep -Eq '^Pin-Priority: 990$' <<<"${fn_body}" \
+grep -Eq 'Pin-Priority: 990' <<<"${fn_body}" \
   || fail "setup_ceralive_repository() no longer sets Pin-Priority: 990"
+grep -Eq 'Pin: origin \*' <<<"${fn_body}" \
+  || fail "setup_ceralive_repository() no longer refuses every other origin of a first-party name — Todo 29's -1 stanza is missing"
+grep -Eq "rm -f /etc/apt/preferences\.d/ceralive\$" <<<"${fn_body}" \
+  || fail "setup_ceralive_repository() no longer removes the RETIRED /etc/apt/preferences.d/ceralive wildcard file"
 
 echo "apt-preferences-baked: Part A static contract OK (runtime executor writes the 990 origin pin)"
 
@@ -63,6 +67,7 @@ fi
 
 REPRO="$(mktemp)"
 trap 'rm -f "${REPRO}"' EXIT
+AWK_BIN="$(readlink -f "$(command -v awk)")"
 cat >"${REPRO}" <<REPRO_EOF
 set -euo pipefail
 # Scratch chroot filesystem: tmpfs over the absolute trees the function writes, so
@@ -77,21 +82,27 @@ mkdir -p /etc/apt/sources.list.d /etc/apt/apt.conf.d /etc/apt/certs
 # skipped). Only 'log' and CHANNEL are ambient in the executor; stub/seed them.
 log() { :; }
 CHANNEL="stable"
-eval "\$(awk '/^setup_ceralive_repository\(\) \{/,/^}/' "${POSTINST}")"
+export CERALIVE_RUNTIME_SRC="${PIPELINE_DIR}/mkosi/runtime"
+export CERALIVE_FIRST_PARTY_NAMES_B64="\$(base64 -w0 <'${PIPELINE_DIR}/manifests/first-party-apt-names.txt')"
+eval "\$("${AWK_BIN}" '/^setup_ceralive_repository\(\) \{/,/^}/' "${POSTINST}")"
 setup_ceralive_repository
 
-[ -f /etc/apt/preferences.d/ceralive ] || { echo "FAIL: setup_ceralive_repository did not create /etc/apt/preferences.d/ceralive (the pin would not ship)"; exit 1; }
-grep -qxF 'Package: *' /etc/apt/preferences.d/ceralive || { echo "FAIL: preferences.d/ceralive missing 'Package: *'"; exit 1; }
-grep -qxF 'Pin: origin apt.ceralive.tv' /etc/apt/preferences.d/ceralive || { echo "FAIL: preferences.d/ceralive missing 'Pin: origin apt.ceralive.tv'"; exit 1; }
-grep -qxF 'Pin-Priority: 990' /etc/apt/preferences.d/ceralive || { echo "FAIL: preferences.d/ceralive missing 'Pin-Priority: 990'"; exit 1; }
+[ ! -e /etc/apt/preferences.d/ceralive ] || { echo "FAIL: the retired /etc/apt/preferences.d/ceralive wildcard file still exists"; exit 1; }
+[ -f /etc/apt/preferences.d/ceralive-origin ] || { echo "FAIL: setup_ceralive_repository did not create /etc/apt/preferences.d/ceralive-origin (the pin would not ship)"; exit 1; }
+grep -qxF 'Package: cerastream' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Package: cerastream'"; exit 1; }
+[[ "\$(grep -c '^Package: ' /etc/apt/preferences.d/ceralive-origin)" -eq 36 ]] || { echo 'FAIL: expected two stanzas for every protected name'; exit 1; }
+grep -qxF 'Pin: origin apt.ceralive.tv' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin: origin apt.ceralive.tv'"; exit 1; }
+grep -qxF 'Pin-Priority: 990' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin-Priority: 990'"; exit 1; }
+grep -qxF 'Pin: origin *' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing the -1 all-other-origins stanza"; exit 1; }
+grep -qxF 'Pin-Priority: -1' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin-Priority: -1'"; exit 1; }
 # and the source it pins must be present too (sanity: same function writes both).
 grep -q '^URIs: https://apt.ceralive.tv/' /etc/apt/sources.list.d/ceralive.sources || { echo "FAIL: ceralive.sources not written alongside the pin"; exit 1; }
 REPRO_EOF
 
 if unshare -rm --map-root-user bash "${REPRO}"; then
-  echo "apt-preferences-baked: Part B runtime OK (build-path setup_ceralive_repository bakes preferences.d/ceralive with the 990 pin)"
+  echo "apt-preferences-baked: Part B runtime OK (build-path setup_ceralive_repository bakes preferences.d/ceralive-origin with per-name 990/-1 pins)"
 else
-  fail "the real setup_ceralive_repository() did not bake /etc/apt/preferences.d/ceralive with the 990 origin pin"
+  fail "the real setup_ceralive_repository() did not bake /etc/apt/preferences.d/ceralive-origin with the per-name origin pin"
 fi
 
 echo "apt-preferences-baked regression: PASS"

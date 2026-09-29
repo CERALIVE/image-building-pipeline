@@ -1,0 +1,106 @@
+# rauc-deb-versions.txt — pinned build INPUTS for the in-pipeline RAUC rebuild.
+#
+# WHY THIS FILE LOOKS DIFFERENT FROM rk3588-userspace-deb-versions.txt: that file
+# pins a PREBUILT release .deb (package/filename/sha256/url) fetched from a
+# CeraLive-owned fork repo's GitHub Releases (gstreamer-rockchip, librga). RAUC has
+# no such fork repo — the Todo-22 RAUC ruling (decisions.md, 2026-09-24, "Todo 22
+# RAUC version path — FINAL RULING") is explicit that this is "Option A: in-pipeline
+# build, no new repo", mirroring the KERNEL-BUILD-FROM-SOURCE precedent instead of
+# the gstreamer-rockchip/librga fork-repo-release precedent. So there is no
+# prebuilt binary URL to pin a package/filename/sha256/url row at — lib/build-rauc.sh
+# builds rauc + rauc-service FRESH on every board build, inside the digest-pinned
+# builder container, and stages the OUTPUT the same way lib/stages/kernel-build.sh
+# stages a source-built kernel .deb: staged in-process into the common debs pool,
+# never round-tripping through a second downloadable URL for the BUILT artifact.
+#
+# What IS pinned here, and verified by lib/rauc-build/source.sh, is the pair of
+# SOURCE inputs the build consumes — matching this repo's two existing verification
+# disciplines exactly (never a third, invented path):
+#
+#   1. UPSTREAM_* — RAUC's own tagged GitHub release source tarball. Static
+#      SHA-256 pin, same discipline as manifests/rk3588-userspace-deb-versions.txt's
+#      rows (an immutable release asset needs no rotating trust root).
+#   2. DEBIAN_* — the Debian archive's OWN `debian/` packaging directory for this
+#      exact upstream version, verified via gpgv-against-InRelease using the SAME
+#      lib/fetch/index.sh helpers (index_release_digest / index_lookup_optional)
+#      every other Debian-sourced fetch in this repo already uses — never a
+#      hand-vendored SHA. See lib/rauc-build/source.sh for the verification chain.
+#
+# DEBIAN SUITE CHOICE: `unstable`, not `trixie`. Both trixie (1.13-3+deb13u1) and
+# unstable (1.15.2-1) carry a real, signed, gpgv-verifiable `debian/` packaging
+# directory for a `rauc` source package — but only unstable's is ALREADY packaged
+# for the exact upstream 1.15.2 the ruling selected. Bumping trixie's own
+# debian/patches/series onto 1.15.2 source was tried and rejected with EVIDENCE,
+# not guessed: `patch --dry-run` against the extracted 1.15.2 tree showed
+# src-context-fix-library-reinitialization.patch,
+# src-signature-fix-compatibility-with-OpenSSL-3.5-for.patch,
+# 0001-src-signature-protect-against-integer-overflows-with.patch and
+# 0002-src-signature-reject-plain-bundles-with-payload-exce.patch all
+# already-applied/reversed or hunk-FAILED (i.e. already incorporated upstream in
+# 1.15.2 — exactly the "fixes from upstream" / "CVE backports" the trixie
+# series/comments themselves label them), while unstable's own maintainer had
+# independently reached the identical conclusion and already dropped exactly
+# those four patches, keeping only the two genuinely Debian-specific ones
+# (disable-network-tests.patch, install-wrapper-to-pkgdatadir.patch — both apply
+# CLEAN, zero fuzz, against 1.15.2). Reusing unstable's real, unmodified `debian/`
+# directory verbatim is therefore MORE faithful to "reuse Debian's own packaging
+# recipe verbatim... do not hand-write" than hand-editing trixie's series myself
+# would have been — it is Debian's own packaging for EXACTLY this version, not a
+# CeraLive reconstruction of what Debian's packaging "should" look like. The
+# unstable InRelease is verified against the SAME debian-archive-keyring
+# `(13/trixie)` automatic signing key already required as a build/runtime
+# dependency elsewhere in this pipeline (ci/Dockerfile, mkosi.postinst.chroot) —
+# confirmed empirically: `gpgv --keyring debian-archive-keyring.gpg InRelease`
+# suite-literal-ok: names which Debian signing keys dual-sign the upstream unstable suite; not this image's target suite
+# for the unstable suite verifies under BOTH the 12/bookworm and 13/trixie
+# automatic signing keys (Debian dual-signs unstable with recent-release keys
+# ahead of the next stable release). No new trust root is introduced.
+#
+# Zero CeraLive patches are applied to either the upstream source or the Debian
+# packaging directory. The only edit lib/build-rauc.sh makes to the fetched
+# debian/ tree is a debian/changelog entry appending CERALIVE_SUFFIX below (the
+# ordinary, expected mechanism for any downstream rebuild of a Debian source
+# package — dpkg refuses to build without SOME changelog entry for the version
+# being built).
+
+UPSTREAM_VERSION=1.15.2
+UPSTREAM_URL=https://github.com/rauc/rauc/releases/download/v1.15.2/rauc-1.15.2.tar.xz
+UPSTREAM_SHA256=127a24cde208c65b837ae978c695a00730f1094ee8b6c7d48cf58ef846eae340
+
+# Independently cross-verified: Debian's OWN `rauc_1.15.2.orig.tar.xz` (both the
+# trixie-track and unstable pool copies carry an identical orig tarball, since
+# Debian repacks nothing for this source) hashes to the exact same SHA-256 above.
+# Two independent origins agreeing on the same 990656-byte tarball is stronger
+# provenance than either alone.
+
+DEBIAN_SUITE=unstable
+DEBIAN_SOURCE_VERSION=1.15.2-1
+DEBIAN_COMPONENT=main
+DEBIAN_DEBIAN_TAR_FILENAME=rauc_1.15.2-1.debian.tar.xz
+
+# The Debian archive automatic signing keys that ACTUALLY (jointly) sign the
+# unstable InRelease today — verified empirically with gpgv, not assumed: Debian
+# dual-signs unstable with the last two stable-release cycles' automatic keys
+# ahead of the next release existing. Both entries are required: unstable's
+# InRelease carries a VALIDSIG line for each, and the verifier
+# (lib/rauc-build/source.sh::rauc_fetch_debian_packaging, via
+# lib/fetch-debs-auth.sh::auth_verify_release_to_file) checks the exact SET of
+# signing fingerprints, not "any one of". Both keys ship inside the
+# `debian-archive-keyring` package already required by ci/Dockerfile* and the
+# on-device apt trust store — no separate keyring is vendored by this repo.
+#
+# THESE ARE THE PRIMARY-KEY fingerprints (VALIDSIG's trailing field), not the
+# signing SUBKEY fingerprints gpgv's human-readable "using RSA key ..." line
+# shows (4CB50190.../B8E5F131...) — auth_verify_release_to_file's own awk prefers
+# $NF (the primary key) whenever present, matching modern gpg's VALIDSIG shape;
+# confirmed by running gpgv --status-fd against the real unstable InRelease.
+DEBIAN_ARCHIVE_KEYRING_PATH=/usr/share/keyrings/debian-archive-keyring.gpg
+DEBIAN_ARCHIVE_KEY_FINGERPRINTS=B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8 04B54C3CDCA79751B16BC6B5225629DF75B188BD
+
+# Local Debian-version suffix this build appends on top of DEBIAN_SOURCE_VERSION
+# (dpkg local-version convention: sorts ABOVE the base version). Matches the
+# `+ceralive.N` shape already used by srt's libsrt1.5-ceralive rebuild — RAUC is
+# the same "unmodified-upstream, Debian-packaged rebuild" shape, not the
+# gstreamer-rockchip/librga "ongoing fork with real patch history" shape (which
+# uses a dedicated fork repo + CalVer/upstream-style release instead).
+CERALIVE_SUFFIX=+ceralive.1

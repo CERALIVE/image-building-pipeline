@@ -27,11 +27,13 @@ ssh_known_hosts=""
 expected_maskrom_id_sha="" uart_signing_key=""
 variant="default" manifests_dir="" mode="flash" physical_confirmation=""
 flash_device_arg=""
+target_medium="emmc"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --variant) variant="${2:-}"; shift 2 ;;
     --manifests-dir) manifests_dir="${2:-}"; shift 2 ;;
     --flash-device) flash_device_arg="${2:-}"; shift 2 ;;
+    --target-medium) target_medium="${2:-}"; shift 2 ;;
     --confirm-physical-write) physical_confirmation="${2:-}"; shift 2 ;;
     --check-identity-only) mode="check-identity"; shift ;;
     --image) image="${2:-}"; shift 2 ;;
@@ -59,6 +61,9 @@ while [[ $# -gt 0 ]]; do
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+[[ "${target_medium}" == emmc || "${target_medium}" == sd ]] || {
+  printf '%s\n' '--target-medium must be emmc or sd' >&2; exit 2;
+}
 
 for value in image bundle loader board expected_sha loader_sha identity_out; do
   [[ -n "${!value}" ]] || { printf '%s is required\n' "$value" >&2; exit 2; }
@@ -807,7 +812,6 @@ run_candidate_identity_gate
 install -m 600 /dev/null "${ssh_known_hosts}"
 
 ssh_bin="${CERALIVE_SSH_BIN:-ssh}"
-preflash="${CERALIVE_PREFLASH_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/preflash-verify.sh}"
 ssh_user="${SSH_USER:-root}"
 ssh_port="${SSH_PORT:-22}"
 flash_device="${flash_device_arg:-${CERALIVE_FLASH_DEVICE:-/dev/mmcblk0}}"
@@ -821,6 +825,17 @@ guard_assert_local_block_device 'flash device' "${flash_device}" || exit 1
 guard_assert_local_command 'rkdeveloptool' "${rkdeveloptool}" || exit 1
 guard_require_physical_confirmation 'whole-media flash' "${flash_device}" \
   "${physical_confirmation}" || exit 1
+preflash="${CERALIVE_PREFLASH_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/preflash-verify.sh}"
+"${preflash}" --labels-only --image "${flash_image}" || {
+  printf 'candidate GPT and baked partition labels disagree; refusing flash\n' >&2
+  exit 1
+}
+# This tool only writes eMMC via rkdeveloptool; a medium declaration is a
+# comparison guard, never an alternate SD writer.
+if [[ "${target_medium}" == sd ]]; then
+  printf '%s\n' '--target-medium sd cannot be flashed by this eMMC-only tool; refusing write' >&2
+  exit 1
+fi
 
 # The ONE chokepoint that writes raw sectors. It re-asserts the whole contract
 # immediately before the write, so no later edit can reach `wl` by another route.

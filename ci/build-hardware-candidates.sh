@@ -56,8 +56,9 @@
 #
 # Usage:
 #   build-hardware-candidates.sh --only <list> --trust-verdict <path>
-#       --signing-env <path> [--debug-env <path>] --evidence <dir>
-#       --bench-labels 0|1
+#       --signing-env <path> [--debug-env <path>] [--debug-image]
+#       [--first-party-local-debs <dir>] --evidence <dir>
+#       --bench-labels 0|1 --os-release-version YYYY.MINOR.PATCH
 #   build-hardware-candidates.sh --self-test
 #
 #   --only          all | a comma-separated subset of:
@@ -74,11 +75,15 @@
 #                   RAUC_KEYRING_FILE
 #   --debug-env     an env file defining CERALIVE_DEBUG_PASSWORD_HASH; REQUIRED
 #                   when a debug candidate is selected, refused otherwise
+#   --debug-image   bake the debug image posture on any selected kernel variant
+#   --first-party-local-debs  bench-only first-party .deb overrides (development only)
 #   --evidence      output directory for logs, configs and artifact tuples
 #   --bench-labels  REQUIRED, 0 or 1, no default and no ambient fallback:
 #                     1 = bench PARTLABEL overlay (xboot/xrootfs_a/xrootfs_b/xdata)
 #                         — for a bench card sharing a board with another image
 #                     0 = the frozen production PARTLABEL set
+#   --os-release-version  REQUIRED CalVer; no ambient fallback. Verified against
+#                         the actual emitted rootfs tar before recording a tuple
 #   --skip-probes   skip the six DRY_RUN probes (they are the default)
 #
 # Every path argument is generic: this repo is built and tested standalone, so
@@ -105,9 +110,10 @@ TOOL_NAME="ci/build-hardware-candidates.sh"
 # schema-2 tuple recorded the Radxa loader's digest for every board, so an Orange
 # Pi tuple named a loader that board's BootROM cannot be recovered with. It also
 # adds `evidence_stem`, because evidence paths are now per bench-labels mode.
-SCHEMA_VERSION=3
+# 4 records local .deb identities that have no signed-index provenance.
+SCHEMA_VERSION=4
 
-usage() { sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
+usage() { sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
 say()  { printf '[cand] %s\n' "$*" >&2; }
 fail() { printf 'build-hardware-candidates: %s\n' "$*" >&2; }
 die()  { fail "$*"; exit "${2:-2}"; }
@@ -133,7 +139,8 @@ candidate_variant() {
     *) return 1 ;;
   esac
 }
-candidate_is_debug() { [[ "$1" == "rock-edge-test" ]]; }
+candidate_kernel_test_seam() { [[ "$1" == "rock-edge-test" ]]; }
+candidate_debug_image() { candidate_kernel_test_seam "$1" || (( DEBUG_IMAGE == 1 )); }
 
 # Evidence file stem. The bench-labels mode is part of the NAME, not just of the
 # content: the same candidate is built once per mode and the two artifacts are
@@ -376,7 +383,7 @@ build_candidate() {
   export CERALIVE_BUILD_MODE="${mode}"
   export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE
 
-  if candidate_is_debug "${name}"; then
+  if candidate_debug_image "${name}"; then
     [[ -n "${DEBUG_PASSWORD_HASH:-}" ]] \
       || die "candidate '${name}' is a DEBUG artifact and no CERALIVE_DEBUG_PASSWORD_HASH was supplied (--debug-env)"
     export CERALIVE_DEBUG_IMAGE=1
@@ -391,6 +398,7 @@ build_candidate() {
   # silently bakes production PARTLABELs into an artifact destined for a bench
   # board whose second medium already carries them (see the header incident note).
   export CERALIVE_BENCH_LABELS="${BENCH_LABELS}"
+  export CERALIVE_OS_RELEASE_VERSION="${OS_RELEASE_VERSION}"
 
   # The recovery loader is resolved for THIS board. Recording another board's
   # loader digest here would name an unusable recovery path in the evidence an
@@ -408,11 +416,16 @@ build_candidate() {
   say "building ${name}: ./build ${build_args[*]}"
   say "  build mode=${CERALIVE_BUILD_MODE} label=${label} debug=${CERALIVE_DEBUG_IMAGE}"
   say "  CERALIVE_BENCH_LABELS=${CERALIVE_BENCH_LABELS} (bench PARTLABEL overlay: $(bench_labels_desc))"
+  say "  CERALIVE_OS_RELEASE_VERSION=${CERALIVE_OS_RELEASE_VERSION}"
   say "  recovery loader (${board}): ${LOADER_NAME} sha256=${LOADER_SHA256}"
   say "  pki=${CERALIVE_RAUC_PKI_DIR} keyring=${RAUC_KEYRING_FILE}"
 
   # pipefail is already set; tee must not be allowed to mask a failed build.
-  ( cd "${PIPELINE_DIR}" && ./build "${build_args[@]}" ) 2>&1 | tee "${log}"
+  ( cd "${PIPELINE_DIR}"
+    if [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]]; then
+      export CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR="${FIRST_PARTY_LOCAL_DEBS}"
+    fi
+    ./build "${build_args[@]}" ) 2>&1 | tee "${log}"
 
   record_tuple "${name}" "${board}" "${variant}" "${label}" \
     "${verdict}" "${root_fpr}" "${leaf_fpr}" "${eku}" "${log}"
@@ -433,15 +446,28 @@ record_tuple() {
   [[ -s "${raw}" ]]    || die "could not resolve the emitted .raw from ${log}" 1
   [[ -s "${bundle}" ]] || die "could not resolve the emitted .raucb from ${log}" 1
 
-  local resolved
-  if candidate_is_source_built "${name}"; then
-    resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
-      lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
-      || die "could not re-resolve the manifest for ${board}/${variant}" 1
-  else
-    resolved="$( cd "${PIPELINE_DIR}" && lib/resolve.sh "${board}" 2>/dev/null )" \
-      || die "could not re-resolve the manifest for ${board} (no variant overlay)" 1
+  # Read the shipped bytes, not the requested env or the mkosi working tree.
+  # tar -xOf returns nonzero for a missing member or broken archive; a temporary
+  # file preserves the trailing newline and the exit status without SIGPIPE.
+  local rootfs_tar="${raw%.raw}.rootfs.tar" stamp os_release_version
+  [[ -s "${rootfs_tar}" ]] || die "rootfs tar missing for ${name}: ${rootfs_tar}" 1
+  stamp="$(mktemp)" || die "cannot create OS release readback file" 1
+  if ! tar -xOf "${rootfs_tar}" './etc/ceralive/os-release-version' >"${stamp}"; then
+    rm -f "${stamp}"
+    die "cannot read OS release stamp from ${rootfs_tar}" 1
   fi
+  if ! cmp -s "${stamp}" <(printf '%s\n' "${OS_RELEASE_VERSION}"); then
+    rm -f "${stamp}"
+    die "OS release stamp in ${rootfs_tar} differs from --os-release-version ${OS_RELEASE_VERSION}" 1
+  fi
+  IFS= read -r os_release_version <"${stamp}"
+  rm -f "${stamp}"
+  say "  rootfs OS release readback: ${os_release_version} (${rootfs_tar})"
+
+  local resolved
+  resolved="$( cd "${PIPELINE_DIR}" && CERALIVE_KERNEL_VARIANT="${variant}" \
+    lib/resolve.sh "${board}" --variant "${variant}" 2>/dev/null )" \
+    || die "could not re-resolve the manifest for ${board}/${variant}" 1
   local kernel_commit patches_commit kernel_tag dtb_name board_id kernel_release kernel_pkg
   kernel_commit="$(sed -n "s/^KERNEL_SOURCE_COMMIT='\(.*\)'$/\1/p" <<<"${resolved}")"
   kernel_tag="$(sed -n "s/^KERNEL_SOURCE_TAG='\(.*\)'$/\1/p" <<<"${resolved}")"
@@ -464,7 +490,7 @@ record_tuple() {
   extract_kernel_config "${kdeb}" "${config}" \
     || die "could not extract /boot/config-${kernel_release} from ${kdeb}" 1
 
-  candidate_is_debug "${name}" && expect="on"
+  candidate_kernel_test_seam "${name}" && expect="on"
   say "verifying CeraLive test symbols in ${name} (expect ${expect})"
   assert_test_symbols "${config}" "${expect}" || exit 1
 
@@ -495,9 +521,24 @@ record_tuple() {
     bench_json="true"; partlabel_set="bench-x-prefixed"
   fi
 
+  local local_overrides='[]' override_file="${PIPELINE_DIR}/mkosi/.staging/${board}/first-party-local-override.json"
+  if [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]]; then
+    [[ -s "${override_file}" ]] || die "local first-party override manifest missing for ${name}: ${override_file}" 1
+    local_overrides="$(python3 - "${override_file}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    entries = json.load(source)
+assert isinstance(entries, list)
+assert all(isinstance(entry, dict) and set(entry) == {"package", "version", "arch", "sha256", "filename"} for entry in entries)
+print(json.dumps(entries, separators=(",", ":")))
+PY
+)" || die "invalid local first-party override manifest for ${name}" 1
+  fi
+
   {
     printf '{\n'
     printf '  "schema_version": %s,\n' "${SCHEMA_VERSION}"
+    printf '  "os_release_version": %s,\n' "$(json_str "${os_release_version}")"
     printf '  "tool": %s,\n'            "$(json_str "${TOOL_NAME}")"
     printf '  "candidate": %s,\n'       "$(json_str "${name}")"
     printf '  "label": %s,\n'           "$(json_str "${label}")"
@@ -527,6 +568,7 @@ record_tuple() {
     printf '  "loader_sha256": %s,\n'   "$(json_str "${LOADER_SHA256:-}")"
     printf '  "build_mode": %s,\n'      "$(json_str "${CERALIVE_BUILD_MODE}")"
     printf '  "debug_image": %s,\n'     "$( [[ "${CERALIVE_DEBUG_IMAGE}" == "1" ]] && echo true || echo false )"
+    printf '  "first_party_local_overrides": %s,\n' "${local_overrides}"
     printf '  "bench_labels": %s,\n'    "${bench_json}"
     printf '  "partlabel_set": %s,\n'   "$(json_str "${partlabel_set}")"
     printf '  "ceralive_test_symbols": %s,\n' "$(json_str "${expect}")"
@@ -618,7 +660,7 @@ JSON
   # 5. a debug candidate with no --debug-env is refused
   if "${BASH_SOURCE[0]}" --only rock-edge-test --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
-       --bench-labels 1 >/dev/null 2>&1; then
+        --bench-labels 1 --os-release-version 2026.10.1 >/dev/null 2>&1; then
     bad "a debug candidate without --debug-env was accepted"
   else
     ok "a debug candidate without --debug-env is refused"
@@ -628,7 +670,7 @@ JSON
   printf 'CERALIVE_RAUC_PKI_DIR=%s\n' "${t}/pki" >"${t}/half.env"
   if "${BASH_SOURCE[0]}" --only rock-edge --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/half.env" --evidence "${t}/ev" --skip-probes \
-       --bench-labels 0 >/dev/null 2>&1; then
+        --bench-labels 0 --os-release-version 2026.10.1 >/dev/null 2>&1; then
     bad "a half-specified signing env was accepted"
   else
     ok "a half-specified signing env is refused"
@@ -637,7 +679,7 @@ JSON
   # 7. a candidate name outside the closed table is refused
   if "${BASH_SOURCE[0]}" --only x86-edge --trust-verdict "${t}/verdict.json" \
        --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
-       --bench-labels 0 >/dev/null 2>&1; then
+        --bench-labels 0 --os-release-version 2026.10.1 >/dev/null 2>&1; then
     bad "an unknown candidate name was accepted"
   else
     ok "an unknown candidate name is refused"
@@ -647,8 +689,8 @@ JSON
   # CERALIVE_BENCH_LABELS must not satisfy it — that is the whole defect.
   local out
   out="$( CERALIVE_BENCH_LABELS=1 "${BASH_SOURCE[0]}" --only rock-edge \
-            --trust-verdict "${t}/verdict.json" --signing-env "${t}/sign.env" \
-            --evidence "${t}/ev" --skip-probes 2>&1 )" \
+             --trust-verdict "${t}/verdict.json" --signing-env "${t}/sign.env" \
+             --evidence "${t}/ev" --skip-probes --os-release-version 2026.10.1 2>&1 )" \
     && bad "a build with no --bench-labels was accepted" \
     || {
       [[ "${out}" == *"refusing to build without --bench-labels"* ]] \
@@ -659,10 +701,27 @@ JSON
   for badval in "" yes 2 true on; do
     if "${BASH_SOURCE[0]}" --only rock-edge --trust-verdict "${t}/verdict.json" \
          --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
-         --bench-labels "${badval}" >/dev/null 2>&1; then
+          --bench-labels "${badval}" --os-release-version 2026.10.1 >/dev/null 2>&1; then
       bad "--bench-labels accepted the non-boolean value '${badval}'"
     else
       ok "--bench-labels refuses the non-boolean value '${badval:-<empty>}'"
+    fi
+  done
+
+  out="$( CERALIVE_OS_RELEASE_VERSION=2026.10.9 "${BASH_SOURCE[0]}" --only rock-edge \
+           --trust-verdict "${t}/verdict.json" --signing-env "${t}/sign.env" \
+           --evidence "${t}/ev" --skip-probes --bench-labels 0 2>&1 )" \
+    && bad "an ambient OS release version satisfied the missing flag" \
+    || { [[ "${out}" == *"refusing to build without --os-release-version"* ]] \
+           && ok "missing --os-release-version refuses an ambient value" \
+           || bad "missing CalVer refusal: ${out}"; }
+  for badval in '' 2026.10 2026.10.1-rc 26.10.1 2026.10.1.0; do
+    if "${BASH_SOURCE[0]}" --only rock-edge --trust-verdict "${t}/verdict.json" \
+         --signing-env "${t}/sign.env" --evidence "${t}/ev" --skip-probes \
+         --bench-labels 0 --os-release-version "${badval}" >/dev/null 2>&1; then
+      bad "--os-release-version accepted '${badval}'"
+    else
+      ok "--os-release-version refuses '${badval:-<empty>}'"
     fi
   done
 
@@ -724,16 +783,21 @@ JSON
 
 # ---------------------------------------------------------------------------
 main() {
-  local only="" evidence="" debug_env="" skip_probes=0
-  TRUST_VERDICT=""; SIGNING_ENV=""; BENCH_LABELS=""
+  local only="" evidence="" debug_env="" skip_probes=0 local_debs_flag=0
+  DEBUG_IMAGE=0 FIRST_PARTY_LOCAL_DEBS=""
+  unset CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR
+  TRUST_VERDICT=""; SIGNING_ENV=""; BENCH_LABELS=""; OS_RELEASE_VERSION=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --only)          only="${2:-}"; shift 2 ;;
       --trust-verdict) TRUST_VERDICT="${2:-}"; shift 2 ;;
       --signing-env)   SIGNING_ENV="${2:-}"; shift 2 ;;
       --debug-env)     debug_env="${2:-}"; shift 2 ;;
+      --debug-image)   DEBUG_IMAGE=1; shift ;;
+      --first-party-local-debs) local_debs_flag=1; FIRST_PARTY_LOCAL_DEBS="${2:-}"; shift 2 ;;
       --evidence)      evidence="${2:-}"; shift 2 ;;
       --bench-labels)  BENCH_LABELS="${2:-}"; shift 2 ;;
+      --os-release-version) OS_RELEASE_VERSION="${2:-}"; shift 2 ;;
       --skip-probes)   skip_probes=1; shift ;;
       --self-test)     self_test; exit $? ;;
       -h|--help)       usage; exit 0 ;;
@@ -742,6 +806,9 @@ main() {
   done
 
   [[ -n "${only}" ]]           || { usage; die "--only is required"; }
+  [[ -n "${OS_RELEASE_VERSION}" ]] || die "refusing to build without --os-release-version YYYY.MINOR.PATCH (no ambient fallback)"
+  [[ "${OS_RELEASE_VERSION}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
+    || die "--os-release-version must be YYYY.MINOR.PATCH CalVer (got '${OS_RELEASE_VERSION}')"
   [[ -n "${TRUST_VERDICT}" ]]  || { usage; die "--trust-verdict is required"; }
   [[ -n "${SIGNING_ENV}" ]]    || { usage; die "--signing-env is required"; }
   [[ -n "${evidence}" ]]       || { usage; die "--evidence is required"; }
@@ -772,8 +839,23 @@ main() {
     done
   fi
 
-  local needs_debug=0 c
-  for c in "${selected[@]}"; do candidate_is_debug "${c}" && needs_debug=1; done
+  if (( local_debs_flag )); then
+    [[ -d "${FIRST_PARTY_LOCAL_DEBS}" ]] || die "--first-party-local-debs is not a directory: ${FIRST_PARTY_LOCAL_DEBS}"
+    FIRST_PARTY_LOCAL_DEBS="$(cd "${FIRST_PARTY_LOCAL_DEBS}" && pwd)"
+  fi
+  local c board verdict_line verdict mode pki root_fpr leaf_fpr eku prod_anchor
+  for c in "${selected[@]}"; do
+    board="$(candidate_board "${c}")"
+    verdict_line="$(read_verdict "${TRUST_VERDICT}" "${board}")" \
+      || die "no trust verdict recorded for board '${board}' in ${TRUST_VERDICT}"
+    IFS='|' read -r verdict mode pki root_fpr leaf_fpr eku prod_anchor <<<"${verdict_line}"
+    if [[ "${mode}" == production ]] && { [[ -n "${FIRST_PARTY_LOCAL_DEBS}" ]] || (( DEBUG_IMAGE == 1 )); }; then
+      die "board '${board}' has production build_mode: --first-party-local-debs / --debug-image refused"
+    fi
+  done
+
+  local needs_debug=0
+  for c in "${selected[@]}"; do candidate_debug_image "${c}" && needs_debug=1; done
   if (( needs_debug )); then
     [[ -n "${debug_env}" ]] || die "a DEBUG candidate is selected but --debug-env was not supplied"
   elif [[ -n "${debug_env}" ]]; then

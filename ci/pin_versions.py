@@ -17,6 +17,7 @@ APP_COMPONENTS: Final = {
     "ceralive-device": "CeraUI", "srtla": "srtla",
     "gstreamer1.0-libuvcsrc": "gstlibuvcsrc",
     "ceralive-modem-support": "modem-stack",
+    "ceralive-apt-credentials": "apt-credentials",
     "modemmanager": "modem-stack", "libmm-glib0": "modem-stack",
     "libmbim-glib4": "modem-stack", "libmbim-proxy": "modem-stack",
     "libmbim-utils": "modem-stack", "libqmi-glib5": "modem-stack",
@@ -39,7 +40,7 @@ COMPONENTS: Final = frozenset(APP_COMPONENTS.values()) | frozenset(PLATFORM_COMP
 COMPONENT_REPOS: Final = {
     "srt": "srt", "cerastream": "cerastream", "CeraUI": "CeraUI",
     "srtla": "srtla-send-rs", "gstlibuvcsrc": "gstlibuvcsrc",
-    "modem-stack": "modem-stack",
+    "modem-stack": "modem-stack", "apt-credentials": "apt-worker",
     "gstreamer-rockchip": "gstreamer-rockchip", "librga": "librga",
 }
 if COMPONENT_REPOS.keys() != COMPONENTS:
@@ -47,7 +48,7 @@ if COMPONENT_REPOS.keys() != COMPONENTS:
 
 
 def release_version(value: str) -> str:
-    version = value.removeprefix("srt-v").removeprefix("v")
+    version = value.removeprefix("apt-credentials-v").removeprefix("srt-v").removeprefix("v")
     # Only known observation/build suffixes are discarded; +ceralive.N is ordered.
     version = re.sub(r"(?:\+[0-9a-f]{7,40}|-\d{8}T\d{6}\.[0-9a-f]{7,40})$", "", version)
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:\+ceralive\.\d+|-\d+~ceralive\.\d+)?", version):

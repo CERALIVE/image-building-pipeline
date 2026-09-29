@@ -7,8 +7,7 @@
 # proves the parameterized tool now derives every identity axis from the board
 # manifest and REFUSES a candidate built for the other board — in both
 # directions, and per axis, with REAL fixtures: a genuine FAT boot partition
-# carrying a real `cera_board.env` and a genuine squashfs RAUC bundle carrying a
-# real `manifest.raucm`.
+# carrying a real `cera_board.env` and a signed verity RAUC bundle.
 #
 # Hardware-free: no USB, no UART, no board, no destructive write. The tool's
 # `--check-identity-only` mode is the whole subject.
@@ -38,7 +37,7 @@ assert_ne() {
 VERIFY="${PIPELINE_DIR}/ci/verify-and-flash-candidate.sh"
 READER="${PIPELINE_DIR}/ci/read-candidate-identity.sh"
 
-for tool in mformat mcopy mtype mksquashfs unsquashfs; do
+for tool in mformat mcopy mtype rauc mkfs.ext4; do
   command -v "${tool}" >/dev/null 2>&1 || {
     printf 'FAIL required tool not on PATH: %s\n' "${tool}" >&2
     exit 2
@@ -47,23 +46,14 @@ done
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
+"${PIPELINE_DIR}/tests/generate-dev-rauc-pki.sh" >/dev/null
 
 GAP_BYTES=$((16 * 1024 * 1024))
-
-# append_be64 <file> <value> — the .raucb 8-byte big-endian signature-length
-# trailer. Written byte-wise because the layout, not a tool, is the contract.
-append_be64() {
-  local file="$1" value="$2" shift_bits byte
-  for shift_bits in 56 48 40 32 24 16 8 0; do
-    byte=$(( (value >> shift_bits) & 255 ))
-    printf '%b' "$(printf '\\x%02x' "${byte}")" >>"${file}"
-  done
-}
 
 # make_candidate <name> <board_id> <fdtfile> <compatible> — a real artifact set.
 make_candidate() {
   local name="$1" board_id="$2" fdtfile="$3" compatible="$4"
-  local dir="${TMP}/${name}" boot="${TMP}/${name}-boot.img" siglen
+  local dir="${TMP}/${name}" boot="${TMP}/${name}-boot.img"
 
   mkdir -p "${dir}/bundle"
   printf 'console=ttyS2,1500000\nfdtfile=%s\nboard_id=%s\n' "${fdtfile}" "${board_id}" \
@@ -76,15 +66,15 @@ make_candidate() {
   truncate -s $((GAP_BYTES + 8 * 1024 * 1024)) "${dir}/candidate.raw"
   dd if="${boot}" of="${dir}/candidate.raw" bs=1M seek=16 conv=notrunc status=none
 
-  printf 'compatible=%s\nversion=2026.8.1\n[image.rootfs]\nfilename=rootfs.img\n' \
+  printf '[update]\ncompatible=%s\nversion=2026.8.1\n[bundle]\nformat=verity\n[image.rootfs]\nfilename=rootfs.ext4\nadaptive=block-hash-index\n' \
     "${compatible}" >"${dir}/bundle/manifest.raucm"
-  printf 'rootfs-bytes\n' >"${dir}/bundle/rootfs.img"
-  mksquashfs "${dir}/bundle" "${dir}/payload.squashfs" -no-progress -quiet -noappend
-
-  printf 'not-a-real-cms-signature-identity-reads-do-not-verify\n' >"${dir}/signature.cms"
-  siglen="$(stat -c %s "${dir}/signature.cms")"
-  cat "${dir}/payload.squashfs" "${dir}/signature.cms" >"${dir}/candidate.raucb"
-  append_be64 "${dir}/candidate.raucb" "${siglen}"
+  truncate -s 64M "${dir}/bundle/rootfs.ext4"
+  mkfs.ext4 -q -F "${dir}/bundle/rootfs.ext4"
+  rauc bundle --cert="${PIPELINE_DIR}/.dev-keys/leaf-signing.pem" \
+    --key="${PIPELINE_DIR}/.dev-keys/leaf-signing.key" \
+    --intermediate="${PIPELINE_DIR}/.dev-keys/chain.pem" \
+    --mksquashfs-args="-noD -noF" \
+    "${dir}/bundle" "${dir}/candidate.raucb" >/dev/null
 
   printf 'rk3588-loader-%s\n' "${name}" >"${dir}/loader.bin"
 }
@@ -112,7 +102,7 @@ assert_contains_str "the reader recovers the Rock board_id from the real FAT boo
   "${rock_read}" 'candidate_board_id=rock-5b-plus'
 assert_contains_str "the reader recovers the Rock fdtfile" \
   "${rock_read}" 'candidate_fdtfile=rk3588-rock-5b-plus.dtb'
-assert_contains_str "the reader recovers the Rock compatible from the real squashfs manifest" \
+assert_contains_str "the reader recovers the Rock compatible from verity metadata" \
   "${rock_read}" 'candidate_compatible=ceralive-rock-5b-plus'
 
 rock_xz_read="$("${READER}" --image "${TMP}/rock/candidate.raw.xz" \

@@ -459,6 +459,19 @@ beside that `.deb`: `resolved.config`, copied after `olddefconfig`, `syncconfig`
 and the config-survival gate; and `built-modules.txt`, a sorted inventory of the
 `.ko` files the compile actually produced.
 
+For repeat builds on the same host, `CERALIVE_KERNEL_ARTIFACT_CACHE=auto` stores
+those three successful outputs under `mkosi/cache/kernel-artifacts/<sha256>/`.
+The key includes the exact source and patch pins, both config modes (ordered
+fragment content in defconfig mode), output variant/identity, build timestamp,
+actual builder image identity, Dockerfile and kernel build/verifier script bytes;
+mtimes never participate. Every hit verifies the manifest's three SHA-256 values,
+the package identity and board DTB, and the config-survival/required/forbidden
+symbol checks. A corrupt or invalid entry is deleted and rebuilt. `=0` disables
+lookup and store; other values are rejected. The per-key flock protects both
+copy-out and atomic publication. `tests/kernel-artifact-cache.test.sh` pins the
+offline contract; a runner cache-hit time remains unmeasured because the current
+audit workflow deletes `mkosi/cache` before and after every run.
+
 **Validated, not assumed.** Before staging, the built `.deb` is checked on four
 axes against the manifest: control `Package:`, control `Version:`, control
 `Architecture:`, and the presence of the board's own DTB at

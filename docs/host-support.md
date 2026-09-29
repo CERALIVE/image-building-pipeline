@@ -155,6 +155,35 @@ per checkout.
 
 ---
 
+## Persistent Debian APT cache on build hosts
+
+Install Docker Compose on a Linux build runner, then run `./dev-cache up` from
+this checkout (or `docker compose -f ci/apt-cache/compose.yml up -d --wait` in
+runner provisioning). The image is pinned by OCI digest and stores downloaded
+packages in the `apt-cache` named volume; `./dev-cache down` stops the service
+without deleting the volume. `./dev-cache status` reports the listener and report
+page. On an always-on runner the Compose service's `restart: unless-stopped`
+restores it after daemon reboot; start it once during provisioning, not inside a
+per-build job. Limit incoming TCP 3142 to trusted runners with the host firewall.
+
+The build probes loopback within one second when `CERALIVE_APT_PROXY` is unset,
+logs the choice, and falls back to direct acquisition when absent. Explicit
+`CERALIVE_APT_PROXY=off` disables it. The host-side fetcher uses HTTP proxy
+options with `Acquire::https::Proxy=DIRECT` (apt's https method otherwise inherits
+the http proxy and would CONNECT first-party mTLS through the cache); Dockerfile APT uses build args and the host-gateway mapping; the runtime
+postinst remaps Debian HTTPS sources through apt-cacher-ng's `HTTPS///` URL
+format for every apt call in the runtime layer, via an exported `APT_CONFIG` that
+points at a `/tmp` source directory. The cache verifies upstream TLS, while APT
+still verifies the Debian archive signature. Nothing under `/etc/apt` changes and
+the `/tmp` directory is removed when the layer exits: installed `debian.sources`
+remains the exact HTTPS deb822 payload on the device. The first-party
+`apt.ceralive.tv` source retains its direct mTLS transport.
+
+Check `DRY_RUN=1 ./build rock-5b-plus` both with the service up and down to
+confirm the chosen proxy/direct path before a real build. The plan does not
+execute mkosi postinstall; a real-build audit is required to prove runtime
+acquisition on a particular runner.
+
 ## Protected production-candidate runner
 
 The developer matrix above describes functional portability. The protected
@@ -201,6 +230,120 @@ mkosi exposes `mkosi-install`; raw `apt-get` uses the image's persistent APT sta
 and cannot resolve packages from mkosi's ephemeral `file:/repository`.
 
 ---
+
+### Scheduled real-build audit: Debian TLS on the runner (2026-09-23)
+
+The scheduled audit runs on the same native-Linux builder but is **not** a
+required PR check. Runs
+[`35626350745`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35626350745)
+and [`35669090715`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35669090715)
+reached runtime postinstall and then failed direct `apt-get update` against
+`deb.debian.org` with `certificate verify failed`; their post-job bare `rm -rf`
+also failed on root-owned mkosi cache files. Audit run
+[`35852947598`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35852947598)
+reproduced the TLS failure after containerized cleanup cleared those paths.
+The runtime-chroot capture at the **first** failed apt acquisition recorded:
+
+- `date -u`: Wed Sep 23 11:27:57 UTC 2026. The CA bundle existed and was
+  nonempty (`224449` bytes). The bootstrap's earlier direct apt probe printed
+  “validates … skipping”, but apt can return exit 0 even when it reports failed
+  index fetches, so that message is not proof of a working direct apt TLS path.
+- Direct `openssl s_client -4 -connect deb.debian.org:443 -servername
+  deb.debian.org -verify_hostname deb.debian.org -verify_return_error` reached
+  `151.101.194.132`: TLS 1.3, `Verification: OK`, verified hostname, leaf
+  `CN=cdn-fastly.deb.debian.org`, issuer Let's Encrypt `YR2`, valid Aug 9–Nov 7.
+  No TLS-rewriting middlebox was observed on this IPv4 route.
+- The equivalent `-6` connection failed with `Network is unreachable` before
+  a certificate was presented. But apt's failed attempts reported **IPv4** Fastly
+  addresses (`151.101.*.132`), so unavailable IPv6 does not explain apt's
+  certificate-verification failure. Eight direct apt retries all failed.
+
+The failure is therefore on the runner's **direct apt HTTPS acquisition path**,
+not a missing CA store, a wrong clock, a demonstrated intercepted TLS peer, or
+an IPv6-only apt route. OpenSSL success alone does not identify the precise
+libapt/GnuTLS rejection; do not invent an issuer or disable verification. The
+audit now brings up the digest-pinned apt-cacher-ng service and **requires** its
+report endpoint before the build. It pins `CERALIVE_APT_PROXY` to the local
+listener for this job, so loss of the cache fails closed rather than reverting
+to direct apt. The first cache startup failed on this runner because the checkout's
+restrictive umask made `ci/apt-cache/ceralive.conf` unreadable to the container's
+unprivileged apt-cacher-ng process (runs `35856518948`, `35856704302`). The audit
+copies only this public config to a mode-0644 file under `RUNNER_TEMP`, mounts
+that copy, and removes the copy after the job; local Compose users retain the
+default checked-out config. Run
+[`35856946523`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35856946523)
+then proved the cache healthy and the runtime remap active, but its nested mkosi
+postinstall failed to resolve `host.docker.internal` on every apt attempt. The
+outer builder gets that name via Docker `--add-host`; mkosi mounts the target
+rootfs over `/etc` inside its sandbox, hiding the outer `/etc/hosts`. With
+`--with-network=yes` the sandbox keeps the network path but not the alias. The
+builder therefore resolves the host-gateway mapping to an IPv4 literal **before**
+invoking mkosi, then forwards that build-only URL through the existing
+`CERALIVE_BUILD_APT_PROXY` environment contract. A missing mapping aborts the
+build, never falls back to direct acquisition. Do not substitute the runner's
+default-route address: the required address is Docker's *host-gateway mapping
+inside the builder*, not an inferred runner route. A local mkosi-sandbox probe
+with an empty `/etc/hosts` reached the live cache at the mapped IPv4 address;
+the scheduled audit still needs two consecutive successful end-to-end receipts.
+The existing runtime-only Debian `HTTPS///` remap moves the
+upstream TLS leg to apt-cacher-ng, while Debian archive signatures and package
+digests remain checked and the installed HTTPS source remains unchanged. The
+first-party mTLS fetch stays DIRECT. A run proving the remapped install works
+is required before this is called resolved.
+
+Run
+[`35889225710`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35889225710)
+(head `86bc968`) established that the literal gateway is reachable from the
+actual runtime chroot: all three `InRelease` files were acquired through
+`172.17.0.1:3142`, but apt reported `sqv` exit 123. The decisive probes ran
+**inside the failing chroot**, not in a reconstructed rootfs:
+
+- [`35896791171`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35896791171):
+  root's `sqv` verified three signatures on the cache-fetched Debian
+  `InRelease`; `_apt` could not even launch `sqv --version` (`Permission
+  denied`). The reported 123 was apt's subprocess launch failure, not a bad
+  signature or an `sqv` signature-rejection exit code.
+- [`35899522292`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35899522292):
+  `/usr` was root-owned mode **0700**, despite `/usr/bin/sqv` mode 0755 and
+  the Debian keyring mode 0644. `_apt` could not launch even `/usr/bin/true`;
+  root still verified the same signed index. The local arm64 replay had used a
+  pre-existing, traversable `/usr`, explaining its disagreement with CI.
+
+Before the runtime's first apt transaction, the build now restores only `/usr`
+to standard mode 0755 and checks that `_apt` can execute. A local arm64
+reproduction with `/usr=0700` failed `_apt` execution and passed after the
+helper ran. Neither apt authentication nor the installed HTTPS `debian.sources`
+is relaxed. Run
+[`35902300468`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35902300468)
+then completed the signed Debian update and runtime package installation, installed
+all 15 first-party packages, verified the boot artifacts and populated both rootfs
+slots (20/0/0 parity). This is the real-run receipt that the `sqv` boundary is
+repaired; it is **not** a green audit.
+
+That run failed later while signing the RAUC bundle: OpenSSL CMS verification
+with `-purpose smimesign` returned `Verify error: unsuitable certificate purpose`
+for the CI-provided release leaf. The separate, locally provisioned production
+leaf in `cert-work/rauc/` was inspected on 2026-09-23: its actual EKU is
+`emailProtection, codeSigning`, and `openssl verify -purpose smimesign` succeeds
+through the existing intermediate to the existing root. The intermediate's
+private key is locally available, and **no new leaf was needed** — the correctly
+purposed one already existed. The Actions secret `RAUC_RELEASE_PKI_TAR_B64` still
+held a pre-2026-07-18 codeSigning-only leaf, so it was rotated on 2026-09-23
+19:17:56Z to the current production PKI. The public root is unchanged at
+`b7ff3c7b…`, so the baked device keyring is untouched. The audit preflights the
+supplied leaf against that root for both S/MIME and code-signing purposes before
+spending time on a real build; the pre-rotation secret was refused by exactly
+that gate in run
+[`35908288341`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35908288341),
+and the test drives a valid, codeSigning-only negative fixture against the same
+check. Never weaken CMS verification or use the non-production test fixture here.
+**The audit has since passed twice consecutively.** Runs
+[`35908389533`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35908389533)
+and
+[`35911623365`](https://github.com/CERALIVE/image-building-pipeline/actions/runs/35911623365)
+each built the full production-mode image at `6614ada`; the bundle was signed by
+the rotated leaf and its `leaf -> intermediate -> root` chain verified before the
+run sealed the artifact.
 
 ## Per-host detail
 

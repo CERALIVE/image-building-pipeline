@@ -95,6 +95,7 @@ install_rootfs() {
   install -D -m 0644 "${SCRIPT_DIR}/../boot-state-core.sh"        "${root}/usr/lib/ceralive/boot-state-core.sh"
   install -D -m 0755 "${SCRIPT_DIR}/x86-boot-state.sh"            "${root}/usr/bin/ceralive-boot-state"
   install -D -m 0755 "${SCRIPT_DIR}/x86-rauc-boot-adapter.sh"     "${root}/usr/lib/rauc/ceralive-rauc-boot-adapter"
+  install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-post-install" "${root}/usr/lib/rauc/ceralive-post-install"
 
   log "writing ${root}/etc/rauc/system.conf (bootloader=custom, compatible=${COMPATIBLE}, single_slot=${SINGLE_SLOT_FALLBACK})"
   mkdir -p "${root}/etc/rauc"
@@ -103,9 +104,12 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=custom
-# Boot attempts per slot before the custom backend / grub.cfg declare a slot bad
-# and roll back. Mirrors CERALIVE_BOOT_ATTEMPTS used by ceralive-boot-state.
-boot-attempts=${BOOT_ATTEMPTS}
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 
 [handlers]
 # RAUC bootloader=custom delegates every boot-state op to this script
@@ -114,6 +118,7 @@ boot-attempts=${BOOT_ATTEMPTS}
 # working persistent env, but we use a CUSTOM backend (not bootloader=grub) to keep
 # the RK3588 multi-attempt countdown model + a uniform interface (task 33 / README).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]
 path=/etc/rauc/keyring.pem
@@ -132,6 +137,12 @@ type=ext4
 bootname=B
 EOF
     fi
+    cat <<EOF
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
+EOF
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
 

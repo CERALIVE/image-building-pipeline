@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/.." && pwd)"
@@ -35,7 +36,44 @@ if bash "${REPO}/lib/verify-disk.sh" check-slot "${WORK}/slot" rootfs_b >/dev/nu
 assert_contains 'metadata diagnostic chooses bavail' "${WORK}/reserved" 'field=bavail'
 tune2fs -m 5 "${WORK}/slot" >/dev/null 2>&1 || exit 1
 if slot_reserve_assert_ext4 "${WORK}/slot" rootfs_b >/dev/null 2>&1; then ok 'real metadata mutation restored GREEN'; else bad 'restored metadata rejected'; fi
-assert_contains 'producer gates both mkfs paths before dd' "${REPO}/lib/disk/slot.sh" "slot_reserve_assert_ext4 \"\${rootfs_img}\" \"\${slot_label}\""
+assert_contains 'factory sources shared slot-image producer' "${REPO}/lib/disk/slot.sh" 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/slot-image.sh"'
+assert_contains 'verity bundle sources shared slot-image producer' "${REPO}/lib/build-bundle.sh" 'source "${HERE}/disk/slot-image.sh"'
+assert_contains 'shared producer uses common ext4 reserve assertion' "${REPO}/lib/disk/slot-image.sh" 'slot_reserve_assert_ext4 "${out}" "${label}"'
+if awk '
+  /^make_slot_image\(\) \{/ { active=1 }
+  active && /mkfs\.ext4 -q/ { mkfs++ }
+  active && /slot_reserve_assert_ext4 "\$\{out\}" "\$\{label\}"/ { gate=NR }
+  active && /^}/ { exit !(mkfs == 2 && gate > 0 && gate > first_mkfs) }
+  active && /mkfs\.ext4 -q/ && !first_mkfs { first_mkfs=NR }
+' "${REPO}/lib/disk/slot-image.sh"; then ok 'shared producer gates both mkfs paths'; else bad 'ext4 reserve check does not follow both mkfs paths'; fi
+if awk '
+  /^populate_rootfs_slot\(\) \{/ { active=1 }
+  active && /make_slot_image "\$\{rootfs_tree\}" "\$\{rootfs_img\}"/ { gate=NR }
+  active && /dd if="\$\{rootfs_img\}"/ { dd=NR }
+  active && /^}/ { exit !(gate > 0 && dd > gate) }
+' "${REPO}/lib/disk/slot.sh"; then ok 'factory checks slot image before dd'; else bad 'factory dd precedes shared slot image gate'; fi
+if (
+  require_cmd() { command -v "$1" >/dev/null; }
+  die() { printf 'factory: %s\n' "$*" >&2; exit 1; }
+  log_info() { :; }
+  log_success() { :; }
+  part_field() { case "$3" in 'First sector') printf '2048\n' ;; 'Partition size') printf '8388608\n' ;; esac; }
+  assert_free_space() { :; }
+  register_scratch() { :; }
+  discard_scratch() { :; }
+  dd() { printf 'dd called\n' >"${WORK}/dd-called"; }
+  SECTOR=512
+  source "${REPO}/lib/disk/slot.sh"
+  slot_reserve_assert_ext4() { printf 'injected reserve failure\n' >&2; return 1; }
+  populate_rootfs_slot "${WORK}/factory.raw" "${WORK}/tree" 2 rootfs_a
+) >"${WORK}/factory-red" 2>&1; then
+  bad 'factory accepted a rejected populated slot image'
+elif [[ ! -e "${WORK}/dd-called" ]] && grep -Fq 'injected reserve failure' "${WORK}/factory-red" \
+  && grep -Fq 'populated rootfs_a fails ext4 available-byte/inode reserve' "${WORK}/factory-red"; then
+  ok 'injected shared reserve failure stops factory before dd'
+else
+  bad 'factory failed for another reason or wrote a rejected slot'
+fi
 assert_contains 'disk verifier exposes shared assertion' "${REPO}/lib/verify-disk.sh" 'shared/slot-reserve.sh'
 assert_contains 'preflash checks sliced slot' "${REPO}/tests/preflash-verify.sh" "slot_reserve_assert_ext4 \"\${tmp}\" \"\${label}\""
 printf '%s passed, %s failed\n' "${PASS}" "${FAIL}"

@@ -142,6 +142,7 @@ EOF
 #     apt (base Packages=) is the only guaranteed fetcher at this point.
 # ---------------------------------------------------------------------------
 bootstrap_ca_trust() {
+  runtime_build_apt_prepare_usr || exit 1
   if [[ -s /etc/ssl/certs/ca-certificates.crt ]] && apt-get update >/dev/null 2>&1; then
     log "CA trust store already present and validates the live HTTPS source — skipping the HTTPS bootstrap"
     return 0
@@ -184,15 +185,12 @@ EOF
 #     its own source first). This mirrors the platform layer's in-chroot apt usage.
 # ---------------------------------------------------------------------------
 # retry_apt: a passing bootstrap_ca_trust probe does not guarantee the real
-# call seconds later. Two live runs since this existed both exhausted their
-# whole backoff window (first 6s, then a widened 155s) with EVERY mirror IP
-# failing cert-verify on EVERY attempt -- not a brief blip, so the backoff
-# is widened again; if this window is not enough either, the flakiness
-# outlasts realistic in-build retrying and needs a caching mirror, not a
-# bigger number here. Exit code alone is not enough either: `apt-get update`
-# exits 0 on a partial fetch failure ("W: Failed to fetch", stale/no index
-# kept) -- observed live, that starves the install with "Unable to locate
-# package" for everything, so output is checked for that marker too.
+# call seconds later. Direct HTTPS failed every attempt on the runner; the
+# build-only cache is the remedy, not further backoff. Also apt-get update can
+# exit 0 on a partial fetch failure ("W: Failed to fetch", stale/no index kept),
+# starving the install with "Unable to locate package" for everything. Check
+# output as well as exit status so that a partial update cannot report success.
+source "${CERALIVE_RUNTIME_SRC}/build-tls-diagnostics.sh"
 retry_apt() {
   local label="$1"; shift
   local attempt backoff=(10 20 40 60 90 120 150) out rc
@@ -200,11 +198,18 @@ retry_apt() {
     out="$("$@" 2>&1)"; rc=$?
     printf '%s\n' "${out}"
     [[ "${rc}" -eq 0 && "${out}" != *'Failed to fetch'* ]] && return 0
+    if (( attempt == 1 )) && [[ "${out}" == *'certificate verify failed'* ]]; then
+      diagnose_debian_tls_failure
+    fi
+    if (( attempt == 1 )) && [[ "${out}" == *'sqv returned an error code'* ]]; then
+      runtime_build_apt_signature_diagnostics
+    fi
     (( attempt < 8 )) || { log "FATAL: ${label} failed after 8 attempts"; return 1; }
     log "${label}: attempt ${attempt}/8 failed — retrying in ${backoff[attempt - 1]}s"
     sleep "${backoff[attempt - 1]}"
   done
 }
+source "${CERALIVE_RUNTIME_SRC}/build-apt-cache.sh"
 install_runtime_packages() {
   if [[ -z "${SHARED_PACKAGES// /}" ]]; then
     log "FATAL: SHARED_PACKAGES is empty — runtime package set (shared.list) was not forwarded; refusing to build a package-less runtime"
@@ -214,32 +219,16 @@ install_runtime_packages() {
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
   bootstrap_ca_trust
-  retry_apt "runtime apt-get update" apt-get update
-  retry_apt "runtime apt-get install" apt-get install -y --no-install-recommends "${pkgs[@]}"
+  runtime_debian_apt_install "${pkgs[@]}"
 }
 
 # ---------------------------------------------------------------------------
-# 3. CeraLive apt repository (mTLS + GPG). Secrets come from env (CI); never
-#    hardcoded. Local/dev build without secrets installs the source + an empty
-#    keyring placeholder, exactly as v1 did.
+# 3. CeraLive apt repository (GPG). The app-layer credentials package owns the
+#    device mTLS cert/key; CI APT_CLIENT_* remains build-time fetch input only.
 # ---------------------------------------------------------------------------
 setup_ceralive_repository() {
   log "configuring apt.ceralive.tv repository (channel=${CHANNEL})"
-  mkdir -p /etc/opt/ceralive /etc/apt/certs /usr/share/keyrings
-
-  if [[ -n "${APT_CLIENT_CRT_B64:-}" && -n "${APT_CLIENT_KEY_B64:-}" ]]; then
-    log "CI mode: installing mTLS client certificate"
-    printf '%s' "${APT_CLIENT_CRT_B64}" | base64 -d >/etc/apt/certs/client.crt
-    printf '%s' "${APT_CLIENT_KEY_B64}" | base64 -d >/etc/apt/certs/client.key
-    chown _apt:root /etc/apt/certs/client.key && chmod 400 /etc/apt/certs/client.key  # apt fetches as the _apt sandbox user; a root:root 0600 key is unreadable → "Could not load client certificate"
-    chmod 644 /etc/apt/certs/client.crt
-    cat >/etc/apt/apt.conf.d/99ceralive-ssl <<'SSLEOF'
-Acquire::https::apt.ceralive.tv::SslCert "/etc/apt/certs/client.crt";
-Acquire::https::apt.ceralive.tv::SslKey  "/etc/apt/certs/client.key";
-SSLEOF
-  else
-    log "no mTLS secrets in env — skipping client-cert injection (CI provides them)"
-  fi
+  mkdir -p /etc/opt/ceralive /usr/share/keyrings
 
   if [[ -n "${APT_GPG_PUBLIC_B64:-}" ]]; then
     log "installing build-validated CeraLive apt GPG public key from env"
@@ -258,14 +247,67 @@ Suites: ./
 Signed-By: /usr/share/keyrings/ceralive-archive-keyring.gpg
 EOF
 
-  # apt.ceralive.tv origin pin (990) — dual-track twin of
+  # apt.ceralive.tv origin pin, PER PACKAGE NAME (Todo 29) — dual-track twin of
   # apt-ceralive-repo.sh::install_apt_preferences. `./build` runs THIS executor,
-  # so the pin MUST live here too or it never ships (guarded in package-contract.bats T2.6).
+  # so the pin MUST live here too or it never ships (guarded in
+  # apt-preferences-baked.test.sh). Replaces the former Package: * wildcard;
+   # see that function's header comment for the first-match rule and why the
+   # exact-name archive wildcard must reject every OTHER origin, not the installed version.
   mkdir -p /etc/apt/preferences.d
-  cat >/etc/apt/preferences.d/ceralive <<'EOF'
-Package: *
-Pin: origin apt.ceralive.tv
-Pin-Priority: 990
+  rm -f /etc/apt/preferences.d/ceralive
+  [[ -n "${CERALIVE_FIRST_PARTY_NAMES_B64:-}" ]] || die "::error::CERALIVE_FIRST_PARTY_NAMES_B64 is required for origin protection"
+  local names count origin_tmp pkg
+  names="$(printf '%s' "${CERALIVE_FIRST_PARTY_NAMES_B64}" | base64 -d)" || die "::error::invalid first-party names encoding"
+  source "${CERALIVE_RUNTIME_SRC}/first-party-origin-policy.sh"
+  validate_first_party_names "$names" || die "::error::first-party origin protection names differ from the independent authority"
+  count="${#FIRST_PARTY_NAMES[@]}"
+  origin_tmp="$(mktemp /etc/apt/preferences.d/.ceralive-origin.XXXXXXXX)"
+  {
+    printf '# CeraLive first-party apt origin pin — generated by\n'
+    printf '# mkosi.postinst.chroot::setup_ceralive_repository from\n'
+    printf '# manifests/first-party-apt-names.txt (Todo 29). One stanza pair per name.\n'
+    for pkg in "${FIRST_PARTY_NAMES[@]}"; do
+      printf '\nPackage: %s\nPin: origin apt.ceralive.tv\nPin-Priority: 990\n' "${pkg}"
+       printf '\nPackage: %s\nPin: origin *\nPin-Priority: -1\n' "${pkg}"
+    done
+  } >"${origin_tmp}"
+  if [[ "$(grep -c '^Package: ' "$origin_tmp")" != "$((count * 2))" ]]; then
+    rm -f -- "$origin_tmp"
+    die "::error::origin protection stanza count differs from first-party names count"
+  fi
+  mv -- "$origin_tmp" /etc/apt/preferences.d/ceralive-origin
+}
+
+# ---------------------------------------------------------------------------
+# 3b. Todo 29 (update-system-overhaul): device prune-paths.list, the apt cache
+#     on /data, and the DPkg::Post-Invoke reprune hook that keeps prunes across
+#     every future apt transaction. Single source: manifests/prune-paths.list
+#     (see that file's own header for the full three-consumer design).
+# ---------------------------------------------------------------------------
+setup_prune_reprune_and_cache() {
+  log "installing prune-paths.list, apt cache on /data, and the reprune hook"
+  mkdir -p /usr/lib/ceralive /usr/libexec/ceralive /etc/apt/apt.conf.d
+  if [[ -n "${CERALIVE_PRUNE_PATHS_B64:-}" ]]; then
+    printf '%s' "${CERALIVE_PRUNE_PATHS_B64}" | base64 -d >/usr/lib/ceralive/prune-paths.list
+  else
+    log "no CERALIVE_PRUNE_PATHS_B64 in env — writing an empty prune-paths.list (standalone/offline build)"
+    : >/usr/lib/ceralive/prune-paths.list
+  fi
+  chmod 0644 /usr/lib/ceralive/prune-paths.list
+
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC}/ceralive-reprune.sh" /usr/libexec/ceralive/ceralive-reprune
+
+  cat >/etc/apt/apt.conf.d/80ceralive-reprune <<'EOF'
+DPkg::Post-Invoke {"/usr/libexec/ceralive/ceralive-reprune";};
+EOF
+
+  cat >/etc/apt/apt.conf.d/81ceralive-cache <<'EOF'
+Dir::Cache::archives "/data/ceralive/apt-archives/";
+EOF
+  mkdir -p /etc/tmpfiles.d
+  cat >/etc/tmpfiles.d/ceralive-apt-cache.conf <<'EOF'
+d /data/ceralive/apt-archives 0755 root root -
+d /data/ceralive/apt-archives/partial 0755 root root -
 EOF
 }
 
@@ -431,6 +473,7 @@ EOF
 setup_rauc_client() {
   local keyring=/etc/rauc/ceralive-keyring.pem
   local sysconf=/etc/rauc/system.conf
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC}/rauc/ceralive-post-install" /usr/lib/rauc/ceralive-post-install
   # ARCH-NEUTRAL fallback. The orchestrator ALWAYS sets COMPATIBLE_STRING from the
   # resolved manifest (lib/orchestrate.sh: COMPATIBLE_STRING=ceralive-${FAMILY}), so
   # this default is only reached when the postinst is run with no env at all. It must
@@ -444,7 +487,7 @@ setup_rauc_client() {
   local slot_a slot_b
   slot_a="$(resolve_partlabel rootfs_a)"
   slot_b="$(resolve_partlabel rootfs_b)"
-  log "wiring RAUC update client (keyring + system.conf + service)"
+  log "wiring RAUC update client (keyring + system.conf + post-install + service)"
   mkdir -p /etc/rauc
 
   if [[ -n "${RAUC_ROOT_CA_B64:-}" ]]; then
@@ -468,11 +511,14 @@ setup_rauc_client() {
 [system]
 compatible=${compatible}
 bootloader=custom
-boot-attempts=3
-
+data-directory=/data/ceralive/rauc
+activate-installed=false
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 [handlers]
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
-
+post-install=/usr/lib/rauc/ceralive-post-install
 [keyring]
 path=${keyring}
 
@@ -492,7 +538,6 @@ type=raw
 EOF
     chmod 0644 "${sysconf}"
   fi
-
   if [[ ! -f /lib/systemd/system/rauc.service && ! -f /usr/lib/systemd/system/rauc.service ]]; then
     log "FATAL: rauc.service not present — the 'rauc-service' package (shared.list) is not installed"
     exit 1
@@ -502,6 +547,7 @@ EOF
   else
     log "rauc.service is D-Bus-activated (no [Install]) — live on demand via the rauc CLI"
   fi
+  install -D -m 0644 "${CERALIVE_RUNTIME_SRC}/rauc/ceralive-ota.tmpfiles.conf" /usr/lib/tmpfiles.d/ceralive-ota.conf && bash "${CERALIVE_RUNTIME_SRC}/rauc/install-update-capabilities.sh" /
 }
 
 # ---------------------------------------------------------------------------
@@ -558,9 +604,9 @@ setup_addon_keyring() {
 # (definition: customize/postinst-lib.sh::setup_boot_healthcheck — sourced above)
 
 # ---------------------------------------------------------------------------
-# 15. Device OTA: rauc-hawkbit-updater (task 41) — poll the private hawkBit DDI
-#     API, install signed .raucb bundles to the inactive RAUC A/B slot. Slot
-#     CONFIRMATION stays with ceralive-healthcheck.service (task 29): the updater
+# 15. Retained dormant hawkBit updater (disabled and masked, no server). CeraUI's
+#     capability-gated orchestrator is the automatic RAUC OS update path. Slot
+#     BOOT confirmation stays with ceralive-healthcheck.service (task 29): the updater
 #     only installs (RAUC D-Bus InstallBundle); it has NO mark-good, so it cannot
 #     bypass the gate. post_update_reboot=false keeps reboot CeraLive-controlled.
 #
@@ -598,7 +644,7 @@ tenant_id                 = @HAWKBIT_TENANT@
 target_name               = @HAWKBIT_TARGET_NAME@
 # Downloads land on the DATA partition, NOT the rootfs slot (task 41 MUST-NOT).
 bundle_download_location  = /data/ceralive/rauc-downloads/bundle.raucb
-# CeraLive owns reboot; healthcheck-gated mark-good (task 29) confirms the slot.
+# CeraLive owns reboot; healthcheck confirms only the booted slot.
 post_update_reboot        = false
 retry_wait                = 300
 connect_timeout           = 20
@@ -629,8 +675,15 @@ TEMPLATE="${CERALIVE_HAWKBIT_TEMPLATE:-/etc/rauc-hawkbit-updater/config.conf}"
 EFFECTIVE="${CERALIVE_HAWKBIT_EFFECTIVE:-/data/ceralive/hawkbit-updater/config.conf}"
 PENDING_FILE="${CERALIVE_HAWKBIT_PENDING:-/data/ceralive/hawkbit-provision.pending}"
 RAUC_SYSTEM_CONF="${CERALIVE_RAUC_SYSTEM_CONF:-/etc/rauc/system.conf}"
-APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-/etc/apt/certs/client.crt}"
-APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-/etc/apt/certs/client.key}"
+credentials_dir="${CERALIVE_APT_CREDENTIALS_DIR:-/usr/share/ceralive/apt-credentials}"
+legacy_certs_dir="${CERALIVE_APT_LEGACY_CERTS_DIR:-/etc/apt/certs}"
+if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${credentials_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${credentials_dir}/client.key}"
+else
+  APT_CLIENT_CRT="${CERALIVE_APT_CLIENT_CRT:-${legacy_certs_dir}/client.crt}"
+  APT_CLIENT_KEY="${CERALIVE_APT_CLIENT_KEY:-${legacy_certs_dir}/client.key}"
+fi
 
 log()  { printf '%s: %s\n' "${PROG}" "$*"; }
 die()  { printf '%s: ERROR: %s\n' "${PROG}" "$*" >&2; exit 1; }
@@ -651,6 +704,9 @@ read_compatible() {
 fetch_token_from_url() {
   local url="$1"
   command -v curl >/dev/null 2>&1 || return 69
+  if [ -e "${credentials_dir}/client.crt" ] || [ -e "${credentials_dir}/client.key" ]; then
+    [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ] || return 75
+  fi
   local -a auth=()
   if [ -s "${APT_CLIENT_CRT}" ] && [ -s "${APT_CLIENT_KEY}" ]; then
     auth=(--cert "${APT_CLIENT_CRT}" --key "${APT_CLIENT_KEY}")
@@ -805,31 +861,6 @@ Unit=ceralive-hawkbit-provision-retry.service
 WantedBy=timers.target
 HBRETRYTIMER
 
-  # --- A/B marker clear (task-29 brick #2 for the hawkBit install path) ---
-  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.service <<'HBMCSVC'
-[Unit]
-Description=Clear the RAUC slot-marked-good marker after a hawkBit-driven bundle download
-RequiresMountsFor=/data
-
-[Service]
-Type=oneshot
-# /data is shared A/B; clear the old slot's marker so the freshly-installed slot
-# re-proves health via ceralive-healthcheck.service (task 29). Safe to re-fire.
-ExecStart=-/bin/rm -f /data/ceralive/.slot-marked-good
-HBMCSVC
-
-  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.path <<'HBMCPATH'
-[Unit]
-Description=Watch for a downloaded RAUC bundle to clear the slot-marked-good marker
-
-[Path]
-PathExistsGlob=/data/ceralive/rauc-downloads/*.raucb
-Unit=ceralive-hawkbit-marker-clear.service
-
-[Install]
-WantedBy=multi-user.target
-HBMCPATH
-
   # --- install the backport .deb if staged; else GRACEFUL skip (config still ships) ---
   local staging dir deb="" installed=0
   for dir in "${HAWKBIT_DEB_STAGING:-}" /opt/ceralive-staging /run/ceralive-debs; do
@@ -852,10 +883,10 @@ HBMCPATH
   # CeraLive-owned units are always installable (present regardless of the .deb).
   enable_service ceralive-hawkbit-provision.service
   enable_service ceralive-hawkbit-provision-retry.timer
-  enable_service ceralive-hawkbit-marker-clear.path
   # The updater unit only exists when the .deb installed it.
   if [[ "${installed}" -eq 1 ]]; then
-    enable_service rauc-hawkbit-updater.service
+    disable_service rauc-hawkbit-updater.service
+    mask_service rauc-hawkbit-updater.service
   else
     log "rauc-hawkbit-updater.service not enabled (package absent) — drop-in/config staged for when it is"
   fi
@@ -933,6 +964,7 @@ main() {
   install_runtime_packages     # shared.list set (forwarded as $SHARED_PACKAGES)
   create_ceralive_user
   setup_ceralive_repository
+  setup_prune_reprune_and_cache # Todo 29: device prune-paths.list, apt cache on /data, reprune hook
   setup_hardware_access
   apply_board_quirks           # board-manifest-gated quirk rows, APPENDED to the rules file setup_hardware_access just truncated (CERALIVE_BOARD_QUIRKS)
   apply_streaming_optimizations
@@ -960,8 +992,12 @@ main() {
   setup_uplink_sharing_carrier # REQ-USB-020..026: ceralive-share.service carrier + teardown script + CeraUI After=nftables drop-in (NOT enabled; CeraUI drives it)
   setup_dongle_netns_retirement # phase-C todo 39: teardown for the RETIRED router-dongle netns layer (the /data slot store is the one artifact a slot swap cannot clear)
   freeze_boot_packages         # kernel freeze: apt-mark hold + name+version pin on kernel/DTB/U-Boot/firmware — LAST, after every apt transaction in this layer
-  # First-party apps + their staging tree are handled by the APPLICATION layer
-  # (mkosi.images/app, Stage 3) — the runtime layer no longer touches them.
+  # rauc/rauc-service are excluded: they are installed by the SIBLING, non-chroot
+  # runtime/mkosi.postinst (mkosi-install from the local RAUC-build package
+  # directory, BEFORE this script runs), never from the Debian archive, so this
+  # layer's Debian-provenance check must not attempt to verify them against it.
+  bash "${SRCDIR}/runtime/packages-lock-capture.sh" runtime rauc rauc-service
+  # First-party apps + their staging tree are handled by the APPLICATION layer (mkosi.images/app, Stage 3).
   log "CeraLive runtime customization complete"
 }
 

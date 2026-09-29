@@ -154,7 +154,7 @@ ensure_kernel_builder_image() {
   log_info "building kernel builder image ${tag} FROM ${base_image}"
   local -a proxy_args=()
   mapfile -t proxy_args < <(container_build_proxy_args)
-  (( ${#proxy_args[@]} )) && log_info "apt proxy: CERALIVE_APT_PROXY -> --build-arg APT_PROXY (http only)"
+  (( ${#proxy_args[@]} )) && log_info "apt proxy: ${proxy_args[*]} (http only; https DIRECT)"
   container_image_build "${runtime}" \
     --build-arg "BASE_IMAGE=${base_image}" \
     "${proxy_args[@]}" \

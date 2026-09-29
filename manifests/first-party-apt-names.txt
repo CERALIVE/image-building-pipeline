@@ -1,0 +1,45 @@
+# CeraLive first-party apt origin-pin manifest — Todo 29 (update-system-overhaul).
+#
+# Every Debian package name CeraLive publishes to apt.ceralive.tv, one per
+# line (blank lines and whitespace-prefixed `#` comments ignored). Both writers
+# check this forwarded list against the independent reviewed set at
+# mkosi/runtime/first-party-origin-names.txt before generating the pin file:
+#   - mkosi/customize/apt-ceralive-repo.sh::install_apt_preferences()
+#   - mkosi/mkosi.images/runtime/mkosi.postinst.chroot::setup_ceralive_repository()
+#     (the dual-track twin the real ./build executor actually runs)
+#
+# For each name, both writers emit a PAIR of stanzas: our origin at 990 (below
+# apt's "always" 1000, above the archive default 500 — so our build wins
+# without silently downgrading an already-installed newer Debian candidate),
+# and every other archive's same-name version pinned to -1 with `Pin: origin *`
+# (refused outright, without pinning an already-installed version),
+# even when apt.ceralive.tv does not publish that name. The exact-host stanza
+# comes first so its 990 priority wins APT's first-specific-match rule. This
+# REPLACES the former blanket `Package: * / Pin: origin apt.ceralive.tv /
+# Pin-Priority: 990` wildcard, which pinned every future apt.ceralive.tv
+# publication sight-unseen — origin protection is now per exact name.
+#
+# The 15 legacy app-layer names (root AGENTS.md "Two operator-facing rosters"
+# / package-layer.ts roster) plus the two platform-layer forks consumed via a
+# URL+SHA pin swap (gstreamer-rockchip-fork, librga-fork — NOT REPOS entries,
+# see root AGENTS.md) plus the fleet apt-credentials companion (Todo 11/29;
+# see the FETCH/INSTALL wiring note in AGENTS.md: published on beta; stable
+# channel delivery is pending).
+ceralive-device
+ceralive-modem-support
+cerastream
+gstreamer1.0-libuvcsrc
+libmbim-glib4
+libmbim-proxy
+libmbim-utils
+libmm-glib0
+libqmi-glib5
+libqmi-proxy
+libqmi-utils
+libqrtr-glib0
+libsrt1.5-ceralive
+modemmanager
+srtla
+gstreamer1.0-rockchip-ceralive
+librga2-ceralive
+ceralive-apt-credentials

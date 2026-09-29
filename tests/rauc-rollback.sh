@@ -146,17 +146,24 @@ mock_write_stubs() {
   local bin="${SIM}/bin"
   mkdir -p "${bin}" "${SIM}/data/ceralive"
 
-  # rauc: the only op that matters is `mark-good`, which (on device) confirms the
+  # rauc: `status mark-good` confirms the
   # CURRENTLY-BOOTED slot. Map it to the REAL state engine so a healthy slot truly
   # resets its bootcount — the heart of "good bundle commits".
   cat >"${bin}/rauc" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "mark-good" ]; then
-  CERALIVE_BOOT_STATE_FILE="${MOCK_BOOT_STATE_FILE}" \
-  CERALIVE_BOOT_ATTEMPTS="${MOCK_BOOT_ATTEMPTS}" \
-  bash "${MOCK_BOOT_STATE_SH}" set-state "$(cat "${MOCK_BOOTED_FILE}")" good
+[[ "$#" -eq 2 && "$1" == status && "$2" == mark-good ]] || exit 2
+printf '%s\n' "$(cat "${MOCK_BOOTED_FILE}")" >>"${MOCK_RAUC_CALLS_FILE}"
+CERALIVE_BOOT_STATE_FILE="${MOCK_BOOT_STATE_FILE}" \
+CERALIVE_BOOT_ATTEMPTS="${MOCK_BOOT_ATTEMPTS}" \
+bash "${MOCK_BOOT_STATE_SH}" set-state "$(cat "${MOCK_BOOTED_FILE}")" good
+EOF
+
+  cat >"${bin}/dpkg" <<'EOF'
+#!/usr/bin/env bash
+[[ "$#" -eq 1 && "$1" == --audit ]] || exit 2
+if [[ -f "${MOCK_DPKG_AUDIT_FILE}" ]]; then
+  cat "${MOCK_DPKG_AUDIT_FILE}"
 fi
-exit 0
 EOF
 
   # systemctl: ceralive.service is active even on a BAD bundle — the app boots, it
@@ -184,6 +191,13 @@ exit 1
 EOF
   chmod +x "${bin}"/*
 
+  mkdir -p "${SIM}/dpkg/updates"
+  printf 'Package: cerastream\nStatus: install ok installed\n' >"${SIM}/dpkg/status"
+  printf 'BUILD_ID="mock-rollback"\n' >"${SIM}/os-release"
+  printf 'root=PARTLABEL=rootfs_a rauc.slot=A\n' >"${SIM}/cmdline"
+  printf '00000000-0000-4000-8000-000000000001\n' >"${SIM}/boot-id"
+  printf '1\n' >"${SIM}/boot-sequence"
+
   # Short healthcheck timeouts so the EXPECTED-to-fail (bad slot) run finishes fast.
   # IRL_SERVER_HOST empty → TCP reach SKIPPED (the on-silicon run exercises reach;
   # the rollback differentiator here is the encoder binary, per the task design).
@@ -208,16 +222,75 @@ mock_run_healthcheck() {
   MOCK_BOOT_STATE_FILE="${SIM}/boot_state.txt" \
   MOCK_BOOT_ATTEMPTS="${BOOT_ATTEMPTS}" \
   MOCK_BOOT_STATE_SH="${BOOT_STATE_SH}" \
-  MOCK_BOOTED_FILE="${SIM}/booted" \
-  PATH="${SIM}/bin:${PATH}" \
-  CERALIVE_HEALTHCHECK_CONF="${SIM}/data/ceralive/update.conf" \
-  CERALIVE_HEALTHCHECK_MARKER="${SIM}/data/ceralive/.slot-marked-good" \
-  RAUC_BIN="${SIM}/bin/rauc" \
+   MOCK_BOOTED_FILE="${SIM}/booted" \
+   MOCK_RAUC_CALLS_FILE="${SIM}/rauc-calls" \
+   MOCK_DPKG_AUDIT_FILE="${SIM}/dpkg-audit" \
+   PATH="${SIM}/bin:${PATH}" \
+   CERALIVE_HEALTHCHECK_CONF="${SIM}/data/ceralive/update.conf" \
+   CERALIVE_HEALTHCHECK_MARKER="${SIM}/data/ceralive/.slot-marked-good" \
+   CERALIVE_HEALTHCHECK_BOOT_ID_FILE="${SIM}/boot-id" \
+   CERALIVE_HEALTHCHECK_CMDLINE_FILE="${SIM}/cmdline" \
+   CERALIVE_OS_RELEASE_FILE="${SIM}/os-release" \
+   CERALIVE_IMAGE_VERSION_FILE="${SIM}/image-build-commit" \
+   CERALIVE_DPKG_UPDATES_DIR="${SIM}/dpkg/updates" \
+   CERALIVE_DPKG_STATUS_FILE="${SIM}/dpkg/status" \
+   CERALIVE_HEALTHY_STATE_FILE="${SIM}/data/ceralive/update-state/healthy-state.json" \
+   CERALIVE_PARTLABEL_FAILURE="${SIM}/partlabel-guard.failed" \
+   CERALIVE_DEBUG_MARKER="${SIM}/debug-image" \
+   CERALIVE_FORCE_HEALTHCHECK_FAIL="${SIM}/force-healthcheck-fail" \
+   RAUC_BIN="${SIM}/bin/rauc" \
+   DPKG_BIN="${SIM}/bin/dpkg" \
   SYSTEMCTL_BIN="${SIM}/bin/systemctl" \
   CERASTREAM_BIN="${cerastream}" \
   SRTLA_SEND_BIN="${SIM}/bin/srtla_send" \
   BIN_PROBE_TIMEOUT=2 SRT_CONNECT_TIMEOUT=2 \
-  bash "${HEALTHCHECK_SH}" >/dev/null 2>&1
+   bash "${HEALTHCHECK_SH}" >"${SIM}/healthcheck.log" 2>&1
+}
+
+# The bad-bundle verdict must not be an earlier fixture failure, nor may an
+# absent/stale dpkg database or missing slot/build identity be accepted as good.
+mock_check_prerequisites() {
+  local rc=0
+  mv "${SIM}/dpkg/status" "${SIM}/dpkg/status.saved"
+  mock_run_healthcheck || rc=$?
+  assert_eq "missing dpkg status refuses mark-good" "1" "${rc}"
+  assert_contains "missing dpkg reached integrity gate" "${SIM}/healthcheck.log" 'FAIL: dpkg database unavailable'
+  mv "${SIM}/dpkg/status.saved" "${SIM}/dpkg/status"
+
+  printf 'pending\n' >"${SIM}/dpkg/updates/0000"
+  rc=0; mock_run_healthcheck || rc=$?
+  assert_eq "pending dpkg updates refuse mark-good" "1" "${rc}"
+  assert_contains "pending updates reached integrity gate" "${SIM}/healthcheck.log" 'FAIL: dpkg updates directory is not empty'
+  rm -f "${SIM}/dpkg/updates/0000"
+
+  printf 'Package cerastream is not configured\n' >"${SIM}/dpkg-audit"
+  rc=0; mock_run_healthcheck || rc=$?
+  assert_eq "nonempty dpkg audit refuses mark-good" "1" "${rc}"
+  assert_contains "audit reached integrity gate" "${SIM}/healthcheck.log" 'FAIL: dpkg audit failed:'
+  rm -f "${SIM}/dpkg-audit"
+
+  mv "${SIM}/cmdline" "${SIM}/cmdline.saved"
+  rc=0; mock_run_healthcheck || rc=$?
+  assert_eq "missing boot slot refuses mark-good" "1" "${rc}"
+  assert_contains "missing slot reached identity gate" "${SIM}/healthcheck.log" 'FAIL: cannot establish slot, image build or dpkg status digest'
+  mv "${SIM}/cmdline.saved" "${SIM}/cmdline"
+
+  printf 'root=PARTLABEL=rootfs_a cera_slot=A rauc.slot=B\n' >"${SIM}/cmdline"
+  rc=0; mock_run_healthcheck || rc=$?
+  assert_eq "conflicting slot identities refuse mark-good" "1" "${rc}"
+  assert_contains "conflicting slot reached identity gate" "${SIM}/healthcheck.log" 'FAIL: cannot establish slot, image build or dpkg status digest'
+  printf 'root=PARTLABEL=rootfs_a rauc.slot=A\n' >"${SIM}/cmdline"
+
+  mv "${SIM}/os-release" "${SIM}/os-release.saved"
+  rc=0; mock_run_healthcheck || rc=$?
+  assert_eq "missing build identity refuses mark-good" "1" "${rc}"
+  assert_contains "missing build reached identity gate" "${SIM}/healthcheck.log" 'FAIL: cannot establish slot, image build or dpkg status digest'
+  mv "${SIM}/os-release.saved" "${SIM}/os-release"
+  if [[ ! -e "${SIM}/rauc-calls" && ! -e "${SIM}/data/ceralive/.slot-marked-good" ]]; then
+    ok "all missing/stale prerequisites left RAUC and marker untouched"
+  else
+    bad "a missing/stale prerequisite reached RAUC or wrote a marker"
+  fi
 }
 
 # mock_init_board — establish a board freshly running healthy on slot A (the LIVE
@@ -229,7 +302,10 @@ mock_init_board() {
   printf 'good\n' >"${SIM}/slot_A.bundle"
   printf 'good\n' >"${SIM}/slot_B.bundle"
   printf 'A\n'    >"${SIM}/booted"
-  mock_run_healthcheck >/dev/null 2>&1    # A confirms itself (writes the marker)
+  mock_check_prerequisites
+  local rc=0
+  mock_run_healthcheck || rc=$?
+  assert_eq "initial A healthcheck confirmed via real RAUC shim" "0" "${rc}"
 }
 
 # ===========================================================================
@@ -292,10 +368,15 @@ board_rauc_install() {
 # board_reboot_and_wait — reboot and block until the system is reachable again.
 board_reboot_and_wait() {
   if [[ "${MODE}" == "mock" ]]; then
-    local out slot
+    local out slot sequence
     out="$(mock_bs boot-select)"           # the REAL U-Boot selection + decrement
     slot="${out%% *}"
     printf '%s\n' "${slot}" >"${SIM}/booted"
+    sequence="$(<"${SIM}/boot-sequence")"
+    sequence=$(( sequence + 1 ))
+    printf '%s\n' "${sequence}" >"${SIM}/boot-sequence"
+    printf '00000000-0000-4000-8000-%012d\n' "${sequence}" >"${SIM}/boot-id"
+    printf 'root=PARTLABEL=rootfs_%s rauc.slot=%s\n' "${slot,,}" "${slot}" >"${SIM}/cmdline"
     return 0
   fi
   ssh_run "test -f '/data/ceralive/ssh/ci-access/${CERALIVE_CI_ACCESS_ID}' && \
@@ -373,6 +454,11 @@ run_bad_bundle_test() {
       # While still on the bad slot, it MUST NOT have confirmed itself.
       if (( hc_rc != 0 )); then ok "bad slot B failed healthcheck → NOT marked good (reboot #${reboots})";
       else bad "bad slot B unexpectedly PASSED healthcheck (would brick the device!)"; fi
+      if [[ "${MODE}" == mock ]]; then
+        assert_contains "bad slot failed at encoder loader probe" "${SIM}/healthcheck.log" 'is missing or not executable'
+        if [[ ! -e "${SIM}/data/ceralive/.slot-marked-good" ]]; then ok "bad slot left no marker";
+        else bad "bad slot wrote mark-good marker"; fi
+      fi
     fi
     [[ "${booted}" == "A" ]] && break
   done
@@ -410,6 +496,12 @@ run_good_bundle_test() {
   local hc_rc=0
   board_run_healthcheck; hc_rc=$?
   assert_eq "good slot healthcheck PASSED → rauc mark-good" "0" "${hc_rc}"
+  if [[ "${MODE}" == mock ]]; then
+    assert_eq "good slot reset attempt budget through RAUC" "${BOOT_ATTEMPTS}" "$(mock_bs get-left B)"
+    assert_eq "RAUC confirmed A, rollback A, then B" $'A\nA\nB' "$(<"${SIM}/rauc-calls")"
+    assert_contains "good slot marker names current boot" "${SIM}/data/ceralive/.slot-marked-good" "boot-id $(<"${SIM}/boot-id")"
+    assert_contains "good slot healthy state names B" "${SIM}/data/ceralive/update-state/healthy-state.json" '"slot":"B"'
+  fi
   if board_wait_good B; then ok "slot B confirmed good within ${HEALTHCHECK_TIMEOUT}s";
   else bad "slot B NOT marked good within ${HEALTHCHECK_TIMEOUT}s"; fi
   assert_eq "slot B state is good (permanent switch)" "good" "$(board_get_state B)"

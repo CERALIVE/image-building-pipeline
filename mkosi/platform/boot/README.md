@@ -226,6 +226,11 @@ specifics differ per board (not hardcoded); `system.conf` shape; that
   a well-formed no-CRC file is trusted. It also rejects
 duplicate/out-of-budget stale state, preserves a deterministic all-bad last resort,
 and proves userspace state replacement stays on one filesystem.
+The offline health cases execute the unchanged production healthcheck with a
+synthetic clean dpkg database, boot slot and build identity. Both no-receiver
+and no-link cases must mark good; a dead encoder must fail at its loader probe,
+and a missing dpkg status must refuse confirmation. Failed probes print their
+healthcheck log so an unrelated precondition cannot make a negative pass vacuously.
 
 `boot-script-sanitize.test.sh` additionally stubs `setexpr` as **absent** — the way
 this board's U-Boot really answers — so a decrement that depends on it fails the
@@ -245,6 +250,7 @@ out of both layouts one at a time so no single case carries the suite.
 
 - `lib/assemble-disk.sh` writes these artifacts into the factory image and populates
   both A/B rootfs filesystems.
-- `lib/build-bundle.sh` emits the signed plain-format `.raucb`; the immutable root CA
+- `lib/build-bundle.sh` emits the signed verity/adaptive `.raucb`; the immutable root CA
   is installed as `/etc/rauc/keyring.pem`.
-- dm-verity is future bundle hardening and is not part of the current slot contract.
+- The system-level post-install handler relabels the inactive ext4 slot from its
+  own GPT PARTLABEL; missing labels fail OTA instead of guessing a boot label.

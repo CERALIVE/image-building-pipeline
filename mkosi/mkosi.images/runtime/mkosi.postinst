@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# runtime/mkosi.postinst — install the pinned, in-pipeline-built RAUC platform
+# pin (rauc + rauc-service) into the runtime layer, BEFORE the chroot postinst
+# installs the rest of shared.list.
+#
+# Todo 22 RAUC-version-path follow-up (decisions.md, 2026-09-24, "Todo 22 RAUC
+# version path — FINAL RULING"). Mirrors the "platform-layer URL+SHA row-swap"
+# pattern gstreamer1.0-rockchip1 -> gstreamer1.0-rockchip-ceralive and
+# librga2 -> librga2-ceralive already use — SAME non-chrooted, mkosi-install,
+# local-package-directory mechanism — with one deliberate placement difference,
+# stated here because it is easy to second-guess from the platform-layer
+# precedent alone:
+#
+#   The gstreamer-rockchip/librga swaps live in the PLATFORM layer
+#   (mkosi.images/platform/mkosi.postinst), which is explicitly the ONLY
+#   arch-specific layer (mkosi/LAYER-MAP.md) and is a hard no-op for any
+#   non-arm64 ARCH. RAUC ships on BOTH shipped families (rk3588 AND x86_64;
+#   lib/rauc-build/builder.sh builds a native .deb for either), so it cannot
+#   live in the arm64-gated platform layer without breaking x86 — it belongs in
+#   THIS layer instead, which mkosi/LAYER-MAP.md documents as
+#   "arch-IDENTICAL" and which ALREADY conceptually owns RAUC
+#   ("RAUC A/B client `rauc` + `u-boot-tools` | shared.list", LAYER-MAP.md
+#   Layer 3). Running this BEFORE the chroot postinst's shared.list apt
+#   transaction is what lets shared.list simply no longer name rauc/rauc-service
+#   at all (they are commented out there, with this file as the documented
+#   replacement) — apt then has nothing left to resolve for those two names.
+#
+# Runs in mkosi's package-manager-aware postinstall sandbox (non-chrooted, so
+# mkosi exposes `mkosi-install`) — same execution class as
+# platform/mkosi.postinst, auto-discovered by mkosi via this exact filename
+# with no `PostInstallationScripts=` declaration needed (empirically confirmed:
+# platform/mkosi.postinst is discovered and runs with no such declaration in
+# platform/mkosi.conf either).
+#
+# The pinned .deb pair is staged into the SAME `--package-directory` local
+# repository the platform layer's `mkosi-install` already reads from
+# (lib/stages/partition.sh routes "rauc"/"rauc-service" into bsp_dir) — no new
+# consumer directory, no new mkosi CLI flag.
+
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+log() { printf '[runtime] %s\n' "$*" >&2; }
+
+log "installing pinned RAUC platform pin: rauc rauc-service"
+mkosi-install -y --no-install-recommends rauc rauc-service
+log "RAUC platform pin installed."

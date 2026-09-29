@@ -1,0 +1,17 @@
+{
+  "today": "2026-09-23T00:00:00+00:00",
+  "debian": {"pinned_date": "2026-06-23", "current": "Version: 13.0\nDate: Tue, 23 Jun 2026 00:00:00 UTC\n", "newer": "Version: 13.1\nDate: Wed, 23 Sep 2026 00:00:00 UTC\n"},
+  "packages": {
+    "pinned": "armbian-firmware-full=26.8.3",
+    "current": "Package: armbian-firmware-full\nVersion: 26.8.3\n\n",
+    "newer": "Package: armbian-firmware-full\nVersion: 26.8.3\n\nPackage: armbian-firmware-full\nVersion: 26.9.0\n\n",
+    "vanished": "Package: armbian-firmware-full\nVersion: 26.9.0\n\n"
+  },
+  "manifest": {
+    "board": "rock-5b-plus", "channel": "stable",
+    "expiring_20_days": {"expires_at": "2026-10-13T00:00:00Z"},
+    "expiring_60_days": {"expires_at": "2026-11-22T00:00:00Z"},
+    "refresh_command": "gh workflow run publish-release.yml --repo CERALIVE/image-building-pipeline -f mode=refresh -f boards=rock-5b-plus -f channel=stable"
+  },
+  "forbidden_pin_write": "Path('manifests/first-party-deb-versions.txt').write_text('cerastream=unreviewed')"
+}

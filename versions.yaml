@@ -69,7 +69,8 @@ cerastream:
   # cbfae2f3b166203a73cfb14870eef7b5a3ecba94, confirmed serving on both
   # apt.ceralive.tv stable indexes. See ceralive/docs/RELIABILITY-FINDINGS.md C4.
   pin: v2026.9.8
-  # Device deb: cerastream 2026.9.6 (amd64 + arm64).
+  # Device deb: cerastream 2026.9.8 (amd64 + arm64); see first-party-deb-versions.txt.
+  # Historical receipt for 2026.9.6 follows (not the active artifact):
   # Tag commit: b3eb2a0767687415401998353337c3413c09fda9.
   # Downloaded assets match the published SHA-256 sidecars:
   #   arm64 75cf2ecbd37957b9bf3d5d2091d670cb0a14a035b0aac7d7d12757b3a2518f3a,
@@ -111,7 +112,10 @@ CeraUI:
   # v2026.9.4 (capture-failover-resilience): capture-resilience operator surfaces
   # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
   pin: v2026.9.4
-  # Device deb: ceralive-device 2026.9.3-20260920T155651.ec522ad (amd64) /
+  # Device deb: ceralive-device 2026.9.4-20260923T212001.159f99b (amd64) /
+  #   2026.9.4-20260923T212013.159f99b (arm64); see first-party-deb-versions.txt.
+  # Historical receipt for 2026.9.3 follows (not the active artifact):
+  #   2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded
   #   through authenticated GitHub access and independently hashed; each matched its
   #   published sidecar, and the CeraUI release run verified the same bytes against
@@ -156,6 +160,13 @@ apt-worker:
   kind: first-party
   pin: latest
 
+apt-credentials:
+  path: apt-worker
+  repo: https://github.com/CERALIVE/apt-worker
+  kind: first-party
+  pin: apt-credentials-v1.0.0
+  channel: stable
+
 ceralive-platform:
   path: ceralive-platform
   repo: https://github.com/CERALIVE/ceralive-platform
@@ -179,6 +190,37 @@ irl-srt-server:
   repo: https://github.com/CERALIVE/irl-srt-server
   kind: first-party
   pin: latest
+
+# ── Platform-layer in-pipeline builds (no CeraLive-owned sibling repo) ────────
+
+# rauc — Todo 22 RAUC-version-path follow-up (decisions.md, 2026-09-24, "Todo 22
+# RAUC version path — FINAL RULING"). UNLIKE every entry above, `repo:` here is
+# upstream RAUC's own repository, not a CeraLive fork — this pipeline carries
+# zero CeraLive patches to either RAUC's source or Debian's packaging of it
+# (Option A of the ruling: in-pipeline build, no new repo). `path: null` for the
+# same reason: there is no sibling checkout for `path` to name.
+#
+# This entry is PROVENANCE ONLY, matching gstreamer-rockchip/librga's own
+# "platform-layer pin" shape as the closer precedent for a URL+SHA-delivered
+# userspace component (vs. the kernel's kernel_source: block, which lives in
+# the family manifest and pins a git commit, not a versions.yaml entry) — but
+# unlike those two, nothing reads this key via lib/shared/versions-lib.sh::get_pin;
+# the ACTUAL build-input pins lib/build-rauc.sh consumes live in
+# manifests/rauc-deb-versions.txt (upstream tarball URL+SHA-256 plus the exact
+# Debian unstable source-package coordinates verified via gpgv+Sources), for
+# the same reason the kernel's own exact commit pins are file-based rather than
+# a single version string.
+rauc:
+  path: null
+  repo: https://github.com/rauc/rauc
+  kind: platform-pin
+  pin: v1.15.2
+  # Packaged with Debian unstable's OWN, byte-unmodified packaging directory
+  # (source version 1.15.2-1) — see manifests/rauc-deb-versions.txt for the full
+  # rationale, including why unstable's packaging is used rather than trixie's
+  # own (trixie's 1.13-3+deb13u1 patch series does not apply cleanly to 1.15.2;
+  # four of its six patches are already incorporated upstream, empirically
+  # verified). Built version: 1.15.2-1+ceralive.1 (rauc + rauc-service).
 
 # ── Local PKI (no remote, no pin) ─────────────────────────────────────────────
 
