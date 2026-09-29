@@ -2,6 +2,7 @@
 # Shared offline 4096 MiB ext4 slot writer. Sourced by factory assembly and OTA.
 # SLOT_IMAGE_LABEL selects the initial filesystem label; the OTA image uses a
 # neutral label which the device post-install handler replaces from GPT.
+# shellcheck disable=SC2016 # Single-quoted script expands inside the container.
 
 SLOT_IMAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/shared/slot-reserve.sh
@@ -21,7 +22,8 @@ make_slot_image() {
   truncate -s $((4096 * 1024 * 1024)) "${out}"
   if tar -C "${tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4
-    mkfs.ext4 -q -L "${label}" -U "${uuid}" -E hash_seed="${uuid}" \
+    # Older mke2fs ignores SOURCE_DATE_EPOCH but honors its own clock override.
+    E2FSPROGS_FAKE_TIME="${SOURCE_DATE_EPOCH:-0}" mkfs.ext4 -q -L "${label}" -U "${uuid}" -E hash_seed="${uuid}" \
       -d "${tree}" "${out}" || return 1
   else
     if command -v docker >/dev/null 2>&1; then runtime=docker
@@ -31,6 +33,7 @@ make_slot_image() {
     img_dir="$(dirname "${out}")"; img_base="$(basename "${out}")"
     "${runtime}" run --rm \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
+      -e "E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}" \
       -e "FS_UUID=${uuid}" -e "FS_LABEL=${label}" \
       -v "${tree}:/rootfs-tree:ro" -v "${img_dir}:/out" "${image}" \
       bash -euo pipefail -c '

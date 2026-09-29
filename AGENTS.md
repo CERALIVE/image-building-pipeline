@@ -3539,6 +3539,13 @@ compression level 0 because recompressing xz wastes time. Regression coverage is
 `tests/release-candidate-contract.test.sh`, and `tests/release-cache-contract.test.sh`.
 
 **Reproducible builds** [PARTIAL — verity producer on integration branch]
+The shared host/container ext4 slot writer sets mke2fs's own
+`E2FSPROGS_FAKE_TIME` from `SOURCE_DATE_EPOCH`. An older CI mke2fs ignored the
+generic epoch and stamped different superblock times into two otherwise
+identical 4096 MiB test slots; `mkosi-image-contract.bats` now forces distinct
+ambient clocks under a shim that models that version and still requires byte
+equality. The image's `/etc/ceralive/image-version` remains a deliberate
+wall-clock exception to whole-image reproducibility.
 The `[6d/9]` package lock is [PARTIAL — fixture verified, real image pending]:
 base/platform/runtime/app apt receipts read their own apt-verified Packages
 indexes before cleanup; staged first-party/BSP/userspace digests reuse the

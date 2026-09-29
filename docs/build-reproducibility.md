@@ -18,6 +18,15 @@ It means images built at different times are intentionally **not byte-identical*
 even with all other inputs fixed; the existing `/etc/ceralive/image-build-commit`
 remains the separate, unchanged source/audit identity.
 
+For fixed rootfs input bytes, the shared ext4 slot writer pins mke2fs's
+`E2FSPROGS_FAKE_TIME` to `SOURCE_DATE_EPOCH` on both host and container paths.
+Older mke2fs versions ignore `SOURCE_DATE_EPOCH` for superblock timestamps:
+hosted CI exposed two 4096 MiB slots differing at superblock byte 1073 despite
+the same source epoch. The reproducibility test now models that older version
+and gives two runs different ambient mke2fs clocks; their output must still
+compare byte-for-byte. This does not override the intentional wall-clock
+`/etc/ceralive/image-version` content above, which differs across real builds.
+
 There are three package hash sources, and no general fourth one:
 
 1. The base, platform, runtime and app layers capture newly configured Debian

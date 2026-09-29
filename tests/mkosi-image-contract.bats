@@ -1279,13 +1279,22 @@ UNIT
   build_repro_bundle "$BATS_TEST_TMPDIR/r2" 1700000000
   [ -f "$BATS_TEST_TMPDIR/r1/fixed.raucb" ]
   [ -f "$BATS_TEST_TMPDIR/r2/fixed.raucb" ]
-  local i info tree="$BATS_TEST_TMPDIR/repro-tree"
+  local i info clock tree="$BATS_TEST_TMPDIR/repro-tree" shim="$BATS_TEST_TMPDIR/old-mkfs"
+  mkdir -p "$shim"
+  cat >"$shim/mkfs.ext4" <<EOF
+#!/usr/bin/env bash
+unset SOURCE_DATE_EPOCH
+exec "$(command -v mkfs.ext4)" "\$@"
+EOF
+  chmod +x "$shim/mkfs.ext4"
   for i in r1 r2; do
+    # Older mke2fs ignores SOURCE_DATE_EPOCH; vary its ambient clock explicitly.
+    if [ "$i" = r1 ]; then clock=1700000001; else clock=1800000000; fi
     info="$(rauc info --keyring="$PIPELINE_DIR/.dev-keys/root-ca.pem" "$BATS_TEST_TMPDIR/$i/fixed.raucb")"
     [[ "$info" == *'Bundle Format:  verity'* ]]
     [[ "$info" == *'Adaptive:  block-hash-index'* ]]
     [[ "$info" == *"Compatible:     'ceralive-rock-5b-plus'"* ]]
-    run env COMPATIBLE_STRING=ceralive-rock-5b-plus SOURCE_DATE_EPOCH=1700000000 \
+    run env PATH="$shim:$PATH" COMPATIBLE_STRING=ceralive-rock-5b-plus SOURCE_DATE_EPOCH=1700000000 E2FSPROGS_FAKE_TIME="$clock" \
       bash -c 'source "$1/lib/common.sh"; source "$1/lib/disk/slot-image.sh"; make_slot_image "$2" "$3"' \
       _ "$PIPELINE_DIR" "$tree" "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
     [ "$status" -eq 0 ]
