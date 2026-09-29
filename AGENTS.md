@@ -952,7 +952,7 @@ The identity check that follows every staged download existed three more times, 
 
 | Helper | Role |
 |---|---|
-| `deb_control_field <deb> <field>` | the single control-tarball walk (gz/xz/zst); empty on an unreadable archive |
+| `deb_control_field <deb> <field>` | control-tarball walk (gz/xz/zst); on extraction failure logs ar/tar errors, archive path/size and scratch-filesystem free space, then returns empty for retryable fetch callers |
 | `deb_pkg_name` / `deb_pkg_version` / `deb_pkg_arch` | thin wrappers over it |
 | `assert_deb_identity <deb> <pkg> <version\|''> <arch> [--arch-all-ok]` | the single package/version/architecture check |
 | `explode_deb <deb> <dest>` | the single data-tarball extractor (`dpkg-deb`, else `ar` + `tar`) |
@@ -977,7 +977,9 @@ Three consequences worth knowing before touching it:
 
 The kernel-build stage deliberately keeps its own `deb_control_field` (now in
 `lib/kernel/package.sh`, sourced by `lib/build-kernel.sh`): it is the
-self-contained in-builder leg and is out of this library's scope. Contract:
+self-contained in-builder leg and is out of this library's scope. The two
+parsers cross-reference and mirror the same extraction diagnostics; missing
+control content no longer hides an ENOSPC error behind `<unreadable>`. Contract:
 `tests/deb-lib.test.sh` (happy, per-axis mismatch, corrupt archive, and the
 single-definition property itself).
 
