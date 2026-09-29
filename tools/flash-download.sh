@@ -3,7 +3,8 @@ set -euo pipefail
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf '%s\n' 'flash-download.sh --board B [--channel stable|beta|drill] [--out DIR] [--jobs 8] [--keyring ROOT.pem] [--decompress]'
+  printf '%s\n' 'flash-download.sh --board B [--channel stable|beta|drill] [--out DIR] [--jobs 8] [--keyring ROOT.pem] [--decompress]' \
+    'Without --keyring: UNAUTHENTICATED (SHA-256 integrity only; no trusted release identity).'
 }
 
 board='' channel=stable out=images jobs=8 keyring='' decompress=0
@@ -55,24 +56,39 @@ get() {
   [[ "$status" == "$expected" ]] || { printf 'unexpected HTTP %s for %s (wanted %s)\n' "$status" "$url" "$expected" >&2; return 1; }
 }
 channel_url="$base/channels/$channel/$board.json"
+# The product slug selects the URL; the resolved board ID selects RAUC compatible.
+params="$(bash "$(dirname "${BASH_SOURCE[0]}")/../lib/resolve.sh" "$board")" || die "cannot resolve board: $board"
+compatible="$(python3 - "$params" <<'PY'
+import ast, re, sys
+matches = [line.split('=', 1)[1] for line in sys.argv[1].splitlines() if line.startswith('BOARD_ID=')]
+assert len(matches) == 1
+board_id = ast.literal_eval(matches[0])
+assert isinstance(board_id, str) and re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', board_id)
+print('ceralive-' + board_id)
+PY
+)" || die 'invalid resolved board identity'
 get "$channel_url" "$tmp/channel.json" 200 || die 'channel manifest fetch failed'
 if [[ -n "$keyring" ]]; then
   get "$channel_url.sig" "$tmp/channel.sig" 200 || die 'channel signature fetch failed'
   openssl cms -verify -binary -inform DER -in "$tmp/channel.sig" -content "$tmp/channel.json" \
     -CAfile "$keyring" -purpose any -signer "$tmp/channel-signer.pem" -out /dev/null >/dev/null 2>&1 || die 'channel CMS verification failed'
+  [[ "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$tmp/channel-signer.pem")" == 1 ]] || die 'ambiguous channel signer'
+  subject="$(openssl x509 -in "$tmp/channel-signer.pem" -noout -subject -nameopt RFC2253)"
+  cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
+  [[ "$subject" =~ $cn_pattern ]] || die 'channel signer CN must be CeraLive OTA Manifest Signer'
   eku="$(openssl x509 -in "$tmp/channel-signer.pem" -noout -ext extendedKeyUsage)"
-  [[ "$eku" == *'Code Signing'* ]] || die 'channel signer must have Code Signing EKU'
+  [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || die 'channel signer must have Code Signing without E-mail Protection EKU'
 else
   printf '%s\n' 'WARNING: unsigned verification skipped; sha256 only (no authenticated release identity)' >&2
 fi
 
 # The manifest selects the immutable version; never interpolate an unchecked version into a path.
-version="$(python3 - "$tmp/channel.json" "$board" "$channel" "$base" <<'PY'
+version="$(python3 - "$tmp/channel.json" "$board" "$channel" "$base" "$compatible" <<'PY'
 import json, re, sys
 m = json.load(open(sys.argv[1]))
-board, channel, base = sys.argv[2:]
+board, channel, base, compatible = sys.argv[2:]
 assert m['schema'] == 1 and m['board'] == board and m['channel'] == channel
-assert m['compatible'] == 'ceralive-' + board
+assert m['compatible'] == compatible
 v = m['version']
 assert isinstance(v, str) and re.fullmatch(r'[0-9]{4}\.[0-9]+\.[0-9]+', v)
 assert isinstance(m['serial'], int) and not isinstance(m['serial'], bool) and m['serial'] > 0
@@ -94,6 +110,17 @@ release="$release/$version"
 mkdir -p -- "$release"
 flash="$release/flash.raw.xz"
 [[ ! -L "$flash" && ( ! -e "$flash" || -f "$flash" ) && ! -L "$flash.partial" && ( ! -e "$flash.partial" || -f "$flash.partial" ) ]] || die 'unsafe assembled path'
+if (( decompress )); then
+  raw="$release/flash.raw"
+  [[ ! -L "$raw" && ! -L "$raw.partial" && ( ! -e "$raw" || -f "$raw" ) && ( ! -e "$raw.partial" || -f "$raw.partial" ) ]] || die 'unsafe raw output path'
+  raw_sha="$(python3 - "$tmp/channel.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['flash']['raw_sha256'])
+PY
+)"
+  if [[ -f "$raw" && "$(sha256sum -- "$raw")" != "$raw_sha "* ]]; then rm -f -- "$raw"; fi
+  rm -f -- "$raw.partial"
+fi
 # An earlier invocation may have left either name behind. Never expose its bytes
 # while fetching or verifying parts, even if this invocation fails before assembly.
 rm -f -- "$flash" "$flash.partial"
@@ -213,13 +240,6 @@ mv -- "$flash_tmp" "$flash"
 flash_tmp=''
 printf 'verified compressed flash: %s\n' "$flash"
 if (( decompress )); then
-  raw="$release/flash.raw"
-  [[ ! -L "$raw" && ! -L "$raw.partial" && ( ! -e "$raw" || -f "$raw" ) && ( ! -e "$raw.partial" || -f "$raw.partial" ) ]] || die 'unsafe raw output path'
-  raw_sha="$(python3 - "$tmp/channel.json" <<'PY'
-import json,sys
-print(json.load(open(sys.argv[1]))['flash']['raw_sha256'])
-PY
-)"
   if [[ ! -f "$raw" || "$(sha256sum -- "$raw")" != "$raw_sha "* ]]; then
     xz -dc -- "$flash" >"$raw.partial" || die 'flash decompression failed'
     [[ "$(sha256sum -- "$raw.partial")" == "$raw_sha "* ]] || die 'raw SHA-256 mismatch'

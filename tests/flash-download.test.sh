@@ -110,6 +110,56 @@ PY
 sign() { openssl cms -sign -binary -in "$channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" -outform DER -out "$channel.sig" >/dev/null; }
 sign
 run() { bash "$downloader" --board rock-5b-plus --out "$tmp/out" --jobs 2 --keyring "$tmp/root.pem"; }
+orange_channel="$tmp/site/channels/stable/orange-pi-5-plus.json"
+mkdir -p "$tmp/site/releases/orange-pi-5-plus/2026.10.1"
+cp -a --reflink=auto "$release/." "$tmp/site/releases/orange-pi-5-plus/2026.10.1/"
+python3 - "$channel" "$orange_channel" <<'PY'
+import json, pathlib, sys
+source, target = map(pathlib.Path, sys.argv[1:])
+manifest = json.loads(source.read_text())
+manifest['board'] = 'orange-pi-5-plus'
+manifest['compatible'] = 'ceralive-orangepi5-plus'
+for entry in ('bundle', 'flash'):
+    manifest[entry]['url'] = manifest[entry]['url'].replace('/rock-5b-plus/', '/orange-pi-5-plus/')
+target.write_text(json.dumps(manifest))
+PY
+openssl cms -sign -binary -in "$orange_channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" -outform DER -out "$orange_channel.sig" >/dev/null
+if ! bash "$downloader" --board orange-pi-5-plus --out "$tmp/orangeout" --keyring "$tmp/root.pem" >"$tmp/orange.log" 2>&1; then
+  printf 'FAIL: correctly signed Orange manifest refused\n' >&2; exit 1
+fi
+[[ -f "$tmp/orangeout/orange-pi-5-plus/2026.10.1/flash.raw.xz" ]] || exit 1
+cp "$channel" "$tmp/rock-channel.json"
+cp "$channel.sig" "$tmp/rock-channel.sig"
+cp "$orange_channel" "$tmp/orange-channel.json"
+cp "$orange_channel.sig" "$tmp/orange-channel.sig"
+cp "$orange_channel" "$channel"
+cp "$orange_channel.sig" "$channel.sig"
+if run >"$tmp/orange-for-rock.log" 2>&1; then printf 'FAIL: Orange manifest accepted for Rock\n' >&2; exit 1; fi
+cp "$tmp/rock-channel.json" "$channel"
+cp "$tmp/rock-channel.sig" "$channel.sig"
+cp "$tmp/rock-channel.json" "$orange_channel"
+cp "$tmp/rock-channel.sig" "$orange_channel.sig"
+if bash "$downloader" --board orange-pi-5-plus --out "$tmp/orangeout" --keyring "$tmp/root.pem" >"$tmp/rock-for-orange.log" 2>&1; then
+  printf 'FAIL: Rock manifest accepted for Orange\n' >&2; exit 1
+fi
+cp "$tmp/orange-channel.json" "$orange_channel"
+cp "$tmp/orange-channel.sig" "$orange_channel.sig"
+printf 'PASS: signed Orange manifest and both cross-board refusals\n'
+openssl req -newkey rsa:2048 -nodes -keyout "$tmp/bundle.key" -out "$tmp/bundle.csr" \
+  -subj '/CN=CeraLive OTA Manifest Signer' >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection\n' >"$tmp/bundle.ext"
+openssl x509 -req -in "$tmp/bundle.csr" -CA "$tmp/root.pem" -CAkey "$tmp/root.key" \
+  -CAcreateserial -days 1 -extfile "$tmp/bundle.ext" -out "$tmp/bundle.pem" >/dev/null 2>&1
+openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/bundle.key" -outform DER -out "$channel.sig" >/dev/null
+if run >"$tmp/bundle-signer.log" 2>&1; then printf 'FAIL: dual-EKU bundle leaf accepted as manifest signer\n' >&2; exit 1; fi
+openssl req -newkey rsa:2048 -nodes -keyout "$tmp/foreign.key" -out "$tmp/foreign.csr" \
+  -subj '/CN=Other Signer' >/dev/null 2>&1
+openssl x509 -req -in "$tmp/foreign.csr" -CA "$tmp/root.pem" -CAkey "$tmp/root.key" \
+  -CAcreateserial -days 1 -extfile "$tmp/leaf.ext" -out "$tmp/foreign.pem" >/dev/null 2>&1
+openssl cms -sign -binary -in "$channel" -signer "$tmp/foreign.pem" -inkey "$tmp/foreign.key" -outform DER -out "$channel.sig" >/dev/null
+if run >"$tmp/foreign-signer.log" 2>&1; then printf 'FAIL: wrong-CN code-signing leaf accepted\n' >&2; exit 1; fi
+sign
+printf 'PASS: dedicated signer accepted; dual-EKU and wrong-CN signers refused\n'
 printf '1' >"$tmp/site/fail"
 if run >"$tmp/first.log" 2>&1; then printf 'FAIL: interrupted fetch accepted\n' >&2; exit 1; fi
 part0="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0000"
@@ -178,15 +228,17 @@ grep -q 'full flash SHA-256 mismatch' "$tmp/mismatch.log"
 [[ -z "$(compgen -G "$tmp/badout/rock-5b-plus/2026.10.1/.flash.raw.xz.*")" ]] || exit 1
 printf 'PASS: final full-hash mismatch refused (valid per-part hashes)\n'
 
-python3 - "$downloader" "$tmp/no-full-check.sh" <<'PY'
+mkdir -p "$tmp/tools"
+python3 - "$downloader" "$tmp/tools/no-full-check.sh" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]).read_text()
 old='sha_ok "$flash_tmp" "$flash_size" "$flash_sha" || die \'full flash SHA-256 mismatch\''
 assert p.count(old)==1
 pathlib.Path(sys.argv[2]).write_text(p.replace(old, ':'))
 PY
+ln -s "$repo/lib" "$tmp/lib"
 mkdir -p "$tmp/mutantout"
-bash "$tmp/no-full-check.sh" --board rock-5b-plus --out "$tmp/mutantout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mutant.log" 2>&1
+bash "$tmp/tools/no-full-check.sh" --board rock-5b-plus --out "$tmp/mutantout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mutant.log" 2>&1
 printf 'PASS: removing full SHA guard makes mismatch fixture wrongly succeed (non-vacuity)\n'
 
 python3 - "$release/index.json" "$release/SHA256SUMS" <<'PY'
@@ -225,6 +277,20 @@ mkdir -p "$tmp/rawout"
 bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/raw.log" 2>&1
 cmp "$tmp/raw-source" "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
 printf 'PASS: optional xz extraction verifies raw SHA-256\n'
+printf 'old unverified raw\n' >"$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
+mkdir -p "$tmp/failing-bin"
+cat >"$tmp/failing-bin/xz" <<'SH'
+#!/usr/bin/env bash
+exit 42
+SH
+chmod 700 "$tmp/failing-bin/xz"
+if PATH="$tmp/failing-bin:$PATH" bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/extract-failed.log" 2>&1; then
+  printf 'FAIL: failing extraction accepted\n' >&2; exit 1
+fi
+[[ ! -e "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw" ]] || {
+  printf 'FAIL: old unverified raw survived failed extraction\n' >&2; exit 1;
+}
+printf 'PASS: failed extraction leaves no stale final raw\n'
 python3 - "$channel" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);m=json.loads(p.read_text());m['flash']['raw_sha256']='0'*64;p.write_text(json.dumps(m))

@@ -638,8 +638,17 @@ lengths/digests, then runs `rauc info -C keyring:check-purpose=codesign`
 against the reconstructed bundle and an explicit `RAUC_BUNDLE_KEYRING`. Missing
 root, missing part, invalid signature, wrong compatible, or wrong signed pointer
 URL/digest aborts before any channel signature or JSON write. `publish` also
-preflights its candidate signature before any immutable write. `promote` and
-`refresh` verify the prior channel CMS under the dedicated manifest signer
+preflights its candidate signature before any immutable write.
+`tools/flash-download.sh --board <board> --keyring <reviewed-manifest-root.pem>`
+uses the same resolved `BOARD_ID` for compatible, and requires the CMS signer
+CN `CeraLive OTA Manifest Signer`, Code Signing EKU and no E-mail Protection.
+Without `--keyring` the downloader is intentionally **unauthenticated**: SHA-256
+checks detect transfer corruption, not a malicious replacement; its output
+must not be treated as a trusted release. An invalid pre-existing `flash.raw`
+is removed before extraction, so a failed decode cannot leave unverified bytes
+under the final raw pathname.
+
+`promote` and `refresh` verify the prior channel CMS under the dedicated manifest signer
 root; only refresh accepts the old, demonstrably wrong product-stem compatible
 as a source and replaces it with the verified value. It never treats that
 legacy claim as install authority. Refresh requires `--expect-serial` and the
