@@ -2,6 +2,18 @@
 set -euo pipefail
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# Production and non-production bench RAUC intermediates are the only manifest issuers.
+readonly -a MANIFEST_SIGNER_ISSUERS=(
+  'CN=CeraLive RAUC Intermediate CA,O=CeraLive'
+  'CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive'
+)
+manifest_signer_issuer_allowed() {
+  local accepted
+  for accepted in "${MANIFEST_SIGNER_ISSUERS[@]}"; do
+    [[ "$1" == "$accepted" ]] && return 0
+  done
+  return 1
+}
 usage() {
   printf '%s\n' 'publish-release.sh publish --board B --version YYYY.M.P --channel stable|beta|drill --bundle FILE --flash FILE --raw-sha256 FILE --lock FILE [--dry-run]' \
     'publish-release.sh promote --board B --version YYYY.M.P --to stable [--dry-run]' \
@@ -81,7 +93,7 @@ current_etag() {
 channel_key() { printf 'channels/%s/%s.json' "$1" "$board"; }
 release_prefix() { printf 'releases/%s/%s' "$board" "$1"; }
 verify_cms() {
-  local content="$1" signature="$2" eku subject cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
+  local content="$1" signature="$2" eku subject issuer cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'manifest verification root absent'
   openssl cms -verify -binary -inform DER -in "$signature" -content "$content" \
     -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any \
@@ -90,7 +102,10 @@ verify_cms() {
   eku="$(openssl x509 -in "$tmp/read-signer.pem" -noout -ext extendedKeyUsage)"
   [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || return 1
   subject="$(openssl x509 -in "$tmp/read-signer.pem" -noout -subject -nameopt RFC2253)"
-  [[ "$subject" =~ $cn_pattern ]]
+  [[ "$subject" =~ $cn_pattern ]] || return 1
+  issuer="$(openssl x509 -in "$tmp/read-signer.pem" -noout -issuer -nameopt RFC2253)" || return 1
+  issuer="${issuer#issuer=}"
+  manifest_signer_issuer_allowed "$issuer" || { printf 'channel signer issuer refused: %s\n' "$issuer" >&2; return 1; }
 }
 intent_key() {
   local c="$1" etag="$2"
@@ -252,11 +267,14 @@ PY
 }
 signer_check() {
   [[ -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/leaf.key" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/intermediate-ca.pem" && -f "${OTA_MANIFEST_SIGNER_DIR:-}/root-ca.pem" ]] || die 'dedicated manifest signer files absent'
-  local cn eku cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
+  local cn eku issuer cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
   cn="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -subject -nameopt RFC2253)"
   [[ "$cn" =~ $cn_pattern ]] || die 'wrong manifest signer CN'
   eku="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -ext extendedKeyUsage)"
   [[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]] || die 'manifest signer must have codeSigning only'
+  issuer="$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -noout -issuer -nameopt RFC2253)" || die 'manifest signer issuer unreadable'
+  issuer="${issuer#issuer=}"
+  manifest_signer_issuer_allowed "$issuer" || die "manifest signer issuer refused: $issuer"
   openssl verify -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -untrusted "$OTA_MANIFEST_SIGNER_DIR/intermediate-ca.pem" "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" >/dev/null
   [[ "$(openssl pkey -in "$OTA_MANIFEST_SIGNER_DIR/leaf.key" -pubout | openssl sha256)" == "$(openssl x509 -in "$OTA_MANIFEST_SIGNER_DIR/leaf.pem" -pubkey -noout | openssl sha256)" ]] || die 'manifest signer key mismatch'
 }

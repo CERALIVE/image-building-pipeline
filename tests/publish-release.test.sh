@@ -83,7 +83,7 @@ PY
 chmod 700 "$tmp/bin/aws"
 export PATH="$tmp/bin:$PATH"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/signer/root-ca.key" -out "$tmp/signer/root-ca.pem" -days 10 -subj '/CN=Test root' -addext 'basicConstraints=critical,CA:TRUE,pathlen:1' -addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
-openssl req -newkey rsa:2048 -nodes -keyout "$tmp/signer/intermediate-ca.key" -out "$tmp/signer/intermediate.csr" -subj '/CN=Test intermediate' >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -keyout "$tmp/signer/intermediate-ca.key" -out "$tmp/signer/intermediate.csr" -subj '/O=CeraLive/CN=CeraLive RAUC Intermediate CA' >/dev/null 2>&1
 printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$tmp/intermediate.ext"
 openssl x509 -req -in "$tmp/signer/intermediate.csr" -CA "$tmp/signer/root-ca.pem" -CAkey "$tmp/signer/root-ca.key" -CAcreateserial -days 10 -extfile "$tmp/intermediate.ext" -out "$tmp/signer/intermediate-ca.pem" >/dev/null 2>&1
 for kind in manifest bundle; do
@@ -111,7 +111,7 @@ printf 'flash-content\n' >"$tmp/flash.raw"
 xz -c "$tmp/flash.raw" >"$tmp/flash.raw.xz"
 ( cd "$tmp" && sha256sum flash.raw > raw.sha256 )
 publisher() {
-  ( cd "$tmp/publisher-cwd" && bash "$repo/ci/publish-release.sh" "$@" )
+  ( cd "$tmp/publisher-cwd" && bash "${PUBLISH_RELEASE_SCRIPT:-$repo/ci/publish-release.sh}" "$@" )
 }
 publish() {
   local v="$1" c="$2"
@@ -147,6 +147,141 @@ assert puts[-2].strip()=='put-object channels/beta/rock-5b-plus.json.sig'
 assert puts[-1].strip()=='put-object channels/beta/rock-5b-plus.json'
 PY
 printf 'PASS: signature before manifest LAST\n'
+make_issuer() {
+  local name="$1" subject="$2" root="${3:-$tmp/signer/root-ca}"
+  openssl req -newkey rsa:2048 -nodes -keyout "$tmp/$name.key" -out "$tmp/$name.csr" \
+    -subj "$subject" >/dev/null 2>&1
+  openssl x509 -req -in "$tmp/$name.csr" -CA "$root.pem" \
+    -CAkey "$root.key" -CAcreateserial -days 10 \
+    -extfile "$tmp/intermediate.ext" -out "$tmp/$name.pem" >/dev/null 2>&1
+}
+make_issuer bench '/O=CeraLive/CN=CeraLive RAUC Bench Intermediate CA'
+make_issuer alternate '/O=CeraLive/CN=CeraLive Other Intermediate CA'
+make_issuer near '/OU=Extra/O=CeraLive/CN=CeraLive RAUC Intermediate CA'
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/foreign-root.key" -out "$tmp/foreign-root.pem" -days 10 \
+  -subj '/CN=Foreign Root' -addext 'basicConstraints=critical,CA:TRUE,pathlen:1' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
+make_issuer foreign '/O=CeraLive/CN=CeraLive RAUC Intermediate CA' "$tmp/foreign-root"
+for kind in bench root alternate near foreign; do
+  ca="$tmp/$kind"
+  [[ "$kind" != root ]] || ca="$tmp/signer/root-ca"
+  openssl x509 -req -in "$tmp/manifest.csr" -CA "$ca.pem" -CAkey "$ca.key" \
+    -CAcreateserial -days 10 -extfile "$tmp/manifest.ext" -out "$tmp/$kind-manifest.pem" >/dev/null 2>&1
+done
+printf '1000\n' >"$tmp/serial"
+: >"$tmp/cert-index"
+printf 'unique_subject = no\n' >"$tmp/cert-index.attr"
+cat >"$tmp/dates.cnf" <<EOF
+[ca]
+default_ca = fixture
+[fixture]
+database = $tmp/cert-index
+new_certs_dir = $tmp
+certificate = $tmp/production-intermediate.pem
+private_key = $tmp/signer/intermediate-ca.key
+serial = $tmp/serial
+default_md = sha256
+policy = names
+x509_extensions = leaf_ext
+[names]
+commonName = supplied
+[leaf_ext]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+EOF
+cp "$tmp/signer/intermediate-ca.pem" "$tmp/production-intermediate.pem"
+openssl ca -batch -config "$tmp/dates.cnf" -startdate 20250101000000Z -enddate 20250102000000Z \
+  -in "$tmp/manifest.csr" -out "$tmp/expired-manifest.pem" >/dev/null 2>&1
+openssl req -new -key "$tmp/manifest.key" -subj '/O=CeraLive/CN=CeraLive OTA Manifest Signer' \
+  -out "$tmp/future.csr" >/dev/null 2>&1
+openssl ca -batch -config "$tmp/dates.cnf" -startdate 20350101000000Z -enddate 20360101000000Z \
+  -in "$tmp/future.csr" -out "$tmp/future-manifest.pem" >/dev/null 2>&1
+set_signer() {
+  local kind="$1"
+  if [[ "$kind" == production ]]; then
+    cp "$tmp/manifest.pem" "$tmp/signer/leaf.pem"
+    cp "$tmp/production-intermediate.pem" "$tmp/signer/intermediate-ca.pem"
+  else
+    cp "$tmp/$kind-manifest.pem" "$tmp/signer/leaf.pem"
+    if [[ "$kind" == root || "$kind" == expired || "$kind" == future ]]; then
+      cp "$tmp/production-intermediate.pem" "$tmp/signer/intermediate-ca.pem"
+    else
+      cp "$tmp/$kind.pem" "$tmp/signer/intermediate-ca.pem"
+    fi
+  fi
+}
+sign_channel() {
+  local target="$1" kind="$2" cert chain
+  cert="$tmp/$kind-manifest.pem" chain="$tmp/$kind.pem"
+  [[ "$kind" != production ]] || { cert="$tmp/manifest.pem"; chain="$tmp/production-intermediate.pem"; }
+  [[ "$kind" != expired && "$kind" != future ]] || chain="$tmp/production-intermediate.pem"
+  local args=()
+  [[ "$kind" != root ]] || chain=''
+  [[ -z "$chain" ]] || args=(-certfile "$chain")
+  openssl cms -sign -binary -in "$target" -signer "$cert" -inkey "$tmp/manifest.key" \
+    "${args[@]}" -outform DER -out "$target.sig" >/dev/null
+}
+set_signer bench
+publish 2026.10.7 drill >"$tmp/bench-publish.log"
+set_signer production
+for kind in root alternate near foreign expired future; do
+  set_signer "$kind"
+  if publish 2026.10.9 drill >"$tmp/$kind-publish.log" 2>&1; then
+    printf 'FAIL: %s-issued signer published a channel\n' "$kind" >&2; exit 1
+  fi
+  if [[ "$kind" == root || "$kind" == alternate || "$kind" == near ]]; then
+    issuer="$(openssl x509 -in "$tmp/$kind-manifest.pem" -noout -issuer -nameopt RFC2253)"
+    assert grep -F -- "${issuer#issuer=}" "$tmp/$kind-publish.log"
+  fi
+done
+set_signer production
+cp "$channel.sig" "$tmp/production-channel.sig"
+for kind in bench root alternate near foreign expired future; do
+  sign_channel "$channel" "$kind"
+  if [[ "$kind" == bench ]]; then
+    publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/bench-pointer.log"
+  else
+    if publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/$kind-pointer.log" 2>&1; then
+      printf 'FAIL: %s-issued channel pointer accepted\n' "$kind" >&2; exit 1
+    fi
+    if [[ "$kind" == root || "$kind" == alternate || "$kind" == near ]]; then
+      issuer="$(openssl x509 -in "$tmp/$kind-manifest.pem" -noout -issuer -nameopt RFC2253)"
+      assert grep -F -- "${issuer#issuer=}" "$tmp/$kind-pointer.log"
+    fi
+  fi
+done
+cp "$tmp/production-channel.sig" "$channel.sig"
+mkdir -p "$tmp/ci"
+ln -s "$repo/ci/r2-immutable-lib.sh" "$tmp/ci/r2-immutable-lib.sh"
+ln -s "$repo/lib" "$tmp/lib"
+python3 - "$repo/ci/publish-release.sh" "$tmp/ci/publish-release.sh" <<'PY'
+import pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+for check in ('manifest_signer_issuer_allowed "$issuer" || die "manifest signer issuer refused: $issuer"',
+              'manifest_signer_issuer_allowed "$issuer" || { printf \'channel signer issuer refused: %s\\n\' "$issuer" >&2; return 1; }'):
+    assert text.count(check)==1
+    text=text.replace(check, ':')
+pathlib.Path(sys.argv[2]).write_text(text)
+PY
+for kind in root alternate; do
+  set_signer "$kind"
+  STUB_R2="$tmp/mutant-$kind" STUB_LOG="$tmp/mutant-$kind.log" \
+    PUBLISH_RELEASE_SCRIPT="$tmp/ci/publish-release.sh" publish 2026.10.9 drill >"$tmp/$kind-publish-mutant.log" 2>&1 || {
+      printf 'FAIL: issuer mutation did not publish %s-issued signer\n' "$kind" >&2; exit 1;
+    }
+done
+set_signer production
+for kind in root alternate; do
+  sign_channel "$channel" "$kind"
+  PUBLISH_RELEASE_SCRIPT="$tmp/ci/publish-release.sh" \
+    publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/$kind-pointer-mutant.log" 2>&1 || {
+      printf 'FAIL: issuer mutation did not read %s-issued pointer\n' "$kind" >&2; exit 1;
+    }
+done
+cp "$tmp/production-channel.sig" "$channel.sig"
+rm -f "$tmp/objects/channels/drill/rock-5b-plus.json" "$tmp/objects/channels/drill/rock-5b-plus.json.sig"
+printf 'PASS: publisher and pointer readers accept production/bench issuers, refuse root/alternate/near-miss, and issuer mutations admit root/alternate\n'
 if publish 2026.10.1 beta >"$tmp/collision.log" 2>&1; then
   printf 'FAIL: same-version channel replay should be refused\n' >&2; exit 1
 fi
