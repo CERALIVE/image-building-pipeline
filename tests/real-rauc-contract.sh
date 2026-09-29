@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# WARNING: PRIVILEGED, DESTRUCTIVE HOST FIXTURE. This test may unmount ANY
+# /mnt/rauc/* mount and briefly exposes real rootfs_a/rootfs_b PARTLABELs to
+# host udev. Run ONLY on an ephemeral CI runner or disposable VM; NEVER run on
+# a developer host. The default local suite must not execute this leg.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
