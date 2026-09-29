@@ -14,6 +14,12 @@ grep -Fxq 'd /data/ceralive/rauc 0700 root root -' "$ROOT/mkosi/runtime/rauc/cer
 grep -Fxq 'd /data/ceralive/update-state 0750 root ceralive -' "$ROOT/mkosi/runtime/rauc/ceralive-ota.tmpfiles.conf"
 
 mkdir -p "$WORK/bin" "$WORK/root/usr/lib/ceralive"
+mkdir -p "$WORK/root/etc/apt/preferences.d"
+pin="$WORK/root/etc/apt/preferences.d/ceralive-origin"
+awk '!/^[[:space:]]*(#|$)/ {
+  print "Package: " $0 "\nPin: origin apt.ceralive.tv\nPin-Priority: 990"
+  print "Package: " $0 "\nPin: origin *\nPin-Priority: -1"
+}' "$ROOT/mkosi/runtime/first-party-origin-names.txt" >"$pin"
 cat >"$WORK/bin/getent" <<'EOF'
 #!/bin/sh
 case "$2" in
@@ -23,6 +29,25 @@ case "$2" in
 esac
 EOF
 chmod +x "$WORK/bin/getent"
+PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root"
+cp "$pin" "$WORK/complete-pin"
+awk 'BEGIN {skip=0} /^Package: cerastream$/ {skip=1} /^Package: / && $0 != "Package: cerastream" {skip=0} !skip {print}' "$WORK/complete-pin" >"$pin"
+if PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root" >"$WORK/short.log" 2>&1; then
+  printf 'short origin pin advertised origin-protection\n' >&2; exit 1
+fi
+grep -Fq 'origin protection pin file is incomplete' "$WORK/short.log"
+[[ ! -e "$WORK/root/usr/lib/ceralive/update-capabilities.json" ]]
+printf '# no package stanzas\n' >"$pin"
+if PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root" >"$WORK/vacuous.log" 2>&1; then
+  printf 'comment-only origin pin advertised origin-protection\n' >&2; exit 1
+fi
+grep -Fq 'origin protection pin has no package stanzas' "$WORK/vacuous.log"
+rm "$pin"
+if PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root" >"$WORK/absent.log" 2>&1; then
+  printf 'missing origin pin advertised origin-protection\n' >&2; exit 1
+fi
+grep -Fq 'origin protection pin or independent name authority missing' "$WORK/absent.log"
+cp "$WORK/complete-pin" "$pin"
 PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root"
 jq -e --argjson ota 657 --argjson apt 42 \
   '.schema == 1 and .ota_uid == $ota and .apt_uid == $apt and .features == [
