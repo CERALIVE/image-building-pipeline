@@ -33,7 +33,7 @@ if [[ -e "$STREAMING" ]]; then
   [[ "$action" == --arm ]] || die 'streaming still present: activation refused'
 fi
 
-# RAUC 1.13 reports per-slot install/activation timestamps in the detailed
+# The pinned RAUC 1.15.2 reports per-slot install/activation timestamps in the detailed
 # shell status. Never source that output: slot metadata may contain bundle text.
 status="$(rauc status --detailed --output-format=shell)" || die 'RAUC status unavailable'
 declare -A bootnames=() states=() installed=() activated=()

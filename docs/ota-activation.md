@@ -32,10 +32,10 @@ skips activation and `--now` refuses. `--now` changes only the next boot target;
 it does **not** request a reboot. The seven-day timer and notification policy
 belong to CeraUI, not this image helper.
 
-RAUC 1.13 documents `activate-installed=false` as requiring manual activation
+The pinned RAUC 1.15.2 retains `activate-installed=false`, which requires manual activation,
 and `rauc status mark-active other` as selecting the other slot for the next boot:
-[RAUC v1.13 configuration](https://rauc.readthedocs.io/en/v1.13/reference.html#activate-installed),
-[RAUC v1.13 activation](https://rauc.readthedocs.io/en/v1.13/using.html#manually-switch-to-a-different-slot).
+[RAUC configuration](https://rauc.readthedocs.io/en/latest/reference.html#activate-installed),
+[RAUC activation](https://rauc.readthedocs.io/en/latest/using.html#manually-switch-to-a-different-slot).
 The helper parses RAUC's `--detailed --output-format=shell` key/value output
 without sourcing it; per-slot installation and activation timestamps establish
 whether an inactive rootfs has a newer staged installation. A shared activation
@@ -48,6 +48,6 @@ The registered `tests/systemd-ordering-cycle.test.sh` gate invokes
 decision path, renders both platform units through the real installer, runs
 `systemd-analyze verify`, probes RAUC ordering by closing a deliberate test-only
 cycle, and inspects a test systemd manager dump for the implicit shutdown conflict.
-No image containing this work has been built or booted yet; Todo 22's verity
-bundle installation remains separately blocked on its RAUC/kernel compatibility
-decision. This test is not a hardware shutdown receipt.
+No image containing this work has been built or booted yet. The RAUC 1.15.2
+source pin resolves the former kernel compatibility decision; this test is not
+a hardware shutdown receipt.
