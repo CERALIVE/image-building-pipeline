@@ -855,31 +855,6 @@ Unit=ceralive-hawkbit-provision-retry.service
 WantedBy=timers.target
 HBRETRYTIMER
 
-  # --- A/B marker clear (task-29 brick #2 for the hawkBit install path) ---
-  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.service <<'HBMCSVC'
-[Unit]
-Description=Clear the RAUC slot-marked-good marker after a hawkBit-driven bundle download
-RequiresMountsFor=/data
-
-[Service]
-Type=oneshot
-# /data is shared A/B; clear the old slot's marker so the freshly-installed slot
-# re-proves health via ceralive-healthcheck.service (task 29). Safe to re-fire.
-ExecStart=-/bin/rm -f /data/ceralive/.slot-marked-good
-HBMCSVC
-
-  cat >/etc/systemd/system/ceralive-hawkbit-marker-clear.path <<'HBMCPATH'
-[Unit]
-Description=Watch for a downloaded RAUC bundle to clear the slot-marked-good marker
-
-[Path]
-PathExistsGlob=/data/ceralive/rauc-downloads/*.raucb
-Unit=ceralive-hawkbit-marker-clear.service
-
-[Install]
-WantedBy=multi-user.target
-HBMCPATH
-
   # --- install the backport .deb if staged; else GRACEFUL skip (config still ships) ---
   local staging dir deb="" installed=0
   for dir in "${HAWKBIT_DEB_STAGING:-}" /opt/ceralive-staging /run/ceralive-debs; do
@@ -902,10 +877,10 @@ HBMCPATH
   # CeraLive-owned units are always installable (present regardless of the .deb).
   enable_service ceralive-hawkbit-provision.service
   enable_service ceralive-hawkbit-provision-retry.timer
-  enable_service ceralive-hawkbit-marker-clear.path
   # The updater unit only exists when the .deb installed it.
   if [[ "${installed}" -eq 1 ]]; then
-    enable_service rauc-hawkbit-updater.service
+    disable_service rauc-hawkbit-updater.service
+    mask_service rauc-hawkbit-updater.service
   else
     log "rauc-hawkbit-updater.service not enabled (package absent) — drop-in/config staged for when it is"
   fi

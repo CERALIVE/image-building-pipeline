@@ -207,8 +207,13 @@ marker existence gate. The script accepts `.slot-marked-good` only when its
 `boot-id` line matches the current kernel boot ID, and writes that identity only
 after all existing checks and RAUC mark-good succeed. Legacy timestamp-only
 markers and previous-boot markers cannot suppress verification, on either an A/B
-swap or an ordinary reboot. Boot identity read failure is fail-closed. Existing
-OTA marker removers remain compatible but are no longer required for correctness.
+swap or an ordinary reboot. Boot identity read failure is fail-closed.
+The manual OTA marker remover remains compatible but is not required for correctness.
+The legacy hawkBit marker-clear path/service are retired: a retained `.raucb`
+matched their level-triggered `PathExistsGlob=` after the oneshot had removed only
+the marker, causing a start-limit loop and two failed units on both bench boards.
+The dormant updater is disabled and masked against first-boot presets; the
+boot-aware healthcheck is unchanged.
 `tests/healthcheck-boot-marker.bats` replays the stale Rock marker against actual
 boot-state helpers, including exhausted counters and unhealthy negative controls.
 

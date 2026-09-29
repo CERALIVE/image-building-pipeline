@@ -1136,7 +1136,7 @@ These are independent mechanisms with different triggers, and reading them as on
 | Path | Trigger | What it does |
 |---|---|---|
 | **apt package upgrade** | CeraUI's update button — its `system.startUpdate` RPC reaches `startSoftwareUpdate()`, which launches a detached `systemd-run` unit executing `/usr/bin/apt-get` | Upgrades the first-party app packages from `apt.ceralive.tv`. Never touches the frozen boot stack (see "Kernel Freeze" above) |
-| **RAUC OS update, automatic (legacy)** | `rauc-hawkbit-updater` | Existing files remain installed; disabling this trigger in favor of CeraUI's orchestrator is a later integration step. |
+| **RAUC OS update, automatic (legacy)** | `rauc-hawkbit-updater` | Package and config template remain installed, but the updater is disabled and masked against first-boot presets; no server is configured. The legacy bundle-watching marker-clear units are removed; boot-scoped health confirmation needs no download hook. |
 | **RAUC OS update, manual** | An operator running `/usr/local/bin/ceralive-update` | **Inert by default.** `persistence.sh` seeds `/data/ceralive/update.conf` with an empty `BUNDLE_URL`, and the script refuses to run without one |
 
 **CeraUI does not invoke `ceralive-update`.** No caller of it exists anywhere in

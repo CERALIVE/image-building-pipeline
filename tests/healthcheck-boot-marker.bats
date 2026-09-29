@@ -336,3 +336,19 @@ PY
   [ "$status" -eq 1 ]
   grep -Fxq Wants=ceralive.service "$ROOT/mkosi/runtime/ceralive-healthcheck.service"
 }
+
+@test "dormant hawkBit has no legacy path watcher that loops on an existing bundle" {
+  local postinst="$ROOT/mkosi/mkosi.images/runtime/mkosi.postinst.chroot"
+  # PathExistsGlob is level-triggered. A retained bundle retriggers its oneshot
+  # forever when that oneshot removes only the marker, not the bundle.
+  run grep -E '^[[:space:]]*(cat >|enable_service ).*ceralive-hawkbit-marker-clear' "$postinst"
+  [ "$status" -eq 1 ]
+  run grep -F 'PathExistsGlob=/data/ceralive/rauc-downloads/*.raucb' "$postinst"
+  [ "$status" -eq 1 ]
+  [ ! -e "$ROOT/mkosi/runtime/ceralive-hawkbit-marker-clear.path" ]
+  [ ! -e "$ROOT/mkosi/runtime/ceralive-hawkbit-marker-clear.service" ]
+  grep -Fxq '    disable_service rauc-hawkbit-updater.service' "$postinst"
+  grep -Fxq '    mask_service rauc-hawkbit-updater.service' "$postinst"
+  run grep -F 'enable_service rauc-hawkbit-updater.service' "$postinst"
+  [ "$status" -eq 1 ]
+}

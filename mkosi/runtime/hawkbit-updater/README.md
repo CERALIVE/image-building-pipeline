@@ -32,8 +32,8 @@ new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
 **Dual-track** (the project convention, tasks 26/29/30): these canonical files are
 mirrored by inline twins written by
 `mkosi.images/runtime/mkosi.postinst.chroot::setup_hawkbit_updater()`, which is the
-layer that actually runs in the build. The postinst also installs five CeraLive
-systemd unit files described below. Keep the twins in sync.
+layer that actually runs in the build. The postinst installs the enrollment
+service and retry units described below. Keep the twins in sync.
 
 ## The backport `.deb` (NOT in trixie apt)
 
@@ -84,10 +84,8 @@ postinst.
 
 > **Graceful build:** if the backport `.deb` is not staged (parity / dry / offline
 > builds), the postinst still deploys the config template, the provision script and
-> the five CeraLive unit files, logs a clear warning, and skips only the binary install
-> — mirroring the postinst's "no secret in env → install placeholder" pattern. The
-> units stay inert (no binary, and the updater is gated on the un-rendered config),
-> so a package-less image is safe.
+> the enrollment/retry units, logs a clear warning, and skips only the binary install
+> — mirroring the postinst's "no secret in env → install placeholder" pattern.
 
 ## Secure enrollment — **no shared static token in the image**
 
@@ -168,18 +166,21 @@ docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-
 risk). Reboot is triggered by the operator / CeraUI, like the manual `ceralive-update`
 path.
 
-### Boot-scoped confirmation and the legacy marker clear
+### Boot-scoped confirmation
 
 `/data/ceralive/.slot-marked-good` now records the kernel boot ID beside its
 timestamp. Only that same boot may reuse the result. A new boot always verifies
 again, including a same-slot reboot: the bootloader decrements its attempt budget
 even without an install. Timestamp-only markers from old images are stale.
 
-The existing `ceralive-update` post-install removal and
-`ceralive-hawkbit-marker-clear.path` download-triggered removal remain compatible,
-but correctness no longer depends on either one. Direct RAUC installs and manual
-slot selection need no special marker-clear hook. The unit must not carry a
-persistent `ConditionPathExists` gate ahead of the script's boot-aware predicate.
+The manual `ceralive-update` post-install removal remains compatible, but
+correctness no longer depends on it. The legacy hawkBit marker-clear path and
+service are retired: `PathExistsGlob=` retriggered the oneshot while a downloaded
+bundle remained on `/data`, until both units hit the start limit and failed on
+every boot. A persistent bundle cannot invalidate a boot-scoped health check.
+Direct RAUC installs and manual slot selection need no marker-clear hook. The
+healthcheck must not carry a persistent `ConditionPathExists` gate ahead of its
+boot-aware predicate.
 
 ## CeraLive systemd units (written by the postinst)
 
@@ -188,7 +189,10 @@ persistent `ConditionPathExists` gate ahead of the script's boot-aware predicate
 | `ceralive-hawkbit-provision.service` | oneshot | First-boot enrollment + config render (gated on `/data/ceralive/hawkbit.conf`). |
 | `ceralive-hawkbit-provision-retry.timer` + `.service` | timer/oneshot | Retry only while the mode-0600 pending marker exists; ordered after NetworkManager, never network-online. |
 | `rauc-hawkbit-updater.service` (+ drop-in) | daemon | Polls DDI; gated on the rendered `/data` config; `-c` it. |
-| `ceralive-hawkbit-marker-clear.path` + `.service` | path/oneshot | Legacy download-triggered marker clear; boot-scoped verification is authoritative. |
+
+The updater package and config template remain installed, but the updater is
+disabled and masked by the image so first-boot presets cannot re-enable it.
+No hawkBit server is configured on dormant devices.
 
 ## Verification (offline; no board / no real hawkBit)
 
