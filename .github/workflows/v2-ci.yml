@@ -195,8 +195,11 @@ jobs:
           version="$(pin UPSTREAM_VERSION)"
           url="$(pin UPSTREAM_URL)"
           sha256="$(pin UPSTREAM_SHA256)"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$sha256" =~ ^[0-9a-f]{64}$ && \
-             "$url" == "https://github.com/rauc/rauc/releases/download/v${version}/rauc-${version}.tar.xz" ]]
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$sha256" =~ ^[0-9a-f]{64}$ && \
+                  "$url" == "https://github.com/rauc/rauc/releases/download/v${version}/rauc-${version}.tar.xz" ]]; then
+            echo "::error::invalid manifests/rauc-deb-versions.txt: expected a dotted numeric UPSTREAM_VERSION, 64 lowercase hex UPSTREAM_SHA256 and the exact versioned GitHub release UPSTREAM_URL"
+            exit 1
+          fi
           printf 'version=%s\nsha256=%s\nurl=%s\n' "$version" "$sha256" "$url" >>"$GITHUB_OUTPUT"
 
       - name: Cache pinned RAUC build

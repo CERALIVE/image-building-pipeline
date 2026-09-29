@@ -112,6 +112,55 @@ transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}" "${RAUC
 echo "== all system.conf writers =="
 check_system_conf_writers
 
+if python3 - "${PIPELINE_DIR}" <<'PY'
+from pathlib import Path
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+repo = Path(sys.argv[1])
+workflow = yaml.safe_load((repo / '.github/workflows/v2-ci.yml').read_text())
+steps = workflow['jobs']['bats']['steps']
+step = next(item['run'] for item in steps if item.get('id') == 'rauc-pin')
+pin = (repo / 'manifests/rauc-deb-versions.txt').read_text()
+
+with tempfile.TemporaryDirectory() as scratch:
+    root = Path(scratch)
+    (root / 'manifests').mkdir()
+    output = root / 'github-output'
+
+    def invoke(text):
+        (root / 'manifests/rauc-deb-versions.txt').write_text(text)
+        output.write_text('')
+        result = subprocess.run(['bash', '-c', step], cwd=root, text=True,
+                                capture_output=True, env={**os.environ, 'GITHUB_OUTPUT': str(output)},
+                                check=False)
+        return result, output.read_text()
+
+    good, actual = invoke(pin)
+    assert good.returncode == 0 and 'version=' in actual and 'sha256=' in actual and 'url=' in actual, (good, actual)
+    for field, replacement in (
+        ('UPSTREAM_VERSION', 'not-a-version'),
+        ('UPSTREAM_SHA256', 'abcdef'),
+        ('UPSTREAM_URL', 'https://example.invalid/rauc.tar.xz'),
+    ):
+        altered, count = re.subn(rf'^{field}=.*$', f'{field}={replacement}', pin, count=1, flags=re.M)
+        assert count == 1, field
+        bad_run, contents = invoke(altered)
+        assert bad_run.returncode != 0 and contents == '' and '::error::' in bad_run.stdout + bad_run.stderr, (
+            f'{field} failed without a diagnostic', bad_run, contents)
+print('RAUC CI pin step: valid pin emits outputs; malformed version, digest and URL fail with ::error::')
+PY
+then
+  ok 'RAUC CI pin step rejects malformed inputs with actionable errors'
+else
+  bad 'RAUC CI pin step failed its good/malformed fixture matrix'
+fi
+
 echo
 echo "== mutation controls =="
 scratch="$(mktemp -d)"

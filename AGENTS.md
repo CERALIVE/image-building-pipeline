@@ -3566,6 +3566,10 @@ creates or validates only the ignored `.dev-keys/` NON-PRODUCTION fixture
 (including the leaf → intermediate → root chain and leaf key pairing); it never
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
+The `v2-ci.yml` pinned RAUC build reads `manifests/rauc-deb-versions.txt` and
+rejects a malformed version, SHA-256 or release URL with a named `::error::`
+before caching/building; `tests/rauc-transition-contract.test.sh` executes that
+actual step against valid and malformed pins.
 
 **RAUC `bootloader=custom` must NOT carry RAUC-native `boot-attempts` — the
 custom backend owns the counters** [EXISTS — fixed 2026-08-29]
