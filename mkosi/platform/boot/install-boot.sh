@@ -145,7 +145,7 @@ sandbox-user=ceralive-ota
 send-headers=boot-id;transaction-id
 
 [handlers]
-# Trixie RAUC 1.13 delegates the four state/primary operations to this script
+# The pinned RAUC 1.15.2 delegates the four state/primary operations to this script
 # AND calls get-current, which the adapter already implements. That call is the
 # one behavioural difference from the bookworm 1.8 this image used to target:  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite
 # 1.8 read rauc.slot= itself and never invoked get-current, so the adapter's
