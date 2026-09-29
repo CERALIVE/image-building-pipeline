@@ -1486,10 +1486,9 @@ Exact hashes and serving proof: [`media pin receipt`](docs/first-party-pin-curre
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 The engine row has since advanced to `2026.9.5`.
 
-**cerastream + CeraUI pins (engine updated 2026-09-21):** the CURRENT app-layer pins.
-`manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.6` on both
-architectures and the unchanged
-architecture-qualified `ceralive-device` rows
+**cerastream + CeraUI pin receipt (2026-09-21; superseded):** at that time,
+`manifests/first-party-deb-versions.txt` selected `cerastream=2026.9.6` on both
+architectures and these architecture-qualified `ceralive-device` rows:
 `2026.9.3-20260920T155651.ec522ad` (amd64) / `2026.9.3-20260920T155654.ec522ad`
 (arm64); repo-local `versions.yaml` records `v2026.9.6` and `v2026.9.3`. Engine
 `2026.9.6` retains audio-meter, idle-preview and program-session teardown ownership
@@ -1520,17 +1519,14 @@ self-marking the slot good, `apt-get update` exit 0, and the previous production
 payload retained good on slot B. That is a boot receipt, not hardware
 qualification of every stream path; the drill rows keep their own verdicts.
 
-**KNOWN GAP, pre-existing and NOT introduced by this pin.** The release-evidence
-catalog `manifests/first-party-releases.json` still carries
-`checked_at=2026-09-17T16:10:16Z`, because `--refresh` now fails closed with
+**Historical release-evidence gap (resolved).** Before the srtla cutover was
+recognized, `--refresh` failed closed with
 `UNVERIFIABLE: newest release lacks srtla-send-rs[amd64]: v4.1.0`. That is the
 srtla cutover: `srtla-send-rs` v4.1.0 publishes `srtla_4.1.0_<arch>.deb`, not
 `srtla-send-rs_*.deb`, and the refresh requires the NEWEST release of a component
 to carry all of that component's image packages with no fallback to an older
-complete one. The ordinary PR gate is unaffected — its evidence bound is 168 h and
-a forward pin is CURRENT by design — but the 24 h release-candidate/scheduled-real-build
-bound will fail until the discovery is taught the cutover's package rename. The
-catalog was deliberately NOT hand-edited and `checked_at` was NOT restamped.
+complete one. The committed catalog has since been authenticated and refreshed
+(`checked_at=2026-09-25T22:36:50.699356Z`); this is no longer a release gate.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
@@ -1546,8 +1542,9 @@ state** under the staging dir (the host apt config is never touched).
   ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
-  `ceralive-modem-support=1.4.0` companion. All are downloaded into `$DEST/debs/`
-  using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
+  `ceralive-modem-support=1.4.0` companion, and the separately published
+  `ceralive-apt-credentials=1.0.0`. All are downloaded into `$DEST/debs/`
+  using the pins from `manifests/first-party-deb-versions.txt` (16 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
   release embeds architecture-specific build metadata, as CeraUI v2026.8.3 does.
@@ -3620,7 +3617,8 @@ contract and additionally set persistent `data-directory=/data/ceralive/rauc`,
 declaration and creates the no-home/nologin account; runtime installs tmpfiles
 for RAUC metadata (0700 root) and update state (0750 root:ceralive). The
 build-generated `/usr/lib/ceralive/update-capabilities.json` records the real
-OTA and `_apt` UIDs and advertises all eight schema-1 features unconditionally:
+OTA and `_apt` UIDs and advertises all eight schema-1 features only after the
+complete origin-protection pin file passes the independent authority check:
 `rauc-verity-streaming`, `rauc-activate-on-shutdown`, `slot-sync`,
 `origin-protection`, `apt-all-packages`, `reprune-hook`, `apt-credentials`,
 `transport-uidrange`. The matching image mechanisms and CeraUI consumers have
@@ -3801,9 +3799,16 @@ downgrades a newer installed version. The name list is forwarded
 base64 (`CERALIVE_FIRST_PARTY_NAMES_B64`, `PassEnvironment=`) — a subimage
 chroot cannot read a path above `$SRCDIR`, the same constraint documented for
 `manifests/target-release.env` above.
-Both writers fail the build on an absent, empty, malformed or incomplete names
-input rather than emitting an empty origin policy while the capability file
-declares `origin-protection`; the valid 18-name pin payload is unchanged.
+Both writers normalize whitespace-prefixed blank/comment lines identically for
+validation and emission. They compare the forwarded input against an independent,
+reviewed `mkosi/runtime/first-party-origin-names.txt` set; the Docker APT contract
+also derives that authority from the first-party .deb pins plus the two active
+RK3588 fork pins. Missing, extra, duplicate, malformed and empty names fail before
+the pin is published, with the offending name in the diagnostic. The capability
+writer verifies the complete 990/-1 pin file before advertising
+`origin-protection`/`apt-all-packages`. Adding a package requires updating its pin,
+the forwarded list and the reviewed authority together; the valid 18-name pin
+payload remains byte-identical.
 
 **The RemoveFiles= single-source mechanism — the central design decision.**
 `manifests/prune-paths.list` (one glob per line, `#` comments) is the ONE
@@ -4163,19 +4168,19 @@ Full ledger: [`docs/size-notes.md`](docs/size-notes.md) §9.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]
 
-**There are THREE update paths and CeraUI drives only the apt one — this guard is
-on a different path than the one people assume.** CeraUI's update button is the
+**There are three defined update paths: CeraUI apt, capability-gated CeraUI OS,
+and manual RAUC; this guard belongs to the manual path.** The legacy CeraUI button is the
 **apt package** path: its `system.startUpdate` RPC reaches `startSoftwareUpdate()`,
 which launches a detached `systemd-run` unit executing `/usr/bin/apt-get`. It does
 **not** invoke `ceralive-update`; no caller of that script exists anywhere in the
-workspace, and CeraUI's `rauc status` use is read-only slot observation, not
-installation. `rauc-hawkbit-updater` is the only AUTOMATIC RAUC OS-update trigger,
-staging to `/data/ceralive/rauc-downloads/bundle.raucb` before a D-Bus
-`InstallBundle`. `/usr/local/bin/ceralive-update` is the MANUAL path, and it is
+workspace. On capable images CeraUI's OS agent also calls `rauc install` to
+stage the inactive slot; released legacy images have no such capability.
+`rauc-hawkbit-updater` is disabled and masked with no server configured, not
+an automatic trigger. `/usr/local/bin/ceralive-update` is the MANUAL path, and it is
 **inert by default** because `persistence.sh` seeds `update.conf` with an empty
 `BUNDLE_URL` and the script refuses to run without one.
 
-Debian's `rauc` 1.13 has streaming support, so a remote `plain` bundle is
+The pinned `rauc` 1.15.2 has streaming support, so a remote `plain` bundle is
 rejected (`Bundle format 'plain' not supported in streaming mode`). The manual
 script now admits HTTPS URLs for **verity** bundles, while retaining absolute
 local paths for the existing plain OS and cert-rotation bundles. It holds
