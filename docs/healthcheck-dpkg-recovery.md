@@ -24,5 +24,7 @@ offline contract, not a claim of a new built/booted image or a completed updater
 
 Proof: `bats tests/healthcheck-boot-marker.bats`,
 `bash tests/systemd-ordering-cycle.test.sh`, and
-`ci/postinst-drift-check.sh`. Todo 22's verity bundle remains separately blocked
-by the installed RAUC 1.13 / Linux 7.2 dm-verity status incompatibility.
+`ci/postinst-drift-check.sh`. The RAUC 1.13 / Linux 7.2 verity incompatibility
+was resolved in this branch by building RAUC 1.15.2 from source (see
+[`rauc-build-from-source.md`](rauc-build-from-source.md)); the image and board
+validation of this combination remain separate from these host tests.
