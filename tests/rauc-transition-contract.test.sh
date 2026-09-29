@@ -40,9 +40,9 @@ lacks_active_key() {
 check_system_conf_writers() {
   local -a writers=()
   local file name key
-  mapfile -t writers < <(grep -rlE --include='*.sh' --include='*.conf' --include='*.chroot' \
-    '^[[:space:]]*bootloader=(custom|grub)[[:space:]]*$' \
-    "${PIPELINE_DIR}/mkosi" "${PIPELINE_DIR}/lib" | sort)
+  mapfile -t writers < <(GIT_MASTER=1 git -C "${PIPELINE_DIR}" grep -lE \
+    '^[[:space:]]*bootloader=(custom|grub)[[:space:]]*$' -- mkosi lib |
+    awk -v root="${PIPELINE_DIR}" '/\.(sh|conf|chroot)$/ {print root "/" $0}' | sort)
   if (( ${#writers[@]} >= 5 )); then
     ok "discovered ${#writers[@]} system.conf writers (minimum 5)"
   else
@@ -111,6 +111,50 @@ echo "== first-Trixie bundle contract =="
 transition_contract_check "${BUNDLE}" "${INSTALL_BOOT}" "${SYSTEM_CONF}" "${RAUC_SETUP}"
 echo "== all system.conf writers =="
 check_system_conf_writers
+
+if bash -s "${PIPELINE_DIR}/tests/real-rauc-contract.sh" <<'SH'
+set -euo pipefail
+harness="$1"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+WORK="$work"
+priority_dir="$work/dev/disk/by-partlabel"
+priority_link="$priority_dir/ceralive-rauc-fixture"
+priority_parent_created=0
+priority_dir_created=0
+priority_link_owned=0
+priority_cmdline_mounted=0
+sudo() { [[ "$1" == -n ]] && shift; "$@"; }
+source <(awk '
+  /^(create_priority_partlabel|remove_priority_fixture)\(\) \{/ { copying=1 }
+  copying { print }
+  copying && /^}$/ { copying=0 }
+' "$harness")
+test -s "$harness"
+touch "$work/slot-b.ext4"
+
+create_priority_partlabel
+test "$(readlink -e "$priority_link")" = "$work/slot-b.ext4"
+remove_priority_fixture
+test ! -e "$priority_dir" && test ! -e "${priority_dir%/*}"
+
+mkdir -p "$priority_dir"
+ln -s "$work/slot-b.ext4" "$priority_dir/rootfs_b"
+create_priority_partlabel
+remove_priority_fixture
+test -d "$priority_dir" && test -L "$priority_dir/rootfs_b"
+
+ln -s "$work/slot-b.ext4" "$priority_link"
+if create_priority_partlabel; then
+  exit 1
+fi
+test "$(readlink "$priority_link")" = "$work/slot-b.ext4"
+SH
+then
+  ok 'real RAUC priority fixture creates only a unique link and cleans only owned paths'
+else
+  bad 'real RAUC priority fixture clobbered a pre-existing link or left created directories'
+fi
 
 if python3 - "${PIPELINE_DIR}" <<'PY'
 from pathlib import Path

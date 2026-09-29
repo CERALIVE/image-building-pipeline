@@ -8,6 +8,52 @@ CONF="${WORK}/system.conf"
 BUNDLE="${WORK}/bundle/probe.raucb"
 service_pid=""
 client_pid=""
+priority_dir=/dev/disk/by-partlabel
+priority_link="${priority_dir}/ceralive-rauc-${WORK##*.}"
+priority_parent_created=0
+priority_dir_created=0
+priority_link_owned=0
+priority_cmdline_mounted=0
+
+remove_priority_fixture() {
+  local rc=0
+  if (( priority_cmdline_mounted )); then
+    sudo -n umount /proc/cmdline || rc=1
+    (( rc != 0 )) || priority_cmdline_mounted=0
+  fi
+  if (( priority_link_owned )); then
+    if [[ "$(readlink -- "${priority_link}" 2>/dev/null)" == "${WORK}/slot-b.ext4" ]]; then
+      sudo -n rm -- "${priority_link}" || rc=1
+      (( rc != 0 )) || priority_link_owned=0
+    else
+      printf 'RAUC priority fixture link changed: %s\n' "${priority_link}" >&2
+      rc=1
+    fi
+  fi
+  if (( priority_dir_created )); then
+    sudo -n rmdir -- "${priority_dir}" 2>/dev/null || true
+    priority_dir_created=0
+  fi
+  if (( priority_parent_created )); then
+    sudo -n rmdir -- "${priority_dir%/*}" 2>/dev/null || true
+    priority_parent_created=0
+  fi
+  return "${rc}"
+}
+
+create_priority_partlabel() {
+  # A unique label cannot overwrite a real board's rootfs_b udev link.
+  [[ ! -e "${priority_link}" && ! -L "${priority_link}" ]] || {
+    printf 'RAUC priority fixture link already exists: %s\n' "${priority_link}" >&2
+    return 1
+  }
+  [[ -d "${priority_dir%/*}" ]] || priority_parent_created=1
+  [[ -d "${priority_dir}" ]] || priority_dir_created=1
+  sudo -n mkdir -p -- "${priority_dir}"
+  sudo -n ln -s -- "${WORK}/slot-b.ext4" "${priority_link}"
+  priority_link_owned=1
+  [[ "$(readlink -e -- "${priority_link}")" == "${WORK}/slot-b.ext4" ]]
+}
 
 stop_service() {
   if [[ -n "${service_pid}" ]] && kill -0 "${service_pid}" 2>/dev/null; then
@@ -80,6 +126,7 @@ cleanup() {
   fi
   stop_service
   stop_descendants
+  remove_priority_fixture || leaked=1
   release_harness_mounts
   while read -r _ source; do
     [[ "${source}" == "${WORK}"/* ]] && leaked=1
@@ -337,6 +384,11 @@ stop_service
 [[ "$(sudo -n lsblk -ndo PARTLABEL "${gpt_loop}p2")" == rootfs_b ]]
 printf 'GPT_LABEL=PASS installed verity rootfs_b has its own GPT PARTLABEL as ext4 label\n'
 sudo -n losetup -d "${gpt_loop}"
+# A runner's udev removes the last by-partlabel entry (and sometimes its
+# directory) after loop detach. Wait for that removal before creating our link.
+if command -v udevadm >/dev/null 2>&1; then
+  sudo -n udevadm settle --timeout=10
+fi
 CONF="${WORK}/system.conf"
 
 # BOOT_SLOT_PRIORITY — RAUC 1.15 (PR #1712) now consults the bootloader-custom
@@ -348,23 +400,22 @@ CONF="${WORK}/system.conf"
 # get_bootname() resolution entirely, which is why every earlier leg above
 # uses it and none of them proves anything about slot-detection priority.
 #
-# The real (faked) /proc/cmdline carries root=PARTLABEL=rootfs_b — no
-# rauc.slot= — and rootfs_b is a REAL, valid symlink resolving to slot B's own
+# The real (faked) /proc/cmdline carries root=PARTLABEL=<our unique label> — no
+# rauc.slot= — and the label is a REAL, valid symlink resolving to slot B's own
 # device, so root= parsing alone would genuinely resolve to B. The real
 # backend.sh wrapper's adapter (unaffected by this fake — it reads
 # CERALIVE_KERNEL_CMDLINE_FILE=${WORK}/cmdline, which still carries
 # rauc.slot=A) answers "A". Only if RAUC 1.15.2 actually asks the custom
 # backend before falling through to root= does the service resolve slot A.
-sudo -n mkdir -p /dev/disk/by-partlabel
-sudo -n ln -sf "${WORK}/slot-b.ext4" /dev/disk/by-partlabel/rootfs_b
-printf 'root=PARTLABEL=rootfs_b console=ttyS2\n' >"${WORK}/priority-cmdline"
+create_priority_partlabel
+printf 'root=PARTLABEL=%s console=ttyS2\n' "${priority_link##*/}" >"${WORK}/priority-cmdline"
 sudo -n mount --bind "${WORK}/priority-cmdline" /proc/cmdline
+priority_cmdline_mounted=1
 priority_log="${WORK}/service-priority.log"
 start_service_auto "${priority_log}"
 priority_status="$(rauc -c "${CONF}" status --output-format=json)"
 stop_service
-sudo -n umount /proc/cmdline
-sudo -n rm -f /dev/disk/by-partlabel/rootfs_b
+remove_priority_fixture
 python3 -c '
 import json, sys
 data = json.loads(sys.argv[1])
