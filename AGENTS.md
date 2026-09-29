@@ -164,7 +164,11 @@ The workflow selects a bench root only for `drill` and the production release
 root for stable/beta (including promotion); no implicit trust root is allowed.
 This is code/test coverage, not a claim that serial 4 was refreshed live. The
 dedicated `cert-work/rauc/ota-manifest-signer` leaf has codeSigning alone, unlike
-the dual-EKU bundle leaf. Signatures upload before the channel JSON; the JSON
+the dual-EKU bundle leaf. After root-chain verification, signing and reading
+require its exact RFC2253 issuer: `CN=CeraLive RAUC Intermediate CA,O=CeraLive`
+or the non-production bench `CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive`.
+An untrusted intermediate offered to OpenSSL alone does not exclude root-direct
+signers. Signatures upload before the channel JSON; the JSON
 uses an ETag compare-and-swap and is the commit point. The `release` environment
 has a required owner reviewer, and the non-cancelling workflow concurrency group
 serializes writers (including refresh and prune). Markers make membership explicit:
@@ -176,9 +180,9 @@ provides that root for prune too. Unmarked versions are never pruned. See
 `docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
 available for old consumers; this workflow does not replace it.
 The standalone `tools/flash-download.sh` reads the same resolved `BOARD_ID` for
-RAUC compatible (not the product manifest stem), checks the CMS leaf CN and
-codeSigning without emailProtection under `--keyring`, and retires stale raw
-output before extraction. Without a keyring it is explicitly unauthenticated;
+RAUC compatible (not the product manifest stem), checks the CMS leaf CN, exact
+issuer above and codeSigning without emailProtection under `--keyring`, and
+retires stale raw output before extraction. Without a keyring it is explicitly unauthenticated;
 its SHA-256 checks alone cannot establish release identity. The refresh workflow
 exports R2 credentials to AWS before its direct JSON/ETag pre-read.
 

@@ -628,6 +628,16 @@ uploads **no parts**; it is required before a rarely-released channel expires.
 immutable index; it uploads no parts. A failed conditional manifest write is a
 serial replay refusal, not licence to overwrite a release object.
 
+After chain verification against the root, both the publisher's signing check
+and every existing-pointer read pin the CMS leaf's RFC2253 issuer DN exactly to
+`CN=CeraLive RAUC Intermediate CA,O=CeraLive` (production) or
+`CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive` (non-production bench).
+The supplied `intermediate-ca.pem` is an untrusted chain candidate, not a
+requirement that OpenSSL use it: a root-direct leaf could otherwise pass the
+chain, dedicated CN and EKU checks. A different or near-miss issuer fails even
+when its signature chains to the same root. The downloader applies the same
+issuer rule with `--keyring`.
+
 **Signed board identity is not the filename stem.** `board` and the release
 URL use the product manifest stem (`orange-pi-5-plus`); `compatible` is derived
 through the validated board resolver's `BOARD_ID` (`orangepi5-plus`) and equals
@@ -641,7 +651,8 @@ URL/digest aborts before any channel signature or JSON write. `publish` also
 preflights its candidate signature before any immutable write.
 `tools/flash-download.sh --board <board> --keyring <reviewed-manifest-root.pem>`
 uses the same resolved `BOARD_ID` for compatible, and requires the CMS signer
-CN `CeraLive OTA Manifest Signer`, Code Signing EKU and no E-mail Protection.
+CN `CeraLive OTA Manifest Signer`, Code Signing EKU, no E-mail Protection, and
+one of the two exact intermediate issuer DNs above.
 Without `--keyring` the downloader is intentionally **unauthenticated**: SHA-256
 checks detect transfer corruption, not a malicious replacement; its output
 must not be treated as a trusted release. An invalid pre-existing `flash.raw`
@@ -704,7 +715,18 @@ etag="$(aws s3api head-object --bucket "$bucket" --endpoint-url "$endpoint" --ke
 test "$etag" = "\"$(openssl dgst -md5 "$work/old.json" | cut -d' ' -f2)\""
 openssl cms -verify -binary -inform DER -in "$work/old.sig" -content "$work/old.json" \
   -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any -signer "$work/old-signer.pem" -out /dev/null
-openssl x509 -in "$work/old-signer.pem" -noout -ext extendedKeyUsage | grep -q 'Code Signing'
+test "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$work/old-signer.pem")" = 1
+subject="$(openssl x509 -in "$work/old-signer.pem" -noout -subject -nameopt RFC2253)"
+cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
+[[ "$subject" =~ $cn_pattern ]]
+eku="$(openssl x509 -in "$work/old-signer.pem" -noout -ext extendedKeyUsage)"
+[[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]]
+issuer="$(openssl x509 -in "$work/old-signer.pem" -noout -issuer -nameopt RFC2253)"
+case "$issuer" in
+  'issuer=CN=CeraLive RAUC Intermediate CA,O=CeraLive'|\
+  'issuer=CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive') ;;
+  *) printf 'refused manifest signer issuer: %s\n' "$issuer" >&2; exit 1 ;;
+esac
 python3 - "$work/old.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
@@ -725,7 +747,7 @@ prefix, Rock pointer and stable/beta pointers are untouched. If the
 live serial, ETag, bundle digest or signer differs, **stop**, never force a
 same-version overwrite. Afterwards fetch both new objects over the public
 `https://images.ceralive.tv/channels/drill/orange-pi-5-plus.json{,.sig}` origin
-(not just R2), run the same `openssl cms -verify ... -purpose any -signer ... plus the Code Signing EKU check` with
+(not just R2), repeat the CMS, signer CN/EKU and exact issuer checks above with
 `-content <fetched.json>` and the reviewed manifest root, and confirm signed
 `serial:5`, `board:orange-pi-5-plus`, `compatible:ceralive-orangepi5-plus`,
 unchanged `version`, bundle/flash URLs, sizes, hashes and lock URL. Verify the

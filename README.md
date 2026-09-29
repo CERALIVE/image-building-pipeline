@@ -355,7 +355,12 @@ immutable release key.
 The new OS-channel path uses `ci/publish-release.sh` through the approved
 `publish-release.yml` dispatch. It splits a real xz flash transport and verity
 bundle into 256 MiB immutable parts, publishes one index, then a dedicated
-codeSigning-only CMS signature and channel manifest (JSON last). `publish`,
+codeSigning-only CMS signature and channel manifest (JSON last). Signing and
+existing-pointer reads require the leaf issuer to be exactly
+`CN=CeraLive RAUC Intermediate CA,O=CeraLive` (production) or
+`CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive` (non-production bench),
+not merely any intermediate or a root-direct leaf chaining to the keyring.
+`publish`,
 `promote`, `refresh`, `prune`, `--dry-run` and the 600 MiB `--selftest` are
 separate modes. Current zstd candidates are decoded and re-encoded as xz;
 earlier xz candidates are copied as-is. Both verify the original raw checksum.
@@ -371,7 +376,8 @@ stable/beta release.
 
 `tools/flash-download.sh` accepts a channel manifest only for the board's
 resolver-derived RAUC compatible; a provided `--keyring` additionally requires
-the dedicated manifest signer CN, Code Signing EKU and no E-mail Protection.
+the dedicated manifest signer CN, one of those two exact intermediate issuer
+DNs, Code Signing EKU and no E-mail Protection.
 Without `--keyring` it is unauthenticated by design: SHA-256 alone is not a
 release-identity check. Invalid pre-existing raw output is removed before a
 `--decompress` attempt, including when that attempt fails.
