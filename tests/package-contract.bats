@@ -1212,7 +1212,7 @@ CONTROL
 
 @test "apt ceralive (T2.6): each exact first-party name prefers apt.ceralive.tv at 990, all other origins at -1 (Todo 29)" {
   local dir="$BATS_TEST_TMPDIR/apt-prefs/preferences.d"
-  local names_b64; names_b64="$(printf 'cerastream\nceralive-device\n' | base64 -w0)"
+  local names_b64; names_b64="$(base64 -w0 "$PIPELINE_DIR/manifests/first-party-apt-names.txt")"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
     CERALIVE_FIRST_PARTY_NAMES_B64="$names_b64" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
@@ -1229,8 +1229,8 @@ CONTROL
   local n990 nminus1
   n990="$(grep -cxF 'Pin-Priority: 990' "$dir/ceralive-origin")"
   nminus1="$(grep -cxF 'Pin-Priority: -1' "$dir/ceralive-origin")"
-  [ "$n990" -eq 2 ]
-  [ "$nminus1" -eq 2 ]
+  [ "$n990" -eq 18 ]
+  [ "$nminus1" -eq 18 ]
   grep -q '^  install_apt_preferences$' "$APT_CERALIVE_REPO"
   printf '%s\n' "$output"
 }
@@ -1340,7 +1340,8 @@ work="$3"
 final=/usr/share/keyrings/ceralive-archive-keyring.gpg
 expected="$work/expected-runtime-keyring.gpg"
 old="$work/old-runtime-keyring.gpg"
-CERALIVE_FIRST_PARTY_NAMES_B64="$(printf 'cerastream\n' | base64 -w0)"
+CERALIVE_RUNTIME_SRC="$5"
+CERALIVE_FIRST_PARTY_NAMES_B64="$(base64 -w0 <"$6")"
 die() { printf 'runtime-keyring: %s\n' "$*" >&2; exit 1; }
 
 extract_fn() {
@@ -1458,7 +1459,7 @@ printf 'runtime-keyring: success published expected bytes mode=0644 owner=root:r
 REPRO
 
   run unshare -rm --map-root-user bash "$repro" "$PIPELINE_DIR/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
-    "$binary_b64" "$BATS_TEST_TMPDIR" "$awk_bin"
+    "$binary_b64" "$BATS_TEST_TMPDIR" "$awk_bin" "$PIPELINE_DIR/mkosi/runtime" "$PIPELINE_DIR/manifests/first-party-apt-names.txt"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
   [[ "$output" != *"$binary_b64"* ]]

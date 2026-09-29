@@ -80,17 +80,17 @@ mkdir -p /etc/apt/sources.list.d /etc/apt/apt.conf.d /etc/apt/certs
 
 # Run the REAL build-path function with no secrets (placeholder keyring, mTLS
 # skipped). Only 'log' and CHANNEL are ambient in the executor; stub/seed them.
-# CERALIVE_FIRST_PARTY_NAMES_B64 supplies a real test name (Todo 29) so the
-# generated per-name file is non-vacuous.
 log() { :; }
 CHANNEL="stable"
-export CERALIVE_FIRST_PARTY_NAMES_B64="\$(printf 'cerastream\n' | base64 -w0)"
+export CERALIVE_RUNTIME_SRC="${PIPELINE_DIR}/mkosi/runtime"
+export CERALIVE_FIRST_PARTY_NAMES_B64="\$(base64 -w0 <'${PIPELINE_DIR}/manifests/first-party-apt-names.txt')"
 eval "\$("${AWK_BIN}" '/^setup_ceralive_repository\(\) \{/,/^}/' "${POSTINST}")"
 setup_ceralive_repository
 
 [ ! -e /etc/apt/preferences.d/ceralive ] || { echo "FAIL: the retired /etc/apt/preferences.d/ceralive wildcard file still exists"; exit 1; }
 [ -f /etc/apt/preferences.d/ceralive-origin ] || { echo "FAIL: setup_ceralive_repository did not create /etc/apt/preferences.d/ceralive-origin (the pin would not ship)"; exit 1; }
 grep -qxF 'Package: cerastream' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Package: cerastream'"; exit 1; }
+[[ "\$(grep -c '^Package: ' /etc/apt/preferences.d/ceralive-origin)" -eq 36 ]] || { echo 'FAIL: expected two stanzas for every protected name'; exit 1; }
 grep -qxF 'Pin: origin apt.ceralive.tv' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin: origin apt.ceralive.tv'"; exit 1; }
 grep -qxF 'Pin-Priority: 990' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing 'Pin-Priority: 990'"; exit 1; }
 grep -qxF 'Pin: origin *' /etc/apt/preferences.d/ceralive-origin || { echo "FAIL: ceralive-origin missing the -1 all-other-origins stanza"; exit 1; }

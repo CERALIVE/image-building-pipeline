@@ -15,6 +15,7 @@ if ! command -v apt-cache >/dev/null || ! command -v apt-get >/dev/null; then
   exit 1
 fi
 [[ -r "${ROOT}/manifests/first-party-apt-names.txt" ]] || exit 1
+[[ -r "${ROOT}/mkosi/runtime/first-party-origin-names.txt" ]] || { printf 'independent origin-name authority missing\n' >&2; exit 1; }
 work="$(mktemp -d)"
 server_pid=''
 cleanup() {
@@ -138,10 +139,30 @@ candidate() { policy "$1" | perl -ne 'if (/^\s*Candidate: (.+)$/) { print "$1\n"
 
 names_b64="$(base64 -w0 "${ROOT}/manifests/first-party-apt-names.txt")"
 export CERALIVE_FIRST_PARTY_NAMES_B64="${names_b64}"
+awk -F= '/^[a-z0-9][a-z0-9+.-]*(\[(amd64|arm64)\])?=/ {sub(/\[.*/, "", $1); print $1}' \
+  "${ROOT}/manifests/first-party-deb-versions.txt" | sort -u >"${work}/pinned-names"
+awk '!/^[[:space:]]*#/ && ($1 == "gstreamer1.0-rockchip-ceralive" || $1 == "librga2-ceralive") {print $1}' \
+  "${ROOT}/manifests/rk3588-userspace-deb-versions.txt" >>"${work}/pinned-names"
+sort -u "${work}/pinned-names" -o "${work}/pinned-names"
+awk 'NF && $1 !~ /^#/ {print $1}' "${ROOT}/mkosi/runtime/first-party-origin-names.txt" | sort >"${work}/authority-names"
+cmp "${work}/pinned-names" "${work}/authority-names" || { printf 'origin-name authority differs from pinned first-party package manifests\n' >&2; exit 1; }
+awk 'NF && $1 !~ /^#/ {print $1}' "${ROOT}/manifests/first-party-apt-names.txt" | sort >"${work}/input-names"
+cmp "${work}/input-names" "${work}/authority-names" || { printf 'origin names manifest differs from independent authority (missing, extra or duplicate name)\n' >&2; exit 1; }
 export APT_CERALIVE_REPO_NO_AUTORUN=1
 export APT_PREFERENCES_DIR="${work}/preferences-customize"
 # shellcheck source=/dev/null
 source "${ROOT}/mkosi/customize/apt-ceralive-repo.sh"
+assert_rejected() {
+  local writer="$1" scenario="$2" text="$3" reason="$4" encoded
+  encoded="$(printf '%s\n' "$text" | base64 -w0)"
+  if (CERALIVE_FIRST_PARTY_NAMES_B64="$encoded"; "$writer") >"${work}/${scenario}-${writer}.log" 2>&1; then
+    printf '%s accepted %s first-party names\n' "$writer" "$scenario" >&2; exit 1
+  fi
+  if ! grep -Fq -- "$reason" "${work}/${scenario}-${writer}.log"; then
+    printf '%s refused %s without naming %s\n' "$writer" "$scenario" "$reason" >&2
+    command cat "${work}/${scenario}-${writer}.log" >&2; exit 1
+  fi
+}
 if (unset CERALIVE_FIRST_PARTY_NAMES_B64; install_apt_preferences) >"${work}/missing-customize.log" 2>&1; then
   printf 'customize writer accepted missing names for origin protection\n' >&2; exit 1
 fi
@@ -156,6 +177,15 @@ eval "$(perl -0777 -ne 'print $1 if /(setup_ceralive_repository\(\) \{.*?^\})/ms
 declare -F setup_ceralive_repository >/dev/null
 log() { :; }
 export CHANNEL=stable
+export CERALIVE_RUNTIME_SRC="${ROOT}/mkosi/runtime"
+for writer in install_apt_preferences setup_ceralive_repository; do
+  assert_rejected "$writer" short "$(printf '%s\n' "$names_b64" | base64 -d | awk '$0 != "ceralive-apt-credentials"')" 'missing: ceralive-apt-credentials'
+  assert_rejected "$writer" missing-critical "$(printf '%s\n' "$names_b64" | base64 -d | awk '$0 != "cerastream"')" 'missing: cerastream'
+  assert_rejected "$writer" extra "$(printf '%s\n' "$names_b64" | base64 -d)"$'\nforeign-package' 'unexpected: foreign-package'
+  assert_rejected "$writer" duplicate "$(printf '%s\n' "$names_b64" | base64 -d)"$'\ncerastream' 'duplicate: cerastream'
+  assert_rejected "$writer" malformed "$(printf '%s\n' "$names_b64" | base64 -d)"$'\nBad!Package' 'invalid first-party package name'
+  assert_rejected "$writer" empty '# only comments' 'first-party names list is empty'
+done
 if (unset CERALIVE_FIRST_PARTY_NAMES_B64; setup_ceralive_repository) >"${work}/missing-runtime.log" 2>&1; then
   printf 'runtime writer accepted missing names for origin protection\n' >&2; exit 1
 fi
@@ -163,6 +193,9 @@ if (CERALIVE_FIRST_PARTY_NAMES_B64="$(printf '# no packages\n' | base64 -w0)"; s
   printf 'runtime writer accepted zero first-party names\n' >&2; exit 1
 fi
 setup_ceralive_repository
+for writer in install_apt_preferences setup_ceralive_repository; do
+  CERALIVE_FIRST_PARTY_NAMES_B64="$( { printf '   # indented comment\n  \n'; base64 -d <<<"$names_b64"; } | base64 -w0)" "$writer"
+done
 expected_names="$(awk 'NF && $1 !~ /^#/ {n++} END {print n+0}' "${ROOT}/manifests/first-party-apt-names.txt")"
 [[ "$(grep -c '^Package: ' /etc/apt/preferences.d/ceralive-origin)" == "$((expected_names * 2))" ]] || {
   printf 'runtime pin count does not match first-party names manifest\n' >&2; exit 1
