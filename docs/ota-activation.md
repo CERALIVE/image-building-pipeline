@@ -11,7 +11,8 @@ orders after D-Bus, and requires the boot-state mount (`/boot` on RK3588,
 `/boot/efi` on x86) and `/data` for the armed marker. Reverse stop ordering keeps RAUC and those mounts available
 until activation completes. It neither starts shutdown nor reboots the device.
 
-The CeraUI orchestrator (a later todo) should use the root-run template interface:
+The capability-gated CeraUI orchestrator uses the root-run template interface
+after its own `rauc install` succeeds and it records `os-staged.json`:
 
 ```sh
 systemctl start ceralive-rauc-arm@arm.service     # after a successful OS install
@@ -31,6 +32,15 @@ fails, the marker remains for another attempt; if streaming is present, shutdown
 skips activation and `--now` refuses. `--now` changes only the next boot target;
 it does **not** request a reboot. The seven-day timer and notification policy
 belong to CeraUI, not this image helper.
+
+An install by the dormant hawkBit updater or the manual `ceralive-update` script
+does not create CeraUI's `os-staged.json` receipt or enter its `os-staged` phase.
+The orchestrator does not adopt or arm it. Without an `activation-armed` marker,
+the shutdown helper exits immediately; with `activate-installed=false`, an
+ordinary reboot keeps the written slot inactive. A separate, explicit operator
+arm of that installed slot can use the template above, after which the same
+RAUC status and streaming checks govern selection. No external install is
+implicitly activated by CeraUI.
 
 The pinned RAUC 1.15.2 retains `activate-installed=false`, which requires manual activation,
 and `rauc status mark-active other` as selecting the other slot for the next boot:

@@ -18,11 +18,22 @@ hawkBit DDI v1 (private, 127.0.0.1:8080 behind TLS proxy/VPN)
 rauc-hawkbit-updater ──download──▶ /data/ceralive/rauc-downloads/bundle.raucb
         │  RAUC D-Bus InstallBundle                         (NOT rootfs — task 41)
         ▼
-RAUC stages the inactive slot; CeraUI activates it at clean idle shutdown/reboot
-        │  (updater has NO mark-good — gate is NOT bypassed)
-        ▼  reboot (operator/CeraUI controlled; post_update_reboot=false)
-new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
+RAUC installs the inactive slot (activate-installed=false)
+        │  no CeraUI os-staged receipt; no CeraUI activation arm
+        ▼
+ordinary shutdown/reboot keeps the installed slot inactive
+        │  only a separate, explicit operator activation can select it
+        ▼  if subsequently booted
+ceralive-healthcheck.service → rauc mark-good  OR  rollback
 ```
+
+The same rule applies to the manual `ceralive-update` script: its RAUC install
+does not write CeraUI's `os-staged.json` receipt. CeraUI arms only its own
+completed OS staging; absent an independent operator arm, the shutdown activation
+helper exits without selecting the other slot. An operator can explicitly arm a
+pending RAUC install with `ceralive-rauc-arm@arm.service` (or activate it using
+RAUC's manual slot selection); neither path is automatic or bypasses the boot
+healthcheck. See [`docs/ota-activation.md`](../../../docs/ota-activation.md).
 
 ## Files (this directory = canonical reference; the wired executor is the postinst)
 
@@ -130,7 +141,8 @@ never in git):
    `/data/ceralive/hawkbit-provision.pending` mode `0600`, exits successfully, and
    leaves the effective updater config absent. The retry timer runs the same
    canonical script every 30 seconds while that marker exists. A successful fetch
-   renders the config, removes the marker, and starts the updater. Missing tools,
+   renders the config and removes the marker; its image mask still prevents the
+   dormant updater from starting. Missing tools,
    malformed enrollment, or an empty endpoint response still fail honestly; only
    endpoint unavailability is deferred.
 
@@ -165,10 +177,11 @@ A bad bundle that boots-but-can't-stream is left unconfirmed and rolled back on
 the next reboot (task 27 bootcount adapter). RAUC's native `boot-attempts` key is
 not used because RAUC rejects it with `bootloader=custom`.
 
-`post_update_reboot = false` keeps the reboot under CeraLive's control (the upstream
+`post_update_reboot = false` prevents an updater-driven reboot (the upstream
 docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-loss
-risk). Reboot is triggered by the operator / CeraUI, like the manual `ceralive-update`
-path.
+risk). Neither hawkBit nor the manual script asks CeraUI to activate or reboot;
+CeraUI's own OS agent separately arms only installs with its staged receipt and
+defers slot selection to a clean idle shutdown or an explicit idle activation.
 
 ### Boot-scoped confirmation
 
