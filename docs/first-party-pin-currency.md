@@ -198,8 +198,9 @@ qualification is implied by this receipt.
 
 ## Engine pin receipt — 2026-09-21
 
-The pipeline selects `cerastream=2026.9.6` on both architectures and records
-`v2026.9.6` in its repo-local provenance registry. Authenticated `gh release view`
+At the time of this receipt the pipeline selected `cerastream=2026.9.6` on both
+architectures and recorded `v2026.9.6` in its repo-local provenance registry;
+the current pin is in `manifests/first-party-deb-versions.txt`. Authenticated `gh release view`
 and the tag-ref API independently identify the published release and commit
 `b3eb2a0767687415401998353337c3413c09fda9`. Both downloaded Debian assets match
 their published sidecars and GitHub asset digests; their control fields confirm

@@ -730,12 +730,11 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.6`. It retains audio-meter, idle-preview
-and program-session teardown ownership across timeouts, fencing replacement
-capture until release completes (engine PRs #199–#201). The canonical
-`gstreamer1.0-libuvcsrc` dependency and earlier composition fixes remain.
-Both architecture release assets were independently checksum-verified before
-pinning. Release identity and the exact-version APT verification mechanism:
+The engine pin is `cerastream=2026.9.8`. It retains the audio-meter,
+idle-preview and teardown ownership of 2026.9.6, plus capture standby
+continuity from 2026.9.7. The canonical `gstreamer1.0-libuvcsrc` dependency
+and earlier composition fixes remain. The independent checksum receipt for
+the earlier 2026.9.6 pin and the exact-version APT verification mechanism:
 [`Engine pin receipt`](docs/first-party-pin-currency.md#engine-pin-receipt--2026-09-21).
 The RK3588 plugin pin is `1.14.4+ceralive.7`, retaining its platform-layer
 URL+SHA route; both the superseded `.6` fork row and the original Radxa row are
@@ -752,18 +751,18 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to release v2026.9.3 (tag commit `ec522ad`) using its exact
-per-architecture Debian versions, `2026.9.3-20260920T155651.ec522ad` (amd64) and
-`2026.9.3-20260920T155654.ec522ad` (arm64). It repairs source enumeration for
-multi-node cameras and HDMI audio card identity, keeps generic raw capture inputs
+CeraUI is pinned to release v2026.9.4 (tag commit `159f99b`) using its exact
+per-architecture Debian versions, `2026.9.4-20260923T212001.159f99b` (amd64) and
+`2026.9.4-20260923T212013.159f99b` (arm64). It retains the
+source-enumeration repairs for multi-node cameras and HDMI audio card identity,
+keeps generic raw capture inputs
 visible and honestly labelled as non-streamable rather than dropping them,
 classifies `libuvcsrc` as an application package, and retains the working address
 family plus alternate default routes during connectivity fallback and host-route
-repair; it consumes the published `@ceralive/cerastream` 2026.9.10 bindings
-(schema 0.20.0). Both downloaded Debian assets were independently hashed against
-their published sidecars, and the CeraUI release run verified the same bytes
-against the stable signed index on both architectures. Fresh-image boot and media
-qualification remain separate gates; the documented early-import SIGUSR1 residual
+repair from 2026.9.3 and adds capture-resilience operator surfaces. The active
+Debian versions above come from the pinned manifest, not the earlier release's
+checksum receipt. Fresh-image boot and media qualification remain separate gates;
+the documented early-import SIGUSR1 residual
 window is unchanged.
 
 All three verified fetch families — the Armbian BSP, the RK3588 HW-accel userspace
@@ -1143,13 +1142,14 @@ These are independent mechanisms with different triggers, and reading them as on
 
 | Path | Trigger | What it does |
 |---|---|---|
-| **apt package upgrade** | CeraUI's update button — its `system.startUpdate` RPC reaches `startSoftwareUpdate()`, which launches a detached `systemd-run` unit executing `/usr/bin/apt-get` | Upgrades the first-party app packages from `apt.ceralive.tv`. Never touches the frozen boot stack (see "Kernel Freeze" above) |
-| **RAUC OS update, automatic (legacy)** | `rauc-hawkbit-updater` | Package and config template remain installed, but the updater is disabled and masked against first-boot presets; no server is configured. The legacy bundle-watching marker-clear units are removed; boot-scoped health confirmation needs no download hook. |
+| **apt package upgrade** | CeraUI's orchestrator or legacy `system.startUpdate` RPC launches a detached `systemd-run` apt unit | Legacy images use the exact first-party app roster; capable images use permitted-origin packages excluding holds. Neither changes the frozen boot stack (see "Kernel Freeze" above). |
+| **RAUC OS update, automatic (capability-gated)** | CeraUI's OS agent on a capable image | Verifies the signed channel manifest, runs `rauc install` to stage the inactive slot, and defers activation until a clean idle shutdown or reboot. Not available on released legacy images. |
+| **RAUC OS update, dormant legacy** | `rauc-hawkbit-updater` | Package and config template remain installed, but the updater is disabled and masked against first-boot presets; no server is configured. The legacy bundle-watching marker-clear units are removed; boot-scoped health confirmation needs no download hook. |
 | **RAUC OS update, manual** | An operator running `/usr/local/bin/ceralive-update` | **Inert by default.** `persistence.sh` seeds `/data/ceralive/update.conf` with an empty `BUNDLE_URL`, and the script refuses to run without one |
 
-**CeraUI does not invoke `ceralive-update`.** No caller of it exists anywhere in
-the workspace. CeraUI's other RAUC contact is `rauc status`, which is read-only
-slot observation, not installation.
+**CeraUI does not invoke `ceralive-update`.** No caller of that manual script exists
+in the workspace. Its legacy slot observation uses read-only `rauc status`; on
+capable images its separate OS agent also invokes `rauc install`.
 
 The pinned RAUC 1.15.2 has a dedicated non-login `ceralive-ota` streaming identity, persistent
 `/data/ceralive/rauc` metadata and `activate-installed=false` in every system.conf
@@ -1163,7 +1163,8 @@ scheduled/automatic trigger belong to CeraUI's capability-gated orchestrator, no
 manual recovery script. Do not reboot expecting a staged slot to boot automatically.
 
 `/usr/lib/ceralive/update-capabilities.json` is generated from the actual
-`ceralive-ota` and `_apt` UIDs and advertises all eight schema-1 update features:
+`ceralive-ota` and `_apt` UIDs and, only after the complete 990/-1 origin pin
+passes the independent authority check, advertises all eight schema-1 update features:
 RAUC verity streaming, deferred activation, slot sync, origin protection,
 all-package APT, reprune hook, APT credentials and UID-range transport.
 The image-side mechanisms and CeraUI consumers are implemented on their
