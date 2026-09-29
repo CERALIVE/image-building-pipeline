@@ -18,7 +18,7 @@ hawkBit DDI v1 (private, 127.0.0.1:8080 behind TLS proxy/VPN)
 rauc-hawkbit-updater ──download──▶ /data/ceralive/rauc-downloads/bundle.raucb
         │  RAUC D-Bus InstallBundle                         (NOT rootfs — task 41)
         ▼
-RAUC installs to inactive slot; custom backend marks it primary (FAT attempt budget=3)
+RAUC stages the inactive slot; CeraUI activates it at clean idle shutdown/reboot
         │  (updater has NO mark-good — gate is NOT bypassed)
         ▼  reboot (operator/CeraUI controlled; post_update_reboot=false)
 new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
@@ -154,16 +154,16 @@ never in git):
 ## Healthcheck-gated mark-good (task 29) — the gate is **not** bypassed
 
 `rauc-hawkbit-updater` 1.4 only **installs** (RAUC D-Bus `InstallBundle`) — and it
-does so against trixie's RAUC **1.13**, not the bookworm 1.8 this design was first
-written for; the D-Bus `InstallBundle` interface it drives is unchanged across that
-jump. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
+is retained with the image's pinned RAUC **1.15.2**; the D-Bus `InstallBundle`
+interface it drives is unchanged. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
 "`mark_compatible = false` or equivalent" the task asks for is satisfied
 structurally: the updater simply cannot confirm a slot). Confirmation is the
 custom backend's FAT `boot_state.txt` countdown plus
-`ceralive-healthcheck.service`, which is the **sole** caller of `rauc mark-good`.
+`ceralive-healthcheck.service`, the only caller marking the **booted** slot good.
+`ceralive-slot-sync.service` marks only the **other** slot good after verified mirroring.
 A bad bundle that boots-but-can't-stream is left unconfirmed and rolled back on
 the next reboot (task 27 bootcount adapter). RAUC's native `boot-attempts` key is
-not used because RAUC 1.13 rejects it with `bootloader=custom`.
+not used because RAUC rejects it with `bootloader=custom`.
 
 `post_update_reboot = false` keeps the reboot under CeraLive's control (the upstream
 docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-loss
