@@ -142,6 +142,12 @@ export APT_CERALIVE_REPO_NO_AUTORUN=1
 export APT_PREFERENCES_DIR="${work}/preferences-customize"
 # shellcheck source=/dev/null
 source "${ROOT}/mkosi/customize/apt-ceralive-repo.sh"
+if (unset CERALIVE_FIRST_PARTY_NAMES_B64; install_apt_preferences) >"${work}/missing-customize.log" 2>&1; then
+  printf 'customize writer accepted missing names for origin protection\n' >&2; exit 1
+fi
+if (CERALIVE_FIRST_PARTY_NAMES_B64="$(printf '# no packages\n' | base64 -w0)"; install_apt_preferences) >"${work}/empty-customize.log" 2>&1; then
+  printf 'customize writer accepted zero first-party names\n' >&2; exit 1
+fi
 install_apt_preferences
 
 # The real build runs the runtime writer. It writes only inside this throwaway
@@ -150,7 +156,24 @@ eval "$(perl -0777 -ne 'print $1 if /(setup_ceralive_repository\(\) \{.*?^\})/ms
 declare -F setup_ceralive_repository >/dev/null
 log() { :; }
 export CHANNEL=stable
+if (unset CERALIVE_FIRST_PARTY_NAMES_B64; setup_ceralive_repository) >"${work}/missing-runtime.log" 2>&1; then
+  printf 'runtime writer accepted missing names for origin protection\n' >&2; exit 1
+fi
+if (CERALIVE_FIRST_PARTY_NAMES_B64="$(printf '# no packages\n' | base64 -w0)"; setup_ceralive_repository) >"${work}/empty-runtime.log" 2>&1; then
+  printf 'runtime writer accepted zero first-party names\n' >&2; exit 1
+fi
 setup_ceralive_repository
+expected_names="$(awk 'NF && $1 !~ /^#/ {n++} END {print n+0}' "${ROOT}/manifests/first-party-apt-names.txt")"
+[[ "$(grep -c '^Package: ' /etc/apt/preferences.d/ceralive-origin)" == "$((expected_names * 2))" ]] || {
+  printf 'runtime pin count does not match first-party names manifest\n' >&2; exit 1
+}
+for writer in install_apt_preferences setup_ceralive_repository; do
+  mutant="$(declare -f "$writer" | perl -pe 'if (/Pin: origin \*/ && /printf/) { $_ = "        :\n"; $found++ } END { die "expected one stanza writer\n" unless $found == 1 }')"
+  if (eval "$mutant"; "$writer") >"${work}/missing-stanza-${writer}.log" 2>&1; then
+    printf '%s accepted fewer pin stanzas than names\n' "$writer" >&2; exit 1
+  fi
+done
+printf 'both preference writers reject absent, empty and incomplete name policy\n'
 cmp "${APT_PREFERENCES_DIR}/ceralive-origin" /etc/apt/preferences.d/ceralive-origin >/dev/null && {
   printf 'writers must differ only in their generated-by comment\n' >&2; exit 1;
 }

@@ -1235,14 +1235,13 @@ CONTROL
   printf '%s\n' "$output"
 }
 
-@test "apt ceralive (T2.6): install_apt_preferences degrades gracefully with no names in env (standalone build)" {
+@test "apt ceralive (T2.6): missing first-party names refuse an unprotected image" {
   local dir="$BATS_TEST_TMPDIR/apt-prefs-empty/preferences.d"
   run env -u CERALIVE_FIRST_PARTY_NAMES_B64 APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
-  [ "$status" -eq 0 ]
-  [ -f "$dir/ceralive-origin" ]
-  ! grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
-  [[ "$output" == *"standalone/offline build"* ]]
+  [ "$status" -ne 0 ]
+  [ ! -e "$dir/ceralive-origin" ]
+  [[ "$output" == *"CERALIVE_FIRST_PARTY_NAMES_B64 is required"* ]]
 }
 
 # The guard ABOVE proves the customize MODULE (apt-ceralive-repo.sh) pins the origin
@@ -1341,6 +1340,8 @@ work="$3"
 final=/usr/share/keyrings/ceralive-archive-keyring.gpg
 expected="$work/expected-runtime-keyring.gpg"
 old="$work/old-runtime-keyring.gpg"
+CERALIVE_FIRST_PARTY_NAMES_B64="$(printf 'cerastream\n' | base64 -w0)"
+die() { printf 'runtime-keyring: %s\n' "$*" >&2; exit 1; }
 
 extract_fn() {
   awk -v fn="$1" '
