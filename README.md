@@ -1123,6 +1123,13 @@ satisfy another slot's healthcheck or let its attempt budget decay. Existing
 service, binary-load and configured reachability checks still gate RAUC mark-good;
 a failed check never refreshes the marker.
 
+The image-owned healthcheck unit wants and follows `ceralive.service` at boot,
+but is not hard-bound to its lifecycle. A CeraUI `.deb` postinst restarts the
+backend during dpkg; this must not restart the already-completed boot check while
+dpkg's updates directory is non-empty. An independently invoked check still
+refuses pending dpkg state, and a missing app still prevents mark-good. This
+2026-09-28 correction is host-tested only; no fixed image has been booted.
+
 These are independent mechanisms with different triggers, and reading them as one
 "update button" is how the wrong thing gets debugged:
 

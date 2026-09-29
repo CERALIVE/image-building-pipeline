@@ -212,6 +212,19 @@ OTA marker removers remain compatible but are no longer required for correctness
 `tests/healthcheck-boot-marker.bats` replays the stale Rock marker against actual
 boot-state helpers, including exhausted counters and unhealthy negative controls.
 
+**A CeraUI package upgrade must not re-run the boot healthcheck.** The CeraUI
+postinst correctly restarts `ceralive.service` to load its upgraded binary; a
+`Requires=ceralive.service` in our healthcheck unit propagated that restart to the
+already-completed healthcheck while dpkg's updates directory was populated (Orange
+Pi, 2026-09-28), leaving a failed unit despite an already-good RAUC slot. This
+unit now `Wants=` the app and retains `After=`, so it starts on boot but does not
+follow the app's install-time restart. The script still checks app activity and
+dpkg integrity before mark-good: a dead app or interrupted dpkg at boot fails
+closed. The boot ID, marker and RAUC semantics are unchanged. The regression
+test holds a live simulated dpkg lock while checking the unit relationship and
+explicitly verifies pending dpkg state still refuses confirmation. This is a
+source/host-test fix, not a new board receipt.
+
 **Device Debian sources use HTTPS and retain explicit `Signed-By`.** Both
 `configure_minimal_apt` writers emit HTTPS for all three suites. A Rock board's
 IPv6 HTTP path returned a carrier captive portal, producing apt `NOSPLIT`/`NODATA`
