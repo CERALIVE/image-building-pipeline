@@ -3806,8 +3806,13 @@ chroot cannot read a path above `$SRCDIR`, the same constraint documented for
 Both writers normalize whitespace-prefixed blank/comment lines identically for
 validation and emission. They compare the forwarded input against an independent,
 reviewed `mkosi/runtime/first-party-origin-names.txt` set; the Docker APT contract
-also derives that authority from the first-party .deb pins plus the two active
-RK3588 fork pins. Missing, extra, duplicate, malformed and empty names fail before
+also derives that authority from the first-party .deb pins plus every active
+RK3588 row whose source URL is a `github.com/CERALIVE/<repo>/releases/download/`
+asset. Package-name prefixes do not establish ownership: tsukumijima/Radxa
+rows stay third-party, even when named `rockchip-*`; commented rollback rows
+are not active. A scratch-manifest mutation adds a new CeraLive package without
+updating the authority and requires rejection, while a new third-party row
+must pass. Missing, extra, duplicate, malformed and empty names fail before
 the pin is published, with the offending name in the diagnostic. The capability
 writer verifies the complete 990/-1 pin file before advertising
 `origin-protection`/`apt-all-packages`. Adding a package requires updating its pin,

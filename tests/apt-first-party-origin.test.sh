@@ -139,13 +139,32 @@ candidate() { policy "$1" | perl -ne 'if (/^\s*Candidate: (.+)$/) { print "$1\n"
 
 names_b64="$(base64 -w0 "${ROOT}/manifests/first-party-apt-names.txt")"
 export CERALIVE_FIRST_PARTY_NAMES_B64="${names_b64}"
-awk -F= '/^[a-z0-9][a-z0-9+.-]*(\[(amd64|arm64)\])?=/ {sub(/\[.*/, "", $1); print $1}' \
-  "${ROOT}/manifests/first-party-deb-versions.txt" | sort -u >"${work}/pinned-names"
-awk '!/^[[:space:]]*#/ && ($1 == "gstreamer1.0-rockchip-ceralive" || $1 == "librga2-ceralive") {print $1}' \
-  "${ROOT}/manifests/rk3588-userspace-deb-versions.txt" >>"${work}/pinned-names"
-sort -u "${work}/pinned-names" -o "${work}/pinned-names"
 awk 'NF && $1 !~ /^#/ {print $1}' "${ROOT}/mkosi/runtime/first-party-origin-names.txt" | sort >"${work}/authority-names"
-cmp "${work}/pinned-names" "${work}/authority-names" || { printf 'origin-name authority differs from pinned first-party package manifests\n' >&2; exit 1; }
+check_pinned_authority() {
+  local rk_pins="$1"
+  awk -F= '/^[a-z0-9][a-z0-9+.-]*(\[(amd64|arm64)\])?=/ {sub(/\[.*/, "", $1); print $1}' \
+    "${ROOT}/manifests/first-party-deb-versions.txt" | sort -u >"${work}/pinned-names"
+  # Provenance, not a two-name allowlist: every active CERALIVE GitHub release
+  # asset here is first-party, regardless of the package name it gives the .deb.
+  awk '!/^[[:space:]]*#/ && $4 ~ /^https:\/\/github[.]com\/CERALIVE\/[^/]+\/releases\/download\// {print $1}' \
+    "$rk_pins" >>"${work}/pinned-names"
+  sort -u "${work}/pinned-names" -o "${work}/pinned-names"
+  cmp "${work}/pinned-names" "${work}/authority-names" || { printf 'origin-name authority differs from pinned first-party package manifests\n' >&2; return 1; }
+}
+check_pinned_authority "${ROOT}/manifests/rk3588-userspace-deb-versions.txt"
+cp "${ROOT}/manifests/rk3588-userspace-deb-versions.txt" "${work}/rk-first-party.txt"
+printf '%s\n' 'rockchip-new-fork rockchip-new-fork_1_arm64.deb 0000000000000000000000000000000000000000000000000000000000000000 https://github.com/CERALIVE/new-fork/releases/download/v1/rockchip-new-fork_1_arm64.deb' >>"${work}/rk-first-party.txt"
+if check_pinned_authority "${work}/rk-first-party.txt" >"${work}/first-party-mutation.log" 2>&1; then
+  printf 'origin-name authority accepted an unprotected new CeraLive RK3588 package\n' >&2; exit 1
+fi
+if ! grep -Fq 'origin-name authority differs from pinned first-party package manifests' "${work}/first-party-mutation.log" ||
+   ! grep -Fxq 'rockchip-new-fork' "${work}/pinned-names"; then
+  printf 'origin-name authority did not reject the new CeraLive package as a pinned name\n' >&2; exit 1
+fi
+cp "${ROOT}/manifests/rk3588-userspace-deb-versions.txt" "${work}/rk-third-party.txt"
+printf '%s\n' 'rockchip-new-foreign rockchip-new-foreign_1_arm64.deb 0000000000000000000000000000000000000000000000000000000000000000 https://github.com/tsukumijima/new-fork/releases/download/v1/rockchip-new-foreign_1_arm64.deb' >>"${work}/rk-third-party.txt"
+check_pinned_authority "${work}/rk-third-party.txt" || { printf 'origin-name authority incorrectly includes a third-party RK3588 package\n' >&2; exit 1; }
+printf 'RK3588 provenance mutations: new CeraLive row rejected; new third-party row accepted\n'
 awk 'NF && $1 !~ /^#/ {print $1}' "${ROOT}/manifests/first-party-apt-names.txt" | sort >"${work}/input-names"
 cmp "${work}/input-names" "${work}/authority-names" || { printf 'origin names manifest differs from independent authority (missing, extra or duplicate name)\n' >&2; exit 1; }
 export APT_CERALIVE_REPO_NO_AUTORUN=1
