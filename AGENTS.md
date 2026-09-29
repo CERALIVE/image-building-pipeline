@@ -1299,7 +1299,17 @@ on a version mismatch, provisions the non-root `ceralive-ota` fixture account,
 starts a system D-Bus, reloads its installed policy, and
 then invokes the real RAUC contract; the harness requires its normal system-bus service
 name and does not replace that check with a session bus or a skipped test. The
-standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
+real harness's GPT loop detach can prompt udev to delete the last
+`/dev/disk/by-partlabel` entry and its directory: it settles those removal events
+before making a unique fixture-owned label under `sudo mkdir -p`, never forces a
+replacement of a host `rootfs_b` link, and removes its own link and only directories
+it created on both normal and trapped exits. The boot-slot-priority assertion still
+requires the conflicting `root=PARTLABEL=` link to resolve to slot B while the
+custom backend returns A. The rootless fixture check in
+`tests/rauc-transition-contract.test.sh` covers creation, cleanup and no-clobber;
+its writer discovery reads tracked files rather than traversing root-owned mkosi
+build/cache output. The real service and GPT installation remain CI-only privileged
+evidence. The standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
 fixture before resolving, so build-plan checks are self-contained too.
 
 Production builds require one explicit RAUC PKI contract: signer root, chain,
