@@ -118,11 +118,11 @@ pass "static: eviction takes each victim's key lock BEFORE unlinking it"
 # Code lines only: the header deliberately DISCUSSES the per-board build lock to
 # record why this cache may not reuse it, so a whole-file grep would read its own
 # rationale as a violation.
-debcache_code() { grep -vE '^[[:space:]]*#' "${DEBCACHE_SRC}"; }
-if ! debcache_code | grep -q 'DEBCACHE_DIR=.*mkosi/\.staging/\.debcache'; then
-	fail "the default cache path is not the repo-local ignored staging tree"
+debcache_code="$(grep -vE '^[[:space:]]*#' "${DEBCACHE_SRC}")"
+if ! grep -q 'DEBCACHE_DIR=.*mkosi/\.staging/\.debcache' <<<"${debcache_code}"; then
+  fail "the default cache path is not the repo-local ignored staging tree"
 fi
-if debcache_code | grep -qE 'BUILD_LOCK|acquire_board_lock'; then
+if grep -qE 'BUILD_LOCK|acquire_board_lock' <<<"${debcache_code}"; then
 	fail "the cache reuses the PER-BOARD build lock; it must own a per-cache-key lock"
 fi
 pass "static: repo-local cache path, and a per-cache-key lock rather than the per-board build lock"
@@ -607,18 +607,38 @@ fi
 pass 'remote mode: invalid values are refused'
 
 UPLOADER="${PIPELINE_DIR}/ci/upload-build-cache.sh"
-if GITHUB_ACTIONS='' bash "${UPLOADER}" rock-5b-plus >"${RUN_DIR}/upload-denied.log" 2>&1; then
+SPY_BIN="${RUN_DIR}/upload-spy-bin"; mkdir -p "${SPY_BIN}"
+REAL_BASH="$(command -v bash)"
+cat >"${SPY_BIN}/bash" <<'SH'
+#!/bin/sh
+env | awk -F= '/^(R2_|AWS_|CLOUDFLARE_)/ && $2 != "" { print $1 }' >"${CLOUD_SPY_LOG}"
+exec "${REAL_BASH}" "$@"
+SH
+chmod +x "${SPY_BIN}/bash"
+if (
+    export R2_BUILD_CACHE_ACCESS_KEY_ID=fixture AWS_ACCESS_KEY_ID=fixture CLOUDFLARE_API_TOKEN=fixture
+    env -i PATH="${SPY_BIN}:${PATH}" REAL_BASH="${REAL_BASH}" CLOUD_SPY_LOG="${RUN_DIR}/upload-denied-env" \
+      GITHUB_ACTIONS='' bash "${UPLOADER}" rock-5b-plus
+  ) >"${RUN_DIR}/upload-denied.log" 2>&1; then
   fail 'developer invocation could enter the R2 writer' "${RUN_DIR}/upload-denied.log"
 fi
+[[ ! -s "${RUN_DIR}/upload-denied-env" ]] \
+  || fail 'developer fixture inherited cloud credentials' "${RUN_DIR}/upload-denied-env"
 if ! grep -q 'CI-only' "${RUN_DIR}/upload-denied.log"; then
   fail 'developer upload refusal did not name its boundary' "${RUN_DIR}/upload-denied.log"
 fi
 pass 'CI writer: developer invocation is refused before any network operation'
 
-if GITHUB_ACTIONS=true GITHUB_WORKFLOW='Release candidate build' \
-    R2_BUILD_CACHE_ACCOUNT_ID='' bash "${UPLOADER}" rock-5b-plus >"${RUN_DIR}/upload-unprovisioned.log" 2>&1; then
+if (
+    export R2_BUILD_CACHE_ACCESS_KEY_ID=fixture AWS_ACCESS_KEY_ID=fixture CLOUDFLARE_API_TOKEN=fixture
+    env -i PATH="${SPY_BIN}:${PATH}" REAL_BASH="${REAL_BASH}" CLOUD_SPY_LOG="${RUN_DIR}/upload-unprovisioned-env" \
+      GITHUB_ACTIONS=true GITHUB_WORKFLOW='Release candidate build' \
+      R2_BUILD_CACHE_ACCOUNT_ID='' bash "${UPLOADER}" rock-5b-plus
+  ) >"${RUN_DIR}/upload-unprovisioned.log" 2>&1; then
   fail 'unprovisioned CI invocation reached the R2 writer' "${RUN_DIR}/upload-unprovisioned.log"
 fi
+[[ ! -s "${RUN_DIR}/upload-unprovisioned-env" ]] \
+  || fail 'missing-secret fixture inherited cloud credentials' "${RUN_DIR}/upload-unprovisioned-env"
 if ! grep -q 'all R2_BUILD_CACHE_\* secrets' "${RUN_DIR}/upload-unprovisioned.log"; then
   fail 'missing credentials were not refused before upload' "${RUN_DIR}/upload-unprovisioned.log"
 fi

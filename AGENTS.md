@@ -6673,7 +6673,11 @@ locking, eviction and no-metadata caching remain intact. Only `release.yml` and
 and with all `R2_BUILD_CACHE_*` secrets; absent secrets report `r2.build-cache
 BLOCKED-if-absent`. Fixture tests do not establish a live object or close the
 separate Todo-15 runner timing proof. Guards: `tests/debcache.test.sh` and
-`tests/kernel-artifact-cache.test.sh`.
+`tests/kernel-artifact-cache.test.sh`. Its offline uploader fixtures run under
+an allow-listed `env -i` and verify that injected `R2_`, `AWS_` and
+`CLOUDFLARE_` variables cannot reach either fixture process. The cache-source
+static guard reads a materialized string, not a pipe into `grep -q` that could
+SIGPIPE its producer under `pipefail`.
 
 **The pinned kernel source has a persistent bare mirror, and its flock is a
 CORRECTNESS fix rather than a speedup** [EXISTS]
