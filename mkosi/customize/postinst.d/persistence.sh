@@ -248,7 +248,7 @@ EOF
 #!/bin/bash
 # CeraLive MANUAL OS update entrypoint — run by an operator, NOT by CeraUI.
 # CeraUI's system.startUpdate RPC is the apt package path and never calls this
-# script; rauc-hawkbit-updater is the only automatic RAUC trigger. Installs a
+  # script; hawkBit is dormant and CeraUI orchestrates automatic OS updates. Installs a
 # RAUC bundle whose URL is read from persistent /data, and is inert until an
 # operator sets BUNDLE_URL there; the post-reboot mark-good is the task-29 gate.
 set -euo pipefail

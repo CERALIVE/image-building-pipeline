@@ -1,7 +1,11 @@
 # CeraLive device OTA — `rauc-hawkbit-updater` (Runtime layer, Stage 7, task 41)
 
-Device-side counterpart of the private hawkBit engine (`fleet/hawkbit/`, task 40).
-`rauc-hawkbit-updater` 1.4 polls the private hawkBit **DDI v1** API, downloads a
+**Dormant by decision:** the package and configuration template remain installed,
+but the service is disabled and masked, with no configured hawkBit server. CeraUI's
+update orchestrator, not hawkBit, is the automatic OS update path. The following
+diagram describes the retained legacy mechanism, not an active device updater.
+
+The retained `rauc-hawkbit-updater` 1.4 can poll the private hawkBit **DDI v1** API, download a
 signed `.raucb` from R2 (the URL hawkBit hands back is rewritten to
 `apt.ceralive.tv/bundles/...`, task 39), and installs it to the inactive RAUC A/B
 slot. Slot **confirmation/rollback stays with `ceralive-healthcheck.service`**
