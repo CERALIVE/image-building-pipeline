@@ -76,7 +76,7 @@ apt_proxy_opts() {
 #
 # apt drops its acquire methods to `_apt` WHENEVER it is invoked as root, so a
 # root-owned 0600 client key is unreadable to it — the device-side twin of this
-# path already paid for that once (AGENTS.md, "Baked mTLS client key MUST be
+# path already paid for that once (docs/agents/key-facts.md, "Baked mTLS client key MUST be
 # `_apt`-owned"). The old answer was apt's sandbox-user override pinned to root,
 # which fixes no permission: it turns the sandbox OFF for the whole build-time
 # fetch. That override must never reappear in the emitted apt options — the guard
