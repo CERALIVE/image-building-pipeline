@@ -7,7 +7,7 @@ debugging the portal on hardware).
 - **Trigger + AP bring-up** — Task 11 (`ceralive-provision.sh` part 1)
 - **Captive page + credential handoff + teardown** — Task 14 (`ceralive-provision.sh`
   part 2 + `ceralive-portal.sh`)
-- Subsystem summary: [`../../AGENTS.md`](../../AGENTS.md) → *First-boot WiFi provisioning portal*
+- Subsystem summary: [`docs/agents/add-on-subsystem.md`](agents/add-on-subsystem.md) → *First-boot WiFi provisioning portal*
 
 ## Artifacts
 
@@ -155,7 +155,7 @@ its selected mDNS hostname on the new network (`https://ceralive.local`,
 NM-native AP mode also requires the onboard wlan driver to support it (RK3588 chip
 dependent). The portal, credential handoff, and four-condition teardown are implemented
 and verified offline, but **on-hardware AP-mode validation is still pending** — hence the
-subsystem is `[PARTIAL]` in `AGENTS.md`.
+subsystem is `[PARTIAL]` in `docs/agents/add-on-subsystem.md`.
 
 ## Verification
 
