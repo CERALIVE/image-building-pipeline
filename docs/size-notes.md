@@ -869,7 +869,7 @@ packages disagreed about where:
 | `/boot/dtb-6.1.115-vendor-rk35xx/rockchip` | `linux-dtb-vendor-rk35xx` | 813 | 91,110,000-ish | yes |
 | `/usr/lib/linux-image-6.1.115-vendor-rk35xx/rockchip` | `linux-image-vendor-rk35xx` | 813 | 91,117,943 | **no** |
 
-`AGENTS.md` has said "BOTH locations, not one" since the prune landed, and
+`docs/agents/key-facts.md` has said "BOTH locations, not one" since the prune landed, and
 `install_kernel_source_dtbs` does exactly that on the source-built path — it calls
 `prune_dtb_dir` twice. `prune_vendor_dtbs` searched `${root}/boot` alone, so the
 package payload was never touched. The log line

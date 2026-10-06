@@ -1181,7 +1181,7 @@ it says nothing about the CC lines dropping out later.
 Both deployments used locally built, bench-labelled artifacts: nothing was published
 to apt or R2, and **no shipped image carries this policy yet**. Per-board verdicts,
 the retired mechanism's full post-mortem, and the udev-vs-oneshot reasoning are in
-`AGENTS.md`. Guards: `tests/runtime-services.bats` §18d ("typec policy: …", 10
+`docs/agents/key-facts.md`. Guards: `tests/runtime-services.bats` §18d ("typec policy: …", 10
 cases). The hardware-only drill that produced the peer, DR_SWAP, PR_SWAP and
 charging verdicts is `tests/realhw-typec-matrix.sh`; it is never run by CI.
 ## Fan Curve
@@ -1391,7 +1391,7 @@ start without a signal (`set_hw_params: Link has been severed`), and the engine'
 always-on meter then leaked one PipeWire capture pipeline every 30 s against it —
 measured +15.6 fds/min idle on a Rock 5B+, exhausting the engine's 1024-descriptor
 limit and SIGABRT-ing it after about 66 minutes. The conditions for restoring it are
-written down in `AGENTS.md` and in the config file itself.
+written down in `docs/agents/key-facts.md` and in the config file itself.
 
 **Hardware validation passed on the released stack.** Todo 31 passed on the exact
 Trixie/mainline/PipeWire image, and the release chain shipped cerastream v2026.8.4
