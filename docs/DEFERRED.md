@@ -16,7 +16,7 @@ Items are documentation-only. None are resolved here.
 **Status:** RESOLVED for the dual-NIC race, which was the whole defect. No
 placeholder remains in the manifest.
 **Location:** `manifests/boards/orange-pi-5-plus.yaml` (`interfaces:` block)
-**Also referenced:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs"
+**Also referenced:** `docs/agents/known-issues-deferred.md` → *KNOWN ISSUES / DEFERRED* → "OPi 5+ interface ID_PATHs"
 **Cross-repo:** tracked in the workspace-root `docs/DEFERRED-WORK.md` as item 3 (*Orange Pi 5+ interface ID_PATHs*); owned here.
 
 **What it was:** The `interfaces:` block carried `FIXME-…` placeholders for
@@ -54,7 +54,7 @@ Add the key only from a real reading on a board that has one.
 ## 2. Modem Interface Naming (usb0..7)
 
 **Status:** Deferred (hardware-gated)
-**Location:** `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Modem `usb0..7` naming is hardware-gated"
+**Location:** `docs/agents/known-issues-deferred.md` → *KNOWN ISSUES / DEFERRED* → "Modem `usb0..7` naming is hardware-gated"
 
 **What it is:** Deterministic udev rename rules for USB modem interfaces
 (`usb0`..`usb7`) are not implemented. Only `eth0`, `eth1`, and `wlan0` are
@@ -64,7 +64,7 @@ shift across reboots or when multiple modems are present.
 **Why deferred:** Deterministic modem renames require reading the `ID_PATH` of
 a physical modem from a live device. The naming uncertainty is distinct from
 the source-routing issue (the NM `dhcp=internal` hook problem — now FIXED in
-software; see `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Modem source-routing
+software; see `docs/agents/known-issues-deferred.md` → *KNOWN ISSUES / DEFERRED* → "Modem source-routing
 under NM `dhcp=internal` — FIXED"): routing was addressed in software, but the
 rename rules need hardware evidence.
 
@@ -73,7 +73,7 @@ CeraLive device. Read `udevadm info /sys/class/net/<iface> | grep ID_PATH` for
 each modem interface. Add deterministic `.link` rules to
 `manifests/boards/<board>.yaml` (or a shared family manifest) using the
 real `ID_PATH` values. (The SRTLA source-policy routing twin-update this note
-used to require is GONE — that layer is retired; see `AGENTS.md` → "SRTLA
+used to require is GONE — that layer is retired; see `docs/agents/known-issues-deferred.md` → "SRTLA
 source-policy routing is RETIRED".)
 
 ---
@@ -117,7 +117,7 @@ after `assemble-disk-x86.sh` (T10 wired, T11 offline-proven).
 ## 4. Cog + WPEWebKit Render QA (Hardware-Gated)
 
 **Status:** Hardware-gated
-**Location:** `docs/cog-display-addon.md` §7 (*Hardware-gated caveats (render QA)*), `docs/cog-display-hw-checklist.md` (full runbook), `AGENTS.md` → *KNOWN ISSUES / DEFERRED* → "Cog render QA hardware-gated", `AGENTS.md` → *KIOSK STACK* → "Cog display add-on (W4)"
+**Location:** `docs/cog-display-addon.md` §7 (*Hardware-gated caveats (render QA)*), `docs/cog-display-hw-checklist.md` (full runbook), `docs/agents/known-issues-deferred.md` → *KNOWN ISSUES / DEFERRED* → "Cog render QA hardware-gated", `docs/agents/kiosk-stack.md` → *KIOSK STACK* → "Cog display add-on (W4)"
 
 **What it is:** The Cog + WPEWebKit display add-on packaging is fully
 validated in software (apt index, layer contract, build+sign pipeline). The
@@ -458,7 +458,7 @@ fallback path did not exist, the function returned silently, **zero** first-part
 packages installed, and the build stopped at `[7/9]` parity with `first-party
 packages MISSING from rootfs`. Board-specific, variant-independent (nothing on
 that path reads the variant), and identical on the vendor path — the same
-silently-inert-mechanism class as the `PassEnvironment=` drift in `AGENTS.md`,
+silently-inert-mechanism class as the `PassEnvironment=` drift in `docs/agents/known-issues-deferred.md`,
 masked because the only regularly-built board has an identity mapping.
 
 The fix forwards the producer's own key: `orchestrate.sh` exports the manifest
@@ -505,7 +505,7 @@ not lost with it:
 * **HDMI-RX audio on the PRODUCTION mainline kernel is a different question with
   its own answer.** It is carried by patches `0005` + `0006` of the mainline
   series (`0006` supplies the DT sound card `0005` alone does not create) — see
-  the `AGENTS.md` KEY FACT on that pair. Nothing about this closure asserts that
+  the `docs/agents/key-facts.md` KEY FACT on that pair. Nothing about this closure asserts that
   HDMI-RX audio works on a shipped image; it asserts only that the retired
   vendor-BSP route to it is gone.
 
@@ -591,13 +591,13 @@ MISSING second half, not about the flag.
 fstab entry, RAUC `system.conf` slot devices, compiled `boot.scr`),
 `ci/build-hardware-candidates.sh` (`--bench-labels 0|1`),
 `tests/preflash-verify.sh` (production-label assertion),
-`AGENTS.md` KEY FACTs "Bench PARTLABEL overlay" and "A hardware candidate that
+`docs/agents/key-facts.md` KEY FACTs "Bench PARTLABEL overlay" and "A hardware candidate that
 does not STATE its PARTLABEL set…"
 
 **What is already correct, and must not be undone.** Requiring the operator to
 state the PARTLABEL set explicitly, with no default and no ambient fallback, is
 the deliberate half of this design and it rests on real incident history. The
-2026-08-10 incident recorded in `AGENTS.md` is exactly what an inherited ambient
+2026-08-10 incident recorded in `docs/agents/key-facts.md` is exactly what an inherited ambient
 value produces: a `rock-edge-test` candidate built with the frozen production
 label set, run from a bench microSD on a board whose eMMC carried an unrelated
 plain-labelled image, addressing `/boot` and `rauc status mark-bad` on the wrong
@@ -712,7 +712,7 @@ posture table from the released workflow evidence.
 | `docs/notes/sharing-kernel-capability.md` | Measured vendor-kernel symbol closure for sharing, the retired out-of-tree `cls_fw` remediation, and §7 on the production-track flip (item 10) |
 | `docs/notes/sharing-qdisc-matrix.md` | qdisc/netfilter availability per kernel track, including the runtime cake→HTB fallback (item 11) |
 | `docs/deb-producer-suite-parity.md` | Release-path suite and GLIBC posture for the six first-party `.deb` producers (item 13) |
-| `AGENTS.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
+| `docs/agents/known-issues-deferred.md §KNOWN ISSUES / DEFERRED` | Prose summary of items 1, 2, and 4 |
 | CeraUI `AGENTS.md §NETWORK-INGEST GATEWAY` | Cross-repo consumer: backend probe surface, streaming-start gate, and the LiveView Network Ingest card that item 8's checklist exercises |
 
 ## Cross-Repo Note
