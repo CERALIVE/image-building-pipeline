@@ -826,7 +826,7 @@ same shipped scripts without hardware):
    resumes streaming on the old, still-good software with **zero operator
    intervention**.
 5. The `OTA-during-stream guard` (`ceralive-update`, see root `AGENTS.md` /
-   this repo's `AGENTS.md` KEY FACTS) additionally refuses to even **start**
+   this repo's `docs/agents/key-facts.md` KEY FACTS) additionally refuses to even **start**
    installing an update while `cerastream.service` / `srtla.service` /
    `srtla-send.service` is active — a bad bundle pushed during a live
    broadcast doesn't get a chance to interrupt it in the first place.
@@ -869,7 +869,7 @@ confirming it, and asserts:
 - a subsequent `mark-good` makes the recovered slot sticky (no further
   reversion).
 
-This is the harness cited in this repo's own `AGENTS.md` `WHERE TO LOOK` table
+This is the harness cited in this repo's [`docs/agents/where-to-look.md`](agents/where-to-look.md) `WHERE TO LOOK` table
 as the "forced-primary-failure rollback proof" — treat a passing run of it as
 the evidence that the x86 boot-state engine itself has not regressed, the same
 way `rauc-rollback.sh`'s MOCK mode is the evidence for the RK3588 engine. Both
@@ -914,7 +914,7 @@ boot log:
   marker removal alone cannot provide that guarantee.
 - It is deliberately **non-fatal** for cosmetic/secondary probes (e.g. the mDNS
   probe, or the HTTPS `:443` check on a device whose uplink is briefly down
-  during provisioning) — see this repo's `AGENTS.md` "CeraUI TLS front" section.
+  during provisioning) — see this repo's `docs/agents/add-on-subsystem.md` "CeraUI TLS front" section.
   A UI/TLS hiccup does not roll back a slot whose core streaming stack
   (`cerastream`/`srtla_send`/`srtla`) is genuinely healthy.
 - It **is** fatal for the streaming-critical checks (service active, encoder

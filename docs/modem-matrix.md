@@ -127,7 +127,7 @@ because both lease `192.168.8.100`.
 
 Full decision record with verbatim traces:
 `.omo/notepads/modem-phase-c-quality/evidence/todo38.md`; summary in
-[`../AGENTS.md`](../AGENTS.md) → "SRTLA source-policy routing is RETIRED".
+[`docs/agents/known-issues-deferred.md`](agents/known-issues-deferred.md) → "SRTLA source-policy routing is RETIRED".
 
 `rp_filter` is a SEPARATE, RETAINED asset and is unaffected:
 `/etc/sysctl.d/60-ceralive-rp-filter.conf` still sets

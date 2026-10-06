@@ -73,7 +73,7 @@ static btrtl rtl_bt/rtl8922au_config.bin
 static btrtl rtl_bt/rtl8922au_fw.bin
 # CLOSED owner-reviewed static gaps, not runtime-composed exemptions. Both chips
 # are future/third-party hardware only; no currently shipped target uses them.
-# Board basis: AGENTS.md firmware-prune / wireless sections; rk3588.yaml radio note
+# Board basis: docs/agents/key-facts.md firmware-prune / wireless sections; rk3588.yaml radio note
 # (Rock RTL8852BE, Orange AP6275P; a fitted Orange MT7925 is NOT MT7927).
 reviewed-hardware-gap btmrvl_sdio mrvl/sd8987_uapsta.bin # Static btmrvl_sdio.c MODULE_FIRMWARE; no shipped Marvell SD8987 SDIO target; forward-hardware module only; absent from frozen full 26.8.3.
 reviewed-hardware-gap btmtk mediatek/mt7927/BT_RAM_CODE_MT6639_2_1_hdr.bin # Static btmtk.c MODULE_FIRMWARE; no shipped MT7927 target; forward-hardware module only; absent from frozen full 26.8.3.

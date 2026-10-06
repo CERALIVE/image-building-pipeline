@@ -178,7 +178,7 @@ The build entry point is the same orchestrator as RK3588
 (`build` → `lib/orchestrate.sh`), routed by `family: x86_64` /
 `rauc_bootloader_adapter: efi` in `manifests/boards/x86-minipc.yaml` to the x86
 disk assembler (`lib/assemble-disk-x86.sh`) instead of the RK3588 one. See
-`AGENTS.md` "x86 disk assembly — full A/B GRUB (Task 12)" for the exact Stage-4
+`docs/agents/key-facts.md` "x86 disk assembly — full A/B GRUB (Task 12)" for the exact Stage-4
 branch.
 
 **Dry run** (resolve and fetch plan only, no image written):
@@ -408,7 +408,7 @@ curl -fsSk "https://ceralive.local/status" || echo "port 443 NOT reachable"
 - [ ] `ceralive.local` (or the fallback hostname) resolves via mDNS.
 - [ ] Port 80 (`http://<host>/status`) reachable.
 - [ ] Port 443 (`https://<host>/status`) reachable (self-signed cert warning is
-      expected — see [`AGENTS.md`](../../AGENTS.md) "CeraUI TLS front").
+      expected — see [`docs/agents/add-on-subsystem.md`](agents/add-on-subsystem.md) "CeraUI TLS front").
 - [ ] Evidence saved to `test-results/x86-first-boot-<date>.txt`.
 
 ---

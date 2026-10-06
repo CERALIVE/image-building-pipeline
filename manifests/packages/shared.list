@@ -34,7 +34,7 @@ ca-certificates          # TLS trust store; required for https apt + apt.ceraliv
                          # into apt itself in 1.5. It ships no apt method and no code at
                          # all, and trixie's apt is 3.0.3, far past the 1.5 cutover.
                          # The device's own https+mTLS apt source (apt.ceralive.tv, see the
-                         # `_apt`-readable client-key KEY FACT in AGENTS.md) is served by
+                         # `_apt`-readable client-key KEY FACT in docs/agents/key-facts.md) is served by
                          # apt's built-in https method, not by this package.
 openssl                  # CLI for the first-boot self-signed TLS cert (ceralive-tls-firstboot).
                          # Priority: important on Debian (usually already present), pinned

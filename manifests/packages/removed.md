@@ -211,7 +211,7 @@ start of this audit — **48 packages**, captured with
 `grep -vE '^\s*(#|$)' shared.list | sort`. Nothing was judged by "no grep hit":
 every verdict below cites a *positive* artefact — a shipped unit or script that
 invokes the binary, a reverse dependency read out of a real built rootfs's
-`/var/lib/dpkg/status`, an AGENTS.md KEY FACT, or (for a REMOVE) an explicit
+`/var/lib/dpkg/status`, a docs/agents/key-facts.md KEY FACT, or (for a REMOVE) an explicit
 structural reason the package cannot be reached.
 
 Explicitly **out of scope**: `development.delta.list` (the 18-package debug delta),
@@ -226,7 +226,7 @@ Evidence classes used in the table:
 |---|---|
 | `INVOKE` | a shipped unit/script/binary on the device executes it — file:line cited |
 | `RDEP` | reverse dependency in a real built rootfs `/var/lib/dpkg/status` |
-| `KEYFACT` | an `AGENTS.md` KEY FACT states the requirement (usually board-confirmed) |
+| `KEYFACT` | a `docs/agents/key-facts.md` KEY FACT states the requirement (usually board-confirmed) |
 | `PLUGIN` | GStreamer plugin reachability / element-factory dependency chain |
 | `ROOTFS` | read directly out of the built rootfs (unit present, config written, rc.d link) |
 
@@ -252,8 +252,8 @@ Evidence classes used in the table:
 | 16 | `gstreamer1.0-plugins-base` | KEEP | PLUGIN: core `videoconvert`/`audioconvert`/`audioresample`/`queue` — every cerastream graph template. | all |
 | 17 | `gstreamer1.0-plugins-good` | KEEP | PLUGIN: `v4l2src` (HDMI-RX / UVC capture), `rtp*`, `matroska`/`isomp4`. | all |
 | 18 | `gstreamer1.0-plugins-ugly` | KEEP | PLUGIN: `x264enc` — the `generic` software-encode profile, which is the platform every non-hardware boot-parity run uses (`cerastream/tests/hw-smoke.sh` `generic/h264` → `x264enc`). | all |
-| 19 | `gstreamer1.0-tools` | KEEP | INVOKE (on-board): `gst-inspect-1.0` / `gst-launch-1.0` are the whole of `cerastream/tests/hw-smoke.sh` Phase A + B, and `gst-inspect-1.0` is the board evidence cited throughout AGENTS.md (e.g. the Mesa prune's "264 plugins / 1548 features"). | all |
-| 20 | `hostapd` | **DEFER** | Positive non-use today: ROOTFS shows `/etc/hostapd/` holds only the package's own `ifupdown.sh` — **no `hostapd.conf`**, and nothing under `mkosi/` ever writes one, so the enabled `hostapd.service`'s `ConditionFileNotEmpty=/etc/hostapd/hostapd.conf` skips it on every boot. `mkosi/runtime/ceralive-provision.sh:34-36` states AP mode is NM-native and "hostapd remains in the image only as an evidence-gated fallback". RDEP: none. The only invoker anywhere is CeraUI's host-side `test-harness/wifi-hwsim/` container. **BUT** the mechanism it backstops is `[PARTIAL]`: AGENTS.md "First-boot WiFi provisioning portal" carries "HW caveat: AP mode also requires the onboard wlan driver to support it (RK3588 chip dependent) — to be validated on hardware". Deleting the sanctioned fallback before the primary is board-proven would be size-driven, not evidence-driven. **Unblock condition:** NM-native AP mode board-confirmed on both RK3588 boards (the `[PARTIAL]` cleared) → then REMOVE (2,297 KB). | all |
+| 19 | `gstreamer1.0-tools` | KEEP | INVOKE (on-board): `gst-inspect-1.0` / `gst-launch-1.0` are the whole of `cerastream/tests/hw-smoke.sh` Phase A + B, and `gst-inspect-1.0` is the board evidence cited throughout docs/agents/key-facts.md (e.g. the Mesa prune's "264 plugins / 1548 features"). | all |
+| 20 | `hostapd` | **DEFER** | Positive non-use today: ROOTFS shows `/etc/hostapd/` holds only the package's own `ifupdown.sh` — **no `hostapd.conf`**, and nothing under `mkosi/` ever writes one, so the enabled `hostapd.service`'s `ConditionFileNotEmpty=/etc/hostapd/hostapd.conf` skips it on every boot. `mkosi/runtime/ceralive-provision.sh:34-36` states AP mode is NM-native and "hostapd remains in the image only as an evidence-gated fallback". RDEP: none. The only invoker anywhere is CeraUI's host-side `test-harness/wifi-hwsim/` container. **BUT** the mechanism it backstops is `[PARTIAL]`: docs/agents/add-on-subsystem.md "First-boot WiFi provisioning portal" carries "HW caveat: AP mode also requires the onboard wlan driver to support it (RK3588 chip dependent) — to be validated on hardware". Deleting the sanctioned fallback before the primary is board-proven would be size-driven, not evidence-driven. **Unblock condition:** NM-native AP mode board-confirmed on both RK3588 boards (the `[PARTIAL]` cleared) → then REMOVE (2,297 KB). | all |
 | 21 | `ipcalc` | **RE-EVALUATE (todo 41)** | Its ONLY stated consumer was the SRTLA source-routing dhclient hook (`networking-srtla.sh:106-107`, `ipcalc -n`/`-p` for the per-link policy tables), and that layer is RETIRED — so this row's justification no longer holds. Deliberately NOT removed here: dropping a package from `shared.list` is image-slimming scope. Re-audit for a remaining consumer, then keep or remove. | all |
 | 22 | `iproute2` | KEEP | INVOKE: `ip` for CeraUI's read-only route/policy-route diagnostics (`policy-route-check.ts`, `gateways.ts`); `ip` is in CeraUI's `run.ts` `ALLOWED` allowlist. SRTLA source-policy routing was retired, `ip` itself is still required. | all |
 | 23 | `iw` | KEEP | **Must-NOT-Have list.** INVOKE: `CeraUI/apps/backend/src/modules/wifi/regdomain.ts:423/435/447` — `iw reg set`, `iw reg get`, `iw phy`; `"iw"` is in the `run.ts` `ALLOWED` allowlist. KEYFACT "`iw` in `shared.list` — `wireless-tools` is NOT the same package". | all |

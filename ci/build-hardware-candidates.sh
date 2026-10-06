@@ -749,10 +749,10 @@ main() {
 
   # No default, and deliberately not read from the environment even when one is
   # already exported: a value this tool cannot show in its own argv is a value
-  # nobody reviewing the dispatch can audit. AGENTS.md, "Bench PARTLABEL overlay".
+  # nobody reviewing the dispatch can audit. docs/agents/key-facts.md, "Bench PARTLABEL overlay".
   [[ -n "${BENCH_LABELS}" ]] || {
     usage
-    die "refusing to build without --bench-labels 0|1 — this script must never silently default this flag; a wrong PARTLABEL set writes A/B recovery state to the WRONG PHYSICAL DEVICE on a dual-media bench rig (see the incident writeup in AGENTS.md, 'Bench PARTLABEL overlay')"
+    die "refusing to build without --bench-labels 0|1 — this script must never silently default this flag; a wrong PARTLABEL set writes A/B recovery state to the WRONG PHYSICAL DEVICE on a dual-media bench rig (see the incident writeup in docs/agents/key-facts.md, 'Bench PARTLABEL overlay')"
   }
   case "${BENCH_LABELS}" in
     0|1) ;;

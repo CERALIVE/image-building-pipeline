@@ -33,7 +33,7 @@
 #   shared subnet. hostapd remains in the image only as an evidence-gated fallback
 #   (NOT used here). NM-native AP is supported since NM 1.0; the image ships NM 1.42
 #   (Debian bookworm). HW caveat: AP mode also needs the wlan driver to support it  # suite-literal-ok: records the suite this NetworkManager AP-mode behaviour was verified on
-#   (RK3588 onboard chip dependent) — see image-building-pipeline/AGENTS.md.
+#   (RK3588 onboard chip dependent) — see docs/agents/key-facts.md.
 #
 # CAPTIVE PORTAL (Task 14): served by ceralive-portal.{socket,@.service} (systemd
 #   socket activation, Accept=yes) running the bash handler /usr/local/sbin/ceralive-portal
