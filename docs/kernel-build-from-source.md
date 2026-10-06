@@ -957,7 +957,7 @@ qualification:
 - **At the `v7.1.7` pin, `rock-5b-plus --variant edge` was built end to end** — a
   real cross-compile producing `linux-image-7.1.7-ceralive-rk3588` and a flashable
   `.raw` — **and flashed and booted on a real Rock 5B+.** That run cleared the MPP
-  hardware-encode KNOWN ISSUE (see the pipeline `AGENTS.md`) at that base.
+  hardware-encode KNOWN ISSUE (see the pipeline `docs/agents/known-issues-deferred.md`) at that base.
 - **At `v7.2`, both Rock 5B+ and Orange Pi 5 Plus booted the exact released
   Debian 13 image** reporting `7.2.0-ceralive-rk3588`. The final qualification
   used released cerastream 2026.8.6 and ceralive-device 2026.8.9; required

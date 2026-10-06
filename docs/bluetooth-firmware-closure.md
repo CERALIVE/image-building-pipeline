@@ -319,7 +319,7 @@ That distinction is the point of this section:
 The exception is therefore an **owner-reviewed statement about hardware scope,
 not about firmware completeness**: no currently shipped target uses Marvell
 SD8987 SDIO Bluetooth or MT7927. Both modules are carried for future and
-third-party hardware. The board basis is this repository's own root `AGENTS.md`
+third-party hardware. The board basis is this repository's own `docs/agents/key-facts.md`
 firmware-prune and wireless sections — the `brcm/`, `rtl_bt/` board paragraph
 under "Firmware is pruned only where an installed-module sweep proves no
 consumer" — together with `manifests/families/rk3588.yaml:98-110`, which names

@@ -152,7 +152,7 @@ gap: full boot to userspace, SSH reachable, eMMC intact — `task-27-sd-boot-val
 > 2026-08-26, from a bench-labelled microSD, and reached userspace and the network.
 > A USB-C source-role battery ran there and on a Rock 5B+ the same day; both boards
 > proved reboot persistence of the pinned `source` role. Read the per-board verdicts
-> in the pipeline `AGENTS.md` USB-C entry, not here.
+> in the pipeline `docs/agents/key-facts.md` USB-C entry, not here.
 >
 > This closes a build-verified/hardware-pending gap. It changes **nothing** in the
 > decision above. The H.264 `encode-broken` finding is what forces `hold`, and the
