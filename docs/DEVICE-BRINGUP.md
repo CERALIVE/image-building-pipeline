@@ -58,7 +58,7 @@ Filesystem      Size  Used Avail Use% Mounted on
 Both Docker and Podman are usable container runtimes for the canonical build.
 `ccache` is not a hard requirement for the container path (the builder image
 carries its own persistent ccache volume across runs, see the CI/build cache
-notes in the root `AGENTS.md`), but installing it locally speeds up a
+notes in [`docs/agents/key-facts.md`](agents/key-facts.md)), but installing it locally speeds up a
 `--native` kernel-from-source build materially — and EVERY build is one now, so
 this matters on the default path rather than only on an opt-in variant. A full
 kernel `make bindeb-pkg` is the single most compile-heavy stage in this

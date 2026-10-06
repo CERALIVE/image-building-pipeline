@@ -869,7 +869,7 @@ confirming it, and asserts:
 - a subsequent `mark-good` makes the recovered slot sticky (no further
   reversion).
 
-This is the harness cited in this repo's own `AGENTS.md` `WHERE TO LOOK` table
+This is the harness cited in this repo's [`docs/agents/where-to-look.md`](agents/where-to-look.md) `WHERE TO LOOK` table
 as the "forced-primary-failure rollback proof" — treat a passing run of it as
 the evidence that the x86 boot-state engine itself has not regressed, the same
 way `rauc-rollback.sh`'s MOCK mode is the evidence for the RK3588 engine. Both
