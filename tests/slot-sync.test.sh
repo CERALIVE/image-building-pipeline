@@ -22,6 +22,7 @@
 # tests/lib/assertions.sh's PASS/FAIL counters.
 #
 # shellcheck shell=bash
+# allow: SIZE_OK — both CLI proof tiers share one private fixture and command-stub environment; the registered entry owns their cleanup.
 
 set -uo pipefail
 
@@ -133,6 +134,16 @@ exit "${E2FSCK_EXIT:-0}"
 EOF
 chmod +x "${WORK}/bin/e2fsck"
 
+cat >"${WORK}/bin/sync" <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+  *.tmp.*) [[ "${SYNC_RECEIPT_FAIL:-}" != file ]] || exit 1 ;;
+  */update-state) [[ "${SYNC_RECEIPT_FAIL:-}" != directory ]] || exit 1 ;;
+esac
+if [[ $# -gt 0 ]]; then exec sync "$@"; fi
+EOF
+chmod +x "${WORK}/bin/sync"
+
 # ---------------------------------------------------------------------------
 # Environment: every path the script reads is overridden into WORK, so the
 # unprivileged tier never touches a real device path.
@@ -146,7 +157,7 @@ export RSYNC_BIN="${WORK}/bin/rsync"
 export MOUNT_BIN="${WORK}/bin/mount"
 export UMOUNT_BIN="${WORK}/bin/umount"
 export E2FSCK_BIN="${WORK}/bin/e2fsck"
-export SYNC_BIN="true"
+export SYNC_BIN="${WORK}/bin/sync"
 export SHA256SUM_BIN="sha256sum"
 
 export CERALIVE_UPDATE_LOCK_PATH="${WORK}/run/lock/ceralive-update.lock"
@@ -167,6 +178,7 @@ export CERALIVE_DPKG_STATUS_FILE="${WORK}/dpkg-status"
 export CERALIVE_HAWKBIT_SERVICE="rauc-hawkbit-updater.service"
 export CERALIVE_OS_RELEASE_FILE="${WORK}/os-release"
 export CERALIVE_IMAGE_VERSION_FILE="${WORK}/image-version.absent"
+export CERALIVE_OS_RELEASE_VERSION_FILE="${WORK}/os-release-version"
 export RAUC_JSON_FIXTURE="${WORK}/rauc-status.json"
 
 mkdir -p "${WORK}/srcroot"
@@ -201,6 +213,8 @@ reset_happy_fixtures() {
   unset DPKG_AUDIT_FIXTURE DPKG_VERIFY_SOURCE_FIXTURE DPKG_VERIFY_TARGET_FIXTURE
   unset RAUC_OPERATION_FIXTURE HAWKBIT_ACTIVE_FIXTURE RAUC_MARK_BAD_FAIL RAUC_MARK_GOOD_FAIL
   unset RSYNC_EXIT RSYNC_SLEEP MOUNT_EXIT E2FSCK_EXIT
+  unset SYNC_RECEIPT_FAIL
+  printf '2026.10.68\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}"
   rauc_json_fixture ""   # other slot NEVER installed -> not pending
   healthy_state_write "${BOOT_ID}" "${DPKG_SHA}" "${BUILD_ID}"
   rm -f "${CERALIVE_SYNC_RECEIPT_FILE}"
@@ -366,8 +380,23 @@ grep -qF -- "--exclude-from=${EXCLUDE_SRC}" "${RSYNC_CALLS}" && ok "rsync uses t
 receipt="$(<"${CERALIVE_SYNC_RECEIPT_FILE}")"
 printf '%s' "${receipt}" | grep -qF "\"state_sha256\": \"${DPKG_SHA}\"" && ok "receipt state_sha256 == current dpkg status sha256" || bad "receipt: ${receipt}"
 printf '%s' "${receipt}" | grep -qF "\"build_id\": \"${BUILD_ID}\"" && ok "receipt build_id from /etc/os-release BUILD_ID" || bad "receipt: ${receipt}"
-printf '%s' "${receipt}" | grep -qF "\"image_version\": \"${BUILD_ID}\"" && ok "receipt image_version from the BOOTED slot's bundle version" || bad "receipt: ${receipt}"
+grep -qxF '  "image_version": "2026.10.68",' "${CERALIVE_SYNC_RECEIPT_FILE}" \
+  && ok "receipt image_version uses the OS release stamp, not the different bundle/BUILD_ID" || bad "receipt OS release missing or guessed: ${receipt}"
 printf '%s' "${receipt}" | grep -qF '"target_slot": "rootfs.1"' && ok "receipt target_slot is the mirrored (other) slot" || bad "receipt: ${receipt}"
+completed_at="$(sed -n 's/^  "completed_at": "\([0-9TZ:-]*\)"$/\1/p' "${CERALIVE_SYNC_RECEIPT_FILE}")"
+[[ "${completed_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+  && ok "receipt completion timestamp is UTC" || bad "invalid completed_at: ${completed_at}"
+cat >"${WORK}/expected-receipt.json" <<EOF
+{
+  "state_sha256": "${DPKG_SHA}",
+  "build_id": "${BUILD_ID}",
+  "image_version": "2026.10.68",
+  "target_slot": "rootfs.1",
+  "completed_at": "${completed_at}"
+}
+EOF
+cmp -s "${WORK}/expected-receipt.json" "${CERALIVE_SYNC_RECEIPT_FILE}" \
+  && ok "receipt retains exactly five keys, their order and two-space format" || bad "receipt wire shape changed: ${receipt}"
 
 grep -qF "${WORK}/srcroot" "${MOUNT_CALLS}" && ok "bind-mounts BIND_SOURCE_ROOT at the source mountpoint" || bad "mount calls: $(<"${MOUNT_CALLS}")"
 grep -qE '^--bind ' "${MOUNT_CALLS}" && ok "source mount uses --bind (non-recursive, never --rbind)" || bad "mount calls: $(<"${MOUNT_CALLS}")"
@@ -376,6 +405,43 @@ grep -qF "${WORK}/mnt/target" "${UMOUNT_CALLS}" && grep -qF "${WORK}/srcroot" "$
   && ok "both mounts were exercised" || bad "expected both source and target mount activity"
 grep -qF "${CERALIVE_SLOT_SYNC_SOURCE}" "${UMOUNT_CALLS}" && grep -qF "${CERALIVE_SLOT_SYNC_TARGET}" "${UMOUNT_CALLS}" \
   && ok "both mountpoints were unmounted on success" || bad "unmount calls: $(<"${UMOUNT_CALLS}")"
+
+# ===========================================================================
+# 3b. Absent or malformed OS release retains the legacy bundle-version fallback.
+# ===========================================================================
+
+for stamp_case in absent empty malformed no-newline extra-line blank-line whitespace nul; do
+  # Given: a healthy mirror with an absent or malformed release stamp.
+  reset_happy_fixtures
+  case "${stamp_case}" in
+    absent) rm -f "${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    empty) : >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    malformed) printf '36d8131\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    no-newline) printf '2026.10.68' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    extra-line) printf '2026.10.68\n2026.10.69\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    blank-line) printf '2026.10.68\n\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    whitespace) printf ' 2026.10.68\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+    nul) printf '2026.10.68\0\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}" ;;
+  esac
+  # When: the CLI completes its mirror.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: malformed input cannot replace the known bundle identity.
+  assert_eq "${stamp_case} release stamp does not block mirroring" 0 "${rc}"
+  grep -qxF "  \"image_version\": \"${BUILD_ID}\"," "${CERALIVE_SYNC_RECEIPT_FILE}" \
+    && ok "${stamp_case} release stamp falls back to the booted bundle version" || bad "${stamp_case} release stamp guessed or omitted image_version: $(<"${CERALIVE_SYNC_RECEIPT_FILE}")"
+done
+
+for sync_failure in file directory; do
+  # Given: receipt persistence fails at one durability boundary.
+  reset_happy_fixtures
+  export SYNC_RECEIPT_FAIL="${sync_failure}"
+  # When: the mirror reaches receipt publication.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: the target must stay unconfirmed.
+  assert_eq "receipt ${sync_failure} fsync failure aborts mirroring" 1 "${rc}"
+  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+    && bad "mark-good followed receipt ${sync_failure} fsync failure" || ok "receipt ${sync_failure} fsync failure leaves target bad"
+done
 
 # ===========================================================================
 # 4. dpkg --verify comparison: mismatch aborts, identical non-empty passes,
@@ -655,6 +721,7 @@ if real_slot_sync_available; then
       CERALIVE_HAWKBIT_SERVICE="rauc-hawkbit-updater.service" \
       CERALIVE_OS_RELEASE_FILE="${WORK}/os-release" \
       CERALIVE_IMAGE_VERSION_FILE="${WORK}/image-version.absent" \
+      CERALIVE_OS_RELEASE_VERSION_FILE="${CERALIVE_OS_RELEASE_VERSION_FILE}" \
       bash "${SCRIPT}" run >"${priv_run_log}" 2>&1
     priv_rc=$?
     if [[ "${priv_rc}" -eq 0 ]]; then

@@ -138,6 +138,11 @@ CalVer stamp can be compared with a channel manifest's CalVer `version`.
 No release-cutting or publishing mechanism sets this variable yet.
 The hardware-candidate wrapper sets it only from its required explicit
 `--os-release-version` flag; this is not a release-cutting or publishing step.
+The lagged mirror's `sync-receipt.json` records this stamp in its existing
+`image_version` field so CeraUI displays the mirrored OS release rather than a
+build commit. An absent, unreadable or malformed stamp falls back to the booted
+slot's RAUC bundle version; the five-key receipt shape is unchanged. Receipt file
+and parent-directory fsync must succeed before the mirrored slot is marked good.
 
 For a hardware drill candidate, use `ci/build-hardware-candidates.sh` with
 `--only <candidate> --trust-verdict <path> --signing-env <path> --evidence <dir>

@@ -3565,6 +3565,15 @@ write `sync-receipt.json` (RAUC's own slot status keeps the OLD bundle version
 for a slot this script wrote, so the UI and drills read the mirrored version
 from this receipt instead), then `rauc status mark-good other`.
 
+The receipt's existing `image_version` reports the booted OS release from
+`/etc/ceralive/os-release-version` (test seam: `CERALIVE_OS_RELEASE_VERSION_FILE`).
+Only exactly one newline-terminated `YYYY.MINOR.PATCH` CalVer line is accepted;
+absent, unreadable or malformed content falls back to the booted slot's RAUC
+bundle version, never an invented version. The five keys, key order and two-space
+format are unchanged: CeraUI's strict reader rejects additive keys. The receipt
+file and its parent directory are fsynced across the atomic rename before
+mark-good; persistence failures leave the target bad.
+
 **The non-recursive bind mount is load-bearing for a second reason beyond
 `/boot`.** `mount --bind` (never `--rbind`) exposes whatever is on the running
 root filesystem's OWN ext4-level tree at a path a live submount currently

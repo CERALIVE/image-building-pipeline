@@ -100,6 +100,7 @@
 # WHY it failed), self-contained log()/die(), no dependency on the repo's lib/.
 #
 # shellcheck shell=bash
+# allow: SIZE_OK — standalone device mirror transaction shares gate, lock and trap state; repository libraries are unavailable on-device.
 
 set -uo pipefail
 
@@ -127,6 +128,7 @@ DPKG_STATUS_FILE="${CERALIVE_DPKG_STATUS_FILE:-/var/lib/dpkg/status}"
 HAWKBIT_SERVICE="${CERALIVE_HAWKBIT_SERVICE:-rauc-hawkbit-updater.service}"
 OS_RELEASE_FILE="${CERALIVE_OS_RELEASE_FILE:-/etc/os-release}"
 IMAGE_VERSION_FILE="${CERALIVE_IMAGE_VERSION_FILE:-/etc/ceralive/image-build-commit}"
+OS_RELEASE_VERSION_FILE="${CERALIVE_OS_RELEASE_VERSION_FILE:-/etc/ceralive/os-release-version}"
 
 # Test seams: stubbed in the offline proof harness; the real tools on device.
 RAUC_BIN="${RAUC_BIN:-rauc}"
@@ -456,13 +458,21 @@ delete_adaptive_index() {
 }
 
 write_sync_receipt() {
-  local state_sha="$1" target_slot="$2" build_id image_version completed_at tmp
+  local state_sha="$1" target_slot="$2" build_id image_version os_release_version="" completed_at tmp
   build_id="$(current_build_id)"
-  image_version="$(source_bundle_version)"
+  # The strict receipt reader displays image_version; no additive key is allowed.
+  if [[ -f "${OS_RELEASE_VERSION_FILE}" && -r "${OS_RELEASE_VERSION_FILE}" ]] \
+    && IFS= read -r os_release_version <"${OS_RELEASE_VERSION_FILE}" \
+    && [[ "${os_release_version}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
+    && cmp -s "${OS_RELEASE_VERSION_FILE}" <(printf '%s\n' "${os_release_version}"); then
+    image_version="${os_release_version}"
+  else
+    image_version="$(source_bundle_version)"
+  fi
   completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "${UPDATE_STATE_DIR}"
   tmp="${SYNC_RECEIPT_FILE}.tmp.$$"
-  cat >"${tmp}" <<EOF
+  cat >"${tmp}" <<EOF || die "writing sync receipt failed"
 {
   "state_sha256": "$(json_str "${state_sha}")",
   "build_id": "$(json_str "${build_id}")",
@@ -471,7 +481,9 @@ write_sync_receipt() {
   "completed_at": "$(json_str "${completed_at}")"
 }
 EOF
-  mv -f "${tmp}" "${SYNC_RECEIPT_FILE}"
+  "${SYNC_BIN}" "${tmp}" || die "sync receipt file fsync failed"
+  mv -f "${tmp}" "${SYNC_RECEIPT_FILE}" || die "sync receipt rename failed"
+  "${SYNC_BIN}" "$(dirname "${SYNC_RECEIPT_FILE}")" || die "sync receipt directory fsync failed"
 }
 
 # ---------------------------------------------------------------------------
