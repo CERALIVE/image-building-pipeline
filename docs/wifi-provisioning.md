@@ -7,7 +7,7 @@ debugging the portal on hardware).
 - **Trigger + AP bring-up** — Task 11 (`ceralive-provision.sh` part 1)
 - **Captive page + credential handoff + teardown** — Task 14 (`ceralive-provision.sh`
   part 2 + `ceralive-portal.sh`)
-- Subsystem summary: [`../../AGENTS.md`](../../AGENTS.md) → *First-boot WiFi provisioning portal*
+- Subsystem summary: [`docs/agents/add-on-subsystem.md`](agents/add-on-subsystem.md) → *First-boot WiFi provisioning portal*
 
 ## Artifacts
 
@@ -168,7 +168,8 @@ set and its digests are recorded in `manifests/packages/removed.md`.
 This closes the AP-capability gate for removing `hostapd` from **future builds**.
 The boards were not re-imaged without it, and the operator's physical client join,
 credential POST and automatic credential-handoff path were not exercised by this
-drill. The provisioning subsystem remains `[PARTIAL]` for those separate paths.
+drill. The provisioning subsystem remains `[PARTIAL]` for those separate paths;
+its routed summary is in [`docs/agents/add-on-subsystem.md`](agents/add-on-subsystem.md).
 
 ## Verification
 

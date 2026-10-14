@@ -122,7 +122,7 @@ when multiple modems are present.
 
 Note: modem **source-routing** is no longer a concern here at all — the SRTLA
 source-policy routing layer is RETIRED (bonding pins egress per link with
-`SO_BINDTODEVICE`; see `AGENTS.md` → "SRTLA source-policy routing is RETIRED").
+`SO_BINDTODEVICE`; see `docs/agents/known-issues-deferred.md` → "SRTLA source-policy routing is RETIRED").
 This item is about deterministic **rename rules** only, which require reading the
 real `ID_PATH` from a physical modem.
 
@@ -170,7 +170,7 @@ rule for each modem interface, pinning it to a stable name.
 
 This item used to require twin-updating the drift-gated SRTLA source-policy
 routing payloads whenever the modem interface naming block changed. That layer is
-RETIRED (see [`../AGENTS.md`](../AGENTS.md) → "SRTLA source-policy routing is
+RETIRED (see [`docs/agents/known-issues-deferred.md`](agents/known-issues-deferred.md) → "SRTLA source-policy routing is
 RETIRED"), so a modem rename now touches the `.link` rules and nothing else.
 
 ### Checklist
@@ -332,7 +332,7 @@ bookworm versions proved insufficient) in `versions.yaml:163` and
 ## Item 4 — Rock 5B+ A/B Hardware Validation
 
 **DEFERRED.md ref:** not a separate DEFERRED.md item — this is a build-system
-gate tracked in `AGENTS.md` (KIOSK STACK / hardware-blocked) and in the OTA
+gate tracked in `docs/agents/kiosk-stack.md` (KIOSK STACK / hardware-blocked) and in the OTA
 validation path.  
 **Software prerequisite:** `[EXISTS]` — the Rock manifest enables A/B, the factory
 image populates both slots, and the custom backend/bootcount contract is covered

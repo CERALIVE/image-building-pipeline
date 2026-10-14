@@ -72,7 +72,7 @@ board_identity_scalar() {
 
 # board_identity_variant_dtb <file> <variant> — read
 # variant_overrides.<variant>.dtb_name, or nothing. The override is the only key
-# a board may restate per variant (see the pipeline AGENTS.md variant contract),
+# a board may restate per variant (see docs/agents/key-facts.md variant contract),
 # so this reader deliberately understands exactly that one path.
 board_identity_variant_dtb() {
   local file="$1" variant="$2"

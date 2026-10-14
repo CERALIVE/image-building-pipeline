@@ -172,7 +172,7 @@ Notes:
   static `/etc/ceralive/conf.d/*.conf` defaults remain **read-only seeds in the rootfs**;
   the **live, writable** copies live under `/data`.
 - The SRTLA source-policy routing seeds (`rt_tables` reservations, the dhclient hook,
-  the NM dispatcher) that used to live in the rootfs are RETIRED — see `AGENTS.md`
+  the NM dispatcher) that used to live in the rootfs are RETIRED — see `docs/agents/known-issues-deferred.md`
   → "SRTLA source-policy routing is RETIRED". Only *runtime-derived* routing state
   that must persist goes under `/data/srtla/`.
 - `/tmp/srtla_ips` stays on tmpfs (ephemeral by design). `/tmp` is tmpfs (1 GB) per

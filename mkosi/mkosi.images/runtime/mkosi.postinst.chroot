@@ -129,7 +129,7 @@ EOF
 #     reports EVERY package as "Unable to locate". Fetch only that one package
 #     through a throwaway HTTP source; it keeps the same explicit `Signed-By`
 #     keyring, so the package stays signature-verified. Nothing shipped changes —
-#     see AGENTS.md → "HTTPS sources need a CA store".
+#     see docs/agents/key-facts.md → "HTTPS sources need a CA store".
 #
 #     Skip check does more than "a file exists": base already ships
 #     ca-certificates (base/mkosi.conf), so a non-empty crt file here can

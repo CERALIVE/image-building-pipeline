@@ -58,7 +58,7 @@ Filesystem      Size  Used Avail Use% Mounted on
 Both Docker and Podman are usable container runtimes for the canonical build.
 `ccache` is not a hard requirement for the container path (the builder image
 carries its own persistent ccache volume across runs, see the CI/build cache
-notes in the root `AGENTS.md`), but installing it locally speeds up a
+notes in [`docs/agents/key-facts.md`](agents/key-facts.md)), but installing it locally speeds up a
 `--native` kernel-from-source build materially — and EVERY build is one now, so
 this matters on the default path rather than only on an opt-in variant. A full
 kernel `make bindeb-pkg` is the single most compile-heavy stage in this
@@ -291,7 +291,7 @@ password hash. **The debug image is bench-only and is never published to apt
 or R2** — no release/publish path ever sets this flag. Full contract, including
 why the flag must be resolved before package-set resolution and the
 directory-glob trap this variant had to be shielded from: root
-[`AGENTS.md`](../AGENTS.md) → "The debug package delta is VARIANT-keyed" KEY
+[`docs/agents/key-facts.md`](agents/key-facts.md) → "The debug package delta is VARIANT-keyed" KEY
 FACT.
 
 ### Image size gate
@@ -643,7 +643,7 @@ off the medium it booted from while fstab resolves everything else by label
 alone. The board therefore looked healthy, and a RAUC recovery transition
 silently wrote its A/B state to the wrong physical device — recoverable only by
 hand. If a board has both a bench microSD and an eMMC image, `--bench-labels 1`
-is not optional. Full write-up: `AGENTS.md`, "Bench PARTLABEL overlay" and the
+is not optional. Full write-up: `docs/agents/key-facts.md`, "Bench PARTLABEL overlay" and the
 candidate-builder KEY FACT; also [`dev-loop.md`](dev-loop.md).
 
 **Microsd boot discipline, board-verified.** A real Rock 5B+ microSD boot

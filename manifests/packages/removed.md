@@ -225,7 +225,7 @@ start of this audit — **48 packages**, captured with
 `grep -vE '^\s*(#|$)' shared.list | sort`. Nothing was judged by "no grep hit":
 every verdict below cites a *positive* artefact — a shipped unit or script that
 invokes the binary, a reverse dependency read out of a real built rootfs's
-`/var/lib/dpkg/status`, an AGENTS.md KEY FACT, or (for a REMOVE) an explicit
+`/var/lib/dpkg/status`, a docs/agents/key-facts.md KEY FACT, or (for a REMOVE) an explicit
 structural reason the package cannot be reached.
 
 Explicitly **out of scope**: `development.delta.list` (the 18-package debug delta),
@@ -240,7 +240,7 @@ Evidence classes used in the table:
 |---|---|
 | `INVOKE` | a shipped unit/script/binary on the device executes it — file:line cited |
 | `RDEP` | reverse dependency in a real built rootfs `/var/lib/dpkg/status` |
-| `KEYFACT` | an `AGENTS.md` KEY FACT states the requirement (usually board-confirmed) |
+| `KEYFACT` | a `docs/agents/key-facts.md` KEY FACT states the requirement (usually board-confirmed) |
 | `PLUGIN` | GStreamer plugin reachability / element-factory dependency chain |
 | `ROOTFS` | read directly out of the built rootfs (unit present, config written, rc.d link) |
 
@@ -266,7 +266,7 @@ Evidence classes used in the table:
 | 16 | `gstreamer1.0-plugins-base` | KEEP | PLUGIN: core `videoconvert`/`audioconvert`/`audioresample`/`queue` — every cerastream graph template. | all |
 | 17 | `gstreamer1.0-plugins-good` | KEEP | PLUGIN: `v4l2src` (HDMI-RX / UVC capture), `rtp*`, `matroska`/`isomp4`. | all |
 | 18 | `gstreamer1.0-plugins-ugly` | KEEP | PLUGIN: `x264enc` — the `generic` software-encode profile, which is the platform every non-hardware boot-parity run uses (`cerastream/tests/hw-smoke.sh` `generic/h264` → `x264enc`). | all |
-| 19 | `gstreamer1.0-tools` | KEEP | INVOKE (on-board): `gst-inspect-1.0` / `gst-launch-1.0` are the whole of `cerastream/tests/hw-smoke.sh` Phase A + B, and `gst-inspect-1.0` is the board evidence cited throughout AGENTS.md (e.g. the Mesa prune's "264 plugins / 1548 features"). | all |
+| 19 | `gstreamer1.0-tools` | KEEP | INVOKE (on-board): `gst-inspect-1.0` / `gst-launch-1.0` are the whole of `cerastream/tests/hw-smoke.sh` Phase A + B, and `gst-inspect-1.0` is the board evidence cited throughout docs/agents/key-facts.md (e.g. the Mesa prune's "264 plugins / 1548 features"). | all |
 | 20 | `hostapd` | **REMOVE (Todo 48, 2026-09-25)** | Both current-production RK3588 boards actually entered NM-native AP mode without a hostapd process: `ceralive-ap` reported activated/ap, wlan0 held `192.168.42.1/24`, and NetworkManager spawned dnsmasq for the shared connection. Both completed out-of-band `ceralive-provision teardown` with wlan0 disconnected, portal socket inactive, CeraUI active, both flags absent and the AP profile deleted. Exact Todo-48 receipts (name → SHA-256): `rock-5b-plus.txt` → `00fc6435a7372101589e78fa4cc6bc6314b3712d1d5e5e13d6c139898af1c883`, `rock-5b-plus-teardown.txt` → `fb3b99f46e72dacfb04a4c8a9bdb05a43e59016951435f89f967c28c5280aa6c`, `orange-pi-5-plus.txt` → `e52a9b1bd106195ad2373e993bbab1a89b3e7571229875e55575d390aa7a9b40`, `orange-pi-5-plus-teardown.txt` → `b4c4f6f7a16ab161608d6e7c4192b3e444157bf91246a6b6d8cbd91ed64998bf`. The former fallback was inert (`hostapd.conf` absent; no runtime invoker), and its two-board evidence gate is now met. `network-manager`, `dnsmasq` and `wpasupplicant` remain. This removes the package from **future images only**; the tested production boards still had it installed, but did not execute it. | all |
 | 21 | `ipcalc` | **REMOVE (Todo 30)** | The retired SRTLA source-routing hook was its only rationale; the completed consumer scan found no replacement runtime consumer. | all |
 | 22 | `iproute2` | KEEP | INVOKE: `ip` for CeraUI's read-only route/policy-route diagnostics (`policy-route-check.ts`, `gateways.ts`); `ip` is in CeraUI's `run.ts` `ALLOWED` allowlist. SRTLA source-policy routing was retired, `ip` itself is still required. | all |

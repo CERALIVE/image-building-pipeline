@@ -33,7 +33,8 @@
 #   shared subnet. Both RK3588 boards passed the hardware AP/teardown drill on
 #   2026-09-25; hostapd is no longer explicitly installed. NM-native AP is
 #   supported since NM 1.0. AP mode still needs a capable wlan driver; both
-#   shipped RK3588 boards passed that hardware check — see AGENTS.md.
+#   shipped RK3588 boards passed that hardware check — see
+#   docs/agents/add-on-subsystem.md and docs/wifi-provisioning.md for its limits.
 #
 # CAPTIVE PORTAL (Task 14): served by ceralive-portal.{socket,@.service} (systemd
 #   socket activation, Accept=yes) running the bash handler /usr/local/sbin/ceralive-portal
