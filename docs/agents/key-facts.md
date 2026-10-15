@@ -1414,7 +1414,7 @@ state** under the staging dir (the host apt config is never touched).
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
   `ceralive-modem-support=1.4.0` companion, and the separately published
-  `ceralive-apt-credentials=1.0.0`. All are downloaded into `$DEST/debs/`
+  `ceralive-apt-credentials=1.0.1`. All are downloaded into `$DEST/debs/`
   using the pins from `manifests/first-party-deb-versions.txt` (16 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
@@ -3798,14 +3798,15 @@ URL+SHA pin, see the "CeraLive librga stays a platform-layer URL+SHA swap"
 section) and must stay apt-updatable, unlike the genuinely third-party MPP
 runtime/config-glue/generated-compat trio.
 
-**`ceralive-apt-credentials` — wired; stable-channel delivery pending.** Its exact
-`1.0.0` package pin, Architecture: all fetch allowance, partition classification,
+**`ceralive-apt-credentials` — wired; channel availability is a separate gate.** Its exact
+`1.0.1` package pin, Architecture: all fetch allowance, partition classification,
 and app-layer `RUNTIME_APP_PKGS` install are now present. The separate
-`apt-credentials:` registry block pins `apt-credentials-v1.0.0` from the
+`apt-credentials:` registry block pins `apt-credentials-v1.0.1` from the
 `apt-worker` repository; the Worker's own `apt-worker: pin: latest` block is
 unchanged. `DRY_RUN` can list the pinned package without fetching it. The
-GitHub release is published and served on beta; a stable-channel real build
-remains blocked until the separate promotion to stable. The
+GitHub release is published. The earlier `1.0.0` was served on beta; the
+authenticated catalog refresh does not verify `1.0.1` APT-channel availability,
+which must be established before a stable-channel real build. The
 runtime executor no longer decodes CI's `APT_CLIENT_*` key into the image;
 build-time first-party fetch authentication still uses those CI inputs. The
 package's postinst owns the device APT TLS config and `_apt`-readable key under
@@ -3813,8 +3814,10 @@ package's postinst owns the device APT TLS config and `_apt`-readable key under
 using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
 The authenticated `--refresh` now records the release as the ninth component;
 previous catalogs without its row remain valid only for regression comparison.
-The live currency check reports newer CeraUI and cerastream releases as STALE,
-without changing image pins. No new image or board installation is claimed.
+The refreshed catalog and selected pins pass the currency check while CeraUI
+remains at its released `v2026.9.4` pin. Historical credentials fixtures remain
+at `1.0.0`; only the live DRY_RUN expectation follows the new image pin.
+No new image or board installation is claimed.
 
 Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
 mechanism, proven against real mkosi with a mutation leg),

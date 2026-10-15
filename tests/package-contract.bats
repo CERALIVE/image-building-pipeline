@@ -1051,7 +1051,7 @@ PINS
   [[ "$output" == *"gstreamer1.0-libuvcsrc=2026.9.0"* ]]
   [[ "$output" == *"ceralive-device"* ]]
   [[ "$output" == *"srtla"* ]]
-  [[ "$output" == *"ceralive-apt-credentials=1.0.0"* ]]
+  [[ "$output" == *"ceralive-apt-credentials=1.0.1"* ]]
   # and NOT ONE .deb was staged (plan-only, zero side effects)
   run bash -c "shopt -s nullglob; f=('$debs'/*.deb); echo \${#f[@]}"
   [ "$output" -eq 0 ]

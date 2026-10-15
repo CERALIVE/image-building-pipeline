@@ -164,7 +164,7 @@ apt-credentials:
   path: apt-worker
   repo: https://github.com/CERALIVE/apt-worker
   kind: first-party
-  pin: apt-credentials-v1.0.0
+  pin: apt-credentials-v1.0.1
   channel: stable
 
 ceralive-platform:

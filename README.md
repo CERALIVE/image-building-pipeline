@@ -4,11 +4,12 @@ The [UVC package migration](docs/uvc-package-migration.md) is [EXISTS]: the pipe
 pins the released, APT-served `gstreamer1.0-libuvcsrc=2026.9.0` on both architectures.
 This is an input migration, not a claim that a new image was built or flashed.
 
-The update-system integration branch now selects `ceralive-apt-credentials=1.0.0`
+The update-system integration branch now selects `ceralive-apt-credentials=1.0.1`
 as an app-layer package rather than baking CI's APT client key into the runtime
-image. Its `apt-credentials-v1.0.0` GitHub release exists and is served on the
-beta APT channel; promotion to stable is separate and a stable-channel real
-build remains blocked. The authenticated release-currency refresh now records
+image. Its `apt-credentials-v1.0.1` GitHub release exists; catalog refresh does
+not establish APT-channel availability. The earlier `1.0.0` release was served
+on beta; stable-channel availability of `1.0.1` remains unverified here and must
+be established before a stable-channel real build. The authenticated release-currency refresh records
 the new component even when its previous catalog predates it; it still fails
 on a downgrade of any previously recorded component. This is not a shipped-image claim.
 

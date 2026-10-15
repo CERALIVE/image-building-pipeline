@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-25T22:36:50.699356+00:00",
+  "checked_at": "2026-10-15T05:53:30.264995+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -13,10 +13,10 @@
     },
     {
       "component": "apt-credentials",
-      "tag": "apt-credentials-v1.0.0",
-      "published_at": "2026-09-25T22:16:32Z",
+      "tag": "apt-credentials-v1.0.1",
+      "published_at": "2026-09-27T18:47:02Z",
       "packages": {
-        "ceralive-apt-credentials[all]": "1.0.0"
+        "ceralive-apt-credentials[all]": "1.0.1"
       }
     },
     {
