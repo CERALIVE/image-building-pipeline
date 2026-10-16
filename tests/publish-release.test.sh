@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-python3 - "$repo/.github/workflows/publish-release.yml" <<'PY'
+# shellcheck source=tests/lib/assertions.sh
+source "$repo/tests/lib/assertions.sh"
+check() { if "$@"; then ok "$*"; else bad "$*"; fi; }
+tmp=''
+finish() {
+  local status=$?
+  [[ "$status" -eq 0 || "$FAIL" -gt 0 ]] || bad "unexpected exit: $status"
+  [[ -z "$tmp" ]] || rm -rf "$tmp"
+  printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+trap 'finish; exit $?' EXIT
+set -o errtrace
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
+check python3 - "$repo/.github/workflows/publish-release.yml" <<'PY'
 from pathlib import Path
 import sys
 
@@ -16,10 +30,8 @@ for destination, source in (
     assert f'export {destination}="${source}"' in before_read, f'{destination} not exported before refresh pre-read'
 assert 'export AWS_DEFAULT_REGION=auto' in before_read, 'refresh pre-read missing AWS region'
 PY
-printf 'PASS: workflow refresh pre-read authenticates before its direct AWS calls\n'
 umask 077
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/objects" "$tmp/signer" "$tmp/other" "$tmp/publisher-tmp"
 mkdir -p "$tmp/publisher-cwd"
 ln -s "$repo/lib" "$tmp/publisher-cwd/lib"
@@ -123,11 +135,11 @@ refresh() {
   etag="\"$(openssl dgst -md5 "$file" | cut -d' ' -f2)\""
   publisher refresh --board "$b" --channel "$c" --expect-serial "$serial" --expect-etag "$etag"
 }
-assert() { "$@" || { printf 'FAIL: %s\n' "$*" >&2; exit 1; }; }
-publish 2026.10.1 beta
+assert() { check "$@"; }
+check publish 2026.10.1 beta
 base="$tmp/objects/releases/rock-5b-plus/2026.10.1"
 assert test -f "$base/channels/beta"
-python3 - "$base/index.json" "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
+check python3 - "$base/index.json" "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
 import json,sys
 i=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]))
 assert i['schema']==1 and set(i['files'])=={'bundle.raucb','flash.raw.xz'}
@@ -138,15 +150,13 @@ assert m['flash']['raw_sha256']!=m['flash']['sha256']
 assert m['compatible']=='ceralive-rock-5b-plus' and m['lock_url'].endswith('/packages.lock.json')
 PY
 channel="$tmp/objects/channels/beta/rock-5b-plus.json"
-openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
-printf 'PASS: dedicated CMS signature verifies with test keyring\n'
-python3 - "$tmp/aws.log" <<'PY'
+check openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
+check python3 - "$tmp/aws.log" <<'PY'
 import sys
 puts=[l for l in open(sys.argv[1]) if l.startswith('put-object')]
 assert puts[-2].strip()=='put-object channels/beta/rock-5b-plus.json.sig'
 assert puts[-1].strip()=='put-object channels/beta/rock-5b-plus.json'
 PY
-printf 'PASS: signature before manifest LAST\n'
 make_issuer() {
   local name="$1" subject="$2" root="${3:-$tmp/signer/root-ca}"
   openssl req -newkey rsa:2048 -nodes -keyout "$tmp/$name.key" -out "$tmp/$name.csr" \
@@ -223,12 +233,14 @@ sign_channel() {
     "${args[@]}" -outform DER -out "$target.sig" >/dev/null
 }
 set_signer bench
-publish 2026.10.7 drill >"$tmp/bench-publish.log"
+check publish 2026.10.7 drill >"$tmp/bench-publish.log"
 set_signer production
 for kind in root alternate near foreign expired future; do
   set_signer "$kind"
   if publish 2026.10.9 drill >"$tmp/$kind-publish.log" 2>&1; then
-    printf 'FAIL: %s-issued signer published a channel\n' "$kind" >&2; exit 1
+    bad "$kind-issued signer published a channel"
+  else
+    ok "$kind-issued signer refused"
   fi
   if [[ "$kind" == root || "$kind" == alternate || "$kind" == near ]]; then
     issuer="$(openssl x509 -in "$tmp/$kind-manifest.pem" -noout -issuer -nameopt RFC2253)"
@@ -240,10 +252,12 @@ cp "$channel.sig" "$tmp/production-channel.sig"
 for kind in bench root alternate near foreign expired future; do
   sign_channel "$channel" "$kind"
   if [[ "$kind" == bench ]]; then
-    publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/bench-pointer.log"
+    check publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/bench-pointer.log"
   else
     if publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/$kind-pointer.log" 2>&1; then
-      printf 'FAIL: %s-issued channel pointer accepted\n' "$kind" >&2; exit 1
+      bad "$kind-issued channel pointer accepted"
+    else
+      ok "$kind-issued channel pointer refused"
     fi
     if [[ "$kind" == root || "$kind" == alternate || "$kind" == near ]]; then
       issuer="$(openssl x509 -in "$tmp/$kind-manifest.pem" -noout -issuer -nameopt RFC2253)"
@@ -267,34 +281,33 @@ PY
 for kind in root alternate; do
   set_signer "$kind"
   STUB_R2="$tmp/mutant-$kind" STUB_LOG="$tmp/mutant-$kind.log" \
-    PUBLISH_RELEASE_SCRIPT="$tmp/ci/publish-release.sh" publish 2026.10.9 drill >"$tmp/$kind-publish-mutant.log" 2>&1 || {
-      printf 'FAIL: issuer mutation did not publish %s-issued signer\n' "$kind" >&2; exit 1;
-    }
+    PUBLISH_RELEASE_SCRIPT="$tmp/ci/publish-release.sh" check publish 2026.10.9 drill >"$tmp/$kind-publish-mutant.log" 2>&1
 done
 set_signer production
 for kind in root alternate; do
   sign_channel "$channel" "$kind"
   PUBLISH_RELEASE_SCRIPT="$tmp/ci/publish-release.sh" \
-    publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/$kind-pointer-mutant.log" 2>&1 || {
-      printf 'FAIL: issuer mutation did not read %s-issued pointer\n' "$kind" >&2; exit 1;
-    }
+    check publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/$kind-pointer-mutant.log" 2>&1
 done
 cp "$tmp/production-channel.sig" "$channel.sig"
 rm -f "$tmp/objects/channels/drill/rock-5b-plus.json" "$tmp/objects/channels/drill/rock-5b-plus.json.sig"
-printf 'PASS: publisher and pointer readers accept production/bench issuers, refuse root/alternate/near-miss, and issuer mutations admit root/alternate\n'
 if publish 2026.10.1 beta >"$tmp/collision.log" 2>&1; then
-  printf 'FAIL: same-version channel replay should be refused\n' >&2; exit 1
+  bad 'same-version channel replay should be refused'
+else
+  ok 'same-version replay refused'
 fi
 if ! grep -q 'serial replay refused' "$tmp/collision.log"; then
-  printf 'FAIL: unexpected collision refusal:\n' >&2
+  bad 'unexpected collision refusal'
   sed -n '1,8p' "$tmp/collision.log" >&2
-  exit 1
+else
+  ok 'collision diagnosed as serial replay'
 fi
-printf 'PASS: create-only collision refused\n'
 cp "$tmp/bundle.raucb" "$tmp/original.raucb"
 printf 'changed-bundle\n' >"$tmp/bundle.raucb"
 if publish 2026.10.1 drill >"$tmp/content-collision.log" 2>&1; then
-  printf 'FAIL: changed immutable part accepted\n' >&2; exit 1
+  bad 'changed immutable part accepted'
+else
+  ok 'invalid changed immutable part refused'
 fi
 assert grep -q 'signed bundle verification failed' "$tmp/content-collision.log"
 assert test ! -e "$tmp/objects/channels/drill/rock-5b-plus.json"
@@ -304,10 +317,11 @@ mkfs.ext4 -q -F -d "$tmp/rootfs" "$tmp/rauc-input/rootfs.ext4"
 make_bundle ceralive-rock-5b-plus "$tmp/changed-valid.raucb"
 if publisher publish --board rock-5b-plus --version 2026.10.1 --channel drill \
     --bundle "$tmp/changed-valid.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/immutable-collision.log" 2>&1; then
-  printf 'FAIL: valid changed bundle replaced immutable release\n' >&2; exit 1
+  bad 'valid changed bundle replaced immutable release'
+else
+  ok 'valid changed immutable part refused'
 fi
 assert grep -q 'immutable R2 key exists with different bytes' "$tmp/immutable-collision.log"
-printf 'PASS: changed immutable part refused before channel mutation\n'
 before="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 beta="$tmp/objects/channels/beta/rock-5b-plus.json"
 cp "$beta" "$tmp/beta-valid.json"; cp "$beta.sig" "$tmp/beta-valid.sig"
@@ -319,43 +333,43 @@ PY
 openssl cms -sign -binary -in "$beta" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
   -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$beta.sig" >/dev/null
 if publisher promote --board rock-5b-plus --version 2026.10.1 --to stable >"$tmp/promote-mismatch.log" 2>&1; then
-  printf 'FAIL: promote accepted signed mismatched compatible\n' >&2; exit 1
+  bad 'promote accepted signed mismatched compatible'
+else
+  ok 'promotion refused signed incompatible beta'
 fi
 assert grep -q 'channel compatible mismatch' "$tmp/promote-mismatch.log"
 assert test ! -e "$base/channels/stable"
 cp "$tmp/beta-valid.json" "$beta"; cp "$tmp/beta-valid.sig" "$beta.sig"
-printf 'PASS: promotion refuses a signed incompatible beta pointer before membership write\n'
-publisher promote --board rock-5b-plus --version 2026.10.1 --to stable
+check publisher promote --board rock-5b-plus --version 2026.10.1 --to stable
 after="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
-[[ "$before" == "$after" ]] || { printf 'FAIL: promote uploaded parts\n' >&2; exit 1; }
+assert_eq 'promotion does not upload parts' "$before" "$after"
 assert test -f "$base/channels/stable"
-python3 - "$tmp/objects/channels/stable/rock-5b-plus.json" <<'PY'
+check python3 - "$tmp/objects/channels/stable/rock-5b-plus.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]));assert m['channel']=='stable' and m['serial']==1 and m['version']=='2026.10.1'
 PY
-printf 'PASS: promote reused existing parts\n'
 before="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
 cp "$channel" "$tmp/beta-before.json"
-refresh rock-5b-plus beta 1
+check refresh rock-5b-plus beta 1
 after="$(grep -c '^put-object releases/.*/.*part' "$tmp/aws.log")"
-[[ "$before" == "$after" ]] || { printf 'FAIL: refresh uploaded parts\n' >&2; exit 1; }
-python3 - "$channel" "$tmp/objects/channels/stable/rock-5b-plus.json" "$tmp/beta-before.json" <<'PY'
+assert_eq 'refresh does not upload parts' "$before" "$after"
+check python3 - "$channel" "$tmp/objects/channels/stable/rock-5b-plus.json" "$tmp/beta-before.json" <<'PY'
 import json,sys,datetime
 b=json.load(open(sys.argv[1]));s=json.load(open(sys.argv[2]));old=json.load(open(sys.argv[3]));assert b['serial']==2 and s['serial']==1
 assert b['version']==s['version'] and b['bundle']==s['bundle'] and b['flash']==s['flash']
 assert b['published_at']>old['published_at'] and b['expires_at']>old['expires_at']
 PY
-printf 'PASS: refresh preserved artifacts, advanced serial and expiry, no parts\n'
 cp "$tmp/bundle.pem" "$tmp/signer/leaf.pem";cp "$tmp/bundle.key" "$tmp/signer/leaf.key"
 if refresh rock-5b-plus beta 2 >"$tmp/wrong-signer.log" 2>&1; then
-  printf 'FAIL: bundle leaf signed a manifest\n' >&2; exit 1
+  bad 'bundle leaf signed a manifest'
+else
+  ok 'bundle leaf refused for manifest signing'
 fi
 assert grep -q 'wrong manifest signer CN' "$tmp/wrong-signer.log"
 cp "$tmp/manifest.pem" "$tmp/signer/leaf.pem";cp "$tmp/manifest.key" "$tmp/signer/leaf.key"
 openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/bundle.key" -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$tmp/bundle.sig" >/dev/null
-openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
+check openssl cms -verify -binary -inform DER -in "$tmp/bundle.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 assert test "$(openssl x509 -in "$tmp/bundle.pem" -noout -subject -nameopt RFC2253)" = 'subject=CN=CeraLive Bundle Signer'
-printf 'PASS: bundle leaf cryptographically valid but identity gate refuses it\n'
 openssl x509 -req -in "$tmp/manifest.csr" -CA "$tmp/signer/intermediate-ca.pem" \
   -CAkey "$tmp/signer/intermediate-ca.key" -CAcreateserial -days 10 \
   -extfile "$tmp/bundle.ext" -out "$tmp/dual-manifest.pem" >/dev/null 2>&1
@@ -364,23 +378,30 @@ openssl cms -sign -binary -in "$channel" -signer "$tmp/dual-manifest.pem" \
   -inkey "$tmp/manifest.key" -certfile "$tmp/signer/intermediate-ca.pem" \
   -outform DER -out "$channel.sig" >/dev/null
 if publisher prune --board rock-5b-plus --channel-family --dry-run >"$tmp/dual-prune.log" 2>&1; then
-  printf 'FAIL: dual-EKU channel signer accepted by publisher prune\n' >&2; exit 1
+  bad 'dual-EKU channel signer accepted by publisher prune'
+else
+  ok 'dual-EKU channel signer refused'
 fi
 cp "$tmp/manifest-original.sig" "$channel.sig"
-printf 'PASS: publisher refuses a valid chain with bundle EKU under the correct manifest CN\n'
 cp "$channel" "$tmp/pre-interruption.json"
 cp "$channel.sig" "$tmp/pre-interruption.sig"
 if (STUB_KILL_AFTER_SIG=1 refresh rock-5b-plus beta 2 >"$tmp/interrupt.log" 2>&1) 2>/dev/null; then
-  printf 'FAIL: publisher survived injected process kill after signature PUT\n' >&2; exit 1
+  bad 'publisher survived injected process kill after signature PUT'
+else
+  ok 'publisher killed after signature PUT'
 fi
 assert cmp "$channel" "$tmp/pre-interruption.json"
 if cmp -s "$channel.sig" "$tmp/pre-interruption.sig"; then
-  printf 'FAIL: injection did not write new signature before killing publisher\n' >&2; exit 1
+  bad 'injection did not write new signature before killing publisher'
+else
+  ok 'injection wrote new signature'
 fi
 cp "$channel.sig" "$tmp/interrupted.sig"
 printf 'foreign signature\n' >"$channel.sig"
 if refresh rock-5b-plus beta 2 >"$tmp/foreign-recovery.log" 2>&1; then
-  printf 'FAIL: foreign signature repaired as if it were the interrupted write\n' >&2; exit 1
+  bad 'foreign signature repaired as if it were the interrupted write'
+else
+  ok 'foreign recovery signature refused'
 fi
 assert grep -q 'foreign signature refused' "$tmp/foreign-recovery.log"
 assert cmp "$channel" "$tmp/pre-interruption.json"
@@ -388,29 +409,34 @@ cp "$tmp/interrupted.sig" "$channel.sig"
 cp "$base/index.json" "$tmp/recovery-index.good"
 printf 'index drift\n' >"$base/index.json"
 if refresh rock-5b-plus beta 2 >"$tmp/recovery-drift.log" 2>&1; then
-  printf 'FAIL: recovery accepted drifted immutable index\n' >&2; exit 1
+  bad 'recovery accepted drifted immutable index'
+else
+  ok 'recovery refused drifted immutable index'
 fi
 assert cmp "$channel" "$tmp/pre-interruption.json"
 cp "$tmp/recovery-index.good" "$base/index.json"
-refresh rock-5b-plus beta 2 >"$tmp/recovered.log"
-openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
+check refresh rock-5b-plus beta 2 >"$tmp/recovered.log"
+check openssl cms -verify -binary -inform DER -in "$channel.sig" -content "$channel" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 assert test "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$channel")" = 3
-printf 'PASS: killed between signature and JSON PUT; authenticated retry repairs pair\n'
 if (STUB_KILL_AFTER_SIG=1 publish 2026.10.8 drill >"$tmp/initial-interrupt.log" 2>&1) 2>/dev/null; then
-  printf 'FAIL: initial publisher survived injected kill\n' >&2; exit 1
+  bad 'initial publisher survived injected kill'
+else
+  ok 'initial publisher killed after signature PUT'
 fi
 assert test ! -e "$tmp/objects/channels/drill/rock-5b-plus.json"
-publish 2026.10.8 drill >"$tmp/initial-recovered.log"
-openssl cms -verify -binary -inform DER -in "$tmp/objects/channels/drill/rock-5b-plus.json.sig" \
+check publish 2026.10.8 drill >"$tmp/initial-recovered.log"
+check openssl cms -verify -binary -inform DER -in "$tmp/objects/channels/drill/rock-5b-plus.json.sig" \
   -content "$tmp/objects/channels/drill/rock-5b-plus.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
-printf 'PASS: initial channel signature-only interruption resumes from authenticated intent\n'
 if STUB_REPLAY=1 refresh rock-5b-plus beta 3 >"$tmp/serial-refuse.txt" 2>&1; then
-  printf 'FAIL: stale serial accepted\n' >&2; exit 1
+  bad 'stale serial accepted'
+else
+  ok 'serial replay refused'
 fi
 assert grep -q 'serial replay refused' "$tmp/serial-refuse.txt"
-printf 'PASS: stale channel ETag refuses serial replay\n'
 if refresh rock-5b-plus beta 2 >"$tmp/stale-precondition.log" 2>&1; then
-  printf 'FAIL: stale serial accepted\n' >&2; exit 1
+  bad 'stale serial accepted'
+else
+  ok 'stale refresh precondition refused'
 fi
 assert grep -q 'refresh precondition' "$tmp/stale-precondition.log"
 
@@ -420,17 +446,18 @@ for pair in "rock-5b-plus:$tmp/opi.raucb" "orange-pi-5-plus:$tmp/bundle.raucb" "
   b="${pair%%:*}" candidate="${pair#*:}"
   if publisher publish --board "$b" --version 2026.12.1 --channel drill \
       --bundle "$candidate" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >"$tmp/mismatch.log" 2>&1; then
-    printf 'FAIL: cross-board/near-spelling bundle accepted: %s\n' "$pair" >&2; exit 1
+    bad "cross-board/near-spelling bundle accepted: $pair"
+  else
+    ok "cross-board/near-spelling bundle refused: $pair"
   fi
   assert grep -q 'signed bundle compatible mismatch' "$tmp/mismatch.log"
 done
 assert test ! -e "$tmp/objects/releases/orange-pi-5-plus/2026.12.1/index.json"
-printf 'PASS: cross-board and near-spelling signed bundles refused before immutable writes\n'
 
-publisher publish --board orange-pi-5-plus --version 2026.12.1 --channel drill \
+check publisher publish --board orange-pi-5-plus --version 2026.12.1 --channel drill \
   --bundle "$tmp/opi.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json" >/dev/null
 opi="$tmp/objects/channels/drill/orange-pi-5-plus.json"
-python3 - "$opi" <<'PY'
+check python3 - "$opi" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]));assert m['compatible']=='ceralive-orangepi5-plus' and m['board']=='orange-pi-5-plus' and m['serial']==1
 PY
@@ -446,18 +473,17 @@ PY
 openssl cms -sign -binary -in "$opi" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
   -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$opi.sig" >/dev/null
 before="$(grep -c '^put-object releases/orange-pi-5-plus/' "$tmp/aws.log")"
-refresh orange-pi-5-plus drill 4 >/dev/null
+check refresh orange-pi-5-plus drill 4 >/dev/null
 after="$(grep -c '^put-object releases/orange-pi-5-plus/' "$tmp/aws.log")"
-[[ "$before" == "$after" && "$opi_index_before" == "$(sha256sum "$opi_base/index.json")" && "$opi_parts_before" == "$(sha256sum "$opi_base"/*.part*)" ]] || { printf 'FAIL: refresh rewrote release\n' >&2; exit 1; }
-python3 - "$opi" "$tmp/opi-original.json" <<'PY'
+[[ "$before" == "$after" && "$opi_index_before" == "$(sha256sum "$opi_base/index.json")" && "$opi_parts_before" == "$(sha256sum "$opi_base"/*.part*)" ]] && ok 'refresh preserves release bytes' || bad 'refresh rewrote release'
+check python3 - "$opi" "$tmp/opi-original.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]));old=json.load(open(sys.argv[2]))
 assert m['compatible']=='ceralive-orangepi5-plus' and m['board']=='orange-pi-5-plus' and m['serial']==5
 assert m['bundle']['url']=='https://images.ceralive.tv/releases/orange-pi-5-plus/2026.12.1/bundle.raucb'
 assert m['version']==old['version'] and m['bundle']==old['bundle'] and m['flash']==old['flash'] and m['lock_url']==old['lock_url']
 PY
-openssl cms -verify -binary -inform DER -in "$opi.sig" -content "$opi" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
-printf 'PASS: legacy signed Orange pointer refresh corrects compatible at serial 5 without release writes\n'
+check openssl cms -verify -binary -inform DER -in "$opi.sig" -content "$opi" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 
 cp "$opi" "$tmp/opi.good.json"; cp "$opi.sig" "$tmp/opi.good.sig"
 python3 - "$opi" <<'PY'
@@ -467,12 +493,12 @@ with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
 PY
 openssl cms -sign -binary -in "$opi" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
   -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$opi.sig" >/dev/null
-if refresh orange-pi-5-plus drill 5 >"$tmp/wrong-url.log" 2>&1; then printf 'FAIL: signed cross-board URL accepted\n' >&2; exit 1; fi
+if refresh orange-pi-5-plus drill 5 >"$tmp/wrong-url.log" 2>&1; then bad 'signed cross-board URL accepted'; else ok 'signed cross-board URL refused'; fi
 assert grep -q 'channel bundle/index mismatch' "$tmp/wrong-url.log"
 cp "$tmp/opi.good.json" "$opi";cp "$tmp/opi.good.sig" "$opi.sig"
 part="$opi_base/bundle.raucb.part0000";cp "$part" "$tmp/part.good"
 printf wrong >>"$part"
-if refresh orange-pi-5-plus drill 5 >"$tmp/drift.log" 2>&1; then printf 'FAIL: drifted release part accepted\n' >&2; exit 1; fi
+if refresh orange-pi-5-plus drill 5 >"$tmp/drift.log" 2>&1; then bad 'drifted release part accepted'; else ok 'drifted release part refused'; fi
 assert grep -q 'release part drift' "$tmp/drift.log"
 cp "$tmp/part.good" "$part"
 cp "$opi_base/index.json" "$tmp/index.good"
@@ -481,7 +507,7 @@ import json,sys
 p=sys.argv[1];i=json.load(open(p));i['files']['bundle.raucb']['sha256']='0'*64
 with open(p,'w') as f:json.dump(i,f)
 PY
-if refresh orange-pi-5-plus drill 5 >"$tmp/index-drift.log" 2>&1; then printf 'FAIL: drifted index accepted\n' >&2; exit 1; fi
+if refresh orange-pi-5-plus drill 5 >"$tmp/index-drift.log" 2>&1; then bad 'drifted index accepted'; else ok 'drifted index refused'; fi
 assert grep -q 'bundle.raucb digest differs from index' "$tmp/index-drift.log"
 cp "$tmp/index.good" "$opi_base/index.json"
 python3 - "$opi.sig" <<'PY'
@@ -491,23 +517,23 @@ with open(p,'rb') as f:content=bytearray(f.read())
 content[-1]^=1
 with open(p,'wb') as f:f.write(content)
 PY
-if refresh orange-pi-5-plus drill 5 >"$tmp/bad-signature.log" 2>&1; then printf 'FAIL: unsigned old pointer accepted\n' >&2; exit 1; fi
+if refresh orange-pi-5-plus drill 5 >"$tmp/bad-signature.log" 2>&1; then bad 'unsigned old pointer accepted'; else ok 'unsigned old pointer refused'; fi
 assert grep -q 'signed channel verification failed' "$tmp/bad-signature.log"
 cp "$tmp/opi.good.sig" "$opi.sig"
-printf 'PASS: signed wrong URL and immutable part drift both refuse refresh\n'
 printf 'CeraUI:\n  pin: v2026.10.9\n' >"$tmp/publisher-cwd/versions.yaml"
-for v in 2026.10.2 2026.10.3 2026.10.4 2026.10.5; do publish "$v" beta >/dev/null; done
-python3 - "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
+for v in 2026.10.2 2026.10.3 2026.10.4 2026.10.5; do check publish "$v" beta >/dev/null; done
+check python3 - "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['min_ceraui_version']=='2026.10.9'
 PY
-printf 'PASS: a changed fixture pin reaches the next published channel\n'
 mkdir -p "$tmp/objects/releases/rock-5b-plus/2026.9.9"
 printf orphan >"$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
 output="$(STUB_PAGE_SIZE=3 publisher prune --board rock-5b-plus --channel-family --dry-run)"
-[[ "$output" == *'2026.10.2'* && "$output" != *'2026.10.1/'* && "$output" != *'2026.9.9/'* ]] || { printf 'FAIL: prune plan not 3 newest + referenced + unmarked\n' >&2; exit 1; }
+[[ "$output" == *'2026.10.2'* && "$output" != *'2026.10.1/'* && "$output" != *'2026.9.9/'* ]] && ok 'prune plan: newest plus references and unmarked' || bad 'prune plan not 3 newest + referenced + unmarked'
 if STUB_PAGE_SIZE=3 STUB_NO_NEXT=1 publisher prune --board rock-5b-plus --channel-family >"$tmp/incomplete.log" 2>&1; then
-  printf 'FAIL: incomplete inventory was accepted\n' >&2; exit 1
+  bad 'incomplete inventory was accepted'
+else
+  ok 'incomplete inventory refused'
 fi
 assert grep -q 'incomplete R2 inventory' "$tmp/incomplete.log"
 stable_pointer="$tmp/objects/channels/stable/rock-5b-plus.json"
@@ -523,7 +549,9 @@ m['version']='2026.10.5'
 with open(p,'w') as f:json.dump(m,f,separators=(',',':'));f.write('\n')
 PY
 if publisher prune --board rock-5b-plus --channel-family >"$tmp/prune-tampered.log" 2>&1; then
-  printf 'FAIL: prune accepted tampered stable pointer and deleted its signed-only release\n' >&2; exit 1
+  bad 'prune accepted tampered stable pointer and deleted its signed-only release'
+else
+  ok 'tampered stable pointer refused'
 fi
 assert grep -q 'signed channel verification failed: stable' "$tmp/prune-tampered.log"
 assert test -f "$base/index.json"
@@ -531,25 +559,23 @@ assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
 cp "$tmp/stable-prune-valid.json" "$stable_pointer"
 rm "$stable_pointer.sig"
 if publisher prune --board rock-5b-plus --channel-family >"$tmp/prune-unsigned.log" 2>&1; then
-  printf 'FAIL: prune accepted an unsigned stable pointer\n' >&2; exit 1
+  bad 'prune accepted an unsigned stable pointer'
+else
+  ok 'unsigned stable pointer refused'
 fi
 assert grep -q 'signed channel signature absent: stable' "$tmp/prune-unsigned.log"
 assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
 cp "$tmp/stable-prune-valid.sig" "$stable_pointer.sig"
-printf 'PASS: tampered or unsigned channel refuses prune before any eligible release deletion\n'
-publisher prune --board rock-5b-plus --channel-family >/dev/null
+check publisher prune --board rock-5b-plus --channel-family >/dev/null
 assert test -f "$base/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.9.9/index.json"
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.2/index.json"
-printf 'PASS: prune keeps 3 newest + references, leaves unmarked versions alone\n'
-printf 'PASS: paginated inventory complete; missing continuation refuses deletion\n'
-publish 2026.11.1 drill >/dev/null
-publish 2026.11.2 drill >/dev/null
-publisher prune --board rock-5b-plus --channel-family >/dev/null
+check publish 2026.11.1 drill >/dev/null
+check publish 2026.11.2 drill >/dev/null
+check publisher prune --board rock-5b-plus --channel-family >/dev/null
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.11.1/index.json"
 assert test -f "$tmp/objects/releases/rock-5b-plus/2026.11.2/index.json"
-printf 'PASS: drill retains one newest marked version\n'
 python3 - "$repo/.github/workflows/publish-release.yml" "$tmp" <<'PY'
 import pathlib,sys,yaml
 w=yaml.safe_load(open(sys.argv[1]))
@@ -578,30 +604,29 @@ EXPECT_SERIAL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[
 EXPECT_ETAG="$(python3 -c 'import hashlib,json,sys;print(json.dumps(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest()))' "$channel")"
 export EXPECT_SERIAL EXPECT_ETAG
 workflow_refresh() { /bin/bash "$tmp/workflow-validate.sh" && /bin/bash "$tmp/workflow-publish.sh"; }
-workflow_refresh >"$tmp/workflow-success.log" 2>&1
-python3 - "$tmp/workflow-argv" "$EXPECT_SERIAL" "$EXPECT_ETAG" <<'PY'
+check workflow_refresh >"$tmp/workflow-success.log" 2>&1
+check python3 - "$tmp/workflow-argv" "$EXPECT_SERIAL" "$EXPECT_ETAG" <<'PY'
 import sys
 assert open(sys.argv[1]).read().splitlines()==['refresh','--board','rock-5b-plus','--channel','beta',
     '--expect-serial',sys.argv[2],'--expect-etag',sys.argv[3]]
 PY
 rm "$tmp/workflow-argv"
 saved_serial="$EXPECT_SERIAL" saved_etag="$EXPECT_ETAG"
-EXPECT_SERIAL='' workflow_refresh >"$tmp/workflow-missing.log" 2>&1 && { printf 'FAIL: workflow accepted missing serial\n' >&2; exit 1; }
-EXPECT_ETAG='' workflow_refresh >"$tmp/workflow-missing-etag.log" 2>&1 && { printf 'FAIL: workflow accepted missing ETag\n' >&2; exit 1; }
-EXPECT_SERIAL="$((saved_serial-1))" workflow_refresh >"$tmp/workflow-stale-serial.log" 2>&1 && { printf 'FAIL: workflow accepted stale serial\n' >&2; exit 1; }
-EXPECT_ETAG='"00000000000000000000000000000000"' workflow_refresh >"$tmp/workflow-stale-etag.log" 2>&1 && { printf 'FAIL: workflow accepted stale ETag\n' >&2; exit 1; }
-EXPECT_ETAG="${saved_etag//\"/}" workflow_refresh >"$tmp/workflow-unquoted.log" 2>&1 && { printf 'FAIL: workflow accepted unquoted ETag\n' >&2; exit 1; }
+if EXPECT_SERIAL='' workflow_refresh >"$tmp/workflow-missing.log" 2>&1; then bad 'workflow accepted missing serial'; else ok 'workflow refused missing serial'; fi
+if EXPECT_ETAG='' workflow_refresh >"$tmp/workflow-missing-etag.log" 2>&1; then bad 'workflow accepted missing ETag'; else ok 'workflow refused missing ETag'; fi
+if EXPECT_SERIAL="$((saved_serial-1))" workflow_refresh >"$tmp/workflow-stale-serial.log" 2>&1; then bad 'workflow accepted stale serial'; else ok 'workflow refused stale serial'; fi
+if EXPECT_ETAG='"00000000000000000000000000000000"' workflow_refresh >"$tmp/workflow-stale-etag.log" 2>&1; then bad 'workflow accepted stale ETag'; else ok 'workflow refused stale ETag'; fi
+if EXPECT_ETAG="${saved_etag//\"/}" workflow_refresh >"$tmp/workflow-unquoted.log" 2>&1; then bad 'workflow accepted unquoted ETag'; else ok 'workflow refused unquoted ETag'; fi
 assert test ! -e "$tmp/workflow-argv"
 export EXPECT_SERIAL="$saved_serial" EXPECT_ETAG="$saved_etag"
-printf 'PASS: workflow refresh passes observed serial + quoted ETag and refuses missing/stale values\n'
 OTA_MANIFEST_SIGNER_TAR_B64="$(tar -czf - -C "$tmp/signer" leaf.key leaf.pem intermediate-ca.pem root-ca.pem | base64 -w0)"
 export OTA_MANIFEST_SIGNER_TAR_B64
-MODE=prune /bin/bash "$tmp/workflow-signer.sh"
+MODE=prune check /bin/bash "$tmp/workflow-signer.sh"
 assert cmp "$tmp/signer/root-ca.pem" "$RUNNER_TEMP/ota-manifest-signer/root-ca.pem"
 unset OTA_MANIFEST_SIGNER_TAR_B64
-printf 'PASS: prune workflow provides the existing CMS verification root\n'
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"
 fi
-printf 'publish-release: PASS\n'
+trap - ERR
+[[ "$FAIL" -eq 0 ]]

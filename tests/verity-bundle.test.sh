@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "${here}/.." && pwd)"
-work="$(mktemp -d "${TMPDIR:-/var/tmp}/verity-contract.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
-"${repo}/tests/generate-dev-rauc-pki.sh" >/dev/null
-for tool in rauc mkfs.ext4 dumpe2fs; do command -v "$tool" >/dev/null; done
+# shellcheck source=tests/lib/assertions.sh
+source "${repo}/tests/lib/assertions.sh"
+check() { if "$@"; then ok "$*"; else bad "$*"; fi; }
+require() { "$@" || { bad "fixture: $*"; exit 1; }; }
+work=''
+finish() {
+  local status=$?
+  [[ "$status" -eq 0 || "$FAIL" -gt 0 ]] || bad "unexpected exit: $status"
+  [[ -z "$work" ]] || rm -rf "$work"
+  printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+trap 'finish; exit $?' EXIT
+set -o errtrace
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
+work="$(mktemp -d "${TMPDIR:-/var/tmp}/verity-contract.XXXXXX")" || { bad 'fixture: mktemp'; exit 1; }
+require "${repo}/tests/generate-dev-rauc-pki.sh" >/dev/null
+for tool in rauc mkfs.ext4 dumpe2fs; do require command -v "$tool" >/dev/null; done
 mkdir -p "${work}/tree/etc" "${work}/bundle"
 printf 'verity fixture\n' >"${work}/tree/etc/hostname"
 truncate -s 64M "${work}/bundle/rootfs.ext4"
@@ -24,19 +38,20 @@ filename=rootfs.ext4
 adaptive=block-hash-index
 MANIFEST
 keys="${repo}/.dev-keys"
-rauc bundle --cert="${keys}/leaf-signing.pem" --key="${keys}/leaf-signing.key" \
+check rauc bundle --cert="${keys}/leaf-signing.pem" --key="${keys}/leaf-signing.key" \
   --intermediate="${keys}/chain.pem" --mksquashfs-args="-noD -noF" \
   "${work}/bundle" "${work}/fixture.raucb" >/dev/null
-rauc info --keyring="${keys}/root-ca.pem" "${work}/fixture.raucb" >"${work}/info"
-grep -iq 'Bundle Format:.*verity' "${work}/info"
-grep -iq 'adaptive.*block-hash-index' "${work}/info"
-printf 'FIXTURE=PASS verity adaptive block-hash-index signature verified\n'
+check rauc info --keyring="${keys}/root-ca.pem" "${work}/fixture.raucb" >"${work}/info"
+check grep -iq 'Bundle Format:.*verity' "${work}/info"
+check grep -iq 'adaptive.*block-hash-index' "${work}/info"
 
-grep -q 'make_slot_image' "${repo}/lib/build-bundle.sh"
-grep -q 'format=verity' "${repo}/lib/build-bundle.sh"
-grep -q 'adaptive=block-hash-index' "${repo}/lib/build-bundle.sh"
+check grep -q 'make_slot_image' "${repo}/lib/build-bundle.sh"
+check grep -q 'format=verity' "${repo}/lib/build-bundle.sh"
+check grep -q 'adaptive=block-hash-index' "${repo}/lib/build-bundle.sh"
 if grep -q 'bundle_with_openssl' "${repo}/lib/build-bundle.sh"; then
-  printf 'FAIL: retired OpenSSL bundle producer is still present\n' >&2
-  exit 1
+  bad 'retired OpenSSL bundle producer is still present'
+else
+  ok 'retired OpenSSL bundle producer absent'
 fi
-printf 'PRODUCER=PASS shared full-size ext4 verity producer\n'
+trap - ERR
+[[ "$FAIL" -eq 0 ]]

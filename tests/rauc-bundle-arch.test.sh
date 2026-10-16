@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "${here}/.." && pwd)"
+# shellcheck source=tests/lib/assertions.sh
+source "${repo}/tests/lib/assertions.sh"
+check() { if "$@"; then ok "$*"; else bad "$*"; fi; }
+work=''
+finish() {
+  local status=$?
+  [[ "$status" -eq 0 || "$FAIL" -gt 0 ]] || bad "unexpected exit: $status"
+  [[ -z "$work" ]] || rm -rf "$work"
+  printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+trap 'finish; exit $?' EXIT
+set -o errtrace
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
 work="$(mktemp -d "${TMPDIR:-/var/tmp}/rauc-bundle-arch.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
 mkdir -p "${work}/bin" "${work}/out" "${work}/content"
 
 # ---------------------------------------------------------------------------
@@ -36,26 +49,31 @@ export MKOSI_BUILDER_IMAGE=fixture-builder MKOSI_NATIVE=0
 mkdir -p "${RAUC_DEB_DIR}"
 # shellcheck source=lib/build-bundle.sh
 source "${repo}/lib/build-bundle.sh"
+# common.sh installs the build profile; the collecting harness owns its mode.
+set +e
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
 
-bundle_with_rauc "${work}/content" "${work}/out/test.raucb"
-grep -Fxq -- 'update -qq' "${APT_LOG}"
-grep -Fxq -- 'install -y --no-install-recommends squashfs-tools /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb' "${APT_LOG}"
+check bundle_with_rauc "${work}/content" "${work}/out/test.raucb"
+check grep -Fxq -- 'update -qq' "${APT_LOG}"
+check grep -Fxq -- 'install -y --no-install-recommends squashfs-tools /rauc-debs/rauc_*.deb /rauc-debs/rauc-service_*.deb' "${APT_LOG}"
 if grep -Fq 'APT::Architecture' "${APT_LOG}"; then
-  printf 'apt-get install line still carries an APT::Architecture override\n' >&2
-  exit 1
+  bad 'apt-get install line still carries an APT::Architecture override'
+else
+  ok 'no APT::Architecture override'
 fi
 if grep -Fq 'RAUC_ARCH' "${repo}/lib/build-bundle.sh"; then
-  printf 'lib/build-bundle.sh still references the retired RAUC_ARCH mechanism\n' >&2
-  exit 1
+  bad 'lib/build-bundle.sh still references the retired RAUC_ARCH mechanism'
+else
+  ok 'no retired RAUC_ARCH mechanism'
 fi
 
 if ( unset RAUC_DEB_DIR; bundle_with_rauc "${work}/content" "${work}/out/test2.raucb" ) \
     >"${work}/missing.log" 2>&1; then
-  printf 'bundle_with_rauc accepted an unset RAUC_DEB_DIR\n' >&2
-  exit 1
+  bad 'bundle_with_rauc accepted an unset RAUC_DEB_DIR'
+else
+  ok 'unset RAUC_DEB_DIR refused'
 fi
-grep -Fq 'RAUC_DEB_DIR is required' "${work}/missing.log"
-printf 'bundle_with_rauc: plain apt-get install, no RAUC_ARCH mechanism: PASS\n'
+check grep -Fq 'RAUC_DEB_DIR is required' "${work}/missing.log"
 
 # ---------------------------------------------------------------------------
 # Part 2 — the corrected design: stage_rauc_build() builds a second,
@@ -127,7 +145,7 @@ exit 1
 EOF
 chmod +x "${work}/bin/"*
 
-grep -Eq 'local .*mkosi_arch="" rauc_build_dir_host=""' "${repo}/lib/orchestrate.sh"
+check grep -Eq 'local .*mkosi_arch="" rauc_build_dir_host=""' "${repo}/lib/orchestrate.sh"
 # shellcheck source=lib/shared/deb-lib.sh
 source "${repo}/lib/shared/deb-lib.sh"
 # shellcheck source=lib/stages/partition.sh
@@ -167,31 +185,36 @@ exercise_stage() {
   invocations="$(wc -l <"${RAUC_BUILD_LOG}")"
   if [[ "${expect_second_build}" == yes ]]; then
     [[ "${invocations}" -eq 2 ]] \
-      || { printf 'expected 2 build-rauc invocations for %s/%s, got %s\n' "${adapter}" "${mkosi_arch}" "${invocations}" >&2; exit 1; }
+      && ok "two build-rauc invocations: ${adapter}/${mkosi_arch}" \
+      || bad "expected 2 build-rauc invocations for ${adapter}/${mkosi_arch}, got ${invocations}"
     [[ "${rauc_build_dir_host}" != "${rauc_build_dir}" ]] \
-      || { printf 'rauc_build_dir_host aliased rauc_build_dir for an arm64 target\n' >&2; exit 1; }
-    grep -Fxq -- "--arch arm64 --out ${rauc_build_dir}" "${RAUC_BUILD_LOG}"
-    grep -Fxq -- "--arch amd64 --out ${rauc_build_dir_host}" "${RAUC_BUILD_LOG}"
+      && ok 'separate host/target directories for arm64' \
+      || bad 'rauc_build_dir_host aliased rauc_build_dir for an arm64 target'
+    check grep -Fxq -- "--arch arm64 --out ${rauc_build_dir}" "${RAUC_BUILD_LOG}"
+    check grep -Fxq -- "--arch amd64 --out ${rauc_build_dir_host}" "${RAUC_BUILD_LOG}"
   else
     [[ "${invocations}" -eq 1 ]] \
-      || { printf 'expected exactly 1 build-rauc invocation for %s/%s (no wasted duplicate build), got %s\n' "${adapter}" "${mkosi_arch}" "${invocations}" >&2; exit 1; }
+      && ok "one build-rauc invocation: ${adapter}/${mkosi_arch}" \
+      || bad "expected exactly 1 build-rauc invocation for ${adapter}/${mkosi_arch}, got ${invocations}"
     [[ "${rauc_build_dir_host}" == "${rauc_build_dir}" ]] \
-      || { printf 'rauc_build_dir_host did not alias rauc_build_dir for an amd64 target\n' >&2; exit 1; }
+      && ok 'host/target directory reused for amd64' \
+      || bad 'rauc_build_dir_host did not alias rauc_build_dir for an amd64 target'
   fi
 
   # The single most important correctness property: the host-native pair's
   # contents must NEVER reach staging/debs.
   if [[ "${rauc_build_dir_host}" != "${rauc_build_dir}" ]] \
       && grep -Fq "${rauc_build_dir_host}/" "${STAGE_LOG}"; then
-    printf 'the host-native rauc pair was staged into staging/debs (dir=%s)\n' "${rauc_build_dir_host}" >&2
-    exit 1
-  fi
-  grep -Fq "${rauc_build_dir}/" "${STAGE_LOG}" \
-    || { printf 'the target-arch rauc pair was never staged (dir=%s)\n' "${rauc_build_dir}" >&2; exit 1; }
+    bad "the host-native rauc pair was staged into staging/debs (dir=${rauc_build_dir_host})"
+  else
+    ok 'host-native pair not separately staged'
+fi
+  check grep -Fq "${rauc_build_dir}/" "${STAGE_LOG}"
 
   stage_assemble
   [[ "$(<"${ASSEMBLE_LOG}")" == "${rauc_build_dir_host}" ]] \
-    || { printf 'stage_assemble passed RAUC_DEB_DIR=%s, expected the host-native dir %s\n' "$(<"${ASSEMBLE_LOG}")" "${rauc_build_dir_host}" >&2; exit 1; }
+    && ok "stage_assemble uses host-native dir: ${adapter}/${mkosi_arch}" \
+    || bad "stage_assemble passed RAUC_DEB_DIR=$(<"${ASSEMBLE_LOG}"), expected ${rauc_build_dir_host}"
 }
 
 # arm64 target (RK3588, custom bootloader adapter): TWO pairs, different dirs,
@@ -203,4 +226,5 @@ exercise_stage arm64 custom yes
 exercise_stage x86-64 efi no
 exercise_stage x86-64 grub no
 
-printf 'RAUC bundle architecture and cross-stage wiring: PASS\n'
+trap - ERR
+[[ "$FAIL" -eq 0 ]]

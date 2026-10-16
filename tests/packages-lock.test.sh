@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/assertions.sh
+source "$HERE/tests/lib/assertions.sh"
+check() { if "$@"; then ok "$*"; else bad "$*"; fi; }
+work=''
+finish() {
+  local status=$?
+  [[ "$status" -eq 0 || "$FAIL" -gt 0 ]] || bad "unexpected exit: $status"
+  [[ -z "$work" ]] || rm -rf "$work"
+  printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+trap 'finish; exit $?' EXIT
+set -o errtrace
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
 root="$work/root"
 stage="$work/staging"
 mkdir -p "$root/usr/lib/ceralive/build-lock" "$root/var/lib/dpkg" "$stage/packages-lock" "$stage/kernel-build" "$stage/rauc-build" "$work/out"
@@ -21,7 +34,7 @@ dpkg-deb --root-owner-group --build "$work/control" "$stage/debs/local-example_2
 hash_b="$(sha256sum "$stage/debs/local-example_2.0_all.deb" | cut -d' ' -f1)"
 printf 'Package: local-example\nVersion: 2.0\nArchitecture: all\nFilename: pool/local-example_2.0_all.deb\nSHA256: %s\n\n' \
   "$hash_b" >"$work/Packages"
-DEST="$stage" ARCH=arm64 DRY_RUN='' INDEX="$work/Packages" LIB="$HERE/lib" bash -ec '
+DEST="$stage" ARCH=arm64 DRY_RUN='' INDEX="$work/Packages" LIB="$HERE/lib" check bash -ec '
   die() { printf "%s\n" "$*" >&2; exit 1; }
   log_error() { die "$*"; }
   deb_pkg_name() { dpkg-deb -f "$1" Package; }
@@ -36,7 +49,7 @@ DEST="$stage" ARCH=arm64 DRY_RUN='' INDEX="$work/Packages" LIB="$HERE/lib" bash 
   source "$LIB/fetch/lock.sh"
   fetch_lock_sidecar
 '
-ARCH=arm64 SOURCE_DATE_EPOCH=1780000000 DEBS="$stage/debs" LIB="$HERE/lib" bash -ec '
+ARCH=arm64 SOURCE_DATE_EPOCH=1780000000 DEBS="$stage/debs" LIB="$HERE/lib" check bash -ec '
   die() { printf "%s\n" "$*" >&2; exit 1; }
   log_success() { :; }
   assert_deb_identity() { [[ "$(dpkg-deb -f "$1" Package)" == "$2" && "$(dpkg-deb -f "$1" Version)" == "$3" && "$(dpkg-deb -f "$1" Architecture)" == "$4" ]]; }
@@ -79,8 +92,8 @@ printf '{"name":"apt-example","version":"1.0","arch":"arm64","origin":"debian","
 printf 'trixie\tWed, 23 Sep 2026 00:00:00 UTC\ntrixie-security\tWed, 23 Sep 2026 01:00:00 UTC\n' >"$root/usr/lib/ceralive/build-lock/runtime.dates"
 
 args=("$root" "$stage" "$work/out/20260924.packages.lock.json" 1780000000 2026-09-24T12:00:00Z aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
-python3 "$HERE/lib/packages-lock.py" merge "${args[@]}"
-python3 - "${args[2]}" "$hash_a" "$hash_b" "$hash_c" "$hash_k" "$hash_r" "$hash_rs" <<'PY'
+check python3 "$HERE/lib/packages-lock.py" merge "${args[@]}"
+check python3 - "${args[2]}" "$hash_a" "$hash_b" "$hash_c" "$hash_k" "$hash_r" "$hash_rs" <<'PY'
 import json
 import sys
 lock = json.load(open(sys.argv[1]))
@@ -106,8 +119,10 @@ assert 'sha256' not in kernel
 PY
 printf 'Package: genuinely-unaccounted\nStatus: install ok installed\nArchitecture: arm64\nVersion: 9\n\n' >>"$root/var/lib/dpkg/status"
 if python3 "$HERE/lib/packages-lock.py" merge "${args[@]}" >"$work/error" 2>&1; then
-  printf 'FAIL: novel unaccounted package was accepted\n' >&2
-  exit 1
+  bad 'novel unaccounted package was accepted'
+else
+  ok 'novel unaccounted package refused'
 fi
-grep -q 'genuinely-unaccounted' "$work/error"
-printf 'packages-lock: PASS cases (a)/(b)/(c), source-built kernel, generated-locally rauc/rauc-service, fail-closed novel package\n'
+check grep -q 'genuinely-unaccounted' "$work/error"
+trap - ERR
+[[ "$FAIL" -eq 0 ]]

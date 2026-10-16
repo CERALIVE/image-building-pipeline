@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=tests/lib/assertions.sh
+source "$repo/tests/lib/assertions.sh"
+check() { if "$@"; then ok "$*"; else bad "$*"; fi; }
+tmp=''
+server=''
+finish() {
+  local status=$?
+  [[ "$status" -eq 0 || "$FAIL" -gt 0 ]] || bad "unexpected exit: $status"
+  if [[ -n "$server" ]]; then kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; fi
+  [[ -z "$tmp" ]] || rm -rf -- "$tmp"
+  printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+  [[ "$FAIL" -eq 0 ]]
+}
+trap 'finish; exit $?' EXIT
+set -o errtrace
+trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
 downloader="${FLASH_DOWNLOAD_SCRIPT:-$repo/tools/flash-download.sh}"
 tmp="$(mktemp -d -p "${TMPDIR:-/tmp}" flash-download.XXXXXXXX)"
-server=''
-cleanup() { [[ -z "$server" ]] || { kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; }; rm -rf -- "$tmp"; }
-trap cleanup EXIT
 mkdir -p "$tmp/site/channels/stable" "$tmp/site/releases/rock-5b-plus/2026.10.1" "$tmp/out"
 release="$tmp/site/releases/rock-5b-plus/2026.10.1"
 channel="$tmp/site/channels/stable/rock-5b-plus.json"
@@ -185,26 +198,29 @@ PY
 openssl cms -sign -binary -in "$orange_channel" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" \
   -certfile "$tmp/intermediate.pem" -outform DER -out "$orange_channel.sig" >/dev/null
 if ! bash "$downloader" --board orange-pi-5-plus --out "$tmp/orangeout" --keyring "$tmp/root.pem" >"$tmp/orange.log" 2>&1; then
-  printf 'FAIL: correctly signed Orange manifest refused\n' >&2; exit 1
+  bad 'correctly signed Orange manifest refused'
+else
+  ok 'correctly signed Orange manifest accepted'
 fi
-[[ -f "$tmp/orangeout/orange-pi-5-plus/2026.10.1/flash.raw.xz" ]] || exit 1
+check test -f "$tmp/orangeout/orange-pi-5-plus/2026.10.1/flash.raw.xz"
 cp "$channel" "$tmp/rock-channel.json"
 cp "$channel.sig" "$tmp/rock-channel.sig"
 cp "$orange_channel" "$tmp/orange-channel.json"
 cp "$orange_channel.sig" "$tmp/orange-channel.sig"
 cp "$orange_channel" "$channel"
 cp "$orange_channel.sig" "$channel.sig"
-if run >"$tmp/orange-for-rock.log" 2>&1; then printf 'FAIL: Orange manifest accepted for Rock\n' >&2; exit 1; fi
+if run >"$tmp/orange-for-rock.log" 2>&1; then bad 'Orange manifest accepted for Rock'; else ok 'Orange manifest refused for Rock'; fi
 cp "$tmp/rock-channel.json" "$channel"
 cp "$tmp/rock-channel.sig" "$channel.sig"
 cp "$tmp/rock-channel.json" "$orange_channel"
 cp "$tmp/rock-channel.sig" "$orange_channel.sig"
 if bash "$downloader" --board orange-pi-5-plus --out "$tmp/orangeout" --keyring "$tmp/root.pem" >"$tmp/rock-for-orange.log" 2>&1; then
-  printf 'FAIL: Rock manifest accepted for Orange\n' >&2; exit 1
+  bad 'Rock manifest accepted for Orange'
+else
+  ok 'Rock manifest refused for Orange'
 fi
 cp "$tmp/orange-channel.json" "$orange_channel"
 cp "$tmp/orange-channel.sig" "$orange_channel.sig"
-printf 'PASS: signed Orange manifest and both cross-board refusals\n'
 mkdir -p "$tmp/tools"
 ln -s "$repo/lib" "$tmp/lib"
 python3 - "$downloader" "$tmp/tools/no-compatible.sh" <<'PY'
@@ -226,40 +242,44 @@ PY
   openssl cms -sign -binary -in "$target" -signer "$tmp/leaf.pem" -inkey "$tmp/leaf.key" \
     -certfile "$tmp/intermediate.pem" -outform DER -out "$target.sig" >/dev/null
   if bash "$downloader" --board "$selected" --out "$tmp/out" --keyring "$tmp/root.pem" >"$tmp/$selected-compatible.log" 2>&1; then
-    printf 'FAIL: same-board wrong compatible accepted: %s\n' "$selected" >&2; exit 1
+    bad "same-board wrong compatible accepted: $selected"
+  else
+    ok "$selected: wrong compatible refused"
   fi
   if ! bash "$tmp/tools/no-compatible.sh" --board "$selected" --out "$tmp/compatible-mutant-out" --keyring "$tmp/root.pem" >"$tmp/$selected-compatible-mutant.log" 2>&1; then
-    printf 'FAIL: compatible mutation did not accept %s\n' "$selected" >&2
+    bad "compatible mutation did not accept $selected"
     cat "$tmp/$selected-compatible-mutant.log" >&2
-    exit 1
+  else
+    ok "$selected: compatible mutation accepted"
   fi
   cp "$tmp/$selected-good.json" "$target"
   cp "$tmp/$selected-good.sig" "$target.sig"
 done
-printf 'PASS: same-board wrong compatible refused for both boards; removing comparison accepts both\n'
 sign "$tmp/bench-leaf.pem" "$tmp/bench.pem"
-bash "$downloader" --board rock-5b-plus --out "$tmp/issuer-accepted-out" --keyring "$tmp/root.pem" >"$tmp/bench-issuer.log" 2>&1
+check bash "$downloader" --board rock-5b-plus --out "$tmp/issuer-accepted-out" --keyring "$tmp/root.pem" >"$tmp/bench-issuer.log" 2>&1
 sign
 for variant in root alternate near; do
   chain="$tmp/$variant.pem"
   [[ "$variant" != root ]] || chain=''
   sign "$tmp/$variant-leaf.pem" "$chain"
   if run >"$tmp/$variant-issuer.log" 2>&1; then
-    printf 'FAIL: %s-issued manifest signer accepted\n' "$variant" >&2; exit 1
+    bad "$variant-issued manifest signer accepted"
+  else
+    ok "$variant-issued manifest signer refused"
   fi
   issuer="$(openssl x509 -in "$tmp/$variant-leaf.pem" -noout -issuer -nameopt RFC2253)"
-  grep -F -- "${issuer#issuer=}" "$tmp/$variant-issuer.log" >/dev/null || {
-    printf 'FAIL: refused %s issuer was not diagnosed\n' "$variant" >&2; exit 1;
-  }
+  check grep -F -- "${issuer#issuer=}" "$tmp/$variant-issuer.log" >/dev/null
 done
 for variant in foreign expired future; do
   chain="$tmp/intermediate.pem"
   [[ "$variant" != foreign ]] || chain="$tmp/foreign.pem"
   sign "$tmp/$variant-leaf.pem" "$chain"
   if run >"$tmp/$variant-invalid-chain.log" 2>&1; then
-    printf 'FAIL: %s manifest signer accepted against root keyring\n' "$variant" >&2; exit 1
+    bad "$variant manifest signer accepted against root keyring"
+  else
+    ok "$variant manifest signer refused against root keyring"
   fi
-  grep -F 'channel CMS verification failed' "$tmp/$variant-invalid-chain.log" >/dev/null
+  check grep -F 'channel CMS verification failed' "$tmp/$variant-invalid-chain.log" >/dev/null
 done
 python3 - "$downloader" "$tmp/tools/no-issuer.sh" <<'PY'
 import pathlib,sys
@@ -272,31 +292,27 @@ for variant in root alternate; do
   chain="$tmp/$variant.pem"
   [[ "$variant" != root ]] || chain=''
   sign "$tmp/$variant-leaf.pem" "$chain"
-  bash "$tmp/tools/no-issuer.sh" --board rock-5b-plus --out "$tmp/issuer-mutant-out" --keyring "$tmp/root.pem" >"$tmp/$variant-issuer-mutant.log" 2>&1 || {
-    printf 'FAIL: removing issuer check did not accept %s-issued signer\n' "$variant" >&2; exit 1;
-  }
+  check bash "$tmp/tools/no-issuer.sh" --board rock-5b-plus --out "$tmp/issuer-mutant-out" --keyring "$tmp/root.pem" >"$tmp/$variant-issuer-mutant.log" 2>&1
 done
 sign
-printf 'PASS: production and bench issuers accepted; root-direct, alternate and near-miss refused; foreign-root/expired/future chains refused; issuer mutation accepts root/alternate\n'
 openssl req -newkey rsa:2048 -nodes -keyout "$tmp/bundle.key" -out "$tmp/bundle.csr" \
   -subj '/CN=CeraLive OTA Manifest Signer' >/dev/null 2>&1
 printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection\n' >"$tmp/bundle.ext"
 openssl x509 -req -in "$tmp/bundle.csr" -CA "$tmp/root.pem" -CAkey "$tmp/root.key" \
   -CAcreateserial -days 1 -extfile "$tmp/bundle.ext" -out "$tmp/bundle.pem" >/dev/null 2>&1
 openssl cms -sign -binary -in "$channel" -signer "$tmp/bundle.pem" -inkey "$tmp/bundle.key" -outform DER -out "$channel.sig" >/dev/null
-if run >"$tmp/bundle-signer.log" 2>&1; then printf 'FAIL: dual-EKU bundle leaf accepted as manifest signer\n' >&2; exit 1; fi
+if run >"$tmp/bundle-signer.log" 2>&1; then bad 'dual-EKU bundle leaf accepted as manifest signer'; else ok 'dual-EKU bundle leaf refused'; fi
 openssl req -newkey rsa:2048 -nodes -keyout "$tmp/foreign.key" -out "$tmp/foreign.csr" \
   -subj '/CN=Other Signer' >/dev/null 2>&1
 openssl x509 -req -in "$tmp/foreign.csr" -CA "$tmp/root.pem" -CAkey "$tmp/root.key" \
   -CAcreateserial -days 1 -extfile "$tmp/leaf.ext" -out "$tmp/foreign.pem" >/dev/null 2>&1
 openssl cms -sign -binary -in "$channel" -signer "$tmp/foreign.pem" -inkey "$tmp/foreign.key" -outform DER -out "$channel.sig" >/dev/null
-if run >"$tmp/foreign-signer.log" 2>&1; then printf 'FAIL: wrong-CN code-signing leaf accepted\n' >&2; exit 1; fi
+if run >"$tmp/foreign-signer.log" 2>&1; then bad 'wrong-CN code-signing leaf accepted'; else ok 'wrong-CN leaf refused'; fi
 sign
-printf 'PASS: dedicated signer accepted; dual-EKU and wrong-CN signers refused\n'
 printf '1' >"$tmp/site/fail"
-if run >"$tmp/first.log" 2>&1; then printf 'FAIL: interrupted fetch accepted\n' >&2; exit 1; fi
+if run >"$tmp/first.log" 2>&1; then bad 'interrupted fetch accepted'; else ok 'interrupted fetch refused'; fi
 part0="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0000"
-[[ -f "$part0" ]] || { printf 'FAIL: first part was not saved for resume\n' >&2; exit 1; }
+check test -f "$part0"
 first_count="$(python3 - "$tmp/site/requests.log" <<'PY'
 import sys
 print(sum('part0000' in l for l in open(sys.argv[1])))
@@ -305,8 +321,8 @@ PY
 rm "$tmp/site/fail"
 printf 'flash' >"$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0001.partial"
 printf '1' >"$tmp/site/corrupt"
-run >"$tmp/second.log" 2>&1
-python3 - "$tmp/site/requests.log" "$first_count" "$tmp/site/max-active" <<'PY'
+check run >"$tmp/second.log" 2>&1
+check python3 - "$tmp/site/requests.log" "$first_count" "$tmp/site/max-active" <<'PY'
 import sys
 lines=open(sys.argv[1]).readlines()
 assert sum('part0000' in l for l in lines)==int(sys.argv[2]), 'verified first part downloaded again'
@@ -314,31 +330,27 @@ assert sum('part0001' in l for l in lines)>=3, 'corrupt part not retried'
 assert any('part0001 bytes=5-' in l for l in lines), 'partial part not resumed by range'
 assert int(open(sys.argv[3]).read())>=2, 'bounded parallel work did not overlap'
 PY
-[[ "$(sha256sum "$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz" | cut -d' ' -f1)" == "$(sha256sum "$release/flash.raw.xz" | cut -d' ' -f1)" ]] || exit 1
-printf 'PASS: parallel fetch, interrupted-run reuse, corrupted part re-fetched\n'
+assert_eq 'assembled flash checksum' "$(sha256sum "$release/flash.raw.xz" | cut -d' ' -f1)" "$(sha256sum "$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz" | cut -d' ' -f1)"
 
 final="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz"
 part1="$tmp/out/rock-5b-plus/2026.10.1/flash.raw.xz.part0001"
-failure=0
 printf 'corrupt assembled file\n' >"$final"
 rm -- "$part1"
 touch "$tmp/site/corrupt-always"
-if run >"$tmp/corrupt-part.log" 2>&1; then printf 'FAIL: corrupt part accepted\n' >&2; exit 1; fi
-[[ ! -e "$final" ]] || { printf 'FAIL: corrupt part left final image\n' >&2; failure=1; }
-grep -q 'part download failed' "$tmp/corrupt-part.log"
+if run >"$tmp/corrupt-part.log" 2>&1; then bad 'corrupt part accepted'; else ok 'corrupt part refused'; fi
+check test ! -e "$final"
+check grep -q 'part download failed' "$tmp/corrupt-part.log"
 rm -- "$tmp/site/corrupt-always"
 
 printf 'corrupt assembled file\n' >"$final"
 printf 'corrupt cached part\n' >"$part0"
 touch "$tmp/site/fail-first"
-if run >"$tmp/unavailable.log" 2>&1; then printf 'FAIL: unavailable part accepted\n' >&2; exit 1; fi
-[[ ! -e "$final" ]] || { printf 'FAIL: unavailable part left final image\n' >&2; failure=1; }
-grep -q 'part download failed' "$tmp/unavailable.log"
+if run >"$tmp/unavailable.log" 2>&1; then bad 'unavailable part accepted'; else ok 'unavailable part refused'; fi
+check test ! -e "$final"
+check grep -q 'part download failed' "$tmp/unavailable.log"
 rm -- "$tmp/site/fail-first"
-(( failure == 0 )) || exit 1
-run >"$tmp/recovered.log" 2>&1
-cmp -- "$release/flash.raw.xz" "$final"
-printf 'PASS: corrupt part and unavailable origin remove stale final; recovery verifies exact image\n'
+check run >"$tmp/recovered.log" 2>&1
+check cmp -- "$release/flash.raw.xz" "$final"
 
 mkdir -p "$tmp/badout"
 python3 - "$release/index.json" "$release/SHA256SUMS" "$channel" <<'PY'
@@ -354,12 +366,13 @@ s.write_text('\n'.join((hashlib.sha256(i.read_bytes()).hexdigest()+'  index.json
 PY
 sign
 if bash "$downloader" --board rock-5b-plus --out "$tmp/badout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mismatch.log" 2>&1; then
-  printf 'FAIL: full-hash mismatch accepted\n' >&2; exit 1
+  bad 'full-hash mismatch accepted'
+else
+  ok 'full-hash mismatch refused'
 fi
-grep -q 'full flash SHA-256 mismatch' "$tmp/mismatch.log"
-[[ ! -e "$tmp/badout/rock-5b-plus/2026.10.1/flash.raw.xz" ]] || exit 1
-[[ -z "$(compgen -G "$tmp/badout/rock-5b-plus/2026.10.1/.flash.raw.xz.*")" ]] || exit 1
-printf 'PASS: final full-hash mismatch refused (valid per-part hashes)\n'
+check grep -q 'full flash SHA-256 mismatch' "$tmp/mismatch.log"
+check test ! -e "$tmp/badout/rock-5b-plus/2026.10.1/flash.raw.xz"
+if compgen -G "$tmp/badout/rock-5b-plus/2026.10.1/.flash.raw.xz.*"; then bad 'temporary assembled flash survived mismatch'; else ok 'no temporary assembled flash'; fi
 
 python3 - "$downloader" "$tmp/tools/no-full-check.sh" <<'PY'
 import pathlib,sys
@@ -369,8 +382,7 @@ assert p.count(old)==1
 pathlib.Path(sys.argv[2]).write_text(p.replace(old, ':'))
 PY
 mkdir -p "$tmp/mutantout"
-bash "$tmp/tools/no-full-check.sh" --board rock-5b-plus --out "$tmp/mutantout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mutant.log" 2>&1
-printf 'PASS: removing full SHA guard makes mismatch fixture wrongly succeed (non-vacuity)\n'
+check bash "$tmp/tools/no-full-check.sh" --board rock-5b-plus --out "$tmp/mutantout" --jobs 2 --keyring "$tmp/root.pem" >"$tmp/mutant.log" 2>&1
 
 python3 - "$release/index.json" "$release/SHA256SUMS" <<'PY'
 import hashlib,json,pathlib,sys
@@ -378,11 +390,12 @@ p,s=map(pathlib.Path,sys.argv[1:]);i=json.loads(p.read_text());i['files']['flash
 s.write_text('\n'.join((hashlib.sha256(p.read_bytes()).hexdigest()+'  index.json') if l.endswith('  index.json') else l for l in s.read_text().splitlines())+'\n')
 PY
 if bash "$downloader" --board rock-5b-plus --out "$tmp/badout" --keyring "$tmp/root.pem" >"$tmp/traversal.log" 2>&1; then
-  printf 'FAIL: traversal accepted\n' >&2; exit 1
+  bad 'traversal accepted'
+else
+  ok 'traversal refused'
 fi
-grep -q 'invalid release metadata' "$tmp/traversal.log"
-[[ ! -e "$tmp/outside" ]] || exit 1
-printf 'PASS: unsafe part metadata refused before download\n'
+check grep -q 'invalid release metadata' "$tmp/traversal.log"
+check test ! -e "$tmp/outside"
 
 printf 'raw flash bytes\n' >"$tmp/raw-source"
 xz -c "$tmp/raw-source" >"$release/flash.raw.xz.part0000"
@@ -405,9 +418,8 @@ root=pathlib.Path(sys.argv[1]);h=lambda p: hashlib.sha256(p.read_bytes()).hexdig
 PY
 sign
 mkdir -p "$tmp/rawout"
-bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/raw.log" 2>&1
-cmp "$tmp/raw-source" "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
-printf 'PASS: optional xz extraction verifies raw SHA-256\n'
+check bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/raw.log" 2>&1
+check cmp "$tmp/raw-source" "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
 printf 'old unverified raw\n' >"$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
 mkdir -p "$tmp/failing-bin"
 cat >"$tmp/failing-bin/xz" <<'SH'
@@ -416,12 +428,11 @@ exit 42
 SH
 chmod 700 "$tmp/failing-bin/xz"
 if PATH="$tmp/failing-bin:$PATH" bash "$downloader" --board rock-5b-plus --out "$tmp/rawout" --keyring "$tmp/root.pem" --decompress >"$tmp/extract-failed.log" 2>&1; then
-  printf 'FAIL: failing extraction accepted\n' >&2; exit 1
+  bad 'failing extraction accepted'
+else
+  ok 'failing extraction refused'
 fi
-[[ ! -e "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw" ]] || {
-  printf 'FAIL: old unverified raw survived failed extraction\n' >&2; exit 1;
-}
-printf 'PASS: failed extraction leaves no stale final raw\n'
+check test ! -e "$tmp/rawout/rock-5b-plus/2026.10.1/flash.raw"
 python3 - "$channel" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]);m=json.loads(p.read_text());m['flash']['raw_sha256']='0'*64;p.write_text(json.dumps(m))
@@ -429,8 +440,11 @@ PY
 sign
 mkdir -p "$tmp/wrongraw"
 if bash "$downloader" --board rock-5b-plus --out "$tmp/wrongraw" --keyring "$tmp/root.pem" --decompress >"$tmp/wrongraw.log" 2>&1; then
-  printf 'FAIL: wrong raw checksum accepted\n' >&2; exit 1
+  bad 'wrong raw checksum accepted'
+else
+  ok 'wrong raw checksum refused'
 fi
-grep -q 'raw SHA-256 mismatch' "$tmp/wrongraw.log"
-[[ ! -e "$tmp/wrongraw/rock-5b-plus/2026.10.1/flash.raw" ]] || exit 1
-printf 'PASS: raw hash mismatch refused\n'
+check grep -q 'raw SHA-256 mismatch' "$tmp/wrongraw.log"
+check test ! -e "$tmp/wrongraw/rock-5b-plus/2026.10.1/flash.raw"
+trap - ERR
+[[ "$FAIL" -eq 0 ]]
