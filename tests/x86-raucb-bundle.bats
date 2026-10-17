@@ -14,7 +14,8 @@
 #                      BUILD_BUNDLE_SH — the x86 path actually produces a bundle.
 #   2. REAL SIGN+VERIFY : build-bundle.sh x86-minipc <rootfs> produces a real
 #                      verity/adaptive `.raucb`; RAUC verifies its leaf chain.
-#   3. TAMPER : corrupt the signed trailer and require RAUC info to reject it.
+#   3. TAMPER : reject a corrupt signed trailer via RAUC info, and a changed
+#                      payload with intact CMS via RAUC extract's verity check.
 #   4. MANIFEST : the manifest.raucm embedded IN the produced bundle carries
 #                      compatible=ceralive-x86-minipc (what `rauc install` matches
 #                      against the device system.conf).
@@ -73,7 +74,7 @@ efi_branch() {
 
 # build_x86_bundle — build a REAL signed x86 `.raucb` ONCE per file into
 # BATS_FILE_TMPDIR (idempotent), driving the board-agnostic build-bundle.sh with
-# the dev PKI + the x86 compatible. Under `bats --jobs N` the four sections call
+# the dev PKI + the x86 compatible. Under `bats --jobs N` the sections call
 # this concurrently, so the build runs inside a flock'd subshell: exactly one
 # test populates the shared fixture, the rest see it already built. Echoes
 # nothing; the bundle lands at $BATS_FILE_TMPDIR/out/x86.raucb.
@@ -148,11 +149,10 @@ build_x86_bundle() {
 }
 
 # ===========================================================================
-# 3. TAMPER — flipping one byte of the bundle payload makes verification FAIL.
-#    Proves the signature has teeth: a mutated rootfs slot image (the exact
-#    attack RAUC's CMS chain exists to stop) is REJECTED by verify_openssl_bundle
-#    against the root keyring. We drive the SHIPPED verifier (sourced from
-#    rauc info --keyring, the same verification the device uses.
+# 3. TAMPER — CMS authenticates the verity root, not the payload directly.
+#    `info` rejects trailer damage but accepts payload damage with intact CMS.
+#    `extract` verifies the complete payload in userspace before unpacking it;
+#    unlike an install, this needs no root/loop/dm-verity and proves no slot state.
 # ===========================================================================
 
 @test "x86 raucb tamper: a corrupted signed trailer makes RAUC reject the bundle" {
@@ -173,6 +173,41 @@ build_x86_bundle() {
   run rauc info --keyring="$DEV_KEYS/root-ca.pem" "$tampered"
   [ "$status" -ne 0 ]
   [[ "$output" != *'Bundle Format:  verity'* ]]
+}
+
+@test "x86 raucb tamper: a flipped payload byte with intact CMS fails verity before extraction" {
+  raucb_prereqs || skip "rauc/ext4/dev-PKI not available"
+  build_x86_bundle
+  local bundle="$BATS_FILE_TMPDIR/out/x86.raucb"
+  local pristine="$BATS_TEST_TMPDIR/pristine"
+  local tampered="$BATS_TEST_TMPDIR/payload-tampered.raucb"
+  local rejected="$BATS_TEST_TMPDIR/rejected"
+
+  # Given: the same real signed fixture can be verified AND unpacked.
+  run rauc extract --keyring="$DEV_KEYS/root-ca.pem" "$bundle" "$pristine"
+  [ "$status" -eq 0 ]
+  [ -s "$pristine/rootfs.ext4" ]
+
+  # Flip exactly one bit inside the squashfs superblock, never in CMS or its
+  # length suffix. Compare every other byte, including the entire hash tree/CMS.
+  cp "$bundle" "$tampered"
+  local byte
+  byte="$(od -An -tu1 -j64 -N1 "$tampered")"
+  printf '%b' "\\$(printf '%03o' "$((byte ^ 1))")" |
+    dd of="$tampered" bs=1 seek=64 count=1 conv=notrunc 2>/dev/null
+  cmp -n64 "$bundle" "$tampered"
+  cmp -i65 "$bundle" "$tampered"
+  run rauc info --keyring="$DEV_KEYS/root-ca.pem" "$tampered"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Bundle Format:  verity'* ]]
+
+  # When: the real verifier reads the changed payload against its signed root.
+  run rauc extract --keyring="$DEV_KEYS/root-ca.pem" "$tampered" "$rejected"
+
+  # Then: fail specifically on verity integrity, before creating any output.
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'bundle payload is corrupted'* ]]
+  [ ! -e "$rejected" ]
 }
 
 # ===========================================================================
