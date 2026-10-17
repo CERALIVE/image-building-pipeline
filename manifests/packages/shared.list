@@ -27,6 +27,8 @@
 
 # --- TLS / apt plumbing -------------------------------------------------------
 ca-certificates          # TLS trust store; required for https apt + apt.ceralive.tv mTLS
+gpgv                     # required by CeraUI's update selector (Debian InRelease verification);
+                         # APT 3.0 images carry sqv, not gpgv.
 # apt-transport-https    # REMOVED (todo 19, audited; re-verified against trixie in
                          # todo 10). On trixie this is STILL a `Section: oldlibs`
                          # TRANSITIONAL DUMMY (3.0.3) whose own Debian description reads

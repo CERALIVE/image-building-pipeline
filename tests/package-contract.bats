@@ -1177,6 +1177,11 @@ CONTROL
 #     synthetic non-secret payload whose bytes are asserted ABSENT from output.
 # ===========================================================================
 
+@test "apt runtime: gpgv is explicit for CeraUI's Debian InRelease verification before offline app install" {
+  run grep -Ex 'gpgv[[:space:]]*(#.*)?' "$PIPELINE_DIR/manifests/packages/shared.list"
+  [ "$status" -eq 0 ]
+}
+
 @test "apt ceralive (T2.6): ceralive.sources is written with a Signed-By keyring reference" {
   local dir="$BATS_TEST_TMPDIR/apt-src/sources.list.d"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_SOURCES_DIR="$dir" \
@@ -1271,7 +1276,8 @@ CONTROL
 }
 
 # The build path must normalize the armored CI secret before the runtime executor
-# writes it: the device carries apt/gpgv, not gpg or file(1).
+# writes it: the device explicitly installs gpgv via shared.list for CeraUI's
+# update selector (APT 3.0 uses sqv), not gpg or file(1).
 @test "apt ceralive (T2.6): the build dearmors its keyring and the RUNTIME EXECUTOR consumes binary input" {
   command -v gpg >/dev/null || skip "gpg is required for the synthetic OpenPGP fixture"
   command -v file >/dev/null || skip "file is required for the keyring-magic guard"
