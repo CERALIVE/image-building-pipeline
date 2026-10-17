@@ -64,6 +64,102 @@ load manifest-helpers
   [[ "$output" == *"RESURRECTED"* ]]
 }
 
+@test "postinst image version: two real writer invocations advance despite frozen SOURCE_DATE_EPOCH" {
+  local src="$PIPELINE_DIR/mkosi/customize/postinst.d/tls-ssh.sh"
+  local first_root="$BATS_TEST_TMPDIR/image-version-first"
+  local second_root="$BATS_TEST_TMPDIR/image-version-second"
+  local writer first second before after
+  mkdir -p "$first_root" "$second_root"
+
+  # Execute the actual adjacent writes from setup_ssh_firstboot, redirecting only
+  # their /etc/ceralive/ destinations so this test never writes to the host.
+  writer="$(awk '
+    /^setup_ssh_firstboot\(\) \{/ { in_function = 1 }
+    in_function && /printf .*image-build-commit$/ { copying = 1 }
+    in_function && /enable_service ceralive-ssh-firstboot.service/ { exit }
+    copying { print }
+  ' "$src")"
+  [[ "$writer" == *'image-build-commit'* && "$writer" == *'image-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  SOURCE_DATE_EPOCH=1577836800
+  before="$(date -u +%Y%m%dT%H%M%SZ)"
+  eval "${writer//\/etc\/ceralive\//$first_root/}"
+  first="$(<"$first_root/image-version")"
+  [[ "$first" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+  [ "$(wc -l <"$first_root/image-version")" -eq 1 ]
+  [ "$(stat -c %a "$first_root/image-version")" = 444 ]
+  [ "$(stat -c %a "$first_root/image-build-commit")" = 444 ]
+  [ "$(<"$first_root/image-build-commit")" = "$CERALIVE_IMAGE_BUILD_COMMIT" ]
+
+  sleep 2
+  eval "${writer//\/etc\/ceralive\//$second_root/}"
+  second="$(<"$second_root/image-version")"
+  after="$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ "$second" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]
+  [ "$(wc -l <"$second_root/image-version")" -eq 1 ]
+  [ "$(stat -c %a "$second_root/image-version")" = 444 ]
+  [ "$(stat -c %a "$second_root/image-build-commit")" = 444 ]
+  [ "$(<"$second_root/image-build-commit")" = "$CERALIVE_IMAGE_BUILD_COMMIT" ]
+  [ "$first" != "$second" ]
+  dpkg --compare-versions "$first" ge "$before"
+  dpkg --compare-versions "$after" ge "$second"
+  dpkg --compare-versions "$second" gt "$first"
+  printf 'image-version first=%s second=%s SOURCE_DATE_EPOCH=%s (monotonically advancing)\n' \
+    "$first" "$second" "$SOURCE_DATE_EPOCH"
+}
+
+# Lift the actual postinst writer, including its optional guard and validation.
+# Only its /etc/ceralive/ destinations are redirected by the callers below.
+os_release_version_writer() {
+  awk '
+    /^setup_ssh_firstboot\(\) \{/ { in_function = 1 }
+    in_function && /printf .*image-build-commit$/ { copying = 1 }
+    in_function && /enable_service ceralive-ssh-firstboot.service/ { exit }
+    copying { print }
+  ' "$PIPELINE_DIR/mkosi/customize/postinst.d/tls-ssh.sh"
+}
+
+@test "os-release-version: absent or empty build input creates no stamp" {
+  local root="$BATS_TEST_TMPDIR/absent" empty_root="$BATS_TEST_TMPDIR/empty" writer
+  mkdir -p "$root" "$empty_root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  unset CERALIVE_OS_RELEASE_VERSION
+  eval "${writer//\/etc\/ceralive\//$root/}"
+  [ ! -e "$root/os-release-version" ]
+  CERALIVE_OS_RELEASE_VERSION=''
+  eval "${writer//\/etc\/ceralive\//$empty_root/}"
+  [ ! -e "$empty_root/os-release-version" ]
+}
+
+@test "os-release-version: CalVer creates one newline-terminated read-only line" {
+  local root="$BATS_TEST_TMPDIR/valid" writer
+  mkdir -p "$root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  CERALIVE_OS_RELEASE_VERSION=2026.10.0
+  eval "${writer//\/etc\/ceralive\//$root/}"
+  cmp -s "$root/os-release-version" <(printf '2026.10.0\n')
+  [ "$(wc -l <"$root/os-release-version")" -eq 1 ]
+  [ "$(stat -c %a "$root/os-release-version")" = 444 ]
+}
+
+@test "os-release-version: malformed CalVer dies without creating a stamp" {
+  local root="$BATS_TEST_TMPDIR/invalid" writer
+  mkdir -p "$root"
+  writer="$(os_release_version_writer)"
+  [[ "$writer" == *'CERALIVE_OS_RELEASE_VERSION'* && "$writer" == *'os-release-version'* ]]
+  CERALIVE_IMAGE_BUILD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  writer="${writer//\/etc\/ceralive\//$root/}"
+  run env CERALIVE_IMAGE_BUILD_COMMIT="$CERALIVE_IMAGE_BUILD_COMMIT" CERALIVE_OS_RELEASE_VERSION=not-a-version \
+    bash -c 'die() { printf "%s\n" "$*" >&2; exit 1; }; eval "$1"' _ "$writer"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'CERALIVE_OS_RELEASE_VERSION must be YYYY.MINOR.PATCH CalVer'* ]]
+  [ ! -e "$root/os-release-version" ]
+}
+
 # ===========================================================================
 # 8b. First-boot WiFi provisioning captive portal (Task 14).
 #     The offline proof harness stubs nmcli/ip/systemctl/systemd-run and drives the
@@ -287,8 +383,8 @@ load manifest-helpers
   for pkg in $MODEM_CLOSURE_PKGS; do
     grep -Fxq "$pkg" <<<"$staged" || { echo "missing from FIRST_PARTY_APT_PKGS: $pkg"; false; }
   done
-  # The set is five core packages + nine closure packages + one support companion.
-  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 15 ]
+  # Five core packages + nine closure packages + modem and apt credentials companions.
+  [ "$(bash -c 'source "$1"; printf "%s" "${#FIRST_PARTY_APT_PKGS[@]}"' bash "$FETCH_DEBS")" -eq 16 ]
 }
 
 @test "modem support companion: is staged once at its exact Architecture-all version" {
@@ -298,7 +394,7 @@ load manifest-helpers
   pins="$PIPELINE_DIR/manifests/first-party-deb-versions.txt"
   [ "$(awk -F= '$1=="ceralive-modem-support"{print $2}' "$pins")" = "1.4.0" ]
   arch_all_ok="$(bash -c 'source "$1"; printf "%s\n" "${FIRST_PARTY_ARCH_ALL_OK_PKGS[@]}"' bash "$PIPELINE_DIR/lib/fetch/firstparty.sh")"
-  [ "$arch_all_ok" = "ceralive-modem-support" ]
+  [ "$arch_all_ok" = $'ceralive-modem-support\nceralive-apt-credentials' ]
 }
 
 @test "modem closure: each package has an exact live-verified Version pin in the txt" {
@@ -357,17 +453,34 @@ load manifest-helpers
   [ "$status" -eq 0 ]
 }
 
-@test "modem closure: the Package:* origin-990 pin covers the closure (wildcard, not per-package)" {
-  # The closure debs are served from the apt.ceralive.tv origin. The pin is
-  # `Package: *` at Pin-Priority 990, so it covers EVERY package that origin
-  # carries — including all nine — with no per-package enumeration needed.
+@test "modem closure: the per-name origin-990 pin covers every closure package (Todo 29: retired the Package:* wildcard)" {
+  # Todo 29 (update-system-overhaul) replaced the blanket `Package: *` wildcard
+  # with a per-name file generated from manifests/first-party-apt-names.txt.
+  # The modem closure's nine packages must each carry their own 990/-1 stanza
+  # pair, sourced from that manifest, never a wildcard.
   local dir="$BATS_TEST_TMPDIR/modem-prefs/preferences.d"
+  local names_b64
+  names_b64="$(base64 -w0 "$PIPELINE_DIR/manifests/first-party-apt-names.txt")"
   run env APT_CERALIVE_REPO_NO_AUTORUN=1 APT_PREFERENCES_DIR="$dir" \
+    CERALIVE_FIRST_PARTY_NAMES_B64="$names_b64" \
     bash -c "source '$APT_CERALIVE_REPO'; install_apt_preferences"
   [ "$status" -eq 0 ]
-  grep -qxF 'Package: *' "$dir/ceralive"
-  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive"
-  grep -qxF 'Pin-Priority: 990' "$dir/ceralive"
+  [ ! -e "$dir/ceralive" ]
+  local pkg
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    grep -qxF "Package: ${pkg}" "$dir/ceralive-origin" \
+      || { echo "ceralive-origin missing a stanza for closure package ${pkg}"; false; }
+  done
+  grep -qxF 'Pin: origin apt.ceralive.tv' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: 990' "$dir/ceralive-origin"
+  grep -qxF 'Pin: origin *' "$dir/ceralive-origin"
+  grep -qxF 'Pin-Priority: -1' "$dir/ceralive-origin"
+  # every one of the nine closure names must ALSO be present in the manifest
+  # itself, or a future manifest edit could silently drop closure coverage.
+  for pkg in $MODEM_CLOSURE_PKGS; do
+    grep -qxF "${pkg}" "$PIPELINE_DIR/manifests/first-party-apt-names.txt" \
+      || { echo "manifests/first-party-apt-names.txt is missing closure package ${pkg}"; false; }
+  done
 }
 
 @test "modem closure: DRY_RUN fetch_first_party resolves every closure package" {

@@ -62,9 +62,11 @@ EVIDENCE="${1:-${REPO}/test-results/migrate-package-diff.txt}"
 for f in "${PKGDIR}/shared.list" "${PKGDIR}/removed.md"; do
   [[ -f "${f}" ]] || { echo "ERROR: missing v2 source: ${f}" >&2; exit 2; }
 done
-[[ -f "${RUNTIME_DIR}/ceralive-console-font.service" ]] || { echo "ERROR: missing console font unit source" >&2; exit 2; }
-[[ "$(grep -c 'install_console_font_service' <<<"${POSTINST_SRC}")" -ge 2 ]] || { echo "ERROR: console font unit is enabled without an installer hook and call site" >&2; exit 2; }
-grep -q 'ceralive-console-font' <<<"${POSTINST_SRC}" || { echo "ERROR: console font service is not enabled by the postinst library" >&2; exit 2; }
+# The old unit always swallowed its missing-PSF setfont failure; with it gone, kbd
+# has no remaining runtime consumer and both must stay retired.
+[[ ! -e "${RUNTIME_DIR}/ceralive-console-font.service" ]] || { echo "ERROR: broken console-font unit returned; it has no PSF provider" >&2; exit 2; }
+! grep -Eq '^[[:space:]]*[^#[:space:]].*(install_console_font_service|ceralive-console-font)' <<<"${POSTINST_SRC}" \
+  || { echo "ERROR: console-font installer or enablement returned; kbd must remain unnecessary" >&2; exit 2; }
 
 # REPOS parse guard — asserted BEFORE the legacy-source skip below, because the
 # accounting run that consumes it is skipped on a post-T24 checkout and would

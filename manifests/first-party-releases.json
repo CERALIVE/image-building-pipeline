@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-10-07T14:23:46.718620+00:00",
+  "checked_at": "2026-10-15T05:53:30.264995+00:00",
   "releases": [
     {
       "component": "CeraUI",
@@ -9,6 +9,14 @@
       "packages": {
         "ceralive-device[amd64]": "2026.9.4-20260923T212001.159f99b",
         "ceralive-device[arm64]": "2026.9.4-20260923T212013.159f99b"
+      }
+    },
+    {
+      "component": "apt-credentials",
+      "tag": "apt-credentials-v1.0.1",
+      "published_at": "2026-09-27T18:47:02Z",
+      "packages": {
+        "ceralive-apt-credentials[all]": "1.0.1"
       }
     },
     {

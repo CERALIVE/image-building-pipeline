@@ -69,7 +69,7 @@ _fetch_bsp_native_one() {
     if (( hit_rc == 0 )) && [[ -n "${hit_resolved}" ]]; then
       IFS=$'\t' read -r hit_file hit_sha _ <<<"${hit_resolved}"
       if debcache_try_hit "$(basename "${hit_file}")" "${hit_sha}" \
-          "${_BSP_DEBS}/$(basename "${hit_file}")"; then
+          "${_BSP_DEBS}/$(basename "${hit_file}")" "${pkg}" "${spec#*=}" "${ARCH}" --arch-all-ok; then
         return 0
       fi
     fi
@@ -185,7 +185,7 @@ _fetch_bsp_curl_one() {
   final="${_BSP_DEBS}/$(basename "${filename}")"
   # ${sha256} came from the gpgv-verified Packages index, so a cache hit is held
   # to the same signed-metadata hash the download would have been.
-  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}"; then
+  if debcache_try_hit "$(basename "${filename}")" "${sha256}" "${final}" "${pkg}" "${wanted_version}" "${ARCH}" --arch-all-ok; then
     return 0
   fi
   tmp="$(mktemp "${_BSP_DEBS}/.tmp-XXXXXX")"

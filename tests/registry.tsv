@@ -65,17 +65,26 @@ tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party a
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
 tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
+tests/packages-lock.test.sh	shell	integration	default-shell	verified apt/fetch/generated receipts, source-built kernel and unaccounted-package refusal
 tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-key set, InRelease identity, per-package SHA-256
 tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
-tests/rauc-transition-contract.test.sh	shell	unit	default-shell	first Trixie bundle remains plain-format with exact fleet compatible and signing chain for RAUC 1.8
+tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration retains compatible, signing chain, and six RAUC writer invariants
+tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
+tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
+tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
+tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
+tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
+tests/flash-download.test.sh	shell	integration	default-shell	local HTTP fixture: parallel parts, Range resume, corrupt/unavailable part cleanup, full SHA refusal and traversal guard
 tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate
+tests/partlabel-guard.test.sh	shell	unit	default-shell	plain lsblk/findmnt fixtures: same-disk, cross-disk and duplicate PARTLABEL safety before mark-good
 tests/preflash-cross-board.test.sh	shell	integration	default-shell	board-derived candidate identity and cross-board rejection against real FAT/squashfs fixtures
 tests/flash-remote-guard.test.sh	shell	integration	default-shell	remote-destructive-write contract: local block device plus a physical confirmation, or no write
 tests/maskrom-first-realhw.test.sh	shell	integration	default-shell	maskrom-first flash sequencing and one-use retention markers
 tests/hardware-candidate-bench-labels.test.sh	shell	integration	default-shell	--bench-labels is required, exported to ./build and recorded in the artifact tuple
+tests/first-party-local-override.test.sh	shell	integration	default-shell	bench-only local Debian overrides preserve identity, cache isolation, production refusal and plan parity
 tests/uart-console-path.test.sh	shell	unit	default-shell	CI-UART bootstrap targets ttyFIQ0 while serial_console stays ttyS2
 tests/uart-bootstrap-tty.test.sh	shell	unit	default-shell	tty-class-aware stty: tolerant on FIQ, fatal on a real UART
 tests/postinst-module-contract.test.sh	shell	unit	default-shell	every postinst registry function resolves from a bare source
@@ -89,6 +98,9 @@ tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= m
 tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
 mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)
 tests/apt-preferences-baked.test.sh	shell	unit	default-shell	the origin-990 apt pin is baked identically on both tracks
+tests/apt-first-party-origin.test.sh	shell	integration	default-shell	real offline APT rejects foreign first-party candidates when ours is absent
+tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
+tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
@@ -112,6 +124,7 @@ tests/build-parallelism.test.sh	shell	unit	default-shell	cgroup v2 leaf-to-root 
 tests/mkosi-package-staging.test.sh	shell	integration	default-shell	staged package modes, mounts and local-repository consumption
 tests/mkosi-cache-privilege-domain.test.sh	shell	unit	default-shell	the mkosi cache stays in one privilege domain; Docker Desktop is refused
 tests/kernel-src-mirror.test.sh	shell	unit	default-shell	persistent kernel-source mirror: reuse with the upstream destroyed, its non-vacuity leg, the per-mirror flock and the auto/0/1 modes
+tests/kernel-artifact-cache.test.sh	shell	unit	default-shell	content-keyed kernel artifacts: input mutations, verified hit, one-byte corruption, config validation and off mode
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
@@ -122,6 +135,7 @@ tests/versions-lib.test.sh	shell	unit	default-shell	the one versions.yaml pin re
 tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-index module, no silent || true
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
 tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
+tests/slot-sync.test.sh	shell	unit	default-shell	verified local slot mirror: full refusal-gate matrix, check JSON, dpkg-verify comparison, mark-bad/good ordering, SIGTERM handling; internal real loop-mounted-ext4 leg gated on CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
 mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
 
@@ -160,6 +174,7 @@ tests/test-registry.test.sh	shell	unit	not-executed	the registry's own completen
 tests/.gitkeep	fixture	support	not-executed	keeps the directory tracked
 tests/fixtures/apt-policyrcd-mode.py	fixture	support	not-executed	reports the file mode mkosi's policy-rc.d write site produces; driven by mkosi-image-contract.bats, never run directly
 tests/fixtures/apt-sandbox/in-container.sh	fixture	support	not-executed	in-container payload for the apt-sandbox suite, never run directly
+tests/fixtures/rauc-1.15.2-rock-status.json	fixture	support	not-executed	verbatim Rock 5B+ RAUC 1.15.2 detailed JSON; consumed by slot-sync.test.sh
 tests/fixtures/gpt-baseline/README.md	fixture	support	not-executed	provenance note for the frozen GPT baselines
 tests/fixtures/gpt-baseline/rk3588-ab.gpt	fixture	support	not-executed	frozen pre-overlay GPT baseline; a diff here is a fleet re-flash, not a test fix
 tests/fixtures/gpt-baseline/rk3588-single-slot.gpt	fixture	support	not-executed	frozen single-slot GPT baseline

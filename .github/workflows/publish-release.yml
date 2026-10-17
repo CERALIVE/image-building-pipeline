@@ -1,0 +1,190 @@
+name: Publish signed image release
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Release candidate workflow run ID (publish only)
+        type: string
+        required: false
+      boards:
+        description: Comma-separated board manifest names
+        type: string
+        required: true
+      version:
+        description: OS CalVer for publish or promote
+        type: string
+        required: false
+      channel:
+        description: Channel for publish or refresh
+        type: choice
+        options: [beta, stable, drill]
+        required: true
+      mode:
+        description: Release operation
+        type: choice
+        options: [publish, promote, refresh, prune]
+        required: true
+      expect_serial:
+        description: Observed channel serial (refresh only, one board)
+        type: string
+        required: false
+      expect_etag:
+        description: Observed quoted JSON ETag (refresh only, one board)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: image-release-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: [self-hosted, ceralive-image-builder]
+    environment: release
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate dispatch and candidate provenance
+        env:
+          MODE: ${{ inputs.mode }}
+          BOARDS: ${{ inputs.boards }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          EXPECT_SERIAL: ${{ inputs.expect_serial }}
+          EXPECT_ETAG: ${{ inputs.expect_etag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$BOARDS" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]] || exit 2
+          if [[ "$MODE" == publish || "$MODE" == promote ]]; then
+            [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || exit 2
+          fi
+          if [[ "$MODE" == publish ]]; then
+            [[ "$CANDIDATE_RUN" =~ ^[1-9][0-9]*$ ]] || exit 2
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
+              --jq '.head_sha' >"${RUNNER_TEMP}/candidate-sha"
+            [[ "$(<"${RUNNER_TEMP}/candidate-sha")" =~ ^[0-9a-f]{40}$ ]]
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
+              --jq '.conclusion' | grep -qx success
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
+              --jq '.path' | grep -qx '.github/workflows/release.yml'
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
+              --jq '.event' | grep -qx push
+          fi
+          if [[ "$MODE" == refresh ]]; then
+            [[ "$BOARDS" != *,* && "$EXPECT_SERIAL" =~ ^[1-9][0-9]*$ && "$EXPECT_ETAG" =~ ^\"[a-fA-F0-9]{32}\"$ ]] || {
+              echo 'refresh requires one board, observed serial, and quoted JSON ETag' >&2; exit 2;
+            }
+          elif [[ -n "$EXPECT_SERIAL" || -n "$EXPECT_ETAG" ]]; then
+            echo 'refresh preconditions apply only to refresh' >&2; exit 2
+          fi
+      - name: Materialize dedicated signer
+        env:
+          OTA_MANIFEST_SIGNER_TAR_B64: ${{ secrets.OTA_MANIFEST_SIGNER_TAR_B64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$OTA_MANIFEST_SIGNER_TAR_B64" ]] || { echo 'manifest signer secret missing' >&2; exit 1; }
+          install -d -m 0700 "${RUNNER_TEMP}/ota-manifest-signer"
+          printf '%s' "$OTA_MANIFEST_SIGNER_TAR_B64" | base64 -d | \
+            tar -xz -C "${RUNNER_TEMP}/ota-manifest-signer" \
+              leaf.key leaf.pem intermediate-ca.pem root-ca.pem
+          chmod 0600 "${RUNNER_TEMP}/ota-manifest-signer/"*
+      - name: Materialize bundle verification root
+        if: ${{ inputs.mode != 'prune' }}
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          MODE: ${{ inputs.mode }}
+          RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
+          RAUC_BENCH_ROOT_CA_B64: ${{ secrets.RAUC_BENCH_ROOT_CA_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == drill && "$MODE" != promote ]]; then
+            [[ -n "$RAUC_BENCH_ROOT_CA_B64" ]] || { echo 'bench RAUC root absent' >&2; exit 1; }
+            printf '%s' "$RAUC_BENCH_ROOT_CA_B64" | base64 -d >"${RUNNER_TEMP}/rauc-bundle-root.pem"
+          else
+            [[ -n "$RAUC_RELEASE_PKI_TAR_B64" ]] || { echo 'production RAUC PKI absent' >&2; exit 1; }
+            printf '%s' "$RAUC_RELEASE_PKI_TAR_B64" | base64 -d | tar -xzO root-ca.pem >"${RUNNER_TEMP}/rauc-bundle-root.pem"
+          fi
+          openssl x509 -in "${RUNNER_TEMP}/rauc-bundle-root.pem" -noout >/dev/null
+          chmod 0600 "${RUNNER_TEMP}/rauc-bundle-root.pem"
+      - name: Publish, promote, refresh, or prune
+        env:
+          MODE: ${{ inputs.mode }}
+          BOARDS: ${{ inputs.boards }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          EXPECT_SERIAL: ${{ inputs.expect_serial }}
+          EXPECT_ETAG: ${{ inputs.expect_etag }}
+          GH_TOKEN: ${{ github.token }}
+          OTA_MANIFEST_SIGNER_DIR: ${{ runner.temp }}/ota-manifest-signer
+          RAUC_BUNDLE_KEYRING: ${{ runner.temp }}/rauc-bundle-root.pem
+          R2_IMAGES_BUCKET: ceralive-images
+          R2_IMAGES_ENDPOINT: ${{ secrets.R2_IMAGES_ENDPOINT }}
+          R2_IMAGES_ACCESS_KEY_ID: ${{ secrets.R2_IMAGES_ACCESS_KEY_ID }}
+          R2_IMAGES_SECRET_ACCESS_KEY: ${{ secrets.R2_IMAGES_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$R2_IMAGES_ENDPOINT" && -n "$R2_IMAGES_ACCESS_KEY_ID" && -n "$R2_IMAGES_SECRET_ACCESS_KEY" ]] || {
+            echo 'R2 images credentials absent' >&2; exit 1;
+          }
+          IFS=, read -r -a selected <<<"$BOARDS"
+          for board in "${selected[@]}"; do
+            case "$board" in
+              rock-5b-plus|orange-pi-5-plus|x86-minipc) ;;
+              *) echo "unsupported board: $board" >&2; exit 2 ;;
+            esac
+            case "$MODE" in
+              publish)
+                artifact="${board}-$(<"${RUNNER_TEMP}/candidate-sha")"
+                dir="${RUNNER_TEMP}/candidate-${board}"
+                mkdir -p "$dir"
+                gh run download "$CANDIDATE_RUN" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$dir"
+                (cd "$dir" && sha256sum -c good.raucb.sha256)
+                mapfile -t compressed < <(find "$dir" -maxdepth 1 -type f \( -name '*.raw.zst' -o -name '*.raw.xz' \))
+                (( ${#compressed[@]} == 1 ))
+                (cd "$dir" && sha256sum -c "$(basename "${compressed[0]}").sha256")
+                [[ -f "$dir/packages.lock.json" ]] || { echo 'candidate package lock absent' >&2; exit 1; }
+                # Old candidates used xz; current ones use zstd. The logical URL
+                # always carries real xz bytes, never renamed zstd transport.
+                case "${compressed[0]}" in
+                  *.raw.zst) zstd --long=31 -dc "${compressed[0]}" | xz -T0 -9 -c >"$dir/flash.raw.xz" ;;
+                  *.raw.xz) cp "${compressed[0]}" "$dir/flash.raw.xz" ;;
+                esac
+                raw_digest="$(cut -d' ' -f1 "$dir/raw.sha256")"
+                [[ "$raw_digest" =~ ^[0-9a-f]{64}$ ]]
+                printf '%s  flash.raw\n' "$raw_digest" >"$dir/flash.raw.sha256"
+                bash ci/publish-release.sh publish --board "$board" --version "$VERSION" \
+                  --channel "$CHANNEL" --bundle "$dir/good.raucb" --flash "$dir/flash.raw.xz" \
+                  --raw-sha256 "$dir/flash.raw.sha256" --lock "$dir/packages.lock.json"
+                ;;
+              promote) bash ci/publish-release.sh promote --board "$board" --version "$VERSION" --to stable ;;
+              refresh)
+                export AWS_ACCESS_KEY_ID="$R2_IMAGES_ACCESS_KEY_ID"
+                export AWS_SECRET_ACCESS_KEY="$R2_IMAGES_SECRET_ACCESS_KEY"
+                export AWS_DEFAULT_REGION=auto
+                key="channels/${CHANNEL}/${board}.json"
+                aws s3api get-object --bucket "$R2_IMAGES_BUCKET" --endpoint-url "$R2_IMAGES_ENDPOINT" \
+                  --key "$key" "${RUNNER_TEMP}/refresh-observed.json" >/dev/null
+                observed_serial="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "${RUNNER_TEMP}/refresh-observed.json")"
+                observed_etag="$(aws s3api head-object --bucket "$R2_IMAGES_BUCKET" --endpoint-url "$R2_IMAGES_ENDPOINT" \
+                  --key "$key" --query ETag --output text)"
+                [[ "$observed_serial" == "$EXPECT_SERIAL" && "$observed_etag" == "$EXPECT_ETAG" ]] || {
+                  echo 'refresh serial/ETag drifted since approval' >&2; exit 1;
+                }
+                bash ci/publish-release.sh refresh --board "$board" --channel "$CHANNEL" \
+                  --expect-serial "$observed_serial" --expect-etag "$observed_etag"
+                ;;
+              prune) bash ci/publish-release.sh prune --board "$board" --channel-family ;;
+            esac
+          done
+      - name: Remove materialized secrets and candidate copies
+        if: ${{ always() }}
+        run: |
+          rm -rf "${RUNNER_TEMP}/ota-manifest-signer" "${RUNNER_TEMP}/rauc-bundle-root.pem" "${RUNNER_TEMP}/candidate-"* "${RUNNER_TEMP}/candidate-sha" "${RUNNER_TEMP}/refresh-observed.json"

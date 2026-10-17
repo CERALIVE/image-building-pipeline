@@ -7,7 +7,7 @@ rauc_cert_sha256() {
 
 rauc_pki_resolve() {
   local mode="$1" requested_pki="${2:-}" requested_keyring="${3:-}"
-  local here v2 pki keyring cert_pub key_pub
+  local here v2 pki keyring cert_pub key_pub eku
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   v2="$(cd "${here}/.." && pwd)"
   case "${mode}" in
@@ -36,6 +36,18 @@ rauc_pki_resolve() {
   cert_pub="$(openssl x509 -in "${pki}/leaf-signing.pem" -pubkey -noout)"
   key_pub="$(openssl pkey -in "${pki}/leaf-signing.key" -pubout 2>/dev/null)"
   [[ "${cert_pub}" == "${key_pub}" ]] || { printf 'RAUC leaf certificate/private key mismatch\n' >&2; return 1; }
+  # RAUC's unconfigured CMS verifier requires S/MIME signing; the leaf also
+  # needs Code Signing EKU for newer RAUC versions.
+  openssl verify -purpose smimesign -CAfile "${keyring}" \
+    -untrusted "${pki}/chain.pem" "${pki}/leaf-signing.pem" >/dev/null || {
+    printf 'RAUC leaf is not valid for the device S/MIME signing purpose\n' >&2
+    return 1
+  }
+  eku="$(openssl x509 -in "${pki}/leaf-signing.pem" -noout -ext extendedKeyUsage)"
+  [[ "$eku" == *'Code Signing'* ]] || {
+    printf 'RAUC leaf is not valid for code signing\n' >&2
+    return 1
+  }
   CERALIVE_RAUC_PKI_DIR="${pki}"
   RAUC_KEYRING_FILE="${keyring}"
   RAUC_ROOT_SHA256="$(rauc_cert_sha256 "${keyring}")"

@@ -473,4 +473,5 @@ else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
 fi
 
+mkosi-chroot bash "${CHROOT_SRCDIR:?}/runtime/packages-lock-capture.sh" platform "${bsp_pkgs[@]}"
 log "authenticated staged BSP layer complete."

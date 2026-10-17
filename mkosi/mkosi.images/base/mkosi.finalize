@@ -37,5 +37,6 @@ log_info "creating 'ceralive' user in the BASE OS layer (run-all.sh base)"
 # CERALIVE_COMMON_SH overrides run-all.sh's relative ../../lib/common.sh lookup,
 # which would resolve outside the mounted $SRCDIR (only $SRCDIR is mounted).
 mkosi-chroot env "CERALIVE_COMMON_SH=${COMMON_SH}" bash "${RUN_ALL}" base
+mkosi-chroot bash "${CHROOT_SRCDIR%/}/runtime/packages-lock-capture.sh" base
 
 log_success "base layer: ceralive user provisioned"

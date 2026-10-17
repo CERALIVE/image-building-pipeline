@@ -31,20 +31,34 @@ resolve_kernel_package_name() {
 
 # ---------------------------------------------------------------------------
 # deb_control_field <deb> <field> — read one Debian control field without dpkg
-# (the host may be non-Debian). Mirrors orchestrate.sh::deb_pkg_name.
+# (the host may be non-Debian). Mirrors lib/shared/deb-lib.sh's parser because
+# the kernel builder must also work without the fetcher's sourced library.
 # ---------------------------------------------------------------------------
 deb_control_field() {
-  local deb="$1" field="$2" tmp value=""
-  tmp="$(mktemp -d)"
-  if ar p "${deb}" control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.xz 2>/dev/null | tar -xJO ./control 2>/dev/null >"${tmp}/control"; then
-    :
-  elif ar p "${deb}" control.tar.zst 2>/dev/null | tar --zstd -xO ./control 2>/dev/null >"${tmp}/control"; then
-    :
+  local deb="$1" field="$2" tmp value="" member flags errors="" size have_control=0
+  if ! tmp="$(mktemp -d)"; then
+    size="$(stat -c '%s' "${deb}" 2>/dev/null)" || size=unavailable
+    log_warn "deb_control_field: cannot create scratch for deb=${deb} size=${size} bytes; df: $(df -P "${TMPDIR:-/tmp}" 2>&1)"
+    printf '%s' "${value}"
+    return 0
   fi
-  if [[ -s "${tmp}/control" ]]; then
+  for member in control.tar.gz control.tar.xz control.tar.zst; do
+    case "${member}" in
+      *.gz) flags=(-xzO) ;;
+      *.xz) flags=(-xJO) ;;
+      *.zst) flags=(--zstd -xO) ;;
+    esac
+    if ar p "${deb}" "${member}" 2>"${tmp}/ar.err" \
+      | tar "${flags[@]}" ./control 2>"${tmp}/tar.err" >"${tmp}/control"; then
+      if [[ -s "${tmp}/control" ]]; then have_control=1; break; fi
+    fi
+    errors+="${member}: ar: $(<"${tmp}/ar.err"); tar: $(<"${tmp}/tar.err"); "
+  done
+  if (( have_control )); then
     value="$(awk -F': ' -v f="${field}" '$0 ~ "^" f ":" {print $2; exit}' "${tmp}/control")"
+  else
+    size="$(stat -c '%s' "${deb}" 2>/dev/null)" || size=unavailable
+    log_warn "deb_control_field: no control content in deb=${deb} size=${size} bytes; extraction: ${errors}; df: $(df -P "${tmp}" 2>&1)"
   fi
   rm -rf "${tmp}"
   printf '%s' "${value}"

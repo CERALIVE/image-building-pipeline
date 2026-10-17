@@ -1,0 +1,118 @@
+# CeraLive v2 — RAUC-build-from-source container (Todo 22 RAUC-version-path
+# follow-up, decisions.md 2026-09-24 "Todo 22 RAUC version path — FINAL RULING").
+#
+# Used ONLY by lib/build-rauc.sh, which runs `dpkg-buildpackage -us -uc -b`
+# inside this image for EVERY board build (unlike the kernel builder, this stage
+# is unconditional — RAUC ships on both the rk3588 and x86_64 families).
+#
+# THE BASE IMAGE IS NOT PINNED HERE, same contract as ci/Dockerfile.kernel: the
+# BASE_IMAGE build-arg is REQUIRED and is supplied by lib/build-rauc.sh from a
+# digest-pinned constant declared next to the manifest's own kernel_source
+# builder_image pins, so the builder digest is reviewed and rotated in one place
+# instead of drifting in a Dockerfile default nobody reads. The build FAILS if
+# BASE_IMAGE is unset.
+#
+# WHY debian:trixie AT ALL, not a lighter distro: the built .deb pair ships
+# straight onto a trixie device rootfs. Building against ANY other libc/glibc
+# generation risks the exact class of defect
+# `docs/build-reproducibility.md`/the cerastream-glibc-pipewire-network-ui effort
+# already found once for a different first-party package — a `GLIBC_` symbol the
+# device's own libc cannot satisfy. One digest-pinned trixie image is also the
+# SAME image family ci/Dockerfile and ci/Dockerfile.kernel already pin, so no
+# fourth libc generation enters this pipeline's provenance story.
+#
+# WHY A SEPARATE Dockerfile from ci/Dockerfile.kernel (mirrors, does not extend,
+# that file's own header reasoning): RAUC's build-dependency closure
+# (meson/glib/openssl/dbus/curl userspace libraries) shares almost nothing with
+# the kernel's (cross toolchain, kbuild, dwarves). A single shared Dockerfile
+# would either install BOTH closures unconditionally into every builder image
+# (larger, slower, and a spurious coupling between two totally independent build
+# stages) or grow a build-arg-gated conditional RUN block, which this repo's own
+# `RUN --mount=type=cache` contract (ci/Dockerfile.kernel's own header) treats as
+# exactly the kind of layer-cache foot-gun worth a second file to avoid.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# apt proxy — same contract as ci/Dockerfile / ci/Dockerfile.kernel: http only
+# (https pinned DIRECT), empty by default, confined to the single RUN that uses
+# it so no host-local proxy URL (which may carry credentials) survives into a
+# shared builder layer.
+ARG APT_PROXY=
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# RAUC build closure, read straight off the REAL Debian source packages this
+# build consumes (verified empirically — `apt-get source`/pool inspection against
+# both trixie 1.13-3+deb13u1 and unstable 1.15.2-1's `debian/control`
+# Build-Depends, not guessed):
+#
+#   dbus e2fsprogs fakeroot faketime grub-common   test-suite tooling
+#     opensc opensc-pkcs11 softhsm2 squashfs-tools  (most gated `<!nocheck>` —
+#     kept anyway so a future non-nocheck build still succeeds unmodified)
+#   debhelper build-essential dpkg-dev              the packaging toolchain itself
+#   libcurl4-gnutls-dev libdbus-1-dev               streaming + D-Bus service
+#   libengine-pkcs11-openssl libfdisk-dev           PKCS#11 signing + GPT slots
+#   libglib2.0-dev libjson-glib-dev libnl-genl-3-dev core RAUC dependencies
+#   libssl-dev libtool meson pkgconf systemd-dev    build system + crypto
+#   openssl ca-certificates git                      pinned source fetch/signing
+#   python3-sphinx-rtd-theme                         `-Dmanpages=true` (unstable's
+#                                                     debian/rules; kept AS-IS —
+#                                                     "reuse Debian's own recipe
+#                                                     verbatim", not trimmed)
+#
+# debhelper-compat (= 13) is satisfied by the plain `debhelper` package on
+# trixie (>= 13 by default); no separate compat package exists to name.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eu; \
+    [ -f /etc/apt/apt.conf.d/docker-clean ] \
+      && mv /etc/apt/apt.conf.d/docker-clean /tmp/ceralive-docker-clean || true; \
+    printf 'Binary::apt::APT::Keep-Downloaded-Packages "true";\n' \
+      > /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    if [ -n "${APT_PROXY}" ]; then \
+      printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "DIRECT";\n' "${APT_PROXY}" \
+        > /etc/apt/apt.conf.d/99ceralive-proxy; \
+    fi; \
+    mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      -o Dpkg::Options::=--force-unsafe-io \
+      build-essential \
+      debhelper \
+      dpkg-dev \
+      fakeroot \
+      faketime \
+      dbus \
+      e2fsprogs \
+      grub-common \
+      opensc \
+      opensc-pkcs11 \
+      softhsm2 \
+      squashfs-tools \
+      libcurl4-gnutls-dev \
+      libdbus-1-dev \
+      libengine-pkcs11-openssl \
+      libfdisk-dev \
+      libglib2.0-dev \
+      libjson-glib-dev \
+      libnl-genl-3-dev \
+      libssl-dev \
+      libtool \
+      meson \
+      pkgconf \
+      systemd-dev \
+      python3-sphinx-rtd-theme \
+      openssl \
+      ca-certificates \
+      git \
+      gnupg \
+      xz-utils \
+      quilt; \
+    rm -f /etc/apt/apt.conf.d/99ceralive-proxy /etc/apt/apt.conf.d/99ceralive-keep-cache; \
+    [ -f /tmp/ceralive-docker-clean ] \
+      && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
+
+# Fail the image build LOUDLY if the toolchain is not what was asked for.
+RUN dpkg-buildpackage --version | head -1 \
+ && meson --version \
+ && dpkg-architecture -qDEB_BUILD_ARCH

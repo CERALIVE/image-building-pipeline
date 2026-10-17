@@ -41,6 +41,8 @@ cp "${RK_HELPER}" "${NONROOT_ROOT}/boot/ceralive-boot-state.sh"
 cp "${X86_HELPER}" "${NONROOT_ROOT}/x86/x86-boot-state.sh"
 cp "${CORE}" "${NONROOT_ROOT}/boot-state-core.sh"
 chmod 755 "${NONROOT_ROOT}" "${NONROOT_ROOT}/boot" "${NONROOT_ROOT}/x86"
+chmod 644 "${NONROOT_ROOT}/boot/ceralive-boot-state.sh" \
+  "${NONROOT_ROOT}/x86/x86-boot-state.sh" "${NONROOT_ROOT}/boot-state-core.sh"
 trap 'rm -rf "${WORK}" "${NONROOT_ROOT}"' EXIT
 NONROOT_RK_HELPER="${NONROOT_ROOT}/boot/ceralive-boot-state.sh"
 NONROOT_X86_HELPER="${NONROOT_ROOT}/x86/x86-boot-state.sh"
@@ -52,13 +54,21 @@ rk()  { CERALIVE_BOOT_STATE_FILE="${WORK}/rk/boot_state.txt" CERALIVE_BOOT_ATTEM
 x86() { CERALIVE_GRUBENV="${WORK}/x86/grubenv" CERALIVE_BOOT_ATTEMPTS=3 \
           GRUB_EDITENV=/nonexistent-grub-editenv bash "${X86_HELPER}" "$@"; }
 reset_backends() { rm -rf "${WORK}/rk" "${WORK}/x86"; mkdir -p "${WORK}/rk" "${WORK}/x86"; }
-run_nobody() {
+run_unprivileged() {
   local output="$1"; shift
-  set +e
-  sudo -n -u nobody "$@" 2>&1 | tee "${output}" >/dev/null
-  local rc="${PIPESTATUS[0]}"
-  set -e
-  return "${rc}"
+  if (( EUID == 0 )); then
+    runuser -u nobody -- "$@" >"${output}" 2>&1
+  else
+    "$@" >"${output}" 2>&1
+  fi
+}
+assert_unreadable_to_runner() {
+  local state_file="$1"
+  # The probe expands $EUID and $1 in the child, never in the test driver.
+  # shellcheck disable=SC2016
+  run_unprivileged "${WORK}/permission-probe.out" bash -c '
+    [[ $EUID -ne 0 && -x "$(dirname "$1")" && -f "$1" && ! -r "$1" ]]
+  ' _ "${state_file}" || fail "state fixture is not an unreadable regular file for the exercising process"
 }
 
 # ---------------------------------------------------------------------------
@@ -253,13 +263,19 @@ assert_rk_refuses_unreadable_state() {
   local state_file="${state_dir}/boot_state.txt"
   mkdir -p "${state_dir}"
   printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\n' >"${state_file}"
+  chmod 755 "${state_dir}"
+  chmod 644 "${state_file}"
+  run_unprivileged "${WORK}/rk-readable.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+      CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump \
+    || fail "RK readable control could not run: $(cat "${WORK}/rk-readable.out")"
+  grep -qx 'BOOT_ORDER=A B' "${WORK}/rk-readable.out" || fail "RK readable control did not read state"
   chmod 000 "${state_file}"
-  chmod 700 "${state_dir}"
-  if run_nobody "${WORK}/unreadable.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+  assert_unreadable_to_runner "${state_file}"
+  if run_unprivileged "${WORK}/unreadable.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
       CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a mode-000 state file as defaults"
   fi
-  grep -qi 'unreadable\|permission' "${WORK}/unreadable.out" \
+  grep -Fxq "ceralive-boot-state: state file ${state_file} is unreadable" "${WORK}/unreadable.out" \
     || fail "unreadable RK state was not named: $(cat "${WORK}/unreadable.out")"
 }
 
@@ -267,8 +283,10 @@ assert_rk_refuses_corrupt_state() {
   local state_dir="${WORK}/rk-corrupt"
   local state_file="${state_dir}/boot_state.txt"
   mkdir -p "${state_dir}"
+  chmod 755 "${state_dir}"
   printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\n' >"${state_file}"
-  if run_nobody "${WORK}/truncated.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+  chmod 644 "${state_file}"
+  if run_unprivileged "${WORK}/truncated.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
       CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a truncated state file as defaults"
   fi
@@ -276,7 +294,7 @@ assert_rk_refuses_corrupt_state() {
     || fail "truncated RK state was not named: $(cat "${WORK}/truncated.out")"
 
   printf 'BOOT_ORDER=A B\nBOOT_A_LEFT=3\nBOOT_B_LEFT=3\nBOOT_CRC=1\n' >"${state_file}"
-  if run_nobody "${WORK}/bad-crc.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
+  if run_unprivileged "${WORK}/bad-crc.out" env CERALIVE_BOOT_STATE_FILE="${state_file}" \
       CERALIVE_BOOT_ATTEMPTS=3 bash "${NONROOT_RK_HELPER}" dump; then
     fail "RK dump accepted a bad-CRC state file as defaults"
   fi
@@ -295,13 +313,20 @@ ok "corruption: unreadable and truncated state are refused instead of fabricated
 
 x86 init >/dev/null
 x86_state="${WORK}/x86/grubenv"
+chmod 755 "${WORK}/x86"
+chmod 644 "${x86_state}"
+run_unprivileged "${WORK}/x86-readable.out" env CERALIVE_GRUBENV="${x86_state}" \
+    CERALIVE_BOOT_ATTEMPTS=3 GRUB_EDITENV=/nonexistent-grub-editenv \
+    bash "${NONROOT_X86_HELPER}" dump \
+  || fail "x86 readable control could not run: $(cat "${WORK}/x86-readable.out")"
+grep -qx 'BOOT_ORDER=A B' "${WORK}/x86-readable.out" || fail "x86 readable control did not read state"
 chmod 000 "${x86_state}"
-chmod 700 "${WORK}/x86"
-if run_nobody "${WORK}/x86-unreadable.out" env CERALIVE_GRUBENV="${x86_state}" \
+assert_unreadable_to_runner "${x86_state}"
+if run_unprivileged "${WORK}/x86-unreadable.out" env CERALIVE_GRUBENV="${x86_state}" \
     CERALIVE_BOOT_ATTEMPTS=3 GRUB_EDITENV=/nonexistent-grub-editenv bash "${NONROOT_X86_HELPER}" dump; then
   fail "x86 dump accepted an unreadable grubenv as defaults"
 fi
-grep -qi 'unreadable\|permission\|inaccessible' "${WORK}/x86-unreadable.out" \
+grep -Fxq "x86-boot-state: grubenv ${x86_state} is unreadable" "${WORK}/x86-unreadable.out" \
   || fail "unreadable x86 grubenv was not named"
 chmod 755 "${WORK}/x86"
 chmod 644 "${x86_state}"

@@ -66,4 +66,3 @@
 - Don't re-add the CTA YCbCr 4:4:4 flag to either EDID profile as an EDID change. It is dropped because the ENGINE cannot consume NV24; the bit comes back with the change that teaches the engine NV24, not before
 - Don't give `ceralive-hdmirx-edid.service` a `RequiresMountsFor=/data` to "fix" the profile selector's ordering. That adds `Requires=` as well as `After=`, so a board whose `/data` failed to mount would get NO EDID at all instead of the default one — the `After=data.mount` is deliberate and is the whole ordering
 - Don't retry, work around, or force past an `-EBUSY` from `VIDIOC_S_EDID`. It means the capture node is STREAMING, and the write drops HPD and renegotiates the operator's source mid-broadcast. Refuse, loudly and non-zero; an exit 0 there renders an unapplied EDID as `active (exited)` under `RemainAfterExit=yes`
-

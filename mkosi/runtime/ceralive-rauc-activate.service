@@ -1,0 +1,16 @@
+[Unit]
+Description=Activate a staged RAUC slot on clean idle shutdown
+Wants=rauc.service
+After=rauc.service dbus.service
+RequiresMountsFor=/boot
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/libexec/ceralive/ceralive-rauc-activate
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

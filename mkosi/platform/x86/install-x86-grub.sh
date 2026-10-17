@@ -159,12 +159,19 @@ install_rootfs() {
   log "installing RAUC bootloader=grub system.conf + ESP fstab mount into the rootfs${root:+ (ROOT=${root})}"
 
   mkdir -p "${root}/etc/rauc"
+  install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-post-install" "${root}/usr/lib/rauc/ceralive-post-install"
   log "writing ${root}/etc/rauc/system.conf (bootloader=grub, compatible=${COMPATIBLE}, grubenv=${GRUBENV_DEVICE_PATH}, single_slot=${SINGLE_SLOT_FALLBACK})"
   {
     cat <<EOF
 [system]
 compatible=${COMPATIBLE}
 bootloader=grub
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 # RAUC's BUILT-IN grub backend manages the A/B grubenv (ORDER / <slot>_OK /
 # <slot>_TRY) on the EFI System Partition via grub-editenv — no CeraLive custom
 # backend. grubenv MUST live on the ESP (never in a rootfs slot): a RAUC update
@@ -173,6 +180,9 @@ grubenv=${GRUBENV_DEVICE_PATH}
 # Boot attempts budget surfaced for parity with the RK3588 path. RAUC's grub
 # backend itself uses the boolean <slot>_OK/<slot>_TRY retry (one attempt/cycle).
 boot-attempts=${BOOT_ATTEMPTS}
+
+[handlers]
+post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]
 path=${RAUC_KEYRING_PATH}
@@ -191,6 +201,12 @@ type=ext4
 bootname=B
 EOF
     fi
+    cat <<EOF
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
+EOF
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
 

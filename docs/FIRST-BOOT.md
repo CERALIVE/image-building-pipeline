@@ -24,6 +24,40 @@ then write it to a microSD card or eMMC. Both release downloads and local builds
 produce `.raw.xz` transport artifacts. Local builds also retain the uncompressed,
 sparse `.raw` under `images/<board>/` for direct `dd` or OTA work.
 
+For a **published** channel release, download the flash image from this checkout
+with `curl`, `openssl`, `python3`, `sha256sum`, and `xz` installed:
+
+```bash
+tools/flash-download.sh --board rock-5b-plus --channel stable \
+  --out images --jobs 8 --keyring /path/to/ota-manifest-root.pem --decompress
+# Verified output: images/rock-5b-plus/<version>/flash.raw
+```
+
+The tool verifies the detached CMS signature against the supplied **manifest**
+root, checks the publisher's two-file `index.json` and `SHA256SUMS`, downloads
+only the flash parts (not the RAUC bundle) in bounded parallel, and checks each
+part and the assembled `flash.raw.xz` against SHA-256. `--decompress` additionally
+checks the decompressed `flash.raw` against the manifest's `raw_sha256`; omit it
+to keep only the compressed artifact. Re-running the same command reuses verified
+parts; incomplete parts resume with HTTP Range and mismatches are re-fetched up
+to three times. An absent `--keyring` emits a warning: SHA-256 alone detects
+accidental corruption but **does not authenticate who published the metadata**.
+Use the dedicated OTA manifest root, not a device TLS key or a private signing
+key. No release is implied by this guide: the live drill publish/download proof
+is still pending.
+
+If you already know and trust the exact published release URL and SHA-256 from a
+verified channel manifest, `aria2c -x8 -s8` can instead range-download the
+logical file through the images Worker. It does **not** perform CMS or checksum
+verification for you:
+
+```bash
+aria2c -c -x8 -s8 -d images \
+  'https://images.ceralive.tv/releases/<board>/<version>/flash.raw.xz'
+# Compare the resulting file's sha256sum with the signed manifest's flash.sha256;
+# after xz -dk, compare the raw file with flash.raw_sha256 before flashing.
+```
+
 **microSD (dd):**
 
 ```bash

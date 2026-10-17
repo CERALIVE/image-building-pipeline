@@ -2,6 +2,57 @@
 
 ## KEY FACTS
 
+**Chunked OS publishing [PARTIAL — workflow and local contract complete; candidate and live drill separate].**
+`ci/publish-release.sh` uses the extracted `ci/r2-immutable-lib.sh::put_or_verify`
+primitive shared with the legacy RAUC pair publisher: release parts, index, lock,
+checksum list and per-channel membership markers are create-only and exact-byte
+recoverable. A single `index.json` carries `bundle.raucb` and `flash.raw.xz`;
+the latter is genuine xz, not the candidate's zstd transport renamed. Channel
+manifests carry the strict CeraUI v1 fields and the pinned CeraUI minimum. The
+product manifest stem remains the signed `board`/URL key, while `compatible`
+is `ceralive-<resolved BOARD_ID>` (Orange: `ceralive-orangepi5-plus`, NOT
+`ceralive-orange-pi-5-plus`; Rock coincides). Before signing any publish,
+promote or refresh pointer, the publisher verifies a real RAUC signature under
+an explicitly provided bundle root, matches its compatible exactly, and
+reconstructs the immutable indexed bundle and flash from R2 parts to check
+sizes and SHA-256. Existing channel JSON must have a valid dedicated CMS
+signature; refresh accepts only the historical product-stem compatible as a
+repairable previous claim, with exact board/version/URLs/digests still required.
+Refresh needs the observed serial and quoted ETag as explicit preconditions;
+the workflow takes one board and both reviewed values, re-reads the JSON/ETag,
+rejects drift and forwards those exact values. Before the signature PUT the
+publisher creates a create-only recovery intent holding both CMS-signed pairs.
+An interrupted write can finish by JSON ETag CAS only after authenticating the
+old and new signatures, exact bytes, serial and indexed RAUC identity. Foreign
+or drifted inputs are refused; the two PUTs still expose a temporary unverifiable
+pair until retry, so recovery does not imply atomic availability.
+an old signed Orange pointer can be corrected without changing any release key.
+The workflow selects a bench root only for `drill` and the production release
+root for stable/beta (including promotion); no implicit trust root is allowed.
+This is code/test coverage, not a claim that serial 4 was refreshed live. The
+dedicated `cert-work/rauc/ota-manifest-signer` leaf has codeSigning alone, unlike
+the dual-EKU bundle leaf. After root-chain verification, signing and reading
+require its exact RFC2253 issuer: `CN=CeraLive RAUC Intermediate CA,O=CeraLive`
+or the non-production bench `CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive`.
+An untrusted intermediate offered to OpenSSL alone does not exclude root-direct
+signers. Signatures upload before the channel JSON; the JSON
+uses an ETag compare-and-swap and is the commit point. The `release` environment
+has a required owner reviewer, and the non-cancelling workflow concurrency group
+serializes writers (including refresh and prune). Markers make membership explicit:
+prune retains the newest three stable/beta versions combined, newest one drill
+version and every version referenced by any channel; it verifies every present
+channel's CMS signature with the same manifest root before deriving references
+or deleting anything, and refuses on an absent or invalid signature. The workflow
+provides that root for prune too. Unmarked versions are never pruned. See
+`docs/RELEASE-PROCESS.md` §5. The existing legacy bundle pair remains
+available for old consumers; this workflow does not replace it.
+The standalone `tools/flash-download.sh` reads the same resolved `BOARD_ID` for
+RAUC compatible (not the product manifest stem), checks the CMS leaf CN, exact
+issuer above and codeSigning without emailProtection under `--keyring`, and
+retires stale raw output before extraction. Without a keyring it is explicitly unauthenticated;
+its SHA-256 checks alone cannot establish release identity. The refresh workflow
+exports R2 credentials to AWS before its direct JSON/ETag pre-read.
+
 **First-party pin currency is a separate CI gate from artifact integrity** [EXISTS].
 `ci/check-first-party-pins.py` checks both app architectures, repo-local
 `versions.yaml` provenance and platform URL/filename versions against the
@@ -10,7 +61,11 @@ It covers the fetcher's complete app set (including capture and modem closure)
 plus the CeraLive plugin and librga runtime. Missing/malformed/expired evidence
 fails closed. PR evidence is bounded to seven days; real CI builds to 24 hours.
 `--refresh` requires authenticated `gh` access to the private component repos,
-updates evidence only, and never changes pins. No automatic refresh bot ships.
+updates evidence only, and never changes pins. It accepts a previous catalog
+missing a newly added component solely for regression comparison; the new catalog
+and ordinary checks still require every current component, and any previously
+recorded component whose release version regresses still fails. No automatic
+refresh bot ships.
 Exact-version, reasoned, expiring rollback exceptions live in
 `manifests/first-party-pin-overrides.json`; they cannot waive unverifiable inputs.
 The registered CLI test includes both incident downgrades and executes the
@@ -29,10 +84,28 @@ marker existence gate. The script accepts `.slot-marked-good` only when its
 `boot-id` line matches the current kernel boot ID, and writes that identity only
 after all existing checks and RAUC mark-good succeed. Legacy timestamp-only
 markers and previous-boot markers cannot suppress verification, on either an A/B
-swap or an ordinary reboot. Boot identity read failure is fail-closed. Existing
-OTA marker removers remain compatible but are no longer required for correctness.
+swap or an ordinary reboot. Boot identity read failure is fail-closed.
+The manual OTA marker remover remains compatible but is not required for correctness.
+The legacy hawkBit marker-clear path/service are retired: a retained `.raucb`
+matched their level-triggered `PathExistsGlob=` after the oneshot had removed only
+the marker, causing a start-limit loop and two failed units on both bench boards.
+The dormant updater is disabled and masked against first-boot presets; the
+boot-aware healthcheck is unchanged.
 `tests/healthcheck-boot-marker.bats` replays the stale Rock marker against actual
 boot-state helpers, including exhausted counters and unhealthy negative controls.
+
+**A CeraUI package upgrade must not re-run the boot healthcheck.** The CeraUI
+postinst correctly restarts `ceralive.service` to load its upgraded binary; a
+`Requires=ceralive.service` in our healthcheck unit propagated that restart to the
+already-completed healthcheck while dpkg's updates directory was populated (Orange
+Pi, 2026-09-28), leaving a failed unit despite an already-good RAUC slot. This
+unit now `Wants=` the app and retains `After=`, so it starts on boot but does not
+follow the app's install-time restart. The script still checks app activity and
+dpkg integrity before mark-good: a dead app or interrupted dpkg at boot fails
+closed. The boot ID, marker and RAUC semantics are unchanged. The regression
+test holds a live simulated dpkg lock while checking the unit relationship and
+explicitly verifies pending dpkg state still refuses confirmation. This is a
+source/host-test fix, not a new board receipt.
 
 **Device Debian sources use HTTPS and retain explicit `Signed-By`.** Both
 `configure_minimal_apt` writers emit HTTPS for all three suites. A Rock board's
@@ -101,10 +174,14 @@ owner-reviewed `reviewed-hardware-gap` exceptions, never runtime misclassificati
 Both RK3588 content ceilings are 3.5 GB; x86 stays 1.5 GB. Frozen 4096M slots each
 must retain 512 MiB **bavail** and `max(ceil(inodes/10),20000)` free inodes after
 population, enforced by assembly, `verify-disk.sh check-slot` and preflash.
-The old measured baselines remain historical, not measurements of this change.
-The 2026-09-15 Rock RGA candidate passed its real size and populated-slot reserve
-checks; its receipt does not qualify new Bluetooth/Wi-Fi adapters or the later
-R0 userspace combination.
+The current per-board size baselines are wet v2 mainline/full-firmware development
+hardware candidates (2026-09-26), not the historical vendor-BSP measurements.
+They carry an unreleased CeraUI PR-head local .deb override and non-production
+RAUC signing. Both passed the absolute size gate; neither is a production image
+qualification or an installed-board measurement. The 2026-09-15 Rock RGA
+candidate separately passed real size and populated-slot reserve checks; that
+receipt does not qualify new Bluetooth/Wi-Fi adapters or the later R0 userspace
+combination.
 Contract, driver/board citations, exact gaps and executable tests:
 [`docs/bluetooth-firmware-closure.md`](../bluetooth-firmware-closure.md).
 
@@ -752,7 +829,7 @@ The identity check that follows every staged download existed three more times, 
 
 | Helper | Role |
 |---|---|
-| `deb_control_field <deb> <field>` | the single control-tarball walk (gz/xz/zst); empty on an unreadable archive |
+| `deb_control_field <deb> <field>` | control-tarball walk (gz/xz/zst); on extraction failure logs ar/tar errors, archive path/size and scratch-filesystem free space, then returns empty for retryable fetch callers |
 | `deb_pkg_name` / `deb_pkg_version` / `deb_pkg_arch` | thin wrappers over it |
 | `assert_deb_identity <deb> <pkg> <version\|''> <arch> [--arch-all-ok]` | the single package/version/architecture check |
 | `explode_deb <deb> <dest>` | the single data-tarball extractor (`dpkg-deb`, else `ar` + `tar`) |
@@ -777,7 +854,9 @@ Three consequences worth knowing before touching it:
 
 The kernel-build stage deliberately keeps its own `deb_control_field` (now in
 `lib/kernel/package.sh`, sourced by `lib/build-kernel.sh`): it is the
-self-contained in-builder leg and is out of this library's scope. Contract:
+self-contained in-builder leg and is out of this library's scope. The two
+parsers cross-reference and mirror the same extraction diagnostics; missing
+control content no longer hides an ENOSPC error behind `<unreadable>`. Contract:
 `tests/deb-lib.test.sh` (happy, per-axis mismatch, corrupt archive, and the
 single-definition property itself).
 
@@ -866,6 +945,18 @@ answer:
   `CERALIVE_BENCH_LABELS=<n> (bench PARTLABEL overlay: …)`, and the tuple carries
   `bench_labels` + `partlabel_set`.
 
+- **WHICH OS RELEASE.** `--os-release-version YYYY.MINOR.PATCH` is REQUIRED for
+  every real candidate, debug or non-debug, with no ambient
+  `CERALIVE_OS_RELEASE_VERSION` fallback. The wrapper exports exactly the flag's
+  value to `./build`, then extracts `./etc/ceralive/os-release-version` from the
+  actual emitted `<timestamp>.rootfs.tar` and requires exactly one matching
+  newline-terminated CalVer line before writing the schema-4 tuple's additive
+  `os_release_version`. Missing, malformed, mismatched or unreadable tar content
+  fails the candidate. The six older Todo-44 candidates have no such stamp and
+  cannot be published as OS-update drill images: CeraUI refuses them with
+  `booted_version_unknown`. Rebuild them with explicit version assignments;
+  this does not make them released or board-qualified.
+
 - **WHICH RECOVERY LOADER.** The MaskROM loader is resolved PER BOARD from
   `ci/fetch-rk3588-loader.sh`'s table (`--print-identity <board-id>`), never as one
   constant. It is the path an operator reaches for once a candidate has already
@@ -909,7 +1000,7 @@ the annotated tag `vendor-kernel-final`. The candidate table is now
 `rock-edge` / `orange-edge` / `rock-edge-test`, and `--self-test` carries an
 absence guard proving `rock-vendor` is REFUSED rather than silently mapped.
 
-**The artifact tuple is at `schema_version: 3`.** Schema 2 added `bench_labels` +
+**The artifact tuple is at `schema_version: 4`.** Schema 2 added `bench_labels` +
 `partlabel_set`, and it is deliberately not silent: a schema-1 tuple was emitted
 by tooling that COULD NOT state which PARTLABEL set built the artifact, which is
 precisely the artifact class that is unsafe to deploy on a dual-media bench rig.
@@ -917,6 +1008,18 @@ Schema 3 makes `loader_sha256` board-specific and adds `loader_name`/`loader_url
 /`loader_board`, `kernel_source`/`kernel_package` and `evidence_stem` — a
 schema-2 tuple recorded the RADXA loader's digest for every board, so an Orange
 Pi tuple named a loader that board's BootROM cannot be recovered with.
+Schema 4 adds `first_party_local_overrides`: the build's own
+`first-party-local-override.json` (`package`/`version`/`arch`/`sha256`/`filename`
+per entry, `[]` without `--first-party-local-debs`). A bench override's bytes come
+from no signed APT index, so the tuple is the only record of what was baked in;
+`fetch_first_party` refuses the override under `CERALIVE_BUILD_MODE=production`
+or `GITHUB_ACTIONS=true`, never stores it in `.debcache`, and validates the
+override's own control version. The candidate tool refuses both
+`--first-party-local-debs` and `--debug-image` when any selected board's verdict
+is `production`. `--debug-image` sets the debug posture on any variant without
+changing the kernel test-seam expectation, which stays keyed on `rock-edge-test`;
+`debug_image` records the posture, `ceralive_test_symbols` the seam. Under the
+debug marker only, the healthcheck fails on `/etc/ceralive/testing/force-healthcheck-fail`.
 
 Every path is a generic argument: like `verify-bench-rauc-trust.sh`, this tool
 resolves no verdict, PKI or evidence root by proximity to its own checkout.
@@ -1033,8 +1136,10 @@ path verbatim.
 `bootloader=custom`. The RK3588 assembler emits a 14,800 MiB factory image, writes
 the same bootable baseline into `rootfs_a` and `rootfs_b`, seeds A as primary, and
 passes `rauc.slot=A|B` on every automatic/manual boot path. The custom backend marks
-the inactive target bad before installation and RAUC activates it only after a
-successful write; a three-attempt bootcount rolls an unconfirmed slot back.
+the inactive target bad before installation. With `activate-installed=false`, a
+successful write stages the slot but does not make it primary; a later explicit
+activation is required before its three-attempt bootcount can roll an unconfirmed
+boot back.
 Both rootfs slots explicitly mount the shared XBOOTLDR p1 at `/boot`; relying on
 automatic discovery would fail because each slot's kernel makes `/boot` non-empty.
 
@@ -1057,18 +1162,31 @@ real-RAUC interruption/cleanup,
 private namespaces, and `CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required`
 exercises the real UID-drop package-index probes described in the KEY FACT below.
 The RAUC harness uses the supported boot-slot override for
-its synthetic file-backed slots, so the same service contract runs across CI
-RAUC versions without depending on the runner's boot device. A v1 single-slot
+its synthetic file-backed slots, so the service contract does not depend on the
+runner's boot device. A v1 single-slot
 disk cannot migrate by
 OTA because its `data` partition starts where v2 places `rootfs_b`; back up required
 state and perform a full re-flash. Physical Rock 5B+ install/reboot/rollback remains
 the hardware acceptance gate in `docs/hardware-gated-completion.md` Item 4.
 
-The v2 CI Bats job installs the split Ubuntu `rauc` + `rauc-service` packages,
-starts a system D-Bus, reloads its installed policy, and then invokes the real
-RAUC contract; the harness requires RAUC to own its normal system-bus service
+The v2 CI Bats job builds upstream RAUC 1.15.2 from the image's SHA-256-pinned
+source, caches the Meson install, and installs its CLI plus systemd/D-Bus service
+files and policy instead of Ubuntu's older `rauc`/`rauc-service` pair. It fails
+on a version mismatch, provisions the non-root `ceralive-ota` fixture account,
+starts a system D-Bus, reloads its installed policy, and
+then invokes the real RAUC contract; the harness requires its normal system-bus service
 name and does not replace that check with a session bus or a skipped test. The
-standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
+real harness's GPT loop detach can prompt udev to delete the last
+`/dev/disk/by-partlabel` entry and its directory: it settles those removal events
+before making a unique fixture-owned label under `sudo mkdir -p`, never forces a
+replacement of a host `rootfs_b` link, and removes its own link and only directories
+it created on both normal and trapped exits. The boot-slot-priority assertion still
+requires the conflicting `root=PARTLABEL=` link to resolve to slot B while the
+custom backend returns A. The rootless fixture check in
+`tests/rauc-transition-contract.test.sh` covers creation, cleanup and no-clobber;
+its writer discovery reads tracked files rather than traversing root-owned mkosi
+build/cache output. The real service and GPT installation remain CI-only privileged
+evidence. The standalone DRY_RUN build-plan jobs materialize the same ignored NON-PRODUCTION
 fixture before resolving, so build-plan checks are self-contained too.
 
 Production builds require one explicit RAUC PKI contract: signer root, chain,
@@ -1188,6 +1306,16 @@ from the verified plaintext only, bad-signature and wrong-digest rejection,
 wrong-architecture miss, and the no-`|| true` property itself), plus the existing
 `fetch-debs-apt-chain` / `fetch-debs-apt-sandbox` / `bsp-auth-contract` suites.
 
+`fetch-debs-apt-chain` and `fetch-debs-retry` isolate their native and curl
+scenarios with private local `.deb` caches and disable the separate remote read
+tier. Their fake curl serves only the fixture-backed origins (first-party and,
+for the retry signal leg, Armbian): accepting a cache-host URL solely because it ends
+in `.deb` bypasses the curl publisher and makes the mode-failure/cleanup test
+report success without exercising the failure. The failure leg checks that the
+real publisher reached its temporary-file chmod, exited non-zero and left no
+temporary or final `.deb` files; the retry suite counts only the real origin
+attempt when it checks a checksum verdict is not retried.
+
 **First-party .deb fetch — build-time apt pull from apt.ceralive.tv** [EXISTS]
 
 **CeraUI pin (2026-09-06, superseded by the 2026-09-17 pin below):** the
@@ -1229,10 +1357,9 @@ Exact hashes and serving proof: [`media pin receipt`](../first-party-pin-currenc
 This pin does not claim a new image has been built, flashed or hardware-qualified.
 The engine row has since advanced to `2026.9.5`.
 
-**cerastream + CeraUI pins (engine updated 2026-09-21):** the CURRENT app-layer pins.
-`manifests/first-party-deb-versions.txt` selects `cerastream=2026.9.6` on both
-architectures and the unchanged
-architecture-qualified `ceralive-device` rows
+**cerastream + CeraUI pin receipt (2026-09-21; superseded):** at that time,
+`manifests/first-party-deb-versions.txt` selected `cerastream=2026.9.6` on both
+architectures and these architecture-qualified `ceralive-device` rows:
 `2026.9.3-20260920T155651.ec522ad` (amd64) / `2026.9.3-20260920T155654.ec522ad`
 (arm64); repo-local `versions.yaml` records `v2026.9.6` and `v2026.9.3`. Engine
 `2026.9.6` retains audio-meter, idle-preview and program-session teardown ownership
@@ -1263,17 +1390,14 @@ self-marking the slot good, `apt-get update` exit 0, and the previous production
 payload retained good on slot B. That is a boot receipt, not hardware
 qualification of every stream path; the drill rows keep their own verdicts.
 
-**KNOWN GAP, pre-existing and NOT introduced by this pin.** The release-evidence
-catalog `manifests/first-party-releases.json` still carries
-`checked_at=2026-09-17T16:10:16Z`, because `--refresh` now fails closed with
+**Historical release-evidence gap (resolved).** Before the srtla cutover was
+recognized, `--refresh` failed closed with
 `UNVERIFIABLE: newest release lacks srtla-send-rs[amd64]: v4.1.0`. That is the
 srtla cutover: `srtla-send-rs` v4.1.0 publishes `srtla_4.1.0_<arch>.deb`, not
 `srtla-send-rs_*.deb`, and the refresh requires the NEWEST release of a component
 to carry all of that component's image packages with no fallback to an older
-complete one. The ordinary PR gate is unaffected — its evidence bound is 168 h and
-a forward pin is CURRENT by design — but the 24 h release-candidate/scheduled-real-build
-bound will fail until the discovery is taught the cutover's package rename. The
-catalog was deliberately NOT hand-edited and `checked_at` was NOT restamped.
+complete one. The committed catalog has since been authenticated and refreshed
+(`checked_at=2026-09-25T22:36:50.699356Z`); this is no longer a release gate.
 
 `fetch_first_party` (in `lib/fetch-debs.sh`) pulls the device first-party
 `.deb`s from `apt.ceralive.tv` via a GPG-verified, mTLS-authenticated apt source —
@@ -1289,8 +1413,9 @@ state** under the staging dir (the host apt config is never touched).
   ceralive-forked (`~ceralive.3`) modem packages `modemmanager libmm-glib0
   libmbim-glib4 libmbim-proxy libmbim-utils libqmi-glib5 libqmi-proxy libqmi-utils
   libqrtr-glib0` (modem-stack v1.4.0), plus the Architecture-all
-  `ceralive-modem-support=1.4.0` companion. All are downloaded into `$DEST/debs/`
-  using the pins from `manifests/first-party-deb-versions.txt` (15 packages total). Generic
+  `ceralive-modem-support=1.4.0` companion, and the separately published
+  `ceralive-apt-credentials=1.0.1`. All are downloaded into `$DEST/debs/`
+  using the pins from `manifests/first-party-deb-versions.txt` (16 packages total). Generic
   `package=version` entries apply to both indexes; an exact
   `package[amd64]=version` / `package[arm64]=version` pair overrides them when a
   release embeds architecture-specific build metadata, as CeraUI v2026.8.3 does.
@@ -2176,8 +2301,8 @@ Three things to know before touching it:
   their parent's `if` block and need no entry — the same select/leaf rule as
   `RTW89_CORE` and `NF_TABLES_IPV4`.
 
-`manifests/kernel/required-symbols.list` (214 symbols) and
-`manifests/kernel/forbidden-symbols.list` (94) are the contract, and they are
+`manifests/kernel/required-symbols.list` (216 symbols) and
+`manifests/kernel/forbidden-symbols.list` (97) are the contract, and they are
 NOT a duplicate of the fragment. The fragment declares what CeraLive ADDS to
 defconfig; the manifests declare what the finished kernel must CARRY, including
 everything defconfig is expected to supply on its own. Only the second claim
@@ -2196,6 +2321,18 @@ bare `CONFIG_X` means "set to anything" and is used for a parent whose own y/m
 value is defconfig's business but whose PRESENCE keeps its leaves visible. A bare
 parent is deliberately not pinned to a value, so an upstream y->m change does not
 fail the build for a difference the device cannot observe.
+
+**IPv6 policy routing is also required on production `edge` (2026-09-27 fix).**
+The boot-time CeraUI update-route sweep inventories `ip -4 rule show` AND
+`ip -6 rule show`; the latter returned exit 255 on a real Rock 5B+ with
+`CONFIG_IPV6=y` but `# CONFIG_IPV6_MULTIPLE_TABLES is not set`, leaving the
+one-shot sweep incomplete and transport-pinned OS operations blocked for that
+backend lifetime. At pinned `v7.2` commit `8d3ae59288f1`,
+`net/ipv6/Kconfig:6-19,237-241` puts `IPV6_MULTIPLE_TABLES` under `if IPV6`,
+with no additional `depends on`, and selects `FIB_RULES`. Therefore the fragment
+declares only `CONFIG_IPV6_MULTIPLE_TABLES=y` beside the existing IPv4 lines;
+`required-symbols.list` independently gates that resolved value. Candidate build
+and bench results are recorded in the dated update-system decisions log.
 
 The forbidden manifest holds four classes: the 55 foreign platforms, the
 test/debug symbols production `edge` must resolve OFF (the island's
@@ -2354,8 +2491,8 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
   The sweep tolerates an individual failure, returns non-zero when NOTHING
   parsed, and the caller then declines and says so. Same direction when `modinfo`
   is missing entirely: no proof, no deletion.
-- **Nothing is removed as a PACKAGE.** `armbian-firmware`, `libmali` and
-  `hostapd` all stay installed.
+- **Nothing is removed as a PACKAGE by this firmware prune.** The independent
+  Todo-48 AP drill removes `hostapd` from the future image package list, not here.
 
 Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
 builder image installs `kmod` and fails its own build without `modinfo`, because
@@ -3203,10 +3340,10 @@ engine pins moved separately (island `v2026.9.5`, fork `.7`, cerastream
 Don't hardcode versions in the script.
 
 **CI and release build caches** [EXISTS]
-PR CI (`v2-ci.yml`) caches only pip's download/wheel store (`~/.cache/pip`) for
-the manifest-validation and build-plan jobs. Its key includes the runner OS,
-architecture, and the hash of `ci/requirements-ci.txt`; image outputs, mkosi
-caches, QEMU state, and release artifacts remain uncached there.
+PR CI (`v2-ci.yml`) caches pip's download/wheel store (`~/.cache/pip`) for
+the manifest-validation and build-plan jobs and the Bats job's compiled RAUC
+install, keyed by the pinned upstream version and source SHA-256. Image outputs,
+mkosi caches, QEMU state, and release artifacts remain uncached there.
 
 The protected release candidate (`.github/workflows/release.yml`) persists the
 two build-state stores that materially shorten a production rebuild:
@@ -3268,16 +3405,49 @@ compression level 0 because recompressing xz wastes time. Regression coverage is
 `tests/raw-candidate-compression.test.sh`, `tests/local-raw-compression.test.sh`,
 `tests/release-candidate-contract.test.sh`, and `tests/release-cache-contract.test.sh`.
 
-**Reproducible builds** [EXISTS]
-Same source state → bit-identical `.raucb`. The orchestrator pins one
+**Reproducible builds** [PARTIAL — verity producer on integration branch]
+The shared host/container ext4 slot writer sets mke2fs's own
+`E2FSPROGS_FAKE_TIME` from `SOURCE_DATE_EPOCH`. An older CI mke2fs ignored the
+generic epoch and stamped different superblock times into two otherwise
+identical 4096 MiB test slots; `mkosi-image-contract.bats` now forces distinct
+ambient clocks under a shim that models that version and still requires byte
+equality. The image's `/etc/ceralive/image-version` remains a deliberate
+wall-clock exception to whole-image reproducibility.
+The `[6d/9]` package lock is [PARTIAL — fixture verified, real image pending]:
+base/platform/runtime/app apt receipts read their own apt-verified Packages
+indexes before cleanup; staged first-party/BSP/userspace digests reuse the
+fetcher's verified metadata/pins; only generated `libv4l-0` hashes its own
+freshly created bytes. The final dpkg-status reconciliation fails on any
+unaccounted package. Source-built kernel entries carry commit pins and an
+artifact hash map, not an apt origin. `docs/build-reproducibility.md` records
+the real apt 3.0.3 snapshot TLS failure; there is no snapshot override.
+Bench-only local first-party `.deb`s are the explicit exception: the fetch lock
+reads their recorded filename/version/architecture/SHA-256 from
+`first-party-local-override.json`, verifies staged bytes, and emits
+`first-party-local-override` rather than falsely claiming signed-index
+`first-party` provenance. All other first-party names still require the index.
+The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
-`common.sh::resolve_source_date_epoch`) and exports it so every embedded mtime
-(rootfs.tar, squashfs, ext4, mkosi) clamps to it. `build-bundle.sh` signs the RAUC
-bundle through a deterministic OpenSSL CMS path (`-noattr` → no wall-clock
-`signingTime`; real leaf key + intermediate chain, still `rauc`-verifiable) because `rauc`
-itself bakes an uncontrollable CMS timestamp. `REPRODUCIBLE=0` opts back into the
-native `rauc bundle` signer (NOT bit-reproducible). Proof: `run-tests` section
-11; double-build the same board and compare `.raucb` sha256.
+`common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle
+producer share `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
+deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
+Factory slots start with their own labels; the bundle's neutral-labelled image is
+relabelled after install from the written partition's own GPT PARTLABEL. The signed
+verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces
+variable CMS/verity metadata. The OpenSSL plain-format signer and `REPRODUCIBLE=0`
+branch are retired. `rauc bundle` signs with leaf and intermediate in the canonical
+builder container; `rauc info --keyring` verifies against the root. Section 11
+and `tests/verity-bundle.test.sh` cover this boundary; no boot is claimed.
+
+The rootfs also carries `/etc/ceralive/image-build-commit` (git SHA identity)
+and `/etc/ceralive/image-version` (wall-clock `YYYYMMDDTHHMMSSZ` build-recency
+diagnostic, outside `SOURCE_DATE_EPOCH`); neither is an OS release version.
+Only an explicit `CERALIVE_OS_RELEASE_VERSION=YYYY.MINOR.PATCH` on a real build
+adds `/etc/ceralive/os-release-version` as one newline-terminated, mode-0444
+CalVer line. With the variable absent, ordinary CI/dev builds write no such
+file: release cutting/publishing does not exist yet. This conditional stamp
+addresses the dpkg-comparability gap found by the CeraUI OS-update-agent consumer:
+only this CalVer can be compared with the channel manifest's CalVer `version`.
 
 **RAUC test trust fixture** [EXISTS]
 
@@ -3287,6 +3457,10 @@ creates or validates only the ignored `.dev-keys/` NON-PRODUCTION fixture
 (including the leaf → intermediate → root chain and leaf key pairing); it never
 provides a production default. Production image builds still require an explicit
 `CERALIVE_RAUC_PKI_DIR` and matching `RAUC_KEYRING_FILE`.
+The `v2-ci.yml` pinned RAUC build reads `manifests/rauc-deb-versions.txt` and
+rejects a malformed version, SHA-256 or release URL with a named `::error::`
+before caching/building; `tests/rauc-transition-contract.test.sh` executes that
+actual step against valid and malformed pins.
 
 **RAUC `bootloader=custom` must NOT carry RAUC-native `boot-attempts` — the
 custom backend owns the counters** [EXISTS — fixed 2026-08-29]
@@ -3297,16 +3471,148 @@ only (not for custom)`. On both RK3588 images this made `rauc.service` exit 1
 before acquiring `de.pengutronix.rauc`; every `rauc status` then waited for the
 system bus's 25-second activation timeout, and the board stayed `degraded`.
 
-All three RK3588/custom writers omit the key: the authoritative
+All custom writers omit the key: the authoritative
 `mkosi/platform/boot/install-boot.sh`, the committed
-`mkosi/runtime/rauc/system.conf`, and `mkosi/customize/rauc-setup.sh`'s
-self-contained fallback. No substitute RAUC key is required. Attempt counting
+`mkosi/runtime/rauc/system.conf`, `mkosi/customize/rauc-setup.sh`'s
+self-contained fallback, the runtime postinst fallback, and the retained x86
+custom harness writer. No substitute RAUC key is required. Attempt counting
 remains entirely in the FAT `boot_state.txt`, U-Boot selector,
 `ceralive-boot-state`, and `ceralive-rauc-boot-adapter`; those mechanisms are
-unchanged and still default to three attempts. `tests/rauc-transition-contract.test.sh`
-guards all three writers, while the opt-in real-RAUC contract starts the daemon
-with the config rendered by the authoritative writer and carries the rejected
-pair as a negative control.
+unchanged and still default to three attempts. All six system.conf writers,
+including x86 GRUB, declare the persistent raw cert-rotation slot; the contract
+discovers them by active `bootloader=` and rejects an absent cert slot, missing
+rootfs slots, custom boot attempts, or persistent ForceIPv4 by filename.
+`tests/real-rauc-contract.sh` installs a signed cert-rotation payload into a
+file-backed fixture with a re-signed, host-safe hook; it does not rotate host
+certificates or touch a board. The existing negative control still proves real
+RAUC rejects custom `boot-attempts`.
+
+**Update-system carrier [PARTIAL — integration branch, not a shipped image].**
+All six system.conf writers keep the Todo-17 rootfs/cert-rotation/custom-backend
+contract and additionally set persistent `data-directory=/data/ceralive/rauc`,
+`activate-installed=false`, and `[streaming] sandbox-user=ceralive-ota` with
+`send-headers=boot-id;transaction-id`. Base `users.sh` installs the sysusers
+declaration and creates the no-home/nologin account; runtime installs tmpfiles
+for RAUC metadata (0700 root) and update state (0750 root:ceralive). The
+build-generated `/usr/lib/ceralive/update-capabilities.json` records the real
+OTA and `_apt` UIDs and advertises all eight schema-1 features only after the
+complete origin-protection pin file passes the independent authority check:
+`rauc-verity-streaming`, `rauc-activate-on-shutdown`, `slot-sync`,
+`origin-protection`, `apt-all-packages`, `reprune-hook`, `apt-credentials`,
+`transport-uidrange`. The matching image mechanisms and CeraUI consumers have
+landed on their integration branches; earlier built drill candidates still carry
+the old empty array and are not qualified by this source change. Both new OS and
+cert-rotation bundle producers now emit verity; the OS image is adaptive
+(`block-hash-index`) and exactly 4096 MiB.
+All six system.conf writers install and wire `/usr/lib/rauc/ceralive-post-install`:
+each written rootfs gets its ext4 label from that partition's own live GPT
+PARTLABEL, and a missing label aborts the installation. The certs slot is skipped.
+`bundle-formats=-plain` remains absent for historical local-bundle compatibility,
+not as a fallback producer path. Manual
+`ceralive-update` remains a bench/recovery path only: HTTPS requires a verity
+bundle, installs under the shared lock with the stream guard, and leaves the
+inactive slot staged (not automatically boot-selected). New images built from
+this branch carry the complete advertised contract; release/board verification
+remains separate.
+Guards: `tests/rauc-transition-contract.test.sh`,
+`tests/update-capabilities.test.sh`, `tests/kernel-config-fragment.bats`, and
+the file-backed real-RAUC service contract.
+
+**Verified local slot mirror (`ceralive-slot-sync`, task 26) — a local rsync
+mirror of the healthy booted slot onto the other, lagged one, entirely outside
+`rauc install`** [EXISTS — artifact code-complete; the lagged-mirror orchestrator
+that starts it is a later task]
+
+`/usr/libexec/ceralive/ceralive-slot-sync` closes a gap RAUC's own A/B model
+cannot see: RAUC only knows about a slot it wrote through `rauc install`, so an
+apt package update on the BOOTED slot (the software-update path CeraUI's
+`system.startUpdate()` drives) leaves the OTHER slot silently stale — and if
+that stale slot is ever activated (rollback, a bench A/B flip, an operator
+mistake), it boots an old, unpatched image. `check` prints every gate INPUT as
+JSON and takes no lock; `run` takes `/run/lock/ceralive-update.lock` then
+`/var/lib/dpkg/lock-frontend` (both `flock -n`, in that order, held for the
+whole operation) and refuses (exit 75, named reason) on the first of six gates
+to fail: `/run/ceralive/partlabel-guard.failed` present, `dpkg --audit`
+non-empty, RAUC `Operation` != idle (`busctl get-property … Installer
+Operation`), the OTHER rootfs-class slot installed-but-not-activated (a genuine
+pending OTA must never be silently overwritten), `rauc-hawkbit-updater.service`
+active, or `healthy-state.json` (todo 27) not matching the current boot_id +
+dpkg status sha256 + build_id — the G3 lagged-mirror gate: only a state that has
+already survived a reboot and the boot healthcheck may ever be mirrored.
+
+The OTHER slot's device and name are resolved from `rauc status --detailed
+--output-format=json`, never a hardcoded PARTLABEL — RAUC's JSON shape nests
+each slot as `{"<name>":{"class",...,["bundle"],["installed"],["activated"],
+"status"}}`, and "installed but not activated" is exactly "has an `installed`
+object but no `activated` one", matching RAUC's own readable-formatter rule.
+RAUC 1.15.2 also emits `slot_status.bundle` within each slot: the parser first
+isolates the `slots` array, enumerates only its immediate slot keys, and uses
+recursive balanced-object matching to retain complete slot objects at any depth.
+The verbatim Rock 5B+ RAUC 1.15.2 capture in
+`tests/fixtures/rauc-1.15.2-rock-status.json` pins this alongside the older flat
+fixture; neither nested `bundle` nor another sub-object key is a slot name.
+The mirror itself is `rauc status mark-bad other`, mount the other slot rw,
+`mount --bind` (never `--rbind`) the running root onto a source mountpoint,
+`rsync -aHAXS --checksum --numeric-ids --delete --exclude-from=/usr/lib/ceralive/
+slot-sync.exclude`, `sync`, a `dpkg --root=<target> --verify` vs `--root=<source>
+--verify` comparison (IDENTICAL, not empty — this image legitimately modifies
+conffiles) filtered through `/usr/lib/ceralive/prune-paths.list` when that
+todo-29 file exists, unmount, `e2fsck -fn`, delete the target slot's stale
+adaptive-index `hash-*` subdirectories under `/data/ceralive/rauc/slot.<name>/`
+(RAUC 1.13's own `r_slot_get_checksum_data_directory` + `hash_index.c` layout —
+a missing index is regenerated on demand, which is the documented safe outcome),
+write `sync-receipt.json` (RAUC's own slot status keeps the OLD bundle version
+for a slot this script wrote, so the UI and drills read the mirrored version
+from this receipt instead), then `rauc status mark-good other`.
+
+The receipt's existing `image_version` reports the booted OS release from
+`/etc/ceralive/os-release-version` (test seam: `CERALIVE_OS_RELEASE_VERSION_FILE`).
+Only exactly one newline-terminated `YYYY.MINOR.PATCH` CalVer line is accepted;
+absent, unreadable or malformed content falls back to the booted slot's RAUC
+bundle version, never an invented version. The five keys, key order and two-space
+format are unchanged: CeraUI's strict reader rejects additive keys. The receipt
+file and its parent directory are fsynced across the atomic rename before
+mark-good; persistence failures leave the target bad.
+
+**The non-recursive bind mount is load-bearing for a second reason beyond
+`/boot`.** `mount --bind` (never `--rbind`) exposes whatever is on the running
+root filesystem's OWN ext4-level tree at a path a live submount currently
+shadows — the FAT `/boot` (`mkosi/platform/boot/install-boot.sh:171-180`) is the
+documented case, but the exact same mechanism is why the exclude list can safely
+list `/dev/*` and still admit a handful of static device special files by
+`--include=` (placed before `--exclude-from=` on the command line, since a plain
+exclude-from file cannot itself express an include override): the non-recursive
+bind never carries devtmpfs's LIVE population into the source view either, so
+what rsync actually sees under `.../source/dev` is the same disk-backed content
+`.../source/boot` exposes, not the running system's ephemeral device nodes.
+
+**SIGTERM must kill the rsync child's whole PROCESS GROUP, not just its PID —
+this was a real bug, found by the privileged test leg, not merely a review
+finding.** `cmd_run` runs `rsync` under `set -m` specifically so the
+backgrounded job becomes its own process-group leader; `on_sigterm` then sends
+`TERM` to `-RSYNC_PID` (the group), unmounts, and exits 143 leaving the target
+slot exactly as bad as `mark-bad other` left it at the start. Killing only the
+single PID looked correct in review and in a fast unprivileged stub test, but
+real `rsync` (and the test's own sleep-based stub) forks a child that inherits
+the script's open flock'd lock fd — killing only the parent orphans that child,
+which then keeps the lock held for as long as it happens to keep running,
+producing a spurious `update-lock-busy` refusal on the very next invocation.
+
+Tests: `tests/slot-sync.test.sh` — the full six-gate + two-lock refusal matrix,
+the `check` JSON shape, the dpkg-verify comparison (mismatch aborts, identical
+non-empty passes, a prune-paths.list-matched difference is a non-issue), the
+mark-bad-before-mark-good ordering, the SIGTERM contract, and the shipped
+`--checksum` invocation proven against a same-size/same-mtime/different-content
+file — all unprivileged, `default-shell`. A second, internally-gated leg
+(`CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required|skip`, default `skip`, same
+shape as this repo's other real-* contracts) drives a REAL loop-mounted ext4
+target through the real script with real `mount`/`rsync`/`e2fsck`, proving
+xattr/ACL/file-capability/hardlink/sparse-file preservation and the
+hidden-ext4-under-a-non-recursive-bind trick in isolation first. It needs root
+or passwordless sudo plus `losetup`/`mkfs.ext4`/`setfacl`/`setcap`/etc, which
+this repo's own dev host lacks (`sudo -n true` fails here too, same as the
+Todo-17/21 precedent) — it was run and passed inside a disposable privileged
+Debian trixie container, the same technique `tests/real-rauc-contract.sh` uses.
 
 **RAUC 1.8 needs a DUAL-EKU signing leaf, `unsquashfs`, and `mkfs.ext4` on the
 device — else OTA is 100% broken** [EXISTS]
@@ -3355,13 +3661,185 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
   fresh slot healthy; guard: `mkosi-image-contract.bats` "e2fsprogs is installed so rauc can
   format ext4 slots".
 
-**PRODUCTION PKI still carries the codeSigning-only leaf and was DELIBERATELY NOT
-touched here.** `/mnt/development/ceralive/cert-work/rauc/gen-certs.sh` generates the
-production leaf with the same `extendedKeyUsage = codeSigning` only — so it has the
-identical RAUC 1.8 defect. It is live security key material (private keys included)
-and reissuing it is a separate, explicit decision per `cert-work/ROTATION.md` — out
-of scope for this fix. Flagged for the orchestrator/user to action separately before
-production OTA can work on a 1.8 device.
+**Origin protection is PER PACKAGE NAME, one manifest drives build-time
+RemoveFiles= AND the on-device reprune hook; stable-channel credentials delivery
+remains BLOCKED (Todo 29, update-system-overhaul)** [PARTIAL — integration
+branch, not a shipped image]
+
+The former `Package: * / Pin: origin apt.ceralive.tv / Pin-Priority: 990`
+wildcard — which pinned every future apt.ceralive.tv publication sight-unseen —
+is retired. `manifests/first-party-apt-names.txt` is the single list of every
+package name CeraLive publishes; both apt-preferences writers
+(`mkosi/customize/apt-ceralive-repo.sh::install_apt_preferences` and its
+dual-track twin `mkosi.images/runtime/mkosi.postinst.chroot::
+setup_ceralive_repository`, the one `./build` actually runs) generate
+`/etc/apt/preferences.d/ceralive-origin` from it: per name, `Pin: origin
+apt.ceralive.tv / Pin-Priority: 990` FIRST, then `Pin: origin * /
+Pin-Priority: -1`. APT uses the first matching specific stanza: our archive
+gets 990 when present, while Debian AND every other origin's same-name version
+gets -1 even if ours has no candidate. The origin wildcard matches archive
+hosts, not the installed version (`Pin: version *` AND `Pin: release *` both
+pinned the installed 10.0 to -1 in the real offline APT fixture, leaving
+`Candidate: (none)` despite our 2.0 at 990). This does not scope a wildcard package
+name or affect unrelated Debian packages. A priority below 1000 never silently
+downgrades a newer installed version. The name list is forwarded
+base64 (`CERALIVE_FIRST_PARTY_NAMES_B64`, `PassEnvironment=`) — a subimage
+chroot cannot read a path above `$SRCDIR`, the same constraint documented for
+`manifests/target-release.env` above.
+Both writers normalize whitespace-prefixed blank/comment lines identically for
+validation and emission. They compare the forwarded input against an independent,
+reviewed `mkosi/runtime/first-party-origin-names.txt` set; the Docker APT contract
+also derives that authority from the first-party .deb pins plus every active
+RK3588 row whose source URL is a `github.com/CERALIVE/<repo>/releases/download/`
+asset. Package-name prefixes do not establish ownership: tsukumijima/Radxa
+rows stay third-party, even when named `rockchip-*`; commented rollback rows
+are not active. A scratch-manifest mutation adds a new CeraLive package without
+updating the authority and requires rejection, while a new third-party row
+must pass. Missing, extra, duplicate, malformed and empty names fail before
+the pin is published, with the offending name in the diagnostic. The capability
+writer verifies the complete 990/-1 pin file before advertising
+`origin-protection`/`apt-all-packages`. Adding a package requires updating its pin,
+the forwarded list and the reviewed authority together; the valid 18-name pin
+payload remains byte-identical.
+
+**The RemoveFiles= single-source mechanism — the central design decision.**
+`manifests/prune-paths.list` (one glob per line, `#` comments) is the ONE
+source for three consumers, and getting the FIRST one working was the actual
+hard problem: `RemoveFiles=` is a plain mkosi `[Content]` setting with no
+script hook and no `${VAR}` expansion (PATH-typed settings expand `${VAR}`;
+`RemoveFiles=`, metavar `GLOB`, is a bare string list and does not — verified
+against mkosi's own `config_make_list_parser()`, `parse=str`, no
+`expandvars`). So a subimage's `RemoveFiles=` cannot be made to read a file
+`AT PARSE TIME` by any mkosi-native mechanism. The resolution is mkosi's own
+documented "local configuration" convention: `lib/stages/mkosi.sh::
+generate_prune_local_conf()` runs at the top of `stage_mkosi()` (real builds
+only — `DRY_RUN` exits before this stage), reads the manifest via
+`lib/shared/prune-paths-lib.sh`, and writes a GITIGNORED
+`mkosi.images/runtime/mkosi.local.conf` with `[Content]\nRemoveFiles=<csv>`.
+The file exists ONLY while the owning mkosi invocation runs: before any fetch
+or DRY_RUN, the orchestrator removes a stale copy only if its complete four-line
+generated signature matches; a symlink, malformed file or operator config is
+refused untouched. A shared lock serializes this config across board builds.
+EXIT/INT/TERM cleanup and post-invocation cleanup remove only the owned inode
+with unchanged content, including on a failed mkosi invocation. The existing
+ERR trap remains responsible for reporting build failures. A standalone mkosi
+call after any completed build sees no generated config.
+mkosi's own cascade rule for list-type settings is "merged by appending the
+new values to the previously configured values" (mkosi.1.md), verified against
+the REAL pinned mkosi (`tests/prune-paths-removefiles.test.sh` Part C, with a
+mutation-proof leg: a RemoveFiles= key mis-sectioned into `[Match]` is
+correctly NOT merged) — so this file ADDS the manifest's globs to, and can
+NEVER replace, the runtime layer's hand-maintained Mesa/LLVM globs.
+
+**Deliberately narrow content, for a reason `tests/mkosi-contract.bats` already
+enforces.** `manifests/prune-paths.list` carries ONLY the locale/i18n strip
+(`/usr/share/locale/*`, `/usr/lib/locale/locale-archive`) — safe at ANY layer,
+including base/platform/runtime, because it is not update-alternatives
+registered. The existing "the deferred prune runs at the final app layer only"
+test refuses any `RemoveFiles=`/`rm -rf`/`find` touching `/usr/share/(doc|man)`
+in base/platform/runtime — the doc/man appliance-payload strip stays exactly
+where it already was, in the APP layer's own hardcoded
+`prune_final_image_payload()`/`prune_package_docs()` (unchanged), which is
+deliberately excluded from that same grep. Putting doc/man globs into the
+runtime layer's generated `RemoveFiles=` would have reopened the exact
+update-alternatives corruption bug documented above ("`WithDocs=no` corrupted
+the update-alternatives database").
+
+**Two more consumers, one on-device and one build-time, both reading the SAME
+manifest rather than duplicating its content.** The runtime executor's new
+`setup_prune_reprune_and_cache()` (called right after `setup_ceralive_repository`
+in `main()`) decodes `CERALIVE_PRUNE_PATHS_B64` (same base64-forwarding idiom)
+into `/usr/lib/ceralive/prune-paths.list` on the device — the exact path
+`ceralive-slot-sync.sh`'s dpkg-verify filter (task 26, above) already reads —
+and installs `/usr/libexec/ceralive/ceralive-reprune` (`mkosi/runtime/
+ceralive-reprune.sh`) as a `DPkg::Post-Invoke` hook
+(`/etc/apt/apt.conf.d/80ceralive-reprune`), so a future apt transaction that
+reintroduces a pruned path (e.g. locale files shipped by an upgraded
+dependency, once Todo 35's apt-all-packages capability lands) gets re-pruned —
+"keeps prunes across upgrades" without ever using `dpkg --path-exclude` (which
+this project cannot use, for the exact reason `WithDocs=no` above already
+documents). The hook NEVER fails the apt transaction it rides on: every step is
+best-effort, logged, and the script always exits 0
+(`tests/reprune-hook.test.sh` Part B4 drives an unremovable/nonexistent target
+through it and asserts exit 0). The app layer's `prune_package_docs()`
+ADDITIONALLY applies the same on-device `/usr/lib/ceralive/prune-paths.list`
+(read directly — the app layer already inherited the runtime layer's rootfs via
+`BaseTrees=%O/runtime`, so no env var is needed at that layer) — redundant with
+the runtime layer's own build-time prune at that point, which is exactly the
+proof that one manifest drives every consumer rather than three copies of the
+same glob list.
+
+`/etc/apt/apt.conf.d/81ceralive-cache` sets `Dir::Cache::archives
+"/data/ceralive/apt-archives/"` (+ tmpfiles.d creating that dir and its
+`partial/` subdir), so downloaded `.deb`s persist across reboots and future
+software updates instead of the rootfs slot's own (small, RAUC-swapped)
+`/var/cache/apt/archives`.
+
+**Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
+RESOLVED package membership, never a blind architecture check.**
+`freeze_boot_packages` (the Kernel Freeze KEY FACT below) now also holds
+`librockchip-mpp1`, `rockchip-multimedia-config` and `libv4l-0` — third-party,
+never CeraLive-owned, so this does not touch `CERALIVE_NEVER_FREEZE_PKGS`.
+Deliberately NOT gated on `ARCH` (every existing fixture in
+`tests/kernel-freeze-guardrails.test.sh` never sets `ARCH`, so an `ARCH`-based
+gate would have silently added these names to EVERY existing test's `declared`
+set and broken the whole 700-line suite under its own
+"declared-but-not-installed dies when `INSTALL_BOOT_BSP=1`" fail-closed rule —
+found and fixed before it shipped). The real gate is membership: `[[ "
+${GSTREAMER_RUNTIME_PACKAGES:-} " == *" rockchip-multimedia-config "* ]]`,
+checking the SAME family-manifest-resolved env var `bsp_names`
+(`lib/stages/partition.sh`) already keys its own MPP classification on — so the
+hold only ever fires on a build that actually resolved these packages into its
+platform-layer install set, and is a clean no-op (never a false die) on any
+build (including x86, and every pre-existing test fixture) that did not.
+`librga2-ceralive` is deliberately EXCLUDED from this set even though it is
+ALSO in `gstreamer_runtime_packages` — it is OUR OWN fork (platform-layer
+URL+SHA pin, see the "CeraLive librga stays a platform-layer URL+SHA swap"
+section) and must stay apt-updatable, unlike the genuinely third-party MPP
+runtime/config-glue/generated-compat trio.
+
+**`ceralive-apt-credentials` — wired; channel availability is a separate gate.** Its exact
+`1.0.1` package pin, Architecture: all fetch allowance, partition classification,
+and app-layer `RUNTIME_APP_PKGS` install are now present. The separate
+`apt-credentials:` registry block pins `apt-credentials-v1.0.1` from the
+`apt-worker` repository; the Worker's own `apt-worker: pin: latest` block is
+unchanged. `DRY_RUN` can list the pinned package without fetching it. The
+GitHub release is published. The earlier `1.0.0` was served on beta; the
+authenticated catalog refresh does not verify `1.0.1` APT-channel availability,
+which must be established before a stable-channel real build. The
+runtime executor no longer decodes CI's `APT_CLIENT_*` key into the image;
+build-time first-party fetch authentication still uses those CI inputs. The
+package's postinst owns the device APT TLS config and `_apt`-readable key under
+`/usr/share/ceralive/apt-credentials/`. hawkBit provisioning prefers that pair,
+using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
+The authenticated `--refresh` now records the release as the ninth component;
+previous catalogs without its row remain valid only for regression comparison.
+The refreshed catalog and selected pins pass the currency check while CeraUI
+remains at its released `v2026.9.4` pin. Historical credentials fixtures remain
+at `1.0.0`; only the live DRY_RUN expectation follows the new image pin.
+No new image or board installation is claimed.
+
+Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
+mechanism, proven against real mkosi with a mutation leg),
+`tests/reprune-hook.test.sh` (device script + writer wiring),
+`tests/kernel-freeze-guardrails.test.sh` Parts B3b/B3c (MPP hold, both
+directions), `tests/apt-preferences-baked.test.sh` +
+`tests/package-contract.bats` §22 (per-name origin pin, both tracks),
+`tests/mkosi-contract.bats` (prune_package_docs manifest consumption; the
+final-app-layer-only doc/man exclusion is unaffected).
+
+**Production source PKI and the Actions secret are distinct copies, and the
+secret has been rotated to match.** The locally provisioned
+`cert-work/rauc/leaf-signing.pem` already carried both EKUs and chained under its
+existing root for `smimesign`, so no new leaf or CA was needed. The scheduled
+audit reads `RAUC_RELEASE_PKI_TAR_B64` from Actions, and run 35902300468 failed
+its S/MIME check because that secret still held a pre-2026-07-18 codeSigning-only
+leaf. The audit now checks the supplied signer before the expensive build; the
+pre-rotation secret was rejected by that gate in run 35908288341 with the same
+`unsuitable certificate purpose`. `RAUC_RELEASE_PKI_TAR_B64` was then rotated to
+the current production PKI — root and intermediate byte-unchanged, leaf
+reissued with `emailProtection, codeSigning` — and the audit passed twice
+consecutively (runs 35908389533 and 35911623365 at `6614ada`).
 
 **The debug package delta is VARIANT-keyed, and it shares a filename suffix with
 the FAMILY deltas — so every directory glob had to be taught the difference** [EXISTS]
@@ -3434,20 +3912,24 @@ PassEnvironment propagation, the retained password/ssh/marker behaviour, the
 untouched add-on, and the absent `development` family). Mutation-verified: deleting
 the name-skip in `runtime_pkg_list_files` fails 5 of them.
 
-**Image size gate — BLOCKING at 1.5 GB, and it is the `[6c/9]` BUILD stage** [EXISTS]
+**Image size gate — BLOCKING at 3.5 GB on RK3588 (1.5 GB on x86), at `[6c/9]`** [EXISTS]
 
 `lib/measure-size.sh` runs as `orchestrate.sh`'s `[6c/9]` stage on every real
 build, between the `[6/9]` tar emit and the `[7/9]` parity check. If the normalized
-rootfs tar exceeds **1.5 GB** the build `die`s there, so no `.raw` and no `.raucb`
+rootfs tar exceeds its board's ceiling the build `die`s there, so no `.raw` and no `.raucb`
 are cut. The threshold is post-slim (locale strip, final apt-cache cleanup,
 appliance payload pruning, and the Mesa software-GL prune below already applied).
 See [`docs/size-notes.md`](../size-notes.md) §10 for the wiring and the
 levers used to reach it.
 
-Both RK3588 boards pass it: `rock-5b-plus` 1,412,259,840 B, `orange-pi-5-plus`
-1,418,792,960 B (real wet vendor-BSP production builds, 2026-08-02). They were
-~70-76 MB OVER until the Mesa software-GL prune below; `rootfs_bytes_max` has never
-been moved to accommodate an overage.
+The v2 non-debug, production-label candidates measured `rock-5b-plus`
+2,730,854,400 B and `orange-pi-5-plus` 2,729,502,720 B from real rootfs tars,
+both under 3,500,000,000 B. These are **development hardware candidates** with
+an unreleased CeraUI PR-head override, not production image qualification.
+The old wet vendor-BSP builds measured 1,412,259,840 B and 1,418,792,960 B
+against the retired 1.5 GB RK3588 ceiling; they were ~70-76 MB over before
+the Mesa software-GL prune. That ceiling was never raised to accommodate an
+overage; the later 3.5 GB policy is for full-firmware adoption.
 
 **For three releases this "blocking" gate had never once run against a real
 image** — and that is why the overage shipped. `orchestrate.sh` had no measurement
@@ -3493,8 +3975,8 @@ worth knowing before editing it:
 Guards: `mkosi-image-contract.bats` §10 "size-gate wiring:" — the shipped `[6c/9]` block is
 extracted from `orchestrate.sh` and EXECUTED against synthetic KB-sized trees
 (pass leg, abort leg, spy-proven silent-skip refusal, stage ordering, DRY_RUN
-unreachability), plus a policy guard that no board's ceiling may be raised above
-1,500,000,000.
+unreachability), plus a policy guard that RK3588 ceilings stay at or below
+3,500,000,000 and x86 at or below 1,500,000,000.
 
 **185.3 MB of Mesa software-GL is `RemoveFiles=`d — and the trixie migration
 proved a version-PINNED prune glob fails SILENTLY** [EXISTS]
@@ -3581,26 +4063,25 @@ Full ledger: [`docs/size-notes.md`](../size-notes.md) §9.
 
 **OTA-during-stream guard — refuses to update while a stream is live** [EXISTS]
 
-**There are THREE update paths and CeraUI drives only the apt one — this guard is
-on a different path than the one people assume.** CeraUI's update button is the
+**There are three defined update paths: CeraUI apt, capability-gated CeraUI OS,
+and manual RAUC; this guard belongs to the manual path.** The legacy CeraUI button is the
 **apt package** path: its `system.startUpdate` RPC reaches `startSoftwareUpdate()`,
 which launches a detached `systemd-run` unit executing `/usr/bin/apt-get`. It does
 **not** invoke `ceralive-update`; no caller of that script exists anywhere in the
-workspace, and CeraUI's `rauc status` use is read-only slot observation, not
-installation. `rauc-hawkbit-updater` is the only AUTOMATIC RAUC OS-update trigger,
-staging to `/data/ceralive/rauc-downloads/bundle.raucb` before a D-Bus
-`InstallBundle`. `/usr/local/bin/ceralive-update` is the MANUAL path, and it is
+workspace. On capable images CeraUI's OS agent also calls `rauc install` to
+stage the inactive slot; released legacy images have no such capability.
+`rauc-hawkbit-updater` is disabled and masked with no server configured, not
+an automatic trigger. `/usr/local/bin/ceralive-update` is the MANUAL path, and it is
 **inert by default** because `persistence.sh` seeds `update.conf` with an empty
 `BUNDLE_URL` and the script refuses to run without one.
 
-One operational trap on that manual path, existing behaviour that predates and is
-untouched by this text: Debian's `rauc` 1.13 is built `-Dstreaming=true`, and a
-streaming-enabled RAUC **rejects a remote `plain` bundle**
-(`Bundle format 'plain' not supported in streaming mode`) instead of downloading
-it — so an operator who sets `BUNDLE_URL` to an `https://` URL gets a hard
-failure, and that field must name a local file path today. Do not "fix" it here.
-This does **not** make the guard below unreachable: the guard is correct and still
-applies whenever the script is run.
+The pinned `rauc` 1.15.2 has streaming support, so a remote `plain` bundle is
+rejected (`Bundle format 'plain' not supported in streaming mode`). The manual
+script now admits HTTPS URLs for **verity** bundles, while retaining absolute
+local paths for the existing plain OS and cert-rotation bundles. It holds
+`/run/lock/ceralive-update.lock` across the guarded install and does NOT activate
+the staged slot; activation belongs to the later idle-shutdown orchestration.
+This is not an automatic update route or a CeraUI shortcut.
 
 `/usr/local/bin/ceralive-update` (generated by
 `postinst-lib.sh::setup_data_persistence`, run MANUALLY by an operator) installs
@@ -4489,6 +4970,13 @@ explicitly in its Console section so every future RK3588 and x86 image has a
 functional UART recovery path. Guards: `mkosi-image-contract.bats` "runtime
 packages: login is installed so UART/serial console recovery works" and "runtime
 packages: login reaches the resolved runtime package set (rk3588 + x86)".
+
+**Historical baked-key ownership contract (superseded for new images):** the
+following incident explains why numeric `_apt` ownership remains necessary for
+the packaged key after tar/ext4 assembly. The runtime executor no longer bakes
+`APT_CLIENT_*` into `/etc/apt/certs`; `ceralive-apt-credentials` supplies the key
+under `/usr/share/ceralive/apt-credentials` from the app layer instead. The
+Debian-source deduplication and arch-qualified source constraints still apply.
 
 **Baked mTLS client key MUST be `_apt`-owned, exactly ONE Debian source, AND an
 arch-qualified apt.ceralive.tv URI — else on-device `apt-get update` is 100% broken** [EXISTS]
@@ -5590,4 +6078,3 @@ against synthetic fixtures, and the inventory above was read off a real board.
 The 2026-09-15 Rock RGA candidate booted with the unit, but that receipt does not
 record heartbeat blink or card-activity flicker. Those visual checks remain
 separate from kernel-pin acceptance; no fleet release is inferred.
-

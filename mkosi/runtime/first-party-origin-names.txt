@@ -1,0 +1,20 @@
+# Independent reviewed origin-protection set; keep in sync with the pinned
+# first-party .deb and CeraLive RK3588 userspace manifests.
+ceralive-device
+ceralive-modem-support
+cerastream
+gstreamer1.0-libuvcsrc
+libmbim-glib4
+libmbim-proxy
+libmbim-utils
+libmm-glib0
+libqmi-glib5
+libqmi-proxy
+libqmi-utils
+libqrtr-glib0
+libsrt1.5-ceralive
+modemmanager
+srtla
+gstreamer1.0-rockchip-ceralive
+librga2-ceralive
+ceralive-apt-credentials

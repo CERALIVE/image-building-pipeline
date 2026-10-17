@@ -10,12 +10,14 @@
 #   [1/9]  resolve       manifest → flat build params        stages/resolve.sh
 #   [2/9]  fetch         stage BSP + first-party .debs       stages/fetch.sh
 #   [2b/9] kernel-build  kernel from pinned source (variant) stages/kernel-build.sh
+#   [2c/9] rauc-build    rauc from pinned upstream source    stages/rauc-build.sh
 #   [3/9]  partition     classify staged .debs               stages/partition.sh
 #   [4/9]  bsp-gate      every boot-BSP package obtainable   stages/bsp-gate.sh
 #   [5/9]  mkosi         base → platform → runtime → app     stages/mkosi.sh
 #   [6/9]  tar-emit      normalized <timestamp>.rootfs.tar   stages/tar-emit.sh
 #   [6b/9] boot-verify   /boot is complete and loadable      stages/boot-verify.sh
 #   [6c/9] size-gate     rootfs is within its size budget    stages/size-gate.sh
+#   [6d/9] packages-lock exact installed .deb provenance    stages/packages-lock.sh
 #   [7/9]  parity        parity vs the v2 package manifests  stages/parity.sh
 #   [8/9]  assemble      Stage-4 .raw + signed .raucb        stages/assemble.sh
 #
@@ -42,6 +44,11 @@ source "${HERE}/shared/deb-lib.sh"
 # the target Debian suite (RELEASE) and its os-release VERSION_ID.
 # shellcheck source=lib/shared/target-release-lib.sh
 source "${HERE}/shared/target-release-lib.sh"
+# The ONE reader for manifests/prune-paths.list (Todo 29) — feeds the generated
+# runtime mkosi.local.conf RemoveFiles= (stages/mkosi.sh) and the base64 content
+# forwarded to the device (run_mkosi_build below).
+# shellcheck source=lib/shared/prune-paths-lib.sh
+source "${HERE}/shared/prune-paths-lib.sh"
 
 # ---------------------------------------------------------------------------
 # Locations.
@@ -52,6 +59,7 @@ FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
 BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
+BUILD_RAUC_SH="${HERE}/build-rauc.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
 MEASURE_SIZE_SH="${HERE}/measure-size.sh"
@@ -152,6 +160,8 @@ source "${STAGE_DIR}/resolve.sh"
 source "${STAGE_DIR}/fetch.sh"
 # shellcheck source=stages/kernel-build.sh
 source "${STAGE_DIR}/kernel-build.sh"
+# shellcheck source=stages/rauc-build.sh
+source "${STAGE_DIR}/rauc-build.sh"
 # shellcheck source=stages/partition.sh
 source "${STAGE_DIR}/partition.sh"
 # shellcheck source=stages/bsp-gate.sh
@@ -164,6 +174,8 @@ source "${STAGE_DIR}/tar-emit.sh"
 source "${STAGE_DIR}/boot-verify.sh"
 # shellcheck source=stages/size-gate.sh
 source "${STAGE_DIR}/size-gate.sh"
+# shellcheck source=stages/packages-lock.sh
+source "${STAGE_DIR}/packages-lock.sh"
 # shellcheck source=stages/parity.sh
 source "${STAGE_DIR}/parity.sh"
 # shellcheck source=stages/assemble.sh
@@ -230,14 +242,24 @@ main() {
   require_cmd tar
   require_cmd flock
   acquire_board_lock "${board}"
+  prune_local_conf_install_traps
+  prune_local_conf_preflight
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"
+  local apt_proxy
+  apt_proxy="$(apt_proxy_url)"
+  if [[ -n "${apt_proxy}" ]]; then
+    export CERALIVE_APT_PROXY="${apt_proxy}"
+    log_info "apt cache: ${apt_proxy} (HTTP fetches; first-party mTLS stays direct)"
+  else
+    log_info "apt cache: unavailable or disabled — using direct APT"
+  fi
 
   # Cross-stage state. Declared in THIS frame so every stage_* module assigns
   # into one place — the stages are called from here, so bash's dynamic scoping
   # hands them these names exactly as the inline bodies had them.
-  local kernel_from_source=0 family_manifest="" mkosi_arch=""
+  local kernel_from_source=0 family_manifest="" mkosi_arch="" rauc_build_dir_host=""
   local ts="" rootfs_tree="" build_version=""
   local out_dir="" artifact=""
 
@@ -254,9 +276,11 @@ main() {
   export CERALIVE_BOARD="${board}"
   local bsp_dir="${staging}/bsp" firstparty_dir="${staging}/firstparty"
   local kernel_build_dir="${staging}/kernel-build"
+  local rauc_build_dir="${staging}/rauc-build"
 
   stage_fetch
   stage_kernel_build
+  stage_rauc_build
   # DRY_RUN stages no archives. Exit after both fetch and source-kernel plans
   # have been emitted, before the package partition/BSP gates inspect the
   # intentionally empty staging tree.
@@ -267,6 +291,7 @@ main() {
   stage_tar_emit
   stage_boot_verify
   stage_size_gate
+  stage_packages_lock
   stage_parity
   stage_assemble
 
@@ -285,6 +310,31 @@ main() {
 # ---------------------------------------------------------------------------
 run_mkosi_build() {
   local mkosi_arch="$1" bsp_dir="$2" firstparty_dir="$3"
+  mkdir -p "${MKOSI_DIR}/lib/fetch"
+  cp "${HERE}/fetch-debs-auth.sh" "${MKOSI_DIR}/lib/fetch-debs-auth.sh"
+  cp "${HERE}/fetch/index.sh" "${MKOSI_DIR}/lib/fetch/index.sh"
+
+  # Per-board, per-privilege-domain mkosi cache leaf (paths.sh::
+  # ceralive_mkosi_cache_domain), computed HERE — before env_names — so it can be
+  # forwarded as CERALIVE_MKOSI_CACHE_DIR. Relative to MKOSI_DIR, which is exactly
+  # $SRCDIR/$CHROOT_SRCDIR inside every subimage script, so a postinst/finalize
+  # hook can resolve it as "${SRCDIR}/${CERALIVE_MKOSI_CACHE_DIR}" with no
+  # knowledge of mkosi's own cache_key format. See the --cache-directory use
+  # below and mkosi/runtime/packages-lock-capture.sh for why this exists: mkosi
+  # >= 25 syncs apt's verified InRelease/Packages ONCE into
+  # "<cache-directory>/<cache_key>.metadata.cache/lib/apt/lists/" and bind-mounts
+  # that into a package-manager-aware sandbox only for the duration of an actual
+  # apt/dpkg operation — it is NEVER copied into the built rootfs itself, so
+  # /var/lib/apt/lists stays permanently empty inside every subimage regardless
+  # of CleanPackageMetadata=. That metadata-cache directory is the one place the
+  # real, gpgv-verified index still lives on disk after the sync, and it is a
+  # plain subdirectory of $SRCDIR (mkosi/cache/…), reachable from every
+  # postinst/finalize hook — chrooted or not — because mkosi re-binds /work
+  # (and therefore $CHROOT_SRCDIR) even after a mkosi-chroot re-root into
+  # /buildroot.
+  local cache_domain
+  cache_domain="$(ceralive_mkosi_cache_domain)"
+  local cache_dir="cache/${BOARD_ID}/${cache_domain}"
 
   # The board/product/secret values mkosi must forward into the post-install
   # scripts. Passed as `--environment NAME` CLI flags (bare name = inherit from
@@ -293,6 +343,7 @@ run_mkosi_build() {
   local env_names=(
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
+    CERALIVE_BUILD_APT_PROXY
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
@@ -304,8 +355,10 @@ run_mkosi_build() {
     CERALIVE_INTERFACES_eth0 CERALIVE_INTERFACES_eth1 CERALIVE_INTERFACES_wlan0
     CERALIVE_MODEM_PORTS_STATUS CERALIVE_MODEM_PORTS_SLOTS CERALIVE_BOARD_QUIRKS
     CERALIVE_DEBUG_IMAGE CERALIVE_DEBUG_PASSWORD_HASH CERALIVE_IMAGE_BUILD_COMMIT
-    CERALIVE_BENCH_LABELS CERALIVE_BOARD
+    CERALIVE_OS_RELEASE_VERSION
+    CERALIVE_BENCH_LABELS CERALIVE_BOARD CERALIVE_MKOSI_CACHE_DIR
     CERALIVE_DTB_KEEP_OVERLAYS
+    CERALIVE_PRUNE_PATHS_B64 CERALIVE_FIRST_PARTY_NAMES_B64
     SOURCE_DATE_EPOCH
   )
   # Export each (default empty for the secrets) so both `--environment NAME`
@@ -332,6 +385,19 @@ run_mkosi_build() {
   export GSTREAMER_RUNTIME_PACKAGES="${GSTREAMER_RUNTIME_PACKAGES:-}"
   export SHARED_PACKAGES="${SHARED_PACKAGES:-}"
   export CERALIVE_IMAGE_BUILD_COMMIT
+  export CERALIVE_OS_RELEASE_VERSION="${CERALIVE_OS_RELEASE_VERSION:-}"
+
+  # Todo 29 (update-system-overhaul): the SINGLE prune-paths and first-party
+  # origin-name manifests, forwarded base64 (same idiom as APT_GPG_PUBLIC_B64
+  # below) so the runtime chroot postinst — which cannot read a path above
+  # $SRCDIR — can materialize /usr/lib/ceralive/prune-paths.list and the
+  # per-name apt-preferences stanzas without repo access. Empty (not absent) on
+  # a standalone `mkosi build` that bypasses this orchestrator: both writers
+  # degrade gracefully — see setup_ceralive_repository()/install_apt_preferences().
+  export CERALIVE_PRUNE_PATHS_B64
+  CERALIVE_PRUNE_PATHS_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/prune-paths.list")"
+  export CERALIVE_FIRST_PARTY_NAMES_B64
+  CERALIVE_FIRST_PARTY_NAMES_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/first-party-apt-names.txt")"
   # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
   # lib/assemble-disk.sh; default false (A/B). See mkosi/repart/README.md.
   export SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}"
@@ -339,6 +405,8 @@ run_mkosi_build() {
   # writes the /data fstab entry and the fallback RAUC slot devices, so it has to
   # reach the SUBIMAGES too — hence the matching mkosi.conf PassEnvironment= entry.
   export CERALIVE_BENCH_LABELS="${CERALIVE_BENCH_LABELS:-0}"
+  # See the cache_dir computation at the top of this function for why this exists.
+  export CERALIVE_MKOSI_CACHE_DIR="${cache_dir}"
   # Device-tree files the installed-rootfs DTB prune must KEEP beside the board's
   # own ${fdtfile}, space-separated and relative to each pruned directory. Empty
   # on both shipped boards: boot.scr.cmd and recovery.scr.cmd load ${fdtfile} and
@@ -347,6 +415,12 @@ run_mkosi_build() {
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
+  if [[ "${MKOSI_NATIVE:-0}" == 1 ]]; then
+    CERALIVE_BUILD_APT_PROXY="$(apt_proxy_url)"
+  else
+    CERALIVE_BUILD_APT_PROXY="$(apt_proxy_container_url)"
+  fi
+  export CERALIVE_BUILD_APT_PROXY
 
   # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64
@@ -457,10 +531,8 @@ run_mkosi_build() {
   # The second axis is the PRIVILEGE DOMAIN (paths.sh::ceralive_mkosi_cache_domain):
   # a containerized and a --native build own their caches as different uids, and
   # mkosi discards a cache it does not own, so sharing one leaf made every
-  # alternation a cold base layer.
-  local cache_domain
-  cache_domain="$(ceralive_mkosi_cache_domain)"
-  local cache_dir="cache/${BOARD_ID}/${cache_domain}"
+  # alternation a cold base layer. (cache_domain/cache_dir are computed once, at
+  # the top of this function, so CERALIVE_MKOSI_CACHE_DIR can reuse them too.)
 
   local mkosi_args=(
     --architecture="${mkosi_arch}"

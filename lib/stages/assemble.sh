@@ -12,7 +12,7 @@
 # stage_assemble — [8/9]
 #
 # Reads from main()'s frame: board, ts, out_dir, artifact, build_version,
-# bsp_dir, rootfs_tree.
+# bsp_dir, rootfs_tree, rauc_build_dir_host.
 # ---------------------------------------------------------------------------
 stage_assemble() {
   local raw_artifact=""
@@ -46,11 +46,13 @@ stage_assemble() {
 
       # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
       # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
-      # the .raw, emitted ALONGSIDE it. format=plain (no dm-verity, G4 deferred).
+      # the .raw, emitted ALONGSIDE it as a verity/adaptive full-slot image.
       local bundle_artifact="${out_dir}/${ts}.raucb"
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
-        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
+        MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
+        RAUC_DEB_DIR="${rauc_build_dir_host}" \
+        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
       log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
     else
@@ -84,11 +86,13 @@ stage_assemble() {
       # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
       # the .raw, emitted ALONGSIDE it. build-bundle.sh is board-agnostic (it reads
       # COMPATIBLE_STRING from the env), so the x86 path mirrors the custom path
-      # verbatim — same rootfs.tar artifact, same BUNDLE_* env. format=plain.
+      # verbatim — same rootfs tree, same BUNDLE_* env, verity/adaptive image.
       local bundle_artifact="${out_dir}/${ts}.raucb"
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
-        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${artifact}" \
+        MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
+        RAUC_DEB_DIR="${rauc_build_dir_host}" \
+        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
         || die "Stage-4 RAUC bundle build failed for board '${board}'"
       log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
     else

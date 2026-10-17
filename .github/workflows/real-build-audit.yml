@@ -22,9 +22,30 @@ jobs:
       CERALIVE_RELEASE_BOARD: rock-5b-plus
       CERALIVE_MKOSI_CACHE_DIR: mkosi/cache/rock-5b-plus
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
+      CERALIVE_GENERATED_CLEANUP_PATHS: 'mkosi/build mkosi/cache'
+      CERALIVE_RUNNER_CLEANUP_IMAGE: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
     steps:
       - name: Remove stale generated paths before checkout
-        run: rm -rf mkosi/build mkosi/cache .mkosi-workspace
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+          CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
+        run: |
+          set -euo pipefail
+          targets=()
+          for rel in ${CLEANUP_PATHS}; do
+            case "${rel}" in
+              /*|*..*|*'*'*|*'?'*|*'['*)
+                echo "::error::refusing to delete non-literal path '${rel}'"; exit 1 ;;
+            esac
+            targets+=("/work/${rel}")
+          done
+          (( ${#targets[@]} > 0 ))
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- "${targets[@]}"
       - uses: actions/checkout@v7
       - name: First-party release pin currency
         run: python3 ci/check-first-party-pins.py --max-age-hours 24
@@ -32,6 +53,18 @@ jobs:
         run: ./ci/check-builder-resources.sh
       - name: Set up BuildKit
         uses: docker/setup-buildx-action@v4
+      - name: Require Debian build cache on this runner
+        env:
+          CERALIVE_APT_CACHE_CONFIG: ${{ runner.temp }}/apt-cache-ceralive.conf
+        run: |
+          set -euo pipefail
+          install -m 0644 ci/apt-cache/ceralive.conf "${CERALIVE_APT_CACHE_CONFIG}"
+          if ! ./dev-cache up; then
+            docker compose -f ci/apt-cache/compose.yml logs --no-color apt-cache
+            exit 1
+          fi
+          curl --noproxy '*' --fail --silent --show-error --connect-timeout 1 --max-time 3 \
+            http://127.0.0.1:3142/acng-report.html >/dev/null
       - name: Materialize build trust inputs
         env:
           RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
@@ -41,10 +74,20 @@ jobs:
           install -d -m 0700 "${RUNNER_TEMP}/release-pki"
           printf '%s' "${RAUC_RELEASE_PKI_TAR_B64}" | base64 -d | tar -xz -C "${RUNNER_TEMP}/release-pki"
           printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
+      - name: Check release signer before the expensive build
+        run: |
+          set -euo pipefail
+          # Public root identity only: compare to the offline production root
+          # before rotating the Actions secret; never print private key material.
+          openssl x509 -in "${RUNNER_TEMP}/release-pki/root-ca.pem" -outform DER | sha256sum
+          lib/rauc-pki-contract.sh resolve --mode production \
+            --pki-dir "${RUNNER_TEMP}/release-pki" \
+            --keyring "${RUNNER_TEMP}/release-pki/root-ca.pem"
       - name: Build production image without publishing
         env:
           CERALIVE_BUILD_MODE: production
           CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
+          CERALIVE_APT_PROXY: http://127.0.0.1:3142
           APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
           APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
           APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
@@ -61,6 +104,44 @@ jobs:
           python3 ./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md
           ./ci/check-build-log.sh --self-test
           ./ci/check-build-log.sh "${RUNNER_TEMP}/real-build.log"
+      - name: Publish verified shared build cache when provisioned
+        env:
+          R2_BUILD_CACHE_ACCOUNT_ID: ${{ secrets.R2_BUILD_CACHE_ACCOUNT_ID }}
+          R2_BUILD_CACHE_BUCKET: ${{ secrets.R2_BUILD_CACHE_BUCKET }}
+          R2_BUILD_CACHE_ACCESS_KEY_ID: ${{ secrets.R2_BUILD_CACHE_ACCESS_KEY_ID }}
+          R2_BUILD_CACHE_SECRET_ACCESS_KEY: ${{ secrets.R2_BUILD_CACHE_SECRET_ACCESS_KEY }}
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+        run: |
+          set -euo pipefail
+          if [[ -n "${R2_BUILD_CACHE_ACCOUNT_ID}" && -n "${R2_BUILD_CACHE_BUCKET}" &&
+                -n "${R2_BUILD_CACHE_ACCESS_KEY_ID}" && -n "${R2_BUILD_CACHE_SECRET_ACCESS_KEY}" ]]; then
+            bash ci/upload-build-cache.sh "${CERALIVE_RELEASE_BOARD}"
+          else
+            echo 'r2.build-cache BLOCKED-if-absent: R2_BUILD_CACHE_* secrets are not provisioned; no upload attempted'
+          fi
       - name: Remove generated build paths
         if: ${{ always() }}
-        run: rm -rf mkosi/build mkosi/cache .mkosi-workspace
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+          CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
+        run: |
+          set -euo pipefail
+          targets=()
+          for rel in ${CLEANUP_PATHS}; do
+            case "${rel}" in
+              /*|*..*|*'*'*|*'?'*|*'['*)
+                echo "::error::refusing to delete non-literal path '${rel}'"; exit 1 ;;
+            esac
+            targets+=("/work/${rel}")
+          done
+          (( ${#targets[@]} > 0 ))
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- "${targets[@]}"
+      - name: Remove build-cache config copy
+        if: ${{ always() }}
+        run: rm -f -- "${RUNNER_TEMP}/apt-cache-ceralive.conf"

@@ -12,6 +12,11 @@
 > · DDI device contract: **v1 (frozen)** · Companion: [`hawkbit/README.md`](hawkbit/README.md),
 > [`hawkbit/platform-bridge.sh`](hawkbit/platform-bridge.sh)
 
+This retained DDI/Management API contract is not the automatic device update
+path: the image disables and masks `rauc-hawkbit-updater`, with no hawkBit server
+configured. CeraUI's capable-image OS agent stages its own RAUC installs and
+arms activation only after recording its own staged receipt.
+
 ---
 
 ## 0. Reading guide / what changes where
@@ -256,7 +261,9 @@ present human-meaningful update state.
 **hawkBit does not model RAUC's A/B slots, and must not.** The A/B swap is entirely a
 *device-local* RAUC concern: `rauc-hawkbit-updater` receives **one** distribution set (one
 bundle), hands it to RAUC over D-Bus (`InstallBundle`), and RAUC writes the *inactive* slot,
-flips `BOOT_ORDER`, and reboots — all invisible to hawkBit. hawkBit only sees *"install this DS
+does not select it (`activate-installed=false`) or reboot — all invisible to hawkBit.
+A separate explicit activation is required; CeraUI does not adopt a hawkBit
+install as its own staged receipt. hawkBit only sees *"install this DS
 → action RUNNING → FINISHED/ERROR"*.
 
 Consequences for `ceralive-platform`:

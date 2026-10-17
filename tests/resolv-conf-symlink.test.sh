@@ -118,6 +118,14 @@ printf '127.0.0.1\tlocalhost\n'  >/etc/hosts
 : >/etc/resolv.conf
 [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] || { echo "seed precondition failed"; exit 1; }
 
+# Docker's hidden resolv.conf bind still appears in mountinfo after /etc is
+# overmounted. This fixture models an ordinary file, not that bind overlay;
+# resolv-conf-bind-mount.test.sh exercises the real mounted branch separately.
+mountpoint() {
+  if [[ "\$1" == -q && "\$2" == /etc/resolv.conf ]]; then return 1; fi
+  command mountpoint "\$@"
+}
+
 # shellcheck source=/dev/null
 source "${POSTINST_LIB}"
 log() { :; }

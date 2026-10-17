@@ -1,0 +1,28 @@
+# ceralive-slot-sync.exclude — rsync --exclude-from list for
+# /usr/libexec/ceralive/ceralive-slot-sync (task 26).
+#
+# Installed verbatim to /usr/lib/ceralive/slot-sync.exclude. These are runtime,
+# ephemeral or download-cache paths that must never be mirrored between slots:
+# neither slot's own transient state belongs on the other slot, and copying it
+# would make the mirror non-deterministic across runs for no benefit.
+#
+# /dev/* is excluded here too, matching /proc, /sys and /run — but the caller
+# ADMITS a handful of conventional static device special files ahead of this
+# file on the rsync command line (--include=/dev/null etc., see
+# ceralive-slot-sync.sh's header comment for why a plain --exclude-from file
+# cannot express that override itself). Do not add a static-node name here:
+# add it as an --include on the command line, in front of --exclude-from.
+#
+# /data is NOT listed here. It is intentionally never touched by this list
+# because it is not part of either rootfs slot's tree at all — it is a THIRD,
+# already-shared partition mounted at runtime (see docs/partition-contract.md),
+# so it never appears under the bind-mounted "/" this script rsyncs from in the
+# first place. Do not add a redundant /data/* entry.
+/var/cache/apt/archives/*
+/tmp/*
+/var/tmp/*
+/run/*
+/proc/*
+/sys/*
+/dev/*
+/lost+found

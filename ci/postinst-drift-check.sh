@@ -60,12 +60,18 @@ SERVICES="${MKOSI}/customize/services.sh"
 DATAPERSIST="${MKOSI}/customize/data-persistence.sh"
 
 # postinst.chroot ceiling. Post-consolidation it is ~841 lines; the consolidated
-# dual-track was ~744 lines. 975 leaves headroom for ordinary edits (raised from
-# 950 for two small, non-duplicative fixes to the CA-trust bootstrap and its
-# apt-get retry — CHECK 1/1b/1c/2 above prove neither re-inlined anything)
-# while still catching a re-inline of any one consolidated section (smallest,
-# data-persistence, is ~206 lines → 841+206 > 975).
-readonly MAX_POSTINST_LINES=975
+# dual-track was ~744 lines. Raised 950 -> 975 for two small, non-duplicative
+# fixes to the CA-trust bootstrap and its apt-get retry (CHECK 1/1b/1c/2 above
+# prove neither re-inlined anything); raised again 975 -> 1050 for Todo 29
+# (update-system-overhaul): the per-name origin-preferences generator
+# (replacing the former Package: * wildcard) and a new
+# setup_prune_reprune_and_cache() (device prune-paths.list, the apt cache on
+# /data, the reprune DPkg::Post-Invoke hook) — real new functionality in this
+# executor, not a re-inline. Still catches a re-inline of any one consolidated
+# section (smallest, data-persistence, is ~206 lines → 841+206 > 1050 is false
+# on its own, but the CHECK 1/1b/1c content-diff checks above are what actually
+# catch a re-inline; this ceiling is the coarse backstop against BULK regrowth).
+readonly MAX_POSTINST_LINES=1050
 
 # Functions consolidated into postinst-lib.sh (Task 6). The single source of truth.
 readonly CONSOLIDATED_FUNCS=(
@@ -79,7 +85,7 @@ readonly CONSOLIDATED_FUNCS=(
   setup_ingest_firewall setup_uplink_sharing_carrier setup_dongle_netns_retirement
   setup_typec_policy setup_fan_curve apply_board_quirks
   setup_fan_kickstart setup_led_status setup_hdmirx_edid freeze_boot_packages
-  setup_cpu_governor setup_pipewire_system_mode
+  setup_cpu_governor setup_pipewire_system_mode setup_dpkg_recovery
 )
 
 FAIL=0

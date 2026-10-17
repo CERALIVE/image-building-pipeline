@@ -31,6 +31,13 @@ part_field() {
     sed -n "s/.*${key}: \([0-9][0-9]*\).*/\1/p"
 }
 
+# write_small_repart_defs — despite the name (kept for call-site stability), the
+# rootfs slots here are exactly the FROZEN 4096 MiB production size, not a scaled-
+# down stand-in: lib/disk/slot-image.sh::make_slot_image unconditionally builds a
+# 4096 MiB ext4 image regardless of caller, and lib/disk/slot.sh::populate_rootfs_slot
+# hard-refuses to dd that into a partition whose own geometry is not exactly 4096
+# MiB (task 22's frozen-slot-size guard). A smaller fixture partition would make
+# every populate call in this file die before ever reaching the behavior under test.
 write_small_repart_defs() {
   local defs="$1"
   mkdir -p "$defs"
@@ -40,8 +47,8 @@ write_small_repart_defs() {
 Type=linux-generic
 Label=rootfs_a
 Format=ext4
-SizeMinBytes=1024M
-SizeMaxBytes=1024M
+SizeMinBytes=4096M
+SizeMaxBytes=4096M
 GrowFileSystem=off
 EOF
   cat >"$defs/30-rootfs_b.conf" <<'EOF'
@@ -49,8 +56,8 @@ EOF
 Type=linux-generic
 Label=rootfs_b
 Format=ext4
-SizeMinBytes=1024M
-SizeMaxBytes=1024M
+SizeMinBytes=4096M
+SizeMaxBytes=4096M
 GrowFileSystem=off
 EOF
   cat >"$defs/40-data.conf" <<'EOF'

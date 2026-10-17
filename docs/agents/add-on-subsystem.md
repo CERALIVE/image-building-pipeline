@@ -480,6 +480,49 @@ Guards: `tests/build-cache-overhaul.bats` (27 cases — the mounts and their
 untouched digest pins, both build sites, the no-bare-build rule, and the version
 floor's refusal).
 
+**The kernel artifact cache is keyed by exact inputs and validates on every hit**
+[EXISTS — offline contract; runner timing not yet measured].
+
+`lib/kernel/artifact-cache.sh` stores the one built `linux-image-*.deb` plus
+`resolved.config` and `built-modules.txt` under
+`mkosi/cache/kernel-artifacts/<sha256>/`, with a JSON manifest containing each
+file's SHA-256. The key covers source URL/tag/commit, patch URL/commit/series,
+both config modes (config revision/path or ordered fragment names and BYTES),
+allow-absent bytes, variant and output identity, SOURCE_DATE_EPOCH, actual builder
+image ID, Dockerfile and all kernel stage/module/verifier script bytes. It never
+uses mtimes. A hit rechecks every digest, the real four-axis deb validator, the
+declared-symbol survival gate and required/forbidden closure on the stored config;
+the debug `edge-test` variant intentionally does not apply production's forbidden
+list. A hash-valid but semantically bad entry is evicted just like a corrupt
+archive. The per-key flock spans validation and copy-out, and store publishes
+through a private directory and atomic rename. A failed cache lookup/store
+degrades to an ordinary build. `CERALIVE_KERNEL_ARTIFACT_CACHE=auto|0` is the
+entire interface; any other value fails before builder work. The cache is under
+the runner's existing `mkosi/cache` cleanup allowlist, so a separate audit job
+cannot reuse an earlier run's artifact without changing the runner persistence
+policy. Offline guard: `tests/kernel-artifact-cache.test.sh` (registered default).
+
+**Shared remote build cache [PARTIAL — fixture-verified, R2 publication pending].**
+`CERALIVE_REMOTE_CACHE=auto|0` adds a remote read tier after local lookup.
+`.deb` GETs use `build-cache.ceralive.tv/debs/<expected-sha>/<filename>`; the
+caller supplies that SHA from its independently verified Packages index or
+committed userspace pin. Remote bytes and Debian control identity must match
+before reaching the existing
+verified publisher, which fills staging and local cache. A wrong hash warns and
+falls back to origin. Kernel GETs use `kernel/<input-key>/` and require all
+manifest hashes plus the existing four-axis deb and Kconfig survival/closure
+checks before atomically filling the local cache. DRY_RUN, disabled mode, local
+locking, eviction and no-metadata caching remain intact. Only `release.yml` and
+`real-build-audit.yml` invoke the create-only R2 uploader after a verified build
+and with all `R2_BUILD_CACHE_*` secrets; absent secrets report `r2.build-cache
+BLOCKED-if-absent`. Fixture tests do not establish a live object or close the
+separate Todo-15 runner timing proof. Guards: `tests/debcache.test.sh` and
+`tests/kernel-artifact-cache.test.sh`. Its offline uploader fixtures run under
+an allow-listed `env -i` and verify that injected `R2_`, `AWS_` and
+`CLOUDFLARE_` variables cannot reach either fixture process. The cache-source
+static guard reads a materialized string, not a pipe into `grep -q` that could
+SIGPIPE its producer under `pipefail`.
+
 **The pinned kernel source has a persistent bare mirror, and its flock is a
 CORRECTNESS fix rather than a speedup** [EXISTS]
 
@@ -548,11 +591,60 @@ the base" looks identical to "the base was stale".
   and the next unprivileged native build must still be told why, with the command
   that repairs it.
 
-**An opt-in apt proxy (`CERALIVE_APT_PROXY`), http-only on purpose** [EXISTS]
+**A local apt-cacher-ng proxy is auto-detected; mTLS remains direct** [EXISTS]
 
-Unset it is a NO-OP down to the token count — `apt_isolated_opts` emits the same
-12 tokens it always did and the Dockerfiles' `APT_PROXY` build arg expands to
-empty. Set, it adds exactly one `-o Acquire::http::Proxy=` pair and is threaded
+The scheduled `real-build-audit.yml` is an exception to auto-detect's silent
+direct fallback: runner evidence from 2026-09-23 showed a populated CA bundle,
+valid direct IPv4 OpenSSL peer (Fastly / Let's Encrypt), no IPv6 route, but eight
+direct apt HTTPS attempts failing certificate verification on IPv4. The audit
+starts the pinned cache and requires its report endpoint, then sets an explicit
+runner-local proxy so runtime Debian `HTTPS///` acquisition cannot silently
+return to the failing direct apt path. The runner's restrictive checkout umask
+also hid the Compose config from apt-cacher-ng; the audit mounts a mode-0644
+copy of that public file from `RUNNER_TEMP` instead. The installed image source and first-party
+mTLS remain unchanged. Details and run ID: `docs/host-support.md` runner section.
+
+Docker's outer `--add-host` entry for `host.docker.internal` is absent from the
+mkosi postinstall rootfs mounted over `/etc`. The outer builder resolves that
+alias to a literal IPv4 gateway before mkosi starts and forwards it through the
+existing build-only `CERALIVE_BUILD_APT_PROXY` contract; an absent mapping fails
+closed. `--with-network=yes` preserves the network path, not the outer hosts
+file. A local nested-sandbox reachability probe passed. Run 35889225710
+acquired all three Debian `InRelease` files inside the actual chroot, but apt
+reported `sqv` exit 123. Runs 35896791171 and 35899522292 isolated the cause:
+the runtime tree's `/usr` was root:root 0700, so `_apt` could not execute even
+`true`, while root's `sqv` verified the same signed index. The runtime now
+restores `/usr` to 0755 before any apt transaction and fails closed if `_apt`
+still cannot execute. Run 35902300468 crossed that boundary and completed
+runtime and app installation, then failed at the independent RAUC CMS
+signer-purpose gate (`unsuitable certificate purpose` under `-purpose
+smimesign`) because the Actions release-PKI secret still held an older,
+codeSigning-only leaf. A pre-build signer gate now rejects that before the
+expensive build — run 35908288341 demonstrated exactly that refusal — and
+`RAUC_RELEASE_PKI_TAR_B64` was rotated to the current dual-EKU production leaf
+(root and intermediate unchanged). The audit has since passed twice
+consecutively: runs 35908389533 and 35911623365 at `6614ada`. See
+`docs/host-support.md` for the evidence.
+
+`./dev-cache up|down|status` manages the digest-pinned Compose service and its
+persistent named volume. An unset `CERALIVE_APT_PROXY` probes localhost:3142
+for one second, then uses it or logs a direct fallback. `=off` opts out;
+an explicit HTTP URL selects a LAN cache. Docker builds and the mkosi builder
+container translate loopback to the host gateway. The runtime postinst exports
+`APT_CONFIG` at a `/tmp` Debian-only `HTTPS///` source for EVERY later apt call in
+the layer, removed by an EXIT trap; nothing under `/etc/apt` changes, so the
+device's `debian.sources` is unchanged. Scoping it to one transaction is wrong:
+apt reads only lists matching its configured sources, so the staged hawkbit
+`.deb` install would then see no Debian index when the cache is on.
+The cache server's CONNECT allowlist is exactly `apt.ceralive.tv:443`, but the
+first-party apt source is never sent through it by this build. The CA bootstrap
+remains isolated and signature verification is unchanged. Guard:
+`tests/apt-lib.test.sh` plus `tests/apt-mtls-and-dedupe.test.sh`.
+
+With no cache (or `=off`), `apt_isolated_opts` emits the same 12 tokens as
+before. With a cache, it adds `-o Acquire::http::Proxy=<url>` plus
+`-o Acquire::https::Proxy=DIRECT` (both builder Dockerfiles write the same pair)
+and is threaded
 into both builder images as `--build-arg APT_PROXY=`, written and removed inside
 the single RUN that uses it so a host-local URL (which may carry credentials)
 never survives into a shared layer.
@@ -561,6 +653,13 @@ never survives into a shared layer.
   CERTIFICATE: a cache can do nothing with that payload and the only thing a proxy
   adds is a handshake that can fail for reasons unrelated to apt. The win is the
   plain-http Debian/Armbian archive traffic, which is also the bulk of the bytes.
+  **"Never proxied" needs `Acquire::https::Proxy=DIRECT` stated, not implied.**
+  apt's https method INHERITS `Acquire::http::Proxy` when no https value is set:
+  a dead http proxy was measured to break an `https://deb.debian.org` fetch, and
+  `=DIRECT` restored the direct origin connection. Without it every first-party
+  fetch would CONNECT through the cache, and Debian-host `https://apt.armbian.com`
+  BSP fetches would hit the CONNECT allowlist's 403. `tests/apt-lib.test.sh`
+  fails if the DIRECT pair is missing or names anything else.
 - **A proxy cannot weaken verification, and no proxy option may try.** Every family
   verifies AFTER acquisition — `gpgv` over `InRelease`, then the SHA-256 that
   signed plaintext declares, or a committed pin's hash — so proxied bytes are
@@ -596,12 +695,18 @@ credentials with no screen or keyboard. Standalone artifacts under
   exists — see "SRTLA source-policy routing is RETIRED" below.)
 - **AP mode:** NetworkManager-native (`802-11-wireless.mode ap` + `ipv4.method
   shared`) — no extra packages (NM drives wpa_supplicant + its internal dnsmasq;
-  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). `hostapd` stays in the
-  image only as an evidence-gated fallback. SSID `CeraLive-Setup-<short-id>`
-  (machine-id-derived setup identifier), passphrase `ceralive-setup`
-  (documented default), gateway `192.168.42.1/24`. **HW caveat:** AP mode also
-  requires the onboard wlan driver to support it (RK3588 chip dependent) — to be
-  validated on hardware, hence `[PARTIAL]`.
+  `network-manager`/`dnsmasq`/`wpasupplicant` already ship). Both RK3588 boards
+  passed the 2026-09-25 Todo-48 force-portal → AP → teardown drill on the current
+  production image: wlan0 advertised AP support, `ceralive-ap` activated in AP
+  mode at `192.168.42.1/24`, NM spawned its dnsmasq child, no hostapd process ran,
+  and each board returned to disconnected wlan0 with portal socket inactive and
+  CeraUI active. The missing `iw` was substituted by NM state/mode plus the
+  kernel's gateway address and the real dnsmasq child. `hostapd` is removed from
+  the future image package list, not uninstalled from either tested board.
+  SSID `CeraLive-Setup-<short-id>` (machine-id-derived setup identifier), passphrase
+  `ceralive-setup` (documented default), gateway `192.168.42.1/24`. The wider
+  provisioning flow remains `[PARTIAL]`: no physical client join or credential
+  handoff was exercised by this AP-only drill.
 - **Regulatory DB (`wireless-regdb`) is an EXPLICIT `shared.list` entry.** WiFi in
   ANY mode (client or the AP above) needs `/lib/firmware/regulatory.db` (+ `.p7s`),
   which the kernel `cfg80211` subsystem loads at boot to establish a usable
@@ -688,4 +793,3 @@ executor and `services.sh`, like `setup_provisioning`).
 - **Coexistence with provisioning (Task 11):** the AP-mode portal uses port 80;
   nginx only binds 443, so there is no conflict.
 - **Size:** ~+3–4 MB; see [`docs/size-notes.md §5`](../size-notes.md).
-

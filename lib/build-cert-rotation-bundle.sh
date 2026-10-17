@@ -35,10 +35,6 @@
 #   root is refused here — shipping it would brick rotation (the device would reject
 #   it too). This is the build-side twin of the on-device cert-rotation.sh gate.
 #
-# HOST WITHOUT rauc: falls back to the SAME OpenSSL CMS harness as build-bundle.sh
-# (squashfs payload + detached CMS by the leaf, verified to the root keyring), so
-# the signing chain is exercised end-to-end with the REAL PKI.
-#
 # DESIGN RULES (lib/common.sh): strict mode, loud ERR trap, NO `|| true`.
 #
 # shellcheck shell=bash
@@ -128,7 +124,7 @@ compatible=${compatible}
 version=${version}
 
 [bundle]
-format=plain
+format=verity
 
 [hooks]
 filename=hook.sh
@@ -230,12 +226,11 @@ build-cert-rotation-bundle() {
   mkdir -p "${out_dir}"
   out="${out_dir}/${ts}.raucb"
 
-  if command -v rauc >/dev/null 2>&1; then
-    log_info "rauc present — using native rauc bundle"
-    bundle_with_rauc "${content}" "${out}"
-  else
-    bundle_with_openssl "${content}" "${out}"
-  fi
+  # The whole cert-rotation payload (manifest + hook.sh + a two-PEM tar) is a
+  # few KB, small enough that squashfs compression can land it at or under
+  # RAUC's 4096-byte verity floor (build-bundle.sh::bundle_with_rauc). Data/
+  # fragment compression buys nothing at this size, so skip it instead.
+  RAUC_BUNDLE_MKSQUASHFS_ARGS="-noD -noF" bundle_with_rauc "${content}" "${out}"
 
   ( cd "${out_dir}" && sha256sum "$(basename "${out}")" >"$(basename "${out}").sha256" )
 

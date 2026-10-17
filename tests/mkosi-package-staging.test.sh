@@ -204,6 +204,8 @@ printf '%s\n' '#!/bin/sh' 'printf "raw apt-get invoked\\n" >&2' 'exit 90' \
 	>"${RUN_DIR}/bin/apt-get"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${RM_CALLS}"' \
 	>"${RUN_DIR}/bin/rm"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${MKOSI_CHROOT_CALLS}"' \
+	>"${RUN_DIR}/bin/mkosi-chroot"
 chmod 755 "${RUN_DIR}/bin/"*
 
 # The firmware prune is now GATED on a modinfo sweep of the installed modules
@@ -216,9 +218,11 @@ done
 : >"${RUN_DIR}/buildroot/usr/lib/firmware/r8a779x_usb3_rom.mem"
 
 MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
+	MKOSI_CHROOT_CALLS="${RUN_DIR}/mkosi-chroot.calls" \
 	RM_CALLS="${RUN_DIR}/rm.calls" \
 	PATH="${RUN_DIR}/bin:${PATH}" \
 	BUILDROOT="${RUN_DIR}/buildroot" \
+	CHROOT_SRCDIR=/fixture/mkosi \
 	ARCH=arm64 \
 	INSTALL_BOOT_BSP=1 \
 	HW_ACCEL_GSTREAMER_PLUGINS='gstreamer-bsp' \
@@ -232,6 +236,11 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 		printf 'FAIL platform BSP installer did not use the mkosi wrapper\n' >&2
 		exit 1
 	}
+
+[[ "$(<"${RUN_DIR}/mkosi-chroot.calls")" == *'runtime/packages-lock-capture.sh platform gstreamer-bsp gstreamer-runtime linux-image-demo linux-dtb-demo linux-u-boot-demo firmware-demo'* ]] || {
+	printf 'FAIL platform package-lock capture was not called after installing the BSP\n' >&2
+	exit 1
+}
 
 # The ORDER is the assertion, not just the membership: zstd must be a configured
 # package before the kernel .deb's postinst generates the initramfs, or

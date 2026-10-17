@@ -15,7 +15,7 @@
 #
 # RAUC CUSTOM BACKEND INTERFACE (https://rauc.readthedocs.io/ integration.html):
 # RAUC invokes this script with the operation as $1 and the slot's `bootname` as the
-# trailing argument. Debian trixie's RAUC 1.13 calls the four state/primary
+# trailing argument. The pinned RAUC 1.15.2 calls the four state/primary
 # operations AND `get-current`. That last one is the only behavioural difference
 # from the bookworm 1.8 this image used to target, which read `rauc.slot=` itself  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite, which is why the get-current arm looked unused
 # and never invoked it — so `get-current` below was dead forward-compat code and

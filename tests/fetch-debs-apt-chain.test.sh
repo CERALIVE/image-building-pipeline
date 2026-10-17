@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Positional arguments expand in the child bash -c.
 
 set -euo pipefail
 
@@ -11,6 +12,7 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fetch-debs-apt-chain.XXXXXX")"
 FAKE_BIN="${RUN_DIR}/bin"
 FAKE_CURL_BIN="${RUN_DIR}/curl-bin"
 FAKE_APT_LOG="${RUN_DIR}/apt-get.log"
+FAKE_CHMOD_LOG="${RUN_DIR}/chmod.log"
 RESULTS_LOG="${ARTIFACT_DIR}/fetch-debs-apt-chain.log"
 
 cleanup() {
@@ -18,7 +20,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${FAKE_BIN}" "${FAKE_CURL_BIN}" "${ARTIFACT_DIR}"
+# The real fetcher writes its override receipt under DEST even without overrides.
+# Keep that output in this run's private tree rather than depending on repo/out.
+FETCH_OUT="${RUN_DIR}/out"
+mkdir -p "${FAKE_BIN}" "${FAKE_CURL_BIN}" "${ARTIFACT_DIR}" "${FETCH_OUT}"
 
 cat >"${FAKE_BIN}/apt-get" <<'SH'
 #!/usr/bin/env bash
@@ -102,6 +107,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${out}" && -n "${url}" ]] || exit 2
+# Only the first-party origin is fixture-backed; a remote-cache URL must never
+# be mistaken for an origin payload just because it ends in .deb.
+[[ "${url}" == https://apt.ceralive.tv/dists/* ]] || exit 22
 case "${url}" in
 	*/InRelease) cp "${FAKE_REPO_DIR}/InRelease" "${out}" ;;
 	*/Packages.gz) cp "${FAKE_REPO_DIR}/Packages.gz" "${out}" ;;
@@ -145,6 +153,7 @@ set -euo pipefail
 
 target="${!#}"
 if [[ "${FAKE_CHMOD_MODE:-}" == "fail-first-party-package" ]]; then
+	printf '%s\n' "${target}" >>"${FAKE_CHMOD_LOG}"
 	case "${target}" in
 		*/.fetch-firstparty-*/*.deb|*/.tmp-firstparty-*) exit 1 ;;
 	esac
@@ -170,8 +179,11 @@ run_fetch_first_party() {
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_BIN}:${PATH}" \
+		DEST="${FETCH_OUT}" \
 		FAKE_APT_LOG="${FAKE_APT_LOG}" \
+		FAKE_CHMOD_LOG="${FAKE_CHMOD_LOG}" \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
+		CERALIVE_REMOTE_CACHE=0 \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 	}
@@ -231,9 +243,12 @@ run_fetch_first_party_curl() {
 	local cache_dir; cache_dir="$(dirname "${dest}")/.debcache"
 	env \
 		PATH="${FAKE_CURL_BIN}:${PATH}" \
+		DEST="${FETCH_OUT}" \
 		FAKE_REPO_DIR="${repo}" \
+		FAKE_CHMOD_LOG="${FAKE_CHMOD_LOG}" \
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
+		CERALIVE_REMOTE_CACHE=0 \
 		"$@" \
 		bash -c 'source "$1"; fetch_first_party "$2"' bash "${FETCH_DEBS}" "${dest}"
 }
@@ -270,6 +285,7 @@ expect_failure() {
 
 : >"${RESULTS_LOG}"
 : >"${FAKE_APT_LOG}"
+: >"${FAKE_CHMOD_LOG}"
 
 # Expected staged-.deb count == the size of the real FIRST_PARTY_APT_PKGS set
 # (libsrt + cerastream/CeraUI/srtla-send/capture + the ModemManager 1.24 closure),
@@ -341,11 +357,25 @@ else
 fi
 
 curl_mode_failure_dest="${RUN_DIR}/curl-package-mode-failure/debs"
+: >"${FAKE_CHMOD_LOG}"
 if run_fetch_first_party_curl "${curl_mode_failure_dest}" "${curl_repo}" \
 	FAKE_CHMOD_MODE=fail-first-party-package \
 	APT_GPG_PUBLIC_B64="${KEY_B64}" >"${RUN_DIR}/curl-package-mode-failure.out" 2>&1; then
 	printf 'FAIL curl-package-mode-failure-is-fatal: expected non-zero exit\n' | tee -a "${RESULTS_LOG}"
 	package_mode_failure_rc=1
+fi
+if ! grep -Eq '/\.tmp-firstparty-[^/]+$' "${FAKE_CHMOD_LOG}"; then
+	printf 'FAIL curl-package-mode-failure-hit-real-publisher: no curl temporary file reached chmod\n' | tee -a "${RESULTS_LOG}"
+	cat "${FAKE_CHMOD_LOG}" >&2
+	package_mode_failure_rc=1
+else
+	printf 'PASS curl-package-mode-failure-hit-real-publisher\n' | tee -a "${RESULTS_LOG}"
+fi
+if ! grep -Fq 'first-party fetch failed (curl path)' "${RUN_DIR}/curl-package-mode-failure.out"; then
+	printf 'FAIL curl-package-mode-failure-reached-fetch-error\n' | tee -a "${RESULTS_LOG}"
+	package_mode_failure_rc=1
+else
+	printf 'PASS curl-package-mode-failure-reached-fetch-error\n' | tee -a "${RESULTS_LOG}"
 fi
 curl_mode_leaks="$(find "${curl_mode_failure_dest}" -maxdepth 1 \
 	\( -name '.tmp-firstparty-*' -o -name '*.deb' \) -print)"

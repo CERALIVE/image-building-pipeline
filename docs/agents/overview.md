@@ -7,4 +7,3 @@
 partition classification, never-freeze policy and release currency use only the
 canonical package name. No new image or board installation is implied. Evidence:
 [`docs/uvc-package-migration.md`](../uvc-package-migration.md).
-

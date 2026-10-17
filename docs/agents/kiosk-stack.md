@@ -57,4 +57,3 @@ production build default replaced the vendor track, and the vendor machinery is
 preserved at `vendor-kernel-final`. The old patch bookmark in
 [`docs/kiosk-display.md §3`](../kiosk-display.md) is historical context only,
 not an active safety fallback or instruction to re-open D3.
-

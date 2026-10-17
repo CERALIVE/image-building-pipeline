@@ -49,6 +49,7 @@
 #   CERALIVE_DEBCACHE  0 disables the verified .deb download cache (default: on)
 #   CERALIVE_DEBCACHE_MAX_BYTES  cache ceiling, LRU-evicted   (default: 4 GiB)
 #   CERALIVE_DEBCACHE_DIR        cache location (default: ../mkosi/.staging/.debcache)
+#   CERALIVE_REMOTE_CACHE auto|0 shared verified R2 read tier (default: auto)
 #
 # shellcheck shell=bash
 
@@ -90,6 +91,8 @@ source "${HERE}/fetch/bsp.sh"
 source "${HERE}/fetch/userspace.sh"
 # shellcheck source=fetch/firstparty.sh
 source "${HERE}/fetch/firstparty.sh"
+# shellcheck source=fetch/lock.sh
+source "${HERE}/fetch/lock.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration (env-overridable; package names come from manifests and exact
@@ -190,7 +193,7 @@ assert_repos_integrity
 # other first-party .deb (exact pins in
 # first-party-deb-versions.txt) and installed by the app layer (RUNTIME_APP_PKGS).
 # External deps (glib, libgudev, polkit, …) come from Debian via shared.list; the
-# origin-990 pin (customize/apt-ceralive-repo.sh, Package: *) keeps the fork
+# per-name origin-990 pin (customize/apt-ceralive-repo.sh) keeps the fork
 # winning on-device.
 FIRST_PARTY_APT_PKGS=(
   "libsrt1.5-ceralive" "cerastream" "gstreamer1.0-libuvcsrc" "ceralive-device" "srtla"
@@ -199,6 +202,7 @@ FIRST_PARTY_APT_PKGS=(
   "libqmi-glib5" "libqmi-proxy" "libqmi-utils"
   "libqrtr-glib0"
   "ceralive-modem-support"
+  "ceralive-apt-credentials"
 )
 usage() {
   cat >&2 <<EOF
@@ -232,6 +236,7 @@ main() {
   fi
 
   [[ -n "${family}" ]] || { usage; die "--family <manifest.yaml> is required"; }
+  ceralive_remote_cache_mode >/dev/null
 
   log_info "=== fetch-debs (mkosi staging) ==="
   log_info "channel=${CHANNEL} arch=${ARCH} dest=${DEST} dry_run=${DRY_RUN:-0}"
@@ -245,6 +250,7 @@ main() {
   fetch_bsp "${family}" "${debs}"
   fetch_rk3588_userspace "${family}" "${debs}"
   fetch_first_party "${debs}"
+  fetch_lock_sidecar
 
   log_success "staging complete -> ${debs} (mkosi runtime/assembly layer consumes this)"
 }
