@@ -127,6 +127,10 @@ chmod +x "${WORK}/bin/mount"
 cat >"${WORK}/bin/umount" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >>"${UMOUNT_CALLS}"
+[[ "\${UMOUNT_EXIT:-0}" == 0 ]] || exit "\${UMOUNT_EXIT}"
+if [[ "\$1" == "\${CERALIVE_SLOT_SYNC_TARGET}" ]]; then
+  rm -f "\${STALE_TARGET_MOUNT}"
+fi
 exit 0
 EOF
 chmod +x "${WORK}/bin/umount"
@@ -134,6 +138,7 @@ chmod +x "${WORK}/bin/umount"
 cat >"${WORK}/bin/findmnt" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >>"${FINDMNT_CALLS}"
+[[ ! -e "${STALE_TARGET_MOUNT}" ]] || exit 0
 exit "${FINDMNT_EXIT:-1}"
 EOF
 chmod +x "${WORK}/bin/findmnt"
@@ -185,6 +190,7 @@ export UMOUNT_BIN="${WORK}/bin/umount"
 export E2FSCK_BIN="${WORK}/bin/e2fsck"
 export FINDMNT_BIN="${WORK}/bin/findmnt"
 export E2FSCK_DIRTY_FILE="${WORK}/dirty-target"
+export STALE_TARGET_MOUNT="${WORK}/stale-target-mount"
 export SYNC_BIN="${WORK}/bin/sync"
 export SHA256SUM_BIN="sha256sum"
 
@@ -232,7 +238,7 @@ EOF
 rauc_json_fixture() {
   local other_extra="${1:-}"
   cat >"${RAUC_JSON_FIXTURE}" <<EOF
-{"compatible":"ceralive-test","variant":"","booted":"A","boot_primary":"rootfs.0","slots":[{"rootfs.0":{"class":"rootfs","device":"${WORK}/mnt/source","type":"ext4","bootname":"A","state":"booted","parent":null,"mountpoint":"/","boot_status":"good","bundle":{"compatible":"ceralive-test","version":"${BUILD_ID}"},"installed":{"timestamp":"2026-09-20T00:00:00Z","count":3},"activated":{"timestamp":"2026-09-20T00:00:05Z","count":3},"status":"ok"}},{"rootfs.1":{"class":"rootfs","device":"${WORK}/mnt/target","type":"ext4","bootname":"B","state":"inactive","parent":null,"mountpoint":null,"boot_status":"good"${other_extra},"status":"ok"}}]}
+{"compatible":"ceralive-test","variant":"","booted":"A","boot_primary":"rootfs.0","slots":[{"rootfs.0":{"class":"rootfs","device":"${WORK}/mnt/source","type":"ext4","bootname":"A","state":"booted","parent":null,"mountpoint":"/","boot_status":"good","bundle":{"compatible":"ceralive-test","version":"${BUILD_ID}"},"installed":{"timestamp":"2026-09-20T00:00:00Z","count":3},"activated":{"timestamp":"2026-09-20T00:00:05Z","count":3},"status":"ok"}},{"rootfs.1":{"class":"rootfs","device":"${WORK}/dev/rootfs_b","type":"ext4","bootname":"B","state":"inactive","parent":null,"mountpoint":null,"boot_status":"good"${other_extra},"status":"ok"}}]}
 EOF
 }
 
@@ -241,8 +247,10 @@ reset_happy_fixtures() {
   unset DPKG_AUDIT_FIXTURE DPKG_VERIFY_SOURCE_FIXTURE DPKG_VERIFY_TARGET_FIXTURE
   unset RAUC_OPERATION_FIXTURE HAWKBIT_ACTIVE_FIXTURE RAUC_MARK_BAD_FAIL RAUC_MARK_GOOD_FAIL
   unset RSYNC_EXIT RSYNC_SLEEP MOUNT_EXIT E2FSCK_EXIT
+  unset UMOUNT_EXIT
   unset E2FSCK_REPAIR_EXIT E2FSCK_READY_FIFO E2FSCK_HOLD_FIFO FINDMNT_EXIT
   rm -f "${E2FSCK_DIRTY_FILE}"
+  rm -f "${STALE_TARGET_MOUNT}"
   : >"${E2FSCK_CALLS}"
   : >"${FINDMNT_CALLS}"
   unset SYNC_RECEIPT_FAIL
@@ -363,7 +371,7 @@ assert_eq "check exit code on healthy fixture" 0 "${rc}"
 printf '%s' "${out}" | grep -qF '"would_refuse":false' && ok "check: healthy fixture would not refuse" || bad "check output: ${out}"
 printf '%s' "${out}" | grep -qF '"rauc_operation":"idle"' && ok "check: reports rauc_operation" || bad "check output: ${out}"
 printf '%s' "${out}" | grep -qF '"other_slot":"rootfs.1"' && ok "check: resolves other_slot by name (never a PARTLABEL)" || bad "check output: ${out}"
-printf '%s' "${out}" | grep -qF "\"other_slot_device\":\"${WORK}/mnt/target\"" && ok "check: resolves other_slot_device from rauc status" || bad "check output: ${out}"
+printf '%s' "${out}" | grep -qF "\"other_slot_device\":\"${WORK}/dev/rootfs_b\"" && ok "check: resolves other_slot_device from rauc status" || bad "check output: ${out}"
 grep -qF 'status --detailed --output-format=json' "${RAUC_CALLS}" && ok "check calls rauc status --detailed --output-format=json" || bad "check did not query rauc status"
 [[ ! -e "${CERALIVE_UPDATE_LOCK_PATH}.held" ]] && ok "check takes no destructive action" || bad "check acted destructively"
 
@@ -442,23 +450,21 @@ grep -qF "${CERALIVE_SLOT_SYNC_SOURCE}" "${UMOUNT_CALLS}" && grep -qF "${CERALIV
 # 3a. Repair only the unmounted, already-bad target before mirroring it.
 # ===========================================================================
 
-for repair_rc in 1 2; do
-  # Given: the target has orphan-list damage that rsync cannot repair.
-  reset_happy_fixtures
-  touch "${E2FSCK_DIRTY_FILE}"
-  export E2FSCK_REPAIR_EXIT="${repair_rc}"
-  # When: the CLI repairs and mirrors the target.
-  out="$(run_run 2>&1)"; rc=$?
-  # Then: corrected filesystems are mirrored and independently checked clean.
-  assert_eq "pre-fsck rc=${repair_rc}: dirty target mirror succeeds" 0 "${rc}"
-  assert_eq "pre-fsck rc=${repair_rc}: repair then read-only verification target the other device" \
-    "$(printf '%s\n' "-fy ${WORK}/mnt/target" "-fn ${WORK}/mnt/target")" "$(<"${E2FSCK_CALLS}")"
-  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
-    && ok "pre-fsck rc=${repair_rc}: repaired mirror marked good" || bad "repaired mirror was not marked good: ${out}"
-done
+# Given: the target has orphan-list damage that rsync cannot repair.
+reset_happy_fixtures
+touch "${E2FSCK_DIRTY_FILE}"
+export E2FSCK_REPAIR_EXIT=1
+# When: the CLI repairs and mirrors the target.
+out="$(run_run 2>&1)"; rc=$?
+# Then: corrected filesystems are mirrored and independently checked clean.
+assert_eq "pre-fsck rc=1: dirty target mirror succeeds" 0 "${rc}"
+assert_eq "pre-fsck rc=1: repair then read-only verification target the other device" \
+  "$(printf '%s\n' "-fy ${WORK}/dev/rootfs_b" "-fn ${WORK}/dev/rootfs_b")" "$(<"${E2FSCK_CALLS}")"
+grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+  && ok "pre-fsck rc=1: repaired mirror marked good" || bad "repaired mirror was not marked good: ${out}"
 
-for repair_rc in 4 8; do
-  # Given: the target filesystem cannot be repaired.
+for repair_rc in 2 3 4 8; do
+  # Given: repair reports a reboot requirement or an unrepaired filesystem.
   reset_happy_fixtures
   export E2FSCK_REPAIR_EXIT="${repair_rc}"
   # When: the CLI attempts the destructive mirror.
@@ -473,6 +479,27 @@ for repair_rc in 4 8; do
     && ok "pre-fsck rc=${repair_rc}: no mount or rsync" || bad "unrepairable target was mounted or mirrored"
 done
 
+for umount_rc in 0 1; do
+  # Given: a killed run left the target mounted at our own mountpoint.
+  reset_happy_fixtures
+  touch "${STALE_TARGET_MOUNT}"
+  export UMOUNT_EXIT="${umount_rc}"
+  # When: the next run tries to clear the stale mount before checking the device.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: a removable stale mount recovers; a busy mount still refuses repair.
+  if [[ "${umount_rc}" -eq 0 ]]; then
+    assert_eq "stale target mount: mirror recovers without operator cleanup" 0 "${rc}"
+    grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+      && ok "stale target mount: recovered mirror marked good" || bad "stale mount blocked recovery: ${out}"
+  else
+    assert_eq "busy stale target mount: repair refused" 1 "${rc}"
+    [[ ! -s "${E2FSCK_CALLS}" && ! -s "${MOUNT_CALLS}" && ! -s "${RSYNC_CALLS}" ]] \
+      && ok "busy stale target mount: no fsck, mount or rsync" || bad "busy target was repaired or mirrored"
+    grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+      && bad "busy stale target mount marked good" || ok "busy stale target mount: target stays bad"
+  fi
+done
+
 for findmnt_rc in 0 2; do
   # Given: the target is mounted, or mount-state inspection fails.
   reset_happy_fixtures
@@ -482,7 +509,7 @@ for findmnt_rc in 0 2; do
   # Then: no filesystem repair, mount or mirror may run; the slot stays bad.
   assert_eq "mount-state rc=${findmnt_rc}: target repair refused" 1 "${rc}"
   assert_eq "mount-state rc=${findmnt_rc}: checks the target device, not its future mountpoint" \
-    "-rn -S ${WORK}/mnt/target" "$(<"${FINDMNT_CALLS}")"
+    "-rn -S ${WORK}/dev/rootfs_b" "$(<"${FINDMNT_CALLS}")"
   [[ ! -s "${E2FSCK_CALLS}" && ! -s "${MOUNT_CALLS}" && ! -s "${RSYNC_CALLS}" ]] \
     && ok "mount-state rc=${findmnt_rc}: no fsck, mount or rsync" || bad "unsafe target was repaired or mirrored"
   grep -qF 'status mark-bad other' "${RAUC_CALLS}" \
@@ -732,6 +759,8 @@ if real_slot_sync_available; then
   loop_dev=""
 
   priv_cleanup() {
+    as_root umount "${CERALIVE_SLOT_SYNC_SOURCE}" 2>/dev/null || true
+    as_root umount "${CERALIVE_SLOT_SYNC_TARGET}" 2>/dev/null || true
     as_root umount "${PRIV_WORK}/mnt-check" 2>/dev/null || true
     if [[ -n "${loop_dev}" ]]; then
       as_root losetup -d "${loop_dev}" 2>/dev/null || true
@@ -812,7 +841,12 @@ if real_slot_sync_available; then
     export CERALIVE_SLOT_SYNC_BIND_SOURCE="${PRIV_WORK}/fixture"
     rauc_json_fixture ""
     # rewrite the device in the fixture to the real loop device
-    sed -i "s#${WORK}/mnt/target#${loop_dev}#" "${RAUC_JSON_FIXTURE}"
+    sed -i "s#${WORK}/dev/rootfs_b#${loop_dev}#" "${RAUC_JSON_FIXTURE}"
+
+    # Given: SIGKILL left the real target mounted at the previous run's mountpoint.
+    mkdir -p "${CERALIVE_SLOT_SYNC_TARGET}"
+    as_root mount "${loop_dev}" "${CERALIVE_SLOT_SYNC_TARGET}" \
+      && ok "privileged leg: stale target mount prepared" || bad "privileged leg: could not prepare stale target mount"
 
     priv_run_log="${PRIV_WORK}/run.log"
     # RAUC_BIN/SYSTEMCTL_BIN/CERALIVE_BUSCTL/DPKG_BIN are absolute stub paths
@@ -821,6 +855,7 @@ if real_slot_sync_available; then
     # PATH — a "${WORK}/bin:${PATH}" prefix here would resolve them to this
     # same file's own mount/rsync/e2fsck STUBS instead, which only record argv
     # and exit 0, so the leg would "succeed" while mounting and copying nothing.
+    # When: the real CLI must clear that mount before its repair guard.
     as_root env \
       RAUC_BIN="${WORK}/bin/rauc" SYSTEMCTL_BIN="${WORK}/bin/systemctl" \
       CERALIVE_BUSCTL="${WORK}/bin/busctl" DPKG_BIN="${WORK}/bin/dpkg" \
@@ -848,11 +883,16 @@ if real_slot_sync_available; then
       CERALIVE_OS_RELEASE_VERSION_FILE="${CERALIVE_OS_RELEASE_VERSION_FILE}" \
       bash "${SCRIPT}" run >"${priv_run_log}" 2>&1
     priv_rc=$?
+    # Then: the recovered run completes the same verified mirror as a clean run.
     if [[ "${priv_rc}" -eq 0 ]]; then
       ok "privileged leg: real end-to-end run succeeded"
     else
       bad "privileged leg: real end-to-end run failed (rc=${priv_rc}): $(<"${priv_run_log}")"
     fi
+    grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+      && ok "privileged leg: stale-mount recovery marked the target good" || bad "privileged leg: stale-mount recovery left target bad"
+    [[ -f "${CERALIVE_SYNC_RECEIPT_FILE}" ]] \
+      && ok "privileged leg: stale-mount recovery published a receipt" || bad "privileged leg: stale-mount recovery receipt missing"
 
     # Inspect the mirrored content by mounting the loop device read-only.
     mkdir -p "${PRIV_WORK}/mnt-check"

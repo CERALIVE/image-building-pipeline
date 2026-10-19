@@ -89,10 +89,10 @@
 # comparison is filtered through /usr/lib/ceralive/prune-paths.list (todo 29)
 # when that file exists; its absence is a safe no-op (compare raw output).
 #
-# Before mounting the already-bad TARGET, refuse if it is mounted anywhere and
-# repair it with `e2fsck -fy`. A crash can leave orphan-list metadata that rsync
-# cannot fix. Repair rc 0/1/2 permits copying; every other rc leaves it bad. The
-# final unmounted `e2fsck -fn` still independently verifies the mirrored result.
+# Before mounting the already-bad TARGET, clear our stale mounts, refuse if it is
+# still mounted anywhere and repair it with `e2fsck -fy`. A crash can leave
+# orphan-list metadata that rsync cannot fix. Only repair rc 0/1 permits copying.
+# The final unmounted `e2fsck -fn` still independently verifies the mirrored result.
 #
 # SIGTERM: unmount whatever is mounted, leave the target slot marked BAD (it
 # was marked bad at the very start, before anything destructive happened), and
@@ -583,6 +583,11 @@ cmd_run() {
   # shell's default (immediate, no-cleanup) termination.
   trap on_sigterm TERM
 
+  # Stale mounts from a previously killed run are a best-effort clear, not a
+  # hard requirement — a genuinely busy mountpoint still fails loudly below.
+  "${UMOUNT_BIN}" "${SOURCE_MNT}" 2>/dev/null || true
+  "${UMOUNT_BIN}" "${TARGET_MNT}" 2>/dev/null || true
+
   "${FINDMNT_BIN}" -rn -S "${OTHER_SLOT_DEVICE}" >/dev/null
   local mount_rc=$?
   case "${mount_rc}" in
@@ -590,11 +595,6 @@ cmd_run() {
     1) ;;
     *) die "cannot determine whether target ${OTHER_SLOT_DEVICE} is mounted (findmnt rc=${mount_rc})" ;;
   esac
-
-  # Stale mounts from a previously killed run are a best-effort clear, not a
-  # hard requirement — a genuinely busy mountpoint still fails loudly below.
-  "${UMOUNT_BIN}" "${SOURCE_MNT}" 2>/dev/null || true
-  "${UMOUNT_BIN}" "${TARGET_MNT}" 2>/dev/null || true
 
   log "repairing unmounted target: e2fsck -fy ${OTHER_SLOT_DEVICE}"
   set -m
@@ -606,7 +606,7 @@ cmd_run() {
   WORKER_PID=""
   log "e2fsck -fy ${OTHER_SLOT_DEVICE} completed (rc=${repair_rc})"
   case "${repair_rc}" in
-    0|1|2) ;;
+    0|1) ;;
     *) die "target filesystem repair failed (e2fsck -fy ${OTHER_SLOT_DEVICE}, rc=${repair_rc}); target slot stays bad" ;;
   esac
 

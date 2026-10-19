@@ -3551,9 +3551,10 @@ recursive balanced-object matching to retain complete slot objects at any depth.
 The verbatim Rock 5B+ RAUC 1.15.2 capture in
 `tests/fixtures/rauc-1.15.2-rock-status.json` pins this alongside the older flat
 fixture; neither nested `bundle` nor another sub-object key is a slot name.
-The mirror itself is `rauc status mark-bad other`, refuse if the target device
-is currently mounted (or mount-state inspection fails), repair the unmounted
-target with `e2fsck -fy`, then mount the other slot rw,
+The mirror itself is `rauc status mark-bad other`, best-effort unmount of the
+source and target mountpoints left by a killed run, refuse if the target device
+is still mounted or findmnt cannot be executed; e2fsck's own mounted-device
+refusal is the second guard. Repair the unmounted target with `e2fsck -fy`, then mount the other slot rw,
 `mount --bind` (never `--rbind`) the running root onto a source mountpoint,
 `rsync -aHAXS --checksum --numeric-ids --delete --exclude-from=/usr/lib/ceralive/
 slot-sync.exclude`, `sync`, a `dpkg --root=<target> --verify` vs `--root=<source>
@@ -3567,14 +3568,17 @@ write `sync-receipt.json` (RAUC's own slot status keeps the OLD bundle version
 for a slot this script wrote, so the UI and drills read the mirrored version
 from this receipt instead), then `rauc status mark-good other`.
 
-Pre-mirror repair accepts only e2fsck rc 0, 1 (corrected) or 2 (corrected;
-no reboot needed for this unmounted non-root filesystem); every other result
+Pre-mirror repair accepts only e2fsck rc 0 or 1 (corrected); every other result
 aborts before mounting or copying and leaves the target bad. This repairs the
 orphan-list metadata left by a crash during dpkg that rsync cannot clear (F-B3,
 Orange Pi Drill B). Both fsck phases log their outcomes; the final `-fn` check
 is unchanged. SIGTERM during pre-repair terminates its process group and exits
 143, just as during rsync, without marking the slot good. This correction is
 host-tested only; re-running the physical drill on the fixed script is separate.
+In e2fsprogs 1.47.2, rc 2/3's reboot bit is set only for a mounted root; it is
+unexpected for this unmounted non-root target and must not permit mirroring.
+findmnt also uses rc 1 for some inspection failures, not only an absent mount;
+the guard does not promise to distinguish those cases.
 
 The receipt's existing `image_version` reports the booted OS release from
 `/etc/ceralive/os-release-version` (test seam: `CERALIVE_OS_RELEASE_VERSION_FILE`).
@@ -3612,13 +3616,15 @@ producing a spurious `update-lock-busy` refusal on the very next invocation.
 Tests: `tests/slot-sync.test.sh` — the full six-gate + two-lock refusal matrix,
 the `check` JSON shape, the dpkg-verify comparison (mismatch aborts, identical
 non-empty passes, a prune-paths.list-matched difference is a non-issue), the
-mark-bad-before-mark-good ordering, target repair (rc 1/2 recovery, rc 4/8
-failure, mounted/unknown-state refusal), SIGTERM during repair and rsync, and the shipped
+mark-bad-before-mark-good ordering, target repair (rc 1 recovery, rc 2/3/4/8
+failure, mounted/command-error refusal), stale-mount recovery and busy-mount
+refusal, SIGTERM during repair and rsync, and the shipped
 `--checksum` invocation proven against a same-size/same-mtime/different-content
 file — all unprivileged, `default-shell`. A second, internally-gated leg
 (`CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required|skip`, default `skip`, same
 shape as this repo's other real-* contracts) drives a REAL loop-mounted ext4
-target through the real script with real `mount`/`rsync`/`e2fsck`, proving
+target left mounted by a previous run through the real script with real
+`mount`/`rsync`/`e2fsck`/`findmnt`, proving stale-mount recovery,
 xattr/ACL/file-capability/hardlink/sparse-file preservation and the
 hidden-ext4-under-a-non-recursive-bind trick in isolation first. It needs root
 or passwordless sudo plus `losetup`/`mkfs.ext4`/`setfacl`/`setcap`/etc, which
