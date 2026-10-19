@@ -120,7 +120,9 @@ chmod +x "${WORK}/bin/rsync"
 cat >"${WORK}/bin/mount" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >>"${MOUNT_CALLS}"
-exit "\${MOUNT_EXIT:-0}"
+[[ "\${MOUNT_EXIT:-0}" == 0 ]] || exit "\${MOUNT_EXIT}"
+touch "${WORK}/mounted.\$(basename "\${@: -1}")"
+exit 0
 EOF
 chmod +x "${WORK}/bin/mount"
 
@@ -128,9 +130,11 @@ cat >"${WORK}/bin/umount" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >>"${UMOUNT_CALLS}"
 [[ "\${UMOUNT_EXIT:-0}" == 0 ]] || exit "\${UMOUNT_EXIT}"
-if [[ "\$1" == "\${CERALIVE_SLOT_SYNC_TARGET}" ]]; then
-  rm -f "\${STALE_TARGET_MOUNT}"
+if [[ "\$1" == "\${CERALIVE_SLOT_SYNC_TARGET}" && -e "\${STALE_TARGET_MOUNT}" ]]; then
+  rm -f "\${STALE_TARGET_MOUNT}"; exit 0
 fi
+[[ -e "${WORK}/mounted.\$(basename "\$1")" ]] || exit 32
+rm -f "${WORK}/mounted.\$(basename "\$1")"
 exit 0
 EOF
 chmod +x "${WORK}/bin/umount"
@@ -250,7 +254,7 @@ reset_happy_fixtures() {
   unset UMOUNT_EXIT
   unset E2FSCK_REPAIR_EXIT E2FSCK_READY_FIFO E2FSCK_HOLD_FIFO FINDMNT_EXIT
   rm -f "${E2FSCK_DIRTY_FILE}"
-  rm -f "${STALE_TARGET_MOUNT}"
+  rm -f "${STALE_TARGET_MOUNT}" "${WORK}"/mounted.*
   : >"${E2FSCK_CALLS}"
   : >"${FINDMNT_CALLS}"
   unset SYNC_RECEIPT_FAIL
@@ -374,6 +378,8 @@ printf '%s' "${out}" | grep -qF '"other_slot":"rootfs.1"' && ok "check: resolves
 printf '%s' "${out}" | grep -qF "\"other_slot_device\":\"${WORK}/dev/rootfs_b\"" && ok "check: resolves other_slot_device from rauc status" || bad "check output: ${out}"
 grep -qF 'status --detailed --output-format=json' "${RAUC_CALLS}" && ok "check calls rauc status --detailed --output-format=json" || bad "check did not query rauc status"
 [[ ! -e "${CERALIVE_UPDATE_LOCK_PATH}.held" ]] && ok "check takes no destructive action" || bad "check acted destructively"
+[[ ! -s "${E2FSCK_CALLS}" && ! -s "${FINDMNT_CALLS}" && ! -s "${MOUNT_CALLS}" ]] && ! grep -qF 'mark-' "${RAUC_CALLS}" \
+  && ok "check runs no fsck, mount-state probe, mount or slot marking" || bad "check ran a mutating or probing command"
 
 reset_happy_fixtures
 rauc_json_fixture ',"installed":{"timestamp":"2026-09-22T00:00:00Z","count":1}'
@@ -843,11 +849,6 @@ if real_slot_sync_available; then
     # rewrite the device in the fixture to the real loop device
     sed -i "s#${WORK}/dev/rootfs_b#${loop_dev}#" "${RAUC_JSON_FIXTURE}"
 
-    # Given: SIGKILL left the real target mounted at the previous run's mountpoint.
-    mkdir -p "${CERALIVE_SLOT_SYNC_TARGET}"
-    as_root mount "${loop_dev}" "${CERALIVE_SLOT_SYNC_TARGET}" \
-      && ok "privileged leg: stale target mount prepared" || bad "privileged leg: could not prepare stale target mount"
-
     priv_run_log="${PRIV_WORK}/run.log"
     # RAUC_BIN/SYSTEMCTL_BIN/CERALIVE_BUSCTL/DPKG_BIN are absolute stub paths
     # and need no PATH help. MOUNT_BIN/UMOUNT_BIN/RSYNC_BIN/E2FSCK_BIN are bare
@@ -855,8 +856,8 @@ if real_slot_sync_available; then
     # PATH — a "${WORK}/bin:${PATH}" prefix here would resolve them to this
     # same file's own mount/rsync/e2fsck STUBS instead, which only record argv
     # and exit 0, so the leg would "succeed" while mounting and copying nothing.
-    # When: the real CLI must clear that mount before its repair guard.
-    as_root env \
+    priv_run() {
+      as_root env \
       RAUC_BIN="${WORK}/bin/rauc" SYSTEMCTL_BIN="${WORK}/bin/systemctl" \
       CERALIVE_BUSCTL="${WORK}/bin/busctl" DPKG_BIN="${WORK}/bin/dpkg" \
       MOUNT_BIN=mount UMOUNT_BIN=umount RSYNC_BIN=rsync E2FSCK_BIN=e2fsck FINDMNT_BIN=findmnt SYNC_BIN=sync \
@@ -882,6 +883,27 @@ if real_slot_sync_available; then
       CERALIVE_IMAGE_VERSION_FILE="${WORK}/image-version.absent" \
       CERALIVE_OS_RELEASE_VERSION_FILE="${CERALIVE_OS_RELEASE_VERSION_FILE}" \
       bash "${SCRIPT}" run >"${priv_run_log}" 2>&1
+    }
+
+    # Given: neither script-owned mountpoint has anything mounted on it.
+    # When: the real CLI encounters umount rc 32 during its best-effort clear.
+    priv_run
+    priv_rc=$?
+    # Then: it still completes a verified mirror and confirms the target.
+    [[ "${priv_rc}" -eq 0 && -f "${CERALIVE_SYNC_RECEIPT_FILE}" ]] \
+      && grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+      && ok "privileged leg: no-stale-mount run succeeds, marks good and publishes a receipt" \
+      || bad "privileged leg: no-stale-mount run failed (rc=${priv_rc}): $(<"${priv_run_log}")"
+
+    : >"${RAUC_CALLS}"
+    rm -f "${CERALIVE_SYNC_RECEIPT_FILE}"
+    # Given: SIGKILL left the real target mounted at the previous run's mountpoint.
+    mkdir -p "${CERALIVE_SLOT_SYNC_TARGET}"
+    as_root mount "${loop_dev}" "${CERALIVE_SLOT_SYNC_TARGET}" \
+      && ok "privileged leg: stale target mount prepared" || bad "privileged leg: could not prepare stale target mount"
+    priv_run_log="${PRIV_WORK}/stale-run.log"
+    # When: the real CLI must clear that mount before its repair guard.
+    priv_run
     priv_rc=$?
     # Then: the recovered run completes the same verified mirror as a clean run.
     if [[ "${priv_rc}" -eq 0 ]]; then
