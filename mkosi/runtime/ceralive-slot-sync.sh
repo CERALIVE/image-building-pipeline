@@ -89,6 +89,11 @@
 # comparison is filtered through /usr/lib/ceralive/prune-paths.list (todo 29)
 # when that file exists; its absence is a safe no-op (compare raw output).
 #
+# Before mounting the already-bad TARGET, refuse if it is mounted anywhere and
+# repair it with `e2fsck -fy`. A crash can leave orphan-list metadata that rsync
+# cannot fix. Repair rc 0/1/2 permits copying; every other rc leaves it bad. The
+# final unmounted `e2fsck -fn` still independently verifies the mirrored result.
+#
 # SIGTERM: unmount whatever is mounted, leave the target slot marked BAD (it
 # was marked bad at the very start, before anything destructive happened), and
 # exit 143. `mark-good` is the LAST thing this script ever does — every other
@@ -139,6 +144,7 @@ RSYNC_BIN="${RSYNC_BIN:-rsync}"
 MOUNT_BIN="${MOUNT_BIN:-mount}"
 UMOUNT_BIN="${UMOUNT_BIN:-umount}"
 E2FSCK_BIN="${E2FSCK_BIN:-e2fsck}"
+FINDMNT_BIN="${FINDMNT_BIN:-findmnt}"
 SYNC_BIN="${SYNC_BIN:-sync}"
 SHA256SUM_BIN="${SHA256SUM_BIN:-sha256sum}"
 
@@ -151,7 +157,7 @@ fail() { printf '%s %s: FAIL: %s\n' "$(ts)" "${PROG}" "$*" >&2; }
 # --- mount bookkeeping (globals so the SIGTERM trap can see them) ------------
 TARGET_MOUNTED=0
 SOURCE_MOUNTED=0
-RSYNC_PID=""
+WORKER_PID=""
 OTHER_SLOT_NAME=""
 OTHER_SLOT_DEVICE=""
 OTHER_SLOT_OBJECT=""
@@ -185,15 +191,15 @@ die() {
 
 on_sigterm() {
   fail "SIGTERM received — aborting; target slot stays bad"
-  if [[ -n "${RSYNC_PID}" ]] && kill -0 "${RSYNC_PID}" 2>/dev/null; then
-    # `set -m` (below, before launching rsync) makes RSYNC_PID a PROCESS GROUP
-    # LEADER, so `-RSYNC_PID` signals the whole group, not just that one PID.
+  if [[ -n "${WORKER_PID}" ]] && kill -0 "${WORKER_PID}" 2>/dev/null; then
+    # `set -m` (below, before launching fsck/rsync) makes WORKER_PID a PROCESS
+    # GROUP LEADER, so `-WORKER_PID` signals the whole group, not just one PID.
     # This matters because rsync itself forks a generator/sender pair even for
     # a purely local copy: killing only the top-level PID can leave a
     # grandchild running — inheriting, and continuing to hold open, THIS
     # script's own flock'd fd 9/8 — for as long as that grandchild survives.
-    kill -TERM -- "-${RSYNC_PID}" 2>/dev/null || kill -TERM "${RSYNC_PID}" 2>/dev/null || true
-    wait "${RSYNC_PID}" 2>/dev/null || true
+    kill -TERM -- "-${WORKER_PID}" 2>/dev/null || kill -TERM "${WORKER_PID}" 2>/dev/null || true
+    wait "${WORKER_PID}" 2>/dev/null || true
   fi
   cleanup_mounts
   exit 143
@@ -577,10 +583,32 @@ cmd_run() {
   # shell's default (immediate, no-cleanup) termination.
   trap on_sigterm TERM
 
+  "${FINDMNT_BIN}" -rn -S "${OTHER_SLOT_DEVICE}" >/dev/null
+  local mount_rc=$?
+  case "${mount_rc}" in
+    0) die "refusing target repair: ${OTHER_SLOT_DEVICE} is currently mounted" ;;
+    1) ;;
+    *) die "cannot determine whether target ${OTHER_SLOT_DEVICE} is mounted (findmnt rc=${mount_rc})" ;;
+  esac
+
   # Stale mounts from a previously killed run are a best-effort clear, not a
   # hard requirement — a genuinely busy mountpoint still fails loudly below.
   "${UMOUNT_BIN}" "${SOURCE_MNT}" 2>/dev/null || true
   "${UMOUNT_BIN}" "${TARGET_MNT}" 2>/dev/null || true
+
+  log "repairing unmounted target: e2fsck -fy ${OTHER_SLOT_DEVICE}"
+  set -m
+  "${E2FSCK_BIN}" -fy "${OTHER_SLOT_DEVICE}" &
+  WORKER_PID=$!
+  set +m
+  wait "${WORKER_PID}"
+  local repair_rc=$?
+  WORKER_PID=""
+  log "e2fsck -fy ${OTHER_SLOT_DEVICE} completed (rc=${repair_rc})"
+  case "${repair_rc}" in
+    0|1|2) ;;
+    *) die "target filesystem repair failed (e2fsck -fy ${OTHER_SLOT_DEVICE}, rc=${repair_rc}); target slot stays bad" ;;
+  esac
 
   mkdir -p "${SOURCE_MNT}" "${TARGET_MNT}"
 
@@ -599,15 +627,15 @@ cmd_run() {
     "--exclude-from=${EXCLUDE_FILE}"
   )
   # `set -m` (job control) makes this background job its OWN process group
-  # (pgid == its own PID), so on_sigterm's `-RSYNC_PID` group-kill actually
+  # (pgid == its own PID), so on_sigterm's `-WORKER_PID` group-kill actually
   # reaches any child rsync itself forks, not just the one PID we captured.
   set -m
   "${RSYNC_BIN}" "${rsync_args[@]}" "${SOURCE_MNT}/" "${TARGET_MNT}/" &
-  RSYNC_PID=$!
+  WORKER_PID=$!
   set +m
-  wait "${RSYNC_PID}"
+  wait "${WORKER_PID}"
   local rsync_rc=$?
-  RSYNC_PID=""
+  WORKER_PID=""
   [[ "${rsync_rc}" -eq 0 ]] || die "rsync mirror failed (rc=${rsync_rc})"
 
   "${SYNC_BIN}"

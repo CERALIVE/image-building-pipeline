@@ -53,6 +53,9 @@ RAUC_CALLS="${WORK}/rauc-calls.log"
 RSYNC_CALLS="${WORK}/rsync-calls.log"
 MOUNT_CALLS="${WORK}/mount-calls.log"
 UMOUNT_CALLS="${WORK}/umount-calls.log"
+E2FSCK_CALLS="${WORK}/e2fsck-calls.log"
+FINDMNT_CALLS="${WORK}/findmnt-calls.log"
+export E2FSCK_CALLS FINDMNT_CALLS MOUNT_CALLS RAUC_CALLS
 : >"${RAUC_CALLS}"; : >"${RSYNC_CALLS}"; : >"${MOUNT_CALLS}"; : >"${UMOUNT_CALLS}"
 : >"${WORK}/empty"
 
@@ -128,9 +131,32 @@ exit 0
 EOF
 chmod +x "${WORK}/bin/umount"
 
+cat >"${WORK}/bin/findmnt" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"${FINDMNT_CALLS}"
+exit "${FINDMNT_EXIT:-1}"
+EOF
+chmod +x "${WORK}/bin/findmnt"
+
 cat >"${WORK}/bin/e2fsck" <<'EOF'
 #!/bin/bash
-exit "${E2FSCK_EXIT:-0}"
+printf '%s\n' "$*" >>"${E2FSCK_CALLS}"
+case "$1" in
+  -fy)
+    grep -qxF 'status mark-bad other' "${RAUC_CALLS}" || exit 8
+    [[ ! -s "${MOUNT_CALLS}" ]] || exit 8
+    if [[ -n "${E2FSCK_READY_FIFO:-}" ]]; then
+      printf '%s\n' "$$" >"${E2FSCK_READY_FIFO}"
+      IFS= read -r release <"${E2FSCK_HOLD_FIFO}"
+    fi
+    rc="${E2FSCK_REPAIR_EXIT:-0}"
+    if [[ "${rc}" -le 2 ]]; then rm -f "${E2FSCK_DIRTY_FILE}"; fi
+    exit "${rc}" ;;
+  -fn)
+    [[ -e "${E2FSCK_DIRTY_FILE}" ]] && exit 4
+    exit "${E2FSCK_EXIT:-0}" ;;
+  *) exit 8 ;;
+esac
 EOF
 chmod +x "${WORK}/bin/e2fsck"
 
@@ -157,6 +183,8 @@ export RSYNC_BIN="${WORK}/bin/rsync"
 export MOUNT_BIN="${WORK}/bin/mount"
 export UMOUNT_BIN="${WORK}/bin/umount"
 export E2FSCK_BIN="${WORK}/bin/e2fsck"
+export FINDMNT_BIN="${WORK}/bin/findmnt"
+export E2FSCK_DIRTY_FILE="${WORK}/dirty-target"
 export SYNC_BIN="${WORK}/bin/sync"
 export SHA256SUM_BIN="sha256sum"
 
@@ -213,6 +241,10 @@ reset_happy_fixtures() {
   unset DPKG_AUDIT_FIXTURE DPKG_VERIFY_SOURCE_FIXTURE DPKG_VERIFY_TARGET_FIXTURE
   unset RAUC_OPERATION_FIXTURE HAWKBIT_ACTIVE_FIXTURE RAUC_MARK_BAD_FAIL RAUC_MARK_GOOD_FAIL
   unset RSYNC_EXIT RSYNC_SLEEP MOUNT_EXIT E2FSCK_EXIT
+  unset E2FSCK_REPAIR_EXIT E2FSCK_READY_FIFO E2FSCK_HOLD_FIFO FINDMNT_EXIT
+  rm -f "${E2FSCK_DIRTY_FILE}"
+  : >"${E2FSCK_CALLS}"
+  : >"${FINDMNT_CALLS}"
   unset SYNC_RECEIPT_FAIL
   printf '2026.10.68\n' >"${CERALIVE_OS_RELEASE_VERSION_FILE}"
   rauc_json_fixture ""   # other slot NEVER installed -> not pending
@@ -405,6 +437,98 @@ grep -qF "${WORK}/mnt/target" "${UMOUNT_CALLS}" && grep -qF "${WORK}/srcroot" "$
   && ok "both mounts were exercised" || bad "expected both source and target mount activity"
 grep -qF "${CERALIVE_SLOT_SYNC_SOURCE}" "${UMOUNT_CALLS}" && grep -qF "${CERALIVE_SLOT_SYNC_TARGET}" "${UMOUNT_CALLS}" \
   && ok "both mountpoints were unmounted on success" || bad "unmount calls: $(<"${UMOUNT_CALLS}")"
+
+# ===========================================================================
+# 3a. Repair only the unmounted, already-bad target before mirroring it.
+# ===========================================================================
+
+for repair_rc in 1 2; do
+  # Given: the target has orphan-list damage that rsync cannot repair.
+  reset_happy_fixtures
+  touch "${E2FSCK_DIRTY_FILE}"
+  export E2FSCK_REPAIR_EXIT="${repair_rc}"
+  # When: the CLI repairs and mirrors the target.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: corrected filesystems are mirrored and independently checked clean.
+  assert_eq "pre-fsck rc=${repair_rc}: dirty target mirror succeeds" 0 "${rc}"
+  assert_eq "pre-fsck rc=${repair_rc}: repair then read-only verification target the other device" \
+    "$(printf '%s\n' "-fy ${WORK}/mnt/target" "-fn ${WORK}/mnt/target")" "$(<"${E2FSCK_CALLS}")"
+  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+    && ok "pre-fsck rc=${repair_rc}: repaired mirror marked good" || bad "repaired mirror was not marked good: ${out}"
+done
+
+for repair_rc in 4 8; do
+  # Given: the target filesystem cannot be repaired.
+  reset_happy_fixtures
+  export E2FSCK_REPAIR_EXIT="${repair_rc}"
+  # When: the CLI attempts the destructive mirror.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: it leaves the target bad without mounting or copying anything.
+  assert_eq "pre-fsck rc=${repair_rc}: unrepairable target aborts" 1 "${rc}"
+  grep -qF 'status mark-bad other' "${RAUC_CALLS}" \
+    && ok "pre-fsck rc=${repair_rc}: target marked bad" || bad "pre-fsck: mark-bad missing"
+  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+    && bad "pre-fsck rc=${repair_rc}: mark-good called" || ok "pre-fsck rc=${repair_rc}: target stays bad"
+  [[ ! -s "${MOUNT_CALLS}" && ! -s "${RSYNC_CALLS}" ]] \
+    && ok "pre-fsck rc=${repair_rc}: no mount or rsync" || bad "unrepairable target was mounted or mirrored"
+done
+
+for findmnt_rc in 0 2; do
+  # Given: the target is mounted, or mount-state inspection fails.
+  reset_happy_fixtures
+  export FINDMNT_EXIT="${findmnt_rc}"
+  # When: the CLI considers repairing the target.
+  out="$(run_run 2>&1)"; rc=$?
+  # Then: no filesystem repair, mount or mirror may run; the slot stays bad.
+  assert_eq "mount-state rc=${findmnt_rc}: target repair refused" 1 "${rc}"
+  assert_eq "mount-state rc=${findmnt_rc}: checks the target device, not its future mountpoint" \
+    "-rn -S ${WORK}/mnt/target" "$(<"${FINDMNT_CALLS}")"
+  [[ ! -s "${E2FSCK_CALLS}" && ! -s "${MOUNT_CALLS}" && ! -s "${RSYNC_CALLS}" ]] \
+    && ok "mount-state rc=${findmnt_rc}: no fsck, mount or rsync" || bad "unsafe target was repaired or mirrored"
+  grep -qF 'status mark-bad other' "${RAUC_CALLS}" \
+    && ok "mount-state rc=${findmnt_rc}: target marked bad" || bad "mount-state: mark-bad missing"
+  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+    && bad "mount-state rc=${findmnt_rc}: mark-good called" || ok "mount-state rc=${findmnt_rc}: target stays bad"
+done
+
+# Given: a healthy mirror whose final read-only filesystem check fails.
+reset_happy_fixtures
+export E2FSCK_EXIT=4
+# When: the CLI completes the copy but cannot verify the result.
+out="$(run_run 2>&1)"; rc=$?
+# Then: successful pre-repair must not bypass the final verification.
+assert_eq "final fsck still rejects a corrupt mirrored result" 1 "${rc}"
+grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+  && bad "final fsck failure marked good" || ok "final fsck failure leaves the target bad"
+
+# Given: pre-fsck blocks after notifying the test that it has started.
+reset_happy_fixtures
+export E2FSCK_READY_FIFO="${WORK}/fsck-ready"
+export E2FSCK_HOLD_FIFO="${WORK}/fsck-hold"
+mkfifo "${E2FSCK_READY_FIFO}" "${E2FSCK_HOLD_FIFO}"
+exec 6<>"${E2FSCK_READY_FIFO}"
+"${SCRIPT}" run >"${WORK}/fsck-term.out" 2>&1 &
+run_pid=$!
+# When: TERM is delivered to the script (not directly to the fsck child).
+if IFS= read -r -t 10 <&6; then
+  kill -TERM "${run_pid}"
+  wait "${run_pid}"; rc=$?
+  # Then: cancellation stops pre-fsck, releases locks, and never confirms a slot.
+  assert_eq "SIGTERM during pre-fsck exits 143" 143 "${rc}"
+  grep -qF 'status mark-bad other' "${RAUC_CALLS}" \
+    && ok "pre-fsck TERM: target already bad" || bad "pre-fsck TERM: mark-bad missing"
+  grep -qF 'status mark-good other' "${RAUC_CALLS}" \
+    && bad "pre-fsck TERM: mark-good called" || ok "pre-fsck TERM: target stays bad"
+  [[ ! -s "${MOUNT_CALLS}" && ! -s "${RSYNC_CALLS}" ]] \
+    && ok "pre-fsck TERM: no mount or rsync" || bad "pre-fsck TERM continued mirroring"
+  flock -n "${CERALIVE_UPDATE_LOCK_PATH}" true \
+    && ok "pre-fsck TERM: child releases the update lock" || bad "pre-fsck TERM leaked the update lock"
+else
+  bad "pre-fsck TERM never reached repair: $(<"${WORK}/fsck-term.out")"
+  kill -KILL "${run_pid}" 2>/dev/null || true
+  wait "${run_pid}" 2>/dev/null || true
+fi
+exec 6>&-
 
 # ===========================================================================
 # 3b. Absent or malformed OS release retains the legacy bundle-version fallback.
@@ -700,7 +824,7 @@ if real_slot_sync_available; then
     as_root env \
       RAUC_BIN="${WORK}/bin/rauc" SYSTEMCTL_BIN="${WORK}/bin/systemctl" \
       CERALIVE_BUSCTL="${WORK}/bin/busctl" DPKG_BIN="${WORK}/bin/dpkg" \
-      MOUNT_BIN=mount UMOUNT_BIN=umount RSYNC_BIN=rsync E2FSCK_BIN=e2fsck SYNC_BIN=sync \
+      MOUNT_BIN=mount UMOUNT_BIN=umount RSYNC_BIN=rsync E2FSCK_BIN=e2fsck FINDMNT_BIN=findmnt SYNC_BIN=sync \
       SHA256SUM_BIN=sha256sum \
       RAUC_JSON_FIXTURE="${RAUC_JSON_FIXTURE}" \
       CERALIVE_UPDATE_LOCK_PATH="${CERALIVE_UPDATE_LOCK_PATH}" \

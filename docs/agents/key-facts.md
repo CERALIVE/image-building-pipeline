@@ -3551,7 +3551,9 @@ recursive balanced-object matching to retain complete slot objects at any depth.
 The verbatim Rock 5B+ RAUC 1.15.2 capture in
 `tests/fixtures/rauc-1.15.2-rock-status.json` pins this alongside the older flat
 fixture; neither nested `bundle` nor another sub-object key is a slot name.
-The mirror itself is `rauc status mark-bad other`, mount the other slot rw,
+The mirror itself is `rauc status mark-bad other`, refuse if the target device
+is currently mounted (or mount-state inspection fails), repair the unmounted
+target with `e2fsck -fy`, then mount the other slot rw,
 `mount --bind` (never `--rbind`) the running root onto a source mountpoint,
 `rsync -aHAXS --checksum --numeric-ids --delete --exclude-from=/usr/lib/ceralive/
 slot-sync.exclude`, `sync`, a `dpkg --root=<target> --verify` vs `--root=<source>
@@ -3564,6 +3566,15 @@ a missing index is regenerated on demand, which is the documented safe outcome),
 write `sync-receipt.json` (RAUC's own slot status keeps the OLD bundle version
 for a slot this script wrote, so the UI and drills read the mirrored version
 from this receipt instead), then `rauc status mark-good other`.
+
+Pre-mirror repair accepts only e2fsck rc 0, 1 (corrected) or 2 (corrected;
+no reboot needed for this unmounted non-root filesystem); every other result
+aborts before mounting or copying and leaves the target bad. This repairs the
+orphan-list metadata left by a crash during dpkg that rsync cannot clear (F-B3,
+Orange Pi Drill B). Both fsck phases log their outcomes; the final `-fn` check
+is unchanged. SIGTERM during pre-repair terminates its process group and exits
+143, just as during rsync, without marking the slot good. This correction is
+host-tested only; re-running the physical drill on the fixed script is separate.
 
 The receipt's existing `image_version` reports the booted OS release from
 `/etc/ceralive/os-release-version` (test seam: `CERALIVE_OS_RELEASE_VERSION_FILE`).
@@ -3586,11 +3597,11 @@ bind never carries devtmpfs's LIVE population into the source view either, so
 what rsync actually sees under `.../source/dev` is the same disk-backed content
 `.../source/boot` exposes, not the running system's ephemeral device nodes.
 
-**SIGTERM must kill the rsync child's whole PROCESS GROUP, not just its PID —
+**SIGTERM must kill the fsck/rsync child's whole PROCESS GROUP, not just its PID —
 this was a real bug, found by the privileged test leg, not merely a review
 finding.** `cmd_run` runs `rsync` under `set -m` specifically so the
 backgrounded job becomes its own process-group leader; `on_sigterm` then sends
-`TERM` to `-RSYNC_PID` (the group), unmounts, and exits 143 leaving the target
+`TERM` to `-WORKER_PID` (the group), unmounts, and exits 143 leaving the target
 slot exactly as bad as `mark-bad other` left it at the start. Killing only the
 single PID looked correct in review and in a fast unprivileged stub test, but
 real `rsync` (and the test's own sleep-based stub) forks a child that inherits
@@ -3601,7 +3612,8 @@ producing a spurious `update-lock-busy` refusal on the very next invocation.
 Tests: `tests/slot-sync.test.sh` — the full six-gate + two-lock refusal matrix,
 the `check` JSON shape, the dpkg-verify comparison (mismatch aborts, identical
 non-empty passes, a prune-paths.list-matched difference is a non-issue), the
-mark-bad-before-mark-good ordering, the SIGTERM contract, and the shipped
+mark-bad-before-mark-good ordering, target repair (rc 1/2 recovery, rc 4/8
+failure, mounted/unknown-state refusal), SIGTERM during repair and rsync, and the shipped
 `--checksum` invocation proven against a same-size/same-mtime/different-content
 file — all unprivileged, `default-shell`. A second, internally-gated leg
 (`CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required|skip`, default `skip`, same
