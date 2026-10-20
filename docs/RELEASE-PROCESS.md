@@ -444,8 +444,10 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
   immediately verifies the bundle against the injected `root-ca.pem` (the
    same keyring baked into the device) with `rauc info --keyring`. A bundle
    that fails to verify never leaves the build host.
-- **Verity, not bit-identical signed containers.** New OS and certificate-rotation
-  bundles use `format=verity` and `adaptive=block-hash-index`. Native RAUC's
+- **Verity, not bit-identical signed containers.** OS and certificate-rotation
+  bundles use `format=verity`; OS bundles also set `adaptive=block-hash-index` on
+  the rootfs image (`lib/build-bundle.sh`), while the certificate-rotation bundle
+  carries a hook-installed `certs.tar` with no `adaptive=` setting. Native RAUC's
   CMS/verity metadata varies between signings: the signed `.raucb` is **not
   bit-reproducible**. Rootfs reproducibility and its image-version timestamp
   exception are documented in [the README](../README.md#reproducible-builds).
@@ -1096,7 +1098,26 @@ the harness's own MOCK-mode warning banner).
 ### Pausing or superseding a published bundle on R2
 
 Immutable bundle objects and their digest sidecars are never deleted or
-overwritten. If a published bundle is found to be bad:
+overwritten.
+
+**Signed image channels (the path capable devices use).** There is no pause or
+rollback command for a signed channel. The response to a bad release is to
+publish a fixed, **newer** OS CalVer through the same `publish`/`promote` flow
+in §5, which moves the channel pointer to the fix with a higher serial. Never
+delete, rewrite or reuse the bad release's `releases/<board>/<CalVer>/` prefix;
+`prune` only removes versions no current channel references and that fall
+outside its retention count. On the device, CeraUI refuses a channel manifest
+whose serial is not higher than the one it last accepted, a version that is not
+newer than the booted one, and a version on its quarantine list, which it adds
+to after an OS rollback. So a device that fell back from the bad release never
+retries it, and pointing a channel back at an older release does not move
+devices that already run the bad one. That is a limit: a device that booted the
+bad release and passed its healthcheck stays on it until the newer fix is
+published.
+
+**Legacy hawkBit tooling (dormant).** `rauc-hawkbit-updater` is disabled on new
+images, so these steps apply only to a deployment still driven by the retained
+hawkBit tooling. If a bundle it distributes is found to be bad:
 
 1. **Pause the hawkBit rollout** so no further devices are offered the bad
    distribution set:
@@ -1121,7 +1142,10 @@ The healthcheck (`ceralive-healthcheck.sh`, gated by
 **self-driving** rather than requiring an operator to watch every device's
 boot log:
 
-- It is the **sole** gate on `rauc mark-good` — nothing else confirms a slot.
+- It is the **sole** gate on marking the **booted** slot good — nothing else
+  confirms the slot the board is running on. `ceralive-slot-sync.sh` marks only
+  the other slot good (`rauc status mark-good other`), and only after it has
+  mirrored the healthy running slot into it and verified the copy.
 - Confirmation is scoped to the current kernel boot ID, stored beside the
   timestamp in `/data/ceralive/.slot-marked-good`. A previous boot's marker,
   including a legacy timestamp-only one, never suppresses checks. Same-slot

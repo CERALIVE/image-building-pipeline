@@ -3681,7 +3681,7 @@ written, the bootloader switched to it, and the new slot rebooted healthy.
 
 **Origin protection is PER PACKAGE NAME, one manifest drives build-time
 RemoveFiles= AND the on-device reprune hook; stable-channel credentials delivery
-remains BLOCKED (Todo 29, update-system-overhaul)** [PARTIAL — integration
+is done (2026-10-19, update-system-overhaul)** [PARTIAL — integration
 branch, not a shipped image]
 
 The former `Package: * / Pin: origin apt.ceralive.tv / Pin-Priority: 990`
@@ -3822,9 +3822,17 @@ and app-layer `RUNTIME_APP_PKGS` install are now present. The separate
 `apt-credentials:` registry block pins `apt-credentials-v1.0.1` from the
 `apt-worker` repository; the Worker's own `apt-worker: pin: latest` block is
 unchanged. `DRY_RUN` can list the pinned package without fetching it. The
-GitHub release is published. The earlier `1.0.0` was served on beta; the
-authenticated catalog refresh does not verify `1.0.1` APT-channel availability,
-which must be established before a stable-channel real build. The
+GitHub release is published. The earlier `1.0.0` was served on beta. The
+authenticated catalog refresh still does not verify APT-channel availability on
+its own; that was established separately. **Stable credentials receipt
+(2026-10-19):** `1.0.1` was promoted to stable and the stable index reindexed
+(apt-worker workflow runs 39205229168 promote and 39205527486 reindex, both
+success; the reindex verified the served `ceralive-apt-credentials_1.0.1_all.deb`
+on both architectures). Both bench boards then had `ceralive-apt-credentials
+1.0.1` installed, the `/__tls-probe` check with the installed certificate
+returned `certVerified:true`, and a request without a certificate was refused
+with 403 (the Rock 5B+ probe needed IPv4, it has no IPv6 route). This is a
+package install on the running boards, not a fresh image build. The
 runtime executor no longer decodes CI's `APT_CLIENT_*` key into the image;
 build-time first-party fetch authentication still uses those CI inputs. The
 package's postinst owns the device APT TLS config and `_apt`-readable key under
@@ -3832,10 +3840,12 @@ package's postinst owns the device APT TLS config and `_apt`-readable key under
 using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
 The authenticated `--refresh` now records the release as the ninth component;
 previous catalogs without its row remain valid only for regression comparison.
-The refreshed catalog and selected pins pass the currency check while CeraUI
-remains at its released `v2026.9.4` pin. Historical credentials fixtures remain
+The refreshed catalog and selected pins passed the currency check while CeraUI
+was at its released `v2026.9.4` pin (superseded 2026-10-20: the tree now pins
+CeraUI `v2026.9.5`, and the refreshed catalog passes the currency check with
+it). Historical credentials fixtures remain
 at `1.0.0`; only the live DRY_RUN expectation follows the new image pin.
-No new image or board installation is claimed.
+No new image built from these pins is claimed by this paragraph.
 
 Guards: `tests/prune-paths-removefiles.test.sh` (the central RemoveFiles=
 mechanism, proven against real mkosi with a mutation leg),
