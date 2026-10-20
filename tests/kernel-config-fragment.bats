@@ -158,6 +158,19 @@ EOF
 
 # --- the real fragment, against the real defect ------------------------------
 
+@test "OTA verity streaming pins NBD as a module in fragment and resolved closure" {
+  grep -qx 'CONFIG_BLK_DEV_NBD=m' "$FRAGMENT"
+  grep -qx 'CONFIG_BLK_DEV_NBD=m' "$REQUIRED"
+  printf 'CONFIG_BLK_DEV_NBD=m\n' >"$WORK/nbd-resolved"
+  printf 'CONFIG_BLK_DEV_NBD=m\n' >"$WORK/nbd-declared"
+  run "$VERIFY" "$WORK/nbd-declared" "$WORK/nbd-resolved"
+  [ "$status" -eq 0 ]
+  printf '# CONFIG_BLK_DEV_NBD is not set\n' >"$WORK/nbd-resolved"
+  run "$VERIFY" "$WORK/nbd-declared" "$WORK/nbd-resolved"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'CONFIG_BLK_DEV_NBD'* ]]
+}
+
 # Execute the builder's declaration-assembly block, not a transcription. Only
 # container paths are relocated. The kernel-owned merger is a boundary double:
 # assert its exact invocation and return an independently authored merged input.
@@ -861,6 +874,18 @@ EOF
   run "$VERIFY" "$WORK/iommu-declared" "$WORK/iommu-wrong"
   [ "$status" -eq 1 ]
   [[ "$output" == *"CONFIG_DMA_API_DEBUG: DROPPED"* ]]
+}
+
+@test "closure manifests: both IP rule families survive for the boot update-route sweep" {
+  grep -qx 'CONFIG_IP_MULTIPLE_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_IPV6_MULTIPLE_TABLES=y' "$FRAGMENT"
+  grep -qx 'CONFIG_IP_MULTIPLE_TABLES=y' "$REQUIRED"
+  grep -qx 'CONFIG_IPV6_MULTIPLE_TABLES=y' "$REQUIRED"
+
+  printf 'CONFIG_IP_MULTIPLE_TABLES=y\nCONFIG_IPV6=y\n# CONFIG_IPV6_MULTIPLE_TABLES is not set\n' >"$WORK/ipv4-only"
+  run "$VERIFY" --config "$WORK/ipv4-only" --required "$REQUIRED"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'CONFIG_IPV6_MULTIPLE_TABLES: REQUIRED'* ]]
 }
 
 @test "closure manifests: the island MPP closure is declared with its parents" {

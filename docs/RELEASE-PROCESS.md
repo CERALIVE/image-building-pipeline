@@ -1,9 +1,12 @@
 # Release process
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
-fielded device can install — as the pipeline is wired **today**, not as it is
-someday planned to be. Two runbook sections live at the bottom: credential
-rotation for the build-time apt secrets, and fleet OTA rollback.
+fielded device can install. The integration branch implements the signed image
+channel publisher and pins stable CeraUI v2026.9.5's unified update orchestrator.
+**Qualification [PARTIAL]:** two-board update drills and released arm64 package
+installation are proven; full override-free candidate boot, multi-uplink failover
+and amd64 hardware remain separate, unverified gates. Build-time APT credential
+rotation and fleet OTA rollback runbooks remain below.
 
 > **Honesty rule for this doc.** Every stage below is either (a) backed by a
 > script or workflow that exists in this repo right now, with its path cited, or
@@ -37,26 +40,29 @@ hand-tests it on a REAL RK3588 (realhw-suite.sh: boot/service,
 encode-path init, dev-loop sanity, RAUC A/B rollback)
         │
         ▼  (once the operator confirms the hand-test is green)
-operator uploads images/<board>/<ts>.raucb (+ .sha256) to R2
+owner approves publish-release.yml for the hand-tested candidate run
         │
         ▼
-operator registers bundles/{channel}/{board}/<ts>.raucb + rolls out via hawkBit
-(fleet/hawkbit/provision.sh, platform-bridge.sh)
+publish-release.sh writes immutable releases/<board>/<OS CalVer>/ parts + index,
+then channels/<channel>/<board>.json.sig and signed JSON pointer (JSON last)
         │
         ▼
-device rauc-hawkbit-updater pulls from apt.ceralive.tv/bundles/...
+device CeraUI verifies the images.ceralive.tv signed channel manifest,
+stages via RAUC, activates only at clean idle shutdown/reboot
         │
         ▼
 verification: preflash-verify.sh (pre-flash) + on-device
-rauc status / ceralive-healthcheck (post-install)
+rauc status / ceralive-healthcheck (post-boot), then lagged other-slot mirror
 ```
 
 The production job signs and seals the exact candidate first so the operator
 hand-tests the bytes that could ship. A human may publish those bytes only after
 hand-testing that exact candidate on real hardware — there is no automated CI job
-that flashes or tests real hardware. Everything from "operator flashes" onward is
-a manual, operator-driven step — there is no committed workflow that does it for
-OS bundles. Section 5 spells out exactly why and exactly what to type.
+that flashes or tests real hardware. Hardware acceptance and publication approval
+remain human decisions; the committed channel-publishing workflow automates the
+approved upload, promotion, refresh and retention operations (§5). The manual
+bundle-pair/hawkBit procedures are legacy tooling, not the product's automatic
+update path; `rauc-hawkbit-updater` is disabled and masked on the new image.
 
 ---
 
@@ -89,6 +95,36 @@ pick up the fix.
 
 For the resource failure after `v2026.7.2`, the only eligible next patch is
 `v2026.7.3`; never rerun or move `v2026.7.0`, `v2026.7.1`, or `v2026.7.2`.
+
+### CeraUI package release and image pins (separate release train)
+
+The update-system overhaul used exactly one **stable** CeraUI release, not a beta
+package release: CeraUI PR #379 merged to
+`23ee67ae14d9b548475cc7cc670573943e597d91`, then its own `publish-release.yml`
+was dispatched from `main` once with `release_type=stable` and
+`force_version=2026.9.5` (run `39361690725`). Tag v2026.9.5 and both exact Debian
+versions are published and served on stable. The image selects
+`ceralive-device[arm64]=2026.9.5-20261020T030724.23ee67a` and
+`ceralive-device[amd64]=2026.9.5-20261020T030729.23ee67a` in
+`manifests/first-party-deb-versions.txt`, with `CeraUI.pin: v2026.9.5` in the
+repo-local registry. Both release downloads matched their SHA-256 sidecars;
+both bench boards installed the arm64 release through the product.
+
+Keep `ceralive-apt-credentials=1.0.1` and registry tag
+`apt-credentials-v1.0.1`: this release is served on stable and the boards use it
+under enforced mTLS. After a package release, refresh the authenticated catalog
+with `python3 ci/check-first-party-pins.py --refresh`, then run the ordinary
+check; do not waive unrelated stale or unverifiable pins. A registry refresh
+alone is not signed APT-index serving proof.
+
+Package installation is not full-image qualification. Next build override-free
+candidates from the committed image tree, verify no local-package overrides,
+boot each exact candidate and restore the saved board state before image merge.
+Do not infer that proof from the earlier package/script-deployment drills or
+close physical bench-label verification (`DEFERRED.md` item 12) without evidence.
+An OS-channel `promote` below is a different operation from the stable-only
+CeraUI package release; executors publish OS drill candidates only, while the
+owner controls OS stable/beta publication.
 
 ---
 
@@ -403,18 +439,19 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 - **`assert_no_root_signing()`** is the enforced guard: it greps the *rendered*
   signing command for `root-ca.key` and dies if it's present, then positively
   asserts `leaf-signing.key` IS the signer. This runs on every bundle build,
-  real `rauc` path or the deterministic OpenSSL-CMS fallback path.
+   native RAUC bundle path; the old OpenSSL plain-format signer is retired.
 - **Verification is part of the same step.** After signing, `build-bundle.sh`
   immediately verifies the bundle against the injected `root-ca.pem` (the
-  same keyring baked into the device) — `rauc info` on a host with `rauc`
-  installed, or an equivalent OpenSSL CMS chain-verify
-  (`verify_openssl_bundle()`) when it isn't. A bundle that fails to verify
-  never leaves the build host.
-- **Reproducible by default** (`REPRODUCIBLE=1`). `SOURCE_DATE_EPOCH` clamps
-  every embedded mtime and the OpenSSL CMS signer uses `-noattr` (no wall-clock
-  `signingTime`), so the same source state produces a bit-identical `.raucb`.
-  `REPRODUCIBLE=0` opts back into the native `rauc bundle` signer, which is
-  **not** bit-reproducible (rauc always bakes a signing timestamp).
+   same keyring baked into the device) with `rauc info --keyring`. A bundle
+   that fails to verify never leaves the build host.
+- **Verity, not bit-identical signed containers.** OS and certificate-rotation
+  bundles use `format=verity`; OS bundles also set `adaptive=block-hash-index` on
+  the rootfs image (`lib/build-bundle.sh`), while the certificate-rotation bundle
+  carries a hook-installed `certs.tar` with no `adaptive=` setting. Native RAUC's
+  CMS/verity metadata varies between signings: the signed `.raucb` is **not
+  bit-reproducible**. Rootfs reproducibility and its image-version timestamp
+  exception are documented in [the README](../README.md#reproducible-builds).
+  Never substitute a plain-format OpenSSL bundle to claim determinism.
 
 The RAUC signing PKI itself (root/intermediate/leaf tiers, validity, and how a
 leaf or intermediate rotates through the channel without a reflash) is a
@@ -426,8 +463,7 @@ full contract; it isn't duplicated here.
 
 CI cannot run the privileged mkosi build (no network / privileged container /
 board under `DRY_RUN`), so it does **not** produce — let alone dual-host-compare —
-a real signed `.raucb`. What it CAN prove is the reachable precondition for the
-bit-identical bundle above: that the **build plan / input closure** resolves
+a real signed `.raucb`. What it CAN prove is that the **build plan / input closure** resolves
 host-independently.
 
 - The [`v2-ci.yml`](../.github/workflows/v2-ci.yml) `build-plan-xrunner` +
@@ -448,26 +484,24 @@ host-independently.
   (`continue-on-error` gated on the repo variable `XRUNNER_PARITY_BLOCKING`);
   promote it to a required check after one green in-budget run.
 - **SCOPE LIMIT:** this compares the deterministic PLAN / input closure ONLY, **not
-  a full `.raucb` image build**. **Full-artifact (`.raucb`) determinism remains
-  future work** — it would require running the real privileged mkosi build on two
-  independent hosts and comparing the signed bundle bytes. The plan gate plus the
-  `SOURCE_DATE_EPOCH` clamp above is the necessary precondition for a bit-identical
-  image, not a substitute for proving it.
+  a full `.raucb` image build**. Signed verity containers are not bit-reproducible;
+  plan equality does not prove rootfs equality, artifact identity or board
+  qualification. Verify the exact candidate bytes and their signatures instead.
 
 ---
 
-## 5. R2 upload — the ACTUAL mechanism (MANUAL today)
+## 5. R2 upload — legacy bundle pair and signed image channels
 
-**There is no CI job or high-level candidate publisher for signed OS `.raucb`
-bundles.** The tested low-level helper performs only the final immutable R2 pair
-write after an operator completes every proof below. Compare the three artifact
-families this pipeline produces:
+The legacy bundle-pair path below remains manual for old consumers. The new
+`images.ceralive.tv` OS channel publisher is a separate, environment-gated
+workflow described after it. Compare the artifact families:
 
 | Artifact | R2 path | Publisher |
 |----------|---------|-----------|
 | Feature-sysext add-ons | `addons/{os_version}/{board}/{feature}.raw` | [`lib/upload-addons.sh`](../lib/upload-addons.sh) — **exists, automatable, CI-proven under `DRY_RUN`** (`v2-ci.yml` `addon-publish` job) |
 | CeraUI federation UI bundles | `ui-bundle/{ceraui-version}/*.js` | CeraUI's own `publish-release.yml` → `publish-federation` job — **exists in the CeraUI repo** |
 | **OS `.raucb` OTA bundles** | `bundles/{channel}/{board}/*.raucb` | manual candidate proof, then [`publish-immutable-r2-pair.sh`](../ci/publish-immutable-r2-pair.sh); **no publishing workflow** |
+| **Signed OS image channels** | `releases/{board}/{version}/` plus `channels/{channel}/{board}.json[.sig]` | [`publish-release.sh`](../ci/publish-release.sh) via approved [`publish-release.yml`](../.github/workflows/publish-release.yml) |
 
 `apt-worker/AGENTS.md` and `apt-worker/README.md` both describe the `bundles/`
 path as a pure read side (the worker range-serves whatever is already in R2)
@@ -477,8 +511,9 @@ workflow or candidate-selection authority.
 
 ### Operator steps (today, until this is automated)
 
-Until a high-level publisher or equivalent CI job exists, publish a release
-bundle manually from the exact candidate artifact that passed physical hardware.
+For an explicitly authorized legacy consumer, publish a bundle pair manually
+from the exact candidate artifact that passed physical hardware. New capable
+devices use the signed image-channel publisher below instead.
 Do not select a local build by timestamp or "newest" ordering. The candidate
 contains the production bundle's original release filename and checksum; the
 GitHub artifact API binds that candidate to the successful run and merge SHA.
@@ -586,17 +621,206 @@ deletes a release key. Any
 mismatched collision or unverifiable read aborts before hawkBit registration;
 never replace an existing release key.
 
-**Future work.** The remaining gap is a high-level publisher that performs the
-candidate/workflow/hardware checks above automatically and a protected
-release-triggered job analogous to `v2-ci.yml`'s `addon-publish`. The low-level
-immutable R2 pair helper deliberately does not select or trust a candidate by
-itself.
+### Signed channel publishing (CeraUI OS agent)
 
-### Registering the artifact with hawkBit (also manual/operator-driven)
+The manual `Publish signed image release` workflow asks for mode (`publish`,
+`promote`, `refresh`, `prune`), comma-separated boards, channel and (for publish
+or promote) OS CalVer. Publish additionally requires the **successful** release
+candidate run ID. The `release` GitHub environment requires owner approval;
+every invocation joins one non-cancelling publisher concurrency group. A
+workflow `refresh` accepts exactly one board and requires the operator's observed
+`expect_serial` and **quoted** JSON `expect_etag`. It fetches that board's JSON
+and ETag again in the approved job, refuses stale/missing inputs, and forwards
+both as `--expect-serial` / `--expect-etag` to the publisher. Read the current
+signed pointer and its R2 ETag using the procedure below before dispatch; do
+not enter an unquoted digest or use a serial from another board.
 
-Once the bundle is on R2, the private hawkBit fleet-update engine
-([`fleet/hawkbit/`](../fleet/hawkbit/)) needs to know about it before any
-device is offered the update:
+The issue-only upstream watcher opens an advisory within 30 days of a stable or
+beta manifest's expiry. Its copyable refresh command includes `expect_serial`
+and shell-quoted `expect_etag` from the **same HTTP response**, retaining the
+literal double quotes in the ETag value. The public manifest endpoint preserves
+the R2 JSON ETag (checked read-only against `head-object` on 2026-10-20).
+A missing, weak or malformed ETag stops the watch rather than producing an
+unusable command. The advisory is an observation, not approval: review the
+signed pointer before dispatch, and re-observe if the workflow refuses drift.
+
+A release-candidate archive must include `good.raucb`, both transport checksums,
+`raw.sha256` and `packages.lock.json`. Current `.raw.zst` candidates are decoded
+and recompressed to actual xz; earlier `.raw.xz` candidates are copied. In both
+cases the bytes after decompression must match the
+original raw SHA. The publisher independently rechecks both file hashes and
+pins `min_ceraui_version` from the repo-local CeraUI version registry. If the
+candidate lacks a package lock (older releases), it is **not** publishable.
+Before approving, the owner must match the candidate run SHA/artifact and the
+real board hand-test; the workflow verifies the successful run and its downloaded
+archive, but does not perform a physical board test.
+
+The release is stored under `releases/<board>/<CalVer>/`: 268435456-byte
+create-only parts for both `bundle.raucb` and `flash.raw.xz`; one schema-1
+`index.json` with both files' complete digests, sizes and ordered parts;
+`packages.lock.json`; `SHA256SUMS`; and create-only
+`channels/<channel>` membership marker. All immutable writes use the same
+conditional/exact-byte-recovery primitive as the legacy publisher. Only after
+they succeed does the publisher sign the strict schema-1 channel manifest with
+the dedicated `CeraLive OTA Manifest Signer` (codeSigning only, **not** the
+dual-EKU bundle signer), upload the detached DER CMS `.sig`, and put `.json`
+**last**, conditional on the previous channel ETag. Its serial increases once
+per publish/promotion/refresh on that channel, and the 90-day validity window
+starts at that operation. `refresh` retains version and artifact bytes and
+uploads **no parts**; it is required before a rarely-released channel expires.
+`promote` requires a beta manifest naming the exact version and matching the
+immutable index; it uploads no parts. A failed conditional manifest write is a
+serial replay refusal, not licence to overwrite a release object.
+
+After chain verification against the root, both the publisher's signing check
+and every existing-pointer read pin the CMS leaf's RFC2253 issuer DN exactly to
+`CN=CeraLive RAUC Intermediate CA,O=CeraLive` (production) or
+`CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive` (non-production bench).
+The supplied `intermediate-ca.pem` is an untrusted chain candidate, not a
+requirement that OpenSSL use it: a root-direct leaf could otherwise pass the
+chain, dedicated CN and EKU checks. A different or near-miss issuer fails even
+when its signature chains to the same root. The downloader applies the same
+issuer rule with `--keyring`.
+
+**Signed board identity is not the filename stem.** `board` and the release
+URL use the product manifest stem (`orange-pi-5-plus`); `compatible` is derived
+through the validated board resolver's `BOARD_ID` (`orangepi5-plus`) and equals
+the signed RAUC bundle/system.conf value `ceralive-orangepi5-plus`. Rock's
+stem and `BOARD_ID` both happen to be `rock-5b-plus`. The publisher reads the
+immutable index and every part back from R2, validates part and whole-file
+lengths/digests, then runs `rauc info -C keyring:check-purpose=codesign`
+against the reconstructed bundle and an explicit `RAUC_BUNDLE_KEYRING`. Missing
+root, missing part, invalid signature, wrong compatible, or wrong signed pointer
+URL/digest aborts before any channel signature or JSON write. `publish` also
+preflights its candidate signature before any immutable write.
+`tools/flash-download.sh --board <board> --keyring <reviewed-manifest-root.pem>`
+uses the same resolved `BOARD_ID` for compatible, and requires the CMS signer
+CN `CeraLive OTA Manifest Signer`, Code Signing EKU, no E-mail Protection, and
+one of the two exact intermediate issuer DNs above.
+Without `--keyring` the downloader is intentionally **unauthenticated**: SHA-256
+checks detect transfer corruption, not a malicious replacement; its output
+must not be treated as a trusted release. An invalid pre-existing `flash.raw`
+is removed before extraction, so a failed decode cannot leave unverified bytes
+under the final raw pathname.
+
+`promote` and `refresh` verify the prior channel CMS under the dedicated manifest signer
+root; only refresh accepts the old, demonstrably wrong product-stem compatible
+as a source and replaces it with the verified value. It never treats that
+legacy claim as install authority. Refresh requires `--expect-serial` and the
+quoted, observed `--expect-etag` of the current JSON, checked again before
+signature-first/JSON-last ETag CAS. If JSON CAS fails while the old JSON ETag
+is still current, a conditional write restores the old signature; a concurrent
+change is not overwritten. No immutable release is re-signed or rewritten.
+
+The two channel objects are **not atomic**. Before changing `.json.sig`, the
+publisher creates an immutable recovery intent under
+`channels/<channel>/<board>.json.recovery/`, keyed by the prior JSON ETag,
+operation and version. It contains byte-for-byte copies of the previously
+CMS-signed pair (if present) and the new pair; it is not trusted merely because
+it exists. On retry after a process dies between the signature and JSON PUT,
+the publisher checks the prior JSON against its observed ETag and saved bytes,
+verifies **both** CMS signatures and signer identities, checks the new serial,
+board/channel/version and indexed artifact identities against the reverified
+RAUC bundle, and requires the currently exposed signature to match the saved
+new signature exactly. Only then may it commit the saved new JSON with
+`If-Match` against the prior ETag and verify the resulting pair by readback.
+For an interrupted first publication (no prior JSON), the next identical
+`publish` reuses the authenticated intent and commits with `If-None-Match`.
+Foreign signatures, changed JSON/ETag, drifted parts/index, absent trust roots
+and stale refresh preconditions fail closed: **never re-sign the old JSON** or
+delete/rewrite immutable release bytes to bypass the refusal. The intent is
+retained as an audit/retry record; ordinary successful operations also create
+one. During the interval between the two PUTs readers may still see an
+unverifiable pair and must fail closed; this is recoverability, **not** atomic
+availability or a guarantee of uninterrupted service. Retry the same reviewed
+operation with the same preconditions; if the pair is foreign/drifted, stop and
+adjudicate rather than forcing a write.
+
+The workflow materializes the RAUC root separately from the CMS manifest
+signer: stable/beta (and promotion to stable) use `RAUC_RELEASE_PKI_TAR_B64`'s
+production `root-ca.pem`; drill requires the separately provisioned
+`RAUC_BENCH_ROOT_CA_B64` (base64 of the bench root certificate). A missing
+secret fails closed. For a reviewed **pointer-only Orange drill repair** after
+both the publisher and device consumer fixes pass their own reviews, use this
+procedure; it is **not authorization to run it during a blocked drill**:
+
+```bash
+# Export R2_IMAGES_ENDPOINT, R2_IMAGES_ACCESS_KEY_ID and
+# R2_IMAGES_SECRET_ACCESS_KEY through the private credential source first.
+export RAUC_BUNDLE_KEYRING=<reviewed-bench-root-ca.pem>
+export OTA_MANIFEST_SIGNER_DIR=<reviewed-manifest-signer-directory>
+bucket=ceralive-images
+endpoint="$R2_IMAGES_ENDPOINT"
+key=channels/drill/orange-pi-5-plus.json
+work="$(mktemp -d)"    # remove this private directory after verification
+aws s3api get-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key" "$work/old.json"
+aws s3api get-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key.sig" "$work/old.sig"
+etag="$(aws s3api head-object --bucket "$bucket" --endpoint-url "$endpoint" --key "$key" --query ETag --output text)"
+test "$etag" = "\"$(openssl dgst -md5 "$work/old.json" | cut -d' ' -f2)\""
+openssl cms -verify -binary -inform DER -in "$work/old.sig" -content "$work/old.json" \
+  -CAfile "$OTA_MANIFEST_SIGNER_DIR/root-ca.pem" -purpose any -signer "$work/old-signer.pem" -out /dev/null
+test "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$work/old-signer.pem")" = 1
+subject="$(openssl x509 -in "$work/old-signer.pem" -noout -subject -nameopt RFC2253)"
+cn_pattern='(^subject=|,)CN=CeraLive OTA Manifest Signer(,|$)'
+[[ "$subject" =~ $cn_pattern ]]
+eku="$(openssl x509 -in "$work/old-signer.pem" -noout -ext extendedKeyUsage)"
+[[ "$eku" == *'Code Signing'* && "$eku" != *'E-mail Protection'* ]]
+issuer="$(openssl x509 -in "$work/old-signer.pem" -noout -issuer -nameopt RFC2253)"
+case "$issuer" in
+  'issuer=CN=CeraLive RAUC Intermediate CA,O=CeraLive'|\
+  'issuer=CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive') ;;
+  *) printf 'refused manifest signer issuer: %s\n' "$issuer" >&2; exit 1 ;;
+esac
+python3 - "$work/old.json" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+assert (m['schema'],m['board'],m['channel'],m['version'],m['serial'],m['compatible']) == \
+       (1,'orange-pi-5-plus','drill','2026.10.6',4,'ceralive-orange-pi-5-plus')
+assert m['bundle']['sha256']=='1820b2b0035b1c3cfa9ff04fcce97a38535c21b793db0e49204b74455dc7f46e'
+PY
+# Re-run only after both repo reviews, device binary verification, and bench approval.
+bash ci/publish-release.sh refresh --board orange-pi-5-plus --channel drill \
+  --expect-serial 4 --expect-etag "$etag"
+```
+
+The command itself re-reads and verifies the immutable 2026.10.6 index,
+bundle parts, whole digest and RAUC signature/compatible under the bench root.
+It updates `channels/drill/orange-pi-5-plus.json{,.sig}` and creates an immutable
+`channels/drill/orange-pi-5-plus.json.recovery/` intent. The existing release
+prefix, Rock pointer and stable/beta pointers are untouched. If the
+live serial, ETag, bundle digest or signer differs, **stop**, never force a
+same-version overwrite. Afterwards fetch both new objects over the public
+`https://images.ceralive.tv/channels/drill/orange-pi-5-plus.json{,.sig}` origin
+(not just R2), repeat the CMS, signer CN/EKU and exact issuer checks above with
+`-content <fetched.json>` and the reviewed manifest root, and confirm signed
+`serial:5`, `board:orange-pi-5-plus`, `compatible:ceralive-orangepi5-plus`,
+unchanged `version`, bundle/flash URLs, sizes, hashes and lock URL. Verify the
+served bundle with `rauc info` under the reviewed bench root and match its
+whole-file SHA-256 to the signed pointer. A CMS-valid but false compatible is
+not a successful repair.
+
+`prune --board <b> --channel-family` inventories all release keys, protects every
+version referenced by **any** of the three current CMS-verified channel pairs,
+keeps the three newest marked stable/beta versions across those two channels combined and
+one newest drill version, and deletes only eligible keys under that board's
+`releases/` prefix. A version with **no channel marker** is never pruned.
+The workflow supplies the existing manifest-signer root to prune as well as
+publish/refresh. Before planning or deleting any release key, prune requires
+every present channel JSON to have a valid `.json.sig` under that root (including
+the dedicated signer identity); a missing or mismatched signature refuses the
+whole operation. An absent channel remains absent, not a fabricated reference.
+`--dry-run` performs the real inventory/read and prints exact planned keys with
+no R2 mutations; use it before pruning. `--selftest` publishes a unique synthetic
+600 MiB logical file in three parts, compares an HTTP Range crossing the first
+part boundary, and cleans up only the unique test prefix. Local stub/CMS contract:
+`bash tests/publish-release.test.sh`. Live publishing by this executor is
+restricted to `drill`; stable/beta require the owner to approve and dispatch.
+
+### Legacy hawkBit registration (manual/operator-driven, updater dormant)
+
+The retained private hawkBit tooling ([`fleet/hawkbit/`](../fleet/hawkbit/)) can
+register an explicitly authorized legacy bundle. It is not part of the unified
+orchestrator or a reason to re-enable the dormant updater. For that legacy path:
 
 ```bash
 cd fleet/hawkbit
@@ -643,7 +867,7 @@ ssh ceralive@<device> 'systemctl status ceralive-healthcheck.service'
 
 `ceralive-healthcheck.service` is the gate that decides whether the newly
 booted slot gets `rauc mark-good` — see §8 for the full rollback contract this
-feeds into. hawkBit's Management API also reports per-target action status
+feeds into. For the legacy tooling only, hawkBit's Management API reports per-target action status
 (`RUNNING` / `FINISHED` / `ERROR`) for anyone tracking a fleet-wide rollout,
 per the integration contract in `fleet/integration-contract.md`.
 
@@ -661,10 +885,12 @@ three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the five
 first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvcsrc`, `ceralive-device`, `srtla`) from
 `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
-The device-side twin of this same contract is
+The image's APT-source writer is
 [`mkosi/customize/apt-ceralive-repo.sh`](../mkosi/customize/apt-ceralive-repo.sh),
-which bakes the same three values (as build-time inputs) into the image's own
-apt source for its own package installs.
+which configures the image's own authenticated source. The new runtime image
+gets its fleet mTLS pair from `ceralive-apt-credentials=1.0.1`, not a baked copy
+of CI's private APT client key. Build-only credentials and reusable build caches
+must not become runtime credential or release-authority inputs.
 
 This is a **distinct** rotation from the RAUC signing PKI in
 [`docs/cert-rotation-policy.md`](../docs/cert-rotation-policy.md) — that
@@ -881,7 +1107,26 @@ the harness's own MOCK-mode warning banner).
 ### Pausing or superseding a published bundle on R2
 
 Immutable bundle objects and their digest sidecars are never deleted or
-overwritten. If a published bundle is found to be bad:
+overwritten.
+
+**Signed image channels (the path capable devices use).** There is no pause or
+rollback command for a signed channel. The response to a bad release is to
+publish a fixed, **newer** OS CalVer through the same `publish`/`promote` flow
+in §5, which moves the channel pointer to the fix with a higher serial. Never
+delete, rewrite or reuse the bad release's `releases/<board>/<CalVer>/` prefix;
+`prune` only removes versions no current channel references and that fall
+outside its retention count. On the device, CeraUI refuses a channel manifest
+whose serial is not higher than the one it last accepted, a version that is not
+newer than the booted one, and a version on its quarantine list, which it adds
+to after an OS rollback. So a device that fell back from the bad release never
+retries it, and pointing a channel back at an older release does not move
+devices that already run the bad one. That is a limit: a device that booted the
+bad release and passed its healthcheck stays on it until the newer fix is
+published.
+
+**Legacy hawkBit tooling (dormant).** `rauc-hawkbit-updater` is disabled on new
+images, so these steps apply only to a deployment still driven by the retained
+hawkBit tooling. If a bundle it distributes is found to be bad:
 
 1. **Pause the hawkBit rollout** so no further devices are offered the bad
    distribution set:
@@ -906,7 +1151,10 @@ The healthcheck (`ceralive-healthcheck.sh`, gated by
 **self-driving** rather than requiring an operator to watch every device's
 boot log:
 
-- It is the **sole** gate on `rauc mark-good` — nothing else confirms a slot.
+- It is the **sole** gate on marking the **booted** slot good — nothing else
+  confirms the slot the board is running on. `ceralive-slot-sync.sh` marks only
+  the other slot good (`rauc status mark-good other`), and only after it has
+  mirrored the healthy running slot into it and verified the copy.
 - Confirmation is scoped to the current kernel boot ID, stored beside the
   timestamp in `/data/ceralive/.slot-marked-good`. A previous boot's marker,
   including a legacy timestamp-only one, never suppresses checks. Same-slot
@@ -929,61 +1177,25 @@ line tells you whether the bundle itself was bad or whether the failure is
 environmental (e.g. no SRT reachability at that specific site, which the
 healthcheck's own skip-when-unconfigured logic already accounts for).
 
-### FINDING — the mark-good marker is a PERMANENT flag, so a healthy slot's boot budget only ever counts down [OPEN — documented, not fixed]
+### Resolved finding — mark-good is scoped to one kernel boot [EXISTS]
 
-The idempotency marker `/data/ceralive/.slot-marked-good` has no per-boot
-lifecycle. Once written it disables the healthcheck for the rest of that
-device's life, so the boot-attempt budget the healthcheck exists to reset is
-never reset again — it decrements on every reboot, clean or otherwise, until it
-hits zero and RAUC reports a genuinely healthy running slot as `bad`.
+An older Rock 5B+ image treated `/data/ceralive/.slot-marked-good` as a permanent
+existence flag. That allowed a stale marker to skip health checks while the U-Boot
+selector decremented the slot's remaining attempts on each reboot, eventually
+reporting a healthy slot as `bad`. The historical observation was a marker dated
+`2026-07-19T17:06:10Z` and `BOOT_A_LEFT=0` five weeks later; it does not describe
+the current healthcheck.
 
-**What is broken.** Two independent guards test the marker, and neither one
-looks at anything but its bare existence:
-
-- `mkosi/runtime/ceralive-healthcheck.service` carries
-  `ConditionPathExists=!/data/ceralive/.slot-marked-good`, so systemd skips the
-  unit entirely — it is not run and its probes are not evaluated.
-- `mkosi/runtime/ceralive-healthcheck.sh` `main()` independently tests
-  `[ -e "${MARKER}" ]` and exits 0 before any check runs.
-
-Neither examines the marker's age, its contents, or any correlation with the
-current boot ID or RAUC slot generation. The only thing that ever clears it is
-`ceralive-update` — the manual, inert-by-default RAUC path — which `rm -f`s it
-after `rauc install` so a freshly-activated slot cannot inherit the other slot's
-confirmation. That covers the slot-swap case it was written for and nothing
-else. `rauc-hawkbit-updater`, the automatic RAUC trigger, does not clear it, and
-no unit clears it on an ordinary boot.
-
-**Why the budget then bleeds out.** `mkosi/platform/boot-state-core.sh` resets a
-slot's `BOOT_<n>_LEFT` back to `BOOT_ATTEMPTS` only on `set-state <slot> good`,
-and on device the sole caller of that path is the healthcheck's
-`rauc status mark-good`. Skip the healthcheck and the reset never happens, while
-the selector keeps decrementing the counter once per boot. Every reboot is a
-one-way step toward zero.
-
-**Observed on hardware.** On a Rock 5B+, `/data/ceralive/.slot-marked-good` was
-dated `2026-07-19T17:06:10Z` — five weeks before the run that found it — and
-`BOOT_A_LEFT` had reached `0`, with RAUC reporting the currently-booted slot as
-`bad`. Read against the all-counters-exhausted branch of
-`mkosi/platform/boot/boot.scr.cmd`, that is one reboot away from an unwanted
-fallback to the other, stale slot. The board was not unhealthy at any point:
-independent verification over the same session confirmed MPP hardware
-encode/decode, RGA scheduler probing, the expected package versions, and a clean
-kernel journal. This is a bookkeeping defect in the marker's lifecycle, not
-evidence of an unstable board — and because the marker is a build-time design
-rather than device state, every device running the same image is affected.
-
-**What a fix would have to change.** The marker's lifecycle, not the probes. It
-has to stop being a permanent flag and start being scoped to one boot or one
-slot generation — cleared early in boot before the healthcheck unit would run,
-or keyed to the current boot ID / RAUC slot generation and treated as absent
-when that key no longer matches. Note that both guards would have to move
-together: repairing only the script leaves `ConditionPathExists=` skipping the
-unit, and repairing only the unit leaves the script's own early exit in place.
-
-**This entry is documentation only.** No code changed with it — not the marker
-handling, not the systemd condition, not `boot-state-core.sh`. The fix is future
-work and is deliberately out of scope here.
+The unit now runs on every boot. The script reads the current kernel boot ID and
+accepts a marker only if its `boot-id` matches; a previous boot's marker or an
+old timestamp-only marker is ignored. After the service, binary and configured
+reachability checks succeed and RAUC marks the running slot good, the script
+writes the current boot ID beside the timestamp. An unreadable boot ID fails
+closed. This replenishes the attempt budget on healthy same-slot reboots as well
+as after an A/B switch; removal by an installer is compatible but no longer
+needed for correctness. `tests/healthcheck-boot-marker.bats` exercises stale
+markers and exhausted counters. Inspect the marker's `boot-id` and the current
+`/proc/sys/kernel/random/boot_id` when diagnosing a mark-good decision.
 
 ---
 

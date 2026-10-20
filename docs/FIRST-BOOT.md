@@ -1,7 +1,8 @@
 # CeraLive First-Boot Guide
 
 Getting from a freshly-flashed card to a live stream. Every step here is
-verifiable against the merged runtime scripts under `mkosi/runtime/`.
+verifiable against the runtime scripts under `mkosi/runtime/`; integration-branch
+changes are not a claim that a new image has completed boot qualification.
 
 ---
 
@@ -23,6 +24,43 @@ Build the image first (see [`docs/DEVICE-BRINGUP.md`](DEVICE-BRINGUP.md) §2),
 then write it to a microSD card or eMMC. Both release downloads and local builds
 produce `.raw.xz` transport artifacts. Local builds also retain the uncompressed,
 sparse `.raw` under `images/<board>/` for direct `dd` or OTA work.
+
+For a **published** channel release, download the flash image from this checkout
+with `curl`, `openssl`, `python3`, `sha256sum`, and `xz` installed:
+
+```bash
+tools/flash-download.sh --board rock-5b-plus --channel stable \
+  --out images --jobs 8 --keyring /path/to/ota-manifest-root.pem --decompress
+# Verified output: images/rock-5b-plus/<version>/flash.raw
+```
+
+The tool verifies the detached CMS signature against the supplied **manifest**
+root, checks the publisher's two-file `index.json` and `SHA256SUMS`, downloads
+only the flash parts (not the RAUC bundle) in bounded parallel, and checks each
+part and the assembled `flash.raw.xz` against SHA-256. `--decompress` additionally
+checks the decompressed `flash.raw` against the manifest's `raw_sha256`; omit it
+to keep only the compressed artifact. Re-running the same command reuses verified
+parts; incomplete parts resume with HTTP Range and mismatches are re-fetched up
+to three times. An absent `--keyring` emits a warning: SHA-256 alone detects
+accidental corruption but **does not authenticate who published the metadata**.
+Use the dedicated OTA manifest root, not a device TLS key or a private signing
+key. **Validation [PARTIAL]:** signed drill-channel flash downloads, interruption
+and resume passed for Rock 5B+ and Orange Pi 5+ in the 2026-10-19 drills. Those
+used bench trust, not production-release qualification. A full override-free
+candidate boot with the newly pinned packages remains pending; no stable OS
+image publication is implied by the CeraUI package release.
+
+If you already know and trust the exact published release URL and SHA-256 from a
+verified channel manifest, `aria2c -x8 -s8` can instead range-download the
+logical file through the images Worker. It does **not** perform CMS or checksum
+verification for you:
+
+```bash
+aria2c -c -x8 -s8 -d images \
+  'https://images.ceralive.tv/releases/<board>/<version>/flash.raw.xz'
+# Compare the resulting file's sha256sum with the signed manifest's flash.sha256;
+# after xz -dk, compare the raw file with flash.raw_sha256 before flashing.
+```
 
 **microSD (dd):**
 
@@ -336,6 +374,26 @@ ls -la /data/ceralive/tls/
 # Boot healthcheck result
 journalctl -u ceralive-healthcheck.service -n 30
 ```
+
+---
+
+### 6.4 Updates after first boot [PARTIAL]
+
+The image pins stable CeraUI v2026.9.5, whose update orchestrator handles both
+APT packages and RAUC OS updates when the image advertises the required
+capabilities. Use CeraUI for discovery and installation; there is no separate
+first-boot OS downloader or required manual `ceralive-update` invocation.
+OS updates come from `images.ceralive.tv` through signed channel manifests and
+stage the inactive slot. Activation waits for a clean idle shutdown or reboot;
+an unclean power loss does not activate a staged slot. Package commit blocks
+stream start; starting a stream aborts an in-flight update download.
+
+After boot, the healthcheck alone confirms the running slot. The lagged mirror
+may then restore the other slot; do not manually mark the running slot good.
+The legacy hawkBit updater stays disabled and masked. See
+[Update Paths](../README.md#update-paths--unified-orchestrator-image-qualification-partial)
+for the drill evidence and limits: multi-uplink failover, a full override-free
+candidate boot and amd64 hardware remain unverified.
 
 ---
 

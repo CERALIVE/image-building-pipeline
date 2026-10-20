@@ -138,6 +138,16 @@ setup_ssh_firstboot() {
   install -m 0444 "${src}/ceralive-ci-uart-bootstrap-public.pem" /etc/ceralive/uart-bootstrap-public.pem
   printf '%s\n' "${CERALIVE_IMAGE_BUILD_COMMIT}" >/etc/ceralive/image-build-commit
   chmod 0444 /etc/ceralive/image-build-commit
+  # OS ordering needs real build time, not reproducibility-pinned SOURCE_DATE_EPOCH.
+  date -u +%Y%m%dT%H%M%SZ >/etc/ceralive/image-version
+  chmod 0444 /etc/ceralive/image-version
+  # Unlike the commit identity and build-recency timestamp, only a deliberate
+  # release-cut CalVer can be compared with the OS channel manifest by dpkg.
+  if [[ -n "${CERALIVE_OS_RELEASE_VERSION:-}" ]]; then
+    [[ "${CERALIVE_OS_RELEASE_VERSION}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] \
+      || die "CERALIVE_OS_RELEASE_VERSION must be YYYY.MINOR.PATCH CalVer"
+    printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" >/etc/ceralive/os-release-version && chmod 0444 /etc/ceralive/os-release-version
+  fi
   enable_service ceralive-ssh-firstboot.service
   enable_service ceralive-ci-uart-bootstrap.service
 }

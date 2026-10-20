@@ -264,7 +264,7 @@ fi
 if grep -q 'armbian-firmware\|libmali\|hostapd' <<<"${CAND_BLOCK}"; then
   bad "no package removal belongs in the firmware prune"
 else
-  ok "the prune removes FILES only — armbian-firmware, libmali and hostapd stay installed"
+  ok "the firmware prune removes FILES only, never packages"
 fi
 
 if grep -q 'prune_irrelevant_rk3588_firmware$' "${POSTINST}"; then

@@ -1,0 +1,46 @@
+name: Pinned upstream input watch
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify offline scenarios and no-write property
+        run: python3 ci/upstream-watch.py --self-test
+      - name: Inspect signed inputs and reconcile issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ARMBIAN_APT_KEYRING_B64: ${{ secrets.ARMBIAN_APT_KEYRING_B64 }}
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
+        run: |
+          set -euo pipefail
+          : "${ARMBIAN_APT_KEYRING_B64:?Armbian archive keyring secret is required}"
+          : "${APT_GPG_PUBLIC_B64:?First-party archive public key secret is required}"
+          : "${APT_CLIENT_CRT_B64:?Image APT client certificate secret is required}"
+          key_dir="$(mktemp -d "${RUNNER_TEMP}/upstream-watch.XXXXXX")"
+          trap 'rm -rf "$key_dir"' EXIT
+          printf '%s' "$ARMBIAN_APT_KEYRING_B64" | base64 -d > "$key_dir/armbian.gpg"
+          printf '%s' "$APT_GPG_PUBLIC_B64" | base64 -d > "$key_dir/first-party.raw"
+          if ! gpg --batch --yes --dearmor -o "$key_dir/first-party.gpg" "$key_dir/first-party.raw"; then
+            cp "$key_dir/first-party.raw" "$key_dir/first-party.gpg"
+          fi
+          ARMBIAN_KEYRING_PATH="$key_dir/armbian.gpg" \
+          FIRST_PARTY_KEYRING_PATH="$key_dir/first-party.gpg" \
+            python3 ci/upstream-watch.py

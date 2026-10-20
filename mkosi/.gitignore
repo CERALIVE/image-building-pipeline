@@ -4,3 +4,10 @@
 /.staging/
 /lib/
 *.cache
+
+# Todo 29 (update-system-overhaul): mkosi's own documented "local
+# configuration" convention (mkosi.1.md FILES) — generated only around the
+# owning mkosi invocation from manifests/prune-paths.list; a stale generated
+# file is cleared before build/dry-run. Operator-owned files are never replaced.
+mkosi.local.conf
+mkosi.local/

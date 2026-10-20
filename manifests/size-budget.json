@@ -11,22 +11,22 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` retains REAL historical wet vendor-BSP rootfs.tar measurements, byte-identical to ci/size-baseline.<board>.json. These are NOT full-firmware/mainline image measurements; no planning projection replaces them. Both boards require fresh wet builds after adoption. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` records real wet v2 mainline/full-firmware development hardware candidate rootfs.tar bytes, byte-identical to ci/size-baseline.<board>.json. The candidates contain an unreleased CeraUI PR-head local .deb override and use a non-production RAUC signer; this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
     "rootfs_bytes_max": 3500000000,
-    "measured": 1422766080,
-    "measured_at": "2026-08-08",
-    "measured_commit": "a575a9a",
-    "measured_artifact": "images/orange-pi-5-plus/20260808T012615Z.rootfs.tar",
-    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, and that is NO LONGER the committed pin: armbian-bsp-deb-versions.txt was promoted to 26.8.3 on 2026-08-26 because the Armbian archive keeps only the newest revision of that Architecture:all package and 26.8.1 had been purged from both the index and the pool. This measurement therefore PREDATES the current pin, and the 26.8.1 -> 26.8.3 firmware delta is NOT reflected in the figure below; re-measure on the next wet vendor-BSP build. The earlier 26.5.1 -> 26.8.1 promotion's +3,389,440 B firmware delta IS already inside it. Supersedes the 2026-08-02 / 67d053a baseline (1418792960); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
+    "measured": 2729502720,
+    "measured_at": "2026-09-26",
+    "measured_commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
+    "measured_artifact": "images/orange-pi-5-plus/20260926T212336Z.rootfs.tar",
+    "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
   },
   "rock-5b-plus": {
     "rootfs_bytes_max": 3500000000,
-    "measured": 1415188480,
-    "measured_at": "2026-08-08",
-    "measured_commit": "a575a9a",
-    "measured_artifact": "images/rock-5b-plus/20260808T000202Z.rootfs.tar",
-    "note": "Real wet vendor-BSP production build (no --variant, no CERALIVE_BENCH_LABELS), measured by lib/measure-size.sh and read by orchestrate.sh's [6c/9] relative gate. MEASURED WITH armbian-firmware=26.8.1, and that is NO LONGER the committed pin: armbian-bsp-deb-versions.txt was promoted to 26.8.3 on 2026-08-26 because the Armbian archive keeps only the newest revision of that Architecture:all package and 26.8.1 had been purged from both the index and the pool. This measurement therefore PREDATES the current pin, and the 26.8.1 -> 26.8.3 firmware delta is NOT reflected in the figure below; re-measure on the next wet vendor-BSP build. The earlier 26.5.1 -> 26.8.1 promotion's +3,389,440 B firmware delta IS already inside it. Supersedes the 2026-08-02 / 67d053a baseline (1412259840); the change is that firmware bump plus the fonts-terminus removal (-460,800 B, A/B measured)."
+    "measured": 2730854400,
+    "measured_at": "2026-09-26",
+    "measured_commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
+    "measured_artifact": "images/rock-5b-plus/20260926T224052Z.rootfs.tar",
+    "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
   },
   "x86-minipc": {
     "rootfs_bytes_max": 1500000000,

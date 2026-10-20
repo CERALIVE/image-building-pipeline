@@ -1,7 +1,11 @@
 # CeraLive device OTA — `rauc-hawkbit-updater` (Runtime layer, Stage 7, task 41)
 
-Device-side counterpart of the private hawkBit engine (`fleet/hawkbit/`, task 40).
-`rauc-hawkbit-updater` 1.4 polls the private hawkBit **DDI v1** API, downloads a
+**Dormant by decision:** the package and configuration template remain installed,
+but the service is disabled and masked, with no configured hawkBit server. CeraUI's
+update orchestrator, not hawkBit, is the automatic OS update path. The following
+diagram describes the retained legacy mechanism, not an active device updater.
+
+The retained `rauc-hawkbit-updater` 1.4 can poll the private hawkBit **DDI v1** API, download a
 signed `.raucb` from R2 (the URL hawkBit hands back is rewritten to
 `apt.ceralive.tv/bundles/...`, task 39), and installs it to the inactive RAUC A/B
 slot. Slot **confirmation/rollback stays with `ceralive-healthcheck.service`**
@@ -14,11 +18,22 @@ hawkBit DDI v1 (private, 127.0.0.1:8080 behind TLS proxy/VPN)
 rauc-hawkbit-updater ──download──▶ /data/ceralive/rauc-downloads/bundle.raucb
         │  RAUC D-Bus InstallBundle                         (NOT rootfs — task 41)
         ▼
-RAUC installs to inactive slot; custom backend marks it primary (FAT attempt budget=3)
-        │  (updater has NO mark-good — gate is NOT bypassed)
-        ▼  reboot (operator/CeraUI controlled; post_update_reboot=false)
-new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
+RAUC installs the inactive slot (activate-installed=false)
+        │  no CeraUI os-staged receipt; no CeraUI activation arm
+        ▼
+ordinary shutdown/reboot keeps the installed slot inactive
+        │  only a separate, explicit operator activation can select it
+        ▼  if subsequently booted
+ceralive-healthcheck.service → rauc mark-good  OR  rollback
 ```
+
+The same rule applies to the manual `ceralive-update` script: its RAUC install
+does not write CeraUI's `os-staged.json` receipt. CeraUI arms only its own
+completed OS staging; absent an independent operator arm, the shutdown activation
+helper exits without selecting the other slot. An operator can explicitly arm a
+pending RAUC install with `ceralive-rauc-arm@arm.service` (or activate it using
+RAUC's manual slot selection); neither path is automatic or bypasses the boot
+healthcheck. See [`docs/ota-activation.md`](../../../docs/ota-activation.md).
 
 ## Files (this directory = canonical reference; the wired executor is the postinst)
 
@@ -32,8 +47,8 @@ new slot boots → ceralive-healthcheck.service → rauc mark-good  OR  rollback
 **Dual-track** (the project convention, tasks 26/29/30): these canonical files are
 mirrored by inline twins written by
 `mkosi.images/runtime/mkosi.postinst.chroot::setup_hawkbit_updater()`, which is the
-layer that actually runs in the build. The postinst also installs five CeraLive
-systemd unit files described below. Keep the twins in sync.
+layer that actually runs in the build. The postinst installs the enrollment
+service and retry units described below. Keep the twins in sync.
 
 ## The backport `.deb` (NOT in trixie apt)
 
@@ -84,10 +99,8 @@ postinst.
 
 > **Graceful build:** if the backport `.deb` is not staged (parity / dry / offline
 > builds), the postinst still deploys the config template, the provision script and
-> the five CeraLive unit files, logs a clear warning, and skips only the binary install
-> — mirroring the postinst's "no secret in env → install placeholder" pattern. The
-> units stay inert (no binary, and the updater is gated on the un-rendered config),
-> so a package-less image is safe.
+> the enrollment/retry units, logs a clear warning, and skips only the binary install
+> — mirroring the postinst's "no secret in env → install placeholder" pattern.
 
 ## Secure enrollment — **no shared static token in the image**
 
@@ -113,7 +126,9 @@ never in git):
 2. `ceralive-hawkbit-provision.service` (oneshot, `ConditionPathExists=` that file)
    runs `provision-token.sh`, which:
    - resolves the token (target token / gateway token / fetched over mTLS using the
-     existing apt client cert), persists it to `/data/ceralive/hawkbit-token`
+     packaged `/usr/share/ceralive/apt-credentials/client.{crt,key}` pair, falling
+     back to the legacy `/etc/apt/certs/client.{crt,key}` pair only when both
+     packaged files are absent), persists it to `/data/ceralive/hawkbit-token`
      (`0600`, the canonical store);
    - renders the **effective** config to `/data/ceralive/hawkbit-updater/config.conf`
      (`0600`) — placeholders filled, the auth line set to `auth_token` **or**
@@ -126,7 +141,8 @@ never in git):
    `/data/ceralive/hawkbit-provision.pending` mode `0600`, exits successfully, and
    leaves the effective updater config absent. The retry timer runs the same
    canonical script every 30 seconds while that marker exists. A successful fetch
-   renders the config, removes the marker, and starts the updater. Missing tools,
+   renders the config and removes the marker; its image mask still prevents the
+   dormant updater from starting. Missing tools,
    malformed enrollment, or an empty endpoint response still fail honestly; only
    endpoint unavailability is deferred.
 
@@ -150,34 +166,38 @@ never in git):
 ## Healthcheck-gated mark-good (task 29) — the gate is **not** bypassed
 
 `rauc-hawkbit-updater` 1.4 only **installs** (RAUC D-Bus `InstallBundle`) — and it
-does so against trixie's RAUC **1.13**, not the bookworm 1.8 this design was first
-written for; the D-Bus `InstallBundle` interface it drives is unchanged across that
-jump. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
+is retained with the image's pinned RAUC **1.15.2**; the D-Bus `InstallBundle`
+interface it drives is unchanged. It has **no `mark-good`/auto-confirm capability** (there is no such config key — the
 "`mark_compatible = false` or equivalent" the task asks for is satisfied
 structurally: the updater simply cannot confirm a slot). Confirmation is the
 custom backend's FAT `boot_state.txt` countdown plus
-`ceralive-healthcheck.service`, which is the **sole** caller of `rauc mark-good`.
+`ceralive-healthcheck.service`, the only caller marking the **booted** slot good.
+`ceralive-slot-sync.service` marks only the **other** slot good after verified mirroring.
 A bad bundle that boots-but-can't-stream is left unconfirmed and rolled back on
 the next reboot (task 27 bootcount adapter). RAUC's native `boot-attempts` key is
-not used because RAUC 1.13 rejects it with `bootloader=custom`.
+not used because RAUC rejects it with `bootloader=custom`.
 
-`post_update_reboot = false` keeps the reboot under CeraLive's control (the upstream
+`post_update_reboot = false` prevents an updater-driven reboot (the upstream
 docs warn `post_update_reboot=true` is an **immediate unclean reboot** — data-loss
-risk). Reboot is triggered by the operator / CeraUI, like the manual `ceralive-update`
-path.
+risk). Neither hawkBit nor the manual script asks CeraUI to activate or reboot;
+CeraUI's own OS agent separately arms only installs with its staged receipt and
+defers slot selection to a clean idle shutdown or an explicit idle activation.
 
-### Boot-scoped confirmation and the legacy marker clear
+### Boot-scoped confirmation
 
 `/data/ceralive/.slot-marked-good` now records the kernel boot ID beside its
 timestamp. Only that same boot may reuse the result. A new boot always verifies
 again, including a same-slot reboot: the bootloader decrements its attempt budget
 even without an install. Timestamp-only markers from old images are stale.
 
-The existing `ceralive-update` post-install removal and
-`ceralive-hawkbit-marker-clear.path` download-triggered removal remain compatible,
-but correctness no longer depends on either one. Direct RAUC installs and manual
-slot selection need no special marker-clear hook. The unit must not carry a
-persistent `ConditionPathExists` gate ahead of the script's boot-aware predicate.
+The manual `ceralive-update` post-install removal remains compatible, but
+correctness no longer depends on it. The legacy hawkBit marker-clear path and
+service are retired: `PathExistsGlob=` retriggered the oneshot while a downloaded
+bundle remained on `/data`, until both units hit the start limit and failed on
+every boot. A persistent bundle cannot invalidate a boot-scoped health check.
+Direct RAUC installs and manual slot selection need no marker-clear hook. The
+healthcheck must not carry a persistent `ConditionPathExists` gate ahead of its
+boot-aware predicate.
 
 ## CeraLive systemd units (written by the postinst)
 
@@ -186,7 +206,10 @@ persistent `ConditionPathExists` gate ahead of the script's boot-aware predicate
 | `ceralive-hawkbit-provision.service` | oneshot | First-boot enrollment + config render (gated on `/data/ceralive/hawkbit.conf`). |
 | `ceralive-hawkbit-provision-retry.timer` + `.service` | timer/oneshot | Retry only while the mode-0600 pending marker exists; ordered after NetworkManager, never network-online. |
 | `rauc-hawkbit-updater.service` (+ drop-in) | daemon | Polls DDI; gated on the rendered `/data` config; `-c` it. |
-| `ceralive-hawkbit-marker-clear.path` + `.service` | path/oneshot | Legacy download-triggered marker clear; boot-scoped verification is authoritative. |
+
+The updater package and config template remain installed, but the updater is
+disabled and masked by the image so first-boot presets cannot re-enable it.
+No hawkBit server is configured on dormant devices.
 
 ## Verification (offline; no board / no real hawkBit)
 

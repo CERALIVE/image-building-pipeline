@@ -61,7 +61,7 @@ RUNTIME_APP_PKGS="libsrt1.5-ceralive \
 modemmanager libmm-glib0 \
 libmbim-glib4 libmbim-proxy libmbim-utils \
 libqmi-glib5 libqmi-proxy libqmi-utils \
- libqrtr-glib0 ceralive-modem-support"
+ libqrtr-glib0 ceralive-modem-support ceralive-apt-credentials"
 
 # Binaries a sysext-class .deb MUST deliver — asserted after install so a broken or
 # wrongly-pruned .deb fails loudly instead of shipping an app that cannot encode/bond
@@ -262,12 +262,60 @@ remove_chroot_service_policy() {
 # sibling for many binary packages, and removing the link orphans that copyright.
 # CERALIVE_DOC_ROOT exists so the shipped function itself can be driven against a
 # synthetic tree by tests/mkosi-contract.bats; the build never sets it.
+safe_prune_parent() {
+  local glob="$1" remainder component parent=""
+  [[ "${glob}" == /* ]] || { log "skipping unsafe non-absolute glob: ${glob}"; return 1; }
+  remainder="${glob#/}"
+  while [[ "${remainder}" == */* ]]; do
+    component="${remainder%%/*}"
+    remainder="${remainder#*/}"
+    if [[ -z "${component}" || "${component}" == . || "${component}" == .. ||
+          "${component}" == *'*'* || "${component}" == *'?'* ||
+          "${component}" == *'['* || "${component}" == *']'* ]]; then
+      log "skipping unsafe glob parent: ${glob}"
+      return 1
+    fi
+    parent+="/${component}"
+    if [[ -L "${parent}" ]]; then
+      log "skipping glob with symlink parent ${parent}: ${glob}"
+      return 1
+    fi
+  done
+  [[ -n "${remainder}" && "${remainder}" != . && "${remainder}" != .. ]] \
+    || { log "skipping unsafe glob: ${glob}"; return 1; }
+}
+
 prune_package_docs() {
   local docdir="${CERALIVE_DOC_ROOT:-/usr/share/doc}"
-  [[ -d "${docdir}" ]] || return 0
-  log "pruning ${docdir} down to copyright files (deferred from the build layers)"
-  find "${docdir}" -type f ! -name copyright -delete
-  find "${docdir}" -mindepth 1 -type d -empty -delete
+  if [[ -d "${docdir}" ]]; then
+    log "pruning ${docdir} down to copyright files (deferred from the build layers)"
+    find "${docdir}" -type f ! -name copyright -delete
+    find "${docdir}" -mindepth 1 -type d -empty -delete
+  fi
+
+  # Todo 29 (update-system-overhaul): also apply the single prune-paths
+  # manifest's globs. The runtime layer already wrote this file (BaseTrees=
+  # %O/runtime inherits it), so no env var is needed here — it is read
+  # directly, matching manifests/prune-paths.list's own documented single-
+  # source design. Safe and redundant-by-design at this point (the runtime
+  # layer already stripped these paths); the point is proving the SAME
+  # manifest drives every consumer, not that this pass finds anything new.
+  local prune_list="${CERALIVE_PRUNE_PATHS_LIST:-/usr/lib/ceralive/prune-paths.list}"
+  if [[ -r "${prune_list}" ]]; then
+    local line target
+    local IFS=
+    shopt -s nullglob
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -n "${line}" ]] || continue
+      case "${line}" in \#*) continue ;; esac
+      safe_prune_parent "${line}" || continue
+      # shellcheck disable=SC2086 # glob expansion is required; IFS is empty, so paths are not word-split
+      for target in ${line}; do
+        rm -rf -- "${target}" 2>/dev/null || true
+      done
+    done <"${prune_list}"
+    shopt -u nullglob
+  fi
 }
 
 main() {
@@ -284,6 +332,7 @@ main() {
   # Staging hygiene: the staging tree must NEVER ship in the final image. Stage 3
   # consumes it (local .deb install above) BEFORE removing it.
   rm -rf "${FIRST_PARTY_DIR}"
+  bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
   clean_package_download_metadata
   prune_final_image_payload
   remove_chroot_service_policy

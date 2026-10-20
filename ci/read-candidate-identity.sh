@@ -48,7 +48,7 @@ for pair in "image:${image}" "bundle:${bundle}" "loader:${loader}"; do
 done
 [[ "${gap_mb}" =~ ^[1-9][0-9]*$ ]] || { printf -- '--gap-mb must be a positive integer\n' >&2; exit 2; }
 
-for tool in dd df mtype unsquashfs sha256sum; do
+for tool in dd df mtype rauc python3 sha256sum; do
   command -v "${tool}" >/dev/null 2>&1 || die "required tool not on PATH: ${tool}"
 done
 
@@ -82,19 +82,11 @@ candidate_fdtfile="$(sed -n 's/^fdtfile=//p'  <<<"${board_env}" | head -1 | tr -
 [[ -n "${candidate_board_id}" ]] || die "cera_board.env carries no board_id"
 [[ -n "${candidate_fdtfile}" ]] || die "cera_board.env carries no fdtfile"
 
-# The .raucb layout is <squashfs payload><CMS signature><8-byte big-endian
-# signature length>; the same split lib/rauc-bundle-inspect.sh performs before it
-# verifies. Reading the trailer is what makes the payload boundary knowable.
-total="$(stat -c '%s' "${bundle}")"
-trailer="$(tail -c 8 "${bundle}" | od -An -tx1 | tr -d ' \n')"
-[[ "${trailer}" =~ ^[0-9a-f]{16}$ ]] || die "bundle has no readable signature-length trailer"
-sig_len=$((16#${trailer}))
-payload_len=$((total - 8 - sig_len))
-(( payload_len > 0 && sig_len > 0 )) || die "bundle payload/signature extents are not sane"
-head -c "${payload_len}" "${bundle}" >"${work}/payload.squashfs"
-unsquashfs -no-progress -cat "${work}/payload.squashfs" manifest.raucm >"${work}/manifest.raucm" 2>/dev/null \
-  || die "bundle payload has no readable manifest.raucm"
-candidate_compatible="$(sed -n 's/^compatible=//p' "${work}/manifest.raucm" | head -1)"
+# Identity-only inspection treats the bundle as untrusted input; the destructive
+# path separately checks its signature against the operator-supplied keyring.
+bundle_json="$(rauc info --no-verify --output-format=json "${bundle}" 2>/dev/null)" \
+  || die "bundle has no readable verity metadata"
+candidate_compatible="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("compatible") or "")' <<<"${bundle_json}")"
 [[ -n "${candidate_compatible}" ]] || die "bundle manifest carries no compatible="
 
 printf 'candidate_board_id=%s\n'      "${candidate_board_id}"

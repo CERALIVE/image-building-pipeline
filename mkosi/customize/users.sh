@@ -53,6 +53,14 @@ configure_users() {
   local joined="${CERALIVE_USER_GROUPS// /,}"
   usermod -aG "${joined}" "${user}"
 
+  local ota_source
+  ota_source="$(dirname "${BASH_SOURCE[0]}")/../runtime/rauc/ceralive-ota.sysusers.conf"
+  install -D -m 0644 "$ota_source" /usr/lib/sysusers.d/ceralive-ota.conf
+  systemd-sysusers /usr/lib/sysusers.d/ceralive-ota.conf
+  [[ "$(id -u ceralive-ota)" -ne 0 ]] || die "ceralive-ota must not run as root"
+  [[ "$(getent passwd ceralive-ota | cut -d: -f7)" == /usr/sbin/nologin ]] \
+    || die "ceralive-ota must have a nologin shell"
+
   log_success "user '${user}' present in groups: ${joined}"
 }
 

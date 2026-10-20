@@ -122,6 +122,7 @@ install_rootfs() {
   install -D -m 0644 "${SCRIPT_DIR}/../boot-state-core.sh"           "${root}/usr/lib/ceralive/boot-state-core.sh"
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-boot-state.sh"          "${root}/usr/bin/ceralive-boot-state"
   install -D -m 0755 "${SCRIPT_DIR}/ceralive-rauc-boot-adapter.sh"   "${root}/usr/lib/rauc/ceralive-rauc-boot-adapter"
+  install -D -m 0755 "${SCRIPT_DIR}/../../runtime/rauc/ceralive-post-install" "${root}/usr/lib/rauc/ceralive-post-install"
 
   # RAUC system.conf — bootloader=custom wired to our backend. Slots referenced by
   # PARTLABEL (frozen contract: never FS-UUID). The B slot is omitted for
@@ -136,9 +137,15 @@ install_rootfs() {
 [system]
 compatible=${COMPATIBLE}
 bootloader=custom
+data-directory=/data/ceralive/rauc
+activate-installed=false
+
+[streaming]
+sandbox-user=ceralive-ota
+send-headers=boot-id;transaction-id
 
 [handlers]
-# Trixie RAUC 1.13 delegates the four state/primary operations to this script
+# The pinned RAUC 1.15.2 delegates the four state/primary operations to this script
 # AND calls get-current, which the adapter already implements. That call is the
 # one behavioural difference from the bookworm 1.8 this image used to target:  # suite-literal-ok: records the RAUC behaviour of the previously targeted suite
 # 1.8 read rauc.slot= itself and never invoked get-current, so the adapter's
@@ -147,6 +154,7 @@ bootloader=custom
 # BOOT_ORDER and per-slot attempt counters live on the FAT boot partition
 # because the staged vendor U-Boot has no persistent fw_setenv (decision D3).
 bootloader-custom-backend=/usr/lib/rauc/ceralive-rauc-boot-adapter
+post-install=/usr/lib/rauc/ceralive-post-install
 
 [keyring]
 path=/etc/rauc/ceralive-keyring.pem
@@ -165,6 +173,12 @@ type=ext4
 bootname=B
 EOF
     fi
+    cat <<EOF
+
+[slot.certs.0]
+device=/data/ceralive/certs/.rauc-certs-slot
+type=raw
+EOF
   } >"${root}/etc/rauc/system.conf"
   chmod 0644 "${root}/etc/rauc/system.conf"
 

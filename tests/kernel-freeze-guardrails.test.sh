@@ -97,12 +97,31 @@ done
 grep -Eq 'linux-(image|dtb|u-boot)-|armbian-firmware' <<<"${fn_body}" \
   && fail "freeze_boot_packages() hardcodes a BSP package name — the set is manifest-resolved so every board (and the per-board U-Boot package) is covered"
 
+# RAUC (Todo 22 RAUC-version-path follow-up): fixed names, NOT manifest-resolved
+# — see persistence.sh's own comment for why that is correct here rather than a
+# drift from the "never hardcode" rule above (that rule is about BOARD-VARYING
+# names; rauc/rauc-service are fixed on every board).
+grep -q '\${RAUC_PACKAGES' <<<"${fn_body}" \
+  || fail "freeze_boot_packages() no longer reads \$RAUC_PACKAGES — RAUC must stay in the frozen/held set (Todo 22 RAUC-version-path ruling)"
+rauc_default="$(sed -n 's/^RAUC_PACKAGES=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
+[[ -n "${rauc_default}" ]] || fail "could not read RAUC_PACKAGES's default from the postinst library"
+for pkg in rauc rauc-service; do
+  [[ " ${rauc_default} " == *" ${pkg} "* ]] \
+    || fail "RAUC_PACKAGES's default does not name '${pkg}' — RAUC must be frozen unconditionally"
+done
+
 # Every first-party package must be refused by name.
 never="$(sed -n 's/^CERALIVE_NEVER_FREEZE_PKGS=.*:-\(.*\)}"$/\1/p' <<<"${POSTINST_SRC}")"
 [[ -n "${never}" ]] || fail "could not read CERALIVE_NEVER_FREEZE_PKGS from the postinst library"
 for pkg in cerastream ceralive-device srtla libsrt1.5-ceralive gstreamer1.0-libuvcsrc modemmanager; do
   [[ " ${never} " == *" ${pkg} "* ]] \
     || fail "CERALIVE_NEVER_FREEZE_PKGS does not protect '${pkg}' — a first-party package could be frozen and would stop being apt-updatable"
+done
+# ...and the inverse: RAUC must NEVER be listed as never-freeze, or the two
+# defaults would cancel each other out and RAUC would stop being held.
+for pkg in rauc rauc-service; do
+  [[ " ${never} " == *" ${pkg} "* ]] \
+    && fail "CERALIVE_NEVER_FREEZE_PKGS wrongly protects '${pkg}' — RAUC must be frozen, not left apt-updatable"
 done
 
 grep -qE '^  freeze_boot_packages( |$)' "${POSTINST}" \
@@ -182,6 +201,8 @@ linux-dtb-generic-rk35xx 26.5.1
 linux-u-boot-rock-5b-plus-vendor 26.5.1
 armbian-firmware 26.8.1
 rk3588-extra-firmware 1.9-1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
 cerastream 2026.6.1
 ceralive-device 2026.6.4"
 KERNEL_PACKAGES="linux-image-generic-rk35xx" \
@@ -191,7 +212,7 @@ FIRMWARE_PACKAGES="armbian-firmware rk3588-extra-firmware" \
   run_freeze "${B1}" "${B1}/etc/apt/preferences.d" >/dev/null
 
 held_b1="$(sort -u "${B1}/holds" | tr '\n' ' ')"
-expected_b1="armbian-firmware linux-dtb-generic-rk35xx linux-image-generic-rk35xx linux-u-boot-rock-5b-plus-vendor rk3588-extra-firmware "
+expected_b1="armbian-firmware linux-dtb-generic-rk35xx linux-image-generic-rk35xx linux-u-boot-rock-5b-plus-vendor rauc rauc-service rk3588-extra-firmware "
 [[ "${held_b1}" == "${expected_b1}" ]] \
   || fail "B1 hold set wrong.\n  got:      ${held_b1}\n  expected: ${expected_b1}"
 for pkg in cerastream ceralive-device; do
@@ -205,8 +226,11 @@ grep -qxF 'Package: linux-image-generic-rk35xx' "${pref_b1}" || fail "B1 pin fil
 grep -qxF 'Pin: version 26.5.1' "${pref_b1}" || fail "B1 pin file does not pin the INSTALLED version (26.5.1)"
 grep -qxF 'Package: linux-u-boot-rock-5b-plus-vendor' "${pref_b1}" || fail "B1 pin file missing the board U-Boot package"
 grep -qxF 'Pin: version 26.8.1' "${pref_b1}" || fail "B1 pin file does not carry armbian-firmware's own installed version"
-[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b1}")" == "5" ]] \
-  || fail "B1 pin file should carry exactly 5 pinned packages"
+grep -qxF 'Package: rauc' "${pref_b1}" || fail "B1 pin file missing the rauc package (Todo 22 RAUC-version-path ruling)"
+grep -qxF 'Package: rauc-service' "${pref_b1}" || fail "B1 pin file missing the rauc-service package"
+grep -qxF 'Pin: version 1.15.2-1+ceralive.1' "${pref_b1}" || fail "B1 pin file does not pin RAUC's own installed version"
+[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b1}")" == "7" ]] \
+  || fail "B1 pin file should carry exactly 7 pinned packages (5 boot + rauc + rauc-service)"
 grep -q 'LIMITATION' "${pref_b1}" \
   || fail "B1 pin file does not document the pin's bypass limitation"
 grep -q 'RAUC' "${pref_b1}" \
@@ -216,7 +240,7 @@ grep -qE '^Package: (cerastream|ceralive-device)$' "${pref_b1}" \
 grep -qE '^Pin: (origin|release) ' "${pref_b1}" \
   && fail "B1 emitted an origin/release pin — the staged local boot .debs have no apt-origin identity for one to match"
 
-pass "Part B1 OK (5 boot packages held + pinned to their installed versions; cerastream/ceralive-device untouched)"
+pass "Part B1 OK (7 packages held: 5 boot + rauc + rauc-service, all pinned to their installed versions; cerastream/ceralive-device untouched)"
 
 # --- B2: the OTHER board's U-Boot package, same code path (also synthetic) ----
 B2="${TMPROOT}/b2"; mkdir -p "${B2}/prefs"
@@ -224,7 +248,9 @@ make_stubs "${B2}" "linux-image-generic-rk35xx 26.5.1
 linux-dtb-generic-rk35xx 26.5.1
 linux-u-boot-orangepi5-plus-vendor 26.5.1
 armbian-firmware 26.8.1
-rk3588-extra-firmware 1.9-1"
+rk3588-extra-firmware 1.9-1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1"
 KERNEL_PACKAGES="linux-image-generic-rk35xx" \
 DTB_PACKAGES="linux-dtb-generic-rk35xx" \
 UBOOT_PACKAGES="linux-u-boot-orangepi5-plus-vendor" \
@@ -248,6 +274,8 @@ B3="${TMPROOT}/b3"; mkdir -p "${B3}/prefs"
 make_stubs "${B3}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
 linux-u-boot-rock-5b-plus-edge 26.8.3
 armbian-firmware-full 26.8.3
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
 cerastream 2026.6.1"
 KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
 DTB_PACKAGES="" \
@@ -256,7 +284,7 @@ FIRMWARE_PACKAGES="armbian-firmware-full" \
   run_freeze "${B3}" "${B3}/prefs" >/dev/null
 
 held_b3="$(sort -u "${B3}/holds" | tr '\n' ' ')"
-expected_b3="armbian-firmware-full linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge "
+expected_b3="armbian-firmware-full linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge rauc rauc-service "
 [[ "${held_b3}" == "${expected_b3}" ]] \
   || fail "B3 hold set wrong.\n  got:      ${held_b3}\n  expected: ${expected_b3}"
 
@@ -266,8 +294,10 @@ grep -qxF 'Package: linux-image-7.2.0-ceralive-rk3588' "${pref_b3}" \
   || fail "B3 pin file does not name the SOURCE-BUILT kernel package"
 grep -qxF 'Pin: version 7.2.0-ceralive1' "${pref_b3}" \
   || fail "B3 pin file does not pin the source-built package's own Debian version"
-[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b3}")" == "3" ]] \
-  || fail "B3 pin file should carry exactly 3 pinned packages (no DTB package on this path)"
+grep -qxF 'Package: rauc' "${pref_b3}" \
+  || fail "B3 pin file missing the rauc package"
+[[ "$(grep -c '^Pin-Priority: 1001$' "${pref_b3}")" == "5" ]] \
+  || fail "B3 pin file should carry exactly 5 pinned packages (3 boot + rauc + rauc-service; no DTB package on this path)"
 grep -qE '^Package: linux-dtb-' "${pref_b3}" \
   && fail "B3 pinned a separate DTB package the source-built path does not install"
 grep -q 'libmali' "${pref_b3}" \
@@ -275,7 +305,63 @@ grep -q 'libmali' "${pref_b3}" \
 grep -qxF 'cerastream' "${B3}/holds" \
   && fail "B3 froze the first-party package 'cerastream'"
 
-pass "Part B3 OK (source-built kernel + edge U-Boot held; empty DTB list is a 3-package freeze, not an error)"
+pass "Part B3 OK (source-built kernel + edge U-Boot + rauc + rauc-service held; empty DTB list is a 5-package freeze, not an error)"
+
+# --- B3b: a REAL RK3588 resolve also holds the third-party MPP runtime -------
+# (Todo 29, update-system-overhaul). Same shape as B3, plus GSTREAMER_RUNTIME_PACKAGES
+# carrying the real family-manifest set (rockchip-multimedia-config librga2-ceralive
+# librockchip-mpp1) — the exact membership signal freeze_boot_packages gates on.
+# librga2-ceralive is OUR OWN fork and must NOT be held; libv4l-0 is a fixed
+# companion with no manifest entry and must be held anyway.
+B3B="${TMPROOT}/b3b"; mkdir -p "${B3B}/prefs"
+make_stubs "${B3B}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware-full 26.8.3
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
+librockchip-mpp1 1.5.0-1
+rockchip-multimedia-config 1.0.2-1
+libv4l-0 1.30.1-1
+librga2-ceralive 1.10.5+ceralive.1
+cerastream 2026.6.1"
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware-full" \
+GSTREAMER_RUNTIME_PACKAGES="rockchip-multimedia-config librga2-ceralive librockchip-mpp1" \
+  run_freeze "${B3B}" "${B3B}/prefs" >/dev/null
+
+held_b3b="$(sort -u "${B3B}/holds" | tr '\n' ' ')"
+expected_b3b="armbian-firmware-full librockchip-mpp1 libv4l-0 linux-image-7.2.0-ceralive-rk3588 linux-u-boot-rock-5b-plus-edge rauc rauc-service rockchip-multimedia-config "
+[[ "${held_b3b}" == "${expected_b3b}" ]] \
+  || fail "B3b hold set wrong.\n  got:      ${held_b3b}\n  expected: ${expected_b3b}"
+grep -qxF 'librga2-ceralive' "${B3B}/holds" \
+  && fail "B3b held librga2-ceralive — that is OUR OWN fork and must stay apt-updatable"
+grep -qxF 'cerastream' "${B3B}/holds" \
+  && fail "B3b froze the first-party package 'cerastream'"
+
+pass "Part B3b OK (real RK3588 resolve holds librockchip-mpp1/rockchip-multimedia-config/libv4l-0; librga2-ceralive stays unheld)"
+
+# --- B3c: with GSTREAMER_RUNTIME_PACKAGES unset (x86 / non-MPP resolve), the -
+#          MPP packages are never declared, so an x86 build that never
+#          installed them cannot die on "declared but not installed" ----------
+B3C="${TMPROOT}/b3c"; mkdir -p "${B3C}/prefs"
+make_stubs "${B3C}" "linux-image-7.2.0-ceralive-rk3588 7.2.0-ceralive1
+linux-u-boot-rock-5b-plus-edge 26.8.3
+armbian-firmware-full 26.8.3
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1"
+GSTREAMER_RUNTIME_PACKAGES="" \
+KERNEL_PACKAGES="linux-image-7.2.0-ceralive-rk3588" \
+DTB_PACKAGES="" \
+UBOOT_PACKAGES="linux-u-boot-rock-5b-plus-edge" \
+FIRMWARE_PACKAGES="armbian-firmware-full" \
+  run_freeze "${B3C}" "${B3C}/prefs" >/dev/null \
+  || fail "B3c: an x86/non-MPP resolve with GSTREAMER_RUNTIME_PACKAGES unset must not die"
+grep -qxF 'librockchip-mpp1' "${B3C}/holds" \
+  && fail "B3c held librockchip-mpp1 despite GSTREAMER_RUNTIME_PACKAGES not naming rockchip-multimedia-config"
+
+pass "Part B3c OK (GSTREAMER_RUNTIME_PACKAGES unset -> MPP packages never declared, no false die)"
 
 # --- C1: a first-party package in the freeze set must ABORT ------------------
 C1="${TMPROOT}/c1"; mkdir -p "${C1}/prefs"
@@ -291,9 +377,48 @@ grep -q "refusing to hold first-party package 'cerastream'" "${C1}/err" \
 
 pass "Part C1 OK (a first-party package in the boot-BSP fields aborts the build, holding nothing)"
 
+# --- C1b: each newly origin-protected name must fail before apt-mark ---------
+# Exercise the actual freeze function with each name misrouted into a boot-BSP
+# field. Keep RAUC installed so a refusal cannot pass by accident as an absent
+# package; an attempted hold is recorded even if the function later aborts.
+c1b_fail=0
+for pkg in gstreamer1.0-rockchip-ceralive librga2-ceralive ceralive-apt-credentials; do
+  C1B="${TMPROOT}/c1b-${pkg}"; mkdir -p "${C1B}/prefs"
+  make_stubs "${C1B}" "linux-image-generic-rk35xx 26.5.1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1
+${pkg} 1.0.0"
+  if KERNEL_PACKAGES="linux-image-generic-rk35xx" FIRMWARE_PACKAGES="${pkg}" \
+       run_freeze "${C1B}" "${C1B}/prefs" >"${C1B}/out" 2>"${C1B}/err"; then
+    printf 'C1b: %s was accepted as boot BSP\n' "${pkg}" >&2
+    c1b_fail=1
+  elif ! grep -qF "refusing to hold first-party package '${pkg}'" "${C1B}/err"; then
+    printf 'C1b: %s was not refused as first-party: %s\n' "${pkg}" "$(<"${C1B}/err")" >&2
+    c1b_fail=1
+  fi
+  if [[ -s "${C1B}/holds" || -e "${C1B}/prefs/ceralive-kernel-freeze" ]]; then
+    printf 'C1b: %s reached apt-mark or the pin writer before refusal\n' "${pkg}" >&2
+    c1b_fail=1
+  fi
+done
+(( c1b_fail == 0 )) || fail "C1b: first-party boot-BSP injection did not fail before apt-mark for all three names"
+
+# The default chroot-safe literal must agree with the manifest used by both
+# origin-pin writers. RAUC's legacy updater is deliberately protected too, but
+# is not a CeraLive-published name; no other extras or missing names are allowed.
+manifest_names="$(grep -vE '^[[:space:]]*(#|$)' "${PIPELINE_DIR}/manifests/first-party-apt-names.txt" | sort -u)"
+read -r -a never_array <<<"${never}"
+never_names="$(printf '%s\n' "${never_array[@]}" | sort -u)"
+expected_never="$(printf '%s\n%s\n' "${manifest_names}" rauc-hawkbit-updater | sort -u)"
+[[ "${never_names}" == "${expected_never}" ]] \
+  || fail "C1b: default never-freeze names differ from first-party apt manifest plus rauc-hawkbit-updater: $(diff -u <(printf '%s\n' "${expected_never}") <(printf '%s\n' "${never_names}") || true)"
+pass "Part C1b OK (every origin-protected name refused before apt-mark; default set equals the manifest plus legacy updater)"
+
 # --- C2: a hold that does not land must ABORT --------------------------------
 C2="${TMPROOT}/c2"; mkdir -p "${C2}/prefs"
-make_stubs "${C2}" "linux-image-generic-rk35xx 26.5.1" 0
+make_stubs "${C2}" "linux-image-generic-rk35xx 26.5.1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1" 0
 if KERNEL_PACKAGES="linux-image-generic-rk35xx" \
      run_freeze "${C2}" "${C2}/prefs" >"${C2}/out" 2>"${C2}/err"; then
   fail "C2: a hold that silently did not land was accepted — that ships an apt-upgradable kernel"
@@ -305,8 +430,13 @@ grep -q 'did not land' "${C2}/err" || fail "C2 aborted but not on the hold verif
 pass "Part C2 OK (a hold that does not land fails the build; no pin file is written)"
 
 # --- C3: full device build with a declared-but-absent boot package -> ABORT ---
+# rauc/rauc-service are stubbed as installed here so this leg isolates exactly
+# the DTB absence it claims to test, rather than incidentally also exercising
+# a second, unrelated absent-package path.
 C3="${TMPROOT}/c3"; mkdir -p "${C3}/prefs"
-make_stubs "${C3}" "linux-image-generic-rk35xx 26.5.1"
+make_stubs "${C3}" "linux-image-generic-rk35xx 26.5.1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1"
 if KERNEL_PACKAGES="linux-image-generic-rk35xx" DTB_PACKAGES="linux-dtb-generic-rk35xx" \
    INSTALL_BOOT_BSP=1 run_freeze "${C3}" "${C3}/prefs" >"${C3}/out" 2>"${C3}/err"; then
   fail "C3: INSTALL_BOOT_BSP=1 with an uninstalled declared boot package was accepted — the freeze would be silently partial"
@@ -439,7 +569,9 @@ pass "Part D1 OK (dpkg hold blocks both 'upgrade' and an explicit 'install' of t
 # Generated by the REAL function, from the REAL installed version, so this tests
 # the shipped pin format rather than a hand-written approximation.
 write_status "install ok installed"
-D2="${TMPROOT}/d2"; make_stubs "${D2}" "linux-image-generic-rk35xx 26.5.1"
+D2="${TMPROOT}/d2"; make_stubs "${D2}" "linux-image-generic-rk35xx 26.5.1
+rauc 1.15.2-1+ceralive.1
+rauc-service 1.15.2-1+ceralive.1"
 KERNEL_PACKAGES="linux-image-generic-rk35xx" \
   run_freeze "${D2}" "${APTROOT}/etc/preferences.d" >/dev/null
 [[ -f "${APTROOT}/etc/preferences.d/ceralive-kernel-freeze" ]] \

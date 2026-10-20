@@ -49,10 +49,11 @@ FIRSTBOOT="${RUNTIME}/ceralive-ssh-firstboot.service"
 CIUART="${RUNTIME}/ceralive-ci-uart-bootstrap.service"
 MACHINEID="${RUNTIME}/machine-id/ceralive-machine-id.service"
 JOURNAL_FLUSH_DROPIN="${RUNTIME}/journald/10-ceralive-journal-flush.conf"
+DPKG_RECOVER="${RUNTIME}/ceralive-dpkg-recover.service"
 
 fail() { printf 'systemd-ordering-cycle regression: %s\n' "$1" >&2; exit 1; }
 
-for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${POSTINST_ENTRY}"; do
+for f in "${FIRSTBOOT}" "${CIUART}" "${MACHINEID}" "${JOURNAL_FLUSH_DROPIN}" "${DPKG_RECOVER}" "${POSTINST_ENTRY}"; do
   [[ -f "${f}" ]] || fail "missing source file: ${f}"
 done
 [[ -d "${POSTINST_D}" ]] || fail "missing module dir: ${POSTINST_D}"
@@ -134,6 +135,10 @@ grep -Eq '^After=.*\bceralive-machine-id\.service\b' "${JOURNAL_FLUSH_DROPIN}" \
   || fail "systemd-journal-flush.service can race the machine-id-triggered journald restart"
 grep -Eq '^RequiresMountsFor=.*\B/var/log/journal\b' "${JOURNAL_FLUSH_DROPIN}" \
   || fail "systemd-journal-flush.service does not explicitly retain the persistent /var/log mount guard"
+
+grep -Fxq 'After=local-fs.target' "${DPKG_RECOVER}" || fail 'dpkg recovery must follow local filesystems'
+grep -Fxq 'Before=ceralive.service ceralive-healthcheck.service' "${DPKG_RECOVER}" || fail 'dpkg recovery must precede app and health confirmation'
+grep -Fq 'setup_dpkg_recovery' "${POSTINST_D}/services.sh" || fail 'dpkg recovery installer is not wired into configure_services'
 
 echo "systemd-ordering-cycle: Part A static contract OK"
 
@@ -244,6 +249,10 @@ printf '%s\n' "${hostname_unit}" >"${ETC}/ceralive-hostname.service"
 # Part D probes both edges; enabling it here also puts it inside B1's acyclicity
 # proof, which is what a Before=local-fs.target unit most needs.
 cp "${MACHINEID}" "${ETC}/ceralive-machine-id.service"
+cp "${DPKG_RECOVER}" "${ETC}/ceralive-dpkg-recover.service"
+install -D -m 0755 "${RUNTIME}/ceralive-dpkg-recover.sh" "${S}/usr/libexec/ceralive/ceralive-dpkg-recover"
+cp "${RUNTIME}/ceralive-healthcheck.service" "${ETC}/ceralive-healthcheck.service"
+install -D -m 0755 "${RUNTIME}/ceralive-healthcheck.sh" "${S}/usr/local/bin/ceralive-healthcheck.sh"
 mkdir -p "${ETC}/systemd-journal-flush.service.d"
 cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive-persistence.conf"
 
@@ -251,7 +260,7 @@ systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
   ceralive-migrate-data.service var-log.mount opt-ceralive.mount data.mount \
   ceralive.service NetworkManager.service ceralive-hostname.service \
-  ceralive-machine-id.service >/dev/null 2>&1 || true
+  ceralive-machine-id.service ceralive-dpkg-recover.service ceralive-healthcheck.service >/dev/null 2>&1 || true
 mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
 ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
@@ -349,4 +358,16 @@ probe_orders_after systemd-journal-flush.service var-log.mount \
   || fail "systemd-journal-flush.service is NOT ordered after var-log.mount — persistent flush can target the rootfs slot"
 echo "systemd-ordering-cycle: Part D persistence ordering OK (mount, machine-id reconciliation, journal flush, consumers)"
 
+probe_orders_after ceralive-dpkg-recover.service local-fs.target \
+  || fail 'dpkg recovery is not ordered after local-fs.target'
+probe_orders_after ceralive.service ceralive-dpkg-recover.service \
+  || fail 'ceralive.service can start before dpkg recovery'
+probe_orders_after ceralive-healthcheck.service ceralive-dpkg-recover.service \
+  || fail 'healthcheck can start before dpkg recovery'
+echo 'systemd-ordering-cycle: Part E dpkg recovery ordering OK (filesystem, recovery, app, confirmation)'
+
 echo "systemd-ordering-cycle regression: PASS"
+
+# Activation uses the opposite default-dependency rule from the early boot
+# guards above: stopping at shutdown requires the implicit shutdown conflict.
+bash "${RUNTIME}/rauc-activation.test.sh"

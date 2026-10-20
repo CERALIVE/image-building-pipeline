@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover interrupted dpkg configuration before device startup
+After=local-fs.target
+Before=ceralive.service ceralive-healthcheck.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-dpkg-recover
+# The dpkg command itself has a strict 600s budget; leave room for the audit
+# and result marker without systemd killing the worker first.
+TimeoutStartSec=610s
+
+[Install]
+WantedBy=multi-user.target

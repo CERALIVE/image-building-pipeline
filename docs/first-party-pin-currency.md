@@ -36,7 +36,8 @@ before building, using a tighter evidence-age bound.
 | `manifests/first-party-releases.json` | Independently observed published stable release and package versions, not copied from image pins |
 
 Covered components: `srt`, `cerastream`, `CeraUI`, `srtla`,
-`gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, and `librga`.
+`gstlibuvcsrc`, `modem-stack`, `gstreamer-rockchip`, `librga`, and
+`apt-credentials` (from the `apt-worker` repository, not its Worker release train).
 Component `srtla` is the Rust sender, renamed from `srtla-send-rs` at the 4.1.0
 cutover; its GitHub repository was not renamed, so `ci/pin_versions.py`
 `COMPONENT_REPOS` — not the component name — resolves the repository for release
@@ -53,7 +54,7 @@ release pins. They keep their existing gates. Neither platform library moves
 into `REPOS` or the app layer. `librga-ceralive-dev` is not an image package.
 
 Version comparison uses Debian's numeric comparator after removing an optional
-`v`/`srt-v` prefix and recognized hash/timestamp build suffixes. In particular,
+`v`/`srt-v`/`apt-credentials-v` prefix and recognized hash/timestamp build suffixes. In particular,
 `+ceralive.10` is **newer** than `+ceralive.9`; that suffix is never discarded
 as SemVer build metadata. Unknown version schemes fail closed.
 
@@ -65,7 +66,7 @@ cerastream, and an anonymous 404 is not proof that a newer release is absent.
 This keeps PR checks deterministic within an explicitly bounded observation
 window and avoids exposing a cross-repository credential to PR code.
 
-Refresh using a local `gh` login with read access to **all eight** repositories:
+Refresh using a local `gh` login with read access to all component repositories:
 
 ```sh
 python3 ci/check-first-party-pins.py --refresh
@@ -76,6 +77,14 @@ binding-only release trains, and picks the greatest component version, not
 GitHub's manually selected `latest` flag or a lexicographic tag maximum.
 It requires the selected newest release to carry all image packages. It
 never falls back to an older complete release if the newest is incomplete.
+Only `apt-credentials-v*` tags in `apt-worker` are considered for the credentials
+component; Worker tags cannot substitute for it. The first release,
+`apt-credentials-v1.0.0`, is published and served on beta (stable promotion is a
+separate step). A previous catalog predating a component may omit it during
+refresh's regression comparison, but the newly written catalog must cover every
+current component. Previously recorded components still fail on a lower discovered
+version. Ordinary catalog checks remain strict. Offline CLI tests pin a synthetic
+historical credentials row in their private fixture independently of live releases.
 It updates only the catalog, **never the three pin inputs or overrides**.
 If pins are stale, a successful catalog refresh still exits **1** after
 writing the new evidence; this is the expected signal to review the pins.
@@ -189,8 +198,9 @@ qualification is implied by this receipt.
 
 ## Engine pin receipt — 2026-09-21
 
-The pipeline selects `cerastream=2026.9.6` on both architectures and records
-`v2026.9.6` in its repo-local provenance registry. Authenticated `gh release view`
+At the time of this receipt the pipeline selected `cerastream=2026.9.6` on both
+architectures and recorded `v2026.9.6` in its repo-local provenance registry;
+the current pin is in `manifests/first-party-deb-versions.txt`. Authenticated `gh release view`
 and the tag-ref API independently identify the published release and commit
 `b3eb2a0767687415401998353337c3413c09fda9`. Both downloaded Debian assets match
 their published sidecars and GitHub asset digests; their control fields confirm

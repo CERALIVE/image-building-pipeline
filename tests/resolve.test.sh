@@ -178,7 +178,7 @@ if (
   eval "$src_out"
   [[ "${ARCH:-}" == "arm64" ]] || exit 1
   [[ "${BOARD_ID:-}" == "rock-5b-plus" ]] || exit 1
-  [[ "${ARMBIAN_BRANCH:-}" == "vendor" ]] || exit 1
+  [[ "${ARMBIAN_BRANCH:-}" == "edge" ]] || exit 1
   [[ "${QUIRKS_M2_MODEM_SIM_WORKAROUND:-}" == "required" ]] || exit 1
 ); then
   ok "flat output is source-able (eval round-trip)"

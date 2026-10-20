@@ -13,6 +13,7 @@
 #
 # It also asserts the single-definition property the refactor exists for: no
 # helper in this library is defined twice, and no other library re-implements it.
+# shellcheck disable=SC2015,SC2016
 
 set -euo pipefail
 
@@ -169,5 +170,54 @@ if lib_eval 'explode_deb "$1" "$2"' "${notanar}" "${WORK}/nowhere" >/dev/null 2>
   fail "explode_deb silently succeeded on a non-ar file"
 fi
 ok "corrupt: explode_deb fails loudly on a non-ar file"
+
+mkdir -p "${WORK}/dpkg/DEBIAN" "${WORK}/dpkg/usr/share/ceralive"
+printf 'Package: tiny-fixture\nVersion: 1.0.0\nArchitecture: all\nMaintainer: CI <ci@example.invalid>\nDescription: tiny fixture\n' \
+  >"${WORK}/dpkg/DEBIAN/control"
+printf 'fixture\n' >"${WORK}/dpkg/usr/share/ceralive/readme"
+dpkg-deb --root-owner-group --build "${WORK}/dpkg" "${WORK}/tiny-fixture.deb" >/dev/null
+kernel_eval() {
+  local code="$1"; shift
+  KERNEL_PKG_LIB="${PIPELINE_DIR}/lib/kernel/package.sh" bash -c '
+    set -euo pipefail
+    source "$(dirname "$KERNEL_PKG_LIB")/../common.sh"
+    source "$KERNEL_PKG_LIB"
+    '"${code}"'
+  ' _ "$@"
+}
+
+for reader in lib_eval kernel_eval; do
+  [[ "$("$reader" 'deb_control_field "$1" Package' "${WORK}/tiny-fixture.deb")" == tiny-fixture ]] \
+    || fail "$reader: dpkg-deb fixture Package was not read"
+  [[ "$("$reader" 'deb_control_field "$1" Version' "${WORK}/tiny-fixture.deb")" == 1.0.0 ]] \
+    || fail "$reader: dpkg-deb fixture Version was not read"
+  ok "$reader: real dpkg-deb retains good field values"
+
+  for case_name in corrupt missing unreadable no-space; do
+    case "$case_name" in
+      corrupt) deb="$notanar"; expected='file format not recognized' ;;
+      missing) deb="${WORK}/does-not-exist.deb"; expected='No such file' ;;
+      unreadable)
+        deb="${WORK}/tiny-fixture.deb"; expected='Permission denied'
+        mkdir -p "${WORK}/unreadable-bin"
+        printf '#!/bin/bash\nprintf "ar: %%s: Permission denied\\n" "$2" >&2\nexit 1\n' >"${WORK}/unreadable-bin/ar"
+        chmod +x "${WORK}/unreadable-bin/ar"
+        ;;
+      no-space)
+        deb="${WORK}/tiny-fixture.deb"; expected='No space left on device'
+        mkdir -p "${WORK}/no-space-bin"
+        printf '#!/bin/bash\nprintf "tar: write error: No space left on device\\n" >&2\nexit 2\n' >"${WORK}/no-space-bin/tar"
+        chmod +x "${WORK}/no-space-bin/tar"
+        ;;
+    esac
+    case "$case_name" in
+      unreadable|no-space) out="$(PATH="${WORK}/${case_name}-bin:$PATH" "$reader" 'deb_control_field "$1" Package' "$deb" 2>&1)" ;;
+      *) out="$("$reader" 'deb_control_field "$1" Package' "$deb" 2>&1)" ;;
+    esac
+    [[ $out == *"$expected"* && $out == *"$deb"* && $out == *'df:'* && $out == *'bytes'* ]] \
+      || fail "$reader: $case_name lacks reason, deb path/size or df diagnostics: $out"
+    ok "$reader: $case_name prints extraction reason, deb path/size and free space"
+  done
+done
 
 printf '\ndeb-lib: %d checks passed\n' "${PASS}"

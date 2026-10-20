@@ -11,7 +11,7 @@
 #                              that drives the hardware and SSH policy modules
 #   * suppress_unusable_boot_units
 #                              the seven stock units this image cannot use
-#   * configure_ntp, install_console_font_service, setup_boot_healthcheck,
+#   * configure_ntp, setup_boot_healthcheck,
 #     setup_avahi_restart, setup_cerastream_ordering, setup_rtmp_gateway
 #
 # NOT to be confused with customize/services.sh one directory up: that is a
@@ -19,9 +19,10 @@
 # module the postinst entry sources. The drift gate keys on full paths, so the
 # shared basename is safe — but they are different files with different callers.
 #
-# configure_services calls into hardware.sh and tls-ssh.sh. That is a runtime
-# call, not a source-time one, so module load order stays irrelevant; the entry
-# sources every module before anything is invoked.
+# configure_services calls into hardware.sh, tls-ssh.sh AND persistence.sh
+# (setup_slot_sync, task 26). That is a runtime call, not a source-time one, so
+# module load order stays irrelevant; the entry sources every module before
+# anything is invoked.
 #
 # CHROOT-SAFE STANDALONE: like every module under postinst.d/, this file carries
 # its own declare -F-guarded log()/die() fallbacks. The modules are sourced
@@ -142,22 +143,13 @@ EOF
   fi
 }
 
-install_console_font_service() {
-  local src="${CERALIVE_RUNTIME_SRC:-}"
-  [[ -n "${src}" && -f "${src}/ceralive-console-font.service" ]] \
-    || die "console font service source not found: ${src}/ceralive-console-font.service (is \$SRCDIR/runtime mounted?)"
-
-  install -m 0644 "${src}/ceralive-console-font.service" /etc/systemd/system/ceralive-console-font.service
-}
-
 # --- 9. Services enable/disable (verbatim from postinst section 9) --------
 configure_services() {
   log "enabling/disabling services"
   configure_debug_access
   configure_ntp  # install NTP pools before enabling chrony
-  install_console_font_service
   local svc
-  for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon ceralive-console-font; do
+  for svc in systemd-resolved NetworkManager ModemManager chrony avahi-daemon; do
     enable_service "${svc}"
   done
   configure_ssh_enablement
@@ -171,6 +163,48 @@ configure_services() {
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
+  setup_rauc_activation
+  setup_slot_sync
+  setup_dpkg_recovery
+}
+
+# Unlike the on-demand slot mirror, recovery must run before the app at boot.
+setup_dpkg_recovery() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local helper_dir="${CERALIVE_DPKG_RECOVER_HELPER_DIR:-/usr/libexec/ceralive}"
+  local unit_dir="${CERALIVE_DPKG_RECOVER_UNIT_DIR:-/etc/systemd/system}"
+  [[ -n "${src}" && -f "${src}/ceralive-dpkg-recover.sh" && -f "${src}/ceralive-dpkg-recover.service" ]] \
+    || die "dpkg recovery source missing from ${src}"
+  install -D -m 0755 "${src}/ceralive-dpkg-recover.sh" "${helper_dir}/ceralive-dpkg-recover"
+  install -D -m 0644 "${src}/ceralive-dpkg-recover.service" "${unit_dir}/ceralive-dpkg-recover.service"
+  enable_service ceralive-dpkg-recover.service
+}
+
+# The unit is installed on both architectures from one source; x86's GRUB ESP
+# lives at /boot/efi, while RK3588's boot-state FAT is mounted at /boot.
+setup_rauc_activation() {
+  local src="${CERALIVE_RUNTIME_SRC:-}" arch unit_dir="${CERALIVE_RAUC_ACTIVATE_UNIT_DIR:-/etc/systemd/system}"
+  local helper_dir="${CERALIVE_RAUC_ACTIVATE_HELPER_DIR:-/usr/libexec/ceralive}"
+  [[ -n "$src" ]] || die 'RAUC activation source directory missing'
+  local artifact
+  for artifact in ceralive-rauc-activate.sh ceralive-rauc-activate.service ceralive-rauc-arm@.service; do
+    [[ -f "$src/$artifact" ]] || die "RAUC activation artifact missing: $src/$artifact"
+  done
+  arch="$(dpkg --print-architecture)" || die 'cannot detect target architecture for boot mount'
+  case "$arch" in amd64|arm64) ;; *) die "unsupported activation architecture: $arch" ;; esac
+  install -D -m 0755 "$src/ceralive-rauc-activate.sh" "$helper_dir/ceralive-rauc-activate"
+  install -d -m 0755 "$unit_dir"
+  if [[ "$arch" == amd64 ]]; then
+    sed 's#RequiresMountsFor=/boot$#RequiresMountsFor=/boot/efi#; s#RequiresMountsFor=/data /boot$#RequiresMountsFor=/data /boot/efi#' \
+      "$src/ceralive-rauc-activate.service" >"$unit_dir/ceralive-rauc-activate.service"
+    sed 's#RequiresMountsFor=/boot$#RequiresMountsFor=/boot/efi#; s#RequiresMountsFor=/data /boot$#RequiresMountsFor=/data /boot/efi#' \
+      "$src/ceralive-rauc-arm@.service" >"$unit_dir/ceralive-rauc-arm@.service"
+  else
+    install -m 0644 "$src/ceralive-rauc-activate.service" "$unit_dir/ceralive-rauc-activate.service"
+    install -m 0644 "$src/ceralive-rauc-arm@.service" "$unit_dir/ceralive-rauc-arm@.service"
+  fi
+  chmod 0644 "$unit_dir/ceralive-rauc-activate.service" "$unit_dir/ceralive-rauc-arm@.service"
+  enable_service ceralive-rauc-activate.service
 }
 
 # --- System-mode PipeWire (ADR-0010) ---------------------------------------
@@ -375,6 +409,10 @@ setup_boot_healthcheck() {
   install -m 0755 "${src}/ceralive-healthcheck.sh" /usr/local/bin/ceralive-healthcheck.sh
   install -m 0644 "${src}/ceralive-healthcheck.service" /etc/systemd/system/ceralive-healthcheck.service
   enable_service ceralive-healthcheck.service
+  [[ -f "${src}/ceralive-partlabel-guard.service" ]] \
+    || die "PARTLABEL guard unit source not found: ${src}/ceralive-partlabel-guard.service"
+  install -m 0644 "${src}/ceralive-partlabel-guard.service" /etc/systemd/system/ceralive-partlabel-guard.service
+  enable_service ceralive-partlabel-guard.service
 }
 # ---------------------------------------------------------------------------
 # avahi-daemon restart hardening (defense-in-depth mDNS reliability): stock Debian's

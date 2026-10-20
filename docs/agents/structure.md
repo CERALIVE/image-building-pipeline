@@ -35,4 +35,3 @@ image-building-pipeline/          # build system lives at the root (mkosi v26)
 │   └── partition-contract.md # frozen GPT layout contract
 └── CONTRIBUTING.md           # contribution rules
 ```
-

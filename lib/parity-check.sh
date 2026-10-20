@@ -116,13 +116,22 @@ main() {
   local status_file="${root}/var/lib/dpkg/status"
   [[ -f "${status_file}" ]] || die "no dpkg status in rootfs (${status_file}) — not a Debian rootfs?"
 
-  # Installed package set (Status: install ok installed) — pure parse, no dpkg.
+  # Installed package set — pure parse, no dpkg. A dpkg Status line is three
+  # space-separated fields after the colon: <want> <flag> <status>, e.g.
+  # "install ok installed" for an ordinary package or "hold ok installed" for
+  # one `apt-mark hold`-ed (the kernel-freeze set: librockchip-mpp1,
+  # rockchip-multimedia-config, libv4l-0 — see freeze_boot_packages() in
+  # mkosi/customize/postinst.d/persistence.sh). A package is genuinely present
+  # on disk whenever <flag>=="ok" and <status>=="installed", regardless of
+  # <want> — matching only the literal substring "install ok installed" missed
+  # every held package and reported it as absent, which is exactly backwards:
+  # a held package is MORE certainly installed than an ordinary one, not less.
   local installed
   installed=" $(awk '
     /^Package: / { pkg=$2 }
-    /^Status: / { st=$0 }
-    /^$/ { if (st ~ /install ok installed/ && pkg!="") print pkg; pkg=""; st="" }
-    END { if (st ~ /install ok installed/ && pkg!="") print pkg }
+    /^Status: / { eflag=$3; state=$4 }
+    /^$/ { if (eflag == "ok" && state == "installed" && pkg!="") print pkg; pkg=""; eflag=""; state="" }
+    END { if (eflag == "ok" && state == "installed" && pkg!="") print pkg }
   ' "${status_file}" | sort -u | tr '\n' ' ') "
   local n_installed
   n_installed="$(echo "${installed}" | wc -w)"

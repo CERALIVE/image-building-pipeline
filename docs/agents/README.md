@@ -2,7 +2,7 @@
 
 [Entry rules](../../AGENTS.md). Read the applicable contract before editing its subsystem.
 
-Every original section is preserved below, including historical findings and deferred work; status and scope remain as recorded.
+Every original section is preserved below, including historical findings and deferred work. The update-system integration contracts are carried into their owning sections; source/host-test evidence never implies a newly released or board-qualified image.
 
 | Original heading | Preserved file | Governed paths / scope |
 |---|---|---|

@@ -76,7 +76,12 @@ EOF
   if ! assert_deb_identity "${tmp}" libv4l-0 "${LIBV4L0_COMPAT_VERSION}" arm64; then
     die "generated libv4l-0 compatibility package has invalid Debian control identity"
   fi
+  local generated_sha
+  generated_sha="$(sha256sum "${tmp}" | cut -d' ' -f1)"
   mv -f "${tmp}" "${out}"
+  install -d -m 0755 "${debs%/debs}/packages-lock"
+  printf '{"name":"libv4l-0","version":"%s","arch":"arm64","origin":"generated-locally","sha256":"%s"}\n' \
+    "${LIBV4L0_COMPAT_VERSION}" "${generated_sha}" >"${debs%/debs}/packages-lock/generated.jsonl"
   log_success "RK3588 userspace: built libv4l-0 compatibility package -> ${out}"
 )
 
@@ -123,7 +128,7 @@ _fetch_rk3588_userspace_one() {
   final="${_RK3588_USERSPACE_DEBS}/${filename}"
   # The pin file IS the expected hash, so a cached entry is re-checked against
   # exactly what the download would have been checked against.
-  if debcache_try_hit "${filename}" "${sha256}" "${final}"; then
+  if debcache_try_hit "${filename}" "${sha256}" "${final}" "${pkg}" '' "${ARCH}" --arch-all-ok; then
     return 0
   fi
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"

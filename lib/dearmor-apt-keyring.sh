@@ -4,7 +4,8 @@
 # into the binary keyring payload consumed by the runtime image postinstall.
 #
 # This runs in the build environment, never on the device: the final runtime
-# image intentionally contains apt/gpgv but not the full gpg or file utilities.
+# image carries apt and explicitly installs gpgv via shared.list for CeraUI's
+# update selector (APT 3.0 uses sqv), but not the full gpg or file utilities.
 
 set -euo pipefail
 

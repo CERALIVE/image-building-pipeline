@@ -88,9 +88,10 @@ ln_line="$(grep -nE "ln[[:space:]]+-sf[[:space:]]+${STUB}[[:space:]]+/etc/resolv
 # After unmounting the overlay, DNS is gone for the rest of the postinst; later steps
 # still hit the network (e.g. setup_rtmp_gateway's MediaMTX fetch). The function must
 # seed resolved's stub with the captured nameservers so those steps keep resolving.
-grep -Eq 'stub-resolv\.conf' <<<"${fn_body}" \
-  && grep -Eq 'mkdir[[:space:]].*-p[[:space:]].*/run/systemd/resolve' <<<"${fn_body}" \
-  || fail "configure_networking() no longer seeds /run/systemd/resolve/stub-resolv.conf after unmounting — later network steps (e.g. MediaMTX fetch) lose DNS and the build fails"
+if ! grep -Eq 'stub-resolv\.conf' <<<"${fn_body}" \
+  || ! grep -Eq 'mkdir[[:space:]].*-p[[:space:]].*/run/systemd/resolve' <<<"${fn_body}"; then
+  fail "configure_networking() no longer seeds /run/systemd/resolve/stub-resolv.conf after unmounting — later network steps (e.g. MediaMTX fetch) lose DNS and the build fails"
+fi
 
 echo "resolv-conf-bind-mount: Part A static contract OK (unmount before symlink; stub seeded for build-time DNS continuity)"
 
@@ -127,6 +128,13 @@ printf 'nameserver 203.0.113.53\n' >/tmp/host-resolv.conf
 mount --bind /tmp/host-resolv.conf /etc/resolv.conf
 
 mountpoint -q /etc/resolv.conf || { echo "seed precondition failed: /etc/resolv.conf is not a mountpoint"; exit 1; }
+
+# Docker's covered resolv.conf bind remains in mountinfo after /etc is mounted
+# anew; a symlink at this path proves the fixture's visible bind is gone.
+mountpoint() {
+  if [[ "\$1" == -q && "\$2" == /etc/resolv.conf && -L /etc/resolv.conf ]]; then return 1; fi
+  command mountpoint "\$@"
+}
 
 # shellcheck source=/dev/null
 source "${POSTINST_LIB}"

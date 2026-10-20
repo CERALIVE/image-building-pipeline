@@ -138,7 +138,7 @@ done
 openssl pkey -pubin -in "${UART_BOOTSTRAP_PUBLIC}" -noout
 # The postinst library is a thin entry plus per-concern modules under
 # postinst.d/; the install site is in a module, so read the whole set.
-cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh | grep -Fq 'ceralive-ci-uart-bootstrap-public.pem'
+cat "${POSTINST_LIB}" "${POSTINST_D}"/*.sh | grep -F 'ceralive-ci-uart-bootstrap-public.pem' >/dev/null
 if grep -Fq 'PRIVATE KEY' "${UART_BOOTSTRAP_PUBLIC}"; then
   printf 'Maskrom-first regression: immutable image embeds the UART signing private key\n' >&2
   exit 1

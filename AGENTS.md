@@ -39,6 +39,15 @@ CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=requir
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.
 
+## UPDATE RELEASE BOUNDARY [PARTIAL]
+The CeraUI v2026.9.5 pin selects the released unified APT/RAUC orchestrator.
+Read [Update Paths](README.md#update-paths--unified-orchestrator-image-qualification-partial)
+for the two-board drill scope, origin protection and verified-other-slot mirror rule;
+[release process](docs/RELEASE-PROCESS.md) owns verity bundles and signed image channels.
+Build caches are reusable state, never candidate, signature or board-proof substitutes.
+Multi-uplink failover, full override-free candidate boot and amd64 hardware remain unverified.
+Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without evidence.
+
 ## WHERE TO LOOK
 | Code path or task | Contract |
 |---|---|
@@ -60,6 +69,8 @@ Build/boot/release lanes are distinct from the lint/test gate; never claim unrun
 - Firmware content, Bluetooth closure, required/forbidden Kconfig and rootfs size gates fail the build; never downgrade them to warnings.
 - Each populated ext4 slot must have >= 512 MiB ACTUAL free space; image size alone is not proof of slot reserve.
 - The healthcheck is the only mark-good caller for the BOOTED slot; never manually confirm an unverified boot.
+- Slot-sync may mark only the OTHER slot good, after verified mirroring of a boot-health-confirmed state; read [the mirror contract](docs/agents/key-facts.md) before editing its receipt or ordering.
+- Slot-sync clears its stale mounts before refusing a still-mounted target; only pre-copy repair rc 0/1 permits copying, and the final read-only filesystem check remains mandatory before mark-good.
 - Never shadow packaged udev rules with image-owned rules of the same basename; udev resolves ownership by basename.
 - Preserve frozen A/B labels, UUID and bootloader contracts; bench PARTLABEL overlays are explicit opt-ins, never production defaults.
 - Signed RAUC/add-on trust and immutable release keys are mandatory; never publish unsigned or byte-different replacement artifacts.
