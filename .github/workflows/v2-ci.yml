@@ -1059,6 +1059,7 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           set -euo pipefail
+          exit 1
           echo "dependency results: ${RESULTS}"
           for result in ${RESULTS}; do
             case "${result}" in
