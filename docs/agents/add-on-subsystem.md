@@ -681,6 +681,8 @@ credentials with no screen or keyboard. Standalone artifacts under
 `CONSOLIDATED_FUNCS`). Full end-to-end flow:
 [`docs/wifi-provisioning.md`](../wifi-provisioning.md).
 
+The portal mark is vendored under `mkosi/runtime/brand/`, pinned by `brand-assets.lock.json` and covered by `BRAND-ASSETS-NOTICE.md`; missing, unreadable or oversized artwork is logged and omitted without interrupting setup.
+
 - **Trigger** (runtime decision, not a static unit Condition): the AP starts IFF
   there are **no stored (non-AP) NM WiFi profiles** on `/data` **AND** no link-up
   connectivity appears within a **60-90s boot grace window** (default 75s). Either

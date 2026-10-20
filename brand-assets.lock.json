@@ -1,0 +1,15 @@
+{
+	"schema": 1,
+	"source": "CERALIVE/ceralive-brand",
+	"tag": "v2026.10.0",
+	"commit": "ed4110a94f8220d19d118b161cbaa980323c96e8",
+	"tarball": "ceralive-brand-2026.10.0.tar.gz",
+	"tarballSha256": "7c4fd4a27d00428574e4c6b10012c653fe2713e2aab36c462993edbe0980ac24",
+	"files": [
+		{
+			"from": "exports/svg/ceralive-mark-small-dark.svg",
+			"to": "mkosi/runtime/brand/ceralive-mark-small-dark.svg",
+			"sha256": "64464b84933cc042b5e7a08ae294ff6a9084b4922c013ba4a1d9828e06c07700"
+		}
+	]
+}

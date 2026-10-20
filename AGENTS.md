@@ -58,6 +58,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Subsystem routing and existing runbooks | [WHERE TO LOOK](docs/agents/where-to-look.md) |
 | lib/, manifests/, mkosi/, ci/, tests/: build, runtime, boot loadaddr error, bench labels, safety and release contracts | [KEY FACTS](docs/agents/key-facts.md) |
 | Feature sysext generation, signing and publishing | [ADD-ON SUBSYSTEM [EXISTS]](docs/agents/add-on-subsystem.md) |
+| First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
 | Unsafe build/runtime patterns | [ANTI-PATTERNS](docs/agents/anti-patterns.md) |
 | Known issues, deferred work and hardware acceptance limits | [KNOWN ISSUES / DEFERRED](docs/agents/known-issues-deferred.md) |

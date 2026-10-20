@@ -121,13 +121,28 @@ echo "== Scenario B: GET serves the form with scanned SSIDs =="
 reset_state
 printf 'HomeNet\nCafe Wifi\nNeighbour\n' >"$(state_file scan.txt)"
 printf 'ssid=CeraLive-Setup-f00d\ngateway=192.168.42.1\n' >"$(state_file portal-active)"
-GET_OUT="$(printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | bash "${PORTAL}" serve 2>/dev/null)"
+GET_OUT="$(printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | CERALIVE_PORTAL_MARK_SVG="${RUNTIME}/brand/ceralive-mark-small-dark.svg" bash "${PORTAL}" serve 2>/dev/null)"
 grep -qF '<form method="POST"' <<<"${GET_OUT}"   && pass "serves an HTML form"          || fail "serves an HTML form"
 grep -qF 'name="ssid"'         <<<"${GET_OUT}"   && pass "form has an SSID field"        || fail "form has an SSID field"
 grep -qF 'name="psk"'          <<<"${GET_OUT}"   && pass "form has a passphrase field"   || fail "form has a passphrase field"
 grep -qF '<option value="HomeNet">' <<<"${GET_OUT}" && pass "SSID list populated from scan" || fail "SSID list populated from scan"
 grep -qF 'Cafe Wifi'           <<<"${GET_OUT}"   && pass "SSID with a space rendered"    || fail "SSID with a space rendered"
 grep -qiF '200 OK'             <<<"${GET_OUT}"   && pass "responds 200 OK"               || fail "responds 200 OK"
+grep -qF 'data:image/svg+xml;base64,' <<<"${GET_OUT}" && pass "embeds the brand mark" || fail "embeds the brand mark"
+MARK_PAYLOAD="$(sed -n 's/.*src="data:image\/svg+xml;base64,\([^"]*\)".*/\1/p' <<<"${GET_OUT}")"
+MARK_SHA="$(sha256sum "${RUNTIME}/brand/ceralive-mark-small-dark.svg")"
+DECODED_SHA="$(printf '%s' "${MARK_PAYLOAD}" | base64 --decode | sha256sum)"
+[ "${MARK_SHA%% *}" = "${DECODED_SHA%% *}" ] && pass "embedded mark matches the vendored sha256" || fail "embedded mark matches the vendored sha256"
+for old_hex in '#0b1220' '#121a2b' '#243049' '#3b82f6' '#0d1526' '#2b3a57' '#9fb0c8' '#7c8aa3'; do
+  ! grep -qiF "${old_hex}" <<<"${GET_OUT}" && pass "retired color ${old_hex} absent" || fail "retired color ${old_hex} absent"
+done
+
+# ===========================================================================
+echo "== Scenario B2: missing artwork still serves the setup form =="
+MISSING_OUT="$(printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | CERALIVE_PORTAL_MARK_SVG=/nonexistent bash "${PORTAL}" serve 2>/dev/null)"
+grep -qF '<form method="POST"' <<<"${MISSING_OUT}" && pass "missing mark keeps the form" || fail "missing mark keeps the form"
+grep -qF '200 OK' <<<"${MISSING_OUT}" && pass "missing mark keeps HTTP 200" || fail "missing mark keeps HTTP 200"
+! grep -qF '<img' <<<"${MISSING_OUT}" && pass "missing mark emits no image" || fail "missing mark emits no image"
 
 # ===========================================================================
 echo "== Scenario C: POST writes the NM profile + triggers the detached handoff =="
