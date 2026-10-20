@@ -371,7 +371,11 @@ not merely any intermediate or a root-direct leaf chaining to the keyring.
 separate modes. Current zstd candidates are decoded and re-encoded as xz;
 earlier xz candidates are copied as-is. Both verify the original raw checksum.
 `refresh` takes a single board and an observed serial plus quoted JSON ETag,
-which CI rechecks before forwarding. A create-only recovery intent lets a retry
+which CI rechecks before forwarding.
+The upstream watcher's expiry issue supplies both inputs from the same HTTP
+response, preserving the quoted R2 JSON ETag in its copyable refresh command;
+review the signed pointer before dispatch and re-observe after any drift refusal.
+The create-only recovery intent lets a retry
 authenticate and finish an interrupted signature-first write by JSON ETag CAS;
 the workflow exports its R2 credentials before the direct refresh pre-read.
 readers can still see a mismatched pair until then and must fail closed. See the

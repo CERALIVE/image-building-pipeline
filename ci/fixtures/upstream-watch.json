@@ -9,9 +9,10 @@
   },
   "manifest": {
     "board": "rock-5b-plus", "channel": "stable",
+    "serial": 9, "etag": "\"fedcba9876543210fedcba9876543210\"",
     "expiring_20_days": {"expires_at": "2026-10-13T00:00:00Z"},
     "expiring_60_days": {"expires_at": "2026-11-22T00:00:00Z"},
-    "refresh_command": "gh workflow run publish-release.yml --repo CERALIVE/image-building-pipeline -f mode=refresh -f boards=rock-5b-plus -f channel=stable"
+    "refresh_command": "gh workflow run publish-release.yml --repo CERALIVE/image-building-pipeline -f mode=refresh -f boards=rock-5b-plus -f channel=stable -f expect_serial=9 -f expect_etag='\"fedcba9876543210fedcba9876543210\"'"
   },
   "forbidden_pin_write": "Path('manifests/first-party-deb-versions.txt').write_text('cerastream=unreviewed')"
 }

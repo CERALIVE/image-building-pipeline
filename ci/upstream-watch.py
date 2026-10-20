@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -165,16 +166,23 @@ def timestamp(value: str) -> datetime:
     return result
 
 
-def refresh_command(channel: str, board: str) -> str:
+@dataclass(frozen=True, slots=True)
+class RefreshPrecondition:
+    serial: int
+    etag: str
+
+
+def refresh_command(channel: str, board: str, observed: RefreshPrecondition) -> str:
     return ("gh workflow run publish-release.yml --repo CERALIVE/image-building-pipeline "
-            f"-f mode=refresh -f boards={board} -f channel={channel}")
+            f"-f mode=refresh -f boards={board} -f channel={channel} "
+            f"-f expect_serial={observed.serial} -f expect_etag={shlex.quote(observed.etag)}")
 
 
 def live_manifest(channel: str, board: str, now: datetime) -> Issue | None:
     url = f"https://images.ceralive.tv/channels/{channel}/{board}.json"
     response = command(["curl", "--silent", "--show-error", "--location", "--max-time", "35",
-                        "--write-out", "\n%{http_code}", url]).decode()
-    content, code = response.rsplit("\n", 1)
+                        "--write-out", "\n%{http_code}\n%header{etag}", url]).decode()
+    content, code, etag = response.rsplit("\n", 2)
     if code == "404":
         return None
     if code != "200":
@@ -182,9 +190,12 @@ def live_manifest(channel: str, board: str, now: datetime) -> Issue | None:
     document = json.loads(content)
     if document.get("board") != board or document.get("channel") != channel:
         raise RuntimeError(f"channel manifest identity mismatch: {url}")
+    serial = document["serial"]
+    if type(serial) is not int or serial <= 0 or re.fullmatch(r'"[a-fA-F0-9]{32}"', etag) is None:
+        raise RuntimeError(f"channel manifest lacks a positive serial or quoted JSON ETag: {url}")
     return expiry_issue(f"channel-{channel}-{board}", f"Channel manifest {channel}/{board}",
                         timestamp(document["expires_at"]), now, 30,
-                        f"Refresh the current signed manifest without republishing parts:\n\n```sh\n{refresh_command(channel, board)}\n```\n")
+                        f"Refresh the current signed manifest without republishing parts:\n\n```sh\n{refresh_command(channel, board, RefreshPrecondition(serial, etag))}\n```\n")
 
 
 def pins(path: Path) -> list[str]:
@@ -308,9 +319,53 @@ def forbidden_write_calls(source: ast.AST) -> list[str]:
 
 
 def self_test() -> None:
+    import textwrap
+    from unittest import TestCase
+    from unittest.mock import patch
+
     before = tree_digest()
     fixture = json.loads((ROOT / "ci/fixtures/upstream-watch.json").read_text())
     today = timestamp(fixture["today"])
+    # Given a manifest and ETag observed together, independent of the command fixture.
+    observed = {"board": "orange-pi-5-plus", "channel": "beta", "serial": 17,
+                "expires_at": "2026-10-13T00:00:00Z"}
+    etag = '"0123456789abcdef0123456789ABCDEF"'
+
+    def manifest_response(args: list[str]) -> bytes:
+        assert args[0] == "curl"
+        trailer = args[args.index("--write-out") + 1]
+        return (json.dumps(observed) + trailer.replace("%{http_code}", "200")
+                .replace("%header{etag}", etag)).encode()
+
+    # When the real issue builder observes the expiring pointer.
+    with patch.dict(live_manifest.__globals__, command=manifest_response):
+        issue = live_manifest("beta", "orange-pi-5-plus", today)
+    assert issue is not None
+    issue_command = issue.body.split("```sh\n", 1)[1].split("\n```", 1)[0]
+    argv = shlex.split(issue_command)
+    fields = dict(argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "-f")
+    workflow = (ROOT / ".github/workflows/publish-release.yml").read_text()
+    step = workflow.split("- name: Validate dispatch and candidate provenance", 1)[1]
+    validation = textwrap.dedent(step.split("run: |\n", 1)[1].split("      - name:", 1)[0])
+    # Then the shell-parsed issue command passes the actual workflow's validation.
+    result = subprocess.run(["bash", "-c", validation], check=False, capture_output=True,
+                            env=os.environ | {"MODE": fields.get("mode", ""),
+                                              "BOARDS": fields.get("boards", ""),
+                                              "EXPECT_SERIAL": fields.get("expect_serial", ""),
+                                              "EXPECT_ETAG": fields.get("expect_etag", "")})
+    assert result.returncode == 0, result.stderr.decode()
+    assert fields["expect_serial"] == str(observed["serial"])
+    assert fields["expect_etag"] == etag
+    assert fields["boards"] == observed["board"] and fields["channel"] == observed["channel"]
+    for etag in ("", "0123456789abcdef0123456789abcdef",
+                 'W/"0123456789abcdef0123456789abcdef"', '"not-an-md5"'):
+        with patch.dict(live_manifest.__globals__, command=manifest_response), TestCase().assertRaises(RuntimeError):
+            live_manifest("beta", "orange-pi-5-plus", today)
+    etag = '"0123456789abcdef0123456789ABCDEF"'
+    for serial in (0, -1, True, "17"):
+        with patch.dict(live_manifest.__globals__, command=manifest_response), \
+                patch.dict(observed, serial=serial), TestCase().assertRaises(RuntimeError):
+            live_manifest("beta", "orange-pi-5-plus", today)
     debian = fixture["debian"]
     assert debian_issue(debian["current"], debian["pinned_date"], "13") is None
     changed = debian_issue(debian["newer"], debian["pinned_date"], "13")
@@ -330,7 +385,8 @@ def self_test() -> None:
     assert expiry_issue("cert", "cert", today + timedelta(days=100), today, 120, "Rotate")
     assert expiry_issue("cert", "cert", today + timedelta(days=140), today, 120, "Rotate") is None
     manifest = fixture["manifest"]
-    cmd = refresh_command(manifest["channel"], manifest["board"])
+    cmd = refresh_command(manifest["channel"], manifest["board"],
+                          RefreshPrecondition(manifest["serial"], manifest["etag"]))
     assert cmd == manifest["refresh_command"]
     expiring = expiry_issue("channel", "channel", timestamp(manifest["expiring_20_days"]["expires_at"]),
                             today, 30, cmd)
@@ -346,7 +402,7 @@ def self_test() -> None:
     else:
         raise AssertionError("command allowlist permitted a pin write")
     assert tree_digest() == before, "self-test mutated the repository tree"
-    print("PASS: current, newer, vanished, tags, certificate, manifest 20d/60d, exact refresh command, structural no-writes, entire checkout byte-identical")
+    print("PASS: current, newer, vanished, tags, certificate, manifest 20d/60d, observed refresh inputs, workflow validation, invalid serial/ETag refusal, exact refresh command, structural no-writes, entire checkout byte-identical")
 
 
 def main() -> int:

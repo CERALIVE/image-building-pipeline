@@ -635,6 +635,15 @@ both as `--expect-serial` / `--expect-etag` to the publisher. Read the current
 signed pointer and its R2 ETag using the procedure below before dispatch; do
 not enter an unquoted digest or use a serial from another board.
 
+The issue-only upstream watcher opens an advisory within 30 days of a stable or
+beta manifest's expiry. Its copyable refresh command includes `expect_serial`
+and shell-quoted `expect_etag` from the **same HTTP response**, retaining the
+literal double quotes in the ETag value. The public manifest endpoint preserves
+the R2 JSON ETag (checked read-only against `head-object` on 2026-10-20).
+A missing, weak or malformed ETag stops the watch rather than producing an
+unusable command. The advisory is an observation, not approval: review the
+signed pointer before dispatch, and re-observe if the workflow refuses drift.
+
 A release-candidate archive must include `good.raucb`, both transport checksums,
 `raw.sha256` and `packages.lock.json`. Current `.raw.zst` candidates are decoded
 and recompressed to actual xz; earlier `.raw.xz` candidates are copied. In both
