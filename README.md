@@ -6,10 +6,10 @@ This is an input migration, not a claim that a new image was built or flashed.
 
 The update-system integration branch now selects `ceralive-apt-credentials=1.0.1`
 as an app-layer package rather than baking CI's APT client key into the runtime
-image. Its `apt-credentials-v1.0.1` GitHub release exists; catalog refresh does
-not establish APT-channel availability. The earlier `1.0.0` release was served
-on beta; stable-channel availability of `1.0.1` remains unverified here and must
-be established before a stable-channel real build. The authenticated release-currency refresh records
+image. Its `apt-credentials-v1.0.1` GitHub release is published and served on
+stable; both bench boards installed `1.0.1` and authenticated through the enforced
+mTLS path. Catalog refresh alone does not establish APT-channel availability.
+The authenticated release-currency refresh records
 the new component even when its previous catalog predates it; it still fails
 on a downgrade of any previously recorded component. This is not a shipped-image claim.
 
@@ -763,17 +763,15 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to release v2026.9.4 (tag commit `159f99b`) using its exact
-per-architecture Debian versions, `2026.9.4-20260923T212001.159f99b` (amd64) and
-`2026.9.4-20260923T212013.159f99b` (arm64). It retains the
-source-enumeration repairs for multi-node cameras and HDMI audio card identity,
-keeps generic raw capture inputs
-visible and honestly labelled as non-streamable rather than dropping them,
-classifies `libuvcsrc` as an application package, and retains the working address
-family plus alternate default routes during connectivity fallback and host-route
-repair from 2026.9.3 and adds capture-resilience operator surfaces. The active
-Debian versions above come from the pinned manifest, not the earlier release's
-checksum receipt. Fresh-image boot and media qualification remain separate gates;
+CeraUI is pinned to stable release v2026.9.5 (tag commit `23ee67a`) using its exact
+per-architecture Debian versions, `2026.9.5-20261020T030729.23ee67a` (amd64) and
+`2026.9.5-20261020T030724.23ee67a` (arm64). It adds the unified device update
+orchestrator to the existing capture-resilience and connectivity repairs. Both
+downloaded release archives matched their published SHA-256 sidecars. Both bench
+boards installed the released arm64 package through the product. The active
+Debian versions above come from the pinned manifest, not an earlier release's
+checksum receipt. Full override-free image boot, amd64 hardware and media
+qualification remain separate gates;
 the documented early-import SIGUSR1 residual
 window is unchanged.
 
@@ -1133,7 +1131,13 @@ symbol declarations and unit-file content — because this repo's CI has no
 privileged network namespace. On-device apply/reload/teardown is a labelled
 hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
-## Update Paths — transition to one orchestrator [PARTIAL]
+## Update Paths — unified orchestrator, image qualification [PARTIAL]
+
+The pinned stable CeraUI v2026.9.5 drives both APT package updates and RAUC OS
+updates on capability-bearing images. OS discovery uses signed channel manifests
+at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
+selects the immutable release bytes, not a guessed bundle URL. Legacy images
+without the required capabilities keep their restricted package-update path.
 
 Boot health confirmation runs on every new kernel boot, including ordinary
 same-slot reboots. The persistent `.slot-marked-good` marker suppresses only
@@ -1147,15 +1151,16 @@ but is not hard-bound to its lifecycle. A CeraUI `.deb` postinst restarts the
 backend during dpkg; this must not restart the already-completed boot check while
 dpkg's updates directory is non-empty. An independently invoked check still
 refuses pending dpkg state, and a missing app still prevents mark-good. This
-2026-09-28 correction is host-tested only; no fixed image has been booted.
+2026-09-28 correction has host regression coverage; full override-free candidate
+boot qualification of this pinned image remains pending.
 
-These are independent mechanisms with different triggers, and reading them as one
-"update button" is how the wrong thing gets debugged:
+One orchestrator owns the product update paths; the dormant legacy and manual
+recovery entrypoints are not additional automatic updaters:
 
 | Path | Trigger | What it does |
 |---|---|---|
 | **apt package upgrade** | CeraUI's orchestrator or legacy `system.startUpdate` RPC launches a detached `systemd-run` apt unit | Legacy images use the exact first-party app roster; capable images use permitted-origin packages excluding holds. Neither changes the frozen boot stack (see "Kernel Freeze" above). |
-| **RAUC OS update, automatic (capability-gated)** | CeraUI's OS agent on a capable image | Verifies the signed channel manifest, runs `rauc install` to stage the inactive slot, and defers activation until a clean idle shutdown or reboot. Not available on released legacy images. |
+| **RAUC OS update, capability-gated** | CeraUI's orchestrator, through the operator action or automatic schedule | Verifies the signed channel manifest from images.ceralive.tv, runs `rauc install` to stage the inactive slot, and defers activation until a clean idle shutdown or reboot. Not available on legacy images without the required capabilities. |
 | **RAUC OS update, dormant legacy** | `rauc-hawkbit-updater` | Package and config template remain installed, but the updater is disabled and masked against first-boot presets; no server is configured. The legacy bundle-watching marker-clear units are removed; boot-scoped health confirmation needs no download hook. |
 | **RAUC OS update, manual** | An operator running `/usr/local/bin/ceralive-update` | **Inert by default.** `persistence.sh` seeds `/data/ceralive/update.conf` with an empty `BUNDLE_URL`, and the script refuses to run without one |
 
@@ -1179,9 +1184,28 @@ manual recovery script. Do not reboot expecting a staged slot to boot automatica
 passes the independent authority check, advertises all eight schema-1 update features:
 RAUC verity streaming, deferred activation, slot sync, origin protection,
 all-package APT, reprune hook, APT credentials and UID-range transport.
-The image-side mechanisms and CeraUI consumers are implemented on their
-integration branches; this source change alone does not rebuild the earlier
-drill candidates or establish a released/booted capable image.
+Origin protection selects our first-party package names from `apt.ceralive.tv`
+at priority 990 and rejects same-name Debian candidates at -1; permitted Debian
+updates remain actionable outside the held image-only set. The lagged
+`ceralive-slot-sync` mirror restores the other slot from a health-confirmed
+running slot, including after rollback. Only the healthcheck may confirm the
+booted slot; slot-sync may mark only the verified mirrored other slot good.
+
+**Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
+exercised OS staging, stream-triggered abort/restage, fallback after three failed
+boots, package-install crash recovery, mirror restoration and notifications.
+Power-loss arms ran on Orange Pi only; Rock had no controlled power plug.
+Origin protection rejected higher-version fake Debian candidates on both boards.
+The interrupted-filesystem mirror repair used the reviewed image script deployed
+separately, not a rebuilt image; some fallback/recovery checks used an earlier
+CeraUI package. A restage may re-download about a cold run, and interrupted broken
+package installs do not yet create a quarantine pin. These are recorded limits,
+not promises of byte reuse or complete crash coverage.
+
+Multi-uplink failover arms remain unverified: each board had only one healthy
+uplink. Full override-free candidate boot qualification follows this pin change;
+amd64 hardware has not been tested. These drills and the released arm64 package
+installation do not establish a newly built, fully qualified production image.
 
 ### OTA-During-Stream Guard
 

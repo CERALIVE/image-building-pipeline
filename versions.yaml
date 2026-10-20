@@ -111,9 +111,10 @@ CeraUI:
   # @ceralive/modem-control at the already-released 1.4.0.
   # v2026.9.4 (capture-failover-resilience): capture-resilience operator surfaces
   # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
-  pin: v2026.9.4
-  # Device deb: ceralive-device 2026.9.4-20260923T212001.159f99b (amd64) /
-  #   2026.9.4-20260923T212013.159f99b (arm64); see first-party-deb-versions.txt.
+  # v2026.9.5: unified device update orchestrator, validated on both bench boards.
+  pin: v2026.9.5
+  # Device deb: ceralive-device 2026.9.5-20261020T030729.23ee67a (amd64) /
+  #   2026.9.5-20261020T030724.23ee67a (arm64); see first-party-deb-versions.txt.
   # Historical receipt for 2026.9.3 follows (not the active artifact):
   #   2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded

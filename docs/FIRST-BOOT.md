@@ -1,7 +1,8 @@
 # CeraLive First-Boot Guide
 
 Getting from a freshly-flashed card to a live stream. Every step here is
-verifiable against the merged runtime scripts under `mkosi/runtime/`.
+verifiable against the runtime scripts under `mkosi/runtime/`; integration-branch
+changes are not a claim that a new image has completed boot qualification.
 
 ---
 
@@ -43,8 +44,11 @@ parts; incomplete parts resume with HTTP Range and mismatches are re-fetched up
 to three times. An absent `--keyring` emits a warning: SHA-256 alone detects
 accidental corruption but **does not authenticate who published the metadata**.
 Use the dedicated OTA manifest root, not a device TLS key or a private signing
-key. No release is implied by this guide: the live drill publish/download proof
-is still pending.
+key. **Validation [PARTIAL]:** signed drill-channel flash downloads, interruption
+and resume passed for Rock 5B+ and Orange Pi 5+ in the 2026-10-19 drills. Those
+used bench trust, not production-release qualification. A full override-free
+candidate boot with the newly pinned packages remains pending; no stable OS
+image publication is implied by the CeraUI package release.
 
 If you already know and trust the exact published release URL and SHA-256 from a
 verified channel manifest, `aria2c -x8 -s8` can instead range-download the
@@ -370,6 +374,26 @@ ls -la /data/ceralive/tls/
 # Boot healthcheck result
 journalctl -u ceralive-healthcheck.service -n 30
 ```
+
+---
+
+### 6.4 Updates after first boot [PARTIAL]
+
+The image pins stable CeraUI v2026.9.5, whose update orchestrator handles both
+APT packages and RAUC OS updates when the image advertises the required
+capabilities. Use CeraUI for discovery and installation; there is no separate
+first-boot OS downloader or required manual `ceralive-update` invocation.
+OS updates come from `images.ceralive.tv` through signed channel manifests and
+stage the inactive slot. Activation waits for a clean idle shutdown or reboot;
+an unclean power loss does not activate a staged slot. Package commit blocks
+stream start; starting a stream aborts an in-flight update download.
+
+After boot, the healthcheck alone confirms the running slot. The lagged mirror
+may then restore the other slot; do not manually mark the running slot good.
+The legacy hawkBit updater stays disabled and masked. See
+[Update Paths](../README.md#update-paths--unified-orchestrator-image-qualification-partial)
+for the drill evidence and limits: multi-uplink failover, a full override-free
+candidate boot and amd64 hardware remain unverified.
 
 ---
 

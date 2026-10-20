@@ -39,6 +39,15 @@ CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=requir
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.
 
+## UPDATE RELEASE BOUNDARY [PARTIAL]
+The CeraUI v2026.9.5 pin selects the released unified APT/RAUC orchestrator.
+Read [Update Paths](README.md#update-paths--unified-orchestrator-image-qualification-partial)
+for the two-board drill scope, origin protection and verified-other-slot mirror rule;
+[release process](docs/RELEASE-PROCESS.md) owns verity bundles and signed image channels.
+Build caches are reusable state, never candidate, signature or board-proof substitutes.
+Multi-uplink failover, full override-free candidate boot and amd64 hardware remain unverified.
+Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without evidence.
+
 ## WHERE TO LOOK
 | Code path or task | Contract |
 |---|---|

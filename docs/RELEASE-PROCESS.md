@@ -1,9 +1,12 @@
 # Release process
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
-fielded device can install — as the pipeline is wired **today**, not as it is
-someday planned to be. Two runbook sections live at the bottom: credential
-rotation for the build-time apt secrets, and fleet OTA rollback.
+fielded device can install. The integration branch implements the signed image
+channel publisher and pins stable CeraUI v2026.9.5's unified update orchestrator.
+**Qualification [PARTIAL]:** two-board update drills and released arm64 package
+installation are proven; full override-free candidate boot, multi-uplink failover
+and amd64 hardware remain separate, unverified gates. Build-time APT credential
+rotation and fleet OTA rollback runbooks remain below.
 
 > **Honesty rule for this doc.** Every stage below is either (a) backed by a
 > script or workflow that exists in this repo right now, with its path cited, or
@@ -37,26 +40,29 @@ hand-tests it on a REAL RK3588 (realhw-suite.sh: boot/service,
 encode-path init, dev-loop sanity, RAUC A/B rollback)
         │
         ▼  (once the operator confirms the hand-test is green)
-operator uploads images/<board>/<ts>.raucb (+ .sha256) to R2
+owner approves publish-release.yml for the hand-tested candidate run
         │
         ▼
-operator registers bundles/{channel}/{board}/<ts>.raucb + rolls out via hawkBit
-(fleet/hawkbit/provision.sh, platform-bridge.sh)
+publish-release.sh writes immutable releases/<board>/<OS CalVer>/ parts + index,
+then channels/<channel>/<board>.json.sig and signed JSON pointer (JSON last)
         │
         ▼
-device rauc-hawkbit-updater pulls from apt.ceralive.tv/bundles/...
+device CeraUI verifies the images.ceralive.tv signed channel manifest,
+stages via RAUC, activates only at clean idle shutdown/reboot
         │
         ▼
 verification: preflash-verify.sh (pre-flash) + on-device
-rauc status / ceralive-healthcheck (post-install)
+rauc status / ceralive-healthcheck (post-boot), then lagged other-slot mirror
 ```
 
 The production job signs and seals the exact candidate first so the operator
 hand-tests the bytes that could ship. A human may publish those bytes only after
 hand-testing that exact candidate on real hardware — there is no automated CI job
-that flashes or tests real hardware. Everything from "operator flashes" onward is
-a manual, operator-driven step — there is no committed workflow that does it for
-OS bundles. Section 5 spells out exactly why and exactly what to type.
+that flashes or tests real hardware. Hardware acceptance and publication approval
+remain human decisions; the committed channel-publishing workflow automates the
+approved upload, promotion, refresh and retention operations (§5). The manual
+bundle-pair/hawkBit procedures are legacy tooling, not the product's automatic
+update path; `rauc-hawkbit-updater` is disabled and masked on the new image.
 
 ---
 
@@ -89,6 +95,36 @@ pick up the fix.
 
 For the resource failure after `v2026.7.2`, the only eligible next patch is
 `v2026.7.3`; never rerun or move `v2026.7.0`, `v2026.7.1`, or `v2026.7.2`.
+
+### CeraUI package release and image pins (separate release train)
+
+The update-system overhaul used exactly one **stable** CeraUI release, not a beta
+package release: CeraUI PR #379 merged to
+`23ee67ae14d9b548475cc7cc670573943e597d91`, then its own `publish-release.yml`
+was dispatched from `main` once with `release_type=stable` and
+`force_version=2026.9.5` (run `39361690725`). Tag v2026.9.5 and both exact Debian
+versions are published and served on stable. The image selects
+`ceralive-device[arm64]=2026.9.5-20261020T030724.23ee67a` and
+`ceralive-device[amd64]=2026.9.5-20261020T030729.23ee67a` in
+`manifests/first-party-deb-versions.txt`, with `CeraUI.pin: v2026.9.5` in the
+repo-local registry. Both release downloads matched their SHA-256 sidecars;
+both bench boards installed the arm64 release through the product.
+
+Keep `ceralive-apt-credentials=1.0.1` and registry tag
+`apt-credentials-v1.0.1`: this release is served on stable and the boards use it
+under enforced mTLS. After a package release, refresh the authenticated catalog
+with `python3 ci/check-first-party-pins.py --refresh`, then run the ordinary
+check; do not waive unrelated stale or unverifiable pins. A registry refresh
+alone is not signed APT-index serving proof.
+
+Package installation is not full-image qualification. Next build override-free
+candidates from the committed image tree, verify no local-package overrides,
+boot each exact candidate and restore the saved board state before image merge.
+Do not infer that proof from the earlier package/script-deployment drills or
+close physical bench-label verification (`DEFERRED.md` item 12) without evidence.
+An OS-channel `promote` below is a different operation from the stable-only
+CeraUI package release; executors publish OS drill candidates only, while the
+owner controls OS stable/beta publication.
 
 ---
 
@@ -403,18 +439,17 @@ board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and a
 - **`assert_no_root_signing()`** is the enforced guard: it greps the *rendered*
   signing command for `root-ca.key` and dies if it's present, then positively
   asserts `leaf-signing.key` IS the signer. This runs on every bundle build,
-  real `rauc` path or the deterministic OpenSSL-CMS fallback path.
+   native RAUC bundle path; the old OpenSSL plain-format signer is retired.
 - **Verification is part of the same step.** After signing, `build-bundle.sh`
   immediately verifies the bundle against the injected `root-ca.pem` (the
-  same keyring baked into the device) — `rauc info` on a host with `rauc`
-  installed, or an equivalent OpenSSL CMS chain-verify
-  (`verify_openssl_bundle()`) when it isn't. A bundle that fails to verify
-  never leaves the build host.
-- **Reproducible by default** (`REPRODUCIBLE=1`). `SOURCE_DATE_EPOCH` clamps
-  every embedded mtime and the OpenSSL CMS signer uses `-noattr` (no wall-clock
-  `signingTime`), so the same source state produces a bit-identical `.raucb`.
-  `REPRODUCIBLE=0` opts back into the native `rauc bundle` signer, which is
-  **not** bit-reproducible (rauc always bakes a signing timestamp).
+   same keyring baked into the device) with `rauc info --keyring`. A bundle
+   that fails to verify never leaves the build host.
+- **Verity, not bit-identical signed containers.** New OS and certificate-rotation
+  bundles use `format=verity` and `adaptive=block-hash-index`. Native RAUC's
+  CMS/verity metadata varies between signings: the signed `.raucb` is **not
+  bit-reproducible**. Rootfs reproducibility and its image-version timestamp
+  exception are documented in [the README](../README.md#reproducible-builds).
+  Never substitute a plain-format OpenSSL bundle to claim determinism.
 
 The RAUC signing PKI itself (root/intermediate/leaf tiers, validity, and how a
 leaf or intermediate rotates through the channel without a reflash) is a
@@ -426,8 +461,7 @@ full contract; it isn't duplicated here.
 
 CI cannot run the privileged mkosi build (no network / privileged container /
 board under `DRY_RUN`), so it does **not** produce — let alone dual-host-compare —
-a real signed `.raucb`. What it CAN prove is the reachable precondition for the
-bit-identical bundle above: that the **build plan / input closure** resolves
+a real signed `.raucb`. What it CAN prove is that the **build plan / input closure** resolves
 host-independently.
 
 - The [`v2-ci.yml`](../.github/workflows/v2-ci.yml) `build-plan-xrunner` +
@@ -448,11 +482,9 @@ host-independently.
   (`continue-on-error` gated on the repo variable `XRUNNER_PARITY_BLOCKING`);
   promote it to a required check after one green in-budget run.
 - **SCOPE LIMIT:** this compares the deterministic PLAN / input closure ONLY, **not
-  a full `.raucb` image build**. **Full-artifact (`.raucb`) determinism remains
-  future work** — it would require running the real privileged mkosi build on two
-  independent hosts and comparing the signed bundle bytes. The plan gate plus the
-  `SOURCE_DATE_EPOCH` clamp above is the necessary precondition for a bit-identical
-  image, not a substitute for proving it.
+  a full `.raucb` image build**. Signed verity containers are not bit-reproducible;
+  plan equality does not prove rootfs equality, artifact identity or board
+  qualification. Verify the exact candidate bytes and their signatures instead.
 
 ---
 
@@ -477,8 +509,9 @@ workflow or candidate-selection authority.
 
 ### Operator steps (today, until this is automated)
 
-Until a high-level publisher or equivalent CI job exists, publish a release
-bundle manually from the exact candidate artifact that passed physical hardware.
+For an explicitly authorized legacy consumer, publish a bundle pair manually
+from the exact candidate artifact that passed physical hardware. New capable
+devices use the signed image-channel publisher below instead.
 Do not select a local build by timestamp or "newest" ordering. The candidate
 contains the production bundle's original release filename and checksum; the
 GitHub artifact API binds that candidate to the successful run and merge SHA.
@@ -586,7 +619,7 @@ deletes a release key. Any
 mismatched collision or unverifiable read aborts before hawkBit registration;
 never replace an existing release key.
 
-### Signed channel publishing (new OS agent)
+### Signed channel publishing (CeraUI OS agent)
 
 The manual `Publish signed image release` workflow asks for mode (`publish`,
 `promote`, `refresh`, `prune`), comma-separated boards, channel and (for publish
@@ -772,11 +805,11 @@ part boundary, and cleans up only the unique test prefix. Local stub/CMS contrac
 `bash tests/publish-release.test.sh`. Live publishing by this executor is
 restricted to `drill`; stable/beta require the owner to approve and dispatch.
 
-### Registering the artifact with hawkBit (also manual/operator-driven)
+### Legacy hawkBit registration (manual/operator-driven, updater dormant)
 
-Once the bundle is on R2, the private hawkBit fleet-update engine
-([`fleet/hawkbit/`](../fleet/hawkbit/)) needs to know about it before any
-device is offered the update:
+The retained private hawkBit tooling ([`fleet/hawkbit/`](../fleet/hawkbit/)) can
+register an explicitly authorized legacy bundle. It is not part of the unified
+orchestrator or a reason to re-enable the dormant updater. For that legacy path:
 
 ```bash
 cd fleet/hawkbit
@@ -823,7 +856,7 @@ ssh ceralive@<device> 'systemctl status ceralive-healthcheck.service'
 
 `ceralive-healthcheck.service` is the gate that decides whether the newly
 booted slot gets `rauc mark-good` — see §8 for the full rollback contract this
-feeds into. hawkBit's Management API also reports per-target action status
+feeds into. For the legacy tooling only, hawkBit's Management API reports per-target action status
 (`RUNNING` / `FINISHED` / `ERROR`) for anyone tracking a fleet-wide rollout,
 per the integration contract in `fleet/integration-contract.md`.
 
@@ -841,10 +874,12 @@ three secrets `fetch-debs.sh::fetch_first_party()` needs to pull the five
 first-party `.deb`s (`libsrt1.5-ceralive`, `cerastream`,
 `gstreamer1.0-libuvcsrc`, `ceralive-device`, `srtla`) from
 `apt.ceralive.tv` during a real (non-`DRY_RUN`) build.
-The device-side twin of this same contract is
+The image's APT-source writer is
 [`mkosi/customize/apt-ceralive-repo.sh`](../mkosi/customize/apt-ceralive-repo.sh),
-which bakes the same three values (as build-time inputs) into the image's own
-apt source for its own package installs.
+which configures the image's own authenticated source. The new runtime image
+gets its fleet mTLS pair from `ceralive-apt-credentials=1.0.1`, not a baked copy
+of CI's private APT client key. Build-only credentials and reusable build caches
+must not become runtime credential or release-authority inputs.
 
 This is a **distinct** rotation from the RAUC signing PKI in
 [`docs/cert-rotation-policy.md`](../docs/cert-rotation-policy.md) — that
