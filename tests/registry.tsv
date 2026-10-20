@@ -61,6 +61,7 @@ tests/packaging-hygiene.bats	bats	unit	default-bats	absence guards for removed s
 tests/mkosi-contract.bats	bats	unit	default-bats	build-log census signatures and the lint that governs them
 
 # --- shell suites (run order) --------------------------------------------
+tests/brand-assets-integrity.test.sh	shell	unit	default-shell	vendored brand mark matches brand-assets.lock.json; notice and installer wiring
 tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party apt chain: gpg, mTLS, curl fallback, fatal failure legs
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged

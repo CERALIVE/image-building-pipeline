@@ -53,6 +53,8 @@ TIMEOUT="${CERALIVE_TIMEOUT:-timeout}"
 READ_TIMEOUT="${CERALIVE_PORTAL_READ_TIMEOUT:-5}"     # bound a slow/hung client
 MAX_BODY="${CERALIVE_PORTAL_MAX_BODY:-4096}"          # cap the POST body read
 CONNECT_RUNTIME_MAX="${CERALIVE_CONNECT_RUNTIME_MAX:-120}"  # hard cap on the detached worker
+PORTAL_MARK_SVG="${CERALIVE_PORTAL_MARK_SVG:-/usr/share/ceralive/brand/ceralive-mark-small-dark.svg}"
+PORTAL_MARK_MAX_BYTES=65536
 
 # --- helpers ------------------------------------------------------------------
 # HTML-escape untrusted text (scanned SSIDs, submitted values) before echoing it back.
@@ -162,6 +164,32 @@ error_banner() {
     "$(html_escape "${ssid}")"
 }
 
+brand_mark_img() {
+  local size encoded
+  if [[ ! -f "${PORTAL_MARK_SVG}" || ! -r "${PORTAL_MARK_SVG}" ]]; then
+    log "skipping portal brand mark: not a readable regular file: ${PORTAL_MARK_SVG}"
+    return 0
+  fi
+  if ! size="$(stat -c %s -- "${PORTAL_MARK_SVG}" 2>/dev/null)"; then
+    log "skipping portal brand mark: stat failed: ${PORTAL_MARK_SVG}"
+    return 0
+  fi
+  if [[ "${size}" -gt "${PORTAL_MARK_MAX_BYTES}" ]]; then
+    log "skipping portal brand mark: exceeds ${PORTAL_MARK_MAX_BYTES} bytes: ${PORTAL_MARK_SVG}"
+    return 0
+  fi
+  if ! command -v base64 >/dev/null 2>&1; then
+    log "skipping portal brand mark: base64 unavailable"
+    return 0
+  fi
+  if ! encoded="$(base64 -w0 -- "${PORTAL_MARK_SVG}" 2>/dev/null)"; then
+    log "skipping portal brand mark: base64 failed: ${PORTAL_MARK_SVG}"
+    return 0
+  fi
+  printf '  <img class="mark" src="data:image/svg+xml;base64,%s" alt="" width="40" height="40">\n' "${encoded}"
+  return 0
+}
+
 page_head() {
   local title="$1"
   cat <<HTML
@@ -170,22 +198,24 @@ page_head() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>
-  :root{color-scheme:light dark}
-  body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#0b1220;color:#e6edf6;
+  :root{color-scheme:dark}
+  body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#080D09;color:#EBF0EC;
        display:flex;min-height:100vh;align-items:center;justify-content:center}
-  .card{width:min(92vw,26rem);background:#121a2b;border:1px solid #243049;border-radius:14px;
+  .card{width:min(92vw,26rem);background:#0F130F;border:1px solid #252B26;border-radius:14px;
         padding:1.5rem 1.4rem;box-shadow:0 10px 40px rgba(0,0,0,.4)}
   h1{font-size:1.15rem;margin:.1rem 0 1rem}
-  label{display:block;font-size:.85rem;margin:.9rem 0 .3rem;color:#9fb0c8}
-  input{width:100%;box-sizing:border-box;padding:.7rem .8rem;border-radius:9px;border:1px solid #2b3a57;
-        background:#0d1526;color:#e6edf6;font-size:1rem}
-  button{margin-top:1.2rem;width:100%;padding:.8rem;border:0;border-radius:9px;background:#3b82f6;
-         color:#fff;font-size:1rem;font-weight:600;cursor:pointer}
-  .muted{color:#7c8aa3;font-size:.78rem;margin-top:1rem;line-height:1.4}
-  .err{background:#3a1620;border:1px solid #6b2233;color:#ffd7de;padding:.6rem .75rem;border-radius:9px;
+  label{display:block;font-size:.85rem;margin:.9rem 0 .3rem;color:#808981}
+  input{width:100%;box-sizing:border-box;padding:.7rem .8rem;border-radius:9px;border:1px solid #252B26;
+        background:#1C211D;color:#EBF0EC;font-size:1rem}
+  button{margin-top:1.2rem;width:100%;padding:.8rem;border:0;border-radius:9px;background:#ABE841;
+         color:#010502;font-size:1rem;font-weight:600;cursor:pointer}
+  .muted{color:#808981;font-size:.78rem;margin-top:1rem;line-height:1.4}
+  .mark{display:block;margin:0 0 .75rem}
+  .err{background:#0F130F;border:1px solid #D81327;color:#EBF0EC;padding:.6rem .75rem;border-radius:9px;
        font-size:.85rem;margin-bottom:.4rem}
 </style></head><body><div class="card">
 HTML
+  brand_mark_img
 }
 
 render_form() {

@@ -257,12 +257,14 @@ setup_provisioning() {
     || die "provisioning source not found: ${src}/ceralive-provision.sh (is \$SRCDIR/runtime mounted?)"
   [[ -f "${src}/ceralive-portal.sh" ]] \
     || die "captive-portal source not found: ${src}/ceralive-portal.sh (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/brand/ceralive-mark-small-dark.svg" ]] || die "portal brand mark not found: ${src}/brand/ceralive-mark-small-dark.svg (is \$SRCDIR/runtime mounted?)"
   mkdir -p /usr/local/sbin
   install -m 0755 "${src}/ceralive-provision.sh" /usr/local/sbin/ceralive-provision
   install -m 0755 "${src}/ceralive-portal.sh"    /usr/local/sbin/ceralive-portal
   install -m 0644 "${src}/ceralive-provision.service"  /etc/systemd/system/ceralive-provision.service
   install -m 0644 "${src}/ceralive-portal.socket"      /etc/systemd/system/ceralive-portal.socket
   install -m 0644 "${src}/ceralive-portal@.service"    /etc/systemd/system/ceralive-portal@.service
+  install -D -m 0644 "${src}/brand/ceralive-mark-small-dark.svg" /usr/share/ceralive/brand/ceralive-mark-small-dark.svg
   # Only the trigger service is enabled at boot; the portal socket + template are driven
   # imperatively by ceralive-provision (start on AP up, stop on teardown).
   enable_service ceralive-provision.service

@@ -18,8 +18,9 @@ debugging the portal on hardware).
 | `ceralive-portal.sh` | `/usr/local/sbin/ceralive-portal` | inetd-style bash HTTP handler (the captive page) |
 | `ceralive-portal.socket` | `/etc/systemd/system/` | Socket-activated listener on `192.168.42.1:80` (`Accept=yes`) |
 | `ceralive-portal@.service` | `/etc/systemd/system/` | Per-connection handler instance |
+| `brand/ceralive-mark-small-dark.svg` | `/usr/share/ceralive/brand/ceralive-mark-small-dark.svg` | Vendored CeraLive mark for the dark Ground Control page |
 
-All five are installed by `customize/postinst-lib.sh::setup_provisioning` (single
+All six are installed by `customize/postinst-lib.sh::setup_provisioning` (single
 source of truth — no inline twin in `mkosi.postinst.chroot`). Only
 `ceralive-provision.service` is enabled at boot; the portal socket + template are
 started/stopped imperatively by `ceralive-provision`.
@@ -80,6 +81,21 @@ HTTP request from stdin and writes the response to stdout.
 `manifests/packages/removed.md`). systemd + bash is the lightest HTTP server already
 present — zero extra packages. The page is standalone plain HTML/CSS with no JS
 framework and no build step (SC2).
+
+**Portal branding [EXISTS in source; next image release]:** every page shows the
+CeraLive mark from `/usr/share/ceralive/brand/` above its heading, embedded as an
+SVG data URI. The page uses the dark Ground Control palette. If the mark is
+missing, unreadable, larger than 65,536 bytes, or cannot be encoded, the handler
+logs the reason and serves the page without an image. Artwork never blocks the
+setup form.
+
+`brand-assets.lock.json` pins the vendored release and SHA-256;
+`BRAND-ASSETS-NOTICE.md` records the brand license and refresh command. Maintainers
+with access to the brand repository run
+`bun <ceralive-brand checkout>/consumer-kit/sync-brand-assets.ts --tag v2026.10.0`
+from this repository's root to refresh it. No TypeScript sync script or Bun
+toolchain is shipped here. Devices receive the change only with the next image
+release; source tests do not qualify a built or booted image.
 
 - **`GET` (any path)** → the provisioning form. The SSID field is an `<input list>` +
   `<datalist>` populated from `scan.txt`, so the operator can pick a scanned network or
@@ -179,6 +195,11 @@ real scripts through bring-up, the `GET`/`POST` page, the credential handoff, al
 MAC6 conditions, the wrong-passphrase retry, the hard-timeout return-to-AP, and the
 out-of-band teardown verb. It is gated in `tests/postinst-wiring.bats`
 (*"provision portal: offline harness proves the 4-condition teardown + handoff"*).
+Its GET scenarios also compare the embedded mark's SHA-256 to the vendored file,
+reject the retired page colors, and prove the form still serves without artwork.
+`tests/brand-assets-integrity.test.sh` runs in the default shell gate and checks
+the lock, notice and installer wiring, including tamper, orphan and missing-notice
+non-vacuity probes.
 
 On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotspot
 disappears, `journalctl -t ceralive-provision -t ceralive-portal` shows the join +
