@@ -41,4 +41,17 @@ assert "if" not in checks[0] and not checks[0].get("continue-on-error"), checks[
 assert not checks[0].get("env"), "offline self-test must not require credentials"
 PY
 
+# Given the CI cache-miss RAUC source GET, when its curl command is inspected,
+# then SSL-read retry coverage must match the shipped build fetchers.
+awk '
+  /^[[:space:]]*curl .*RAUC_PIN_URL/ {
+    seen++
+    if ($0 !~ /[[:space:]]--retry-all-errors([[:space:]]|$)/) {
+      print "CI RAUC fetch lacks --retry-all-errors" > "/dev/stderr"
+      failed = 1
+    }
+  }
+  END { exit failed || seen != 1 }
+' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml"
+
 printf 'production CI/scope contract: PASS\n'
