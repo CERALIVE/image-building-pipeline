@@ -68,8 +68,10 @@ touch "${work}/keyring"
 # only the complete, digest-verified response is published.
 for failures in 1 3; do
   export FAIL_TARGET=upstream.tar.xz FAIL_COUNT="${failures}"
-  if (set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
-      "${upstream_sha}" "${work}/upstream-${failures}") && \
+  (set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
+      "${upstream_sha}" "${work}/upstream-${failures}")
+  rc=$?
+  if (( rc == 0 )) && \
       cmp -s "${CURL_FIXTURES}/upstream.tar.xz" "${work}/upstream-${failures}"; then
     ok "upstream succeeds after ${failures} exit-56 failures"
   else
@@ -81,8 +83,10 @@ done
 # fetch runs, then its final output matches the trusted Sources digest.
 for target in InRelease Sources.xz rauc_1.15.2-1.debian.tar.xz; do
   export FAIL_TARGET="${target}" FAIL_COUNT=1
-  if (set -e; rauc_fetch_debian_packaging unstable main 1.15.2-1 \
-      rauc_1.15.2-1.debian.tar.xz "${work}/keyring" "${work}/${target}.result" fixture-key) && \
+  (set -e; rauc_fetch_debian_packaging unstable main 1.15.2-1 \
+      rauc_1.15.2-1.debian.tar.xz "${work}/keyring" "${work}/${target}.result" fixture-key)
+  rc=$?
+  if (( rc == 0 )) && \
       cmp -s "${CURL_FIXTURES}/rauc_1.15.2-1.debian.tar.xz" "${work}/${target}.result"; then
     ok "Debian packaging recovers from exit 56 at ${target}"
   else
@@ -95,8 +99,10 @@ done
 export FAIL_TARGET=upstream.tar.xz FAIL_COUNT=4
 printf existing >"${work}/existing"
 cp "${work}/existing" "${work}/exhausted"
-if (set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
-    "${upstream_sha}" "${work}/exhausted"); then
+(set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
+    "${upstream_sha}" "${work}/exhausted")
+rc=$?
+if (( rc == 0 )); then
   bad 'retry exhaustion was accepted'
 elif cmp -s "${work}/existing" "${work}/exhausted"; then
   ok 'retry exhaustion preserves the destination'
@@ -107,11 +113,25 @@ fi
 # Given a successful but corrupt response, when fetching, then digest validation
 # still refuses it; retry broadening must never bypass integrity checks.
 export FAIL_COUNT=0
-if (set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
-    "${packaging_sha}" "${work}/corrupt"); then
+(set -e; rauc_fetch_upstream_tarball https://fixture.invalid/upstream.tar.xz \
+    "${packaging_sha}" "${work}/corrupt")
+rc=$?
+if (( rc == 0 )); then
   bad 'corrupt upstream response was accepted'
 else
   ok 'corrupt upstream response is refused'
+fi
+
+# Given a decompressor that writes valid bytes but fails, when packaging is
+# fetched under build-strict semantics, then that failure must stop publication.
+(set -e; xz() { command xz "$@"; return 42; }
+    rauc_fetch_debian_packaging unstable main 1.15.2-1 \
+      rauc_1.15.2-1.debian.tar.xz "${work}/keyring" "${work}/xz-failed" fixture-key)
+rc=$?
+if (( rc == 0 )); then
+  bad 'failed decompression was accepted'
+else
+  ok 'failed decompression aborts packaging fetch'
 fi
 printf ' RESULT: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]

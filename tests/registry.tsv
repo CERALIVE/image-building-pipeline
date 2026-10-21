@@ -64,6 +64,7 @@ tests/mkosi-contract.bats	bats	unit	default-bats	build-log census signatures and
 tests/brand-assets-integrity.test.sh	shell	unit	default-shell	vendored brand mark matches brand-assets.lock.json; notice and installer wiring
 tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party apt chain: gpg, mTLS, curl fallback, fatal failure legs
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
+tests/fetch-retry-flags.test.sh	shell	unit	default-shell	all build curl retry flags with per-call-site removal mutants
 tests/fetch-debs-apt-sandbox.test.sh	shell	integration	default-shell	real apt-get against a signed fixture repo, privileged and unprivileged
 tests/debcache.test.sh	shell	integration	default-shell	verified .deb cache: hit/miss/corrupt/eviction plus live concurrency legs
 tests/packages-lock.test.sh	shell	integration	default-shell	verified apt/fetch/generated receipts, source-built kernel and unaccounted-package refusal
