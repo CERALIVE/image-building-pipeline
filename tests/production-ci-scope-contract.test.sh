@@ -27,4 +27,18 @@ if rg -n 'REPO_ROOT/\.\./CeraUI|PIPELINE_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./
 fi
 [[ -s "${PIPELINE_DIR}/ci/size-exceptions.txt" ]]
 
+python3 - "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+workflow = yaml.safe_load(Path(sys.argv[1]).read_text())
+steps = workflow["jobs"]["bats"]["steps"]
+checks = [step for step in steps
+          if step.get("run", "").strip() == "python3 ci/upstream-watch.py --self-test"]
+assert len(checks) == 1, "PR unit job must run the offline upstream watcher self-test once"
+assert "if" not in checks[0] and not checks[0].get("continue-on-error"), checks[0]
+assert not checks[0].get("env"), "offline self-test must not require credentials"
+PY
+
 printf 'production CI/scope contract: PASS\n'

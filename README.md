@@ -352,6 +352,10 @@ skip the service check. Standalone DRY_RUN build-plan jobs also
 materialize the same ignored NON-PRODUCTION fixture before resolving, so they
 do not depend on the Bats job's checkout.
 
+The same PR unit-test job also runs `python3 ci/upstream-watch.py --self-test`.
+It uses committed fixtures without network access or credentials; the live,
+issue-only upstream reconciliation remains in its separate scheduled workflow.
+
 Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
 §5. Its low-level `ci/publish-immutable-r2-pair.sh` helper requires the
 independently approved candidate SHA-256, snapshots both inputs privately, and

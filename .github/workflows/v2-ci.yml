@@ -274,6 +274,9 @@ jobs:
             CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
             CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 
+      - name: Offline upstream watcher self-test
+        run: python3 ci/upstream-watch.py --self-test
+
   edid-conformance:
     # The anti-corruption gate for the CeraLive HDMI-RX product EDIDs.
     #
