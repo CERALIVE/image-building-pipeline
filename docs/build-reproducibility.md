@@ -74,14 +74,39 @@ which `--retry` alone does not retry. These are repeatable GETs with curl-owned
 `-o` scratch files; timeouts, resume options, signature checks, pinned digests
 and atomic publication are unchanged. No upload or publish path is changed.
 
+Deterministic HTTP 4xx/5xx failures are retried too: a direct curl call makes up
+to 3 extra requests (4 total), with about 7 s of retry backoff (1 + 2 + 4 s).
+Across the default three outer `retry_transient` attempts, a wrapped package
+download can add 9 requests and about 21 s of curl backoff (12 requests total),
+plus the outer 2 + 4 s backoff: about 27 s before failure for fast HTTP errors.
+These are backoff costs, not network-response-time limits; the direct stalled
+transfer bound remains 4 × `CURL_MAX_TIME` + 7 s, subject to outer time caps.
+The outer loop stops immediately only when its diagnostic regex matches.
+Its pre-existing `404 +Not Found` pattern does not match curl's
+`(22) The requested URL returned error: 404` (likewise the 401/403 patterns).
+Thus curl 404s already took three outer requests before this change; they now
+take up to twelve. Correcting that regex is separate work, not a retry-policy
+change in this refresh. Signature, digest and identity verdicts remain outside
+the curl retry wrapper.
+
 The option requires [curl 7.71.0 or newer](https://curl.se/docs/cmdline-opts/retry-all-errors.html).
-The builder uses the digest-pinned Debian Trixie base in `ci/Dockerfile` and
-`ci/Dockerfile.rauc`; the oldest hosted runner used by the plan matrix,
+**The build host must supply curl >= 7.71.0 even for container-mode builds:**
+`lib/orchestrate.sh` invokes `lib/stages/fetch.sh` and
+`lib/stages/rauc-build.sh` on the host, before containerized compilation.
+The oldest hosted runner used by the plan matrix,
 [Ubuntu 22.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md),
-ships curl 7.81.0. Native builds already require Trixie or newer; non-Debian
-fetch hosts must also supply curl >= 7.71.0. No pre-7.71 runner is supported.
+ships curl 7.81.0. The digest-pinned Trixie builder containers in
+`ci/Dockerfile` and `ci/Dockerfile.rauc` use the curl 8.14.1 package line;
+MediaMTX alone among these fetches runs inside the image chroot, whose candidate
+lock records curl `8.14.1-2+deb13u7`. Containers do not upgrade the host curl.
+An older host curl rejects `--retry-all-errors` with exit 2 and the fetch fails
+loudly (for example, RAUC reports "failed to download"); there is no fallback
+that silently drops the flag. Upgrade host curl or use a Trixie-or-newer host;
+see [host prerequisites](host-support.md#build-host-curl-prerequisite).
 `tests/rauc-source-fetch.test.sh` exercises all four RAUC fetch boundaries with
 an offline curl shim, including exit-56 recovery, exhaustion and corrupt bytes.
+`tests/fetch-retry-flags.test.sh` sweeps every retrying curl call in `lib/` and
+`mkosi/customize/`, with a flag-removal mutant for each site and no exclusions.
 
 ## Debian snapshot probe: APT passes; mkosi build path still blocks the override
 

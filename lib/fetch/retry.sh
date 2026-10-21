@@ -101,19 +101,20 @@ CURL_TIMEOUT_OPTS=(--connect-timeout "${CURL_CONNECT_TIMEOUT}" --max-time "${CUR
 # ---------------------------------------------------------------------------
 # Bounded transient-failure retry.
 #
-# WHAT IS RETRIED, and nothing else: the apt-get archive round trips (`update`,
-# `download`). Those are the only steps on this path whose failure can be a
-# transient property of the network rather than a fact about the artifact.
+# The outer loop wraps apt-get archive round trips (`update`, `download`) and
+# large-.deb curl GETs. GPG/InRelease, SHA-256 and Debian identity checks stay
+# OUTSIDE the curl wrapper; half-supplied credentials fail before acquisition.
+# Apt-get collapses errors to exit 100, so FETCH_NO_RETRY_REGEX classifies its
+# output. A matching deterministic diagnostic returns on the FIRST outer attempt.
 #
-# WHAT IS NEVER RETRIED, deliberately: GPG/InRelease signature verification, a
-# SHA-256 mismatch, a Debian control identity mismatch, a deterministic 404/403/
-# 401, and the half-supplied-credential fatal. Each of those is a VERDICT on
-# bytes already in hand — replaying it cannot change the answer, it only buys a
-# slower failure with the real diagnostic buried under two more attempts. The
-# curl fetchers keep their verification OUTSIDE any wrapper, so they are covered
-# structurally; apt-get performs its own verification internally and reports
-# every error as exit 100, so its output is classified against
-# FETCH_NO_RETRY_REGEX and a matching failure returns on the FIRST attempt.
+# "Never retried: 404/403/401" applies only to matching OUTER-loop diagnostics:
+# the existing `404 +Not Found` (and 403/401 equivalents) does not match curl's
+# `(22) The requested URL returned error: 404`. Curl 404s therefore already used
+# three outer attempts before --retry-all-errors. That flag also retries HTTP
+# 4xx/5xx: up to 3 extra requests / about 7 s backoff per direct call, or 9 extra
+# requests / about 21 s curl backoff per wrapped download (12 requests total,
+# about 27 s including outer 2+4 s sleeps, excluding response time). Regex and
+# retry policy are unchanged; see docs/build-reproducibility.md for this limit.
 #
 # Every bound is finite and env-tunable; there is no unbounded loop:
 #   FETCH_RETRY_ATTEMPTS  total attempts, >= 1               (default 3)

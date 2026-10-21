@@ -238,8 +238,11 @@ When intentional changes cause growth (e.g., adding a new package, enabling a fe
 3. **Justify the growth** here and in the PR description with:
    - What changed (package, feature, config)
    - Why it was necessary
-   - The measured delta and evidence; explicitly say "not attributed" if the
-     historical artifact/lock needed for a file-level comparison is unavailable
+    - The measured delta and evidence. "Not attributed" is permitted only for an
+      explicitly owner-accepted **reference refresh** when the historical
+      artifact/lock needed for a file-level comparison is unavailable; cite the
+      accepted decision (D481 for this refresh). It is never justification for
+      relaxing an absolute ceiling, slot reserve or relative-growth gate.
 4. Run the comparator before and after. A matching refreshed baseline returns 0
    with no growth warning; it does not waive absolute-size or slot-reserve gates.
 
@@ -275,7 +278,10 @@ update selector, and `manifests/first-party-deb-versions.txt` advances CeraUI
 `manifests/rauc-deb-versions.txt` nor `manifests/families/rk3588.yaml` changes
 over that interval: RAUC 1.15.2 source inputs and kernel 7.2 were already declared
 at the old baseline. Curl was already in the package list. Do not label their
-presence, or the capability file, as a measured new cost.
+presence, or the capability file, as a measured new cost. The interval also adds
+`CONFIG_IPV6_MULTIPLE_TABLES=y` to `manifests/kernel/rk3588-edge.fragment` and
+`manifests/kernel/required-symbols.list`; its size effect is negligible, not a
+measured attribution of the growth below.
 
 The adjacent `20261020T052027Z.packages.lock.json` and
 `20261020T070345Z.packages.lock.json` record CeraUI
