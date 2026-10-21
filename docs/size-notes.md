@@ -8,15 +8,14 @@ slots additionally require 536,870,912 **bavail** bytes and
 `max(ceil(total_inodes/10),20000)` free inodes after population. The shared gate
 subtracts both root-reserved blocks and ext4's internal extent reserve.
 See [full-firmware closure and slot contract](bluetooth-firmware-closure.md).
-Both v2 mainline/full-firmware development hardware candidates now have real wet
-rootfs tar measurements: Rock 5B+ **2,730,854,400 B** (artifact
-`20260926T224052Z.rootfs.tar`) and Orange Pi 5+ **2,729,502,720 B** (artifact
-`20260926T212336Z.rootfs.tar`). Both passed the absolute 3.5 GB gate and now
-anchor the per-board measured/baseline registries. They are non-debug builds with
-production PARTLABELs but include an **unreleased CeraUI PR-head local .deb
-override** and use a non-production RAUC signer. This is build evidence, not
-production-image qualification or an installed-board result; the old vendor-BSP
-measurements remain historical below.
+The current mainline/full-firmware references are the override-free 2026-10-20
+candidate rootfs tars: Rock 5B+ OS 2026.10.96 **2,815,037,440 B** and Orange Pi
+5+ OS 2026.10.95 **2,813,675,520 B**. Both passed the unchanged absolute 3.5 GB
+gate. They are non-debug with production PARTLABELs and a non-production RAUC
+signer; size evidence alone is not fleet or full hardware qualification.
+Section 4 records the artifacts, hashes and unattributed growth over the
+2026-09-26 local-override baselines. Older vendor-BSP measurements remain
+historical below.
 
 **Why those three numbers are three different numbers.** They are not
 alternative spellings of one budget, and treating them as such is how a build
@@ -180,17 +179,24 @@ Until then `armbian-firmware` is the correct, safe choice.
 
 ### Baseline artifact and comparator
 
-On top of the existing **1.5 GB absolute gate** (`measure-size.sh`), a relative
-regression detector (`check-size-regression.sh`) warns on any growth and fails
-(exit 1) if growth exceeds **50 MB** per build.
+On top of the **3,500,000,000 B RK3588 / 1,500,000,000 B x86 absolute gate**
+(`lib/measure-size.sh`), `ci/check-size-regression.sh` warns on any growth and
+returns 1 above **50 MiB (52,428,800 B)**. Its output labels MiB as "MB".
+The real-build caller, `lib/stages/size-gate.sh::compare_size_against_baseline`,
+reports exit 1 as an advisory warning; malformed or cross-board baselines are
+fatal. The absolute gate remains blocking. This refresh changes neither policy.
 
-**Baseline file format** (`ci/size-baseline.json`):
+**Baseline file format** (`ci/size-baseline.<board>.json`):
 
 ```json
 {
-  "board": "x86-minipc",
-  "bytes": 1234567890,
-  "recorded_at": "2026-06-12"
+  "board": "orange-pi-5-plus",
+  "bytes": 2813675520,
+  "recorded_at": "2026-10-20",
+  "artifact": "images/orange-pi-5-plus/20261020T052027Z.rootfs.tar",
+  "artifact_sha256": "7cceeae19dd33db74f53c2868731b7aa75e97c6e5ffab3c45272db8fc3a20467",
+  "commit": "904e3238c9c945bcd2309dcdd62dfb445bf9e94a",
+  "note": "Measured OS 2026.10.95 candidate; growth not attributed, see section 4."
 }
 ```
 
@@ -199,35 +205,94 @@ regression detector (`check-size-regression.sh`) warns on any growth and fails
 | `board` | string | Board identifier (e.g., `x86-minipc`, `rock-5b-plus`) |
 | `bytes` | integer | Measured rootfs size in bytes (from `du --apparent-size -sb`) |
 | `recorded_at` | ISO-8601 date | When the baseline was recorded (YYYY-MM-DD) |
+| `artifact` | string | Repo-relative path in the candidate checkout |
+| `artifact_sha256` | string | SHA-256 of that exact artifact, matched to its sidecar |
+| `commit` | string | Full source commit used to build the artifact |
+| `note` | string | Candidate scope, measurement method and growth justification |
 
 **Comparator script** (`ci/check-size-regression.sh`):
 
 ```bash
-./ci/check-size-regression.sh <current-bytes> <baseline-file>
+./ci/check-size-regression.sh <current-bytes> <baseline-file> <board>
 ```
 
-- **Input:** current measured size (bytes) and baseline JSON file
-- **Output:** human-readable delta line (e.g., `size-regression: baseline=1234567890 bytes, current=1245053650 bytes, delta=+10 MB`)
+- **Input:** current measured size (bytes), baseline JSON and exact board identity
+- **Output:** human-readable baseline/current/delta line
 - **Behavior:**
   - Warns (stderr) on any growth (delta > 0)
-  - Exits 0 if delta ≤ 50 MB
-  - Exits 1 if delta > 50 MB (fails the CI gate)
-  - Exits 2 on bad args / missing file / malformed JSON
+  - Exits 0 if delta ≤ 50 MiB
+  - Exits 1 if delta > 50 MiB (advisory in the real-build caller)
+  - Exits 2 on bad args / missing file / malformed JSON / board mismatch
 
 ### Updating the baseline
 
 When intentional changes cause growth (e.g., adding a new package, enabling a feature):
 
-1. **Measure the new size** via `measure-size.sh` or a full build
-2. **Update `ci/size-baseline.json`** in the SAME PR:
+1. **Measure the same quantity** as the caller: `du --apparent-size -sb` of the
+   emitted normalized `.rootfs.tar`, not compressed transport bytes, slot size,
+   extracted-tree size or the sum of dpkg `Installed-Size` fields.
+2. **Update `ci/size-baseline.<board>.json`** in the SAME PR:
    - Set `bytes` to the new measured value
-   - Update `recorded_at` to the current date
-   - Document the reason in the PR description (e.g., "Added cog display add-on: +15 MB")
-3. **Justify the growth** in the PR description with:
+   - Record the artifact date, source commit, path and recomputed SHA-256
+   - Synchronize only the measurement/provenance fields in `manifests/size-budget.json`
+3. **Justify the growth** here and in the PR description with:
    - What changed (package, feature, config)
    - Why it was necessary
-   - The measured delta (e.g., "+15 MB for cog + WPEWebKit")
-4. **CI will pass** once the baseline is updated to match the new size
+   - The measured delta and evidence; explicitly say "not attributed" if the
+     historical artifact/lock needed for a file-level comparison is unavailable
+4. Run the comparator before and after. A matching refreshed baseline returns 0
+   with no growth warning; it does not waive absolute-size or slot-reserve gates.
+
+### 2026-10-20 override-free candidate refresh [EXISTS]
+
+Both candidates were built from `904e3238c9c945bcd2309dcdd62dfb445bf9e94a`,
+without first-party local overrides or debug mode, using production PARTLABELs
+and a non-production RAUC signer. The rootfs tar files were remeasured directly;
+their recomputed SHA-256 values matched adjacent `.rootfs.tar.sha256` sidecars.
+Paths below are relative to each candidate checkout, not prerequisites for CI.
+
+| Board / OS candidate | Rootfs artifact | Apparent bytes | Previous baseline bytes | Growth bytes |
+|---|---|---:|---:|---:|
+| Orange Pi 5+ / 2026.10.95 | `images/orange-pi-5-plus/20261020T052027Z.rootfs.tar` | 2,813,675,520 | 2,729,502,720 | 84,172,800 |
+| Rock 5B+ / 2026.10.96 | `images/rock-5b-plus/20261020T070345Z.rootfs.tar` | 2,815,037,440 | 2,730,854,400 | 84,183,040 |
+
+- Orange artifact SHA-256: `7cceeae19dd33db74f53c2868731b7aa75e97c6e5ffab3c45272db8fc3a20467`.
+- Rock artifact SHA-256: `b1151d7a429025b548a1d6cc545d6e316792052d8676cde76eb1c03b187ee245`.
+- Previous references at `d49f75c3335075282f88920f78a9dabf7acf7ecf`:
+  Orange `20260926T212336Z.rootfs.tar`, SHA-256
+  `d0af8d19eb8dd074bad2a7c5e3921acc161deae2a979d3a9ebbc68e8daf798f1`;
+  Rock `20260926T224052Z.rootfs.tar`, SHA-256
+  `f9af2b4e32d4872b80bf8519d38911b58d4efb90d8373847ae0dd1ebe6c16e95`.
+  These recorded baselines used an unreleased CeraUI local override. Their tars
+  and package locks were not recovered, so historical installed-byte comparisons
+  cannot be made from the available evidence.
+
+**What changed, and what is not attributed:** the manifest diff
+`d49f75c3..904e3238` adds `gpgv` to `manifests/packages/shared.list` for the
+update selector, and `manifests/first-party-deb-versions.txt` advances CeraUI
+2026.9.3 → 2026.9.5 (released unified update orchestrator), cerastream
+2026.9.6 → 2026.9.8 and APT credentials 1.0.0 → 1.0.1. Neither
+`manifests/rauc-deb-versions.txt` nor `manifests/families/rk3588.yaml` changes
+over that interval: RAUC 1.15.2 source inputs and kernel 7.2 were already declared
+at the old baseline. Curl was already in the package list. Do not label their
+presence, or the capability file, as a measured new cost.
+
+The adjacent `20261020T052027Z.packages.lock.json` and
+`20261020T070345Z.packages.lock.json` record CeraUI
+`2026.9.5-20261020T030724.23ee67a`, RAUC/rauc-service `1.15.2-1+ceralive.1`,
+curl `8.14.1-2+deb13u7`, gpgv `2.4.7-21+deb13u1+b5` and source-built kernel
+`7.2.0-ceralive1`. Both tars' `var/lib/dpkg/status` record `Installed-Size`
+values of 169,550 / 641 / 62 / 503 / 620 / 101,680 KiB respectively. Those are
+inventory metadata, not surviving rootfs byte deltas, and are not summed here.
+The measured growth remains **not attributed** to individual contents.
+
+**Justification:** replace the unreleased/local-override reference with the
+measured override-free candidate selecting the released update stack, while
+retaining this explicit accounting gap. This is a reference refresh, not a
+claim that the growth is optimized or fully explained. Both artifacts remain
+below 3,500,000,000 B; the absolute ceiling and populated-slot reserve are
+unchanged. Before refresh, both comparator runs returned 1 above 50 MiB; against
+these refreshed references, both return 0 with delta 0 and no growth warning.
 
 ### Integration with CI
 
@@ -236,14 +301,13 @@ The comparator is wired into CI jobs after `measure-size.sh` runs:
 ```bash
 # After building the image and measuring its size:
 ./lib/measure-size.sh <board> <rootfs-artifact>  # emits measured=<N> bytes
-./ci/check-size-regression.sh <measured-bytes> ci/size-baseline.json
+./ci/check-size-regression.sh <measured-bytes> ci/size-baseline.<board>.json <board>
 ```
 
-Both gates must pass:
-1. **Absolute gate:** measured size ≤ 1.5 GB (enforced by `measure-size.sh`)
-2. **Relative gate:** growth ≤ 50 MB (enforced by `check-size-regression.sh`)
-
-If either fails, the build is rejected and no `.raucb` is produced.
+The absolute per-board ceiling must pass before assembly. Relative growth over
+50 MiB is reported for review by the real-build caller; malformed or cross-board
+baseline data is fatal. Neither comparison substitutes for the populated-slot
+`bavail` and inode-reserve checks.
 
 ---
 

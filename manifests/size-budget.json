@@ -11,22 +11,22 @@
       "note": "RTMP ingest gateway (Todo 14). Per-arch static Go binary; ~52 MiB (amd64) / ~59 MiB (arm64). The plan estimated ~30 MB; the real measured delta is recorded here."
     }
   },
-  "_measurement_note": "`measured` records real wet v2 mainline/full-firmware development hardware candidate rootfs.tar bytes, byte-identical to ci/size-baseline.<board>.json. The candidates contain an unreleased CeraUI PR-head local .deb override and use a non-production RAUC signer; this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md. x86-minipc has no wet build yet, so it stays null.",
+  "_measurement_note": "`measured` records the real override-free OS 2026.10.95/.96 mainline/full-firmware candidate rootfs.tar apparent bytes, byte-identical to ci/size-baseline.<board>.json. Both are non-debug, use production PARTLABELs and a non-production RAUC signer; no fleet or full hardware qualification is implied. Growth is not attributed; provenance and justification are in docs/size-notes.md section 4. Absolute ceilings and slot-reserve gates are unchanged. x86-minipc has no wet build yet, so it stays null.",
   "orange-pi-5-plus": {
     "rootfs_bytes_max": 3500000000,
-    "measured": 2729502720,
-    "measured_at": "2026-09-26",
-    "measured_commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
-    "measured_artifact": "images/orange-pi-5-plus/20260926T212336Z.rootfs.tar",
-    "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
+    "measured": 2813675520,
+    "measured_at": "2026-10-20",
+    "measured_commit": "904e3238c9c945bcd2309dcdd62dfb445bf9e94a",
+    "measured_artifact": "images/orange-pi-5-plus/20261020T052027Z.rootfs.tar",
+    "note": "Measured OS 2026.10.95 rootfs tar; SHA-256 and the unattributed 84172800-byte growth are recorded in ci/size-baseline.orange-pi-5-plus.json and docs/size-notes.md section 4. Absolute size gate passed; no fleet or full hardware qualification implied."
   },
   "rock-5b-plus": {
     "rootfs_bytes_max": 3500000000,
-    "measured": 2730854400,
-    "measured_at": "2026-09-26",
-    "measured_commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
-    "measured_artifact": "images/rock-5b-plus/20260926T224052Z.rootfs.tar",
-    "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
+    "measured": 2815037440,
+    "measured_at": "2026-10-20",
+    "measured_commit": "904e3238c9c945bcd2309dcdd62dfb445bf9e94a",
+    "measured_artifact": "images/rock-5b-plus/20261020T070345Z.rootfs.tar",
+    "note": "Measured OS 2026.10.96 rootfs tar; SHA-256 and the unattributed 84183040-byte growth are recorded in ci/size-baseline.rock-5b-plus.json and docs/size-notes.md section 4. Absolute size gate passed; no fleet or full hardware qualification implied."
   },
   "x86-minipc": {
     "rootfs_bytes_max": 1500000000,

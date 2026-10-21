@@ -558,13 +558,15 @@ for the check commands, exceptions and validation boundary. The 2026-09-15 Rock
 RGA candidate completed a full image build and boot with this firmware closure;
 new-adapter validation is separate and is not implied by that result.
 
-The current baseline is measured from the two real v2 `edge`/mainline,
-full-firmware rootfs tars (2026-09-26): Rock 5B+ **2,730,854,400 B**, Orange Pi
-5+ **2,729,502,720 B**. Both passed the 3.5 GB absolute gate. They are
-**development hardware candidates**, non-debug with production PARTLABELs but
-carrying an unreleased CeraUI PR-head local .deb override and a non-production
-RAUC signer. They have not been booted or production-image-qualified; the older
-vendor-BSP baseline numbers below are historical, not the current registry.
+The current baseline is measured from the override-free `edge`/mainline,
+full-firmware rootfs tars (2026-10-20): Rock 5B+ OS 2026.10.96
+**2,815,037,440 B**, Orange Pi 5+ OS 2026.10.95 **2,813,675,520 B**.
+Both passed the unchanged 3.5 GB absolute gate. These are non-debug candidates
+with production PARTLABELs and a non-production RAUC signer, not fleet or full
+hardware qualification. The measured growth over the 2026-09-26 local-override
+baselines is **not attributed**; artifact SHA-256, manifest changes and the
+justification for refreshing the reference are in
+[`docs/size-notes.md` §4](docs/size-notes.md#4-relative-size-regression-tracking-task-6).
 
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
