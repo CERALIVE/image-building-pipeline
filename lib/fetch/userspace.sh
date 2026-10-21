@@ -120,7 +120,7 @@ _fetch_rk3588_userspace_one() {
 
   log_info "RK3588 userspace fetch: ${pkg} (${filename}) sha256=${sha256} <- ${url}"
   if [[ -n "${DRY_RUN}" ]]; then
-    run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${_RK3588_USERSPACE_DEBS}/${filename}" "${url}"
+    run_or_plan curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" -o "${_RK3588_USERSPACE_DEBS}/${filename}" "${url}"
     return 0
   fi
 
@@ -136,7 +136,7 @@ _fetch_rk3588_userspace_one() {
   # failure this fixes and why the two env overrides are needed alongside it.
   if ! FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
       "RK3588 userspace curl fetch ${pkg}" \
-      curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
+      curl -fsSL --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
     rm -f "${tmp}"
     return 1
   fi

@@ -176,7 +176,7 @@ _fetch_bsp_curl_one() {
   fi
   log_info "BSP fetch (curl): ${spec}"
   if [[ -n "${DRY_RUN}" ]]; then
-    run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" \
+    run_or_plan curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" \
       -o "${_BSP_DEBS}/$(basename "${filename:-${pkg}.deb}")" \
       "${ARMBIAN_APT_URL}/${filename:-DRYRUN}"
     return 0
@@ -199,7 +199,7 @@ _fetch_bsp_curl_one() {
   # runs (each up to ~1200s) fit. ${tmp} is a fresh mktemp file: safe to resume.
   if ! FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
       "BSP curl fetch ${spec}" \
-      curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
+      curl -fsSL --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${ARMBIAN_APT_URL}/${filename}"; then
     rm -f "${tmp}"
     return 1
   fi
@@ -242,7 +242,7 @@ _fetch_bsp_curl() {
   local packages_file="${FETCH_TMPDIR}/Packages"
   local inrelease="${FETCH_TMPDIR}/InRelease"
   local verified_release="${FETCH_TMPDIR}/Release" expected_sha
-  run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${inrelease}" "${release_base}/InRelease" \
+  run_or_plan curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" -o "${inrelease}" "${release_base}/InRelease" \
     || die "failed to download Armbian InRelease"
   if [[ -z "${DRY_RUN}" ]]; then
     auth_verify_release_to_file \
@@ -254,7 +254,7 @@ _fetch_bsp_curl() {
     expected_sha="$(index_release_digest "${verified_release}" "${packages_rel}")" \
       || die "Armbian InRelease lacks ${packages_rel} SHA256"
   fi
-  run_or_plan curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" -o "${packages_file}.gz" "${packages_url}" \
+  run_or_plan curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" -o "${packages_file}.gz" "${packages_url}" \
     || die "failed to download Armbian Packages index: ${packages_url}"
 
   if [[ -z "${DRY_RUN}" ]]; then

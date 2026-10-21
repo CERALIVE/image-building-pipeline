@@ -66,6 +66,23 @@ is not a Debian snapshot package. The ordinary packages keep the five-field
 make the difference explicit. Neither a Debian snapshot nor a later Debian
 point release affects which pinned kernel source and patch commits were built.
 
+## Build fetch retry boundary [EXISTS]
+
+RAUC source acquisition, MediaMTX and the BSP, userspace and first-party curl fetches use
+`--retry 3 --retry-all-errors`. This includes SSL read failures (curl exit 56),
+which `--retry` alone does not retry. These are repeatable GETs with curl-owned
+`-o` scratch files; timeouts, resume options, signature checks, pinned digests
+and atomic publication are unchanged. No upload or publish path is changed.
+
+The option requires [curl 7.71.0 or newer](https://curl.se/docs/cmdline-opts/retry-all-errors.html).
+The builder uses the digest-pinned Debian Trixie base in `ci/Dockerfile` and
+`ci/Dockerfile.rauc`; the oldest hosted runner used by the plan matrix,
+[Ubuntu 22.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md),
+ships curl 7.81.0. Native builds already require Trixie or newer; non-Debian
+fetch hosts must also supply curl >= 7.71.0. No pre-7.71 runner is supported.
+`tests/rauc-source-fetch.test.sh` exercises all four RAUC fetch boundaries with
+an offline curl shim, including exit-56 recovery, exhaustion and corrupt bytes.
+
 ## Debian snapshot probe: APT passes; mkosi build path still blocks the override
 
 The initial `debian:trixie-slim` probe was **confounded**: its container had no

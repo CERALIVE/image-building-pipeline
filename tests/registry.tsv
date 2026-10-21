@@ -71,6 +71,7 @@ tests/bsp-auth-contract.test.sh	shell	integration	default-shell	Armbian archive-
 tests/firmware-content.test.sh	shell	unit	default-shell	strict full-firmware archive pin and authenticated-index lockstep
 tests/bsp-package-resolution.test.sh	shell	unit	default-shell	exact BSP package/version resolution and fail-closed misses
 tests/rauc-pki-contract.test.sh	shell	unit	default-shell	signer root/chain/leaf and baked keyring must agree
+tests/rauc-source-fetch.test.sh	shell	unit	default-shell	offline exit-56 retries for all RAUC source fetches, bounded exhaustion and digest refusal
 tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration retains compatible, signing chain, and six RAUC writer invariants
 tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
