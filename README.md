@@ -384,6 +384,11 @@ from its product slug), verified bundle/index, and pointer-only refresh gates;
 existence of this publisher does not certify any candidate or authorize a
 stable/beta release.
 
+Publisher `--dry-run` is remote-read-only in every mode [EXISTS]. An authenticated
+interrupted pointer produces `PLAN recover ...` and exits successfully without
+repairing the pair or continuing publication; invalid pairs still fail closed.
+See the release runbook's recovery section before retrying in real mode.
+
 `tools/flash-download.sh` accepts a channel manifest only for the board's
 resolver-derived RAUC compatible; a provided `--keyring` additionally requires
 the dedicated manifest signer CN, one of those two exact intermediate issuer
