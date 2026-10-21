@@ -89,7 +89,7 @@ take up to twelve. Correcting that regex is separate work, not a retry-policy
 change in this refresh. Signature, digest and identity verdicts remain outside
 the curl retry wrapper.
 
-The option requires [curl 7.71.0 or newer](https://curl.se/docs/cmdline-opts/retry-all-errors.html).
+The option requires [curl 7.71.0 or newer](https://curl.se/docs/manpage.html#--retry-all-errors).
 **The build host must supply curl >= 7.71.0 even for container-mode builds:**
 `lib/orchestrate.sh` invokes `lib/stages/fetch.sh` and
 `lib/stages/rauc-build.sh` on the host, before containerized compilation.

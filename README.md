@@ -26,6 +26,7 @@ support for Intel N100/N200 and AMD platforms.
 | mkosi | ≥ 26 (native builds only; container build needs none of this host-side) | `mkosi --version` → `mkosi 26` on this host |
 | Python | ≥ 3.12 (native build host requirement) | this host runs 3.14.6 |
 | Container runtime | Docker or Podman — the container build is canonical | `docker --version` → 29.7.2; `podman --version` → 6.0.2, both present |
+| curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
 | ccache | recommended for repeat kernel-from-source builds — which is EVERY build now | `which ccache` → `/usr/bin/ccache` present on this host |
 
@@ -34,7 +35,8 @@ This table is the quick-reference; the full, step-by-step, executed walkthrough
 × image-variant build matrix, and every flash path — lives in
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §1-4. **The container build
 is canonical** — most of the table above (mkosi/Python versions) matters only
-if you opt into `--native`; a container build only needs Docker or Podman.
+if you opt into `--native`; container-mode fetches still need host curl ≥ 7.71.0
+alongside Docker or Podman.
 
 ## Supported Devices
 
