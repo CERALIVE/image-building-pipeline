@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# allow: SIZE_OK — preserve the existing publication transaction's real-mode ordering in this dry-run-only safety fix.
+# allow: SIZE_OK — one publication transaction shares private tmp, EXIT trap, authenticated intent and ETag CAS state.
 set -euo pipefail
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -146,7 +146,7 @@ PY
   if [[ "$mode" == refresh ]]; then
     [[ -n "$old_etag" && "$old_etag" == "$expect_etag" && "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$old")" == "$expect_serial" ]] || die 'refresh precondition: serial or ETag changed'
   fi
-  verify_release "$version"
+  verify_release "$version" || die 'channel recovery release verification failed'
   verify_pointer_source "$next" "$version" no
 }
 recover_channel() {
@@ -186,7 +186,7 @@ read_channel() {
       [[ "$mode" != prune ]] || die "signed channel verification failed: $c; refusing prune"
       recover_channel "$c" "$destination"
     fi
-    python3 - "$destination" "$board" "$c" <<'PY'
+    python3 - "$destination" "$board" "$c" <<'PY' || die "signed channel identity mismatch: $c"
 import json,sys
 m=json.load(open(sys.argv[1]))
 assert m['schema']==1 and m['board']==sys.argv[2] and m['channel']==sys.argv[3]
@@ -215,7 +215,7 @@ verify_release() {
   local prefix
   prefix="$(release_prefix "$v")"
   read_key "$prefix/index.json" "$index" || die 'release index absent'
-  python3 - "$index" >"$tmp/release-parts" <<'PY'
+  python3 - "$index" >"$tmp/release-parts" <<'PY' || die 'release index validation failed'
 import json,re,sys
 i=json.load(open(sys.argv[1]))
 assert i['schema']==1 and set(i['files'])=={'bundle.raucb','flash.raw.xz'}, 'release index files invalid'
@@ -237,7 +237,7 @@ PY
     [[ "$actual_size" == "$size" && "$actual_digest" == "$digest" ]] || die "release part drift: $part"
     cat "$tmp/verified-part" >>"$tmp/verified-$name"
   done <"$tmp/release-parts"
-  python3 - "$index" "$tmp" <<'PY'
+  python3 - "$index" "$tmp" <<'PY' || die 'release whole-file verification failed'
 import hashlib,json,os,sys
 for name,entry in json.load(open(sys.argv[1]))['files'].items():
     path=os.path.join(sys.argv[2],f'verified-{name}')
@@ -251,7 +251,7 @@ PY
   command -v rauc >/dev/null || die 'rauc is required for signed bundle verification'
   rauc info -C keyring:check-purpose=codesign --keyring="$RAUC_BUNDLE_KEYRING" \
     --output-format=json "$tmp/verified-bundle.raucb" >"$tmp/bundle-info.json" || die 'signed bundle verification failed'
-  python3 - "$tmp/bundle-info.json" "$compatible" <<'PY'
+  python3 - "$tmp/bundle-info.json" "$compatible" <<'PY' || die 'signed bundle compatible mismatch'
 import json,sys
 assert json.load(open(sys.argv[1]))['compatible']==sys.argv[2], 'signed bundle compatible mismatch'
 PY

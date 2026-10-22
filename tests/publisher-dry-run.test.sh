@@ -12,6 +12,11 @@ cat >"$tmp/bin/aws" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 argv=("$@")
+encoded=''
+for ((n=0; n<${#argv[@]}; n++)); do
+  if [[ "${argv[n]}" == --body ]]; then encoded="$(base64 -w0 "${argv[n+1]}")"; break; fi
+done
+jq -cn --arg body "$encoded" --args '{argv:$ARGS.positional,body:$body}' -- "${argv[@]}" >>"$STUB_LOG"
 [[ "$1" == s3api ]] || exit 2
 op="$2"; shift 2
 key='' body='' destination='' match='' create=0
@@ -26,8 +31,6 @@ while (($#)); do
     *) destination="$1"; shift ;;
   esac
 done
-encoded=''; [[ -z "$body" ]] || encoded="$(base64 -w0 "$body")"
-jq -cn --arg body "$encoded" --args '{argv:$ARGS.positional,body:$body}' -- "${argv[@]}" >>"$STUB_LOG"
 path="$STUB_R2/$key"
 case "$op" in
   get-object|head-object)
@@ -48,7 +51,7 @@ cat >"$tmp/bin/rauc" <<'SH'
 #!/usr/bin/env bash
 # Bundle verification is exercised with real RAUC in publish-release.test.sh.
 [[ "$1" == info ]] || exit 2
-printf '{"compatible":"ceralive-rock-5b-plus"}\n'
+printf '{"compatible":"%s"}\n' "${STUB_COMPATIBLE:-ceralive-rock-5b-plus}"
 SH
 cat >"$tmp/bin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -105,15 +108,19 @@ reset_fixture() {
 readonly_calls() {
   jq -se 'all(.[]; .argv[0]=="s3api" and (.argv[1]=="get-object" or .argv[1]=="head-object" or .argv[1]=="list-objects-v2"))' "$STUB_LOG" >/dev/null
 }
-# Given authenticated old/next pairs and the exact signature-first interruption.
-for mode in refresh publish promote; do
+seed_intent() {
+  local mode="$1" signature="${2:-$tmp/next.sig}"
   reset_fixture
   mkdir -p "$STUB_R2/$key.recovery"
   jq -n --arg mode "$mode" --arg old "$(base64 -w0 "$tmp/old.json")" --arg next "$(base64 -w0 "$tmp/next.json")" \
-    --arg sig "$(base64 -w0 "$tmp/next.sig")" --arg oldsig "$(base64 -w0 "$tmp/old.sig")" \
+    --arg sig "$(base64 -w0 "$signature")" --arg oldsig "$(base64 -w0 "$tmp/old.sig")" \
     '{schema:1,mode:$mode,board:"rock-5b-plus",channel:"beta",version:"2026.10.1",old:$old,next:$next,signature:$sig,old_signature:$oldsig}' \
     >"$STUB_R2/$key.recovery/${etag//\"/}-$mode-2026.10.1"
-  cp "$tmp/next.sig" "$STUB_R2/$key.sig"
+  cp "$signature" "$STUB_R2/$key.sig"
+}
+# Given authenticated old/next pairs and the exact signature-first interruption.
+for mode in refresh publish promote; do
+  seed_intent "$mode"
   args=("$mode" --board rock-5b-plus)
   case "$mode" in
     refresh) args+=(--channel beta --expect-serial 1 --expect-etag "$etag") ;;
@@ -159,6 +166,100 @@ for mode in publish promote refresh prune --selftest; do
   if publisher "${args[@]}" --dry-run >"$tmp/healthy.log" 2>&1 && readonly_calls; then
     ok "$mode healthy dry-run performs zero writes"
   else bad "$mode healthy dry-run performs zero writes"; cat "$tmp/healthy.log" "$STUB_LOG"; fi
+done
+# Given an interrupted refresh with independently invalid release metadata.
+refresh_args=(refresh --board rock-5b-plus --channel beta --expect-serial 1 --expect-etag "$etag")
+expect_refusal() {
+  local label="$1"; shift
+  # When the real CLI runs; then it must fail before any recovery plan or channel PUT.
+  if publisher "$@" >"$tmp/refused.log" 2>&1; then
+    bad "$label: accepted invalid input"; cat "$tmp/refused.log"
+  elif grep -q '^PLAN recover' "$tmp/refused.log" || \
+       ! jq -se 'all(.[]; .argv[1]!="put-object" or (.argv|index("--key") as $i|.[$i+1]|startswith("channels/")|not))' "$STUB_LOG" >/dev/null; then
+    bad "$label: planned recovery or wrote a channel"; cat "$tmp/refused.log" "$STUB_LOG"
+  else ok "$label: refused without a channel PUT or recovery plan"; fi
+}
+reset_fixture
+if aws s3 cp fixture s3://stub/ignored-error 2>/dev/null; then bad 'aws stub accepted non-s3api call'
+elif readonly_calls; then bad 'aws stub hid non-s3api call'; else ok 'aws stub records non-s3api calls before refusal'; fi
+seed_intent refresh
+python3 - "${PUBLISH_RELEASE_SCRIPT:-$repo/ci/publish-release.sh}" "$tmp/load-intent.sh" <<'PY'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text()
+Path(sys.argv[2]).write_text('load_intent() {'+text.split('load_intent() {',1)[1].split('\nrecover_channel() {',1)[0])
+PY
+# These dependencies are called indirectly by the extracted production function.
+# shellcheck disable=SC2317
+if (
+  # shellcheck source=/dev/null
+  source "$tmp/load-intent.sh"
+  die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+  intent_key() { printf 'channels/beta/rock-5b-plus.json.recovery/%s-refresh-2026.10.1' "${etag//\"/}"; }
+  read_key() { cp "$STUB_R2/$1" "$2"; }
+  verify_cms() { return 0; }
+  verify_release() { return 1; }
+  verify_pointer_source() { return 0; }
+  export mode=refresh board=rock-5b-plus version=2026.10.1 expect_serial=1 expect_etag="$etag"
+  load_intent beta "$tmp/intent-old" "$etag" "$tmp/intent-next" "$tmp/intent-sig" || exit 2
+) >"$tmp/intent-status.log" 2>&1; then bad 'load_intent discarded release verifier failure'
+elif grep -q '^ERROR: channel recovery release verification failed' "$tmp/intent-status.log"; then ok 'load_intent aborts on release verifier failure in a conditional'
+else bad 'load_intent refused for the wrong reason'; cat "$tmp/intent-status.log"; fi
+for defect in compatible index-schema whole-digest; do
+  for execution in dry-run real; do
+    seed_intent refresh
+    export STUB_COMPATIBLE=ceralive-rock-5b-plus
+    index="$STUB_R2/releases/rock-5b-plus/2026.10.1/index.json"
+    case "$defect" in
+      compatible) export STUB_COMPATIBLE=ceralive-WRONG-board ;;
+      index-schema) jq '.schema=2' "$index" >"$tmp/index-bad.json"; cp "$tmp/index-bad.json" "$index" ;;
+      whole-digest)
+        jq '.files["bundle.raucb"].sha256=("0"*64)' "$index" >"$tmp/index-bad.json"; cp "$tmp/index-bad.json" "$index"
+        # Keep the authenticated pointer consistent with the drifted index: only the whole-file check can reject it.
+        jq '.bundle.sha256=("0"*64)' "$tmp/next.json" >"$tmp/drift-next.json"
+        openssl cms -sign -binary -in "$tmp/drift-next.json" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
+          -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$STUB_R2/$key.sig"
+        intent="$STUB_R2/$key.recovery/${etag//\"/}-refresh-2026.10.1"
+        jq --arg next "$(base64 -w0 "$tmp/drift-next.json")" --arg sig "$(base64 -w0 "$STUB_R2/$key.sig")" \
+          '.next=$next|.signature=$sig' "$intent" >"$tmp/intent-bad.json"; cp "$tmp/intent-bad.json" "$intent" ;;
+    esac
+    extra=(); [[ "$execution" != dry-run ]] || extra=(--dry-run)
+    expect_refusal "recovery $defect $execution" "${refresh_args[@]}" "${extra[@]}"
+    case "$defect" in
+      compatible) reason='signed bundle compatible mismatch' ;;
+      index-schema) reason='release index validation failed' ;;
+      whole-digest) reason='release whole-file verification failed' ;;
+    esac
+    if grep -q "^ERROR: $reason" "$tmp/refused.log"; then ok "$defect fails at its integrity gate"; else bad "$defect integrity gate did not abort"; fi
+    if readonly_calls; then ok "$defect $execution remote calls read-only"; else bad "$defect $execution wrote remotely"; fi
+  done
+done
+unset STUB_COMPATIBLE
+# Given a trusted beta identity replayed onto the stable key.
+for mode in refresh publish promote; do
+  for execution in dry-run real; do
+    reset_fixture; mkdir -p "$STUB_R2/channels/stable"
+    cp "$tmp/old.json" "$STUB_R2/channels/stable/rock-5b-plus.json"
+    cp "$tmp/old.sig" "$STUB_R2/channels/stable/rock-5b-plus.json.sig"
+    case "$mode" in
+      refresh) args=(refresh --board rock-5b-plus --channel stable --expect-serial 1 --expect-etag "$etag") ;;
+      publish) args=(publish --board rock-5b-plus --version 2026.10.2 --channel stable --bundle "$tmp/bundle.raucb" --flash "$tmp/flash.raw.xz" --raw-sha256 "$tmp/raw.sha256" --lock "$tmp/lock.json") ;;
+      promote) args=(promote --board rock-5b-plus --version 2026.10.1 --to stable) ;;
+    esac
+    extra=(); [[ "$execution" != dry-run ]] || extra=(--dry-run)
+    expect_refusal "$mode cross-channel replay $execution" "${args[@]}" "${extra[@]}"
+    if grep -q '^ERROR: signed channel identity mismatch: stable' "$tmp/refused.log"; then ok "$mode rejects the replay identity"; else bad "$mode did not enforce signed channel identity"; fi
+  done
+done
+# Given foreign-root next CMS bytes or a mismatched pair without any intent.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/foreign.key" -out "$tmp/foreign.pem" -days 2 \
+  -subj '/CN=CeraLive OTA Manifest Signer' -addext 'extendedKeyUsage=codeSigning' >/dev/null 2>&1
+openssl cms -sign -binary -in "$tmp/next.json" -signer "$tmp/foreign.pem" -inkey "$tmp/foreign.key" -outform DER -out "$tmp/foreign.sig"
+for defect in foreign-root missing-intent; do
+  if [[ "$defect" == foreign-root ]]; then seed_intent refresh "$tmp/foreign.sig"
+  else reset_fixture; cp "$tmp/next.sig" "$STUB_R2/$key.sig"; fi
+  expect_refusal "$defect dry-run" "${refresh_args[@]}" --dry-run
+  if readonly_calls; then ok "$defect remote calls read-only"; else bad "$defect wrote remotely"; fi
 done
 printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

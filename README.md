@@ -384,7 +384,12 @@ review the signed pointer before dispatch and re-observe after any drift refusal
 The create-only recovery intent lets a retry
 authenticate and finish an interrupted signature-first write by JSON ETag CAS;
 the workflow exports its R2 credentials before the direct refresh pre-read.
-readers can still see a mismatched pair until then and must fail closed. See the
+Recovery [EXISTS] explicitly aborts on an invalid release index, whole-file
+digest mismatch or signed-bundle compatible mismatch in both dry-run and real
+mode. A trusted signature does not authorize a cross-channel replay: the signed
+channel identity must match its object key before publish, promote, refresh or
+prune can use it. Readers can still see a mismatched pair until recovery and
+must fail closed. See the
 runbook for the retention, RAUC-compatible identity (Orange's board ID differs
 from its product slug), verified bundle/index, and pointer-only refresh gates;
 existence of this publisher does not certify any candidate or authorize a
