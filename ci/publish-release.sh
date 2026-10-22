@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# allow: SIZE_OK — preserve the existing publication transaction's real-mode ordering in this dry-run-only safety fix.
 set -euo pipefail
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -162,6 +163,10 @@ recover_channel() {
   read_key "$key.sig" "$tmp/recovery-current.sig" || die 'channel recovery signature absent'
   cmp -s "$sig" "$tmp/recovery-current.sig" || die 'channel recovery foreign signature refused'
   [[ "$(current_etag "$key.sig")" == "\"$(openssl dgst -md5 "$sig" | cut -d' ' -f2)\"" ]] || die 'channel recovery signature changed'
+  if [[ "$dry_run" == 1 ]]; then
+    printf 'PLAN recover %s by JSON ETag CAS; stop after recovery plan\n' "$key"
+    exit 0
+  fi
   s3 put-object --key "$key" --body "$next" --content-type application/json --cache-control no-cache \
     --if-match "$etag" >/dev/null || die 'channel recovery JSON CAS failed'
   read_key "$key" "$tmp/recovery-committed.json" || die 'channel recovery readback absent'

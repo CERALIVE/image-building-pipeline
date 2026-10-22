@@ -736,6 +736,20 @@ availability or a guarantee of uninterrupted service. Retry the same reviewed
 operation with the same preconditions; if the pair is foreign/drifted, stop and
 adjudicate rather than forcing a write.
 
+**Publisher dry-run [EXISTS]:** `--dry-run` never creates, replaces or deletes
+remote objects, in any mode. It still performs the required reads and trust
+checks. If publish, promote or refresh finds an authenticated interrupted
+signature-first write, it prints `PLAN recover <channel JSON key> by JSON ETag
+CAS; stop after recovery plan` and exits successfully without committing the
+recovery or continuing the original operation. The pair remains mismatched;
+this plan is not evidence of a repaired channel. Retry without `--dry-run` only
+under the normal release authorization and preconditions. Invalid or foreign
+pairs still fail closed, and prune never attempts recovery. A dry-run selftest
+only prints its synthetic round-trip plan; it uploads nothing and installs no
+remote-cleanup trap. The recording-stub regression is
+`bash tests/publisher-dry-run.test.sh`; the real-mode publication, CMS and RAUC
+contracts remain in `bash tests/publish-release.test.sh`.
+
 The workflow materializes the RAUC root separately from the CMS manifest
 signer: stable/beta (and promotion to stable) use `RAUC_RELEASE_PKI_TAR_B64`'s
 production `root-ca.pem`; drill requires the separately provisioned
