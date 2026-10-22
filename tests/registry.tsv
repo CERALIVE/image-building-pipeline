@@ -80,6 +80,7 @@ tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install rela
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
+tests/publisher-dry-run.test.sh	shell	integration	default-shell	recording R2 fixture: every dry-run mode is read-only, authenticated interruption plans recovery, real JSON CAS unchanged
 tests/flash-download.test.sh	shell	integration	default-shell	local HTTP fixture: parallel parts, Range resume, corrupt/unavailable part cleanup, full SHA refusal and traversal guard
 tests/preflash-fit.test.sh	shell	integration	default-shell	FIT payload extents and SHA-256 nodes in the preflash gate
 tests/partlabel-guard.test.sh	shell	unit	default-shell	plain lsblk/findmnt fixtures: same-disk, cross-disk and duplicate PARTLABEL safety before mark-good
