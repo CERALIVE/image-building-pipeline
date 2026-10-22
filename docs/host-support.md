@@ -69,6 +69,21 @@ limitation + workaround; do **not** assume the **native** build works.
 
 ---
 
+## Build-host curl prerequisite
+
+All supported build hosts, **including container-mode hosts**, need curl
+**>= 7.71.0** for `--retry-all-errors`. Package and RAUC source downloads run
+on the host through `lib/stages/fetch.sh` and `lib/stages/rauc-build.sh`;
+only the MediaMTX fetch runs in the image chroot. Ubuntu 22.04 hosted runners
+provide curl 7.81.0; the pinned Trixie builder containers and candidate chroot
+use the curl 8.14.1 package line. Neither container supplies curl to the host.
+
+Older host versions (for example, RHEL 8's 7.61.1 or Ubuntu 20.04's 7.68.0)
+reject the option with curl exit 2, followed by a failed-download diagnostic.
+Upgrade the host curl before building; there is no compatibility fallback.
+See [fetch retry boundaries](build-reproducibility.md#build-fetch-retry-boundary-exists)
+for retry timing, provenance and the unchanged verification gates.
+
 ## Privileged contract prerequisites
 
 Run the complete hardware-free gate with all three contracts required:

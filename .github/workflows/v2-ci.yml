@@ -219,7 +219,7 @@ jobs:
           set -euo pipefail
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
-          curl -fsSL --retry 3 --connect-timeout 30 --max-time 300 "$RAUC_PIN_URL" -o "$work/rauc.tar.xz"
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 "$RAUC_PIN_URL" -o "$work/rauc.tar.xz"
           printf '%s  %s\n' "$RAUC_PIN_SHA256" "$work/rauc.tar.xz" | sha256sum -c -
           mkdir -p "$work/source"
           tar -xf "$work/rauc.tar.xz" -C "$work/source" --strip-components=1
@@ -273,6 +273,9 @@ jobs:
           CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
             CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
             CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
+
+      - name: Offline upstream watcher self-test
+        run: python3 ci/upstream-watch.py --self-test
 
   edid-conformance:
     # The anti-corruption gate for the CeraLive HDMI-RX product EDIDs.

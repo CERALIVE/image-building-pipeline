@@ -1,9 +1,9 @@
 {
   "board": "orange-pi-5-plus",
-  "bytes": 2729502720,
-  "recorded_at": "2026-09-26",
-  "artifact": "images/orange-pi-5-plus/20260926T212336Z.rootfs.tar",
-  "artifact_sha256": "d0af8d19eb8dd074bad2a7c5e3921acc161deae2a979d3a9ebbc68e8daf798f1",
-  "commit": "d49f75c3335075282f88920f78a9dabf7acf7ecf",
-  "note": "Real wet v2 edge/mainline full-firmware development hardware candidate, non-debug with production PARTLABELs; [6c/9] absolute 3500000000-byte gate passed. Uses an unreleased CeraUI PR-head local .deb override and a non-production RAUC signer, so this is not production image qualification or an installed-board measurement. Historical vendor-BSP measurements remain in docs/size-notes.md."
+  "bytes": 2813675520,
+  "recorded_at": "2026-10-20",
+  "artifact": "images/orange-pi-5-plus/20261020T052027Z.rootfs.tar",
+  "artifact_sha256": "7cceeae19dd33db74f53c2868731b7aa75e97c6e5ffab3c45272db8fc3a20467",
+  "commit": "904e3238c9c945bcd2309dcdd62dfb445bf9e94a",
+  "note": "Measured override-free OS 2026.10.95 edge/mainline full-firmware candidate, non-debug with production PARTLABELs and a non-production RAUC signer; absolute 3500000000-byte gate passed. du --apparent-size -sb of the rootfs tar, SHA-256 recomputed and matched its sidecar. Growth of 84172800 bytes vs the 2026-09-26 baseline is not attributed; evidence and justification in docs/size-notes.md section 4. This measurement is not fleet or full hardware qualification."
 }

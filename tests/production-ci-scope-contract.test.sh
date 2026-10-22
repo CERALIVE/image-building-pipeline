@@ -27,4 +27,31 @@ if rg -n 'REPO_ROOT/\.\./CeraUI|PIPELINE_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./
 fi
 [[ -s "${PIPELINE_DIR}/ci/size-exceptions.txt" ]]
 
+python3 - "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+workflow = yaml.safe_load(Path(sys.argv[1]).read_text())
+steps = workflow["jobs"]["bats"]["steps"]
+checks = [step for step in steps
+          if step.get("run", "").strip() == "python3 ci/upstream-watch.py --self-test"]
+assert len(checks) == 1, "PR unit job must run the offline upstream watcher self-test once"
+assert "if" not in checks[0] and not checks[0].get("continue-on-error"), checks[0]
+assert not checks[0].get("env"), "offline self-test must not require credentials"
+PY
+
+# Given the CI cache-miss RAUC source GET, when its curl command is inspected,
+# then SSL-read retry coverage must match the shipped build fetchers.
+awk '
+  /^[[:space:]]*curl .*RAUC_PIN_URL/ {
+    seen++
+    if ($0 !~ /[[:space:]]--retry-all-errors([[:space:]]|$)/) {
+      print "CI RAUC fetch lacks --retry-all-errors" > "/dev/stderr"
+      failed = 1
+    }
+  }
+  END { exit failed || seen != 1 }
+' "${PIPELINE_DIR}/.github/workflows/v2-ci.yml"
+
 printf 'production CI/scope contract: PASS\n'

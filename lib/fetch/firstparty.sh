@@ -103,7 +103,7 @@ _fetch_first_party_curl_one() {
   # failure this fixes and why the two env overrides are needed alongside it.
   FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
     "first-party curl fetch ${spec}" \
-    curl -fsSL --retry 3 -C - "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+    curl -fsSL --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
@@ -134,14 +134,14 @@ _fetch_first_party_curl() {
   fi
 
   log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
-  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
+  curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
   auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
   expected_sha="$(index_release_digest "${verified_release}" Packages.gz)" \
     || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
 
-  curl -fsSL --retry 3 "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
+  curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
   index_verify_digest "${packages_gz}" "${expected_sha}" "first-party Packages.gz" \
     || die "first-party Packages.gz checksum mismatch"
   index_decompress_gz "${packages_gz}" "${packages}"

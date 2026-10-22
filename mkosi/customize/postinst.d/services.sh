@@ -543,7 +543,7 @@ setup_rtmp_gateway() {
     local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"
     url="${url//\{arch\}/${arch}}"
     log "fetching MediaMTX ${MEDIAMTX_VERSION} (${arch}) from ${url}"
-    curl -fsSL --retry 3 -o "${tarball}" "${url}" \
+    curl -fsSL --retry 3 --retry-all-errors -o "${tarball}" "${url}" \
       || { rm -rf "${tmpdir}"; die "MediaMTX fetch failed: ${url}"; }
   fi
 
