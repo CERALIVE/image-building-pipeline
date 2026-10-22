@@ -26,6 +26,7 @@ support for Intel N100/N200 and AMD platforms.
 | mkosi | ≥ 26 (native builds only; container build needs none of this host-side) | `mkosi --version` → `mkosi 26` on this host |
 | Python | ≥ 3.12 (native build host requirement) | this host runs 3.14.6 |
 | Container runtime | Docker or Podman — the container build is canonical | `docker --version` → 29.7.2; `podman --version` → 6.0.2, both present |
+| curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
 | ccache | recommended for repeat kernel-from-source builds — which is EVERY build now | `which ccache` → `/usr/bin/ccache` present on this host |
 
@@ -34,7 +35,8 @@ This table is the quick-reference; the full, step-by-step, executed walkthrough
 × image-variant build matrix, and every flash path — lives in
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §1-4. **The container build
 is canonical** — most of the table above (mkosi/Python versions) matters only
-if you opt into `--native`; a container build only needs Docker or Podman.
+if you opt into `--native`; container-mode fetches still need host curl ≥ 7.71.0
+alongside Docker or Podman.
 
 ## Supported Devices
 
@@ -352,6 +354,10 @@ skip the service check. Standalone DRY_RUN build-plan jobs also
 materialize the same ignored NON-PRODUCTION fixture before resolving, so they
 do not depend on the Bats job's checkout.
 
+The same PR unit-test job also runs `python3 ci/upstream-watch.py --self-test`.
+It uses committed fixtures without network access or credentials; the live,
+issue-only upstream reconciliation remains in its separate scheduled workflow.
+
 Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
 §5. Its low-level `ci/publish-immutable-r2-pair.sh` helper requires the
 independently approved candidate SHA-256, snapshots both inputs privately, and
@@ -563,13 +569,15 @@ for the check commands, exceptions and validation boundary. The 2026-09-15 Rock
 RGA candidate completed a full image build and boot with this firmware closure;
 new-adapter validation is separate and is not implied by that result.
 
-The current baseline is measured from the two real v2 `edge`/mainline,
-full-firmware rootfs tars (2026-09-26): Rock 5B+ **2,730,854,400 B**, Orange Pi
-5+ **2,729,502,720 B**. Both passed the 3.5 GB absolute gate. They are
-**development hardware candidates**, non-debug with production PARTLABELs but
-carrying an unreleased CeraUI PR-head local .deb override and a non-production
-RAUC signer. They have not been booted or production-image-qualified; the older
-vendor-BSP baseline numbers below are historical, not the current registry.
+The current baseline is measured from the override-free `edge`/mainline,
+full-firmware rootfs tars (2026-10-20): Rock 5B+ OS 2026.10.96
+**2,815,037,440 B**, Orange Pi 5+ OS 2026.10.95 **2,813,675,520 B**.
+Both passed the unchanged 3.5 GB absolute gate. These are non-debug candidates
+with production PARTLABELs and a non-production RAUC signer, not fleet or full
+hardware qualification. The measured growth over the 2026-09-26 local-override
+baselines is **not attributed**; artifact SHA-256, manifest changes and the
+justification for refreshing the reference are in
+[`docs/size-notes.md` §4](docs/size-notes.md#4-relative-size-regression-tracking-task-6).
 
 Every real build runs `lib/measure-size.sh` as the orchestrator's `[6c/9]` stage,
 between the normalized-tar emit and the parity check. If the rootfs content's
