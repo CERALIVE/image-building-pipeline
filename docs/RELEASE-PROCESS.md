@@ -736,6 +736,19 @@ availability or a guarantee of uninterrupted service. Retry the same reviewed
 operation with the same preconditions; if the pair is foreign/drifted, stop and
 adjudicate rather than forcing a write.
 
+**Recovery integrity [EXISTS]:** release-index schema/chunk checks, reconstructed
+whole-file size/SHA-256 checks and the verified RAUC bundle's exact compatible
+are mandatory even when recovery is reached through a conditional channel read.
+Each failed check explicitly aborts; Bash `set -e` alone is not a guard inside
+functions invoked by `if`, `!`, `&&` or `||`. Both real and dry-run recovery
+refuse before the channel JSON PUT or `PLAN recover` on any such failure.
+Every authenticated existing pointer must also name the requested schema,
+board and channel and carry a valid serial/version identity. A validly signed
+beta manifest on the stable key is refused, not re-signed as stable, by publish,
+promote, refresh and prune. Publishing may already have attempted create-only
+release objects before it reads that existing pointer; the refusal prevents
+channel mutation, not those immutable attempts.
+
 **Publisher dry-run [EXISTS]:** `--dry-run` never creates, replaces or deletes
 remote objects, in any mode. It still performs the required reads and trust
 checks. If publish, promote or refresh finds an authenticated interrupted
@@ -749,6 +762,11 @@ only prints its synthetic round-trip plan; it uploads nothing and installs no
 remote-cleanup trap. The recording-stub regression is
 `bash tests/publisher-dry-run.test.sh`; the real-mode publication, CMS and RAUC
 contracts remain in `bash tests/publish-release.test.sh`.
+The recording suite also rejects cross-channel replay in dry-run and real modes,
+invalid recovery release metadata, foreign-root next signatures and a mismatched
+pair with no recovery intent. Its remote-call allow-list records all AWS calls,
+including unsupported non-`s3api` invocations, before deciding whether they are
+read-only.
 
 The workflow materializes the RAUC root separately from the CMS manifest
 signer: stable/beta (and promotion to stable) use `RAUC_RELEASE_PKI_TAR_B64`'s
