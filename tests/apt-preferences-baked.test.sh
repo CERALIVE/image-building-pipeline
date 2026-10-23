@@ -70,6 +70,8 @@ trap 'rm -f "${REPRO}"' EXIT
 AWK_BIN="$(readlink -f "$(command -v awk)")"
 cat >"${REPRO}" <<REPRO_EOF
 set -euo pipefail
+# Helpers also need the resolved binary: tmpfs hides /etc/alternatives/awk.
+awk() { "${AWK_BIN}" "\$@"; }
 # Scratch chroot filesystem: tmpfs over the absolute trees the function writes, so
 # the host is never touched and we inspect exactly what the build would bake.
 # /usr/share (not /usr/bin) is tmpfs'd for the keyring write — binaries stay intact.
