@@ -40,7 +40,7 @@ Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.
 
 ## UPDATE RELEASE BOUNDARY [PARTIAL]
-The CeraUI v2026.9.5 pin selects the released unified APT/RAUC orchestrator.
+The CeraUI v2026.10.0 pin selects the released unified APT/RAUC orchestrator.
 Read [Update Paths](README.md#update-paths--unified-orchestrator-image-qualification-partial)
 for the two-board drill scope, origin protection and verified-other-slot mirror rule;
 [release process](docs/RELEASE-PROCESS.md) owns verity bundles and signed image channels.

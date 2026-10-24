@@ -112,9 +112,10 @@ CeraUI:
   # v2026.9.4 (capture-failover-resilience): capture-resilience operator surfaces
   # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
   # v2026.9.5: unified device update orchestrator, validated on both bench boards.
-  pin: v2026.9.5
-  # Device deb: ceralive-device 2026.9.5-20261020T030729.23ee67a (amd64) /
-  #   2026.9.5-20261020T030724.23ee67a (arm64); see first-party-deb-versions.txt.
+  # v2026.10.0: released update-system fixes; package installation is not image qualification.
+  pin: v2026.10.0
+  # Device deb: ceralive-device 2026.10.0-20261024T034041.7c076c1 (amd64) /
+  #   2026.10.0-20261024T034043.7c076c1 (arm64); see first-party-deb-versions.txt.
   # Historical receipt for 2026.9.3 follows (not the active artifact):
   #   2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded
