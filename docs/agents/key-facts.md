@@ -3841,8 +3841,8 @@ using `/etc/apt/certs/client.{crt,key}` only if both package files are absent.
 The authenticated `--refresh` now records the release as the ninth component;
 previous catalogs without its row remain valid only for regression comparison.
 The refreshed catalog and selected pins passed the currency check while CeraUI
-was at its released `v2026.9.4` pin (superseded 2026-10-20: the tree now pins
-CeraUI `v2026.9.5`, and the refreshed catalog passes the currency check with
+was at its released `v2026.9.4` pin (superseded 2026-10-24: the tree now pins
+CeraUI `v2026.10.0`, and the refreshed catalog passes the currency check with
 it). Historical credentials fixtures remain
 at `1.0.0`; only the live DRY_RUN expectation follows the new image pin.
 No new image built from these pins is claimed by this paragraph.

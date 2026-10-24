@@ -230,6 +230,39 @@ the provenance tag independently to this release.
 All other component pins, the MPP userspace pin and the HDMI-RX profile policy
 remain unchanged. This receipt is not a board soak, flash or OTA authorization.
 
+## CeraUI pin receipt — 2026-10-24
+
+The image now selects stable [CeraUI v2026.10.0](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.10.0),
+published 2026-10-24T03:42:10Z, tag commit `7c076c1`. Downloaded release assets
+independently passed `sha256sum -c`; `dpkg-deb -f` confirmed `Package:
+ceralive-device`, the exact version and the respective architecture.
+
+| Architecture | Debian control version | Release asset SHA-256 = authenticated served-release SHA-256 |
+|---|---|---|
+| arm64 | `2026.10.0-20261024T034043.7c076c1` | `f69f506e85a28ddc7259732faecb33d2d9a3607c5ba195b7733e71176ee3c398` |
+| amd64 | `2026.10.0-20261024T034041.7c076c1` | `0a67dc4d0c812c8b6d0a0941875c8353826f364e01c11ed65efe87d8d4aef9bd` |
+
+The live APT index was **not read directly** during this pin update because it
+requires mTLS. The existing authenticated publisher and device receipts were
+used instead: [apt-worker reindex run 40059391307](https://github.com/CERALIVE/apt-worker/actions/runs/40059391307)
+recorded exactly one `KEEP` and one `Verified served release` for each architecture,
+with the versions and hashes above, and completed successfully. Its saved
+single-build check passed for both architectures. The Rock 5B+ authenticated
+`apt-cache policy` receipt showed the arm64 candidate at priority 990 from the
+stable CeraLive index. Subsequent Rock and Orange Pi product-upgrade receipts
+recorded that exact arm64 version installed, clean dpkg audits and an active
+service. Their verification receipts retain the expected pruned package-doc
+notices; they do not supply an archive SHA-256. No amd64 device was tested: its
+proof is the publisher receipt plus release asset control and digest checks.
+
+Only the guard's authenticated `--refresh --max-age-hours 24` updated the release
+catalog. It first reported the two old device pins and provenance stale (exit 1);
+the updated pins must pass the 24-hour and ordinary 168-hour checks. No timestamp
+was hand-edited, no rollback exception was added, and no size budget changed.
+This is not image build, boot, flash or hardware qualification, or OS publication
+authorization. OS 2026.10.97 stays private-drill only; stable/beta pointers remain
+untouched.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as

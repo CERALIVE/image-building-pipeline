@@ -785,14 +785,16 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.9.5 (tag commit `23ee67a`) using its exact
-per-architecture Debian versions, `2026.9.5-20261020T030729.23ee67a` (amd64) and
-`2026.9.5-20261020T030724.23ee67a` (arm64). It adds the unified device update
-orchestrator to the existing capture-resilience and connectivity repairs. Both
-downloaded release archives matched their published SHA-256 sidecars. Both bench
-boards installed the released arm64 package through the product. The active
-Debian versions above come from the pinned manifest, not an earlier release's
-checksum receipt. Full override-free image boot, amd64 hardware and media
+CeraUI is pinned to stable release v2026.10.0 (tag commit `7c076c1`) using its exact
+per-architecture Debian versions, `2026.10.0-20261024T034041.7c076c1` (amd64) and
+`2026.10.0-20261024T034043.7c076c1` (arm64). It retains the unified device update
+orchestrator and includes the released update-system fixes. Both downloaded Debian
+assets matched their published SHA-256 sidecars and the authenticated publisher's
+served-release proof. Both bench boards installed the released arm64 package
+through the product; amd64 has serving and artifact proof only. See the
+[CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-10-24).
+This pin update does not build or qualify an image, or authorize an OS release.
+Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
 the documented early-import SIGUSR1 residual
 window is unchanged.
@@ -1155,7 +1157,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.9.5 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.10.0 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images
