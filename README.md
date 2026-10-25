@@ -97,7 +97,13 @@ squashfs-compressed and is not recompressed.
 trixie+ host. See [`docs/host-support.md`](docs/host-support.md) for the
 full host matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon, WSL2).
 
-The protected production-candidate job has a stricter host contract than local
+The protected production-candidate job builds both `rock-5b-plus` and
+`orange-pi-5-plus` in production mode with the production RAUC PKI from
+`RAUC_RELEASE_PKI_TAR_B64`. Each matrix job uploads `<board>-<commit sha>` and
+stamps the OS CalVer from its `vYYYY.M.P` tag or the required
+`CERALIVE_OS_RELEASE_VERSION` repository Actions variable on `release/**`
+branch pushes. See [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md) §1 for
+the cross-channel monthly patch rule. The job has a stricter host contract than local
 development: it pins Docker's native Linux `default` context and fails before
 BuildKit unless the daemon exposes at least 16 GiB RAM, live memory plus swap
 headroom is at least 16 GiB, and both the workspace and Docker root have at
@@ -138,7 +144,8 @@ Neither marker is an OS release version. Only a deliberate real build with
 0444); ordinary CI/dev builds leave that file absent. This fills the
 dpkg-comparability gap found by CeraUI's OS-update-agent consumer: only the
 CalVer stamp can be compared with a channel manifest's CalVer `version`.
-No release-cutting or publishing mechanism sets this variable yet.
+The production release workflow sets this variable from the validated version
+input described above.
 The hardware-candidate wrapper sets it only from its required explicit
 `--os-release-version` flag; this is not a release-cutting or publishing step.
 The lagged mirror's `sync-receipt.json` records this stamp in its existing

@@ -261,5 +261,71 @@ for defect in foreign-root missing-intent; do
   expect_refusal "$defect dry-run" "${refresh_args[@]}" --dry-run
   if readonly_calls; then ok "$defect remote calls read-only"; else bad "$defect wrote remotely"; fi
 done
+python3 - "$repo/.github/workflows/publish-release.yml" "$tmp" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+steps = yaml.load(Path(sys.argv[1]).read_text(), Loader=yaml.BaseLoader)["jobs"]["publish"]["steps"]
+validate = next(s["run"] for s in steps if s.get("name") == "Validate dispatch and candidate provenance")
+publish = next(s["run"] for s in steps if s.get("name") == "Publish, promote, refresh, or prune")
+sha = "a" * 40
+# Run the real workflow bodies with only GitHub and the publishing CLI replaced.
+# No download fixture exists: gh must refuse before any publisher invocation.
+stubs = r'''
+gh() {
+  if [[ "$1" == api ]]; then
+    case "${*: -1}" in
+      .head_sha) printf '%s\n' "$FIXTURE_SHA" ;;
+      .conclusion) printf 'success\n' ;;
+      .path) printf '.github/workflows/release.yml\n' ;;
+      .event) printf 'push\n' ;;
+      *) return 99 ;;
+    esac
+  elif [[ "$1" == run && "$2" == download ]]; then
+    printf '%s\n' "$@" >"$RUNNER_TEMP/download-argv"
+    echo "no artifact named orange-pi-5-plus-${FIXTURE_SHA}" >&2
+    return 1
+  else
+    return 99
+  fi
+}
+bash() {
+  touch "$RUNNER_TEMP/publisher-called"
+  return 99
+}
+'''
+with tempfile.TemporaryDirectory(dir=sys.argv[2]) as tmp:
+    env = {**os.environ, "RUNNER_TEMP": tmp, "FIXTURE_SHA": sha,
+           "GITHUB_REPOSITORY": "CERALIVE/image-building-pipeline",
+           "MODE": "publish", "CHANNEL": "beta", "VERSION": "2026.10.99",
+           "CANDIDATE_RUN": "123", "EXPECT_SERIAL": "", "EXPECT_ETAG": ""}
+    both = subprocess.run(
+        ["/bin/bash", "-c", stubs + validate],
+        env={**env, "BOARDS": "rock-5b-plus,orange-pi-5-plus"},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert both.returncode == 0, both
+    missing = subprocess.run(
+        ["/bin/bash", "-c", stubs + validate + "\n" + publish],
+        env={**env, "BOARDS": "orange-pi-5-plus"},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert missing.returncode == 1, missing
+    assert missing.stderr == f"no artifact named orange-pi-5-plus-{sha}\n", missing
+    assert (Path(tmp) / "download-argv").read_text().splitlines() == [
+        "run", "download", "123", "--repo", "CERALIVE/image-building-pipeline",
+        "--name", f"orange-pi-5-plus-{sha}", "--dir", f"{tmp}/candidate-orange-pi-5-plus",
+    ]
+    assert not (Path(tmp) / "publisher-called").exists()
+    print("boards=rock-5b-plus,orange-pi-5-plus provenance validation: exit=0")
+    print(f"boards=orange-pi-5-plus missing artifact: exit={missing.returncode}; publisher calls=0")
+    print(missing.stderr, end="")
+PY
+ok 'workflow refuses the missing Orange candidate artifact before publishing'
 printf ' RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -20,6 +20,10 @@ concurrency:
 jobs:
   candidate:
     runs-on: [self-hosted, ceralive-image-builder]
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [rock-5b-plus, orange-pi-5-plus]
     # A self-hosted runner has no ambient job budget, so a build that wedges
     # (a hung git fetch, a stalled docker pull) would hold the only image
     # builder until someone notices. The bound is deliberately far above a
@@ -29,14 +33,8 @@ jobs:
     env:
       DOCKER_CONTEXT: default
       CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
-      # The ONE board declaration: every step below derives its build target,
-      # artifact paths and cache scope from this. CERALIVE_MKOSI_CACHE_DIR
-      # cannot interpolate it — GitHub does not expose the `env` context to
-      # other entries of the same `env` map — so it repeats the board and the
-      # "Assert canonical generated paths" step proves the two agree against
-      # lib/paths.sh rather than trusting them to.
-      CERALIVE_RELEASE_BOARD: rock-5b-plus
-      CERALIVE_MKOSI_CACHE_DIR: mkosi/cache/rock-5b-plus
+      # Cache directories use the manifest's board_id, not necessarily this stem.
+      CERALIVE_RELEASE_BOARD: ${{ matrix.board }}
       CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
       # The ONLY declaration of the generated paths this persistent runner may
       # delete. It is an explicit allowlist, never a glob, and the post-checkout
@@ -76,8 +74,27 @@ jobs:
             "${CLEANUP_IMAGE}" \
             rm -rf -- "${targets[@]}"
       - uses: actions/checkout@v7
+      - name: Resolve OS release version
+        env:
+          OS_RELEASE_VERSION: ${{ vars.CERALIVE_OS_RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          version="${OS_RELEASE_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          fi
+          [[ "${version}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::OS release version must be YYYY.M.P CalVer: use a vYYYY.M.P tag or set the required CERALIVE_OS_RELEASE_VERSION Actions variable for release branches."
+            exit 2
+          }
+          printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "${version}" >>"${GITHUB_ENV}"
       - name: First-party release pin currency
         run: python3 ci/check-first-party-pins.py --max-age-hours 24
+      - name: Resolve board cache directory
+        run: |
+          set -euo pipefail
+          cache_dir="$(./ci/emit-canonical-paths.sh --board "${CERALIVE_RELEASE_BOARD}" --get board_mkosi_cache_dir)"
+          printf 'CERALIVE_MKOSI_CACHE_DIR=%s\n' "${cache_dir}" >>"${GITHUB_ENV}"
       - name: Assert canonical generated paths
         env:
           DECLARED_CACHE_DIR: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
@@ -236,9 +253,11 @@ jobs:
       - name: Build candidate-bound signed rollback probe
         env:
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
-          COMPATIBLE_STRING: ceralive-${{ env.CERALIVE_RELEASE_BOARD }}
         run: |
           set -euo pipefail
+          source ci/board-identity.sh
+          board_identity_load "${CERALIVE_RELEASE_BOARD}"
+          export COMPATIBLE_STRING="${BOARD_IDENTITY_COMPATIBLE}"
           mapfile -t roots < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.rootfs.tar')
           (( ${#roots[@]} == 1 ))
           mkdir -p "${RUNNER_TEMP}/rollback-root/etc/systemd/system" "${RUNNER_TEMP}/rollback-bundle"
