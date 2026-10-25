@@ -3345,8 +3345,13 @@ the manifest-validation and build-plan jobs and the Bats job's compiled RAUC
 install, keyed by the pinned upstream version and source SHA-256. Image outputs,
 mkosi caches, QEMU state, and release artifacts remain uncached there.
 
-The protected release candidate (`.github/workflows/release.yml`) persists the
-two build-state stores that materially shorten a production rebuild:
+The protected release candidate (`.github/workflows/release.yml`) builds a
+`[rock-5b-plus, orange-pi-5-plus]` production matrix with the existing production
+RAUC PKI, uploading `<board>-<commit sha>` per job. It stamps the validated OS
+CalVer from a `vYYYY.M.P` tag or the required `CERALIVE_OS_RELEASE_VERSION`
+repository Actions variable for release-branch pushes; the monthly patch
+allocation rule lives in `docs/RELEASE-PROCESS.md` §1. It persists the two
+build-state stores that materially shorten a production rebuild:
 
 - BuildKit's GitHub Actions cache reuses layers from the canonical
   `ci/Dockerfile`. The scope is stable per repository, runner OS/architecture,
@@ -3354,7 +3359,10 @@ two build-state stores that materially shorten a production rebuild:
   family. The source hash is carried in the builder image tag and label; the
   Dockerfile/context digests remain BuildKit's layer keys. `mode=min` exports
   only layers needed by the loaded builder image.
-- `mkosi/cache/rock-5b-plus` is restored and saved with a key containing the
+- The board cache path is resolved by `ci/emit-canonical-paths.sh` from the
+  manifest's `board_id`: `mkosi/cache/rock-5b-plus` or
+  `mkosi/cache/orangepi5-plus`, not the Orange manifest stem. It is restored
+  and saved with a key containing the
   repository, runner OS/architecture, board, mkosi pin, and build-source hash.
   Its restore prefix retains those collision boundaries. The cache is capped at
   2 GiB; size measurement, over-limit clearing, and runner-UID/GID
@@ -3445,7 +3453,8 @@ diagnostic, outside `SOURCE_DATE_EPOCH`); neither is an OS release version.
 Only an explicit `CERALIVE_OS_RELEASE_VERSION=YYYY.MINOR.PATCH` on a real build
 adds `/etc/ceralive/os-release-version` as one newline-terminated, mode-0444
 CalVer line. With the variable absent, ordinary CI/dev builds write no such
-file: release cutting/publishing does not exist yet. This conditional stamp
+file. Production candidates set it from the validated release version; publishing
+remains a separate owner-approved operation. This conditional stamp
 addresses the dpkg-comparability gap found by the CeraUI OS-update-agent consumer:
 only this CalVer can be compared with the channel manifest's CalVer `version`.
 

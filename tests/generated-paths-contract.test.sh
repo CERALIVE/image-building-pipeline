@@ -86,8 +86,10 @@ canonical_mkosi="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --get mkosi_dir)
 # --- 2. the workflow's declarations equal the build-resolved paths ------------
 python3 - "${RELEASE_WORKFLOW}" "${PIPELINE_DIR}" <<'PY'
 from pathlib import Path
+import os
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -97,20 +99,32 @@ job = yaml.load(raw, Loader=yaml.BaseLoader)["jobs"]["candidate"]
 env = job["env"]
 steps = job["steps"]
 
-cache_dir = env["CERALIVE_MKOSI_CACHE_DIR"]
 cleanup = env["CERALIVE_GENERATED_CLEANUP_PATHS"]
 
-# The workflow must submit its own declarations to the build-resolved check.
-subprocess.run(
-    [
-        str(pipeline_dir / "ci/check-canonical-paths.sh"),
-        "--board", "rock-5b-plus",
-        "--cache-dir", cache_dir,
-        "--cleanup", cleanup,
-    ],
-    check=True,
-    stdout=subprocess.DEVNULL,
-)
+# Execute the workflow's resolver for every matrix leg, including the Orange
+# manifest stem whose board_id (orangepi5-plus) differs.
+resolve = next(s for s in steps if s.get("name") == "Resolve board cache directory")
+assert "CERALIVE_MKOSI_CACHE_DIR" not in env
+for board in job["strategy"]["matrix"]["board"]:
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "env"
+        subprocess.run(
+            ["bash", "-c", resolve["run"]], cwd=pipeline_dir,
+            env={**os.environ, "CERALIVE_RELEASE_BOARD": board, "GITHUB_ENV": str(output)},
+            check=True, timeout=10,
+        )
+        key, cache_dir = output.read_text().strip().split("=", 1)
+        assert key == "CERALIVE_MKOSI_CACHE_DIR"
+        board_id = yaml.load(
+            (pipeline_dir / f"manifests/boards/{board}.yaml").read_text(), Loader=yaml.BaseLoader
+        )["board_id"]
+        assert cache_dir == f"mkosi/cache/{board_id}"
+        subprocess.run(
+            [str(pipeline_dir / "ci/check-canonical-paths.sh"),
+             "--board", board, "--cache-dir", cache_dir, "--cleanup", cleanup],
+            check=True, stdout=subprocess.DEVNULL, timeout=10,
+        )
+        print(f"board={board} cache={cache_dir}")
 
 assert any(
     step.get("name") == "Assert canonical generated paths"
@@ -119,10 +133,9 @@ assert any(
 ), "BUG: the release workflow never proves its declared paths against the build"
 
 # A declaration is only single-sourced if it appears exactly once.
-assert raw.count(cache_dir) == 1, (
-    f"BUG: the mkosi cache literal '{cache_dir}' is restated "
-    f"{raw.count(cache_dir)} times in release.yml"
-)
+assert raw.count("CERALIVE_MKOSI_CACHE_DIR=") == 1
+assert "mkosi/cache/rock-5b-plus" not in raw
+assert "mkosi/cache/orangepi5-plus" not in raw
 assert raw.count(f"CERALIVE_GENERATED_CLEANUP_PATHS: '{cleanup}'") == 1
 
 # Cleanup deletes from that declaration, element by element — never a glob.

@@ -21,7 +21,7 @@ rotation and fleet OTA rollback runbooks remain below.
 push to release/** or vX.Y.Z tag
         │
         ▼
-release.yml: admission + production build
+release.yml: admission + production build for rock-5b-plus and orange-pi-5-plus
         │
         ▼
 ./build <board>  →  orchestrate.sh  →  build-bundle.sh
@@ -31,7 +31,7 @@ release.yml: admission + production build
         │                            verifies leaf→intermediate→root
         │
         ▼
-verify the uncompressed raw, then seal + upload one immutable candidate artifact
+verify each uncompressed raw, then seal + upload one immutable artifact per board
 (.raw.xz + compressed and uncompressed SHA-256 records)
         │
         ▼  (MANUAL from here down — no automated hardware gate)
@@ -64,6 +64,27 @@ approved upload, promotion, refresh and retention operations (§5). The manual
 bundle-pair/hawkBit procedures are legacy tooling, not the product's automatic
 update path; `rauc-hawkbit-updater` is disabled and masked on the new image.
 
+### OS release version rule
+
+Use `YYYY.M.P`, where `YYYY.M` is the UTC month of the candidate build and `P`
+is one above the highest patch ever used in that month on **any channel and
+either board**, including private drill releases. If that month has no previous
+release, start at `P = 0`. The October 2026 inventory gives `2026.10.99` as the
+next version; a new month starts at patch zero. Inventory both
+`releases/<board>/` prefixes with
+`bash ci/publish-release.sh prune --board <board> --channel-family --dry-run`,
+or review existing pointer and channel-marker versions. Never reuse a patch
+because its release was pruned.
+
+For a tag build, `vYYYY.M.P` supplies `CERALIVE_OS_RELEASE_VERSION` after removing
+the leading `v`. For a `release/**` branch push, the repository Actions variable
+`CERALIVE_OS_RELEASE_VERSION` is a required version input: set it to the reviewed
+CalVer before pushing. The tag takes precedence over that variable. The workflow
+rejects a missing or malformed version against `^[0-9]{4}\.[0-9]+\.[0-9]+$`
+before building, then exports the validated value to both board jobs so each
+rootfs carries `/etc/ceralive/os-release-version`. Patch allocation and the UTC
+month are operator checks, not an automated live inventory or version bump.
+
 ---
 
 ## 2. Trigger
@@ -73,15 +94,15 @@ update path; `rauc-hawkbit-updater` is disabled and masked on the new image.
 - a push to `release/**`
 - a `v*` tag (e.g. `v2026.7.0`)
 
-It builds and seals one production candidate as an immutable artifact for an
-operator to download, flash, and hand-test on real hardware — there is no
+It builds and seals one production candidate per board in the
+`[rock-5b-plus, orange-pi-5-plus]` matrix, as immutable artifacts named
+`<board>-<commit sha>`, for an operator to download, flash, and hand-test on real hardware — there is no
 automated hardware-flashing gate. `concurrency.cancel-in-progress: false` prevents
 a newer release push from cancelling a build in progress.
 
-There is no version-bump automation in this repo. The tag itself is the release
-marker; CeraLive's CalVer convention (`YYYY.MINOR.PATCH`, documented as the
-cross-repo source of truth in `CeraUI/docs/APT_VERSION_CONTROL.md`) governs what
-string goes in the tag and in `BUNDLE_VERSION` (§4).
+There is no version-bump automation in this repo. Section 1 defines the OS CalVer
+input and tag rule; the resulting rootfs stamp is distinct from the bundle's
+`BUNDLE_VERSION` diagnostic (§4).
 
 A workflow rerun for an existing tag always checks out that tag's original SHA.
 If a release fix lands after the tag, rotate any affected secret first; rerunning
@@ -143,9 +164,10 @@ owner controls OS stable/beta publication.
 
 ## 3. Manual hand-test on real hardware
 
-`release.yml` builds and uploads one immutable production candidate; there is no
-automated CI job that flashes or tests real hardware. An operator downloads the
-candidate artifact and hand-tests it on a Rock 5B+ before a manual release, using
+`release.yml` builds and uploads one immutable production candidate per supported
+board; there is no automated CI job that flashes or tests real hardware. An
+operator downloads each candidate artifact and hand-tests it on its matching
+Rock 5B+ or Orange Pi 5 Plus before a manual release, using
 the bench flash-and-verify tool (`ci/verify-and-flash-candidate.sh`) plus the
 acceptance suite (`tests/realhw-suite.sh`). The candidate artifact carries the
    xz-compressed raw image, SHA-256 records for both its compressed transport and
@@ -237,6 +259,8 @@ The real build is:
 
 ```bash
 ./build rock-5b-plus
+# The other matrix job runs:
+./build orange-pi-5-plus
 ```
 
 which execs [`lib/orchestrate.sh`](../lib/orchestrate.sh) through its
@@ -300,7 +324,9 @@ export uses `mode=min` so the cache contains only layers needed by the loaded
 builder image.
 
 The same job restores and saves only the board-specific mkosi package cache at
-`mkosi/cache/rock-5b-plus`. Its exact key includes the repository, runner
+the manifest-resolved path from `ci/emit-canonical-paths.sh`:
+`mkosi/cache/rock-5b-plus` or `mkosi/cache/orangepi5-plus`. The Orange manifest
+stem is not its cache ID. Its exact key includes the repository, runner
 OS/architecture, board, mkosi pin, and build-source hash; its fallback prefix
 keeps those axes fixed. Before saving, the workflow enforces a 2 GiB ceiling,
 measures/prunes the tree as root inside the builder container, and normalizes

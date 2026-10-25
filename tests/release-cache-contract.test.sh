@@ -10,7 +10,10 @@ R2_PUBLISHER="${REPO}/ci/publish-immutable-r2-pair.sh"
 
 python3 - "${WORKFLOW}" <<'PY'
 from pathlib import Path
+import os
+import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -22,6 +25,10 @@ steps = candidate["steps"]
 assert candidate["runs-on"] == ["self-hosted", "ceralive-image-builder"]
 assert workflow["permissions"]["contents"] == "read"
 assert workflow["concurrency"]["cancel-in-progress"] == "false"
+boards = candidate["strategy"]["matrix"]["board"]
+assert boards == ["rock-5b-plus", "orange-pi-5-plus"]
+assert candidate["strategy"]["fail-fast"] == "false"
+assert candidate["env"]["CERALIVE_RELEASE_BOARD"] == "${{ matrix.board }}"
 assert any(step.get("uses") == "actions/checkout@v7" for step in steps)
 assert any(step.get("name") == "Materialize release trust inputs" for step in steps)
 CANDIDATE_BUILD_RUN = (
@@ -47,8 +54,63 @@ assert "realhw" not in workflow["jobs"], (
     "BUG: the automated real-HW flashing gate was removed; images are hand-tested before a manual release"
 )
 
+version_step = next(s for s in steps if s.get("name") == "Resolve OS release version")
+assert version_step["env"]["OS_RELEASE_VERSION"] == "${{ vars.CERALIVE_OS_RELEASE_VERSION }}"
+assert steps.index(version_step) < next(
+    i for i, s in enumerate(steps) if s.get("name") == "Materialize release trust inputs"
+)
+repo = workflow_path.resolve().parents[2]
+with tempfile.TemporaryDirectory() as tmp:
+    output = Path(tmp) / "env"
+    for ref, supplied, expected in (
+        ("refs/tags/v2026.10.99", "not-a-version", "2026.10.99"),
+        ("refs/heads/release/proof", "2026.10.99", "2026.10.99"),
+        ("refs/heads/release/proof", "2026.11.0", "2026.11.0"),
+        ("refs/heads/release/proof", "", None),
+        ("refs/heads/release/proof", "not-a-version", None),
+        ("refs/heads/release/proof", "v2026.10.99", None),
+        ("refs/heads/release/proof", "2026.10.99\ninjected=value", None),
+        ("refs/tags/v2026.10", "2026.10.99", None),
+        ("refs/tags/v2026.10.99-beta", "2026.10.99", None),
+    ):
+        output.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["bash", "-c", version_step["run"]], cwd=repo,
+            env={**os.environ, "GITHUB_REF": ref, "OS_RELEASE_VERSION": supplied,
+                 "GITHUB_ENV": str(output)},
+            capture_output=True, text=True, timeout=10,
+        )
+        if expected is None:
+            assert result.returncode == 2, (ref, supplied, result)
+            assert not output.exists(), "invalid version wrote a GitHub environment entry"
+        else:
+            assert result.returncode == 0, result
+            assert output.read_text() == f"CERALIVE_OS_RELEASE_VERSION={expected}\n"
+        print(f"version admission: ref={ref!r} input={supplied!r} exit={result.returncode}")
+
+    rollback = next(s for s in steps if s.get("name") == "Build candidate-bound signed rollback probe")
+    for board in boards:
+        result = subprocess.run(
+            ["bash", "-c", rollback["run"].split("mapfile -t roots", 1)[0]
+             + '\nprintf "%s\\n" "${COMPATIBLE_STRING}"'],
+            cwd=repo, env={**os.environ, "CERALIVE_RELEASE_BOARD": board},
+            capture_output=True, text=True, timeout=10,
+        )
+        manifest = yaml.load((repo / f"manifests/boards/{board}.yaml").read_text(), Loader=yaml.BaseLoader)
+        assert result.returncode == 0, result
+        assert result.stdout == f"ceralive-{manifest['board_id']}\n"
+
+trust = next(s for s in steps if s.get("name") == "Materialize release trust inputs")
+assert trust["env"]["RAUC_RELEASE_PKI_TAR_B64"] == "${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}"
+build = next(s for s in steps if s.get("name") == "Build exact production candidate")
+assert build["env"]["CERALIVE_RAUC_PKI_DIR"] == "${{ runner.temp }}/release-pki"
+assert build["env"]["RAUC_KEYRING_FILE"] == "${{ runner.temp }}/release-pki/root-ca.pem"
+meta = next(s for s in steps if s.get("id") == "meta")
+assert 'echo "artifact_name=${CERALIVE_RELEASE_BOARD}-${GITHUB_SHA}"' in meta["run"]
+assert next(s for s in steps if s.get("id") == "upload")["with"]["name"] == "${{ steps.meta.outputs.artifact_name }}"
+
 print("release workflow baseline characterization: PASS")
-print("candidate=production rock-5b-plus self-hosted builder")
+print(f"candidate=production {','.join(boards)} self-hosted builder")
 print("artifact_upload=immutable candidate artifact for manual hardware testing")
 PY
 
@@ -273,18 +335,21 @@ assert "builder_image=" in cache_meta["run"]
 require_guard(setup)
 require_guard(builder)
 
-release_board = job_env["CERALIVE_RELEASE_BOARD"]
-# GitHub does not expose the `env` context to other entries of the same `env`
-# map, so the cache dir cannot interpolate the board and repeats it instead.
-# That is safe ONLY because "Assert canonical generated paths" compares the two
-# against lib/paths.sh; the assertion below is what keeps that step honest.
-assert job_env["CERALIVE_MKOSI_CACHE_DIR"] == f"mkosi/cache/{release_board}"
+boards = candidate["strategy"]["matrix"]["board"]
+assert "CERALIVE_MKOSI_CACHE_DIR" not in job_env
+resolve_paths_index = step_index(lambda step: step.get("name") == "Resolve board cache directory")
+resolve_paths = steps[resolve_paths_index]
+assert './ci/emit-canonical-paths.sh --board "${CERALIVE_RELEASE_BOARD}" --get board_mkosi_cache_dir' in resolve_paths["run"]
+assert '>>"${GITHUB_ENV}"' in resolve_paths["run"]
+assert checkout_index < resolve_paths_index < restore_index
 assert_paths = steps[step_index(lambda step: step.get("name") == "Assert canonical generated paths")]
+assert resolve_paths_index < steps.index(assert_paths)
 assert '--board "${CERALIVE_RELEASE_BOARD}"' in assert_paths["run"]
 assert '--cache-dir "${DECLARED_CACHE_DIR}"' in assert_paths["run"]
 # every remaining board reference derives from the one declaration
 board_literals = sum(
-    step_text.count(release_board)
+    step_text.count(board)
+    for board in boards
     for step in steps
     for step_text in (step.get("run", ""), str(step.get("env", {})), str(step.get("with", {})))
 )
