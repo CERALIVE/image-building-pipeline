@@ -84,7 +84,8 @@ if [[ -n "${prepare_line}" && -n "${prune_line}" && "${prepare_line}" -lt "${pru
 # Given: runtime-only Intel/TI roots and an unconsumed non-Bluetooth candidate.
 mkdir -p "${FW}/qcom"; touch "${FW}/qcom/unconsumed.bin"
 source "${REPO}/mkosi/customize/bluetooth-firmware.sh"
-eval "$(sed -n '/^installed_module_firmware_refs()/,/^}/p; /^prune_irrelevant_rk3588_firmware()/,/^}/p' "${REPO}/mkosi/mkosi.images/platform/mkosi.postinst")"
+source "${REPO}/mkosi/runtime/ceralive-kernel-boot-staging.sh"
+eval "$(sed -n '/^prune_irrelevant_rk3588_firmware()/,/^}/p' "${POSTINST}")"
 log() { printf '%s\n' "$*"; }
 export BUILDROOT="${WORK}/root"
 bluetooth_firmware_prepare "${MODULES}" "${FW}" "${MANIFEST}" || exit 1

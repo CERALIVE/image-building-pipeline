@@ -51,6 +51,8 @@ tests/bootloader-variant.bats	bats	unit	default-bats	per-variant U-Boot selectio
 tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk geometry and preflash gate, no hardware
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
 tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths
+tests/kernel-boot-staging.bats	bats	unit	default-bats	shipped staging CLI, package upgrades, board identity and root/tar verifier equivalence
+tests/lib/kernel-boot-fixtures.bash	helper	support	invoked-by-suite	offline dpkg-deb and tree-manifest fixtures for kernel-boot-staging.bats
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
 tests/kernel-build-resilience.bats	bats	unit	default-bats	pinned-fetch retry, pin-mismatch never retried, memory-derived make -j
 tests/build-cache-overhaul.bats	bats	unit	default-bats	BuildKit apt cache mounts, kernel-source mirror wiring, mkosi cache privilege domains and the opt-in apt proxy

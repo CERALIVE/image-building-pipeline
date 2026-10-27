@@ -593,7 +593,7 @@ DTBs **inside** the `linux-image` deb:
 
 ```
 /usr/lib/linux-image-<KERNELRELEASE>/<vendor>/   (kernel_source.dtb_deb_dir)
-        -> copied by mkosi.images/platform/mkosi.postinst to ->
+        -> copied by ceralive-kernel-boot-staging to ->
 /boot/dtb/<vendor>/                              (kernel_source.dtb_boot_dir)
 ```
 
@@ -606,6 +606,26 @@ Both paths are empty on a prebuilt-BSP resolve, so the copy step is a strict no-
 there. When enabled it is fail-loud: a missing source directory, a half-specified
 mapping, or a missing board DTB aborts the build rather than producing an image
 that boots to a device-tree-less kernel.
+
+**Reusable staging [EXISTS].** The platform layer installs
+`mkosi/runtime/ceralive-kernel-boot-staging.sh` as
+`/usr/lib/ceralive/ceralive-kernel-boot-staging`, and calls that exact payload.
+It writes `/usr/lib/ceralive/board-boot.json` from the resolved manifest:
+`dtb_name`, `dtb_deb_dir_template`, `dtb_boot_dir`, and `kernel_package_regex`.
+The package path replaces the manifest's release with `{kernel_release}`, so
+a new upstream release uses its own DTB directory, not the image's original one.
+The CLI takes board identity from this file, never environment overrides:
+
+```bash
+/usr/lib/ceralive/ceralive-kernel-boot-staging <rootdir> --kernel-release <release>
+/usr/lib/ceralive/ceralive-kernel-boot-staging <rootdir> --kernel-release <release> --no-initrd
+/usr/lib/ceralive/ceralive-kernel-boot-staging firmware-refs <rootdir> --kernel-release <release>
+```
+
+`--no-initrd` is for an extracted-package scratch root only: DTB and Image
+checks still run. `firmware-refs` selects modules for that candidate release;
+the build's sourced function still sweeps every installed module for pruning.
+These helpers neither install nor purge packages and do not activate a slot.
 
 Note the layouts differ and that is FINE: the retired prebuilt Armbian package
 shipped `/boot/dtb-<release>/<vendor>/` with a `/boot/dtb` symlink onto it, while this copy
@@ -652,8 +672,8 @@ Starting kernel ...
 "Synchronous Abort" handler, esr 0x02000000
 ```
 
-`install_kernel_source_boot_artifacts` in
-`mkosi.images/platform/mkosi.postinst` replicates that Armbian behaviour for this
+`install_kernel_source_boot_artifacts` in the shipped staging script
+replicates that Armbian behaviour for this
 path, and the platform layer installs `initramfs-tools` in its **own transaction
 before** the kernel package so the hook is configured when the kernel postinst runs.
 Ordering is the mechanism — in one apt invocation it is incidental, and a prebuilt
@@ -676,6 +696,12 @@ U-Boot can load, not which packaging mechanism produced it. This exists because
 `DRY_RUN` CI never executes the layers that populate `/boot`, and
 `tests/preflash-verify.sh` (which does check) asserts the production PARTLABEL set
 first, so a bench image fails there and never reaches its artifact checks.
+
+The same verifier ships as `/usr/lib/ceralive/verify-boot-artifacts.sh`.
+`--root-dir <dir> --dtb-name <name.dtb>` checks an installed or extracted root
+using the same path resolution, size floors and Image magic as tar mode.
+`--skip-initrd` omits only the initrd check, for scratch roots before the
+initramfs hook runs. Tar invocation and its default checks are unchanged.
 
 ---
 
@@ -1172,6 +1198,7 @@ no second place to keep in sync.
 | `lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
 | `mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping + the `/boot` artifact mapping (§4b) |
 | `lib/verify-boot-artifacts.sh` | the `[6b/9]` build gate on `/boot` completeness |
+| `mkosi/runtime/ceralive-kernel-boot-staging.sh` | shipped DTB/Image staging and release-scoped firmware references |
 | `lib/verify-kernel-config.sh` | the in-container config-survival gate, both modes (§2c, §6b) |
 | `tests/boot-artifacts.bats` | the `/boot` contract for BOTH kernel paths |
 | `tests/kernel-config-fragment.bats` | the fragment-survival contract (§6b) |

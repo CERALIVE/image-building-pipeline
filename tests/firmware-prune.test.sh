@@ -49,7 +49,7 @@ check() { if [[ "$1" == "$2" ]]; then ok "$3"; else bad "$3 (want '$1', got '$2'
 FNS="${WORK}/fw-fns.sh"
 {
   echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
-  sed -n '/^installed_module_firmware_refs()/,/^}/p' "${POSTINST}"
+  sed -n '/^installed_module_firmware_refs()/,/^}/p' "${PIPELINE_DIR}/mkosi/runtime/ceralive-kernel-boot-staging.sh"
   sed -n '/^prune_irrelevant_rk3588_firmware()/,/^}/p' "${POSTINST}"
 } >"${FNS}"
 
