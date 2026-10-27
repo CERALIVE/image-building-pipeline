@@ -1188,7 +1188,7 @@ YAML
 }
 
 @test "platform DTB mapping: no-op with an empty mapping, fail-loud when half-specified" {
-  local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  local postinst="$PIPELINE_DIR/mkosi/runtime/ceralive-kernel-boot-staging.sh"
   local fn
   fn="$(sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$postinst")"
   [ -n "$fn" ]
@@ -1220,7 +1220,7 @@ YAML
 }
 
 @test "platform DTB mapping: copies the board DTB where the boot script looks" {
-  local postinst="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  local postinst="$PIPELINE_DIR/mkosi/runtime/ceralive-kernel-boot-staging.sh"
   local fn
   # The whole SET, not just the entry: install_kernel_source_dtbs calls
   # prune_dtb_dir, and lifting the caller alone yields a function that dies on an

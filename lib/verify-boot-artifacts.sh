@@ -31,6 +31,7 @@
 # no loop device and no filesystem tooling, and runs identically in CI.
 #
 # Usage: verify-boot-artifacts.sh <rootfs.tar> --dtb-name <name.dtb> [--dtb-subdir <dir>]
+#        verify-boot-artifacts.sh --root-dir <dir> --dtb-name <name.dtb> [--skip-initrd]
 
 set -euo pipefail
 
@@ -39,6 +40,8 @@ log() { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
 TAR=""
+ROOT_DIR=""
+SKIP_INITRD=0
 DTB_NAME=""
 DTB_SUBDIR="rockchip"
 MIN_KERNEL_BYTES=$((4 * 1024 * 1024))
@@ -49,14 +52,21 @@ while (($#)); do
   case "$1" in
     --dtb-name)   DTB_NAME="${2:?--dtb-name needs a value}"; shift 2 ;;
     --dtb-subdir) DTB_SUBDIR="${2:?--dtb-subdir needs a value}"; shift 2 ;;
+    --root-dir)   ROOT_DIR="${2:?--root-dir needs a value}"; shift 2 ;;
+    --skip-initrd) SKIP_INITRD=1; shift ;;
     -h|--help)    sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*)           die "unknown option: $1" ;;
     *)            TAR="$1"; shift ;;
   esac
 done
 
-[[ -n "${TAR}" ]]      || die "usage: ${PROG} <rootfs.tar> --dtb-name <name.dtb>"
-[[ -f "${TAR}" ]]      || die "rootfs tar not found: ${TAR}"
+if [[ -n "${ROOT_DIR}" ]]; then
+  [[ -z "${TAR}" ]] || die "--root-dir and rootfs tar are mutually exclusive"
+  [[ -d "${ROOT_DIR}" ]] || die "root directory not found: ${ROOT_DIR}"
+else
+  [[ -n "${TAR}" ]] || die "usage: ${PROG} <rootfs.tar> --dtb-name <name.dtb>"
+  [[ -f "${TAR}" ]] || die "rootfs tar not found: ${TAR}"
+fi
 [[ -n "${DTB_NAME}" ]] || die "--dtb-name is required (the board manifest's dtb_name)"
 
 # ---------------------------------------------------------------------------
@@ -88,6 +98,22 @@ index_tar() {
       *) TYPE["${name}"]="other" ;;
     esac
   done < <(LC_ALL=C tar -tvf "${TAR}")
+}
+
+# Populate the same index without following host-absolute symlinks. resolve()
+# handles them relative to this root, exactly as it does for tar members.
+index_root() {
+  local type size name target
+  while IFS= read -r -d '' type && IFS= read -r -d '' size \
+    && IFS= read -r -d '' name && IFS= read -r -d '' target; do
+    [[ -n "${name}" ]] || continue
+    case "${type}" in
+      d) TYPE["${name}"]="dir" ;;
+      l) TYPE["${name}"]="link"; LINK["${name}"]="${target}" ;;
+      f) TYPE["${name}"]="file"; SIZE["${name}"]="${size}" ;;
+      *) TYPE["${name}"]="other" ;;
+    esac
+  done < <(find "${ROOT_DIR%/}/" -printf '%y\0%s\0%P\0%l\0')
 }
 
 # Resolve one path component at a time, following symlinks the way U-Boot's ext4
@@ -148,6 +174,10 @@ compression_name() {
 # correct read into a build failure (this repo has shipped that bug once already).
 member_header() {
   local name="$1" tmp
+  if [[ -n "${ROOT_DIR}" ]]; then
+    od -An -tx1 -j0 -N64 -v "${ROOT_DIR}/${name}" | tr -d ' \n'
+    return
+  fi
   tmp="$(mktemp)"
   if ! LC_ALL=C tar -xOf "${TAR}" "./${name}" >"${tmp}" 2>/dev/null; then
     LC_ALL=C tar -xOf "${TAR}" "${name}" >"${tmp}" 2>/dev/null || { rm -f "${tmp}"; return 1; }
@@ -232,11 +262,11 @@ check_initrd() {
   ok "/${best} (${best_size} bytes)"
 }
 
-log "verifying boot artifacts in ${TAR} (dtb ${DTB_SUBDIR}/${DTB_NAME})"
-index_tar
+log "verifying boot artifacts in ${ROOT_DIR:-${TAR}} (dtb ${DTB_SUBDIR}/${DTB_NAME})"
+if [[ -n "${ROOT_DIR}" ]]; then index_root; else index_tar; fi
 check_kernel
 check_dtb
-check_initrd
+if [[ "${SKIP_INITRD}" == 0 ]]; then check_initrd; fi
 
 if (( FAILS > 0 )); then
   die "${FAILS} boot artifact check(s) failed — this rootfs would not boot"

@@ -25,7 +25,7 @@
 # package is not.
 #
 # Hardware-free and root-free: the real shipped functions are lifted out of
-# mkosi/mkosi.images/platform/mkosi.postinst and executed against synthetic
+# mkosi/runtime/ceralive-kernel-boot-staging.sh and executed against synthetic
 # trees.
 
 bats_require_minimum_version 1.5.0
@@ -34,6 +34,7 @@ setup() {
   TESTS_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
   PIPELINE_DIR="$(cd "$TESTS_DIR/.." && pwd)"
   POSTINST="$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  STAGING="$PIPELINE_DIR/mkosi/runtime/ceralive-kernel-boot-staging.sh"
   WORK="$(mktemp -d)"
 
   # The shipped functions, lifted by TEXT so this suite can never drift into
@@ -43,8 +44,8 @@ setup() {
   FNS="$WORK/dtb-fns.sh"
   {
     echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
-    sed -n '/^prune_dtb_dir()/,/^}/p' "$POSTINST"
-    sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$POSTINST"
+    sed -n '/^prune_dtb_dir()/,/^}/p' "$STAGING"
+    sed -n '/^install_kernel_source_dtbs()/,/^}/p' "$STAGING"
   } >"$FNS"
 
   # Non-vacuity: a renamed or reshaped function would otherwise make every case
@@ -294,10 +295,10 @@ edge_env() {
 
 @test "dtb prune: the prune path is actually WIRED into the boot-BSP branch" {
   # A prune nobody calls is the failure mode a synthetic-tree suite cannot see.
-  grep -q 'install_kernel_source_dtbs$' "$POSTINST"
+  grep -q 'install_kernel_source_dtbs$' "$STAGING"
 
   local install_line firmware_line
-  install_line="$(grep -n '^  install_kernel_source_dtbs$' "$POSTINST" | cut -d: -f1)"
+  install_line="$(grep -n '^    bash "\${BUILDROOT}/usr/lib/ceralive/ceralive-kernel-boot-staging"' "$POSTINST" | cut -d: -f1)"
   firmware_line="$(grep -n '^  prune_irrelevant_rk3588_firmware$' "$POSTINST" | cut -d: -f1)"
   [ -n "$install_line" ]
   [ -n "$firmware_line" ]

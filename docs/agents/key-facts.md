@@ -1941,7 +1941,7 @@ occurrence of each of those `make` calls in the file.
   hand-written list would drift from the replacement list.
 - **DTB install mapping:** `bindeb-pkg` puts arm64 DTBs under
   `/usr/lib/linux-image-<REL>/rockchip/`, but the U-Boot script resolves
-  `/boot/dtb/rockchip/${fdtfile}`. `platform/mkosi.postinst::install_kernel_source_dtbs`
+  `/boot/dtb/rockchip/${fdtfile}`. `ceralive-kernel-boot-staging::install_kernel_source_dtbs`
   copies source → target. Both paths are EMPTY on the vendor path, so the step is a
   strict no-op there; fail-loud when enabled.
 - **`/boot` artifact mapping — the DTB copy was NOT enough, and the gap crash-looped
@@ -1956,7 +1956,7 @@ occurrence of each of those `make` calls in the file.
   image therefore shipped a `/boot` holding `vmlinuz-7.1.5-ceralive-rk3588` and
   nothing else; on hardware: `Failed to load '/boot/Image'` → `booti` into unloaded
   DRAM → `"Synchronous Abort"` → reset, forever.
-  `platform/mkosi.postinst::install_kernel_source_boot_artifacts` replicates the
+  `ceralive-kernel-boot-staging::install_kernel_source_boot_artifacts` replicates the
   vendor behaviour, and the platform layer installs `initramfs-tools` in its **own
   transaction before** the kernel package — ordering is the mechanism, because the
   hook must be configured when the kernel postinst run-parts. Gated on
@@ -2363,7 +2363,7 @@ for the vendor path, while a board boots exactly ONE: `boot.scr.cmd` and
 `recovery.scr.cmd` load `/boot/dtb/rockchip/${fdtfile}` and nothing else. There
 is no overlay load anywhere in the CeraLive boot path.
 
-`prune_dtb_dir` in `platform/mkosi.postinst` reduces a directory to the board DTB
+`prune_dtb_dir` in `mkosi/runtime/ceralive-kernel-boot-staging.sh` reduces a directory to the board DTB
 plus an explicit overlay allowlist; `install_kernel_source_dtbs` applies it to
 BOTH the package-payload directory and the `/boot` copy. Measured on a real edge
 build: 34,646,582 B -> 213,660 B per rootfs, i.e. **34,432,922 B saved**, doubled
