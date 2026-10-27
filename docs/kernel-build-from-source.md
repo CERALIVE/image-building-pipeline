@@ -434,6 +434,62 @@ from the manifest alone.
 
 ---
 
+## Kernel-only build lane [EXISTS]
+
+`./build <family|board> --kernel-only` resolves the selected board's family,
+builds one kernel and validates a fresh extraction for **every** board manifest
+in that family, including resolved variant DTB overrides. It runs shared boot
+staging with `--no-initrd`, the root-directory boot verifier with `--skip-initrd`,
+and the read-only firmware check against the extracted, authenticated pinned
+firmware archive. Initrd generation remains a device/image install gate.
+No image, RAUC bundle or release is produced. `--release` runs the production
+variant guard; the debug kernel cannot pass it.
+
+Only a successful family gate publishes `mkosi/build/kernel-only/<family>/`:
+one named `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json`,
+and `SHA256SUMS`. Metadata records package/version/architecture/release, archive
+digest, kernel epoch, family input fingerprint, resolved builder closure and
+the boards actually validated. Failures leave any previous complete output intact.
+
+The kernel epoch comes from the pinned kernel commit's **committer** time in
+the verified clone, before patches are applied, for image and kernel-only
+builds alike. It does not use image-repository HEAD or an ambient epoch override.
+Debian packaging timestamps, including its changelog, use that same pinned epoch.
+This lane PR leaves the production pin at `7.2.0-ceralive1`. Before producing a
+release candidate, the release owner must bump it to `7.2.0-ceralive2`;
+revision 1 must never be reissued with changed bytes.
+The family fingerprint excludes DTB paths and local container image IDs, but
+includes Dockerfile bytes, base digest, sorted package/version/architecture
+closure, compiler version, kernel scripts, config fragments and closure gates.
+The local artifact-cache key additionally includes board DTB and local image ID.
+
+Installed `/usr/lib/ceralive/ceralive-kernel-boot-staging firmware-check
+<rootdir> --kernel-release R --firmware-root <dir>` uses the same board identity
+and `/usr/lib/ceralive/kernel-firmware-rules.{sh,txt}` as the scratch gate.
+It calls the image's `bluetooth_firmware_prepare` implementation: the same
+Bluetooth/UHID module selection, recursive dependency traversal, manifest parser,
+static references, runtime roots and exactly two reviewed hardware gaps.
+Other modules' firmware is **not gated**, just as in shipped images. Neither
+input tree is changed. Exit 0 means satisfied, exit 1 prints
+`missing: <relative-path-or-glob>` for an unmet reference, and exit 2
+means invalid usage, identity or unprovable module metadata. The device caller
+checks the target slot's existing firmware, never upgrades it.
+
+The checker shares the image Bluetooth checker's complete closure-object
+traversal: every matching object must resolve to a regular file inside the
+firmware root, including non-first symlinks. The manifest and its two exact
+module/path-bound exceptions remain the reviewed image policy, not a new
+all-module compatibility allowlist.
+
+`tests/fixtures/kernel-firmware-v7.2.json` contains all 990 real module metadata
+records, built-in dependencies, and the pinned archive's 7,653 file/link names
+and targets, not payload blobs. Its provenance is checked against the current
+source, patch, package-version and firmware pins. The regression reconstructs
+that namespace, checks the image-equivalent closure and removes required
+Bluetooth payloads to prove the gate still rejects them.
+The build-inventory checksum includes both source-tree module paths and
+`bindeb-pkg` staging copies; those copies are not additional drivers.
+
 ## 3. The build backend — and what it is not
 
 **Backend: plain kernel `make bindeb-pkg`.** `lib/build-kernel.sh` clones the

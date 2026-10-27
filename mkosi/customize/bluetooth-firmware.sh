@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Profile-neutral: shared by platform postinst and the emitted-image checker.
 
-bluetooth_firmware_error() { printf 'Bluetooth firmware: %s\n' "$*" >&2; return 1; }
+bluetooth_firmware_error() {
+  if [[ "${BT_FW_KERNEL_CHECK:-0}" == 1 && -n "${2:-}" ]]; then
+    printf 'missing: %s\n' "$2" >&2
+    return 1
+  fi
+  printf 'Bluetooth firmware: %s\n' "$1" >&2
+  return "${BT_FW_ERROR_STATUS:-1}"
+}
 
 bluetooth_firmware_load() {
   local manifest="$1" kind module pattern note key base
@@ -40,46 +47,53 @@ bluetooth_firmware_load() {
   (( ${#BT_FW_PATTERNS[@]} > 0 )) || { bluetooth_firmware_error 'zero declared roots'; return 1; }
 }
 
-bluetooth_firmware_snapshot() {
-  local fw="$1" pattern object target listing matches
-  BT_FW_OBJECTS=()
+firmware_closure_objects() {
+  local fw="$1" pattern="$2" object target listing matches
   fw="$(realpath -e "${fw}")" || return 1
-  for pattern in "${BT_FW_PATTERNS[@]}"; do
-    matches="$(compgen -G "${fw}/${pattern}")" || { bluetooth_firmware_error "missing declared root ${pattern}"; return 1; }
+  matches="$(compgen -G "${fw}/${pattern}")" || { bluetooth_firmware_error "missing declared root ${pattern}" "${pattern}"; return $?; }
+  while IFS= read -r object; do
+    [[ -e "${object}" || -L "${object}" ]] || { bluetooth_firmware_error "missing declared root ${pattern}" "${pattern}"; return $?; }
+    listing="$(find "${object}" \( -type f -o -type l \) -print)" || return 1
+    [[ -n "${listing}" ]] || { bluetooth_firmware_error "empty declared root ${pattern}" "${pattern}"; return $?; }
     while IFS= read -r object; do
-      listing="$(find "${object}" \( -type f -o -type l \) -print)" || return 1
-      [[ -n "${listing}" ]] || { bluetooth_firmware_error "empty declared root ${pattern}"; return 1; }
-      while IFS= read -r object; do
-        target="$(realpath -e "${object}")" || { bluetooth_firmware_error "dangling closure object ${object}"; return 1; }
-        [[ "${target}" == "${fw}/"* && -f "${target}" ]] || { bluetooth_firmware_error "escaping closure object ${object}"; return 1; }
-        BT_FW_OBJECTS+=("${object#"${fw}/"}" "${target#"${fw}/"}")
-      done <<<"${listing}"
-    done <<<"${matches}"
+      target="$(realpath -e "${object}" 2>/dev/null)" || { bluetooth_firmware_error "dangling closure object ${object}" "${object#"${fw}/"}"; return $?; }
+      [[ "${target}" == "${fw}/"* && -f "${target}" ]] || { bluetooth_firmware_error "escaping closure object ${object}" "${object#"${fw}/"}"; return $?; }
+      printf '%s\n' "${object#"${fw}/"}" "${target#"${fw}/"}"
+    done <<<"${listing}"
+  done <<<"${matches}"
+}
+
+bluetooth_firmware_snapshot() {
+  local fw="$1" pattern objects object
+  BT_FW_OBJECTS=()
+  for pattern in "${BT_FW_PATTERNS[@]}"; do
+    objects="$(firmware_closure_objects "${fw}" "${pattern}")" || return 1
+    while IFS= read -r object; do BT_FW_OBJECTS+=("${object}"); done <<<"${objects}"
   done
 }
 
 bluetooth_firmware_scan() {
   local modules="$1" fw="$2" listing ko name deps dep refs ref key
-  command -v modinfo >/dev/null 2>&1 || { bluetooth_firmware_error 'modinfo unavailable; cannot prove closure'; return 1; }
-  listing="$(find "${modules}" -type f \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print)" || return 1
+  command -v modinfo >/dev/null 2>&1 || { bluetooth_firmware_error 'modinfo unavailable; cannot prove closure'; return $?; }
+  listing="$(find "${modules}" -type f \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print)" || return "${BT_FW_ERROR_STATUS:-1}"
   local -A paths=() visited=()
   local -a queue=() dependencies=()
   while IFS= read -r ko; do
     [[ -n "${ko}" ]] || continue
     name="${ko##*/}"; name="${name%%.ko*}"; name="${name//-/_}"
-    [[ -z "${paths[${name}]:-}" ]] || { bluetooth_firmware_error "duplicate module ${name}"; return 1; }
+    [[ -z "${paths[${name}]:-}" ]] || { bluetooth_firmware_error "duplicate module ${name}"; return $?; }
     paths["${name}"]="${ko}"
     case "${ko}" in */kernel/drivers/bluetooth/*|*/kernel/net/bluetooth/*|*/kernel/drivers/hid/uhid.ko*) queue+=("${name}") ;; esac
   done <<<"${listing}"
-  (( ${#queue[@]} > 0 )) || { bluetooth_firmware_error 'zero Bluetooth/UHID modules'; return 1; }
+  (( ${#queue[@]} > 0 )) || { bluetooth_firmware_error 'zero Bluetooth/UHID modules'; return $?; }
   local -i i count=0
   for ((i=0; i<${#queue[@]}; i++)); do
     name="${queue[i]}"; [[ -z "${visited[${name}]:-}" ]] || continue
     visited["${name}"]=1
     ko="${paths[${name}]:-}"
-    [[ -n "${ko}" ]] || { bluetooth_firmware_error "missing dependency module ${name}"; return 1; }
+    [[ -n "${ko}" ]] || { bluetooth_firmware_error "missing dependency module ${name}"; return $?; }
     if ! deps="$(modinfo -F depends "${ko}")" || ! refs="$(modinfo -F firmware "${ko}")"; then
-      bluetooth_firmware_error "unparseable closure module ${name}"; return 1
+      bluetooth_firmware_error "unparseable closure module ${name}"; return $?
     fi
     IFS=, read -r -a dependencies <<<"${deps}"
     for dep in "${dependencies[@]}"; do [[ -z "${dep}" ]] || queue+=("${dep//-/_}"); done
@@ -93,9 +107,9 @@ bluetooth_firmware_scan() {
             continue
           fi ;;
         static) ;;
-        *) bluetooth_firmware_error "unknown static reference module=${name} firmware=${ref}"; return 1 ;;
+        *) bluetooth_firmware_error "unknown static reference module=${name} firmware=${ref}"; return $? ;;
       esac
-      [[ -f "${fw}/${ref}" ]] || { bluetooth_firmware_error "missing static object module=${name} firmware=${ref}"; return 1; }
+      [[ -f "${fw}/${ref}" ]] || { bluetooth_firmware_error "missing static object module=${name} firmware=${ref}" "${ref}"; return $?; }
     done <<<"${refs}"
     count+=1
   done
@@ -103,7 +117,8 @@ bluetooth_firmware_scan() {
 }
 
 bluetooth_firmware_prepare() {
-  bluetooth_firmware_load "$3" && bluetooth_firmware_scan "$1" "$2" && bluetooth_firmware_snapshot "$2"
+  bluetooth_firmware_load "$3" || return "${BT_FW_ERROR_STATUS:-1}"
+  bluetooth_firmware_scan "$1" "$2" && bluetooth_firmware_snapshot "$2"
 }
 
 bluetooth_firmware_assert_candidates() {
@@ -125,3 +140,13 @@ bluetooth_firmware_assert_retained() {
     [[ -f "${fw}/${object}" ]] || { bluetooth_firmware_error "removed closure object ${object}"; return 1; }
   done
 }
+
+# Kernel/device interface for exactly the image's Bluetooth/UHID closure.
+kernel_firmware_check() (
+  local root="$1" release="$2" fw="$3" manifest="$4" modules
+  local BT_FW_KERNEL_CHECK=1 BT_FW_ERROR_STATUS=2
+  modules="${root}/usr/lib/modules/${release}"
+  [[ -d "${modules}" ]] || modules="${root}/lib/modules/${release}"
+  [[ -d "${modules}" && -d "${fw}" ]] || return 2
+  bluetooth_firmware_prepare "${modules}" "${fw}" "${manifest}" >/dev/null
+)

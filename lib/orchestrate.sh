@@ -92,8 +92,7 @@ INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
 # shellcheck source=lib/rauc-pki-contract.sh
 source "${RAUC_PKI_CONTRACT_SH}"
 CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
-rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
-export CERALIVE_BUILD_MODE CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+export CERALIVE_BUILD_MODE
 CHANNEL="${CHANNEL:-stable}"
 VARIANT="${VARIANT:-standard}"
 # Target userspace suite + its os-release VERSION_ID, from the ONE mapping in
@@ -160,6 +159,8 @@ source "${STAGE_DIR}/resolve.sh"
 source "${STAGE_DIR}/fetch.sh"
 # shellcheck source=stages/kernel-build.sh
 source "${STAGE_DIR}/kernel-build.sh"
+# shellcheck source=kernel/only.sh
+source "${HERE}/kernel/only.sh"
 # shellcheck source=stages/rauc-build.sh
 source "${STAGE_DIR}/rauc-build.sh"
 # shellcheck source=stages/partition.sh
@@ -222,11 +223,14 @@ acquire_board_lock() {
 
 main() {
   local board="" manifest="" variant="${CERALIVE_KERNEL_VARIANT:-default}"
+  local kernel_only=0 release=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --board)     board="${2:-}"; shift 2 ;;
       --manifest)  manifest="${2:-}"; shift 2 ;;
       --native)    MKOSI_NATIVE=1; shift ;;
+      --kernel-only) kernel_only=1; shift ;;
+      --release) release=1; shift ;;
       --variant)   variant="${2:-}"; shift 2 ;;
       --variant=*) variant="${1#--variant=}"; shift ;;
       -h|--help)   usage; exit 0 ;;
@@ -241,9 +245,13 @@ main() {
   require_cmd ar
   require_cmd tar
   require_cmd flock
-  acquire_board_lock "${board}"
-  prune_local_conf_install_traps
-  prune_local_conf_preflight
+  if (( kernel_only == 0 )); then
+    rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+    export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+    acquire_board_lock "${board}"
+    prune_local_conf_install_traps
+    prune_local_conf_preflight
+  fi
 
   log_info "=== CeraLive v2 build: board='${board}' ==="
   log_info "manifest=${manifest} install_boot_bsp=${INSTALL_BOOT_BSP} channel=${CHANNEL} variant=${VARIANT} kernel_variant=${variant}"
@@ -264,6 +272,14 @@ main() {
   local out_dir="" artifact=""
 
   stage_resolve
+  if (( release )); then
+    "${CHECK_RELEASE_VARIANT_SH}" --variant "${KERNEL_VARIANT:-${variant}}"
+  fi
+  if (( kernel_only )); then
+    acquire_board_lock "kernel-only-${FAMILY}"
+    stage_kernel_only
+    return 0
+  fi
 
   # Staging key = the board MANIFEST STEM: unique by construction, and the same
   # key acquire_board_lock() serialises on. The app subimage rebuilds this exact

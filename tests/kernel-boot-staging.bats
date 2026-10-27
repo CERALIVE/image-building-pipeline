@@ -195,9 +195,11 @@ verdicts_equal() {
 
 @test "platform installs executable staging and verifier with manifest-derived board identity" {
   local src="${WORK}/src" board
-  mkdir -p "${src}/runtime" "${src}/.staging/fixture"
+  mkdir -p "${src}/runtime" "${src}/customize" "${src}/.staging/fixture"
   cp "${STAGING}" "${src}/runtime/ceralive-kernel-boot-staging.sh"
   cp "${VERIFY}" "${src}/.staging/fixture/verify-boot-artifacts.sh"
+  cp "${PIPELINE}/mkosi/customize/bluetooth-firmware.sh" "${src}/customize/bluetooth-firmware.sh"
+  cp "${PIPELINE}/manifests/rk3588-bluetooth-firmware-roots.txt" "${src}/.staging/fixture/"
   for board in rock-5b-plus orange-pi-5-plus; do
     run env BUILDROOT="${ROOT}" SRCDIR="${src}" CERALIVE_BOARD=fixture bash -c '
       set -euo pipefail
@@ -211,6 +213,8 @@ verdicts_equal() {
     [ -x "${ROOT}/usr/lib/ceralive/verify-boot-artifacts.sh" ]
     cmp "${STAGING}" "${ROOT}/usr/lib/ceralive/ceralive-kernel-boot-staging"
     cmp "${VERIFY}" "${ROOT}/usr/lib/ceralive/verify-boot-artifacts.sh"
+    cmp "${PIPELINE}/mkosi/customize/bluetooth-firmware.sh" "${ROOT}/usr/lib/ceralive/kernel-firmware-rules.sh"
+    cmp "${PIPELINE}/manifests/rk3588-bluetooth-firmware-roots.txt" "${ROOT}/usr/lib/ceralive/kernel-firmware-rules.txt"
     run python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))

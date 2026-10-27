@@ -85,6 +85,17 @@ alongside Docker or Podman.
 
 ## Build System
 
+The kernel-only build lane is [EXISTS]:
+`./build rk3588 --kernel-only` (or either board name) builds one family artifact,
+then extracts and gates it separately for every board in that family. It emits
+the `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json` and
+`SHA256SUMS` under `mkosi/build/kernel-only/rk3588/` only after all boot and
+pinned-firmware checks pass. Firmware uses exactly the image's Bluetooth/UHID
+closure and its two reviewed hardware gaps; other modules' firmware is not
+gated, just as in shipped images. `DRY_RUN=1` prints only resolution and kernel work;
+`--release` rejects debug variants. This does not publish or qualify hardware.
+See [kernel build details](docs/kernel-build-from-source.md#kernel-only-build-lane-exists).
+
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
 container (`ci/Dockerfile`). A local full-device build retains its uncompressed,
 sparse `.raw`, emits the same verified `.raw.xz` transport artifact as the release

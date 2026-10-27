@@ -2,6 +2,7 @@
 # Shared build/device boot mapping. Sourcing defines the original function API.
 # CLI: <rootdir> --kernel-release R [--no-initrd]
 #      firmware-refs <rootdir> --kernel-release R
+#      firmware-check <rootdir> --kernel-release R --firmware-root <dir>
 
 prune_dtb_dir() {
   local dir="$1" label="$2" board_dtb="$3"
@@ -185,23 +186,49 @@ installed_module_firmware_refs() {
 
 kernel_boot_staging_main() {
   local mode=stage
-  if [[ "${1:-}" == firmware-refs ]]; then mode=firmware-refs; shift; fi
-  local BUILDROOT="${1:?root directory required}"
+  case "${1:-}" in firmware-refs|firmware-check) mode="$1"; shift ;; esac
+  [[ -n "${1:-}" ]] || return 2
+  local BUILDROOT="$1"
   shift
-  local KERNEL_SOURCE_KERNEL_RELEASE="" KERNEL_BOOT_NO_INITRD=0
+  local KERNEL_SOURCE_KERNEL_RELEASE="" KERNEL_BOOT_NO_INITRD=0 firmware_root=""
+  local DTB_NAME="" KERNEL_SOURCE_DTB_DEB_DIR="" KERNEL_SOURCE_DTB_BOOT_DIR=""
   while (($#)); do
     case "$1" in
-      --kernel-release) KERNEL_SOURCE_KERNEL_RELEASE="${2:?--kernel-release needs a value}"; shift 2 ;;
+      --kernel-release) [[ -n "${2:-}" ]] || return 2; KERNEL_SOURCE_KERNEL_RELEASE="$2"; shift 2 ;;
+      --firmware-root) [[ -n "${2:-}" ]] || return 2; firmware_root="$2"; shift 2 ;;
       --no-initrd) KERNEL_BOOT_NO_INITRD=1; shift ;;
-      *) log "FATAL: unknown option: $1"; return 1 ;;
+      *) log "FATAL: unknown option: $1"; return 2 ;;
     esac
   done
+  if [[ "${mode}" == firmware-check ]]; then
+    [[ -d "${firmware_root}" && "${KERNEL_BOOT_NO_INITRD}" == 0 ]] || return 2
+    # Identity failures in this mode are usage errors, not missing references.
+    kernel_boot_staging_identity || return 2
+    local rules="${BUILDROOT}/usr/lib/ceralive/kernel-firmware-rules.sh"
+    [[ -r "${rules}" ]] || return 2
+    # shellcheck source=mkosi/customize/bluetooth-firmware.sh
+    source "${rules}"
+    kernel_firmware_check "${BUILDROOT}" "${KERNEL_SOURCE_KERNEL_RELEASE}" "${firmware_root}" \
+      "${BUILDROOT}/usr/lib/ceralive/kernel-firmware-rules.txt"
+    return $?
+  fi
+  kernel_boot_staging_identity || return $?
+  if [[ "${mode}" == firmware-refs ]]; then
+    installed_module_firmware_refs "${BUILDROOT}" "${KERNEL_SOURCE_KERNEL_RELEASE}"
+  else
+    install_kernel_source_dtbs
+    install_kernel_source_boot_artifacts
+  fi
+}
+
+# Uses the caller's resolved identity for both read-only and staging modes.
+kernel_boot_staging_identity() {
   [[ -d "${BUILDROOT}" ]] || { log "FATAL: root directory is absent: ${BUILDROOT}"; return 1; }
   [[ "${KERNEL_SOURCE_KERNEL_RELEASE}" =~ ^[0-9]+[.][0-9]+[.][0-9]+-[a-zA-Z0-9.+-]+$ ]] \
     || { log "FATAL: invalid --kernel-release: ${KERNEL_SOURCE_KERNEL_RELEASE}"; return 1; }
   local board="${BUILDROOT}/usr/lib/ceralive/board-boot.json"
   [[ -r "${board}" ]] || { log "FATAL: missing board-boot.json: ${board}"; return 1; }
-  local DTB_NAME KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR kernel_package_regex
+  local kernel_package_regex
   # Same flat-string convention as slot-sync's image-owned healthy-state.json.
   # The platform writes constrained paths/names and a regex without JSON escapes.
   DTB_NAME="$(sed -n 's/.*"dtb_name"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' "${board}")"
@@ -222,12 +249,6 @@ kernel_boot_staging_main() {
   done
   [[ -f "${BUILDROOT}/boot/vmlinuz-${KERNEL_SOURCE_KERNEL_RELEASE}" ]] \
     || { log "FATAL: /boot/vmlinuz-${KERNEL_SOURCE_KERNEL_RELEASE} is absent"; return 1; }
-  if [[ "${mode}" == firmware-refs ]]; then
-    installed_module_firmware_refs "${BUILDROOT}" "${KERNEL_SOURCE_KERNEL_RELEASE}"
-  else
-    install_kernel_source_dtbs
-    install_kernel_source_boot_artifacts
-  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

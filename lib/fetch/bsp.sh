@@ -410,18 +410,11 @@ fetch_bsp() {
   fi
 
   if [[ -z "${DRY_RUN}" && " ${bsp_pkgs[*]} " == *' armbian-firmware-full '* ]]; then
-    local firmware_deb firmware_pin firmware_count=0
-    firmware_pin="$(firmware_content_read "${HERE}/../manifests/armbian-firmware-content.json")" \
-      || die "invalid firmware archive content pin"
+    local firmware_deb firmware_count=0
     for firmware_deb in "${debs}"/*.deb; do
       [[ "$(deb_pkg_name "${firmware_deb}")" == armbian-firmware-full ]] || continue
       firmware_count=$((firmware_count + 1))
-      local pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib
-      IFS=$'\t' read -r pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib <<<"${firmware_pin}"
-      if ! assert_deb_identity "${firmware_deb}" "${pin_pkg}" "${pin_version}" "${pin_arch}" \
-        || ! auth_verify_file "${firmware_deb}" "${pin_sha}" \
-        || [[ "$(stat -c %s "${firmware_deb}")" != "${pin_bytes}" ]] \
-        || [[ "$(deb_control_field "${firmware_deb}" Installed-Size)" != "${pin_kib}" ]]; then
+      if ! firmware_content_assert_archive "${HERE}/../manifests/armbian-firmware-content.json" "${firmware_deb}"; then
         die "staged firmware .deb ARCHIVE FILE differs from committed content pin"
       fi
     done
