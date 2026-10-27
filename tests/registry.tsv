@@ -144,6 +144,8 @@ tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
 tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 tests/slot-sync.test.sh	shell	unit	default-shell	verified local slot mirror: full refusal-gate matrix, check JSON, dpkg-verify comparison, mark-bad/good ordering, SIGTERM handling; internal real loop-mounted-ext4 leg gated on CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required
+tests/kernel-stage.test.sh	shell	unit	default-shell	real flock ownership, write-ahead, gates, reserves, mount order and crash recovery
+tests/kernel-stage-real.test.sh	shell	privileged	default-shell	native Debian chroot and two loop slots; required in CI, opt-in locally
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
 mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
 
@@ -156,6 +158,13 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
+tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
+tests/fixtures/kernel-stage-contract/staged-state.json	fixture	support	not-executed	byte-identical real producer staged record for the adopted consumer contract
+tests/fixtures/kernel-stage-contract/pending-overlay.json	fixture	support	not-executed	byte-identical real producer pending overlay with observed RAUC byte identity
+tests/fixtures/kernel-stage-contract/invalid-overlay.json	fixture	support	not-executed	byte-identical real producer lean invalid overlay
+tests/fixtures/kernel-stage-contract/failed-state.json	fixture	support	not-executed	byte-identical real producer failed record with a shared reason token
+tests/fixtures/kernel-stage-tool.sh	fixture	support	invoked-by-suite	command boundary fixtures for kernel-stage unit and native contracts
 tests/lib/edid-conformance.py	tool	support	invoked-by-suite	per-profile EDID validity + capability checker and negative-fixture generator, driven by hdmirx-edid-contract.bats
 tests/preflash-verify.sh	tool	support	invoked-by-suite	operator preflash gate; its --self-test is driven by rk3588-ab-contract.bats and lib/stages/boot-verify.sh
 tests/provision-portal.test.sh	shell	unit	invoked-by-suite	offline captive-portal proof, gated and executed by postinst-wiring.bats

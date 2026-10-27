@@ -65,6 +65,7 @@ stage_partition() {
   log_info "[3/9] partitioning staged .debs into BSP vs first-party by package name"
   cp "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" "${staging}/rk3588-bluetooth-firmware-roots.txt"
   cp "${PIPELINE_DIR}/lib/verify-boot-artifacts.sh" "${staging}/verify-boot-artifacts.sh"
+  cp "${PIPELINE_DIR}/lib/shared/slot-reserve.sh" "${staging}/slot-reserve.sh"
   # The set of BSP package names (manifest-declared) is the partition key.
   # rauc + rauc-service: built in-process by stage_rauc_build ([2c/9], EVERY
   # board, not manifest-declared) from pinned upstream source — Todo 22 RAUC

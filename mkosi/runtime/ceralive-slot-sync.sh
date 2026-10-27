@@ -109,6 +109,14 @@
 
 set -uo pipefail
 
+# Also sourceable as the shared, read-only six-gate reader for kernel staging.
+# shellcheck source=mkosi/runtime/ceralive-slot-mirror-lib.sh
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/ceralive-slot-mirror-lib.sh" ]]; then
+  source "$(dirname "${BASH_SOURCE[0]}")/ceralive-slot-mirror-lib.sh"
+else
+  source "${CERALIVE_SLOT_MIRROR_LIB:-/usr/lib/ceralive/ceralive-slot-mirror-lib.sh}"
+fi
+
 PROG="ceralive-slot-sync"
 
 # --- config: overridable for the offline/loop-mounted test harness -----------
@@ -419,27 +427,6 @@ gate_healthy_state() {
 
 # --- dpkg --verify comparison, filtered through prune-paths.list (todo 29) ---
 # Absence of that file is a safe no-op: compare the raw --verify output.
-dpkg_verify_filtered() {
-  local root="$1" out line path keep prune
-  out="$("${DPKG_BIN}" --root="${root}" --verify 2>&1)"
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    path="${line##* }"
-    keep=1
-    if [[ -r "${PRUNE_PATHS_FILE}" ]]; then
-      while IFS= read -r prune; do
-        [[ -n "${prune}" ]] || continue
-        case "${prune}" in \#*) continue ;; esac
-        # shellcheck disable=SC2254 # deliberately unquoted: prune-paths.list entries are globs
-        case "${path}" in
-          ${prune}) keep=0; break ;;
-        esac
-      done <"${PRUNE_PATHS_FILE}"
-    fi
-    [[ "${keep}" -eq 1 ]] && printf '%s\n' "${line}"
-  done <<<"${out}"
-}
-
 # --- adaptive index cleanup (RAUC 1.13 layout: <data-directory>/slot.<name>/
 # hash-<digest>/block-hash-index — see r_slot_get_checksum_data_directory /
 # hash_index.c upstream). We do not know (and must not guess) the digest a
@@ -456,7 +443,7 @@ delete_adaptive_index() {
   local removed=0
   for hashdir in "${dir}"/hash-*; do
     [[ -e "${hashdir}" ]] || continue
-    rm -rf -- "${hashdir}"
+    rm -rf -- "${hashdir}" || return 1
     removed=1
     log "removed stale adaptive index: ${hashdir}"
   done
@@ -626,30 +613,7 @@ cmd_run() {
     --include=/dev/random --include=/dev/urandom
     "--exclude-from=${EXCLUDE_FILE}"
   )
-  # `set -m` (job control) makes this background job its OWN process group
-  # (pgid == its own PID), so on_sigterm's `-WORKER_PID` group-kill actually
-  # reaches any child rsync itself forks, not just the one PID we captured.
-  set -m
-  "${RSYNC_BIN}" "${rsync_args[@]}" "${SOURCE_MNT}/" "${TARGET_MNT}/" &
-  WORKER_PID=$!
-  set +m
-  wait "${WORKER_PID}"
-  local rsync_rc=$?
-  WORKER_PID=""
-  [[ "${rsync_rc}" -eq 0 ]] || die "rsync mirror failed (rc=${rsync_rc})"
-
-  "${SYNC_BIN}"
-
-  log "rsync complete — comparing dpkg --verify between source and target"
-  local source_verify target_verify
-  source_verify="$(dpkg_verify_filtered "${SOURCE_MNT}" | sort)"
-  target_verify="$(dpkg_verify_filtered "${TARGET_MNT}" | sort)"
-  if [[ "${source_verify}" != "${target_verify}" ]]; then
-    fail "dpkg --verify mismatch between source and target after mirror:"
-    diff <(printf '%s\n' "${source_verify}") <(printf '%s\n' "${target_verify}") >&2 || true
-    die "aborting — target slot stays bad"
-  fi
-  log "dpkg --verify comparison identical"
+  slot_mirror_copy_verify "${rsync_args[@]}"
 
   local state_sha256
   state_sha256="$(current_dpkg_status_sha256)"
@@ -666,12 +630,34 @@ cmd_run() {
 
   delete_adaptive_index "${OTHER_SLOT_NAME}"
 
+  mirror_slot_overlay
   write_sync_receipt "${state_sha256}" "${OTHER_SLOT_NAME}"
   log "wrote sync receipt: ${SYNC_RECEIPT_FILE}"
 
   "${RAUC_BIN}" status mark-good other >/dev/null || die "rauc status mark-good other failed"
   log "slot-sync complete: ${OTHER_SLOT_NAME} mirrored and marked good"
   return 0
+}
+
+# Called only after the complete verified mirror. An invalid overlay is evidence
+# of changed bytes, so acknowledgement or failed attempts must never remove it.
+mirror_slot_overlay() {
+  local booted other source target tmp
+  booted="$(json_field "$(booted_rootfs_slot_object)" bootname)"
+  other="$(json_field "${OTHER_SLOT_OBJECT}" bootname)"
+  [[ "${booted}" =~ ^[AB]$ && "${other}" =~ ^[AB]$ && "${booted}" != "${other}" ]] \
+    || die "overlay slot identity invalid"
+  source="${UPDATE_STATE_DIR}/slot-overlay-${booted}.json"
+  target="${UPDATE_STATE_DIR}/slot-overlay-${other}.json"
+  if [[ -f "${source}" ]]; then
+    tmp="${target}.tmp.$$"
+    cp -- "${source}" "${tmp}" &&
+      "${SYNC_BIN}" "${tmp}" &&
+      mv -f -- "${tmp}" "${target}" || die "overlay mirror failed"
+  else
+    rm -f -- "${target}" || die "overlay removal failed"
+  fi
+  "${SYNC_BIN}" "${UPDATE_STATE_DIR}" || die "overlay directory sync failed"
 }
 
 main() {
@@ -685,4 +671,4 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

@@ -73,6 +73,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 - Each populated ext4 slot must have >= 512 MiB ACTUAL free space; image size alone is not proof of slot reserve.
 - The healthcheck is the only mark-good caller for the BOOTED slot; never manually confirm an unverified boot.
 - Slot-sync may mark only the OTHER slot good, after verified mirroring of a boot-health-confirmed state; read [the mirror contract](docs/agents/key-facts.md) before editing its receipt or ordering.
+- Kernel staging may mark only OTHER eligible after mirror/install/verification; only healthcheck confirms its boot. Read [staging](docs/kernel-staging.md).
 - Slot-sync clears its stale mounts before refusing a still-mounted target; only pre-copy repair rc 0/1 permits copying, and the final read-only filesystem check remains mandatory before mark-good.
 - Never shadow packaged udev rules with image-owned rules of the same basename; udev resolves ownership by basename.
 - Preserve frozen A/B labels, UUID and bootloader contracts; bench PARTLABEL overlays are explicit opt-ins, never production defaults.

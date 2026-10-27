@@ -200,6 +200,7 @@ verdicts_equal() {
   cp "${VERIFY}" "${src}/.staging/fixture/verify-boot-artifacts.sh"
   cp "${PIPELINE}/mkosi/customize/bluetooth-firmware.sh" "${src}/customize/bluetooth-firmware.sh"
   cp "${PIPELINE}/manifests/rk3588-bluetooth-firmware-roots.txt" "${src}/.staging/fixture/"
+  cp "${PIPELINE}/lib/shared/slot-reserve.sh" "${src}/.staging/fixture/slot-reserve.sh"
   for board in rock-5b-plus orange-pi-5-plus; do
     run env BUILDROOT="${ROOT}" SRCDIR="${src}" CERALIVE_BOARD=fixture bash -c '
       set -euo pipefail
@@ -215,6 +216,7 @@ verdicts_equal() {
     cmp "${VERIFY}" "${ROOT}/usr/lib/ceralive/verify-boot-artifacts.sh"
     cmp "${PIPELINE}/mkosi/customize/bluetooth-firmware.sh" "${ROOT}/usr/lib/ceralive/kernel-firmware-rules.sh"
     cmp "${PIPELINE}/manifests/rk3588-bluetooth-firmware-roots.txt" "${ROOT}/usr/lib/ceralive/kernel-firmware-rules.txt"
+    cmp "${PIPELINE}/lib/shared/slot-reserve.sh" "${ROOT}/usr/lib/ceralive/slot-reserve.sh"
     run python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))

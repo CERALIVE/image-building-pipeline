@@ -314,6 +314,9 @@ setup_slot_sync() {
   install -D -m 0755 "${src}/ceralive-slot-sync.sh" /usr/libexec/ceralive/ceralive-slot-sync
   install -D -m 0644 "${src}/ceralive-slot-sync.exclude" /usr/lib/ceralive/slot-sync.exclude
   install -D -m 0644 "${src}/ceralive-slot-sync.service" /etc/systemd/system/ceralive-slot-sync.service
+  install -D -m 0644 "${src}/ceralive-slot-mirror-lib.sh" /usr/lib/ceralive/ceralive-slot-mirror-lib.sh
+  install -D -m 0644 "${src}/ceralive-kernel-state-lib.sh" /usr/lib/ceralive/ceralive-kernel-state-lib.sh
+  install -D -m 0755 "${src}/ceralive-kernel-stage.sh" /usr/lib/ceralive/ceralive-kernel-stage
 }
 
 # ---------------------------------------------------------------------------

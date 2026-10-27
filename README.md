@@ -1233,6 +1233,13 @@ updates remain actionable outside the held image-only set. The lagged
 running slot, including after rollback. Only the healthcheck may confirm the
 booted slot; slot-sync may mark only the verified mirrored other slot good.
 
+The [kernel stager](docs/kernel-staging.md) [PARTIAL: host contract, not board
+qualification] prepares a new kernel only in the other slot. It requires the
+`kernel-apt-stage` capability and CeraUI's parent flock, leaves the running slot
+unchanged, and commits eligibility only after boot, firmware and filesystem
+verification. Capability emission and activation reconciliation are separate
+release gates; this helper alone does not enable kernel updates.
+
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed
 boots, package-install crash recovery, mirror restoration and notifications.
