@@ -2,6 +2,13 @@
 
 ## KEY FACTS
 
+**Local kernel candidates [PARTIAL].** `ci/kernel-release.py` calls the existing
+family-only builder, metadata/fingerprint and version/floor gates, then creates
+one immutable local bundle per version. `--publish` refuses before any work;
+no producer workflow or publisher bypass exists. See
+[the local command contract](../RELEASE-PROCESS.md#local-kernel-candidates-partial)
+for the exact inputs, unavailable authorization fields and pending owner decision.
+
 **Immutable kernel reuse and OS downgrade floors [EXISTS].** Kernel image bytes
 come only from authenticated apt.ceralive.tv; release metadata supplies identity,
 config and module inventory. Production images refuse an APT miss; local

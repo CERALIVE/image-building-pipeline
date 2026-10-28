@@ -2,6 +2,7 @@
 /build/
 /cache/
 /.staging/
+/.kernel-release.lock
 /lib/
 /runtime/first-party-deb-versions.txt
 *.cache

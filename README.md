@@ -17,6 +17,11 @@ A build pipeline for creating ready-to-use images for ARM-based streaming device
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future
 support for Intel N100/N200 and AMD platforms.
 
+The [local kernel-release command](docs/RELEASE-PROCESS.md#local-kernel-candidates-partial)
+builds and gates immutable family candidates without an OS image [PARTIAL].
+Its publish flag refuses until the owner resolves apt-worker authorization; it
+does not create a Release, dispatch a workflow, sign an APT index or change pins.
+
 > Status: Alpha — interfaces and docs may evolve. Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Build Requirements (at a glance)

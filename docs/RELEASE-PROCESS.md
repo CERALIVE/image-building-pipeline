@@ -15,6 +15,92 @@ rotation and fleet OTA rollback runbooks remain below.
 
 ---
 
+## Local kernel candidates [PARTIAL]
+
+Kernel compilation runs on the owner's workstation, never a GitHub runner or
+remote builder. From a clean, non-shallow checkout with complete kernel tags:
+
+```bash
+python3 ci/kernel-release.py rk3588 \
+  --candidate-run-id 12345 --channel beta \
+  --os-releases mkosi/cache/reviewed-os-kernel-sidecars
+```
+
+`--candidate-run-id` is an owner-selected positive decimal **local candidate ID**,
+not a claim that an Actions run exists. `--os-releases` is required: provide a
+complete, already authenticated snapshot of the published OS kernel sidecars
+across boards/channels, as described under signed channel publishing below.
+An empty directory asserts no OS kernel publication; it is not a substitute
+for inventorying live releases. `CERALIVE_KERNEL_HISTORY_DIR` optionally supplies
+the existing version gate's local kernel metadata history; otherwise that gate
+reads kernel Release metadata through `gh`. No APT credentials are needed for
+the local bundle store; the builder retains its normal authenticated dependencies.
+This command does not refresh tags or authenticate the supplied OS snapshot.
+
+The command refuses a dirty/shallow source, mismatched existing kernel tag,
+DRY_RUN, an existing version bundle, or any failed gate. It checks the production
+variant and runs `ci/check-kernel-version-monotonic.py --candidate`, `--published`
+and `--floor --os-releases ...` before invoking exactly
+`./build rk3588 --kernel-only`. That existing builder performs all-family
+package/config/boot/DTB/firmware checks. The command then snapshots its five
+outputs, reuses the strict metadata parser, verifies the archive's checksum and
+all-family validation list, recomputes the existing family fingerprint, and
+repeats candidate/publication/floor admission before sealing. A local producer
+lock is not an APT publication lease or the image publisher's Actions lock.
+Its persistent file is `mkosi/.kernel-release.lock`, outside candidate stores;
+stores containing that lock are refused. Failed attempts remove only empty
+store directories and parents that they created. Existing stores, completed
+bundles and the shared lock are never removed by failure cleanup.
+
+The default store is `mkosi/build/kernel-releases/<version>/`; `--output-dir`
+can select another repo-local, ignored store. Linux `renameat2(RENAME_NOREPLACE)`
+installs the complete bundle create-only, including against an empty-directory
+collision. Files become read-only, as does the completed version directory.
+The command never overwrites or reuses an existing version, even for identical
+bytes. Manual filesystem writes by the owner are outside this command's
+immutability guarantee. The original five builder files remain byte-identical:
+
+- The production arm64 `.deb`, `kernel-artifact.json`, `resolved.config`,
+  `built-modules.txt` and their original `SHA256SUMS`.
+- `candidate.json`: local ID, source commit, family, observed floor and
+  `publication: "blocked-pending-owner"`.
+- `publish-authorization.inputs.json`: exactly apt-worker's eleven authorization
+  field names. The artifact identity, candidate ID, tag, commit and channel are
+  bound. `publish_run_id` and `run_attempt` are `null` because no approved Actions
+  run exists; `bench_report_sha256` is `null` unless a report was supplied.
+  This is an input record, **not** a valid or approved publish authorization.
+- `BUNDLE.SHA256SUMS`: digests for every file above, including the original
+  checksum list and the two local records.
+
+Optionally supply `--bench-report FILE` during candidate creation. The command
+uses `ci/validate-kernel-bench-report.py` and the byte-identical apt-worker schema,
+requires exact candidate/tag/commit/archive identity and all six passing board
+observations, then retains `bench-<version>.json` and binds its **raw-byte** hash.
+Bootstrap reports use the same publisher schema and version/digest binding;
+their eligibility still belongs exclusively to apt-worker's publication state.
+A report cannot be attached later by rerunning this immutable local command.
+No report is required to build a candidate; a report can separately be prepared
+against that frozen candidate for a future owner-approved publication interface.
+
+```bash
+python3 ci/kernel-release.py --publish
+```
+
+This always exits nonzero with one error, before reading repository/history or
+creating output: apt-worker requires a `kernel-release.yml` `workflow_dispatch`
+run approved in the `kernel-release` environment. The owner must choose a
+self-hosted `kernel-release.yml` on this PC or an apt-worker contract change.
+Neither option is implemented or enabled here. There is no GitHub Release
+creation/upload, APT dispatch/signing/publication, token, or environment in this
+local lane. The production pin remains `7.2.0-ceralive1`; allocating the next
+revision and any actual publication remain owner actions.
+
+CI runs only the offline command/bench fixtures through `tests/registry.tsv`
+and `./run-tests`; tests stub build/transport boundaries and make no network
+requests. Fixture success is not a real kernel build, board drill or publication.
+
+---
+
 ## 1. The path at a glance
 
 ```

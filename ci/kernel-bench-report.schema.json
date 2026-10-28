@@ -1,0 +1,75 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"title": "CeraLive kernel publication bench report",
+	"oneOf": [{ "$ref": "#/$defs/kernelLane" }, { "$ref": "#/$defs/bootstrap" }],
+	"$defs": {
+		"sha256": { "type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])" },
+		"version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9.+:~-]*(?![\\s\\S])" },
+		"observation": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["result", "evidence"],
+			"properties": {
+				"result": { "type": "string", "enum": ["pass", "fail", "not-run"] },
+				"evidence": {
+					"type": "array",
+					"minItems": 1,
+					"uniqueItems": true,
+					"items": { "type": "string", "pattern": "^\\S+(?![\\s\\S])" }
+				}
+			}
+		},
+		"board": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["happy", "forced_rollback", "restored"],
+			"properties": {
+				"happy": { "$ref": "#/$defs/observation" },
+				"forced_rollback": { "$ref": "#/$defs/observation" },
+				"restored": { "$ref": "#/$defs/observation" }
+			}
+		},
+		"kernelLane": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["type", "candidate_run_id", "tag", "commit", "deb_sha256", "boards"],
+			"properties": {
+				"type": { "type": "string", "const": "kernel-lane" },
+				"candidate_run_id": { "type": "string", "pattern": "^[1-9][0-9]*(?![\\s\\S])" },
+				"tag": {
+					"type": "string",
+					"pattern": "^kernel/v[0-9][A-Za-z0-9.+:~-]*(?![\\s\\S])"
+				},
+				"commit": { "type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])" },
+				"deb_sha256": { "$ref": "#/$defs/sha256" },
+				"boards": {
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["rock-5b-plus", "orange-pi-5-plus"],
+					"properties": {
+						"rock-5b-plus": { "$ref": "#/$defs/board" },
+						"orange-pi-5-plus": { "$ref": "#/$defs/board" }
+					}
+				}
+			}
+		},
+		"bootstrap": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["type", "version", "deb_sha256", "approving_owner", "statement"],
+			"properties": {
+				"type": { "type": "string", "const": "bootstrap" },
+				"version": { "$ref": "#/$defs/version" },
+				"deb_sha256": { "$ref": "#/$defs/sha256" },
+				"approving_owner": {
+					"type": "string",
+					"pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}(?![\\s\\S])"
+				},
+				"statement": {
+					"type": "string",
+					"const": "No kernel-apt-stage image is published."
+				}
+			}
+		}
+	}
+}

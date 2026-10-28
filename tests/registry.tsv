@@ -57,6 +57,8 @@ tests/kernel-only-build.test.sh	shell	integration	default-shell	family kernel-on
 tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline Debian kernel ordering, immutable candidate fingerprints and published OS floors
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
 tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	independent 9b89e6f production fingerprint file digests including the coverage function
+tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
+tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board and bootstrap report schema, identity binding and fail-closed evidence
 tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds
 tests/lib/kernel-release-fixtures.sh	helper	support	invoked-by-suite	offline kernel release metadata, package, git history and compiler-boundary fixtures
 tests/fixtures/kernel-firmware-v7.2.json	fixture	support	not-executed	real pinned v7.2 module metadata and full-firmware 26.8.3 file inventory, no blobs
