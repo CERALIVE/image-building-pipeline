@@ -81,5 +81,62 @@ from jsonschema import validate
 with open(sys.argv[1]) as schema, open(sys.argv[2]) as data:
     validate(json.load(data), json.load(schema))
 PY
+export CERALIVE_KERNEL_STAGE_PIN_FILE="$ROOT/manifests/first-party-deb-versions.txt"
+export REAL_DPKG
+REAL_DPKG="$(command -v dpkg)"
+cat >"$WORK/bin/dpkg" <<'SH'
+#!/bin/sh
+if [ "$1" = --print-architecture ]; then
+  printf '%s\n' "${FIXTURE_ARCH:-amd64}"
+else
+  exec "$REAL_DPKG" "$@"
+fi
+SH
+chmod +x "$WORK/bin/dpkg"
+mkdir -p "$WORK/root/usr/libexec/ceralive"
+for file in ceralive-kernel-stage ceralive-kernel-state-lib.sh ceralive-slot-mirror-lib.sh \
+  ceralive-kernel-boot-staging verify-boot-artifacts.sh; do
+  install -m 0755 /usr/bin/true "$WORK/root/usr/lib/ceralive/$file"
+done
+install -m 0755 /usr/bin/true "$WORK/root/usr/libexec/ceralive/ceralive-slot-sync"
+capability_has_kernel() {
+  jq -e '.features | index("kernel-apt-stage") != null' "$WORK/root/usr/lib/ceralive/update-capabilities.json" >/dev/null
+}
+emit() {
+  env PATH="$WORK/bin:$PATH" "$ROOT/mkosi/runtime/rauc/install-update-capabilities.sh" "$WORK/root"
+}
+for arch in amd64 arm64; do
+  export FIXTURE_ARCH="$arch"
+  # Real payload pins include timestamp/hash suffixes, not just the release tag.
+  version="$(awk -F= -v package="ceralive-device[$arch]" '$1 == package {print $2}' "$CERALIVE_KERNEL_STAGE_PIN_FILE")"
+  check test -n "$version"
+  unset KERNEL_STAGE_MIN_CERAUI
+  check emit
+  if capability_has_kernel; then bad 'unset minimum enabled kernel staging'; else ok 'unset minimum stays OFF'; fi
+  export KERNEL_STAGE_MIN_CERAUI=""
+  check emit
+  if capability_has_kernel; then bad 'empty minimum enabled kernel staging'; else ok 'empty minimum stays OFF'; fi
+  export KERNEL_STAGE_MIN_CERAUI="$version"
+  check emit
+  check capability_has_kernel
+  export KERNEL_STAGE_MIN_CERAUI="2026.10.0"
+  check emit
+  check capability_has_kernel
+  export KERNEL_STAGE_MIN_CERAUI="${version}1"
+  check emit
+  if capability_has_kernel; then bad 'below-minimum pin enabled kernel staging'; else ok 'below-minimum payload stays OFF'; fi
+done
+export KERNEL_STAGE_MIN_CERAUI="$version"
+for file in usr/lib/ceralive/ceralive-kernel-stage usr/lib/ceralive/ceralive-kernel-state-lib.sh \
+  usr/lib/ceralive/ceralive-slot-mirror-lib.sh usr/libexec/ceralive/ceralive-slot-sync \
+  usr/lib/ceralive/ceralive-kernel-boot-staging usr/lib/ceralive/verify-boot-artifacts.sh; do
+  mv "$WORK/root/$file" "$WORK/missing-file"
+  check emit
+  if capability_has_kernel; then bad "missing $file enabled staging"; else ok "missing $file stays OFF"; fi
+  mv "$WORK/missing-file" "$WORK/root/$file"
+done
+export CERALIVE_KERNEL_STAGE_PIN_FILE="$WORK/missing-pins"
+check emit
+if capability_has_kernel; then bad 'missing pins enabled staging'; else ok 'missing pins stay OFF'; fi
 trap - ERR
 [[ "$FAIL" -eq 0 ]]

@@ -55,7 +55,9 @@ is bad, stale owned mounts are cleared, and the overlay remains `invalid`.
 Acknowledgement must not delete these records. A later verified slot-sync
 mirror replaces the target overlay with the booted slot's record or absence.
 Activation/reconciliation and full RAUC overlay retirement are owned by their
-respective helpers, not this transaction.
+respective helpers, not this transaction; see the
+[activation and recovery contract](ota-activation.md). The capability remains
+off until the owner releases a capable CeraUI and sets its minimum/pins.
 
 Attempts are UUIDs. State slot fields and overlay filenames use bootnames `A`/`B`. Pending overlays
 retain the actual booted RAUC identity as `base_bundle_identity`:

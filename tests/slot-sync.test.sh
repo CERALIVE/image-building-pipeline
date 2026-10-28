@@ -32,6 +32,7 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 source "${HERE}/lib/assertions.sh"
 
 SCRIPT="${ROOT}/mkosi/runtime/ceralive-slot-sync.sh"
+SCRIPT="${SLOT_SYNC_SCRIPT_OVERRIDE:-${SCRIPT}}"
 EXCLUDE_SRC="${ROOT}/mkosi/runtime/ceralive-slot-sync.exclude"
 SERVICE_SRC="${ROOT}/mkosi/runtime/ceralive-slot-sync.service"
 
@@ -729,6 +730,52 @@ grep -qF 'setup_slot_sync() {' "${ROOT}/mkosi/customize/postinst.d/persistence.s
 grep -qF 'setup_slot_sync' "${ROOT}/mkosi/mkosi.images/runtime/mkosi.postinst.chroot" \
   && bad "setup_slot_sync must not be called directly from mkosi.postinst.chroot (Todo 22 owns that file right now)" \
   || ok "no new call added to mkosi.postinst.chroot — wiring goes through configure_services() instead"
+
+# Kernel lifecycle gates use real producer records with all other gates valid.
+for state in staging staged armed activating activated; do
+  reset_happy_fixtures
+  jq --arg state "${state}" '.state = $state | .boot_id_at_activation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"' \
+    "${ROOT}/tests/fixtures/kernel-stage-contract/staged-state.json" >"${CERALIVE_UPDATE_STATE_DIR}/kernel-state.json"
+  out="$(run_run 2>&1)"; rc=$?
+  assert_eq "kernel ${state} refuses mirror" 75 "${rc}"
+  printf '%s' "${out}" | grep -Fq kernel_staged_pending \
+    && ok "kernel ${state} exact refusal" || bad "kernel ${state} reason: ${out}"
+  if grep -Eq 'mark-(bad|good)' "${RAUC_CALLS}" || [[ -s "${MOUNT_CALLS}" ]]; then
+    bad "kernel ${state} mutated slot"
+  else
+    ok "kernel ${state} performs no slot mutation"
+  fi
+  out="$(run_check)"
+  printf '%s' "${out}" | jq -e '.would_refuse and .refuse_reason == "kernel_staged_pending"' >/dev/null \
+    && ok "kernel ${state} check predicts refusal" || bad "kernel ${state} check: ${out}"
+done
+printf '{"state":' >"${CERALIVE_UPDATE_STATE_DIR}/kernel-state.json"
+out="$(run_run 2>&1)"; rc=$?
+assert_eq "corrupt kernel state refuses mirror" 75 "${rc}"
+printf '%s' "${out}" | grep -Fq kernel_state_invalid \
+  && ok 'corrupt kernel state exact refusal' || bad "corrupt state reason: ${out}"
+
+reset_happy_fixtures
+jq '.state = "rolled_back" | .boot_id_at_activation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"' \
+  "${ROOT}/tests/fixtures/kernel-stage-contract/staged-state.json" >"${CERALIVE_UPDATE_STATE_DIR}/kernel-state.json"
+cp "${ROOT}/tests/fixtures/kernel-stage-contract/pending-overlay.json" "${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-B.json"
+out="$(run_run 2>&1)"; rc=$?
+assert_eq "rolled back kernel permits verified repair" 0 "${rc}"
+[[ ! -e "${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-B.json" ]] \
+  && ok 'repair mirrors booted overlay absence over obsolete pending overlay' \
+  || bad 'repair retained obsolete overlay'
+grep -Fq 'status mark-good other' "${RAUC_CALLS}" && ok 'repair marks mirrored other eligible' || bad 'repair never marked other eligible'
+
+reset_happy_fixtures
+rm "${CERALIVE_UPDATE_STATE_DIR}/kernel-state.json"
+jq '.status = "confirmed"' "${ROOT}/tests/fixtures/kernel-stage-contract/pending-overlay.json" \
+  >"${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-A.json"
+cp "${ROOT}/tests/fixtures/kernel-stage-contract/invalid-overlay.json" "${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-B.json"
+out="$(run_run 2>&1)"; rc=$?
+assert_eq "upgraded booted slot mirror succeeds" 0 "${rc}"
+cmp -s "${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-A.json" "${CERALIVE_UPDATE_STATE_DIR}/slot-overlay-B.json" \
+  && ok 'verified mirror copies upgraded booted overlay bytes' || bad 'mirror overlay differs'
+rm "${CERALIVE_UPDATE_STATE_DIR}"/slot-overlay-{A,B}.json
 
 # ===========================================================================
 # 9. PRIVILEGED leg: real loop-mounted ext4 target + real mount/rsync/e2fsck.

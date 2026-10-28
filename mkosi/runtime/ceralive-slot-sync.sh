@@ -116,6 +116,10 @@ if [[ -f "$(dirname "${BASH_SOURCE[0]}")/ceralive-slot-mirror-lib.sh" ]]; then
 else
   source "${CERALIVE_SLOT_MIRROR_LIB:-/usr/lib/ceralive/ceralive-slot-mirror-lib.sh}"
 fi
+state_lib="$(dirname "${BASH_SOURCE[0]}")/ceralive-kernel-state-lib.sh"
+[[ -f "${state_lib}" ]] || state_lib=/usr/lib/ceralive/ceralive-kernel-state-lib.sh
+# shellcheck source=mkosi/runtime/ceralive-kernel-state-lib.sh
+source "${CERALIVE_KERNEL_STATE_LIB:-${state_lib}}"
 
 PROG="ceralive-slot-sync"
 
@@ -343,6 +347,19 @@ gate_partlabel_guard() {
   return 0
 }
 
+gate_kernel_pending() {
+  if ! kernel_load_state "${UPDATE_STATE_DIR}"; then
+    REFUSE_REASON="kernel_state_invalid"
+    return 1
+  fi
+  case "${KERNEL_STATE}" in
+    staging|staged|armed|activating|activated)
+      REFUSE_REASON="kernel_staged_pending"
+      return 1 ;;
+  esac
+  return 0
+}
+
 DPKG_AUDIT_OUTPUT=""
 gate_dpkg_audit() {
   DPKG_AUDIT_OUTPUT="$("${DPKG_BIN}" --audit 2>&1)"
@@ -489,6 +506,7 @@ cmd_check() {
   gate_partlabel_guard || { partlabel_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
   gate_dpkg_audit || { dpkg_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
   gate_rauc_idle || { rauc_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
+  gate_kernel_pending || { other_bad=1; [[ -z "${first_reason}" ]] && first_reason="${REFUSE_REASON}"; }
 
   if resolve_other_rootfs_slot; then
     json_has_object "${OTHER_SLOT_OBJECT}" installed && other_installed=1
@@ -556,6 +574,7 @@ cmd_run() {
   gate_partlabel_guard || refuse_exit
   gate_dpkg_audit || refuse_exit
   gate_rauc_idle || refuse_exit
+  gate_kernel_pending || refuse_exit
   gate_other_slot_pending || refuse_exit
   gate_hawkbit_idle || refuse_exit
   gate_healthy_state || refuse_exit
@@ -642,7 +661,7 @@ cmd_run() {
 # Called only after the complete verified mirror. An invalid overlay is evidence
 # of changed bytes, so acknowledgement or failed attempts must never remove it.
 mirror_slot_overlay() {
-  local booted other source target tmp
+  local booted other source target
   booted="$(json_field "$(booted_rootfs_slot_object)" bootname)"
   other="$(json_field "${OTHER_SLOT_OBJECT}" bootname)"
   [[ "${booted}" =~ ^[AB]$ && "${other}" =~ ^[AB]$ && "${booted}" != "${other}" ]] \
@@ -650,10 +669,7 @@ mirror_slot_overlay() {
   source="${UPDATE_STATE_DIR}/slot-overlay-${booted}.json"
   target="${UPDATE_STATE_DIR}/slot-overlay-${other}.json"
   if [[ -f "${source}" ]]; then
-    tmp="${target}.tmp.$$"
-    cp -- "${source}" "${tmp}" &&
-      "${SYNC_BIN}" "${tmp}" &&
-      mv -f -- "${tmp}" "${target}" || die "overlay mirror failed"
+    kernel_atomic_write "${target}" "$(<"${source}")" || die "overlay mirror failed"
   else
     rm -f -- "${target}" || die "overlay removal failed"
   fi

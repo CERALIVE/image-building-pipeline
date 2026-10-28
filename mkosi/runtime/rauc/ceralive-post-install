@@ -35,4 +35,15 @@ for slot in ${RAUC_TARGET_SLOTS}; do
     exit 1
   fi
   e2label "${device}" "${label}"
+  # Rootfs bytes came from a full bundle; retained local-kernel identity is stale.
+  case "${label}" in
+    rootfs_a|xrootfs_a) bootname=A ;;
+    rootfs_b|xrootfs_b) bootname=B ;;
+    *) printf 'unknown rootfs slot label: %s\n' "${label}" >&2; exit 1 ;;
+  esac
+  state_dir="${CERALIVE_UPDATE_STATE_DIR:-/data/ceralive/update-state}"
+  if [[ -d "${state_dir}" ]]; then
+    rm -f -- "${state_dir}/slot-overlay-${bootname}.json"
+    sync "${state_dir}"
+  fi
 done

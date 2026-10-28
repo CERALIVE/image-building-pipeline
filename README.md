@@ -1239,6 +1239,11 @@ qualification] prepares a new kernel only in the other slot. It requires the
 unchanged, and commits eligibility only after boot, firmware and filesystem
 verification. Capability emission and activation reconciliation are separate
 release gates; this helper alone does not enable kernel updates.
+The [activation lifecycle](docs/ota-activation.md#local-kernel-activation-and-recovery-partial)
+now reconciles kernel boot identity, outcomes and quarantine before health
+confirmation, and retires overlays on verified mirror or full OS install.
+Host crash-boundary tests cover these helpers; `kernel-apt-stage` remains OFF
+until the owner releases a capable CeraUI and sets its minimum/pins.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed

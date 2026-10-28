@@ -275,6 +275,8 @@ assert_cache_privilege_domain() {
 # is in that caller's frame.
 # ---------------------------------------------------------------------------
 mkosi_invoke() {
+  # Runtime's source mount is mkosi/, so carry the authoritative pin snapshot.
+  cp "${PIPELINE_DIR}/manifests/first-party-deb-versions.txt" "${MKOSI_DIR}/runtime/first-party-deb-versions.txt"
   select_build_mode   # sets BUILD_MODE (native|docker|podman); logs the plan
 
   # Same-filesystem workspace. mkosi RENAMES each finished subimage tree out of
