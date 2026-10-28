@@ -101,11 +101,12 @@ gated, just as in shipped images. `DRY_RUN=1` prints only resolution and kernel 
 `--release` rejects debug variants. This does not publish or qualify hardware.
 See [kernel build details](docs/kernel-build-from-source.md#kernel-only-build-lane-exists).
 
-Released kernel reuse is [EXISTS]. Image builds select the exact platform kernel
-from the authenticated `apt.ceralive.tv` index, verify its bytes against immutable
-release metadata and restore its config/module inventory without compiling.
-`--release` image builds and production candidates refuse `kernel_not_on_apt`;
-local builds may compile only an unpublished version above all released kernels.
+Released kernel reuse is [EXISTS]. When the pinned version is published, image
+builds select it from the authenticated `apt.ceralive.tv` index, verify its bytes
+against immutable release metadata and restore its config/module inventory
+without compiling. `--release` image builds and production candidates refuse
+`kernel_not_on_apt`; local builds may compile only an unpublished version above
+all released kernels.
 The production pin remains `7.2.0-ceralive1` until the release owner changes it.
 See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
 The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
@@ -353,9 +354,12 @@ plan with no image written (see the executed transcript in
 The complete hardware-free CI/test entrypoint is
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
 CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required
 CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests`. It creates the
 ignored, NON-PRODUCTION RAUC signing fixture on demand; production builds must
-still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
+still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The kernel-stage leg also needs
+`CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported native Debian rootfs; see
+[`docs/kernel-staging.md`](docs/kernel-staging.md). The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
 

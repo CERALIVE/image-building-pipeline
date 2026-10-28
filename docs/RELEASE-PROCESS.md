@@ -18,7 +18,9 @@ rotation and fleet OTA rollback runbooks remain below.
 ## Local kernel candidates [PARTIAL]
 
 Kernel compilation runs on the owner's workstation, never a GitHub runner or
-remote builder. From a clean, non-shallow checkout with complete kernel tags:
+remote builder. The ordered owner steps, the bench binding and the device
+outcome records live in [`kernel-release.md`](kernel-release.md). From a clean,
+non-shallow checkout with complete kernel tags:
 
 ```bash
 python3 ci/kernel-release.py rk3588 \
@@ -806,12 +808,14 @@ CeraLive source kernel and is outside this RK3588 version floor.
 `--floor --os-releases DIR` can inspect an already verified local snapshot;
 `CERALIVE_KERNEL_HISTORY_DIR` supplies local immutable kernel metadata, otherwise
 the gate reads release metadata through `gh`. Neither path supplies kernel
-`.deb` bytes: image candidates take those only from authenticated CeraLive APT.
+`.deb` bytes: production image candidates take those only from authenticated
+CeraLive APT.
 
 The release is stored under `releases/<board>/<CalVer>/`: 268435456-byte
 create-only parts for both `bundle.raucb` and `flash.raw.xz`; one schema-1
 `index.json` with both files' complete digests, sizes and ordered parts;
-`packages.lock.json`; `SHA256SUMS`; the signed kernel sidecar pair; and create-only
+`packages.lock.json`; `SHA256SUMS`; the signed `kernel.json`/`kernel.json.sig`
+pair; and create-only
 `channels/<channel>` membership marker. All immutable writes use the same
 conditional/exact-byte-recovery primitive as the legacy publisher. Only after
 they succeed does the publisher sign the strict schema-1 channel manifest with
@@ -1391,3 +1395,6 @@ markers and exhausted counters. Inspect the marker's `boot-id` and the current
 - [`docs/paseto-key-provisioning.md`](paseto-key-provisioning.md) — the sibling runbook style this doc follows for a different credential (device-token PASETO keys).
 - [`fleet/hawkbit/README.md`](../fleet/hawkbit/README.md) + [`fleet/integration-contract.md`](../fleet/integration-contract.md) — the fleet rollout engine referenced in §5 and §8.
 - [`docs/DEFERRED.md`](../docs/DEFERRED.md) — index of every other deferred/hardware-gated item in this pipeline.
+- [`docs/kernel-release.md`](kernel-release.md) — the local kernel-only release
+  runbook: version bump, candidate, gates, refused publication and the device
+  records that report success or rollback.

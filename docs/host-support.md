@@ -86,13 +86,17 @@ for retry timing, provenance and the unchanged verification gates.
 
 ## Privileged contract prerequisites
 
-Run the complete hardware-free gate with all three contracts required:
+Run the complete hardware-free gate with all four contracts required:
 
 ```sh
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
 CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required \
 CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
+
+The kernel-stage leg additionally consumes a pre-exported native Debian rootfs
+via `CERALIVE_KERNEL_STAGE_ROOTFS`; see [`kernel-staging.md`](kernel-staging.md).
 
 The host needs passwordless/cached `sudo`, network and mount namespace support,
 Avahi plus D-Bus tools, and the RAUC/loop/mount prerequisites described in the

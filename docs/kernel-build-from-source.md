@@ -1147,10 +1147,14 @@ the gap is closed by retirement rather than by evidence. **None of that run is
 evidence about the production mainline kernel** — see §2d for the summarised
 history and its Tier-1-only limits.
 
-1. **The kernel is not built in CI.** The PR gate runs `DRY_RUN=1`, which emits
-   the plan and touches no network, container or compiler. A real kernel build is
-   a multi-GB clone and a long cross-compile; wiring it into the PR gate would be
-   a separate, deliberate decision about CI budget.
+1. **The kernel is never built in CI.** Kernel builds run locally on the owner's
+   workstation: `./build <family> --kernel-only` for the lane, and
+   `ci/kernel-release.py` for an immutable candidate, both described in
+   [`kernel-release.md`](kernel-release.md). The PR gate runs `DRY_RUN=1`, which
+   emits the plan and touches no network, container or compiler, plus the offline
+   fixture tests for that command. A real kernel build is a multi-GB clone and a
+   long cross-compile; wiring it into the PR gate would be a separate, deliberate
+   decision about CI budget.
 
    That gap is not free, and it has been paid for once already: the first real
    build of this path hit **four** independent, board-independent defects, each
@@ -1228,20 +1232,30 @@ history and its Tier-1-only limits.
    item 1, this board *also* failed the DTB check — with the divergence wording
    above and an empty "DTBs actually present" list. **An empty list there means the
    listing is broken, not that the DTB is missing.**
-5. **No `.deb` produced by this stage may be published.** It is a local build
-   input only; nothing here uploads to apt/R2.
+5. **The build stage never publishes, and APT publication is owner-gated and not
+   available yet.** The kernel-only stage uploads nothing to apt or R2; its
+   `.deb` is a build output. A version reaches `apt.ceralive.tv` only through the
+   release path in [`kernel-release.md`](kernel-release.md), whose publish mode
+   currently refuses pending an owner decision on apt-worker authorization.
+   Production image candidates and `--release` image builds take kernel bytes
+   only from authenticated CeraLive APT; a local, non-release build of an
+   unpublished higher version still compiles from source. Both rules are stated
+   under [released kernel reuse](#released-kernel-reuse-exists).
 6. **D3 is not reopened.** The shipped kernel is the source-built mainline
    `edge` track. Its custom RAUC bootloader adapter is unchanged; see
    [`kernel-currency-watch.md`](kernel-currency-watch.md) for its remaining
    maintenance criteria.
-7. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
-   date from the wall clock, so the post-`am` commit SHAs differ on every run.
-   `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP` are pinned and the *content* is
-   stable — two consecutive builds produced identical package versions, identical
-   `.deb` file lists and an identical `/boot/config-*` — but the archive bytes
-   differ. This is exactly why `CONFIG_LOCALVERSION_AUTO=n` and the
-   `kernelrelease` assertion matter: without them the package NAME would inherit
-   that nondeterminism.
+7. **The `edge` `.deb` is byte-reproducible from the pins.** Debian packaging
+   timestamps come from the pinned kernel commit's committer time, exported as
+   `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP`, and `scripts/package/mkdebian`'s
+   wall-clock `date -R` is rewritten to that epoch before `bindeb-pkg`. Two
+   independent local builds of `7.2.0-ceralive1` and one Orange Pi 5+ build
+   produced identical bytes for the `.deb`, `kernel-artifact.json`,
+   `resolved.config`, `built-modules.txt` and `SHA256SUMS`. `git am` still creates
+   commits whose IDs are not reproducible, and that is why
+   `CONFIG_LOCALVERSION_AUTO=n` and the `kernelrelease` assertion matter: nothing
+   in the package may consume them. Byte identity is a build property, not a
+   publication or a hardware result.
 
 ---
 

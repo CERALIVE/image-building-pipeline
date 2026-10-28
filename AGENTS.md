@@ -34,9 +34,11 @@ ci/check-suite-literals.sh --self-test
 ci/check-suite-literals.sh
 python3 ci/check-first-party-pins.py
 python3 ci/validate-manifests.py
-CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
+CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=required CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
+The kernel-stage contract also needs `CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported
+native Debian rootfs; see [staging](docs/kernel-staging.md).
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.
 
 ## UPDATE RELEASE BOUNDARY [PARTIAL]
@@ -61,7 +63,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Reusable kernel boot staging, board-boot.json and root/tar verification [EXISTS] | [Kernel mapping](docs/kernel-build-from-source.md#4-the-dtb-install-mapping) |
 | Family kernel-only builds, fingerprints and image-equivalent Bluetooth/UHID firmware checks [EXISTS] | [Kernel-only lane](docs/kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable kernel versions, APT image reuse and signed OS kernel floors [EXISTS] | [Artifact reuse](docs/kernel-build-from-source.md#released-kernel-reuse-exists); [channel publishing](docs/RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent) |
-| Local immutable kernel candidates; APT publication refuses pending owner decision [PARTIAL] | [Local kernel command](docs/RELEASE-PROCESS.md#local-kernel-candidates-partial) |
+| Local immutable kernel candidates; APT publication refuses pending owner decision [PARTIAL] | [Kernel release runbook](docs/kernel-release.md) |
 | Kernel activation, boot identity, durable overlays/quarantine and owner-gated capability [PARTIAL] | [Activation lifecycle](docs/ota-activation.md) |
 | First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
