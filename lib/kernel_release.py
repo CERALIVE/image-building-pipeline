@@ -145,6 +145,12 @@ def metadata(selected: str, dest: Path) -> KernelArtifact:
         for name in names:
             args.extend(("--pattern", name))
         command(args)
+    return verified_metadata(selected, dest)
+
+
+def verified_metadata(selected: str, dest: Path) -> KernelArtifact:
+    """Verify the existing four metadata files without acquiring replacement bytes."""
+    names = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
     record = artifact(dest / "kernel-artifact.json")
     if record.identity.version != selected:
         raise KernelReleaseError("kernel release metadata version mismatch")

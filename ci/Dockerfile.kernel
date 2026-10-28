@@ -17,6 +17,25 @@
 # digest-pinned Debian trixie image gives the same gcc/binutils/dpkg-dev
 # everywhere, which is the only way `make bindeb-pkg` output is comparable
 # across machines.
+#
+# THE APT CLOSURE IS PINNED TOO. A digest-pinned base image does not fix the
+# toolchain by itself: `apt-get install` resolves against a rolling mirror, so a
+# rebuild after any Debian point release installs different package versions.
+# Those versions ARE an input — kernel_input_fingerprint (lib/kernel/
+# artifact-cache.sh) hashes `dpkg-query -W` of this image into
+# kernel-artifact.json, and lib/kernel/released.sh:50 refuses to reuse a released
+# kernel whose fingerprint moved — so the same commit rebuilt on another day
+# produced a different artifact record while the compiled kernel stayed
+# byte-identical. The RUN below therefore replaces the base image's
+# deb.debian.org sources with ONE Debian snapshot timestamp (trixie,
+# trixie-updates, trixie-security) and installs through it. The expired
+# Valid-Until exception is scoped to those THREE source lines with their own
+# [check-valid-until=no]; there is deliberately no global apt.conf override, so
+# nothing else in the image (or a derived one) inherits an expired-index bypass.
+# The timestamp is a literal, so it cannot be overridden per build, and this
+# file's digest is one of the frozen producer inputs
+# (tests/fixtures/kernel-producer.sha256): moving the pin is a reviewed change
+# that updates that fixture.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
@@ -82,6 +101,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "DIRECT";\n' "${APT_PROXY}" \
         > /etc/apt/apt.conf.d/99ceralive-proxy; \
     fi; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
+    printf '%s\n' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260925T000000Z/ trixie main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260925T000000Z/ trixie-updates main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260925T000000Z/ trixie-security main' \
+      > /etc/apt/sources.list; \
     mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial; \
     dpkg --add-architecture arm64; \
     apt-get update; \

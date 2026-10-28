@@ -18,7 +18,7 @@ PY
 }
 
 kernel_floor_check() {
-  local candidate="$1" history="${tmp}/kernel-floor" keys="${tmp}/kernel-floor-keys"
+  local candidate="$1" history="${2:-${tmp}/kernel-floor}" keys="${tmp}/kernel-floor-keys"
   local token="" next="" prefix board_name os_version n=0
   mkdir -p "${history}"
   : >"${keys}"

@@ -326,8 +326,8 @@ debcache_evict() {
 }
 
 # ---------------------------------------------------------------------------
-# debcache_apt_index <apt_state> — echo the single Packages list apt wrote into an
-# isolated apt state, or nothing.
+# debcache_apt_index <apt_state> [arch] — echo exactly one Packages list from an
+# isolated apt state, optionally restricted to the requested architecture.
 #
 # The two apt-driven transports (BSP native, first-party native) resolve their
 # expected SHA-256 from this list, which is the same signed-metadata-derived index
@@ -344,6 +344,9 @@ debcache_apt_index() {
   [[ -d "${apt_state}/lists" ]] || return 0
   shopt -s nullglob
   lists=("${apt_state}/lists/"*_Packages)
+  if [[ -n "${2:-}" ]]; then
+    lists=("${apt_state}/lists/"*"_binary-${2}_Packages")
+  fi
   shopt -u nullglob
   (( ${#lists[@]} == 1 )) || return 0
   printf '%s' "${lists[0]}"

@@ -58,6 +58,9 @@ tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline D
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
 tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	independent 9b89e6f production fingerprint file digests including the coverage function
 tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
+tests/kernel-release-workflow.test.sh	shell	integration	default-shell	owner-approved VM workflow provenance, immutable Release and bench-bound authorization/dispatch sequences
+tests/kernel-runner.test.sh	shell	unit	default-shell	anonymous JIT handoff, no host shares or credentials, disposable disk cleanup on success and failure
+tests/fixtures/kernel-bootstrap-publisher.sh	fixture	support	invoked-by-suite	verbatim apt-worker bootstrap-state validator driven by the offline producer-to-publisher sequence
 tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board and bootstrap report schema, identity binding and fail-closed evidence
 tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds
 tests/lib/kernel-release-fixtures.sh	helper	support	invoked-by-suite	offline kernel release metadata, package, git history and compiler-boundary fixtures

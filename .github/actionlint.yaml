@@ -7,3 +7,4 @@ self-hosted-runner:
     - ceralive-rk3588
     - rock-5b-plus
     - ceralive-image-builder
+    - ceralive-kernel-vm

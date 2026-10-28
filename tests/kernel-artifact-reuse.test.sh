@@ -15,7 +15,12 @@ repo="${WORK}/repo"
 kernel_test_repo "${repo}"
 kernel_test_version "${repo}" 7.2.0-ceralive2
 export CERALIVE_KERNEL_HISTORY_DIR="${WORK}/history"
-kernel_test_artifact "${WORK}/history/7.2.0-ceralive2" 7.2.0-ceralive2 "${repo}"
+if [[ -n "${KERNEL_REUSE_FIXTURE_BUNDLE:-}" ]]; then
+  mkdir -p "${WORK}/history/7.2.0-ceralive2"
+  cp "${KERNEL_REUSE_FIXTURE_BUNDLE}/"* "${WORK}/history/7.2.0-ceralive2/"
+else
+  kernel_test_artifact "${WORK}/history/7.2.0-ceralive2" 7.2.0-ceralive2 "${repo}"
+fi
 name=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive2_arm64.deb
 mkdir -p "${WORK}/apt/pool" "${WORK}/gnupg" "${WORK}/bin"
 chmod 700 "${WORK}/gnupg"

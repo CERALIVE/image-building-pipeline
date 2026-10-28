@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an immutable local kernel candidate; APT publication awaits an owner decision."""
+"""Build an immutable kernel candidate; publish only through the approved VM workflow."""
 
 from __future__ import annotations
 
@@ -186,7 +186,17 @@ def main() -> int:
 
 if __name__ == "__main__":
     # Refuse before loading repository code, parsing inputs or creating any file.
-    if "--publish" in sys.argv[1:]:
+    workflow_publish = "--publish" in sys.argv[1:]
+    workflow_context = (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_REPOSITORY") == "CERALIVE/image-building-pipeline"
+        and os.environ.get("GITHUB_WORKFLOW_REF") ==
+        "CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master"
+        and os.environ.get("GITHUB_REF") == "refs/heads/master"
+        and os.environ.get("GITHUB_RUN_ATTEMPT") == "1"
+        and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    )
+    if workflow_publish and not workflow_context:
         sys.exit(
             "kernel release: publication blocked pending owner decision: apt-worker requires a "
             "kernel-release.yml workflow_dispatch run approved in the kernel-release "
@@ -197,6 +207,9 @@ if __name__ == "__main__":
     from kernel_release import KernelReleaseError, artifact, command, version
 
     try:
+        if workflow_publish:
+            from kernel_workflow import main as publish
+            sys.exit(publish([arg for arg in sys.argv[1:] if arg != "--publish"]))
         sys.exit(main())
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
             KernelReleaseError) as exc:
