@@ -33,7 +33,7 @@ assert any(step.get("uses") == "actions/checkout@v7" for step in steps)
 assert any(step.get("name") == "Materialize release trust inputs" for step in steps)
 CANDIDATE_BUILD_RUN = (
     "set -euo pipefail\n"
-    './build "${CERALIVE_RELEASE_BOARD}" 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"\n'
+    './build "${CERALIVE_RELEASE_BOARD}" --release 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"\n'
 )
 assert any(
     step.get("name") == "Build exact production candidate"

@@ -666,7 +666,12 @@ The manual `Publish signed image release` workflow asks for mode (`publish`,
 `promote`, `refresh`, `prune`), comma-separated boards, channel and (for publish
 or promote) OS CalVer. Publish additionally requires the **successful** release
 candidate run ID. The `release` GitHub environment requires owner approval;
-every invocation joins one non-cancelling publisher concurrency group. A
+every invocation's publish job joins the non-cancelling shared
+`ceralive-kernel-floor` group. This replaces the workflow-level
+`image-release-publisher` group while retaining serialization of publish,
+promote, refresh and prune. Integration of the owner's separate local
+kernel-release command uses this floor contract. Kernel/image builds remain local; this does
+not add a kernel tag-triggered build or dispatch workflow. A
 workflow `refresh` accepts exactly one board and requires the operator's observed
 `expect_serial` and **quoted** JSON `expect_etag`. It fetches that board's JSON
 and ETag again in the approved job, refuses stale/missing inputs, and forwards
@@ -684,7 +689,7 @@ unusable command. The advisory is an observation, not approval: review the
 signed pointer before dispatch, and re-observe if the workflow refuses drift.
 
 A release-candidate archive must include `good.raucb`, both transport checksums,
-`raw.sha256` and `packages.lock.json`. Current `.raw.zst` candidates are decoded
+`raw.sha256`, `packages.lock.json` and `kernel-artifact.json`. Current `.raw.zst` candidates are decoded
 and recompressed to actual xz; earlier `.raw.xz` candidates are copied. In both
 cases the bytes after decompression must match the
 original raw SHA. The publisher independently rechecks both file hashes and
@@ -694,10 +699,33 @@ Before approving, the owner must match the candidate run SHA/artifact and the
 real board hand-test; the workflow verifies the successful run and its downloaded
 archive, but does not perform a physical board test.
 
+For RK3588, the publisher derives the installed kernel's exact package/version/
+digest from the **candidate's** package lock, requires authenticated
+`ceralive-kernel` origin, checks it against that version's released artifact,
+and cross-checks the candidate artifact identity when present. A newer kernel
+manifest in the publishing checkout cannot change this identity. It writes
+immutable `releases/<board>/<CalVer>/kernel.json` and `kernel.json.sig`, signed
+with the same dedicated channel key. The sidecar has schema 1, board, os_version
+and kernel `{package,version,deb_sha256}`. Deterministic, attribute-free CMS
+allows exact-byte retries. No field is added to the strict channel manifest.
+
+Both publish and promote inventory **all boards'** published channel membership
+markers, authenticate their kernel sidecars with the channel trust root, and
+compare against the maximum OS/kernel release floor. A lower candidate fails
+`os_kernel_below_floor` before publishing any marker/channel pointer. Missing,
+malformed or unsigned historical sidecars stop the gate; they are not treated
+as version zero. Historical releases must therefore have reviewed signed
+sidecars before a new managed-kernel publication. x86-minipc has no managed
+CeraLive source kernel and is outside this RK3588 version floor.
+`--floor --os-releases DIR` can inspect an already verified local snapshot;
+`CERALIVE_KERNEL_HISTORY_DIR` supplies local immutable kernel metadata, otherwise
+the gate reads release metadata through `gh`. Neither path supplies kernel
+`.deb` bytes: image candidates take those only from authenticated CeraLive APT.
+
 The release is stored under `releases/<board>/<CalVer>/`: 268435456-byte
 create-only parts for both `bundle.raucb` and `flash.raw.xz`; one schema-1
 `index.json` with both files' complete digests, sizes and ordered parts;
-`packages.lock.json`; `SHA256SUMS`; and create-only
+`packages.lock.json`; `SHA256SUMS`; the signed kernel sidecar pair; and create-only
 `channels/<channel>` membership marker. All immutable writes use the same
 conditional/exact-byte-recovery primitive as the legacy publisher. Only after
 they succeed does the publisher sign the strict schema-1 channel manifest with

@@ -2,6 +2,17 @@
 
 ## KEY FACTS
 
+**Immutable kernel reuse and OS downgrade floors [EXISTS].** Kernel image bytes
+come only from authenticated apt.ceralive.tv; release metadata supplies identity,
+config and module inventory. Production images refuse an APT miss; local
+unpublished source builds must exceed released versions. Fetch and final locks
+retain the APT digest. OS publish/promote derives schema-1 signed kernel sidecars
+from candidate payloads and checks the global published floor in the shared
+non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON is unchanged.
+See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
+and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
+The production revision remains owner-managed at `7.2.0-ceralive1`.
+
 **Chunked OS publishing [PARTIAL — workflow and local contract complete; candidate and live drill separate].**
 `ci/publish-release.sh` uses the extracted `ci/r2-immutable-lib.sh::put_or_verify`
 primitive shared with the legacy RAUC pair publisher: release parts, index, lock,

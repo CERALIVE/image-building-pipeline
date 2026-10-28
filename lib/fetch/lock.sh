@@ -15,9 +15,17 @@ fetch_lock_sidecar() {
     arch="$(deb_pkg_arch "$deb")"
     [[ -n "$name" && -n "$version" && -n "$arch" ]] || die "invalid staged .deb identity: $deb"
     [[ "$name" != libv4l-0 ]] || continue
-    [[ "$name" != linux-image-* ]] || continue
+    if [[ "$name" == linux-image-* && -z "${_KERNEL_APT_INDEX:-}" ]]; then
+      continue
+    fi
     record="$(rk3588_userspace_record "$name")"
-    if [[ -n "$record" ]]; then
+    if [[ "$name" == linux-image-* ]]; then
+      rc=0
+      record="$(index_lookup_optional "$_KERNEL_APT_INDEX" "$name" "$version" "$ARCH")" || rc=$?
+      (( rc == 0 )) || die "kernel verified APT digest missing for $name=$version/$arch"
+      IFS=$'\t' read -r filename digest resolved <<<"$record"
+      origin=ceralive-kernel
+    elif [[ -n "$record" ]]; then
       IFS=$'\t' read -r filename digest _url <<<"$record"
       origin=userspace-pin
     elif [[ " ${FIRST_PARTY_APT_PKGS[*]} " == *" $name "* ]]; then
@@ -55,7 +63,7 @@ PY
       || die "verified digest identity mismatch for $name=$version/$arch: $filename"
     [[ "$origin" == userspace-pin || "$resolved" == "$version" ]] \
       || die "verified index version differs from staged $name=$version/$arch"
-    [[ "$origin" != first-party-local-override || "$(sha256sum "$deb" | cut -d' ' -f1)" == "$digest" ]] \
+    [[ ( "$origin" != first-party-local-override && "$origin" != ceralive-kernel ) || "$(sha256sum "$deb" | cut -d' ' -f1)" == "$digest" ]] \
       || die "verified digest identity mismatch for $name=$version/$arch: $filename"
     printf '{"name":"%s","version":"%s","arch":"%s","origin":"%s","sha256":"%s"}\n' \
       "$name" "$version" "$arch" "$origin" "$digest" >>"$target"

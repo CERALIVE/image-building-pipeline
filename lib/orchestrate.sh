@@ -58,7 +58,7 @@ RESOLVE_SH="${HERE}/resolve.sh"
 FETCH_DEBS_SH="${HERE}/fetch-debs.sh"
 DEARMOR_APT_KEYRING_SH="${HERE}/dearmor-apt-keyring.sh"
 MKOSI_PACKAGE_STAGING_SH="${HERE}/stage-mkosi-package.sh"
-BUILD_KERNEL_SH="${HERE}/build-kernel.sh"
+BUILD_KERNEL_SH="${HERE}/kernel/released.sh"
 BUILD_RAUC_SH="${HERE}/build-rauc.sh"
 PARITY_CHECK_SH="${HERE}/parity-check.sh"
 VERIFY_BOOT_ARTIFACTS_SH="${HERE}/verify-boot-artifacts.sh"
@@ -279,6 +279,9 @@ main() {
     acquire_board_lock "kernel-only-${FAMILY}"
     stage_kernel_only
     return 0
+  fi
+  if (( release )); then
+    export CERALIVE_REQUIRE_KERNEL_APT=1
   fi
 
   # Staging key = the board MANIFEST STEM: unique by construction, and the same

@@ -852,18 +852,76 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 ---
 
+## Released kernel reuse [EXISTS]
+
+Kernels and images are built locally on the owner's workstation. These gates
+consume artifacts; they do not authorize publication or add a kernel workflow.
+The production pin stays `7.2.0-ceralive1` until the release owner advances it.
+
+Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
+`lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
+It sources the unchanged producer's validators/fingerprint function and calls
+the producer for actual compilation. It never overrides or edits that function.
+`lib/build-kernel.sh` and every other fingerprinted input remain byte-identical
+to stack `9b89e6f`: release orchestration cannot change a kernel's identity.
+`tests/fixtures/kernel-producer.sha256` freezes the production inputs and coverage
+function; `tests/kernel-producer-identity.test.sh` also proves that changes to
+release-only files leave the computed fingerprint unchanged.
+
+`ci/check-kernel-version-monotonic.py` uses system `dpkg --compare-versions`,
+so revision 10 sorts after revision 9:
+
+- `--candidate` compares the manifest with full local `kernel/v*` tag history.
+  Equal released versions must retain their family fingerprint; changed
+  fragments, epoch inputs or builder closure require `bump package_version`.
+  `--artifact FILE` checks a built candidate's actual closure/epoch too.
+  Pre-build checks use the released closure/epoch with current pins/source files.
+- `--published` requires a source-build/publication candidate to exceed every
+  released kernel version. Debug `-test` kernels remain local and unpublishable.
+- `--floor` prints the maximum released kernel and published OS sidecar version
+  (`--os-releases DIR`), or `none` before any publication. `--version V` also
+  refuses `os_kernel_below_floor` when V is lower.
+
+For local history, set `CERALIVE_KERNEL_HISTORY_DIR`: each `<version>/` contains
+`kernel-artifact.json`, `resolved.config`, `built-modules.txt` and `SHA256SUMS`.
+The gate checks metadata, checksum identity and closure. Otherwise it reads
+release metadata with `gh`, requesting those four names only, never a `.deb`.
+Every workflow job using the gates fetches full tags. Tests use fixtures/stubs.
+
+Image fetch selects exactly `<package>=<version>`/arm64 from the existing
+GPG-verified first-party APT index with build mTLS inputs. Selection lives in
+`lib/fetch/bsp.sh`, outside REPOS and FIRST_PARTY_APT_PKGS. The configured origin
+and signed Filename must stay at `https://apt.ceralive.tv`; the kernel download
+does not follow redirects. Digest and control fields are checked before staging.
+
+At `[2b/9]`, an APT selection bypasses compilation and the local/remote kernel
+artifact cache. Release **metadata only** must match the APT archive's SHA-256
+and family fingerprint, and include the board in `validated_boards`. The stage
+restores the `.deb`, config and module inventory. The board's own four-axis
+package/DTB validation, config survival/closure, staged-name uniqueness and
+installed boot-artifact gates still run. The final lock keeps the authenticated
+`ceralive-kernel` APT digest; only an unpublished local kernel gets source-built
+commit/artifact provenance.
+
+A signed-index miss permits a higher unpublished local version to compile.
+An unusable index, bad signature, origin or digest is fatal, never a fallback.
+Production candidates and `--release` image builds refuse `kernel_not_on_apt`
+on a miss. The separate `--kernel-only --release` command remains a local build.
+
 ## 5. Integration semantics
 
 Three things change when a `kernel_source:` block resolves, and only then:
 
-1. **Remote fetch is suppressed** for the kernel/DTB package names.
+1. **Armbian fetch is suppressed** for the kernel/DTB package names.
    `resolve.py` derives `KERNEL_SOURCE_SUPPRESSED_PACKAGES` as the union of the
    *pre-overlay* family names (still present in the family file, which
-   `fetch-debs.sh` reads directly) and the *post-merge* built names (which no
-   remote archive carries). The orchestrator forwards it as
+   `fetch-debs.sh` reads directly) and the *post-merge* built names.
+   The orchestrator forwards it as
    `CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS`, and `collect_declared_bsp_pkgs`
-   filters it out — so a suppressed package is invisible to **every** remote path
-   at once. **U-Boot and firmware are never in that set** and stay
+   filters it out. After authenticated APT selection, `resolve.sh --kernel-apt`
+   removes the selected kernel name from suppression; BSP code still excludes
+   it from Armbian and obtains its bytes only from CeraLive APT.
+   **U-Boot and firmware are never in that set** and stay
    prebuilt-fetched.
 
    The list is *derived*, never authored: the schema rejects a manifest that

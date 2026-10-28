@@ -38,17 +38,18 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: image-release-publisher
-  cancel-in-progress: false
-
 jobs:
   publish:
+    concurrency:
+      group: ceralive-kernel-floor
+      cancel-in-progress: false
     runs-on: [self-hosted, ceralive-image-builder]
     environment: release
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Validate dispatch and candidate provenance
         env:
           MODE: ${{ inputs.mode }}
@@ -151,6 +152,7 @@ jobs:
                 (( ${#compressed[@]} == 1 ))
                 (cd "$dir" && sha256sum -c "$(basename "${compressed[0]}").sha256")
                 [[ -f "$dir/packages.lock.json" ]] || { echo 'candidate package lock absent' >&2; exit 1; }
+                [[ -f "$dir/kernel-artifact.json" ]] || { echo 'candidate kernel identity absent' >&2; exit 1; }
                 # Old candidates used xz; current ones use zstd. The logical URL
                 # always carries real xz bytes, never renamed zstd transport.
                 case "${compressed[0]}" in

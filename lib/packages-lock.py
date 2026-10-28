@@ -71,7 +71,12 @@ def merge(
     packages = []
     for identity in installed_packages(root / "var/lib/dpkg/status"):
         key = (identity["name"], identity["version"], identity["arch"])
-        if identity["name"].startswith("linux-image-"):
+        receipt = receipts.get(key)
+        if identity["name"].startswith("linux-image-") and receipt:
+            if receipt["origin"] != "ceralive-kernel":
+                raise LockError(f"kernel {key}: expected authenticated CeraLive APT origin")
+            packages.append(receipt)
+        elif identity["name"].startswith("linux-image-"):
             if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(
                 r"[0-9a-f]{40}", patches_commit
             ):

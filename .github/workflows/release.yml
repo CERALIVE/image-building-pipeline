@@ -74,6 +74,8 @@ jobs:
             "${CLEANUP_IMAGE}" \
             rm -rf -- "${targets[@]}"
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Resolve OS release version
         env:
           OS_RELEASE_VERSION: ${{ vars.CERALIVE_OS_RELEASE_VERSION }}
@@ -90,6 +92,10 @@ jobs:
           printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "${version}" >>"${GITHUB_ENV}"
       - name: First-party release pin currency
         run: python3 ci/check-first-party-pins.py --max-age-hours 24
+      - name: Enforce immutable kernel candidate identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/check-kernel-version-monotonic.py --candidate --board "${CERALIVE_RELEASE_BOARD}"
       - name: Resolve board cache directory
         run: |
           set -euo pipefail
@@ -195,6 +201,7 @@ jobs:
           # re-spin, which is the one substitution the exact version pin cannot
           # catch. BSP_DRIFT_STRICT=0 is the deliberate opt-out.
           CERALIVE_BUILD_MODE: production
+          CERALIVE_REQUIRE_KERNEL_APT: '1'
           CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
           RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
           ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
@@ -208,7 +215,7 @@ jobs:
         # report success.
         run: |
           set -euo pipefail
-          ./build "${CERALIVE_RELEASE_BOARD}" 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
+          ./build "${CERALIVE_RELEASE_BOARD}" --release 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
       # A production candidate must be clean, not merely successful: the build
       # exits 0 while emitting deprecation notices, ignored repart keys and
       # chroot service-start failures. This is the only place a REAL production
@@ -285,6 +292,7 @@ jobs:
           cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
           cp "${dev_debs[0]}" candidate/dev-debs/
           cp "${locks[0]}" candidate/packages.lock.json
+          cp "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/kernel-build/kernel-artifact.json" candidate/
           raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"

@@ -106,7 +106,12 @@ for kind in manifest bundle; do
 done
 cp "$tmp/manifest.key" "$tmp/signer/leaf.key"
 cp "$tmp/manifest.pem" "$tmp/signer/leaf.pem"
-printf '{"schema":1}\n' >"$tmp/lock.json"
+ROOT="$repo" WORK="$tmp"
+source "$repo/tests/lib/kernel-release-fixtures.sh"
+export CERALIVE_KERNEL_HISTORY_DIR="$tmp/kernel-history"
+kernel_test_artifact "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive1" 7.2.0-ceralive1 "$repo"
+jq '{schema:1,packages:[{name:.package,version,arch,origin:"ceralive-kernel",sha256:.deb_sha256}]}' \
+  "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive1/kernel-artifact.json" >"$tmp/lock.json"
 mkdir -p "$tmp/rootfs/etc" "$tmp/rauc-input"
 printf 'publisher fixture\n' >"$tmp/rootfs/etc/hostname"
 dd if=/dev/urandom of="$tmp/rootfs/etc/fixture" bs=16K count=1 status=none
@@ -139,6 +144,15 @@ assert() { check "$@"; }
 check publish 2026.10.1 beta
 base="$tmp/objects/releases/rock-5b-plus/2026.10.1"
 assert test -f "$base/channels/beta"
+check python3 - "$base/kernel.json" "$tmp/lock.json" <<'PY'
+import json,sys
+sidecar,lock=(json.load(open(p)) for p in sys.argv[1:])
+row=lock['packages'][0]
+assert sidecar == {'schema':1,'board':'rock-5b-plus','os_version':'2026.10.1',
+                   'kernel':{'package':row['name'],'version':row['version'],'deb_sha256':row['sha256']}}
+PY
+check openssl cms -verify -binary -inform DER -in "$base/kernel.json.sig" \
+  -content "$base/kernel.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
 check python3 - "$base/index.json" "$tmp/objects/channels/beta/rock-5b-plus.json" <<'PY'
 import json,sys
 i=json.load(open(sys.argv[1]));m=json.load(open(sys.argv[2]))
@@ -268,6 +282,8 @@ done
 cp "$tmp/production-channel.sig" "$channel.sig"
 mkdir -p "$tmp/ci"
 ln -s "$repo/ci/r2-immutable-lib.sh" "$tmp/ci/r2-immutable-lib.sh"
+ln -s "$repo/ci/kernel-floor-lib.sh" "$tmp/ci/kernel-floor-lib.sh"
+ln -s "$repo/ci/check-kernel-version-monotonic.py" "$tmp/ci/check-kernel-version-monotonic.py"
 ln -s "$repo/lib" "$tmp/lib"
 python3 - "$repo/ci/publish-release.sh" "$tmp/ci/publish-release.sh" <<'PY'
 import pathlib,sys
@@ -624,9 +640,37 @@ export OTA_MANIFEST_SIGNER_TAR_B64
 MODE=prune check /bin/bash "$tmp/workflow-signer.sh"
 assert cmp "$tmp/signer/root-ca.pem" "$RUNNER_TEMP/ota-manifest-signer/root-ca.pem"
 unset OTA_MANIFEST_SIGNER_TAR_B64
+
+# Candidate identity is independent of newer manifest pins in the dispatch checkout.
+kernel_test_repo "$tmp/dispatch"
+kernel_test_version "$tmp/dispatch" 7.2.0-ceralive2
+PUBLISH_RELEASE_SCRIPT="$tmp/dispatch/ci/publish-release.sh" check publish 2027.1.1 drill >"$tmp/stale-checkout.log"
+check jq -e '.kernel.version == "7.2.0-ceralive1"' "$tmp/objects/releases/rock-5b-plus/2027.1.1/kernel.json"
+cp "$tmp/lock.json" "$tmp/lock.good"
+jq '.packages[0].sha256 = ("f"*64)' "$tmp/lock.good" >"$tmp/lock.json"
+if publish 2027.1.2 drill >"$tmp/kernel-digest.log" 2>&1; then bad 'candidate kernel differs from released bytes'
+else ok 'candidate kernel digest mismatch refused'; fi
+assert grep -q 'candidate kernel digest differs from released artifact' "$tmp/kernel-digest.log"
+assert test ! -e "$tmp/objects/releases/rock-5b-plus/2027.1.2"
+cp "$tmp/lock.good" "$tmp/lock.json"
+kernel_test_artifact "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive2" 7.2.0-ceralive2 "$repo"
+if publish 2027.1.3 drill >"$tmp/kernel-publish-floor.log" 2>&1; then bad 'publish accepted OS below kernel floor'
+else ok 'publish below newly released kernel floor refused'; fi
+assert grep -q os_kernel_below_floor "$tmp/kernel-publish-floor.log"
+assert test ! -e "$tmp/objects/releases/rock-5b-plus/2027.1.3"
+if publisher promote --board rock-5b-plus --version 2026.10.5 --to stable >"$tmp/kernel-promote-floor.log" 2>&1; then
+  bad 'promote accepted OS below a newer released kernel'
+else ok 'promote below newly released kernel floor refused'; fi
+assert grep -q os_kernel_below_floor "$tmp/kernel-promote-floor.log"
+assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.5/channels/stable"
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"
+  cp "$tmp/stale-checkout.log" "$tmp/kernel-digest.log" "$tmp/kernel-publish-floor.log" \
+    "$tmp/kernel-promote-floor.log" "$PUBLISH_TEST_EVIDENCE_DIR/"
+  cp "$tmp/objects/releases/rock-5b-plus/2027.1.1/kernel.json" \
+    "$tmp/objects/releases/rock-5b-plus/2027.1.1/kernel.json.sig" \
+    "$tmp/signer/root-ca.pem" "$tmp/signer/leaf.pem" "$PUBLISH_TEST_EVIDENCE_DIR/"
 fi
 trap - ERR
 [[ "$FAIL" -eq 0 ]]

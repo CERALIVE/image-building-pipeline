@@ -583,6 +583,12 @@ def cmd_merge(args: argparse.Namespace) -> int:
         merged["kernel_source"]["suppressed_packages"] = _dedupe(
             pre_overlay_packages + _package_names(merged, _SUPPRESSED_FIELDS)
         )
+        if args.kernel_apt:
+            fetched = _package_names(merged, ("kernel_packages",))
+            merged["kernel_source"]["suppressed_packages"] = [
+                name for name in merged["kernel_source"]["suppressed_packages"]
+                if name not in fetched
+            ]
 
     flat = flatten(merged)
     for key in sorted(flat):
@@ -609,6 +615,8 @@ def main(argv: "list[str]") -> int:
     )
     p_merge.add_argument("--family", required=True)
     p_merge.add_argument("--board", required=True)
+    p_merge.add_argument("--kernel-apt", action="store_true",
+                         help="kernel was selected from the authenticated CeraLive APT index")
     p_merge.add_argument(
         "--variant",
         default=DEFAULT_VARIANT,

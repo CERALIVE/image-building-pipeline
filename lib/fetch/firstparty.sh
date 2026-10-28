@@ -260,6 +260,10 @@ PY
 # place, so an interrupted apt-get never leaves a half-written final .deb. One
 # ---------------------------------------------------------------------------
 fetch_first_party() {
+  if [[ -n "${KERNEL_SOURCE_PACKAGE_VERSION:-}" && "${KERNEL_PACKAGES:-}" != *-test && -z "${DRY_RUN}" ]]; then
+    [[ "${APT_CERALIVE_URL}" == https://apt.ceralive.tv ]] \
+      || die "kernel_origin_mismatch: expected https://apt.ceralive.tv"
+  fi
   local debs="$1"
   local r
 
@@ -375,7 +379,7 @@ EOF
     return 0
   fi
 
-  if (( ${#download_specs[@]} == 0 )); then
+  if (( ${#download_specs[@]} == 0 )) && [[ -z "${KERNEL_SOURCE_PACKAGE_VERSION:-}" ]]; then
     log_info "first-party: every package supplied locally — no apt download needed"
   elif [[ "${FETCH_DEBS_FIRST_PARTY_TRANSPORT:-}" == "curl" ]] || ! command -v apt-get >/dev/null 2>&1; then
     _fetch_first_party_curl "${debs}" "${keyring}" "${certs_dir}" "${download_specs[@]}"
@@ -442,4 +446,5 @@ EOF
   fi
 
   validate_first_party_staged_debs "${debs}" "${staged_specs[@]}"
+  bsp_fetch_kernel "${debs}"
 }
