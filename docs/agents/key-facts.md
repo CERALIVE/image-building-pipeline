@@ -2,6 +2,36 @@
 
 ## KEY FACTS
 
+**Local kernel candidates [PARTIAL].** `ci/kernel-release.py` calls the existing
+family-only builder, metadata/fingerprint and version/floor gates, then creates
+one immutable local bundle per version. `--publish` refuses before any work;
+no producer workflow or publisher bypass exists. See
+[the local command contract](../RELEASE-PROCESS.md#local-kernel-candidates-partial)
+for the exact inputs, unavailable authorization fields and pending owner decision.
+
+**Immutable kernel reuse and OS downgrade floors [EXISTS].** Production kernel
+image bytes come only from authenticated apt.ceralive.tv; release metadata
+supplies identity, config and module inventory. Production images refuse an APT
+miss; local unpublished source builds must exceed released versions. Fetch and
+final locks retain the APT digest. OS publish/promote derives schema-1 signed
+kernel sidecars from candidate payloads and checks the global published floor in
+the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
+is unchanged.
+See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
+and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
+The production revision remains owner-managed at `7.2.0-ceralive1`.
+
+**Kernel slot roles [PARTIAL: capability off].** Slot marking stays scoped. The
+healthcheck is the only `mark-good` caller for the BOOTED slot, after boot
+identity and service checks. Slot-sync marks only the OTHER slot good, after a
+verified mirror. `/usr/lib/ceralive/ceralive-kernel-stage` marks OTHER eligible
+only after mirror, install and boot/firmware/filesystem verification, and never
+confirms health. Kernel state, quarantine and per-slot
+overlays live in `/data/ceralive/update-state/`; the `kernel-apt-stage`
+capability stays off until the owner releases a capable CeraUI and sets its
+minimum. See [staging](../kernel-staging.md) and
+[activation](../ota-activation.md#local-kernel-activation-and-recovery-partial).
+
 **Chunked OS publishing [PARTIAL — workflow and local contract complete; candidate and live drill separate].**
 `ci/publish-release.sh` uses the extracted `ci/r2-immutable-lib.sh::put_or_verify`
 primitive shared with the legacy RAUC pair publisher: release parts, index, lock,
@@ -1155,11 +1185,13 @@ NOT dereference a symlink that is the FINAL path component (it writes the link
 target, so a fast symlink yields a 0-byte file), so the gate `stat`s each artifact,
 follows a terminal-component symlink to the versioned target, and globs the versioned
 initrd name when the bare one is absent; plain-file `/boot` layouts still pass. `run-tests` blocks on the actual boot-script sanitizer, fallback engine,
-mock rollback, preflash adversarial fixtures, and the three privileged hardware-free
+mock rollback, preflash adversarial fixtures, and the four privileged hardware-free
 contracts required by CI: `CERALIVE_RUN_REAL_RAUC_CONTRACT=required` exercises
 real-RAUC interruption/cleanup,
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required` exercises real mDNS arbitration in
-private namespaces, and `CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required`
+private namespaces, `CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required` exercises
+the real chroot kernel install against `CERALIVE_KERNEL_STAGE_ROOTFS`, and
+`CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required`
 exercises the real UID-drop package-index probes described in the KEY FACT below.
 The RAUC harness uses the supported boot-slot override for
 its synthetic file-backed slots, so the service contract does not depend on the

@@ -44,6 +44,7 @@ tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiri
 tests/mkosi-image-contract.bats	bats	unit	default-bats	mkosi config, PassEnvironment lockstep, size-gate wiring, runtime packages
 tests/runtime-services.bats	bats	unit	default-bats	hostname/mDNS, typec, fan curve, fan kickstart, LED status units
 tests/healthcheck-boot-marker.bats	bats	unit	default-bats	boot-scoped health confirmation, stale shared marker and exhausted slot budget regressions
+tests/kernel-state-machine.bats	bats	unit	default-bats	kernel activation and healthcheck crash boundaries, identity prerequisites, quarantine and atomic state writes
 tests/hdmirx-edid-contract.bats	bats	unit	default-bats	HDMI-RX EDID install/enable wiring, unit ordering, per-profile blob hashes, runtime profile resolution + fallback, negative conformance fixtures
 tests/journal-diagnosability.bats	bats	unit	default-bats	journald retention budget, validated persistent machine-id, one-time journal-dir migration
 tests/variant-contract.bats	bats	unit	default-bats	family variants, kernel-source pins, production-baseline byte parity
@@ -52,6 +53,15 @@ tests/rk3588-ab-contract.bats	bats	integration	default-bats	real RK3588 A/B disk
 tests/bench-partlabels.bats	bats	unit	default-bats	opt-in bench PARTLABEL overlay and its production no-op
 tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM64 Image magic on both kernel paths
 tests/kernel-boot-staging.bats	bats	unit	default-bats	shipped staging CLI, package upgrades, board identity and root/tar verifier equivalence
+tests/kernel-only-build.test.sh	shell	integration	default-shell	family kernel-only CLI, atomic outputs, boot and firmware gates, epoch and fingerprint identity
+tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline Debian kernel ordering, immutable candidate fingerprints and published OS floors
+tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
+tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	independent 9b89e6f production fingerprint file digests including the coverage function
+tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
+tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board and bootstrap report schema, identity binding and fail-closed evidence
+tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds
+tests/lib/kernel-release-fixtures.sh	helper	support	invoked-by-suite	offline kernel release metadata, package, git history and compiler-boundary fixtures
+tests/fixtures/kernel-firmware-v7.2.json	fixture	support	not-executed	real pinned v7.2 module metadata and full-firmware 26.8.3 file inventory, no blobs
 tests/lib/kernel-boot-fixtures.bash	helper	support	invoked-by-suite	offline dpkg-deb and tree-manifest fixtures for kernel-boot-staging.bats
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
 tests/kernel-build-resilience.bats	bats	unit	default-bats	pinned-fetch retry, pin-mismatch never retried, memory-derived make -j
@@ -142,6 +152,8 @@ tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
 tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 tests/slot-sync.test.sh	shell	unit	default-shell	verified local slot mirror: full refusal-gate matrix, check JSON, dpkg-verify comparison, mark-bad/good ordering, SIGTERM handling; internal real loop-mounted-ext4 leg gated on CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required
+tests/kernel-stage.test.sh	shell	unit	default-shell	real flock ownership, write-ahead, gates, reserves, mount order and crash recovery
+tests/kernel-stage-real.test.sh	shell	privileged	default-shell	native Debian chroot and two loop slots; required in CI, opt-in locally
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
 mkosi/platform/x86/test-x86-fallback.sh	shell	unit	default-shell	x86/GRUB offline bootcount/fallback proof against the shipped state engine
 
@@ -154,6 +166,13 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
+tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
+tests/fixtures/kernel-stage-contract/staged-state.json	fixture	support	not-executed	byte-identical real producer staged record for the adopted consumer contract
+tests/fixtures/kernel-stage-contract/pending-overlay.json	fixture	support	not-executed	byte-identical real producer pending overlay with observed RAUC byte identity
+tests/fixtures/kernel-stage-contract/invalid-overlay.json	fixture	support	not-executed	byte-identical real producer lean invalid overlay
+tests/fixtures/kernel-stage-contract/failed-state.json	fixture	support	not-executed	byte-identical real producer failed record with a shared reason token
+tests/fixtures/kernel-stage-tool.sh	fixture	support	invoked-by-suite	command boundary fixtures for kernel-stage unit and native contracts
 tests/lib/edid-conformance.py	tool	support	invoked-by-suite	per-profile EDID validity + capability checker and negative-fixture generator, driven by hdmirx-edid-contract.bats
 tests/preflash-verify.sh	tool	support	invoked-by-suite	operator preflash gate; its --self-test is driven by rk3588-ab-contract.bats and lib/stages/boot-verify.sh
 tests/provision-portal.test.sh	shell	unit	invoked-by-suite	offline captive-portal proof, gated and executed by postinst-wiring.bats

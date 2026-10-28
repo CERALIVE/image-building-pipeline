@@ -17,7 +17,8 @@
           "apt-all-packages",
           "reprune-hook",
           "apt-credentials",
-          "transport-uidrange"
+          "transport-uidrange",
+          "kernel-apt-stage"
         ]
       }
     },

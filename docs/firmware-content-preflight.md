@@ -143,8 +143,12 @@ gate remains pending. On a suitably privileged host, run:
 DOCKER_CONTEXT=default \
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
 CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required \
 CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
+
+The kernel-stage leg consumes a pre-exported native Debian rootfs via
+`CERALIVE_KERNEL_STAGE_ROOTFS`; see [`kernel-staging.md`](kernel-staging.md).
 
 The previous run stopped at its first unavailable prerequisite, so later suites
 must also finish successfully; they are not implicitly passed by this diagnosis.

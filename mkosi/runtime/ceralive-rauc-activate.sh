@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-STATE_DIR="${CERALIVE_ACTIVATION_STATE_DIR:-/data/ceralive/update-state}"
+STATE_DIR="${CERALIVE_ACTIVATION_STATE_DIR:-${CERALIVE_UPDATE_STATE_DIR:-/data/ceralive/update-state}}"
 ARMED="${STATE_DIR}/activation-armed"
 STREAMING="${CERALIVE_STREAMING_MARKER:-/run/ceralive/streaming}"
 LOCK="${CERALIVE_ACTIVATION_LOCK:-/run/lock/ceralive-rauc-activate.lock}"
 
 log() { printf 'ceralive-rauc-activate: %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+
+state_lib="$(dirname "${BASH_SOURCE[0]}")/ceralive-kernel-state-lib.sh"
+[[ -f "${state_lib}" ]] || state_lib=/usr/lib/ceralive/ceralive-kernel-state-lib.sh
+# shellcheck source=mkosi/runtime/ceralive-kernel-state-lib.sh
+source "${CERALIVE_KERNEL_STATE_LIB:-${state_lib}}"
 
 [[ $# -le 1 ]] || die 'usage: ceralive-rauc-activate [--arm|--disarm|--now]'
 action="${1:---stop}"
@@ -16,8 +21,12 @@ case "$action" in --arm|--disarm|--now|--stop) ;; *) die "invalid action: $actio
 
 exec {lock_fd}>"$LOCK" || die 'cannot open activation lock'
 flock -w 10 "$lock_fd" || die 'cannot acquire activation lock'
+kernel_load_state "${STATE_DIR}" || die 'invalid kernel state'
 
 if [[ "$action" == --disarm ]]; then
+  if [[ "${KERNEL_STATE}" == armed ]]; then
+    kernel_transition staged || die 'cannot disarm kernel state'
+  fi
   rm -f -- "$ARMED" || die 'cannot remove activation marker'
   log 'activation disarmed'
   exit 0
@@ -84,6 +93,21 @@ done
 [[ "$rootfs_count" == 2 && "$booted_name" == "$primary" && -n "$other_idx" ]] \
   || die 'RAUC primary/booted rootfs mismatch or not exactly two bootable slots'
 
+kernel_pending=0
+case "${KERNEL_STATE}" in
+  staged|armed)
+    [[ "${KERNEL_TARGET}" == "${bootnames[$other_idx]}" && "${KERNEL_BOOTED}" == "${booted}" ]] \
+      || die 'kernel target differs from inactive slot'
+    kernel_overlay_matches "${STATE_DIR}/slot-overlay-${KERNEL_TARGET}.json" pending \
+      || die 'kernel overlay does not match staged attempt'
+    kernel_pending=1 ;;
+  staging|activating|activated) die 'kernel transaction is not ready for activation' ;;
+esac
+if [[ "${kernel_pending}" == 0 && -e "${STATE_DIR}/slot-overlay-${bootnames[$other_idx]}.json" ]]; then
+  die 'other slot has no staged kernel identity'
+fi
+
+if [[ "${kernel_pending}" == 0 ]]; then
 stamp="${installed[$other_idx]:-}"
 previous="${activated[$other_idx]:-}"
 if [[ -z "$stamp" ]]; then
@@ -101,9 +125,13 @@ if (( install_epoch <= activation_epoch )); then
   log 'other rootfs has no unactivated install'
   exit 0
 fi
+fi
 
 if [[ "$action" == --arm ]]; then
   install -d -m 0750 "$STATE_DIR" || die 'cannot create activation state directory'
+  if [[ "${kernel_pending}" == 1 ]]; then
+    kernel_transition armed || die 'cannot persist armed kernel state'
+  fi
   umask 077
   : >"$ARMED" || die 'cannot arm activation'
   log "armed pending $other"
@@ -111,6 +139,15 @@ if [[ "$action" == --arm ]]; then
 fi
 [[ -f "$ARMED" ]] || die 'activation is not armed'
 [[ ! -e "$STREAMING" ]] || die 'streaming began during activation check'
+if [[ "${kernel_pending}" == 1 ]]; then
+  boot_id="$(<"${CERALIVE_HEALTHCHECK_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}")" \
+    || die 'cannot read activation boot identity'
+  kernel_uuid_valid "${boot_id}" || die 'invalid activation boot identity'
+  kernel_transition activating "" "${boot_id}" || die 'cannot persist activating kernel state'
+fi
 rauc status mark-active other || die 'RAUC mark-active other failed'
+if [[ "${kernel_pending}" == 1 ]]; then
+  kernel_transition activated || die 'cannot persist activated kernel state'
+fi
 rm -f -- "$ARMED" || die 'marked active but failed to disarm; inspect RAUC state'
 log "activated staged $other ($action); no reboot requested"

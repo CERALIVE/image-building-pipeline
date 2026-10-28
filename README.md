@@ -17,6 +17,11 @@ A build pipeline for creating ready-to-use images for ARM-based streaming device
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future
 support for Intel N100/N200 and AMD platforms.
 
+The [local kernel-release command](docs/RELEASE-PROCESS.md#local-kernel-candidates-partial)
+builds and gates immutable family candidates without an OS image [PARTIAL].
+Its publish flag refuses until the owner resolves apt-worker authorization; it
+does not create a Release, dispatch a workflow, sign an APT index or change pins.
+
 > Status: Alpha — interfaces and docs may evolve. Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Build Requirements (at a glance)
@@ -28,7 +33,7 @@ support for Intel N100/N200 and AMD platforms.
 | Container runtime | Docker or Podman — the container build is canonical | `docker --version` → 29.7.2; `podman --version` → 6.0.2, both present |
 | curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
-| ccache | recommended for repeat kernel-from-source builds — which is EVERY build now | `which ccache` → `/usr/bin/ccache` present on this host |
+| ccache | recommended for unpublished local kernel-from-source builds | `which ccache` → `/usr/bin/ccache` present on this host |
 
 This table is the quick-reference; the full, step-by-step, executed walkthrough
 — including the container-vs-native host matrix, the full board × kernel-track
@@ -84,6 +89,29 @@ alongside Docker or Podman.
 ```
 
 ## Build System
+
+The kernel-only build lane is [EXISTS]:
+`./build rk3588 --kernel-only` (or either board name) builds one family artifact,
+then extracts and gates it separately for every board in that family. It emits
+the `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json` and
+`SHA256SUMS` under `mkosi/build/kernel-only/rk3588/` only after all boot and
+pinned-firmware checks pass. Firmware uses exactly the image's Bluetooth/UHID
+closure and its two reviewed hardware gaps; other modules' firmware is not
+gated, just as in shipped images. `DRY_RUN=1` prints only resolution and kernel work;
+`--release` rejects debug variants. This does not publish or qualify hardware.
+See [kernel build details](docs/kernel-build-from-source.md#kernel-only-build-lane-exists).
+
+Released kernel reuse is [EXISTS]. When the pinned version is published, image
+builds select it from the authenticated `apt.ceralive.tv` index, verify its bytes
+against immutable release metadata and restore its config/module inventory
+without compiling. `--release` image builds and production candidates refuse
+`kernel_not_on_apt`; local builds may compile only an unpublished version above
+all released kernels.
+The production pin remains `7.2.0-ceralive1` until the release owner changes it.
+See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
+The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
+and reuse; the fingerprinted producer and its inputs stay byte-identical to the
+verified stack. A digest and exclusion regression protects that boundary.
 
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
 container (`ci/Dockerfile`). A local full-device build retains its uncompressed,
@@ -326,9 +354,12 @@ plan with no image written (see the executed transcript in
 The complete hardware-free CI/test entrypoint is
 `CERALIVE_RUN_REAL_AVAHI_CONTRACT=required
 CERALIVE_RUN_REAL_RAUC_CONTRACT=required
+CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required
 CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests`. It creates the
 ignored, NON-PRODUCTION RAUC signing fixture on demand; production builds must
-still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The real-Avahi leg uses private
+still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The kernel-stage leg also needs
+`CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported native Debian rootfs; see
+[`docs/kernel-staging.md`](docs/kernel-staging.md). The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
 
@@ -379,6 +410,11 @@ existing-pointer reads require the leaf issuer to be exactly
 `CN=CeraLive RAUC Intermediate CA,O=CeraLive` (production) or
 `CN=CeraLive RAUC Bench Intermediate CA,O=CeraLive` (non-production bench),
 not merely any intermediate or a root-direct leaf chaining to the keyring.
+RK3588 releases also carry immutable `kernel.json` and `kernel.json.sig`, derived
+from the candidate's package lock, not the publisher checkout. Publish and
+promotion refuse a kernel below the maximum published kernel/OS floor. The
+non-cancelling publisher job now uses the shared `ceralive-kernel-floor` group;
+strict channel JSON fields are unchanged.
 `publish`,
 `promote`, `refresh`, `prune`, `--dry-run` and the 600 MiB `--selftest` are
 separate modes. Current zstd candidates are decoded and re-encoded as xz;
@@ -1221,6 +1257,18 @@ updates remain actionable outside the held image-only set. The lagged
 `ceralive-slot-sync` mirror restores the other slot from a health-confirmed
 running slot, including after rollback. Only the healthcheck may confirm the
 booted slot; slot-sync may mark only the verified mirrored other slot good.
+
+The [kernel stager](docs/kernel-staging.md) [PARTIAL: host contract, not board
+qualification] prepares a new kernel only in the other slot. It requires the
+`kernel-apt-stage` capability and CeraUI's parent flock, leaves the running slot
+unchanged, and commits eligibility only after boot, firmware and filesystem
+verification. Capability emission and activation reconciliation are separate
+release gates; this helper alone does not enable kernel updates.
+The [activation lifecycle](docs/ota-activation.md#local-kernel-activation-and-recovery-partial)
+now reconciles kernel boot identity, outcomes and quarantine before health
+confirmation, and retires overlays on verified mirror or full OS install.
+Host crash-boundary tests cover these helpers; `kernel-apt-stage` remains OFF
+until the owner releases a capable CeraUI and sets its minimum/pins.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed

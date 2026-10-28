@@ -26,7 +26,10 @@ Design rules locked by this contract:
    state, and host identity live on the shared `data` partition and survive A/B updates.
 3. **Kernel rides with the rootfs.** Kernel/DTB/initrd are inside each slot's `/boot`, so an
    OS update swaps kernel + userland atomically. The `boot` partition holds only the
-   bootloader environment + slot selector.
+   bootloader environment + slot selector. A kernel-only update keeps this rule: it copies a
+   verified mirror of the healthy booted slot into the inactive slot, installs the new kernel
+   there, and activates that whole slot at idle. Nothing replaces a kernel inside the running
+   slot, per-slot atomicity stays, and no partition size, label or bootloader payload changes.
 4. **No appfs.** App components (`CeraUI`, `cerastream`, `srtla`, `srt`) are `.deb`s inside
    the rootfs → already atomic with the rootfs slot. A separate RAUC appfs is omitted.
 

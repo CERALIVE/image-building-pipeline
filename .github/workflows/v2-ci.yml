@@ -132,6 +132,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -148,6 +150,11 @@ jobs:
 
       - name: Validate every manifest against its schema
         run: python3 ci/validate-manifests.py
+
+      - name: Enforce immutable kernel candidate identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/check-kernel-version-monotonic.py --candidate
 
   bats:
     name: bats manifest unit suite
@@ -184,7 +191,7 @@ jobs:
             device-tree-compiler dosfstools e2fsprogs gdisk iproute2 kmod \
             libcurl4-openssl-dev libdbus-1-dev libfdisk-dev libglib2.0-dev \
             libjson-glib-dev libnl-genl-3-dev libssl-dev meson mtools \
-            ninja-build pkg-config procps socat squashfs-tools systemd \
+            jq ninja-build pkg-config procps rsync socat squashfs-tools systemd \
             u-boot-tools util-linux zstd
 
       - name: Read shipped RAUC source pin
@@ -268,10 +275,22 @@ jobs:
             org.freedesktop.DBus ReloadConfig
           sudo busctl --system status
 
+      - name: Export native Debian rootfs for kernel-stage contract
+        run: |
+          set -euo pipefail
+          source manifests/target-release.env
+          docker pull "debian:${RELEASE}"
+          container="$(docker create --network none "debian:${RELEASE}")"
+          trap 'docker rm "$container"' EXIT
+          docker export "$container" >"$RUNNER_TEMP/kernel-stage-rootfs.tar"
+
       - name: Run v2 manifest unit suite
+        env:
+          CERALIVE_KERNEL_STAGE_ROOTFS: ${{ runner.temp }}/kernel-stage-rootfs.tar
         run: |
           CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
             CERALIVE_RUN_REAL_RAUC_CONTRACT=required \
+            CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required \
             CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 
       - name: Offline upstream watcher self-test

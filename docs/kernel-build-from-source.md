@@ -434,6 +434,62 @@ from the manifest alone.
 
 ---
 
+## Kernel-only build lane [EXISTS]
+
+`./build <family|board> --kernel-only` resolves the selected board's family,
+builds one kernel and validates a fresh extraction for **every** board manifest
+in that family, including resolved variant DTB overrides. It runs shared boot
+staging with `--no-initrd`, the root-directory boot verifier with `--skip-initrd`,
+and the read-only firmware check against the extracted, authenticated pinned
+firmware archive. Initrd generation remains a device/image install gate.
+No image, RAUC bundle or release is produced. `--release` runs the production
+variant guard; the debug kernel cannot pass it.
+
+Only a successful family gate publishes `mkosi/build/kernel-only/<family>/`:
+one named `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json`,
+and `SHA256SUMS`. Metadata records package/version/architecture/release, archive
+digest, kernel epoch, family input fingerprint, resolved builder closure and
+the boards actually validated. Failures leave any previous complete output intact.
+
+The kernel epoch comes from the pinned kernel commit's **committer** time in
+the verified clone, before patches are applied, for image and kernel-only
+builds alike. It does not use image-repository HEAD or an ambient epoch override.
+Debian packaging timestamps, including its changelog, use that same pinned epoch.
+This lane PR leaves the production pin at `7.2.0-ceralive1`. Before producing a
+release candidate, the release owner must bump it to `7.2.0-ceralive2`;
+revision 1 must never be reissued with changed bytes.
+The family fingerprint excludes DTB paths and local container image IDs, but
+includes Dockerfile bytes, base digest, sorted package/version/architecture
+closure, compiler version, kernel scripts, config fragments and closure gates.
+The local artifact-cache key additionally includes board DTB and local image ID.
+
+Installed `/usr/lib/ceralive/ceralive-kernel-boot-staging firmware-check
+<rootdir> --kernel-release R --firmware-root <dir>` uses the same board identity
+and `/usr/lib/ceralive/kernel-firmware-rules.{sh,txt}` as the scratch gate.
+It calls the image's `bluetooth_firmware_prepare` implementation: the same
+Bluetooth/UHID module selection, recursive dependency traversal, manifest parser,
+static references, runtime roots and exactly two reviewed hardware gaps.
+Other modules' firmware is **not gated**, just as in shipped images. Neither
+input tree is changed. Exit 0 means satisfied, exit 1 prints
+`missing: <relative-path-or-glob>` for an unmet reference, and exit 2
+means invalid usage, identity or unprovable module metadata. The device caller
+checks the target slot's existing firmware, never upgrades it.
+
+The checker shares the image Bluetooth checker's complete closure-object
+traversal: every matching object must resolve to a regular file inside the
+firmware root, including non-first symlinks. The manifest and its two exact
+module/path-bound exceptions remain the reviewed image policy, not a new
+all-module compatibility allowlist.
+
+`tests/fixtures/kernel-firmware-v7.2.json` contains all 990 real module metadata
+records, built-in dependencies, and the pinned archive's 7,653 file/link names
+and targets, not payload blobs. Its provenance is checked against the current
+source, patch, package-version and firmware pins. The regression reconstructs
+that namespace, checks the image-equivalent closure and removes required
+Bluetooth payloads to prove the gate still rejects them.
+The build-inventory checksum includes both source-tree module paths and
+`bindeb-pkg` staging copies; those copies are not additional drivers.
+
 ## 3. The build backend — and what it is not
 
 **Backend: plain kernel `make bindeb-pkg`.** `lib/build-kernel.sh` clones the
@@ -796,18 +852,76 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 ---
 
+## Released kernel reuse [EXISTS]
+
+Kernels and images are built locally on the owner's workstation. These gates
+consume artifacts; they do not authorize publication or add a kernel workflow.
+The production pin stays `7.2.0-ceralive1` until the release owner advances it.
+
+Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
+`lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
+It sources the unchanged producer's validators/fingerprint function and calls
+the producer for actual compilation. It never overrides or edits that function.
+`lib/build-kernel.sh` and every other fingerprinted input remain byte-identical
+to stack `9b89e6f`: release orchestration cannot change a kernel's identity.
+`tests/fixtures/kernel-producer.sha256` freezes the production inputs and coverage
+function; `tests/kernel-producer-identity.test.sh` also proves that changes to
+release-only files leave the computed fingerprint unchanged.
+
+`ci/check-kernel-version-monotonic.py` uses system `dpkg --compare-versions`,
+so revision 10 sorts after revision 9:
+
+- `--candidate` compares the manifest with full local `kernel/v*` tag history.
+  Equal released versions must retain their family fingerprint; changed
+  fragments, epoch inputs or builder closure require `bump package_version`.
+  `--artifact FILE` checks a built candidate's actual closure/epoch too.
+  Pre-build checks use the released closure/epoch with current pins/source files.
+- `--published` requires a source-build/publication candidate to exceed every
+  released kernel version. Debug `-test` kernels remain local and unpublishable.
+- `--floor` prints the maximum released kernel and published OS sidecar version
+  (`--os-releases DIR`), or `none` before any publication. `--version V` also
+  refuses `os_kernel_below_floor` when V is lower.
+
+For local history, set `CERALIVE_KERNEL_HISTORY_DIR`: each `<version>/` contains
+`kernel-artifact.json`, `resolved.config`, `built-modules.txt` and `SHA256SUMS`.
+The gate checks metadata, checksum identity and closure. Otherwise it reads
+release metadata with `gh`, requesting those four names only, never a `.deb`.
+Every workflow job using the gates fetches full tags. Tests use fixtures/stubs.
+
+Image fetch selects exactly `<package>=<version>`/arm64 from the existing
+GPG-verified first-party APT index with build mTLS inputs. Selection lives in
+`lib/fetch/bsp.sh`, outside REPOS and FIRST_PARTY_APT_PKGS. The configured origin
+and signed Filename must stay at `https://apt.ceralive.tv`; the kernel download
+does not follow redirects. Digest and control fields are checked before staging.
+
+At `[2b/9]`, an APT selection bypasses compilation and the local/remote kernel
+artifact cache. Release **metadata only** must match the APT archive's SHA-256
+and family fingerprint, and include the board in `validated_boards`. The stage
+restores the `.deb`, config and module inventory. The board's own four-axis
+package/DTB validation, config survival/closure, staged-name uniqueness and
+installed boot-artifact gates still run. The final lock keeps the authenticated
+`ceralive-kernel` APT digest; only an unpublished local kernel gets source-built
+commit/artifact provenance.
+
+A signed-index miss permits a higher unpublished local version to compile.
+An unusable index, bad signature, origin or digest is fatal, never a fallback.
+Production candidates and `--release` image builds refuse `kernel_not_on_apt`
+on a miss. The separate `--kernel-only --release` command remains a local build.
+
 ## 5. Integration semantics
 
 Three things change when a `kernel_source:` block resolves, and only then:
 
-1. **Remote fetch is suppressed** for the kernel/DTB package names.
+1. **Armbian fetch is suppressed** for the kernel/DTB package names.
    `resolve.py` derives `KERNEL_SOURCE_SUPPRESSED_PACKAGES` as the union of the
    *pre-overlay* family names (still present in the family file, which
-   `fetch-debs.sh` reads directly) and the *post-merge* built names (which no
-   remote archive carries). The orchestrator forwards it as
+   `fetch-debs.sh` reads directly) and the *post-merge* built names.
+   The orchestrator forwards it as
    `CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS`, and `collect_declared_bsp_pkgs`
-   filters it out — so a suppressed package is invisible to **every** remote path
-   at once. **U-Boot and firmware are never in that set** and stay
+   filters it out. After authenticated APT selection, `resolve.sh --kernel-apt`
+   removes the selected kernel name from suppression; BSP code still excludes
+   it from Armbian and obtains its bytes only from CeraLive APT.
+   **U-Boot and firmware are never in that set** and stay
    prebuilt-fetched.
 
    The list is *derived*, never authored: the schema rejects a manifest that
@@ -1033,10 +1147,14 @@ the gap is closed by retirement rather than by evidence. **None of that run is
 evidence about the production mainline kernel** — see §2d for the summarised
 history and its Tier-1-only limits.
 
-1. **The kernel is not built in CI.** The PR gate runs `DRY_RUN=1`, which emits
-   the plan and touches no network, container or compiler. A real kernel build is
-   a multi-GB clone and a long cross-compile; wiring it into the PR gate would be
-   a separate, deliberate decision about CI budget.
+1. **The kernel is never built in CI.** Kernel builds run locally on the owner's
+   workstation: `./build <family> --kernel-only` for the lane, and
+   `ci/kernel-release.py` for an immutable candidate, both described in
+   [`kernel-release.md`](kernel-release.md). The PR gate runs `DRY_RUN=1`, which
+   emits the plan and touches no network, container or compiler, plus the offline
+   fixture tests for that command. A real kernel build is a multi-GB clone and a
+   long cross-compile; wiring it into the PR gate would be a separate, deliberate
+   decision about CI budget.
 
    That gap is not free, and it has been paid for once already: the first real
    build of this path hit **four** independent, board-independent defects, each
@@ -1114,20 +1232,30 @@ history and its Tier-1-only limits.
    item 1, this board *also* failed the DTB check — with the divergence wording
    above and an empty "DTBs actually present" list. **An empty list there means the
    listing is broken, not that the DTB is missing.**
-5. **No `.deb` produced by this stage may be published.** It is a local build
-   input only; nothing here uploads to apt/R2.
+5. **The build stage never publishes, and APT publication is owner-gated and not
+   available yet.** The kernel-only stage uploads nothing to apt or R2; its
+   `.deb` is a build output. A version reaches `apt.ceralive.tv` only through the
+   release path in [`kernel-release.md`](kernel-release.md), whose publish mode
+   currently refuses pending an owner decision on apt-worker authorization.
+   Production image candidates and `--release` image builds take kernel bytes
+   only from authenticated CeraLive APT; a local, non-release build of an
+   unpublished higher version still compiles from source. Both rules are stated
+   under [released kernel reuse](#released-kernel-reuse-exists).
 6. **D3 is not reopened.** The shipped kernel is the source-built mainline
    `edge` track. Its custom RAUC bootloader adapter is unchanged; see
    [`kernel-currency-watch.md`](kernel-currency-watch.md) for its remaining
    maintenance criteria.
-7. **The `edge` `.deb` is not byte-reproducible.** `git am` stamps the committer
-   date from the wall clock, so the post-`am` commit SHAs differ on every run.
-   `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP` are pinned and the *content* is
-   stable — two consecutive builds produced identical package versions, identical
-   `.deb` file lists and an identical `/boot/config-*` — but the archive bytes
-   differ. This is exactly why `CONFIG_LOCALVERSION_AUTO=n` and the
-   `kernelrelease` assertion matter: without them the package NAME would inherit
-   that nondeterminism.
+7. **The `edge` `.deb` is byte-reproducible from the pins.** Debian packaging
+   timestamps come from the pinned kernel commit's committer time, exported as
+   `SOURCE_DATE_EPOCH`/`KBUILD_BUILD_TIMESTAMP`, and `scripts/package/mkdebian`'s
+   wall-clock `date -R` is rewritten to that epoch before `bindeb-pkg`. Two
+   independent local builds of `7.2.0-ceralive1` and one Orange Pi 5+ build
+   produced identical bytes for the `.deb`, `kernel-artifact.json`,
+   `resolved.config`, `built-modules.txt` and `SHA256SUMS`. `git am` still creates
+   commits whose IDs are not reproducible, and that is why
+   `CONFIG_LOCALVERSION_AUTO=n` and the `kernelrelease` assertion matter: nothing
+   in the package may consume them. Byte identity is a build property, not a
+   publication or a hardware result.
 
 ---
 

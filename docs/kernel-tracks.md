@@ -77,6 +77,12 @@ backward:
 `rk3588.yaml` is the single point where a pin becomes a build input. Nothing in
 this repo re-derives a pin independently of that file.
 
+A kernel release is one more step on the same chain. The Debian revision in
+`kernel_source.package_version` is the version the owner tags
+`kernel/v<version>`, and `ci/kernel-release.py` builds the immutable local
+candidate for it. See [`kernel-release.md`](kernel-release.md). Publication of
+that candidate to APT is owner-gated and currently refuses.
+
 ## The media-island handover: two reversibility points, both crossed
 
 The island silicon handover was staged as two `patches_commit` bumps, each a

@@ -55,6 +55,11 @@ set -uo pipefail
 
 PROG="ceralive-healthcheck"
 
+state_lib="$(dirname "${BASH_SOURCE[0]}")/ceralive-kernel-state-lib.sh"
+[[ -f "${state_lib}" ]] || state_lib=/usr/lib/ceralive/ceralive-kernel-state-lib.sh
+# shellcheck source=mkosi/runtime/ceralive-kernel-state-lib.sh
+source "${CERALIVE_KERNEL_STATE_LIB:-${state_lib}}"
+
 # --- config: defaults first, then /data/ceralive/update.conf overrides them ----
 CONF="${CERALIVE_HEALTHCHECK_CONF:-/data/ceralive/update.conf}"
 MARKER="${CERALIVE_HEALTHCHECK_MARKER:-/data/ceralive/.slot-marked-good}"
@@ -431,6 +436,9 @@ marker_matches_boot() {
 
 mark_good() {
    partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || return 1
+   if [[ "${KERNEL_CONFIRM_PENDING:-0}" == 1 ]]; then
+     kernel_running_identity_matches || { fail 'kernel identity mismatch'; return 1; }
+   fi
    local slot build_id status_sha
    if ! slot="$(boot_slot)" || ! build_id="$(current_build_id)" ||
       ! status_sha="$(sha256sum "${DPKG_STATUS_FILE}" | cut -d' ' -f1)"; then
@@ -455,6 +463,7 @@ mark_good() {
       fail "slot marked good but healthy-state record could not be written"
       return 1
     fi
+    kernel_confirm_boot || { fail 'kernel confirmation persistence failed'; return 1; }
     log "slot marked good; wrote idempotency marker ${MARKER} and ${HEALTHY_STATE_FILE}"
     return 0
   fi
@@ -471,7 +480,20 @@ main() {
     fail "cannot establish current boot identity — slot left unconfirmed"
     exit 1
   fi
+  if ! kernel_load_state "${CERALIVE_UPDATE_STATE_DIR:-${HEALTHY_STATE_FILE%/*}}"; then
+    fail 'invalid kernel state'
+    exit 1
+  fi
+  if [[ -n "${KERNEL_STATE}" ]]; then
+    local kernel_slot
+    kernel_slot="$(boot_slot)" &&
+      kernel_reconcile_boot "${kernel_slot}" "${BOOT_ID}" || {
+        fail 'kernel identity or reconciliation failed; slot left unconfirmed'
+        exit 1
+      }
+  fi
   if marker_matches_boot && healthy_state_matches_boot; then
+    kernel_confirm_boot || { fail 'kernel confirmation persistence failed'; exit 1; }
     log "marker ${MARKER} matches this boot — already confirmed good; no-op"
     exit 0
   fi

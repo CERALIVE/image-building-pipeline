@@ -61,6 +61,8 @@ config_commit=''
 config_path=''
 builder_image='base@sha256:123'
 builder_digest='sha256:builder'
+builder_packages='gcc-aarch64-linux-gnu=14.2 arm64'
+builder_compiler='aarch64-linux-gnu-gcc 14.2'
 KERNEL_VARIANT=edge
 arch=arm64
 kernel_pkg=linux-image-cache-test
@@ -81,7 +83,7 @@ check_key_mutation() {
   printf -v "${name}" '%s' "${old}"
 }
 for name in git_url commit patches_commit patches_url patches_series config_mode \
-  defconfig_base builder_image builder_digest KERNEL_VARIANT kernel_pkg \
+  defconfig_base builder_image builder_digest builder_packages builder_compiler KERNEL_VARIANT kernel_pkg \
   package_version kernel_release local_version arch epoch dtb_path \
   config_git_url config_commit config_path; do
   check_key_mutation "${name}" "${name}" "changed-${!name}"
@@ -98,22 +100,31 @@ fragments=("${WORK}/fragment")
 
 KEY_HERE="${WORK}/source/lib"
 mkdir -p "${KEY_HERE}/kernel" "${KEY_HERE}/shared" "${WORK}/source/ci"
-cp "${ROOT}/lib/build-kernel.sh" "${ROOT}/lib/verify-kernel-config.sh" "${KEY_HERE}/"
+cp "${ROOT}/lib/build-kernel.sh" "${ROOT}/lib/verify-kernel-config.sh" "${ROOT}/lib/verify-boot-artifacts.sh" "${KEY_HERE}/"
 cp "${ROOT}/lib/kernel/"*.sh "${KEY_HERE}/kernel/"
 cp "${ROOT}/lib/shared/remote-cache.sh" "${KEY_HERE}/shared/"
 cp "${ROOT}/ci/Dockerfile.kernel" "${WORK}/source/ci/"
+mkdir -p "${WORK}/source/manifests/kernel" "${WORK}/source/mkosi/runtime" "${WORK}/source/mkosi/customize"
+cp "${ROOT}/manifests/kernel/required-symbols.list" "${ROOT}/manifests/kernel/forbidden-symbols.list" "${WORK}/source/manifests/kernel/"
+cp "${ROOT}/manifests/rk3588-bluetooth-firmware-roots.txt" "${WORK}/source/manifests/"
+cp "${ROOT}/mkosi/runtime/ceralive-kernel-boot-staging.sh" "${WORK}/source/mkosi/runtime/"
+cp "${ROOT}/mkosi/customize/bluetooth-firmware.sh" "${WORK}/source/mkosi/customize/"
+PIPELINE_DIR="${WORK}/source"
 HERE="${KEY_HERE}"
 KERNEL_LIB_DIR="${HERE}/kernel"
 KERNEL_BUILDER_DOCKERFILE="${WORK}/source/ci/Dockerfile.kernel"
 SOURCE_KEY="$(kernel_artifact_cache_key)"
-for file in "${HERE}/build-kernel.sh" "${HERE}/verify-kernel-config.sh" \
+for file in "${HERE}/build-kernel.sh" "${HERE}/verify-kernel-config.sh" "${HERE}/verify-boot-artifacts.sh" \
   "${KERNEL_LIB_DIR}/config.sh" "${KERNEL_LIB_DIR}/checkout.sh" \
   "${KERNEL_LIB_DIR}/builder.sh" "${KERNEL_LIB_DIR}/package.sh" \
-  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}"; do
+  "${KERNEL_LIB_DIR}/artifact-cache.sh" "${KERNEL_LIB_DIR}/only.sh" "${KEY_HERE}/shared/remote-cache.sh" "${KERNEL_BUILDER_DOCKERFILE}" \
+  "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" \
+  "${PIPELINE_DIR}/mkosi/customize/bluetooth-firmware.sh"; do
   printf '\n' >>"${file}"
   [[ "$(kernel_artifact_cache_key)" != "${SOURCE_KEY}" ]] && ok "key changes with $(basename "${file}") bytes" || bad "key ignores ${file}"
   truncate -s -1 "${file}"
 done
+PIPELINE_DIR="${ROOT}"
 HERE="${ROOT}/lib"
 KERNEL_LIB_DIR="${ROOT}/lib/kernel"
 KERNEL_BUILDER_DOCKERFILE="${ROOT}/ci/Dockerfile.kernel"

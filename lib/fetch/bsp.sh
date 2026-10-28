@@ -13,6 +13,72 @@
 # shellcheck shell=bash
 source "$(dirname "${BASH_SOURCE[0]}")/../shared/firmware-content.sh"
 
+# The first-party transport has already authenticated this index and materialized
+# its mTLS inputs. Kernel is a platform package, not FIRST_PARTY_APT_PKGS.
+bsp_fetch_kernel() {
+  local debs="$1" selected="${KERNEL_SOURCE_PACKAGE_VERSION:-}" package="${KERNEL_PACKAGES:-}"
+  [[ -n "${selected}" ]] || return 0
+  [[ "${package}" != *-test ]] || return 0
+  if [[ -n "${DRY_RUN}" ]]; then
+    log_info "DRY-RUN kernel APT selection: ${package}=${selected} from https://apt.ceralive.tv (production refuses kernel_not_on_apt)"
+    return 0
+  fi
+  [[ "${APT_CERALIVE_URL}" == https://apt.ceralive.tv ]] || die "kernel_origin_mismatch: expected https://apt.ceralive.tv"
+  [[ "${ARCH}" == arm64 && "${package}" =~ ^linux-image-[0-9]+[.][0-9]+[.][0-9]+-ceralive-rk3588$ ]] \
+    || die "kernel_origin_mismatch: invalid platform kernel identity"
+  local index="${_FIRST_PARTY_INDEX:-}" record rc=0 filename digest resolved url
+  [[ -n "${index}" ]] || index="$(debcache_apt_index "${debs}/.apt-state-firstparty")"
+  record="$(index_lookup_optional "${index}" "${package}" "${selected}" "${ARCH}")" || rc=$?
+  if (( rc == INDEX_LOOKUP_NOT_FOUND )); then
+    local declarations
+    declarations="$(awk -v package="${package}" -v version="${selected}" '
+      BEGIN { RS=""; FS="\n" }
+      { p=""; v=""; for(i=1;i<=NF;i++) {
+          if($i ~ /^Package: /) p=substr($i,10)
+          if($i ~ /^Version: /) v=substr($i,10)
+        }
+        if(p==package && v==version) count++
+      }
+      END { print count+0 }
+    ' "${index}")"
+    (( declarations == 0 )) || die "kernel APT record is ambiguous or malformed; refusing source-build fallback"
+    if [[ "${CERALIVE_REQUIRE_KERNEL_APT:-0}" == 1 || "${CERALIVE_BUILD_MODE:-}" == production ]]; then
+      die "kernel_not_on_apt: ${package}=${selected}"
+    fi
+    log_info "kernel not published on APT: ${package}=${selected}; local source build required"
+    return 0
+  fi
+  (( rc == 0 )) || die "kernel APT index is unusable; refusing source-build fallback"
+  IFS=$'\t' read -r filename digest resolved <<<"${record}"
+  local _FIRST_PARTY_BASE_URL="${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}"
+  url="$(first_party_curl_url "${filename}")"
+  [[ "${url}" == https://apt.ceralive.tv/* && "/${filename}/" != *"/../"* ]] \
+    || die "kernel_origin_mismatch: ${url}"
+  [[ "${resolved}" == "${selected}" && "${digest}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "kernel APT record identity mismatch"
+  local final tmp
+  final="${debs}/$(basename "${filename}")"
+  tmp="$(mktemp "${debs}/.tmp-kernel-XXXXXX")" || return 1
+  local -a curl_auth=()
+  if [[ -n "${APT_CLIENT_CRT_B64:-}" ]]; then
+    curl_auth=(--cert "${debs}/.apt-state-firstparty/certs/client.crt"
+               --key "${debs}/.apt-state-firstparty/certs/client.key")
+  fi
+  # No redirect following: even a signed Filename may not move the byte origin.
+  if ! curl -fsS --proto '=https' "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" \
+       -o "${tmp}" "${url}" ||
+     ! auth_verify_file "${tmp}" "${digest}" ||
+     ! assert_deb_identity "${tmp}" "${package}" "${selected}" arm64; then
+    rm -f -- "${tmp}"
+    die "kernel APT digest/control verification failed: ${package}=${selected}"
+  fi
+  if ! publish_staged_deb "${tmp}" "${final}"; then
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  _KERNEL_APT_INDEX="${index}"
+}
+
 bsp_assert_firmware_content() {
   local index="$1" spec
   shift
@@ -323,6 +389,9 @@ collect_declared_bsp_pkgs() {
     [[ -n "${pkg}" ]] && pkgs+=("${pkg}")
   done
   local suppressed=" ${CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS:-} "
+  # APT selection is separate from Armbian, even after the resolver unsuppresses
+  # the published name. Neither transport may ask Armbian for our kernel.
+  [[ -z "${KERNEL_SOURCE_PACKAGE_VERSION:-}" ]] || suppressed+="${KERNEL_PACKAGES:-} "
   local -a deduped=()
   local seen="|" p
   for p in "${pkgs[@]}"; do
@@ -410,18 +479,11 @@ fetch_bsp() {
   fi
 
   if [[ -z "${DRY_RUN}" && " ${bsp_pkgs[*]} " == *' armbian-firmware-full '* ]]; then
-    local firmware_deb firmware_pin firmware_count=0
-    firmware_pin="$(firmware_content_read "${HERE}/../manifests/armbian-firmware-content.json")" \
-      || die "invalid firmware archive content pin"
+    local firmware_deb firmware_count=0
     for firmware_deb in "${debs}"/*.deb; do
       [[ "$(deb_pkg_name "${firmware_deb}")" == armbian-firmware-full ]] || continue
       firmware_count=$((firmware_count + 1))
-      local pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib
-      IFS=$'\t' read -r pin_pkg pin_version pin_arch pin_sha pin_bytes pin_kib <<<"${firmware_pin}"
-      if ! assert_deb_identity "${firmware_deb}" "${pin_pkg}" "${pin_version}" "${pin_arch}" \
-        || ! auth_verify_file "${firmware_deb}" "${pin_sha}" \
-        || [[ "$(stat -c %s "${firmware_deb}")" != "${pin_bytes}" ]] \
-        || [[ "$(deb_control_field "${firmware_deb}" Installed-Size)" != "${pin_kib}" ]]; then
+      if ! firmware_content_assert_archive "${HERE}/../manifests/armbian-firmware-content.json" "${firmware_deb}"; then
         die "staged firmware .deb ARCHIVE FILE differs from committed content pin"
       fi
     done

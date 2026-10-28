@@ -68,6 +68,7 @@
 | **Kernel tracks (index)** | [`docs/kernel-tracks.md`](../kernel-tracks.md) — thin lifecycle/discoverability index: which patch repo feeds which variant, the pin chain, and links to the decision/build/currency docs below (does not restate them) |
 | **Kernel currency watch** | [`docs/kernel-currency-watch.md`](../kernel-currency-watch.md) — vendor 6.1 lock decision, 7-way evidence, and the two precise revisit triggers |
 | **Kernel build from source (the production path)** | [`docs/kernel-build-from-source.md`](../kernel-build-from-source.md) — the `variants:` model (`edge` = mainline 7.2 and the production default, `edge-test` = its never-released debug sibling), `kernel_source:` pins, the two source-checkout shapes (§2b, tagged vs commit-only) and the two config modes (§2c, defconfig-fragment vs fetched full `.config` — both still supported, only the first in use), `make bindeb-pkg` backend, fetch suppression / package replacement / uniqueness check, and the DTB install mapping |
+| **Kernel-only release runbook [PARTIAL]** | [`docs/kernel-release.md`](../kernel-release.md) — Debian revision bump, `ci/kernel-release.py` local candidate, its gates, bench-report binding, the refused APT publication and the device records that report success or rollback |
 | **Bench PARTLABEL overlay (`CERALIVE_BENCH_LABELS=1`)** | [`docs/dev-loop.md`](../dev-loop.md) → "Bench PARTLABEL overlay" — see the KEY FACT below |
 | Add-on descriptor schema | `manifests/schema/addon.schema.json` |
 | Build a feature sysext add-on | `lib/build-feature-sysext.sh` |

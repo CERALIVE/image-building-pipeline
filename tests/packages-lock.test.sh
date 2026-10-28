@@ -117,6 +117,37 @@ assert kernel['source']['patches_commit'] == 'b' * 40
 assert kernel['artifact']['sha256'] == {'linux-image-test_1_arm64.deb': sys.argv[5]}
 assert 'sha256' not in kernel
 PY
+
+# A fetched kernel retains its authenticated APT digest, even when an old
+# source-built artifact with different bytes remains in kernel-build.
+printf 'Package: linux-image-test\nVersion: 1\nArchitecture: arm64\nMaintainer: Fixture <fixture@example.invalid>\nDescription: fetched kernel\n' >"$work/control/DEBIAN/control"
+dpkg-deb --root-owner-group --build "$work/control" "$stage/debs/linux-image-test_1_arm64.deb" >/dev/null
+hash_fetched="$(sha256sum "$stage/debs/linux-image-test_1_arm64.deb" | cut -d' ' -f1)"
+printf 'Package: linux-image-test\nVersion: 1\nArchitecture: arm64\nFilename: pool/linux-image-test_1_arm64.deb\nSHA256: %s\n\n' \
+  "$hash_fetched" >>"$work/Packages"
+DEST="$stage" ARCH=arm64 DRY_RUN='' INDEX="$work/Packages" LIB="$HERE/lib" check bash -ec '
+  die() { printf "%s\n" "$*" >&2; exit 1; }
+  log_error() { die "$*"; }
+  deb_pkg_name() { dpkg-deb -f "$1" Package; }
+  deb_pkg_version() { dpkg-deb -f "$1" Version; }
+  deb_pkg_arch() { dpkg-deb -f "$1" Architecture; }
+  rk3588_userspace_record() { :; }
+  debcache_apt_index() { :; }
+  FIRST_PARTY_APT_PKGS=()
+  _BSP_APT_INDEX="$INDEX"; _KERNEL_APT_INDEX="$INDEX"
+  source "$LIB/fetch-debs-auth.sh"
+  source "$LIB/fetch/index.sh"
+  source "$LIB/fetch/lock.sh"
+  fetch_lock_sidecar
+'
+check python3 "$HERE/lib/packages-lock.py" merge "${args[@]}"
+check python3 - "${args[2]}" "$hash_fetched" "$hash_k" <<'PY'
+import json, sys
+row = next(r for r in json.load(open(sys.argv[1]))['packages'] if r['name'] == 'linux-image-test')
+assert row == {'name':'linux-image-test', 'version':'1', 'arch':'arm64',
+               'origin':'ceralive-kernel', 'sha256':sys.argv[2]}
+assert row['sha256'] != sys.argv[3], 'stale source-built bytes must not replace the APT digest'
+PY
 printf 'Package: genuinely-unaccounted\nStatus: install ok installed\nArchitecture: arm64\nVersion: 9\n\n' >>"$root/var/lib/dpkg/status"
 if python3 "$HERE/lib/packages-lock.py" merge "${args[@]}" >"$work/error" 2>&1; then
   bad 'novel unaccounted package was accepted'

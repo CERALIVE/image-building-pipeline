@@ -76,7 +76,12 @@ printf 'bundle fixture\n' >"$tmp/bundle.raucb"
 printf 'flash fixture\n' >"$tmp/flash.raw"
 xz -c "$tmp/flash.raw" >"$tmp/flash.raw.xz"
 (cd "$tmp" && sha256sum flash.raw >raw.sha256)
-printf '{}\n' >"$tmp/lock.json"
+ROOT="$repo" WORK="$tmp"
+source "$repo/tests/lib/kernel-release-fixtures.sh"
+export CERALIVE_KERNEL_HISTORY_DIR="$tmp/kernel-history"
+kernel_test_artifact "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive1" 7.2.0-ceralive1 "$repo"
+jq '{schema:1,packages:[{name:.package,version,arch,origin:"ceralive-kernel",sha256:.deb_sha256}]}' \
+  "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive1/kernel-artifact.json" >"$tmp/lock.json"
 prefix="$tmp/seed/releases/rock-5b-plus/2026.10.1"
 cp "$tmp/bundle.raucb" "$prefix/bundle.raucb.part0000"
 cp "$tmp/flash.raw.xz" "$prefix/flash.raw.xz.part0000"
@@ -97,6 +102,15 @@ jq '.serial=2' "$tmp/old.json" >"$tmp/next.json"
 for pair in old next; do
   openssl cms -sign -binary -in "$tmp/$pair.json" -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
     -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$tmp/$pair.sig"
+done
+for v in 2026.9.1 2026.9.2 2026.9.3 2026.9.4 2026.10.1; do
+  sidecar_dir="$tmp/seed/releases/rock-5b-plus/$v"
+  mkdir -p "$sidecar_dir"
+  python3 "$repo/ci/check-kernel-version-monotonic.py" --sidecar "$tmp/lock.json" \
+    --board rock-5b-plus --version "$v" --out "$sidecar_dir/kernel.json"
+  openssl cms -sign -binary -noattr -in "$sidecar_dir/kernel.json" \
+    -signer "$tmp/signer/leaf.pem" -inkey "$tmp/signer/leaf.key" \
+    -certfile "$tmp/signer/intermediate-ca.pem" -outform DER -out "$sidecar_dir/kernel.json.sig"
 done
 etag="\"$(md5sum "$tmp/old.json" | cut -d' ' -f1)\""
 publisher() { (cd "$repo" && bash "${PUBLISH_RELEASE_SCRIPT:-$repo/ci/publish-release.sh}" "$@"); }
@@ -141,7 +155,7 @@ for mode in refresh publish promote; do
      jq -se --arg etag "$etag" --arg body "$(base64 -w0 "$tmp/next.json")" '
        all(.[]; .argv[1]!="delete-object") and
        ([.[] | select(.argv[1]=="put-object")]|length)==
-         (if $ARGS.named.mode=="publish" then 7 else 1 end) and
+         (if $ARGS.named.mode=="publish" then 9 else 1 end) and
        ([.[] | select(.argv[1]=="put-object" and (.argv[3]|startswith("channels/")))] as $writes |
        ($writes|length)==1 and $writes[0].body==$body and
        $writes[0].argv==["s3api","put-object","--key","channels/beta/rock-5b-plus.json","--body",$writes[0].argv[5],

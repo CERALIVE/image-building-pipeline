@@ -146,10 +146,12 @@ resolve() {
   require_cmd python3
 
   local board="" variant="${CERALIVE_KERNEL_VARIANT:-${DEFAULT_KERNEL_VARIANT}}"
+  local -a kernel_apt_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --variant)   variant="${2:-}"; shift 2 ;;
       --variant=*) variant="${1#--variant=}"; shift ;;
+      --kernel-apt) kernel_apt_args=(--kernel-apt); shift ;;
       -h|--help)   usage; return 0 ;;
       -*)          usage; die "unknown option: '$1'" ;;
       *)
@@ -198,6 +200,7 @@ resolve() {
   local merged
   merged="$(python3 "$RESOLVE_PY" merge \
       --family "$family_file" --board "$board_file" --variant "$variant" \
+      "${kernel_apt_args[@]}" \
       --family-schema "$FAMILY_SCHEMA" --board-schema "$BOARD_SCHEMA")" \
     || die "manifest validation/merge failed for board '${board}' (variant '${variant}'; see 'schema invalid:' above)"
 

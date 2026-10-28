@@ -66,6 +66,7 @@ export AWS_DEFAULT_REGION=auto
 umask 077
 tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
 source "$(dirname "${BASH_SOURCE[0]}")/r2-immutable-lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/kernel-floor-lib.sh"
 
 s3() { aws s3api "$@" --bucket "$bucket" --endpoint-url "$endpoint"; }
 md5_of() { openssl dgst -md5 -binary "$1" | base64 -w0; }
@@ -475,6 +476,10 @@ PY
     cp --reflink=auto -- "$flash" "$tmp/flash.raw.xz"
     cp -- "$lock" "$tmp/packages.lock.json"
     python3 -m json.tool "$tmp/packages.lock.json" >/dev/null || die 'invalid package lock JSON'
+    if [[ -f "$(dirname "$lock")/kernel-artifact.json" ]]; then
+      cp -- "$(dirname "$lock")/kernel-artifact.json" "$tmp/kernel-artifact.json"
+    fi
+    kernel_prepare_sidecar
     : >"$tmp/files.tsv"; : >"$tmp/parts.tsv"
     make_parts bundle.raucb "$tmp/bundle.raucb" "$prefix"
     make_parts flash.raw.xz "$tmp/flash.raw.xz" "$prefix"
@@ -483,6 +488,10 @@ PY
     immutable "$prefix/packages.lock.json" "$tmp/packages.lock.json" application/json
     immutable "$prefix/SHA256SUMS" "$tmp/SHA256SUMS" text/plain
     immutable "$prefix/index.json" "$tmp/index.json" application/json
+    if [[ "$board" != x86-minipc ]]; then
+      immutable "$prefix/kernel.json" "$tmp/kernel.json" application/json
+      immutable "$prefix/kernel.json.sig" "$tmp/kernel.json.sig" application/pkcs7-signature
+    fi
     printf '%s\n' "$version" >"$tmp/marker"
     immutable "$prefix/channels/$channel" "$tmp/marker" text/plain
     if [[ "$dry_run" != 1 ]]; then verify_release "$version"; fi
@@ -493,6 +502,7 @@ PY
     resolve_compatible
     prefix="$(release_prefix "$version")"
     [[ "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || die 'version required'
+    kernel_promote_check
     read_channel beta "$tmp/beta.json" || die 'beta manifest absent: cannot promote'
     verify_release "$version"
     verify_pointer_source "$tmp/beta.json" "$version" no

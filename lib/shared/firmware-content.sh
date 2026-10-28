@@ -44,3 +44,13 @@ firmware_content_assert_index() {
     return 1
   fi
 }
+
+firmware_content_assert_archive() {
+  local pin="$1" deb="$2" record pkg version arch sha bytes kib
+  record="$(firmware_content_read "${pin}")" || return 1
+  IFS=$'\t' read -r pkg version arch sha bytes kib <<<"${record}"
+  assert_deb_identity "${deb}" "${pkg}" "${version}" "${arch}" &&
+    auth_verify_file "${deb}" "${sha}" &&
+    [[ "$(stat -c %s "${deb}")" == "${bytes}" ]] &&
+    [[ "$(deb_control_field "${deb}" Installed-Size)" == "${kib}" ]]
+}

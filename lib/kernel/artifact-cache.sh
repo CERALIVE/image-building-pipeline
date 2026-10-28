@@ -15,16 +15,16 @@ kernel_artifact_cache_root() {
   printf '%s/%s' "${PIPELINE_DIR}" "${CERALIVE_REL_MKOSI_CACHE_ROOT}/kernel-artifacts"
 }
 
-kernel_artifact_cache_key() {
+kernel_input_fingerprint() {
   local file
   {
-    printf '%s\0' 'kernel-artifacts-v1' "${git_url}" "${tag}" "${commit}" \
+    printf '%s\0' 'kernel-input-v2' "${git_url}" "${tag}" "${commit}" \
       "${patches_url}" "${patches_commit}" "${patches_series}" \
       "${config_mode}" "${defconfig_base}" "${config_git_url}" \
       "${config_commit}" "${config_path}" "${builder_image}" \
-      "${builder_digest}" "${KERNEL_VARIANT:-default}" "${arch}" \
+      "${builder_packages}" "${builder_compiler}" "${KERNEL_VARIANT:-default}" "${arch}" \
       "${kernel_pkg}" "${kernel_release}" "${local_version}" \
-      "${package_version}" "${epoch}" "${dtb_path}"
+      "${package_version}" "${epoch}"
     for file in "${fragments[@]}"; do
       printf '%s\0' "${file#"${PIPELINE_DIR}/"}"
       sha256sum "${file}" | cut -d' ' -f1
@@ -33,14 +33,45 @@ kernel_artifact_cache_key() {
       "${HERE}/build-kernel.sh" "${KERNEL_LIB_DIR}/config.sh" \
       "${KERNEL_LIB_DIR}/checkout.sh" "${KERNEL_LIB_DIR}/builder.sh" \
       "${KERNEL_LIB_DIR}/package.sh" "${KERNEL_LIB_DIR}/artifact-cache.sh" \
+      "${KERNEL_LIB_DIR}/only.sh" \
       "${HERE}/shared/remote-cache.sh" \
       "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}" \
+      "${HERE}/verify-boot-artifacts.sh" \
+      "${PIPELINE_DIR}/mkosi/runtime/ceralive-kernel-boot-staging.sh" \
+      "${PIPELINE_DIR}/mkosi/customize/bluetooth-firmware.sh" \
+      "${PIPELINE_DIR}/manifests/rk3588-bluetooth-firmware-roots.txt" \
+      "${PIPELINE_DIR}/manifests/kernel/required-symbols.list" \
+      "${PIPELINE_DIR}/manifests/kernel/forbidden-symbols.list" \
       "${KERNEL_BUILDER_DOCKERFILE}"; do
       [[ -n "${file}" ]] || continue
       printf '%s\0' "${file#"${PIPELINE_DIR}/"}"
       sha256sum "${file}" | cut -d' ' -f1
     done
   } | sha256sum | cut -d' ' -f1
+}
+kernel_artifact_cache_key() {
+  printf '%s\0' "$(kernel_input_fingerprint)" "${builder_digest}" "${dtb_path}" \
+    | sha256sum | cut -d' ' -f1
+}
+
+kernel_artifact_identity() {
+  local out="$1" deb="$2"
+  python3 - "${out}" "${deb}" "${kernel_pkg}" "${package_version}" "${arch}" \
+    "${kernel_release}" "${input_fingerprint}" "${epoch}" "${builder_image}" \
+    "${builder_packages}" "${builder_compiler}" "${KERNEL_BUILDER_DOCKERFILE}" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+out, deb, package, version, arch, release, fingerprint, epoch, base, packages, compiler, dockerfile = sys.argv[1:]
+record = dict(package=package, version=version, arch=arch, kernel_release=release,
+              deb_sha256=hashlib.sha256(pathlib.Path(deb).read_bytes()).hexdigest(),
+              input_fingerprint=fingerprint, kernel_epoch=int(epoch), validated_boards=[],
+              builder_closure=dict(base_image=base, packages=packages.splitlines(),
+                                   compiler=compiler, dockerfile_sha256=hashlib.sha256(
+                                       pathlib.Path(dockerfile).read_bytes()).hexdigest()))
+(pathlib.Path(out) / 'kernel-artifact.json').write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+PY
 }
 
 kernel_artifact_cache_manifest() {

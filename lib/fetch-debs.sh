@@ -230,6 +230,8 @@ main() {
   # no credential to do a GPG-verified first-party fetch, so plan only.
   local auto_dry_run=""
   if [[ -z "${DRY_RUN}" && -z "${APT_GPG_PUBLIC_B64:-}" ]]; then
+    [[ "${CERALIVE_REQUIRE_KERNEL_APT:-0}" != 1 && "${CERALIVE_BUILD_MODE:-}" != production ]] \
+      || die "kernel_not_on_apt: authenticated build credentials are required"
     auto_dry_run=1
     DRY_RUN=1
     log_warn "no apt.ceralive.tv GPG key (APT_GPG_PUBLIC_B64) in env — auto dry-run (plan only, downloads nothing)"

@@ -30,6 +30,26 @@ if ! cmp -s \
   exit 1
 fi
 mkdir -p "${dest%/*}"
-printf '{"schema":1,"features":["rauc-verity-streaming","rauc-activate-on-shutdown","slot-sync","origin-protection","apt-all-packages","reprune-hook","apt-credentials","transport-uidrange"],"ota_uid":%s,"apt_uid":%s}\n' \
-  "$ota_uid" "$apt_uid" >"$dest"
+# Owner fills the default only after releasing the capable CeraUI. Empty is OFF.
+KERNEL_STAGE_MIN_CERAUI="${KERNEL_STAGE_MIN_CERAUI:-}"
+kernel_feature=""
+kernel_pins="${CERALIVE_KERNEL_STAGE_PIN_FILE:-${BASH_SOURCE[0]%/*}/../first-party-deb-versions.txt}"
+if [[ -n "${KERNEL_STAGE_MIN_CERAUI}" && -r "${kernel_pins}" &&
+      -x "$root/usr/lib/ceralive/ceralive-kernel-stage" &&
+      -r "$root/usr/lib/ceralive/ceralive-kernel-state-lib.sh" &&
+      -r "$root/usr/lib/ceralive/ceralive-slot-mirror-lib.sh" &&
+      -x "$root/usr/libexec/ceralive/ceralive-slot-sync" &&
+      -x "$root/usr/lib/ceralive/ceralive-kernel-boot-staging" &&
+      -x "$root/usr/lib/ceralive/verify-boot-artifacts.sh" ]]; then
+  arch="$(dpkg --print-architecture)"
+  pinned="$(awk -F= -v package="ceralive-device[${arch}]" '$1 == package {version=$2; count++} END {if (count == 1) print version}' "${kernel_pins}")"
+  if [[ -n "${pinned}" ]] &&
+    dpkg --validate-version "${pinned}" >/dev/null 2>&1 &&
+    dpkg --validate-version "${KERNEL_STAGE_MIN_CERAUI}" >/dev/null 2>&1 &&
+    dpkg --compare-versions "${pinned}" ge "${KERNEL_STAGE_MIN_CERAUI}"; then
+    kernel_feature=',"kernel-apt-stage"'
+  fi
+fi
+printf '{"schema":1,"features":["rauc-verity-streaming","rauc-activate-on-shutdown","slot-sync","origin-protection","apt-all-packages","reprune-hook","apt-credentials","transport-uidrange"%s],"ota_uid":%s,"apt_uid":%s}\n' \
+  "$kernel_feature" "$ota_uid" "$apt_uid" >"$dest"
 chmod 0644 "$dest"

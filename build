@@ -66,6 +66,8 @@ usage() {
 Usage:
   build <board>              build a single board
   build <board> --variant N  build a single board with family variant N
+  build <family|board> --kernel-only [--release]
+                            build and gate one family kernel, without an image
   build --all                build every board manifest
   build --only b1,b2         build the named subset (comma-separated)
 
@@ -184,6 +186,7 @@ main() {
   local only_csv=""
   local board=""
   local variant=""
+  local kernel_only=0 release=0
   local -a passthrough=()
 
   # `--only=x` / `--variant=x` are folded into their two-token form up front, so
@@ -212,6 +215,8 @@ main() {
         [[ -n "${variant}" ]] || args_usage_die usage "--variant requires a name (e.g. --variant edge)"
         shift 2
         ;;
+      --kernel-only) kernel_only=1; shift ;;
+      --release) release=1; shift ;;
       --)
         shift
         passthrough+=("$@")
@@ -232,6 +237,25 @@ main() {
         ;;
     esac
   done
+
+  if (( kernel_only )); then
+    [[ "${mode}" == single && -n "${board}" ]] || args_usage_die usage "--kernel-only requires one family or board"
+    if [[ -f "${FAMILIES_DIR}/${board}.yaml" ]]; then
+      board="$(python3 - "${BOARDS_DIR}" "${board}" <<'PY'
+import pathlib
+import sys
+import yaml
+boards = [p.stem for p in sorted(pathlib.Path(sys.argv[1]).glob('*.yaml'))
+          if yaml.safe_load(p.read_text()).get('family') == sys.argv[2]]
+if not boards:
+    sys.exit('family has no board manifests')
+print(boards[0])
+PY
+)"
+    fi
+    passthrough+=(--kernel-only)
+  fi
+  (( release == 0 )) || passthrough+=(--release)
 
   # Resolve the requested selection into SELECTED_BOARDS.
   local -a SELECTED_BOARDS=()

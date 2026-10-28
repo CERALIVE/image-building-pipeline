@@ -2,7 +2,9 @@
 /build/
 /cache/
 /.staging/
+/.kernel-release.lock
 /lib/
+/runtime/first-party-deb-versions.txt
 *.cache
 
 # Todo 29 (update-system-overhaul): mkosi's own documented "local

@@ -206,8 +206,14 @@ install_kernel_boot_staging() {
   template="${template//"${release}"/\{kernel_release\}}"
   install -D -m 0755 "${src}/runtime/ceralive-kernel-boot-staging.sh" \
     "${root}/usr/lib/ceralive/ceralive-kernel-boot-staging"
+  install -D -m 0644 "${src}/customize/bluetooth-firmware.sh" \
+    "${root}/usr/lib/ceralive/kernel-firmware-rules.sh"
+  install -D -m 0644 "${src}/.staging/${CERALIVE_BOARD:?}/rk3588-bluetooth-firmware-roots.txt" \
+    "${root}/usr/lib/ceralive/kernel-firmware-rules.txt"
   install -D -m 0755 "${src}/.staging/${CERALIVE_BOARD:?}/verify-boot-artifacts.sh" \
     "${root}/usr/lib/ceralive/verify-boot-artifacts.sh"
+  install -D -m 0644 "${src}/.staging/${CERALIVE_BOARD:?}/slot-reserve.sh" \
+    "${root}/usr/lib/ceralive/slot-reserve.sh"
   printf '{\n  "dtb_name": "%s",\n  "dtb_deb_dir_template": "%s",\n  "dtb_boot_dir": "%s",\n  "kernel_package_regex": "^linux-image-[0-9]+[.][0-9]+[.][0-9]+%s$"\n}\n' \
     "${DTB_NAME:?}" "${template}" "${KERNEL_SOURCE_DTB_BOOT_DIR:?}" "${suffix}" \
     >"${root}/usr/lib/ceralive/board-boot.json"

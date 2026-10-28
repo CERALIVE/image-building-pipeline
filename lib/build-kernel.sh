@@ -246,7 +246,7 @@ main() {
   ceralive_remote_cache_mode >/dev/null
 
   local dtb_path="${dtb_deb_dir%/}/${dtb_name}"
-  local epoch="${SOURCE_DATE_EPOCH:-0}"
+  local epoch=""
 
   KERNEL_BUILD_JOBS="$(derive_kernel_build_jobs)"
 
@@ -280,7 +280,8 @@ main() {
       log_info "DRY-RUN would run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${defconfig_base} && scripts/kconfig/merge_config.sh -m .config ${fragments_rel_list[*]} (merged in this order)"
       log_info "DRY-RUN would run: verify-kernel-config.sh ${fragments_rel_list[*]} .config (fragment-survival gate, after olddefconfig)"
     fi
-    log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@${epoch} bindeb-pkg"
+    log_info "DRY-RUN kernel epoch: git show -s --format=%ct ${commit} in the verified kernel clone (not image repo HEAD)"
+    log_info "DRY-RUN would run: make -j${KERNEL_BUILD_JOBS} ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION=${local_version} KDEB_PKGVERSION=${package_version} KBUILD_BUILD_TIMESTAMP=@<kernel-commit-epoch> bindeb-pkg"
     log_info "DRY-RUN would stage: ${kernel_pkg}_${package_version}_${arch}.deb -> ${out_dir} (linux-headers-*/linux-libc-dev discarded)"
     log_info "DRY-RUN fetch policy: each pinned fetch runs under timeout ${KERNEL_GIT_TIMEOUT}s, up to ${KERNEL_GIT_ATTEMPTS} attempt(s) in a private attempt dir; a pin mismatch is NEVER retried"
     log_info "DRY-RUN source mirror: CERALIVE_KERNEL_SRC_MIRROR=$(kernel_src_mirror_mode), mirror dir $(kernel_src_mirror_dir) (a mirror holding ${commit} is cloned locally with no network; the patch series and config are always fetched fresh)"
@@ -296,23 +297,14 @@ main() {
   KERNEL_BUILDER_IMAGE_TAG="$(resolve_kernel_builder_tag "${builder_image}")"
   ensure_kernel_builder_image "${runtime}" "${builder_image}" "${KERNEL_BUILDER_IMAGE_TAG}"
 
-  local builder_digest cache_key="" deb_name="${kernel_pkg}_${package_version}_${arch}.deb"
-  if [[ "${cache_mode}" == 'auto' ]]; then
-    builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
-      || die "cannot inspect kernel builder image identity"
-    [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
-    cache_key="$(kernel_artifact_cache_key)"
-    if kernel_artifact_cache_hit "${cache_key}" "${out_dir}" "${deb_name}"; then
-      log_success "kernel-build-from-source: staged verified cache artifact -> ${out_dir}"
-      return 0
-    fi
-  fi
+  local builder_digest cache_key="" input_fingerprint builder_packages builder_compiler
+  local deb_name="${kernel_pkg}_${package_version}_${arch}.deb"
 
   local work
   work="$(mktemp -d)"
   # shellcheck disable=SC2064  # expand $work now: the trap must survive the local going out of scope
-  trap "rm -rf '${work}'" EXIT
-  install -d -m 0755 "${work}/out" "${out_dir}"
+  trap "${runtime} run --rm -v '${work}/src:/src' '${KERNEL_BUILDER_IMAGE_TAG}' bash -c 'find /src -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'; rm -rf '${work}'" EXIT
+  install -d -m 0755 "${work}/out" "${work}/src" "${out_dir}"
 
   ccache_dir="${ccache_dir:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_CCACHE_DIR}}"
   install -d -m 0755 "${ccache_dir}"
@@ -386,17 +378,18 @@ main() {
   container_script="$(declare -f fetch_pinned_tree_once fetch_pinned_tree)
 "'
       export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
-      export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
       export KBUILD_BUILD_USER=ceralive KBUILD_BUILD_HOST=ceralive-builder
 
       # KERNEL_SRC_MIRROR is the ONLY fetch here that gets one: the patch series
       # and the kernel config below deliberately stay fresh network fetches.
+      if [ ! -d /src/linux/.git ]; then
       if [ -n "${KERNEL_TAG}" ]; then
         echo "== cloning ${KERNEL_GIT_URL} at ${KERNEL_TAG}"
         fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "${KERNEL_TAG}" "${KERNEL_COMMIT}" "kernel source" "${KERNEL_SRC_MIRROR}"
       else
         echo "== fetching ${KERNEL_GIT_URL} at ${KERNEL_COMMIT} (no tag on the pinned branch)"
         fetch_pinned_tree /src/linux "${KERNEL_GIT_URL}" "" "${KERNEL_COMMIT}" "kernel source" "${KERNEL_SRC_MIRROR}"
+      fi
       fi
       cd /src/linux
       # Re-asserted on the PUBLISHED path: fetch_pinned_tree gates the rename on
@@ -407,6 +400,12 @@ main() {
         echo "FATAL: kernel source checked out ${have}, pinned commit is ${KERNEL_COMMIT} — refusing to build different source under the same pin" >&2
         exit 1
       fi
+      # Read before git am changes HEAD; image and kernel-only builds share this.
+      export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${KERNEL_COMMIT}")"
+      [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]] || exit 1
+      export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
+      printf "%s\n" "${SOURCE_DATE_EPOCH}" > /out/kernel-epoch
+      if [ "${KERNEL_EPOCH_ONLY:-0}" = 1 ]; then exit 0; fi
       git config user.email kernel-build@ceralive.tv
       git config user.name  "CeraLive kernel build"
 
@@ -495,6 +494,8 @@ main() {
         exit 1
       fi
 
+      # Pin Debian packaging too: the pinned mkdebian ignores the epoch.
+      sed -i "s/date -R/date -u -R -d @${SOURCE_DATE_EPOCH}/" scripts/package/mkdebian
       echo "== make bindeb-pkg (-j${BUILD_JOBS})"
       make -j"${BUILD_JOBS}" \
         LOCALVERSION="${LOCAL_VERSION}" \
@@ -516,7 +517,7 @@ main() {
   # The whole pinned-input dance runs INSIDE the container so the git, make and
   # toolchain versions are the pinned ones end to end — a host-side clone would
   # reintroduce exactly the host dependence the container exists to remove.
-  "${runtime}" run --rm \
+  local -a container_args=(--rm \
     -e "KERNEL_GIT_URL=${git_url}" \
     -e "KERNEL_TAG=${tag}" \
     -e "KERNEL_COMMIT=${commit}" \
@@ -538,7 +539,6 @@ main() {
     -e "CERALIVE_KERNEL_GIT_ATTEMPTS=${KERNEL_GIT_ATTEMPTS}" \
     -e "CERALIVE_KERNEL_GIT_TIMEOUT=${KERNEL_GIT_TIMEOUT}" \
     -e "CERALIVE_KERNEL_GIT_BACKOFF=${KERNEL_GIT_BACKOFF}" \
-    -e "SOURCE_DATE_EPOCH=${epoch}" \
     "${mirror_mount[@]}" \
     "${patches_mount[@]}" \
     "${patches_env[@]}" \
@@ -546,8 +546,36 @@ main() {
     "${absent_mount[@]}" \
     -v "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}:/in/verify-kernel-config.sh:ro" \
     -v "${work}/out:/out" \
+    -v "${work}/src:/src" \
     -v "${ccache_dir}:/ccache" \
-    "${KERNEL_BUILDER_IMAGE_TAG}" \
+  )
+  # Resolve the source epoch before cache lookup. Keep this clone for the build,
+  # so a cold miss does not fetch the kernel twice.
+  "${runtime}" run "${container_args[@]}" -e KERNEL_EPOCH_ONLY=1 \
+    "${KERNEL_BUILDER_IMAGE_TAG}" bash -euo pipefail -c "${container_script}" \
+    || die "cannot derive epoch from the pinned kernel clone"
+  epoch="$(<"${work}/out/kernel-epoch")"
+  [[ "${epoch}" =~ ^[0-9]+$ ]] || die "invalid pinned kernel epoch"
+  builder_packages="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" \
+    dpkg-query -W -f '${Package}=${Version} ${Architecture}\n' | LC_ALL=C sort)" \
+    || die "cannot resolve kernel builder package closure"
+  [[ -n "${builder_packages}" ]] || die "empty kernel builder package closure"
+  builder_compiler="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" aarch64-linux-gnu-gcc --version)" \
+    || die "cannot resolve kernel builder compiler identity"
+  [[ -n "${builder_compiler}" ]] || die "empty kernel builder compiler identity"
+  input_fingerprint="$(kernel_input_fingerprint)"
+  if [[ "${cache_mode}" == 'auto' ]]; then
+    builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
+      || die "cannot inspect kernel builder image identity"
+    [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
+    cache_key="$(kernel_artifact_cache_key)"
+    if kernel_artifact_cache_hit "${cache_key}" "${out_dir}" "${deb_name}"; then
+      kernel_artifact_identity "${out_dir}" "${out_dir}/${deb_name}"
+      log_success "kernel-build-from-source: staged verified cache artifact -> ${out_dir}"
+      return 0
+    fi
+  fi
+  "${runtime}" run "${container_args[@]}" "${KERNEL_BUILDER_IMAGE_TAG}" \
     bash -euo pipefail -c "${container_script}" \
     || die "kernel build failed for board '${board}' (see the container log above)"
 
@@ -564,6 +592,7 @@ main() {
   "${MKOSI_PACKAGE_STAGING_SH:-${HERE}/stage-mkosi-package.sh}" "${built[0]}" "${out_dir}"
   install -m 0644 "${work}/out/resolved.config" "${out_dir}/resolved.config"
   install -m 0644 "${work}/out/built-modules.txt" "${out_dir}/built-modules.txt"
+  kernel_artifact_identity "${out_dir}" "${built[0]}"
   if [[ "${cache_mode}" == 'auto' ]]; then
     kernel_artifact_cache_store "${cache_key}" "${built[0]}" "${work}/out"
   fi
