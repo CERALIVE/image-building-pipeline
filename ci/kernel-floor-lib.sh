@@ -82,6 +82,62 @@ kernel_prepare_sidecar() {
   fi
 }
 
+# Owner-attested sidecar for the two OS releases published before kernel.json existed. Their
+# kernel is source-built (no APT origin, no kernel Release), so the normal generator refuses
+# it; the OTA signer's signature here means the owner attests the named kernel shipped in
+# that image. The floor is deliberately not run: it cannot pass until these sidecars exist.
+# shortcut: allowlist is hard-coded to the pre-sidecar releases, extend it only by reviewed PR.
+kernel_legacy_backfill() {
+  [[ "${board}" != x86-minipc ]] || die "x86-minipc carries no kernel sidecar"
+  case "${board}/${version}" in
+    rock-5b-plus/2026.10.100|orange-pi-5-plus/2026.10.100) ;;
+    *) die "legacy kernel backfill covers only the named pre-sidecar releases" ;;
+  esac
+  [[ "${expect_kernel_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
+     "${expect_deb_sha256}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "backfill-kernel requires --expect-kernel-version and --expect-deb-sha256"
+  local prefix
+  prefix="$(release_prefix "${version}")"
+  if read_key "${prefix}/kernel.json" "${tmp}/existing-kernel.json"; then
+    die "kernel sidecar already published: ${prefix}"
+  fi
+  if read_key "${prefix}/kernel.json.sig" "${tmp}/existing-kernel.sig"; then
+    die "kernel signature already published: ${prefix}"
+  fi
+  read_key "${prefix}/packages.lock.json" "${tmp}/packages.lock.json" || die "release package lock absent: ${prefix}"
+  read_key "${prefix}/SHA256SUMS" "${tmp}/SHA256SUMS" || die "release checksum list absent: ${prefix}"
+  python3 - "${tmp}/packages.lock.json" "${tmp}/SHA256SUMS" "${board}" "${version}" \
+    "${expect_kernel_version}" "${expect_deb_sha256}" "${tmp}/kernel.json" <<'PY' || die "legacy kernel identity refused"
+import hashlib, json, re, sys
+lock_path, sums_path, board, os_version, want_version, want_sha, out = sys.argv[1:]
+lock_bytes = open(lock_path, 'rb').read()
+sums = {m[2]: m[1] for m in re.finditer(r'^([0-9a-f]{64})  (\S+)$', open(sums_path).read(), re.M)}
+if sums.get('packages.lock.json') != hashlib.sha256(lock_bytes).hexdigest():
+    sys.exit('package lock does not match the release checksum list')
+rows = [r for r in json.loads(lock_bytes)['packages'] if r['name'].startswith('linux-image-')]
+if len(rows) != 1:
+    sys.exit('release must contain exactly one installed kernel')
+row = rows[0]
+if row['origin'] != 'source-built' or row['arch'] != 'arm64':
+    sys.exit('only source-built arm64 legacy kernels may be backfilled')
+if row['version'] != want_version or row['sha256'] != want_sha:
+    sys.exit('kernel differs from the owner-attested version and digest')
+record = {'schema': 1, 'board': board, 'os_version': os_version,
+          'kernel': {'package': row['name'], 'version': row['version'], 'deb_sha256': row['sha256']}}
+with open(out, 'w') as handle:
+    handle.write(json.dumps(record, indent=2, sort_keys=True) + '\n')
+PY
+  kernel_sidecar_check "${tmp}/kernel.json" "${version}" >/dev/null || die "invalid legacy kernel sidecar"
+  if [[ "${dry_run}" != 1 ]]; then
+    signer_check
+    openssl cms -sign -binary -noattr -in "${tmp}/kernel.json" \
+      -signer "${OTA_MANIFEST_SIGNER_DIR}/leaf.pem" -inkey "${OTA_MANIFEST_SIGNER_DIR}/leaf.key" \
+      -certfile "${OTA_MANIFEST_SIGNER_DIR}/intermediate-ca.pem" \
+      -outform DER -out "${tmp}/kernel.json.sig" || return 1
+    verify_cms "${tmp}/kernel.json" "${tmp}/kernel.json.sig" || die "kernel sidecar CMS verification failed"
+  fi
+}
+
 kernel_promote_check() {
   [[ "${board}" != x86-minipc ]] || return 0
   local prefix selected

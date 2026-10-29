@@ -121,6 +121,18 @@ copy the image signing key into the kernel VM. The Docker dependency archive
 uses `actions/cache` rather than a Buildx `type=gha` exporter; the runbook records
 this targeted CI-standard deviation.
 
+The floor refuses any live OS release without a signed `kernel.json`. The two releases
+published before sidecars existed (`rock-5b-plus` and `orange-pi-5-plus` `2026.10.100`)
+ship a source-built `7.2.0-ceralive1` kernel that has no APT origin or kernel Release, so
+the normal generator rejects it. `publish-release.yml` `mode=backfill-kernel` (one board per
+dispatch, release environment) is the owner-attested exception: pass the exact
+`expect_kernel_version` and `expect_deb_sha256` from that release's published
+`packages.lock.json`. It verifies the lock against the release `SHA256SUMS`, refuses any
+release outside that two-entry allowlist, any APT-origin kernel and any existing sidecar,
+then signs and uploads only `kernel.json` and `kernel.json.sig`. The OTA signer signature is
+the owner's attestation. It does not run the floor, which cannot pass before the sidecars
+exist, and extending the allowlist needs a reviewed change.
+
 The production source pin is `7.2.0-ceralive2` for the first kernel-only publication.
 Tag creation, GitHub settings, JIT registration, dispatch, environment approval and actual publication
 are owner actions not performed by implementation/tests. PR CI runs offline

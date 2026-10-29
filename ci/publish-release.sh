@@ -21,14 +21,15 @@ usage() {
     'publish-release.sh refresh --board B --channel stable|beta|drill --expect-serial N --expect-etag "\"MD5\"" [--dry-run]' \
     'publish-release.sh prune --board B --channel-family [--dry-run]' \
     'publish-release.sh --selftest [--dry-run]' \
-    'publish-release.sh kernel-floor --kernel-version V --os-releases DIR'
+    'publish-release.sh kernel-floor --kernel-version V --os-releases DIR' \
+    'publish-release.sh backfill-kernel --board B --version YYYY.M.P --expect-kernel-version V --expect-deb-sha256 SHA [--dry-run]'
 }
 
 mode="${1:-}"; [[ -n "$mode" ]] || { usage; exit 2; }; shift
-board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0 expect_serial='' expect_etag='' kernel_version='' os_releases=''
+board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0 expect_serial='' expect_etag='' kernel_version='' os_releases='' expect_kernel_version='' expect_deb_sha256=''
 while (($#)); do
   case "$1" in
-    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock|--expect-serial|--expect-etag|--kernel-version|--os-releases)
+    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock|--expect-serial|--expect-etag|--kernel-version|--os-releases|--expect-kernel-version|--expect-deb-sha256)
       (($# >= 2)) || die "missing value for $1"
       case "$1" in
         --board) board="$2" ;; --version) version="$2" ;; --channel) channel="$2" ;;
@@ -36,6 +37,7 @@ while (($#)); do
         --raw-sha256) raw_sha256="$2" ;; --lock) lock="$2" ;;
         --expect-serial) expect_serial="$2" ;; --expect-etag) expect_etag="$2" ;;
         --kernel-version) kernel_version="$2" ;; --os-releases) os_releases="$2" ;;
+        --expect-kernel-version) expect_kernel_version="$2" ;; --expect-deb-sha256) expect_deb_sha256="$2" ;;
       esac
       shift 2 ;;
     --dry-run) dry_run=1; shift ;;
@@ -55,6 +57,7 @@ done
 [[ "$mode" == refresh || ( -z "$expect_serial" && -z "$expect_etag" ) ]] || die 'expect-serial/etag only apply to refresh'
 [[ "$mode" != prune || ( -z "$channel" && "$channel_family" == 1 ) ]] || die 'prune requires --channel-family (not --channel)'
 [[ "$mode" == prune || "$channel_family" == 0 ]] || die '--channel-family only applies to prune'
+[[ "$mode" == backfill-kernel || ( -z "$expect_kernel_version" && -z "$expect_deb_sha256" ) ]] || die 'expect-kernel-version/deb-sha256 only apply to backfill-kernel'
 command -v aws >/dev/null || die 'aws CLI is required'
 command -v python3 >/dev/null || die 'python3 is required'
 command -v openssl >/dev/null || die 'openssl is required'
@@ -454,6 +457,12 @@ case "$mode" in
     [[ "$kernel_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
        -n "$os_releases" && ! -e "$os_releases" ]] || die 'kernel-floor requires a version and new output directory'
     kernel_floor_check "$kernel_version" "$os_releases"
+    ;;
+  backfill-kernel)
+    kernel_legacy_backfill
+    prefix="$(release_prefix "$version")"
+    immutable "$prefix/kernel.json" "$tmp/kernel.json" application/json
+    immutable "$prefix/kernel.json.sig" "$tmp/kernel.json.sig" application/pkcs7-signature
     ;;
   publish)
     resolve_compatible
