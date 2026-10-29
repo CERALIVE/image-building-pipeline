@@ -692,6 +692,8 @@ legacy_lock() {
   # source-built rows carry the digest under artifact.sha256 keyed by the .deb name (as the real
   # 2026.10.100 locks do); APT-origin rows carry a flat sha256. wrong-deb keys it by another file.
   case "$1" in
+    extra-key)
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb":"%s","linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb.sig":"%s"}}}]}\n' "$legacy_sha" "$other_sha" >"$legacy/packages.lock.json" ;;
     source-built|wrong-deb)
       local deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb
       [[ "$1" != wrong-deb ]] || deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive9_arm64.deb
@@ -731,6 +733,12 @@ if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfi
 else ok 'backfill refuses a kernel row whose digest is not its own .deb'; fi
 assert grep -q 'exactly its own .deb digest' "$tmp/backfill-debkey.log"
 assert test ! -e "$legacy/kernel.json"
+# The right key plus an extra one must also be refused, with nothing written (a behavioural check).
+legacy_lock extra-key
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-extrakey.log" 2>&1; then bad 'backfill accepted a kernel row with extra digest entries'
+else ok 'backfill refuses a kernel row with extra digest entries'; fi
+assert test ! -e "$legacy/kernel.json"
+assert test ! -e "$legacy/kernel.json.sig"
 legacy_lock source-built
 printf ' ' >>"$legacy/packages.lock.json"
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-sums.log" 2>&1; then bad 'backfill accepted a lock that differs from SHA256SUMS'
