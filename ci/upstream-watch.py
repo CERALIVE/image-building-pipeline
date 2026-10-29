@@ -352,7 +352,9 @@ def self_test() -> None:
                             env=os.environ | {"MODE": fields.get("mode", ""),
                                               "BOARDS": fields.get("boards", ""),
                                               "EXPECT_SERIAL": fields.get("expect_serial", ""),
-                                              "EXPECT_ETAG": fields.get("expect_etag", "")})
+                                              "EXPECT_ETAG": fields.get("expect_etag", ""),
+                                              "EXPECT_KERNEL_VERSION": "",
+                                              "EXPECT_DEB_SHA256": ""})
     assert result.returncode == 0, result.stderr.decode()
     assert fields["expect_serial"] == str(observed["serial"])
     assert fields["expect_etag"] == etag
