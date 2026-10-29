@@ -125,15 +125,18 @@ do not change the compiler/producer to satisfy a cache convention.
 
 ## 1. Bump the kernel version
 
-Bump exactly one Debian revision in `manifests/families/rk3588.yaml`:
+The first kernel-only publication advances exactly one Debian revision in
+`manifests/families/rk3588.yaml`, now prepared as:
 
 ```yaml
 kernel_source:
   package_version: 7.2.0-ceralive2
 ```
 
-Revision 1 (`7.2.0-ceralive1`) is the production pin. Keep it until you make
-this change, and never reissue an existing revision with different bytes. A new
+Revision 1 (`7.2.0-ceralive1`) identifies the existing image kernel and captured
+firmware fixture. Revision 2 is the source pin for the first kernel-only
+publication, not a publication receipt. Never reissue an existing revision with
+different bytes. A new
 upstream base changes `kernel_release`, and with it the package name
 (`linux-image-<release>-ceralive-rk3588`).
 

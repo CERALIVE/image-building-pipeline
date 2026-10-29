@@ -9,6 +9,8 @@ trap 'chmod -R u+rwX "${WORK}"; rm -rf -- "${WORK}"' EXIT
 export WORK ROOT GIT_MASTER=1
 repo="${WORK}/repo"
 kernel_test_repo "${repo}"
+# Keep the revision-1 candidate and revision-2 successor scenarios independent of the live pin.
+kernel_test_version "${repo}" 7.2.0-ceralive1
 cp "${ROOT}/.gitignore" "${repo}/"
 cp "${ROOT}/mkosi/.gitignore" "${repo}/mkosi/"
 mkdir -p "${WORK}/history" "${WORK}/os" "${WORK}/bin"

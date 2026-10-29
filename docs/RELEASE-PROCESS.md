@@ -121,8 +121,8 @@ copy the image signing key into the kernel VM. The Docker dependency archive
 uses `actions/cache` rather than a Buildx `type=gha` exporter; the runbook records
 this targeted CI-standard deviation.
 
-The production pin remains `7.2.0-ceralive1`. Revision allocation, GitHub
-settings, JIT registration, dispatch, environment approval and actual publication
+The production source pin is `7.2.0-ceralive2` for the first kernel-only publication.
+Tag creation, GitHub settings, JIT registration, dispatch, environment approval and actual publication
 are owner actions not performed by implementation/tests. PR CI runs offline
 command/bench/workflow/runner fixtures through `tests/registry.tsv`; the release
 workflow additionally runs all four native real contracts inside a fresh VM.

@@ -385,7 +385,9 @@ import pathlib
 import sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 provenance = data['provenance']
-assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == sys.argv[3:7]
+# The captured revision-1 archive stays historical; only the packaging revision advances.
+assert sys.argv[6] == '7.2.0-ceralive2'
+assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == [*sys.argv[3:6], '7.2.0-ceralive1']
 firmware = json.loads(pathlib.Path(sys.argv[7]).read_text())
 assert [provenance[key] for key in ('firmware_package', 'firmware_version', 'firmware_archive_sha256')] == [firmware[key] for key in ('package', 'version', 'archive_sha256')]
 paths = [row[0].removeprefix('kernel/') for row in data['modules']]
@@ -410,8 +412,8 @@ for entry in data['firmware']:
     if len(entry) == 2:
         (fw / entry[0]).symlink_to(entry[1])
 PY
-if [[ $? == 0 ]]; then ok 'real metadata provenance and module inventory match current pins'
-else bad 'stale real metadata fixture does not represent the current pin'; exit 1; fi
+if [[ $? == 0 ]]; then ok 'revision-1 metadata matches current source/firmware pins and the revision-2 transition'
+else bad 'stale real metadata fixture or unreviewed package revision'; exit 1; fi
 mkdir -p "${RECORDED}/root/usr/lib" "${RECORDED}/root/boot"
 cp -a "${ROOTFS}/usr/lib/ceralive" "${RECORDED}/root/usr/lib/"
 cp "${ROOTFS}/boot/vmlinuz-${R}" "${RECORDED}/root/boot/"
