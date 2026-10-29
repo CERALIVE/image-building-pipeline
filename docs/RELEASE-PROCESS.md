@@ -128,8 +128,10 @@ the normal generator rejects it. `publish-release.yml` `mode=backfill-kernel` (o
 dispatch, release environment) is the owner-attested exception: pass the exact
 `expect_kernel_version` and `expect_deb_sha256` from that release's published
 `packages.lock.json`. It verifies the lock against the release `SHA256SUMS`, refuses any
-release outside that two-entry allowlist, any APT-origin kernel and any existing sidecar,
-then signs and uploads only `kernel.json` and `kernel.json.sig`. The OTA signer signature is
+release outside that two-entry allowlist, any APT-origin kernel and an already complete
+sidecar pair, then signs and uploads only `kernel.json` and `kernel.json.sig`. A half
+published pair (an interrupted earlier run) is completed only if the surviving file is
+exactly what the attestation yields; it is never overwritten. The OTA signer signature is
 the owner's attestation. It does not run the floor, which cannot pass before the sidecars
 exist, and extending the allowlist needs a reviewed change.
 
