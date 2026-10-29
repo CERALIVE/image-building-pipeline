@@ -29,7 +29,7 @@ for mode in local workflow; do
   [[ "${code}" == 0 ]] || cat "${WORK}/${mode}.log"
   summary="$(grep '^Local kernel release contract:' "${WORK}/${mode}.log")"
   assert_eq "${mode} command contract results" \
-    'Local kernel release contract: 66 passed, 0 failed' "${summary}"
+    'Local kernel release contract: 88 passed, 0 failed' "${summary}"
   printf '%s\n' "${summary}" >"${WORK}/${mode}.results"
 done
 if cmp -s "${WORK}/local.results" "${WORK}/workflow.results"; then

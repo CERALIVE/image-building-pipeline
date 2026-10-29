@@ -222,6 +222,17 @@ refuse 'dirty source rejected' 'clean source checkout'
 # Publish refusal must not even read a repository, resolve inputs, or create output.
 mkdir "${WORK}/standalone"
 cp "${ROOT}/ci/kernel-release.py" "${WORK}/standalone/"
+mkdir "${WORK}/lib"
+cat >"${WORK}/lib/kernel_release.py" <<'PY'
+class KernelReleaseError(Exception):
+    pass
+artifact = command = version = object()
+PY
+cat >"${WORK}/lib/kernel_workflow.py" <<'PY'
+def main(argv):
+    print('approved workflow context reached the publish path')
+    return 0
+PY
 # A wedged transport must be unreachable from the local publish refusal.
 export KERNEL_CLI_HANG_FIFO="${WORK}/gh-hang"
 mkfifo "${KERNEL_CLI_HANG_FIFO}"
@@ -240,25 +251,55 @@ for args in none with-inputs; do
   done
   [[ ! -e "${WORK}/never-created-${args}" ]] && ok 'publish touches no output' || bad 'publish created output'
 done
-for context in partial wrong; do
-  code=0
-  (
-    source "${ROOT}/tests/lib/clear-workflow-env.sh"
-    export GITHUB_ACTIONS=true
-    if [[ "${context}" == wrong ]]; then
-      export GITHUB_REPOSITORY=CERALIVE/image-building-pipeline
-      export GITHUB_WORKFLOW_REF=CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master
-      export GITHUB_REF=refs/heads/untrusted GITHUB_RUN_ATTEMPT=1 GITHUB_EVENT_NAME=workflow_dispatch
+# The approved context must reach the publish path; each guarded variable must gate it alone.
+guarded=(GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_WORKFLOW_REF GITHUB_REF GITHUB_RUN_ATTEMPT GITHUB_EVENT_NAME)
+approved=(
+  GITHUB_ACTIONS=true
+  GITHUB_REPOSITORY=CERALIVE/image-building-pipeline
+  GITHUB_WORKFLOW_REF=CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master
+  GITHUB_REF=refs/heads/master
+  GITHUB_RUN_ATTEMPT=1
+  GITHUB_EVENT_NAME=workflow_dispatch
+)
+altered=(
+  GITHUB_ACTIONS=false
+  GITHUB_REPOSITORY=someone/image-building-pipeline
+  GITHUB_WORKFLOW_REF=CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/other
+  GITHUB_REF=refs/heads/other
+  GITHUB_RUN_ATTEMPT=2
+  GITHUB_EVENT_NAME=push
+)
+code=0
+(
+  source "${ROOT}/tests/lib/clear-workflow-env.sh"
+  export "${approved[@]}"
+  timeout --kill-after=2 10 python3 "${WORK}/standalone/kernel-release.py" --publish
+) >"${WORK}/approved-error" 2>&1 || code=$?
+assert_eq 'approved workflow context exits through the publish path' 0 "${code}"
+assert_eq 'approved workflow context is not refused by the publication guard' \
+  'approved workflow context reached the publish path' "$(<"${WORK}/approved-error")"
+for index in "${!guarded[@]}"; do
+  name="${guarded[index]}"
+  for mutation in unset altered; do
+    code=0
+    (
+      source "${ROOT}/tests/lib/clear-workflow-env.sh"
+      export "${approved[@]}"
+      if [[ "${mutation}" == unset ]]; then
+        unset "${name}"
+      else
+        export "${altered[index]}"
+      fi
+      timeout --kill-after=2 10 python3 "${WORK}/standalone/kernel-release.py" --publish
+    ) >"${WORK}/context-error" 2>&1 || code=$?
+    assert_eq "${name} ${mutation} exits at the publication guard" 1 "${code}"
+    if cmp -s "${WORK}/publish-error" "${WORK}/context-error"; then
+      ok "${name} ${mutation} gives the exact local publication refusal"
+    else
+      bad "${name} ${mutation} gave a different refusal"
+      cat "${WORK}/context-error"
     fi
-    timeout --kill-after=2 10 python3 "${WORK}/standalone/kernel-release.py" --publish
-  ) >"${WORK}/context-error" 2>&1 || code=$?
-  assert_eq "${context} workflow context exits at the publication guard" 1 "${code}"
-  if cmp -s "${WORK}/publish-error" "${WORK}/context-error"; then
-    ok "${context} workflow context gives the exact local publication refusal"
-  else
-    bad "${context} workflow context gave a different refusal"
-    cat "${WORK}/context-error"
-  fi
+  done
 done
 [[ ! -e "${KERNEL_CLI_NETWORK}" ]] && ok 'every test completed without network tools' || bad 'network boundary reached'
 [[ ! -e "${WORK}/standalone/__pycache__" ]] && ok 'publish creates no bytecode cache' || bad 'publish wrote bytecode'
