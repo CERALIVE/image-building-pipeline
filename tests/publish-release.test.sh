@@ -705,9 +705,14 @@ assert grep -q 'owner-attested version and digest' "$tmp/backfill-digest.log"
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive2 "$legacy_sha" >"$tmp/backfill-version.log" 2>&1; then bad 'backfill accepted an unattested kernel version'
 else ok 'backfill refuses an unattested kernel version'; fi
 assert grep -q 'owner-attested version and digest' "$tmp/backfill-version.log"
-if backfill rock-5b-plus 2026.10.1 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-scope.log" 2>&1; then bad 'backfill accepted a release outside the allowlist'
-else ok 'backfill refuses releases outside the pre-sidecar allowlist'; fi
+unlisted="$tmp/objects/releases/rock-5b-plus/2026.10.101"
+mkdir -p "$unlisted"
+cp -- "$legacy/packages.lock.json" "$legacy/SHA256SUMS" "$unlisted/"
+if backfill rock-5b-plus 2026.10.101 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-scope.log" 2>&1; then bad 'backfill accepted a release outside the allowlist'
+else ok 'backfill refuses an otherwise valid release outside the pre-sidecar allowlist'; fi
 assert grep -q 'covers only the named pre-sidecar releases' "$tmp/backfill-scope.log"
+assert test ! -e "$unlisted/kernel.json"
+assert test ! -e "$unlisted/kernel.json.sig"
 legacy_lock ceralive-kernel
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-origin.log" 2>&1; then bad 'backfill accepted an APT-origin kernel'
 else ok 'backfill refuses an APT-origin kernel (normal path only)'; fi
@@ -733,6 +738,29 @@ check openssl cms -verify -binary -inform DER -in "$legacy/kernel.json.sig" \
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-again.log" 2>&1; then bad 'backfill overwrote a published sidecar'
 else ok 'backfill refuses to touch an already published sidecar'; fi
 assert grep -q 'kernel sidecar already published' "$tmp/backfill-again.log"
+# An interrupted run leaves one half; a retry may only complete it with the exact attested bytes.
+cp -- "$legacy/kernel.json" "$tmp/kernel.good.json"
+cms_ok() { openssl cms -verify -binary -inform DER -in "$legacy/kernel.json.sig" -content "$legacy/kernel.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1; }
+rm -f "$legacy/kernel.json.sig"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha"
+assert cmp -s "$legacy/kernel.json" "$tmp/kernel.good.json"
+check cms_ok
+cp -- "$legacy/kernel.json.sig" "$tmp/kernel.good.sig"
+rm -f "$legacy/kernel.json"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha"
+assert cmp -s "$legacy/kernel.json" "$tmp/kernel.good.json"
+assert cmp -s "$legacy/kernel.json.sig" "$tmp/kernel.good.sig"
+check cms_ok
+printf '{}\n' >"$legacy/kernel.json"; rm -f "$legacy/kernel.json.sig"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-half-json.log" 2>&1; then bad 'backfill completed a half whose JSON differs from the attestation'
+else ok 'backfill refuses a half-published sidecar that differs from the attestation'; fi
+assert grep -q 'differs from the attested identity' "$tmp/backfill-half-json.log"
+assert test ! -e "$legacy/kernel.json.sig"
+rm -f "$legacy/kernel.json"; printf 'not-a-signature' >"$legacy/kernel.json.sig"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-half-sig.log" 2>&1; then bad 'backfill completed a half whose signature does not verify'
+else ok 'backfill refuses a half-published signature that does not verify'; fi
+assert grep -q 'does not verify' "$tmp/backfill-half-sig.log"
+assert test ! -e "$legacy/kernel.json"
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"

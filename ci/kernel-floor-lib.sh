@@ -96,14 +96,11 @@ kernel_legacy_backfill() {
   [[ "${expect_kernel_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
      "${expect_deb_sha256}" =~ ^[0-9a-f]{64}$ ]] \
     || die "backfill-kernel requires --expect-kernel-version and --expect-deb-sha256"
-  local prefix
+  local prefix have_json=0 have_sig=0
   prefix="$(release_prefix "${version}")"
-  if read_key "${prefix}/kernel.json" "${tmp}/existing-kernel.json"; then
-    die "kernel sidecar already published: ${prefix}"
-  fi
-  if read_key "${prefix}/kernel.json.sig" "${tmp}/existing-kernel.sig"; then
-    die "kernel signature already published: ${prefix}"
-  fi
+  if read_key "${prefix}/kernel.json" "${tmp}/existing-kernel.json"; then have_json=1; fi
+  if read_key "${prefix}/kernel.json.sig" "${tmp}/existing-kernel.sig"; then have_sig=1; fi
+  [[ "${have_json}${have_sig}" != 11 ]] || die "kernel sidecar already published: ${prefix}"
   read_key "${prefix}/packages.lock.json" "${tmp}/packages.lock.json" || die "release package lock absent: ${prefix}"
   read_key "${prefix}/SHA256SUMS" "${tmp}/SHA256SUMS" || die "release checksum list absent: ${prefix}"
   python3 - "${tmp}/packages.lock.json" "${tmp}/SHA256SUMS" "${board}" "${version}" \
@@ -128,7 +125,18 @@ with open(out, 'w') as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + '\n')
 PY
   kernel_sidecar_check "${tmp}/kernel.json" "${version}" >/dev/null || die "invalid legacy kernel sidecar"
-  if [[ "${dry_run}" != 1 ]]; then
+  # An interrupted run leaves one half; a retry completes it only if that half is exactly what
+  # this attestation yields, and never overwrites it.
+  if [[ "${have_json}" == 1 ]]; then
+    cmp -s "${tmp}/existing-kernel.json" "${tmp}/kernel.json" \
+      || die "published kernel sidecar differs from the attested identity: ${prefix}"
+  fi
+  if [[ "${have_sig}" == 1 && "${dry_run}" != 1 ]]; then
+    verify_cms "${tmp}/kernel.json" "${tmp}/existing-kernel.sig" \
+      || die "published kernel signature does not verify: ${prefix}"
+    cp -- "${tmp}/existing-kernel.sig" "${tmp}/kernel.json.sig"
+  fi
+  if [[ "${dry_run}" != 1 && "${have_sig}" == 0 ]]; then
     signer_check
     openssl cms -sign -binary -noattr -in "${tmp}/kernel.json" \
       -signer "${OTA_MANIFEST_SIGNER_DIR}/leaf.pem" -inkey "${OTA_MANIFEST_SIGNER_DIR}/leaf.key" \
