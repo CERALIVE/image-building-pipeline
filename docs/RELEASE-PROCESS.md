@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.10.0's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.10.1's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -246,15 +246,16 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects the subsequent stable CeraUI **v2026.10.0** release
-(tag commit `7c076c1`), published 2026-10-24T03:42:10Z. The exact Debian versions
-are `2026.10.0-20261024T034043.7c076c1` (arm64) and
-`2026.10.0-20261024T034041.7c076c1` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.10.0`. Both asset control fields and SHA-256 sidecars agree
-with the authenticated publisher's served-release proof; both bench boards
-installed the released arm64 package through the product. The mTLS-protected APT
-index was not read directly during this pin update. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-10-24) for the
+The current image pin selects stable CeraUI **v2026.10.1**
+(tag commit `81c16be0a0ff842ab73c6ef8d175c411b746a964`), published
+2026-10-29T06:43:44Z. The exact Debian versions are
+`2026.10.1-20261029T064207.81c16be` (arm64) and
+`2026.10.1-20261029T064208.81c16be` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.10.1`. Both asset control fields and SHA-256 sidecars agree
+with the authenticated publisher's served-release proof and signed-index health
+checks. Direct requests to the mTLS-protected APT index returned HTTP 403;
+no installation or hardware check was performed for this pin. See the
+[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-10-29) for the
 authorized serving evidence. Pinning is not image qualification or OS stable/beta
 authorization; OS 2026.10.97 remains private-drill only and channel pointers are
 unchanged.

@@ -829,14 +829,14 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.10.0 (tag commit `7c076c1`) using its exact
-per-architecture Debian versions, `2026.10.0-20261024T034041.7c076c1` (amd64) and
-`2026.10.0-20261024T034043.7c076c1` (arm64). It retains the unified device update
-orchestrator and includes the released update-system fixes. Both downloaded Debian
+CeraUI is pinned to stable release v2026.10.1 (tag commit `81c16be`) using its exact
+per-architecture Debian versions, `2026.10.1-20261029T064208.81c16be` (amd64) and
+`2026.10.1-20261029T064207.81c16be` (arm64). It retains the unified device update
+orchestrator. Both downloaded Debian
 assets matched their published SHA-256 sidecars and the authenticated publisher's
-served-release proof. Both bench boards installed the released arm64 package
-through the product; amd64 has serving and artifact proof only. See the
-[CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-10-24).
+served-release proof and signed-index health checks. Direct index requests returned
+HTTP 403; neither architecture was installed or tested on hardware for this pin.
+See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-10-29).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -1201,7 +1201,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.10.0 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.10.1 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images

@@ -379,7 +379,7 @@ journalctl -u ceralive-healthcheck.service -n 30
 
 ### 6.4 Updates after first boot [PARTIAL]
 
-The image pins stable CeraUI v2026.10.0, whose update orchestrator handles both
+The image pins stable CeraUI v2026.10.1, whose update orchestrator handles both
 APT packages and RAUC OS updates when the image advertises the required
 capabilities. Use CeraUI for discovery and installation; there is no separate
 first-boot OS downloader or required manual `ceralive-update` invocation.
