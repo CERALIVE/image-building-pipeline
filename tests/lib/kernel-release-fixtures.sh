@@ -3,6 +3,9 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016,SC2154
 
+# Keep local fixtures independent of the job hosting the contract suite.
+source "$(dirname "${BASH_SOURCE[0]}")/clear-workflow-env.sh"
+
 kernel_test_repo() {
   local dest="$1"
   mkdir -p "${dest}"

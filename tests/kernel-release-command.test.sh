@@ -222,7 +222,7 @@ refuse 'dirty source rejected' 'clean source checkout'
 # Publish refusal must not even read a repository, resolve inputs, or create output.
 mkdir "${WORK}/standalone"
 cp "${ROOT}/ci/kernel-release.py" "${WORK}/standalone/"
-# A wedged transport must be unreachable from the unconditional publish refusal.
+# A wedged transport must be unreachable from the local publish refusal.
 export KERNEL_CLI_HANG_FIFO="${WORK}/gh-hang"
 mkfifo "${KERNEL_CLI_HANG_FIFO}"
 printf '#!/usr/bin/env bash\nprintf "called\\n" >>"$KERNEL_CLI_NETWORK"\nIFS= read -r _ <"$KERNEL_CLI_HANG_FIFO"\n' >"${WORK}/bin/gh"
@@ -239,6 +239,26 @@ for args in none with-inputs; do
     grep -Fq "${token}" "${WORK}/publish-error" || bad "missing publication decision: ${token}"
   done
   [[ ! -e "${WORK}/never-created-${args}" ]] && ok 'publish touches no output' || bad 'publish created output'
+done
+for context in partial wrong; do
+  code=0
+  (
+    source "${ROOT}/tests/lib/clear-workflow-env.sh"
+    export GITHUB_ACTIONS=true
+    if [[ "${context}" == wrong ]]; then
+      export GITHUB_REPOSITORY=CERALIVE/image-building-pipeline
+      export GITHUB_WORKFLOW_REF=CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master
+      export GITHUB_REF=refs/heads/untrusted GITHUB_RUN_ATTEMPT=1 GITHUB_EVENT_NAME=workflow_dispatch
+    fi
+    timeout --kill-after=2 10 python3 "${WORK}/standalone/kernel-release.py" --publish
+  ) >"${WORK}/context-error" 2>&1 || code=$?
+  assert_eq "${context} workflow context exits at the publication guard" 1 "${code}"
+  if cmp -s "${WORK}/publish-error" "${WORK}/context-error"; then
+    ok "${context} workflow context gives the exact local publication refusal"
+  else
+    bad "${context} workflow context gave a different refusal"
+    cat "${WORK}/context-error"
+  fi
 done
 [[ ! -e "${KERNEL_CLI_NETWORK}" ]] && ok 'every test completed without network tools' || bad 'network boundary reached'
 [[ ! -e "${WORK}/standalone/__pycache__" ]] && ok 'publish creates no bytecode cache' || bad 'publish wrote bytecode'
