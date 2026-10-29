@@ -113,9 +113,18 @@ CeraUI:
   # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
   # v2026.9.5: unified device update orchestrator, validated on both bench boards.
   # v2026.10.0: released update-system fixes; package installation is not image qualification.
-  pin: v2026.10.0
-  # Device deb: ceralive-device 2026.10.0-20261024T034041.7c076c1 (amd64) /
-  #   2026.10.0-20261024T034043.7c076c1 (arm64); see first-party-deb-versions.txt.
+  pin: v2026.10.1
+  # Device deb: ceralive-device 2026.10.1-20261029T064208.81c16be (amd64) /
+  #   2026.10.1-20261029T064207.81c16be (arm64); see first-party-deb-versions.txt.
+  # Tag commit: 81c16be0a0ff842ab73c6ef8d175c411b746a964.
+  # Authenticated release downloads independently matched their SHA-256 sidecars:
+  #   amd64 30443d551e80b3d75c30f77684a5b3309b6767b5427f765c95534c5f91251657,
+  #   arm64 b90d912e2bff4ff97358e5a3f4364f3d25ca64ebb28ae3cd441aa5515ffc0f5b.
+  # APT reindex run 40830981528 verified the same served bytes on stable and passed
+  # both signed-index health checks. Direct index reads returned HTTP 403 (mTLS);
+  # this receipt uses the publisher logs, not a local signature or hardware check.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.10.1
+  # Serving proof: https://github.com/CERALIVE/apt-worker/actions/runs/40830981528
   # Historical receipt for 2026.9.3 follows (not the active artifact):
   #   2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded
