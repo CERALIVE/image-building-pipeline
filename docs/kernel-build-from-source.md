@@ -460,9 +460,8 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-This lane PR leaves the production pin at `7.2.0-ceralive1`. Before producing a
-release candidate, the release owner must bump it to `7.2.0-ceralive2`;
-revision 1 must never be reissued with changed bytes.
+The production source pin is `7.2.0-ceralive2` for the first kernel-only release
+candidate; revision 1 must never be reissued with changed bytes.
 The family fingerprint excludes DTB paths and local container image IDs, but
 includes Dockerfile bytes, base digest, sorted package/version/architecture
 closure, compiler version, kernel scripts, config fragments and closure gates.
@@ -488,8 +487,9 @@ all-module compatibility allowlist.
 
 `tests/fixtures/kernel-firmware-v7.2.json` contains all 990 real module metadata
 records, built-in dependencies, and the pinned archive's 7,653 file/link names
-and targets, not payload blobs. Its provenance is checked against the current
-source, patch, package-version and firmware pins. The regression reconstructs
+and targets, not payload blobs. Its revision-1 archive provenance is preserved;
+the regression checks the current source, patch and firmware pins and explicitly
+binds the packaging-only revision-2 transition. It reconstructs
 that namespace, checks the image-equivalent closure and removes required
 Bluetooth payloads to prove the gate still rejects them.
 The build-inventory checksum includes both source-tree module paths and
@@ -869,7 +869,7 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The production pin stays `7.2.0-ceralive1` until the release owner advances it.
+The production source pin is `7.2.0-ceralive2`; publication remains owner-gated.
 
 Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.

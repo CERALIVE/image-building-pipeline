@@ -12,7 +12,7 @@ export ROOT WORK
 ok 'all production fingerprint inputs and the coverage function equal stack 9b89e6f'
 
 kernel_test_repo "${WORK}/repo"
-kernel_test_artifact "${WORK}/artifact" 7.2.0-ceralive1 "${WORK}/repo"
+kernel_test_artifact "${WORK}/artifact" 7.2.0-ceralive2 "${WORK}/repo"
 expected="$(jq -r .input_fingerprint "${WORK}/artifact/kernel-artifact.json")"
 fingerprint() (
   set -a
