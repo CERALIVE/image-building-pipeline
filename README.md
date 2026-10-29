@@ -17,10 +17,11 @@ A build pipeline for creating ready-to-use images for ARM-based streaming device
 targeting Rockchip RK3588 devices (Orange Pi 5+, Radxa Rock 5B+) with future
 support for Intel N100/N200 and AMD platforms.
 
-The [local kernel-release command](docs/RELEASE-PROCESS.md#local-kernel-candidates-partial)
-builds and gates immutable family candidates without an OS image [PARTIAL].
-Its publish flag refuses until the owner resolves apt-worker authorization; it
-does not create a Release, dispatch a workflow, sign an APT index or change pins.
+The [kernel release lane](docs/kernel-release.md) builds immutable family
+candidates in single-job KVM runners on the owner's workstation [PARTIAL:
+GitHub settings and actual publication remain owner actions]. The approved
+workflow creates the identity Release, then dispatches apt-worker only with a
+matching bench report and immutable publication authorization.
 
 > Status: Alpha — interfaces and docs may evolve. Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md).
 

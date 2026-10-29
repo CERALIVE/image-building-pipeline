@@ -1,0 +1,238 @@
+name: Kernel release
+
+on:
+  push:
+    tags: ['kernel/v*']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build a candidate, create its immutable Release, or authorize APT
+        type: choice
+        options: [candidate, release, apt-publish]
+        required: true
+      tag:
+        description: Existing kernel/vVERSION tag at this exact master commit
+        type: string
+        required: true
+      candidate_run_id:
+        description: Successful candidate dispatch on this exact master/tag commit
+        type: string
+        required: false
+      channel:
+        description: APT channel (release identity is channel independent)
+        type: choice
+        options: [beta, stable]
+        required: true
+        default: beta
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: kernel-pip-${{ runner.os }}-${{ hashFiles('ci/requirements-ci.txt') }}
+      - name: Install validators
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+          pip install --quiet --requirement ci/requirements-ci.txt
+      - name: Gate exact source without path exclusions
+        run: |
+          mapfile -t files < <(git ls-files '**/*.sh' build dev-push run-tests)
+          shellcheck --severity=warning -x "${files[@]}"
+          ci/check-suite-literals.sh --self-test
+          ci/check-suite-literals.sh
+          python3 ci/check-first-party-pins.py
+          python3 ci/validate-manifests.py
+
+  tests:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    needs: lint
+    runs-on:
+      group: kernel-release
+      labels: ceralive-kernel-vm
+    environment: kernel-release
+    timeout-minutes: 90
+    steps:
+      - name: Refuse immutable run retries
+        run: test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: kernel-pip-${{ runner.os }}-${{ hashFiles('ci/requirements-ci.txt') }}
+      - name: Full native suite with all four required real contracts
+        run: bash ci/kernel-runner/ci-tests.sh
+
+  candidate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.mode == 'candidate'
+    needs: [lint, tests]
+    runs-on:
+      group: kernel-release
+      labels: ceralive-kernel-vm
+    environment: kernel-release
+    timeout-minutes: 360
+    env:
+      KERNEL_RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.KERNEL_FLOOR_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.KERNEL_FLOOR_R2_SECRET_ACCESS_KEY }}
+      R2_IMAGES_ENDPOINT: ${{ secrets.R2_IMAGES_ENDPOINT }}
+      OTA_MANIFEST_ROOT_CA_B64: ${{ vars.OTA_MANIFEST_ROOT_CA_B64 }}
+    steps:
+      - name: Refuse immutable run retries
+        run: test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert pristine generated paths
+        run: |
+          for path in mkosi/build mkosi/cache .mkosi-workspace; do test ! -e "$path"; done
+          test -z "$(git status --porcelain)"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/pip
+            mkosi/cache
+            ${{ runner.temp }}/kernel-builder.tar
+          key: kernel-builder-${{ runner.os }}-${{ hashFiles('ci/Dockerfile.kernel', 'manifests/families/rk3588.yaml') }}
+      - name: Restore Docker dependency layers
+        run: |
+          if test -f "$RUNNER_TEMP/kernel-builder.tar"; then docker load -i "$RUNNER_TEMP/kernel-builder.tar"; fi
+          python3 -m venv "$RUNNER_TEMP/python"
+          echo "$RUNNER_TEMP/python/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/python/bin/pip" install --quiet --requirement ci/requirements-ci.txt
+      - name: Authenticate current OS kernel floor
+        run: |
+          eval "$(bash lib/resolve.sh rock-5b-plus)"
+          test "$KERNEL_RELEASE_TAG" = "kernel/v$KERNEL_SOURCE_PACKAGE_VERSION"
+          test "$(git rev-list -n 1 "$KERNEL_RELEASE_TAG")" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/trust"
+          printf '%s' "$OTA_MANIFEST_ROOT_CA_B64" | base64 -d >"$RUNNER_TEMP/trust/root-ca.pem"
+          OTA_MANIFEST_SIGNER_DIR="$RUNNER_TEMP/trust" bash ci/publish-release.sh kernel-floor \
+            --kernel-version "$KERNEL_SOURCE_PACKAGE_VERSION" --os-releases "$RUNNER_TEMP/os-history"
+          echo "KERNEL_VERSION=$KERNEL_SOURCE_PACKAGE_VERSION" >>"$GITHUB_ENV"
+      - name: Build and seal the immutable family candidate
+        run: |
+          python3 ci/kernel-release.py rk3588 --candidate-run-id "$GITHUB_RUN_ID" \
+            --channel "${CHANNEL}" --os-releases "$RUNNER_TEMP/os-history"
+        env:
+          CHANNEL: ${{ inputs.channel }}
+      - name: Save Docker dependency layers
+        run: |
+          mapfile -t images < <(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^ceralive-kernel-builder:')
+          ((${#images[@]} > 0))
+          docker save -o "$RUNNER_TEMP/kernel-builder.tar" "${images[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel-candidate-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            mkosi/build/kernel-releases/${{ env.KERNEL_VERSION }}/*.deb
+            mkosi/build/kernel-releases/${{ env.KERNEL_VERSION }}/kernel-artifact.json
+            mkosi/build/kernel-releases/${{ env.KERNEL_VERSION }}/resolved.config
+            mkosi/build/kernel-releases/${{ env.KERNEL_VERSION }}/built-modules.txt
+            mkosi/build/kernel-releases/${{ env.KERNEL_VERSION }}/SHA256SUMS
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.mode != 'candidate'
+    needs: [lint, tests]
+    runs-on:
+      group: kernel-release
+      labels: ceralive-kernel-vm
+    environment: kernel-release
+    concurrency:
+      group: ceralive-kernel-floor
+      cancel-in-progress: false
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+    env:
+      KERNEL_RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.KERNEL_FLOOR_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.KERNEL_FLOOR_R2_SECRET_ACCESS_KEY }}
+      R2_IMAGES_ENDPOINT: ${{ secrets.R2_IMAGES_ENDPOINT }}
+      OTA_MANIFEST_ROOT_CA_B64: ${{ vars.OTA_MANIFEST_ROOT_CA_B64 }}
+      CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Refuse immutable run retries
+        run: test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install validators
+        run: |
+          python3 -m venv "$RUNNER_TEMP/python"
+          echo "$RUNNER_TEMP/python/bin" >>"$GITHUB_PATH"
+          "$RUNNER_TEMP/python/bin/pip" install --quiet --requirement ci/requirements-ci.txt
+      - name: Authenticate floor inside shared publication exclusion
+        run: |
+          eval "$(bash lib/resolve.sh rock-5b-plus)"
+          test "$KERNEL_RELEASE_TAG" = "kernel/v$KERNEL_SOURCE_PACKAGE_VERSION"
+          test "$(git rev-list -n 1 "$KERNEL_RELEASE_TAG")" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/trust"
+          printf '%s' "$OTA_MANIFEST_ROOT_CA_B64" | base64 -d >"$RUNNER_TEMP/trust/root-ca.pem"
+          OTA_MANIFEST_SIGNER_DIR="$RUNNER_TEMP/trust" bash ci/publish-release.sh kernel-floor \
+            --kernel-version "$KERNEL_SOURCE_PACKAGE_VERSION" --os-releases "$RUNNER_TEMP/os-history"
+      - name: Resolve current publication job ID
+        run: |
+          job="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name == "publish" and .status == "in_progress") | .id')"
+          [[ "$job" =~ ^[1-9][0-9]*$ ]]
+          echo "KERNEL_PUBLISH_JOB_ID=$job" >>"$GITHUB_ENV"
+      - name: Create identity Release without APT or bench gate
+        if: inputs.mode == 'release'
+        run: |
+          python3 ci/kernel-release.py --publish release --candidate-run-id "$CANDIDATE_RUN" \
+            --channel "$CHANNEL" --os-releases "$RUNNER_TEMP/os-history" \
+            --authorization "$RUNNER_TEMP/publish-authorization.json"
+      - name: Bind bench proof to this approved APT publication
+        if: inputs.mode == 'apt-publish'
+        run: |
+          python3 ci/kernel-release.py --publish authorize --candidate-run-id "$CANDIDATE_RUN" \
+            --channel "$CHANNEL" --os-releases "$RUNNER_TEMP/os-history" \
+            --authorization "$RUNNER_TEMP/publish-authorization.json"
+      - uses: actions/upload-artifact@v7
+        if: inputs.mode == 'apt-publish'
+        with:
+          name: publish-authorization
+          if-no-files-found: error
+          path: ${{ runner.temp }}/publish-authorization.json
+      - name: Verify uploaded authorization then dispatch sole publisher
+        if: inputs.mode == 'apt-publish'
+        env:
+          CERALIVE_DISPATCH_TOKEN: ${{ secrets.CERALIVE_DISPATCH_TOKEN }}
+        run: |
+          python3 ci/kernel-release.py --publish dispatch --candidate-run-id "$CANDIDATE_RUN" \
+            --channel "$CHANNEL" --os-releases "$RUNNER_TEMP/os-history" \
+            --authorization "$RUNNER_TEMP/publish-authorization.json"

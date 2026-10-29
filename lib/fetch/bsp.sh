@@ -213,7 +213,9 @@ _fetch_bsp_native() {
   _APT_OPTS=("${apt_opts[@]}")
   _BSP_APT_INDEX=""
   if [[ -z "${DRY_RUN}" ]]; then
-    _BSP_APT_INDEX="$(debcache_apt_index "${apt_state}")"
+    _BSP_APT_INDEX="$(debcache_apt_index "${apt_state}" "${ARCH}")"
+    [[ -s "${_BSP_APT_INDEX}" ]] \
+      || die "BSP signed index requires exactly one ${ARCH} Packages file"
     bsp_assert_firmware_content "${_BSP_APT_INDEX}" "${bsp_pkgs[@]}" \
       || die "BSP firmware archive content pin rejected native signed index"
   fi

@@ -1187,6 +1187,43 @@ YAML
   [ "$status" -ne 0 ]
 }
 
+@test "build-kernel: the builder apt closure is pinned to ONE Debian snapshot, not a rolling mirror" {
+  # A digest-pinned base image does not fix the apt closure: `apt-get install`
+  # against deb.debian.org resolves to whatever is current, so a rebuild after a
+  # point release changes builder_packages -> input_fingerprint ->
+  # kernel-artifact.json while the compiled kernel stays byte-identical. The
+  # frozen producer fixture pins this file's digest, so the timestamp below is
+  # reviewed along with every other kernel input.
+  local df="$PIPELINE_DIR/ci/Dockerfile.kernel"
+  grep -Fq 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260925T000000Z/ trixie main' "$df"
+  grep -Fq 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260925T000000Z/ trixie-updates main' "$df"
+  grep -Fq 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260925T000000Z/ trixie-security main' "$df"
+  # The expired Valid-Until exception belongs to these three sources ONLY: a
+  # global apt.conf would leak the bypass into every later apt use in the image.
+  run grep -F 'Acquire::Check-Valid-Until "false"' "$df"
+  [ "$status" -ne 0 ]
+  run grep -F '/etc/apt/apt.conf.d/99ceralive-snapshot' "$df"
+  [ "$status" -ne 0 ]
+  # The rolling mirror may not survive as an INSTALLED SOURCE (the header
+  # comment names it on purpose; an uncommented source line would defeat the pin).
+  run grep -Eq '^[[:space:]]*deb .*deb\.debian\.org' "$df"
+  [ "$status" -ne 0 ]
+  # The pin must be written BEFORE the update that reads it.
+  local pin_line update_line
+  pin_line="$(grep -n 'snapshot.debian.org/archive/debian/20260925T000000Z/ trixie main' "$df" | head -1 | cut -d: -f1)"
+  update_line="$(grep -n 'apt-get update' "$df" | head -1 | cut -d: -f1)"
+  [ -n "$pin_line" ]
+  [ -n "$update_line" ]
+  [ "$pin_line" -lt "$update_line" ]
+
+  # MUTATION: the same file with the pin stripped (the pre-pin shape) must fail
+  # these assertions. The copy is in BATS_TEST_TMPDIR, never the repo.
+  local mutated="$BATS_TEST_TMPDIR/Dockerfile.kernel.unpinned"
+  sed -e '/snapshot\.debian\.org/d' "$df" >"$mutated"
+  run bash -c 'grep -Fq "snapshot.debian.org/archive/debian/20260925T000000Z/ trixie main" "$1" && grep -Fq "trixie-security main" "$1"' _ "$mutated"
+  [ "$status" -ne 0 ]
+}
+
 @test "platform DTB mapping: no-op with an empty mapping, fail-loud when half-specified" {
   local postinst="$PIPELINE_DIR/mkosi/runtime/ceralive-kernel-boot-staging.sh"
   local fn

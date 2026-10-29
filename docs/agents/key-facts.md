@@ -2,12 +2,14 @@
 
 ## KEY FACTS
 
-**Local kernel candidates [PARTIAL].** `ci/kernel-release.py` calls the existing
-family-only builder, metadata/fingerprint and version/floor gates, then creates
-one immutable local bundle per version. `--publish` refuses before any work;
-no producer workflow or publisher bypass exists. See
-[the local command contract](../RELEASE-PROCESS.md#local-kernel-candidates-partial)
-for the exact inputs, unavailable authorization fields and pending owner decision.
+**Kernel releases [PARTIAL: owner settings/publication pending].**
+`ci/kernel-release.py` retains the immutable local candidate engine. Its
+`--publish` adapter requires the exact master workflow, first attempt, approved
+`kernel-release` deployment, live shared floor lease and matching completed
+candidate provenance. `ci/kernel-runner/vm.py` boots one pristine KVM overlay per
+job, with host-only JIT registration and RAM-only credential handoff; no host
+directory shares or host credentials enter the guest. See
+[the runbook](../kernel-release.md) for exact settings, start/stop and release steps.
 
 **Immutable kernel reuse and OS downgrade floors [EXISTS].** Production kernel
 image bytes come only from authenticated apt.ceralive.tv; release metadata
@@ -2140,10 +2142,23 @@ occurrence of each of those `make` calls in the file.
   `set -o pipefail` turned that into failure. **An empty "DTBs actually present"
   list in that error means the listing is broken, not that the DTB is missing.**
 - **The `edge` `.deb` is NOT byte-reproducible** — `git am` restamps committer dates,
-  so post-`am` SHAs differ per run. Content is stable (two builds agreed on package
   versions, rootfs file lists and `/boot/config-*`); archive bytes are not. This is
   precisely why `CONFIG_LOCALVERSION_AUTO=n` plus the exact `kernelrelease` assertion
   matter — without them the package NAME inherits that nondeterminism.
+- **The builder APT CLOSURE is pinned to one Debian snapshot timestamp**
+  (`20260925T000000Z`: `trixie`, `trixie-updates`, `trixie-security`, each source
+  carrying its own `check-valid-until=no` — no global apt.conf bypass) in
+  `ci/Dockerfile.kernel`, because those package
+  versions are an INPUT: `kernel_input_fingerprint` hashes the image's
+  `dpkg-query -W`. Without the pin, rebuilding the image after any Debian point
+  release changed `builder_packages` -> `input_fingerprint` ->
+  `kernel-artifact.json` -> `SHA256SUMS` while the compiled `.deb` stayed
+  byte-identical, and `released.sh:50` would have refused to reuse a released
+  kernel for a fingerprint that moved under an unchanged toolchain. The
+  timestamp is a literal (not an ARG, so a build cannot override it) and the
+  file's digest is frozen in `tests/fixtures/kernel-producer.sha256`;
+  `variant-contract.bats` asserts the pin precedes `apt-get update`, that no
+  `deb.debian.org` source survives, and that stripping the pin fails.
 - **D3's KERNEL half is now answered, and its other half is untouched.** The
   shipped kernel is the mainline source-built track (`default_variant: edge`);
   `rauc_bootloader_adapter: custom` is unchanged and still locked. See

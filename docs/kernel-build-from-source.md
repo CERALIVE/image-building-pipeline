@@ -442,6 +442,11 @@ in that family, including resolved variant DTB overrides. It runs shared boot
 staging with `--no-initrd`, the root-directory boot verifier with `--skip-initrd`,
 and the read-only firmware check against the extracted, authenticated pinned
 firmware archive. Initrd generation remains a device/image install gate.
+Native APT firmware fetches select exactly one target-architecture Packages
+index before applying the unchanged archive content pin; APT's separate
+`binary-all` index is not a substitute. Missing or ambiguous target indexes
+fail before any package download. Non-Debian hosts use the authenticated curl
+transport against the same live target-architecture index.
 No image, RAUC bundle or release is produced. `--release` runs the production
 variant guard; the debug kernel cannot pass it.
 
@@ -496,7 +501,15 @@ The build-inventory checksum includes both source-tree module paths and
 pinned source, applies the series with `git am`, merges the defconfig fragment,
 and runs `make bindeb-pkg` — all inside the digest-pinned builder container
 (`ci/Dockerfile.kernel`), cross-compiling with `aarch64-linux-gnu-` and a
-persistent `ccache`.
+persistent `ccache`. The container's APT CLOSURE is pinned too: the image sources
+are replaced with one Debian snapshot timestamp (`20260925T000000Z` for `trixie`,
+`trixie-updates` and `trixie-security`, each carrying its own
+`check-valid-until=no`; there is no global apt.conf bypass) before
+`apt-get update`, so a rebuild cannot pick up a later point release behind the
+same Dockerfile digest. That closure is an input — `kernel_input_fingerprint`
+hashes `dpkg-query -W` of the image — and the file's digest is frozen in
+`tests/fixtures/kernel-producer.sha256`, so moving the timestamp is a reviewed
+change.
 
 **The Armbian build framework is NOT the build system here.** It is consulted for
 exactly one thing — the `edge` → kernel-version mapping, upstream in the patches
@@ -1147,14 +1160,14 @@ the gap is closed by retirement rather than by evidence. **None of that run is
 evidence about the production mainline kernel** — see §2d for the summarised
 history and its Tier-1-only limits.
 
-1. **The kernel is never built in CI.** Kernel builds run locally on the owner's
-   workstation: `./build <family> --kernel-only` for the lane, and
-   `ci/kernel-release.py` for an immutable candidate, both described in
-   [`kernel-release.md`](kernel-release.md). The PR gate runs `DRY_RUN=1`, which
+1. **Kernel compilation stays on the owner's workstation.** The owner-approved
+   `kernel-release.yml` uses a single-job KVM runner here, never GitHub-hosted
+   compute or a remote builder. It calls `ci/kernel-release.py`, the same local
+   immutable candidate engine; see [`kernel-release.md`](kernel-release.md).
+   The PR gate runs `DRY_RUN=1`, which
    emits the plan and touches no network, container or compiler, plus the offline
    fixture tests for that command. A real kernel build is a multi-GB clone and a
-   long cross-compile; wiring it into the PR gate would be a separate, deliberate
-   decision about CI budget.
+   long cross-compile; it is not part of the PR gate.
 
    That gap is not free, and it has been paid for once already: the first real
    build of this path hit **four** independent, board-independent defects, each
@@ -1321,7 +1334,7 @@ no second place to keep in sync.
 | `lib/kernel/checkout.sh` | `fetch_pinned_tree` — bounded retry, pin assertion, publish (§3) |
 | `lib/kernel/builder.sh` | builder-container management + the build-job preflight (§3b) |
 | `lib/kernel/package.sh` | built-`.deb` identity + `deb_lists_path` DTB proof (§4) |
-| `ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest) |
+| `ci/Dockerfile.kernel` | the builder image (base digest comes from the manifest; apt closure pinned to the Debian snapshot `20260925T000000Z`) |
 | `lib/orchestrate.sh` | stage wiring, suppression export, uniqueness check |
 | `lib/fetch-debs.sh` | suppression filter in `collect_declared_bsp_pkgs` |
 | `mkosi/mkosi.images/platform/mkosi.postinst` | the DTB install mapping + the `/boot` artifact mapping (§4b) |

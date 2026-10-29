@@ -8,9 +8,10 @@ device can install, plus how to read the result when it succeeds or rolls back.
 `./build <family> --kernel-only` compiles one family kernel and validates it
 for every board in that family. The local release command
 `ci/kernel-release.py` is [EXISTS] up to one immutable candidate bundle per
-version. APT publication is [PARTIAL]: `--publish` refuses, so no kernel `.deb`
-from this lane is on `apt.ceralive.tv`. The two-board bench drill has not been
-run, and no bench report exists.
+version. The approved workflow adapter and ephemeral VM scripts are [EXISTS].
+APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
+the first publication are owner actions, not performed by implementation/tests.
+The two-board bench drill has not been run, and no bench report exists.
 
 | Part | State | Contract |
 |---|---|---|
@@ -20,8 +21,107 @@ run, and no bench report exists.
 | Device staging into the inactive slot | EXISTS as a host contract; capability off | [`kernel-staging.md`](kernel-staging.md) |
 | Two-board bench drill | not run | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
-Kernels and images are built locally on the owner's workstation. Nothing here
-runs on a GitHub runner, and no workflow builds or publishes a kernel.
+Kernel compilation runs only inside a dedicated KVM guest on the owner's
+workstation, never on GitHub-hosted runners or a remote machine. Cheap lint
+can run on GitHub-hosted compute; the full tests, candidate and publication
+jobs use the `kernel-release` runner group and `ceralive-kernel-vm` label.
+
+## 0. Owner setup and runner lifecycle [MANUAL]
+
+Set these GitHub controls before registering any runner:
+
+- Organization runner group `kernel-release`: repository access **Selected
+  repositories**, only `CERALIVE/image-building-pipeline`; enable **Allow public
+  repositories**. Workflow access **Selected workflows**, only
+  `CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master`.
+  Keep it out of the default groups (currently IDs 1 and 5); use the new group's
+  numeric ID with `--group-id`.
+- Repository environment `kernel-release`: required reviewer `andrescera`;
+  prevent administrator bypass. Use **Selected branches and tags**, add branch
+  `master` as a branch rule and `kernel/v*` as a separate tag rule.
+  The workflow nevertheless admits VM jobs only for dispatches on master.
+  Leave **Prevent self-review** off so the named
+  release owner can initiate and approve each run; turning it on requires a
+  second authorized reviewer and a changed release procedure.
+- Organization secret `CERALIVE_DISPATCH_TOKEN`: retain selected-repository
+  visibility and add `image-building-pipeline`. Its token needs Contents:
+  read/write on `apt-worker` for repository dispatch, and Contents: read plus
+  Actions: read on `image-building-pipeline` for the publisher's independent
+  provenance/artifact checks. Preserve its existing consumers.
+- Environment secrets `KERNEL_FLOOR_R2_ACCESS_KEY_ID` and
+  `KERNEL_FLOOR_R2_SECRET_ACCESS_KEY`: a separate **read-only**, bucket-scoped
+  `ceralive-images` credential for complete OS publication inventory, never
+  the image publisher's write key. `R2_IMAGES_ENDPOINT` is that bucket's S3 API
+  endpoint. Environment variable `OTA_MANIFEST_ROOT_CA_B64` is the base64
+  **public** OTA manifest verification root. No signing key is needed.
+- Repository Actions settings: **Require approval for all outside
+  collaborators** for fork pull requests. Do not allow PR workflows access to
+  this runner group. A label by itself is not an access control.
+
+The scripts require user-accessible `/dev/kvm`, QEMU, `qemu-img`, `xorriso`,
+Python/PyYAML, curl and authenticated `gh` on the host. A group-scoped JIT
+request needs organization self-hosted-runners write permission, held only by
+the host's `gh` session. No script runs host sudo. If `/dev/kvm` is inaccessible,
+an administrator must grant the owner KVM access outside this procedure.
+
+Build the base once, then boot a **new overlay for every job**:
+
+```bash
+: "${KERNEL_HEAVY_LOCK:?Set the workstation shared heavy-suite.lock path}"
+flock --exclusive --close "$KERNEL_HEAVY_LOCK" \
+  python3 ci/kernel-runner/vm.py build-base --base mkosi/cache/kernel-runner/base.qcow2
+flock --exclusive --close "$KERNEL_HEAVY_LOCK" \
+  python3 ci/kernel-runner/vm.py run --base mkosi/cache/kernel-runner/base.qcow2 \
+    --group-id "${KERNEL_RUNNER_GROUP_ID:?Set the dedicated group numeric ID}"
+```
+
+Run these commands under the workstation's shared exclusive heavy-suite lock.
+The base uses SHA-verified Ubuntu noble/20261017 and runner 2.338.2; cloud-init
+installs Docker and CI/build dependencies, disables SSH and console logins,
+then powers off. Job output uses journal+console, not a shared login terminal.
+The host alone requests a single-use JIT configuration. It reaches the guest
+through an anonymous RAM fd/QEMU firmware configuration; no registration
+credential is written to a host file or printed. The guest starts `run.sh
+--jitconfig`, handles one job, then powers off. The overlay is deleted on
+success, guest/registration failure, timeout, SIGTERM or Ctrl-C. Job disks are
+unlinked temporary-file descriptors, so SIGKILL cannot leave an overlay path.
+**The guest admits the job itself.** A single-use JIT config still executes
+whatever job context GitHub delivers, so the runner is started with
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/ceralive-kernel-runner/admit-job.sh`
+(root-owned 0755, installed by the base, not writable by the runner user). That
+hook exits non-zero unless `GITHUB_ACTIONS=true`, `GITHUB_REPOSITORY` is
+`CERALIVE/image-building-pipeline`, `GITHUB_EVENT_NAME` is `workflow_dispatch`,
+`GITHUB_REF` is `refs/heads/master`, `GITHUB_WORKFLOW_REF` is
+`CERALIVE/image-building-pipeline/.github/workflows/kernel-release.yml@refs/heads/master`
+and `GITHUB_RUN_ATTEMPT` is `1`, and it fails closed on any missing value. It is
+independent of `ci/kernel-release.py`'s `--publish` guard: that one gates
+publication, this one gates execution on the workstation. `guest-job.sh` refuses
+to start the runner when the hook is absent or writable by the runner user;
+the `check --check-script` path runs no runner and is unaffected.
+Linux parent-death signals kill QEMU when Python dies and kill Python when its
+flock parent dies. Stop by sending
+SIGTERM to the `vm.py run` process; never reuse its overlay. Start again with
+the same command for the next job.
+Wait for that process to exit before another launch. Keep the direct flock to
+Python chain above; do not insert a host `timeout` process group or cancel only
+an outer shell. Guest and transport deadlines are enforced inside `vm.py`.
+The launcher refuses execution without that direct exclusive/close flock parent.
+
+There are no host directory mounts, Docker socket forwarding, SSH agent
+forwarding or host secrets in the guest. QEMU uses user-mode outbound networking,
+which is not a network firewall: guest egress can reach host/LAN services, so do
+not expose credential services there. Workflow credentials are short-lived
+Actions tokens plus the explicitly configured job secrets, not copied host
+credentials. JIT logs stay inside the disposable guest. `check --check-script
+FILE` replaces the runner with a local stand-in and never contacts GitHub;
+`--source-bundle FILE` attaches only a public-source tar capsule as a read-only
+block device. It is not a host directory share; credentials still use RAM only.
+
+**CI policy note:** this dedicated VM lane uses `actions/cache` for the
+kernel-builder Docker archive/dependency caches instead of `type=gha`, since
+the existing kernel engine uses `docker build`, not a Buildx exporter. Record
+this targeted cache deviation in the root CI standard when integrating policy;
+do not change the compiler/producer to satisfy a cache convention.
 
 ## 1. Bump the kernel version
 
@@ -39,8 +139,9 @@ upstream base changes `kernel_release`, and with it the package name
 
 ## 2. Create the local candidate
 
-Run from a clean, non-shallow checkout of the release commit, with complete
-local tags:
+For standalone diagnostics, run this inside an unregistered workstation VM,
+from a clean, non-shallow checkout with complete local tags. For publication,
+use the approved dispatch sequence in section 5:
 
 ```bash
 python3 ci/kernel-release.py rk3588 \
@@ -56,7 +157,7 @@ python3 ci/kernel-release.py rk3588 \
 | `--os-releases DIR` | Required authenticated snapshot of published OS kernel sidecars across boards and channels, used for the floor. An empty directory claims no OS kernel publication. |
 | `--output-dir DIR` | Optional repo-local bundle store. Default `mkosi/build/kernel-releases`. |
 | `--bench-report FILE` | Optional report bound to this candidate; see step 4. |
-| `--publish` | Always refuses; see step 5. |
+| `--publish` | Refuses outside the exact approved workflow context; see step 5. |
 
 The command refuses, before any build, when `DRY_RUN` has any value other than
 `0`, the repository is shallow or dirty, an existing `kernel/v<version>` tag does
@@ -111,33 +212,57 @@ be attached later by rerunning the immutable command.
 **No drill has been run for any version.** These are the steps a report must
 satisfy, not a receipt.
 
-## 5. Publish: refused today
+## 5. Owner release sequence [MANUAL]
 
-```bash
-python3 ci/kernel-release.py --publish
-```
+1. Merge the reviewed release source on `master`, with revision 2 for the first
+   publication. Create `kernel/v<version>` at that exact commit. Do not advance
+   `master` during this three-run release sequence. The tag push runs lint only:
+   the group deliberately permits workflow code only from `master`, not tags.
+2. Dispatch `kernel-release.yml` **on master**, `mode=candidate`, channel
+   `beta`, and `tag=kernel/v<version>`. The explicit tag must match the manifest
+   and this exact master commit. Approve the `kernel-release` environment and start one fresh VM for
+   `tests`, then another for `candidate`. The workflow runs the four real
+   contracts, authenticates the complete OS kernel floor and calls the existing
+   candidate engine. Retain the successful run ID and five-file immutable
+   `kernel-candidate-<commit>` artifact.
+3. Dispatch `mode=release`, the same tag/candidate run ID/channel and exact master
+   commit. Approve it and provide fresh VMs for tests and publish. Under the
+   shared non-cancelling `ceralive-kernel-floor` job group it checks GitHub
+   provenance, tag/manifest/commit, checksums, `--published` and `--floor`, then
+   creates the identity Release. This mode needs no bench report and never
+   dispatches APT.
+4. Attach `bench-<version>.json` to that existing Release. For the first kernel
+   use the owner-reviewed bootstrap statement; only apt-worker's inventory
+   decides bootstrap eligibility. Later versions need both boards' passing
+   happy/forced-rollback/restore observations. Never invent a passing report.
+5. Dispatch `mode=apt-publish` with the same successful candidate ID, exact
+   master/tag commit, explicit tag input and chosen channel. Approve and provide new VMs for tests
+   and publish. The adapter compares all five released files to the candidate,
+   validates the raw bench bytes, uploads `publish-authorization` **before**
+   dispatch and reads that immutable artifact back before sending `apt-reindex`.
+   apt-worker independently checks the approved workflow and authorization,
+   signs the APT indexes and verifies served bytes. It stays the sole publisher.
+   For bootstrap, choose the channel the capable OS consumes (normally stable);
+   an APT retry must replay the original authorization, not manufacture a new
+   bootstrap authorization or use it as a cross-channel promotion.
+6. Confirm apt-worker's successful served-verification receipt before building
+   a capable OS release. Images fetch the released kernel only from authenticated
+   APT, never the Release's `.deb`; a production miss refuses `kernel_not_on_apt`.
 
-This exits nonzero before reading repository code or creating any file:
+Candidate provenance is a successful first-attempt **workflow_dispatch** on
+master, rather than the original tag-push build: a tag workflow cannot satisfy
+the owner's master-only runner-group restriction. The additional `candidate`
+mode separates completed build provenance from later approval/publication.
+Every operation still requires master HEAD == the kernel tag commit. A rerun
+is refused; a new explicitly approved dispatch is a new authorization, not an
+immutable candidate overwrite.
 
-```text
-kernel release: publication blocked pending owner decision: apt-worker requires a kernel-release.yml workflow_dispatch run approved in the kernel-release environment; choose a self-hosted kernel-release.yml on this PC or an apt-worker contract change
-```
-
-apt-worker's merged publisher admits a kernel only from a `kernel-release.yml`
-`workflow_dispatch` run whose commit matches the kernel tag and whose
-`kernel-release` environment deployment is approved. A local command cannot
-produce that. Two owner choices would close the gap, and neither is implemented:
-
-1. A self-hosted `kernel-release.yml` on the owner's workstation, run on this PC,
-   whose dispatch and approval satisfy the existing publisher checks.
-2. An apt-worker contract change that accepts a local owner authorization bound
-   to the candidate bytes.
-
-Until one lands, this lane creates no GitHub Release, dispatches nothing, signs
-no index and needs no token or environment. No image can fetch this candidate
-from APT: production and `--release` image builds refuse `kernel_not_on_apt`, and
-only a local, non-release build of an unpublished higher version still compiles
-a kernel.
+`ci/publish-release.sh kernel-floor --kernel-version V --os-releases DIR` is
+read-only: it reuses the image publisher's complete R2 marker inventory, CMS
+verification and existing version comparator. It never receives a signing key.
+Kernel and OS publication share the floor exclusion. No APT eligibility check
+is duplicated upstream. Direct `ci/kernel-release.py --publish` still refuses
+before imports/output when the exact workflow context is absent.
 
 ## 6. Reading the outcome on a device
 
@@ -164,11 +289,13 @@ sequencing is in [`ota-activation.md`](ota-activation.md) and
 
 ## 7. Tests
 
-CI runs only offline tests for this lane, through `tests/registry.tsv` and
+PR CI runs offline tests for this lane, through `tests/registry.tsv` and
 `./run-tests`. `tests/kernel-release-command.test.sh` drives the real command
 with stubbed build and transport boundaries, and `tests/kernel-bench-report.test.sh`
 drives the validator. Fixture success is not a kernel build, a board drill or a
-publication.
+publication. `tests/kernel-release-workflow.test.sh` drives the workflow
+adapter with stubbed GitHub transport; `tests/kernel-runner.test.sh` checks
+anonymous JIT handoff, QEMU arguments and cleanup with stubbed QEMU/gh.
 
 ## See also
 

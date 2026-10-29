@@ -67,4 +67,42 @@ if (DRY_RUN=1 FIRMWARE_PACKAGES=armbian-firmware fetch_bsp "${ROOT}/manifests/fa
   printf 'FAIL: full and trimmed firmware coexistence accepted\n' >&2; exit 1
 fi
 grep -q 'must not coexist' "${TMP}/coexist"
+
+# Native APT keeps a separate all-architecture index; choose exactly the target
+# index, then apply the same content pin before any package download.
+native="${TMP}/native"
+mkdir -p "${native}/debs/.apt-state/lists"
+arm64_index="${native}/debs/.apt-state/lists/apt.example_dists_bookworm_main_binary-arm64_Packages"
+all_index="${native}/debs/.apt-state/lists/apt.example_dists_bookworm_main_binary-all_Packages"
+cp "${TMP}/committed-index" "${arm64_index}"
+cp "${TMP}/committed-index" "${all_index}"
+native_fetch() (
+  DRY_RUN=""
+  ARCH=arm64
+  run_or_plan_retry() { :; }
+  bsp_verify_native_release() { :; }
+  _run_bounded() { touch "${native}/downloaded"; }
+  _fetch_bsp_native "${native}/debs" armbian-firmware-full=26.8.3
+  [[ "${_BSP_APT_INDEX}" == "${arm64_index}" ]]
+)
+native_fetch </dev/null
+[[ -f "${native}/downloaded" ]]
+rm "${native}/downloaded"
+cp "${TMP}/Packages" "${arm64_index}"
+if native_fetch </dev/null >"${TMP}/native-wrong.log" 2>&1; then
+  printf 'FAIL: native target-index firmware re-spin accepted\n' >&2; exit 1
+fi
+[[ ! -e "${native}/downloaded" ]]
+rm "${arm64_index}"
+if native_fetch </dev/null >"${TMP}/native-missing.log" 2>&1; then
+  printf 'FAIL: native missing target index fell back to all\n' >&2; exit 1
+fi
+[[ ! -e "${native}/downloaded" ]]
+cp "${TMP}/committed-index" "${arm64_index}"
+cp "${TMP}/committed-index" "${native}/debs/.apt-state/lists/other.example_dists_bookworm_main_binary-arm64_Packages"
+if native_fetch </dev/null >"${TMP}/native-duplicate.log" 2>&1; then
+  printf 'FAIL: native duplicate target indexes accepted\n' >&2; exit 1
+fi
+[[ ! -e "${native}/downloaded" ]]
+printf 'PASS: native firmware target-index selection, re-spin, missing and ambiguous controls (4 cases)\n'
 printf 'PASS: strict firmware pin, signed-index lockstep, both fetch transports and coexistence contract\n'

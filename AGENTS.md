@@ -63,7 +63,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Reusable kernel boot staging, board-boot.json and root/tar verification [EXISTS] | [Kernel mapping](docs/kernel-build-from-source.md#4-the-dtb-install-mapping) |
 | Family kernel-only builds, fingerprints and image-equivalent Bluetooth/UHID firmware checks [EXISTS] | [Kernel-only lane](docs/kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable kernel versions, APT image reuse and signed OS kernel floors [EXISTS] | [Artifact reuse](docs/kernel-build-from-source.md#released-kernel-reuse-exists); [channel publishing](docs/RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent) |
-| Local immutable kernel candidates; APT publication refuses pending owner decision [PARTIAL] | [Kernel release runbook](docs/kernel-release.md) |
+| Immutable kernel candidates and owner-approved single-job KVM release runners [PARTIAL: settings/publication manual] | [Kernel release runbook](docs/kernel-release.md) |
 | Kernel activation, boot identity, durable overlays/quarantine and owner-gated capability [PARTIAL] | [Activation lifecycle](docs/ota-activation.md) |
 | First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
@@ -86,3 +86,4 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 - Do not log private keys or credential values; mTLS client keys must remain `_apt`-readable without undoing their numeric ownership.
 - One firmware owner: pin archive identity as well as version; an unexplained missing retained-module firmware reference fails closed.
 - Never treat DRY_RUN, a clean boot or a test-pattern stream as proof of physical capture, radio or full-image qualification.
+- Kernel release runners must use throwaway KVM disks, no host shares/secrets and the workflow-restricted `kernel-release` group; never register a persistent or default-group runner.

@@ -17,10 +17,12 @@ rotation and fleet OTA rollback runbooks remain below.
 
 ## Local kernel candidates [PARTIAL]
 
-Kernel compilation runs on the owner's workstation, never a GitHub runner or
-remote builder. The ordered owner steps, the bench binding and the device
+Kernel compilation runs in an ephemeral KVM Actions runner on the owner's
+workstation, never on GitHub-hosted compute or a remote builder.
+The ordered owner steps, exact GitHub settings, VM start/stop, bench binding and device
 outcome records live in [`kernel-release.md`](kernel-release.md). From a clean,
-non-shallow checkout with complete kernel tags:
+non-shallow checkout with complete kernel tags inside an unregistered
+workstation VM (publication uses the approved workflow sequence):
 
 ```bash
 python3 ci/kernel-release.py rk3588 \
@@ -82,24 +84,49 @@ Bootstrap reports use the same publisher schema and version/digest binding;
 their eligibility still belongs exclusively to apt-worker's publication state.
 A report cannot be attached later by rerunning this immutable local command.
 No report is required to build a candidate; a report can separately be prepared
-against that frozen candidate for a future owner-approved publication interface.
+against that frozen candidate for the owner-approved workflow publication interface.
 
 ```bash
 python3 ci/kernel-release.py --publish
 ```
 
-This always exits nonzero with one error, before reading repository/history or
-creating output: apt-worker requires a `kernel-release.yml` `workflow_dispatch`
-run approved in the `kernel-release` environment. The owner must choose a
-self-hosted `kernel-release.yml` on this PC or an apt-worker contract change.
-Neither option is implemented or enabled here. There is no GitHub Release
-creation/upload, APT dispatch/signing/publication, token, or environment in this
-local lane. The production pin remains `7.2.0-ceralive1`; allocating the next
-revision and any actual publication remain owner actions.
+Outside the exact approved master workflow context this exits nonzero before
+repository imports or output. Inside `kernel-release.yml`, the adapter verifies
+the running first-attempt dispatch, environment approval, live shared floor
+lease and a successful candidate run on the exact tag/master commit. The
+`candidate` mode calls the same local engine above. The `release` mode repeats
+version/floor admission and creates the immutable identity Release without
+requiring a bench report or dispatching APT. The `apt-publish` mode compares
+the Release bytes with the candidate, validates the attached bench report,
+uploads and reads back an immutable run-scoped `publish-authorization`, then
+dispatches apt-worker's `apt-reindex` with component `ceralive-kernel`.
+apt-worker remains unchanged and independently authorizes/signs/indexes it.
 
-CI runs only the offline command/bench fixtures through `tests/registry.tsv`
-and `./run-tests`; tests stub build/transport boundaries and make no network
-requests. Fixture success is not a real kernel build, board drill or publication.
+The full tests, candidate and publication jobs use the workflow-restricted
+`kernel-release` runner group and owner-approved environment. The host's
+`ci/kernel-runner/vm.py` creates a pristine throwaway overlay and passes only a
+single-use JIT config through RAM; there are no host directory shares or host
+credentials in the guest. Each job needs a fresh VM. Tag pushes run lint only;
+candidate dispatches run on master because the required runner-group workflow
+allowlist is pinned to `@refs/heads/master`. Each dispatch supplies a required
+`tag=kernel/v<version>` input matching the manifest and master commit.
+Master must remain at that kernel tag during candidate, release and apt-publish.
+The environment allows branch `master` and tag pattern `kernel/v*`; those tag
+deployment policies do not bypass the master-only self-hosted job guards.
+
+The read-only `ci/publish-release.sh kernel-floor` mode reuses the existing
+complete R2 publication inventory, CMS verifier and floor gate. Configure only
+bucket-scoped read credentials and the public verification root for it; never
+copy the image signing key into the kernel VM. The Docker dependency archive
+uses `actions/cache` rather than a Buildx `type=gha` exporter; the runbook records
+this targeted CI-standard deviation.
+
+The production pin remains `7.2.0-ceralive1`. Revision allocation, GitHub
+settings, JIT registration, dispatch, environment approval and actual publication
+are owner actions not performed by implementation/tests. PR CI runs offline
+command/bench/workflow/runner fixtures through `tests/registry.tsv`; the release
+workflow additionally runs all four native real contracts inside a fresh VM.
+Fixture success is not a real kernel build, board drill or publication.
 
 ---
 

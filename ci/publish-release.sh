@@ -20,20 +20,22 @@ usage() {
     'publish-release.sh promote --board B --version YYYY.M.P --to stable [--dry-run]' \
     'publish-release.sh refresh --board B --channel stable|beta|drill --expect-serial N --expect-etag "\"MD5\"" [--dry-run]' \
     'publish-release.sh prune --board B --channel-family [--dry-run]' \
-    'publish-release.sh --selftest [--dry-run]'
+    'publish-release.sh --selftest [--dry-run]' \
+    'publish-release.sh kernel-floor --kernel-version V --os-releases DIR'
 }
 
 mode="${1:-}"; [[ -n "$mode" ]] || { usage; exit 2; }; shift
-board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0 expect_serial='' expect_etag=''
+board='' version='' channel='' to='' bundle='' flash='' raw_sha256='' lock='' dry_run=0 channel_family=0 expect_serial='' expect_etag='' kernel_version='' os_releases=''
 while (($#)); do
   case "$1" in
-    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock|--expect-serial|--expect-etag)
+    --board|--version|--channel|--to|--bundle|--flash|--raw-sha256|--lock|--expect-serial|--expect-etag|--kernel-version|--os-releases)
       (($# >= 2)) || die "missing value for $1"
       case "$1" in
         --board) board="$2" ;; --version) version="$2" ;; --channel) channel="$2" ;;
         --to) to="$2" ;; --bundle) bundle="$2" ;; --flash) flash="$2" ;;
         --raw-sha256) raw_sha256="$2" ;; --lock) lock="$2" ;;
         --expect-serial) expect_serial="$2" ;; --expect-etag) expect_etag="$2" ;;
+        --kernel-version) kernel_version="$2" ;; --os-releases) os_releases="$2" ;;
       esac
       shift 2 ;;
     --dry-run) dry_run=1; shift ;;
@@ -42,10 +44,10 @@ while (($#)); do
     *) die "unknown argument: $1" ;;
   esac
 done
-[[ "$mode" == --selftest || "$board" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die 'invalid or missing board'
+[[ "$mode" == --selftest || "$mode" == kernel-floor || "$board" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die 'invalid or missing board'
 [[ -z "$version" || "$version" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || die 'invalid CalVer'
 [[ -z "$channel" || "$channel" =~ ^(stable|beta|drill)$ ]] || die 'invalid channel'
-[[ "$mode" == --selftest || "$mode" == prune || "$mode" == refresh || -n "$version" ]] || die 'version is required'
+[[ "$mode" == --selftest || "$mode" == kernel-floor || "$mode" == prune || "$mode" == refresh || -n "$version" ]] || die 'version is required'
 [[ "$mode" != publish || ( -n "$channel" && -f "$bundle" && -f "$flash" && -f "$raw_sha256" && -f "$lock" ) ]] || die 'publish requires channel and all four input files'
 [[ "$mode" != promote || "$to" == stable ]] || die 'promotion target must be stable'
 [[ "$mode" != refresh || -n "$channel" ]] || die 'refresh needs channel'
@@ -448,6 +450,11 @@ with open(sys.argv[3],'w') as f:json.dump({'schema':1,'files':files},f,separator
 PY
 }
 case "$mode" in
+  kernel-floor)
+    [[ "$kernel_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
+       -n "$os_releases" && ! -e "$os_releases" ]] || die 'kernel-floor requires a version and new output directory'
+    kernel_floor_check "$kernel_version" "$os_releases"
+    ;;
   publish)
     resolve_compatible
     [[ "$(basename "$bundle")" == *.raucb && "$(basename "$flash")" == *.raw.xz ]] || die 'publish expects .raucb and .raw.xz files (never relabel zstd bytes)'
