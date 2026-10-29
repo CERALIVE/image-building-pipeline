@@ -4,6 +4,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 source "${HERE}/lib/assertions.sh"
+source "${HERE}/lib/clear-workflow-env.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 

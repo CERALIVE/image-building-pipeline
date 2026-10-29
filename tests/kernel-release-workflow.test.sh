@@ -212,7 +212,12 @@ ok 'bootstrap Release bytes feed the capable OS authenticated APT fixture'
 rm "${WF_STATE}/dispatch.json"
 printf 'tampered\n' >>"${WF_STATE}/uploaded/publish-authorization.json"
 refuse 'uploaded authorization must match raw reviewed bytes' dispatch
+calls_before="$(wc -l <"${WF_STATE}/calls")"
 GITHUB_RUN_ATTEMPT=2 refuse 'reruns refuse before workflow code or API access' authorize
+assert_eq 'rerun refusal is the publication guard diagnostic' \
+  'kernel release: publication blocked pending owner decision: apt-worker requires a kernel-release.yml workflow_dispatch run approved in the kernel-release environment; choose a self-hosted kernel-release.yml on this PC or an apt-worker contract change' \
+  "$(<"${WORK}/refused")"
+assert_eq 'rerun performs no API calls' "${calls_before}" "$(wc -l <"${WF_STATE}/calls")"
 rm "${WORK}/publish-authorization.json"
 export WF_CHANNEL=beta
 kernel_test_version "${repo}" 7.2.0-ceralive3

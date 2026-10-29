@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "${ROOT}/tests/lib/assertions.sh"
+source "${ROOT}/tests/lib/clear-workflow-env.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "${WORK}"' EXIT
 assert_eq 'canonical apt-worker schema bytes' \

@@ -58,12 +58,14 @@ tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline D
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
 tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	independent 9b89e6f production fingerprint file digests including the coverage function
 tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
+tests/kernel-release-environment.test.sh	shell	integration	default-shell	exact command contract result parity with and without inherited workflow and runner context
 tests/kernel-release-workflow.test.sh	shell	integration	default-shell	owner-approved VM workflow provenance, immutable Release and bench-bound authorization/dispatch sequences
 tests/kernel-runner.test.sh	shell	unit	default-shell	anonymous JIT handoff, no host shares or credentials, disposable disk cleanup on success and failure
 tests/fixtures/kernel-bootstrap-publisher.sh	fixture	support	invoked-by-suite	verbatim apt-worker bootstrap-state validator driven by the offline producer-to-publisher sequence
 tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board and bootstrap report schema, identity binding and fail-closed evidence
 tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds
 tests/lib/kernel-release-fixtures.sh	helper	support	invoked-by-suite	offline kernel release metadata, package, git history and compiler-boundary fixtures
+tests/lib/clear-workflow-env.sh	helper	support	invoked-by-suite	clear ambient GitHub Actions and runner context before defining offline scenarios
 tests/fixtures/kernel-firmware-v7.2.json	fixture	support	not-executed	real pinned v7.2 module metadata and full-firmware 26.8.3 file inventory, no blobs
 tests/lib/kernel-boot-fixtures.bash	helper	support	invoked-by-suite	offline dpkg-deb and tree-manifest fixtures for kernel-boot-staging.bats
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests

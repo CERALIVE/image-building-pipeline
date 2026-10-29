@@ -26,6 +26,15 @@ workstation, never on GitHub-hosted runners or a remote machine. Cheap lint
 can run on GitHub-hosted compute; the full tests, candidate and publication
 jobs use the `kernel-release` runner group and `ceralive-kernel-vm` label.
 
+The offline release contracts clear inherited `GITHUB_*` and `RUNNER_*`
+variables before defining their scenarios. Workflow-adapter scenarios then set
+their exact dispatch context explicitly; local publication-refusal scenarios
+remain local even when the suite runs inside `kernel-release.yml`. The command
+contract also corrupts and unsets each guarded dispatch variable independently,
+with one approved-context control proving the guard admits the full context.
+`bash tests/kernel-release-environment.test.sh` checks the command contract's
+exit status and exact pass/fail totals in both parent environments.
+
 ## 0. Owner setup and runner lifecycle [MANUAL]
 
 Set these GitHub controls before registering any runner:

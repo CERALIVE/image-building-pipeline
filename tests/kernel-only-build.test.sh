@@ -5,6 +5,7 @@ set -uo pipefail
 TESTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${TESTS}/.." && pwd)"
 source "${TESTS}/lib/assertions.sh"
+source "${TESTS}/lib/clear-workflow-env.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 export WORK ROOT
