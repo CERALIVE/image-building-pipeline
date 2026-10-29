@@ -689,7 +689,16 @@ legacy="$tmp/objects/releases/rock-5b-plus/2026.10.100"
 legacy_sha="$(printf 'legacy-kernel-deb' | sha256sum | cut -d' ' -f1)"
 other_sha="$(printf 'other-kernel-deb' | sha256sum | cut -d' ' -f1)"
 legacy_lock() {
-  printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"%s","sha256":"%s"}]}\n' "$1" "$legacy_sha" >"$legacy/packages.lock.json"
+  # source-built rows carry the digest under artifact.sha256 keyed by the .deb name (as the real
+  # 2026.10.100 locks do); APT-origin rows carry a flat sha256. wrong-deb keys it by another file.
+  case "$1" in
+    source-built|wrong-deb)
+      local deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb
+      [[ "$1" != wrong-deb ]] || deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive9_arm64.deb
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"%s":"%s"}}}]}\n' "$deb" "$legacy_sha" >"$legacy/packages.lock.json" ;;
+    *)
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"%s","sha256":"%s"}]}\n' "$1" "$legacy_sha" >"$legacy/packages.lock.json" ;;
+  esac
   ( cd "$legacy" && sha256sum packages.lock.json >SHA256SUMS )
 }
 mkdir -p "$legacy"
@@ -717,6 +726,11 @@ legacy_lock ceralive-kernel
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-origin.log" 2>&1; then bad 'backfill accepted an APT-origin kernel'
 else ok 'backfill refuses an APT-origin kernel (normal path only)'; fi
 assert grep -q 'only source-built arm64 legacy kernels' "$tmp/backfill-origin.log"
+legacy_lock wrong-deb
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-debkey.log" 2>&1; then bad 'backfill accepted a digest not keyed by the kernel own .deb'
+else ok 'backfill refuses a kernel row whose digest is not its own .deb'; fi
+assert grep -q 'exactly its own .deb digest' "$tmp/backfill-debkey.log"
+assert test ! -e "$legacy/kernel.json"
 legacy_lock source-built
 printf ' ' >>"$legacy/packages.lock.json"
 if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-sums.log" 2>&1; then bad 'backfill accepted a lock that differs from SHA256SUMS'

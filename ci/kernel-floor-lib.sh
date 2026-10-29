@@ -117,10 +117,14 @@ if len(rows) != 1:
 row = rows[0]
 if row['origin'] != 'source-built' or row['arch'] != 'arm64':
     sys.exit('only source-built arm64 legacy kernels may be backfilled')
-if row['version'] != want_version or row['sha256'] != want_sha:
+deb = f"{row['name']}_{row['version']}_arm64.deb"
+digests = row.get('artifact', {}).get('sha256', {})
+if list(digests) != [deb]:
+    sys.exit('kernel row must carry exactly its own .deb digest')
+if row['version'] != want_version or digests[deb] != want_sha:
     sys.exit('kernel differs from the owner-attested version and digest')
 record = {'schema': 1, 'board': board, 'os_version': os_version,
-          'kernel': {'package': row['name'], 'version': row['version'], 'deb_sha256': row['sha256']}}
+          'kernel': {'package': row['name'], 'version': row['version'], 'deb_sha256': digests[deb]}}
 with open(out, 'w') as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + '\n')
 PY
