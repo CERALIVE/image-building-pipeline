@@ -23,7 +23,7 @@ on:
       mode:
         description: Release operation
         type: choice
-        options: [publish, promote, refresh, prune]
+        options: [publish, promote, refresh, prune, backfill-kernel]
         required: true
       expect_serial:
         description: Observed channel serial (refresh only, one board)
@@ -31,6 +31,14 @@ on:
         required: false
       expect_etag:
         description: Observed quoted JSON ETag (refresh only, one board)
+        type: string
+        required: false
+      expect_kernel_version:
+        description: Owner-attested legacy kernel version (backfill-kernel only, one board)
+        type: string
+        required: false
+      expect_deb_sha256:
+        description: Owner-attested legacy kernel .deb SHA-256 (backfill-kernel only, one board)
         type: string
         required: false
 
@@ -59,6 +67,8 @@ jobs:
           CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
           EXPECT_SERIAL: ${{ inputs.expect_serial }}
           EXPECT_ETAG: ${{ inputs.expect_etag }}
+          EXPECT_KERNEL_VERSION: ${{ inputs.expect_kernel_version }}
+          EXPECT_DEB_SHA256: ${{ inputs.expect_deb_sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -85,6 +95,15 @@ jobs:
           elif [[ -n "$EXPECT_SERIAL" || -n "$EXPECT_ETAG" ]]; then
             echo 'refresh preconditions apply only to refresh' >&2; exit 2
           fi
+          if [[ "$MODE" == backfill-kernel ]]; then
+            [[ "$BOARDS" != *,* && "$VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ &&
+               "$EXPECT_KERNEL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
+               "$EXPECT_DEB_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo 'backfill-kernel requires one board, an OS version and the attested kernel version and SHA-256' >&2; exit 2;
+            }
+          elif [[ -n "$EXPECT_KERNEL_VERSION" || -n "$EXPECT_DEB_SHA256" ]]; then
+            echo 'kernel attestation applies only to backfill-kernel' >&2; exit 2
+          fi
       - name: Materialize dedicated signer
         env:
           OTA_MANIFEST_SIGNER_TAR_B64: ${{ secrets.OTA_MANIFEST_SIGNER_TAR_B64 }}
@@ -97,7 +116,7 @@ jobs:
               leaf.key leaf.pem intermediate-ca.pem root-ca.pem
           chmod 0600 "${RUNNER_TEMP}/ota-manifest-signer/"*
       - name: Materialize bundle verification root
-        if: ${{ inputs.mode != 'prune' }}
+        if: ${{ inputs.mode != 'prune' && inputs.mode != 'backfill-kernel' }}
         env:
           CHANNEL: ${{ inputs.channel }}
           MODE: ${{ inputs.mode }}
@@ -123,6 +142,8 @@ jobs:
           CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
           EXPECT_SERIAL: ${{ inputs.expect_serial }}
           EXPECT_ETAG: ${{ inputs.expect_etag }}
+          EXPECT_KERNEL_VERSION: ${{ inputs.expect_kernel_version }}
+          EXPECT_DEB_SHA256: ${{ inputs.expect_deb_sha256 }}
           GH_TOKEN: ${{ github.token }}
           OTA_MANIFEST_SIGNER_DIR: ${{ runner.temp }}/ota-manifest-signer
           RAUC_BUNDLE_KEYRING: ${{ runner.temp }}/rauc-bundle-root.pem
@@ -184,6 +205,10 @@ jobs:
                   --expect-serial "$observed_serial" --expect-etag "$observed_etag"
                 ;;
               prune) bash ci/publish-release.sh prune --board "$board" --channel-family ;;
+              backfill-kernel)
+                bash ci/publish-release.sh backfill-kernel --board "$board" --version "$VERSION" \
+                  --expect-kernel-version "$EXPECT_KERNEL_VERSION" --expect-deb-sha256 "$EXPECT_DEB_SHA256"
+                ;;
             esac
           done
       - name: Remove materialized secrets and candidate copies

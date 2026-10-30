@@ -317,7 +317,8 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as tmp:
     env = {**os.environ, "RUNNER_TEMP": tmp, "FIXTURE_SHA": sha,
            "GITHUB_REPOSITORY": "CERALIVE/image-building-pipeline",
            "MODE": "publish", "CHANNEL": "beta", "VERSION": "2026.10.99",
-           "CANDIDATE_RUN": "123", "EXPECT_SERIAL": "", "EXPECT_ETAG": ""}
+           "CANDIDATE_RUN": "123", "EXPECT_SERIAL": "", "EXPECT_ETAG": "",
+           "EXPECT_KERNEL_VERSION": "", "EXPECT_DEB_SHA256": ""}
     both = subprocess.run(
         ["/bin/bash", "-c", stubs + validate],
         env={**env, "BOARDS": "rock-5b-plus,orange-pi-5-plus"},

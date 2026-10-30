@@ -614,7 +614,7 @@ fi
 exec /bin/bash "$@"
 SH
 chmod 700 "$tmp/bin/bash"
-export MODE=refresh BOARDS=rock-5b-plus CHANNEL=beta VERSION='' CANDIDATE_RUN='' GH_TOKEN=stub
+export MODE=refresh BOARDS=rock-5b-plus CHANNEL=beta VERSION='' CANDIDATE_RUN='' GH_TOKEN=stub EXPECT_KERNEL_VERSION='' EXPECT_DEB_SHA256=''
 export RUNNER_TEMP="$tmp" GITHUB_REPOSITORY=CERALIVE/image-building-pipeline STUB_WORKFLOW_ARGV="$tmp/workflow-argv"
 EXPECT_SERIAL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["serial"])' "$channel")"
 EXPECT_ETAG="$(python3 -c 'import hashlib,json,sys;print(json.dumps(hashlib.md5(open(sys.argv[1],"rb").read()).hexdigest()))' "$channel")"
@@ -635,6 +635,27 @@ if EXPECT_ETAG='"00000000000000000000000000000000"' workflow_refresh >"$tmp/work
 if EXPECT_ETAG="${saved_etag//\"/}" workflow_refresh >"$tmp/workflow-unquoted.log" 2>&1; then bad 'workflow accepted unquoted ETag'; else ok 'workflow refused unquoted ETag'; fi
 assert test ! -e "$tmp/workflow-argv"
 export EXPECT_SERIAL="$saved_serial" EXPECT_ETAG="$saved_etag"
+workflow_backfill() {
+  ( export MODE=backfill-kernel VERSION=2026.10.100 EXPECT_SERIAL='' EXPECT_ETAG=''
+    env "$@" /bin/bash "$tmp/workflow-validate.sh" && env "$@" /bin/bash "$tmp/workflow-publish.sh" )
+}
+wf_sha="$(printf 'workflow-kernel-deb' | sha256sum | cut -d' ' -f1)"
+check workflow_backfill BOARDS=rock-5b-plus EXPECT_KERNEL_VERSION=7.2.0-ceralive1 EXPECT_DEB_SHA256="$wf_sha" >"$tmp/workflow-backfill.log" 2>&1
+check python3 - "$tmp/workflow-argv" "$wf_sha" <<'PY'
+import sys
+assert open(sys.argv[1]).read().splitlines()==['backfill-kernel','--board','rock-5b-plus','--version','2026.10.100',
+    '--expect-kernel-version','7.2.0-ceralive1','--expect-deb-sha256',sys.argv[2]]
+PY
+rm "$tmp/workflow-argv"
+if workflow_backfill BOARDS=rock-5b-plus EXPECT_KERNEL_VERSION='' EXPECT_DEB_SHA256="$wf_sha" >"$tmp/workflow-backfill-nokernel.log" 2>&1; then bad 'workflow accepted backfill without an attested kernel version'
+else ok 'workflow refused backfill without an attested kernel version'; fi
+if workflow_backfill BOARDS=rock-5b-plus EXPECT_KERNEL_VERSION=7.2.0-ceralive1 EXPECT_DEB_SHA256='' >"$tmp/workflow-backfill-nosha.log" 2>&1; then bad 'workflow accepted backfill without an attested digest'
+else ok 'workflow refused backfill without an attested digest'; fi
+if workflow_backfill BOARDS=rock-5b-plus,orange-pi-5-plus EXPECT_KERNEL_VERSION=7.2.0-ceralive1 EXPECT_DEB_SHA256="$wf_sha" >"$tmp/workflow-backfill-boards.log" 2>&1; then bad 'workflow accepted backfill for several boards'
+else ok 'workflow refused backfill for several boards'; fi
+if ( export MODE=refresh EXPECT_KERNEL_VERSION=7.2.0-ceralive1 EXPECT_DEB_SHA256="$wf_sha"; /bin/bash "$tmp/workflow-validate.sh" ) >"$tmp/workflow-attest-misuse.log" 2>&1; then bad 'workflow accepted kernel attestation outside backfill-kernel'
+else ok 'workflow refused kernel attestation outside backfill-kernel'; fi
+assert test ! -e "$tmp/workflow-argv"
 OTA_MANIFEST_SIGNER_TAR_B64="$(tar -czf - -C "$tmp/signer" leaf.key leaf.pem intermediate-ca.pem root-ca.pem | base64 -w0)"
 export OTA_MANIFEST_SIGNER_TAR_B64
 MODE=prune check /bin/bash "$tmp/workflow-signer.sh"
@@ -663,6 +684,105 @@ if publisher promote --board rock-5b-plus --version 2026.10.5 --to stable >"$tmp
 else ok 'promote below newly released kernel floor refused'; fi
 assert grep -q os_kernel_below_floor "$tmp/kernel-promote-floor.log"
 assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.5/channels/stable"
+# Legacy-attested kernel sidecar backfill for the pre-sidecar OS releases.
+legacy="$tmp/objects/releases/rock-5b-plus/2026.10.100"
+legacy_sha="$(printf 'legacy-kernel-deb' | sha256sum | cut -d' ' -f1)"
+other_sha="$(printf 'other-kernel-deb' | sha256sum | cut -d' ' -f1)"
+legacy_lock() {
+  # source-built rows carry the digest under artifact.sha256 keyed by the .deb name (as the real
+  # 2026.10.100 locks do); APT-origin rows carry a flat sha256. wrong-deb keys it by another file.
+  case "$1" in
+    extra-key)
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb":"%s","linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb.sig":"%s"}}}]}\n' "$legacy_sha" "$other_sha" >"$legacy/packages.lock.json" ;;
+    source-built|wrong-deb)
+      local deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive1_arm64.deb
+      [[ "$1" != wrong-deb ]] || deb=linux-image-7.2.0-ceralive-rk3588_7.2.0-ceralive9_arm64.deb
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"source-built","artifact":{"sha256":{"%s":"%s"}}}]}\n' "$deb" "$legacy_sha" >"$legacy/packages.lock.json" ;;
+    *)
+      printf '{"schema":1,"packages":[{"name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive1","arch":"arm64","origin":"%s","sha256":"%s"}]}\n' "$1" "$legacy_sha" >"$legacy/packages.lock.json" ;;
+  esac
+  ( cd "$legacy" && sha256sum packages.lock.json >SHA256SUMS )
+}
+mkdir -p "$legacy"
+legacy_lock source-built
+backfill() {
+  local board="$1" os="$2" kv="$3" sha="$4"; shift 4
+  ( export OTA_MANIFEST_SIGNER_DIR="$tmp/signer"
+    publisher backfill-kernel --board "$board" --version "$os" --expect-kernel-version "$kv" --expect-deb-sha256 "$sha" "$@" )
+}
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$other_sha" >"$tmp/backfill-digest.log" 2>&1; then bad 'backfill accepted a digest the owner did not attest'
+else ok 'backfill refuses an unattested kernel digest'; fi
+assert grep -q 'owner-attested version and digest' "$tmp/backfill-digest.log"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive2 "$legacy_sha" >"$tmp/backfill-version.log" 2>&1; then bad 'backfill accepted an unattested kernel version'
+else ok 'backfill refuses an unattested kernel version'; fi
+assert grep -q 'owner-attested version and digest' "$tmp/backfill-version.log"
+unlisted="$tmp/objects/releases/rock-5b-plus/2026.10.101"
+mkdir -p "$unlisted"
+cp -- "$legacy/packages.lock.json" "$legacy/SHA256SUMS" "$unlisted/"
+if backfill rock-5b-plus 2026.10.101 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-scope.log" 2>&1; then bad 'backfill accepted a release outside the allowlist'
+else ok 'backfill refuses an otherwise valid release outside the pre-sidecar allowlist'; fi
+assert grep -q 'covers only the named pre-sidecar releases' "$tmp/backfill-scope.log"
+assert test ! -e "$unlisted/kernel.json"
+assert test ! -e "$unlisted/kernel.json.sig"
+legacy_lock ceralive-kernel
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-origin.log" 2>&1; then bad 'backfill accepted an APT-origin kernel'
+else ok 'backfill refuses an APT-origin kernel (normal path only)'; fi
+assert grep -q 'only source-built arm64 legacy kernels' "$tmp/backfill-origin.log"
+legacy_lock wrong-deb
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-debkey.log" 2>&1; then bad 'backfill accepted a digest not keyed by the kernel own .deb'
+else ok 'backfill refuses a kernel row whose digest is not its own .deb'; fi
+assert grep -q 'exactly its own .deb digest' "$tmp/backfill-debkey.log"
+assert test ! -e "$legacy/kernel.json"
+# The right key plus an extra one must also be refused, with nothing written (a behavioural check).
+legacy_lock extra-key
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-extrakey.log" 2>&1; then bad 'backfill accepted a kernel row with extra digest entries'
+else ok 'backfill refuses a kernel row with extra digest entries'; fi
+assert test ! -e "$legacy/kernel.json"
+assert test ! -e "$legacy/kernel.json.sig"
+legacy_lock source-built
+printf ' ' >>"$legacy/packages.lock.json"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-sums.log" 2>&1; then bad 'backfill accepted a lock that differs from SHA256SUMS'
+else ok 'backfill refuses a package lock that differs from the release checksums'; fi
+assert grep -q 'does not match the release checksum list' "$tmp/backfill-sums.log"
+legacy_lock source-built
+assert test ! -e "$legacy/kernel.json"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" --dry-run
+assert test ! -e "$legacy/kernel.json"
+assert test ! -e "$legacy/kernel.json.sig"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha"
+check python3 - "$legacy/kernel.json" "$legacy_sha" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1])) == {'schema':1,'board':'rock-5b-plus','os_version':'2026.10.100',
+    'kernel':{'package':'linux-image-7.2.0-ceralive-rk3588','version':'7.2.0-ceralive1','deb_sha256':sys.argv[2]}}
+PY
+check openssl cms -verify -binary -inform DER -in "$legacy/kernel.json.sig" \
+  -content "$legacy/kernel.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-again.log" 2>&1; then bad 'backfill overwrote a published sidecar'
+else ok 'backfill refuses to touch an already published sidecar'; fi
+assert grep -q 'kernel sidecar already published' "$tmp/backfill-again.log"
+# An interrupted run leaves one half; a retry may only complete it with the exact attested bytes.
+cp -- "$legacy/kernel.json" "$tmp/kernel.good.json"
+cms_ok() { openssl cms -verify -binary -inform DER -in "$legacy/kernel.json.sig" -content "$legacy/kernel.json" -CAfile "$tmp/signer/root-ca.pem" -purpose any -out /dev/null >/dev/null 2>&1; }
+rm -f "$legacy/kernel.json.sig"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha"
+assert cmp -s "$legacy/kernel.json" "$tmp/kernel.good.json"
+check cms_ok
+cp -- "$legacy/kernel.json.sig" "$tmp/kernel.good.sig"
+rm -f "$legacy/kernel.json"
+check backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha"
+assert cmp -s "$legacy/kernel.json" "$tmp/kernel.good.json"
+assert cmp -s "$legacy/kernel.json.sig" "$tmp/kernel.good.sig"
+check cms_ok
+printf '{}\n' >"$legacy/kernel.json"; rm -f "$legacy/kernel.json.sig"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-half-json.log" 2>&1; then bad 'backfill completed a half whose JSON differs from the attestation'
+else ok 'backfill refuses a half-published sidecar that differs from the attestation'; fi
+assert grep -q 'differs from the attested identity' "$tmp/backfill-half-json.log"
+assert test ! -e "$legacy/kernel.json.sig"
+rm -f "$legacy/kernel.json"; printf 'not-a-signature' >"$legacy/kernel.json.sig"
+if backfill rock-5b-plus 2026.10.100 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-half-sig.log" 2>&1; then bad 'backfill completed a half whose signature does not verify'
+else ok 'backfill refuses a half-published signature that does not verify'; fi
+assert grep -q 'does not verify' "$tmp/backfill-half-sig.log"
+assert test ! -e "$legacy/kernel.json"
 if [[ -n "${PUBLISH_TEST_EVIDENCE_DIR:-}" ]]; then
   mkdir -p "$PUBLISH_TEST_EVIDENCE_DIR"
   cp "$tmp/serial-refuse.txt" "$PUBLISH_TEST_EVIDENCE_DIR/serial-refuse.txt"
