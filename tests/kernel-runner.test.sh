@@ -55,8 +55,10 @@ cat >"${WORK}/bin/qemu-system-x86_64" <<'PY'
 import os, pathlib, sys
 args = sys.argv[1:]
 assert not os.isatty(0), 'a background VM must not inherit the terminal input'
-assert not any(x in ('-virtfs','-fsdev','-virtiofs','-smb','-chardev') for x in args)
-assert not any('hostfwd=' in x or 'smb=' in x or x.startswith('virtio-9p') or 'vhost-user' in x for x in args)
+assert not any(x in ('-virtfs','-fsdev','-virtiofs','-smb','-chardev','--virtfs','--fsdev','--virtiofs','--smb','--chardev') for x in args)
+assert not any('hostfwd=' in x or 'smb=' in x or 'vhost-user' in x for x in args)
+# 9p is judged on -device values only: other arguments carry random temp paths.
+assert not any('9p' in args[i+1] for i, a in enumerate(args[:-1]) if a in ('-device','--device'))
 assert 'user,id=net0' in args
 assert 'virtio-blk-pci,drive=system,bootindex=1' in args
 if 'virtio-blk-pci,drive=source,serial=ceralive-source' in args:
