@@ -722,6 +722,21 @@ cp -- "$legacy/packages.lock.json" "$legacy/SHA256SUMS" "$unlisted/"
 if backfill rock-5b-plus 2026.10.101 7.2.0-ceralive1 "$legacy_sha" >"$tmp/backfill-scope.log" 2>&1; then bad 'backfill accepted a release outside the allowlist'
 else ok 'backfill refuses an otherwise valid release outside the pre-sidecar allowlist'; fi
 assert grep -q 'covers only the named pre-sidecar releases' "$tmp/backfill-scope.log"
+# The two drill builds are allowlisted for their own board only; a swapped board/version is refused.
+for pair in 'rock-5b-plus 2026.10.96' 'orange-pi-5-plus 2026.10.97' 'rock-5b-plus 2026.10.97' 'orange-pi-5-plus 2026.10.96'; do
+  set -- $pair; drill="$tmp/objects/releases/$1/$2"; mkdir -p "$drill"
+  cp -- "$legacy/packages.lock.json" "$legacy/SHA256SUMS" "$drill/"
+done
+for pair in 'rock-5b-plus 2026.10.96' 'orange-pi-5-plus 2026.10.97'; do
+  set -- $pair; check backfill "$1" "$2" 7.2.0-ceralive1 "$legacy_sha" --dry-run
+  assert test ! -e "$tmp/objects/releases/$1/$2/kernel.json"
+done
+for pair in 'rock-5b-plus 2026.10.97' 'orange-pi-5-plus 2026.10.96'; do
+  set -- $pair
+  if backfill "$1" "$2" 7.2.0-ceralive1 "$legacy_sha" --dry-run >"$tmp/backfill-swap.log" 2>&1; then bad "backfill accepted the swapped release $1/$2"
+  else ok "backfill refuses the swapped release $1/$2"; fi
+  assert grep -q 'covers only the named pre-sidecar releases' "$tmp/backfill-swap.log"
+done
 assert test ! -e "$unlisted/kernel.json"
 assert test ! -e "$unlisted/kernel.json.sig"
 legacy_lock ceralive-kernel
