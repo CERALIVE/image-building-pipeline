@@ -257,6 +257,14 @@ satisfy, not a receipt.
    For bootstrap, choose the channel the capable OS consumes (normally stable);
    an APT retry must replay the original authorization, not manufacture a new
    bootstrap authorization or use it as a cross-channel promotion.
+   **Single-step first publication:** for a bootstrap, dispatch `mode=apt-publish` once with
+   `bootstrap_owner=<your GitHub login>` (it must equal the dispatching actor). The same run
+   creates the identity Release if it is absent and attaches the fixed bootstrap statement
+   (`approving_owner` = that login) before the unchanged authorize and dispatch steps
+   re-verify the released bytes and the report, so steps 3 and 4 are not separate dispatches.
+   A Release or report that already exists is never replaced, and without `bootstrap_owner`
+   the two-step flow above applies. A later kernel with a drill report still needs that
+   report attached to the Release first.
 6. Confirm apt-worker's successful served-verification receipt before building
    a capable OS release. Images fetch the released kernel only from authenticated
    APT, never the Release's `.deb`; a production miss refuses `kernel_not_on_apt`.

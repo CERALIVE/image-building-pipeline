@@ -19,6 +19,31 @@ from kernel_release import (
 
 WORKFLOW = ".github/workflows/kernel-release.yml"
 API = f"repos/{REPOSITORY}"
+BOOTSTRAP_STATEMENT = "No kernel-apt-stage image is published."
+
+
+def prepare_bootstrap(repo: Path, work: Path, gate: list[str], tag: str, selected: str,
+                      commit: str, deb_sha256: str, names: tuple[str, ...]) -> None:
+    """Single-step first publication: create the identity Release if absent and attach the
+    owner's bootstrap statement. authorize/dispatch then re-verify everything independently."""
+    owner = os.environ.get("KERNEL_BOOTSTRAP_OWNER", "")
+    if not owner or owner != os.environ.get("GITHUB_ACTOR"):
+        raise KernelReleaseError("bootstrap owner must be the dispatching actor")
+    view = ["gh", "release", "view", tag, "--repo", REPOSITORY]
+    if subprocess.run(view, capture_output=True).returncode != 0:
+        command([*gate, "--published"], repo)
+        command(["gh", "release", "create", tag, "--repo", REPOSITORY, "--verify-tag",
+                 "--target", commit, "--title", tag, "--notes", "Immutable kernel candidate.",
+                 *[str(work / name) for name in names]], repo)
+    bench = f"bench-{selected}.json"
+    if bench in command([*view, "--json", "assets", "--jq", ".assets[].name"], repo).split():
+        return  # an existing report wins; authorize validates it
+    report = work / bench
+    report.write_text(json.dumps({
+        "type": "bootstrap", "version": selected, "deb_sha256": deb_sha256,
+        "approving_owner": owner, "statement": BOOTSTRAP_STATEMENT,
+    }, indent=2, sort_keys=True) + "\n")
+    command(["gh", "release", "upload", tag, str(report), "--repo", REPOSITORY], repo)
 
 
 def api(path: str) -> dict:
@@ -88,7 +113,7 @@ def download_artifact(run_id: str, commit: str, name: str, dest: Path) -> None:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("release", "authorize", "dispatch"))
+    parser.add_argument("operation", choices=("release", "prepare", "authorize", "dispatch"))
     parser.add_argument("--candidate-run-id", required=True)
     parser.add_argument("--channel", choices=("beta", "stable"), required=True)
     parser.add_argument("--os-releases", type=Path, required=True)
@@ -131,6 +156,9 @@ def main(argv: list[str]) -> int:
                 "--version", selected, "--repo", str(repo)]
         command([*gate, "--candidate", "--artifact", str(work / "kernel-artifact.json")], repo)
         command([*gate, "--floor", "--os-releases", str(args.os_releases)], repo)
+        if args.operation == "prepare":
+            prepare_bootstrap(repo, work, gate, tag, selected, commit, record.identity.deb_sha256, names)
+            return 0
         if args.operation == "release":
             command([*gate, "--published"], repo)
             command(["gh", "release", "create", tag, "--repo", REPOSITORY, "--verify-tag",
