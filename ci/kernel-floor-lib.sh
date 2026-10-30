@@ -82,7 +82,7 @@ kernel_prepare_sidecar() {
   fi
 }
 
-# Owner-attested sidecar for the two OS releases published before kernel.json existed. Their
+# Owner-attested sidecar for the four OS releases published before kernel.json existed. Their
 # kernel is source-built (no APT origin, no kernel Release), so the normal generator refuses
 # it; the OTA signer's signature here means the owner attests the named kernel shipped in
 # that image. The floor is deliberately not run: it cannot pass until these sidecars exist.
@@ -90,7 +90,7 @@ kernel_prepare_sidecar() {
 kernel_legacy_backfill() {
   [[ "${board}" != x86-minipc ]] || die "x86-minipc carries no kernel sidecar"
   case "${board}/${version}" in
-    rock-5b-plus/2026.10.100|orange-pi-5-plus/2026.10.100) ;;
+    rock-5b-plus/2026.10.100|orange-pi-5-plus/2026.10.100|rock-5b-plus/2026.10.96|orange-pi-5-plus/2026.10.97) ;;
     *) die "legacy kernel backfill covers only the named pre-sidecar releases" ;;
   esac
   [[ "${expect_kernel_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*$ &&
