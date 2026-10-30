@@ -142,7 +142,9 @@ elif args[:2] == ['release','view']:
         for file in sorted(release.iterdir()): print(file.name)
 elif args[:2] == ['release','upload']:
     assert release.exists(), 'Release is missing'
-    shutil.copyfile(args[3], release/pathlib.Path(args[3]).name)
+    dest = release/pathlib.Path(args[3]).name
+    assert not dest.exists(), 'asset already exists (no --clobber)'
+    shutil.copyfile(args[3], dest)
 elif args[:2] == ['release','download']:
     assert release.exists(), 'Release is missing'
     dest = pathlib.Path(args[args.index('--dir')+1])
@@ -311,7 +313,10 @@ cp "${WORK}/publish-authorization.json" "${WF_STATE}/uploaded/"
 invoke dispatch
 assert_eq 'single-step publication dispatches the new version' 7.2.0-ceralive4 \
   "$(jq -r .client_payload.version "${WF_STATE}/dispatch.json")"
+report_sum="$(sha256sum "${WF_STATE}/release/7.2.0-ceralive4/bench-7.2.0-ceralive4.json" | cut -d' ' -f1)"
 invoke prepare
+assert_eq 'a second prepare never replaces the existing report' "${report_sum}" \
+  "$(sha256sum "${WF_STATE}/release/7.2.0-ceralive4/bench-7.2.0-ceralive4.json" | cut -d' ' -f1)"
 assert_eq 'a second prepare creates no second Release' "$((creates + 1))" "$(grep -c '^release create ' "${WF_STATE}/calls")"
 unset KERNEL_BOOTSTRAP_OWNER
 printf 'Kernel release workflow contract: %d passed, %d failed\n' "${PASS}" "${FAIL}"
