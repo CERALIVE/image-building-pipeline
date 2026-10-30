@@ -3,7 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "${ROOT}/tests/lib/assertions.sh"
-WORK="$(mktemp -d)"
+# The name always contains "9p" so the stub's 9p check is proven to match devices, never paths.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/kernel-runner-9p.XXXXXX")"
 trap 'rm -rf -- "${WORK}"' EXIT
 mkdir "${WORK}/bin"
 mkdir "${WORK}/trust"
@@ -54,8 +55,10 @@ cat >"${WORK}/bin/qemu-system-x86_64" <<'PY'
 import os, pathlib, sys
 args = sys.argv[1:]
 assert not os.isatty(0), 'a background VM must not inherit the terminal input'
-assert not any(x in ('-virtfs','-fsdev','-virtiofs','-smb','-chardev') for x in args)
-assert not any('hostfwd=' in x or 'smb=' in x or '9p' in x or 'vhost-user' in x for x in args)
+assert not any(x in ('-virtfs','-fsdev','-virtiofs','-smb','-chardev','--virtfs','--fsdev','--virtiofs','--smb','--chardev','-set','--set','-readconfig','--readconfig') for x in args)
+assert not any('hostfwd=' in x or 'smb=' in x or 'vhost-user' in x for x in args)
+# 9p is judged on -device values only: other arguments carry random temp paths.
+assert not any('9p' in args[i+1] for i, a in enumerate(args[:-1]) if a in ('-device','--device'))
 assert 'user,id=net0' in args
 assert 'virtio-blk-pci,drive=system,bootindex=1' in args
 if 'virtio-blk-pci,drive=source,serial=ceralive-source' in args:
