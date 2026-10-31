@@ -18,6 +18,10 @@ on:
         description: Successful candidate dispatch on this exact master/tag commit
         type: string
         required: false
+      bootstrap_owner:
+        description: apt-publish only - first publication in one step; GitHub login of the dispatching owner attesting the bootstrap statement (creates the Release if absent)
+        type: string
+        required: false
       channel:
         description: APT channel (release identity is channel independent)
         type: choice
@@ -183,6 +187,7 @@ jobs:
       OTA_MANIFEST_ROOT_CA_B64: ${{ vars.OTA_MANIFEST_ROOT_CA_B64 }}
       CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
       CHANNEL: ${{ inputs.channel }}
+      KERNEL_BOOTSTRAP_OWNER: ${{ inputs.bootstrap_owner }}
     steps:
       - name: Refuse immutable run retries
         run: test "$GITHUB_RUN_ATTEMPT" = 1
@@ -214,6 +219,12 @@ jobs:
         if: inputs.mode == 'release'
         run: |
           python3 ci/kernel-release.py --publish release --candidate-run-id "$CANDIDATE_RUN" \
+            --channel "$CHANNEL" --os-releases "$RUNNER_TEMP/os-history" \
+            --authorization "$RUNNER_TEMP/publish-authorization.json"
+      - name: Create the Release and bootstrap statement in this run (single-step first publication)
+        if: inputs.mode == 'apt-publish' && inputs.bootstrap_owner != ''
+        run: |
+          python3 ci/kernel-release.py --publish prepare --candidate-run-id "$CANDIDATE_RUN" \
             --channel "$CHANNEL" --os-releases "$RUNNER_TEMP/os-history" \
             --authorization "$RUNNER_TEMP/publish-authorization.json"
       - name: Bind bench proof to this approved APT publication

@@ -55,6 +55,11 @@ authorize = next(i for i,s in enumerate(steps) if '--publish authorize' in s.get
 upload = next(i for i,s in enumerate(steps) if s.get('with',{}).get('name') == 'publish-authorization')
 dispatch = next(i for i,s in enumerate(steps) if '--publish dispatch' in s.get('run',''))
 assert authorize < upload < dispatch
+prepare = next(i for i,s in enumerate(steps) if '--publish prepare' in s.get('run',''))
+assert prepare < authorize
+assert steps[prepare]['if'] == "inputs.mode == 'apt-publish' && inputs.bootstrap_owner != ''"
+assert workflow['on']['workflow_dispatch']['inputs']['bootstrap_owner']['required'] == 'false'
+assert jobs['publish']['env']['KERNEL_BOOTSTRAP_OWNER'] == '${{ inputs.bootstrap_owner }}'
 assert all(s['with']['fetch-depth'] == '0' for job in jobs.values()
            for s in job['steps'] if s.get('uses','').startswith('actions/checkout@'))
 PY
@@ -131,6 +136,15 @@ elif args[:2] == ['release','create']:
     for arg in args[3:]:
         file = pathlib.Path(arg)
         if file.is_file(): shutil.copyfile(file, release/file.name)
+elif args[:2] == ['release','view']:
+    if not release.exists(): sys.exit(1)
+    if '--json' in args:
+        for file in sorted(release.iterdir()): print(file.name)
+elif args[:2] == ['release','upload']:
+    assert release.exists(), 'Release is missing'
+    dest = release/pathlib.Path(args[3]).name
+    assert not dest.exists(), 'asset already exists (no --clobber)'
+    shutil.copyfile(args[3], dest)
 elif args[:2] == ['release','download']:
     assert release.exists(), 'Release is missing'
     dest = pathlib.Path(args[args.index('--dir')+1])
@@ -270,5 +284,40 @@ R2_IMAGES_ENDPOINT=https://fixture.invalid AWS_ACCESS_KEY_ID=fixture AWS_SECRET_
     --os-releases "${WORK}/floor"
 [[ -d "${WORK}/floor" ]] && ok 'read-only floor mode exports complete authenticated inventory' || bad 'floor output'
 assert_eq 'only release operations create identity Releases' 2 "$(grep -c '^release create ' "${WF_STATE}/calls")"
+# Single-step first publication: prepare creates the Release and the owner's bootstrap statement.
+rm -f "${WF_STATE}/dispatch.json" "${WORK}/publish-authorization.json"
+kernel_test_version "${repo}" 7.2.0-ceralive4
+git -C "${repo}" add -- manifests/families/rk3588.yaml
+git -C "${repo}" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false commit -qm 'single-step workflow fixture'
+WF_COMMIT="$(git -C "${repo}" rev-parse HEAD)"
+export WF_COMMIT WF_VERSION=7.2.0-ceralive4 KERNEL_RELEASE_TAG=kernel/v7.2.0-ceralive4 GITHUB_ACTOR=andrescera
+git -C "${repo}" tag kernel/v7.2.0-ceralive4
+kernel_test_artifact "${WORK}/candidate" 7.2.0-ceralive4 "${repo}"
+rm "${WORK}/candidate/"*_7.2.0-ceralive3_arm64.deb
+sha="$(jq -r .deb_sha256 "${WORK}/candidate/kernel-artifact.json")"
+creates="$(grep -c '^release create ' "${WF_STATE}/calls")"
+KERNEL_BOOTSTRAP_OWNER='' refuse 'single-step publication requires the bootstrap owner' prepare
+KERNEL_BOOTSTRAP_OWNER=someone-else refuse 'bootstrap owner must be the dispatching actor' prepare
+assert_eq 'refused single-step created no Release' "${creates}" "$(grep -c '^release create ' "${WF_STATE}/calls")"
+[[ ! -e "${WF_STATE}/release/7.2.0-ceralive4" ]] && ok 'refused single-step left no Release behind' || bad 'refused single-step left a Release'
+export KERNEL_BOOTSTRAP_OWNER=andrescera WF_CHANNEL=stable
+invoke prepare
+jq -e --arg sha "${sha}" '. == {type:"bootstrap",version:"7.2.0-ceralive4",deb_sha256:$sha,
+  approving_owner:"andrescera",statement:"No kernel-apt-stage image is published."}' \
+  "${WF_STATE}/release/7.2.0-ceralive4/bench-7.2.0-ceralive4.json" >/dev/null \
+  && ok 'prepare creates the Release and the owner-attested bootstrap statement' || bad 'prepare output'
+invoke authorize
+[[ ! -e "${WF_STATE}/dispatch.json" ]] && ok 'single-step authorization alone never dispatches' || bad 'single-step early dispatch'
+cp "${WORK}/publish-authorization.json" "${WF_STATE}/uploaded/"
+invoke dispatch
+assert_eq 'single-step publication dispatches the new version' 7.2.0-ceralive4 \
+  "$(jq -r .client_payload.version "${WF_STATE}/dispatch.json")"
+report_sum="$(sha256sum "${WF_STATE}/release/7.2.0-ceralive4/bench-7.2.0-ceralive4.json" | cut -d' ' -f1)"
+invoke prepare
+assert_eq 'a second prepare never replaces the existing report' "${report_sum}" \
+  "$(sha256sum "${WF_STATE}/release/7.2.0-ceralive4/bench-7.2.0-ceralive4.json" | cut -d' ' -f1)"
+assert_eq 'a second prepare creates no second Release' "$((creates + 1))" "$(grep -c '^release create ' "${WF_STATE}/calls")"
+unset KERNEL_BOOTSTRAP_OWNER
 printf 'Kernel release workflow contract: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" == 0 ]]
