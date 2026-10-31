@@ -60,7 +60,8 @@ as SemVer build metadata. Unknown version schemes fail closed.
 
 ## Release evidence and network policy
 
-CI deliberately uses a **committed catalog**, not a live GitHub request.
+PR CI deliberately uses a **committed catalog**, not a live GitHub request (release
+builds and the weekly audit refresh it in the job; see below).
 The ordinary PR token cannot read private sibling repositories such as
 cerastream, and an anonymous 404 is not proof that a newer release is absent.
 This keeps PR checks deterministic within an explicitly bounded observation
@@ -99,9 +100,14 @@ versions or restamp `checked_at` without re-querying the release sources.
 release candidates and scheduled real builds allow **24 hours**. Future-dated
 or expired evidence fails, including with a rollback override. Maintain the
 catalog with every first-party release and at least weekly; refresh within a
-day before a real CI image build. There is no automatic refresh bot or new
-secret in this change. A stale catalog requires a reviewed refresh, not a
-warning-only bypass.
+day before a real CI image build. PR CI keeps using the committed snapshot. Release
+builds (`release.yml`) and the weekly `real-build-audit.yml` refresh the evidence
+themselves in the job (`--refresh --max-age-hours 24`), so they no longer depend on a
+manual refresh commit: they use the optional read-only secret
+`FIRST_PARTY_RELEASE_READ_TOKEN`, and without it `gh` falls back to the runner user's
+login. The refresh never edits pins, so a pin behind a newer first-party release still
+fails the build, and there is no bot and no warning-only bypass. The committed
+snapshot used by PR CI still needs a reviewed refresh at least weekly.
 
 **Limit:** a release published after `checked_at` is invisible until refresh,
 up to the bounds above. The printed timestamp is the scope of the verdict;

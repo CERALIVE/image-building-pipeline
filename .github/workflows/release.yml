@@ -90,6 +90,12 @@ jobs:
             exit 2
           }
           printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "${version}" >>"${GITHUB_ENV}"
+      - name: Refresh first-party release evidence
+        env:
+          # Optional read-only token for the private first-party repos; when unset gh falls back
+          # to the runner user's login. Refreshes release evidence only and never edits pins.
+          GH_TOKEN: ${{ secrets.FIRST_PARTY_RELEASE_READ_TOKEN }}
+        run: python3 ci/check-first-party-pins.py --refresh --max-age-hours 24
       - name: First-party release pin currency
         run: python3 ci/check-first-party-pins.py --max-age-hours 24
       - name: Enforce immutable kernel candidate identity

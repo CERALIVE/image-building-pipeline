@@ -279,7 +279,9 @@ Keep `ceralive-apt-credentials=1.0.1` and registry tag
 `apt-credentials-v1.0.1`: this release is served on stable and the boards use it
 under enforced mTLS. After a package release, refresh the authenticated catalog
 with `python3 ci/check-first-party-pins.py --refresh`, then run the ordinary
-check; do not waive unrelated stale or unverifiable pins. A registry refresh
+check; do not waive unrelated stale or unverifiable pins. Release builds and the
+weekly audit refresh this evidence themselves in the job, so only the committed
+snapshot used by PR CI needs a manual refresh. A registry refresh
 alone is not signed APT-index serving proof.
 
 Package installation is not full-image qualification. Next build override-free
