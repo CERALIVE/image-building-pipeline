@@ -24,15 +24,15 @@ and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-o
 The production source revision is `7.2.0-ceralive2`, prepared for the first
 kernel-only publication; tag creation and publication remain owner steps.
 
-**Kernel slot roles [PARTIAL: capability off].** Slot marking stays scoped. The
+**Kernel slot roles [PARTIAL: capable OS release and bench drill pending].** Slot marking stays scoped. The
 healthcheck is the only `mark-good` caller for the BOOTED slot, after boot
 identity and service checks. Slot-sync marks only the OTHER slot good, after a
 verified mirror. `/usr/lib/ceralive/ceralive-kernel-stage` marks OTHER eligible
 only after mirror, install and boot/firmware/filesystem verification, and never
 confirms health. Kernel state, quarantine and per-slot
 overlays live in `/data/ceralive/update-state/`; the `kernel-apt-stage`
-capability stays off until the owner releases a capable CeraUI and sets its
-minimum. See [staging](../kernel-staging.md) and
+capability is advertised only by images that carry the stager and pin CeraUI at or
+above the default minimum `2026.10.1`; no such OS release is published yet. See [staging](../kernel-staging.md) and
 [activation](../ota-activation.md#local-kernel-activation-and-recovery-partial).
 
 **Chunked OS publishing [PARTIAL — workflow and local contract complete; candidate and live drill separate].**

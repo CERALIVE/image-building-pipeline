@@ -18,7 +18,7 @@ The two-board bench drill has not been run, and no bench report exists.
 | Family compile, boot/DTB/firmware gates | EXISTS | [`kernel-build-from-source.md`](kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable per-version candidate | EXISTS | this page |
 | APT publication of a candidate | PARTIAL, owner-gated | this page, "Publish" |
-| Device staging into the inactive slot | EXISTS as a host contract; capability off | [`kernel-staging.md`](kernel-staging.md) |
+| Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), none published yet | [`kernel-staging.md`](kernel-staging.md) |
 | Two-board bench drill | not run | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
 Kernel compilation runs only inside a dedicated KVM guest on the owner's
@@ -287,8 +287,9 @@ before imports/output when the exact workflow context is absent.
 ## 6. Reading the outcome on a device
 
 A device that declares the `kernel-apt-stage` capability stages a kernel only
-into the inactive slot. The capability is off until the owner releases a CeraUI
-with the kernel lane and raises the minimum. The records live in
+into the inactive slot. An image advertises the capability only if it carries the
+stager and pins a CeraUI payload at or above the minimum (default `2026.10.1`); older
+images, such as the published `2026.10.100`, do not. The records live in
 `/data/ceralive/update-state/`:
 
 | File | What it holds |
