@@ -129,7 +129,7 @@ or removes the target overlay when the booted slot has none. A full RAUC
 post-install hook clears only the installed rootfs slot's overlay after restoring
 its own GPT label. Cert-only installs do not retire rootfs overlays.
 
-## Capability release gate [PARTIAL: owner release pending]
+## Capability release gate [PARTIAL: capable OS release and bench drill pending]
 
 `install-update-capabilities.sh` emits `kernel-apt-stage` only with the stager,
 state/mirror libraries, slot-sync and boot staging/verifier installed, and the
@@ -138,10 +138,12 @@ architecture-specific pinned `ceralive-device` payload version at or above
 `manifests/first-party-deb-versions.txt` into the runtime source mount. Comparison
 uses full Debian versions, including timestamp/hash suffixes.
 
-The minimum defaults to empty, so the feature is currently never advertised.
-The owner must first release the CeraUI containing the kernel lane, then update
-the minimum, CeraUI pin and authenticated pin catalog in the same release. No
-version has been invented for this gate. The base eight capabilities remain
+The minimum defaults to `2026.10.1`, the first released CeraUI that contains the
+kernel lane (`dpkg` orders it above the `2026.10.0` and `2026.9.x` payloads and at
+or below every `2026.10.1-<timestamp>.<hash>` payload). An image advertises the
+feature only if its pinned `ceralive-device` payload reaches that minimum; an
+explicitly empty `KERNEL_STAGE_MIN_CERAUI` turns it OFF. Devices already deployed
+receive the capability only with a RAUC OS update that carries the stager. The base eight capabilities remain
 unchanged.
 
 `tests/kernel-state-machine.bats` drives the real activation and healthcheck
