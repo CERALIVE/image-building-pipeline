@@ -266,7 +266,7 @@ class PinCurrencyTest(unittest.TestCase):
         for filename in ("v2-ci.yml", "release.yml", "real-build-audit.yml"):
             workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
             steps = [step for job in workflow["jobs"].values() for step in job["steps"]
-                     if "check-first-party-pins.py" in step.get("run", "")]
+                     if "check-first-party-pins.py" in step.get("run", "") and "--refresh" not in step["run"]]
             self.assertEqual(len(steps), 1, filename)
             step = steps[0]
             self.assertNotIn("if", step)
@@ -282,6 +282,31 @@ class PinCurrencyTest(unittest.TestCase):
             self.assertEqual(rejected.returncode, 1, rejected.stderr)
             self.assertIn("STALE cerastream", rejected.stdout)
             self.engine_pin("2026.9.3")
+
+
+class ReleaseEvidenceRefreshWiringTest(unittest.TestCase):
+    def steps(self, filename: str) -> list[dict]:
+        import yaml
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        return [step for job in workflow["jobs"].values() for step in job["steps"]]
+
+    def test_release_builds_refresh_evidence_before_the_currency_check(self) -> None:
+        for filename in ("release.yml", "real-build-audit.yml"):
+            steps = self.steps(filename)
+            refresh = [i for i, s in enumerate(steps) if "--refresh" in s.get("run", "")]
+            check = [i for i, s in enumerate(steps) if "check-first-party-pins.py" in s.get("run", "")
+                     and "--refresh" not in s["run"]]
+            self.assertEqual((len(refresh), len(check)), (1, 1), filename)
+            self.assertLess(refresh[0], check[0], filename)
+            step = steps[refresh[0]]
+            self.assertEqual(step["run"], "python3 ci/check-first-party-pins.py --refresh --max-age-hours 24")
+            self.assertEqual(step["env"], {"GH_TOKEN": "${{ secrets.FIRST_PARTY_RELEASE_READ_TOKEN }}"})
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+
+    def test_pull_request_ci_stays_offline(self) -> None:
+        # PR CI must never depend on live GitHub lookups or a read token.
+        self.assertFalse([s for s in self.steps("v2-ci.yml") if "--refresh" in s.get("run", "")])
 
 
 class VersionTest(unittest.TestCase):
