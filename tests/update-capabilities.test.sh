@@ -112,7 +112,10 @@ for arch in amd64 arm64; do
   check test -n "$version"
   unset KERNEL_STAGE_MIN_CERAUI
   check emit
-  if capability_has_kernel; then bad 'unset minimum enabled kernel staging'; else ok 'unset minimum stays OFF'; fi
+  check capability_has_kernel   # default minimum 2026.10.1 is met by the pinned 2026.10.1 payload
+  printf 'ceralive-device[%s]=2026.10.0-20261024T034200.7c076c1\n' "$arch" >"$WORK/old-pins"
+  CERALIVE_KERNEL_STAGE_PIN_FILE="$WORK/old-pins" check emit
+  if capability_has_kernel; then bad 'pre-lane payload enabled kernel staging by default'; else ok 'default minimum keeps a pre-lane payload OFF'; fi
   export KERNEL_STAGE_MIN_CERAUI=""
   check emit
   if capability_has_kernel; then bad 'empty minimum enabled kernel staging'; else ok 'empty minimum stays OFF'; fi

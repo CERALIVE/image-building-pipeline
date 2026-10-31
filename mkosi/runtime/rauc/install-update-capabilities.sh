@@ -30,8 +30,9 @@ if ! cmp -s \
   exit 1
 fi
 mkdir -p "${dest%/*}"
-# Owner fills the default only after releasing the capable CeraUI. Empty is OFF.
-KERNEL_STAGE_MIN_CERAUI="${KERNEL_STAGE_MIN_CERAUI:-}"
+# Default: the first released CeraUI that contains the kernel lane (v2026.10.1). An explicitly
+# empty value turns the feature OFF.
+KERNEL_STAGE_MIN_CERAUI="${KERNEL_STAGE_MIN_CERAUI-2026.10.1}"
 kernel_feature=""
 kernel_pins="${CERALIVE_KERNEL_STAGE_PIN_FILE:-${BASH_SOURCE[0]%/*}/../first-party-deb-versions.txt}"
 if [[ -n "${KERNEL_STAGE_MIN_CERAUI}" && -r "${kernel_pins}" &&

@@ -56,8 +56,9 @@ Acknowledgement must not delete these records. A later verified slot-sync
 mirror replaces the target overlay with the booted slot's record or absence.
 Activation/reconciliation and full RAUC overlay retirement are owned by their
 respective helpers, not this transaction; see the
-[activation and recovery contract](ota-activation.md). The capability remains
-off until the owner releases a capable CeraUI and sets its minimum/pins.
+[activation and recovery contract](ota-activation.md). The capability is advertised
+only by images that carry the stager and pin CeraUI at or above the default minimum
+`2026.10.1`; no such OS release is published yet.
 
 Attempts are UUIDs. State slot fields and overlay filenames use bootnames `A`/`B`. Pending overlays
 retain the actual booted RAUC identity as `base_bundle_identity`:
