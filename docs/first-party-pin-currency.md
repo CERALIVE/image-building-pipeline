@@ -60,7 +60,8 @@ as SemVer build metadata. Unknown version schemes fail closed.
 
 ## Release evidence and network policy
 
-CI deliberately uses a **committed catalog**, not a live GitHub request.
+PR CI deliberately uses a **committed catalog**, not a live GitHub request (release
+builds and the weekly audit refresh it in the job; see below).
 The ordinary PR token cannot read private sibling repositories such as
 cerastream, and an anonymous 404 is not proof that a newer release is absent.
 This keeps PR checks deterministic within an explicitly bounded observation
