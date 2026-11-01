@@ -21,7 +21,7 @@ the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
 is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
-The production source revision is `7.2.0-ceralive2`, prepared for the first
+The production source revision is `7.2.0-ceralive3`, the first bench-drilled
 kernel-only publication; tag creation and publication remain owner steps.
 
 **Kernel slot roles [PARTIAL: capable OS release and bench drill pending].** Slot marking stays scoped. The
