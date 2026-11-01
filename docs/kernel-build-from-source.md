@@ -460,7 +460,7 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-The production source pin is `7.2.0-ceralive2` for the first kernel-only release
+The production source pin is `7.2.0-ceralive3`, the first bench-drilled release
 candidate; revision 1 must never be reissued with changed bytes.
 The family fingerprint excludes DTB paths and local container image IDs, but
 includes Dockerfile bytes, base digest, sorted package/version/architecture
@@ -869,7 +869,7 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The production source pin is `7.2.0-ceralive2`; publication remains owner-gated.
+The production source pin is `7.2.0-ceralive3`; publication remains owner-gated.
 
 Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
