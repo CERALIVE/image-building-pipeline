@@ -204,7 +204,9 @@ kernel_running_identity_matches() {
   local installed expected="${KERNEL_PACKAGE#linux-image-}"
   [[ "$("${UNAME_BIN:-uname}" -r)" == "${expected}" ]] || return 1
   installed="$("${DPKG_QUERY_BIN:-dpkg-query}" -W -f="\${Status}\t\${Version}\n" "${KERNEL_PACKAGE}")" || return 1
-  [[ "${installed}" == $'install ok installed\t'"${KERNEL_VERSION}" ]]
+  # The stager holds the kernel package, so dpkg reports "hold", not "install", as the wanted state.
+  [[ "${installed}" == $'install ok installed\t'"${KERNEL_VERSION}" ||
+     "${installed}" == $'hold ok installed\t'"${KERNEL_VERSION}" ]]
 }
 
 # Read-only selector decisions: never reset the failed target's attempt budget.
