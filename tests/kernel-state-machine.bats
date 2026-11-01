@@ -82,7 +82,7 @@ SH
   cat >"$DPKG_QUERY_BIN" <<'SH'
 #!/bin/bash
 [[ "${@: -1}" == "$EXPECTED_PACKAGE" ]] || exit 90
-printf 'install ok installed\t%s\n' "${INSTALLED_VERSION:-$EXPECTED_VERSION}"
+printf '%s\t%s\n' "${INSTALLED_STATUS:-install ok installed}" "${INSTALLED_VERSION:-$EXPECTED_VERSION}"
 SH
   cat >"$UNAME_BIN" <<'SH'
 #!/bin/sh
@@ -336,6 +336,28 @@ assert_state() {
   [ "$status" -ne 0 ]
   [ ! -s "$FIXTURE/calls" ]
   [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+}
+
+@test "held kernel package, as the stager leaves it, still confirms the boot" {
+  bash "$ACTIVATE_SCRIPT" --arm
+  bash "$ACTIVATE_SCRIPT" --now
+  boot_target
+  run env INSTALLED_STATUS='hold ok installed' bash "$HEALTH_SCRIPT"
+  [ "$status" -eq 0 ]
+  assert_state succeeded
+  jq -e '.status == "confirmed"' "$FIXTURE/state/slot-overlay-B.json"
+}
+
+@test "kernel package in any other dpkg state cannot mark good or publish healthy state" {
+  bash "$ACTIVATE_SCRIPT" --arm
+  bash "$ACTIVATE_SCRIPT" --now
+  boot_target
+  : >"$FIXTURE/calls"
+  run env INSTALLED_STATUS='deinstall ok config-files' bash "$HEALTH_SCRIPT"
+  [ "$status" -ne 0 ]
+  [ ! -s "$FIXTURE/calls" ]
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+  assert_state activated
 }
 
 @test "identity prerequisite also runs before an already confirmed marker exit" {
