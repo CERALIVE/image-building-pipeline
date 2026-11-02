@@ -63,7 +63,10 @@ only by images that carry the stager and pin CeraUI at or above the default mini
 Attempts are UUIDs. State slot fields and overlay filenames use bootnames `A`/`B`. Pending overlays
 retain the actual booted RAUC identity as `base_bundle_identity`:
 `slot` (the RAUC `rootfs.N` name), `bundleHash`, `checksum`, `installedAt` and
-`installedCount`. Missing or invalid byte identity refuses before mutation;
+`installedCount`. The booted slot's own confirmed overlay supplies that identity when one
+exists, because RAUC's record describes the bytes of the last bundle install; otherwise
+RAUC's slot record does. An unconfirmed, malformed or invalid booted overlay refuses.
+Missing or invalid byte identity refuses before mutation;
 build/version labels never substitute for it. Invalid overlays contain only
 `status`, `attempt` and `reason`. State reasons are JSON null or a shared kernel
 reason token, with command detail in the journal. UTC state-entry anchors such
