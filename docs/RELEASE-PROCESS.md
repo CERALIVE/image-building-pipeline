@@ -828,6 +828,10 @@ cases the bytes after decompression must match the
 original raw SHA. The publisher independently rechecks both file hashes and
 pins `min_ceraui_version` from the repo-local CeraUI version registry. If the
 candidate lacks a package lock (older releases), it is **not** publishable.
+The candidate also carries `os-release-version`, the CalVer the build baked into the image
+(`CERALIVE_OS_RELEASE_VERSION`); `ci/check-candidate-os-version.sh` refuses to publish a
+candidate with no stamp or a stamp that differs from the requested `version`, because
+devices report the baked version. Set the variable before building the image.
 Before approving, the owner must match the candidate run SHA/artifact and the
 real board hand-test; the workflow verifies the successful run and its downloaded
 archive, but does not perform a physical board test.
