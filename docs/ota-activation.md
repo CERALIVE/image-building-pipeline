@@ -129,7 +129,7 @@ or removes the target overlay when the booted slot has none. A full RAUC
 post-install hook clears only the installed rootfs slot's overlay after restoring
 its own GPT label. Cert-only installs do not retire rootfs overlays.
 
-## Capability release gate [PARTIAL: capable OS release and bench drill pending]
+## Capability release gate [PARTIAL: beta only, stable not published]
 
 `install-update-capabilities.sh` emits `kernel-apt-stage` only with the stager,
 state/mirror libraries, slot-sync and boot staging/verifier installed, and the
