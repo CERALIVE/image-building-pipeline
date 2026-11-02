@@ -299,6 +299,7 @@ jobs:
           cp "${dev_debs[0]}" candidate/dev-debs/
           cp "${locks[0]}" candidate/packages.lock.json
           cp "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/kernel-build/kernel-artifact.json" candidate/
+          printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" > candidate/os-release-version
           raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
           loader_name=rk3588_spl_loader_v1.15.113.bin
           bundle_release_name="$(basename "${bundles[0]}")"

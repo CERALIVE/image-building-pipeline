@@ -55,6 +55,7 @@ tests/boot-artifacts.bats	bats	unit	default-bats	/boot completeness and raw ARM6
 tests/kernel-boot-staging.bats	bats	unit	default-bats	shipped staging CLI, package upgrades, board identity and root/tar verifier equivalence
 tests/kernel-only-build.test.sh	shell	integration	default-shell	family kernel-only CLI, atomic outputs, boot and firmware gates, epoch and fingerprint identity
 tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline Debian kernel ordering, immutable candidate fingerprints and published OS floors
+tests/candidate-os-version.test.sh	shell	integration	default-shell	publish guard: candidate baked OS version must equal the requested version
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
 tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	independent 9b89e6f production fingerprint file digests including the coverage function
 tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
