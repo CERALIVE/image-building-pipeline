@@ -180,6 +180,46 @@ for identity_case in missing-status missing-hash missing-checksum missing-instal
   assert_eq "${identity_case}: never publishes pending overlay" confirmed "$(jq -r .status "${OVERLAY}")"
 done
 
+OVERLAY_A="${FIXTURE}/state/slot-overlay-A.json"
+base_hash="$(printf 'c%.0s' {1..64})" base_sum="$(printf 'd%.0s' {1..64})"
+booted_overlay() {
+  printf '{"base_bundle_identity":{"slot":"rootfs.1","bundleHash":"%s","checksum":"%s","installedAt":"2026-10-31T19:12:59Z","installedCount":3},"kernel":{"package":"%s","version":"7.2.0-ceralive2","deb_sha256":"%s"},"attempt":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","status":"%s","reason":null}\n' \
+    "${2:-${base_hash}}" "${base_sum}" linux-image-7.2.0-ceralive-rk3588 "$(printf 'e%.0s' {1..64})" "$1" >"${OVERLAY_A}"
+}
+expected_base() {
+  jq -nc --arg hash "${base_hash}" --arg sum "${base_sum}" \
+    '{slot:"rootfs.0",bundleHash:$hash,checksum:$sum,installedAt:"2026-10-31T19:12:59Z",installedCount:3}'
+}
+
+stage_fixture_reset
+jq -c 'del(.slots[0]["rootfs.0"].slot_status)' "${FIXTURE}/rauc.json" >"${WORK}/json"
+cp "${WORK}/json" "${FIXTURE}/rauc.json"
+booted_overlay confirmed
+stage_run >"${WORK}/out" 2>&1
+assert_eq "booted slot without a RAUC record stages from its confirmed overlay" 0 "$?"
+assert_eq "overlay base identity is carried to the target" "$(expected_base)" "$(jq -c .base_bundle_identity "${OVERLAY}")"
+rm -f "${OVERLAY_A}"
+
+stage_fixture_reset
+booted_overlay confirmed
+stage_run >"${WORK}/out" 2>&1
+assert_eq "a confirmed overlay wins over the stale RAUC record" 0 "$?"
+assert_eq "stale RAUC record is not recorded as the base" "$(expected_base)" "$(jq -c .base_bundle_identity "${OVERLAY}")"
+rm -f "${OVERLAY_A}"
+
+for overlay_case in unconfirmed malformed short-hash; do
+  stage_fixture_reset
+  case "${overlay_case}" in
+    unconfirmed) booted_overlay pending ;;
+    malformed) printf '{not json' >"${OVERLAY_A}" ;;
+    short-hash) booted_overlay confirmed abc ;;
+  esac
+  run_refused kernel_identity_mismatch
+  [[ ! -e "${STATE}" && ! -s "${FIXTURE}/mounts" ]] \
+    && ok "${overlay_case} booted overlay: no mutation" || bad "${overlay_case} booted overlay: mutated"
+  rm -f "${OVERLAY_A}"
+done
+
 for state in staged armed activating activated; do
   stage_fixture_reset
   printf '{"state":"%s"}\n' "${state}" >"${STATE}"

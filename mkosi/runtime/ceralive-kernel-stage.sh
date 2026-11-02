@@ -74,22 +74,46 @@ load_state_timestamps() {
   done
 }
 
-capture_base_identity() {
-  local status bundle checksum installed hash digest stamp count
-  [[ "${BOOTED_SLOT}" =~ ^rootfs[.][0-9]+$ ]] || return 1
-  status="$(kernel_json_object "${BOOTED_SLOT_OBJECT}" slot_status)" || return 1
-  bundle="$(kernel_json_object "${status}" bundle)" || return 1
-  checksum="$(kernel_json_object "${status}" checksum)" || return 1
-  installed="$(kernel_json_object "${status}" installed)" || return 1
-  hash="$(kernel_json_string "${bundle}" hash)"
-  digest="$(kernel_json_string "${checksum}" sha256)"
-  stamp="$(kernel_json_string "${installed}" timestamp)"
-  count="$(printf '%s' "${installed}" | grep -oP '"count"[[:space:]]*:[[:space:]]*\K[0-9]+(?=[[:space:]]*[,}])')" || return 1
+format_base_identity() {
+  local hash="$1" digest="$2" stamp="$3" count="$4"
   [[ "${hash}" =~ ^[a-f0-9]{64}$ && "${digest}" =~ ^[a-f0-9]{64}$ &&
      "${count}" =~ ^[1-9][0-9]{0,14}$ ]] || return 1
   kernel_utc_timestamp_valid "${stamp}" || return 1
   BASE_IDENTITY="$(printf '{"slot":"%s","bundleHash":"%s","checksum":"%s","installedAt":"%s","installedCount":%s}' \
     "${BOOTED_SLOT}" "${hash}" "${digest}" "${stamp}" "${count}")"
+}
+
+# RAUC's record describes the bytes of the last bundle install; once a kernel overlay exists the
+# slot's base identity is the overlay's. Returns 2 when the booted slot has no overlay.
+capture_overlay_base_identity() {
+  local file="${UPDATE_STATE_DIR}/slot-overlay-${BOOTED_NAME}.json" record base count
+  [[ -e "${file}" ]] || return 2
+  record="$(<"${file}")"
+  kernel_json_valid "${record}" || return 1
+  [[ "$(kernel_json_string "${record}" status)" == confirmed ]] || return 1
+  base="$(kernel_json_object "${record}" base_bundle_identity)" || return 1
+  count="$(printf '%s' "${base}" | grep -oP '"installedCount"[[:space:]]*:[[:space:]]*\K[0-9]+(?=[[:space:]]*[,}])')" || return 1
+  format_base_identity "$(kernel_json_string "${base}" bundleHash)" "$(kernel_json_string "${base}" checksum)" \
+    "$(kernel_json_string "${base}" installedAt)" "${count}"
+}
+
+capture_rauc_base_identity() {
+  local status bundle checksum installed count
+  status="$(kernel_json_object "${BOOTED_SLOT_OBJECT}" slot_status)" || return 1
+  bundle="$(kernel_json_object "${status}" bundle)" || return 1
+  checksum="$(kernel_json_object "${status}" checksum)" || return 1
+  installed="$(kernel_json_object "${status}" installed)" || return 1
+  count="$(printf '%s' "${installed}" | grep -oP '"count"[[:space:]]*:[[:space:]]*\K[0-9]+(?=[[:space:]]*[,}])')" || return 1
+  format_base_identity "$(kernel_json_string "${bundle}" hash)" "$(kernel_json_string "${checksum}" sha256)" \
+    "$(kernel_json_string "${installed}" timestamp)" "${count}"
+}
+
+capture_base_identity() {
+  local rc=0
+  [[ "${BOOTED_SLOT}" =~ ^rootfs[.][0-9]+$ ]] || return 1
+  capture_overlay_base_identity || rc=$?
+  [[ "${rc}" -eq 2 ]] || return "${rc}"
+  capture_rauc_base_identity
 }
 
 stage_cleanup_children() {
