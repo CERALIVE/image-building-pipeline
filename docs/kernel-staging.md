@@ -58,7 +58,7 @@ Activation/reconciliation and full RAUC overlay retirement are owned by their
 respective helpers, not this transaction; see the
 [activation and recovery contract](ota-activation.md). The capability is advertised
 only by images that carry the stager and pin CeraUI at or above the default minimum
-`2026.10.1`; no such OS release is published yet.
+`2026.10.1`; the first such release, `2026.10.102`, is published to the beta channel only.
 
 Attempts are UUIDs. State slot fields and overlay filenames use bootnames `A`/`B`. Pending overlays
 retain the actual booted RAUC identity as `base_bundle_identity`:
