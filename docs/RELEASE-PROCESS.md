@@ -136,7 +136,7 @@ exactly what the attestation yields; it is never overwritten. The OTA signer sig
 the owner's attestation. It does not run the floor, which cannot pass before the sidecars
 exist, and extending the allowlist needs a reviewed change.
 
-The production source pin is `7.2.0-ceralive3`; revision 2 was the first kernel-only publication and revision 3 the first bench-drilled release.
+The production source pin is `7.2.0-ceralive4`; revision 2 was the first kernel-only publication, revision 3 the first bench-drilled release, and revision 4 re-tags that kernel on the current `master` for stable promotion.
 Tag creation, GitHub settings, JIT registration, dispatch, environment approval and actual publication
 are owner actions not performed by implementation/tests. PR CI runs offline
 command/bench/workflow/runner fixtures through `tests/registry.tsv`; the release
