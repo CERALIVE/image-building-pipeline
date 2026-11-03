@@ -322,11 +322,11 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
-      # package_version uses KERNELVERSION + -ceralive<revision>; revision 3
-      # reserves the first bench-drilled release; revisions 1 and 2 are never reissued.
+      # package_version uses KERNELVERSION + -ceralive<revision>; revision 4
+      # re-tags revision 3's kernel on the current master for stable promotion; revisions 1 to 3 are never reissued.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive3
+      package_version: 7.2.0-ceralive4
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script

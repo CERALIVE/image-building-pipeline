@@ -108,7 +108,7 @@ against immutable release metadata and restore its config/module inventory
 without compiling. `--release` image builds and production candidates refuse
 `kernel_not_on_apt`; local builds may compile only an unpublished version above
 all released kernels.
-The production source pin is `7.2.0-ceralive3`; revision 2 was the first kernel-only publication and revision 3 the first bench-drilled release;
+The production source pin is `7.2.0-ceralive4`; revision 2 was the first kernel-only publication, revision 3 the first bench-drilled release, and revision 4 re-tags that kernel on the current `master` for stable promotion;
 the tag, candidate, Release and APT publication remain separate owner steps.
 See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
 The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
