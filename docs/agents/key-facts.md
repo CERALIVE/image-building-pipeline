@@ -22,8 +22,8 @@ is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
 The production source revision is `7.2.0-ceralive5`, adding nftables reject for
-NetworkManager shared mode. Its planned Rock 5B+ sink-first Type-C update still
-awaits the owner-approved patch-series merge and pin; tag creation, the drill
+NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
+the kernel-patches PR #28 pin; tag creation, the drill
 and publication remain owner steps. Revision 4 is already on stable APT.
 
 **Kernel slot roles [PARTIAL: images on beta only; kernels on the stable APT only].** Slot marking stays scoped. The

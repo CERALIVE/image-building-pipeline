@@ -13,8 +13,8 @@ APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
 each publication are owner actions, not performed by implementation/tests.
 The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release. Kernels are published to the stable APT channel only: `7.2.0-ceralive3` reached only the beta APT, and its identical successor `7.2.0-ceralive4` was drilled on 2026-11-03 and is on stable.
 The production source pin is now `7.2.0-ceralive5`, adding nftables reject for
-NetworkManager shared mode. Its planned Rock 5B+ sink-first Type-C update still
-awaits the owner-approved patch-series merge and pin; revision 5 has not been
+NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
+the kernel-patches PR #28 pin; revision 5 has not been
 drilled or published.
 
 | Part | State | Contract |

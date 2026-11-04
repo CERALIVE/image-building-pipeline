@@ -294,14 +294,15 @@ variants:
       # why this pin is the RESULTING `main` commit and not the branch tip.
       # Verified before pinning: `git ls-remote
       # https://github.com/CERALIVE/rk3588-kernel-patches.git refs/heads/main`
-      # answers 6996f96bc883f637ddac11f81871a256632f3f48, that commit reaches a
-      # 33-entry patches/series, and the whole series applies to
-      # v7.2 with its own post-apply gate green.
+      # answers bc7e44fa35d3eded23567dd48e65f6dc799f4b34 (PR #28), with a
+      # 32-entry patches/series. Patch 0029's Rock Try.SRC preference is retired:
+      # the Rock connector defaults to sink; the Orange connector stays source.
+      # The whole series applies to v7.2 with its post-apply gate green.
       # Island v2026.9.4: artifact-bound Rock qualification passed 2026-09-15.
       # Scope/receipts: docs/kernel-build-from-source.md, RGA ownership section.
       # Changes require independent exact-head review before merge.
       patches_git_url: https://github.com/CERALIVE/rk3588-kernel-patches.git
-      patches_commit: 6996f96bc883f637ddac11f81871a256632f3f48
+      patches_commit: bc7e44fa35d3eded23567dd48e65f6dc799f4b34
       patches_series: patches/series
 
       defconfig_base: defconfig
@@ -314,7 +315,7 @@ variants:
 
       # kernel_release is DERIVED, never guessed: `make -s kernelrelease
       # LOCALVERSION=-ceralive-rk3588` run against a fresh v7.2 clone at the
-       # pinned commit, with this exact 24-member series applied and the resolved
+      # pinned commit, with this exact 32-member series applied and the resolved
       # defconfig+fragment synced, answers 7.2.0-ceralive-rk3588.
       #
       # NOTE THE `.0`, because it is the whole reason that probe is mandatory.
@@ -323,9 +324,8 @@ variants:
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
       # package_version uses KERNELVERSION + -ceralive<revision>; revision 5
-      # adds nftables reject for NetworkManager shared mode. Its Rock 5B+ sink-first
-      # Type-C pin awaits the owner-approved patch-series merge; revisions 1 to 4
-      # are never reissued.
+      # adds nftables reject for NetworkManager shared mode and Rock 5B+ sink-first
+      # Type-C through the PR #28 patch pin; revisions 1 to 4 are never reissued.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
       package_version: 7.2.0-ceralive5
