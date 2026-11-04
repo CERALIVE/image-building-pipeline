@@ -1271,7 +1271,7 @@ now reconciles kernel boot identity, outcomes and quarantine before health
 confirmation, and retires overlays on verified mirror or full OS install.
 Host crash-boundary tests cover these helpers; images that carry the stager and pin a
 CeraUI payload at or above the default minimum `2026.10.1` advertise `kernel-apt-stage`.
-The first such release, `2026.10.102`, is published to the beta channel only, and the kernel-only path was bench-drilled on both boards with `7.2.0-ceralive3` on 2026-11-02; nothing is published to stable.
+Images that carry it (`2026.10.102`, then `2026.11.1`) are published to the beta channel only; no OS image is on stable. Kernels are published to the stable APT channel only: the kernel-only path was bench-drilled on both boards with `7.2.0-ceralive3` (2026-11-02, which reached only the beta APT) and `7.2.0-ceralive4` (2026-11-03), and `7.2.0-ceralive4` is on the stable APT.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed

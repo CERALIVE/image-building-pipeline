@@ -11,15 +11,15 @@ for every board in that family. The local release command
 version. The approved workflow adapter and ephemeral VM scripts are [EXISTS].
 APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
 the first publication are owner actions, not performed by implementation/tests.
-The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release; the kernel is published to the beta channel only.
+The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release. Kernels are published to the stable APT channel only: `7.2.0-ceralive3` reached only the beta APT, and its identical successor `7.2.0-ceralive4` was drilled on 2026-11-03 and is on stable.
 
 | Part | State | Contract |
 |---|---|---|
 | Family compile, boot/DTB/firmware gates | EXISTS | [`kernel-build-from-source.md`](kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable per-version candidate | EXISTS | this page |
 | APT publication of a candidate | PARTIAL, owner-gated | this page, "Publish" |
-| Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), first published as `2026.10.102` on beta only | [`kernel-staging.md`](kernel-staging.md) |
-| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
+| Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), first published as `2026.10.102`, then `2026.11.1`, on beta only | [`kernel-staging.md`](kernel-staging.md) |
+| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03) | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
 Kernel compilation runs only inside a dedicated KVM guest on the owner's
 workstation, never on GitHub-hosted runners or a remote machine. Cheap lint
