@@ -54,6 +54,8 @@ assert "realhw" not in workflow["jobs"], (
     "BUG: the automated real-HW flashing gate was removed; images are hand-tested before a manual release"
 )
 
+import time
+cur = time.strftime("%Y.%-m", time.gmtime())
 version_step = next(s for s in steps if s.get("name") == "Resolve OS release version")
 assert version_step["env"]["OS_RELEASE_VERSION"] == "${{ vars.CERALIVE_OS_RELEASE_VERSION }}"
 assert steps.index(version_step) < next(
@@ -63,9 +65,11 @@ repo = workflow_path.resolve().parents[2]
 with tempfile.TemporaryDirectory() as tmp:
     output = Path(tmp) / "env"
     for ref, supplied, expected in (
-        ("refs/tags/v2026.10.99", "not-a-version", "2026.10.99"),
-        ("refs/heads/release/proof", "2026.10.99", "2026.10.99"),
-        ("refs/heads/release/proof", "2026.11.0", "2026.11.0"),
+        (f"refs/tags/v{cur}.99", "not-a-version", f"{cur}.99"),
+        ("refs/heads/release/proof", f"{cur}.99", f"{cur}.99"),
+        ("refs/heads/release/proof", f"{cur}.0", f"{cur}.0"),
+        ("refs/heads/release/proof", "2020.1.1", False),
+        ("refs/tags/v2020.1.1", "not-a-version", False),
         ("refs/heads/release/proof", "", None),
         ("refs/heads/release/proof", "not-a-version", None),
         ("refs/heads/release/proof", "v2026.10.99", None),
@@ -80,7 +84,10 @@ with tempfile.TemporaryDirectory() as tmp:
                  "GITHUB_ENV": str(output)},
             capture_output=True, text=True, timeout=10,
         )
-        if expected is None:
+        if expected is False:
+            assert result.returncode == 1, (ref, supplied, result)
+            assert not output.exists(), "past-month version wrote a GitHub environment entry"
+        elif expected is None:
             assert result.returncode == 2, (ref, supplied, result)
             assert not output.exists(), "invalid version wrote a GitHub environment entry"
         else:

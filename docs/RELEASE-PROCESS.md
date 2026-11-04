@@ -832,6 +832,9 @@ The candidate also carries `os-release-version`, the CalVer the build baked into
 (`CERALIVE_OS_RELEASE_VERSION`); `ci/check-candidate-os-version.sh` refuses to publish a
 candidate with no stamp or a stamp that differs from the requested `version`, because
 devices report the baked version. Set the variable before building the image.
+`ci/check-os-version-month.sh` also refuses a new build or `publish` whose version is not in the
+current UTC month (`YYYY.M`), so a stale variable cannot ship a past-month label; rebuild with the
+current month instead. `promote`, `refresh` and `prune` are not month-checked.
 Before approving, the owner must match the candidate run SHA/artifact and the
 real board hand-test; the workflow verifies the successful run and its downloaded
 archive, but does not perform a physical board test.

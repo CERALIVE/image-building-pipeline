@@ -281,6 +281,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 import yaml
 
@@ -316,7 +317,7 @@ bash() {
 with tempfile.TemporaryDirectory(dir=sys.argv[2]) as tmp:
     env = {**os.environ, "RUNNER_TEMP": tmp, "FIXTURE_SHA": sha,
            "GITHUB_REPOSITORY": "CERALIVE/image-building-pipeline",
-           "MODE": "publish", "CHANNEL": "beta", "VERSION": "2026.10.99",
+           "MODE": "publish", "CHANNEL": "beta", "VERSION": time.strftime("%Y.%-m", time.gmtime()) + ".99",
            "CANDIDATE_RUN": "123", "EXPECT_SERIAL": "", "EXPECT_ETAG": "",
            "EXPECT_KERNEL_VERSION": "", "EXPECT_DEB_SHA256": ""}
     both = subprocess.run(
