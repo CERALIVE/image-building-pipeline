@@ -67,7 +67,7 @@ active_role() {
 
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
-  local settled_power identity=unknown
+  local settled_power identity=unknown original_port_type
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
   [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
@@ -122,6 +122,14 @@ rock_back_power_correction() {
     stamp="$(stat -c %Y "${RUN_DIR}/corrected")" || return 0
     (( $(date +%s) - stamp >= 10 )) || return 0
   fi
+  original_port_type="$(active_role "${PORT_DIR}/port_type")"
+  case "${original_port_type}" in
+    dual | sink | source) ;;
+    *)
+      log "ERROR: cannot record Rock port_type before correction — no port_type write"
+      return 0
+      ;;
+  esac
   if ! mkdir -p "${RUN_DIR}" || ! touch "${RUN_DIR}/corrected"; then
     log "ERROR: cannot record Rock correction marker — no port_type write"
     return 0
@@ -133,7 +141,18 @@ rock_back_power_correction() {
   fi
   if ! printf '%s\n' dual >"${PORT_DIR}/port_type"; then
     log "ERROR: Rock port_type=dual write was rejected — retrying restoration"
-    printf '%s\n' dual >"${PORT_DIR}/port_type" || die "ERROR: cannot restore Rock port_type=dual"
+    if ! printf '%s\n' dual >"${PORT_DIR}/port_type"; then
+      log "ERROR: Rock port_type=dual retry was rejected — restoring recorded port_type=${original_port_type}"
+      if ! printf '%s\n' "${original_port_type}" >"${PORT_DIR}/port_type"; then
+        log "ERROR: Rock port_type=${original_port_type} restoration was rejected — interface rejected every restoration"
+      fi
+      if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
+        identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+      fi
+      printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
+        || log "ERROR: cannot record failed Rock attachment"
+      return 1
+    fi
   fi
 
   # The cycle removes and re-adds the partner asynchronously. This wait and its
@@ -171,7 +190,8 @@ if [[ -r "${compat}" ]] && tr '\0' '\n' <"${compat}" | grep -Fxq 'radxa,rock-5b-
     log "ERROR: cannot create Rock Type-C run directory"
   elif { exec {rock_lock}>"${RUN_DIR}/lock"; } 2>/dev/null; then
     if flock -w 20 "${rock_lock}"; then
-      rock_back_power_correction
+      # A recorded restoration fault must not reach DR_SWAP or fail media startup.
+      rock_back_power_correction || exit 0
       flock -u "${rock_lock}"
     elif [[ "${MODE}" == recheck ]]; then
       log "INFO: Rock correction lock timed out — next tick will recheck"

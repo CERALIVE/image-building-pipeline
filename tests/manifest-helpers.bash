@@ -1097,6 +1097,13 @@ run_typec_rock() {
       case "$target" in
         "$CERALIVE_TYPEC_CLASS_DIR/port0/port_type")
           builtin printf "%s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/writes"
+          if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/reject-dual-twice" ]] &&
+              (( $(grep -c "^dual$" "$CERALIVE_TYPEC_IIO_DIR/writes") <= 2 )); then
+            return 1
+          fi
+          if [[ "$2" != source && -e "$CERALIVE_TYPEC_IIO_DIR/reject-restore" ]]; then
+            return 1
+          fi
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/reject-dual-once" &&
                 ! -e "$CERALIVE_TYPEC_IIO_DIR/dual-rejected" ]]; then
             touch "$CERALIVE_TYPEC_IIO_DIR/dual-rejected"
@@ -1105,12 +1112,18 @@ run_typec_rock() {
           if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/detach" ]]; then
             rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
           fi
+          if [[ -f "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type" ]]; then
+            builtin printf "%s\n" "$2" >"$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"
+          fi
           ;;
       esac
       builtin printf "$@"
     }
     cat() {
-      if [[ "${*: -1}" == "$CERALIVE_TYPEC_IIO_DIR/iio:device7/in_voltage6_raw" &&
+      if [[ "${*: -1}" == "$CERALIVE_TYPEC_CLASS_DIR/port0/port_type" &&
+            -f "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type" ]]; then
+        command cat "$CERALIVE_TYPEC_IIO_DIR/accepted-port-type"
+      elif [[ "${*: -1}" == "$CERALIVE_TYPEC_IIO_DIR/iio:device7/in_voltage6_raw" &&
             -f "$CERALIVE_TYPEC_IIO_DIR/second" ]]; then
         if [[ -f "$CERALIVE_TYPEC_IIO_DIR/read" ]]; then
           command cat "$CERALIVE_TYPEC_IIO_DIR/second"

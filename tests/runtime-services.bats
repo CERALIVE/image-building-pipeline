@@ -976,6 +976,74 @@ EOF
   [ "$(cat "$root/typec/port0/port_type")" = dual ]
 }
 
+@test "typec policy: two rejected dual writes restore the recorded role and mark the attach failed" {
+  local root original mode
+  for mode in normal recheck; do
+    for original in dual sink; do
+      root="$BATS_TEST_TMPDIR/$mode-$original"
+      typec_rock_fixture "$root"
+      printf '[%s] source\n' "$original" >"$root/typec/port0/port_type"
+      cp "$root/typec/port0/port_type" "$root/iio/accepted-port-type"
+      mkdir -p "$root/typec/port0-partner/identity"
+      printf '0x12345678\n' >"$root/typec/port0-partner/identity/id_header"
+      touch "$root/iio/reject-dual-twice"
+      export CERALIVE_TYPEC_MODE="$mode" CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null
+
+      run run_typec_rock
+      printf '%s\n' "$output"
+      printf 'WRITE_ATTEMPTS:\n'
+      cat "$root/iio/writes"
+      printf 'LAST_ACCEPTED_PORT_TYPE=%s POLICY_EXIT=%s\n' \
+        "$(cat "$root/iio/accepted-port-type")" "$status"
+      [ "$status" -eq 0 ]
+      [ "$(cat "$root/iio/writes")" = "$(printf 'source\ndual\ndual\n%s' "$original")" ]
+      [ "$(cat "$root/iio/accepted-port-type")" = "$original" ]
+      [ "$(cat "$root/run/failed")" = 0x12345678 ]
+      [ "$(printf '%s\n' "$output" | grep -c 'ERROR:.*port_type=dual')" -eq 2 ]
+      [[ "$output" != *DR_SWAP* ]]
+      [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+
+      touch -d '-11 seconds' "$root/run/corrected"
+      : >"$root/iio/writes"
+      export CERALIVE_TYPEC_MODE=recheck
+      run run_typec_rock
+      [ "$status" -eq 0 ]
+      [ ! -s "$root/iio/writes" ]
+    done
+  done
+}
+
+@test "typec policy: rejected dual and recorded-role restoration log errors without blocking startup or retrying" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  printf '[sink] source dual\n' >"$root/typec/port0/port_type"
+  cp "$root/typec/port0/port_type" "$root/iio/accepted-port-type"
+  touch "$root/iio/reject-dual-twice" "$root/iio/reject-restore"
+  export CERALIVE_TYPEC_MODE=normal CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null
+
+  run run_typec_rock
+  printf '%s\n' "$output"
+  printf 'WRITE_ATTEMPTS:\n'
+  cat "$root/iio/writes"
+  printf 'LAST_ACCEPTED_PORT_TYPE=%s POLICY_EXIT=%s\n' \
+    "$(cat "$root/iio/accepted-port-type")" "$status"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\ndual\nsink' ]
+  [ "$(cat "$root/iio/accepted-port-type")" = source ]
+  [ "$(cat "$root/run/failed")" = unknown ]
+  [ "$(printf '%s\n' "$output" | grep -c 'ERROR:.*port_type=')" -eq 3 ]
+  [[ "$output" == *"interface rejected every restoration"* ]]
+  [[ "$output" != *DR_SWAP* ]]
+  [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+
+  touch -d '-11 seconds' "$root/run/corrected"
+  : >"$root/iio/writes"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -s "$root/iio/writes" ]
+}
+
 @test "typec policy: Rock correction never cycles without a writable correction marker" {
   local root="$BATS_TEST_TMPDIR/rock"
   typec_rock_fixture "$root"
