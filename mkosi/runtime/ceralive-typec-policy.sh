@@ -1,23 +1,15 @@
 #!/bin/bash
 #
-# ceralive-typec-policy — preserve the connector's dual-role policy and request
-# host data role whenever a settled attach leaves the board as a sink/device.
+# ceralive-typec-policy — request host data role on settled sink/device attaches.
 #
-# The connector remains DRP permanently. Charger and power-bank peers must still
-# be able to make the board a sink, so this policy never changes the connector's
-# supported port role or its device-tree Try preference. DR_SWAP eligibility is
-# deliberately role-only: a charge-only peer may reject the host request, which
-# is harmless because the write/readback path stops after two logged attempts.
-#
-# PR_SWAP is intentionally not implemented. Todo 20 recorded MIXED, not the
-# required zero-failure ACCEPTED verdict, and todo 26 records the same hardware
-# result in the kernel-patch repository. Evidence:
-#   rk3588-kernel-patches/README.md
-#   rk3588-kernel-patches/docs/UPSTREAM-STATUS.md
-# The camera-identification condition applied only to that omitted PR_SWAP path.
-# Consequently this script has no code path that writes the live power role.
-# The connector mode and preferred-role attributes are likewise read-only policy
-# owned by the kernel/device tree; the sole writable surface here is data_role.
+# Rock 5B+ exception (CeraUI#414): its kernel must start sink-first so a front
+# charger cannot cut the board's only supply during probe. Only a confirmed back
+# input (SARADC channel 6, two readings) permits source preference and a bounded
+# source->dual cycle to make an attached camera charge. Absent/unknown back power
+# leaves the connector alone. Other boards retain their existing DR_SWAP policy.
+# PR_SWAP is never requested: the proven correction is a port_type cycle, always
+# restoring dual, rather than writing power_role. A tmpfs marker suppresses the
+# cycle's partner-add recursion; a failed-attach marker prevents charger loops.
 #
 # udev starts the systemd oneshot on partner and port add events. The boot enable
 # is a second coldplug path, so every run inspects CURRENT sysfs state and is safe
@@ -30,6 +22,12 @@
 #   CERALIVE_TYPEC_POLL        settle poll interval seconds (default 0.25)
 #   CERALIVE_TYPEC_DATA_ROLE_WRITE write target (default current data_role;
 #                                  test-only rejected/readback seam)
+#   CERALIVE_TYPEC_DT_ROOT     device tree (default /proc/device-tree)
+#   CERALIVE_TYPEC_IIO_DIR     IIO devices (default /sys/bus/iio/devices)
+#   CERALIVE_TYPEC_RUN_DIR     volatile state (default /run/ceralive-typec)
+#   CERALIVE_TYPEC_ADC_RETRY   unknown ADC retry seconds (default 15)
+#   CERALIVE_TYPEC_MODE        recheck skips ADC retry and the DR_SWAP loop
+#   CERALIVE_TYPEC_SETTLED_POWER_ROLE post-cycle readback (default power_role)
 
 set -uo pipefail
 
@@ -48,6 +46,9 @@ PARTNER_DIR="${PORT_DIR}-partner"
 DATA_ROLE="${PORT_DIR}/data_role"
 POWER_ROLE="${PORT_DIR}/power_role"
 DATA_ROLE_WRITE="${CERALIVE_TYPEC_DATA_ROLE_WRITE:-${DATA_ROLE}}"
+RUN_DIR="${CERALIVE_TYPEC_RUN_DIR:-/run/ceralive-typec}"
+MODE="${CERALIVE_TYPEC_MODE:-normal}"
+rock_settled_source=0
 
 # active_role <file> — the entry the kernel marked active. `[dual] source sink`
 # -> dual. Falls back to the raw trimmed value for a kernel that ever drops the
@@ -64,6 +65,126 @@ active_role() {
   fi
 }
 
+rock_back_power_correction() {
+  local adc first second decision=unknown previous="" retry deadline stamp=0
+  local settled_power identity=unknown
+  retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
+  [[ "${MODE}" != recheck ]] || retry=0
+  [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
+
+  # A detached partner starts a new attach, regardless of the current ADC result.
+  if [[ ! -e "${PARTNER_DIR}" ]]; then
+    rm -f "${RUN_DIR}/failed"
+  fi
+  deadline=$((SECONDS + retry))
+  while :; do
+    for adc in "${CERALIVE_TYPEC_IIO_DIR:-/sys/bus/iio/devices}"/iio:device*; do
+      [[ -r "${adc}/name" && "$(cat "${adc}/name")" == fec10000.adc ]] || continue
+      first="$(cat "${adc}/in_voltage6_raw" 2>/dev/null)"
+      sleep 0.1
+      second="$(cat "${adc}/in_voltage6_raw" 2>/dev/null)"
+      if [[ "${first}" =~ ^[0-9]+$ && "${second}" =~ ^[0-9]+$ ]]; then
+        if (( 10#${first} >= 500 && 10#${second} >= 500 )); then
+          decision=present
+        elif (( 10#${first} <= 100 && 10#${second} <= 100 )); then
+          decision=absent
+        fi
+      fi
+      break
+    done
+    [[ "${decision}" == unknown ]] && (( SECONDS < deadline )) || break
+    sleep 1
+  done
+  [[ ! -r "${RUN_DIR}/state" ]] || previous="$(cat "${RUN_DIR}/state")"
+  if [[ "${MODE}" != recheck || "${previous}" != "${decision}" ]]; then
+    log "INFO: Rock back power=${decision}"
+  fi
+  printf '%s\n' "${decision}" >"${RUN_DIR}/state" || log "ERROR: cannot record Rock back-power state"
+  [[ "${decision}" == present ]] || return 0
+
+  # Set Try.SRC before the no-partner exit, so the next attach needs no reset.
+  if [[ ! -r "${PORT_DIR}/preferred_role" ||
+        "$(active_role "${PORT_DIR}/preferred_role")" != source ]]; then
+    log "INFO: Rock back power present: requesting preferred_role=source"
+    if ! printf '%s\n' source >"${PORT_DIR}/preferred_role"; then
+      log "ERROR: cannot set Rock source preference"
+      return 0
+    fi
+  fi
+  [[ -e "${PARTNER_DIR}" && ! -e "${RUN_DIR}/failed" ]] || return 0
+  deadline=$((SECONDS + WAIT_SECONDS))
+  while [[ ! -r "${POWER_ROLE}" ]]; do
+    (( SECONDS < deadline )) || return 0
+    sleep "${POLL_INTERVAL}"
+  done
+  [[ -e "${PARTNER_DIR}" && "$(active_role "${POWER_ROLE}")" == sink ]] || return 0
+  if [[ -e "${RUN_DIR}/corrected" ]]; then
+    stamp="$(stat -c %Y "${RUN_DIR}/corrected")" || return 0
+    (( $(date +%s) - stamp >= 10 )) || return 0
+  fi
+  if ! mkdir -p "${RUN_DIR}" || ! touch "${RUN_DIR}/corrected"; then
+    log "ERROR: cannot record Rock correction marker — no port_type write"
+    return 0
+  fi
+  log "INFO: Rock back power present: cycling port_type=source then dual"
+  if ! printf '%s\n' source >"${PORT_DIR}/port_type"; then
+    log "ERROR: Rock port_type=source write was rejected"
+    return 0
+  fi
+  if ! printf '%s\n' dual >"${PORT_DIR}/port_type"; then
+    log "ERROR: Rock port_type=dual write was rejected — retrying restoration"
+    printf '%s\n' dual >"${PORT_DIR}/port_type" || die "ERROR: cannot restore Rock port_type=dual"
+  fi
+
+  # The cycle removes and re-adds the partner asynchronously. This wait and its
+  # failure receipt also run under the periodic recheck, without any DR_SWAP.
+  deadline=$((SECONDS + WAIT_SECONDS))
+  rock_settle_deadline="${deadline}"
+  settled_power="${CERALIVE_TYPEC_SETTLED_POWER_ROLE:-${POWER_ROLE}}"
+  while :; do
+    if [[ -e "${PARTNER_DIR}" && -r "${settled_power}" ]]; then
+      case "$(active_role "${settled_power}")" in
+        source) rock_settled_source=1; return 0 ;;
+        sink)
+          # A sink read immediately after the write may still be the old attach.
+          if (( SECONDS >= deadline )); then
+            if [[ -r "${PARTNER_DIR}/identity/id_header" ]]; then
+              identity="$(cat "${PARTNER_DIR}/identity/id_header")"
+            fi
+            break
+          fi
+          ;;
+      esac
+    fi
+    (( SECONDS < deadline )) || break
+    sleep "${POLL_INTERVAL}"
+  done
+  printf '%s\n' "${identity}" >"${RUN_DIR}/failed" \
+    || log "ERROR: cannot record failed Rock attachment"
+}
+
+# Check the board before creating state or opening a lock: non-Rock runs retain
+# the original behavior, including when the state directory is unwritable.
+compat="${CERALIVE_TYPEC_DT_ROOT:-/proc/device-tree}/compatible"
+if [[ -r "${compat}" ]] && tr '\0' '\n' <"${compat}" | grep -Fxq 'radxa,rock-5b-plus'; then
+  if ! mkdir -p "${RUN_DIR}"; then
+    log "ERROR: cannot create Rock Type-C run directory"
+  elif { exec {rock_lock}>"${RUN_DIR}/lock"; } 2>/dev/null; then
+    if flock -w 20 "${rock_lock}"; then
+      rock_back_power_correction
+      flock -u "${rock_lock}"
+    elif [[ "${MODE}" == recheck ]]; then
+      log "INFO: Rock correction lock timed out — next tick will recheck"
+    else
+      log "ERROR: Rock correction lock timed out"
+    fi
+    exec {rock_lock}>&-
+  else
+    log "ERROR: cannot open Rock Type-C lock"
+  fi
+fi
+[[ "${MODE}" != recheck && "${rock_settled_source}" == 0 ]] || exit 0
+
 if [[ ! -d "${CLASS_DIR}" ]]; then
   log "no Type-C connector class at ${CLASS_DIR} — nothing to inspect"
   exit 0
@@ -77,7 +198,8 @@ if [[ ! -e "${PARTNER_DIR}" ]]; then
   exit 0
 fi
 
-deadline=$((SECONDS + WAIT_SECONDS))
+# Share the post-cycle deadline rather than adding a third settle budget.
+deadline="${rock_settle_deadline:-$((SECONDS + WAIT_SECONDS))}"
 while :; do
   if [[ -r "${POWER_ROLE}" && -r "${DATA_ROLE}" ]]; then
     power="$(active_role "${POWER_ROLE}")"

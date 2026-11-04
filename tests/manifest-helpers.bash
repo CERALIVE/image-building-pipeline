@@ -1070,6 +1070,62 @@ typec_fake_sysfs() {
   printf '%s\n' "$3" >"$1/port0/data_role"
 }
 
+# Rock back-input measurements captured on 2026-11-04: ~910 powered, ~3 absent.
+typec_rock_fixture() {
+  local root="$1"
+  typec_fake_sysfs "$root/typec" 'source [sink]' 'host [device]'
+  mkdir -p "$root/dt" "$root/iio/iio:device7"
+  printf 'radxa,rock-5b-plus\0rockchip,rk3588\0' >"$root/dt/compatible"
+  printf 'fec10000.adc\n' >"$root/iio/iio:device7/name"
+  printf '910\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  printf '[dual] source sink\n' >"$root/typec/port0/port_type"
+  printf '[sink] source\n' >"$root/typec/port0/preferred_role"
+  export CERALIVE_TYPEC_DT_ROOT="$root/dt"
+  export CERALIVE_TYPEC_IIO_DIR="$root/iio"
+  export CERALIVE_TYPEC_RUN_DIR="$root/run"
+  export CERALIVE_TYPEC_CLASS_DIR="$root/typec"
+  export CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_ADC_RETRY=0
+}
+
+# Observe the actual redirected writes; emulate only the kernel's post-cycle
+# detach and ADC changes, which regular files cannot produce themselves.
+run_typec_rock() {
+  bash -c '
+    printf() {
+      local target
+      target="$(readlink "/proc/$$/fd/1")"
+      case "$target" in
+        "$CERALIVE_TYPEC_CLASS_DIR/port0/port_type")
+          builtin printf "%s\n" "$2" >>"$CERALIVE_TYPEC_IIO_DIR/writes"
+          if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/reject-dual-once" &&
+                ! -e "$CERALIVE_TYPEC_IIO_DIR/dual-rejected" ]]; then
+            touch "$CERALIVE_TYPEC_IIO_DIR/dual-rejected"
+            return 1
+          fi
+          if [[ "$2" == dual && -e "$CERALIVE_TYPEC_IIO_DIR/detach" ]]; then
+            rm -rf "$CERALIVE_TYPEC_CLASS_DIR/port0-partner"
+          fi
+          ;;
+      esac
+      builtin printf "$@"
+    }
+    cat() {
+      if [[ "${*: -1}" == "$CERALIVE_TYPEC_IIO_DIR/iio:device7/in_voltage6_raw" &&
+            -f "$CERALIVE_TYPEC_IIO_DIR/second" ]]; then
+        if [[ -f "$CERALIVE_TYPEC_IIO_DIR/read" ]]; then
+          command cat "$CERALIVE_TYPEC_IIO_DIR/second"
+        else
+          touch "$CERALIVE_TYPEC_IIO_DIR/read"
+          command cat "$@"
+        fi
+      else
+        command cat "$@"
+      fi
+    }
+    source "$1"
+  ' bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
+}
+
 
 
 

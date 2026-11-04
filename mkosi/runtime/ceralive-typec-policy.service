@@ -12,7 +12,7 @@ Before=cerastream.service ceralive.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/ceralive-typec-policy
-TimeoutStartSec=30
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target

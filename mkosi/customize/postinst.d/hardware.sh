@@ -30,14 +30,14 @@ if ! declare -F die >/dev/null 2>&1; then
   die() { log "FATAL: $*"; exit 1; }
 fi
 
-# USB-C capture reliability: keep the connector dual-role and request the
-# role-only DR_SWAP for any settled sink/device attach.
+# USB-C capture reliability: preserve DR_SWAP and install the Rock-only back-power
+# correction plus its timer for power connected after the initial attach.
 # udev hands port/partner add events to the same serialized systemd oneshot; the
 # enabled unit retains deterministic coldplug ordering before the media services.
 # Installed from committed artifacts under CERALIVE_RUNTIME_SRC, never inlined.
 # TYPEC_{UNIT,SBIN,RULES}_DIR override install dirs for the offline contract.
 setup_typec_policy() {
-  log "installing the adaptive USB-C data-role policy (ceralive-typec-policy.service — preserve DRP and swap any settled sink/device attach to host)"
+  log "installing the adaptive USB-C policy and Rock back-power recheck"
   local src="${CERALIVE_RUNTIME_SRC:-}"
   [[ -n "${src}" && -f "${src}/ceralive-typec-policy.sh" ]] \
     || die "typec-policy script not found: ${src}/ceralive-typec-policy.sh (is \$SRCDIR/runtime mounted?)"
@@ -45,15 +45,22 @@ setup_typec_policy() {
     || die "typec-policy unit not found: ${src}/ceralive-typec-policy.service (is \$SRCDIR/runtime mounted?)"
   [[ -f "${src}/99-ceralive-typec-policy.rules" ]] \
     || die "typec-policy udev rules not found: ${src}/99-ceralive-typec-policy.rules (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-typec-recheck.timer" ]] \
+    || die "typec-policy recheck timer not found: ${src}/ceralive-typec-recheck.timer (is \$SRCDIR/runtime mounted?)"
+  [[ -f "${src}/ceralive-typec-recheck.service" ]] \
+    || die "typec-policy recheck service not found: ${src}/ceralive-typec-recheck.service (is \$SRCDIR/runtime mounted?)"
 
   local sbin_dir="${TYPEC_SBIN_DIR:-/usr/local/sbin}"
   local unit_dir="${TYPEC_UNIT_DIR:-/etc/systemd/system}"
   local rules_dir="${TYPEC_RULES_DIR:-/etc/udev/rules.d}"
   install -D -m 0755 "${src}/ceralive-typec-policy.sh" "${sbin_dir}/ceralive-typec-policy"
   install -D -m 0644 "${src}/ceralive-typec-policy.service" "${unit_dir}/ceralive-typec-policy.service"
+  install -D -m 0644 "${src}/ceralive-typec-recheck.service" "${unit_dir}/ceralive-typec-recheck.service"
+  install -D -m 0644 "${src}/ceralive-typec-recheck.timer" "${unit_dir}/ceralive-typec-recheck.timer"
   install -D -m 0644 "${src}/99-ceralive-typec-policy.rules" "${rules_dir}/99-ceralive-typec-policy.rules"
 
   enable_service ceralive-typec-policy.service
+  enable_service ceralive-typec-recheck.timer
 }
 
 # Thermal comfort: lower the pwm-fan zone's FIRST `active` trip at boot.
