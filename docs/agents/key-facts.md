@@ -21,8 +21,10 @@ the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
 is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
-The production source revision is `7.2.0-ceralive4`, the revision-3 kernel re-tagged for stable promotion;
-tag creation and publication remain owner steps.
+The production source revision is `7.2.0-ceralive5`, adding nftables reject for
+NetworkManager shared mode. Its planned Rock 5B+ sink-first Type-C update still
+awaits the owner-approved patch-series merge and pin; tag creation, the drill
+and publication remain owner steps. Revision 4 is already on stable APT.
 
 **Kernel slot roles [PARTIAL: images on beta only; kernels on the stable APT only].** Slot marking stays scoped. The
 healthcheck is the only `mark-good` caller for the BOOTED slot, after boot

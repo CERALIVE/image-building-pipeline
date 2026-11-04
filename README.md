@@ -108,12 +108,13 @@ against immutable release metadata and restore its config/module inventory
 without compiling. `--release` image builds and production candidates refuse
 `kernel_not_on_apt`; local builds may compile only an unpublished version above
 all released kernels.
-The production source pin is `7.2.0-ceralive4`; revision 2 was the first kernel-only publication, revision 3 the first bench-drilled release, and revision 4 re-tags that kernel on the current `master` for stable promotion;
+The production source pin is `7.2.0-ceralive5`, adding nftables reject for NetworkManager shared mode. The Rock 5B+ sink-first Type-C update planned for revision 5 still awaits its owner-approved patch-series merge and pin. Revision 4 was drilled and published to stable APT;
 the tag, candidate, Release and APT publication remain separate owner steps.
 See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
 The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
 and reuse; the fingerprinted producer and its inputs stay byte-identical to the
-verified stack. A digest and exclusion regression protects that boundary.
+verified stack except for the revision-5 reject fragment and required list.
+A digest and exclusion regression protects that boundary.
 
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
 container (`ci/Dockerfile`). A local full-device build retains its uncompressed,
@@ -1272,6 +1273,8 @@ confirmation, and retires overlays on verified mirror or full OS install.
 Host crash-boundary tests cover these helpers; images that carry the stager and pin a
 CeraUI payload at or above the default minimum `2026.10.1` advertise `kernel-apt-stage`.
 Images that carry it (`2026.10.102`, then `2026.11.1`) are published to the beta channel only; no OS image is on stable. Kernels are published to the stable APT channel only: the kernel-only path was bench-drilled on both boards with `7.2.0-ceralive3` (2026-11-02, which reached only the beta APT) and `7.2.0-ceralive4` (2026-11-03), and `7.2.0-ceralive4` is on the stable APT.
+The source pin `7.2.0-ceralive5` adds nftables reject for NetworkManager shared mode;
+its planned Rock 5B+ sink-first Type-C pin, drill and publication remain pending.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed

@@ -387,7 +387,7 @@ import sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 provenance = data['provenance']
 # The captured revision-1 archive stays historical; only the packaging revision advances.
-assert sys.argv[6] == '7.2.0-ceralive4'
+assert sys.argv[6] == '7.2.0-ceralive5'
 assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == [*sys.argv[3:6], '7.2.0-ceralive1']
 firmware = json.loads(pathlib.Path(sys.argv[7]).read_text())
 assert [provenance[key] for key in ('firmware_package', 'firmware_version', 'firmware_archive_sha256')] == [firmware[key] for key in ('package', 'version', 'archive_sha256')]
