@@ -89,6 +89,7 @@ jobs:
             echo "::error::OS release version must be YYYY.M.P CalVer: use a vYYYY.M.P tag or set the required CERALIVE_OS_RELEASE_VERSION Actions variable for release branches."
             exit 2
           }
+          bash ci/check-os-version-month.sh "${version}"
           printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "${version}" >>"${GITHUB_ENV}"
       - name: Refresh first-party release evidence
         env:

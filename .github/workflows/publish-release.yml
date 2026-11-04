@@ -78,6 +78,7 @@ jobs:
           fi
           if [[ "$MODE" == publish ]]; then
             [[ "$CANDIDATE_RUN" =~ ^[1-9][0-9]*$ ]] || exit 2
+            bash ci/check-os-version-month.sh "$VERSION"
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN}" \
               --jq '.head_sha' >"${RUNNER_TEMP}/candidate-sha"
             [[ "$(<"${RUNNER_TEMP}/candidate-sha")" =~ ^[0-9a-f]{40}$ ]]
