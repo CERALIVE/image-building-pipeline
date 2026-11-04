@@ -9,7 +9,7 @@ export ROOT WORK
 
 # Independent stack digests bind both the producer bytes and its coverage list.
 (cd "${ROOT}" && sha256sum --check tests/fixtures/kernel-producer.sha256)
-ok 'all production fingerprint inputs and the coverage function equal stack 9b89e6f'
+ok 'production inputs equal stack 9b89e6f plus revision-5 nftables-reject fragment/required-list changes'
 
 kernel_test_repo "${WORK}/repo"
 kernel_test_artifact "${WORK}/artifact" 7.2.0-ceralive4 "${WORK}/repo"

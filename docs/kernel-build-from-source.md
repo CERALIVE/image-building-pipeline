@@ -875,9 +875,10 @@ Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
 It sources the unchanged producer's validators/fingerprint function and calls
 the producer for actual compilation. It never overrides or edits that function.
-`lib/build-kernel.sh` and every other fingerprinted input remain byte-identical
-to stack `9b89e6f`: release orchestration cannot change a kernel's identity.
-`tests/fixtures/kernel-producer.sha256` freezes the production inputs and coverage
+`lib/build-kernel.sh` and the other fingerprinted inputs remain byte-identical
+to stack `9b89e6f`, except for the revision-5 nftables-reject fragment and
+required-list changes: release orchestration cannot change a kernel's identity.
+`tests/fixtures/kernel-producer.sha256` freezes that baseline and the coverage
 function; `tests/kernel-producer-identity.test.sh` also proves that changes to
 release-only files leave the computed fingerprint unchanged.
 
