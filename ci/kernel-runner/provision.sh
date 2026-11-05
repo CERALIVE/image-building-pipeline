@@ -33,4 +33,7 @@ printf 'qemu_fw_cfg\n' >/etc/modules-load.d/ceralive-runner.conf
 touch /etc/cloud/cloud-init.disabled
 systemctl disable --now ssh.service ssh.socket
 systemctl mask --now serial-getty@ttyS0.service getty@tty1.service
+# A job VM is disposable and reproducible: a persistent apt timer firing a random delay after boot would
+# upgrade packages mid-job, restart docker.service and stop ceralive-runner.service (Requires=docker).
+systemctl mask --now apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service
 printf '\nCERALIVE_BASE_READY\n' >/dev/ttyS0
