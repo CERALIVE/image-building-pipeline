@@ -831,14 +831,14 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.10.1 (tag commit `81c16be`) using its exact
-per-architecture Debian versions, `2026.10.1-20261029T064208.81c16be` (amd64) and
-`2026.10.1-20261029T064207.81c16be` (arm64). It retains the unified device update
+CeraUI is pinned to stable release v2026.11.0 (tag commit `c8387c1`) using its exact
+per-architecture Debian versions, `2026.11.0-20261105T023023.c8387c1` (amd64) and
+`2026.11.0-20261105T023029.c8387c1` (arm64). It retains the unified device update
 orchestrator. Both downloaded Debian
-assets matched their published SHA-256 sidecars and the authenticated publisher's
-served-release proof and signed-index health checks. Direct index requests returned
-HTTP 403; neither architecture was installed or tested on hardware for this pin.
-See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-10-29).
+assets matched their published SHA-256 sidecars and GitHub asset digests.
+APT serving and hardware were not checked for this pin; the release catalog
+refresh remains a separate final commit.
+See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-11-05).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -1203,7 +1203,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.10.1 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.11.0 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images

@@ -271,7 +271,7 @@ untouched.
 
 ## CeraUI pin receipt — 2026-10-29
 
-The image selects stable [CeraUI v2026.10.1](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.10.1),
+This historical receipt selected stable [CeraUI v2026.10.1](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.10.1),
 published 2026-10-29T06:43:44Z, tag commit
 `81c16be0a0ff842ab73c6ef8d175c411b746a964`. Both Debian assets and their sidecars
 were downloaded with `gh release download v2026.10.1 -R CERALIVE/CeraUI` into
@@ -301,6 +301,33 @@ the two old device pins and registry provenance. Other component evidence and
 all other pins remain unchanged; no timestamp was invented, rollback exception
 added or size budget changed. Neither architecture was installed or tested on
 hardware. This pin change publishes no image or kernel and changes no channel pointer.
+
+## CeraUI pin receipt — 2026-11-05
+
+The image selects stable [CeraUI v2026.11.0](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.0),
+published 2026-11-05T02:32:20Z, tag commit
+`c8387c14e9c4b28b62aadd7f6125689b5b0fb100`. Authenticated release metadata
+confirms a published, non-draft, non-prerelease release. Both Debian assets and
+their SHA-256 sidecars were downloaded into an empty directory outside the
+repository. Independent `sha256sum -c` checks and GitHub asset digests agree;
+`dpkg-deb -f` confirms package `ceralive-device`, the exact versions and their
+architectures.
+
+| Architecture | Debian control version | Release asset SHA-256 = sidecar SHA-256 = GitHub asset digest |
+|---|---|---|
+| arm64 | `2026.11.0-20261105T023029.c8387c1` | `436fadceadbf7e5cdcf4e83df9c37daf9dd99e617eaa9290c7773dada9426cf6` |
+| amd64 | `2026.11.0-20261105T023023.c8387c1` | `c53b56a7318a5dd90837aea5961108a64ddab998a7f358d9e06bc96c2ba73c96` |
+
+The manifest's architecture selectors and repo-local provenance registry name
+these exact release assets. The existing package-contract test independently
+checks the registry tag and both fetcher-selected package versions.
+
+The committed release catalog remains unchanged. Its authenticated refresh must
+be the final commit after the owner decides which prerequisite PRs land before
+this branch; its 168-hour lifetime must cover the subsequent release steps.
+APT indexes, serving, installation and hardware were not checked for this pin.
+No mTLS credentials were read. This receipt is release-asset identity proof,
+not image qualification, kernel publication or a channel-pointer change.
 
 ## Intentional rollback
 
