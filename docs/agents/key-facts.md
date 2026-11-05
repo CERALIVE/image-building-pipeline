@@ -21,7 +21,7 @@ the shared non-cancelling `ceralive-kernel-floor` job group. Strict channel JSON
 is unchanged.
 See [kernel reuse](../kernel-build-from-source.md#released-kernel-reuse-exists)
 and [release admission](../RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent).
-The production source revision is `7.2.0-ceralive5`, adding nftables reject for
+The production source revision is `7.2.0-ceralive6`, adding nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
 the kernel-patches PR #28 pin; tag creation, the drill
 and publication remain owner steps. Revision 4 is already on stable APT.

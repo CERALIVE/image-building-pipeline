@@ -12,9 +12,9 @@ version. The approved workflow adapter and ephemeral VM scripts are [EXISTS].
 APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
 each publication are owner actions, not performed by implementation/tests.
 The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release. Kernels are published to the stable APT channel only: `7.2.0-ceralive3` reached only the beta APT, and its identical successor `7.2.0-ceralive4` was drilled on 2026-11-03 and is on stable.
-The production source pin is now `7.2.0-ceralive5`, adding nftables reject for
+The production source pin is now `7.2.0-ceralive6`, adding nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; revision 5 has not been
+the kernel-patches PR #28 pin; revision 6 (revision 5's kernel, re-tagged; revision 5 itself was never published) has not been
 drilled or published.
 
 | Part | State | Contract |
@@ -23,7 +23,7 @@ drilled or published.
 | Immutable per-version candidate | EXISTS | this page |
 | APT publication of a candidate | PARTIAL, owner-gated | this page, "Publish" |
 | Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), first published as `2026.10.102`, then `2026.11.1`, on beta only | [`kernel-staging.md`](kernel-staging.md) |
-| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); source revision 5 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
+| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); source revision 6 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
 Kernel compilation runs only inside a dedicated KVM guest on the owner's
 workstation, never on GitHub-hosted runners or a remote machine. Cheap lint

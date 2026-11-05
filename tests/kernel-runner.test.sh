@@ -32,6 +32,12 @@ else
   [[ ! -e "${WORK}/armbian.gpg" ]] && ok 'wrong public key digest refuses without output' \
     || bad 'wrong public key digest left an output'
 fi
+# A job VM must not upgrade packages mid-job: that restarts docker.service, which ceralive-runner.service requires.
+for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service; do
+  if grep -E '^systemctl mask ' "${ROOT}/ci/kernel-runner/provision.sh" | grep -qF " ${unit}"; then
+    ok "base provisioning masks ${unit}"
+  else bad "base provisioning leaves ${unit} runnable"; fi
+done
 touch "${WORK}/base.qcow2"
 printf 'exit 0\n' >"${WORK}/check.sh"
 printf 'PUBLIC_SOURCE_CAPSULE\n' >"${WORK}/source.tar"

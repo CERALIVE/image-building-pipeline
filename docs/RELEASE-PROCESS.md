@@ -136,7 +136,7 @@ exactly what the attestation yields; it is never overwritten. The OTA signer sig
 the owner's attestation. It does not run the floor, which cannot pass before the sidecars
 exist, and extending the allowlist needs a reviewed change.
 
-The production source pin is `7.2.0-ceralive5`, adding nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled on both boards and published to stable APT; revision 5 has not been drilled or published.
+The production source pin is `7.2.0-ceralive6`, adding nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled on both boards and published to stable APT; revision 6 (revision 5's kernel, re-tagged; revision 5 itself was never published) has not been drilled or published.
 Tag creation, GitHub settings, JIT registration, dispatch, environment approval and actual publication
 are owner actions not performed by implementation/tests. PR CI runs offline
 command/bench/workflow/runner fixtures through `tests/registry.tsv`; the release
