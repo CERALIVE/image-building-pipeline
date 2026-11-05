@@ -706,6 +706,13 @@ CONFIG_NFT_MASQ=y
 # `numgen random mod <N> : verdict` map; without this the whole balancer degrades
 # to a single uplink.
 CONFIG_NFT_NUMGEN=y
+# NetworkManager 1.52 shared mode (ipv4.method=shared, nft backend) emits
+# `iifname "<if>" reject` / `oifname "<if>" reject` in `table ip nm-shared-<if>`
+# (src/core/nm-firewall-utils.c L687-754 @995a28fa). Without reject the whole
+# batch fails: CeraUI sharing-diag's hotspot NAT floor never loads (CeraUI#416).
+# In v7.2 NFT_REJECT has no extra parent; NFT_REJECT_INET/IPV4/IPV6 default to
+# NFT_REJECT and select NF_REJECT_IPV4/IPV6, so only the parent is declared.
+CONFIG_NFT_REJECT=y
 # The per-uplink `ip rule` band the marks select into, used by CeraUI's
 # uplink-steering module for its client-zone band. (It is NOT the retired SRTLA
 # source-policy layer — that installed priority-100 source rules and was removed

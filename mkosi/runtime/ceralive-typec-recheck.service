@@ -1,0 +1,9 @@
+[Unit]
+Description=CeraLive Rock USB-C back-power recheck
+ConditionFirmware=device-tree-compatible(radxa,rock-5b-plus)
+
+[Service]
+Type=oneshot
+Environment=CERALIVE_TYPEC_MODE=recheck
+ExecStart=/usr/local/sbin/ceralive-typec-policy
+TimeoutStartSec=60

@@ -1,6 +1,6 @@
-# Effective production file inputs of kernel_input_fingerprint at stack 9b89e6f.
+# Production inputs at stack 9b89e6f plus revision-5 nftables-reject fragment/required-list changes.
 # artifact-cache.sh also freezes the input-selection code; release-only files stay outside it.
-97c724924e9791b4d2625fe0930662649b27f8b20e270f859a425ac551c8a656  manifests/kernel/rk3588-edge.fragment
+9c2af3a1e2a2a3b2e842d01adc4e38fb8b6a88372e69ecd58a0645267db34cdf  manifests/kernel/rk3588-edge.fragment
 08a4e0cfd874dc064a13339b7aa6d92acd0868aeb121e25ce70d0781761b3dd5  lib/build-kernel.sh
 e1bcce8314d650df690eadd9dff677d6a4bc77c43dc1919a20417c234cd0ecd2  lib/kernel/config.sh
 bce57f7a3be6bbea6830429cdcca50bc84dc971165b9671f69984f435d7e9bca  lib/kernel/checkout.sh
@@ -14,6 +14,6 @@ e6f0329616f97fe56c8e5bb0719b797ca17dc17dda8c4037a3a7d73e05df047d  lib/verify-boo
 b9b76a9b46504811128a1c5ca06142e572afa35edf5d8379e678a1f2d6cc5e88  mkosi/runtime/ceralive-kernel-boot-staging.sh
 dd2476a20adb0aea0c682a065167657fb8d96b450d8cfc69a9e7e1b4932c4bf2  mkosi/customize/bluetooth-firmware.sh
 f67a73fcb7612213fedf5e13e16bdb6e0c899989b1b6035ec2ebeb35ae48340f  manifests/rk3588-bluetooth-firmware-roots.txt
-c62b0e169542529dc33bb828911c5ba6c28299c1790638f2c702e889ae345426  manifests/kernel/required-symbols.list
+59d42dd5228925e6afac74a0e54cddd52c68af6ab350ce0c1a07a8d40254c9eb  manifests/kernel/required-symbols.list
 5a1f2923220861e1df60b732d2c43db3a3073bb4af532be81a0eac277896e3af  manifests/kernel/forbidden-symbols.list
 192d88e2a3ca48b69400c64977ab493e55afd124a0b4880815f2321d7018f06f  ci/Dockerfile.kernel

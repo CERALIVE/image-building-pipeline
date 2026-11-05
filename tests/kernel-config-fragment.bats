@@ -317,6 +317,14 @@ EOF
   run ! grep -qx 'CONFIG_NF_TABLES=m' "$FRAGMENT"
 }
 
+@test "rk3588-edge.fragment: NetworkManager shared mode has the built-in nftables reject closure" {
+  grep -qx 'CONFIG_NFT_REJECT=y' "$FRAGMENT"
+  local symbol
+  for symbol in NFT_REJECT NFT_REJECT_INET NFT_REJECT_IPV4 NFT_REJECT_IPV6 NF_REJECT_IPV4 NF_REJECT_IPV6; do
+    grep -qx "CONFIG_${symbol}=y" "$REQUIRED"
+  done
+}
+
 @test "rk3588-edge.fragment: the system-uncached dma-heap declares its own symbol under its parent" {
   # Patch 0009's heap is what makes MPP hardware encode work on this track:
   # librockchip_mpp hard-codes the heap NAME `system-uncached` and does not fall

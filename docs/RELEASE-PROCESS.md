@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.10.1's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.11.0's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -136,7 +136,7 @@ exactly what the attestation yields; it is never overwritten. The OTA signer sig
 the owner's attestation. It does not run the floor, which cannot pass before the sidecars
 exist, and extending the allowlist needs a reviewed change.
 
-The production source pin is `7.2.0-ceralive4`; revision 2 was the first kernel-only publication, revision 3 the first bench-drilled release, and revision 4 re-tags that kernel on the current `master` for stable promotion.
+The production source pin is `7.2.0-ceralive5`, adding nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled on both boards and published to stable APT; revision 5 has not been drilled or published.
 Tag creation, GitHub settings, JIT registration, dispatch, environment approval and actual publication
 are owner actions not performed by implementation/tests. PR CI runs offline
 command/bench/workflow/runner fixtures through `tests/registry.tsv`; the release
@@ -261,19 +261,19 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.10.1**
-(tag commit `81c16be0a0ff842ab73c6ef8d175c411b746a964`), published
-2026-10-29T06:43:44Z. The exact Debian versions are
-`2026.10.1-20261029T064207.81c16be` (arm64) and
-`2026.10.1-20261029T064208.81c16be` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.10.1`. Both asset control fields and SHA-256 sidecars agree
-with the authenticated publisher's served-release proof and signed-index health
-checks. Direct requests to the mTLS-protected APT index returned HTTP 403;
-no installation or hardware check was performed for this pin. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-10-29) for the
-authorized serving evidence. Pinning is not image qualification or OS stable/beta
-authorization; OS 2026.10.97 remains private-drill only and channel pointers are
-unchanged.
+The current image pin selects stable CeraUI **v2026.11.0**
+(tag commit `c8387c14e9c4b28b62aadd7f6125689b5b0fb100`), published
+2026-11-05T02:32:20Z. The exact Debian versions are
+`2026.11.0-20261105T023029.c8387c1` (arm64) and
+`2026.11.0-20261105T023023.c8387c1` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.11.0`. Downloaded asset hashes match both SHA-256 sidecars
+and GitHub asset digests, and Debian control fields confirm both identities.
+APT serving, installation and hardware were not checked for this pin. See the
+[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-11-05).
+The committed release catalog is unchanged pending a separate final refresh
+commit after the owner decides the prerequisite PR merge order. Pinning is not
+image qualification or OS stable/beta authorization; OS 2026.10.97 remains
+private-drill only and channel pointers are unchanged.
 
 Keep `ceralive-apt-credentials=1.0.1` and registry tag
 `apt-credentials-v1.0.1`: this release is served on stable and the boards use it

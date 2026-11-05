@@ -108,12 +108,13 @@ against immutable release metadata and restore its config/module inventory
 without compiling. `--release` image builds and production candidates refuse
 `kernel_not_on_apt`; local builds may compile only an unpublished version above
 all released kernels.
-The production source pin is `7.2.0-ceralive4`; revision 2 was the first kernel-only publication, revision 3 the first bench-drilled release, and revision 4 re-tags that kernel on the current `master` for stable promotion;
+The production source pin is `7.2.0-ceralive5`, adding nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled and published to stable APT;
 the tag, candidate, Release and APT publication remain separate owner steps.
 See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
 The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
 and reuse; the fingerprinted producer and its inputs stay byte-identical to the
-verified stack. A digest and exclusion regression protects that boundary.
+verified stack except for the revision-5 reject fragment and required list.
+A digest and exclusion regression protects that boundary.
 
 The build path lives at the repository root and uses mkosi v26 inside a pinned `debian:trixie-slim`
 container (`ci/Dockerfile`). A local full-device build retains its uncompressed,
@@ -830,14 +831,14 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.10.1 (tag commit `81c16be`) using its exact
-per-architecture Debian versions, `2026.10.1-20261029T064208.81c16be` (amd64) and
-`2026.10.1-20261029T064207.81c16be` (arm64). It retains the unified device update
+CeraUI is pinned to stable release v2026.11.0 (tag commit `c8387c1`) using its exact
+per-architecture Debian versions, `2026.11.0-20261105T023023.c8387c1` (amd64) and
+`2026.11.0-20261105T023029.c8387c1` (arm64). It retains the unified device update
 orchestrator. Both downloaded Debian
-assets matched their published SHA-256 sidecars and the authenticated publisher's
-served-release proof and signed-index health checks. Direct index requests returned
-HTTP 403; neither architecture was installed or tested on hardware for this pin.
-See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-10-29).
+assets matched their published SHA-256 sidecars and GitHub asset digests.
+APT serving and hardware were not checked for this pin; the release catalog
+refresh remains a separate final commit.
+See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-11-05).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -1202,7 +1203,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.10.1 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.11.0 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images
@@ -1272,6 +1273,8 @@ confirmation, and retires overlays on verified mirror or full OS install.
 Host crash-boundary tests cover these helpers; images that carry the stager and pin a
 CeraUI payload at or above the default minimum `2026.10.1` advertise `kernel-apt-stage`.
 Images that carry it (`2026.10.102`, then `2026.11.1`) are published to the beta channel only; no OS image is on stable. Kernels are published to the stable APT channel only: the kernel-only path was bench-drilled on both boards with `7.2.0-ceralive3` (2026-11-02, which reached only the beta APT) and `7.2.0-ceralive4` (2026-11-03), and `7.2.0-ceralive4` is on the stable APT.
+The source pin `7.2.0-ceralive5` adds nftables reject for NetworkManager shared mode;
+it also pins the Rock 5B+ sink-first Type-C default. Its drill and publication remain pending.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed

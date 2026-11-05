@@ -1,0 +1,12 @@
+[Unit]
+Description=Recheck Rock USB-C back power every ten seconds
+ConditionFirmware=device-tree-compatible(radxa,rock-5b-plus)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=ceralive-typec-recheck.service
+
+[Install]
+WantedBy=timers.target

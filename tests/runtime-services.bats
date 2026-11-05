@@ -812,6 +812,345 @@ EOF
 #      script against fake sysfs trees — no image boot, no hardware.
 # ===========================================================================
 
+@test "typec policy: Rock back power corrects a sink attachment once" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  [ ! -e "$root/run" ]
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cat "$root/typec/port0/port_type")" = dual ]
+  [ -f "$root/run/corrected" ]
+}
+
+@test "typec policy: a recent Rock correction suppresses partner-add recursion" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  rm "$root/run/failed"
+  : >"$root/iio/writes"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -s "$root/iio/writes" ]
+}
+
+@test "typec policy: a Rock correction older than ten seconds permits one new cycle" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  mkdir -p "$root/run"
+  touch -d '-11 seconds' "$root/run/corrected"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+}
+
+@test "typec policy: Rock source settlement needs neither DR_SWAP nor a failed marker" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  printf '[source] sink\n' >"$root/settled"
+  export CERALIVE_TYPEC_SETTLED_POWER_ROLE="$root/settled"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+  [ ! -e "$root/run/failed" ]
+  [[ "$output" != *DR_SWAP* ]]
+}
+
+@test "typec policy: Rock absent or unknown back power performs zero connector writes" {
+  local root="$BATS_TEST_TMPDIR/rock" value
+  for value in 3 100 101 499 invalid; do
+    typec_rock_fixture "$root"
+    printf '%s\n' "$value" >"$root/iio/iio:device7/in_voltage6_raw"
+    printf '[host] device\n' >"$root/typec/port0/data_role"
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/iio/writes" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+    [ "$(cat "$root/typec/port0/port_type")" = '[dual] source sink' ]
+    [ "$(cat "$root/typec/port0/data_role")" = '[host] device' ]
+    [ ! -e "$root/run/corrected" ]
+  done
+}
+
+@test "typec policy: mixed or non-integer Rock ADC double reads remain unknown" {
+  local root="$BATS_TEST_TMPDIR/rock" second
+  for second in 3 invalid; do
+    typec_rock_fixture "$root"
+    rm -f "$root/iio/read"
+    printf '%s\n' "$second" >"$root/iio/second"
+
+    export CERALIVE_TYPEC_MODE=recheck
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ "$(cat "$root/run/state")" = unknown ]
+    [ ! -e "$root/iio/writes" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+    [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+  done
+}
+
+@test "typec policy: Rock ADC retries unknown for two seconds with no connector writes" {
+  local root="$BATS_TEST_TMPDIR/rock" start
+  typec_rock_fixture "$root"
+  printf 'invalid\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  printf '[host] device\n' >"$root/typec/port0/data_role"
+  export CERALIVE_TYPEC_ADC_RETRY=2
+  start=$SECONDS
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$((SECONDS - start))" -lt 5 ]
+  [ "$(cat "$root/run/state")" = unknown ]
+  [ ! -e "$root/iio/writes" ]
+  [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+}
+
+@test "typec policy: non-Rock normal and recheck runs create no Rock state or writes" {
+  local root="$BATS_TEST_TMPDIR/orange" mode
+  typec_rock_fixture "$root"
+  printf 'xunlong,orangepi-5-plus\0rockchip,rk3588\0' >"$root/dt/compatible"
+  printf '[host] device\n' >"$root/typec/port0/data_role"
+  for mode in normal recheck; do
+    export CERALIVE_TYPEC_MODE="$mode"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/run" ]
+    [ ! -e "$root/iio/writes" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+    [ "$(cat "$root/typec/port0/data_role")" = '[host] device' ]
+  done
+}
+
+@test "typec policy: Rock run-directory and lock-open faults prevent all connector correction" {
+  local root="$BATS_TEST_TMPDIR/rock" fault
+  typec_rock_fixture "$root"
+  export CERALIVE_TYPEC_MODE=recheck
+  for fault in directory lock; do
+    if [ "$fault" = directory ]; then
+      printf 'not a directory\n' >"$root/run"
+    else
+      rm "$root/run"
+      mkdir -p "$root/run/lock"
+    fi
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *ERROR* ]]
+    [ ! -e "$root/iio/writes" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+    [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+  done
+}
+
+@test "typec policy: Rock recheck corrects once without ever writing data_role" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+  [ "$(cat "$root/run/failed")" = unknown ]
+  [[ "$output" != *DR_SWAP* ]]
+}
+
+@test "typec policy: Rock correction retries a rejected dual restoration once" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  touch "$root/iio/reject-dual-once"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERROR: Rock port_type=dual write was rejected"* ]]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\ndual' ]
+  [ "$(cat "$root/typec/port0/port_type")" = dual ]
+}
+
+@test "typec policy: two rejected dual writes restore the recorded role and mark the attach failed" {
+  local root original mode
+  for mode in normal recheck; do
+    for original in dual sink; do
+      root="$BATS_TEST_TMPDIR/$mode-$original"
+      typec_rock_fixture "$root"
+      printf '[%s] source\n' "$original" >"$root/typec/port0/port_type"
+      cp "$root/typec/port0/port_type" "$root/iio/accepted-port-type"
+      mkdir -p "$root/typec/port0-partner/identity"
+      printf '0x12345678\n' >"$root/typec/port0-partner/identity/id_header"
+      touch "$root/iio/reject-dual-twice"
+      export CERALIVE_TYPEC_MODE="$mode" CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null
+
+      run run_typec_rock
+      printf '%s\n' "$output"
+      printf 'WRITE_ATTEMPTS:\n'
+      cat "$root/iio/writes"
+      printf 'LAST_ACCEPTED_PORT_TYPE=%s POLICY_EXIT=%s\n' \
+        "$(cat "$root/iio/accepted-port-type")" "$status"
+      [ "$status" -eq 0 ]
+      [ "$(cat "$root/iio/writes")" = "$(printf 'source\ndual\ndual\n%s' "$original")" ]
+      [ "$(cat "$root/iio/accepted-port-type")" = "$original" ]
+      [ "$(cat "$root/run/failed")" = 0x12345678 ]
+      [ "$(printf '%s\n' "$output" | grep -c 'ERROR:.*port_type=dual')" -eq 2 ]
+      [[ "$output" != *DR_SWAP* ]]
+      [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+
+      touch -d '-11 seconds' "$root/run/corrected"
+      : >"$root/iio/writes"
+      export CERALIVE_TYPEC_MODE=recheck
+      run run_typec_rock
+      [ "$status" -eq 0 ]
+      [ ! -s "$root/iio/writes" ]
+    done
+  done
+}
+
+@test "typec policy: rejected dual and recorded-role restoration log errors without blocking startup or retrying" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  printf '[sink] source dual\n' >"$root/typec/port0/port_type"
+  cp "$root/typec/port0/port_type" "$root/iio/accepted-port-type"
+  touch "$root/iio/reject-dual-twice" "$root/iio/reject-restore"
+  export CERALIVE_TYPEC_MODE=normal CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null
+
+  run run_typec_rock
+  printf '%s\n' "$output"
+  printf 'WRITE_ATTEMPTS:\n'
+  cat "$root/iio/writes"
+  printf 'LAST_ACCEPTED_PORT_TYPE=%s POLICY_EXIT=%s\n' \
+    "$(cat "$root/iio/accepted-port-type")" "$status"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual\ndual\nsink' ]
+  [ "$(cat "$root/iio/accepted-port-type")" = source ]
+  [ "$(cat "$root/run/failed")" = unknown ]
+  [ "$(printf '%s\n' "$output" | grep -c 'ERROR:.*port_type=')" -eq 3 ]
+  [[ "$output" == *"interface rejected every restoration"* ]]
+  [[ "$output" != *DR_SWAP* ]]
+  [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+
+  touch -d '-11 seconds' "$root/run/corrected"
+  : >"$root/iio/writes"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -s "$root/iio/writes" ]
+}
+
+@test "typec policy: Rock correction never cycles without a writable correction marker" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  mkdir -p "$root/run"
+  ln -s "$root/missing/marker" "$root/run/corrected"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ERROR: cannot record Rock correction marker"* ]]
+  [ ! -e "$root/iio/writes" ]
+  [ "$(cat "$root/typec/port0/port_type")" = '[dual] source sink' ]
+}
+
+@test "typec policy: a held Rock correction lock defers the recheck without connector writes" {
+  local root="$BATS_TEST_TMPDIR/rock" lock
+  typec_rock_fixture "$root"
+  mkdir -p "$root/run"
+  exec {lock}>"$root/run/lock"
+  flock -n "$lock"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  flock -u "$lock"
+  exec {lock}>&-
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INFO: Rock correction lock timed out"* ]]
+  [ ! -e "$root/iio/writes" ]
+  [ "$(cat "$root/typec/port0/preferred_role")" = '[sink] source' ]
+  [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+}
+
+@test "typec policy: a failed Rock attach blocks later normal and recheck correction" {
+  local root="$BATS_TEST_TMPDIR/rock" mode
+  for mode in normal recheck; do
+    typec_rock_fixture "$root"
+    rm -rf "$root/run"
+    mkdir -p "$root/typec/port0-partner/identity"
+    printf '0x12345678\n' >"$root/typec/port0-partner/identity/id_header"
+    export CERALIVE_TYPEC_MODE="$mode"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ "$(cat "$root/run/failed")" = 0x12345678 ]
+    touch -d '-11 seconds' "$root/run/corrected"
+    : >"$root/iio/writes"
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -s "$root/iio/writes" ]
+  done
+}
+
+@test "typec policy: Rock no-partner runs clear failed state and set future source preference" {
+  local root="$BATS_TEST_TMPDIR/rock" mode
+  for mode in normal recheck; do
+    typec_rock_fixture "$root"
+    rm -rf "$root/typec/port0-partner"
+    mkdir -p "$root/run"
+    printf 'old partner\n' >"$root/run/failed"
+    export CERALIVE_TYPEC_MODE="$mode"
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ ! -e "$root/run/failed" ]
+    [ ! -e "$root/iio/writes" ]
+    [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+  done
+}
+
+@test "typec policy: a Rock partner missing after correction records an unknown failed attach" {
+  local root="$BATS_TEST_TMPDIR/rock" mode
+  for mode in normal recheck; do
+    typec_rock_fixture "$root"
+    rm -rf "$root/run"
+    touch "$root/iio/detach"
+    export CERALIVE_TYPEC_MODE="$mode"
+
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    [ "$(cat "$root/run/failed")" = unknown ]
+    [ ! -e "$root/typec/port0-partner" ]
+    [ "$(cat "$root/typec/port0/data_role")" = 'host [device]' ]
+  done
+}
+
+@test "typec policy: Rock rechecks skip ADC retries and log only decisions or writes" {
+  local root="$BATS_TEST_TMPDIR/rock" start
+  typec_rock_fixture "$root"
+  printf 'invalid\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_ADC_RETRY=15
+  start=$SECONDS
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$((SECONDS - start))" -lt 2 ]
+  [[ "$output" == *"back power=unknown"* ]]
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  printf '3\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"back power=absent"* ]]
+  [ "$(cat "$root/run/state")" = absent ]
+  [ ! -e "$root/iio/writes" ]
+}
+
 @test "typec policy: script, unit and udev rules are installed and the boot unit is enabled" {
   local unit_dir="$BATS_TEST_TMPDIR/typec-units"
   local sbin_dir="$BATS_TEST_TMPDIR/typec-sbin"
@@ -833,6 +1172,8 @@ SH
   [ "$status" -eq 0 ]
   [ -x "$sbin_dir/ceralive-typec-policy" ]
   [ -f "$unit_dir/ceralive-typec-policy.service" ]
+  [ -f "$unit_dir/ceralive-typec-recheck.service" ]
+  [ -f "$unit_dir/ceralive-typec-recheck.timer" ]
   [ -f "$rules_dir/99-ceralive-typec-policy.rules" ]
   [ ! -e "$sbin_dir/ceralive-typec-source" ]
   [ ! -e "$unit_dir/ceralive-typec-source.service" ]
@@ -840,6 +1181,27 @@ SH
   run cat "$calls"
   [ "$status" -eq 0 ]
   [[ "$output" == *"enable ceralive-typec-policy.service"* ]]
+  [[ "$output" == *"enable ceralive-typec-recheck.timer"* ]]
+  [[ "$output" != *"enable ceralive-typec-recheck.service"* ]]
+}
+
+@test "typec policy: the Rock-only recheck timer guarantees bounded periodic reevaluation" {
+  local service="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  local timer="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.timer" unit
+  for unit in "$service" "$timer"; do
+    grep -Fxq 'ConditionFirmware=device-tree-compatible(radxa,rock-5b-plus)' "$unit"
+  done
+  grep -Fxq 'Type=oneshot' "$service"
+  grep -Fxq 'TimeoutStartSec=60' "$service"
+  grep -Fxq 'Environment=CERALIVE_TYPEC_MODE=recheck' "$service"
+  grep -Fxq 'ExecStart=/usr/local/sbin/ceralive-typec-policy' "$service"
+  run grep -Fxq '[Install]' "$service"
+  [ "$status" -ne 0 ]
+  grep -Fxq 'OnBootSec=20s' "$timer"
+  grep -Fxq 'OnUnitActiveSec=10s' "$timer"
+  grep -Fxq 'AccuracySec=1s' "$timer"
+  grep -Fxq 'Unit=ceralive-typec-recheck.service' "$timer"
+  grep -Fxq 'WantedBy=timers.target' "$timer"
 }
 
 @test "typec policy: udev add events hand off to one systemd service without RUN or change recursion" {
@@ -856,6 +1218,7 @@ SH
 @test "typec policy: the retriggerable oneshot retains boot ordering before both media consumers" {
   local unit="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
   grep -Eq '^Type=oneshot$' "$unit"
+  grep -Eq '^TimeoutStartSec=60$' "$unit"
   grep -Eq '^Before=.*\bcerastream\.service\b' "$unit"
   grep -Eq '^Before=.*\bceralive\.service\b' "$unit"
   run grep -Eq '^(Requires|Requisite|BindsTo|Wants)=.*cerastream' "$unit"
@@ -870,7 +1233,7 @@ SH
   printf '%s\n' '[dual] source sink' >"$sysfs/port0/port_type"
   printf '%s\n' '[none] source sink' >"$sysfs/port0/preferred_role"
 
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DR_SWAP attempt 1/2 succeeded"* ]]
@@ -884,7 +1247,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/typec-idem"
   typec_fake_sysfs "$sysfs" 'source [sink]' '[host] device'
 
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"data_role=host — no data-role swap needed"* ]]
@@ -895,7 +1258,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/typec-bounded"
   typec_fake_sysfs "$sysfs" 'source [sink]' 'host [device]'
 
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
     CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -ne 0 ]
@@ -903,11 +1266,20 @@ SH
   [[ "$output" == *"failed after 2 attempts"* ]]
 }
 
-@test "typec policy: connector mode, power role and preferred role have no write capability" {
+@test "typec policy: only the guarded Rock function can write connector policy, never power_role" {
   local script="$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
-  grep -Fq 'printf '\''%s\n'\'' host >"${DATA_ROLE_WRITE}"' "$script"
-  [ "$(grep -cE '>"\$\{[A-Z_]+\}"' "$script")" -eq 1 ]
-  run grep -E '>.*(POWER_ROLE|port_type|preferred_role)' "$script"
+  local outside="$BATS_TEST_TMPDIR/outside-rock"
+  grep -Fq 'rock_back_power_correction() {' "$script"
+  awk '
+    /^rock_back_power_correction\(\) \{/ { inside=1 }
+    !inside { print }
+    inside && /^}/ { inside=0 }
+  ' "$script" >"$outside"
+  grep -Fq 'printf '\''%s\n'\'' host >"${DATA_ROLE_WRITE}"' "$outside"
+  [ "$(grep -cE '>"\$\{[A-Z_]+\}"' "$outside")" -eq 1 ]
+  run grep -E '>.*(POWER_ROLE|power_role)' "$script"
+  [ "$status" -ne 0 ]
+  run grep -E '>.*(port_type|preferred_role)' "$outside"
   [ "$status" -ne 0 ]
 }
 
@@ -915,18 +1287,18 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/typec-empty"
   mkdir -p "$sysfs/port0"
 
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no attached partner"* ]]
 
   mkdir -p "$sysfs/port0-partner"
-  run env CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" CERALIVE_TYPEC_WAIT=0 \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"role attributes did not settle within 0s"* ]]
 
-  run env CERALIVE_TYPEC_CLASS_DIR="$BATS_TEST_TMPDIR/typec-absent" \
+  run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$BATS_TEST_TMPDIR/typec-absent" \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to inspect"* ]]
@@ -944,6 +1316,28 @@ SH
   [[ "$output" == *"typec-policy script not found"* ]]
   [ ! -e "$unit_dir/ceralive-typec-policy.service" ]
   [ ! -e "$rules_dir/99-ceralive-typec-policy.rules" ]
+}
+
+@test "typec policy: missing recheck timer or service fails before installing any artifact" {
+  local src="$BATS_TEST_TMPDIR/src" artifact
+  mkdir -p "$src"
+  cp "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh" \
+    "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service" \
+    "$PIPELINE_DIR/mkosi/runtime/99-ceralive-typec-policy.rules" "$src/"
+  for artifact in timer service; do
+    if [ "$artifact" = service ]; then
+      cp "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.timer" "$src/"
+    fi
+    run env CERALIVE_RUNTIME_SRC="$src" \
+      TYPEC_UNIT_DIR="$BATS_TEST_TMPDIR/units" \
+      TYPEC_SBIN_DIR="$BATS_TEST_TMPDIR/sbin" TYPEC_RULES_DIR="$BATS_TEST_TMPDIR/rules" \
+      bash -c "source '$POSTINST_ENTRY'; setup_typec_policy"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"recheck $artifact not found"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/units" ]
+    [ ! -e "$BATS_TEST_TMPDIR/sbin" ]
+    [ ! -e "$BATS_TEST_TMPDIR/rules" ]
+  done
 }
 
 @test "typec policy: adaptive policy setup is wired into configure_services" {

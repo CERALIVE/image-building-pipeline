@@ -43,10 +43,18 @@ Two overlays exist, and both build from pinned source:
 
 ## 1. The variant model
 
-### Current pin — island v2026.9.5
+### Current pin — Rock sink-first Type-C, island v2026.9.5
 
 `manifests/families/rk3588.yaml` pins `patches_commit`
-`6996f96bc883f637ddac11f81871a256632f3f48`, the merged
+`bc7e44fa35d3eded23567dd48e65f6dc799f4b34`, the merged
+[kernel-patches PR #28](https://github.com/CERALIVE/rk3588-kernel-patches/pull/28).
+Its 32-entry series retires patch 0029's Rock 5B+ Try.SRC preference, leaving
+that connector's default at sink while the Orange Pi 5 Plus stays source.
+Resolved-config and DTB-only proof do not qualify a kernel build or board boot.
+
+### Previous pin — island v2026.9.5
+
+The previous pin was `6996f96bc883f637ddac11f81871a256632f3f48`, the merged
 [kernel-patches PR #25](https://github.com/CERALIVE/rk3588-kernel-patches/pull/25),
 carrying [island v2026.9.5](https://github.com/CERALIVE/rk3588-media-island/releases/tag/v2026.9.5)
 — the RGA job-lifecycle race fix (an admitted job's allocation could be released
@@ -460,8 +468,10 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-The production source pin is `7.2.0-ceralive4`, the revision-3 kernel re-tagged for stable promotion;
-revisions 1 to 3 must never be reissued with changed bytes.
+The production source pin is `7.2.0-ceralive5`, adding nftables reject for
+NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
+the kernel-patches PR #28 pin; revisions 1 to 4 must never be
+reissued with changed bytes.
 The family fingerprint excludes DTB paths and local container image IDs, but
 includes Dockerfile bytes, base digest, sorted package/version/architecture
 closure, compiler version, kernel scripts, config fragments and closure gates.
@@ -869,15 +879,18 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The production source pin is `7.2.0-ceralive4`; publication remains owner-gated.
+The production source pin is `7.2.0-ceralive5`, adding nftables reject for
+NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
+the kernel-patches PR #28 pin; publication remains owner-gated.
 
 Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
 It sources the unchanged producer's validators/fingerprint function and calls
 the producer for actual compilation. It never overrides or edits that function.
-`lib/build-kernel.sh` and every other fingerprinted input remain byte-identical
-to stack `9b89e6f`: release orchestration cannot change a kernel's identity.
-`tests/fixtures/kernel-producer.sha256` freezes the production inputs and coverage
+`lib/build-kernel.sh` and the other fingerprinted inputs remain byte-identical
+to stack `9b89e6f`, except for the revision-5 nftables-reject fragment and
+required-list changes: release orchestration cannot change a kernel's identity.
+`tests/fixtures/kernel-producer.sha256` freezes that baseline and the coverage
 function; `tests/kernel-producer-identity.test.sh` also proves that changes to
 release-only files leave the computed fingerprint unchanged.
 
