@@ -323,12 +323,13 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
-      # package_version uses KERNELVERSION + -ceralive<revision>; revision 5
-      # adds nftables reject for NetworkManager shared mode and Rock 5B+ sink-first
-      # Type-C through the PR #28 patch pin; revisions 1 to 4 are never reissued.
+      # package_version uses KERNELVERSION + -ceralive<revision>; revision 6
+      # re-tags revision 5's kernel (nftables reject for NetworkManager shared mode and
+      # Rock 5B+ sink-first Type-C through the PR #28 patch pin) on the current master
+      # after the kernel runner base stopped apt upgrades mid-job; revisions 1 to 5 are never reissued.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive5
+      package_version: 7.2.0-ceralive6
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
