@@ -59,7 +59,16 @@ simulate() (
     return 0
   }
   exit() { printf 'ABORTED\n' >"${result}"; builtin exit 0; }
-  booti() { printf '%s|%s|%s|%s|%s|%s\n' "${cera_slot}" "${cera_root}" "${cera_part}" "${BOOT_ORDER}" "${BOOT_A_LEFT}" "${BOOT_B_LEFT}" >"${result}"; }
+  # `reset` restarts the board, so nothing after it runs: model it as terminal.
+  reset() { printf 'RESET\n' >"${result}"; builtin exit 0; }
+  # A good `booti` never returns (the kernel takes over), so the stub is terminal.
+  # CERA_BOOTI_FAILS=1 models `booti` rejecting the image ("Bad Linux ARM64 Image
+  # magic!"): it RETURNS non-zero and the script carries on.
+  booti() {
+    printf '%s|%s|%s|%s|%s|%s\n' "${cera_slot}" "${cera_root}" "${cera_part}" "${BOOT_ORDER}" "${BOOT_A_LEFT}" "${BOOT_B_LEFT}" >"${result}"
+    [[ -n "${CERA_BOOTI_FAILS:-}" ]] || builtin exit 0
+    return 1
+  }
   set +u
   source "${BOOT_SCRIPT}" >/dev/null
 )
@@ -99,9 +108,27 @@ assert_case exhausted-last-resort 'A B' 0 0 'A|rootfs_a|2|A B|0|0'
 
 # THE CRASH LOOP. A slot whose kernel cannot be loaded must abandon the device so
 # the bootflow scan reaches the next one, NOT `booti` into unloaded DRAM.
-CERA_ABSENT_PATHS='/boot/Image' assert_case absent-kernel 'A B' 3 3 'ABORTED'
+# UNATTENDED ROLLBACK: while any attempt budget remains the failure RESETS the board so
+# the next run spends the next attempt (nobody is at the console to type `reset`); once
+# every budget is spent it still abandons the device, never a hot reset loop.
+CERA_ABSENT_PATHS='/boot/Image' assert_case absent-kernel 'A B' 3 3 'RESET'
 CERA_ABSENT_PATHS='/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb' \
-  assert_case absent-dtb 'A B' 3 3 'ABORTED'
+  assert_case absent-dtb 'A B' 3 3 'RESET'
+CERA_ABSENT_PATHS='/boot/Image' assert_case absent-kernel-exhausted 'A B' 0 0 'ABORTED'
+CERA_ABSENT_PATHS='/boot/dtb/rockchip/rk3588-rock-5b-plus.dtb' \
+  assert_case absent-dtb-exhausted 'A B' 0 0 'ABORTED'
+
+# A kernel that loads but is rejected by `booti` (zeroed ARM64 magic, the forced-rollback
+# drill) must reset too: before this the Rock 5B+ stopped at the U-Boot prompt and the
+# Orange Pi 5 Plus hung in the USB scan. Exhausted: no reset, the last-resort boot stands.
+CERA_BOOTI_FAILS=1 assert_case booti-rejects-image 'A B' 3 3 'RESET'
+CERA_BOOTI_FAILS=1 assert_case booti-rejects-image-last-slot-attempt 'B A' 3 1 'RESET'
+CERA_BOOTI_FAILS=1 assert_case booti-rejects-image-exhausted 'A B' 0 0 'A|rootfs_a|2|A B|0|0'
+# And the full cycle: a failing A drains its budget 3->2->1->0, then B is chosen.
+CERA_BOOTI_FAILS=1 assert_case failing-a-cycle-1 'A B' 3 3 'RESET'
+CERA_BOOTI_FAILS=1 assert_case failing-a-cycle-2 'A B' 2 3 'RESET'
+CERA_BOOTI_FAILS=1 assert_case failing-a-cycle-3 'A B' 1 3 'RESET'
+assert_case failing-a-then-b 'A B' 0 3 'B|rootfs_b|3|A B|0|2'
 
 # The initrd stays OPTIONAL — the vendor path ships only initrd.img-<ver>, so a
 # failed bare-name load must still boot.
