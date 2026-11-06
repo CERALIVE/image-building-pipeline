@@ -387,7 +387,7 @@ import sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 provenance = data['provenance']
 # The revision-1 archive keeps its captured patch pin; revision 5 retires only a DT patch.
-assert sys.argv[6] == '7.2.0-ceralive7'
+assert sys.argv[6] == '7.2.0-ceralive8'
 assert sys.argv[4] == 'bc7e44fa35d3eded23567dd48e65f6dc799f4b34'
 assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == [sys.argv[3], '6996f96bc883f637ddac11f81871a256632f3f48', sys.argv[5], '7.2.0-ceralive1']
 firmware = json.loads(pathlib.Path(sys.argv[7]).read_text())

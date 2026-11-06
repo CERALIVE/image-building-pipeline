@@ -323,14 +323,15 @@ variants:
       # base spelled its own three components. A "7.2-ceralive-rk3588" spelling
       # looks right, matches the tag, and would fail build-kernel.sh's own
       # `kernelrelease != KERNEL_RELEASE` assertion before one object compiles.
-      # package_version uses KERNELVERSION + -ceralive<revision>; revision 7
-      # re-tags revision 6's kernel (nftables reject for NetworkManager shared mode and
+      # package_version uses KERNELVERSION + -ceralive<revision>; revision 8
+      # re-tags revision 7's kernel (nftables reject for NetworkManager shared mode and
       # Rock 5B+ sink-first Type-C through the PR #28 patch pin) on a master that carries
-      # the unattended-rollback boot.scr fix (PR #229); revisions 1 to 6 are never reissued.
-      # Revision 6 has an identity Release but was never published to APT.
+      # the unattended-rollback boot.scr fix (PR #229) and the real-Avahi contract wait fix;
+      # revisions 1 to 7 are never reissued. Revision 6 has an identity Release but was
+      # never published to APT; revision 7's release run failed in the Avahi contract.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive7
+      package_version: 7.2.0-ceralive8
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script

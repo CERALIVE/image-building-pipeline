@@ -12,12 +12,14 @@ version. The approved workflow adapter and ephemeral VM scripts are [EXISTS].
 APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
 each publication are owner actions, not performed by implementation/tests.
 The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release. Kernels are published to the stable APT channel only: `7.2.0-ceralive3` reached only the beta APT, and its identical successor `7.2.0-ceralive4` was drilled on 2026-11-03 and is on stable.
-The production source pin is now `7.2.0-ceralive7`, adding nftables reject for
+The production source pin is now `7.2.0-ceralive8`, adding nftables reject for
 NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin. Revision 7 carries revision 6's kernel (itself revision 5's kernel, re-tagged; revision 5 was never
-published) on a master that includes the unattended-rollback `boot.scr` fix (PR #229). Revision 6 has an identity Release and was
-drilled on both boards (2026-11-05), but is not on APT: that drill showed the old `boot.scr` did not reset after a rejected kernel, so
-rollback needed manual resets and power-cycles. Revision 7 has not been published.
+the kernel-patches PR #28 pin. Revision 8 carries revision 7's kernel, which is revision 6's kernel, which is revision 5's kernel,
+re-tagged each time (revision 5 was never published) on a master that includes the unattended-rollback `boot.scr` fix (PR #229).
+Revision 6 has an identity Release and was drilled on both boards (2026-11-05), but is not on APT: that drill showed the old
+`boot.scr` did not reset after a rejected kernel, so rollback needed manual resets and power-cycles. Revision 7 has a candidate and a
+tag, but its release run failed in the real Avahi hostname contract, whose 30 s wait was too tight for the allocator's own retry
+schedule; revision 8 gives that contract the production wait. Revisions 7 and 8 have not been published.
 
 | Part | State | Contract |
 |---|---|---|
@@ -25,7 +27,7 @@ rollback needed manual resets and power-cycles. Revision 7 has not been publishe
 | Immutable per-version candidate | EXISTS | this page |
 | APT publication of a candidate | PARTIAL, owner-gated | this page, "Publish" |
 | Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), first published as `2026.10.102`, then `2026.11.1`, on beta only | [`kernel-staging.md`](kernel-staging.md) |
-| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); revision 6 was drilled (2026-11-05) but needed manual resets for the rollback leg; source revision 7 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
+| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); revision 6 was drilled (2026-11-05) but needed manual resets for the rollback leg; source revision 8 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
 Kernel compilation runs only inside a dedicated KVM guest on the owner's
 workstation, never on GitHub-hosted runners or a remote machine. Cheap lint

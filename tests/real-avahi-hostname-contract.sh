@@ -325,6 +325,10 @@ run_allocator() {
   local root="$1" ns="$2" device_id="$3" mode="${4:-}" barrier="${5:-}"
   local -a args=()
   [[ -z "$mode" ]] || args+=("$mode")
+  # MAX_WAIT is the production default (120), not a tighter test cap: the allocator
+  # shares ONE deadline across its random-backoff retries and both candidates, and a
+  # symmetric double-rename legitimately takes several rounds. A 30 s cap failed
+  # intermittently (CONCURRENT phase 7 s typical, 23 s observed) on a correct allocator.
   sudo -n env \
     REAL_CALL_LOG="$root/calls" \
     REAL_SYSTEM_HOSTNAME="$root/system-hostname" \
@@ -346,7 +350,7 @@ run_allocator() {
     AVAHI_RESOLVE_BIN="$root/bin/avahi-resolve" \
     SYSTEMCTL_BIN="$root/bin/systemctl" \
     CERALIVE_HOSTNAME_MAX_INDEX=8 \
-    CERALIVE_HOSTNAME_MAX_WAIT=30 \
+    CERALIVE_HOSTNAME_MAX_WAIT=120 \
     CERALIVE_HOSTNAME_MAX_PROBES=60 \
     CERALIVE_HOSTNAME_POLL_INTERVAL=1 \
     CERALIVE_HOSTNAME_STABLE_CHECKS=2 \
