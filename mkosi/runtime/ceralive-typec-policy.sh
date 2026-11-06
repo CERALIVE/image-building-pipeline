@@ -255,4 +255,7 @@ for attempt in 1 2; do
   log "WARNING: DR_SWAP attempt ${attempt}/2 readback is '${data:-unknown}', expected 'host'"
 done
 
-die "DR_SWAP failed after 2 attempts; leaving ${PORT} dual-role policy unchanged"
+# A partner that cannot swap (a plain charger has no data role) is a clean stop,
+# not a unit failure: the port is left unchanged and the journal keeps the warning.
+log "WARNING: DR_SWAP failed after 2 attempts; leaving ${PORT} dual-role policy unchanged"
+exit 0
