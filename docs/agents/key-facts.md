@@ -3011,17 +3011,22 @@ rolling back.
 - **A failed `ext4load` used to reach `booti` anyway.** The kernel/DTB loads were
   unguarded, so on failure the load address still held whatever was in DRAM and
   `booti` jumped into it — `"Synchronous Abort" handler, esr 0x02000000` → reset →
-  same slot. The script now `exit`s on a failed kernel or DTB load, which returns to
-  the bootflow scan so U-Boot moves to the next boot device (eMMC) instead of
-  wedging. The **initrd load stays optional** — the vendor package ships only
-  `/boot/initrd.img-<REL>`, so the bare-name load legitimately fails on the
-  known-good path.
+  same slot. A failed kernel or DTB load, or a `booti` that returns (it rejected the
+  image, e.g. `Bad Linux ARM64 Image magic!`), now `reset`s while any attempt budget
+  remains, so the next run spends the next attempt and rolls over to the other slot
+  unattended (at most six resets). Once every budget is spent it `exit`s to the
+  bootflow scan, never a hot reset loop. Before this, the Rock 5B+ stopped at the
+  `=>` prompt and the Orange Pi 5 Plus hung in the USB scan after a rejected image
+  (7.2.0-ceralive6 forced-rollback drill), so rollback needed a human. The **initrd
+  load stays optional** — the vendor package ships only `/boot/initrd.img-<REL>`, so
+  the bare-name load legitimately fails on the known-good path.
 
 Guard: `tests/boot-script-sanitize.test.sh` stubs `setexpr` as **absent**, the way
 the board really answers, and executes the real script through U-Boot command stubs —
 so a decrement that depends on it fails the suite, not the fleet. It walks the whole
-budget, proves rollover to B and B's own decrement, and proves an unloadable
-kernel/DTB abandons the device. `test-fallback.sh` §7 additionally forbids the token
+budget, proves rollover to B and B's own decrement, proves an unloadable kernel/DTB
+or a `booti` that rejects the image RESETs while attempts remain, and proves the
+exhausted case still abandons the device. `test-fallback.sh` §7 additionally forbids the token
 `setexpr` outside comments.
 
 **The A/B selector must define its OWN scratch address — an inherited `loadaddr`

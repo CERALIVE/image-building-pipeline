@@ -118,15 +118,30 @@ clear of `kernel_addr_r` (4 MiB) and far below `fdt_addr_r` (131 MiB); a full
 proven on the real Orange Pi 5 Plus. `recovery.scr.cmd` never had this defect — it
 uses only the three `*_addr_r` variables.
 
-### A slot that cannot be loaded ABANDONS the device
+### A slot that cannot be loaded or booted RESETS (attempts left) or ABANDONS the device
 
 Steps 5's kernel and DTB loads are checked. An unguarded `ext4load` failure left the
 load address holding whatever was already in DRAM, and `booti` jumped into it:
 `"Synchronous Abort" handler` → reset → the same slot again. Combined with the dead
 counter above, that is an infinite crash loop that never reaches the other slot or
-the other boot medium. On a failed kernel/DTB load the script now `exit`s, which
-returns control to the bootflow scan so U-Boot moves on to the next boot device
-(e.g. eMMC) instead of wedging.
+the other boot medium.
+
+A failed kernel/DTB load, or a `booti` that returns because it rejected the image
+(`Bad Linux ARM64 Image magic!`; a good kernel never returns), used to just `exit` /
+fall off the end. That handed control to the bootflow scan, and on the real boards that
+is not a rollback: the Rock 5B+ stopped at the `=>` prompt and the Orange Pi 5 Plus hung
+in the USB scan, so a headless device stayed dark until someone typed `reset` or
+pulled power (observed in the 7.2.0-ceralive6 forced-rollback drill).
+
+While any attempt budget remains (`cera_exhausted=0`) the script now `reset`s. The next
+run spends the next attempt and, once this slot's budget is 0, picks the other slot, so
+the rollback is unattended and bounded to at most six resets. When every budget is
+spent it keeps the old behaviour (`exit`, bootflow scan to the next boot device), never
+a hot reset loop.
+
+An existing board only gets this with a new `boot.scr`: RAUC's slot list covers just the
+two rootfs slots and `certs`, so an OTA bundle does not replace `boot.scr`; it ships
+with a new image or a manual `boot.scr` update.
 
 The **initrd load stays optional**: the Armbian vendor package ships only the
 versioned `/boot/initrd.img-<release>`, so the bare-name load legitimately fails on

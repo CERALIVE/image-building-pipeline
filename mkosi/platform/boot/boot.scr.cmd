@@ -169,16 +169,26 @@ fi
 # hands control back to the bootflow scan, which moves on to the next boot device
 # (eMMC), so a slot missing its kernel degrades to the other media instead of
 # wedging the board.
+#
+# UNATTENDED ROLLBACK: a slot that cannot be loaded or booted must not leave the board
+# at the U-Boot prompt or in the next device's scan (the Rock 5B+ stops at `=>`, the
+# Orange Pi 5 Plus can hang in the USB scan) — nobody is there to type `reset`. While any
+# attempt budget remains (cera_exhausted=0) the board RESETS, so the next run of this
+# script spends the next attempt and, once this slot's budget is 0, picks the other
+# slot. The budgets bound this to at most 6 resets. When everything is exhausted the old
+# behaviour stays: fall through to the bootflow scan, never a hot reset loop.
 if ext4load ${devtype} ${devnum}:${cera_part} ${kernel_addr_r} /boot/Image; then
   echo "CeraLive: loaded /boot/Image from slot ${cera_slot}"
 else
   echo "CeraLive: FATAL /boot/Image missing in slot ${cera_slot} — abandoning this device"
+  if test "${cera_exhausted}" = "0"; then echo "CeraLive: resetting to spend the next attempt"; reset; fi
   exit
 fi
 if ext4load ${devtype} ${devnum}:${cera_part} ${fdt_addr_r} /boot/dtb/rockchip/${fdtfile}; then
   echo "CeraLive: loaded ${fdtfile}"
 else
   echo "CeraLive: FATAL /boot/dtb/rockchip/${fdtfile} missing in slot ${cera_slot} — abandoning this device"
+  if test "${cera_exhausted}" = "0"; then echo "CeraLive: resetting to spend the next attempt"; reset; fi
   exit
 fi
 
@@ -191,3 +201,8 @@ if ext4load ${devtype} ${devnum}:${cera_part} ${ramdisk_addr_r} /boot/initrd.img
 else
   booti ${kernel_addr_r} - ${fdt_addr_r}
 fi
+
+# booti only RETURNS when it fails (e.g. "Bad Linux ARM64 Image magic!"); a good kernel
+# never comes back here. Same rule as the load failures above.
+echo "CeraLive: FATAL booti failed for slot ${cera_slot}"
+if test "${cera_exhausted}" = "0"; then echo "CeraLive: resetting to spend the next attempt"; reset; fi
