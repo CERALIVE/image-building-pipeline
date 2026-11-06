@@ -1261,7 +1261,7 @@ SH
   run env CERALIVE_TYPEC_DT_ROOT="$BATS_TEST_TMPDIR" CERALIVE_TYPEC_CLASS_DIR="$sysfs" \
     CERALIVE_TYPEC_WAIT=0 CERALIVE_TYPEC_DATA_ROLE_WRITE=/dev/null \
     bash "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh"
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c 'DR_SWAP attempt [12]/2: requesting')" -eq 2 ]
   [[ "$output" == *"failed after 2 attempts"* ]]
 }
