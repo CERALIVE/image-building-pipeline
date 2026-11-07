@@ -1591,6 +1591,20 @@ fankick_run() {
       "$@" bash "$(FANKICK_SCRIPT)"
 }
 
+# fankick_wait_until <check-cmd...> — poll until the check succeeds, bounded at 10 s.
+# Lets a test order a fake-governor write after an OBSERVED monitor event instead
+# of after a guessed delay, which a loaded runner can stretch past the kick window.
+fankick_wait_until() {
+  local i
+  for (( i = 0; i < 200; i++ )); do
+    "$@" && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+fankick_state_is() { [ "$(fankick_attr "$1")" = "$2" ]; }
+
 
 
 

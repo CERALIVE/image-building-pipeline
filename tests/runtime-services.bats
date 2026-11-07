@@ -2353,17 +2353,23 @@ SH
 }
 
 @test "fan kickstart: a governor decision made DURING the kick wins — it is not overwritten by the restore" {
-  local sysfs="$BATS_TEST_TMPDIR/fk-race"
+  local sysfs="$BATS_TEST_TMPDIR/fk-race" log="$BATS_TEST_TMPDIR/fk-race.log"
+  local attr="$sysfs/cooling_device6/cur_state" monitor rc=0 out
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1
-    sleep 0.4;  fankick_set_state "$sysfs/cooling_device6/cur_state" 4 ) &
-  run fankick_run "$sysfs" 900 18
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"nudging to state 6"* ]]
-  [[ "$output" == *"re-asserted state 4"* ]]
-  [[ "$output" != *"state 1 handed back"* ]]
-  [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "4" ]
+  fankick_run "$sysfs" 2500 30 >"$log" 2>&1 &
+  monitor=$!
+  fankick_wait_until grep -q 'currently state 0' "$log"
+  fankick_set_state "$attr" 1
+  fankick_wait_until fankick_state_is "$attr" 6
+  fankick_set_state "$attr" 4
+  wait "$monitor" || rc=$?
+  out="$(<"$log")"
+  [ "$rc" -eq 0 ]
+  [[ "$out" == *"nudging to state 6"* ]]
+  [[ "$out" == *"re-asserted state 4"* ]]
+  [[ "$out" != *"state 1 handed back"* ]]
+  [ "$(fankick_attr "$attr")" = "4" ]
 }
 
 @test "fan kickstart: it re-kicks on EVERY cooldown/reheat cycle — this is why it is not a oneshot" {
