@@ -3039,9 +3039,11 @@ the bundle (`debugfs`, fixed owner/mode/time, then readback and `e2fsck`). On th
 `ceralive-boot-script-sync.service` (`Requires=` and `After=` the healthcheck, inert
 without the payload) replaces `/boot/boot.scr` only when the bytes after the 64-byte uImage
 header differ (mkimage stamps a time in the header), no kernel activation is armed and
-`/boot` is a writable vfat mount. It never creates `boot.scr`, keeps `boot.scr.prev`,
+`/boot` is a writable vfat mount. It holds the activation lock (the one `--arm` takes)
+from the armed check to the last write. It never creates `boot.scr`, keeps `boot.scr.prev`,
 writes `boot.scr.new`, verifies by `cmp`, renames and verifies again, and restores the
-previous file if that check fails. The booted, confirmed OS decides the selector, so a
+previous file if that check fails, verifying the restore too (exit 2 = restore failed).
+A failing `mkimage` fails both `boot-partition` and `boot-payload`. The booted, confirmed OS decides the selector, so a
 RAUC rollback to an older image also restores that image's script. A power cut during the
 FAT rename is the residual risk; a board with a damaged `boot.scr` needs Maskrom recovery
 (`recovery.scr` is manual). Guard: `tests/boot-script-sync.test.sh`.

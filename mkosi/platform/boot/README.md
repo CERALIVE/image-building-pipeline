@@ -156,9 +156,9 @@ injected into every slot image and the bundle by `lib/disk/slot-image.sh`). Afte
 health-confirmed boot, `ceralive-boot-script-sync.service` replaces `/boot/boot.scr` when
 its body (everything after the 64-byte uImage header, which carries a build time) differs
 from the shipped one. It writes `boot.scr.new`, verifies it, renames it into place,
-verifies again and restores `boot.scr.prev` if the final check fails. It never creates
-`boot.scr`, does nothing while a kernel activation is armed, and requires a writable vfat
-`/boot`. Test seams and the safety argument are in the script header; the guard is
+verifies again and restores `boot.scr.prev` if the final check fails (and verifies the
+restore; exit 2 means it failed). It never creates `boot.scr`, does nothing while a kernel
+activation is armed or holds the activation lock, and requires a writable vfat `/boot`. Test seams and the safety argument are in the script header; the guard is
 `tests/boot-script-sync.test.sh`.
 
 ### What must be in the slot's `/boot`
