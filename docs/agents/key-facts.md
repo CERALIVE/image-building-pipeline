@@ -5813,7 +5813,7 @@ never asserted as sourcing proof.
 **Camera attached at boot with no partner (Rock 5B+, back power confirmed).** A camera
 that advertises Rp but never drives VBUS leaves TCPM waiting in `SNK_DEBOUNCED`; no
 partner object is ever created, so the partner-keyed correction never ran. The ten-second
-recheck (first tick 10 s after boot) now performs the same `port_type=source` then `dual`
+recheck (first tick 8 s after boot) now performs the same `port_type=source` then `dual`
 cycle when the back input is confirmed and no partner exists, at most
 `CERALIVE_TYPEC_NOPARTNER_MAX` (3) times per boot and `CERALIVE_TYPEC_NOPARTNER_SPACING`
 (30 s) apart; a partner appearing resets the count. The boot-time run never cycles

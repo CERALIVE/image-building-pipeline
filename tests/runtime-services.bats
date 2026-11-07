@@ -1262,7 +1262,7 @@ SH
   grep -Fxq 'ExecStart=/usr/local/sbin/ceralive-typec-policy' "$service"
   run grep -Fxq '[Install]' "$service"
   [ "$status" -ne 0 ]
-  grep -Fxq 'OnBootSec=10s' "$timer"
+  grep -Fxq 'OnBootSec=8s' "$timer"
   grep -Fxq 'OnUnitActiveSec=10s' "$timer"
   grep -Fxq 'AccuracySec=1s' "$timer"
   grep -Fxq 'Unit=ceralive-typec-recheck.service' "$timer"
