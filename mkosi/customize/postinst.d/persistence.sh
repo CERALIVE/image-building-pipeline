@@ -319,6 +319,22 @@ setup_slot_sync() {
   install -D -m 0755 "${src}/ceralive-kernel-stage.sh" /usr/lib/ceralive/ceralive-kernel-stage
 }
 
+# Guarded boot.scr sync: the image build ships a compiled boot.scr under
+# /usr/lib/ceralive/boot/; this unit (enabled, After/Requires the healthcheck)
+# replaces /boot/boot.scr with it only after a confirmed boot. See the script.
+setup_boot_script_sync() {
+  log "installing guarded boot.scr sync (ceralive-boot-script-sync)"
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  local artifact
+  for artifact in ceralive-boot-script-sync.sh ceralive-boot-script-sync.service; do
+    [[ -n "${src}" && -f "${src}/${artifact}" ]] \
+      || die "boot-script-sync source not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
+  done
+  install -D -m 0755 "${src}/ceralive-boot-script-sync.sh" /usr/libexec/ceralive/ceralive-boot-script-sync
+  install -D -m 0644 "${src}/ceralive-boot-script-sync.service" /etc/systemd/system/ceralive-boot-script-sync.service
+  enable_service ceralive-boot-script-sync.service
+}
+
 # ---------------------------------------------------------------------------
 # DIAGNOSABILITY — a device whose journal holds a hundred seconds of history
 # cannot be diagnosed, and this image shipped exactly that.

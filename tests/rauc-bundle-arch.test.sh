@@ -168,6 +168,7 @@ exercise_stage() {
   local BUILD_RAUC_SH="${work}/bin/build-rauc" MKOSI_PACKAGE_STAGING_SH="${work}/bin/stage-mkosi-package"
   local ASSEMBLE_DISK_SH="${work}/bin/assemble" ASSEMBLE_DISK_X86_SH="${work}/bin/assemble"
   local BUILD_BUNDLE_SH="${work}/bin/bundle" SEAL_RAW_CANDIDATE_SH="${work}/bin/seal"
+  local INSTALL_BOOT_SH="${work}/bin/install-boot"
   local BOARD_ID=fixture COMPATIBLE_STRING=ceralive-fixture INSTALL_BOOT_BSP=1
   local RAUC_BOOTLOADER_ADAPTER="${adapter}" SINGLE_SLOT_FALLBACK=false DRY_RUN=0
   local RAUC_BUILD_LOG="${work}/build-${adapter}-${mkosi_arch}.log"
@@ -175,6 +176,8 @@ exercise_stage() {
   local ASSEMBLE_LOG="${work}/assemble-${adapter}-${mkosi_arch}.log"
   export RAUC_BUILD_LOG STAGE_LOG ASSEMBLE_LOG
   mkdir -p "${staging}/debs"
+  printf '#!/bin/bash\nexit 0\n' >"${INSTALL_BOOT_SH}"
+  chmod +x "${INSTALL_BOOT_SH}"
   : >"${RAUC_BUILD_LOG}"
   : >"${STAGE_LOG}"
   : >"${ASSEMBLE_LOG}"

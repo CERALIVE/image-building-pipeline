@@ -3029,6 +3029,23 @@ or a `booti` that rejects the image RESETs while attempts remain, and proves the
 exhausted case still abandons the device. `test-fallback.sh` §7 additionally forbids the token
 `setexpr` outside comments.
 
+**A selector fix reaches already-deployed boards through `ceralive-boot-script-sync`, not
+through the RAUC bundle** [EXISTS, hardware drill pending]. `boot.scr` is on the FAT boot
+partition (p1), written when a disk image is assembled; a bundle carries one rootfs image
+and never touches p1. `stage_assemble` therefore compiles `boot.scr` once on the host
+(`install-boot.sh boot-payload`; `mkimage` is not in the image) and `make_slot_image`
+injects it with its SHA-256 at `/usr/lib/ceralive/boot/` in every rootfs slot image and in
+the bundle (`debugfs`, fixed owner/mode/time, then readback and `e2fsck`). On the device
+`ceralive-boot-script-sync.service` (`Requires=` and `After=` the healthcheck, inert
+without the payload) replaces `/boot/boot.scr` only when the bytes after the 64-byte uImage
+header differ (mkimage stamps a time in the header), no kernel activation is armed and
+`/boot` is a writable vfat mount. It never creates `boot.scr`, keeps `boot.scr.prev`,
+writes `boot.scr.new`, verifies by `cmp`, renames and verifies again, and restores the
+previous file if that check fails. The booted, confirmed OS decides the selector, so a
+RAUC rollback to an older image also restores that image's script. A power cut during the
+FAT rename is the residual risk; a board with a damaged `boot.scr` needs Maskrom recovery
+(`recovery.scr` is manual). Guard: `tests/boot-script-sync.test.sh`.
+
 **The A/B selector must define its OWN scratch address — an inherited `loadaddr`
 is a per-board default, and an empty one HALTS the board with an SError** [EXISTS]
 

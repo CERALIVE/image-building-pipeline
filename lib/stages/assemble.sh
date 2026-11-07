@@ -33,6 +33,17 @@ stage_assemble() {
       local single_slot_flag=()
       [[ "${SINGLE_SLOT_FALLBACK:-false}" == "true" ]] && single_slot_flag+=(--single-slot)
       log_info "[8/9] Stage-4 disk assembly → ${raw_artifact} (bootloader_adapter=custom single_slot=${SINGLE_SLOT_FALLBACK:-false})"
+      # Compile boot.scr once (mkimage is host-side only) and hand the same files to the
+      # disk and the bundle: ceralive-boot-script-sync ships them to /boot after a
+      # health-confirmed boot, so devices that only take RAUC bundles get selector fixes.
+      local boot_payload_dir
+      boot_payload_dir="$(mktemp -d)"
+      SINGLE_SLOT_FALLBACK="${SINGLE_SLOT_FALLBACK:-false}" BOARD_ID="${BOARD_ID}" \
+        DTB_NAME="${DTB_NAME:-}" SERIAL_CONSOLE="${SERIAL_CONSOLE:-}" \
+        COMPATIBLE_STRING="${COMPATIBLE_STRING:-}" \
+        bash "${INSTALL_BOOT_SH}" boot-payload "${boot_payload_dir}" \
+        || die "boot.scr payload compilation failed for board '${board}'"
+      CERALIVE_BOOT_PAYLOAD_DIR="${boot_payload_dir}" \
       "${ASSEMBLE_DISK_SH}" build \
         --output "${raw_artifact}" \
         "${single_slot_flag[@]}" \
@@ -49,6 +60,7 @@ stage_assemble() {
       # the .raw, emitted ALONGSIDE it as a verity/adaptive full-slot image.
       local bundle_artifact="${out_dir}/${ts}.raucb"
       log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+      CERALIVE_BOOT_PAYLOAD_DIR="${boot_payload_dir}" \
       BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
         MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
         RAUC_DEB_DIR="${rauc_build_dir_host}" \
@@ -101,6 +113,8 @@ stage_assemble() {
   else
     die "[8/9] unsupported bootloader_adapter '${RAUC_BOOTLOADER_ADAPTER:-unset}' for board '${board}' — no Stage-4 disk-assembly path is wired (expected 'custom' for RK3588 or 'efi'/'grub' for x86); refusing to emit a partial image"
   fi
+
+  [[ -z "${boot_payload_dir:-}" ]] || rm -rf "${boot_payload_dir}"
 
   if [[ -n "${raw_artifact}" ]]; then
     log_info "[8/9] sealing local flash image → ${raw_artifact}.xz"

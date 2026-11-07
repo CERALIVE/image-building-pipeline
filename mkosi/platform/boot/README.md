@@ -147,6 +147,20 @@ The **initrd load stays optional**: the Armbian vendor package ships only the
 versioned `/boot/initrd.img-<release>`, so the bare-name load legitimately fails on
 the known-good path and the board boots `root=PARTLABEL=` directly.
 
+### Updating `boot.scr` on boards that only take RAUC bundles
+
+`boot.scr` lives on p1 and is written at disk assembly; a bundle contains only a rootfs
+image. So the build also ships the compiled script inside the rootfs
+(`install-boot.sh boot-payload <dir>` → `/usr/lib/ceralive/boot/boot.scr` + `.sha256`,
+injected into every slot image and the bundle by `lib/disk/slot-image.sh`). After a
+health-confirmed boot, `ceralive-boot-script-sync.service` replaces `/boot/boot.scr` when
+its body (everything after the 64-byte uImage header, which carries a build time) differs
+from the shipped one. It writes `boot.scr.new`, verifies it, renames it into place,
+verifies again and restores `boot.scr.prev` if the final check fails. It never creates
+`boot.scr`, does nothing while a kernel activation is armed, and requires a writable vfat
+`/boot`. Test seams and the safety argument are in the script header; the guard is
+`tests/boot-script-sync.test.sh`.
+
 ### What must be in the slot's `/boot`
 
 `/boot/Image` and `/boot/dtb/<soc-vendor>/${fdtfile}` must both resolve — as a
@@ -215,7 +229,7 @@ last-resort boots A.
 | `cera_board.env.tmpl` | board specifics template (`@CONSOLE@`/`@DTB_NAME@`/`@BOARD_ID@`) |
 | `recovery.scr.cmd` | manual A/B recovery source; explicitly loads Image, DTB, and initrd from p2 or p3 |
 | `boot_state.txt` | fresh-flash A/B state seed |
-| `install-boot.sh` | build-time installer (`rootfs` + `boot-partition` targets) |
+| `install-boot.sh` | build-time installer (`rootfs`, `boot-partition` and `boot-payload` targets) |
 | `test-fallback.sh` | offline proof of decrement→rollback + backend + render (no HW/root) |
 | `tests/boot-script-sanitize.test.sh` | faithful execution of the actual selector source with malformed imported state |
 | `lib/verify-boot-artifacts.sh` | asserts a built rootfs carries what the selector loads, on either kernel path |
