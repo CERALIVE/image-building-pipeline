@@ -25,6 +25,8 @@
 #   CERALIVE_BOOT_SCRIPT_SUMS    its checksum file (default <src>.sha256)
 #   CERALIVE_BOOT_DIR            boot partition mount (default /boot)
 #   CERALIVE_ACTIVATION_ARMED    pending-activation marker
+#   CERALIVE_ACTIVATION_LOCK     the lock ceralive-rauc-activate holds while it arms
+#   CERALIVE_ACTIVATION_LOCK_WAIT seconds to wait for it (default 10)
 #   CERALIVE_FINDMNT_BIN         findmnt
 #   CERALIVE_BOOT_SCRIPT_CP_BIN  cp used for the new file (default cp)
 #   CERALIVE_BOOT_SCRIPT_MV_BIN  mv used for the rename and the restore (default mv)
@@ -35,6 +37,8 @@ SRC="${CERALIVE_BOOT_SCRIPT_SRC:-/usr/lib/ceralive/boot/boot.scr}"
 SUMS="${CERALIVE_BOOT_SCRIPT_SUMS:-${SRC}.sha256}"
 BOOT_DIR="${CERALIVE_BOOT_DIR:-/boot}"
 ARMED="${CERALIVE_ACTIVATION_ARMED:-/data/ceralive/update-state/activation-armed}"
+LOCK="${CERALIVE_ACTIVATION_LOCK:-/run/lock/ceralive-rauc-activate.lock}"
+LOCK_WAIT="${CERALIVE_ACTIVATION_LOCK_WAIT:-10}"
 FINDMNT_BIN="${CERALIVE_FINDMNT_BIN:-findmnt}"
 CP_BIN="${CERALIVE_BOOT_SCRIPT_CP_BIN:-cp}"
 MV_BIN="${CERALIVE_BOOT_SCRIPT_MV_BIN:-mv}"
@@ -46,6 +50,8 @@ PREV="${BOOT_DIR}/boot.scr.prev"
 
 log() { printf 'ceralive-boot-script-sync: %s\n' "$*"; }
 fail() { printf 'ceralive-boot-script-sync: ERROR: %s\n' "$*" >&2; exit 1; }
+# Exit 2 = the live boot.scr may be damaged and could not be restored.
+fail_unrestored() { printf 'ceralive-boot-script-sync: ERROR: %s\n' "$*" >&2; exit 2; }
 
 same_script() { cmp -s -i "${HEADER_BYTES}" -- "$1" "$2"; }
 
@@ -55,6 +61,14 @@ expected="$(awk 'NR == 1 { print $1 }' "${SUMS}" 2>/dev/null)"
 actual="$(sha256sum -- "${SRC}" | awk '{ print $1 }')"
 [[ -n "${expected}" && "${expected}" == "${actual}" ]] \
   || fail "shipped boot.scr does not match ${SUMS} — refusing to write it"
+
+# Arming happens under this lock; holding it from the marker check to the last write
+# means an activation cannot be armed halfway through the replacement.
+exec {lock_fd}>"${LOCK}" || fail "cannot open the activation lock ${LOCK}"
+flock -w "${LOCK_WAIT}" "${lock_fd}" || {
+  log "an activation is in progress — not touching the boot partition now"
+  exit 0
+}
 
 if [[ -e "${ARMED}" ]]; then
   log "a kernel activation is armed — not touching the boot partition now"
@@ -87,7 +101,11 @@ fi
 sync -f -- "${DST}" 2>/dev/null || sync
 
 if ! cmp -s -- "${SRC}" "${DST}"; then
-  cp -f -- "${PREV}" "${NEW}" && "${MV_BIN}" -f -- "${NEW}" "${DST}" && sync
-  fail "readback of ${DST} differs after the rename — restored the previous boot.scr"
+  if cp -f -- "${PREV}" "${NEW}" && "${MV_BIN}" -f -- "${NEW}" "${DST}" && sync \
+    && cmp -s -- "${PREV}" "${DST}"; then
+    fail "readback of ${DST} differs after the rename — restored the previous boot.scr"
+  fi
+  rm -f -- "${NEW}"
+  fail_unrestored "readback of ${DST} differs after the rename and the restore failed — ${DST} may be damaged; the previous copy is ${PREV}"
 fi
 log "boot.scr updated to the shipped selector ($(sha256sum -- "${DST}" | cut -c1-12)); previous kept as ${PREV}"

@@ -246,9 +246,9 @@ install_boot_partition() {
   if command -v mkimage >/dev/null 2>&1; then
     log "compiling automatic and manual recovery scripts (mkimage)"
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B selector" \
-      -d "${boot_src}" "${dest}/boot.scr" >&2
+      -d "${boot_src}" "${dest}/boot.scr" >&2 || return 1
     mkimage -A arm64 -O linux -T script -C none -n "CeraLive A/B recovery" \
-      -d "${recovery_src}" "${dest}/recovery.scr" >&2
+      -d "${recovery_src}" "${dest}/recovery.scr" >&2 || return 1
   else
     cp -a "${boot_src}" "${dest}/boot.scr.cmd"
     cp -a "${recovery_src}" "${dest}/recovery.scr.cmd"

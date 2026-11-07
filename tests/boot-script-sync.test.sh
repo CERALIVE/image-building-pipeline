@@ -44,6 +44,7 @@ fixture() {
 run_sync() {
   env CERALIVE_BOOT_SCRIPT_SRC="${D}/src/boot.scr" CERALIVE_BOOT_DIR="${D}/boot" \
     CERALIVE_ACTIVATION_ARMED="${D}/armed" CERALIVE_FINDMNT_BIN="${D}/findmnt" \
+    CERALIVE_ACTIVATION_LOCK="${D}/lock" \
     "$@" bash "${SYNC}" >"${D}/out" 2>&1
 }
 
@@ -127,6 +128,22 @@ run_sync CERALIVE_BOOT_SCRIPT_MV_BIN="${D}/mv-corrupt"; rc=$?
   && ok "a bad readback after the rename restores the previous boot.scr" \
   || bad "mv-corrupt case (rc=${rc}): $(cat "${D}/out")"
 
+fixture
+printf '#!/bin/bash\nmv "$@" && printf X >>"${@: -1}"\n' >"${D}/mv-always-corrupt"
+chmod +x "${D}/mv-always-corrupt"
+run_sync CERALIVE_BOOT_SCRIPT_MV_BIN="${D}/mv-always-corrupt"; rc=$?
+{ [[ ${rc} -eq 2 ]] && ! cmp -s "${D}/old.scr" "${D}/boot/boot.scr" && cmp -s "${D}/old.scr" "${D}/boot/boot.scr.prev"; } \
+  && ok "a restore that also fails exits 2 and keeps the previous copy" \
+  || bad "failed-restore case (rc=${rc}): $(cat "${D}/out")"
+
+fixture
+exec {lk}>"${D}/lock"; flock "${lk}"
+run_sync CERALIVE_ACTIVATION_LOCK_WAIT=1; rc=$?
+exec {lk}>&-
+{ [[ ${rc} -eq 0 ]] && cmp -s "${D}/old.scr" "${D}/boot/boot.scr" && [[ ! -e "${D}/boot/boot.scr.prev" ]]; } \
+  && ok "while an activation holds the lock the boot partition is not touched" \
+  || bad "lock-held case (rc=${rc}): $(cat "${D}/out")"
+
 echo "== build side: install-boot.sh boot-payload"
 
 BOARD_ENV=(SERIAL_CONSOLE=ttyS2:1500000 DTB_NAME=rockchip/rk3588-rock-5b-plus.dtb
@@ -147,6 +164,17 @@ cmp -s -i 64 "${PAYLOAD}/boot.scr" "${PARTITION}/boot.scr" \
 env "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-payload >/dev/null 2>&1 \
   && bad "boot-payload accepted a missing destination" \
   || ok "boot-payload requires a destination directory"
+
+mkdir "${WORK}/badbin"
+printf '#!/bin/bash\nfor a; do last="$a"; done\nprintf partial >"$last"\nexit 1\n' >"${WORK}/badbin/mkimage"
+chmod +x "${WORK}/badbin/mkimage"
+env PATH="${WORK}/badbin:${PATH}" "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-payload "${WORK}/bad-payload" >/dev/null 2>&1; rc=$?
+{ [[ ${rc} -ne 0 ]] && [[ ! -e "${WORK}/bad-payload/boot.scr" ]]; } \
+  && ok "a failing mkimage fails boot-payload and ships no boot.scr" \
+  || bad "boot-payload shipped output after a mkimage failure (rc=${rc})"
+env PATH="${WORK}/badbin:${PATH}" "${BOARD_ENV[@]}" bash "${INSTALL_BOOT}" boot-partition "${WORK}/bad-partition" >/dev/null 2>&1 \
+  && bad "boot-partition succeeded although mkimage failed" \
+  || ok "a failing mkimage fails boot-partition"
 
 echo "== slot image: inject_boot_payload"
 
