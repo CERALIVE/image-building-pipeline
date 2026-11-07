@@ -1100,17 +1100,82 @@ EOF
   local root="$BATS_TEST_TMPDIR/rock" mode
   for mode in normal recheck; do
     typec_rock_fixture "$root"
-    rm -rf "$root/typec/port0-partner"
+    rm -rf "$root/typec/port0-partner" "$root/iio/writes"
     mkdir -p "$root/run"
     printf 'old partner\n' >"$root/run/failed"
     export CERALIVE_TYPEC_MODE="$mode"
 
     run run_typec_rock
     [ "$status" -eq 0 ]
-    [ ! -e "$root/run/failed" ]
-    [ ! -e "$root/iio/writes" ]
     [ "$(cat "$root/typec/port0/preferred_role")" = source ]
+    if [ "$mode" = normal ]; then
+      [ ! -e "$root/run/failed" ]
+      [ ! -e "$root/iio/writes" ]
+    else
+      # The recheck now probes once for a camera stuck in SNK_DEBOUNCED; no
+      # partner returns after the cycle, so the attach is recorded as unknown.
+      [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+      [ "$(cat "$root/run/failed")" = unknown ]
+    fi
   done
+}
+
+@test "typec policy: Rock recheck with back power and no partner cycles port_type once per spacing window" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+  [[ "$output" == *"no partner seen"* ]]
+  [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 1 ]
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/iio/writes")" = $'source\ndual' ]
+}
+
+@test "typec policy: Rock no-partner cycles stop at the per-boot limit" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_NOPARTNER_SPACING=0 CERALIVE_TYPEC_NOPARTNER_MAX=2
+
+  for n in 1 2 3; do
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
+  [ "$(grep -c '^source$' "$root/iio/writes")" -eq 2 ]
+  [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 2 ]
+}
+
+@test "typec policy: a partner appearing resets the no-partner try count" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  export CERALIVE_TYPEC_MODE=recheck
+  run run_typec_rock
+  [ -e "$root/run/nopartner" ]
+
+  mkdir -p "$root/typec/port0-partner"
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -e "$root/run/nopartner" ]
+}
+
+@test "typec policy: Rock no-partner recheck without back power performs zero connector writes" {
+  local root="$BATS_TEST_TMPDIR/rock"
+  typec_rock_fixture "$root"
+  rm -rf "$root/typec/port0-partner"
+  printf '3\n' >"$root/iio/iio:device7/in_voltage6_raw"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ ! -s "$root/iio/writes" ]
+  [ ! -e "$root/run/nopartner" ]
 }
 
 @test "typec policy: a Rock partner missing after correction records an unknown failed attach" {
@@ -1197,7 +1262,7 @@ SH
   grep -Fxq 'ExecStart=/usr/local/sbin/ceralive-typec-policy' "$service"
   run grep -Fxq '[Install]' "$service"
   [ "$status" -ne 0 ]
-  grep -Fxq 'OnBootSec=20s' "$timer"
+  grep -Fxq 'OnBootSec=10s' "$timer"
   grep -Fxq 'OnUnitActiveSec=10s' "$timer"
   grep -Fxq 'AccuracySec=1s' "$timer"
   grep -Fxq 'Unit=ceralive-typec-recheck.service' "$timer"

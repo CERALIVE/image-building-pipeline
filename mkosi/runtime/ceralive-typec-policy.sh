@@ -28,6 +28,8 @@
 #   CERALIVE_TYPEC_ADC_RETRY   unknown ADC retry seconds (default 15)
 #   CERALIVE_TYPEC_MODE        recheck skips ADC retry and the DR_SWAP loop
 #   CERALIVE_TYPEC_SETTLED_POWER_ROLE post-cycle readback (default power_role)
+#   CERALIVE_TYPEC_NOPARTNER_MAX      recheck cycles per boot with no partner (default 3)
+#   CERALIVE_TYPEC_NOPARTNER_SPACING  seconds between those cycles (default 30)
 
 set -uo pipefail
 
@@ -40,6 +42,10 @@ log() { printf 'ceralive-typec-policy: %s\n' "$*"; }
 die() { printf 'ceralive-typec-policy: %s\n' "$*" >&2; exit 1; }
 
 [[ "${WAIT_SECONDS}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_WAIT must be an unsigned integer"
+NOPARTNER_MAX="${CERALIVE_TYPEC_NOPARTNER_MAX:-3}"
+NOPARTNER_SPACING="${CERALIVE_TYPEC_NOPARTNER_SPACING:-30}"
+[[ "${NOPARTNER_MAX}" =~ ^[0-9]+$ && "${NOPARTNER_SPACING}" =~ ^[0-9]+$ ]] \
+  || die "CERALIVE_TYPEC_NOPARTNER_MAX and _SPACING must be unsigned integers"
 
 PORT_DIR="${CLASS_DIR}/${PORT}"
 PARTNER_DIR="${PORT_DIR}-partner"
@@ -68,6 +74,7 @@ active_role() {
 rock_back_power_correction() {
   local adc first second decision=unknown previous="" retry deadline stamp=0
   local settled_power identity=unknown original_port_type
+  local blind=0 tries=0 last=0 now
   retry="${CERALIVE_TYPEC_ADC_RETRY:-15}"
   [[ "${MODE}" != recheck ]] || retry=0
   [[ "${retry}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_ADC_RETRY must be an unsigned integer"
@@ -111,16 +118,35 @@ rock_back_power_correction() {
       return 0
     fi
   fi
-  [[ -e "${PARTNER_DIR}" && ! -e "${RUN_DIR}/failed" ]] || return 0
-  deadline=$((SECONDS + WAIT_SECONDS))
-  while [[ ! -r "${POWER_ROLE}" ]]; do
-    (( SECONDS < deadline )) || return 0
-    sleep "${POLL_INTERVAL}"
-  done
-  [[ -e "${PARTNER_DIR}" && "$(active_role "${POWER_ROLE}")" == sink ]] || return 0
-  if [[ -e "${RUN_DIR}/corrected" ]]; then
-    stamp="$(stat -c %Y "${RUN_DIR}/corrected")" || return 0
-    (( $(date +%s) - stamp >= 10 )) || return 0
+  if [[ -e "${PARTNER_DIR}" ]]; then
+    rm -f "${RUN_DIR}/nopartner"
+    [[ ! -e "${RUN_DIR}/failed" ]] || return 0
+  else
+    # A camera that advertises Rp but never drives VBUS leaves tcpm waiting in
+    # SNK_DEBOUNCED and no partner is ever created. Only the ten-second recheck
+    # (coldplug has settled by then) looks for it, a bounded number of times.
+    [[ "${MODE}" == recheck ]] || return 0
+    [[ ! -r "${RUN_DIR}/nopartner" ]] || read -r tries last <"${RUN_DIR}/nopartner"
+    [[ "${tries}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] || { tries=0; last=0; }
+    now="$(date +%s)"
+    (( tries < NOPARTNER_MAX && now - last >= NOPARTNER_SPACING )) || return 0
+    if ! mkdir -p "${RUN_DIR}" || ! printf '%s %s\n' "$((tries + 1))" "${now}" >"${RUN_DIR}/nopartner"; then
+      log "ERROR: cannot record Rock no-partner try — no port_type write"
+      return 0
+    fi
+    blind=1
+  fi
+  if (( blind == 0 )); then
+    deadline=$((SECONDS + WAIT_SECONDS))
+    while [[ ! -r "${POWER_ROLE}" ]]; do
+      (( SECONDS < deadline )) || return 0
+      sleep "${POLL_INTERVAL}"
+    done
+    [[ -e "${PARTNER_DIR}" && "$(active_role "${POWER_ROLE}")" == sink ]] || return 0
+    if [[ -e "${RUN_DIR}/corrected" ]]; then
+      stamp="$(stat -c %Y "${RUN_DIR}/corrected")" || return 0
+      (( $(date +%s) - stamp >= 10 )) || return 0
+    fi
   fi
   original_port_type="$(active_role "${PORT_DIR}/port_type")"
   case "${original_port_type}" in
@@ -134,7 +160,11 @@ rock_back_power_correction() {
     log "ERROR: cannot record Rock correction marker — no port_type write"
     return 0
   fi
-  log "INFO: Rock back power present: cycling port_type=source then dual"
+  if (( blind )); then
+    log "INFO: Rock back power present, no partner seen: cycling port_type=source then dual (try $((tries + 1))/${NOPARTNER_MAX})"
+  else
+    log "INFO: Rock back power present: cycling port_type=source then dual"
+  fi
   if ! printf '%s\n' source >"${PORT_DIR}/port_type"; then
     log "ERROR: Rock port_type=source write was rejected"
     return 0

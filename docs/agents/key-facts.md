@@ -5810,6 +5810,17 @@ protocol-level throughout — VBUS enabled, PD contract accepted to `SRC_READY`,
 regulator enabled — and `tcpm-source-psy-*/online` reads `0` while sourcing and is
 never asserted as sourcing proof.
 
+**Camera attached at boot with no partner (Rock 5B+, back power confirmed).** A camera
+that advertises Rp but never drives VBUS leaves TCPM waiting in `SNK_DEBOUNCED`; no
+partner object is ever created, so the partner-keyed correction never ran. The ten-second
+recheck (first tick 10 s after boot) now performs the same `port_type=source` then `dual`
+cycle when the back input is confirmed and no partner exists, at most
+`CERALIVE_TYPEC_NOPARTNER_MAX` (3) times per boot and `CERALIVE_TYPEC_NOPARTNER_SPACING`
+(30 s) apart; a partner appearing resets the count. The boot-time run never cycles
+blind. Whether the camera then offers its webcam personality is the camera's own USB-mode
+setting (the Pocket 3 enumerates `2ca3:0020` RNDIS/storage by default and `2ca3:0023` UVC
+in webcam mode); nothing in the image switches it.
+
 Guards: `runtime-services.bats` §18d "typec policy: …" (10 cases) — installer +
 enablement with the legacy script/unit asserted ABSENT, the udev handoff (both
 `typec_partner` and `typec_port` add events, exactly two `SYSTEMD_WANTS+=`, zero
