@@ -266,6 +266,23 @@ install_boot_partition() {
   log "boot-partition artifacts staged in ${dest}"
 }
 
+# boot-payload <dir> — compile the same boot.scr the boot partition gets and write it,
+# with its SHA-256 line, to <dir>. The image build injects <dir> into the rootfs slot
+# image so ceralive-boot-script-sync can update boards that only take RAUC bundles.
+install_boot_payload() {
+  local dest="${1:-}" stage
+  [[ -n "${dest}" ]] || die "boot-payload: destination dir is required"
+  command -v mkimage >/dev/null 2>&1 \
+    || die "mkimage (u-boot-tools) not found — cannot compile the boot.scr shipped in the rootfs"
+  stage="$(mktemp -d)"
+  install_boot_partition "${stage}" || { rm -rf "${stage}"; die "boot-payload: boot.scr compilation failed"; }
+  mkdir -p "${dest}"
+  install -m 0644 "${stage}/boot.scr" "${dest}/boot.scr"
+  (cd "${dest}" && sha256sum boot.scr >boot.scr.sha256)
+  rm -rf "${stage}"
+  log "boot.scr payload staged in ${dest}"
+}
+
 usage() {
   cat >&2 <<EOF
 Usage: install-boot.sh <target> [args]
@@ -274,6 +291,9 @@ Usage: install-boot.sh <target> [args]
   boot-partition <dir> [--allow-uncompiled]
                                  render boot.scr + recovery.scr + cera_board.env
                                  + boot_state.txt into <dir> (the FAT partition)
+  boot-payload <dir>             compile boot.scr + SHA-256 into <dir> for the rootfs
+                                 (ceralive-boot-script-sync ships it to /boot after a
+                                 health-confirmed boot)
 
 Board specifics come from the environment (manifest-resolved + orchestrator):
   SERIAL_CONSOLE DTB_NAME BOARD_ID SINGLE_SLOT_FALLBACK COMPATIBLE_STRING
@@ -285,6 +305,7 @@ main() {
   case "${target}" in
     rootfs)          install_rootfs ;;
     boot-partition)  install_boot_partition "$@" ;;
+    boot-payload)    install_boot_payload "$@" ;;
     -h|--help|"")    usage; [[ -n "${target}" ]] ;;
     *) usage; die "unknown target '${target}'" ;;
   esac

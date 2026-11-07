@@ -165,6 +165,7 @@ configure_services() {
   setup_pipewire_system_mode
   setup_rauc_activation
   setup_slot_sync
+  setup_boot_script_sync
   setup_dpkg_recovery
 }
 

@@ -53,10 +53,12 @@ build_version='fixture'
 MKOSI_BUILDER_IMAGE='fixture-builder'
 ASSEMBLE_DISK_SH="${TMP}/assemble-disk"
 BUILD_BUNDLE_SH="${TMP}/build-bundle"
+INSTALL_BOOT_SH="${TMP}/install-boot"
+printf '#!/bin/bash\nexit 0\n' >"${INSTALL_BOOT_SH}"
 SEAL_RAW_CANDIDATE_SH="${PIPELINE_DIR}/ci/seal-raw-candidate.sh"
 export board variant RAUC_BOOTLOADER_ADAPTER INSTALL_BOOT_BSP SINGLE_SLOT_FALLBACK
 export BOARD_ID COMPATIBLE_STRING CERALIVE_RAUC_PKI_DIR bsp_dir rauc_build_dir rauc_build_dir_host rootfs_tree
-export artifact build_version MKOSI_BUILDER_IMAGE ASSEMBLE_DISK_SH BUILD_BUNDLE_SH SEAL_RAW_CANDIDATE_SH
+export artifact build_version MKOSI_BUILDER_IMAGE ASSEMBLE_DISK_SH BUILD_BUNDLE_SH SEAL_RAW_CANDIDATE_SH INSTALL_BOOT_SH
 mkdir -p "${out_dir}" "${bsp_dir}" "${rauc_build_dir}" "${rootfs_tree}"
 
 # shellcheck disable=SC1090 # STAGE resolves to the repository's shipped stage module.

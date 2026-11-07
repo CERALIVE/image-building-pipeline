@@ -1,0 +1,19 @@
+[Unit]
+Description=CeraLive guarded boot.scr sync after a health-confirmed boot
+Documentation=file:///usr/libexec/ceralive/ceralive-boot-script-sync
+# Inert on any image that does not ship a compiled boot.scr (x86, rollback probes).
+ConditionPathExists=/usr/lib/ceralive/boot/boot.scr
+RequiresMountsFor=/boot
+# A failed or skipped healthcheck means the booted slot is unconfirmed: the boot
+# selector must not change then.
+Requires=ceralive-healthcheck.service
+After=ceralive-healthcheck.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-boot-script-sync
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

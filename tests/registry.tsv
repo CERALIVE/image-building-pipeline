@@ -159,6 +159,7 @@ tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
 tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 tests/slot-sync.test.sh	shell	unit	default-shell	verified local slot mirror: full refusal-gate matrix, check JSON, dpkg-verify comparison, mark-bad/good ordering, SIGTERM handling; internal real loop-mounted-ext4 leg gated on CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required
+tests/boot-script-sync.test.sh	shell	unit	default-shell	boot.scr field update: guarded device sync (replace, current-by-body, refusals, restore), boot-payload build output, debugfs slot-image injection, wiring
 tests/kernel-stage.test.sh	shell	unit	default-shell	real flock ownership, write-ahead, gates, reserves, mount order and crash recovery
 tests/kernel-stage-real.test.sh	shell	privileged	default-shell	native Debian chroot and two loop slots; required in CI, opt-in locally
 mkosi/platform/boot/test-fallback.sh	shell	unit	default-shell	RK3588 offline bootcount/fallback proof against the shipped state engine
